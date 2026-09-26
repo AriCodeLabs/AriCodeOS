@@ -1,0 +1,10 @@
+name = "memory.nx_data_exec_faults"
+description = "test=exec_data -> #PF por fetch en pagina NX"
+level = "full"
+areas = ["memory", "interrupts"]
+cmdline = "qemu_exit test=exec_data"
+
+[expect]
+exit = 35
+serial_contains = ["EXCEPTION #PF (14) Page Fault", "ACCESS: FETCH  MODE: KERNEL  CAUSE: protection", "ARICODEOS KERNEL PANIC"]
+serial_absent = ["ARICODEOS_KERNEL_READY"]

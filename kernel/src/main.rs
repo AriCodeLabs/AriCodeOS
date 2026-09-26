@@ -1,15 +1,19 @@
 //! AriKernel: núcleo de AriCodeOS.
 //!
-//! Estado: 0.0.2 en curso. Recibe `BootInfo`, valida el protocolo, levanta la
-//! consola (serie + framebuffer) y el logger con niveles, describe el hardware
-//! que le han entregado y anuncia `ARICODEOS_KERNEL_READY`.
+//! Estado: 0.0.3. Recibe `BootInfo`, valida el protocolo, levanta la consola
+//! (serie + framebuffer) y el logger con niveles, describe el hardware,
+//! instala GDT/IDT, PMM, VMM (tablas propias, pila con guard) y heap, y
+//! anuncia `ARICODEOS_KERNEL_READY`.
 
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 mod arch;
 mod console;
 mod framebuffer;
+mod memory;
 mod qemu;
 mod serial;
 mod sync;
@@ -37,8 +41,10 @@ static QEMU_EXIT: AtomicBool = AtomicBool::new(false);
 pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     serial::Serial.init();
     let info = validate_boot_info(boot_info);
+    let fb_end = info.framebuffer.address + info.framebuffer.size;
+    memory::phys::init(info.phys_map_offset, info.phys_map_limit, fb_end);
 
-    // SAFETY: AriBoot copió la cmdline a memoria de kernel identidad-mapeada.
+    // SAFETY: AriBoot copió la cmdline a memoria de kernel accesible por el mapa físico.
     let cmdline = CmdLine::new(unsafe { info.cmdline() });
     QEMU_EXIT.store(cmdline.has(keys::QEMU_EXIT), Ordering::Relaxed);
 
@@ -67,6 +73,33 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
         "cpu: GDT, TSS (IST para #DF) e IDT instaladas (cs={:#x} ds={:#x} tr={:#x})",
         sel.code.0, sel.data.0, sel.tss.0
     );
+
+    memory::pmm::init(info);
+    let stack_top = memory::vmm::init(info);
+
+    // Continuar en la pila nueva (con guard page); la del cargador queda atrás.
+    // SAFETY: `stack_top` está mapeado RW por el VMM; `kernel_main` no retorna.
+    unsafe {
+        core::arch::asm!(
+            "mov rsp, {stack}",
+            "xor rbp, rbp",
+            "call {main}",
+            stack = in(reg) stack_top - 8,
+            main = sym kernel_main,
+            in("rdi") info as *const BootInfo,
+            options(noreturn)
+        );
+    }
+}
+
+/// Segunda etapa, ya sobre la pila definitiva y las tablas del kernel.
+extern "C" fn kernel_main(info: *const BootInfo) -> ! {
+    // SAFETY: mismo puntero validado en `kernel_entry`; memoria de tipo Kernel
+    // accesible por el mapa físico.
+    let info = unsafe { &*info };
+    let cmdline = CmdLine::new(unsafe { info.cmdline() });
+    debug!("kernel_main en pila {:#x}", memory::vmm::KERNEL_STACK_TOP);
+    memory::heap::init();
 
     run_requested_test(&cmdline);
 
@@ -149,8 +182,8 @@ fn report_memory(info: &BootInfo) {
     ];
     let mut totals = [0u64; NAMES.len()];
     let mut count = 0u32;
-    // SAFETY: el mapa está en memoria de boot identidad-mapeada por AriBoot.
-    for d in unsafe { info.memory_map.iter() } {
+    // SAFETY: el mapa está en memoria de boot accesible por el mapa físico.
+    for d in unsafe { info.memory_regions() } {
         totals[d.kind() as usize] += d.size_bytes();
         count += 1;
     }
@@ -173,6 +206,40 @@ fn run_requested_test(cmdline: &CmdLine) {
     info!("test provocado: {name}");
     match name {
         "panic" => panic!("test=panic: fallo provocado"),
+        "pmm" => memory::pmm::selftest(),
+        "vmm" => memory::vmm::selftest(),
+        "heap" => memory::heap::selftest(),
+        // W^X: escribir en .rodata -> #PF por protección.
+        "write_rodata" => {
+            static RO: u64 = 7;
+            // SAFETY: fallo deliberado; la página es de solo lectura.
+            unsafe { (&RO as *const u64 as *mut u64).write_volatile(1) };
+            unreachable!("la escritura en .rodata debia provocar #PF");
+        }
+        // NX: ejecutar desde .data -> #PF por fetch.
+        "exec_data" => {
+            static mut CODE: [u8; 16] = [0xC3; 16]; // ret
+                                                    // SAFETY: fallo deliberado; la página es NX.
+            let f: extern "C" fn() =
+                unsafe { core::mem::transmute(core::ptr::addr_of!(CODE) as *const u8) };
+            f();
+            unreachable!("ejecutar .data debia provocar #PF");
+        }
+        // Desbordar la pila hasta la guard page -> #PF con pila inválida -> #DF en IST.
+        "stack_overflow" => {
+            fn recurse(depth: u64) -> u64 {
+                let buf = [depth as u8; 512];
+                core::hint::black_box(&buf);
+                // Condición opaca: nunca se cumple, pero el compilador no puede
+                // demostrarlo ni convertir la recursión en un bucle.
+                if core::hint::black_box(depth) == u64::MAX {
+                    return 0;
+                }
+                1 + recurse(depth + 1)
+            }
+            let _ = recurse(0);
+            unreachable!("la recursion debia agotar la pila");
+        }
         // #BP es recuperable: el handler avisa y la ejecución continúa.
         // SAFETY: instrucción de depuración; la IDT ya está instalada.
         "breakpoint" => unsafe { core::arch::asm!("int3", options(nomem, nostack)) },

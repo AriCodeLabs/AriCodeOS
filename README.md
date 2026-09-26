@@ -7,12 +7,13 @@ El documento maestro de arquitectura y roadmap es [AriCodeOS.md](AriCodeOS.md).
 Las decisiones de diseño se registran en [docs/decisions/](docs/decisions/) y el
 flujo de ramas (git flow) en [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-**Estado:** 0.0.2. AriBoot (UEFI) carga `kernel.elf`, construye las tablas de
-páginas, sale de boot services y salta a AriKernel, que levanta consola serie
-y de framebuffer con logger por niveles, instala GDT/TSS/IDT propias con pila
-IST para double fault, reporta el hardware y emite `ARICODEOS_KERNEL_READY`.
-Las excepciones producen un volcado legible y los fallos se provocan desde la
-cmdline para los tests.
+**Estado:** 0.0.3. AriBoot (UEFI) carga `kernel.elf`, construye tablas con
+mapa físico lineal, sale de boot services y salta a AriKernel, que levanta
+consola serie y de framebuffer con logger por niveles, instala GDT/TSS/IDT
+propias con pila IST, construye el allocator físico por bitmap, activa sus
+propias tablas con W^X y pila con guard page, arranca el heap con crecimiento
+bajo demanda y emite `ARICODEOS_KERNEL_READY`. Las excepciones producen un
+volcado legible y los fallos se provocan desde la cmdline para los tests.
 
 ## Requisitos (Debian 13)
 
@@ -43,7 +44,7 @@ niveles de test están descritos en [tests/README.md](tests/README.md).
 
 ```text
 boot-protocol/   ABI BootInfo compartido por bootloader y kernel
-libs/            librerías no_std con tests de host: elf, x86-paging, x86-cpu, cmdline, fb-console
+libs/            librerías no_std con tests de host: elf, x86-paging, x86-cpu, pmm, heap, cmdline, fb-console
 boot/            AriBoot: cargador UEFI (crate `ariboot`)
 kernel/          AriKernel (crate `arikernel`), ELF64 en la mitad alta
 tools/xtask/     automatización: build, imagen, QEMU, tests, lint

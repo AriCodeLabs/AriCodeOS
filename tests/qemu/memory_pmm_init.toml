@@ -1,0 +1,11 @@
+# El PMM se construye del mapa UEFI y reporta memoria libre coherente con QEMU (-m 512M).
+name = "memory.pmm_init"
+description = "PMM inicializado desde el mapa UEFI con ~460 MiB libres"
+level = "smoke"
+areas = ["memory"]
+cmdline = "qemu_exit"
+
+[expect]
+exit = 33
+serial_contains = ["[INFO ] pmm: 4", "MiB libres de", "MiB direccionables, bitmap 1", "ARICODEOS_KERNEL_READY"]
+serial_absent = ["KERNEL PANIC"]

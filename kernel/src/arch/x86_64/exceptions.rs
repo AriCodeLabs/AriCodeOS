@@ -38,9 +38,17 @@ fn fatal(frame: &InterruptFrame) -> ! {
     if exception::has_error_code(vector) {
         serial_println!("ERROR: {:#x}", frame.error_code);
     }
+    let cr2 = read_cr2();
+    if crate::memory::vmm::in_stack_guard(frame.rsp) || crate::memory::vmm::in_stack_guard(cr2) {
+        serial_println!(
+            "STACK OVERFLOW: la pila del kernel toco su guard page ({:#x}..{:#x})",
+            crate::memory::vmm::KERNEL_STACK_GUARD,
+            crate::memory::vmm::KERNEL_STACK_BOTTOM
+        );
+    }
     if vector == PAGE_FAULT {
         let e = frame.error_code;
-        serial_println!("CR2: {:#018x}", read_cr2());
+        serial_println!("CR2: {:#018x}", cr2);
         serial_println!(
             "ACCESS: {}  MODE: {}  CAUSE: {}",
             if e & PF_INSTRUCTION != 0 {

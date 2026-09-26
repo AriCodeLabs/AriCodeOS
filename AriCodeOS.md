@@ -2,7 +2,7 @@
 
 ## Documento maestro de arquitectura, especificaciones técnicas y plan de desarrollo
 
-**Estado:** 0.0.2 completada (2026-09-26): boot, consola, GDT/IDT  
+**Estado:** 0.0.3 completada (2026-09-26): boot, consola, GDT/IDT, PMM, VMM, heap  
 **Versión del documento:** 0.2  
 **Nombre del sistema:** AriCodeOS  
 **Arquitectura inicial:** x86-64  
@@ -2005,57 +2005,73 @@ contra valores conocidos.
 
 # FASE 5 — Physical Memory Manager
 
-### Implementar
+**Estado: completada (2026-09-26).**
 
-- parser memory map;
-- bitmap allocator;
-- reserve/free pages;
-- estadísticas.
+### Implementado
+
+- parser del mapa UEFI en `kernel/src/memory/pmm.rs`;
+- bitmap allocator en `libs/pmm` (sin `alloc`, almacenamiento aportado por
+  el llamador, `allocate`, `allocate_contiguous` alineado, `free` con
+  detección de double free y fuera de rango);
+- reservas: frame 0 y primer MiB, el propio bitmap;
+- estadísticas (`Stats`: total, libres, usados).
 
 ### Tests
 
-- asignación;
-- liberación;
-- agotamiento;
-- páginas reservadas nunca reutilizadas.
+- host (7): liberación solo de frames completos, unicidad y orden, double
+  free, redondeo de reservas, contigüidad con huecos, agotamiento;
+- QEMU (área `memory`): `memory.pmm_init` (smoke) y `memory.pmm_selftest`
+  (`test=pmm`, 2048 frames sobre el bitmap real).
 
 ---
 
 # FASE 6 — Virtual Memory Manager
 
-### Implementar
+**Estado: completada (2026-09-26).**
 
-- page tables;
-- map/unmap;
-- permissions;
-- NX;
-- kernel mappings;
-- guard pages.
+### Implementado
+
+- `libs/x86-paging` genérica en `FrameAlloc` y `PhysMap`: `map_4k`,
+  `map_2m`, rangos, `unmap_4k`, `translate`, errores explícitos;
+- `kernel/memory/vmm`: tablas propias con frames del PMM, imagen con W^X por
+  secciones del linker, mapa físico lineal RW+NX, framebuffer, pila nueva
+  de 64 KiB con guard page, cambio de pila a `kernel_main`, recuperación de
+  la memoria de arranque;
+- protocolo v3: AriBoot construye el mapa físico lineal desde el principio
+  (ADR 0009), así que el cambio de tablas no invalida punteros;
+- detección de desbordamiento de pila en #DF.
 
 ### Tests
 
-- lectura válida;
-- escritura válida;
-- NX fault;
-- write protection;
-- unmapped fault.
+- host (6 en `x86-paging`): traducción y enmascarado de flags, páginas
+  grandes y colisiones, unmap, agotamiento, `OffsetMap`/`BumpFrames`;
+- QEMU (área `memory`): `memory.vmm_init` (smoke), `memory.vmm_selftest`
+  (lectura/escritura válidas, sin identidad, map/unmap),
+  `memory.wx_rodata_write_faults` (write protection),
+  `memory.nx_data_exec_faults` (NX fault), `memory.stack_guard_page`
+  (guard page); `interrupts.page_fault_reports_cr2` cubre el unmapped fault.
 
 ---
 
 # FASE 7 — Kernel allocator
 
-### Implementar
+**Estado: completada (2026-09-26).**
 
-- heap;
-- `alloc` support;
-- allocator escalable posteriormente.
+### Implementado
+
+- `libs/heap`: first-fit con lista de libres ordenada, fusión de vecinos y
+  cabecera por asignación (bump -> linked-list de la sección 16);
+- `kernel/memory/heap`: `#[global_allocator]` con región virtual reservada
+  de 64 MiB y crecimiento por trozos de 1 MiB con frames del PMM;
+- `alloc` disponible en el kernel.
 
 ### Tests
 
-- Vec;
-- Box;
-- allocation stress;
-- memory reuse.
+- host (5): reutilización y fusión, alineaciones grandes sin fugas,
+  agotamiento, 500 asignaciones en orden pseudoaleatorio sin solapes,
+  regiones múltiples y colas absorbidas;
+- QEMU: `memory.heap_init` (smoke) y `memory.heap_selftest` (`Vec`, `Box`,
+  `String`, `format!`, crecimiento, `try_reserve` fallando limpio, sin fugas).
 
 ---
 
@@ -2930,11 +2946,14 @@ auditoría (`docs/audits/`).
 
 # 87. AriCodeOS 0.0.3
 
-Añadir:
+**Estado: completada (2026-09-26), tag `v0.0.3`.**
 
-- physical memory allocator;
-- virtual memory;
-- kernel heap.
+Añadido:
+
+- physical memory allocator (bitmap, `libs/pmm`);
+- virtual memory (tablas propias, W^X, mapa físico lineal, guard page;
+  protocolo de arranque v3, ADR 0009);
+- kernel heap (`libs/heap`, crecimiento bajo demanda).
 
 ---
 
@@ -3392,7 +3411,7 @@ aricodeos/
 No necesitamos crear toda la estructura futura desde el primer día.
 
 Este árbol es el que existe en el repositorio desde M0, ampliado con
-`libs/{elf,x86-paging,x86-cpu,cmdline,fb-console}` (lógica `no_std` con tests de host),
+`libs/{elf,x86-paging,x86-cpu,pmm,heap,cmdline,fb-console}` (lógica `no_std` con tests de host),
 `tests/qemu/` (escenarios) y `docs/decisions/0001..0007`.
 
 ---

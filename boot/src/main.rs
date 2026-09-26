@@ -15,11 +15,12 @@ use alloc::vec::Vec;
 use aricode_cmdline::{keys, CmdLine};
 use aricode_elf as elf;
 use aricode_x86_paging::{
-    self as paging, PagePool, PageTables, GLOBAL, NO_EXECUTE, PAGE_SIZE, WRITABLE,
+    self as paging, BumpFrames, IdentityMap, Mapper, GLOBAL, HUGE_2M, NO_EXECUTE, PAGE_SIZE,
+    WRITABLE,
 };
 use boot_protocol::{
     BootInfo, FramebufferInfo, MemoryMap, PixelFormat, BOOT_PROTOCOL_MAGIC, BOOT_PROTOCOL_VERSION,
-    KERNEL_VIRT_BASE, MEMORY_TYPE_KERNEL,
+    KERNEL_VIRT_BASE, MEMORY_TYPE_KERNEL, PHYS_MAP_BASE,
 };
 use core::ptr::NonNull;
 use log::{error, info, warn};
@@ -140,10 +141,10 @@ fn run(cmdline_bytes: &[u8]) -> Result<core::convert::Infallible, &'static str> 
         );
     }
 
-    // 6. Extensión física a identidad-mapear: mapa actual + framebuffer.
-    let snapshot = boot::memory_map(MemoryType::LOADER_DATA).map_err(|_| "memory map")?;
+    // 6. Extensión física a mapear: mapa actual + framebuffer.
     // Se excluyen Reserved/Unusable: el firmware suele anunciar aperturas MMIO
     // gigantes (p. ej. PCIe 64 bits) que el kernel mapeará bajo demanda.
+    let snapshot = boot::memory_map(MemoryType::LOADER_DATA).map_err(|_| "memory map")?;
     let mut phys_limit: u64 = 0;
     for d in snapshot.entries() {
         if matches!(d.ty, MemoryType::RESERVED | MemoryType::UNUSABLE) {
@@ -151,20 +152,40 @@ fn run(cmdline_bytes: &[u8]) -> Result<core::convert::Infallible, &'static str> 
         }
         phys_limit = phys_limit.max(d.phys_start + d.page_count * PAGE_SIZE);
     }
-    if framebuffer.address != 0 {
-        phys_limit = phys_limit.max(framebuffer.address + framebuffer.size);
-    }
     phys_limit = phys_limit.max(4 << 30); // al menos 4 GiB (MMIO clásico bajo 4G)
+    phys_limit = phys_limit.next_multiple_of(HUGE_2M);
     drop(snapshot);
 
-    // 7. Tablas de páginas.
-    let pool_pages = paging::pool_size_for(phys_limit, kernel_pages as u64);
+    // 7. Tablas de páginas: identidad (solo para el cargador), mapa físico
+    // lineal en PHYS_MAP_BASE (lo que usará el kernel) y kernel en la mitad alta.
+    let pool_pages = paging::pool_size_for(phys_limit, 2, kernel_pages as u64);
     let pool_mem = alloc_pages(pool_pages, "page tables")?;
     // SAFETY: `pool_mem` son `pool_pages` páginas recién reservadas por UEFI,
     // alineadas, identidad-mapeadas y de uso exclusivo hasta que el kernel las herede.
-    let mut pool = unsafe { PagePool::new(pool_mem, pool_pages) };
-    let mut tables = PageTables::new(&mut pool);
-    tables.identity_map_2m(&mut pool, phys_limit);
+    let pool = unsafe { BumpFrames::new(pool_mem.as_ptr() as u64, pool_pages) };
+    let mut tables = Mapper::new(pool, IdentityMap).map_err(|_| "tablas: sin paginas")?;
+    tables
+        .map_range_2m(0, 0, phys_limit, WRITABLE)
+        .map_err(|_| "tablas: identidad")?;
+    tables
+        .map_range_2m(PHYS_MAP_BASE, 0, phys_limit, WRITABLE | NO_EXECUTE | GLOBAL)
+        .map_err(|_| "tablas: mapa fisico")?;
+    if framebuffer.address != 0 {
+        let fb_start = framebuffer.address & !(HUGE_2M - 1);
+        let fb_end = (framebuffer.address + framebuffer.size).next_multiple_of(HUGE_2M);
+        // Solo la parte que quede fuera del mapa físico ya construido.
+        let start = fb_start.max(phys_limit);
+        if start < fb_end {
+            tables
+                .map_range_2m(
+                    PHYS_MAP_BASE + start,
+                    start,
+                    fb_end - start,
+                    WRITABLE | NO_EXECUTE | GLOBAL,
+                )
+                .map_err(|_| "tablas: framebuffer")?;
+        }
+    }
     for seg in &elf.segments {
         let mut flags = GLOBAL;
         if seg.writable() {
@@ -174,16 +195,19 @@ fn run(cmdline_bytes: &[u8]) -> Result<core::convert::Infallible, &'static str> 
             flags |= NO_EXECUTE;
         }
         let (start, end) = seg.page_range();
-        let mut v = start;
-        while v < end {
-            tables.map_4k(&mut pool, v, kernel_phys_base + (v - virt_lo), flags);
-            v += PAGE_SIZE;
-        }
+        tables
+            .map_range_4k(
+                start,
+                kernel_phys_base + (start - virt_lo),
+                end - start,
+                flags,
+            )
+            .map_err(|_| "tablas: kernel")?;
     }
     info!(
-        "paginas: identidad hasta {} MiB, {} tablas usadas de {}",
+        "paginas: identidad y mapa fisico hasta {} MiB, {} tablas usadas de {}",
         phys_limit >> 20,
-        pool.used_pages(),
+        tables.allocator().used_pages(),
         pool_pages
     );
 
@@ -209,6 +233,8 @@ fn run(cmdline_bytes: &[u8]) -> Result<core::convert::Infallible, &'static str> 
         initrd_size: 0,
         cmdline_address,
         cmdline_size,
+        phys_map_offset: PHYS_MAP_BASE,
+        phys_map_limit: phys_limit,
     };
 
     info!("ExitBootServices -> AriKernel");
@@ -229,7 +255,9 @@ fn run(cmdline_bytes: &[u8]) -> Result<core::convert::Infallible, &'static str> 
     // SAFETY: página propia, alineada, identidad-mapeada en las tablas nuevas.
     unsafe { boot_info_ptr.write(boot_info) };
 
-    // 10. Salto. rsp = top - 8 para cumplir la alineación de entrada del ABI.
+    // 10. Salto. La pila y el BootInfo se entregan a través del mapa físico
+    // para que el kernel no dependa nunca de la identidad. rsp = top - 8 para
+    // cumplir la alineación de entrada del ABI.
     // SAFETY: tablas construidas arriba mapean este código (identidad), la pila
     // y el kernel; el kernel no retorna.
     unsafe {
@@ -241,9 +269,9 @@ fn run(cmdline_bytes: &[u8]) -> Result<core::convert::Infallible, &'static str> 
             "xor rbp, rbp",
             "jmp {entry}",
             cr3 = in(reg) tables.root_phys(),
-            rsp = in(reg) stack_top - 8,
+            rsp = in(reg) PHYS_MAP_BASE + stack_top - 8,
             entry = in(reg) elf.entry,
-            in("rdi") boot_info_ptr,
+            in("rdi") PHYS_MAP_BASE + boot_info_ptr as u64,
             options(noreturn)
         );
     }

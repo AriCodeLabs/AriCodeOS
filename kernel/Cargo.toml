@@ -16,4 +16,7 @@ boot-protocol = { path = "../boot-protocol" }
 aricode-cmdline = { path = "../libs/cmdline" }
 aricode-fb-console = { path = "../libs/fb-console" }
 aricode-x86-cpu = { path = "../libs/x86-cpu" }
+aricode-pmm = { path = "../libs/pmm" }
+aricode-x86-paging = { path = "../libs/x86-paging" }
+aricode-heap = { path = "../libs/heap" }
 log = { version = "0.4", default-features = false }
