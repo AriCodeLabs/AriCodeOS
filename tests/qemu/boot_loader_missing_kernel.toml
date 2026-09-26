@@ -1,0 +1,14 @@
+# Fault injection: la ESP no contiene kernel.elf.
+name = "boot.loader_missing_kernel"
+description = "sin kernel.elf -> AriBoot falla de forma controlada"
+level = "full"
+areas = ["boot"]
+cmdline = "qemu_exit"
+
+[inject]
+remove_kernel = true
+
+[expect]
+exit = 35
+serial_contains = ["no se pudo leer"]
+serial_absent = ["ARICODEOS_KERNEL_READY"]

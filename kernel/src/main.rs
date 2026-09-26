@@ -8,15 +8,20 @@
 #![no_main]
 
 mod framebuffer;
-#[cfg(feature = "qemu-exit")]
 mod qemu;
 mod serial;
 
-use boot_protocol::{BootInfo, MemoryRegionKind, BOOT_PROTOCOL_MAGIC, BOOT_PROTOCOL_VERSION};
+use aricode_cmdline::{keys, CmdLine};
+use boot_protocol::{BootInfo, BOOT_PROTOCOL_MAGIC, BOOT_PROTOCOL_VERSION};
 use core::panic::PanicInfo;
+use core::sync::atomic::{AtomicBool, Ordering};
 use framebuffer::Framebuffer;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Si es `true`, el kernel termina QEMU al acabar o al entrar en pánico.
+/// Se fija una vez desde la línea de comandos, antes de cualquier panic posible.
+static QEMU_EXIT: AtomicBool = AtomicBool::new(false);
 
 /// Punto de entrada. Ver `boot_protocol::KernelEntry` para el contrato.
 ///
@@ -32,10 +37,30 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     println!("AriCodeOS booting...");
     println!("AriCodeOS Kernel {VERSION}");
 
+    let info = validate_boot_info(boot_info);
+
+    // SAFETY: AriBoot copió la cmdline a memoria de kernel identidad-mapeada.
+    let cmdline = CmdLine::new(unsafe { info.cmdline() });
+    QEMU_EXIT.store(cmdline.has(keys::QEMU_EXIT), Ordering::Relaxed);
+    if !cmdline.is_empty() {
+        println!("cmdline: {}", cmdline.raw().trim());
+    }
+
+    report_framebuffer(info);
+    report_kernel(info);
+    report_memory(info);
+
+    run_requested_test(&cmdline);
+
+    println!("ARICODEOS_KERNEL_READY");
+    finish(qemu::ExitCode::Success)
+}
+
+/// Comprueba magic y versión del protocolo; cualquier discrepancia es fatal.
+unsafe fn validate_boot_info(ptr: *const BootInfo) -> &'static BootInfo {
     // SAFETY: AriBoot garantiza un puntero válido a una página identidad-mapeada.
-    let info: &BootInfo = match boot_info.as_ref() {
-        Some(i) => i,
-        None => panic!("BootInfo nulo"),
+    let Some(info) = ptr.as_ref() else {
+        panic!("BootInfo nulo");
     };
     if info.magic != BOOT_PROTOCOL_MAGIC {
         panic!("BootInfo: magic invalido {:#x}", info.magic);
@@ -46,21 +71,24 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
             info.version, BOOT_PROTOCOL_VERSION
         );
     }
+    info
+}
 
-    if let Some(fb) = Framebuffer::new(info.framebuffer) {
-        fb.draw_boot_screen();
-        println!(
-            "framebuffer: {}x{} stride {} {:?} @ {:#x}",
-            info.framebuffer.width,
-            info.framebuffer.height,
-            info.framebuffer.stride,
-            info.framebuffer.pixel_format,
-            info.framebuffer.address
-        );
-    } else {
-        println!("framebuffer: no disponible");
+fn report_framebuffer(info: &BootInfo) {
+    match Framebuffer::new(info.framebuffer) {
+        Some(fb) => {
+            fb.draw_boot_screen();
+            let f = &info.framebuffer;
+            println!(
+                "framebuffer: {}x{} stride {} {:?} @ {:#x}",
+                f.width, f.height, f.stride, f.pixel_format, f.address
+            );
+        }
+        None => println!("framebuffer: no disponible"),
     }
+}
 
+fn report_kernel(info: &BootInfo) {
     println!(
         "kernel: phys {:#x} virt {:#x} size {} KiB",
         info.kernel_phys_base,
@@ -74,19 +102,13 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
         info.page_table_root
     );
     println!("acpi rsdp: {:#x}", info.rsdp_address);
-
-    report_memory(info);
-
-    println!("ARICODEOS_KERNEL_READY");
-
-    #[cfg(feature = "qemu-exit")]
-    qemu::exit(qemu::ExitCode::Success);
-    #[cfg(not(feature = "qemu-exit"))]
-    halt_loop()
 }
 
 fn report_memory(info: &BootInfo) {
-    let mut totals = [0u64; 7];
+    const NAMES: [&str; 7] = [
+        "free", "kernel", "boot", "firmware", "acpi", "mmio", "reserved",
+    ];
+    let mut totals = [0u64; NAMES.len()];
     let mut count = 0u32;
     // SAFETY: el mapa está en memoria de boot identidad-mapeada por AriBoot.
     for d in unsafe { info.memory_map.iter() } {
@@ -97,15 +119,28 @@ fn report_memory(info: &BootInfo) {
         "memory map: {count} regiones (desc {} bytes)",
         info.memory_map.descriptor_size
     );
-    let names = [
-        "free", "kernel", "boot", "firmware", "acpi", "mmio", "reserved",
-    ];
-    for (i, name) in names.iter().enumerate() {
-        if totals[i] != 0 {
-            println!("  {:<9} {:>8} KiB", name, totals[i] / 1024);
+    for (name, total) in NAMES.iter().zip(totals) {
+        if total != 0 {
+            println!("  {:<9} {:>8} KiB", name, total / 1024);
         }
     }
-    let _ = MemoryRegionKind::Free;
+}
+
+/// Fallos provocados para los escenarios de test (`test=<nombre>`).
+fn run_requested_test(cmdline: &CmdLine) {
+    match cmdline.get(keys::TEST) {
+        None => {}
+        Some("panic") => panic!("test=panic: fallo provocado"),
+        Some(other) => println!("test: '{other}' desconocido, ignorado"),
+    }
+}
+
+/// Fin de la ejecución: termina QEMU si se pidió, si no detiene la CPU.
+fn finish(code: qemu::ExitCode) -> ! {
+    if QEMU_EXIT.load(Ordering::Relaxed) {
+        qemu::exit(code)
+    }
+    halt_loop()
 }
 
 pub fn halt_loop() -> ! {
@@ -126,8 +161,5 @@ fn panic(info: &PanicInfo) -> ! {
     }
     println!("Reason: {}", info.message());
     println!("============================");
-    #[cfg(feature = "qemu-exit")]
-    qemu::exit(qemu::ExitCode::Failed);
-    #[cfg(not(feature = "qemu-exit"))]
-    halt_loop()
+    finish(qemu::ExitCode::Failed)
 }

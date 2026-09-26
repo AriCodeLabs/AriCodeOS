@@ -28,26 +28,33 @@ targets `x86_64-unknown-none` y `x86_64-unknown-uefi`.
 cargo xtask build          # compila AriBoot y AriKernel (release)
 cargo xtask image          # monta build/esp/ (EFI/BOOT/BOOTX64.EFI + aricodeos/kernel.elf)
 cargo xtask run            # arranca en QEMU + OVMF, serie en la terminal (salir: Ctrl-A X)
-cargo xtask test           # test de integración boot.kernel_ready (exit code para CI)
+cargo xtask test           # unit + smoke (arranque nominal en QEMU)
+cargo xtask test --all     # unit + todos los escenarios QEMU; obligatorio antes de main
+cargo xtask test --area boot   # solo los escenarios de un área
 cargo xtask check          # rustfmt --check + clippy -D warnings
 ```
 
-Añade `--debug` a cualquier comando para usar el perfil de desarrollo.
+Añade `--debug` a cualquier comando para usar el perfil de desarrollo. Los
+niveles de test están descritos en [tests/README.md](tests/README.md).
 
 ## Estructura
 
 ```text
-boot-protocol/   ABI BootInfo v1 compartido por bootloader y kernel
+boot-protocol/   ABI BootInfo compartido por bootloader y kernel
+libs/            librerías no_std con tests de host: elf, x86-paging, cmdline
 boot/            AriBoot: cargador UEFI (crate `ariboot`)
 kernel/          AriKernel (crate `arikernel`), ELF64 en la mitad alta
 tools/xtask/     automatización: build, imagen, QEMU, tests, lint
-docs/            arquitectura y ADRs
+tests/qemu/      escenarios de integración declarativos (TOML)
+docs/            arquitectura, flujo de trabajo y ADRs
 build/           salida generada (ESP, OVMF_VARS, logs); no versionar
 ```
 
 ## Test de aceptación
 
-`cargo xtask test` compila el kernel con la feature `qemu-exit`, arranca QEMU
-sin pantalla con `isa-debug-exit`, captura la serie y exige tres cosas: que
-aparezca `ARICODEOS_KERNEL_READY`, que no haya `KERNEL PANIC` y que QEMU
-termine con código 33. El log queda en `build/test-serial.log`.
+`tests/qemu/boot_kernel_ready.toml` arranca QEMU sin pantalla con
+`isa-debug-exit`, captura la serie y exige que aparezca
+`ARICODEOS_KERNEL_READY`, que no haya `KERNEL PANIC` y que QEMU termine con
+código 33. Los escenarios `full` inyectan fallos (ELF truncado, kernel
+ausente, panic provocado) y exigen el código 35. Los logs quedan en
+`build/scenarios/<nombre>/serial.log`.

@@ -1,0 +1,65 @@
+# Tests de AriCodeOS
+
+Todos los tests viven en el repositorio y se ejecutan con `cargo xtask test`.
+
+## Niveles
+
+| Nivel   | Qué ejecuta                                              | Duración | Cuándo es obligatorio                    |
+|---------|----------------------------------------------------------|----------|------------------------------------------|
+| `unit`  | `cargo test` de las crates de host (`libs/*`, protocolo, xtask) | segundos | en cada commit de una feature            |
+| `smoke` | unit + arranque nominal en QEMU (`boot.kernel_ready`)     | ~5 s     | antes de mergear en `develop`            |
+| `full`  | unit + todos los escenarios QEMU (fallos provocados incluidos) | ~20 s    | antes de mergear en `main` (`--all`)     |
+
+```bash
+cargo xtask test                    # unit + smoke (por defecto)
+cargo xtask test --level unit       # solo host
+cargo xtask test --all              # todo: obligatorio hacia main
+cargo xtask test --area boot        # escenarios QEMU del área (con --all para incluir los full)
+cargo xtask test --list             # ver escenarios y cuáles selecciona el filtro
+```
+
+## Dónde está cada cosa
+
+```text
+libs/*/src/lib.rs        #[cfg(test)] unitarios de ELF, paginación, cmdline
+boot-protocol/src/lib.rs #[cfg(test)] clasificación de memoria, iterador, cmdline
+tools/xtask/src/*.rs     #[cfg(test)] validez de los escenarios, utilidades
+tests/qemu/*.toml        escenarios de integración en QEMU
+```
+
+## Escribir un escenario QEMU
+
+Un fichero `tests/qemu/<area>_<nombre>.toml`:
+
+```toml
+name = "area.nombre"            # único; prefijo = área principal
+description = "una línea"
+level = "smoke" | "full"
+areas = ["boot", "memory"]      # para filtrar con --area
+cmdline = "qemu_exit ..."       # se escribe en aricodeos/cmdline.txt
+timeout_secs = 30
+
+[inject]                        # opcional: fallos provocados en la ESP
+truncate_kernel = 3000
+remove_kernel = true
+
+[expect]
+exit = 33                       # 33 = éxito, 35 = fallo reportado por el sistema
+serial_contains = ["..."]
+serial_absent = ["..."]
+```
+
+Los fallos provocados dentro del kernel se piden por cmdline (`test=panic`),
+nunca con features de compilación: el mismo binario sirve para todos los
+escenarios y no queda código de test disperso por `cfg`.
+
+## Áreas
+
+Cada fase del roadmap añade su área y sus escenarios: `boot`, `panic`,
+`memory`, `paging`, `interrupts`, `scheduler`, `ipc`, `capabilities`, ...
+Una rama `feature/f05-physical-memory` ejecuta `--area memory` mientras
+desarrolla y `--all` antes de integrar.
+
+## Logs
+
+Cada escenario deja su serie en `build/scenarios/<name>/serial.log`.

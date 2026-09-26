@@ -2,8 +2,20 @@
 resolver = "2"
 members = [
     "boot-protocol",
+    "libs/elf",
+    "libs/x86-paging",
+    "libs/cmdline",
     "boot",
     "kernel",
+    "tools/xtask",
+]
+
+# Crates con tests unitarios de host (`cargo xtask test --level unit`).
+default-members = [
+    "boot-protocol",
+    "libs/elf",
+    "libs/x86-paging",
+    "libs/cmdline",
     "tools/xtask",
 ]
 

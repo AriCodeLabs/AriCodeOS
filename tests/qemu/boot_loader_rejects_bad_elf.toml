@@ -1,0 +1,14 @@
+# Fault injection: kernel.elf truncado. AriBoot debe rechazarlo y terminar con fallo.
+name = "boot.loader_rejects_bad_elf"
+description = "kernel.elf truncado -> AriBoot reporta ELF invalido, sin saltar"
+level = "full"
+areas = ["boot"]
+cmdline = "qemu_exit"
+
+[inject]
+truncate_kernel = 3000
+
+[expect]
+exit = 35
+serial_contains = ["kernel.elf: ELF64 invalido"]
+serial_absent = ["AriCodeOS booting...", "ARICODEOS_KERNEL_READY"]

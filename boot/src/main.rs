@@ -9,17 +9,20 @@
 
 extern crate alloc;
 
-mod elf;
-mod paging;
+mod qemu;
 
 use alloc::vec::Vec;
+use aricode_cmdline::{keys, CmdLine};
+use aricode_elf as elf;
+use aricode_x86_paging::{
+    self as paging, PagePool, PageTables, GLOBAL, NO_EXECUTE, PAGE_SIZE, WRITABLE,
+};
 use boot_protocol::{
     BootInfo, FramebufferInfo, MemoryMap, PixelFormat, BOOT_PROTOCOL_MAGIC, BOOT_PROTOCOL_VERSION,
     KERNEL_VIRT_BASE, MEMORY_TYPE_KERNEL,
 };
 use core::ptr::NonNull;
 use log::{error, info, warn};
-use paging::{PagePool, PageTables, GLOBAL, NO_EXECUTE, PAGE_SIZE, WRITABLE};
 use uefi::boot::{self, AllocateType, MemoryType};
 use uefi::mem::memory_map::MemoryMap as _;
 use uefi::proto::console::gop::{self, GraphicsOutput};
@@ -38,17 +41,25 @@ fn main() -> Status {
         env!("CARGO_PKG_VERSION")
     );
 
-    match run() {
+    // La cmdline es opcional; se copia a memoria de kernel para que sobreviva
+    // a ExitBootServices y la vea AriKernel.
+    let cmdline_bytes = read_file(cstr16!("\\aricodeos\\cmdline.txt")).unwrap_or_default();
+    let qemu_exit = CmdLine::from_bytes(&cmdline_bytes).has(keys::QEMU_EXIT);
+
+    match run(&cmdline_bytes) {
         Ok(never) => match never {},
         Err(e) => {
             error!("AriBoot: fallo irrecuperable: {e}");
+            if qemu_exit {
+                qemu::exit(qemu::ExitCode::Failed);
+            }
             boot::stall(core::time::Duration::from_secs(10));
             Status::LOAD_ERROR
         }
     }
 }
 
-fn run() -> Result<core::convert::Infallible, &'static str> {
+fn run(cmdline_bytes: &[u8]) -> Result<core::convert::Infallible, &'static str> {
     // 1. Framebuffer GOP (opcional: sin GOP seguimos solo con serie).
     let framebuffer = framebuffer_info();
     if framebuffer.address != 0 {
@@ -104,6 +115,13 @@ fn run() -> Result<core::convert::Infallible, &'static str> {
     let stack_base = stack.as_ptr() as u64;
     let stack_top = stack_base + KERNEL_STACK_PAGES as u64 * PAGE_SIZE;
     let boot_info_page = alloc_pages(1, "bootinfo")?;
+    let (cmdline_address, cmdline_size) = copy_cmdline(cmdline_bytes)?;
+    if cmdline_size != 0 {
+        info!(
+            "cmdline: {}",
+            CmdLine::from_bytes(cmdline_bytes).raw().trim()
+        );
+    }
 
     // 6. Extensión física a identidad-mapear: mapa actual + framebuffer.
     let snapshot = boot::memory_map(MemoryType::LOADER_DATA).map_err(|_| "memory map")?;
@@ -172,6 +190,8 @@ fn run() -> Result<core::convert::Infallible, &'static str> {
         page_table_root: tables.root_phys(),
         initrd_address: 0,
         initrd_size: 0,
+        cmdline_address,
+        cmdline_size,
     };
 
     info!("ExitBootServices -> AriKernel");
@@ -217,6 +237,18 @@ fn alloc_pages(pages: usize, what: &'static str) -> Result<NonNull<u8>, &'static
         error!("allocate_pages({pages}) para {what}: {e:?}");
         "sin memoria"
     })
+}
+
+/// Copia la cmdline a páginas de tipo kernel. Devuelve (dirección, tamaño).
+fn copy_cmdline(bytes: &[u8]) -> Result<(u64, u64), &'static str> {
+    if bytes.is_empty() {
+        return Ok((0, 0));
+    }
+    let pages = bytes.len().div_ceil(PAGE_SIZE as usize);
+    let dst = alloc_pages(pages, "cmdline")?;
+    // SAFETY: `dst` tiene `pages * 4096 >= bytes.len()` bytes recién reservados.
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.as_ptr(), bytes.len()) };
+    Ok((dst.as_ptr() as u64, bytes.len() as u64))
 }
 
 fn read_file(path: &CStr16) -> uefi::Result<Vec<u8>> {
