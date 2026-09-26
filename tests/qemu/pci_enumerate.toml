@@ -16,8 +16,8 @@ serial_contains = [
     "pci: 00:1f.2 8086:2922 clase 01.06 SATA (AHCI)",
     "pci: 00:02.0 1af4:1042 clase 01.00 almacenamiento",
     "pci: 00:03.0 1af4:1041 clase 02.00 Ethernet",
-    "pci: 00:04.0 1af4:1052 clase 09.80",
-    "pci: 00:05.0 1af4:1052 clase 09.80",
+    "pci: 00:04.0 1af4:1052 clase 09.00 teclado",
+    "pci: 00:05.0 1af4:1052 clase 09.02 raton",
     "pci: 9 funciones en el segmento 0 (ECAM @ 0xe0000000)",
     "ARICODEOS_KERNEL_READY",
 ]

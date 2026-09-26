@@ -106,6 +106,9 @@ impl Header {
             (0x0C, 0x03) => "USB",
             (0x0C, 0x05) => "SMBus",
             (0x0C, _) => "bus serie",
+            (0x09, 0x00) => "teclado",
+            (0x09, 0x02) => "raton",
+            (0x09, _) => "entrada",
             _ => "otro",
         }
     }
@@ -218,6 +221,27 @@ pub fn cap_name(id: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_controller_class_names() {
+        let mut h = Header {
+            vendor: 0x1AF4,
+            device: 0x1052,
+            command: 0,
+            status: 0,
+            revision: 1,
+            prog_if: 0,
+            subclass: 0x00,
+            class: 0x09,
+            header_type: 0,
+            multifunction: false,
+        };
+        assert_eq!(h.class_name(), "teclado");
+        h.subclass = 0x02;
+        assert_eq!(h.class_name(), "raton");
+        h.subclass = 0x80;
+        assert_eq!(h.class_name(), "entrada");
+    }
     use alloc::vec;
 
     fn config(vendor: u16, device: u16, class: u8, sub: u8, header_type: u8) -> Vec<u8> {
