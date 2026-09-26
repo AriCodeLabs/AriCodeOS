@@ -165,11 +165,14 @@ pub mod fs {
             }
         }
 
-        pub fn with_name(mut self, name: &str) -> Self {
-            let n = name.len().min(MAX_NAME);
-            self.name[..n].copy_from_slice(&name.as_bytes()[..n]);
-            self.name_len = n as u8;
-            self
+        /// `None` si el nombre no cabe: nunca se recorta un identificador.
+        pub fn with_name(mut self, name: &str) -> Option<Self> {
+            if name.len() > MAX_NAME {
+                return None;
+            }
+            self.name[..name.len()].copy_from_slice(name.as_bytes());
+            self.name_len = name.len() as u8;
+            Some(self)
         }
 
         pub fn name_str(&self) -> &str {
@@ -315,7 +318,6 @@ pub mod fs {
 pub mod net {
     pub const PROTOCOL: u8 = 3;
     pub const VERSION: u8 = 1;
-    pub const MAX_NAME: usize = 40;
     /// Máximo de un datagrama por petición (buffer del cliente).
     pub const MAX_DATAGRAM: u16 = 1472;
     /// Puerto UDP del respondedor de pruebas del host (eco y DNS), alcanzable
@@ -345,7 +347,8 @@ pub mod net {
         UdpRecv = 5,
         /// Libera `sock`.
         UdpClose = 6,
-        /// Resuelve `name` (registro A) en `addr:port` (0 = servidor DHCP).
+        /// Resuelve el nombre que viaja en el buffer del cliente (`len` bytes,
+        /// hasta 253) en `addr:port` (0 = servidor DHCP).
         Dns = 7,
         /// Conecta con `addr:port`; espera hasta `timeout_ms`; `value` = socket.
         TcpConnect = 8,
@@ -363,7 +366,8 @@ pub mod net {
         TcpClose = 13,
     }
 
-    /// Petición (64 bytes).
+    /// Petición (64 bytes). Los nombres DNS no viajan en el mensaje: van por
+    /// el buffer del cliente, sin límite artificial.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Request {
         pub op: Op,
@@ -373,8 +377,6 @@ pub mod net {
         pub addr: [u8; 4],
         pub timeout_ms: u32,
         pub id: u16,
-        pub name: [u8; MAX_NAME],
-        pub name_len: u8,
     }
 
     impl Request {
@@ -389,20 +391,7 @@ pub mod net {
                 addr: [0; 4],
                 timeout_ms: 0,
                 id: 0,
-                name: [0; MAX_NAME],
-                name_len: 0,
             }
-        }
-
-        pub fn with_name(mut self, name: &str) -> Self {
-            let n = name.len().min(MAX_NAME);
-            self.name[..n].copy_from_slice(&name.as_bytes()[..n]);
-            self.name_len = n as u8;
-            self
-        }
-
-        pub fn name_str(&self) -> &str {
-            core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("")
         }
 
         pub fn encode(&self) -> [u8; Self::LEN] {
@@ -410,14 +399,12 @@ pub mod net {
             b[0] = PROTOCOL;
             b[1] = VERSION;
             b[2] = self.op as u8;
-            b[3] = self.name_len;
             b[4..6].copy_from_slice(&self.sock.to_le_bytes());
             b[6..8].copy_from_slice(&self.port.to_le_bytes());
             b[8..10].copy_from_slice(&self.len.to_le_bytes());
             b[10..14].copy_from_slice(&self.addr);
             b[14..18].copy_from_slice(&self.timeout_ms.to_le_bytes());
             b[18..20].copy_from_slice(&self.id.to_le_bytes());
-            b[20..60].copy_from_slice(&self.name);
             b
         }
 
@@ -443,8 +430,6 @@ pub mod net {
             };
             let mut addr = [0u8; 4];
             addr.copy_from_slice(&b[10..14]);
-            let mut name = [0u8; MAX_NAME];
-            name.copy_from_slice(&b[20..60]);
             Some(Self {
                 op,
                 sock: u16::from_le_bytes(b[4..6].try_into().ok()?),
@@ -453,8 +438,6 @@ pub mod net {
                 addr,
                 timeout_ms: u32::from_le_bytes(b[14..18].try_into().ok()?),
                 id: u16::from_le_bytes(b[18..20].try_into().ok()?),
-                name,
-                name_len: b[3].min(MAX_NAME as u8),
             })
         }
     }
@@ -600,7 +583,7 @@ mod tests {
     #[test]
     fn net_request_reply_round_trip() {
         use super::net::*;
-        let mut r = Request::new(Op::UdpSend).with_name("aricodeos.test");
+        let mut r = Request::new(Op::UdpSend);
         r.sock = 3;
         r.port = 17007;
         r.len = 14;
@@ -609,7 +592,6 @@ mod tests {
         r.id = 7;
         let d = Request::decode(&r.encode()).unwrap();
         assert_eq!(d, r);
-        assert_eq!(d.name_str(), "aricodeos.test");
         let reply = Reply::ok(14).with_addr([10, 0, 2, 2], 17007);
         let back = Reply::decode(&reply.encode()).unwrap();
         assert_eq!(back, reply);
@@ -644,7 +626,7 @@ mod tests {
     #[test]
     fn fs_request_and_reply_round_trip() {
         use super::fs::*;
-        let mut r = Request::new(Op::Read).with_name("hola.txt");
+        let mut r = Request::new(Op::Read).with_name("hola.txt").unwrap();
         r.fd = 3;
         r.offset = 512;
         r.len = 100;
@@ -662,8 +644,17 @@ mod tests {
         let mut bad = r.encode();
         bad[2] = 99;
         assert!(Request::decode(&bad).is_none());
-        let long = Request::new(Op::Open).with_name("abcdefghijklmnopqrstuvwxyz0123456789");
-        assert_eq!(long.name_len as usize, MAX_NAME);
+        assert!(
+            Request::new(Op::Open)
+                .with_name("abcdefghijklmnopqrstuvwxyz0123456789")
+                .is_none(),
+            "un nombre largo se rechaza, nunca se recorta"
+        );
+        let exact = "a".repeat(MAX_NAME);
+        assert_eq!(
+            Request::new(Op::Open).with_name(&exact).unwrap().name_str(),
+            exact
+        );
     }
 
     #[test]

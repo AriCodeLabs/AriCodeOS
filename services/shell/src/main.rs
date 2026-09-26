@@ -326,7 +326,7 @@ fn ping(client: &NetClient, arg: &[u8]) {
     sys::print(b" de 4 respuestas\n");
 }
 
-fn dns(client: &NetClient, arg: &[u8]) {
+fn dns(client: &mut NetClient, arg: &[u8]) {
     let Ok(name) = core::str::from_utf8(arg) else {
         sys::print(b"dns: nombre invalido\n");
         return;
@@ -377,6 +377,9 @@ fn http_get(client: &mut NetClient, arg: &[u8]) {
         Err(user_testprogs::sys::http::HttpError::Io(e)) => net_error(e),
         Err(user_testprogs::sys::http::HttpError::Malformed) => {
             sys::print(b"http: respuesta no valida\n")
+        }
+        Err(user_testprogs::sys::http::HttpError::Unsupported) => {
+            sys::print(b"http: respuesta con codificacion o protocolo no soportado\n")
         }
         Err(user_testprogs::sys::http::HttpError::TooBig) => {
             sys::print(b"http: respuesta demasiado grande (4 KiB)\n")
@@ -437,7 +440,7 @@ fn main(mask: u64) -> u64 {
             b"uptime" => uptime(),
             b"net" => net(&net_client),
             b"ping" => ping(&net_client, rest),
-            b"dns" => dns(&net_client, rest),
+            b"dns" => dns(&mut net_client, rest),
             b"http" => http_get(&mut net_client, rest),
             b"reboot" => {
                 user_testprogs::print_error(

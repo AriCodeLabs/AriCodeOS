@@ -77,13 +77,17 @@ impl FsClient {
     }
 
     pub fn open(&self, name: &str) -> Result<u32, FsError> {
-        self.call(Request::new(Op::Open).with_name(name), false)
-            .map(|r| r.value as u32)
+        let req = Request::new(Op::Open)
+            .with_name(name)
+            .ok_or(FsError::Status(Status::Invalid))?;
+        self.call(req, false).map(|r| r.value as u32)
     }
 
     pub fn create(&self, name: &str) -> Result<u32, FsError> {
-        self.call(Request::new(Op::Create).with_name(name), false)
-            .map(|r| r.value as u32)
+        let req = Request::new(Op::Create)
+            .with_name(name)
+            .ok_or(FsError::Status(Status::Invalid))?;
+        self.call(req, false).map(|r| r.value as u32)
     }
 
     pub fn close(&self, fd: u32) -> Result<(), FsError> {
