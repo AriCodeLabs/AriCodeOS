@@ -1,0 +1,19 @@
+# Fase 21: entrada de consola del kernel. Sin entrada, console_read vence el
+# plazo; despues el runner envia una linea al ver CONSOLE_INPUT_READY y el
+# kernel la recibe por la IRQ de COM1.
+name = "console.input"
+description = "recepcion por COM1 con IRQ: plazo vencido y lectura de una linea"
+level = "full"
+areas = ["console", "interrupts"]
+cmdline = "qemu_exit test=console_input"
+prompt = "CONSOLE_INPUT_READY"
+stdin = ["hola AriCodeOS"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "console: entrada por COM1",
+    "console: linea 'hola AriCodeOS' (14 bytes, 0 descartados)",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC"]

@@ -10,6 +10,7 @@ pub mod msr;
 pub mod pic;
 pub mod pit;
 pub mod port;
+pub mod power;
 pub mod syscall;
 pub mod usermode;
 

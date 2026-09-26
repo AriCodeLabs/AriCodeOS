@@ -73,6 +73,9 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         nr::PROCESS_WAIT => process_wait(h, frame.rsi),
         nr::IPC_SEND => ipc_send(h, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9),
         nr::IPC_RECEIVE => ipc_receive(h, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9),
+        nr::CONSOLE_READ => console_read(h, frame.rsi, frame.rdx, frame.r10),
+        nr::SYSTEM_INFO => system_info(h, frame.rsi, frame.rdx, frame.r10),
+        nr::SYSTEM_POWER => system_power(h, frame.rsi),
         n => {
             warn!("syscall desconocida {n} desde rip={:#x}", frame.user_rip);
             Err(Error::NoSys)
@@ -105,6 +108,81 @@ fn console_write(handle: Handle, ptr: u64, len: u64) -> Result<u64, Error> {
     let text = core::str::from_utf8(&bytes).map_err(|_| Error::Invalid)?;
     crate::print!("{text}");
     Ok(len)
+}
+
+fn console_read(handle: Handle, ptr: u64, len: u64, timeout_ms: u64) -> Result<u64, Error> {
+    const MAX: u64 = 4096;
+    let is_console = with_handles(|t| {
+        lookup(t, handle, Rights::READ).map(|o| matches!(o.kind, ObjectKind::Console))
+    })?;
+    if !is_console || len == 0 || len > MAX {
+        return Err(Error::Invalid);
+    }
+    // Validar el destino antes de bloquear: un puntero inválido falla ya.
+    process::copy_to_user(ptr, &[])?;
+    let mut buf = alloc::vec![0u8; len as usize];
+    let n = crate::console_input::read(&mut buf, deadline_from(timeout_ms));
+    if n == 0 {
+        return Err(Error::Timeout);
+    }
+    process::copy_to_user(ptr, &buf[..n])?;
+    Ok(n as u64)
+}
+
+/// Comprueba que `h` es el objeto `System` con `required`.
+fn system_object(h: Handle, required: Rights) -> Result<(), Error> {
+    let ok =
+        with_handles(|t| lookup(t, h, required).map(|o| matches!(o.kind, ObjectKind::System)))?;
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::Invalid)
+    }
+}
+
+fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
+    use aricode_abi::sysinfo;
+    system_object(h, Rights::READ)?;
+    let bytes: Vec<u8> = match kind {
+        sysinfo::UPTIME => crate::time::uptime_ms().to_le_bytes().to_vec(),
+        sysinfo::MEMORY => {
+            let s = crate::memory::pmm::stats();
+            let mut v = (s.usable_frames as u64).to_le_bytes().to_vec();
+            v.extend_from_slice(&(s.free_frames as u64).to_le_bytes());
+            v
+        }
+        sysinfo::PROCESSES => {
+            let max = (len as usize) / sysinfo::ProcessEntry::LEN;
+            process::snapshot()
+                .iter()
+                .take(max)
+                .flat_map(|e| e.encode())
+                .collect()
+        }
+        _ => return Err(Error::Invalid),
+    };
+    if bytes.len() as u64 > len {
+        return Err(Error::TooBig);
+    }
+    process::copy_to_user(ptr, &bytes)?;
+    Ok(bytes.len() as u64)
+}
+
+fn system_power(h: Handle, action: u64) -> Result<u64, Error> {
+    use aricode_abi::power;
+    system_object(h, Rights::MANAGE)?;
+    let who = process::current_pid().map(|p| p.0).unwrap_or(0);
+    match action {
+        power::SHUTDOWN => {
+            crate::println!("AriCodeOS: apagando el sistema (pedido por el proceso {who})");
+            crate::shutdown()
+        }
+        power::REBOOT => {
+            crate::println!("AriCodeOS: reiniciando (pedido por el proceso {who})");
+            crate::arch::x86_64::power::reboot()
+        }
+        _ => Err(Error::Invalid),
+    }
 }
 
 /// Endpoint de un handle con `required`, o `Invalid` si el objeto no es un endpoint.

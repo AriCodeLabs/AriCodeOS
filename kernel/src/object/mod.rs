@@ -23,6 +23,8 @@ pub enum ObjectKind {
     Hardware,
     /// Raíz PCI: enumerar y reclamar dispositivos.
     PciRoot,
+    /// Estado del sistema: información (`READ`) y apagado/reinicio (`MANAGE`).
+    System,
 }
 
 /// Objeto compartido por todos los handles que lo referencian. Revocarlo
@@ -64,6 +66,7 @@ impl KernelObject {
             ObjectKind::Dma(_) => kind::DMA,
             ObjectKind::Hardware => kind::HARDWARE,
             ObjectKind::PciRoot => kind::PCI_ROOT,
+            ObjectKind::System => kind::SYSTEM,
         }
     }
 
