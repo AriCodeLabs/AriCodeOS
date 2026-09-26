@@ -3,6 +3,15 @@
 version = 4
 
 [[package]]
+name = "ari-virtio-blk"
+version = "0.0.7"
+dependencies = [
+ "aricode-sys",
+ "aricode-virtio",
+ "user-testprogs",
+]
+
+[[package]]
 name = "ariboot"
 version = "0.0.7"
 dependencies = [
@@ -67,6 +76,13 @@ name = "aricode-sys"
 version = "0.0.7"
 dependencies = [
  "aricode-abi",
+]
+
+[[package]]
+name = "aricode-virtio"
+version = "0.0.7"
+dependencies = [
+ "aricode-pci",
 ]
 
 [[package]]
@@ -354,6 +370,8 @@ checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
 name = "user-testprogs"
 version = "0.0.7"
 dependencies = [
+ "aricode-heap",
+ "aricode-sync",
  "aricode-sys",
 ]
 

@@ -20,6 +20,8 @@ pub const ABI_VERSION: u32 = 2;
 pub mod handle {
     /// Handle con el que `init` recibe el objeto `SPAWNER` (`MANAGE`).
     pub const INIT_SPAWNER: u32 = 0x0001_0004;
+    /// Handle con el que `init` recibe la raíz PCI (`READ|MANAGE`).
+    pub const INIT_PCI_ROOT: u32 = 0x0001_0005;
     /// El propio proceso (`MANAGE | READ | DUPLICATE`).
     pub const SELF_PROCESS: u32 = 0x0001_0001;
     /// El hilo principal (`READ | WAIT | DUPLICATE`).
@@ -55,6 +57,8 @@ pub mod kind {
     pub const DMA: u64 = 8;
     /// Capacidad de reservar recursos de hardware (buffers DMA).
     pub const HARDWARE: u64 = 9;
+    /// Raíz PCI: enumeración y reclamación de dispositivos (solo `init`).
+    pub const PCI_ROOT: u64 = 10;
 }
 
 /// Límite exclusivo del espacio de usuario (mitad baja canónica).
@@ -96,8 +100,11 @@ pub mod nr {
     /// `ipc_receive(ep, buf_ptr, buf_len, handles_out_ptr, handles_max, timeout_ms)
     /// -> data_len | (handles_recibidos << 32)`; exige `READ` sobre `ep`.
     pub const IPC_RECEIVE: u64 = 13;
-    /// `process_spawn(spawner, name_ptr, name_len, arg) -> handle de proceso`;
-    /// exige `MANAGE` sobre un objeto `SPAWNER`. El hijo recibe `arg` en `rdi`.
+    /// `process_spawn(spawner, name_ptr, name_len, arg, handles_ptr, handles_len)
+    /// -> handle de proceso`; exige `MANAGE` sobre un objeto `SPAWNER` y
+    /// `TRANSFER` sobre cada handle, que se retira del padre y aparece en el
+    /// hijo a partir de `0x0001_0004` en el mismo orden. El hijo recibe `arg`
+    /// en `rdi`.
     pub const PROCESS_SPAWN: u64 = 14;
     /// `process_wait(process, timeout_ms) -> código de salida`; exige `WAIT`.
     /// Un proceso terminado por el kernel devuelve `Error::Killed`.
@@ -114,6 +121,62 @@ pub mod nr {
     pub const DMA_ALLOC: u64 = 19;
     /// `dma_phys(dma) -> dirección física`; exige `READ`.
     pub const DMA_PHYS: u64 = 20;
+    /// `pci_count(root) -> funciones enumeradas`; exige `READ` sobre `PCI_ROOT`.
+    pub const PCI_COUNT: u64 = 21;
+    /// `pci_info(root, index) -> PciInfo empaquetado` (ver [`pci_info`]); exige `READ`.
+    pub const PCI_INFO: u64 = 22;
+    /// `pci_claim(root, index, out_ptr) -> handles escritos`; exige `MANAGE`.
+    /// Escribe [`PCI_CLAIM_HANDLES`] `u32` en `out_ptr`: espacio de
+    /// configuración (MMIO), `HARDWARE`, IRQ MSI-X (0 si no hay) y los seis
+    /// BARs de memoria (0 si ausente o de E/S). El dispositivo queda con
+    /// memoria y bus master habilitados y MSI-X en la entrada 0.
+    pub const PCI_CLAIM: u64 = 23;
+}
+
+/// Número de handles que escribe `pci_claim`.
+pub const PCI_CLAIM_HANDLES: usize = 9;
+
+/// Empaquetado de `pci_info`: `vendor << 48 | device << 32 | class << 24 |
+/// subclass << 16 | bus << 8 | dev << 3 | func`.
+pub mod pci_info {
+    pub const fn pack(
+        vendor: u16,
+        device: u16,
+        class: u8,
+        subclass: u8,
+        bus: u8,
+        dev: u8,
+        func: u8,
+    ) -> u64 {
+        (vendor as u64) << 48
+            | (device as u64) << 32
+            | (class as u64) << 24
+            | (subclass as u64) << 16
+            | (bus as u64) << 8
+            | (dev as u64) << 3
+            | func as u64
+    }
+    pub const fn vendor(v: u64) -> u16 {
+        (v >> 48) as u16
+    }
+    pub const fn device(v: u64) -> u16 {
+        (v >> 32) as u16
+    }
+    pub const fn class(v: u64) -> u8 {
+        (v >> 24) as u8
+    }
+    pub const fn subclass(v: u64) -> u8 {
+        (v >> 16) as u8
+    }
+    pub const fn bus(v: u64) -> u8 {
+        (v >> 8) as u8
+    }
+    pub const fn dev(v: u64) -> u8 {
+        ((v >> 3) & 0x1F) as u8
+    }
+    pub const fn func(v: u64) -> u8 {
+        (v & 7) as u8
+    }
 }
 
 /// Máximo de un buffer DMA por llamada (sección 52).
@@ -226,6 +289,18 @@ mod tests {
             decode(-77),
             Err(Error::Invalid),
             "codigo desconocido se normaliza"
+        );
+    }
+
+    #[test]
+    fn pci_info_round_trip() {
+        let v = pci_info::pack(0x1AF4, 0x1042, 0x01, 0x00, 0, 3, 0);
+        assert_eq!(pci_info::vendor(v), 0x1AF4);
+        assert_eq!(pci_info::device(v), 0x1042);
+        assert_eq!((pci_info::class(v), pci_info::subclass(v)), (1, 0));
+        assert_eq!(
+            (pci_info::bus(v), pci_info::dev(v), pci_info::func(v)),
+            (0, 3, 0)
         );
     }
 

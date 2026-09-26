@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-fn base_command(esp: &Path, vars: &Path) -> Command {
+fn base_command(esp: &Path, vars: &Path, disk: &Path) -> Command {
     let mut q = Command::new("qemu-system-x86_64");
     q.current_dir(root());
     q.args([
@@ -18,6 +18,15 @@ fn base_command(esp: &Path, vars: &Path) -> Command {
         "-m",
         "512M",
         "-no-reboot",
+    ]);
+    // Disco virtio-blk moderno (sin interfaz legacy) para el driver de usuario.
+    q.args([
+        "-drive",
+        &format!("if=none,id=disk0,format=raw,file={}", disk.display()),
+    ]);
+    q.args([
+        "-device",
+        "virtio-blk-pci,drive=disk0,disable-legacy=on,disable-modern=off",
     ]);
     q.args([
         "-drive",
@@ -49,8 +58,10 @@ pub fn run_interactive(release: bool, cmdline: &str) -> Result {
         )?
     };
     let vars = image::ovmf_vars_for(&build_dir())?;
+    let disk = build_dir().join("disk.img");
+    image::write_test_disk(&disk)?;
     println!("[xtask] QEMU (salir: Ctrl-A X)");
-    let st = base_command(&esp, &vars)
+    let st = base_command(&esp, &vars, &disk)
         .arg("-nographic")
         .status()
         .map_err(|e| format!("qemu: {e}"))?;
@@ -68,8 +79,10 @@ pub struct Capture {
 /// Arranca sin pantalla, captura la serie y espera hasta `timeout`.
 pub fn run_headless(esp: &Path, workdir: &Path, timeout: Duration) -> Result<Capture> {
     let vars = image::ovmf_vars_for(workdir)?;
+    let disk = workdir.join("disk.img");
+    image::write_test_disk(&disk)?;
     let start = Instant::now();
-    let mut child = base_command(esp, &vars)
+    let mut child = base_command(esp, &vars, &disk)
         .args(["-display", "none", "-monitor", "none", "-serial", "stdio"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

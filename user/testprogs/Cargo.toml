@@ -8,3 +8,5 @@ publish = false
 
 [dependencies]
 aricode-sys = { path = "../../sdk/rust" }
+aricode-heap = { path = "../../libs/heap" }
+aricode-sync = { path = "../../libs/sync" }

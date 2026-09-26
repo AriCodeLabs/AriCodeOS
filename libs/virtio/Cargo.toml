@@ -1,0 +1,12 @@
+[package]
+name = "aricode-virtio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Virtio 1.x: virtqueues split sobre memoria DMA, capabilities virtio-pci y peticiones virtio-blk (no_std)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+aricode-pci = { path = "../pci" }

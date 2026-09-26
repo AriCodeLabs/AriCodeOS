@@ -2320,11 +2320,17 @@ pci: 00:1f.3 8086:2930 clase 0c.05 SMBus (1 BAR)
 
 # FASE 18 — Virtio
 
-### Implementar primero
+**Estado: virtio-blk completado (2026-09-26); virtio-net pendiente.**
 
-- virtio transport;
-- virtio-blk;
-- después virtio-net.
+### Implementado
+
+- virtio transport: `libs/virtio` (virtqueue split sobre DMA, descubrimiento
+  de estructuras virtio-pci modernas, negociación por `common_cfg`);
+- virtio-blk: `services/virtio-blk`, driver en ring 3 con capabilities
+  reclamadas por `init` (`pci_claim`: BARs sondeados y MSI-X programada por
+  el kernel), cola 0 en DMA, lectura y escritura verificadas
+  (`virtio.blk_rw`);
+- virtio-net: después (Fase 22).
 
 ### Motivo
 

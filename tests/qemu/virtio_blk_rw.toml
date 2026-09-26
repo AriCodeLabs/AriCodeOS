@@ -1,0 +1,22 @@
+# Fase 18: init reclama el virtio-blk por la raiz PCI (BARs sondeados, MSI-X
+# programada) y lanza el driver de usuario, que negocia por la interfaz
+# moderna, crea la cola en DMA y lee y escribe sectores del disco de pruebas.
+name = "virtio.blk_rw"
+description = "driver virtio-blk en ring 3: negociacion, cola DMA, MSI-X, lectura y escritura"
+level = "full"
+areas = ["virtio", "drivers", "init"]
+cmdline = "qemu_exit"
+
+[expect]
+exit = 33
+serial_contains = [
+    "pci: 00:03.0 1af4:1042 clase 01.00 almacenamiento",
+    "reclamado (MSI-X entrada 0)",
+    "virtio-blk: dispositivo listo",
+    "virtio-blk: capacidad 8192 sectores",
+    "virtio-blk: lectura y escritura ok",
+    "AriInit: virtio-blk listo",
+    "ARICODEOS_KERNEL_READY",
+]
+# USER FAULT aparece porque init mata a proposito a kernel_read y crashy_driver.
+serial_absent = ["KERNEL PANIC", "fallo en la", "salio con codigo 14"]

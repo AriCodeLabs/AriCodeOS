@@ -60,6 +60,10 @@ pub fn init(info: &BootInfo) -> u64 {
     let offset = phys::offset();
     let limit = phys::limit();
     let mut m = Mapper::new(PmmFrames, OffsetMap(offset)).expect("vmm: sin frames para el PML4");
+    // La mitad alta completa (256 PDPT, 1 MiB) existe desde el principio:
+    // los procesos la comparten y ven todo mapeo futuro del kernel.
+    m.preallocate_kernel_half()
+        .expect("vmm: sin frames para la mitad alta");
 
     // Mapa físico lineal.
     m.map_range_2m(offset, 0, limit, WRITABLE | NO_EXECUTE | GLOBAL)

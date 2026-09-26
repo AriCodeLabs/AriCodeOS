@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.0.7 (Fases 15, 16 y 17)
+## Estado: 0.0.8 en curso (0.0.7 + Fase 18)
 
 ```text
 OVMF (UEFI)
@@ -23,7 +23,8 @@ OVMF (UEFI)
        IPC por endpoints con transferencia de capabilities y timeouts,
        initrd con init y programas de usuario, init lanza y supervisa
        procesos con la capacidad SPAWNER, ACPI + I/O APIC, drivers en ring 3
-       con capabilities IRQ/MMIO/DMA, enumeración PCIe por ECAM,
+       con capabilities IRQ/MMIO/DMA, enumeración PCIe por ECAM, init reclama
+       el virtio-blk (BARs, MSI-X) y lanza su driver en ring 3,
        ARICODEOS_KERNEL_READY
 ```
 
@@ -44,14 +45,17 @@ libs/handles/        aricode-handles: tabla de handles con generación y derecho
 libs/initrd/         aricode-initrd: formato del initrd, lector sin copia (no_std) y escritor (feature `write`, xtask); tests de host
 libs/acpi/           aricode-acpi: RSDP, XSDT/RSDT, MADT (LAPIC, I/O APIC, overrides), MCFG; sin AML (no_std + alloc, tests de host)
 libs/pci/            aricode-pci: direccionamiento ECAM, cabecera de configuración, BARs, capabilities, clases (no_std + alloc, tests de host)
+libs/virtio/         aricode-virtio: virtqueue split sobre DMA, estructuras virtio-pci modernas, peticiones virtio-blk (no_std, tests de host)
 sdk/abi/             aricode-abi: números de syscall, errores, handles iniciales, derechos y tipos de objeto (no_std, tests de host)
 sdk/rust/            aricode-sys: wrappers de syscall para programas de usuario (no_std, sin alloc) y `user.ld`, el linker script de todo programa de usuario
 user/testprogs/      programas de prueba de ring 3 (Rust y ensamblador) enlazados como ELF estáticos en 0x400000
-services/init/       AriInit: primer proceso; recibe SPAWNER y lanza/supervisa servicios
+services/init/       AriInit: primer proceso; recibe SPAWNER y la raíz PCI, lanza/supervisa servicios y reclama dispositivos para sus drivers
+services/virtio-blk/ driver virtio-blk en ring 3 (interfaz moderna, cola 0 en DMA, MSI-X)
 boot/                ariboot: integra lo anterior con la crate `uefi`
 kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log con IrqLock y try_lock),
                      arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions, port, pic, pit, apic, ioapic, msr, syscall, usermode},
-                     acpi (localización de tablas), pci (ECAM y enumeración), hw (IrqLine, Region, DmaBuffer, registro de vectores, banco de pruebas),
+                     acpi (localización de tablas), pci (ECAM, enumeración, reclamación con sondeo de BARs y MSI-X),
+                     hw (IrqLine por GSI o MSI-X, Region, DmaBuffer, ventanas sin caché, registro de vectores, banco de pruebas),
                      object (KernelObject revocable, tabla inicial), ipc (Endpoint, Message, benchmark), initrd,
                      user/{process (cargador ELF, copy_from/to_user, espera de salida), programs (initrd), syscalls},
                      memory/{phys, pmm, vmm, heap}, sync (política IRQ), time,
@@ -282,8 +286,9 @@ segundo brevemente para añadir la región.
 - GDT con el layout que exige `syscall`/`sysret` (`aricode-x86-cpu::layout`):
   código y datos de kernel, datos y código de usuario (DPL 3), TSS. `STAR`,
   `LSTAR` y `FMASK` se programan en `arch::x86_64::syscall::init`.
-- Cada proceso tiene su PML4: la mitad alta se copia del kernel (PDPT
-  compartidos) y la baja contiene su código en `0x40_0000` (solo lectura y
+- Cada proceso tiene su PML4: la mitad alta se copia del kernel (256 PDPT
+  reservados en el arranque y compartidos, de modo que los mapeos que el
+  kernel añada después, como ventanas MMIO, se ven en todos los espacios) y la baja contiene su código en `0x40_0000` (solo lectura y
   ejecución) y su pila en `0x7F_C000..0x80_0000` (RW, NX). El bit USER se
   propaga por toda la ruta de tablas.
 - El hilo principal del proceso es un hilo del kernel normal cuyo `cr3` es el
@@ -298,8 +303,9 @@ segundo brevemente para añadir la región.
   `thread_yield`, `thread_sleep`, `thread_get_tid`, `abi_version`,
   `handle_close`, `handle_duplicate`, `object_kind`, `object_id`,
   `object_revoke`, `endpoint_create`, `ipc_send`, `ipc_receive`,
-  `process_spawn`, `process_wait`, `irq_wait`, `mmio_map`, `region_len`,
-  `dma_alloc`, `dma_phys`.
+  `process_spawn` (con transferencia de handles al hijo), `process_wait`,
+  `irq_wait`, `mmio_map`, `region_len`, `dma_alloc`, `dma_phys`, `pci_count`,
+  `pci_info`, `pci_claim`.
 - Los punteros de usuario se validan página a página contra las tablas del
   proceso (`copy_from_user`): un puntero de kernel devuelve `Fault`, nunca se
   desreferencia.
@@ -434,11 +440,37 @@ segundo brevemente para añadir la región.
 - La lista se devuelve al arranque; la programación de MSI/MSI-X y la
   asignación de BARs a drivers llegan con virtio (Fase 18).
 
+## Virtio-blk en espacio de usuario (Fase 18)
+
+- La raíz PCI es un objeto que solo recibe `init` (`0x0001_0005`,
+  `READ|MANAGE`). `pci_count`/`pci_info` enumeran desde usuario; `pci_claim`
+  reclama una función: el kernel habilita memoria y bus master, deshabilita
+  INTx, sondea el tamaño de cada BAR de memoria, programa la entrada 0 de
+  MSI-X hacia un vector de dispositivo (tabla mapeada en una ventana sin
+  caché del kernel) y devuelve nueve handles: espacio de configuración
+  (MMIO), `Hardware`, IRQ y los seis BARs (0 si ausentes), todos con
+  `TRANSFER`.
+- `process_spawn` transfiere handles al hijo (aparecen desde
+  `0x0001_0004` en orden). `init` reclama `1af4:1042`, compacta los handles
+  presentes y pasa en `arg` una máscara (bit 15 IRQ, bits 0..5 BARs); el
+  driver reconstruye la posición de cada BAR con ella.
+- `services/virtio-blk`: lee el espacio de configuración por MMIO, localiza
+  las estructuras common/notify/device con `aricode-virtio`, negocia
+  `VERSION_1`, crea la cola 0 en un buffer DMA (`QueueLayout` +
+  `Virtqueue`), asigna el vector MSI-X 0 a la cola y ejecuta peticiones de
+  un sector (cabecera, datos, estado) esperando la IRQ con `irq_wait`. La
+  autoprueba lee sectores del disco de pruebas, escribe uno y lo relee.
+- El runner añade `virtio-blk-pci` moderno con `build/disk.img` (4 MiB,
+  cada sector lleva `ARIDISK\0` y su número), regenerado en cada arranque.
+- Los programas de usuario tienen un heap estático de 64 KiB
+  (`aricode-heap` tras un spinlock) porque la librería PCI usa `alloc`.
+
 ## Deuda conocida
 
-- El device manager (sección 29) es todavía el banco de pruebas del kernel:
-  enumerar dispositivos (Fase 17) y repartir capabilities de hardware a
-  drivers reales pasará a un servicio de usuario.
+- El driver termina tras la autoprueba; en la Fase 19 se queda residente y
+  sirve peticiones por IPC.
+- El device manager (sección 29) vive dentro de `init`: enumera, reclama y
+  lanza drivers; separarlo en un servicio propio cuando haya más de uno.
 - Sin IOMMU (Fase 33): un buffer DMA es memoria autorizada solo por
   convención del driver.
 - `init` todavía no recibe endpoints de los servicios que lanza ni puede
