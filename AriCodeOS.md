@@ -3084,15 +3084,20 @@ Cada fase se considerará terminada únicamente si cumple:
 
 # 99. Gestión del proyecto
 
-Modelo recomendado:
+Modelo adoptado (git flow), detallado en `docs/WORKFLOW.md`:
 
 ```text
-main        -> siempre arrancable
-feature/*   -> desarrollo
+main        -> siempre arrancable; solo merges etiquetados desde develop u hotfix/*
+develop     -> integración; debe pasar cargo xtask test
+feature/*   -> desarrollo, parte y vuelve a develop
+fix/*       -> correcciones sobre develop
+hotfix/*    -> correcciones urgentes sobre main (vuelven también a develop)
 experiment/*-> prototipos que pueden romperse
 ```
 
-Las features se integran únicamente cuando sus tests básicos pasan.
+Ningún commit directo en `main` ni `develop`. Merges siempre con `--no-ff` y
+con `cargo xtask check` y `cargo xtask test` en verde. El primer commit
+(`v0.0.1`, M0) es la única excepción histórica.
 
 ---
 

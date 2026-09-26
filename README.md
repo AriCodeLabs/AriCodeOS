@@ -4,7 +4,8 @@ Sistema operativo desde cero: microkernel en Rust `no_std`, arranque UEFI,
 x86-64, seguridad por capabilities y drivers en espacio de usuario.
 
 El documento maestro de arquitectura y roadmap es [AriCodeOS.md](AriCodeOS.md).
-Las decisiones de diseño se registran en [docs/decisions/](docs/decisions/).
+Las decisiones de diseño se registran en [docs/decisions/](docs/decisions/) y el
+flujo de ramas (git flow) en [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
 **Estado:** Milestone M0 "First Boot" completado. AriBoot (UEFI) carga
 `kernel.elf`, construye las tablas de páginas, sale de boot services y salta a
