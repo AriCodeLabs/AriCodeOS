@@ -2503,14 +2503,31 @@ TLS vendrá posteriormente (Fase 31, criptografía).
 
 # FASE 25 — Input moderno
 
-Primero virtio-input.
+**Estado: virtio-input completado (2026-09-27); xHCI/USB HID pendiente.**
 
-Después:
+### Implementado
 
-- xHCI;
-- USB;
-- HID keyboard;
-- HID mouse.
+- `libs/input` (no_std, tests de host): eventos en formato evdev (el mismo
+  que usa virtio-input y que servirá para USB HID) y un teclado US con
+  mayúsculas y bloqueo de mayúsculas que convierte pulsaciones en
+  caracteres;
+- `inputd` (`services/virtio-input`): driver virtio-input en ring 3 sobre el
+  transporte virtio común, un proceso por dispositivo (init lanza uno por
+  cada función `1af4:1052`); lee el nombre del dispositivo de su
+  configuración, mantiene la cola de eventos y atiende
+  `InputServiceProtocol v1` (`sdk/proto::input`: `Info`, `Read` con plazo);
+- cliente `aricode-sys::input`, programa `input_client` y escenario
+  `input.virtio`: xtask inyecta por QMP (`input-send-event`) la línea
+  `hola` + Enter en el teclado virtio y un movimiento y clic en el ratón
+  virtio; el escenario exige la traducción exacta.
+
+### Pendiente
+
+- xHCI, USB y HID (teclado y ratón físicos): misma librería de eventos,
+  driver nuevo en ring 3;
+- que el shell pueda leer del teclado virtio además de la consola serie
+  (llegará con la GUI, Fase 26, donde el teclado y el ratón alimentan al
+  compositor).
 
 ---
 
