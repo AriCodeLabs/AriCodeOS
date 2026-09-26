@@ -1,0 +1,15 @@
+name = "interrupts.page_fault_reports_cr2"
+description = "test=page_fault -> #PF con CR2, tipo de acceso y modo"
+level = "full"
+areas = ["interrupts"]
+cmdline = "qemu_exit test=page_fault"
+
+[expect]
+exit = 35
+serial_contains = [
+    "EXCEPTION #PF (14) Page Fault",
+    "CR2: 0xffff900000000000",
+    "ACCESS: WRITE  MODE: KERNEL  CAUSE: not present",
+    "ARICODEOS KERNEL PANIC",
+]
+serial_absent = ["ARICODEOS_KERNEL_READY"]

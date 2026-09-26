@@ -58,7 +58,7 @@ escenarios y no queda código de test disperso por `cfg`.
 ## Áreas
 
 Cada fase del roadmap añade su área y sus escenarios. Existentes: `boot`,
-`panic`, `console`. Previstas: `memory`, `paging`, `interrupts`, `scheduler`,
+`panic`, `console`, `interrupts`. Previstas: `memory`, `paging`, `scheduler`,
 `ipc`, `capabilities`, ...
 Una rama `feature/f05-physical-memory` ejecuta `--area memory` mientras
 desarrolla y `--all` antes de integrar. Si el filtro no selecciona ningún
