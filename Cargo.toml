@@ -7,6 +7,7 @@ members = [
     "libs/cmdline",
     "libs/fb-console",
     "libs/x86-cpu",
+    "libs/pmm",
     "boot",
     "kernel",
     "tools/xtask",
@@ -20,6 +21,7 @@ default-members = [
     "libs/cmdline",
     "libs/fb-console",
     "libs/x86-cpu",
+    "libs/pmm",
     "tools/xtask",
 ]
 

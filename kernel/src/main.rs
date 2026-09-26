@@ -10,6 +10,7 @@
 mod arch;
 mod console;
 mod framebuffer;
+mod memory;
 mod qemu;
 mod serial;
 mod sync;
@@ -67,6 +68,8 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
         "cpu: GDT, TSS (IST para #DF) e IDT instaladas (cs={:#x} ds={:#x} tr={:#x})",
         sel.code.0, sel.data.0, sel.tss.0
     );
+
+    memory::pmm::init(info);
 
     run_requested_test(&cmdline);
 
@@ -173,6 +176,7 @@ fn run_requested_test(cmdline: &CmdLine) {
     info!("test provocado: {name}");
     match name {
         "panic" => panic!("test=panic: fallo provocado"),
+        "pmm" => memory::pmm::selftest(),
         // #BP es recuperable: el handler avisa y la ejecución continúa.
         // SAFETY: instrucción de depuración; la IDT ya está instalada.
         "breakpoint" => unsafe { core::arch::asm!("int3", options(nomem, nostack)) },
