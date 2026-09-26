@@ -42,12 +42,18 @@ cargo xtask check          # rustfmt --check + clippy -D warnings
 Añade `--debug` a cualquier comando para usar el perfil de desarrollo. Los
 niveles de test están descritos en [tests/README.md](tests/README.md).
 
+El kernel embebe los programas de usuario de `user/testprogs`, así que se
+compila siempre a través de `cargo xtask` (que los construye primero y exporta
+`ARICODE_USER_BIN`); un `cargo build -p arikernel` directo falla con ese aviso.
+
 ## Estructura
 
 ```text
 boot-protocol/   ABI BootInfo compartido por bootloader y kernel
 libs/            librerías no_std con tests de host: elf, x86-paging, x86-cpu, pmm, heap, sync, sched, handles, cmdline, fb-console
 sdk/abi/         ABI de syscalls compartido entre kernel y espacio de usuario
+sdk/rust/        aricode-sys: wrappers de syscall para programas de usuario
+user/testprogs/  programas de prueba de ring 3 (Rust y ensamblador), ELF embebidos en el kernel
 boot/            AriBoot: cargador UEFI (crate `ariboot`)
 kernel/          AriKernel (crate `arikernel`), ELF64 en la mitad alta
 tools/xtask/     automatización: build, imagen, QEMU, tests, lint

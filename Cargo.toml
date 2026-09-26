@@ -13,6 +13,8 @@ members = [
     "libs/sched",
     "libs/handles",
     "sdk/abi",
+    "sdk/rust",
+    "user/testprogs",
     "boot",
     "kernel",
     "tools/xtask",
@@ -32,6 +34,7 @@ default-members = [
     "libs/sched",
     "libs/handles",
     "sdk/abi",
+    "sdk/rust",
     "tools/xtask",
 ]
 

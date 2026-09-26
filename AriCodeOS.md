@@ -2191,17 +2191,31 @@ sin derechos, escalada y objeto equivocado.
 
 # FASE 13 — Capabilities
 
-### Implementar
+**Estado: completada (2026-09-26).**
 
-- capabilities;
-- rights;
-- transfer;
-- revoke/drop;
-- derivation limitada.
+### Implementado
+
+- capabilities: handles con derechos sobre objetos compartidos por `Arc`
+  (Fase 12);
+- rights: `READ WRITE DUPLICATE TRANSFER WAIT SIGNAL MANAGE`;
+- transfer: `HandleTable::take` (exige `TRANSFER`), consumido por el IPC
+  de la Fase 14;
+- revoke/drop: `object_revoke` (exige `MANAGE`) invalida el objeto para
+  todos sus handles en todos los procesos; `handle_close` descarta uno;
+- derivation limitada: duplicar solo reduce derechos; un objeto revocado no
+  se duplica.
+
+Además, infraestructura adelantada de la Fase 27: `sdk/rust` (`aricode-sys`)
+con los wrappers de syscall y `user/testprogs` con programas de ring 3 en
+Rust y ensamblador enlazados como ELF estáticos, cargados por el kernel con
+`aricode-elf`.
 
 ### Test esencial
 
-Un proceso sin capability no puede acceder al recurso aunque conozca su identificador.
+Un proceso sin capability no puede acceder al recurso aunque conozca su
+identificador: `user.handles` (los identificadores de `object_id` no dan
+acceso; un handle inventado o cerrado falla) y `capabilities.revoke`
+(revocar exige `MANAGE`; tras revocar, ningún duplicado da acceso).
 
 ---
 

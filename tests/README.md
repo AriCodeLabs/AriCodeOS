@@ -53,7 +53,10 @@ serial_absent = ["..."]
 
 Los fallos provocados dentro del kernel se piden por cmdline (`test=panic`),
 nunca con features de compilación: el mismo binario sirve para todos los
-escenarios y no queda código de test disperso por `cfg`.
+escenarios y no queda código de test disperso por `cfg`. Los programas de
+ring 3 (`test=user_<nombre>`) viven en `user/testprogs` como binarios propios
+(Rust sobre `aricode-sys` o ensamblador) y devuelven un código de salida que
+identifica el paso fallido.
 
 ## Áreas
 

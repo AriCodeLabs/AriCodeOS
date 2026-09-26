@@ -22,6 +22,8 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("aricode-sched", None),
     ("aricode-abi", None),
     ("aricode-handles", None),
+    ("aricode-sys", None),
+    ("user-testprogs", Some(KERNEL_TARGET)),
     ("ariboot", Some(UEFI_TARGET)),
     ("arikernel", Some(KERNEL_TARGET)),
     ("xtask", None),
@@ -57,9 +59,33 @@ pub struct Artifacts {
     pub kernel: PathBuf,
 }
 
+/// Compila los programas de usuario de prueba (ELF estáticos en 0x400000) y
+/// devuelve el directorio con los binarios. El kernel los embebe, así que
+/// van siempre antes que él.
+pub fn build_user_programs(release: bool) -> Result<PathBuf> {
+    println!("[xtask] build user-testprogs ({KERNEL_TARGET})");
+    let mut c = cargo();
+    c.args(["build", "-p", "user-testprogs", "--target", KERNEL_TARGET]);
+    if release {
+        c.arg("--release");
+    }
+    // Mismos flags que el kernel (.cargo/config.toml): el modelo de código
+    // `kernel` admite direcciones absolutas de 32 bits con signo, así que
+    // 0x400000 es válido, y coincide con el `core` precompilado (LTO).
+    run(c)?;
+    Ok(root()
+        .join("target")
+        .join(KERNEL_TARGET)
+        .join(profile_dir(release)))
+}
+
+/// Variable que el kernel lee en su `build.rs` para embeber los programas.
+pub const USER_BIN_ENV: &str = "ARICODE_USER_BIN";
+
 /// Compila AriBoot y AriKernel. Un único binario de cada uno sirve para todos
 /// los escenarios: el comportamiento de test se controla por cmdline.
 pub fn build_os(release: bool) -> Result<Artifacts> {
+    let user_bin = build_user_programs(release)?;
     for (pkg, target) in [("ariboot", UEFI_TARGET), ("arikernel", KERNEL_TARGET)] {
         println!("[xtask] build {pkg} ({target})");
         let mut c = cargo();
@@ -67,6 +93,7 @@ pub fn build_os(release: bool) -> Result<Artifacts> {
         if release {
             c.arg("--release");
         }
+        c.env(USER_BIN_ENV, &user_bin);
         run(c)?;
     }
     let t = root().join("target");
@@ -98,12 +125,15 @@ pub fn check() -> Result {
     let mut c = cargo();
     c.args(["fmt", "--all", "--", "--check"]);
     run(c)?;
+    // El kernel embebe los programas de usuario: deben existir para lintarlo.
+    let user_bin = build_user_programs(true)?;
     for (pkg, target) in PACKAGES {
         let mut c = cargo();
         c.args(["clippy", "-p", pkg]);
         if let Some(t) = target {
             c.args(["--target", t]);
         }
+        c.env(USER_BIN_ENV, &user_bin);
         c.args(["--", "-D", "warnings"]);
         run(c)?;
     }
