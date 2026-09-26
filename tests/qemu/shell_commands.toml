@@ -20,6 +20,7 @@ stdin = [
     "net",
     "ping 10.0.2.2",
     "dns aricodeos.test",
+    "http http://10.0.2.2:17010/hola",
     "nada",
     "shutdown",
 ]
@@ -44,6 +45,8 @@ serial_contains = [
     "ip      10.0.2.15",
     "respuesta de 10.0.2.2: seq=4 tiempo=",
     "4 de 4 respuestas",
+    "HTTP 200, 19 bytes",
+    "Hola desde el host",
     "comando desconocido: nada (help)",
     "AriCodeOS: apagando el sistema",
     "ARICODEOS_SHUTDOWN",

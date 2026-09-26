@@ -12,3 +12,5 @@ path = "src/lib.rs"
 aricode-abi = { path = "../abi" }
 aricode-proto = { path = "../proto" }
 aricode-virtio = { path = "../../libs/virtio" }
+aricode-http = { path = "../../libs/http" }
+aricode-net = { path = "../../libs/net" }

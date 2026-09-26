@@ -62,6 +62,7 @@ services/virtio-blk/ driver virtio-blk y servicio de bloques por IPC en ring 3
 services/arifs/  fsd: servicio de ficheros AriFS v0 por IPC en ring 3
 services/virtio-net/ netd: driver virtio-net y pila de red (DHCP, ping, UDP, TCP, DNS) por IPC en ring 3
 libs/net/        pila de red mínima sin alloc con tests de host
+libs/http/       cliente HTTP GET mínimo (Content-Length, chunked) con tests de host
 services/shell/  arish: shell interactivo en ring 3
 libs/arifs/      AriFS v0: sistema de archivos plano con tests de host
 sdk/proto/       protocolos IPC de los servicios

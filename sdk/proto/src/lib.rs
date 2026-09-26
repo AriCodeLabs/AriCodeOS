@@ -327,6 +327,8 @@ pub mod net {
     pub const TEST_TCP_FORWARD_PORT: u16 = 17009;
     /// Puerto TCP en el que escucha el programa de prueba del invitado.
     pub const TEST_TCP_LISTEN_PORT: u16 = 7;
+    /// Puerto del servidor HTTP de pruebas del host.
+    pub const TEST_HTTP_PORT: u16 = 17010;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Op {
