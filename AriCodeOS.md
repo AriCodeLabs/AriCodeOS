@@ -3199,7 +3199,8 @@ kernel conozca ningún protocolo de red.
 
 # 94. AriCodeOS 0.1
 
-**Estado: completada (2026-09-26), tag `v0.1.0`.** Fases 0 a 24: arranque
+**Estado: completada (2026-09-26), tag `v0.1.0`; hotfix `v0.1.1`
+(2026-09-27) con las correcciones de la auditoría HTTP.** Fases 0 a 24: arranque
 UEFI, memoria, procesos en ring 3, scheduler, IPC y capabilities, drivers
 virtio en espacio de usuario, servicio de bloques, AriFS, shell, pila de
 red con TCP y cliente HTTP.
