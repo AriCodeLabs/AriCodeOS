@@ -18,12 +18,14 @@ members = [
     "libs/virtio",
     "libs/gpt",
     "libs/arifs",
+    "libs/net",
     "sdk/abi",
     "sdk/rust",
     "sdk/proto",
     "user/testprogs",
     "services/init",
     "services/virtio-blk",
+    "services/virtio-net",
     "services/arifs",
     "services/shell",
     "boot",
@@ -57,7 +59,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.0.8"
+version = "0.0.9"
 edition = "2021"
 license = "UNLICENSED"
 repository = "https://github.com/lynxcraft/aricodeos"

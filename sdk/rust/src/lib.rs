@@ -6,6 +6,8 @@
 
 pub mod block;
 pub mod fs;
+pub mod net;
+pub mod virtio_pci;
 
 pub use aricode_abi::{self as abi, handle, kind, rights, Error, TIMEOUT_INFINITE};
 use aricode_abi::{decode, nr, receive_result};

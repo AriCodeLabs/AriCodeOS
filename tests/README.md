@@ -41,6 +41,10 @@ timeout_secs = 30
 stdin = ["ls", "shutdown"]      # opcional: líneas que el runner teclea por la serie
 prompt = "ari> "                # cada línea se envía al ver el prompt una vez más (por defecto "ari> ")
 
+[host_tcp]                      # opcional: sonda TCP del host hacia el invitado (hostfwd 127.0.0.1:17009 -> :7)
+marker = "TCP_LISTEN_READY"     # al verlo en la serie, xtask se conecta y envía payload
+payload = "hola desde el host"  # el eco se anota en la captura como "[host] sonda TCP: ..."
+
 [inject]                        # opcional: fallos provocados en la ESP
 truncate_kernel = 3000          # recorta kernel.elf a N bytes
 remove_kernel = true            # elimina kernel.elf
@@ -65,7 +69,7 @@ identifica el paso fallido.
 Cada fase del roadmap añade su área y sus escenarios. Existentes: `boot`,
 `panic`, `console`, `interrupts`, `memory`, `timer`, `threads`, `scheduler`,
 `user`, `capabilities`, `ipc`, `init`, `drivers`, `acpi`, `pci`, `virtio`,
-`storage`, `filesystem`, `shell`.
+`storage`, `filesystem`, `shell`, `network`.
 Una rama `feature/f05-physical-memory` ejecuta `--area memory` mientras
 desarrolla y `--all` antes de integrar. Si el filtro no selecciona ningún
 escenario QEMU, el runner falla y lista las áreas conocidas: un filtro mal

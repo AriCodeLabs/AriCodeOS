@@ -1,0 +1,20 @@
+[package]
+name = "ari-virtio-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Driver virtio-net y servicio de red (ARP, IPv4, ICMP, UDP, DHCP, DNS) de AriCodeOS en espacio de usuario"
+publish = false
+
+[[bin]]
+name = "virtio_net"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+aricode-sys = { path = "../../sdk/rust" }
+aricode-virtio = { path = "../../libs/virtio" }
+aricode-proto = { path = "../../sdk/proto" }
+aricode-net = { path = "../../libs/net" }
+user-testprogs = { path = "../../user/testprogs" }
