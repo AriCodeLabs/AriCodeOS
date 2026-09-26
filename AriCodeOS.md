@@ -2077,16 +2077,23 @@ contra valores conocidos.
 
 # FASE 8 — APIC y timer
 
-### Implementar
+**Estado: completada (2026-09-26).**
 
-- Local APIC;
-- timer;
-- tick;
-- monotonic clock inicial.
+### Implementado
+
+- `libs/sync`: `IrqLock` con política de interrupciones; sustituye a la
+  celda de una sola CPU en todo el estado global del kernel;
+- PIC 8259 remapeado y enmascarado; Local APIC habilitado (vector espurio
+  0xFF) y mapeado sin caché;
+- timer del LAPIC calibrado con el PIT y periódico a 100 Hz (vector 0x20);
+- tick y reloj monótono (`time::{ticks, uptime_ms, sleep_ms}`);
+- interrupciones externas habilitadas al final del arranque.
 
 ### Criterio
 
-Interrupciones periódicas estables durante ejecución prolongada.
+Interrupciones periódicas estables: `timer.init` (smoke) y `timer.selftest`
+(5 ticks en 50 ms medidos por el PIT, `sleep_ms` exacto, cero espurias).
+La ejecución prolongada se cubrirá con el scheduler (Fase 10).
 
 ---
 
@@ -3411,7 +3418,7 @@ aricodeos/
 No necesitamos crear toda la estructura futura desde el primer día.
 
 Este árbol es el que existe en el repositorio desde M0, ampliado con
-`libs/{elf,x86-paging,x86-cpu,pmm,heap,cmdline,fb-console}` (lógica `no_std` con tests de host),
+`libs/{elf,x86-paging,x86-cpu,pmm,heap,sync,cmdline,fb-console}` (lógica `no_std` con tests de host),
 `tests/qemu/` (escenarios) y `docs/decisions/0001..0007`.
 
 ---

@@ -9,6 +9,7 @@ members = [
     "libs/x86-cpu",
     "libs/pmm",
     "libs/heap",
+    "libs/sync",
     "boot",
     "kernel",
     "tools/xtask",
@@ -24,6 +25,7 @@ default-members = [
     "libs/x86-cpu",
     "libs/pmm",
     "libs/heap",
+    "libs/sync",
     "tools/xtask",
 ]
 

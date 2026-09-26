@@ -1,24 +1,10 @@
 //! Salida por puerto serie COM1 (16550). Única consola fiable en M0 y la que
 //! captura el test runner de QEMU.
 
-use core::arch::asm;
+use crate::arch::x86_64::port::{inb, outb};
 use core::fmt;
 
 const COM1: u16 = 0x3F8;
-
-#[inline]
-unsafe fn outb(port: u16, value: u8) {
-    // SAFETY: instrucción de E/S; el llamador garantiza que el puerto es COM1.
-    asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags));
-}
-
-#[inline]
-unsafe fn inb(port: u16) -> u8 {
-    let value: u8;
-    // SAFETY: ídem `outb`.
-    asm!("in al, dx", out("al") value, in("dx") port, options(nomem, nostack, preserves_flags));
-    value
-}
 
 /// Puerto serie COM1. Tipo sin estado: los registros del UART son el estado.
 pub struct Serial;

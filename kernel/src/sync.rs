@@ -1,26 +1,50 @@
-//! Primitivas de sincronización del kernel.
+//! Sincronización del kernel: `IrqLock` de `aricode-sync` con la política de
+//! interrupciones de x86-64 (guardar `RFLAGS.IF`, `cli`, y restaurar).
 //!
-//! Hasta la Fase 9 (threads) hay una sola CPU y las interrupciones externas
-//! están deshabilitadas: `SingleCpu` expresa ese régimen. Se sustituirá por
-//! un spinlock consciente de interrupciones cuando deje de ser cierto.
+//! Regla: ningún lock se mantiene mientras se llama a otro subsistema que
+//! pueda querer el mismo lock; el orden de adquisición es
+//! heap -> pmm -> vmm -> console y nunca al revés.
 
-use core::cell::UnsafeCell;
+use aricode_sync::IrqPolicy;
+use core::arch::asm;
 
-/// Celda global mutable para un régimen de una sola CPU sin concurrencia.
-pub struct SingleCpu<T>(UnsafeCell<T>);
+pub struct KernelIrq;
 
-// SAFETY: el acceso es estrictamente secuencial mientras solo exista una CPU y
-// no haya interrupciones habilitadas; los llamadores de `get` no deben crear
-// dos `&mut` vivos a la vez (documentado en cada uso).
-unsafe impl<T> Sync for SingleCpu<T> {}
+impl IrqPolicy for KernelIrq {
+    type State = bool;
 
-impl<T> SingleCpu<T> {
-    pub const fn new(value: T) -> Self {
-        Self(UnsafeCell::new(value))
+    fn save_and_disable() -> bool {
+        let rflags: u64;
+        // SAFETY: leer RFLAGS y deshabilitar interrupciones no toca memoria.
+        unsafe {
+            asm!("pushfq", "pop {}", "cli", out(reg) rflags, options(nomem, preserves_flags));
+        }
+        rflags & (1 << 9) != 0
     }
 
-    /// Puntero al contenido. El llamador garantiza exclusividad.
-    pub fn get(&self) -> *mut T {
-        self.0.get()
+    fn restore(was_enabled: bool) {
+        if was_enabled {
+            // SAFETY: rehabilitar interrupciones que estaban habilitadas al entrar.
+            unsafe { asm!("sti", options(nomem, nostack)) };
+        }
     }
+}
+
+pub type IrqLock<T> = aricode_sync::IrqLock<T, KernelIrq>;
+
+/// `true` si las interrupciones están habilitadas en esta CPU.
+pub fn interrupts_enabled() -> bool {
+    let rflags: u64;
+    // SAFETY: solo lee RFLAGS.
+    unsafe { asm!("pushfq", "pop {}", out(reg) rflags, options(nomem, preserves_flags)) };
+    rflags & (1 << 9) != 0
+}
+
+/// Habilita las interrupciones externas. Solo tras instalar IDT y APIC.
+///
+/// # Safety
+///
+/// Todo handler alcanzable debe estar instalado y el estado global protegido.
+pub unsafe fn enable_interrupts() {
+    asm!("sti", options(nomem, nostack));
 }

@@ -1,5 +1,6 @@
-//! Manejo de excepciones: diagnóstico detallado (sección 17 del documento
-//! maestro) y pánico, salvo #BP, que es recuperable y sirve de prueba.
+//! Despacho de vectores: excepciones (0..31) con diagnóstico detallado
+//! (sección 17 del documento maestro) y pánico, salvo #BP, que es recuperable
+//! y sirve de prueba; el resto van al APIC.
 //!
 //! Todo el volcado va solo por serie (`serial_println!`): una excepción puede
 //! ocurrir con la consola de framebuffer a medio escribir.
@@ -15,11 +16,7 @@ pub fn handle(frame: &mut InterruptFrame) {
             log::warn!("#BP breakpoint en rip={:#x}, continuando", frame.rip);
         }
         0..=31 => fatal(frame),
-        _ => {
-            // Sin APIC ni IRQs habilitadas todavía; cualquier vector externo
-            // es inesperado pero no fatal.
-            log::warn!("interrupcion inesperada, vector {vector}");
-        }
+        v => super::apic::handle_interrupt(v),
     }
 }
 
