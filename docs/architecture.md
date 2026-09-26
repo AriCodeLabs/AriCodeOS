@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.0.9 en curso (0.0.8 + Fase 22)
+## Estado: 0.0.9 (0.0.8 + Fases 22 y 23)
 
 ```text
 OVMF (UEFI)
@@ -51,7 +51,7 @@ libs/acpi/           aricode-acpi: RSDP, XSDT/RSDT, MADT (LAPIC, I/O APIC, overr
 libs/pci/            aricode-pci: direccionamiento ECAM, cabecera de configuración, BARs, capabilities, clases (no_std + alloc, tests de host)
 libs/virtio/         aricode-virtio: virtqueue split sobre DMA, estructuras virtio-pci modernas, peticiones virtio-blk (no_std, tests de host)
 libs/gpt/            aricode-gpt: CRC32, cabecera y entradas GPT, escritor para el disco de pruebas (no_std, tests de host)
-libs/net/            aricode-net: Ethernet, ARP, IPv4, ICMP, UDP, cliente DHCP y DNS sin alloc (no_std, tests de host)
+libs/net/            aricode-net: Ethernet, ARP, IPv4, ICMP, UDP, TCP, cliente DHCP y DNS sin alloc (no_std, tests de host)
 libs/arifs/          aricode-arifs: AriFS v0, directorio plano con tabla de ficheros de capacidad fija sobre `BlockDevice` (no_std, tests de host)
 sdk/proto/           aricode-proto: protocolos IPC versionados de los servicios (bloques v1, ficheros v1, red v1) (no_std, tests de host)
 sdk/abi/             aricode-abi: números de syscall, errores, handles iniciales, derechos y tipos de objeto (no_std, tests de host)
@@ -59,7 +59,7 @@ sdk/rust/            aricode-sys: wrappers de syscall (no_std, sin alloc), clien
 user/testprogs/      programas de prueba de ring 3 (Rust y ensamblador) enlazados como ELF estáticos en 0x400000
 services/init/       AriInit: primer proceso; recibe SPAWNER y la raíz PCI, lanza/supervisa servicios y reclama dispositivos para sus drivers
 services/virtio-blk/ driver virtio-blk en ring 3 y servicio de bloques por IPC (interfaz moderna, cola 0 en DMA, MSI-X, GPT)
-services/virtio-net/ netd: driver virtio-net y pila de red (DHCP, ARP, ICMP, UDP, DNS) por IPC en ring 3
+services/virtio-net/ netd: driver virtio-net y pila de red (DHCP, ARP, ICMP, UDP, TCP, DNS) por IPC en ring 3
 services/arifs/      fsd: servicio de ficheros AriFS en ring 3 sobre el servicio de bloques
 services/shell/      arish: shell interactivo en ring 3 (help, ps, mem, ls, cat, devices, services, uptime, reboot, shutdown, exit)
 boot/                ariboot: integra lo anterior con la crate `uefi`
@@ -475,7 +475,7 @@ segundo brevemente para añadir la región.
 - El runner añade `virtio-blk-pci` moderno con `build/disk.img` (4 MiB, GPT
   con la partición `ARI0` formateada como AriFS; desde el LBA 4096 cada
   sector lleva `ARIDISK\0` y su número), regenerado en cada arranque.
-- Los programas de usuario tienen un heap estático de 64 KiB
+- Los programas de usuario tienen un heap estático de 256 KiB
   (`aricode-heap` tras un spinlock) porque la librería PCI usa `alloc`.
 
 ## Servicio de bloques (Fase 19)
@@ -587,10 +587,39 @@ segundo brevemente para añadir la región.
   `netdev`, QEMU deja de añadir la e1000 por defecto: el disco pasa a
   `00:02.0` y la red a `00:03.0` (7 funciones).
 
+## TCP (Fase 23)
+
+- `aricode-net::tcp::Connection` es una máquina de estados pura: `poll`
+  produce como mucho un segmento por llamada (retransmisión vencida, SYN,
+  datos nuevos dentro de la ventana del otro extremo, FIN, ACK puro) y
+  `on_segment` consume uno; el llamador transmite y cronometra. Buffers
+  fijos de 4 KiB por sentido, retransmisión desde `snd_una` con RTO
+  exponencial (500 ms a 8 s, 6 reintentos → `CloseReason::Timeout`),
+  TIME-WAIT de 2 s, RST recibido o `abort` → `CloseReason::Reset`. Los
+  tests de host conectan dos `Connection` por un cable que descarta
+  segmentos elegidos o al azar.
+- En `netd` cada socket TCP (`Box`, 8 KiB de buffers) vive en un slot de
+  la tabla; los segmentos se demultiplexan por cuádrupla y un SYN a un
+  puerto en escucha crea una conexión pasiva que `TcpAccept` entrega al
+  establecerse. `TcpConnect`/`TcpAccept`/`TcpRecv` quedan pendientes con
+  plazo; `TcpSend` encola lo que cabe y devuelve la cuenta (el cliente
+  reintenta con `tcp_send_all`). Un slot se libera cuando el usuario ha
+  cerrado y la conexión terminó.
+- QEMU redirige `127.0.0.1:17009` al puerto 7 del invitado (`hostfwd`) y
+  el respondedor de xtask escucha eco TCP en `127.0.0.1:17008`. Un
+  escenario puede declarar `[host_tcp] marker/payload`: al ver el marcador
+  en la serie, xtask se conecta al puerto redirigido, envía la carga y
+  añade a la captura una línea `[host] sonda TCP: ...` que `serial_contains`
+  puede exigir.
+- El heap estático de los programas de usuario pasa a 256 KiB (los
+  sockets TCP de netd no caben en la pila de 64 KiB).
+
 ## Deuda conocida
 
-- `netd` no tiene TCP (Fase 23), ni renovación de la concesión DHCP, ni
-  fragmentación IPv4; un socket UDP guarda un solo datagrama sin recoger.
+- `netd` no renueva la concesión DHCP ni fragmenta IPv4; un socket UDP
+  guarda un solo datagrama sin recoger; TCP reenvía desde `snd_una` sin
+  SACK ni estimación de RTT. Un cliente que envía a un servicio muerto se
+  queda bloqueado en la cola del endpoint (no hay aviso de cierre).
 - `arish` no tiene historial, edición de línea ni redirecciones; las
   variables de entorno y el lanzamiento de programas llegan con el servicio
   de procesos.

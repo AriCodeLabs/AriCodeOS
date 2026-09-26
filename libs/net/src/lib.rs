@@ -12,6 +12,7 @@ pub mod dns;
 pub mod eth;
 pub mod icmp;
 pub mod ipv4;
+pub mod tcp;
 pub mod udp;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]

@@ -257,6 +257,19 @@ fn main(arg: u64) -> u64 {
                     return 18;
                 }
             }
+            match run_block_client("tcp_client", net_service) {
+                Ok(0) => say(b"servicio TCP ok"),
+                Ok(code) => {
+                    sys::print(b"AriInit: tcp_client salio con ");
+                    sys::print(user_testprogs::fmt_u64(code, &mut buf));
+                    sys::print(b"\n");
+                    return 19;
+                }
+                Err(e) => {
+                    user_testprogs::print_error(b"AriInit: tcp_client", e);
+                    return 19;
+                }
+            }
         }
         None => say(b"sin virtio-net"),
     }

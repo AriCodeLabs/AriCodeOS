@@ -321,6 +321,12 @@ pub mod net {
     /// Puerto UDP del respondedor de pruebas del host (eco y DNS), alcanzable
     /// desde el invitado en la dirección del anfitrión virtual (10.0.2.2).
     pub const TEST_RESPONDER_PORT: u16 = 17007;
+    /// Puerto TCP del servidor de eco de pruebas del host.
+    pub const TEST_TCP_ECHO_PORT: u16 = 17008;
+    /// Puerto del host redirigido (`hostfwd`) al puerto TCP 7 del invitado.
+    pub const TEST_TCP_FORWARD_PORT: u16 = 17009;
+    /// Puerto TCP en el que escucha el programa de prueba del invitado.
+    pub const TEST_TCP_LISTEN_PORT: u16 = 7;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Op {
@@ -339,6 +345,20 @@ pub mod net {
         UdpClose = 6,
         /// Resuelve `name` (registro A) en `addr:port` (0 = servidor DHCP).
         Dns = 7,
+        /// Conecta con `addr:port`; espera hasta `timeout_ms`; `value` = socket.
+        TcpConnect = 8,
+        /// Escucha en `port`; `value` = socket de escucha.
+        TcpListen = 9,
+        /// Espera hasta `timeout_ms` una conexión en `sock`; `value` = socket
+        /// nuevo, remitente en `Reply::data`/`Reply::port`.
+        TcpAccept = 10,
+        /// Encola `len` bytes del buffer; `value` = aceptados (0 si está lleno).
+        TcpSend = 11,
+        /// Espera hasta `timeout_ms` datos en `sock`; `value` = bytes (0 = el
+        /// otro extremo cerró).
+        TcpRecv = 12,
+        /// Cierre ordenado de `sock`.
+        TcpClose = 13,
     }
 
     /// Petición (64 bytes).
@@ -411,6 +431,12 @@ pub mod net {
                 5 => Op::UdpRecv,
                 6 => Op::UdpClose,
                 7 => Op::Dns,
+                8 => Op::TcpConnect,
+                9 => Op::TcpListen,
+                10 => Op::TcpAccept,
+                11 => Op::TcpSend,
+                12 => Op::TcpRecv,
+                13 => Op::TcpClose,
                 _ => return None,
             };
             let mut addr = [0u8; 4];
@@ -447,6 +473,8 @@ pub mod net {
         InUse = 7,
         /// El servidor DNS respondió sin dirección.
         NotFound = 8,
+        /// La conexión fue rechazada o reiniciada por el otro extremo.
+        Reset = 9,
     }
 
     /// Respuesta (48 bytes): estado, valor, puerto y datos (direcciones).
@@ -516,6 +544,7 @@ pub mod net {
                 6 => Status::BadSock,
                 7 => Status::InUse,
                 8 => Status::NotFound,
+                9 => Status::Reset,
                 _ => return None,
             };
             let mut data = [0u8; 24];
@@ -599,6 +628,14 @@ mod tests {
                 .unwrap()
                 .status,
             Status::InUse
+        );
+        let t = Request::new(Op::TcpAccept);
+        assert_eq!(Request::decode(&t.encode()).unwrap().op, Op::TcpAccept);
+        assert_eq!(
+            Reply::decode(&Reply::status(Status::Reset).encode())
+                .unwrap()
+                .status,
+            Status::Reset
         );
     }
 

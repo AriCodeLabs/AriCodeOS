@@ -2458,15 +2458,28 @@ devices   services  uptime    reboot    shutdown  exit
 
 # FASE 23 — TCP
 
-Implementar TCP en servicio de usuario.
+**Estado: completada (2026-09-26).**
 
-Tests:
+TCP vive en `netd` (servicio de usuario), con la máquina de estados en
+`libs/net::tcp` y sin `alloc`: conexión con buffers fijos de 4 KiB,
+apertura activa y pasiva, MSS 1400, retransmisión por temporizador
+exponencial (500 ms → 8 s, 6 reintentos), cierre ordenado con TIME-WAIT y
+RST. `NetServiceProtocol v1` añade `TcpConnect`, `TcpListen`, `TcpAccept`,
+`TcpSend`, `TcpRecv` y `TcpClose`; las esperas quedan pendientes con plazo.
 
-- handshake;
-- retransmisión;
-- cierre;
-- pérdida simulada;
-- múltiples conexiones.
+Tests (todos en `libs/net`, sobre un cable simulado con pérdidas
+controladas, más `network.tcp` en QEMU contra un servidor de eco del host
+y una sonda que se conecta al invitado por `hostfwd`):
+
+- handshake: `handshake_data_and_close`;
+- retransmisión: `retransmits_lost_syn_and_data`, `gives_up_after_too_many_retries`;
+- cierre: `handshake_data_and_close` (FIN en ambos sentidos, TIME-WAIT), `reset_closes_immediately`;
+- pérdida simulada: `random_loss_keeps_stream_in_order` (25 % de pérdidas, 10 000 bytes en orden);
+- múltiples conexiones: `multiple_independent_connections` y dos conexiones simultáneas en `network.tcp`.
+
+Pendiente: ventana deslizante con varios segmentos en vuelo retransmitidos
+individualmente (hoy se reenvía desde `snd_una`), opciones de escala de
+ventana y SACK, y estimación de RTT.
 
 ---
 
@@ -3164,14 +3177,19 @@ máquina sin que ningún driver viva en el kernel.
 
 # 93. AriCodeOS 0.0.9
 
-**Estado: en curso.**
+**Estado: completada (2026-09-26), tag `v0.0.9`.**
 
-Añadir:
+Añadido:
 
-- virtio-net (Fase 22, hecho);
-- IP (Fase 22, hecho: IPv4, ARP, ICMP, DHCP, DNS);
-- UDP (Fase 22, hecho);
-- TCP básico (Fase 23).
+- virtio-net (Fase 22): driver en ring 3 sobre el transporte virtio común;
+- IP (Fase 22): IPv4, ARP, ICMP, DHCP, DNS;
+- UDP (Fase 22);
+- TCP básico (Fase 23): conexiones activas y pasivas con retransmisión y
+  cierre ordenado, todo en `netd`.
+
+Con esta versión el sistema obtiene dirección por DHCP, responde y hace
+ping, intercambia UDP y TCP con el host y resuelve nombres, sin que el
+kernel conozca ningún protocolo de red.
 
 ---
 

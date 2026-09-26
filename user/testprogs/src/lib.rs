@@ -8,7 +8,7 @@ extern crate alloc;
 
 pub use aricode_sys as sys;
 
-/// Heap de los programas de usuario: 64 KiB estáticos servidos por
+/// Heap de los programas de usuario: 256 KiB estáticos servidos por
 /// `aricode-heap` (el mismo allocator que el kernel) tras un spinlock. Sin
 /// crecimiento: los programas de prueba y drivers usan poca memoria dinámica.
 mod user_heap {
@@ -17,7 +17,7 @@ mod user_heap {
     use core::alloc::{GlobalAlloc, Layout};
     use core::cell::UnsafeCell;
 
-    const SIZE: usize = 64 * 1024;
+    const SIZE: usize = 256 * 1024;
 
     #[repr(align(4096))]
     struct Arena(UnsafeCell<[u8; SIZE]>);

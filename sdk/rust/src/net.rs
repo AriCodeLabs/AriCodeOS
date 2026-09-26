@@ -129,6 +129,80 @@ impl NetClient {
         })
     }
 
+    pub fn tcp_connect(&self, addr: [u8; 4], port: u16, timeout_ms: u32) -> Result<u16, NetError> {
+        let mut req = Request::new(Op::TcpConnect);
+        req.addr = addr;
+        req.port = port;
+        req.timeout_ms = timeout_ms;
+        self.call(req, false).map(|r| r.value as u16)
+    }
+
+    pub fn tcp_listen(&self, port: u16) -> Result<u16, NetError> {
+        let mut req = Request::new(Op::TcpListen);
+        req.port = port;
+        self.call(req, false).map(|r| r.value as u16)
+    }
+
+    /// Acepta una conexión: devuelve el socket nuevo y el remitente.
+    pub fn tcp_accept(&self, sock: u16, timeout_ms: u32) -> Result<(u16, [u8; 4], u16), NetError> {
+        let mut req = Request::new(Op::TcpAccept);
+        req.sock = sock;
+        req.timeout_ms = timeout_ms;
+        self.call(req, false)
+            .map(|r| (r.value as u16, r.addr(), r.port))
+    }
+
+    /// Encola datos; devuelve los aceptados (puede ser menos que `data`).
+    pub fn tcp_send(&mut self, sock: u16, data: &[u8]) -> Result<usize, NetError> {
+        let len = data.len().min(MAX_DATAGRAM as usize);
+        self.buffer()[..len].copy_from_slice(&data[..len]);
+        let mut req = Request::new(Op::TcpSend);
+        req.sock = sock;
+        req.len = len as u16;
+        self.call(req, true).map(|r| r.value as usize)
+    }
+
+    /// Envía todo `data`, esperando cuando el buffer está lleno.
+    pub fn tcp_send_all(&mut self, sock: u16, data: &[u8]) -> Result<(), NetError> {
+        let mut done = 0;
+        let mut idle = 0;
+        while done < data.len() {
+            let n = self.tcp_send(sock, &data[done..])?;
+            done += n;
+            if n == 0 {
+                idle += 1;
+                if idle > 500 {
+                    return Err(NetError::Status(Status::Timeout));
+                }
+                sys::thread_sleep(10);
+            }
+        }
+        Ok(())
+    }
+
+    /// Recibe datos; `Ok(0)` significa que el otro extremo cerró.
+    pub fn tcp_recv(
+        &mut self,
+        sock: u16,
+        timeout_ms: u32,
+        out: &mut [u8],
+    ) -> Result<usize, NetError> {
+        let mut req = Request::new(Op::TcpRecv);
+        req.sock = sock;
+        req.timeout_ms = timeout_ms;
+        req.len = out.len().min(MAX_DATAGRAM as usize) as u16;
+        let r = self.call(req, true)?;
+        let len = (r.value as usize).min(out.len());
+        out[..len].copy_from_slice(&self.buffer()[..len]);
+        Ok(len)
+    }
+
+    pub fn tcp_close(&self, sock: u16) -> Result<(), NetError> {
+        let mut req = Request::new(Op::TcpClose);
+        req.sock = sock;
+        self.call(req, false).map(|_| ())
+    }
+
     /// Resuelve un nombre; `server` = `Some((ip, puerto))` o `None` para el
     /// servidor DNS de la configuración.
     pub fn resolve(
