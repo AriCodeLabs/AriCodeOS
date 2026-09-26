@@ -13,5 +13,8 @@ bench = false
 
 [dependencies]
 boot-protocol = { path = "../boot-protocol" }
+aricode-elf = { path = "../libs/elf" }
+aricode-x86-paging = { path = "../libs/x86-paging" }
+aricode-cmdline = { path = "../libs/cmdline" }
 uefi = { version = "0.41", default-features = false, features = ["alloc", "global_allocator", "panic_handler", "logger"] }
 log = { version = "0.4", default-features = false }

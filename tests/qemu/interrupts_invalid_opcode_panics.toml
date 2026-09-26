@@ -1,0 +1,10 @@
+name = "interrupts.invalid_opcode_panics"
+description = "test=invalid_opcode -> #UD con volcado y panico"
+level = "full"
+areas = ["interrupts"]
+cmdline = "qemu_exit test=invalid_opcode"
+
+[expect]
+exit = 35
+serial_contains = ["EXCEPTION #UD (6) Invalid Opcode", "RIP: 0xffffffff8", "ARICODEOS KERNEL PANIC", "Reason: excepcion #UD (6)"]
+serial_absent = ["ARICODEOS_KERNEL_READY"]

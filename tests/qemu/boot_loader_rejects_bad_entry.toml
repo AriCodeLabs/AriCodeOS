@@ -1,0 +1,16 @@
+# Fault injection: e_entry = 0 (auditoria 2026-09-26, hallazgo 3). AriBoot debe
+# rechazar el ELF antes de ExitBootServices en vez de saltar a una direccion
+# invalida y provocar una excepcion del firmware.
+name = "boot.loader_rejects_bad_entry"
+description = "e_entry=0 -> AriBoot rechaza el ELF sin saltar"
+level = "full"
+areas = ["boot"]
+cmdline = "qemu_exit"
+
+[inject]
+patch_entry = 0
+
+[expect]
+exit = 35
+serial_contains = ["punto de entrada fuera de un segmento ejecutable"]
+serial_absent = ["ExitBootServices -> AriKernel", "ARICODEOS_KERNEL_READY"]

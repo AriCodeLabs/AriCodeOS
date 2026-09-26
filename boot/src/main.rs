@@ -9,17 +9,20 @@
 
 extern crate alloc;
 
-mod elf;
-mod paging;
+mod qemu;
 
 use alloc::vec::Vec;
+use aricode_cmdline::{keys, CmdLine};
+use aricode_elf as elf;
+use aricode_x86_paging::{
+    self as paging, PagePool, PageTables, GLOBAL, NO_EXECUTE, PAGE_SIZE, WRITABLE,
+};
 use boot_protocol::{
     BootInfo, FramebufferInfo, MemoryMap, PixelFormat, BOOT_PROTOCOL_MAGIC, BOOT_PROTOCOL_VERSION,
     KERNEL_VIRT_BASE, MEMORY_TYPE_KERNEL,
 };
 use core::ptr::NonNull;
 use log::{error, info, warn};
-use paging::{PagePool, PageTables, GLOBAL, NO_EXECUTE, PAGE_SIZE, WRITABLE};
 use uefi::boot::{self, AllocateType, MemoryType};
 use uefi::mem::memory_map::MemoryMap as _;
 use uefi::proto::console::gop::{self, GraphicsOutput};
@@ -38,17 +41,25 @@ fn main() -> Status {
         env!("CARGO_PKG_VERSION")
     );
 
-    match run() {
+    // La cmdline es opcional; se copia a memoria de kernel para que sobreviva
+    // a ExitBootServices y la vea AriKernel.
+    let cmdline_bytes = read_file(cstr16!("\\aricodeos\\cmdline.txt")).unwrap_or_default();
+    let qemu_exit = CmdLine::from_bytes(&cmdline_bytes).has(keys::QEMU_EXIT);
+
+    match run(&cmdline_bytes) {
         Ok(never) => match never {},
         Err(e) => {
             error!("AriBoot: fallo irrecuperable: {e}");
+            if qemu_exit {
+                qemu::exit(qemu::ExitCode::Failed);
+            }
             boot::stall(core::time::Duration::from_secs(10));
             Status::LOAD_ERROR
         }
     }
 }
 
-fn run() -> Result<core::convert::Infallible, &'static str> {
+fn run(cmdline_bytes: &[u8]) -> Result<core::convert::Infallible, &'static str> {
     // 1. Framebuffer GOP (opcional: sin GOP seguimos solo con serie).
     let framebuffer = framebuffer_info();
     if framebuffer.address != 0 {
@@ -72,7 +83,18 @@ fn run() -> Result<core::convert::Infallible, &'static str> {
     let kernel_data = read_file(cstr16!("\\aricodeos\\kernel.elf"))
         .map_err(|_| "no se pudo leer \\aricodeos\\kernel.elf")?;
     info!("kernel.elf: {} bytes", kernel_data.len());
-    let elf = elf::Elf::parse(&kernel_data).map_err(|_| "kernel.elf: ELF64 invalido")?;
+    let elf = elf::Elf::parse(&kernel_data).map_err(|e| {
+        error!("kernel.elf: {e:?}");
+        match e {
+            elf::ElfError::EntryOutsideText => {
+                "kernel.elf: punto de entrada fuera de un segmento ejecutable"
+            }
+            elf::ElfError::AddressOverflow | elf::ElfError::OverlappingSegments => {
+                "kernel.elf: segmentos invalidos"
+            }
+            _ => "kernel.elf: ELF64 invalido",
+        }
+    })?;
     let (virt_lo, virt_hi) = elf.virt_range();
     if virt_lo != KERNEL_VIRT_BASE {
         error!("kernel enlazado en {virt_lo:#x}, se esperaba {KERNEL_VIRT_BASE:#x}");
@@ -86,9 +108,15 @@ fn run() -> Result<core::convert::Infallible, &'static str> {
     // SAFETY: región recién reservada de `kernel_pages` páginas.
     unsafe { core::ptr::write_bytes(kernel_phys.as_ptr(), 0, kernel_pages * PAGE_SIZE as usize) };
     for seg in &elf.segments {
-        let dst = kernel_phys.as_ptr() as u64 + (seg.vaddr - virt_lo);
         let src = elf.segment_bytes(seg);
-        // SAFETY: dst dentro de la región reservada (virt_range cubre todos los segmentos).
+        let offset = seg.vaddr - virt_lo;
+        // Defensa en profundidad: el parser ya garantiza que [vaddr, end) cabe
+        // en virt_range; se vuelve a comprobar contra la reserva real.
+        if offset + src.len() as u64 > kernel_size {
+            return Err("kernel.elf: segmento fuera de la reserva");
+        }
+        let dst = kernel_phys.as_ptr() as u64 + offset;
+        // SAFETY: `dst..dst+len` está dentro de las `kernel_pages` reservadas (comprobado arriba).
         unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst as *mut u8, src.len()) };
     }
     let kernel_phys_base = kernel_phys.as_ptr() as u64;
@@ -104,6 +132,13 @@ fn run() -> Result<core::convert::Infallible, &'static str> {
     let stack_base = stack.as_ptr() as u64;
     let stack_top = stack_base + KERNEL_STACK_PAGES as u64 * PAGE_SIZE;
     let boot_info_page = alloc_pages(1, "bootinfo")?;
+    let (cmdline_address, cmdline_size) = copy_cmdline(cmdline_bytes)?;
+    if cmdline_size != 0 {
+        info!(
+            "cmdline: {}",
+            CmdLine::from_bytes(cmdline_bytes).raw().trim()
+        );
+    }
 
     // 6. Extensión física a identidad-mapear: mapa actual + framebuffer.
     let snapshot = boot::memory_map(MemoryType::LOADER_DATA).map_err(|_| "memory map")?;
@@ -125,8 +160,9 @@ fn run() -> Result<core::convert::Infallible, &'static str> {
     // 7. Tablas de páginas.
     let pool_pages = paging::pool_size_for(phys_limit, kernel_pages as u64);
     let pool_mem = alloc_pages(pool_pages, "page tables")?;
-    let pool_base = pool_mem.as_ptr() as u64;
-    let mut pool = PagePool::new(pool_mem, pool_pages);
+    // SAFETY: `pool_mem` son `pool_pages` páginas recién reservadas por UEFI,
+    // alineadas, identidad-mapeadas y de uso exclusivo hasta que el kernel las herede.
+    let mut pool = unsafe { PagePool::new(pool_mem, pool_pages) };
     let mut tables = PageTables::new(&mut pool);
     tables.identity_map_2m(&mut pool, phys_limit);
     for seg in &elf.segments {
@@ -137,8 +173,7 @@ fn run() -> Result<core::convert::Infallible, &'static str> {
         if !seg.executable() {
             flags |= NO_EXECUTE;
         }
-        let start = seg.vaddr & !(PAGE_SIZE - 1);
-        let end = (seg.vaddr + seg.memsz + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let (start, end) = seg.page_range();
         let mut v = start;
         while v < end {
             tables.map_4k(&mut pool, v, kernel_phys_base + (v - virt_lo), flags);
@@ -148,7 +183,7 @@ fn run() -> Result<core::convert::Infallible, &'static str> {
     info!(
         "paginas: identidad hasta {} MiB, {} tablas usadas de {}",
         phys_limit >> 20,
-        pool.used_pages(pool_base),
+        pool.used_pages(),
         pool_pages
     );
 
@@ -172,6 +207,8 @@ fn run() -> Result<core::convert::Infallible, &'static str> {
         page_table_root: tables.root_phys(),
         initrd_address: 0,
         initrd_size: 0,
+        cmdline_address,
+        cmdline_size,
     };
 
     info!("ExitBootServices -> AriKernel");
@@ -217,6 +254,18 @@ fn alloc_pages(pages: usize, what: &'static str) -> Result<NonNull<u8>, &'static
         error!("allocate_pages({pages}) para {what}: {e:?}");
         "sin memoria"
     })
+}
+
+/// Copia la cmdline a páginas de tipo kernel. Devuelve (dirección, tamaño).
+fn copy_cmdline(bytes: &[u8]) -> Result<(u64, u64), &'static str> {
+    if bytes.is_empty() {
+        return Ok((0, 0));
+    }
+    let pages = bytes.len().div_ceil(PAGE_SIZE as usize);
+    let dst = alloc_pages(pages, "cmdline")?;
+    // SAFETY: `dst` tiene `pages * 4096 >= bytes.len()` bytes recién reservados.
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.as_ptr(), bytes.len()) };
+    Ok((dst.as_ptr() as u64, bytes.len() as u64))
 }
 
 fn read_file(path: &CStr16) -> uefi::Result<Vec<u8>> {

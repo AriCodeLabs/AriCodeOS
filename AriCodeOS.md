@@ -2,7 +2,7 @@
 
 ## Documento maestro de arquitectura, especificaciones técnicas y plan de desarrollo
 
-**Estado:** M0 First Boot completado (2026-09-26)  
+**Estado:** 0.0.2 completada (2026-09-26): boot, consola, GDT/IDT  
 **Versión del documento:** 0.2  
 **Nombre del sistema:** AriCodeOS  
 **Arquitectura inicial:** x86-64  
@@ -1562,48 +1562,54 @@ structured logging service
 
 # 55. Tests
 
-Los tests son parte estructural del proyecto.
+Los tests son parte estructural del proyecto y viven en el repositorio.
 
-Estructura conceptual:
+Estructura implementada (ver `tests/README.md`):
 
 ```text
-tests/
-├── boot/
-├── memory/
-├── paging/
-├── allocator/
-├── interrupts/
-├── scheduler/
-├── ipc/
-├── capabilities/
-├── drivers/
-├── filesystem/
-├── networking/
-└── security/
+libs/*/src/lib.rs          #[cfg(test)]  unitarios de host (elf, x86-paging, cmdline)
+boot-protocol/src/lib.rs   #[cfg(test)]  clasificación de memoria, iterador, cmdline
+tools/xtask/src/*.rs       #[cfg(test)]  validez de los escenarios y utilidades
+tests/qemu/*.toml                        escenarios de integración en QEMU
 ```
+
+Cada fase añade su área (`boot`, `panic`, `memory`, `paging`, `interrupts`,
+`scheduler`, `ipc`, `capabilities`, `drivers`, `filesystem`, `networking`,
+`security`) como nuevos escenarios TOML y nuevos tests unitarios, en la misma
+rama que el código.
 
 ---
 
-# 56. Test runner en QEMU
-
-Objetivo:
+# 56. Test runner en QEMU y niveles
 
 ```bash
-cargo xtask test
+cargo xtask test                 # unit + smoke      (por defecto; mínimo hacia develop)
+cargo xtask test --level unit    # solo host, segundos
+cargo xtask test --all           # unit + full       (obligatorio hacia main)
+cargo xtask test --area boot     # solo los escenarios QEMU de un área
+cargo xtask test --list          # ver escenarios
 ```
 
 Salida:
 
 ```text
-[PASS] boot.basic
-[PASS] memory.bitmap
-[PASS] paging.map_unmap
-[PASS] interrupt.breakpoint
-[PASS] scheduler.round_robin
-[FAIL] ipc.transfer_capability
+[xtask] nivel Full
+[xtask] unit tests (host)
+test result: ok. 18 passed
+[PASS] boot.kernel_panic_reports              1.6s
+[PASS] boot.kernel_ready                      1.6s
+[PASS] boot.loader_missing_kernel             1.5s
+[PASS] boot.loader_rejects_bad_elf            1.5s
+[xtask] 4 escenarios QEMU, 0 fallidos
 ```
 
-QEMU debe finalizar automáticamente con código de salida interpretable por CI.
+Un escenario declara cmdline, inyecciones de fallo en la ESP (kernel truncado,
+kernel ausente) y expectativas sobre la serie y el código de salida de QEMU
+(33 éxito, 35 fallo reportado). El comportamiento de test dentro del sistema se
+pide por cmdline (`qemu_exit`, `test=panic`), nunca por features de
+compilación (ADR 0007): un único binario sirve para todos los escenarios.
+
+QEMU termina automáticamente con código de salida interpretable por CI.
 
 ---
 
@@ -1949,39 +1955,51 @@ sin utilizar servicios UEFI después de entrar.
 
 # FASE 3 — Consola temprana
 
+**Estado: completada (2026-09-26).**
+
 ### Objetivo
 
 Logging fiable.
 
-### Implementar
+### Implementado
 
-- serial logger;
-- framebuffer logger;
-- macros `log!`;
-- panic handler.
+- serial logger (COM1);
+- framebuffer logger: `libs/fb-console` con fuente Terminus 8x16 (OFL 1.1),
+  rejilla de celdas y scroll sin leer VRAM;
+- macros: `print!/println!` (texto sin formato) y `log::{trace..error}!`
+  con niveles TRACE..ERROR vía `console::KernelLogger`; `log=<nivel>` en la
+  cmdline; FATAL equivale al panic;
+- panic handler solo por serie.
 
 ### Criterio
 
-Kernel panic legible y salida capturable por tests.
+Kernel panic legible y salida capturable por tests: escenarios
+`boot.kernel_panic_reports` y área `console` (cuatro escenarios de niveles).
 
 ---
 
 # FASE 4 — CPU foundation
 
-### Implementar
+**Estado: completada (2026-09-26).**
 
-- GDT;
-- TSS;
-- IDT;
-- excepciones;
-- handlers;
-- double fault stack.
+### Implementado
 
-### Tests
+- GDT propia (código/datos ring 0, TSS) codificada en `libs/x86-cpu`;
+- TSS con IST1 -> pila dedicada de 16 KiB para #DF;
+- IDT de 256 vectores sobre stubs generados en ensamblador (ADR 0008);
+- excepciones con volcado de registros, CR2/acceso/modo/causa para #PF,
+  #BP recuperable;
+- fallos provocados por cmdline: `test=breakpoint|invalid_opcode|page_fault|double_fault`.
 
-- breakpoint;
-- invalid opcode;
-- page fault controlado.
+### Tests (área `interrupts`)
+
+- `interrupts.breakpoint_returns` (smoke): #BP manejado, el kernel llega a READY;
+- `interrupts.invalid_opcode_panics`: #UD con volcado y pánico;
+- `interrupts.page_fault_reports_cr2`: #PF con CR2, ACCESS WRITE, MODE KERNEL;
+- `interrupts.double_fault_uses_ist`: pila corrupta + int3 -> #DF atendido en IST.
+
+Además, 7 tests de host validan las codificaciones de descriptores, TSS e IDT
+contra valores conocidos.
 
 ---
 
@@ -2894,14 +2912,19 @@ Ese milestone es importante porque demostrará que existe una cadena completamen
 
 # 86. AriCodeOS 0.0.2
 
-Añadir:
+**Estado: completada (2026-09-26), tag `v0.0.2`.**
 
-- BootInfo;
-- memory map;
-- logging;
-- panic;
-- GDT;
-- IDT.
+Añadido:
+
+- BootInfo v2 (con cmdline);
+- memory map clasificado;
+- logging con niveles (serie + framebuffer);
+- panic handler y excepciones con diagnóstico;
+- GDT/TSS;
+- IDT con IST para double fault.
+
+Incluye además la infraestructura de tests por niveles y las dos rondas de
+auditoría (`docs/audits/`).
 
 ---
 
@@ -3084,15 +3107,20 @@ Cada fase se considerará terminada únicamente si cumple:
 
 # 99. Gestión del proyecto
 
-Modelo recomendado:
+Modelo adoptado (git flow), detallado en `docs/WORKFLOW.md`:
 
 ```text
-main        -> siempre arrancable
-feature/*   -> desarrollo
+main        -> siempre arrancable; solo merges etiquetados desde develop u hotfix/*
+develop     -> integración; debe pasar cargo xtask test
+feature/*   -> desarrollo, parte y vuelve a develop
+fix/*       -> correcciones sobre develop
+hotfix/*    -> correcciones urgentes sobre main (vuelven también a develop)
 experiment/*-> prototipos que pueden romperse
 ```
 
-Las features se integran únicamente cuando sus tests básicos pasan.
+Ningún commit directo en `main` ni `develop`. Merges siempre con `--no-ff` y
+con `cargo xtask check` y `cargo xtask test` en verde. El primer commit
+(`v0.0.1`, M0) es la única excepción histórica.
 
 ---
 
@@ -3363,9 +3391,9 @@ aricodeos/
 
 No necesitamos crear toda la estructura futura desde el primer día.
 
-Este árbol es el que existe en el repositorio desde M0, con `boot/` y
-`kernel/` divididos en módulos (`elf.rs`, `paging.rs`; `serial.rs`,
-`framebuffer.rs`, `qemu.rs`) y `docs/decisions/0001..0006`.
+Este árbol es el que existe en el repositorio desde M0, ampliado con
+`libs/{elf,x86-paging,x86-cpu,cmdline,fb-console}` (lógica `no_std` con tests de host),
+`tests/qemu/` (escenarios) y `docs/decisions/0001..0007`.
 
 ---
 

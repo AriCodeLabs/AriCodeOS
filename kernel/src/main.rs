@@ -1,22 +1,30 @@
 //! AriKernel: núcleo de AriCodeOS.
 //!
-//! Estado: M0 First Boot. Recibe `BootInfo`, valida el protocolo, inicializa
-//! la consola serie, pinta el framebuffer, describe el hardware que le han
-//! entregado y anuncia `ARICODEOS_KERNEL_READY`.
+//! Estado: 0.0.2 en curso. Recibe `BootInfo`, valida el protocolo, levanta la
+//! consola (serie + framebuffer) y el logger con niveles, describe el hardware
+//! que le han entregado y anuncia `ARICODEOS_KERNEL_READY`.
 
 #![no_std]
 #![no_main]
 
+mod arch;
+mod console;
 mod framebuffer;
-#[cfg(feature = "qemu-exit")]
 mod qemu;
 mod serial;
+mod sync;
 
-use boot_protocol::{BootInfo, MemoryRegionKind, BOOT_PROTOCOL_MAGIC, BOOT_PROTOCOL_VERSION};
+use aricode_cmdline::{keys, CmdLine};
+use boot_protocol::{BootInfo, BOOT_PROTOCOL_MAGIC, BOOT_PROTOCOL_VERSION};
 use core::panic::PanicInfo;
-use framebuffer::Framebuffer;
+use core::sync::atomic::{AtomicBool, Ordering};
+use log::{debug, info, trace, warn, LevelFilter};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Si es `true`, el kernel termina QEMU al acabar o al entrar en pánico.
+/// Se fija una vez desde la línea de comandos, antes de cualquier panic posible.
+static QEMU_EXIT: AtomicBool = AtomicBool::new(false);
 
 /// Punto de entrada. Ver `boot_protocol::KernelEntry` para el contrato.
 ///
@@ -28,14 +36,72 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[no_mangle]
 pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     serial::Serial.init();
+    let info = validate_boot_info(boot_info);
+
+    // SAFETY: AriBoot copió la cmdline a memoria de kernel identidad-mapeada.
+    let cmdline = CmdLine::new(unsafe { info.cmdline() });
+    QEMU_EXIT.store(cmdline.has(keys::QEMU_EXIT), Ordering::Relaxed);
+
+    let has_fb = console::init_framebuffer(info.framebuffer);
     println!();
     println!("AriCodeOS booting...");
     println!("AriCodeOS Kernel {VERSION}");
 
+    let (level, level_error) = log_level_from(&cmdline);
+    console::init_logger(level);
+    if let Some(bad) = level_error {
+        warn!("cmdline: log={bad} desconocido, se usa {level}");
+    }
+    if !cmdline.is_empty() {
+        info!("cmdline: {}", cmdline.raw().trim());
+    }
+    trace!("logger activo en nivel {level}");
+
+    report_framebuffer(info, has_fb);
+    report_kernel(info);
+    report_memory(info);
+
+    arch::x86_64::init();
+    let sel = arch::x86_64::gdt::selectors();
+    info!(
+        "cpu: GDT, TSS (IST para #DF) e IDT instaladas (cs={:#x} ds={:#x} tr={:#x})",
+        sel.code.0, sel.data.0, sel.tss.0
+    );
+
+    run_requested_test(&cmdline);
+
+    println!("ARICODEOS_KERNEL_READY");
+    finish(qemu::ExitCode::Success)
+}
+
+/// `log=<trace|debug|info|warn|error|off>`; por defecto `info`.
+/// Devuelve también el valor rechazado, si lo hubo, para avisar tras el init.
+fn log_level_from(cmdline: &CmdLine) -> (LevelFilter, Option<&'static str>) {
+    match cmdline.get(keys::LOG) {
+        None => (LevelFilter::Info, None),
+        Some(v) => match v.parse::<LevelFilter>() {
+            Ok(l) => (l, None),
+            // El valor vive en la cmdline (memoria de kernel, 'static de facto).
+            Err(_) => (LevelFilter::Info, Some(unsafe { extend_lifetime(v) })),
+        },
+    }
+}
+
+/// La cmdline está en memoria de kernel que nunca se libera; el `&str` es
+/// válido durante toda la ejecución.
+///
+/// # Safety
+///
+/// Solo para cadenas que apuntan a la cmdline entregada por AriBoot.
+unsafe fn extend_lifetime(s: &str) -> &'static str {
+    unsafe { &*(s as *const str) }
+}
+
+/// Comprueba magic y versión del protocolo; cualquier discrepancia es fatal.
+unsafe fn validate_boot_info(ptr: *const BootInfo) -> &'static BootInfo {
     // SAFETY: AriBoot garantiza un puntero válido a una página identidad-mapeada.
-    let info: &BootInfo = match boot_info.as_ref() {
-        Some(i) => i,
-        None => panic!("BootInfo nulo"),
+    let Some(info) = ptr.as_ref() else {
+        panic!("BootInfo nulo");
     };
     if info.magic != BOOT_PROTOCOL_MAGIC {
         panic!("BootInfo: magic invalido {:#x}", info.magic);
@@ -46,66 +112,95 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
             info.version, BOOT_PROTOCOL_VERSION
         );
     }
+    info
+}
 
-    if let Some(fb) = Framebuffer::new(info.framebuffer) {
-        fb.draw_boot_screen();
-        println!(
+fn report_framebuffer(info: &BootInfo, has_fb: bool) {
+    if has_fb {
+        let f = &info.framebuffer;
+        info!(
             "framebuffer: {}x{} stride {} {:?} @ {:#x}",
-            info.framebuffer.width,
-            info.framebuffer.height,
-            info.framebuffer.stride,
-            info.framebuffer.pixel_format,
-            info.framebuffer.address
+            f.width, f.height, f.stride, f.pixel_format, f.address
         );
     } else {
-        println!("framebuffer: no disponible");
+        warn!("framebuffer: no disponible, solo serie");
     }
+}
 
-    println!(
+fn report_kernel(info: &BootInfo) {
+    info!(
         "kernel: phys {:#x} virt {:#x} size {} KiB",
         info.kernel_phys_base,
         info.kernel_virt_base,
         info.kernel_size / 1024
     );
-    println!(
+    debug!(
         "stack: {:#x} ({} KiB)  pml4: {:#x}",
         info.kernel_stack_base,
         info.kernel_stack_size / 1024,
         info.page_table_root
     );
-    println!("acpi rsdp: {:#x}", info.rsdp_address);
-
-    report_memory(info);
-
-    println!("ARICODEOS_KERNEL_READY");
-
-    #[cfg(feature = "qemu-exit")]
-    qemu::exit(qemu::ExitCode::Success);
-    #[cfg(not(feature = "qemu-exit"))]
-    halt_loop()
+    info!("acpi rsdp: {:#x}", info.rsdp_address);
 }
 
 fn report_memory(info: &BootInfo) {
-    let mut totals = [0u64; 7];
+    const NAMES: [&str; 7] = [
+        "free", "kernel", "boot", "firmware", "acpi", "mmio", "reserved",
+    ];
+    let mut totals = [0u64; NAMES.len()];
     let mut count = 0u32;
     // SAFETY: el mapa está en memoria de boot identidad-mapeada por AriBoot.
     for d in unsafe { info.memory_map.iter() } {
         totals[d.kind() as usize] += d.size_bytes();
         count += 1;
     }
-    println!(
+    info!(
         "memory map: {count} regiones (desc {} bytes)",
         info.memory_map.descriptor_size
     );
-    let names = [
-        "free", "kernel", "boot", "firmware", "acpi", "mmio", "reserved",
-    ];
-    for (i, name) in names.iter().enumerate() {
-        if totals[i] != 0 {
-            println!("  {:<9} {:>8} KiB", name, totals[i] / 1024);
+    for (name, total) in NAMES.iter().zip(totals) {
+        if total != 0 {
+            debug!("  {:<9} {:>8} KiB", name, total / 1024);
         }
     }
-    let _ = MemoryRegionKind::Free;
+}
+
+/// Fallos provocados para los escenarios de test (`test=<nombre>`).
+fn run_requested_test(cmdline: &CmdLine) {
+    let Some(name) = cmdline.get(keys::TEST) else {
+        return;
+    };
+    info!("test provocado: {name}");
+    match name {
+        "panic" => panic!("test=panic: fallo provocado"),
+        // #BP es recuperable: el handler avisa y la ejecución continúa.
+        // SAFETY: instrucción de depuración; la IDT ya está instalada.
+        "breakpoint" => unsafe { core::arch::asm!("int3", options(nomem, nostack)) },
+        // SAFETY: ud2 provoca #UD de forma deliberada; termina en pánico.
+        "invalid_opcode" => unsafe { core::arch::asm!("ud2", options(nomem, nostack, noreturn)) },
+        // Escritura a una dirección canónica no mapeada -> #PF con CR2 legible.
+        "page_fault" => {
+            // SAFETY: fallo deliberado; nunca retorna.
+            unsafe { (0xFFFF_9000_0000_0000 as *mut u64).write_volatile(0xDEAD) };
+            unreachable!("la escritura debia provocar #PF");
+        }
+        // Pila apuntando a memoria no mapeada + int3: la CPU no puede empujar el
+        // marco de #BP (-> #PF) ni el de #PF (-> #DF); solo la pila IST salva el
+        // diagnóstico.
+        // SAFETY: fallo deliberado; nunca retorna.
+        "double_fault" => unsafe {
+            core::arch::asm!("mov rsp, {0}", "int3", in(reg) 0xFFFF_9000_0000_0000u64, options(noreturn))
+        },
+        other => warn!("test: '{other}' desconocido, ignorado"),
+    }
+}
+
+/// Fin de la ejecución: termina QEMU si se pidió, si no detiene la CPU.
+fn finish(code: qemu::ExitCode) -> ! {
+    if QEMU_EXIT.load(Ordering::Relaxed) {
+        qemu::exit(code)
+    }
+    halt_loop()
 }
 
 pub fn halt_loop() -> ! {
@@ -117,17 +212,16 @@ pub fn halt_loop() -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    println!();
-    println!("============================");
-    println!("ARICODEOS KERNEL PANIC");
-    println!("============================");
+    // Solo serie: el panic puede ocurrir con la consola de framebuffer a medio
+    // escribir y no debe tocar estado compartido.
+    serial_println!();
+    serial_println!("============================");
+    serial_println!("ARICODEOS KERNEL PANIC");
+    serial_println!("============================");
     if let Some(loc) = info.location() {
-        println!("Where: {}:{}:{}", loc.file(), loc.line(), loc.column());
+        serial_println!("Where: {}:{}:{}", loc.file(), loc.line(), loc.column());
     }
-    println!("Reason: {}", info.message());
-    println!("============================");
-    #[cfg(feature = "qemu-exit")]
-    qemu::exit(qemu::ExitCode::Failed);
-    #[cfg(not(feature = "qemu-exit"))]
-    halt_loop()
+    serial_println!("Reason: {}", info.message());
+    serial_println!("============================");
+    finish(qemu::ExitCode::Failed)
 }

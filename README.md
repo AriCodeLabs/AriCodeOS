@@ -4,12 +4,15 @@ Sistema operativo desde cero: microkernel en Rust `no_std`, arranque UEFI,
 x86-64, seguridad por capabilities y drivers en espacio de usuario.
 
 El documento maestro de arquitectura y roadmap es [AriCodeOS.md](AriCodeOS.md).
-Las decisiones de diseño se registran en [docs/decisions/](docs/decisions/).
+Las decisiones de diseño se registran en [docs/decisions/](docs/decisions/) y el
+flujo de ramas (git flow) en [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-**Estado:** Milestone M0 "First Boot" completado. AriBoot (UEFI) carga
-`kernel.elf`, construye las tablas de páginas, sale de boot services y salta a
-AriKernel, que reporta el hardware por serie, pinta el framebuffer y emite
-`ARICODEOS_KERNEL_READY`.
+**Estado:** 0.0.2. AriBoot (UEFI) carga `kernel.elf`, construye las tablas de
+páginas, sale de boot services y salta a AriKernel, que levanta consola serie
+y de framebuffer con logger por niveles, instala GDT/TSS/IDT propias con pila
+IST para double fault, reporta el hardware y emite `ARICODEOS_KERNEL_READY`.
+Las excepciones producen un volcado legible y los fallos se provocan desde la
+cmdline para los tests.
 
 ## Requisitos (Debian 13)
 
@@ -27,26 +30,33 @@ targets `x86_64-unknown-none` y `x86_64-unknown-uefi`.
 cargo xtask build          # compila AriBoot y AriKernel (release)
 cargo xtask image          # monta build/esp/ (EFI/BOOT/BOOTX64.EFI + aricodeos/kernel.elf)
 cargo xtask run            # arranca en QEMU + OVMF, serie en la terminal (salir: Ctrl-A X)
-cargo xtask test           # test de integración boot.kernel_ready (exit code para CI)
+cargo xtask test           # unit + smoke (arranque nominal en QEMU)
+cargo xtask test --all     # unit + todos los escenarios QEMU; obligatorio antes de main
+cargo xtask test --area boot   # solo los escenarios de un área
 cargo xtask check          # rustfmt --check + clippy -D warnings
 ```
 
-Añade `--debug` a cualquier comando para usar el perfil de desarrollo.
+Añade `--debug` a cualquier comando para usar el perfil de desarrollo. Los
+niveles de test están descritos en [tests/README.md](tests/README.md).
 
 ## Estructura
 
 ```text
-boot-protocol/   ABI BootInfo v1 compartido por bootloader y kernel
+boot-protocol/   ABI BootInfo compartido por bootloader y kernel
+libs/            librerías no_std con tests de host: elf, x86-paging, x86-cpu, cmdline, fb-console
 boot/            AriBoot: cargador UEFI (crate `ariboot`)
 kernel/          AriKernel (crate `arikernel`), ELF64 en la mitad alta
 tools/xtask/     automatización: build, imagen, QEMU, tests, lint
-docs/            arquitectura y ADRs
+tests/qemu/      escenarios de integración declarativos (TOML)
+docs/            arquitectura, flujo de trabajo y ADRs
 build/           salida generada (ESP, OVMF_VARS, logs); no versionar
 ```
 
 ## Test de aceptación
 
-`cargo xtask test` compila el kernel con la feature `qemu-exit`, arranca QEMU
-sin pantalla con `isa-debug-exit`, captura la serie y exige tres cosas: que
-aparezca `ARICODEOS_KERNEL_READY`, que no haya `KERNEL PANIC` y que QEMU
-termine con código 33. El log queda en `build/test-serial.log`.
+`tests/qemu/boot_kernel_ready.toml` arranca QEMU sin pantalla con
+`isa-debug-exit`, captura la serie y exige que aparezca
+`ARICODEOS_KERNEL_READY`, que no haya `KERNEL PANIC` y que QEMU termine con
+código 33. Los escenarios `full` inyectan fallos (ELF truncado, kernel
+ausente, panic provocado) y exigen el código 35. Los logs quedan en
+`build/scenarios/<nombre>/serial.log`.

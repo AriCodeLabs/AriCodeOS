@@ -1,0 +1,16 @@
+# Revision de auditoria 2026-09-26, hallazgo 1: un PT_LOAD RW vacio y sin
+# alinear sobre la pagina de la entrada no debe alterar los permisos de .text.
+# Se ignora en la carga y el sistema arranca exactamente igual.
+name = "boot.loader_ignores_empty_segment"
+description = "PT_LOAD vacio en e_entry -> se ignora, el kernel arranca"
+level = "full"
+areas = ["boot"]
+cmdline = "qemu_exit"
+
+[inject]
+add_empty_segment_at_entry = true
+
+[expect]
+exit = 33
+serial_contains = ["ARICODEOS_KERNEL_READY"]
+serial_absent = ["KERNEL PANIC", "[ERROR]"]
