@@ -1,7 +1,7 @@
 //! Orquestación de niveles de test: unit (host) -> smoke/full (QEMU).
 
 use crate::scenario::{self, Level, Scenario};
-use crate::{build, build_dir, image, qemu, Cli, Result};
+use crate::{build, image, qemu, Cli, Result};
 use std::time::Duration;
 
 pub fn run(cli: &Cli, release: bool) -> Result {
@@ -21,7 +21,7 @@ pub fn run(cli: &Cli, release: bool) -> Result {
         .unwrap_or_default();
 
     let all = scenario::load_all()?;
-    let selected: Vec<&Scenario> = all.iter().filter(|s| s.matches(level, &areas)).collect();
+    let selected = scenario::select(&all, level, &areas)?;
 
     if cli.flag("--list") {
         for s in &all {
@@ -79,7 +79,7 @@ pub fn run(cli: &Cli, release: bool) -> Result {
 }
 
 fn run_scenario(base: &std::path::Path, s: &Scenario) -> Result<bool> {
-    let workdir = build_dir().join("scenarios").join(&s.name);
+    let workdir = image::scenario_dir(&s.name)?;
     let esp = image::build_scenario_esp(base, &s.name, &s.cmdline, &s.inject)?;
     let cap = qemu::run_headless(&esp, &workdir, Duration::from_secs(s.timeout_secs))?;
     let log = workdir.join("serial.log");

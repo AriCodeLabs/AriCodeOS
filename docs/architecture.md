@@ -31,6 +31,16 @@ tests/qemu/          escenarios QEMU declarativos (ver tests/README.md)
 Regla: la lógica que se pueda probar en host vive en `libs/*`; `boot/` y
 `kernel/` solo integran.
 
+Invariantes de seguridad de memoria en el cargador (auditoría 2026-09-26,
+`docs/audits/`):
+
+- `aricode-elf` rechaza cualquier ELF cuyo rango virtual no sea representable,
+  con segmentos solapados o cuya entrada no esté en un segmento ejecutable.
+  Nada se reserva ni se copia hasta que el ELF completo ha pasado la validación.
+- `aricode-x86-paging` solo desreferencia tablas que su propio `PagePool` ha
+  repartido; la única operación `unsafe` para el llamador es tomar posesión de
+  la región del pool.
+
 ## Contrato AriBoot -> AriKernel
 
 Definido en `boot-protocol/` (`BootInfo`, versión 2). Al entrar al kernel:

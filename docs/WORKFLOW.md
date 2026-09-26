@@ -78,6 +78,9 @@ Cada fase del roadmap añade sus tests en la misma rama que su código: nuevos
    la anterior se borra en el mismo commit. `clippy -D warnings` lo vigila.
 9. El comportamiento de test se pide por cmdline (`qemu_exit`, `test=...`),
    nunca con features de compilación (ADR 0007).
+10. Las auditorías se guardan en `docs/audits/` con su resolución; cada
+    hallazgo corregido lleva una regresión (unitaria o escenario QEMU) en la
+    misma rama `fix/*`.
 
 ## Mensajes de commit
 

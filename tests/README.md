@@ -32,7 +32,7 @@ tests/qemu/*.toml        escenarios de integración en QEMU
 Un fichero `tests/qemu/<area>_<nombre>.toml`:
 
 ```toml
-name = "area.nombre"            # único; prefijo = área principal
+name = "area.nombre"            # único; solo [a-z0-9._-]; también es el directorio en build/scenarios/
 description = "una línea"
 level = "smoke" | "full"
 areas = ["boot", "memory"]      # para filtrar con --area
@@ -40,8 +40,9 @@ cmdline = "qemu_exit ..."       # se escribe en aricodeos/cmdline.txt
 timeout_secs = 30
 
 [inject]                        # opcional: fallos provocados en la ESP
-truncate_kernel = 3000
-remove_kernel = true
+truncate_kernel = 3000          # recorta kernel.elf a N bytes
+remove_kernel = true            # elimina kernel.elf
+patch_entry = 0                 # sobrescribe e_entry del ELF
 
 [expect]
 exit = 33                       # 33 = éxito, 35 = fallo reportado por el sistema
@@ -58,7 +59,9 @@ escenarios y no queda código de test disperso por `cfg`.
 Cada fase del roadmap añade su área y sus escenarios: `boot`, `panic`,
 `memory`, `paging`, `interrupts`, `scheduler`, `ipc`, `capabilities`, ...
 Una rama `feature/f05-physical-memory` ejecuta `--area memory` mientras
-desarrolla y `--all` antes de integrar.
+desarrolla y `--all` antes de integrar. Si el filtro no selecciona ningún
+escenario QEMU, el runner falla y lista las áreas conocidas: un filtro mal
+escrito nunca produce un éxito vacío.
 
 ## Logs
 

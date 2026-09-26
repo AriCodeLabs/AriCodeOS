@@ -4,6 +4,12 @@
 //! `no_std`. Se prueba en host con `cargo test -p aricode-x86-paging`: allí
 //! las "direcciones físicas" son punteros del heap del proceso.
 //!
+//! Seguridad de memoria: la única operación `unsafe` para el llamador es
+//! `PagePool::new`, que toma posesión de una región. A partir de ahí toda
+//! tabla que se desreferencia proviene de ese pool (`PagePool::owns`), y la
+//! jerarquía no expone sus tablas, así que la API segura no puede provocar
+//! accesos fuera de la región.
+//!
 //! Estrategia M0:
 //! - identidad para toda la memoria física con páginas de 2 MiB (RWX; la
 //!   restricción W^X del mapa físico llega con el VMM del kernel);
@@ -22,48 +28,83 @@ pub const HUGE_2M: u64 = 2 * 1024 * 1024;
 
 pub const PRESENT: u64 = 1 << 0;
 pub const WRITABLE: u64 = 1 << 1;
+pub const USER: u64 = 1 << 2;
 pub const HUGE: u64 = 1 << 7;
 pub const GLOBAL: u64 = 1 << 8;
 pub const NO_EXECUTE: u64 = 1 << 63;
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
+/// Flags que un llamador puede pedir para una página hoja de 4 KiB. Cualquier
+/// otro bit (dirección, HUGE, bits reservados) se descarta.
+const LEAF_FLAG_MASK: u64 = WRITABLE | USER | GLOBAL | NO_EXECUTE;
+
 /// Pool de páginas físicas cero-inicializadas, identidad-mapeadas.
+///
+/// Es dueño exclusivo de la región mientras vive; las tablas que reparte se
+/// referencian por dirección física dentro de esa región.
 pub struct PagePool {
+    base: u64,
     next: u64,
     end: u64,
 }
 
 impl PagePool {
-    pub fn new(base: NonNull<u8>, pages: usize) -> Self {
+    /// Toma posesión de `pages` páginas contiguas a partir de `base`.
+    ///
+    /// # Safety
+    ///
+    /// - `base` está alineado a 4 KiB y apunta a `pages * 4096` bytes válidos,
+    ///   escribibles y accesibles por identidad (dirección virtual == física).
+    /// - Nadie más lee ni escribe esa región mientras el pool o las tablas
+    ///   construidas con él estén en uso.
+    /// - La región permanece válida mientras las tablas se usen (en la
+    ///   práctica siempre: el kernel las hereda).
+    pub unsafe fn new(base: NonNull<u8>, pages: usize) -> Self {
         let base = base.as_ptr() as u64;
-        // SAFETY: `base` apunta a `pages` páginas recién reservadas para nosotros.
+        assert_eq!(base % PAGE_SIZE, 0, "pool no alineado a pagina");
+        let end = base
+            .checked_add(pages as u64 * PAGE_SIZE)
+            .expect("pool overflow");
+        // SAFETY: contrato de la función.
         unsafe { core::ptr::write_bytes(base as *mut u8, 0, pages * PAGE_SIZE as usize) };
         Self {
+            base,
             next: base,
-            end: base + pages as u64 * PAGE_SIZE,
+            end,
         }
     }
 
-    fn alloc_table(&mut self) -> &'static mut [u64; 512] {
+    /// Reparte una tabla nueva (ya en cero) y devuelve su dirección física.
+    fn alloc_table(&mut self) -> u64 {
         assert!(self.next < self.end, "page table pool agotado");
         let addr = self.next;
         self.next += PAGE_SIZE;
-        // SAFETY: página del pool, ya en cero, alineada a 4 KiB, exclusiva.
-        unsafe { &mut *(addr as *mut [u64; 512]) }
+        addr
     }
 
-    pub fn used_pages(&self, base: u64) -> u64 {
-        (self.next - base) / PAGE_SIZE
+    /// `true` si `phys` es una tabla que este pool ha repartido.
+    fn owns(&self, phys: u64) -> bool {
+        phys >= self.base && phys < self.next && phys.is_multiple_of(PAGE_SIZE)
+    }
+
+    /// Acceso a una tabla del pool. Panic si la dirección no es suya: es la
+    /// barrera que impide desreferenciar direcciones arbitrarias.
+    fn table(&mut self, phys: u64) -> &mut [u64; 512] {
+        assert!(self.owns(phys), "tabla {phys:#x} ajena al pool");
+        // SAFETY: `phys` es una página del pool (identidad-mapeada, alineada,
+        // exclusiva) según `owns`; la vida queda ligada al préstamo `&mut self`.
+        unsafe { &mut *(phys as *mut [u64; 512]) }
+    }
+
+    pub fn used_pages(&self) -> u64 {
+        (self.next - self.base) / PAGE_SIZE
     }
 }
 
+/// Jerarquía de tablas. Todas sus tablas provienen del pool con el que se
+/// creó; solo se expone la dirección física de la raíz.
 pub struct PageTables {
-    pub pml4: &'static mut [u64; 512],
-}
-
-fn table_of(entry: u64) -> &'static mut [u64; 512] {
-    // SAFETY: las tablas están identidad-mapeadas y las creamos nosotros.
-    unsafe { &mut *((entry & ADDR_MASK) as *mut [u64; 512]) }
+    pml4: u64,
 }
 
 impl PageTables {
@@ -73,48 +114,44 @@ impl PageTables {
         }
     }
 
+    /// Dirección física del PML4, lista para `cr3`.
     pub fn root_phys(&self) -> u64 {
-        self.pml4.as_ptr() as u64
+        self.pml4
     }
 
-    fn next_level(
-        pool: &mut PagePool,
-        table: &mut [u64; 512],
-        idx: usize,
-    ) -> &'static mut [u64; 512] {
-        if table[idx] & PRESENT == 0 {
+    /// Dirección de la tabla inferior en `table[idx]`, creándola si no existe.
+    /// Nunca desciende por una entrada `HUGE`.
+    fn next_level(pool: &mut PagePool, table_phys: u64, idx: usize) -> u64 {
+        let entry = pool.table(table_phys)[idx];
+        if entry & PRESENT == 0 {
             let t = pool.alloc_table();
-            table[idx] = (t.as_ptr() as u64) | PRESENT | WRITABLE;
+            pool.table(table_phys)[idx] = t | PRESENT | WRITABLE;
+            return t;
         }
-        table_of(table[idx])
+        assert!(entry & HUGE == 0, "entrada {idx} es una pagina grande");
+        entry & ADDR_MASK
     }
 
-    /// Mapea una página de 4 KiB. `flags` sin PRESENT (se añade).
+    /// Mapea una página de 4 KiB. `virt` y `phys` alineados; `flags` limitado
+    /// a los bits de permiso de una entrada hoja (`PRESENT` se añade).
     pub fn map_4k(&mut self, pool: &mut PagePool, virt: u64, phys: u64, flags: u64) {
-        debug_assert_eq!(virt % PAGE_SIZE, 0);
-        debug_assert_eq!(phys % PAGE_SIZE, 0);
-        let pml4_i = ((virt >> 39) & 0x1FF) as usize;
-        let pdpt_i = ((virt >> 30) & 0x1FF) as usize;
-        let pd_i = ((virt >> 21) & 0x1FF) as usize;
+        assert_eq!(virt % PAGE_SIZE, 0, "virt no alineado");
+        assert_eq!(phys % PAGE_SIZE, 0, "phys no alineado");
+        let pdpt = Self::next_level(pool, self.pml4, ((virt >> 39) & 0x1FF) as usize);
+        let pd = Self::next_level(pool, pdpt, ((virt >> 30) & 0x1FF) as usize);
+        let pt = Self::next_level(pool, pd, ((virt >> 21) & 0x1FF) as usize);
         let pt_i = ((virt >> 12) & 0x1FF) as usize;
-        let pdpt = Self::next_level(pool, self.pml4, pml4_i);
-        let pd = Self::next_level(pool, pdpt, pdpt_i);
-        assert!(pd[pd_i] & HUGE == 0, "colision con pagina 2M en {virt:#x}");
-        let pt = Self::next_level(pool, pd, pd_i);
-        pt[pt_i] = (phys & ADDR_MASK) | flags | PRESENT;
+        pool.table(pt)[pt_i] = (phys & ADDR_MASK) | (flags & LEAF_FLAG_MASK) | PRESENT;
     }
 
     /// Mapea identidad [0, limit) con páginas de 2 MiB, RWX.
     pub fn identity_map_2m(&mut self, pool: &mut PagePool, limit: u64) {
-        let limit = (limit + HUGE_2M - 1) & !(HUGE_2M - 1);
+        let limit = limit.checked_add(HUGE_2M - 1).expect("limite overflow") & !(HUGE_2M - 1);
         let mut addr = 0u64;
         while addr < limit {
-            let pml4_i = ((addr >> 39) & 0x1FF) as usize;
-            let pdpt_i = ((addr >> 30) & 0x1FF) as usize;
-            let pd_i = ((addr >> 21) & 0x1FF) as usize;
-            let pdpt = Self::next_level(pool, self.pml4, pml4_i);
-            let pd = Self::next_level(pool, pdpt, pdpt_i);
-            pd[pd_i] = addr | PRESENT | WRITABLE | HUGE;
+            let pdpt = Self::next_level(pool, self.pml4, ((addr >> 39) & 0x1FF) as usize);
+            let pd = Self::next_level(pool, pdpt, ((addr >> 30) & 0x1FF) as usize);
+            pool.table(pd)[((addr >> 21) & 0x1FF) as usize] = addr | PRESENT | WRITABLE | HUGE;
             addr += HUGE_2M;
         }
     }
@@ -160,7 +197,8 @@ mod tests {
             Self { ptr, layout }
         }
         fn pool(&self, pages: usize) -> PagePool {
-            PagePool::new(NonNull::new(self.ptr).unwrap(), pages)
+            // SAFETY: memoria del heap alineada a 4 KiB, exclusiva del test.
+            unsafe { PagePool::new(NonNull::new(self.ptr).unwrap(), pages) }
         }
     }
     impl Drop for Arena {
@@ -204,7 +242,7 @@ mod tests {
             "fuera del limite no mapeado"
         );
         // PML4 + PDPT + 4 PD
-        assert_eq!(pool.used_pages(arena.ptr as u64), 6);
+        assert_eq!(pool.used_pages(), 6);
     }
 
     #[test]
@@ -226,6 +264,37 @@ mod tests {
         assert!(pool_size_for(4 << 30, 16) >= 9);
         // 1 TiB identidad necesita 1024 PDs
         assert!(pool_size_for(1 << 40, 16) >= 1024 + 4);
+    }
+
+    #[test]
+    fn leaf_flags_cannot_smuggle_address_bits() {
+        let arena = Arena::new(16);
+        let mut pool = arena.pool(16);
+        let mut t = PageTables::new(&mut pool);
+        // Bits de direccion y HUGE en flags se descartan (auditoria, hallazgo 2)
+        t.map_4k(&mut pool, 0x2000, 0x3000, 0xDEAD_B000 | HUGE | WRITABLE);
+        let (phys, flags) = walk(t.root_phys(), 0x2000).unwrap();
+        assert_eq!(phys, 0x3000);
+        assert_eq!(flags, PRESENT | WRITABLE);
+    }
+
+    #[test]
+    #[should_panic(expected = "pagina grande")]
+    fn map_4k_over_2m_page_panics() {
+        let arena = Arena::new(16);
+        let mut pool = arena.pool(16);
+        let mut t = PageTables::new(&mut pool);
+        t.identity_map_2m(&mut pool, HUGE_2M);
+        t.map_4k(&mut pool, 0x1000, 0x1000, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "no alineado")]
+    fn map_4k_rejects_unaligned() {
+        let arena = Arena::new(16);
+        let mut pool = arena.pool(16);
+        let mut t = PageTables::new(&mut pool);
+        t.map_4k(&mut pool, 0x1234, 0x1000, 0);
     }
 
     #[test]

@@ -26,6 +26,13 @@ pub fn build_base_esp(release: bool) -> Result<PathBuf> {
     Ok(esp)
 }
 
+/// Directorio de trabajo de un escenario. El nombre se valida siempre aquí,
+/// aunque venga de un TOML ya cargado, porque a continuación se borra.
+pub fn scenario_dir(name: &str) -> Result<PathBuf> {
+    crate::scenario::validate_name(name)?;
+    Ok(build_dir().join("scenarios").join(name))
+}
+
 /// ESP para un escenario: copia del base + cmdline + inyecciones de fallo.
 pub fn build_scenario_esp(
     base: &Path,
@@ -33,7 +40,7 @@ pub fn build_scenario_esp(
     cmdline: &str,
     inject: &Inject,
 ) -> Result<PathBuf> {
-    let esp = build_dir().join("scenarios").join(name).join("esp");
+    let esp = scenario_dir(name)?.join("esp");
     let _ = fs::remove_dir_all(&esp);
     copy_dir(base, &esp)?;
     if !cmdline.trim().is_empty() {
@@ -42,12 +49,23 @@ pub fn build_scenario_esp(
     let kernel = esp.join(KERNEL);
     if inject.remove_kernel {
         io(fs::remove_file(&kernel), "quitar kernel")?;
-    } else if let Some(n) = inject.truncate_kernel {
+        return Ok(esp);
+    }
+    if let Some(n) = inject.truncate_kernel {
         let data = io(fs::read(&kernel), "leer kernel")?;
         io(
             fs::write(&kernel, &data[..n.min(data.len())]),
             "truncar kernel",
         )?;
+    }
+    if let Some(entry) = inject.patch_entry {
+        const E_ENTRY: usize = 24;
+        let mut data = io(fs::read(&kernel), "leer kernel")?;
+        if data.len() < E_ENTRY + 8 {
+            return Err("patch_entry: kernel demasiado corto".into());
+        }
+        data[E_ENTRY..E_ENTRY + 8].copy_from_slice(&entry.to_le_bytes());
+        io(fs::write(&kernel, &data), "parchear e_entry")?;
     }
     Ok(esp)
 }

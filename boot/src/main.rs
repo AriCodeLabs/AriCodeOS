@@ -83,7 +83,18 @@ fn run(cmdline_bytes: &[u8]) -> Result<core::convert::Infallible, &'static str> 
     let kernel_data = read_file(cstr16!("\\aricodeos\\kernel.elf"))
         .map_err(|_| "no se pudo leer \\aricodeos\\kernel.elf")?;
     info!("kernel.elf: {} bytes", kernel_data.len());
-    let elf = elf::Elf::parse(&kernel_data).map_err(|_| "kernel.elf: ELF64 invalido")?;
+    let elf = elf::Elf::parse(&kernel_data).map_err(|e| {
+        error!("kernel.elf: {e:?}");
+        match e {
+            elf::ElfError::EntryOutsideText => {
+                "kernel.elf: punto de entrada fuera de un segmento ejecutable"
+            }
+            elf::ElfError::AddressOverflow | elf::ElfError::OverlappingSegments => {
+                "kernel.elf: segmentos invalidos"
+            }
+            _ => "kernel.elf: ELF64 invalido",
+        }
+    })?;
     let (virt_lo, virt_hi) = elf.virt_range();
     if virt_lo != KERNEL_VIRT_BASE {
         error!("kernel enlazado en {virt_lo:#x}, se esperaba {KERNEL_VIRT_BASE:#x}");
@@ -97,9 +108,15 @@ fn run(cmdline_bytes: &[u8]) -> Result<core::convert::Infallible, &'static str> 
     // SAFETY: región recién reservada de `kernel_pages` páginas.
     unsafe { core::ptr::write_bytes(kernel_phys.as_ptr(), 0, kernel_pages * PAGE_SIZE as usize) };
     for seg in &elf.segments {
-        let dst = kernel_phys.as_ptr() as u64 + (seg.vaddr - virt_lo);
         let src = elf.segment_bytes(seg);
-        // SAFETY: dst dentro de la región reservada (virt_range cubre todos los segmentos).
+        let offset = seg.vaddr - virt_lo;
+        // Defensa en profundidad: el parser ya garantiza que [vaddr, end) cabe
+        // en virt_range; se vuelve a comprobar contra la reserva real.
+        if offset + src.len() as u64 > kernel_size {
+            return Err("kernel.elf: segmento fuera de la reserva");
+        }
+        let dst = kernel_phys.as_ptr() as u64 + offset;
+        // SAFETY: `dst..dst+len` está dentro de las `kernel_pages` reservadas (comprobado arriba).
         unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst as *mut u8, src.len()) };
     }
     let kernel_phys_base = kernel_phys.as_ptr() as u64;
@@ -143,8 +160,9 @@ fn run(cmdline_bytes: &[u8]) -> Result<core::convert::Infallible, &'static str> 
     // 7. Tablas de páginas.
     let pool_pages = paging::pool_size_for(phys_limit, kernel_pages as u64);
     let pool_mem = alloc_pages(pool_pages, "page tables")?;
-    let pool_base = pool_mem.as_ptr() as u64;
-    let mut pool = PagePool::new(pool_mem, pool_pages);
+    // SAFETY: `pool_mem` son `pool_pages` páginas recién reservadas por UEFI,
+    // alineadas, identidad-mapeadas y de uso exclusivo hasta que el kernel las herede.
+    let mut pool = unsafe { PagePool::new(pool_mem, pool_pages) };
     let mut tables = PageTables::new(&mut pool);
     tables.identity_map_2m(&mut pool, phys_limit);
     for seg in &elf.segments {
@@ -155,8 +173,7 @@ fn run(cmdline_bytes: &[u8]) -> Result<core::convert::Infallible, &'static str> 
         if !seg.executable() {
             flags |= NO_EXECUTE;
         }
-        let start = seg.vaddr & !(PAGE_SIZE - 1);
-        let end = (seg.vaddr + seg.memsz + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let (start, end) = seg.page_range();
         let mut v = start;
         while v < end {
             tables.map_4k(&mut pool, v, kernel_phys_base + (v - virt_lo), flags);
@@ -166,7 +183,7 @@ fn run(cmdline_bytes: &[u8]) -> Result<core::convert::Infallible, &'static str> 
     info!(
         "paginas: identidad hasta {} MiB, {} tablas usadas de {}",
         phys_limit >> 20,
-        pool.used_pages(pool_base),
+        pool.used_pages(),
         pool_pages
     );
 
