@@ -617,14 +617,23 @@ segundo brevemente para añadir la región.
 
 ## Cliente HTTP (Fase 24)
 
-- `aricode-http` no toca la red: `write_get` construye la petición,
-  `parse_response` devuelve `None` hasta tener la línea vacía y luego el
-  estado y la longitud del cuerpo, y `decode_chunked` es incremental
-  (consumido, escrito, fin). `aricode-sys::http::get` une esas piezas con
-  `NetClient` (conexión, envío, lectura por trozos, cierre) y acepta URL
-  con IP o nombre; el cuerpo va a un buffer del llamador (4 KiB en el
-  shell). El respondedor de xtask añade un servidor HTTP de pruebas en
-  `127.0.0.1:17010` con los tres casos que exige `network.http`.
+- `aricode-http` no toca la red: `fetch` hace toda la descarga sobre un
+  trait `Transport` (`send_all`, `recv` con `Ok(0)` = cierre limpio), así
+  que la crate se prueba en host con un transporte simulado y el SDK
+  (`aricode-sys::http::get`) solo resuelve, conecta y adapta `NetClient`.
+  `parse_response` recoge todas las cabeceras antes de decidir el framing
+  (`Transfer-Encoding: chunked` prevalece sobre `Content-Length`; otras
+  codificaciones o longitudes contradictorias son inválidas), las
+  respuestas 1xx se consumen antes de la final, `ChunkDecoder` es una
+  máquina de estados incremental (trozos mayores que el temporal, límites
+  de línea entre lecturas, tamaños validados sin aritmética sin comprobar)
+  y un cuerpo delimitado por cierre solo termina con `Ok(0)`: un reset del
+  transporte es error, nunca éxito parcial. El cuerpo va a un buffer del
+  llamador (4 KiB en el shell). El respondedor de xtask añade un servidor
+  HTTP de pruebas en `127.0.0.1:17010` con los casos de `network.http`.
+- Los identificadores no se recortan: `fs::Request::with_name` devuelve
+  `None` si el nombre no cabe y el nombre DNS viaja entero en el buffer DMA
+  del cliente (hasta 253 bytes) en vez de en el mensaje IPC.
 
 ## Deuda conocida
 
