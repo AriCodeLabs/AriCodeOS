@@ -1,0 +1,20 @@
+# Fase 17: enumeracion PCIe por ECAM (MCFG). La maquina q35 de QEMU expone
+# host bridge 8086:29c0, VGA 1234:1111, ISA bridge 8086:2918, SATA 8086:2922
+# y SMBus 8086:2930.
+name = "pci.enumerate"
+description = "ECAM mapeado y funciones de q35 enumeradas con clase, BARs y capabilities"
+level = "smoke"
+areas = ["pci", "drivers"]
+cmdline = "qemu_exit"
+
+[expect]
+exit = 33
+serial_contains = [
+    "pci: 00:00.0 8086:29c0 clase 06.00 host bridge",
+    "pci: 00:01.0 1234:1111 clase 03.00 VGA/display",
+    "pci: 00:1f.0 8086:2918 clase 06.01 ISA bridge",
+    "pci: 00:1f.2 8086:2922 clase 01.06 SATA (AHCI)",
+    "funciones en el segmento 0 (ECAM @ 0xe0000000)",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "sin MCFG"]

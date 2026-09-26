@@ -19,6 +19,7 @@ mod initrd;
 mod ipc;
 mod memory;
 mod object;
+mod pci;
 mod qemu;
 mod serial;
 mod sync;
@@ -119,6 +120,7 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
 
     task::init();
     initrd::init(info);
+    let _pci_devices = pci::init();
 
     if cmdline.get(keys::TEST).is_some() {
         run_requested_test(&cmdline, info);

@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.0.7 en curso (0.0.6 + Fases 15 y 16)
+## Estado: 0.0.7 (Fases 15, 16 y 17)
 
 ```text
 OVMF (UEFI)
@@ -23,7 +23,8 @@ OVMF (UEFI)
        IPC por endpoints con transferencia de capabilities y timeouts,
        initrd con init y programas de usuario, init lanza y supervisa
        procesos con la capacidad SPAWNER, ACPI + I/O APIC, drivers en ring 3
-       con capabilities IRQ/MMIO/DMA, ARICODEOS_KERNEL_READY
+       con capabilities IRQ/MMIO/DMA, enumeración PCIe por ECAM,
+       ARICODEOS_KERNEL_READY
 ```
 
 ## Crates
@@ -42,6 +43,7 @@ libs/sched/          aricode-sched: política round robin sobre Tid con estados,
 libs/handles/        aricode-handles: tabla de handles con generación y derechos, duplicación solo reductora (no_std + alloc, tests de host)
 libs/initrd/         aricode-initrd: formato del initrd, lector sin copia (no_std) y escritor (feature `write`, xtask); tests de host
 libs/acpi/           aricode-acpi: RSDP, XSDT/RSDT, MADT (LAPIC, I/O APIC, overrides), MCFG; sin AML (no_std + alloc, tests de host)
+libs/pci/            aricode-pci: direccionamiento ECAM, cabecera de configuración, BARs, capabilities, clases (no_std + alloc, tests de host)
 sdk/abi/             aricode-abi: números de syscall, errores, handles iniciales, derechos y tipos de objeto (no_std, tests de host)
 sdk/rust/            aricode-sys: wrappers de syscall para programas de usuario (no_std, sin alloc) y `user.ld`, el linker script de todo programa de usuario
 user/testprogs/      programas de prueba de ring 3 (Rust y ensamblador) enlazados como ELF estáticos en 0x400000
@@ -49,7 +51,7 @@ services/init/       AriInit: primer proceso; recibe SPAWNER y lanza/supervisa s
 boot/                ariboot: integra lo anterior con la crate `uefi`
 kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log con IrqLock y try_lock),
                      arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions, port, pic, pit, apic, ioapic, msr, syscall, usermode},
-                     acpi (localización de tablas), hw (IrqLine, Region, DmaBuffer, registro de vectores, banco de pruebas),
+                     acpi (localización de tablas), pci (ECAM y enumeración), hw (IrqLine, Region, DmaBuffer, registro de vectores, banco de pruebas),
                      object (KernelObject revocable, tabla inicial), ipc (Endpoint, Message, benchmark), initrd,
                      user/{process (cargador ELF, copy_from/to_user, espera de salida), programs (initrd), syscalls},
                      memory/{phys, pmm, vmm, heap}, sync (política IRQ), time,
@@ -418,6 +420,19 @@ segundo brevemente para añadir la región.
 - Un proceso se inserta en la tabla antes de encolar su hilo
   (`prepare_for_process` + `start_thread`): con `log=trace` la salida lenta
   hacía que el hilo llegara a ejecutar antes de existir su proceso.
+
+## PCIe (Fase 17)
+
+- `pci::init` toma la primera entrada de la MCFG, mapea su ECAM sin caché en
+  `0xFFFF_D100_0000_0000` con páginas de 2 MiB (1 MiB por bus) y recorre los
+  buses desde el inicial siguiendo los puentes PCI-PCI. Cada función se lee
+  con accesos de 32 bits y se decodifica con `aricode-pci`: vendor y device,
+  clase, BARs (E/S, 32 y 64 bits, prefetchable) y lista de capabilities
+  (MSI, MSI-X, PCIe, PM).
+- En QEMU q35: host bridge, VGA, Ethernet e1000e (MSI/MSI-X), ISA bridge,
+  SATA AHCI (MSI) y SMBus. `pci.enumerate` (smoke) los exige.
+- La lista se devuelve al arranque; la programación de MSI/MSI-X y la
+  asignación de BARs a drivers llegan con virtio (Fase 18).
 
 ## Deuda conocida
 

@@ -26,4 +26,5 @@ aricode-handles = { path = "../libs/handles" }
 aricode-elf = { path = "../libs/elf" }
 aricode-initrd = { path = "../libs/initrd" }
 aricode-acpi = { path = "../libs/acpi" }
+aricode-pci = { path = "../libs/pci" }
 log = { version = "0.4", default-features = false }

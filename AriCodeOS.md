@@ -2,7 +2,7 @@
 
 ## Documento maestro de arquitectura, especificaciones técnicas y plan de desarrollo
 
-**Estado:** 0.0.6 completada (2026-09-26): microkernel con procesos en ring 3, capabilities e IPC  
+**Estado:** 0.0.7 completada (2026-09-26): init, drivers en espacio de usuario, PCIe  
 **Versión del documento:** 0.2  
 **Nombre del sistema:** AriCodeOS  
 **Arquitectura inicial:** x86-64  
@@ -2292,19 +2292,28 @@ ring 3).
 
 # FASE 17 — PCIe enumeration
 
-### Implementar
+**Estado: completada (2026-09-26).**
 
-- ACPI MCFG;
-- ECAM;
-- enumerate;
-- BARs;
-- MSI inicial.
+### Implementado
 
-### Salida ejemplo
+- ACPI MCFG (`libs/acpi`);
+- ECAM mapeado sin caché, 1 MiB por bus;
+- enumerate: recorrido desde el bus inicial siguiendo puentes, funciones
+  múltiples;
+- BARs decodificados (E/S, memoria de 32/64 bits, prefetchable) y tamaño
+  por sondeo en la librería;
+- MSI inicial: detección de las capabilities MSI y MSI-X (la programación
+  llega con virtio, Fase 18).
+
+### Salida real en QEMU q35
 
 ```text
-00:01.0 1AF4:1000 VirtIO Network
-00:02.0 1AF4:1050 VirtIO GPU
+pci: 00:00.0 8086:29c0 clase 06.00 host bridge (0 BARs)
+pci: 00:01.0 1234:1111 clase 03.00 VGA/display (2 BARs)
+pci: 00:02.0 8086:10d3 clase 02.00 Ethernet (4 BARs, PM/MSI/PCIe/MSI-X)
+pci: 00:1f.0 8086:2918 clase 06.01 ISA bridge (0 BARs)
+pci: 00:1f.2 8086:2922 clase 01.06 SATA (AHCI) (2 BARs, MSI)
+pci: 00:1f.3 8086:2930 clase 0c.05 SMBus (1 BAR)
 ```
 
 ---
@@ -3071,12 +3080,15 @@ más que a través de las capabilities que se le han concedido.
 
 # 91. AriCodeOS 0.0.7
 
-Añadir:
+**Estado: completada (2026-09-26), tag `v0.0.7`.**
 
-- init process;
-- driver framework;
-- device manager;
-- PCIe.
+Añadido:
+
+- init process (AriInit desde el initrd, capacidad SPAWNER, supervisión);
+- driver framework (capabilities IRQ, MMIO y DMA; drivers de prueba en ring 3);
+- device manager: la enumeración y el reparto de capabilities siguen en el
+  kernel (banco de pruebas); el servicio de usuario llega con virtio;
+- PCIe (ECAM por MCFG, enumeración, BARs, capabilities).
 
 ---
 

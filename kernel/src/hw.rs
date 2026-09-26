@@ -165,7 +165,12 @@ pub fn selftest(info: &boot_protocol::BootInfo) {
     )
     .expect("pit_driver");
     let status = process::wait(pid);
+    // Silenciar la fuente antes de soltar la línea: primero se enmascara la
+    // GSI, luego se para el PIT y se deja un tick para que cualquier
+    // interrupción ya en vuelo llegue mientras la línea sigue registrada.
+    ioapic::set_masked(gsi, true);
     pit::stop();
+    crate::task::scheduler::sleep_ms(crate::time::MS_PER_TICK * 2);
     let fired = match &irq.kind {
         ObjectKind::Irq(l) => l.pending.load(Ordering::Relaxed),
         _ => 0,
