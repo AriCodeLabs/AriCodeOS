@@ -15,9 +15,25 @@ OVMF (UEFI)
        ARICODEOS_KERNEL_READY, panic handler
 ```
 
+## Crates
+
+```text
+boot-protocol/       ABI BootInfo (v2): mapa UEFI, framebuffer, RSDP, kernel, pila, PML4, cmdline
+libs/elf/            aricode-elf: parser ELF64 mínimo (no_std, tests de host)
+libs/x86-paging/     aricode-x86-paging: tablas de 4 niveles sobre un pool (no_std, tests de host)
+libs/cmdline/        aricode-cmdline: `clave` / `clave=valor` sin alloc (no_std, tests de host)
+boot/                ariboot: integra lo anterior con la crate `uefi`
+kernel/              arikernel: serial, framebuffer, informe, panic, salida QEMU
+tools/xtask/         build, image, qemu, scenario, test, check
+tests/qemu/          escenarios QEMU declarativos (ver tests/README.md)
+```
+
+Regla: la lógica que se pueda probar en host vive en `libs/*`; `boot/` y
+`kernel/` solo integran.
+
 ## Contrato AriBoot -> AriKernel
 
-Definido en `boot-protocol/` (`BootInfo`, versión 1). Al entrar al kernel:
+Definido en `boot-protocol/` (`BootInfo`, versión 2). Al entrar al kernel:
 
 - interrupciones deshabilitadas;
 - CR3 apunta a tablas construidas por AriBoot: identidad con páginas de 2 MiB
@@ -26,7 +42,9 @@ Definido en `boot-protocol/` (`BootInfo`, versión 1). Al entrar al kernel:
   (NX fuera de `.text`, solo lectura fuera de `.data`/`.bss`);
 - `rsp` en una pila de 64 KiB reservada por el loader;
 - `rdi` = puntero físico a `BootInfo`;
-- EFER.NXE activado.
+- EFER.NXE activado;
+- si existía `\aricodeos\cmdline.txt`, su contenido está copiado en memoria
+  de kernel y referenciado por `cmdline_address/size`.
 
 Toda la memoria que el kernel debe conservar (imagen, pila, tablas, BootInfo)
 está marcada en el mapa UEFI con el tipo `0x8000_0000` (`MemoryRegionKind::Kernel`).

@@ -11,7 +11,7 @@
 pub const BOOT_PROTOCOL_MAGIC: u64 = 0x3145_444F_4349_5241;
 
 /// Versión del protocolo. El kernel rechaza versiones que no entiende.
-pub const BOOT_PROTOCOL_VERSION: u32 = 1;
+pub const BOOT_PROTOCOL_VERSION: u32 = 2;
 
 /// Dirección virtual base donde se enlaza y se mapea el kernel (mitad alta,
 /// últimos 2 GiB del espacio canónico: compatible con `code-model=kernel`).
@@ -19,6 +19,9 @@ pub const KERNEL_VIRT_BASE: u64 = 0xFFFF_FFFF_8000_0000;
 
 /// Ruta del kernel dentro de la partición EFI, tal y como la abre AriBoot.
 pub const KERNEL_PATH: &str = "\\aricodeos\\kernel.elf";
+
+/// Línea de comandos opcional del kernel (ver crate `aricode-cmdline`).
+pub const CMDLINE_PATH: &str = "\\aricodeos\\cmdline.txt";
 
 /// Tipo de memoria UEFI (rango OEM/OS loader) con el que AriBoot marca todas
 /// las páginas que el kernel debe conservar: imagen del kernel, tablas de
@@ -68,6 +71,30 @@ pub struct BootInfo {
     /// initrd: reservado para fases posteriores. 0 si no hay.
     pub initrd_address: u64,
     pub initrd_size: u64,
+
+    /// Línea de comandos (UTF-8, sin terminador) copiada por AriBoot a memoria
+    /// de tipo `MEMORY_TYPE_KERNEL`. `cmdline_size == 0` si no existe.
+    pub cmdline_address: u64,
+    pub cmdline_size: u64,
+}
+
+impl BootInfo {
+    /// Línea de comandos como `&str` (vacía si no hay o no es UTF-8).
+    ///
+    /// # Safety
+    ///
+    /// `cmdline_address..+cmdline_size` debe estar mapeado y ser inmutable
+    /// durante el lifetime devuelto.
+    pub unsafe fn cmdline(&self) -> &str {
+        if self.cmdline_size == 0 {
+            return "";
+        }
+        let bytes = core::slice::from_raw_parts(
+            self.cmdline_address as *const u8,
+            self.cmdline_size as usize,
+        );
+        core::str::from_utf8(bytes).unwrap_or("")
+    }
 }
 
 /// Mapa de memoria UEFI tal y como lo devolvió `ExitBootServices`.
@@ -121,7 +148,7 @@ impl Iterator for MemoryMapIter {
 
 /// `EFI_MEMORY_DESCRIPTOR` (UEFI 2.x, §7.2). Layout fijo por especificación.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct MemoryDescriptor {
     pub ty: u32,
     pub _padding: u32,
@@ -233,3 +260,102 @@ impl FramebufferInfo {
 const _: () = assert!(core::mem::size_of::<MemoryDescriptor>() == 40);
 const _: () = assert!(core::mem::size_of::<FramebufferInfo>() == 48);
 const _: () = assert!(core::mem::size_of::<MemoryMap>() == 16);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_uefi_memory_types() {
+        assert_eq!(MemoryRegionKind::from_uefi_type(7), MemoryRegionKind::Free);
+        for t in 1..=4 {
+            assert_eq!(MemoryRegionKind::from_uefi_type(t), MemoryRegionKind::Boot);
+        }
+        assert_eq!(
+            MemoryRegionKind::from_uefi_type(5),
+            MemoryRegionKind::Firmware
+        );
+        assert_eq!(MemoryRegionKind::from_uefi_type(9), MemoryRegionKind::Acpi);
+        assert_eq!(MemoryRegionKind::from_uefi_type(11), MemoryRegionKind::Mmio);
+        assert_eq!(
+            MemoryRegionKind::from_uefi_type(MEMORY_TYPE_KERNEL),
+            MemoryRegionKind::Kernel
+        );
+        assert_eq!(
+            MemoryRegionKind::from_uefi_type(0),
+            MemoryRegionKind::Reserved
+        );
+        assert_eq!(
+            MemoryRegionKind::from_uefi_type(8),
+            MemoryRegionKind::Reserved
+        );
+        assert_eq!(
+            MemoryRegionKind::from_uefi_type(0x1234),
+            MemoryRegionKind::Reserved
+        );
+    }
+
+    #[test]
+    fn iterates_descriptors_with_firmware_stride() {
+        // UEFI puede usar descriptores mas grandes que la estructura: stride 48.
+        const STRIDE: usize = 48;
+        let mut buf = [0u8; STRIDE * 2];
+        for (i, (ty, start, pages)) in [(7u32, 0x1000u64, 4u64), (MEMORY_TYPE_KERNEL, 0x9000, 1)]
+            .iter()
+            .enumerate()
+        {
+            let d = MemoryDescriptor {
+                ty: *ty,
+                _padding: 0,
+                phys_start: *start,
+                virt_start: 0,
+                page_count: *pages,
+                attribute: 0,
+            };
+            let bytes = unsafe { core::slice::from_raw_parts(&d as *const _ as *const u8, 40) };
+            buf[i * STRIDE..i * STRIDE + 40].copy_from_slice(bytes);
+        }
+        let map = MemoryMap {
+            descriptors: buf.as_ptr() as u64,
+            descriptor_size: STRIDE as u32,
+            descriptor_count: 2,
+        };
+        let v: alloc_free::Collect<MemoryDescriptor, 2> = unsafe { map.iter() }.collect();
+        assert_eq!(v.len, 2);
+        assert_eq!(v.items[0].kind(), MemoryRegionKind::Free);
+        assert_eq!(v.items[0].size_bytes(), 4 * 4096);
+        assert_eq!(v.items[0].end(), 0x1000 + 4 * 4096);
+        assert_eq!(v.items[1].kind(), MemoryRegionKind::Kernel);
+    }
+
+    #[test]
+    fn cmdline_accessor() {
+        let text = b"qemu_exit test=panic";
+        let mut info = unsafe { core::mem::zeroed::<BootInfo>() };
+        assert_eq!(unsafe { info.cmdline() }, "");
+        info.cmdline_address = text.as_ptr() as u64;
+        info.cmdline_size = text.len() as u64;
+        assert_eq!(unsafe { info.cmdline() }, "qemu_exit test=panic");
+    }
+
+    /// Colector fijo sin `alloc` para tests `no_std`.
+    mod alloc_free {
+        pub struct Collect<T: Copy + Default, const N: usize> {
+            pub items: [T; N],
+            pub len: usize,
+        }
+        impl<T: Copy + Default, const N: usize> FromIterator<T> for Collect<T, N> {
+            fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+                let mut c = Self {
+                    items: [T::default(); N],
+                    len: 0,
+                };
+                for it in iter {
+                    c.items[c.len] = it;
+                    c.len += 1;
+                }
+                c
+            }
+        }
+    }
+}

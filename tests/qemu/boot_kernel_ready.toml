@@ -1,0 +1,17 @@
+# Arranque nominal: la piedra angular del CI (sección 109 del documento maestro).
+name = "boot.kernel_ready"
+description = "AriBoot carga el kernel, que reporta hardware y emite READY"
+level = "smoke"
+areas = ["boot"]
+cmdline = "qemu_exit"
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriBoot",
+    "ExitBootServices -> AriKernel",
+    "AriCodeOS booting...",
+    "memory map:",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "[ERROR]"]

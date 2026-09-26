@@ -1,0 +1,11 @@
+[package]
+name = "aricode-x86-paging"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tablas de páginas x86-64 de 4 niveles (no_std) usadas por AriBoot"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

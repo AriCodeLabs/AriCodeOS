@@ -1562,48 +1562,54 @@ structured logging service
 
 # 55. Tests
 
-Los tests son parte estructural del proyecto.
+Los tests son parte estructural del proyecto y viven en el repositorio.
 
-Estructura conceptual:
+Estructura implementada (ver `tests/README.md`):
 
 ```text
-tests/
-├── boot/
-├── memory/
-├── paging/
-├── allocator/
-├── interrupts/
-├── scheduler/
-├── ipc/
-├── capabilities/
-├── drivers/
-├── filesystem/
-├── networking/
-└── security/
+libs/*/src/lib.rs          #[cfg(test)]  unitarios de host (elf, x86-paging, cmdline)
+boot-protocol/src/lib.rs   #[cfg(test)]  clasificación de memoria, iterador, cmdline
+tools/xtask/src/*.rs       #[cfg(test)]  validez de los escenarios y utilidades
+tests/qemu/*.toml                        escenarios de integración en QEMU
 ```
+
+Cada fase añade su área (`boot`, `panic`, `memory`, `paging`, `interrupts`,
+`scheduler`, `ipc`, `capabilities`, `drivers`, `filesystem`, `networking`,
+`security`) como nuevos escenarios TOML y nuevos tests unitarios, en la misma
+rama que el código.
 
 ---
 
-# 56. Test runner en QEMU
-
-Objetivo:
+# 56. Test runner en QEMU y niveles
 
 ```bash
-cargo xtask test
+cargo xtask test                 # unit + smoke      (por defecto; mínimo hacia develop)
+cargo xtask test --level unit    # solo host, segundos
+cargo xtask test --all           # unit + full       (obligatorio hacia main)
+cargo xtask test --area boot     # solo los escenarios QEMU de un área
+cargo xtask test --list          # ver escenarios
 ```
 
 Salida:
 
 ```text
-[PASS] boot.basic
-[PASS] memory.bitmap
-[PASS] paging.map_unmap
-[PASS] interrupt.breakpoint
-[PASS] scheduler.round_robin
-[FAIL] ipc.transfer_capability
+[xtask] nivel Full
+[xtask] unit tests (host)
+test result: ok. 18 passed
+[PASS] boot.kernel_panic_reports              1.6s
+[PASS] boot.kernel_ready                      1.6s
+[PASS] boot.loader_missing_kernel             1.5s
+[PASS] boot.loader_rejects_bad_elf            1.5s
+[xtask] 4 escenarios QEMU, 0 fallidos
 ```
 
-QEMU debe finalizar automáticamente con código de salida interpretable por CI.
+Un escenario declara cmdline, inyecciones de fallo en la ESP (kernel truncado,
+kernel ausente) y expectativas sobre la serie y el código de salida de QEMU
+(33 éxito, 35 fallo reportado). El comportamiento de test dentro del sistema se
+pide por cmdline (`qemu_exit`, `test=panic`), nunca por features de
+compilación (ADR 0007): un único binario sirve para todos los escenarios.
+
+QEMU termina automáticamente con código de salida interpretable por CI.
 
 ---
 
@@ -3368,9 +3374,9 @@ aricodeos/
 
 No necesitamos crear toda la estructura futura desde el primer día.
 
-Este árbol es el que existe en el repositorio desde M0, con `boot/` y
-`kernel/` divididos en módulos (`elf.rs`, `paging.rs`; `serial.rs`,
-`framebuffer.rs`, `qemu.rs`) y `docs/decisions/0001..0006`.
+Este árbol es el que existe en el repositorio desde M0, ampliado con
+`libs/{elf,x86-paging,cmdline}` (lógica `no_std` con tests de host),
+`tests/qemu/` (escenarios) y `docs/decisions/0001..0007`.
 
 ---
 
