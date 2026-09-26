@@ -2,7 +2,7 @@
 
 ## Documento maestro de arquitectura, especificaciones técnicas y plan de desarrollo
 
-**Estado:** 0.0.3 completada (2026-09-26): boot, consola, GDT/IDT, PMM, VMM, heap  
+**Estado:** 0.0.4 completada (2026-09-26): boot, consola, GDT/IDT, memoria, APIC, threads, scheduler  
 **Versión del documento:** 0.2  
 **Nombre del sistema:** AriCodeOS  
 **Arquitectura inicial:** x86-64  
@@ -2077,48 +2077,64 @@ contra valores conocidos.
 
 # FASE 8 — APIC y timer
 
-### Implementar
+**Estado: completada (2026-09-26).**
 
-- Local APIC;
-- timer;
-- tick;
-- monotonic clock inicial.
+### Implementado
+
+- `libs/sync`: `IrqLock` con política de interrupciones; sustituye a la
+  celda de una sola CPU en todo el estado global del kernel;
+- PIC 8259 remapeado y enmascarado; Local APIC habilitado (vector espurio
+  0xFF) y mapeado sin caché;
+- timer del LAPIC calibrado con el PIT y periódico a 100 Hz (vector 0x20);
+- tick y reloj monótono (`time::{ticks, uptime_ms, sleep_ms}`);
+- interrupciones externas habilitadas al final del arranque.
 
 ### Criterio
 
-Interrupciones periódicas estables durante ejecución prolongada.
+Interrupciones periódicas estables: `timer.init` (smoke) y `timer.selftest`
+(5 ticks en 50 ms medidos por el PIT, `sleep_ms` exacto, cero espurias).
+La ejecución prolongada se cubrirá con el scheduler (Fase 10).
 
 ---
 
 # FASE 9 — Threads
 
-### Implementar
+**Estado: completada (2026-09-26).**
 
-- kernel thread;
-- stacks;
-- context switch;
-- estados;
-- idle thread.
+### Implementado
+
+- kernel threads (`kernel/src/task`), con el contexto de arranque adoptado
+  como hilo `main`;
+- pilas de 32 KiB con guard page en región propia, devueltas al PMM al
+  recoger el hilo;
+- context switch System V en ensamblador (`switch_context`, `thread_start`);
+- estados READY/RUNNING/BLOCKED/SLEEPING/TERMINATED en `libs/sched`
+  (política probada en host: 6 tests);
+- idle thread (`hlt` + `yield`).
 
 ### Criterio
 
-Dos threads alternan ejecución correctamente.
+Dos threads alternan ejecución correctamente: `threads.selftest` exige la
+secuencia `ABABAB` con `yield` y que 40 workers terminen y sean recogidos sin
+perder frames.
 
 ---
 
 # FASE 10 — Scheduler
 
+**Estado: completada (2026-09-26).**
+
 ### Primera versión
 
-Round Robin preemptivo.
+Round Robin preemptivo con quantum de 20 ms sobre el tick del APIC, sueño
+planificado y colas de espera (`task::wait::WaitQueue`).
 
-### Tests
+### Tests (`scheduler.selftest`, área `scheduler`)
 
-- fairness básica;
-- yield;
-- sleep;
-- bloqueo;
-- wakeup.
+- fairness básica: tres hilos ocupados sin `yield` reparten la CPU;
+- yield: cubierto por `threads.selftest`;
+- sleep: 50 ms medidos en ticks;
+- bloqueo y wakeup: `wake_one` libera a un consumidor y `wake_all` al resto.
 
 ---
 
@@ -2959,12 +2975,14 @@ Añadido:
 
 # 88. AriCodeOS 0.0.4
 
-Añadir:
+**Estado: completada (2026-09-26), tag `v0.0.4`.**
 
-- APIC;
-- timer;
-- threads;
-- scheduler.
+Añadido:
+
+- `IrqLock` en todo el estado global (`libs/sync`);
+- APIC (PIC enmascarado, LAPIC, timer calibrado con PIT, 100 Hz);
+- threads (pilas con guard, context switch, idle);
+- scheduler round robin preemptivo, sueño y colas de espera (`libs/sched`).
 
 ---
 
@@ -3411,7 +3429,7 @@ aricodeos/
 No necesitamos crear toda la estructura futura desde el primer día.
 
 Este árbol es el que existe en el repositorio desde M0, ampliado con
-`libs/{elf,x86-paging,x86-cpu,pmm,heap,cmdline,fb-console}` (lógica `no_std` con tests de host),
+`libs/{elf,x86-paging,x86-cpu,pmm,heap,sync,sched,cmdline,fb-console}` (lógica `no_std` con tests de host),
 `tests/qemu/` (escenarios) y `docs/decisions/0001..0007`.
 
 ---

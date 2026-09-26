@@ -3,7 +3,7 @@
 //! trozo más de la región virtual reservada con frames del PMM.
 
 use super::{pmm, vmm};
-use crate::sync::SingleCpu;
+use crate::sync::IrqLock;
 use aricode_heap::{Heap, HeapStats};
 use aricode_pmm::Frame;
 use aricode_x86_paging::{GLOBAL, NO_EXECUTE, PAGE_SIZE, WRITABLE};
@@ -18,15 +18,15 @@ pub const HEAP_MAX: u64 = 64 * 1024 * 1024;
 pub const HEAP_CHUNK: u64 = 1024 * 1024;
 
 struct KernelHeap {
-    heap: SingleCpu<Heap>,
-    /// Bytes de `HEAP_BASE..` ya mapeados.
-    mapped: SingleCpu<u64>,
+    heap: IrqLock<Heap>,
+    /// Bytes de `HEAP_BASE..` ya mapeados. Su lock serializa los crecimientos.
+    mapped: IrqLock<u64>,
 }
 
 #[global_allocator]
 static HEAP: KernelHeap = KernelHeap {
-    heap: SingleCpu::new(Heap::empty()),
-    mapped: SingleCpu::new(0),
+    heap: IrqLock::new(Heap::empty()),
+    mapped: IrqLock::new(0),
 };
 
 pub fn init() {
@@ -41,13 +41,11 @@ pub fn init() {
 }
 
 pub fn stats() -> HeapStats {
-    // SAFETY: una CPU sin interrupciones (ver `SingleCpu`).
-    unsafe { (*HEAP.heap.get()).stats() }
+    HEAP.heap.lock().stats()
 }
 
 pub fn mapped_bytes() -> u64 {
-    // SAFETY: ídem.
-    unsafe { *HEAP.mapped.get() }
+    *HEAP.mapped.lock()
 }
 
 /// Mapea `bytes` más (redondeado a página) y los añade al heap.
@@ -58,9 +56,9 @@ pub fn mapped_bytes() -> u64 {
 /// estado y puede tener éxito si vuelve a haber memoria. Las tablas
 /// intermedias que el VMM haya creado se conservan: se reutilizarán.
 fn grow(bytes: u64) -> Result<(), &'static str> {
-    // SAFETY: una CPU sin interrupciones; `mapped` solo se toca aquí y no se
-    // reentra (ni el PMM ni el VMM llaman al heap).
-    let mapped = unsafe { &mut *HEAP.mapped.get() };
+    // El lock de `mapped` se mantiene durante todo el crecimiento: ni el PMM
+    // ni el VMM llaman al heap, así que no hay reentrada.
+    let mut mapped = HEAP.mapped.lock();
     let bytes = bytes.next_multiple_of(PAGE_SIZE);
     if *mapped + bytes > HEAP_MAX {
         return Err("heap: limite alcanzado");
@@ -76,7 +74,7 @@ fn grow(bytes: u64) -> Result<(), &'static str> {
 
     *mapped += bytes;
     // SAFETY: región recién mapeada RW, exclusiva del heap, alineada a página.
-    unsafe { (*HEAP.heap.get()).add_region(start as usize, bytes as usize) };
+    unsafe { HEAP.heap.lock().add_region(start as usize, bytes as usize) };
     debug!("heap: crecido a {} KiB", *mapped / 1024);
     Ok(())
 }
@@ -106,17 +104,18 @@ fn unmap_pages(start: u64, len: u64) {
     }
 }
 
-// SAFETY: el acceso es secuencial (una CPU, sin interrupciones); `dealloc`
-// solo recibe punteros de `alloc` por contrato de `GlobalAlloc`. Cada acceso
-// al heap toma una referencia nueva y corta: `grow` vuelve a entrar en el
-// global, así que ninguna `&mut Heap` puede seguir viva al llamarlo.
+// SAFETY: cada acceso al heap toma su `IrqLock` durante una sola operación;
+// `dealloc` solo recibe punteros de `alloc` por contrato de `GlobalAlloc`.
+// `grow` toma el lock por su cuenta, así que no puede haber un guard vivo al
+// llamarlo.
 unsafe impl GlobalAlloc for KernelHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if let Some(p) = (*self.heap.get()).allocate(layout) {
+        let first = self.heap.lock().allocate(layout);
+        if let Some(p) = first {
             return p.as_ptr();
         }
         // No cabe: crecer lo suficiente para esta petición (con margen) y
-        // reintentar con un préstamo nuevo.
+        // reintentar con un lock nuevo.
         let need = (layout.size() as u64)
             .saturating_add(layout.align() as u64)
             .saturating_add(64)
@@ -124,14 +123,15 @@ unsafe impl GlobalAlloc for KernelHeap {
         if grow(need).is_err() {
             return core::ptr::null_mut();
         }
-        (*self.heap.get())
+        self.heap
+            .lock()
             .allocate(layout)
             .map_or(core::ptr::null_mut(), |p| p.as_ptr())
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         if let Some(p) = core::ptr::NonNull::new(ptr) {
-            (*self.heap.get()).deallocate(p, layout);
+            self.heap.lock().deallocate(p, layout);
         }
     }
 }

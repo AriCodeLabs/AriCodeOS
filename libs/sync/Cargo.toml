@@ -1,0 +1,11 @@
+[package]
+name = "aricode-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Spinlocks con política de interrupciones enchufable (no_std)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

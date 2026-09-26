@@ -1,17 +1,18 @@
 //! Consola del kernel: serie siempre, framebuffer si existe. Implementa
 //! `log::Log` para las macros `log::{trace,debug,info,warn,error}!`.
 //!
-//! Estado global en `sync::SingleCpu`: una CPU y sin interrupciones externas
-//! hasta la Fase 9.
+//! La consola de framebuffer va tras un `IrqLock`. Si el lock está tomado
+//! (una excepción dentro de la propia consola), el texto sale solo por serie
+//! en vez de bloquear: perder una línea en pantalla es mejor que colgar.
 
 use crate::framebuffer::MmioSurface;
 use crate::serial::Serial;
-use crate::sync::SingleCpu;
+use crate::sync::IrqLock;
 use aricode_fb_console::Console;
 use core::fmt::Write;
 use log::{Level, LevelFilter, Log, Metadata, Record};
 
-static FB: SingleCpu<Option<Console<MmioSurface>>> = SingleCpu::new(None);
+static FB: IrqLock<Option<Console<MmioSurface>>> = IrqLock::new(None);
 static LOGGER: KernelLogger = KernelLogger;
 
 /// Activa la consola de framebuffer. Idempotente; ignora si no hay GOP.
@@ -23,8 +24,7 @@ pub fn init_framebuffer(info: boot_protocol::FramebufferInfo) -> bool {
     };
     match MmioSurface::new(info, base) {
         Some(surface) => {
-            // SAFETY: ver `SingleCpu`.
-            unsafe { *FB.get() = Some(Console::new(surface)) };
+            *FB.lock() = Some(Console::new(surface));
             true
         }
         None => false,
@@ -41,9 +41,10 @@ pub fn init_logger(level: LevelFilter) {
 /// Escribe texto sin formato de log en todas las salidas (marcadores, banner).
 pub fn write_raw(args: core::fmt::Arguments) {
     let _ = Serial.write_fmt(args);
-    // SAFETY: ver `SingleCpu`.
-    if let Some(fb) = unsafe { &mut *FB.get() } {
-        let _ = fb.write_fmt(args);
+    if let Some(mut guard) = FB.try_lock() {
+        if let Some(fb) = guard.as_mut() {
+            let _ = fb.write_fmt(args);
+        }
     }
 }
 

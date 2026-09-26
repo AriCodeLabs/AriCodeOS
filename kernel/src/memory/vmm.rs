@@ -11,7 +11,7 @@
 
 use super::phys;
 use super::pmm;
-use crate::sync::SingleCpu;
+use crate::sync::IrqLock;
 use aricode_pmm::{Frame, FRAME_SIZE};
 use aricode_x86_paging::{
     FrameAlloc, MapError, Mapper, OffsetMap, GLOBAL, HUGE_2M, NO_EXECUTE, PAGE_SIZE, WRITABLE,
@@ -37,7 +37,7 @@ impl FrameAlloc for PmmFrames {
 
 pub type KernelMapper = Mapper<PmmFrames, OffsetMap>;
 
-static VMM: SingleCpu<Option<KernelMapper>> = SingleCpu::new(None);
+static VMM: IrqLock<Option<KernelMapper>> = IrqLock::new(None);
 
 extern "C" {
     static __text_start: u8;
@@ -121,8 +121,7 @@ pub fn init(info: &BootInfo) -> u64 {
     // pila actual (mapa físico) y todos los datos del kernel; `root` es un
     // PML4 completo construido arriba.
     unsafe { core::arch::asm!("mov cr3, {}", in(reg) root, options(nostack, preserves_flags)) };
-    // SAFETY: init único, una CPU (ver `SingleCpu`).
-    unsafe { *VMM.get() = Some(m) };
+    *VMM.lock() = Some(m);
     info!(
         "vmm: tablas propias activas (pml4 {root:#x}), W^X en la imagen, pila {:#x}..{:#x} con guard {:#x}",
         KERNEL_STACK_BOTTOM, KERNEL_STACK_TOP, KERNEL_STACK_GUARD
@@ -165,9 +164,8 @@ fn describe(flags: u64) -> &'static str {
 /// # Panics
 /// Si `init` no se ha ejecutado.
 pub fn with<R>(f: impl FnOnce(&mut KernelMapper) -> R) -> R {
-    // SAFETY: una CPU sin interrupciones; no se reentra (ver `SingleCpu`).
-    let vmm = unsafe { &mut *VMM.get() };
-    f(vmm.as_mut().expect("VMM no inicializado"))
+    let mut guard = VMM.lock();
+    f(guard.as_mut().expect("VMM no inicializado"))
 }
 
 /// `true` si `addr` cae en la guard page de la pila del kernel.

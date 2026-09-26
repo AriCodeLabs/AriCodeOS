@@ -9,6 +9,8 @@ members = [
     "libs/x86-cpu",
     "libs/pmm",
     "libs/heap",
+    "libs/sync",
+    "libs/sched",
     "boot",
     "kernel",
     "tools/xtask",
@@ -24,11 +26,13 @@ default-members = [
     "libs/x86-cpu",
     "libs/pmm",
     "libs/heap",
+    "libs/sync",
+    "libs/sched",
     "tools/xtask",
 ]
 
 [workspace.package]
-version = "0.0.3"
+version = "0.0.4"
 edition = "2021"
 license = "UNLICENSED"
 repository = "https://github.com/lynxcraft/aricodeos"

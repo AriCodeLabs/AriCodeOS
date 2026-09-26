@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "ariboot"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "aricode-cmdline",
  "aricode-elf",
@@ -16,40 +16,50 @@ dependencies = [
 
 [[package]]
 name = "aricode-cmdline"
-version = "0.0.3"
+version = "0.0.4"
 
 [[package]]
 name = "aricode-elf"
-version = "0.0.3"
+version = "0.0.4"
 
 [[package]]
 name = "aricode-fb-console"
-version = "0.0.3"
+version = "0.0.4"
 
 [[package]]
 name = "aricode-heap"
-version = "0.0.3"
+version = "0.0.4"
 
 [[package]]
 name = "aricode-pmm"
-version = "0.0.3"
+version = "0.0.4"
+
+[[package]]
+name = "aricode-sched"
+version = "0.0.4"
+
+[[package]]
+name = "aricode-sync"
+version = "0.0.4"
 
 [[package]]
 name = "aricode-x86-cpu"
-version = "0.0.3"
+version = "0.0.4"
 
 [[package]]
 name = "aricode-x86-paging"
-version = "0.0.3"
+version = "0.0.4"
 
 [[package]]
 name = "arikernel"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "aricode-cmdline",
  "aricode-fb-console",
  "aricode-heap",
  "aricode-pmm",
+ "aricode-sched",
+ "aricode-sync",
  "aricode-x86-cpu",
  "aricode-x86-paging",
  "boot-protocol",
@@ -70,7 +80,7 @@ checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
 name = "boot-protocol"
-version = "0.0.3"
+version = "0.0.4"
 
 [[package]]
 name = "cfg-if"
@@ -310,7 +320,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "serde",
  "toml",

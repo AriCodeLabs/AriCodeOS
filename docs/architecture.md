@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.0.3 (Fases 5, 6 y 7)
+## Estado: 0.0.4 (Fases 8, 9 y 10)
 
 ```text
 OVMF (UEFI)
@@ -16,7 +16,9 @@ OVMF (UEFI)
        informe de BootInfo, GDT/TSS/IDT propias con IST para #DF,
        excepciones con volcado, PMM por bitmap, VMM con tablas propias
        (W^X, mapa físico, pila con guard page), heap con crecimiento
-       bajo demanda, ARICODEOS_KERNEL_READY
+       bajo demanda, PIC enmascarado, LAPIC + timer 100 Hz, interrupciones
+       habilitadas, hilos del kernel, scheduler round robin preemptivo con
+       sueño y colas de espera, ARICODEOS_KERNEL_READY
 ```
 
 ## Crates
@@ -30,10 +32,13 @@ libs/fb-console/     aricode-fb-console: consola de texto sobre framebuffer 32 b
 libs/x86-cpu/        aricode-x86-cpu: descriptores GDT/TSS/IDT y tabla de excepciones (no_std, tests de host)
 libs/pmm/            aricode-pmm: allocator de frames por bitmap sobre almacenamiento externo (no_std, tests de host)
 libs/heap/           aricode-heap: heap first-fit con lista de libres, fusión y cabecera por asignación (no_std, tests de host)
+libs/sync/           aricode-sync: IrqLock/SpinLock con política de interrupciones enchufable (no_std, tests de host)
+libs/sched/          aricode-sched: política round robin sobre Tid con estados, sueño, bloqueo y salida (no_std + alloc, tests de host)
 boot/                ariboot: integra lo anterior con la crate `uefi`
 kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log), sync (SingleCpu),
-                     arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions}, memory/{phys, pmm, vmm, heap},
-                     informe, panic, salida QEMU
+                     arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions, port, pic, pit, apic},
+                     memory/{phys, pmm, vmm, heap}, sync (política IRQ), time,
+                     task/{context (switch_context, thread_start), stack, thread, scheduler, wait}, informe, panic, salida QEMU
 tools/xtask/         build, image, qemu, scenario, test, check
 tests/qemu/          escenarios QEMU declarativos (ver tests/README.md)
 ```
@@ -158,15 +163,83 @@ las activa; a partir de ahí la identidad del cargador deja de existir:
 - `test=heap` ejercita colecciones, crecimiento a más de 4 MiB, fallo
   controlado y ausencia de fugas.
 
+## Sincronización
+
+Todo el estado global (consola de framebuffer, PMM, VMM, heap, GDT/TSS/IDT)
+vive tras `sync::IrqLock`, que guarda `RFLAGS.IF`, ejecuta `cli` al tomar y
+restaura al soltar: una sección crítica no puede ser interrumpida ni reentrada
+por un handler. Con una CPU, encontrar un lock tomado solo puede ser reentrada,
+así que `lock` entra en pánico tras muchos giros en vez de colgar. La consola
+usa `try_lock` y cae a solo serie si está tomada (una excepción dentro de la
+propia consola no bloquea el diagnóstico). Orden de adquisición:
+heap -> pmm -> vmm -> console.
+
+## Interrupciones externas y tiempo (Fase 8)
+
+- El 8259 se remapea a 0x20/0x28 y se enmascara por completo; las
+  interrupciones llegan por el Local APIC, mapeado sin caché en
+  `0xFFFF_D000_0000_0000` y habilitado con vector espurio 0xFF.
+- El timer del LAPIC se calibra contra el canal 2 del PIT (10 ms) y se
+  programa periódico a `time::TICK_HZ` = 100 Hz en el vector 0x20; en QEMU
+  resultan ~62 700 ticks/ms con divisor 16.
+- `time` mantiene el contador de ticks, `uptime_ms` y `sleep_ms` (espera con
+  `hlt`, sin scheduler todavía). `test=timer` verifica el ritmo contra el PIT.
+- Los vectores >= 32 se despachan desde `exceptions::handle` a
+  `apic::handle_interrupt`, que envía EOI (salvo el espurio).
+
+## Hilos del kernel (Fase 9)
+
+```text
+0xFFFF_E000_0000_0000  pilas de hilo: slot = tid, cada uno guard page (sin mapear) + 32 KiB RW NX G
+```
+
+- `aricode-sched::RoundRobin` decide quién sigue; el kernel guarda por hilo
+  su `saved_rsp` y su pila. El contexto de arranque se adopta como hilo
+  `main` (tid 0) y el idle (tid 1, `hlt` + `yield`) se elige cuando la cola
+  está vacía y nunca se encola.
+- `switch_context` (System V) guarda rbx, rbp, r12..r15 y rsp; un hilo nuevo
+  arranca por `thread_start` con r12 = entrada y r13 = argumento, habilita
+  interrupciones y al retornar entra en `exit`.
+- El lock del planificador se suelta antes del cambio de contexto, con las
+  interrupciones deshabilitadas: el hilo que reanuda nunca hereda un lock.
+- Los hilos terminados los recoge el siguiente hilo que reanuda tras un
+  cambio (`reap`): nunca se libera la pila en uso. Las guard pages de hilo
+  también se reconocen en el diagnóstico de `STACK OVERFLOW`.
+- `test=threads`: dos hilos alternan estrictamente con `yield` y 40 workers
+  terminan y devuelven sus pilas al PMM.
+
+## Scheduler preemptivo (Fase 10)
+
+- El handler del timer, tras el EOI, llama a `scheduler::on_tick`: despierta
+  a los hilos cuyo tick ha llegado y, si el quantum (2 ticks = 20 ms) ha
+  expirado o alguien despertó, preempta con la misma ruta de cambio que
+  `yield`. El hilo preemptado queda con su marco de interrupción en su pila y
+  reanuda por el `iretq` del handler.
+- Ningún lock del kernel puede ser preemptado: todos deshabilitan
+  interrupciones. El lock del planificador se suelta antes del cambio.
+- `scheduler::sleep_ms` duerme sin consumir CPU; `time::sleep_ms` delega en él.
+- `task::wait::WaitQueue` implementa bloqueo con condición evaluada bajo su
+  lock y `wake_one`/`wake_all`; un despertar que llega antes de bloquearse no
+  se pierde porque `unblock` falla y el hilo reevalúa.
+- `test=sched`: tres hilos que nunca ceden reparten la CPU (mínimo >= mitad
+  del máximo), un hilo duerme 50 ms con 5..7 ticks de error, y dos
+  consumidores se despiertan uno a uno y luego todos.
+
 ## Deuda conocida
 
+- Sin prioridades ni afinidad: solo round robin en una CPU (Fase 32 para SMP).
+- Los slots de pila no se reutilizan (uno por tid); el espacio virtual
+  reservado permite ~2^31 hilos, así que no es un límite práctico aún.
+- El LAPIC también queda cubierto por el mapa físico lineal con caché WB;
+  solo se accede por la ventana sin caché, pero es un alias a resolver
+  cuando se reserve MMIO fuera del mapa lineal.
+- Sin I/O APIC ni MSI: ninguna IRQ de dispositivo todavía (Fase 17).
 - El heap nunca devuelve trozos al PMM ni compacta; el slab/size-class de la
   sección 16 llegará cuando haya métricas que lo pidan. Las tablas intermedias
   creadas durante un crecimiento fallido tampoco se devuelven (se reutilizan).
 - Las tablas del cargador (tipo `Kernel` en el mapa) no se recuperan: su
   extensión no se conoce con precisión.
-- Sin `invlpg`/TLB shootdown genérico: solo la autoprueba invalida entradas.
-- Estado global (PMM, VMM, consola) en `SingleCpu` hasta la Fase 9.
+- Sin `invlpg`/TLB shootdown genérico: solo el heap y la autoprueba invalidan.
 - Sin APIC: las interrupciones externas siguen deshabilitadas (Fase 8).
 - El estado de la consola es una celda de una sola CPU sin bloqueo; se
   sustituye por un spinlock consciente de interrupciones con los threads (Fase 9).
