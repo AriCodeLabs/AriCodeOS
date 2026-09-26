@@ -15,6 +15,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "aricode-abi"
+version = "0.0.4"
+
+[[package]]
 name = "aricode-cmdline"
 version = "0.0.4"
 
@@ -54,6 +58,7 @@ version = "0.0.4"
 name = "arikernel"
 version = "0.0.4"
 dependencies = [
+ "aricode-abi",
  "aricode-cmdline",
  "aricode-fb-console",
  "aricode-heap",

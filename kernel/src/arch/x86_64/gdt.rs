@@ -1,7 +1,7 @@
 //! GDT propia del kernel y TSS con pila dedicada para double fault.
 
 use crate::sync::IrqLock;
-use aricode_x86_cpu::{Gdt, SegmentDescriptor, Selector, Tss, TssDescriptor};
+use aricode_x86_cpu::{layout, Gdt, SegmentDescriptor, Selector, Tss, TssDescriptor};
 use core::arch::asm;
 
 /// Índice IST (1..=7) usado por #DF. IST1 = `Tss::ist[0]`.
@@ -21,12 +21,16 @@ static GDT: IrqLock<Gdt<8>> = IrqLock::new(Gdt::new());
 pub struct Selectors {
     pub code: Selector,
     pub data: Selector,
+    pub user_data: Selector,
+    pub user_code: Selector,
     pub tss: Selector,
 }
 
 static SELECTORS: IrqLock<Selectors> = IrqLock::new(Selectors {
     code: Selector::NULL,
     data: Selector::NULL,
+    user_data: Selector::NULL,
+    user_code: Selector::NULL,
     tss: Selector::NULL,
 });
 
@@ -44,16 +48,37 @@ pub fn init() {
         tss.ist[(DOUBLE_FAULT_IST - 1) as usize] = stack_top;
         &*tss as *const Tss as u64
     };
-    let (ptr, code, data, tss) = {
+    let (ptr, sel) = {
         let mut gdt = GDT.lock();
         let code = gdt.push(SegmentDescriptor::code64(0));
         let data = gdt.push(SegmentDescriptor::data(0));
+        let user_data = gdt.push(SegmentDescriptor::data(3));
+        let user_code = gdt.push(SegmentDescriptor::code64(3));
         let tss = gdt.push_tss(TssDescriptor::new(tss_addr));
-        (gdt.pointer(), code, data, tss)
+        (
+            gdt.pointer(),
+            Selectors {
+                code,
+                data,
+                user_data,
+                user_code,
+                tss,
+            },
+        )
     };
-    *SELECTORS.lock() = Selectors { code, data, tss };
+    assert_eq!(sel.code, layout::KERNEL_CODE);
+    assert_eq!(sel.user_data, layout::USER_DATA);
+    assert_eq!(sel.user_code, layout::USER_CODE);
+    assert_eq!(sel.tss, layout::TSS);
+    *SELECTORS.lock() = sel;
     // SAFETY: la GDT y el TSS son estáticos, ya construidos y nunca se mueven.
-    unsafe { load(ptr, code, data, tss) };
+    unsafe { load(ptr, sel.code, sel.data, sel.tss) };
+}
+
+/// Pila que usará la CPU al entrar en ring 0 desde ring 3 por interrupción
+/// o excepción (`TSS.rsp0`). Se actualiza en cada cambio de contexto.
+pub fn set_kernel_stack(top: u64) {
+    TSS.lock().rsp[0] = top;
 }
 
 /// Carga la GDT y recarga todos los selectores de segmento y el TR.

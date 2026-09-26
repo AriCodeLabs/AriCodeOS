@@ -1,0 +1,10 @@
+name = "user.bad_syscall"
+description = "syscall inexistente devuelve NoSys y el proceso continua"
+level = "full"
+areas = ["user"]
+cmdline = "qemu_exit test=user_bad_syscall"
+
+[expect]
+exit = 33
+serial_contains = ["syscall desconocida 999", "salio con codigo 7", "ARICODEOS_KERNEL_READY"]
+serial_absent = ["KERNEL PANIC"]

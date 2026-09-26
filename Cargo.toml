@@ -11,6 +11,7 @@ members = [
     "libs/heap",
     "libs/sync",
     "libs/sched",
+    "sdk/abi",
     "boot",
     "kernel",
     "tools/xtask",
@@ -28,6 +29,7 @@ default-members = [
     "libs/heap",
     "libs/sync",
     "libs/sched",
+    "sdk/abi",
     "tools/xtask",
 ]
 
