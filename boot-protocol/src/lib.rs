@@ -11,11 +11,17 @@
 pub const BOOT_PROTOCOL_MAGIC: u64 = 0x3145_444F_4349_5241;
 
 /// Versión del protocolo. El kernel rechaza versiones que no entiende.
-pub const BOOT_PROTOCOL_VERSION: u32 = 2;
+pub const BOOT_PROTOCOL_VERSION: u32 = 3;
 
 /// Dirección virtual base donde se enlaza y se mapea el kernel (mitad alta,
 /// últimos 2 GiB del espacio canónico: compatible con `code-model=kernel`).
 pub const KERNEL_VIRT_BASE: u64 = 0xFFFF_FFFF_8000_0000;
+
+/// Base del mapa lineal de memoria física (entrada 256 del PML4). AriBoot
+/// mapea ahí toda la memoria física no reservada, RW y NX, de modo que el
+/// kernel accede a cualquier dirección física `p` en `PHYS_MAP_BASE + p`
+/// desde su primera instrucción y sin depender del mapa de identidad.
+pub const PHYS_MAP_BASE: u64 = 0xFFFF_8000_0000_0000;
 
 /// Ruta del kernel dentro de la partición EFI, tal y como la abre AriBoot.
 pub const KERNEL_PATH: &str = "\\aricodeos\\kernel.elf";
@@ -31,8 +37,13 @@ pub const MEMORY_TYPE_KERNEL: u32 = 0x8000_0000;
 /// Firma de la función de entrada del kernel.
 ///
 /// AriBoot salta aquí con interrupciones deshabilitadas, paginación activa
-/// (identidad para toda la memoria física + kernel en `KERNEL_VIRT_BASE`),
-/// `rsp` apuntando a la pila reservada y `rdi` = puntero físico a `BootInfo`.
+/// (identidad para toda la memoria física, mapa físico en `PHYS_MAP_BASE` y
+/// kernel en `KERNEL_VIRT_BASE`), `rsp` apuntando a la pila reservada a través
+/// del mapa físico y `rdi` = puntero a `BootInfo` a través del mapa físico.
+///
+/// Todas las direcciones contenidas en `BootInfo` son físicas; el kernel las
+/// convierte con `phys_map_offset`. La identidad es solo para el cargador y
+/// el kernel no debe contar con ella.
 pub type KernelEntry = unsafe extern "C" fn(boot_info: *const BootInfo) -> !;
 
 /// Información entregada por el bootloader. Vive en una página propia
@@ -76,24 +87,44 @@ pub struct BootInfo {
     /// de tipo `MEMORY_TYPE_KERNEL`. `cmdline_size == 0` si no existe.
     pub cmdline_address: u64,
     pub cmdline_size: u64,
+
+    /// Desplazamiento del mapa físico lineal (= `PHYS_MAP_BASE`): la dirección
+    /// física `p` es accesible en `p + phys_map_offset`.
+    pub phys_map_offset: u64,
+    /// Fin (exclusivo) de la memoria física cubierta por el mapa lineal.
+    pub phys_map_limit: u64,
 }
 
 impl BootInfo {
+    /// Dirección virtual, a través del mapa físico, de una dirección física.
+    pub const fn phys_to_virt(&self, phys: u64) -> u64 {
+        phys + self.phys_map_offset
+    }
+
     /// Línea de comandos como `&str` (vacía si no hay o no es UTF-8).
     ///
     /// # Safety
     ///
-    /// `cmdline_address..+cmdline_size` debe estar mapeado y ser inmutable
-    /// durante el lifetime devuelto.
+    /// El mapa físico descrito por `phys_map_offset` debe estar activo y la
+    /// cmdline debe permanecer inmutable durante el lifetime devuelto.
     pub unsafe fn cmdline(&self) -> &str {
         if self.cmdline_size == 0 {
             return "";
         }
         let bytes = core::slice::from_raw_parts(
-            self.cmdline_address as *const u8,
+            self.phys_to_virt(self.cmdline_address) as *const u8,
             self.cmdline_size as usize,
         );
         core::str::from_utf8(bytes).unwrap_or("")
+    }
+
+    /// Iterador sobre el mapa de memoria a través del mapa físico.
+    ///
+    /// # Safety
+    ///
+    /// El mapa físico debe estar activo y el buffer de descriptores intacto.
+    pub unsafe fn memory_regions(&self) -> MemoryMapIter {
+        self.memory_map.iter(self.phys_map_offset)
     }
 }
 
@@ -111,16 +142,17 @@ pub struct MemoryMap {
 }
 
 impl MemoryMap {
-    /// Itera los descriptores.
+    /// Itera los descriptores leyéndolos en `descriptors + virt_offset`.
     ///
     /// # Safety
     ///
-    /// El buffer de descriptores (`descriptors`, `descriptor_size *
-    /// descriptor_count` bytes) debe seguir mapeado y sin modificar mientras
-    /// viva el iterador.
-    pub unsafe fn iter(&self) -> MemoryMapIter {
+    /// El buffer de descriptores (`descriptors + virt_offset`,
+    /// `descriptor_size * descriptor_count` bytes) debe estar mapeado y sin
+    /// modificar mientras viva el iterador.
+    pub unsafe fn iter(&self, virt_offset: u64) -> MemoryMapIter {
         MemoryMapIter {
             map: *self,
+            virt_offset,
             index: 0,
         }
     }
@@ -128,6 +160,7 @@ impl MemoryMap {
 
 pub struct MemoryMapIter {
     map: MemoryMap,
+    virt_offset: u64,
     index: u32,
 }
 
@@ -138,7 +171,9 @@ impl Iterator for MemoryMapIter {
         if self.index >= self.map.descriptor_count {
             return None;
         }
-        let addr = self.map.descriptors + self.index as u64 * self.map.descriptor_size as u64;
+        let addr = self.map.descriptors
+            + self.virt_offset
+            + self.index as u64 * self.map.descriptor_size as u64;
         self.index += 1;
         // SAFETY: el llamador de `MemoryMap::iter` garantizó que el buffer es
         // accesible; `read_unaligned` tolera descriptores con padding extra.
@@ -320,7 +355,7 @@ mod tests {
             descriptor_size: STRIDE as u32,
             descriptor_count: 2,
         };
-        let v: alloc_free::Collect<MemoryDescriptor, 2> = unsafe { map.iter() }.collect();
+        let v: alloc_free::Collect<MemoryDescriptor, 2> = unsafe { map.iter(0) }.collect();
         assert_eq!(v.len, 2);
         assert_eq!(v.items[0].kind(), MemoryRegionKind::Free);
         assert_eq!(v.items[0].size_bytes(), 4 * 4096);
@@ -333,9 +368,12 @@ mod tests {
         let text = b"qemu_exit test=panic";
         let mut info = unsafe { core::mem::zeroed::<BootInfo>() };
         assert_eq!(unsafe { info.cmdline() }, "");
-        info.cmdline_address = text.as_ptr() as u64;
+        // Direccion "fisica" desplazada: el offset del mapa la corrige.
+        info.phys_map_offset = 0x1000;
+        info.cmdline_address = text.as_ptr() as u64 - 0x1000;
         info.cmdline_size = text.len() as u64;
         assert_eq!(unsafe { info.cmdline() }, "qemu_exit test=panic");
+        assert_eq!(info.phys_to_virt(0x10), 0x1010);
     }
 
     /// Colector fijo sin `alloc` para tests `no_std`.

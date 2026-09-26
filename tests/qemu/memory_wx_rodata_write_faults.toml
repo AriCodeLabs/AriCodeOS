@@ -1,0 +1,10 @@
+name = "memory.wx_rodata_write_faults"
+description = "test=write_rodata -> #PF por proteccion (W^X)"
+level = "full"
+areas = ["memory", "interrupts"]
+cmdline = "qemu_exit test=write_rodata"
+
+[expect]
+exit = 35
+serial_contains = ["EXCEPTION #PF (14) Page Fault", "ACCESS: WRITE  MODE: KERNEL  CAUSE: protection", "ARICODEOS KERNEL PANIC"]
+serial_absent = ["ARICODEOS_KERNEL_READY"]

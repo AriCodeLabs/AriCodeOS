@@ -5,10 +5,13 @@ use boot_protocol::{FramebufferInfo, PixelFormat};
 
 pub struct MmioSurface {
     info: FramebufferInfo,
+    /// Dirección virtual del framebuffer (a través del mapa físico).
+    base: *mut u32,
 }
 
 impl MmioSurface {
-    pub fn new(info: FramebufferInfo) -> Option<Self> {
+    /// `base` es la dirección virtual donde está mapeado `info.address`.
+    pub fn new(info: FramebufferInfo, base: u64) -> Option<Self> {
         if info.address == 0
             || info.pixel_format == PixelFormat::None
             || info.width == 0
@@ -16,7 +19,10 @@ impl MmioSurface {
         {
             return None;
         }
-        Some(Self { info })
+        Some(Self {
+            info,
+            base: base as *mut u32,
+        })
     }
 
     fn encode(&self, Rgb(r, g, b): Rgb) -> u32 {
@@ -56,12 +62,8 @@ impl Surface for MmioSurface {
         if (idx + 1) * 4 > self.info.size as usize {
             return;
         }
-        // SAFETY: framebuffer identidad-mapeado por AriBoot; `idx` acotado por
-        // width/height/stride y por `size`.
-        unsafe {
-            (self.info.address as *mut u32)
-                .add(idx)
-                .write_volatile(self.encode(color))
-        };
+        // SAFETY: `base` es el framebuffer mapeado (AriBoot y luego el VMM lo
+        // cubren en el mapa físico); `idx` acotado por width/height/stride y `size`.
+        unsafe { self.base.add(idx).write_volatile(self.encode(color)) };
     }
 }

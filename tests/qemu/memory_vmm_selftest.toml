@@ -1,0 +1,10 @@
+name = "memory.vmm_selftest"
+description = "test=vmm: flags de secciones, mapa fisico, sin identidad, map/unmap"
+level = "full"
+areas = ["memory"]
+cmdline = "qemu_exit test=vmm"
+
+[expect]
+exit = 33
+serial_contains = ["vmm selftest ok (W^X, mapa fisico, sin identidad, map/unmap)", "ARICODEOS_KERNEL_READY"]
+serial_absent = ["KERNEL PANIC"]

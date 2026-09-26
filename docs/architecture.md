@@ -3,17 +3,19 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.0.3 en curso (0.0.2 + Fase 5)
+## Estado: 0.0.3 en curso (0.0.2 + Fases 5 y 6)
 
 ```text
 OVMF (UEFI)
   -> EFI/BOOT/BOOTX64.EFI            AriBoot        boot/
-       GOP, ACPI RSDP, cmdline.txt, kernel.elf, tablas de páginas,
-       BootInfo v2, ExitBootServices, salto
+       GOP, ACPI RSDP, cmdline.txt, kernel.elf, tablas de páginas
+       (identidad + mapa físico lineal + kernel), BootInfo v3,
+       ExitBootServices, salto
   -> aricodeos/kernel.elf            AriKernel      kernel/
        consola serie + framebuffer (fuente 8x16), logger con niveles,
        informe de BootInfo, GDT/TSS/IDT propias con IST para #DF,
-       excepciones con volcado, ARICODEOS_KERNEL_READY, panic handler
+       excepciones con volcado, PMM por bitmap, VMM con tablas propias
+       (W^X, mapa físico, pila con guard page), ARICODEOS_KERNEL_READY
 ```
 
 ## Crates
@@ -21,14 +23,15 @@ OVMF (UEFI)
 ```text
 boot-protocol/       ABI BootInfo (v2): mapa UEFI, framebuffer, RSDP, kernel, pila, PML4, cmdline
 libs/elf/            aricode-elf: parser ELF64 mínimo (no_std, tests de host)
-libs/x86-paging/     aricode-x86-paging: tablas de 4 niveles sobre un pool (no_std, tests de host)
+libs/x86-paging/     aricode-x86-paging: tablas de 4 niveles genéricas en FrameAlloc/PhysMap (no_std, tests de host)
 libs/cmdline/        aricode-cmdline: `clave` / `clave=valor` sin alloc (no_std, tests de host)
 libs/fb-console/     aricode-fb-console: consola de texto sobre framebuffer 32 bpp, fuente Terminus 8x16 (OFL), tests de host
 libs/x86-cpu/        aricode-x86-cpu: descriptores GDT/TSS/IDT y tabla de excepciones (no_std, tests de host)
 libs/pmm/            aricode-pmm: allocator de frames por bitmap sobre almacenamiento externo (no_std, tests de host)
 boot/                ariboot: integra lo anterior con la crate `uefi`
 kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log), sync (SingleCpu),
-                     arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions}, memory/pmm, informe, panic, salida QEMU
+                     arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions}, memory/{phys, pmm, vmm},
+                     informe, panic, salida QEMU
 tools/xtask/         build, image, qemu, scenario, test, check
 tests/qemu/          escenarios QEMU declarativos (ver tests/README.md)
 ```
@@ -49,15 +52,18 @@ Invariantes de seguridad de memoria en el cargador (auditoría 2026-09-26,
 
 ## Contrato AriBoot -> AriKernel
 
-Definido en `boot-protocol/` (`BootInfo`, versión 2). Al entrar al kernel:
+Definido en `boot-protocol/` (`BootInfo`, versión 3, ADR 0009). Al entrar al kernel:
 
 - interrupciones deshabilitadas;
 - CR3 apunta a tablas construidas por AriBoot: identidad con páginas de 2 MiB
-  para toda la memoria física no reservada (mínimo 4 GiB) y el kernel en
-  `0xFFFF_FFFF_8000_0000` con páginas de 4 KiB y permisos por segmento ELF
-  (NX fuera de `.text`, solo lectura fuera de `.data`/`.bss`);
-- `rsp` en una pila de 64 KiB reservada por el loader;
-- `rdi` = puntero físico a `BootInfo`;
+  (solo para el cargador), mapa físico lineal en `PHYS_MAP_BASE` (RW, NX)
+  para toda la memoria física no reservada (mínimo 4 GiB) más el framebuffer,
+  y el kernel en `0xFFFF_FFFF_8000_0000` con páginas de 4 KiB y permisos por
+  segmento ELF;
+- `rsp` en una pila de 64 KiB reservada por el loader, direccionada por el
+  mapa físico;
+- `rdi` = puntero a `BootInfo` a través del mapa físico; las direcciones que
+  contiene son físicas (`phys_map_offset` las traduce);
 - EFER.NXE activado;
 - si existía `\aricodeos\cmdline.txt`, su contenido está copiado en memoria
   de kernel y referenciado por `cmdline_address/size`.
@@ -104,10 +110,36 @@ está marcada en el mapa UEFI con el tipo `0x8000_0000` (`MemoryRegionKind::Kern
   double free, contigüidad alineada) y exige que las estadísticas vuelvan al
   estado inicial.
 
+## Memoria virtual (Fase 6)
+
+`memory::vmm::init` construye las tablas definitivas con frames del PMM y
+las activa; a partir de ahí la identidad del cargador deja de existir:
+
+```text
+0xFFFF_8000_0000_0000  mapa físico lineal, 2 MiB, RW NX G (RAM no reservada + framebuffer)
+0xFFFF_FFFF_7FFE_E000  guard page (sin mapear)
+0xFFFF_FFFF_7FFE_F000  pila del kernel, 64 KiB, RW NX G
+0xFFFF_FFFF_8000_0000  imagen: .text R-X, .rodata R--, .data/.bss RW- (todo G)
+```
+
+- Los límites de sección vienen de los símbolos del linker script; los de fin
+  se redondean a página (la sección siguiente empieza en la página siguiente).
+- Tras activar las tablas, `kernel_entry` cambia a la pila nueva y continúa
+  en `kernel_main`; la pila del cargador queda sin uso.
+- Las regiones `Boot` del mapa UEFI (cargador y boot services, ~42 MiB en
+  QEMU) se devuelven al PMM en ese momento.
+- Un desbordamiento de pila toca la guard page: #PF sin pila válida -> #DF
+  en la pila IST; el handler reconoce `rsp`/CR2 dentro de la guard y lo
+  anuncia como `STACK OVERFLOW`.
+- Fallos provocados: `test=vmm` (autoprueba), `write_rodata`, `exec_data`,
+  `stack_overflow`.
+
 ## Deuda conocida
 
-- La identidad física es RWX; W^X en el mapa físico llega con el VMM (Fase 6).
-- El PMM se accede a través de `SingleCpu` como el resto del estado global.
+- Las tablas del cargador (tipo `Kernel` en el mapa) no se recuperan: su
+  extensión no se conoce con precisión.
+- Sin `invlpg`/TLB shootdown genérico: solo la autoprueba invalida entradas.
+- Estado global (PMM, VMM, consola) en `SingleCpu` hasta la Fase 9.
 - Sin APIC: las interrupciones externas siguen deshabilitadas (Fase 8).
 - El estado de la consola es una celda de una sola CPU sin bloqueo; se
   sustituye por un spinlock consciente de interrupciones con los threads (Fase 9).

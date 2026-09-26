@@ -46,6 +46,7 @@ dependencies = [
  "aricode-fb-console",
  "aricode-pmm",
  "aricode-x86-cpu",
+ "aricode-x86-paging",
  "boot-protocol",
  "log",
 ]

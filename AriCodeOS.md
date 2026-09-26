@@ -2027,22 +2027,29 @@ contra valores conocidos.
 
 # FASE 6 — Virtual Memory Manager
 
-### Implementar
+**Estado: completada (2026-09-26).**
 
-- page tables;
-- map/unmap;
-- permissions;
-- NX;
-- kernel mappings;
-- guard pages.
+### Implementado
+
+- `libs/x86-paging` genérica en `FrameAlloc` y `PhysMap`: `map_4k`,
+  `map_2m`, rangos, `unmap_4k`, `translate`, errores explícitos;
+- `kernel/memory/vmm`: tablas propias con frames del PMM, imagen con W^X por
+  secciones del linker, mapa físico lineal RW+NX, framebuffer, pila nueva
+  de 64 KiB con guard page, cambio de pila a `kernel_main`, recuperación de
+  la memoria de arranque;
+- protocolo v3: AriBoot construye el mapa físico lineal desde el principio
+  (ADR 0009), así que el cambio de tablas no invalida punteros;
+- detección de desbordamiento de pila en #DF.
 
 ### Tests
 
-- lectura válida;
-- escritura válida;
-- NX fault;
-- write protection;
-- unmapped fault.
+- host (6 en `x86-paging`): traducción y enmascarado de flags, páginas
+  grandes y colisiones, unmap, agotamiento, `OffsetMap`/`BumpFrames`;
+- QEMU (área `memory`): `memory.vmm_init` (smoke), `memory.vmm_selftest`
+  (lectura/escritura válidas, sin identidad, map/unmap),
+  `memory.wx_rodata_write_faults` (write protection),
+  `memory.nx_data_exec_faults` (NX fault), `memory.stack_guard_page`
+  (guard page); `interrupts.page_fault_reports_cr2` cubre el unmapped fault.
 
 ---
 
