@@ -265,6 +265,9 @@ struct Stack {
     buffers: ClientBuffers,
     /// Puerto UDP efímero para consultas DNS.
     dns_port: u16,
+    /// Buffer de cliente que una petición pendiente conserva (recepciones):
+    /// el bucle principal no lo cierra al despachar.
+    retained: Option<Handle>,
 }
 
 fn new_socket(port: u16) -> Socket {
@@ -299,6 +302,7 @@ impl Stack {
                 count: 0,
             },
             dns_port: 49153,
+            retained: None,
         }
     }
 
@@ -853,7 +857,7 @@ impl Stack {
                     max_len: req.len.min(MAX_DATAGRAM),
                     deadline: now + req.timeout_ms.max(1) as u64,
                 });
-                return; // el buffer se cierra al entregar o al vencer
+                self.retained = Some(buf); // se cierra al entregar o al vencer
             }
             Op::TcpClose => {
                 let Some(sock) = self.tcp.get_mut(req.sock as usize).and_then(|s| s.as_mut())
@@ -879,9 +883,6 @@ impl Stack {
                 answer(reply_to, Reply::ok(0));
             }
             _ => answer(reply_to, Reply::status(Status::Invalid)),
-        }
-        if let Some(b) = buf {
-            let _ = sys::handle_close(b);
         }
     }
 
@@ -935,6 +936,9 @@ impl Stack {
 
     // ---------------- peticiones IPC ----------------
 
+    /// Atiende una petición. El handle del buffer del cliente lo cierra el
+    /// bucle principal salvo que quede en `retained` (recepción pendiente),
+    /// así ningún camino de error deja handles huérfanos.
     fn handle(&mut self, req: Request, reply_to: Handle, buf: Option<Handle>, now: u64) {
         let addr = Ipv4Addr(req.addr);
         match req.op {
@@ -943,9 +947,7 @@ impl Stack {
             | Op::TcpAccept
             | Op::TcpSend
             | Op::TcpRecv
-            | Op::TcpClose => {
-                return self.tcp_handle(req, reply_to, buf, now);
-            }
+            | Op::TcpClose => self.tcp_handle(req, reply_to, buf, now),
             Op::Info => match self.config {
                 Some(c) => {
                     let info = Info {
@@ -1064,10 +1066,13 @@ impl Stack {
                     deliver_recv(&mut self.buffers, pending, from, port, &data[..len]);
                 } else {
                     sock.recv = Some(pending);
-                    return; // el buffer se cierra al entregar o al vencer
+                    self.retained = Some(buf); // se cierra al entregar o al vencer
                 }
             }
             Op::Dns => {
+                let Some(buf) = buf else {
+                    return answer(reply_to, Reply::status(Status::BadHandles));
+                };
                 let Some(slot) = self.dns.iter().position(|d| d.is_none()) else {
                     return answer(reply_to, Reply::status(Status::Busy));
                 };
@@ -1079,10 +1084,23 @@ impl Stack {
                 } else {
                     (addr, if req.port == 0 { dns::PORT } else { req.port })
                 };
+                // El nombre viaja entero en el buffer del cliente (hasta 253 bytes).
+                let len = req.len as usize;
+                if len == 0 || len > dns::MAX_NAME {
+                    return answer(reply_to, Reply::status(Status::Invalid));
+                }
+                let mut name = [0u8; dns::MAX_NAME];
+                match self.buffers.map(buf) {
+                    Some(b) if b.len() >= len => name[..len].copy_from_slice(&b[..len]),
+                    _ => return answer(reply_to, Reply::status(Status::BadHandles)),
+                }
+                let Ok(name_str) = core::str::from_utf8(&name[..len]) else {
+                    return answer(reply_to, Reply::status(Status::Invalid));
+                };
                 let id = self.dns_id;
                 self.dns_id = self.dns_id.wrapping_add(1);
                 let mut q = [0u8; 320];
-                let Some(n) = dns::write_query(id, req.name_str(), &mut q) else {
+                let Some(n) = dns::write_query(id, name_str, &mut q) else {
                     return answer(reply_to, Reply::status(Status::Invalid));
                 };
                 let src_port = self.dns_port;
@@ -1097,9 +1115,6 @@ impl Stack {
                     Err(s) => answer(reply_to, Reply::status(s)),
                 }
             }
-        }
-        if let Some(b) = buf {
-            let _ = sys::handle_close(b);
         }
     }
 }
@@ -1170,11 +1185,12 @@ fn main(mask: u64) -> u64 {
             let buf = (nh >= 2).then_some(handles[1]);
             match Request::decode(&msg[..n]) {
                 Some(req) => stack.handle(req, reply_to, buf, now),
-                None => {
-                    if let Some(b) = buf {
-                        let _ = sys::handle_close(b);
-                    }
-                    answer(reply_to, Reply::status(Status::Invalid));
+                None => answer(reply_to, Reply::status(Status::Invalid)),
+            }
+            let retained = stack.retained.take();
+            if let Some(b) = buf {
+                if retained != Some(b) {
+                    let _ = sys::handle_close(b);
                 }
             }
         }
