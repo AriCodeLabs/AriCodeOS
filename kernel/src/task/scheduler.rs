@@ -104,8 +104,9 @@ pub fn block_current() {
     switch_with(|p| p.block_current());
 }
 
-pub fn unblock(tid: Tid) -> Result<(), aricode_sched::SchedError> {
-    with(|s| s.policy.unblock(tid))
+/// Despierta un hilo bloqueado o dormido antes de su plazo.
+pub fn wake(tid: Tid) -> Result<(), aricode_sched::SchedError> {
+    with(|s| s.policy.wake(tid))
 }
 
 #[derive(Debug, Clone, Copy)]

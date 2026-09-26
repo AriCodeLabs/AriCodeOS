@@ -13,6 +13,7 @@ extern crate alloc;
 mod arch;
 mod console;
 mod framebuffer;
+mod ipc;
 mod memory;
 mod object;
 mod qemu;
@@ -225,6 +226,7 @@ fn run_requested_test(cmdline: &CmdLine) {
         "timer" => time::selftest(),
         "threads" => task::scheduler::threads_selftest(),
         "sched" => task::scheduler::selftest(),
+        "ipc" => ipc::selftest(),
         other if other.starts_with("user_") => run_user_program(&other[5..]),
         // W^X: escribir en .rodata -> #PF por protección.
         "write_rodata" => {

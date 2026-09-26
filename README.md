@@ -7,13 +7,14 @@ El documento maestro de arquitectura y roadmap es [AriCodeOS.md](AriCodeOS.md).
 Las decisiones de diseño se registran en [docs/decisions/](docs/decisions/) y el
 flujo de ramas (git flow) en [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-**Estado:** 0.0.5. AriBoot (UEFI) carga `kernel.elf` y salta a AriKernel,
+**Estado:** 0.0.6. AriBoot (UEFI) carga `kernel.elf` y salta a AriKernel,
 que levanta consola serie y de framebuffer con logger por niveles, instala
 GDT/TSS/IDT propias, construye el allocator físico, activa sus propias tablas
 con W^X, arranca el heap, calibra el timer del LAPIC a 100 Hz, planifica
 hilos del kernel con round robin preemptivo y ejecuta procesos en ring 3 con
-espacio propio, syscalls por instrucción `syscall` y tablas de handles con
-derechos. Un proceso que toca memoria del kernel o ejecuta instrucciones
+espacio propio, syscalls por instrucción `syscall`, tablas de handles con
+derechos y revocación, e IPC por endpoints con transferencia de capabilities
+y timeouts. Un proceso que toca memoria del kernel o ejecuta instrucciones
 privilegiadas muere sin afectar al kernel. Los fallos se provocan desde la
 cmdline para los tests.
 

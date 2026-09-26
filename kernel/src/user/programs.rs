@@ -23,5 +23,7 @@ programs!(
     bad_pointer,
     sleep_yield,
     handles,
-    caps
+    caps,
+    ipc_server,
+    ipc_client
 );
