@@ -48,6 +48,18 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
                 .union(Rights::MANAGE);
             t.insert(ep, rights).map(|h| h.0 as u64).map_err(abi_error)
         }),
+        nr::IRQ_WAIT => irq_wait(h, frame.rsi),
+        nr::MMIO_MAP => mmio_map(h),
+        nr::REGION_LEN => with_handles(|t| match lookup(t, h, Rights::READ)?.kind {
+            ObjectKind::Mmio(ref r) => Ok(r.len),
+            ObjectKind::Dma(ref d) => Ok(d.region.len),
+            _ => Err(Error::Invalid),
+        }),
+        nr::DMA_ALLOC => dma_alloc(h, frame.rsi),
+        nr::DMA_PHYS => with_handles(|t| match lookup(t, h, Rights::READ)?.kind {
+            ObjectKind::Dma(ref d) => Ok(d.region.phys),
+            _ => Err(Error::Invalid),
+        }),
         nr::PROCESS_SPAWN => process_spawn(h, frame.rsi, frame.rdx, frame.r10),
         nr::PROCESS_WAIT => process_wait(h, frame.rsi),
         nr::IPC_SEND => ipc_send(h, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9),
@@ -208,15 +220,64 @@ fn process_wait(h: Handle, timeout_ms: u64) -> Result<u64, Error> {
         ObjectKind::Process(p) => Ok(p),
         _ => Err(Error::Invalid),
     })?;
-    let deadline = if timeout_ms == aricode_abi::TIMEOUT_INFINITE {
-        None
-    } else {
-        Some(crate::time::ticks() + timeout_ms.div_ceil(crate::time::MS_PER_TICK))
-    };
-    match process::wait_until(pid, deadline) {
+    match process::wait_until(pid, deadline_from(timeout_ms)) {
         Some(process::ExitStatus::Exited(code)) => Ok(code),
         Some(process::ExitStatus::Killed(_)) => Err(Error::Killed),
         None if process::exists(pid) => Err(Error::Timeout),
         None => Err(Error::BadHandle),
     }
+}
+
+fn deadline_from(timeout_ms: u64) -> Option<u64> {
+    if timeout_ms == aricode_abi::TIMEOUT_INFINITE {
+        None
+    } else {
+        Some(crate::time::ticks() + timeout_ms.div_ceil(crate::time::MS_PER_TICK))
+    }
+}
+
+fn irq_wait(h: Handle, timeout_ms: u64) -> Result<u64, Error> {
+    let obj = with_handles(|t| {
+        let o = lookup(t, h, Rights::WAIT)?;
+        match o.kind {
+            ObjectKind::Irq(_) => Ok(o.clone()),
+            _ => Err(Error::Invalid),
+        }
+    })?;
+    let ObjectKind::Irq(line) = &obj.kind else {
+        unreachable!()
+    };
+    line.wait(deadline_from(timeout_ms))
+        .map(|n| n as u64)
+        .ok_or(Error::Timeout)
+}
+
+fn mmio_map(h: Handle) -> Result<u64, Error> {
+    let (phys, len, cacheable) =
+        with_handles(
+            |t| match lookup(t, h, Rights::READ.union(Rights::WRITE))?.kind {
+                ObjectKind::Mmio(ref r) => Ok((r.phys, r.len, r.cacheable)),
+                ObjectKind::Dma(ref d) => Ok((d.region.phys, d.region.len, d.region.cacheable)),
+                _ => Err(Error::Invalid),
+            },
+        )?;
+    process::map_foreign(phys, len, cacheable)
+}
+
+fn dma_alloc(h: Handle, len: u64) -> Result<u64, Error> {
+    let is_hw = with_handles(|t| {
+        lookup(t, h, Rights::MANAGE).map(|o| matches!(o.kind, ObjectKind::Hardware))
+    })?;
+    if !is_hw {
+        return Err(Error::Invalid);
+    }
+    if len == 0 || len > aricode_abi::DMA_MAX_LEN {
+        return Err(Error::TooBig);
+    }
+    let dma = crate::hw::dma_alloc(len).map_err(|_| Error::Limit)?;
+    let rights = Rights::READ
+        .union(Rights::WRITE)
+        .union(Rights::DUPLICATE)
+        .union(Rights::TRANSFER);
+    with_handles(|t| t.insert(dma, rights).map(|h| h.0 as u64).map_err(abi_error))
 }

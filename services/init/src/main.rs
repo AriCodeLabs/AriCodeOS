@@ -47,6 +47,15 @@ fn main(_arg: u64) -> u64 {
     if sys::process_spawn(SPAWNER, "no-existe", 0) != Err(Error::NotFound) {
         return 5;
     }
+    // 5. Un driver que muere se reinicia (Fase 16): el segundo intento arranca.
+    match run("crashy_driver", 0) {
+        Err(Error::Killed) => say(b"crashy_driver fallo, reiniciando"),
+        _ => return 6,
+    }
+    match run("crashy_driver", 1) {
+        Ok(0) => say(b"crashy_driver reiniciado con exito"),
+        _ => return 7,
+    }
     say(b"servicios de arranque completados");
     0
 }

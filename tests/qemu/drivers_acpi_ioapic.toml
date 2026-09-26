@@ -1,0 +1,10 @@
+name = "drivers.acpi_ioapic"
+description = "ACPI (RSDP, XSDT, MADT, MCFG) leido e I/O APIC mapeado y enmascarado"
+level = "smoke"
+areas = ["drivers", "acpi"]
+cmdline = "qemu_exit"
+
+[expect]
+exit = 33
+serial_contains = ["[INFO ] acpi: RSDP rev", "[INFO ] acpi: MADT lapic @ 0xfee00000", "[INFO ] acpi: MCFG ecam @", "[INFO ] ioapic: id 0 @ 0xfec00000", "ARICODEOS_KERNEL_READY"]
+serial_absent = ["KERNEL PANIC", "acpi: sin RSDP", "ioapic: ninguno"]

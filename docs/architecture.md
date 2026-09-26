@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.0.7 en curso (0.0.6 + Fase 15)
+## Estado: 0.0.7 en curso (0.0.6 + Fases 15 y 16)
 
 ```text
 OVMF (UEFI)
@@ -22,7 +22,8 @@ OVMF (UEFI)
        syscalls, tablas de handles con derechos y revocación por objeto,
        IPC por endpoints con transferencia de capabilities y timeouts,
        initrd con init y programas de usuario, init lanza y supervisa
-       procesos con la capacidad SPAWNER, ARICODEOS_KERNEL_READY
+       procesos con la capacidad SPAWNER, ACPI + I/O APIC, drivers en ring 3
+       con capabilities IRQ/MMIO/DMA, ARICODEOS_KERNEL_READY
 ```
 
 ## Crates
@@ -40,13 +41,15 @@ libs/sync/           aricode-sync: IrqLock/SpinLock con política de interrupcio
 libs/sched/          aricode-sched: política round robin sobre Tid con estados, sueño, bloqueo y salida (no_std + alloc, tests de host)
 libs/handles/        aricode-handles: tabla de handles con generación y derechos, duplicación solo reductora (no_std + alloc, tests de host)
 libs/initrd/         aricode-initrd: formato del initrd, lector sin copia (no_std) y escritor (feature `write`, xtask); tests de host
+libs/acpi/           aricode-acpi: RSDP, XSDT/RSDT, MADT (LAPIC, I/O APIC, overrides), MCFG; sin AML (no_std + alloc, tests de host)
 sdk/abi/             aricode-abi: números de syscall, errores, handles iniciales, derechos y tipos de objeto (no_std, tests de host)
 sdk/rust/            aricode-sys: wrappers de syscall para programas de usuario (no_std, sin alloc) y `user.ld`, el linker script de todo programa de usuario
 user/testprogs/      programas de prueba de ring 3 (Rust y ensamblador) enlazados como ELF estáticos en 0x400000
 services/init/       AriInit: primer proceso; recibe SPAWNER y lanza/supervisa servicios
 boot/                ariboot: integra lo anterior con la crate `uefi`
 kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log con IrqLock y try_lock),
-                     arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions, port, pic, pit, apic, msr, syscall, usermode},
+                     arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions, port, pic, pit, apic, ioapic, msr, syscall, usermode},
+                     acpi (localización de tablas), hw (IrqLine, Region, DmaBuffer, registro de vectores, banco de pruebas),
                      object (KernelObject revocable, tabla inicial), ipc (Endpoint, Message, benchmark), initrd,
                      user/{process (cargador ELF, copy_from/to_user, espera de salida), programs (initrd), syscalls},
                      memory/{phys, pmm, vmm, heap}, sync (política IRQ), time,
@@ -293,7 +296,8 @@ segundo brevemente para añadir la región.
   `thread_yield`, `thread_sleep`, `thread_get_tid`, `abi_version`,
   `handle_close`, `handle_duplicate`, `object_kind`, `object_id`,
   `object_revoke`, `endpoint_create`, `ipc_send`, `ipc_receive`,
-  `process_spawn`, `process_wait`.
+  `process_spawn`, `process_wait`, `irq_wait`, `mmio_map`, `region_len`,
+  `dma_alloc`, `dma_phys`.
 - Los punteros de usuario se validan página a página contra las tablas del
   proceso (`copy_from_user`): un puntero de kernel devuelve `Fault`, nunca se
   desreferencia.
@@ -388,8 +392,40 @@ segundo brevemente para añadir la región.
   como `Killed`, comprueba que un duplicado del SPAWNER sin `MANAGE` no
   puede crear procesos y que un nombre inexistente da `NotFound`.
 
+## Drivers en espacio de usuario (Fase 16)
+
+- `acpi::init` localiza el RSDP de `BootInfo`, valida XSDT/RSDT y parsea
+  MADT y MCFG con `aricode-acpi` a través del mapa físico. `ioapic::init`
+  mapea el primer I/O APIC sin caché en `0xFFFF_D000_0000_1000` y enmascara
+  sus 24 entradas.
+- Un driver solo recibe lo que sus capabilities le dan (sección 27):
+  - `Irq`: GSI enrutada a un vector de dispositivo (`0x30..=0x3F`) con la
+    polaridad y disparo de la MADT. El handler acumula y despierta; las
+    líneas por nivel quedan enmascaradas hasta que `irq_wait` las atiende.
+    Al soltarse el último handle, la línea se enmascara y el vector se libera.
+  - `Mmio`: región física de dispositivo; `mmio_map` la mapea en el proceso
+    (`0x1000_0000` en adelante, sin caché) y la registra como memoria ajena,
+    que se desmapea sin liberar al destruir el espacio.
+  - `Dma`: frames contiguos puestos a cero (`dma_alloc`, máximo 1 MiB, exige
+    `MANAGE` sobre un objeto `Hardware`); `dma_phys` da la física para el
+    dispositivo y `mmio_map` la mapea con caché. Los frames vuelven al PMM al
+    soltarse el objeto.
+- `test=drivers`: `pit_driver` atiende cinco IRQ0 del PIT (canal 0 a 100 Hz)
+  y reserva, mapea y verifica un buffer DMA; `fb_driver` recibe el
+  framebuffer como región MMIO y pinta 64x64 píxeles; el kernel comprueba el
+  píxel (0,0). El reinicio de un driver caído lo hace AriInit en `init.boot`
+  (`crashy_driver` muere con arg 0 y arranca con arg 1).
+- Un proceso se inserta en la tabla antes de encolar su hilo
+  (`prepare_for_process` + `start_thread`): con `log=trace` la salida lenta
+  hacía que el hilo llegara a ejecutar antes de existir su proceso.
+
 ## Deuda conocida
 
+- El device manager (sección 29) es todavía el banco de pruebas del kernel:
+  enumerar dispositivos (Fase 17) y repartir capabilities de hardware a
+  drivers reales pasará a un servicio de usuario.
+- Sin IOMMU (Fase 33): un buffer DMA es memoria autorizada solo por
+  convención del driver.
 - `init` todavía no recibe endpoints de los servicios que lanza ni puede
   pasarles capabilities al crearlos: llegará con el device manager (Fase 16).
 - Los benchmarks (sección 69) necesitan una máquina de referencia o KVM

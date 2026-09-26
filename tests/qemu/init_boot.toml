@@ -15,6 +15,8 @@ serial_contains = [
     "AriInit: arrancando",
     "AriInit: hello termino con 42",
     "AriInit: kernel_read fue terminado por el kernel",
+    "AriInit: crashy_driver fallo, reiniciando",
+    "AriInit: crashy_driver reiniciado con exito",
     "AriInit: servicios de arranque completados",
     "[INFO ] init terminado con codigo 0",
     "ARICODEOS_KERNEL_READY",
