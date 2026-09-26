@@ -35,6 +35,8 @@ pub struct Inject {
     /// Elimina `kernel.elf` de la ESP.
     #[serde(default)]
     pub remove_kernel: bool,
+    /// Sobrescribe `e_entry` del kernel con este valor.
+    pub patch_entry: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -69,6 +71,23 @@ pub struct Scenario {
     pub expect: Expect,
     #[serde(skip)]
     pub file: PathBuf,
+}
+
+/// Un nombre de escenario también es un nombre de directorio bajo
+/// `build/scenarios/`: solo `[a-z0-9._-]`, sin empezar por `.`, sin `..`.
+pub fn validate_name(name: &str) -> Result<()> {
+    let ok = !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('.')
+        && !name.contains("..")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'));
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("nombre de escenario invalido '{name}': usar [a-z0-9._-], sin '/', sin '..', sin '.' inicial"))
+    }
 }
 
 fn default_cmdline() -> String {
@@ -115,6 +134,40 @@ impl Scenario {
     }
 }
 
+/// Selecciona escenarios por nivel y áreas. Para smoke/full, una selección
+/// vacía es un error: un filtro mal escrito no debe dar un éxito sin arrancar
+/// nada.
+pub fn select<'a>(
+    all: &'a [Scenario],
+    level: Level,
+    areas: &[String],
+) -> Result<Vec<&'a Scenario>> {
+    let selected: Vec<&Scenario> = all.iter().filter(|s| s.matches(level, areas)).collect();
+    if selected.is_empty() && level > Level::Unit {
+        let mut known: Vec<&str> = all
+            .iter()
+            .flat_map(|s| s.areas.iter().map(String::as_str))
+            .collect();
+        known.sort_unstable();
+        known.dedup();
+        let higher: Vec<&str> = all
+            .iter()
+            .filter(|s| s.level > level && s.areas.iter().any(|a| areas.contains(a)))
+            .map(|s| s.name.as_str())
+            .collect();
+        let mut msg = format!(
+            "ningun escenario QEMU coincide con nivel {level:?} y areas [{}]. Areas conocidas: {}",
+            areas.join(","),
+            known.join(", ")
+        );
+        if !higher.is_empty() {
+            msg.push_str(&format!(". Con --all entrarian: {}", higher.join(", ")));
+        }
+        return Err(msg);
+    }
+    Ok(selected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,6 +185,54 @@ mod tests {
         );
         for s in &all {
             assert!(!s.areas.is_empty(), "{}: sin areas", s.name);
+        }
+    }
+
+    fn scenario(name: &str, level: &str, areas: &str) -> Scenario {
+        toml::from_str(&format!(
+            "name = \"{name}\"\nlevel = \"{level}\"\nareas = [{areas}]\n[expect]\nexit = 33\n"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn empty_selection_is_an_error_for_qemu_levels() {
+        let all = vec![
+            scenario("boot.ok", "smoke", "\"boot\""),
+            scenario("boot.panic", "full", "\"boot\", \"panic\""),
+        ];
+        // area inexistente (auditoria, hallazgo 5)
+        let err = select(&all, Level::Smoke, &["booot".into()]).unwrap_err();
+        assert!(
+            err.contains("booot") && err.contains("boot, panic"),
+            "{err}"
+        );
+        // area cuyo unico escenario es full
+        let err = select(&all, Level::Smoke, &["panic".into()]).unwrap_err();
+        assert!(err.contains("Con --all entrarian: boot.panic"), "{err}");
+        // en unit la seleccion vacia es normal
+        assert!(select(&all, Level::Unit, &["booot".into()])
+            .unwrap()
+            .is_empty());
+        assert_eq!(select(&all, Level::Full, &[]).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn scenario_names_cannot_escape_scenarios_dir() {
+        for bad in [
+            "/tmp/x",
+            "../x",
+            "a/b",
+            "a\\b",
+            ".hidden",
+            "",
+            "Boot.Ready",
+            "a b",
+        ] {
+            assert!(validate_name(bad).is_err(), "{bad:?} deberia rechazarse");
+        }
+        for good in ["boot.kernel_ready", "memory.oom-2", "x"] {
+            assert!(validate_name(good).is_ok(), "{good:?} deberia aceptarse");
         }
     }
 

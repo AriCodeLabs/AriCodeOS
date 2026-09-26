@@ -29,7 +29,23 @@ impl Segment {
     pub fn executable(&self) -> bool {
         self.flags & PF_X != 0
     }
+    /// Fin exclusivo en memoria. Garantizado sin overflow por `Elf::parse`.
+    pub fn end(&self) -> u64 {
+        self.vaddr + self.memsz
+    }
+    /// Rango [inicio, fin) redondeado a página. Garantizado sin overflow por `Elf::parse`.
+    pub fn page_range(&self) -> (u64, u64) {
+        (
+            self.vaddr & !PAGE_MASK,
+            (self.end() + PAGE_MASK) & !PAGE_MASK,
+        )
+    }
+    pub fn contains(&self, addr: u64) -> bool {
+        addr >= self.vaddr && addr < self.end()
+    }
 }
+
+const PAGE_MASK: u64 = 0xFFF;
 
 pub struct Elf<'a> {
     data: &'a [u8],
@@ -37,7 +53,17 @@ pub struct Elf<'a> {
     pub segments: Vec<Segment>,
 }
 
-#[derive(Debug)]
+impl core::fmt::Debug for Elf<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Elf")
+            .field("len", &self.data.len())
+            .field("entry", &format_args!("{:#x}", self.entry))
+            .field("segments", &self.segments)
+            .finish()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum ElfError {
     TooShort,
     BadMagic,
@@ -46,6 +72,14 @@ pub enum ElfError {
     NotExecutable,
     NotX86_64,
     BadProgramHeader,
+    /// Sin segmentos `PT_LOAD`.
+    NoSegments,
+    /// `vaddr + memsz` (o su redondeo a página) no es representable.
+    AddressOverflow,
+    /// Dos segmentos `PT_LOAD` se solapan en memoria (a granularidad de página).
+    OverlappingSegments,
+    /// `e_entry` no cae dentro de un segmento `PT_LOAD` ejecutable.
+    EntryOutsideText,
 }
 
 fn u16_at(d: &[u8], off: usize) -> u16 {
@@ -109,7 +143,23 @@ impl<'a> Elf<'a> {
             {
                 return Err(ElfError::BadProgramHeader);
             }
+            // Todo el rango, incluido el redondeo a página, debe ser representable.
+            if seg
+                .vaddr
+                .checked_add(seg.memsz)
+                .and_then(|e| e.checked_add(PAGE_MASK))
+                .is_none()
+            {
+                return Err(ElfError::AddressOverflow);
+            }
             segments.push(seg);
+        }
+        if segments.is_empty() {
+            return Err(ElfError::NoSegments);
+        }
+        Self::check_no_overlap(&segments)?;
+        if !segments.iter().any(|s| s.executable() && s.contains(entry)) {
+            return Err(ElfError::EntryOutsideText);
         }
         Ok(Self {
             data,
@@ -118,19 +168,32 @@ impl<'a> Elf<'a> {
         })
     }
 
+    /// Segmentos con `memsz > 0` no pueden compartir páginas: la reserva y el
+    /// mapeo se hacen por página y con permisos por segmento.
+    fn check_no_overlap(segments: &[Segment]) -> Result<(), ElfError> {
+        for (i, a) in segments.iter().enumerate().filter(|(_, s)| s.memsz > 0) {
+            let (a0, a1) = a.page_range();
+            for b in segments.iter().skip(i + 1).filter(|s| s.memsz > 0) {
+                let (b0, b1) = b.page_range();
+                if a0 < b1 && b0 < a1 {
+                    return Err(ElfError::OverlappingSegments);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn segment_bytes(&self, seg: &Segment) -> &'a [u8] {
         &self.data[seg.offset as usize..(seg.offset + seg.filesz) as usize]
     }
 
     /// Rango virtual [min, max) cubierto por los segmentos, alineado a página.
+    /// Sin overflow: `parse` ya validó cada segmento.
     pub fn virt_range(&self) -> (u64, u64) {
-        let mut lo = u64::MAX;
-        let mut hi = 0;
-        for s in &self.segments {
-            lo = lo.min(s.vaddr & !0xFFF);
-            hi = hi.max((s.vaddr + s.memsz + 0xFFF) & !0xFFF);
-        }
-        (lo, hi)
+        self.segments
+            .iter()
+            .map(Segment::page_range)
+            .fold((u64::MAX, 0), |(lo, hi), (a, b)| (lo.min(a), hi.max(b)))
     }
 }
 
@@ -164,12 +227,78 @@ mod tests {
         d
     }
 
+    const TEXT: u64 = 0xFFFF_FFFF_8000_0000;
+
+    #[test]
+    fn rejects_entry_outside_executable_segment() {
+        // entry = 0 (auditoría, hallazgo 3)
+        let d = build_elf(0, &[(TEXT, 16, 16, PF_X | 4)]);
+        assert_eq!(Elf::parse(&d).unwrap_err(), ElfError::EntryOutsideText);
+        // entry dentro de un segmento NX
+        let d = build_elf(
+            TEXT + 0x3000,
+            &[(TEXT, 16, 16, PF_X | 4), (TEXT + 0x3000, 8, 8, PF_W | 4)],
+        );
+        assert_eq!(Elf::parse(&d).unwrap_err(), ElfError::EntryOutsideText);
+        // entry justo al final del texto (exclusivo)
+        let d = build_elf(TEXT + 16, &[(TEXT, 16, 16, PF_X | 4)]);
+        assert_eq!(Elf::parse(&d).unwrap_err(), ElfError::EntryOutsideText);
+    }
+
+    #[test]
+    fn rejects_address_overflow() {
+        // vaddr + memsz envuelve (auditoría, hallazgo 1)
+        let d = build_elf(
+            TEXT,
+            &[
+                (TEXT, 1, 1, PF_X | 4),
+                (0xFFFF_FFFF_FFFF_FFF8, 8, 8, PF_W | 4),
+            ],
+        );
+        assert_eq!(Elf::parse(&d).unwrap_err(), ElfError::AddressOverflow);
+        // vaddr + memsz cabe pero el redondeo a página no
+        let d = build_elf(
+            TEXT,
+            &[
+                (TEXT, 1, 1, PF_X | 4),
+                (0xFFFF_FFFF_FFFF_F000, 0, 0xFF0, PF_W | 4),
+            ],
+        );
+        assert_eq!(Elf::parse(&d).unwrap_err(), ElfError::AddressOverflow);
+        // memsz enorme
+        let d = build_elf(TEXT, &[(TEXT, 1, u64::MAX, PF_X | 4)]);
+        assert_eq!(Elf::parse(&d).unwrap_err(), ElfError::AddressOverflow);
+    }
+
+    #[test]
+    fn rejects_overlapping_segments() {
+        let d = build_elf(
+            TEXT,
+            &[(TEXT, 16, 16, PF_X | 4), (TEXT + 0x800, 8, 8, PF_W | 4)],
+        );
+        assert_eq!(Elf::parse(&d).unwrap_err(), ElfError::OverlappingSegments);
+        // segmentos vacios nunca solapan
+        let d = build_elf(
+            TEXT,
+            &[(TEXT, 16, 16, PF_X | 4), (TEXT + 0x800, 0, 0, PF_W | 4)],
+        );
+        assert!(Elf::parse(&d).is_ok());
+    }
+
+    #[test]
+    fn rejects_no_segments() {
+        assert_eq!(
+            Elf::parse(&build_elf(0, &[])).unwrap_err(),
+            ElfError::NoSegments
+        );
+    }
+
     #[test]
     fn parses_entry_and_segments() {
         let d = build_elf(
             0xFFFF_FFFF_8000_0410,
             &[
-                (0xFFFF_FFFF_8000_0000, 16, 16, PF_X | 4),
+                (0xFFFF_FFFF_8000_0000, 16, 0x1000, PF_X | 4),
                 (0xFFFF_FFFF_8000_3000, 8, 0x2000, PF_W | 4),
             ],
         );
@@ -187,7 +316,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_magic() {
-        let mut d = build_elf(0, &[]);
+        let mut d = build_elf(TEXT, &[(TEXT, 4, 4, PF_X)]);
         d[0] = 0;
         assert!(matches!(Elf::parse(&d), Err(ElfError::BadMagic)));
     }
@@ -205,10 +334,10 @@ mod tests {
 
     #[test]
     fn rejects_wrong_class_or_machine() {
-        let mut d = build_elf(0, &[]);
+        let mut d = build_elf(TEXT, &[(TEXT, 4, 4, PF_X)]);
         d[4] = 1;
         assert!(matches!(Elf::parse(&d), Err(ElfError::Not64Bit)));
-        let mut d = build_elf(0, &[]);
+        let mut d = build_elf(TEXT, &[(TEXT, 4, 4, PF_X)]);
         d[18..20].copy_from_slice(&0xB7u16.to_le_bytes());
         assert!(matches!(Elf::parse(&d), Err(ElfError::NotX86_64)));
     }
