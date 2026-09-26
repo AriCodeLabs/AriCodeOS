@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.0.6 en curso (0.0.5 + Fase 13)
+## Estado: 0.0.6 (Fases 13 y 14)
 
 ```text
 OVMF (UEFI)
@@ -20,7 +20,8 @@ OVMF (UEFI)
        habilitadas, hilos del kernel, scheduler round robin preemptivo con
        sueño y colas de espera, procesos en ring 3 con espacio propio,
        syscalls, tablas de handles con derechos y revocación por objeto,
-       programas de usuario ELF cargados desde el kernel, ARICODEOS_KERNEL_READY
+       programas de usuario ELF cargados desde el kernel, IPC por endpoints
+       con transferencia de capabilities y timeouts, ARICODEOS_KERNEL_READY
 ```
 
 ## Crates
@@ -43,7 +44,8 @@ user/testprogs/      programas de prueba de ring 3 (Rust y ensamblador) enlazado
 boot/                ariboot: integra lo anterior con la crate `uefi`
 kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log con IrqLock y try_lock),
                      arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions, port, pic, pit, apic, msr, syscall, usermode},
-                     object (KernelObject revocable, tabla inicial), user/{process (cargador ELF), programs (ELF embebidos), syscalls},
+                     object (KernelObject revocable, tabla inicial), ipc (Endpoint, Message, benchmark),
+                     user/{process (cargador ELF, copy_from/to_user), programs (ELF embebidos), syscalls},
                      memory/{phys, pmm, vmm, heap}, sync (política IRQ), time,
                      task/{context (switch_context, thread_start), stack, thread, scheduler, wait}, informe, panic, salida QEMU
 tools/xtask/         build, image, qemu, scenario, test, check
@@ -286,7 +288,8 @@ segundo brevemente para añadir la región.
   número, `rdi rsi rdx r10 r8 r9` argumentos, resultado en `rax`, negativo
   `-4095..=-1` = error. Syscalls actuales: `process_exit`, `console_write`,
   `thread_yield`, `thread_sleep`, `thread_get_tid`, `abi_version`,
-  `handle_close`, `handle_duplicate`, `object_kind`, `object_id`.
+  `handle_close`, `handle_duplicate`, `object_kind`, `object_id`,
+  `object_revoke`, `endpoint_create`, `ipc_send`, `ipc_receive`.
 - Los punteros de usuario se validan página a página contra las tablas del
   proceso (`copy_from_user`): un puntero de kernel devuelve `Fault`, nunca se
   desreferencia.
@@ -332,8 +335,40 @@ segundo brevemente para añadir la región.
   duplicado invalidado, cerrar el revocado y comprobar que la consola sigue
   viva.
 
+## IPC (Fase 14)
+
+- `ipc::Endpoint` es un objeto del kernel: cola acotada (16 mensajes) de
+  `Message` (hasta 256 bytes y 4 capabilities), dos colas de espera (emisores
+  y receptores) y contador de envíos. `endpoint_create` da al creador
+  `READ|WRITE|DUPLICATE|TRANSFER|MANAGE`; el modelo cliente/servidor
+  habitual es: el cliente crea un endpoint de respuesta y envía en cada
+  mensaje un duplicado con `WRITE|TRANSFER`.
+- `ipc_send` exige `WRITE` sobre el endpoint y `TRANSFER` sobre cada handle;
+  los handles se retiran del emisor solo cuando la cola confirma la plaza
+  (`Endpoint::send_with` construye el mensaje dentro de la sección crítica),
+  así que un timeout no pierde capabilities. `ipc_receive` exige `READ`,
+  copia los datos y los handles recibidos al espacio del proceso
+  (`copy_to_user` valida USER y WRITABLE) y devuelve `len | (n << 32)`.
+- Timeouts en ms: `0` no bloquea, `TIMEOUT_INFINITE` espera siempre. Las
+  esperas usan `WaitQueue::wait_until_deadline`: el hilo duerme con plazo y
+  un `wake` anticipado (`RoundRobin::wake` saca a un dormido de su lista) lo
+  despierta antes.
+- Tamaños y colas acotadas son la primera defensa frente al agotamiento de
+  recursos (sección 52); los mensajes que no caben producen `TooBig`.
+- `test=ipc` lanza `ipc_server` e `ipc_client` (programas Rust) con el mismo
+  endpoint del kernel (servidor con `READ|WRITE`, cliente solo `WRITE`):
+  1000 round trips con handle de respuesta transferido, más recepción sin
+  `READ` (`Denied`), timeout, cola llena, envío fallido sin perder el handle,
+  mensaje demasiado grande y handle sin `TRANSFER`. Mide el round trip con el
+  TSC: ~260 000 ciclos bajo QEMU TCG incluyendo la creación del cliente. El
+  número solo sirve como referencia relativa: TCG no es hardware.
+
 ## Deuda conocida
 
+- Los benchmarks (sección 69) necesitan una máquina de referencia o KVM
+  para ser absolutos; bajo TCG solo comparan versiones entre sí.
+- Los mensajes IPC no llevan identidad del emisor: la dará un handle al
+  proceso remitente cuando haya política de identidad (sección 80).
 - Sin SMAP/SMEP: el kernel puede tocar memoria de usuario sin querer; los
   accesos se limitan a `copy_from_user` validado. Activar SMEP/SMAP cuando la
   CPU de referencia lo garantice.

@@ -9,17 +9,16 @@ use aricode_handles::{Handle, HandleError, HandleTable, Rights};
 use aricode_sched::Tid;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-#[derive(Debug)]
 pub enum ObjectKind {
     Thread(Tid),
     Process(Pid),
     Console,
+    Endpoint(crate::ipc::Endpoint),
 }
 
 /// Objeto compartido por todos los handles que lo referencian. Revocarlo
 /// invalida cada uno de esos handles a la vez, en todos los procesos, sin
 /// tener que encontrarlos (sección 25: lifetime y revocación).
-#[derive(Debug)]
 pub struct KernelObject {
     pub kind: ObjectKind,
     revoked: AtomicBool,
@@ -39,7 +38,7 @@ impl KernelObject {
         match self.kind {
             ObjectKind::Thread(t) => t.0 as u64,
             ObjectKind::Process(p) => p.0 as u64,
-            ObjectKind::Console => 0,
+            ObjectKind::Console | ObjectKind::Endpoint(_) => 0,
         }
     }
 
@@ -48,6 +47,7 @@ impl KernelObject {
             ObjectKind::Thread(_) => kind::THREAD,
             ObjectKind::Process(_) => kind::PROCESS,
             ObjectKind::Console => kind::CONSOLE,
+            ObjectKind::Endpoint(_) => kind::ENDPOINT,
         }
     }
 

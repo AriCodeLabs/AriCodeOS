@@ -42,6 +42,7 @@ pub mod kind {
     pub const THREAD: u64 = 1;
     pub const PROCESS: u64 = 2;
     pub const CONSOLE: u64 = 3;
+    pub const ENDPOINT: u64 = 4;
 }
 
 /// Límite exclusivo del espacio de usuario (mitad baja canónica).
@@ -73,6 +74,29 @@ pub mod nr {
     /// `object_revoke(handle)`: invalida el objeto para todos sus handles,
     /// en todos los procesos; exige `MANAGE`.
     pub const OBJECT_REVOKE: u64 = 10;
+    /// `endpoint_create() -> handle` con `READ|WRITE|DUPLICATE|TRANSFER|MANAGE`.
+    pub const ENDPOINT_CREATE: u64 = 11;
+    /// `ipc_send(ep, data_ptr, data_len, handles_ptr, handles_len, timeout_ms)`;
+    /// exige `WRITE` sobre `ep` y `TRANSFER` sobre cada handle enviado (que
+    /// se retira del emisor). `timeout_ms`: 0 = no bloquear,
+    /// [`TIMEOUT_INFINITE`] = esperar siempre.
+    pub const IPC_SEND: u64 = 12;
+    /// `ipc_receive(ep, buf_ptr, buf_len, handles_out_ptr, handles_max, timeout_ms)
+    /// -> data_len | (handles_recibidos << 32)`; exige `READ` sobre `ep`.
+    pub const IPC_RECEIVE: u64 = 13;
+}
+
+/// Límites de un mensaje IPC (sección 23: mensajes pequeños y rápidos).
+pub const IPC_MAX_DATA: usize = 256;
+pub const IPC_MAX_HANDLES: usize = 4;
+/// Capacidad de la cola de un endpoint (protección frente a agotamiento).
+pub const IPC_QUEUE_CAPACITY: usize = 16;
+/// Timeout que significa "esperar indefinidamente".
+pub const TIMEOUT_INFINITE: u64 = u64::MAX;
+
+/// Descompone el resultado de `ipc_receive`.
+pub const fn receive_result(raw: u64) -> (usize, usize) {
+    ((raw & 0xFFFF_FFFF) as usize, (raw >> 32) as usize)
 }
 
 /// Errores devueltos por el kernel (negados en `rax`).
@@ -95,6 +119,10 @@ pub enum Error {
     Limit = 7,
     /// El objeto fue revocado: el handle existe pero ya no da acceso.
     Revoked = 8,
+    /// Se agotó el plazo (o `timeout_ms == 0` y la operación bloquearía).
+    Timeout = 9,
+    /// Mensaje o buffer por encima de los límites.
+    TooBig = 10,
 }
 
 impl Error {
@@ -112,6 +140,8 @@ impl Error {
             6 => Some(Error::Escalation),
             7 => Some(Error::Limit),
             8 => Some(Error::Revoked),
+            9 => Some(Error::Timeout),
+            10 => Some(Error::TooBig),
             _ => None,
         }
     }
@@ -158,6 +188,12 @@ mod tests {
             Err(Error::Invalid),
             "codigo desconocido se normaliza"
         );
+    }
+
+    #[test]
+    fn receive_result_packs_len_and_handles() {
+        assert_eq!(receive_result(4 | (2 << 32)), (4, 2));
+        assert_eq!(receive_result(0), (0, 0));
     }
 
     #[test]

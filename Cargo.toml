@@ -39,7 +39,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.0.5"
+version = "0.0.6"
 edition = "2021"
 license = "UNLICENSED"
 repository = "https://github.com/lynxcraft/aricodeos"
