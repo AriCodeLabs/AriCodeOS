@@ -2320,7 +2320,7 @@ pci: 00:1f.3 8086:2930 clase 0c.05 SMBus (1 BAR)
 
 # FASE 18 — Virtio
 
-**Estado: virtio-blk completado (2026-09-26); virtio-net pendiente.**
+**Estado: completada (2026-09-26): virtio-blk (Fase 18) y virtio-net (Fase 22) en ring 3 sobre un transporte PCI moderno común (`aricode-sys::virtio_pci`).**
 
 ### Implementado
 
@@ -2330,7 +2330,7 @@ pci: 00:1f.3 8086:2930 clase 0c.05 SMBus (1 BAR)
   reclamadas por `init` (`pci_claim`: BARs sondeados y MSI-X programada por
   el kernel), cola 0 en DMA, lectura y escritura verificadas
   (`virtio.blk_rw`);
-- virtio-net: después (Fase 22).
+- virtio-net: `services/virtio-net`, driver y pila de red en un mismo servicio (Fase 22).
 
 ### Motivo
 
@@ -2423,24 +2423,36 @@ devices   services  uptime    reboot    shutdown  exit
 
 # FASE 22 — Red
 
-### Implementar
+**Estado: completada (2026-09-26).**
 
-- virtio-net;
-- Ethernet;
-- ARP;
-- IPv4;
-- ICMP;
-- UDP;
-- DHCP;
-- DNS.
+### Implementado
+
+- `libs/net` (no_std, sin `alloc`, tests de host): Ethernet II, ARP con
+  caché, IPv4 (checksum, sin fragmentación), ICMP eco, UDP con checksum,
+  cliente DHCP (DISCOVER/OFFER/REQUEST/ACK/NAK con reintentos) y DNS
+  (consulta A, respuesta con compresión, y un constructor de respuestas para
+  servidores de prueba);
+- `netd` (`services/virtio-net`): driver virtio-net (colas rx/tx en DMA,
+  MSI-X, `VIRTIO_NET_F_MAC`) y pila de red en un único hilo de ring 3: DHCP
+  al arrancar, ARP con tramas aparcadas hasta resolver, respuesta a eco
+  ICMP, sockets UDP y resolución DNS. Atiende `NetServiceProtocol v1`
+  (`sdk/proto::net`): `Info`, `Ping`, `UdpBind`, `UdpSend`, `UdpRecv`,
+  `UdpClose`, `Dns`; los datagramas van por el buffer DMA del cliente y las
+  esperas (ping, recv, dns) quedan pendientes con plazo sin bloquear al
+  servicio;
+- contrato de driver ampliado: tras los BARs, init pasa extras propios de
+  cada driver (netd recibe `SYSTEM` con `READ` para medir el tiempo);
+- transporte virtio compartido (`aricode-sys::virtio_pci`): virtio-blk y
+  virtio-net ya no duplican la negociación ni la creación de colas;
+- cliente `aricode-sys::net`, programa `net_client`, comandos `net`,
+  `ping` y `dns` en el shell;
+- QEMU con red de usuario (slirp) y un respondedor UDP de pruebas en el
+  host (eco y DNS con registro A fijo) que arranca con cada ejecución.
 
 ### Criterio
 
-```text
-ping
-```
-
-funciona dentro de QEMU.
+`ping` funciona dentro de QEMU (`ping 10.0.2.2` desde el shell responde 4 de
+4; `network.stack` lo exige por IPC). **Cumplido.**
 
 ---
 
@@ -3152,12 +3164,14 @@ máquina sin que ningún driver viva en el kernel.
 
 # 93. AriCodeOS 0.0.9
 
+**Estado: en curso.**
+
 Añadir:
 
-- virtio-net;
-- IP;
-- UDP;
-- TCP básico.
+- virtio-net (Fase 22, hecho);
+- IP (Fase 22, hecho: IPv4, ARP, ICMP, DHCP, DNS);
+- UDP (Fase 22, hecho);
+- TCP básico (Fase 23).
 
 ---
 

@@ -14,7 +14,8 @@ serial_contains = [
     "pci: 00:01.0 1234:1111 clase 03.00 VGA/display",
     "pci: 00:1f.0 8086:2918 clase 06.01 ISA bridge",
     "pci: 00:1f.2 8086:2922 clase 01.06 SATA (AHCI)",
-    "pci: 00:03.0 1af4:1042 clase 01.00 almacenamiento",
+    "pci: 00:02.0 1af4:1042 clase 01.00 almacenamiento",
+    "pci: 00:03.0 1af4:1041 clase 02.00 Ethernet",
     "pci: 7 funciones en el segmento 0 (ECAM @ 0xe0000000)",
     "ARICODEOS_KERNEL_READY",
 ]

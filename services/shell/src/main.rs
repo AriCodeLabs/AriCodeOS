@@ -1,10 +1,12 @@
 //! arish (Fase 21): shell interactivo en ring 3. Solo ve lo que init le da:
 //! 0x10004 = endpoint de fsd (WRITE), 0x10005 = HARDWARE (buffer DMA),
 //! 0x10006 = SYSTEM (READ|MANAGE), 0x10007 = entrada de consola (READ),
-//! 0x10008 = raíz PCI (READ). `arg` = máscara de servicios en ejecución.
+//! 0x10008 = raíz PCI (READ), 0x10009 = endpoint de netd (WRITE). `arg` =
+//! máscara de servicios en ejecución.
 #![no_std]
 #![no_main]
 
+use user_testprogs::sys::net::{NetClient, NetError};
 use user_testprogs::sys::{self, abi, fs::FsClient, Handle, TIMEOUT_INFINITE};
 use user_testprogs::{fmt_hex, fmt_u64};
 
@@ -13,10 +15,12 @@ const HW: Handle = Handle(0x0001_0005);
 const SYSTEM: Handle = Handle(0x0001_0006);
 const CONSOLE_IN: Handle = Handle(0x0001_0007);
 const PCI_ROOT: Handle = Handle(0x0001_0008);
+const NETD: Handle = Handle(0x0001_0009);
 
 /// Bits de `arg`: servicios que init dejó en marcha.
 const SERVICE_BLOCK: u64 = 1;
 const SERVICE_FS: u64 = 2;
+const SERVICE_NET: u64 = 4;
 
 const PROMPT: &[u8] = b"ari> ";
 const LINE_MAX: usize = 256;
@@ -79,7 +83,7 @@ fn trim(s: &[u8]) -> &[u8] {
 
 fn help() {
     sys::print(
-        b"comandos:\n  help      esta ayuda\n  ps        procesos\n  mem       memoria fisica\n  ls        ficheros de AriFS\n  cat NOM   muestra un fichero\n  devices   funciones PCI\n  services  servicios de arranque\n  uptime    tiempo desde el arranque\n  reboot    reinicia\n  shutdown  apaga\n  exit      termina el shell\n",
+        b"comandos:\n  help      esta ayuda\n  ps        procesos\n  mem       memoria fisica\n  ls        ficheros de AriFS\n  cat NOM   muestra un fichero\n  devices   funciones PCI\n  services  servicios de arranque\n  uptime    tiempo desde el arranque\n  net       configuracion de red\n  ping IP   eco ICMP (4 intentos)\n  dns NOM   resuelve un nombre\n  reboot    reinicia\n  shutdown  apaga\n  exit      termina el shell\n",
     );
 }
 
@@ -244,6 +248,104 @@ fn devices() {
     sys::print(b" funcion(es) PCI\n");
 }
 
+fn print_ip(ip: [u8; 4]) {
+    let mut b = [0u8; 15];
+    sys::print(aricode_net::Ipv4Addr(ip).format(&mut b));
+}
+
+fn net_error(e: NetError) {
+    match e {
+        NetError::Status(abi_status) => {
+            sys::print(match abi_status {
+                aricode_proto::net::Status::Timeout => {
+                    b"sin respuesta (plazo vencido)\n" as &[u8]
+                }
+                aricode_proto::net::Status::NoRoute => b"sin configuracion de red\n",
+                aricode_proto::net::Status::NotFound => b"nombre desconocido\n",
+                _ => b"el servicio de red rechazo la peticion\n",
+            });
+        }
+        NetError::Ipc(_) => sys::print(b"el servicio de red no responde\n"),
+    }
+}
+
+fn net(client: &NetClient) {
+    match client.info() {
+        Ok(i) => {
+            sys::print(b"ip      ");
+            print_ip(i.address);
+            sys::print(b"\nmascara ");
+            print_ip(i.mask);
+            sys::print(b"\nrouter  ");
+            print_ip(i.router);
+            sys::print(b"\ndns     ");
+            print_ip(i.dns);
+            sys::print(b"\nmac     ");
+            for (n, b) in i.mac.iter().enumerate() {
+                if n > 0 {
+                    sys::print(b":");
+                }
+                hex(*b as u64, 2);
+            }
+            sys::print(b"\n");
+        }
+        Err(e) => net_error(e),
+    }
+}
+
+fn ping(client: &NetClient, arg: &[u8]) {
+    let Some(ip) = core::str::from_utf8(arg)
+        .ok()
+        .and_then(aricode_net::Ipv4Addr::parse)
+    else {
+        sys::print(b"uso: ping A.B.C.D\n");
+        return;
+    };
+    let mut received = 0;
+    for seq in 1..=4u16 {
+        match client.ping(ip.0, seq, 1000) {
+            Ok(rtt) => {
+                received += 1;
+                sys::print(b"respuesta de ");
+                print_ip(ip.0);
+                sys::print(b": seq=");
+                num(seq as u64);
+                sys::print(b" tiempo=");
+                num(rtt);
+                sys::print(b" ms\n");
+            }
+            Err(e) => {
+                sys::print(b"seq=");
+                num(seq as u64);
+                sys::print(b": ");
+                net_error(e);
+            }
+        }
+    }
+    num(received);
+    sys::print(b" de 4 respuestas\n");
+}
+
+fn dns(client: &NetClient, arg: &[u8]) {
+    let Ok(name) = core::str::from_utf8(arg) else {
+        sys::print(b"dns: nombre invalido\n");
+        return;
+    };
+    if name.is_empty() {
+        sys::print(b"uso: dns NOMBRE\n");
+        return;
+    }
+    match client.resolve(name, None, 3000) {
+        Ok(ip) => {
+            sys::print(name.as_bytes());
+            sys::print(b" -> ");
+            print_ip(ip);
+            sys::print(b"\n");
+        }
+        Err(e) => net_error(e),
+    }
+}
+
 fn services(mask: u64, fs: &FsClient) {
     sys::print(b"bloques   virtio_blk  ");
     sys::print(if mask & SERVICE_BLOCK != 0 {
@@ -262,12 +364,22 @@ fn services(mask: u64, fs: &FsClient) {
             b"activo, no responde\n"
         });
     }
+    sys::print(b"red       virtio_net  ");
+    sys::print(if mask & SERVICE_NET != 0 {
+        b"activo\n"
+    } else {
+        b"ausente\n"
+    });
 }
 
 fn main(mask: u64) -> u64 {
     let Ok(mut fs) = FsClient::new(FSD, HW) else {
         sys::print(b"arish: sin cliente de ficheros\n");
         return 1;
+    };
+    let Ok(net_client) = NetClient::new(NETD, HW) else {
+        sys::print(b"arish: sin cliente de red\n");
+        return 2;
     };
     sys::print(b"arish: shell de AriCodeOS (help para ayuda)\n");
     let mut line = [0u8; LINE_MAX];
@@ -285,6 +397,9 @@ fn main(mask: u64) -> u64 {
             b"devices" => devices(),
             b"services" => services(mask, &fs),
             b"uptime" => uptime(),
+            b"net" => net(&net_client),
+            b"ping" => ping(&net_client, rest),
+            b"dns" => dns(&net_client, rest),
             b"reboot" => {
                 user_testprogs::print_error(
                     b"reboot",

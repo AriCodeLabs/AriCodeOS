@@ -16,6 +16,8 @@ dependencies = [
 name = "ari-shell"
 version = "0.0.8"
 dependencies = [
+ "aricode-net",
+ "aricode-proto",
  "aricode-sys",
  "user-testprogs",
 ]
@@ -25,6 +27,17 @@ name = "ari-virtio-blk"
 version = "0.0.8"
 dependencies = [
  "aricode-gpt",
+ "aricode-proto",
+ "aricode-sys",
+ "aricode-virtio",
+ "user-testprogs",
+]
+
+[[package]]
+name = "ari-virtio-net"
+version = "0.0.8"
+dependencies = [
+ "aricode-net",
  "aricode-proto",
  "aricode-sys",
  "aricode-virtio",
@@ -84,6 +97,10 @@ name = "aricode-initrd"
 version = "0.0.8"
 
 [[package]]
+name = "aricode-net"
+version = "0.0.8"
+
+[[package]]
 name = "aricode-pci"
 version = "0.0.8"
 
@@ -109,6 +126,7 @@ version = "0.0.8"
 dependencies = [
  "aricode-abi",
  "aricode-proto",
+ "aricode-virtio",
 ]
 
 [[package]]
@@ -404,6 +422,7 @@ name = "user-testprogs"
 version = "0.0.8"
 dependencies = [
  "aricode-heap",
+ "aricode-net",
  "aricode-proto",
  "aricode-sync",
  "aricode-sys",
@@ -425,6 +444,8 @@ dependencies = [
  "aricode-arifs",
  "aricode-gpt",
  "aricode-initrd",
+ "aricode-net",
+ "aricode-proto",
  "serde",
  "toml",
 ]

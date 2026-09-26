@@ -11,3 +11,5 @@ toml = "0.8"
 aricode-initrd = { path = "../../libs/initrd", features = ["write"] }
 aricode-gpt = { path = "../../libs/gpt", features = ["write"] }
 aricode-arifs = { path = "../../libs/arifs" }
+aricode-net = { path = "../../libs/net" }
+aricode-proto = { path = "../../sdk/proto" }

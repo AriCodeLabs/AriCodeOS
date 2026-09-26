@@ -10,7 +10,7 @@ cmdline = "qemu_exit"
 [expect]
 exit = 33
 serial_contains = [
-    "pci: 00:03.0 1af4:1042 clase 01.00 almacenamiento",
+    "pci: 00:02.0 1af4:1042 clase 01.00 almacenamiento",
     "reclamado (MSI-X entrada 0)",
     "virtio-blk: dispositivo listo",
     "virtio-blk: capacidad 8192 sectores",

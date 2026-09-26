@@ -1,0 +1,147 @@
+//! Pila de red mínima (Fase 22, sección 38). Codificadores y decodificadores
+//! sin `alloc` sobre buffers del llamador, más las pequeñas máquinas de
+//! estado que necesita un servicio de red en ring 3 (caché ARP, cliente
+//! DHCP). Toda la lógica es pura y se prueba en host; el servicio `netd`
+//! solo la conecta con el driver virtio-net y con IPC.
+
+#![no_std]
+
+pub mod arp;
+pub mod dhcp;
+pub mod dns;
+pub mod eth;
+pub mod icmp;
+pub mod ipv4;
+pub mod udp;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub struct MacAddr(pub [u8; 6]);
+
+impl MacAddr {
+    pub const BROADCAST: MacAddr = MacAddr([0xFF; 6]);
+    pub const ZERO: MacAddr = MacAddr([0; 6]);
+    pub fn is_broadcast(&self) -> bool {
+        *self == Self::BROADCAST
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub struct Ipv4Addr(pub [u8; 4]);
+
+impl Ipv4Addr {
+    pub const UNSPECIFIED: Ipv4Addr = Ipv4Addr([0; 4]);
+    pub const BROADCAST: Ipv4Addr = Ipv4Addr([255; 4]);
+
+    pub const fn new(a: u8, b: u8, c: u8, d: u8) -> Self {
+        Self([a, b, c, d])
+    }
+    pub fn from_u32(v: u32) -> Self {
+        Self(v.to_be_bytes())
+    }
+    pub fn to_u32(self) -> u32 {
+        u32::from_be_bytes(self.0)
+    }
+    pub fn is_unspecified(&self) -> bool {
+        *self == Self::UNSPECIFIED
+    }
+    /// Misma subred que `other` bajo `mask`.
+    pub fn same_subnet(&self, other: Ipv4Addr, mask: Ipv4Addr) -> bool {
+        (self.to_u32() & mask.to_u32()) == (other.to_u32() & mask.to_u32())
+    }
+    /// Analiza `a.b.c.d`.
+    pub fn parse(s: &str) -> Option<Self> {
+        let mut out = [0u8; 4];
+        let mut parts = s.split('.');
+        for slot in &mut out {
+            let p = parts.next()?;
+            if p.is_empty() || p.len() > 3 || !p.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            *slot = p.parse().ok()?;
+        }
+        parts.next().is_none().then_some(Self(out))
+    }
+    /// Escribe `a.b.c.d` en `buf` y devuelve la porción usada.
+    pub fn format<'a>(&self, buf: &'a mut [u8; 15]) -> &'a [u8] {
+        let mut n = 0;
+        for (i, b) in self.0.iter().enumerate() {
+            if i > 0 {
+                buf[n] = b'.';
+                n += 1;
+            }
+            if *b >= 100 {
+                buf[n] = b'0' + b / 100;
+                n += 1;
+            }
+            if *b >= 10 {
+                buf[n] = b'0' + (b / 10) % 10;
+                n += 1;
+            }
+            buf[n] = b'0' + b % 10;
+            n += 1;
+        }
+        &buf[..n]
+    }
+}
+
+/// Suma de comprobación de Internet (RFC 1071) sobre `data`, con `initial`
+/// ya acumulado (para la pseudocabecera).
+pub fn checksum(initial: u32, data: &[u8]) -> u16 {
+    let mut sum = initial;
+    let (pairs, rest) = data.as_chunks::<2>();
+    for c in pairs {
+        sum += u16::from_be_bytes(*c) as u32;
+    }
+    if let [last] = rest {
+        sum += (*last as u32) << 8;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+fn be16(b: &[u8]) -> u16 {
+    u16::from_be_bytes([b[0], b[1]])
+}
+
+fn be32(b: &[u8]) -> u32 {
+    u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ipv4_parse_and_format() {
+        let a = Ipv4Addr::parse("10.0.2.15").unwrap();
+        assert_eq!(a, Ipv4Addr::new(10, 0, 2, 15));
+        let mut buf = [0u8; 15];
+        assert_eq!(a.format(&mut buf), b"10.0.2.15");
+        assert_eq!(
+            Ipv4Addr::new(255, 200, 0, 7).format(&mut buf),
+            b"255.200.0.7"
+        );
+        assert!(Ipv4Addr::parse("10.0.2").is_none());
+        assert!(Ipv4Addr::parse("10.0.2.256").is_none());
+        assert!(Ipv4Addr::parse("10.0.2.15.1").is_none());
+        assert!(Ipv4Addr::parse("a.b.c.d").is_none());
+        assert!(a.same_subnet(Ipv4Addr::new(10, 0, 2, 2), Ipv4Addr::new(255, 255, 255, 0)));
+        assert!(!a.same_subnet(Ipv4Addr::new(10, 1, 2, 2), Ipv4Addr::new(255, 255, 255, 0)));
+    }
+
+    #[test]
+    fn checksum_rfc1071_example() {
+        // Ejemplo clásico: cabecera IPv4 con checksum 0 debe dar 0xb861.
+        let hdr = [
+            0x45, 0x00, 0x00, 0x73, 0x00, 0x00, 0x40, 0x00, 0x40, 0x11, 0x00, 0x00, 0xc0, 0xa8,
+            0x00, 0x01, 0xc0, 0xa8, 0x00, 0xc7,
+        ];
+        assert_eq!(checksum(0, &hdr), 0xb861);
+        let mut with = hdr;
+        with[10..12].copy_from_slice(&0xb861u16.to_be_bytes());
+        assert_eq!(checksum(0, &with), 0);
+        assert_eq!(checksum(0, &[0x01]), !0x0100u16);
+    }
+}

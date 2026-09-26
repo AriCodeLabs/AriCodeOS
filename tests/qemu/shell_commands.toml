@@ -2,9 +2,9 @@
 # arranque; el runner teclea comandos al ver el prompt y termina con shutdown,
 # que el kernel convierte en salida limpia de QEMU.
 name = "shell.commands"
-description = "arish: help, uptime, mem, ps, ls, cat, devices, services, error y shutdown"
+description = "arish: help, uptime, mem, ps, ls, cat, devices, services, net, ping, dns, error y shutdown"
 level = "full"
-areas = ["shell", "filesystem", "init"]
+areas = ["shell", "filesystem", "network", "init"]
 cmdline = "qemu_exit shell"
 timeout_secs = 60
 stdin = [
@@ -17,6 +17,9 @@ stdin = [
     "cat no-existe",
     "devices",
     "services",
+    "net",
+    "ping 10.0.2.2",
+    "dns aricodeos.test",
     "nada",
     "shutdown",
 ]
@@ -37,6 +40,10 @@ serial_contains = [
     "cat: no existe no-existe",
     "1af4:1042  clase 01.00",
     "ficheros  fsd         activo, responde",
+    "red       virtio_net  activo",
+    "ip      10.0.2.15",
+    "respuesta de 10.0.2.2: seq=4 tiempo=",
+    "4 de 4 respuestas",
     "comando desconocido: nada (help)",
     "AriCodeOS: apagando el sistema",
     "ARICODEOS_SHUTDOWN",
