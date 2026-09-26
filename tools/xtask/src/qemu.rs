@@ -40,7 +40,13 @@ pub fn run_interactive(release: bool, cmdline: &str) -> Result {
     let esp = if cmdline.is_empty() {
         base
     } else {
-        image::build_scenario_esp(&base, "interactive", cmdline, &Default::default())?
+        image::build_scenario_esp(
+            &base,
+            &image::scenarios_root(),
+            "interactive",
+            cmdline,
+            &Default::default(),
+        )?
     };
     let vars = image::ovmf_vars_for(&build_dir())?;
     println!("[xtask] QEMU (salir: Ctrl-A X)");

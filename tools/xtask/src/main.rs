@@ -17,6 +17,8 @@ mod image;
 mod qemu;
 mod scenario;
 mod test;
+#[cfg(test)]
+mod test_util;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

@@ -2,7 +2,7 @@
 
 use crate::{root, Result};
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -37,6 +37,9 @@ pub struct Inject {
     pub remove_kernel: bool,
     /// Sobrescribe `e_entry` del kernel con este valor.
     pub patch_entry: Option<u64>,
+    /// Añade un `PT_LOAD` RW vacío (`memsz = 0`, alineación 1) en `e_entry`.
+    #[serde(default)]
+    pub add_empty_segment_at_entry: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -101,12 +104,16 @@ pub fn scenarios_dir() -> PathBuf {
     root().join("tests/qemu")
 }
 
-/// Carga todos los escenarios ordenados por nombre. Un TOML inválido es error:
-/// un test mal escrito no debe pasar en silencio.
+/// Carga todos los escenarios de `tests/qemu/` ordenados por nombre.
 pub fn load_all() -> Result<Vec<Scenario>> {
-    let dir = scenarios_dir();
+    load_from(&scenarios_dir())
+}
+
+/// Carga los escenarios de un directorio. Un TOML inválido o un nombre no
+/// admitido es error: un test mal escrito no debe pasar en silencio.
+pub fn load_from(dir: &Path) -> Result<Vec<Scenario>> {
     let mut out = Vec::new();
-    for entry in std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+    for entry in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
         let path = entry.map_err(|e| e.to_string())?.path();
         if path.extension().is_some_and(|x| x == "toml") {
             let text =
@@ -119,6 +126,7 @@ pub fn load_all() -> Result<Vec<Scenario>> {
                     path.display()
                 ));
             }
+            validate_name(&s.name).map_err(|e| format!("{}: {e}", path.display()))?;
             s.file = path;
             out.push(s);
         }
@@ -215,6 +223,19 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(select(&all, Level::Full, &[]).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn load_rejects_invalid_names() {
+        // Revision de auditoria, hallazgo 3: la validacion debe ocurrir al cargar.
+        let tmp = crate::test_util::TempDir::new("scenarios-load");
+        std::fs::write(
+            tmp.path().join("bad.toml"),
+            "name = \"../escape\"\nlevel = \"full\"\nareas = [\"boot\"]\n[expect]\nexit = 33\n",
+        )
+        .unwrap();
+        let err = load_from(tmp.path()).unwrap_err();
+        assert!(err.contains("nombre de escenario invalido"), "{err}");
     }
 
     #[test]

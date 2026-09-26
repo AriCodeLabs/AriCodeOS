@@ -50,6 +50,8 @@ const PAGE_MASK: u64 = 0xFFF;
 pub struct Elf<'a> {
     data: &'a [u8],
     pub entry: u64,
+    /// Segmentos `PT_LOAD` con `memsz > 0`, validados: sin overflow, sin
+    /// solapes por página. Los vacíos se descartan en `parse`.
     pub segments: Vec<Segment>,
 }
 
@@ -152,6 +154,13 @@ impl<'a> Elf<'a> {
             {
                 return Err(ElfError::AddressOverflow);
             }
+            // Un PT_LOAD con memsz == 0 no ocupa memoria: se descarta aquí para
+            // que ni la reserva, ni la copia ni el mapeo lo vean. Si se
+            // conservara, su `page_range` (una página completa si vaddr no
+            // está alineado) podría pisar los permisos de otro segmento.
+            if seg.memsz == 0 {
+                continue;
+            }
             segments.push(seg);
         }
         if segments.is_empty() {
@@ -168,12 +177,12 @@ impl<'a> Elf<'a> {
         })
     }
 
-    /// Segmentos con `memsz > 0` no pueden compartir páginas: la reserva y el
-    /// mapeo se hacen por página y con permisos por segmento.
+    /// Dos segmentos no pueden compartir páginas: la reserva y el mapeo se
+    /// hacen por página y con permisos por segmento. (Los vacíos ya no están.)
     fn check_no_overlap(segments: &[Segment]) -> Result<(), ElfError> {
-        for (i, a) in segments.iter().enumerate().filter(|(_, s)| s.memsz > 0) {
+        for (i, a) in segments.iter().enumerate() {
             let (a0, a1) = a.page_range();
-            for b in segments.iter().skip(i + 1).filter(|s| s.memsz > 0) {
+            for b in segments.iter().skip(i + 1) {
                 let (b0, b1) = b.page_range();
                 if a0 < b1 && b0 < a1 {
                     return Err(ElfError::OverlappingSegments);
@@ -277,12 +286,27 @@ mod tests {
             &[(TEXT, 16, 16, PF_X | 4), (TEXT + 0x800, 8, 8, PF_W | 4)],
         );
         assert_eq!(Elf::parse(&d).unwrap_err(), ElfError::OverlappingSegments);
-        // segmentos vacios nunca solapan
+    }
+
+    #[test]
+    fn empty_segments_are_dropped_and_cannot_clobber_text() {
+        // Revision de auditoria, hallazgo 1: PT_LOAD RW vacio, sin alinear,
+        // sobre la pagina de la entrada. Debe desaparecer del resultado.
         let d = build_elf(
-            TEXT,
-            &[(TEXT, 16, 16, PF_X | 4), (TEXT + 0x800, 0, 0, PF_W | 4)],
+            TEXT + 0x10,
+            &[
+                (TEXT, 16, 0x100, PF_X | 4),
+                (TEXT + 0x10, 0, 0, PF_W | 4),
+                (TEXT + 0x3000, 8, 8, PF_W | 4),
+            ],
         );
-        assert!(Elf::parse(&d).is_ok());
+        let elf = Elf::parse(&d).unwrap();
+        assert_eq!(elf.segments.len(), 2);
+        assert!(elf.segments.iter().all(|s| s.memsz > 0));
+        assert_eq!(elf.virt_range(), (TEXT, TEXT + 0x4000));
+        // Un ELF cuyo unico PT_LOAD es vacio no tiene nada que cargar.
+        let d = build_elf(TEXT, &[(TEXT, 0, 0, PF_X | 4)]);
+        assert_eq!(Elf::parse(&d).unwrap_err(), ElfError::NoSegments);
     }
 
     #[test]

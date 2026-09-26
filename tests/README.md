@@ -43,6 +43,7 @@ timeout_secs = 30
 truncate_kernel = 3000          # recorta kernel.elf a N bytes
 remove_kernel = true            # elimina kernel.elf
 patch_entry = 0                 # sobrescribe e_entry del ELF
+add_empty_segment_at_entry = true   # añade un PT_LOAD RW vacío (memsz 0) en e_entry
 
 [expect]
 exit = 33                       # 33 = éxito, 35 = fallo reportado por el sistema
@@ -65,4 +66,6 @@ escrito nunca produce un éxito vacío.
 
 ## Logs
 
-Cada escenario deja su serie en `build/scenarios/<name>/serial.log`.
+Cada escenario deja su serie en `build/scenarios/<name>/serial.log`. El runner
+se niega a trabajar si ese directorio o su `esp` son enlaces simbólicos o si la
+ruta canónica sale de `build/scenarios/`.
