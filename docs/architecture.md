@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.0.5 (Fases 11 y 12)
+## Estado: 0.0.6 en curso (0.0.5 + Fase 13)
 
 ```text
 OVMF (UEFI)
@@ -19,7 +19,8 @@ OVMF (UEFI)
        bajo demanda, PIC enmascarado, LAPIC + timer 100 Hz, interrupciones
        habilitadas, hilos del kernel, scheduler round robin preemptivo con
        sueño y colas de espera, procesos en ring 3 con espacio propio,
-       syscalls y tablas de handles con derechos, ARICODEOS_KERNEL_READY
+       syscalls, tablas de handles con derechos y revocación por objeto,
+       programas de usuario ELF cargados desde el kernel, ARICODEOS_KERNEL_READY
 ```
 
 ## Crates
@@ -37,10 +38,12 @@ libs/sync/           aricode-sync: IrqLock/SpinLock con política de interrupcio
 libs/sched/          aricode-sched: política round robin sobre Tid con estados, sueño, bloqueo y salida (no_std + alloc, tests de host)
 libs/handles/        aricode-handles: tabla de handles con generación y derechos, duplicación solo reductora (no_std + alloc, tests de host)
 sdk/abi/             aricode-abi: números de syscall, errores, handles iniciales, derechos y tipos de objeto (no_std, tests de host)
+sdk/rust/            aricode-sys: wrappers de syscall para programas de usuario (no_std, sin alloc)
+user/testprogs/      programas de prueba de ring 3 (Rust y ensamblador) enlazados como ELF estáticos en 0x400000
 boot/                ariboot: integra lo anterior con la crate `uefi`
 kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log con IrqLock y try_lock),
                      arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions, port, pic, pit, apic, msr, syscall, usermode},
-                     object (KernelObject, tabla inicial), user/{process, programs (programs.s), syscalls},
+                     object (KernelObject revocable, tabla inicial), user/{process (cargador ELF), programs (ELF embebidos), syscalls},
                      memory/{phys, pmm, vmm, heap}, sync (política IRQ), time,
                      task/{context (switch_context, thread_start), stack, thread, scheduler, wait}, informe, panic, salida QEMU
 tools/xtask/         build, image, qemu, scenario, test, check
@@ -290,9 +293,15 @@ segundo brevemente para añadir la región.
 - Una excepción con `CS.RPL = 3` no es un pánico: se diagnostica por serie y
   el proceso termina (`Killed`). Al recoger el hilo se libera todo el
   espacio de usuario, tablas incluidas.
-- Programas de prueba en `user/programs.s` (ensamblador independiente de
-  posición): `hello`, `kernel_read`, `kernel_write`, `privileged`,
-  `bad_syscall`, `bad_pointer`, `sleep_yield`; se lanzan con `test=user_<nombre>`.
+- Programas de prueba en `user/testprogs` (crate aparte): binarios en
+  ensamblador (`hello`, `kernel_read`, `kernel_write`, `privileged`,
+  `bad_syscall`, `bad_pointer`) y en Rust sobre `aricode-sys`
+  (`sleep_yield`, `handles`, `caps`). `cargo xtask` los compila como ELF
+  estáticos para `x86_64-unknown-none` con `user/testprogs/user.ld`
+  (0x400000, segmentos R-X, R--, RW-) y el kernel los embebe por
+  `include_bytes!` desde `ARICODE_USER_BIN`. `process::spawn` los carga con
+  `aricode-elf` y mapea cada segmento con sus permisos. Se lanzan con
+  `test=user_<nombre>`.
 
 ## Objetos y handles (Fase 12, ADR 0010)
 
@@ -306,6 +315,22 @@ segundo brevemente para añadir la región.
   (`BadHandle`), duplicado sin derechos que no puede escribir (`Denied`),
   escalada al duplicar (`Escalation`), handle cerrado (`BadHandle`) y uso de
   un objeto del tipo equivocado.
+
+## Capabilities (Fase 13)
+
+- Revocación por objeto: `KernelObject` lleva un flag `revoked`; `object_revoke`
+  exige `MANAGE` y a partir de ahí todo handle a ese objeto, en cualquier
+  proceso, devuelve `Revoked` (salvo cerrarlo). No hace falta localizar los
+  handles: comparten el `Arc`.
+- Derivación: `handle_duplicate` solo reduce derechos (Fase 12); un
+  duplicado revocado no puede volver a duplicarse.
+- Transferencia: `HandleTable::take` retira un handle con `TRANSFER` para
+  moverlo a otra tabla conservando sus derechos; es la primitiva que usa el
+  IPC (Fase 14) para pasar capabilities entre procesos.
+- `capabilities.revoke` (programa Rust `caps`): derivar la consola, intentar
+  revocarla sin `MANAGE` (`Denied`), revocar el propio proceso e ver el
+  duplicado invalidado, cerrar el revocado y comprobar que la consola sigue
+  viva.
 
 ## Deuda conocida
 

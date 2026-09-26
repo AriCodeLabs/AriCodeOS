@@ -70,6 +70,9 @@ pub mod nr {
     pub const OBJECT_KIND: u64 = 8;
     /// `object_id(handle) -> tid | pid`; exige `READ`. La consola devuelve 0.
     pub const OBJECT_ID: u64 = 9;
+    /// `object_revoke(handle)`: invalida el objeto para todos sus handles,
+    /// en todos los procesos; exige `MANAGE`.
+    pub const OBJECT_REVOKE: u64 = 10;
 }
 
 /// Errores devueltos por el kernel (negados en `rax`).
@@ -90,6 +93,8 @@ pub enum Error {
     Escalation = 6,
     /// Límite de recursos del proceso.
     Limit = 7,
+    /// El objeto fue revocado: el handle existe pero ya no da acceso.
+    Revoked = 8,
 }
 
 impl Error {
@@ -106,6 +111,7 @@ impl Error {
             5 => Some(Error::Denied),
             6 => Some(Error::Escalation),
             7 => Some(Error::Limit),
+            8 => Some(Error::Revoked),
             _ => None,
         }
     }

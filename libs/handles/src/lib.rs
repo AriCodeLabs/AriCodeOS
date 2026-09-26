@@ -167,6 +167,18 @@ impl<T> HandleTable<T> {
         Ok(slot.object)
     }
 
+    /// Retira el handle para transferirlo a otra tabla: exige `TRANSFER`.
+    /// Devuelve el objeto y sus derechos (sin `TRANSFER` el receptor no podría
+    /// reenviarlo salvo que se le conceda expresamente: se conserva tal cual).
+    pub fn take(&mut self, handle: Handle) -> Result<(T, Rights), HandleError> {
+        let rights = self.get(handle)?.1;
+        if !rights.contains(Rights::TRANSFER) {
+            return Err(HandleError::Denied);
+        }
+        let object = self.remove(handle)?;
+        Ok((object, rights))
+    }
+
     /// Nuevo handle al mismo objeto con `rights`, que debe ser subconjunto de
     /// los del origen; el origen necesita `DUPLICATE`.
     pub fn duplicate(&mut self, handle: Handle, rights: Rights) -> Result<Handle, HandleError>
@@ -247,6 +259,26 @@ mod tests {
             "bits invalidos"
         );
         assert_eq!(t.insert(2, Rights(0x100)), Err(HandleError::Escalation));
+    }
+
+    #[test]
+    fn take_requires_transfer_and_moves_the_handle() {
+        let mut a: HandleTable<u32> = HandleTable::new(4);
+        let mut b: HandleTable<u32> = HandleTable::new(4);
+        let fixed = a.insert(1, Rights::READ).unwrap();
+        assert_eq!(a.take(fixed), Err(HandleError::Denied));
+        let movable = a.insert(2, Rights::READ.union(Rights::TRANSFER)).unwrap();
+        let (obj, rights) = a.take(movable).unwrap();
+        assert_eq!(
+            a.get(movable),
+            Err(HandleError::BadHandle),
+            "ya no esta en el origen"
+        );
+        let hb = b.insert(obj, rights).unwrap();
+        assert_eq!(
+            b.get(hb).unwrap(),
+            (&2, Rights::READ.union(Rights::TRANSFER))
+        );
     }
 
     #[test]

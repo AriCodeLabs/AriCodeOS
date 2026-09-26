@@ -51,6 +51,13 @@ name = "aricode-sync"
 version = "0.0.5"
 
 [[package]]
+name = "aricode-sys"
+version = "0.0.5"
+dependencies = [
+ "aricode-abi",
+]
+
+[[package]]
 name = "aricode-x86-cpu"
 version = "0.0.5"
 
@@ -64,6 +71,7 @@ version = "0.0.5"
 dependencies = [
  "aricode-abi",
  "aricode-cmdline",
+ "aricode-elf",
  "aricode-fb-console",
  "aricode-handles",
  "aricode-heap",
@@ -318,6 +326,13 @@ name = "unicode-ident"
 version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
+
+[[package]]
+name = "user-testprogs"
+version = "0.0.5"
+dependencies = [
+ "aricode-sys",
+]
 
 [[package]]
 name = "winnow"
