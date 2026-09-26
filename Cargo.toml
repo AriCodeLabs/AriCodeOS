@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "boot-protocol",
+    "boot",
+    "kernel",
+    "tools/xtask",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "UNLICENSED"
+repository = "https://github.com/lynxcraft/aricodeos"
+
+# Perfiles compartidos por bootloader y kernel.
+# panic = "abort": no hay unwinding en no_std.
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true
+codegen-units = 1
+debug = true

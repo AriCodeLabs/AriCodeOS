@@ -1,0 +1,17 @@
+[package]
+name = "ariboot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AriBoot: cargador UEFI de AriCodeOS"
+
+[[bin]]
+name = "ariboot"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+boot-protocol = { path = "../boot-protocol" }
+uefi = { version = "0.41", default-features = false, features = ["alloc", "global_allocator", "panic_handler", "logger"] }
+log = { version = "0.4", default-features = false }

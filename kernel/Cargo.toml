@@ -1,0 +1,19 @@
+[package]
+name = "arikernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AriKernel: núcleo de AriCodeOS"
+
+[[bin]]
+name = "arikernel"
+path = "src/main.rs"
+test = false
+bench = false
+
+[features]
+# Termina QEMU vía isa-debug-exit tras ARICODEOS_KERNEL_READY (modo test).
+qemu-exit = []
+
+[dependencies]
+boot-protocol = { path = "../boot-protocol" }

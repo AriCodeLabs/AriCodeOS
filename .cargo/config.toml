@@ -1,0 +1,10 @@
+[alias]
+xtask = "run --package xtask --release --"
+
+# Kernel: ELF estático en la mitad alta. code-model=kernel permite direcciones
+# en los últimos 2 GiB con desplazamientos de 32 bits con signo.
+[target.x86_64-unknown-none]
+rustflags = [
+    "-C", "relocation-model=static",
+    "-C", "code-model=kernel",
+]
