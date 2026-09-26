@@ -1,0 +1,10 @@
+name = "timer.selftest"
+description = "test=timer: ~5 ticks en 50 ms de PIT, sleep_ms despierta, sin espurias"
+level = "full"
+areas = ["timer"]
+cmdline = "qemu_exit test=timer"
+
+[expect]
+exit = 33
+serial_contains = ["timer selftest ok (", "ticks en 50 ms de PIT", "ARICODEOS_KERNEL_READY"]
+serial_absent = ["KERNEL PANIC"]

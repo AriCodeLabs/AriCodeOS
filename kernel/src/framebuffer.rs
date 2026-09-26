@@ -9,6 +9,10 @@ pub struct MmioSurface {
     base: *mut u32,
 }
 
+// SAFETY: `base` es un puntero a MMIO global que no pertenece a ningún hilo;
+// el acceso queda serializado por el lock de la consola.
+unsafe impl Send for MmioSurface {}
+
 impl MmioSurface {
     /// `base` es la dirección virtual donde está mapeado `info.address`.
     pub fn new(info: FramebufferInfo, base: u64) -> Option<Self> {

@@ -1,6 +1,6 @@
 //! GDT propia del kernel y TSS con pila dedicada para double fault.
 
-use crate::sync::SingleCpu;
+use crate::sync::IrqLock;
 use aricode_x86_cpu::{Gdt, SegmentDescriptor, Selector, Tss, TssDescriptor};
 use core::arch::asm;
 
@@ -11,41 +11,49 @@ const DOUBLE_FAULT_STACK_SIZE: usize = 16 * 1024;
 #[repr(C, align(16))]
 struct Stack([u8; DOUBLE_FAULT_STACK_SIZE]);
 
-static DOUBLE_FAULT_STACK: SingleCpu<Stack> = SingleCpu::new(Stack([0; DOUBLE_FAULT_STACK_SIZE]));
-static TSS: SingleCpu<Tss> = SingleCpu::new(Tss::new());
-static GDT: SingleCpu<Gdt<8>> = SingleCpu::new(Gdt::new());
+// Estas estructuras las lee la CPU directamente por su dirección: el lock solo
+// serializa la construcción; después no se modifican y no se mueven.
+static DOUBLE_FAULT_STACK: IrqLock<Stack> = IrqLock::new(Stack([0; DOUBLE_FAULT_STACK_SIZE]));
+static TSS: IrqLock<Tss> = IrqLock::new(Tss::new());
+static GDT: IrqLock<Gdt<8>> = IrqLock::new(Gdt::new());
 
+#[derive(Debug, Clone, Copy)]
 pub struct Selectors {
     pub code: Selector,
     pub data: Selector,
     pub tss: Selector,
 }
 
-static SELECTORS: SingleCpu<Selectors> = SingleCpu::new(Selectors {
+static SELECTORS: IrqLock<Selectors> = IrqLock::new(Selectors {
     code: Selector::NULL,
     data: Selector::NULL,
     tss: Selector::NULL,
 });
 
-pub fn selectors() -> &'static Selectors {
-    // SAFETY: solo lectura tras `init`; ver `SingleCpu`.
-    unsafe { &*SELECTORS.get() }
+pub fn selectors() -> Selectors {
+    *SELECTORS.lock()
 }
 
 pub fn init() {
-    // SAFETY: una CPU, interrupciones deshabilitadas, llamada única (ver `SingleCpu`).
-    unsafe {
-        let stack_top = DOUBLE_FAULT_STACK.get() as u64 + DOUBLE_FAULT_STACK_SIZE as u64;
-        (*TSS.get()).ist[(DOUBLE_FAULT_IST - 1) as usize] = stack_top;
-
-        let gdt = &mut *GDT.get();
+    let stack_top = {
+        let stack = DOUBLE_FAULT_STACK.lock();
+        stack.0.as_ptr() as u64 + DOUBLE_FAULT_STACK_SIZE as u64
+    };
+    let tss_addr = {
+        let mut tss = TSS.lock();
+        tss.ist[(DOUBLE_FAULT_IST - 1) as usize] = stack_top;
+        &*tss as *const Tss as u64
+    };
+    let (ptr, code, data, tss) = {
+        let mut gdt = GDT.lock();
         let code = gdt.push(SegmentDescriptor::code64(0));
         let data = gdt.push(SegmentDescriptor::data(0));
-        let tss = gdt.push_tss(TssDescriptor::new(TSS.get() as u64));
-        *SELECTORS.get() = Selectors { code, data, tss };
-
-        load(gdt.pointer(), code, data, tss);
-    }
+        let tss = gdt.push_tss(TssDescriptor::new(tss_addr));
+        (gdt.pointer(), code, data, tss)
+    };
+    *SELECTORS.lock() = Selectors { code, data, tss };
+    // SAFETY: la GDT y el TSS son estáticos, ya construidos y nunca se mueven.
+    unsafe { load(ptr, code, data, tss) };
 }
 
 /// Carga la GDT y recarga todos los selectores de segmento y el TR.

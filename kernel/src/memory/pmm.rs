@@ -5,12 +5,12 @@
 //! se accede a través del mapa físico lineal.
 
 use super::phys;
-use crate::sync::SingleCpu;
+use crate::sync::IrqLock;
 use aricode_pmm::{BitmapAllocator, Frame, Stats, FRAME_SIZE};
 use boot_protocol::{BootInfo, MemoryRegionKind};
 use log::{debug, info};
 
-static PMM: SingleCpu<Option<BitmapAllocator<'static>>> = SingleCpu::new(None);
+static PMM: IrqLock<Option<BitmapAllocator<'static>>> = IrqLock::new(None);
 
 /// Memoria baja que nunca se entrega: frame 0 (null) y el primer MiB, que
 /// necesitarán el trampolín SMP y algunos dispositivos heredados.
@@ -73,8 +73,7 @@ pub fn init(info: &BootInfo) {
         bitmap_bytes.div_ceil(1024),
         bitmap_addr
     );
-    // SAFETY: init único, una CPU (ver `SingleCpu`).
-    unsafe { *PMM.get() = Some(pmm) };
+    *PMM.lock() = Some(pmm);
 }
 
 /// Acceso exclusivo al allocator.
@@ -82,9 +81,8 @@ pub fn init(info: &BootInfo) {
 /// # Panics
 /// Si `init` no se ha ejecutado.
 pub fn with<R>(f: impl FnOnce(&mut BitmapAllocator<'static>) -> R) -> R {
-    // SAFETY: una CPU sin interrupciones; no se reentra (ver `SingleCpu`).
-    let pmm = unsafe { &mut *PMM.get() };
-    f(pmm.as_mut().expect("PMM no inicializado"))
+    let mut guard = PMM.lock();
+    f(guard.as_mut().expect("PMM no inicializado"))
 }
 
 pub fn stats() -> Stats {

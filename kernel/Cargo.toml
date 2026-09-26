@@ -19,4 +19,5 @@ aricode-x86-cpu = { path = "../libs/x86-cpu" }
 aricode-pmm = { path = "../libs/pmm" }
 aricode-x86-paging = { path = "../libs/x86-paging" }
 aricode-heap = { path = "../libs/heap" }
+aricode-sync = { path = "../libs/sync" }
 log = { version = "0.4", default-features = false }

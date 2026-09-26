@@ -35,6 +35,10 @@ name = "aricode-pmm"
 version = "0.0.3"
 
 [[package]]
+name = "aricode-sync"
+version = "0.0.3"
+
+[[package]]
 name = "aricode-x86-cpu"
 version = "0.0.3"
 
@@ -50,6 +54,7 @@ dependencies = [
  "aricode-fb-console",
  "aricode-heap",
  "aricode-pmm",
+ "aricode-sync",
  "aricode-x86-cpu",
  "aricode-x86-paging",
  "boot-protocol",
