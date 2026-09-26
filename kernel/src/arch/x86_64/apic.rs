@@ -1,16 +1,15 @@
 //! Local APIC: habilitación, vector espurio, EOI y timer periódico calibrado
 //! con el PIT (Fase 8).
 
+use super::msr;
 use crate::memory::vmm;
 use crate::time;
 use aricode_x86_paging::{CACHE_DISABLE, GLOBAL, NO_EXECUTE, WRITABLE, WRITE_THROUGH};
-use core::arch::asm;
 use core::sync::atomic::{AtomicU32, Ordering};
 use log::{info, warn};
 
 /// Dirección virtual donde se mapea el LAPIC (una página, sin caché).
 const LAPIC_VIRT: u64 = 0xFFFF_D000_0000_0000;
-const IA32_APIC_BASE: u32 = 0x1B;
 
 pub const TIMER_VECTOR: u8 = 0x20;
 pub const SPURIOUS_VECTOR: u8 = 0xFF;
@@ -43,27 +42,14 @@ fn write(reg: u32, value: u32) {
     unsafe { ((LAPIC_VIRT + reg as u64) as *mut u32).write_volatile(value) }
 }
 
-fn read_msr(msr: u32) -> u64 {
-    let (lo, hi): (u32, u32);
-    // SAFETY: lectura de MSR en ring 0.
-    unsafe { asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi, options(nomem, nostack)) };
-    (hi as u64) << 32 | lo as u64
-}
-
-fn write_msr(msr: u32, value: u64) {
-    // SAFETY: escritura de MSR en ring 0; el llamador conoce el registro.
-    unsafe {
-        asm!("wrmsr", in("ecx") msr, in("eax") value as u32, in("edx") (value >> 32) as u32, options(nomem, nostack))
-    };
-}
-
 /// Mapea el LAPIC, lo habilita y arranca el timer periódico a `time::TICK_HZ`.
 /// Debe llamarse con las interrupciones deshabilitadas y la IDT instalada.
 pub fn init() {
-    let base_msr = read_msr(IA32_APIC_BASE);
+    let base_msr = msr::read(msr::IA32_APIC_BASE);
     let phys = base_msr & 0x000F_FFFF_FFFF_F000;
     // Bit 11: habilitación global del APIC (en xAPIC).
-    write_msr(IA32_APIC_BASE, base_msr | (1 << 11));
+    // SAFETY: habilitar el APIC global no cambia su dirección base.
+    unsafe { msr::write(msr::IA32_APIC_BASE, base_msr | (1 << 11)) };
 
     vmm::with(|m| {
         m.map_4k(

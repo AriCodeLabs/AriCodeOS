@@ -2140,20 +2140,29 @@ planificado y colas de espera (`task::wait::WaitQueue`).
 
 # FASE 11 — User mode
 
+**Estado: completada (2026-09-26).**
+
 ### Objetivo
 
 Ejecutar código en ring 3.
 
-### Implementar
+### Implementado
 
-- user address spaces;
-- transición kernel/user;
-- syscall entry;
-- protección de páginas.
+- user address spaces: PML4 por proceso con la mitad del kernel compartida,
+  liberación completa al terminar (`libs/x86-paging::free_user_half`);
+- transición kernel/user: `iretq` a ring 3, GDT con segmentos DPL 3, TSS.rsp0
+  y CR3 por hilo en cada cambio de contexto;
+- syscall entry: instrucción `syscall`/`sysretq`, ABI propio en `sdk/abi`
+  (6 syscalls iniciales), validación de punteros de usuario;
+- protección de páginas: USER solo en la mitad baja, código RX, pila RW+NX.
 
 ### Criterio crítico
 
-Un proceso user no puede leer ni escribir memoria kernel.
+Un proceso user no puede leer ni escribir memoria kernel:
+`user.kernel_read_killed` y `user.kernel_write_killed` provocan #PF de
+protección en ring 3, el proceso termina y el kernel llega a READY. Además
+`user.privileged_killed` (#GP por `hlt`), `user.bad_pointer` (la syscall
+rechaza un puntero de kernel) y `user.bad_syscall` (número inexistente).
 
 ---
 

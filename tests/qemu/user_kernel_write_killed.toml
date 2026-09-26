@@ -1,0 +1,10 @@
+name = "user.kernel_write_killed"
+description = "escribir memoria del kernel desde ring 3 -> #PF escritura, proceso terminado"
+level = "full"
+areas = ["user"]
+cmdline = "qemu_exit test=user_kernel_write"
+
+[expect]
+exit = 33
+serial_contains = ["USER FAULT #PF (14)", "terminado por fallo: #PF escritura", "ARICODEOS_KERNEL_READY"]
+serial_absent = ["KERNEL PANIC", "salio con codigo"]

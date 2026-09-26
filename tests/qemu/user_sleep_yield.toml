@@ -1,0 +1,10 @@
+name = "user.sleep_yield"
+description = "sleep, yield, get_tid y abi_version desde ring 3"
+level = "full"
+areas = ["user"]
+cmdline = "qemu_exit test=user_sleep_yield"
+
+[expect]
+exit = 33
+serial_contains = ["salio con codigo 3", "ARICODEOS_KERNEL_READY"]
+serial_absent = ["KERNEL PANIC"]

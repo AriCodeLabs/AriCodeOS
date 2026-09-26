@@ -174,11 +174,14 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
     }
 
     /// Tabla del nivel inferior en `table[idx]`. Con `create`, la crea si falta.
+    /// `user` añade el bit USER a la entrada intermedia (necesario en toda la
+    /// ruta para que una hoja de usuario sea accesible desde ring 3).
     fn next_level(
         &mut self,
         table_phys: u64,
         idx: usize,
         create: bool,
+        user: bool,
     ) -> Result<Option<u64>, MapError> {
         let entry = self.table(table_phys)[idx];
         if entry & PRESENT == 0 {
@@ -186,11 +189,15 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
                 return Ok(None);
             }
             let t = self.alloc_table()?;
-            self.table_mut(table_phys)[idx] = t | PRESENT | WRITABLE;
+            let user_bit = if user { USER } else { 0 };
+            self.table_mut(table_phys)[idx] = t | PRESENT | WRITABLE | user_bit;
             return Ok(Some(t));
         }
         if entry & HUGE != 0 {
             return Err(MapError::HugePageCollision);
+        }
+        if user && entry & USER == 0 {
+            self.table_mut(table_phys)[idx] = entry | USER;
         }
         Ok(Some(entry & ADDR_MASK))
     }
@@ -200,13 +207,16 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
         if !virt.is_multiple_of(PAGE_SIZE) || !phys.is_multiple_of(PAGE_SIZE) {
             return Err(MapError::Unaligned);
         }
+        let user = flags & USER != 0;
         let pdpt = self
-            .next_level(self.root, index(virt, 39), true)?
+            .next_level(self.root, index(virt, 39), true, user)?
             .expect("create");
         let pd = self
-            .next_level(pdpt, index(virt, 30), true)?
+            .next_level(pdpt, index(virt, 30), true, user)?
             .expect("create");
-        let pt = self.next_level(pd, index(virt, 21), true)?.expect("create");
+        let pt = self
+            .next_level(pd, index(virt, 21), true, user)?
+            .expect("create");
         let slot = &mut self.table_mut(pt)[index(virt, 12)];
         if *slot & PRESENT != 0 {
             return Err(MapError::AlreadyMapped);
@@ -220,11 +230,12 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
         if !virt.is_multiple_of(HUGE_2M) || !phys.is_multiple_of(HUGE_2M) {
             return Err(MapError::Unaligned);
         }
+        let user = flags & USER != 0;
         let pdpt = self
-            .next_level(self.root, index(virt, 39), true)?
+            .next_level(self.root, index(virt, 39), true, user)?
             .expect("create");
         let pd = self
-            .next_level(pdpt, index(virt, 30), true)?
+            .next_level(pdpt, index(virt, 30), true, user)?
             .expect("create");
         let slot = &mut self.table_mut(pd)[index(virt, 21)];
         if *slot & PRESENT != 0 {
@@ -276,13 +287,13 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
             return Err(MapError::Unaligned);
         }
         let pdpt = self
-            .next_level(self.root, index(virt, 39), false)?
+            .next_level(self.root, index(virt, 39), false, false)?
             .ok_or(MapError::NotMapped)?;
         let pd = self
-            .next_level(pdpt, index(virt, 30), false)?
+            .next_level(pdpt, index(virt, 30), false, false)?
             .ok_or(MapError::NotMapped)?;
         let pt = self
-            .next_level(pd, index(virt, 21), false)?
+            .next_level(pd, index(virt, 21), false, false)?
             .ok_or(MapError::NotMapped)?;
         let slot = &mut self.table_mut(pt)[index(virt, 12)];
         if *slot & PRESENT == 0 {
@@ -319,6 +330,69 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
             (pte & ADDR_MASK) + (virt & (PAGE_SIZE - 1)),
             pte & !ADDR_MASK,
         ))
+    }
+}
+
+/// Entradas del PML4 que pertenecen al kernel (mitad alta).
+pub const KERNEL_PML4_FIRST: usize = 256;
+
+impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
+    /// Copia las entradas 256..512 del PML4 `from_root` (la mitad del kernel)
+    /// en este mapper: los PDPT del kernel quedan compartidos.
+    ///
+    /// # Safety
+    ///
+    /// `from_root` debe ser un PML4 válido accesible a través de `self.map`.
+    pub unsafe fn share_kernel_half(&mut self, from_root: u64) {
+        let src = &*(self.map.phys_to_virt(from_root) as *const [u64; 512]);
+        let dst = self.table_mut(self.root);
+        dst[KERNEL_PML4_FIRST..].copy_from_slice(&src[KERNEL_PML4_FIRST..]);
+    }
+
+    /// Libera toda la mitad baja (usuario): hojas de 4 KiB y 2 MiB y tablas
+    /// intermedias, entregando cada frame a `free`. Las entradas del kernel
+    /// no se tocan. Al terminar, el PML4 sigue siendo válido y vacío por abajo.
+    pub fn free_user_half(&mut self, mut free: impl FnMut(u64)) {
+        for i in 0..KERNEL_PML4_FIRST {
+            let e = self.table(self.root)[i];
+            if e & PRESENT == 0 {
+                continue;
+            }
+            let pdpt = e & ADDR_MASK;
+            for j in 0..512 {
+                let e = self.table(pdpt)[j];
+                if e & PRESENT == 0 {
+                    continue;
+                }
+                let pd = e & ADDR_MASK;
+                for k in 0..512 {
+                    let e = self.table(pd)[k];
+                    if e & PRESENT == 0 {
+                        continue;
+                    }
+                    if e & HUGE != 0 {
+                        free(e & ADDR_MASK & !(HUGE_2M - 1));
+                        continue;
+                    }
+                    let pt = e & ADDR_MASK;
+                    for l in 0..512 {
+                        let e = self.table(pt)[l];
+                        if e & PRESENT != 0 {
+                            free(e & ADDR_MASK);
+                        }
+                    }
+                    free(pt);
+                }
+                free(pd);
+            }
+            free(pdpt);
+            self.table_mut(self.root)[i] = 0;
+        }
+    }
+
+    /// Libera el PML4 (tras `free_user_half`) y consume el mapper.
+    pub fn into_root_frame(self) -> u64 {
+        self.root
     }
 }
 
@@ -438,6 +512,52 @@ mod tests {
         // Volver a mapear tras unmap funciona.
         m.map_4k(0x5000, 0xB000, 0).unwrap();
         assert_eq!(m.translate(0x5000).unwrap().0, 0xB000);
+    }
+
+    #[test]
+    fn user_mappings_set_user_on_the_whole_path() {
+        let mut m = mapper(16);
+        m.map_4k(0x40_0000, 0x10_0000, USER | WRITABLE).unwrap();
+        let root = m.root_phys();
+        let pml4e = unsafe { (*(root as *const [u64; 512]))[0] };
+        assert!(pml4e & USER != 0, "PML4E sin USER");
+        let pdpte = unsafe { (*((pml4e & ADDR_MASK) as *const [u64; 512]))[0] };
+        assert!(pdpte & USER != 0, "PDPTE sin USER");
+        let (_, flags) = m.translate(0x40_0000).unwrap();
+        assert!(flags & USER != 0);
+        // Un mapeo de kernel en el mismo PD no quita USER a la ruta.
+        m.map_4k(0x40_1000, 0x10_1000, WRITABLE).unwrap();
+        let pml4e2 = unsafe { (*(root as *const [u64; 512]))[0] };
+        assert!(pml4e2 & USER != 0);
+    }
+
+    #[test]
+    fn share_kernel_half_and_free_user_half() {
+        let mut kernel = mapper(32);
+        kernel
+            .map_4k(0xFFFF_FFFF_8000_0000, 0x20_0000, GLOBAL)
+            .unwrap();
+        let mut user = mapper(32);
+        unsafe { user.share_kernel_half(kernel.root_phys()) };
+        assert_eq!(
+            user.translate(0xFFFF_FFFF_8000_0000).map(|t| t.0),
+            Some(0x20_0000)
+        );
+        user.map_4k(0x40_0000, 0x10_0000, USER).unwrap();
+        user.map_2m(0x80_0000, 0x40_0000, USER | WRITABLE).unwrap();
+        let mut freed = Vec::new();
+        user.free_user_half(|p| freed.push(p));
+        // Hojas: 0x10_0000 (4K) y 0x40_0000 (2M); tablas: PT, PD, PDPT.
+        assert!(freed.contains(&0x10_0000) && freed.contains(&0x40_0000));
+        assert_eq!(freed.len(), 5, "{freed:x?}");
+        assert!(user.translate(0x40_0000).is_none());
+        assert_eq!(
+            user.translate(0xFFFF_FFFF_8000_0000).map(|t| t.0),
+            Some(0x20_0000),
+            "kernel intacto"
+        );
+        let root = user.into_root_frame();
+        assert_ne!(root, 0);
     }
 
     #[test]

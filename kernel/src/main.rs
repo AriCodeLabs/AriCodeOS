@@ -19,6 +19,7 @@ mod serial;
 mod sync;
 mod task;
 mod time;
+mod user;
 
 use aricode_cmdline::{keys, CmdLine};
 use boot_protocol::{BootInfo, BOOT_PROTOCOL_MAGIC, BOOT_PROTOCOL_VERSION};
@@ -223,6 +224,7 @@ fn run_requested_test(cmdline: &CmdLine) {
         "timer" => time::selftest(),
         "threads" => task::scheduler::threads_selftest(),
         "sched" => task::scheduler::selftest(),
+        other if other.starts_with("user_") => run_user_program(&other[5..]),
         // W^X: escribir en .rodata -> #PF por protección.
         "write_rodata" => {
             static RO: u64 = 7;
@@ -274,6 +276,17 @@ fn run_requested_test(cmdline: &CmdLine) {
         },
         other => warn!("test: '{other}' desconocido, ignorado"),
     }
+}
+
+/// Lanza un programa de usuario embebido y espera su fin.
+fn run_user_program(name: &str) {
+    let Some(code) = user::programs::by_name(name) else {
+        warn!("test: programa de usuario '{name}' desconocido");
+        return;
+    };
+    let pid = user::process::spawn(name, code).expect("crear proceso");
+    let status = user::process::wait(pid);
+    info!("user: '{name}' terminado: {status:?}");
 }
 
 /// Fin de la ejecución: termina QEMU si se pidió, si no detiene la CPU.

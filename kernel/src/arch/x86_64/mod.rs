@@ -5,9 +5,12 @@ pub mod exceptions;
 pub mod gdt;
 pub mod idt;
 pub mod interrupts;
+pub mod msr;
 pub mod pic;
 pub mod pit;
 pub mod port;
+pub mod syscall;
+pub mod usermode;
 
 /// Instala GDT + TSS (con pila IST para #DF) e IDT. Debe llamarse una vez,
 /// con interrupciones deshabilitadas, antes de cualquier operación que pueda
@@ -15,4 +18,5 @@ pub mod port;
 pub fn init() {
     gdt::init();
     idt::init();
+    syscall::init();
 }
