@@ -23,6 +23,7 @@ serial_contains = [
     "AriInit: servicio de bloques ok",
     "AriInit: servicio de red ok",
     "AriInit: servicio TCP ok",
+    "AriInit: cliente HTTP ok",
     "AriInit: servicios de arranque completados",
     "[INFO ] init terminado con codigo 0",
     "ARICODEOS_KERNEL_READY",

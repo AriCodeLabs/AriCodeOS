@@ -19,6 +19,7 @@ members = [
     "libs/gpt",
     "libs/arifs",
     "libs/net",
+    "libs/http",
     "sdk/abi",
     "sdk/rust",
     "sdk/proto",
@@ -59,7 +60,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.0.9"
+version = "0.1.0"
 edition = "2021"
 license = "UNLICENSED"
 repository = "https://github.com/lynxcraft/aricodeos"
