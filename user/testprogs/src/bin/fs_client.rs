@@ -1,0 +1,73 @@
+//! Cliente del servicio de ficheros (Fase 20): lista, abre, lee, crea,
+//! escribe y relee por IPC. Handles: 0x10004 = fsd (WRITE), 0x10005 = HARDWARE.
+#![no_std]
+#![no_main]
+
+use user_testprogs::sys::{self, fs::FsClient, Handle};
+
+const FSD: Handle = Handle(0x0001_0004);
+const HW: Handle = Handle(0x0001_0005);
+
+fn main(_arg: u64) -> u64 {
+    let Ok(mut fs) = FsClient::new(FSD, HW) else {
+        return 1;
+    };
+    // 1. Listado.
+    let mut name = [0u8; 32];
+    let mut count = 0;
+    let mut saw_hola = false;
+    let mut i = 0;
+    while let Ok(Some((n, size))) = fs.list(i, &mut name) {
+        sys::print(b"fs_client: ");
+        sys::print(&name[..n]);
+        sys::print(b" (");
+        let mut buf = [0u8; 20];
+        sys::print(user_testprogs::fmt_u64(size, &mut buf));
+        sys::print(b" bytes)\n");
+        saw_hola |= &name[..n] == b"hola.txt";
+        count += 1;
+        i += 1;
+    }
+    if count < 2 || !saw_hola {
+        return 2;
+    }
+    // 2. Leer hola.txt.
+    let Ok(fd) = fs.open("hola.txt") else {
+        return 3;
+    };
+    let mut data = [0u8; 64];
+    let n = match fs.read(fd, 0, &mut data) {
+        Ok(n) => n,
+        Err(_) => return 4,
+    };
+    if &data[..n] != b"Hola desde AriFS\n" {
+        return 5;
+    }
+    sys::print(b"fs_client: hola.txt dice: ");
+    sys::print(&data[..n]);
+    let _ = fs.close(fd);
+    // 3. Crear, escribir, releer.
+    let Ok(fd) = fs.create("nuevo.txt") else {
+        return 6;
+    };
+    if fs.write(fd, 0, b"escrito desde ring 3") != Ok(20) {
+        return 7;
+    }
+    if fs.read(fd, 8, &mut data) != Ok(12) || &data[..12] != b"desde ring 3" {
+        return 8;
+    }
+    // 4. Errores: crear duplicado, abrir inexistente, fd cerrado.
+    if fs.create("nuevo.txt").is_ok() {
+        return 9;
+    }
+    if fs.open("no-existe").is_ok() {
+        return 10;
+    }
+    if fs.close(fd).is_err() || fs.read(fd, 0, &mut data).is_ok() {
+        return 11;
+    }
+    sys::print(b"fs_client: listar, leer, crear y escribir por IPC ok\n");
+    0
+}
+
+user_testprogs::entry!(main);

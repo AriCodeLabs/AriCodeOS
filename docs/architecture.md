@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.0.8 en curso (0.0.7 + Fases 18 y 19)
+## Estado: 0.0.8 en curso (0.0.7 + Fases 18, 19 y 20)
 
 ```text
 OVMF (UEFI)
@@ -25,7 +25,8 @@ OVMF (UEFI)
        procesos con la capacidad SPAWNER, ACPI + I/O APIC, drivers en ring 3
        con capabilities IRQ/MMIO/DMA, enumeración PCIe por ECAM, init reclama
        el virtio-blk (BARs, MSI-X) y lanza su driver en ring 3 como servicio
-       de bloques por IPC (disco GPT), ARICODEOS_KERNEL_READY
+       de bloques por IPC (disco GPT), fsd monta AriFS v0 sobre él y sirve
+       ficheros por IPC, ARICODEOS_KERNEL_READY
 ```
 
 ## Crates
@@ -47,12 +48,14 @@ libs/acpi/           aricode-acpi: RSDP, XSDT/RSDT, MADT (LAPIC, I/O APIC, overr
 libs/pci/            aricode-pci: direccionamiento ECAM, cabecera de configuración, BARs, capabilities, clases (no_std + alloc, tests de host)
 libs/virtio/         aricode-virtio: virtqueue split sobre DMA, estructuras virtio-pci modernas, peticiones virtio-blk (no_std, tests de host)
 libs/gpt/            aricode-gpt: CRC32, cabecera y entradas GPT, escritor para el disco de pruebas (no_std, tests de host)
-sdk/proto/           aricode-proto: protocolos IPC versionados de los servicios (bloques v1) (no_std, tests de host)
+libs/arifs/          aricode-arifs: AriFS v0, directorio plano con tabla de ficheros de capacidad fija sobre `BlockDevice` (no_std, tests de host)
+sdk/proto/           aricode-proto: protocolos IPC versionados de los servicios (bloques v1, ficheros v1) (no_std, tests de host)
 sdk/abi/             aricode-abi: números de syscall, errores, handles iniciales, derechos y tipos de objeto (no_std, tests de host)
-sdk/rust/            aricode-sys: wrappers de syscall para programas de usuario (no_std, sin alloc) y `user.ld`, el linker script de todo programa de usuario
+sdk/rust/            aricode-sys: wrappers de syscall para programas de usuario (no_std, sin alloc), clientes de los servicios de bloques y ficheros, y `user.ld`, el linker script de todo programa de usuario
 user/testprogs/      programas de prueba de ring 3 (Rust y ensamblador) enlazados como ELF estáticos en 0x400000
 services/init/       AriInit: primer proceso; recibe SPAWNER y la raíz PCI, lanza/supervisa servicios y reclama dispositivos para sus drivers
 services/virtio-blk/ driver virtio-blk en ring 3 y servicio de bloques por IPC (interfaz moderna, cola 0 en DMA, MSI-X, GPT)
+services/arifs/      fsd: servicio de ficheros AriFS en ring 3 sobre el servicio de bloques
 boot/                ariboot: integra lo anterior con la crate `uefi`
 kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log con IrqLock y try_lock),
                      arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions, port, pic, pit, apic, ioapic, msr, syscall, usermode},
@@ -462,8 +465,9 @@ segundo brevemente para añadir la región.
   `Virtqueue`), asigna el vector MSI-X 0 a la cola y ejecuta peticiones de
   un sector (cabecera, datos, estado) esperando la IRQ con `irq_wait`. La
   autoprueba lee sectores del disco de pruebas, escribe uno y lo relee.
-- El runner añade `virtio-blk-pci` moderno con `build/disk.img` (4 MiB,
-  cada sector lleva `ARIDISK\0` y su número), regenerado en cada arranque.
+- El runner añade `virtio-blk-pci` moderno con `build/disk.img` (4 MiB, GPT
+  con la partición `ARI0` formateada como AriFS; desde el LBA 4096 cada
+  sector lleva `ARIDISK\0` y su número), regenerado en cada arranque.
 - Los programas de usuario tienen un heap estático de 64 KiB
   (`aricode-heap` tras un spinlock) porque la librería PCI usa `alloc`.
 
@@ -493,7 +497,38 @@ segundo brevemente para añadir la región.
   handler MSI-X no puede llegar en la ventana entre soltar el lock y
   dormirse (antes cada petición podía esperar hasta el plazo de 2 s).
 
+## Sistema de archivos (Fase 20)
+
+- AriFS v0 (`libs/arifs`): LBA 0 superbloque (magia `ARIFS`, sectores,
+  siguiente LBA libre), LBA 1..4 tabla de 32 entradas de 64 bytes (nombre,
+  LBA inicial, capacidad, tamaño), datos desde el LBA 5 en bloques fijos
+  de 16 sectores asignados de forma incremental. Sin fragmentación, borrado
+  ni journaling: lo justo para el criterio de la fase. Todo el acceso pasa
+  por el trait `BlockDevice`, así que la librería se prueba en host sobre
+  un `Vec` y xtask la usa para formatear la partición `ARI0` del disco de
+  pruebas con `hola.txt` y `README`.
+- `fsd` (`services/arifs`) recibe de init su endpoint (`READ|WRITE`), el
+  del servicio de bloques (`WRITE`) y una capacidad de hardware; `arg` es el
+  LBA de la partición. Implementa `BlockDevice` sobre `aricode-sys::block`
+  (un sector por petición) y atiende `FileServiceProtocol v1`
+  (`sdk/proto::fs`): peticiones y respuestas de 64 bytes con `List`,
+  `Open`, `Create`, `Read`, `Write` y `Close`; los datos van por el buffer
+  DMA del cliente (hasta 4 KiB por petición), que fsd mapea una vez y
+  reutiliza por dirección física. Los descriptores son globales al servicio
+  (16 abiertos) hasta que haya identidad de cliente por capability.
+- `aricode-sys::fs::FsClient` encapsula endpoint de respuesta, buffer DMA
+  y llamadas; `fs_client` (ring 3) lista, lee `hola.txt`, crea y escribe
+  `nuevo.txt`, relee y comprueba `Exists`, `NotFound` y `BadFd`.
+  `filesystem.read_write` lo exige; `init.boot` exige el mensaje de éxito.
+- El área en bruto del disco de pruebas (LBA 4096 en adelante, patrón
+  `ARIDISK\0`+LBA) queda fuera del alcance máximo de AriFS (32 × 16
+  sectores) para que `blk_client` y `fsd` no se pisen.
+
 ## Deuda conocida
+
+- `fsd` no distingue clientes: cualquier proceso con su endpoint ve todos
+  los descriptores. La capability por fichero llega con la identidad de
+  cliente en IPC.
 
 - El servicio de bloques mapea cada buffer DMA de cliente una vez y lo
   reutiliza por dirección física; no hay `mmio_unmap` ni caché de bloques.

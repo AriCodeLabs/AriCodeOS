@@ -58,6 +58,8 @@ sdk/rust/        aricode-sys: wrappers de syscall y linker script de los program
 user/testprogs/  programas de prueba de ring 3 y drivers de prueba (Rust y ensamblador), empaquetados en el initrd
 services/init/   AriInit, primer proceso de usuario y device manager provisional
 services/virtio-blk/ driver virtio-blk y servicio de bloques por IPC en ring 3
+services/arifs/  fsd: servicio de ficheros AriFS v0 por IPC en ring 3
+libs/arifs/      AriFS v0: sistema de archivos plano con tests de host
 sdk/proto/       protocolos IPC de los servicios
 boot/            AriBoot: cargador UEFI (crate `ariboot`)
 kernel/          AriKernel (crate `arikernel`), ELF64 en la mitad alta

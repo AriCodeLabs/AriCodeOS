@@ -67,7 +67,20 @@ fn start_driver(name: &str, index: u64, service: Handle) -> Result<Handle, Error
     sys::process_spawn_with(SPAWNER, name, mask, &to_send[..n])
 }
 
-/// Lanza un cliente del servicio de bloques con su endpoint (solo WRITE) y
+/// Lanza fsd con su endpoint (READ|WRITE), el del servicio de bloques (WRITE)
+/// y una capacidad de hardware; `arg` = LBA de la partición.
+fn start_fsd(
+    fs_service: Handle,
+    block_service: Handle,
+    partition_lba: u64,
+) -> Result<Handle, Error> {
+    let own = sys::handle_duplicate(fs_service, rights::READ | rights::WRITE | rights::TRANSFER)?;
+    let blk = sys::handle_duplicate(block_service, rights::WRITE | rights::TRANSFER)?;
+    let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
+    sys::process_spawn_with(SPAWNER, "fsd", partition_lba, &[own, blk, hw])
+}
+
+/// Lanza un cliente de un servicio con su endpoint (solo WRITE) y
 /// una capacidad de hardware para su buffer DMA, y espera su salida.
 fn run_block_client(name: &str, service: Handle) -> Result<u64, Error> {
     let ep = sys::handle_duplicate(service, rights::WRITE | rights::TRANSFER)?;
@@ -129,6 +142,30 @@ fn main(_arg: u64) -> u64 {
             let Ok(_driver) = start_driver("virtio_blk", index, service) else {
                 return 10;
             };
+            // Servicio de ficheros sobre la particion ARI0 (LBA 34) y su cliente.
+            let Ok(fs_service) = sys::endpoint_create() else {
+                return 12;
+            };
+            match start_fsd(fs_service, service, 34) {
+                Ok(_) => {}
+                Err(e) => {
+                    user_testprogs::print_error(b"AriInit: fsd", e);
+                    return 13;
+                }
+            }
+            match run_block_client("fs_client", fs_service) {
+                Ok(0) => say(b"servicio de ficheros ok"),
+                Ok(code) => {
+                    sys::print(b"AriInit: fs_client salio con ");
+                    sys::print(user_testprogs::fmt_u64(code, &mut buf));
+                    sys::print(b"\n");
+                    return 14;
+                }
+                Err(e) => {
+                    user_testprogs::print_error(b"AriInit: fs_client", e);
+                    return 14;
+                }
+            }
             match run_block_client("blk_client", service) {
                 Ok(0) => say(b"servicio de bloques ok"),
                 Ok(code) => {
