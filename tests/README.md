@@ -59,7 +59,7 @@ escenarios y no queda código de test disperso por `cfg`.
 
 Cada fase del roadmap añade su área y sus escenarios. Existentes: `boot`,
 `panic`, `console`, `interrupts`, `memory`, `timer`, `threads`, `scheduler`,
-`user`. Previstas: `ipc`, `capabilities`, `drivers`, ...
+`user`, `capabilities`. Previstas: `ipc`, `drivers`, ...
 Una rama `feature/f05-physical-memory` ejecuta `--area memory` mientras
 desarrolla y `--all` antes de integrar. Si el filtro no selecciona ningún
 escenario QEMU, el runner falla y lista las áreas conocidas: un filtro mal
