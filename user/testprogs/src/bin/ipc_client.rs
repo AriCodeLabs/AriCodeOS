@@ -8,7 +8,7 @@ use user_testprogs::sys::{self, rights, Error, Handle, TIMEOUT_INFINITE};
 const EP: Handle = Handle(0x0001_0004);
 const ROUND_TRIPS: usize = 1000;
 
-fn main() -> u64 {
+fn main(_arg: u64) -> u64 {
     let mut buf = [0u8; 16];
     let mut none: [Handle; 0] = [];
     // 1. Sin READ no se puede recibir del endpoint del servidor.

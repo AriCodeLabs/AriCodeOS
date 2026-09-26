@@ -4,7 +4,7 @@
 
 use user_testprogs::sys;
 
-fn main() -> u64 {
+fn main(_arg: u64) -> u64 {
     sys::thread_sleep(20);
     sys::thread_yield();
     let tid = sys::thread_get_tid();

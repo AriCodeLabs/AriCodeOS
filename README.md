@@ -32,7 +32,7 @@ targets `x86_64-unknown-none` y `x86_64-unknown-uefi`.
 
 ```bash
 cargo xtask build          # compila AriBoot y AriKernel (release)
-cargo xtask image          # monta build/esp/ (EFI/BOOT/BOOTX64.EFI + aricodeos/kernel.elf)
+cargo xtask image          # monta build/esp/ (BOOTX64.EFI, aricodeos/kernel.elf, aricodeos/initrd.img)
 cargo xtask run            # arranca en QEMU + OVMF, serie en la terminal (salir: Ctrl-A X)
 cargo xtask test           # unit + smoke (arranque nominal en QEMU)
 cargo xtask test --all     # unit + todos los escenarios QEMU; obligatorio antes de main
@@ -43,9 +43,8 @@ cargo xtask check          # rustfmt --check + clippy -D warnings
 Añade `--debug` a cualquier comando para usar el perfil de desarrollo. Los
 niveles de test están descritos en [tests/README.md](tests/README.md).
 
-El kernel embebe los programas de usuario de `user/testprogs`, así que se
-compila siempre a través de `cargo xtask` (que los construye primero y exporta
-`ARICODE_USER_BIN`); un `cargo build -p arikernel` directo falla con ese aviso.
+Los programas de usuario y `init` van en `aricodeos/initrd.img`, que `cargo
+xtask image` construye a partir de `user/testprogs` y `services/init`.
 
 ## Estructura
 
@@ -53,8 +52,9 @@ compila siempre a través de `cargo xtask` (que los construye primero y exporta
 boot-protocol/   ABI BootInfo compartido por bootloader y kernel
 libs/            librerías no_std con tests de host: elf, x86-paging, x86-cpu, pmm, heap, sync, sched, handles, cmdline, fb-console
 sdk/abi/         ABI de syscalls compartido entre kernel y espacio de usuario
-sdk/rust/        aricode-sys: wrappers de syscall para programas de usuario
-user/testprogs/  programas de prueba de ring 3 (Rust y ensamblador), ELF embebidos en el kernel
+sdk/rust/        aricode-sys: wrappers de syscall y linker script de los programas de usuario
+user/testprogs/  programas de prueba de ring 3 (Rust y ensamblador), empaquetados en el initrd
+services/init/   AriInit, primer proceso de usuario
 boot/            AriBoot: cargador UEFI (crate `ariboot`)
 kernel/          AriKernel (crate `arikernel`), ELF64 en la mitad alta
 tools/xtask/     automatización: build, imagen, QEMU, tests, lint

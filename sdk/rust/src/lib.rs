@@ -146,6 +146,23 @@ pub fn ipc_receive(
     .map(receive_result)
 }
 
+/// Crea un proceso del initrd (exige `MANAGE` sobre el `SPAWNER`).
+pub fn process_spawn(spawner: Handle, name: &str, arg: u64) -> Result<Handle, Error> {
+    call(
+        nr::PROCESS_SPAWN,
+        spawner.0 as u64,
+        name.as_ptr() as u64,
+        name.len() as u64,
+        arg,
+    )
+    .map(|v| Handle(v as u32))
+}
+
+/// Espera la salida de un proceso (exige `WAIT`). `Err(Killed)` si lo terminó el kernel.
+pub fn process_wait(process: Handle, timeout_ms: u64) -> Result<u64, Error> {
+    call(nr::PROCESS_WAIT, process.0 as u64, timeout_ms, 0, 0)
+}
+
 /// Ayuda para programas de prueba: escribe en la consola ignorando errores.
 pub fn print(bytes: &[u8]) {
     let _ = console_write(Handle::CONSOLE, bytes);

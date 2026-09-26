@@ -1,0 +1,16 @@
+[package]
+name = "aricode-initrd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Formato del initrd de AriCodeOS: lector sin copia (no_std) y escritor (std)"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+# Escritor para herramientas de host (xtask).
+write = []
+
+[dependencies]

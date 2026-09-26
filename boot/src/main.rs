@@ -134,6 +134,7 @@ fn run(cmdline_bytes: &[u8]) -> Result<core::convert::Infallible, &'static str> 
     let stack_top = stack_base + KERNEL_STACK_PAGES as u64 * PAGE_SIZE;
     let boot_info_page = alloc_pages(1, "bootinfo")?;
     let (cmdline_address, cmdline_size) = copy_cmdline(cmdline_bytes)?;
+    let (initrd_address, initrd_size) = load_initrd()?;
     if cmdline_size != 0 {
         info!(
             "cmdline: {}",
@@ -229,8 +230,8 @@ fn run(cmdline_bytes: &[u8]) -> Result<core::convert::Infallible, &'static str> 
         kernel_stack_base: stack_base,
         kernel_stack_size: KERNEL_STACK_PAGES as u64 * PAGE_SIZE,
         page_table_root: tables.root_phys(),
-        initrd_address: 0,
-        initrd_size: 0,
+        initrd_address,
+        initrd_size,
         cmdline_address,
         cmdline_size,
         phys_map_offset: PHYS_MAP_BASE,
@@ -282,6 +283,27 @@ fn alloc_pages(pages: usize, what: &'static str) -> Result<NonNull<u8>, &'static
         error!("allocate_pages({pages}) para {what}: {e:?}");
         "sin memoria"
     })
+}
+
+/// Carga `\aricodeos\initrd.img` (opcional) en páginas de tipo kernel.
+fn load_initrd() -> Result<(u64, u64), &'static str> {
+    let Ok(bytes) = read_file(cstr16!("\\aricodeos\\initrd.img")) else {
+        warn!("initrd.img: ausente");
+        return Ok((0, 0));
+    };
+    if bytes.is_empty() {
+        return Ok((0, 0));
+    }
+    let pages = bytes.len().div_ceil(PAGE_SIZE as usize);
+    let dst = alloc_pages(pages, "initrd")?;
+    // SAFETY: `dst` tiene `pages * 4096 >= bytes.len()` bytes recién reservados.
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.as_ptr(), bytes.len()) };
+    info!(
+        "initrd.img: {} KiB en phys {:#x}",
+        bytes.len() / 1024,
+        dst.as_ptr() as u64
+    );
+    Ok((dst.as_ptr() as u64, bytes.len() as u64))
 }
 
 /// Copia la cmdline a páginas de tipo kernel. Devuelve (dirección, tamaño).

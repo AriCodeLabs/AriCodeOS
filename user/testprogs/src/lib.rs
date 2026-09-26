@@ -9,14 +9,14 @@ pub use aricode_sys as sys;
 /// Código de salida que usa el panic handler de los programas de prueba.
 pub const PANIC_EXIT_CODE: u64 = 255;
 
-/// Define `_start` para un `fn main() -> u64` cuyo resultado es el código de
-/// salida del proceso.
+/// Define `_start` para un `fn main(arg: u64) -> u64`: `arg` es el valor que
+/// pasó quien creó el proceso y el resultado es el código de salida.
 #[macro_export]
 macro_rules! entry {
     ($main:path) => {
         #[no_mangle]
-        pub extern "C" fn _start() -> ! {
-            let code: u64 = $main();
+        pub extern "C" fn _start(arg: u64) -> ! {
+            let code: u64 = $main(arg);
             $crate::sys::process_exit(code)
         }
 

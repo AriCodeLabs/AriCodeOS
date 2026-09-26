@@ -48,6 +48,8 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
                 .union(Rights::MANAGE);
             t.insert(ep, rights).map(|h| h.0 as u64).map_err(abi_error)
         }),
+        nr::PROCESS_SPAWN => process_spawn(h, frame.rsi, frame.rdx, frame.r10),
+        nr::PROCESS_WAIT => process_wait(h, frame.rsi),
         nr::IPC_SEND => ipc_send(h, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9),
         nr::IPC_RECEIVE => ipc_receive(h, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9),
         n => {
@@ -171,4 +173,50 @@ fn ipc_receive(
     let raw: Vec<u8> = received.iter().flat_map(|h| h.to_le_bytes()).collect();
     process::copy_to_user(out_ptr, &raw)?;
     Ok(n as u64 | ((received.len() as u64) << 32))
+}
+
+fn process_spawn(spawner: Handle, name_ptr: u64, name_len: u64, arg: u64) -> Result<u64, Error> {
+    if name_len > 64 {
+        return Err(Error::TooBig);
+    }
+    let is_spawner = with_handles(|t| {
+        lookup(t, spawner, Rights::MANAGE).map(|o| matches!(o.kind, ObjectKind::Spawner))
+    })?;
+    if !is_spawner {
+        return Err(Error::Invalid);
+    }
+    let raw = process::copy_from_user(name_ptr, name_len)?;
+    let name = core::str::from_utf8(&raw).map_err(|_| Error::Invalid)?;
+    let elf = crate::user::programs::by_name(name).ok_or(Error::NotFound)?;
+    let pid = process::spawn_with_arg(name, elf, arg).map_err(|e| {
+        warn!("process_spawn '{name}': {e}");
+        Error::Limit
+    })?;
+    let rights = Rights::READ
+        .union(Rights::WAIT)
+        .union(Rights::MANAGE)
+        .union(Rights::DUPLICATE);
+    with_handles(|t| {
+        t.insert(KernelObject::new(ObjectKind::Process(pid)), rights)
+            .map(|h| h.0 as u64)
+            .map_err(abi_error)
+    })
+}
+
+fn process_wait(h: Handle, timeout_ms: u64) -> Result<u64, Error> {
+    let pid = with_handles(|t| match lookup(t, h, Rights::WAIT)?.kind {
+        ObjectKind::Process(p) => Ok(p),
+        _ => Err(Error::Invalid),
+    })?;
+    let deadline = if timeout_ms == aricode_abi::TIMEOUT_INFINITE {
+        None
+    } else {
+        Some(crate::time::ticks() + timeout_ms.div_ceil(crate::time::MS_PER_TICK))
+    };
+    match process::wait_until(pid, deadline) {
+        Some(process::ExitStatus::Exited(code)) => Ok(code),
+        Some(process::ExitStatus::Killed(_)) => Err(Error::Killed),
+        None if process::exists(pid) => Err(Error::Timeout),
+        None => Err(Error::BadHandle),
+    }
 }

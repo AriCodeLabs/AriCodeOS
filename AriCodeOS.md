@@ -2245,17 +2245,24 @@ hasta disponer de KVM o hardware (sección 69).
 
 # FASE 15 — Init process
 
+**Estado: completada (2026-09-26).**
+
 ### Primer proceso user-space
 
-```text
-/init
-```
+`services/init` (AriInit), cargado desde `aricodeos/initrd.img` (formato
+propio en `libs/initrd`, leído por AriBoot y entregado en `BootInfo`).
 
-Responsabilidades:
+Responsabilidades implementadas:
 
-- iniciar servicios;
-- supervisar procesos;
-- gestionar dependencias básicas.
+- iniciar servicios: `process_spawn` con la capacidad `SPAWNER`, que solo
+  recibe init;
+- supervisar procesos: `process_wait` distingue salida normal de muerte por
+  fallo (`Killed`);
+- gestionar dependencias básicas: pendiente hasta que existan servicios
+  reales (Fase 16 en adelante).
+
+Verificado por `init.boot` (smoke): lanza `hello`, ve morir `kernel_read`,
+y comprueba que sin `MANAGE` no se pueden crear procesos.
 
 ---
 
