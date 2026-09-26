@@ -36,7 +36,11 @@ fn fatal(frame: &InterruptFrame) -> ! {
         serial_println!("ERROR: {:#x}", frame.error_code);
     }
     let cr2 = read_cr2();
-    if crate::memory::vmm::in_stack_guard(frame.rsp) || crate::memory::vmm::in_stack_guard(cr2) {
+    if crate::memory::vmm::in_stack_guard(frame.rsp)
+        || crate::memory::vmm::in_stack_guard(cr2)
+        || crate::task::scheduler::in_thread_stack_guard(frame.rsp)
+        || crate::task::scheduler::in_thread_stack_guard(cr2)
+    {
         serial_println!(
             "STACK OVERFLOW: la pila del kernel toco su guard page ({:#x}..{:#x})",
             crate::memory::vmm::KERNEL_STACK_GUARD,

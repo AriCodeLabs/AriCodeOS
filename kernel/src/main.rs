@@ -17,6 +17,7 @@ mod memory;
 mod qemu;
 mod serial;
 mod sync;
+mod task;
 mod time;
 
 use aricode_cmdline::{keys, CmdLine};
@@ -107,6 +108,8 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     // SAFETY: IDT, APIC y todo el estado global (tras IrqLock) están listos.
     unsafe { sync::enable_interrupts() };
     info!("interrupciones habilitadas");
+
+    task::init();
 
     run_requested_test(&cmdline);
 
@@ -218,6 +221,7 @@ fn run_requested_test(cmdline: &CmdLine) {
         "heap" => memory::heap::selftest(),
         "heap_oom" => memory::heap::oom_selftest(),
         "timer" => time::selftest(),
+        "threads" => task::scheduler::selftest(),
         // W^X: escribir en .rodata -> #PF por protección.
         "write_rodata" => {
             static RO: u64 = 7;

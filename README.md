@@ -44,7 +44,7 @@ niveles de test están descritos en [tests/README.md](tests/README.md).
 
 ```text
 boot-protocol/   ABI BootInfo compartido por bootloader y kernel
-libs/            librerías no_std con tests de host: elf, x86-paging, x86-cpu, pmm, heap, sync, cmdline, fb-console
+libs/            librerías no_std con tests de host: elf, x86-paging, x86-cpu, pmm, heap, sync, sched, cmdline, fb-console
 boot/            AriBoot: cargador UEFI (crate `ariboot`)
 kernel/          AriKernel (crate `arikernel`), ELF64 en la mitad alta
 tools/xtask/     automatización: build, imagen, QEMU, tests, lint

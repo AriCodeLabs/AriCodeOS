@@ -2099,17 +2099,24 @@ La ejecución prolongada se cubrirá con el scheduler (Fase 10).
 
 # FASE 9 — Threads
 
-### Implementar
+**Estado: completada (2026-09-26).**
 
-- kernel thread;
-- stacks;
-- context switch;
-- estados;
-- idle thread.
+### Implementado
+
+- kernel threads (`kernel/src/task`), con el contexto de arranque adoptado
+  como hilo `main`;
+- pilas de 32 KiB con guard page en región propia, devueltas al PMM al
+  recoger el hilo;
+- context switch System V en ensamblador (`switch_context`, `thread_start`);
+- estados READY/RUNNING/BLOCKED/SLEEPING/TERMINATED en `libs/sched`
+  (política probada en host: 6 tests);
+- idle thread (`hlt` + `yield`).
 
 ### Criterio
 
-Dos threads alternan ejecución correctamente.
+Dos threads alternan ejecución correctamente: `threads.selftest` exige la
+secuencia `ABABAB` con `yield` y que 40 workers terminen y sean recogidos sin
+perder frames.
 
 ---
 
@@ -3418,7 +3425,7 @@ aricodeos/
 No necesitamos crear toda la estructura futura desde el primer día.
 
 Este árbol es el que existe en el repositorio desde M0, ampliado con
-`libs/{elf,x86-paging,x86-cpu,pmm,heap,sync,cmdline,fb-console}` (lógica `no_std` con tests de host),
+`libs/{elf,x86-paging,x86-cpu,pmm,heap,sync,sched,cmdline,fb-console}` (lógica `no_std` con tests de host),
 `tests/qemu/` (escenarios) y `docs/decisions/0001..0007`.
 
 ---
