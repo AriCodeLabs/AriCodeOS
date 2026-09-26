@@ -7,18 +7,20 @@ El documento maestro de arquitectura y roadmap es [AriCodeOS.md](AriCodeOS.md).
 Las decisiones de diseño se registran en [docs/decisions/](docs/decisions/) y el
 flujo de ramas (git flow) en [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-**Estado:** 0.0.7. AriBoot (UEFI) carga `kernel.elf` e `initrd.img` y salta a AriKernel,
-que levanta consola serie y de framebuffer con logger por niveles, instala
-GDT/TSS/IDT propias, construye el allocator físico, activa sus propias tablas
-con W^X, arranca el heap, calibra el timer del LAPIC a 100 Hz, planifica
-hilos del kernel con round robin preemptivo y ejecuta procesos en ring 3 con
-espacio propio, syscalls por instrucción `syscall`, tablas de handles con
-derechos y revocación, e IPC por endpoints con transferencia de capabilities
-y timeouts, lanza `init` desde el initrd, lee ACPI, enumera PCIe y entrega a
-drivers de ring 3 capabilities de IRQ, MMIO y DMA. Un proceso que toca memoria
-del kernel o ejecuta instrucciones privilegiadas muere sin afectar al kernel,
-y `init` lo reinicia si es un servicio. Los fallos se provocan desde la
-cmdline para los tests.
+**Estado:** 0.1.0, primera versión experimental utilizable. AriBoot (UEFI)
+carga `kernel.elf` e `initrd.img` y salta a AriKernel, que levanta consola
+serie y de framebuffer con logger por niveles, instala GDT/TSS/IDT propias,
+construye el allocator físico, activa sus propias tablas con W^X, arranca el
+heap, calibra el timer del LAPIC a 100 Hz, planifica hilos con round robin
+preemptivo y ejecuta procesos en ring 3 con espacio propio, syscalls, tablas
+de handles con derechos y revocación e IPC por endpoints con transferencia de
+capabilities. `init` lanza desde el initrd los servicios de ring 3: el driver
+virtio-blk como servicio de bloques, `fsd` (AriFS v0), `netd` (virtio-net con
+DHCP, ARP, ICMP, UDP, TCP y DNS) y, si la cmdline lleva `shell`, el shell
+`arish` con `ls`, `cat`, `ps`, `mem`, `ping`, `dns`, `http`, `reboot` y
+`shutdown`. Un proceso que toca memoria del kernel o ejecuta instrucciones
+privilegiadas muere sin afectar al kernel, y `init` lo reinicia si es un
+servicio. Los fallos se provocan desde la cmdline para los tests.
 
 ## Requisitos (Debian 13)
 

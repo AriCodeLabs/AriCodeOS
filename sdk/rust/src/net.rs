@@ -203,20 +203,25 @@ impl NetClient {
         self.call(req, false).map(|_| ())
     }
 
-    /// Resuelve un nombre; `server` = `Some((ip, puerto))` o `None` para el
-    /// servidor DNS de la configuración.
+    /// Resuelve un nombre (hasta 253 bytes, sin recortes); `server` =
+    /// `Some((ip, puerto))` o `None` para el servidor DNS de la configuración.
     pub fn resolve(
-        &self,
+        &mut self,
         name: &str,
         server: Option<([u8; 4], u16)>,
         timeout_ms: u32,
     ) -> Result<[u8; 4], NetError> {
-        let mut req = Request::new(Op::Dns).with_name(name);
+        if name.is_empty() || name.len() > aricode_net::dns::MAX_NAME {
+            return Err(NetError::Status(Status::Invalid));
+        }
+        self.buffer()[..name.len()].copy_from_slice(name.as_bytes());
+        let mut req = Request::new(Op::Dns);
+        req.len = name.len() as u16;
         if let Some((addr, port)) = server {
             req.addr = addr;
             req.port = port;
         }
         req.timeout_ms = timeout_ms;
-        self.call(req, false).map(|r| r.addr())
+        self.call(req, true).map(|r| r.addr())
     }
 }
