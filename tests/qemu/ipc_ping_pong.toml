@@ -1,0 +1,15 @@
+# Fase 14: dos procesos de usuario se comunican por un endpoint creado por el
+# kernel: 1000 round trips con transferencia de un handle de respuesta por
+# mensaje, mas timeout, cola acotada, envio fallido sin perder capabilities,
+# mensaje demasiado grande y handle sin TRANSFER.
+name = "ipc.ping_pong"
+description = "test=ipc: servidor y cliente en ring 3, 1000 round trips, timeouts y cola acotada"
+level = "full"
+areas = ["ipc", "capabilities", "user"]
+cmdline = "qemu_exit test=ipc"
+timeout_secs = 40
+
+[expect]
+exit = 33
+serial_contains = ["ipc selftest ok: 1000 round trips", "ciclos TSC por round trip", "ARICODEOS_KERNEL_READY"]
+serial_absent = ["KERNEL PANIC", "USER FAULT"]

@@ -17,7 +17,7 @@ use log::{info, warn};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Pid(pub u32);
 
-/// Dónde se carga el código y dónde va la pila de usuario.
+/// Base mínima del código de usuario (los ELF se enlazan en 0x40_0000) y pila.
 pub const USER_CODE_BASE: u64 = 0x40_0000;
 pub const USER_STACK_TOP: u64 = 0x80_0000;
 pub const USER_STACK_SIZE: u64 = 16 * 1024;
@@ -42,8 +42,23 @@ pub struct Process {
 static PROCESSES: IrqLock<BTreeMap<Pid, Process>> = IrqLock::new(BTreeMap::new());
 static NEXT_PID: IrqLock<u32> = IrqLock::new(1);
 
-/// Crea un proceso a partir de un blob de código independiente de posición.
-pub fn spawn(name: &str, code: &[u8]) -> Result<Pid, &'static str> {
+/// Crea un proceso a partir de un ELF64 estático de usuario.
+pub fn spawn(name: &str, elf_bytes: &[u8]) -> Result<Pid, &'static str> {
+    spawn_with_handles(name, elf_bytes, Vec::new())
+}
+
+/// Como `spawn`, con capabilities adicionales insertadas tras las tres
+/// iniciales (la primera recibe el handle `0x0001_0004`, y así sucesivamente).
+pub fn spawn_with_handles(
+    name: &str,
+    elf_bytes: &[u8],
+    extra: Vec<(crate::object::ObjectRef, aricode_handles::Rights)>,
+) -> Result<Pid, &'static str> {
+    let elf = aricode_elf::Elf::parse(elf_bytes).map_err(|_| "process: ELF invalido")?;
+    let (lo, hi) = elf.virt_range();
+    if lo < USER_CODE_BASE || hi > USER_STACK_TOP - USER_STACK_SIZE - PAGE_SIZE {
+        return Err("process: el ELF no cabe en la region de usuario");
+    }
     let pid = {
         let mut n = NEXT_PID.lock();
         let p = Pid(*n);
@@ -56,20 +71,39 @@ pub fn spawn(name: &str, code: &[u8]) -> Result<Pid, &'static str> {
     // SAFETY: el PML4 del kernel es válido y accesible por el mapa físico.
     unsafe { m.share_kernel_half(kernel_root) };
 
-    // Código: páginas de solo lectura y ejecución.
-    let code_pages = (code.len() as u64).div_ceil(PAGE_SIZE).max(1);
-    for i in 0..code_pages {
-        let frame = pmm::with(|p| p.allocate()).ok_or("process: sin frames")?;
-        let dst = phys::phys_to_virt(frame.addr()) as *mut u8;
-        let off = (i * PAGE_SIZE) as usize;
-        let chunk = &code[off.min(code.len())..(off + PAGE_SIZE as usize).min(code.len())];
-        // SAFETY: frame recién asignado, accesible por el mapa físico.
-        unsafe {
-            core::ptr::write_bytes(dst, 0xCC, PAGE_SIZE as usize); // int3 como relleno
-            core::ptr::copy_nonoverlapping(chunk.as_ptr(), dst, chunk.len());
+    for seg in &elf.segments {
+        let mut flags = USER;
+        if seg.writable() {
+            flags |= WRITABLE;
         }
-        m.map_4k(USER_CODE_BASE + i * PAGE_SIZE, frame.addr(), USER)
-            .map_err(|_| "process: map code")?;
+        if !seg.executable() {
+            flags |= NO_EXECUTE;
+        }
+        let (start, end) = seg.page_range();
+        let bytes = elf.segment_bytes(seg);
+        for page in (start..end).step_by(PAGE_SIZE as usize) {
+            let frame = pmm::with(|p| p.allocate()).ok_or("process: sin frames")?;
+            let dst = phys::phys_to_virt(frame.addr()) as *mut u8;
+            // SAFETY: frame recién asignado, accesible por el mapa físico.
+            unsafe { core::ptr::write_bytes(dst, 0, PAGE_SIZE as usize) };
+            // Parte del contenido del fichero que cae en esta página.
+            let file_start = seg.vaddr.max(page);
+            let file_end = (seg.vaddr + seg.filesz).min(page + PAGE_SIZE);
+            if file_start < file_end {
+                let src =
+                    &bytes[(file_start - seg.vaddr) as usize..(file_end - seg.vaddr) as usize];
+                // SAFETY: destino dentro del frame; `src` dentro del segmento.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        src.as_ptr(),
+                        dst.add((file_start - page) as usize),
+                        src.len(),
+                    )
+                };
+            }
+            m.map_4k(page, frame.addr(), flags)
+                .map_err(|_| "process: map segmento")?;
+        }
     }
     // Pila: RW, NX, con la página inferior sin mapear como guard.
     for virt in (USER_STACK_TOP - USER_STACK_SIZE..USER_STACK_TOP).step_by(PAGE_SIZE as usize) {
@@ -93,21 +127,29 @@ pub fn spawn(name: &str, code: &[u8]) -> Result<Pid, &'static str> {
         pid.0,
         m.root_phys(),
     )?;
+    let mut handles = crate::object::initial_table(pid, tid);
+    for (obj, rights) in extra {
+        handles
+            .insert(obj, rights)
+            .map_err(|_| "process: tabla de handles llena")?;
+    }
     PROCESSES.lock().insert(
         pid,
         Process {
             name: String::from(name),
-            handles: crate::object::initial_table(pid, tid),
+            handles,
             mapper: Some(m),
             main_thread: tid,
-            entry: USER_CODE_BASE,
+            entry: elf.entry,
             status: None,
         },
     );
     info!(
-        "user: proceso {} '{name}' creado ({} bytes de codigo, hilo {tid:?})",
+        "user: proceso {} '{name}' creado ({} segmentos, {} KiB, entrada {:#x}, hilo {tid:?})",
         pid.0,
-        code.len()
+        elf.segments.len(),
+        (hi - lo) / 1024,
+        elf.entry
     );
     Ok(pid)
 }
@@ -198,11 +240,14 @@ pub fn wait(pid: Pid) -> ExitStatus {
     }
 }
 
-/// Copia `[ptr, ptr+len)` del espacio del proceso actual, comprobando que
-/// cada página está mapeada con USER. El espacio del proceso es el activo.
-pub fn copy_from_user(ptr: u64, len: u64) -> Result<Vec<u8>, aricode_abi::Error> {
+/// Comprueba que `[ptr, ptr+len)` está en espacio de usuario y mapeado con
+/// USER (y WRITABLE si `write`) en el proceso actual.
+fn check_user_range(ptr: u64, len: u64, write: bool) -> Result<(), aricode_abi::Error> {
     if !aricode_abi::user_range_ok(ptr, len) {
         return Err(aricode_abi::Error::Fault);
+    }
+    if len == 0 {
+        return Ok(());
     }
     let pid = current_pid().ok_or(aricode_abi::Error::Fault)?;
     let procs = PROCESSES.lock();
@@ -210,18 +255,35 @@ pub fn copy_from_user(ptr: u64, len: u64) -> Result<Vec<u8>, aricode_abi::Error>
         .get(&pid)
         .and_then(|p| p.mapper.as_ref())
         .ok_or(aricode_abi::Error::Fault)?;
+    let needed = USER | if write { WRITABLE } else { 0 };
     let mut page = ptr & !(PAGE_SIZE - 1);
     while page < ptr + len {
         match m.translate(page) {
-            Some((_, flags)) if flags & USER != 0 => {}
+            Some((_, flags)) if flags & needed == needed => {}
             _ => return Err(aricode_abi::Error::Fault),
         }
         page += PAGE_SIZE;
     }
     debug_assert!(ptr + len <= USER_SPACE_END);
+    Ok(())
+}
+
+/// Copia `[ptr, ptr+len)` del espacio del proceso actual, comprobando que
+/// cada página está mapeada con USER. El espacio del proceso es el activo.
+pub fn copy_from_user(ptr: u64, len: u64) -> Result<Vec<u8>, aricode_abi::Error> {
+    check_user_range(ptr, len, false)?;
     // SAFETY: rango validado página a página en el espacio activo.
     let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
     Ok(bytes.to_vec())
+}
+
+/// Escribe `bytes` en `[ptr, ptr+len)` del proceso actual, comprobando que
+/// cada página está mapeada con USER y WRITABLE.
+pub fn copy_to_user(ptr: u64, bytes: &[u8]) -> Result<(), aricode_abi::Error> {
+    check_user_range(ptr, bytes.len() as u64, true)?;
+    // SAFETY: rango validado como escribible en el espacio activo.
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len()) };
+    Ok(())
 }
 
 /// Acceso a la tabla de handles del proceso actual.

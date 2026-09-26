@@ -1,0 +1,10 @@
+[package]
+name = "user-testprogs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Programas de usuario de prueba de AriCodeOS (ELF estáticos en 0x400000)"
+publish = false
+
+[dependencies]
+aricode-sys = { path = "../../sdk/rust" }

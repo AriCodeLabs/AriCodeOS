@@ -13,6 +13,8 @@ members = [
     "libs/sched",
     "libs/handles",
     "sdk/abi",
+    "sdk/rust",
+    "user/testprogs",
     "boot",
     "kernel",
     "tools/xtask",
@@ -32,11 +34,12 @@ default-members = [
     "libs/sched",
     "libs/handles",
     "sdk/abi",
+    "sdk/rust",
     "tools/xtask",
 ]
 
 [workspace.package]
-version = "0.0.5"
+version = "0.0.6"
 edition = "2021"
 license = "UNLICENSED"
 repository = "https://github.com/lynxcraft/aricodeos"

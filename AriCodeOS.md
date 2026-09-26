@@ -2,7 +2,7 @@
 
 ## Documento maestro de arquitectura, especificaciones técnicas y plan de desarrollo
 
-**Estado:** 0.0.5 completada (2026-09-26): kernel con memoria, scheduler, ring 3, syscalls y handles  
+**Estado:** 0.0.6 completada (2026-09-26): microkernel con procesos en ring 3, capabilities e IPC  
 **Versión del documento:** 0.2  
 **Nombre del sistema:** AriCodeOS  
 **Arquitectura inicial:** x86-64  
@@ -2191,35 +2191,55 @@ sin derechos, escalada y objeto equivocado.
 
 # FASE 13 — Capabilities
 
-### Implementar
+**Estado: completada (2026-09-26).**
 
-- capabilities;
-- rights;
-- transfer;
-- revoke/drop;
-- derivation limitada.
+### Implementado
+
+- capabilities: handles con derechos sobre objetos compartidos por `Arc`
+  (Fase 12);
+- rights: `READ WRITE DUPLICATE TRANSFER WAIT SIGNAL MANAGE`;
+- transfer: `HandleTable::take` (exige `TRANSFER`), consumido por el IPC
+  de la Fase 14;
+- revoke/drop: `object_revoke` (exige `MANAGE`) invalida el objeto para
+  todos sus handles en todos los procesos; `handle_close` descarta uno;
+- derivation limitada: duplicar solo reduce derechos; un objeto revocado no
+  se duplica.
+
+Además, infraestructura adelantada de la Fase 27: `sdk/rust` (`aricode-sys`)
+con los wrappers de syscall y `user/testprogs` con programas de ring 3 en
+Rust y ensamblador enlazados como ELF estáticos, cargados por el kernel con
+`aricode-elf`.
 
 ### Test esencial
 
-Un proceso sin capability no puede acceder al recurso aunque conozca su identificador.
+Un proceso sin capability no puede acceder al recurso aunque conozca su
+identificador: `user.handles` (los identificadores de `object_id` no dan
+acceso; un handle inventado o cerrado falla) y `capabilities.revoke`
+(revocar exige `MANAGE`; tras revocar, ningún duplicado da acceso).
 
 ---
 
 # FASE 14 — IPC
 
-### Implementar
+**Estado: completada (2026-09-26), salvo memoria compartida.**
 
-- endpoints;
-- send;
-- receive;
-- reply;
-- timeout;
-- shared memory;
-- capability transfer.
+### Implementado
+
+- endpoints: objeto del kernel con cola acotada y colas de espera;
+- send / receive: `ipc_send` (`WRITE`) e `ipc_receive` (`READ`), mensajes de
+  hasta 256 bytes y 4 capabilities;
+- reply: por un endpoint de respuesta que el cliente transfiere en el mensaje;
+- timeout: en ms, `0` no bloquea, infinito espera; despertar anticipado;
+- capability transfer: `TRANSFER` obligatorio; se retira del emisor solo
+  cuando el mensaje entra en la cola;
+- shared memory: pendiente (llegará con `memory_map` y objetos de memoria,
+  sección 24).
 
 ### Benchmark
 
-Medir round-trip IPC.
+`test=ipc` mide el round trip con el TSC: ~260 000 ciclos por round trip
+bajo QEMU TCG (incluye crear el proceso cliente). Es una referencia relativa
+hasta disponer de KVM o hardware (sección 69).
 
 ---
 
@@ -3019,14 +3039,18 @@ Añadido:
 
 # 90. AriCodeOS 0.0.6
 
-Añadir:
+**Estado: completada (2026-09-26), tag `v0.0.6`.**
 
-- kernel objects;
-- handles;
-- capabilities;
-- IPC.
+Añadido:
 
-Esta versión marca el nacimiento real de la arquitectura microkernel.
+- kernel objects y handles (Fase 12, en 0.0.5);
+- capabilities con revocación y transferencia (Fase 13);
+- IPC por endpoints con timeouts y transferencia de capabilities (Fase 14);
+- SDK mínimo (`sdk/rust`) y programas de usuario en Rust (`user/testprogs`).
+
+Esta versión marca el nacimiento real de la arquitectura microkernel: dos
+procesos en ring 3 se comunican por un endpoint sin que ninguno vea al otro
+más que a través de las capabilities que se le han concedido.
 
 ---
 

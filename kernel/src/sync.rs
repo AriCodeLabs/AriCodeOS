@@ -1,9 +1,18 @@
 //! Sincronización del kernel: `IrqLock` de `aricode-sync` con la política de
 //! interrupciones de x86-64 (guardar `RFLAGS.IF`, `cli`, y restaurar).
 //!
-//! Regla: ningún lock se mantiene mientras se llama a otro subsistema que
-//! pueda querer el mismo lock; el orden de adquisición es
-//! heap -> pmm -> vmm -> console y nunca al revés.
+//! Anidamientos permitidos (exterior -> interior), documentados en
+//! `docs/architecture.md`, sección Sincronización:
+//!
+//! ```text
+//! VMM -> PMM            el Mapper pide frames al PMM con el VMM tomado
+//! heap.mapped -> VMM    y por tanto heap.mapped -> PMM
+//! PROCESSES -> SCHED    process::wait consulta el planificador
+//! ```
+//!
+//! Nunca al revés: en particular, nunca entrar al VMM con el PMM tomado, y
+//! nunca tomar PROCESSES desde dentro del planificador. Los demás locks
+//! (heap.heap, console, colas de espera) son hoja.
 
 use aricode_sync::IrqPolicy;
 use core::arch::asm;

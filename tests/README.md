@@ -53,13 +53,16 @@ serial_absent = ["..."]
 
 Los fallos provocados dentro del kernel se piden por cmdline (`test=panic`),
 nunca con features de compilación: el mismo binario sirve para todos los
-escenarios y no queda código de test disperso por `cfg`.
+escenarios y no queda código de test disperso por `cfg`. Los programas de
+ring 3 (`test=user_<nombre>`) viven en `user/testprogs` como binarios propios
+(Rust sobre `aricode-sys` o ensamblador) y devuelven un código de salida que
+identifica el paso fallido.
 
 ## Áreas
 
 Cada fase del roadmap añade su área y sus escenarios. Existentes: `boot`,
 `panic`, `console`, `interrupts`, `memory`, `timer`, `threads`, `scheduler`,
-`user`, `capabilities`. Previstas: `ipc`, `drivers`, ...
+`user`, `capabilities`, `ipc`. Previstas: `drivers`, `filesystem`, ...
 Una rama `feature/f05-physical-memory` ejecuta `--area memory` mientras
 desarrolla y `--all` antes de integrar. Si el filtro no selecciona ningún
 escenario QEMU, el runner falla y lista las áreas conocidas: un filtro mal

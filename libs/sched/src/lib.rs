@@ -135,6 +135,27 @@ impl RoundRobin {
         }
     }
 
+    /// Despierta un hilo bloqueado o dormido (antes de su plazo) y lo encola.
+    /// Sirve a las colas de espera con timeout: el hilo duerme con plazo y un
+    /// `wake` anticipado lo saca de la lista de dormidos.
+    pub fn wake(&mut self, tid: Tid) -> Result<(), SchedError> {
+        match self.states.get(&tid) {
+            None => Err(SchedError::UnknownThread),
+            Some(State::Blocked) => {
+                self.states.insert(tid, State::Ready);
+                self.ready.push_back(tid);
+                Ok(())
+            }
+            Some(State::Sleeping) => {
+                self.sleeping.retain(|(_, t)| *t != tid);
+                self.states.insert(tid, State::Ready);
+                self.ready.push_back(tid);
+                Ok(())
+            }
+            Some(_) => Err(SchedError::WrongState),
+        }
+    }
+
     /// El hilo actual duerme hasta el tick `until`.
     pub fn sleep_current(&mut self, until: u64) -> Option<Tid> {
         let cur = self.current;
@@ -253,6 +274,21 @@ mod tests {
         assert_eq!(s.yield_current(), Some(a));
         assert_eq!(s.wake_due(100), 1);
         assert_eq!(s.yield_current(), Some(MAIN));
+    }
+
+    #[test]
+    fn wake_handles_blocked_and_sleeping() {
+        let mut s = rr();
+        let a = s.allocate_tid();
+        s.add(a);
+        assert_eq!(s.sleep_current(100), Some(a)); // MAIN duerme
+        assert_eq!(s.wake(MAIN), Ok(()), "dormido -> listo antes del plazo");
+        assert_eq!(s.wake_due(100), 0, "ya no esta en la lista de dormidos");
+        assert_eq!(s.wake(MAIN), Err(SchedError::WrongState), "ya listo");
+        assert_eq!(s.block_current(), Some(MAIN)); // a se bloquea
+        assert_eq!(s.wake(a), Ok(()));
+        assert_eq!(s.state(a), Some(State::Ready));
+        assert_eq!(s.wake(Tid(77)), Err(SchedError::UnknownThread));
     }
 
     #[test]

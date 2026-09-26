@@ -7,13 +7,14 @@ El documento maestro de arquitectura y roadmap es [AriCodeOS.md](AriCodeOS.md).
 Las decisiones de diseño se registran en [docs/decisions/](docs/decisions/) y el
 flujo de ramas (git flow) en [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-**Estado:** 0.0.5. AriBoot (UEFI) carga `kernel.elf` y salta a AriKernel,
+**Estado:** 0.0.6. AriBoot (UEFI) carga `kernel.elf` y salta a AriKernel,
 que levanta consola serie y de framebuffer con logger por niveles, instala
 GDT/TSS/IDT propias, construye el allocator físico, activa sus propias tablas
 con W^X, arranca el heap, calibra el timer del LAPIC a 100 Hz, planifica
 hilos del kernel con round robin preemptivo y ejecuta procesos en ring 3 con
-espacio propio, syscalls por instrucción `syscall` y tablas de handles con
-derechos. Un proceso que toca memoria del kernel o ejecuta instrucciones
+espacio propio, syscalls por instrucción `syscall`, tablas de handles con
+derechos y revocación, e IPC por endpoints con transferencia de capabilities
+y timeouts. Un proceso que toca memoria del kernel o ejecuta instrucciones
 privilegiadas muere sin afectar al kernel. Los fallos se provocan desde la
 cmdline para los tests.
 
@@ -42,12 +43,18 @@ cargo xtask check          # rustfmt --check + clippy -D warnings
 Añade `--debug` a cualquier comando para usar el perfil de desarrollo. Los
 niveles de test están descritos en [tests/README.md](tests/README.md).
 
+El kernel embebe los programas de usuario de `user/testprogs`, así que se
+compila siempre a través de `cargo xtask` (que los construye primero y exporta
+`ARICODE_USER_BIN`); un `cargo build -p arikernel` directo falla con ese aviso.
+
 ## Estructura
 
 ```text
 boot-protocol/   ABI BootInfo compartido por bootloader y kernel
 libs/            librerías no_std con tests de host: elf, x86-paging, x86-cpu, pmm, heap, sync, sched, handles, cmdline, fb-console
 sdk/abi/         ABI de syscalls compartido entre kernel y espacio de usuario
+sdk/rust/        aricode-sys: wrappers de syscall para programas de usuario
+user/testprogs/  programas de prueba de ring 3 (Rust y ensamblador), ELF embebidos en el kernel
 boot/            AriBoot: cargador UEFI (crate `ariboot`)
 kernel/          AriKernel (crate `arikernel`), ELF64 en la mitad alta
 tools/xtask/     automatización: build, imagen, QEMU, tests, lint
