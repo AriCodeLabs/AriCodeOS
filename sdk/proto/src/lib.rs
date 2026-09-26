@@ -576,9 +576,210 @@ pub mod net {
     }
 }
 
+/// Protocolo del servicio de entrada (`InputServiceProtocol v1`): eventos
+/// evdev de un dispositivo virtio-input.
+pub mod input {
+    pub const PROTOCOL: u8 = 4;
+    pub const VERSION: u8 = 1;
+    /// Eventos por respuesta.
+    pub const MAX_EVENTS: usize = 4;
+    pub const MAX_NAME: usize = 32;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Op {
+        /// Nombre del dispositivo en `Reply::name`.
+        Info = 1,
+        /// Espera hasta `timeout_ms` y devuelve hasta `MAX_EVENTS` eventos.
+        Read = 2,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Request {
+        pub op: Op,
+        pub timeout_ms: u32,
+    }
+
+    impl Request {
+        pub const LEN: usize = 8;
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[0] = PROTOCOL;
+            b[1] = VERSION;
+            b[2] = self.op as u8;
+            b[4..8].copy_from_slice(&self.timeout_ms.to_le_bytes());
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN || b[0] != PROTOCOL || b[1] != VERSION {
+                return None;
+            }
+            let op = match b[2] {
+                1 => Op::Info,
+                2 => Op::Read,
+                _ => return None,
+            };
+            Some(Self {
+                op,
+                timeout_ms: u32::from_le_bytes(b[4..8].try_into().ok()?),
+            })
+        }
+    }
+
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Status {
+        Ok = 0,
+        Invalid = 1,
+        Timeout = 2,
+        Busy = 3,
+    }
+
+    /// Evento (8 bytes, formato evdev): tipo, código, valor.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct Event {
+        pub kind: u16,
+        pub code: u16,
+        pub value: u32,
+    }
+
+    /// Respuesta (48 bytes): estado, número de eventos, eventos y nombre.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Reply {
+        pub status: Status,
+        pub count: u8,
+        pub events: [Event; MAX_EVENTS],
+        pub name: [u8; MAX_NAME],
+        pub name_len: u8,
+    }
+
+    impl Reply {
+        pub const LEN: usize = 8 + 8 * MAX_EVENTS + MAX_NAME;
+
+        pub fn status(status: Status) -> Self {
+            Self {
+                status,
+                count: 0,
+                events: [Event::default(); MAX_EVENTS],
+                name: [0; MAX_NAME],
+                name_len: 0,
+            }
+        }
+
+        pub fn events(events: &[Event]) -> Self {
+            let mut r = Self::status(Status::Ok);
+            let n = events.len().min(MAX_EVENTS);
+            r.events[..n].copy_from_slice(&events[..n]);
+            r.count = n as u8;
+            r
+        }
+
+        /// `None` si el nombre no cabe.
+        pub fn with_name(mut self, name: &str) -> Option<Self> {
+            if name.len() > MAX_NAME {
+                return None;
+            }
+            self.name[..name.len()].copy_from_slice(name.as_bytes());
+            self.name_len = name.len() as u8;
+            Some(self)
+        }
+
+        pub fn name_str(&self) -> &str {
+            core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("?")
+        }
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[0] = PROTOCOL;
+            b[1] = VERSION;
+            b[2] = self.status as u8;
+            b[3] = self.count;
+            b[4] = self.name_len;
+            for (i, e) in self.events.iter().enumerate() {
+                let o = 8 + 8 * i;
+                b[o..o + 2].copy_from_slice(&e.kind.to_le_bytes());
+                b[o + 2..o + 4].copy_from_slice(&e.code.to_le_bytes());
+                b[o + 4..o + 8].copy_from_slice(&e.value.to_le_bytes());
+            }
+            b[8 + 8 * MAX_EVENTS..].copy_from_slice(&self.name);
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN || b[0] != PROTOCOL || b[1] != VERSION {
+                return None;
+            }
+            let status = match b[2] {
+                0 => Status::Ok,
+                1 => Status::Invalid,
+                2 => Status::Timeout,
+                3 => Status::Busy,
+                _ => return None,
+            };
+            let mut events = [Event::default(); MAX_EVENTS];
+            for (i, e) in events.iter_mut().enumerate() {
+                let o = 8 + 8 * i;
+                *e = Event {
+                    kind: u16::from_le_bytes([b[o], b[o + 1]]),
+                    code: u16::from_le_bytes([b[o + 2], b[o + 3]]),
+                    value: u32::from_le_bytes(b[o + 4..o + 8].try_into().ok()?),
+                };
+            }
+            let mut name = [0u8; MAX_NAME];
+            name.copy_from_slice(&b[8 + 8 * MAX_EVENTS..Self::LEN]);
+            Some(Self {
+                status,
+                count: b[3].min(MAX_EVENTS as u8),
+                events,
+                name,
+                name_len: b[4].min(MAX_NAME as u8),
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::block::*;
+
+    #[test]
+    fn input_round_trip() {
+        use super::input::*;
+        let r = Request {
+            op: Op::Read,
+            timeout_ms: 1500,
+        };
+        assert_eq!(Request::decode(&r.encode()), Some(r));
+        let evs = [
+            Event {
+                kind: 1,
+                code: 35,
+                value: 1,
+            },
+            Event {
+                kind: 2,
+                code: 1,
+                value: (-5i32) as u32,
+            },
+        ];
+        let reply = Reply::events(&evs)
+            .with_name("QEMU Virtio Keyboard")
+            .unwrap();
+        let d = Reply::decode(&reply.encode()).unwrap();
+        assert_eq!(d, reply);
+        assert_eq!(d.count, 2);
+        assert_eq!(d.name_str(), "QEMU Virtio Keyboard");
+        assert!(Reply::status(Status::Ok)
+            .with_name(&"x".repeat(33))
+            .is_none());
+        assert_eq!(
+            Reply::decode(&Reply::status(Status::Timeout).encode())
+                .unwrap()
+                .status,
+            Status::Timeout
+        );
+    }
 
     #[test]
     fn net_request_reply_round_trip() {

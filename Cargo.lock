@@ -34,6 +34,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ari-virtio-input"
+version = "0.1.1"
+dependencies = [
+ "aricode-input",
+ "aricode-proto",
+ "aricode-sys",
+ "user-testprogs",
+]
+
+[[package]]
 name = "ari-virtio-net"
 version = "0.1.1"
 dependencies = [
@@ -98,6 +108,10 @@ version = "0.1.1"
 
 [[package]]
 name = "aricode-initrd"
+version = "0.1.1"
+
+[[package]]
+name = "aricode-input"
 version = "0.1.1"
 
 [[package]]
@@ -428,6 +442,7 @@ name = "user-testprogs"
 version = "0.1.1"
 dependencies = [
  "aricode-heap",
+ "aricode-input",
  "aricode-net",
  "aricode-proto",
  "aricode-sync",

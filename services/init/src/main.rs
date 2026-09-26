@@ -23,6 +23,7 @@ const CONSOLE_IN: Handle = Handle(0x0001_0008);
 const SERVICE_BLOCK: u64 = 1;
 const SERVICE_FS: u64 = 2;
 const SERVICE_NET: u64 = 4;
+const SERVICE_INPUT: u64 = 8;
 
 fn say(msg: &[u8]) {
     sys::print(b"AriInit: ");
@@ -40,8 +41,13 @@ fn run(name: &str, arg: u64) -> Result<u64, Error> {
 
 /// Busca la primera función PCI con `vendor:device` y devuelve su índice.
 fn find_pci(vendor: u16, device: u16) -> Option<u64> {
+    find_pci_from(vendor, device, 0)
+}
+
+/// Como `find_pci`, buscando a partir del índice `start`.
+fn find_pci_from(vendor: u16, device: u16, start: u64) -> Option<u64> {
     let n = sys::pci_count(PCI_ROOT).ok()?;
-    (0..n).find(|&i| {
+    (start..n).find(|&i| {
         sys::pci_info(PCI_ROOT, i).is_ok_and(|v| {
             sys::abi::pci_info::vendor(v) == vendor && sys::abi::pci_info::device(v) == device
         })
@@ -285,6 +291,64 @@ fn main(arg: u64) -> u64 {
             }
         }
         None => say(b"sin virtio-net"),
+    }
+    // 9. Dispositivos de entrada virtio (teclado, raton): un driver por cada uno.
+    let mut input_eps = [Handle(0); 4];
+    let mut inputs = 0;
+    let mut next = 0;
+    while let Some(index) = find_pci_from(0x1AF4, 0x1052, next) {
+        next = index + 1;
+        if inputs == input_eps.len() {
+            break;
+        }
+        let Ok(ep) = sys::endpoint_create() else {
+            return 21;
+        };
+        let Ok(system) = sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER) else {
+            return 21;
+        };
+        match start_driver("virtio_input", index, ep, &[system]) {
+            Ok(_) => {
+                input_eps[inputs] = ep;
+                inputs += 1;
+            }
+            Err(e) => {
+                user_testprogs::print_error(b"AriInit: virtio_input", e);
+                return 22;
+            }
+        }
+    }
+    if inputs > 0 {
+        services |= SERVICE_INPUT;
+        let mut dups = [Handle(0); 4];
+        for (d, ep) in dups.iter_mut().zip(&input_eps[..inputs]) {
+            let Ok(h) = sys::handle_duplicate(*ep, rights::WRITE | rights::TRANSFER) else {
+                return 23;
+            };
+            *d = h;
+        }
+        let result =
+            sys::process_spawn_with(SPAWNER, "input_client", inputs as u64, &dups[..inputs])
+                .and_then(|child| {
+                    let r = sys::process_wait(child, TIMEOUT_INFINITE);
+                    let _ = sys::handle_close(child);
+                    r
+                });
+        match result {
+            Ok(0) => say(b"servicio de entrada ok"),
+            Ok(code) => {
+                sys::print(b"AriInit: input_client salio con ");
+                sys::print(user_testprogs::fmt_u64(code, &mut buf));
+                sys::print(b"\n");
+                return 24;
+            }
+            Err(e) => {
+                user_testprogs::print_error(b"AriInit: input_client", e);
+                return 24;
+            }
+        }
+    } else {
+        say(b"sin dispositivos virtio-input");
     }
     say(b"servicios de arranque completados");
     if arg & sys::abi::init_arg::SHELL != 0 {

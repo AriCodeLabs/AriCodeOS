@@ -21,6 +21,7 @@ const NETD: Handle = Handle(0x0001_0009);
 const SERVICE_BLOCK: u64 = 1;
 const SERVICE_FS: u64 = 2;
 const SERVICE_NET: u64 = 4;
+const SERVICE_INPUT: u64 = 8;
 
 const PROMPT: &[u8] = b"ari> ";
 const LINE_MAX: usize = 256;
@@ -407,6 +408,12 @@ fn services(mask: u64, fs: &FsClient) {
     }
     sys::print(b"red       virtio_net  ");
     sys::print(if mask & SERVICE_NET != 0 {
+        b"activo\n"
+    } else {
+        b"ausente\n"
+    });
+    sys::print(b"entrada   virtio_input ");
+    sys::print(if mask & SERVICE_INPUT != 0 {
         b"activo\n"
     } else {
         b"ausente\n"

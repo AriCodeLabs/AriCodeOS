@@ -1,0 +1,32 @@
+# Fase 25: un inputd por dispositivo virtio-input. El host inyecta por QMP
+# la linea "hola" + Enter en el teclado y un movimiento y clic en el raton;
+# input_client los traduce con el teclado US de libs/input.
+name = "input.virtio"
+description = "virtio-input: teclado y raton por IPC con eventos inyectados por QMP"
+level = "full"
+areas = ["input", "virtio", "init"]
+cmdline = "qemu_exit"
+timeout_secs = 90
+
+[host_input]
+marker = "INPUT_READY"
+keys = ["h", "o", "l", "a", "ret"]
+mouse_rel = [10, -5]
+click = "left"
+
+[expect]
+exit = 33
+serial_contains = [
+    "virtio-input: dispositivo listo: QEMU Virtio Keyboard",
+    "virtio-input: dispositivo listo: QEMU Virtio Mouse",
+    "input_client: dispositivo 0: QEMU Virtio Keyboard",
+    "input_client: dispositivo 1: QEMU Virtio Mouse",
+    "input_client: teclado: hola",
+    "input_client: raton: boton izquierdo pulsado",
+    "input_client: raton: dx=10 dy=-5",
+    "input_client: eventos de entrada por IPC ok",
+    "[host] QMP: 14 eventos de entrada enviados",
+    "AriInit: servicio de entrada ok",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "nadie tecleo", "fallo en la inicializacion"]

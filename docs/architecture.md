@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.1.0 (Fases 0 a 24)
+## Estado: 0.1.1 + Fase 25 (virtio-input) en desarrollo
 
 ```text
 OVMF (UEFI)
@@ -51,16 +51,18 @@ libs/acpi/           aricode-acpi: RSDP, XSDT/RSDT, MADT (LAPIC, I/O APIC, overr
 libs/pci/            aricode-pci: direccionamiento ECAM, cabecera de configuración, BARs, capabilities, clases (no_std + alloc, tests de host)
 libs/virtio/         aricode-virtio: virtqueue split sobre DMA, estructuras virtio-pci modernas, peticiones virtio-blk (no_std, tests de host)
 libs/gpt/            aricode-gpt: CRC32, cabecera y entradas GPT, escritor para el disco de pruebas (no_std, tests de host)
+libs/input/          aricode-input: eventos evdev y teclado US (no_std, tests de host)
 libs/http/           aricode-http: GET, análisis de respuestas, Content-Length y chunked sin alloc (no_std, tests de host)
 libs/net/            aricode-net: Ethernet, ARP, IPv4, ICMP, UDP, TCP, cliente DHCP y DNS sin alloc (no_std, tests de host)
 libs/arifs/          aricode-arifs: AriFS v0, directorio plano con tabla de ficheros de capacidad fija sobre `BlockDevice` (no_std, tests de host)
-sdk/proto/           aricode-proto: protocolos IPC versionados de los servicios (bloques v1, ficheros v1, red v1) (no_std, tests de host)
+sdk/proto/           aricode-proto: protocolos IPC versionados de los servicios (bloques v1, ficheros v1, red v1, entrada v1) (no_std, tests de host)
 sdk/abi/             aricode-abi: números de syscall, errores, handles iniciales, derechos y tipos de objeto (no_std, tests de host)
 sdk/rust/            aricode-sys: wrappers de syscall (no_std, sin alloc), clientes de los servicios de bloques, ficheros y red, cliente HTTP GET, transporte virtio PCI para drivers, y `user.ld`, el linker script de todo programa de usuario
 user/testprogs/      programas de prueba de ring 3 (Rust y ensamblador) enlazados como ELF estáticos en 0x400000
 services/init/       AriInit: primer proceso; recibe SPAWNER y la raíz PCI, lanza/supervisa servicios y reclama dispositivos para sus drivers
 services/virtio-blk/ driver virtio-blk en ring 3 y servicio de bloques por IPC (interfaz moderna, cola 0 en DMA, MSI-X, GPT)
 services/virtio-net/ netd: driver virtio-net y pila de red (DHCP, ARP, ICMP, UDP, TCP, DNS) por IPC en ring 3
+services/virtio-input/ inputd: driver virtio-input (un proceso por teclado o ratón) y eventos por IPC en ring 3
 services/arifs/      fsd: servicio de ficheros AriFS en ring 3 sobre el servicio de bloques
 services/shell/      arish: shell interactivo en ring 3 (help, ps, mem, ls, cat, devices, services, uptime, reboot, shutdown, exit)
 boot/                ariboot: integra lo anterior con la crate `uefi`
@@ -635,8 +637,31 @@ segundo brevemente para añadir la región.
   `None` si el nombre no cabe y el nombre DNS viaja entero en el buffer DMA
   del cliente (hasta 253 bytes) en vez de en el mensaje IPC.
 
+## Entrada (Fase 25)
+
+- virtio-input entrega eventos evdev (`type`, `code`, `value`, 8 bytes) por
+  su cola 0; `inputd` publica 64 buffers de 8 bytes en DMA, repone cada
+  uno al consumirlo y guarda los eventos en un anillo de 128 (los más
+  antiguos se descartan si nadie lee). El nombre del dispositivo se lee de
+  `virtio_input_config` (select `ID_NAME`). Init lanza un `inputd` por
+  cada función `1af4:1052` con su propio endpoint y `SYSTEM` como extra.
+- `InputServiceProtocol v1`: `Info` (nombre) y `Read(timeout)` con hasta
+  4 eventos por respuesta; una sola lectura pendiente por servicio
+  (`Busy` si hay otra). `aricode-input::Keyboard` traduce en el cliente,
+  no en el driver: el driver no decide la distribución de teclado.
+- QEMU lleva `virtio-keyboard-pci` y `virtio-mouse-pci` (funciones
+  `00:04.0` y `00:05.0`; nueve funciones PCI en total) y en las
+  ejecuciones headless expone QMP por socket Unix en el directorio del
+  escenario. `[host_input]` en un escenario hace que xtask, al ver el
+  marcador, envíe `input-send-event` (teclas por nombre qcode, movimiento
+  relativo y clic); sin `device`, porque QMP solo admite ahí pantallas y
+  los dispositivos virtio, registrados después del i8042, son los
+  manejadores activos. El resultado se anota como `[host] QMP: ...`.
+
 ## Deuda conocida
 
+- Sin xHCI/USB HID: solo dispositivos virtio-input; el shell sigue leyendo
+  de la consola serie.
 - HTTP sin TLS, sin redirecciones ni `keep-alive`; cuerpos limitados al
   buffer del llamador.
 - `netd` no renueva la concesión DHCP ni fragmenta IPv4; un socket UDP

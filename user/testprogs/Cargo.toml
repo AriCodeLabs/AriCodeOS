@@ -12,3 +12,4 @@ aricode-heap = { path = "../../libs/heap" }
 aricode-sync = { path = "../../libs/sync" }
 aricode-proto = { path = "../../sdk/proto" }
 aricode-net = { path = "../../libs/net" }
+aricode-input = { path = "../../libs/input" }
