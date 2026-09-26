@@ -1,0 +1,11 @@
+# log=warn silencia INFO y DEBUG; los marcadores sin formato siguen saliendo.
+name = "console.log_level_warn"
+description = "log=warn oculta INFO y DEBUG"
+level = "full"
+areas = ["console"]
+cmdline = "qemu_exit log=warn"
+
+[expect]
+exit = 33
+serial_contains = ["AriCodeOS booting...", "ARICODEOS_KERNEL_READY"]
+serial_absent = ["[INFO ]", "[DEBUG]", "KERNEL PANIC"]

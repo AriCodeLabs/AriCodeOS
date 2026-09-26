@@ -5,6 +5,7 @@ members = [
     "libs/elf",
     "libs/x86-paging",
     "libs/cmdline",
+    "libs/fb-console",
     "boot",
     "kernel",
     "tools/xtask",
@@ -16,6 +17,7 @@ default-members = [
     "libs/elf",
     "libs/x86-paging",
     "libs/cmdline",
+    "libs/fb-console",
     "tools/xtask",
 ]
 

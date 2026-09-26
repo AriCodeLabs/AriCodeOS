@@ -23,6 +23,10 @@ name = "aricode-elf"
 version = "0.0.1"
 
 [[package]]
+name = "aricode-fb-console"
+version = "0.0.1"
+
+[[package]]
 name = "aricode-x86-paging"
 version = "0.0.1"
 
@@ -31,7 +35,9 @@ name = "arikernel"
 version = "0.0.1"
 dependencies = [
  "aricode-cmdline",
+ "aricode-fb-console",
  "boot-protocol",
+ "log",
 ]
 
 [[package]]

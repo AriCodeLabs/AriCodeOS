@@ -14,6 +14,7 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("aricode-elf", None),
     ("aricode-x86-paging", None),
     ("aricode-cmdline", None),
+    ("aricode-fb-console", None),
     ("ariboot", Some(UEFI_TARGET)),
     ("arikernel", Some(KERNEL_TARGET)),
     ("xtask", None),

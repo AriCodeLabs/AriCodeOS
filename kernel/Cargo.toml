@@ -14,3 +14,5 @@ bench = false
 [dependencies]
 boot-protocol = { path = "../boot-protocol" }
 aricode-cmdline = { path = "../libs/cmdline" }
+aricode-fb-console = { path = "../libs/fb-console" }
+log = { version = "0.4", default-features = false }

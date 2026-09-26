@@ -59,17 +59,21 @@ impl fmt::Write for Serial {
     }
 }
 
+/// Texto sin formato de log en todas las consolas (serie y framebuffer).
 #[macro_export]
 macro_rules! print {
-    ($($arg:tt)*) => {{
-        use core::fmt::Write as _;
-        let _ = write!($crate::serial::Serial, $($arg)*);
-    }};
+    ($($arg:tt)*) => { $crate::console::write_raw(format_args!($($arg)*)) };
 }
 
 #[macro_export]
 macro_rules! println {
     () => { $crate::print!("\n") };
+    ($($arg:tt)*) => { $crate::console::write_raw(format_args!("{}\n", format_args!($($arg)*))) };
+}
+
+/// Solo serie: para el panic handler, que no debe tocar estado compartido.
+#[macro_export]
+macro_rules! serial_println {
     ($($arg:tt)*) => {{
         use core::fmt::Write as _;
         let _ = writeln!($crate::serial::Serial, $($arg)*);
