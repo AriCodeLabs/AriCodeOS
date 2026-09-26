@@ -1,0 +1,10 @@
+name = "memory.heap_selftest"
+description = "test=heap: Vec/Box/String, crecimiento, try_reserve falla limpio, sin fugas"
+level = "full"
+areas = ["memory"]
+cmdline = "qemu_exit test=heap"
+
+[expect]
+exit = 33
+serial_contains = ["heap selftest ok (Vec/Box/String/format, crecido a", "try_reserve falla limpio)", "ARICODEOS_KERNEL_READY"]
+serial_absent = ["KERNEL PANIC"]

@@ -1,0 +1,10 @@
+name = "memory.heap_init"
+description = "heap del kernel mapeado y anunciado"
+level = "smoke"
+areas = ["memory"]
+cmdline = "qemu_exit"
+
+[expect]
+exit = 33
+serial_contains = ["[INFO ] heap: 1024 KiB en 0xffffc00000000000, crece por trozos de 1024 KiB hasta 64 MiB", "ARICODEOS_KERNEL_READY"]
+serial_absent = ["KERNEL PANIC"]

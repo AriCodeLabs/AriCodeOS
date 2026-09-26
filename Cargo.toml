@@ -8,6 +8,7 @@ members = [
     "libs/fb-console",
     "libs/x86-cpu",
     "libs/pmm",
+    "libs/heap",
     "boot",
     "kernel",
     "tools/xtask",
@@ -22,11 +23,12 @@ default-members = [
     "libs/fb-console",
     "libs/x86-cpu",
     "libs/pmm",
+    "libs/heap",
     "tools/xtask",
 ]
 
 [workspace.package]
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 license = "UNLICENSED"
 repository = "https://github.com/lynxcraft/aricodeos"

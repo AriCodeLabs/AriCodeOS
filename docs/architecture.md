@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.0.3 en curso (0.0.2 + Fases 5 y 6)
+## Estado: 0.0.3 (Fases 5, 6 y 7)
 
 ```text
 OVMF (UEFI)
@@ -15,7 +15,8 @@ OVMF (UEFI)
        consola serie + framebuffer (fuente 8x16), logger con niveles,
        informe de BootInfo, GDT/TSS/IDT propias con IST para #DF,
        excepciones con volcado, PMM por bitmap, VMM con tablas propias
-       (W^X, mapa físico, pila con guard page), ARICODEOS_KERNEL_READY
+       (W^X, mapa físico, pila con guard page), heap con crecimiento
+       bajo demanda, ARICODEOS_KERNEL_READY
 ```
 
 ## Crates
@@ -28,9 +29,10 @@ libs/cmdline/        aricode-cmdline: `clave` / `clave=valor` sin alloc (no_std,
 libs/fb-console/     aricode-fb-console: consola de texto sobre framebuffer 32 bpp, fuente Terminus 8x16 (OFL), tests de host
 libs/x86-cpu/        aricode-x86-cpu: descriptores GDT/TSS/IDT y tabla de excepciones (no_std, tests de host)
 libs/pmm/            aricode-pmm: allocator de frames por bitmap sobre almacenamiento externo (no_std, tests de host)
+libs/heap/           aricode-heap: heap first-fit con lista de libres, fusión y cabecera por asignación (no_std, tests de host)
 boot/                ariboot: integra lo anterior con la crate `uefi`
 kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log), sync (SingleCpu),
-                     arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions}, memory/{phys, pmm, vmm},
+                     arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions}, memory/{phys, pmm, vmm, heap},
                      informe, panic, salida QEMU
 tools/xtask/         build, image, qemu, scenario, test, check
 tests/qemu/          escenarios QEMU declarativos (ver tests/README.md)
@@ -134,8 +136,28 @@ las activa; a partir de ahí la identidad del cargador deja de existir:
 - Fallos provocados: `test=vmm` (autoprueba), `write_rodata`, `exec_data`,
   `stack_overflow`.
 
+## Heap del kernel (Fase 7)
+
+```text
+0xFFFF_C000_0000_0000  heap, trozos de 1 MiB mapeados bajo demanda, máximo 64 MiB, RW NX G
+```
+
+- `memory::heap` es el `#[global_allocator]`; `alloc` de `core` está
+  disponible en todo el kernel (`Vec`, `Box`, `String`, `format!`).
+- Cuando una asignación no cabe, el allocator mapea otro trozo con frames del
+  PMM a través del VMM y reintenta; si se alcanza el máximo devuelve nulo y
+  `try_reserve` falla limpiamente (una asignación normal entra en pánico por
+  el `handle_alloc_error` por defecto).
+- `aricode-heap` guarda una cabecera de 16 bytes por asignación con el bloque
+  real: `dealloc` no depende del `Layout` y las alineaciones grandes no
+  pierden memoria. Los bloques libres se fusionan al liberar.
+- `test=heap` ejercita colecciones, crecimiento a más de 4 MiB, fallo
+  controlado y ausencia de fugas.
+
 ## Deuda conocida
 
+- El heap nunca devuelve trozos al PMM ni compacta; el slab/size-class de la
+  sección 16 llegará cuando haya métricas que lo pidan.
 - Las tablas del cargador (tipo `Kernel` en el mapa) no se recuperan: su
   extensión no se conoce con precisión.
 - Sin `invlpg`/TLB shootdown genérico: solo la autoprueba invalida entradas.
