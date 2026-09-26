@@ -43,7 +43,14 @@ fn base_command(esp: &Path, vars: &Path, disk: &Path) -> Command {
     // Red de usuario (slirp): DHCP en 10.0.2.2, DNS en 10.0.2.3; el anfitrión
     // virtual 10.0.2.2 redirige UDP/TCP al loopback del host, donde escucha
     // el respondedor de pruebas.
-    q.args(["-netdev", "user,id=net0"]);
+    q.args([
+        "-netdev",
+        &format!(
+            "user,id=net0,hostfwd=tcp:127.0.0.1:{}-:{}",
+            aricode_proto::net::TEST_TCP_FORWARD_PORT,
+            aricode_proto::net::TEST_TCP_LISTEN_PORT
+        ),
+    ]);
     q.args([
         "-device",
         "virtio-net-pci,netdev=net0,disable-legacy=on,disable-modern=off",
@@ -52,12 +59,23 @@ fn base_command(esp: &Path, vars: &Path, disk: &Path) -> Command {
     q
 }
 
-/// Respondedor UDP de pruebas en el loopback del host: devuelve un registro A
-/// fijo a las consultas DNS y hace eco de cualquier otro datagrama. Vive
-/// mientras exista el valor devuelto.
+/// Respondedor de pruebas en el loopback del host: por UDP devuelve un
+/// registro A fijo a las consultas DNS y hace eco de lo demás; por TCP hace
+/// eco de cada conexión. Vive mientras exista el valor devuelto.
 pub struct Responder {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    threads: Vec<std::thread::JoinHandle<()>>,
+}
+
+/// Eco de una conexión TCP hasta que el otro extremo cierra.
+fn tcp_echo(mut stream: std::net::TcpStream) {
+    use std::io::Write;
+    let mut buf = [0u8; 4096];
+    while let Ok(n) = stream.read(&mut buf) {
+        if n == 0 || stream.write_all(&buf[..n]).is_err() {
+            break;
+        }
+    }
 }
 
 /// Dirección que el respondedor devuelve a toda consulta DNS.
@@ -86,9 +104,13 @@ impl Responder {
         socket
             .set_read_timeout(Some(Duration::from_millis(100)))
             .map_err(|e| e.to_string())?;
+        let tcp_port = aricode_proto::net::TEST_TCP_ECHO_PORT;
+        let listener = std::net::TcpListener::bind(("127.0.0.1", tcp_port))
+            .map_err(|e| format!("servidor de eco TCP en 127.0.0.1:{tcp_port}: {e}"))?;
+        listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
-        let thread = std::thread::spawn(move || {
+        let udp = std::thread::spawn(move || {
             let mut buf = [0u8; 2048];
             let mut out = [0u8; 2048];
             while !flag.load(Ordering::Relaxed) {
@@ -98,9 +120,22 @@ impl Responder {
                 }
             }
         });
+        let flag = Arc::clone(&stop);
+        let tcp = std::thread::spawn(move || {
+            while !flag.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                        std::thread::spawn(move || tcp_echo(stream));
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(20)),
+                }
+            }
+        });
         Ok(Self {
             stop,
-            thread: Some(thread),
+            threads: vec![udp, tcp],
         })
     }
 }
@@ -108,9 +143,44 @@ impl Responder {
 impl Drop for Responder {
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(t) = self.thread.take() {
+        for t in self.threads.drain(..) {
             let _ = t.join();
         }
+    }
+}
+
+/// Sonda TCP del host: al ver `marker` en la serie se conecta al puerto
+/// redirigido, envía `payload` y comprueba el eco. El resultado se añade a la
+/// captura como una línea `[host] ...` para que el escenario lo exija.
+pub struct TcpProbe<'a> {
+    pub marker: &'a str,
+    pub payload: &'a str,
+}
+
+fn run_tcp_probe(payload: &str) -> String {
+    use std::io::Write;
+    let port = aricode_proto::net::TEST_TCP_FORWARD_PORT;
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = match std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
+        Ok(s) => s,
+        Err(e) => return format!("[host] sonda TCP: sin conexion ({e})"),
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    if stream.write_all(payload.as_bytes()).is_err() {
+        return String::from("[host] sonda TCP: fallo al enviar");
+    }
+    let mut got = Vec::new();
+    let mut buf = [0u8; 512];
+    while got.len() < payload.len() {
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => got.extend_from_slice(&buf[..n]),
+        }
+    }
+    if got == payload.as_bytes() {
+        format!("[host] sonda TCP: eco de {} bytes recibido", got.len())
+    } else {
+        format!("[host] sonda TCP: eco incorrecto ({} bytes)", got.len())
     }
 }
 
@@ -171,6 +241,7 @@ pub fn run_headless(
     workdir: &Path,
     timeout: Duration,
     input: &Input,
+    probe: Option<&TcpProbe>,
 ) -> Result<Capture> {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
@@ -204,6 +275,8 @@ pub fn run_headless(
         }
     });
     let mut sent = 0;
+    let mut probe_result: Option<String> = None;
+    let mut probe_thread: Option<std::thread::JoinHandle<String>> = None;
     let mut timed_out = false;
     let exit_code = loop {
         if let Some(st) = child.try_wait().map_err(|e| e.to_string())? {
@@ -226,11 +299,29 @@ pub fn run_headless(
                 sent += 1;
             }
         }
+        if let Some(p) = probe {
+            if probe_thread.is_none()
+                && probe_result.is_none()
+                && count_occurrences(&captured.lock().expect("captura"), p.marker.as_bytes()) > 0
+            {
+                let payload = p.payload.to_string();
+                probe_thread = Some(std::thread::spawn(move || run_tcp_probe(&payload)));
+            }
+            if probe_thread.as_ref().is_some_and(|t| t.is_finished()) {
+                probe_result = probe_thread.take().and_then(|t| t.join().ok());
+            }
+        }
         std::thread::sleep(Duration::from_millis(20));
     };
     drop(stdin);
+    if let Some(t) = probe_thread.take() {
+        probe_result = t.join().ok();
+    }
     reader.join().map_err(|_| "lector de serie")?;
-    let bytes = captured.lock().expect("captura").clone();
+    let mut bytes = captured.lock().expect("captura").clone();
+    if let Some(line) = probe_result {
+        bytes.extend_from_slice(format!("\n{line}\n").as_bytes());
+    }
     Ok(Capture {
         serial: strip_ansi(&String::from_utf8_lossy(&bytes)),
         exit_code,

@@ -86,7 +86,17 @@ fn run_scenario(base: &std::path::Path, s: &Scenario) -> Result<bool> {
         prompt: &s.prompt,
         lines: &s.stdin,
     };
-    let cap = qemu::run_headless(&esp, &workdir, Duration::from_secs(s.timeout_secs), &input)?;
+    let probe = s.host_tcp.as_ref().map(|h| qemu::TcpProbe {
+        marker: &h.marker,
+        payload: &h.payload,
+    });
+    let cap = qemu::run_headless(
+        &esp,
+        &workdir,
+        Duration::from_secs(s.timeout_secs),
+        &input,
+        probe.as_ref(),
+    )?;
     let log = workdir.join("serial.log");
     let _ = std::fs::write(&log, &cap.serial);
 

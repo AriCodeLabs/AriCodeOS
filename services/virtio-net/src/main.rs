@@ -8,6 +8,11 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::boxed::Box;
+
+use aricode_net::tcp::{self, Connection};
 use aricode_net::{arp, dhcp, dns, eth, icmp, ipv4, udp, Ipv4Addr, MacAddr};
 use aricode_proto::net::{Info, Op, Reply, Request, Status, MAX_DATAGRAM};
 use user_testprogs::sys::virtio_pci::{extra_handle, DmaRegion, Queue, Transport, IRQ, SERVICE};
@@ -25,6 +30,8 @@ const MAX_FRAME: usize = eth::HEADER_LEN + eth::MTU;
 const MAX_PINGS: usize = 4;
 const MAX_SOCKETS: usize = 8;
 const MAX_DNS: usize = 4;
+const MAX_TCP: usize = 8;
+const TCP_EPHEMERAL_FIRST: u16 = 50000;
 const PING_ID: u16 = 0xA51C;
 const DHCP_RETRY_MS: u64 = 1000;
 const ARP_WAIT_MS: u64 = 1000;
@@ -172,6 +179,33 @@ struct Socket {
     data: [u8; MAX_DATAGRAM as usize],
 }
 
+/// Socket TCP: una conexión (o un puerto de escucha) y sus esperas.
+struct TcpSock {
+    conn: Connection,
+    listening: bool,
+    /// Conexión entrante aún no entregada por `TcpAccept` (índice del socket).
+    accepted_from: Option<u16>,
+    connect: Option<(Handle, u64)>,
+    accept: Option<(Handle, u64)>,
+    recv: Option<PendingRecv>,
+    /// El usuario ya cerró: liberar el slot cuando la conexión termine.
+    user_closed: bool,
+}
+
+impl TcpSock {
+    fn new(conn: Connection) -> Self {
+        Self {
+            conn,
+            listening: false,
+            accepted_from: None,
+            connect: None,
+            accept: None,
+            recv: None,
+            user_closed: false,
+        }
+    }
+}
+
 struct PendingDns {
     reply_to: Handle,
     id: u16,
@@ -224,6 +258,9 @@ struct Stack {
     pings: [Option<PendingPing>; MAX_PINGS],
     sockets: [Option<Socket>; MAX_SOCKETS],
     dns: [Option<PendingDns>; MAX_DNS],
+    /// En el heap: cada socket lleva 8 KiB de buffers y la pila es de 64 KiB.
+    tcp: [Option<Box<TcpSock>>; MAX_TCP],
+    tcp_next_port: u16,
     deferred: [Option<Deferred>; 4],
     buffers: ClientBuffers,
     /// Puerto UDP efímero para consultas DNS.
@@ -254,6 +291,8 @@ impl Stack {
             pings: [const { None }; MAX_PINGS],
             sockets: [const { None }; MAX_SOCKETS],
             dns: [const { None }; MAX_DNS],
+            tcp: [const { None }; MAX_TCP],
+            tcp_next_port: TCP_EPHEMERAL_FIRST,
             deferred: [const { None }; 4],
             buffers: ClientBuffers {
                 entries: [(0, 0, 0); 8],
@@ -474,6 +513,7 @@ impl Stack {
         match ih.protocol {
             ipv4::PROTO_ICMP => self.on_icmp(ih, payload, now),
             ipv4::PROTO_UDP => self.on_udp(ih, payload, now),
+            ipv4::PROTO_TCP => self.on_tcp(ih, payload, now),
             _ => {}
         }
     }
@@ -568,6 +608,283 @@ impl Stack {
         }
     }
 
+    fn on_tcp(&mut self, ih: ipv4::Header, b: &[u8], now: u64) {
+        let Some((h, payload)) = tcp::Header::parse(ih.src, ih.dst, b) else {
+            return;
+        };
+        // Conexión existente con la misma cuádrupla.
+        let existing = self.tcp.iter().position(|s| {
+            s.as_ref().is_some_and(|s| {
+                !s.listening
+                    && s.conn.local_port() == h.dst_port
+                    && s.conn.remote() == (ih.src, h.src_port)
+            })
+        });
+        if let Some(i) = existing {
+            self.tcp[i]
+                .as_mut()
+                .unwrap()
+                .conn
+                .on_segment(&h, payload, now);
+            return;
+        }
+        // SYN a un puerto en escucha: nueva conexión pasiva.
+        if h.flags & tcp::FLAG_SYN == 0 || h.flags & tcp::FLAG_ACK != 0 {
+            return;
+        }
+        let Some(listener) = self.tcp.iter().position(|s| {
+            s.as_ref()
+                .is_some_and(|s| s.listening && s.conn.local_port() == h.dst_port)
+        }) else {
+            return;
+        };
+        let Some(slot) = self.tcp.iter().position(|s| s.is_none()) else {
+            return;
+        };
+        let mut conn = Connection::new(ih.dst, h.dst_port, ih.src, h.src_port);
+        conn.listen();
+        conn.on_segment(&h, payload, now);
+        let mut sock = Box::new(TcpSock::new(conn));
+        sock.accepted_from = Some(listener as u16);
+        self.tcp[slot] = Some(sock);
+    }
+
+    /// Emite segmentos pendientes y resuelve esperas de todas las conexiones.
+    fn tcp_poll(&mut self, now: u64) {
+        let mut seg = [0u8; tcp::MAX_SEGMENT];
+        for i in 0..MAX_TCP {
+            if self.tcp[i].as_ref().is_none_or(|s| s.listening) {
+                continue;
+            }
+            // Sacar el socket del slot mientras se emite: `send_ipv4` necesita
+            // el resto de la pila.
+            let mut sock = self.tcp[i].take().unwrap();
+            let (remote, _) = sock.conn.remote();
+            while let Some(n) = sock.conn.poll(now, &mut seg) {
+                let _ = self.send_ipv4(remote, ipv4::PROTO_TCP, &seg[..n]);
+                if sock.conn.is_closed() {
+                    break;
+                }
+            }
+            self.tcp[i] = Some(sock);
+            let Some(sock) = self.tcp[i].as_mut() else {
+                continue;
+            };
+            // Conexión activa resuelta.
+            if let Some((reply_to, deadline)) = sock.connect {
+                if sock.conn.is_established() {
+                    sock.connect = None;
+                    answer(reply_to, Reply::ok(i as u64));
+                } else if sock.conn.is_closed() || now >= deadline {
+                    sock.connect = None;
+                    let status = match sock.conn.close_reason() {
+                        Some(tcp::CloseReason::Reset) => Status::Reset,
+                        _ => Status::Timeout,
+                    };
+                    sock.conn.abort();
+                    sock.user_closed = true;
+                    answer(reply_to, Reply::status(status));
+                }
+            }
+            // Recepción pendiente.
+            if sock.recv.is_some()
+                && (sock.conn.recv_available() > 0
+                    || sock.conn.recv_finished()
+                    || sock.conn.is_closed())
+            {
+                let pending = sock.recv.take().unwrap();
+                let mut data = [0u8; MAX_DATAGRAM as usize];
+                let n = sock.conn.recv(&mut data[..pending.max_len as usize]);
+                if n == 0
+                    && !sock.conn.recv_finished()
+                    && sock.conn.close_reason() == Some(tcp::CloseReason::Reset)
+                {
+                    let _ = sys::handle_close(pending.buf);
+                    answer(pending.reply_to, Reply::status(Status::Reset));
+                } else {
+                    let (from, port) = sock.conn.remote();
+                    deliver_recv(&mut self.buffers, pending, from, port, &data[..n]);
+                }
+            }
+            // Liberar conexiones terminadas que el usuario ya cerró.
+            if sock.user_closed && sock.conn.is_closed() {
+                self.tcp[i] = None;
+            }
+        }
+        // Entregar conexiones aceptadas a los `TcpAccept` pendientes.
+        for i in 0..MAX_TCP {
+            let Some(from) = self.tcp[i].as_ref().and_then(|s| s.accepted_from) else {
+                continue;
+            };
+            if !self.tcp[i].as_ref().unwrap().conn.is_established() {
+                if self.tcp[i].as_ref().unwrap().conn.is_closed() {
+                    self.tcp[i] = None;
+                }
+                continue;
+            }
+            let Some(listener) = self.tcp.get_mut(from as usize).and_then(|s| s.as_mut()) else {
+                self.tcp[i] = None;
+                continue;
+            };
+            if let Some((reply_to, _)) = listener.accept.take() {
+                let sock = self.tcp[i].as_mut().unwrap();
+                sock.accepted_from = None;
+                let (addr, port) = sock.conn.remote();
+                answer(reply_to, Reply::ok(i as u64).with_addr(addr.0, port));
+            }
+        }
+    }
+
+    fn tcp_expire(&mut self, now: u64) {
+        for sock in self.tcp.iter_mut().flatten() {
+            if sock.accept.as_ref().is_some_and(|(_, d)| now >= *d) {
+                let (reply_to, _) = sock.accept.take().unwrap();
+                answer(reply_to, Reply::status(Status::Timeout));
+            }
+            if sock.recv.as_ref().is_some_and(|r| now >= r.deadline) {
+                let r = sock.recv.take().unwrap();
+                let _ = sys::handle_close(r.buf);
+                answer(r.reply_to, Reply::status(Status::Timeout));
+            }
+        }
+    }
+
+    fn tcp_handle(&mut self, req: Request, reply_to: Handle, buf: Option<Handle>, now: u64) {
+        let addr = Ipv4Addr(req.addr);
+        match req.op {
+            Op::TcpConnect => {
+                if self.config.is_none() {
+                    return answer(reply_to, Reply::status(Status::NoRoute));
+                }
+                let Some(slot) = self.tcp.iter().position(|s| s.is_none()) else {
+                    return answer(reply_to, Reply::status(Status::Busy));
+                };
+                let port = self.tcp_next_port;
+                self.tcp_next_port = if port == u16::MAX {
+                    TCP_EPHEMERAL_FIRST
+                } else {
+                    port + 1
+                };
+                let mut conn = Connection::new(self.my_ip(), port, addr, req.port);
+                conn.connect((now as u32).wrapping_mul(64).wrapping_add(slot as u32), now);
+                let mut sock = Box::new(TcpSock::new(conn));
+                sock.connect = Some((reply_to, now + req.timeout_ms.max(1) as u64));
+                self.tcp[slot] = Some(sock);
+            }
+            Op::TcpListen => {
+                if req.port == 0 {
+                    return answer(reply_to, Reply::status(Status::Invalid));
+                }
+                if self
+                    .tcp
+                    .iter()
+                    .flatten()
+                    .any(|s| s.listening && s.conn.local_port() == req.port)
+                {
+                    return answer(reply_to, Reply::status(Status::InUse));
+                }
+                let Some(slot) = self.tcp.iter().position(|s| s.is_none()) else {
+                    return answer(reply_to, Reply::status(Status::Busy));
+                };
+                let mut conn = Connection::new(self.my_ip(), req.port, Ipv4Addr::UNSPECIFIED, 0);
+                conn.listen();
+                let mut sock = Box::new(TcpSock::new(conn));
+                sock.listening = true;
+                self.tcp[slot] = Some(sock);
+                answer(reply_to, Reply::ok(slot as u64));
+            }
+            Op::TcpAccept => {
+                let Some(listener) = self.tcp.get_mut(req.sock as usize).and_then(|s| s.as_mut())
+                else {
+                    return answer(reply_to, Reply::status(Status::BadSock));
+                };
+                if !listener.listening {
+                    return answer(reply_to, Reply::status(Status::BadSock));
+                }
+                if listener.accept.is_some() {
+                    return answer(reply_to, Reply::status(Status::Busy));
+                }
+                listener.accept = Some((reply_to, now + req.timeout_ms.max(1) as u64));
+            }
+            Op::TcpSend => {
+                let Some(buf) = buf else {
+                    return answer(reply_to, Reply::status(Status::BadHandles));
+                };
+                let len = req.len.min(MAX_DATAGRAM) as usize;
+                let mut data = [0u8; MAX_DATAGRAM as usize];
+                match self.buffers.map(buf) {
+                    Some(b) if b.len() >= len => data[..len].copy_from_slice(&b[..len]),
+                    _ => return answer(reply_to, Reply::status(Status::BadHandles)),
+                }
+                let Some(sock) = self.tcp.get_mut(req.sock as usize).and_then(|s| s.as_mut())
+                else {
+                    return answer(reply_to, Reply::status(Status::BadSock));
+                };
+                if sock.listening || sock.user_closed {
+                    return answer(reply_to, Reply::status(Status::BadSock));
+                }
+                if sock.conn.is_closed() {
+                    return answer(reply_to, Reply::status(Status::Reset));
+                }
+                let n = sock.conn.send(&data[..len]);
+                answer(reply_to, Reply::ok(n as u64));
+            }
+            Op::TcpRecv => {
+                let Some(buf) = buf else {
+                    return answer(reply_to, Reply::status(Status::BadHandles));
+                };
+                let Some(sock) = self.tcp.get_mut(req.sock as usize).and_then(|s| s.as_mut())
+                else {
+                    return answer(reply_to, Reply::status(Status::BadSock));
+                };
+                if sock.listening || sock.user_closed || sock.recv.is_some() {
+                    return answer(
+                        reply_to,
+                        Reply::status(if sock.recv.is_some() {
+                            Status::Busy
+                        } else {
+                            Status::BadSock
+                        }),
+                    );
+                }
+                sock.recv = Some(PendingRecv {
+                    reply_to,
+                    buf,
+                    max_len: req.len.min(MAX_DATAGRAM),
+                    deadline: now + req.timeout_ms.max(1) as u64,
+                });
+                return; // el buffer se cierra al entregar o al vencer
+            }
+            Op::TcpClose => {
+                let Some(sock) = self.tcp.get_mut(req.sock as usize).and_then(|s| s.as_mut())
+                else {
+                    return answer(reply_to, Reply::status(Status::BadSock));
+                };
+                if sock.user_closed {
+                    return answer(reply_to, Reply::status(Status::BadSock));
+                }
+                if let Some(r) = sock.recv.take() {
+                    let _ = sys::handle_close(r.buf);
+                    answer(r.reply_to, Reply::status(Status::BadSock));
+                }
+                if let Some((h, _)) = sock.accept.take() {
+                    answer(h, Reply::status(Status::BadSock));
+                }
+                sock.user_closed = true;
+                if sock.listening {
+                    self.tcp[req.sock as usize] = None;
+                } else {
+                    sock.conn.close();
+                }
+                answer(reply_to, Reply::ok(0));
+            }
+            _ => answer(reply_to, Reply::status(Status::Invalid)),
+        }
+        if let Some(b) = buf {
+            let _ = sys::handle_close(b);
+        }
+    }
+
     fn on_dns(&mut self, data: &[u8]) {
         for slot in self.dns.iter_mut() {
             let Some(p) = slot.as_ref() else { continue };
@@ -621,6 +938,14 @@ impl Stack {
     fn handle(&mut self, req: Request, reply_to: Handle, buf: Option<Handle>, now: u64) {
         let addr = Ipv4Addr(req.addr);
         match req.op {
+            Op::TcpConnect
+            | Op::TcpListen
+            | Op::TcpAccept
+            | Op::TcpSend
+            | Op::TcpRecv
+            | Op::TcpClose => {
+                return self.tcp_handle(req, reply_to, buf, now);
+            }
             Op::Info => match self.config {
                 Some(c) => {
                     let info = Info {
@@ -854,6 +1179,8 @@ fn main(mask: u64) -> u64 {
             }
         }
         stack.expire(now);
+        stack.tcp_expire(now);
+        stack.tcp_poll(now);
         let _ = sys::irq_wait(IRQ, 10);
     }
 }

@@ -42,6 +42,13 @@ pub struct Inject {
     pub add_empty_segment_at_entry: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostTcp {
+    pub marker: String,
+    pub payload: String,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Expect {
@@ -76,6 +83,9 @@ pub struct Scenario {
     /// Texto que anuncia que el sistema espera una línea.
     #[serde(default = "default_prompt")]
     pub prompt: String,
+    /// Sonda TCP del host: al ver `marker` se conecta al puerto redirigido
+    /// al invitado, envía `payload` y anota el eco como `[host] ...`.
+    pub host_tcp: Option<HostTcp>,
     #[serde(default)]
     pub inject: Inject,
     pub expect: Expect,
