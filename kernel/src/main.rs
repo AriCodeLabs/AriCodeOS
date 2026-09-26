@@ -1,11 +1,14 @@
 //! AriKernel: núcleo de AriCodeOS.
 //!
-//! Estado: 0.0.2 en curso. Recibe `BootInfo`, valida el protocolo, levanta la
-//! consola (serie + framebuffer) y el logger con niveles, describe el hardware
-//! que le han entregado y anuncia `ARICODEOS_KERNEL_READY`.
+//! Estado: 0.0.3. Recibe `BootInfo`, valida el protocolo, levanta la consola
+//! (serie + framebuffer) y el logger con niveles, describe el hardware,
+//! instala GDT/IDT, PMM, VMM (tablas propias, pila con guard) y heap, y
+//! anuncia `ARICODEOS_KERNEL_READY`.
 
 #![no_std]
 #![no_main]
+
+extern crate alloc;
 
 mod arch;
 mod console;
@@ -96,6 +99,7 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     let info = unsafe { &*info };
     let cmdline = CmdLine::new(unsafe { info.cmdline() });
     debug!("kernel_main en pila {:#x}", memory::vmm::KERNEL_STACK_TOP);
+    memory::heap::init();
 
     run_requested_test(&cmdline);
 
@@ -204,6 +208,7 @@ fn run_requested_test(cmdline: &CmdLine) {
         "panic" => panic!("test=panic: fallo provocado"),
         "pmm" => memory::pmm::selftest(),
         "vmm" => memory::vmm::selftest(),
+        "heap" => memory::heap::selftest(),
         // W^X: escribir en .rodata -> #PF por protección.
         "write_rodata" => {
             static RO: u64 = 7;

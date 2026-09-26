@@ -2,7 +2,7 @@
 
 ## Documento maestro de arquitectura, especificaciones técnicas y plan de desarrollo
 
-**Estado:** 0.0.2 completada (2026-09-26): boot, consola, GDT/IDT  
+**Estado:** 0.0.3 completada (2026-09-26): boot, consola, GDT/IDT, PMM, VMM, heap  
 **Versión del documento:** 0.2  
 **Nombre del sistema:** AriCodeOS  
 **Arquitectura inicial:** x86-64  
@@ -2055,18 +2055,23 @@ contra valores conocidos.
 
 # FASE 7 — Kernel allocator
 
-### Implementar
+**Estado: completada (2026-09-26).**
 
-- heap;
-- `alloc` support;
-- allocator escalable posteriormente.
+### Implementado
+
+- `libs/heap`: first-fit con lista de libres ordenada, fusión de vecinos y
+  cabecera por asignación (bump -> linked-list de la sección 16);
+- `kernel/memory/heap`: `#[global_allocator]` con región virtual reservada
+  de 64 MiB y crecimiento por trozos de 1 MiB con frames del PMM;
+- `alloc` disponible en el kernel.
 
 ### Tests
 
-- Vec;
-- Box;
-- allocation stress;
-- memory reuse.
+- host (5): reutilización y fusión, alineaciones grandes sin fugas,
+  agotamiento, 500 asignaciones en orden pseudoaleatorio sin solapes,
+  regiones múltiples y colas absorbidas;
+- QEMU: `memory.heap_init` (smoke) y `memory.heap_selftest` (`Vec`, `Box`,
+  `String`, `format!`, crecimiento, `try_reserve` fallando limpio, sin fugas).
 
 ---
 
@@ -2941,11 +2946,14 @@ auditoría (`docs/audits/`).
 
 # 87. AriCodeOS 0.0.3
 
-Añadir:
+**Estado: completada (2026-09-26), tag `v0.0.3`.**
 
-- physical memory allocator;
-- virtual memory;
-- kernel heap.
+Añadido:
+
+- physical memory allocator (bitmap, `libs/pmm`);
+- virtual memory (tablas propias, W^X, mapa físico lineal, guard page;
+  protocolo de arranque v3, ADR 0009);
+- kernel heap (`libs/heap`, crecimiento bajo demanda).
 
 ---
 
@@ -3403,7 +3411,7 @@ aricodeos/
 No necesitamos crear toda la estructura futura desde el primer día.
 
 Este árbol es el que existe en el repositorio desde M0, ampliado con
-`libs/{elf,x86-paging,x86-cpu,pmm,cmdline,fb-console}` (lógica `no_std` con tests de host),
+`libs/{elf,x86-paging,x86-cpu,pmm,heap,cmdline,fb-console}` (lógica `no_std` con tests de host),
 `tests/qemu/` (escenarios) y `docs/decisions/0001..0007`.
 
 ---
