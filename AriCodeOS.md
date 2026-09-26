@@ -2,7 +2,7 @@
 
 ## Documento maestro de arquitectura, especificaciones técnicas y plan de desarrollo
 
-**Estado:** 0.0.3 completada (2026-09-26): boot, consola, GDT/IDT, PMM, VMM, heap  
+**Estado:** 0.0.4 completada (2026-09-26): boot, consola, GDT/IDT, memoria, APIC, threads, scheduler  
 **Versión del documento:** 0.2  
 **Nombre del sistema:** AriCodeOS  
 **Arquitectura inicial:** x86-64  
@@ -2122,17 +2122,19 @@ perder frames.
 
 # FASE 10 — Scheduler
 
+**Estado: completada (2026-09-26).**
+
 ### Primera versión
 
-Round Robin preemptivo.
+Round Robin preemptivo con quantum de 20 ms sobre el tick del APIC, sueño
+planificado y colas de espera (`task::wait::WaitQueue`).
 
-### Tests
+### Tests (`scheduler.selftest`, área `scheduler`)
 
-- fairness básica;
-- yield;
-- sleep;
-- bloqueo;
-- wakeup.
+- fairness básica: tres hilos ocupados sin `yield` reparten la CPU;
+- yield: cubierto por `threads.selftest`;
+- sleep: 50 ms medidos en ticks;
+- bloqueo y wakeup: `wake_one` libera a un consumidor y `wake_all` al resto.
 
 ---
 
@@ -2973,12 +2975,14 @@ Añadido:
 
 # 88. AriCodeOS 0.0.4
 
-Añadir:
+**Estado: completada (2026-09-26), tag `v0.0.4`.**
 
-- APIC;
-- timer;
-- threads;
-- scheduler.
+Añadido:
+
+- `IrqLock` en todo el estado global (`libs/sync`);
+- APIC (PIC enmascarado, LAPIC, timer calibrado con PIT, 100 Hz);
+- threads (pilas con guard, context switch, idle);
+- scheduler round robin preemptivo, sueño y colas de espera (`libs/sched`).
 
 ---
 

@@ -9,9 +9,9 @@ pub const MS_PER_TICK: u64 = 1000 / TICK_HZ;
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
-/// Llamado desde el handler del timer.
-pub fn tick() {
-    TICKS.fetch_add(1, Ordering::Relaxed);
+/// Llamado desde el handler del timer. Devuelve el tick recién contado.
+pub fn tick() -> u64 {
+    TICKS.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 pub fn ticks() -> u64 {
@@ -23,13 +23,9 @@ pub fn uptime_ms() -> u64 {
     ticks() * MS_PER_TICK
 }
 
-/// Duerme `ms` con `hlt` entre ticks (espera pasiva; sin scheduler todavía).
+/// Duerme `ms` cediendo la CPU al planificador.
 pub fn sleep_ms(ms: u64) {
-    let until = ticks() + ms.div_ceil(MS_PER_TICK);
-    while ticks() < until {
-        // SAFETY: con interrupciones habilitadas, `hlt` despierta en el siguiente tick.
-        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
-    }
+    crate::task::scheduler::sleep_ms(ms);
 }
 
 /// Autoprueba (`test=timer`): el tick avanza al ritmo esperado medido contra

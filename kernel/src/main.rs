@@ -221,7 +221,8 @@ fn run_requested_test(cmdline: &CmdLine) {
         "heap" => memory::heap::selftest(),
         "heap_oom" => memory::heap::oom_selftest(),
         "timer" => time::selftest(),
-        "threads" => task::scheduler::selftest(),
+        "threads" => task::scheduler::threads_selftest(),
+        "sched" => task::scheduler::selftest(),
         // W^X: escribir en .rodata -> #PF por protección.
         "write_rodata" => {
             static RO: u64 = 7;

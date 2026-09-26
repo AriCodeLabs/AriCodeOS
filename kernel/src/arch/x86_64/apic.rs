@@ -119,8 +119,9 @@ fn eoi() {
 pub fn handle_interrupt(vector: u8) {
     match vector {
         TIMER_VECTOR => {
-            time::tick();
+            let now = time::tick();
             eoi();
+            crate::task::scheduler::on_tick(now);
         }
         SPURIOUS_VECTOR => {
             // Sin EOI por especificación.

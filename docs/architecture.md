@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.0.4 en curso (0.0.3 + Fases 8 y 9)
+## Estado: 0.0.4 (Fases 8, 9 y 10)
 
 ```text
 OVMF (UEFI)
@@ -17,8 +17,8 @@ OVMF (UEFI)
        excepciones con volcado, PMM por bitmap, VMM con tablas propias
        (W^X, mapa físico, pila con guard page), heap con crecimiento
        bajo demanda, PIC enmascarado, LAPIC + timer 100 Hz, interrupciones
-       habilitadas, hilos del kernel con cambio de contexto cooperativo,
-       ARICODEOS_KERNEL_READY
+       habilitadas, hilos del kernel, scheduler round robin preemptivo con
+       sueño y colas de espera, ARICODEOS_KERNEL_READY
 ```
 
 ## Crates
@@ -38,7 +38,7 @@ boot/                ariboot: integra lo anterior con la crate `uefi`
 kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log), sync (SingleCpu),
                      arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions, port, pic, pit, apic},
                      memory/{phys, pmm, vmm, heap}, sync (política IRQ), time,
-                     task/{context (switch_context, thread_start), stack, thread, scheduler}, informe, panic, salida QEMU
+                     task/{context (switch_context, thread_start), stack, thread, scheduler, wait}, informe, panic, salida QEMU
 tools/xtask/         build, image, qemu, scenario, test, check
 tests/qemu/          escenarios QEMU declarativos (ver tests/README.md)
 ```
@@ -208,9 +208,26 @@ heap -> pmm -> vmm -> console.
 - `test=threads`: dos hilos alternan estrictamente con `yield` y 40 workers
   terminan y devuelven sus pilas al PMM.
 
+## Scheduler preemptivo (Fase 10)
+
+- El handler del timer, tras el EOI, llama a `scheduler::on_tick`: despierta
+  a los hilos cuyo tick ha llegado y, si el quantum (2 ticks = 20 ms) ha
+  expirado o alguien despertó, preempta con la misma ruta de cambio que
+  `yield`. El hilo preemptado queda con su marco de interrupción en su pila y
+  reanuda por el `iretq` del handler.
+- Ningún lock del kernel puede ser preemptado: todos deshabilitan
+  interrupciones. El lock del planificador se suelta antes del cambio.
+- `scheduler::sleep_ms` duerme sin consumir CPU; `time::sleep_ms` delega en él.
+- `task::wait::WaitQueue` implementa bloqueo con condición evaluada bajo su
+  lock y `wake_one`/`wake_all`; un despertar que llega antes de bloquearse no
+  se pierde porque `unblock` falla y el hilo reevalúa.
+- `test=sched`: tres hilos que nunca ceden reparten la CPU (mínimo >= mitad
+  del máximo), un hilo duerme 50 ms con 5..7 ticks de error, y dos
+  consumidores se despiertan uno a uno y luego todos.
+
 ## Deuda conocida
 
-- Sin preempción todavía: un hilo que no cede monopoliza la CPU (Fase 10).
+- Sin prioridades ni afinidad: solo round robin en una CPU (Fase 32 para SMP).
 - Los slots de pila no se reutilizan (uno por tid); el espacio virtual
   reservado permite ~2^31 hilos, así que no es un límite práctico aún.
 - El LAPIC también queda cubierto por el mapa físico lineal con caché WB;
