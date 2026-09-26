@@ -25,7 +25,7 @@ OVMF (UEFI)
 ## Crates
 
 ```text
-boot-protocol/       ABI BootInfo (v2): mapa UEFI, framebuffer, RSDP, kernel, pila, PML4, cmdline
+boot-protocol/       ABI BootInfo (v3): mapa UEFI, framebuffer, RSDP, kernel, pila, PML4, cmdline, mapa físico
 libs/elf/            aricode-elf: parser ELF64 mínimo (no_std, tests de host)
 libs/x86-paging/     aricode-x86-paging: tablas de 4 niveles genéricas en FrameAlloc/PhysMap (no_std, tests de host)
 libs/cmdline/        aricode-cmdline: `clave` / `clave=valor` sin alloc (no_std, tests de host)
@@ -38,7 +38,7 @@ libs/sched/          aricode-sched: política round robin sobre Tid con estados,
 libs/handles/        aricode-handles: tabla de handles con generación y derechos, duplicación solo reductora (no_std + alloc, tests de host)
 sdk/abi/             aricode-abi: números de syscall, errores, handles iniciales, derechos y tipos de objeto (no_std, tests de host)
 boot/                ariboot: integra lo anterior con la crate `uefi`
-kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log), sync (SingleCpu),
+kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log con IrqLock y try_lock),
                      arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions, port, pic, pit, apic, msr, syscall, usermode},
                      object (KernelObject, tabla inicial), user/{process, programs (programs.s), syscalls},
                      memory/{phys, pmm, vmm, heap}, sync (política IRQ), time,
@@ -57,9 +57,16 @@ Invariantes de seguridad de memoria en el cargador (auditoría 2026-09-26,
   con segmentos solapados o cuya entrada no esté en un segmento ejecutable, y
   descarta los `PT_LOAD` vacíos para que no participen en el mapeo. Nada se
   reserva ni se copia hasta que el ELF completo ha pasado la validación.
-- `aricode-x86-paging` solo desreferencia tablas que su propio `PagePool` ha
-  repartido; la única operación `unsafe` para el llamador es tomar posesión de
-  la región del pool.
+- `aricode-x86-paging` es genérica en dos proveedores: `FrameAlloc` entrega
+  frames de 4 KiB (bump sobre páginas UEFI en el cargador, PMM en el kernel) y
+  `PhysMap` traduce física a puntero (identidad en el cargador, mapa lineal en
+  el kernel). `PhysMap` es un trait `unsafe`: quien lo implementa garantiza que
+  la traducción es válida para todo frame que el allocador pueda entregar. El
+  `Mapper` desreferencia las tablas que creó con su `FrameAlloc` y, tras
+  `share_kernel_half` (también `unsafe`), las tablas del kernel que copia por
+  referencia: el llamador garantiza que ese PML4 origen es válido y que sus
+  PDPT viven tanto como el espacio que los comparte (siempre, en el caso del
+  kernel).
 
 ## Contrato AriBoot -> AriKernel
 
@@ -96,16 +103,20 @@ está marcada en el mapa UEFI con el tipo `0x8000_0000` (`MemoryRegionKind::Kern
 
 ## CPU (Fase 4)
 
-- GDT propia: nulo, código ring 0 (0x08), datos ring 0 (0x10), TSS (0x18).
-  Los descriptores se codifican en `aricode-x86-cpu` (probados contra valores
-  conocidos) y `arch::x86_64::gdt` los carga y recarga CS con `retfq`.
+- GDT propia con el layout que exigen `syscall`/`sysret`
+  (`aricode-x86-cpu::layout`, única referencia): nulo, código ring 0 (0x08),
+  datos ring 0 (0x10), datos usuario (0x18, selector 0x1B con RPL 3), código
+  usuario (0x20, selector 0x23), TSS (0x28, 16 bytes). Los descriptores se
+  codifican en `aricode-x86-cpu` (probados contra valores conocidos) y
+  `arch::x86_64::gdt` los carga, recarga CS con `retfq` y comprueba el layout.
 - TSS con IST1 apuntando a una pila de 16 KiB dedicada a #DF, de modo que un
   double fault con la pila corrupta sigue produciendo diagnóstico.
 - IDT con los 256 vectores apuntando a stubs generados (ADR 0008). Vectores
   con código de error y sin él se normalizan en el mismo `InterruptFrame`.
-- Excepciones: #BP avisa y continúa; el resto vuelca registros, y para #PF
-  CR2, tipo de acceso, modo y causa, todo por serie, y termina en pánico.
-  Vectores >= 32 se registran como inesperados (no hay APIC todavía).
+- Excepciones: #BP avisa y continúa; una excepción con `CS.RPL = 3` termina
+  el proceso de usuario (ver Modo usuario); el resto vuelca registros, y para
+  #PF CR2, tipo de acceso, modo y causa, todo por serie, y termina en pánico.
+  Los vectores >= 32 se despachan al APIC (ver Interrupciones externas).
 - Fallos provocados por cmdline: `test=breakpoint|invalid_opcode|page_fault|double_fault`.
 
 ## Memoria física (Fase 5)
@@ -114,9 +125,9 @@ está marcada en el mapa UEFI con el tipo `0x8000_0000` (`MemoryRegionKind::Kern
   última región no reservada, coloca el bitmap (1 bit por frame de 4 KiB) en
   la región libre más baja con sitio, libera las regiones `Free` y vuelve a
   reservar el primer MiB (frame 0, trampolín SMP futuro) y el propio bitmap.
-- Las regiones `Boot` (datos del cargador y de boot services) siguen
-  reservadas: se reclamarán cuando el kernel deje de depender del `BootInfo`
-  original.
+- Las regiones `Boot` (datos del cargador y de boot services) quedan
+  reservadas en este punto; el VMM las devuelve al PMM al activar las tablas
+  propias (ver Memoria virtual).
 - `test=pmm` ejecuta la autoprueba sobre el bitmap real (unicidad, orden,
   double free, contigüidad alineada) y exige que las estadísticas vuelvan al
   estado inicial.
@@ -151,8 +162,9 @@ las activa; a partir de ahí la identidad del cargador deja de existir:
 0xFFFF_C000_0000_0000  heap, trozos de 1 MiB mapeados bajo demanda, máximo 64 MiB, RW NX G
 ```
 
-- `memory::heap` es el `#[global_allocator]`; `alloc` de `core` está
-  disponible en todo el kernel (`Vec`, `Box`, `String`, `format!`).
+- `memory::heap` es el `#[global_allocator]`; la crate `alloc` (`Vec`, `Box`,
+  `String`, `format!`) está disponible en todo el kernel. `core::alloc` solo
+  aporta las interfaces `Layout` y `GlobalAlloc`.
 - Cuando una asignación no cabe, el allocator mapea otro trozo con frames del
   PMM a través del VMM y reintenta; si se alcanza el máximo o no hay frames
   devuelve nulo y `try_reserve` falla limpiamente (una asignación normal entra
@@ -169,14 +181,35 @@ las activa; a partir de ahí la identidad del cargador deja de existir:
 
 ## Sincronización
 
-Todo el estado global (consola de framebuffer, PMM, VMM, heap, GDT/TSS/IDT)
-vive tras `sync::IrqLock`, que guarda `RFLAGS.IF`, ejecuta `cli` al tomar y
-restaura al soltar: una sección crítica no puede ser interrumpida ni reentrada
-por un handler. Con una CPU, encontrar un lock tomado solo puede ser reentrada,
-así que `lock` entra en pánico tras muchos giros en vez de colgar. La consola
-usa `try_lock` y cae a solo serie si está tomada (una excepción dentro de la
-propia consola no bloquea el diagnóstico). Orden de adquisición:
-heap -> pmm -> vmm -> console.
+Todo el estado global (consola de framebuffer, PMM, VMM, heap, GDT/TSS/IDT,
+planificador, tabla de procesos, colas de espera) vive tras `sync::IrqLock`,
+que guarda `RFLAGS.IF`, ejecuta `cli` al tomar y restaura al soltar: una
+sección crítica no puede ser interrumpida ni reentrada por un handler. Con una
+CPU, encontrar un lock tomado solo puede ser reentrada, así que `lock` entra
+en pánico tras muchos giros en vez de colgar. La consola usa `try_lock` y cae
+a solo serie si está tomada (una excepción dentro de la propia consola no
+bloquea el diagnóstico).
+
+Anidamientos reales (un lock exterior se mantiene mientras se toma el
+interior); cualquier otro par se toma en secuencia, nunca anidado:
+
+```text
+VMM -> PMM            vmm::with mantiene el VMM y el Mapper pide frames al PMM (PmmFrames)
+heap.mapped -> VMM    grow mantiene el lock de crecimiento y mapea (y, por lo anterior, llega al PMM)
+heap.mapped -> PMM    grow pide y devuelve frames
+PROCESSES -> SCHED    process::wait consulta el estado del hilo con la tabla tomada
+WaitQueue.waiters     hoja: se suelta antes de bloquear o despertar
+heap.heap, console    hoja: nunca llaman a otro subsistema
+```
+
+Prohibiciones que se derivan: nunca entrar al VMM con el PMM tomado (el
+mapper podría necesitar una tabla y reentrar en el PMM); nunca tomar la
+tabla de procesos desde dentro del planificador (`reap` suelta el
+planificador antes de liberar un espacio de usuario); el lock del
+planificador se suelta siempre antes de un cambio de contexto. El lock de
+crecimiento del heap (`mapped`) es distinto del lock del allocator (`heap`):
+una asignación toma el segundo, un crecimiento el primero y luego el
+segundo brevemente para añadir la región.
 
 ## Interrupciones externas y tiempo (Fase 8)
 
@@ -186,8 +219,9 @@ heap -> pmm -> vmm -> console.
 - El timer del LAPIC se calibra contra el canal 2 del PIT (10 ms) y se
   programa periódico a `time::TICK_HZ` = 100 Hz en el vector 0x20; en QEMU
   resultan ~62 700 ticks/ms con divisor 16.
-- `time` mantiene el contador de ticks, `uptime_ms` y `sleep_ms` (espera con
-  `hlt`, sin scheduler todavía). `test=timer` verifica el ritmo contra el PIT.
+- `time` mantiene el contador de ticks y `uptime_ms`; `time::sleep_ms` delega
+  en el planificador (ver Scheduler preemptivo). `test=timer` verifica el
+  ritmo contra el PIT.
 - Los vectores >= 32 se despachan desde `exceptions::handle` a
   `apic::handle_interrupt`, que envía EOI (salvo el espurio).
 
@@ -226,8 +260,9 @@ heap -> pmm -> vmm -> console.
   lock y `wake_one`/`wake_all`; un despertar que llega antes de bloquearse no
   se pierde porque `unblock` falla y el hilo reevalúa.
 - `test=sched`: tres hilos que nunca ceden reparten la CPU (mínimo >= mitad
-  del máximo), un hilo duerme 50 ms con 5..7 ticks de error, y dos
-  consumidores se despiertan uno a uno y luego todos.
+  del máximo), un hilo duerme 50 ms con una duración observada de 5 a 7 ticks
+  (50 a 70 ms en total), y dos consumidores se despiertan uno a uno y luego
+  todos.
 
 ## Modo usuario (Fase 11)
 
@@ -277,8 +312,10 @@ heap -> pmm -> vmm -> console.
 - Sin SMAP/SMEP: el kernel puede tocar memoria de usuario sin querer; los
   accesos se limitan a `copy_from_user` validado. Activar SMEP/SMAP cuando la
   CPU de referencia lo garantice.
-- Un proceso tiene un único hilo y su espacio es fijo (sin `mmap`); ambos
-  llegan con el modelo de objetos (Fase 12) y el runtime (Fase 27).
+- Un proceso tiene un único hilo y su espacio es fijo (sin `mmap`): las
+  syscalls `memory_map`/`memory_unmap` y la creación de hilos desde usuario
+  son parte del conjunto previsto en la sección 22 y llegarán con el IPC
+  (Fase 14) y el runtime (Fase 27).
 - Sin prioridades ni afinidad: solo round robin en una CPU (Fase 32 para SMP).
 - Los slots de pila no se reutilizan (uno por tid); el espacio virtual
   reservado permite ~2^31 hilos, así que no es un límite práctico aún.
@@ -291,8 +328,8 @@ heap -> pmm -> vmm -> console.
   creadas durante un crecimiento fallido tampoco se devuelven (se reutilizan).
 - Las tablas del cargador (tipo `Kernel` en el mapa) no se recuperan: su
   extensión no se conoce con precisión.
-- Sin `invlpg`/TLB shootdown genérico: solo el heap y la autoprueba invalidan.
-- Sin APIC: las interrupciones externas siguen deshabilitadas (Fase 8).
-- El estado de la consola es una celda de una sola CPU sin bloqueo; se
-  sustituye por un spinlock consciente de interrupciones con los threads (Fase 9).
+- La invalidación de TLB es local y explícita en cada ruta que desmapea
+  (heap al deshacer un crecimiento, pilas de hilo al liberarse, autoprueba
+  del VMM, con `invlpg`); no existe un mecanismo genérico ni TLB shootdown
+  entre CPUs, que llegará con SMP (Fase 32).
 - El loader depende de la crate `uefi` (ver ADR 0006).
