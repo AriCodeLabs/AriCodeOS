@@ -1,0 +1,148 @@
+//! Cliente del servicio de red (`aricode-proto::net`).
+
+use crate::{self as sys, rights, Error, Handle, TIMEOUT_INFINITE};
+use aricode_proto::net::{Info, Op, Reply, Request, Status, MAX_DATAGRAM};
+
+pub struct NetClient {
+    service: Handle,
+    reply: Handle,
+    dma: Handle,
+    buf: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetError {
+    Ipc(Error),
+    Status(Status),
+}
+
+/// Datagrama recibido: remitente y longitud.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Datagram {
+    pub from: [u8; 4],
+    pub port: u16,
+    pub len: usize,
+}
+
+impl NetClient {
+    pub fn new(service: Handle, hardware: Handle) -> Result<Self, Error> {
+        let reply = sys::endpoint_create()?;
+        let dma = sys::dma_alloc(hardware, MAX_DATAGRAM as u64)?;
+        let buf = sys::mmio_map(dma)?;
+        Ok(Self {
+            service,
+            reply,
+            dma,
+            buf,
+        })
+    }
+
+    fn buffer(&mut self) -> &mut [u8] {
+        // SAFETY: buffer DMA de MAX_DATAGRAM bytes mapeado RW, exclusivo del cliente.
+        unsafe { core::slice::from_raw_parts_mut(self.buf as *mut u8, MAX_DATAGRAM as usize) }
+    }
+
+    fn call(&self, req: Request, with_buffer: bool) -> Result<Reply, NetError> {
+        let reply_w = sys::handle_duplicate(self.reply, rights::WRITE | rights::TRANSFER)
+            .map_err(NetError::Ipc)?;
+        let mut handles = [reply_w, Handle(0)];
+        let mut n = 1;
+        if with_buffer {
+            handles[1] =
+                sys::handle_duplicate(self.dma, rights::READ | rights::WRITE | rights::TRANSFER)
+                    .map_err(NetError::Ipc)?;
+            n = 2;
+        }
+        sys::ipc_send(self.service, &req.encode(), &handles[..n], TIMEOUT_INFINITE)
+            .map_err(NetError::Ipc)?;
+        let mut msg = [0u8; Reply::LEN];
+        let mut none: [Handle; 0] = [];
+        let (len, _) = sys::ipc_receive(self.reply, &mut msg, &mut none, TIMEOUT_INFINITE)
+            .map_err(NetError::Ipc)?;
+        let reply = Reply::decode(&msg[..len]).ok_or(NetError::Ipc(Error::Invalid))?;
+        match reply.status {
+            Status::Ok => Ok(reply),
+            s => Err(NetError::Status(s)),
+        }
+    }
+
+    pub fn info(&self) -> Result<Info, NetError> {
+        self.call(Request::new(Op::Info), false)
+            .map(|r| Info::decode(&r.data))
+    }
+
+    /// Eco ICMP; devuelve el RTT en ms.
+    pub fn ping(&self, addr: [u8; 4], seq: u16, timeout_ms: u32) -> Result<u64, NetError> {
+        let mut req = Request::new(Op::Ping);
+        req.addr = addr;
+        req.id = seq;
+        req.timeout_ms = timeout_ms;
+        self.call(req, false).map(|r| r.value)
+    }
+
+    pub fn udp_bind(&self, port: u16) -> Result<u16, NetError> {
+        let mut req = Request::new(Op::UdpBind);
+        req.port = port;
+        self.call(req, false).map(|r| r.value as u16)
+    }
+
+    pub fn udp_close(&self, sock: u16) -> Result<(), NetError> {
+        let mut req = Request::new(Op::UdpClose);
+        req.sock = sock;
+        self.call(req, false).map(|_| ())
+    }
+
+    pub fn udp_send(
+        &mut self,
+        sock: u16,
+        addr: [u8; 4],
+        port: u16,
+        data: &[u8],
+    ) -> Result<usize, NetError> {
+        let len = data.len().min(MAX_DATAGRAM as usize);
+        self.buffer()[..len].copy_from_slice(&data[..len]);
+        let mut req = Request::new(Op::UdpSend);
+        req.sock = sock;
+        req.addr = addr;
+        req.port = port;
+        req.len = len as u16;
+        self.call(req, true).map(|r| r.value as usize)
+    }
+
+    pub fn udp_recv(
+        &mut self,
+        sock: u16,
+        timeout_ms: u32,
+        out: &mut [u8],
+    ) -> Result<Datagram, NetError> {
+        let mut req = Request::new(Op::UdpRecv);
+        req.sock = sock;
+        req.timeout_ms = timeout_ms;
+        req.len = out.len().min(MAX_DATAGRAM as usize) as u16;
+        let r = self.call(req, true)?;
+        let len = (r.value as usize).min(out.len());
+        out[..len].copy_from_slice(&self.buffer()[..len]);
+        Ok(Datagram {
+            from: r.addr(),
+            port: r.port,
+            len,
+        })
+    }
+
+    /// Resuelve un nombre; `server` = `Some((ip, puerto))` o `None` para el
+    /// servidor DNS de la configuración.
+    pub fn resolve(
+        &self,
+        name: &str,
+        server: Option<([u8; 4], u16)>,
+        timeout_ms: u32,
+    ) -> Result<[u8; 4], NetError> {
+        let mut req = Request::new(Op::Dns).with_name(name);
+        if let Some((addr, port)) = server {
+            req.addr = addr;
+            req.port = port;
+        }
+        req.timeout_ms = timeout_ms;
+        self.call(req, false).map(|r| r.addr())
+    }
+}

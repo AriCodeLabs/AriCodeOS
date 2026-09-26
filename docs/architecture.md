@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.0.8 (0.0.7 + Fases 18 a 21)
+## Estado: 0.0.9 en curso (0.0.8 + Fase 22)
 
 ```text
 OVMF (UEFI)
@@ -27,7 +27,8 @@ OVMF (UEFI)
        el virtio-blk (BARs, MSI-X) y lanza su driver en ring 3 como servicio
        de bloques por IPC (disco GPT), fsd monta AriFS v0 sobre él y sirve
        ficheros por IPC; con `shell` en la cmdline init lanza arish, que lee
-       la consola serie y apaga o reinicia por `system_power`;
+       la consola serie y apaga o reinicia por `system_power`; netd
+       (virtio-net) obtiene IP por DHCP y sirve ping, UDP y DNS por IPC;
        ARICODEOS_KERNEL_READY
 ```
 
@@ -50,13 +51,15 @@ libs/acpi/           aricode-acpi: RSDP, XSDT/RSDT, MADT (LAPIC, I/O APIC, overr
 libs/pci/            aricode-pci: direccionamiento ECAM, cabecera de configuración, BARs, capabilities, clases (no_std + alloc, tests de host)
 libs/virtio/         aricode-virtio: virtqueue split sobre DMA, estructuras virtio-pci modernas, peticiones virtio-blk (no_std, tests de host)
 libs/gpt/            aricode-gpt: CRC32, cabecera y entradas GPT, escritor para el disco de pruebas (no_std, tests de host)
+libs/net/            aricode-net: Ethernet, ARP, IPv4, ICMP, UDP, cliente DHCP y DNS sin alloc (no_std, tests de host)
 libs/arifs/          aricode-arifs: AriFS v0, directorio plano con tabla de ficheros de capacidad fija sobre `BlockDevice` (no_std, tests de host)
-sdk/proto/           aricode-proto: protocolos IPC versionados de los servicios (bloques v1, ficheros v1) (no_std, tests de host)
+sdk/proto/           aricode-proto: protocolos IPC versionados de los servicios (bloques v1, ficheros v1, red v1) (no_std, tests de host)
 sdk/abi/             aricode-abi: números de syscall, errores, handles iniciales, derechos y tipos de objeto (no_std, tests de host)
-sdk/rust/            aricode-sys: wrappers de syscall para programas de usuario (no_std, sin alloc), clientes de los servicios de bloques y ficheros, y `user.ld`, el linker script de todo programa de usuario
+sdk/rust/            aricode-sys: wrappers de syscall (no_std, sin alloc), clientes de los servicios de bloques, ficheros y red, transporte virtio PCI para drivers, y `user.ld`, el linker script de todo programa de usuario
 user/testprogs/      programas de prueba de ring 3 (Rust y ensamblador) enlazados como ELF estáticos en 0x400000
 services/init/       AriInit: primer proceso; recibe SPAWNER y la raíz PCI, lanza/supervisa servicios y reclama dispositivos para sus drivers
 services/virtio-blk/ driver virtio-blk en ring 3 y servicio de bloques por IPC (interfaz moderna, cola 0 en DMA, MSI-X, GPT)
+services/virtio-net/ netd: driver virtio-net y pila de red (DHCP, ARP, ICMP, UDP, DNS) por IPC en ring 3
 services/arifs/      fsd: servicio de ficheros AriFS en ring 3 sobre el servicio de bloques
 services/shell/      arish: shell interactivo en ring 3 (help, ps, mem, ls, cat, devices, services, uptime, reboot, shutdown, exit)
 boot/                ariboot: integra lo anterior con la crate `uefi`
@@ -314,6 +317,7 @@ segundo brevemente para añadir la región.
   `process_spawn` (con transferencia de handles al hijo), `process_wait`,
   `irq_wait`, `mmio_map`, `region_len`, `dma_alloc`, `dma_phys`, `pci_count`,
   `pci_info`, `pci_claim`, `console_read`, `system_info`, `system_power`.
+  Los servicios de bloques, ficheros y red no añaden syscalls: son IPC.
 - Los punteros de usuario se validan página a página contra las tablas del
   proceso (`copy_from_user`): un puntero de kernel devuelve `Fault`, nunca se
   desreferencia.
@@ -557,8 +561,36 @@ segundo brevemente para añadir la región.
   fijas. `console.input` usa `CONSOLE_INPUT_READY` como prompt para probar
   el kernel sin shell.
 
+## Red (Fase 22)
+
+- `aricode-net` es una biblioteca de codificadores puros sobre buffers del
+  llamador (sin `alloc`): cada capa tiene `parse`/`write` con validación de
+  longitudes y checksums, y las máquinas de estado (caché ARP, cliente
+  DHCP) se prueban en host paso a paso. El servicio solo conecta la
+  biblioteca con el driver y con IPC.
+- `aricode-sys::virtio_pci` concentra el transporte virtio moderno
+  (estructuras PCI, negociación `VERSION_1 | deseadas`, colas en DMA con
+  el vector MSI-X 0, `DRIVER_OK`, `NEEDS_RESET`) y el contrato de handles
+  con init; tras los BARs vienen los extras del driver (`extra_handle`).
+  virtio-blk quedó reducido a su lógica de peticiones.
+- `netd` es de un solo hilo: en cada vuelta vacía la cola de recepción,
+  atiende hasta 8 peticiones IPC con timeout 0, vence plazos y espera la
+  IRQ hasta 10 ms. Las operaciones que esperan a la red (ping, `UdpRecv`,
+  `Dns`) guardan el endpoint de respuesta del cliente y contestan cuando
+  llega el paquete o vence el plazo; las tramas cuyo siguiente salto no
+  está en la caché ARP se aparcan hasta la respuesta ARP (1 s).
+- La red de QEMU es la de usuario (slirp): DHCP entrega 10.0.2.15,
+  router 10.0.2.2 (que responde a ICMP y redirige UDP al loopback del
+  host) y DNS 10.0.2.3. xtask arranca con cada QEMU un respondedor UDP en
+  `127.0.0.1:17007` que hace eco y contesta consultas DNS con `10.1.2.3`,
+  así `network.stack` y el shell no dependen de Internet. Al declarar un
+  `netdev`, QEMU deja de añadir la e1000 por defecto: el disco pasa a
+  `00:02.0` y la red a `00:03.0` (7 funciones).
+
 ## Deuda conocida
 
+- `netd` no tiene TCP (Fase 23), ni renovación de la concesión DHCP, ni
+  fragmentación IPv4; un socket UDP guarda un solo datagrama sin recoger.
 - `arish` no tiene historial, edición de línea ni redirecciones; las
   variables de entorno y el lanzamiento de programas llegan con el servicio
   de procesos.

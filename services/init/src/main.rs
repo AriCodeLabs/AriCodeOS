@@ -22,6 +22,7 @@ const CONSOLE_IN: Handle = Handle(0x0001_0008);
 /// Bits de la máscara de servicios que recibe el shell.
 const SERVICE_BLOCK: u64 = 1;
 const SERVICE_FS: u64 = 2;
+const SERVICE_NET: u64 = 4;
 
 fn say(msg: &[u8]) {
     sys::print(b"AriInit: ");
@@ -51,12 +52,17 @@ fn find_pci(vendor: u16, device: u16) -> Option<u64> {
 /// capabilities transferidas. Devuelve el handle del proceso.
 ///
 /// Contrato con el driver: recibe en orden el endpoint de servicio, el
-/// espacio de configuración, la capacidad de hardware, la IRQ (si existe) y
-/// solo los BARs presentes; `arg` lleva una máscara: bit 15 = hay IRQ,
-/// bits 0..5 = BAR i presente.
-fn start_driver(name: &str, index: u64, service: Handle) -> Result<Handle, Error> {
+/// espacio de configuración, la capacidad de hardware, la IRQ (si existe),
+/// solo los BARs presentes y después `extras` (propios de cada driver);
+/// `arg` lleva una máscara: bit 15 = hay IRQ, bits 0..5 = BAR i presente.
+fn start_driver(
+    name: &str,
+    index: u64,
+    service: Handle,
+    extras: &[Handle],
+) -> Result<Handle, Error> {
     let handles = sys::pci_claim(PCI_ROOT, index)?;
-    let mut to_send = [Handle(0); 10];
+    let mut to_send = [Handle(0); 12];
     to_send[0] = sys::handle_duplicate(service, rights::READ | rights::WRITE | rights::TRANSFER)?;
     let mut n = 1;
     let mut mask = 0u64;
@@ -69,6 +75,10 @@ fn start_driver(name: &str, index: u64, service: Handle) -> Result<Handle, Error
             3..=8 => mask |= 1 << (i - 3),
             _ => {}
         }
+        to_send[n] = *h;
+        n += 1;
+    }
+    for h in extras {
         to_send[n] = *h;
         n += 1;
     }
@@ -100,19 +110,21 @@ fn run_block_client(name: &str, service: Handle) -> Result<u64, Error> {
 }
 
 /// Lanza el shell con el endpoint de fsd (WRITE), hardware para su buffer,
-/// el sistema (READ|MANAGE), la entrada de consola y la raíz PCI solo
-/// lectura; `arg` = servicios activos. Espera a que termine.
-fn run_shell(fs_service: Handle, services: u64) -> Result<u64, Error> {
+/// el sistema (READ|MANAGE), la entrada de consola, la raíz PCI solo
+/// lectura y el endpoint de netd (WRITE); `arg` = servicios activos. Espera
+/// a que termine.
+fn run_shell(fs_service: Handle, net_service: Handle, services: u64) -> Result<u64, Error> {
     let fsd = sys::handle_duplicate(fs_service, rights::WRITE | rights::TRANSFER)?;
     let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
     let system = sys::handle_duplicate(SYSTEM, rights::READ | rights::MANAGE | rights::TRANSFER)?;
     let console_in = sys::handle_duplicate(CONSOLE_IN, rights::READ | rights::TRANSFER)?;
     let pci = sys::handle_duplicate(PCI_ROOT, rights::READ | rights::TRANSFER)?;
+    let netd = sys::handle_duplicate(net_service, rights::WRITE | rights::TRANSFER)?;
     let child = sys::process_spawn_with(
         SPAWNER,
         "shell",
         services,
-        &[fsd, hw, system, console_in, pci],
+        &[fsd, hw, system, console_in, pci, netd],
     )?;
     let result = sys::process_wait(child, TIMEOUT_INFINITE);
     let _ = sys::handle_close(child);
@@ -169,7 +181,7 @@ fn main(arg: u64) -> u64 {
             let Ok(service) = sys::endpoint_create() else {
                 return 9;
             };
-            let Ok(_driver) = start_driver("virtio_blk", index, service) else {
+            let Ok(_driver) = start_driver("virtio_blk", index, service, &[]) else {
                 return 10;
             };
             services |= SERVICE_BLOCK;
@@ -216,13 +228,45 @@ fn main(arg: u64) -> u64 {
         }
         None => say(b"sin virtio-blk"),
     }
+    // 8. Servicio de red: driver virtio-net residente + cliente de prueba.
+    let Ok(net_service) = sys::endpoint_create() else {
+        return 16;
+    };
+    match find_pci(0x1AF4, 0x1041) {
+        Some(index) => {
+            let Ok(system) = sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER) else {
+                return 17;
+            };
+            match start_driver("virtio_net", index, net_service, &[system]) {
+                Ok(_) => services |= SERVICE_NET,
+                Err(e) => {
+                    user_testprogs::print_error(b"AriInit: virtio_net", e);
+                    return 17;
+                }
+            }
+            match run_block_client("net_client", net_service) {
+                Ok(0) => say(b"servicio de red ok"),
+                Ok(code) => {
+                    sys::print(b"AriInit: net_client salio con ");
+                    sys::print(user_testprogs::fmt_u64(code, &mut buf));
+                    sys::print(b"\n");
+                    return 18;
+                }
+                Err(e) => {
+                    user_testprogs::print_error(b"AriInit: net_client", e);
+                    return 18;
+                }
+            }
+        }
+        None => say(b"sin virtio-net"),
+    }
     say(b"servicios de arranque completados");
     if arg & sys::abi::init_arg::SHELL != 0 {
         let Some(fs) = fs_service else {
             say(b"sin servicio de ficheros, no se lanza el shell");
             return 15;
         };
-        match run_shell(fs, services) {
+        match run_shell(fs, net_service, services) {
             Ok(code) => {
                 sys::print(b"AriInit: shell terminado con ");
                 sys::print(user_testprogs::fmt_u64(code, &mut buf));

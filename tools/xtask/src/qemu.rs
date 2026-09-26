@@ -40,8 +40,78 @@ fn base_command(esp: &Path, vars: &Path, disk: &Path) -> Command {
         "-drive",
         &format!("format=raw,file=fat:rw:{}", esp.display()),
     ]);
+    // Red de usuario (slirp): DHCP en 10.0.2.2, DNS en 10.0.2.3; el anfitrión
+    // virtual 10.0.2.2 redirige UDP/TCP al loopback del host, donde escucha
+    // el respondedor de pruebas.
+    q.args(["-netdev", "user,id=net0"]);
+    q.args([
+        "-device",
+        "virtio-net-pci,netdev=net0,disable-legacy=on,disable-modern=off",
+    ]);
     q.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     q
+}
+
+/// Respondedor UDP de pruebas en el loopback del host: devuelve un registro A
+/// fijo a las consultas DNS y hace eco de cualquier otro datagrama. Vive
+/// mientras exista el valor devuelto.
+pub struct Responder {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Dirección que el respondedor devuelve a toda consulta DNS.
+pub const RESPONDER_DNS_ANSWER: aricode_net::Ipv4Addr = aricode_net::Ipv4Addr::new(10, 1, 2, 3);
+
+/// Respuesta a un datagrama recibido por el respondedor.
+pub fn responder_reply(datagram: &[u8], out: &mut [u8]) -> usize {
+    if let Some(n) = aricode_net::dns::write_answer(datagram, RESPONDER_DNS_ANSWER, 60, out) {
+        let mut name = [0u8; aricode_net::dns::MAX_NAME];
+        if aricode_net::dns::query_name(datagram, &mut name).is_some() && datagram[2] & 0x80 == 0 {
+            return n;
+        }
+    }
+    let n = datagram.len().min(out.len());
+    out[..n].copy_from_slice(&datagram[..n]);
+    n
+}
+
+impl Responder {
+    pub fn start() -> Result<Self> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let port = aricode_proto::net::TEST_RESPONDER_PORT;
+        let socket = std::net::UdpSocket::bind(("127.0.0.1", port))
+            .map_err(|e| format!("respondedor UDP en 127.0.0.1:{port}: {e}"))?;
+        socket
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .map_err(|e| e.to_string())?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let thread = std::thread::spawn(move || {
+            let mut buf = [0u8; 2048];
+            let mut out = [0u8; 2048];
+            while !flag.load(Ordering::Relaxed) {
+                if let Ok((n, from)) = socket.recv_from(&mut buf) {
+                    let m = responder_reply(&buf[..n], &mut out);
+                    let _ = socket.send_to(&out[..m], from);
+                }
+            }
+        });
+        Ok(Self {
+            stop,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for Responder {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
 }
 
 pub fn run_interactive(release: bool, cmdline: &str) -> Result {
@@ -60,6 +130,7 @@ pub fn run_interactive(release: bool, cmdline: &str) -> Result {
     let vars = image::ovmf_vars_for(&build_dir())?;
     let disk = build_dir().join("disk.img");
     image::write_test_disk(&disk)?;
+    let _responder = Responder::start()?;
     println!("[xtask] QEMU (salir: Ctrl-A X)");
     let st = base_command(&esp, &vars, &disk)
         .arg("-nographic")
@@ -106,6 +177,7 @@ pub fn run_headless(
     let vars = image::ovmf_vars_for(workdir)?;
     let disk = workdir.join("disk.img");
     image::write_test_disk(&disk)?;
+    let _responder = Responder::start()?;
     let start = Instant::now();
     let mut child = base_command(esp, &vars, &disk)
         .args(["-display", "none", "-monitor", "none", "-serial", "stdio"])
@@ -190,6 +262,23 @@ fn strip_ansi(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn responder_echoes_and_answers_dns() {
+        let mut out = [0u8; 512];
+        let n = super::responder_reply(b"hola", &mut out);
+        assert_eq!(&out[..n], b"hola");
+        let mut q = [0u8; 128];
+        let qn = aricode_net::dns::write_query(0x77, "aricodeos.test", &mut q).unwrap();
+        let n = super::responder_reply(&q[..qn], &mut out);
+        assert_eq!(
+            aricode_net::dns::parse_response(0x77, &out[..n]),
+            Some(aricode_net::dns::Answer::Address(
+                super::RESPONDER_DNS_ANSWER,
+                60
+            ))
+        );
+    }
+
     #[test]
     fn counts_prompts() {
         assert_eq!(
