@@ -10,9 +10,11 @@
 
 extern crate alloc;
 
+mod acpi;
 mod arch;
 mod console;
 mod framebuffer;
+mod hw;
 mod initrd;
 mod ipc;
 mod memory;
@@ -107,8 +109,10 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     debug!("kernel_main en pila {:#x}", memory::vmm::KERNEL_STACK_TOP);
     memory::heap::init();
 
+    acpi::init(info);
     arch::x86_64::pic::disable();
     arch::x86_64::apic::init();
+    arch::x86_64::ioapic::init();
     // SAFETY: IDT, APIC y todo el estado global (tras IrqLock) están listos.
     unsafe { sync::enable_interrupts() };
     info!("interrupciones habilitadas");
@@ -117,7 +121,7 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     initrd::init(info);
 
     if cmdline.get(keys::TEST).is_some() {
-        run_requested_test(&cmdline);
+        run_requested_test(&cmdline, info);
     } else {
         run_init();
     }
@@ -218,7 +222,7 @@ fn report_memory(info: &BootInfo) {
 }
 
 /// Fallos provocados para los escenarios de test (`test=<nombre>`).
-fn run_requested_test(cmdline: &CmdLine) {
+fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
     let Some(name) = cmdline.get(keys::TEST) else {
         return;
     };
@@ -233,6 +237,7 @@ fn run_requested_test(cmdline: &CmdLine) {
         "threads" => task::scheduler::threads_selftest(),
         "sched" => task::scheduler::selftest(),
         "ipc" => ipc::selftest(),
+        "drivers" => hw::selftest(info),
         other if other.starts_with("user_") => run_user_program(&other[5..]),
         // W^X: escribir en .rodata -> #PF por protección.
         "write_rodata" => {

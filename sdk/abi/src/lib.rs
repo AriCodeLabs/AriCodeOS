@@ -47,6 +47,14 @@ pub mod kind {
     pub const ENDPOINT: u64 = 4;
     /// Capacidad de crear procesos desde el initrd (solo `init` la recibe).
     pub const SPAWNER: u64 = 5;
+    /// Línea de interrupción de un dispositivo.
+    pub const IRQ: u64 = 6;
+    /// Región MMIO de un dispositivo.
+    pub const MMIO: u64 = 7;
+    /// Buffer DMA (memoria física contigua).
+    pub const DMA: u64 = 8;
+    /// Capacidad de reservar recursos de hardware (buffers DMA).
+    pub const HARDWARE: u64 = 9;
 }
 
 /// Límite exclusivo del espacio de usuario (mitad baja canónica).
@@ -94,7 +102,22 @@ pub mod nr {
     /// `process_wait(process, timeout_ms) -> código de salida`; exige `WAIT`.
     /// Un proceso terminado por el kernel devuelve `Error::Killed`.
     pub const PROCESS_WAIT: u64 = 15;
+    /// `irq_wait(irq, timeout_ms) -> interrupciones acumuladas`; exige `WAIT`.
+    pub const IRQ_WAIT: u64 = 16;
+    /// `mmio_map(region) -> dirección virtual`; exige `READ|WRITE` sobre un
+    /// objeto MMIO o DMA. Cada llamada crea un mapeo nuevo.
+    pub const MMIO_MAP: u64 = 17;
+    /// `region_len(region) -> bytes`; exige `READ`.
+    pub const REGION_LEN: u64 = 18;
+    /// `dma_alloc(hardware, len) -> handle DMA`; exige `MANAGE` sobre un objeto
+    /// `HARDWARE`. Memoria física contigua, máximo `DMA_MAX_LEN`.
+    pub const DMA_ALLOC: u64 = 19;
+    /// `dma_phys(dma) -> dirección física`; exige `READ`.
+    pub const DMA_PHYS: u64 = 20;
 }
+
+/// Máximo de un buffer DMA por llamada (sección 52).
+pub const DMA_MAX_LEN: u64 = 1024 * 1024;
 
 /// Límites de un mensaje IPC (sección 23: mensajes pequeños y rápidos).
 pub const IPC_MAX_DATA: usize = 256;

@@ -36,6 +36,11 @@ pub struct Process {
     pub arg: u64,
     /// Despierta a quien espera la salida.
     pub exit_wait: alloc::sync::Arc<crate::task::wait::WaitQueue>,
+    /// Siguiente dirección libre para mapeos MMIO/DMA.
+    mmio_next: u64,
+    /// Rangos virtuales que apuntan a memoria ajena al proceso (MMIO, DMA):
+    /// se desmapean sin liberar al destruir el espacio.
+    foreign: Vec<(u64, u64)>,
     /// `None` una vez liberado el espacio de direcciones.
     mapper: Option<Mapper<vmm::PmmFrames, OffsetMap>>,
     pub main_thread: Tid,
@@ -55,6 +60,19 @@ pub fn spawn(name: &str, elf_bytes: &[u8]) -> Result<Pid, &'static str> {
 pub fn spawn_with_arg(name: &str, elf_bytes: &[u8], arg: u64) -> Result<Pid, &'static str> {
     spawn_full(name, elf_bytes, Vec::new(), arg)
 }
+
+/// Capabilities extra y argumento de `_start`.
+pub fn spawn_with_handles_and_arg(
+    name: &str,
+    elf_bytes: &[u8],
+    extra: Vec<(crate::object::ObjectRef, aricode_handles::Rights)>,
+    arg: u64,
+) -> Result<Pid, &'static str> {
+    spawn_full(name, elf_bytes, extra, arg)
+}
+
+/// Base de los mapeos MMIO/DMA de usuario.
+const USER_MMIO_BASE: u64 = 0x1000_0000;
 
 /// Como `spawn`, con capabilities adicionales insertadas tras las tres
 /// iniciales (la primera recibe el handle `0x0001_0004`, y así sucesivamente).
@@ -138,13 +156,16 @@ fn spawn_full(
             .map_err(|_| "process: map stack")?;
     }
 
-    let tid = scheduler::spawn_for_process(
+    // El hilo se prepara ahora y se encola solo cuando el proceso ya está en
+    // la tabla: su primer código consulta la entrada y el salto a ring 3.
+    let thread = scheduler::prepare_for_process(
         name,
         user_thread_entry,
         pid.0 as usize,
         pid.0,
         m.root_phys(),
     )?;
+    let tid = thread.tid;
     let mut handles = crate::object::initial_table(pid, tid);
     for (obj, rights) in extra {
         handles
@@ -158,12 +179,15 @@ fn spawn_full(
             handles,
             arg,
             exit_wait: alloc::sync::Arc::new(crate::task::wait::WaitQueue::new()),
+            mmio_next: USER_MMIO_BASE,
+            foreign: Vec::new(),
             mapper: Some(m),
             main_thread: tid,
             entry: elf.entry,
             status: None,
         },
     );
+    scheduler::start_thread(thread);
     info!(
         "user: proceso {} '{name}' creado ({} segmentos, {} KiB, entrada {:#x}, hilo {tid:?})",
         pid.0,
@@ -230,11 +254,19 @@ pub fn kill_current(why: &'static str) -> ! {
 /// Libera el espacio de direcciones de un proceso terminado. Lo llama el
 /// planificador al recoger su hilo, siempre desde otro hilo y con otro CR3.
 pub fn release_address_space(pid: u32) {
-    let mapper = PROCESSES
-        .lock()
-        .get_mut(&Pid(pid))
-        .and_then(|p| p.mapper.take());
-    if let Some(mut m) = mapper {
+    let taken = PROCESSES.lock().get_mut(&Pid(pid)).and_then(|p| {
+        p.mapper
+            .take()
+            .map(|m| (m, core::mem::take(&mut p.foreign)))
+    });
+    if let Some((mut m, foreign)) = taken {
+        // Memoria ajena (MMIO, DMA): se desmapea sin liberar; sus dueños son
+        // el dispositivo o el objeto DMA.
+        for (virt, len) in foreign {
+            for page in (virt..virt + len).step_by(PAGE_SIZE as usize) {
+                let _ = m.unmap_4k(page);
+            }
+        }
         let mut frames = Vec::new();
         m.free_user_half(|f| frames.push(f));
         frames.push(m.into_root_frame());
@@ -351,4 +383,35 @@ pub fn with_current_handles<R>(f: impl FnOnce(&mut crate::object::Handles) -> R)
     let pid = current_pid()?;
     let mut procs = PROCESSES.lock();
     procs.get_mut(&pid).map(|p| f(&mut p.handles))
+}
+
+/// Mapea `[phys, phys+len)` en el proceso actual como memoria de dispositivo
+/// (sin caché) o buffer DMA (con caché). Devuelve la dirección virtual.
+pub fn map_foreign(phys: u64, len: u64, cacheable: bool) -> Result<u64, aricode_abi::Error> {
+    use aricode_x86_paging::{CACHE_DISABLE, WRITE_THROUGH};
+    let pid = current_pid().ok_or(aricode_abi::Error::Fault)?;
+    let mut procs = PROCESSES.lock();
+    let p = procs.get_mut(&pid).ok_or(aricode_abi::Error::Fault)?;
+    let m = p.mapper.as_mut().ok_or(aricode_abi::Error::Fault)?;
+    let offset = phys & (PAGE_SIZE - 1);
+    let start = phys - offset;
+    let span = (offset + len).next_multiple_of(PAGE_SIZE);
+    let virt = p.mmio_next;
+    // La zona MMIO/DMA está por encima de la pila de usuario (8 MiB) y crece
+    // hacia arriba hasta el fin del espacio de usuario.
+    if virt
+        .checked_add(span)
+        .is_none_or(|end| end > USER_SPACE_END)
+    {
+        return Err(aricode_abi::Error::Limit);
+    }
+    let mut flags = USER | WRITABLE | NO_EXECUTE;
+    if !cacheable {
+        flags |= CACHE_DISABLE | WRITE_THROUGH;
+    }
+    m.map_range_4k(virt, start, span, flags)
+        .map_err(|_| aricode_abi::Error::Limit)?;
+    p.mmio_next += span;
+    p.foreign.push((virt, span));
+    Ok(virt + offset)
 }

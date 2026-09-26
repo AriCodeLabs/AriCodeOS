@@ -113,6 +113,10 @@ pub fn handle_interrupt(vector: u8) {
             // Sin EOI por especificación.
             SPURIOUS.fetch_add(1, Ordering::Relaxed);
         }
+        crate::hw::DEVICE_VECTOR_FIRST..=crate::hw::DEVICE_VECTOR_LAST => {
+            crate::hw::handle_device_irq(vector);
+            eoi();
+        }
         v => {
             warn!("interrupcion inesperada, vector {v}");
             eoi();

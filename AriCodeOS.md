@@ -1050,7 +1050,8 @@ HPET
 DMAR / IOMMU
 ```
 
-No se implementará AML completo inicialmente.
+No se implementará AML completo inicialmente. `libs/acpi` parsea RSDP,
+XSDT/RSDT, MADT y MCFG (Fase 16); HPET y DMAR quedan para cuando se usen.
 
 Podrá incorporarse un intérprete AML posteriormente si resulta necesario.
 
@@ -2268,17 +2269,24 @@ y comprueba que sin `MANAGE` no se pueden crear procesos.
 
 # FASE 16 — Driver framework
 
-### Implementar
+**Estado: completada (2026-09-26).**
 
-- driver API;
-- MMIO capability;
-- IRQ capability;
-- DMA buffer API;
-- process restart.
+### Implementado
+
+- driver API: syscalls `irq_wait`, `mmio_map`, `region_len`, `dma_alloc`,
+  `dma_phys` en `sdk/abi` y `aricode-sys`;
+- MMIO capability: objeto `Mmio` mapeado sin caché en el proceso;
+- IRQ capability: objeto `Irq` sobre GSI del I/O APIC (ACPI MADT, `libs/acpi`),
+  con enmascarado por nivel y liberación del vector;
+- DMA buffer API: objeto `Dma` de frames contiguos a cero, `MANAGE` sobre
+  `Hardware` para reservarlo;
+- process restart: AriInit reinicia `crashy_driver` tras verlo morir.
 
 ### Criterio
 
-Un driver puede fallar sin provocar panic del kernel.
+Un driver puede fallar sin provocar panic del kernel: `init.boot` (driver
+muerto y reiniciado) y `drivers.user_irq_mmio_dma` (IRQ, DMA y MMIO desde
+ring 3).
 
 ---
 
