@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.0.4 en curso (0.0.3 + Fase 8)
+## Estado: 0.0.4 en curso (0.0.3 + Fases 8 y 9)
 
 ```text
 OVMF (UEFI)
@@ -17,7 +17,8 @@ OVMF (UEFI)
        excepciones con volcado, PMM por bitmap, VMM con tablas propias
        (W^X, mapa físico, pila con guard page), heap con crecimiento
        bajo demanda, PIC enmascarado, LAPIC + timer 100 Hz, interrupciones
-       habilitadas, ARICODEOS_KERNEL_READY
+       habilitadas, hilos del kernel con cambio de contexto cooperativo,
+       ARICODEOS_KERNEL_READY
 ```
 
 ## Crates
@@ -32,10 +33,12 @@ libs/x86-cpu/        aricode-x86-cpu: descriptores GDT/TSS/IDT y tabla de excepc
 libs/pmm/            aricode-pmm: allocator de frames por bitmap sobre almacenamiento externo (no_std, tests de host)
 libs/heap/           aricode-heap: heap first-fit con lista de libres, fusión y cabecera por asignación (no_std, tests de host)
 libs/sync/           aricode-sync: IrqLock/SpinLock con política de interrupciones enchufable (no_std, tests de host)
+libs/sched/          aricode-sched: política round robin sobre Tid con estados, sueño, bloqueo y salida (no_std + alloc, tests de host)
 boot/                ariboot: integra lo anterior con la crate `uefi`
 kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log), sync (SingleCpu),
                      arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions, port, pic, pit, apic},
-                     memory/{phys, pmm, vmm, heap}, sync (política IRQ), time, informe, panic, salida QEMU
+                     memory/{phys, pmm, vmm, heap}, sync (política IRQ), time,
+                     task/{context (switch_context, thread_start), stack, thread, scheduler}, informe, panic, salida QEMU
 tools/xtask/         build, image, qemu, scenario, test, check
 tests/qemu/          escenarios QEMU declarativos (ver tests/README.md)
 ```
@@ -184,8 +187,32 @@ heap -> pmm -> vmm -> console.
 - Los vectores >= 32 se despachan desde `exceptions::handle` a
   `apic::handle_interrupt`, que envía EOI (salvo el espurio).
 
+## Hilos del kernel (Fase 9)
+
+```text
+0xFFFF_E000_0000_0000  pilas de hilo: slot = tid, cada uno guard page (sin mapear) + 32 KiB RW NX G
+```
+
+- `aricode-sched::RoundRobin` decide quién sigue; el kernel guarda por hilo
+  su `saved_rsp` y su pila. El contexto de arranque se adopta como hilo
+  `main` (tid 0) y el idle (tid 1, `hlt` + `yield`) se elige cuando la cola
+  está vacía y nunca se encola.
+- `switch_context` (System V) guarda rbx, rbp, r12..r15 y rsp; un hilo nuevo
+  arranca por `thread_start` con r12 = entrada y r13 = argumento, habilita
+  interrupciones y al retornar entra en `exit`.
+- El lock del planificador se suelta antes del cambio de contexto, con las
+  interrupciones deshabilitadas: el hilo que reanuda nunca hereda un lock.
+- Los hilos terminados los recoge el siguiente hilo que reanuda tras un
+  cambio (`reap`): nunca se libera la pila en uso. Las guard pages de hilo
+  también se reconocen en el diagnóstico de `STACK OVERFLOW`.
+- `test=threads`: dos hilos alternan estrictamente con `yield` y 40 workers
+  terminan y devuelven sus pilas al PMM.
+
 ## Deuda conocida
 
+- Sin preempción todavía: un hilo que no cede monopoliza la CPU (Fase 10).
+- Los slots de pila no se reutilizan (uno por tid); el espacio virtual
+  reservado permite ~2^31 hilos, así que no es un límite práctico aún.
 - El LAPIC también queda cubierto por el mapa físico lineal con caché WB;
   solo se accede por la ventana sin caché, pero es un alias a resolver
   cuando se reserve MMIO fuera del mapa lineal.
