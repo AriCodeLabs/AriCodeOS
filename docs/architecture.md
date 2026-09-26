@@ -145,9 +145,13 @@ las activa; a partir de ahí la identidad del cargador deja de existir:
 - `memory::heap` es el `#[global_allocator]`; `alloc` de `core` está
   disponible en todo el kernel (`Vec`, `Box`, `String`, `format!`).
 - Cuando una asignación no cabe, el allocator mapea otro trozo con frames del
-  PMM a través del VMM y reintenta; si se alcanza el máximo devuelve nulo y
-  `try_reserve` falla limpiamente (una asignación normal entra en pánico por
-  el `handle_alloc_error` por defecto).
+  PMM a través del VMM y reintenta; si se alcanza el máximo o no hay frames
+  devuelve nulo y `try_reserve` falla limpiamente (una asignación normal entra
+  en pánico por el `handle_alloc_error` por defecto). El crecimiento es
+  transaccional: un fallo a medias desmapea y devuelve lo ya tomado.
+- La aritmética de direcciones del allocator es comprobada: en la mitad alta
+  del espacio virtual un `Layout` válido de decenas de TiB desbordaría
+  `usize` (auditoría `docs/audits/2026-09-26-audit-9d8c7e5.md`).
 - `aricode-heap` guarda una cabecera de 16 bytes por asignación con el bloque
   real: `dealloc` no depende del `Layout` y las alineaciones grandes no
   pierden memoria. Los bloques libres se fusionan al liberar.
@@ -157,7 +161,8 @@ las activa; a partir de ahí la identidad del cargador deja de existir:
 ## Deuda conocida
 
 - El heap nunca devuelve trozos al PMM ni compacta; el slab/size-class de la
-  sección 16 llegará cuando haya métricas que lo pidan.
+  sección 16 llegará cuando haya métricas que lo pidan. Las tablas intermedias
+  creadas durante un crecimiento fallido tampoco se devuelven (se reutilizan).
 - Las tablas del cargador (tipo `Kernel` en el mapa) no se recuperan: su
   extensión no se conoce con precisión.
 - Sin `invlpg`/TLB shootdown genérico: solo la autoprueba invalida entradas.
