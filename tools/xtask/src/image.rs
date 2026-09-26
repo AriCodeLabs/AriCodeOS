@@ -205,6 +205,21 @@ fn write_esp(esp: &Path, a: &Artifacts, cmdline: Option<&str>) -> Result {
     Ok(())
 }
 
+/// Disco de pruebas virtio-blk: 4 MiB con "ARIDISK\0" + numero de sector en
+/// cada sector. Se regenera en cada imagen (los tests escriben en él).
+pub const DISK_SECTORS: u64 = 8192;
+
+pub fn write_test_disk(path: &Path) -> Result {
+    let mut img = Vec::with_capacity(DISK_SECTORS as usize * 512);
+    for sector in 0..DISK_SECTORS {
+        let mut s = [0u8; 512];
+        s[..8].copy_from_slice(b"ARIDISK\0");
+        s[8..16].copy_from_slice(&sector.to_le_bytes());
+        img.extend_from_slice(&s);
+    }
+    io(fs::write(path, img), "escribir disco de pruebas")
+}
+
 /// Copia privada de las variables OVMF: el firmware las escribe al arrancar.
 pub fn ovmf_vars_for(dir: &Path) -> Result<PathBuf> {
     io(fs::create_dir_all(dir), "crear dir")?;

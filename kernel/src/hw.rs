@@ -17,12 +17,18 @@ use log::warn;
 pub const DEVICE_VECTOR_FIRST: u8 = 0x30;
 pub const DEVICE_VECTOR_LAST: u8 = 0x3F;
 
+/// Origen de una línea: una GSI del I/O APIC o una entrada MSI-X (tabla
+/// mapeada por el kernel, índice de entrada).
+pub enum IrqSource {
+    Gsi { gsi: u32, level: bool },
+    Msix { table_virt: u64, entry: u32 },
+}
+
 /// Una línea de interrupción enrutada a un vector. Al soltarse el último
 /// handle se enmascara y libera el vector.
 pub struct IrqLine {
-    pub gsi: u32,
+    pub source: IrqSource,
     pub vector: u8,
-    pub level: bool,
     pending: AtomicU32,
     waiters: WaitQueue,
 }
@@ -31,11 +37,19 @@ impl IrqLine {
     /// Llamado desde el handler: acumula y despierta. Las líneas por nivel se
     /// enmascaran hasta que el driver las atienda (`irq_wait`).
     pub fn fire(&self) {
-        if self.level {
-            ioapic::set_masked(self.gsi, true);
+        if let IrqSource::Gsi { gsi, level: true } = self.source {
+            ioapic::set_masked(gsi, true);
         }
         self.pending.fetch_add(1, Ordering::Release);
         self.waiters.wake_all();
+    }
+
+    /// GSI si es una línea del I/O APIC (para `object_id`).
+    pub fn gsi(&self) -> u32 {
+        match self.source {
+            IrqSource::Gsi { gsi, .. } => gsi,
+            IrqSource::Msix { entry, .. } => entry,
+        }
     }
 
     /// Espera hasta que haya interrupciones acumuladas y las devuelve.
@@ -47,8 +61,8 @@ impl IrqLine {
             return None;
         }
         let n = self.pending.swap(0, Ordering::AcqRel);
-        if self.level {
-            ioapic::set_masked(self.gsi, false);
+        if let IrqSource::Gsi { gsi, level: true } = self.source {
+            ioapic::set_masked(gsi, false);
         }
         Some(n)
     }
@@ -56,9 +70,83 @@ impl IrqLine {
 
 impl Drop for IrqLine {
     fn drop(&mut self) {
-        ioapic::set_masked(self.gsi, true);
+        match self.source {
+            IrqSource::Gsi { gsi, .. } => ioapic::set_masked(gsi, true),
+            IrqSource::Msix { table_virt, entry } => {
+                msix_write(table_virt, entry, 0, 0, MSIX_MASKED)
+            }
+        }
         VECTORS.lock().remove(&self.vector);
     }
+}
+
+const MSIX_MASKED: u32 = 1;
+
+/// Escribe una entrada de la tabla MSI-X (16 bytes: addr lo, addr hi, data, control).
+fn msix_write(table_virt: u64, entry: u32, addr: u64, data: u32, control: u32) {
+    let base = (table_virt + 16 * entry as u64) as *mut u32;
+    // SAFETY: la tabla se mapeó sin caché en `map_uc` y `entry` es una entrada
+    // válida del dispositivo reclamado.
+    unsafe {
+        base.add(3).write_volatile(MSIX_MASKED); // enmascarar mientras se programa
+        base.write_volatile(addr as u32);
+        base.add(1).write_volatile((addr >> 32) as u32);
+        base.add(2).write_volatile(data);
+        base.add(3).write_volatile(control);
+    }
+}
+
+/// Ventanas MMIO sin caché del kernel (tablas MSI-X y similares), asignadas
+/// de forma incremental y nunca liberadas: se usan mientras viva el dispositivo.
+static UC_NEXT: IrqLock<u64> = IrqLock::new(0xFFFF_D200_0000_0000);
+
+fn map_uc(phys: u64, len: u64) -> Result<u64, &'static str> {
+    use crate::memory::vmm;
+    use aricode_x86_paging::{
+        CACHE_DISABLE, GLOBAL, NO_EXECUTE, PAGE_SIZE, WRITABLE, WRITE_THROUGH,
+    };
+    let offset = phys & (PAGE_SIZE - 1);
+    let start = phys - offset;
+    let span = (offset + len).next_multiple_of(PAGE_SIZE);
+    let mut next = UC_NEXT.lock();
+    let virt = *next;
+    vmm::with(|m| {
+        m.map_range_4k(
+            virt,
+            start,
+            span,
+            WRITABLE | NO_EXECUTE | GLOBAL | CACHE_DISABLE | WRITE_THROUGH,
+        )
+    })
+    .map_err(|_| "hw: mapear ventana sin cache")?;
+    *next += span;
+    Ok(virt + offset)
+}
+
+/// Crea el objeto IRQ de una entrada MSI-X: asigna vector y programa la
+/// entrada hacia el LAPIC de arranque.
+pub fn register_msix(table_phys: u64, entry: u32) -> Result<ObjectRef, &'static str> {
+    let table_virt = map_uc(table_phys, 16 * (entry as u64 + 1))?;
+    let mut vectors = VECTORS.lock();
+    let vector = (DEVICE_VECTOR_FIRST..=DEVICE_VECTOR_LAST)
+        .find(|v| !vectors.contains_key(v))
+        .ok_or("hw: sin vectores libres")?;
+    let lapic_id = crate::acpi::with(|a| a.madt.lapic_ids.first().copied()).unwrap_or(0) as u64;
+    msix_write(
+        table_virt,
+        entry,
+        0xFEE0_0000 | (lapic_id << 12),
+        vector as u32,
+        0,
+    );
+    let obj = KernelObject::new(ObjectKind::Irq(IrqLine {
+        source: IrqSource::Msix { table_virt, entry },
+        vector,
+        pending: AtomicU32::new(0),
+        waiters: WaitQueue::new(),
+    }));
+    vectors.insert(vector, alloc::sync::Arc::downgrade(&obj));
+    Ok(obj)
 }
 
 /// Región MMIO de un dispositivo (física, sin caché) o un buffer DMA
@@ -93,9 +181,8 @@ pub fn register_irq(gsi: u32, level: bool, active_low: bool) -> Result<ObjectRef
     let lapic_id = crate::acpi::with(|a| a.madt.lapic_ids.first().copied()).unwrap_or(0);
     ioapic::route(gsi, vector, lapic_id, level, active_low)?;
     let obj = KernelObject::new(ObjectKind::Irq(IrqLine {
-        gsi,
+        source: IrqSource::Gsi { gsi, level },
         vector,
-        level,
         pending: AtomicU32::new(0),
         waiters: WaitQueue::new(),
     }));

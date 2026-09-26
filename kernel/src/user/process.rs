@@ -56,11 +56,6 @@ pub fn spawn(name: &str, elf_bytes: &[u8]) -> Result<Pid, &'static str> {
     spawn_with_handles(name, elf_bytes, Vec::new())
 }
 
-/// Como `spawn_with_handles`, con el argumento de `_start`.
-pub fn spawn_with_arg(name: &str, elf_bytes: &[u8], arg: u64) -> Result<Pid, &'static str> {
-    spawn_full(name, elf_bytes, Vec::new(), arg)
-}
-
 /// Capabilities extra y argumento de `_start`.
 pub fn spawn_with_handles_and_arg(
     name: &str,

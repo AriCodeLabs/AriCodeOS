@@ -60,7 +60,16 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
             ObjectKind::Dma(ref d) => Ok(d.region.phys),
             _ => Err(Error::Invalid),
         }),
-        nr::PROCESS_SPAWN => process_spawn(h, frame.rsi, frame.rdx, frame.r10),
+        nr::PROCESS_SPAWN => process_spawn(h, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9),
+        nr::PCI_COUNT => with_handles(|t| {
+            require_pci_root(t, h, Rights::READ)?;
+            Ok(crate::pci::count() as u64)
+        }),
+        nr::PCI_INFO => with_handles(|t| {
+            require_pci_root(t, h, Rights::READ)?;
+            crate::pci::info_packed(frame.rsi as usize).ok_or(Error::NotFound)
+        }),
+        nr::PCI_CLAIM => pci_claim(h, frame.rsi as usize, frame.rdx),
         nr::PROCESS_WAIT => process_wait(h, frame.rsi),
         nr::IPC_SEND => ipc_send(h, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9),
         nr::IPC_RECEIVE => ipc_receive(h, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9),
@@ -187,8 +196,15 @@ fn ipc_receive(
     Ok(n as u64 | ((received.len() as u64) << 32))
 }
 
-fn process_spawn(spawner: Handle, name_ptr: u64, name_len: u64, arg: u64) -> Result<u64, Error> {
-    if name_len > 64 {
+fn process_spawn(
+    spawner: Handle,
+    name_ptr: u64,
+    name_len: u64,
+    arg: u64,
+    handles_ptr: u64,
+    handles_len: u64,
+) -> Result<u64, Error> {
+    if name_len > 64 || handles_len as usize > IPC_MAX_HANDLES * 4 {
         return Err(Error::TooBig);
     }
     let is_spawner = with_handles(|t| {
@@ -200,10 +216,30 @@ fn process_spawn(spawner: Handle, name_ptr: u64, name_len: u64, arg: u64) -> Res
     let raw = process::copy_from_user(name_ptr, name_len)?;
     let name = core::str::from_utf8(&raw).map_err(|_| Error::Invalid)?;
     let elf = crate::user::programs::by_name(name).ok_or(Error::NotFound)?;
-    let pid = process::spawn_with_arg(name, elf, arg).map_err(|e| {
-        warn!("process_spawn '{name}': {e}");
-        Error::Limit
+    let raw_handles = process::copy_from_user(handles_ptr, handles_len * 4)?;
+    let user_handles: Vec<Handle> = raw_handles
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| Handle(u32::from_le_bytes(*c)))
+        .collect();
+    // Validar todos antes de retirar ninguno.
+    let extra: Vec<(ObjectRef, Rights)> = with_handles(|t| {
+        for uh in &user_handles {
+            lookup(t, *uh, Rights::TRANSFER)?;
+        }
+        user_handles
+            .iter()
+            .map(|uh| t.take(*uh).map_err(abi_error))
+            .collect()
     })?;
+    let pid = match process::spawn_with_handles_and_arg(name, elf, extra, arg) {
+        Ok(pid) => pid,
+        Err(e) => {
+            warn!("process_spawn '{name}': {e}");
+            return Err(Error::Limit);
+        }
+    };
     let rights = Rights::READ
         .union(Rights::WAIT)
         .union(Rights::MANAGE)
@@ -213,6 +249,35 @@ fn process_spawn(spawner: Handle, name_ptr: u64, name_len: u64, arg: u64) -> Res
             .map(|h| h.0 as u64)
             .map_err(abi_error)
     })
+}
+
+fn require_pci_root(t: &crate::object::Handles, h: Handle, required: Rights) -> Result<(), Error> {
+    match lookup(t, h, required)?.kind {
+        ObjectKind::PciRoot => Ok(()),
+        _ => Err(Error::Invalid),
+    }
+}
+
+fn pci_claim(root: Handle, index: usize, out_ptr: u64) -> Result<u64, Error> {
+    with_handles(|t| require_pci_root(t, root, Rights::MANAGE))?;
+    process::copy_to_user(out_ptr, &[0u8; aricode_abi::PCI_CLAIM_HANDLES * 4])?;
+    let claimed = crate::pci::claim(index).map_err(|e| {
+        warn!("pci_claim {index}: {e}");
+        Error::NotFound
+    })?;
+    let raw: Vec<u8> = with_handles(|t| {
+        let mut out = Vec::with_capacity(aricode_abi::PCI_CLAIM_HANDLES * 4);
+        for slot in claimed.handles {
+            let value = match slot {
+                Some((obj, rights)) => t.insert(obj, rights).map_err(abi_error)?.0,
+                None => 0,
+            };
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        Ok(out)
+    })?;
+    process::copy_to_user(out_ptr, &raw)?;
+    Ok(aricode_abi::PCI_CLAIM_HANDLES as u64)
 }
 
 fn process_wait(h: Handle, timeout_ms: u64) -> Result<u64, Error> {

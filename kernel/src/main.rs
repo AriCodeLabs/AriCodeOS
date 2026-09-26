@@ -120,7 +120,7 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
 
     task::init();
     initrd::init(info);
-    let _pci_devices = pci::init();
+    pci::init();
 
     if cmdline.get(keys::TEST).is_some() {
         run_requested_test(&cmdline, info);
@@ -303,10 +303,17 @@ fn run_init() {
         return;
     };
     let spawner = object::KernelObject::new(object::ObjectKind::Spawner);
+    let pci_root = object::KernelObject::new(object::ObjectKind::PciRoot);
     let pid = user::process::spawn_with_handles(
         "init",
         elf,
-        alloc::vec![(spawner, Rights::MANAGE.union(Rights::DUPLICATE))],
+        alloc::vec![
+            (spawner, Rights::MANAGE.union(Rights::DUPLICATE)),
+            (
+                pci_root,
+                Rights::READ.union(Rights::MANAGE).union(Rights::DUPLICATE)
+            ),
+        ],
     )
     .expect("crear init");
     let status = user::process::wait(pid);

@@ -148,12 +148,25 @@ pub fn ipc_receive(
 
 /// Crea un proceso del initrd (exige `MANAGE` sobre el `SPAWNER`).
 pub fn process_spawn(spawner: Handle, name: &str, arg: u64) -> Result<Handle, Error> {
-    call(
+    process_spawn_with(spawner, name, arg, &[])
+}
+
+/// Como `process_spawn`, transfiriendo `handles` al hijo (aparecen en él a
+/// partir de `0x0001_0004` en el mismo orden; exigen `TRANSFER`).
+pub fn process_spawn_with(
+    spawner: Handle,
+    name: &str,
+    arg: u64,
+    handles: &[Handle],
+) -> Result<Handle, Error> {
+    call6(
         nr::PROCESS_SPAWN,
         spawner.0 as u64,
         name.as_ptr() as u64,
         name.len() as u64,
         arg,
+        handles.as_ptr() as u64,
+        handles.len() as u64,
     )
     .map(|v| Handle(v as u32))
 }
@@ -184,6 +197,28 @@ pub fn dma_alloc(hardware: Handle, len: u64) -> Result<Handle, Error> {
 
 pub fn dma_phys(dma: Handle) -> Result<u64, Error> {
     call(nr::DMA_PHYS, dma.0 as u64, 0, 0, 0)
+}
+
+pub fn pci_count(root: Handle) -> Result<u64, Error> {
+    call(nr::PCI_COUNT, root.0 as u64, 0, 0, 0)
+}
+
+/// Información empaquetada de la función `index` (ver `abi::pci_info`).
+pub fn pci_info(root: Handle, index: u64) -> Result<u64, Error> {
+    call(nr::PCI_INFO, root.0 as u64, index, 0, 0)
+}
+
+/// Reclama la función `index`: devuelve sus handles (ver `abi::nr::PCI_CLAIM`).
+pub fn pci_claim(root: Handle, index: u64) -> Result<[Handle; abi::PCI_CLAIM_HANDLES], Error> {
+    let mut raw = [0u32; abi::PCI_CLAIM_HANDLES];
+    call(
+        nr::PCI_CLAIM,
+        root.0 as u64,
+        index,
+        raw.as_mut_ptr() as u64,
+        0,
+    )?;
+    Ok(raw.map(Handle))
 }
 
 /// Ayuda para programas de prueba: escribe en la consola ignorando errores.
