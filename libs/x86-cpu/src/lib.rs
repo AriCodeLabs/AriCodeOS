@@ -140,6 +140,29 @@ impl TssDescriptor {
     }
 }
 
+/// Layout de GDT que exige `syscall`/`sysret`: `STAR[47:32]` = código
+/// kernel (y datos = +8); `STAR[63:48]` = base tal que datos usuario = +8 y
+/// código usuario = +16.
+///
+/// ```text
+/// 0x00 nulo
+/// 0x08 código kernel (DPL 0)
+/// 0x10 datos kernel  (DPL 0)
+/// 0x18 datos usuario (DPL 3)   <- STAR[63:48] = 0x10 => SS = 0x18 | 3
+/// 0x20 código usuario (DPL 3)  <-                        CS = 0x20 | 3
+/// 0x28 TSS (16 bytes)
+/// ```
+pub mod layout {
+    use super::Selector;
+    pub const KERNEL_CODE: Selector = Selector(0x08);
+    pub const KERNEL_DATA: Selector = Selector(0x10);
+    pub const USER_DATA: Selector = Selector(0x18 | 3);
+    pub const USER_CODE: Selector = Selector(0x20 | 3);
+    pub const TSS: Selector = Selector(0x28);
+    /// Valor de `IA32_STAR` para este layout.
+    pub const STAR: u64 = ((0x10u64) << 48) | ((0x08u64) << 32);
+}
+
 /// Tabla global de descriptores con capacidad fija.
 #[repr(C, align(8))]
 #[derive(Debug, Clone, Copy)]
@@ -386,14 +409,26 @@ mod tests {
         let mut g: Gdt<8> = Gdt::new();
         let cs = g.push(SegmentDescriptor::code64(0));
         let ds = g.push(SegmentDescriptor::data(0));
+        let uds = g.push(SegmentDescriptor::data(3));
+        let ucs = g.push(SegmentDescriptor::code64(3));
         let tss = g.push_tss(TssDescriptor::new(0x1000));
-        assert_eq!(cs, Selector(0x08));
-        assert_eq!(ds, Selector(0x10));
-        assert_eq!(tss, Selector(0x18));
-        assert_eq!(g.len(), 5);
+        assert_eq!(cs, layout::KERNEL_CODE);
+        assert_eq!(ds, layout::KERNEL_DATA);
+        assert_eq!(uds, layout::USER_DATA, "RPL 3 incluido");
+        assert_eq!(ucs, layout::USER_CODE);
+        assert_eq!(tss, layout::TSS);
+        assert_eq!(g.len(), 7);
+        // sysret: CS = STAR[63:48] + 16, SS = STAR[63:48] + 8; syscall: CS = STAR[47:32].
+        let base = (layout::STAR >> 48) as u16;
+        assert_eq!(base + 16 | 3, layout::USER_CODE.0);
+        assert_eq!(base + 8 | 3, layout::USER_DATA.0);
+        assert_eq!(
+            ((layout::STAR >> 32) & 0xFFFF) as u16,
+            layout::KERNEL_CODE.0
+        );
         assert_eq!(g.entry(0), 0, "entrada nula");
         let p = g.pointer();
-        assert_eq!({ p.limit }, 5 * 8 - 1);
+        assert_eq!({ p.limit }, 7 * 8 - 1);
         assert_eq!({ p.base }, g.entries.as_ptr() as u64);
         assert_eq!(Selector::new(3, 3).0, 0x1B);
         assert_eq!(Selector(0x1B).index(), 3);

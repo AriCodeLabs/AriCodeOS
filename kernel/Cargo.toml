@@ -21,4 +21,6 @@ aricode-x86-paging = { path = "../libs/x86-paging" }
 aricode-heap = { path = "../libs/heap" }
 aricode-sync = { path = "../libs/sync" }
 aricode-sched = { path = "../libs/sched" }
+aricode-abi = { path = "../sdk/abi" }
+aricode-handles = { path = "../libs/handles" }
 log = { version = "0.4", default-features = false }

@@ -5,4 +5,5 @@ fn main() {
     println!("cargo:rustc-link-arg-bins=--no-dynamic-linker");
     println!("cargo:rerun-if-changed=kernel.ld");
     println!("cargo:rerun-if-changed=src/arch/x86_64/stubs.s");
+    println!("cargo:rerun-if-changed=src/user/programs.s");
 }

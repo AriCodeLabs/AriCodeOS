@@ -52,10 +52,12 @@ pub fn init() {
         policy: RoundRobin::new(MAIN_TID, IDLE_TID),
         threads: BTreeMap::new(),
     };
-    sched
-        .threads
-        .insert(MAIN_TID, Box::new(Thread::adopt_current(MAIN_TID, "main")));
-    let idle = Thread::new(IDLE_TID, "idle", idle_entry, 0).expect("hilo idle");
+    let kernel_cr3 = crate::memory::vmm::with(|m| m.root_phys());
+    sched.threads.insert(
+        MAIN_TID,
+        Box::new(Thread::adopt_current(MAIN_TID, "main", kernel_cr3)),
+    );
+    let idle = Thread::new(IDLE_TID, "idle", idle_entry, 0, None, kernel_cr3).expect("hilo idle");
     sched.threads.insert(IDLE_TID, Box::new(idle));
     *SCHED.lock() = Some(sched);
     CURRENT.store(MAIN_TID.0, Ordering::Relaxed);
@@ -131,20 +133,48 @@ pub fn current_tid() -> Tid {
     Tid(CURRENT.load(Ordering::Relaxed))
 }
 
-/// Crea un hilo listo para ejecutar.
+/// Crea un hilo del kernel listo para ejecutar.
 pub fn spawn(
     name: &str,
     entry: super::context::ThreadEntry,
     arg: usize,
 ) -> Result<Tid, &'static str> {
+    let cr3 = crate::memory::vmm::with(|m| m.root_phys());
+    spawn_thread(name, entry, arg, None, cr3)
+}
+
+/// Crea el hilo principal de un proceso de usuario: arranca en `entry` (en
+/// ring 0, con el espacio `cr3` activo) y de ahí salta a ring 3.
+pub fn spawn_for_process(
+    name: &str,
+    entry: super::context::ThreadEntry,
+    arg: usize,
+    pid: u32,
+    cr3: u64,
+) -> Result<Tid, &'static str> {
+    spawn_thread(name, entry, arg, Some(pid), cr3)
+}
+
+fn spawn_thread(
+    name: &str,
+    entry: super::context::ThreadEntry,
+    arg: usize,
+    process: Option<u32>,
+    cr3: u64,
+) -> Result<Tid, &'static str> {
     let tid = with(|s| s.policy.allocate_tid());
-    let thread = Thread::new(tid, name, entry, arg)?;
+    let thread = Thread::new(tid, name, entry, arg, process, cr3)?;
     with(|s| {
         s.threads.insert(tid, Box::new(thread));
         s.policy.add(tid);
     });
     debug!("task: spawn {tid:?} '{name}'");
     Ok(tid)
+}
+
+/// Proceso del hilo actual.
+pub fn current_process() -> Option<u32> {
+    with(|s| s.threads.get(&s.policy.current()).and_then(|t| t.process))
 }
 
 /// Estado de un hilo, si existe.
@@ -175,14 +205,26 @@ fn switch_with(decide: impl FnOnce(&mut RoundRobin) -> Option<Tid>) {
         let prev = s.policy.current();
         decide(&mut s.policy).map(|next| {
             let old = &mut s.threads.get_mut(&prev).expect("hilo actual").saved_rsp as *mut u64;
-            let new = s.threads.get(&next).expect("hilo siguiente").saved_rsp;
-            (next, old, new)
+            let nt = s.threads.get(&next).expect("hilo siguiente");
+            (next, old, nt.saved_rsp, nt.kernel_stack_top(), nt.cr3)
         })
     });
-    if let Some((next, old, new)) = switch {
+    if let Some((next, old, new, kstack, cr3)) = switch {
         CURRENT.store(next.0, Ordering::Relaxed);
         QUANTUM_LEFT.store(QUANTUM_TICKS, Ordering::Relaxed);
         SWITCHES.fetch_add(1, Ordering::Relaxed);
+        // Entradas a ring 0 desde ring 3 del hilo siguiente: su pila de kernel.
+        crate::arch::x86_64::gdt::set_kernel_stack(kstack);
+        crate::arch::x86_64::syscall::set_kernel_stack(kstack);
+        // Espacio de direcciones del hilo siguiente (la mitad del kernel es
+        // común, así que el cambio es seguro desde cualquier pila de kernel).
+        let current_cr3: u64;
+        // SAFETY: lectura de CR3.
+        unsafe { core::arch::asm!("mov {}, cr3", out(reg) current_cr3, options(nomem, nostack)) };
+        if cr3 != current_cr3 {
+            // SAFETY: `cr3` es un PML4 construido por el VMM o por `process::spawn`.
+            unsafe { core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack)) };
+        }
         // SAFETY: `old` apunta al campo de un `Box<Thread>` que no se mueve ni
         // se libera mientras el hilo exista; `new` fue guardado por un
         // `switch_context` previo o preparado por `initial_stack_frame`.
@@ -207,6 +249,9 @@ fn reap() {
     });
     for z in zombies {
         debug!("task: reap {:?} '{}'", z.tid, z.name);
+        if let Some(pid) = z.process {
+            crate::user::process::release_address_space(pid);
+        }
         drop(z);
     }
 }

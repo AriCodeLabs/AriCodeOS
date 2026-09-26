@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.0.4 (Fases 8, 9 y 10)
+## Estado: 0.0.5 (Fases 11 y 12)
 
 ```text
 OVMF (UEFI)
@@ -18,7 +18,8 @@ OVMF (UEFI)
        (W^X, mapa físico, pila con guard page), heap con crecimiento
        bajo demanda, PIC enmascarado, LAPIC + timer 100 Hz, interrupciones
        habilitadas, hilos del kernel, scheduler round robin preemptivo con
-       sueño y colas de espera, ARICODEOS_KERNEL_READY
+       sueño y colas de espera, procesos en ring 3 con espacio propio,
+       syscalls y tablas de handles con derechos, ARICODEOS_KERNEL_READY
 ```
 
 ## Crates
@@ -34,9 +35,12 @@ libs/pmm/            aricode-pmm: allocator de frames por bitmap sobre almacenam
 libs/heap/           aricode-heap: heap first-fit con lista de libres, fusión y cabecera por asignación (no_std, tests de host)
 libs/sync/           aricode-sync: IrqLock/SpinLock con política de interrupciones enchufable (no_std, tests de host)
 libs/sched/          aricode-sched: política round robin sobre Tid con estados, sueño, bloqueo y salida (no_std + alloc, tests de host)
+libs/handles/        aricode-handles: tabla de handles con generación y derechos, duplicación solo reductora (no_std + alloc, tests de host)
+sdk/abi/             aricode-abi: números de syscall, errores, handles iniciales, derechos y tipos de objeto (no_std, tests de host)
 boot/                ariboot: integra lo anterior con la crate `uefi`
 kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log), sync (SingleCpu),
-                     arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions, port, pic, pit, apic},
+                     arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions, port, pic, pit, apic, msr, syscall, usermode},
+                     object (KernelObject, tabla inicial), user/{process, programs (programs.s), syscalls},
                      memory/{phys, pmm, vmm, heap}, sync (política IRQ), time,
                      task/{context (switch_context, thread_start), stack, thread, scheduler, wait}, informe, panic, salida QEMU
 tools/xtask/         build, image, qemu, scenario, test, check
@@ -225,8 +229,56 @@ heap -> pmm -> vmm -> console.
   del máximo), un hilo duerme 50 ms con 5..7 ticks de error, y dos
   consumidores se despiertan uno a uno y luego todos.
 
+## Modo usuario (Fase 11)
+
+- GDT con el layout que exige `syscall`/`sysret` (`aricode-x86-cpu::layout`):
+  código y datos de kernel, datos y código de usuario (DPL 3), TSS. `STAR`,
+  `LSTAR` y `FMASK` se programan en `arch::x86_64::syscall::init`.
+- Cada proceso tiene su PML4: la mitad alta se copia del kernel (PDPT
+  compartidos) y la baja contiene su código en `0x40_0000` (solo lectura y
+  ejecución) y su pila en `0x7F_C000..0x80_0000` (RW, NX). El bit USER se
+  propaga por toda la ruta de tablas.
+- El hilo principal del proceso es un hilo del kernel normal cuyo `cr3` es el
+  del proceso; arranca en ring 0, fija nada más y salta a ring 3 con `iretq`.
+  En cada cambio de contexto el planificador carga el CR3 del hilo siguiente
+  si difiere y fija su pila de kernel en `TSS.rsp0` y en la entrada `syscall`.
+- `syscall_entry` guarda el `rsp` de usuario, carga la pila de kernel del
+  hilo, construye un `SyscallFrame`, habilita interrupciones y despacha en
+  Rust; antes de `sysretq` las deshabilita. Convención en `sdk/abi`: `rax`
+  número, `rdi rsi rdx r10 r8 r9` argumentos, resultado en `rax`, negativo
+  `-4095..=-1` = error. Syscalls actuales: `process_exit`, `console_write`,
+  `thread_yield`, `thread_sleep`, `thread_get_tid`, `abi_version`,
+  `handle_close`, `handle_duplicate`, `object_kind`, `object_id`.
+- Los punteros de usuario se validan página a página contra las tablas del
+  proceso (`copy_from_user`): un puntero de kernel devuelve `Fault`, nunca se
+  desreferencia.
+- Una excepción con `CS.RPL = 3` no es un pánico: se diagnostica por serie y
+  el proceso termina (`Killed`). Al recoger el hilo se libera todo el
+  espacio de usuario, tablas incluidas.
+- Programas de prueba en `user/programs.s` (ensamblador independiente de
+  posición): `hello`, `kernel_read`, `kernel_write`, `privileged`,
+  `bad_syscall`, `bad_pointer`, `sleep_yield`; se lanzan con `test=user_<nombre>`.
+
+## Objetos y handles (Fase 12, ADR 0010)
+
+- `object::KernelObject` (`Thread`, `Process`, `Console`) se referencia con
+  `Arc` desde las tablas de handles; los procesos nunca ven punteros ni
+  identificadores globales con valor de acceso.
+- Cada proceso nace con tres handles: sí mismo (`MANAGE|READ|DUPLICATE`), su
+  hilo (`READ|WAIT|DUPLICATE`) y la consola (`WRITE|DUPLICATE`); límite de
+  256 handles por proceso.
+- `user.handles` comprueba desde ring 3: tipo de objeto, handle inventado
+  (`BadHandle`), duplicado sin derechos que no puede escribir (`Denied`),
+  escalada al duplicar (`Escalation`), handle cerrado (`BadHandle`) y uso de
+  un objeto del tipo equivocado.
+
 ## Deuda conocida
 
+- Sin SMAP/SMEP: el kernel puede tocar memoria de usuario sin querer; los
+  accesos se limitan a `copy_from_user` validado. Activar SMEP/SMAP cuando la
+  CPU de referencia lo garantice.
+- Un proceso tiene un único hilo y su espacio es fijo (sin `mmap`); ambos
+  llegan con el modelo de objetos (Fase 12) y el runtime (Fase 27).
 - Sin prioridades ni afinidad: solo round robin en una CPU (Fase 32 para SMP).
 - Los slots de pila no se reutilizan (uno por tid); el espacio virtual
   reservado permite ~2^31 hilos, así que no es un límite práctico aún.

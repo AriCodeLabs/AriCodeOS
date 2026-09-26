@@ -2,7 +2,7 @@
 
 ## Documento maestro de arquitectura, especificaciones técnicas y plan de desarrollo
 
-**Estado:** 0.0.4 completada (2026-09-26): boot, consola, GDT/IDT, memoria, APIC, threads, scheduler  
+**Estado:** 0.0.5 completada (2026-09-26): kernel con memoria, scheduler, ring 3, syscalls y handles  
 **Versión del documento:** 0.2  
 **Nombre del sistema:** AriCodeOS  
 **Arquitectura inicial:** x86-64  
@@ -2140,35 +2140,52 @@ planificado y colas de espera (`task::wait::WaitQueue`).
 
 # FASE 11 — User mode
 
+**Estado: completada (2026-09-26).**
+
 ### Objetivo
 
 Ejecutar código en ring 3.
 
-### Implementar
+### Implementado
 
-- user address spaces;
-- transición kernel/user;
-- syscall entry;
-- protección de páginas.
+- user address spaces: PML4 por proceso con la mitad del kernel compartida,
+  liberación completa al terminar (`libs/x86-paging::free_user_half`);
+- transición kernel/user: `iretq` a ring 3, GDT con segmentos DPL 3, TSS.rsp0
+  y CR3 por hilo en cada cambio de contexto;
+- syscall entry: instrucción `syscall`/`sysretq`, ABI propio en `sdk/abi`
+  (6 syscalls iniciales), validación de punteros de usuario;
+- protección de páginas: USER solo en la mitad baja, código RX, pila RW+NX.
 
 ### Criterio crítico
 
-Un proceso user no puede leer ni escribir memoria kernel.
+Un proceso user no puede leer ni escribir memoria kernel:
+`user.kernel_read_killed` y `user.kernel_write_killed` provocan #PF de
+protección en ring 3, el proceso termina y el kernel llega a READY. Además
+`user.privileged_killed` (#GP por `hlt`), `user.bad_pointer` (la syscall
+rechaza un puntero de kernel) y `user.bad_syscall` (número inexistente).
 
 ---
 
 # FASE 12 — Kernel objects + handles
 
-### Implementar
+**Estado: completada (2026-09-26), ADR 0010.**
 
-- object manager;
-- handle tables;
-- lifetime;
-- rights.
+### Implementado
+
+- object manager: `kernel/src/object` con `KernelObject` (`Thread`,
+  `Process`, `Console`) y tabla inicial por proceso;
+- handle tables: `libs/handles` con índice + generación, límite por proceso
+  (256), 4 tests de host;
+- lifetime: `Arc` por objeto; cerrar un handle invalida ese valor para siempre;
+- rights: `READ WRITE DUPLICATE TRANSFER WAIT SIGNAL MANAGE`; duplicar solo
+  reduce; cada syscall declara el derecho que exige.
 
 ### Resultado
 
-Las syscalls dejan de depender de identificadores globales inseguros.
+Las syscalls dejan de depender de identificadores globales inseguros:
+`console_write` exige un handle de consola con `WRITE` (ABI v2), y
+`user.handles` verifica desde ring 3 los casos de handle inventado, cerrado,
+sin derechos, escalada y objeto equivocado.
 
 ---
 
@@ -2988,12 +3005,15 @@ Añadido:
 
 # 89. AriCodeOS 0.0.5
 
-Añadir:
+**Estado: completada (2026-09-26), tag `v0.0.5`.**
 
-- ring 3;
-- syscalls;
-- procesos;
-- address spaces.
+Añadido:
+
+- ring 3 (GDT con segmentos DPL 3, `iretq`, fallos de usuario no fatales);
+- syscalls (`syscall`/`sysretq`, ABI v2 en `sdk/abi`);
+- procesos (hilo principal, salida y muerte, liberación del espacio);
+- address spaces (PML4 por proceso con mitad del kernel compartida);
+- objetos y handles con derechos (Fase 12 adelantada, ADR 0010).
 
 ---
 
@@ -3429,7 +3449,7 @@ aricodeos/
 No necesitamos crear toda la estructura futura desde el primer día.
 
 Este árbol es el que existe en el repositorio desde M0, ampliado con
-`libs/{elf,x86-paging,x86-cpu,pmm,heap,sync,sched,cmdline,fb-console}` (lógica `no_std` con tests de host),
+`libs/{elf,x86-paging,x86-cpu,pmm,heap,sync,sched,handles,cmdline,fb-console}` y `sdk/abi` (lógica `no_std` con tests de host),
 `tests/qemu/` (escenarios) y `docs/decisions/0001..0007`.
 
 ---

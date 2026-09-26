@@ -1,0 +1,10 @@
+name = "user.hello"
+description = "programa en ring 3 escribe por syscall y sale con 42"
+level = "smoke"
+areas = ["user"]
+cmdline = "qemu_exit test=user_hello"
+
+[expect]
+exit = 33
+serial_contains = ["hola desde ring 3", "user: proceso 1 'hello' salio con codigo 42", "terminado: Exited(42)", "ARICODEOS_KERNEL_READY"]
+serial_absent = ["KERNEL PANIC"]

@@ -11,6 +11,8 @@ members = [
     "libs/heap",
     "libs/sync",
     "libs/sched",
+    "libs/handles",
+    "sdk/abi",
     "boot",
     "kernel",
     "tools/xtask",
@@ -28,11 +30,13 @@ default-members = [
     "libs/heap",
     "libs/sync",
     "libs/sched",
+    "libs/handles",
+    "sdk/abi",
     "tools/xtask",
 ]
 
 [workspace.package]
-version = "0.0.4"
+version = "0.0.5"
 edition = "2021"
 license = "UNLICENSED"
 repository = "https://github.com/lynxcraft/aricodeos"

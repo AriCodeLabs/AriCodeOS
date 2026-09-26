@@ -1,0 +1,11 @@
+[package]
+name = "aricode-abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ABI de syscalls de AriCodeOS compartido por kernel y espacio de usuario (no_std)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

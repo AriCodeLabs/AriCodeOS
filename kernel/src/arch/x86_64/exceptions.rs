@@ -15,9 +15,32 @@ pub fn handle(frame: &mut InterruptFrame) {
         BREAKPOINT => {
             log::warn!("#BP breakpoint en rip={:#x}, continuando", frame.rip);
         }
+        0..=31 if frame.cs & 3 == 3 => user_fault(frame),
         0..=31 => fatal(frame),
         v => super::apic::handle_interrupt(v),
     }
+}
+
+/// Excepción en ring 3: se diagnostica por serie y se termina el proceso.
+/// El kernel sigue intacto: el marco está en la pila de kernel del hilo.
+fn user_fault(frame: &InterruptFrame) -> ! {
+    let vector = frame.vector as u8;
+    let (mnemonic, name) = exception::name(vector);
+    let cr2 = read_cr2();
+    serial_println!(
+        "USER FAULT {mnemonic} ({vector}) {name}: rip={:#x} rsp={:#x} err={:#x} cr2={cr2:#x}",
+        frame.rip,
+        frame.rsp,
+        frame.error_code
+    );
+    let why = match vector {
+        PAGE_FAULT if frame.error_code & PF_WRITE != 0 => "#PF escritura",
+        PAGE_FAULT => "#PF lectura",
+        GENERAL_PROTECTION => "#GP",
+        INVALID_OPCODE => "#UD",
+        _ => mnemonic,
+    };
+    crate::user::process::kill_current(why)
 }
 
 fn fatal(frame: &InterruptFrame) -> ! {

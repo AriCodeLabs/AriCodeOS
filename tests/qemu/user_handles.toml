@@ -1,0 +1,13 @@
+# Fase 12: un proceso no puede usar handles inventados, cerrados, sin derechos
+# ni escalar derechos al duplicar. Exito = codigo 11; cualquier otro codigo
+# es el paso que fallo.
+name = "user.handles"
+description = "handles: object_kind, inventado, duplicado sin derechos, escalada, cerrado, objeto equivocado"
+level = "full"
+areas = ["user", "capabilities"]
+cmdline = "qemu_exit test=user_handles"
+
+[expect]
+exit = 33
+serial_contains = ["'handles' salio con codigo 11", "ARICODEOS_KERNEL_READY"]
+serial_absent = ["KERNEL PANIC", "USER FAULT", "ok\n"]
