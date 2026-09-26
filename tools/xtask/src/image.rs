@@ -206,23 +206,83 @@ fn write_esp(esp: &Path, a: &Artifacts, cmdline: Option<&str>) -> Result {
 }
 
 /// Disco de pruebas virtio-blk: 4 MiB con GPT y una partición AriCodeOS
-/// (`ARI0`) que ocupa todo el rango usable. Cada sector de la partición lleva
-/// `ARIDISK\0` y su LBA. Se regenera en cada arranque (los tests escriben).
+/// (`ARI0`) formateada como AriFS con ficheros de ejemplo. Se regenera en
+/// cada arranque (los tests escriben en él).
 pub const DISK_SECTORS: u64 = 8192;
+
+struct VecDisk<'a> {
+    data: &'a mut [u8],
+    base: u64,
+}
+
+impl aricode_arifs::BlockDevice for VecDisk<'_> {
+    fn read_sector(
+        &mut self,
+        lba: u64,
+        buf: &mut [u8; 512],
+    ) -> std::result::Result<(), aricode_arifs::FsError> {
+        let o = (self.base + lba) as usize * 512;
+        buf.copy_from_slice(
+            self.data
+                .get(o..o + 512)
+                .ok_or(aricode_arifs::FsError::Io)?,
+        );
+        Ok(())
+    }
+    fn write_sector(
+        &mut self,
+        lba: u64,
+        buf: &[u8; 512],
+    ) -> std::result::Result<(), aricode_arifs::FsError> {
+        let o = (self.base + lba) as usize * 512;
+        self.data
+            .get_mut(o..o + 512)
+            .ok_or(aricode_arifs::FsError::Io)?
+            .copy_from_slice(buf);
+        Ok(())
+    }
+}
+
+/// Primer sector del área en bruto del disco de pruebas: desde aquí hasta el
+/// final de la partición cada sector lleva `ARIDISK\0` y su LBA, fuera del
+/// alcance de AriFS (32 ficheros × 16 sectores caben antes).
+pub const RAW_PATTERN_LBA: u64 = 4096;
+
+/// Ficheros de ejemplo del disco de pruebas.
+pub const DISK_FILES: &[(&str, &[u8])] = &[
+    ("hola.txt", b"Hola desde AriFS\n"),
+    ("README", b"AriCodeOS: disco de pruebas con AriFS v0.\n"),
+];
 
 pub fn write_test_disk(path: &Path) -> Result {
     let mut img = vec![0u8; DISK_SECTORS as usize * 512];
-    let usable = aricode_gpt::write_disk(&mut img, &[]).map_err(|e| format!("gpt: {e:?}"))?;
-    let (first, last) = usable;
+    let (first, last) =
+        aricode_gpt::write_disk(&mut img, &[]).map_err(|e| format!("gpt: {e:?}"))?;
     aricode_gpt::write_disk(
         &mut img,
         &[("ARI0", first, last, aricode_gpt::ARICODEOS_DATA_GUID)],
     )
     .map_err(|e| format!("gpt: {e:?}"))?;
-    for lba in first..=last {
-        let s = &mut img[lba as usize * 512..(lba as usize + 1) * 512];
-        s[..8].copy_from_slice(b"ARIDISK\0");
-        s[8..16].copy_from_slice(&lba.to_le_bytes());
+    let sectors = last - first + 1;
+    let mut fs = aricode_arifs::AriFs::format(
+        VecDisk {
+            data: &mut img,
+            base: first,
+        },
+        sectors,
+    )
+    .map_err(|e| format!("arifs: {e:?}"))?;
+    for (name, content) in DISK_FILES {
+        let i = fs
+            .create(name)
+            .map_err(|e| format!("arifs {name}: {e:?}"))?;
+        fs.write(i, 0, content)
+            .map_err(|e| format!("arifs {name}: {e:?}"))?;
+    }
+    for lba in RAW_PATTERN_LBA..=last {
+        let o = lba as usize * 512;
+        img[o..o + 8].copy_from_slice(b"ARIDISK\0");
+        img[o + 8..o + 16].copy_from_slice(&lba.to_le_bytes());
     }
     io(fs::write(path, img), "escribir disco de pruebas")
 }

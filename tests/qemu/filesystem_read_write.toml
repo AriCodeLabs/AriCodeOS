@@ -1,0 +1,21 @@
+# Fase 20: fsd monta AriFS v0 de la particion ARI0 a traves del servicio de
+# bloques y un cliente lista, lee, crea, escribe y relee ficheros por IPC.
+name = "filesystem.read_write"
+description = "AriFS por IPC: listar, abrir, leer, crear, escribir, errores"
+level = "full"
+areas = ["filesystem", "storage", "init"]
+cmdline = "qemu_exit"
+
+[expect]
+exit = 33
+serial_contains = [
+    "fsd: AriFS montado, 2 ficheros",
+    "fsd: sirviendo peticiones",
+    "fs_client: hola.txt (17 bytes)",
+    "fs_client: hola.txt dice: Hola desde AriFS",
+    "fs_client: listar, leer, crear y escribir por IPC ok",
+    "AriInit: servicio de ficheros ok",
+    "AriInit: servicio de bloques ok",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "no contiene AriFS", "USER STACK OVERFLOW"]

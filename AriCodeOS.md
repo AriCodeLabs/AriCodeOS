@@ -2355,18 +2355,34 @@ Disponer rápidamente de almacenamiento y red en QEMU.
 
 # FASE 20 — Filesystem básico
 
-### Implementar
+**Estado: completada (2026-09-26) con AriFS v0.**
 
-- VFS-like abstraction sin obligación POSIX;
-- paths;
-- file objects;
-- directories;
-- metadata;
-- permisos mediante capabilities.
+### Implementado
+
+- AriFS v0 (`libs/arifs`, no_std, tests de host): superbloque, tabla plana
+  de 32 ficheros de capacidad fija (16 sectores), lectura y escritura por
+  desplazamiento, sin fragmentación ni journaling (deliberadamente simple,
+  sección 34.2). xtask formatea la partición `ARI0` del disco de pruebas
+  con ficheros de ejemplo;
+- servicio de ficheros `fsd` (`services/arifs`) en ring 3 sobre el servicio
+  de bloques: `FileServiceProtocol v1` (`sdk/proto::fs`) con `List`,
+  `Open`, `Create`, `Read`, `Write`, `Close`; los datos viajan por el buffer
+  DMA del cliente, no por el mensaje;
+- clientes en el SDK (`aricode-sys::block`, `aricode-sys::fs`) y programa
+  de prueba `fs_client`; escenario `filesystem.read_write`;
+- permisos mediante capabilities: un proceso solo habla con `fsd` si init
+  le entrega un duplicado `WRITE` de su endpoint; `fsd` solo llega al disco
+  a través del endpoint del servicio de bloques.
+
+### Pendiente
+
+- directorios jerárquicos y paths (v0 es un directorio plano);
+- metadata (fechas, tipo) y borrado/redimensionado;
+- capabilities por fichero (hoy la capability es por servicio).
 
 ### Criterio
 
-Proceso user-space puede abrir, leer y escribir un archivo mediante servicio IPC.
+Proceso user-space puede abrir, leer y escribir un archivo mediante servicio IPC. **Cumplido.**
 
 ---
 
@@ -3104,12 +3120,14 @@ Añadido:
 
 # 92. AriCodeOS 0.0.8
 
+**Estado: en curso.**
+
 Añadir:
 
-- virtio-blk;
-- storage service;
-- filesystem;
-- shell.
+- virtio-blk (Fase 18, hecho);
+- storage service (Fase 19, hecho);
+- filesystem (Fase 20, hecho: AriFS v0 y `fsd`);
+- shell (Fase 21).
 
 ---
 

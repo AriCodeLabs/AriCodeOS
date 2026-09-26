@@ -3,6 +3,16 @@
 version = 4
 
 [[package]]
+name = "ari-fsd"
+version = "0.0.7"
+dependencies = [
+ "aricode-arifs",
+ "aricode-proto",
+ "aricode-sys",
+ "user-testprogs",
+]
+
+[[package]]
 name = "ari-virtio-blk"
 version = "0.0.7"
 dependencies = [
@@ -31,6 +41,10 @@ version = "0.0.7"
 
 [[package]]
 name = "aricode-acpi"
+version = "0.0.7"
+
+[[package]]
+name = "aricode-arifs"
 version = "0.0.7"
 
 [[package]]
@@ -86,6 +100,7 @@ name = "aricode-sys"
 version = "0.0.7"
 dependencies = [
  "aricode-abi",
+ "aricode-proto",
 ]
 
 [[package]]
@@ -399,6 +414,7 @@ dependencies = [
 name = "xtask"
 version = "0.0.7"
 dependencies = [
+ "aricode-arifs",
  "aricode-gpt",
  "aricode-initrd",
  "serde",

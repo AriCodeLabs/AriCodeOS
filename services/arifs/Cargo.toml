@@ -1,0 +1,19 @@
+[package]
+name = "ari-fsd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Servicio de ficheros AriFS de AriCodeOS en espacio de usuario"
+publish = false
+
+[[bin]]
+name = "fsd"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+aricode-sys = { path = "../../sdk/rust" }
+aricode-proto = { path = "../../sdk/proto" }
+aricode-arifs = { path = "../../libs/arifs" }
+user-testprogs = { path = "../../user/testprogs" }
