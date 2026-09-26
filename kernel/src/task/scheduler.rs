@@ -144,16 +144,37 @@ pub fn spawn(
     spawn_thread(name, entry, arg, None, cr3)
 }
 
-/// Crea el hilo principal de un proceso de usuario: arranca en `entry` (en
-/// ring 0, con el espacio `cr3` activo) y de ahí salta a ring 3.
-pub fn spawn_for_process(
+/// Prepara (sin encolar) el hilo principal de un proceso de usuario: arranca
+/// en `entry` (ring 0, con el espacio `cr3` activo) y de ahí salta a ring 3.
+/// El llamador registra el proceso y después llama a `start_thread`, de modo
+/// que el hilo nunca ejecuta antes de que su proceso exista.
+pub fn prepare_for_process(
     name: &str,
     entry: super::context::ThreadEntry,
     arg: usize,
     pid: u32,
     cr3: u64,
-) -> Result<Tid, &'static str> {
-    spawn_thread(name, entry, arg, Some(pid), cr3)
+) -> Result<Box<Thread>, &'static str> {
+    let tid = with(|s| s.policy.allocate_tid());
+    Ok(Box::new(Thread::new(
+        tid,
+        name,
+        entry,
+        arg,
+        Some(pid),
+        cr3,
+    )?))
+}
+
+/// Encola un hilo preparado con `prepare_for_process`.
+pub fn start_thread(thread: Box<Thread>) -> Tid {
+    let tid = thread.tid;
+    debug!("task: spawn {tid:?} '{}'", thread.name);
+    with(|s| {
+        s.threads.insert(tid, thread);
+        s.policy.add(tid);
+    });
+    tid
 }
 
 fn spawn_thread(

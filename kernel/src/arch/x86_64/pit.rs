@@ -4,6 +4,7 @@
 use super::port::{inb, outb};
 
 const PIT_HZ: u64 = 1_193_182;
+const PIT_CH0: u16 = 0x40;
 const PIT_CH2: u16 = 0x42;
 const PIT_CMD: u16 = 0x43;
 const SPEAKER_CTRL: u16 = 0x61;
@@ -24,5 +25,27 @@ pub fn wait_ms(ms: u64) {
             core::hint::spin_loop();
         }
         outb(SPEAKER_CTRL, ctrl);
+    }
+}
+
+/// Canal 0 como generador periódico (IRQ0) a `hz`: fuente de interrupciones
+/// para probar drivers de usuario.
+pub fn start_periodic(hz: u64) {
+    let divisor = (PIT_HZ / hz).clamp(1, 0xFFFF) as u16;
+    // SAFETY: canal 0, modo 2 (rate generator), lo/hi byte.
+    unsafe {
+        outb(PIT_CMD, 0x34);
+        outb(PIT_CH0, divisor as u8);
+        outb(PIT_CH0, (divisor >> 8) as u8);
+    }
+}
+
+/// Detiene el canal 0 (modo 0 con cuenta única: tras un disparo, silencio).
+pub fn stop() {
+    // SAFETY: canal 0, modo 0, cuenta 1: una interrupción más como máximo.
+    unsafe {
+        outb(PIT_CMD, 0x30);
+        outb(PIT_CH0, 1);
+        outb(PIT_CH0, 0);
     }
 }

@@ -146,6 +146,46 @@ pub fn ipc_receive(
     .map(receive_result)
 }
 
+/// Crea un proceso del initrd (exige `MANAGE` sobre el `SPAWNER`).
+pub fn process_spawn(spawner: Handle, name: &str, arg: u64) -> Result<Handle, Error> {
+    call(
+        nr::PROCESS_SPAWN,
+        spawner.0 as u64,
+        name.as_ptr() as u64,
+        name.len() as u64,
+        arg,
+    )
+    .map(|v| Handle(v as u32))
+}
+
+/// Espera la salida de un proceso (exige `WAIT`). `Err(Killed)` si lo terminó el kernel.
+pub fn process_wait(process: Handle, timeout_ms: u64) -> Result<u64, Error> {
+    call(nr::PROCESS_WAIT, process.0 as u64, timeout_ms, 0, 0)
+}
+
+/// Espera interrupciones de la línea (exige `WAIT`); devuelve cuántas llegaron.
+pub fn irq_wait(irq: Handle, timeout_ms: u64) -> Result<u64, Error> {
+    call(nr::IRQ_WAIT, irq.0 as u64, timeout_ms, 0, 0)
+}
+
+/// Mapea una región MMIO o DMA en el proceso; devuelve su dirección virtual.
+pub fn mmio_map(region: Handle) -> Result<u64, Error> {
+    call(nr::MMIO_MAP, region.0 as u64, 0, 0, 0)
+}
+
+pub fn region_len(region: Handle) -> Result<u64, Error> {
+    call(nr::REGION_LEN, region.0 as u64, 0, 0, 0)
+}
+
+/// Reserva un buffer DMA (exige `MANAGE` sobre un objeto `HARDWARE`).
+pub fn dma_alloc(hardware: Handle, len: u64) -> Result<Handle, Error> {
+    call(nr::DMA_ALLOC, hardware.0 as u64, len, 0, 0).map(|v| Handle(v as u32))
+}
+
+pub fn dma_phys(dma: Handle) -> Result<u64, Error> {
+    call(nr::DMA_PHYS, dma.0 as u64, 0, 0, 0)
+}
+
 /// Ayuda para programas de prueba: escribe en la consola ignorando errores.
 pub fn print(bytes: &[u8]) {
     let _ = console_write(Handle::CONSOLE, bytes);

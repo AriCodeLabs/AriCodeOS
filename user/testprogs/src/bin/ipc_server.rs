@@ -7,7 +7,7 @@ use user_testprogs::sys::{self, Handle, TIMEOUT_INFINITE};
 
 const EP: Handle = Handle(0x0001_0004);
 
-fn main() -> u64 {
+fn main(_arg: u64) -> u64 {
     let mut buf = [0u8; 16];
     let mut handles = [Handle(0); 1];
     loop {

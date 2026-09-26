@@ -18,6 +18,8 @@ pub const ABI_VERSION: u32 = 2;
 
 /// Handles iniciales de todo proceso.
 pub mod handle {
+    /// Handle con el que `init` recibe el objeto `SPAWNER` (`MANAGE`).
+    pub const INIT_SPAWNER: u32 = 0x0001_0004;
     /// El propio proceso (`MANAGE | READ | DUPLICATE`).
     pub const SELF_PROCESS: u32 = 0x0001_0001;
     /// El hilo principal (`READ | WAIT | DUPLICATE`).
@@ -43,6 +45,16 @@ pub mod kind {
     pub const PROCESS: u64 = 2;
     pub const CONSOLE: u64 = 3;
     pub const ENDPOINT: u64 = 4;
+    /// Capacidad de crear procesos desde el initrd (solo `init` la recibe).
+    pub const SPAWNER: u64 = 5;
+    /// Línea de interrupción de un dispositivo.
+    pub const IRQ: u64 = 6;
+    /// Región MMIO de un dispositivo.
+    pub const MMIO: u64 = 7;
+    /// Buffer DMA (memoria física contigua).
+    pub const DMA: u64 = 8;
+    /// Capacidad de reservar recursos de hardware (buffers DMA).
+    pub const HARDWARE: u64 = 9;
 }
 
 /// Límite exclusivo del espacio de usuario (mitad baja canónica).
@@ -84,7 +96,28 @@ pub mod nr {
     /// `ipc_receive(ep, buf_ptr, buf_len, handles_out_ptr, handles_max, timeout_ms)
     /// -> data_len | (handles_recibidos << 32)`; exige `READ` sobre `ep`.
     pub const IPC_RECEIVE: u64 = 13;
+    /// `process_spawn(spawner, name_ptr, name_len, arg) -> handle de proceso`;
+    /// exige `MANAGE` sobre un objeto `SPAWNER`. El hijo recibe `arg` en `rdi`.
+    pub const PROCESS_SPAWN: u64 = 14;
+    /// `process_wait(process, timeout_ms) -> código de salida`; exige `WAIT`.
+    /// Un proceso terminado por el kernel devuelve `Error::Killed`.
+    pub const PROCESS_WAIT: u64 = 15;
+    /// `irq_wait(irq, timeout_ms) -> interrupciones acumuladas`; exige `WAIT`.
+    pub const IRQ_WAIT: u64 = 16;
+    /// `mmio_map(region) -> dirección virtual`; exige `READ|WRITE` sobre un
+    /// objeto MMIO o DMA. Cada llamada crea un mapeo nuevo.
+    pub const MMIO_MAP: u64 = 17;
+    /// `region_len(region) -> bytes`; exige `READ`.
+    pub const REGION_LEN: u64 = 18;
+    /// `dma_alloc(hardware, len) -> handle DMA`; exige `MANAGE` sobre un objeto
+    /// `HARDWARE`. Memoria física contigua, máximo `DMA_MAX_LEN`.
+    pub const DMA_ALLOC: u64 = 19;
+    /// `dma_phys(dma) -> dirección física`; exige `READ`.
+    pub const DMA_PHYS: u64 = 20;
 }
+
+/// Máximo de un buffer DMA por llamada (sección 52).
+pub const DMA_MAX_LEN: u64 = 1024 * 1024;
 
 /// Límites de un mensaje IPC (sección 23: mensajes pequeños y rápidos).
 pub const IPC_MAX_DATA: usize = 256;
@@ -123,6 +156,10 @@ pub enum Error {
     Timeout = 9,
     /// Mensaje o buffer por encima de los límites.
     TooBig = 10,
+    /// El proceso esperado fue terminado por el kernel (excepción en ring 3).
+    Killed = 11,
+    /// No existe un fichero con ese nombre en el initrd.
+    NotFound = 12,
 }
 
 impl Error {
@@ -142,6 +179,8 @@ impl Error {
             8 => Some(Error::Revoked),
             9 => Some(Error::Timeout),
             10 => Some(Error::TooBig),
+            11 => Some(Error::Killed),
+            12 => Some(Error::NotFound),
             _ => None,
         }
     }

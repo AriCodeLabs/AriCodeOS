@@ -2,7 +2,7 @@
 
 ## Documento maestro de arquitectura, especificaciones técnicas y plan de desarrollo
 
-**Estado:** 0.0.6 completada (2026-09-26): microkernel con procesos en ring 3, capabilities e IPC  
+**Estado:** 0.0.7 completada (2026-09-26): init, drivers en espacio de usuario, PCIe  
 **Versión del documento:** 0.2  
 **Nombre del sistema:** AriCodeOS  
 **Arquitectura inicial:** x86-64  
@@ -1050,7 +1050,8 @@ HPET
 DMAR / IOMMU
 ```
 
-No se implementará AML completo inicialmente.
+No se implementará AML completo inicialmente. `libs/acpi` parsea RSDP,
+XSDT/RSDT, MADT y MCFG (Fase 16); HPET y DMAR quedan para cuando se usen.
 
 Podrá incorporarse un intérprete AML posteriormente si resulta necesario.
 
@@ -2245,51 +2246,74 @@ hasta disponer de KVM o hardware (sección 69).
 
 # FASE 15 — Init process
 
+**Estado: completada (2026-09-26).**
+
 ### Primer proceso user-space
 
-```text
-/init
-```
+`services/init` (AriInit), cargado desde `aricodeos/initrd.img` (formato
+propio en `libs/initrd`, leído por AriBoot y entregado en `BootInfo`).
 
-Responsabilidades:
+Responsabilidades implementadas:
 
-- iniciar servicios;
-- supervisar procesos;
-- gestionar dependencias básicas.
+- iniciar servicios: `process_spawn` con la capacidad `SPAWNER`, que solo
+  recibe init;
+- supervisar procesos: `process_wait` distingue salida normal de muerte por
+  fallo (`Killed`);
+- gestionar dependencias básicas: pendiente hasta que existan servicios
+  reales (Fase 16 en adelante).
+
+Verificado por `init.boot` (smoke): lanza `hello`, ve morir `kernel_read`,
+y comprueba que sin `MANAGE` no se pueden crear procesos.
 
 ---
 
 # FASE 16 — Driver framework
 
-### Implementar
+**Estado: completada (2026-09-26).**
 
-- driver API;
-- MMIO capability;
-- IRQ capability;
-- DMA buffer API;
-- process restart.
+### Implementado
+
+- driver API: syscalls `irq_wait`, `mmio_map`, `region_len`, `dma_alloc`,
+  `dma_phys` en `sdk/abi` y `aricode-sys`;
+- MMIO capability: objeto `Mmio` mapeado sin caché en el proceso;
+- IRQ capability: objeto `Irq` sobre GSI del I/O APIC (ACPI MADT, `libs/acpi`),
+  con enmascarado por nivel y liberación del vector;
+- DMA buffer API: objeto `Dma` de frames contiguos a cero, `MANAGE` sobre
+  `Hardware` para reservarlo;
+- process restart: AriInit reinicia `crashy_driver` tras verlo morir.
 
 ### Criterio
 
-Un driver puede fallar sin provocar panic del kernel.
+Un driver puede fallar sin provocar panic del kernel: `init.boot` (driver
+muerto y reiniciado) y `drivers.user_irq_mmio_dma` (IRQ, DMA y MMIO desde
+ring 3).
 
 ---
 
 # FASE 17 — PCIe enumeration
 
-### Implementar
+**Estado: completada (2026-09-26).**
 
-- ACPI MCFG;
-- ECAM;
-- enumerate;
-- BARs;
-- MSI inicial.
+### Implementado
 
-### Salida ejemplo
+- ACPI MCFG (`libs/acpi`);
+- ECAM mapeado sin caché, 1 MiB por bus;
+- enumerate: recorrido desde el bus inicial siguiendo puentes, funciones
+  múltiples;
+- BARs decodificados (E/S, memoria de 32/64 bits, prefetchable) y tamaño
+  por sondeo en la librería;
+- MSI inicial: detección de las capabilities MSI y MSI-X (la programación
+  llega con virtio, Fase 18).
+
+### Salida real en QEMU q35
 
 ```text
-00:01.0 1AF4:1000 VirtIO Network
-00:02.0 1AF4:1050 VirtIO GPU
+pci: 00:00.0 8086:29c0 clase 06.00 host bridge (0 BARs)
+pci: 00:01.0 1234:1111 clase 03.00 VGA/display (2 BARs)
+pci: 00:02.0 8086:10d3 clase 02.00 Ethernet (4 BARs, PM/MSI/PCIe/MSI-X)
+pci: 00:1f.0 8086:2918 clase 06.01 ISA bridge (0 BARs)
+pci: 00:1f.2 8086:2922 clase 01.06 SATA (AHCI) (2 BARs, MSI)
+pci: 00:1f.3 8086:2930 clase 0c.05 SMBus (1 BAR)
 ```
 
 ---
@@ -3056,12 +3080,15 @@ más que a través de las capabilities que se le han concedido.
 
 # 91. AriCodeOS 0.0.7
 
-Añadir:
+**Estado: completada (2026-09-26), tag `v0.0.7`.**
 
-- init process;
-- driver framework;
-- device manager;
-- PCIe.
+Añadido:
+
+- init process (AriInit desde el initrd, capacidad SPAWNER, supervisión);
+- driver framework (capabilities IRQ, MMIO y DMA; drivers de prueba en ring 3);
+- device manager: la enumeración y el reparto de capabilities siguen en el
+  kernel (banco de pruebas); el servicio de usuario llega con virtio;
+- PCIe (ECAM por MCFG, enumeración, BARs, capabilities).
 
 ---
 

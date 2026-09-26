@@ -3,13 +3,13 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.0.6 (Fases 13 y 14)
+## Estado: 0.0.7 (Fases 15, 16 y 17)
 
 ```text
 OVMF (UEFI)
   -> EFI/BOOT/BOOTX64.EFI            AriBoot        boot/
-       GOP, ACPI RSDP, cmdline.txt, kernel.elf, tablas de páginas
-       (identidad + mapa físico lineal + kernel), BootInfo v3,
+       GOP, ACPI RSDP, cmdline.txt, kernel.elf, initrd.img, tablas de
+       páginas (identidad + mapa físico lineal + kernel), BootInfo v3,
        ExitBootServices, salto
   -> aricodeos/kernel.elf            AriKernel      kernel/
        consola serie + framebuffer (fuente 8x16), logger con niveles,
@@ -20,8 +20,11 @@ OVMF (UEFI)
        habilitadas, hilos del kernel, scheduler round robin preemptivo con
        sueño y colas de espera, procesos en ring 3 con espacio propio,
        syscalls, tablas de handles con derechos y revocación por objeto,
-       programas de usuario ELF cargados desde el kernel, IPC por endpoints
-       con transferencia de capabilities y timeouts, ARICODEOS_KERNEL_READY
+       IPC por endpoints con transferencia de capabilities y timeouts,
+       initrd con init y programas de usuario, init lanza y supervisa
+       procesos con la capacidad SPAWNER, ACPI + I/O APIC, drivers en ring 3
+       con capabilities IRQ/MMIO/DMA, enumeración PCIe por ECAM,
+       ARICODEOS_KERNEL_READY
 ```
 
 ## Crates
@@ -38,14 +41,19 @@ libs/heap/           aricode-heap: heap first-fit con lista de libres, fusión y
 libs/sync/           aricode-sync: IrqLock/SpinLock con política de interrupciones enchufable (no_std, tests de host)
 libs/sched/          aricode-sched: política round robin sobre Tid con estados, sueño, bloqueo y salida (no_std + alloc, tests de host)
 libs/handles/        aricode-handles: tabla de handles con generación y derechos, duplicación solo reductora (no_std + alloc, tests de host)
+libs/initrd/         aricode-initrd: formato del initrd, lector sin copia (no_std) y escritor (feature `write`, xtask); tests de host
+libs/acpi/           aricode-acpi: RSDP, XSDT/RSDT, MADT (LAPIC, I/O APIC, overrides), MCFG; sin AML (no_std + alloc, tests de host)
+libs/pci/            aricode-pci: direccionamiento ECAM, cabecera de configuración, BARs, capabilities, clases (no_std + alloc, tests de host)
 sdk/abi/             aricode-abi: números de syscall, errores, handles iniciales, derechos y tipos de objeto (no_std, tests de host)
-sdk/rust/            aricode-sys: wrappers de syscall para programas de usuario (no_std, sin alloc)
+sdk/rust/            aricode-sys: wrappers de syscall para programas de usuario (no_std, sin alloc) y `user.ld`, el linker script de todo programa de usuario
 user/testprogs/      programas de prueba de ring 3 (Rust y ensamblador) enlazados como ELF estáticos en 0x400000
+services/init/       AriInit: primer proceso; recibe SPAWNER y lanza/supervisa servicios
 boot/                ariboot: integra lo anterior con la crate `uefi`
 kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log con IrqLock y try_lock),
-                     arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions, port, pic, pit, apic, msr, syscall, usermode},
-                     object (KernelObject revocable, tabla inicial), ipc (Endpoint, Message, benchmark),
-                     user/{process (cargador ELF, copy_from/to_user), programs (ELF embebidos), syscalls},
+                     arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions, port, pic, pit, apic, ioapic, msr, syscall, usermode},
+                     acpi (localización de tablas), pci (ECAM y enumeración), hw (IrqLine, Region, DmaBuffer, registro de vectores, banco de pruebas),
+                     object (KernelObject revocable, tabla inicial), ipc (Endpoint, Message, benchmark), initrd,
+                     user/{process (cargador ELF, copy_from/to_user, espera de salida), programs (initrd), syscalls},
                      memory/{phys, pmm, vmm, heap}, sync (política IRQ), time,
                      task/{context (switch_context, thread_start), stack, thread, scheduler, wait}, informe, panic, salida QEMU
 tools/xtask/         build, image, qemu, scenario, test, check
@@ -289,7 +297,9 @@ segundo brevemente para añadir la región.
   `-4095..=-1` = error. Syscalls actuales: `process_exit`, `console_write`,
   `thread_yield`, `thread_sleep`, `thread_get_tid`, `abi_version`,
   `handle_close`, `handle_duplicate`, `object_kind`, `object_id`,
-  `object_revoke`, `endpoint_create`, `ipc_send`, `ipc_receive`.
+  `object_revoke`, `endpoint_create`, `ipc_send`, `ipc_receive`,
+  `process_spawn`, `process_wait`, `irq_wait`, `mmio_map`, `region_len`,
+  `dma_alloc`, `dma_phys`.
 - Los punteros de usuario se validan página a página contra las tablas del
   proceso (`copy_from_user`): un puntero de kernel devuelve `Fault`, nunca se
   desreferencia.
@@ -299,11 +309,12 @@ segundo brevemente para añadir la región.
 - Programas de prueba en `user/testprogs` (crate aparte): binarios en
   ensamblador (`hello`, `kernel_read`, `kernel_write`, `privileged`,
   `bad_syscall`, `bad_pointer`) y en Rust sobre `aricode-sys`
-  (`sleep_yield`, `handles`, `caps`). `cargo xtask` los compila como ELF
-  estáticos para `x86_64-unknown-none` con `user/testprogs/user.ld`
-  (0x400000, segmentos R-X, R--, RW-) y el kernel los embebe por
-  `include_bytes!` desde `ARICODE_USER_BIN`. `process::spawn` los carga con
-  `aricode-elf` y mapea cada segmento con sus permisos. Se lanzan con
+  (`sleep_yield`, `handles`, `caps`, `ipc_server`, `ipc_client`). `cargo
+  xtask` los compila como ELF estáticos para `x86_64-unknown-none` con
+  `sdk/rust/user.ld` (0x400000, segmentos R-X, R--, RW-) y los empaqueta con
+  `init` en `aricodeos/initrd.img`. `process::spawn` los carga con
+  `aricode-elf` y mapea cada segmento con sus permisos. `_start` recibe en
+  `rdi` el argumento de quien creó el proceso. Se lanzan con
   `test=user_<nombre>`.
 
 ## Objetos y handles (Fase 12, ADR 0010)
@@ -363,8 +374,75 @@ segundo brevemente para añadir la región.
   TSC: ~260 000 ciclos bajo QEMU TCG incluyendo la creación del cliente. El
   número solo sirve como referencia relativa: TCG no es hardware.
 
+## Initrd e init (Fase 15)
+
+- AriBoot carga `\aricodeos\initrd.img` en páginas de tipo Kernel y lo
+  entrega en `BootInfo::initrd_*`. Formato propio (`aricode-initrd`): magia,
+  número de entradas y, por fichero, nombre y datos alineados a 8 bytes; el
+  lector valida la imagen entera al abrirla y no copia nada.
+- `cargo xtask image` construye el initrd con `init` y todos los binarios de
+  `user/testprogs`; el kernel ya no embebe programas y se compila sin
+  variables de entorno.
+- Sin `test=` en la cmdline, `kernel_main` lanza `init` con un único handle
+  extra: el objeto `SPAWNER` con `MANAGE|DUPLICATE` (handle
+  `0x0001_0004`). `process_spawn` exige `MANAGE` sobre un `SPAWNER`, busca el
+  nombre en el initrd y devuelve un handle de proceso con
+  `READ|WAIT|MANAGE|DUPLICATE`; `process_wait` exige `WAIT`, bloquea en la
+  cola de salida del proceso (con plazo opcional) y devuelve el código o
+  `Killed`. Un proceso creado así solo tiene los tres handles iniciales.
+- `init.boot` (smoke): AriInit lanza `hello` (42), ve `kernel_read` morir
+  como `Killed`, comprueba que un duplicado del SPAWNER sin `MANAGE` no
+  puede crear procesos y que un nombre inexistente da `NotFound`.
+
+## Drivers en espacio de usuario (Fase 16)
+
+- `acpi::init` localiza el RSDP de `BootInfo`, valida XSDT/RSDT y parsea
+  MADT y MCFG con `aricode-acpi` a través del mapa físico. `ioapic::init`
+  mapea el primer I/O APIC sin caché en `0xFFFF_D000_0000_1000` y enmascara
+  sus 24 entradas.
+- Un driver solo recibe lo que sus capabilities le dan (sección 27):
+  - `Irq`: GSI enrutada a un vector de dispositivo (`0x30..=0x3F`) con la
+    polaridad y disparo de la MADT. El handler acumula y despierta; las
+    líneas por nivel quedan enmascaradas hasta que `irq_wait` las atiende.
+    Al soltarse el último handle, la línea se enmascara y el vector se libera.
+  - `Mmio`: región física de dispositivo; `mmio_map` la mapea en el proceso
+    (`0x1000_0000` en adelante, sin caché) y la registra como memoria ajena,
+    que se desmapea sin liberar al destruir el espacio.
+  - `Dma`: frames contiguos puestos a cero (`dma_alloc`, máximo 1 MiB, exige
+    `MANAGE` sobre un objeto `Hardware`); `dma_phys` da la física para el
+    dispositivo y `mmio_map` la mapea con caché. Los frames vuelven al PMM al
+    soltarse el objeto.
+- `test=drivers`: `pit_driver` atiende cinco IRQ0 del PIT (canal 0 a 100 Hz)
+  y reserva, mapea y verifica un buffer DMA; `fb_driver` recibe el
+  framebuffer como región MMIO y pinta 64x64 píxeles; el kernel comprueba el
+  píxel (0,0). El reinicio de un driver caído lo hace AriInit en `init.boot`
+  (`crashy_driver` muere con arg 0 y arranca con arg 1).
+- Un proceso se inserta en la tabla antes de encolar su hilo
+  (`prepare_for_process` + `start_thread`): con `log=trace` la salida lenta
+  hacía que el hilo llegara a ejecutar antes de existir su proceso.
+
+## PCIe (Fase 17)
+
+- `pci::init` toma la primera entrada de la MCFG, mapea su ECAM sin caché en
+  `0xFFFF_D100_0000_0000` con páginas de 2 MiB (1 MiB por bus) y recorre los
+  buses desde el inicial siguiendo los puentes PCI-PCI. Cada función se lee
+  con accesos de 32 bits y se decodifica con `aricode-pci`: vendor y device,
+  clase, BARs (E/S, 32 y 64 bits, prefetchable) y lista de capabilities
+  (MSI, MSI-X, PCIe, PM).
+- En QEMU q35: host bridge, VGA, Ethernet e1000e (MSI/MSI-X), ISA bridge,
+  SATA AHCI (MSI) y SMBus. `pci.enumerate` (smoke) los exige.
+- La lista se devuelve al arranque; la programación de MSI/MSI-X y la
+  asignación de BARs a drivers llegan con virtio (Fase 18).
+
 ## Deuda conocida
 
+- El device manager (sección 29) es todavía el banco de pruebas del kernel:
+  enumerar dispositivos (Fase 17) y repartir capabilities de hardware a
+  drivers reales pasará a un servicio de usuario.
+- Sin IOMMU (Fase 33): un buffer DMA es memoria autorizada solo por
+  convención del driver.
+- `init` todavía no recibe endpoints de los servicios que lanza ni puede
+  pasarles capabilities al crearlos: llegará con el device manager (Fase 16).
 - Los benchmarks (sección 69) necesitan una máquina de referencia o KVM
   para ser absolutos; bajo TCG solo comparan versiones entre sí.
 - Los mensajes IPC no llevan identidad del emisor: la dará un handle al

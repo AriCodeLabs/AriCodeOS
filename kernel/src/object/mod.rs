@@ -14,6 +14,13 @@ pub enum ObjectKind {
     Process(Pid),
     Console,
     Endpoint(crate::ipc::Endpoint),
+    /// Capacidad de crear procesos desde el initrd.
+    Spawner,
+    Irq(crate::hw::IrqLine),
+    Mmio(crate::hw::Region),
+    Dma(crate::hw::DmaBuffer),
+    /// Capacidad de reservar recursos de hardware (buffers DMA).
+    Hardware,
 }
 
 /// Objeto compartido por todos los handles que lo referencian. Revocarlo
@@ -38,7 +45,8 @@ impl KernelObject {
         match self.kind {
             ObjectKind::Thread(t) => t.0 as u64,
             ObjectKind::Process(p) => p.0 as u64,
-            ObjectKind::Console | ObjectKind::Endpoint(_) => 0,
+            ObjectKind::Irq(ref l) => l.gsi as u64,
+            _ => 0,
         }
     }
 
@@ -48,6 +56,11 @@ impl KernelObject {
             ObjectKind::Process(_) => kind::PROCESS,
             ObjectKind::Console => kind::CONSOLE,
             ObjectKind::Endpoint(_) => kind::ENDPOINT,
+            ObjectKind::Spawner => kind::SPAWNER,
+            ObjectKind::Irq(_) => kind::IRQ,
+            ObjectKind::Mmio(_) => kind::MMIO,
+            ObjectKind::Dma(_) => kind::DMA,
+            ObjectKind::Hardware => kind::HARDWARE,
         }
     }
 

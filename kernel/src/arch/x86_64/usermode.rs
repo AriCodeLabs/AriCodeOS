@@ -3,7 +3,8 @@
 use aricode_x86_cpu::layout;
 use core::arch::asm;
 
-/// Salta a `rip` en ring 3 con la pila `rsp` e interrupciones habilitadas.
+/// Salta a `rip` en ring 3 con la pila `rsp`, `arg` en `rdi` e interrupciones
+/// habilitadas.
 /// Nunca retorna: el proceso solo vuelve al kernel por `syscall`,
 /// interrupción o excepción.
 ///
@@ -11,7 +12,7 @@ use core::arch::asm;
 ///
 /// `rip` y `rsp` deben estar mapeados con USER en el espacio activo; la pila
 /// de kernel del hilo debe estar fijada en el TSS y en `syscall`.
-pub unsafe fn enter(rip: u64, rsp: u64) -> ! {
+pub unsafe fn enter(rip: u64, rsp: u64, arg: u64) -> ! {
     const RFLAGS_IF: u64 = 1 << 9;
     asm!(
         "mov ds, {ds:x}",
@@ -28,6 +29,7 @@ pub unsafe fn enter(rip: u64, rsp: u64) -> ! {
         rflags = in(reg) RFLAGS_IF | 2,
         cs = in(reg) layout::USER_CODE.0 as u64,
         rip = in(reg) rip,
+        in("rdi") arg,
         options(noreturn)
     );
 }

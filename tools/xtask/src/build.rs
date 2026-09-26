@@ -3,6 +3,7 @@
 use crate::{root, Result};
 use std::path::PathBuf;
 use std::process::Command;
+use std::string::String;
 
 pub const UEFI_TARGET: &str = "x86_64-unknown-uefi";
 pub const KERNEL_TARGET: &str = "x86_64-unknown-none";
@@ -22,8 +23,12 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("aricode-sched", None),
     ("aricode-abi", None),
     ("aricode-handles", None),
+    ("aricode-initrd", None),
+    ("aricode-acpi", None),
+    ("aricode-pci", None),
     ("aricode-sys", None),
     ("user-testprogs", Some(KERNEL_TARGET)),
+    ("ariinit", Some(KERNEL_TARGET)),
     ("ariboot", Some(UEFI_TARGET)),
     ("arikernel", Some(KERNEL_TARGET)),
     ("xtask", None),
@@ -57,30 +62,44 @@ fn profile_dir(release: bool) -> &'static str {
 pub struct Artifacts {
     pub ariboot: PathBuf,
     pub kernel: PathBuf,
+    /// Directorio con `init` y los programas de usuario.
+    pub user_bin: PathBuf,
 }
 
-/// Compila los programas de usuario de prueba (ELF estáticos en 0x400000) y
-/// devuelve el directorio con los binarios. El kernel los embebe, así que
-/// van siempre antes que él.
-pub fn build_user_programs(release: bool) -> Result<PathBuf> {
-    println!("[xtask] build user-testprogs ({KERNEL_TARGET})");
-    let mut c = cargo();
-    c.args(["build", "-p", "user-testprogs", "--target", KERNEL_TARGET]);
-    if release {
-        c.arg("--release");
+/// Programas que van al initrd: `init` y los binarios de `user/testprogs`.
+pub fn initrd_programs() -> Result<Vec<String>> {
+    let mut names = vec![String::from("init")];
+    let bins = root().join("user/testprogs/src/bin");
+    for entry in std::fs::read_dir(&bins).map_err(|e| format!("{}: {e}", bins.display()))? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.extension().is_some_and(|x| x == "rs") {
+            names.push(path.file_stem().unwrap().to_string_lossy().into_owned());
+        }
     }
-    // Mismos flags que el kernel (.cargo/config.toml): el modelo de código
-    // `kernel` admite direcciones absolutas de 32 bits con signo, así que
-    // 0x400000 es válido, y coincide con el `core` precompilado (LTO).
-    run(c)?;
+    names.sort();
+    Ok(names)
+}
+
+/// Compila `init` y los programas de usuario (ELF estáticos en 0x400000) y
+/// devuelve el directorio con los binarios.
+pub fn build_user_programs(release: bool) -> Result<PathBuf> {
+    for pkg in ["user-testprogs", "ariinit"] {
+        println!("[xtask] build {pkg} ({KERNEL_TARGET})");
+        let mut c = cargo();
+        c.args(["build", "-p", pkg, "--target", KERNEL_TARGET]);
+        if release {
+            c.arg("--release");
+        }
+        // Mismos flags que el kernel (.cargo/config.toml): el modelo de código
+        // `kernel` admite direcciones absolutas de 32 bits con signo, así que
+        // 0x400000 es válido, y coincide con el `core` precompilado (LTO).
+        run(c)?;
+    }
     Ok(root()
         .join("target")
         .join(KERNEL_TARGET)
         .join(profile_dir(release)))
 }
-
-/// Variable que el kernel lee en su `build.rs` para embeber los programas.
-pub const USER_BIN_ENV: &str = "ARICODE_USER_BIN";
 
 /// Compila AriBoot y AriKernel. Un único binario de cada uno sirve para todos
 /// los escenarios: el comportamiento de test se controla por cmdline.
@@ -93,7 +112,6 @@ pub fn build_os(release: bool) -> Result<Artifacts> {
         if release {
             c.arg("--release");
         }
-        c.env(USER_BIN_ENV, &user_bin);
         run(c)?;
     }
     let t = root().join("target");
@@ -106,6 +124,7 @@ pub fn build_os(release: bool) -> Result<Artifacts> {
             .join(KERNEL_TARGET)
             .join(profile_dir(release))
             .join("arikernel"),
+        user_bin,
     })
 }
 
@@ -125,15 +144,12 @@ pub fn check() -> Result {
     let mut c = cargo();
     c.args(["fmt", "--all", "--", "--check"]);
     run(c)?;
-    // El kernel embebe los programas de usuario: deben existir para lintarlo.
-    let user_bin = build_user_programs(true)?;
     for (pkg, target) in PACKAGES {
         let mut c = cargo();
         c.args(["clippy", "-p", pkg]);
         if let Some(t) = target {
             c.args(["--target", t]);
         }
-        c.env(USER_BIN_ENV, &user_bin);
         c.args(["--", "-D", "warnings"]);
         run(c)?;
     }

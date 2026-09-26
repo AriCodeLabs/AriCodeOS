@@ -4,7 +4,7 @@
 
 use user_testprogs::sys::{self, kind, rights, Error, Handle};
 
-fn main() -> u64 {
+fn main(_arg: u64) -> u64 {
     if sys::object_kind(Handle::CONSOLE) != Ok(kind::CONSOLE) {
         return 1;
     }

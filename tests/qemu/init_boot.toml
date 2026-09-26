@@ -1,0 +1,24 @@
+# Fase 15: sin test= el kernel lanza init del initrd con la capacidad SPAWNER.
+# init lanza servicios, ve un fallo como Killed y comprueba que sin MANAGE no
+# se puede crear procesos.
+name = "init.boot"
+description = "arranque normal: init lanza hello, ve morir kernel_read y comprueba la capacidad SPAWNER"
+level = "smoke"
+areas = ["init", "user"]
+cmdline = "qemu_exit"
+
+[expect]
+exit = 33
+serial_contains = [
+    "initrd.img:",
+    "[INFO ] initrd:",
+    "AriInit: arrancando",
+    "AriInit: hello termino con 42",
+    "AriInit: kernel_read fue terminado por el kernel",
+    "AriInit: crashy_driver fallo, reiniciando",
+    "AriInit: crashy_driver reiniciado con exito",
+    "AriInit: servicios de arranque completados",
+    "[INFO ] init terminado con codigo 0",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "init terminado por fallo"]

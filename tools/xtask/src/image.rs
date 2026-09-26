@@ -12,6 +12,7 @@ pub const OVMF_VARS: &str = "/usr/share/OVMF/OVMF_VARS_4M.fd";
 const BOOTX64: &str = "EFI/BOOT/BOOTX64.EFI";
 const KERNEL: &str = "aricodeos/kernel.elf";
 const CMDLINE: &str = "aricodeos/cmdline.txt";
+const INITRD: &str = "aricodeos/initrd.img";
 
 fn io<T>(r: std::io::Result<T>, what: &str) -> Result<T> {
     r.map_err(|e| format!("{what}: {e}"))
@@ -170,6 +171,20 @@ mod elf_patch {
     }
 }
 
+/// Empaqueta `init` y los programas de usuario en un initrd.
+fn build_initrd(user_bin: &Path) -> Result<Vec<u8>> {
+    let names = crate::build::initrd_programs()?;
+    let contents: Vec<(String, Vec<u8>)> = names
+        .iter()
+        .map(|n| io(fs::read(user_bin.join(n)), &format!("leer {n}")).map(|d| (n.clone(), d)))
+        .collect::<Result<_>>()?;
+    let files: Vec<(&str, &[u8])> = contents
+        .iter()
+        .map(|(n, d)| (n.as_str(), d.as_slice()))
+        .collect();
+    aricode_initrd::build(&files).map_err(|e| format!("initrd: {e:?}"))
+}
+
 fn write_esp(esp: &Path, a: &Artifacts, cmdline: Option<&str>) -> Result {
     let _ = fs::remove_dir_all(esp);
     for rel in [BOOTX64, KERNEL] {
@@ -180,6 +195,10 @@ fn write_esp(esp: &Path, a: &Artifacts, cmdline: Option<&str>) -> Result {
     }
     io(fs::copy(&a.ariboot, esp.join(BOOTX64)), "copiar ariboot")?;
     io(fs::copy(&a.kernel, esp.join(KERNEL)), "copiar kernel")?;
+    io(
+        fs::write(esp.join(INITRD), build_initrd(&a.user_bin)?),
+        "escribir initrd",
+    )?;
     if let Some(c) = cmdline {
         io(fs::write(esp.join(CMDLINE), c), "escribir cmdline")?;
     }

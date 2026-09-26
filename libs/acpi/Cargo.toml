@@ -1,0 +1,11 @@
+[package]
+name = "aricode-acpi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Parser de tablas ACPI estáticas: RSDP, XSDT/RSDT, MADT, MCFG (no_std + alloc)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
