@@ -14,6 +14,7 @@ mod arch;
 mod console;
 mod framebuffer;
 mod memory;
+mod object;
 mod qemu;
 mod serial;
 mod sync;

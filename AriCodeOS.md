@@ -2,7 +2,7 @@
 
 ## Documento maestro de arquitectura, especificaciones técnicas y plan de desarrollo
 
-**Estado:** 0.0.4 completada (2026-09-26): boot, consola, GDT/IDT, memoria, APIC, threads, scheduler  
+**Estado:** 0.0.5 completada (2026-09-26): kernel con memoria, scheduler, ring 3, syscalls y handles  
 **Versión del documento:** 0.2  
 **Nombre del sistema:** AriCodeOS  
 **Arquitectura inicial:** x86-64  
@@ -2168,16 +2168,24 @@ rechaza un puntero de kernel) y `user.bad_syscall` (número inexistente).
 
 # FASE 12 — Kernel objects + handles
 
-### Implementar
+**Estado: completada (2026-09-26), ADR 0010.**
 
-- object manager;
-- handle tables;
-- lifetime;
-- rights.
+### Implementado
+
+- object manager: `kernel/src/object` con `KernelObject` (`Thread`,
+  `Process`, `Console`) y tabla inicial por proceso;
+- handle tables: `libs/handles` con índice + generación, límite por proceso
+  (256), 4 tests de host;
+- lifetime: `Arc` por objeto; cerrar un handle invalida ese valor para siempre;
+- rights: `READ WRITE DUPLICATE TRANSFER WAIT SIGNAL MANAGE`; duplicar solo
+  reduce; cada syscall declara el derecho que exige.
 
 ### Resultado
 
-Las syscalls dejan de depender de identificadores globales inseguros.
+Las syscalls dejan de depender de identificadores globales inseguros:
+`console_write` exige un handle de consola con `WRITE` (ABI v2), y
+`user.handles` verifica desde ring 3 los casos de handle inventado, cerrado,
+sin derechos, escalada y objeto equivocado.
 
 ---
 
@@ -2997,12 +3005,15 @@ Añadido:
 
 # 89. AriCodeOS 0.0.5
 
-Añadir:
+**Estado: completada (2026-09-26), tag `v0.0.5`.**
 
-- ring 3;
-- syscalls;
-- procesos;
-- address spaces.
+Añadido:
+
+- ring 3 (GDT con segmentos DPL 3, `iretq`, fallos de usuario no fatales);
+- syscalls (`syscall`/`sysretq`, ABI v2 en `sdk/abi`);
+- procesos (hilo principal, salida y muerte, liberación del espacio);
+- address spaces (PML4 por proceso con mitad del kernel compartida);
+- objetos y handles con derechos (Fase 12 adelantada, ADR 0010).
 
 ---
 
@@ -3438,7 +3449,7 @@ aricodeos/
 No necesitamos crear toda la estructura futura desde el primer día.
 
 Este árbol es el que existe en el repositorio desde M0, ampliado con
-`libs/{elf,x86-paging,x86-cpu,pmm,heap,sync,sched,cmdline,fb-console}` (lógica `no_std` con tests de host),
+`libs/{elf,x86-paging,x86-cpu,pmm,heap,sync,sched,handles,cmdline,fb-console}` y `sdk/abi` (lógica `no_std` con tests de host),
 `tests/qemu/` (escenarios) y `docs/decisions/0001..0007`.
 
 ---

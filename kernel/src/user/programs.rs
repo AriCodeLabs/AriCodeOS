@@ -32,4 +32,5 @@ programs! {
     bad_syscall => user_prog_bad_syscall_start, user_prog_bad_syscall_end;
     bad_pointer => user_prog_bad_pointer_start, user_prog_bad_pointer_end;
     sleep_yield => user_prog_sleep_yield_start, user_prog_sleep_yield_end;
+    handles => user_prog_handles_start, user_prog_handles_end;
 }

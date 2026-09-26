@@ -31,6 +31,7 @@ pub enum ExitStatus {
 
 pub struct Process {
     pub name: String,
+    pub handles: crate::object::Handles,
     /// `None` una vez liberado el espacio de direcciones.
     mapper: Option<Mapper<vmm::PmmFrames, OffsetMap>>,
     pub main_thread: Tid,
@@ -96,6 +97,7 @@ pub fn spawn(name: &str, code: &[u8]) -> Result<Pid, &'static str> {
         pid,
         Process {
             name: String::from(name),
+            handles: crate::object::initial_table(pid, tid),
             mapper: Some(m),
             main_thread: tid,
             entry: USER_CODE_BASE,
@@ -220,4 +222,11 @@ pub fn copy_from_user(ptr: u64, len: u64) -> Result<Vec<u8>, aricode_abi::Error>
     // SAFETY: rango validado página a página en el espacio activo.
     let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
     Ok(bytes.to_vec())
+}
+
+/// Acceso a la tabla de handles del proceso actual.
+pub fn with_current_handles<R>(f: impl FnOnce(&mut crate::object::Handles) -> R) -> Option<R> {
+    let pid = current_pid()?;
+    let mut procs = PROCESSES.lock();
+    procs.get_mut(&pid).map(|p| f(&mut p.handles))
 }

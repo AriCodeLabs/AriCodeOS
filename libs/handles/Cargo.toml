@@ -1,0 +1,11 @@
+[package]
+name = "aricode-handles"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tabla de handles con generación y derechos (no_std + alloc)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

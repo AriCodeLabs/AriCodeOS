@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.0.5 en curso (0.0.4 + Fase 11)
+## Estado: 0.0.5 (Fases 11 y 12)
 
 ```text
 OVMF (UEFI)
@@ -18,8 +18,8 @@ OVMF (UEFI)
        (W^X, mapa físico, pila con guard page), heap con crecimiento
        bajo demanda, PIC enmascarado, LAPIC + timer 100 Hz, interrupciones
        habilitadas, hilos del kernel, scheduler round robin preemptivo con
-       sueño y colas de espera, procesos en ring 3 con espacio propio y
-       syscalls, ARICODEOS_KERNEL_READY
+       sueño y colas de espera, procesos en ring 3 con espacio propio,
+       syscalls y tablas de handles con derechos, ARICODEOS_KERNEL_READY
 ```
 
 ## Crates
@@ -35,11 +35,12 @@ libs/pmm/            aricode-pmm: allocator de frames por bitmap sobre almacenam
 libs/heap/           aricode-heap: heap first-fit con lista de libres, fusión y cabecera por asignación (no_std, tests de host)
 libs/sync/           aricode-sync: IrqLock/SpinLock con política de interrupciones enchufable (no_std, tests de host)
 libs/sched/          aricode-sched: política round robin sobre Tid con estados, sueño, bloqueo y salida (no_std + alloc, tests de host)
-sdk/abi/             aricode-abi: números de syscall, errores y límites del espacio de usuario, compartido con el SDK futuro (no_std, tests de host)
+libs/handles/        aricode-handles: tabla de handles con generación y derechos, duplicación solo reductora (no_std + alloc, tests de host)
+sdk/abi/             aricode-abi: números de syscall, errores, handles iniciales, derechos y tipos de objeto (no_std, tests de host)
 boot/                ariboot: integra lo anterior con la crate `uefi`
 kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log), sync (SingleCpu),
                      arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions, port, pic, pit, apic, msr, syscall, usermode},
-                     user/{process, programs (programs.s), syscalls},
+                     object (KernelObject, tabla inicial), user/{process, programs (programs.s), syscalls},
                      memory/{phys, pmm, vmm, heap}, sync (política IRQ), time,
                      task/{context (switch_context, thread_start), stack, thread, scheduler, wait}, informe, panic, salida QEMU
 tools/xtask/         build, image, qemu, scenario, test, check
@@ -246,7 +247,8 @@ heap -> pmm -> vmm -> console.
   Rust; antes de `sysretq` las deshabilita. Convención en `sdk/abi`: `rax`
   número, `rdi rsi rdx r10 r8 r9` argumentos, resultado en `rax`, negativo
   `-4095..=-1` = error. Syscalls actuales: `process_exit`, `console_write`,
-  `thread_yield`, `thread_sleep`, `thread_get_tid`, `abi_version`.
+  `thread_yield`, `thread_sleep`, `thread_get_tid`, `abi_version`,
+  `handle_close`, `handle_duplicate`, `object_kind`, `object_id`.
 - Los punteros de usuario se validan página a página contra las tablas del
   proceso (`copy_from_user`): un puntero de kernel devuelve `Fault`, nunca se
   desreferencia.
@@ -256,6 +258,19 @@ heap -> pmm -> vmm -> console.
 - Programas de prueba en `user/programs.s` (ensamblador independiente de
   posición): `hello`, `kernel_read`, `kernel_write`, `privileged`,
   `bad_syscall`, `bad_pointer`, `sleep_yield`; se lanzan con `test=user_<nombre>`.
+
+## Objetos y handles (Fase 12, ADR 0010)
+
+- `object::KernelObject` (`Thread`, `Process`, `Console`) se referencia con
+  `Arc` desde las tablas de handles; los procesos nunca ven punteros ni
+  identificadores globales con valor de acceso.
+- Cada proceso nace con tres handles: sí mismo (`MANAGE|READ|DUPLICATE`), su
+  hilo (`READ|WAIT|DUPLICATE`) y la consola (`WRITE|DUPLICATE`); límite de
+  256 handles por proceso.
+- `user.handles` comprueba desde ring 3: tipo de objeto, handle inventado
+  (`BadHandle`), duplicado sin derechos que no puede escribir (`Denied`),
+  escalada al duplicar (`Escalation`), handle cerrado (`BadHandle`) y uso de
+  un objeto del tipo equivocado.
 
 ## Deuda conocida
 
