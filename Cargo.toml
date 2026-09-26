@@ -14,6 +14,7 @@ members = [
     "libs/handles",
     "libs/initrd",
     "libs/acpi",
+    "libs/pci",
     "sdk/abi",
     "sdk/rust",
     "user/testprogs",
@@ -38,13 +39,14 @@ default-members = [
     "libs/handles",
     "libs/initrd",
     "libs/acpi",
+    "libs/pci",
     "sdk/abi",
     "sdk/rust",
     "tools/xtask",
 ]
 
 [workspace.package]
-version = "0.0.6"
+version = "0.0.7"
 edition = "2021"
 license = "UNLICENSED"
 repository = "https://github.com/lynxcraft/aricodeos"
