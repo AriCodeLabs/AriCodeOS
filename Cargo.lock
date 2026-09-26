@@ -6,6 +6,8 @@ version = 4
 name = "ari-virtio-blk"
 version = "0.0.7"
 dependencies = [
+ "aricode-gpt",
+ "aricode-proto",
  "aricode-sys",
  "aricode-virtio",
  "user-testprogs",
@@ -44,6 +46,10 @@ name = "aricode-fb-console"
 version = "0.0.7"
 
 [[package]]
+name = "aricode-gpt"
+version = "0.0.7"
+
+[[package]]
 name = "aricode-handles"
 version = "0.0.7"
 
@@ -61,6 +67,10 @@ version = "0.0.7"
 
 [[package]]
 name = "aricode-pmm"
+version = "0.0.7"
+
+[[package]]
+name = "aricode-proto"
 version = "0.0.7"
 
 [[package]]
@@ -371,6 +381,7 @@ name = "user-testprogs"
 version = "0.0.7"
 dependencies = [
  "aricode-heap",
+ "aricode-proto",
  "aricode-sync",
  "aricode-sys",
 ]
@@ -388,6 +399,7 @@ dependencies = [
 name = "xtask"
 version = "0.0.7"
 dependencies = [
+ "aricode-gpt",
  "aricode-initrd",
  "serde",
  "toml",

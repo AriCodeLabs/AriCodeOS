@@ -1,22 +1,28 @@
-//! Driver virtio-blk (Fase 18) en ring 3. Recibe por `pci_claim`, a través de
-//! `init`, el espacio de configuración, la capacidad de hardware, la IRQ
-//! MSI-X y los BARs. Inicializa el dispositivo por la interfaz moderna,
-//! crea la cola 0 en memoria DMA y verifica lectura y escritura del disco.
+//! Driver virtio-blk (Fase 18) y servicio de bloques (Fase 19) en ring 3.
 //!
-//! En esta fase se ejecuta como autoprueba; en la Fase 19 pasa a servir
-//! peticiones por IPC.
+//! Recibe de `init`, en este orden, el endpoint de servicio, el espacio de
+//! configuración PCI, la capacidad de hardware, la IRQ MSI-X y los BARs
+//! presentes (`arg` es la máscara de BARs). Inicializa el dispositivo por la
+//! interfaz moderna, crea la cola 0 en memoria DMA, lee la GPT y atiende por
+//! IPC (`aricode-proto::block`) peticiones de otros procesos, que aportan su
+//! propio buffer DMA: el dispositivo lee y escribe directamente en él.
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use aricode_proto::block::{Op, Reply, Request, Status, MAX_SECTORS};
 use aricode_virtio::{
     blk, cfg_type, common, find_structures, status, QueueLayout, Virtqueue, FEATURE_VERSION_1,
 };
-use user_testprogs::sys::{self, Error, Handle};
+use user_testprogs::sys::{self, Error, Handle, TIMEOUT_INFINITE};
 
-const CFG: Handle = Handle(0x0001_0004);
-const HW: Handle = Handle(0x0001_0005);
-const IRQ: Handle = Handle(0x0001_0006);
-const FIRST_BAR_HANDLE: u32 = 0x0001_0007;
+/// Endpoint de servicio (creado por init) y capabilities del dispositivo.
+const SERVICE: Handle = Handle(0x0001_0004);
+const CFG: Handle = Handle(0x0001_0005);
+const HW: Handle = Handle(0x0001_0006);
+const IRQ: Handle = Handle(0x0001_0007);
+const FIRST_BAR_HANDLE: u32 = 0x0001_0008;
 
 /// Máscara que pasa `init` en `arg`: bit 15 = IRQ presente, bits 0..5 = BAR i
 /// presente. Los handles de BAR van seguidos en ese orden tras la IRQ.
@@ -43,21 +49,26 @@ impl Mmio {
         unsafe { ((self.0 + off) as *const u8).read_volatile() }
     }
     fn r16(&self, off: u64) -> u16 {
+        // SAFETY: idem.
         unsafe { ((self.0 + off) as *const u16).read_volatile() }
     }
     fn r32(&self, off: u64) -> u32 {
+        // SAFETY: idem.
         unsafe { ((self.0 + off) as *const u32).read_volatile() }
     }
     fn r64(&self, off: u64) -> u64 {
         self.r32(off) as u64 | (self.r32(off + 4) as u64) << 32
     }
     fn w8(&self, off: u64, v: u8) {
+        // SAFETY: idem.
         unsafe { ((self.0 + off) as *mut u8).write_volatile(v) }
     }
     fn w16(&self, off: u64, v: u16) {
+        // SAFETY: idem.
         unsafe { ((self.0 + off) as *mut u16).write_volatile(v) }
     }
     fn w32(&self, off: u64, v: u32) {
+        // SAFETY: idem.
         unsafe { ((self.0 + off) as *mut u32).write_volatile(v) }
     }
     fn w64(&self, off: u64, v: u64) {
@@ -73,13 +84,13 @@ struct Device {
     device_cfg: Mmio,
     queue: Virtqueue,
     queue_notify_off: u64,
-    /// Buffer DMA para cabecera (16), datos (512) y estado (1).
+    /// Buffer DMA propio: cabecera (16), un sector de datos (512) y estado (1).
     req_virt: u64,
     req_phys: u64,
 }
 
 fn setup(mask: u64) -> Result<Device, u64> {
-    // 1. Estructuras virtio a partir del espacio de configuración.
+    // 1. Estructuras virtio a partir del espacio de configuracion.
     let cfg_virt = sys::mmio_map(CFG).map_err(|_| 10u64)?;
     let mut cfg = [0u8; 256];
     for (i, b) in cfg.iter_mut().enumerate() {
@@ -90,7 +101,6 @@ fn setup(mask: u64) -> Result<Device, u64> {
     let common_s = structures[cfg_type::COMMON as usize].ok_or(11u64)?;
     let notify_s = structures[cfg_type::NOTIFY as usize].ok_or(12u64)?;
     let device_s = structures[cfg_type::DEVICE as usize].ok_or(13u64)?;
-    // Todas en el mismo BAR en QEMU; se mapea una vez por BAR distinto.
     let bar_virt = |bar: u8| sys::mmio_map(bar_handle(mask, bar).ok_or(14u64)?).map_err(|_| 14u64);
     let common_base = bar_virt(common_s.bar)?;
     let notify_base = if notify_s.bar == common_s.bar {
@@ -116,8 +126,7 @@ fn setup(mask: u64) -> Result<Device, u64> {
     let f_lo = common.r32(common::DEVICE_FEATURE) as u64;
     common.w32(common::DEVICE_FEATURE_SELECT, 1);
     let f_hi = (common.r32(common::DEVICE_FEATURE) as u64) << 32;
-    let offered = f_lo | f_hi;
-    if offered & FEATURE_VERSION_1 == 0 {
+    if (f_lo | f_hi) & FEATURE_VERSION_1 == 0 {
         return Err(15);
     }
     // Solo VERSION_1: sin caracteristicas opcionales todavia.
@@ -181,12 +190,14 @@ impl Device {
         self.device_cfg.r64(blk::CFG_CAPACITY)
     }
 
-    /// Una peticion sincrona de un sector: cabecera, datos y estado en el
-    /// buffer DMA; espera la interrupcion MSI-X y comprueba el estado.
+    /// Una peticion sincrona: cabecera y estado en el buffer propio, datos en
+    /// `(data_phys, data_len)`; espera la interrupcion MSI-X y comprueba el estado.
     fn request(
         &mut self,
         header: blk::RequestHeader,
-        data_write_by_device: bool,
+        data_phys: u64,
+        data_len: u32,
+        device_writes: bool,
     ) -> Result<(), u64> {
         // SAFETY: buffer DMA de 4 KiB mapeado RW.
         unsafe {
@@ -201,7 +212,7 @@ impl Device {
             .queue
             .add(&[
                 (self.req_phys, 16, false),
-                (self.req_phys + 16, 512, data_write_by_device),
+                (data_phys, data_len, device_writes),
                 (self.req_phys + 528, 1, true),
             ])
             .ok_or(30u64)?;
@@ -227,48 +238,169 @@ impl Device {
         }
     }
 
-    fn data(&self) -> &[u8] {
+    /// Lee un sector en el buffer propio (para la GPT).
+    fn read_own(&mut self, lba: u64) -> Result<&[u8], u64> {
+        self.request(blk::RequestHeader::read(lba), self.req_phys + 16, 512, true)?;
         // SAFETY: 512 bytes de datos dentro del buffer DMA.
-        unsafe { core::slice::from_raw_parts((self.req_virt + 16) as *const u8, 512) }
-    }
-
-    fn data_mut(&mut self) -> &mut [u8] {
-        // SAFETY: idem, en exclusiva mientras no hay peticion en curso.
-        unsafe { core::slice::from_raw_parts_mut((self.req_virt + 16) as *mut u8, 512) }
+        Ok(unsafe { core::slice::from_raw_parts((self.req_virt + 16) as *const u8, 512) })
     }
 }
 
-fn selftest(dev: &mut Device) -> Result<(), u64> {
-    // El disco de pruebas tiene en cada sector "ARIDISK\0" + numero de sector.
-    for sector in [0u64, 1, 7] {
-        dev.request(blk::RequestHeader::read(sector), true)?;
-        let d = dev.data();
-        if &d[..8] != b"ARIDISK\0" || d[8..16] != sector.to_le_bytes() {
-            return Err(40);
+/// Lee la GPT y anuncia las particiones.
+fn report_partitions(dev: &mut Device) {
+    let mut buf = [0u8; 20];
+    let header = match dev
+        .read_own(1)
+        .ok()
+        .and_then(|s| aricode_gpt::Header::parse(s).ok())
+    {
+        Some(h) => h,
+        None => {
+            say(b"sin GPT");
+            return;
+        }
+    };
+    // La tabla (16 KiB) va al heap: la pila de usuario es pequeña.
+    let mut table = alloc::vec![0u8; 128 * aricode_gpt::ENTRY_LEN];
+    let sectors = header.entries_bytes() / 512;
+    for i in 0..sectors.min(32) {
+        match dev.read_own(header.entries_lba + i as u64) {
+            Ok(s) => table[i * 512..(i + 1) * 512].copy_from_slice(s),
+            Err(_) => {
+                say(b"error leyendo la tabla GPT");
+                return;
+            }
         }
     }
-    // Escribir un patron en el sector 2 y releerlo.
-    {
-        let d = dev.data_mut();
-        for (i, b) in d.iter_mut().enumerate() {
-            *b = (i as u8).wrapping_mul(7).wrapping_add(3);
+    let mut parts = [None; 8];
+    match aricode_gpt::partitions(&header, &table, &mut parts) {
+        Ok(n) => {
+            sys::print(b"virtio-blk: GPT con ");
+            sys::print(user_testprogs::fmt_u64(n as u64, &mut buf));
+            sys::print(b" particion(es)\n");
+            for p in parts.iter().flatten() {
+                sys::print(b"virtio-blk:   ");
+                sys::print(p.name_str().as_bytes());
+                sys::print(b" LBA ");
+                sys::print(user_testprogs::fmt_u64(p.first_lba, &mut buf));
+                sys::print(b"..");
+                sys::print(user_testprogs::fmt_u64(p.last_lba, &mut buf));
+                sys::print(b"\n");
+            }
         }
+        Err(_) => say(b"tabla GPT corrupta"),
     }
-    dev.request(blk::RequestHeader::write(2), false)?;
-    dev.data_mut().fill(0);
-    dev.request(blk::RequestHeader::read(2), true)?;
-    if dev
-        .data()
-        .iter()
-        .enumerate()
-        .any(|(i, b)| *b != (i as u8).wrapping_mul(7).wrapping_add(3))
-    {
-        return Err(41);
+}
+
+/// Mapeos de buffers DMA de clientes, reutilizados por direccion fisica
+/// (cada `mmio_map` crea un mapeo nuevo que no se libera hasta salir).
+struct ClientBuffers {
+    entries: [(u64, u64); 8], // (phys, len)
+    count: usize,
+}
+
+impl ClientBuffers {
+    fn map(&mut self, dma: Handle) -> Option<(u64, u64)> {
+        let phys = sys::dma_phys(dma).ok()?;
+        let len = sys::region_len(dma).ok()?;
+        if let Some(e) = self.entries[..self.count].iter().find(|e| e.0 == phys) {
+            return Some(*e);
+        }
+        sys::mmio_map(dma).ok()?;
+        if self.count < self.entries.len() {
+            self.entries[self.count] = (phys, len);
+            self.count += 1;
+        }
+        Some((phys, len))
     }
-    if dev.common.r8(common::DEVICE_STATUS) & status::NEEDS_RESET != 0 {
-        return Err(42);
+}
+
+/// Bucle de servicio: una peticion por mensaje, respuesta por el endpoint
+/// transferido en el mensaje.
+fn serve(dev: &mut Device) -> ! {
+    let capacity = dev.capacity();
+    let mut buffers = ClientBuffers {
+        entries: [(0, 0); 8],
+        count: 0,
+    };
+    let mut msg = [0u8; 32];
+    let mut handles = [Handle(0); 2];
+    say(b"sirviendo peticiones");
+    loop {
+        let Ok((n, nh)) = sys::ipc_receive(SERVICE, &mut msg, &mut handles, TIMEOUT_INFINITE)
+        else {
+            continue;
+        };
+        if nh == 0 {
+            continue; // sin endpoint de respuesta no hay a quien contestar
+        }
+        let reply_to = handles[0];
+        let reply = match Request::decode(&msg[..n]) {
+            None => Reply {
+                status: Status::Invalid,
+                value: 0,
+            },
+            Some(Request { op: Op::Info, .. }) => Reply {
+                status: Status::Ok,
+                value: capacity,
+            },
+            Some(Request { op, count, lba }) => {
+                let count = count.min(MAX_SECTORS) as u64;
+                if nh < 2 {
+                    Reply {
+                        status: Status::BadHandles,
+                        value: 0,
+                    }
+                } else if count == 0 || lba.checked_add(count).is_none_or(|end| end > capacity) {
+                    Reply {
+                        status: Status::Invalid,
+                        value: 0,
+                    }
+                } else {
+                    match buffers.map(handles[1]) {
+                        Some((phys, len)) if len >= count * 512 => {
+                            let bytes = (count * 512) as u32;
+                            let r = match op {
+                                Op::Read => {
+                                    dev.request(blk::RequestHeader::read(lba), phys, bytes, true)
+                                }
+                                Op::Write => {
+                                    dev.request(blk::RequestHeader::write(lba), phys, bytes, false)
+                                }
+                                Op::Info => unreachable!(),
+                            };
+                            match r {
+                                Ok(()) => Reply {
+                                    status: Status::Ok,
+                                    value: count,
+                                },
+                                Err(_) => {
+                                    if dev.common.r8(common::DEVICE_STATUS) & status::NEEDS_RESET
+                                        != 0
+                                    {
+                                        say(b"el dispositivo pide reset");
+                                    }
+                                    Reply {
+                                        status: Status::Io,
+                                        value: 0,
+                                    }
+                                }
+                            }
+                        }
+                        _ => Reply {
+                            status: Status::BadHandles,
+                            value: 0,
+                        },
+                    }
+                }
+            }
+        };
+        if nh >= 2 {
+            let _ = sys::handle_close(handles[1]);
+        }
+        let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
+        let _ = sys::handle_close(reply_to);
     }
-    Ok(())
 }
 
 fn main(mask: u64) -> u64 {
@@ -279,22 +411,13 @@ fn main(mask: u64) -> u64 {
             return step;
         }
     };
-    let cap = dev.capacity();
     let mut buf = [0u8; 20];
     say(b"dispositivo listo");
     sys::print(b"virtio-blk: capacidad ");
-    sys::print(user_testprogs::fmt_u64(cap, &mut buf));
+    sys::print(user_testprogs::fmt_u64(dev.capacity(), &mut buf));
     sys::print(b" sectores\n");
-    match selftest(&mut dev) {
-        Ok(()) => {
-            say(b"lectura y escritura ok");
-            0
-        }
-        Err(step) => {
-            say(b"fallo en la autoprueba");
-            step
-        }
-    }
+    report_partitions(&mut dev);
+    serve(&mut dev)
 }
 
 user_testprogs::entry!(main);

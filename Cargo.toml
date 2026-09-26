@@ -16,8 +16,10 @@ members = [
     "libs/acpi",
     "libs/pci",
     "libs/virtio",
+    "libs/gpt",
     "sdk/abi",
     "sdk/rust",
+    "sdk/proto",
     "user/testprogs",
     "services/init",
     "services/virtio-blk",
@@ -43,8 +45,10 @@ default-members = [
     "libs/acpi",
     "libs/pci",
     "libs/virtio",
+    "libs/gpt",
     "sdk/abi",
     "sdk/rust",
+    "sdk/proto",
     "tools/xtask",
 ]
 

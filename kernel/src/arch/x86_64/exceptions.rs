@@ -33,7 +33,11 @@ fn user_fault(frame: &InterruptFrame) -> ! {
         frame.rsp,
         frame.error_code
     );
+    if crate::user::process::in_user_stack_guard(cr2) {
+        serial_println!("USER STACK OVERFLOW: la pila de usuario toco su guard page");
+    }
     let why = match vector {
+        PAGE_FAULT if crate::user::process::in_user_stack_guard(cr2) => "desbordamiento de pila",
         PAGE_FAULT if frame.error_code & PF_WRITE != 0 => "#PF escritura",
         PAGE_FAULT => "#PF lectura",
         GENERAL_PROTECTION => "#GP",

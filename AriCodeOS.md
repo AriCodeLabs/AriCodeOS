@@ -2340,12 +2340,16 @@ Disponer rápidamente de almacenamiento y red en QEMU.
 
 # FASE 19 — Storage service
 
-### Implementar
+**Estado: completada (2026-09-26), salvo la caché.**
 
-- block service;
-- async request queue;
-- cache inicial;
-- partition parsing.
+### Implementado
+
+- block service: el driver virtio-blk atiende `BlockServiceProtocol v1`
+  (`sdk/proto`) por IPC con acceso directo al buffer DMA del cliente;
+- async request queue: la cola acotada del endpoint;
+- cache inicial: pendiente (llegará con el filesystem cuando haya métricas);
+- partition parsing: GPT con CRC (`libs/gpt`), disco de pruebas con
+  partición AriCodeOS (`ARI0`).
 
 ---
 

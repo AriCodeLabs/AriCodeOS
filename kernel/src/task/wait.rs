@@ -1,9 +1,10 @@
 //! Cola de espera: bloquea al hilo actual hasta que se cumpla una condición
 //! y alguien llame a `wake_all`/`wake_one`, con plazo opcional.
 //!
-//! La comprobación de la condición y el encolado ocurren bajo el lock de la
-//! cola con interrupciones deshabilitadas, así que un `wake` entre "comprobar"
-//! y "bloquear" no se pierde: el bloqueo se decide con el hilo ya en la cola.
+//! La comprobación de la condición, el encolado y el cambio de contexto
+//! ocurren con las interrupciones deshabilitadas, así que un `wake` desde un
+//! handler nunca cae entre "comprobar" y "dormir": encuentra al hilo ya
+//! dormido o bloqueado y lo despierta.
 
 use super::scheduler;
 use crate::sync::IrqLock;
@@ -35,25 +36,31 @@ impl WaitQueue {
         mut cond: impl FnMut() -> bool,
         deadline: Option<u64>,
     ) -> bool {
+        use crate::sync::KernelIrq;
+        use aricode_sync::IrqPolicy;
         loop {
+            // Interrupciones deshabilitadas desde la comprobación hasta el
+            // cambio de contexto: así un `wake` desde un handler solo puede
+            // llegar cuando el hilo ya está dormido o bloqueado, nunca en la
+            // ventana entre soltar el lock y dormirse (despertar perdido).
+            let irq = KernelIrq::save_and_disable();
             {
                 let mut w = self.waiters.lock();
                 if cond() {
+                    KernelIrq::restore(irq);
                     return false;
                 }
                 if deadline.is_some_and(|d| crate::time::ticks() >= d) {
+                    KernelIrq::restore(irq);
                     return true;
                 }
                 w.push_back(scheduler::current_tid());
             }
-            // El lock se ha soltado pero las interrupciones siguen deshabilitadas
-            // dentro del cambio de contexto: un `wake` concurrente solo puede
-            // llegar por interrupción y encontrará el hilo bloqueado/dormido, o
-            // aún corriendo (entonces `wake` falla y el bucle reevalúa).
             match deadline {
                 Some(d) => scheduler::sleep_until(d),
                 None => scheduler::block_current(),
             }
+            KernelIrq::restore(irq);
         }
     }
 

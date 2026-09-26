@@ -66,6 +66,15 @@ mod user_heap {
 /// Código de salida que usa el panic handler de los programas de prueba.
 pub const PANIC_EXIT_CODE: u64 = 255;
 
+/// Imprime `prefix` seguido del error del ABI (su código numérico).
+pub fn print_error(prefix: &[u8], e: sys::Error) {
+    let mut buf = [0u8; 20];
+    sys::print(prefix);
+    sys::print(b" error ");
+    sys::print(fmt_u64(-(e.to_raw()) as u64, &mut buf));
+    sys::print(b"\n");
+}
+
 /// Formatea un entero en decimal sin `alloc` (para mensajes de consola).
 pub fn fmt_u64(mut v: u64, buf: &mut [u8; 20]) -> &[u8] {
     let mut i = buf.len();

@@ -62,8 +62,8 @@ identifica el paso fallido.
 
 Cada fase del roadmap añade su área y sus escenarios. Existentes: `boot`,
 `panic`, `console`, `interrupts`, `memory`, `timer`, `threads`, `scheduler`,
-`user`, `capabilities`, `ipc`, `init`, `drivers`, `acpi`, `pci`, `virtio`.
-Previstas: `storage`, `filesystem`, `shell`, ...
+`user`, `capabilities`, `ipc`, `init`, `drivers`, `acpi`, `pci`, `virtio`,
+`storage`. Previstas: `filesystem`, `shell`, ...
 Una rama `feature/f05-physical-memory` ejecuta `--area memory` mientras
 desarrolla y `--all` antes de integrar. Si el filtro no selecciona ningún
 escenario QEMU, el runner falla y lista las áreas conocidas: un filtro mal

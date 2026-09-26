@@ -19,8 +19,14 @@ pub struct Pid(pub u32);
 
 /// Base mínima del código de usuario (los ELF se enlazan en 0x40_0000) y pila.
 pub const USER_CODE_BASE: u64 = 0x40_0000;
+
+/// `true` si `addr` cae en la guard page bajo la pila de usuario.
+pub fn in_user_stack_guard(addr: u64) -> bool {
+    let bottom = USER_STACK_TOP - USER_STACK_SIZE;
+    (bottom - PAGE_SIZE..bottom).contains(&addr)
+}
 pub const USER_STACK_TOP: u64 = 0x80_0000;
-pub const USER_STACK_SIZE: u64 = 16 * 1024;
+pub const USER_STACK_SIZE: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitStatus {

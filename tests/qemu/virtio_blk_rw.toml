@@ -14,9 +14,10 @@ serial_contains = [
     "reclamado (MSI-X entrada 0)",
     "virtio-blk: dispositivo listo",
     "virtio-blk: capacidad 8192 sectores",
-    "virtio-blk: lectura y escritura ok",
-    "AriInit: virtio-blk listo",
+    "virtio-blk: GPT con 1 particion(es)",
+    "virtio-blk: sirviendo peticiones",
+    "AriInit: servicio de bloques ok",
     "ARICODEOS_KERNEL_READY",
 ]
 # USER FAULT aparece porque init mata a proposito a kernel_read y crashy_driver.
-serial_absent = ["KERNEL PANIC", "fallo en la", "salio con codigo 14"]
+serial_absent = ["KERNEL PANIC", "fallo en la"]

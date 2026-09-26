@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.0.8 en curso (0.0.7 + Fase 18)
+## Estado: 0.0.8 en curso (0.0.7 + Fases 18 y 19)
 
 ```text
 OVMF (UEFI)
@@ -24,8 +24,8 @@ OVMF (UEFI)
        initrd con init y programas de usuario, init lanza y supervisa
        procesos con la capacidad SPAWNER, ACPI + I/O APIC, drivers en ring 3
        con capabilities IRQ/MMIO/DMA, enumeración PCIe por ECAM, init reclama
-       el virtio-blk (BARs, MSI-X) y lanza su driver en ring 3,
-       ARICODEOS_KERNEL_READY
+       el virtio-blk (BARs, MSI-X) y lanza su driver en ring 3 como servicio
+       de bloques por IPC (disco GPT), ARICODEOS_KERNEL_READY
 ```
 
 ## Crates
@@ -46,11 +46,13 @@ libs/initrd/         aricode-initrd: formato del initrd, lector sin copia (no_st
 libs/acpi/           aricode-acpi: RSDP, XSDT/RSDT, MADT (LAPIC, I/O APIC, overrides), MCFG; sin AML (no_std + alloc, tests de host)
 libs/pci/            aricode-pci: direccionamiento ECAM, cabecera de configuración, BARs, capabilities, clases (no_std + alloc, tests de host)
 libs/virtio/         aricode-virtio: virtqueue split sobre DMA, estructuras virtio-pci modernas, peticiones virtio-blk (no_std, tests de host)
+libs/gpt/            aricode-gpt: CRC32, cabecera y entradas GPT, escritor para el disco de pruebas (no_std, tests de host)
+sdk/proto/           aricode-proto: protocolos IPC versionados de los servicios (bloques v1) (no_std, tests de host)
 sdk/abi/             aricode-abi: números de syscall, errores, handles iniciales, derechos y tipos de objeto (no_std, tests de host)
 sdk/rust/            aricode-sys: wrappers de syscall para programas de usuario (no_std, sin alloc) y `user.ld`, el linker script de todo programa de usuario
 user/testprogs/      programas de prueba de ring 3 (Rust y ensamblador) enlazados como ELF estáticos en 0x400000
 services/init/       AriInit: primer proceso; recibe SPAWNER y la raíz PCI, lanza/supervisa servicios y reclama dispositivos para sus drivers
-services/virtio-blk/ driver virtio-blk en ring 3 (interfaz moderna, cola 0 en DMA, MSI-X)
+services/virtio-blk/ driver virtio-blk en ring 3 y servicio de bloques por IPC (interfaz moderna, cola 0 en DMA, MSI-X, GPT)
 boot/                ariboot: integra lo anterior con la crate `uefi`
 kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log con IrqLock y try_lock),
                      arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions, port, pic, pit, apic, ioapic, msr, syscall, usermode},
@@ -465,10 +467,36 @@ segundo brevemente para añadir la región.
 - Los programas de usuario tienen un heap estático de 64 KiB
   (`aricode-heap` tras un spinlock) porque la librería PCI usa `alloc`.
 
+## Servicio de bloques (Fase 19)
+
+- `init` crea el endpoint del servicio y se lo pasa al driver junto a las
+  capabilities del dispositivo; a los clientes les da un duplicado solo
+  `WRITE` y una capacidad de hardware para su buffer DMA (init la recibe del
+  kernel en `0x0001_0006`).
+- Protocolo `BlockServiceProtocol v1` (`sdk/proto::block`): petición de 16
+  bytes (`Info`, `Read`, `Write`, LBA, sectores) con dos handles, el endpoint
+  de respuesta y el buffer DMA del cliente; respuesta de 16 bytes con estado
+  y valor. El driver programa el descriptor de datos con la física del
+  buffer del cliente: cero copias. Hasta 16 sectores por petición; la cola
+  del endpoint es la cola de peticiones.
+- Al arrancar, el driver lee la GPT (`aricode-gpt`, CRC de cabecera y tabla)
+  y anuncia las particiones; el disco de pruebas de xtask lleva un MBR
+  protector, GPT con respaldo y una partición `ARI0` de tipo AriCodeOS.
+- `blk_client` (ring 3) prueba info, lectura de la partición, escritura y
+  relectura, LBA fuera de rango (`Invalid`) y petición sin buffer
+  (`BadHandles`). `storage.block_service` lo exige.
+- Los programas de usuario tienen la pila en 64 KiB y el kernel diagnostica
+  `USER STACK OVERFLOW` cuando un fallo toca su guard page (la tabla GPT de
+  16 KiB en la pila lo provocó; ahora va al heap del programa).
+- `WaitQueue::wait_until_deadline` mantiene las interrupciones deshabilitadas
+  desde la comprobación hasta el cambio de contexto: un `wake` desde un
+  handler MSI-X no puede llegar en la ventana entre soltar el lock y
+  dormirse (antes cada petición podía esperar hasta el plazo de 2 s).
+
 ## Deuda conocida
 
-- El driver termina tras la autoprueba; en la Fase 19 se queda residente y
-  sirve peticiones por IPC.
+- El servicio de bloques mapea cada buffer DMA de cliente una vez y lo
+  reutiliza por dirección física; no hay `mmio_unmap` ni caché de bloques.
 - El device manager (sección 29) vive dentro de `init`: enumera, reclama y
   lanza drivers; separarlo en un servicio propio cuando haya más de uno.
 - Sin IOMMU (Fase 33): un buffer DMA es memoria autorizada solo por
