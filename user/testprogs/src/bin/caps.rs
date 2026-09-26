@@ -4,7 +4,7 @@
 
 use user_testprogs::sys::{self, rights, Error, Handle};
 
-fn main() -> u64 {
+fn main(_arg: u64) -> u64 {
     // Derivacion: un duplicado con menos derechos sigue siendo el mismo objeto.
     let Ok(dup) = sys::handle_duplicate(Handle::CONSOLE, rights::WRITE) else {
         return 1;

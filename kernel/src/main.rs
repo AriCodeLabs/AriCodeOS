@@ -13,6 +13,7 @@ extern crate alloc;
 mod arch;
 mod console;
 mod framebuffer;
+mod initrd;
 mod ipc;
 mod memory;
 mod object;
@@ -113,8 +114,13 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     info!("interrupciones habilitadas");
 
     task::init();
+    initrd::init(info);
 
-    run_requested_test(&cmdline);
+    if cmdline.get(keys::TEST).is_some() {
+        run_requested_test(&cmdline);
+    } else {
+        run_init();
+    }
 
     println!("ARICODEOS_KERNEL_READY");
     finish(qemu::ExitCode::Success)
@@ -281,7 +287,29 @@ fn run_requested_test(cmdline: &CmdLine) {
     }
 }
 
-/// Lanza un programa de usuario embebido y espera su fin.
+/// Arranque normal: lanza `init` del initrd con la capacidad de crear
+/// procesos y espera a que termine.
+fn run_init() {
+    use aricode_handles::Rights;
+    let Some(elf) = user::programs::by_name("init") else {
+        warn!("init: no hay 'init' en el initrd");
+        return;
+    };
+    let spawner = object::KernelObject::new(object::ObjectKind::Spawner);
+    let pid = user::process::spawn_with_handles(
+        "init",
+        elf,
+        alloc::vec![(spawner, Rights::MANAGE.union(Rights::DUPLICATE))],
+    )
+    .expect("crear init");
+    let status = user::process::wait(pid);
+    match status {
+        user::process::ExitStatus::Exited(code) => info!("init terminado con codigo {code}"),
+        user::process::ExitStatus::Killed(why) => warn!("init terminado por fallo: {why}"),
+    }
+}
+
+/// Lanza un programa de usuario del initrd y espera su fin.
 fn run_user_program(name: &str) {
     let Some(code) = user::programs::by_name(name) else {
         warn!("test: programa de usuario '{name}' desconocido");

@@ -39,6 +39,10 @@ name = "aricode-heap"
 version = "0.0.6"
 
 [[package]]
+name = "aricode-initrd"
+version = "0.0.6"
+
+[[package]]
 name = "aricode-pmm"
 version = "0.0.6"
 
@@ -66,6 +70,14 @@ name = "aricode-x86-paging"
 version = "0.0.6"
 
 [[package]]
+name = "ariinit"
+version = "0.0.6"
+dependencies = [
+ "aricode-sys",
+ "user-testprogs",
+]
+
+[[package]]
 name = "arikernel"
 version = "0.0.6"
 dependencies = [
@@ -75,6 +87,7 @@ dependencies = [
  "aricode-fb-console",
  "aricode-handles",
  "aricode-heap",
+ "aricode-initrd",
  "aricode-pmm",
  "aricode-sched",
  "aricode-sync",
@@ -347,6 +360,7 @@ dependencies = [
 name = "xtask"
 version = "0.0.6"
 dependencies = [
+ "aricode-initrd",
  "serde",
  "toml",
 ]

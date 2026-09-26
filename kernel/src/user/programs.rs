@@ -1,29 +1,5 @@
-//! Programas de usuario embebidos: ELF estáticos generados por la crate
-//! `user-testprogs` (los construye `cargo xtask` y expone su directorio en
-//! `ARICODE_USER_BIN`).
+//! Programas de usuario: se buscan por nombre en el initrd.
 
-macro_rules! programs {
-    ($($name:ident),* $(,)?) => {
-        /// ELF de un programa por nombre de test, o `None`.
-        pub fn by_name(name: &str) -> Option<&'static [u8]> {
-            match name {
-                $( stringify!($name) => Some(include_bytes!(concat!(env!("ARICODE_USER_BIN"), "/", stringify!($name)))), )*
-                _ => None,
-            }
-        }
-    };
+pub fn by_name(name: &str) -> Option<&'static [u8]> {
+    crate::initrd::find(name)
 }
-
-programs!(
-    hello,
-    kernel_read,
-    kernel_write,
-    privileged,
-    bad_syscall,
-    bad_pointer,
-    sleep_yield,
-    handles,
-    caps,
-    ipc_server,
-    ipc_client
-);

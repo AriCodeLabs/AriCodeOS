@@ -32,6 +32,10 @@ pub enum ExitStatus {
 pub struct Process {
     pub name: String,
     pub handles: crate::object::Handles,
+    /// Argumento que recibe `_start` en `rdi`.
+    pub arg: u64,
+    /// Despierta a quien espera la salida.
+    pub exit_wait: alloc::sync::Arc<crate::task::wait::WaitQueue>,
     /// `None` una vez liberado el espacio de direcciones.
     mapper: Option<Mapper<vmm::PmmFrames, OffsetMap>>,
     pub main_thread: Tid,
@@ -47,12 +51,26 @@ pub fn spawn(name: &str, elf_bytes: &[u8]) -> Result<Pid, &'static str> {
     spawn_with_handles(name, elf_bytes, Vec::new())
 }
 
+/// Como `spawn_with_handles`, con el argumento de `_start`.
+pub fn spawn_with_arg(name: &str, elf_bytes: &[u8], arg: u64) -> Result<Pid, &'static str> {
+    spawn_full(name, elf_bytes, Vec::new(), arg)
+}
+
 /// Como `spawn`, con capabilities adicionales insertadas tras las tres
 /// iniciales (la primera recibe el handle `0x0001_0004`, y así sucesivamente).
 pub fn spawn_with_handles(
     name: &str,
     elf_bytes: &[u8],
     extra: Vec<(crate::object::ObjectRef, aricode_handles::Rights)>,
+) -> Result<Pid, &'static str> {
+    spawn_full(name, elf_bytes, extra, 0)
+}
+
+fn spawn_full(
+    name: &str,
+    elf_bytes: &[u8],
+    extra: Vec<(crate::object::ObjectRef, aricode_handles::Rights)>,
+    arg: u64,
 ) -> Result<Pid, &'static str> {
     let elf = aricode_elf::Elf::parse(elf_bytes).map_err(|_| "process: ELF invalido")?;
     let (lo, hi) = elf.virt_range();
@@ -138,6 +156,8 @@ pub fn spawn_with_handles(
         Process {
             name: String::from(name),
             handles,
+            arg,
+            exit_wait: alloc::sync::Arc::new(crate::task::wait::WaitQueue::new()),
             mapper: Some(m),
             main_thread: tid,
             entry: elf.entry,
@@ -158,10 +178,14 @@ pub fn spawn_with_handles(
 /// fija la pila de kernel del hilo y salta a ring 3.
 extern "C" fn user_thread_entry(pid: usize) {
     let pid = Pid(pid as u32);
-    let entry = PROCESSES.lock().get(&pid).expect("proceso").entry;
+    let (entry, arg) = {
+        let procs = PROCESSES.lock();
+        let p = procs.get(&pid).expect("proceso");
+        (p.entry, p.arg)
+    };
     // SAFETY: código y pila mapeados con USER en `spawn`; la pila de kernel
     // la fijó el planificador al conmutar a este hilo.
-    unsafe { usermode::enter(entry, USER_STACK_TOP) }
+    unsafe { usermode::enter(entry, USER_STACK_TOP, arg) }
 }
 
 /// Proceso del hilo actual, si es de usuario.
@@ -170,12 +194,13 @@ pub fn current_pid() -> Option<Pid> {
 }
 
 fn finish(pid: Pid, status: ExitStatus) -> ! {
-    let name = {
+    let (name, waiters) = {
         let mut procs = PROCESSES.lock();
         let p = procs.get_mut(&pid).expect("proceso en la tabla");
         p.status = Some(status);
-        p.name.clone()
+        (p.name.clone(), p.exit_wait.clone())
     };
+    waiters.wake_all();
     match status {
         ExitStatus::Exited(code) => {
             info!("user: proceso {} '{name}' salio con codigo {code}", pid.0)
@@ -223,21 +248,56 @@ pub fn release_address_space(pid: u32) {
     }
 }
 
-/// Espera (cediendo) a que el proceso termine y devuelve su estado,
-/// retirándolo de la tabla.
-pub fn wait(pid: Pid) -> ExitStatus {
+/// Estado de salida si el proceso ha terminado y su hilo ya fue recogido.
+fn finished(pid: Pid) -> Option<ExitStatus> {
+    let procs = PROCESSES.lock();
+    let p = procs.get(&pid)?;
+    let status = p.status?;
+    scheduler::state(p.main_thread).is_none().then_some(status)
+}
+
+/// Espera a que el proceso termine (bloqueando en su cola de salida) y
+/// devuelve su estado, retirándolo de la tabla. `None` si vence el plazo.
+pub fn wait_until(pid: Pid, deadline: Option<u64>) -> Option<ExitStatus> {
+    let waiters = PROCESSES.lock().get(&pid)?.exit_wait.clone();
     loop {
-        let done = PROCESSES.lock().get(&pid).and_then(|p| p.status);
-        let thread_gone = PROCESSES
+        if let Some(status) = finished(pid) {
+            PROCESSES.lock().remove(&pid);
+            return Some(status);
+        }
+        // Entre `status` fijado y el hilo recogido media un cambio de contexto:
+        // ceder cubre ese hueco sin dormir.
+        if PROCESSES
             .lock()
             .get(&pid)
-            .map(|p| scheduler::state(p.main_thread).is_none());
-        if let (Some(status), Some(true)) = (done, thread_gone) {
-            PROCESSES.lock().remove(&pid);
-            return status;
+            .is_some_and(|p| p.status.is_some())
+        {
+            scheduler::yield_now();
+            continue;
         }
-        scheduler::yield_now();
+        let timed_out = waiters.wait_until_deadline(
+            || {
+                PROCESSES
+                    .lock()
+                    .get(&pid)
+                    .is_none_or(|p| p.status.is_some())
+            },
+            deadline,
+        );
+        if timed_out {
+            return None;
+        }
     }
+}
+
+/// Espera sin plazo.
+pub fn wait(pid: Pid) -> ExitStatus {
+    wait_until(pid, None).expect("sin plazo no hay timeout")
+}
+
+/// Nombre de un proceso vivo (para diagnóstico).
+pub fn exists(pid: Pid) -> bool {
+    PROCESSES.lock().contains_key(&pid)
 }
 
 /// Comprueba que `[ptr, ptr+len)` está en espacio de usuario y mapeado con
