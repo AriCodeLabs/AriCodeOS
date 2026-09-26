@@ -209,6 +209,7 @@ fn run_requested_test(cmdline: &CmdLine) {
         "pmm" => memory::pmm::selftest(),
         "vmm" => memory::vmm::selftest(),
         "heap" => memory::heap::selftest(),
+        "heap_oom" => memory::heap::oom_selftest(),
         // W^X: escribir en .rodata -> #PF por protección.
         "write_rodata" => {
             static RO: u64 = 7;

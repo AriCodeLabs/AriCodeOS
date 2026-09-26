@@ -122,14 +122,26 @@ impl Heap {
         }
     }
 
-    fn round(layout: Layout) -> (usize, usize) {
-        let size = layout.size().max(1).next_multiple_of(GRANULE);
+    /// Tamaño y alineación efectivos. `None` si el redondeo no es representable.
+    fn round(layout: Layout) -> Option<(usize, usize)> {
+        let size = layout.size().max(1).checked_next_multiple_of(GRANULE)?;
         let align = layout.align().max(GRANULE);
-        (size, align)
+        Some((size, align))
     }
 
+    /// `None` si no hay bloque adecuado o si la petición no es representable
+    /// en el espacio de direcciones. Nunca modifica la lista antes de haber
+    /// comprobado que la asignación cabe.
     pub fn allocate(&mut self, layout: Layout) -> Option<NonNull<u8>> {
-        let (size, align) = Self::round(layout);
+        let (size, align) = Self::round(layout)?;
+        self.allocate_rounded(size, align)
+    }
+
+    /// Núcleo de `allocate` con `size` múltiplo de `GRANULE` y `align`
+    /// potencia de dos >= `GRANULE`. Separado para poder probar la aritmética
+    /// con valores que `Layout` no admite pero que en la mitad alta del
+    /// espacio virtual del kernel aparecen con layouts válidos.
+    fn allocate_rounded(&mut self, size: usize, align: usize) -> Option<NonNull<u8>> {
         let mut prev: Option<NonNull<FreeBlock>> = None;
         let mut cur = self.head;
         while let Some(c) = cur {
@@ -137,9 +149,14 @@ impl Heap {
             let (block_start, block_size, next) =
                 unsafe { (c.as_ptr() as usize, c.as_ref().size, c.as_ref().next) };
             let block_end = block_start + block_size;
-            let user = (block_start + HEADER).next_multiple_of(align);
-            let used_end = user + size;
-            if used_end <= block_end {
+            // Aritmética comprobada: en la mitad alta del espacio virtual una
+            // petición grande o una alineación enorme desbordan `usize` y un
+            // valor envuelto pasaría la comprobación `used_end <= block_end`.
+            let fits = (block_start + HEADER)
+                .checked_next_multiple_of(align)
+                .and_then(|user| user.checked_add(size).map(|end| (user, end)))
+                .filter(|&(_, end)| end <= block_end);
+            if let Some((user, used_end)) = fits {
                 let tail = block_end - used_end;
                 let used_end = if tail >= MIN_BLOCK {
                     used_end
@@ -276,6 +293,36 @@ mod tests {
         assert!(h.allocate(l(200, 8)).is_none());
         unsafe { h.deallocate(a, l(900, 8)) };
         assert_eq!(h.stats().free, 1024);
+    }
+
+    #[test]
+    fn unrepresentable_requests_return_none_and_leave_list_intact() {
+        // Auditoria 9d8c7e5, hallazgo 1: sin aritmetica comprobada un tamaño
+        // enorme envuelve y se escribe fuera del heap.
+        let r = Region::new(4096);
+        let mut h = r.heap();
+        // En el kernel el heap vive en 0xFFFF_C000_..., donde un `Layout`
+        // valido de 64 TiB ya desborda `user + size`. En host la region esta
+        // en direcciones bajas, asi que se ejercita `allocate_rounded` con
+        // tamaños que `Layout` no admite: la aritmetica debe rechazarlos sin
+        // tocar la lista.
+        assert!(
+            h.allocate_rounded(usize::MAX - 15, GRANULE).is_none(),
+            "user + size desborda"
+        );
+        assert!(
+            h.allocate_rounded(GRANULE, 1 << 63).is_none(),
+            "alineacion fuera del bloque"
+        );
+        // El redondeo del propio `Layout` tampoco puede desbordar.
+        assert!(Heap::round(l(isize::MAX as usize, 1)).is_some());
+        // Alineacion enorme con layout valido: el multiplo siguiente no cabe.
+        assert!(h.allocate(l(16, 1 << 62)).is_none());
+        assert_eq!(h.stats().free, 4096);
+        assert_eq!(h.free_blocks(), 1);
+        assert_eq!(h.stats().allocations, 0);
+        // Y el heap sigue operativo.
+        assert!(h.allocate(l(64, 8)).is_some());
     }
 
     #[test]
