@@ -1,0 +1,10 @@
+name = "memory.pmm_selftest"
+description = "test=pmm: unicidad, liberacion, double free y contiguidad sobre el bitmap real"
+level = "full"
+areas = ["memory"]
+cmdline = "qemu_exit test=pmm"
+
+[expect]
+exit = 33
+serial_contains = ["pmm selftest ok (2048 frames, contiguo 64x alineado 16)", "ARICODEOS_KERNEL_READY"]
+serial_absent = ["KERNEL PANIC"]

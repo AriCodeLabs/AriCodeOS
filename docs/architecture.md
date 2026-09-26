@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.0.2 (M0 + Fase 3 + Fase 4)
+## Estado: 0.0.3 en curso (0.0.2 + Fase 5)
 
 ```text
 OVMF (UEFI)
@@ -25,9 +25,10 @@ libs/x86-paging/     aricode-x86-paging: tablas de 4 niveles sobre un pool (no_s
 libs/cmdline/        aricode-cmdline: `clave` / `clave=valor` sin alloc (no_std, tests de host)
 libs/fb-console/     aricode-fb-console: consola de texto sobre framebuffer 32 bpp, fuente Terminus 8x16 (OFL), tests de host
 libs/x86-cpu/        aricode-x86-cpu: descriptores GDT/TSS/IDT y tabla de excepciones (no_std, tests de host)
+libs/pmm/            aricode-pmm: allocator de frames por bitmap sobre almacenamiento externo (no_std, tests de host)
 boot/                ariboot: integra lo anterior con la crate `uefi`
 kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log), sync (SingleCpu),
-                     arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions}, informe, panic, salida QEMU
+                     arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions}, memory/pmm, informe, panic, salida QEMU
 tools/xtask/         build, image, qemu, scenario, test, check
 tests/qemu/          escenarios QEMU declarativos (ver tests/README.md)
 ```
@@ -90,9 +91,23 @@ está marcada en el mapa UEFI con el tipo `0x8000_0000` (`MemoryRegionKind::Kern
   Vectores >= 32 se registran como inesperados (no hay APIC todavía).
 - Fallos provocados por cmdline: `test=breakpoint|invalid_opcode|page_fault|double_fault`.
 
+## Memoria física (Fase 5)
+
+- `memory::pmm::init` recorre el mapa UEFI: administra hasta el final de la
+  última región no reservada, coloca el bitmap (1 bit por frame de 4 KiB) en
+  la región libre más baja con sitio, libera las regiones `Free` y vuelve a
+  reservar el primer MiB (frame 0, trampolín SMP futuro) y el propio bitmap.
+- Las regiones `Boot` (datos del cargador y de boot services) siguen
+  reservadas: se reclamarán cuando el kernel deje de depender del `BootInfo`
+  original.
+- `test=pmm` ejecuta la autoprueba sobre el bitmap real (unicidad, orden,
+  double free, contigüidad alineada) y exige que las estadísticas vuelvan al
+  estado inicial.
+
 ## Deuda conocida
 
 - La identidad física es RWX; W^X en el mapa físico llega con el VMM (Fase 6).
+- El PMM se accede a través de `SingleCpu` como el resto del estado global.
 - Sin APIC: las interrupciones externas siguen deshabilitadas (Fase 8).
 - El estado de la consola es una celda de una sola CPU sin bloqueo; se
   sustituye por un spinlock consciente de interrupciones con los threads (Fase 9).

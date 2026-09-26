@@ -2005,19 +2005,23 @@ contra valores conocidos.
 
 # FASE 5 — Physical Memory Manager
 
-### Implementar
+**Estado: completada (2026-09-26).**
 
-- parser memory map;
-- bitmap allocator;
-- reserve/free pages;
-- estadísticas.
+### Implementado
+
+- parser del mapa UEFI en `kernel/src/memory/pmm.rs`;
+- bitmap allocator en `libs/pmm` (sin `alloc`, almacenamiento aportado por
+  el llamador, `allocate`, `allocate_contiguous` alineado, `free` con
+  detección de double free y fuera de rango);
+- reservas: frame 0 y primer MiB, el propio bitmap;
+- estadísticas (`Stats`: total, libres, usados).
 
 ### Tests
 
-- asignación;
-- liberación;
-- agotamiento;
-- páginas reservadas nunca reutilizadas.
+- host (7): liberación solo de frames completos, unicidad y orden, double
+  free, redondeo de reservas, contigüidad con huecos, agotamiento;
+- QEMU (área `memory`): `memory.pmm_init` (smoke) y `memory.pmm_selftest`
+  (`test=pmm`, 2048 frames sobre el bitmap real).
 
 ---
 
@@ -3392,7 +3396,7 @@ aricodeos/
 No necesitamos crear toda la estructura futura desde el primer día.
 
 Este árbol es el que existe en el repositorio desde M0, ampliado con
-`libs/{elf,x86-paging,x86-cpu,cmdline,fb-console}` (lógica `no_std` con tests de host),
+`libs/{elf,x86-paging,x86-cpu,pmm,cmdline,fb-console}` (lógica `no_std` con tests de host),
 `tests/qemu/` (escenarios) y `docs/decisions/0001..0007`.
 
 ---
