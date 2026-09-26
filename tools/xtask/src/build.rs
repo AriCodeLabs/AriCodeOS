@@ -27,6 +27,8 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("aricode-acpi", None),
     ("aricode-pci", None),
     ("aricode-virtio", None),
+    ("aricode-gpt", None),
+    ("aricode-proto", None),
     ("aricode-sys", None),
     ("user-testprogs", Some(KERNEL_TARGET)),
     ("ariinit", Some(KERNEL_TARGET)),

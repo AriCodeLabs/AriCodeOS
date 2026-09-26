@@ -205,17 +205,24 @@ fn write_esp(esp: &Path, a: &Artifacts, cmdline: Option<&str>) -> Result {
     Ok(())
 }
 
-/// Disco de pruebas virtio-blk: 4 MiB con "ARIDISK\0" + numero de sector en
-/// cada sector. Se regenera en cada imagen (los tests escriben en él).
+/// Disco de pruebas virtio-blk: 4 MiB con GPT y una partición AriCodeOS
+/// (`ARI0`) que ocupa todo el rango usable. Cada sector de la partición lleva
+/// `ARIDISK\0` y su LBA. Se regenera en cada arranque (los tests escriben).
 pub const DISK_SECTORS: u64 = 8192;
 
 pub fn write_test_disk(path: &Path) -> Result {
-    let mut img = Vec::with_capacity(DISK_SECTORS as usize * 512);
-    for sector in 0..DISK_SECTORS {
-        let mut s = [0u8; 512];
+    let mut img = vec![0u8; DISK_SECTORS as usize * 512];
+    let usable = aricode_gpt::write_disk(&mut img, &[]).map_err(|e| format!("gpt: {e:?}"))?;
+    let (first, last) = usable;
+    aricode_gpt::write_disk(
+        &mut img,
+        &[("ARI0", first, last, aricode_gpt::ARICODEOS_DATA_GUID)],
+    )
+    .map_err(|e| format!("gpt: {e:?}"))?;
+    for lba in first..=last {
+        let s = &mut img[lba as usize * 512..(lba as usize + 1) * 512];
         s[..8].copy_from_slice(b"ARIDISK\0");
-        s[8..16].copy_from_slice(&sector.to_le_bytes());
-        img.extend_from_slice(&s);
+        s[8..16].copy_from_slice(&lba.to_le_bytes());
     }
     io(fs::write(path, img), "escribir disco de pruebas")
 }

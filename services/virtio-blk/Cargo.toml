@@ -15,4 +15,6 @@ bench = false
 [dependencies]
 aricode-sys = { path = "../../sdk/rust" }
 aricode-virtio = { path = "../../libs/virtio" }
+aricode-proto = { path = "../../sdk/proto" }
+aricode-gpt = { path = "../../libs/gpt" }
 user-testprogs = { path = "../../user/testprogs" }

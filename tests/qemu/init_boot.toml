@@ -19,7 +19,7 @@ serial_contains = [
     "AriInit: crashy_driver reiniciado con exito",
     "AriInit: 7 funciones PCI",
     "virtio-blk: dispositivo listo",
-    "AriInit: virtio-blk listo",
+    "AriInit: servicio de bloques ok",
     "AriInit: servicios de arranque completados",
     "[INFO ] init terminado con codigo 0",
     "ARICODEOS_KERNEL_READY",

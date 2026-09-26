@@ -57,7 +57,8 @@ sdk/abi/         ABI de syscalls compartido entre kernel y espacio de usuario
 sdk/rust/        aricode-sys: wrappers de syscall y linker script de los programas de usuario
 user/testprogs/  programas de prueba de ring 3 y drivers de prueba (Rust y ensamblador), empaquetados en el initrd
 services/init/   AriInit, primer proceso de usuario y device manager provisional
-services/virtio-blk/ driver virtio-blk en ring 3
+services/virtio-blk/ driver virtio-blk y servicio de bloques por IPC en ring 3
+sdk/proto/       protocolos IPC de los servicios
 boot/            AriBoot: cargador UEFI (crate `ariboot`)
 kernel/          AriKernel (crate `arikernel`), ELF64 en la mitad alta
 tools/xtask/     automatización: build, imagen, QEMU, tests, lint

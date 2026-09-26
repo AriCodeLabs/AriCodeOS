@@ -304,6 +304,7 @@ fn run_init() {
     };
     let spawner = object::KernelObject::new(object::ObjectKind::Spawner);
     let pci_root = object::KernelObject::new(object::ObjectKind::PciRoot);
+    let hardware = object::KernelObject::new(object::ObjectKind::Hardware);
     let pid = user::process::spawn_with_handles(
         "init",
         elf,
@@ -312,6 +313,12 @@ fn run_init() {
             (
                 pci_root,
                 Rights::READ.union(Rights::MANAGE).union(Rights::DUPLICATE)
+            ),
+            (
+                hardware,
+                Rights::MANAGE
+                    .union(Rights::DUPLICATE)
+                    .union(Rights::TRANSFER)
             ),
         ],
     )
