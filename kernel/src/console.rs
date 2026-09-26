@@ -1,24 +1,17 @@
 //! Consola del kernel: serie siempre, framebuffer si existe. Implementa
 //! `log::Log` para las macros `log::{trace,debug,info,warn,error}!`.
 //!
-//! Estado global de un solo hilo: en M0/0.0.2 hay una CPU y las interrupciones
-//! están deshabilitadas. Se sustituirá por un spinlock consciente de
-//! interrupciones cuando lleguen threads (Fase 9).
+//! Estado global en `sync::SingleCpu`: una CPU y sin interrupciones externas
+//! hasta la Fase 9.
 
 use crate::framebuffer::MmioSurface;
 use crate::serial::Serial;
+use crate::sync::SingleCpu;
 use aricode_fb_console::Console;
-use core::cell::UnsafeCell;
 use core::fmt::Write;
 use log::{Level, LevelFilter, Log, Metadata, Record};
 
-struct SingleCpu<T>(UnsafeCell<T>);
-
-// SAFETY: solo una CPU y sin interrupciones habilitadas hasta la Fase 9; el
-// acceso es estrictamente secuencial. Ver nota del módulo.
-unsafe impl<T> Sync for SingleCpu<T> {}
-
-static FB: SingleCpu<Option<Console<MmioSurface>>> = SingleCpu(UnsafeCell::new(None));
+static FB: SingleCpu<Option<Console<MmioSurface>>> = SingleCpu::new(None);
 static LOGGER: KernelLogger = KernelLogger;
 
 /// Activa la consola de framebuffer. Idempotente; ignora si no hay GOP.
@@ -26,7 +19,7 @@ pub fn init_framebuffer(info: boot_protocol::FramebufferInfo) -> bool {
     match MmioSurface::new(info) {
         Some(surface) => {
             // SAFETY: ver `SingleCpu`.
-            unsafe { *FB.0.get() = Some(Console::new(surface)) };
+            unsafe { *FB.get() = Some(Console::new(surface)) };
             true
         }
         None => false,
@@ -44,7 +37,7 @@ pub fn init_logger(level: LevelFilter) {
 pub fn write_raw(args: core::fmt::Arguments) {
     let _ = Serial.write_fmt(args);
     // SAFETY: ver `SingleCpu`.
-    if let Some(fb) = unsafe { &mut *FB.0.get() } {
+    if let Some(fb) = unsafe { &mut *FB.get() } {
         let _ = fb.write_fmt(args);
     }
 }

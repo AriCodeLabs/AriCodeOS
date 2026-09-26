@@ -6,6 +6,7 @@ members = [
     "libs/x86-paging",
     "libs/cmdline",
     "libs/fb-console",
+    "libs/x86-cpu",
     "boot",
     "kernel",
     "tools/xtask",
@@ -18,11 +19,12 @@ default-members = [
     "libs/x86-paging",
     "libs/cmdline",
     "libs/fb-console",
+    "libs/x86-cpu",
     "tools/xtask",
 ]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 license = "UNLICENSED"
 repository = "https://github.com/lynxcraft/aricodeos"

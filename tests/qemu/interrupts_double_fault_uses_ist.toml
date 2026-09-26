@@ -1,0 +1,12 @@
+# Con la pila apuntando a memoria no mapeada solo la pila IST permite que el
+# handler de #DF llegue a ejecutarse y deje diagnostico.
+name = "interrupts.double_fault_uses_ist"
+description = "test=double_fault -> #DF atendido en la pila IST"
+level = "full"
+areas = ["interrupts"]
+cmdline = "qemu_exit test=double_fault"
+
+[expect]
+exit = 35
+serial_contains = ["EXCEPTION #DF (8) Double Fault", "ERROR: 0x0", "ARICODEOS KERNEL PANIC"]
+serial_absent = ["ARICODEOS_KERNEL_READY"]

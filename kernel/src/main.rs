@@ -7,10 +7,12 @@
 #![no_std]
 #![no_main]
 
+mod arch;
 mod console;
 mod framebuffer;
 mod qemu;
 mod serial;
+mod sync;
 
 use aricode_cmdline::{keys, CmdLine};
 use boot_protocol::{BootInfo, BOOT_PROTOCOL_MAGIC, BOOT_PROTOCOL_VERSION};
@@ -58,6 +60,13 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     report_framebuffer(info, has_fb);
     report_kernel(info);
     report_memory(info);
+
+    arch::x86_64::init();
+    let sel = arch::x86_64::gdt::selectors();
+    info!(
+        "cpu: GDT, TSS (IST para #DF) e IDT instaladas (cs={:#x} ds={:#x} tr={:#x})",
+        sel.code.0, sel.data.0, sel.tss.0
+    );
 
     run_requested_test(&cmdline);
 
@@ -158,10 +167,31 @@ fn report_memory(info: &BootInfo) {
 
 /// Fallos provocados para los escenarios de test (`test=<nombre>`).
 fn run_requested_test(cmdline: &CmdLine) {
-    match cmdline.get(keys::TEST) {
-        None => {}
-        Some("panic") => panic!("test=panic: fallo provocado"),
-        Some(other) => warn!("test: '{other}' desconocido, ignorado"),
+    let Some(name) = cmdline.get(keys::TEST) else {
+        return;
+    };
+    info!("test provocado: {name}");
+    match name {
+        "panic" => panic!("test=panic: fallo provocado"),
+        // #BP es recuperable: el handler avisa y la ejecución continúa.
+        // SAFETY: instrucción de depuración; la IDT ya está instalada.
+        "breakpoint" => unsafe { core::arch::asm!("int3", options(nomem, nostack)) },
+        // SAFETY: ud2 provoca #UD de forma deliberada; termina en pánico.
+        "invalid_opcode" => unsafe { core::arch::asm!("ud2", options(nomem, nostack, noreturn)) },
+        // Escritura a una dirección canónica no mapeada -> #PF con CR2 legible.
+        "page_fault" => {
+            // SAFETY: fallo deliberado; nunca retorna.
+            unsafe { (0xFFFF_9000_0000_0000 as *mut u64).write_volatile(0xDEAD) };
+            unreachable!("la escritura debia provocar #PF");
+        }
+        // Pila apuntando a memoria no mapeada + int3: la CPU no puede empujar el
+        // marco de #BP (-> #PF) ni el de #PF (-> #DF); solo la pila IST salva el
+        // diagnóstico.
+        // SAFETY: fallo deliberado; nunca retorna.
+        "double_fault" => unsafe {
+            core::arch::asm!("mov rsp, {0}", "int3", in(reg) 0xFFFF_9000_0000_0000u64, options(noreturn))
+        },
+        other => warn!("test: '{other}' desconocido, ignorado"),
     }
 }
 

@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.0.2 en curso (M0 + Fase 3)
+## Estado: 0.0.2 (M0 + Fase 3 + Fase 4)
 
 ```text
 OVMF (UEFI)
@@ -12,7 +12,8 @@ OVMF (UEFI)
        BootInfo v2, ExitBootServices, salto
   -> aricodeos/kernel.elf            AriKernel      kernel/
        consola serie + framebuffer (fuente 8x16), logger con niveles,
-       informe de BootInfo, ARICODEOS_KERNEL_READY, panic handler
+       informe de BootInfo, GDT/TSS/IDT propias con IST para #DF,
+       excepciones con volcado, ARICODEOS_KERNEL_READY, panic handler
 ```
 
 ## Crates
@@ -23,8 +24,10 @@ libs/elf/            aricode-elf: parser ELF64 mínimo (no_std, tests de host)
 libs/x86-paging/     aricode-x86-paging: tablas de 4 niveles sobre un pool (no_std, tests de host)
 libs/cmdline/        aricode-cmdline: `clave` / `clave=valor` sin alloc (no_std, tests de host)
 libs/fb-console/     aricode-fb-console: consola de texto sobre framebuffer 32 bpp, fuente Terminus 8x16 (OFL), tests de host
+libs/x86-cpu/        aricode-x86-cpu: descriptores GDT/TSS/IDT y tabla de excepciones (no_std, tests de host)
 boot/                ariboot: integra lo anterior con la crate `uefi`
-kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log), informe, panic, salida QEMU
+kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log), sync (SingleCpu),
+                     arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions}, informe, panic, salida QEMU
 tools/xtask/         build, image, qemu, scenario, test, check
 tests/qemu/          escenarios QEMU declarativos (ver tests/README.md)
 ```
@@ -73,10 +76,24 @@ está marcada en el mapa UEFI con el tipo `0x8000_0000` (`MemoryRegionKind::Kern
 - La consola de framebuffer mantiene una copia de las celdas y repinta al
   hacer scroll; nunca lee de VRAM.
 
+## CPU (Fase 4)
+
+- GDT propia: nulo, código ring 0 (0x08), datos ring 0 (0x10), TSS (0x18).
+  Los descriptores se codifican en `aricode-x86-cpu` (probados contra valores
+  conocidos) y `arch::x86_64::gdt` los carga y recarga CS con `retfq`.
+- TSS con IST1 apuntando a una pila de 16 KiB dedicada a #DF, de modo que un
+  double fault con la pila corrupta sigue produciendo diagnóstico.
+- IDT con los 256 vectores apuntando a stubs generados (ADR 0008). Vectores
+  con código de error y sin él se normalizan en el mismo `InterruptFrame`.
+- Excepciones: #BP avisa y continúa; el resto vuelca registros, y para #PF
+  CR2, tipo de acceso, modo y causa, todo por serie, y termina en pánico.
+  Vectores >= 32 se registran como inesperados (no hay APIC todavía).
+- Fallos provocados por cmdline: `test=breakpoint|invalid_opcode|page_fault|double_fault`.
+
 ## Deuda conocida
 
 - La identidad física es RWX; W^X en el mapa físico llega con el VMM (Fase 6).
-- El kernel no tiene GDT/IDT propias todavía: usa las del firmware (Fase 4).
+- Sin APIC: las interrupciones externas siguen deshabilitadas (Fase 8).
 - El estado de la consola es una celda de una sola CPU sin bloqueo; se
   sustituye por un spinlock consciente de interrupciones con los threads (Fase 9).
 - El loader depende de la crate `uefi` (ver ADR 0006).

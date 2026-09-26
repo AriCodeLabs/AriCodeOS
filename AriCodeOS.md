@@ -2,7 +2,7 @@
 
 ## Documento maestro de arquitectura, especificaciones técnicas y plan de desarrollo
 
-**Estado:** M0 First Boot completado (2026-09-26)  
+**Estado:** 0.0.2 completada (2026-09-26): boot, consola, GDT/IDT  
 **Versión del documento:** 0.2  
 **Nombre del sistema:** AriCodeOS  
 **Arquitectura inicial:** x86-64  
@@ -1980,20 +1980,26 @@ Kernel panic legible y salida capturable por tests: escenarios
 
 # FASE 4 — CPU foundation
 
-### Implementar
+**Estado: completada (2026-09-26).**
 
-- GDT;
-- TSS;
-- IDT;
-- excepciones;
-- handlers;
-- double fault stack.
+### Implementado
 
-### Tests
+- GDT propia (código/datos ring 0, TSS) codificada en `libs/x86-cpu`;
+- TSS con IST1 -> pila dedicada de 16 KiB para #DF;
+- IDT de 256 vectores sobre stubs generados en ensamblador (ADR 0008);
+- excepciones con volcado de registros, CR2/acceso/modo/causa para #PF,
+  #BP recuperable;
+- fallos provocados por cmdline: `test=breakpoint|invalid_opcode|page_fault|double_fault`.
 
-- breakpoint;
-- invalid opcode;
-- page fault controlado.
+### Tests (área `interrupts`)
+
+- `interrupts.breakpoint_returns` (smoke): #BP manejado, el kernel llega a READY;
+- `interrupts.invalid_opcode_panics`: #UD con volcado y pánico;
+- `interrupts.page_fault_reports_cr2`: #PF con CR2, ACCESS WRITE, MODE KERNEL;
+- `interrupts.double_fault_uses_ist`: pila corrupta + int3 -> #DF atendido en IST.
+
+Además, 7 tests de host validan las codificaciones de descriptores, TSS e IDT
+contra valores conocidos.
 
 ---
 
@@ -2906,14 +2912,19 @@ Ese milestone es importante porque demostrará que existe una cadena completamen
 
 # 86. AriCodeOS 0.0.2
 
-Añadir:
+**Estado: completada (2026-09-26), tag `v0.0.2`.**
 
-- BootInfo;
-- memory map;
-- logging;
-- panic;
-- GDT;
-- IDT.
+Añadido:
+
+- BootInfo v2 (con cmdline);
+- memory map clasificado;
+- logging con niveles (serie + framebuffer);
+- panic handler y excepciones con diagnóstico;
+- GDT/TSS;
+- IDT con IST para double fault.
+
+Incluye además la infraestructura de tests por niveles y las dos rondas de
+auditoría (`docs/audits/`).
 
 ---
 
@@ -3381,7 +3392,7 @@ aricodeos/
 No necesitamos crear toda la estructura futura desde el primer día.
 
 Este árbol es el que existe en el repositorio desde M0, ampliado con
-`libs/{elf,x86-paging,cmdline,fb-console}` (lógica `no_std` con tests de host),
+`libs/{elf,x86-paging,x86-cpu,cmdline,fb-console}` (lógica `no_std` con tests de host),
 `tests/qemu/` (escenarios) y `docs/decisions/0001..0007`.
 
 ---

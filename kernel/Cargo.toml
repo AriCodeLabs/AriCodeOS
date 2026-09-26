@@ -15,4 +15,5 @@ bench = false
 boot-protocol = { path = "../boot-protocol" }
 aricode-cmdline = { path = "../libs/cmdline" }
 aricode-fb-console = { path = "../libs/fb-console" }
+aricode-x86-cpu = { path = "../libs/x86-cpu" }
 log = { version = "0.4", default-features = false }
