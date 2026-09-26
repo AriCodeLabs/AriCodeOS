@@ -270,6 +270,19 @@ fn main(arg: u64) -> u64 {
                     return 19;
                 }
             }
+            match run_block_client("http_client", net_service) {
+                Ok(0) => say(b"cliente HTTP ok"),
+                Ok(code) => {
+                    sys::print(b"AriInit: http_client salio con ");
+                    sys::print(user_testprogs::fmt_u64(code, &mut buf));
+                    sys::print(b"\n");
+                    return 20;
+                }
+                Err(e) => {
+                    user_testprogs::print_error(b"AriInit: http_client", e);
+                    return 20;
+                }
+            }
         }
         None => say(b"sin virtio-net"),
     }

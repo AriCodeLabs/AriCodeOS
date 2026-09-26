@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.0.9 (0.0.8 + Fases 22 y 23)
+## Estado: 0.1.0 (Fases 0 a 24)
 
 ```text
 OVMF (UEFI)
@@ -51,11 +51,12 @@ libs/acpi/           aricode-acpi: RSDP, XSDT/RSDT, MADT (LAPIC, I/O APIC, overr
 libs/pci/            aricode-pci: direccionamiento ECAM, cabecera de configuración, BARs, capabilities, clases (no_std + alloc, tests de host)
 libs/virtio/         aricode-virtio: virtqueue split sobre DMA, estructuras virtio-pci modernas, peticiones virtio-blk (no_std, tests de host)
 libs/gpt/            aricode-gpt: CRC32, cabecera y entradas GPT, escritor para el disco de pruebas (no_std, tests de host)
+libs/http/           aricode-http: GET, análisis de respuestas, Content-Length y chunked sin alloc (no_std, tests de host)
 libs/net/            aricode-net: Ethernet, ARP, IPv4, ICMP, UDP, TCP, cliente DHCP y DNS sin alloc (no_std, tests de host)
 libs/arifs/          aricode-arifs: AriFS v0, directorio plano con tabla de ficheros de capacidad fija sobre `BlockDevice` (no_std, tests de host)
 sdk/proto/           aricode-proto: protocolos IPC versionados de los servicios (bloques v1, ficheros v1, red v1) (no_std, tests de host)
 sdk/abi/             aricode-abi: números de syscall, errores, handles iniciales, derechos y tipos de objeto (no_std, tests de host)
-sdk/rust/            aricode-sys: wrappers de syscall (no_std, sin alloc), clientes de los servicios de bloques, ficheros y red, transporte virtio PCI para drivers, y `user.ld`, el linker script de todo programa de usuario
+sdk/rust/            aricode-sys: wrappers de syscall (no_std, sin alloc), clientes de los servicios de bloques, ficheros y red, cliente HTTP GET, transporte virtio PCI para drivers, y `user.ld`, el linker script de todo programa de usuario
 user/testprogs/      programas de prueba de ring 3 (Rust y ensamblador) enlazados como ELF estáticos en 0x400000
 services/init/       AriInit: primer proceso; recibe SPAWNER y la raíz PCI, lanza/supervisa servicios y reclama dispositivos para sus drivers
 services/virtio-blk/ driver virtio-blk en ring 3 y servicio de bloques por IPC (interfaz moderna, cola 0 en DMA, MSI-X, GPT)
@@ -614,8 +615,21 @@ segundo brevemente para añadir la región.
 - El heap estático de los programas de usuario pasa a 256 KiB (los
   sockets TCP de netd no caben en la pila de 64 KiB).
 
+## Cliente HTTP (Fase 24)
+
+- `aricode-http` no toca la red: `write_get` construye la petición,
+  `parse_response` devuelve `None` hasta tener la línea vacía y luego el
+  estado y la longitud del cuerpo, y `decode_chunked` es incremental
+  (consumido, escrito, fin). `aricode-sys::http::get` une esas piezas con
+  `NetClient` (conexión, envío, lectura por trozos, cierre) y acepta URL
+  con IP o nombre; el cuerpo va a un buffer del llamador (4 KiB en el
+  shell). El respondedor de xtask añade un servidor HTTP de pruebas en
+  `127.0.0.1:17010` con los tres casos que exige `network.http`.
+
 ## Deuda conocida
 
+- HTTP sin TLS, sin redirecciones ni `keep-alive`; cuerpos limitados al
+  buffer del llamador.
 - `netd` no renueva la concesión DHCP ni fragmenta IPv4; un socket UDP
   guarda un solo datagrama sin recoger; TCP reenvía desde `snd_una` sin
   SACK ni estimación de RTT. Un cliente que envía a un servicio muerto se

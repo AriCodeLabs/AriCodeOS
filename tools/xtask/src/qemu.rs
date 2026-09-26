@@ -67,6 +67,32 @@ pub struct Responder {
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
+/// Servidor HTTP de pruebas: `/hola` (Content-Length), `/chunked`
+/// (Transfer-Encoding: chunked) y 404 para el resto.
+fn http_serve(mut stream: std::net::TcpStream) {
+    use std::io::Write;
+    let mut buf = [0u8; 2048];
+    let mut have = 0;
+    loop {
+        match stream.read(&mut buf[have..]) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => have += n,
+        }
+        if buf[..have].windows(4).any(|w| w == b"\r\n\r\n") || have == buf.len() {
+            break;
+        }
+    }
+    let request = String::from_utf8_lossy(&buf[..have]);
+    let path = request.split(' ').nth(1).unwrap_or("/");
+    let response: Vec<u8> = match path {
+        "/hola" => b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 19\r\nConnection: close\r\n\r\nHola desde el host\n".to_vec(),
+        "/chunked" => b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nd\r\nprimer trozo,\r\ne\r\n segundo trozo\r\n0\r\n\r\n".to_vec(),
+        _ => b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nno existe".to_vec(),
+    };
+    let _ = stream.write_all(&response);
+    let _ = stream.flush();
+}
+
 /// Eco de una conexión TCP hasta que el otro extremo cierra.
 fn tcp_echo(mut stream: std::net::TcpStream) {
     use std::io::Write;
@@ -120,22 +146,37 @@ impl Responder {
                 }
             }
         });
-        let flag = Arc::clone(&stop);
-        let tcp = std::thread::spawn(move || {
-            while !flag.load(Ordering::Relaxed) {
+        let http_port = aricode_proto::net::TEST_HTTP_PORT;
+        let http_listener = std::net::TcpListener::bind(("127.0.0.1", http_port))
+            .map_err(|e| format!("servidor HTTP de pruebas en 127.0.0.1:{http_port}: {e}"))?;
+        http_listener
+            .set_nonblocking(true)
+            .map_err(|e| e.to_string())?;
+        let tcp = Self::accept_loop(Arc::clone(&stop), listener, tcp_echo);
+        let http = Self::accept_loop(Arc::clone(&stop), http_listener, http_serve);
+        Ok(Self {
+            stop,
+            threads: vec![udp, tcp, http],
+        })
+    }
+
+    /// Acepta conexiones hasta `stop` y atiende cada una en su hilo.
+    fn accept_loop(
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        listener: std::net::TcpListener,
+        serve: fn(std::net::TcpStream),
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, _)) => {
                         let _ = stream.set_nonblocking(false);
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-                        std::thread::spawn(move || tcp_echo(stream));
+                        std::thread::spawn(move || serve(stream));
                     }
                     Err(_) => std::thread::sleep(Duration::from_millis(20)),
                 }
             }
-        });
-        Ok(Self {
-            stop,
-            threads: vec![udp, tcp],
         })
     }
 }

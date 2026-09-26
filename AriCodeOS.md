@@ -2485,15 +2485,19 @@ ventana y SACK, y estimación de RTT.
 
 # FASE 24 — HTTP client
 
-Primera aplicación de red real.
+**Estado: completada (2026-09-26).**
 
-Objetivo:
+Primera aplicación de red real: `libs/http` (peticiones `GET`, análisis de
+la línea de estado y cabeceras, cuerpos por `Content-Length`, `chunked` o
+hasta el cierre; sin `alloc`, tests de host), `aricode-sys::http::get`
+sobre el cliente TCP de netd (resuelve nombres por DNS si el host no es una
+IP), el programa `http_client` y el comando `http URL` del shell. xtask
+sirve `/hola`, `/chunked` y 404 en `127.0.0.1:17010` para `network.http`.
 
-```text
-http GET -> respuesta recibida
-```
+Objetivo `http GET -> respuesta recibida`: **cumplido** (200 con cuerpo,
+chunked, 404 y puerto cerrado detectado).
 
-TLS vendrá posteriormente.
+TLS vendrá posteriormente (Fase 31, criptografía).
 
 ---
 
@@ -3194,6 +3198,11 @@ kernel conozca ningún protocolo de red.
 ---
 
 # 94. AriCodeOS 0.1
+
+**Estado: completada (2026-09-26), tag `v0.1.0`.** Fases 0 a 24: arranque
+UEFI, memoria, procesos en ring 3, scheduler, IPC y capabilities, drivers
+virtio en espacio de usuario, servicio de bloques, AriFS, shell, pila de
+red con TCP y cliente HTTP.
 
 Primera versión experimental utilizable.
 

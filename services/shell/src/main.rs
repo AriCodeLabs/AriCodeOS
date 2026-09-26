@@ -83,7 +83,7 @@ fn trim(s: &[u8]) -> &[u8] {
 
 fn help() {
     sys::print(
-        b"comandos:\n  help      esta ayuda\n  ps        procesos\n  mem       memoria fisica\n  ls        ficheros de AriFS\n  cat NOM   muestra un fichero\n  devices   funciones PCI\n  services  servicios de arranque\n  uptime    tiempo desde el arranque\n  net       configuracion de red\n  ping IP   eco ICMP (4 intentos)\n  dns NOM   resuelve un nombre\n  reboot    reinicia\n  shutdown  apaga\n  exit      termina el shell\n",
+        b"comandos:\n  help      esta ayuda\n  ps        procesos\n  mem       memoria fisica\n  ls        ficheros de AriFS\n  cat NOM   muestra un fichero\n  devices   funciones PCI\n  services  servicios de arranque\n  uptime    tiempo desde el arranque\n  net       configuracion de red\n  ping IP   eco ICMP (4 intentos)\n  dns NOM   resuelve un nombre\n  http URL  GET y muestra el cuerpo\n  reboot    reinicia\n  shutdown  apaga\n  exit      termina el shell\n",
     );
 }
 
@@ -346,6 +346,44 @@ fn dns(client: &NetClient, arg: &[u8]) {
     }
 }
 
+fn http_get(client: &mut NetClient, arg: &[u8]) {
+    let Ok(url) = core::str::from_utf8(arg) else {
+        sys::print(b"http: url invalida\n");
+        return;
+    };
+    if url.is_empty() {
+        sys::print(b"uso: http [http://]host[:puerto][/ruta]\n");
+        return;
+    }
+    let mut body = [0u8; 4096];
+    match user_testprogs::sys::http::get(client, url, &mut body, 5000) {
+        Ok(f) => {
+            sys::print(b"HTTP ");
+            num(f.status as u64);
+            sys::print(b", ");
+            num(f.body_len as u64);
+            sys::print(b" bytes\n");
+            sys::print(&body[..f.body_len]);
+            if f.body_len > 0 && body[f.body_len - 1] != b'\n' {
+                sys::print(b"\n");
+            }
+        }
+        Err(user_testprogs::sys::http::HttpError::BadUrl) => sys::print(b"http: url invalida\n"),
+        Err(user_testprogs::sys::http::HttpError::Resolve(e)) => net_error(e),
+        Err(user_testprogs::sys::http::HttpError::Connect(e)) => {
+            sys::print(b"http: no se pudo conectar: ");
+            net_error(e);
+        }
+        Err(user_testprogs::sys::http::HttpError::Io(e)) => net_error(e),
+        Err(user_testprogs::sys::http::HttpError::Malformed) => {
+            sys::print(b"http: respuesta no valida\n")
+        }
+        Err(user_testprogs::sys::http::HttpError::TooBig) => {
+            sys::print(b"http: respuesta demasiado grande (4 KiB)\n")
+        }
+    }
+}
+
 fn services(mask: u64, fs: &FsClient) {
     sys::print(b"bloques   virtio_blk  ");
     sys::print(if mask & SERVICE_BLOCK != 0 {
@@ -377,7 +415,7 @@ fn main(mask: u64) -> u64 {
         sys::print(b"arish: sin cliente de ficheros\n");
         return 1;
     };
-    let Ok(net_client) = NetClient::new(NETD, HW) else {
+    let Ok(mut net_client) = NetClient::new(NETD, HW) else {
         sys::print(b"arish: sin cliente de red\n");
         return 2;
     };
@@ -400,6 +438,7 @@ fn main(mask: u64) -> u64 {
             b"net" => net(&net_client),
             b"ping" => ping(&net_client, rest),
             b"dns" => dns(&net_client, rest),
+            b"http" => http_get(&mut net_client, rest),
             b"reboot" => {
                 user_testprogs::print_error(
                     b"reboot",
