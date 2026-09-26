@@ -1955,20 +1955,26 @@ sin utilizar servicios UEFI después de entrar.
 
 # FASE 3 — Consola temprana
 
+**Estado: completada (2026-09-26).**
+
 ### Objetivo
 
 Logging fiable.
 
-### Implementar
+### Implementado
 
-- serial logger;
-- framebuffer logger;
-- macros `log!`;
-- panic handler.
+- serial logger (COM1);
+- framebuffer logger: `libs/fb-console` con fuente Terminus 8x16 (OFL 1.1),
+  rejilla de celdas y scroll sin leer VRAM;
+- macros: `print!/println!` (texto sin formato) y `log::{trace..error}!`
+  con niveles TRACE..ERROR vía `console::KernelLogger`; `log=<nivel>` en la
+  cmdline; FATAL equivale al panic;
+- panic handler solo por serie.
 
 ### Criterio
 
-Kernel panic legible y salida capturable por tests.
+Kernel panic legible y salida capturable por tests: escenarios
+`boot.kernel_panic_reports` y área `console` (cuatro escenarios de niveles).
 
 ---
 
@@ -3375,7 +3381,7 @@ aricodeos/
 No necesitamos crear toda la estructura futura desde el primer día.
 
 Este árbol es el que existe en el repositorio desde M0, ampliado con
-`libs/{elf,x86-paging,cmdline}` (lógica `no_std` con tests de host),
+`libs/{elf,x86-paging,cmdline,fb-console}` (lógica `no_std` con tests de host),
 `tests/qemu/` (escenarios) y `docs/decisions/0001..0007`.
 
 ---

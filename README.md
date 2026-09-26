@@ -7,10 +7,10 @@ El documento maestro de arquitectura y roadmap es [AriCodeOS.md](AriCodeOS.md).
 Las decisiones de diseño se registran en [docs/decisions/](docs/decisions/) y el
 flujo de ramas (git flow) en [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-**Estado:** Milestone M0 "First Boot" completado. AriBoot (UEFI) carga
-`kernel.elf`, construye las tablas de páginas, sale de boot services y salta a
-AriKernel, que reporta el hardware por serie, pinta el framebuffer y emite
-`ARICODEOS_KERNEL_READY`.
+**Estado:** M0 "First Boot" completado y Fase 3 (consola temprana) integrada.
+AriBoot (UEFI) carga `kernel.elf`, construye las tablas de páginas, sale de
+boot services y salta a AriKernel, que levanta consola serie y de framebuffer
+con logger por niveles, reporta el hardware y emite `ARICODEOS_KERNEL_READY`.
 
 ## Requisitos (Debian 13)
 
@@ -41,7 +41,7 @@ niveles de test están descritos en [tests/README.md](tests/README.md).
 
 ```text
 boot-protocol/   ABI BootInfo compartido por bootloader y kernel
-libs/            librerías no_std con tests de host: elf, x86-paging, cmdline
+libs/            librerías no_std con tests de host: elf, x86-paging, cmdline, fb-console
 boot/            AriBoot: cargador UEFI (crate `ariboot`)
 kernel/          AriKernel (crate `arikernel`), ELF64 en la mitad alta
 tools/xtask/     automatización: build, imagen, QEMU, tests, lint

@@ -1,0 +1,10 @@
+name = "console.log_level_invalid_falls_back"
+description = "log=bogus -> WARN explicativo y nivel info"
+level = "full"
+areas = ["console"]
+cmdline = "qemu_exit log=bogus"
+
+[expect]
+exit = 33
+serial_contains = ["[WARN ] cmdline: log=bogus desconocido, se usa INFO", "[INFO ] kernel:", "ARICODEOS_KERNEL_READY"]
+serial_absent = ["[DEBUG]", "KERNEL PANIC"]

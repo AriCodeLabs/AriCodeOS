@@ -61,6 +61,8 @@ pub mod keys {
     pub const QEMU_EXIT: &str = "qemu_exit";
     /// Fallo provocado para tests: `test=panic`.
     pub const TEST: &str = "test";
+    /// Nivel máximo de log: `log=trace|debug|info|warn|error|off`.
+    pub const LOG: &str = "log";
 }
 
 #[cfg(test)]

@@ -1,12 +1,13 @@
 //! AriKernel: núcleo de AriCodeOS.
 //!
-//! Estado: M0 First Boot. Recibe `BootInfo`, valida el protocolo, inicializa
-//! la consola serie, pinta el framebuffer, describe el hardware que le han
-//! entregado y anuncia `ARICODEOS_KERNEL_READY`.
+//! Estado: 0.0.2 en curso. Recibe `BootInfo`, valida el protocolo, levanta la
+//! consola (serie + framebuffer) y el logger con niveles, describe el hardware
+//! que le han entregado y anuncia `ARICODEOS_KERNEL_READY`.
 
 #![no_std]
 #![no_main]
 
+mod console;
 mod framebuffer;
 mod qemu;
 mod serial;
@@ -15,7 +16,7 @@ use aricode_cmdline::{keys, CmdLine};
 use boot_protocol::{BootInfo, BOOT_PROTOCOL_MAGIC, BOOT_PROTOCOL_VERSION};
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
-use framebuffer::Framebuffer;
+use log::{debug, info, trace, warn, LevelFilter};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -33,20 +34,28 @@ static QEMU_EXIT: AtomicBool = AtomicBool::new(false);
 #[no_mangle]
 pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     serial::Serial.init();
-    println!();
-    println!("AriCodeOS booting...");
-    println!("AriCodeOS Kernel {VERSION}");
-
     let info = validate_boot_info(boot_info);
 
     // SAFETY: AriBoot copió la cmdline a memoria de kernel identidad-mapeada.
     let cmdline = CmdLine::new(unsafe { info.cmdline() });
     QEMU_EXIT.store(cmdline.has(keys::QEMU_EXIT), Ordering::Relaxed);
-    if !cmdline.is_empty() {
-        println!("cmdline: {}", cmdline.raw().trim());
-    }
 
-    report_framebuffer(info);
+    let has_fb = console::init_framebuffer(info.framebuffer);
+    println!();
+    println!("AriCodeOS booting...");
+    println!("AriCodeOS Kernel {VERSION}");
+
+    let (level, level_error) = log_level_from(&cmdline);
+    console::init_logger(level);
+    if let Some(bad) = level_error {
+        warn!("cmdline: log={bad} desconocido, se usa {level}");
+    }
+    if !cmdline.is_empty() {
+        info!("cmdline: {}", cmdline.raw().trim());
+    }
+    trace!("logger activo en nivel {level}");
+
+    report_framebuffer(info, has_fb);
     report_kernel(info);
     report_memory(info);
 
@@ -54,6 +63,29 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
 
     println!("ARICODEOS_KERNEL_READY");
     finish(qemu::ExitCode::Success)
+}
+
+/// `log=<trace|debug|info|warn|error|off>`; por defecto `info`.
+/// Devuelve también el valor rechazado, si lo hubo, para avisar tras el init.
+fn log_level_from(cmdline: &CmdLine) -> (LevelFilter, Option<&'static str>) {
+    match cmdline.get(keys::LOG) {
+        None => (LevelFilter::Info, None),
+        Some(v) => match v.parse::<LevelFilter>() {
+            Ok(l) => (l, None),
+            // El valor vive en la cmdline (memoria de kernel, 'static de facto).
+            Err(_) => (LevelFilter::Info, Some(unsafe { extend_lifetime(v) })),
+        },
+    }
+}
+
+/// La cmdline está en memoria de kernel que nunca se libera; el `&str` es
+/// válido durante toda la ejecución.
+///
+/// # Safety
+///
+/// Solo para cadenas que apuntan a la cmdline entregada por AriBoot.
+unsafe fn extend_lifetime(s: &str) -> &'static str {
+    unsafe { &*(s as *const str) }
 }
 
 /// Comprueba magic y versión del protocolo; cualquier discrepancia es fatal.
@@ -74,34 +106,32 @@ unsafe fn validate_boot_info(ptr: *const BootInfo) -> &'static BootInfo {
     info
 }
 
-fn report_framebuffer(info: &BootInfo) {
-    match Framebuffer::new(info.framebuffer) {
-        Some(fb) => {
-            fb.draw_boot_screen();
-            let f = &info.framebuffer;
-            println!(
-                "framebuffer: {}x{} stride {} {:?} @ {:#x}",
-                f.width, f.height, f.stride, f.pixel_format, f.address
-            );
-        }
-        None => println!("framebuffer: no disponible"),
+fn report_framebuffer(info: &BootInfo, has_fb: bool) {
+    if has_fb {
+        let f = &info.framebuffer;
+        info!(
+            "framebuffer: {}x{} stride {} {:?} @ {:#x}",
+            f.width, f.height, f.stride, f.pixel_format, f.address
+        );
+    } else {
+        warn!("framebuffer: no disponible, solo serie");
     }
 }
 
 fn report_kernel(info: &BootInfo) {
-    println!(
+    info!(
         "kernel: phys {:#x} virt {:#x} size {} KiB",
         info.kernel_phys_base,
         info.kernel_virt_base,
         info.kernel_size / 1024
     );
-    println!(
+    debug!(
         "stack: {:#x} ({} KiB)  pml4: {:#x}",
         info.kernel_stack_base,
         info.kernel_stack_size / 1024,
         info.page_table_root
     );
-    println!("acpi rsdp: {:#x}", info.rsdp_address);
+    info!("acpi rsdp: {:#x}", info.rsdp_address);
 }
 
 fn report_memory(info: &BootInfo) {
@@ -115,13 +145,13 @@ fn report_memory(info: &BootInfo) {
         totals[d.kind() as usize] += d.size_bytes();
         count += 1;
     }
-    println!(
+    info!(
         "memory map: {count} regiones (desc {} bytes)",
         info.memory_map.descriptor_size
     );
     for (name, total) in NAMES.iter().zip(totals) {
         if total != 0 {
-            println!("  {:<9} {:>8} KiB", name, total / 1024);
+            debug!("  {:<9} {:>8} KiB", name, total / 1024);
         }
     }
 }
@@ -131,7 +161,7 @@ fn run_requested_test(cmdline: &CmdLine) {
     match cmdline.get(keys::TEST) {
         None => {}
         Some("panic") => panic!("test=panic: fallo provocado"),
-        Some(other) => println!("test: '{other}' desconocido, ignorado"),
+        Some(other) => warn!("test: '{other}' desconocido, ignorado"),
     }
 }
 
@@ -152,14 +182,16 @@ pub fn halt_loop() -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    println!();
-    println!("============================");
-    println!("ARICODEOS KERNEL PANIC");
-    println!("============================");
+    // Solo serie: el panic puede ocurrir con la consola de framebuffer a medio
+    // escribir y no debe tocar estado compartido.
+    serial_println!();
+    serial_println!("============================");
+    serial_println!("ARICODEOS KERNEL PANIC");
+    serial_println!("============================");
     if let Some(loc) = info.location() {
-        println!("Where: {}:{}:{}", loc.file(), loc.line(), loc.column());
+        serial_println!("Where: {}:{}:{}", loc.file(), loc.line(), loc.column());
     }
-    println!("Reason: {}", info.message());
-    println!("============================");
+    serial_println!("Reason: {}", info.message());
+    serial_println!("============================");
     finish(qemu::ExitCode::Failed)
 }

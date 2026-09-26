@@ -3,16 +3,16 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: M0 First Boot
+## Estado: 0.0.2 en curso (M0 + Fase 3)
 
 ```text
 OVMF (UEFI)
   -> EFI/BOOT/BOOTX64.EFI            AriBoot        boot/
-       GOP, ACPI RSDP, kernel.elf, tablas de páginas, BootInfo v1,
-       ExitBootServices, salto
+       GOP, ACPI RSDP, cmdline.txt, kernel.elf, tablas de páginas,
+       BootInfo v2, ExitBootServices, salto
   -> aricodeos/kernel.elf            AriKernel      kernel/
-       serie COM1, framebuffer, informe de BootInfo,
-       ARICODEOS_KERNEL_READY, panic handler
+       consola serie + framebuffer (fuente 8x16), logger con niveles,
+       informe de BootInfo, ARICODEOS_KERNEL_READY, panic handler
 ```
 
 ## Crates
@@ -22,8 +22,9 @@ boot-protocol/       ABI BootInfo (v2): mapa UEFI, framebuffer, RSDP, kernel, pi
 libs/elf/            aricode-elf: parser ELF64 mínimo (no_std, tests de host)
 libs/x86-paging/     aricode-x86-paging: tablas de 4 niveles sobre un pool (no_std, tests de host)
 libs/cmdline/        aricode-cmdline: `clave` / `clave=valor` sin alloc (no_std, tests de host)
+libs/fb-console/     aricode-fb-console: consola de texto sobre framebuffer 32 bpp, fuente Terminus 8x16 (OFL), tests de host
 boot/                ariboot: integra lo anterior con la crate `uefi`
-kernel/              arikernel: serial, framebuffer, informe, panic, salida QEMU
+kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log), informe, panic, salida QEMU
 tools/xtask/         build, image, qemu, scenario, test, check
 tests/qemu/          escenarios QEMU declarativos (ver tests/README.md)
 ```
@@ -60,9 +61,22 @@ Definido en `boot-protocol/` (`BootInfo`, versión 2). Al entrar al kernel:
 Toda la memoria que el kernel debe conservar (imagen, pila, tablas, BootInfo)
 está marcada en el mapa UEFI con el tipo `0x8000_0000` (`MemoryRegionKind::Kernel`).
 
-## Deuda conocida de M0
+## Consola y logging (Fase 3)
+
+- `print!`/`println!` escriben texto sin formato en serie y framebuffer
+  (banner y marcadores como `ARICODEOS_KERNEL_READY`).
+- Las macros de la crate `log` (`trace!`..`error!`) pasan por `console::KernelLogger`,
+  que antepone `[LEVEL]` y escribe en ambas salidas. Nivel por defecto `info`;
+  `log=<nivel>` en la cmdline lo cambia y un valor inválido produce un `WARN`.
+- El panic handler escribe solo por serie (`serial_println!`): no toca estado
+  compartido, por si el panic ocurre a medio escribir en el framebuffer.
+- La consola de framebuffer mantiene una copia de las celdas y repinta al
+  hacer scroll; nunca lee de VRAM.
+
+## Deuda conocida
 
 - La identidad física es RWX; W^X en el mapa físico llega con el VMM (Fase 6).
 - El kernel no tiene GDT/IDT propias todavía: usa las del firmware (Fase 4).
-- Sin consola de texto en framebuffer, solo serie (Fase 3).
+- El estado de la consola es una celda de una sola CPU sin bloqueo; se
+  sustituye por un spinlock consciente de interrupciones con los threads (Fase 9).
 - El loader depende de la crate `uefi` (ver ADR 0006).
