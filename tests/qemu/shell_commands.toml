@@ -1,0 +1,44 @@
+# Fase 21: init lanza el shell (cmdline `shell`) tras los servicios de
+# arranque; el runner teclea comandos al ver el prompt y termina con shutdown,
+# que el kernel convierte en salida limpia de QEMU.
+name = "shell.commands"
+description = "arish: help, uptime, mem, ps, ls, cat, devices, services, error y shutdown"
+level = "full"
+areas = ["shell", "filesystem", "init"]
+cmdline = "qemu_exit shell"
+timeout_secs = 60
+stdin = [
+    "help",
+    "uptime",
+    "mem",
+    "ps",
+    "ls",
+    "cat hola.txt",
+    "cat no-existe",
+    "devices",
+    "services",
+    "nada",
+    "shutdown",
+]
+
+[expect]
+exit = 33
+serial_contains = [
+    "arish: shell de AriCodeOS",
+    "ari> help",
+    "  shutdown  apaga",
+    "uptime: ",
+    "memoria fisica utilizable: ",
+    "PID  ESTADO      NOMBRE",
+    "shell",
+    "hola.txt            17 bytes",
+    "ari> cat hola.txt",
+    "Hola desde AriFS",
+    "cat: no existe no-existe",
+    "1af4:1042  clase 01.00",
+    "ficheros  fsd         activo, responde",
+    "comando desconocido: nada (help)",
+    "AriCodeOS: apagando el sistema",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "ARICODEOS_KERNEL_READY"]

@@ -38,6 +38,8 @@ level = "smoke" | "full"
 areas = ["boot", "memory"]      # para filtrar con --area
 cmdline = "qemu_exit ..."       # se escribe en aricodeos/cmdline.txt
 timeout_secs = 30
+stdin = ["ls", "shutdown"]      # opcional: líneas que el runner teclea por la serie
+prompt = "ari> "                # cada línea se envía al ver el prompt una vez más (por defecto "ari> ")
 
 [inject]                        # opcional: fallos provocados en la ESP
 truncate_kernel = 3000          # recorta kernel.elf a N bytes
@@ -62,8 +64,8 @@ identifica el paso fallido.
 
 Cada fase del roadmap añade su área y sus escenarios. Existentes: `boot`,
 `panic`, `console`, `interrupts`, `memory`, `timer`, `threads`, `scheduler`,
-`user`, `capabilities`, `ipc`, `init`, `drivers`, `acpi`, `pci`. Previstas:
-`virtio`, `storage`, `filesystem`, ...
+`user`, `capabilities`, `ipc`, `init`, `drivers`, `acpi`, `pci`, `virtio`,
+`storage`, `filesystem`, `shell`.
 Una rama `feature/f05-physical-memory` ejecuta `--area memory` mientras
 desarrolla y `--all` antes de integrar. Si el filtro no selecciona ningún
 escenario QEMU, el runner falla y lista las áreas conocidas: un filtro mal

@@ -10,3 +10,4 @@ path = "src/lib.rs"
 
 [dependencies]
 aricode-abi = { path = "../abi" }
+aricode-proto = { path = "../proto" }

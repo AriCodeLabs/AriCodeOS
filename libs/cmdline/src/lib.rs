@@ -63,6 +63,8 @@ pub mod keys {
     pub const TEST: &str = "test";
     /// Nivel máximo de log: `log=trace|debug|info|warn|error|off`.
     pub const LOG: &str = "log";
+    /// `shell`: init lanza el shell interactivo tras los servicios de arranque.
+    pub const SHELL: &str = "shell";
 }
 
 #[cfg(test)]

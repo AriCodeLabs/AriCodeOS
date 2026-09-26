@@ -69,6 +69,13 @@ pub struct Scenario {
     pub cmdline: String,
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
+    /// Líneas que el runner envía por la consola serie, una cada vez que la
+    /// salida muestra `prompt` (la primera al primer prompt).
+    #[serde(default)]
+    pub stdin: Vec<String>,
+    /// Texto que anuncia que el sistema espera una línea.
+    #[serde(default = "default_prompt")]
+    pub prompt: String,
     #[serde(default)]
     pub inject: Inject,
     pub expect: Expect,
@@ -98,6 +105,10 @@ fn default_cmdline() -> String {
 }
 fn default_timeout() -> u64 {
     30
+}
+
+fn default_prompt() -> String {
+    String::from("ari> ")
 }
 
 pub fn scenarios_dir() -> PathBuf {

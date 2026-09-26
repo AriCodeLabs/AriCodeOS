@@ -36,6 +36,7 @@ targets `x86_64-unknown-none` y `x86_64-unknown-uefi`.
 cargo xtask build          # compila AriBoot y AriKernel (release)
 cargo xtask image          # monta build/esp/ (BOOTX64.EFI, aricodeos/kernel.elf, aricodeos/initrd.img)
 cargo xtask run            # arranca en QEMU + OVMF, serie en la terminal (salir: Ctrl-A X)
+cargo xtask run --cmdline shell   # arranca con el shell interactivo (arish) en la consola serie
 cargo xtask test           # unit + smoke (arranque nominal en QEMU)
 cargo xtask test --all     # unit + todos los escenarios QEMU; obligatorio antes de main
 cargo xtask test --area boot   # solo los escenarios de un área
@@ -56,13 +57,18 @@ libs/            librerías no_std con tests de host: elf, x86-paging, x86-cpu, 
 sdk/abi/         ABI de syscalls compartido entre kernel y espacio de usuario
 sdk/rust/        aricode-sys: wrappers de syscall y linker script de los programas de usuario
 user/testprogs/  programas de prueba de ring 3 y drivers de prueba (Rust y ensamblador), empaquetados en el initrd
-services/init/   AriInit, primer proceso de usuario
+services/init/   AriInit, primer proceso de usuario y device manager provisional
+services/virtio-blk/ driver virtio-blk y servicio de bloques por IPC en ring 3
+services/arifs/  fsd: servicio de ficheros AriFS v0 por IPC en ring 3
+services/shell/  arish: shell interactivo en ring 3
+libs/arifs/      AriFS v0: sistema de archivos plano con tests de host
+sdk/proto/       protocolos IPC de los servicios
 boot/            AriBoot: cargador UEFI (crate `ariboot`)
 kernel/          AriKernel (crate `arikernel`), ELF64 en la mitad alta
 tools/xtask/     automatización: build, imagen, QEMU, tests, lint
 tests/qemu/      escenarios de integración declarativos (TOML)
 docs/            arquitectura, flujo de trabajo y ADRs
-build/           salida generada (ESP, OVMF_VARS, logs); no versionar
+build/           salida generada (ESP, OVMF_VARS, disk.img, logs); no versionar
 ```
 
 ## Test de aceptación

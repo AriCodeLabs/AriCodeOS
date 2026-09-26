@@ -349,6 +349,20 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
         dst[KERNEL_PML4_FIRST..].copy_from_slice(&src[KERNEL_PML4_FIRST..]);
     }
 
+    /// Crea de antemano el PDPT de cada entrada de la mitad alta del PML4.
+    /// Así `share_kernel_half` comparte PDPTs y no entradas vacías: cualquier
+    /// mapeo que el kernel añada después queda visible en todos los espacios
+    /// de usuario sin tener que propagarlo.
+    pub fn preallocate_kernel_half(&mut self) -> Result<(), MapError> {
+        for i in KERNEL_PML4_FIRST..512 {
+            if self.table(self.root)[i] & PRESENT == 0 {
+                let t = self.alloc_table()?;
+                self.table_mut(self.root)[i] = t | PRESENT | WRITABLE;
+            }
+        }
+        Ok(())
+    }
+
     /// Libera toda la mitad baja (usuario): hojas de 4 KiB y 2 MiB y tablas
     /// intermedias, entregando cada frame a `free`. Las entradas del kernel
     /// no se tocan. Al terminar, el PML4 sigue siendo válido y vacío por abajo.
@@ -529,6 +543,33 @@ mod tests {
         m.map_4k(0x40_1000, 0x10_1000, WRITABLE).unwrap();
         let pml4e2 = unsafe { (*(root as *const [u64; 512]))[0] };
         assert!(pml4e2 & USER != 0);
+    }
+
+    #[test]
+    fn preallocated_kernel_half_makes_later_mappings_visible() {
+        let mut kernel = mapper(300);
+        kernel.preallocate_kernel_half().unwrap();
+        let mut user = mapper(8);
+        unsafe { user.share_kernel_half(kernel.root_phys()) };
+        // Un mapeo posterior en una region alta nueva se ve desde el espacio de usuario.
+        kernel
+            .map_4k(0xFFFF_D200_0000_0000, 0x30_0000, GLOBAL)
+            .unwrap();
+        assert_eq!(
+            user.translate(0xFFFF_D200_0000_0000).map(|t| t.0),
+            Some(0x30_0000)
+        );
+        assert_eq!(
+            kernel.allocator().live.len(),
+            1 + 256 + 2,
+            "PML4 + 256 PDPT + PD + PT"
+        );
+        assert_eq!(
+            Mapper::new(HostFrames::new(10), IdentityMap)
+                .unwrap()
+                .preallocate_kernel_half(),
+            Err(MapError::OutOfFrames)
+        );
     }
 
     #[test]

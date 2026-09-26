@@ -1,0 +1,17 @@
+[package]
+name = "ari-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "arish: primer shell interactivo de AriCodeOS (ring 3)"
+publish = false
+
+[[bin]]
+name = "shell"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+aricode-sys = { path = "../../sdk/rust" }
+user-testprogs = { path = "../../user/testprogs" }

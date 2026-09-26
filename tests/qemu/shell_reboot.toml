@@ -1,0 +1,17 @@
+# Fase 21: `reboot` desde el shell reinicia la maquina; con -no-reboot QEMU
+# termina con codigo 0 en vez de volver a arrancar.
+name = "shell.reboot"
+description = "arish: reboot reinicia la maquina (QEMU sale por -no-reboot)"
+level = "full"
+areas = ["shell", "init"]
+cmdline = "qemu_exit shell"
+timeout_secs = 60
+stdin = ["exit-no", "reboot"]
+
+[expect]
+exit = 0
+serial_contains = [
+    "comando desconocido: exit-no (help)",
+    "AriCodeOS: reiniciando",
+]
+serial_absent = ["KERNEL PANIC", "ARICODEOS_SHUTDOWN"]

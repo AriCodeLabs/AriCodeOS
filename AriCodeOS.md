@@ -2320,11 +2320,17 @@ pci: 00:1f.3 8086:2930 clase 0c.05 SMBus (1 BAR)
 
 # FASE 18 — Virtio
 
-### Implementar primero
+**Estado: virtio-blk completado (2026-09-26); virtio-net pendiente.**
 
-- virtio transport;
-- virtio-blk;
-- después virtio-net.
+### Implementado
+
+- virtio transport: `libs/virtio` (virtqueue split sobre DMA, descubrimiento
+  de estructuras virtio-pci modernas, negociación por `common_cfg`);
+- virtio-blk: `services/virtio-blk`, driver en ring 3 con capabilities
+  reclamadas por `init` (`pci_claim`: BARs sondeados y MSI-X programada por
+  el kernel), cola 0 en DMA, lectura y escritura verificadas
+  (`virtio.blk_rw`);
+- virtio-net: después (Fase 22).
 
 ### Motivo
 
@@ -2334,50 +2340,84 @@ Disponer rápidamente de almacenamiento y red en QEMU.
 
 # FASE 19 — Storage service
 
-### Implementar
+**Estado: completada (2026-09-26), salvo la caché.**
 
-- block service;
-- async request queue;
-- cache inicial;
-- partition parsing.
+### Implementado
+
+- block service: el driver virtio-blk atiende `BlockServiceProtocol v1`
+  (`sdk/proto`) por IPC con acceso directo al buffer DMA del cliente;
+- async request queue: la cola acotada del endpoint;
+- cache inicial: pendiente (llegará con el filesystem cuando haya métricas);
+- partition parsing: GPT con CRC (`libs/gpt`), disco de pruebas con
+  partición AriCodeOS (`ARI0`).
 
 ---
 
 # FASE 20 — Filesystem básico
 
-### Implementar
+**Estado: completada (2026-09-26) con AriFS v0.**
 
-- VFS-like abstraction sin obligación POSIX;
-- paths;
-- file objects;
-- directories;
-- metadata;
-- permisos mediante capabilities.
+### Implementado
+
+- AriFS v0 (`libs/arifs`, no_std, tests de host): superbloque, tabla plana
+  de 32 ficheros de capacidad fija (16 sectores), lectura y escritura por
+  desplazamiento, sin fragmentación ni journaling (deliberadamente simple,
+  sección 34.2). xtask formatea la partición `ARI0` del disco de pruebas
+  con ficheros de ejemplo;
+- servicio de ficheros `fsd` (`services/arifs`) en ring 3 sobre el servicio
+  de bloques: `FileServiceProtocol v1` (`sdk/proto::fs`) con `List`,
+  `Open`, `Create`, `Read`, `Write`, `Close`; los datos viajan por el buffer
+  DMA del cliente, no por el mensaje;
+- clientes en el SDK (`aricode-sys::block`, `aricode-sys::fs`) y programa
+  de prueba `fs_client`; escenario `filesystem.read_write`;
+- permisos mediante capabilities: un proceso solo habla con `fsd` si init
+  le entrega un duplicado `WRITE` de su endpoint; `fsd` solo llega al disco
+  a través del endpoint del servicio de bloques.
+
+### Pendiente
+
+- directorios jerárquicos y paths (v0 es un directorio plano);
+- metadata (fechas, tipo) y borrado/redimensionado;
+- capabilities por fichero (hoy la capability es por servicio).
 
 ### Criterio
 
-Proceso user-space puede abrir, leer y escribir un archivo mediante servicio IPC.
+Proceso user-space puede abrir, leer y escribir un archivo mediante servicio IPC. **Cumplido.**
 
 ---
 
 # FASE 21 — Shell
 
-Primer shell AriCodeOS.
+**Estado: completada (2026-09-26).**
 
-Comandos posibles:
+Primer shell AriCodeOS: `arish` (`services/shell`), un proceso de ring 3 que
+init lanza cuando la cmdline lleva `shell` (`cargo xtask run --cmdline shell`).
+
+Comandos:
 
 ```text
-help
-ps
-mem
-ls
-cat
-devices
-services
-uptime
-reboot
-shutdown
+help      ps        mem       ls        cat NOM
+devices   services  uptime    reboot    shutdown  exit
 ```
+
+### Implementado
+
+- entrada de consola en el kernel: IRQ de COM1 (GSI 4, vector propio) con
+  anillo de 1 KiB y `console_read(console, buf, timeout)`; la consola sigue
+  siendo del kernel y el shell solo la lee a través de un handle `CONSOLE`
+  con `READ` que init le transfiere;
+- objeto `SYSTEM` (kind 11): `system_info` (`READ`: uptime, memoria
+  utilizable/libre, lista de procesos) y `system_power` (`MANAGE`: apagar,
+  reiniciar). Init lo recibe y le pasa al shell un duplicado;
+- el shell ve solo lo que init le da: endpoint de fsd (`WRITE`), hardware
+  para su buffer DMA, `SYSTEM`, entrada de consola (`READ`) y la raíz PCI en
+  solo lectura para `devices`; `services` enseña la máscara de servicios que
+  init dejó activos y comprueba que fsd responde;
+- `shutdown` termina QEMU con `qemu_exit` (`ARICODEOS_SHUTDOWN`) o detiene la
+  CPU; `reboot` pulsa el reset del 8042 y, si no, fuerza un triple fallo;
+- el runner de escenarios acepta `stdin` (líneas) y `prompt`: envía cada
+  línea cuando la serie muestra el prompt. Escenarios `console.input`,
+  `shell.commands`, `shell.exit` y `shell.reboot`.
 
 ---
 
@@ -3094,12 +3134,19 @@ Añadido:
 
 # 92. AriCodeOS 0.0.8
 
-Añadir:
+**Estado: completada (2026-09-26), tag `v0.0.8`.**
 
-- virtio-blk;
-- storage service;
-- filesystem;
-- shell.
+Añadido:
+
+- virtio-blk (Fase 18): driver en ring 3 con capabilities PCI, MSI-X y DMA;
+- storage service (Fase 19): `BlockServiceProtocol v1` sobre disco GPT;
+- filesystem (Fase 20): AriFS v0 y el servicio `fsd` por IPC;
+- shell (Fase 21): `arish`, entrada de consola por IRQ, `system_info` y
+  `system_power`.
+
+Con esta versión un usuario puede teclear en la consola serie, listar y leer
+ficheros de un disco virtio a través de dos servicios en ring 3 y apagar la
+máquina sin que ningún driver viva en el kernel.
 
 ---
 

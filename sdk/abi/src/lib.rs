@@ -14,18 +14,32 @@
 
 #![no_std]
 
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 
 /// Handles iniciales de todo proceso.
 pub mod handle {
     /// Handle con el que `init` recibe el objeto `SPAWNER` (`MANAGE`).
     pub const INIT_SPAWNER: u32 = 0x0001_0004;
+    /// Handle con el que `init` recibe la raíz PCI (`READ|MANAGE`).
+    pub const INIT_PCI_ROOT: u32 = 0x0001_0005;
     /// El propio proceso (`MANAGE | READ | DUPLICATE`).
     pub const SELF_PROCESS: u32 = 0x0001_0001;
     /// El hilo principal (`READ | WAIT | DUPLICATE`).
     pub const MAIN_THREAD: u32 = 0x0001_0002;
     /// Consola del kernel (`WRITE | DUPLICATE`).
     pub const CONSOLE: u32 = 0x0001_0003;
+    /// Handle con el que `init` recibe la capacidad de hardware (`MANAGE`).
+    pub const INIT_HARDWARE: u32 = 0x0001_0006;
+    /// Handle con el que `init` recibe el objeto `SYSTEM` (`READ|MANAGE`).
+    pub const INIT_SYSTEM: u32 = 0x0001_0007;
+    /// Handle con el que `init` recibe la entrada de consola (`READ`).
+    pub const INIT_CONSOLE_IN: u32 = 0x0001_0008;
+}
+
+/// Bits del `arg` que el kernel pasa a `init`.
+pub mod init_arg {
+    /// La cmdline pide un shell interactivo (`shell`).
+    pub const SHELL: u64 = 1;
 }
 
 /// Derechos (bits) tal y como los ve el espacio de usuario.
@@ -55,6 +69,10 @@ pub mod kind {
     pub const DMA: u64 = 8;
     /// Capacidad de reservar recursos de hardware (buffers DMA).
     pub const HARDWARE: u64 = 9;
+    /// Raíz PCI: enumeración y reclamación de dispositivos (solo `init`).
+    pub const PCI_ROOT: u64 = 10;
+    /// Estado del sistema (`READ`: información; `MANAGE`: apagar, reiniciar).
+    pub const SYSTEM: u64 = 11;
 }
 
 /// Límite exclusivo del espacio de usuario (mitad baja canónica).
@@ -96,8 +114,11 @@ pub mod nr {
     /// `ipc_receive(ep, buf_ptr, buf_len, handles_out_ptr, handles_max, timeout_ms)
     /// -> data_len | (handles_recibidos << 32)`; exige `READ` sobre `ep`.
     pub const IPC_RECEIVE: u64 = 13;
-    /// `process_spawn(spawner, name_ptr, name_len, arg) -> handle de proceso`;
-    /// exige `MANAGE` sobre un objeto `SPAWNER`. El hijo recibe `arg` en `rdi`.
+    /// `process_spawn(spawner, name_ptr, name_len, arg, handles_ptr, handles_len)
+    /// -> handle de proceso`; exige `MANAGE` sobre un objeto `SPAWNER` y
+    /// `TRANSFER` sobre cada handle, que se retira del padre y aparece en el
+    /// hijo a partir de `0x0001_0004` en el mismo orden. El hijo recibe `arg`
+    /// en `rdi`.
     pub const PROCESS_SPAWN: u64 = 14;
     /// `process_wait(process, timeout_ms) -> código de salida`; exige `WAIT`.
     /// Un proceso terminado por el kernel devuelve `Error::Killed`.
@@ -114,6 +135,160 @@ pub mod nr {
     pub const DMA_ALLOC: u64 = 19;
     /// `dma_phys(dma) -> dirección física`; exige `READ`.
     pub const DMA_PHYS: u64 = 20;
+    /// `pci_count(root) -> funciones enumeradas`; exige `READ` sobre `PCI_ROOT`.
+    pub const PCI_COUNT: u64 = 21;
+    /// `pci_info(root, index) -> PciInfo empaquetado` (ver [`pci_info`]); exige `READ`.
+    pub const PCI_INFO: u64 = 22;
+    /// `pci_claim(root, index, out_ptr) -> handles escritos`; exige `MANAGE`.
+    /// Escribe [`PCI_CLAIM_HANDLES`] `u32` en `out_ptr`: espacio de
+    /// configuración (MMIO), `HARDWARE`, IRQ MSI-X (0 si no hay) y los seis
+    /// BARs de memoria (0 si ausente o de E/S). El dispositivo queda con
+    /// memoria y bus master habilitados y MSI-X en la entrada 0.
+    pub const PCI_CLAIM: u64 = 23;
+    /// `console_read(console, ptr, len, timeout_ms) -> bytes leídos (>= 1)`;
+    /// exige `READ`. Bloquea hasta que haya entrada o venza el plazo (`Timeout`).
+    pub const CONSOLE_READ: u64 = 24;
+    /// `system_info(system, kind, ptr, len) -> bytes escritos` (ver [`sysinfo`]);
+    /// exige `READ`.
+    pub const SYSTEM_INFO: u64 = 25;
+    /// `system_power(system, action)` (ver [`power`]); exige `MANAGE`. No retorna.
+    pub const SYSTEM_POWER: u64 = 26;
+}
+
+/// Consultas de `system_info` y formato de sus respuestas.
+pub mod sysinfo {
+    /// Un `u64`: milisegundos desde el arranque.
+    pub const UPTIME: u64 = 0;
+    /// Dos `u64`: frames de RAM utilizable y frames libres.
+    pub const MEMORY: u64 = 1;
+    /// Tantas [`ProcessEntry`] como quepan en el buffer.
+    pub const PROCESSES: u64 = 2;
+
+    pub const PROCESS_NAME_LEN: usize = 24;
+
+    /// Estado de un proceso en [`ProcessEntry`].
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ProcessState {
+        Running = 0,
+        Exited = 1,
+        Killed = 2,
+    }
+
+    /// Entrada de la lista de procesos (32 bytes): pid, estado, código de
+    /// salida (si terminó) y nombre.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ProcessEntry {
+        pub pid: u32,
+        pub state: ProcessState,
+        pub exit_code: u16,
+        pub name: [u8; PROCESS_NAME_LEN],
+        pub name_len: u8,
+    }
+
+    impl ProcessEntry {
+        pub const LEN: usize = 32;
+
+        pub fn new(pid: u32, state: ProcessState, exit_code: u16, name: &str) -> Self {
+            let n = name.len().min(PROCESS_NAME_LEN);
+            let mut buf = [0u8; PROCESS_NAME_LEN];
+            buf[..n].copy_from_slice(&name.as_bytes()[..n]);
+            Self {
+                pid,
+                state,
+                exit_code,
+                name: buf,
+                name_len: n as u8,
+            }
+        }
+
+        pub fn name_str(&self) -> &str {
+            core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("?")
+        }
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[..4].copy_from_slice(&self.pid.to_le_bytes());
+            b[4] = self.state as u8;
+            b[5] = self.name_len;
+            b[6..8].copy_from_slice(&self.exit_code.to_le_bytes());
+            b[8..].copy_from_slice(&self.name);
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN {
+                return None;
+            }
+            let state = match b[4] {
+                0 => ProcessState::Running,
+                1 => ProcessState::Exited,
+                2 => ProcessState::Killed,
+                _ => return None,
+            };
+            let mut name = [0u8; PROCESS_NAME_LEN];
+            name.copy_from_slice(&b[8..Self::LEN]);
+            Some(Self {
+                pid: u32::from_le_bytes(b[..4].try_into().ok()?),
+                state,
+                exit_code: u16::from_le_bytes(b[6..8].try_into().ok()?),
+                name,
+                name_len: b[5].min(PROCESS_NAME_LEN as u8),
+            })
+        }
+    }
+}
+
+/// Acciones de `system_power`.
+pub mod power {
+    pub const SHUTDOWN: u64 = 0;
+    pub const REBOOT: u64 = 1;
+}
+
+/// Número de handles que escribe `pci_claim`.
+pub const PCI_CLAIM_HANDLES: usize = 9;
+
+/// Empaquetado de `pci_info`: `vendor << 48 | device << 32 | class << 24 |
+/// subclass << 16 | bus << 8 | dev << 3 | func`.
+pub mod pci_info {
+    pub const fn pack(
+        vendor: u16,
+        device: u16,
+        class: u8,
+        subclass: u8,
+        bus: u8,
+        dev: u8,
+        func: u8,
+    ) -> u64 {
+        (vendor as u64) << 48
+            | (device as u64) << 32
+            | (class as u64) << 24
+            | (subclass as u64) << 16
+            | (bus as u64) << 8
+            | (dev as u64) << 3
+            | func as u64
+    }
+    pub const fn vendor(v: u64) -> u16 {
+        (v >> 48) as u16
+    }
+    pub const fn device(v: u64) -> u16 {
+        (v >> 32) as u16
+    }
+    pub const fn class(v: u64) -> u8 {
+        (v >> 24) as u8
+    }
+    pub const fn subclass(v: u64) -> u8 {
+        (v >> 16) as u8
+    }
+    pub const fn bus(v: u64) -> u8 {
+        (v >> 8) as u8
+    }
+    pub const fn dev(v: u64) -> u8 {
+        ((v >> 3) & 0x1F) as u8
+    }
+    pub const fn func(v: u64) -> u8 {
+        (v & 7) as u8
+    }
 }
 
 /// Máximo de un buffer DMA por llamada (sección 52).
@@ -208,6 +383,26 @@ pub const fn user_range_ok(ptr: u64, len: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn process_entry_round_trip() {
+        use super::sysinfo::*;
+        let e = ProcessEntry::new(7, ProcessState::Exited, 42, "virtio_blk");
+        let d = ProcessEntry::decode(&e.encode()).unwrap();
+        assert_eq!(d, e);
+        assert_eq!(d.name_str(), "virtio_blk");
+        let long = ProcessEntry::new(
+            1,
+            ProcessState::Running,
+            0,
+            "un-nombre-demasiado-largo-para-la-entrada",
+        );
+        assert_eq!(long.name_len as usize, PROCESS_NAME_LEN);
+        let mut bad = e.encode();
+        bad[4] = 9;
+        assert!(ProcessEntry::decode(&bad).is_none());
+        assert!(ProcessEntry::decode(&bad[..10]).is_none());
+    }
+
     use super::*;
 
     #[test]
@@ -226,6 +421,18 @@ mod tests {
             decode(-77),
             Err(Error::Invalid),
             "codigo desconocido se normaliza"
+        );
+    }
+
+    #[test]
+    fn pci_info_round_trip() {
+        let v = pci_info::pack(0x1AF4, 0x1042, 0x01, 0x00, 0, 3, 0);
+        assert_eq!(pci_info::vendor(v), 0x1AF4);
+        assert_eq!(pci_info::device(v), 0x1042);
+        assert_eq!((pci_info::class(v), pci_info::subclass(v)), (1, 0));
+        assert_eq!(
+            (pci_info::bus(v), pci_info::dev(v), pci_info::func(v)),
+            (0, 3, 0)
         );
     }
 

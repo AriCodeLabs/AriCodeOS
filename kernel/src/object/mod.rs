@@ -21,6 +21,10 @@ pub enum ObjectKind {
     Dma(crate::hw::DmaBuffer),
     /// Capacidad de reservar recursos de hardware (buffers DMA).
     Hardware,
+    /// Raíz PCI: enumerar y reclamar dispositivos.
+    PciRoot,
+    /// Estado del sistema: información (`READ`) y apagado/reinicio (`MANAGE`).
+    System,
 }
 
 /// Objeto compartido por todos los handles que lo referencian. Revocarlo
@@ -45,7 +49,7 @@ impl KernelObject {
         match self.kind {
             ObjectKind::Thread(t) => t.0 as u64,
             ObjectKind::Process(p) => p.0 as u64,
-            ObjectKind::Irq(ref l) => l.gsi as u64,
+            ObjectKind::Irq(ref l) => l.gsi() as u64,
             _ => 0,
         }
     }
@@ -61,6 +65,8 @@ impl KernelObject {
             ObjectKind::Mmio(_) => kind::MMIO,
             ObjectKind::Dma(_) => kind::DMA,
             ObjectKind::Hardware => kind::HARDWARE,
+            ObjectKind::PciRoot => kind::PCI_ROOT,
+            ObjectKind::System => kind::SYSTEM,
         }
     }
 

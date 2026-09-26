@@ -4,6 +4,9 @@
 
 #![no_std]
 
+pub mod block;
+pub mod fs;
+
 pub use aricode_abi::{self as abi, handle, kind, rights, Error, TIMEOUT_INFINITE};
 use aricode_abi::{decode, nr, receive_result};
 
@@ -148,12 +151,25 @@ pub fn ipc_receive(
 
 /// Crea un proceso del initrd (exige `MANAGE` sobre el `SPAWNER`).
 pub fn process_spawn(spawner: Handle, name: &str, arg: u64) -> Result<Handle, Error> {
-    call(
+    process_spawn_with(spawner, name, arg, &[])
+}
+
+/// Como `process_spawn`, transfiriendo `handles` al hijo (aparecen en él a
+/// partir de `0x0001_0004` en el mismo orden; exigen `TRANSFER`).
+pub fn process_spawn_with(
+    spawner: Handle,
+    name: &str,
+    arg: u64,
+    handles: &[Handle],
+) -> Result<Handle, Error> {
+    call6(
         nr::PROCESS_SPAWN,
         spawner.0 as u64,
         name.as_ptr() as u64,
         name.len() as u64,
         arg,
+        handles.as_ptr() as u64,
+        handles.len() as u64,
     )
     .map(|v| Handle(v as u32))
 }
@@ -184,6 +200,73 @@ pub fn dma_alloc(hardware: Handle, len: u64) -> Result<Handle, Error> {
 
 pub fn dma_phys(dma: Handle) -> Result<u64, Error> {
     call(nr::DMA_PHYS, dma.0 as u64, 0, 0, 0)
+}
+
+pub fn pci_count(root: Handle) -> Result<u64, Error> {
+    call(nr::PCI_COUNT, root.0 as u64, 0, 0, 0)
+}
+
+/// Información empaquetada de la función `index` (ver `abi::pci_info`).
+pub fn pci_info(root: Handle, index: u64) -> Result<u64, Error> {
+    call(nr::PCI_INFO, root.0 as u64, index, 0, 0)
+}
+
+/// Reclama la función `index`: devuelve sus handles (ver `abi::nr::PCI_CLAIM`).
+pub fn pci_claim(root: Handle, index: u64) -> Result<[Handle; abi::PCI_CLAIM_HANDLES], Error> {
+    let mut raw = [0u32; abi::PCI_CLAIM_HANDLES];
+    call(
+        nr::PCI_CLAIM,
+        root.0 as u64,
+        index,
+        raw.as_mut_ptr() as u64,
+        0,
+    )?;
+    Ok(raw.map(Handle))
+}
+
+/// Lee de la consola hasta `buf.len()` bytes; bloquea hasta que haya al
+/// menos uno o venza `timeout_ms`.
+pub fn console_read(console: Handle, buf: &mut [u8], timeout_ms: u64) -> Result<usize, Error> {
+    abi::decode(raw_syscall(
+        nr::CONSOLE_READ,
+        console.0 as u64,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        timeout_ms,
+        0,
+        0,
+    ))
+    .map(|n| n as usize)
+}
+
+/// Consulta del sistema (`abi::sysinfo`); devuelve los bytes escritos en `buf`.
+pub fn system_info(system: Handle, kind: u64, buf: &mut [u8]) -> Result<usize, Error> {
+    abi::decode(raw_syscall(
+        nr::SYSTEM_INFO,
+        system.0 as u64,
+        kind,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        0,
+        0,
+    ))
+    .map(|n| n as usize)
+}
+
+/// Apaga o reinicia (`abi::power`). Solo retorna si el kernel rechaza la acción.
+pub fn system_power(system: Handle, action: u64) -> Error {
+    match abi::decode(raw_syscall(
+        nr::SYSTEM_POWER,
+        system.0 as u64,
+        action,
+        0,
+        0,
+        0,
+        0,
+    )) {
+        Ok(_) => Error::Invalid,
+        Err(e) => e,
+    }
 }
 
 /// Ayuda para programas de prueba: escribe en la consola ignorando errores.

@@ -13,6 +13,7 @@ extern crate alloc;
 mod acpi;
 mod arch;
 mod console;
+mod console_input;
 mod framebuffer;
 mod hw;
 mod initrd;
@@ -119,13 +120,14 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     info!("interrupciones habilitadas");
 
     task::init();
+    console_input::init();
     initrd::init(info);
-    let _pci_devices = pci::init();
+    pci::init();
 
     if cmdline.get(keys::TEST).is_some() {
         run_requested_test(&cmdline, info);
     } else {
-        run_init();
+        run_init(cmdline.has(keys::SHELL));
     }
 
     println!("ARICODEOS_KERNEL_READY");
@@ -240,6 +242,7 @@ fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
         "sched" => task::scheduler::selftest(),
         "ipc" => ipc::selftest(),
         "drivers" => hw::selftest(info),
+        "console_input" => console_input::selftest(),
         other if other.starts_with("user_") => run_user_program(&other[5..]),
         // W^X: escribir en .rodata -> #PF por protección.
         "write_rodata" => {
@@ -296,17 +299,57 @@ fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
 
 /// Arranque normal: lanza `init` del initrd con la capacidad de crear
 /// procesos y espera a que termine.
-fn run_init() {
+/// Lanza `init` con sus capacidades (`aricode_abi::handle::INIT_*`) y espera
+/// su fin. `shell` pide un shell interactivo tras los servicios de arranque.
+fn run_init(shell: bool) {
     use aricode_handles::Rights;
     let Some(elf) = user::programs::by_name("init") else {
         warn!("init: no hay 'init' en el initrd");
         return;
     };
     let spawner = object::KernelObject::new(object::ObjectKind::Spawner);
-    let pid = user::process::spawn_with_handles(
+    let pci_root = object::KernelObject::new(object::ObjectKind::PciRoot);
+    let hardware = object::KernelObject::new(object::ObjectKind::Hardware);
+    let system = object::KernelObject::new(object::ObjectKind::System);
+    let console_in = object::KernelObject::new(object::ObjectKind::Console);
+    let arg = if shell {
+        aricode_abi::init_arg::SHELL
+    } else {
+        0
+    };
+    let pid = user::process::spawn_with_handles_and_arg(
         "init",
         elf,
-        alloc::vec![(spawner, Rights::MANAGE.union(Rights::DUPLICATE))],
+        alloc::vec![
+            (spawner, Rights::MANAGE.union(Rights::DUPLICATE)),
+            (
+                pci_root,
+                Rights::READ
+                    .union(Rights::MANAGE)
+                    .union(Rights::DUPLICATE)
+                    .union(Rights::TRANSFER)
+            ),
+            (
+                hardware,
+                Rights::MANAGE
+                    .union(Rights::DUPLICATE)
+                    .union(Rights::TRANSFER)
+            ),
+            (
+                system,
+                Rights::READ
+                    .union(Rights::MANAGE)
+                    .union(Rights::DUPLICATE)
+                    .union(Rights::TRANSFER)
+            ),
+            (
+                console_in,
+                Rights::READ
+                    .union(Rights::DUPLICATE)
+                    .union(Rights::TRANSFER)
+            ),
+        ],
+        arg,
     )
     .expect("crear init");
     let status = user::process::wait(pid);
@@ -325,6 +368,13 @@ fn run_user_program(name: &str) {
     let pid = user::process::spawn(name, code).expect("crear proceso");
     let status = user::process::wait(pid);
     info!("user: '{name}' terminado: {status:?}");
+}
+
+/// Apagado ordenado pedido desde usuario (`system_power`): con `qemu_exit`
+/// termina QEMU con éxito; en hardware real detiene la CPU.
+pub fn shutdown() -> ! {
+    println!("ARICODEOS_SHUTDOWN");
+    finish(qemu::ExitCode::Success)
 }
 
 /// Fin de la ejecución: termina QEMU si se pidió, si no detiene la CPU.

@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.0.7 (Fases 15, 16 y 17)
+## Estado: 0.0.8 (0.0.7 + Fases 18 a 21)
 
 ```text
 OVMF (UEFI)
@@ -23,7 +23,11 @@ OVMF (UEFI)
        IPC por endpoints con transferencia de capabilities y timeouts,
        initrd con init y programas de usuario, init lanza y supervisa
        procesos con la capacidad SPAWNER, ACPI + I/O APIC, drivers en ring 3
-       con capabilities IRQ/MMIO/DMA, enumeración PCIe por ECAM,
+       con capabilities IRQ/MMIO/DMA, enumeración PCIe por ECAM, init reclama
+       el virtio-blk (BARs, MSI-X) y lanza su driver en ring 3 como servicio
+       de bloques por IPC (disco GPT), fsd monta AriFS v0 sobre él y sirve
+       ficheros por IPC; con `shell` en la cmdline init lanza arish, que lee
+       la consola serie y apaga o reinicia por `system_power`;
        ARICODEOS_KERNEL_READY
 ```
 
@@ -44,14 +48,22 @@ libs/handles/        aricode-handles: tabla de handles con generación y derecho
 libs/initrd/         aricode-initrd: formato del initrd, lector sin copia (no_std) y escritor (feature `write`, xtask); tests de host
 libs/acpi/           aricode-acpi: RSDP, XSDT/RSDT, MADT (LAPIC, I/O APIC, overrides), MCFG; sin AML (no_std + alloc, tests de host)
 libs/pci/            aricode-pci: direccionamiento ECAM, cabecera de configuración, BARs, capabilities, clases (no_std + alloc, tests de host)
+libs/virtio/         aricode-virtio: virtqueue split sobre DMA, estructuras virtio-pci modernas, peticiones virtio-blk (no_std, tests de host)
+libs/gpt/            aricode-gpt: CRC32, cabecera y entradas GPT, escritor para el disco de pruebas (no_std, tests de host)
+libs/arifs/          aricode-arifs: AriFS v0, directorio plano con tabla de ficheros de capacidad fija sobre `BlockDevice` (no_std, tests de host)
+sdk/proto/           aricode-proto: protocolos IPC versionados de los servicios (bloques v1, ficheros v1) (no_std, tests de host)
 sdk/abi/             aricode-abi: números de syscall, errores, handles iniciales, derechos y tipos de objeto (no_std, tests de host)
-sdk/rust/            aricode-sys: wrappers de syscall para programas de usuario (no_std, sin alloc) y `user.ld`, el linker script de todo programa de usuario
+sdk/rust/            aricode-sys: wrappers de syscall para programas de usuario (no_std, sin alloc), clientes de los servicios de bloques y ficheros, y `user.ld`, el linker script de todo programa de usuario
 user/testprogs/      programas de prueba de ring 3 (Rust y ensamblador) enlazados como ELF estáticos en 0x400000
-services/init/       AriInit: primer proceso; recibe SPAWNER y lanza/supervisa servicios
+services/init/       AriInit: primer proceso; recibe SPAWNER y la raíz PCI, lanza/supervisa servicios y reclama dispositivos para sus drivers
+services/virtio-blk/ driver virtio-blk en ring 3 y servicio de bloques por IPC (interfaz moderna, cola 0 en DMA, MSI-X, GPT)
+services/arifs/      fsd: servicio de ficheros AriFS en ring 3 sobre el servicio de bloques
+services/shell/      arish: shell interactivo en ring 3 (help, ps, mem, ls, cat, devices, services, uptime, reboot, shutdown, exit)
 boot/                ariboot: integra lo anterior con la crate `uefi`
 kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log con IrqLock y try_lock),
                      arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions, port, pic, pit, apic, ioapic, msr, syscall, usermode},
-                     acpi (localización de tablas), pci (ECAM y enumeración), hw (IrqLine, Region, DmaBuffer, registro de vectores, banco de pruebas),
+                     acpi (localización de tablas), pci (ECAM, enumeración, reclamación con sondeo de BARs y MSI-X),
+                     hw (IrqLine por GSI o MSI-X, Region, DmaBuffer, ventanas sin caché, registro de vectores, banco de pruebas),
                      object (KernelObject revocable, tabla inicial), ipc (Endpoint, Message, benchmark), initrd,
                      user/{process (cargador ELF, copy_from/to_user, espera de salida), programs (initrd), syscalls},
                      memory/{phys, pmm, vmm, heap}, sync (política IRQ), time,
@@ -282,8 +294,9 @@ segundo brevemente para añadir la región.
 - GDT con el layout que exige `syscall`/`sysret` (`aricode-x86-cpu::layout`):
   código y datos de kernel, datos y código de usuario (DPL 3), TSS. `STAR`,
   `LSTAR` y `FMASK` se programan en `arch::x86_64::syscall::init`.
-- Cada proceso tiene su PML4: la mitad alta se copia del kernel (PDPT
-  compartidos) y la baja contiene su código en `0x40_0000` (solo lectura y
+- Cada proceso tiene su PML4: la mitad alta se copia del kernel (256 PDPT
+  reservados en el arranque y compartidos, de modo que los mapeos que el
+  kernel añada después, como ventanas MMIO, se ven en todos los espacios) y la baja contiene su código en `0x40_0000` (solo lectura y
   ejecución) y su pila en `0x7F_C000..0x80_0000` (RW, NX). El bit USER se
   propaga por toda la ruta de tablas.
 - El hilo principal del proceso es un hilo del kernel normal cuyo `cr3` es el
@@ -298,8 +311,9 @@ segundo brevemente para añadir la región.
   `thread_yield`, `thread_sleep`, `thread_get_tid`, `abi_version`,
   `handle_close`, `handle_duplicate`, `object_kind`, `object_id`,
   `object_revoke`, `endpoint_create`, `ipc_send`, `ipc_receive`,
-  `process_spawn`, `process_wait`, `irq_wait`, `mmio_map`, `region_len`,
-  `dma_alloc`, `dma_phys`.
+  `process_spawn` (con transferencia de handles al hijo), `process_wait`,
+  `irq_wait`, `mmio_map`, `region_len`, `dma_alloc`, `dma_phys`, `pci_count`,
+  `pci_info`, `pci_claim`, `console_read`, `system_info`, `system_power`.
 - Los punteros de usuario se validan página a página contra las tablas del
   proceso (`copy_from_user`): un puntero de kernel devuelve `Fault`, nunca se
   desreferencia.
@@ -434,11 +448,128 @@ segundo brevemente para añadir la región.
 - La lista se devuelve al arranque; la programación de MSI/MSI-X y la
   asignación de BARs a drivers llegan con virtio (Fase 18).
 
+## Virtio-blk en espacio de usuario (Fase 18)
+
+- La raíz PCI es un objeto que solo recibe `init` (`0x0001_0005`,
+  `READ|MANAGE`). `pci_count`/`pci_info` enumeran desde usuario; `pci_claim`
+  reclama una función: el kernel habilita memoria y bus master, deshabilita
+  INTx, sondea el tamaño de cada BAR de memoria, programa la entrada 0 de
+  MSI-X hacia un vector de dispositivo (tabla mapeada en una ventana sin
+  caché del kernel) y devuelve nueve handles: espacio de configuración
+  (MMIO), `Hardware`, IRQ y los seis BARs (0 si ausentes), todos con
+  `TRANSFER`.
+- `process_spawn` transfiere handles al hijo (aparecen desde
+  `0x0001_0004` en orden). `init` reclama `1af4:1042`, compacta los handles
+  presentes y pasa en `arg` una máscara (bit 15 IRQ, bits 0..5 BARs); el
+  driver reconstruye la posición de cada BAR con ella.
+- `services/virtio-blk`: lee el espacio de configuración por MMIO, localiza
+  las estructuras common/notify/device con `aricode-virtio`, negocia
+  `VERSION_1`, crea la cola 0 en un buffer DMA (`QueueLayout` +
+  `Virtqueue`), asigna el vector MSI-X 0 a la cola y ejecuta peticiones de
+  un sector (cabecera, datos, estado) esperando la IRQ con `irq_wait`. La
+  autoprueba lee sectores del disco de pruebas, escribe uno y lo relee.
+- El runner añade `virtio-blk-pci` moderno con `build/disk.img` (4 MiB, GPT
+  con la partición `ARI0` formateada como AriFS; desde el LBA 4096 cada
+  sector lleva `ARIDISK\0` y su número), regenerado en cada arranque.
+- Los programas de usuario tienen un heap estático de 64 KiB
+  (`aricode-heap` tras un spinlock) porque la librería PCI usa `alloc`.
+
+## Servicio de bloques (Fase 19)
+
+- `init` crea el endpoint del servicio y se lo pasa al driver junto a las
+  capabilities del dispositivo; a los clientes les da un duplicado solo
+  `WRITE` y una capacidad de hardware para su buffer DMA (init la recibe del
+  kernel en `0x0001_0006`).
+- Protocolo `BlockServiceProtocol v1` (`sdk/proto::block`): petición de 16
+  bytes (`Info`, `Read`, `Write`, LBA, sectores) con dos handles, el endpoint
+  de respuesta y el buffer DMA del cliente; respuesta de 16 bytes con estado
+  y valor. El driver programa el descriptor de datos con la física del
+  buffer del cliente: cero copias. Hasta 16 sectores por petición; la cola
+  del endpoint es la cola de peticiones.
+- Al arrancar, el driver lee la GPT (`aricode-gpt`, CRC de cabecera y tabla)
+  y anuncia las particiones; el disco de pruebas de xtask lleva un MBR
+  protector, GPT con respaldo y una partición `ARI0` de tipo AriCodeOS.
+- `blk_client` (ring 3) prueba info, lectura de la partición, escritura y
+  relectura, LBA fuera de rango (`Invalid`) y petición sin buffer
+  (`BadHandles`). `storage.block_service` lo exige.
+- Los programas de usuario tienen la pila en 64 KiB y el kernel diagnostica
+  `USER STACK OVERFLOW` cuando un fallo toca su guard page (la tabla GPT de
+  16 KiB en la pila lo provocó; ahora va al heap del programa).
+- `WaitQueue::wait_until_deadline` mantiene las interrupciones deshabilitadas
+  desde la comprobación hasta el cambio de contexto: un `wake` desde un
+  handler MSI-X no puede llegar en la ventana entre soltar el lock y
+  dormirse (antes cada petición podía esperar hasta el plazo de 2 s).
+
+## Sistema de archivos (Fase 20)
+
+- AriFS v0 (`libs/arifs`): LBA 0 superbloque (magia `ARIFS`, sectores,
+  siguiente LBA libre), LBA 1..4 tabla de 32 entradas de 64 bytes (nombre,
+  LBA inicial, capacidad, tamaño), datos desde el LBA 5 en bloques fijos
+  de 16 sectores asignados de forma incremental. Sin fragmentación, borrado
+  ni journaling: lo justo para el criterio de la fase. Todo el acceso pasa
+  por el trait `BlockDevice`, así que la librería se prueba en host sobre
+  un `Vec` y xtask la usa para formatear la partición `ARI0` del disco de
+  pruebas con `hola.txt` y `README`.
+- `fsd` (`services/arifs`) recibe de init su endpoint (`READ|WRITE`), el
+  del servicio de bloques (`WRITE`) y una capacidad de hardware; `arg` es el
+  LBA de la partición. Implementa `BlockDevice` sobre `aricode-sys::block`
+  (un sector por petición) y atiende `FileServiceProtocol v1`
+  (`sdk/proto::fs`): peticiones y respuestas de 64 bytes con `List`,
+  `Open`, `Create`, `Read`, `Write` y `Close`; los datos van por el buffer
+  DMA del cliente (hasta 4 KiB por petición), que fsd mapea una vez y
+  reutiliza por dirección física. Los descriptores son globales al servicio
+  (16 abiertos) hasta que haya identidad de cliente por capability.
+- `aricode-sys::fs::FsClient` encapsula endpoint de respuesta, buffer DMA
+  y llamadas; `fs_client` (ring 3) lista, lee `hola.txt`, crea y escribe
+  `nuevo.txt`, relee y comprueba `Exists`, `NotFound` y `BadFd`.
+  `filesystem.read_write` lo exige; `init.boot` exige el mensaje de éxito.
+- El área en bruto del disco de pruebas (LBA 4096 en adelante, patrón
+  `ARIDISK\0`+LBA) queda fuera del alcance máximo de AriFS (32 × 16
+  sectores) para que `blk_client` y `fsd` no se pisen.
+
+## Shell y entrada de consola (Fase 21)
+
+- `console_input` (kernel): la IRQ ISA 4 de COM1 se enruta por el I/O APIC
+  al vector `0x40`, fuera del rango de dispositivos de usuario; el handler
+  vacía el FIFO en un anillo de 1 KiB y despierta una `WaitQueue`.
+  `console_read` (syscall 24) exige `READ` sobre un objeto `Console`,
+  valida el destino antes de bloquear y devuelve `Timeout` si vence el plazo.
+  Los bytes descartados por anillo lleno se cuentan para diagnóstico.
+- Objeto `System` (kind 11): `system_info` (syscall 25, `READ`) responde
+  `UPTIME` (ms), `MEMORY` (frames utilizables y libres: el PMM distingue la
+  RAM entregada con `free_range` de los frames direccionables) y
+  `PROCESSES` (entradas de 32 bytes con pid, estado, código y nombre);
+  `system_power` (syscall 26, `MANAGE`) apaga (`ARICODEOS_SHUTDOWN` y
+  salida de QEMU con `qemu_exit`, `hlt` sin él) o reinicia (reset por el
+  8042 y triple fallo como respaldo). ABI v3.
+- Init recibe además `SYSTEM` (`0x10007`) y una entrada de consola
+  (`0x10008`, `READ`); el kernel le pasa en `arg` `init_arg::SHELL` si la
+  cmdline lleva `shell`. Tras los servicios de arranque lanza `shell` con
+  el endpoint de fsd (`WRITE`), hardware, `SYSTEM`, la entrada de consola
+  y la raíz PCI solo lectura, y `arg` = máscara de servicios activos; espera
+  su salida y la anota.
+- `arish` lee líneas con eco y retroceso, y despacha los comandos sin
+  `alloc` (formato con `fmt_u64`/`fmt_hex` de la biblioteca de programas
+  de usuario). `cat` lee por bloques de 1 KiB con `FsClient`.
+- El runner (`qemu::run_headless`) acepta `Input { prompt, lines }`: lee la
+  serie de forma incremental y envía la línea `k` cuando el prompt ha
+  aparecido `k + 1` veces, así los tests son deterministas sin esperas
+  fijas. `console.input` usa `CONSOLE_INPUT_READY` como prompt para probar
+  el kernel sin shell.
+
 ## Deuda conocida
 
-- El device manager (sección 29) es todavía el banco de pruebas del kernel:
-  enumerar dispositivos (Fase 17) y repartir capabilities de hardware a
-  drivers reales pasará a un servicio de usuario.
+- `arish` no tiene historial, edición de línea ni redirecciones; las
+  variables de entorno y el lanzamiento de programas llegan con el servicio
+  de procesos.
+- `fsd` no distingue clientes: cualquier proceso con su endpoint ve todos
+  los descriptores. La capability por fichero llega con la identidad de
+  cliente en IPC.
+
+- El servicio de bloques mapea cada buffer DMA de cliente una vez y lo
+  reutiliza por dirección física; no hay `mmio_unmap` ni caché de bloques.
+- El device manager (sección 29) vive dentro de `init`: enumera, reclama y
+  lanza drivers; separarlo en un servicio propio cuando haya más de uno.
 - Sin IOMMU (Fase 33): un buffer DMA es memoria autorizada solo por
   convención del driver.
 - `init` todavía no recibe endpoints de los servicios que lanza ni puede

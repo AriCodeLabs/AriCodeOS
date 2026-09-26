@@ -26,9 +26,16 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("aricode-initrd", None),
     ("aricode-acpi", None),
     ("aricode-pci", None),
+    ("aricode-virtio", None),
+    ("aricode-gpt", None),
+    ("aricode-arifs", None),
+    ("aricode-proto", None),
     ("aricode-sys", None),
     ("user-testprogs", Some(KERNEL_TARGET)),
     ("ariinit", Some(KERNEL_TARGET)),
+    ("ari-virtio-blk", Some(KERNEL_TARGET)),
+    ("ari-fsd", Some(KERNEL_TARGET)),
+    ("ari-shell", Some(KERNEL_TARGET)),
     ("ariboot", Some(UEFI_TARGET)),
     ("arikernel", Some(KERNEL_TARGET)),
     ("xtask", None),
@@ -68,7 +75,12 @@ pub struct Artifacts {
 
 /// Programas que van al initrd: `init` y los binarios de `user/testprogs`.
 pub fn initrd_programs() -> Result<Vec<String>> {
-    let mut names = vec![String::from("init")];
+    let mut names = vec![
+        String::from("init"),
+        String::from("virtio_blk"),
+        String::from("fsd"),
+        String::from("shell"),
+    ];
     let bins = root().join("user/testprogs/src/bin");
     for entry in std::fs::read_dir(&bins).map_err(|e| format!("{}: {e}", bins.display()))? {
         let path = entry.map_err(|e| e.to_string())?.path();
@@ -83,7 +95,13 @@ pub fn initrd_programs() -> Result<Vec<String>> {
 /// Compila `init` y los programas de usuario (ELF estáticos en 0x400000) y
 /// devuelve el directorio con los binarios.
 pub fn build_user_programs(release: bool) -> Result<PathBuf> {
-    for pkg in ["user-testprogs", "ariinit"] {
+    for pkg in [
+        "user-testprogs",
+        "ariinit",
+        "ari-virtio-blk",
+        "ari-fsd",
+        "ari-shell",
+    ] {
         println!("[xtask] build {pkg} ({KERNEL_TARGET})");
         let mut c = cargo();
         c.args(["build", "-p", pkg, "--target", KERNEL_TARGET]);

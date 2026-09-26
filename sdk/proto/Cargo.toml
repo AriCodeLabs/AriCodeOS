@@ -1,0 +1,11 @@
+[package]
+name = "aricode-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Protocolos IPC de los servicios de AriCodeOS (codificación de mensajes, no_std)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

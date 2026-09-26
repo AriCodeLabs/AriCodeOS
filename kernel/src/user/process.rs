@@ -19,8 +19,14 @@ pub struct Pid(pub u32);
 
 /// Base mínima del código de usuario (los ELF se enlazan en 0x40_0000) y pila.
 pub const USER_CODE_BASE: u64 = 0x40_0000;
+
+/// `true` si `addr` cae en la guard page bajo la pila de usuario.
+pub fn in_user_stack_guard(addr: u64) -> bool {
+    let bottom = USER_STACK_TOP - USER_STACK_SIZE;
+    (bottom - PAGE_SIZE..bottom).contains(&addr)
+}
 pub const USER_STACK_TOP: u64 = 0x80_0000;
-pub const USER_STACK_SIZE: u64 = 16 * 1024;
+pub const USER_STACK_SIZE: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitStatus {
@@ -54,11 +60,6 @@ static NEXT_PID: IrqLock<u32> = IrqLock::new(1);
 /// Crea un proceso a partir de un ELF64 estático de usuario.
 pub fn spawn(name: &str, elf_bytes: &[u8]) -> Result<Pid, &'static str> {
     spawn_with_handles(name, elf_bytes, Vec::new())
-}
-
-/// Como `spawn_with_handles`, con el argumento de `_start`.
-pub fn spawn_with_arg(name: &str, elf_bytes: &[u8], arg: u64) -> Result<Pid, &'static str> {
-    spawn_full(name, elf_bytes, Vec::new(), arg)
 }
 
 /// Capabilities extra y argumento de `_start`.
@@ -328,6 +329,25 @@ pub fn wait(pid: Pid) -> ExitStatus {
 }
 
 /// Nombre de un proceso vivo (para diagnóstico).
+/// Instantánea de la tabla de procesos para `system_info`.
+pub fn snapshot() -> Vec<aricode_abi::sysinfo::ProcessEntry> {
+    use aricode_abi::sysinfo::{ProcessEntry, ProcessState};
+    PROCESSES
+        .lock()
+        .iter()
+        .map(|(pid, p)| {
+            let (state, code) = match p.status {
+                None => (ProcessState::Running, 0),
+                Some(ExitStatus::Exited(c)) => {
+                    (ProcessState::Exited, c.min(u16::MAX as u64) as u16)
+                }
+                Some(ExitStatus::Killed(_)) => (ProcessState::Killed, 0),
+            };
+            ProcessEntry::new(pid.0, state, code, &p.name)
+        })
+        .collect()
+}
+
 pub fn exists(pid: Pid) -> bool {
     PROCESSES.lock().contains_key(&pid)
 }

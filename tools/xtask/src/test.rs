@@ -82,7 +82,11 @@ fn run_scenario(base: &std::path::Path, s: &Scenario) -> Result<bool> {
     let root = image::scenarios_root();
     let workdir = image::scenario_dir(&root, &s.name)?;
     let esp = image::build_scenario_esp(base, &root, &s.name, &s.cmdline, &s.inject)?;
-    let cap = qemu::run_headless(&esp, &workdir, Duration::from_secs(s.timeout_secs))?;
+    let input = qemu::Input {
+        prompt: &s.prompt,
+        lines: &s.stdin,
+    };
+    let cap = qemu::run_headless(&esp, &workdir, Duration::from_secs(s.timeout_secs), &input)?;
     let log = workdir.join("serial.log");
     let _ = std::fs::write(&log, &cap.serial);
 

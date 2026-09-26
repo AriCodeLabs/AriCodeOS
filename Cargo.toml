@@ -15,10 +15,17 @@ members = [
     "libs/initrd",
     "libs/acpi",
     "libs/pci",
+    "libs/virtio",
+    "libs/gpt",
+    "libs/arifs",
     "sdk/abi",
     "sdk/rust",
+    "sdk/proto",
     "user/testprogs",
     "services/init",
+    "services/virtio-blk",
+    "services/arifs",
+    "services/shell",
     "boot",
     "kernel",
     "tools/xtask",
@@ -40,13 +47,17 @@ default-members = [
     "libs/initrd",
     "libs/acpi",
     "libs/pci",
+    "libs/virtio",
+    "libs/gpt",
+    "libs/arifs",
     "sdk/abi",
     "sdk/rust",
+    "sdk/proto",
     "tools/xtask",
 ]
 
 [workspace.package]
-version = "0.0.7"
+version = "0.0.8"
 edition = "2021"
 license = "UNLICENSED"
 repository = "https://github.com/lynxcraft/aricodeos"
