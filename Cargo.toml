@@ -25,6 +25,7 @@ members = [
     "services/init",
     "services/virtio-blk",
     "services/arifs",
+    "services/shell",
     "boot",
     "kernel",
     "tools/xtask",

@@ -2388,22 +2388,36 @@ Proceso user-space puede abrir, leer y escribir un archivo mediante servicio IPC
 
 # FASE 21 — Shell
 
-Primer shell AriCodeOS.
+**Estado: completada (2026-09-26).**
 
-Comandos posibles:
+Primer shell AriCodeOS: `arish` (`services/shell`), un proceso de ring 3 que
+init lanza cuando la cmdline lleva `shell` (`cargo xtask run --cmdline shell`).
+
+Comandos:
 
 ```text
-help
-ps
-mem
-ls
-cat
-devices
-services
-uptime
-reboot
-shutdown
+help      ps        mem       ls        cat NOM
+devices   services  uptime    reboot    shutdown  exit
 ```
+
+### Implementado
+
+- entrada de consola en el kernel: IRQ de COM1 (GSI 4, vector propio) con
+  anillo de 1 KiB y `console_read(console, buf, timeout)`; la consola sigue
+  siendo del kernel y el shell solo la lee a través de un handle `CONSOLE`
+  con `READ` que init le transfiere;
+- objeto `SYSTEM` (kind 11): `system_info` (`READ`: uptime, memoria
+  utilizable/libre, lista de procesos) y `system_power` (`MANAGE`: apagar,
+  reiniciar). Init lo recibe y le pasa al shell un duplicado;
+- el shell ve solo lo que init le da: endpoint de fsd (`WRITE`), hardware
+  para su buffer DMA, `SYSTEM`, entrada de consola (`READ`) y la raíz PCI en
+  solo lectura para `devices`; `services` enseña la máscara de servicios que
+  init dejó activos y comprueba que fsd responde;
+- `shutdown` termina QEMU con `qemu_exit` (`ARICODEOS_SHUTDOWN`) o detiene la
+  CPU; `reboot` pulsa el reset del 8042 y, si no, fuerza un triple fallo;
+- el runner de escenarios acepta `stdin` (líneas) y `prompt`: envía cada
+  línea cuando la serie muestra el prompt. Escenarios `console.input`,
+  `shell.commands`, `shell.exit` y `shell.reboot`.
 
 ---
 
@@ -3120,14 +3134,19 @@ Añadido:
 
 # 92. AriCodeOS 0.0.8
 
-**Estado: en curso.**
+**Estado: completada (2026-09-26), tag `v0.0.8`.**
 
-Añadir:
+Añadido:
 
-- virtio-blk (Fase 18, hecho);
-- storage service (Fase 19, hecho);
-- filesystem (Fase 20, hecho: AriFS v0 y `fsd`);
-- shell (Fase 21).
+- virtio-blk (Fase 18): driver en ring 3 con capabilities PCI, MSI-X y DMA;
+- storage service (Fase 19): `BlockServiceProtocol v1` sobre disco GPT;
+- filesystem (Fase 20): AriFS v0 y el servicio `fsd` por IPC;
+- shell (Fase 21): `arish`, entrada de consola por IRQ, `system_info` y
+  `system_power`.
+
+Con esta versión un usuario puede teclear en la consola serie, listar y leer
+ficheros de un disco virtio a través de dos servicios en ring 3 y apagar la
+máquina sin que ningún driver viva en el kernel.
 
 ---
 

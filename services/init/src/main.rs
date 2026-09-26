@@ -1,8 +1,10 @@
 //! AriInit (Fase 15): primer proceso de usuario. Recibe del kernel el handle
-//! `SPAWNER` (0x10004, `MANAGE`), la raíz PCI (0x10005, `READ|MANAGE`) y una
-//! capacidad de hardware (0x10006, `MANAGE`) para repartir DMA. Lanza los
+//! `SPAWNER` (0x10004, `MANAGE`), la raíz PCI (0x10005, `READ|MANAGE`), una
+//! capacidad de hardware (0x10006, `MANAGE`) para repartir DMA, el objeto
+//! `SYSTEM` (0x10007) y la entrada de consola (0x10008, `READ`). Lanza los
 //! servicios de arranque y los supervisa; hasta que exista un device manager
 //! propio también reclama dispositivos y lanza sus drivers (Fases 18 y 19).
+//! Si `arg` lleva `init_arg::SHELL`, al final lanza el shell (Fase 21).
 //!
 //! En 0.0.8 su lista de servicios es de prueba: demuestra lanzar, esperar,
 //! reaccionar a un proceso terminado por fallo y montar el servicio de bloques.
@@ -14,6 +16,12 @@ use user_testprogs::sys::{self, rights, Error, Handle, TIMEOUT_INFINITE};
 const SPAWNER: Handle = Handle(0x0001_0004);
 const PCI_ROOT: Handle = Handle(0x0001_0005);
 const HARDWARE: Handle = Handle(0x0001_0006);
+const SYSTEM: Handle = Handle(0x0001_0007);
+const CONSOLE_IN: Handle = Handle(0x0001_0008);
+
+/// Bits de la máscara de servicios que recibe el shell.
+const SERVICE_BLOCK: u64 = 1;
+const SERVICE_FS: u64 = 2;
 
 fn say(msg: &[u8]) {
     sys::print(b"AriInit: ");
@@ -91,8 +99,30 @@ fn run_block_client(name: &str, service: Handle) -> Result<u64, Error> {
     result
 }
 
-fn main(_arg: u64) -> u64 {
+/// Lanza el shell con el endpoint de fsd (WRITE), hardware para su buffer,
+/// el sistema (READ|MANAGE), la entrada de consola y la raíz PCI solo
+/// lectura; `arg` = servicios activos. Espera a que termine.
+fn run_shell(fs_service: Handle, services: u64) -> Result<u64, Error> {
+    let fsd = sys::handle_duplicate(fs_service, rights::WRITE | rights::TRANSFER)?;
+    let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
+    let system = sys::handle_duplicate(SYSTEM, rights::READ | rights::MANAGE | rights::TRANSFER)?;
+    let console_in = sys::handle_duplicate(CONSOLE_IN, rights::READ | rights::TRANSFER)?;
+    let pci = sys::handle_duplicate(PCI_ROOT, rights::READ | rights::TRANSFER)?;
+    let child = sys::process_spawn_with(
+        SPAWNER,
+        "shell",
+        services,
+        &[fsd, hw, system, console_in, pci],
+    )?;
+    let result = sys::process_wait(child, TIMEOUT_INFINITE);
+    let _ = sys::handle_close(child);
+    result
+}
+
+fn main(arg: u64) -> u64 {
     say(b"arrancando");
+    let mut fs_service = None;
+    let mut services = 0u64;
     // 1. Un servicio que termina bien.
     match run("hello", 0) {
         Ok(42) => say(b"hello termino con 42"),
@@ -142,19 +172,23 @@ fn main(_arg: u64) -> u64 {
             let Ok(_driver) = start_driver("virtio_blk", index, service) else {
                 return 10;
             };
+            services |= SERVICE_BLOCK;
             // Servicio de ficheros sobre la particion ARI0 (LBA 34) y su cliente.
-            let Ok(fs_service) = sys::endpoint_create() else {
+            let Ok(fs_ep) = sys::endpoint_create() else {
                 return 12;
             };
-            match start_fsd(fs_service, service, 34) {
-                Ok(_) => {}
+            match start_fsd(fs_ep, service, 34) {
+                Ok(_) => services |= SERVICE_FS,
                 Err(e) => {
                     user_testprogs::print_error(b"AriInit: fsd", e);
                     return 13;
                 }
             }
-            match run_block_client("fs_client", fs_service) {
-                Ok(0) => say(b"servicio de ficheros ok"),
+            match run_block_client("fs_client", fs_ep) {
+                Ok(0) => {
+                    say(b"servicio de ficheros ok");
+                    fs_service = Some(fs_ep);
+                }
                 Ok(code) => {
                     sys::print(b"AriInit: fs_client salio con ");
                     sys::print(user_testprogs::fmt_u64(code, &mut buf));
@@ -183,6 +217,20 @@ fn main(_arg: u64) -> u64 {
         None => say(b"sin virtio-blk"),
     }
     say(b"servicios de arranque completados");
+    if arg & sys::abi::init_arg::SHELL != 0 {
+        let Some(fs) = fs_service else {
+            say(b"sin servicio de ficheros, no se lanza el shell");
+            return 15;
+        };
+        match run_shell(fs, services) {
+            Ok(code) => {
+                sys::print(b"AriInit: shell terminado con ");
+                sys::print(user_testprogs::fmt_u64(code, &mut buf));
+                sys::print(b"\n");
+            }
+            Err(e) => user_testprogs::print_error(b"AriInit: shell", e),
+        }
+    }
     0
 }
 

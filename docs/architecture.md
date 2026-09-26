@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.0.8 en curso (0.0.7 + Fases 18, 19 y 20)
+## Estado: 0.0.8 (0.0.7 + Fases 18 a 21)
 
 ```text
 OVMF (UEFI)
@@ -26,7 +26,9 @@ OVMF (UEFI)
        con capabilities IRQ/MMIO/DMA, enumeración PCIe por ECAM, init reclama
        el virtio-blk (BARs, MSI-X) y lanza su driver en ring 3 como servicio
        de bloques por IPC (disco GPT), fsd monta AriFS v0 sobre él y sirve
-       ficheros por IPC, ARICODEOS_KERNEL_READY
+       ficheros por IPC; con `shell` en la cmdline init lanza arish, que lee
+       la consola serie y apaga o reinicia por `system_power`;
+       ARICODEOS_KERNEL_READY
 ```
 
 ## Crates
@@ -56,6 +58,7 @@ user/testprogs/      programas de prueba de ring 3 (Rust y ensamblador) enlazado
 services/init/       AriInit: primer proceso; recibe SPAWNER y la raíz PCI, lanza/supervisa servicios y reclama dispositivos para sus drivers
 services/virtio-blk/ driver virtio-blk en ring 3 y servicio de bloques por IPC (interfaz moderna, cola 0 en DMA, MSI-X, GPT)
 services/arifs/      fsd: servicio de ficheros AriFS en ring 3 sobre el servicio de bloques
+services/shell/      arish: shell interactivo en ring 3 (help, ps, mem, ls, cat, devices, services, uptime, reboot, shutdown, exit)
 boot/                ariboot: integra lo anterior con la crate `uefi`
 kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log con IrqLock y try_lock),
                      arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions, port, pic, pit, apic, ioapic, msr, syscall, usermode},
@@ -310,7 +313,7 @@ segundo brevemente para añadir la región.
   `object_revoke`, `endpoint_create`, `ipc_send`, `ipc_receive`,
   `process_spawn` (con transferencia de handles al hijo), `process_wait`,
   `irq_wait`, `mmio_map`, `region_len`, `dma_alloc`, `dma_phys`, `pci_count`,
-  `pci_info`, `pci_claim`.
+  `pci_info`, `pci_claim`, `console_read`, `system_info`, `system_power`.
 - Los punteros de usuario se validan página a página contra las tablas del
   proceso (`copy_from_user`): un puntero de kernel devuelve `Fault`, nunca se
   desreferencia.
@@ -524,8 +527,41 @@ segundo brevemente para añadir la región.
   `ARIDISK\0`+LBA) queda fuera del alcance máximo de AriFS (32 × 16
   sectores) para que `blk_client` y `fsd` no se pisen.
 
+## Shell y entrada de consola (Fase 21)
+
+- `console_input` (kernel): la IRQ ISA 4 de COM1 se enruta por el I/O APIC
+  al vector `0x40`, fuera del rango de dispositivos de usuario; el handler
+  vacía el FIFO en un anillo de 1 KiB y despierta una `WaitQueue`.
+  `console_read` (syscall 24) exige `READ` sobre un objeto `Console`,
+  valida el destino antes de bloquear y devuelve `Timeout` si vence el plazo.
+  Los bytes descartados por anillo lleno se cuentan para diagnóstico.
+- Objeto `System` (kind 11): `system_info` (syscall 25, `READ`) responde
+  `UPTIME` (ms), `MEMORY` (frames utilizables y libres: el PMM distingue la
+  RAM entregada con `free_range` de los frames direccionables) y
+  `PROCESSES` (entradas de 32 bytes con pid, estado, código y nombre);
+  `system_power` (syscall 26, `MANAGE`) apaga (`ARICODEOS_SHUTDOWN` y
+  salida de QEMU con `qemu_exit`, `hlt` sin él) o reinicia (reset por el
+  8042 y triple fallo como respaldo). ABI v3.
+- Init recibe además `SYSTEM` (`0x10007`) y una entrada de consola
+  (`0x10008`, `READ`); el kernel le pasa en `arg` `init_arg::SHELL` si la
+  cmdline lleva `shell`. Tras los servicios de arranque lanza `shell` con
+  el endpoint de fsd (`WRITE`), hardware, `SYSTEM`, la entrada de consola
+  y la raíz PCI solo lectura, y `arg` = máscara de servicios activos; espera
+  su salida y la anota.
+- `arish` lee líneas con eco y retroceso, y despacha los comandos sin
+  `alloc` (formato con `fmt_u64`/`fmt_hex` de la biblioteca de programas
+  de usuario). `cat` lee por bloques de 1 KiB con `FsClient`.
+- El runner (`qemu::run_headless`) acepta `Input { prompt, lines }`: lee la
+  serie de forma incremental y envía la línea `k` cuando el prompt ha
+  aparecido `k + 1` veces, así los tests son deterministas sin esperas
+  fijas. `console.input` usa `CONSOLE_INPUT_READY` como prompt para probar
+  el kernel sin shell.
+
 ## Deuda conocida
 
+- `arish` no tiene historial, edición de línea ni redirecciones; las
+  variables de entorno y el lanzamiento de programas llegan con el servicio
+  de procesos.
 - `fsd` no distingue clientes: cualquier proceso con su endpoint ve todos
   los descriptores. La capability por fichero llega con la identidad de
   cliente en IPC.

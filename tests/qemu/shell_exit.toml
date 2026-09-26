@@ -1,0 +1,17 @@
+# Fase 21: `exit` devuelve el control a init, que lo anota y termina; el
+# kernel sigue su camino normal hasta ARICODEOS_KERNEL_READY.
+name = "shell.exit"
+description = "arish: exit termina el shell y init lo supervisa"
+level = "full"
+areas = ["shell", "init"]
+cmdline = "qemu_exit shell"
+timeout_secs = 60
+stdin = ["exit"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: shell terminado con 0",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC"]

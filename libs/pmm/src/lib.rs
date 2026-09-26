@@ -50,13 +50,17 @@ pub enum PmmError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Stats {
+    /// Frames direccionables (tamaño del bitmap, huecos incluidos).
     pub total_frames: usize,
+    /// Frames de RAM entregados al asignador con `free_range`.
+    pub usable_frames: usize,
     pub free_frames: usize,
 }
 
 impl Stats {
+    /// Frames de RAM utilizable ocupados ahora mismo.
     pub const fn used_frames(&self) -> usize {
-        self.total_frames - self.free_frames
+        self.usable_frames - self.free_frames
     }
     pub const fn free_bytes(&self) -> u64 {
         self.free_frames as u64 * FRAME_SIZE
@@ -70,6 +74,8 @@ pub struct BitmapAllocator<'a> {
     /// 1 = ocupado. Los bits más allá de `frames` están siempre a 1.
     bits: &'a mut [u64],
     frames: usize,
+    /// Frames de RAM entregados con `free_range` (para estadísticas).
+    usable: usize,
     free: usize,
     /// Primer word que puede contener un bit libre (heurística, nunca mayor
     /// que el verdadero primero).
@@ -100,6 +106,7 @@ impl<'a> BitmapAllocator<'a> {
         Self {
             bits,
             frames,
+            usable: 0,
             free: 0,
             hint: 0,
         }
@@ -112,6 +119,7 @@ impl<'a> BitmapAllocator<'a> {
     pub fn stats(&self) -> Stats {
         Stats {
             total_frames: self.frames,
+            usable_frames: self.usable,
             free_frames: self.free,
         }
     }
@@ -151,6 +159,9 @@ impl<'a> BitmapAllocator<'a> {
         let first = start.div_ceil(FRAME_SIZE) as usize;
         let last = (end / FRAME_SIZE) as usize; // exclusivo
         for n in first..last.min(self.frames) {
+            if self.get(n) {
+                self.usable += 1;
+            }
             self.set(n, false);
         }
     }
@@ -252,6 +263,11 @@ mod tests {
         // [0x1800, 0x8800): frames completos 2..=7 (6 frames); bordes parciales fuera.
         p.free_range(0x1800, 0x8800);
         assert_eq!(p.stats().free_frames, 6);
+        assert_eq!(p.stats().usable_frames, 6);
+        assert_eq!(p.stats().total_frames, 100);
+        // Repetir el rango no cuenta dos veces la RAM utilizable.
+        p.free_range(0x1800, 0x8800);
+        assert_eq!(p.stats().usable_frames, 6);
         assert!(!p.is_free(Frame::from_number(1)));
         assert!(p.is_free(Frame::from_number(2)));
         assert!(p.is_free(Frame::from_number(7)));

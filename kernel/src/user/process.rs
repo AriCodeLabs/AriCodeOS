@@ -329,6 +329,25 @@ pub fn wait(pid: Pid) -> ExitStatus {
 }
 
 /// Nombre de un proceso vivo (para diagnóstico).
+/// Instantánea de la tabla de procesos para `system_info`.
+pub fn snapshot() -> Vec<aricode_abi::sysinfo::ProcessEntry> {
+    use aricode_abi::sysinfo::{ProcessEntry, ProcessState};
+    PROCESSES
+        .lock()
+        .iter()
+        .map(|(pid, p)| {
+            let (state, code) = match p.status {
+                None => (ProcessState::Running, 0),
+                Some(ExitStatus::Exited(c)) => {
+                    (ProcessState::Exited, c.min(u16::MAX as u64) as u16)
+                }
+                Some(ExitStatus::Killed(_)) => (ProcessState::Killed, 0),
+            };
+            ProcessEntry::new(pid.0, state, code, &p.name)
+        })
+        .collect()
+}
+
 pub fn exists(pid: Pid) -> bool {
     PROCESSES.lock().contains_key(&pid)
 }

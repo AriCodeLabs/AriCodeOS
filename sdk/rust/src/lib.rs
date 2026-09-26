@@ -224,6 +224,51 @@ pub fn pci_claim(root: Handle, index: u64) -> Result<[Handle; abi::PCI_CLAIM_HAN
     Ok(raw.map(Handle))
 }
 
+/// Lee de la consola hasta `buf.len()` bytes; bloquea hasta que haya al
+/// menos uno o venza `timeout_ms`.
+pub fn console_read(console: Handle, buf: &mut [u8], timeout_ms: u64) -> Result<usize, Error> {
+    abi::decode(raw_syscall(
+        nr::CONSOLE_READ,
+        console.0 as u64,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        timeout_ms,
+        0,
+        0,
+    ))
+    .map(|n| n as usize)
+}
+
+/// Consulta del sistema (`abi::sysinfo`); devuelve los bytes escritos en `buf`.
+pub fn system_info(system: Handle, kind: u64, buf: &mut [u8]) -> Result<usize, Error> {
+    abi::decode(raw_syscall(
+        nr::SYSTEM_INFO,
+        system.0 as u64,
+        kind,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        0,
+        0,
+    ))
+    .map(|n| n as usize)
+}
+
+/// Apaga o reinicia (`abi::power`). Solo retorna si el kernel rechaza la acción.
+pub fn system_power(system: Handle, action: u64) -> Error {
+    match abi::decode(raw_syscall(
+        nr::SYSTEM_POWER,
+        system.0 as u64,
+        action,
+        0,
+        0,
+        0,
+        0,
+    )) {
+        Ok(_) => Error::Invalid,
+        Err(e) => e,
+    }
+}
+
 /// Ayuda para programas de prueba: escribe en la consola ignorando errores.
 pub fn print(bytes: &[u8]) {
     let _ = console_write(Handle::CONSOLE, bytes);

@@ -90,6 +90,20 @@ pub fn fmt_u64(mut v: u64, buf: &mut [u8; 20]) -> &[u8] {
     &buf[i..]
 }
 
+/// Formatea un entero en hexadecimal con `width` dígitos (relleno con ceros).
+pub fn fmt_hex(v: u64, width: usize, buf: &mut [u8; 16]) -> &[u8] {
+    let width = width.clamp(1, 16);
+    for (i, slot) in buf.iter_mut().enumerate().take(width) {
+        let nibble = ((v >> (4 * (width - 1 - i))) & 0xF) as u8;
+        *slot = if nibble < 10 {
+            b'0' + nibble
+        } else {
+            b'a' + nibble - 10
+        };
+    }
+    &buf[..width]
+}
+
 /// Define `_start` para un `fn main(arg: u64) -> u64`: `arg` es el valor que
 /// pasó quien creó el proceso y el resultado es el código de salida.
 #[macro_export]

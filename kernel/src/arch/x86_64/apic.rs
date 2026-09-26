@@ -117,6 +117,10 @@ pub fn handle_interrupt(vector: u8) {
             crate::hw::handle_device_irq(vector);
             eoi();
         }
+        crate::console_input::SERIAL_VECTOR => {
+            crate::console_input::on_irq();
+            eoi();
+        }
         v => {
             warn!("interrupcion inesperada, vector {v}");
             eoi();
