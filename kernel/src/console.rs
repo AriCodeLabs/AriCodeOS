@@ -16,7 +16,12 @@ static LOGGER: KernelLogger = KernelLogger;
 
 /// Activa la consola de framebuffer. Idempotente; ignora si no hay GOP.
 pub fn init_framebuffer(info: boot_protocol::FramebufferInfo) -> bool {
-    match MmioSurface::new(info) {
+    let base = if info.address == 0 {
+        0
+    } else {
+        crate::memory::phys::phys_to_virt(info.address)
+    };
+    match MmioSurface::new(info, base) {
         Some(surface) => {
             // SAFETY: ver `SingleCpu`.
             unsafe { *FB.get() = Some(Console::new(surface)) };

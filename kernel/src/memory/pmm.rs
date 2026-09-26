@@ -1,10 +1,10 @@
 //! Allocator físico global (Fase 5), construido sobre `aricode-pmm` a partir
 //! del mapa UEFI de `BootInfo`.
 //!
-//! El bitmap se coloca en la región libre más baja con espacio suficiente.
-//! Hasta la Fase 6 toda la memoria física es accesible por identidad, así
-//! que la dirección física del bitmap es también su dirección virtual.
+//! El bitmap se coloca en la región libre más baja con espacio suficiente y
+//! se accede a través del mapa físico lineal.
 
+use super::phys;
 use crate::sync::SingleCpu;
 use aricode_pmm::{BitmapAllocator, Frame, Stats, FRAME_SIZE};
 use boot_protocol::{BootInfo, MemoryRegionKind};
@@ -21,8 +21,8 @@ const LOW_RESERVED_END: u64 = 1024 * 1024;
 /// # Panics
 /// Si el mapa no contiene ninguna región libre capaz de alojar el bitmap.
 pub fn init(info: &BootInfo) {
-    // SAFETY: el mapa vive en memoria de boot identidad-mapeada por AriBoot.
-    let regions = || unsafe { info.memory_map.iter() };
+    // SAFETY: el mapa vive en memoria de boot accesible por el mapa físico.
+    let regions = || unsafe { info.memory_regions() };
 
     // Extensión administrada: hasta el final de la última región no reservada.
     let phys_end = regions()
@@ -44,10 +44,13 @@ pub fn init(info: &BootInfo) {
         .min()
         .expect("sin region libre para el bitmap del PMM");
 
-    // SAFETY: región libre según el firmware, identidad-mapeada, alineada a
-    // frame y de uso exclusivo del PMM a partir de ahora.
+    // SAFETY: región libre según el firmware, accesible por el mapa físico,
+    // alineada a frame y de uso exclusivo del PMM a partir de ahora.
     let words: &'static mut [u64] = unsafe {
-        core::slice::from_raw_parts_mut(bitmap_addr as *mut u64, BitmapAllocator::words_for(frames))
+        core::slice::from_raw_parts_mut(
+            phys::phys_to_virt(bitmap_addr) as *mut u64,
+            BitmapAllocator::words_for(frames),
+        )
     };
     let mut pmm = BitmapAllocator::new(words, frames);
     for d in regions().filter(|d| d.kind() == MemoryRegionKind::Free) {

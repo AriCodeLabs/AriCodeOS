@@ -1,0 +1,12 @@
+# La recursion agota la pila del kernel: el primer acceso a la guard page
+# provoca #PF, la CPU no puede apilar su marco y llega #DF por la pila IST.
+name = "memory.stack_guard_page"
+description = "test=stack_overflow -> guard page detectada en #DF"
+level = "full"
+areas = ["memory", "interrupts"]
+cmdline = "qemu_exit test=stack_overflow"
+
+[expect]
+exit = 35
+serial_contains = ["EXCEPTION #DF (8) Double Fault", "STACK OVERFLOW: la pila del kernel toco su guard page", "ARICODEOS KERNEL PANIC"]
+serial_absent = ["ARICODEOS_KERNEL_READY"]
