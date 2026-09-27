@@ -7,15 +7,15 @@
 
 use aricode_input::{describe, Keyboard, BTN_LEFT, EV_KEY, EV_REL, REL_X, REL_Y};
 use aricode_proto::input::{Event, Status, MAX_EVENTS};
-use user_testprogs::sys::input::{InputClient, InputError};
-use user_testprogs::sys::{self, Handle};
+use aricode_rt::sys::input::{InputClient, InputError};
+use aricode_rt::sys::{self, Handle};
 
 fn num_i32(v: i32) {
     let mut b = [0u8; 20];
     if v < 0 {
         sys::print(b"-");
     }
-    sys::print(user_testprogs::fmt_u64(v.unsigned_abs() as u64, &mut b));
+    sys::print(aricode_rt::fmt_u64(v.unsigned_abs() as u64, &mut b));
 }
 
 fn main(count: u64) -> u64 {
@@ -36,7 +36,7 @@ fn main(count: u64) -> u64 {
         };
         sys::print(b"input_client: dispositivo ");
         let mut b = [0u8; 20];
-        sys::print(user_testprogs::fmt_u64(i as u64, &mut b));
+        sys::print(aricode_rt::fmt_u64(i as u64, &mut b));
         sys::print(b": ");
         sys::print(&name[..n]);
         sys::print(b"\n");
@@ -120,4 +120,4 @@ fn main(count: u64) -> u64 {
     0
 }
 
-user_testprogs::entry!(main);
+aricode_rt::entry!(main);

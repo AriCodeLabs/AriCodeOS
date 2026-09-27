@@ -5,8 +5,8 @@
 #![no_main]
 
 use aricode_gfx::{rgb, Rect};
-use user_testprogs::sys::window::{Event, Window, WindowError};
-use user_testprogs::sys::{self, Handle};
+use aricode_rt::sys::window::{Event, Window, WindowError};
+use aricode_rt::sys::{self, Handle};
 
 const COMPOSITOR: Handle = Handle(0x0001_0004);
 const HW: Handle = Handle(0x0001_0005);
@@ -16,7 +16,7 @@ fn num_i32(v: i32) {
     if v < 0 {
         sys::print(b"-");
     }
-    sys::print(user_testprogs::fmt_u64(v.unsigned_abs() as u64, &mut b));
+    sys::print(aricode_rt::fmt_u64(v.unsigned_abs() as u64, &mut b));
 }
 
 fn main(index: u64) -> u64 {
@@ -32,11 +32,11 @@ fn main(index: u64) -> u64 {
             sys::print(name);
             sys::print(b": no se pudo crear la ventana: ");
             match e {
-                WindowError::Ipc(err) => user_testprogs::print_error(b"ipc", err),
+                WindowError::Ipc(err) => aricode_rt::print_error(b"ipc", err),
                 WindowError::Status(s) => {
                     let mut b = [0u8; 20];
                     sys::print(b"estado ");
-                    sys::print(user_testprogs::fmt_u64(s as u64, &mut b));
+                    sys::print(aricode_rt::fmt_u64(s as u64, &mut b));
                     sys::print(b"\n");
                 }
                 WindowError::Invalid => sys::print(b"parametros invalidos\n"),
@@ -103,4 +103,4 @@ fn main(index: u64) -> u64 {
     0
 }
 
-user_testprogs::entry!(main);
+aricode_rt::entry!(main);

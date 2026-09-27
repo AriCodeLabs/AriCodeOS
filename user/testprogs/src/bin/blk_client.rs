@@ -5,7 +5,7 @@
 #![no_main]
 
 use aricode_proto::block::{Op, Reply, Request, Status};
-use user_testprogs::sys::{self, rights, Handle, TIMEOUT_INFINITE};
+use aricode_rt::sys::{self, rights, Handle, TIMEOUT_INFINITE};
 
 const BLK: Handle = Handle(0x0001_0004);
 /// Primer sector del área en bruto del disco de pruebas (`xtask`).
@@ -161,4 +161,4 @@ fn main(_arg: u64) -> u64 {
     0
 }
 
-user_testprogs::entry!(main);
+aricode_rt::entry!(main);

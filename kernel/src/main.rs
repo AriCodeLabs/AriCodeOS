@@ -346,7 +346,12 @@ fn run_init(shell: bool, gui: bool, fb: boot_protocol::FramebufferInfo) {
         "init",
         elf,
         alloc::vec![
-            (spawner, Rights::MANAGE.union(Rights::DUPLICATE)),
+            (
+                spawner,
+                Rights::MANAGE
+                    .union(Rights::DUPLICATE)
+                    .union(Rights::TRANSFER)
+            ),
             (
                 pci_root,
                 Rights::READ

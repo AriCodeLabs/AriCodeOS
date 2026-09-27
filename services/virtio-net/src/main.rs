@@ -15,8 +15,8 @@ use alloc::boxed::Box;
 use aricode_net::tcp::{self, Connection};
 use aricode_net::{arp, dhcp, dns, eth, icmp, ipv4, udp, Ipv4Addr, MacAddr};
 use aricode_proto::net::{Info, Op, Reply, Request, Status, MAX_DATAGRAM};
-use user_testprogs::sys::virtio_pci::{extra_handle, DmaRegion, Queue, Transport, IRQ, SERVICE};
-use user_testprogs::sys::{self, abi, Handle};
+use aricode_rt::sys::virtio_pci::{extra_handle, DmaRegion, Queue, Transport, IRQ, SERVICE};
+use aricode_rt::sys::{self, abi, Handle};
 
 /// VIRTIO_NET_F_MAC: el dispositivo tiene una MAC en su configuración.
 const FEATURE_MAC: u64 = 1 << 5;
@@ -1160,7 +1160,7 @@ fn main(mask: u64) -> u64 {
         if i > 0 {
             sys::print(b":");
         }
-        sys::print(user_testprogs::fmt_hex(*b as u64, 2, &mut hex));
+        sys::print(aricode_rt::fmt_hex(*b as u64, 2, &mut hex));
     }
     sys::print(b"\n");
     let mut stack = Stack::new(nic, clock);
@@ -1201,4 +1201,4 @@ fn main(mask: u64) -> u64 {
     }
 }
 
-user_testprogs::entry!(main);
+aricode_rt::entry!(main);

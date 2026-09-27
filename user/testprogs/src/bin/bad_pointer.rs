@@ -1,4 +1,4 @@
 #![no_std]
 #![no_main]
 
-user_testprogs::asm_program!("../../asm/bad_pointer.s");
+aricode_rt::asm_program!("../../asm/bad_pointer.s");

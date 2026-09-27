@@ -2,7 +2,7 @@
 #![no_std]
 #![no_main]
 
-use user_testprogs::sys::{self, rights, Error, Handle};
+use aricode_rt::sys::{self, rights, Error, Handle};
 
 fn main(_arg: u64) -> u64 {
     // Derivacion: un duplicado con menos derechos sigue siendo el mismo objeto.
@@ -47,4 +47,4 @@ fn main(_arg: u64) -> u64 {
     21
 }
 
-user_testprogs::entry!(main);
+aricode_rt::entry!(main);

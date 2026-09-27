@@ -35,6 +35,9 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("aricode-gfx", None),
     ("aricode-proto", None),
     ("aricode-sys", None),
+    ("aricode-build", None),
+    ("aricode-rt", Some(KERNEL_TARGET)),
+    ("ari-app-hello", Some(KERNEL_TARGET)),
     ("user-testprogs", Some(KERNEL_TARGET)),
     ("ariinit", Some(KERNEL_TARGET)),
     ("ari-virtio-blk", Some(KERNEL_TARGET)),
@@ -80,7 +83,8 @@ pub struct Artifacts {
     pub user_bin: PathBuf,
 }
 
-/// Programas que van al initrd: `init` y los binarios de `user/testprogs`.
+/// Programas que van al initrd: `init`, los servicios, las aplicaciones y los
+/// binarios de `user/testprogs`.
 pub fn initrd_programs() -> Result<Vec<String>> {
     let mut names = vec![
         String::from("init"),
@@ -89,6 +93,7 @@ pub fn initrd_programs() -> Result<Vec<String>> {
         String::from("virtio_input"),
         String::from("compositor"),
         String::from("fsd"),
+        String::from("hello_app"),
         String::from("shell"),
     ];
     let bins = root().join("user/testprogs/src/bin");
@@ -113,6 +118,7 @@ pub fn build_user_programs(release: bool) -> Result<PathBuf> {
         "ari-virtio-input",
         "ari-compositor",
         "ari-fsd",
+        "ari-app-hello",
         "ari-shell",
     ] {
         println!("[xtask] build {pkg} ({KERNEL_TARGET})");

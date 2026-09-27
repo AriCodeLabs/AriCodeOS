@@ -2,7 +2,7 @@
 #![no_std]
 #![no_main]
 
-use user_testprogs::sys;
+use aricode_rt::sys;
 
 fn main(_arg: u64) -> u64 {
     sys::thread_sleep(20);
@@ -14,4 +14,4 @@ fn main(_arg: u64) -> u64 {
     3
 }
 
-user_testprogs::entry!(main);
+aricode_rt::entry!(main);

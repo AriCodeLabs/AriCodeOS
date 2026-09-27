@@ -1,0 +1,19 @@
+[package]
+name = "ari-app-hello"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Aplicacion de ejemplo del SDK de AriCodeOS: consola, tiempo y permisos"
+publish = false
+
+[[bin]]
+name = "hello_app"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+aricode-rt = { path = "../../sdk/runtime" }
+
+[build-dependencies]
+aricode-build = { path = "../../sdk/build" }

@@ -11,7 +11,7 @@
 #![no_std]
 #![no_main]
 
-use user_testprogs::sys::{self, rights, Error, Handle, TIMEOUT_INFINITE};
+use aricode_rt::sys::{self, rights, Error, Handle, TIMEOUT_INFINITE};
 
 const SPAWNER: Handle = Handle(0x0001_0004);
 const PCI_ROOT: Handle = Handle(0x0001_0005);
@@ -119,20 +119,26 @@ fn run_block_client(name: &str, service: Handle) -> Result<u64, Error> {
 
 /// Lanza el shell con el endpoint de fsd (WRITE), hardware para su buffer,
 /// el sistema (READ|MANAGE), la entrada de consola, la raíz PCI solo
-/// lectura y el endpoint de netd (WRITE); `arg` = servicios activos. Espera
-/// a que termine.
+/// lectura, el endpoint de netd (WRITE) y un SPAWNER para `run`; `arg` =
+/// servicios activos. Espera a que termine.
 fn run_shell(fs_service: Handle, net_service: Handle, services: u64) -> Result<u64, Error> {
     let fsd = sys::handle_duplicate(fs_service, rights::WRITE | rights::TRANSFER)?;
     let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
-    let system = sys::handle_duplicate(SYSTEM, rights::READ | rights::MANAGE | rights::TRANSFER)?;
+    // Con DUPLICATE el shell puede a su vez pasar un SYSTEM de solo lectura a
+    // los programas que lance con `run`.
+    let system = sys::handle_duplicate(
+        SYSTEM,
+        rights::READ | rights::MANAGE | rights::DUPLICATE | rights::TRANSFER,
+    )?;
     let console_in = sys::handle_duplicate(CONSOLE_IN, rights::READ | rights::TRANSFER)?;
     let pci = sys::handle_duplicate(PCI_ROOT, rights::READ | rights::TRANSFER)?;
     let netd = sys::handle_duplicate(net_service, rights::WRITE | rights::TRANSFER)?;
+    let spawner = sys::handle_duplicate(SPAWNER, rights::MANAGE | rights::TRANSFER)?;
     let child = sys::process_spawn_with(
         SPAWNER,
         "shell",
         services,
-        &[fsd, hw, system, console_in, pci, netd],
+        &[fsd, hw, system, console_in, pci, netd, spawner],
     )?;
     let result = sys::process_wait(child, TIMEOUT_INFINITE);
     let _ = sys::handle_close(child);
@@ -221,7 +227,7 @@ fn main(arg: u64) -> u64 {
     match sys::pci_count(PCI_ROOT) {
         Ok(n) => {
             sys::print(b"AriInit: ");
-            sys::print(user_testprogs::fmt_u64(n, &mut buf));
+            sys::print(aricode_rt::fmt_u64(n, &mut buf));
             sys::print(b" funciones PCI\n");
         }
         Err(_) => return 8,
@@ -243,7 +249,7 @@ fn main(arg: u64) -> u64 {
             match start_fsd(fs_ep, service, 34) {
                 Ok(_) => services |= SERVICE_FS,
                 Err(e) => {
-                    user_testprogs::print_error(b"AriInit: fsd", e);
+                    aricode_rt::print_error(b"AriInit: fsd", e);
                     return 13;
                 }
             }
@@ -254,12 +260,12 @@ fn main(arg: u64) -> u64 {
                 }
                 Ok(code) => {
                     sys::print(b"AriInit: fs_client salio con ");
-                    sys::print(user_testprogs::fmt_u64(code, &mut buf));
+                    sys::print(aricode_rt::fmt_u64(code, &mut buf));
                     sys::print(b"\n");
                     return 14;
                 }
                 Err(e) => {
-                    user_testprogs::print_error(b"AriInit: fs_client", e);
+                    aricode_rt::print_error(b"AriInit: fs_client", e);
                     return 14;
                 }
             }
@@ -267,12 +273,12 @@ fn main(arg: u64) -> u64 {
                 Ok(0) => say(b"servicio de bloques ok"),
                 Ok(code) => {
                     sys::print(b"AriInit: blk_client salio con ");
-                    sys::print(user_testprogs::fmt_u64(code, &mut buf));
+                    sys::print(aricode_rt::fmt_u64(code, &mut buf));
                     sys::print(b"\n");
                     return 11;
                 }
                 Err(e) => {
-                    user_testprogs::print_error(b"AriInit: blk_client", e);
+                    aricode_rt::print_error(b"AriInit: blk_client", e);
                     return 11;
                 }
             }
@@ -291,7 +297,7 @@ fn main(arg: u64) -> u64 {
             match start_driver("virtio_net", index, net_service, &[system]) {
                 Ok(_) => services |= SERVICE_NET,
                 Err(e) => {
-                    user_testprogs::print_error(b"AriInit: virtio_net", e);
+                    aricode_rt::print_error(b"AriInit: virtio_net", e);
                     return 17;
                 }
             }
@@ -299,12 +305,12 @@ fn main(arg: u64) -> u64 {
                 Ok(0) => say(b"servicio de red ok"),
                 Ok(code) => {
                     sys::print(b"AriInit: net_client salio con ");
-                    sys::print(user_testprogs::fmt_u64(code, &mut buf));
+                    sys::print(aricode_rt::fmt_u64(code, &mut buf));
                     sys::print(b"\n");
                     return 18;
                 }
                 Err(e) => {
-                    user_testprogs::print_error(b"AriInit: net_client", e);
+                    aricode_rt::print_error(b"AriInit: net_client", e);
                     return 18;
                 }
             }
@@ -312,12 +318,12 @@ fn main(arg: u64) -> u64 {
                 Ok(0) => say(b"servicio TCP ok"),
                 Ok(code) => {
                     sys::print(b"AriInit: tcp_client salio con ");
-                    sys::print(user_testprogs::fmt_u64(code, &mut buf));
+                    sys::print(aricode_rt::fmt_u64(code, &mut buf));
                     sys::print(b"\n");
                     return 19;
                 }
                 Err(e) => {
-                    user_testprogs::print_error(b"AriInit: tcp_client", e);
+                    aricode_rt::print_error(b"AriInit: tcp_client", e);
                     return 19;
                 }
             }
@@ -325,12 +331,12 @@ fn main(arg: u64) -> u64 {
                 Ok(0) => say(b"cliente HTTP ok"),
                 Ok(code) => {
                     sys::print(b"AriInit: http_client salio con ");
-                    sys::print(user_testprogs::fmt_u64(code, &mut buf));
+                    sys::print(aricode_rt::fmt_u64(code, &mut buf));
                     sys::print(b"\n");
                     return 20;
                 }
                 Err(e) => {
-                    user_testprogs::print_error(b"AriInit: http_client", e);
+                    aricode_rt::print_error(b"AriInit: http_client", e);
                     return 20;
                 }
             }
@@ -358,7 +364,7 @@ fn main(arg: u64) -> u64 {
                 inputs += 1;
             }
             Err(e) => {
-                user_testprogs::print_error(b"AriInit: virtio_input", e);
+                aricode_rt::print_error(b"AriInit: virtio_input", e);
                 return 22;
             }
         }
@@ -383,12 +389,12 @@ fn main(arg: u64) -> u64 {
             Ok(0) => say(b"servicio de entrada ok"),
             Ok(code) => {
                 sys::print(b"AriInit: input_client salio con ");
-                sys::print(user_testprogs::fmt_u64(code, &mut buf));
+                sys::print(aricode_rt::fmt_u64(code, &mut buf));
                 sys::print(b"\n");
                 return 24;
             }
             Err(e) => {
-                user_testprogs::print_error(b"AriInit: input_client", e);
+                aricode_rt::print_error(b"AriInit: input_client", e);
                 return 24;
             }
         }
@@ -405,7 +411,7 @@ fn main(arg: u64) -> u64 {
             }
             Err(code) => {
                 sys::print(b"AriInit: gui fallo con ");
-                sys::print(user_testprogs::fmt_u64(code, &mut buf));
+                sys::print(aricode_rt::fmt_u64(code, &mut buf));
                 sys::print(b"\n");
                 return 25;
             }
@@ -420,13 +426,13 @@ fn main(arg: u64) -> u64 {
         match run_shell(fs, net_service, services) {
             Ok(code) => {
                 sys::print(b"AriInit: shell terminado con ");
-                sys::print(user_testprogs::fmt_u64(code, &mut buf));
+                sys::print(aricode_rt::fmt_u64(code, &mut buf));
                 sys::print(b"\n");
             }
-            Err(e) => user_testprogs::print_error(b"AriInit: shell", e),
+            Err(e) => aricode_rt::print_error(b"AriInit: shell", e),
         }
     }
     0
 }
 
-user_testprogs::entry!(main);
+aricode_rt::entry!(main);
