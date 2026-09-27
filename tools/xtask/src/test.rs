@@ -98,14 +98,18 @@ fn run_scenario(base: &std::path::Path, s: &Scenario) -> Result<bool> {
     });
     let disk_variant = image::DiskVariant::parse(&s.disk)
         .ok_or_else(|| format!("{}: disk '{}' desconocido", s.name, s.disk))?;
+    let options = qemu::Headless {
+        input,
+        probe,
+        input_probe,
+        disk_variant,
+        disk_readonly: s.disk_readonly,
+    };
     let cap = qemu::run_headless(
         &esp,
         &workdir,
         Duration::from_secs(s.timeout_secs),
-        &input,
-        probe.as_ref(),
-        input_probe.as_ref(),
-        disk_variant,
+        &options,
     )?;
     let log = workdir.join("serial.log");
     let _ = std::fs::write(&log, &cap.serial);

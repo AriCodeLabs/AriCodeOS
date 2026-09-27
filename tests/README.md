@@ -46,6 +46,7 @@ marker = "TCP_LISTEN_READY"     # al verlo en la serie, xtask se conecta y enví
 payload = "hola desde el host"  # el eco se anota en la captura como "[host] sonda TCP: ..."
 
 disk = "slots"                  # estado inicial del disco: slots (defecto) | esp-only | pending-b | b-exhausted | b-corrupt
+disk_readonly = false           # true: el disco de pruebas se presenta como solo lectura
 
 [host_input]                    # opcional: entrada inyectada por QMP al ver marker
 marker = "INPUT_READY"

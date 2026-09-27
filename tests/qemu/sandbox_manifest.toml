@@ -11,7 +11,7 @@ description = "broker de capabilities: manifiesto, directorio privado, cuota y d
 level = "full"
 areas = ["sandbox", "shell", "filesystem", "init"]
 cmdline = "qemu_exit shell"
-timeout_secs = 180
+timeout_secs = 300
 stdin = [
     "run hello_app 7",
     "run hello_app 8",
@@ -20,6 +20,10 @@ stdin = [
     "run perms_check",
     "repeat 300 run no-existe",
     "run hello_app 9",
+    "run fs_victim",
+    "run fs_probe",
+    "repeat 300 run win_probe",
+    "run hello_app 10",
     "shutdown",
 ]
 
@@ -44,6 +48,11 @@ serial_contains = [
     "perms_check: la enumeracion salta huecos ok",
     "run: perms_check termino con 0",
     "hello_app: hola desde una aplicacion del SDK (arg 9)",
+    "fs_victim: secreto escrito, descriptor abierto al salir",
+    "fs_probe: descriptores ajenos inaccesibles (BadFd en 16 x lectura, escritura y cierre)",
+    "run: fs_probe termino con 0",
+    "run: win_probe: denegado por el broker",
+    "hello_app: hola desde una aplicacion del SDK (arg 10)",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "veo ficheros ajenos", "pude abrir", "la cuota no se aplico", "un hueco oculto", "el broker no pudo lanzarlo"]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "veo ficheros ajenos", "pude abrir", "la cuota no se aplico", "un hueco oculto", "el broker no pudo lanzarlo", "ACCESO CRUZADO"]

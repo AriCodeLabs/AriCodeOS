@@ -65,5 +65,8 @@ La primera batería de QEMU fue terminada con SIGTERM mientras otra batería
 estaba activa en el workspace. La segunda usó una copia independiente, los
 puertos 27007–27010 en lugar de 17007–17010 y nombres distintos para los
 ejecutables del runner y QEMU. Solo se ajustaron las constantes de puertos de
-prueba, el comando de QEMU y las expectativas correspondientes. Los archivos
+prueba, las URLs del cliente HTTP de prueba, el comando de QEMU y las
+expectativas correspondientes. Los archivos
 de los hallazgos permanecieron iguales a `snapshot.json`.
+La repetición de `virtio.blk_rw` usa la expectativa corregida en `ade2d04`
+(98304 sectores para el disco A/B).
