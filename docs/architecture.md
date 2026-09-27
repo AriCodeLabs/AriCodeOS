@@ -707,7 +707,8 @@ segundo brevemente para añadir la región.
   ocho `build.rs` duplicados se redujeron a `aricode_build::user_program()`,
   que apunta al linker script del SDK desde su propio `CARGO_MANIFEST_DIR`.
 - `aricode-sys` gana `time` (reloj sobre `SYSTEM`) y `permissions`
-  (recorrer los handles recibidos, comprobar tipos, cerrar los que sobran).
+  (recorrer los handles recibidos saltando los huecos que deja renunciar a
+  uno, comprobar tipos, cerrar los que sobran).
   `docs/sdk.md` describe el contrato completo de un programa.
 - El shell recibe un `SPAWNER` (init ahora puede transferir el suyo) y
   ejecuta `run PROGRAMA [ARG]`: el hijo solo recibe la consola, su proceso,
@@ -731,7 +732,10 @@ segundo brevemente para añadir la región.
   cuando la aplicación quiere `fs`, duplica los endpoints de red,
   compositor y entrada solo si se piden, añade `HARDWARE` solo cuando hay
   buffers que reservar y lanza con la cuota del manifiesto; responde con el
-  código de salida o `Killed`. El shell recibe el endpoint del broker en
+  código de salida o `Killed`. Si el kernel rechaza el `spawn` por cualquier
+  motivo, los duplicados preparados se cierran (el kernel solo los retira al
+  crear el proceso): antes cada nombre inexistente consumía una entrada de
+  la tabla de init. El shell recibe el endpoint del broker en
   lugar del `SPAWNER`.
 - fsd mantiene hasta 8 directorios privados: cada `Bind` (solo por el
   endpoint principal) crea o reutiliza un endpoint ligado a un prefijo; el
