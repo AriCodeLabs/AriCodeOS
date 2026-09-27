@@ -28,6 +28,7 @@ members = [
     "sdk/runtime",
     "sdk/build",
     "apps/hello",
+    "apps/perms-check",
     "apps/wasm-runner",
     "apps/wasm-demo",
     "sdk/rust",

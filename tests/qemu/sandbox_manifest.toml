@@ -2,17 +2,24 @@
 # programas. hello_app trae manifiesto (system, fs, 128K): recibe un reloj de
 # solo lectura, un directorio privado en fsd y una cuota de memoria; no ve los
 # ficheros de otros. Un programa sin manifiesto solo recibe consola y reloj.
+# Regresiones de la auditoria 2026-09-27-sdk-28e745a: tras 300 lanzamientos
+# fallidos el broker no ha perdido handles (el `run hello_app 9` posterior
+# funciona; antes se agotaba la tabla de 256) y permissions::granted salta los
+# huecos que deja renunciar a un permiso (perms_check).
 name = "sandbox.manifest"
 description = "broker de capabilities: manifiesto, directorio privado, cuota y denegacion"
 level = "full"
 areas = ["sandbox", "shell", "filesystem", "init"]
 cmdline = "qemu_exit shell"
-timeout_secs = 90
+timeout_secs = 180
 stdin = [
     "run hello_app 7",
     "run hello_app 8",
     "run blk_client",
     "run no-existe",
+    "run perms_check",
+    "repeat 300 run no-existe",
+    "run hello_app 9",
     "shutdown",
 ]
 
@@ -30,6 +37,12 @@ serial_contains = [
     "AriInit: lanzar blk_client sin manifiesto [system] memoria 64 KiB",
     "run: blk_client termino con 2",
     "run: no-existe: no existe en el initrd",
+    "perms_check: al arrancar: sistema endpoint hardware",
+    "perms_check: sin el sistema: endpoint hardware",
+    "perms_check: sin el endpoint: hardware",
+    "perms_check: la enumeracion salta huecos ok",
+    "run: perms_check termino con 0",
+    "hello_app: hola desde una aplicacion del SDK (arg 9)",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "veo ficheros ajenos", "pude abrir", "la cuota no se aplico"]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "veo ficheros ajenos", "pude abrir", "la cuota no se aplico", "un hueco oculto", "el broker no pudo lanzarlo"]

@@ -87,7 +87,7 @@ fn trim(s: &[u8]) -> &[u8] {
 
 fn help() {
     sys::print(
-        b"comandos:\n  help      esta ayuda\n  ps        procesos\n  mem       memoria fisica\n  ls        ficheros de AriFS\n  cat NOM   muestra un fichero\n  devices   funciones PCI\n  services  servicios de arranque\n  uptime    tiempo desde el arranque\n  net       configuracion de red\n  ping IP   eco ICMP (4 intentos)\n  dns NOM   resuelve un nombre\n  http URL  GET y muestra el cuerpo\n  run PROG  ejecuta un programa del initrd y espera\n  reboot    reinicia\n  shutdown  apaga\n  exit      termina el shell\n",
+        b"comandos:\n  help      esta ayuda\n  ps        procesos\n  mem       memoria fisica\n  ls        ficheros de AriFS\n  cat NOM   muestra un fichero\n  devices   funciones PCI\n  services  servicios de arranque\n  uptime    tiempo desde el arranque\n  net       configuracion de red\n  ping IP   eco ICMP (4 intentos)\n  dns NOM   resuelve un nombre\n  http URL  GET y muestra el cuerpo\n  run PROG  ejecuta un programa del initrd y espera\n  repeat N CMD  repite un comando N veces\n  reboot    reinicia\n  shutdown  apaga\n  exit      termina el shell\n",
     );
 }
 
@@ -482,39 +482,70 @@ fn main(mask: u64) -> u64 {
     loop {
         sys::print(PROMPT);
         let len = read_line(&mut line);
-        let (cmd, rest) = split(&line[..len]);
-        match cmd {
-            b"" => {}
-            b"help" => help(),
-            b"ps" => ps(),
-            b"mem" => mem(),
-            b"ls" => ls(&fs),
-            b"cat" => cat(&mut fs, rest),
-            b"devices" => devices(),
-            b"services" => services(mask, &fs),
-            b"uptime" => uptime(),
-            b"net" => net(&net_client),
-            b"ping" => ping(&net_client, rest),
-            b"dns" => dns(&mut net_client, rest),
-            b"http" => http_get(&mut net_client, rest),
-            b"run" => run(rest),
-            b"reboot" => {
-                aricode_rt::print_error(b"reboot", sys::system_power(SYSTEM, abi::power::REBOOT));
-            }
-            b"shutdown" => {
-                aricode_rt::print_error(
-                    b"shutdown",
-                    sys::system_power(SYSTEM, abi::power::SHUTDOWN),
-                );
-            }
-            b"exit" => return 0,
-            other => {
-                sys::print(b"comando desconocido: ");
-                sys::print(other);
-                sys::print(b" (help)\n");
-            }
+        if execute(&mut fs, &mut net_client, mask, &line[..len], 0) {
+            return 0;
         }
     }
+}
+
+/// Ejecuta una línea; devuelve `true` si el shell debe terminar. `depth`
+/// acota la recursión de `repeat`.
+fn execute(
+    fs: &mut FsClient,
+    net_client: &mut NetClient,
+    mask: u64,
+    line: &[u8],
+    depth: u8,
+) -> bool {
+    let (cmd, rest) = split(line);
+    match cmd {
+        b"" => {}
+        b"help" => help(),
+        b"ps" => ps(),
+        b"mem" => mem(),
+        b"ls" => ls(fs),
+        b"cat" => cat(fs, rest),
+        b"devices" => devices(),
+        b"services" => services(mask, fs),
+        b"uptime" => uptime(),
+        b"net" => net(net_client),
+        b"ping" => ping(net_client, rest),
+        b"dns" => dns(net_client, rest),
+        b"http" => http_get(net_client, rest),
+        b"run" => run(rest),
+        b"repeat" => {
+            let (count, inner) = split(rest);
+            let Some(times) = core::str::from_utf8(count)
+                .ok()
+                .and_then(|c| c.parse::<u32>().ok())
+            else {
+                sys::print(b"uso: repeat N COMANDO\n");
+                return false;
+            };
+            if depth > 0 || inner.is_empty() {
+                sys::print(b"repeat: sin anidar y con un comando\n");
+                return false;
+            }
+            for _ in 0..times.min(10_000) {
+                if execute(fs, net_client, mask, inner, depth + 1) {
+                    return true;
+                }
+            }
+        }
+        b"reboot" => {
+            aricode_rt::print_error(b"reboot", sys::system_power(SYSTEM, abi::power::REBOOT));
+        }
+        b"shutdown" => {
+            aricode_rt::print_error(b"shutdown", sys::system_power(SYSTEM, abi::power::SHUTDOWN));
+        }
+        b"exit" => return true,
+        other => {
+            sys::print(b"comando desconocido: ");
+            sys::print(other);
+            sys::print(b" (help)\n");
+        }
+    }
+    false
 }
 
 aricode_rt::entry!(main);

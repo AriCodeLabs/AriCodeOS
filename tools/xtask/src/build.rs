@@ -41,6 +41,7 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("aricode-build", None),
     ("aricode-rt", Some(KERNEL_TARGET)),
     ("ari-app-hello", Some(KERNEL_TARGET)),
+    ("ari-app-perms-check", Some(KERNEL_TARGET)),
     ("ari-app-wasm-runner", Some(KERNEL_TARGET)),
     ("wasm-demo", Some(WASM_TARGET)),
     ("user-testprogs", Some(KERNEL_TARGET)),
@@ -99,6 +100,7 @@ pub fn initrd_programs() -> Result<Vec<String>> {
         String::from("compositor"),
         String::from("fsd"),
         String::from("hello_app"),
+        String::from("perms_check"),
         String::from("wasm_runner"),
         String::from("shell"),
     ];
@@ -149,6 +151,7 @@ pub fn build_user_programs(release: bool) -> Result<PathBuf> {
         "ari-compositor",
         "ari-fsd",
         "ari-app-hello",
+        "ari-app-perms-check",
         "ari-app-wasm-runner",
         "ari-shell",
     ] {
