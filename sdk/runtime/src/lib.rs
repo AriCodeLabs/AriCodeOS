@@ -1,6 +1,17 @@
-//! Soporte común de los programas de prueba: entrada, panic y macros.
+//! Runtime de los programas de usuario (Fase 27): `_start`, heap, panic y
+//! utilidades de formato sin `alloc`. Todo programa de AriCodeOS (servicios,
+//! aplicaciones y programas de prueba) depende de esta crate y del SDK de
+//! syscalls y servicios (`aricode-sys`, reexportado como `sys`).
 //!
-//! Cada binario define `_start` (en Rust vía [`entry!`] o en ensamblador).
+//! Un programa mínimo:
+//!
+//! ```ignore
+//! #![no_std]
+//! #![no_main]
+//! use aricode_rt::sys;
+//! fn main(arg: u64) -> u64 { sys::print(b"hola\n"); 0 }
+//! aricode_rt::entry!(main);
+//! ```
 
 #![no_std]
 
@@ -10,7 +21,7 @@ pub use aricode_sys as sys;
 
 /// Heap de los programas de usuario: 256 KiB estáticos servidos por
 /// `aricode-heap` (el mismo allocator que el kernel) tras un spinlock. Sin
-/// crecimiento: los programas de prueba y drivers usan poca memoria dinámica.
+/// crecimiento: los servicios y drivers usan poca memoria dinámica.
 mod user_heap {
     use aricode_heap::Heap;
     use aricode_sync::SpinLock;
@@ -63,7 +74,7 @@ mod user_heap {
     }
 }
 
-/// Código de salida que usa el panic handler de los programas de prueba.
+/// Código de salida del panic handler.
 pub const PANIC_EXIT_CODE: u64 = 255;
 
 /// Imprime `prefix` seguido del error del ABI (su código numérico).

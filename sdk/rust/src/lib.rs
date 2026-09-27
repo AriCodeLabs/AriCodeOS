@@ -7,8 +7,12 @@
 pub mod block;
 pub mod fs;
 pub mod http;
+pub mod input;
 pub mod net;
+pub mod permissions;
+pub mod time;
 pub mod virtio_pci;
+pub mod window;
 
 pub use aricode_abi::{self as abi, handle, kind, rights, Error, TIMEOUT_INFINITE};
 use aricode_abi::{decode, nr, receive_result};

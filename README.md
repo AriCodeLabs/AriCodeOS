@@ -39,6 +39,7 @@ cargo xtask build          # compila AriBoot y AriKernel (release)
 cargo xtask image          # monta build/esp/ (BOOTX64.EFI, aricodeos/kernel.elf, aricodeos/initrd.img)
 cargo xtask run            # arranca en QEMU + OVMF, serie en la terminal (salir: Ctrl-A X)
 cargo xtask run --cmdline shell   # arranca con el shell interactivo (arish) en la consola serie
+cargo xtask run --cmdline gui     # compositor y dos ventanas de prueba en la pantalla de QEMU
 cargo xtask test           # unit + smoke (arranque nominal en QEMU)
 cargo xtask test --all     # unit + todos los escenarios QEMU; obligatorio antes de main
 cargo xtask test --area boot   # solo los escenarios de un área
@@ -63,11 +64,18 @@ services/init/   AriInit, primer proceso de usuario y device manager provisional
 services/virtio-blk/ driver virtio-blk y servicio de bloques por IPC en ring 3
 services/arifs/  fsd: servicio de ficheros AriFS v0 por IPC en ring 3
 services/virtio-net/ netd: driver virtio-net y pila de red (DHCP, ping, UDP, TCP, DNS) por IPC en ring 3
+services/virtio-input/ inputd: driver virtio-input (teclado, raton) con eventos por IPC en ring 3
+services/compositor/ compositor: ventanas, cursor y enrutado de entrada sobre el framebuffer, en ring 3
+libs/gfx/        graficos 2D sin alloc (lienzos, texto, cursor, escritorio) con tests de host
+libs/input/      eventos evdev y teclado US con tests de host
 libs/net/        pila de red mínima sin alloc con tests de host
 libs/http/       cliente HTTP GET mínimo (Content-Length, chunked) con tests de host
 services/shell/  arish: shell interactivo en ring 3
 libs/arifs/      AriFS v0: sistema de archivos plano con tests de host
 sdk/proto/       protocolos IPC de los servicios
+sdk/runtime/     aricode-rt: runtime de los programas de usuario (entry!, heap, panic)
+sdk/build/       aricode-build: build.rs de una linea para programas de usuario
+apps/hello/      aplicacion de ejemplo del SDK (ver docs/sdk.md)
 boot/            AriBoot: cargador UEFI (crate `ariboot`)
 kernel/          AriKernel (crate `arikernel`), ELF64 en la mitad alta
 tools/xtask/     automatización: build, imagen, QEMU, tests, lint

@@ -49,6 +49,16 @@ pub struct HostTcp {
     pub payload: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostInput {
+    pub marker: String,
+    #[serde(default)]
+    pub keys: Vec<String>,
+    pub mouse_rel: Option<(i32, i32)>,
+    pub click: Option<String>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Expect {
@@ -86,6 +96,9 @@ pub struct Scenario {
     /// Sonda TCP del host: al ver `marker` se conecta al puerto redirigido
     /// al invitado, envía `payload` y anota el eco como `[host] ...`.
     pub host_tcp: Option<HostTcp>,
+    /// Inyección de entrada por QMP al ver `marker`: teclas (nombres qcode
+    /// de QEMU) en el teclado virtio, movimiento relativo y clic en el ratón.
+    pub host_input: Option<HostInput>,
     #[serde(default)]
     pub inject: Inject,
     pub expect: Expect,

@@ -3,7 +3,7 @@
 #![no_std]
 #![no_main]
 
-use user_testprogs::sys::{self, fs::FsClient, Handle};
+use aricode_rt::sys::{self, fs::FsClient, Handle};
 
 const FSD: Handle = Handle(0x0001_0004);
 const HW: Handle = Handle(0x0001_0005);
@@ -22,7 +22,7 @@ fn main(_arg: u64) -> u64 {
         sys::print(&name[..n]);
         sys::print(b" (");
         let mut buf = [0u8; 20];
-        sys::print(user_testprogs::fmt_u64(size, &mut buf));
+        sys::print(aricode_rt::fmt_u64(size, &mut buf));
         sys::print(b" bytes)\n");
         saw_hola |= &name[..n] == b"hola.txt";
         count += 1;
@@ -70,4 +70,4 @@ fn main(_arg: u64) -> u64 {
     0
 }
 
-user_testprogs::entry!(main);
+aricode_rt::entry!(main);

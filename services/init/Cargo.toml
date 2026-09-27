@@ -14,4 +14,7 @@ bench = false
 
 [dependencies]
 aricode-sys = { path = "../../sdk/rust" }
-user-testprogs = { path = "../../user/testprogs" }
+aricode-rt = { path = "../../sdk/runtime" }
+
+[build-dependencies]
+aricode-build = { path = "../../sdk/build" }

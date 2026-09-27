@@ -2503,49 +2503,98 @@ TLS vendrá posteriormente (Fase 31, criptografía).
 
 # FASE 25 — Input moderno
 
-Primero virtio-input.
+**Estado: virtio-input completado (2026-09-27); xHCI/USB HID pendiente.**
 
-Después:
+### Implementado
 
-- xHCI;
-- USB;
-- HID keyboard;
-- HID mouse.
+- `libs/input` (no_std, tests de host): eventos en formato evdev (el mismo
+  que usa virtio-input y que servirá para USB HID) y un teclado US con
+  mayúsculas y bloqueo de mayúsculas que convierte pulsaciones en
+  caracteres;
+- `inputd` (`services/virtio-input`): driver virtio-input en ring 3 sobre el
+  transporte virtio común, un proceso por dispositivo (init lanza uno por
+  cada función `1af4:1052`); lee el nombre del dispositivo de su
+  configuración, mantiene la cola de eventos y atiende
+  `InputServiceProtocol v1` (`sdk/proto::input`: `Info`, `Read` con plazo);
+- cliente `aricode-sys::input`, programa `input_client` y escenario
+  `input.virtio`: xtask inyecta por QMP (`input-send-event`) la línea
+  `hola` + Enter en el teclado virtio y un movimiento y clic en el ratón
+  virtio; el escenario exige la traducción exacta.
+
+### Pendiente
+
+- xHCI, USB y HID (teclado y ratón físicos): misma librería de eventos,
+  driver nuevo en ring 3;
+- que el shell pueda leer del teclado virtio además de la consola serie
+  (llegará con la GUI, Fase 26, donde el teclado y el ratón alimentan al
+  compositor).
 
 ---
 
 # FASE 26 — GUI básica
 
-### Implementar
+**Estado: completada (2026-09-27).**
 
-- framebuffer abstraction;
-- surfaces;
-- compositor;
-- mouse pointer;
-- windows;
-- events.
+### Implementado
+
+- framebuffer abstraction: con `gui` en la cmdline el kernel no pinta en la
+  pantalla y entrega a init el framebuffer GOP como capability MMIO
+  (`INIT_FRAMEBUFFER`); `system_info(FRAMEBUFFER)` describe geometría y
+  formato. La consola de kernel queda en la serie;
+- surfaces: `libs/gfx` (no_std, sin alloc, tests de host): lienzos
+  `0x00RRGGBB` sobre buffers del llamador con recorte, rectángulos, texto
+  con la fuente de la consola, cursor y el modelo `Desktop` (ventanas en
+  cascada, orden z, foco, prueba de impacto, composición);
+- compositor (`services/compositor`): proceso de ring 3 dueño del
+  framebuffer; compone en un buffer trasero DMA y lo vuelca convirtiendo el
+  formato; lee los servicios de entrada, ordena sus eventos por instante de
+  llegada (inputd los sella) y enruta teclado y clics a la ventana con foco;
+- mouse pointer: flecha dibujada por el compositor, movida con los eventos
+  relativos del ratón virtio;
+- windows: `WindowProtocol v1` (`sdk/proto::window`): `Create` (el cliente
+  aporta el buffer de contenido como DMA), `Present`, `Poll`, `Close`;
+  cliente `aricode-sys::window::Window` con lienzo propio;
+- events: `Key` (carácter traducido), `Click` (coordenadas del contenido,
+  botón) y `Focus`, con espera pendiente por ventana.
 
 ### Criterio
 
-Dos aplicaciones gráficas aisladas pueden dibujar simultáneamente.
+Dos aplicaciones gráficas aisladas pueden dibujar simultáneamente:
+**cumplido**. `gui.two_windows` lanza `gui_demo A` y `gui_demo B` (procesos
+distintos con sus propios buffers), comprueba los píxeles de cada ventana en
+la composición, hace clic sobre B por QMP y teclea `h`: solo B recibe foco,
+clic y tecla; A nunca ve eventos ajenos.
+
+### Pendiente
+
+- mover y redimensionar ventanas, cerrar desde la barra de título;
+- composición por regiones dañadas (hoy se repinta la pantalla completa);
+- que el shell y la consola vivan en una ventana (terminal gráfico).
 
 ---
 
 # FASE 27 — Application SDK
 
-SDK inicial Rust.
+**Estado: completada (2026-09-27).** Ver `docs/sdk.md`.
 
-APIs:
+SDK inicial Rust, en `sdk/`: `aricode-abi`, `aricode-sys` (syscalls y
+clientes de servicios), `aricode-proto` (protocolos), `aricode-rt` (runtime:
+`entry!`, heap, panic, formato) y `aricode-build` (enlace). El runtime dejó
+de vivir en los programas de prueba: servicios, aplicaciones y tests
+dependen de las mismas crates. `apps/hello` es la aplicación de ejemplo y el
+shell puede lanzar programas del initrd con `run` (recibe un `SPAWNER`).
+
+APIs y dónde están:
 
 ```text
-process
-ipc
-filesystem
-network
-window
-input
-time
-permissions
+process      sys::process_spawn_with / process_wait / process_exit
+ipc          sys::endpoint_create / ipc_send / ipc_receive
+filesystem   sys::fs::FsClient
+network      sys::net::NetClient, sys::http::get
+window       sys::window::Window (lienzo aricode-gfx)
+input        sys::input::InputClient, aricode-input::Keyboard
+time         sys::time::{uptime_ms, Clock, sleep_ms}
+permissions  sys::permissions::{granted, kind_name, is, drop_handle}
 ```
 
 ---
@@ -3223,6 +3272,22 @@ basic drivers
 ```
 
 Todavía sin ser un sistema operativo de escritorio completo.
+
+## 94.1 AriCodeOS 0.2
+
+**Estado: completada (2026-09-27), tag `v0.2.0`.** Fases 25 a 27:
+
+- entrada moderna: virtio-input (teclado y ratón) con eventos sellados en el
+  tiempo y traducción de teclado en el cliente;
+- GUI básica: compositor en ring 3 dueño del framebuffer, ventanas con
+  buffer propio, cursor, foco y enrutado de entrada; dos aplicaciones
+  aisladas dibujan a la vez;
+- SDK de aplicaciones: runtime común (`aricode-rt`), `aricode-build`, APIs
+  de proceso, IPC, ficheros, red, ventanas, entrada, tiempo y permisos,
+  documentadas en `docs/sdk.md`; `apps/hello` y `run` en el shell.
+
+Siguiente: 0.3 con el sandbox de aplicaciones (Fase 28) y el runtime WASM
+(Fase 29).
 
 ---
 

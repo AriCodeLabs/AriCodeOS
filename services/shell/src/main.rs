@@ -1,14 +1,14 @@
 //! arish (Fase 21): shell interactivo en ring 3. Solo ve lo que init le da:
 //! 0x10004 = endpoint de fsd (WRITE), 0x10005 = HARDWARE (buffer DMA),
 //! 0x10006 = SYSTEM (READ|MANAGE), 0x10007 = entrada de consola (READ),
-//! 0x10008 = raíz PCI (READ), 0x10009 = endpoint de netd (WRITE). `arg` =
-//! máscara de servicios en ejecución.
+//! 0x10008 = raíz PCI (READ), 0x10009 = endpoint de netd (WRITE), 0x1000A =
+//! SPAWNER (MANAGE) para `run`. `arg` = máscara de servicios en ejecución.
 #![no_std]
 #![no_main]
 
-use user_testprogs::sys::net::{NetClient, NetError};
-use user_testprogs::sys::{self, abi, fs::FsClient, Handle, TIMEOUT_INFINITE};
-use user_testprogs::{fmt_hex, fmt_u64};
+use aricode_rt::sys::net::{NetClient, NetError};
+use aricode_rt::sys::{self, abi, fs::FsClient, Handle, TIMEOUT_INFINITE};
+use aricode_rt::{fmt_hex, fmt_u64};
 
 const FSD: Handle = Handle(0x0001_0004);
 const HW: Handle = Handle(0x0001_0005);
@@ -16,11 +16,14 @@ const SYSTEM: Handle = Handle(0x0001_0006);
 const CONSOLE_IN: Handle = Handle(0x0001_0007);
 const PCI_ROOT: Handle = Handle(0x0001_0008);
 const NETD: Handle = Handle(0x0001_0009);
+const SPAWNER: Handle = Handle(0x0001_000A);
 
 /// Bits de `arg`: servicios que init dejó en marcha.
 const SERVICE_BLOCK: u64 = 1;
 const SERVICE_FS: u64 = 2;
 const SERVICE_NET: u64 = 4;
+const SERVICE_INPUT: u64 = 8;
+const SERVICE_GUI: u64 = 16;
 
 const PROMPT: &[u8] = b"ari> ";
 const LINE_MAX: usize = 256;
@@ -83,7 +86,7 @@ fn trim(s: &[u8]) -> &[u8] {
 
 fn help() {
     sys::print(
-        b"comandos:\n  help      esta ayuda\n  ps        procesos\n  mem       memoria fisica\n  ls        ficheros de AriFS\n  cat NOM   muestra un fichero\n  devices   funciones PCI\n  services  servicios de arranque\n  uptime    tiempo desde el arranque\n  net       configuracion de red\n  ping IP   eco ICMP (4 intentos)\n  dns NOM   resuelve un nombre\n  http URL  GET y muestra el cuerpo\n  reboot    reinicia\n  shutdown  apaga\n  exit      termina el shell\n",
+        b"comandos:\n  help      esta ayuda\n  ps        procesos\n  mem       memoria fisica\n  ls        ficheros de AriFS\n  cat NOM   muestra un fichero\n  devices   funciones PCI\n  services  servicios de arranque\n  uptime    tiempo desde el arranque\n  net       configuracion de red\n  ping IP   eco ICMP (4 intentos)\n  dns NOM   resuelve un nombre\n  http URL  GET y muestra el cuerpo\n  run PROG  ejecuta un programa del initrd y espera\n  reboot    reinicia\n  shutdown  apaga\n  exit      termina el shell\n",
     );
 }
 
@@ -356,7 +359,7 @@ fn http_get(client: &mut NetClient, arg: &[u8]) {
         return;
     }
     let mut body = [0u8; 4096];
-    match user_testprogs::sys::http::get(client, url, &mut body, 5000) {
+    match aricode_rt::sys::http::get(client, url, &mut body, 5000) {
         Ok(f) => {
             sys::print(b"HTTP ");
             num(f.status as u64);
@@ -368,22 +371,67 @@ fn http_get(client: &mut NetClient, arg: &[u8]) {
                 sys::print(b"\n");
             }
         }
-        Err(user_testprogs::sys::http::HttpError::BadUrl) => sys::print(b"http: url invalida\n"),
-        Err(user_testprogs::sys::http::HttpError::Resolve(e)) => net_error(e),
-        Err(user_testprogs::sys::http::HttpError::Connect(e)) => {
+        Err(aricode_rt::sys::http::HttpError::BadUrl) => sys::print(b"http: url invalida\n"),
+        Err(aricode_rt::sys::http::HttpError::Resolve(e)) => net_error(e),
+        Err(aricode_rt::sys::http::HttpError::Connect(e)) => {
             sys::print(b"http: no se pudo conectar: ");
             net_error(e);
         }
-        Err(user_testprogs::sys::http::HttpError::Io(e)) => net_error(e),
-        Err(user_testprogs::sys::http::HttpError::Malformed) => {
+        Err(aricode_rt::sys::http::HttpError::Io(e)) => net_error(e),
+        Err(aricode_rt::sys::http::HttpError::Malformed) => {
             sys::print(b"http: respuesta no valida\n")
         }
-        Err(user_testprogs::sys::http::HttpError::Unsupported) => {
+        Err(aricode_rt::sys::http::HttpError::Unsupported) => {
             sys::print(b"http: respuesta con codificacion o protocolo no soportado\n")
         }
-        Err(user_testprogs::sys::http::HttpError::TooBig) => {
+        Err(aricode_rt::sys::http::HttpError::TooBig) => {
             sys::print(b"http: respuesta demasiado grande (4 KiB)\n")
         }
+    }
+}
+
+/// Lanza un programa del initrd con solo sus handles iniciales (consola,
+/// proceso e hilo) y un `SYSTEM` de solo lectura, y espera su salida.
+fn run(arg: &[u8]) {
+    let Ok(name) = core::str::from_utf8(arg) else {
+        sys::print(b"run: nombre invalido\n");
+        return;
+    };
+    if name.is_empty() {
+        sys::print(b"uso: run PROGRAMA [ARG]\n");
+        return;
+    }
+    let (prog, num_arg) = match name.split_once(' ') {
+        Some((p, a)) => (p, a.trim().parse::<u64>().unwrap_or(0)),
+        None => (name, 0),
+    };
+    let Ok(system) = sys::handle_duplicate(SYSTEM, sys::rights::READ | sys::rights::TRANSFER)
+    else {
+        sys::print(b"run: sin acceso al sistema\n");
+        return;
+    };
+    match sys::process_spawn_with(SPAWNER, prog, num_arg, &[system]) {
+        Ok(child) => {
+            let result = sys::process_wait(child, TIMEOUT_INFINITE);
+            let _ = sys::handle_close(child);
+            sys::print(b"run: ");
+            sys::print(prog.as_bytes());
+            match result {
+                Ok(code) => {
+                    sys::print(b" termino con ");
+                    num(code);
+                    sys::print(b"\n");
+                }
+                Err(sys::Error::Killed) => sys::print(b" fue terminado por el kernel\n"),
+                Err(e) => aricode_rt::print_error(b"", e),
+            }
+        }
+        Err(sys::Error::NotFound) => {
+            sys::print(b"run: no existe ");
+            sys::print(prog.as_bytes());
+            sys::print(b" en el initrd\n");
+        }
+        Err(e) => aricode_rt::print_error(b"run", e),
     }
 }
 
@@ -410,6 +458,18 @@ fn services(mask: u64, fs: &FsClient) {
         b"activo\n"
     } else {
         b"ausente\n"
+    });
+    sys::print(b"entrada   virtio_input ");
+    sys::print(if mask & SERVICE_INPUT != 0 {
+        b"activo\n"
+    } else {
+        b"ausente\n"
+    });
+    sys::print(b"grafico   compositor  ");
+    sys::print(if mask & SERVICE_GUI != 0 {
+        b"activo\n"
+    } else {
+        b"ausente (arranca con `gui`)\n"
     });
 }
 
@@ -442,14 +502,12 @@ fn main(mask: u64) -> u64 {
             b"ping" => ping(&net_client, rest),
             b"dns" => dns(&mut net_client, rest),
             b"http" => http_get(&mut net_client, rest),
+            b"run" => run(rest),
             b"reboot" => {
-                user_testprogs::print_error(
-                    b"reboot",
-                    sys::system_power(SYSTEM, abi::power::REBOOT),
-                );
+                aricode_rt::print_error(b"reboot", sys::system_power(SYSTEM, abi::power::REBOOT));
             }
             b"shutdown" => {
-                user_testprogs::print_error(
+                aricode_rt::print_error(
                     b"shutdown",
                     sys::system_power(SYSTEM, abi::power::SHUTDOWN),
                 );
@@ -464,4 +522,4 @@ fn main(mask: u64) -> u64 {
     }
 }
 
-user_testprogs::entry!(main);
+aricode_rt::entry!(main);

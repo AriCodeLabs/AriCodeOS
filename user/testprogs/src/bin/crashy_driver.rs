@@ -12,4 +12,4 @@ fn main(arg: u64) -> u64 {
     0
 }
 
-user_testprogs::entry!(main);
+aricode_rt::entry!(main);

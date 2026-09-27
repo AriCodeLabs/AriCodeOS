@@ -55,8 +55,132 @@ fn base_command(esp: &Path, vars: &Path, disk: &Path) -> Command {
         "-device",
         "virtio-net-pci,netdev=net0,disable-legacy=on,disable-modern=off",
     ]);
+    // Teclado y ratón virtio con id fijo: QMP inyecta eventos por dispositivo.
+    q.args([
+        "-device",
+        "virtio-keyboard-pci,id=kbd0,disable-legacy=on,disable-modern=off",
+    ]);
+    q.args([
+        "-device",
+        "virtio-mouse-pci,id=mouse0,disable-legacy=on,disable-modern=off",
+    ]);
     q.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     q
+}
+
+/// Inyección de entrada por QMP: al ver `marker` en la serie se teclean
+/// `keys` (nombres qcode de QEMU) y se mueve y pulsa el ratón.
+pub struct InputProbe<'a> {
+    pub marker: &'a str,
+    pub keys: &'a [String],
+    pub mouse_rel: Option<(i32, i32)>,
+    pub click: Option<&'a str>,
+}
+
+/// Cliente QMP mínimo sobre un socket Unix: negociación y comandos JSON
+/// escritos a mano (solo cadenas y números); espera `return` o `error`.
+struct Qmp {
+    stream: std::os::unix::net::UnixStream,
+    reader: std::io::BufReader<std::os::unix::net::UnixStream>,
+}
+
+impl Qmp {
+    fn connect(path: &Path) -> std::io::Result<Self> {
+        use std::io::BufRead;
+        let stream = std::os::unix::net::UnixStream::connect(path)?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let mut reader = std::io::BufReader::new(stream.try_clone()?);
+        let mut greeting = String::new();
+        reader.read_line(&mut greeting)?;
+        let mut q = Self { stream, reader };
+        q.execute(r#"{"execute":"qmp_capabilities"}"#)?;
+        Ok(q)
+    }
+
+    fn execute(&mut self, command: &str) -> std::io::Result<()> {
+        use std::io::{BufRead, Write};
+        self.stream.write_all(command.as_bytes())?;
+        self.stream.write_all(b"\n")?;
+        loop {
+            let mut line = String::new();
+            if self.reader.read_line(&mut line)? == 0 {
+                return Err(std::io::Error::other("QMP cerrado"));
+            }
+            if line.contains(r#""return""#) {
+                return Ok(());
+            }
+            if line.contains(r#""error""#) {
+                return Err(std::io::Error::other(line.trim().to_string()));
+            }
+        }
+    }
+
+    /// Sin `device`: QMP solo admite ahí una pantalla, no un dispositivo de
+    /// entrada; el evento va al manejador activo de su tipo (los virtio se
+    /// registran después que el i8042 y tienen prioridad).
+    fn send_event(&mut self, event: &str) -> std::io::Result<()> {
+        self.execute(&format!(
+            r#"{{"execute":"input-send-event","arguments":{{"events":[{event}]}}}}"#
+        ))
+    }
+}
+
+fn run_input_probe(
+    path: &Path,
+    keys: &[String],
+    mouse_rel: Option<(i32, i32)>,
+    click: Option<&str>,
+) -> String {
+    let mut qmp = match Qmp::connect(path) {
+        Ok(q) => q,
+        Err(e) => return format!("[host] QMP: sin conexion ({e})"),
+    };
+    let mut sent = 0;
+    let mut step = |qmp: &mut Qmp, event: String| -> Result {
+        qmp.send_event(&event).map_err(|e| e.to_string())?;
+        sent += 1;
+        Ok(())
+    };
+    let result: Result = (|| {
+        // Orden natural: apuntar, pulsar y despues teclear.
+        if let Some((dx, dy)) = mouse_rel {
+            step(
+                &mut qmp,
+                format!(r#"{{"type":"rel","data":{{"axis":"x","value":{dx}}}}}"#),
+            )?;
+            step(
+                &mut qmp,
+                format!(r#"{{"type":"rel","data":{{"axis":"y","value":{dy}}}}}"#),
+            )?;
+        }
+        // Una pausa breve entre fases: el compositor ordena por instante de
+        // llegada y un usuario real no pulsa y teclea en el mismo milisegundo.
+        std::thread::sleep(Duration::from_millis(100));
+        if let Some(button) = click {
+            for down in [true, false] {
+                step(
+                    &mut qmp,
+                    format!(r#"{{"type":"btn","data":{{"down":{down},"button":"{button}"}}}}"#),
+                )?;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        for key in keys {
+            for down in [true, false] {
+                step(
+                    &mut qmp,
+                    format!(
+                        r#"{{"type":"key","data":{{"down":{down},"key":{{"type":"qcode","data":"{key}"}}}}}}"#
+                    ),
+                )?;
+            }
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => format!("[host] QMP: {sent} eventos de entrada enviados"),
+        Err(e) => format!("[host] QMP: fallo tras {sent} eventos ({e})"),
+    }
 }
 
 /// Respondedor de pruebas en el loopback del host: por UDP devuelve un
@@ -242,11 +366,16 @@ pub fn run_interactive(release: bool, cmdline: &str) -> Result {
     let disk = build_dir().join("disk.img");
     image::write_test_disk(&disk)?;
     let _responder = Responder::start()?;
-    println!("[xtask] QEMU (salir: Ctrl-A X)");
-    let st = base_command(&esp, &vars, &disk)
-        .arg("-nographic")
-        .status()
-        .map_err(|e| format!("qemu: {e}"))?;
+    let mut q = base_command(&esp, &vars, &disk);
+    if cmdline.split_whitespace().any(|w| w == "gui") {
+        // Con `gui` hace falta ver la pantalla: ventana de QEMU y serie en la terminal.
+        println!("[xtask] QEMU con pantalla (serie en la terminal; salir: cerrar la ventana)");
+        q.args(["-serial", "stdio"]);
+    } else {
+        println!("[xtask] QEMU (salir: Ctrl-A X)");
+        q.arg("-nographic");
+    }
+    let st = q.status().map_err(|e| format!("qemu: {e}"))?;
     println!("[xtask] qemu exit: {:?}", st.code());
     Ok(())
 }
@@ -283,6 +412,7 @@ pub fn run_headless(
     timeout: Duration,
     input: &Input,
     probe: Option<&TcpProbe>,
+    input_probe: Option<&InputProbe>,
 ) -> Result<Capture> {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
@@ -290,9 +420,15 @@ pub fn run_headless(
     let disk = workdir.join("disk.img");
     image::write_test_disk(&disk)?;
     let _responder = Responder::start()?;
+    let qmp_path = workdir.join("qmp.sock");
+    let _ = std::fs::remove_file(&qmp_path);
     let start = Instant::now();
     let mut child = base_command(esp, &vars, &disk)
         .args(["-display", "none", "-monitor", "none", "-serial", "stdio"])
+        .args([
+            "-qmp",
+            &format!("unix:{},server=on,wait=off", qmp_path.display()),
+        ])
         .stdin(if input.lines.is_empty() {
             Stdio::null()
         } else {
@@ -318,6 +454,8 @@ pub fn run_headless(
     let mut sent = 0;
     let mut probe_result: Option<String> = None;
     let mut probe_thread: Option<std::thread::JoinHandle<String>> = None;
+    let mut input_result: Option<String> = None;
+    let mut input_thread: Option<std::thread::JoinHandle<String>> = None;
     let mut timed_out = false;
     let exit_code = loop {
         if let Some(st) = child.try_wait().map_err(|e| e.to_string())? {
@@ -352,15 +490,36 @@ pub fn run_headless(
                 probe_result = probe_thread.take().and_then(|t| t.join().ok());
             }
         }
+        if let Some(p) = input_probe {
+            if input_thread.is_none()
+                && input_result.is_none()
+                && count_occurrences(&captured.lock().expect("captura"), p.marker.as_bytes()) > 0
+            {
+                let path = qmp_path.clone();
+                let keys = p.keys.to_vec();
+                let rel = p.mouse_rel;
+                let click = p.click.map(String::from);
+                input_thread = Some(std::thread::spawn(move || {
+                    run_input_probe(&path, &keys, rel, click.as_deref())
+                }));
+            }
+            if input_thread.as_ref().is_some_and(|t| t.is_finished()) {
+                input_result = input_thread.take().and_then(|t| t.join().ok());
+            }
+        }
         std::thread::sleep(Duration::from_millis(20));
     };
     drop(stdin);
     if let Some(t) = probe_thread.take() {
         probe_result = t.join().ok();
     }
+    if let Some(t) = input_thread.take() {
+        input_result = t.join().ok();
+    }
+    let _ = std::fs::remove_file(&qmp_path);
     reader.join().map_err(|_| "lector de serie")?;
     let mut bytes = captured.lock().expect("captura").clone();
-    if let Some(line) = probe_result {
+    for line in [probe_result, input_result].into_iter().flatten() {
         bytes.extend_from_slice(format!("\n{line}\n").as_bytes());
     }
     Ok(Capture {

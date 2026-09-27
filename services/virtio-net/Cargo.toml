@@ -17,4 +17,7 @@ aricode-sys = { path = "../../sdk/rust" }
 aricode-virtio = { path = "../../libs/virtio" }
 aricode-proto = { path = "../../sdk/proto" }
 aricode-net = { path = "../../libs/net" }
-user-testprogs = { path = "../../user/testprogs" }
+aricode-rt = { path = "../../sdk/runtime" }
+
+[build-dependencies]
+aricode-build = { path = "../../sdk/build" }

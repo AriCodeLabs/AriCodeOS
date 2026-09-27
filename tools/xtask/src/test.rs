@@ -90,12 +90,19 @@ fn run_scenario(base: &std::path::Path, s: &Scenario) -> Result<bool> {
         marker: &h.marker,
         payload: &h.payload,
     });
+    let input_probe = s.host_input.as_ref().map(|h| qemu::InputProbe {
+        marker: &h.marker,
+        keys: &h.keys,
+        mouse_rel: h.mouse_rel,
+        click: h.click.as_deref(),
+    });
     let cap = qemu::run_headless(
         &esp,
         &workdir,
         Duration::from_secs(s.timeout_secs),
         &input,
         probe.as_ref(),
+        input_probe.as_ref(),
     )?;
     let log = workdir.join("serial.log");
     let _ = std::fs::write(&log, &cap.serial);

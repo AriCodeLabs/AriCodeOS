@@ -1,0 +1,99 @@
+# SDK de aplicaciones (Fase 27)
+
+Un programa de AriCodeOS es un ELF estático de ring 3 cargado en `0x400000`
+que solo puede hacer lo que sus handles le permiten. El SDK son cuatro crates
+de `sdk/`:
+
+| Crate | Qué da |
+|-------|--------|
+| `aricode-abi` (`sdk/abi`) | números de syscall, errores, tipos de objeto, derechos, handles iniciales |
+| `aricode-sys` (`sdk/rust`) | wrappers de syscall y clientes de servicios: `fs`, `net`, `http`, `input`, `window`, `block`, `time`, `permissions`, `virtio_pci` |
+| `aricode-proto` (`sdk/proto`) | los protocolos IPC versionados de cada servicio |
+| `aricode-rt` (`sdk/runtime`) | `entry!`, heap de 256 KiB, panic handler y utilidades de formato; reexporta `aricode-sys` como `sys` |
+| `aricode-build` (`sdk/build`) | `build.rs` de una línea que enlaza con `sdk/rust/user.ld` |
+
+## Programa mínimo
+
+`Cargo.toml`:
+
+```toml
+[package]
+name = "mi-app"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "mi_app"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+aricode-rt = { path = "../../sdk/runtime" }
+
+[build-dependencies]
+aricode-build = { path = "../../sdk/build" }
+```
+
+`build.rs`:
+
+```rust
+fn main() {
+    aricode_build::user_program();
+}
+```
+
+`src/main.rs`:
+
+```rust
+#![no_std]
+#![no_main]
+
+use aricode_rt::sys;
+
+fn main(arg: u64) -> u64 {
+    sys::print(b"hola\n");
+    0 // codigo de salida
+}
+
+aricode_rt::entry!(main);
+```
+
+Para que llegue al initrd, el paquete se añade a `Cargo.toml` (workspace), a
+`PACKAGES` y a `build_user_programs`/`initrd_programs` en
+`tools/xtask/src/build.rs`. `apps/hello` es el ejemplo completo.
+
+## Qué recibe un programa
+
+Handles fijos (`aricode_abi::handle`): `0x10001` su proceso, `0x10002` su
+hilo principal, `0x10003` la consola (`WRITE`). Todo lo demás lo entrega
+quien lo lanza, en orden, a partir de `0x10004`, y el `arg` de `main` es el
+valor que ese lanzador eligió. No hay variables de entorno ni descubrimiento
+de servicios: un programa que no recibe el endpoint de un servicio no puede
+hablar con él. `sys::permissions::granted` recorre lo recibido.
+
+## APIs
+
+| Área | Cómo |
+|------|------|
+| process | `sys::process_spawn_with(spawner, nombre, arg, handles)`, `sys::process_wait`, `sys::process_exit`; hace falta un handle `SPAWNER` con `MANAGE` (init lo tiene; el shell recibe uno para `run`) |
+| ipc | `sys::endpoint_create`, `sys::ipc_send`, `sys::ipc_receive` (256 bytes y hasta 4 handles por mensaje, con plazo); los datos grandes van por buffers DMA compartidos |
+| filesystem | `sys::fs::FsClient` sobre el endpoint de `fsd` y una capacidad `HARDWARE` para su buffer: `list`, `open`, `create`, `read`, `write`, `close` |
+| network | `sys::net::NetClient`: `info`, `ping`, UDP (`udp_bind/send/recv`), TCP (`tcp_connect/listen/accept/send/recv/close`), `resolve`; `sys::http::get` encima |
+| window | `sys::window::Window::create(compositor, hardware, w, h, titulo)`, `canvas()` (lienzo `aricode-gfx`), `present`, `poll` (`Key`, `Click`, `Focus`), `close` |
+| input | `sys::input::InputClient` sobre un `inputd`: eventos evdev con instante; `aricode-input::Keyboard` los traduce |
+| time | `sys::time::uptime_ms(system)`, `sys::time::Clock`, `sys::time::sleep_ms` |
+| permissions | `sys::permissions::{granted, kind_name, is, drop_handle}` |
+
+## Reglas
+
+- Para entregar un handle a otro proceso hace falta `TRANSFER` sobre él, y
+  para hacer una copia con menos derechos, `DUPLICATE`. Quien lanza decide
+  qué derechos viajan; nunca se pueden ampliar (`Error::Escalation`).
+
+- Sin `alloc` en las bibliotecas del SDK; el programa tiene un heap estático
+  de 256 KiB si lo necesita (`extern crate alloc`).
+- Todo error del kernel llega como `sys::Error`; los servicios responden con
+  su `Status` propio (`aricode-proto`). Nunca se recortan nombres: si no
+  caben, la llamada falla.
+- Un programa que hace algo ilegal (tocar memoria del kernel, instrucciones
+  privilegiadas, pila desbordada) muere solo; el kernel y el resto siguen.

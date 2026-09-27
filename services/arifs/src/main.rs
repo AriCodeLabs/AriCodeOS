@@ -7,7 +7,7 @@
 
 use aricode_arifs::{AriFs, BlockDevice, FsError, SECTOR};
 use aricode_proto::fs::{Op, Reply, Request, Status, MAX_IO};
-use user_testprogs::sys::{self, block::BlockClient, Handle, TIMEOUT_INFINITE};
+use aricode_rt::sys::{self, block::BlockClient, Handle, TIMEOUT_INFINITE};
 
 const SERVICE: Handle = Handle(0x0001_0004);
 const BLOCK: Handle = Handle(0x0001_0005);
@@ -178,10 +178,7 @@ fn main(partition_lba: u64) -> u64 {
     };
     let mut buf = [0u8; 20];
     sys::print(b"fsd: AriFS montado, ");
-    sys::print(user_testprogs::fmt_u64(
-        fs.entries().count() as u64,
-        &mut buf,
-    ));
+    sys::print(aricode_rt::fmt_u64(fs.entries().count() as u64, &mut buf));
     sys::print(b" ficheros\n");
     let mut fds = Fds([None; 16]);
     let mut buffers = ClientBuffers {
@@ -213,4 +210,4 @@ fn main(partition_lba: u64) -> u64 {
     }
 }
 
-user_testprogs::entry!(main);
+aricode_rt::entry!(main);
