@@ -103,6 +103,9 @@ pub struct Scenario {
     /// (por defecto), `esp-only`, `pending-b`, `b-exhausted`, `b-corrupt`.
     #[serde(default = "default_disk")]
     pub disk: String,
+    /// Presenta el disco de pruebas como solo lectura (fallos de escritura).
+    #[serde(default)]
+    pub disk_readonly: bool,
     #[serde(default)]
     pub inject: Inject,
     pub expect: Expect,

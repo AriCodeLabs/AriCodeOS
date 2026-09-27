@@ -156,7 +156,13 @@ fn main(arg: u64) -> u64 {
         }
     };
     let mut host = AriHost { imports, system };
-    // 4. Ejecutar.
+    // 4. Inicializacion del modulo (funcion `start`) y ejecucion.
+    if let Err(e) = instance.start(memory, &mut host) {
+        sys::print(b"wasm_runner: la funcion start fallo: ");
+        sys::print(describe(e).as_bytes());
+        sys::print(b"\n");
+        return 10;
+    }
     match instance.call("main", &[arg], memory, &mut host) {
         Ok(code) => {
             sys::print(b"wasm_runner: main devolvio ");

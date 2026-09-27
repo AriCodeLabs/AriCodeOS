@@ -3,6 +3,15 @@
 version = 4
 
 [[package]]
+name = "ari-app-fs-probe"
+version = "0.4.0"
+dependencies = [
+ "aricode-build",
+ "aricode-proto",
+ "aricode-rt",
+]
+
+[[package]]
 name = "ari-app-hello"
 version = "0.4.0"
 dependencies = [
@@ -36,6 +45,14 @@ dependencies = [
  "aricode-build",
  "aricode-rt",
  "aricode-wasm",
+]
+
+[[package]]
+name = "ari-app-win-probe"
+version = "0.4.0"
+dependencies = [
+ "aricode-build",
+ "aricode-rt",
 ]
 
 [[package]]

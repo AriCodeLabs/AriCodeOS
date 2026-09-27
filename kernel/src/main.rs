@@ -148,6 +148,9 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
         if cmdline.has(keys::BOOT_PENDING) {
             init_flags |= aricode_abi::init_arg::BOOT_PENDING;
         }
+        if cmdline.has(keys::INIT_FAIL_LATE) {
+            init_flags |= aricode_abi::init_arg::FAIL_LATE;
+        }
         run_init(init_flags, info.framebuffer);
     }
 

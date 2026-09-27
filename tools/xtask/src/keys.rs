@@ -29,10 +29,31 @@ pub fn read_hex<const N: usize>(path: &Path) -> Result<[u8; N]> {
     Ok(out)
 }
 
-fn write_hex(path: &Path, bytes: &[u8]) -> Result {
+fn hex_line(bytes: &[u8]) -> String {
     let mut buf = vec![0u8; bytes.len() * 2];
-    let text = format!("{}\n", hex(bytes, &mut buf));
-    fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
+    format!("{}\n", hex(bytes, &mut buf))
+}
+
+fn write_hex(path: &Path, bytes: &[u8]) -> Result {
+    fs::write(path, hex_line(bytes)).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Escribe un secreto: creación exclusiva con modo 0600 desde el primer
+/// instante (sin depender del umask ni de un chmod posterior).
+fn write_secret(path: &Path, bytes: &[u8]) -> Result {
+    use std::io::Write;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut f = options
+        .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    f.write_all(hex_line(bytes).as_bytes())
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// `xtask keygen DIR`: crea `DIR/ed25519.seed` y `DIR/ed25519.pub`.
@@ -48,7 +69,7 @@ pub fn keygen(dir: &Path) -> Result {
     let mut seed = [0u8; ed25519::SEED_LEN];
     os_random(&mut seed)?;
     let pk = ed25519::public_key(&seed);
-    write_hex(&seed_path, &seed)?;
+    write_secret(&seed_path, &seed)?;
     write_hex(&dir.join(PUB_FILE), &pk)?;
     let mut buf = [0u8; 64];
     println!("[xtask] clave publica {}", hex(&pk, &mut buf));
@@ -96,6 +117,19 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         keygen(&dir).unwrap();
         assert!(keygen(&dir).is_err(), "no sobrescribe");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(dir.join(SEED_FILE))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "la semilla no debe ser legible por otros: {mode:o}"
+            );
+        }
         let file = dir.join("mensaje.txt");
         fs::write(&file, b"manifiesto de prueba").unwrap();
         sign(&dir.join(SEED_FILE), &file).unwrap();

@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-fn base_command(esp: &Path, vars: &Path, disk: &Path) -> Command {
+fn base_command(esp: &Path, vars: &Path, disk: &Path, disk_readonly: bool) -> Command {
     let mut q = Command::new("qemu-system-x86_64");
     q.current_dir(root());
     q.args([
@@ -22,7 +22,11 @@ fn base_command(esp: &Path, vars: &Path, disk: &Path) -> Command {
     // Disco virtio-blk moderno (sin interfaz legacy) para el driver de usuario.
     q.args([
         "-drive",
-        &format!("if=none,id=disk0,format=raw,file={}", disk.display()),
+        &format!(
+            "if=none,id=disk0,format=raw,file={}{}",
+            disk.display(),
+            if disk_readonly { ",readonly=on" } else { "" }
+        ),
     ]);
     q.args([
         "-device",
@@ -366,7 +370,7 @@ pub fn run_interactive(release: bool, cmdline: &str) -> Result {
     let disk = build_dir().join("disk.img");
     image::write_test_disk(&disk, image::DiskVariant::Slots)?;
     let _responder = Responder::start()?;
-    let mut q = base_command(&esp, &vars, &disk);
+    let mut q = base_command(&esp, &vars, &disk, false);
     if cmdline.split_whitespace().any(|w| w == "gui") {
         // Con `gui` hace falta ver la pantalla: ventana de QEMU y serie en la terminal.
         println!("[xtask] QEMU con pantalla (serie en la terminal; salir: cerrar la ventana)");
@@ -406,15 +410,26 @@ fn count_occurrences(haystack: &[u8], needle: &[u8]) -> usize {
 
 /// Arranca sin pantalla, captura la serie, alimenta `input` y espera hasta
 /// `timeout`.
+/// Todo lo que un escenario pide al runner además de la ESP y el plazo.
+pub struct Headless<'a> {
+    pub input: Input<'a>,
+    pub probe: Option<TcpProbe<'a>>,
+    pub input_probe: Option<InputProbe<'a>>,
+    pub disk_variant: image::DiskVariant,
+    pub disk_readonly: bool,
+}
+
 pub fn run_headless(
     esp: &Path,
     workdir: &Path,
     timeout: Duration,
-    input: &Input,
-    probe: Option<&TcpProbe>,
-    input_probe: Option<&InputProbe>,
-    disk_variant: image::DiskVariant,
+    options: &Headless,
 ) -> Result<Capture> {
+    let input = &options.input;
+    let probe = options.probe.as_ref();
+    let input_probe = options.input_probe.as_ref();
+    let disk_variant = options.disk_variant;
+    let disk_readonly = options.disk_readonly;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
     let vars = image::ovmf_vars_for(workdir)?;
@@ -424,7 +439,7 @@ pub fn run_headless(
     let qmp_path = workdir.join("qmp.sock");
     let _ = std::fs::remove_file(&qmp_path);
     let start = Instant::now();
-    let mut child = base_command(esp, &vars, &disk)
+    let mut child = base_command(esp, &vars, &disk, disk_readonly)
         .args(["-display", "none", "-monitor", "none", "-serial", "stdio"])
         .args([
             "-qmp",
