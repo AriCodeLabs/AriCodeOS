@@ -24,6 +24,7 @@ members = [
     "libs/gfx",
     "libs/manifest",
     "libs/wasm",
+    "libs/crypto",
     "sdk/abi",
     "sdk/runtime",
     "sdk/build",

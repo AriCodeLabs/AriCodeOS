@@ -52,6 +52,20 @@ fn main(arg: u64) -> u64 {
         None => sys::print(b"hello_app: sin acceso al reloj del sistema\n"),
     }
 
+    // 2b. Aleatoriedad del kernel.
+    if let Some(h) = system {
+        let mut r = [0u8; 8];
+        match sys::random(h, &mut r) {
+            Ok(8) => {
+                let mut hex = [0u8; 16];
+                sys::print(b"hello_app: aleatorio ");
+                sys::print(aricode_rt::fmt_hex(u64::from_le_bytes(r), 16, &mut hex));
+                sys::print(b"\n");
+            }
+            _ => sys::print(b"hello_app: sin aleatoriedad\n"),
+        }
+    }
+
     // 3. Directorio privado: escribir, leer y listar (solo veo lo mio).
     let (Some(ep), Some(hw)) = (fs_ep, hardware) else {
         sys::print(b"hello_app: sin directorio privado (el manifiesto no pide fs)\n");

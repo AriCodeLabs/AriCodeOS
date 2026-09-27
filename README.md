@@ -78,6 +78,8 @@ sdk/runtime/     aricode-rt: runtime de los programas de usuario (entry!, heap, 
 sdk/build/       aricode-build: build.rs de una linea para programas de usuario
 apps/hello/      aplicacion de ejemplo del SDK con su manifiesto (ver docs/sdk.md)
 libs/manifest/   manifiestos de aplicacion: capacidades pedidas y cuota de memoria
+libs/crypto/     SHA-256, SHA-512, Ed25519 y ChaCha20 desde cero con vectores oficiales
+keys/dev/        par Ed25519 de desarrollo (solo pruebas; ver su README)
 libs/wasm/       interprete WebAssembly MVP (enteros, memoria acotada, importaciones) con tests de host
 apps/wasm-demo/  modulo WebAssembly portable de ejemplo; apps/wasm-runner lo ejecuta con la Capability API
 boot/            AriBoot: cargador UEFI (crate `ariboot`)

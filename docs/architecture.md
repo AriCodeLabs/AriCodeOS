@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.3.0 (Fases 0 a 29)
+## Estado: 0.3.1 + Fase 31 (criptografía) en desarrollo
 
 ```text
 OVMF (UEFI)
@@ -51,6 +51,7 @@ libs/acpi/           aricode-acpi: RSDP, XSDT/RSDT, MADT (LAPIC, I/O APIC, overr
 libs/pci/            aricode-pci: direccionamiento ECAM, cabecera de configuración, BARs, capabilities, clases (no_std + alloc, tests de host)
 libs/virtio/         aricode-virtio: virtqueue split sobre DMA, estructuras virtio-pci modernas, peticiones virtio-blk (no_std, tests de host)
 libs/gpt/            aricode-gpt: CRC32, cabecera y entradas GPT, escritor para el disco de pruebas (no_std, tests de host)
+libs/crypto/         aricode-crypto: SHA-256, SHA-512, Ed25519 y ChaCha20 desde cero con vectores oficiales (no_std, tests de host)
 libs/wasm/           aricode-wasm: intérprete WebAssembly MVP con enteros, memoria acotada e importaciones (no_std + alloc, tests de host)
 libs/manifest/       aricode-manifest: manifiestos de aplicación (nombre, capacidades, memoria) (no_std, tests de host)
 libs/gfx/            aricode-gfx: lienzos 0x00RRGGBB, recorte, texto, cursor y escritorio de ventanas (no_std, tests de host)
@@ -772,8 +773,26 @@ segundo brevemente para añadir la región.
   tiene manera de nombrar nada que el runner no le haya importado.
 - Los ficheros de AriFS pasan a 32 KiB de capacidad para alojar módulos.
 
+## Criptografía (Fase 31)
+
+- `aricode-crypto` no tiene dependencias ni `alloc`. Los hashes son
+  incrementales (`update`/`finish`); Ed25519 usa cinco limbs de 51 bits para
+  GF(2^255-19), coordenadas extendidas (fórmulas de la RFC 8032 §5.1.4),
+  descompresión por raíz cuadrada con `(p-5)/8` y escalares módulo L por
+  división larga binaria (lenta pero simple: unas pocas firmas por
+  arranque). Verificación comprobada con los tres vectores de la RFC 8032
+  además de firmas y claves alteradas y `S` no canónico.
+- `kernel/src/random.rs`: `Rng` de ChaCha20 sembrado con SHA-256 de ocho
+  valores de `rdrand` (si CPUID.1:ECX.30) y 64 muestras del TSC más el
+  tick de arranque; cada `fill` mezcla otra muestra (`reseed`). `qemu64` no
+  expone `rdrand`, así que en los tests la fuente es el TSC y el kernel lo
+  dice. `system_info(RANDOM)` sirve hasta 256 bytes por llamada.
+- xtask gana `keygen`, `sign` y `verify` (semilla y clave pública en hex);
+  `keys/dev` guarda el par de desarrollo que firmará las imágenes de prueba.
+
 ## Deuda conocida
 
+- El generador del kernel solo tiene `rdrand` y TSC como fuentes.
 - El intérprete WASM no valida el módulo antes de ejecutar (confía en el
   productor; todo se comprueba en ejecución) y no tiene coma flotante.
 - La política del broker es una constante; no hay cuotas de CPU ni de

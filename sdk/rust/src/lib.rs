@@ -287,6 +287,13 @@ pub fn system_info(system: Handle, kind: u64, buf: &mut [u8]) -> Result<usize, E
     .map(|n| n as usize)
 }
 
+/// Bytes aleatorios del kernel (hasta `sysinfo::RANDOM_MAX` por llamada) con
+/// un handle `SYSTEM` (`READ`); devuelve cuántos escribió.
+pub fn random(system: Handle, buf: &mut [u8]) -> Result<usize, Error> {
+    let n = buf.len().min(abi::sysinfo::RANDOM_MAX as usize);
+    system_info(system, abi::sysinfo::RANDOM, &mut buf[..n])
+}
+
 /// Apaga o reinicia (`abi::power`). Solo retorna si el kernel rechaza la acción.
 pub fn system_power(system: Handle, action: u64) -> Error {
     match abi::decode(raw_syscall(

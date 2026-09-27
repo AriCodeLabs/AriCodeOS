@@ -173,6 +173,12 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
             v.extend_from_slice(&(s.free_frames as u64).to_le_bytes());
             v
         }
+        sysinfo::RANDOM => {
+            let n = len.min(sysinfo::RANDOM_MAX) as usize;
+            let mut v = alloc::vec![0u8; n];
+            crate::random::fill(&mut v);
+            v
+        }
         sysinfo::FRAMEBUFFER => match crate::framebuffer::abi_info() {
             Some(fb) => fb.encode().to_vec(),
             None => return Err(Error::NotFound),
