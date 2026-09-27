@@ -3397,7 +3397,8 @@ correcciones de la auditoría del SDK.** Fases 28 y 29:
 
 ## 94.3 AriCodeOS 0.4
 
-**Estado: completada (2026-09-27), tag `v0.4.0`.** Fases 30 y 31:
+**Estado: completada (2026-09-27), tag `v0.4.0`; hotfix `v0.4.1` con las
+correcciones de la auditoría e9fdf38.** Fases 30 y 31:
 
 - criptografía propia (SHA-256, SHA-512, Ed25519, ChaCha20), generador
   aleatorio del kernel y herramientas de claves;
