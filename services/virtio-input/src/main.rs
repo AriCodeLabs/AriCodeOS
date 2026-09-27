@@ -106,32 +106,33 @@ impl Clock {
 
 /// Cola de eventos pendientes de entregar (los más antiguos se descartan).
 struct EventRing {
-    buf: [Event; RING],
+    buf: [(Event, u64); RING],
     head: usize,
     len: usize,
     dropped: u64,
 }
 
 impl EventRing {
-    fn push(&mut self, ev: Event) {
+    fn push(&mut self, ev: Event, at: u64) {
         if self.len == RING {
             self.head = (self.head + 1) % RING;
             self.len -= 1;
             self.dropped += 1;
         }
-        self.buf[(self.head + self.len) % RING] = ev;
+        self.buf[(self.head + self.len) % RING] = (ev, at);
         self.len += 1;
     }
 
-    fn take(&mut self, out: &mut [WireEvent; MAX_EVENTS]) -> usize {
+    fn take(&mut self, out: &mut [WireEvent; MAX_EVENTS], times: &mut [u64; MAX_EVENTS]) -> usize {
         let n = self.len.min(MAX_EVENTS);
-        for slot in out.iter_mut().take(n) {
-            let e = self.buf[self.head];
+        for (slot, t) in out.iter_mut().zip(times.iter_mut()).take(n) {
+            let (e, at) = self.buf[self.head];
             *slot = WireEvent {
                 kind: e.kind,
                 code: e.code,
                 value: e.value,
             };
+            *t = at;
             self.head = (self.head + 1) % RING;
             self.len -= 1;
         }
@@ -157,7 +158,7 @@ fn main(mask: u64) -> u64 {
     sys::print(dev.name_str().as_bytes());
     sys::print(b"\n");
     let mut ring = EventRing {
-        buf: [Event::default(); RING],
+        buf: [(Event::default(), 0); RING],
         head: 0,
         len: 0,
         dropped: 0,
@@ -166,11 +167,12 @@ fn main(mask: u64) -> u64 {
     let mut msg = [0u8; Request::LEN];
     let mut handles = [Handle(0); 1];
     let mut events = [WireEvent::default(); MAX_EVENTS];
+    let mut times = [0u64; MAX_EVENTS];
     say(b"sirviendo peticiones");
     loop {
         let now = clock.now();
         while let Some(ev) = dev.poll() {
-            ring.push(ev);
+            ring.push(ev, now);
         }
         for _ in 0..8 {
             let Ok((n, nh)) = sys::ipc_receive(SERVICE, &mut msg, &mut handles, 0) else {
@@ -192,8 +194,8 @@ fn main(mask: u64) -> u64 {
                     timeout_ms,
                 }) => {
                     if ring.len > 0 {
-                        let n = ring.take(&mut events);
-                        answer(reply_to, Reply::events(&events[..n]));
+                        let n = ring.take(&mut events, &mut times);
+                        answer(reply_to, Reply::events(&events[..n], &times[..n]));
                     } else if pending.is_some() {
                         answer(reply_to, Reply::status(Status::Busy));
                     } else {
@@ -205,8 +207,8 @@ fn main(mask: u64) -> u64 {
         }
         if let Some((reply_to, deadline)) = pending {
             if ring.len > 0 {
-                let n = ring.take(&mut events);
-                answer(reply_to, Reply::events(&events[..n]));
+                let n = ring.take(&mut events, &mut times);
+                answer(reply_to, Reply::events(&events[..n], &times[..n]));
                 pending = None;
             } else if now >= deadline {
                 answer(reply_to, Reply::status(Status::Timeout));

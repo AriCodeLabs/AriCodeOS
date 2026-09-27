@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "ari-compositor"
+version = "0.1.1"
+dependencies = [
+ "aricode-gfx",
+ "aricode-input",
+ "aricode-proto",
+ "aricode-sys",
+ "user-testprogs",
+]
+
+[[package]]
 name = "ari-fsd"
 version = "0.1.1"
 dependencies = [
@@ -91,6 +102,13 @@ name = "aricode-fb-console"
 version = "0.1.1"
 
 [[package]]
+name = "aricode-gfx"
+version = "0.1.1"
+dependencies = [
+ "aricode-fb-console",
+]
+
+[[package]]
 name = "aricode-gpt"
 version = "0.1.1"
 
@@ -143,6 +161,7 @@ name = "aricode-sys"
 version = "0.1.1"
 dependencies = [
  "aricode-abi",
+ "aricode-gfx",
  "aricode-http",
  "aricode-net",
  "aricode-proto",
@@ -441,6 +460,7 @@ checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
 name = "user-testprogs"
 version = "0.1.1"
 dependencies = [
+ "aricode-gfx",
  "aricode-heap",
  "aricode-input",
  "aricode-net",

@@ -32,6 +32,7 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("aricode-net", None),
     ("aricode-http", None),
     ("aricode-input", None),
+    ("aricode-gfx", None),
     ("aricode-proto", None),
     ("aricode-sys", None),
     ("user-testprogs", Some(KERNEL_TARGET)),
@@ -39,6 +40,7 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("ari-virtio-blk", Some(KERNEL_TARGET)),
     ("ari-virtio-net", Some(KERNEL_TARGET)),
     ("ari-virtio-input", Some(KERNEL_TARGET)),
+    ("ari-compositor", Some(KERNEL_TARGET)),
     ("ari-fsd", Some(KERNEL_TARGET)),
     ("ari-shell", Some(KERNEL_TARGET)),
     ("ariboot", Some(UEFI_TARGET)),
@@ -85,6 +87,7 @@ pub fn initrd_programs() -> Result<Vec<String>> {
         String::from("virtio_blk"),
         String::from("virtio_net"),
         String::from("virtio_input"),
+        String::from("compositor"),
         String::from("fsd"),
         String::from("shell"),
     ];
@@ -108,6 +111,7 @@ pub fn build_user_programs(release: bool) -> Result<PathBuf> {
         "ari-virtio-blk",
         "ari-virtio-net",
         "ari-virtio-input",
+        "ari-compositor",
         "ari-fsd",
         "ari-shell",
     ] {

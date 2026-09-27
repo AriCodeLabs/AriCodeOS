@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.1.1 + Fase 25 (virtio-input) en desarrollo
+## Estado: 0.1.1 + Fases 25 (virtio-input) y 26 (GUI básica) en desarrollo
 
 ```text
 OVMF (UEFI)
@@ -51,17 +51,19 @@ libs/acpi/           aricode-acpi: RSDP, XSDT/RSDT, MADT (LAPIC, I/O APIC, overr
 libs/pci/            aricode-pci: direccionamiento ECAM, cabecera de configuración, BARs, capabilities, clases (no_std + alloc, tests de host)
 libs/virtio/         aricode-virtio: virtqueue split sobre DMA, estructuras virtio-pci modernas, peticiones virtio-blk (no_std, tests de host)
 libs/gpt/            aricode-gpt: CRC32, cabecera y entradas GPT, escritor para el disco de pruebas (no_std, tests de host)
+libs/gfx/            aricode-gfx: lienzos 0x00RRGGBB, recorte, texto, cursor y escritorio de ventanas (no_std, tests de host)
 libs/input/          aricode-input: eventos evdev y teclado US (no_std, tests de host)
 libs/http/           aricode-http: GET, análisis de respuestas, Content-Length y chunked sin alloc (no_std, tests de host)
 libs/net/            aricode-net: Ethernet, ARP, IPv4, ICMP, UDP, TCP, cliente DHCP y DNS sin alloc (no_std, tests de host)
 libs/arifs/          aricode-arifs: AriFS v0, directorio plano con tabla de ficheros de capacidad fija sobre `BlockDevice` (no_std, tests de host)
-sdk/proto/           aricode-proto: protocolos IPC versionados de los servicios (bloques v1, ficheros v1, red v1, entrada v1) (no_std, tests de host)
+sdk/proto/           aricode-proto: protocolos IPC versionados de los servicios (bloques v1, ficheros v1, red v1, entrada v1, ventanas v1) (no_std, tests de host)
 sdk/abi/             aricode-abi: números de syscall, errores, handles iniciales, derechos y tipos de objeto (no_std, tests de host)
 sdk/rust/            aricode-sys: wrappers de syscall (no_std, sin alloc), clientes de los servicios de bloques, ficheros y red, cliente HTTP GET, transporte virtio PCI para drivers, y `user.ld`, el linker script de todo programa de usuario
 user/testprogs/      programas de prueba de ring 3 (Rust y ensamblador) enlazados como ELF estáticos en 0x400000
 services/init/       AriInit: primer proceso; recibe SPAWNER y la raíz PCI, lanza/supervisa servicios y reclama dispositivos para sus drivers
 services/virtio-blk/ driver virtio-blk en ring 3 y servicio de bloques por IPC (interfaz moderna, cola 0 en DMA, MSI-X, GPT)
 services/virtio-net/ netd: driver virtio-net y pila de red (DHCP, ARP, ICMP, UDP, TCP, DNS) por IPC en ring 3
+services/compositor/ compositor: dueño del framebuffer, ventanas, cursor y enrutado de entrada en ring 3
 services/virtio-input/ inputd: driver virtio-input (un proceso por teclado o ratón) y eventos por IPC en ring 3
 services/arifs/      fsd: servicio de ficheros AriFS en ring 3 sobre el servicio de bloques
 services/shell/      arish: shell interactivo en ring 3 (help, ps, mem, ls, cat, devices, services, uptime, reboot, shutdown, exit)
@@ -658,8 +660,42 @@ segundo brevemente para añadir la región.
   los dispositivos virtio, registrados después del i8042, son los
   manejadores activos. El resultado se anota como `[host] QMP: ...`.
 
+## GUI básica (Fase 26)
+
+- Con `gui` en la cmdline el kernel no inicializa la consola de framebuffer
+  (solo serie) y `run_init` entrega a init un objeto `Mmio` con el
+  framebuffer GOP (`0x10009`, `READ|WRITE`); `system_info(FRAMEBUFFER)`
+  devuelve ancho, alto, stride, formato, tamaño y máscaras. Sin `gui` la
+  capability existe pero la pantalla la sigue usando el kernel.
+- `aricode-gfx` no reserva memoria: `Canvas` envuelve `&mut [u32]` con
+  stride y recorta todo (`fill_rect`, `blit`, `text`, `cursor`); `Desktop`
+  guarda hasta 8 ventanas con orden z, foco, puntero y colocación en
+  cascada, y `compose` pinta fondo, marcos (título activo/inactivo),
+  contenidos (vía callback del llamador) y cursor. Todo probado en host
+  sobre `Vec<u32>`, incluida la composición de dos ventanas solapadas.
+- El compositor compone en un buffer trasero DMA (la pantalla entera,
+  `DMA_MAX_LEN` sube a 8 MiB) y lo vuelca al framebuffer convirtiendo a RGB
+  si hace falta. Recompone solo cuando algo cambió (`Present`, puntero,
+  foco, ventanas) y anota por serie cada frame con una muestra de píxel por
+  ventana, que los escenarios exigen. Los eventos de los `inputd` llegan
+  con el instante en que cada servicio los recibió (`Reply::times`), y el
+  compositor los fusiona por ese instante antes de procesarlos: un clic
+  del ratón precede a la tecla que vino después aunque los dispositivos se
+  lean por turnos.
+- `WindowProtocol v1`: el cliente reserva el buffer de contenido con su
+  capacidad de hardware y lo transfiere en `Create` (el compositor lo mapea
+  una vez y lo lee en cada composición); `Present` marca la ventana sucia;
+  `Poll` espera con plazo un `Key`, `Click` o `Focus`; `Close` la quita.
+  El compositor traduce el teclado (`aricode-input::Keyboard`) y entrega
+  solo a la ventana con foco: la sonda de `gui.two_windows` comprueba que
+  la otra ventana no ve nada.
+- La sonda QMP de xtask envía ahora ratón, clic y teclas en ese orden con
+  100 ms entre fases.
+
 ## Deuda conocida
 
+- La GUI no mueve ni redimensiona ventanas, repinta la pantalla completa
+  en cada frame y no tiene terminal gráfico; el shell sigue en la serie.
 - Sin xHCI/USB HID: solo dispositivos virtio-input; el shell sigue leyendo
   de la consola serie.
 - HTTP sin TLS, sin redirecciones ni `keep-alive`; cuerpos limitados al

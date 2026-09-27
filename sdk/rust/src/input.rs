@@ -50,11 +50,13 @@ impl InputClient {
         Ok(n)
     }
 
-    /// Espera eventos hasta `timeout_ms`; devuelve cuántos hay en `out`.
+    /// Espera eventos hasta `timeout_ms`; devuelve cuántos hay en `out`, con
+    /// el instante (ms de arranque) de cada uno en `times`.
     pub fn read(
         &self,
         timeout_ms: u32,
         out: &mut [Event; MAX_EVENTS],
+        times: &mut [u64; MAX_EVENTS],
     ) -> Result<usize, InputError> {
         let r = self.call(Request {
             op: Op::Read,
@@ -62,6 +64,7 @@ impl InputClient {
         })?;
         let n = r.count as usize;
         out[..n].copy_from_slice(&r.events[..n]);
+        times[..n].copy_from_slice(&r.times[..n]);
         Ok(n)
     }
 }

@@ -644,33 +644,41 @@ pub mod input {
         pub value: u32,
     }
 
-    /// Respuesta (48 bytes): estado, número de eventos, eventos y nombre.
+    /// Respuesta (104 bytes): estado, número de eventos, eventos, el instante
+    /// (ms de arranque) en que el servicio recibió cada uno, y nombre. Los
+    /// instantes permiten ordenar eventos de varios dispositivos.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Reply {
         pub status: Status,
         pub count: u8,
         pub events: [Event; MAX_EVENTS],
+        pub times: [u64; MAX_EVENTS],
         pub name: [u8; MAX_NAME],
         pub name_len: u8,
     }
 
     impl Reply {
-        pub const LEN: usize = 8 + 8 * MAX_EVENTS + MAX_NAME;
+        pub const LEN: usize = 8 + 16 * MAX_EVENTS + MAX_NAME;
+        const TIMES: usize = 8 + 8 * MAX_EVENTS;
+        const NAME: usize = 8 + 16 * MAX_EVENTS;
 
         pub fn status(status: Status) -> Self {
             Self {
                 status,
                 count: 0,
                 events: [Event::default(); MAX_EVENTS],
+                times: [0; MAX_EVENTS],
                 name: [0; MAX_NAME],
                 name_len: 0,
             }
         }
 
-        pub fn events(events: &[Event]) -> Self {
+        /// Eventos con sus instantes (`times[i]` acompaña a `events[i]`).
+        pub fn events(events: &[Event], times: &[u64]) -> Self {
             let mut r = Self::status(Status::Ok);
-            let n = events.len().min(MAX_EVENTS);
+            let n = events.len().min(times.len()).min(MAX_EVENTS);
             r.events[..n].copy_from_slice(&events[..n]);
+            r.times[..n].copy_from_slice(&times[..n]);
             r.count = n as u8;
             r
         }
@@ -702,7 +710,11 @@ pub mod input {
                 b[o + 2..o + 4].copy_from_slice(&e.code.to_le_bytes());
                 b[o + 4..o + 8].copy_from_slice(&e.value.to_le_bytes());
             }
-            b[8 + 8 * MAX_EVENTS..].copy_from_slice(&self.name);
+            for (i, t) in self.times.iter().enumerate() {
+                let o = Self::TIMES + 8 * i;
+                b[o..o + 8].copy_from_slice(&t.to_le_bytes());
+            }
+            b[Self::NAME..].copy_from_slice(&self.name);
             b
         }
 
@@ -726,14 +738,235 @@ pub mod input {
                     value: u32::from_le_bytes(b[o + 4..o + 8].try_into().ok()?),
                 };
             }
+            let mut times = [0u64; MAX_EVENTS];
+            for (i, t) in times.iter_mut().enumerate() {
+                let o = Self::TIMES + 8 * i;
+                *t = u64::from_le_bytes(b[o..o + 8].try_into().ok()?);
+            }
             let mut name = [0u8; MAX_NAME];
-            name.copy_from_slice(&b[8 + 8 * MAX_EVENTS..Self::LEN]);
+            name.copy_from_slice(&b[Self::NAME..Self::LEN]);
             Some(Self {
                 status,
                 count: b[3].min(MAX_EVENTS as u8),
                 events,
+                times,
                 name,
                 name_len: b[4].min(MAX_NAME as u8),
+            })
+        }
+    }
+}
+
+/// Protocolo del compositor (`WindowProtocol v1`): ventanas cuyo contenido
+/// vive en un buffer DMA del cliente, y eventos de entrada ya enrutados.
+pub mod window {
+    pub const PROTOCOL: u8 = 5;
+    pub const VERSION: u8 = 1;
+    pub const MAX_TITLE: usize = 24;
+    /// Ventana máxima (píxeles por lado).
+    pub const MAX_SIDE: u32 = 4096;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Op {
+        /// Crea una ventana `w`x`h` con `title`; handles `[respuesta, buffer]`
+        /// (el buffer tiene `w*h*4` bytes en `0x00RRGGBB`); `value` = id.
+        Create = 1,
+        /// El contenido del buffer cambió: recomponer.
+        Present = 2,
+        /// Espera hasta `timeout_ms` un evento de la ventana.
+        Poll = 3,
+        Close = 4,
+    }
+
+    /// Petición (64 bytes).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Request {
+        pub op: Op,
+        pub window: u32,
+        pub width: u32,
+        pub height: u32,
+        pub timeout_ms: u32,
+        pub title: [u8; MAX_TITLE],
+        pub title_len: u8,
+    }
+
+    impl Request {
+        pub const LEN: usize = 64;
+
+        pub fn new(op: Op) -> Self {
+            Self {
+                op,
+                window: 0,
+                width: 0,
+                height: 0,
+                timeout_ms: 0,
+                title: [0; MAX_TITLE],
+                title_len: 0,
+            }
+        }
+
+        /// `None` si el título no cabe.
+        pub fn with_title(mut self, title: &str) -> Option<Self> {
+            if title.len() > MAX_TITLE {
+                return None;
+            }
+            self.title[..title.len()].copy_from_slice(title.as_bytes());
+            self.title_len = title.len() as u8;
+            Some(self)
+        }
+
+        pub fn title_str(&self) -> &str {
+            core::str::from_utf8(&self.title[..self.title_len as usize]).unwrap_or("")
+        }
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[0] = PROTOCOL;
+            b[1] = VERSION;
+            b[2] = self.op as u8;
+            b[3] = self.title_len;
+            b[4..8].copy_from_slice(&self.window.to_le_bytes());
+            b[8..12].copy_from_slice(&self.width.to_le_bytes());
+            b[12..16].copy_from_slice(&self.height.to_le_bytes());
+            b[16..20].copy_from_slice(&self.timeout_ms.to_le_bytes());
+            b[24..48].copy_from_slice(&self.title);
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN || b[0] != PROTOCOL || b[1] != VERSION {
+                return None;
+            }
+            let op = match b[2] {
+                1 => Op::Create,
+                2 => Op::Present,
+                3 => Op::Poll,
+                4 => Op::Close,
+                _ => return None,
+            };
+            let mut title = [0u8; MAX_TITLE];
+            title.copy_from_slice(&b[24..48]);
+            Some(Self {
+                op,
+                window: u32::from_le_bytes(b[4..8].try_into().ok()?),
+                width: u32::from_le_bytes(b[8..12].try_into().ok()?),
+                height: u32::from_le_bytes(b[12..16].try_into().ok()?),
+                timeout_ms: u32::from_le_bytes(b[16..20].try_into().ok()?),
+                title,
+                title_len: b[3].min(MAX_TITLE as u8),
+            })
+        }
+    }
+
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Status {
+        Ok = 0,
+        Invalid = 1,
+        Busy = 2,
+        BadHandles = 3,
+        BadWindow = 4,
+        Timeout = 5,
+    }
+
+    /// Evento entregado a una ventana.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Event {
+        /// Carácter ya traducido por el compositor.
+        Key(u8),
+        /// Botón pulsado en coordenadas del contenido.
+        Click { x: i32, y: i32, button: u8 },
+        /// La ventana ganó (`true`) o perdió el foco.
+        Focus(bool),
+    }
+
+    /// Respuesta (32 bytes): estado, valor y evento opcional.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Reply {
+        pub status: Status,
+        pub value: u64,
+        pub event: Option<Event>,
+    }
+
+    impl Reply {
+        pub const LEN: usize = 32;
+
+        pub fn status(status: Status) -> Self {
+            Self {
+                status,
+                value: 0,
+                event: None,
+            }
+        }
+        pub fn ok(value: u64) -> Self {
+            Self::status(Status::Ok).with_value(value)
+        }
+        pub fn with_value(mut self, value: u64) -> Self {
+            self.value = value;
+            self
+        }
+        pub fn event(event: Event) -> Self {
+            Self {
+                status: Status::Ok,
+                value: 0,
+                event: Some(event),
+            }
+        }
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[0] = PROTOCOL;
+            b[1] = VERSION;
+            b[2] = self.status as u8;
+            b[8..16].copy_from_slice(&self.value.to_le_bytes());
+            match self.event {
+                None => b[3] = 0,
+                Some(Event::Key(c)) => {
+                    b[3] = 1;
+                    b[16] = c;
+                }
+                Some(Event::Click { x, y, button }) => {
+                    b[3] = 2;
+                    b[16..20].copy_from_slice(&x.to_le_bytes());
+                    b[20..24].copy_from_slice(&y.to_le_bytes());
+                    b[24] = button;
+                }
+                Some(Event::Focus(f)) => {
+                    b[3] = 3;
+                    b[16] = f as u8;
+                }
+            }
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN || b[0] != PROTOCOL || b[1] != VERSION {
+                return None;
+            }
+            let status = match b[2] {
+                0 => Status::Ok,
+                1 => Status::Invalid,
+                2 => Status::Busy,
+                3 => Status::BadHandles,
+                4 => Status::BadWindow,
+                5 => Status::Timeout,
+                _ => return None,
+            };
+            let event = match b[3] {
+                0 => None,
+                1 => Some(Event::Key(b[16])),
+                2 => Some(Event::Click {
+                    x: i32::from_le_bytes(b[16..20].try_into().ok()?),
+                    y: i32::from_le_bytes(b[20..24].try_into().ok()?),
+                    button: b[24],
+                }),
+                3 => Some(Event::Focus(b[16] != 0)),
+                _ => return None,
+            };
+            Some(Self {
+                status,
+                value: u64::from_le_bytes(b[8..16].try_into().ok()?),
+                event,
             })
         }
     }
@@ -742,6 +975,40 @@ pub mod input {
 #[cfg(test)]
 mod tests {
     use super::block::*;
+
+    #[test]
+    fn window_round_trip() {
+        use super::window::*;
+        let mut r = Request::new(Op::Create).with_title("Demo A").unwrap();
+        r.width = 400;
+        r.height = 300;
+        let d = Request::decode(&r.encode()).unwrap();
+        assert_eq!(d, r);
+        assert_eq!(d.title_str(), "Demo A");
+        assert!(Request::new(Op::Create)
+            .with_title(&"t".repeat(25))
+            .is_none());
+        for ev in [
+            Event::Key(b'h'),
+            Event::Click {
+                x: -3,
+                y: 280,
+                button: 1,
+            },
+            Event::Focus(true),
+        ] {
+            let reply = Reply::event(ev);
+            assert_eq!(Reply::decode(&reply.encode()), Some(reply));
+        }
+        let ok = Reply::ok(7);
+        assert_eq!(Reply::decode(&ok.encode()), Some(ok));
+        assert_eq!(
+            Reply::decode(&Reply::status(Status::BadWindow).encode())
+                .unwrap()
+                .status,
+            Status::BadWindow
+        );
+    }
 
     #[test]
     fn input_round_trip() {
@@ -763,7 +1030,7 @@ mod tests {
                 value: (-5i32) as u32,
             },
         ];
-        let reply = Reply::events(&evs)
+        let reply = Reply::events(&evs, &[1000, 1003])
             .with_name("QEMU Virtio Keyboard")
             .unwrap();
         let d = Reply::decode(&reply.encode()).unwrap();

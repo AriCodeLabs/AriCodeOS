@@ -34,12 +34,17 @@ pub mod handle {
     pub const INIT_SYSTEM: u32 = 0x0001_0007;
     /// Handle con el que `init` recibe la entrada de consola (`READ`).
     pub const INIT_CONSOLE_IN: u32 = 0x0001_0008;
+    /// Handle con el que `init` recibe el framebuffer (`MMIO`, `READ|WRITE`).
+    pub const INIT_FRAMEBUFFER: u32 = 0x0001_0009;
 }
 
 /// Bits del `arg` que el kernel pasa a `init`.
 pub mod init_arg {
     /// La cmdline pide un shell interactivo (`shell`).
     pub const SHELL: u64 = 1;
+    /// La cmdline pide la interfaz gráfica (`gui`): el kernel no pinta en el
+    /// framebuffer y init lanza el compositor.
+    pub const GUI: u64 = 2;
 }
 
 /// Derechos (bits) tal y como los ve el espacio de usuario.
@@ -163,6 +168,59 @@ pub mod sysinfo {
     pub const MEMORY: u64 = 1;
     /// Tantas [`ProcessEntry`] como quepan en el buffer.
     pub const PROCESSES: u64 = 2;
+    /// Un [`Framebuffer`] (40 bytes): geometría y formato de la pantalla GOP.
+    pub const FRAMEBUFFER: u64 = 3;
+
+    /// Formato de píxel del framebuffer (32 bpp).
+    pub const FB_FORMAT_RGB: u8 = 0;
+    pub const FB_FORMAT_BGR: u8 = 1;
+    pub const FB_FORMAT_BITMASK: u8 = 2;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct Framebuffer {
+        pub width: u32,
+        pub height: u32,
+        /// Píxeles por fila.
+        pub stride: u32,
+        pub format: u8,
+        pub size: u64,
+        pub red_mask: u32,
+        pub green_mask: u32,
+        pub blue_mask: u32,
+    }
+
+    impl Framebuffer {
+        pub const LEN: usize = 40;
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[0..4].copy_from_slice(&self.width.to_le_bytes());
+            b[4..8].copy_from_slice(&self.height.to_le_bytes());
+            b[8..12].copy_from_slice(&self.stride.to_le_bytes());
+            b[12] = self.format;
+            b[16..24].copy_from_slice(&self.size.to_le_bytes());
+            b[24..28].copy_from_slice(&self.red_mask.to_le_bytes());
+            b[28..32].copy_from_slice(&self.green_mask.to_le_bytes());
+            b[32..36].copy_from_slice(&self.blue_mask.to_le_bytes());
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN {
+                return None;
+            }
+            Some(Self {
+                width: u32::from_le_bytes(b[0..4].try_into().ok()?),
+                height: u32::from_le_bytes(b[4..8].try_into().ok()?),
+                stride: u32::from_le_bytes(b[8..12].try_into().ok()?),
+                format: b[12],
+                size: u64::from_le_bytes(b[16..24].try_into().ok()?),
+                red_mask: u32::from_le_bytes(b[24..28].try_into().ok()?),
+                green_mask: u32::from_le_bytes(b[28..32].try_into().ok()?),
+                blue_mask: u32::from_le_bytes(b[32..36].try_into().ok()?),
+            })
+        }
+    }
 
     pub const PROCESS_NAME_LEN: usize = 24;
 
@@ -292,7 +350,7 @@ pub mod pci_info {
 }
 
 /// Máximo de un buffer DMA por llamada (sección 52).
-pub const DMA_MAX_LEN: u64 = 1024 * 1024;
+pub const DMA_MAX_LEN: u64 = 8 * 1024 * 1024;
 
 /// Límites de un mensaje IPC (sección 23: mensajes pequeños y rápidos).
 pub const IPC_MAX_DATA: usize = 256;
@@ -383,6 +441,23 @@ pub const fn user_range_ok(ptr: u64, len: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn framebuffer_info_round_trip() {
+        use super::sysinfo::*;
+        let f = Framebuffer {
+            width: 1280,
+            height: 800,
+            stride: 1280,
+            format: FB_FORMAT_BGR,
+            size: 1280 * 800 * 4,
+            red_mask: 0,
+            green_mask: 0,
+            blue_mask: 0,
+        };
+        assert_eq!(Framebuffer::decode(&f.encode()), Some(f));
+        assert!(Framebuffer::decode(&[0u8; 10]).is_none());
+    }
+
     #[test]
     fn process_entry_round_trip() {
         use super::sysinfo::*;

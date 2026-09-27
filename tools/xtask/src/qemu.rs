@@ -142,16 +142,7 @@ fn run_input_probe(
         Ok(())
     };
     let result: Result = (|| {
-        for key in keys {
-            for down in [true, false] {
-                step(
-                    &mut qmp,
-                    format!(
-                        r#"{{"type":"key","data":{{"down":{down},"key":{{"type":"qcode","data":"{key}"}}}}}}"#
-                    ),
-                )?;
-            }
-        }
+        // Orden natural: apuntar, pulsar y despues teclear.
         if let Some((dx, dy)) = mouse_rel {
             step(
                 &mut qmp,
@@ -162,11 +153,25 @@ fn run_input_probe(
                 format!(r#"{{"type":"rel","data":{{"axis":"y","value":{dy}}}}}"#),
             )?;
         }
+        // Una pausa breve entre fases: el compositor ordena por instante de
+        // llegada y un usuario real no pulsa y teclea en el mismo milisegundo.
+        std::thread::sleep(Duration::from_millis(100));
         if let Some(button) = click {
             for down in [true, false] {
                 step(
                     &mut qmp,
                     format!(r#"{{"type":"btn","data":{{"down":{down},"button":"{button}"}}}}"#),
+                )?;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        for key in keys {
+            for down in [true, false] {
+                step(
+                    &mut qmp,
+                    format!(
+                        r#"{{"type":"key","data":{{"down":{down},"key":{{"type":"qcode","data":"{key}"}}}}}}"#
+                    ),
                 )?;
             }
         }
@@ -361,11 +366,16 @@ pub fn run_interactive(release: bool, cmdline: &str) -> Result {
     let disk = build_dir().join("disk.img");
     image::write_test_disk(&disk)?;
     let _responder = Responder::start()?;
-    println!("[xtask] QEMU (salir: Ctrl-A X)");
-    let st = base_command(&esp, &vars, &disk)
-        .arg("-nographic")
-        .status()
-        .map_err(|e| format!("qemu: {e}"))?;
+    let mut q = base_command(&esp, &vars, &disk);
+    if cmdline.split_whitespace().any(|w| w == "gui") {
+        // Con `gui` hace falta ver la pantalla: ventana de QEMU y serie en la terminal.
+        println!("[xtask] QEMU con pantalla (serie en la terminal; salir: cerrar la ventana)");
+        q.args(["-serial", "stdio"]);
+    } else {
+        println!("[xtask] QEMU (salir: Ctrl-A X)");
+        q.arg("-nographic");
+    }
+    let st = q.status().map_err(|e| format!("qemu: {e}"))?;
     println!("[xtask] qemu exit: {:?}", st.code());
     Ok(())
 }

@@ -1,7 +1,39 @@
 //! Superficie MMIO sobre el framebuffer GOP para `aricode-fb-console`.
 
+use crate::sync::IrqLock;
 use aricode_fb_console::{Rgb, Surface};
 use boot_protocol::{FramebufferInfo, PixelFormat};
+
+static INFO: IrqLock<Option<FramebufferInfo>> = IrqLock::new(None);
+
+/// Guarda la descripción del framebuffer GOP para `system_info`.
+pub fn set_info(info: FramebufferInfo) {
+    *INFO.lock() = Some(info);
+}
+
+/// Descripción del framebuffer en el formato del ABI (`sysinfo::Framebuffer`),
+/// o `None` si no hay pantalla.
+pub fn abi_info() -> Option<aricode_abi::sysinfo::Framebuffer> {
+    use aricode_abi::sysinfo::{FB_FORMAT_BGR, FB_FORMAT_BITMASK, FB_FORMAT_RGB};
+    let info = (*INFO.lock())?;
+    if info.address == 0 || info.pixel_format == PixelFormat::None {
+        return None;
+    }
+    Some(aricode_abi::sysinfo::Framebuffer {
+        width: info.width,
+        height: info.height,
+        stride: info.stride,
+        format: match info.pixel_format {
+            PixelFormat::Rgb => FB_FORMAT_RGB,
+            PixelFormat::Bgr => FB_FORMAT_BGR,
+            _ => FB_FORMAT_BITMASK,
+        },
+        size: info.size,
+        red_mask: info.red_mask,
+        green_mask: info.green_mask,
+        blue_mask: info.blue_mask,
+    })
+}
 
 pub struct MmioSurface {
     info: FramebufferInfo,

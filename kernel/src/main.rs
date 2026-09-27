@@ -58,7 +58,11 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     let cmdline = CmdLine::new(unsafe { info.cmdline() });
     QEMU_EXIT.store(cmdline.has(keys::QEMU_EXIT), Ordering::Relaxed);
 
-    let has_fb = console::init_framebuffer(info.framebuffer);
+    framebuffer::set_info(info.framebuffer);
+    // Con `gui` la pantalla es del compositor de usuario: el kernel solo
+    // escribe por serie.
+    let gui = cmdline.has(keys::GUI);
+    let has_fb = !gui && console::init_framebuffer(info.framebuffer);
     println!();
     println!("AriCodeOS booting...");
     println!("AriCodeOS Kernel {VERSION}");
@@ -73,7 +77,7 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     }
     trace!("logger activo en nivel {level}");
 
-    report_framebuffer(info, has_fb);
+    report_framebuffer(info, has_fb, gui);
     report_kernel(info);
     report_memory(info);
 
@@ -127,7 +131,11 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     if cmdline.get(keys::TEST).is_some() {
         run_requested_test(&cmdline, info);
     } else {
-        run_init(cmdline.has(keys::SHELL));
+        run_init(
+            cmdline.has(keys::SHELL),
+            cmdline.has(keys::GUI),
+            info.framebuffer,
+        );
     }
 
     println!("ARICODEOS_KERNEL_READY");
@@ -175,12 +183,21 @@ unsafe fn validate_boot_info(ptr: *const BootInfo) -> &'static BootInfo {
     info
 }
 
-fn report_framebuffer(info: &BootInfo, has_fb: bool) {
-    if has_fb {
-        let f = &info.framebuffer;
+fn report_framebuffer(info: &BootInfo, has_fb: bool, gui: bool) {
+    let f = &info.framebuffer;
+    if has_fb || (gui && f.address != 0) {
         info!(
-            "framebuffer: {}x{} stride {} {:?} @ {:#x}",
-            f.width, f.height, f.stride, f.pixel_format, f.address
+            "framebuffer: {}x{} stride {} {:?} @ {:#x}{}",
+            f.width,
+            f.height,
+            f.stride,
+            f.pixel_format,
+            f.address,
+            if gui {
+                " (reservado para el compositor)"
+            } else {
+                ""
+            }
         );
     } else {
         warn!("framebuffer: no disponible, solo serie");
@@ -300,8 +317,9 @@ fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
 /// Arranque normal: lanza `init` del initrd con la capacidad de crear
 /// procesos y espera a que termine.
 /// Lanza `init` con sus capacidades (`aricode_abi::handle::INIT_*`) y espera
-/// su fin. `shell` pide un shell interactivo tras los servicios de arranque.
-fn run_init(shell: bool) {
+/// su fin. `shell` pide un shell interactivo tras los servicios de arranque;
+/// `gui` pide el compositor (init recibe siempre el framebuffer como MMIO).
+fn run_init(shell: bool, gui: bool, fb: boot_protocol::FramebufferInfo) {
     use aricode_handles::Rights;
     let Some(elf) = user::programs::by_name("init") else {
         warn!("init: no hay 'init' en el initrd");
@@ -312,11 +330,18 @@ fn run_init(shell: bool) {
     let hardware = object::KernelObject::new(object::ObjectKind::Hardware);
     let system = object::KernelObject::new(object::ObjectKind::System);
     let console_in = object::KernelObject::new(object::ObjectKind::Console);
-    let arg = if shell {
-        aricode_abi::init_arg::SHELL
-    } else {
-        0
-    };
+    let framebuffer = object::KernelObject::new(object::ObjectKind::Mmio(hw::Region {
+        phys: fb.address,
+        len: fb.size,
+        cacheable: false,
+    }));
+    let mut arg = 0;
+    if shell {
+        arg |= aricode_abi::init_arg::SHELL;
+    }
+    if gui {
+        arg |= aricode_abi::init_arg::GUI;
+    }
     let pid = user::process::spawn_with_handles_and_arg(
         "init",
         elf,
@@ -345,6 +370,13 @@ fn run_init(shell: bool) {
             (
                 console_in,
                 Rights::READ
+                    .union(Rights::DUPLICATE)
+                    .union(Rights::TRANSFER)
+            ),
+            (
+                framebuffer,
+                Rights::READ
+                    .union(Rights::WRITE)
                     .union(Rights::DUPLICATE)
                     .union(Rights::TRANSFER)
             ),

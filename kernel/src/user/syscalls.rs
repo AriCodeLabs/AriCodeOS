@@ -151,6 +151,10 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
             v.extend_from_slice(&(s.free_frames as u64).to_le_bytes());
             v
         }
+        sysinfo::FRAMEBUFFER => match crate::framebuffer::abi_info() {
+            Some(fb) => fb.encode().to_vec(),
+            None => return Err(Error::NotFound),
+        },
         sysinfo::PROCESSES => {
             let max = (len as usize) / sysinfo::ProcessEntry::LEN;
             process::snapshot()

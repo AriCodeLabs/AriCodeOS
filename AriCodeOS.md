@@ -2533,18 +2533,43 @@ TLS vendrá posteriormente (Fase 31, criptografía).
 
 # FASE 26 — GUI básica
 
-### Implementar
+**Estado: completada (2026-09-27).**
 
-- framebuffer abstraction;
-- surfaces;
-- compositor;
-- mouse pointer;
-- windows;
-- events.
+### Implementado
+
+- framebuffer abstraction: con `gui` en la cmdline el kernel no pinta en la
+  pantalla y entrega a init el framebuffer GOP como capability MMIO
+  (`INIT_FRAMEBUFFER`); `system_info(FRAMEBUFFER)` describe geometría y
+  formato. La consola de kernel queda en la serie;
+- surfaces: `libs/gfx` (no_std, sin alloc, tests de host): lienzos
+  `0x00RRGGBB` sobre buffers del llamador con recorte, rectángulos, texto
+  con la fuente de la consola, cursor y el modelo `Desktop` (ventanas en
+  cascada, orden z, foco, prueba de impacto, composición);
+- compositor (`services/compositor`): proceso de ring 3 dueño del
+  framebuffer; compone en un buffer trasero DMA y lo vuelca convirtiendo el
+  formato; lee los servicios de entrada, ordena sus eventos por instante de
+  llegada (inputd los sella) y enruta teclado y clics a la ventana con foco;
+- mouse pointer: flecha dibujada por el compositor, movida con los eventos
+  relativos del ratón virtio;
+- windows: `WindowProtocol v1` (`sdk/proto::window`): `Create` (el cliente
+  aporta el buffer de contenido como DMA), `Present`, `Poll`, `Close`;
+  cliente `aricode-sys::window::Window` con lienzo propio;
+- events: `Key` (carácter traducido), `Click` (coordenadas del contenido,
+  botón) y `Focus`, con espera pendiente por ventana.
 
 ### Criterio
 
-Dos aplicaciones gráficas aisladas pueden dibujar simultáneamente.
+Dos aplicaciones gráficas aisladas pueden dibujar simultáneamente:
+**cumplido**. `gui.two_windows` lanza `gui_demo A` y `gui_demo B` (procesos
+distintos con sus propios buffers), comprueba los píxeles de cada ventana en
+la composición, hace clic sobre B por QMP y teclea `h`: solo B recibe foco,
+clic y tecla; A nunca ve eventos ajenos.
+
+### Pendiente
+
+- mover y redimensionar ventanas, cerrar desde la barra de título;
+- composición por regiones dañadas (hoy se repinta la pantalla completa);
+- que el shell y la consola vivan en una ventana (terminal gráfico).
 
 ---
 

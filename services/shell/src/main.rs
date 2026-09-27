@@ -22,6 +22,7 @@ const SERVICE_BLOCK: u64 = 1;
 const SERVICE_FS: u64 = 2;
 const SERVICE_NET: u64 = 4;
 const SERVICE_INPUT: u64 = 8;
+const SERVICE_GUI: u64 = 16;
 
 const PROMPT: &[u8] = b"ari> ";
 const LINE_MAX: usize = 256;
@@ -417,6 +418,12 @@ fn services(mask: u64, fs: &FsClient) {
         b"activo\n"
     } else {
         b"ausente\n"
+    });
+    sys::print(b"grafico   compositor  ");
+    sys::print(if mask & SERVICE_GUI != 0 {
+        b"activo\n"
+    } else {
+        b"ausente (arranca con `gui`)\n"
     });
 }
 
