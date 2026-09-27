@@ -99,6 +99,10 @@ pub struct Scenario {
     /// Inyección de entrada por QMP al ver `marker`: teclas (nombres qcode
     /// de QEMU) en el teclado virtio, movimiento relativo y clic en el ratón.
     pub host_input: Option<HostInput>,
+    /// Estado inicial del disco de pruebas (`image::DiskVariant`): `slots`
+    /// (por defecto), `esp-only`, `pending-b`, `b-exhausted`, `b-corrupt`.
+    #[serde(default = "default_disk")]
+    pub disk: String,
     #[serde(default)]
     pub inject: Inject,
     pub expect: Expect,
@@ -132,6 +136,10 @@ fn default_timeout() -> u64 {
 
 fn default_prompt() -> String {
     String::from("ari> ")
+}
+
+fn default_disk() -> String {
+    String::from("slots")
 }
 
 pub fn scenarios_dir() -> PathBuf {
@@ -213,6 +221,18 @@ pub fn select<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repo_scenarios_have_known_disk_variants() {
+        for sc in load_all().expect("escenarios") {
+            assert!(
+                crate::image::DiskVariant::parse(&sc.disk).is_some(),
+                "{}: disk '{}' desconocido",
+                sc.name,
+                sc.disk
+            );
+        }
+    }
 
     #[test]
     fn repo_scenarios_are_valid_and_unique() {

@@ -17,6 +17,8 @@ aricode-sys = { path = "../../sdk/rust" }
 aricode-rt = { path = "../../sdk/runtime" }
 aricode-manifest = { path = "../../libs/manifest" }
 aricode-proto = { path = "../../sdk/proto" }
+aricode-gpt = { path = "../../libs/gpt" }
+aricode-ab = { path = "../../libs/ab" }
 
 [build-dependencies]
 aricode-build = { path = "../../sdk/build" }

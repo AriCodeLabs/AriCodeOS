@@ -7,6 +7,9 @@ level = "full"
 areas = ["boot"]
 cmdline = "qemu_exit"
 
+# Sin slots: estos escenarios prueban el camino de la ESP.
+disk = "esp-only"
+
 [inject]
 add_empty_segment_at_entry = true
 

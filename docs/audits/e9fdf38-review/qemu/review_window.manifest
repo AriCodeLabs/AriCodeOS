@@ -1,0 +1,3 @@
+name = review_window
+caps = system, window
+memory = 64K

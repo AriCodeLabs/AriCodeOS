@@ -93,7 +93,7 @@ xtask):
 
 ```text
 name = hello_app
-caps = system, fs      # system | fs | net | window | input
+caps = system, fs      # system | fs | net | window | input | block (solo apps de confianza: updater)
 memory = 128K          # cuota de buffers DMA (K o M, máximo 8M)
 ```
 

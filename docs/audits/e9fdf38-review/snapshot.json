@@ -1,0 +1,13 @@
+{
+  "base": "e9fdf3819ffa7aeb2463443e3f6546121a2b1a1a",
+  "note": "Incluye los cambios sin commit de Fase 30 al iniciar la revision",
+  "sha256": {
+    "services/arifs/src/main.rs": "f2c6c14c54093e2aece62d58640db7ab8acb7c3b8ca3efdd6d8af50191545e67",
+    "services/init/src/main.rs": "4296c8aa42d3a65a0973479bddfa95699ab5658d71c5fb44135f02625ce887ed",
+    "tools/xtask/src/keys.rs": "705f4e3e9ee6c8d8774131697a8bff6d2b108baada3e42a61b10a3797564860d",
+    "libs/wasm/src/lib.rs": "eb514ee2c30d17442aba0bb521e29965644c784d812a75aa88f6c2eab53c1198",
+    "apps/wasm-runner/src/main.rs": "e73a7285e7ace0a1785555c20d5a657461977f48ae791c32ff1f7b07d7c01480",
+    "boot/src/slots.rs": "de97719ccd2912446f1def7d0f753037945c1d5556f15d9470fea71500adbf96",
+    "libs/ab/src/lib.rs": "6fdfa3651f425d4453e677632b47f5f41ffc5d59791ba297901bcb0e5aa3bc6f"
+  }
+}

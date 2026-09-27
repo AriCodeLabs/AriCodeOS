@@ -67,6 +67,10 @@ pub mod keys {
     pub const SHELL: &str = "shell";
     /// `gui`: el kernel deja el framebuffer al compositor de usuario.
     pub const GUI: &str = "gui";
+    /// `boot_slot=A|B`: AriBoot lo añade cuando arranca desde una partición de
+    /// slot; `boot_pending` acompaña si el slot espera confirmación.
+    pub const BOOT_SLOT: &str = "boot_slot";
+    pub const BOOT_PENDING: &str = "boot_pending";
 }
 
 #[cfg(test)]

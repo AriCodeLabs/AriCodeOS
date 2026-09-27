@@ -1,0 +1,6 @@
+# Aplicacion de sistema (lista de confianza del broker): necesita el servicio
+# de bloques para leer UPDATE y escribir el slot inactivo y ARIBOOT. La
+# imagen se verifica en un buffer DMA de su cuota.
+name = updater
+caps = system, block
+memory = 6M

@@ -11,6 +11,8 @@ extern crate alloc;
 
 mod qemu;
 
+mod slots;
+
 use alloc::vec::Vec;
 use aricode_cmdline::{keys, CmdLine};
 use aricode_elf as elf;
@@ -44,10 +46,21 @@ fn main() -> Status {
 
     // La cmdline es opcional; se copia a memoria de kernel para que sobreviva
     // a ExitBootServices y la vea AriKernel.
-    let cmdline_bytes = read_file(cstr16!("\\aricodeos\\cmdline.txt")).unwrap_or_default();
+    let mut cmdline_bytes = read_file(cstr16!("\\aricodeos\\cmdline.txt")).unwrap_or_default();
     let qemu_exit = CmdLine::from_bytes(&cmdline_bytes).has(keys::QEMU_EXIT);
 
-    match run(&cmdline_bytes) {
+    // Arranque A/B: si hay una imagen de slot valida, el kernel sabe desde
+    // donde arranco (y si debe confirmarlo) por la cmdline.
+    let loaded = slots::load();
+    if let Some(l) = &loaded {
+        cmdline_bytes.extend_from_slice(b" boot_slot=");
+        cmdline_bytes.extend_from_slice(l.slot.name().as_bytes());
+        if l.pending {
+            cmdline_bytes.extend_from_slice(b" boot_pending");
+        }
+    }
+
+    match run(&cmdline_bytes, loaded) {
         Ok(never) => match never {},
         Err(e) => {
             error!("AriBoot: fallo irrecuperable: {e}");
@@ -60,7 +73,10 @@ fn main() -> Status {
     }
 }
 
-fn run(cmdline_bytes: &[u8]) -> Result<core::convert::Infallible, &'static str> {
+fn run(
+    cmdline_bytes: &[u8],
+    loaded: Option<slots::Loaded>,
+) -> Result<core::convert::Infallible, &'static str> {
     // 1. Framebuffer GOP (opcional: sin GOP seguimos solo con serie).
     let framebuffer = framebuffer_info();
     if framebuffer.address != 0 {
@@ -80,9 +96,15 @@ fn run(cmdline_bytes: &[u8]) -> Result<core::convert::Infallible, &'static str> 
     let rsdp = find_rsdp();
     info!("ACPI RSDP: {rsdp:#x}");
 
-    // 3. Kernel ELF desde la ESP.
-    let kernel_data = read_file(cstr16!("\\aricodeos\\kernel.elf"))
-        .map_err(|_| "no se pudo leer \\aricodeos\\kernel.elf")?;
+    // 3. Kernel ELF: de la imagen de slot verificada o, si no, de la ESP.
+    let (kernel_data, initrd_data) = match loaded {
+        Some(l) => (l.kernel, Some(l.initrd)),
+        None => (
+            read_file(cstr16!("\\aricodeos\\kernel.elf"))
+                .map_err(|_| "no se pudo leer \\aricodeos\\kernel.elf")?,
+            None,
+        ),
+    };
     info!("kernel.elf: {} bytes", kernel_data.len());
     let elf = elf::Elf::parse(&kernel_data).map_err(|e| {
         error!("kernel.elf: {e:?}");
@@ -134,7 +156,7 @@ fn run(cmdline_bytes: &[u8]) -> Result<core::convert::Infallible, &'static str> 
     let stack_top = stack_base + KERNEL_STACK_PAGES as u64 * PAGE_SIZE;
     let boot_info_page = alloc_pages(1, "bootinfo")?;
     let (cmdline_address, cmdline_size) = copy_cmdline(cmdline_bytes)?;
-    let (initrd_address, initrd_size) = load_initrd()?;
+    let (initrd_address, initrd_size) = load_initrd(initrd_data)?;
     if cmdline_size != 0 {
         info!(
             "cmdline: {}",
@@ -286,10 +308,18 @@ fn alloc_pages(pages: usize, what: &'static str) -> Result<NonNull<u8>, &'static
 }
 
 /// Carga `\aricodeos\initrd.img` (opcional) en páginas de tipo kernel.
-fn load_initrd() -> Result<(u64, u64), &'static str> {
-    let Ok(bytes) = read_file(cstr16!("\\aricodeos\\initrd.img")) else {
-        warn!("initrd.img: ausente");
-        return Ok((0, 0));
+/// Copia el initrd (de la imagen de slot, o de la ESP si no lo hay) a páginas
+/// de tipo kernel.
+fn load_initrd(from_slot: Option<Vec<u8>>) -> Result<(u64, u64), &'static str> {
+    let bytes = match from_slot {
+        Some(b) => b,
+        None => match read_file(cstr16!("\\aricodeos\\initrd.img")) {
+            Ok(b) => b,
+            Err(_) => {
+                warn!("initrd.img: ausente");
+                return Ok((0, 0));
+            }
+        },
     };
     if bytes.is_empty() {
         return Ok((0, 0));
