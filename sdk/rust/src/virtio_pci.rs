@@ -9,7 +9,8 @@
 
 use crate::{self as sys, Error, Handle};
 use aricode_virtio::{
-    cfg_type, common, find_structures, status, QueueLayout, Virtqueue, FEATURE_VERSION_1,
+    cfg_type, common, find_structures, status, QueueLayout, Virtqueue, FEATURE_ACCESS_PLATFORM,
+    FEATURE_VERSION_1,
 };
 
 /// Handles fijos del contrato con init.
@@ -181,7 +182,9 @@ impl Transport {
         if offered & FEATURE_VERSION_1 == 0 {
             return Err(SetupError::NoVersion1);
         }
-        let features = FEATURE_VERSION_1 | (wanted & offered);
+        // ACCESS_PLATFORM es del transporte: si el dispositivo la ofrece (DMA
+        // por el IOMMU) hay que aceptarla o rechaza FEATURES_OK.
+        let features = FEATURE_VERSION_1 | (wanted & offered) | (offered & FEATURE_ACCESS_PLATFORM);
         common.w32(common::DRIVER_FEATURE_SELECT, 0);
         common.w32(common::DRIVER_FEATURE, features as u32);
         common.w32(common::DRIVER_FEATURE_SELECT, 1);

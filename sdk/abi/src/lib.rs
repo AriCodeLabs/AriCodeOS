@@ -201,6 +201,9 @@ pub mod sysinfo {
     pub const RANDOM_MAX: u64 = 256;
     /// Un `u64`: CPUs en línea (Fase 32).
     pub const CPUS: u64 = 5;
+    /// Tres `u64`: unidades IOMMU activas, dominios vivos y fallos de DMA
+    /// registrados (Fase 33).
+    pub const IOMMU: u64 = 6;
 
     /// Formato de píxel del framebuffer (32 bpp).
     pub const FB_FORMAT_RGB: u8 = 0;

@@ -4,7 +4,7 @@
 use crate::memory::phys;
 use crate::sync::IrqLock;
 use alloc::vec::Vec;
-use aricode_acpi::{root_entries, Madt, McfgEntry, Rsdp, SdtHeader};
+use aricode_acpi::{root_entries, Dmar, Madt, McfgEntry, Rsdp, SdtHeader};
 use boot_protocol::BootInfo;
 use log::{info, warn};
 
@@ -12,6 +12,8 @@ use log::{info, warn};
 pub struct AcpiInfo {
     pub madt: Madt,
     pub mcfg: Vec<McfgEntry>,
+    /// Unidades de remapeo DMA (VT-d), si la plataforma las declara.
+    pub dmar: Option<Dmar>,
 }
 
 static ACPI: IrqLock<Option<AcpiInfo>> = IrqLock::new(None);
@@ -76,6 +78,10 @@ pub fn init(info: &BootInfo) {
                 Ok(m) => acpi.mcfg = m,
                 Err(e) => warn!("acpi: MCFG invalida ({e:?})"),
             },
+            b"DMAR" => match Dmar::parse(table) {
+                Ok(d) => acpi.dmar = Some(d),
+                Err(e) => warn!("acpi: DMAR invalida ({e:?})"),
+            },
             _ => {}
         }
     }
@@ -108,6 +114,18 @@ pub fn init(info: &BootInfo) {
             e.base, e.segment, e.bus_start, e.bus_end
         );
     }
+    if let Some(d) = &acpi.dmar {
+        info!(
+            "acpi: DMAR {} bits, {} unidad(es) {:?}, {} region(es) reservadas",
+            d.host_address_width,
+            d.units.len(),
+            d.units
+                .iter()
+                .map(|u| (u.register_base, u.include_all))
+                .collect::<Vec<_>>(),
+            d.reserved.len()
+        );
+    }
     *ACPI.lock() = Some(acpi);
 }
 
@@ -121,6 +139,7 @@ pub fn with<R>(f: impl FnOnce(&AcpiInfo) -> R) -> R {
             overrides: Vec::new(),
         },
         mcfg: Vec::new(),
+        dmar: None,
     };
     let guard = ACPI.lock();
     f(guard.as_ref().unwrap_or(&EMPTY))

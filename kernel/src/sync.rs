@@ -8,6 +8,8 @@
 //! VMM -> PMM            el Mapper pide frames al PMM con el VMM tomado
 //! heap.mapped -> VMM    y por tanto heap.mapped -> PMM
 //! PROCESSES -> SCHED    process::wait consulta el planificador
+//! PROCESSES -> IOMMU    soltar un buffer DMA (tabla de handles) lo retira de los dominios
+//! IOMMU -> PMM          los dominios piden y devuelven frames de tablas
 //! ```
 //!
 //! Nunca al revés: en particular, nunca entrar al VMM con el PMM tomado, y

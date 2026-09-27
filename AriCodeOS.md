@@ -2817,12 +2817,53 @@ Aunque parte de SMP puede adelantarse, en esta etapa deberá consolidarse:
 
 # FASE 33 — IOMMU
 
+**Estado: completada (2026-09-27).**
+
 ### Implementar
 
 - VT-d o AMD equivalent;
 - device domains;
 - DMA mappings;
 - isolation.
+
+### Implementado
+
+- VT-d: `libs/acpi` parsea la DMAR (unidades DRHD con sus ámbitos de
+  dispositivo e `INCLUDE_PCI_ALL`, regiones reservadas RMRR);
+  `libs/iommu` (no_std, tests de host) contiene registros y bits,
+  capacidades, entradas raíz y de contexto, paginación de segundo nivel de
+  3 o 4 niveles con hook `clflush` para unidades no coherentes, y
+  decodificación de registros de fallo; `kernel/src/iommu.rs` programa cada
+  unidad (tabla raíz, interrupción de fallo por MSI al BSP, invalidación
+  global de contextos e IOTLB, `TE`) antes de que arranque ningún driver;
+- device domains: un dominio por proceso, creado al primer uso; la función
+  PCI se asigna al dominio del proceso que mapea su espacio de
+  configuración o un BAR (`mmio_map` de una región con `source_id`); al
+  morir el proceso su entrada de contexto se retira, se invalida y sus
+  tablas vuelven al PMM;
+- DMA mappings: IOVA = dirección física, así los drivers no cambian;
+  `dma_alloc` mapea el buffer en el dominio de quien lo reserva y
+  `mmio_map` de un objeto DMA ajeno (buffers de clientes del servicio de
+  bloques) lo mapea en el dominio del servicio; al liberarse un buffer se
+  retira de todos los dominios antes de devolver sus frames; las RMRR de un
+  dispositivo se mapean identidad al asignarlo;
+- isolation: cualquier otro acceso del dispositivo falla en la unidad, que
+  lo registra; el kernel lo anuncia (`iommu: fallo DMA de bb:dd.f ...`),
+  lo cuenta y lo expone con `system_info(IOMMU)`; los virtio de QEMU llevan
+  `iommu_platform=on` y el transporte acepta `ACCESS_PLATFORM`;
+- pruebas: `test=iommu` con el driver de prueba `dma_rogue` (lectura
+  legítima traducida, escritura a memoria ajena bloqueada, fallo
+  registrado, memoria intacta, dominio liberado) y `iommu.enabled` (smoke:
+  toda la pila de servicios funciona traducida); sin DMAR todo sigue
+  funcionando sin traducción.
+
+### Pendiente
+
+- Interrupt remapping (las MSI pasan sin traducir) y la variante AMD-Vi.
+- Invalidación selectiva (por dominio o página) con cola de invalidación;
+  hoy se invalida globalmente tras cada cambio.
+- Un dominio por dispositivo o compartido entre procesos; hoy es por proceso.
+- Comprobación en hardware real (Fase 34): RMRR de gráficos y USB.
 
 ---
 

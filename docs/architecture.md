@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.5-dev (Fases 0 a 32)
+## Estado: 0.5-dev (Fases 0 a 33)
 
 ```text
 OVMF (UEFI)
@@ -30,7 +30,8 @@ OVMF (UEFI)
        la consola serie y apaga o reinicia por `system_power`; netd
        (virtio-net) obtiene IP por DHCP y sirve ping, UDP y DNS por IPC;
        SMP: los APs de la MADT arrancan por INIT-SIPI y planifican sobre la
-       misma cola de listos con estado por CPU e IPI; ARICODEOS_KERNEL_READY
+       misma cola de listos con estado por CPU e IPI; IOMMU VT-d con un
+       dominio por driver (IOVA = física); ARICODEOS_KERNEL_READY
 ```
 
 ## Crates
@@ -45,6 +46,7 @@ libs/x86-cpu/        aricode-x86-cpu: descriptores GDT/TSS/IDT y tabla de excepc
 libs/pmm/            aricode-pmm: allocator de frames por bitmap sobre almacenamiento externo (no_std, tests de host)
 libs/heap/           aricode-heap: heap first-fit con lista de libres, fusión y cabecera por asignación (no_std, tests de host)
 libs/sync/           aricode-sync: IrqLock/SpinLock con política de interrupciones enchufable, restaurada entre giros; force_unlock (no_std, tests de host)
+libs/iommu/          aricode-iommu: Intel VT-d: registros, capacidades, entradas raíz/contexto, paginación de segundo nivel, registros de fallo (no_std, tests de host)
 libs/sched/          aricode-sched: política round robin sobre Tid con estados, sueño, bloqueo, salida, varias CPUs, afinidad y despertares pendientes (no_std + alloc, tests de host)
 libs/handles/        aricode-handles: tabla de handles con generación y derechos, duplicación solo reductora (no_std + alloc, tests de host)
 libs/initrd/         aricode-initrd: formato del initrd, lector sin copia (no_std) y escritor (feature `write`, xtask); tests de host
@@ -879,6 +881,44 @@ libs/sched                     cola compartida, current/idle por CPU, afinidad, 
 - `system_info(CPUS)` y `cpus` en arish. Pruebas: `test=smp` y escenarios
   `smp.*`; `cargo xtask test --cpus N` como estrés de toda la suite.
 
+## IOMMU (Fase 33)
+
+```text
+libs/acpi                      DMAR: DRHD (ámbitos, INCLUDE_PCI_ALL), RMRR
+libs/iommu                     registros, Capability/ExtendedCapability, RootEntry, ContextEntry, SecondLevel (3/4 niveles), FaultRecord
+kernel/src/iommu.rs            unidades, dominios por proceso, attach/map_region/unmap_everywhere/release, interrupción de fallo (vector 0x24)
+```
+
+- Arranque: tras enumerar PCI, `iommu::init` mapea los registros de cada
+  DRHD sin caché, elige los niveles de paginación (4 si SAGAW lo permite, si
+  no 3, el mínimo entre unidades), programa la tabla raíz (`RTADDR` +
+  `SRTP`), la interrupción de fallo (MSI al LAPIC del BSP, vector 0x24),
+  invalida contextos e IOTLB y activa la traducción (`TE`). Si la unidad no
+  es coherente con la caché (`ECAP.C = 0`, como en QEMU) cada entrada
+  escrita se `clflush`ea.
+- Dominios: uno por proceso, creado al primer `dma_alloc`, `mmio_map` de un
+  DMA o mapeo de un dispositivo; DID desde 1 con lista de libres. Las
+  tablas de segundo nivel mapean IOVA = física con R+W en páginas de 4 KiB.
+- Asignación: los objetos MMIO que `pci::claim` entrega (configuración y
+  BARs) llevan el `source_id` de la función; al mapear uno, el kernel escribe
+  la entrada de contexto de esa función (tabla de contexto del bus creada
+  bajo demanda) apuntando a las tablas del dominio del proceso, mapea sus
+  RMRR y hace una invalidación global en la unidad.
+- Liberación: `DmaBuffer::drop` retira la región de todos los dominios
+  antes de devolver los frames; `release_address_space` destruye el dominio
+  del proceso (entradas de contexto a no presente, invalidación, tablas al
+  PMM).
+- Fallos: la unidad escribe los FRCD y dispara la MSI; el handler los
+  decodifica (`bus:dev.fn`, lectura/escritura, dirección, motivo), los
+  limpia y los cuenta; `system_info(IOMMU)` devuelve unidades, dominios y
+  fallos.
+- QEMU: `-device intel-iommu,aw-bits=48` antes de los dispositivos y
+  `iommu_platform=on` en cada virtio; el transporte acepta
+  `VIRTIO_F_ACCESS_PLATFORM` siempre que se ofrezca. Orden de locks:
+  `PROCESSES -> IOMMU -> PMM`; nunca al revés.
+- Pruebas: `test=iommu` (`dma_rogue`) y `iommu.enabled`; con
+  `--cpus 4` toda la suite corre traducida en SMP.
+
 ## Deuda conocida
 
 - No hay reinicio automático tras `updater` ni prueba de dos arranques
@@ -909,8 +949,9 @@ libs/sched                     cola compartida, current/idle por CPU, afinidad, 
   reutiliza por dirección física; no hay `mmio_unmap` ni caché de bloques.
 - El device manager (sección 29) vive dentro de `init`: enumera, reclama y
   lanza drivers; separarlo en un servicio propio cuando haya más de uno.
-- Sin IOMMU (Fase 33): un buffer DMA es memoria autorizada solo por
-  convención del driver.
+- El IOMMU invalida globalmente tras cada cambio y no remapea
+  interrupciones; sin variante AMD-Vi ni dominios compartidos entre
+  procesos.
 - `init` todavía no recibe endpoints de los servicios que lanza ni puede
   pasarles capabilities al crearlos: llegará con el device manager (Fase 16).
 - Los benchmarks (sección 69) necesitan una máquina de referencia o KVM

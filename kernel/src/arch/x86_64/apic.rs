@@ -215,6 +215,10 @@ pub fn handle_interrupt(vector: u8) {
             eoi();
             super::smp::halt_forever();
         }
+        crate::iommu::FAULT_VECTOR => {
+            crate::iommu::on_fault_irq();
+            eoi();
+        }
         SPURIOUS_VECTOR => {
             // Sin EOI por especificación.
             SPURIOUS.fetch_add(1, Ordering::Relaxed);
