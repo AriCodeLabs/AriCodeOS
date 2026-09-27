@@ -2,7 +2,8 @@
 //! 0x10004 = endpoint de fsd (WRITE), 0x10005 = HARDWARE (buffer DMA),
 //! 0x10006 = SYSTEM (READ|MANAGE), 0x10007 = entrada de consola (READ),
 //! 0x10008 = raíz PCI (READ), 0x10009 = endpoint de netd (WRITE), 0x1000A =
-//! SPAWNER (MANAGE) para `run`. `arg` = máscara de servicios en ejecución.
+//! broker de lanzamiento de init (WRITE) para `run`. `arg` = máscara de
+//! servicios en ejecución. El shell no puede crear procesos por sí mismo.
 #![no_std]
 #![no_main]
 
@@ -16,7 +17,7 @@ const SYSTEM: Handle = Handle(0x0001_0006);
 const CONSOLE_IN: Handle = Handle(0x0001_0007);
 const PCI_ROOT: Handle = Handle(0x0001_0008);
 const NETD: Handle = Handle(0x0001_0009);
-const SPAWNER: Handle = Handle(0x0001_000A);
+const BROKER: Handle = Handle(0x0001_000A);
 
 /// Bits de `arg`: servicios que init dejó en marcha.
 const SERVICE_BLOCK: u64 = 1;
@@ -390,9 +391,10 @@ fn http_get(client: &mut NetClient, arg: &[u8]) {
     }
 }
 
-/// Lanza un programa del initrd con solo sus handles iniciales (consola,
-/// proceso e hilo) y un `SYSTEM` de solo lectura, y espera su salida.
+/// Pide al broker (init) que ejecute un programa del initrd con las
+/// capabilities de su manifiesto y espera su salida.
 fn run(arg: &[u8]) {
+    use aricode_rt::sys::launch::{self, LaunchError, Status};
     let Ok(name) = core::str::from_utf8(arg) else {
         sys::print(b"run: nombre invalido\n");
         return;
@@ -405,33 +407,26 @@ fn run(arg: &[u8]) {
         Some((p, a)) => (p, a.trim().parse::<u64>().unwrap_or(0)),
         None => (name, 0),
     };
-    let Ok(system) = sys::handle_duplicate(SYSTEM, sys::rights::READ | sys::rights::TRANSFER)
-    else {
-        sys::print(b"run: sin acceso al sistema\n");
-        return;
-    };
-    match sys::process_spawn_with(SPAWNER, prog, num_arg, &[system]) {
-        Ok(child) => {
-            let result = sys::process_wait(child, TIMEOUT_INFINITE);
-            let _ = sys::handle_close(child);
-            sys::print(b"run: ");
-            sys::print(prog.as_bytes());
-            match result {
-                Ok(code) => {
-                    sys::print(b" termino con ");
-                    num(code);
-                    sys::print(b"\n");
-                }
-                Err(sys::Error::Killed) => sys::print(b" fue terminado por el kernel\n"),
-                Err(e) => aricode_rt::print_error(b"", e),
-            }
+    // El resultado se imprime entero al final: mientras el programa corre,
+    // su salida y la del broker se intercalan con la nuestra.
+    let result = launch::run(BROKER, prog, num_arg);
+    sys::print(b"run: ");
+    sys::print(prog.as_bytes());
+    match result {
+        Ok(code) => {
+            sys::print(b" termino con ");
+            num(code);
+            sys::print(b"\n");
         }
-        Err(sys::Error::NotFound) => {
-            sys::print(b"run: no existe ");
-            sys::print(prog.as_bytes());
-            sys::print(b" en el initrd\n");
+        Err(LaunchError::Status(Status::NotFound)) => sys::print(b": no existe en el initrd\n"),
+        Err(LaunchError::Status(Status::Denied)) => {
+            sys::print(b": denegado por el broker (pide capacidades del sistema)\n")
         }
-        Err(e) => aricode_rt::print_error(b"run", e),
+        Err(LaunchError::Status(Status::Killed)) => sys::print(b": fue terminado por el kernel\n"),
+        Err(LaunchError::Status(Status::BadManifest)) => sys::print(b": manifiesto invalido\n"),
+        Err(LaunchError::Status(_)) => sys::print(b": el broker no pudo lanzarlo\n"),
+        Err(LaunchError::BadName) => sys::print(b": nombre invalido\n"),
+        Err(LaunchError::Ipc(e)) => aricode_rt::print_error(b"", e),
     }
 }
 

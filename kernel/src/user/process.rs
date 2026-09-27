@@ -52,6 +52,10 @@ pub struct Process {
     pub main_thread: Tid,
     pub entry: u64,
     pub status: Option<ExitStatus>,
+    /// Límite de memoria DMA (bytes) que el proceso puede reservar en total;
+    /// 0 = sin límite. Lo fija quien lo crea (`spawn_limits`).
+    pub dma_quota: u64,
+    pub dma_used: u64,
 }
 
 static PROCESSES: IrqLock<BTreeMap<Pid, Process>> = IrqLock::new(BTreeMap::new());
@@ -68,8 +72,9 @@ pub fn spawn_with_handles_and_arg(
     elf_bytes: &[u8],
     extra: Vec<(crate::object::ObjectRef, aricode_handles::Rights)>,
     arg: u64,
+    dma_quota: u64,
 ) -> Result<Pid, &'static str> {
-    spawn_full(name, elf_bytes, extra, arg)
+    spawn_full(name, elf_bytes, extra, arg, dma_quota)
 }
 
 /// Base de los mapeos MMIO/DMA de usuario.
@@ -82,7 +87,7 @@ pub fn spawn_with_handles(
     elf_bytes: &[u8],
     extra: Vec<(crate::object::ObjectRef, aricode_handles::Rights)>,
 ) -> Result<Pid, &'static str> {
-    spawn_full(name, elf_bytes, extra, 0)
+    spawn_full(name, elf_bytes, extra, 0, 0)
 }
 
 fn spawn_full(
@@ -90,6 +95,7 @@ fn spawn_full(
     elf_bytes: &[u8],
     extra: Vec<(crate::object::ObjectRef, aricode_handles::Rights)>,
     arg: u64,
+    dma_quota: u64,
 ) -> Result<Pid, &'static str> {
     let elf = aricode_elf::Elf::parse(elf_bytes).map_err(|_| "process: ELF invalido")?;
     let (lo, hi) = elf.virt_range();
@@ -186,6 +192,8 @@ fn spawn_full(
             main_thread: tid,
             entry: elf.entry,
             status: None,
+            dma_quota,
+            dma_used: 0,
         },
     );
     scheduler::start_thread(thread);
@@ -329,6 +337,23 @@ pub fn wait(pid: Pid) -> ExitStatus {
 }
 
 /// Nombre de un proceso vivo (para diagnóstico).
+/// Carga `len` bytes de DMA a la cuota del proceso actual; `false` si la
+/// excedería (la cuota es acumulativa: lo reservado no se devuelve).
+pub fn charge_dma(len: u64) -> bool {
+    let Some(pid) = current_pid() else {
+        return true;
+    };
+    let mut procs = PROCESSES.lock();
+    let Some(p) = procs.get_mut(&pid) else {
+        return true;
+    };
+    if p.dma_quota != 0 && p.dma_used.saturating_add(len) > p.dma_quota {
+        return false;
+    }
+    p.dma_used += len;
+    true
+}
+
 /// Instantánea de la tabla de procesos para `system_info`.
 pub fn snapshot() -> Vec<aricode_abi::sysinfo::ProcessEntry> {
     use aricode_abi::sysinfo::{ProcessEntry, ProcessState};

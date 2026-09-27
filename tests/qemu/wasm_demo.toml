@@ -1,0 +1,25 @@
+# Fase 29: wasm_runner (aplicacion con manifiesto system+fs) carga demo.wasm
+# de su directorio privado y lo ejecuta con aricode-wasm; el modulo, compilado
+# con rustc para wasm32, solo usa la Capability API importada (print, uptime).
+name = "wasm.demo"
+description = "runtime WebAssembly en ring 3: modulo portable aislado con Capability API"
+level = "full"
+areas = ["wasm", "sandbox", "shell"]
+cmdline = "qemu_exit shell"
+timeout_secs = 90
+stdin = ["run wasm_runner 5", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: lanzar wasm_runner con manifiesto [system fs] memoria 512 KiB",
+    "wasm_runner: modulo demo.wasm cargado (",
+    "wasm: hola desde WebAssembly (arg 5)",
+    "wasm: fib(24) = 46368",
+    "wasm: uptime ",
+    "wasm: suma ponderada 162",
+    "wasm_runner: main devolvio 42",
+    "run: wasm_runner termino con 42",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "el modulo fallo", "importacion desconocida"]

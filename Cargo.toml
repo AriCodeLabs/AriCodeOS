@@ -22,10 +22,14 @@ members = [
     "libs/http",
     "libs/input",
     "libs/gfx",
+    "libs/manifest",
+    "libs/wasm",
     "sdk/abi",
     "sdk/runtime",
     "sdk/build",
     "apps/hello",
+    "apps/wasm-runner",
+    "apps/wasm-demo",
     "sdk/rust",
     "sdk/proto",
     "user/testprogs",
@@ -67,7 +71,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "UNLICENSED"
 repository = "https://github.com/lynxcraft/aricodeos"

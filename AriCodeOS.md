@@ -2601,27 +2601,77 @@ permissions  sys::permissions::{granted, kind_name, is, drop_handle}
 
 # FASE 28 — App sandbox
 
-### Implementar
+**Estado: completada (2026-09-27).**
 
-- manifests;
-- capability broker;
-- permisos de usuario;
-- directorio privado por app;
-- límites de recursos.
+### Implementado
+
+- manifests: `libs/manifest` (no_std, tests de host) analiza
+  `NOMBRE.manifest` (`name`, `caps`, `memory`); xtask lo empaqueta en el
+  initrd junto al programa y el kernel lo sirve a init con `initrd_read`
+  (`READ` sobre el `SPAWNER`);
+- capability broker: init atiende `LaunchProtocol v1` (`sdk/proto::launch`)
+  mientras vive el shell; el shell ya no tiene `SPAWNER`, solo un endpoint
+  al broker. Por cada lanzamiento el broker lee el manifiesto, deniega las
+  capacidades reservadas al sistema (`spawner`, `pci`, `framebuffer`) y
+  entrega en orden fijo solo lo pedido: `SYSTEM` de lectura, directorio
+  privado, red, compositor, entradas y, si hace falta, `HARDWARE`. Sin
+  manifiesto: consola y reloj;
+- permisos de usuario: la política vive en el broker (`Caps::APP_ALLOWED`);
+  `sys::permissions` deja a la aplicación ver lo que recibió;
+- directorio privado por app: `fs::Op::Bind` crea en fsd un endpoint ligado
+  a un prefijo (`app/`); desde él solo se listan, abren y crean ficheros
+  propios (AriFS admite `/` en los nombres). El mismo prefijo comparte
+  endpoint entre lanzamientos;
+- límites de recursos: cuota de memoria DMA por proceso, fijada por quien lo
+  crea (`spawn_limits` en `process_spawn`) y cobrada en `dma_alloc`
+  (`Error::Limit` al excederla).
+
+`hello_app` (manifiesto `system, fs, 128K`) demuestra las cuatro cosas en
+`sandbox.manifest`: ve solo su fichero `notas`, no puede abrir `hola.txt` y
+una reserva de 256 KiB falla con `Limit`; un programa sin manifiesto recibe
+solo consola y reloj.
+
+### Pendiente
+
+- cuota de CPU y de handles por manifiesto; cuota de memoria de heap (hoy el
+  heap es estático);
+- identidad de cliente en IPC (que fsd distinga procesos sin un endpoint por
+  cada uno);
+- un fichero de política editable por el usuario en AriFS en vez de la
+  constante del broker.
 
 ---
 
 # FASE 29 — WASM runtime
 
+**Estado: completada (2026-09-27).**
+
 ### Objetivo
 
-Ejecutar una aplicación portable y aislada.
+Ejecutar una aplicación portable y aislada. **Cumplido**: `apps/wasm-demo`
+se compila con `rustc` a `wasm32-unknown-unknown` (MVP + `sign-ext` +
+`bulk-memory`) y `wasm_runner`, una aplicación con manifiesto (`system, fs,
+512K`), lo carga de su directorio privado y lo ejecuta con `libs/wasm`, un
+intérprete propio `no_std` (control estructurado, locales y globales,
+memoria lineal con límites comprobados, llamadas directas e indirectas,
+importaciones; sin coma flotante ni SIMD, con tope de pasos y de
+profundidad). La memoria lineal del módulo es un buffer DMA del runner,
+acotado por la cuota del manifiesto. Escenario `wasm.demo`.
 
 ### API
 
-No exponer POSIX directamente.
+No se expone POSIX: el módulo solo importa la Capability API bajo el módulo
+`aricode` (`print(ptr, len)`, `uptime_ms() -> i64`), resuelta por nombre
+por el anfitrión, que valida cada acceso a memoria. Todo lo que el anfitrión
+no importa no existe para el módulo.
 
-Exponer AriCode Capability API.
+### Pendiente
+
+- más funciones de la Capability API (ficheros, red y ventanas del propio
+  runner) y un formato de manifiesto para módulos WASM;
+- coma flotante y validación completa del módulo antes de ejecutar (hoy se
+  confía en el productor y se comprueba en tiempo de ejecución);
+- rendimiento: es un intérprete byte a byte sin precompilación.
 
 ---
 
@@ -3286,8 +3336,19 @@ Todavía sin ser un sistema operativo de escritorio completo.
   de proceso, IPC, ficheros, red, ventanas, entrada, tiempo y permisos,
   documentadas en `docs/sdk.md`; `apps/hello` y `run` en el shell.
 
-Siguiente: 0.3 con el sandbox de aplicaciones (Fase 28) y el runtime WASM
-(Fase 29).
+## 94.2 AriCodeOS 0.3
+
+**Estado: completada (2026-09-27), tag `v0.3.0`.** Fases 28 y 29:
+
+- sandbox de aplicaciones: manifiestos, broker de capabilities en init,
+  directorio privado por aplicación en fsd y cuota de memoria DMA por
+  proceso; el shell lanza a través del broker y ya no puede crear procesos;
+- runtime WebAssembly: intérprete propio `no_std` y `wasm_runner`, una
+  aplicación con manifiesto que ejecuta módulos portables compilados con
+  `rustc` exponiendo solo la Capability API.
+
+Siguiente: 0.4 con actualización A/B (Fase 30) y criptografía y confianza
+(Fase 31).
 
 ---
 

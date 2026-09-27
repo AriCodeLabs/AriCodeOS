@@ -8,6 +8,7 @@ pub mod block;
 pub mod fs;
 pub mod http;
 pub mod input;
+pub mod launch;
 pub mod net;
 pub mod permissions;
 pub mod time;
@@ -169,6 +170,18 @@ pub fn process_spawn_with(
     arg: u64,
     handles: &[Handle],
 ) -> Result<Handle, Error> {
+    process_spawn_limited(spawner, name, arg, handles, 0)
+}
+
+/// Como `process_spawn_with`, fijando la cuota de memoria DMA del hijo en
+/// KiB (0 = sin límite).
+pub fn process_spawn_limited(
+    spawner: Handle,
+    name: &str,
+    arg: u64,
+    handles: &[Handle],
+    memory_kib: u32,
+) -> Result<Handle, Error> {
     call6(
         nr::PROCESS_SPAWN,
         spawner.0 as u64,
@@ -176,9 +189,23 @@ pub fn process_spawn_with(
         name.len() as u64,
         arg,
         handles.as_ptr() as u64,
-        handles.len() as u64,
+        abi::spawn_limits::pack(handles.len(), memory_kib),
     )
-    .map(|v| Handle(v as u32))
+    .map(|h| Handle(h as u32))
+}
+
+/// Copia un fichero del initrd en `buf` (exige `READ` sobre el `SPAWNER`).
+pub fn initrd_read(spawner: Handle, name: &str, buf: &mut [u8]) -> Result<usize, Error> {
+    abi::decode(raw_syscall(
+        nr::INITRD_READ,
+        spawner.0 as u64,
+        name.as_ptr() as u64,
+        name.len() as u64,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        0,
+    ))
+    .map(|n| n as usize)
 }
 
 /// Espera la salida de un proceso (exige `WAIT`). `Err(Killed)` si lo terminó el kernel.
