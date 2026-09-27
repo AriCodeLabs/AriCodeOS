@@ -817,6 +817,14 @@ segundo brevemente para añadir la región.
   --strip-debug` si existe): el initrd pasa de 4,8 MiB a 550 KiB y la
   imagen de sistema cabe en el slot.
 
+- Correcciones de la auditoría `e9fdf38`: los descriptores de fsd
+  pertenecen al endpoint que los abrió; el broker cierra sus duplicados con
+  un guard en cualquier salida; init confirma el slot solo al final del
+  arranque (`init_fail_late` prueba el camino de error); AriBoot no arranca
+  un pendiente cuyo intento no pudo persistir (`unpersisted`); el intérprete
+  WASM acota memoria al tamaño actual, la inicializa a cero y ejecuta
+  `start`; `keygen` crea la semilla con modo 0600.
+
 ## Deuda conocida
 
 - No hay reinicio automático tras `updater` ni prueba de dos arranques

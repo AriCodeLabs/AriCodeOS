@@ -71,6 +71,8 @@ pub mod keys {
     /// slot; `boot_pending` acompaña si el slot espera confirmación.
     pub const BOOT_SLOT: &str = "boot_slot";
     pub const BOOT_PENDING: &str = "boot_pending";
+    /// `init_fail_late`: init falla tras los servicios y antes de confirmar.
+    pub const INIT_FAIL_LATE: &str = "init_fail_late";
 }
 
 #[cfg(test)]

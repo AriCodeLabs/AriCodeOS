@@ -6,7 +6,7 @@
 //! ESP como siempre (recuperación).
 
 use alloc::vec::Vec;
-use aricode_ab::{choose, reject, BootState, Decision, Image, ImageError, Slot};
+use aricode_ab::{choose, reject, unpersisted, BootState, Decision, Image, ImageError, Slot};
 use aricode_gpt::{partitions, Header, Partition};
 use log::{info, warn};
 use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol};
@@ -165,6 +165,17 @@ pub fn load() -> Option<Loaded> {
                 Ok((kernel, initrd, version)) => {
                     if !disk.write(state_lba, &decision.state.encode()) {
                         warn!("slots: no se pudo escribir el estado de arranque");
+                        if decision.pending && attempt == 0 {
+                            // Un pendiente sin intento contado podria arrancar
+                            // sin fin: se vuelve al activo, que no lo necesita.
+                            decision = unpersisted(state);
+                            info!(
+                                "slots: {} -> slot {}",
+                                decision.reason,
+                                decision.slot.name()
+                            );
+                            continue;
+                        }
                     }
                     info!(
                         "slots: arrancando desde el slot {} (imagen version {}{})",

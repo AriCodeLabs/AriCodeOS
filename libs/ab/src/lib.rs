@@ -190,6 +190,18 @@ pub fn reject(state: BootState) -> Decision {
     }
 }
 
+/// No se pudo guardar el intento consumido del pendiente: sin contador
+/// persistido no se arranca el pendiente (podría repetirse sin fin); se vuelve
+/// al activo y el pendiente se conserva para cuando el disco vuelva a escribir.
+pub fn unpersisted(state: BootState) -> Decision {
+    Decision {
+        slot: state.active,
+        pending: false,
+        state,
+        reason: "intento del pendiente no persistido: arranque del activo",
+    }
+}
+
 /// El sistema arrancado desde `slot` funciona: pasa a activo.
 pub fn confirm(state: BootState, slot: Slot) -> BootState {
     BootState {
@@ -418,6 +430,10 @@ mod tests {
         // Imagen rechazada: rollback inmediato.
         let r = reject(schedule(fresh, Slot::B));
         assert_eq!((r.slot, r.state.pending), (Slot::A, None));
+        // Sin poder persistir el intento: arranca el activo y el pendiente sigue.
+        let u = unpersisted(schedule(fresh, Slot::B));
+        assert_eq!((u.slot, u.pending), (Slot::A, false));
+        assert_eq!(u.state.pending, Some((Slot::B, DEFAULT_TRIES)));
     }
 
     fn build(seed: &[u8; 32], version: u32, kernel: &[u8], initrd: &[u8]) -> Vec<u8> {

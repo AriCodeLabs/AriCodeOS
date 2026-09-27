@@ -32,6 +32,8 @@ members = [
     "apps/hello",
     "apps/perms-check",
     "apps/updater",
+    "apps/fs-probe",
+    "apps/win-probe",
     "apps/wasm-runner",
     "apps/wasm-demo",
     "sdk/rust",

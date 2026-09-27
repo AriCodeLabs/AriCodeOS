@@ -1,0 +1,3 @@
+name = fs_probe
+caps = system, fs
+memory = 64K

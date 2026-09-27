@@ -42,20 +42,27 @@ impl BlockDevice for PartitionDevice {
 }
 
 /// Descriptores abiertos: índice de fichero por fd (global al servicio).
-struct Fds([Option<usize>; 16]);
+/// Descriptores abiertos: (índice de fichero, endpoint propietario). Un
+/// descriptor solo responde al endpoint (directorio privado) que lo abrió:
+/// sin esto, una aplicación podía leer, escribir o cerrar los ficheros de
+/// otra probando números de descriptor.
+struct Fds([Option<(usize, usize)>; 16]);
 
 impl Fds {
-    fn open(&mut self, index: usize) -> Option<u32> {
+    fn open(&mut self, index: usize, owner: usize) -> Option<u32> {
         let slot = self.0.iter().position(Option::is_none)?;
-        self.0[slot] = Some(index);
+        self.0[slot] = Some((index, owner));
         Some(slot as u32)
     }
-    fn get(&self, fd: u32) -> Option<usize> {
-        self.0.get(fd as usize).copied().flatten()
+    fn get(&self, fd: u32, owner: usize) -> Option<usize> {
+        match self.0.get(fd as usize).copied().flatten() {
+            Some((index, o)) if o == owner => Some(index),
+            _ => None,
+        }
     }
-    fn close(&mut self, fd: u32) -> bool {
+    fn close(&mut self, fd: u32, owner: usize) -> bool {
         match self.0.get_mut(fd as usize) {
-            Some(s) if s.is_some() => {
+            Some(s) if s.is_some_and(|(_, o)| o == owner) => {
                 *s = None;
                 true
             }
@@ -127,6 +134,7 @@ fn handle(
     fds: &mut Fds,
     buffers: &mut ClientBuffers,
     prefix: &str,
+    owner: usize,
     req: Request,
     data: Option<Handle>,
 ) -> Reply {
@@ -156,7 +164,7 @@ fn handle(
         }
         Op::Open => match qualified(prefix, req.name_str(), &mut qbuf).and_then(|q| fs.find(q)) {
             Some(i) => fds
-                .open(i)
+                .open(i, owner)
                 .map_or(Reply::status(Status::NoSpace), |fd| Reply::ok(fd as u64)),
             None => Reply::status(Status::NotFound),
         },
@@ -165,19 +173,19 @@ fn handle(
             .and_then(|q| fs.create(q))
         {
             Ok(i) => fds
-                .open(i)
+                .open(i, owner)
                 .map_or(Reply::status(Status::NoSpace), |fd| Reply::ok(fd as u64)),
             Err(e) => Reply::status(status_of(e)),
         },
         Op::Close => {
-            if fds.close(req.fd) {
+            if fds.close(req.fd, owner) {
                 Reply::ok(0)
             } else {
                 Reply::status(Status::BadFd)
             }
         }
         Op::Read | Op::Write => {
-            let Some(index) = fds.get(req.fd) else {
+            let Some(index) = fds.get(req.fd, owner) else {
                 return Reply::status(Status::BadFd);
             };
             let Some(dma) = data else {
@@ -267,7 +275,7 @@ fn main(partition_lba: u64) -> u64 {
                 continue;
             }
             let reply = match request {
-                Some(req) => handle(&mut fs, &mut fds, &mut buffers, prefix, req, data),
+                Some(req) => handle(&mut fs, &mut fds, &mut buffers, prefix, slot, req, data),
                 None => Reply::status(Status::Invalid),
             };
             if let Some(d) = data {

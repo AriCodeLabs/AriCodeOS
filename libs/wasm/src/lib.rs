@@ -495,12 +495,20 @@ impl<'m, 'a> Instance<'m, 'a> {
     /// Crea la instancia y copia los segmentos de datos en `memory`.
     pub fn new(module: &'m Module<'a>, memory: &mut [u8]) -> Result<Self, Error> {
         let pages = module.initial_pages();
-        if (pages as usize) * PAGE > memory.len() {
+        let active = (pages as usize) * PAGE;
+        if active > memory.len() {
             return Err(Error::Trap("memoria insuficiente para el modulo"));
         }
+        // La memoria lineal nace a cero aunque el buffer del anfitrion traiga
+        // restos; los segmentos de datos deben caer dentro de las paginas
+        // iniciales, no del buffer entero.
+        memory[..active].fill(0);
         for d in &module.data {
-            let dst = memory
-                .get_mut(d.offset as usize..d.offset as usize + d.len)
+            let end = (d.offset as usize)
+                .checked_add(d.len)
+                .ok_or(Error::Trap("segmento de datos fuera de memoria"))?;
+            let dst = memory[..active]
+                .get_mut(d.offset as usize..end)
                 .ok_or(Error::Trap("segmento de datos fuera de memoria"))?;
             dst.copy_from_slice(&module.bytes[d.start..d.start + d.len]);
         }
@@ -515,6 +523,20 @@ impl<'m, 'a> Instance<'m, 'a> {
 
     pub fn global(&self, index: usize) -> Option<Value> {
         self.globals.get(index).copied()
+    }
+
+    /// Bytes de memoria lineal actualmente válidos (`memory_pages * PAGE`).
+    pub fn memory_len(&self) -> usize {
+        self.memory_pages as usize * PAGE
+    }
+
+    /// Ejecuta la función `start` del módulo si la declara. Debe llamarse una
+    /// vez, tras `new` y antes de cualquier exportación; propaga sus traps.
+    pub fn start(&mut self, memory: &mut [u8], host: &mut dyn Host) -> Result<(), Error> {
+        match self.module.start {
+            Some(index) => self.invoke(index, &[], memory, host).map(|_| ()),
+            None => Ok(()),
+        }
     }
 
     /// Llama a la función exportada `name` con `args`; devuelve su primer
@@ -701,7 +723,8 @@ impl<'m, 'a> Instance<'m, 'a> {
                 return Err(Error::Trap("faltan argumentos"));
             }
             let args: Vec<Value> = this.stack.split_off(this.stack.len() - n);
-            let result = host.call(import, &args, memory)?;
+            let active = this.memory_len().min(memory.len());
+            let result = host.call(import, &args, &mut memory[..active])?;
             if !ty.results.is_empty() {
                 this.push(result)?;
             }
@@ -908,7 +931,8 @@ impl<'m, 'a> Instance<'m, 'a> {
                     let _align = r.u32()?;
                     let offset = r.u32()?;
                     let base = self.pop32()?;
-                    let v = load(memory, base, offset, op)?;
+                    let active = self.memory_len();
+                    let v = load(&memory[..active], base, offset, op)?;
                     self.push(v)?;
                 }
                 0x36..=0x3E => {
@@ -916,7 +940,8 @@ impl<'m, 'a> Instance<'m, 'a> {
                     let offset = r.u32()?;
                     let v = self.pop()?;
                     let base = self.pop32()?;
-                    store(memory, base, offset, op, v)?;
+                    let active = self.memory_len();
+                    store(&mut memory[..active], base, offset, op, v)?;
                 }
                 0x3F => {
                     r.u8()?;
@@ -932,6 +957,8 @@ impl<'m, 'a> Instance<'m, 'a> {
                         .and_then(|(_, max)| max)
                         .unwrap_or(u32::MAX) as u64;
                     if new * PAGE as u64 <= memory.len() as u64 && new <= max {
+                        // Las paginas nuevas nacen a cero.
+                        memory[old as usize * PAGE..new as usize * PAGE].fill(0);
                         self.memory_pages = new as u32;
                         self.push(old as u64)?;
                     } else {
@@ -996,7 +1023,8 @@ impl<'m, 'a> Instance<'m, 'a> {
                         let dst = self.pop32()? as usize;
                         let end_src = src.checked_add(n).ok_or(Error::Trap("memory.copy"))?;
                         let end_dst = dst.checked_add(n).ok_or(Error::Trap("memory.copy"))?;
-                        if end_src > memory.len() || end_dst > memory.len() {
+                        let active = self.memory_len();
+                        if end_src > active || end_dst > active {
                             return Err(Error::Trap("acceso fuera de memoria"));
                         }
                         memory.copy_within(src..end_src, dst);
@@ -1007,7 +1035,7 @@ impl<'m, 'a> Instance<'m, 'a> {
                         let v = self.pop32()? as u8;
                         let dst = self.pop32()? as usize;
                         let end = dst.checked_add(n).ok_or(Error::Trap("memory.fill"))?;
-                        if end > memory.len() {
+                        if end > self.memory_len() {
                             return Err(Error::Trap("acceso fuera de memoria"));
                         }
                         memory[dst..end].fill(v);
@@ -1333,6 +1361,7 @@ mod tests {
         data: Vec<(u32, Vec<u8>)>,
         table: Vec<u32>,
         globals: Vec<(u8, bool, i64)>,
+        start: Option<u32>,
     }
 
     fn leb(mut v: u32, out: &mut Vec<u8>) {
@@ -1376,6 +1405,7 @@ mod tests {
                 data: Vec::new(),
                 table: Vec::new(),
                 globals: Vec::new(),
+                start: None,
             }
         }
         fn ty(&mut self, params: &[u8], results: &[u8]) -> u32 {
@@ -1451,6 +1481,11 @@ mod tests {
                 leb(*f, &mut b);
             }
             section(7, &b, &mut out);
+            if let Some(s) = self.start {
+                let mut b = Vec::new();
+                leb(s, &mut b);
+                section(8, &b, &mut out);
+            }
             if !self.table.is_empty() {
                 let mut b = vec![1, 0, 0x41, 0, 0x0B];
                 leb(self.table.len() as u32, &mut b);
@@ -1733,6 +1768,123 @@ mod tests {
         assert_eq!(
             run(&big.build(), "g", &[]),
             Err(Error::Trap("acceso fuera de memoria"))
+        );
+    }
+
+    #[test]
+    fn memory_is_bounded_by_current_pages_not_host_buffer() {
+        // Modulo de 1 pagina (max 1) sobre un buffer de 4: leer en 65536 es trap.
+        let mut b = Builder::new();
+        let t = b.ty(&[0x7F], &[0x7F]);
+        let f = b.func(t, 0, &[0x20, 0, 0x2D, 0, 0]);
+        b.export("ld", f);
+        let g = b.func(t, 0, &[0x20, 0, 0x41, 0x5A, 0x3A, 0, 0, 0x41, 1]);
+        b.export("st", g);
+        let wasm = b.build();
+        let m = Module::parse(&wasm).unwrap();
+        let mut mem = vec![0u8; 4 * PAGE];
+        mem[PAGE] = 0x5A;
+        let mut inst = Instance::new(&m, &mut mem).unwrap();
+        assert_eq!(inst.memory_len(), PAGE);
+        assert_eq!(
+            inst.call("ld", &[PAGE as u64], &mut mem, &mut NoHost),
+            Err(Error::Trap("acceso fuera de memoria"))
+        );
+        assert_eq!(
+            inst.call("st", &[PAGE as u64], &mut mem, &mut NoHost),
+            Err(Error::Trap("acceso fuera de memoria"))
+        );
+        assert_eq!(
+            inst.call("ld", &[(PAGE - 1) as u64], &mut mem, &mut NoHost),
+            Ok(0)
+        );
+        // El anfitrion tampoco ve mas alla de la memoria activa.
+        struct Peek;
+        impl Host for Peek {
+            fn call(&mut self, _: usize, _: &[Value], memory: &mut [u8]) -> Result<Value, Error> {
+                Ok(memory.len() as u64)
+            }
+        }
+        let mut b = Builder::new();
+        let t = b.ty(&[], &[0x7F]);
+        let imp = b.import("aricode", "len", t);
+        let f = b.func(t, 0, &[0x10, imp as u8]);
+        b.export("f", f);
+        let wasm = b.build();
+        let m = Module::parse(&wasm).unwrap();
+        let mut mem = vec![0u8; 4 * PAGE];
+        let mut inst = Instance::new(&m, &mut mem).unwrap();
+        assert_eq!(inst.call("f", &[], &mut mem, &mut Peek), Ok(PAGE as u64));
+    }
+
+    #[test]
+    fn memory_starts_and_grows_zeroed() {
+        let mut b = Builder::new();
+        let t = b.ty(&[], &[0x7F]);
+        let ld0 = b.func(t, 0, &[0x41, 0, 0x2D, 0, 0]);
+        b.export("ld0", ld0);
+        // grow 1 pagina y leer el primer byte de la nueva.
+        let grow = b.func(t, 0, &[0x41, 1, 0x40, 0, 0x1A, 0x41, 0, 0x2D, 0, 0]);
+        b.export("grow", grow);
+        b.data.push((8, vec![1, 2, 3]));
+        let wasm = b.build();
+        // El constructor de pruebas declara memoria {min 1} sin maximo.
+        let m = Module::parse(&wasm).unwrap();
+        let mut mem = vec![0xAAu8; 4 * PAGE];
+        let mut inst = Instance::new(&m, &mut mem).unwrap();
+        assert_eq!(mem[0], 0, "memoria inicial a cero");
+        assert_eq!(&mem[8..11], &[1, 2, 3], "datos aplicados");
+        assert_eq!(inst.call("ld0", &[], &mut mem, &mut NoHost), Ok(0));
+        // Tras crecer, el byte 65536 (antes 0xAA en el buffer) debe ser 0.
+        let mut b2 = Builder::new();
+        let t2 = b2.ty(&[], &[0x7F]);
+        let g = b2.func(
+            t2,
+            0,
+            &[0x41, 1, 0x40, 0, 0x1A, 0x41, 0x80, 0x80, 0x04, 0x2D, 0, 0],
+        );
+        b2.export("g", g);
+        let wasm2 = b2.build();
+        let m2 = Module::parse(&wasm2).unwrap();
+        let mut mem2 = vec![0xAAu8; 4 * PAGE];
+        let mut inst2 = Instance::new(&m2, &mut mem2).unwrap();
+        assert_eq!(inst2.call("g", &[], &mut mem2, &mut NoHost), Ok(0));
+        assert_eq!(inst2.memory_len(), 2 * PAGE);
+    }
+
+    #[test]
+    fn start_function_runs_before_exports() {
+        let mut b = Builder::new();
+        let tv = b.ty(&[], &[]);
+        let t = b.ty(&[], &[0x7F]);
+        b.globals.push((0x7F, true, 0));
+        let start = b.func(tv, 0, &[0x41, 42, 0x24, 0]); // global = 42
+        let get = b.func(t, 0, &[0x23, 0]);
+        b.export("get", get);
+        b.start = Some(start);
+        let wasm = b.build();
+        let m = Module::parse(&wasm).unwrap();
+        assert_eq!(m.start, Some(start));
+        let mut mem = vec![0u8; PAGE];
+        let mut inst = Instance::new(&m, &mut mem).unwrap();
+        assert_eq!(
+            inst.call("get", &[], &mut mem, &mut NoHost),
+            Ok(0),
+            "sin start aun"
+        );
+        inst.start(&mut mem, &mut NoHost).unwrap();
+        assert_eq!(inst.call("get", &[], &mut mem, &mut NoHost), Ok(42));
+        // Un start que hace trap se propaga.
+        let mut b = Builder::new();
+        let tv = b.ty(&[], &[]);
+        let bad = b.func(tv, 0, &[0x00]);
+        b.start = Some(bad);
+        let wasm = b.build();
+        let m = Module::parse(&wasm).unwrap();
+        let mut inst = Instance::new(&m, &mut mem).unwrap();
+        assert_eq!(
+            inst.start(&mut mem, &mut NoHost),
+            Err(Error::Trap("unreachable"))
         );
     }
 

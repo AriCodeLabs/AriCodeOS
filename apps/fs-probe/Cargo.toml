@@ -1,0 +1,26 @@
+[package]
+name = "ari-app-fs-probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Regresion de aislamiento de fsd: una app deja un descriptor abierto y otra intenta usarlo"
+publish = false
+
+[[bin]]
+name = "fs_victim"
+path = "src/victim.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "fs_probe"
+path = "src/probe.rs"
+test = false
+bench = false
+
+[dependencies]
+aricode-rt = { path = "../../sdk/runtime" }
+aricode-proto = { path = "../../sdk/proto" }
+
+[build-dependencies]
+aricode-build = { path = "../../sdk/build" }
