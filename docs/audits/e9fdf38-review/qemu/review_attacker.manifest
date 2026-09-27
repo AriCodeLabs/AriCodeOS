@@ -1,0 +1,3 @@
+name = review_attacker
+caps = fs
+memory = 64K

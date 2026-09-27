@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.3.0 (Fases 0 a 29)
+## Estado: 0.4.0 (Fases 0 a 31)
 
 ```text
 OVMF (UEFI)
@@ -51,6 +51,8 @@ libs/acpi/           aricode-acpi: RSDP, XSDT/RSDT, MADT (LAPIC, I/O APIC, overr
 libs/pci/            aricode-pci: direccionamiento ECAM, cabecera de configuración, BARs, capabilities, clases (no_std + alloc, tests de host)
 libs/virtio/         aricode-virtio: virtqueue split sobre DMA, estructuras virtio-pci modernas, peticiones virtio-blk (no_std, tests de host)
 libs/gpt/            aricode-gpt: CRC32, cabecera y entradas GPT, escritor para el disco de pruebas (no_std, tests de host)
+libs/ab/             aricode-ab: estado de arranque A/B, imágenes de sistema firmadas y política de slots (no_std, tests de host)
+libs/crypto/         aricode-crypto: SHA-256, SHA-512, Ed25519 y ChaCha20 desde cero con vectores oficiales (no_std, tests de host)
 libs/wasm/           aricode-wasm: intérprete WebAssembly MVP con enteros, memoria acotada e importaciones (no_std + alloc, tests de host)
 libs/manifest/       aricode-manifest: manifiestos de aplicación (nombre, capacidades, memoria) (no_std, tests de host)
 libs/gfx/            aricode-gfx: lienzos 0x00RRGGBB, recorte, texto, cursor y escritorio de ventanas (no_std, tests de host)
@@ -61,6 +63,7 @@ libs/arifs/          aricode-arifs: AriFS v0, directorio plano con tabla de fich
 sdk/proto/           aricode-proto: protocolos IPC versionados de los servicios (bloques v1, ficheros v1, red v1, entrada v1, ventanas v1, lanzamiento v1) (no_std, tests de host)
 sdk/runtime/         aricode-rt: runtime de programas de usuario (`entry!`, heap de 256 KiB, panic, fmt); reexporta aricode-sys
 sdk/build/           aricode-build: `build.rs` de una línea que enlaza con `sdk/rust/user.ld`
+apps/updater/        updater: verifica la imagen de UPDATE y la instala en el slot inactivo (capacidad `block`)
 apps/wasm-demo/      wasm_demo.wasm: módulo portable compilado a wasm32 que solo usa la Capability API importada
 apps/wasm-runner/    wasm_runner: runtime WebAssembly como aplicación con manifiesto (lee el módulo de su directorio privado)
 apps/hello/          hello_app: aplicación de ejemplo del SDK (consola, permisos, tiempo)
@@ -772,8 +775,53 @@ segundo brevemente para añadir la región.
   tiene manera de nombrar nada que el runner no le haya importado.
 - Los ficheros de AriFS pasan a 32 KiB de capacidad para alojar módulos.
 
+## Criptografía (Fase 31)
+
+- `aricode-crypto` no tiene dependencias ni `alloc`. Los hashes son
+  incrementales (`update`/`finish`); Ed25519 usa cinco limbs de 51 bits para
+  GF(2^255-19), coordenadas extendidas (fórmulas de la RFC 8032 §5.1.4),
+  descompresión por raíz cuadrada con `(p-5)/8` y escalares módulo L por
+  división larga binaria (lenta pero simple: unas pocas firmas por
+  arranque). Verificación comprobada con los tres vectores de la RFC 8032
+  además de firmas y claves alteradas y `S` no canónico.
+- `kernel/src/random.rs`: `Rng` de ChaCha20 sembrado con SHA-256 de ocho
+  valores de `rdrand` (si CPUID.1:ECX.30) y 64 muestras del TSC más el
+  tick de arranque; cada `fill` mezcla otra muestra (`reseed`). `qemu64` no
+  expone `rdrand`, así que en los tests la fuente es el TSC y el kernel lo
+  dice. `system_info(RANDOM)` sirve hasta 256 bytes por llamada.
+- xtask gana `keygen`, `sign` y `verify` (semilla y clave pública en hex);
+  `keys/dev` guarda el par de desarrollo que firmará las imágenes de prueba.
+
+## Actualización A/B (Fase 30)
+
+- Disco de pruebas de 48 MiB: `ARI0` (AriFS), `SYSA`, `SYSB`, `UPDATE` (12
+  MiB cada una) y `ARIBOOT` (32 KiB). El escenario elige el estado inicial
+  con `disk = slots | esp-only | pending-b | b-exhausted | b-corrupt`;
+  los escenarios de fallos de la ESP usan `esp-only`.
+- `aricode-ab`: `BootState` (magia, activo, pendiente+intentos, contador,
+  CRC de SHA-256 truncado), `choose`/`reject`/`confirm`/`schedule` como
+  funciones puras, y `Image` (cabecera `ARISLOT` + contenedor con
+  manifiesto firmado). Todo probado en host, incluidas firma ajena, kernel
+  alterado y contenedor sin firma.
+- AriBoot (`boot/src/slots.rs`) abre los `BlockIo` de disco entero con
+  `GetProtocol` (una apertura exclusiva desconectaba el driver FAT de la
+  ESP), analiza la GPT con `aricode-gpt`, lee `ARIBOOT`, aplica `choose`,
+  lee y verifica la imagen del slot con la clave pública de `keys/dev`
+  embebida, escribe el estado (intento consumido) y entrega kernel e initrd
+  a `run`; si el pendiente falla, `reject` y el activo; si nada vale, ESP.
+  Añade `boot_slot=X [boot_pending]` a la cmdline.
+- init confirma el slot pendiente al final de los servicios de arranque:
+  localiza `ARIBOOT` leyendo la GPT por el servicio de bloques y escribe
+  `confirm(state, slot)`. `updater` hace el camino inverso con `schedule`.
+- xtask quita la información de depuración de kernel e initrd (`strip
+  --strip-debug` si existe): el initrd pasa de 4,8 MiB a 550 KiB y la
+  imagen de sistema cabe en el slot.
+
 ## Deuda conocida
 
+- No hay reinicio automático tras `updater` ni prueba de dos arranques
+  encadenados en un mismo QEMU; la actualización llega por xtask, no por red.
+- El generador del kernel solo tiene `rdrand` y TSC como fuentes.
 - El intérprete WASM no valida el módulo antes de ejecutar (confía en el
   productor; todo se comprueba en ejecución) y no tiene coma flotante.
 - La política del broker es una constante; no hay cuotas de CPU ni de

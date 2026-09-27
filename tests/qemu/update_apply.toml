@@ -1,0 +1,23 @@
+# Fase 30: el actualizador (aplicacion de confianza con capacidad block) lee la
+# imagen de UPDATE (version 2), la verifica, la copia al slot inactivo (B) y
+# deja B pendiente con 3 intentos. Un `updater` lanzado sin manifiesto de
+# confianza no recibiria el servicio de bloques.
+name = "update.apply"
+description = "updater: verificar UPDATE, instalar en el slot inactivo y programar el arranque"
+level = "full"
+areas = ["update", "sandbox", "shell"]
+cmdline = "qemu_exit shell"
+timeout_secs = 120
+stdin = ["run updater", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: lanzar updater con manifiesto [system block] memoria 6144 KiB",
+    "updater: imagen en UPDATE version 2 verificada (",
+    "updater: instalada en el slot B",
+    "updater: estado: activo A, pendiente B (3 intentos); reinicia para probarlo",
+    "run: updater termino con 0",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "no verifica", "denegado"]

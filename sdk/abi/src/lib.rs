@@ -45,6 +45,11 @@ pub mod init_arg {
     /// La cmdline pide la interfaz gráfica (`gui`): el kernel no pinta en el
     /// framebuffer y init lanza el compositor.
     pub const GUI: u64 = 2;
+    /// El sistema arrancó desde el slot A (o B) de una partición de sistema.
+    pub const BOOT_SLOT_A: u64 = 4;
+    pub const BOOT_SLOT_B: u64 = 8;
+    /// El slot arrancado espera confirmación: init debe marcarlo activo.
+    pub const BOOT_PENDING: u64 = 16;
 }
 
 /// Derechos (bits) tal y como los ve el espacio de usuario.
@@ -187,6 +192,10 @@ pub mod sysinfo {
     pub const PROCESSES: u64 = 2;
     /// Un [`Framebuffer`] (40 bytes): geometría y formato de la pantalla GOP.
     pub const FRAMEBUFFER: u64 = 3;
+    /// Hasta `RANDOM_MAX` bytes aleatorios del generador del kernel (la
+    /// longitud pedida es la del buffer).
+    pub const RANDOM: u64 = 4;
+    pub const RANDOM_MAX: u64 = 256;
 
     /// Formato de píxel del framebuffer (32 bpp).
     pub const FB_FORMAT_RGB: u8 = 0;

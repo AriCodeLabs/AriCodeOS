@@ -27,13 +27,16 @@ impl Caps {
     pub const SPAWNER: Caps = Caps(1 << 5);
     pub const PCI: Caps = Caps(1 << 6);
     pub const FRAMEBUFFER: Caps = Caps(1 << 7);
+    /// Acceso al servicio de bloques: solo para aplicaciones de sistema de la
+    /// lista de confianza del broker (`updater`).
+    pub const BLOCK: Caps = Caps(1 << 8);
 
     pub const NONE: Caps = Caps(0);
     /// Las que el broker concede a aplicaciones normales.
     pub const APP_ALLOWED: Caps =
         Caps(Caps::SYSTEM.0 | Caps::FS.0 | Caps::NET.0 | Caps::WINDOW.0 | Caps::INPUT.0);
 
-    const NAMES: [(&'static str, Caps); 8] = [
+    const NAMES: [(&'static str, Caps); 9] = [
         ("system", Caps::SYSTEM),
         ("fs", Caps::FS),
         ("net", Caps::NET),
@@ -42,7 +45,20 @@ impl Caps {
         ("spawner", Caps::SPAWNER),
         ("pci", Caps::PCI),
         ("framebuffer", Caps::FRAMEBUFFER),
+        ("block", Caps::BLOCK),
     ];
+
+    /// Aplicaciones de sistema que además pueden pedir `block`.
+    pub const TRUSTED_BLOCK: [&'static str; 1] = ["updater"];
+
+    /// Capacidades concedibles a la aplicación `name`.
+    pub fn allowed_for(name: &str) -> Caps {
+        if Self::TRUSTED_BLOCK.contains(&name) {
+            Caps::APP_ALLOWED.union(Caps::BLOCK)
+        } else {
+            Caps::APP_ALLOWED
+        }
+    }
 
     pub fn from_name(name: &str) -> Option<Caps> {
         Self::NAMES
@@ -229,6 +245,15 @@ mod tests {
             Err(ManifestError::BadMemory)
         );
         assert_eq!(Manifest::parse("sin igual"), Err(ManifestError::Syntax));
+        let block = Manifest::parse("name = updater\ncaps = system, block").unwrap();
+        assert!(block
+            .caps
+            .difference(Caps::allowed_for("updater"))
+            .is_empty());
+        assert!(
+            !block.caps.difference(Caps::allowed_for("otra")).is_empty(),
+            "block solo para updater"
+        );
         let forbidden = Manifest::parse("name = x\ncaps = fs, spawner").unwrap();
         let denied: Vec<&str> = forbidden
             .caps

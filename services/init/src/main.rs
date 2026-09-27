@@ -11,10 +11,13 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use aricode_manifest::{Caps, Manifest};
 use aricode_proto::launch::{
     Reply as LaunchReply, Request as LaunchRequest, Status as LaunchStatus,
 };
+use aricode_rt::sys::block::BlockClient;
 use aricode_rt::sys::fs::FsClient;
 use aricode_rt::sys::{self, rights, Error, Handle, TIMEOUT_INFINITE};
 
@@ -98,6 +101,75 @@ fn start_driver(
     sys::process_spawn_with(SPAWNER, name, mask, &to_send[..n])
 }
 
+/// Primer y último LBA de la partición GPT `name`, leyendo la tabla por el
+/// servicio de bloques.
+fn find_partition(blk: &mut BlockClient, name: &str) -> Option<(u64, u64)> {
+    blk.read(1, 1).ok()?;
+    let header = aricode_gpt::Header::parse(&blk.buffer()[..512]).ok()?;
+    let sectors = header.entries_bytes().div_ceil(512) as u64;
+    let mut table = alloc::vec![0u8; sectors as usize * 512];
+    let mut lba = 0;
+    while lba < sectors {
+        let n = (sectors - lba).min(16) as u16;
+        blk.read(header.entries_lba + lba, n).ok()?;
+        let o = lba as usize * 512;
+        table[o..o + n as usize * 512].copy_from_slice(&blk.buffer()[..n as usize * 512]);
+        lba += n as u64;
+    }
+    let mut parts = [None; 16];
+    let count = aricode_gpt::partitions(&header, &table, &mut parts).ok()?;
+    parts[..count]
+        .iter()
+        .flatten()
+        .find(|p| p.name_str() == name)
+        .map(|p| (p.first_lba, p.last_lba))
+}
+
+/// Arranque A/B: si el kernel arrancó desde un slot pendiente, marcarlo
+/// activo en `ARIBOOT` ahora que los servicios de arranque funcionan.
+fn confirm_boot_slot(arg: u64, block_service: Handle) {
+    use aricode_ab::{confirm, BootState, Slot};
+    let slot = if arg & sys::abi::init_arg::BOOT_SLOT_A != 0 {
+        Slot::A
+    } else if arg & sys::abi::init_arg::BOOT_SLOT_B != 0 {
+        Slot::B
+    } else {
+        say(b"arrancado desde la ESP (sin slots)");
+        return;
+    };
+    sys::print(b"AriInit: arrancado desde el slot ");
+    sys::print(slot.name().as_bytes());
+    if arg & sys::abi::init_arg::BOOT_PENDING == 0 {
+        sys::print(b" (activo)\n");
+        return;
+    }
+    sys::print(b" (pendiente de confirmacion)\n");
+    let Ok(mut blk) = BlockClient::new(block_service, HARDWARE, 16) else {
+        say(b"no se pudo abrir el servicio de bloques para confirmar");
+        return;
+    };
+    let Some((first, _)) = find_partition(&mut blk, aricode_ab::PART_STATE) else {
+        say(b"sin particion ARIBOOT, no se confirma");
+        return;
+    };
+    if blk.read(first, 1).is_err() {
+        return say(b"no se pudo leer el estado de arranque");
+    }
+    let Some(state) = BootState::decode(&blk.buffer()[..512]) else {
+        return say(b"estado de arranque invalido, no se confirma");
+    };
+    let confirmed = confirm(state, slot);
+    blk.buffer()[..512].copy_from_slice(&confirmed.encode());
+    match blk.write(first, 1) {
+        Ok(()) => {
+            sys::print(b"AriInit: arranque confirmado en el slot ");
+            sys::print(slot.name().as_bytes());
+            sys::print(b"\n");
+        }
+        Err(_) => say(b"no se pudo escribir el estado de arranque"),
+    }
+}
+
 /// Lanza fsd con su endpoint (READ|WRITE), el del servicio de bloques (WRITE)
 /// y una capacidad de hardware; `arg` = LBA de la partición.
 fn start_fsd(
@@ -167,11 +239,13 @@ fn run_shell(
 /// Broker de capabilities (Fase 28): lanza programas según su manifiesto.
 /// Una aplicación recibe, en este orden, solo lo que pide y se le permite:
 /// `SYSTEM` (lectura), un directorio privado en fsd, el endpoint de red, el
-/// del compositor, los de entrada, y por último `HARDWARE` si necesita
-/// buffers (fs, net, window), acotado por la memoria del manifiesto.
+/// del compositor, el de bloques (solo aplicaciones de confianza), los de
+/// entrada, y por último `HARDWARE` si necesita buffers, acotado por la
+/// memoria del manifiesto.
 struct Broker {
     endpoint: Handle,
     fs: Option<FsClient>,
+    block: Option<Handle>,
     net: Handle,
     compositor: Option<Handle>,
     inputs: [Handle; 4],
@@ -181,6 +255,7 @@ struct Broker {
 impl Broker {
     fn new(
         fs_service: Option<Handle>,
+        block: Option<Handle>,
         net: Handle,
         compositor: Option<Handle>,
         inputs: &[Handle],
@@ -195,6 +270,7 @@ impl Broker {
         Ok(Self {
             endpoint: sys::endpoint_create()?,
             fs,
+            block,
             net,
             compositor,
             inputs: ins,
@@ -249,7 +325,7 @@ impl Broker {
             // Sin manifiesto: solo consola y reloj, memoria minima.
             None => (Caps::SYSTEM, 64),
         };
-        let denied = caps.difference(Caps::APP_ALLOWED);
+        let denied = caps.difference(Caps::allowed_for(name));
         sys::print(b"AriInit: lanzar ");
         sys::print(name.as_bytes());
         sys::print(if manifest.is_some() {
@@ -315,6 +391,16 @@ impl Broker {
                 return LaunchReply::status(LaunchStatus::Denied);
             };
             match sys::handle_duplicate(comp, rights::WRITE | rights::TRANSFER) {
+                Ok(h) => push(h),
+                Err(_) => return LaunchReply::status(LaunchStatus::Failed),
+            }
+            needs_hw = true;
+        }
+        if caps.contains(Caps::BLOCK) {
+            let Some(block) = self.block else {
+                return LaunchReply::status(LaunchStatus::Denied);
+            };
+            match sys::handle_duplicate(block, rights::WRITE | rights::TRANSFER) {
                 Ok(h) => push(h),
                 Err(_) => return LaunchReply::status(LaunchStatus::Failed),
             }
@@ -419,6 +505,7 @@ fn run_gui(inputs: &[Handle]) -> Result<Handle, u64> {
 fn main(arg: u64) -> u64 {
     say(b"arrancando");
     let mut fs_service = None;
+    let mut block_service = None;
     let mut services = 0u64;
     // 1. Un servicio que termina bien.
     match run("hello", 0) {
@@ -470,6 +557,7 @@ fn main(arg: u64) -> u64 {
                 return 10;
             };
             services |= SERVICE_BLOCK;
+            block_service = Some(service);
             // Servicio de ficheros sobre la particion ARI0 (LBA 34) y su cliente.
             let Ok(fs_ep) = sys::endpoint_create() else {
                 return 12;
@@ -512,6 +600,11 @@ fn main(arg: u64) -> u64 {
             }
         }
         None => say(b"sin virtio-blk"),
+    }
+    // 7b. Arranque A/B: confirmar el slot si venimos de uno pendiente.
+    match block_service {
+        Some(service) => confirm_boot_slot(arg, service),
+        None => say(b"sin servicio de bloques: no se confirma el arranque"),
     }
     // 8. Servicio de red: driver virtio-net residente + cliente de prueba.
     let Ok(net_service) = sys::endpoint_create() else {
@@ -653,8 +746,13 @@ fn main(arg: u64) -> u64 {
             say(b"sin servicio de ficheros, no se lanza el shell");
             return 15;
         };
-        let Ok(broker) = Broker::new(fs_service, net_service, compositor, &input_eps[..inputs])
-        else {
+        let Ok(broker) = Broker::new(
+            fs_service,
+            block_service,
+            net_service,
+            compositor,
+            &input_eps[..inputs],
+        ) else {
             return 26;
         };
         match run_shell(fs, net_service, services, &broker) {

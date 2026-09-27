@@ -1,0 +1,9 @@
+[package]
+name = "aricode-review-probes"
+version = "0.0.0"
+edition = "2021"
+[workspace]
+[dependencies]
+aricode-wasm = { path = "../../../libs/wasm" }
+aricode-arifs = { path = "../../../libs/arifs" }
+aricode-proto = { path = "../../../sdk/proto" }

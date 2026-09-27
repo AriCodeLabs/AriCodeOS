@@ -22,6 +22,7 @@ mod memory;
 mod object;
 mod pci;
 mod qemu;
+mod random;
 mod serial;
 mod sync;
 mod task;
@@ -124,6 +125,7 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     info!("interrupciones habilitadas");
 
     task::init();
+    random::init();
     console_input::init();
     initrd::init(info);
     pci::init();
@@ -131,11 +133,22 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     if cmdline.get(keys::TEST).is_some() {
         run_requested_test(&cmdline, info);
     } else {
-        run_init(
-            cmdline.has(keys::SHELL),
-            cmdline.has(keys::GUI),
-            info.framebuffer,
-        );
+        let mut init_flags = 0;
+        if cmdline.has(keys::SHELL) {
+            init_flags |= aricode_abi::init_arg::SHELL;
+        }
+        if cmdline.has(keys::GUI) {
+            init_flags |= aricode_abi::init_arg::GUI;
+        }
+        match cmdline.get(keys::BOOT_SLOT) {
+            Some("A") => init_flags |= aricode_abi::init_arg::BOOT_SLOT_A,
+            Some("B") => init_flags |= aricode_abi::init_arg::BOOT_SLOT_B,
+            _ => {}
+        }
+        if cmdline.has(keys::BOOT_PENDING) {
+            init_flags |= aricode_abi::init_arg::BOOT_PENDING;
+        }
+        run_init(init_flags, info.framebuffer);
     }
 
     println!("ARICODEOS_KERNEL_READY");
@@ -259,6 +272,7 @@ fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
         "sched" => task::scheduler::selftest(),
         "ipc" => ipc::selftest(),
         "drivers" => hw::selftest(info),
+        "random" => random::selftest(),
         "console_input" => console_input::selftest(),
         other if other.starts_with("user_") => run_user_program(&other[5..]),
         // W^X: escribir en .rodata -> #PF por protección.
@@ -317,9 +331,8 @@ fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
 /// Arranque normal: lanza `init` del initrd con la capacidad de crear
 /// procesos y espera a que termine.
 /// Lanza `init` con sus capacidades (`aricode_abi::handle::INIT_*`) y espera
-/// su fin. `shell` pide un shell interactivo tras los servicios de arranque;
-/// `gui` pide el compositor (init recibe siempre el framebuffer como MMIO).
-fn run_init(shell: bool, gui: bool, fb: boot_protocol::FramebufferInfo) {
+/// su fin. `arg` lleva los bits de `init_arg` (shell, gui, slot arrancado).
+fn run_init(arg: u64, fb: boot_protocol::FramebufferInfo) {
     use aricode_handles::Rights;
     let Some(elf) = user::programs::by_name("init") else {
         warn!("init: no hay 'init' en el initrd");
@@ -335,13 +348,6 @@ fn run_init(shell: bool, gui: bool, fb: boot_protocol::FramebufferInfo) {
         len: fb.size,
         cacheable: false,
     }));
-    let mut arg = 0;
-    if shell {
-        arg |= aricode_abi::init_arg::SHELL;
-    }
-    if gui {
-        arg |= aricode_abi::init_arg::GUI;
-    }
     let pid = user::process::spawn_with_handles_and_arg(
         "init",
         elf,

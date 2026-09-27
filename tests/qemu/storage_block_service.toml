@@ -11,8 +11,8 @@ cmdline = "qemu_exit"
 [expect]
 exit = 33
 serial_contains = [
-    "virtio-blk: GPT con 1 particion(es)",
-    "virtio-blk:   ARI0 LBA 34..8158",
+    "virtio-blk: GPT con 5 particion(es)",
+    "virtio-blk:   ARI0 LBA 34..6143",
     "virtio-blk: sirviendo peticiones",
     "blk_client: info, lectura y escritura por IPC ok",
     "AriInit: servicio de bloques ok",

@@ -364,7 +364,7 @@ pub fn run_interactive(release: bool, cmdline: &str) -> Result {
     };
     let vars = image::ovmf_vars_for(&build_dir())?;
     let disk = build_dir().join("disk.img");
-    image::write_test_disk(&disk)?;
+    image::write_test_disk(&disk, image::DiskVariant::Slots)?;
     let _responder = Responder::start()?;
     let mut q = base_command(&esp, &vars, &disk);
     if cmdline.split_whitespace().any(|w| w == "gui") {
@@ -413,12 +413,13 @@ pub fn run_headless(
     input: &Input,
     probe: Option<&TcpProbe>,
     input_probe: Option<&InputProbe>,
+    disk_variant: image::DiskVariant,
 ) -> Result<Capture> {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
     let vars = image::ovmf_vars_for(workdir)?;
     let disk = workdir.join("disk.img");
-    image::write_test_disk(&disk)?;
+    image::write_test_disk(&disk, disk_variant)?;
     let _responder = Responder::start()?;
     let qmp_path = workdir.join("qmp.sock");
     let _ = std::fs::remove_file(&qmp_path);

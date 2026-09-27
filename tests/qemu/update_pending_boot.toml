@@ -1,0 +1,22 @@
+# Fase 30: B instalado y pendiente con 3 intentos. AriBoot consume un intento,
+# arranca B y marca la cmdline; init, con los servicios en marcha, confirma B
+# como activo escribiendo el estado por el servicio de bloques.
+name = "update.pending_boot"
+description = "primer arranque de un slot pendiente y confirmacion por init"
+level = "full"
+areas = ["update", "boot", "init"]
+cmdline = "qemu_exit"
+disk = "pending-b"
+
+[expect]
+exit = 33
+serial_contains = [
+    "slots: estado activo A, pendiente B (3 intentos)",
+    "slots: slot pendiente con intentos -> slot B",
+    "slots: arrancando desde el slot B (imagen version 2, pendiente de confirmacion)",
+    "cmdline: qemu_exit boot_slot=B boot_pending",
+    "AriInit: arrancado desde el slot B (pendiente de confirmacion)",
+    "AriInit: arranque confirmado en el slot B",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "rechazado", "arranque desde la ESP"]

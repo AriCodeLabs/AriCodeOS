@@ -1,0 +1,11 @@
+[package]
+name = "aricode-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Primitivas criptográficas de AriCodeOS: SHA-256, SHA-512, Ed25519 y ChaCha20 (no_std, sin dependencias)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
