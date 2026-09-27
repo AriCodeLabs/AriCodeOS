@@ -20,6 +20,16 @@ pub fn run(cli: &Cli, release: bool) -> Result {
         })
         .unwrap_or_default();
 
+    let cpus_override = match cli.value("--cpus") {
+        Some(v) => Some(
+            v.parse::<u32>()
+                .ok()
+                .filter(|n| (1..=64).contains(n))
+                .ok_or_else(|| format!("--cpus {v}: se esperaba un numero de 1 a 64"))?,
+        ),
+        None => None,
+    };
+
     let all = scenario::load_all()?;
     let selected = scenario::select(&all, level, &areas)?;
 
@@ -42,12 +52,15 @@ pub fn run(cli: &Cli, release: bool) -> Result {
     }
 
     println!(
-        "[xtask] nivel {level:?}{}",
+        "[xtask] nivel {level:?}{}{}",
         if areas.is_empty() {
             String::new()
         } else {
             format!(", areas {}", areas.join(","))
-        }
+        },
+        cpus_override.map_or(String::new(), |n| format!(
+            ", {n} CPUs en todos los escenarios"
+        ))
     );
 
     // Nivel unit: siempre, salvo que se filtre por área (una feature puede
@@ -62,7 +75,7 @@ pub fn run(cli: &Cli, release: bool) -> Result {
     let base = image::build_base_esp(release)?;
     let mut failed = Vec::new();
     for s in &selected {
-        if !run_scenario(&base, s)? {
+        if !run_scenario(&base, s, cpus_override)? {
             failed.push(s.name.clone());
         }
     }
@@ -78,7 +91,7 @@ pub fn run(cli: &Cli, release: bool) -> Result {
     }
 }
 
-fn run_scenario(base: &std::path::Path, s: &Scenario) -> Result<bool> {
+fn run_scenario(base: &std::path::Path, s: &Scenario, cpus_override: Option<u32>) -> Result<bool> {
     let root = image::scenarios_root();
     let workdir = image::scenario_dir(&root, &s.name)?;
     let esp = image::build_scenario_esp(base, &root, &s.name, &s.cmdline, &s.inject)?;
@@ -104,6 +117,7 @@ fn run_scenario(base: &std::path::Path, s: &Scenario) -> Result<bool> {
         input_probe,
         disk_variant,
         disk_readonly: s.disk_readonly,
+        cpus: s.cpus(cpus_override),
     };
     let cap = qemu::run_headless(
         &esp,

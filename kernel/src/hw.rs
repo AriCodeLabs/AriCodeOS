@@ -2,7 +2,7 @@
 //! de interrupción, regiones MMIO y buffers DMA. Un driver solo recibe lo
 //! que su capability le da; el kernel no le presta nada más (sección 27).
 
-use crate::arch::x86_64::ioapic;
+use crate::arch::x86_64::{apic, ioapic};
 use crate::memory::pmm;
 use crate::object::{KernelObject, ObjectKind, ObjectRef};
 use crate::sync::IrqLock;
@@ -100,7 +100,7 @@ fn msix_write(table_virt: u64, entry: u32, addr: u64, data: u32, control: u32) {
 /// de forma incremental y nunca liberadas: se usan mientras viva el dispositivo.
 static UC_NEXT: IrqLock<u64> = IrqLock::new(0xFFFF_D200_0000_0000);
 
-fn map_uc(phys: u64, len: u64) -> Result<u64, &'static str> {
+pub(crate) fn map_uc(phys: u64, len: u64) -> Result<u64, &'static str> {
     use crate::memory::vmm;
     use aricode_x86_paging::{
         CACHE_DISABLE, GLOBAL, NO_EXECUTE, PAGE_SIZE, WRITABLE, WRITE_THROUGH,
@@ -131,7 +131,7 @@ pub fn register_msix(table_phys: u64, entry: u32) -> Result<ObjectRef, &'static 
     let vector = (DEVICE_VECTOR_FIRST..=DEVICE_VECTOR_LAST)
         .find(|v| !vectors.contains_key(v))
         .ok_or("hw: sin vectores libres")?;
-    let lapic_id = crate::acpi::with(|a| a.madt.lapic_ids.first().copied()).unwrap_or(0) as u64;
+    let lapic_id = apic::bsp_id() as u64;
     msix_write(
         table_virt,
         entry,
@@ -155,6 +155,9 @@ pub struct Region {
     pub phys: u64,
     pub len: u64,
     pub cacheable: bool,
+    /// Función PCI a la que pertenece (`bus << 8 | dev << 3 | fn`): mapearla
+    /// asigna el dispositivo al dominio IOMMU del proceso (Fase 33).
+    pub source_id: Option<u16>,
 }
 
 /// Buffer DMA: frames contiguos que vuelven al PMM al soltarse el objeto.
@@ -165,6 +168,9 @@ pub struct DmaBuffer {
 
 impl Drop for DmaBuffer {
     fn drop(&mut self) {
+        // Antes de devolver los frames, ningún dispositivo debe poder
+        // seguir escribiendo en ellos.
+        crate::iommu::unmap_everywhere(self.region.phys, self.region.len);
         pmm::with(|p| p.free_contiguous(Frame::from_addr(self.region.phys), self.frames))
             .expect("frames DMA");
     }
@@ -178,8 +184,7 @@ pub fn register_irq(gsi: u32, level: bool, active_low: bool) -> Result<ObjectRef
     let vector = (DEVICE_VECTOR_FIRST..=DEVICE_VECTOR_LAST)
         .find(|v| !vectors.contains_key(v))
         .ok_or("hw: sin vectores libres")?;
-    let lapic_id = crate::acpi::with(|a| a.madt.lapic_ids.first().copied()).unwrap_or(0);
-    ioapic::route(gsi, vector, lapic_id, level, active_low)?;
+    ioapic::route(gsi, vector, apic::bsp_id(), level, active_low)?;
     let obj = KernelObject::new(ObjectKind::Irq(IrqLine {
         source: IrqSource::Gsi { gsi, level },
         vector,
@@ -221,6 +226,7 @@ pub fn dma_alloc(len: u64) -> Result<ObjectRef, &'static str> {
             phys: first.addr(),
             len: frames as u64 * FRAME_SIZE,
             cacheable: true,
+            source_id: None,
         },
         frames,
     })))
@@ -280,6 +286,7 @@ pub fn selftest(info: &boot_protocol::BootInfo) {
             phys: fb.address,
             len: fb.size,
             cacheable: false,
+            source_id: None,
         }));
         let pid = process::spawn_with_handles_and_arg(
             "fb_driver",

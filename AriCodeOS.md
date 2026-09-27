@@ -2748,6 +2748,8 @@ intentos. Escenarios: `update.slot_a` (smoke), `update.pending_boot`,
 
 # FASE 32 — SMP
 
+**Estado: completada (2026-09-27).**
+
 Aunque parte de SMP puede adelantarse, en esta etapa deberá consolidarse:
 
 - AP discovery;
@@ -2758,9 +2760,64 @@ Aunque parte de SMP puede adelantarse, en esta etapa deberá consolidarse:
 - locks;
 - CPU affinity.
 
+### Implementado
+
+- AP discovery: los LAPIC habilitados de la MADT (`libs/acpi`); el BSP se
+  reconoce por su propio id y es el destino de todas las IRQ de dispositivo
+  (I/O APIC y MSI-X) y de la consola serie;
+- startup: trampolín en la página física `0x8000` (memoria baja reservada
+  por el PMM y comprobada en el mapa UEFI) que lleva al AP de modo real a
+  modo largo con unas tablas de arranque (identidad del primer MiB + mitad
+  del kernel) y salta a `ap_entry` sobre la pila de su hilo idle;
+  INIT-SIPI-SIPI por el ICR del LAPIC, espera de hasta 500 ms por CPU y
+  aviso si un AP no responde; cada AP carga el CR3 definitivo, copia CR0 y
+  CR4 del BSP, instala sus tablas, la IDT compartida, `syscall`, su LAPIC
+  (timer con la cuenta calibrada por el BSP) y entra en el bucle idle;
+- per-CPU state: `kernel/src/cpu.rs` con un `Cpu` estático por procesador
+  (GDT, TSS con pila de #DF, hilo actual, quantum, scratch de `syscall`)
+  al que apunta `IA32_GS_BASE`; `swapgs` en `syscall`, en el trampolín de
+  interrupciones cuando viene de ring 3 y al saltar a ring 3;
+- scheduler SMP: `aricode-sched` con una cola de listos compartida y, por
+  CPU, hilo actual e idle propio; el lock del planificador se mantiene
+  durante el cambio de contexto y lo suelta el hilo que reanuda
+  (`force_unlock`), de modo que ninguna CPU puede tomar un hilo antes de
+  que su `rsp` esté guardado; solo el BSP cuenta el tiempo y despierta a
+  los dormidos; una CPU en idle recibe una IPI (`RESCHED`) cuando un hilo
+  pasa a listo; un `wake` que llega a un hilo aún `Running` queda pendiente
+  y convierte su siguiente bloqueo en una cesión (sin despertares perdidos);
+- TLB shootdown: `vmm::flush_page` invalida en la CPU local y, por IPI
+  (`TLB_FLUSH`), en las demás en línea con confirmación; se exige llamarlo
+  con interrupciones habilitadas y sin locks; IPI `HALT` para detener las
+  demás CPUs en un pánico;
+- locks: `IrqLock` deshabilita interrupciones solo mientras tiene el lock y
+  las restaura entre giros (una CPU que espera sigue atendiendo IPI);
+  detección de bloqueo mutuo por giros como antes;
+- CPU affinity: `set_affinity` en la política y `spawn_on` en el kernel; un
+  hilo con afinidad solo lo toma su CPU (las demás lo saltan en la cola);
+- `system_info(CPUS)` y el comando `cpus` del shell; el volcado de
+  excepciones y de pánico indica la CPU;
+- pruebas: `test=smp` (todas las CPUs de la MADT en línea, hilos fijados
+  que ejecutan a la vez en CPUs distintas, hilos libres que migran,
+  shootdown observado desde otra CPU con el número exacto de IPI, contador
+  bajo lock disputado por todas las CPUs), escenarios `smp.boot`
+  (smoke, `-smp 4`), `smp.selftest`, `smp.single_cpu_selftest`,
+  `smp.shell_user`; los escenarios declaran `cpus = N` y
+  `cargo xtask test --cpus N` fuerza N procesadores en toda la suite.
+
+### Pendiente
+
+- Balanceo de carga explícito (solo hay cola compartida y afinidad
+  opcional), prioridades y `sched_yield`/afinidad desde usuario.
+- x2APIC y más de 16 CPUs; hot-plug.
+- Las IRQ de dispositivo siempre van al BSP; no hay reparto ni migración de
+  vectores.
+- El heap sigue con un lock global; no hay cachés por CPU.
+
 ---
 
 # FASE 33 — IOMMU
+
+**Estado: completada (2026-09-27).**
 
 ### Implementar
 
@@ -2768,6 +2825,45 @@ Aunque parte de SMP puede adelantarse, en esta etapa deberá consolidarse:
 - device domains;
 - DMA mappings;
 - isolation.
+
+### Implementado
+
+- VT-d: `libs/acpi` parsea la DMAR (unidades DRHD con sus ámbitos de
+  dispositivo e `INCLUDE_PCI_ALL`, regiones reservadas RMRR);
+  `libs/iommu` (no_std, tests de host) contiene registros y bits,
+  capacidades, entradas raíz y de contexto, paginación de segundo nivel de
+  3 o 4 niveles con hook `clflush` para unidades no coherentes, y
+  decodificación de registros de fallo; `kernel/src/iommu.rs` programa cada
+  unidad (tabla raíz, interrupción de fallo por MSI al BSP, invalidación
+  global de contextos e IOTLB, `TE`) antes de que arranque ningún driver;
+- device domains: un dominio por proceso, creado al primer uso; la función
+  PCI se asigna al dominio del proceso que mapea su espacio de
+  configuración o un BAR (`mmio_map` de una región con `source_id`); al
+  morir el proceso su entrada de contexto se retira, se invalida y sus
+  tablas vuelven al PMM;
+- DMA mappings: IOVA = dirección física, así los drivers no cambian;
+  `dma_alloc` mapea el buffer en el dominio de quien lo reserva y
+  `mmio_map` de un objeto DMA ajeno (buffers de clientes del servicio de
+  bloques) lo mapea en el dominio del servicio; al liberarse un buffer se
+  retira de todos los dominios antes de devolver sus frames; las RMRR de un
+  dispositivo se mapean identidad al asignarlo;
+- isolation: cualquier otro acceso del dispositivo falla en la unidad, que
+  lo registra; el kernel lo anuncia (`iommu: fallo DMA de bb:dd.f ...`),
+  lo cuenta y lo expone con `system_info(IOMMU)`; los virtio de QEMU llevan
+  `iommu_platform=on` y el transporte acepta `ACCESS_PLATFORM`;
+- pruebas: `test=iommu` con el driver de prueba `dma_rogue` (lectura
+  legítima traducida, escritura a memoria ajena bloqueada, fallo
+  registrado, memoria intacta, dominio liberado) y `iommu.enabled` (smoke:
+  toda la pila de servicios funciona traducida); sin DMAR todo sigue
+  funcionando sin traducción.
+
+### Pendiente
+
+- Interrupt remapping (las MSI pasan sin traducir) y la variante AMD-Vi.
+- Invalidación selectiva (por dominio o página) con cola de invalidación;
+  hoy se invalida globalmente tras cada cambio.
+- Un dominio por dispositivo o compartido entre procesos; hoy es por proceso.
+- Comprobación en hardware real (Fase 34): RMRR de gráficos y USB.
 
 ---
 
@@ -3407,6 +3503,22 @@ correcciones de la auditoría e9fdf38.** Fases 30 y 31:
   init y actualizador con capacidad de bloques.
 
 Siguiente: 0.5 con SMP (Fase 32) e IOMMU (Fase 33).
+
+## 94.4 AriCodeOS 0.5
+
+**Estado: completada (2026-09-27), tag `v0.5.0`.** Fases 32 y 33:
+
+- SMP: arranque de los procesadores de aplicación por INIT-SIPI, estado
+  por CPU (`swapgs`), planificador con cola compartida, idle por CPU,
+  afinidad e IPI, TLB shootdown, consola serializada entre CPUs y
+  `cargo xtask test --cpus N` como estrés de toda la suite;
+- IOMMU: Intel VT-d con un dominio de traducción por driver (IOVA =
+  física), asignación del dispositivo al mapear su configuración o un BAR,
+  buffers DMA mapeados solo en los dominios que los usan, fallos
+  registrados y contados; toda la suite corre traducida.
+
+Siguiente: Fase 34 (hardware real) y la segunda parte de la Fase 25
+(xHCI/USB HID).
 
 ---
 

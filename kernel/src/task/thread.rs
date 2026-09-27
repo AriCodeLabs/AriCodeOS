@@ -31,6 +31,19 @@ impl Thread {
         }
     }
 
+    /// Hilo que ya ejecuta sobre `stack` sin haber pasado por
+    /// `switch_context`: el idle de un AP, que arranca directamente en ella.
+    pub fn adopt_on_stack(tid: Tid, name: &str, stack: KernelStack, cr3: u64) -> Self {
+        Self {
+            tid,
+            name: String::from(name),
+            stack: Some(stack),
+            saved_rsp: 0,
+            process: None,
+            cr3,
+        }
+    }
+
     /// Hilo nuevo con pila propia listo para su primer cambio de contexto.
     pub fn new(
         tid: Tid,

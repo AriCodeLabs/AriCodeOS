@@ -107,7 +107,7 @@ fn console_write(handle: Handle, ptr: u64, len: u64) -> Result<u64, Error> {
     }
     let bytes = process::copy_from_user(ptr, len)?;
     let text = core::str::from_utf8(&bytes).map_err(|_| Error::Invalid)?;
-    crate::print!("{text}");
+    process::console_write_current(text);
     Ok(len)
 }
 
@@ -121,6 +121,10 @@ fn console_read(handle: Handle, ptr: u64, len: u64, timeout_ms: u64) -> Result<u
     }
     // Validar el destino antes de bloquear: un puntero inválido falla ya.
     process::copy_to_user(ptr, &[])?;
+    // El prompt (línea sin terminar) debe verse antes de esperar la entrada.
+    if let Some(pid) = process::current_pid() {
+        process::console_flush(pid);
+    }
     let mut buf = alloc::vec![0u8; len as usize];
     let n = crate::console_input::read(&mut buf, deadline_from(timeout_ms));
     if n == 0 {
@@ -167,6 +171,14 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
     system_object(h, Rights::READ)?;
     let bytes: Vec<u8> = match kind {
         sysinfo::UPTIME => crate::time::uptime_ms().to_le_bytes().to_vec(),
+        sysinfo::CPUS => (crate::cpu::online_count() as u64).to_le_bytes().to_vec(),
+        sysinfo::IOMMU => {
+            let (units, domains, faults) = crate::iommu::stats();
+            let mut v = units.to_le_bytes().to_vec();
+            v.extend_from_slice(&domains.to_le_bytes());
+            v.extend_from_slice(&faults.to_le_bytes());
+            v
+        }
         sysinfo::MEMORY => {
             let s = crate::memory::pmm::stats();
             let mut v = (s.usable_frames as u64).to_le_bytes().to_vec();
@@ -430,15 +442,31 @@ fn irq_wait(h: Handle, timeout_ms: u64) -> Result<u64, Error> {
 }
 
 fn mmio_map(h: Handle) -> Result<u64, Error> {
-    let (phys, len, cacheable) =
+    let (phys, len, cacheable, source_id, is_dma) =
         with_handles(
             |t| match lookup(t, h, Rights::READ.union(Rights::WRITE))?.kind {
-                ObjectKind::Mmio(ref r) => Ok((r.phys, r.len, r.cacheable)),
-                ObjectKind::Dma(ref d) => Ok((d.region.phys, d.region.len, d.region.cacheable)),
+                ObjectKind::Mmio(ref r) => Ok((r.phys, r.len, r.cacheable, r.source_id, false)),
+                ObjectKind::Dma(ref d) => {
+                    Ok((d.region.phys, d.region.len, d.region.cacheable, None, true))
+                }
                 _ => Err(Error::Invalid),
             },
         )?;
-    process::map_foreign(phys, len, cacheable)
+    let virt = process::map_foreign(phys, len, cacheable)?;
+    // IOMMU (Fase 33): mapear un dispositivo lo asigna al dominio del
+    // proceso; mapear un buffer DMA ajeno lo hace visible a sus dispositivos.
+    if let Some(pid) = process::current_pid() {
+        let r = match source_id {
+            Some(sid) => crate::iommu::attach(pid.0, sid),
+            None if is_dma => crate::iommu::map_region(pid.0, phys, len),
+            None => Ok(()),
+        };
+        if let Err(e) = r {
+            warn!("mmio_map: {e}");
+            return Err(Error::Limit);
+        }
+    }
+    Ok(virt)
 }
 
 fn dma_alloc(h: Handle, len: u64) -> Result<u64, Error> {
@@ -457,6 +485,12 @@ fn dma_alloc(h: Handle, len: u64) -> Result<u64, Error> {
         return Err(Error::Limit);
     }
     let dma = crate::hw::dma_alloc(len).map_err(|_| Error::Limit)?;
+    if let (Some(pid), ObjectKind::Dma(d)) = (process::current_pid(), &dma.kind) {
+        if let Err(e) = crate::iommu::map_region(pid.0, d.region.phys, d.region.len) {
+            warn!("dma_alloc: {e}");
+            return Err(Error::Limit);
+        }
+    }
     let rights = Rights::READ
         .union(Rights::WRITE)
         .union(Rights::DUPLICATE)

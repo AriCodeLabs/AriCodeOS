@@ -1,0 +1,38 @@
+# Fase 32: con 4 CPUs los procesos de usuario se reparten entre ellas: el
+# shell, los servicios y las aplicaciones lanzadas por el broker funcionan
+# igual (syscalls, IPC, excepciones de usuario y salida limpia).
+name = "smp.shell_user"
+description = "-smp 4 con shell: cpus, ps, run de aplicaciones y un proceso que muere, todo en paralelo"
+level = "full"
+areas = ["smp", "shell", "user", "init"]
+cmdline = "qemu_exit shell"
+cpus = 4
+timeout_secs = 120
+stdin = [
+    "cpus",
+    "uptime",
+    "run hello_app 7",
+    "repeat 20 run hello_app 8",
+    "run perms_check",
+    "run fs_probe",
+    "ps",
+    "shutdown",
+]
+
+[expect]
+exit = 33
+serial_contains = [
+    "smp: 4 CPUs en linea",
+    "arish: shell de AriCodeOS",
+    "cpus: 4 en linea",
+    "uptime: ",
+    "hello_app: hola desde una aplicacion del SDK (arg 7)",
+    "run: hello_app termino con 0",
+    "hello_app: hola desde una aplicacion del SDK (arg 8)",
+    "perms_check: la enumeracion salta huecos ok",
+    "run: perms_check termino con 0",
+    "PID  ESTADO      NOMBRE",
+    "AriCodeOS: apagando el sistema",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "ARICODEOS_KERNEL_READY"]

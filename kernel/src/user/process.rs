@@ -56,7 +56,14 @@ pub struct Process {
     /// 0 = sin límite. Lo fija quien lo crea (`spawn_limits`).
     pub dma_quota: u64,
     pub dma_used: u64,
+    /// Salida de consola pendiente de una línea completa (Fase 32): con
+    /// varias CPUs, dos procesos que imprimen una línea en varios trozos se
+    /// mezclarían; el kernel emite cada línea entera.
+    console_line: Vec<u8>,
 }
+
+/// Tamaño a partir del cual una línea incompleta se emite tal cual.
+const CONSOLE_LINE_MAX: usize = 1024;
 
 static PROCESSES: IrqLock<BTreeMap<Pid, Process>> = IrqLock::new(BTreeMap::new());
 static NEXT_PID: IrqLock<u32> = IrqLock::new(1);
@@ -194,6 +201,7 @@ fn spawn_full(
             status: None,
             dma_quota,
             dma_used: 0,
+            console_line: Vec::new(),
         },
     );
     scheduler::start_thread(thread);
@@ -226,7 +234,53 @@ pub fn current_pid() -> Option<Pid> {
     scheduler::current_process().map(Pid)
 }
 
+/// Acumula `text` en la línea pendiente del proceso actual y emite por la
+/// consola todo lo que ya forme líneas completas (o todo, si la línea
+/// pendiente supera `CONSOLE_LINE_MAX`).
+pub fn console_write_current(text: &str) {
+    let Some(pid) = current_pid() else {
+        crate::print!("{text}");
+        return;
+    };
+    let ready: Vec<u8> = {
+        let mut procs = PROCESSES.lock();
+        let Some(p) = procs.get_mut(&pid) else {
+            drop(procs);
+            crate::print!("{text}");
+            return;
+        };
+        p.console_line.extend_from_slice(text.as_bytes());
+        match p.console_line.iter().rposition(|&b| b == b'\n') {
+            Some(i) => {
+                let rest = p.console_line.split_off(i + 1);
+                core::mem::replace(&mut p.console_line, rest)
+            }
+            None if p.console_line.len() >= CONSOLE_LINE_MAX => {
+                core::mem::take(&mut p.console_line)
+            }
+            None => Vec::new(),
+        }
+    };
+    if !ready.is_empty() {
+        crate::print!("{}", String::from_utf8_lossy(&ready));
+    }
+}
+
+/// Emite la línea incompleta pendiente de `pid` (prompt antes de leer la
+/// consola, salida del proceso).
+pub fn console_flush(pid: Pid) {
+    let pending = PROCESSES
+        .lock()
+        .get_mut(&pid)
+        .map(|p| core::mem::take(&mut p.console_line))
+        .unwrap_or_default();
+    if !pending.is_empty() {
+        crate::print!("{}", String::from_utf8_lossy(&pending));
+    }
+}
+
 fn finish(pid: Pid, status: ExitStatus) -> ! {
+    console_flush(pid);
     let (name, waiters) = {
         let mut procs = PROCESSES.lock();
         let p = procs.get_mut(&pid).expect("proceso en la tabla");
@@ -287,6 +341,7 @@ pub fn release_address_space(pid: u32) {
         });
         log::debug!("user: espacio del proceso {pid} liberado ({n} frames)");
     }
+    crate::iommu::release(pid);
 }
 
 /// Estado de salida si el proceso ha terminado y su hilo ya fue recogido.

@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.4.0 (Fases 0 a 31)
+## Estado: 0.5.0 (Fases 0 a 33)
 
 ```text
 OVMF (UEFI)
@@ -29,7 +29,9 @@ OVMF (UEFI)
        ficheros por IPC; con `shell` en la cmdline init lanza arish, que lee
        la consola serie y apaga o reinicia por `system_power`; netd
        (virtio-net) obtiene IP por DHCP y sirve ping, UDP y DNS por IPC;
-       ARICODEOS_KERNEL_READY
+       SMP: los APs de la MADT arrancan por INIT-SIPI y planifican sobre la
+       misma cola de listos con estado por CPU e IPI; IOMMU VT-d con un
+       dominio por driver (IOVA = física); ARICODEOS_KERNEL_READY
 ```
 
 ## Crates
@@ -43,8 +45,9 @@ libs/fb-console/     aricode-fb-console: consola de texto sobre framebuffer 32 b
 libs/x86-cpu/        aricode-x86-cpu: descriptores GDT/TSS/IDT y tabla de excepciones (no_std, tests de host)
 libs/pmm/            aricode-pmm: allocator de frames por bitmap sobre almacenamiento externo (no_std, tests de host)
 libs/heap/           aricode-heap: heap first-fit con lista de libres, fusión y cabecera por asignación (no_std, tests de host)
-libs/sync/           aricode-sync: IrqLock/SpinLock con política de interrupciones enchufable (no_std, tests de host)
-libs/sched/          aricode-sched: política round robin sobre Tid con estados, sueño, bloqueo y salida (no_std + alloc, tests de host)
+libs/sync/           aricode-sync: IrqLock/SpinLock con política de interrupciones enchufable, restaurada entre giros; force_unlock (no_std, tests de host)
+libs/iommu/          aricode-iommu: Intel VT-d: registros, capacidades, entradas raíz/contexto, paginación de segundo nivel, registros de fallo (no_std, tests de host)
+libs/sched/          aricode-sched: política round robin sobre Tid con estados, sueño, bloqueo, salida, varias CPUs, afinidad y despertares pendientes (no_std + alloc, tests de host)
 libs/handles/        aricode-handles: tabla de handles con generación y derechos, duplicación solo reductora (no_std + alloc, tests de host)
 libs/initrd/         aricode-initrd: formato del initrd, lector sin copia (no_std) y escritor (feature `write`, xtask); tests de host
 libs/acpi/           aricode-acpi: RSDP, XSDT/RSDT, MADT (LAPIC, I/O APIC, overrides), MCFG; sin AML (no_std + alloc, tests de host)
@@ -224,14 +227,17 @@ las activa; a partir de ahí la identidad del cargador deja de existir:
 
 ## Sincronización
 
-Todo el estado global (consola de framebuffer, PMM, VMM, heap, GDT/TSS/IDT,
+Todo el estado global (consola de framebuffer, PMM, VMM, heap, IDT,
 planificador, tabla de procesos, colas de espera) vive tras `sync::IrqLock`,
 que guarda `RFLAGS.IF`, ejecuta `cli` al tomar y restaura al soltar: una
-sección crítica no puede ser interrumpida ni reentrada por un handler. Con una
-CPU, encontrar un lock tomado solo puede ser reentrada, así que `lock` entra
-en pánico tras muchos giros en vez de colgar. La consola usa `try_lock` y cae
-a solo serie si está tomada (una excepción dentro de la propia consola no
-bloquea el diagnóstico).
+sección crítica no puede ser interrumpida ni reentrada por un handler. Entre
+giros de espera las interrupciones vuelven a su estado (Fase 32): una CPU que
+espera un lock de otra sigue atendiendo IPI. Un lock tomado durante muchos
+giros es reentrada (una CPU) o bloqueo mutuo, así que `lock` entra en pánico
+en vez de colgar. La consola usa `try_lock` y cae a solo serie si está tomada
+(una excepción dentro de la propia consola no bloquea el diagnóstico). El
+estado propio de cada CPU (GDT, TSS, hilo actual, quantum) no lleva lock:
+solo lo toca su CPU con interrupciones deshabilitadas (`cpu::Cpu`).
 
 Anidamientos reales (un lock exterior se mantiene mientras se toma el
 interior); cualquier otro par se toma en secuencia, nunca anidado:
@@ -248,8 +254,14 @@ heap.heap, console    hoja: nunca llaman a otro subsistema
 Prohibiciones que se derivan: nunca entrar al VMM con el PMM tomado (el
 mapper podría necesitar una tabla y reentrar en el PMM); nunca tomar la
 tabla de procesos desde dentro del planificador (`reap` suelta el
-planificador antes de liberar un espacio de usuario); el lock del
-planificador se suelta siempre antes de un cambio de contexto. El lock de
+planificador antes de liberar un espacio de usuario). El lock del
+planificador es la excepción al patrón guard: se mantiene tomado durante el
+cambio de contexto y lo suelta el hilo que reanuda con `force_unlock` (o
+`thread_first_run` en su primera ejecución), porque con varias CPUs el hilo
+saliente no puede quedar en la cola de listos antes de que su `rsp` esté
+guardado. `smp::flush_others` (TLB shootdown) exige interrupciones
+habilitadas y ningún lock tomado: espera a las demás CPUs y estas pueden
+estar esperando el mismo lock. El lock de
 crecimiento del heap (`mapped`) es distinto del lock del allocator (`heap`):
 una asignación toma el segundo, un crecimiento el primero y luego el
 segundo brevemente para añadir la región.
@@ -321,9 +333,10 @@ segundo brevemente para añadir la región.
   del proceso; arranca en ring 0, fija nada más y salta a ring 3 con `iretq`.
   En cada cambio de contexto el planificador carga el CR3 del hilo siguiente
   si difiere y fija su pila de kernel en `TSS.rsp0` y en la entrada `syscall`.
-- `syscall_entry` guarda el `rsp` de usuario, carga la pila de kernel del
-  hilo, construye un `SyscallFrame`, habilita interrupciones y despacha en
-  Rust; antes de `sysretq` las deshabilita. Convención en `sdk/abi`: `rax`
+- `syscall_entry` hace `swapgs`, guarda el `rsp` de usuario en el scratch de
+  la CPU (`gs:`), carga la pila de kernel del hilo, construye un
+  `SyscallFrame`, habilita interrupciones y despacha en Rust; antes de
+  `sysretq` las deshabilita y deshace el `swapgs`. Convención en `sdk/abi`: `rax`
   número, `rdi rsi rdx r10 r8 r9` argumentos, resultado en `rax`, negativo
   `-4095..=-1` = error. Syscalls actuales: `process_exit`, `console_write`,
   `thread_yield`, `thread_sleep`, `thread_get_tid`, `abi_version`,
@@ -825,6 +838,87 @@ segundo brevemente para añadir la región.
   WASM acota memoria al tamaño actual, la inicializa a cero y ejecuta
   `start`; `keygen` crea la semilla con modo 0600.
 
+## SMP (Fase 32)
+
+```text
+kernel/src/cpu.rs              Cpu por procesador (GDT, TSS + pila #DF, hilo actual, quantum, scratch syscall), GS base
+kernel/src/arch/x86_64/smp.rs  trampolín 0x8000, tablas de arranque, INIT-SIPI, ap_entry, TLB shootdown, halt_others
+kernel/src/arch/x86_64/apic.rs ICR: send_ipi, broadcast_ipi, send_init, send_startup; vectores 0x21 RESCHED, 0x22 TLB_FLUSH, 0x23 HALT
+libs/sched                     cola compartida, current/idle por CPU, afinidad, despertares pendientes
+```
+
+- Arranque: tras `task::init` el BSP copia el trampolín a `0x8000` (memoria
+  baja reservada por el PMM y nunca devuelta al reclamar la de arranque),
+  construye tres frames de tablas (copia del PML4 del kernel + identidad de
+  2 MiB) y, por cada LAPIC de la MADT distinto del suyo, crea el hilo idle de
+  esa CPU (su pila es la del arranque del AP), escribe los parámetros
+  (PML4, rsp, `ap_entry`, índice) y envía INIT, 10 ms, SIPI, 1 ms, SIPI si
+  aún no está en línea, y espera hasta 500 ms. El AP recorre modo real ->
+  protegido -> largo (PAE, `EFER.LME|NXE`), salta a `ap_entry`, carga el CR3
+  del kernel y CR0/CR4 del BSP, instala su GDT/TSS, la IDT compartida,
+  `syscall`, `IA32_GS_BASE`, su LAPIC (timer con la cuenta calibrada por el
+  BSP), adopta su idle y habilita interrupciones. Las tablas de arranque se
+  liberan al terminar.
+- Por CPU: `Cpu` estático con `self_ptr` en `gs:[0]`; `cpu::current_tid()`
+  y `cpu::id()` son un solo acceso relativo a GS (atómico frente a
+  migraciones). `swapgs` en `syscall_entry`/`sysretq`, en
+  `interrupt_common` cuando `cs & 3 == 3` (a la entrada y a la salida) y en
+  `usermode::enter` (con `cli` antes). `TSS.rsp0` y el scratch de `syscall`
+  se fijan en cada cambio de contexto en la CPU que conmuta.
+- Planificación: solo el BSP llama a `time::tick` y `wake_due`; los APs solo
+  consumen quantum. Cuando un hilo pasa a listo (`spawn`, `wake`, dormidos
+  que despiertan) y otra CPU está en su idle se le envía `RESCHED`; el bucle
+  idle comprueba la cola con IF = 0 y duerme con `sti; hlt` (sin ventana). Un
+  hilo migra libremente salvo afinidad (`spawn_on`, `set_affinity`).
+- TLB: los slots de pila de hilo no se reutilizan y un proceso muerto ya no
+  tiene su CR3 en ninguna CPU (cada cambio a otro espacio recarga CR3), así
+  que las rutas normales de liberación siguen con `invlpg` local. Para
+  desmapeos de la mitad del kernel en uso por otras CPUs existe
+  `vmm::flush_page` (local + `TLB_FLUSH` con confirmación); el receptor
+  invalida la página o, con dirección 0, todo el TLB alternando `CR4.PGE`.
+- Pánico: `halt_others` envía `HALT` a las demás CPUs antes del volcado, que
+  indica la CPU; las excepciones fatales también.
+- `system_info(CPUS)` y `cpus` en arish. Pruebas: `test=smp` y escenarios
+  `smp.*`; `cargo xtask test --cpus N` como estrés de toda la suite.
+
+## IOMMU (Fase 33)
+
+```text
+libs/acpi                      DMAR: DRHD (ámbitos, INCLUDE_PCI_ALL), RMRR
+libs/iommu                     registros, Capability/ExtendedCapability, RootEntry, ContextEntry, SecondLevel (3/4 niveles), FaultRecord
+kernel/src/iommu.rs            unidades, dominios por proceso, attach/map_region/unmap_everywhere/release, interrupción de fallo (vector 0x24)
+```
+
+- Arranque: tras enumerar PCI, `iommu::init` mapea los registros de cada
+  DRHD sin caché, elige los niveles de paginación (4 si SAGAW lo permite, si
+  no 3, el mínimo entre unidades), programa la tabla raíz (`RTADDR` +
+  `SRTP`), la interrupción de fallo (MSI al LAPIC del BSP, vector 0x24),
+  invalida contextos e IOTLB y activa la traducción (`TE`). Si la unidad no
+  es coherente con la caché (`ECAP.C = 0`, como en QEMU) cada entrada
+  escrita se `clflush`ea.
+- Dominios: uno por proceso, creado al primer `dma_alloc`, `mmio_map` de un
+  DMA o mapeo de un dispositivo; DID desde 1 con lista de libres. Las
+  tablas de segundo nivel mapean IOVA = física con R+W en páginas de 4 KiB.
+- Asignación: los objetos MMIO que `pci::claim` entrega (configuración y
+  BARs) llevan el `source_id` de la función; al mapear uno, el kernel escribe
+  la entrada de contexto de esa función (tabla de contexto del bus creada
+  bajo demanda) apuntando a las tablas del dominio del proceso, mapea sus
+  RMRR y hace una invalidación global en la unidad.
+- Liberación: `DmaBuffer::drop` retira la región de todos los dominios
+  antes de devolver los frames; `release_address_space` destruye el dominio
+  del proceso (entradas de contexto a no presente, invalidación, tablas al
+  PMM).
+- Fallos: la unidad escribe los FRCD y dispara la MSI; el handler los
+  decodifica (`bus:dev.fn`, lectura/escritura, dirección, motivo), los
+  limpia y los cuenta; `system_info(IOMMU)` devuelve unidades, dominios y
+  fallos.
+- QEMU: `-device intel-iommu,aw-bits=48` antes de los dispositivos y
+  `iommu_platform=on` en cada virtio; el transporte acepta
+  `VIRTIO_F_ACCESS_PLATFORM` siempre que se ofrezca. Orden de locks:
+  `PROCESSES -> IOMMU -> PMM`; nunca al revés.
+- Pruebas: `test=iommu` (`dma_rogue`) y `iommu.enabled`; con
+  `--cpus 4` toda la suite corre traducida en SMP.
+
 ## Deuda conocida
 
 - No hay reinicio automático tras `updater` ni prueba de dos arranques
@@ -855,8 +949,9 @@ segundo brevemente para añadir la región.
   reutiliza por dirección física; no hay `mmio_unmap` ni caché de bloques.
 - El device manager (sección 29) vive dentro de `init`: enumera, reclama y
   lanza drivers; separarlo en un servicio propio cuando haya más de uno.
-- Sin IOMMU (Fase 33): un buffer DMA es memoria autorizada solo por
-  convención del driver.
+- El IOMMU invalida globalmente tras cada cambio y no remapea
+  interrupciones; sin variante AMD-Vi ni dominios compartidos entre
+  procesos.
 - `init` todavía no recibe endpoints de los servicios que lanza ni puede
   pasarles capabilities al crearlos: llegará con el device manager (Fase 16).
 - Los benchmarks (sección 69) necesitan una máquina de referencia o KVM
@@ -870,7 +965,9 @@ segundo brevemente para añadir la región.
   syscalls `memory_map`/`memory_unmap` y la creación de hilos desde usuario
   son parte del conjunto previsto en la sección 22 y llegarán con el IPC
   (Fase 14) y el runtime (Fase 27).
-- Sin prioridades ni afinidad: solo round robin en una CPU (Fase 32 para SMP).
+- Sin prioridades ni balanceo de carga: round robin sobre una cola
+  compartida entre CPUs, con afinidad opcional. Las IRQ de dispositivo van
+  siempre al BSP.
 - Los slots de pila no se reutilizan (uno por tid); el espacio virtual
   reservado permite ~2^31 hilos, así que no es un límite práctico aún.
 - El LAPIC también queda cubierto por el mapa físico lineal con caché WB;
@@ -882,8 +979,9 @@ segundo brevemente para añadir la región.
   creadas durante un crecimiento fallido tampoco se devuelven (se reutilizan).
 - Las tablas del cargador (tipo `Kernel` en el mapa) no se recuperan: su
   extensión no se conoce con precisión.
-- La invalidación de TLB es local y explícita en cada ruta que desmapea
-  (heap al deshacer un crecimiento, pilas de hilo al liberarse, autoprueba
-  del VMM, con `invlpg`); no existe un mecanismo genérico ni TLB shootdown
-  entre CPUs, que llegará con SMP (Fase 32).
+- La invalidación de TLB sigue siendo explícita en cada ruta que desmapea:
+  local (`invlpg`) donde ninguna otra CPU pudo usar la traducción (heap al
+  deshacer un crecimiento, pilas de hilo que no se reutilizan) y con
+  shootdown (`vmm::flush_page`) en la autoprueba del VMM y `test=smp`; no
+  hay un mecanismo genérico que decida solo.
 - El loader depende de la crate `uefi` (ver ADR 0006).

@@ -1,32 +1,30 @@
 //! Entrada de syscalls por la instrucción `syscall` (Fase 11).
 //!
-//! `syscall` no cambia de pila: la entrada guarda el `rsp` de usuario en un
-//! scratch, carga la pila de kernel del hilo actual (fijada en cada cambio
-//! de contexto) y construye un `SyscallFrame` con los argumentos. Las
-//! interrupciones llegan enmascaradas por `IA32_FMASK` y se habilitan una vez
-//! en la pila de kernel; se vuelven a deshabilitar antes de `sysretq`.
+//! `syscall` no cambia de pila: la entrada intercambia GS (`swapgs`) para
+//! ver el `Cpu` de esta CPU, guarda el `rsp` de usuario en su scratch, carga
+//! la pila de kernel del hilo actual (fijada en cada cambio de contexto) y
+//! construye un `SyscallFrame` con los argumentos. Las interrupciones llegan
+//! enmascaradas por `IA32_FMASK` y se habilitan una vez en la pila de
+//! kernel; se vuelven a deshabilitar antes de `sysretq`, que va precedido
+//! del `swapgs` de vuelta.
 //!
-//! Con una CPU, los scratch estáticos son seguros: entre `syscall` y la carga
-//! de la pila de kernel no puede entrar nadie (IF = 0).
+//! El scratch es por CPU: entre `syscall` y la carga de la pila de kernel
+//! no puede entrar nadie en esta CPU (IF = 0) y otra CPU usa el suyo.
 
 use super::msr;
+use crate::cpu::{OFF_KERNEL_RSP, OFF_USER_RSP};
 use aricode_x86_cpu::layout;
 use core::arch::global_asm;
-
-/// Pila de kernel del hilo actual para la próxima entrada por `syscall`.
-#[no_mangle]
-static mut SYSCALL_KERNEL_RSP: u64 = 0;
-#[no_mangle]
-static mut SYSCALL_USER_RSP: u64 = 0;
 
 global_asm!(
     r#"
 .section .text.syscall_entry, "ax"
 .global syscall_entry
 syscall_entry:
-    mov [rip + SYSCALL_USER_RSP], rsp
-    mov rsp, [rip + SYSCALL_KERNEL_RSP]
-    push qword ptr [rip + SYSCALL_USER_RSP]
+    swapgs
+    mov gs:[{user_rsp}], rsp
+    mov rsp, gs:[{kernel_rsp}]
+    push qword ptr gs:[{user_rsp}]
     push r11        // rflags de usuario
     push rcx        // rip de usuario
     push rax        // numero
@@ -50,8 +48,11 @@ syscall_entry:
     pop rcx
     pop r11
     pop rsp
+    swapgs
     sysretq
-"#
+"#,
+    user_rsp = const OFF_USER_RSP,
+    kernel_rsp = const OFF_KERNEL_RSP,
 );
 
 extern "C" {
@@ -74,7 +75,8 @@ pub struct SyscallFrame {
     pub user_rsp: u64,
 }
 
-/// Habilita `syscall`/`sysret` y apunta la entrada.
+/// Habilita `syscall`/`sysret` y apunta la entrada. Los MSR son por CPU:
+/// cada una lo llama al arrancar.
 pub fn init() {
     // SAFETY: los valores siguen el layout de la GDT y la entrada está enlazada.
     unsafe {
@@ -84,13 +86,6 @@ pub fn init() {
         // Enmascarar IF, TF, DF y AC al entrar.
         msr::write(msr::IA32_FMASK, (1 << 9) | (1 << 8) | (1 << 10) | (1 << 18));
     }
-}
-
-/// Pila de kernel para la próxima entrada por `syscall`.
-pub fn set_kernel_stack(top: u64) {
-    // SAFETY: escritura de un scratch de una sola CPU con interrupciones
-    // deshabilitadas por el llamador (cambio de contexto).
-    unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!(SYSCALL_KERNEL_RSP), top) };
 }
 
 /// Punto de entrada Rust. Retorna el valor para `rax`.

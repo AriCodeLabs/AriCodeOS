@@ -12,6 +12,7 @@ aricode-proto = { path = "../../sdk/proto" }
 aricode-net = { path = "../../libs/net" }
 aricode-input = { path = "../../libs/input" }
 aricode-gfx = { path = "../../libs/gfx" }
+aricode-virtio = { path = "../../libs/virtio" }
 
 [build-dependencies]
 aricode-build = { path = "../../sdk/build" }

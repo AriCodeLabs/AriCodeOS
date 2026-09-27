@@ -47,6 +47,7 @@ payload = "hola desde el host"  # el eco se anota en la captura como "[host] son
 
 disk = "slots"                  # estado inicial del disco: slots (defecto) | esp-only | pending-b | b-exhausted | b-corrupt
 disk_readonly = false           # true: el disco de pruebas se presenta como solo lectura
+cpus = 4                        # procesadores (-smp N); sin declarar: 1, o lo que fuerce `--cpus N`
 
 [host_input]                    # opcional: entrada inyectada por QMP al ver marker
 marker = "INPUT_READY"
@@ -78,11 +79,22 @@ identifica el paso fallido.
 Cada fase del roadmap añade su área y sus escenarios. Existentes: `boot`,
 `panic`, `console`, `interrupts`, `memory`, `timer`, `threads`, `scheduler`,
 `user`, `capabilities`, `ipc`, `init`, `drivers`, `acpi`, `pci`, `virtio`,
-`storage`, `filesystem`, `shell`, `network`, `input`, `gui`, `sandbox`, `wasm`, `crypto`, `update`.
+`storage`, `filesystem`, `shell`, `network`, `input`, `gui`, `sandbox`, `wasm`, `crypto`, `update`, `smp`, `iommu`.
 Una rama `feature/f05-physical-memory` ejecuta `--area memory` mientras
 desarrolla y `--all` antes de integrar. Si el filtro no selecciona ningún
 escenario QEMU, el runner falla y lista las áreas conocidas: un filtro mal
 escrito nunca produce un éxito vacío.
+
+## Varias CPUs
+
+Los escenarios arrancan con una CPU salvo que declaren `cpus = N`; los de
+la Fase 32 usan 4 (y `cpus = 1` el que prueba la degradación a una sola).
+`cargo xtask test --all --cpus 4` arranca con cuatro procesadores todos los
+escenarios que no declaran `cpus`: es la prueba de estrés del kernel SMP y debe
+pasar entera antes de integrar cambios en el planificador, los locks o las
+rutas de entrada a ring 0. Las autopruebas con expectativas de reparto en una
+sola CPU (`scheduler.selftest`, `threads.selftest`) fijan sus hilos a la
+CPU 0 para valer con cualquier `--cpus`.
 
 ## Logs
 

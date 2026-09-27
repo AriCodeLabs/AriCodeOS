@@ -14,9 +14,11 @@ mod acpi;
 mod arch;
 mod console;
 mod console_input;
+mod cpu;
 mod framebuffer;
 mod hw;
 mod initrd;
+mod iommu;
 mod ipc;
 mod memory;
 mod object;
@@ -125,10 +127,12 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     info!("interrupciones habilitadas");
 
     task::init();
+    arch::x86_64::smp::start_aps(info);
     random::init();
     console_input::init();
     initrd::init(info);
     pci::init();
+    iommu::init();
 
     if cmdline.get(keys::TEST).is_some() {
         run_requested_test(&cmdline, info);
@@ -273,6 +277,8 @@ fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
         "timer" => time::selftest(),
         "threads" => task::scheduler::threads_selftest(),
         "sched" => task::scheduler::selftest(),
+        "smp" => task::scheduler::smp_selftest(),
+        "iommu" => iommu::selftest(),
         "ipc" => ipc::selftest(),
         "drivers" => hw::selftest(info),
         "random" => random::selftest(),
@@ -350,6 +356,7 @@ fn run_init(arg: u64, fb: boot_protocol::FramebufferInfo) {
         phys: fb.address,
         len: fb.size,
         cacheable: false,
+        source_id: None,
     }));
     let pid = user::process::spawn_with_handles_and_arg(
         "init",
@@ -442,6 +449,8 @@ pub fn halt_loop() -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    // Las demás CPUs se detienen para que el volcado no se mezcle con nada.
+    arch::x86_64::smp::halt_others();
     // Solo serie: el panic puede ocurrir con la consola de framebuffer a medio
     // escribir y no debe tocar estado compartido.
     serial_println!();
@@ -452,6 +461,7 @@ fn panic(info: &PanicInfo) -> ! {
         serial_println!("Where: {}:{}:{}", loc.file(), loc.line(), loc.column());
     }
     serial_println!("Reason: {}", info.message());
+    serial_println!("CPU: {}", cpu::id());
     serial_println!("============================");
     finish(qemu::ExitCode::Failed)
 }
