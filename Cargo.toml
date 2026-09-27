@@ -23,6 +23,9 @@ members = [
     "libs/input",
     "libs/gfx",
     "sdk/abi",
+    "sdk/runtime",
+    "sdk/build",
+    "apps/hello",
     "sdk/rust",
     "sdk/proto",
     "user/testprogs",
@@ -64,7 +67,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 license = "UNLICENSED"
 repository = "https://github.com/lynxcraft/aricodeos"

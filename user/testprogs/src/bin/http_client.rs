@@ -5,10 +5,10 @@
 #![no_main]
 
 use aricode_proto::net::{Status, TEST_HTTP_PORT};
-use user_testprogs::fmt_u64;
-use user_testprogs::sys::http::{self, HttpError};
-use user_testprogs::sys::net::{NetClient, NetError};
-use user_testprogs::sys::{self, Handle};
+use aricode_rt::fmt_u64;
+use aricode_rt::sys::http::{self, HttpError};
+use aricode_rt::sys::net::{NetClient, NetError};
+use aricode_rt::sys::{self, Handle};
 
 const NETD: Handle = Handle(0x0001_0004);
 const HW: Handle = Handle(0x0001_0005);
@@ -61,4 +61,4 @@ fn main(_arg: u64) -> u64 {
     0
 }
 
-user_testprogs::entry!(main);
+aricode_rt::entry!(main);

@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.1.1 + Fases 25 (virtio-input) y 26 (GUI básica) en desarrollo
+## Estado: 0.2.0 (Fases 0 a 27)
 
 ```text
 OVMF (UEFI)
@@ -57,6 +57,9 @@ libs/http/           aricode-http: GET, análisis de respuestas, Content-Length 
 libs/net/            aricode-net: Ethernet, ARP, IPv4, ICMP, UDP, TCP, cliente DHCP y DNS sin alloc (no_std, tests de host)
 libs/arifs/          aricode-arifs: AriFS v0, directorio plano con tabla de ficheros de capacidad fija sobre `BlockDevice` (no_std, tests de host)
 sdk/proto/           aricode-proto: protocolos IPC versionados de los servicios (bloques v1, ficheros v1, red v1, entrada v1, ventanas v1) (no_std, tests de host)
+sdk/runtime/         aricode-rt: runtime de programas de usuario (`entry!`, heap de 256 KiB, panic, fmt); reexporta aricode-sys
+sdk/build/           aricode-build: `build.rs` de una línea que enlaza con `sdk/rust/user.ld`
+apps/hello/          hello_app: aplicación de ejemplo del SDK (consola, permisos, tiempo)
 sdk/abi/             aricode-abi: números de syscall, errores, handles iniciales, derechos y tipos de objeto (no_std, tests de host)
 sdk/rust/            aricode-sys: wrappers de syscall (no_std, sin alloc), clientes de los servicios de bloques, ficheros y red, cliente HTTP GET, transporte virtio PCI para drivers, y `user.ld`, el linker script de todo programa de usuario
 user/testprogs/      programas de prueba de ring 3 (Rust y ensamblador) enlazados como ELF estáticos en 0x400000
@@ -692,8 +695,25 @@ segundo brevemente para añadir la región.
 - La sonda QMP de xtask envía ahora ratón, clic y teclas en ese orden con
   100 ms entre fases.
 
+## SDK de aplicaciones (Fase 27)
+
+- El runtime de usuario (`_start`, heap estático, panic handler, `fmt_u64`
+  y `fmt_hex`) vive en `aricode-rt`; `user/testprogs` vuelve a ser solo
+  binarios de prueba y todos los servicios dependen del mismo runtime. Los
+  ocho `build.rs` duplicados se redujeron a `aricode_build::user_program()`,
+  que apunta al linker script del SDK desde su propio `CARGO_MANIFEST_DIR`.
+- `aricode-sys` gana `time` (reloj sobre `SYSTEM`) y `permissions`
+  (recorrer los handles recibidos, comprobar tipos, cerrar los que sobran).
+  `docs/sdk.md` describe el contrato completo de un programa.
+- El shell recibe un `SPAWNER` (init ahora puede transferir el suyo) y
+  ejecuta `run PROGRAMA [ARG]`: el hijo solo recibe la consola, su proceso,
+  su hilo y un `SYSTEM` de solo lectura. `hello_app` lo demuestra en
+  `shell.commands`.
+
 ## Deuda conocida
 
+- Sin manifiestos ni broker de capabilities (Fase 28): quien lanza decide a
+  mano qué handles entrega.
 - La GUI no mueve ni redimensiona ventanas, repinta la pantalla completa
   en cada frame y no tiene terminal gráfico; el shell sigue en la serie.
 - Sin xHCI/USB HID: solo dispositivos virtio-input; el shell sigue leyendo

@@ -3,7 +3,7 @@
 #![no_std]
 #![no_main]
 
-use user_testprogs::sys::{self, rights, Error, Handle, TIMEOUT_INFINITE};
+use aricode_rt::sys::{self, rights, Error, Handle, TIMEOUT_INFINITE};
 
 const EP: Handle = Handle(0x0001_0004);
 const ROUND_TRIPS: usize = 1000;
@@ -73,4 +73,4 @@ fn main(_arg: u64) -> u64 {
     0
 }
 
-user_testprogs::entry!(main);
+aricode_rt::entry!(main);

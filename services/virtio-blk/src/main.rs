@@ -12,9 +12,9 @@
 extern crate alloc;
 
 use aricode_proto::block::{Op, Reply, Request, Status, MAX_SECTORS};
+use aricode_rt::sys::virtio_pci::{DmaRegion, Queue, Transport, IRQ, SERVICE};
+use aricode_rt::sys::{self, Error, Handle, TIMEOUT_INFINITE};
 use aricode_virtio::blk;
-use user_testprogs::sys::virtio_pci::{DmaRegion, Queue, Transport, IRQ, SERVICE};
-use user_testprogs::sys::{self, Error, Handle, TIMEOUT_INFINITE};
 
 fn say(msg: &[u8]) {
     sys::print(b"virtio-blk: ");
@@ -125,15 +125,15 @@ fn report_partitions(dev: &mut Device) {
     match aricode_gpt::partitions(&header, &table, &mut parts) {
         Ok(n) => {
             sys::print(b"virtio-blk: GPT con ");
-            sys::print(user_testprogs::fmt_u64(n as u64, &mut buf));
+            sys::print(aricode_rt::fmt_u64(n as u64, &mut buf));
             sys::print(b" particion(es)\n");
             for p in parts.iter().flatten() {
                 sys::print(b"virtio-blk:   ");
                 sys::print(p.name_str().as_bytes());
                 sys::print(b" LBA ");
-                sys::print(user_testprogs::fmt_u64(p.first_lba, &mut buf));
+                sys::print(aricode_rt::fmt_u64(p.first_lba, &mut buf));
                 sys::print(b"..");
-                sys::print(user_testprogs::fmt_u64(p.last_lba, &mut buf));
+                sys::print(aricode_rt::fmt_u64(p.last_lba, &mut buf));
                 sys::print(b"\n");
             }
         }
@@ -261,10 +261,10 @@ fn main(mask: u64) -> u64 {
     let mut buf = [0u8; 20];
     say(b"dispositivo listo");
     sys::print(b"virtio-blk: capacidad ");
-    sys::print(user_testprogs::fmt_u64(dev.capacity(), &mut buf));
+    sys::print(aricode_rt::fmt_u64(dev.capacity(), &mut buf));
     sys::print(b" sectores\n");
     report_partitions(&mut dev);
     serve(&mut dev)
 }
 
-user_testprogs::entry!(main);
+aricode_rt::entry!(main);

@@ -2,7 +2,7 @@
 #![no_std]
 #![no_main]
 
-use user_testprogs::sys::{self, kind, rights, Error, Handle};
+use aricode_rt::sys::{self, kind, rights, Error, Handle};
 
 fn main(_arg: u64) -> u64 {
     if sys::object_kind(Handle::CONSOLE) != Ok(kind::CONSOLE) {
@@ -37,4 +37,4 @@ fn main(_arg: u64) -> u64 {
     11
 }
 
-user_testprogs::entry!(main);
+aricode_rt::entry!(main);

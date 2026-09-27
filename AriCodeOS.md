@@ -2575,19 +2575,26 @@ clic y tecla; A nunca ve eventos ajenos.
 
 # FASE 27 — Application SDK
 
-SDK inicial Rust.
+**Estado: completada (2026-09-27).** Ver `docs/sdk.md`.
 
-APIs:
+SDK inicial Rust, en `sdk/`: `aricode-abi`, `aricode-sys` (syscalls y
+clientes de servicios), `aricode-proto` (protocolos), `aricode-rt` (runtime:
+`entry!`, heap, panic, formato) y `aricode-build` (enlace). El runtime dejó
+de vivir en los programas de prueba: servicios, aplicaciones y tests
+dependen de las mismas crates. `apps/hello` es la aplicación de ejemplo y el
+shell puede lanzar programas del initrd con `run` (recibe un `SPAWNER`).
+
+APIs y dónde están:
 
 ```text
-process
-ipc
-filesystem
-network
-window
-input
-time
-permissions
+process      sys::process_spawn_with / process_wait / process_exit
+ipc          sys::endpoint_create / ipc_send / ipc_receive
+filesystem   sys::fs::FsClient
+network      sys::net::NetClient, sys::http::get
+window       sys::window::Window (lienzo aricode-gfx)
+input        sys::input::InputClient, aricode-input::Keyboard
+time         sys::time::{uptime_ms, Clock, sleep_ms}
+permissions  sys::permissions::{granted, kind_name, is, drop_handle}
 ```
 
 ---
@@ -3265,6 +3272,22 @@ basic drivers
 ```
 
 Todavía sin ser un sistema operativo de escritorio completo.
+
+## 94.1 AriCodeOS 0.2
+
+**Estado: completada (2026-09-27), tag `v0.2.0`.** Fases 25 a 27:
+
+- entrada moderna: virtio-input (teclado y ratón) con eventos sellados en el
+  tiempo y traducción de teclado en el cliente;
+- GUI básica: compositor en ring 3 dueño del framebuffer, ventanas con
+  buffer propio, cursor, foco y enrutado de entrada; dos aplicaciones
+  aisladas dibujan a la vez;
+- SDK de aplicaciones: runtime común (`aricode-rt`), `aricode-build`, APIs
+  de proceso, IPC, ficheros, red, ventanas, entrada, tiempo y permisos,
+  documentadas en `docs/sdk.md`; `apps/hello` y `run` en el shell.
+
+Siguiente: 0.3 con el sandbox de aplicaciones (Fase 28) y el runtime WASM
+(Fase 29).
 
 ---
 

@@ -9,6 +9,8 @@ pub mod fs;
 pub mod http;
 pub mod input;
 pub mod net;
+pub mod permissions;
+pub mod time;
 pub mod virtio_pci;
 pub mod window;
 

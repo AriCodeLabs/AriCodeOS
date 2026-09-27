@@ -3,7 +3,7 @@
 #![no_std]
 #![no_main]
 
-use user_testprogs::sys::{self, Handle};
+use aricode_rt::sys::{self, Handle};
 
 const FB: Handle = Handle(0x0001_0004);
 const COLOR: u32 = 0x00FF_8800;
@@ -29,4 +29,4 @@ fn main(stride: u64) -> u64 {
     0
 }
 
-user_testprogs::entry!(main);
+aricode_rt::entry!(main);

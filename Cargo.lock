@@ -3,71 +3,85 @@
 version = 4
 
 [[package]]
-name = "ari-compositor"
-version = "0.1.1"
+name = "ari-app-hello"
+version = "0.2.0"
 dependencies = [
+ "aricode-build",
+ "aricode-rt",
+]
+
+[[package]]
+name = "ari-compositor"
+version = "0.2.0"
+dependencies = [
+ "aricode-build",
  "aricode-gfx",
  "aricode-input",
  "aricode-proto",
+ "aricode-rt",
  "aricode-sys",
- "user-testprogs",
 ]
 
 [[package]]
 name = "ari-fsd"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "aricode-arifs",
+ "aricode-build",
  "aricode-proto",
+ "aricode-rt",
  "aricode-sys",
- "user-testprogs",
 ]
 
 [[package]]
 name = "ari-shell"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
+ "aricode-build",
  "aricode-net",
  "aricode-proto",
+ "aricode-rt",
  "aricode-sys",
- "user-testprogs",
 ]
 
 [[package]]
 name = "ari-virtio-blk"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
+ "aricode-build",
  "aricode-gpt",
  "aricode-proto",
+ "aricode-rt",
  "aricode-sys",
  "aricode-virtio",
- "user-testprogs",
 ]
 
 [[package]]
 name = "ari-virtio-input"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
+ "aricode-build",
  "aricode-input",
  "aricode-proto",
+ "aricode-rt",
  "aricode-sys",
- "user-testprogs",
 ]
 
 [[package]]
 name = "ari-virtio-net"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
+ "aricode-build",
  "aricode-net",
  "aricode-proto",
+ "aricode-rt",
  "aricode-sys",
  "aricode-virtio",
- "user-testprogs",
 ]
 
 [[package]]
 name = "ariboot"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "aricode-cmdline",
  "aricode-elf",
@@ -79,86 +93,99 @@ dependencies = [
 
 [[package]]
 name = "aricode-abi"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "aricode-acpi"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "aricode-arifs"
-version = "0.1.1"
+version = "0.2.0"
+
+[[package]]
+name = "aricode-build"
+version = "0.2.0"
 
 [[package]]
 name = "aricode-cmdline"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "aricode-elf"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "aricode-fb-console"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "aricode-gfx"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "aricode-fb-console",
 ]
 
 [[package]]
 name = "aricode-gpt"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "aricode-handles"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "aricode-heap"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "aricode-http"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "aricode-initrd"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "aricode-input"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "aricode-net"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "aricode-pci"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "aricode-pmm"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "aricode-proto"
-version = "0.1.1"
+version = "0.2.0"
+
+[[package]]
+name = "aricode-rt"
+version = "0.2.0"
+dependencies = [
+ "aricode-heap",
+ "aricode-sync",
+ "aricode-sys",
+]
 
 [[package]]
 name = "aricode-sched"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "aricode-sync"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "aricode-sys"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "aricode-abi",
  "aricode-gfx",
@@ -170,30 +197,31 @@ dependencies = [
 
 [[package]]
 name = "aricode-virtio"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "aricode-pci",
 ]
 
 [[package]]
 name = "aricode-x86-cpu"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "aricode-x86-paging"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "ariinit"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
+ "aricode-build",
+ "aricode-rt",
  "aricode-sys",
- "user-testprogs",
 ]
 
 [[package]]
 name = "arikernel"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "aricode-abi",
  "aricode-acpi",
@@ -227,7 +255,7 @@ checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
 name = "boot-protocol"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "cfg-if"
@@ -458,15 +486,14 @@ checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
 
 [[package]]
 name = "user-testprogs"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
+ "aricode-build",
  "aricode-gfx",
- "aricode-heap",
  "aricode-input",
  "aricode-net",
  "aricode-proto",
- "aricode-sync",
- "aricode-sys",
+ "aricode-rt",
 ]
 
 [[package]]
@@ -480,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "aricode-arifs",
  "aricode-gpt",

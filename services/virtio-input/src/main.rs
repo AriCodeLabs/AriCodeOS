@@ -7,8 +7,8 @@
 
 use aricode_input::Event;
 use aricode_proto::input::{Event as WireEvent, Op, Reply, Request, Status, MAX_EVENTS, MAX_NAME};
-use user_testprogs::sys::virtio_pci::{extra_handle, DmaRegion, Queue, Transport, IRQ, SERVICE};
-use user_testprogs::sys::{self, abi, Handle};
+use aricode_rt::sys::virtio_pci::{extra_handle, DmaRegion, Queue, Transport, IRQ, SERVICE};
+use aricode_rt::sys::{self, abi, Handle};
 
 /// `virtio_input_config`: select, subsel, size y la carga en el offset 8.
 const CFG_SELECT: u64 = 0;
@@ -219,4 +219,4 @@ fn main(mask: u64) -> u64 {
     }
 }
 
-user_testprogs::entry!(main);
+aricode_rt::entry!(main);
