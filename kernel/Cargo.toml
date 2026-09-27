@@ -29,4 +29,5 @@ aricode-acpi = { path = "../libs/acpi" }
 aricode-pci = { path = "../libs/pci" }
 aricode-crypto = { path = "../libs/crypto" }
 aricode-iommu = { path = "../libs/iommu" }
+aricode-input = { path = "../libs/input" }
 log = { version = "0.4", default-features = false }

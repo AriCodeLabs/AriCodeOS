@@ -1,0 +1,23 @@
+# Fase 34: consola de un portatil sin puerto serie. El host teclea "hola" +
+# Enter por QMP; sin inputd activo QEMU la entrega al teclado PS/2 del i8042 y
+# el kernel la recibe por IRQ1 en el anillo de la consola.
+name = "console.ps2"
+description = "teclado PS/2 (i8042) como entrada de consola: una linea por IRQ1"
+level = "full"
+areas = ["console", "hardware", "interrupts"]
+cmdline = "qemu_exit test=console_ps2"
+timeout_secs = 40
+
+[host_input]
+marker = "CONSOLE_PS2_READY"
+keys = ["h", "o", "l", "a", "ret"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "console: teclado PS/2 (GSI 1, vector 0x41)",
+    "console: linea PS/2 'hola' (4 bytes, 10 scancodes)",
+    "[host] QMP: 10 eventos de entrada enviados",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "nadie tecleo"]

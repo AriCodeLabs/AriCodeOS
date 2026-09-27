@@ -215,10 +215,15 @@ fn start_fsd(
 
 /// Lanza un cliente de un servicio con su endpoint (solo WRITE) y
 /// una capacidad de hardware para su buffer DMA, y espera su salida.
-fn run_block_client(name: &str, service: Handle) -> Result<u64, Error> {
+/// Desplazamiento del area en bruto dentro de ARI0 (el disco de pruebas la
+/// tiene en el LBA 4096 con ARI0 en el 34; la imagen USB, al mismo
+/// desplazamiento).
+const RAW_AREA_OFFSET: u64 = 4096 - 34;
+
+fn run_block_client(name: &str, service: Handle, arg: u64) -> Result<u64, Error> {
     let ep = sys::handle_duplicate(service, rights::WRITE | rights::TRANSFER)?;
     let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
-    let child = sys::process_spawn_with(SPAWNER, name, 0, &[ep, hw])?;
+    let child = sys::process_spawn_with(SPAWNER, name, arg, &[ep, hw])?;
     let result = sys::process_wait(child, TIMEOUT_INFINITE);
     let _ = sys::handle_close(child);
     result
@@ -625,18 +630,27 @@ fn main(arg: u64) -> u64 {
             };
             services |= SERVICE_BLOCK;
             block_service = Some(service);
-            // Servicio de ficheros sobre la particion ARI0 (LBA 34) y su cliente.
+            // Servicio de ficheros sobre la particion ARI0 (por nombre en la
+            // GPT: el disco de pruebas y la imagen USB la colocan en LBA
+            // distintos) y su cliente.
             let Ok(fs_ep) = sys::endpoint_create() else {
                 return 12;
             };
-            match start_fsd(fs_ep, service, 34) {
+            let ari0 = BlockClient::new(service, HARDWARE, 16)
+                .ok()
+                .and_then(|mut blk| find_partition(&mut blk, "ARI0"));
+            let Some((ari0_lba, _)) = ari0 else {
+                say(b"sin particion ARI0 en el disco");
+                return 12;
+            };
+            match start_fsd(fs_ep, service, ari0_lba) {
                 Ok(_) => services |= SERVICE_FS,
                 Err(e) => {
                     aricode_rt::print_error(b"AriInit: fsd", e);
                     return 13;
                 }
             }
-            match run_block_client("fs_client", fs_ep) {
+            match run_block_client("fs_client", fs_ep, 0) {
                 Ok(0) => {
                     say(b"servicio de ficheros ok");
                     fs_service = Some(fs_ep);
@@ -652,7 +666,7 @@ fn main(arg: u64) -> u64 {
                     return 14;
                 }
             }
-            match run_block_client("blk_client", service) {
+            match run_block_client("blk_client", service, ari0_lba + RAW_AREA_OFFSET) {
                 Ok(0) => say(b"servicio de bloques ok"),
                 Ok(code) => {
                     sys::print(b"AriInit: blk_client salio con ");
@@ -684,7 +698,7 @@ fn main(arg: u64) -> u64 {
                     return 17;
                 }
             }
-            match run_block_client("net_client", net_service) {
+            match run_block_client("net_client", net_service, 0) {
                 Ok(0) => say(b"servicio de red ok"),
                 Ok(code) => {
                     sys::print(b"AriInit: net_client salio con ");
@@ -697,7 +711,7 @@ fn main(arg: u64) -> u64 {
                     return 18;
                 }
             }
-            match run_block_client("tcp_client", net_service) {
+            match run_block_client("tcp_client", net_service, 0) {
                 Ok(0) => say(b"servicio TCP ok"),
                 Ok(code) => {
                     sys::print(b"AriInit: tcp_client salio con ");
@@ -710,7 +724,7 @@ fn main(arg: u64) -> u64 {
                     return 19;
                 }
             }
-            match run_block_client("http_client", net_service) {
+            match run_block_client("http_client", net_service, 0) {
                 Ok(0) => say(b"cliente HTTP ok"),
                 Ok(code) => {
                     sys::print(b"AriInit: http_client salio con ");

@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.5.0 (Fases 0 a 33)
+## Estado: 0.5.0 + preparación de la Fase 34 (Fases 0 a 33)
 
 ```text
 OVMF (UEFI)
@@ -46,6 +46,7 @@ libs/x86-cpu/        aricode-x86-cpu: descriptores GDT/TSS/IDT y tabla de excepc
 libs/pmm/            aricode-pmm: allocator de frames por bitmap sobre almacenamiento externo (no_std, tests de host)
 libs/heap/           aricode-heap: heap first-fit con lista de libres, fusión y cabecera por asignación (no_std, tests de host)
 libs/sync/           aricode-sync: IrqLock/SpinLock con política de interrupciones enchufable, restaurada entre giros; force_unlock (no_std, tests de host)
+libs/fat/            aricode-fat: FAT32 mínimo con nombres largos para construir y leer la ESP de la imagen USB (no_std + alloc, tests de host)
 libs/iommu/          aricode-iommu: Intel VT-d: registros, capacidades, entradas raíz/contexto, paginación de segundo nivel, registros de fallo (no_std, tests de host)
 libs/sched/          aricode-sched: política round robin sobre Tid con estados, sueño, bloqueo, salida, varias CPUs, afinidad y despertares pendientes (no_std + alloc, tests de host)
 libs/handles/        aricode-handles: tabla de handles con generación y derechos, duplicación solo reductora (no_std + alloc, tests de host)
@@ -918,6 +919,27 @@ kernel/src/iommu.rs            unidades, dominios por proceso, attach/map_region
   `PROCESSES -> IOMMU -> PMM`; nunca al revés.
 - Pruebas: `test=iommu` (`dma_rogue`) y `iommu.enabled`; con
   `--cpus 4` toda la suite corre traducida en SMP.
+
+## Hardware real (Fase 34, preparación)
+
+- `console_input` también lee el teclado PS/2 del i8042: inicialización
+  (puertos deshabilitados, configuración con IRQ1 y traducción, autotest,
+  puerto 1, `0xF4`), IRQ1 en el vector 0x41 y decodificación con
+  `aricode_input::ScancodeSet1` + `Keyboard` al mismo anillo que COM1. Es la
+  consola de un portátil sin serie; los teclados de verdad siguen en ring 3.
+  Sin controlador (estado 0xFF) se informa y se sigue.
+- `smp=off` e `iommu=off` en la cmdline saltan `smp::start_aps` e
+  `iommu::init` con una traza; `test=console_ps2` prueba el teclado con
+  entrada QMP.
+- `iommu::init` crea dominios identidad (claves `u32::MAX - n`) para los
+  dispositivos con RMRR y para los controladores gráficos (RMRR +
+  framebuffer GOP) antes de activar `TE`, y solo después enciende la
+  traducción.
+- `cargo xtask usb-image`: `image::write_usb_image` construye la ESP con
+  `aricode-fat` (64 MiB, clústeres de 512 bytes, LFN) a partir del directorio
+  ESP del escenario, más ARI0, SYSA (imagen firmada), SYSB/UPDATE vacías y
+  ARIBOOT; `disk = "usb-image"` arranca un escenario desde esa imagen sin el
+  disco `fat:` de QEMU. Guía en `docs/hardware.md`.
 
 ## Deuda conocida
 

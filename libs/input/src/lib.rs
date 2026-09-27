@@ -135,6 +135,100 @@ pub fn describe(ev: &Event) -> &'static str {
     }
 }
 
+/// Decodificador de scancodes del conjunto 1 (teclado PS/2 con traducción
+/// del i8042) a eventos evdev: los códigos 0x01..=0x58 coinciden con los
+/// keycodes de Linux; el prefijo `E0` introduce las teclas extendidas y
+/// `E1` (Pausa) se descarta con sus dos bytes.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ScancodeSet1 {
+    extended: bool,
+    skip: u8,
+}
+
+pub const KEY_KPENTER: u16 = 96;
+pub const KEY_RIGHTCTRL: u16 = 97;
+pub const KEY_KPSLASH: u16 = 98;
+pub const KEY_RIGHTALT: u16 = 100;
+pub const KEY_HOME: u16 = 102;
+pub const KEY_UP: u16 = 103;
+pub const KEY_PAGEUP: u16 = 104;
+pub const KEY_LEFT: u16 = 105;
+pub const KEY_RIGHT: u16 = 106;
+pub const KEY_END: u16 = 107;
+pub const KEY_DOWN: u16 = 108;
+pub const KEY_PAGEDOWN: u16 = 109;
+pub const KEY_INSERT: u16 = 110;
+pub const KEY_DELETE: u16 = 111;
+pub const KEY_LEFTMETA: u16 = 125;
+pub const KEY_RIGHTMETA: u16 = 126;
+pub const KEY_COMPOSE: u16 = 127;
+
+impl ScancodeSet1 {
+    pub const fn new() -> Self {
+        Self {
+            extended: false,
+            skip: 0,
+        }
+    }
+
+    fn extended_code(code: u8) -> Option<u16> {
+        Some(match code {
+            0x1C => KEY_KPENTER,
+            0x1D => KEY_RIGHTCTRL,
+            0x35 => KEY_KPSLASH,
+            0x38 => KEY_RIGHTALT,
+            0x47 => KEY_HOME,
+            0x48 => KEY_UP,
+            0x49 => KEY_PAGEUP,
+            0x4B => KEY_LEFT,
+            0x4D => KEY_RIGHT,
+            0x4F => KEY_END,
+            0x50 => KEY_DOWN,
+            0x51 => KEY_PAGEDOWN,
+            0x52 => KEY_INSERT,
+            0x53 => KEY_DELETE,
+            0x5B => KEY_LEFTMETA,
+            0x5C => KEY_RIGHTMETA,
+            0x5D => KEY_COMPOSE,
+            _ => return None,
+        })
+    }
+
+    /// Procesa un byte del teclado; devuelve el evento completo, si lo hay.
+    pub fn feed(&mut self, byte: u8) -> Option<Event> {
+        if self.skip > 0 {
+            self.skip -= 1;
+            return None;
+        }
+        match byte {
+            0xE0 => {
+                self.extended = true;
+                return None;
+            }
+            0xE1 => {
+                self.skip = 2;
+                return None;
+            }
+            _ => {}
+        }
+        let released = byte & 0x80 != 0;
+        let code = byte & 0x7F;
+        let extended = core::mem::take(&mut self.extended);
+        let key = if extended {
+            Self::extended_code(code)?
+        } else if (1..=0x58).contains(&code) {
+            code as u16
+        } else {
+            return None;
+        };
+        Some(Event {
+            kind: EV_KEY,
+            code: key,
+            value: if released { 0 } else { 1 },
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,5 +300,71 @@ mod tests {
 
     fn alloc_free_buf() -> [u8; 16] {
         [0; 16]
+    }
+
+    #[test]
+    fn scancode_set1_to_evdev_and_ascii() {
+        let mut d = ScancodeSet1::new();
+        let mut k = Keyboard::new();
+        // 'h' 'o' 'l' 'a' Enter, con sus sueltas.
+        let mut out = [0u8; 8];
+        let mut n = 0;
+        for byte in [0x23u8, 0xA3, 0x18, 0x98, 0x26, 0xA6, 0x1E, 0x9E, 0x1C, 0x9C] {
+            if let Some(ev) = d.feed(byte) {
+                if let Some(c) = k.feed(ev) {
+                    out[n] = c;
+                    n += 1;
+                }
+            }
+        }
+        assert_eq!(&out[..n], b"hola\n");
+        // Shift izquierdo (0x2A) + 'a' = 'A'.
+        assert_eq!(
+            d.feed(0x2A),
+            Some(Event {
+                kind: EV_KEY,
+                code: KEY_LEFTSHIFT,
+                value: 1
+            })
+        );
+        k.feed(d.feed(0x2A).unwrap());
+        assert_eq!(k.feed(d.feed(0x1E).unwrap()), Some(b'A'));
+        k.feed(d.feed(0xAA).unwrap());
+        // Extendidas: E0 48 = flecha arriba; E0 53 = suprimir; E0 con codigo desconocido se ignora.
+        assert_eq!(d.feed(0xE0), None);
+        assert_eq!(
+            d.feed(0x48),
+            Some(Event {
+                kind: EV_KEY,
+                code: KEY_UP,
+                value: 1
+            })
+        );
+        assert_eq!(d.feed(0xE0), None);
+        assert_eq!(
+            d.feed(0xD3),
+            Some(Event {
+                kind: EV_KEY,
+                code: KEY_DELETE,
+                value: 0
+            })
+        );
+        assert_eq!(d.feed(0xE0), None);
+        assert_eq!(d.feed(0x7F), None);
+        // Pausa (E1 1D 45) se descarta entera; lo siguiente se decodifica normal.
+        assert_eq!(d.feed(0xE1), None);
+        assert_eq!(d.feed(0x1D), None);
+        assert_eq!(d.feed(0x45), None);
+        assert_eq!(
+            d.feed(0x39),
+            Some(Event {
+                kind: EV_KEY,
+                code: 57,
+                value: 1
+            })
+        );
+        // Bytes fuera del conjunto (ACK 0xFA, 0x00) no producen nada.
+        assert_eq!(d.feed(0xFA), None);
+        assert_eq!(d.feed(0x00), None);
     }
 }

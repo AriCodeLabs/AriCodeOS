@@ -163,9 +163,11 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
 }
 
 /// Localiza las unidades de la DMAR, programa sus tablas raíz y su
-/// interrupción de fallo y activa la traducción. Debe llamarse tras el
-/// APIC y el PMM, antes de que arranque cualquier driver.
-pub fn init() {
+/// interrupción de fallo, da un dominio identidad a los dispositivos que el
+/// firmware sigue usando (RMRR y controladores gráficos, que leen el
+/// framebuffer) y activa la traducción. Debe llamarse tras el APIC, el PMM y
+/// la enumeración PCI, antes de que arranque cualquier driver.
+pub fn init(framebuffer: &boot_protocol::FramebufferInfo) {
     let Some(dmar) = crate::acpi::with(|a| a.dmar.clone()) else {
         info!("iommu: sin tabla DMAR; el DMA de los drivers no se traduce");
         return;
@@ -225,13 +227,77 @@ pub fn init() {
         u.w32(regs::FAULT_EVENT_UPPER_ADDRESS, 0);
         u.w32(regs::FAULT_STATUS, fsts::CLEAR_MASK);
         u.w32(regs::FAULT_EVENT_CONTROL, 0);
+        max_did = max_did.min((u.cap.domains() - 1).min(u16::MAX as u32) as u16);
+    }
+    let reserved = dmar.reserved.len();
+    let n = units.len();
+    let mut state = State {
+        dmar,
+        units,
+        levels,
+        flush,
+        domains: BTreeMap::new(),
+        free_dids: Vec::new(),
+        next_did: 1,
+        max_did,
+    };
+
+    // Dispositivos del firmware: los que tienen regiones reservadas y los
+    // controladores gráficos (clase 03), que barren el framebuffer sin que
+    // ningún driver de AriCodeOS los reclame. Un dominio identidad cada uno,
+    // con clave fuera del rango de PIDs.
+    let mut firmware: Vec<(u16, Vec<(u64, u64)>)> = Vec::new();
+    for r in &state.dmar.reserved {
+        for scope in r.scopes.iter().filter(|s| s.path.len() == 1) {
+            let (dev, func) = scope.path[0];
+            let sid = aricode_iommu::source_id(scope.start_bus, dev, func);
+            match firmware.iter_mut().find(|(s, _)| *s == sid) {
+                Some((_, ranges)) => ranges.push((r.base, r.limit + 1 - r.base)),
+                None => firmware.push((sid, alloc::vec![(r.base, r.limit + 1 - r.base)])),
+            }
+        }
+    }
+    for (bus, dev, func) in crate::pci::functions_of_class(0x03) {
+        let sid = aricode_iommu::source_id(bus, dev, func);
+        let mut ranges = Vec::new();
+        if framebuffer.address != 0 {
+            ranges.push((framebuffer.address, framebuffer.size));
+        }
+        match firmware.iter_mut().find(|(s, _)| *s == sid) {
+            Some((_, r)) => r.extend(ranges),
+            None => firmware.push((sid, ranges)),
+        }
+    }
+    let mut firmware_names = Vec::new();
+    for (i, (sid, ranges)) in firmware.iter().enumerate() {
+        let key = u32::MAX - i as u32;
+        let mut ok = true;
+        for &(base, len) in ranges {
+            if let Err(e) = state.map_range(key, base, len) {
+                warn!("iommu: dispositivo {sid:#06x}: region {base:#x}+{len:#x}: {e}");
+                ok = false;
+            }
+        }
+        if ok {
+            match state.attach(key, *sid) {
+                Ok(()) => firmware_names.push(alloc::format!(
+                    "{:02x}:{:02x}.{}",
+                    sid >> 8,
+                    (sid >> 3) & 0x1F,
+                    sid & 7
+                )),
+                Err(e) => warn!("iommu: dispositivo {sid:#06x}: {e}"),
+            }
+        }
+    }
+
+    for (i, u) in state.units.iter().enumerate() {
         u.invalidate_all();
         let active = u.global_command(gcmd::TRANSLATION_ENABLE);
         let ver = u.r32(regs::VERSION);
-        max_did = max_did.min((u.cap.domains() - 1).min(u16::MAX as u32) as u16);
         info!(
             "iommu: unidad {i} @ {:#x} version {}.{}: {} bits de invitado, {} niveles, {} dominios, {} registro(s) de fallo{}{}; traduccion {}",
-            dmar.units[i].register_base,
+            state.dmar.units[i].register_base,
             (ver >> 4) & 0xF,
             ver & 0xF,
             u.cap.guest_address_width(),
@@ -251,21 +317,12 @@ pub fn init() {
             if active { "activa" } else { "NO activada" }
         );
     }
-    let reserved = dmar.reserved.len();
-    let n = units.len();
-    *IOMMU.lock() = Some(State {
-        dmar,
-        units,
-        levels,
-        flush,
-        domains: BTreeMap::new(),
-        free_dids: Vec::new(),
-        next_did: 1,
-        max_did,
-    });
     info!(
-        "iommu: {n} unidad(es) activas, {reserved} region(es) reservadas (RMRR); un dominio por proceso con IOVA = fisica"
+        "iommu: {n} unidad(es) activas, {reserved} region(es) reservadas (RMRR), dominio identidad para {} dispositivo(s) del firmware {:?}; un dominio por proceso con IOVA = fisica",
+        firmware_names.len(),
+        firmware_names
     );
+    *IOMMU.lock() = Some(state);
 }
 
 /// `true` si hay traducción DMA activa.
@@ -273,10 +330,18 @@ pub fn enabled() -> bool {
     IOMMU.lock().is_some()
 }
 
-/// (unidades, dominios vivos, fallos registrados) para `system_info`.
+/// Las claves por encima son dominios identidad del firmware, no procesos.
+const FIRMWARE_KEYS: u32 = u32::MAX / 2;
+
+/// (unidades, dominios de procesos vivos, fallos registrados) para `system_info`.
 pub fn stats() -> (u64, u64, u64) {
-    let (units, domains) =
-        with(|s| (s.units.len() as u64, s.domains.len() as u64)).unwrap_or((0, 0));
+    let (units, domains) = with(|s| {
+        (
+            s.units.len() as u64,
+            s.domains.keys().filter(|k| **k <= FIRMWARE_KEYS).count() as u64,
+        )
+    })
+    .unwrap_or((0, 0));
     (units, domains, FAULTS.load(Ordering::Relaxed))
 }
 
@@ -391,42 +456,50 @@ fn write_context(ptr: *mut u64, entry: ContextEntry, flush: Option<fn(u64)>) {
     flush_line(flush, ptr as u64);
 }
 
-/// Asigna la función PCI `source` al dominio del proceso `pid` (lo crea si
-/// no existe). Mapea antes sus regiones reservadas (RMRR).
-pub fn attach(pid: u32, source: u16) -> Result<(), &'static str> {
-    let (bus, dev, func) = (
-        (source >> 8) as u8,
-        ((source >> 3) & 0x1F) as u8,
-        (source & 7) as u8,
-    );
-    with(|s| {
-        let unit = s
+impl State {
+    /// Asigna la función PCI `source` al dominio `key` (un PID, o una clave
+    /// del firmware), creándolo si no existe. Mapea antes sus RMRR.
+    fn attach(&mut self, key: u32, source: u16) -> Result<(), &'static str> {
+        let (bus, dev, func) = (
+            (source >> 8) as u8,
+            ((source >> 3) & 0x1F) as u8,
+            (source & 7) as u8,
+        );
+        let unit = self
             .dmar
             .unit_for(0, bus, dev, func)
             .ok_or("iommu: dispositivo fuera de toda unidad")?;
-        let reserved: Vec<(u64, u64)> = s
+        let reserved: Vec<(u64, u64)> = self
             .dmar
             .reserved_for(0, bus, dev, func)
             .map(|r| (r.base, r.limit + 1 - r.base))
             .collect();
         for (base, len) in reserved {
-            s.map_range(pid, base, len)?;
+            self.map_range(key, base, len)?;
         }
-        let levels = s.levels;
-        let flush = s.flush;
-        let dom = s.domain(pid)?;
+        let levels = self.levels;
+        let flush = self.flush;
+        let dom = self.domain(key)?;
         if dom.devices.contains(&(unit, source)) {
             return Ok(());
         }
         let (did, root) = (dom.did, dom.tables.root_phys());
         dom.devices.push((unit, source));
-        let ptr = s.context_entry(unit, source)?;
+        let ptr = self.context_entry(unit, source)?;
         write_context(ptr, ContextEntry::new(root, did, levels), flush);
-        s.units[unit].invalidate_all();
-        info!("iommu: {bus:02x}:{dev:02x}.{func} asignado al dominio {did} (proceso {pid})");
+        self.units[unit].invalidate_all();
+        if key > FIRMWARE_KEYS {
+            info!("iommu: {bus:02x}:{dev:02x}.{func} en el dominio identidad {did} (firmware)");
+        } else {
+            info!("iommu: {bus:02x}:{dev:02x}.{func} asignado al dominio {did} (proceso {key})");
+        }
         Ok(())
-    })
-    .unwrap_or(Ok(()))
+    }
+}
+
+/// Asigna la función PCI `source` al dominio del proceso `pid`.
+pub fn attach(pid: u32, source: u16) -> Result<(), &'static str> {
+    with(|s| s.attach(pid, source)).unwrap_or(Ok(()))
 }
 
 /// Mapea `[phys, phys+len)` identidad en el dominio de `pid`.
@@ -582,7 +655,10 @@ pub fn selftest() {
         "el dispositivo escribio en memoria fuera de su dominio"
     );
     let (_, domains, _) = stats();
-    assert_eq!(domains, 0, "el dominio del driver debe liberarse con el");
+    assert_eq!(
+        domains, 0,
+        "el dominio del driver debe liberarse con el (quedan {domains})"
+    );
     info!(
         "iommu selftest ok (lectura legitima traducida, DMA a memoria ajena bloqueado con {recorded} fallo(s) registrados y la memoria intacta, dominio liberado)"
     );

@@ -73,6 +73,10 @@ pub mod keys {
     pub const BOOT_PENDING: &str = "boot_pending";
     /// `init_fail_late`: init falla tras los servicios y antes de confirmar.
     pub const INIT_FAIL_LATE: &str = "init_fail_late";
+    /// `smp=off`: no arrancar los procesadores de aplicación (hardware real).
+    pub const SMP: &str = "smp";
+    /// `iommu=off`: no activar la traducción DMA (hardware real).
+    pub const IOMMU: &str = "iommu";
 }
 
 #[cfg(test)]

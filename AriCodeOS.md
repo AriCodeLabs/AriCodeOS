@@ -2869,6 +2869,31 @@ Aunque parte de SMP puede adelantarse, en esta etapa deberá consolidarse:
 
 # FASE 34 — Hardware real
 
+**Estado: preparación completada (2026-09-27); pendiente de la primera
+prueba en el portátil.** Ver `docs/hardware.md`.
+
+### Preparado sin hardware
+
+- `cargo xtask usb-image [--cmdline S]`: imagen GPT para pendrive con la ESP
+  en FAT32 propia (`libs/fat`, con nombres largos), AriFS, slot A firmado y
+  estado A/B; la misma imagen arranca en QEMU sin el disco FAT del emulador
+  (escenario `usb.image_boot`);
+- consola sin puerto serie: teclado PS/2 del i8042 como entrada de consola
+  del kernel (decodificador del conjunto 1 en `libs/input`, escenario
+  `console.ps2`) y salida por el framebuffer;
+- interruptores de depuración `smp=off` e `iommu=off` en la cmdline
+  (escenarios `smp.disabled`, `iommu.disabled`);
+- IOMMU en firmware real: los dispositivos con RMRR y los controladores
+  gráficos reciben un dominio identidad (RMRR + framebuffer) antes de
+  activar la traducción, para que la pantalla y el firmware sigan
+  funcionando;
+- guía de arranque, grabación y diagnóstico en `docs/hardware.md`.
+
+### Pendiente (necesita el portátil)
+
+- Arranque UEFI desde USB, RAM/ACPI/framebuffer, PCIe, IOMMU con RMRR reales.
+- Drivers de almacenamiento reales (AHCI/NVMe) y xHCI/USB HID (Fase 25).
+
 Aquí entra el portátil viejo.
 
 No hace falta formatearlo durante las primeras fases.

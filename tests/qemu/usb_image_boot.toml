@@ -1,0 +1,23 @@
+# Fase 34: la imagen para pendrive (GPT con ESP FAT32 propia + particiones de
+# AriCodeOS) arranca sola: OVMF carga AriBoot desde la ESP del disco, AriBoot
+# arranca el slot A y el sistema completo levanta sin el disco FAT de QEMU.
+name = "usb.image_boot"
+description = "arranque completo desde la imagen USB (ESP FAT32 en el propio disco GPT, slot A)"
+level = "smoke"
+areas = ["usb", "hardware", "boot", "update"]
+cmdline = "qemu_exit"
+disk = "usb-image"
+timeout_secs = 90
+
+[expect]
+exit = 33
+serial_contains = [
+    "cmdline: qemu_exit boot_slot=A",
+    "virtio-blk: GPT con 6 particion(es)",
+    "ESP LBA 2048..133119",
+    "SYSA LBA 139264..163839",
+    "fsd: AriFS montado, 3 ficheros",
+    "AriInit: servicios de arranque completados",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "arranque desde la ESP"]

@@ -177,6 +177,16 @@ pub fn count() -> usize {
     DEVICES.lock().len()
 }
 
+/// Funciones de la clase dada (`bus, dispositivo, función`).
+pub fn functions_of_class(class: u8) -> Vec<(u8, u8, u8)> {
+    DEVICES
+        .lock()
+        .iter()
+        .filter(|d| d.header.class == class)
+        .map(|d| (d.address.bus, d.address.device, d.address.function))
+        .collect()
+}
+
 /// Índice de la primera función `vendor:device` sin reclamar.
 pub fn find(vendor: u16, device: u16) -> Option<usize> {
     DEVICES
