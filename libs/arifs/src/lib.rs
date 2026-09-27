@@ -21,8 +21,8 @@ pub const NAME_LEN: usize = 32;
 pub const TABLE_LBA: u64 = 1;
 pub const TABLE_SECTORS: u64 = (MAX_FILES * ENTRY_LEN / SECTOR) as u64;
 pub const DATA_LBA: u64 = TABLE_LBA + TABLE_SECTORS;
-/// Capacidad por fichero: 16 sectores (8 KiB).
-pub const FILE_CAPACITY_SECTORS: u32 = 16;
+/// Capacidad por fichero: 64 sectores (32 KiB).
+pub const FILE_CAPACITY_SECTORS: u32 = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsError {
@@ -389,7 +389,9 @@ mod tests {
         assert_eq!(fs.write(i, 0, &too_big), Err(FsError::OutOfRange));
         assert_eq!(fs.read(99, 0, &mut [0u8; 4]), Err(FsError::NotFound));
         assert_eq!(fs.find("zzz"), None);
-        // Sin espacio para mas ficheros de 16 sectores en 200 sectores.
+        // Sin espacio para mas ficheros de 64 sectores en 2000 sectores.
+        let mut fs = AriFs::format(disk(2000), 2000).unwrap();
+        fs.create("a").unwrap();
         let mut created = 1;
         while fs.create(&std::format!("f{created}")).is_ok() {
             created += 1;

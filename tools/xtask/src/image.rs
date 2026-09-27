@@ -282,6 +282,17 @@ pub fn write_test_disk(path: &Path) -> Result {
         fs.write(i, 0, content)
             .map_err(|e| format!("arifs {name}: {e:?}"))?;
     }
+    // Módulo WebAssembly de ejemplo en el directorio privado de `wasm_runner`
+    // (lo deja `build_wasm_programs`; sin él, el runner informa y sale).
+    let demo = crate::build_dir().join("demo.wasm");
+    if let Ok(bytes) = fs::read(&demo) {
+        let name = "wasm_runner/demo.wasm";
+        let i = fs
+            .create(name)
+            .map_err(|e| format!("arifs {name}: {e:?}"))?;
+        fs.write(i, 0, &bytes)
+            .map_err(|e| format!("arifs {name} ({} bytes): {e:?}", bytes.len()))?;
+    }
     for lba in RAW_PATTERN_LBA..=last {
         let o = lba as usize * 512;
         img[o..o + 8].copy_from_slice(b"ARIDISK\0");
