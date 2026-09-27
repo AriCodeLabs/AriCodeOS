@@ -2748,6 +2748,8 @@ intentos. Escenarios: `update.slot_a` (smoke), `update.pending_boot`,
 
 # FASE 32 — SMP
 
+**Estado: completada (2026-09-27).**
+
 Aunque parte de SMP puede adelantarse, en esta etapa deberá consolidarse:
 
 - AP discovery;
@@ -2757,6 +2759,59 @@ Aunque parte de SMP puede adelantarse, en esta etapa deberá consolidarse:
 - TLB shootdown;
 - locks;
 - CPU affinity.
+
+### Implementado
+
+- AP discovery: los LAPIC habilitados de la MADT (`libs/acpi`); el BSP se
+  reconoce por su propio id y es el destino de todas las IRQ de dispositivo
+  (I/O APIC y MSI-X) y de la consola serie;
+- startup: trampolín en la página física `0x8000` (memoria baja reservada
+  por el PMM y comprobada en el mapa UEFI) que lleva al AP de modo real a
+  modo largo con unas tablas de arranque (identidad del primer MiB + mitad
+  del kernel) y salta a `ap_entry` sobre la pila de su hilo idle;
+  INIT-SIPI-SIPI por el ICR del LAPIC, espera de hasta 500 ms por CPU y
+  aviso si un AP no responde; cada AP carga el CR3 definitivo, copia CR0 y
+  CR4 del BSP, instala sus tablas, la IDT compartida, `syscall`, su LAPIC
+  (timer con la cuenta calibrada por el BSP) y entra en el bucle idle;
+- per-CPU state: `kernel/src/cpu.rs` con un `Cpu` estático por procesador
+  (GDT, TSS con pila de #DF, hilo actual, quantum, scratch de `syscall`)
+  al que apunta `IA32_GS_BASE`; `swapgs` en `syscall`, en el trampolín de
+  interrupciones cuando viene de ring 3 y al saltar a ring 3;
+- scheduler SMP: `aricode-sched` con una cola de listos compartida y, por
+  CPU, hilo actual e idle propio; el lock del planificador se mantiene
+  durante el cambio de contexto y lo suelta el hilo que reanuda
+  (`force_unlock`), de modo que ninguna CPU puede tomar un hilo antes de
+  que su `rsp` esté guardado; solo el BSP cuenta el tiempo y despierta a
+  los dormidos; una CPU en idle recibe una IPI (`RESCHED`) cuando un hilo
+  pasa a listo; un `wake` que llega a un hilo aún `Running` queda pendiente
+  y convierte su siguiente bloqueo en una cesión (sin despertares perdidos);
+- TLB shootdown: `vmm::flush_page` invalida en la CPU local y, por IPI
+  (`TLB_FLUSH`), en las demás en línea con confirmación; se exige llamarlo
+  con interrupciones habilitadas y sin locks; IPI `HALT` para detener las
+  demás CPUs en un pánico;
+- locks: `IrqLock` deshabilita interrupciones solo mientras tiene el lock y
+  las restaura entre giros (una CPU que espera sigue atendiendo IPI);
+  detección de bloqueo mutuo por giros como antes;
+- CPU affinity: `set_affinity` en la política y `spawn_on` en el kernel; un
+  hilo con afinidad solo lo toma su CPU (las demás lo saltan en la cola);
+- `system_info(CPUS)` y el comando `cpus` del shell; el volcado de
+  excepciones y de pánico indica la CPU;
+- pruebas: `test=smp` (todas las CPUs de la MADT en línea, hilos fijados
+  que ejecutan a la vez en CPUs distintas, hilos libres que migran,
+  shootdown observado desde otra CPU con el número exacto de IPI, contador
+  bajo lock disputado por todas las CPUs), escenarios `smp.boot`
+  (smoke, `-smp 4`), `smp.selftest`, `smp.single_cpu_selftest`,
+  `smp.shell_user`; los escenarios declaran `cpus = N` y
+  `cargo xtask test --cpus N` fuerza N procesadores en toda la suite.
+
+### Pendiente
+
+- Balanceo de carga explícito (solo hay cola compartida y afinidad
+  opcional), prioridades y `sched_yield`/afinidad desde usuario.
+- x2APIC y más de 16 CPUs; hot-plug.
+- Las IRQ de dispositivo siempre van al BSP; no hay reparto ni migración de
+  vectores.
+- El heap sigue con un lock global; no hay cachés por CPU.
 
 ---
 

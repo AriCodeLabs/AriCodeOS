@@ -87,7 +87,7 @@ fn trim(s: &[u8]) -> &[u8] {
 
 fn help() {
     sys::print(
-        b"comandos:\n  help      esta ayuda\n  ps        procesos\n  mem       memoria fisica\n  ls        ficheros de AriFS\n  cat NOM   muestra un fichero\n  devices   funciones PCI\n  services  servicios de arranque\n  uptime    tiempo desde el arranque\n  net       configuracion de red\n  ping IP   eco ICMP (4 intentos)\n  dns NOM   resuelve un nombre\n  http URL  GET y muestra el cuerpo\n  run PROG  ejecuta un programa del initrd y espera\n  repeat N CMD  repite un comando N veces\n  reboot    reinicia\n  shutdown  apaga\n  exit      termina el shell\n",
+        b"comandos:\n  help      esta ayuda\n  ps        procesos\n  mem       memoria fisica\n  ls        ficheros de AriFS\n  cat NOM   muestra un fichero\n  devices   funciones PCI\n  services  servicios de arranque\n  uptime    tiempo desde el arranque\n  cpus      procesadores en linea\n  net       configuracion de red\n  ping IP   eco ICMP (4 intentos)\n  dns NOM   resuelve un nombre\n  http URL  GET y muestra el cuerpo\n  run PROG  ejecuta un programa del initrd y espera\n  repeat N CMD  repite un comando N veces\n  reboot    reinicia\n  shutdown  apaga\n  exit      termina el shell\n",
     );
 }
 
@@ -161,6 +161,17 @@ fn uptime() {
     }
     num(frac);
     sys::print(b" s\n");
+}
+
+fn cpus() {
+    let mut buf = [0u8; 8];
+    if sys::system_info(SYSTEM, abi::sysinfo::CPUS, &mut buf) != Ok(8) {
+        sys::print(b"cpus: sin acceso al sistema\n");
+        return;
+    }
+    sys::print(b"cpus: ");
+    num(u64::from_le_bytes(buf));
+    sys::print(b" en linea\n");
 }
 
 fn ls(fs: &FsClient) {
@@ -508,6 +519,7 @@ fn execute(
         b"devices" => devices(),
         b"services" => services(mask, fs),
         b"uptime" => uptime(),
+        b"cpus" => cpus(),
         b"net" => net(net_client),
         b"ping" => ping(net_client, rest),
         b"dns" => dns(net_client, rest),

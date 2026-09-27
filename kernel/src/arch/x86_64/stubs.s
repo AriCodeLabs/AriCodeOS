@@ -1,7 +1,8 @@
 // Generado por tools/gen-stubs.py; no editar a mano.
 // Cada stub deja la pila como [vector][error_code][rip][cs][rflags][rsp][ss]
-// y salta al trampolín común, que guarda los registros generales y llama a
-// interrupt_dispatch(&mut InterruptFrame).
+// y salta al trampolín común, que guarda los registros generales, hace
+// swapgs si venía de ring 3 (cs en [rsp+144] tras los 15 registros) y
+// llama a interrupt_dispatch(&mut InterruptFrame).
 .section .text.interrupt_stubs, "ax"
 .code64
 
@@ -1036,9 +1037,18 @@ interrupt_common:
     push r13
     push r14
     push r15
+    // Desde ring 3 (cs & 3): intercambiar GS para ver el Cpu de esta CPU.
+    test qword ptr [rsp + 144], 3
+    jz 1f
+    swapgs
+1:
     mov rdi, rsp
     cld
     call interrupt_dispatch
+    test qword ptr [rsp + 144], 3
+    jz 2f
+    swapgs
+2:
     pop r15
     pop r14
     pop r13

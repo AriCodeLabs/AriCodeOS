@@ -57,11 +57,11 @@ macro_rules! println {
     ($($arg:tt)*) => { $crate::console::write_raw(format_args!("{}\n", format_args!($($arg)*))) };
 }
 
-/// Solo serie: para el panic handler, que no debe tocar estado compartido.
+/// Solo serie: para excepciones y el panic handler, que no deben tocar la
+/// consola de framebuffer. Cada mensaje sale entero (lock de la serie con
+/// espera acotada; ver `console::write_serial`).
 #[macro_export]
 macro_rules! serial_println {
-    ($($arg:tt)*) => {{
-        use core::fmt::Write as _;
-        let _ = writeln!($crate::serial::Serial, $($arg)*);
-    }};
+    () => { $crate::console::write_serial(format_args!("\n")) };
+    ($($arg:tt)*) => { $crate::console::write_serial(format_args!("{}\n", format_args!($($arg)*))) };
 }

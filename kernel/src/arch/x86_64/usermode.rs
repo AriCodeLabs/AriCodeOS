@@ -14,7 +14,10 @@ use core::arch::asm;
 /// de kernel del hilo debe estar fijada en el TSS y en `syscall`.
 pub unsafe fn enter(rip: u64, rsp: u64, arg: u64) -> ! {
     const RFLAGS_IF: u64 = 1 << 9;
+    // `cli` antes del `swapgs`: entre ambos y el `iretq` la CPU esta en ring 0
+    // con el GS de usuario, y una interrupcion no lo intercambiaria.
     asm!(
+        "cli",
         "mov ds, {ds:x}",
         "mov es, {ds:x}",
         "push {ss}",
@@ -22,6 +25,7 @@ pub unsafe fn enter(rip: u64, rsp: u64, arg: u64) -> ! {
         "push {rflags}",
         "push {cs}",
         "push {rip}",
+        "swapgs",
         "iretq",
         ds = in(reg) layout::USER_DATA.0 as u64,
         ss = in(reg) layout::USER_DATA.0 as u64,

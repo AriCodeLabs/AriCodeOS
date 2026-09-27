@@ -44,13 +44,32 @@ pub fn init_logger(level: LevelFilter) {
     log::set_max_level(level);
 }
 
+/// Lock de la serie para un mensaje. Con interrupciones habilitadas espera;
+/// con ellas deshabilitadas (handler, excepción, pánico) solo insiste un rato
+/// acotado: otra CPU lo suelta enseguida, pero la propia CPU (reentrada
+/// desde una excepción dentro de la consola) no lo haría nunca.
+fn serial_guard() -> Option<aricode_sync::IrqGuard<'static, (), aricode_sync::NoIrq>> {
+    if crate::sync::interrupts_enabled() {
+        return Some(SERIAL.lock());
+    }
+    for _ in 0..200_000 {
+        if let Some(g) = SERIAL.try_lock() {
+            return Some(g);
+        }
+        core::hint::spin_loop();
+    }
+    None
+}
+
+/// Solo serie, un mensaje completo bajo el lock (excepciones y pánico).
+pub fn write_serial(args: core::fmt::Arguments) {
+    let _serial = serial_guard();
+    let _ = Serial.write_fmt(args);
+}
+
 /// Escribe texto sin formato de log en todas las salidas (marcadores, banner).
 pub fn write_raw(args: core::fmt::Arguments) {
-    let _serial = if crate::sync::interrupts_enabled() {
-        Some(SERIAL.lock())
-    } else {
-        SERIAL.try_lock()
-    };
+    let _serial = serial_guard();
     let _ = Serial.write_fmt(args);
     if let Some(mut guard) = FB.try_lock() {
         if let Some(fb) = guard.as_mut() {

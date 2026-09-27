@@ -1,4 +1,5 @@
 //! IDT: los 256 vectores apuntan a los stubs generados; #DF usa la pila IST.
+//! Es única y la cargan todas las CPUs.
 
 use super::gdt::{self, DOUBLE_FAULT_IST};
 use crate::sync::IrqLock;
@@ -13,9 +14,10 @@ extern "C" {
     static interrupt_stub_table: [u64; 256];
 }
 
+/// Construye la IDT (una vez, en el BSP) y la carga.
 pub fn init() {
     let cs = gdt::selectors().code;
-    let ptr = {
+    {
         let mut idt = IDT.lock();
         for vector in 0..=255u8 {
             let ist = if vector == exception::DOUBLE_FAULT {
@@ -27,8 +29,13 @@ pub fn init() {
             let handler = unsafe { interrupt_stub_table[vector as usize] };
             idt.set(vector, IdtEntry::interrupt_gate(handler, cs, ist, 0));
         }
-        idt.pointer()
-    };
-    // SAFETY: la IDT es estática, construida arriba y nunca se mueve.
+    }
+    load();
+}
+
+/// Carga la IDT ya construida en la CPU que llama (los APs).
+pub fn load() {
+    let ptr = IDT.lock().pointer();
+    // SAFETY: la IDT es estática, construida en `init` y nunca se mueve.
     unsafe { asm!("lidt [{}]", in(reg) &ptr, options(nostack, preserves_flags)) };
 }

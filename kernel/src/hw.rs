@@ -2,7 +2,7 @@
 //! de interrupción, regiones MMIO y buffers DMA. Un driver solo recibe lo
 //! que su capability le da; el kernel no le presta nada más (sección 27).
 
-use crate::arch::x86_64::ioapic;
+use crate::arch::x86_64::{apic, ioapic};
 use crate::memory::pmm;
 use crate::object::{KernelObject, ObjectKind, ObjectRef};
 use crate::sync::IrqLock;
@@ -131,7 +131,7 @@ pub fn register_msix(table_phys: u64, entry: u32) -> Result<ObjectRef, &'static 
     let vector = (DEVICE_VECTOR_FIRST..=DEVICE_VECTOR_LAST)
         .find(|v| !vectors.contains_key(v))
         .ok_or("hw: sin vectores libres")?;
-    let lapic_id = crate::acpi::with(|a| a.madt.lapic_ids.first().copied()).unwrap_or(0) as u64;
+    let lapic_id = apic::bsp_id() as u64;
     msix_write(
         table_virt,
         entry,
@@ -178,8 +178,7 @@ pub fn register_irq(gsi: u32, level: bool, active_low: bool) -> Result<ObjectRef
     let vector = (DEVICE_VECTOR_FIRST..=DEVICE_VECTOR_LAST)
         .find(|v| !vectors.contains_key(v))
         .ok_or("hw: sin vectores libres")?;
-    let lapic_id = crate::acpi::with(|a| a.madt.lapic_ids.first().copied()).unwrap_or(0);
-    ioapic::route(gsi, vector, lapic_id, level, active_low)?;
+    ioapic::route(gsi, vector, apic::bsp_id(), level, active_low)?;
     let obj = KernelObject::new(ObjectKind::Irq(IrqLine {
         source: IrqSource::Gsi { gsi, level },
         vector,

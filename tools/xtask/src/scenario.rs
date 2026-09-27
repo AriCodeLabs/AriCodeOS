@@ -106,6 +106,10 @@ pub struct Scenario {
     /// Presenta el disco de pruebas como solo lectura (fallos de escritura).
     #[serde(default)]
     pub disk_readonly: bool,
+    /// Procesadores de la máquina virtual (`-smp N`). Sin declarar vale 1 y
+    /// `cargo xtask test --cpus N` lo sustituye; un valor explícito se
+    /// respeta siempre (el escenario depende de ese número de CPUs).
+    pub cpus: Option<u32>,
     #[serde(default)]
     pub inject: Inject,
     pub expect: Expect,
@@ -181,6 +185,12 @@ pub fn load_from(dir: &Path) -> Result<Vec<Scenario>> {
 }
 
 impl Scenario {
+    /// CPUs con las que arranca el escenario: las declaradas, o el valor
+    /// forzado por `--cpus`, o 1.
+    pub fn cpus(&self, forced: Option<u32>) -> u32 {
+        self.cpus.or(forced).unwrap_or(1)
+    }
+
     pub fn matches(&self, max_level: Level, areas: &[String]) -> bool {
         self.level <= max_level
             && (areas.is_empty() || self.areas.iter().any(|a| areas.contains(a)))

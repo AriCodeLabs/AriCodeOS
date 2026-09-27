@@ -1,0 +1,19 @@
+# Fase 32: con -smp 4 el kernel arranca los tres APs por INIT-SIPI y todos
+# quedan en linea antes de lanzar init; el arranque nominal sigue igual.
+name = "smp.boot"
+description = "-smp 4: los APs arrancan por INIT-SIPI, quedan en linea y el arranque normal completa"
+level = "smoke"
+areas = ["smp", "init"]
+cmdline = "qemu_exit"
+cpus = 4
+timeout_secs = 60
+
+[expect]
+exit = 33
+serial_contains = [
+    "acpi: MADT lapic @ 0xfee00000, 4 cpu(s)",
+    "smp: 4 CPUs en linea (3 AP de 3 arrancados), lapic ids [0, 1, 2, 3]",
+    "AriInit: servicios de arranque completados",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "no respondio al SIPI"]

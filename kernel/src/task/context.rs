@@ -4,7 +4,8 @@
 //!
 //! Un hilo nuevo arranca con una pila preparada por `initial_stack_frame`
 //! de modo que el primer `switch_context` hacia él "retorna" a
-//! `thread_start`, que habilita interrupciones y llama a la entrada.
+//! `thread_start`, que suelta el lock del planificador, habilita
+//! interrupciones y llama a la entrada.
 
 use core::arch::global_asm;
 
@@ -31,8 +32,11 @@ switch_context:
     ret
 
 .global thread_start
-// Primer "retorno" de un hilo nuevo: r12 = entrada, r13 = argumento.
+// Primer "retorno" de un hilo nuevo: r12 = entrada, r13 = argumento. Antes
+// de habilitar interrupciones suelta el lock del planificador que dejo
+// tomado la CPU que conmuto hacia el.
 thread_start:
+    call thread_first_run
     mov rdi, r13
     sti
     call r12
@@ -58,9 +62,11 @@ pub type ThreadEntry = extern "C" fn(arg: usize);
 /// `stack_top` debe ser el fin (exclusivo) de una pila mapeada y escribible
 /// con sitio para 8 palabras.
 pub unsafe fn initial_stack_frame(stack_top: u64, entry: ThreadEntry, arg: usize) -> u64 {
-    // Alineación: tras el `ret` a thread_start, rsp debe ser 16-alineado + 8
-    // antes del `call r12` para cumplir el ABI en la entrada.
-    let mut sp = (stack_top & !0xF) - 8;
+    // Alineación: tras el `ret` a thread_start, rsp debe ser múltiplo de 16
+    // antes del `call r12` para que la entrada vea rsp ≡ 8 (mod 16), como
+    // exige el ABI. Se apilan 7 palabras: `ret` consume una y `switch_context`
+    // seis, así que la cima debe ser múltiplo de 16.
+    let mut sp = stack_top & !0xF;
     let mut push = |v: u64| {
         sp -= 8;
         (sp as *mut u64).write(v);
