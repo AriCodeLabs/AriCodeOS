@@ -33,6 +33,7 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("aricode-http", None),
     ("aricode-input", None),
     ("aricode-gfx", None),
+    ("aricode-manifest", None),
     ("aricode-proto", None),
     ("aricode-sys", None),
     ("aricode-build", None),
@@ -105,6 +106,30 @@ pub fn initrd_programs() -> Result<Vec<String>> {
     }
     names.sort();
     Ok(names)
+}
+
+/// Manifiestos de aplicaciones (`apps/*/NOMBRE.manifest`): van al initrd con
+/// su nombre de fichero, junto al programa que describen.
+pub fn initrd_manifests() -> Result<Vec<(String, PathBuf)>> {
+    let apps = root().join("apps");
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(&apps).map_err(|e| format!("{}: {e}", apps.display()))? {
+        let dir = entry.map_err(|e| e.to_string())?.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        for f in std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+            let path = f.map_err(|e| e.to_string())?.path();
+            if path.extension().is_some_and(|x| x == "manifest") {
+                out.push((
+                    path.file_name().unwrap().to_string_lossy().into_owned(),
+                    path,
+                ));
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 /// Compila `init` y los programas de usuario (ELF estáticos en 0x400000) y

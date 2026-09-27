@@ -2601,13 +2601,44 @@ permissions  sys::permissions::{granted, kind_name, is, drop_handle}
 
 # FASE 28 — App sandbox
 
-### Implementar
+**Estado: completada (2026-09-27).**
 
-- manifests;
-- capability broker;
-- permisos de usuario;
-- directorio privado por app;
-- límites de recursos.
+### Implementado
+
+- manifests: `libs/manifest` (no_std, tests de host) analiza
+  `NOMBRE.manifest` (`name`, `caps`, `memory`); xtask lo empaqueta en el
+  initrd junto al programa y el kernel lo sirve a init con `initrd_read`
+  (`READ` sobre el `SPAWNER`);
+- capability broker: init atiende `LaunchProtocol v1` (`sdk/proto::launch`)
+  mientras vive el shell; el shell ya no tiene `SPAWNER`, solo un endpoint
+  al broker. Por cada lanzamiento el broker lee el manifiesto, deniega las
+  capacidades reservadas al sistema (`spawner`, `pci`, `framebuffer`) y
+  entrega en orden fijo solo lo pedido: `SYSTEM` de lectura, directorio
+  privado, red, compositor, entradas y, si hace falta, `HARDWARE`. Sin
+  manifiesto: consola y reloj;
+- permisos de usuario: la política vive en el broker (`Caps::APP_ALLOWED`);
+  `sys::permissions` deja a la aplicación ver lo que recibió;
+- directorio privado por app: `fs::Op::Bind` crea en fsd un endpoint ligado
+  a un prefijo (`app/`); desde él solo se listan, abren y crean ficheros
+  propios (AriFS admite `/` en los nombres). El mismo prefijo comparte
+  endpoint entre lanzamientos;
+- límites de recursos: cuota de memoria DMA por proceso, fijada por quien lo
+  crea (`spawn_limits` en `process_spawn`) y cobrada en `dma_alloc`
+  (`Error::Limit` al excederla).
+
+`hello_app` (manifiesto `system, fs, 128K`) demuestra las cuatro cosas en
+`sandbox.manifest`: ve solo su fichero `notas`, no puede abrir `hola.txt` y
+una reserva de 256 KiB falla con `Limit`; un programa sin manifiesto recibe
+solo consola y reloj.
+
+### Pendiente
+
+- cuota de CPU y de handles por manifiesto; cuota de memoria de heap (hoy el
+  heap es estático);
+- identidad de cliente en IPC (que fsd distinga procesos sin un endpoint por
+  cada uno);
+- un fichero de política editable por el usuario en AriFS en vez de la
+  constante del broker.
 
 ---
 

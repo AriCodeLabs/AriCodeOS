@@ -76,6 +76,7 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         nr::CONSOLE_READ => console_read(h, frame.rsi, frame.rdx, frame.r10),
         nr::SYSTEM_INFO => system_info(h, frame.rsi, frame.rdx, frame.r10),
         nr::SYSTEM_POWER => system_power(h, frame.rsi),
+        nr::INITRD_READ => initrd_read(h, frame.rsi, frame.rdx, frame.r10, frame.r8),
         n => {
             warn!("syscall desconocida {n} desde rip={:#x}", frame.user_rip);
             Err(Error::NoSys)
@@ -127,6 +128,27 @@ fn console_read(handle: Handle, ptr: u64, len: u64, timeout_ms: u64) -> Result<u
     }
     process::copy_to_user(ptr, &buf[..n])?;
     Ok(n as u64)
+}
+
+/// Copia un fichero del initrd al buffer del usuario (`READ` sobre el `SPAWNER`).
+fn initrd_read(h: Handle, name_ptr: u64, name_len: u64, buf: u64, len: u64) -> Result<u64, Error> {
+    if name_len > 64 {
+        return Err(Error::TooBig);
+    }
+    let is_spawner = with_handles(|t| {
+        lookup(t, h, Rights::READ).map(|o| matches!(o.kind, ObjectKind::Spawner))
+    })?;
+    if !is_spawner {
+        return Err(Error::Invalid);
+    }
+    let raw = process::copy_from_user(name_ptr, name_len)?;
+    let name = core::str::from_utf8(&raw).map_err(|_| Error::Invalid)?;
+    let data = crate::user::programs::by_name(name).ok_or(Error::NotFound)?;
+    if data.len() as u64 > len {
+        return Err(Error::TooBig);
+    }
+    process::copy_to_user(buf, data)?;
+    Ok(data.len() as u64)
 }
 
 /// Comprueba que `h` es el objeto `System` con `required`.
@@ -284,8 +306,10 @@ fn process_spawn(
     name_len: u64,
     arg: u64,
     handles_ptr: u64,
-    handles_len: u64,
+    limits: u64,
 ) -> Result<u64, Error> {
+    let handles_len = aricode_abi::spawn_limits::handles(limits) as u64;
+    let dma_quota = aricode_abi::spawn_limits::memory_kib(limits) as u64 * 1024;
     if name_len > 64 || handles_len as usize > IPC_MAX_HANDLES * 4 {
         return Err(Error::TooBig);
     }
@@ -315,7 +339,7 @@ fn process_spawn(
             .map(|uh| t.take(*uh).map_err(abi_error))
             .collect()
     })?;
-    let pid = match process::spawn_with_handles_and_arg(name, elf, extra, arg) {
+    let pid = match process::spawn_with_handles_and_arg(name, elf, extra, arg, dma_quota) {
         Ok(pid) => pid,
         Err(e) => {
             warn!("process_spawn '{name}': {e}");
@@ -420,6 +444,11 @@ fn dma_alloc(h: Handle, len: u64) -> Result<u64, Error> {
     }
     if len == 0 || len > aricode_abi::DMA_MAX_LEN {
         return Err(Error::TooBig);
+    }
+    // Cuota del proceso (fijada por quien lo lanzó): se cobra el tamaño
+    // redondeado a páginas, que es lo que se reserva.
+    if !process::charge_dma(len.next_multiple_of(4096)) {
+        return Err(Error::Limit);
     }
     let dma = crate::hw::dma_alloc(len).map_err(|_| Error::Limit)?;
     let rights = Rights::READ

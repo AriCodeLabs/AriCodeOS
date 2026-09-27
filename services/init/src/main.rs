@@ -11,6 +11,11 @@
 #![no_std]
 #![no_main]
 
+use aricode_manifest::{Caps, Manifest};
+use aricode_proto::launch::{
+    Reply as LaunchReply, Request as LaunchRequest, Status as LaunchStatus,
+};
+use aricode_rt::sys::fs::FsClient;
 use aricode_rt::sys::{self, rights, Error, Handle, TIMEOUT_INFINITE};
 
 const SPAWNER: Handle = Handle(0x0001_0004);
@@ -121,7 +126,12 @@ fn run_block_client(name: &str, service: Handle) -> Result<u64, Error> {
 /// el sistema (READ|MANAGE), la entrada de consola, la raíz PCI solo
 /// lectura, el endpoint de netd (WRITE) y un SPAWNER para `run`; `arg` =
 /// servicios activos. Espera a que termine.
-fn run_shell(fs_service: Handle, net_service: Handle, services: u64) -> Result<u64, Error> {
+fn run_shell(
+    fs_service: Handle,
+    net_service: Handle,
+    services: u64,
+    broker: &Broker,
+) -> Result<u64, Error> {
     let fsd = sys::handle_duplicate(fs_service, rights::WRITE | rights::TRANSFER)?;
     let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
     // Con DUPLICATE el shell puede a su vez pasar un SYSTEM de solo lectura a
@@ -133,22 +143,233 @@ fn run_shell(fs_service: Handle, net_service: Handle, services: u64) -> Result<u
     let console_in = sys::handle_duplicate(CONSOLE_IN, rights::READ | rights::TRANSFER)?;
     let pci = sys::handle_duplicate(PCI_ROOT, rights::READ | rights::TRANSFER)?;
     let netd = sys::handle_duplicate(net_service, rights::WRITE | rights::TRANSFER)?;
-    let spawner = sys::handle_duplicate(SPAWNER, rights::MANAGE | rights::TRANSFER)?;
+    // El shell no recibe el SPAWNER: pide lanzamientos al broker (init).
+    let launch = sys::handle_duplicate(broker.endpoint, rights::WRITE | rights::TRANSFER)?;
     let child = sys::process_spawn_with(
         SPAWNER,
         "shell",
         services,
-        &[fsd, hw, system, console_in, pci, netd, spawner],
+        &[fsd, hw, system, console_in, pci, netd, launch],
     )?;
-    let result = sys::process_wait(child, TIMEOUT_INFINITE);
-    let _ = sys::handle_close(child);
-    result
+    // Atender peticiones de lanzamiento mientras el shell viva.
+    loop {
+        match sys::process_wait(child, 0) {
+            Err(Error::Timeout) => {}
+            result => {
+                let _ = sys::handle_close(child);
+                return result;
+            }
+        }
+        broker.serve_one(20);
+    }
+}
+
+/// Broker de capabilities (Fase 28): lanza programas según su manifiesto.
+/// Una aplicación recibe, en este orden, solo lo que pide y se le permite:
+/// `SYSTEM` (lectura), un directorio privado en fsd, el endpoint de red, el
+/// del compositor, los de entrada, y por último `HARDWARE` si necesita
+/// buffers (fs, net, window), acotado por la memoria del manifiesto.
+struct Broker {
+    endpoint: Handle,
+    fs: Option<FsClient>,
+    net: Handle,
+    compositor: Option<Handle>,
+    inputs: [Handle; 4],
+    input_count: usize,
+}
+
+impl Broker {
+    fn new(
+        fs_service: Option<Handle>,
+        net: Handle,
+        compositor: Option<Handle>,
+        inputs: &[Handle],
+    ) -> Result<Self, Error> {
+        let fs = match fs_service {
+            Some(ep) => Some(FsClient::new(ep, HARDWARE)?),
+            None => None,
+        };
+        let mut ins = [Handle(0); 4];
+        let n = inputs.len().min(4);
+        ins[..n].copy_from_slice(&inputs[..n]);
+        Ok(Self {
+            endpoint: sys::endpoint_create()?,
+            fs,
+            net,
+            compositor,
+            inputs: ins,
+            input_count: n,
+        })
+    }
+
+    /// Atiende como mucho una petición (espera hasta `timeout_ms`).
+    fn serve_one(&self, timeout_ms: u64) {
+        let mut msg = [0u8; LaunchRequest::LEN];
+        let mut handles = [Handle(0); 1];
+        let Ok((n, nh)) = sys::ipc_receive(self.endpoint, &mut msg, &mut handles, timeout_ms)
+        else {
+            return;
+        };
+        if nh == 0 {
+            return;
+        }
+        let reply_to = handles[0];
+        let reply = match LaunchRequest::decode(&msg[..n]) {
+            Some(req) => self.launch(req.name_str(), req.arg),
+            None => LaunchReply::status(LaunchStatus::Invalid),
+        };
+        let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
+        let _ = sys::handle_close(reply_to);
+    }
+
+    /// Lee el manifiesto (`NOMBRE.manifest` en el initrd), aplica la política y
+    /// ejecuta el programa hasta que termine.
+    fn launch(&self, name: &str, arg: u64) -> LaunchReply {
+        let mut path = [0u8; 48];
+        let Some(path) = join(name, ".manifest", &mut path) else {
+            return LaunchReply::status(LaunchStatus::Invalid);
+        };
+        let mut text = [0u8; 1024];
+        let manifest = match sys::initrd_read(SPAWNER, path, &mut text) {
+            Ok(n) => match core::str::from_utf8(&text[..n])
+                .ok()
+                .and_then(|t| Manifest::parse(t).ok())
+            {
+                Some(m) => Some(m),
+                None => return LaunchReply::status(LaunchStatus::BadManifest),
+            },
+            Err(Error::NotFound) => None,
+            Err(_) => return LaunchReply::status(LaunchStatus::BadManifest),
+        };
+        let (caps, memory_kib) = match manifest {
+            Some(m) if m.name_str() != name => {
+                return LaunchReply::status(LaunchStatus::BadManifest)
+            }
+            Some(m) => (m.caps, m.memory_kib),
+            // Sin manifiesto: solo consola y reloj, memoria minima.
+            None => (Caps::SYSTEM, 64),
+        };
+        let denied = caps.difference(Caps::APP_ALLOWED);
+        sys::print(b"AriInit: lanzar ");
+        sys::print(name.as_bytes());
+        sys::print(if manifest.is_some() {
+            b" con manifiesto ["
+        } else {
+            b" sin manifiesto ["
+        });
+        let mut first = true;
+        for c in caps.names() {
+            if !first {
+                sys::print(b" ");
+            }
+            first = false;
+            sys::print(c.as_bytes());
+        }
+        sys::print(b"] memoria ");
+        let mut buf = [0u8; 20];
+        sys::print(aricode_rt::fmt_u64(memory_kib as u64, &mut buf));
+        sys::print(b" KiB\n");
+        if !denied.is_empty() {
+            sys::print(b"AriInit: denegado, pide capacidades del sistema:");
+            for c in denied.names() {
+                sys::print(b" ");
+                sys::print(c.as_bytes());
+            }
+            sys::print(b"\n");
+            return LaunchReply::status(LaunchStatus::Denied);
+        }
+        let mut granted = [Handle(0); 12];
+        let mut n = 0;
+        let mut needs_hw = false;
+        let mut push = |h: Handle| {
+            if n < granted.len() {
+                granted[n] = h;
+                n += 1;
+            }
+        };
+        if caps.contains(Caps::SYSTEM) {
+            match sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER) {
+                Ok(h) => push(h),
+                Err(_) => return LaunchReply::status(LaunchStatus::Failed),
+            }
+        }
+        if caps.contains(Caps::FS) {
+            let Some(fs) = &self.fs else {
+                return LaunchReply::status(LaunchStatus::Denied);
+            };
+            match fs.bind(name) {
+                Ok(h) => push(h),
+                Err(_) => return LaunchReply::status(LaunchStatus::Failed),
+            }
+            needs_hw = true;
+        }
+        if caps.contains(Caps::NET) {
+            match sys::handle_duplicate(self.net, rights::WRITE | rights::TRANSFER) {
+                Ok(h) => push(h),
+                Err(_) => return LaunchReply::status(LaunchStatus::Failed),
+            }
+            needs_hw = true;
+        }
+        if caps.contains(Caps::WINDOW) {
+            let Some(comp) = self.compositor else {
+                return LaunchReply::status(LaunchStatus::Denied);
+            };
+            match sys::handle_duplicate(comp, rights::WRITE | rights::TRANSFER) {
+                Ok(h) => push(h),
+                Err(_) => return LaunchReply::status(LaunchStatus::Failed),
+            }
+            needs_hw = true;
+        }
+        if caps.contains(Caps::INPUT) {
+            for ep in &self.inputs[..self.input_count] {
+                match sys::handle_duplicate(*ep, rights::WRITE | rights::TRANSFER) {
+                    Ok(h) => push(h),
+                    Err(_) => return LaunchReply::status(LaunchStatus::Failed),
+                }
+            }
+        }
+        if needs_hw {
+            match sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER) {
+                Ok(h) => push(h),
+                Err(_) => return LaunchReply::status(LaunchStatus::Failed),
+            }
+        }
+        let child = match sys::process_spawn_limited(SPAWNER, name, arg, &granted[..n], memory_kib)
+        {
+            Ok(c) => c,
+            Err(Error::NotFound) => {
+                for h in &granted[..n] {
+                    let _ = sys::handle_close(*h);
+                }
+                return LaunchReply::status(LaunchStatus::NotFound);
+            }
+            Err(_) => return LaunchReply::status(LaunchStatus::Failed),
+        };
+        let result = sys::process_wait(child, TIMEOUT_INFINITE);
+        let _ = sys::handle_close(child);
+        match result {
+            Ok(code) => LaunchReply::exited(code),
+            Err(Error::Killed) => LaunchReply::status(LaunchStatus::Killed),
+            Err(_) => LaunchReply::status(LaunchStatus::Failed),
+        }
+    }
+}
+
+/// `a` + `b` en `buf`.
+fn join<'a>(a: &str, b: &str, buf: &'a mut [u8; 48]) -> Option<&'a str> {
+    let total = a.len() + b.len();
+    if total > buf.len() {
+        return None;
+    }
+    buf[..a.len()].copy_from_slice(a.as_bytes());
+    buf[a.len()..total].copy_from_slice(b.as_bytes());
+    core::str::from_utf8(&buf[..total]).ok()
 }
 
 /// Lanza el compositor (endpoint propio, framebuffer, SYSTEM, hardware para
 /// su buffer trasero y los servicios de entrada) y dos aplicaciones gráficas
 /// que comparten pantalla; espera a que las aplicaciones terminen.
-fn run_gui(inputs: &[Handle]) -> Result<(), u64> {
+fn run_gui(inputs: &[Handle]) -> Result<Handle, u64> {
     let service = sys::endpoint_create().map_err(|_| 1u64)?;
     let mut handles = [Handle(0); 8];
     handles[0] = sys::handle_duplicate(service, rights::READ | rights::WRITE | rights::TRANSFER)
@@ -185,7 +406,7 @@ fn run_gui(inputs: &[Handle]) -> Result<(), u64> {
             return Err(100 + code);
         }
     }
-    Ok(())
+    Ok(service)
 }
 
 fn main(arg: u64) -> u64 {
@@ -403,10 +624,12 @@ fn main(arg: u64) -> u64 {
     }
     // 10. Interfaz grafica: compositor con el framebuffer y las entradas, y dos
     //     aplicaciones que dibujan a la vez.
+    let mut compositor = None;
     if arg & sys::abi::init_arg::GUI != 0 {
         match run_gui(&input_eps[..inputs]) {
-            Ok(()) => {
+            Ok(ep) => {
                 services |= SERVICE_GUI;
+                compositor = Some(ep);
                 say(b"gui ok (2 aplicaciones)");
             }
             Err(code) => {
@@ -423,7 +646,11 @@ fn main(arg: u64) -> u64 {
             say(b"sin servicio de ficheros, no se lanza el shell");
             return 15;
         };
-        match run_shell(fs, net_service, services) {
+        let Ok(broker) = Broker::new(fs_service, net_service, compositor, &input_eps[..inputs])
+        else {
+            return 26;
+        };
+        match run_shell(fs, net_service, services, &broker) {
             Ok(code) => {
                 sys::print(b"AriInit: shell terminado con ");
                 sys::print(aricode_rt::fmt_u64(code, &mut buf));

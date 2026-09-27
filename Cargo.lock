@@ -151,6 +151,10 @@ name = "aricode-input"
 version = "0.2.0"
 
 [[package]]
+name = "aricode-manifest"
+version = "0.2.0"
+
+[[package]]
 name = "aricode-net"
 version = "0.2.0"
 
@@ -215,6 +219,8 @@ name = "ariinit"
 version = "0.2.0"
 dependencies = [
  "aricode-build",
+ "aricode-manifest",
+ "aricode-proto",
  "aricode-rt",
  "aricode-sys",
 ]

@@ -286,6 +286,7 @@ pub fn selftest(info: &boot_protocol::BootInfo) {
             programs::by_name("fb_driver").expect("fb_driver"),
             vec![(region, Rights::READ.union(Rights::WRITE))],
             fb.stride as u64,
+            0,
         )
         .expect("fb_driver");
         let status = process::wait(pid);

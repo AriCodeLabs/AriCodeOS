@@ -22,6 +22,7 @@ members = [
     "libs/http",
     "libs/input",
     "libs/gfx",
+    "libs/manifest",
     "sdk/abi",
     "sdk/runtime",
     "sdk/build",
