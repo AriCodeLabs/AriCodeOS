@@ -22,6 +22,7 @@ mod memory;
 mod object;
 mod pci;
 mod qemu;
+mod random;
 mod serial;
 mod sync;
 mod task;
@@ -124,6 +125,7 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     info!("interrupciones habilitadas");
 
     task::init();
+    random::init();
     console_input::init();
     initrd::init(info);
     pci::init();
@@ -259,6 +261,7 @@ fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
         "sched" => task::scheduler::selftest(),
         "ipc" => ipc::selftest(),
         "drivers" => hw::selftest(info),
+        "random" => random::selftest(),
         "console_input" => console_input::selftest(),
         other if other.starts_with("user_") => run_user_program(&other[5..]),
         // W^X: escribir en .rodata -> #PF por protección.

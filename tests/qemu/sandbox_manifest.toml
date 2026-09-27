@@ -30,6 +30,7 @@ serial_contains = [
     "fsd: directorio privado 'hello_app'",
     "hello_app: capacidades: proceso(0x10001) hilo(0x10002) consola(0x10003) sistema(0x10004) endpoint(0x10005) hardware(0x10006)",
     "hello_app: uptime ",
+    "hello_app: aleatorio ",
     "hello_app: fichero privado 'notas' escrito y leido",
     "hello_app: ls privado: notas",
     "hello_app: cuota de memoria respetada (Limit)",

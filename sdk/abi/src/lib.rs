@@ -187,6 +187,10 @@ pub mod sysinfo {
     pub const PROCESSES: u64 = 2;
     /// Un [`Framebuffer`] (40 bytes): geometría y formato de la pantalla GOP.
     pub const FRAMEBUFFER: u64 = 3;
+    /// Hasta `RANDOM_MAX` bytes aleatorios del generador del kernel (la
+    /// longitud pedida es la del buffer).
+    pub const RANDOM: u64 = 4;
+    pub const RANDOM_MAX: u64 = 256;
 
     /// Formato de píxel del framebuffer (32 bpp).
     pub const FB_FORMAT_RGB: u8 = 0;

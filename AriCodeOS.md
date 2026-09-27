@@ -2689,13 +2689,31 @@ no importa no existe para el módulo.
 
 # FASE 31 — Criptografía y confianza
 
-### Implementar
+**Estado: completada (2026-09-27); la firma de imágenes se aplica en la Fase 30.**
 
-- firma de images;
-- hash verification;
-- key management;
-- secure random;
-- entropy sources.
+### Implementado
+
+- `libs/crypto` (no_std, sin dependencias, tests con los vectores oficiales):
+  SHA-256 y SHA-512 (FIPS 180-4), Ed25519 (RFC 8032: campo GF(2^255-19) en
+  limbs de 51 bits, puntos extendidos, escalares módulo L) y ChaCha20
+  (RFC 7539). Ed25519 no es de tiempo constante: el sistema solo verifica;
+  firmar es cosa del host;
+- firma de imágenes: `cargo xtask sign` y `cargo xtask verify` sobre
+  ficheros; los manifiestos de actualización firmados llegan con la Fase 30;
+- hash verification: SHA-256 incremental para imágenes grandes;
+- key management: `cargo xtask keygen`; par de desarrollo versionado en
+  `keys/dev` (solo pruebas, ver su README) y regla de que la semilla de
+  producción nunca entra en el repositorio;
+- secure random: generador ChaCha20 en el kernel, servido por
+  `system_info(RANDOM)` (`sys::random`);
+- entropy sources: `rdrand` si la CPU lo tiene, y muestras del TSC y del
+  tiempo de arranque en cada semilla y en cada lectura; el kernel anuncia
+  qué fuente usa (`rdrand` o `TSC (sin rdrand: entropia limitada)`).
+
+### Pendiente
+
+- `rdseed` y fuentes externas (jitter de interrupciones, virtio-rng);
+- Ed25519 de tiempo constante si algún día el sistema firma.
 
 ---
 

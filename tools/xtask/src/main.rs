@@ -10,10 +10,14 @@
 //!     --area boot[,memory,...]                solo escenarios QEMU de esas áreas
 //!     --list                                  muestra los escenarios y sale
 //! cargo xtask check                           fmt --check + clippy -D warnings
+//! cargo xtask keygen [DIR]                    par Ed25519 (por defecto keys/dev)
+//! cargo xtask sign SEED FICHERO               escribe FICHERO.sig
+//! cargo xtask verify PUB FICHERO [FIRMA]      comprueba una firma
 //! ```
 
 mod build;
 mod image;
+mod keys;
 mod qemu;
 mod scenario;
 mod test;
@@ -35,6 +39,14 @@ impl Cli {
         let i = self.args.iter().position(|a| a == name)?;
         self.args.get(i + 1).map(String::as_str)
     }
+    /// Argumento posicional `n` (desde 1), ignorando opciones `--x`.
+    fn positional(&self, n: usize) -> Option<&str> {
+        self.args
+            .iter()
+            .filter(|a| !a.starts_with("--"))
+            .nth(n - 1)
+            .map(String::as_str)
+    }
 }
 
 fn main() -> ExitCode {
@@ -51,6 +63,19 @@ fn main() -> ExitCode {
         "run" => qemu::run_interactive(release, cli.value("--cmdline").unwrap_or("")),
         "test" => test::run(&cli, release),
         "check" => build::check(),
+        "keygen" => keys::keygen(&root().join(cli.positional(1).unwrap_or(keys::DEV_KEY_DIR))),
+        "sign" => match (cli.positional(1), cli.positional(2)) {
+            (Some(seed), Some(file)) => keys::sign(Path::new(seed), Path::new(file)),
+            _ => Err(String::from("uso: xtask sign SEED FICHERO")),
+        },
+        "verify" => match (cli.positional(1), cli.positional(2)) {
+            (Some(pk), Some(file)) => keys::verify(
+                Path::new(pk),
+                Path::new(file),
+                cli.positional(3).map(Path::new),
+            ),
+            _ => Err(String::from("uso: xtask verify PUB FICHERO [FIRMA]")),
+        },
         _ => {
             eprintln!("uso: cargo xtask <build|image|run|test|check> [--debug] (ver tools/xtask/src/main.rs)");
             return ExitCode::from(2);
