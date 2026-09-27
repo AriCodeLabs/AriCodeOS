@@ -3504,6 +3504,22 @@ correcciones de la auditoría e9fdf38.** Fases 30 y 31:
 
 Siguiente: 0.5 con SMP (Fase 32) e IOMMU (Fase 33).
 
+## 94.4 AriCodeOS 0.5
+
+**Estado: completada (2026-09-27), tag `v0.5.0`.** Fases 32 y 33:
+
+- SMP: arranque de los procesadores de aplicación por INIT-SIPI, estado
+  por CPU (`swapgs`), planificador con cola compartida, idle por CPU,
+  afinidad e IPI, TLB shootdown, consola serializada entre CPUs y
+  `cargo xtask test --cpus N` como estrés de toda la suite;
+- IOMMU: Intel VT-d con un dominio de traducción por driver (IOVA =
+  física), asignación del dispositivo al mapear su configuración o un BAR,
+  buffers DMA mapeados solo en los dominios que los usan, fallos
+  registrados y contados; toda la suite corre traducida.
+
+Siguiente: Fase 34 (hardware real) y la segunda parte de la Fase 25
+(xHCI/USB HID).
+
 ---
 
 # 95. Hardware real: momento correcto

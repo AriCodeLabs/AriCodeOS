@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.5-dev (Fases 0 a 33)
+## Estado: 0.5.0 (Fases 0 a 33)
 
 ```text
 OVMF (UEFI)
