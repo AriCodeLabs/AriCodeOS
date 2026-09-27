@@ -8,3 +8,13 @@ rustflags = [
     "-C", "relocation-model=static",
     "-C", "code-model=kernel",
 ]
+
+# Módulos WebAssembly de ejemplo: solo MVP con las extensiones que entiende
+# `aricode-wasm` (sign-ext, bulk-memory); pila pequeña para que el módulo
+# quepa en la memoria que le da el anfitrión.
+[target.wasm32-unknown-unknown]
+rustflags = [
+    "-C", "target-cpu=mvp",
+    "-C", "target-feature=+sign-ext,+bulk-memory",
+    "-C", "link-arg=-zstack-size=16384",
+]

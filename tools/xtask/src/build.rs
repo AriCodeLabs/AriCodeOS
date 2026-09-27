@@ -7,6 +7,7 @@ use std::string::String;
 
 pub const UEFI_TARGET: &str = "x86_64-unknown-uefi";
 pub const KERNEL_TARGET: &str = "x86_64-unknown-none";
+pub const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
 /// Paquetes del workspace y el target con el que se compilan/lintan.
 /// Única fuente de verdad para `check` y para los tests unitarios de host.
@@ -34,11 +35,14 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("aricode-input", None),
     ("aricode-gfx", None),
     ("aricode-manifest", None),
+    ("aricode-wasm", None),
     ("aricode-proto", None),
     ("aricode-sys", None),
     ("aricode-build", None),
     ("aricode-rt", Some(KERNEL_TARGET)),
     ("ari-app-hello", Some(KERNEL_TARGET)),
+    ("ari-app-wasm-runner", Some(KERNEL_TARGET)),
+    ("wasm-demo", Some(WASM_TARGET)),
     ("user-testprogs", Some(KERNEL_TARGET)),
     ("ariinit", Some(KERNEL_TARGET)),
     ("ari-virtio-blk", Some(KERNEL_TARGET)),
@@ -95,6 +99,7 @@ pub fn initrd_programs() -> Result<Vec<String>> {
         String::from("compositor"),
         String::from("fsd"),
         String::from("hello_app"),
+        String::from("wasm_runner"),
         String::from("shell"),
     ];
     let bins = root().join("user/testprogs/src/bin");
@@ -144,6 +149,7 @@ pub fn build_user_programs(release: bool) -> Result<PathBuf> {
         "ari-compositor",
         "ari-fsd",
         "ari-app-hello",
+        "ari-app-wasm-runner",
         "ari-shell",
     ] {
         println!("[xtask] build {pkg} ({KERNEL_TARGET})");
@@ -163,10 +169,32 @@ pub fn build_user_programs(release: bool) -> Result<PathBuf> {
         .join(profile_dir(release)))
 }
 
+/// Compila los módulos WebAssembly de ejemplo y deja `demo.wasm` en `build/`,
+/// desde donde `write_test_disk` lo copia al directorio privado del runner.
+pub fn build_wasm_programs(release: bool) -> Result {
+    println!("[xtask] build wasm-demo ({WASM_TARGET})");
+    let mut c = cargo();
+    c.args(["build", "-p", "wasm-demo", "--target", WASM_TARGET]);
+    if release {
+        c.arg("--release");
+    }
+    run(c)?;
+    let src = root()
+        .join("target")
+        .join(WASM_TARGET)
+        .join(profile_dir(release))
+        .join("wasm_demo.wasm");
+    let dst = crate::build_dir().join("demo.wasm");
+    std::fs::create_dir_all(crate::build_dir()).map_err(|e| e.to_string())?;
+    std::fs::copy(&src, &dst).map_err(|e| format!("{}: {e}", src.display()))?;
+    Ok(())
+}
+
 /// Compila AriBoot y AriKernel. Un único binario de cada uno sirve para todos
 /// los escenarios: el comportamiento de test se controla por cmdline.
 pub fn build_os(release: bool) -> Result<Artifacts> {
     let user_bin = build_user_programs(release)?;
+    build_wasm_programs(release)?;
     for (pkg, target) in [("ariboot", UEFI_TARGET), ("arikernel", KERNEL_TARGET)] {
         println!("[xtask] build {pkg} ({target})");
         let mut c = cargo();

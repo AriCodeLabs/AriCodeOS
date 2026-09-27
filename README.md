@@ -26,6 +26,7 @@ servicio. Los fallos se provocan desde la cmdline para los tests.
 
 ```bash
 sudo apt install qemu-system-x86 ovmf nasm clang lld gdb git make
+rustup target add wasm32-unknown-unknown   # modulos WebAssembly de ejemplo (apps/wasm-demo)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
@@ -77,6 +78,8 @@ sdk/runtime/     aricode-rt: runtime de los programas de usuario (entry!, heap, 
 sdk/build/       aricode-build: build.rs de una linea para programas de usuario
 apps/hello/      aplicacion de ejemplo del SDK con su manifiesto (ver docs/sdk.md)
 libs/manifest/   manifiestos de aplicacion: capacidades pedidas y cuota de memoria
+libs/wasm/       interprete WebAssembly MVP (enteros, memoria acotada, importaciones) con tests de host
+apps/wasm-demo/  modulo WebAssembly portable de ejemplo; apps/wasm-runner lo ejecuta con la Capability API
 boot/            AriBoot: cargador UEFI (crate `ariboot`)
 kernel/          AriKernel (crate `arikernel`), ELF64 en la mitad alta
 tools/xtask/     automatización: build, imagen, QEMU, tests, lint

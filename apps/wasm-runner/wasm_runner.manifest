@@ -1,0 +1,5 @@
+# Runtime WebAssembly: lee el modulo de su directorio privado y le presta un
+# reloj y la consola. La memoria lineal del modulo sale de su cuota.
+name = wasm_runner
+caps = system, fs
+memory = 512K

@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.2.0 + Fase 28 (sandbox) en desarrollo
+## Estado: 0.3.0 (Fases 0 a 29)
 
 ```text
 OVMF (UEFI)
@@ -51,6 +51,7 @@ libs/acpi/           aricode-acpi: RSDP, XSDT/RSDT, MADT (LAPIC, I/O APIC, overr
 libs/pci/            aricode-pci: direccionamiento ECAM, cabecera de configuración, BARs, capabilities, clases (no_std + alloc, tests de host)
 libs/virtio/         aricode-virtio: virtqueue split sobre DMA, estructuras virtio-pci modernas, peticiones virtio-blk (no_std, tests de host)
 libs/gpt/            aricode-gpt: CRC32, cabecera y entradas GPT, escritor para el disco de pruebas (no_std, tests de host)
+libs/wasm/           aricode-wasm: intérprete WebAssembly MVP con enteros, memoria acotada e importaciones (no_std + alloc, tests de host)
 libs/manifest/       aricode-manifest: manifiestos de aplicación (nombre, capacidades, memoria) (no_std, tests de host)
 libs/gfx/            aricode-gfx: lienzos 0x00RRGGBB, recorte, texto, cursor y escritorio de ventanas (no_std, tests de host)
 libs/input/          aricode-input: eventos evdev y teclado US (no_std, tests de host)
@@ -60,6 +61,8 @@ libs/arifs/          aricode-arifs: AriFS v0, directorio plano con tabla de fich
 sdk/proto/           aricode-proto: protocolos IPC versionados de los servicios (bloques v1, ficheros v1, red v1, entrada v1, ventanas v1, lanzamiento v1) (no_std, tests de host)
 sdk/runtime/         aricode-rt: runtime de programas de usuario (`entry!`, heap de 256 KiB, panic, fmt); reexporta aricode-sys
 sdk/build/           aricode-build: `build.rs` de una línea que enlaza con `sdk/rust/user.ld`
+apps/wasm-demo/      wasm_demo.wasm: módulo portable compilado a wasm32 que solo usa la Capability API importada
+apps/wasm-runner/    wasm_runner: runtime WebAssembly como aplicación con manifiesto (lee el módulo de su directorio privado)
 apps/hello/          hello_app: aplicación de ejemplo del SDK (consola, permisos, tiempo)
 sdk/abi/             aricode-abi: números de syscall, errores, handles iniciales, derechos y tipos de objeto (no_std, tests de host)
 sdk/rust/            aricode-sys: wrappers de syscall (no_std, sin alloc), clientes de los servicios de bloques, ficheros y red, cliente HTTP GET, transporte virtio PCI para drivers, y `user.ld`, el linker script de todo programa de usuario
@@ -742,8 +745,33 @@ segundo brevemente para añadir la región.
   carácter a carácter. Con interrupciones deshabilitadas solo se intenta el
   lock, para que un handler nunca espere a un hilo que no puede correr.
 
+## Runtime WebAssembly (Fase 29)
+
+- `aricode-wasm` analiza el binario una vez (`Module::parse`: tipos,
+  importaciones, funciones, tabla, memoria, globales, exportaciones,
+  elementos y datos) y ejecuta byte a byte con una pila de valores `u64` y
+  una de etiquetas. Los fines de bloque se localizan saltando inmediatos al
+  entrar en cada bloque; `br` recorta la pila a la altura de la etiqueta y
+  conserva la aridad; la etiqueta implícita de la función hace de `return`.
+  Límites: 64 llamadas anidadas, 16 K valores, 50 M pasos (`Fuel`). Toda
+  carga, almacenamiento, `memory.copy` y `memory.fill` se comprueba contra
+  el `&mut [u8]` que aporta el anfitrión; la coma flotante devuelve
+  `Unsupported`. Los tests de host usan un ensamblador mínimo de módulos
+  para cubrir aritmética, bucles, `if/else` con resultado, recursión,
+  `br_table`, globales, `call_indirect`, traps y límites.
+- `wasm_runner` es una aplicación normal del broker: recibe `SYSTEM`, su
+  directorio privado y `HARDWARE`; lee `demo.wasm` (xtask lo compila con
+  `-C target-cpu=mvp -C target-feature=+sign-ext,+bulk-memory` y lo deja en
+  `build/`, y `write_test_disk` lo copia a `wasm_runner/demo.wasm`), resuelve
+  las importaciones por nombre (`aricode.print`, `aricode.uptime_ms`) y
+  reserva la memoria lineal como buffer DMA dentro de su cuota. El módulo no
+  tiene manera de nombrar nada que el runner no le haya importado.
+- Los ficheros de AriFS pasan a 32 KiB de capacidad para alojar módulos.
+
 ## Deuda conocida
 
+- El intérprete WASM no valida el módulo antes de ejecutar (confía en el
+  productor; todo se comprueba en ejecución) y no tiene coma flotante.
 - La política del broker es una constante; no hay cuotas de CPU ni de
   handles por manifiesto y el heap de usuario sigue siendo estático.
 - La GUI no mueve ni redimensiona ventanas, repinta la pantalla completa
