@@ -7,7 +7,15 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-fn base_command(esp: &Path, vars: &Path, disk: &Path, disk_readonly: bool, cpus: u32) -> Command {
+/// `esp`: directorio que QEMU expone como disco FAT; `None` cuando la ESP va
+/// dentro de la imagen de disco (imagen USB).
+fn base_command(
+    esp: Option<&Path>,
+    vars: &Path,
+    disk: &Path,
+    disk_readonly: bool,
+    cpus: u32,
+) -> Command {
     let mut q = Command::new("qemu-system-x86_64");
     q.current_dir(root());
     q.args([
@@ -45,10 +53,12 @@ fn base_command(esp: &Path, vars: &Path, disk: &Path, disk_readonly: bool, cpus:
         "-drive",
         &format!("if=pflash,format=raw,file={}", vars.display()),
     ]);
-    q.args([
-        "-drive",
-        &format!("format=raw,file=fat:rw:{}", esp.display()),
-    ]);
+    if let Some(esp) = esp {
+        q.args([
+            "-drive",
+            &format!("format=raw,file=fat:rw:{}", esp.display()),
+        ]);
+    }
     // Red de usuario (slirp): DHCP en 10.0.2.2, DNS en 10.0.2.3; el anfitrión
     // virtual 10.0.2.2 redirige UDP/TCP al loopback del host, donde escucha
     // el respondedor de pruebas.
@@ -358,7 +368,7 @@ fn run_tcp_probe(payload: &str) -> String {
     }
 }
 
-pub fn run_interactive(release: bool, cmdline: &str, cpus: u32) -> Result {
+pub fn run_interactive(release: bool, cmdline: &str, cpus: u32, usb_image: bool) -> Result {
     let base = image::build_base_esp(release)?;
     let esp = if cmdline.is_empty() {
         base
@@ -373,9 +383,16 @@ pub fn run_interactive(release: bool, cmdline: &str, cpus: u32) -> Result {
     };
     let vars = image::ovmf_vars_for(&build_dir())?;
     let disk = build_dir().join("disk.img");
-    image::write_test_disk(&disk, image::DiskVariant::Slots)?;
+    let esp_drive = if usb_image {
+        // Como en un pendrive: la ESP dentro del disco GPT, sin `fat:`.
+        image::write_usb_image(&disk, &esp)?;
+        None
+    } else {
+        image::write_test_disk(&disk, image::DiskVariant::Slots)?;
+        Some(esp.as_path())
+    };
     let _responder = Responder::start()?;
-    let mut q = base_command(&esp, &vars, &disk, false, cpus);
+    let mut q = base_command(esp_drive, &vars, &disk, false, cpus);
     if cmdline.split_whitespace().any(|w| w == "gui") {
         // Con `gui` hace falta ver la pantalla: ventana de QEMU y serie en la terminal.
         println!("[xtask] QEMU con pantalla (serie en la terminal; salir: cerrar la ventana)");
@@ -440,12 +457,18 @@ pub fn run_headless(
     use std::sync::{Arc, Mutex};
     let vars = image::ovmf_vars_for(workdir)?;
     let disk = workdir.join("disk.img");
-    image::write_test_disk(&disk, disk_variant)?;
+    let esp_drive = if disk_variant == image::DiskVariant::UsbImage {
+        image::write_usb_image(&disk, esp)?;
+        None
+    } else {
+        image::write_test_disk(&disk, disk_variant)?;
+        Some(esp)
+    };
     let _responder = Responder::start()?;
     let qmp_path = workdir.join("qmp.sock");
     let _ = std::fs::remove_file(&qmp_path);
     let start = Instant::now();
-    let mut child = base_command(esp, &vars, &disk, disk_readonly, options.cpus)
+    let mut child = base_command(esp_drive, &vars, &disk, disk_readonly, options.cpus)
         .args(["-display", "none", "-monitor", "none", "-serial", "stdio"])
         .args([
             "-qmp",

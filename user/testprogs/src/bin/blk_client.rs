@@ -9,7 +9,8 @@ use aricode_rt::sys::{self, rights, Handle, TIMEOUT_INFINITE};
 
 const BLK: Handle = Handle(0x0001_0004);
 /// Primer sector del área en bruto del disco de pruebas (`xtask`).
-const RAW: u64 = 4096;
+/// Primer LBA del area en bruto en el disco de pruebas (`arg` = 0).
+const RAW_DEFAULT: u64 = 4096;
 const HW: Handle = Handle(0x0001_0005);
 
 struct Client {
@@ -42,7 +43,9 @@ impl Client {
     }
 }
 
-fn main(_arg: u64) -> u64 {
+fn main(arg: u64) -> u64 {
+    // init pasa el inicio del area en bruto (cola de ARI0) del disco que haya.
+    let raw = if arg == 0 { RAW_DEFAULT } else { arg };
     let Ok(reply) = sys::endpoint_create() else {
         return 1;
     };
@@ -74,7 +77,7 @@ fn main(_arg: u64) -> u64 {
         Request {
             op: Op::Read,
             count: 4,
-            lba: RAW,
+            lba: raw,
         },
         true,
     ) {
@@ -86,11 +89,11 @@ fn main(_arg: u64) -> u64 {
     }
     for i in 0..4 {
         let s = c.sector(i);
-        if &s[..8] != b"ARIDISK\0" || s[8..16] != (RAW + i as u64).to_le_bytes() {
+        if &s[..8] != b"ARIDISK\0" || s[8..16] != (raw + i as u64).to_le_bytes() {
             return 6;
         }
     }
-    // 3. Escribir un patron en el LBA RAW + 100 y releerlo.
+    // 3. Escribir un patron en el LBA raw + 100 y releerlo.
     for (i, b) in c.sector(0).iter_mut().enumerate() {
         *b = (i as u8).wrapping_mul(13).wrapping_add(1);
     }
@@ -98,7 +101,7 @@ fn main(_arg: u64) -> u64 {
         Request {
             op: Op::Write,
             count: 1,
-            lba: RAW + 100,
+            lba: raw + 100,
         },
         true,
     ) {
@@ -113,7 +116,7 @@ fn main(_arg: u64) -> u64 {
         Request {
             op: Op::Read,
             count: 1,
-            lba: RAW + 100,
+            lba: raw + 100,
         },
         true,
     ) {
@@ -148,7 +151,7 @@ fn main(_arg: u64) -> u64 {
         Request {
             op: Op::Read,
             count: 1,
-            lba: RAW,
+            lba: raw,
         },
         false,
     )

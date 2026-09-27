@@ -176,6 +176,10 @@ name = "aricode-elf"
 version = "0.5.0"
 
 [[package]]
+name = "aricode-fat"
+version = "0.5.0"
+
+[[package]]
 name = "aricode-fb-console"
 version = "0.5.0"
 
@@ -311,6 +315,7 @@ dependencies = [
  "aricode-handles",
  "aricode-heap",
  "aricode-initrd",
+ "aricode-input",
  "aricode-iommu",
  "aricode-pci",
  "aricode-pmm",
@@ -598,6 +603,7 @@ dependencies = [
  "aricode-ab",
  "aricode-arifs",
  "aricode-crypto",
+ "aricode-fat",
  "aricode-gpt",
  "aricode-http",
  "aricode-initrd",

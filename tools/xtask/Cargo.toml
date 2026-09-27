@@ -10,6 +10,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 aricode-initrd = { path = "../../libs/initrd", features = ["write"] }
 aricode-gpt = { path = "../../libs/gpt", features = ["write"] }
+aricode-fat = { path = "../../libs/fat" }
 aricode-arifs = { path = "../../libs/arifs" }
 aricode-net = { path = "../../libs/net" }
 aricode-http = { path = "../../libs/http" }
