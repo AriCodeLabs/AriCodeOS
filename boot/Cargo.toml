@@ -16,5 +16,8 @@ boot-protocol = { path = "../boot-protocol" }
 aricode-elf = { path = "../libs/elf" }
 aricode-x86-paging = { path = "../libs/x86-paging" }
 aricode-cmdline = { path = "../libs/cmdline" }
+aricode-gpt = { path = "../libs/gpt" }
+aricode-ab = { path = "../libs/ab" }
+aricode-crypto = { path = "../libs/crypto" }
 uefi = { version = "0.41", default-features = false, features = ["alloc", "global_allocator", "panic_handler", "logger"] }
 log = { version = "0.4", default-features = false }

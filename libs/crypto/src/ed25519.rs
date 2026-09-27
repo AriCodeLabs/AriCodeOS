@@ -410,21 +410,23 @@ fn mul_add(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> [u8; 32] {
         limbs_from_bytes(b),
         limbs_from_bytes(c),
     );
-    let mut prod = [0u128; 9];
-    for i in 0..4 {
-        for j in 0..4 {
-            prod[i + j] += a[i] as u128 * b[j] as u128;
-        }
-    }
-    for i in 0..4 {
-        prod[i] += c[i] as u128;
-    }
+    // Producto escolar con acarreo por fila: cada suma parcial cabe en u128
+    // (limb*limb + limb + acarreo < 2^128), a diferencia de acumular columnas.
     let mut limbs = [0u64; 8];
+    for i in 0..4 {
+        let mut carry = 0u128;
+        for j in 0..4 {
+            let t = limbs[i + j] as u128 + a[i] as u128 * b[j] as u128 + carry;
+            limbs[i + j] = t as u64;
+            carry = t >> 64;
+        }
+        limbs[i + 4] = carry as u64;
+    }
     let mut carry = 0u128;
     for i in 0..8 {
-        let v = prod[i] + carry;
-        limbs[i] = v as u64;
-        carry = v >> 64;
+        let t = limbs[i] as u128 + if i < 4 { c[i] as u128 } else { 0 } + carry;
+        limbs[i] = t as u64;
+        carry = t >> 64;
     }
     bytes_from_limbs(&reduce_limbs(&limbs))
 }
@@ -608,6 +610,20 @@ mod tests {
             if other != pk {
                 assert!(!verify(&other, m, &sig));
             }
+        }
+    }
+
+    #[test]
+    fn scalar_products_with_large_limbs_do_not_overflow() {
+        // Regresion: acumular columnas de cuatro productos u64*u64 en un u128
+        // desbordaba con semillas como [9; 32]; ahora el acarreo va por filas.
+        let all = [0xFFu8; 32];
+        let p = mul_add(&all, &all, &all);
+        assert!(is_canonical(&p));
+        for seed in [[9u8; 32], [0xFFu8; 32], [0x80u8; 32], [0x5Au8; 32]] {
+            let pk = public_key(&seed);
+            let sig = sign(&seed, b"limbs grandes");
+            assert!(verify(&pk, b"limbs grandes", &sig), "semilla {:?}", seed[0]);
         }
     }
 

@@ -1,0 +1,17 @@
+# Fase 30: disco sin particiones de slots: AriBoot arranca desde la ESP como
+# recuperacion e init lo anota.
+name = "update.esp_fallback"
+description = "sin ARIBOOT: arranque de recuperacion desde la ESP"
+level = "full"
+areas = ["update", "boot"]
+cmdline = "qemu_exit"
+disk = "esp-only"
+
+[expect]
+exit = 33
+serial_contains = [
+    "slots: sin particion ARIBOOT, arranque desde la ESP",
+    "AriInit: arrancado desde la ESP (sin slots)",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "boot_slot="]

@@ -15,3 +15,4 @@ aricode-net = { path = "../../libs/net" }
 aricode-http = { path = "../../libs/http" }
 aricode-proto = { path = "../../sdk/proto" }
 aricode-crypto = { path = "../../libs/crypto" }
+aricode-ab = { path = "../../libs/ab" }

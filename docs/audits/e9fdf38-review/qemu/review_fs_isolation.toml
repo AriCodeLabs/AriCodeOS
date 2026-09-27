@@ -1,0 +1,10 @@
+name = "review.fs_isolation"
+level = "full"
+areas = ["review"]
+cmdline = "qemu_exit shell"
+timeout_secs = 90
+stdin = ["run review_victim", "run review_attacker", "shutdown"]
+[expect]
+exit = 33
+serial_contains = ["REVIEW_VICTIM_WROTE_PRIVATE_FILE", "REVIEW_PRIVATE_FDS_ISOLATED"]
+serial_absent = ["REVIEW_CROSS_NAMESPACE_READ", "KERNEL PANIC"]

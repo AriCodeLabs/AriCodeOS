@@ -174,9 +174,11 @@ mod elf_patch {
 /// Empaqueta `init` y los programas de usuario en un initrd.
 fn build_initrd(user_bin: &Path) -> Result<Vec<u8>> {
     let names = crate::build::initrd_programs()?;
+    // Programas sin informacion de depuracion: el initrd pasa de ~5 MiB a
+    // unos cientos de KiB y el arranque es mas rapido.
     let mut contents: Vec<(String, Vec<u8>)> = names
         .iter()
-        .map(|n| io(fs::read(user_bin.join(n)), &format!("leer {n}")).map(|d| (n.clone(), d)))
+        .map(|n| stripped_elf(&user_bin.join(n)).map(|d| (n.clone(), d)))
         .collect::<Result<_>>()?;
     for (name, path) in crate::build::initrd_manifests()? {
         contents.push((name.clone(), io(fs::read(&path), &format!("leer {name}"))?));
@@ -208,10 +210,54 @@ fn write_esp(esp: &Path, a: &Artifacts, cmdline: Option<&str>) -> Result {
     Ok(())
 }
 
-/// Disco de pruebas virtio-blk: 4 MiB con GPT y una partición AriCodeOS
-/// (`ARI0`) formateada como AriFS con ficheros de ejemplo. Se regenera en
-/// cada arranque (los tests escriben en él).
-pub const DISK_SECTORS: u64 = 8192;
+/// Disco de pruebas virtio-blk: 12 MiB con GPT y cinco particiones. Se
+/// regenera en cada arranque (los tests escriben en él).
+///
+/// ```text
+/// ARI0     34..6143      AriFS con ficheros de ejemplo (patrón en bruto desde el LBA 4096)
+/// SYSA     6144..30719   imagen de sistema firmada, slot A (versión 1), 12 MiB
+/// SYSB     30720..55295  slot B (vacío, o la variante que pida el escenario)
+/// UPDATE   55296..79871  imagen de actualización (versión 2) que instala `updater`
+/// ARIBOOT  79872..79935  estado de arranque A/B (sector 0)
+/// ```
+///
+/// El kernel de las imágenes va sin información de depuración (`strip`) si la
+/// herramienta existe; con ella el ELF supera los 8 MiB.
+pub const DISK_SECTORS: u64 = 98304;
+pub const PART_ARI0: (u64, u64) = (34, 6143);
+pub const PART_SYSA: (u64, u64) = (6144, 30719);
+pub const PART_SYSB: (u64, u64) = (30720, 55295);
+pub const PART_UPDATE: (u64, u64) = (55296, 79871);
+pub const PART_ARIBOOT: (u64, u64) = (79872, 79935);
+
+/// Estado inicial del disco que pide un escenario (`disk = "..."`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiskVariant {
+    /// Slot A activo con la imagen actual; B vacío; UPDATE con la versión 2.
+    #[default]
+    Slots,
+    /// Sin particiones de slots ni estado: AriBoot arranca desde la ESP.
+    EspOnly,
+    /// B instalado (versión 2) y pendiente con 3 intentos.
+    PendingB,
+    /// B pendiente pero sin intentos: rollback a A.
+    ExhaustedB,
+    /// B pendiente con una imagen cuya firma no vale: rechazo y rollback.
+    CorruptB,
+}
+
+impl DiskVariant {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "slots" => Self::Slots,
+            "esp-only" => Self::EspOnly,
+            "pending-b" => Self::PendingB,
+            "b-exhausted" => Self::ExhaustedB,
+            "b-corrupt" => Self::CorruptB,
+            _ => return None,
+        })
+    }
+}
 
 struct VecDisk<'a> {
     data: &'a mut [u8],
@@ -248,7 +294,7 @@ impl aricode_arifs::BlockDevice for VecDisk<'_> {
 
 /// Primer sector del área en bruto del disco de pruebas: desde aquí hasta el
 /// final de la partición cada sector lleva `ARIDISK\0` y su LBA, fuera del
-/// alcance de AriFS (32 ficheros × 16 sectores caben antes).
+/// alcance de AriFS (32 ficheros × 64 sectores caben antes).
 pub const RAW_PATTERN_LBA: u64 = 4096;
 
 /// Ficheros de ejemplo del disco de pruebas.
@@ -257,15 +303,83 @@ pub const DISK_FILES: &[(&str, &[u8])] = &[
     ("README", b"AriCodeOS: disco de pruebas con AriFS v0.\n"),
 ];
 
-pub fn write_test_disk(path: &Path) -> Result {
+/// Imagen de sistema firmada con la clave de desarrollo: contenedor con
+/// manifiesto (versión y hashes), firma, kernel e initrd de la ESP base.
+/// Con `corrupt`, la firma se altera para que el cargador la rechace.
+pub fn system_image(version: u32, corrupt: bool) -> Result<Vec<u8>> {
+    let esp = crate::build_dir().join("esp");
+    let kernel = stripped_elf(&esp.join(KERNEL))?;
+    let initrd = io(fs::read(esp.join(INITRD)), "leer initrd.img de la ESP base")?;
+    let manifest = aricode_ab::Manifest {
+        version,
+        kernel_sha256: aricode_crypto::sha256::sha256(&kernel),
+        initrd_sha256: aricode_crypto::sha256::sha256(&initrd),
+    };
+    let mut buf = [0u8; 192];
+    let text = manifest.write(&mut buf).as_bytes().to_vec();
+    let seed: [u8; 32] = crate::keys::read_hex(
+        &crate::root()
+            .join(crate::keys::DEV_KEY_DIR)
+            .join(crate::keys::SEED_FILE),
+    )?;
+    let mut sig = aricode_crypto::ed25519::sign(&seed, &text);
+    if corrupt {
+        sig[5] ^= 0x40;
+    }
+    aricode_initrd::build(&[
+        ("manifest", text.as_slice()),
+        ("manifest.sig", &sig[..]),
+        ("kernel.elf", kernel.as_slice()),
+        ("initrd.img", initrd.as_slice()),
+    ])
+    .map_err(|e| format!("imagen de sistema: {e:?}"))
+}
+
+/// ELF sin secciones de depuración (el kernel y el initrd solo necesitan los
+/// segmentos `PT_LOAD`; con depuración el kernel supera los 5 MiB). Si no hay
+/// `strip`, se usa el fichero tal cual.
+pub fn stripped_elf(path: &Path) -> Result<Vec<u8>> {
+    let dir = crate::build_dir().join("stripped");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let out = dir.join(path.file_name().unwrap_or_default());
+    let status = std::process::Command::new("strip")
+        .args(["--strip-debug", "-o"])
+        .arg(&out)
+        .arg(path)
+        .status();
+    match status {
+        Ok(st) if st.success() => io(fs::read(&out), "leer ELF sin depuracion"),
+        _ => io(fs::read(path), &format!("leer {}", path.display())),
+    }
+}
+
+/// Escribe cabecera + contenedor al principio de una partición.
+fn write_slot(img: &mut [u8], part: (u64, u64), container: &[u8]) -> Result {
+    let cap = (part.1 - part.0 + 1) as usize * 512 - 512;
+    if container.len() > cap {
+        return Err(format!(
+            "la imagen de sistema ({} bytes) no cabe en el slot ({cap} bytes)",
+            container.len()
+        ));
+    }
+    let o = part.0 as usize * 512;
+    img[o..o + 512].copy_from_slice(&aricode_ab::Image::header(container.len() as u32));
+    img[o + 512..o + 512 + container.len()].copy_from_slice(container);
+    Ok(())
+}
+
+pub fn write_test_disk(path: &Path, variant: DiskVariant) -> Result {
     let mut img = vec![0u8; DISK_SECTORS as usize * 512];
-    let (first, last) =
-        aricode_gpt::write_disk(&mut img, &[]).map_err(|e| format!("gpt: {e:?}"))?;
-    aricode_gpt::write_disk(
-        &mut img,
-        &[("ARI0", first, last, aricode_gpt::ARICODEOS_DATA_GUID)],
-    )
-    .map_err(|e| format!("gpt: {e:?}"))?;
+    let guid = aricode_gpt::ARICODEOS_DATA_GUID;
+    let mut parts = vec![("ARI0", PART_ARI0.0, PART_ARI0.1, guid)];
+    if variant != DiskVariant::EspOnly {
+        parts.push(("SYSA", PART_SYSA.0, PART_SYSA.1, guid));
+        parts.push(("SYSB", PART_SYSB.0, PART_SYSB.1, guid));
+        parts.push(("UPDATE", PART_UPDATE.0, PART_UPDATE.1, guid));
+        parts.push(("ARIBOOT", PART_ARIBOOT.0, PART_ARIBOOT.1, guid));
+    }
+    aricode_gpt::write_disk(&mut img, &parts).map_err(|e| format!("gpt: {e:?}"))?;
+    let (first, last) = PART_ARI0;
     let sectors = last - first + 1;
     let mut fs = aricode_arifs::AriFs::format(
         VecDisk {
@@ -297,6 +411,32 @@ pub fn write_test_disk(path: &Path) -> Result {
         let o = lba as usize * 512;
         img[o..o + 8].copy_from_slice(b"ARIDISK\0");
         img[o + 8..o + 16].copy_from_slice(&lba.to_le_bytes());
+    }
+    if variant != DiskVariant::EspOnly {
+        use aricode_ab::{schedule, BootState, Slot};
+        let v1 = system_image(1, false)?;
+        let v2 = system_image(2, false)?;
+        write_slot(&mut img, PART_SYSA, &v1)?;
+        write_slot(&mut img, PART_UPDATE, &v2)?;
+        let mut state = BootState::fresh(Slot::A);
+        match variant {
+            DiskVariant::PendingB => {
+                write_slot(&mut img, PART_SYSB, &v2)?;
+                state = schedule(state, Slot::B);
+            }
+            DiskVariant::ExhaustedB => {
+                write_slot(&mut img, PART_SYSB, &v2)?;
+                state = schedule(state, Slot::B);
+                state.pending = Some((Slot::B, 0));
+            }
+            DiskVariant::CorruptB => {
+                write_slot(&mut img, PART_SYSB, &system_image(2, true)?)?;
+                state = schedule(state, Slot::B);
+            }
+            DiskVariant::Slots | DiskVariant::EspOnly => {}
+        }
+        let o = PART_ARIBOOT.0 as usize * 512;
+        img[o..o + 512].copy_from_slice(&state.encode());
     }
     io(fs::write(path, img), "escribir disco de pruebas")
 }

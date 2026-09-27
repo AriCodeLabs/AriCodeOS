@@ -1,0 +1,10 @@
+name = "review.broker_leak"
+level = "full"
+areas = ["review"]
+cmdline = "qemu_exit shell"
+timeout_secs = 180
+stdin = ["repeat 300 run review_window", "run hello_app 7", "shutdown"]
+[expect]
+exit = 33
+serial_contains = ["run: hello_app termino con 0"]
+serial_absent = ["el broker no pudo lanzarlo", "KERNEL PANIC"]

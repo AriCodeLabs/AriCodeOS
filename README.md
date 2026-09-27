@@ -82,6 +82,8 @@ libs/crypto/     SHA-256, SHA-512, Ed25519 y ChaCha20 desde cero con vectores of
 keys/dev/        par Ed25519 de desarrollo (solo pruebas; ver su README)
 libs/wasm/       interprete WebAssembly MVP (enteros, memoria acotada, importaciones) con tests de host
 apps/wasm-demo/  modulo WebAssembly portable de ejemplo; apps/wasm-runner lo ejecuta con la Capability API
+apps/updater/    actualizador A/B: verifica la imagen de UPDATE y la instala en el slot inactivo
+libs/ab/         estado de arranque A/B, imagenes firmadas y politica de slots (AriBoot, init, updater)
 boot/            AriBoot: cargador UEFI (crate `ariboot`)
 kernel/          AriKernel (crate `arikernel`), ELF64 en la mitad alta
 tools/xtask/     automatización: build, imagen, QEMU, tests, lint

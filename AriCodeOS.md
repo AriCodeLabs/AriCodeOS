@@ -2677,13 +2677,42 @@ no importa no existe para el módulo.
 
 # FASE 30 — Actualización A/B
 
-### Implementar
+**Estado: completada (2026-09-27).**
 
-- system image;
-- manifest firmado;
-- slot A/B;
-- boot attempts counter;
-- rollback.
+### Implementado
+
+- system image: contenedor `aricode-initrd` con `manifest`, `manifest.sig`,
+  `kernel.elf` (sin depuración) e `initrd.img`, precedido en la partición
+  por una cabecera `ARISLOT` con su longitud; xtask lo construye y firma
+  con la clave de desarrollo (`image::system_image`);
+- manifest firmado: `version`, SHA-256 de kernel e initrd; firma Ed25519
+  del texto completo; `aricode-ab::Image::verify` solo devuelve los bytes
+  si firma y hashes cuadran;
+- slot A/B: particiones GPT `SYSA` y `SYSB` (12 MiB), `UPDATE` (imagen
+  descargada) y `ARIBOOT` (estado); AriBoot las localiza por `BlockIo`
+  (apertura no exclusiva), elige el slot, verifica y carga el kernel de la
+  imagen; si no hay `ARIBOOT` o nada verifica, arranca desde la ESP
+  (recuperación). El kernel recibe `boot_slot=A|B [boot_pending]` por la
+  cmdline e init lo ve en `init_arg`;
+- boot attempts counter: `BootState` (sector 0 de `ARIBOOT`, con CRC)
+  guarda activo, pendiente e intentos; AriBoot consume un intento antes de
+  saltar al kernel e init confirma el slot escribiendo el estado por el
+  servicio de bloques cuando los servicios de arranque funcionan;
+- rollback: pendiente sin intentos o con imagen rechazada → vuelve al
+  activo y borra el pendiente (`aricode-ab::{choose, reject}`).
+
+El actualizador (`apps/updater`, aplicación de confianza con la capacidad
+`block`) lee `UPDATE`, verifica, copia al slot inactivo y programa tres
+intentos. Escenarios: `update.slot_a` (smoke), `update.pending_boot`,
+`update.rollback_exhausted`, `update.reject_bad_signature`,
+`update.esp_fallback` y `update.apply`, cada uno con su variante de disco.
+
+### Pendiente
+
+- reinicio automático tras instalar y prueba de dos arranques encadenados
+  (hoy cada escenario parte de un disco preparado por xtask);
+- origen de la actualización por red (hoy la deja xtask en `UPDATE`);
+- clave de producción fuera del repositorio y rotación de claves.
 
 ---
 
@@ -3366,8 +3395,17 @@ correcciones de la auditoría del SDK.** Fases 28 y 29:
   aplicación con manifiesto que ejecuta módulos portables compilados con
   `rustc` exponiendo solo la Capability API.
 
-Siguiente: 0.4 con actualización A/B (Fase 30) y criptografía y confianza
-(Fase 31).
+## 94.3 AriCodeOS 0.4
+
+**Estado: completada (2026-09-27), tag `v0.4.0`.** Fases 30 y 31:
+
+- criptografía propia (SHA-256, SHA-512, Ed25519, ChaCha20), generador
+  aleatorio del kernel y herramientas de claves;
+- actualización A/B: imágenes de sistema firmadas en particiones de slot,
+  estado de arranque con intentos y rollback en AriBoot, confirmación por
+  init y actualizador con capacidad de bloques.
+
+Siguiente: 0.5 con SMP (Fase 32) e IOMMU (Fase 33).
 
 ---
 
