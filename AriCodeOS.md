@@ -3338,7 +3338,8 @@ Todavía sin ser un sistema operativo de escritorio completo.
 
 ## 94.2 AriCodeOS 0.3
 
-**Estado: completada (2026-09-27), tag `v0.3.0`.** Fases 28 y 29:
+**Estado: completada (2026-09-27), tag `v0.3.0`; hotfix `v0.3.1` con las
+correcciones de la auditoría del SDK.** Fases 28 y 29:
 
 - sandbox de aplicaciones: manifiestos, broker de capabilities en init,
   directorio privado por aplicación en fsd y cuota de memoria DMA por

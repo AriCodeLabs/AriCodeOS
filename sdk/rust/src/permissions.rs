@@ -28,7 +28,10 @@ pub fn kind_name(handle: Handle) -> Option<&'static str> {
 }
 
 /// Recorre los handles iniciales y los extra que el creador entregó
-/// (`0x10004..`), llamando a `f(handle, nombre)` por cada uno que exista.
+/// (`0x10004..0x10004 + MAX_EXTRA`), llamando a `f(handle, nombre)` por cada
+/// uno que exista. Los huecos (handles ya cerrados o transferidos) se
+/// saltan: renunciar a un permiso no oculta los demás. Solo cubre los
+/// handles recibidos al arrancar, no los creados después.
 pub fn granted(mut f: impl FnMut(Handle, &'static str)) {
     for h in [Handle::SELF_PROCESS, Handle::MAIN_THREAD, Handle::CONSOLE] {
         if let Some(name) = kind_name(h) {
@@ -37,9 +40,8 @@ pub fn granted(mut f: impl FnMut(Handle, &'static str)) {
     }
     for i in 0..MAX_EXTRA {
         let h = Handle(FIRST_EXTRA + i);
-        match kind_name(h) {
-            Some(name) => f(h, name),
-            None => break,
+        if let Some(name) = kind_name(h) {
+            f(h, name);
         }
     }
 }

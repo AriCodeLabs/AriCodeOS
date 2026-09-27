@@ -337,13 +337,20 @@ impl Broker {
         let child = match sys::process_spawn_limited(SPAWNER, name, arg, &granted[..n], memory_kib)
         {
             Ok(c) => c,
-            Err(Error::NotFound) => {
+            Err(e) => {
+                // El kernel solo retira los handles si llega a crear el
+                // proceso; en cualquier fallo los duplicados siguen en nuestra
+                // tabla y hay que cerrarlos (cerrar uno ya retirado devuelve
+                // BadHandle y se ignora). Sin esto, cada nombre inexistente
+                // dejaba una entrada hasta agotar la tabla.
                 for h in &granted[..n] {
                     let _ = sys::handle_close(*h);
                 }
-                return LaunchReply::status(LaunchStatus::NotFound);
+                return LaunchReply::status(match e {
+                    Error::NotFound => LaunchStatus::NotFound,
+                    _ => LaunchStatus::Failed,
+                });
             }
-            Err(_) => return LaunchReply::status(LaunchStatus::Failed),
         };
         let result = sys::process_wait(child, TIMEOUT_INFINITE);
         let _ = sys::handle_close(child);
