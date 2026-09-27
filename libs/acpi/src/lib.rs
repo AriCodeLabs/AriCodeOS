@@ -264,6 +264,154 @@ pub fn parse_mcfg(table: &[u8]) -> Result<Vec<McfgEntry>, AcpiError> {
         .collect())
 }
 
+/// Ámbito de dispositivo de la DMAR: un endpoint o puente PCI identificado
+/// por bus de partida y camino (dispositivo, función) por cada puente.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceScope {
+    /// 1 endpoint, 2 puente, 3 I/O APIC, 4 HPET, 5 namespace ACPI.
+    pub kind: u8,
+    pub start_bus: u8,
+    pub path: Vec<(u8, u8)>,
+}
+
+impl DeviceScope {
+    /// `true` si describe exactamente la función PCI dada (endpoint o puente
+    /// directamente en `start_bus`; los caminos con varios saltos no se
+    /// resuelven sin la topología de puentes).
+    pub fn matches(&self, bus: u8, device: u8, function: u8) -> bool {
+        matches!(self.kind, 1 | 2)
+            && self.start_bus == bus
+            && self.path.len() == 1
+            && self.path[0] == (device, function)
+    }
+}
+
+/// Unidad de remapeo DMA (DRHD).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Drhd {
+    pub register_base: u64,
+    pub segment: u16,
+    /// Cubre todos los dispositivos del segmento no listados por otra unidad.
+    pub include_all: bool,
+    pub scopes: Vec<DeviceScope>,
+}
+
+/// Región de memoria reservada (RMRR): rango físico al que ciertos
+/// dispositivos siguen accediendo por DMA (firmware, USB heredado, gráficos)
+/// y que debe quedar mapeado identidad en su dominio.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rmrr {
+    pub segment: u16,
+    pub base: u64,
+    /// Inclusivo.
+    pub limit: u64,
+    pub scopes: Vec<DeviceScope>,
+}
+
+/// Tabla DMAR (VT-d).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Dmar {
+    /// Bits de dirección física que traducen las unidades.
+    pub host_address_width: u8,
+    pub flags: u8,
+    pub units: Vec<Drhd>,
+    pub reserved: Vec<Rmrr>,
+}
+
+fn parse_scopes(mut d: &[u8]) -> Result<Vec<DeviceScope>, AcpiError> {
+    let mut scopes = Vec::new();
+    while !d.is_empty() {
+        if d.len() < 6 {
+            return Err(AcpiError::Truncated);
+        }
+        let len = d[1] as usize;
+        if len < 6 || len > d.len() || !(len - 6).is_multiple_of(2) {
+            return Err(AcpiError::Truncated);
+        }
+        let path = d[6..len]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|p| (p[0], p[1]))
+            .collect();
+        scopes.push(DeviceScope {
+            kind: d[0],
+            start_bus: d[5],
+            path,
+        });
+        d = &d[len..];
+    }
+    Ok(scopes)
+}
+
+impl Dmar {
+    pub fn parse(table: &[u8]) -> Result<Self, AcpiError> {
+        let h = validate_table(table, b"DMAR")?;
+        let d = &table[..h.length as usize];
+        if d.len() < 48 {
+            return Err(AcpiError::Truncated);
+        }
+        let mut dmar = Dmar {
+            host_address_width: d[36] + 1,
+            flags: d[37],
+            ..Default::default()
+        };
+        let mut off = 48;
+        while off + 4 <= d.len() {
+            let (ty, len) = (u16_at(d, off), u16_at(d, off + 2) as usize);
+            if len < 4 || off + len > d.len() {
+                return Err(AcpiError::Truncated);
+            }
+            let e = &d[off..off + len];
+            match ty {
+                0 if len >= 16 => dmar.units.push(Drhd {
+                    include_all: e[4] & 1 != 0,
+                    segment: u16_at(e, 6),
+                    register_base: u64_at(e, 8),
+                    scopes: parse_scopes(&e[16..])?,
+                }),
+                1 if len >= 24 => dmar.reserved.push(Rmrr {
+                    segment: u16_at(e, 6),
+                    base: u64_at(e, 8),
+                    limit: u64_at(e, 16),
+                    scopes: parse_scopes(&e[24..])?,
+                }),
+                _ => {}
+            }
+            off += len;
+        }
+        Ok(dmar)
+    }
+
+    /// Índice de la unidad que traduce la función PCI dada: la que la lista
+    /// en su ámbito o, si ninguna, la que cubre todo el segmento.
+    pub fn unit_for(&self, segment: u16, bus: u8, device: u8, function: u8) -> Option<usize> {
+        self.units
+            .iter()
+            .position(|u| {
+                u.segment == segment && u.scopes.iter().any(|s| s.matches(bus, device, function))
+            })
+            .or_else(|| {
+                self.units
+                    .iter()
+                    .position(|u| u.segment == segment && u.include_all)
+            })
+    }
+
+    /// Regiones reservadas que aplican a la función PCI dada.
+    pub fn reserved_for(
+        &self,
+        segment: u16,
+        bus: u8,
+        device: u8,
+        function: u8,
+    ) -> impl Iterator<Item = &Rmrr> + '_ {
+        self.reserved.iter().filter(move |r| {
+            r.segment == segment && r.scopes.iter().any(|s| s.matches(bus, device, function))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,6 +550,61 @@ mod tests {
         assert_eq!(
             parse_mcfg(&table(b"APIC", &body)),
             Err(AcpiError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn dmar_units_reserved_regions_and_scopes() {
+        // Ámbito: endpoint en bus 0, dispositivo 2 función 0 (8 bytes).
+        let scope = |kind: u8, bus: u8, dev: u8, func: u8| vec![kind, 8, 0, 0, 0, bus, dev, func];
+        let mut body = vec![39u8, 1]; // HAW - 1 = 39 -> 40 bits; flags
+        body.extend_from_slice(&[0; 10]);
+        // DRHD dedicada a 00:02.0 en 0xfed91000.
+        let mut drhd0 = vec![0u8, 0, 0, 0, 0, 0, 0, 0];
+        drhd0.extend_from_slice(&0xFED9_1000u64.to_le_bytes());
+        drhd0.extend_from_slice(&scope(1, 0, 2, 0));
+        let n0 = drhd0.len() as u16;
+        drhd0[2..4].copy_from_slice(&n0.to_le_bytes());
+        // DRHD INCLUDE_PCI_ALL en 0xfed90000.
+        let mut drhd1 = vec![0u8, 0, 16, 0, 1, 0, 0, 0];
+        drhd1.extend_from_slice(&0xFED9_0000u64.to_le_bytes());
+        // RMRR 0xdead0000..=0xdeadffff para 00:1d.0.
+        let mut rmrr = vec![1u8, 0, 0, 0, 0, 0, 0, 0];
+        rmrr.extend_from_slice(&0xDEAD_0000u64.to_le_bytes());
+        rmrr.extend_from_slice(&0xDEAD_FFFFu64.to_le_bytes());
+        rmrr.extend_from_slice(&scope(1, 0, 0x1d, 0));
+        let n1 = rmrr.len() as u16;
+        rmrr[2..4].copy_from_slice(&n1.to_le_bytes());
+        body.extend_from_slice(&drhd0);
+        body.extend_from_slice(&drhd1);
+        body.extend_from_slice(&rmrr);
+        let t = table(b"DMAR", &body);
+        let d = Dmar::parse(&t).unwrap();
+        assert_eq!(d.host_address_width, 40);
+        assert_eq!(d.flags, 1);
+        assert_eq!(d.units.len(), 2);
+        assert_eq!(d.units[0].register_base, 0xFED9_1000);
+        assert!(!d.units[0].include_all);
+        assert_eq!(d.units[0].scopes[0].path, vec![(2, 0)]);
+        assert!(d.units[1].include_all);
+        assert_eq!(d.unit_for(0, 0, 2, 0), Some(0), "ambito explicito");
+        assert_eq!(d.unit_for(0, 0, 3, 0), Some(1), "INCLUDE_PCI_ALL");
+        assert_eq!(d.unit_for(1, 0, 3, 0), None, "otro segmento");
+        assert_eq!(d.reserved.len(), 1);
+        assert_eq!(d.reserved[0].base, 0xDEAD_0000);
+        assert_eq!(d.reserved[0].limit, 0xDEAD_FFFF);
+        assert_eq!(d.reserved_for(0, 0, 0x1d, 0).count(), 1);
+        assert_eq!(d.reserved_for(0, 0, 2, 0).count(), 0);
+
+        // Ámbito truncado: error, no lectura fuera de rango.
+        let mut bad_body = body.clone();
+        let n = bad_body.len();
+        bad_body[n - 7] = 9; // longitud del ultimo scope > lo que queda
+        let bad = table(b"DMAR", &bad_body);
+        assert_eq!(Dmar::parse(&bad), Err(AcpiError::Truncated));
+        assert_eq!(
+            Dmar::parse(&table(b"DMAR", &[0; 4])),
+            Err(AcpiError::Truncated)
         );
     }
 }

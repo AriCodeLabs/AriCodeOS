@@ -59,7 +59,7 @@ xtask image` construye a partir de `user/testprogs` y `services/init`.
 
 ```text
 boot-protocol/   ABI BootInfo compartido por bootloader y kernel
-libs/            librerías no_std con tests de host: elf, x86-paging, x86-cpu, pmm, heap, sync, sched, handles, cmdline, fb-console
+libs/            librerías no_std con tests de host: elf, x86-paging, x86-cpu, pmm, heap, sync, sched, handles, cmdline, fb-console, acpi, pci, virtio, iommu, ...
 sdk/abi/         ABI de syscalls compartido entre kernel y espacio de usuario
 sdk/rust/        aricode-sys: wrappers de syscall y linker script de los programas de usuario
 user/testprogs/  programas de prueba de ring 3 y drivers de prueba (Rust y ensamblador), empaquetados en el initrd

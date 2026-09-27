@@ -21,6 +21,9 @@ fn base_command(esp: &Path, vars: &Path, disk: &Path, disk_readonly: bool, cpus:
         "512M",
         "-no-reboot",
     ]);
+    // IOMMU VT-d (Fase 33) antes que cualquier dispositivo PCI; los virtio
+    // llevan `iommu_platform=on` para que su DMA pase por la traduccion.
+    q.args(["-device", "intel-iommu,aw-bits=48"]);
     // Disco virtio-blk moderno (sin interfaz legacy) para el driver de usuario.
     q.args([
         "-drive",
@@ -32,7 +35,7 @@ fn base_command(esp: &Path, vars: &Path, disk: &Path, disk_readonly: bool, cpus:
     ]);
     q.args([
         "-device",
-        "virtio-blk-pci,drive=disk0,disable-legacy=on,disable-modern=off",
+        "virtio-blk-pci,drive=disk0,disable-legacy=on,disable-modern=off,iommu_platform=on",
     ]);
     q.args([
         "-drive",
@@ -59,16 +62,16 @@ fn base_command(esp: &Path, vars: &Path, disk: &Path, disk_readonly: bool, cpus:
     ]);
     q.args([
         "-device",
-        "virtio-net-pci,netdev=net0,disable-legacy=on,disable-modern=off",
+        "virtio-net-pci,netdev=net0,disable-legacy=on,disable-modern=off,iommu_platform=on",
     ]);
     // Teclado y ratón virtio con id fijo: QMP inyecta eventos por dispositivo.
     q.args([
         "-device",
-        "virtio-keyboard-pci,id=kbd0,disable-legacy=on,disable-modern=off",
+        "virtio-keyboard-pci,id=kbd0,disable-legacy=on,disable-modern=off,iommu_platform=on",
     ]);
     q.args([
         "-device",
-        "virtio-mouse-pci,id=mouse0,disable-legacy=on,disable-modern=off",
+        "virtio-mouse-pci,id=mouse0,disable-legacy=on,disable-modern=off,iommu_platform=on",
     ]);
     q.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     q

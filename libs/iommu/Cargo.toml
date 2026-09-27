@@ -1,0 +1,12 @@
+[package]
+name = "aricode-iommu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Estructuras de Intel VT-d: registros, tabla raíz y de contexto, paginación de segundo nivel y registros de fallo (no_std)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+aricode-x86-paging = { path = "../x86-paging" }

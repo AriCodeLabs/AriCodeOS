@@ -211,6 +211,13 @@ name = "aricode-input"
 version = "0.4.1"
 
 [[package]]
+name = "aricode-iommu"
+version = "0.4.1"
+dependencies = [
+ "aricode-x86-paging",
+]
+
+[[package]]
 name = "aricode-manifest"
 version = "0.4.1"
 
@@ -304,6 +311,7 @@ dependencies = [
  "aricode-handles",
  "aricode-heap",
  "aricode-initrd",
+ "aricode-iommu",
  "aricode-pci",
  "aricode-pmm",
  "aricode-sched",
@@ -567,6 +575,7 @@ dependencies = [
  "aricode-net",
  "aricode-proto",
  "aricode-rt",
+ "aricode-virtio",
 ]
 
 [[package]]

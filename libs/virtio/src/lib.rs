@@ -19,6 +19,10 @@ pub mod status {
 
 /// Bit de característica obligatorio en virtio 1.x (palabra alta, bit 0).
 pub const FEATURE_VERSION_1: u64 = 1 << 32;
+/// El dispositivo accede a memoria a través del IOMMU de la plataforma: el
+/// driver debe aceptarla si se ofrece (en AriCodeOS IOVA = física, así que
+/// no cambia nada más).
+pub const FEATURE_ACCESS_PLATFORM: u64 = 1 << 33;
 
 /// Desplazamientos de la estructura `virtio_pci_common_cfg`.
 pub mod common {

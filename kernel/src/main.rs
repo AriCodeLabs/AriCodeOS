@@ -18,6 +18,7 @@ mod cpu;
 mod framebuffer;
 mod hw;
 mod initrd;
+mod iommu;
 mod ipc;
 mod memory;
 mod object;
@@ -131,6 +132,7 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     console_input::init();
     initrd::init(info);
     pci::init();
+    iommu::init();
 
     if cmdline.get(keys::TEST).is_some() {
         run_requested_test(&cmdline, info);
@@ -276,6 +278,7 @@ fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
         "threads" => task::scheduler::threads_selftest(),
         "sched" => task::scheduler::selftest(),
         "smp" => task::scheduler::smp_selftest(),
+        "iommu" => iommu::selftest(),
         "ipc" => ipc::selftest(),
         "drivers" => hw::selftest(info),
         "random" => random::selftest(),
@@ -353,6 +356,7 @@ fn run_init(arg: u64, fb: boot_protocol::FramebufferInfo) {
         phys: fb.address,
         len: fb.size,
         cacheable: false,
+        source_id: None,
     }));
     let pid = user::process::spawn_with_handles_and_arg(
         "init",

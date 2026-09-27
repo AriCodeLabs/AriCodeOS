@@ -341,6 +341,7 @@ pub fn release_address_space(pid: u32) {
         });
         log::debug!("user: espacio del proceso {pid} liberado ({n} frames)");
     }
+    crate::iommu::release(pid);
 }
 
 /// Estado de salida si el proceso ha terminado y su hilo ya fue recogido.

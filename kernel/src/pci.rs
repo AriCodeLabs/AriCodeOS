@@ -177,6 +177,14 @@ pub fn count() -> usize {
     DEVICES.lock().len()
 }
 
+/// Índice de la primera función `vendor:device` sin reclamar.
+pub fn find(vendor: u16, device: u16) -> Option<usize> {
+    DEVICES
+        .lock()
+        .iter()
+        .position(|d| d.header.vendor == vendor && d.header.device == device && !d.claimed)
+}
+
 /// Información empaquetada (`aricode_abi::pci_info`) de la función `index`.
 pub fn info_packed(index: usize) -> Option<u64> {
     let devs = DEVICES.lock();
@@ -241,6 +249,11 @@ pub fn claim(index: usize) -> Result<Claimed, &'static str> {
         Default::default();
     let mmio_rights = Rights::READ.union(Rights::WRITE).union(Rights::TRANSFER);
 
+    let source_id = Some(aricode_iommu::source_id(
+        addr.bus,
+        addr.device,
+        addr.function,
+    ));
     // 0: espacio de configuración (la página ECAM de la función).
     let cfg_phys = ecam.base + addr.ecam_offset(ecam.bus_start);
     handles[0] = Some((
@@ -248,6 +261,7 @@ pub fn claim(index: usize) -> Result<Claimed, &'static str> {
             phys: cfg_phys,
             len: 4096,
             cacheable: false,
+            source_id,
         })),
         mmio_rights,
     ));
@@ -269,6 +283,7 @@ pub fn claim(index: usize) -> Result<Claimed, &'static str> {
                     phys: *address,
                     len: size,
                     cacheable: false,
+                    source_id,
                 })),
                 mmio_rights,
             ));
