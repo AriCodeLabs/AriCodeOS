@@ -41,9 +41,11 @@ cargo xtask image          # monta build/esp/ (BOOTX64.EFI, aricodeos/kernel.elf
 cargo xtask run            # arranca en QEMU + OVMF, serie en la terminal (salir: Ctrl-A X)
 cargo xtask run --cmdline shell   # arranca con el shell interactivo (arish) en la consola serie
 cargo xtask run --cmdline gui     # compositor y dos ventanas de prueba en la pantalla de QEMU
+cargo xtask run --cpus 4   # arranca con cuatro procesadores (SMP)
 cargo xtask test           # unit + smoke (arranque nominal en QEMU)
 cargo xtask test --all     # unit + todos los escenarios QEMU; obligatorio antes de main
 cargo xtask test --area boot   # solo los escenarios de un área
+cargo xtask test --all --cpus 4   # toda la suite con cuatro CPUs: estrés del kernel SMP
 cargo xtask check          # rustfmt --check + clippy -D warnings
 ```
 

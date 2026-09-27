@@ -58,7 +58,12 @@ fn fatal(frame: &InterruptFrame) -> ! {
         frame.cs,
         frame.rflags
     );
-    serial_println!("RSP: {:#018x}  SS: {:#06x}", frame.rsp, frame.ss);
+    serial_println!(
+        "RSP: {:#018x}  SS: {:#06x}  CPU: {}",
+        frame.rsp,
+        frame.ss,
+        crate::cpu::id()
+    );
     if exception::has_error_code(vector) {
         serial_println!("ERROR: {:#x}", frame.error_code);
     }

@@ -1,6 +1,7 @@
-//! GDT propia del kernel y TSS con pila dedicada para double fault.
+//! GDT y TSS por CPU (con pila dedicada para double fault). El layout de
+//! selectores es el mismo en todas las CPUs (`aricode_x86_cpu::layout`).
 
-use crate::sync::IrqLock;
+use crate::cpu::Cpu;
 use aricode_x86_cpu::{layout, Gdt, SegmentDescriptor, Selector, Tss, TssDescriptor};
 use core::arch::asm;
 
@@ -11,11 +12,23 @@ const DOUBLE_FAULT_STACK_SIZE: usize = 16 * 1024;
 #[repr(C, align(16))]
 struct Stack([u8; DOUBLE_FAULT_STACK_SIZE]);
 
-// Estas estructuras las lee la CPU directamente por su dirección: el lock solo
-// serializa la construcción; después no se modifican y no se mueven.
-static DOUBLE_FAULT_STACK: IrqLock<Stack> = IrqLock::new(Stack([0; DOUBLE_FAULT_STACK_SIZE]));
-static TSS: IrqLock<Tss> = IrqLock::new(Tss::new());
-static GDT: IrqLock<Gdt<8>> = IrqLock::new(Gdt::new());
+/// Tablas que la CPU lee por su dirección: viven en el `Cpu` estático de
+/// cada una y no se mueven.
+pub struct Tables {
+    gdt: Gdt<8>,
+    tss: Tss,
+    double_fault_stack: Stack,
+}
+
+impl Tables {
+    pub const fn new() -> Self {
+        Self {
+            gdt: Gdt::new(),
+            tss: Tss::new(),
+            double_fault_stack: Stack([0; DOUBLE_FAULT_STACK_SIZE]),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Selectors {
@@ -26,59 +39,47 @@ pub struct Selectors {
     pub tss: Selector,
 }
 
-static SELECTORS: IrqLock<Selectors> = IrqLock::new(Selectors {
-    code: Selector::NULL,
-    data: Selector::NULL,
-    user_data: Selector::NULL,
-    user_code: Selector::NULL,
-    tss: Selector::NULL,
-});
-
 pub fn selectors() -> Selectors {
-    *SELECTORS.lock()
+    Selectors {
+        code: layout::KERNEL_CODE,
+        data: layout::KERNEL_DATA,
+        user_data: layout::USER_DATA,
+        user_code: layout::USER_CODE,
+        tss: layout::TSS,
+    }
 }
 
-pub fn init() {
-    let stack_top = {
-        let stack = DOUBLE_FAULT_STACK.lock();
-        stack.0.as_ptr() as u64 + DOUBLE_FAULT_STACK_SIZE as u64
-    };
-    let tss_addr = {
-        let mut tss = TSS.lock();
-        tss.ist[(DOUBLE_FAULT_IST - 1) as usize] = stack_top;
-        &*tss as *const Tss as u64
-    };
-    let (ptr, sel) = {
-        let mut gdt = GDT.lock();
-        let code = gdt.push(SegmentDescriptor::code64(0));
-        let data = gdt.push(SegmentDescriptor::data(0));
-        let user_data = gdt.push(SegmentDescriptor::data(3));
-        let user_code = gdt.push(SegmentDescriptor::code64(3));
-        let tss = gdt.push_tss(TssDescriptor::new(tss_addr));
-        (
-            gdt.pointer(),
-            Selectors {
-                code,
-                data,
-                user_data,
-                user_code,
-                tss,
-            },
-        )
-    };
-    assert_eq!(sel.code, layout::KERNEL_CODE);
-    assert_eq!(sel.user_data, layout::USER_DATA);
-    assert_eq!(sel.user_code, layout::USER_CODE);
-    assert_eq!(sel.tss, layout::TSS);
-    *SELECTORS.lock() = sel;
+/// Construye las tablas de `cpu` y las carga en la CPU que llama, que debe
+/// ser esa misma, con interrupciones deshabilitadas.
+pub fn init_for(cpu: &'static Cpu) {
+    // SAFETY: arranque de la propia CPU, sin interrupciones.
+    let t = unsafe { cpu.tables() };
+    let stack_top = t.double_fault_stack.0.as_ptr() as u64 + DOUBLE_FAULT_STACK_SIZE as u64;
+    t.tss.ist[(DOUBLE_FAULT_IST - 1) as usize] = stack_top;
+    let tss_addr = &t.tss as *const Tss as u64;
+    let code = t.gdt.push(SegmentDescriptor::code64(0));
+    let data = t.gdt.push(SegmentDescriptor::data(0));
+    let user_data = t.gdt.push(SegmentDescriptor::data(3));
+    let user_code = t.gdt.push(SegmentDescriptor::code64(3));
+    let tss = t.gdt.push_tss(TssDescriptor::new(tss_addr));
+    let sel = selectors();
+    assert_eq!(code, sel.code);
+    assert_eq!(data, sel.data);
+    assert_eq!(user_data, sel.user_data);
+    assert_eq!(user_code, sel.user_code);
+    assert_eq!(tss, sel.tss);
     // SAFETY: la GDT y el TSS son estáticos, ya construidos y nunca se mueven.
-    unsafe { load(ptr, sel.code, sel.data, sel.tss) };
+    unsafe { load(t.gdt.pointer(), sel.code, sel.data, sel.tss) };
 }
 
-/// Pila que usará la CPU al entrar en ring 0 desde ring 3 por interrupción
-/// o excepción (`TSS.rsp0`). Se actualiza en cada cambio de contexto.
+/// Pila que usará esta CPU al entrar en ring 0 desde ring 3 por interrupción
+/// o excepción (`TSS.rsp0`) y por `syscall`. Se actualiza en cada cambio de
+/// contexto, con interrupciones deshabilitadas.
 pub fn set_kernel_stack(top: u64) {
-    TSS.lock().rsp[0] = top;
+    let cpu = crate::cpu::current();
+    // SAFETY: llamado con IF = 0 desde la propia CPU (cambio de contexto).
+    unsafe { cpu.tables().tss.rsp[0] = top };
+    cpu.set_kernel_rsp(top);
 }
 
 /// Carga la GDT y recarga todos los selectores de segmento y el TR.

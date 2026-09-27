@@ -107,7 +107,7 @@ fn console_write(handle: Handle, ptr: u64, len: u64) -> Result<u64, Error> {
     }
     let bytes = process::copy_from_user(ptr, len)?;
     let text = core::str::from_utf8(&bytes).map_err(|_| Error::Invalid)?;
-    crate::print!("{text}");
+    process::console_write_current(text);
     Ok(len)
 }
 
@@ -121,6 +121,10 @@ fn console_read(handle: Handle, ptr: u64, len: u64, timeout_ms: u64) -> Result<u
     }
     // Validar el destino antes de bloquear: un puntero inválido falla ya.
     process::copy_to_user(ptr, &[])?;
+    // El prompt (línea sin terminar) debe verse antes de esperar la entrada.
+    if let Some(pid) = process::current_pid() {
+        process::console_flush(pid);
+    }
     let mut buf = alloc::vec![0u8; len as usize];
     let n = crate::console_input::read(&mut buf, deadline_from(timeout_ms));
     if n == 0 {
@@ -167,6 +171,7 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
     system_object(h, Rights::READ)?;
     let bytes: Vec<u8> = match kind {
         sysinfo::UPTIME => crate::time::uptime_ms().to_le_bytes().to_vec(),
+        sysinfo::CPUS => (crate::cpu::online_count() as u64).to_le_bytes().to_vec(),
         sysinfo::MEMORY => {
             let s = crate::memory::pmm::stats();
             let mut v = (s.usable_frames as u64).to_le_bytes().to_vec();

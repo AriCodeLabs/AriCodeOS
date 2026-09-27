@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-fn base_command(esp: &Path, vars: &Path, disk: &Path, disk_readonly: bool) -> Command {
+fn base_command(esp: &Path, vars: &Path, disk: &Path, disk_readonly: bool, cpus: u32) -> Command {
     let mut q = Command::new("qemu-system-x86_64");
     q.current_dir(root());
     q.args([
@@ -15,6 +15,8 @@ fn base_command(esp: &Path, vars: &Path, disk: &Path, disk_readonly: bool) -> Co
         "q35",
         "-cpu",
         "qemu64",
+        "-smp",
+        &cpus.max(1).to_string(),
         "-m",
         "512M",
         "-no-reboot",
@@ -353,7 +355,7 @@ fn run_tcp_probe(payload: &str) -> String {
     }
 }
 
-pub fn run_interactive(release: bool, cmdline: &str) -> Result {
+pub fn run_interactive(release: bool, cmdline: &str, cpus: u32) -> Result {
     let base = image::build_base_esp(release)?;
     let esp = if cmdline.is_empty() {
         base
@@ -370,7 +372,7 @@ pub fn run_interactive(release: bool, cmdline: &str) -> Result {
     let disk = build_dir().join("disk.img");
     image::write_test_disk(&disk, image::DiskVariant::Slots)?;
     let _responder = Responder::start()?;
-    let mut q = base_command(&esp, &vars, &disk, false);
+    let mut q = base_command(&esp, &vars, &disk, false, cpus);
     if cmdline.split_whitespace().any(|w| w == "gui") {
         // Con `gui` hace falta ver la pantalla: ventana de QEMU y serie en la terminal.
         println!("[xtask] QEMU con pantalla (serie en la terminal; salir: cerrar la ventana)");
@@ -417,6 +419,7 @@ pub struct Headless<'a> {
     pub input_probe: Option<InputProbe<'a>>,
     pub disk_variant: image::DiskVariant,
     pub disk_readonly: bool,
+    pub cpus: u32,
 }
 
 pub fn run_headless(
@@ -439,7 +442,7 @@ pub fn run_headless(
     let qmp_path = workdir.join("qmp.sock");
     let _ = std::fs::remove_file(&qmp_path);
     let start = Instant::now();
-    let mut child = base_command(esp, &vars, &disk, disk_readonly)
+    let mut child = base_command(esp, &vars, &disk, disk_readonly, options.cpus)
         .args(["-display", "none", "-monitor", "none", "-serial", "stdio"])
         .args([
             "-qmp",

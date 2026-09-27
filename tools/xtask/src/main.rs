@@ -3,11 +3,12 @@
 //! ```text
 //! cargo xtask build [--debug]                 compila AriBoot y AriKernel
 //! cargo xtask image [--debug]                 build + monta build/esp/
-//! cargo xtask run   [--debug] [--cmdline S]   image + QEMU interactivo (serie en stdio)
+//! cargo xtask run   [--debug] [--cmdline S] [--cpus N]   image + QEMU interactivo (serie en stdio)
 //! cargo xtask test  [opciones]                niveles de test (ver tests/README.md)
 //!     --level unit|smoke|full                 por defecto: unit + smoke
 //!     --all                                   unit + full (obligatorio antes de main)
 //!     --area boot[,memory,...]                solo escenarios QEMU de esas áreas
+//!     --cpus N                                N procesadores en los escenarios que no declaran cpus
 //!     --list                                  muestra los escenarios y sale
 //! cargo xtask check                           fmt --check + clippy -D warnings
 //! cargo xtask keygen [DIR]                    par Ed25519 (por defecto keys/dev)
@@ -60,7 +61,13 @@ fn main() -> ExitCode {
     let result = match cmd.as_str() {
         "build" => build::build_os(release).map(|_| ()),
         "image" => image::build_base_esp(release).map(|_| ()),
-        "run" => qemu::run_interactive(release, cli.value("--cmdline").unwrap_or("")),
+        "run" => qemu::run_interactive(
+            release,
+            cli.value("--cmdline").unwrap_or(""),
+            cli.value("--cpus")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1),
+        ),
         "test" => test::run(&cli, release),
         "check" => build::check(),
         "keygen" => keys::keygen(&root().join(cli.positional(1).unwrap_or(keys::DEV_KEY_DIR))),

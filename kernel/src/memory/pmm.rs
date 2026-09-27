@@ -14,7 +14,7 @@ static PMM: IrqLock<Option<BitmapAllocator<'static>>> = IrqLock::new(None);
 
 /// Memoria baja que nunca se entrega: frame 0 (null) y el primer MiB, que
 /// necesitarán el trampolín SMP y algunos dispositivos heredados.
-const LOW_RESERVED_END: u64 = 1024 * 1024;
+pub const LOW_RESERVED_END: u64 = 1024 * 1024;
 
 /// Construye el allocator. Debe llamarse una vez, con el mapa aún accesible.
 ///

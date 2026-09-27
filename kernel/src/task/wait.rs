@@ -38,14 +38,20 @@ impl WaitQueue {
     ) -> bool {
         use crate::sync::KernelIrq;
         use aricode_sync::IrqPolicy;
+        let me = scheduler::current_tid();
         loop {
             // Interrupciones deshabilitadas desde la comprobación hasta el
-            // cambio de contexto: así un `wake` desde un handler solo puede
-            // llegar cuando el hilo ya está dormido o bloqueado, nunca en la
-            // ventana entre soltar el lock y dormirse (despertar perdido).
+            // cambio de contexto: así un `wake` desde un handler de esta CPU
+            // solo puede llegar cuando el hilo ya está dormido o bloqueado.
+            // Un `wake` desde otra CPU en esa ventana queda pendiente en la
+            // política y convierte el bloqueo en cesión (Fase 32).
             let irq = KernelIrq::save_and_disable();
             {
                 let mut w = self.waiters.lock();
+                // Si se vuelve a evaluar tras un despertar anticipado o un
+                // plazo, la anotación anterior ya no sirve: evita despertares
+                // espurios a quien luego espere en otra cola.
+                w.retain(|t| *t != me);
                 if cond() {
                     KernelIrq::restore(irq);
                     return false;
@@ -54,7 +60,7 @@ impl WaitQueue {
                     KernelIrq::restore(irq);
                     return true;
                 }
-                w.push_back(scheduler::current_tid());
+                w.push_back(me);
             }
             match deadline {
                 Some(d) => scheduler::sleep_until(d),

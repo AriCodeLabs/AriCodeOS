@@ -61,7 +61,7 @@ pub fn init() {
     let (level, low) = ov
         .map(|o| (o.level_triggered(), o.active_low()))
         .unwrap_or((false, false));
-    let lapic_id = crate::acpi::with(|a| a.madt.lapic_ids.first().copied()).unwrap_or(0);
+    let lapic_id = crate::arch::x86_64::apic::bsp_id();
     if let Err(e) = ioapic::route(gsi, SERIAL_VECTOR, lapic_id, level, low) {
         warn!("console: sin entrada por serie ({e})");
         return;

@@ -199,6 +199,8 @@ pub mod sysinfo {
     /// longitud pedida es la del buffer).
     pub const RANDOM: u64 = 4;
     pub const RANDOM_MAX: u64 = 256;
+    /// Un `u64`: CPUs en línea (Fase 32).
+    pub const CPUS: u64 = 5;
 
     /// Formato de píxel del framebuffer (32 bpp).
     pub const FB_FORMAT_RGB: u8 = 0;

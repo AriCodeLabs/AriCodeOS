@@ -143,8 +143,12 @@ fn reclaim_boot_memory(info: &BootInfo) {
     let mut reclaimed = 0u64;
     // SAFETY: mapa físico activo (reconstruido arriba) y buffer intacto.
     for d in unsafe { info.memory_regions() }.filter(|d| d.kind() == MemoryRegionKind::Boot) {
-        pmm::with(|p| p.free_range(d.phys_start, d.end()));
-        reclaimed += d.size_bytes();
+        // La memoria baja sigue reservada (trampolín SMP, dispositivos heredados).
+        let start = d.phys_start.max(pmm::LOW_RESERVED_END);
+        if start < d.end() {
+            pmm::with(|p| p.free_range(start, d.end()));
+            reclaimed += d.end() - start;
+        }
     }
     let s = pmm::stats();
     info!(
@@ -172,6 +176,15 @@ pub fn with<R>(f: impl FnOnce(&mut KernelMapper) -> R) -> R {
     f(guard.as_mut().expect("VMM no inicializado"))
 }
 
+/// Invalida la traducción de `virt` en esta CPU y, por IPI, en las demás
+/// (Fase 32). Para páginas de la mitad del kernel que otra CPU puede haber
+/// usado. Debe llamarse con interrupciones habilitadas y sin locks tomados.
+pub fn flush_page(virt: u64) {
+    // SAFETY: invalidación de una entrada de TLB; sin efectos en memoria.
+    unsafe { core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags)) };
+    crate::arch::x86_64::smp::flush_others(Some(virt));
+}
+
 /// `true` si `addr` cae en la guard page de la pila del kernel.
 pub fn in_stack_guard(addr: u64) -> bool {
     (KERNEL_STACK_GUARD..KERNEL_STACK_BOTTOM).contains(&addr)
@@ -180,7 +193,7 @@ pub fn in_stack_guard(addr: u64) -> bool {
 /// Autoprueba (`test=vmm`): traducciones coherentes con lo que se mapeó,
 /// mapeo y desmapeo de una página nueva, y errores esperados.
 pub fn selftest() {
-    with(|m| {
+    let _probe_virt = with(|m| {
         // .text es ejecutable y no escribible; .data al revés.
         // SAFETY: solo direcciones de símbolos.
         let (text, data) = unsafe { (sym(&__text_start), sym(&__data_start)) };
@@ -225,11 +238,12 @@ pub fn selftest() {
             Err(MapError::AlreadyMapped)
         );
         assert_eq!(m.unmap_4k(virt), Ok(frame.addr()));
-        // SAFETY: invalidación de una entrada de TLB que acabamos de retirar.
-        unsafe { core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags)) };
         pmm::with(|p| p.free(frame)).expect("free");
         assert_eq!(m.translate(virt), None);
         let _ = FRAME_SIZE;
+        virt
     });
+    // Fuera del lock del VMM: la invalidación avisa a las demás CPUs.
+    flush_page(0xFFFF_9000_0000_0000u64);
     info!("vmm selftest ok (W^X, mapa fisico, sin identidad, map/unmap)");
 }
