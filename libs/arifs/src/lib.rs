@@ -115,7 +115,10 @@ fn valid_name(name: &str) -> bool {
         && name.len() <= NAME_LEN
         && name
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'))
+        && !name.starts_with('/')
+        && !name.ends_with('/')
+        && !name.contains("//")
 }
 
 /// Un sistema de archivos abierto sobre un dispositivo.
@@ -371,6 +374,13 @@ mod tests {
     fn errors() {
         let mut fs = AriFs::format(disk(200), 200).unwrap();
         assert_eq!(fs.create("con espacio"), Err(FsError::BadName));
+        assert_eq!(fs.create("/abs"), Err(FsError::BadName));
+        assert_eq!(fs.create("dir/"), Err(FsError::BadName));
+        assert_eq!(fs.create("a//b"), Err(FsError::BadName));
+        assert!(
+            fs.create("app/notas").is_ok(),
+            "prefijo de directorio privado"
+        );
         assert_eq!(fs.create(""), Err(FsError::BadName));
         let i = fs.create("a").unwrap();
         assert_eq!(fs.create("a"), Err(FsError::Exists));

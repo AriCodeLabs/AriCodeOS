@@ -174,10 +174,13 @@ mod elf_patch {
 /// Empaqueta `init` y los programas de usuario en un initrd.
 fn build_initrd(user_bin: &Path) -> Result<Vec<u8>> {
     let names = crate::build::initrd_programs()?;
-    let contents: Vec<(String, Vec<u8>)> = names
+    let mut contents: Vec<(String, Vec<u8>)> = names
         .iter()
         .map(|n| io(fs::read(user_bin.join(n)), &format!("leer {n}")).map(|d| (n.clone(), d)))
         .collect::<Result<_>>()?;
+    for (name, path) in crate::build::initrd_manifests()? {
+        contents.push((name.clone(), io(fs::read(&path), &format!("leer {name}"))?));
+    }
     let files: Vec<(&str, &[u8])> = contents
         .iter()
         .map(|(n, d)| (n.as_str(), d.as_slice()))

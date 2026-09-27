@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.2.0 (Fases 0 a 27)
+## Estado: 0.2.0 + Fase 28 (sandbox) en desarrollo
 
 ```text
 OVMF (UEFI)
@@ -51,12 +51,13 @@ libs/acpi/           aricode-acpi: RSDP, XSDT/RSDT, MADT (LAPIC, I/O APIC, overr
 libs/pci/            aricode-pci: direccionamiento ECAM, cabecera de configuración, BARs, capabilities, clases (no_std + alloc, tests de host)
 libs/virtio/         aricode-virtio: virtqueue split sobre DMA, estructuras virtio-pci modernas, peticiones virtio-blk (no_std, tests de host)
 libs/gpt/            aricode-gpt: CRC32, cabecera y entradas GPT, escritor para el disco de pruebas (no_std, tests de host)
+libs/manifest/       aricode-manifest: manifiestos de aplicación (nombre, capacidades, memoria) (no_std, tests de host)
 libs/gfx/            aricode-gfx: lienzos 0x00RRGGBB, recorte, texto, cursor y escritorio de ventanas (no_std, tests de host)
 libs/input/          aricode-input: eventos evdev y teclado US (no_std, tests de host)
 libs/http/           aricode-http: GET, análisis de respuestas, Content-Length y chunked sin alloc (no_std, tests de host)
 libs/net/            aricode-net: Ethernet, ARP, IPv4, ICMP, UDP, TCP, cliente DHCP y DNS sin alloc (no_std, tests de host)
 libs/arifs/          aricode-arifs: AriFS v0, directorio plano con tabla de ficheros de capacidad fija sobre `BlockDevice` (no_std, tests de host)
-sdk/proto/           aricode-proto: protocolos IPC versionados de los servicios (bloques v1, ficheros v1, red v1, entrada v1, ventanas v1) (no_std, tests de host)
+sdk/proto/           aricode-proto: protocolos IPC versionados de los servicios (bloques v1, ficheros v1, red v1, entrada v1, ventanas v1, lanzamiento v1) (no_std, tests de host)
 sdk/runtime/         aricode-rt: runtime de programas de usuario (`entry!`, heap de 256 KiB, panic, fmt); reexporta aricode-sys
 sdk/build/           aricode-build: `build.rs` de una línea que enlaza con `sdk/rust/user.ld`
 apps/hello/          hello_app: aplicación de ejemplo del SDK (consola, permisos, tiempo)
@@ -710,10 +711,41 @@ segundo brevemente para añadir la región.
   su hilo y un `SYSTEM` de solo lectura. `hello_app` lo demuestra en
   `shell.commands`.
 
+## Sandbox de aplicaciones (Fase 28)
+
+- `process_spawn` recibe en su sexto argumento el número de handles y la
+  cuota de memoria DMA del hijo (`spawn_limits::pack`); el proceso la guarda
+  (`dma_quota`, `dma_used`) y `dma_alloc` cobra el tamaño redondeado a
+  página, devolviendo `Limit` al excederla. La cuota es acumulativa: lo
+  reservado no se devuelve al liberar (los buffers DMA viven lo que el
+  proceso).
+- `initrd_read` (syscall 27) copia un fichero del initrd a quien tenga
+  `READ` sobre el `SPAWNER`; init lee `NOMBRE.manifest` y `aricode-manifest`
+  lo analiza (`name`, `caps`, `memory` en K/M, límite 8 MiB).
+- El broker es init: `Broker::serve_one` atiende `LaunchProtocol v1` en el
+  bucle que antes solo esperaba al shell. `launch` deniega manifiestos que
+  piden capacidades del sistema, pide a fsd un directorio privado (`Bind`)
+  cuando la aplicación quiere `fs`, duplica los endpoints de red,
+  compositor y entrada solo si se piden, añade `HARDWARE` solo cuando hay
+  buffers que reservar y lanza con la cuota del manifiesto; responde con el
+  código de salida o `Killed`. El shell recibe el endpoint del broker en
+  lugar del `SPAWNER`.
+- fsd mantiene hasta 8 directorios privados: cada `Bind` (solo por el
+  endpoint principal) crea o reutiliza un endpoint ligado a un prefijo; el
+  bucle lee el principal con 10 ms de espera y los privados sin espera.
+  Desde un privado, `Open`/`Create` califican el nombre como `prefijo/nombre`
+  (rechazando `/` en el nombre) y `List` filtra y recorta el prefijo.
+
+- La consola serie del kernel serializa cada mensaje con un spinlock sin
+  deshabilitar interrupciones (`console::write_raw`): antes un `info!` del
+  kernel y un `console_write` de un proceso recién creado se mezclaban
+  carácter a carácter. Con interrupciones deshabilitadas solo se intenta el
+  lock, para que un handler nunca espere a un hilo que no puede correr.
+
 ## Deuda conocida
 
-- Sin manifiestos ni broker de capabilities (Fase 28): quien lanza decide a
-  mano qué handles entrega.
+- La política del broker es una constante; no hay cuotas de CPU ni de
+  handles por manifiesto y el heap de usuario sigue siendo estático.
 - La GUI no mueve ni redimensiona ventanas, repinta la pantalla completa
   en cada frame y no tiene terminal gráfico; el shell sigue en la serie.
 - Sin xHCI/USB HID: solo dispositivos virtio-input; el shell sigue leyendo

@@ -138,6 +138,10 @@ pub mod fs {
         Write = 5,
         /// `fd`.
         Close = 6,
+        /// Solo por el endpoint principal (el broker): crea un endpoint ligado
+        /// al prefijo `name/`; la respuesta transfiere ese endpoint (`WRITE`).
+        /// Quien lo reciba solo ve y crea ficheros bajo su prefijo.
+        Bind = 7,
     }
 
     /// Petición (64 bytes): cabecera, argumentos y nombre.
@@ -203,6 +207,7 @@ pub mod fs {
                 4 => Op::Read,
                 5 => Op::Write,
                 6 => Op::Close,
+                7 => Op::Bind,
                 _ => return None,
             };
             let mut name = [0u8; MAX_NAME];
@@ -972,9 +977,156 @@ pub mod window {
     }
 }
 
+/// Protocolo del broker de lanzamiento (`LaunchProtocol v1`): un programa
+/// pide a init que ejecute otro; init lee su manifiesto, decide qué
+/// capabilities entrega y devuelve el código de salida.
+pub mod launch {
+    pub const PROTOCOL: u8 = 6;
+    pub const VERSION: u8 = 1;
+    pub const MAX_NAME: usize = 32;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Request {
+        pub arg: u64,
+        pub name: [u8; MAX_NAME],
+        pub name_len: u8,
+    }
+
+    impl Request {
+        pub const LEN: usize = 48;
+
+        /// `None` si el nombre no cabe.
+        pub fn new(name: &str, arg: u64) -> Option<Self> {
+            if name.is_empty() || name.len() > MAX_NAME {
+                return None;
+            }
+            let mut n = [0u8; MAX_NAME];
+            n[..name.len()].copy_from_slice(name.as_bytes());
+            Some(Self {
+                arg,
+                name: n,
+                name_len: name.len() as u8,
+            })
+        }
+
+        pub fn name_str(&self) -> &str {
+            core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("")
+        }
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[0] = PROTOCOL;
+            b[1] = VERSION;
+            b[2] = self.name_len;
+            b[8..16].copy_from_slice(&self.arg.to_le_bytes());
+            b[16..48].copy_from_slice(&self.name);
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN || b[0] != PROTOCOL || b[1] != VERSION {
+                return None;
+            }
+            let mut name = [0u8; MAX_NAME];
+            name.copy_from_slice(&b[16..48]);
+            Some(Self {
+                arg: u64::from_le_bytes(b[8..16].try_into().ok()?),
+                name,
+                name_len: b[2].min(MAX_NAME as u8),
+            })
+        }
+    }
+
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Status {
+        /// `value` = código de salida del programa.
+        Ok = 0,
+        Invalid = 1,
+        /// No hay tal programa en el initrd.
+        NotFound = 2,
+        /// El manifiesto pide capacidades que el broker no concede.
+        Denied = 3,
+        /// El programa murió por un fallo.
+        Killed = 4,
+        /// Manifiesto ilegible.
+        BadManifest = 5,
+        /// El broker no pudo lanzarlo (recursos).
+        Failed = 6,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Reply {
+        pub status: Status,
+        pub value: u64,
+    }
+
+    impl Reply {
+        pub const LEN: usize = 16;
+
+        pub fn status(status: Status) -> Self {
+            Self { status, value: 0 }
+        }
+        pub fn exited(code: u64) -> Self {
+            Self {
+                status: Status::Ok,
+                value: code,
+            }
+        }
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[0] = PROTOCOL;
+            b[1] = VERSION;
+            b[2] = self.status as u8;
+            b[8..16].copy_from_slice(&self.value.to_le_bytes());
+            b
+        }
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN || b[0] != PROTOCOL || b[1] != VERSION {
+                return None;
+            }
+            let status = match b[2] {
+                0 => Status::Ok,
+                1 => Status::Invalid,
+                2 => Status::NotFound,
+                3 => Status::Denied,
+                4 => Status::Killed,
+                5 => Status::BadManifest,
+                6 => Status::Failed,
+                _ => return None,
+            };
+            Some(Self {
+                status,
+                value: u64::from_le_bytes(b[8..16].try_into().ok()?),
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::block::*;
+
+    #[test]
+    fn launch_round_trip() {
+        use super::launch::*;
+        let r = Request::new("hello_app", 7).unwrap();
+        let d = Request::decode(&r.encode()).unwrap();
+        assert_eq!(d, r);
+        assert_eq!(d.name_str(), "hello_app");
+        assert!(Request::new("", 0).is_none());
+        assert!(Request::new(&"x".repeat(33), 0).is_none());
+        assert_eq!(
+            Reply::decode(&Reply::exited(42).encode()),
+            Some(Reply::exited(42))
+        );
+        assert_eq!(
+            Reply::decode(&Reply::status(Status::Denied).encode())
+                .unwrap()
+                .status,
+            Status::Denied
+        );
+    }
 
     #[test]
     fn window_round_trip() {

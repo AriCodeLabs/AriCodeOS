@@ -13,6 +13,12 @@ use core::fmt::Write;
 use log::{Level, LevelFilter, Log, Metadata, Record};
 
 static FB: IrqLock<Option<Console<MmioSurface>>> = IrqLock::new(None);
+/// Serializa cada mensaje completo por la serie: sin él, un `info!` del
+/// kernel y un `console_write` de otro hilo se mezclan carácter a carácter.
+/// No deshabilita interrupciones (la serie es lenta); con interrupciones
+/// deshabilitadas (handler o sección crítica) solo se intenta, para no
+/// esperar a un hilo que no puede correr.
+static SERIAL: aricode_sync::SpinLock<()> = aricode_sync::SpinLock::new(());
 static LOGGER: KernelLogger = KernelLogger;
 
 /// Activa la consola de framebuffer. Idempotente; ignora si no hay GOP.
@@ -40,6 +46,11 @@ pub fn init_logger(level: LevelFilter) {
 
 /// Escribe texto sin formato de log en todas las salidas (marcadores, banner).
 pub fn write_raw(args: core::fmt::Arguments) {
+    let _serial = if crate::sync::interrupts_enabled() {
+        Some(SERIAL.lock())
+    } else {
+        SERIAL.try_lock()
+    };
     let _ = Serial.write_fmt(args);
     if let Some(mut guard) = FB.try_lock() {
         if let Some(fb) = guard.as_mut() {

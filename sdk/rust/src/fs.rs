@@ -96,6 +96,28 @@ impl FsClient {
         self.call(req, false).map(|_| ())
     }
 
+    /// Solo para el broker: pide a fsd un endpoint ligado al directorio
+    /// privado `prefix` y devuelve el handle recibido (`WRITE`, transferible).
+    pub fn bind(&self, prefix: &str) -> Result<Handle, FsError> {
+        let req = Request::new(Op::Bind)
+            .with_name(prefix)
+            .ok_or(FsError::Status(Status::Invalid))?;
+        let reply_w = sys::handle_duplicate(self.reply, rights::WRITE | rights::TRANSFER)
+            .map_err(FsError::Ipc)?;
+        sys::ipc_send(self.service, &req.encode(), &[reply_w], TIMEOUT_INFINITE)
+            .map_err(FsError::Ipc)?;
+        let mut msg = [0u8; Reply::LEN];
+        let mut handles = [Handle(0); 1];
+        let (len, nh) = sys::ipc_receive(self.reply, &mut msg, &mut handles, TIMEOUT_INFINITE)
+            .map_err(FsError::Ipc)?;
+        let reply = Reply::decode(&msg[..len]).ok_or(FsError::Ipc(Error::Invalid))?;
+        match (reply.status, nh) {
+            (Status::Ok, 1) => Ok(handles[0]),
+            (Status::Ok, _) => Err(FsError::Ipc(Error::Invalid)),
+            (s, _) => Err(FsError::Status(s)),
+        }
+    }
+
     /// Lee hasta `out.len()` bytes (máximo `MAX_IO`) desde `offset`.
     pub fn read(&mut self, fd: u32, offset: u32, out: &mut [u8]) -> Result<usize, FsError> {
         let len = out.len().min(MAX_IO as usize);

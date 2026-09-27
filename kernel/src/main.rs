@@ -348,7 +348,8 @@ fn run_init(shell: bool, gui: bool, fb: boot_protocol::FramebufferInfo) {
         alloc::vec![
             (
                 spawner,
-                Rights::MANAGE
+                Rights::READ
+                    .union(Rights::MANAGE)
                     .union(Rights::DUPLICATE)
                     .union(Rights::TRANSFER)
             ),
@@ -387,6 +388,7 @@ fn run_init(shell: bool, gui: bool, fb: boot_protocol::FramebufferInfo) {
             ),
         ],
         arg,
+        0,
     )
     .expect("crear init");
     let status = user::process::wait(pid);

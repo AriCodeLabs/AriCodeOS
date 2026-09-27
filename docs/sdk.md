@@ -84,6 +84,27 @@ hablar con él. `sys::permissions::granted` recorre lo recibido.
 | time | `sys::time::uptime_ms(system)`, `sys::time::Clock`, `sys::time::sleep_ms` |
 | permissions | `sys::permissions::{granted, kind_name, is, drop_handle}` |
 
+## Manifiesto y lanzamiento (Fase 28)
+
+Una aplicación se lanza a través del broker (init) con `run NOMBRE [ARG]`
+desde el shell o `sys::launch::run(broker, nombre, arg)`. El broker lee
+`NOMBRE.manifest` del initrd (`apps/<app>/NOMBRE.manifest`, empaquetado por
+xtask):
+
+```text
+name = hello_app
+caps = system, fs      # system | fs | net | window | input
+memory = 128K          # cuota de buffers DMA (K o M, máximo 8M)
+```
+
+Los handles llegan en este orden fijo, solo los pedidos: `SYSTEM` (lectura),
+directorio privado de fsd, endpoint de red, endpoint del compositor,
+endpoints de entrada y, si alguna capacidad necesita buffers (`fs`, `net`,
+`window`), `HARDWARE` al final. Con `sys::permissions::granted` la aplicación
+los reconoce por tipo sin depender de la posición. Sin manifiesto solo se
+recibe consola y `SYSTEM`. Pedir `spawner`, `pci` o `framebuffer` hace que el
+broker deniegue el lanzamiento.
+
 ## Reglas
 
 - Para entregar un handle a otro proceso hace falta `TRANSFER` sobre él, y

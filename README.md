@@ -75,7 +75,8 @@ libs/arifs/      AriFS v0: sistema de archivos plano con tests de host
 sdk/proto/       protocolos IPC de los servicios
 sdk/runtime/     aricode-rt: runtime de los programas de usuario (entry!, heap, panic)
 sdk/build/       aricode-build: build.rs de una linea para programas de usuario
-apps/hello/      aplicacion de ejemplo del SDK (ver docs/sdk.md)
+apps/hello/      aplicacion de ejemplo del SDK con su manifiesto (ver docs/sdk.md)
+libs/manifest/   manifiestos de aplicacion: capacidades pedidas y cuota de memoria
 boot/            AriBoot: cargador UEFI (crate `ariboot`)
 kernel/          AriKernel (crate `arikernel`), ELF64 en la mitad alta
 tools/xtask/     automatización: build, imagen, QEMU, tests, lint

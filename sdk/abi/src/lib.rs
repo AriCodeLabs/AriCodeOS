@@ -158,6 +158,23 @@ pub mod nr {
     pub const SYSTEM_INFO: u64 = 25;
     /// `system_power(system, action)` (ver [`power`]); exige `MANAGE`. No retorna.
     pub const SYSTEM_POWER: u64 = 26;
+    /// `initrd_read(spawner, name_ptr, name_len, buf, len) -> bytes copiados`;
+    /// exige `READ` sobre el `SPAWNER`. `TooBig` si el fichero no cabe.
+    pub const INITRD_READ: u64 = 27;
+}
+
+/// Sexto argumento de `process_spawn`: número de handles (bits 0..7) y
+/// límite de memoria DMA del hijo en KiB (bits 8..). 0 KiB = sin límite.
+pub mod spawn_limits {
+    pub const fn pack(handles: usize, memory_kib: u32) -> u64 {
+        (handles as u64 & 0xFF) | (memory_kib as u64) << 8
+    }
+    pub const fn handles(raw: u64) -> usize {
+        (raw & 0xFF) as usize
+    }
+    pub const fn memory_kib(raw: u64) -> u32 {
+        (raw >> 8) as u32
+    }
 }
 
 /// Consultas de `system_info` y formato de sus respuestas.
@@ -441,6 +458,15 @@ pub const fn user_range_ok(ptr: u64, len: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn spawn_limits_pack() {
+        use super::spawn_limits::*;
+        let raw = pack(6, 128);
+        assert_eq!(handles(raw), 6);
+        assert_eq!(memory_kib(raw), 128);
+        assert_eq!(memory_kib(pack(3, 0)), 0);
+    }
+
     #[test]
     fn framebuffer_info_round_trip() {
         use super::sysinfo::*;
