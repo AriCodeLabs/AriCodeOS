@@ -1,0 +1,20 @@
+[package]
+name = "ari-compositor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Compositor de ventanas de AriCodeOS en espacio de usuario"
+publish = false
+
+[[bin]]
+name = "compositor"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+aricode-sys = { path = "../../sdk/rust" }
+aricode-proto = { path = "../../sdk/proto" }
+aricode-gfx = { path = "../../libs/gfx" }
+aricode-input = { path = "../../libs/input" }
+user-testprogs = { path = "../../user/testprogs" }

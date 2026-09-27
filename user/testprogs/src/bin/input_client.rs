@@ -56,11 +56,12 @@ fn main(count: u64) -> u64 {
     let mut clicked = false;
     let mut idle_rounds = 0;
     let mut events = [Event::default(); MAX_EVENTS];
+    let mut times = [0u64; MAX_EVENTS];
     while !(got_line && moved && clicked) && idle_rounds < 8 {
         let mut any = false;
         for (i, c) in clients.iter().take(count).enumerate() {
             let Some(c) = c else { continue };
-            let n = match c.read(200, &mut events) {
+            let n = match c.read(200, &mut events, &mut times) {
                 Ok(n) => n,
                 Err(InputError::Status(Status::Timeout)) => 0,
                 Err(_) => return 3,

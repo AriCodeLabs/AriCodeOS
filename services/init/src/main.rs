@@ -18,12 +18,14 @@ const PCI_ROOT: Handle = Handle(0x0001_0005);
 const HARDWARE: Handle = Handle(0x0001_0006);
 const SYSTEM: Handle = Handle(0x0001_0007);
 const CONSOLE_IN: Handle = Handle(0x0001_0008);
+const FRAMEBUFFER: Handle = Handle(0x0001_0009);
 
 /// Bits de la máscara de servicios que recibe el shell.
 const SERVICE_BLOCK: u64 = 1;
 const SERVICE_FS: u64 = 2;
 const SERVICE_NET: u64 = 4;
 const SERVICE_INPUT: u64 = 8;
+const SERVICE_GUI: u64 = 16;
 
 fn say(msg: &[u8]) {
     sys::print(b"AriInit: ");
@@ -135,6 +137,49 @@ fn run_shell(fs_service: Handle, net_service: Handle, services: u64) -> Result<u
     let result = sys::process_wait(child, TIMEOUT_INFINITE);
     let _ = sys::handle_close(child);
     result
+}
+
+/// Lanza el compositor (endpoint propio, framebuffer, SYSTEM, hardware para
+/// su buffer trasero y los servicios de entrada) y dos aplicaciones gráficas
+/// que comparten pantalla; espera a que las aplicaciones terminen.
+fn run_gui(inputs: &[Handle]) -> Result<(), u64> {
+    let service = sys::endpoint_create().map_err(|_| 1u64)?;
+    let mut handles = [Handle(0); 8];
+    handles[0] = sys::handle_duplicate(service, rights::READ | rights::WRITE | rights::TRANSFER)
+        .map_err(|_| 2u64)?;
+    handles[1] =
+        sys::handle_duplicate(FRAMEBUFFER, rights::READ | rights::WRITE | rights::TRANSFER)
+            .map_err(|_| 3u64)?;
+    handles[2] =
+        sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER).map_err(|_| 4u64)?;
+    handles[3] =
+        sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER).map_err(|_| 5u64)?;
+    let mut n = 4;
+    for ep in inputs.iter().take(4) {
+        handles[n] =
+            sys::handle_duplicate(*ep, rights::WRITE | rights::TRANSFER).map_err(|_| 6u64)?;
+        n += 1;
+    }
+    let _compositor =
+        sys::process_spawn_with(SPAWNER, "compositor", inputs.len() as u64, &handles[..n])
+            .map_err(|_| 7u64)?;
+    let mut apps = [Handle(0); 2];
+    for (i, app) in apps.iter_mut().enumerate() {
+        let ep =
+            sys::handle_duplicate(service, rights::WRITE | rights::TRANSFER).map_err(|_| 8u64)?;
+        let hw =
+            sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER).map_err(|_| 8u64)?;
+        *app =
+            sys::process_spawn_with(SPAWNER, "gui_demo", i as u64, &[ep, hw]).map_err(|_| 9u64)?;
+    }
+    for app in apps {
+        let code = sys::process_wait(app, TIMEOUT_INFINITE).map_err(|_| 10u64)?;
+        let _ = sys::handle_close(app);
+        if code != 0 {
+            return Err(100 + code);
+        }
+    }
+    Ok(())
 }
 
 fn main(arg: u64) -> u64 {
@@ -349,6 +394,22 @@ fn main(arg: u64) -> u64 {
         }
     } else {
         say(b"sin dispositivos virtio-input");
+    }
+    // 10. Interfaz grafica: compositor con el framebuffer y las entradas, y dos
+    //     aplicaciones que dibujan a la vez.
+    if arg & sys::abi::init_arg::GUI != 0 {
+        match run_gui(&input_eps[..inputs]) {
+            Ok(()) => {
+                services |= SERVICE_GUI;
+                say(b"gui ok (2 aplicaciones)");
+            }
+            Err(code) => {
+                sys::print(b"AriInit: gui fallo con ");
+                sys::print(user_testprogs::fmt_u64(code, &mut buf));
+                sys::print(b"\n");
+                return 25;
+            }
+        }
     }
     say(b"servicios de arranque completados");
     if arg & sys::abi::init_arg::SHELL != 0 {

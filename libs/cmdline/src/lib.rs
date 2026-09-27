@@ -65,6 +65,8 @@ pub mod keys {
     pub const LOG: &str = "log";
     /// `shell`: init lanza el shell interactivo tras los servicios de arranque.
     pub const SHELL: &str = "shell";
+    /// `gui`: el kernel deja el framebuffer al compositor de usuario.
+    pub const GUI: &str = "gui";
 }
 
 #[cfg(test)]
