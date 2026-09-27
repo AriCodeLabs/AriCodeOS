@@ -1,0 +1,19 @@
+[package]
+name = "ari-app-win-probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Regresion del broker: aplicacion que pide window; sin GUI el broker la deniega tras conceder SYSTEM"
+publish = false
+
+[[bin]]
+name = "win_probe"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+aricode-rt = { path = "../../sdk/runtime" }
+
+[build-dependencies]
+aricode-build = { path = "../../sdk/build" }

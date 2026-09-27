@@ -125,8 +125,38 @@ fn find_partition(blk: &mut BlockClient, name: &str) -> Option<(u64, u64)> {
         .map(|p| (p.first_lba, p.last_lba))
 }
 
+/// Lee y anuncia el estado de arranque (para los tests de no confirmación).
+fn report_boot_state(block_service: Handle) {
+    use aricode_ab::BootState;
+    let Ok(mut blk) = BlockClient::new(block_service, HARDWARE, 16) else {
+        return;
+    };
+    let Some((first, _)) = find_partition(&mut blk, aricode_ab::PART_STATE) else {
+        return;
+    };
+    if blk.read(first, 1).is_err() {
+        return;
+    }
+    let Some(state) = BootState::decode(&blk.buffer()[..512]) else {
+        return;
+    };
+    let mut buf = [0u8; 20];
+    sys::print(b"AriInit: estado de arranque: activo ");
+    sys::print(state.active.name().as_bytes());
+    match state.pending {
+        Some((slot, tries)) => {
+            sys::print(b", pendiente ");
+            sys::print(slot.name().as_bytes());
+            sys::print(b" (");
+            sys::print(aricode_rt::fmt_u64(tries as u64, &mut buf));
+            sys::print(b" intentos)\n");
+        }
+        None => sys::print(b", sin pendiente\n"),
+    }
+}
+
 /// Arranque A/B: si el kernel arrancó desde un slot pendiente, marcarlo
-/// activo en `ARIBOOT` ahora que los servicios de arranque funcionan.
+/// activo en `ARIBOOT` ahora que todos los servicios de arranque funcionan.
 fn confirm_boot_slot(arg: u64, block_service: Handle) {
     use aricode_ab::{confirm, BootState, Slot};
     let slot = if arg & sys::abi::init_arg::BOOT_SLOT_A != 0 {
@@ -354,18 +384,15 @@ impl Broker {
             sys::print(b"\n");
             return LaunchReply::status(LaunchStatus::Denied);
         }
-        let mut granted = [Handle(0); 12];
-        let mut n = 0;
+        // Los duplicados preparados se cierran solos si cualquier camino de
+        // error sale antes de transferirlos (`Granted::take` los libera al
+        // kernel). Antes, una denegacion tras conceder SYSTEM dejaba una
+        // entrada en la tabla por intento.
+        let mut granted = Granted::new();
         let mut needs_hw = false;
-        let mut push = |h: Handle| {
-            if n < granted.len() {
-                granted[n] = h;
-                n += 1;
-            }
-        };
         if caps.contains(Caps::SYSTEM) {
             match sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER) {
-                Ok(h) => push(h),
+                Ok(h) => granted.push(h),
                 Err(_) => return LaunchReply::status(LaunchStatus::Failed),
             }
         }
@@ -374,14 +401,14 @@ impl Broker {
                 return LaunchReply::status(LaunchStatus::Denied);
             };
             match fs.bind(name) {
-                Ok(h) => push(h),
+                Ok(h) => granted.push(h),
                 Err(_) => return LaunchReply::status(LaunchStatus::Failed),
             }
             needs_hw = true;
         }
         if caps.contains(Caps::NET) {
             match sys::handle_duplicate(self.net, rights::WRITE | rights::TRANSFER) {
-                Ok(h) => push(h),
+                Ok(h) => granted.push(h),
                 Err(_) => return LaunchReply::status(LaunchStatus::Failed),
             }
             needs_hw = true;
@@ -391,7 +418,7 @@ impl Broker {
                 return LaunchReply::status(LaunchStatus::Denied);
             };
             match sys::handle_duplicate(comp, rights::WRITE | rights::TRANSFER) {
-                Ok(h) => push(h),
+                Ok(h) => granted.push(h),
                 Err(_) => return LaunchReply::status(LaunchStatus::Failed),
             }
             needs_hw = true;
@@ -401,7 +428,7 @@ impl Broker {
                 return LaunchReply::status(LaunchStatus::Denied);
             };
             match sys::handle_duplicate(block, rights::WRITE | rights::TRANSFER) {
-                Ok(h) => push(h),
+                Ok(h) => granted.push(h),
                 Err(_) => return LaunchReply::status(LaunchStatus::Failed),
             }
             needs_hw = true;
@@ -409,41 +436,81 @@ impl Broker {
         if caps.contains(Caps::INPUT) {
             for ep in &self.inputs[..self.input_count] {
                 match sys::handle_duplicate(*ep, rights::WRITE | rights::TRANSFER) {
-                    Ok(h) => push(h),
+                    Ok(h) => granted.push(h),
                     Err(_) => return LaunchReply::status(LaunchStatus::Failed),
                 }
             }
         }
         if needs_hw {
             match sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER) {
-                Ok(h) => push(h),
+                Ok(h) => granted.push(h),
                 Err(_) => return LaunchReply::status(LaunchStatus::Failed),
             }
         }
-        let child = match sys::process_spawn_limited(SPAWNER, name, arg, &granted[..n], memory_kib)
-        {
-            Ok(c) => c,
-            Err(e) => {
-                // El kernel solo retira los handles si llega a crear el
-                // proceso; en cualquier fallo los duplicados siguen en nuestra
-                // tabla y hay que cerrarlos (cerrar uno ya retirado devuelve
-                // BadHandle y se ignora). Sin esto, cada nombre inexistente
-                // dejaba una entrada hasta agotar la tabla.
-                for h in &granted[..n] {
-                    let _ = sys::handle_close(*h);
+        // El kernel solo retira los handles si llega a crear el proceso; en
+        // cualquier fallo el guard los cierra al salir (cerrar uno ya retirado
+        // devuelve BadHandle y se ignora).
+        let child =
+            match sys::process_spawn_limited(SPAWNER, name, arg, granted.handles(), memory_kib) {
+                Ok(c) => {
+                    granted.take();
+                    c
                 }
-                return LaunchReply::status(match e {
-                    Error::NotFound => LaunchStatus::NotFound,
-                    _ => LaunchStatus::Failed,
-                });
-            }
-        };
+                Err(e) => {
+                    return LaunchReply::status(match e {
+                        Error::NotFound => LaunchStatus::NotFound,
+                        _ => LaunchStatus::Failed,
+                    });
+                }
+            };
         let result = sys::process_wait(child, TIMEOUT_INFINITE);
         let _ = sys::handle_close(child);
         match result {
             Ok(code) => LaunchReply::exited(code),
             Err(Error::Killed) => LaunchReply::status(LaunchStatus::Killed),
             Err(_) => LaunchReply::status(LaunchStatus::Failed),
+        }
+    }
+}
+
+/// Handles preparados para un lanzamiento: se cierran al soltarse salvo que
+/// `take` los haya entregado al kernel.
+struct Granted {
+    handles: [Handle; 12],
+    count: usize,
+    transferred: bool,
+}
+
+impl Granted {
+    fn new() -> Self {
+        Self {
+            handles: [Handle(0); 12],
+            count: 0,
+            transferred: false,
+        }
+    }
+    fn push(&mut self, h: Handle) {
+        if self.count < self.handles.len() {
+            self.handles[self.count] = h;
+            self.count += 1;
+        } else {
+            let _ = sys::handle_close(h);
+        }
+    }
+    fn handles(&self) -> &[Handle] {
+        &self.handles[..self.count]
+    }
+    fn take(&mut self) {
+        self.transferred = true;
+    }
+}
+
+impl Drop for Granted {
+    fn drop(&mut self) {
+        if !self.transferred {
+            for h in &self.handles[..self.count] {
+                let _ = sys::handle_close(*h);
+            }
         }
     }
 }
@@ -601,11 +668,6 @@ fn main(arg: u64) -> u64 {
         }
         None => say(b"sin virtio-blk"),
     }
-    // 7b. Arranque A/B: confirmar el slot si venimos de uno pendiente.
-    match block_service {
-        Some(service) => confirm_boot_slot(arg, service),
-        None => say(b"sin servicio de bloques: no se confirma el arranque"),
-    }
     // 8. Servicio de red: driver virtio-net residente + cliente de prueba.
     let Ok(net_service) = sys::endpoint_create() else {
         return 16;
@@ -739,6 +801,20 @@ fn main(arg: u64) -> u64 {
                 return 25;
             }
         }
+    }
+    // 11. Arranque A/B: solo ahora, con todos los servicios comprobados, se
+    //     confirma el slot pendiente. Cualquier retorno de error anterior deja
+    //     el estado pendiente para que AriBoot agote intentos y haga rollback.
+    if arg & sys::abi::init_arg::FAIL_LATE != 0 {
+        say(b"fallo tardio provocado (init_fail_late): no se confirma el slot");
+        if let Some(service) = block_service {
+            report_boot_state(service);
+        }
+        return 99;
+    }
+    match block_service {
+        Some(service) => confirm_boot_slot(arg, service),
+        None => say(b"sin servicio de bloques: no se confirma el arranque"),
     }
     say(b"servicios de arranque completados");
     if arg & sys::abi::init_arg::SHELL != 0 {

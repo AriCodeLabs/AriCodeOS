@@ -45,6 +45,8 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("ari-app-hello", Some(KERNEL_TARGET)),
     ("ari-app-perms-check", Some(KERNEL_TARGET)),
     ("ari-app-updater", Some(KERNEL_TARGET)),
+    ("ari-app-fs-probe", Some(KERNEL_TARGET)),
+    ("ari-app-win-probe", Some(KERNEL_TARGET)),
     ("ari-app-wasm-runner", Some(KERNEL_TARGET)),
     ("wasm-demo", Some(WASM_TARGET)),
     ("user-testprogs", Some(KERNEL_TARGET)),
@@ -105,6 +107,9 @@ pub fn initrd_programs() -> Result<Vec<String>> {
         String::from("hello_app"),
         String::from("perms_check"),
         String::from("updater"),
+        String::from("fs_victim"),
+        String::from("fs_probe"),
+        String::from("win_probe"),
         String::from("wasm_runner"),
         String::from("shell"),
     ];
@@ -157,6 +162,8 @@ pub fn build_user_programs(release: bool) -> Result<PathBuf> {
         "ari-app-hello",
         "ari-app-perms-check",
         "ari-app-updater",
+        "ari-app-fs-probe",
+        "ari-app-win-probe",
         "ari-app-wasm-runner",
         "ari-shell",
     ] {
