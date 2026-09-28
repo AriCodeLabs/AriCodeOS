@@ -118,3 +118,18 @@ broker deniegue el lanzamiento.
   caben, la llamada falla.
 - Un programa que hace algo ilegal (tocar memoria del kernel, instrucciones
   privilegiadas, pila desbordada) muere solo; el kernel y el resto siguen.
+
+## Plazos y correlación de las llamadas (ADR 0012)
+
+Todas las llamadas de los clientes del SDK (`block`, `fs`, `net`, `window`,
+`input`, `launch`, `status`) pasan por `aricode_sys::rpc::call`:
+
+- cada petición crea su propio endpoint de respuesta y lo cierra al volver;
+  una respuesta tardía se pierde y nunca se atribuye a otra petición;
+- el envío y la recepción tienen plazo (el pedido por la petición más
+  `rpc::GRACE_MS`); un servicio muerto produce `Error::Timeout`, no una
+  espera infinita. Solo `launch::run` espera sin plazo la salida del
+  programa lanzado;
+- un plazo vencido no deshace la operación: su resultado es desconocido. El
+  SDK no reintenta escrituras; el programa decide. Las lecturas y consultas
+  sin efectos se pueden repetir.

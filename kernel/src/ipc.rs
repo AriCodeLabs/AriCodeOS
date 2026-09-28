@@ -101,6 +101,48 @@ impl Endpoint {
 /// Banco de medida (`test=ipc`): un servidor y un cliente de usuario hacen
 /// ping-pong a través de un endpoint creado por el kernel. Mide el round
 /// trip con el TSC. Ver `user/testprogs/src/bin/ipc_{server,client}.rs`.
+/// Autoprueba de correlación (`test=ipc_late`, etapa 1B): una respuesta que
+/// llega después del plazo del cliente nunca se confunde con la de la
+/// petición siguiente, porque cada petición usa su propio endpoint de
+/// respuesta.
+pub fn late_reply_selftest() {
+    use crate::object::{KernelObject, ObjectKind};
+    use crate::user::{process, programs};
+    use alloc::vec;
+
+    let ep = KernelObject::new(ObjectKind::Endpoint(Endpoint::new()));
+    let server = process::spawn_with_handles(
+        "late_server",
+        programs::by_name("late_server").expect("late_server"),
+        vec![(
+            ep.clone(),
+            Rights::READ.union(Rights::WRITE).union(Rights::DUPLICATE),
+        )],
+    )
+    .expect("servidor");
+    let client = process::spawn_with_handles(
+        "late_client",
+        programs::by_name("late_client").expect("late_client"),
+        vec![(ep, Rights::WRITE.union(Rights::DUPLICATE))],
+    )
+    .expect("cliente");
+    let client_status = process::wait(client);
+    let server_status = process::wait(server);
+    assert_eq!(
+        client_status,
+        process::ExitStatus::Exited(0),
+        "cliente: {client_status:?}"
+    );
+    assert_eq!(
+        server_status,
+        process::ExitStatus::Exited(0),
+        "servidor: {server_status:?}"
+    );
+    log::info!(
+        "ipc late reply selftest ok (plazo vencido, respuesta tardia descartada, sin confusion)"
+    );
+}
+
 pub fn selftest() {
     use crate::object::{KernelObject, ObjectKind};
     use crate::user::{process, programs};

@@ -1,12 +1,11 @@
 //! Cliente del servicio de bloques (`aricode-proto::block`) con un buffer DMA
 //! propio: la memoria la aporta el cliente y el dispositivo escribe en ella.
 
-use crate::{self as sys, rights, Error, Handle, TIMEOUT_INFINITE};
+use crate::{self as sys, rights, rpc, Error, Handle};
 use aricode_proto::block::{Op, Reply, Request, Status, MAX_SECTORS};
 
 pub struct BlockClient {
     service: Handle,
-    reply: Handle,
     dma: Handle,
     buf: u64,
     buf_len: u64,
@@ -17,12 +16,10 @@ impl BlockClient {
     /// reservar el buffer DMA de `sectors` sectores (máximo `MAX_SECTORS`).
     pub fn new(service: Handle, hardware: Handle, sectors: u16) -> Result<Self, Error> {
         let sectors = sectors.clamp(1, MAX_SECTORS) as u64;
-        let reply = sys::endpoint_create()?;
         let dma = sys::dma_alloc(hardware, sectors * 512)?;
         let buf = sys::mmio_map(dma)?;
         Ok(Self {
             service,
-            reply,
             dma,
             buf,
             buf_len: sectors * 512,
@@ -36,18 +33,22 @@ impl BlockClient {
     }
 
     fn call(&self, req: Request, with_buffer: bool) -> Result<Reply, Error> {
-        let reply_w = sys::handle_duplicate(self.reply, rights::WRITE | rights::TRANSFER)?;
-        let mut handles = [reply_w, Handle(0)];
-        let mut n = 1;
+        let mut extra = [Handle(0); 1];
+        let mut n = 0;
         if with_buffer {
-            handles[1] =
+            extra[0] =
                 sys::handle_duplicate(self.dma, rights::READ | rights::WRITE | rights::TRANSFER)?;
-            n = 2;
+            n = 1;
         }
-        sys::ipc_send(self.service, &req.encode(), &handles[..n], TIMEOUT_INFINITE)?;
         let mut msg = [0u8; Reply::LEN];
-        let mut none: [Handle; 0] = [];
-        let (len, _) = sys::ipc_receive(self.reply, &mut msg, &mut none, TIMEOUT_INFINITE)?;
+        let len = rpc::call(
+            self.service,
+            &req.encode(),
+            &extra[..n],
+            rpc::GRACE_MS,
+            rpc::GRACE_MS,
+            &mut msg,
+        )?;
         Reply::decode(&msg[..len]).ok_or(Error::Invalid)
     }
 
