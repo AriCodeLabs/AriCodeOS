@@ -1002,10 +1002,15 @@ pub mod launch {
         pub arg: u64,
         pub name: [u8; MAX_NAME],
         pub name_len: u8,
+        /// `DETACH`: responder `Started` al crear el proceso, sin esperar su
+        /// salida (ADR 0015).
+        pub flags: u8,
     }
 
     impl Request {
         pub const LEN: usize = 48;
+        /// Lanzamiento en segundo plano.
+        pub const DETACH: u8 = 1;
 
         /// `None` si el nombre no cabe.
         pub fn new(name: &str, arg: u64) -> Option<Self> {
@@ -1018,7 +1023,17 @@ pub mod launch {
                 arg,
                 name: n,
                 name_len: name.len() as u8,
+                flags: 0,
             })
+        }
+
+        pub fn detached(mut self) -> Self {
+            self.flags |= Self::DETACH;
+            self
+        }
+
+        pub fn is_detached(&self) -> bool {
+            self.flags & Self::DETACH != 0
         }
 
         pub fn name_str(&self) -> &str {
@@ -1030,6 +1045,7 @@ pub mod launch {
             b[0] = PROTOCOL;
             b[1] = VERSION;
             b[2] = self.name_len;
+            b[3] = self.flags;
             b[8..16].copy_from_slice(&self.arg.to_le_bytes());
             b[16..48].copy_from_slice(&self.name);
             b
@@ -1045,6 +1061,7 @@ pub mod launch {
                 arg: u64::from_le_bytes(b[8..16].try_into().ok()?),
                 name,
                 name_len: b[2].min(MAX_NAME as u8),
+                flags: b[3],
             })
         }
     }
@@ -1065,6 +1082,10 @@ pub mod launch {
         BadManifest = 5,
         /// El broker no pudo lanzarlo (recursos).
         Failed = 6,
+        /// Lanzado en segundo plano (`DETACH`); `value` = 0.
+        Started = 7,
+        /// Límite de programas en marcha del broker (ADR 0015).
+        Limit = 8,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1105,6 +1126,8 @@ pub mod launch {
                 4 => Status::Killed,
                 5 => Status::BadManifest,
                 6 => Status::Failed,
+                7 => Status::Started,
+                8 => Status::Limit,
                 _ => return None,
             };
             Some(Self {

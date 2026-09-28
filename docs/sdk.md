@@ -88,7 +88,10 @@ hablar con él. `sys::permissions::granted` recorre lo recibido.
 ## Manifiesto y lanzamiento (Fase 28)
 
 Una aplicación se lanza a través del broker (init) con `run NOMBRE [ARG]`
-desde el shell o `sys::launch::run(broker, nombre, arg)`. El broker lee
+desde el shell o `sys::launch::run(broker, nombre, arg)`; `spawn` y
+`sys::launch::spawn` la lanzan en segundo plano sin esperar su salida. El
+broker admite 4 programas en marcha a la vez y responde `Limit` al quinto
+(ADR 0015). El broker lee
 `NOMBRE.manifest` del initrd (`apps/<app>/NOMBRE.manifest`, empaquetado por
 xtask):
 
