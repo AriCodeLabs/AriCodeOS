@@ -90,6 +90,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ari-usb-input"
+version = "0.5.1"
+dependencies = [
+ "aricode-build",
+ "aricode-input",
+ "aricode-proto",
+ "aricode-rt",
+ "aricode-sys",
+ "aricode-xhci",
+]
+
+[[package]]
 name = "ari-virtio-blk"
 version = "0.5.1"
 dependencies = [
@@ -287,6 +299,10 @@ version = "0.5.1"
 
 [[package]]
 name = "aricode-x86-paging"
+version = "0.5.1"
+
+[[package]]
+name = "aricode-xhci"
 version = "0.5.1"
 
 [[package]]

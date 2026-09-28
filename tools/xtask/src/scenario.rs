@@ -110,6 +110,10 @@ pub struct Scenario {
     /// `cargo xtask test --cpus N` lo sustituye; un valor explícito se
     /// respeta siempre (el escenario depende de ese número de CPUs).
     pub cpus: Option<u32>,
+    /// Añade un controlador xHCI con un teclado y un ratón USB HID. Los
+    /// eventos QMP van entonces al teclado USB (el manejador más reciente).
+    #[serde(default)]
+    pub usb_hid: bool,
     #[serde(default)]
     pub inject: Inject,
     pub expect: Expect,

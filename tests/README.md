@@ -48,6 +48,7 @@ payload = "hola desde el host"  # el eco se anota en la captura como "[host] son
 disk = "slots"                  # disco: slots (defecto) | esp-only | pending-b | b-exhausted | b-corrupt | usb-image (la ESP va dentro del disco)
 disk_readonly = false           # true: el disco de pruebas se presenta como solo lectura
 cpus = 4                        # procesadores (-smp N); sin declarar: 1, o lo que fuerce `--cpus N`
+usb_hid = true                  # añade qemu-xhci con un teclado y un ratón USB (los eventos QMP van al USB)
 
 [host_input]                    # opcional: entrada inyectada por QMP al ver marker
 marker = "INPUT_READY"

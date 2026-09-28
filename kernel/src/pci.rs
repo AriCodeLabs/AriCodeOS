@@ -187,6 +187,14 @@ pub fn functions_of_class(class: u8) -> Vec<(u8, u8, u8)> {
         .collect()
 }
 
+/// Índice de la primera función de la clase dada sin reclamar.
+pub fn find_class(class: u8, subclass: u8) -> Option<usize> {
+    DEVICES
+        .lock()
+        .iter()
+        .position(|d| d.header.class == class && d.header.subclass == subclass && !d.claimed)
+}
+
 /// Índice de la primera función `vendor:device` sin reclamar.
 pub fn find(vendor: u16, device: u16) -> Option<usize> {
     DEVICES

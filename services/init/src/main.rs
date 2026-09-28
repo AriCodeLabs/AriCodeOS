@@ -54,6 +54,16 @@ fn find_pci(vendor: u16, device: u16) -> Option<u64> {
     find_pci_from(vendor, device, 0)
 }
 
+/// Primera función PCI de la clase `class.subclass` a partir de `start`.
+fn find_pci_class_from(class: u8, subclass: u8, start: u64) -> Option<u64> {
+    let n = sys::pci_count(PCI_ROOT).ok()?;
+    (start..n).find(|&i| {
+        sys::pci_info(PCI_ROOT, i).is_ok_and(|v| {
+            sys::abi::pci_info::class(v) == class && sys::abi::pci_info::subclass(v) == subclass
+        })
+    })
+}
+
 /// Como `find_pci`, buscando a partir del índice `start`.
 fn find_pci_from(vendor: u16, device: u16, start: u64) -> Option<u64> {
     let n = sys::pci_count(PCI_ROOT).ok()?;
@@ -766,6 +776,31 @@ fn main(arg: u64) -> u64 {
             }
         }
     }
+    // Controladores USB (clase 0c.03): usbd enumera teclados y ratones HID y
+    // los sirve como un unico dispositivo de entrada.
+    let mut next = 0;
+    while let Some(index) = find_pci_class_from(0x0C, 0x03, next) {
+        next = index + 1;
+        if inputs == input_eps.len() {
+            break;
+        }
+        let Ok(ep) = sys::endpoint_create() else {
+            return 21;
+        };
+        let Ok(system) = sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER) else {
+            return 21;
+        };
+        match start_driver("usb_input", index, ep, &[system]) {
+            Ok(_) => {
+                input_eps[inputs] = ep;
+                inputs += 1;
+            }
+            Err(e) => {
+                aricode_rt::print_error(b"AriInit: usb_input", e);
+                return 22;
+            }
+        }
+    }
     if inputs > 0 {
         services |= SERVICE_INPUT;
         let mut dups = [Handle(0); 4];
@@ -796,7 +831,7 @@ fn main(arg: u64) -> u64 {
             }
         }
     } else {
-        say(b"sin dispositivos virtio-input");
+        say(b"sin dispositivos de entrada");
     }
     // 10. Interfaz grafica: compositor con el framebuffer y las entradas, y dos
     //     aplicaciones que dibujan a la vez.

@@ -3,7 +3,7 @@
 //! ```text
 //! cargo xtask build [--debug]                 compila AriBoot y AriKernel
 //! cargo xtask image [--debug]                 build + monta build/esp/
-//! cargo xtask run   [--debug] [--cmdline S] [--cpus N] [--usb-image]   image + QEMU interactivo (serie en stdio)
+//! cargo xtask run   [--debug] [--cmdline S] [--cpus N] [--usb-image] [--usb-hid]   image + QEMU interactivo
 //! cargo xtask usb-image [--cmdline S]         imagen GPT para pendrive en build/aricodeos-usb.img
 //! cargo xtask test  [opciones]                niveles de test (ver tests/README.md)
 //!     --level unit|smoke|full                 por defecto: unit + smoke
@@ -69,6 +69,7 @@ fn main() -> ExitCode {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1),
             cli.flag("--usb-image"),
+            cli.flag("--usb-hid"),
         ),
         "usb-image" => image::build_usb_image(release, cli.value("--cmdline").unwrap_or("shell"))
             .map(|p| {

@@ -2503,7 +2503,7 @@ TLS vendrá posteriormente (Fase 31, criptografía).
 
 # FASE 25 — Input moderno
 
-**Estado: virtio-input completado (2026-09-27); xHCI/USB HID pendiente.**
+**Estado: completada (virtio-input 2026-09-27; xHCI y USB HID 2026-09-28).**
 
 ### Implementado
 
@@ -2519,15 +2519,33 @@ TLS vendrá posteriormente (Fase 31, criptografía).
 - cliente `aricode-sys::input`, programa `input_client` y escenario
   `input.virtio`: xtask inyecta por QMP (`input-send-event`) la línea
   `hola` + Enter en el teclado virtio y un movimiento y clic en el ratón
-  virtio; el escenario exige la traducción exacta.
+  virtio; el escenario exige la traducción exacta;
+- xHCI y USB HID (segunda parte): `libs/xhci` (no_std, tests de host) con
+  registros, TRB, anillos con bit de ciclo y enlace, contextos de slot y
+  endpoint de 32 o 64 bytes, ERST, paquetes SETUP y descriptores USB;
+  `usbd` (`services/usb-input`) en ring 3 recibe el controlador (clase
+  `0c.03`) con el contrato de driver, lo reinicia, programa DCBAA,
+  scratchpads, anillo de comandos y de eventos, enumera los puertos con
+  dispositivo (reset, Enable Slot, Address Device, descriptores,
+  `SET_CONFIGURATION`, `SET_PROTOCOL` de arranque, Configure Endpoint) y
+  sondea los endpoints de interrupción; los informes de arranque de teclado
+  y ratón se traducen a eventos evdev en `libs/input`
+  (`HidBootKeyboard`, `HidBootMouse`) y se sirven por
+  `InputServiceProtocol v1` como un único dispositivo
+  (`USB HID Keyboard+Mouse`); init lanza `usb_input` por cada controlador
+  USB y lo añade a los servicios de entrada;
+- escenarios `usb.hid` (`test=usb_hid`, QEMU con `qemu-xhci` + `usb-kbd` +
+  `usb-mouse` mediante `usb_hid = true`, eventos inyectados por QMP) y
+  `usb.hid_boot` (arranque normal con xHCI).
 
 ### Pendiente
 
-- xHCI, USB y HID (teclado y ratón físicos): misma librería de eventos,
-  driver nuevo en ring 3;
-- que el shell pueda leer del teclado virtio además de la consola serie
-  (llegará con la GUI, Fase 26, donde el teclado y el ratón alimentan al
-  compositor).
+- HID con descriptor de informe (protocolo de informe, teclados con teclas
+  multimedia, ratones con más botones), hubs USB, conexión y desconexión
+  en caliente (los Port Status Change se reconocen pero no se enumeran
+  puertos nuevos tras el arranque) y almacenamiento USB.
+- Que el shell pueda leer del teclado virtio o USB además de la consola
+  serie y PS/2 (el compositor ya los recibe en la GUI).
 
 ---
 

@@ -232,6 +232,60 @@ pub fn dma_alloc(len: u64) -> Result<ObjectRef, &'static str> {
     })))
 }
 
+/// Banco de pruebas del USB (`test=usb_hid`, Fase 25): el driver xHCI de
+/// ring 3 recibe el controlador (clase 0c.03) y un endpoint de servicio;
+/// `input_client` lee por IPC lo que el host inyecta por QMP en el teclado
+/// y el raton USB.
+pub fn usb_hid_selftest() {
+    use crate::user::{process, programs};
+    use alloc::vec;
+    use aricode_handles::Rights;
+
+    let index = crate::pci::find_class(0x0C, 0x03).expect("controlador USB en el bus PCI");
+    let claimed = crate::pci::claim(index).expect("reclamar el xHCI");
+    let service = KernelObject::new(ObjectKind::Endpoint(crate::ipc::Endpoint::new()));
+    let mut extra = vec![(
+        service.clone(),
+        Rights::READ.union(Rights::WRITE).union(Rights::TRANSFER),
+    )];
+    let mut mask = 0u64;
+    for (i, slot) in claimed.handles.into_iter().enumerate() {
+        if let Some(h) = slot {
+            match i {
+                2 => mask |= 1 << 15,
+                3..=8 => mask |= 1 << (i - 3),
+                _ => {}
+            }
+            extra.push(h);
+        }
+    }
+    extra.push((KernelObject::new(ObjectKind::System), Rights::READ));
+    let driver = process::spawn_with_handles_and_arg(
+        "usb_input",
+        programs::by_name("usb_input").expect("usb_input en el initrd"),
+        extra,
+        mask,
+        0,
+    )
+    .expect("usb_input");
+    let client = process::spawn_with_handles_and_arg(
+        "input_client",
+        programs::by_name("input_client").expect("input_client"),
+        vec![(service, Rights::WRITE)],
+        1,
+        0,
+    )
+    .expect("input_client");
+    let status = process::wait(client);
+    assert_eq!(
+        status,
+        process::ExitStatus::Exited(0),
+        "input_client: {status:?}"
+    );
+    let _ = driver;
+    log::info!("usb hid selftest ok (xHCI y HID de arranque en ring 3, eventos por IPC)");
+}
+
 /// Banco de pruebas (`test=drivers`): IRQ0 del PIT, DMA y framebuffer como
 /// MMIO, todo atendido por drivers de usuario.
 pub fn selftest(info: &boot_protocol::BootInfo) {

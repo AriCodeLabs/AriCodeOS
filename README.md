@@ -42,6 +42,7 @@ cargo xtask run            # arranca en QEMU + OVMF, serie en la terminal (salir
 cargo xtask run --cmdline shell   # arranca con el shell interactivo (arish) en la consola serie
 cargo xtask run --cmdline gui     # compositor y dos ventanas de prueba en la pantalla de QEMU
 cargo xtask run --cpus 4   # arranca con cuatro procesadores (SMP)
+cargo xtask run --usb-hid  # añade un xHCI con teclado y raton USB
 cargo xtask test           # unit + smoke (arranque nominal en QEMU)
 cargo xtask test --all     # unit + todos los escenarios QEMU; obligatorio antes de main
 cargo xtask test --area boot   # solo los escenarios de un área

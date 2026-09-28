@@ -10,8 +10,10 @@ interno no se toca**; AriCodeOS arranca y escribe solo en su pendrive.
   Secure Boot desactivado. VT-d/"Intel Virtualization for Directed I/O" puede
   quedar activado: el kernel lo usa si la DMAR lo declara.
 - Un pendrive de al menos 128 MiB que se pueda borrar por completo.
-- Teclado: el interno (PS/2 por i8042) sirve de consola. Los USB llegarán
-  con xHCI (segunda parte de la Fase 25).
+- Teclado: el interno (PS/2 por i8042) sirve de consola del kernel. Los
+  teclados y ratones USB (HID de arranque) los atiende `usbd` sobre el xHCI
+  y llegan al compositor con `gui`; el shell de la consola serie/PS/2 no los
+  lee todavía.
 - Sin puerto serie el diagnóstico es la pantalla: el kernel escribe la
   consola en el framebuffer GOP salvo con `gui`.
 

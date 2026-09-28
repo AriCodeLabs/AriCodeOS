@@ -1,0 +1,34 @@
+# Fase 25 (segunda parte): xHCI con teclado y raton USB HID. El kernel entrega
+# el controlador al driver usb_input; el host inyecta por QMP "hola" + Enter,
+# un movimiento y un clic (van al teclado y raton USB, los manejadores mas
+# recientes) y input_client los lee por IPC.
+name = "usb.hid"
+description = "test=usb_hid: xHCI + teclado y raton USB HID (protocolo de arranque) con eventos inyectados por QMP"
+level = "full"
+areas = ["usb", "input", "drivers"]
+cmdline = "qemu_exit test=usb_hid"
+usb_hid = true
+timeout_secs = 40
+
+[host_input]
+marker = "INPUT_READY"
+keys = ["h", "o", "l", "a", "ret"]
+mouse_rel = [10, -5]
+click = "left"
+
+[expect]
+exit = 33
+serial_contains = [
+    "usb-input: xHCI listo (",
+    "teclado HID (protocolo de arranque, 8 bytes por informe",
+    "raton HID (protocolo de arranque,",
+    "usb-input: dispositivo listo: USB HID Keyboard+Mouse",
+    "input_client: dispositivo 0: USB HID Keyboard+Mouse",
+    "input_client: teclado: hola",
+    "input_client: raton: boton izquierdo pulsado",
+    "input_client: raton: dx=10 dy=-5",
+    "input_client: eventos de entrada por IPC ok",
+    "usb hid selftest ok",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "USER FAULT", "nadie tecleo", "fallo en la inicializacion"]
