@@ -280,6 +280,19 @@ pub fn console_read(console: Handle, buf: &mut [u8], timeout_ms: u64) -> Result<
     .map(|n| n as usize)
 }
 
+/// Escribe texto de un teclado de usuario en el anillo de entrada de consola
+/// (exige `MANAGE` sobre la consola; ADR 0013). Devuelve los bytes aceptados.
+pub fn console_inject(console: Handle, bytes: &[u8]) -> Result<usize, Error> {
+    call(
+        nr::CONSOLE_INJECT,
+        console.0 as u64,
+        bytes.as_ptr() as u64,
+        bytes.len() as u64,
+        0,
+    )
+    .map(|n| n as usize)
+}
+
 /// Consulta del sistema (`abi::sysinfo`); devuelve los bytes escritos en `buf`.
 pub fn system_info(system: Handle, kind: u64, buf: &mut [u8]) -> Result<usize, Error> {
     abi::decode(raw_syscall(

@@ -322,6 +322,44 @@ enum Kind {
     },
     /// Programa del initrd con su endpoint de servicio (servicios de prueba).
     Program { arg: u64 },
+    /// Puente de consola (ADR 0013): la entrada de consola con `MANAGE` y
+    /// los endpoints de los servicios de entrada. No atiende peticiones, así
+    /// que su residente no tiene endpoint propio.
+    ConsoleBridge {
+        inputs: [Handle; MAX_INPUTS],
+        count: usize,
+    },
+}
+
+/// Servicios de entrada que init reparte (compositor, broker, puente).
+const MAX_INPUTS: usize = 4;
+
+/// Lanza el puente de consola con la entrada de consola (`MANAGE`) y un
+/// duplicado (`WRITE`) de cada endpoint de entrada; `arg` = cuántos. Si un
+/// duplicado falla, cierra los ya hechos.
+fn start_console_bridge(inputs: &[Handle]) -> Result<Handle, Error> {
+    let mut handles = [Handle(0); MAX_INPUTS + 1];
+    let mut made = 0;
+    let result = (|| {
+        handles[0] = sys::handle_duplicate(CONSOLE_IN, rights::MANAGE | rights::TRANSFER)?;
+        made = 1;
+        for ep in inputs {
+            handles[made] = sys::handle_duplicate(*ep, rights::WRITE | rights::TRANSFER)?;
+            made += 1;
+        }
+        sys::process_spawn_with(
+            SPAWNER,
+            "console_bridge",
+            inputs.len() as u64,
+            &handles[..made],
+        )
+    })();
+    if result.is_err() {
+        for h in &handles[..made] {
+            let _ = sys::handle_close(*h);
+        }
+    }
+    result
 }
 
 /// Cómo se comprueba que el servicio ya sirve.
@@ -456,6 +494,7 @@ impl Supervisor {
                 sys::handle_duplicate(r.endpoint, rights::READ | rights::WRITE | rights::TRANSFER)
                     .and_then(|ep| sys::process_spawn_with(SPAWNER, r.name, arg, &[ep]))
             }
+            Kind::ConsoleBridge { inputs, count } => start_console_bridge(&inputs[..count]),
         };
         let now = now_ms();
         let process = match spawned {
@@ -1435,6 +1474,29 @@ fn main(arg: u64) -> u64 {
         ) else {
             return 26;
         };
+        // Etapa 2 (ADR 0013): los teclados de usuario alimentan la consola
+        // del shell mientras no haya compositor (con GUI los eventos son
+        // suyos y cada servicio de entrada admite un solo lector).
+        if inputs > 0 && compositor.is_none() {
+            let mut ins = [Handle(0); MAX_INPUTS];
+            ins[..inputs].copy_from_slice(&input_eps[..inputs]);
+            let launched = sup
+                .register(
+                    "console_bridge",
+                    Kind::ConsoleBridge {
+                        inputs: ins,
+                        count: inputs,
+                    },
+                    Probe::None,
+                    Handle(0),
+                    true,
+                    Policy::DRIVER,
+                )
+                .is_some_and(|i| sup.launch(i));
+            if !launched {
+                say(b"puente de consola sin arrancar: el shell solo lee COM1 y PS/2");
+            }
+        }
         match run_shell(fs, net_service, services, &broker, &mut sup) {
             Ok(code) => {
                 sys::print(b"AriInit: shell terminado con ");

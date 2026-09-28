@@ -48,6 +48,7 @@ members = [
     "services/virtio-net",
     "services/virtio-input",
     "services/usb-input",
+    "services/console-bridge",
     "services/compositor",
     "services/arifs",
     "services/shell",

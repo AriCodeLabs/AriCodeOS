@@ -16,6 +16,7 @@ serial_contains = [
     "fsd              listo        1    0          -",
     "virtio_net       listo        1    0          -",
     "virtio_input     listo        1    0          -",
+    "console_bridge   listo        1    0          -",
     "(opcional)",
     "ARICODEOS_SHUTDOWN",
 ]

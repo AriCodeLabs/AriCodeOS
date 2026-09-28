@@ -23,7 +23,7 @@ todavía `validado en hardware`.
 | Drivers en ring 3: virtio-blk, virtio-net, virtio-input, xHCI + USB HID | validado en QEMU | `drivers.*`, `virtio.*`, `storage.*`, `network.*`, `input.*`, `usb.*` |
 | AriFS (ficheros, directorios privados por app) | prototipo, validado en QEMU | `filesystem.*`; sin garantías ante cortes de energía |
 | Red IPv4: DHCP, ARP, ICMP, UDP, TCP, DNS, cliente HTTP | prototipo, validado en QEMU | `network.*`; sin TLS ni renovación DHCP |
-| Shell `arish` por consola serie o teclado PS/2 | validado en QEMU | `shell.*`, `console.*` |
+| Shell `arish` por consola serie, teclado PS/2 o teclados USB/virtio (puente de consola) | validado en QEMU | `shell.*`, `console.*` |
 | GUI: compositor, ventanas, entrada | prototipo, validado en QEMU | `gui.*` |
 | WASM (intérprete MVP acotado) | prototipo, validado en QEMU | `wasm.*`; sin validación previa ni WASI |
 | Criptografía propia, RNG, imágenes firmadas, A/B con rollback | validado en QEMU | `crypto.*`, `update.*`; no es Secure Boot |

@@ -346,7 +346,8 @@ segundo brevemente para añadir la región.
   `object_revoke`, `endpoint_create`, `ipc_send`, `ipc_receive`,
   `process_spawn` (con transferencia de handles al hijo), `process_wait`,
   `irq_wait`, `mmio_map`, `region_len`, `dma_alloc`, `dma_phys`, `pci_count`,
-  `pci_info`, `pci_claim`, `console_read`, `system_info`, `system_power`.
+  `pci_info`, `pci_claim`, `console_read`, `system_info`, `system_power`,
+  `initrd_read`, `pci_info_ext`, `console_inject`.
   Los servicios de bloques, ficheros y red no añaden syscalls: son IPC.
 - Los punteros de usuario se validan página a página contra las tablas del
   proceso (`copy_from_user`): un puntero de kernel devuelve `Fault`, nunca se
@@ -569,6 +570,14 @@ segundo brevemente para añadir la región.
   `console_read` (syscall 24) exige `READ` sobre un objeto `Console`,
   valida el destino antes de bloquear y devuelve `Timeout` si vence el plazo.
   Los bytes descartados por anillo lleno se cuentan para diagnóstico.
+- Teclados de usuario (etapa 2, ADR 0013): `console_inject` (syscall 29)
+  escribe texto en el mismo anillo y exige `MANAGE` sobre el `Console`;
+  solo init lo tiene (`0x10008` con `READ|MANAGE|DUPLICATE|TRANSFER`) y lo
+  delega al servicio `console_bridge`, que en modo `shell` sin compositor
+  recorre los servicios de entrada (virtio-input, USB HID) por turnos y
+  traduce las pulsaciones con `aricode_input::Keyboard`. Es un residente
+  supervisado más (`services --detail`); los escenarios `shell.usb_keyboard`
+  y `shell.virtio_keyboard` teclean una sesión por QMP.
 - Objeto `System` (kind 11): `system_info` (syscall 25, `READ`) responde
   `UPTIME` (ms), `MEMORY` (frames utilizables y libres: el PMM distingue la
   RAM entregada con `free_range` de los frames direccionables) y

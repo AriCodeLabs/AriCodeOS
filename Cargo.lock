@@ -68,6 +68,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ari-console-bridge"
+version = "0.6.0"
+dependencies = [
+ "aricode-build",
+ "aricode-input",
+ "aricode-proto",
+ "aricode-rt",
+ "aricode-sys",
+]
+
+[[package]]
 name = "ari-fsd"
 version = "0.6.0"
 dependencies = [

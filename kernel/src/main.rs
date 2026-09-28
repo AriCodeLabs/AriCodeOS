@@ -433,6 +433,7 @@ fn run_init(arg: u64, fb: boot_protocol::FramebufferInfo) {
             (
                 console_in,
                 Rights::READ
+                    .union(Rights::MANAGE)
                     .union(Rights::DUPLICATE)
                     .union(Rights::TRANSFER)
             ),

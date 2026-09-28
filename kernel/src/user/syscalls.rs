@@ -78,6 +78,7 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         nr::IPC_SEND => ipc_send(h, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9),
         nr::IPC_RECEIVE => ipc_receive(h, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9),
         nr::CONSOLE_READ => console_read(h, frame.rsi, frame.rdx, frame.r10),
+        nr::CONSOLE_INJECT => console_inject(h, frame.rsi, frame.rdx),
         nr::SYSTEM_INFO => system_info(h, frame.rsi, frame.rdx, frame.r10),
         nr::SYSTEM_POWER => system_power(h, frame.rsi),
         nr::INITRD_READ => initrd_read(h, frame.rsi, frame.rdx, frame.r10, frame.r8),
@@ -136,6 +137,20 @@ fn console_read(handle: Handle, ptr: u64, len: u64, timeout_ms: u64) -> Result<u
     }
     process::copy_to_user(ptr, &buf[..n])?;
     Ok(n as u64)
+}
+
+/// Texto de un teclado de usuario al anillo de la consola (`MANAGE` sobre un
+/// `Console`; ADR 0013). Devuelve los bytes que cupieron.
+fn console_inject(handle: Handle, ptr: u64, len: u64) -> Result<u64, Error> {
+    const MAX: u64 = 1024;
+    let is_console = with_handles(|t| {
+        lookup(t, handle, Rights::MANAGE).map(|o| matches!(o.kind, ObjectKind::Console))
+    })?;
+    if !is_console || len == 0 || len > MAX {
+        return Err(Error::Invalid);
+    }
+    let bytes = process::copy_from_user(ptr, len)?;
+    Ok(crate::console_input::inject(&bytes) as u64)
 }
 
 /// Copia un fichero del initrd al buffer del usuario (`READ` sobre el `SPAWNER`).
