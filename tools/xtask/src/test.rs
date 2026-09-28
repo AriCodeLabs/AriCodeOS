@@ -91,63 +91,127 @@ pub fn run(cli: &Cli, release: bool) -> Result {
     }
 }
 
+/// Un arranque a ejecutar: el único del escenario o cada uno de `[[boots]]`.
+struct BootRun<'a> {
+    cmdline: &'a str,
+    stdin: &'a [String],
+    kill_on: Option<&'a str>,
+    expect: &'a scenario::Expect,
+}
+
 fn run_scenario(base: &std::path::Path, s: &Scenario, cpus_override: Option<u32>) -> Result<bool> {
     let root = image::scenarios_root();
     let workdir = image::scenario_dir(&root, &s.name)?;
-    let esp = image::build_scenario_esp(base, &root, &s.name, &s.cmdline, &s.inject)?;
-    let input = qemu::Input {
-        prompt: &s.prompt,
-        lines: &s.stdin,
+    let runs: Vec<BootRun> = if s.boots.is_empty() {
+        vec![BootRun {
+            cmdline: &s.cmdline,
+            stdin: &s.stdin,
+            kill_on: None,
+            expect: &s.expect,
+        }]
+    } else {
+        s.boots
+            .iter()
+            .map(|b| BootRun {
+                cmdline: &b.cmdline,
+                stdin: &b.stdin,
+                kill_on: b.kill_on.as_deref(),
+                expect: &b.expect,
+            })
+            .collect()
     };
-    let probe = s.host_tcp.as_ref().map(|h| qemu::TcpProbe {
-        marker: &h.marker,
-        payload: &h.payload,
-    });
-    let input_probe = s.host_input.as_ref().map(|h| qemu::InputProbe {
-        marker: &h.marker,
-        keys: &h.keys,
-        mouse_rel: h.mouse_rel,
-        click: h.click.as_deref(),
-    });
+    let multi = !s.boots.is_empty();
     let disk_variant = image::DiskVariant::parse(&s.disk)
         .ok_or_else(|| format!("{}: disk '{}' desconocido", s.name, s.disk))?;
-    let options = qemu::Headless {
-        input,
-        probe,
-        input_probe,
-        disk_variant,
-        disk_readonly: s.disk_readonly,
-        cpus: s.cpus(cpus_override),
-        usb_hid: s.usb_hid,
-        usb_legacy_controller: s.usb_legacy_controller,
-    };
-    let cap = qemu::run_headless(
-        &esp,
-        &workdir,
-        Duration::from_secs(s.timeout_secs),
-        &options,
-    )?;
-    let log = workdir.join("serial.log");
-    let _ = std::fs::write(&log, &cap.serial);
-
     let mut problems = Vec::new();
-    if let Some(exit) = s.expect.exit {
-        if cap.exit_code != Some(exit) {
-            problems.push(format!("exit {:?} != {exit}", cap.exit_code));
+    let mut elapsed = Duration::ZERO;
+    let mut logs: Vec<(std::path::PathBuf, String)> = Vec::new();
+    for (i, run) in runs.iter().enumerate() {
+        // Cada arranque tiene su ESP (su cmdline); el disco es el mismo.
+        let esp_name = if multi {
+            format!("{}.boot{}", s.name, i + 1)
+        } else {
+            s.name.clone()
+        };
+        let esp = image::build_scenario_esp(base, &root, &esp_name, run.cmdline, &s.inject)?;
+        let input = qemu::Input {
+            prompt: &s.prompt,
+            lines: run.stdin,
+        };
+        let probe = s.host_tcp.as_ref().map(|h| qemu::TcpProbe {
+            marker: &h.marker,
+            payload: &h.payload,
+        });
+        let input_probe = s.host_input.as_ref().map(|h| qemu::InputProbe {
+            marker: &h.marker,
+            keys: &h.keys,
+            mouse_rel: h.mouse_rel,
+            click: h.click.as_deref(),
+        });
+        let options = qemu::Headless {
+            input,
+            probe,
+            input_probe,
+            disk_variant,
+            disk_readonly: s.disk_readonly,
+            keep_disk: i > 0,
+            kill_on: run.kill_on,
+            cpus: s.cpus(cpus_override),
+            usb_hid: s.usb_hid,
+            usb_legacy_controller: s.usb_legacy_controller,
+        };
+        let cap = qemu::run_headless(
+            &esp,
+            &workdir,
+            Duration::from_secs(s.timeout_secs),
+            &options,
+        )?;
+        let log = workdir.join(if multi {
+            format!("serial-{}.log", i + 1)
+        } else {
+            String::from("serial.log")
+        });
+        let _ = std::fs::write(&log, &cap.serial);
+        elapsed += cap.elapsed;
+        let prefix = if multi {
+            format!("arranque {}: ", i + 1)
+        } else {
+            String::new()
+        };
+        let expect = run.expect;
+        if let Some(exit) = expect.exit {
+            if cap.exit_code != Some(exit) {
+                problems.push(format!("{prefix}exit {:?} != {exit}", cap.exit_code));
+            }
         }
-    }
-    for needle in &s.expect.serial_contains {
-        if !cap.serial.contains(needle) {
-            problems.push(format!("falta '{needle}'"));
+        if expect.killed != cap.killed {
+            problems.push(format!(
+                "{prefix}{}",
+                if expect.killed {
+                    "QEMU no llego a matarse en kill_on"
+                } else {
+                    "QEMU matado sin esperarlo"
+                }
+            ));
         }
-    }
-    for needle in &s.expect.serial_absent {
-        if cap.serial.contains(needle) {
-            problems.push(format!("aparece '{needle}'"));
+        for needle in &expect.serial_contains {
+            if !cap.serial.contains(needle) {
+                problems.push(format!("{prefix}falta '{needle}'"));
+            }
         }
-    }
-    if cap.timed_out {
-        problems.push(format!("timeout {}s", s.timeout_secs));
+        for needle in &expect.serial_absent {
+            if cap.serial.contains(needle) {
+                problems.push(format!("{prefix}aparece '{needle}'"));
+            }
+        }
+        if cap.timed_out {
+            problems.push(format!("{prefix}timeout {}s", s.timeout_secs));
+        }
+        logs.push((log, cap.serial));
+        if !problems.is_empty() {
+            // Los arranques siguientes dependen de este: no dicen nada nuevo.
+            break;
+        }
     }
 
     let ok = problems.is_empty();
@@ -155,7 +219,7 @@ fn run_scenario(base: &std::path::Path, s: &Scenario, cpus_override: Option<u32>
         "[{}] {:<36} {:>5.1}s  {}",
         if ok { "PASS" } else { "FAIL" },
         s.name,
-        cap.elapsed.as_secs_f32(),
+        elapsed.as_secs_f32(),
         if ok {
             String::new()
         } else {
@@ -163,10 +227,12 @@ fn run_scenario(base: &std::path::Path, s: &Scenario, cpus_override: Option<u32>
         }
     );
     if !ok {
-        for line in cap.serial.lines().filter(|l| !l.trim().is_empty()) {
-            println!("      | {line}");
+        if let Some((log, serial)) = logs.last() {
+            for line in serial.lines().filter(|l| !l.trim().is_empty()) {
+                println!("      | {line}");
+            }
+            println!("      log: {}", log.display());
         }
-        println!("      log: {}", log.display());
     }
     Ok(ok)
 }

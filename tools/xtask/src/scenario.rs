@@ -64,12 +64,40 @@ pub struct HostInput {
 pub struct Expect {
     /// Código de salida de QEMU esperado. `isa-debug-exit` devuelve
     /// `(valor << 1) | 1`: el sistema escribe 0x10 en éxito (33) y 0x11 en
-    /// fallo reportado por AriBoot o AriKernel (35).
+    /// fallo reportado por AriBoot o AriKernel (35). Un `reboot` termina
+    /// QEMU con 0 (`-no-reboot`).
     pub exit: Option<i32>,
     #[serde(default)]
     pub serial_contains: Vec<String>,
     #[serde(default)]
     pub serial_absent: Vec<String>,
+    /// El runner debió matar QEMU al ver `kill_on` (corte de energía).
+    #[serde(default)]
+    pub killed: bool,
+}
+
+impl Expect {
+    fn is_empty(&self) -> bool {
+        self.exit.is_none()
+            && self.serial_contains.is_empty()
+            && self.serial_absent.is_empty()
+            && !self.killed
+    }
+}
+
+/// Un arranque de un escenario con varios (`[[boots]]`): el disco de pruebas
+/// se conserva entre arranques y cada uno lleva su cmdline, sus líneas de
+/// consola y lo que se espera de él.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Boot {
+    #[serde(default = "default_cmdline")]
+    pub cmdline: String,
+    #[serde(default)]
+    pub stdin: Vec<String>,
+    /// Mata QEMU (corte de energía) en cuanto la serie muestra este texto.
+    pub kill_on: Option<String>,
+    pub expect: Expect,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,7 +149,13 @@ pub struct Scenario {
     pub usb_legacy_controller: bool,
     #[serde(default)]
     pub inject: Inject,
+    /// Lo que se espera del único arranque (sin `[[boots]]`).
+    #[serde(default)]
     pub expect: Expect,
+    /// Varios arranques sobre el mismo disco de pruebas (ver [`Boot`]); con
+    /// ellos la `cmdline`, `stdin` y `expect` del escenario no se usan.
+    #[serde(default)]
+    pub boots: Vec<Boot>,
     #[serde(skip)]
     pub file: PathBuf,
 }
@@ -185,6 +219,18 @@ pub fn load_from(dir: &Path) -> Result<Vec<Scenario>> {
                 ));
             }
             validate_name(&s.name).map_err(|e| format!("{}: {e}", path.display()))?;
+            if s.boots.is_empty() == s.expect.is_empty() {
+                return Err(format!(
+                    "{}: un escenario lleva [expect] o [[boots]], no ambos ni ninguno",
+                    path.display()
+                ));
+            }
+            if !s.boots.is_empty() && !s.stdin.is_empty() {
+                return Err(format!(
+                    "{}: con [[boots]] las lineas de consola van en cada arranque",
+                    path.display()
+                ));
+            }
             s.file = path;
             out.push(s);
         }

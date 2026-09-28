@@ -87,7 +87,7 @@ fn trim(s: &[u8]) -> &[u8] {
 
 fn help() {
     sys::print(
-        b"comandos:\n  help      esta ayuda\n  ps        procesos\n  mem       memoria fisica\n  ls        ficheros de AriFS\n  cat NOM   muestra un fichero\n  devices   funciones PCI\n  services  servicios de arranque (--detail: estado del supervisor)\n  uptime    tiempo desde el arranque\n  cpus      procesadores en linea\n  net       configuracion de red\n  ping IP   eco ICMP (4 intentos)\n  dns NOM   resuelve un nombre\n  http URL  GET y muestra el cuerpo\n  run PROG  ejecuta un programa del initrd y espera\n  repeat N CMD  repite un comando N veces\n  reboot    reinicia\n  shutdown  apaga\n  exit      termina el shell\n",
+        b"comandos:\n  help      esta ayuda\n  ps        procesos\n  mem       memoria fisica\n  ls        ficheros de AriFS\n  cat NOM   muestra un fichero\n  write NOM TEXTO  guarda TEXTO en el fichero (lo crea o lo reemplaza entero)\n  devices   funciones PCI\n  services  servicios de arranque (--detail: estado del supervisor)\n  uptime    tiempo desde el arranque\n  cpus      procesadores en linea\n  net       configuracion de red\n  ping IP   eco ICMP (4 intentos)\n  dns NOM   resuelve un nombre\n  http URL  GET y muestra el cuerpo\n  run PROG  ejecuta un programa del initrd y espera\n  repeat N CMD  repite un comando N veces\n  reboot    reinicia\n  shutdown  apaga\n  exit      termina el shell\n",
     );
 }
 
@@ -231,6 +231,44 @@ fn cat(fs: &mut FsClient, name: &[u8]) {
                 break;
             }
         }
+    }
+    let _ = fs.close(fd);
+}
+
+/// `write NOMBRE TEXTO`: crea el fichero si no existe y sustituye su
+/// contenido entero (más un salto de línea) de forma atómica y duradera
+/// (ADR 0014).
+fn write(fs: &mut FsClient, rest: &[u8]) {
+    let (name, text) = split(rest);
+    let Ok(name) = core::str::from_utf8(name) else {
+        sys::print(b"write: nombre invalido\n");
+        return;
+    };
+    if name.is_empty() {
+        sys::print(b"uso: write NOMBRE TEXTO\n");
+        return;
+    }
+    let fd = match fs.open(name).or_else(|_| fs.create(name)) {
+        Ok(fd) => fd,
+        Err(_) => {
+            sys::print(b"write: no se pudo crear ");
+            sys::print(name.as_bytes());
+            sys::print(b"\n");
+            return;
+        }
+    };
+    let mut content = [0u8; LINE_MAX + 1];
+    content[..text.len()].copy_from_slice(text);
+    content[text.len()] = b'\n';
+    match fs.replace(fd, &content[..text.len() + 1]) {
+        Ok(n) => {
+            sys::print(b"write: ");
+            num(n as u64);
+            sys::print(b" bytes en ");
+            sys::print(name.as_bytes());
+            sys::print(b"\n");
+        }
+        Err(_) => sys::print(b"write: error de escritura\n"),
     }
     let _ = fs.close(fd);
 }
@@ -582,6 +620,7 @@ fn execute(
         b"mem" => mem(),
         b"ls" => ls(fs),
         b"cat" => cat(fs, rest),
+        b"write" => write(fs, rest),
         b"devices" => devices(),
         b"services" if rest == b"--detail" => services_detail(),
         b"services" => services(mask, fs),

@@ -2398,7 +2398,7 @@ init lanza cuando la cmdline lleva `shell` (`cargo xtask run --cmdline shell`).
 Comandos:
 
 ```text
-help      ps        mem       ls        cat NOM
+help      ps        mem       ls        cat NOM   write NOM TEXTO
 devices   services  uptime    reboot    shutdown  exit
 ```
 
@@ -3608,7 +3608,7 @@ etapa con sus ramas, ADR y escenarios:
 | 0. Consolidar | completada (0.6.0) | auditorías resueltas con evidencia; tabla única de estado por capacidad en el README |
 | 1. Recuperación observable | completada | supervisor de servicios (ADR 0011): estados, generaciones, reinicio con presupuesto y espera creciente, endpoint estable entre generaciones, publicación solo tras responder, `status` v1 y `services --detail`; plazos y correlación IPC (ADR 0012): endpoint de respuesta por petición, esperas acotadas, sin reintentos automáticos de escrituras (`ipc.late_reply`) |
 | 2. Sesión útil | en curso | hecho: shell con teclados USB y virtio (puente de consola, ADR 0013, `shell.usb_keyboard`, `shell.virtio_keyboard`); persistencia de AriFS ante cortes (ADR 0014: CRC32, journal de reemplazo, `flush` de extremo a extremo, `filesystem.replace_recovery`, `filesystem.corrupt_detected`); pendiente: equipo de referencia |
-| 3. Límites y actualización | pendiente | cuotas, permisos por recurso, cortes de escritura, actualización entre arranques |
+| 3. Límites y actualización | en curso | hecho: actualización entre arranques con el mismo disco y cortes (`[[boots]]`, `kill_on`: `update.full_cycle`, `update.cut_during_install`, `update.rollback_keeps_data`), `write` en el shell (`shell.write_persists`); pendiente: cuotas, permisos por recurso |
 | 4. Aplicaciones externas | pendiente | SDK reproducible, perfil WASI, paquetes |
 | 5. Optimización y ampliación | pendiente | rendimiento, energía, más dispositivos |
 

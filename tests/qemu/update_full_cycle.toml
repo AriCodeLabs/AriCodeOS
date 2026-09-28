@@ -1,0 +1,50 @@
+# Etapa 3 (actualizacion entre arranques, estudio F): con el mismo disco, el
+# actualizador instala B, la maquina reinicia, AriBoot arranca B pendiente,
+# init lo confirma, y el tercer arranque ya sale de B activo. Un fichero
+# escrito antes de actualizar sigue ahi en cada arranque.
+name = "update.full_cycle"
+description = "instalar B, reiniciar, confirmar B y arrancar de B activo conservando los datos de AriFS"
+level = "full"
+areas = ["update", "boot", "init", "shell"]
+timeout_secs = 120
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["write notas.txt antes de actualizar", "run updater", "reboot"]
+[boots.expect]
+exit = 0
+serial_contains = [
+    "slots: estado activo A, sin pendiente",
+    "write: 20 bytes en notas.txt",
+    "updater: estado: activo A, pendiente B (3 intentos); reinicia para probarlo",
+    "AriCodeOS: reiniciando",
+]
+serial_absent = ["KERNEL PANIC", "no verifica"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["cat notas.txt", "reboot"]
+[boots.expect]
+exit = 0
+serial_contains = [
+    "slots: estado activo A, pendiente B (3 intentos)",
+    "slots: arrancando desde el slot B (imagen version 2, pendiente de confirmacion)",
+    "AriInit: arranque confirmado en el slot B",
+    "antes de actualizar",
+    "AriCodeOS: reiniciando",
+]
+serial_absent = ["KERNEL PANIC", "rollback", "cat: no existe"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["cat notas.txt", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "slots: estado activo B, sin pendiente",
+    "slots: arrancando desde el slot B (imagen version 2)",
+    "AriInit: arrancado desde el slot B (activo)",
+    "antes de actualizar",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "pendiente de confirmacion", "cat: no existe"]
