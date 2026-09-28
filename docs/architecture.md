@@ -708,6 +708,14 @@ segundo brevemente para añadir la región.
   relativo y clic); sin `device`, porque QMP solo admite ahí pantallas y
   los dispositivos virtio, registrados después del i8042, son los
   manejadores activos. El resultado se anota como `[host] QMP: ...`.
+- Varios arranques sobre el mismo disco (`[[boots]]`, etapa 3): cada
+  arranque lleva su `cmdline`, sus líneas de consola, opcionalmente
+  `kill_on` (xtask mata QEMU al ver ese texto: un corte de energía) y su
+  `expect` (`killed = true` cuando se espera el corte). El disco de
+  pruebas se fabrica una vez y se conserva; cada arranque tiene su ESP y
+  su `serial-N.log`. Así se prueban `update.full_cycle` (instalar,
+  reiniciar, confirmar, arrancar de B), `update.cut_during_install`,
+  `update.rollback_keeps_data` y `shell.write_persists`.
 
 ## GUI básica (Fase 26)
 

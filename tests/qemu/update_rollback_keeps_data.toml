@@ -1,0 +1,70 @@
+# Etapa 3 (estudio F): la version nueva falla en cada arranque (init no
+# confirma), AriBoot agota los tres intentos y vuelve a A. Los datos escritos
+# en AriFS antes de actualizar siguen ahi tras el rollback: A/B protege el
+# sistema y no toca la particion de datos.
+name = "update.rollback_keeps_data"
+description = "tres arranques fallidos de B, rollback a A y los datos de AriFS intactos"
+level = "full"
+areas = ["update", "boot", "init", "shell"]
+timeout_secs = 120
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["write notas.txt datos de la version 1", "run updater", "reboot"]
+[boots.expect]
+exit = 0
+serial_contains = [
+    "write: 22 bytes en notas.txt",
+    "updater: estado: activo A, pendiente B (3 intentos); reinicia para probarlo",
+    "AriCodeOS: reiniciando",
+]
+serial_absent = ["KERNEL PANIC"]
+
+[[boots]]
+cmdline = "qemu_exit init_fail_late"
+[boots.expect]
+exit = 33
+serial_contains = [
+    "slots: estado activo A, pendiente B (3 intentos)",
+    "slots: arrancando desde el slot B (imagen version 2, pendiente de confirmacion)",
+    "AriInit: fallo tardio provocado (init_fail_late): no se confirma el slot",
+    "init terminado con codigo 99",
+]
+serial_absent = ["KERNEL PANIC", "arranque confirmado"]
+
+[[boots]]
+cmdline = "qemu_exit init_fail_late"
+[boots.expect]
+exit = 33
+serial_contains = [
+    "slots: estado activo A, pendiente B (2 intentos)",
+    "slots: arrancando desde el slot B (imagen version 2, pendiente de confirmacion)",
+    "init terminado con codigo 99",
+]
+serial_absent = ["KERNEL PANIC", "arranque confirmado"]
+
+[[boots]]
+cmdline = "qemu_exit init_fail_late"
+[boots.expect]
+exit = 33
+serial_contains = [
+    "slots: estado activo A, pendiente B (1 intentos)",
+    "slots: arrancando desde el slot B (imagen version 2, pendiente de confirmacion)",
+    "init terminado con codigo 99",
+]
+serial_absent = ["KERNEL PANIC", "arranque confirmado"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["cat notas.txt", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "slots: estado activo A, pendiente B (0 intentos)",
+    "slots: slot pendiente agotado: rollback al activo -> slot A",
+    "slots: arrancando desde el slot A (imagen version 1)",
+    "AriInit: arrancado desde el slot A (activo)",
+    "datos de la version 1",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "boot_slot=B", "cat: no existe"]

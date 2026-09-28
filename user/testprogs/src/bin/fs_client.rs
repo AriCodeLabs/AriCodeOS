@@ -3,7 +3,9 @@
 #![no_std]
 #![no_main]
 
-use aricode_rt::sys::{self, fs::FsClient, Handle};
+use aricode_proto::fs::Status;
+use aricode_rt::sys::fs::{FsClient, FsError};
+use aricode_rt::sys::{self, Handle};
 
 const FSD: Handle = Handle(0x0001_0004);
 const HW: Handle = Handle(0x0001_0005);
@@ -46,9 +48,23 @@ fn main(_arg: u64) -> u64 {
     sys::print(b"fs_client: hola.txt dice: ");
     sys::print(&data[..n]);
     let _ = fs.close(fd);
-    // 3. Crear, escribir, releer.
-    let Ok(fd) = fs.create("nuevo.txt") else {
-        return 6;
+    // 3. Crear, escribir, releer. Con un disco que ya arranco antes el
+    //    fichero existe: se abre y se sobrescribe.
+    let fd = match fs.create("nuevo.txt") {
+        Ok(fd) => fd,
+        Err(FsError::Status(Status::Exists)) => {
+            sys::print(b"fs_client: nuevo.txt ya existia (disco persistente)\n");
+            let Ok(fd) = fs.open("nuevo.txt") else {
+                return 6;
+            };
+            // Vaciarlo para que las comprobaciones siguientes vean lo mismo
+            // que en un disco recien formateado.
+            if fs.replace(fd, b"").is_err() {
+                return 6;
+            }
+            fd
+        }
+        Err(_) => return 6,
     };
     if fs.write(fd, 0, b"escrito desde ring 3") != Ok(20) {
         return 7;
