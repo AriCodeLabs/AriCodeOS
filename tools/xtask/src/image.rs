@@ -356,6 +356,11 @@ pub enum DiskVariant {
     ExhaustedB,
     /// B pendiente con una imagen cuya firma no vale: rechazo y rollback.
     CorruptB,
+    /// Slots normales y un reemplazo de `README` comprometido en el journal
+    /// de AriFS sin aplicar (corte tras el compromiso): fsd lo rehace.
+    FsPendingReplace,
+    /// Slots normales y un byte alterado en la tabla de AriFS: fsd no monta.
+    FsCorrupt,
     /// Imagen para pendrive: la ESP va dentro del disco (sin `fat:` en QEMU).
     UsbImage,
 }
@@ -368,6 +373,8 @@ impl DiskVariant {
             "pending-b" => Self::PendingB,
             "b-exhausted" => Self::ExhaustedB,
             "b-corrupt" => Self::CorruptB,
+            "fs-pending-replace" => Self::FsPendingReplace,
+            "fs-corrupt" => Self::FsCorrupt,
             "usb-image" => Self::UsbImage,
             _ => return None,
         })
@@ -405,6 +412,9 @@ impl aricode_arifs::BlockDevice for VecDisk<'_> {
             .copy_from_slice(buf);
         Ok(())
     }
+    fn flush(&mut self) -> std::result::Result<(), aricode_arifs::FsError> {
+        Ok(())
+    }
 }
 
 /// Primer sector del área en bruto del disco de pruebas: desde aquí hasta el
@@ -417,7 +427,7 @@ pub const RAW_PATTERN_OFFSET: u64 = RAW_PATTERN_LBA - PART_ARI0.0;
 /// Ficheros de ejemplo del disco de pruebas.
 pub const DISK_FILES: &[(&str, &[u8])] = &[
     ("hola.txt", b"Hola desde AriFS\n"),
-    ("README", b"AriCodeOS: disco de pruebas con AriFS v0.\n"),
+    ("README", b"AriCodeOS: disco de pruebas con AriFS v1.\n"),
 ];
 
 /// Imagen de sistema firmada con la clave de desarrollo: contenedor con
@@ -502,6 +512,14 @@ pub fn write_test_disk(path: &Path, variant: DiskVariant) -> Result {
     }
     aricode_gpt::write_disk(&mut img, &parts).map_err(|e| format!("gpt: {e:?}"))?;
     populate_arifs(&mut img, PART_ARI0)?;
+    match variant {
+        DiskVariant::FsPendingReplace => stage_arifs_replace(&mut img, PART_ARI0)?,
+        DiskVariant::FsCorrupt => {
+            // Primer byte del nombre de la primera entrada en uso.
+            img[(PART_ARI0.0 + aricode_arifs::TABLE_LBA) as usize * 512] ^= 0x20;
+        }
+        _ => {}
+    }
     let (_, last) = PART_ARI0;
     for lba in RAW_PATTERN_LBA..=last {
         let o = lba as usize * 512;
@@ -529,12 +547,36 @@ pub fn write_test_disk(path: &Path, variant: DiskVariant) -> Result {
                 write_slot(&mut img, PART_SYSB, &system_image(2, true)?)?;
                 state = schedule(state, Slot::B);
             }
-            DiskVariant::Slots | DiskVariant::EspOnly | DiskVariant::UsbImage => {}
+            DiskVariant::Slots
+            | DiskVariant::EspOnly
+            | DiskVariant::UsbImage
+            | DiskVariant::FsPendingReplace
+            | DiskVariant::FsCorrupt => {}
         }
         let o = PART_ARIBOOT.0 as usize * 512;
         img[o..o + 512].copy_from_slice(&state.encode());
     }
     io(fs::write(path, img), "escribir disco de pruebas")
+}
+
+/// Contenido que `filesystem.replace_recovery` espera leer en `README`.
+pub const RECOVERED_README: &[u8] = b"AriCodeOS: recuperado tras un corte\n";
+
+/// Deja en el journal de AriFS un reemplazo de `README` comprometido y sin
+/// aplicar: el estado exacto que queda tras un corte justo después del
+/// compromiso (ADR 0014). El siguiente montaje debe rehacerlo.
+fn stage_arifs_replace(img: &mut [u8], part: (u64, u64)) -> Result {
+    let mut fs = aricode_arifs::AriFs::open(VecDisk {
+        data: img,
+        base: part.0,
+    })
+    .map_err(|e| format!("arifs: {e:?}"))?;
+    let i = fs
+        .find("README")
+        .ok_or_else(|| String::from("arifs: falta README"))?;
+    fs.stage_replace(i, RECOVERED_README)
+        .map(|_| ())
+        .map_err(|e| format!("arifs README: {e:?}"))
 }
 
 /// Formatea AriFS en `part` con los ficheros de ejemplo y el módulo WASM.

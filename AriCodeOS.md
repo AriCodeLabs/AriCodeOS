@@ -2355,7 +2355,8 @@ Disponer rápidamente de almacenamiento y red en QEMU.
 
 # FASE 20 — Filesystem básico
 
-**Estado: completada (2026-09-26) con AriFS v0.**
+**Estado: completada (2026-09-26) con AriFS v0; formato v1 con CRC32,
+journal de reemplazo y `flush` desde la etapa 2 (2026-09-28, ADR 0014).**
 
 ### Implementado
 
@@ -2366,8 +2367,9 @@ Disponer rápidamente de almacenamiento y red en QEMU.
   con ficheros de ejemplo;
 - servicio de ficheros `fsd` (`services/arifs`) en ring 3 sobre el servicio
   de bloques: `FileServiceProtocol v1` (`sdk/proto::fs`) con `List`,
-  `Open`, `Create`, `Read`, `Write`, `Close`; los datos viajan por el buffer
-  DMA del cliente, no por el mensaje;
+  `Open`, `Create`, `Read`, `Write`, `Close` y, desde la etapa 2, `Flush` y
+  `Replace`; los datos viajan por el buffer DMA del cliente, no por el
+  mensaje;
 - clientes en el SDK (`aricode-sys::block`, `aricode-sys::fs`) y programa
   de prueba `fs_client`; escenario `filesystem.read_write`;
 - permisos mediante capabilities: un proceso solo habla con `fsd` si init
@@ -3605,7 +3607,7 @@ etapa con sus ramas, ADR y escenarios:
 |---|---|---|
 | 0. Consolidar | completada (0.6.0) | auditorías resueltas con evidencia; tabla única de estado por capacidad en el README |
 | 1. Recuperación observable | completada | supervisor de servicios (ADR 0011): estados, generaciones, reinicio con presupuesto y espera creciente, endpoint estable entre generaciones, publicación solo tras responder, `status` v1 y `services --detail`; plazos y correlación IPC (ADR 0012): endpoint de respuesta por petición, esperas acotadas, sin reintentos automáticos de escrituras (`ipc.late_reply`) |
-| 2. Sesión útil | en curso | hecho: shell con teclados USB y virtio (puente de consola, ADR 0013, `shell.usb_keyboard`, `shell.virtio_keyboard`); pendiente: persistencia de AriFS ante cortes, equipo de referencia |
+| 2. Sesión útil | en curso | hecho: shell con teclados USB y virtio (puente de consola, ADR 0013, `shell.usb_keyboard`, `shell.virtio_keyboard`); persistencia de AriFS ante cortes (ADR 0014: CRC32, journal de reemplazo, `flush` de extremo a extremo, `filesystem.replace_recovery`, `filesystem.corrupt_detected`); pendiente: equipo de referencia |
 | 3. Límites y actualización | pendiente | cuotas, permisos por recurso, cortes de escritura, actualización entre arranques |
 | 4. Aplicaciones externas | pendiente | SDK reproducible, perfil WASI, paquetes |
 | 5. Optimización y ampliación | pendiente | rendimiento, energía, más dispositivos |

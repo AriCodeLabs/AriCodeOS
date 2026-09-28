@@ -100,7 +100,8 @@ pub struct Scenario {
     /// de QEMU) en el teclado virtio, movimiento relativo y clic en el ratón.
     pub host_input: Option<HostInput>,
     /// Estado inicial del disco de pruebas (`image::DiskVariant`): `slots`
-    /// (por defecto), `esp-only`, `pending-b`, `b-exhausted`, `b-corrupt`.
+    /// (por defecto), `esp-only`, `pending-b`, `b-exhausted`, `b-corrupt`,
+    /// `fs-pending-replace`, `fs-corrupt`.
     #[serde(default = "default_disk")]
     pub disk: String,
     /// Presenta el disco de pruebas como solo lectura (fallos de escritura).

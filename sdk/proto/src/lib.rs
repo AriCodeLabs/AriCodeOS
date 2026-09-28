@@ -20,6 +20,9 @@ pub mod block {
         Read = 2,
         /// Escribe `count` sectores desde el buffer DMA transferido en `lba`.
         Write = 3,
+        /// Hace duraderas las escrituras anteriores (ADR 0014); solo lleva
+        /// la respuesta. Sin `VIRTIO_BLK_F_FLUSH` vuelve sin hacer nada.
+        Flush = 4,
     }
 
     /// Petición (16 bytes). Handles del mensaje: `[respuesta (WRITE), buffer DMA (READ|WRITE)]`;
@@ -52,6 +55,7 @@ pub mod block {
                 1 => Op::Info,
                 2 => Op::Read,
                 3 => Op::Write,
+                4 => Op::Flush,
                 _ => return None,
             };
             Some(Self {
@@ -142,6 +146,12 @@ pub mod fs {
         /// al prefijo `name/`; la respuesta transfiere ese endpoint (`WRITE`).
         /// Quien lo reciba solo ve y crea ficheros bajo su prefijo.
         Bind = 7,
+        /// Hace duraderas las escrituras anteriores (ADR 0014).
+        Flush = 8,
+        /// `fd`, `len`; handles `[respuesta, buffer]`: sustituye el contenido
+        /// entero del fichero de forma atómica y duradera (ADR 0014); `value`
+        /// = bytes escritos.
+        Replace = 9,
     }
 
     /// Petición (64 bytes): cabecera, argumentos y nombre.
@@ -208,6 +218,8 @@ pub mod fs {
                 5 => Op::Write,
                 6 => Op::Close,
                 7 => Op::Bind,
+                8 => Op::Flush,
+                9 => Op::Replace,
                 _ => return None,
             };
             let mut name = [0u8; MAX_NAME];

@@ -25,7 +25,7 @@ OVMF (UEFI)
        procesos con la capacidad SPAWNER, ACPI + I/O APIC, drivers en ring 3
        con capabilities IRQ/MMIO/DMA, enumeración PCIe por ECAM, init reclama
        el virtio-blk (BARs, MSI-X) y lanza su driver en ring 3 como servicio
-       de bloques por IPC (disco GPT), fsd monta AriFS v0 sobre él y sirve
+       de bloques por IPC (disco GPT), fsd monta AriFS v1 sobre él y sirve
        ficheros por IPC; con `shell` en la cmdline init lanza arish, que lee
        la consola serie y apaga o reinicia por `system_power`; netd
        (virtio-net) obtiene IP por DHCP y sirve ping, UDP y DNS por IPC;
@@ -64,7 +64,7 @@ libs/gfx/            aricode-gfx: lienzos 0x00RRGGBB, recorte, texto, cursor y e
 libs/input/          aricode-input: eventos evdev y teclado US (no_std, tests de host)
 libs/http/           aricode-http: GET, análisis de respuestas, Content-Length y chunked sin alloc (no_std, tests de host)
 libs/net/            aricode-net: Ethernet, ARP, IPv4, ICMP, UDP, TCP, cliente DHCP y DNS sin alloc (no_std, tests de host)
-libs/arifs/          aricode-arifs: AriFS v0, directorio plano con tabla de ficheros de capacidad fija sobre `BlockDevice` (no_std, tests de host)
+libs/arifs/          aricode-arifs: AriFS v1, directorio plano con tabla de ficheros de capacidad fija, CRC32 y journal de reemplazo sobre `BlockDevice` (no_std, tests de host con cortes)
 sdk/proto/           aricode-proto: protocolos IPC versionados de los servicios (bloques v1, ficheros v1, red v1, entrada v1, ventanas v1, lanzamiento v1) (no_std, tests de host)
 sdk/runtime/         aricode-rt: runtime de programas de usuario (`entry!`, heap de 256 KiB, panic, fmt); reexporta aricode-sys
 sdk/build/           aricode-build: `build.rs` de una línea que enlaza con `sdk/rust/user.ld`
@@ -537,29 +537,44 @@ segundo brevemente para añadir la región.
 
 ## Sistema de archivos (Fase 20)
 
-- AriFS v0 (`libs/arifs`): LBA 0 superbloque (magia `ARIFS`, sectores,
-  siguiente LBA libre), LBA 1..4 tabla de 32 entradas de 64 bytes (nombre,
-  LBA inicial, capacidad, tamaño), datos desde el LBA 5 en bloques fijos
-  de 16 sectores asignados de forma incremental. Sin fragmentación, borrado
-  ni journaling: lo justo para el criterio de la fase. Todo el acceso pasa
-  por el trait `BlockDevice`, así que la librería se prueba en host sobre
-  un `Vec` y xtask la usa para formatear la partición `ARI0` del disco de
-  pruebas con `hola.txt` y `README`.
+- AriFS v1 (`libs/arifs`, ADR 0014): LBA 0 superbloque (magia `ARIFS`,
+  sectores, siguiente LBA libre, CRC32), LBA 1..4 tabla de 32 entradas de
+  64 bytes (nombre, LBA inicial, capacidad, tamaño, CRC32 por entrada), LBA
+  5 cabecera del journal de reemplazo y 6..69 sus datos, datos desde el LBA
+  70 en bloques fijos de 64 sectores asignados de forma incremental. Sin
+  fragmentación ni borrado. `open` rechaza (`Corrupt`) metadatos cuyo CRC
+  no cuadra y rehace un reemplazo comprometido a medias; `write` escribe en
+  el sitio (sector entero viejo o nuevo tras un corte, tamaño después de
+  los datos, duradero tras `flush`); `replace` es atómico y duradero por el
+  journal (datos + CRC, `flush`, cabecera pendiente, `flush`, copia y
+  tamaño, `flush`, limpieza). Todo el acceso pasa por el trait
+  `BlockDevice` (con `flush`), así que la librería se prueba en host sobre
+  un `Vec`, incluido un corte en cada escritura del reemplazo con la caché
+  perdida o conservada, y xtask la usa para formatear la partición `ARI0`
+  del disco de pruebas con `hola.txt` y `README` (y fabricar los discos
+  `fs-pending-replace` y `fs-corrupt`).
+- `virtio-blk` negocia `VIRTIO_BLK_F_FLUSH` y atiende `Op::Flush` del
+  protocolo de bloques (`T_FLUSH`); sin la característica, `Flush` vuelve
+  sin hacer nada y el driver lo anuncia al arrancar.
 - `fsd` (`services/arifs`) recibe de init su endpoint (`READ|WRITE`), el
   del servicio de bloques (`WRITE`) y una capacidad de hardware; `arg` es el
   LBA de la partición. Implementa `BlockDevice` sobre `aricode-sys::block`
   (un sector por petición) y atiende `FileServiceProtocol v1`
   (`sdk/proto::fs`): peticiones y respuestas de 64 bytes con `List`,
-  `Open`, `Create`, `Read`, `Write` y `Close`; los datos van por el buffer
+  `Open`, `Create`, `Read`, `Write`, `Close`, `Flush` y `Replace`
+  (reemplazo atómico de hasta `MAX_IO`); los datos van por el buffer
   DMA del cliente (hasta 4 KiB por petición), que fsd mapea una vez y
   reutiliza por dirección física. Los descriptores son globales al servicio
   (16 abiertos) hasta que haya identidad de cliente por capability.
 - `aricode-sys::fs::FsClient` encapsula endpoint de respuesta, buffer DMA
   y llamadas; `fs_client` (ring 3) lista, lee `hola.txt`, crea y escribe
-  `nuevo.txt`, relee y comprueba `Exists`, `NotFound` y `BadFd`.
-  `filesystem.read_write` lo exige; `init.boot` exige el mensaje de éxito.
+  `nuevo.txt`, lo reemplaza de una vez, hace `flush`, relee y comprueba
+  `Exists`, `NotFound` y `BadFd`. `filesystem.read_write` lo exige (y el
+  `flush` negociado); `init.boot` exige el mensaje de éxito;
+  `filesystem.replace_recovery` rehace al montar un reemplazo cortado tras
+  el compromiso y `filesystem.corrupt_detected` rechaza una tabla alterada.
 - El área en bruto del disco de pruebas (LBA 4096 en adelante, patrón
-  `ARIDISK\0`+LBA) queda fuera del alcance máximo de AriFS (32 × 16
+  `ARIDISK\0`+LBA) queda fuera del alcance máximo de AriFS (70 + 32 × 64
   sectores) para que `blk_client` y `fsd` no se pisen.
 
 ## Shell y entrada de consola (Fase 21)

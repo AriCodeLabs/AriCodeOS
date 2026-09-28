@@ -1,0 +1,22 @@
+# Etapa 2 (ADR 0014): el disco de pruebas trae un reemplazo de `README`
+# comprometido en el journal de AriFS pero sin aplicar (lo que queda tras un
+# corte justo despues del compromiso). fsd lo rehace al montar y el shell lee
+# el contenido nuevo entero.
+name = "filesystem.replace_recovery"
+description = "AriFS rehace al montar un reemplazo atomico comprometido y cortado antes de aplicarse"
+level = "full"
+areas = ["filesystem", "storage", "shell"]
+cmdline = "qemu_exit shell"
+disk = "fs-pending-replace"
+timeout_secs = 60
+stdin = ["cat README", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "fsd: reemplazo pendiente de 'README' rehecho al montar",
+    "fsd: AriFS montado, 3 ficheros",
+    "AriCodeOS: recuperado tras un corte",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "no contiene AriFS", "AriFS corrupto", "disco de pruebas con AriFS"]

@@ -5,7 +5,7 @@
 #![no_std]
 #![no_main]
 
-use aricode_arifs::{AriFs, BlockDevice, FsError, SECTOR};
+use aricode_arifs::{AriFs, BlockDevice, FsError, Recovery, SECTOR};
 use aricode_proto::fs::{Op, Reply, Request, Status, MAX_IO};
 use aricode_rt::sys::{self, block::BlockClient, Handle};
 
@@ -38,6 +38,9 @@ impl BlockDevice for PartitionDevice {
         self.blk
             .write(self.base_lba + lba, 1)
             .map_err(|_| FsError::Io)
+    }
+    fn flush(&mut self) -> Result<(), FsError> {
+        self.blk.flush().map_err(|_| FsError::Io)
     }
 }
 
@@ -73,7 +76,7 @@ impl Fds {
 
 fn status_of(e: FsError) -> Status {
     match e {
-        FsError::Io | FsError::BadMagic => Status::Io,
+        FsError::Io | FsError::BadMagic | FsError::Corrupt => Status::Io,
         FsError::NotFound => Status::NotFound,
         FsError::Exists => Status::Exists,
         FsError::NoSpace => Status::NoSpace,
@@ -184,7 +187,11 @@ fn handle(
                 Reply::status(Status::BadFd)
             }
         }
-        Op::Read | Op::Write => {
+        Op::Flush => match fs.flush() {
+            Ok(()) => Reply::ok(0),
+            Err(e) => Reply::status(status_of(e)),
+        },
+        Op::Read | Op::Write | Op::Replace => {
             let Some(index) = fds.get(req.fd, owner) else {
                 return Reply::status(Status::BadFd);
             };
@@ -200,7 +207,8 @@ fn handle(
             }
             let result = match req.op {
                 Op::Read => fs.read(index, req.offset, &mut buf[..len]),
-                _ => fs.write(index, req.offset, &buf[..len]),
+                Op::Write => fs.write(index, req.offset, &buf[..len]),
+                _ => fs.replace(index, &buf[..len]).map(|()| len),
             };
             match result {
                 Ok(n) => Reply::ok(n as u64),
@@ -220,11 +228,24 @@ fn main(partition_lba: u64) -> u64 {
     };
     let mut fs = match AriFs::open(dev) {
         Ok(fs) => fs,
+        Err(FsError::Corrupt) => {
+            say(b"AriFS corrupto: no se monta");
+            return 3;
+        }
         Err(_) => {
             say(b"la particion no contiene AriFS");
             return 2;
         }
     };
+    match fs.recovery() {
+        Recovery::Clean => {}
+        Recovery::Replayed { index } => {
+            sys::print(b"fsd: reemplazo pendiente de '");
+            sys::print(fs.entry(index).map_or("?", |e| e.name_str()).as_bytes());
+            sys::print(b"' rehecho al montar\n");
+        }
+        Recovery::Discarded => say(b"journal roto descartado al montar"),
+    }
     let mut buf = [0u8; 20];
     sys::print(b"fsd: AriFS montado, ");
     sys::print(aricode_rt::fmt_u64(fs.entries().count() as u64, &mut buf));

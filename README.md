@@ -21,7 +21,7 @@ todavía `validado en hardware`.
 | Procesos ring 3, syscalls, handles con derechos, revocación, IPC con transferencia | validado en QEMU | `user.*`, `capabilities.*`, `ipc.*` |
 | init como device manager y broker de capabilities; sandbox por manifiesto | validado en QEMU | `init.*`, `sandbox.*` |
 | Drivers en ring 3: virtio-blk, virtio-net, virtio-input, xHCI + USB HID | validado en QEMU | `drivers.*`, `virtio.*`, `storage.*`, `network.*`, `input.*`, `usb.*` |
-| AriFS (ficheros, directorios privados por app) | prototipo, validado en QEMU | `filesystem.*`; sin garantías ante cortes de energía |
+| AriFS (ficheros, directorios privados por app, CRC32, reemplazo atómico con journal, `flush`) | validado en QEMU y con cortes inyectados en host | `filesystem.*`; ADR 0014 fija el contrato ante cortes |
 | Red IPv4: DHCP, ARP, ICMP, UDP, TCP, DNS, cliente HTTP | prototipo, validado en QEMU | `network.*`; sin TLS ni renovación DHCP |
 | Shell `arish` por consola serie, teclado PS/2 o teclados USB/virtio (puente de consola) | validado en QEMU | `shell.*`, `console.*` |
 | GUI: compositor, ventanas, entrada | prototipo, validado en QEMU | `gui.*` |
@@ -76,7 +76,7 @@ sdk/rust/        aricode-sys: wrappers de syscall y linker script de los program
 user/testprogs/  programas de prueba de ring 3 y drivers de prueba (Rust y ensamblador), empaquetados en el initrd
 services/init/   AriInit, primer proceso de usuario y device manager provisional
 services/virtio-blk/ driver virtio-blk y servicio de bloques por IPC en ring 3
-services/arifs/  fsd: servicio de ficheros AriFS v0 por IPC en ring 3
+services/arifs/  fsd: servicio de ficheros AriFS v1 por IPC en ring 3
 services/virtio-net/ netd: driver virtio-net y pila de red (DHCP, ping, UDP, TCP, DNS) por IPC en ring 3
 services/virtio-input/ inputd: driver virtio-input (teclado, raton) con eventos por IPC en ring 3
 services/compositor/ compositor: ventanas, cursor y enrutado de entrada sobre el framebuffer, en ring 3
@@ -85,7 +85,7 @@ libs/input/      eventos evdev y teclado US con tests de host
 libs/net/        pila de red mínima sin alloc con tests de host
 libs/http/       cliente HTTP GET mínimo (Content-Length, chunked) con tests de host
 services/shell/  arish: shell interactivo en ring 3
-libs/arifs/      AriFS v0: sistema de archivos plano con tests de host
+libs/arifs/      AriFS v1: sistema de archivos plano con CRC32, journal de reemplazo y tests de host con cortes
 sdk/proto/       protocolos IPC de los servicios
 sdk/runtime/     aricode-rt: runtime de los programas de usuario (entry!, heap, panic)
 sdk/build/       aricode-build: build.rs de una linea para programas de usuario
