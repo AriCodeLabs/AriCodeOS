@@ -12,7 +12,10 @@ use aricode_fb_console::Console;
 use core::fmt::Write;
 use log::{Level, LevelFilter, Log, Metadata, Record};
 
-static FB: IrqLock<Option<Console<MmioSurface>>> = IrqLock::new(None);
+/// La rejilla de la consola (unas 32 KiB) vive aquí, nunca en la pila: al
+/// arrancar, el kernel corre sobre la pila de 64 KiB de AriBoot y construir
+/// la consola por valor la desbordaba (corrompía el initrd contiguo).
+static FB: IrqLock<Console<MmioSurface>> = IrqLock::new(Console::empty());
 /// Serializa cada mensaje completo por la serie: sin él, un `info!` del
 /// kernel y un `console_write` de otro hilo se mezclan carácter a carácter.
 /// No deshabilita interrupciones (la serie es lenta); con interrupciones
@@ -30,7 +33,7 @@ pub fn init_framebuffer(info: boot_protocol::FramebufferInfo) -> bool {
     };
     match MmioSurface::new(info, base) {
         Some(surface) => {
-            *FB.lock() = Some(Console::new(surface));
+            FB.lock().attach(surface);
             true
         }
         None => false,
@@ -72,8 +75,8 @@ pub fn write_raw(args: core::fmt::Arguments) {
     let _serial = serial_guard();
     let _ = Serial.write_fmt(args);
     if let Some(mut guard) = FB.try_lock() {
-        if let Some(fb) = guard.as_mut() {
-            let _ = fb.write_fmt(args);
+        if guard.is_attached() {
+            let _ = guard.write_fmt(args);
         }
     }
 }

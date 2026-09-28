@@ -1,0 +1,194 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.26
+   Compiling quote v1.0.47
+   Compiling serde_core v1.0.229
+   Compiling serde v1.0.229
+   Compiling equivalent v1.0.2
+   Compiling hashbrown v0.17.1
+   Compiling winnow v0.7.15
+   Compiling toml_write v0.1.2
+   Compiling aricode-initrd v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/initrd)
+   Compiling aricode-crypto v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/crypto)
+   Compiling aricode-http v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/http)
+   Compiling aricode-proto v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/sdk/proto)
+   Compiling aricode-net v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/net)
+   Compiling aricode-arifs v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/arifs)
+   Compiling aricode-fat v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/fat)
+   Compiling aricode-gpt v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/gpt)
+   Compiling aricode-ab v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/ab)
+   Compiling indexmap v2.14.2
+   Compiling syn v3.0.6
+   Compiling serde_derive v1.0.229
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling toml_edit v0.22.27
+   Compiling toml v0.8.23
+   Compiling xtask v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/tools/xtask)
+    Finished `release` profile [optimized + debuginfo] target(s) in 14.33s
+     Running `target/release/xtask check`
+    Blocking waiting for file lock on build directory
+    Checking boot-protocol v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/boot-protocol)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 6.15s
+    Checking aricode-elf v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/elf)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.05s
+    Checking aricode-x86-paging v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/x86-paging)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.05s
+    Checking aricode-cmdline v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/cmdline)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.04s
+    Checking aricode-fb-console v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/fb-console)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.05s
+    Checking aricode-x86-cpu v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/x86-cpu)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.05s
+    Checking aricode-pmm v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/pmm)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.05s
+    Checking aricode-heap v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/heap)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.04s
+    Checking aricode-sync v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/sync)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.04s
+    Checking aricode-sched v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/sched)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.05s
+    Checking aricode-abi v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/sdk/abi)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.06s
+    Checking aricode-handles v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/handles)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.05s
+    Checking aricode-initrd v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/initrd)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.04s
+    Checking aricode-acpi v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/acpi)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.07s
+    Checking aricode-pci v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/pci)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.05s
+    Checking aricode-virtio v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/virtio)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.05s
+    Checking aricode-gpt v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/gpt)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.09s
+    Checking aricode-arifs v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/arifs)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.06s
+    Checking aricode-net v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/net)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.14s
+    Checking aricode-http v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/http)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.21s
+    Checking aricode-input v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/input)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.05s
+    Checking aricode-gfx v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/gfx)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.07s
+    Checking aricode-manifest v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/manifest)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.08s
+    Checking aricode-wasm v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/wasm)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.12s
+    Checking aricode-crypto v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/crypto)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.09s
+    Checking aricode-ab v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/ab)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.06s
+    Checking aricode-proto v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/sdk/proto)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.10s
+    Checking aricode-sys v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/sdk/rust)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.11s
+    Checking aricode-build v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/sdk/build)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.05s
+    Checking aricode-fb-console v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/fb-console)
+    Checking aricode-pci v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/pci)
+    Checking aricode-http v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/http)
+    Checking aricode-abi v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/sdk/abi)
+    Checking aricode-proto v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/sdk/proto)
+    Checking aricode-net v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/net)
+    Checking aricode-sync v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/sync)
+    Checking aricode-heap v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/heap)
+    Checking aricode-virtio v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/virtio)
+    Checking aricode-gfx v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/gfx)
+    Checking aricode-sys v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/sdk/rust)
+    Checking aricode-rt v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/sdk/runtime)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.28s
+   Compiling aricode-build v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/sdk/build)
+   Compiling ari-app-hello v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/apps/hello)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.11s
+   Compiling ari-app-perms-check v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/apps/perms-check)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.08s
+    Checking aricode-initrd v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/initrd)
+    Checking aricode-crypto v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/crypto)
+    Checking aricode-gpt v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/gpt)
+   Compiling ari-app-updater v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/apps/updater)
+    Checking aricode-ab v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/ab)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.18s
+   Compiling ari-app-fs-probe v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/apps/fs-probe)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.08s
+   Compiling ari-app-win-probe v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/apps/win-probe)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.08s
+    Checking aricode-wasm v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/wasm)
+   Compiling ari-app-wasm-runner v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/apps/wasm-runner)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.15s
+    Checking wasm-demo v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/apps/wasm-demo)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.07s
+    Checking aricode-input v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/input)
+   Compiling user-testprogs v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/user/testprogs)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.15s
+   Compiling ariinit v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/services/init)
+    Checking aricode-manifest v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/manifest)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.12s
+   Compiling ari-virtio-blk v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/services/virtio-blk)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.13s
+   Compiling ari-virtio-net v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/services/virtio-net)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.14s
+   Compiling ari-virtio-input v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/services/virtio-input)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.09s
+   Compiling ari-compositor v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/services/compositor)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.14s
+   Compiling ari-fsd v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/services/arifs)
+    Checking aricode-arifs v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/arifs)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.10s
+   Compiling ari-shell v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/services/shell)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.10s
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.26
+    Checking bit_field v0.10.3
+    Checking uguid v2.2.1
+    Checking bitflags v2.13.2
+    Checking cfg-if v1.0.5
+    Checking log v0.4.34
+    Checking aricode-crypto v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/crypto)
+    Checking aricode-initrd v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/initrd)
+    Checking aricode-elf v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/elf)
+    Checking aricode-cmdline v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/cmdline)
+    Checking aricode-x86-paging v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/x86-paging)
+    Checking aricode-gpt v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/gpt)
+    Checking boot-protocol v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/boot-protocol)
+    Checking ucs2 v0.3.3
+    Checking uefi-raw v0.17.0
+    Checking aricode-ab v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/ab)
+   Compiling syn v3.0.6
+   Compiling ptr_meta_derive v0.3.2
+   Compiling uefi-macros v0.20.0
+    Checking ptr_meta v0.3.2
+    Checking uefi v0.41.0
+    Checking ariboot v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/boot)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 3.08s
+    Checking aricode-x86-paging v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/x86-paging)
+   Compiling arikernel v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/kernel)
+    Checking aricode-handles v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/handles)
+    Checking aricode-pmm v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/pmm)
+    Checking aricode-cmdline v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/cmdline)
+    Checking aricode-sched v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/sched)
+    Checking aricode-acpi v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/acpi)
+    Checking aricode-x86-cpu v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/x86-cpu)
+    Checking aricode-elf v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/elf)
+    Checking boot-protocol v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/boot-protocol)
+    Checking log v0.4.34
+    Checking aricode-iommu v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/iommu)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.70s
+    Checking equivalent v1.0.2
+    Checking hashbrown v0.17.1
+    Checking winnow v0.7.15
+    Checking toml_write v0.1.2
+    Checking aricode-initrd v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/initrd)
+    Checking aricode-gpt v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/gpt)
+    Checking aricode-fat v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/fat)
+    Checking serde_core v1.0.229
+    Checking aricode-ab v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/ab)
+    Checking indexmap v2.14.2
+    Checking serde v1.0.229
+    Checking serde_spanned v0.6.9
+    Checking toml_datetime v0.6.11
+    Checking toml_edit v0.22.27
+    Checking toml v0.8.23
+    Checking xtask v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/tools/xtask)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 2.11s

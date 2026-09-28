@@ -941,6 +941,20 @@ kernel/src/iommu.rs            unidades, dominios por proceso, attach/map_region
   ARIBOOT; `disk = "usb-image"` arranca un escenario desde esa imagen sin el
   disco `fat:` de QEMU. Guía en `docs/hardware.md`.
 
+## Pila de arranque y consola (auditoría 3eb4965)
+
+- El kernel arranca sobre la pila de 64 KiB de AriBoot hasta que `vmm::init`
+  crea la suya. Nada grande puede vivir en esa pila: la consola de
+  framebuffer (rejilla de 32 KiB) es un `static` construido con
+  `Console::empty()` (`const`) al que se acopla la pantalla con `attach`.
+  `check_boot_stack` mide lo usado justo antes de cambiar de pila y exige
+  16 KiB de margen; AriBoot y el kernel anuncian el SHA-256 del initrd para
+  detectar corrupciones entre ambos.
+- `wait_until` retira un proceso solo cuando `release_address_space` lo ha
+  marcado `reaped` (espacio y dominio DMA liberados); el IOMMU guarda un
+  propietario único por función PCI y `release` no toca contextos que ya
+  son de otro dominio.
+
 ## Deuda conocida
 
 - No hay reinicio automático tras `updater` ni prueba de dos arranques

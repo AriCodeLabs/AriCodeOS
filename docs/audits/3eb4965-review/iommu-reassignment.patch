@@ -1,0 +1,27 @@
+--- a/kernel/src/iommu.rs
++++ b/kernel/src/iommu.rs
+@@ -609,6 +609,24 @@
+         enabled(),
+         "iommu: sin unidad VT-d (QEMU necesita -device intel-iommu)"
+     );
++    // Auditoria: mismo dispositivo asignado sucesivamente a dos dominios.
++    const FIRST: u32 = 1001;
++    const SECOND: u32 = 1002;
++    let sid = aricode_iommu::source_id(0, 2, 0);
++    attach(FIRST, sid).expect("primer dominio");
++    attach(SECOND, sid).expect("segundo dominio");
++    let context = || with(|s| {
++        let u = s.dmar.unit_for(0, 0, 2, 0).unwrap();
++        let p = s.context_entry(u, sid).unwrap();
++        unsafe { ContextEntry { low: p.read_volatile(), high: p.add(1).read_volatile() } }
++    }).unwrap();
++    let before = context();
++    crate::println!("AUDIT context before release: present={} domain={}", before.present(), before.domain());
++    release(FIRST);
++    let after = context();
++    crate::println!("AUDIT context after release: present={} domain={}", after.present(), after.domain());
++    assert!(after.present(), "AUDIT: liberar el primer dominio desactiva el dispositivo del segundo");
++    release(SECOND);
+     let index = crate::pci::find(0x1af4, 0x1042).expect("virtio-blk moderno en el bus PCI");
+     let claimed = crate::pci::claim(index).expect("reclamar virtio-blk");
+     let mut extra = alloc::vec![(KernelObject::new(ObjectKind::System), Rights::READ)];
