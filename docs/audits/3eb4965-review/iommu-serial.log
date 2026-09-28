@@ -1,0 +1,67 @@
+BdsDxe: failed to load Boot0001 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x2,0x0): Not Found
+BdsDxe: loading Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
+BdsDxe: starting Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
+[ INFO]: boot/src/main.rs@042: AriBoot 0.5.0 (AriCodeOS UEFI loader)
+[ INFO]: boot/src/slots.rs@148: slots: estado activo A, sin pendiente
+[ INFO]: boot/src/slots.rs@154: slots: slot activo -> slot A
+[ INFO]: boot/src/slots.rs@180: slots: arrancando desde el slot A (imagen version 1)
+[ INFO]: boot/src/main.rs@083: GOP: 1280x800 stride 1280 Bgr @ 0x80000000
+[ INFO]: boot/src/main.rs@097: ACPI RSDP: 0x1f77e014
+[ INFO]: boot/src/main.rs@108: kernel.elf: 743568 bytes
+[ INFO]: boot/src/main.rs@146: kernel: 668 KiB en phys 0x1de1b000, entry 0xffffffff80042fa0
+[ INFO]: boot/src/main.rs@331: initrd.img: 643 KiB en phys 0x1dd7a000
+[ INFO]: boot/src/main.rs@161: cmdline: qemu_exit test=iommu boot_slot=A
+[ INFO]: boot/src/main.rs@230: paginas: identidad y mapa fisico hasta 4096 MiB, 14 tablas usadas de 22
+[ INFO]: boot/src/main.rs@263: ExitBootServices -> AriKernel
+
+AriCodeOS booting...
+AriCodeOS Kernel 0.5.0
+[INFO ] cmdline: qemu_exit test=iommu boot_slot=A
+[INFO ] framebuffer: 1280x800 stride 1280 Bgr @ 0x80000000
+[INFO ] kernel: phys 0x1de1b000 virt 0xffffffff80000000 size 668 KiB
+[INFO ] acpi rsdp: 0x1f77e014
+[INFO ] memory map: 123 regiones (desc 48 bytes)
+[INFO ] cpu: GDT, TSS (IST para #DF) e IDT instaladas (cs=0x8 ds=0x10 tr=0x28)
+[INFO ] pmm: 460 MiB libres de 4096 MiB direccionables, bitmap 128 KiB @ 0x100000
+[INFO ] vmm: tablas propias activas (pml4 0x120000), W^X en la imagen, pila 0xffffffff7ffef000..0xffffffff7ffff000 con guard 0xffffffff7ffee000
+[INFO ] vmm: 43 MiB de memoria de arranque devueltos al PMM (502 MiB libres)
+[INFO ] heap: 1024 KiB en 0xffffc00000000000, crece por trozos de 1024 KiB hasta 64 MiB
+[INFO ] acpi: RSDP rev 2 -> XSDT con 7 tablas [FACP APIC HPET MCFG DMAR WAET BGRT]
+[INFO ] acpi: MADT lapic @ 0xfee00000, 1 cpu(s), 1 ioapic(s) [(0, 4273995776, 0)], overrides [(0, 2, 0), (5, 5, 13), (9, 9, 13), (10, 10, 13), (11, 11, 13)]
+[INFO ] acpi: MCFG ecam @ 0xe0000000 segmento 0 buses 0..=255
+[INFO ] acpi: DMAR 48 bits, 1 unidad(es) [(4275634176, false)], 0 region(es) reservadas
+[INFO ] apic: lapic id 0 version 0x14 @ 0xfee00000; timer 62750 ticks/ms (div 16), tick 100 Hz (cuenta 627500)
+[INFO ] ioapic: id 0 @ 0xfec00000, 24 entradas, gsi base 0, todas enmascaradas
+[INFO ] interrupciones habilitadas
+[INFO ] task: hilo main adoptado, idle creado (pilas de 32 KiB con guard); scheduler round robin preemptivo, quantum 20 ms
+[INFO ] smp: 1 CPU en linea (sin APs en la MADT)
+[INFO ] random: generador ChaCha20 sembrado con TSC (sin rdrand: entropia limitada)
+[INFO ] console: entrada por COM1 (GSI 4, vector 0x40)
+[INFO ] console: teclado PS/2 (GSI 1, vector 0x41)
+[INFO ] initrd: 43 ficheros, 643 KiB @ 0x1dd7a000
+[INFO ] pci: 00:00.0 8086:29c0 clase 06.00 host bridge (0 BARs)
+[INFO ] pci: 00:01.0 1234:1111 clase 03.00 VGA/display (2 BARs)
+[INFO ] pci: 00:02.0 1af4:1042 clase 01.00 almacenamiento (2 BARs, MSI-X/vendor/vendor/vendor/vendor/vendor)
+[INFO ] pci: 00:03.0 1af4:1041 clase 02.00 Ethernet (2 BARs, MSI-X/vendor/vendor/vendor/vendor/vendor)
+[INFO ] pci: 00:04.0 1af4:1052 clase 09.00 teclado (2 BARs, MSI-X/vendor/vendor/vendor/vendor/vendor)
+[INFO ] pci: 00:05.0 1af4:1052 clase 09.02 raton (2 BARs, MSI-X/vendor/vendor/vendor/vendor/vendor)
+[INFO ] pci: 00:1f.0 8086:2918 clase 06.01 ISA bridge (0 BARs)
+[INFO ] pci: 00:1f.2 8086:2922 clase 01.06 SATA (AHCI) (2 BARs, MSI)
+[INFO ] pci: 00:1f.3 8086:2930 clase 0c.05 SMBus (1 BAR)
+[INFO ] pci: 9 funciones en el segmento 0 (ECAM @ 0xe0000000)
+[INFO ] iommu: 00:01.0 en el dominio identidad 1 (firmware)
+[INFO ] iommu: unidad 0 @ 0xfed90000 version 1.0: 48 bits de invitado, 4 niveles, 65536 dominios, 1 registro(s) de fallo, sin coherencia (clflush); traduccion activa
+[INFO ] iommu: 1 unidad(es) activas, 0 region(es) reservadas (RMRR), dominio identidad para 1 dispositivo(s) del firmware ["00:01.0"]; un dominio por proceso con IOVA = fisica
+[INFO ] test provocado: iommu
+[INFO ] iommu: 00:02.0 asignado al dominio 2 (proceso 1001)
+[INFO ] iommu: 00:02.0 asignado al dominio 3 (proceso 1002)
+AUDIT context before release: present=true domain=3
+AUDIT context after release: present=false domain=0
+
+============================
+ARICODEOS KERNEL PANIC
+============================
+Where: kernel/src/iommu.rs:628:5
+Reason: AUDIT: liberar el primer dominio desactiva el dispositivo del segundo
+CPU: 0
+============================

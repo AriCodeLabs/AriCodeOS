@@ -427,10 +427,16 @@ pub fn thread_count() -> usize {
 /// con `yield`, y un lote de hilos termina y libera sus pilas.
 pub fn threads_selftest() {
     use crate::memory::pmm;
-    use core::sync::atomic::AtomicU64;
+    use core::sync::atomic::{AtomicBool, AtomicU64};
 
     static LOG: IrqLock<Vec<u8>> = IrqLock::new(Vec::new());
+    static GO: AtomicBool = AtomicBool::new(false);
     extern "C" fn ping(arg: usize) {
+        // Nadie anota hasta que los dos hilos existen: si no, un tick entre
+        // los dos spawn deja a uno solo en la cola y rompe la alternancia.
+        while !GO.load(Ordering::Acquire) {
+            yield_now();
+        }
         for _ in 0..3 {
             LOG.lock().push(arg as u8);
             yield_now();
@@ -442,13 +448,18 @@ pub fn threads_selftest() {
     set_affinity(MAIN_TID, Some(0)).unwrap();
     let a = spawn_on("ping-a", ping, b'A' as usize, 0).unwrap();
     let b = spawn_on("ping-b", ping, b'B' as usize, 0).unwrap();
+    GO.store(true, Ordering::Release);
     while state(a).is_some() || state(b).is_some() {
         yield_now();
     }
     let log = LOG.lock().clone();
-    assert_eq!(
-        &log[..],
-        b"ABABAB",
+    // Quien anota primero depende de en que punto del turno cayo el ultimo
+    // tick; lo que se exige es la alternancia estricta.
+    let alternates = log.len() == 6
+        && log.windows(2).all(|w| w[0] != w[1])
+        && log.iter().filter(|&&c| c == b'A').count() == 3;
+    assert!(
+        alternates,
         "los dos hilos deben alternar: {:?}",
         core::str::from_utf8(&log)
     );
@@ -486,7 +497,8 @@ pub fn threads_selftest() {
     assert_eq!(thread_count(), expected, "solo main y un idle por CPU");
     assert_eq!(current_tid(), MAIN_TID);
     info!(
-        "threads selftest ok (ABABAB, {N} workers terminados y recogidos, {} frames en tablas)",
+        "threads selftest ok (alternancia {}, {N} workers terminados y recogidos, {} frames en tablas)",
+        core::str::from_utf8(&log).unwrap_or("?"),
         free_before - free_after
     );
 }

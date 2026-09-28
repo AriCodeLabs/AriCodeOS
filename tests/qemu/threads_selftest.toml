@@ -6,5 +6,5 @@ cmdline = "qemu_exit test=threads"
 
 [expect]
 exit = 33
-serial_contains = ["threads selftest ok (ABABAB, 40 workers terminados y recogidos", "ARICODEOS_KERNEL_READY"]
+serial_contains = ["threads selftest ok (alternancia ", "40 workers terminados y recogidos", "ARICODEOS_KERNEL_READY"]
 serial_absent = ["KERNEL PANIC"]

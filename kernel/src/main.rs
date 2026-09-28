@@ -56,6 +56,7 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     let info = validate_boot_info(boot_info);
     let fb_end = info.framebuffer.address + info.framebuffer.size;
     memory::phys::init(info.phys_map_offset, info.phys_map_limit, fb_end);
+    initrd::snapshot_digest(info);
 
     // SAFETY: AriBoot copió la cmdline a memoria de kernel accesible por el mapa físico.
     let cmdline = CmdLine::new(unsafe { info.cmdline() });
@@ -93,6 +94,7 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
 
     memory::pmm::init(info);
     let stack_top = memory::vmm::init(info);
+    check_boot_stack(info);
 
     // Continuar en la pila nueva (con guard page); la del cargador queda atrás.
     // SAFETY: `stack_top` está mapeado RW por el VMM; `kernel_main` no retorna.
@@ -107,6 +109,30 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
             options(noreturn)
         );
     }
+}
+
+/// La pila de AriBoot es pequeña (64 KiB) y está pegada al initrd: si el
+/// arranque temprano la desborda, corrompe el initrd en silencio. Se mide
+/// lo usado justo antes de abandonarla y se exige margen; un exceso es un
+/// pánico con diagnóstico, no una corrupción.
+fn check_boot_stack(info: &BootInfo) {
+    let rsp: u64;
+    // SAFETY: lectura del puntero de pila.
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack)) };
+    let top = memory::phys::phys_to_virt(info.kernel_stack_base + info.kernel_stack_size);
+    let used = top.saturating_sub(rsp);
+    const MARGIN: u64 = 16 * 1024;
+    debug!(
+        "stack de arranque: {} KiB usados de {} KiB",
+        used.div_ceil(1024),
+        info.kernel_stack_size / 1024
+    );
+    assert!(
+        used + MARGIN <= info.kernel_stack_size,
+        "la pila de arranque de {} KiB se queda sin margen: {} bytes usados",
+        info.kernel_stack_size / 1024,
+        used
+    );
 }
 
 /// Segunda etapa, ya sobre la pila definitiva y las tablas del kernel.
@@ -283,6 +309,7 @@ fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
         "drivers" => hw::selftest(info),
         "random" => random::selftest(),
         "console_input" => console_input::selftest(),
+        "process_reap" => user::process::reap_selftest(),
         other if other.starts_with("user_") => run_user_program(&other[5..]),
         // W^X: escribir en .rodata -> #PF por protección.
         "write_rodata" => {
