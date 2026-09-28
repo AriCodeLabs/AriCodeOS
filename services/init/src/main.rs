@@ -17,9 +17,11 @@ use aricode_manifest::{Caps, Manifest};
 use aricode_proto::launch::{
     Reply as LaunchReply, Request as LaunchRequest, Status as LaunchStatus,
 };
+use aricode_proto::status;
 use aricode_rt::sys::block::BlockClient;
 use aricode_rt::sys::fs::FsClient;
 use aricode_rt::sys::{self, rights, Error, Handle, TIMEOUT_INFINITE};
+use aricode_supervisor::{Action, Exit, Policy, Service, State};
 
 const SPAWNER: Handle = Handle(0x0001_0004);
 const PCI_ROOT: Handle = Handle(0x0001_0005);
@@ -64,12 +66,12 @@ fn find_pci_class_from(class: u8, subclass: u8, start: u64) -> Option<u64> {
     })
 }
 
-/// Comprueba que un servicio de entrada recién lanzado responde a `Info`
-/// antes de publicar su endpoint (auditoría 4836023, hallazgo 1): un driver
-/// que termina sin servir no debe dejar a los clientes esperando. Devuelve
-/// `false` si el proceso acabó o no contestó en unos segundos.
-fn input_service_ready(service: Handle, driver: Handle) -> bool {
-    use aricode_proto::input::{Op, Reply, Request};
+/// Comprueba que un servicio recién lanzado responde a `request` con algo
+/// que `accept` da por bueno, antes de publicar su endpoint (auditoría
+/// 4836023, hallazgo 1, generalizado por el supervisor): un proceso que
+/// termina sin servir no debe dejar clientes esperando. Devuelve `false` si
+/// el proceso acabó o no contestó en unos segundos.
+fn probe_ready(service: Handle, driver: Handle, request: &[u8], accept: fn(&[u8]) -> bool) -> bool {
     let Ok(reply) = sys::endpoint_create() else {
         return false;
     };
@@ -82,18 +84,48 @@ fn input_service_ready(service: Handle, driver: Handle) -> bool {
         let Ok(reply_w) = sys::handle_duplicate(reply, rights::WRITE | rights::TRANSFER) else {
             break;
         };
-        let req = Request {
-            op: Op::Info,
-            timeout_ms: 0,
-        };
-        if sys::ipc_send(service, &req.encode(), &[reply_w], 250).is_err() {
+        if sys::ipc_send(service, request, &[reply_w], 250).is_err() {
             continue;
         }
-        let mut msg = [0u8; Reply::LEN];
+        let mut msg = [0u8; 256];
         let mut none: [Handle; 0] = [];
         if let Ok((n, _)) = sys::ipc_receive(reply, &mut msg, &mut none, 250) {
-            ok = Reply::decode(&msg[..n]).is_some();
+            ok = accept(&msg[..n]);
             break;
+        }
+    }
+    let _ = sys::handle_close(reply);
+    ok
+}
+
+fn input_service_ready(service: Handle, driver: Handle) -> bool {
+    use aricode_proto::input::{Op, Reply, Request};
+    let req = Request {
+        op: Op::Info,
+        timeout_ms: 0,
+    };
+    probe_ready(service, driver, &req.encode(), |b| {
+        Reply::decode(b).is_some()
+    })
+}
+
+fn ping_service_ready(service: Handle, driver: Handle) -> bool {
+    probe_ready(service, driver, b"ping", |b| b == b"pong")
+}
+
+/// Una petición corta al servicio de prueba ("ping" o "die") esperando "pong".
+fn ping_once(service: Handle, request: &[u8]) -> bool {
+    let Ok(reply) = sys::endpoint_create() else {
+        return false;
+    };
+    let mut ok = false;
+    if let Ok(reply_w) = sys::handle_duplicate(reply, rights::WRITE | rights::TRANSFER) {
+        if sys::ipc_send(service, request, &[reply_w], 500).is_ok() {
+            let mut msg = [0u8; 16];
+            let mut none: [Handle; 0] = [];
+            if let Ok((n, _)) = sys::ipc_receive(reply, &mut msg, &mut none, 500) {
+                ok = &msg[..n] == b"pong";
+            }
         }
     }
     let _ = sys::handle_close(reply);
@@ -277,6 +309,392 @@ fn start_fsd(
     sys::process_spawn_with(SPAWNER, "fsd", partition_lba, &[own, blk, hw])
 }
 
+/// Cómo se (re)lanza un servicio residente.
+#[derive(Clone, Copy)]
+enum Kind {
+    /// Driver PCI con el contrato de `start_driver`; `with_system` añade
+    /// `SYSTEM` (lectura) como extra.
+    Driver { pci_index: u64, with_system: bool },
+    /// fsd sobre el servicio de bloques.
+    Fs {
+        block_service: Handle,
+        partition_lba: u64,
+    },
+    /// Programa del initrd con su endpoint de servicio (servicios de prueba).
+    Program { arg: u64 },
+}
+
+/// Cómo se comprueba que el servicio ya sirve.
+#[derive(Clone, Copy)]
+enum Probe {
+    /// Lo comprueba un cliente de prueba después (bloques, ficheros, red).
+    None,
+    /// `InputServiceProtocol::Info`.
+    Input,
+    /// "ping" -> "pong".
+    Ping,
+}
+
+/// Un servicio residente bajo supervisión. El endpoint es de init y no
+/// cambia entre generaciones: un cliente sigue hablando con "el servicio"
+/// aunque el proceso que lo atiende se haya reiniciado.
+struct Resident {
+    name: &'static str,
+    kind: Kind,
+    probe: Probe,
+    endpoint: Handle,
+    process: Option<Handle>,
+    sup: Service,
+}
+
+const MAX_RESIDENTS: usize = 8;
+
+/// Supervisor de servicios residentes (etapa 1 del plan posterior al
+/// roadmap): estados, generaciones, reinicio con espera creciente y
+/// presupuesto, y estado consultable (`status` v1) para el shell.
+struct Supervisor {
+    slots: [Option<Resident>; MAX_RESIDENTS],
+    count: usize,
+}
+
+fn now_ms() -> u64 {
+    let mut b = [0u8; 8];
+    match sys::system_info(SYSTEM, sys::abi::sysinfo::UPTIME, &mut b) {
+        Ok(8) => u64::from_le_bytes(b),
+        _ => 0,
+    }
+}
+
+impl Supervisor {
+    fn new() -> Self {
+        Self {
+            slots: [const { None }; MAX_RESIDENTS],
+            count: 0,
+        }
+    }
+
+    fn register(
+        &mut self,
+        name: &'static str,
+        kind: Kind,
+        probe: Probe,
+        endpoint: Handle,
+        optional: bool,
+        policy: Policy,
+    ) -> Option<usize> {
+        if self.count == MAX_RESIDENTS {
+            return None;
+        }
+        let i = self.count;
+        self.slots[i] = Some(Resident {
+            name,
+            kind,
+            probe,
+            endpoint,
+            process: None,
+            sup: Service::new(policy, optional),
+        });
+        self.count += 1;
+        Some(i)
+    }
+
+    fn generation(&self, i: usize) -> u32 {
+        self.slots[i].as_ref().map_or(0, |r| r.sup.generation())
+    }
+
+    fn state(&self, i: usize) -> State {
+        self.slots[i]
+            .as_ref()
+            .map_or(State::Stopped, |r| r.sup.state())
+    }
+
+    fn endpoint(&self, i: usize) -> Handle {
+        self.slots[i].as_ref().map_or(Handle(0), |r| r.endpoint)
+    }
+
+    fn has_process(&self, i: usize) -> bool {
+        self.slots[i].as_ref().is_some_and(|r| r.process.is_some())
+    }
+
+    /// Retira el servicio `i`: no se relanzará aunque muera.
+    fn stop(&mut self, i: usize) {
+        if let Some(r) = self.slots[i].as_mut() {
+            r.sup.stop();
+        }
+    }
+
+    /// Lanza (o relanza) el servicio `i` y espera a que sirva. Devuelve si
+    /// quedó listo; si no, el supervisor ya ha decidido qué hacer.
+    fn launch(&mut self, i: usize) -> bool {
+        let Some(r) = self.slots[i].as_mut() else {
+            return false;
+        };
+        let spawned = match r.kind {
+            Kind::Driver {
+                pci_index,
+                with_system,
+            } => {
+                let system = if with_system {
+                    match sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER) {
+                        Ok(h) => Some(h),
+                        Err(e) => Err(e).ok(),
+                    }
+                } else {
+                    None
+                };
+                match system {
+                    Some(h) => start_driver(r.name, pci_index, r.endpoint, &[h]),
+                    None if with_system => Err(Error::Limit),
+                    None => start_driver(r.name, pci_index, r.endpoint, &[]),
+                }
+            }
+            Kind::Fs {
+                block_service,
+                partition_lba,
+            } => start_fsd(r.endpoint, block_service, partition_lba),
+            Kind::Program { arg } => {
+                sys::handle_duplicate(r.endpoint, rights::READ | rights::WRITE | rights::TRANSFER)
+                    .and_then(|ep| sys::process_spawn_with(SPAWNER, r.name, arg, &[ep]))
+            }
+        };
+        let now = now_ms();
+        let process = match spawned {
+            Ok(h) => h,
+            Err(e) => {
+                aricode_rt::print_error(b"AriInit: lanzar servicio", e);
+                let _ = r.sup.starting(now);
+                self.announce_death(i, now, Exit::Code(u64::MAX));
+                return false;
+            }
+        };
+        r.process = Some(process);
+        let generation = r.sup.starting(now);
+        let ready = match r.probe {
+            Probe::None => true,
+            Probe::Input => input_service_ready(r.endpoint, process),
+            Probe::Ping => ping_service_ready(r.endpoint, process),
+        };
+        if ready {
+            r.sup.ready(now_ms());
+            if generation > 1 {
+                sys::print(b"AriInit: servicio ");
+                sys::print(r.name.as_bytes());
+                sys::print(b" reiniciado (generacion ");
+                let mut b = [0u8; 20];
+                sys::print(aricode_rt::fmt_u64(generation as u64, &mut b));
+                sys::print(b")\n");
+            }
+            true
+        } else {
+            self.announce_death(i, now_ms(), Exit::StartTimeout);
+            false
+        }
+    }
+
+    /// Registra la muerte de `i`, cierra su proceso y anuncia la decisión.
+    fn announce_death(&mut self, i: usize, now: u64, exit: Exit) {
+        let Some(r) = self.slots[i].as_mut() else {
+            return;
+        };
+        if let Some(h) = r.process.take() {
+            let _ = sys::handle_close(h);
+        }
+        let action = r.sup.died(now, exit);
+        sys::print(b"AriInit: servicio ");
+        sys::print(r.name.as_bytes());
+        sys::print(match exit {
+            Exit::Code(_) => b" termino",
+            Exit::Killed => b" murio por fallo",
+            Exit::StartTimeout => b" no llego a servir",
+        });
+        let mut b = [0u8; 20];
+        match action {
+            Action::Restart { at } => {
+                sys::print(b"; reinicio en ");
+                sys::print(aricode_rt::fmt_u64(at.saturating_sub(now), &mut b));
+                sys::print(b" ms\n");
+            }
+            _ => {
+                sys::print(b"; presupuesto de reinicios agotado: ");
+                sys::print(if r.sup.is_optional() {
+                    b"sistema degradado\n"
+                } else {
+                    b"servicio obligatorio fallido\n"
+                });
+            }
+        }
+    }
+
+    /// Vigila los procesos: muertes, plazos de arranque y reinicios que ya tocan.
+    fn poll(&mut self) {
+        let now = now_ms();
+        for i in 0..self.count {
+            let (process, state) = match self.slots[i].as_ref() {
+                Some(r) => (r.process, r.sup.state()),
+                None => continue,
+            };
+            if let Some(h) = process {
+                match sys::process_wait(h, 0) {
+                    Err(Error::Timeout) => {
+                        if let Some(r) = self.slots[i].as_mut() {
+                            if r.sup.tick(now) == Action::Timeout {
+                                self.announce_death(i, now, Exit::StartTimeout);
+                            }
+                        }
+                    }
+                    Ok(code) => self.announce_death(i, now, Exit::Code(code)),
+                    Err(Error::Killed) => self.announce_death(i, now, Exit::Killed),
+                    Err(_) => self.announce_death(i, now, Exit::Code(u64::MAX)),
+                }
+            } else if state == State::Stopped {
+                let start = self.slots[i]
+                    .as_mut()
+                    .is_some_and(|r| r.sup.tick(now) == Action::Start);
+                if start {
+                    self.launch(i);
+                }
+            }
+        }
+    }
+
+    /// Estado del servicio `index` para `status` v1.
+    fn status(&self, index: u8) -> status::Reply {
+        let Some(r) = self.slots.get(index as usize).and_then(|s| s.as_ref()) else {
+            return status::Reply::not_found();
+        };
+        let st = r.sup.status();
+        let (last_exit, last_code) = match st.last_exit {
+            None => (status::LastExit::None, 0),
+            Some(Exit::Code(c)) => (status::LastExit::Code, c),
+            Some(Exit::Killed) => (status::LastExit::Killed, 0),
+            Some(Exit::StartTimeout) => (status::LastExit::StartTimeout, 0),
+        };
+        status::Reply {
+            found: true,
+            state: match st.state {
+                State::Stopped => status::State::Stopped,
+                State::Starting => status::State::Starting,
+                State::Ready => status::State::Ready,
+                State::Degraded => status::State::Degraded,
+                State::Failed => status::State::Failed,
+            },
+            optional: r.sup.is_optional(),
+            generation: st.generation,
+            restarts: st.restarts,
+            last_exit,
+            last_code,
+            ready_for_ms: st.ready_at.map_or(0, |t| now_ms().saturating_sub(t).max(1)),
+            ..status::Reply::not_found()
+        }
+        .with_name(r.name)
+    }
+}
+
+/// Reinicios provocados (`restart_storm`): un servicio de prueba que muere
+/// tras cada petición se reinicia 100 veces bajo el supervisor mientras fsd
+/// sigue atendiendo; al final la memoria libre debe ser la de antes.
+fn restart_storm(sup: &mut Supervisor, fs: &mut FsClient) -> Result<(), u64> {
+    let ep = sys::endpoint_create().map_err(|_| 40u64)?;
+    let policy = Policy {
+        max_restarts: 200,
+        backoff_initial_ms: 1,
+        backoff_max_ms: 8,
+        start_timeout_ms: 2000,
+        stable_ms: 60_000,
+    };
+    let i = sup
+        .register(
+            "crashy_service",
+            Kind::Program { arg: 0 },
+            Probe::Ping,
+            ep,
+            true,
+            policy,
+        )
+        .ok_or(40u64)?;
+    let mut mem = [0u8; 16];
+    let free = |mem: &mut [u8; 16]| -> u64 {
+        match sys::system_info(SYSTEM, sys::abi::sysinfo::MEMORY, mem) {
+            Ok(16) => u64::from_le_bytes(mem[8..].try_into().unwrap()),
+            _ => 0,
+        }
+    };
+    // Sin ningun proceso de prueba vivo: asi la medida final es comparable.
+    let free_before = free(&mut mem);
+    let t0 = now_ms();
+    if !sup.launch(i) {
+        return Err(41);
+    }
+    let mut fs_ok = 0u32;
+    let mut fs_checks = 0u32;
+    let mut pings = 0u32;
+    loop {
+        sup.poll();
+        let generation = sup.generation(i);
+        if generation > 100 {
+            break;
+        }
+        if now_ms().saturating_sub(t0) > 60_000 {
+            return Err(42);
+        }
+        // "die": contesta y muere; el supervisor lo relanza. Antes de pedir
+        // otra muerte hay que haber visto esta: en SMP el proceso puede
+        // seguir vivo un instante despues de contestar, y un segundo "die"
+        // encolado mataria a la siguiente generacion antes de su sonda.
+        if sup.state(i) == State::Ready && sup.has_process(i) {
+            if ping_once(sup.endpoint(i), b"die") {
+                pings += 1;
+                if pings.is_multiple_of(10) {
+                    fs_checks += 1;
+                    let mut name = [0u8; 32];
+                    if fs.list(0, &mut name).is_ok() {
+                        fs_ok += 1;
+                    }
+                }
+            }
+            let seen = now_ms() + 2000;
+            while sup.has_process(i) && now_ms() < seen {
+                sup.poll();
+            }
+        }
+    }
+    // Ultima generacion: un ping mas la mata; se recoge y se retira el
+    // servicio para que el supervisor no lo relance antes de medir.
+    let _ = ping_once(sup.endpoint(i), b"die");
+    let deadline = now_ms() + 2000;
+    while sup.has_process(i) && now_ms() < deadline {
+        sup.poll();
+    }
+    sup.stop(i);
+    let elapsed = now_ms().saturating_sub(t0);
+    let free_after = free(&mut mem);
+    let delta = free_before as i64 - free_after as i64;
+    let mut b = [0u8; 20];
+    let restarts = sup.generation(i).saturating_sub(1);
+    sys::print(b"AriInit: supervisor: ");
+    sys::print(aricode_rt::fmt_u64(restarts as u64, &mut b));
+    sys::print(b" reinicios de crashy_service en ");
+    sys::print(aricode_rt::fmt_u64(elapsed, &mut b));
+    sys::print(b" ms, fsd respondio ");
+    sys::print(aricode_rt::fmt_u64(fs_ok as u64, &mut b));
+    sys::print(b"/");
+    sys::print(aricode_rt::fmt_u64(fs_checks as u64, &mut b));
+    sys::print(b", memoria: ");
+    if delta < 0 {
+        sys::print(b"-");
+    }
+    sys::print(aricode_rt::fmt_u64(delta.unsigned_abs(), &mut b));
+    sys::print(b" frames de diferencia\n");
+    if restarts != 100 || fs_checks == 0 || fs_ok != fs_checks {
+        return Err(43);
+    }
+    if delta > 32 {
+        say(b"supervisor: se han perdido frames en los reinicios");
+        return Err(44);
+    }
+    Ok(())
+}
+
 /// Lanza un cliente de un servicio con su endpoint (solo WRITE) y
 /// una capacidad de hardware para su buffer DMA, y espera su salida.
 /// Desplazamiento del area en bruto dentro de ARI0 (el disco de pruebas la
@@ -302,6 +720,7 @@ fn run_shell(
     net_service: Handle,
     services: u64,
     broker: &Broker,
+    sup: &mut Supervisor,
 ) -> Result<u64, Error> {
     let fsd = sys::handle_duplicate(fs_service, rights::WRITE | rights::TRANSFER)?;
     let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
@@ -322,7 +741,8 @@ fn run_shell(
         services,
         &[fsd, hw, system, console_in, pci, netd, launch],
     )?;
-    // Atender peticiones de lanzamiento mientras el shell viva.
+    // Atender peticiones de lanzamiento y de estado, y vigilar los
+    // servicios residentes, mientras el shell viva.
     loop {
         match sys::process_wait(child, 0) {
             Err(Error::Timeout) => {}
@@ -331,7 +751,8 @@ fn run_shell(
                 return result;
             }
         }
-        broker.serve_one(20);
+        sup.poll();
+        broker.serve_one(20, sup);
     }
 }
 
@@ -378,7 +799,7 @@ impl Broker {
     }
 
     /// Atiende como mucho una petición (espera hasta `timeout_ms`).
-    fn serve_one(&self, timeout_ms: u64) {
+    fn serve_one(&self, timeout_ms: u64, sup: &Supervisor) {
         let mut msg = [0u8; LaunchRequest::LEN];
         let mut handles = [Handle(0); 1];
         let Ok((n, nh)) = sys::ipc_receive(self.endpoint, &mut msg, &mut handles, timeout_ms)
@@ -389,6 +810,14 @@ impl Broker {
             return;
         }
         let reply_to = handles[0];
+        // El mismo endpoint atiende dos protocolos: lanzamientos (6) y estado
+        // de servicios (7); el primer byte los distingue.
+        if let Some(req) = status::Request::decode(&msg[..n]) {
+            let reply = sup.status(req.index);
+            let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
+            let _ = sys::handle_close(reply_to);
+            return;
+        }
         let reply = match LaunchRequest::decode(&msg[..n]) {
             Some(req) => self.launch(req.name_str(), req.arg),
             None => LaunchReply::status(LaunchStatus::Invalid),
@@ -643,6 +1072,7 @@ fn main(arg: u64) -> u64 {
     let mut fs_service = None;
     let mut block_service = None;
     let mut services = 0u64;
+    let mut sup = Supervisor::new();
     // 1. Un servicio que termina bien.
     match run("hello", 0) {
         Ok(42) => say(b"hello termino con 42"),
@@ -689,9 +1119,22 @@ fn main(arg: u64) -> u64 {
             let Ok(service) = sys::endpoint_create() else {
                 return 9;
             };
-            let Ok(_driver) = start_driver("virtio_blk", index, service, &[]) else {
+            let launched = sup
+                .register(
+                    "virtio_blk",
+                    Kind::Driver {
+                        pci_index: index,
+                        with_system: false,
+                    },
+                    Probe::None,
+                    service,
+                    false,
+                    Policy::DRIVER,
+                )
+                .is_some_and(|i| sup.launch(i));
+            if !launched {
                 return 10;
-            };
+            }
             services |= SERVICE_BLOCK;
             block_service = Some(service);
             // Servicio de ficheros sobre la particion ARI0 (por nombre en la
@@ -707,13 +1150,24 @@ fn main(arg: u64) -> u64 {
                 say(b"sin particion ARI0 en el disco");
                 return 12;
             };
-            match start_fsd(fs_ep, service, ari0_lba) {
-                Ok(_) => services |= SERVICE_FS,
-                Err(e) => {
-                    aricode_rt::print_error(b"AriInit: fsd", e);
-                    return 13;
-                }
+            let launched = sup
+                .register(
+                    "fsd",
+                    Kind::Fs {
+                        block_service: service,
+                        partition_lba: ari0_lba,
+                    },
+                    Probe::None,
+                    fs_ep,
+                    false,
+                    Policy::DRIVER,
+                )
+                .is_some_and(|i| sup.launch(i));
+            if !launched {
+                say(b"fsd no arranco");
+                return 13;
             }
+            services |= SERVICE_FS;
             match run_block_client("fs_client", fs_ep, 0) {
                 Ok(0) => {
                     say(b"servicio de ficheros ok");
@@ -752,16 +1206,24 @@ fn main(arg: u64) -> u64 {
     };
     match find_pci(0x1AF4, 0x1041) {
         Some(index) => {
-            let Ok(system) = sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER) else {
+            let launched = sup
+                .register(
+                    "virtio_net",
+                    Kind::Driver {
+                        pci_index: index,
+                        with_system: true,
+                    },
+                    Probe::None,
+                    net_service,
+                    true,
+                    Policy::DRIVER,
+                )
+                .is_some_and(|i| sup.launch(i));
+            if !launched {
+                say(b"virtio_net no arranco");
                 return 17;
-            };
-            match start_driver("virtio_net", index, net_service, &[system]) {
-                Ok(_) => services |= SERVICE_NET,
-                Err(e) => {
-                    aricode_rt::print_error(b"AriInit: virtio_net", e);
-                    return 17;
-                }
             }
+            services |= SERVICE_NET;
             match run_block_client("net_client", net_service, 0) {
                 Ok(0) => say(b"servicio de red ok"),
                 Ok(code) => {
@@ -816,22 +1278,24 @@ fn main(arg: u64) -> u64 {
         let Ok(ep) = sys::endpoint_create() else {
             return 21;
         };
-        let Ok(system) = sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER) else {
-            return 21;
-        };
-        match start_driver("virtio_input", index, ep, &[system]) {
-            Ok(driver) if input_service_ready(ep, driver) => {
-                input_eps[inputs] = ep;
-                inputs += 1;
-            }
-            Ok(_) => {
-                say(b"virtio_input no llego a servir; se descarta");
-                let _ = sys::handle_close(ep);
-            }
-            Err(e) => {
-                aricode_rt::print_error(b"AriInit: virtio_input", e);
-                return 22;
-            }
+        let launched = sup
+            .register(
+                "virtio_input",
+                Kind::Driver {
+                    pci_index: index,
+                    with_system: true,
+                },
+                Probe::Input,
+                ep,
+                true,
+                Policy::DRIVER,
+            )
+            .is_some_and(|i| sup.launch(i));
+        if launched {
+            input_eps[inputs] = ep;
+            inputs += 1;
+        } else {
+            say(b"virtio_input no llego a servir; se descarta");
         }
     }
     // Controladores USB (clase 0c.03): solo los xHCI (interfaz 0x30) tienen
@@ -858,23 +1322,25 @@ fn main(arg: u64) -> u64 {
         let Ok(ep) = sys::endpoint_create() else {
             return 21;
         };
-        let Ok(system) = sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER) else {
-            return 21;
-        };
-        match start_driver("usb_input", index, ep, &[system]) {
-            Ok(driver) if input_service_ready(ep, driver) => {
-                say(b"entrada usb_input lista");
-                input_eps[inputs] = ep;
-                inputs += 1;
-            }
-            Ok(_) => {
-                say(b"usb_input no llego a servir; se descarta");
-                let _ = sys::handle_close(ep);
-            }
-            Err(e) => {
-                aricode_rt::print_error(b"AriInit: usb_input", e);
-                return 22;
-            }
+        let launched = sup
+            .register(
+                "usb_input",
+                Kind::Driver {
+                    pci_index: index,
+                    with_system: true,
+                },
+                Probe::Input,
+                ep,
+                true,
+                Policy::DRIVER,
+            )
+            .is_some_and(|i| sup.launch(i));
+        if launched {
+            say(b"entrada usb_input lista");
+            input_eps[inputs] = ep;
+            inputs += 1;
+        } else {
+            say(b"usb_input no llego a servir; se descarta");
         }
     }
     if inputs > 0 {
@@ -927,6 +1393,19 @@ fn main(arg: u64) -> u64 {
             }
         }
     }
+    // 10b. Tormenta de reinicios (solo tests, `restart_storm`): 100 reinicios
+    //      de un servicio de prueba bajo el supervisor sin perder recursos.
+    if arg & sys::abi::init_arg::RESTART_STORM != 0 {
+        let Some(fs_ep) = fs_service else {
+            return 40;
+        };
+        let Ok(mut fs) = FsClient::new(fs_ep, HARDWARE) else {
+            return 40;
+        };
+        if let Err(code) = restart_storm(&mut sup, &mut fs) {
+            return code;
+        }
+    }
     // 11. Arranque A/B: solo ahora, con todos los servicios comprobados, se
     //     confirma el slot pendiente. Cualquier retorno de error anterior deja
     //     el estado pendiente para que AriBoot agote intentos y haga rollback.
@@ -956,7 +1435,7 @@ fn main(arg: u64) -> u64 {
         ) else {
             return 26;
         };
-        match run_shell(fs, net_service, services, &broker) {
+        match run_shell(fs, net_service, services, &broker, &mut sup) {
             Ok(code) => {
                 sys::print(b"AriInit: shell terminado con ");
                 sys::print(aricode_rt::fmt_u64(code, &mut buf));

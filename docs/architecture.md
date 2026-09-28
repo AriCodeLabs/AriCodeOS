@@ -963,6 +963,27 @@ services/usb-input             usbd: controlador, enumeración, endpoints de int
   de EP0 con `Evaluate Context`; los intervalos FS/LS se redondean hacia
   abajo (3..=10).
 
+## Supervisión de servicios (etapa 1, ADR 0011)
+
+```text
+libs/supervisor                estados, generaciones, presupuesto de reinicios con espera creciente, plazo de arranque
+services/init                  Supervisor: Resident {kind, probe, endpoint, process, Service}; poll en el bucle del shell
+sdk/proto::status              estado por servicio (protocolo 7) en el endpoint del broker; sdk::status::service_status
+```
+
+- init registra cada servicio residente (`virtio_blk`, `fsd`, `virtio_net`,
+  `virtio_input`, `usb_input`) con su forma de relanzarlo (`Kind`), su sonda
+  (`Probe`) y su política; `launch` crea el proceso, anota la generación y
+  espera a que sirva; `poll` (en cada vuelta del bucle del shell) detecta
+  muertes con `process_wait(0)`, aplica el presupuesto y relanza cuando toca,
+  reclamando de nuevo la función PCI si el driver anterior murió.
+- El endpoint del servicio pertenece a init y se entrega duplicado a cada
+  generación: los clientes no cambian de handle.
+- `restart_storm` (cmdline) reinicia 100 veces `crashy_service` con espera
+  de 1 a 8 ms, comprobando que fsd responde entre medias y que la memoria
+  libre vuelve al nivel anterior (`services.restart_storm`);
+  `shell.services_detail` cubre el estado consultable.
+
 ## Hardware real (Fase 34, preparación)
 
 - `console_input` también lee el teclado PS/2 del i8042: inicialización

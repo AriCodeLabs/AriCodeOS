@@ -73,6 +73,8 @@ pub mod keys {
     pub const BOOT_PENDING: &str = "boot_pending";
     /// `init_fail_late`: init falla tras los servicios y antes de confirmar.
     pub const INIT_FAIL_LATE: &str = "init_fail_late";
+    /// `restart_storm`: init somete a un servicio de prueba a 100 reinicios.
+    pub const RESTART_STORM: &str = "restart_storm";
     /// `smp=off`: no arrancar los procesadores de aplicación (hardware real).
     pub const SMP: &str = "smp";
     /// `iommu=off`: no activar la traducción DMA (hardware real).

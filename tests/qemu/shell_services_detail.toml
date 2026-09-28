@@ -1,0 +1,22 @@
+# Etapa 1: `services --detail` muestra lo que el supervisor de init sabe de
+# cada servicio residente (estado, generacion, reinicios, ultima salida).
+name = "shell.services_detail"
+description = "arish: services --detail consulta el estado del supervisor por el protocolo status v1"
+level = "full"
+areas = ["services", "shell", "init"]
+cmdline = "qemu_exit shell"
+timeout_secs = 60
+stdin = ["services --detail", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "SERVICIO         ESTADO       GEN  REINICIOS  ULTIMA SALIDA     LISTO DESDE",
+    "virtio_blk       listo        1    0          -",
+    "fsd              listo        1    0          -",
+    "virtio_net       listo        1    0          -",
+    "virtio_input     listo        1    0          -",
+    "(opcional)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "init no responde"]

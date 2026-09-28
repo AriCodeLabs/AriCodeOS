@@ -3591,6 +3591,23 @@ primera prueba física de la Fase 34.
 
 ---
 
+## 94.6 Después del roadmap: secuencia posterior
+
+Con las 35 fases implementadas, el desarrollo sigue la secuencia propuesta en
+`docs/audits/2026-09-28-referentes-capacidades-oportunidades.md`, cada
+etapa con sus ramas, ADR y escenarios:
+
+| Etapa | Estado | Contenido |
+|---|---|---|
+| 0. Consolidar | completada (0.6.0) | auditorías resueltas con evidencia; tabla única de estado por capacidad en el README |
+| 1. Recuperación observable | en curso | supervisor de servicios (ADR 0011): estados, generaciones, reinicio con presupuesto y espera creciente, endpoint estable entre generaciones, publicación solo tras responder, `status` v1 y `services --detail`; pendiente: correlación de peticiones IPC y semántica de reintento (1B) |
+| 2. Sesión útil | pendiente | shell con teclados USB y virtio, persistencia de AriFS ante cortes, equipo de referencia |
+| 3. Límites y actualización | pendiente | cuotas, permisos por recurso, cortes de escritura, actualización entre arranques |
+| 4. Aplicaciones externas | pendiente | SDK reproducible, perfil WASI, paquetes |
+| 5. Optimización y ampliación | pendiente | rendimiento, energía, más dispositivos |
+
+---
+
 # 95. Hardware real: momento correcto
 
 No es necesario formatear el portátil antiguo inicialmente.
