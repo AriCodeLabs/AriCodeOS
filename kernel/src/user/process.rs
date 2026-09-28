@@ -10,7 +10,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use aricode_abi::USER_SPACE_END;
 use aricode_pmm::Frame;
-use aricode_sched::Tid;
 use aricode_x86_paging::{Mapper, OffsetMap, NO_EXECUTE, PAGE_SIZE, USER, WRITABLE};
 use log::{info, warn};
 
@@ -49,7 +48,6 @@ pub struct Process {
     foreign: Vec<(u64, u64)>,
     /// `None` una vez liberado el espacio de direcciones.
     mapper: Option<Mapper<vmm::PmmFrames, OffsetMap>>,
-    pub main_thread: Tid,
     pub entry: u64,
     pub status: Option<ExitStatus>,
     /// Límite de memoria DMA (bytes) que el proceso puede reservar en total;
@@ -60,6 +58,10 @@ pub struct Process {
     /// varias CPUs, dos procesos que imprimen una línea en varios trozos se
     /// mezclarían; el kernel emite cada línea entera.
     console_line: Vec<u8>,
+    /// El planificador ya recogió su hilo y liberó su espacio y su dominio
+    /// DMA: solo entonces `wait` puede retirar el proceso (auditoría
+    /// 3eb4965, hallazgo 1: con varias CPUs el estado del hilo no basta).
+    reaped: bool,
 }
 
 /// Tamaño a partir del cual una línea incompleta se emite tal cual.
@@ -196,12 +198,12 @@ fn spawn_full(
             mmio_next: USER_MMIO_BASE,
             foreign: Vec::new(),
             mapper: Some(m),
-            main_thread: tid,
             entry: elf.entry,
             status: None,
             dma_quota,
             dma_used: 0,
             console_line: Vec::new(),
+            reaped: false,
         },
     );
     scheduler::start_thread(thread);
@@ -314,7 +316,8 @@ pub fn kill_current(why: &'static str) -> ! {
     finish(pid, ExitStatus::Killed(why))
 }
 
-/// Libera el espacio de direcciones de un proceso terminado. Lo llama el
+/// Libera el espacio de direcciones y el dominio DMA de un proceso
+/// terminado y lo marca recogido, despertando a quien lo espera. Lo llama el
 /// planificador al recoger su hilo, siempre desde otro hilo y con otro CR3.
 pub fn release_address_space(pid: u32) {
     let taken = PROCESSES.lock().get_mut(&Pid(pid)).and_then(|p| {
@@ -342,42 +345,33 @@ pub fn release_address_space(pid: u32) {
         log::debug!("user: espacio del proceso {pid} liberado ({n} frames)");
     }
     crate::iommu::release(pid);
+    // Recogido del todo: ahora sí puede retirarse de la tabla.
+    let waiters = PROCESSES.lock().get_mut(&Pid(pid)).map(|p| {
+        p.reaped = true;
+        p.exit_wait.clone()
+    });
+    if let Some(w) = waiters {
+        w.wake_all();
+    }
 }
 
-/// Estado de salida si el proceso ha terminado y su hilo ya fue recogido.
-fn finished(pid: Pid) -> Option<ExitStatus> {
-    let procs = PROCESSES.lock();
-    let p = procs.get(&pid)?;
-    let status = p.status?;
-    scheduler::state(p.main_thread).is_none().then_some(status)
-}
-
-/// Espera a que el proceso termine (bloqueando en su cola de salida) y
-/// devuelve su estado, retirándolo de la tabla. `None` si vence el plazo.
+/// Espera a que el proceso termine y esté recogido (espacio y dominio
+/// liberados), y devuelve su estado retirándolo de la tabla. `None` si vence
+/// el plazo o si otro `wait` lo retiró antes.
 pub fn wait_until(pid: Pid, deadline: Option<u64>) -> Option<ExitStatus> {
     let waiters = PROCESSES.lock().get(&pid)?.exit_wait.clone();
     loop {
-        if let Some(status) = finished(pid) {
-            PROCESSES.lock().remove(&pid);
-            return Some(status);
-        }
-        // Entre `status` fijado y el hilo recogido media un cambio de contexto:
-        // ceder cubre ese hueco sin dormir.
-        if PROCESSES
-            .lock()
-            .get(&pid)
-            .is_some_and(|p| p.status.is_some())
         {
-            scheduler::yield_now();
-            continue;
+            let mut procs = PROCESSES.lock();
+            let p = procs.get(&pid)?;
+            if p.reaped {
+                let status = p.status;
+                procs.remove(&pid);
+                return status;
+            }
         }
         let timed_out = waiters.wait_until_deadline(
-            || {
-                PROCESSES
-                    .lock()
-                    .get(&pid)
-                    .is_none_or(|p| p.status.is_some())
-            },
+            || PROCESSES.lock().get(&pid).is_none_or(|p| p.reaped),
             deadline,
         );
         if timed_out {
@@ -389,6 +383,51 @@ pub fn wait_until(pid: Pid, deadline: Option<u64>) -> Option<ExitStatus> {
 /// Espera sin plazo.
 pub fn wait(pid: Pid) -> ExitStatus {
     wait_until(pid, None).expect("sin plazo no hay timeout")
+}
+
+/// Autoprueba (`test=process_reap`, auditoría 3eb4965, hallazgo 1): crear y
+/// esperar procesos por lotes, en todas las CPUs, no pierde frames: `wait`
+/// no retira un proceso hasta que su espacio se ha devuelto al PMM.
+pub fn reap_selftest() {
+    use crate::memory::{heap, pmm};
+    use crate::user::programs;
+
+    let code = programs::by_name("hello").expect("hello en el initrd");
+    // Calentamiento: lo que el heap vaya a crecer, que crezca antes de medir.
+    for _ in 0..4 {
+        let pid = spawn("hello", code).expect("spawn");
+        assert_eq!(wait(pid), ExitStatus::Exited(42));
+    }
+    let free_before = pmm::stats().free_frames;
+    let heap_before = heap::mapped_bytes();
+    const ROUNDS: usize = 30;
+    const BATCH: usize = 6;
+    for _ in 0..ROUNDS {
+        let pids: Vec<Pid> = (0..BATCH)
+            .map(|_| spawn("hello", code).expect("spawn"))
+            .collect();
+        for pid in pids {
+            assert_eq!(wait(pid), ExitStatus::Exited(42));
+            assert!(!exists(pid), "wait debe retirar el proceso {pid:?}");
+        }
+    }
+    assert!(
+        PROCESSES.lock().is_empty(),
+        "no debe quedar ningun proceso en la tabla"
+    );
+    let heap_grown = (heap::mapped_bytes() - heap_before) / PAGE_SIZE;
+    let free_after = pmm::stats().free_frames;
+    let lost = free_before as i64 - free_after as i64 - heap_grown as i64;
+    assert!(
+        lost <= 8,
+        "frames perdidos tras {} procesos: {lost} (heap +{heap_grown} paginas)",
+        ROUNDS * BATCH
+    );
+    info!(
+        "process reap selftest ok ({} procesos creados y esperados en {} CPU(s), {lost} frames de diferencia, heap +{heap_grown} paginas)",
+        ROUNDS * BATCH,
+        crate::cpu::online_count()
+    );
 }
 
 /// Nombre de un proceso vivo (para diagnóstico).

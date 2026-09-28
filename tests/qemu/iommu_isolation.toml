@@ -1,7 +1,8 @@
 # Fase 33: un driver de prueba recibe el virtio-blk, lee un sector en su
 # buffer (traducido) y luego ordena al dispositivo escribir en memoria que no
 # es suya: la unidad lo bloquea y registra el fallo; el dominio se libera con
-# el proceso.
+# el proceso. Ademas (auditoria 3eb4965, hallazgo 2) una funcion reasignada
+# a otro dominio conserva su contexto cuando el anterior se libera.
 name = "iommu.isolation"
 description = "test=iommu: DMA legitimo traducido, DMA a memoria ajena bloqueado y registrado, dominio liberado"
 level = "full"
@@ -16,7 +17,8 @@ serial_contains = [
     "iommu: fallo DMA de 00:02.0 (escritura en 0x1000):",
     "dma_rogue: lectura legitima ok, DMA a memoria ajena bloqueado (",
     "iommu selftest ok (lectura legitima traducida, DMA a memoria ajena bloqueado con",
-    "y la memoria intacta, dominio liberado)",
+    "y la memoria intacta, dominio liberado, reasignacion de 00:02.0 conservada)",
+    "iommu: 00:02.0 reasignado del dominio del proceso 1001 al dominio",
     "ARICODEOS_KERNEL_READY",
 ]
 serial_absent = ["KERNEL PANIC", "USER FAULT"]

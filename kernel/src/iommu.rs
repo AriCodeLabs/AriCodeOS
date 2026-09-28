@@ -126,6 +126,10 @@ struct State {
     levels: u8,
     flush: Option<fn(u64)>,
     domains: BTreeMap<u32, Domain>,
+    /// Propietario único de cada función PCI (clave del dominio que tiene su
+    /// entrada de contexto). Auditoría 3eb4965, hallazgo 2: liberar un
+    /// dominio solo retira los contextos que siguen siendo suyos.
+    owners: BTreeMap<u16, u32>,
     free_dids: Vec<u16>,
     next_did: u16,
     max_did: u16,
@@ -163,8 +167,8 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
 }
 
 /// Localiza las unidades de la DMAR, programa sus tablas raíz y su
-/// interrupción de fallo y activa la traducción. Debe llamarse tras el
-/// APIC y el PMM, antes de que arranque cualquier driver.
+/// interrupción de fallo y activa la traducción. Debe llamarse tras el APIC
+/// y el PMM, antes de que arranque cualquier driver.
 pub fn init() {
     let Some(dmar) = crate::acpi::with(|a| a.dmar.clone()) else {
         info!("iommu: sin tabla DMAR; el DMA de los drivers no se traduce");
@@ -225,13 +229,29 @@ pub fn init() {
         u.w32(regs::FAULT_EVENT_UPPER_ADDRESS, 0);
         u.w32(regs::FAULT_STATUS, fsts::CLEAR_MASK);
         u.w32(regs::FAULT_EVENT_CONTROL, 0);
+        max_did = max_did.min((u.cap.domains() - 1).min(u16::MAX as u32) as u16);
+    }
+    let reserved = dmar.reserved.len();
+    let n = units.len();
+    let state = State {
+        dmar,
+        units,
+        levels,
+        flush,
+        domains: BTreeMap::new(),
+        owners: BTreeMap::new(),
+        free_dids: Vec::new(),
+        next_did: 1,
+        max_did,
+    };
+
+    for (i, u) in state.units.iter().enumerate() {
         u.invalidate_all();
         let active = u.global_command(gcmd::TRANSLATION_ENABLE);
         let ver = u.r32(regs::VERSION);
-        max_did = max_did.min((u.cap.domains() - 1).min(u16::MAX as u32) as u16);
         info!(
             "iommu: unidad {i} @ {:#x} version {}.{}: {} bits de invitado, {} niveles, {} dominios, {} registro(s) de fallo{}{}; traduccion {}",
-            dmar.units[i].register_base,
+            state.dmar.units[i].register_base,
             (ver >> 4) & 0xF,
             ver & 0xF,
             u.cap.guest_address_width(),
@@ -251,21 +271,10 @@ pub fn init() {
             if active { "activa" } else { "NO activada" }
         );
     }
-    let reserved = dmar.reserved.len();
-    let n = units.len();
-    *IOMMU.lock() = Some(State {
-        dmar,
-        units,
-        levels,
-        flush,
-        domains: BTreeMap::new(),
-        free_dids: Vec::new(),
-        next_did: 1,
-        max_did,
-    });
     info!(
         "iommu: {n} unidad(es) activas, {reserved} region(es) reservadas (RMRR); un dominio por proceso con IOVA = fisica"
     );
+    *IOMMU.lock() = Some(state);
 }
 
 /// `true` si hay traducción DMA activa.
@@ -273,10 +282,18 @@ pub fn enabled() -> bool {
     IOMMU.lock().is_some()
 }
 
-/// (unidades, dominios vivos, fallos registrados) para `system_info`.
+/// Las claves por encima son dominios identidad del firmware, no procesos.
+const FIRMWARE_KEYS: u32 = u32::MAX / 2;
+
+/// (unidades, dominios de procesos vivos, fallos registrados) para `system_info`.
 pub fn stats() -> (u64, u64, u64) {
-    let (units, domains) =
-        with(|s| (s.units.len() as u64, s.domains.len() as u64)).unwrap_or((0, 0));
+    let (units, domains) = with(|s| {
+        (
+            s.units.len() as u64,
+            s.domains.keys().filter(|k| **k <= FIRMWARE_KEYS).count() as u64,
+        )
+    })
+    .unwrap_or((0, 0));
     (units, domains, FAULTS.load(Ordering::Relaxed))
 }
 
@@ -391,42 +408,104 @@ fn write_context(ptr: *mut u64, entry: ContextEntry, flush: Option<fn(u64)>) {
     flush_line(flush, ptr as u64);
 }
 
-/// Asigna la función PCI `source` al dominio del proceso `pid` (lo crea si
-/// no existe). Mapea antes sus regiones reservadas (RMRR).
-pub fn attach(pid: u32, source: u16) -> Result<(), &'static str> {
-    let (bus, dev, func) = (
-        (source >> 8) as u8,
-        ((source >> 3) & 0x1F) as u8,
-        (source & 7) as u8,
-    );
-    with(|s| {
-        let unit = s
+impl State {
+    /// Asigna la función PCI `source` al dominio `key` (un PID, o una clave
+    /// del firmware), creándolo si no existe. Mapea antes sus RMRR.
+    fn attach(&mut self, key: u32, source: u16) -> Result<(), &'static str> {
+        let (bus, dev, func) = (
+            (source >> 8) as u8,
+            ((source >> 3) & 0x1F) as u8,
+            (source & 7) as u8,
+        );
+        let unit = self
             .dmar
             .unit_for(0, bus, dev, func)
             .ok_or("iommu: dispositivo fuera de toda unidad")?;
-        let reserved: Vec<(u64, u64)> = s
+        let reserved: Vec<(u64, u64)> = self
             .dmar
             .reserved_for(0, bus, dev, func)
             .map(|r| (r.base, r.limit + 1 - r.base))
             .collect();
         for (base, len) in reserved {
-            s.map_range(pid, base, len)?;
+            self.map_range(key, base, len)?;
         }
-        let levels = s.levels;
-        let flush = s.flush;
-        let dom = s.domain(pid)?;
-        if dom.devices.contains(&(unit, source)) {
+        if self.owners.get(&source) == Some(&key) {
             return Ok(());
         }
-        let (did, root) = (dom.did, dom.tables.root_phys());
-        dom.devices.push((unit, source));
-        let ptr = s.context_entry(unit, source)?;
+        let levels = self.levels;
+        let flush = self.flush;
+        // Todo lo que puede fallar, antes de anotar nada: la tabla de contexto
+        // del bus y el dominio receptor.
+        let ptr = self.context_entry(unit, source)?;
+        let (did, root) = {
+            let dom = self.domain(key)?;
+            (dom.did, dom.tables.root_phys())
+        };
         write_context(ptr, ContextEntry::new(root, did, levels), flush);
-        s.units[unit].invalidate_all();
-        info!("iommu: {bus:02x}:{dev:02x}.{func} asignado al dominio {did} (proceso {pid})");
+        self.units[unit].invalidate_all();
+        // Un solo propietario: el dominio anterior deja de listar la función.
+        let previous = self.owners.insert(source, key);
+        if let Some(prev) = previous.filter(|p| *p != key) {
+            if let Some(old) = self.domains.get_mut(&prev) {
+                old.devices.retain(|d| *d != (unit, source));
+            }
+        }
+        let dom = self.domains.get_mut(&key).expect("dominio recien creado");
+        if !dom.devices.contains(&(unit, source)) {
+            dom.devices.push((unit, source));
+        }
+        match previous {
+            Some(prev) if prev != key && key <= FIRMWARE_KEYS => info!(
+                "iommu: {bus:02x}:{dev:02x}.{func} reasignado del dominio del proceso {prev} al dominio {did} (proceso {key})"
+            ),
+            _ if key > FIRMWARE_KEYS => {
+                info!("iommu: {bus:02x}:{dev:02x}.{func} en el dominio identidad {did} (firmware)")
+            }
+            _ => info!("iommu: {bus:02x}:{dev:02x}.{func} asignado al dominio {did} (proceso {key})"),
+        }
         Ok(())
-    })
-    .unwrap_or(Ok(()))
+    }
+
+    /// Dominio (DID) que la entrada de contexto real de `source` señala, o
+    /// `None` si no está presente. Lee las tablas, no la contabilidad.
+    fn context_domain(&mut self, source: u16) -> Option<u16> {
+        let (bus, dev, func) = (
+            (source >> 8) as u8,
+            ((source >> 3) & 0x1F) as u8,
+            (source & 7) as u8,
+        );
+        let unit = self.dmar.unit_for(0, bus, dev, func)?;
+        let u = &self.units[unit];
+        let root_entry = phys::phys_to_virt(u.root_table + (bus as u64) * 16) as *const u64;
+        // SAFETY: tabla raíz de la unidad, accesible por el mapa físico.
+        let root = RootEntry {
+            low: unsafe { root_entry.read_volatile() },
+            high: 0,
+        };
+        if !root.present() {
+            return None;
+        }
+        let ptr =
+            phys::phys_to_virt(root.context_table() + (source & 0xFF) as u64 * 16) as *const u64;
+        // SAFETY: tabla de contexto creada por `context_entry`.
+        let entry = unsafe {
+            ContextEntry {
+                low: ptr.read_volatile(),
+                high: ptr.add(1).read_volatile(),
+            }
+        };
+        entry.present().then(|| entry.domain())
+    }
+}
+
+/// DID que la entrada de contexto de `source` señala ahora mismo (pruebas).
+pub fn context_domain(source: u16) -> Option<u16> {
+    with(|s| s.context_domain(source)).flatten()
+}
+
+/// Asigna la función PCI `source` al dominio del proceso `pid`.
+pub fn attach(pid: u32, source: u16) -> Result<(), &'static str> {
+    with(|s| s.attach(pid, source)).unwrap_or(Ok(()))
 }
 
 /// Mapea `[phys, phys+len)` identidad en el dominio de `pid`.
@@ -466,9 +545,15 @@ pub fn release(pid: u32) {
         };
         let flush = s.flush;
         for &(unit, source) in &dom.devices {
+            // Solo los contextos que siguen siendo de este dominio: una
+            // función reasignada a otro proceso conserva el suyo.
+            if s.owners.get(&source) != Some(&pid) {
+                continue;
+            }
             if let Ok(ptr) = s.context_entry(unit, source) {
                 write_context(ptr, ContextEntry::NOT_PRESENT, flush);
             }
+            s.owners.remove(&source);
         }
         for u in State::units_of(&dom) {
             s.units[u].invalidate_all();
@@ -582,8 +667,41 @@ pub fn selftest() {
         "el dispositivo escribio en memoria fuera de su dominio"
     );
     let (_, domains, _) = stats();
-    assert_eq!(domains, 0, "el dominio del driver debe liberarse con el");
+    assert_eq!(
+        domains, 0,
+        "el dominio del driver debe liberarse con el (quedan {domains})"
+    );
+
+    // Reasignación (auditoría 3eb4965, hallazgo 2): la función pasa del
+    // dominio A al B (transferencia de la capability MMIO); A termina y B
+    // conserva su contexto; al terminar B el contexto desaparece.
+    let (bus, dev, func) = crate::pci::functions_of_class(0x01)
+        .into_iter()
+        .next()
+        .expect("una funcion de almacenamiento (virtio-blk)");
+    let sid = aricode_iommu::source_id(bus, dev, func);
+    const A: u32 = 1001;
+    const B: u32 = 1002;
+    attach(A, sid).expect("attach A");
+    let did_a = context_domain(sid).expect("contexto de A presente");
+    attach(B, sid).expect("attach B");
+    let did_b = context_domain(sid).expect("contexto de B presente");
+    assert_ne!(did_a, did_b, "B debe tener su propio dominio");
+    release(A);
+    assert_eq!(
+        context_domain(sid),
+        Some(did_b),
+        "liberar A no debe tocar el contexto que ya es de B"
+    );
+    release(B);
+    assert_eq!(
+        context_domain(sid),
+        None,
+        "al liberar B el contexto se retira"
+    );
+    let (_, domains, _) = stats();
+    assert_eq!(domains, 0);
     info!(
-        "iommu selftest ok (lectura legitima traducida, DMA a memoria ajena bloqueado con {recorded} fallo(s) registrados y la memoria intacta, dominio liberado)"
+        "iommu selftest ok (lectura legitima traducida, DMA a memoria ajena bloqueado con {recorded} fallo(s) registrados y la memoria intacta, dominio liberado, reasignacion de {bus:02x}:{dev:02x}.{func} conservada)"
     );
 }

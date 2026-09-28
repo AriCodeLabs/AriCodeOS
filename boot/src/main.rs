@@ -328,10 +328,15 @@ fn load_initrd(from_slot: Option<Vec<u8>>) -> Result<(u64, u64), &'static str> {
     let dst = alloc_pages(pages, "initrd")?;
     // SAFETY: `dst` tiene `pages * 4096 >= bytes.len()` bytes recién reservados.
     unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.as_ptr(), bytes.len()) };
+    let digest = aricode_crypto::sha256::sha256(&bytes);
     info!(
-        "initrd.img: {} KiB en phys {:#x}",
+        "initrd.img: {} KiB en phys {:#x}, sha256 {:02x}{:02x}{:02x}{:02x}",
         bytes.len() / 1024,
-        dst.as_ptr() as u64
+        dst.as_ptr() as u64,
+        digest[0],
+        digest[1],
+        digest[2],
+        digest[3]
     );
     Ok((dst.as_ptr() as u64, bytes.len() as u64))
 }

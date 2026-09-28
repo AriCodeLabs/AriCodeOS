@@ -1,0 +1,821 @@
+[xtask] nivel Full
+[xtask] unit tests (host)
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.26
+   Compiling quote v1.0.47
+   Compiling serde_core v1.0.229
+   Compiling aricode-fb-console v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/fb-console)
+   Compiling aricode-pci v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/pci)
+   Compiling serde v1.0.229
+   Compiling aricode-net v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/net)
+   Compiling aricode-initrd v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/initrd)
+   Compiling aricode-http v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/http)
+   Compiling aricode-proto v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/sdk/proto)
+   Compiling aricode-crypto v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/crypto)
+   Compiling aricode-x86-paging v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/x86-paging)
+   Compiling hashbrown v0.17.1
+   Compiling equivalent v1.0.2
+   Compiling aricode-abi v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/sdk/abi)
+   Compiling aricode-gfx v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/gfx)
+   Compiling toml_write v0.1.2
+   Compiling aricode-virtio v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/virtio)
+   Compiling winnow v0.7.15
+   Compiling aricode-gpt v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/gpt)
+   Compiling aricode-ab v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/ab)
+   Compiling aricode-arifs v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/arifs)
+   Compiling aricode-fat v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/fat)
+   Compiling aricode-sys v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/sdk/rust)
+   Compiling aricode-iommu v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/iommu)
+   Compiling aricode-build v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/sdk/build)
+   Compiling aricode-x86-cpu v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/x86-cpu)
+   Compiling aricode-manifest v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/manifest)
+   Compiling aricode-cmdline v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/cmdline)
+   Compiling boot-protocol v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/boot-protocol)
+   Compiling aricode-wasm v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/wasm)
+   Compiling aricode-sched v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/sched)
+   Compiling indexmap v2.14.2
+   Compiling aricode-input v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/input)
+   Compiling aricode-acpi v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/acpi)
+   Compiling aricode-elf v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/elf)
+   Compiling aricode-heap v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/heap)
+   Compiling aricode-pmm v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/pmm)
+   Compiling aricode-handles v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/handles)
+   Compiling aricode-sync v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/sync)
+   Compiling syn v3.0.6
+   Compiling serde_derive v1.0.229
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling toml_edit v0.22.27
+   Compiling toml v0.8.23
+   Compiling xtask v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/tools/xtask)
+    Finished `test` profile [optimized + debuginfo] target(s) in 6.56s
+     Running unittests src/lib.rs (target/debug/deps/aricode_ab-ff521bdc5997af2c)
+
+running 4 tests
+test tests::boot_policy ... ok
+test tests::state_round_trip_and_crc ... ok
+test tests::manifest_text_round_trip ... ok
+test tests::image_verification ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_abi-b2c4a13cbc034dbe)
+
+running 7 tests
+test tests::errors_round_trip_and_decode ... ok
+test tests::framebuffer_info_round_trip ... ok
+test tests::pci_info_round_trip ... ok
+test tests::process_entry_round_trip ... ok
+test tests::receive_result_packs_len_and_handles ... ok
+test tests::spawn_limits_pack ... ok
+test tests::user_range_checks ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_acpi-b4b0f397715d7497)
+
+running 5 tests
+test tests::dmar_units_reserved_regions_and_scopes ... ok
+test tests::madt_entries_and_isa_override ... ok
+test tests::rsdp_v1_and_v2 ... ok
+test tests::mcfg_entries ... ok
+test tests::xsdt_entries_and_validation ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_arifs-83e6e820d7438ccf)
+
+running 3 tests
+test tests::format_create_write_read_and_reopen ... ok
+test tests::writes_across_sectors_and_append ... ok
+test tests::errors ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_build-9e490ee57c04b366)
+
+running 1 test
+test tests::linker_script_exists ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_cmdline-667ce968ec6a78f1)
+
+running 3 tests
+test tests::empty_and_invalid_utf8 ... ok
+test tests::last_value_wins ... ok
+test tests::parses_flags_and_values ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_crypto-a5cc8cb328871278)
+
+running 11 tests
+test chacha20::tests::rfc7539_block_vector ... ok
+test chacha20::tests::rng_is_deterministic_and_reseed_changes_stream ... ok
+test ed25519::tests::field_round_trip_and_inverse ... ok
+test ed25519::tests::scalar_reduction ... ok
+test sha256::tests::incremental_matches_one_shot ... ok
+test sha512::tests::fips_vectors ... ok
+test tests::hex_round_trip_and_ct_eq ... ok
+test ed25519::tests::long_message_round_trip ... ok
+test ed25519::tests::scalar_products_with_large_limbs_do_not_overflow ... ok
+test sha256::tests::fips_vectors ... ok
+test ed25519::tests::rfc8032_test_vectors ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_elf-64626cfee39fe019)
+
+running 10 tests
+test tests::empty_segments_are_dropped_and_cannot_clobber_text ... ok
+test tests::parses_entry_and_segments ... ok
+test tests::rejects_bad_magic ... ok
+test tests::rejects_address_overflow ... ok
+test tests::rejects_entry_outside_executable_segment ... ok
+test tests::rejects_no_segments ... ok
+test tests::rejects_overlapping_segments ... ok
+test tests::rejects_segment_with_filesz_beyond_data ... ok
+test tests::rejects_short_and_truncated ... ok
+test tests::rejects_wrong_class_or_machine ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_fat-391a5671dbb406ba)
+
+running 4 tests
+test tests::lfn_checksum_matches_spec_example ... ok
+test tests::size_limits ... ok
+test tests::esp_layout_round_trip ... ok
+test tests::many_long_names_extend_the_directory ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_fb_console-535569dc4debbe96)
+
+running 6 tests
+test tests::newline_wrap_and_tab ... ok
+test tests::non_ascii_becomes_question_mark ... ok
+test tests::renders_glyph_pixels_from_font ... ok
+test tests::scrolls_when_full ... ok
+test tests::grid_size_and_clear ... ok
+test tests::huge_surface_is_clamped_to_max_cells ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_gfx-31de673946e73adb)
+
+running 5 tests
+test tests::desktop_windows_focus_and_hit_test ... ok
+test tests::fill_blit_and_clip ... ok
+test tests::rect_math ... ok
+test tests::text_and_cursor_draw_something_inside_bounds ... ok
+test tests::compose_two_windows_and_cursor ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_gpt-3c6b358970d8e1a6)
+
+running 3 tests
+test tests::crc32_known_vector ... ok
+test tests::write_then_read_back ... ok
+test tests::corruption_is_detected ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_handles-1b594b11f964db5c)
+
+running 5 tests
+test tests::duplicate_only_reduces_rights ... ok
+test tests::forged_and_stale_handles_are_rejected ... ok
+test tests::insert_get_and_rights ... ok
+test tests::table_limit ... ok
+test tests::take_requires_transfer_and_moves_the_handle ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_heap-d935205870c5a775)
+
+running 6 tests
+test tests::alloc_free_reuse_and_coalesce ... ok
+test tests::multiple_regions_and_small_tail_absorbed ... ok
+test tests::out_of_memory_returns_none_and_keeps_state ... ok
+test tests::respects_large_alignment ... ok
+test tests::unrepresentable_requests_return_none_and_leave_list_intact ... ok
+test tests::many_small_allocations_in_random_order ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_http-624d1806f8640755)
+
+running 11 tests
+test tests::chunk_decoder_rejects_garbage_without_panicking ... ok
+test tests::chunk_decoder_streams_across_boundaries ... ok
+test tests::close_delimited_body_exactly_fits ... ok
+test tests::chunk_larger_than_scratch_fits_caller_buffer ... ok
+test tests::get_request_and_url ... ok
+test tests::informational_responses_precede_the_final_one ... ok
+test tests::long_hostname_is_kept_whole_in_host_header ... ok
+test tests::nominal_length_response ... ok
+test tests::oversized_headers_and_non_http ... ok
+test tests::reset_is_not_successful_completion ... ok
+test tests::response_headers_and_framing_precedence ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_initrd-4094e8ca6bae64f1)
+
+running 3 tests
+test tests::corrupt_images_are_rejected ... ok
+test tests::empty_image ... ok
+test tests::roundtrip_and_alignment ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_input-0fa82db9bdce3497)
+
+running 4 tests
+test tests::event_round_trip ... ok
+test tests::keyboard_translates_hola_enter ... ok
+test tests::scancode_set1_to_evdev_and_ascii ... ok
+test tests::shift_caps_and_repeats ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_iommu-4b3d557c80d64b74)
+
+running 5 tests
+test tests::capability_fields ... ok
+test tests::fault_record_decoding ... ok
+test tests::flush_hook_runs_for_every_written_entry ... ok
+test tests::root_and_context_entries ... ok
+test tests::second_level_map_translate_unmap_and_limits ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_manifest-653a8e32ec269898)
+
+running 3 tests
+test tests::defaults_and_units ... ok
+test tests::parses_full_manifest ... ok
+test tests::rejects_bad_input ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_net-bd44186133523db7)
+
+running 18 tests
+test arp::tests::cache_replaces_oldest ... ok
+test arp::tests::request_reply_round_trip ... ok
+test dhcp::tests::full_handshake ... ok
+test dhcp::tests::retries_and_nak ... ok
+test dns::tests::query_answer_round_trip ... ok
+test eth::tests::header_round_trip ... ok
+test icmp::tests::echo_round_trip ... ok
+test ipv4::tests::header_round_trip_and_validation ... ok
+test tcp::tests::header_round_trip_and_bad_checksum ... ok
+test tcp::tests::handshake_data_and_close ... ok
+test tcp::tests::multiple_independent_connections ... ok
+test tcp::tests::gives_up_after_too_many_retries ... ok
+test tcp::tests::reset_closes_immediately ... ok
+test tests::checksum_rfc1071_example ... ok
+test tcp::tests::retransmits_lost_syn_and_data ... ok
+test udp::tests::udp_round_trip_with_checksum ... ok
+test tcp::tests::random_loss_keeps_stream_in_order ... ok
+test tests::ipv4_parse_and_format ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_pci-92102866e3d075ae)
+
+running 5 tests
+test tests::bar_decoding ... ok
+test tests::capability_list_walk_stops_on_loops ... ok
+test tests::ecam_offsets_and_display ... ok
+test tests::header_parse_and_absent_function ... ok
+test tests::input_controller_class_names ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_pmm-85ddfbd1ac4a1b56)
+
+running 7 tests
+test tests::allocate_returns_lowest_and_unique_frames ... ok
+test tests::contiguous_allocation_respects_alignment_and_gaps ... ok
+test tests::free_and_double_free ... ok
+test tests::rejects_small_bitmap - should panic ... ok
+test tests::reserve_range_rounds_outward_and_hint_moves_back_on_free ... ok
+test tests::sizes_and_frame_helpers ... ok
+test tests::starts_fully_reserved_then_frees_whole_frames_only ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_proto-56355f522e24b73f)
+
+running 7 tests
+test tests::fs_request_and_reply_round_trip ... ok
+test tests::input_round_trip ... ok
+test tests::launch_round_trip ... ok
+test tests::net_request_reply_round_trip ... ok
+test tests::reply_round_trip ... ok
+test tests::request_round_trip_and_rejections ... ok
+test tests::window_round_trip ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_sched-ecac59786086059e)
+
+running 10 tests
+test tests::affinity_restricts_which_cpu_takes_a_thread ... ok
+test tests::block_and_unblock ... ok
+test tests::cpus_share_one_ready_queue_and_have_their_own_idle ... ok
+test tests::exit_and_reap ... ok
+test tests::idle_runs_when_nothing_is_ready_and_is_never_queued ... ok
+test tests::idle_cannot_exit - should panic ... ok
+test tests::round_robin_order_is_fair_and_cyclic ... ok
+test tests::sleep_wakes_at_tick_in_queue_order ... ok
+test tests::wake_handles_blocked_and_sleeping ... ok
+test tests::wake_of_running_thread_is_kept_until_it_blocks ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_sync-e3cebb4a2105e892)
+
+running 6 tests
+test tests::forgotten_guard_is_released_by_force_unlock ... ok
+test tests::lock_guard_and_try_lock ... ok
+test tests::get_mut_bypasses_lock ... ok
+test tests::policy_is_applied_symmetrically_even_on_failed_try_lock ... ok
+test tests::spinning_restores_policy_between_attempts ... ok
+test tests::mutual_exclusion_across_threads ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_sys-2f15742cd7f203a1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_virtio-7e9a959426b82146)
+
+running 4 tests
+test tests::add_chain_and_pop_used_recycles_descriptors ... ok
+test tests::blk_request_header_bytes ... ok
+test tests::finds_virtio_pci_structures ... ok
+test tests::layout_alignment ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_wasm-9ee8eff50da43b1d)
+
+running 14 tests
+test tests::arithmetic_and_locals ... ok
+test tests::br_table_globals_and_indirect_calls ... ok
+test tests::bulk_memory_copy_and_fill ... ok
+test tests::if_else_block_results_and_select ... ok
+test tests::i64_and_conversions ... ok
+test tests::imports_reach_the_host ... ok
+test tests::loop_sums_with_br_if_and_locals ... ok
+test tests::memory_loads_stores_and_bounds ... ok
+test tests::rejects_bad_modules ... ok
+test tests::start_function_runs_before_exports ... ok
+test tests::memory_is_bounded_by_current_pages_not_host_buffer ... ok
+test tests::memory_starts_and_grows_zeroed ... ok
+test tests::calls_recursion_and_return ... ok
+test tests::traps_and_limits ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_x86_cpu-b49866e644c12d59)
+
+running 7 tests
+test tests::exception_table ... ok
+test tests::gdt_overflow_panics - should panic ... ok
+test tests::gdt_selectors_and_pointer ... ok
+test tests::idt_entry_splits_handler_address ... ok
+test tests::segment_descriptors_match_known_encodings ... ok
+test tests::idt_table_pointer ... ok
+test tests::tss_layout_and_descriptor ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_x86_paging-9e02645f7b33a756)
+
+running 9 tests
+test tests::map_2m_and_collisions ... ok
+test tests::map_4k_translates_and_masks_flags ... ok
+test tests::offset_map_and_bump_frames ... ok
+test tests::pool_size_covers_windows_and_kernel ... ok
+test tests::out_of_frames_is_reported ... ok
+test tests::unmap_returns_phys_and_clears ... ok
+test tests::share_kernel_half_and_free_user_half ... ok
+test tests::user_mappings_set_user_on_the_whole_path ... ok
+test tests::preallocated_kernel_half_makes_later_mappings_visible ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/boot_protocol-8dac5276bbb303c7)
+
+running 3 tests
+test tests::classifies_uefi_memory_types ... ok
+test tests::cmdline_accessor ... ok
+test tests::iterates_descriptors_with_firmware_stride ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/xtask-6811ed2a1118d002)
+
+running 14 tests
+test image::tests::empty_segment_injection_appends_a_load_header ... ok
+test qemu::tests::counts_prompts ... ok
+test qemu::tests::responder_echoes_and_answers_dns ... ok
+test qemu::tests::strips_csi_sequences ... ok
+test image::tests::symlinked_scenario_dir_is_rejected_and_outside_data_survives ... ok
+test scenario::tests::level_filter_is_inclusive ... ok
+test scenario::tests::empty_selection_is_an_error_for_qemu_levels ... ok
+test image::tests::symlinked_esp_is_rejected ... ok
+test scenario::tests::scenario_names_cannot_escape_scenarios_dir ... ok
+test scenario::tests::load_rejects_invalid_names ... ok
+test image::tests::nominal_scenario_esp_is_built_inside_root ... ok
+test keys::tests::keygen_sign_verify_round_trip ... ok
+test scenario::tests::repo_scenarios_are_valid_and_unique ... ok
+test scenario::tests::repo_scenarios_have_known_disk_variants ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_ab
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_abi
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_acpi
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_arifs
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_build
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_cmdline
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_crypto
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_elf
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_fat
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_fb_console
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_gfx
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_gpt
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_handles
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_heap
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_http
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_initrd
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_input
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_iommu
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_manifest
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_net
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_pci
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_pmm
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_proto
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_sched
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_sync
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_sys
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_virtio
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_wasm
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_x86_cpu
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_x86_paging
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests boot_protocol
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[xtask] build user-testprogs (x86_64-unknown-none)
+   Compiling aricode-fb-console v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/fb-console)
+   Compiling aricode-pci v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/pci)
+   Compiling aricode-net v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/net)
+   Compiling aricode-build v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/sdk/build)
+   Compiling aricode-proto v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/sdk/proto)
+   Compiling aricode-abi v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/sdk/abi)
+   Compiling aricode-http v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/http)
+   Compiling aricode-heap v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/heap)
+   Compiling aricode-sync v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/sync)
+   Compiling aricode-input v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/input)
+   Compiling user-testprogs v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/user/testprogs)
+   Compiling aricode-gfx v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/gfx)
+   Compiling aricode-virtio v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/virtio)
+   Compiling aricode-sys v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/sdk/rust)
+   Compiling aricode-rt v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/sdk/runtime)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.93s
+[xtask] build ariinit (x86_64-unknown-none)
+   Compiling ariinit v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/services/init)
+   Compiling aricode-initrd v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/initrd)
+   Compiling aricode-crypto v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/crypto)
+   Compiling aricode-gpt v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/gpt)
+   Compiling aricode-manifest v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/manifest)
+   Compiling aricode-ab v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/ab)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.63s
+[xtask] build ari-virtio-blk (x86_64-unknown-none)
+   Compiling ari-virtio-blk v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/services/virtio-blk)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.35s
+[xtask] build ari-virtio-net (x86_64-unknown-none)
+   Compiling ari-virtio-net v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/services/virtio-net)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.84s
+[xtask] build ari-virtio-input (x86_64-unknown-none)
+   Compiling ari-virtio-input v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/services/virtio-input)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.36s
+[xtask] build ari-compositor (x86_64-unknown-none)
+   Compiling ari-compositor v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/services/compositor)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.44s
+[xtask] build ari-fsd (x86_64-unknown-none)
+   Compiling ari-fsd v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/services/arifs)
+   Compiling aricode-arifs v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/arifs)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.47s
+[xtask] build ari-app-hello (x86_64-unknown-none)
+   Compiling ari-app-hello v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/apps/hello)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.28s
+[xtask] build ari-app-perms-check (x86_64-unknown-none)
+   Compiling ari-app-perms-check v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/apps/perms-check)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.23s
+[xtask] build ari-app-updater (x86_64-unknown-none)
+   Compiling ari-app-updater v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/apps/updater)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.41s
+[xtask] build ari-app-fs-probe (x86_64-unknown-none)
+   Compiling ari-app-fs-probe v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/apps/fs-probe)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.20s
+[xtask] build ari-app-win-probe (x86_64-unknown-none)
+   Compiling ari-app-win-probe v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/apps/win-probe)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.19s
+[xtask] build ari-app-wasm-runner (x86_64-unknown-none)
+   Compiling ari-app-wasm-runner v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/apps/wasm-runner)
+   Compiling aricode-wasm v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/wasm)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.91s
+[xtask] build ari-shell (x86_64-unknown-none)
+   Compiling ari-shell v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/services/shell)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.50s
+[xtask] build wasm-demo (wasm32-unknown-unknown)
+   Compiling wasm-demo v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/apps/wasm-demo)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.12s
+[xtask] build ariboot (x86_64-unknown-uefi)
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.26
+   Compiling quote v1.0.47
+   Compiling bit_field v0.10.3
+   Compiling bitflags v2.13.2
+   Compiling uguid v2.2.1
+   Compiling log v0.4.34
+   Compiling aricode-initrd v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/initrd)
+   Compiling aricode-crypto v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/crypto)
+   Compiling cfg-if v1.0.5
+   Compiling boot-protocol v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/boot-protocol)
+   Compiling aricode-elf v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/elf)
+   Compiling aricode-x86-paging v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/x86-paging)
+   Compiling aricode-gpt v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/gpt)
+   Compiling aricode-cmdline v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/cmdline)
+   Compiling ucs2 v0.3.3
+   Compiling uefi-raw v0.17.0
+   Compiling aricode-ab v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/ab)
+   Compiling syn v3.0.6
+   Compiling ptr_meta_derive v0.3.2
+   Compiling uefi-macros v0.20.0
+   Compiling ptr_meta v0.3.2
+   Compiling uefi v0.41.0
+   Compiling ariboot v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/boot)
+    Finished `release` profile [optimized + debuginfo] target(s) in 5.36s
+[xtask] build arikernel (x86_64-unknown-none)
+   Compiling aricode-x86-paging v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/x86-paging)
+   Compiling arikernel v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/kernel)
+   Compiling aricode-elf v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/elf)
+   Compiling aricode-handles v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/handles)
+   Compiling aricode-pmm v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/pmm)
+   Compiling aricode-acpi v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/acpi)
+   Compiling log v0.4.34
+   Compiling aricode-cmdline v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/cmdline)
+   Compiling aricode-x86-cpu v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/x86-cpu)
+   Compiling boot-protocol v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/boot-protocol)
+   Compiling aricode-sched v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/sched)
+   Compiling aricode-iommu v0.5.0 (/tmp/aricode-review-3eb4965-8k8lsac4/libs/iommu)
+    Finished `release` profile [optimized + debuginfo] target(s) in 6.05s
+[xtask] imagen ESP en /tmp/aricode-review-3eb4965-8k8lsac4/build/esp
+[PASS] boot.kernel_panic_reports              1.7s  
+[PASS] boot.kernel_ready                     14.5s  
+[PASS] boot.loader_ignores_empty_segment     13.9s  
+[PASS] boot.loader_missing_kernel             1.6s  
+[PASS] boot.loader_rejects_bad_elf            1.5s  
+[PASS] boot.loader_rejects_bad_entry          1.6s  
+[PASS] capabilities.revoke                    1.7s  
+[PASS] console.input                          1.8s  
+[PASS] console.log_level_default_info        14.1s  
+[PASS] console.log_level_invalid_falls_back  14.3s  
+[PASS] console.log_level_trace               19.4s  
+[PASS] console.log_level_warn                 8.7s  
+[PASS] console.ps2                            1.9s  
+[PASS] crypto.random                          1.7s  
+[PASS] drivers.acpi_ioapic                   14.6s  
+[PASS] drivers.user_irq_mmio_dma              1.8s  
+[PASS] filesystem.read_write                 14.1s  
+[PASS] gui.two_windows                       11.3s  
+[PASS] init.boot                             14.3s  
+[PASS] input.virtio                          11.9s  
+[PASS] interrupts.breakpoint_returns          1.7s  
+[PASS] interrupts.double_fault_uses_ist       1.7s  
+[PASS] interrupts.invalid_opcode_panics       1.7s  
+[PASS] interrupts.page_fault_reports_cr2      1.7s  
+[PASS] iommu.disabled                        13.6s  
+[PASS] iommu.enabled                         14.3s  
+qemu-aricode-review: vtd_iova_to_slpte: detected slpte permission error (iova=0x1000, level=0x2, slpte=0x0, write=1, pasid=0xffffffff)
+qemu-aricode-review: vtd_iommu_translate: detected translation failure (dev=00:02:00, iova=0x1000)
+qemu-aricode-review: New fault is not recorded due to compression of faults
+[PASS] iommu.isolation                        2.2s  
+[PASS] ipc.ping_pong                          1.9s  
+[PASS] memory.heap_init                      14.4s  
+[PASS] memory.heap_oom_recovers               1.7s  
+[PASS] memory.heap_selftest                   1.7s  
+[PASS] memory.nx_data_exec_faults             1.7s  
+[PASS] memory.pmm_init                       14.4s  
+[PASS] memory.pmm_selftest                    1.7s  
+[PASS] memory.stack_guard_page                1.7s  
+[PASS] memory.vmm_init                       14.2s  
+[PASS] memory.vmm_selftest                    1.7s  
+[PASS] memory.wx_rodata_write_faults          1.7s  
+[PASS] network.http                          14.3s  
+[PASS] network.stack                         14.3s  
+[PASS] network.tcp                           13.0s  
+[PASS] pci.enumerate                         14.5s  
+[PASS] sandbox.manifest                     114.5s  
+[PASS] scheduler.init                        14.1s  
+[PASS] scheduler.selftest                     2.1s  
+[PASS] shell.commands                        22.1s  
+[PASS] shell.exit                            14.6s  
+[PASS] shell.reboot                          14.5s  
+[PASS] smp.boot                              16.0s  
+[PASS] smp.disabled                          14.3s  
+[PASS] smp.selftest                           2.0s  
+[PASS] smp.shell_user                        42.5s  
+[PASS] smp.single_cpu_selftest                1.8s  
+[PASS] storage.block_service                 14.4s  
+[PASS] threads.init                          14.4s  
+[PASS] threads.selftest                       1.8s  
+[PASS] timer.init                            14.3s  
+[PASS] timer.selftest                         1.7s  
+[PASS] update.apply                          15.1s  
+[PASS] update.esp_fallback                   14.0s  
+[PASS] update.no_confirm_on_late_failure     14.6s  
+[PASS] update.pending_boot                   14.4s  
+[PASS] update.readonly_no_pending_boot        1.7s  
+[PASS] update.reject_bad_signature           14.4s  
+[PASS] update.rollback_exhausted             14.2s  
+[PASS] update.slot_a                         14.3s  
+[xtask] imagen USB en /tmp/aricode-review-3eb4965-8k8lsac4/build/scenarios/usb.image_boot/disk.img (104 MiB, 4 ficheros en la ESP)
+[PASS] usb.image_boot                        14.6s  
+[PASS] user.bad_pointer                       1.7s  
+[PASS] user.bad_syscall                       1.7s  
+[PASS] user.handles                           1.7s  
+[PASS] user.hello                             1.7s  
+[PASS] user.kernel_read_killed                1.7s  
+[PASS] user.kernel_write_killed               1.7s  
+[PASS] user.privileged_killed                 1.7s  
+[PASS] user.sleep_yield                       1.7s  
+[PASS] virtio.blk_rw                         14.3s  
+[PASS] wasm.demo                             15.6s  
+[xtask] 77 escenarios QEMU, 0 fallidos

@@ -3506,7 +3506,10 @@ Siguiente: 0.5 con SMP (Fase 32) e IOMMU (Fase 33).
 
 ## 94.4 AriCodeOS 0.5
 
-**Estado: completada (2026-09-27), tag `v0.5.0`.** Fases 32 y 33:
+**Estado: completada (2026-09-27), tag `v0.5.0`; hotfix `v0.5.1` (2026-09-28)
+con las correcciones de la auditoría 3eb4965: recogida de procesos en SMP,
+propietario único por función PCI en el IOMMU y consola de framebuffer fuera
+de la pila de arranque.** Fases 32 y 33:
 
 - SMP: arranque de los procesadores de aplicación por INIT-SIPI, estado
   por CPU (`swapgs`), planificador con cola compartida, idle por CPU,
