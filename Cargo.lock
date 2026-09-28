@@ -267,6 +267,10 @@ name = "aricode-sched"
 version = "0.6.0"
 
 [[package]]
+name = "aricode-supervisor"
+version = "0.6.0"
+
+[[package]]
 name = "aricode-sync"
 version = "0.6.0"
 
@@ -315,6 +319,7 @@ dependencies = [
  "aricode-manifest",
  "aricode-proto",
  "aricode-rt",
+ "aricode-supervisor",
  "aricode-sys",
 ]
 

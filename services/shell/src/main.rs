@@ -87,7 +87,7 @@ fn trim(s: &[u8]) -> &[u8] {
 
 fn help() {
     sys::print(
-        b"comandos:\n  help      esta ayuda\n  ps        procesos\n  mem       memoria fisica\n  ls        ficheros de AriFS\n  cat NOM   muestra un fichero\n  devices   funciones PCI\n  services  servicios de arranque\n  uptime    tiempo desde el arranque\n  cpus      procesadores en linea\n  net       configuracion de red\n  ping IP   eco ICMP (4 intentos)\n  dns NOM   resuelve un nombre\n  http URL  GET y muestra el cuerpo\n  run PROG  ejecuta un programa del initrd y espera\n  repeat N CMD  repite un comando N veces\n  reboot    reinicia\n  shutdown  apaga\n  exit      termina el shell\n",
+        b"comandos:\n  help      esta ayuda\n  ps        procesos\n  mem       memoria fisica\n  ls        ficheros de AriFS\n  cat NOM   muestra un fichero\n  devices   funciones PCI\n  services  servicios de arranque (--detail: estado del supervisor)\n  uptime    tiempo desde el arranque\n  cpus      procesadores en linea\n  net       configuracion de red\n  ping IP   eco ICMP (4 intentos)\n  dns NOM   resuelve un nombre\n  http URL  GET y muestra el cuerpo\n  run PROG  ejecuta un programa del initrd y espera\n  repeat N CMD  repite un comando N veces\n  reboot    reinicia\n  shutdown  apaga\n  exit      termina el shell\n",
     );
 }
 
@@ -479,6 +479,72 @@ fn services(mask: u64, fs: &FsClient) {
     });
 }
 
+/// `services --detail`: lo que init sabe de cada servicio supervisado.
+fn services_detail() {
+    use aricode_rt::sys::status::{service_status, LastExit};
+    sys::print(b"SERVICIO         ESTADO       GEN  REINICIOS  ULTIMA SALIDA     LISTO DESDE\n");
+    let mut index = 0u8;
+    loop {
+        let entry = match service_status(BROKER, index) {
+            Ok(Some(e)) => e,
+            Ok(None) => break,
+            Err(_) => {
+                sys::print(b"services: init no responde\n");
+                return;
+            }
+        };
+        let name = entry.name_str().as_bytes();
+        sys::print(name);
+        for _ in name.len()..17 {
+            sys::print(b" ");
+        }
+        let state = entry.state.name().as_bytes();
+        sys::print(state);
+        for _ in state.len()..13 {
+            sys::print(b" ");
+        }
+        let mut b = [0u8; 20];
+        let g = aricode_rt::fmt_u64(entry.generation as u64, &mut b);
+        sys::print(g);
+        for _ in g.len()..5 {
+            sys::print(b" ");
+        }
+        let r = aricode_rt::fmt_u64(entry.restarts as u64, &mut b);
+        sys::print(r);
+        for _ in r.len()..11 {
+            sys::print(b" ");
+        }
+        match entry.last_exit {
+            LastExit::None => sys::print(b"-                 "),
+            LastExit::Code => {
+                sys::print(b"codigo ");
+                let c = aricode_rt::fmt_u64(entry.last_code, &mut b);
+                sys::print(c);
+                for _ in c.len()..11 {
+                    sys::print(b" ");
+                }
+            }
+            LastExit::Killed => sys::print(b"fallo (killed)    "),
+            LastExit::StartTimeout => sys::print(b"plazo de arranque "),
+        }
+        if entry.ready_for_ms > 0 {
+            sys::print(b"hace ");
+            num(entry.ready_for_ms / 1000);
+            sys::print(b" s");
+        } else {
+            sys::print(b"-");
+        }
+        if entry.optional {
+            sys::print(b"  (opcional)");
+        }
+        sys::print(b"\n");
+        index += 1;
+        if index == 255 {
+            break;
+        }
+    }
+}
+
 fn main(mask: u64) -> u64 {
     let Ok(mut fs) = FsClient::new(FSD, HW) else {
         sys::print(b"arish: sin cliente de ficheros\n");
@@ -517,6 +583,7 @@ fn execute(
         b"ls" => ls(fs),
         b"cat" => cat(fs, rest),
         b"devices" => devices(),
+        b"services" if rest == b"--detail" => services_detail(),
         b"services" => services(mask, fs),
         b"uptime" => uptime(),
         b"cpus" => cpus(),

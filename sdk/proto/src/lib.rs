@@ -1312,3 +1312,205 @@ mod tests {
         assert_eq!(Reply::decode(&bad), None);
     }
 }
+
+/// Estado de los servicios supervisados por init (etapa 1 del plan posterior
+/// al roadmap): el shell y las herramientas de diagnóstico lo consultan por
+/// el endpoint del broker; init distingue las peticiones por el byte de
+/// protocolo. Una petición por servicio (`index` desde 0) hasta `NotFound`.
+pub mod status {
+    pub const PROTOCOL: u8 = 7;
+    pub const VERSION: u8 = 1;
+    pub const MAX_NAME: usize = 16;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Request {
+        pub index: u8,
+    }
+
+    impl Request {
+        pub const LEN: usize = 8;
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[0] = PROTOCOL;
+            b[1] = VERSION;
+            b[2] = self.index;
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN || b[0] != PROTOCOL || b[1] != VERSION {
+                return None;
+            }
+            Some(Self { index: b[2] })
+        }
+    }
+
+    /// Estado de vida (`aricode_supervisor::State`) en el cable.
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum State {
+        Stopped = 0,
+        Starting = 1,
+        Ready = 2,
+        Degraded = 3,
+        Failed = 4,
+    }
+
+    impl State {
+        pub fn name(self) -> &'static str {
+            match self {
+                State::Stopped => "parado",
+                State::Starting => "arrancando",
+                State::Ready => "listo",
+                State::Degraded => "degradado",
+                State::Failed => "fallido",
+            }
+        }
+        fn from_u8(v: u8) -> Option<Self> {
+            Some(match v {
+                0 => State::Stopped,
+                1 => State::Starting,
+                2 => State::Ready,
+                3 => State::Degraded,
+                4 => State::Failed,
+                _ => return None,
+            })
+        }
+    }
+
+    /// Última salida del servicio en el cable.
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum LastExit {
+        None = 0,
+        Code = 1,
+        Killed = 2,
+        StartTimeout = 3,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Reply {
+        pub found: bool,
+        pub name: [u8; MAX_NAME],
+        pub name_len: u8,
+        pub state: State,
+        pub optional: bool,
+        pub generation: u32,
+        pub restarts: u32,
+        pub last_exit: LastExit,
+        pub last_code: u64,
+        /// Milisegundos desde el último `listo` (0 si no lo está).
+        pub ready_for_ms: u64,
+    }
+
+    impl Reply {
+        pub const LEN: usize = 48;
+
+        pub fn not_found() -> Self {
+            Self {
+                found: false,
+                name: [0; MAX_NAME],
+                name_len: 0,
+                state: State::Stopped,
+                optional: false,
+                generation: 0,
+                restarts: 0,
+                last_exit: LastExit::None,
+                last_code: 0,
+                ready_for_ms: 0,
+            }
+        }
+
+        pub fn with_name(mut self, name: &str) -> Self {
+            let n = name.len().min(MAX_NAME);
+            self.name = [0; MAX_NAME];
+            self.name[..n].copy_from_slice(&name.as_bytes()[..n]);
+            self.name_len = n as u8;
+            self
+        }
+
+        pub fn name_str(&self) -> &str {
+            core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("?")
+        }
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[0] = PROTOCOL;
+            b[1] = VERSION;
+            b[2] = self.found as u8;
+            b[3] = self.state as u8;
+            b[4] = self.optional as u8;
+            b[5] = self.last_exit as u8;
+            b[6] = self.name_len;
+            b[8..12].copy_from_slice(&self.generation.to_le_bytes());
+            b[12..16].copy_from_slice(&self.restarts.to_le_bytes());
+            b[16..24].copy_from_slice(&self.last_code.to_le_bytes());
+            b[24..32].copy_from_slice(&self.ready_for_ms.to_le_bytes());
+            b[32..48].copy_from_slice(&self.name);
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN || b[0] != PROTOCOL || b[1] != VERSION {
+                return None;
+            }
+            let mut name = [0u8; MAX_NAME];
+            name.copy_from_slice(&b[32..48]);
+            Some(Self {
+                found: b[2] != 0,
+                state: State::from_u8(b[3])?,
+                optional: b[4] != 0,
+                last_exit: match b[5] {
+                    0 => LastExit::None,
+                    1 => LastExit::Code,
+                    2 => LastExit::Killed,
+                    3 => LastExit::StartTimeout,
+                    _ => return None,
+                },
+                name_len: b[6].min(MAX_NAME as u8),
+                generation: u32::from_le_bytes(b[8..12].try_into().ok()?),
+                restarts: u32::from_le_bytes(b[12..16].try_into().ok()?),
+                last_code: u64::from_le_bytes(b[16..24].try_into().ok()?),
+                ready_for_ms: u64::from_le_bytes(b[24..32].try_into().ok()?),
+                name,
+            })
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn status_round_trip() {
+            let r = Request { index: 3 };
+            assert_eq!(Request::decode(&r.encode()), Some(r));
+            assert_eq!(
+                Request::decode(&[6, 1, 0, 0, 0, 0, 0, 0]),
+                None,
+                "otro protocolo"
+            );
+            let reply = Reply {
+                found: true,
+                state: State::Degraded,
+                optional: true,
+                generation: 7,
+                restarts: 2,
+                last_exit: LastExit::Code,
+                last_code: 42,
+                ready_for_ms: 1234,
+                ..Reply::not_found()
+            }
+            .with_name("virtio_input_00");
+            let d = Reply::decode(&reply.encode()).unwrap();
+            assert_eq!(d, reply);
+            assert_eq!(d.name_str(), "virtio_input_00");
+            assert_eq!(d.state.name(), "degradado");
+            assert!(!Reply::decode(&Reply::not_found().encode()).unwrap().found);
+            let mut bad = reply.encode();
+            bad[3] = 9;
+            assert_eq!(Reply::decode(&bad), None, "estado desconocido");
+        }
+    }
+}

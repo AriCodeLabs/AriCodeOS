@@ -50,6 +50,9 @@ pub mod init_arg {
     pub const BOOT_SLOT_B: u64 = 8;
     /// El slot arrancado espera confirmación: init debe marcarlo activo.
     pub const BOOT_PENDING: u64 = 16;
+    /// Solo tests (`restart_storm`): init reinicia 100 veces un servicio de
+    /// prueba bajo el supervisor y comprueba que no se pierden recursos.
+    pub const RESTART_STORM: u64 = 64;
     /// Solo tests (`init_fail_late`): init falla al final del arranque, antes
     /// de confirmar el slot, para comprobar que el estado sigue pendiente.
     pub const FAIL_LATE: u64 = 32;

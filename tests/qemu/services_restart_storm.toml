@@ -1,0 +1,22 @@
+# Etapa 1 (recuperacion observable): un servicio de prueba que muere tras
+# cada peticion se reinicia 100 veces bajo el supervisor de init, con espera
+# creciente acotada, mientras fsd sigue respondiendo; la memoria libre vuelve
+# al nivel anterior (el endpoint es de init y sobrevive a cada generacion).
+name = "services.restart_storm"
+description = "restart_storm: 100 reinicios supervisados de crashy_service sin perder frames y con fsd respondiendo"
+level = "full"
+areas = ["services", "init", "user"]
+cmdline = "qemu_exit restart_storm"
+timeout_secs = 120
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: servicio crashy_service murio por fallo; reinicio en",
+    "AriInit: servicio crashy_service reiniciado (generacion 101)",
+    "AriInit: supervisor: 100 reinicios de crashy_service en",
+    "fsd respondio 10/10",
+    "AriInit: servicios de arranque completados",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "se han perdido frames", "presupuesto de reinicios agotado"]

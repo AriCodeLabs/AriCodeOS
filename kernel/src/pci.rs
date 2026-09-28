@@ -23,8 +23,18 @@ pub struct PciDevice {
     pub capability_ids: Vec<u8>,
     /// Desplazamiento de la capability MSI-X en el espacio de configuración.
     pub msix_cap: Option<u8>,
-    /// Ya entregado a un driver.
-    pub claimed: bool,
+    /// Objeto de configuración entregado al driver actual: mientras viva
+    /// (algún handle lo referencia) la función está reclamada; cuando el
+    /// driver muere y sus handles desaparecen, init puede reclamarla de nuevo
+    /// para reiniciarlo (etapa 1: recuperación de servicios).
+    pub claimed: Option<alloc::sync::Weak<KernelObject>>,
+}
+
+impl PciDevice {
+    /// `true` si un driver vivo tiene la función.
+    pub fn is_claimed(&self) -> bool {
+        self.claimed.as_ref().is_some_and(|w| w.strong_count() > 0)
+    }
 }
 
 struct Ecam {
@@ -134,7 +144,7 @@ pub fn init() {
                     bars: bars(&cfg),
                     capability_ids: caps.iter().map(|c| c.id).collect(),
                     msix_cap: caps.iter().find(|c| c.id == CAP_MSIX).map(|c| c.offset),
-                    claimed: false,
+                    claimed: None,
                 });
             }
         }
@@ -192,7 +202,7 @@ pub fn find_class(class: u8, subclass: u8) -> Option<usize> {
     DEVICES
         .lock()
         .iter()
-        .position(|d| d.header.class == class && d.header.subclass == subclass && !d.claimed)
+        .position(|d| d.header.class == class && d.header.subclass == subclass && !d.is_claimed())
 }
 
 /// Índice de la primera función `vendor:device` sin reclamar.
@@ -200,7 +210,7 @@ pub fn find(vendor: u16, device: u16) -> Option<usize> {
     DEVICES
         .lock()
         .iter()
-        .position(|d| d.header.vendor == vendor && d.header.device == device && !d.claimed)
+        .position(|d| d.header.vendor == vendor && d.header.device == device && !d.is_claimed())
 }
 
 /// Información empaquetada (`aricode_abi::pci_info`) de la función `index`.
@@ -260,9 +270,10 @@ pub fn claim(index: usize) -> Result<Claimed, &'static str> {
     let ecam = ecam_guard.as_ref().ok_or("pci: sin ECAM")?;
     let mut devs = DEVICES.lock();
     let d = devs.get_mut(index).ok_or("pci: indice fuera de rango")?;
-    if d.claimed {
+    if d.is_claimed() {
         return Err("pci: ya reclamado");
     }
+    let reclaimed = d.claimed.is_some();
     let addr = d.address;
 
     // Command: memory space (bit 1) + bus master (bit 2); INTx deshabilitada (bit 10).
@@ -285,15 +296,14 @@ pub fn claim(index: usize) -> Result<Claimed, &'static str> {
     ));
     // 0: espacio de configuración (la página ECAM de la función).
     let cfg_phys = ecam.base + addr.ecam_offset(ecam.bus_start);
-    handles[0] = Some((
-        KernelObject::new(ObjectKind::Mmio(crate::hw::Region {
-            phys: cfg_phys,
-            len: 4096,
-            cacheable: false,
-            source_id,
-        })),
-        mmio_rights,
-    ));
+    let cfg = KernelObject::new(ObjectKind::Mmio(crate::hw::Region {
+        phys: cfg_phys,
+        len: 4096,
+        cacheable: false,
+        source_id,
+    }));
+    d.claimed = Some(alloc::sync::Arc::downgrade(&cfg));
+    handles[0] = Some((cfg, mmio_rights));
     // 1: capacidad de hardware (DMA).
     handles[1] = Some((
         KernelObject::new(ObjectKind::Hardware),
@@ -341,12 +351,16 @@ pub fn claim(index: usize) -> Result<Claimed, &'static str> {
             msix_table = Some((table_phys, 0));
         }
     }
-    d.claimed = true;
     info!(
-        "pci: {} {:04x}:{:04x} reclamado{}",
+        "pci: {} {:04x}:{:04x} {}{}",
         addr,
         d.header.vendor,
         d.header.device,
+        if reclaimed {
+            "reclamado de nuevo (el driver anterior murio)"
+        } else {
+            "reclamado"
+        },
         if msix_table.is_some() {
             " (MSI-X entrada 0)"
         } else {
