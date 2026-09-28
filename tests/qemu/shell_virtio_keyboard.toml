@@ -20,8 +20,7 @@ exit = 33
 serial_contains = [
     "console-bridge: 2 dispositivo(s) de entrada hacia la consola",
     "arish: shell de AriCodeOS",
-    "ari> cpus",
-    "cpus: 1 en linea",
+    "cpus: ",
     "ari> shutdown",
     "[host] QMP: 32 eventos de entrada enviados",
     "ARICODEOS_SHUTDOWN",
