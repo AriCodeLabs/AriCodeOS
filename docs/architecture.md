@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.5.1 + preparación de la Fase 34 y xHCI/USB HID (Fases 0 a 33 y 25 completa)
+## Estado: 0.6.0 (Fases 0 a 34 implementadas; la 34 pendiente de hardware)
 
 ```text
 OVMF (UEFI)
