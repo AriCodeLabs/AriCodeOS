@@ -15,6 +15,7 @@ fn base_command(
     disk: &Path,
     disk_readonly: bool,
     cpus: u32,
+    usb_hid: bool,
 ) -> Command {
     let mut q = Command::new("qemu-system-x86_64");
     q.current_dir(root());
@@ -83,6 +84,12 @@ fn base_command(
         "-device",
         "virtio-mouse-pci,id=mouse0,disable-legacy=on,disable-modern=off,iommu_platform=on",
     ]);
+    if usb_hid {
+        // xHCI con teclado y raton USB HID (Fase 25, segunda parte).
+        q.args(["-device", "qemu-xhci,id=xhci"]);
+        q.args(["-device", "usb-kbd,bus=xhci.0"]);
+        q.args(["-device", "usb-mouse,bus=xhci.0"]);
+    }
     q.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     q
 }
@@ -368,7 +375,13 @@ fn run_tcp_probe(payload: &str) -> String {
     }
 }
 
-pub fn run_interactive(release: bool, cmdline: &str, cpus: u32, usb_image: bool) -> Result {
+pub fn run_interactive(
+    release: bool,
+    cmdline: &str,
+    cpus: u32,
+    usb_image: bool,
+    usb_hid: bool,
+) -> Result {
     let base = image::build_base_esp(release)?;
     let esp = if cmdline.is_empty() {
         base
@@ -392,7 +405,7 @@ pub fn run_interactive(release: bool, cmdline: &str, cpus: u32, usb_image: bool)
         Some(esp.as_path())
     };
     let _responder = Responder::start()?;
-    let mut q = base_command(esp_drive, &vars, &disk, false, cpus);
+    let mut q = base_command(esp_drive, &vars, &disk, false, cpus, usb_hid);
     if cmdline.split_whitespace().any(|w| w == "gui") {
         // Con `gui` hace falta ver la pantalla: ventana de QEMU y serie en la terminal.
         println!("[xtask] QEMU con pantalla (serie en la terminal; salir: cerrar la ventana)");
@@ -440,6 +453,7 @@ pub struct Headless<'a> {
     pub disk_variant: image::DiskVariant,
     pub disk_readonly: bool,
     pub cpus: u32,
+    pub usb_hid: bool,
 }
 
 pub fn run_headless(
@@ -468,21 +482,28 @@ pub fn run_headless(
     let qmp_path = workdir.join("qmp.sock");
     let _ = std::fs::remove_file(&qmp_path);
     let start = Instant::now();
-    let mut child = base_command(esp_drive, &vars, &disk, disk_readonly, options.cpus)
-        .args(["-display", "none", "-monitor", "none", "-serial", "stdio"])
-        .args([
-            "-qmp",
-            &format!("unix:{},server=on,wait=off", qmp_path.display()),
-        ])
-        .stdin(if input.lines.is_empty() {
-            Stdio::null()
-        } else {
-            Stdio::piped()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|e| format!("qemu: {e}"))?;
+    let mut child = base_command(
+        esp_drive,
+        &vars,
+        &disk,
+        disk_readonly,
+        options.cpus,
+        options.usb_hid,
+    )
+    .args(["-display", "none", "-monitor", "none", "-serial", "stdio"])
+    .args([
+        "-qmp",
+        &format!("unix:{},server=on,wait=off", qmp_path.display()),
+    ])
+    .stdin(if input.lines.is_empty() {
+        Stdio::null()
+    } else {
+        Stdio::piped()
+    })
+    .stdout(Stdio::piped())
+    .stderr(Stdio::inherit())
+    .spawn()
+    .map_err(|e| format!("qemu: {e}"))?;
     let mut stdout = child.stdout.take().expect("stdout piped");
     let mut stdin = child.stdin.take();
     let captured = Arc::new(Mutex::new(Vec::new()));

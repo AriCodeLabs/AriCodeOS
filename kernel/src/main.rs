@@ -315,6 +315,7 @@ fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
         "iommu" => iommu::selftest(),
         "ipc" => ipc::selftest(),
         "drivers" => hw::selftest(info),
+        "usb_hid" => hw::usb_hid_selftest(),
         "random" => random::selftest(),
         "console_input" => console_input::selftest(),
         "console_ps2" => console_input::ps2_selftest(),
