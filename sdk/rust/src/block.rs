@@ -95,4 +95,17 @@ impl BlockClient {
         )?)
         .map(|_| ())
     }
+
+    /// Hace duraderas las escrituras anteriores (ADR 0014).
+    pub fn flush(&self) -> Result<(), Error> {
+        Self::check(self.call(
+            Request {
+                op: Op::Flush,
+                count: 0,
+                lba: 0,
+            },
+            false,
+        )?)
+        .map(|_| ())
+    }
 }

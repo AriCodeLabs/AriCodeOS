@@ -27,10 +27,13 @@ struct Device {
     queue: Queue,
     /// Buffer DMA propio: cabecera (16), un sector de datos (512) y estado (1).
     req: DmaRegion,
+    /// `VIRTIO_BLK_F_FLUSH` negociado: `T_FLUSH` hace duraderas las escrituras.
+    flush: bool,
 }
 
 fn setup(mask: u64) -> Result<Device, u64> {
-    let transport = Transport::open(mask, 0).map_err(|e| e.code())?;
+    let transport = Transport::open(mask, blk::F_FLUSH).map_err(|e| e.code())?;
+    let flush = transport.features & blk::F_FLUSH != 0;
     let queue = transport.setup_queue(0, 64).map_err(|e| e.code())?;
     transport.driver_ok();
     let req = DmaRegion::alloc(4096).map_err(|_| 30u64)?;
@@ -38,6 +41,7 @@ fn setup(mask: u64) -> Result<Device, u64> {
         transport,
         queue,
         req,
+        flush,
     })
 }
 
@@ -47,27 +51,27 @@ impl Device {
     }
 
     /// Una peticion sincrona: cabecera y estado en el buffer propio, datos en
-    /// `(data_phys, data_len)`; espera la interrupcion MSI-X y comprueba el estado.
+    /// `(data_phys, data_len)` si los hay (`T_FLUSH` no lleva); espera la
+    /// interrupcion MSI-X y comprueba el estado.
     fn request(
         &mut self,
         header: blk::RequestHeader,
-        data_phys: u64,
-        data_len: u32,
-        device_writes: bool,
+        data: Option<(u64, u32, bool)>,
     ) -> Result<(), u64> {
         self.req
             .slice_mut(0, 16)
             .copy_from_slice(&header.to_bytes());
         self.req.slice_mut(528, 1)[0] = 0xFF;
-        let head = self
-            .queue
-            .vq
-            .add(&[
+        let status = (self.req.phys + 528, 1, true);
+        let head = match data {
+            Some((phys, len, device_writes)) => self.queue.vq.add(&[
                 (self.req.phys, 16, false),
-                (data_phys, data_len, device_writes),
-                (self.req.phys + 528, 1, true),
-            ])
-            .ok_or(40u64)?;
+                (phys, len, device_writes),
+                status,
+            ]),
+            None => self.queue.vq.add(&[(self.req.phys, 16, false), status]),
+        }
+        .ok_or(40u64)?;
         self.queue.notify(&self.transport);
         loop {
             if let Some((done, _)) = self.queue.vq.pop_used() {
@@ -90,7 +94,10 @@ impl Device {
 
     /// Lee un sector en el buffer propio (para la GPT).
     fn read_own(&mut self, lba: u64) -> Result<&[u8], u64> {
-        self.request(blk::RequestHeader::read(lba), self.req.phys + 16, 512, true)?;
+        self.request(
+            blk::RequestHeader::read(lba),
+            Some((self.req.phys + 16, 512, true)),
+        )?;
         Ok(self.req.slice_mut(16, 512))
     }
 }
@@ -193,6 +200,17 @@ fn serve(dev: &mut Device) -> ! {
                 status: Status::Ok,
                 value: capacity,
             },
+            Some(Request { op: Op::Flush, .. }) => {
+                let done = if dev.flush {
+                    dev.request(blk::RequestHeader::flush(), None)
+                } else {
+                    Ok(())
+                };
+                Reply {
+                    status: if done.is_ok() { Status::Ok } else { Status::Io },
+                    value: 0,
+                }
+            }
             Some(Request { op, count, lba }) => {
                 let count = count.min(MAX_SECTORS) as u64;
                 if nh < 2 {
@@ -210,13 +228,15 @@ fn serve(dev: &mut Device) -> ! {
                         Some((phys, len)) if len >= count * 512 => {
                             let bytes = (count * 512) as u32;
                             let r = match op {
-                                Op::Read => {
-                                    dev.request(blk::RequestHeader::read(lba), phys, bytes, true)
-                                }
-                                Op::Write => {
-                                    dev.request(blk::RequestHeader::write(lba), phys, bytes, false)
-                                }
-                                Op::Info => unreachable!(),
+                                Op::Read => dev.request(
+                                    blk::RequestHeader::read(lba),
+                                    Some((phys, bytes, true)),
+                                ),
+                                Op::Write => dev.request(
+                                    blk::RequestHeader::write(lba),
+                                    Some((phys, bytes, false)),
+                                ),
+                                Op::Info | Op::Flush => unreachable!(),
                             };
                             match r {
                                 Ok(()) => Reply {
@@ -260,6 +280,11 @@ fn main(mask: u64) -> u64 {
     };
     let mut buf = [0u8; 20];
     say(b"dispositivo listo");
+    say(if dev.flush {
+        b"flush negociado (VIRTIO_BLK_F_FLUSH)"
+    } else {
+        b"sin flush: el dispositivo no lo ofrece"
+    });
     sys::print(b"virtio-blk: capacidad ");
     sys::print(aricode_rt::fmt_u64(dev.capacity(), &mut buf));
     sys::print(b" sectores\n");

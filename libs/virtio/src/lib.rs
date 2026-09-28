@@ -288,6 +288,8 @@ pub mod blk {
     pub const T_IN: u32 = 0;
     pub const T_OUT: u32 = 1;
     pub const T_FLUSH: u32 = 4;
+    /// `VIRTIO_BLK_F_FLUSH`: el dispositivo atiende `T_FLUSH`.
+    pub const F_FLUSH: u64 = 1 << 9;
     pub const STATUS_OK: u8 = 0;
     pub const STATUS_IOERR: u8 = 1;
     pub const STATUS_UNSUPP: u8 = 2;
@@ -316,6 +318,14 @@ pub mod blk {
                 kind: T_OUT,
                 reserved: 0,
                 sector,
+            }
+        }
+        /// Hace duraderas las escrituras anteriores (sin datos).
+        pub const fn flush() -> Self {
+            Self {
+                kind: T_FLUSH,
+                reserved: 0,
+                sector: 0,
             }
         }
         pub fn to_bytes(self) -> [u8; 16] {

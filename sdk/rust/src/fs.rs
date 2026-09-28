@@ -130,7 +130,8 @@ impl FsClient {
         Ok(n)
     }
 
-    /// Escribe `data` (máximo `MAX_IO`) en `offset`.
+    /// Escribe `data` (máximo `MAX_IO`) en `offset`, en el sitio: tras un
+    /// corte cada sector tiene lo viejo o lo nuevo. Duradero tras `flush`.
     pub fn write(&mut self, fd: u32, offset: u32, data: &[u8]) -> Result<usize, FsError> {
         let len = data.len().min(MAX_IO as usize);
         self.buffer()[..len].copy_from_slice(&data[..len]);
@@ -139,5 +140,24 @@ impl FsClient {
         req.offset = offset;
         req.len = len as u32;
         self.call(req, true).map(|r| r.value as usize)
+    }
+
+    /// Sustituye el contenido entero del fichero por `data` (máximo `MAX_IO`)
+    /// de forma atómica y duradera (ADR 0014): tras un corte el fichero tiene
+    /// el contenido anterior o el nuevo, nunca una mezcla.
+    pub fn replace(&mut self, fd: u32, data: &[u8]) -> Result<usize, FsError> {
+        if data.len() > MAX_IO as usize {
+            return Err(FsError::Status(Status::OutOfRange));
+        }
+        self.buffer()[..data.len()].copy_from_slice(data);
+        let mut req = Request::new(Op::Replace);
+        req.fd = fd;
+        req.len = data.len() as u32;
+        self.call(req, true).map(|r| r.value as usize)
+    }
+
+    /// Hace duraderas las escrituras anteriores (ADR 0014).
+    pub fn flush(&self) -> Result<(), FsError> {
+        self.call(Request::new(Op::Flush), false).map(|_| ())
     }
 }

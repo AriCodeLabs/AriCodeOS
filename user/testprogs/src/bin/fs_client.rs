@@ -1,5 +1,5 @@
 //! Cliente del servicio de ficheros (Fase 20): lista, abre, lee, crea,
-//! escribe y relee por IPC. Handles: 0x10004 = fsd (WRITE), 0x10005 = HARDWARE.
+//! escribe, reemplaza, hace flush y relee por IPC. Handles: 0x10004 = fsd (WRITE), 0x10005 = HARDWARE.
 #![no_std]
 #![no_main]
 
@@ -56,14 +56,26 @@ fn main(_arg: u64) -> u64 {
     if fs.read(fd, 8, &mut data) != Ok(12) || &data[..12] != b"desde ring 3" {
         return 8;
     }
-    // 4. Errores: crear duplicado, abrir inexistente, fd cerrado.
+    // 4. Reemplazo atomico (ADR 0014): el contenido entero cambia de una vez
+    //    y queda duradero; flush explicito de las escrituras anteriores.
+    if fs.replace(fd, b"contenido reemplazado de una vez") != Ok(32) {
+        return 12;
+    }
+    if fs.read(fd, 0, &mut data) != Ok(32) || &data[..32] != b"contenido reemplazado de una vez" {
+        return 13;
+    }
+    if fs.flush().is_err() {
+        return 14;
+    }
+    sys::print(b"fs_client: reemplazo atomico y flush ok\n");
+    // 5. Errores: crear duplicado, abrir inexistente, fd cerrado.
     if fs.create("nuevo.txt").is_ok() {
         return 9;
     }
     if fs.open("no-existe").is_ok() {
         return 10;
     }
-    if fs.close(fd).is_err() || fs.read(fd, 0, &mut data).is_ok() {
+    if fs.close(fd).is_err() || fs.read(fd, 0, &mut data).is_ok() || fs.replace(fd, b"x").is_ok() {
         return 11;
     }
     sys::print(b"fs_client: listar, leer, crear y escribir por IPC ok\n");
