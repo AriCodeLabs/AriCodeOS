@@ -1,0 +1,10 @@
+--- a/tools/xtask/src/qemu.rs
++++ b/tools/xtask/src/qemu.rs
+@@ -85,6 +85,7 @@
+         "virtio-mouse-pci,id=mouse0,disable-legacy=on,disable-modern=off,iommu_platform=on",
+     ]);
+     if usb_hid {
++        q.args(["-device", "usb-ehci,id=review_ehci"]);
+         // xHCI con teclado y raton USB HID (Fase 25, segunda parte).
+         q.args(["-device", "qemu-xhci,id=xhci"]);
+         q.args(["-device", "usb-kbd,bus=xhci.0"]);

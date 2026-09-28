@@ -1,0 +1,30 @@
+   Compiling aricode-xhci v0.5.1 (/tmp/aricode-probes-4836023-rluc8oh6/libs/xhci)
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.08s
+     Running tests/review.rs (target/debug/deps/review-69ea133ddd5c6afc)
+
+running 2 tests
+bInterval=255, programmed_interval=11, maximum_valid=10
+
+thread 'full_speed_interval_stays_in_the_xhci_range' (2680731) panicked at libs/xhci/tests/review.rs:6:5:
+assertion `left == right` failed: FS interrupt Interval debe redondearse hacia abajo
+  left: 11
+ right: 10
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+bInterval=10ms, programmed_period=16ms
+
+thread 'low_speed_polling_does_not_exceed_the_requested_period' (2680732) panicked at libs/xhci/tests/review.rs:12:5:
+assertion `left == right` failed: 10ms debe convertirse en 8ms, no 16ms
+  left: 7
+ right: 6
+test low_speed_polling_does_not_exceed_the_requested_period ... FAILED
+test full_speed_interval_stays_in_the_xhci_range ... FAILED
+
+failures:
+
+failures:
+    full_speed_interval_stays_in_the_xhci_range
+    low_speed_polling_does_not_exceed_the_requested_period
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p aricode-xhci --test review`

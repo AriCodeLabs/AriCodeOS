@@ -218,6 +218,17 @@ pub fn info_packed(index: usize) -> Option<u64> {
     ))
 }
 
+/// Campos extendidos (`aricode_abi::pci_info::pack_ext`) de la función `index`.
+pub fn info_ext_packed(index: usize) -> Option<u64> {
+    let devs = DEVICES.lock();
+    let d = devs.get(index)?;
+    Some(aricode_abi::pci_info::pack_ext(
+        d.header.prog_if,
+        d.header.revision,
+        d.header.header_type,
+    ))
+}
+
 /// Tamaño de un BAR de memoria por sondeo (escribir unos, leer, restaurar).
 fn probe_bar_size(ecam: &Ecam, addr: Address, index: usize, is_64: bool) -> u64 {
     let off = 0x10 + 4 * index as u64;

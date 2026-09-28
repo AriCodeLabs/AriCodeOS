@@ -954,6 +954,14 @@ services/usb-input             usbd: controlador, enumeración, endpoints de int
 - Un único dispositivo de entrada para todo el controlador
   (`USB HID Keyboard+Mouse`); `input_client` y el compositor enrutan por
   tipo de evento, no por dispositivo.
+- Selección y publicación (auditoría 4836023): `pci_info_ext` expone la
+  interfaz de programación y init solo entrega a `usb_input` los `0c.03`
+  con interfaz `0x30`; cualquier servicio de entrada se publica cuando
+  responde a `Info` (`input_service_ready`), y `InputClient` acota sus
+  esperas para que un servicio muerto no bloquee al cliente. El descriptor
+  de dispositivo se lee primero en 8 bytes para fijar el tamaño de paquete
+  de EP0 con `Evaluate Context`; los intervalos FS/LS se redondean hacia
+  abajo (3..=10).
 
 ## Hardware real (Fase 34, preparación)
 

@@ -505,18 +505,17 @@ impl EndpointContext {
 }
 
 /// Intervalo de un endpoint de interrupción a partir de `bInterval`.
-/// Alta velocidad y superior: `2^(bInterval-1)` microframes; baja y
-/// completa: `bInterval` ms redondeado a la potencia de dos superior.
+/// Alta velocidad y superior: `2^(bInterval-1)` microframes. Baja y
+/// completa: `bInterval` está en ms y el campo es `floor(log2(ms * 8))`,
+/// acotado a 3..=10 (xHCI 6.2.3.6, tabla 6-12: se redondea hacia abajo, al
+/// periodo igual o menor, nunca mayor).
 pub fn interrupt_interval(speed: u8, b_interval: u8) -> u8 {
     match speed {
         speed::HIGH | speed::SUPER => b_interval.clamp(1, 16) - 1,
         _ => {
-            let frames = (b_interval.max(1) as u32) * 8; // microframes
-            let mut i = 0u8;
-            while (1u32 << i) < frames && i < 15 {
-                i += 1;
-            }
-            i
+            let microframes = (b_interval.max(1) as u32) * 8;
+            let floor_log2 = 31 - microframes.leading_zeros() as u8;
+            floor_log2.clamp(3, 10)
         }
     }
 }
@@ -748,6 +747,8 @@ mod tests {
         assert_eq!(speed::default_ep0_max_packet(speed::SUPER), 512);
         assert_eq!(op::port_speed(3 << 10 | 1), 3);
         assert_eq!(interrupt_interval(speed::HIGH, 4), 3);
+        assert_eq!(interrupt_interval(speed::HIGH, 0), 0);
+        assert_eq!(interrupt_interval(speed::HIGH, 255), 15);
         assert_eq!(
             interrupt_interval(speed::FULL, 8),
             6,
@@ -755,10 +756,24 @@ mod tests {
         );
         assert_eq!(
             interrupt_interval(speed::FULL, 10),
-            7,
-            "10 ms se redondea a 16"
+            6,
+            "10 ms se redondea hacia abajo a 8 ms"
         );
+        assert_eq!(interrupt_interval(speed::FULL, 3), 4, "3 ms -> 2 ms");
         assert_eq!(interrupt_interval(speed::LOW, 1), 3);
+        assert_eq!(interrupt_interval(speed::LOW, 0), 3);
+        assert_eq!(interrupt_interval(speed::FULL, 129), 10, "tope del campo");
+        assert_eq!(interrupt_interval(speed::FULL, 255), 10);
+        // Auditoria 4836023, hallazgo 2: campo en rango y periodo nunca
+        // mayor que el pedido (salvo el minimo de 1 ms).
+        for b in 1..=255u8 {
+            let i = interrupt_interval(speed::FULL, b);
+            assert!((3..=10).contains(&i));
+            assert!(
+                (1u32 << i) <= (b as u32) * 8,
+                "nunca un periodo mayor: {b} -> {i}"
+            );
+        }
     }
 
     #[test]
