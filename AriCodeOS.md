@@ -2,7 +2,7 @@
 
 ## Documento maestro de arquitectura, especificaciones técnicas y plan de desarrollo
 
-**Estado:** 0.0.7 completada (2026-09-26): init, drivers en espacio de usuario, PCIe  
+**Estado:** 0.6.0 (2026-09-28): las 35 fases implementadas y validadas en QEMU; la Fase 34 espera el portátil. Estado por capacidad en el README  
 **Versión del documento:** 0.2  
 **Nombre del sistema:** AriCodeOS  
 **Arquitectura inicial:** x86-64  
@@ -3565,6 +3565,29 @@ de la pila de arranque.** Fases 32 y 33:
 
 Siguiente: Fase 34 (hardware real) y la segunda parte de la Fase 25
 (xHCI/USB HID).
+
+---
+
+## 94.5 AriCodeOS 0.6
+
+**Estado: completada (2026-09-28), tag `v0.6.0`.** Preparación de la Fase 34,
+segunda parte de la Fase 25 y las correcciones de las auditorías 3eb4965 y
+4836023:
+
+- imagen para pendrive con ESP FAT32 propia (`cargo xtask usb-image`),
+  teclado PS/2 como consola, interruptores `smp=off` e `iommu=off`,
+  dominios identidad para los dispositivos del firmware y guía de hardware;
+- xHCI y teclado/ratón USB HID en ring 3 (`libs/xhci`, `usbd`), con
+  selección por interfaz de programación y publicación de servicios de
+  entrada solo cuando responden;
+- recogida de procesos segura en SMP, propietario único por función PCI en
+  el IOMMU, consola de framebuffer fuera de la pila de arranque y
+  comprobación de margen de esa pila.
+
+Siguiente: la secuencia posterior al roadmap propuesta en
+`docs/audits/2026-09-28-referentes-capacidades-oportunidades.md`
+(recuperación observable, sesión útil con teclado USB y persistencia) y la
+primera prueba física de la Fase 34.
 
 ---
 
