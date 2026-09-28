@@ -231,6 +231,118 @@ pub const PART_UPDATE: (u64, u64) = (55296, 79871);
 pub const PART_ARIBOOT: (u64, u64) = (79872, 79935);
 
 /// Estado inicial del disco que pide un escenario (`disk = "..."`).
+/// Imagen para un pendrive (Fase 34): GPT con la ESP (FAT32, 64 MiB) y las
+/// mismas particiones de AriCodeOS que el disco de pruebas, alineadas a 1 MiB.
+///
+/// ```text
+/// ESP      2048..133119     EFI/BOOT/BOOTX64.EFI, aricodeos/{kernel.elf,initrd.img,cmdline.txt}
+/// ARI0     133120..139263   AriFS con los ficheros de ejemplo
+/// SYSA     139264..163839   imagen de sistema firmada, slot A
+/// SYSB     163840..188415   slot B (vacío)
+/// UPDATE   188416..212991   vacía
+/// ARIBOOT  212992..213055   estado de arranque: A activo
+/// ```
+pub const USB_SECTORS: u64 = 213_120;
+pub const USB_PART_ESP: (u64, u64) = (2048, 133_119);
+pub const USB_PART_ARI0: (u64, u64) = (133_120, 139_263);
+pub const USB_PART_SYSA: (u64, u64) = (139_264, 163_839);
+pub const USB_PART_SYSB: (u64, u64) = (163_840, 188_415);
+pub const USB_PART_UPDATE: (u64, u64) = (188_416, 212_991);
+pub const USB_PART_ARIBOOT: (u64, u64) = (212_992, 213_055);
+/// GUID de tipo de la partición de sistema EFI, en el orden en disco.
+pub const ESP_TYPE_GUID: [u8; 16] = [
+    0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11, 0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B,
+];
+
+/// Ficheros de un directorio (recursivo) como rutas relativas con `/`.
+fn walk_files(dir: &Path, prefix: &str, out: &mut Vec<(String, PathBuf)>) -> Result {
+    let mut entries: Vec<_> = io(fs::read_dir(dir), "leer dir")?
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let rel = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+        if e.path().is_dir() {
+            walk_files(&e.path(), &rel, out)?;
+        } else {
+            out.push((rel, e.path()));
+        }
+    }
+    Ok(())
+}
+
+/// Escribe la imagen USB completa en `path` con el contenido de `esp_dir`
+/// como partición EFI y el slot A cargado con la imagen de sistema.
+pub fn write_usb_image(path: &Path, esp_dir: &Path) -> Result {
+    let esp_sectors = (USB_PART_ESP.1 - USB_PART_ESP.0 + 1) as u32;
+    let mut fat =
+        aricode_fat::Fat32Builder::new(esp_sectors, 1).map_err(|e| format!("fat: {e:?}"))?;
+    let mut files = Vec::new();
+    walk_files(esp_dir, "", &mut files)?;
+    for (rel, p) in &files {
+        let data = io(fs::read(p), "leer fichero de la ESP")?;
+        fat.add_file(rel, &data)
+            .map_err(|e| format!("fat {rel}: {e:?}"))?;
+    }
+    let mut img = vec![0u8; USB_SECTORS as usize * 512];
+    let guid = aricode_gpt::ARICODEOS_DATA_GUID;
+    aricode_gpt::write_disk(
+        &mut img,
+        &[
+            ("ESP", USB_PART_ESP.0, USB_PART_ESP.1, ESP_TYPE_GUID),
+            ("ARI0", USB_PART_ARI0.0, USB_PART_ARI0.1, guid),
+            ("SYSA", USB_PART_SYSA.0, USB_PART_SYSA.1, guid),
+            ("SYSB", USB_PART_SYSB.0, USB_PART_SYSB.1, guid),
+            ("UPDATE", USB_PART_UPDATE.0, USB_PART_UPDATE.1, guid),
+            ("ARIBOOT", USB_PART_ARIBOOT.0, USB_PART_ARIBOOT.1, guid),
+        ],
+    )
+    .map_err(|e| format!("gpt: {e:?}"))?;
+    let o = USB_PART_ESP.0 as usize * 512;
+    let fat_img = fat.finish();
+    img[o..o + fat_img.len()].copy_from_slice(&fat_img);
+    populate_arifs(&mut img, USB_PART_ARI0)?;
+    // Area en bruto en la cola de ARI0, al mismo desplazamiento que en el
+    // disco de pruebas (init se lo indica a blk_client).
+    for lba in USB_PART_ARI0.0 + RAW_PATTERN_OFFSET..=USB_PART_ARI0.1 {
+        let o = lba as usize * 512;
+        img[o..o + 8].copy_from_slice(b"ARIDISK\0");
+        img[o + 8..o + 16].copy_from_slice(&lba.to_le_bytes());
+    }
+    write_slot(&mut img, USB_PART_SYSA, &system_image(1, false)?)?;
+    let state = aricode_ab::BootState::fresh(aricode_ab::Slot::A);
+    let o = USB_PART_ARIBOOT.0 as usize * 512;
+    img[o..o + 512].copy_from_slice(&state.encode());
+    io(fs::write(path, &img), "escribir imagen USB")?;
+    println!(
+        "[xtask] imagen USB en {} ({} MiB, {} ficheros en la ESP)",
+        path.display(),
+        img.len() >> 20,
+        files.len()
+    );
+    Ok(())
+}
+
+/// `cargo xtask usb-image [--cmdline S]`: imagen lista para `dd` en un pendrive.
+pub fn build_usb_image(release: bool, cmdline: &str) -> Result<PathBuf> {
+    let base = build_base_esp(release)?;
+    let esp = build_scenario_esp(
+        &base,
+        &scenarios_root(),
+        "usb-image",
+        cmdline,
+        &Default::default(),
+    )?;
+    let out = crate::build_dir().join("aricodeos-usb.img");
+    write_usb_image(&out, &esp)?;
+    Ok(out)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DiskVariant {
     /// Slot A activo con la imagen actual; B vacío; UPDATE con la versión 2.
@@ -244,6 +356,8 @@ pub enum DiskVariant {
     ExhaustedB,
     /// B pendiente con una imagen cuya firma no vale: rechazo y rollback.
     CorruptB,
+    /// Imagen para pendrive: la ESP va dentro del disco (sin `fat:` en QEMU).
+    UsbImage,
 }
 
 impl DiskVariant {
@@ -254,6 +368,7 @@ impl DiskVariant {
             "pending-b" => Self::PendingB,
             "b-exhausted" => Self::ExhaustedB,
             "b-corrupt" => Self::CorruptB,
+            "usb-image" => Self::UsbImage,
             _ => return None,
         })
     }
@@ -296,6 +411,8 @@ impl aricode_arifs::BlockDevice for VecDisk<'_> {
 /// final de la partición cada sector lleva `ARIDISK\0` y su LBA, fuera del
 /// alcance de AriFS (32 ficheros × 64 sectores caben antes).
 pub const RAW_PATTERN_LBA: u64 = 4096;
+/// Desplazamiento del area en bruto dentro de ARI0 (igual en todos los discos).
+pub const RAW_PATTERN_OFFSET: u64 = RAW_PATTERN_LBA - PART_ARI0.0;
 
 /// Ficheros de ejemplo del disco de pruebas.
 pub const DISK_FILES: &[(&str, &[u8])] = &[
@@ -369,6 +486,11 @@ fn write_slot(img: &mut [u8], part: (u64, u64), container: &[u8]) -> Result {
 }
 
 pub fn write_test_disk(path: &Path, variant: DiskVariant) -> Result {
+    if variant == DiskVariant::UsbImage {
+        return Err(String::from(
+            "la imagen USB necesita la ESP: usar write_usb_image",
+        ));
+    }
     let mut img = vec![0u8; DISK_SECTORS as usize * 512];
     let guid = aricode_gpt::ARICODEOS_DATA_GUID;
     let mut parts = vec![("ARI0", PART_ARI0.0, PART_ARI0.1, guid)];
@@ -379,34 +501,8 @@ pub fn write_test_disk(path: &Path, variant: DiskVariant) -> Result {
         parts.push(("ARIBOOT", PART_ARIBOOT.0, PART_ARIBOOT.1, guid));
     }
     aricode_gpt::write_disk(&mut img, &parts).map_err(|e| format!("gpt: {e:?}"))?;
-    let (first, last) = PART_ARI0;
-    let sectors = last - first + 1;
-    let mut fs = aricode_arifs::AriFs::format(
-        VecDisk {
-            data: &mut img,
-            base: first,
-        },
-        sectors,
-    )
-    .map_err(|e| format!("arifs: {e:?}"))?;
-    for (name, content) in DISK_FILES {
-        let i = fs
-            .create(name)
-            .map_err(|e| format!("arifs {name}: {e:?}"))?;
-        fs.write(i, 0, content)
-            .map_err(|e| format!("arifs {name}: {e:?}"))?;
-    }
-    // Módulo WebAssembly de ejemplo en el directorio privado de `wasm_runner`
-    // (lo deja `build_wasm_programs`; sin él, el runner informa y sale).
-    let demo = crate::build_dir().join("demo.wasm");
-    if let Ok(bytes) = fs::read(&demo) {
-        let name = "wasm_runner/demo.wasm";
-        let i = fs
-            .create(name)
-            .map_err(|e| format!("arifs {name}: {e:?}"))?;
-        fs.write(i, 0, &bytes)
-            .map_err(|e| format!("arifs {name} ({} bytes): {e:?}", bytes.len()))?;
-    }
+    populate_arifs(&mut img, PART_ARI0)?;
+    let (_, last) = PART_ARI0;
     for lba in RAW_PATTERN_LBA..=last {
         let o = lba as usize * 512;
         img[o..o + 8].copy_from_slice(b"ARIDISK\0");
@@ -433,12 +529,45 @@ pub fn write_test_disk(path: &Path, variant: DiskVariant) -> Result {
                 write_slot(&mut img, PART_SYSB, &system_image(2, true)?)?;
                 state = schedule(state, Slot::B);
             }
-            DiskVariant::Slots | DiskVariant::EspOnly => {}
+            DiskVariant::Slots | DiskVariant::EspOnly | DiskVariant::UsbImage => {}
         }
         let o = PART_ARIBOOT.0 as usize * 512;
         img[o..o + 512].copy_from_slice(&state.encode());
     }
     io(fs::write(path, img), "escribir disco de pruebas")
+}
+
+/// Formatea AriFS en `part` con los ficheros de ejemplo y el módulo WASM.
+fn populate_arifs(img: &mut [u8], part: (u64, u64)) -> Result {
+    let (first, last) = part;
+    let sectors = last - first + 1;
+    let mut fs = aricode_arifs::AriFs::format(
+        VecDisk {
+            data: img,
+            base: first,
+        },
+        sectors,
+    )
+    .map_err(|e| format!("arifs: {e:?}"))?;
+    for (name, content) in DISK_FILES {
+        let i = fs
+            .create(name)
+            .map_err(|e| format!("arifs {name}: {e:?}"))?;
+        fs.write(i, 0, content)
+            .map_err(|e| format!("arifs {name}: {e:?}"))?;
+    }
+    // Módulo WebAssembly de ejemplo en el directorio privado de `wasm_runner`
+    // (lo deja `build_wasm_programs`; sin él, el runner informa y sale).
+    let demo = crate::build_dir().join("demo.wasm");
+    if let Ok(bytes) = fs::read(&demo) {
+        let name = "wasm_runner/demo.wasm";
+        let i = fs
+            .create(name)
+            .map_err(|e| format!("arifs {name}: {e:?}"))?;
+        fs.write(i, 0, &bytes)
+            .map_err(|e| format!("arifs {name} ({} bytes): {e:?}", bytes.len()))?;
+    }
+    Ok(())
 }
 
 /// Copia privada de las variables OVMF: el firmware las escribe al arrancar.

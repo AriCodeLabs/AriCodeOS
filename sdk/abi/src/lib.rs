@@ -169,6 +169,9 @@ pub mod nr {
     /// `initrd_read(spawner, name_ptr, name_len, buf, len) -> bytes copiados`;
     /// exige `READ` sobre el `SPAWNER`. `TooBig` si el fichero no cabe.
     pub const INITRD_READ: u64 = 27;
+    /// `pci_info_ext(root, index) -> prog_if | revision << 8 | header_type << 16`
+    /// (ver `pci_info::prog_if`); exige `READ` sobre la raíz PCI.
+    pub const PCI_INFO_EXT: u64 = 28;
 }
 
 /// Sexto argumento de `process_spawn`: número de handles (bits 0..7) y
@@ -381,6 +384,21 @@ pub mod pci_info {
     pub const fn func(v: u64) -> u8 {
         (v & 7) as u8
     }
+
+    /// Campos de `pci_info_ext`.
+    pub const fn pack_ext(prog_if: u8, revision: u8, header_type: u8) -> u64 {
+        prog_if as u64 | (revision as u64) << 8 | (header_type as u64) << 16
+    }
+    /// Programming Interface: distingue variantes de una misma clase (xHCI
+    /// es `0c.03` con interfaz `0x30`; EHCI `0x20`, OHCI `0x10`, UHCI `0x00`).
+    pub const fn prog_if(ext: u64) -> u8 {
+        ext as u8
+    }
+    pub const fn revision(ext: u64) -> u8 {
+        (ext >> 8) as u8
+    }
+    /// Interfaz de programación del xHCI.
+    pub const XHCI_PROG_IF: u8 = 0x30;
 }
 
 /// Máximo de un buffer DMA por llamada (sección 52).

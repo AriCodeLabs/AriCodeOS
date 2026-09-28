@@ -54,6 +54,70 @@ fn find_pci(vendor: u16, device: u16) -> Option<u64> {
     find_pci_from(vendor, device, 0)
 }
 
+/// Primera función PCI de la clase `class.subclass` a partir de `start`.
+fn find_pci_class_from(class: u8, subclass: u8, start: u64) -> Option<u64> {
+    let n = sys::pci_count(PCI_ROOT).ok()?;
+    (start..n).find(|&i| {
+        sys::pci_info(PCI_ROOT, i).is_ok_and(|v| {
+            sys::abi::pci_info::class(v) == class && sys::abi::pci_info::subclass(v) == subclass
+        })
+    })
+}
+
+/// Comprueba que un servicio de entrada recién lanzado responde a `Info`
+/// antes de publicar su endpoint (auditoría 4836023, hallazgo 1): un driver
+/// que termina sin servir no debe dejar a los clientes esperando. Devuelve
+/// `false` si el proceso acabó o no contestó en unos segundos.
+fn input_service_ready(service: Handle, driver: Handle) -> bool {
+    use aricode_proto::input::{Op, Reply, Request};
+    let Ok(reply) = sys::endpoint_create() else {
+        return false;
+    };
+    let mut ok = false;
+    for _ in 0..12 {
+        match sys::process_wait(driver, 0) {
+            Err(Error::Timeout) => {}
+            _ => break, // termino (con codigo o por fallo): no servira
+        }
+        let Ok(reply_w) = sys::handle_duplicate(reply, rights::WRITE | rights::TRANSFER) else {
+            break;
+        };
+        let req = Request {
+            op: Op::Info,
+            timeout_ms: 0,
+        };
+        if sys::ipc_send(service, &req.encode(), &[reply_w], 250).is_err() {
+            continue;
+        }
+        let mut msg = [0u8; Reply::LEN];
+        let mut none: [Handle; 0] = [];
+        if let Ok((n, _)) = sys::ipc_receive(reply, &mut msg, &mut none, 250) {
+            ok = Reply::decode(&msg[..n]).is_some();
+            break;
+        }
+    }
+    let _ = sys::handle_close(reply);
+    ok
+}
+
+/// `bb:dd.f` de un valor de `pci_info`.
+fn print_bdf(info: u64) {
+    print_hex8(sys::abi::pci_info::bus(info));
+    sys::print(b":");
+    print_hex8(sys::abi::pci_info::dev(info));
+    sys::print(b".");
+    let mut b = [0u8; 20];
+    sys::print(aricode_rt::fmt_u64(
+        sys::abi::pci_info::func(info) as u64,
+        &mut b,
+    ));
+}
+
+fn print_hex8(v: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    sys::print(&[HEX[(v >> 4) as usize], HEX[(v & 0xF) as usize]]);
+}
+
 /// Como `find_pci`, buscando a partir del índice `start`.
 fn find_pci_from(vendor: u16, device: u16, start: u64) -> Option<u64> {
     let n = sys::pci_count(PCI_ROOT).ok()?;
@@ -215,10 +279,15 @@ fn start_fsd(
 
 /// Lanza un cliente de un servicio con su endpoint (solo WRITE) y
 /// una capacidad de hardware para su buffer DMA, y espera su salida.
-fn run_block_client(name: &str, service: Handle) -> Result<u64, Error> {
+/// Desplazamiento del area en bruto dentro de ARI0 (el disco de pruebas la
+/// tiene en el LBA 4096 con ARI0 en el 34; la imagen USB, al mismo
+/// desplazamiento).
+const RAW_AREA_OFFSET: u64 = 4096 - 34;
+
+fn run_block_client(name: &str, service: Handle, arg: u64) -> Result<u64, Error> {
     let ep = sys::handle_duplicate(service, rights::WRITE | rights::TRANSFER)?;
     let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
-    let child = sys::process_spawn_with(SPAWNER, name, 0, &[ep, hw])?;
+    let child = sys::process_spawn_with(SPAWNER, name, arg, &[ep, hw])?;
     let result = sys::process_wait(child, TIMEOUT_INFINITE);
     let _ = sys::handle_close(child);
     result
@@ -625,18 +694,27 @@ fn main(arg: u64) -> u64 {
             };
             services |= SERVICE_BLOCK;
             block_service = Some(service);
-            // Servicio de ficheros sobre la particion ARI0 (LBA 34) y su cliente.
+            // Servicio de ficheros sobre la particion ARI0 (por nombre en la
+            // GPT: el disco de pruebas y la imagen USB la colocan en LBA
+            // distintos) y su cliente.
             let Ok(fs_ep) = sys::endpoint_create() else {
                 return 12;
             };
-            match start_fsd(fs_ep, service, 34) {
+            let ari0 = BlockClient::new(service, HARDWARE, 16)
+                .ok()
+                .and_then(|mut blk| find_partition(&mut blk, "ARI0"));
+            let Some((ari0_lba, _)) = ari0 else {
+                say(b"sin particion ARI0 en el disco");
+                return 12;
+            };
+            match start_fsd(fs_ep, service, ari0_lba) {
                 Ok(_) => services |= SERVICE_FS,
                 Err(e) => {
                     aricode_rt::print_error(b"AriInit: fsd", e);
                     return 13;
                 }
             }
-            match run_block_client("fs_client", fs_ep) {
+            match run_block_client("fs_client", fs_ep, 0) {
                 Ok(0) => {
                     say(b"servicio de ficheros ok");
                     fs_service = Some(fs_ep);
@@ -652,7 +730,7 @@ fn main(arg: u64) -> u64 {
                     return 14;
                 }
             }
-            match run_block_client("blk_client", service) {
+            match run_block_client("blk_client", service, ari0_lba + RAW_AREA_OFFSET) {
                 Ok(0) => say(b"servicio de bloques ok"),
                 Ok(code) => {
                     sys::print(b"AriInit: blk_client salio con ");
@@ -684,7 +762,7 @@ fn main(arg: u64) -> u64 {
                     return 17;
                 }
             }
-            match run_block_client("net_client", net_service) {
+            match run_block_client("net_client", net_service, 0) {
                 Ok(0) => say(b"servicio de red ok"),
                 Ok(code) => {
                     sys::print(b"AriInit: net_client salio con ");
@@ -697,7 +775,7 @@ fn main(arg: u64) -> u64 {
                     return 18;
                 }
             }
-            match run_block_client("tcp_client", net_service) {
+            match run_block_client("tcp_client", net_service, 0) {
                 Ok(0) => say(b"servicio TCP ok"),
                 Ok(code) => {
                     sys::print(b"AriInit: tcp_client salio con ");
@@ -710,7 +788,7 @@ fn main(arg: u64) -> u64 {
                     return 19;
                 }
             }
-            match run_block_client("http_client", net_service) {
+            match run_block_client("http_client", net_service, 0) {
                 Ok(0) => say(b"cliente HTTP ok"),
                 Ok(code) => {
                     sys::print(b"AriInit: http_client salio con ");
@@ -742,12 +820,59 @@ fn main(arg: u64) -> u64 {
             return 21;
         };
         match start_driver("virtio_input", index, ep, &[system]) {
-            Ok(_) => {
+            Ok(driver) if input_service_ready(ep, driver) => {
                 input_eps[inputs] = ep;
                 inputs += 1;
             }
+            Ok(_) => {
+                say(b"virtio_input no llego a servir; se descarta");
+                let _ = sys::handle_close(ep);
+            }
             Err(e) => {
                 aricode_rt::print_error(b"AriInit: virtio_input", e);
+                return 22;
+            }
+        }
+    }
+    // Controladores USB (clase 0c.03): solo los xHCI (interfaz 0x30) tienen
+    // driver; usbd enumera teclados y ratones HID y los sirve como un unico
+    // dispositivo de entrada, que se publica cuando responde.
+    let mut next = 0;
+    while let Some(index) = find_pci_class_from(0x0C, 0x03, next) {
+        next = index + 1;
+        let prog_if = sys::pci_info_ext(PCI_ROOT, index)
+            .map(sys::abi::pci_info::prog_if)
+            .unwrap_or(0xFF);
+        if prog_if != sys::abi::pci_info::XHCI_PROG_IF {
+            let info = sys::pci_info(PCI_ROOT, index).unwrap_or(0);
+            sys::print(b"AriInit: controlador USB ");
+            print_bdf(info);
+            sys::print(b" sin driver (interfaz 0x");
+            print_hex8(prog_if);
+            sys::print(b", solo xHCI)\n");
+            continue;
+        }
+        if inputs == input_eps.len() {
+            break;
+        }
+        let Ok(ep) = sys::endpoint_create() else {
+            return 21;
+        };
+        let Ok(system) = sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER) else {
+            return 21;
+        };
+        match start_driver("usb_input", index, ep, &[system]) {
+            Ok(driver) if input_service_ready(ep, driver) => {
+                say(b"entrada usb_input lista");
+                input_eps[inputs] = ep;
+                inputs += 1;
+            }
+            Ok(_) => {
+                say(b"usb_input no llego a servir; se descarta");
+                let _ = sys::handle_close(ep);
+            }
+            Err(e) => {
+                aricode_rt::print_error(b"AriInit: usb_input", e);
                 return 22;
             }
         }
@@ -782,7 +907,7 @@ fn main(arg: u64) -> u64 {
             }
         }
     } else {
-        say(b"sin dispositivos virtio-input");
+        say(b"sin dispositivos de entrada");
     }
     // 10. Interfaz grafica: compositor con el framebuffer y las entradas, y dos
     //     aplicaciones que dibujan a la vez.

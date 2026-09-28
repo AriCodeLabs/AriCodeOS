@@ -13,7 +13,8 @@ timeout_secs = 40
 [expect]
 exit = 33
 serial_contains = [
-    "iommu: 00:02.0 asignado al dominio 1 (proceso 1)",
+    "iommu: 00:02.0 asignado al dominio",
+    "en el dominio identidad",
     "iommu: fallo DMA de 00:02.0 (escritura en 0x1000):",
     "dma_rogue: lectura legitima ok, DMA a memoria ajena bloqueado (",
     "iommu selftest ok (lectura legitima traducida, DMA a memoria ajena bloqueado con",

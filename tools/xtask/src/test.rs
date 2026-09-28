@@ -118,6 +118,8 @@ fn run_scenario(base: &std::path::Path, s: &Scenario, cpus_override: Option<u32>
         disk_variant,
         disk_readonly: s.disk_readonly,
         cpus: s.cpus(cpus_override),
+        usb_hid: s.usb_hid,
+        usb_legacy_controller: s.usb_legacy_controller,
     };
     let cap = qemu::run_headless(
         &esp,

@@ -167,9 +167,11 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
 }
 
 /// Localiza las unidades de la DMAR, programa sus tablas raíz y su
-/// interrupción de fallo y activa la traducción. Debe llamarse tras el APIC
-/// y el PMM, antes de que arranque cualquier driver.
-pub fn init() {
+/// interrupción de fallo, da un dominio identidad a los dispositivos que el
+/// firmware sigue usando (RMRR y controladores gráficos, que leen el
+/// framebuffer) y activa la traducción. Debe llamarse tras el APIC, el PMM y
+/// la enumeración PCI, antes de que arranque cualquier driver.
+pub fn init(framebuffer: &boot_protocol::FramebufferInfo) {
     let Some(dmar) = crate::acpi::with(|a| a.dmar.clone()) else {
         info!("iommu: sin tabla DMAR; el DMA de los drivers no se traduce");
         return;
@@ -233,7 +235,7 @@ pub fn init() {
     }
     let reserved = dmar.reserved.len();
     let n = units.len();
-    let state = State {
+    let mut state = State {
         dmar,
         units,
         levels,
@@ -244,6 +246,55 @@ pub fn init() {
         next_did: 1,
         max_did,
     };
+
+    // Dispositivos del firmware: los que tienen regiones reservadas y los
+    // controladores gráficos (clase 03), que barren el framebuffer sin que
+    // ningún driver de AriCodeOS los reclame. Un dominio identidad cada uno,
+    // con clave fuera del rango de PIDs.
+    let mut firmware: Vec<(u16, Vec<(u64, u64)>)> = Vec::new();
+    for r in &state.dmar.reserved {
+        for scope in r.scopes.iter().filter(|s| s.path.len() == 1) {
+            let (dev, func) = scope.path[0];
+            let sid = aricode_iommu::source_id(scope.start_bus, dev, func);
+            match firmware.iter_mut().find(|(s, _)| *s == sid) {
+                Some((_, ranges)) => ranges.push((r.base, r.limit + 1 - r.base)),
+                None => firmware.push((sid, alloc::vec![(r.base, r.limit + 1 - r.base)])),
+            }
+        }
+    }
+    for (bus, dev, func) in crate::pci::functions_of_class(0x03) {
+        let sid = aricode_iommu::source_id(bus, dev, func);
+        let mut ranges = Vec::new();
+        if framebuffer.address != 0 {
+            ranges.push((framebuffer.address, framebuffer.size));
+        }
+        match firmware.iter_mut().find(|(s, _)| *s == sid) {
+            Some((_, r)) => r.extend(ranges),
+            None => firmware.push((sid, ranges)),
+        }
+    }
+    let mut firmware_names = Vec::new();
+    for (i, (sid, ranges)) in firmware.iter().enumerate() {
+        let key = u32::MAX - i as u32;
+        let mut ok = true;
+        for &(base, len) in ranges {
+            if let Err(e) = state.map_range(key, base, len) {
+                warn!("iommu: dispositivo {sid:#06x}: region {base:#x}+{len:#x}: {e}");
+                ok = false;
+            }
+        }
+        if ok {
+            match state.attach(key, *sid) {
+                Ok(()) => firmware_names.push(alloc::format!(
+                    "{:02x}:{:02x}.{}",
+                    sid >> 8,
+                    (sid >> 3) & 0x1F,
+                    sid & 7
+                )),
+                Err(e) => warn!("iommu: dispositivo {sid:#06x}: {e}"),
+            }
+        }
+    }
 
     for (i, u) in state.units.iter().enumerate() {
         u.invalidate_all();
@@ -272,7 +323,9 @@ pub fn init() {
         );
     }
     info!(
-        "iommu: {n} unidad(es) activas, {reserved} region(es) reservadas (RMRR); un dominio por proceso con IOVA = fisica"
+        "iommu: {n} unidad(es) activas, {reserved} region(es) reservadas (RMRR), dominio identidad para {} dispositivo(s) del firmware {:?}; un dominio por proceso con IOVA = fisica",
+        firmware_names.len(),
+        firmware_names
     );
     *IOMMU.lock() = Some(state);
 }

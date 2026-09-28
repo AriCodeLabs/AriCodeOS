@@ -2,7 +2,7 @@
 
 ## Documento maestro de arquitectura, especificaciones técnicas y plan de desarrollo
 
-**Estado:** 0.0.7 completada (2026-09-26): init, drivers en espacio de usuario, PCIe  
+**Estado:** 0.6.0 (2026-09-28): las 35 fases implementadas y validadas en QEMU; la Fase 34 espera el portátil. Estado por capacidad en el README  
 **Versión del documento:** 0.2  
 **Nombre del sistema:** AriCodeOS  
 **Arquitectura inicial:** x86-64  
@@ -2503,7 +2503,7 @@ TLS vendrá posteriormente (Fase 31, criptografía).
 
 # FASE 25 — Input moderno
 
-**Estado: virtio-input completado (2026-09-27); xHCI/USB HID pendiente.**
+**Estado: completada (virtio-input 2026-09-27; xHCI y USB HID 2026-09-28).**
 
 ### Implementado
 
@@ -2519,15 +2519,33 @@ TLS vendrá posteriormente (Fase 31, criptografía).
 - cliente `aricode-sys::input`, programa `input_client` y escenario
   `input.virtio`: xtask inyecta por QMP (`input-send-event`) la línea
   `hola` + Enter en el teclado virtio y un movimiento y clic en el ratón
-  virtio; el escenario exige la traducción exacta.
+  virtio; el escenario exige la traducción exacta;
+- xHCI y USB HID (segunda parte): `libs/xhci` (no_std, tests de host) con
+  registros, TRB, anillos con bit de ciclo y enlace, contextos de slot y
+  endpoint de 32 o 64 bytes, ERST, paquetes SETUP y descriptores USB;
+  `usbd` (`services/usb-input`) en ring 3 recibe el controlador (clase
+  `0c.03`) con el contrato de driver, lo reinicia, programa DCBAA,
+  scratchpads, anillo de comandos y de eventos, enumera los puertos con
+  dispositivo (reset, Enable Slot, Address Device, descriptores,
+  `SET_CONFIGURATION`, `SET_PROTOCOL` de arranque, Configure Endpoint) y
+  sondea los endpoints de interrupción; los informes de arranque de teclado
+  y ratón se traducen a eventos evdev en `libs/input`
+  (`HidBootKeyboard`, `HidBootMouse`) y se sirven por
+  `InputServiceProtocol v1` como un único dispositivo
+  (`USB HID Keyboard+Mouse`); init lanza `usb_input` por cada controlador
+  USB y lo añade a los servicios de entrada;
+- escenarios `usb.hid` (`test=usb_hid`, QEMU con `qemu-xhci` + `usb-kbd` +
+  `usb-mouse` mediante `usb_hid = true`, eventos inyectados por QMP) y
+  `usb.hid_boot` (arranque normal con xHCI).
 
 ### Pendiente
 
-- xHCI, USB y HID (teclado y ratón físicos): misma librería de eventos,
-  driver nuevo en ring 3;
-- que el shell pueda leer del teclado virtio además de la consola serie
-  (llegará con la GUI, Fase 26, donde el teclado y el ratón alimentan al
-  compositor).
+- HID con descriptor de informe (protocolo de informe, teclados con teclas
+  multimedia, ratones con más botones), hubs USB, conexión y desconexión
+  en caliente (los Port Status Change se reconocen pero no se enumeran
+  puertos nuevos tras el arranque) y almacenamiento USB.
+- Que el shell pueda leer del teclado virtio o USB además de la consola
+  serie y PS/2 (el compositor ya los recibe en la GUI).
 
 ---
 
@@ -2868,6 +2886,31 @@ Aunque parte de SMP puede adelantarse, en esta etapa deberá consolidarse:
 ---
 
 # FASE 34 — Hardware real
+
+**Estado: preparación completada (2026-09-27); pendiente de la primera
+prueba en el portátil.** Ver `docs/hardware.md`.
+
+### Preparado sin hardware
+
+- `cargo xtask usb-image [--cmdline S]`: imagen GPT para pendrive con la ESP
+  en FAT32 propia (`libs/fat`, con nombres largos), AriFS, slot A firmado y
+  estado A/B; la misma imagen arranca en QEMU sin el disco FAT del emulador
+  (escenario `usb.image_boot`);
+- consola sin puerto serie: teclado PS/2 del i8042 como entrada de consola
+  del kernel (decodificador del conjunto 1 en `libs/input`, escenario
+  `console.ps2`) y salida por el framebuffer;
+- interruptores de depuración `smp=off` e `iommu=off` en la cmdline
+  (escenarios `smp.disabled`, `iommu.disabled`);
+- IOMMU en firmware real: los dispositivos con RMRR y los controladores
+  gráficos reciben un dominio identidad (RMRR + framebuffer) antes de
+  activar la traducción, para que la pantalla y el firmware sigan
+  funcionando;
+- guía de arranque, grabación y diagnóstico en `docs/hardware.md`.
+
+### Pendiente (necesita el portátil)
+
+- Arranque UEFI desde USB, RAM/ACPI/framebuffer, PCIe, IOMMU con RMRR reales.
+- Drivers de almacenamiento reales (AHCI/NVMe) y xHCI/USB HID (Fase 25).
 
 Aquí entra el portátil viejo.
 
@@ -3522,6 +3565,29 @@ de la pila de arranque.** Fases 32 y 33:
 
 Siguiente: Fase 34 (hardware real) y la segunda parte de la Fase 25
 (xHCI/USB HID).
+
+---
+
+## 94.5 AriCodeOS 0.6
+
+**Estado: completada (2026-09-28), tag `v0.6.0`.** Preparación de la Fase 34,
+segunda parte de la Fase 25 y las correcciones de las auditorías 3eb4965 y
+4836023:
+
+- imagen para pendrive con ESP FAT32 propia (`cargo xtask usb-image`),
+  teclado PS/2 como consola, interruptores `smp=off` e `iommu=off`,
+  dominios identidad para los dispositivos del firmware y guía de hardware;
+- xHCI y teclado/ratón USB HID en ring 3 (`libs/xhci`, `usbd`), con
+  selección por interfaz de programación y publicación de servicios de
+  entrada solo cuando responden;
+- recogida de procesos segura en SMP, propietario único por función PCI en
+  el IOMMU, consola de framebuffer fuera de la pila de arranque y
+  comprobación de margen de esa pila.
+
+Siguiente: la secuencia posterior al roadmap propuesta en
+`docs/audits/2026-09-28-referentes-capacidades-oportunidades.md`
+(recuperación observable, sesión útil con teclado USB y persistencia) y la
+primera prueba física de la Fase 34.
 
 ---
 

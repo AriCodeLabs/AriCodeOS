@@ -1,0 +1,19 @@
+# Fase 34: `smp=off` deja los APs parados aunque la maquina tenga varias CPUs
+# (interruptor para depurar hardware real).
+name = "smp.disabled"
+description = "smp=off con -smp 4: solo el BSP, arranque normal"
+level = "full"
+areas = ["smp", "hardware"]
+cmdline = "qemu_exit smp=off"
+cpus = 4
+timeout_secs = 60
+
+[expect]
+exit = 33
+serial_contains = [
+    "acpi: MADT lapic @ 0xfee00000, 4 cpu(s)",
+    "smp: desactivado por la linea de comandos (smp=off); 1 CPU",
+    "AriInit: servicios de arranque completados",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "smp: 4 CPUs en linea"]

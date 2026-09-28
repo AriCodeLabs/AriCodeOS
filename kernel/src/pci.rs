@@ -187,6 +187,14 @@ pub fn functions_of_class(class: u8) -> Vec<(u8, u8, u8)> {
         .collect()
 }
 
+/// Índice de la primera función de la clase dada sin reclamar.
+pub fn find_class(class: u8, subclass: u8) -> Option<usize> {
+    DEVICES
+        .lock()
+        .iter()
+        .position(|d| d.header.class == class && d.header.subclass == subclass && !d.claimed)
+}
+
 /// Índice de la primera función `vendor:device` sin reclamar.
 pub fn find(vendor: u16, device: u16) -> Option<usize> {
     DEVICES
@@ -207,6 +215,17 @@ pub fn info_packed(index: usize) -> Option<u64> {
         d.address.bus,
         d.address.device,
         d.address.function,
+    ))
+}
+
+/// Campos extendidos (`aricode_abi::pci_info::pack_ext`) de la función `index`.
+pub fn info_ext_packed(index: usize) -> Option<u64> {
+    let devs = DEVICES.lock();
+    let d = devs.get(index)?;
+    Some(aricode_abi::pci_info::pack_ext(
+        d.header.prog_if,
+        d.header.revision,
+        d.header.header_type,
     ))
 }
 

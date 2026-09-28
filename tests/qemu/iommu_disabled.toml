@@ -1,0 +1,19 @@
+# Fase 34: `iommu=off` arranca sin traduccion DMA aunque haya DMAR
+# (interruptor para depurar hardware real). Los drivers funcionan igual.
+name = "iommu.disabled"
+description = "iommu=off con VT-d presente: sin traduccion, servicios de arranque completos"
+level = "full"
+areas = ["iommu", "hardware"]
+cmdline = "qemu_exit iommu=off"
+timeout_secs = 60
+
+[expect]
+exit = 33
+serial_contains = [
+    "acpi: DMAR 48 bits, 1 unidad(es)",
+    "iommu: desactivado por la linea de comandos (iommu=off); DMA sin traducir",
+    "virtio-blk: dispositivo listo",
+    "AriInit: servicios de arranque completados",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "traduccion activa", "asignado al dominio"]

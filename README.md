@@ -7,20 +7,29 @@ El documento maestro de arquitectura y roadmap es [AriCodeOS.md](AriCodeOS.md).
 Las decisiones de diseño se registran en [docs/decisions/](docs/decisions/) y el
 flujo de ramas (git flow) en [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-**Estado:** 0.1.0, primera versión experimental utilizable. AriBoot (UEFI)
-carga `kernel.elf` e `initrd.img` y salta a AriKernel, que levanta consola
-serie y de framebuffer con logger por niveles, instala GDT/TSS/IDT propias,
-construye el allocator físico, activa sus propias tablas con W^X, arranca el
-heap, calibra el timer del LAPIC a 100 Hz, planifica hilos con round robin
-preemptivo y ejecuta procesos en ring 3 con espacio propio, syscalls, tablas
-de handles con derechos y revocación e IPC por endpoints con transferencia de
-capabilities. `init` lanza desde el initrd los servicios de ring 3: el driver
-virtio-blk como servicio de bloques, `fsd` (AriFS v0), `netd` (virtio-net con
-DHCP, ARP, ICMP, UDP, TCP y DNS) y, si la cmdline lleva `shell`, el shell
-`arish` con `ls`, `cat`, `ps`, `mem`, `ping`, `dns`, `http`, `reboot` y
-`shutdown`. Un proceso que toca memoria del kernel o ejecuta instrucciones
-privilegiadas muere sin afectar al kernel, y `init` lo reinicia si es un
-servicio. Los fallos se provocan desde la cmdline para los tests.
+**Estado:** 0.6.0 (2026-09-28). Las 35 fases del roadmap (0 a 34) están
+implementadas y probadas en QEMU; la Fase 34 espera su primera prueba en el
+portátil (ver [docs/hardware.md](docs/hardware.md)). La tabla siguiente es
+la referencia única del estado de cada capacidad: `validado en QEMU` significa
+que hay escenarios en `tests/qemu/` que lo exigen en cada suite; nada está
+todavía `validado en hardware`.
+
+| Capacidad | Estado | Pruebas |
+|---|---|---|
+| Arranque UEFI, kernel, memoria, excepciones, heap | validado en QEMU | `boot.*`, `memory.*`, `interrupts.*` |
+| Hilos, scheduler preemptivo, SMP (APs, IPI, TLB shootdown, afinidad) | validado en QEMU (1 y 4 CPUs) | `threads.*`, `scheduler.*`, `smp.*`, `--cpus 4` |
+| Procesos ring 3, syscalls, handles con derechos, revocación, IPC con transferencia | validado en QEMU | `user.*`, `capabilities.*`, `ipc.*` |
+| init como device manager y broker de capabilities; sandbox por manifiesto | validado en QEMU | `init.*`, `sandbox.*` |
+| Drivers en ring 3: virtio-blk, virtio-net, virtio-input, xHCI + USB HID | validado en QEMU | `drivers.*`, `virtio.*`, `storage.*`, `network.*`, `input.*`, `usb.*` |
+| AriFS (ficheros, directorios privados por app) | prototipo, validado en QEMU | `filesystem.*`; sin garantías ante cortes de energía |
+| Red IPv4: DHCP, ARP, ICMP, UDP, TCP, DNS, cliente HTTP | prototipo, validado en QEMU | `network.*`; sin TLS ni renovación DHCP |
+| Shell `arish` por consola serie o teclado PS/2 | validado en QEMU | `shell.*`, `console.*` |
+| GUI: compositor, ventanas, entrada | prototipo, validado en QEMU | `gui.*` |
+| WASM (intérprete MVP acotado) | prototipo, validado en QEMU | `wasm.*`; sin validación previa ni WASI |
+| Criptografía propia, RNG, imágenes firmadas, A/B con rollback | validado en QEMU | `crypto.*`, `update.*`; no es Secure Boot |
+| IOMMU VT-d con dominio por driver | validado en QEMU | `iommu.*` |
+| Imagen USB para pendrive | validado en QEMU (`usb.image_boot`) | pendiente en hardware |
+| Arranque en portátil (Fase 34) | propuesto | necesita el equipo de referencia |
 
 ## Requisitos (Debian 13)
 
@@ -42,10 +51,12 @@ cargo xtask run            # arranca en QEMU + OVMF, serie en la terminal (salir
 cargo xtask run --cmdline shell   # arranca con el shell interactivo (arish) en la consola serie
 cargo xtask run --cmdline gui     # compositor y dos ventanas de prueba en la pantalla de QEMU
 cargo xtask run --cpus 4   # arranca con cuatro procesadores (SMP)
+cargo xtask run --usb-hid  # añade un xHCI con teclado y raton USB
 cargo xtask test           # unit + smoke (arranque nominal en QEMU)
 cargo xtask test --all     # unit + todos los escenarios QEMU; obligatorio antes de main
 cargo xtask test --area boot   # solo los escenarios de un área
 cargo xtask test --all --cpus 4   # toda la suite con cuatro CPUs: estrés del kernel SMP
+cargo xtask usb-image      # build/aricodeos-usb.img para grabar en un pendrive (docs/hardware.md)
 cargo xtask check          # rustfmt --check + clippy -D warnings
 ```
 

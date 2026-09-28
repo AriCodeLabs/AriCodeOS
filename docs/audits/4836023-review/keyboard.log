@@ -1,0 +1,22 @@
+   Compiling aricode-input v0.5.1 (/tmp/aricode-probes-4836023-rluc8oh6/libs/input)
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.19s
+     Running tests/review.rs (target/debug/deps/review-b0c4665eea85fc8d)
+
+running 1 test
+events=16, new_presses=2, repeated_report_events=0
+
+thread 'every_new_key_in_a_full_report_is_delivered' (2673486) panicked at libs/input/tests/review.rs:12:5:
+assertion `left == right` failed: las seis teclas nuevas deben llegar al consumidor
+  left: 2
+ right: 6
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test every_new_key_in_a_full_report_is_delivered ... FAILED
+
+failures:
+
+failures:
+    every_new_key_in_a_full_report_is_delivered
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p aricode-input --test review`

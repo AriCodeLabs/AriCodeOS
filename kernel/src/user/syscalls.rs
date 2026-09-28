@@ -69,6 +69,10 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
             require_pci_root(t, h, Rights::READ)?;
             crate::pci::info_packed(frame.rsi as usize).ok_or(Error::NotFound)
         }),
+        nr::PCI_INFO_EXT => with_handles(|t| {
+            require_pci_root(t, h, Rights::READ)?;
+            crate::pci::info_ext_packed(frame.rsi as usize).ok_or(Error::NotFound)
+        }),
         nr::PCI_CLAIM => pci_claim(h, frame.rsi as usize, frame.rdx),
         nr::PROCESS_WAIT => process_wait(h, frame.rsi),
         nr::IPC_SEND => ipc_send(h, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9),

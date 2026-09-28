@@ -27,6 +27,8 @@ members = [
     "libs/crypto",
     "libs/ab",
     "libs/iommu",
+    "libs/fat",
+    "libs/xhci",
     "sdk/abi",
     "sdk/runtime",
     "sdk/build",
@@ -44,6 +46,7 @@ members = [
     "services/virtio-blk",
     "services/virtio-net",
     "services/virtio-input",
+    "services/usb-input",
     "services/compositor",
     "services/arifs",
     "services/shell",
@@ -72,6 +75,8 @@ default-members = [
     "libs/gpt",
     "libs/arifs",
     "libs/iommu",
+    "libs/fat",
+    "libs/xhci",
     "sdk/abi",
     "sdk/rust",
     "sdk/proto",
@@ -79,7 +84,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 license = "UNLICENSED"
 repository = "https://github.com/lynxcraft/aricodeos"

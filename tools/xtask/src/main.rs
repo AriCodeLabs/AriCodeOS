@@ -3,7 +3,8 @@
 //! ```text
 //! cargo xtask build [--debug]                 compila AriBoot y AriKernel
 //! cargo xtask image [--debug]                 build + monta build/esp/
-//! cargo xtask run   [--debug] [--cmdline S] [--cpus N]   image + QEMU interactivo (serie en stdio)
+//! cargo xtask run   [--debug] [--cmdline S] [--cpus N] [--usb-image] [--usb-hid]   image + QEMU interactivo
+//! cargo xtask usb-image [--cmdline S]         imagen GPT para pendrive en build/aricodeos-usb.img
 //! cargo xtask test  [opciones]                niveles de test (ver tests/README.md)
 //!     --level unit|smoke|full                 por defecto: unit + smoke
 //!     --all                                   unit + full (obligatorio antes de main)
@@ -67,7 +68,16 @@ fn main() -> ExitCode {
             cli.value("--cpus")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1),
+            cli.flag("--usb-image"),
+            cli.flag("--usb-hid"),
         ),
+        "usb-image" => image::build_usb_image(release, cli.value("--cmdline").unwrap_or("shell"))
+            .map(|p| {
+                println!(
+                    "[xtask] grabar con: sudo dd if={} of=/dev/sdX bs=4M conv=fsync status=progress (ver docs/hardware.md)",
+                    p.display()
+                )
+            }),
         "test" => test::run(&cli, release),
         "check" => build::check(),
         "keygen" => keys::keygen(&root().join(cli.positional(1).unwrap_or(keys::DEV_KEY_DIR))),
@@ -84,7 +94,7 @@ fn main() -> ExitCode {
             _ => Err(String::from("uso: xtask verify PUB FICHERO [FIRMA]")),
         },
         _ => {
-            eprintln!("uso: cargo xtask <build|image|run|test|check> [--debug] (ver tools/xtask/src/main.rs)");
+            eprintln!("uso: cargo xtask <build|image|run|test|check|usb-image|keygen|sign|verify> [--debug] (ver tools/xtask/src/main.rs)");
             return ExitCode::from(2);
         }
     };

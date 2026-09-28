@@ -231,6 +231,10 @@ pub fn handle_interrupt(vector: u8) {
             crate::console_input::on_irq();
             eoi();
         }
+        crate::console_input::KEYBOARD_VECTOR => {
+            crate::console_input::on_keyboard_irq();
+            eoi();
+        }
         v => {
             warn!("interrupcion inesperada, vector {v}");
             eoi();
