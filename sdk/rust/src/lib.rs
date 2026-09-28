@@ -11,6 +11,7 @@ pub mod input;
 pub mod launch;
 pub mod net;
 pub mod permissions;
+pub mod rpc;
 pub mod status;
 pub mod time;
 pub mod virtio_pci;

@@ -3600,7 +3600,7 @@ etapa con sus ramas, ADR y escenarios:
 | Etapa | Estado | Contenido |
 |---|---|---|
 | 0. Consolidar | completada (0.6.0) | auditorías resueltas con evidencia; tabla única de estado por capacidad en el README |
-| 1. Recuperación observable | en curso | supervisor de servicios (ADR 0011): estados, generaciones, reinicio con presupuesto y espera creciente, endpoint estable entre generaciones, publicación solo tras responder, `status` v1 y `services --detail`; pendiente: correlación de peticiones IPC y semántica de reintento (1B) |
+| 1. Recuperación observable | completada | supervisor de servicios (ADR 0011): estados, generaciones, reinicio con presupuesto y espera creciente, endpoint estable entre generaciones, publicación solo tras responder, `status` v1 y `services --detail`; plazos y correlación IPC (ADR 0012): endpoint de respuesta por petición, esperas acotadas, sin reintentos automáticos de escrituras (`ipc.late_reply`) |
 | 2. Sesión útil | pendiente | shell con teclados USB y virtio, persistencia de AriFS ante cortes, equipo de referencia |
 | 3. Límites y actualización | pendiente | cuotas, permisos por recurso, cortes de escritura, actualización entre arranques |
 | 4. Aplicaciones externas | pendiente | SDK reproducible, perfil WASI, paquetes |

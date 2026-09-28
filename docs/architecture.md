@@ -984,6 +984,17 @@ sdk/proto::status              estado por servicio (protocolo 7) en el endpoint 
   libre vuelve al nivel anterior (`services.restart_storm`);
   `shell.services_detail` cubre el estado consultable.
 
+## Plazos y correlación IPC (etapa 1B, ADR 0012)
+
+- `aricode_sys::rpc::call`: un endpoint de respuesta por petición (creado y
+  cerrado en la llamada), envío y recepción con plazo, handles extra que se
+  consumen o se cierran si el envío falla. Lo usan todos los clientes del
+  SDK; `launch::run` es el único que espera la respuesta sin plazo (es la
+  salida del programa).
+- `test=ipc_late` (`ipc.late_reply`): `late_server` contesta la primera
+  petición 800 ms tarde; `late_client` vence a los 200 ms, pide otra y
+  recibe la suya, nunca la tardía, que muere en el endpoint ya cerrado.
+
 ## Hardware real (Fase 34, preparación)
 
 - `console_input` también lee el teclado PS/2 del i8042: inicialización

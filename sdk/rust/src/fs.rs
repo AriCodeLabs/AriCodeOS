@@ -1,11 +1,10 @@
 //! Cliente del servicio de ficheros (`aricode-proto::fs`).
 
-use crate::{self as sys, rights, Error, Handle, TIMEOUT_INFINITE};
+use crate::{self as sys, rights, rpc, Error, Handle};
 use aricode_proto::fs::{Op, Reply, Request, Status, MAX_IO};
 
 pub struct FsClient {
     service: Handle,
-    reply: Handle,
     dma: Handle,
     buf: u64,
 }
@@ -18,15 +17,9 @@ pub enum FsError {
 
 impl FsClient {
     pub fn new(service: Handle, hardware: Handle) -> Result<Self, Error> {
-        let reply = sys::endpoint_create()?;
         let dma = sys::dma_alloc(hardware, MAX_IO as u64)?;
         let buf = sys::mmio_map(dma)?;
-        Ok(Self {
-            service,
-            reply,
-            dma,
-            buf,
-        })
+        Ok(Self { service, dma, buf })
     }
 
     fn buffer(&mut self) -> &mut [u8] {
@@ -35,22 +28,24 @@ impl FsClient {
     }
 
     fn call(&self, req: Request, with_buffer: bool) -> Result<Reply, FsError> {
-        let reply_w = sys::handle_duplicate(self.reply, rights::WRITE | rights::TRANSFER)
-            .map_err(FsError::Ipc)?;
-        let mut handles = [reply_w, Handle(0)];
-        let mut n = 1;
+        let mut extra = [Handle(0); 1];
+        let mut n = 0;
         if with_buffer {
-            handles[1] =
+            extra[0] =
                 sys::handle_duplicate(self.dma, rights::READ | rights::WRITE | rights::TRANSFER)
                     .map_err(FsError::Ipc)?;
-            n = 2;
+            n = 1;
         }
-        sys::ipc_send(self.service, &req.encode(), &handles[..n], TIMEOUT_INFINITE)
-            .map_err(FsError::Ipc)?;
         let mut msg = [0u8; Reply::LEN];
-        let mut none: [Handle; 0] = [];
-        let (len, _) = sys::ipc_receive(self.reply, &mut msg, &mut none, TIMEOUT_INFINITE)
-            .map_err(FsError::Ipc)?;
+        let len = rpc::call(
+            self.service,
+            &req.encode(),
+            &extra[..n],
+            rpc::GRACE_MS,
+            rpc::GRACE_MS,
+            &mut msg,
+        )
+        .map_err(FsError::Ipc)?;
         let reply = Reply::decode(&msg[..len]).ok_or(FsError::Ipc(Error::Invalid))?;
         match reply.status {
             Status::Ok => Ok(reply),
@@ -102,14 +97,18 @@ impl FsClient {
         let req = Request::new(Op::Bind)
             .with_name(prefix)
             .ok_or(FsError::Status(Status::Invalid))?;
-        let reply_w = sys::handle_duplicate(self.reply, rights::WRITE | rights::TRANSFER)
-            .map_err(FsError::Ipc)?;
-        sys::ipc_send(self.service, &req.encode(), &[reply_w], TIMEOUT_INFINITE)
-            .map_err(FsError::Ipc)?;
         let mut msg = [0u8; Reply::LEN];
         let mut handles = [Handle(0); 1];
-        let (len, nh) = sys::ipc_receive(self.reply, &mut msg, &mut handles, TIMEOUT_INFINITE)
-            .map_err(FsError::Ipc)?;
+        let (len, nh) = rpc::call_handles(
+            self.service,
+            &req.encode(),
+            &[],
+            rpc::GRACE_MS,
+            rpc::GRACE_MS,
+            &mut msg,
+            &mut handles,
+        )
+        .map_err(FsError::Ipc)?;
         let reply = Reply::decode(&msg[..len]).ok_or(FsError::Ipc(Error::Invalid))?;
         match (reply.status, nh) {
             (Status::Ok, 1) => Ok(handles[0]),
