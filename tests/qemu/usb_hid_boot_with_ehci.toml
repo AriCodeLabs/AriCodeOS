@@ -1,0 +1,24 @@
+# Auditoria 4836023, hallazgo 1: un controlador USB que no es xHCI (EHCI,
+# interfaz 0x20) no debe entregarse al driver xHCI ni dejar un endpoint sin
+# servidor que bloquee a input_client; el xHCI de al lado sigue funcionando.
+name = "usb.hid_boot_with_ehci"
+description = "arranque con EHCI y xHCI: init salta el EHCI por su interfaz y la entrada USB sigue disponible"
+level = "full"
+areas = ["usb", "input", "init"]
+cmdline = "qemu_exit"
+usb_hid = true
+usb_legacy_controller = true
+timeout_secs = 90
+
+[expect]
+exit = 33
+serial_contains = [
+    "sin driver (interfaz 0x20",
+    "usb-input: dispositivo listo: USB HID Keyboard+Mouse",
+    "AriInit: entrada usb_input lista",
+    "input_client: dispositivo 2: USB HID Keyboard+Mouse",
+    "AriInit: servicio de entrada ok",
+    "AriInit: servicios de arranque completados",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "fallo en la inicializacion del xHCI"]

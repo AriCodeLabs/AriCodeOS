@@ -16,6 +16,7 @@ fn base_command(
     disk_readonly: bool,
     cpus: u32,
     usb_hid: bool,
+    usb_legacy_controller: bool,
 ) -> Command {
     let mut q = Command::new("qemu-system-x86_64");
     q.current_dir(root());
@@ -89,6 +90,10 @@ fn base_command(
         q.args(["-device", "qemu-xhci,id=xhci"]);
         q.args(["-device", "usb-kbd,bus=xhci.0"]);
         q.args(["-device", "usb-mouse,bus=xhci.0"]);
+    }
+    if usb_legacy_controller {
+        // EHCI (clase 0c.03, interfaz 0x20): no es xHCI.
+        q.args(["-device", "usb-ehci,id=ehci"]);
     }
     q.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     q
@@ -405,7 +410,7 @@ pub fn run_interactive(
         Some(esp.as_path())
     };
     let _responder = Responder::start()?;
-    let mut q = base_command(esp_drive, &vars, &disk, false, cpus, usb_hid);
+    let mut q = base_command(esp_drive, &vars, &disk, false, cpus, usb_hid, false);
     if cmdline.split_whitespace().any(|w| w == "gui") {
         // Con `gui` hace falta ver la pantalla: ventana de QEMU y serie en la terminal.
         println!("[xtask] QEMU con pantalla (serie en la terminal; salir: cerrar la ventana)");
@@ -454,6 +459,7 @@ pub struct Headless<'a> {
     pub disk_readonly: bool,
     pub cpus: u32,
     pub usb_hid: bool,
+    pub usb_legacy_controller: bool,
 }
 
 pub fn run_headless(
@@ -489,6 +495,7 @@ pub fn run_headless(
         disk_readonly,
         options.cpus,
         options.usb_hid,
+        options.usb_legacy_controller,
     )
     .args(["-display", "none", "-monitor", "none", "-serial", "stdio"])
     .args([

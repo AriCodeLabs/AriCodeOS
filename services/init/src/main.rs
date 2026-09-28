@@ -64,6 +64,60 @@ fn find_pci_class_from(class: u8, subclass: u8, start: u64) -> Option<u64> {
     })
 }
 
+/// Comprueba que un servicio de entrada recién lanzado responde a `Info`
+/// antes de publicar su endpoint (auditoría 4836023, hallazgo 1): un driver
+/// que termina sin servir no debe dejar a los clientes esperando. Devuelve
+/// `false` si el proceso acabó o no contestó en unos segundos.
+fn input_service_ready(service: Handle, driver: Handle) -> bool {
+    use aricode_proto::input::{Op, Reply, Request};
+    let Ok(reply) = sys::endpoint_create() else {
+        return false;
+    };
+    let mut ok = false;
+    for _ in 0..12 {
+        match sys::process_wait(driver, 0) {
+            Err(Error::Timeout) => {}
+            _ => break, // termino (con codigo o por fallo): no servira
+        }
+        let Ok(reply_w) = sys::handle_duplicate(reply, rights::WRITE | rights::TRANSFER) else {
+            break;
+        };
+        let req = Request {
+            op: Op::Info,
+            timeout_ms: 0,
+        };
+        if sys::ipc_send(service, &req.encode(), &[reply_w], 250).is_err() {
+            continue;
+        }
+        let mut msg = [0u8; Reply::LEN];
+        let mut none: [Handle; 0] = [];
+        if let Ok((n, _)) = sys::ipc_receive(reply, &mut msg, &mut none, 250) {
+            ok = Reply::decode(&msg[..n]).is_some();
+            break;
+        }
+    }
+    let _ = sys::handle_close(reply);
+    ok
+}
+
+/// `bb:dd.f` de un valor de `pci_info`.
+fn print_bdf(info: u64) {
+    print_hex8(sys::abi::pci_info::bus(info));
+    sys::print(b":");
+    print_hex8(sys::abi::pci_info::dev(info));
+    sys::print(b".");
+    let mut b = [0u8; 20];
+    sys::print(aricode_rt::fmt_u64(
+        sys::abi::pci_info::func(info) as u64,
+        &mut b,
+    ));
+}
+
+fn print_hex8(v: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    sys::print(&[HEX[(v >> 4) as usize], HEX[(v & 0xF) as usize]]);
+}
+
 /// Como `find_pci`, buscando a partir del índice `start`.
 fn find_pci_from(vendor: u16, device: u16, start: u64) -> Option<u64> {
     let n = sys::pci_count(PCI_ROOT).ok()?;
@@ -766,9 +820,13 @@ fn main(arg: u64) -> u64 {
             return 21;
         };
         match start_driver("virtio_input", index, ep, &[system]) {
-            Ok(_) => {
+            Ok(driver) if input_service_ready(ep, driver) => {
                 input_eps[inputs] = ep;
                 inputs += 1;
+            }
+            Ok(_) => {
+                say(b"virtio_input no llego a servir; se descarta");
+                let _ = sys::handle_close(ep);
             }
             Err(e) => {
                 aricode_rt::print_error(b"AriInit: virtio_input", e);
@@ -776,11 +834,24 @@ fn main(arg: u64) -> u64 {
             }
         }
     }
-    // Controladores USB (clase 0c.03): usbd enumera teclados y ratones HID y
-    // los sirve como un unico dispositivo de entrada.
+    // Controladores USB (clase 0c.03): solo los xHCI (interfaz 0x30) tienen
+    // driver; usbd enumera teclados y ratones HID y los sirve como un unico
+    // dispositivo de entrada, que se publica cuando responde.
     let mut next = 0;
     while let Some(index) = find_pci_class_from(0x0C, 0x03, next) {
         next = index + 1;
+        let prog_if = sys::pci_info_ext(PCI_ROOT, index)
+            .map(sys::abi::pci_info::prog_if)
+            .unwrap_or(0xFF);
+        if prog_if != sys::abi::pci_info::XHCI_PROG_IF {
+            let info = sys::pci_info(PCI_ROOT, index).unwrap_or(0);
+            sys::print(b"AriInit: controlador USB ");
+            print_bdf(info);
+            sys::print(b" sin driver (interfaz 0x");
+            print_hex8(prog_if);
+            sys::print(b", solo xHCI)\n");
+            continue;
+        }
         if inputs == input_eps.len() {
             break;
         }
@@ -791,9 +862,14 @@ fn main(arg: u64) -> u64 {
             return 21;
         };
         match start_driver("usb_input", index, ep, &[system]) {
-            Ok(_) => {
+            Ok(driver) if input_service_ready(ep, driver) => {
+                say(b"entrada usb_input lista");
                 input_eps[inputs] = ep;
                 inputs += 1;
+            }
+            Ok(_) => {
+                say(b"usb_input no llego a servir; se descarta");
+                let _ = sys::handle_close(ep);
             }
             Err(e) => {
                 aricode_rt::print_error(b"AriInit: usb_input", e);

@@ -114,6 +114,10 @@ pub struct Scenario {
     /// eventos QMP van entonces al teclado USB (el manejador más reciente).
     #[serde(default)]
     pub usb_hid: bool,
+    /// Añade además un controlador USB anterior a xHCI (EHCI): init no debe
+    /// entregárselo al driver xHCI ni bloquearse por él.
+    #[serde(default)]
+    pub usb_legacy_controller: bool,
     #[serde(default)]
     pub inject: Inject,
     pub expect: Expect,

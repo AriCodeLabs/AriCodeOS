@@ -1,0 +1,3 @@
+smp.process_reap: [INFO ] process reap selftest ok (180 procesos creados y esperados en 4 CPU(s), 3 frames de diferencia, heap +0 paginas)
+iommu.isolation: [INFO ] iommu selftest ok (lectura legitima traducida, DMA a memoria ajena bloqueado con 1 fallo(s) registrados y la memoria intacta, dominio liberado, reasignacion de 00:02.0 conservada)
+user.process_reap: [INFO ] process reap selftest ok (180 procesos creados y esperados en 1 CPU(s), 3 frames de diferencia, heap +0 paginas)

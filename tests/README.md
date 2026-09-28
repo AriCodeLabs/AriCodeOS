@@ -49,6 +49,7 @@ disk = "slots"                  # disco: slots (defecto) | esp-only | pending-b 
 disk_readonly = false           # true: el disco de pruebas se presenta como solo lectura
 cpus = 4                        # procesadores (-smp N); sin declarar: 1, o lo que fuerce `--cpus N`
 usb_hid = true                  # añade qemu-xhci con un teclado y un ratón USB (los eventos QMP van al USB)
+usb_legacy_controller = true    # añade además un EHCI (clase 0c.03 pero no xHCI)
 
 [host_input]                    # opcional: entrada inyectada por QMP al ver marker
 marker = "INPUT_READY"

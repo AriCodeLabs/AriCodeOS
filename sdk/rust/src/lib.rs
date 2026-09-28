@@ -245,6 +245,11 @@ pub fn pci_info(root: Handle, index: u64) -> Result<u64, Error> {
     call(nr::PCI_INFO, root.0 as u64, index, 0, 0)
 }
 
+/// Campos extendidos de la función `index` (ver `abi::pci_info::prog_if`).
+pub fn pci_info_ext(root: Handle, index: u64) -> Result<u64, Error> {
+    call(nr::PCI_INFO_EXT, root.0 as u64, index, 0, 0)
+}
+
 /// Reclama la función `index`: devuelve sus handles (ver `abi::nr::PCI_CLAIM`).
 pub fn pci_claim(root: Handle, index: u64) -> Result<[Handle; abi::PCI_CLAIM_HANDLES], Error> {
     let mut raw = [0u32; abi::PCI_CLAIM_HANDLES];

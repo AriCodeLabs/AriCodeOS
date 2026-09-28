@@ -8,7 +8,7 @@
 #![no_std]
 #![no_main]
 
-use aricode_input::{Event, HidBootKeyboard, HidBootMouse};
+use aricode_input::{Event, HidBootKeyboard, HidBootMouse, MAX_REPORT_EVENTS};
 use aricode_proto::input::{Event as WireEvent, Op, Reply, Request, Status, MAX_EVENTS};
 use aricode_rt::sys::virtio_pci::{bar_handle, extra_handle, DmaRegion, Mmio, IRQ, SERVICE};
 use aricode_rt::sys::{self, abi, Handle};
@@ -452,8 +452,40 @@ impl Controller {
             decoders: [Decoder::None; MAX_DEVICES],
         });
 
-        // Descriptor de dispositivo (y ajuste del tamaño de paquete de EP0).
+        // Descriptor de dispositivo en dos pasos (xHCI 4.3, paso 7): primero
+        // solo 8 bytes, que caben en cualquier EP0, para conocer
+        // bMaxPacketSize0; si difiere del supuesto se corrige el contexto con
+        // Evaluate Context y solo entonces se pide el descriptor completo.
         let (buf_phys, buf_virt) = self.arena.alloc(512, 64).ok_or("sin DMA")?;
+        self.control(
+            index,
+            SetupPacket::get_descriptor(aricode_xhci::request::DESC_DEVICE, 0, 8),
+            Some((buf_phys, 8)),
+        )
+        .ok_or("GET_DESCRIPTOR(device, 8 bytes) fallo")?;
+        // SAFETY: buffer DMA de 512 bytes del driver.
+        let raw = unsafe { core::slice::from_raw_parts(buf_virt as *const u8, 512) };
+        let max_packet0 = raw[7] as u16;
+        if raw[1] != aricode_xhci::request::DESC_DEVICE || max_packet0 == 0 {
+            return Err("cabecera del descriptor de dispositivo invalida");
+        }
+        if max_packet0 != speed::default_ep0_max_packet(spd) && spd != speed::SUPER {
+            let ep0_ctx = EndpointContext::control(max_packet0, ep0_ctx.ring_phys);
+            write_input_context(
+                // SAFETY: ídem.
+                unsafe { core::slice::from_raw_parts_mut(in_virt as *mut u8, in_len as usize) },
+                ctx_bytes,
+                0b10,
+                &slot_ctx,
+                &[(1, ep0_ctx)],
+            );
+            let (code, _) = self
+                .command(Trb::evaluate_context(in_phys, slot), 500)
+                .ok_or("Evaluate Context sin respuesta")?;
+            if code != completion::SUCCESS {
+                return Err("Evaluate Context (tamano de paquete de EP0) fallo");
+            }
+        }
         self.control(
             index,
             SetupPacket::get_descriptor(
@@ -464,22 +496,7 @@ impl Controller {
             Some((buf_phys, DeviceDescriptor::LEN)),
         )
         .ok_or("GET_DESCRIPTOR(device) fallo")?;
-        // SAFETY: buffer DMA de 512 bytes del driver.
-        let raw = unsafe { core::slice::from_raw_parts(buf_virt as *const u8, 512) };
         let desc = DeviceDescriptor::parse(raw).ok_or("descriptor de dispositivo invalido")?;
-        if desc.max_packet_size0 as u16 != speed::default_ep0_max_packet(spd) && spd != speed::SUPER
-        {
-            let ep0_ctx = EndpointContext::control(desc.max_packet_size0 as u16, ep0_ctx.ring_phys);
-            write_input_context(
-                // SAFETY: ídem.
-                unsafe { core::slice::from_raw_parts_mut(in_virt as *mut u8, in_len as usize) },
-                ctx_bytes,
-                0b10,
-                &slot_ctx,
-                &[(1, ep0_ctx)],
-            );
-            self.command(Trb::evaluate_context(in_phys, slot), 500);
-        }
         // Configuración completa.
         self.control(
             index,
@@ -606,7 +623,7 @@ impl Controller {
     /// y vuelve a encolar el TRB.
     fn handle_transfer_event(&mut self, ev: Trb, pending: Option<&mut Pending>) {
         let now = self.clock.now();
-        let mut out = [Event::default(); 16];
+        let mut out = [Event::default(); MAX_REPORT_EVENTS];
         for dev in self.devices.iter_mut().flatten() {
             if dev.slot != ev.slot_id() {
                 continue;

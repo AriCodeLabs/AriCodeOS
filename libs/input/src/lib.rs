@@ -229,9 +229,14 @@ impl ScancodeSet1 {
     }
 }
 
+/// Eventos que puede producir un informe HID de arranque: 8 cambios de
+/// modificador, 6 sueltas, 6 pulsaciones y `EV_SYN` (21); se reservan 24.
+pub const MAX_REPORT_EVENTS: usize = 24;
+
 /// Teclado HID de arranque (USB): informe de 8 bytes (modificadores,
 /// reservado, hasta 6 usages pulsados). Traduce cada informe a eventos evdev
-/// comparándolo con el anterior.
+/// comparándolo con el anterior. `out` tiene sitio para el peor caso, así
+/// que ningún cambio se pierde ni el estado avanza sin haberlo entregado.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct HidBootKeyboard {
     modifiers: u8,
@@ -310,7 +315,7 @@ impl HidBootKeyboard {
 
     /// Procesa un informe y escribe en `out` los eventos (sueltas primero,
     /// luego pulsaciones, y `EV_SYN` al final). Devuelve cuántos.
-    pub fn feed(&mut self, report: &[u8], out: &mut [Event; 16]) -> usize {
+    pub fn feed(&mut self, report: &[u8], out: &mut [Event; MAX_REPORT_EVENTS]) -> usize {
         if report.len() < 8 {
             return 0;
         }
@@ -395,7 +400,7 @@ impl HidBootMouse {
         Self { buttons: 0 }
     }
 
-    pub fn feed(&mut self, report: &[u8], out: &mut [Event; 16]) -> usize {
+    pub fn feed(&mut self, report: &[u8], out: &mut [Event; MAX_REPORT_EVENTS]) -> usize {
         if report.len() < 3 {
             return 0;
         }
@@ -610,7 +615,7 @@ mod tests {
     #[test]
     fn hid_boot_keyboard_reports_to_events_and_text() {
         let mut kbd = HidBootKeyboard::new();
-        let mut out = [Event::default(); 16];
+        let mut out = [Event::default(); MAX_REPORT_EVENTS];
         // 'h' pulsada (usage 0x0B), luego 'h' suelta y 'o' pulsada, luego todo suelto.
         let n = kbd.feed(&[0, 0, 0x0B, 0, 0, 0, 0, 0], &mut out);
         assert_eq!(n, 2);
@@ -680,9 +685,46 @@ mod tests {
     }
 
     #[test]
+    fn hid_boot_keyboard_worst_case_transition_loses_nothing() {
+        // Auditoria 4836023, hallazgo 3: ocho modificadores y seis teclas
+        // cambian a la vez: 8 + 6 + 6 eventos de tecla mas EV_SYN.
+        let mut kbd = HidBootKeyboard::new();
+        let mut out = [Event::default(); MAX_REPORT_EVENTS];
+        let n = kbd.feed(&[0xFF, 0, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09], &mut out);
+        assert_eq!(n, 8 + 6 + 1);
+        let n = kbd.feed(&[0x00, 0, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F], &mut out);
+        assert_eq!(n, 21);
+        let releases = out[..n]
+            .iter()
+            .filter(|e| e.kind == EV_KEY && e.value == 0)
+            .count();
+        let presses = out[..n]
+            .iter()
+            .filter(|e| e.kind == EV_KEY && e.value == 1)
+            .count();
+        assert_eq!((releases, presses), (8 + 6, 6));
+        assert_eq!(out[n - 1].kind, EV_SYN);
+        // Todas las pulsaciones nuevas estan: g h i j k l.
+        for usage in 0x0A..=0x0F {
+            let code = hid_usage_to_key(usage);
+            assert!(out[..n]
+                .iter()
+                .any(|e| e.kind == EV_KEY && e.code == code && e.value == 1));
+        }
+        // El mismo informe otra vez no produce nada; el informe vacio suelta las seis.
+        assert_eq!(
+            kbd.feed(&[0x00, 0, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F], &mut out),
+            0
+        );
+        let n = kbd.feed(&[0; 8], &mut out);
+        assert_eq!(n, 7);
+        assert!(out[..6].iter().all(|e| e.value == 0));
+    }
+
+    #[test]
     fn hid_boot_mouse_reports_to_events() {
         let mut m = HidBootMouse::new();
-        let mut out = [Event::default(); 16];
+        let mut out = [Event::default(); MAX_REPORT_EVENTS];
         let n = m.feed(&[0x01, 10, (-5i8) as u8], &mut out);
         assert_eq!(
             &out[..n],
