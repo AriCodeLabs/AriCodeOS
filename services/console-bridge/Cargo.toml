@@ -1,0 +1,22 @@
+[package]
+name = "ari-console-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Puente de consola de AriCodeOS: lleva las pulsaciones de los teclados de usuario (virtio, USB HID) al anillo de entrada de consola del kernel"
+publish = false
+
+[[bin]]
+name = "console_bridge"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+aricode-sys = { path = "../../sdk/rust" }
+aricode-proto = { path = "../../sdk/proto" }
+aricode-input = { path = "../../libs/input" }
+aricode-rt = { path = "../../sdk/runtime" }
+
+[build-dependencies]
+aricode-build = { path = "../../sdk/build" }

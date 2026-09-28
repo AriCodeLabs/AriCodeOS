@@ -175,6 +175,11 @@ pub mod nr {
     /// `pci_info_ext(root, index) -> prog_if | revision << 8 | header_type << 16`
     /// (ver `pci_info::prog_if`); exige `READ` sobre la raíz PCI.
     pub const PCI_INFO_EXT: u64 = 28;
+    /// `console_inject(console, ptr, len) -> bytes aceptados`; exige `MANAGE`
+    /// sobre un `Console`. Escribe texto de un teclado de usuario en el anillo
+    /// de entrada de consola (puente de consola, ADR 0013); los bytes que no
+    /// caben se descartan y se cuentan.
+    pub const CONSOLE_INJECT: u64 = 29;
 }
 
 /// Sexto argumento de `process_spawn`: número de handles (bits 0..7) y

@@ -1,0 +1,28 @@
+# Etapa 2 (ADR 0013): el shell lee del teclado virtio-input. init lanza el
+# puente de consola con los dos servicios virtio_input (teclado y raton); el
+# host teclea por QMP "cpus" + Enter y "shutdown" + Enter al ver que el
+# puente sirve, y el shell los ejecuta.
+name = "shell.virtio_keyboard"
+description = "arish con teclado virtio-input: el puente de consola recorre teclado y raton y solo traduce las teclas"
+level = "full"
+areas = ["shell", "input", "virtio", "console"]
+cmdline = "qemu_exit shell"
+timeout_secs = 60
+
+[host_input]
+marker = "CONSOLE_BRIDGE_READY"
+keys = ["c", "p", "u", "s", "ret", "s", "h", "u", "t", "d", "o", "w", "n", "ret"]
+mouse_rel = [3, 4]
+click = "left"
+
+[expect]
+exit = 33
+serial_contains = [
+    "console-bridge: 2 dispositivo(s) de entrada hacia la consola",
+    "arish: shell de AriCodeOS",
+    "cpus: ",
+    "ari> shutdown",
+    "[host] QMP: 32 eventos de entrada enviados",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "init no responde", "console-bridge: la consola rechaza"]

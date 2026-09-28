@@ -269,6 +269,24 @@ pub fn read(buf: &mut [u8], deadline: Option<u64>) -> usize {
     n
 }
 
+/// Texto de un teclado de usuario (syscall `console_inject`, ADR 0013) al
+/// mismo anillo que COM1 y el PS/2. Devuelve los bytes aceptados; los que
+/// no caben se cuentan como descartados.
+pub fn inject(bytes: &[u8]) -> usize {
+    let mut ring = RING.lock();
+    let mut n = 0;
+    while n < bytes.len() && ring.len < CAPACITY {
+        ring.push(bytes[n]);
+        n += 1;
+    }
+    ring.dropped += (bytes.len() - n) as u64;
+    drop(ring);
+    if n > 0 {
+        WAITERS.wake_all();
+    }
+    n
+}
+
 /// Bytes descartados por anillo lleno (diagnóstico).
 pub fn dropped() -> u64 {
     RING.lock().dropped

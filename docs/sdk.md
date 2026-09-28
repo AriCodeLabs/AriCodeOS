@@ -81,6 +81,7 @@ hablar con él. `sys::permissions::granted` recorre lo recibido.
 | network | `sys::net::NetClient`: `info`, `ping`, UDP (`udp_bind/send/recv`), TCP (`tcp_connect/listen/accept/send/recv/close`), `resolve`; `sys::http::get` encima |
 | window | `sys::window::Window::create(compositor, hardware, w, h, titulo)`, `canvas()` (lienzo `aricode-gfx`), `present`, `poll` (`Key`, `Click`, `Focus`), `close` |
 | input | `sys::input::InputClient` sobre un `inputd`: eventos evdev con instante; `aricode-input::Keyboard` los traduce |
+| console | `sys::console_write` (`WRITE`), `sys::console_read` (`READ`, con plazo); `sys::console_inject` exige `MANAGE` y solo lo usa el puente de consola de init (ADR 0013) |
 | time | `sys::time::uptime_ms(system)`, `sys::time::Clock`, `sys::time::sleep_ms` |
 | permissions | `sys::permissions::{granted, kind_name, is, drop_handle}` |
 

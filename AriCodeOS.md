@@ -2406,6 +2406,10 @@ devices   services  uptime    reboot    shutdown  exit
   anillo de 1 KiB y `console_read(console, buf, timeout)`; la consola sigue
   siendo del kernel y el shell solo la lee a través de un handle `CONSOLE`
   con `READ` que init le transfiere;
+- teclados de usuario (etapa 2, ADR 0013): `console_inject` (`MANAGE` sobre
+  la consola) y el servicio `console_bridge`, que init lanza supervisado en
+  modo `shell` sin GUI con los endpoints de virtio-input y USB HID; el shell
+  no cambia (`shell.usb_keyboard`, `shell.virtio_keyboard`);
 - objeto `SYSTEM` (kind 11): `system_info` (`READ`: uptime, memoria
   utilizable/libre, lista de procesos) y `system_power` (`MANAGE`: apagar,
   reiniciar). Init lo recibe y le pasa al shell un duplicado;
@@ -3601,7 +3605,7 @@ etapa con sus ramas, ADR y escenarios:
 |---|---|---|
 | 0. Consolidar | completada (0.6.0) | auditorías resueltas con evidencia; tabla única de estado por capacidad en el README |
 | 1. Recuperación observable | completada | supervisor de servicios (ADR 0011): estados, generaciones, reinicio con presupuesto y espera creciente, endpoint estable entre generaciones, publicación solo tras responder, `status` v1 y `services --detail`; plazos y correlación IPC (ADR 0012): endpoint de respuesta por petición, esperas acotadas, sin reintentos automáticos de escrituras (`ipc.late_reply`) |
-| 2. Sesión útil | pendiente | shell con teclados USB y virtio, persistencia de AriFS ante cortes, equipo de referencia |
+| 2. Sesión útil | en curso | hecho: shell con teclados USB y virtio (puente de consola, ADR 0013, `shell.usb_keyboard`, `shell.virtio_keyboard`); pendiente: persistencia de AriFS ante cortes, equipo de referencia |
 | 3. Límites y actualización | pendiente | cuotas, permisos por recurso, cortes de escritura, actualización entre arranques |
 | 4. Aplicaciones externas | pendiente | SDK reproducible, perfil WASI, paquetes |
 | 5. Optimización y ampliación | pendiente | rendimiento, energía, más dispositivos |
