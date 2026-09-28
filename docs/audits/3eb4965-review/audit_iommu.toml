@@ -1,0 +1,23 @@
+# Fase 33: un driver de prueba recibe el virtio-blk, lee un sector en su
+# buffer (traducido) y luego ordena al dispositivo escribir en memoria que no
+# es suya: la unidad lo bloquea y registra el fallo; el dominio se libera con
+# el proceso.
+name = "audit.iommu_reassignment"
+description = "test=iommu: DMA legitimo traducido, DMA a memoria ajena bloqueado y registrado, dominio liberado"
+level = "full"
+areas = ["audit_iommu"]
+cmdline = "qemu_exit test=iommu"
+timeout_secs = 40
+
+[expect]
+exit = 33
+serial_contains = [
+    "iommu: 00:02.0 asignado al dominio",
+    "en el dominio identidad",
+    "iommu: fallo DMA de 00:02.0 (escritura en 0x1000):",
+    "dma_rogue: lectura legitima ok, DMA a memoria ajena bloqueado (",
+    "iommu selftest ok (lectura legitima traducida, DMA a memoria ajena bloqueado con",
+    "y la memoria intacta, dominio liberado)",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "USER FAULT"]

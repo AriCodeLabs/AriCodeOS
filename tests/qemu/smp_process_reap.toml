@@ -1,0 +1,15 @@
+# Auditoria 3eb4965, hallazgo 1: con varias CPUs, la CPU que espera podia
+# retirar el proceso antes de que la que lo recogia liberase su espacio, y
+# los frames se perdian. Lotes de procesos en 4 CPUs con recuento de frames.
+name = "smp.process_reap"
+description = "test=process_reap con -smp 4: recogida y espera en CPUs distintas sin perder frames"
+level = "full"
+areas = ["smp", "user", "memory"]
+cmdline = "qemu_exit test=process_reap"
+cpus = 4
+timeout_secs = 60
+
+[expect]
+exit = 33
+serial_contains = ["smp: 4 CPUs en linea", "process reap selftest ok (180 procesos creados y esperados en 4 CPU(s)", "ARICODEOS_KERNEL_READY"]
+serial_absent = ["KERNEL PANIC", "frames perdidos"]

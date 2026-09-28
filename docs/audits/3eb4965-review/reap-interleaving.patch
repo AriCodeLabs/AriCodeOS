@@ -1,0 +1,41 @@
+--- a/kernel/src/user/process.rs
++++ b/kernel/src/user/process.rs
+@@ -316,7 +316,14 @@
+ 
+ /// Libera el espacio de direcciones de un proceso terminado. Lo llama el
+ /// planificador al recoger su hilo, siempre desde otro hilo y con otro CR3.
++static AUDIT_STAGE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+ pub fn release_address_space(pid: u32) {
++    use core::sync::atomic::Ordering::SeqCst;
++    AUDIT_STAGE.store(1, SeqCst);
++    while AUDIT_STAGE.load(SeqCst) != 2 { core::hint::spin_loop(); }
++    let present = PROCESSES.lock().contains_key(&Pid(pid));
++    crate::println!("AUDIT reaper: process_present={present}");
++    AUDIT_STAGE.store(3, SeqCst);
+     let taken = PROCESSES.lock().get_mut(&Pid(pid)).and_then(|p| {
+         p.mapper
+             .take()
+@@ -358,7 +365,13 @@
+     let waiters = PROCESSES.lock().get(&pid)?.exit_wait.clone();
+     loop {
+         if let Some(status) = finished(pid) {
+-            PROCESSES.lock().remove(&pid);
++            use core::sync::atomic::Ordering::SeqCst;
++            while AUDIT_STAGE.load(SeqCst) != 1 { core::hint::spin_loop(); }
++            let p = PROCESSES.lock().remove(&pid).unwrap();
++            crate::println!("AUDIT wait: removed process with mapper={}", p.mapper.is_some());
++            drop(p);
++            AUDIT_STAGE.store(2, SeqCst);
++            while AUDIT_STAGE.load(SeqCst) != 3 { core::hint::spin_loop(); }
+             return Some(status);
+         }
+         // Entre `status` fijado y el hilo recogido media un cambio de contexto:
+@@ -368,7 +381,7 @@
+             .get(&pid)
+             .is_some_and(|p| p.status.is_some())
+         {
+-            scheduler::yield_now();
++            core::hint::spin_loop();
+             continue;
+         }
+         let timed_out = waiters.wait_until_deadline(

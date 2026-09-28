@@ -1,9 +1,12 @@
 //! Consola de texto sobre un framebuffer lineal de 32 bpp.
 //!
 //! `no_std`, sin `alloc`: la rejilla de caracteres vive dentro de la propia
-//! `Console` (tamaño máximo fijo). El acceso a los píxeles se abstrae en
-//! [`Surface`] para que el kernel escriba MMIO con `write_volatile` y los tests
-//! de host usen un `Vec<u32>`.
+//! `Console` (tamaño máximo fijo, unas 32 KiB). Por eso la consola se
+//! construye vacía y constante (`Console::empty`) en un `static` y se le
+//! acopla la superficie después (`attach`): devolverla por valor pondría la
+//! rejilla en la pila, que en el arranque del kernel es pequeña. El acceso a
+//! los píxeles se abstrae en [`Surface`] para que el kernel escriba MMIO con
+//! `write_volatile` y los tests de host usen un `Vec<u32>`.
 //!
 //! El scroll no lee del framebuffer (leer VRAM es lento): se conserva una
 //! copia de los caracteres y se vuelve a pintar la pantalla.
@@ -37,7 +40,8 @@ pub trait Surface {
 pub const MAX_CELLS: usize = 240 * 135;
 
 pub struct Console<S: Surface> {
-    surface: S,
+    /// `None` hasta `attach`: sin pantalla, la consola no dibuja nada.
+    surface: Option<S>,
     cols: usize,
     rows: usize,
     cursor_col: usize,
@@ -51,23 +55,41 @@ impl<S: Surface> Console<S> {
     pub const DEFAULT_FG: Rgb = Rgb(0xD8, 0xDE, 0xE9);
     pub const DEFAULT_BG: Rgb = Rgb(0x10, 0x12, 0x18);
 
-    /// Crea la consola y limpia la pantalla.
-    pub fn new(surface: S) -> Self {
-        let cols = (surface.width() / GLYPH_WIDTH).max(1);
-        let rows = (surface.height() / GLYPH_HEIGHT).max(1);
-        // Si la pantalla es mayor que MAX_CELLS se recortan filas, no columnas.
-        let rows = rows.min(MAX_CELLS / cols);
-        let mut c = Self {
-            surface,
-            cols,
-            rows,
+    /// Consola sin pantalla, construible en un `static`.
+    pub const fn empty() -> Self {
+        Self {
+            surface: None,
+            cols: 0,
+            rows: 0,
             cursor_col: 0,
             cursor_row: 0,
             fg: Self::DEFAULT_FG,
             bg: Self::DEFAULT_BG,
             cells: [b' '; MAX_CELLS],
-        };
-        c.clear();
+        }
+    }
+
+    /// Acopla la pantalla y la limpia. Se hace sobre la consola ya alojada
+    /// (en un `static`), sin mover la rejilla.
+    pub fn attach(&mut self, surface: S) {
+        let cols = (surface.width() / GLYPH_WIDTH).max(1);
+        let rows = (surface.height() / GLYPH_HEIGHT).max(1);
+        // Si la pantalla es mayor que MAX_CELLS se recortan filas, no columnas.
+        self.cols = cols;
+        self.rows = rows.min(MAX_CELLS / cols);
+        self.surface = Some(surface);
+        self.clear();
+    }
+
+    pub fn is_attached(&self) -> bool {
+        self.surface.is_some()
+    }
+
+    /// Crea la consola con pantalla y la limpia (tests de host: la rejilla
+    /// pasa por la pila, que ahí es grande).
+    pub fn new(surface: S) -> Self {
+        let mut c = Self::empty();
+        c.attach(surface);
         c
     }
 
@@ -84,16 +106,18 @@ impl<S: Surface> Console<S> {
         self.fg = fg;
         self.bg = bg;
     }
-    pub fn surface(&self) -> &S {
-        &self.surface
+    pub fn surface(&self) -> Option<&S> {
+        self.surface.as_ref()
     }
 
     pub fn clear(&mut self) {
         self.cells[..self.cols * self.rows].fill(b' ');
         self.cursor_col = 0;
         self.cursor_row = 0;
-        let h = self.surface.height();
-        self.surface.fill_rows(0, h, self.bg);
+        if let Some(s) = self.surface.as_mut() {
+            let h = s.height();
+            s.fill_rows(0, h, self.bg);
+        }
     }
 
     /// Carácter en una celda (para tests y depuración).
@@ -154,6 +178,9 @@ impl<S: Surface> Console<S> {
     }
 
     fn draw_cell(&mut self, col: usize, row: usize) {
+        let Some(surface) = self.surface.as_mut() else {
+            return;
+        };
         let b = self.cells[row * self.cols + col];
         let glyph = &GLYPHS[(b - FIRST_CHAR) as usize];
         let x0 = col * GLYPH_WIDTH;
@@ -161,8 +188,7 @@ impl<S: Surface> Console<S> {
         for (dy, bits) in glyph.iter().enumerate() {
             for dx in 0..GLYPH_WIDTH {
                 let on = bits & (0x80 >> dx) != 0;
-                self.surface
-                    .put(x0 + dx, y0 + dy, if on { self.fg } else { self.bg });
+                surface.put(x0 + dx, y0 + dy, if on { self.fg } else { self.bg });
             }
         }
     }
@@ -221,7 +247,7 @@ mod tests {
         let c = C::new(Mem::new(640, 480));
         assert_eq!((c.cols(), c.rows()), (80, 30));
         assert_eq!(c.cursor(), (0, 0));
-        assert_eq!(c.surface().at(639, 479), C::DEFAULT_BG);
+        assert_eq!(c.surface().unwrap().at(639, 479), C::DEFAULT_BG);
     }
 
     #[test]
@@ -238,7 +264,7 @@ mod tests {
                 } else {
                     C::DEFAULT_BG
                 };
-                assert_eq!(c.surface().at(dx, dy), expect, "pixel ({dx},{dy})");
+                assert_eq!(c.surface().unwrap().at(dx, dy), expect, "pixel ({dx},{dy})");
                 lit += (bits & (0x80 >> dx) != 0) as usize;
             }
         }
@@ -277,7 +303,7 @@ mod tests {
         } else {
             C::DEFAULT_BG
         };
-        assert_eq!(c.surface().at(dx, dy), expect);
+        assert_eq!(c.surface().unwrap().at(dx, dy), expect);
     }
 
     #[test]
@@ -286,6 +312,23 @@ mod tests {
         write!(c, "ñ\u{1F600}").unwrap();
         assert_eq!(c.cell(0, 0), b'?');
         assert_eq!(c.cell(1, 0), b'?');
+    }
+
+    #[test]
+    fn empty_console_is_const_and_attaches_in_place() {
+        const EMPTY: Console<Mem> = Console::empty();
+        let mut c = EMPTY;
+        assert!(!c.is_attached());
+        assert!(c.surface().is_none());
+        // Sin pantalla no dibuja ni falla.
+        c.write_str("nada").unwrap();
+        assert_eq!(c.cols(), 0);
+        c.attach(Mem::new(640, 480));
+        assert!(c.is_attached());
+        assert_eq!((c.cols(), c.rows()), (80, 30));
+        c.write_str("ok").unwrap();
+        assert_eq!(c.cell(0, 0), b'o');
+        assert_eq!(c.cell(1, 0), b'k');
     }
 
     #[test]
