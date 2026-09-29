@@ -1,0 +1,10 @@
+     Locking 3 packages to latest compatible versions
+      Adding aricode-crypto v0.6.0 (/var/tmp/aricode-review-6ee19fb-uhBqbF/libs/crypto)
+      Adding aricode-initrd v0.6.0 (/var/tmp/aricode-review-6ee19fb-uhBqbF/libs/initrd)
+      Adding aricode-pkg v0.6.0 (/var/tmp/aricode-review-6ee19fb-uhBqbF/libs/pkg)
+   Compiling aricode-initrd v0.6.0 (/var/tmp/aricode-review-6ee19fb-uhBqbF/libs/initrd)
+   Compiling aricode-crypto v0.6.0 (/var/tmp/aricode-review-6ee19fb-uhBqbF/libs/crypto)
+   Compiling aricode-pkg v0.6.0 (/var/tmp/aricode-review-6ee19fb-uhBqbF/libs/pkg)
+   Compiling review-probes v0.1.0 (/var/tmp/aricode-probes-6ee19fb)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.31s
+     Running `target/debug/prepare qemu/disk.img`

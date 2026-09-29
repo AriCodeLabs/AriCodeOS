@@ -1,0 +1,20 @@
+# Etapa 4 (ADR 0019): un modulo mal tipado (suma con la pila vacia) se
+# rechaza en la validacion, antes de instanciarlo o ejecutar una sola
+# instruccion.
+name = "wasm.invalid"
+description = "modulo WASM invalido: el validador lo rechaza antes de ejecutar"
+level = "full"
+areas = ["wasm", "sandbox", "shell"]
+cmdline = "qemu_exit shell"
+disk = "wasm-invalid"
+timeout_secs = 90
+stdin = ["run wasm_runner 5", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "wasm_runner: modulo invalido (pila vacia)",
+    "run: wasm_runner termino con 6",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "wasm: hola", "el modulo fallo", "trap"]

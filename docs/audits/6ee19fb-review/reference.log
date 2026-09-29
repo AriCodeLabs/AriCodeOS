@@ -1,0 +1,7 @@
+Node v20.19.2
+wrong-global.wasm valid= false
+missing-memory.wasm valid= false
+inverted-limits.wasm valid= false
+loop-params.wasm valid= true
+reference result= 0
+wrong-import.wasm valid= true

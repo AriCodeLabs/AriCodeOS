@@ -15,7 +15,10 @@
 
 extern crate alloc;
 
+mod validate;
+
 use alloc::vec::Vec;
+pub use validate::validate;
 
 pub const PAGE: usize = 65536;
 /// Profundidad máxima de llamadas anidadas.
@@ -39,6 +42,9 @@ pub enum Error {
     Fuel,
     /// Una importación no tiene anfitrión.
     MissingImport,
+    /// El módulo no valida (tipado, índices, pilas): se rechaza antes de
+    /// instanciarlo (ADR 0019).
+    Invalid(&'static str),
     /// Exportación no encontrada.
     NoExport,
 }
@@ -78,9 +84,13 @@ pub struct Export {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Function {
+    /// Índice de la función en el espacio de funciones (importadas primero).
+    pub index: u32,
     pub type_index: u32,
     /// Locales declaradas (sin parámetros).
     pub locals: u32,
+    /// Posición de la declaración de locales (tipos) dentro del módulo.
+    pub locals_decl: usize,
     /// Rango del cuerpo (instrucciones) dentro del módulo.
     pub code_start: usize,
     pub code_end: usize,
@@ -373,9 +383,10 @@ impl<'a> Module<'a> {
                     if count != func_types.len() {
                         return Err(Error::Malformed("cuerpos != funciones"));
                     }
-                    for type_index in func_types.iter().copied() {
+                    for (i, type_index) in func_types.iter().copied().enumerate() {
                         let body_size = s.u32()? as usize;
                         let body_start = s.pos;
+                        let index = m.imports.len() as u32 + i as u32;
                         let body_end = body_start
                             .checked_add(body_size)
                             .ok_or(Error::Malformed("cuerpo"))?;
@@ -392,8 +403,10 @@ impl<'a> Module<'a> {
                             return Err(Error::Unsupported("demasiadas locales"));
                         }
                         m.functions.push(Function {
+                            index,
                             type_index,
                             locals,
+                            locals_decl: body_start,
                             code_start: s.pos,
                             code_end: body_end,
                         });
@@ -421,6 +434,7 @@ impl<'a> Module<'a> {
         if func_types.len() != m.functions.len() {
             return Err(Error::Malformed("faltan cuerpos"));
         }
+        validate(&m)?;
         Ok(m)
     }
 
@@ -1905,5 +1919,60 @@ mod tests {
         let mut truncated = b.build();
         truncated.truncate(truncated.len() - 3);
         assert!(Module::parse(&truncated).is_err());
+    }
+
+    /// El validador rechaza antes de ejecutar lo que el intérprete solo
+    /// descubriría a mitad de camino (ADR 0019).
+    #[test]
+    fn validator_rejects_ill_typed_modules() {
+        fn invalid(code: &[u8], params: &[u8], results: &[u8]) -> Option<Error> {
+            let mut b = Builder::new();
+            let t = b.ty(params, results);
+            let f = b.func(t, 1, code);
+            b.export("f", f);
+            Module::parse(&b.build()).err()
+        }
+        // Pila vacia al sumar.
+        assert_eq!(
+            invalid(&[0x41, 1, 0x6A], &[], &[0x7F]),
+            Some(Error::Invalid("pila vacia"))
+        );
+        // i64 donde se espera i32.
+        assert_eq!(
+            invalid(&[0x42, 1, 0x41, 2, 0x6A], &[], &[0x7F]),
+            Some(Error::Invalid("tipo de operando"))
+        );
+        // Valor sobrante al terminar la funcion.
+        assert_eq!(
+            invalid(&[0x41, 1, 0x41, 2], &[], &[0x7F]),
+            Some(Error::Invalid("valores sobrantes al cerrar el bloque"))
+        );
+        // Etiqueta inexistente.
+        assert_eq!(
+            invalid(&[0x0C, 5], &[], &[]),
+            Some(Error::Invalid("etiqueta fuera de rango"))
+        );
+        // `if` con resultado y sin `else`.
+        assert_eq!(
+            invalid(&[0x41, 1, 0x04, 0x7F, 0x41, 7, 0x0B], &[], &[0x7F]),
+            Some(Error::Invalid("if sin else con resultados"))
+        );
+        // Local y global fuera de rango; opcode desconocido.
+        assert_eq!(
+            invalid(&[0x20, 9], &[], &[0x7F]),
+            Some(Error::Invalid("local fuera de rango"))
+        );
+        assert_eq!(
+            invalid(&[0x23, 0], &[], &[0x7F]),
+            Some(Error::Invalid("global fuera de rango"))
+        );
+        assert_eq!(
+            invalid(&[0xD0], &[], &[]),
+            Some(Error::Unsupported("opcode"))
+        );
+        // Codigo inalcanzable: la pila es polimorfica y el resto valida.
+        assert_eq!(invalid(&[0x00, 0x6A], &[], &[0x7F]), None);
+        // Un modulo correcto sigue pasando.
+        assert_eq!(invalid(&[0x20, 0, 0x41, 1, 0x6A], &[0x7F], &[0x7F]), None);
     }
 }

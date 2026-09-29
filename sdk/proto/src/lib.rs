@@ -20,6 +20,9 @@ pub mod block {
         Read = 2,
         /// Escribe `count` sectores desde el buffer DMA transferido en `lba`.
         Write = 3,
+        /// Hace duraderas las escrituras anteriores (ADR 0014); solo lleva
+        /// la respuesta. Sin `VIRTIO_BLK_F_FLUSH` vuelve sin hacer nada.
+        Flush = 4,
     }
 
     /// Petición (16 bytes). Handles del mensaje: `[respuesta (WRITE), buffer DMA (READ|WRITE)]`;
@@ -52,6 +55,7 @@ pub mod block {
                 1 => Op::Info,
                 2 => Op::Read,
                 3 => Op::Write,
+                4 => Op::Flush,
                 _ => return None,
             };
             Some(Self {
@@ -123,6 +127,8 @@ pub mod fs {
     pub const MAX_NAME: usize = 32;
     /// Máximo por petición de lectura/escritura (buffer del cliente).
     pub const MAX_IO: u32 = 4096;
+    /// Máximo de un reemplazo atómico (el journal de AriFS, ADR 0018).
+    pub const MAX_REPLACE: u32 = 32 * 1024;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Op {
@@ -142,6 +148,23 @@ pub mod fs {
         /// al prefijo `name/`; la respuesta transfiere ese endpoint (`WRITE`).
         /// Quien lo reciba solo ve y crea ficheros bajo su prefijo.
         Bind = 7,
+        /// Hace duraderas las escrituras anteriores (ADR 0014).
+        Flush = 8,
+        /// `fd`, `len`; handles `[respuesta, buffer]`: sustituye el contenido
+        /// entero del fichero de forma atómica y duradera (ADR 0014); `value`
+        /// = bytes escritos.
+        Replace = 9,
+        /// Solo por el endpoint principal (el broker): crea un endpoint ligado
+        /// a un único fichero en modo lectura (ADR 0016); la respuesta lo
+        /// transfiere (`WRITE`). Desde él solo se ve, abre y lee ese fichero.
+        Share = 10,
+        /// `fd`, `offset`, `len`; handles `[respuesta, buffer]`: un trozo del
+        /// contenido nuevo al journal, sin comprometer nada (ADR 0018). Solo
+        /// un reemplazo a medias por servicio (`Busy` para los demás).
+        ReplaceChunk = 11,
+        /// `fd`, `len`: compromete y aplica los trozos anteriores de una vez;
+        /// `value` = bytes del contenido nuevo.
+        ReplaceCommit = 12,
     }
 
     /// Petición (64 bytes): cabecera, argumentos y nombre.
@@ -208,6 +231,11 @@ pub mod fs {
                 5 => Op::Write,
                 6 => Op::Close,
                 7 => Op::Bind,
+                8 => Op::Flush,
+                9 => Op::Replace,
+                10 => Op::Share,
+                11 => Op::ReplaceChunk,
+                12 => Op::ReplaceCommit,
                 _ => return None,
             };
             let mut name = [0u8; MAX_NAME];
@@ -235,6 +263,11 @@ pub mod fs {
         Io = 6,
         BadFd = 7,
         OutOfRange = 8,
+        /// El endpoint no permite la operación (fichero compartido de solo
+        /// lectura, ADR 0016).
+        Denied = 9,
+        /// Otro reemplazo por trozos está a medias (ADR 0018).
+        Busy = 10,
     }
 
     /// Respuesta (64 bytes): estado, valor y nombre (para `List`).
@@ -303,6 +336,8 @@ pub mod fs {
                 6 => Status::Io,
                 7 => Status::BadFd,
                 8 => Status::OutOfRange,
+                9 => Status::Denied,
+                10 => Status::Busy,
                 _ => return None,
             };
             let mut name = [0u8; MAX_NAME];
@@ -990,10 +1025,15 @@ pub mod launch {
         pub arg: u64,
         pub name: [u8; MAX_NAME],
         pub name_len: u8,
+        /// `DETACH`: responder `Started` al crear el proceso, sin esperar su
+        /// salida (ADR 0015).
+        pub flags: u8,
     }
 
     impl Request {
         pub const LEN: usize = 48;
+        /// Lanzamiento en segundo plano.
+        pub const DETACH: u8 = 1;
 
         /// `None` si el nombre no cabe.
         pub fn new(name: &str, arg: u64) -> Option<Self> {
@@ -1006,7 +1046,17 @@ pub mod launch {
                 arg,
                 name: n,
                 name_len: name.len() as u8,
+                flags: 0,
             })
+        }
+
+        pub fn detached(mut self) -> Self {
+            self.flags |= Self::DETACH;
+            self
+        }
+
+        pub fn is_detached(&self) -> bool {
+            self.flags & Self::DETACH != 0
         }
 
         pub fn name_str(&self) -> &str {
@@ -1018,6 +1068,7 @@ pub mod launch {
             b[0] = PROTOCOL;
             b[1] = VERSION;
             b[2] = self.name_len;
+            b[3] = self.flags;
             b[8..16].copy_from_slice(&self.arg.to_le_bytes());
             b[16..48].copy_from_slice(&self.name);
             b
@@ -1033,6 +1084,7 @@ pub mod launch {
                 arg: u64::from_le_bytes(b[8..16].try_into().ok()?),
                 name,
                 name_len: b[2].min(MAX_NAME as u8),
+                flags: b[3],
             })
         }
     }
@@ -1053,6 +1105,10 @@ pub mod launch {
         BadManifest = 5,
         /// El broker no pudo lanzarlo (recursos).
         Failed = 6,
+        /// Lanzado en segundo plano (`DETACH`); `value` = 0.
+        Started = 7,
+        /// Límite de programas en marcha del broker (ADR 0015).
+        Limit = 8,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1093,6 +1149,8 @@ pub mod launch {
                 4 => Status::Killed,
                 5 => Status::BadManifest,
                 6 => Status::Failed,
+                7 => Status::Started,
+                8 => Status::Limit,
                 _ => return None,
             };
             Some(Self {
@@ -1310,5 +1368,207 @@ mod tests {
         .encode();
         bad[2] = 200;
         assert_eq!(Reply::decode(&bad), None);
+    }
+}
+
+/// Estado de los servicios supervisados por init (etapa 1 del plan posterior
+/// al roadmap): el shell y las herramientas de diagnóstico lo consultan por
+/// el endpoint del broker; init distingue las peticiones por el byte de
+/// protocolo. Una petición por servicio (`index` desde 0) hasta `NotFound`.
+pub mod status {
+    pub const PROTOCOL: u8 = 7;
+    pub const VERSION: u8 = 1;
+    pub const MAX_NAME: usize = 16;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Request {
+        pub index: u8,
+    }
+
+    impl Request {
+        pub const LEN: usize = 8;
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[0] = PROTOCOL;
+            b[1] = VERSION;
+            b[2] = self.index;
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN || b[0] != PROTOCOL || b[1] != VERSION {
+                return None;
+            }
+            Some(Self { index: b[2] })
+        }
+    }
+
+    /// Estado de vida (`aricode_supervisor::State`) en el cable.
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum State {
+        Stopped = 0,
+        Starting = 1,
+        Ready = 2,
+        Degraded = 3,
+        Failed = 4,
+    }
+
+    impl State {
+        pub fn name(self) -> &'static str {
+            match self {
+                State::Stopped => "parado",
+                State::Starting => "arrancando",
+                State::Ready => "listo",
+                State::Degraded => "degradado",
+                State::Failed => "fallido",
+            }
+        }
+        fn from_u8(v: u8) -> Option<Self> {
+            Some(match v {
+                0 => State::Stopped,
+                1 => State::Starting,
+                2 => State::Ready,
+                3 => State::Degraded,
+                4 => State::Failed,
+                _ => return None,
+            })
+        }
+    }
+
+    /// Última salida del servicio en el cable.
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum LastExit {
+        None = 0,
+        Code = 1,
+        Killed = 2,
+        StartTimeout = 3,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Reply {
+        pub found: bool,
+        pub name: [u8; MAX_NAME],
+        pub name_len: u8,
+        pub state: State,
+        pub optional: bool,
+        pub generation: u32,
+        pub restarts: u32,
+        pub last_exit: LastExit,
+        pub last_code: u64,
+        /// Milisegundos desde el último `listo` (0 si no lo está).
+        pub ready_for_ms: u64,
+    }
+
+    impl Reply {
+        pub const LEN: usize = 48;
+
+        pub fn not_found() -> Self {
+            Self {
+                found: false,
+                name: [0; MAX_NAME],
+                name_len: 0,
+                state: State::Stopped,
+                optional: false,
+                generation: 0,
+                restarts: 0,
+                last_exit: LastExit::None,
+                last_code: 0,
+                ready_for_ms: 0,
+            }
+        }
+
+        pub fn with_name(mut self, name: &str) -> Self {
+            let n = name.len().min(MAX_NAME);
+            self.name = [0; MAX_NAME];
+            self.name[..n].copy_from_slice(&name.as_bytes()[..n]);
+            self.name_len = n as u8;
+            self
+        }
+
+        pub fn name_str(&self) -> &str {
+            core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("?")
+        }
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[0] = PROTOCOL;
+            b[1] = VERSION;
+            b[2] = self.found as u8;
+            b[3] = self.state as u8;
+            b[4] = self.optional as u8;
+            b[5] = self.last_exit as u8;
+            b[6] = self.name_len;
+            b[8..12].copy_from_slice(&self.generation.to_le_bytes());
+            b[12..16].copy_from_slice(&self.restarts.to_le_bytes());
+            b[16..24].copy_from_slice(&self.last_code.to_le_bytes());
+            b[24..32].copy_from_slice(&self.ready_for_ms.to_le_bytes());
+            b[32..48].copy_from_slice(&self.name);
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN || b[0] != PROTOCOL || b[1] != VERSION {
+                return None;
+            }
+            let mut name = [0u8; MAX_NAME];
+            name.copy_from_slice(&b[32..48]);
+            Some(Self {
+                found: b[2] != 0,
+                state: State::from_u8(b[3])?,
+                optional: b[4] != 0,
+                last_exit: match b[5] {
+                    0 => LastExit::None,
+                    1 => LastExit::Code,
+                    2 => LastExit::Killed,
+                    3 => LastExit::StartTimeout,
+                    _ => return None,
+                },
+                name_len: b[6].min(MAX_NAME as u8),
+                generation: u32::from_le_bytes(b[8..12].try_into().ok()?),
+                restarts: u32::from_le_bytes(b[12..16].try_into().ok()?),
+                last_code: u64::from_le_bytes(b[16..24].try_into().ok()?),
+                ready_for_ms: u64::from_le_bytes(b[24..32].try_into().ok()?),
+                name,
+            })
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn status_round_trip() {
+            let r = Request { index: 3 };
+            assert_eq!(Request::decode(&r.encode()), Some(r));
+            assert_eq!(
+                Request::decode(&[6, 1, 0, 0, 0, 0, 0, 0]),
+                None,
+                "otro protocolo"
+            );
+            let reply = Reply {
+                found: true,
+                state: State::Degraded,
+                optional: true,
+                generation: 7,
+                restarts: 2,
+                last_exit: LastExit::Code,
+                last_code: 42,
+                ready_for_ms: 1234,
+                ..Reply::not_found()
+            }
+            .with_name("virtio_input_00");
+            let d = Reply::decode(&reply.encode()).unwrap();
+            assert_eq!(d, reply);
+            assert_eq!(d.name_str(), "virtio_input_00");
+            assert_eq!(d.state.name(), "degradado");
+            assert!(!Reply::decode(&Reply::not_found().encode()).unwrap().found);
+            let mut bad = reply.encode();
+            bad[3] = 9;
+            assert_eq!(Reply::decode(&bad), None, "estado desconocido");
+        }
     }
 }

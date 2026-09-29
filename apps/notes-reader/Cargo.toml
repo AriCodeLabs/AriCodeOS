@@ -1,0 +1,20 @@
+[package]
+name = "ari-app-notes-reader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Aplicacion de ejemplo del SDK de AriCodeOS: lee un fichero compartido de solo lectura por el broker"
+publish = false
+
+[[bin]]
+name = "notes_reader"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+aricode-rt = { path = "../../sdk/runtime" }
+aricode-proto = { path = "../../sdk/proto" }
+
+[build-dependencies]
+aricode-build = { path = "../../sdk/build" }

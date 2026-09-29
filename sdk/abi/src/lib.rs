@@ -50,6 +50,9 @@ pub mod init_arg {
     pub const BOOT_SLOT_B: u64 = 8;
     /// El slot arrancado espera confirmación: init debe marcarlo activo.
     pub const BOOT_PENDING: u64 = 16;
+    /// Solo tests (`restart_storm`): init reinicia 100 veces un servicio de
+    /// prueba bajo el supervisor y comprueba que no se pierden recursos.
+    pub const RESTART_STORM: u64 = 64;
     /// Solo tests (`init_fail_late`): init falla al final del arranque, antes
     /// de confirmar el slot, para comprobar que el estado sigue pendiente.
     pub const FAIL_LATE: u64 = 32;
@@ -172,6 +175,81 @@ pub mod nr {
     /// `pci_info_ext(root, index) -> prog_if | revision << 8 | header_type << 16`
     /// (ver `pci_info::prog_if`); exige `READ` sobre la raíz PCI.
     pub const PCI_INFO_EXT: u64 = 28;
+    /// `console_inject(console, ptr, len) -> bytes aceptados`; exige `MANAGE`
+    /// sobre un `Console`. Escribe texto de un teclado de usuario en el anillo
+    /// de entrada de consola (puente de consola, ADR 0013); los bytes que no
+    /// caben se descartan y se cuentan.
+    pub const CONSOLE_INJECT: u64 = 29;
+    /// `process_spawn_from(spawner, req_ptr, arg, handles_ptr, limits) -> handle`;
+    /// como `PROCESS_SPAWN` con el ELF en un buffer DMA del llamador descrito
+    /// por [`spawn_from::Request`] (programas instalados fuera del initrd,
+    /// ADR 0017). Exige `MANAGE` sobre el `SPAWNER` y `READ` sobre el buffer.
+    pub const PROCESS_SPAWN_FROM: u64 = 30;
+}
+
+/// Petición de `process_spawn_from` (48 bytes en memoria del llamador).
+pub mod spawn_from {
+    pub const LEN: usize = 48;
+    pub const MAX_NAME: usize = 32;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Request {
+        /// Handle del buffer DMA que contiene el ELF (`READ`).
+        pub dma: u32,
+        /// Desplazamiento del ELF dentro del buffer.
+        pub elf_offset: u32,
+        /// Bytes del ELF.
+        pub elf_len: u32,
+        pub name: [u8; MAX_NAME],
+        pub name_len: u8,
+    }
+
+    impl Request {
+        /// `None` si el nombre está vacío o no cabe.
+        pub fn new(dma: u32, elf_offset: u32, elf_len: u32, name: &str) -> Option<Self> {
+            if name.is_empty() || name.len() > MAX_NAME {
+                return None;
+            }
+            let mut n = [0u8; MAX_NAME];
+            n[..name.len()].copy_from_slice(name.as_bytes());
+            Some(Self {
+                dma,
+                elf_offset,
+                elf_len,
+                name: n,
+                name_len: name.len() as u8,
+            })
+        }
+
+        pub fn name_str(&self) -> &str {
+            core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("")
+        }
+
+        pub fn encode(&self) -> [u8; LEN] {
+            let mut b = [0u8; LEN];
+            b[0..4].copy_from_slice(&self.dma.to_le_bytes());
+            b[4..8].copy_from_slice(&self.elf_offset.to_le_bytes());
+            b[8..12].copy_from_slice(&self.elf_len.to_le_bytes());
+            b[12] = self.name_len;
+            b[16..48].copy_from_slice(&self.name);
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < LEN || b[12] as usize > MAX_NAME {
+                return None;
+            }
+            let mut name = [0u8; MAX_NAME];
+            name.copy_from_slice(&b[16..48]);
+            Some(Self {
+                dma: u32::from_le_bytes(b[0..4].try_into().ok()?),
+                elf_offset: u32::from_le_bytes(b[4..8].try_into().ok()?),
+                elf_len: u32::from_le_bytes(b[8..12].try_into().ok()?),
+                name,
+                name_len: b[12],
+            })
+        }
+    }
 }
 
 /// Sexto argumento de `process_spawn`: número de handles (bits 0..7) y

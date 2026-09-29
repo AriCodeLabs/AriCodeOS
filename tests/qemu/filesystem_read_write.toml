@@ -9,11 +9,13 @@ cmdline = "qemu_exit"
 [expect]
 exit = 33
 serial_contains = [
-    "fsd: AriFS montado, 3 ficheros",
+    "fsd: AriFS montado, 4 ficheros",
     "fsd: sirviendo peticiones",
     "fs_client: hola.txt (17 bytes)",
     "fs_client: hola.txt dice: Hola desde AriFS",
+    "fs_client: reemplazo atomico y flush ok",
     "fs_client: listar, leer, crear y escribir por IPC ok",
+    "virtio-blk: flush negociado (VIRTIO_BLK_F_FLUSH)",
     "AriInit: servicio de ficheros ok",
     "AriInit: servicio de bloques ok",
     "ARICODEOS_KERNEL_READY",

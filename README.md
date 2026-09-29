@@ -7,9 +7,12 @@ El documento maestro de arquitectura y roadmap es [AriCodeOS.md](AriCodeOS.md).
 Las decisiones de diseño se registran en [docs/decisions/](docs/decisions/) y el
 flujo de ramas (git flow) en [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-**Estado:** 0.6.0 (2026-09-28). Las 35 fases del roadmap (0 a 34) están
-implementadas y probadas en QEMU; la Fase 34 espera su primera prueba en el
-portátil (ver [docs/hardware.md](docs/hardware.md)). La tabla siguiente es
+**Estado:** 0.7.0 (2026-09-29). Las 35 fases del roadmap (0 a 34) están
+implementadas y probadas en QEMU, y las etapas 1 a 4 de la secuencia
+posterior al roadmap (recuperación observable, sesión útil, límites y
+actualización, aplicaciones externas) también; la Fase 34 y el equipo de
+referencia esperan su primera prueba en el portátil (ver
+[docs/hardware.md](docs/hardware.md)). La tabla siguiente es
 la referencia única del estado de cada capacidad: `validado en QEMU` significa
 que hay escenarios en `tests/qemu/` que lo exigen en cada suite; nada está
 todavía `validado en hardware`.
@@ -21,14 +24,15 @@ todavía `validado en hardware`.
 | Procesos ring 3, syscalls, handles con derechos, revocación, IPC con transferencia | validado en QEMU | `user.*`, `capabilities.*`, `ipc.*` |
 | init como device manager y broker de capabilities; sandbox por manifiesto | validado en QEMU | `init.*`, `sandbox.*` |
 | Drivers en ring 3: virtio-blk, virtio-net, virtio-input, xHCI + USB HID | validado en QEMU | `drivers.*`, `virtio.*`, `storage.*`, `network.*`, `input.*`, `usb.*` |
-| AriFS (ficheros, directorios privados por app) | prototipo, validado en QEMU | `filesystem.*`; sin garantías ante cortes de energía |
+| AriFS (ficheros, directorios privados por app, CRC32, reemplazo atómico con journal, `flush`) | validado en QEMU y con cortes inyectados en host | `filesystem.*`; ADR 0014 fija el contrato ante cortes |
 | Red IPv4: DHCP, ARP, ICMP, UDP, TCP, DNS, cliente HTTP | prototipo, validado en QEMU | `network.*`; sin TLS ni renovación DHCP |
-| Shell `arish` por consola serie o teclado PS/2 | validado en QEMU | `shell.*`, `console.*` |
+| Shell `arish` por consola serie, teclado PS/2 o teclados USB/virtio (puente de consola) | validado en QEMU | `shell.*`, `console.*` |
 | GUI: compositor, ventanas, entrada | prototipo, validado en QEMU | `gui.*` |
-| WASM (intérprete MVP acotado) | prototipo, validado en QEMU | `wasm.*`; sin validación previa ni WASI |
+| WASM: intérprete MVP con validador previo, perfil `aricode-wasm` v1 y manifiesto por módulo | validado en QEMU | `wasm.*`, `docs/wasm-profile.md`; no es WASI |
 | Criptografía propia, RNG, imágenes firmadas, A/B con rollback | validado en QEMU | `crypto.*`, `update.*`; no es Secure Boot |
 | IOMMU VT-d con dominio por driver | validado en QEMU | `iommu.*` |
 | Imagen USB para pendrive | validado en QEMU (`usb.image_boot`) | pendiente en hardware |
+| Aplicaciones fuera del árbol: paquetes firmados instalados y actualizados en AriFS (`cargo xtask app-pack`, `installer`) | validado en QEMU, con cortes | `apps.*`; sin distribución por red |
 | Arranque en portátil (Fase 34) | propuesto | necesita el equipo de referencia |
 
 ## Requisitos (Debian 13)
@@ -76,7 +80,7 @@ sdk/rust/        aricode-sys: wrappers de syscall y linker script de los program
 user/testprogs/  programas de prueba de ring 3 y drivers de prueba (Rust y ensamblador), empaquetados en el initrd
 services/init/   AriInit, primer proceso de usuario y device manager provisional
 services/virtio-blk/ driver virtio-blk y servicio de bloques por IPC en ring 3
-services/arifs/  fsd: servicio de ficheros AriFS v0 por IPC en ring 3
+services/arifs/  fsd: servicio de ficheros AriFS v1 por IPC en ring 3
 services/virtio-net/ netd: driver virtio-net y pila de red (DHCP, ping, UDP, TCP, DNS) por IPC en ring 3
 services/virtio-input/ inputd: driver virtio-input (teclado, raton) con eventos por IPC en ring 3
 services/compositor/ compositor: ventanas, cursor y enrutado de entrada sobre el framebuffer, en ring 3
@@ -85,7 +89,7 @@ libs/input/      eventos evdev y teclado US con tests de host
 libs/net/        pila de red mínima sin alloc con tests de host
 libs/http/       cliente HTTP GET mínimo (Content-Length, chunked) con tests de host
 services/shell/  arish: shell interactivo en ring 3
-libs/arifs/      AriFS v0: sistema de archivos plano con tests de host
+libs/arifs/      AriFS v1: sistema de archivos plano con CRC32, journal de reemplazo y tests de host con cortes
 sdk/proto/       protocolos IPC de los servicios
 sdk/runtime/     aricode-rt: runtime de los programas de usuario (entry!, heap, panic)
 sdk/build/       aricode-build: build.rs de una linea para programas de usuario

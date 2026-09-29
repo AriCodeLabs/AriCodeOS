@@ -17,9 +17,14 @@ use aricode_manifest::{Caps, Manifest};
 use aricode_proto::launch::{
     Reply as LaunchReply, Request as LaunchRequest, Status as LaunchStatus,
 };
+use aricode_proto::status;
 use aricode_rt::sys::block::BlockClient;
 use aricode_rt::sys::fs::FsClient;
 use aricode_rt::sys::{self, rights, Error, Handle, TIMEOUT_INFINITE};
+use aricode_supervisor::{Action, Exit, Policy, Service, State};
+
+/// Clave pública de desarrollo con la que se firman los paquetes (ADR 0017).
+const PUBKEY_HEX: &str = include_str!("../../../keys/dev/ed25519.pub");
 
 const SPAWNER: Handle = Handle(0x0001_0004);
 const PCI_ROOT: Handle = Handle(0x0001_0005);
@@ -64,12 +69,12 @@ fn find_pci_class_from(class: u8, subclass: u8, start: u64) -> Option<u64> {
     })
 }
 
-/// Comprueba que un servicio de entrada recién lanzado responde a `Info`
-/// antes de publicar su endpoint (auditoría 4836023, hallazgo 1): un driver
-/// que termina sin servir no debe dejar a los clientes esperando. Devuelve
-/// `false` si el proceso acabó o no contestó en unos segundos.
-fn input_service_ready(service: Handle, driver: Handle) -> bool {
-    use aricode_proto::input::{Op, Reply, Request};
+/// Comprueba que un servicio recién lanzado responde a `request` con algo
+/// que `accept` da por bueno, antes de publicar su endpoint (auditoría
+/// 4836023, hallazgo 1, generalizado por el supervisor): un proceso que
+/// termina sin servir no debe dejar clientes esperando. Devuelve `false` si
+/// el proceso acabó o no contestó en unos segundos.
+fn probe_ready(service: Handle, driver: Handle, request: &[u8], accept: fn(&[u8]) -> bool) -> bool {
     let Ok(reply) = sys::endpoint_create() else {
         return false;
     };
@@ -82,18 +87,48 @@ fn input_service_ready(service: Handle, driver: Handle) -> bool {
         let Ok(reply_w) = sys::handle_duplicate(reply, rights::WRITE | rights::TRANSFER) else {
             break;
         };
-        let req = Request {
-            op: Op::Info,
-            timeout_ms: 0,
-        };
-        if sys::ipc_send(service, &req.encode(), &[reply_w], 250).is_err() {
+        if sys::ipc_send(service, request, &[reply_w], 250).is_err() {
             continue;
         }
-        let mut msg = [0u8; Reply::LEN];
+        let mut msg = [0u8; 256];
         let mut none: [Handle; 0] = [];
         if let Ok((n, _)) = sys::ipc_receive(reply, &mut msg, &mut none, 250) {
-            ok = Reply::decode(&msg[..n]).is_some();
+            ok = accept(&msg[..n]);
             break;
+        }
+    }
+    let _ = sys::handle_close(reply);
+    ok
+}
+
+fn input_service_ready(service: Handle, driver: Handle) -> bool {
+    use aricode_proto::input::{Op, Reply, Request};
+    let req = Request {
+        op: Op::Info,
+        timeout_ms: 0,
+    };
+    probe_ready(service, driver, &req.encode(), |b| {
+        Reply::decode(b).is_some()
+    })
+}
+
+fn ping_service_ready(service: Handle, driver: Handle) -> bool {
+    probe_ready(service, driver, b"ping", |b| b == b"pong")
+}
+
+/// Una petición corta al servicio de prueba ("ping" o "die") esperando "pong".
+fn ping_once(service: Handle, request: &[u8]) -> bool {
+    let Ok(reply) = sys::endpoint_create() else {
+        return false;
+    };
+    let mut ok = false;
+    if let Ok(reply_w) = sys::handle_duplicate(reply, rights::WRITE | rights::TRANSFER) {
+        if sys::ipc_send(service, request, &[reply_w], 500).is_ok() {
+            let mut msg = [0u8; 16];
+            let mut none: [Handle; 0] = [];
+            if let Ok((n, _)) = sys::ipc_receive(reply, &mut msg, &mut none, 500) {
+                ok = &msg[..n] == b"pong";
+            }
         }
     }
     let _ = sys::handle_close(reply);
@@ -277,6 +312,431 @@ fn start_fsd(
     sys::process_spawn_with(SPAWNER, "fsd", partition_lba, &[own, blk, hw])
 }
 
+/// Cómo se (re)lanza un servicio residente.
+#[derive(Clone, Copy)]
+enum Kind {
+    /// Driver PCI con el contrato de `start_driver`; `with_system` añade
+    /// `SYSTEM` (lectura) como extra.
+    Driver { pci_index: u64, with_system: bool },
+    /// fsd sobre el servicio de bloques.
+    Fs {
+        block_service: Handle,
+        partition_lba: u64,
+    },
+    /// Programa del initrd con su endpoint de servicio (servicios de prueba).
+    Program { arg: u64 },
+    /// Puente de consola (ADR 0013): la entrada de consola con `MANAGE` y
+    /// los endpoints de los servicios de entrada. No atiende peticiones, así
+    /// que su residente no tiene endpoint propio.
+    ConsoleBridge {
+        inputs: [Handle; MAX_INPUTS],
+        count: usize,
+    },
+}
+
+/// Servicios de entrada que init reparte (compositor, broker, puente).
+const MAX_INPUTS: usize = 4;
+
+/// Lanza el puente de consola con la entrada de consola (`MANAGE`) y un
+/// duplicado (`WRITE`) de cada endpoint de entrada; `arg` = cuántos. Si un
+/// duplicado falla, cierra los ya hechos.
+fn start_console_bridge(inputs: &[Handle]) -> Result<Handle, Error> {
+    let mut handles = [Handle(0); MAX_INPUTS + 1];
+    let mut made = 0;
+    let result = (|| {
+        handles[0] = sys::handle_duplicate(CONSOLE_IN, rights::MANAGE | rights::TRANSFER)?;
+        made = 1;
+        for ep in inputs {
+            handles[made] = sys::handle_duplicate(*ep, rights::WRITE | rights::TRANSFER)?;
+            made += 1;
+        }
+        sys::process_spawn_with(
+            SPAWNER,
+            "console_bridge",
+            inputs.len() as u64,
+            &handles[..made],
+        )
+    })();
+    if result.is_err() {
+        for h in &handles[..made] {
+            let _ = sys::handle_close(*h);
+        }
+    }
+    result
+}
+
+/// Cómo se comprueba que el servicio ya sirve.
+#[derive(Clone, Copy)]
+enum Probe {
+    /// Lo comprueba un cliente de prueba después (bloques, ficheros, red).
+    None,
+    /// `InputServiceProtocol::Info`.
+    Input,
+    /// "ping" -> "pong".
+    Ping,
+}
+
+/// Un servicio residente bajo supervisión. El endpoint es de init y no
+/// cambia entre generaciones: un cliente sigue hablando con "el servicio"
+/// aunque el proceso que lo atiende se haya reiniciado.
+struct Resident {
+    name: &'static str,
+    kind: Kind,
+    probe: Probe,
+    endpoint: Handle,
+    process: Option<Handle>,
+    sup: Service,
+}
+
+const MAX_RESIDENTS: usize = 8;
+
+/// Supervisor de servicios residentes (etapa 1 del plan posterior al
+/// roadmap): estados, generaciones, reinicio con espera creciente y
+/// presupuesto, y estado consultable (`status` v1) para el shell.
+struct Supervisor {
+    slots: [Option<Resident>; MAX_RESIDENTS],
+    count: usize,
+}
+
+fn now_ms() -> u64 {
+    let mut b = [0u8; 8];
+    match sys::system_info(SYSTEM, sys::abi::sysinfo::UPTIME, &mut b) {
+        Ok(8) => u64::from_le_bytes(b),
+        _ => 0,
+    }
+}
+
+impl Supervisor {
+    fn new() -> Self {
+        Self {
+            slots: [const { None }; MAX_RESIDENTS],
+            count: 0,
+        }
+    }
+
+    fn register(
+        &mut self,
+        name: &'static str,
+        kind: Kind,
+        probe: Probe,
+        endpoint: Handle,
+        optional: bool,
+        policy: Policy,
+    ) -> Option<usize> {
+        if self.count == MAX_RESIDENTS {
+            return None;
+        }
+        let i = self.count;
+        self.slots[i] = Some(Resident {
+            name,
+            kind,
+            probe,
+            endpoint,
+            process: None,
+            sup: Service::new(policy, optional),
+        });
+        self.count += 1;
+        Some(i)
+    }
+
+    fn generation(&self, i: usize) -> u32 {
+        self.slots[i].as_ref().map_or(0, |r| r.sup.generation())
+    }
+
+    fn state(&self, i: usize) -> State {
+        self.slots[i]
+            .as_ref()
+            .map_or(State::Stopped, |r| r.sup.state())
+    }
+
+    fn endpoint(&self, i: usize) -> Handle {
+        self.slots[i].as_ref().map_or(Handle(0), |r| r.endpoint)
+    }
+
+    fn has_process(&self, i: usize) -> bool {
+        self.slots[i].as_ref().is_some_and(|r| r.process.is_some())
+    }
+
+    /// Retira el servicio `i`: no se relanzará aunque muera.
+    fn stop(&mut self, i: usize) {
+        if let Some(r) = self.slots[i].as_mut() {
+            r.sup.stop();
+        }
+    }
+
+    /// Lanza (o relanza) el servicio `i` y espera a que sirva. Devuelve si
+    /// quedó listo; si no, el supervisor ya ha decidido qué hacer.
+    fn launch(&mut self, i: usize) -> bool {
+        let Some(r) = self.slots[i].as_mut() else {
+            return false;
+        };
+        let spawned = match r.kind {
+            Kind::Driver {
+                pci_index,
+                with_system,
+            } => {
+                let system = if with_system {
+                    match sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER) {
+                        Ok(h) => Some(h),
+                        Err(e) => Err(e).ok(),
+                    }
+                } else {
+                    None
+                };
+                match system {
+                    Some(h) => start_driver(r.name, pci_index, r.endpoint, &[h]),
+                    None if with_system => Err(Error::Limit),
+                    None => start_driver(r.name, pci_index, r.endpoint, &[]),
+                }
+            }
+            Kind::Fs {
+                block_service,
+                partition_lba,
+            } => start_fsd(r.endpoint, block_service, partition_lba),
+            Kind::Program { arg } => {
+                sys::handle_duplicate(r.endpoint, rights::READ | rights::WRITE | rights::TRANSFER)
+                    .and_then(|ep| sys::process_spawn_with(SPAWNER, r.name, arg, &[ep]))
+            }
+            Kind::ConsoleBridge { inputs, count } => start_console_bridge(&inputs[..count]),
+        };
+        let now = now_ms();
+        let process = match spawned {
+            Ok(h) => h,
+            Err(e) => {
+                aricode_rt::print_error(b"AriInit: lanzar servicio", e);
+                let _ = r.sup.starting(now);
+                self.announce_death(i, now, Exit::Code(u64::MAX));
+                return false;
+            }
+        };
+        r.process = Some(process);
+        let generation = r.sup.starting(now);
+        let ready = match r.probe {
+            Probe::None => true,
+            Probe::Input => input_service_ready(r.endpoint, process),
+            Probe::Ping => ping_service_ready(r.endpoint, process),
+        };
+        if ready {
+            r.sup.ready(now_ms());
+            if generation > 1 {
+                sys::print(b"AriInit: servicio ");
+                sys::print(r.name.as_bytes());
+                sys::print(b" reiniciado (generacion ");
+                let mut b = [0u8; 20];
+                sys::print(aricode_rt::fmt_u64(generation as u64, &mut b));
+                sys::print(b")\n");
+            }
+            true
+        } else {
+            self.announce_death(i, now_ms(), Exit::StartTimeout);
+            false
+        }
+    }
+
+    /// Registra la muerte de `i`, cierra su proceso y anuncia la decisión.
+    fn announce_death(&mut self, i: usize, now: u64, exit: Exit) {
+        let Some(r) = self.slots[i].as_mut() else {
+            return;
+        };
+        if let Some(h) = r.process.take() {
+            let _ = sys::handle_close(h);
+        }
+        let action = r.sup.died(now, exit);
+        sys::print(b"AriInit: servicio ");
+        sys::print(r.name.as_bytes());
+        sys::print(match exit {
+            Exit::Code(_) => b" termino",
+            Exit::Killed => b" murio por fallo",
+            Exit::StartTimeout => b" no llego a servir",
+        });
+        let mut b = [0u8; 20];
+        match action {
+            Action::Restart { at } => {
+                sys::print(b"; reinicio en ");
+                sys::print(aricode_rt::fmt_u64(at.saturating_sub(now), &mut b));
+                sys::print(b" ms\n");
+            }
+            _ => {
+                sys::print(b"; presupuesto de reinicios agotado: ");
+                sys::print(if r.sup.is_optional() {
+                    b"sistema degradado\n"
+                } else {
+                    b"servicio obligatorio fallido\n"
+                });
+            }
+        }
+    }
+
+    /// Vigila los procesos: muertes, plazos de arranque y reinicios que ya tocan.
+    fn poll(&mut self) {
+        let now = now_ms();
+        for i in 0..self.count {
+            let (process, state) = match self.slots[i].as_ref() {
+                Some(r) => (r.process, r.sup.state()),
+                None => continue,
+            };
+            if let Some(h) = process {
+                match sys::process_wait(h, 0) {
+                    Err(Error::Timeout) => {
+                        if let Some(r) = self.slots[i].as_mut() {
+                            if r.sup.tick(now) == Action::Timeout {
+                                self.announce_death(i, now, Exit::StartTimeout);
+                            }
+                        }
+                    }
+                    Ok(code) => self.announce_death(i, now, Exit::Code(code)),
+                    Err(Error::Killed) => self.announce_death(i, now, Exit::Killed),
+                    Err(_) => self.announce_death(i, now, Exit::Code(u64::MAX)),
+                }
+            } else if state == State::Stopped {
+                let start = self.slots[i]
+                    .as_mut()
+                    .is_some_and(|r| r.sup.tick(now) == Action::Start);
+                if start {
+                    self.launch(i);
+                }
+            }
+        }
+    }
+
+    /// Estado del servicio `index` para `status` v1.
+    fn status(&self, index: u8) -> status::Reply {
+        let Some(r) = self.slots.get(index as usize).and_then(|s| s.as_ref()) else {
+            return status::Reply::not_found();
+        };
+        let st = r.sup.status();
+        let (last_exit, last_code) = match st.last_exit {
+            None => (status::LastExit::None, 0),
+            Some(Exit::Code(c)) => (status::LastExit::Code, c),
+            Some(Exit::Killed) => (status::LastExit::Killed, 0),
+            Some(Exit::StartTimeout) => (status::LastExit::StartTimeout, 0),
+        };
+        status::Reply {
+            found: true,
+            state: match st.state {
+                State::Stopped => status::State::Stopped,
+                State::Starting => status::State::Starting,
+                State::Ready => status::State::Ready,
+                State::Degraded => status::State::Degraded,
+                State::Failed => status::State::Failed,
+            },
+            optional: r.sup.is_optional(),
+            generation: st.generation,
+            restarts: st.restarts,
+            last_exit,
+            last_code,
+            ready_for_ms: st.ready_at.map_or(0, |t| now_ms().saturating_sub(t).max(1)),
+            ..status::Reply::not_found()
+        }
+        .with_name(r.name)
+    }
+}
+
+/// Reinicios provocados (`restart_storm`): un servicio de prueba que muere
+/// tras cada petición se reinicia 100 veces bajo el supervisor mientras fsd
+/// sigue atendiendo; al final la memoria libre debe ser la de antes.
+fn restart_storm(sup: &mut Supervisor, fs: &mut FsClient) -> Result<(), u64> {
+    let ep = sys::endpoint_create().map_err(|_| 40u64)?;
+    let policy = Policy {
+        max_restarts: 200,
+        backoff_initial_ms: 1,
+        backoff_max_ms: 8,
+        start_timeout_ms: 2000,
+        stable_ms: 60_000,
+    };
+    let i = sup
+        .register(
+            "crashy_service",
+            Kind::Program { arg: 0 },
+            Probe::Ping,
+            ep,
+            true,
+            policy,
+        )
+        .ok_or(40u64)?;
+    let mut mem = [0u8; 16];
+    let free = |mem: &mut [u8; 16]| -> u64 {
+        match sys::system_info(SYSTEM, sys::abi::sysinfo::MEMORY, mem) {
+            Ok(16) => u64::from_le_bytes(mem[8..].try_into().unwrap()),
+            _ => 0,
+        }
+    };
+    // Sin ningun proceso de prueba vivo: asi la medida final es comparable.
+    let free_before = free(&mut mem);
+    let t0 = now_ms();
+    if !sup.launch(i) {
+        return Err(41);
+    }
+    let mut fs_ok = 0u32;
+    let mut fs_checks = 0u32;
+    let mut pings = 0u32;
+    loop {
+        sup.poll();
+        let generation = sup.generation(i);
+        if generation > 100 {
+            break;
+        }
+        if now_ms().saturating_sub(t0) > 60_000 {
+            return Err(42);
+        }
+        // "die": contesta y muere; el supervisor lo relanza. Antes de pedir
+        // otra muerte hay que haber visto esta: en SMP el proceso puede
+        // seguir vivo un instante despues de contestar, y un segundo "die"
+        // encolado mataria a la siguiente generacion antes de su sonda.
+        if sup.state(i) == State::Ready && sup.has_process(i) {
+            if ping_once(sup.endpoint(i), b"die") {
+                pings += 1;
+                if pings.is_multiple_of(10) {
+                    fs_checks += 1;
+                    let mut name = [0u8; 32];
+                    if fs.list(0, &mut name).is_ok() {
+                        fs_ok += 1;
+                    }
+                }
+            }
+            let seen = now_ms() + 2000;
+            while sup.has_process(i) && now_ms() < seen {
+                sup.poll();
+            }
+        }
+    }
+    // Ultima generacion: un ping mas la mata; se recoge y se retira el
+    // servicio para que el supervisor no lo relance antes de medir.
+    let _ = ping_once(sup.endpoint(i), b"die");
+    let deadline = now_ms() + 2000;
+    while sup.has_process(i) && now_ms() < deadline {
+        sup.poll();
+    }
+    sup.stop(i);
+    let elapsed = now_ms().saturating_sub(t0);
+    let free_after = free(&mut mem);
+    let delta = free_before as i64 - free_after as i64;
+    let mut b = [0u8; 20];
+    let restarts = sup.generation(i).saturating_sub(1);
+    sys::print(b"AriInit: supervisor: ");
+    sys::print(aricode_rt::fmt_u64(restarts as u64, &mut b));
+    sys::print(b" reinicios de crashy_service en ");
+    sys::print(aricode_rt::fmt_u64(elapsed, &mut b));
+    sys::print(b" ms, fsd respondio ");
+    sys::print(aricode_rt::fmt_u64(fs_ok as u64, &mut b));
+    sys::print(b"/");
+    sys::print(aricode_rt::fmt_u64(fs_checks as u64, &mut b));
+    sys::print(b", memoria: ");
+    if delta < 0 {
+        sys::print(b"-");
+    }
+    sys::print(aricode_rt::fmt_u64(delta.unsigned_abs(), &mut b));
+    sys::print(b" frames de diferencia\n");
+    if restarts != 100 || fs_checks == 0 || fs_ok != fs_checks {
+        return Err(43);
+    }
+    if delta > 32 {
+        say(b"supervisor: se han perdido frames en los reinicios");
+        return Err(44);
+    }
+    Ok(())
+}
+
 /// Lanza un cliente de un servicio con su endpoint (solo WRITE) y
 /// una capacidad de hardware para su buffer DMA, y espera su salida.
 /// Desplazamiento del area en bruto dentro de ARI0 (el disco de pruebas la
@@ -301,7 +761,8 @@ fn run_shell(
     fs_service: Handle,
     net_service: Handle,
     services: u64,
-    broker: &Broker,
+    broker: &mut Broker,
+    sup: &mut Supervisor,
 ) -> Result<u64, Error> {
     let fsd = sys::handle_duplicate(fs_service, rights::WRITE | rights::TRANSFER)?;
     let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
@@ -322,7 +783,8 @@ fn run_shell(
         services,
         &[fsd, hw, system, console_in, pci, netd, launch],
     )?;
-    // Atender peticiones de lanzamiento mientras el shell viva.
+    // Atender peticiones de lanzamiento y de estado, y vigilar los
+    // servicios residentes, mientras el shell viva.
     loop {
         match sys::process_wait(child, 0) {
             Err(Error::Timeout) => {}
@@ -331,7 +793,9 @@ fn run_shell(
                 return result;
             }
         }
-        broker.serve_one(20);
+        sup.poll();
+        broker.serve_one(20, sup);
+        broker.poll_launches();
     }
 }
 
@@ -344,11 +808,54 @@ fn run_shell(
 struct Broker {
     endpoint: Handle,
     fs: Option<FsClient>,
+    /// Endpoint principal de fsd, para la capacidad `install` (ADR 0018).
+    fs_root: Option<Handle>,
     block: Option<Handle>,
     net: Handle,
     compositor: Option<Handle>,
     inputs: [Handle; 4],
     input_count: usize,
+    /// Programas lanzados que aún no han terminado (ADR 0015): proceso y, si
+    /// alguien espera su salida, el endpoint al que responder.
+    running: [Option<Running>; MAX_RUNNING],
+    /// Buffer DMA de preparación para paquetes instalados en AriFS (ADR
+    /// 0017): handle y dirección, reservado la primera vez que hace falta.
+    stage: Option<(Handle, u64)>,
+}
+
+/// Tamaño del buffer de preparación: un paquete instalado no puede pasar de
+/// aquí.
+const STAGE_LEN: u64 = 256 * 1024;
+
+/// De dónde sale el programa que se lanza.
+#[derive(Clone, Copy)]
+enum Source {
+    Initrd,
+    /// `apps/NOMBRE.aripkg` en AriFS, ya copiado y verificado en el buffer:
+    /// desplazamiento y longitud del ELF, versión del paquete.
+    Installed {
+        elf_offset: u32,
+        elf_len: u32,
+        version: u32,
+        package_len: u32,
+    },
+}
+
+/// Programas en marcha a la vez que admite el broker; el siguiente `run` o
+/// `spawn` recibe `Limit`.
+const MAX_RUNNING: usize = 4;
+
+#[derive(Clone, Copy)]
+struct Running {
+    process: Handle,
+    reply_to: Option<Handle>,
+}
+
+/// Resultado inmediato de `launch`: respuesta ya decidida, o un proceso
+/// creado cuya salida hay que esperar en una ranura.
+enum Launched {
+    Reply(LaunchReply),
+    Process(Handle),
 }
 
 impl Broker {
@@ -369,16 +876,126 @@ impl Broker {
         Ok(Self {
             endpoint: sys::endpoint_create()?,
             fs,
+            fs_root: fs_service,
             block,
             net,
             compositor,
             inputs: ins,
             input_count: n,
+            running: [None; MAX_RUNNING],
+            stage: None,
         })
     }
 
+    /// Paquete instalado (`apps/NOMBRE.aripkg`): lo copia al buffer de
+    /// preparación, lo verifica y devuelve su manifiesto de aplicación y
+    /// dónde queda el ELF. Un paquete que no verifica se deniega.
+    fn load_installed(&mut self, name: &str) -> Result<(Manifest, Source), LaunchStatus> {
+        let fs = self.fs.as_mut().ok_or(LaunchStatus::NotFound)?;
+        let mut path = [0u8; 48];
+        let Some(pkg_path) = join("apps/", name, &mut path) else {
+            return Err(LaunchStatus::Invalid);
+        };
+        let mut full = [0u8; 48];
+        let Some(pkg_path) = join(pkg_path, aricode_pkg::EXTENSION, &mut full) else {
+            return Err(LaunchStatus::Invalid);
+        };
+        // Tamaño por el listado del espacio principal.
+        let mut size = None;
+        let mut entry = [0u8; 32];
+        let mut i = 0;
+        while let Ok(Some((n, s))) = fs.list(i, &mut entry) {
+            if &entry[..n] == pkg_path.as_bytes() {
+                size = Some(s);
+                break;
+            }
+            i += 1;
+        }
+        let Some(size) = size else {
+            return Err(LaunchStatus::NotFound);
+        };
+        if size == 0 || size > STAGE_LEN {
+            sys::print(b"AriInit: paquete instalado demasiado grande\n");
+            return Err(LaunchStatus::Failed);
+        }
+        let virt = match self.stage {
+            Some((_, virt)) => virt,
+            None => {
+                let dma = sys::dma_alloc(HARDWARE, STAGE_LEN).map_err(|_| LaunchStatus::Failed)?;
+                let virt = sys::mmio_map(dma).map_err(|_| LaunchStatus::Failed)?;
+                self.stage = Some((dma, virt));
+                virt
+            }
+        };
+        // SAFETY: buffer DMA propio de STAGE_LEN bytes, mapeado RW en init.
+        let stage = unsafe { core::slice::from_raw_parts_mut(virt as *mut u8, STAGE_LEN as usize) };
+        let fd = fs.open(pkg_path).map_err(|_| LaunchStatus::NotFound)?;
+        let total = size as usize;
+        let mut done = 0usize;
+        while done < total {
+            let want = (total - done).min(4096);
+            match fs.read(fd, done as u32, &mut stage[done..done + want]) {
+                Ok(n) if n > 0 => done += n,
+                _ => {
+                    let _ = fs.close(fd);
+                    return Err(LaunchStatus::Failed);
+                }
+            }
+        }
+        let _ = fs.close(fd);
+        let mut pubkey = [0u8; 32];
+        if aricode_crypto::unhex(PUBKEY_HEX.trim(), &mut pubkey).is_none() {
+            return Err(LaunchStatus::Failed);
+        }
+        let package = &stage[..total];
+        let verified = match aricode_pkg::verify(package, &pubkey) {
+            Ok(v) => v,
+            Err(_) => {
+                sys::print(b"AriInit: denegado, el paquete ");
+                sys::print(pkg_path.as_bytes());
+                sys::print(b" no verifica (firma o hashes)\n");
+                return Err(LaunchStatus::Denied);
+            }
+        };
+        let manifest = core::str::from_utf8(verified.app_manifest)
+            .ok()
+            .and_then(|t| Manifest::parse(t).ok())
+            .ok_or(LaunchStatus::BadManifest)?;
+        if verified.manifest.name_str() != name || manifest.name_str() != name {
+            return Err(LaunchStatus::BadManifest);
+        }
+        Ok((
+            manifest,
+            Source::Installed {
+                elf_offset: verified.program_offset(package) as u32,
+                elf_len: verified.program.len() as u32,
+                version: verified.manifest.version,
+                package_len: total as u32,
+            },
+        ))
+    }
+
+    /// Responde a los programas que han terminado y libera sus ranuras.
+    fn poll_launches(&mut self) {
+        for slot in self.running.iter_mut() {
+            let Some(r) = *slot else { continue };
+            let reply = match sys::process_wait(r.process, 0) {
+                Err(Error::Timeout) => continue,
+                Ok(code) => LaunchReply::exited(code),
+                Err(Error::Killed) => LaunchReply::status(LaunchStatus::Killed),
+                Err(_) => LaunchReply::status(LaunchStatus::Failed),
+            };
+            let _ = sys::handle_close(r.process);
+            if let Some(reply_to) = r.reply_to {
+                let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
+                let _ = sys::handle_close(reply_to);
+            }
+            *slot = None;
+        }
+    }
+
     /// Atiende como mucho una petición (espera hasta `timeout_ms`).
-    fn serve_one(&self, timeout_ms: u64) {
+    fn serve_one(&mut self, timeout_ms: u64, sup: &Supervisor) {
         let mut msg = [0u8; LaunchRequest::LEN];
         let mut handles = [Handle(0); 1];
         let Ok((n, nh)) = sys::ipc_receive(self.endpoint, &mut msg, &mut handles, timeout_ms)
@@ -389,44 +1006,117 @@ impl Broker {
             return;
         }
         let reply_to = handles[0];
-        let reply = match LaunchRequest::decode(&msg[..n]) {
-            Some(req) => self.launch(req.name_str(), req.arg),
-            None => LaunchReply::status(LaunchStatus::Invalid),
+        // El mismo endpoint atiende dos protocolos: lanzamientos (6) y estado
+        // de servicios (7); el primer byte los distingue.
+        if let Some(req) = status::Request::decode(&msg[..n]) {
+            let reply = sup.status(req.index);
+            let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
+            let _ = sys::handle_close(reply_to);
+            return;
+        }
+        let Some(req) = LaunchRequest::decode(&msg[..n]) else {
+            let reply = LaunchReply::status(LaunchStatus::Invalid);
+            let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
+            let _ = sys::handle_close(reply_to);
+            return;
         };
-        let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
-        let _ = sys::handle_close(reply_to);
+        // La ranura se reserva antes de lanzar: sin ranura no hay proceso.
+        let Some(slot) = self.running.iter().position(Option::is_none) else {
+            sys::print(b"AriInit: ");
+            sys::print(req.name_str().as_bytes());
+            sys::print(b": limite de programas en marcha\n");
+            let reply = LaunchReply::status(LaunchStatus::Limit);
+            let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
+            let _ = sys::handle_close(reply_to);
+            return;
+        };
+        match self.launch(req.name_str(), req.arg) {
+            Launched::Reply(reply) => {
+                let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
+                let _ = sys::handle_close(reply_to);
+            }
+            Launched::Process(process) if req.is_detached() => {
+                let reply = LaunchReply::status(LaunchStatus::Started);
+                let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
+                let _ = sys::handle_close(reply_to);
+                self.running[slot] = Some(Running {
+                    process,
+                    reply_to: None,
+                });
+            }
+            Launched::Process(process) => {
+                self.running[slot] = Some(Running {
+                    process,
+                    reply_to: Some(reply_to),
+                });
+            }
+        }
     }
 
-    /// Lee el manifiesto (`NOMBRE.manifest` en el initrd), aplica la política y
-    /// ejecuta el programa hasta que termine.
-    fn launch(&self, name: &str, arg: u64) -> LaunchReply {
+    /// Lee el manifiesto (`NOMBRE.manifest` en el initrd, o el del paquete
+    /// `apps/NOMBRE.aripkg` en AriFS si el programa está instalado, ADR 0017),
+    /// aplica la política y lanza el programa; su salida la recoge
+    /// `poll_launches`.
+    fn launch(&mut self, name: &str, arg: u64) -> Launched {
         let mut path = [0u8; 48];
         let Some(path) = join(name, ".manifest", &mut path) else {
-            return LaunchReply::status(LaunchStatus::Invalid);
+            return Launched::Reply(LaunchReply::status(LaunchStatus::Invalid));
         };
+        // Un byte basta para saber si el programa está en el initrd: TooBig
+        // si existe, NotFound si no.
+        let mut probe = [0u8; 1];
+        let in_initrd = !matches!(
+            sys::initrd_read(SPAWNER, name, &mut probe),
+            Err(Error::NotFound)
+        );
         let mut text = [0u8; 1024];
-        let manifest = match sys::initrd_read(SPAWNER, path, &mut text) {
-            Ok(n) => match core::str::from_utf8(&text[..n])
-                .ok()
-                .and_then(|t| Manifest::parse(t).ok())
-            {
-                Some(m) => Some(m),
-                None => return LaunchReply::status(LaunchStatus::BadManifest),
-            },
-            Err(Error::NotFound) => None,
-            Err(_) => return LaunchReply::status(LaunchStatus::BadManifest),
+        let (manifest, source) = if in_initrd {
+            let manifest = match sys::initrd_read(SPAWNER, path, &mut text) {
+                Ok(n) => match core::str::from_utf8(&text[..n])
+                    .ok()
+                    .and_then(|t| Manifest::parse(t).ok())
+                {
+                    Some(m) => Some(m),
+                    None => return Launched::Reply(LaunchReply::status(LaunchStatus::BadManifest)),
+                },
+                Err(Error::NotFound) => None,
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::BadManifest)),
+            };
+            (manifest, Source::Initrd)
+        } else {
+            match self.load_installed(name) {
+                Ok((m, source)) => (Some(m), source),
+                Err(status) => return Launched::Reply(LaunchReply::status(status)),
+            }
         };
         let (caps, memory_kib) = match manifest {
             Some(m) if m.name_str() != name => {
-                return LaunchReply::status(LaunchStatus::BadManifest)
+                return Launched::Reply(LaunchReply::status(LaunchStatus::BadManifest))
             }
             Some(m) => (m.caps, m.memory_kib),
             // Sin manifiesto: solo consola y reloj, memoria minima.
             None => (Caps::SYSTEM, 64),
         };
+        let read_files = manifest.as_ref().map(Manifest::read_files);
         let denied = caps.difference(Caps::allowed_for(name));
         sys::print(b"AriInit: lanzar ");
         sys::print(name.as_bytes());
+        if let Source::Installed {
+            version,
+            package_len,
+            ..
+        } = source
+        {
+            let mut b = [0u8; 20];
+            sys::print(b" desde AriFS (apps/");
+            sys::print(name.as_bytes());
+            sys::print(aricode_pkg::EXTENSION.as_bytes());
+            sys::print(b" version ");
+            sys::print(aricode_rt::fmt_u64(version as u64, &mut b));
+            sys::print(b", ");
+            sys::print(aricode_rt::fmt_u64(package_len as u64, &mut b));
+            sys::print(b" bytes)");
+        }
         sys::print(if manifest.is_some() {
             b" con manifiesto ["
         } else {
@@ -443,7 +1133,18 @@ impl Broker {
         sys::print(b"] memoria ");
         let mut buf = [0u8; 20];
         sys::print(aricode_rt::fmt_u64(memory_kib as u64, &mut buf));
-        sys::print(b" KiB\n");
+        sys::print(b" KiB");
+        if let Some(files) = read_files.clone().filter(|f| f.clone().count() > 0) {
+            sys::print(b" solo lectura [");
+            for (i, f) in files.enumerate() {
+                if i > 0 {
+                    sys::print(b" ");
+                }
+                sys::print(f.as_bytes());
+            }
+            sys::print(b"]");
+        }
+        sys::print(b"\n");
         if !denied.is_empty() {
             sys::print(b"AriInit: denegado, pide capacidades del sistema:");
             for c in denied.names() {
@@ -451,7 +1152,7 @@ impl Broker {
                 sys::print(c.as_bytes());
             }
             sys::print(b"\n");
-            return LaunchReply::status(LaunchStatus::Denied);
+            return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
         }
         // Los duplicados preparados se cierran solos si cualquier camino de
         // error sale antes de transferirlos (`Granted::take` los libera al
@@ -462,43 +1163,71 @@ impl Broker {
         if caps.contains(Caps::SYSTEM) {
             match sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER) {
                 Ok(h) => granted.push(h),
-                Err(_) => return LaunchReply::status(LaunchStatus::Failed),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
         }
         if caps.contains(Caps::FS) {
             let Some(fs) = &self.fs else {
-                return LaunchReply::status(LaunchStatus::Denied);
+                return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
             };
             match fs.bind(name) {
                 Ok(h) => granted.push(h),
-                Err(_) => return LaunchReply::status(LaunchStatus::Failed),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
+            }
+            needs_hw = true;
+        }
+        // Ficheros compartidos de solo lectura (ADR 0016): fsd liga un
+        // endpoint a cada uno; uno inexistente deniega el lanzamiento.
+        for file in read_files.into_iter().flatten() {
+            let Some(fs) = &self.fs else {
+                return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
+            };
+            match fs.share(file) {
+                Ok(h) => granted.push(h),
+                Err(sys::fs::FsError::Status(aricode_proto::fs::Status::NotFound)) => {
+                    sys::print(b"AriInit: denegado, fichero compartido inexistente: ");
+                    sys::print(file.as_bytes());
+                    sys::print(b"\n");
+                    return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
+                }
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
             needs_hw = true;
         }
         if caps.contains(Caps::NET) {
             match sys::handle_duplicate(self.net, rights::WRITE | rights::TRANSFER) {
                 Ok(h) => granted.push(h),
-                Err(_) => return LaunchReply::status(LaunchStatus::Failed),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
             needs_hw = true;
         }
         if caps.contains(Caps::WINDOW) {
             let Some(comp) = self.compositor else {
-                return LaunchReply::status(LaunchStatus::Denied);
+                return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
             };
             match sys::handle_duplicate(comp, rights::WRITE | rights::TRANSFER) {
                 Ok(h) => granted.push(h),
-                Err(_) => return LaunchReply::status(LaunchStatus::Failed),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
             needs_hw = true;
         }
         if caps.contains(Caps::BLOCK) {
             let Some(block) = self.block else {
-                return LaunchReply::status(LaunchStatus::Denied);
+                return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
             };
             match sys::handle_duplicate(block, rights::WRITE | rights::TRANSFER) {
                 Ok(h) => granted.push(h),
-                Err(_) => return LaunchReply::status(LaunchStatus::Failed),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
+            }
+            needs_hw = true;
+        }
+        if caps.contains(Caps::INSTALL) {
+            let Some(root) = self.fs_root else {
+                return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
+            };
+            match sys::handle_duplicate(root, rights::WRITE | rights::TRANSFER) {
+                Ok(h) => granted.push(h),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
             needs_hw = true;
         }
@@ -506,39 +1235,54 @@ impl Broker {
             for ep in &self.inputs[..self.input_count] {
                 match sys::handle_duplicate(*ep, rights::WRITE | rights::TRANSFER) {
                     Ok(h) => granted.push(h),
-                    Err(_) => return LaunchReply::status(LaunchStatus::Failed),
+                    Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
                 }
             }
         }
         if needs_hw {
             match sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER) {
                 Ok(h) => granted.push(h),
-                Err(_) => return LaunchReply::status(LaunchStatus::Failed),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
         }
         // El kernel solo retira los handles si llega a crear el proceso; en
         // cualquier fallo el guard los cierra al salir (cerrar uno ya retirado
         // devuelve BadHandle y se ignora).
-        let child =
-            match sys::process_spawn_limited(SPAWNER, name, arg, granted.handles(), memory_kib) {
-                Ok(c) => {
-                    granted.take();
-                    c
-                }
-                Err(e) => {
-                    return LaunchReply::status(match e {
-                        Error::NotFound => LaunchStatus::NotFound,
-                        _ => LaunchStatus::Failed,
-                    });
-                }
-            };
-        let result = sys::process_wait(child, TIMEOUT_INFINITE);
-        let _ = sys::handle_close(child);
-        match result {
-            Ok(code) => LaunchReply::exited(code),
-            Err(Error::Killed) => LaunchReply::status(LaunchStatus::Killed),
-            Err(_) => LaunchReply::status(LaunchStatus::Failed),
-        }
+        let spawned = match source {
+            Source::Initrd => {
+                sys::process_spawn_limited(SPAWNER, name, arg, granted.handles(), memory_kib)
+            }
+            Source::Installed {
+                elf_offset,
+                elf_len,
+                ..
+            } => {
+                let (dma, _) = self.stage.expect("buffer de preparacion reservado");
+                sys::process_spawn_from(
+                    SPAWNER,
+                    dma,
+                    elf_offset,
+                    elf_len,
+                    name,
+                    arg,
+                    granted.handles(),
+                    memory_kib,
+                )
+            }
+        };
+        let child = match spawned {
+            Ok(c) => {
+                granted.take();
+                c
+            }
+            Err(e) => {
+                return Launched::Reply(LaunchReply::status(match e {
+                    Error::NotFound => LaunchStatus::NotFound,
+                    _ => LaunchStatus::Failed,
+                }));
+            }
+        };
+        Launched::Process(child)
     }
 }
 
@@ -643,6 +1387,7 @@ fn main(arg: u64) -> u64 {
     let mut fs_service = None;
     let mut block_service = None;
     let mut services = 0u64;
+    let mut sup = Supervisor::new();
     // 1. Un servicio que termina bien.
     match run("hello", 0) {
         Ok(42) => say(b"hello termino con 42"),
@@ -689,9 +1434,22 @@ fn main(arg: u64) -> u64 {
             let Ok(service) = sys::endpoint_create() else {
                 return 9;
             };
-            let Ok(_driver) = start_driver("virtio_blk", index, service, &[]) else {
+            let launched = sup
+                .register(
+                    "virtio_blk",
+                    Kind::Driver {
+                        pci_index: index,
+                        with_system: false,
+                    },
+                    Probe::None,
+                    service,
+                    false,
+                    Policy::DRIVER,
+                )
+                .is_some_and(|i| sup.launch(i));
+            if !launched {
                 return 10;
-            };
+            }
             services |= SERVICE_BLOCK;
             block_service = Some(service);
             // Servicio de ficheros sobre la particion ARI0 (por nombre en la
@@ -707,13 +1465,24 @@ fn main(arg: u64) -> u64 {
                 say(b"sin particion ARI0 en el disco");
                 return 12;
             };
-            match start_fsd(fs_ep, service, ari0_lba) {
-                Ok(_) => services |= SERVICE_FS,
-                Err(e) => {
-                    aricode_rt::print_error(b"AriInit: fsd", e);
-                    return 13;
-                }
+            let launched = sup
+                .register(
+                    "fsd",
+                    Kind::Fs {
+                        block_service: service,
+                        partition_lba: ari0_lba,
+                    },
+                    Probe::None,
+                    fs_ep,
+                    false,
+                    Policy::DRIVER,
+                )
+                .is_some_and(|i| sup.launch(i));
+            if !launched {
+                say(b"fsd no arranco");
+                return 13;
             }
+            services |= SERVICE_FS;
             match run_block_client("fs_client", fs_ep, 0) {
                 Ok(0) => {
                     say(b"servicio de ficheros ok");
@@ -752,16 +1521,24 @@ fn main(arg: u64) -> u64 {
     };
     match find_pci(0x1AF4, 0x1041) {
         Some(index) => {
-            let Ok(system) = sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER) else {
+            let launched = sup
+                .register(
+                    "virtio_net",
+                    Kind::Driver {
+                        pci_index: index,
+                        with_system: true,
+                    },
+                    Probe::None,
+                    net_service,
+                    true,
+                    Policy::DRIVER,
+                )
+                .is_some_and(|i| sup.launch(i));
+            if !launched {
+                say(b"virtio_net no arranco");
                 return 17;
-            };
-            match start_driver("virtio_net", index, net_service, &[system]) {
-                Ok(_) => services |= SERVICE_NET,
-                Err(e) => {
-                    aricode_rt::print_error(b"AriInit: virtio_net", e);
-                    return 17;
-                }
             }
+            services |= SERVICE_NET;
             match run_block_client("net_client", net_service, 0) {
                 Ok(0) => say(b"servicio de red ok"),
                 Ok(code) => {
@@ -816,22 +1593,24 @@ fn main(arg: u64) -> u64 {
         let Ok(ep) = sys::endpoint_create() else {
             return 21;
         };
-        let Ok(system) = sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER) else {
-            return 21;
-        };
-        match start_driver("virtio_input", index, ep, &[system]) {
-            Ok(driver) if input_service_ready(ep, driver) => {
-                input_eps[inputs] = ep;
-                inputs += 1;
-            }
-            Ok(_) => {
-                say(b"virtio_input no llego a servir; se descarta");
-                let _ = sys::handle_close(ep);
-            }
-            Err(e) => {
-                aricode_rt::print_error(b"AriInit: virtio_input", e);
-                return 22;
-            }
+        let launched = sup
+            .register(
+                "virtio_input",
+                Kind::Driver {
+                    pci_index: index,
+                    with_system: true,
+                },
+                Probe::Input,
+                ep,
+                true,
+                Policy::DRIVER,
+            )
+            .is_some_and(|i| sup.launch(i));
+        if launched {
+            input_eps[inputs] = ep;
+            inputs += 1;
+        } else {
+            say(b"virtio_input no llego a servir; se descarta");
         }
     }
     // Controladores USB (clase 0c.03): solo los xHCI (interfaz 0x30) tienen
@@ -858,23 +1637,25 @@ fn main(arg: u64) -> u64 {
         let Ok(ep) = sys::endpoint_create() else {
             return 21;
         };
-        let Ok(system) = sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER) else {
-            return 21;
-        };
-        match start_driver("usb_input", index, ep, &[system]) {
-            Ok(driver) if input_service_ready(ep, driver) => {
-                say(b"entrada usb_input lista");
-                input_eps[inputs] = ep;
-                inputs += 1;
-            }
-            Ok(_) => {
-                say(b"usb_input no llego a servir; se descarta");
-                let _ = sys::handle_close(ep);
-            }
-            Err(e) => {
-                aricode_rt::print_error(b"AriInit: usb_input", e);
-                return 22;
-            }
+        let launched = sup
+            .register(
+                "usb_input",
+                Kind::Driver {
+                    pci_index: index,
+                    with_system: true,
+                },
+                Probe::Input,
+                ep,
+                true,
+                Policy::DRIVER,
+            )
+            .is_some_and(|i| sup.launch(i));
+        if launched {
+            say(b"entrada usb_input lista");
+            input_eps[inputs] = ep;
+            inputs += 1;
+        } else {
+            say(b"usb_input no llego a servir; se descarta");
         }
     }
     if inputs > 0 {
@@ -927,6 +1708,19 @@ fn main(arg: u64) -> u64 {
             }
         }
     }
+    // 10b. Tormenta de reinicios (solo tests, `restart_storm`): 100 reinicios
+    //      de un servicio de prueba bajo el supervisor sin perder recursos.
+    if arg & sys::abi::init_arg::RESTART_STORM != 0 {
+        let Some(fs_ep) = fs_service else {
+            return 40;
+        };
+        let Ok(mut fs) = FsClient::new(fs_ep, HARDWARE) else {
+            return 40;
+        };
+        if let Err(code) = restart_storm(&mut sup, &mut fs) {
+            return code;
+        }
+    }
     // 11. Arranque A/B: solo ahora, con todos los servicios comprobados, se
     //     confirma el slot pendiente. Cualquier retorno de error anterior deja
     //     el estado pendiente para que AriBoot agote intentos y haga rollback.
@@ -947,7 +1741,7 @@ fn main(arg: u64) -> u64 {
             say(b"sin servicio de ficheros, no se lanza el shell");
             return 15;
         };
-        let Ok(broker) = Broker::new(
+        let Ok(mut broker) = Broker::new(
             fs_service,
             block_service,
             net_service,
@@ -956,7 +1750,38 @@ fn main(arg: u64) -> u64 {
         ) else {
             return 26;
         };
-        match run_shell(fs, net_service, services, &broker) {
+        // Etapa 2 (ADR 0013): los teclados de usuario alimentan la consola
+        // del shell mientras no haya compositor (con GUI los eventos son
+        // suyos y cada servicio de entrada admite un solo lector).
+        if inputs > 0 && compositor.is_none() {
+            let mut ins = [Handle(0); MAX_INPUTS];
+            ins[..inputs].copy_from_slice(&input_eps[..inputs]);
+            let launched = sup
+                .register(
+                    "console_bridge",
+                    Kind::ConsoleBridge {
+                        inputs: ins,
+                        count: inputs,
+                    },
+                    Probe::None,
+                    Handle(0),
+                    true,
+                    Policy::DRIVER,
+                )
+                .is_some_and(|i| sup.launch(i));
+            if launched {
+                // El anuncio va aqui y no en el puente: init imprime antes
+                // de que exista el shell, asi que nada se entrelaza con su
+                // primer prompt. Los servicios de entrada guardan lo que se
+                // teclee hasta que el puente lo lea.
+                sys::print(b"AriInit: puente de consola con ");
+                sys::print(aricode_rt::fmt_u64(inputs as u64, &mut buf));
+                sys::print(b" dispositivo(s) de entrada\nCONSOLE_BRIDGE_READY\n");
+            } else {
+                say(b"puente de consola sin arrancar: el shell solo lee COM1 y PS/2");
+            }
+        }
+        match run_shell(fs, net_service, services, &mut broker, &mut sup) {
             Ok(code) => {
                 sys::print(b"AriInit: shell terminado con ");
                 sys::print(aricode_rt::fmt_u64(code, &mut buf));

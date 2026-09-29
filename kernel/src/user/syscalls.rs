@@ -61,6 +61,7 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
             _ => Err(Error::Invalid),
         }),
         nr::PROCESS_SPAWN => process_spawn(h, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9),
+        nr::PROCESS_SPAWN_FROM => process_spawn_from(h, frame.rsi, frame.rdx, frame.r10, frame.r8),
         nr::PCI_COUNT => with_handles(|t| {
             require_pci_root(t, h, Rights::READ)?;
             Ok(crate::pci::count() as u64)
@@ -78,6 +79,7 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         nr::IPC_SEND => ipc_send(h, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9),
         nr::IPC_RECEIVE => ipc_receive(h, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9),
         nr::CONSOLE_READ => console_read(h, frame.rsi, frame.rdx, frame.r10),
+        nr::CONSOLE_INJECT => console_inject(h, frame.rsi, frame.rdx),
         nr::SYSTEM_INFO => system_info(h, frame.rsi, frame.rdx, frame.r10),
         nr::SYSTEM_POWER => system_power(h, frame.rsi),
         nr::INITRD_READ => initrd_read(h, frame.rsi, frame.rdx, frame.r10, frame.r8),
@@ -136,6 +138,20 @@ fn console_read(handle: Handle, ptr: u64, len: u64, timeout_ms: u64) -> Result<u
     }
     process::copy_to_user(ptr, &buf[..n])?;
     Ok(n as u64)
+}
+
+/// Texto de un teclado de usuario al anillo de la consola (`MANAGE` sobre un
+/// `Console`; ADR 0013). Devuelve los bytes que cupieron.
+fn console_inject(handle: Handle, ptr: u64, len: u64) -> Result<u64, Error> {
+    const MAX: u64 = 1024;
+    let is_console = with_handles(|t| {
+        lookup(t, handle, Rights::MANAGE).map(|o| matches!(o.kind, ObjectKind::Console))
+    })?;
+    if !is_console || len == 0 || len > MAX {
+        return Err(Error::Invalid);
+    }
+    let bytes = process::copy_from_user(ptr, len)?;
+    Ok(crate::console_input::inject(&bytes) as u64)
 }
 
 /// Copia un fichero del initrd al buffer del usuario (`READ` sobre el `SPAWNER`).
@@ -330,20 +346,80 @@ fn process_spawn(
     handles_ptr: u64,
     limits: u64,
 ) -> Result<u64, Error> {
-    let handles_len = aricode_abi::spawn_limits::handles(limits) as u64;
-    let dma_quota = aricode_abi::spawn_limits::memory_kib(limits) as u64 * 1024;
-    if name_len > 64 || handles_len as usize > IPC_MAX_HANDLES * 4 {
+    if name_len > 64 {
         return Err(Error::TooBig);
     }
-    let is_spawner = with_handles(|t| {
-        lookup(t, spawner, Rights::MANAGE).map(|o| matches!(o.kind, ObjectKind::Spawner))
-    })?;
-    if !is_spawner {
-        return Err(Error::Invalid);
-    }
+    require_spawner(spawner)?;
     let raw = process::copy_from_user(name_ptr, name_len)?;
     let name = core::str::from_utf8(&raw).map_err(|_| Error::Invalid)?;
     let elf = crate::user::programs::by_name(name).ok_or(Error::NotFound)?;
+    spawn_from_bytes(name, elf, arg, handles_ptr, limits)
+}
+
+/// `process_spawn_from` (ADR 0017): como `process_spawn`, con el ELF en un
+/// buffer DMA del llamador (`spawn_from::Request` en su memoria). El buffer
+/// se lee por el mapa físico mientras se copian los segmentos; después el
+/// proceso nuevo no depende de él.
+fn process_spawn_from(
+    spawner: Handle,
+    req_ptr: u64,
+    arg: u64,
+    handles_ptr: u64,
+    limits: u64,
+) -> Result<u64, Error> {
+    use aricode_abi::spawn_from;
+    require_spawner(spawner)?;
+    let raw = process::copy_from_user(req_ptr, spawn_from::LEN as u64)?;
+    let req = spawn_from::Request::decode(&raw).ok_or(Error::Invalid)?;
+    if req.name_len == 0 {
+        return Err(Error::Invalid);
+    }
+    let dma: ObjectRef = with_handles(|t| lookup(t, Handle(req.dma), Rights::READ).cloned())?;
+    let (phys, len) = match dma.kind {
+        ObjectKind::Dma(ref d) => (d.region.phys, d.region.len),
+        _ => return Err(Error::Invalid),
+    };
+    let end = req.elf_offset as u64 + req.elf_len as u64;
+    if req.elf_len == 0 || end > len {
+        return Err(Error::TooBig);
+    }
+    // SAFETY: memoria física del buffer DMA, viva mientras `dma` (Arc) viva y
+    // accesible por el mapa lineal; solo se lee, con comprobación de límites
+    // en el analizador ELF.
+    let elf = unsafe {
+        core::slice::from_raw_parts(
+            crate::memory::phys::phys_to_virt(phys + req.elf_offset as u64) as *const u8,
+            req.elf_len as usize,
+        )
+    };
+    spawn_from_bytes(req.name_str(), elf, arg, handles_ptr, limits)
+}
+
+fn require_spawner(spawner: Handle) -> Result<(), Error> {
+    let is_spawner = with_handles(|t| {
+        lookup(t, spawner, Rights::MANAGE).map(|o| matches!(o.kind, ObjectKind::Spawner))
+    })?;
+    if is_spawner {
+        Ok(())
+    } else {
+        Err(Error::Invalid)
+    }
+}
+
+/// Parte común de `process_spawn` y `process_spawn_from`: retira los handles
+/// transferidos, crea el proceso y devuelve su handle.
+fn spawn_from_bytes(
+    name: &str,
+    elf: &[u8],
+    arg: u64,
+    handles_ptr: u64,
+    limits: u64,
+) -> Result<u64, Error> {
+    let handles_len = aricode_abi::spawn_limits::handles(limits) as u64;
+    let dma_quota = aricode_abi::spawn_limits::memory_kib(limits) as u64 * 1024;
+    if handles_len as usize > IPC_MAX_HANDLES * 4 {
+        return Err(Error::TooBig);
+    }
     let raw_handles = process::copy_from_user(handles_ptr, handles_len * 4)?;
     let user_handles: Vec<Handle> = raw_handles
         .as_chunks::<4>()

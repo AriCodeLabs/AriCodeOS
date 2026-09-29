@@ -1,0 +1,4 @@
+# Aplicacion externa: reloj del sistema y un directorio privado en AriFS.
+name = hello_ext
+caps = system, fs
+memory = 64K

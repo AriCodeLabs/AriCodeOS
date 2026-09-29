@@ -11,6 +11,8 @@ pub mod input;
 pub mod launch;
 pub mod net;
 pub mod permissions;
+pub mod rpc;
+pub mod status;
 pub mod time;
 pub mod virtio_pci;
 pub mod window;
@@ -194,6 +196,36 @@ pub fn process_spawn_limited(
     .map(|h| Handle(h as u32))
 }
 
+/// Crea un proceso con un ELF que está en el buffer DMA `elf` (`elf_len`
+/// bytes desde `elf_offset`) del llamador (ADR 0017); exige `MANAGE` sobre el
+/// `SPAWNER` y `READ` sobre el buffer. Handles y cuota como en
+/// `process_spawn_limited`.
+#[allow(clippy::too_many_arguments)]
+pub fn process_spawn_from(
+    spawner: Handle,
+    elf: Handle,
+    elf_offset: u32,
+    elf_len: u32,
+    name: &str,
+    arg: u64,
+    handles: &[Handle],
+    memory_kib: u32,
+) -> Result<Handle, Error> {
+    let req = abi::spawn_from::Request::new(elf.0, elf_offset, elf_len, name)
+        .ok_or(Error::Invalid)?
+        .encode();
+    call6(
+        nr::PROCESS_SPAWN_FROM,
+        spawner.0 as u64,
+        req.as_ptr() as u64,
+        arg,
+        handles.as_ptr() as u64,
+        abi::spawn_limits::pack(handles.len(), memory_kib),
+        0,
+    )
+    .map(|h| Handle(h as u32))
+}
+
 /// Copia un fichero del initrd en `buf` (exige `READ` sobre el `SPAWNER`).
 pub fn initrd_read(spawner: Handle, name: &str, buf: &mut [u8]) -> Result<usize, Error> {
     abi::decode(raw_syscall(
@@ -275,6 +307,19 @@ pub fn console_read(console: Handle, buf: &mut [u8], timeout_ms: u64) -> Result<
         0,
         0,
     ))
+    .map(|n| n as usize)
+}
+
+/// Escribe texto de un teclado de usuario en el anillo de entrada de consola
+/// (exige `MANAGE` sobre la consola; ADR 0013). Devuelve los bytes aceptados.
+pub fn console_inject(console: Handle, bytes: &[u8]) -> Result<usize, Error> {
+    call(
+        nr::CONSOLE_INJECT,
+        console.0 as u64,
+        bytes.as_ptr() as u64,
+        bytes.len() as u64,
+        0,
+    )
     .map(|n| n as usize)
 }
 

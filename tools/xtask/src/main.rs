@@ -12,6 +12,7 @@
 //!     --cpus N                                N procesadores en los escenarios que no declaran cpus
 //!     --list                                  muestra los escenarios y sale
 //! cargo xtask check                           fmt --check + clippy -D warnings
+//! cargo xtask app-pack DIR [--version N] [--debug]   compila, empaqueta y firma una app externa (DIR/Cargo.toml + NOMBRE.manifest) en build/pkgs/
 //! cargo xtask keygen [DIR]                    par Ed25519 (por defecto keys/dev)
 //! cargo xtask sign SEED FICHERO               escribe FICHERO.sig
 //! cargo xtask verify PUB FICHERO [FIRMA]      comprueba una firma
@@ -80,6 +81,16 @@ fn main() -> ExitCode {
             }),
         "test" => test::run(&cli, release),
         "check" => build::check(),
+        "app-pack" => match cli.positional(1) {
+            Some(dir) => build::app_pack(
+                Path::new(dir),
+                cli.value("--version")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1),
+                release,
+            ),
+            None => Err(String::from("uso: xtask app-pack DIR [--version N]")),
+        },
         "keygen" => keys::keygen(&root().join(cli.positional(1).unwrap_or(keys::DEV_KEY_DIR))),
         "sign" => match (cli.positional(1), cli.positional(2)) {
             (Some(seed), Some(file)) => keys::sign(Path::new(seed), Path::new(file)),
@@ -94,7 +105,7 @@ fn main() -> ExitCode {
             _ => Err(String::from("uso: xtask verify PUB FICHERO [FIRMA]")),
         },
         _ => {
-            eprintln!("uso: cargo xtask <build|image|run|test|check|usb-image|keygen|sign|verify> [--debug] (ver tools/xtask/src/main.rs)");
+            eprintln!("uso: cargo xtask <build|image|run|test|check|usb-image|app-pack|keygen|sign|verify> [--debug] (ver tools/xtask/src/main.rs)");
             return ExitCode::from(2);
         }
     };

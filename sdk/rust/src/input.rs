@@ -1,12 +1,11 @@
 //! Cliente del servicio de entrada (`aricode-proto::input`).
 
-use crate::{self as sys, rights, Error, Handle};
+use crate::{rpc, Error, Handle};
 pub use aricode_proto::input::Event;
 use aricode_proto::input::{Op, Reply, Request, Status, MAX_EVENTS};
 
 pub struct InputClient {
     service: Handle,
-    reply: Handle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,10 +16,7 @@ pub enum InputError {
 
 impl InputClient {
     pub fn new(service: Handle) -> Result<Self, Error> {
-        Ok(Self {
-            service,
-            reply: sys::endpoint_create()?,
-        })
+        Ok(Self { service })
     }
 
     /// Margen sobre el plazo pedido para que un servicio muerto no deje al
@@ -28,20 +24,17 @@ impl InputClient {
     const REPLY_GRACE_MS: u64 = 5000;
 
     fn call(&self, req: Request) -> Result<Reply, InputError> {
-        let reply_w = sys::handle_duplicate(self.reply, rights::WRITE | rights::TRANSFER)
-            .map_err(InputError::Ipc)?;
-        sys::ipc_send(
+        let mut msg = [0u8; Reply::LEN];
+        let wait = req.timeout_ms as u64 + Self::REPLY_GRACE_MS;
+        let len = rpc::call(
             self.service,
             &req.encode(),
-            &[reply_w],
+            &[],
             Self::REPLY_GRACE_MS,
+            wait,
+            &mut msg,
         )
         .map_err(InputError::Ipc)?;
-        let mut msg = [0u8; Reply::LEN];
-        let mut none: [Handle; 0] = [];
-        let wait = req.timeout_ms as u64 + Self::REPLY_GRACE_MS;
-        let (len, _) =
-            sys::ipc_receive(self.reply, &mut msg, &mut none, wait).map_err(InputError::Ipc)?;
         let reply = Reply::decode(&msg[..len]).ok_or(InputError::Ipc(Error::Invalid))?;
         match reply.status {
             Status::Ok => Ok(reply),

@@ -23,12 +23,14 @@ members = [
     "libs/input",
     "libs/gfx",
     "libs/manifest",
+    "libs/pkg",
     "libs/wasm",
     "libs/crypto",
     "libs/ab",
     "libs/iommu",
     "libs/fat",
     "libs/xhci",
+    "libs/supervisor",
     "sdk/abi",
     "sdk/runtime",
     "sdk/build",
@@ -39,6 +41,8 @@ members = [
     "apps/win-probe",
     "apps/wasm-runner",
     "apps/wasm-demo",
+    "apps/notes-reader",
+    "apps/installer",
     "sdk/rust",
     "sdk/proto",
     "user/testprogs",
@@ -47,6 +51,7 @@ members = [
     "services/virtio-net",
     "services/virtio-input",
     "services/usb-input",
+    "services/console-bridge",
     "services/compositor",
     "services/arifs",
     "services/shell",
@@ -77,6 +82,7 @@ default-members = [
     "libs/iommu",
     "libs/fat",
     "libs/xhci",
+    "libs/supervisor",
     "sdk/abi",
     "sdk/rust",
     "sdk/proto",
@@ -84,7 +90,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 license = "UNLICENSED"
 repository = "https://github.com/lynxcraft/aricodeos"

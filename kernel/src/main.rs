@@ -189,6 +189,9 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
         if cmdline.has(keys::INIT_FAIL_LATE) {
             init_flags |= aricode_abi::init_arg::FAIL_LATE;
         }
+        if cmdline.has(keys::RESTART_STORM) {
+            init_flags |= aricode_abi::init_arg::RESTART_STORM;
+        }
         run_init(init_flags, info.framebuffer);
     }
 
@@ -314,6 +317,7 @@ fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
         "smp" => task::scheduler::smp_selftest(),
         "iommu" => iommu::selftest(),
         "ipc" => ipc::selftest(),
+        "ipc_late" => ipc::late_reply_selftest(),
         "drivers" => hw::selftest(info),
         "usb_hid" => hw::usb_hid_selftest(),
         "random" => random::selftest(),
@@ -429,6 +433,7 @@ fn run_init(arg: u64, fb: boot_protocol::FramebufferInfo) {
             (
                 console_in,
                 Rights::READ
+                    .union(Rights::MANAGE)
                     .union(Rights::DUPLICATE)
                     .union(Rights::TRANSFER)
             ),

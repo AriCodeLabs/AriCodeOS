@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.6.0 (Fases 0 a 34 implementadas; la 34 pendiente de hardware)
+## Estado: 0.7.0 (Fases 0 a 34 y etapas 1 a 4 posteriores al roadmap; la 34 pendiente de hardware)
 
 ```text
 OVMF (UEFI)
@@ -25,7 +25,7 @@ OVMF (UEFI)
        procesos con la capacidad SPAWNER, ACPI + I/O APIC, drivers en ring 3
        con capabilities IRQ/MMIO/DMA, enumeración PCIe por ECAM, init reclama
        el virtio-blk (BARs, MSI-X) y lanza su driver en ring 3 como servicio
-       de bloques por IPC (disco GPT), fsd monta AriFS v0 sobre él y sirve
+       de bloques por IPC (disco GPT), fsd monta AriFS v1 sobre él y sirve
        ficheros por IPC; con `shell` en la cmdline init lanza arish, que lee
        la consola serie y apaga o reinicia por `system_power`; netd
        (virtio-net) obtiene IP por DHCP y sirve ping, UDP y DNS por IPC;
@@ -64,7 +64,8 @@ libs/gfx/            aricode-gfx: lienzos 0x00RRGGBB, recorte, texto, cursor y e
 libs/input/          aricode-input: eventos evdev y teclado US (no_std, tests de host)
 libs/http/           aricode-http: GET, análisis de respuestas, Content-Length y chunked sin alloc (no_std, tests de host)
 libs/net/            aricode-net: Ethernet, ARP, IPv4, ICMP, UDP, TCP, cliente DHCP y DNS sin alloc (no_std, tests de host)
-libs/arifs/          aricode-arifs: AriFS v0, directorio plano con tabla de ficheros de capacidad fija sobre `BlockDevice` (no_std, tests de host)
+libs/arifs/          aricode-arifs: AriFS v1, directorio plano con tabla de ficheros de capacidad fija, CRC32 y journal de reemplazo sobre `BlockDevice` (no_std, tests de host con cortes)
+libs/pkg/            aricode-pkg: paquetes de aplicación firmados (manifiesto con nombre, versión y hashes; firma Ed25519; ELF; manifiesto de aplicación)
 sdk/proto/           aricode-proto: protocolos IPC versionados de los servicios (bloques v1, ficheros v1, red v1, entrada v1, ventanas v1, lanzamiento v1) (no_std, tests de host)
 sdk/runtime/         aricode-rt: runtime de programas de usuario (`entry!`, heap de 256 KiB, panic, fmt); reexporta aricode-sys
 sdk/build/           aricode-build: `build.rs` de una línea que enlaza con `sdk/rust/user.ld`
@@ -346,7 +347,8 @@ segundo brevemente para añadir la región.
   `object_revoke`, `endpoint_create`, `ipc_send`, `ipc_receive`,
   `process_spawn` (con transferencia de handles al hijo), `process_wait`,
   `irq_wait`, `mmio_map`, `region_len`, `dma_alloc`, `dma_phys`, `pci_count`,
-  `pci_info`, `pci_claim`, `console_read`, `system_info`, `system_power`.
+  `pci_info`, `pci_claim`, `console_read`, `system_info`, `system_power`,
+  `initrd_read`, `pci_info_ext`, `console_inject`, `process_spawn_from`.
   Los servicios de bloques, ficheros y red no añaden syscalls: son IPC.
 - Los punteros de usuario se validan página a página contra las tablas del
   proceso (`copy_from_user`): un puntero de kernel devuelve `Fault`, nunca se
@@ -536,29 +538,47 @@ segundo brevemente para añadir la región.
 
 ## Sistema de archivos (Fase 20)
 
-- AriFS v0 (`libs/arifs`): LBA 0 superbloque (magia `ARIFS`, sectores,
-  siguiente LBA libre), LBA 1..4 tabla de 32 entradas de 64 bytes (nombre,
-  LBA inicial, capacidad, tamaño), datos desde el LBA 5 en bloques fijos
-  de 16 sectores asignados de forma incremental. Sin fragmentación, borrado
-  ni journaling: lo justo para el criterio de la fase. Todo el acceso pasa
-  por el trait `BlockDevice`, así que la librería se prueba en host sobre
-  un `Vec` y xtask la usa para formatear la partición `ARI0` del disco de
-  pruebas con `hola.txt` y `README`.
+- AriFS v1 (`libs/arifs`, ADR 0014): LBA 0 superbloque (magia `ARIFS`,
+  sectores, siguiente LBA libre, CRC32), LBA 1..4 tabla de 32 entradas de
+  64 bytes (nombre, LBA inicial, capacidad, tamaño, CRC32 por entrada), LBA
+  5 cabecera del journal de reemplazo y 6..69 sus datos, datos desde el LBA
+  70 en bloques fijos de 64 sectores asignados de forma incremental. Sin
+  fragmentación ni borrado. `open` rechaza (`Corrupt`) metadatos cuyo CRC
+  no cuadra y rehace un reemplazo comprometido a medias; `write` escribe en
+  el sitio (sector entero viejo o nuevo tras un corte, tamaño después de
+  los datos, duradero tras `flush`); `replace` es atómico y duradero por el
+  journal (datos + CRC, `flush`, cabecera pendiente, `flush`, copia y
+  tamaño, `flush`, limpieza). Todo el acceso pasa por el trait
+  `BlockDevice` (con `flush`), así que la librería se prueba en host sobre
+  un `Vec`, incluido un corte en cada escritura del reemplazo con la caché
+  perdida o conservada, y xtask la usa para formatear la partición `ARI0`
+  del disco de pruebas con `hola.txt` y `README` (y fabricar los discos
+  `fs-pending-replace` y `fs-corrupt`).
+- `virtio-blk` negocia `VIRTIO_BLK_F_FLUSH` y atiende `Op::Flush` del
+  protocolo de bloques (`T_FLUSH`); sin la característica, `Flush` vuelve
+  sin hacer nada y el driver lo anuncia al arrancar.
 - `fsd` (`services/arifs`) recibe de init su endpoint (`READ|WRITE`), el
   del servicio de bloques (`WRITE`) y una capacidad de hardware; `arg` es el
   LBA de la partición. Implementa `BlockDevice` sobre `aricode-sys::block`
   (un sector por petición) y atiende `FileServiceProtocol v1`
   (`sdk/proto::fs`): peticiones y respuestas de 64 bytes con `List`,
-  `Open`, `Create`, `Read`, `Write` y `Close`; los datos van por el buffer
+  `Open`, `Create`, `Read`, `Write`, `Close`, `Flush`, `Replace`
+  (reemplazo atómico de hasta `MAX_IO`) y `ReplaceChunk`/`ReplaceCommit`
+  (trozos al journal y compromiso: hasta 32 KiB con la misma garantía; un
+  solo reemplazo a medias por servicio, `Busy` para los demás, liberado por
+  el compromiso, un error o el cierre del descriptor; ADR 0018); los datos van por el buffer
   DMA del cliente (hasta 4 KiB por petición), que fsd mapea una vez y
   reutiliza por dirección física. Los descriptores son globales al servicio
   (16 abiertos) hasta que haya identidad de cliente por capability.
 - `aricode-sys::fs::FsClient` encapsula endpoint de respuesta, buffer DMA
   y llamadas; `fs_client` (ring 3) lista, lee `hola.txt`, crea y escribe
-  `nuevo.txt`, relee y comprueba `Exists`, `NotFound` y `BadFd`.
-  `filesystem.read_write` lo exige; `init.boot` exige el mensaje de éxito.
+  `nuevo.txt`, lo reemplaza de una vez, hace `flush`, relee y comprueba
+  `Exists`, `NotFound` y `BadFd`. `filesystem.read_write` lo exige (y el
+  `flush` negociado); `init.boot` exige el mensaje de éxito;
+  `filesystem.replace_recovery` rehace al montar un reemplazo cortado tras
+  el compromiso y `filesystem.corrupt_detected` rechaza una tabla alterada.
 - El área en bruto del disco de pruebas (LBA 4096 en adelante, patrón
-  `ARIDISK\0`+LBA) queda fuera del alcance máximo de AriFS (32 × 16
+  `ARIDISK\0`+LBA) queda fuera del alcance máximo de AriFS (70 + 32 × 64
   sectores) para que `blk_client` y `fsd` no se pisen.
 
 ## Shell y entrada de consola (Fase 21)
@@ -569,6 +589,14 @@ segundo brevemente para añadir la región.
   `console_read` (syscall 24) exige `READ` sobre un objeto `Console`,
   valida el destino antes de bloquear y devuelve `Timeout` si vence el plazo.
   Los bytes descartados por anillo lleno se cuentan para diagnóstico.
+- Teclados de usuario (etapa 2, ADR 0013): `console_inject` (syscall 29)
+  escribe texto en el mismo anillo y exige `MANAGE` sobre el `Console`;
+  solo init lo tiene (`0x10008` con `READ|MANAGE|DUPLICATE|TRANSFER`) y lo
+  delega al servicio `console_bridge`, que en modo `shell` sin compositor
+  recorre los servicios de entrada (virtio-input, USB HID) por turnos y
+  traduce las pulsaciones con `aricode_input::Keyboard`. Es un residente
+  supervisado más (`services --detail`); los escenarios `shell.usb_keyboard`
+  y `shell.virtio_keyboard` teclean una sesión por QMP.
 - Objeto `System` (kind 11): `system_info` (syscall 25, `READ`) responde
   `UPTIME` (ms), `MEMORY` (frames utilizables y libres: el PMM distingue la
   RAM entregada con `free_range` de los frames direccionables) y
@@ -684,6 +712,14 @@ segundo brevemente para añadir la región.
   relativo y clic); sin `device`, porque QMP solo admite ahí pantallas y
   los dispositivos virtio, registrados después del i8042, son los
   manejadores activos. El resultado se anota como `[host] QMP: ...`.
+- Varios arranques sobre el mismo disco (`[[boots]]`, etapa 3): cada
+  arranque lleva su `cmdline`, sus líneas de consola, opcionalmente
+  `kill_on` (xtask mata QEMU al ver ese texto: un corte de energía) y su
+  `expect` (`killed = true` cuando se espera el corte). El disco de
+  pruebas se fabrica una vez y se conserva; cada arranque tiene su ESP y
+  su `serial-N.log`. Así se prueban `update.full_cycle` (instalar,
+  reiniciar, confirmar, arrancar de B), `update.cut_during_install`,
+  `update.rollback_keeps_data` y `shell.write_persists`.
 
 ## GUI básica (Fase 26)
 
@@ -750,16 +786,39 @@ segundo brevemente para añadir la región.
   cuando la aplicación quiere `fs`, duplica los endpoints de red,
   compositor y entrada solo si se piden, añade `HARDWARE` solo cuando hay
   buffers que reservar y lanza con la cuota del manifiesto; responde con el
-  código de salida o `Killed`. Si el kernel rechaza el `spawn` por cualquier
+  código de salida o `Killed` cuando el programa termina, sin bloquear
+  init: `launch` deja el proceso en una de las `MAX_RUNNING` (4) ranuras y
+  `poll_launches` responde al recogerlo (ADR 0015). Sin ranura libre el
+  lanzamiento recibe `Limit`. Con `Request::DETACH` (`sys::launch::spawn`,
+  `spawn` en el shell) el broker responde `Started` al crear el proceso y
+  nadie espera su salida. Si el programa no está en el initrd, el broker
+  lo busca instalado en AriFS (`apps/NOMBRE.aripkg`, ADR 0017): copia el
+  paquete por fsd a un buffer DMA de preparación de 256 KiB reservado una
+  vez, lo verifica con `aricode-pkg` (firma Ed25519 del manifiesto del
+  paquete con la clave de desarrollo y SHA-256 del ELF y del manifiesto de
+  aplicación), aplica la política al manifiesto y lo lanza con
+  `process_spawn_from` (syscall 30: `MANAGE` sobre el `SPAWNER`, `READ`
+  sobre el buffer, desplazamiento y longitud del ELF; el kernel copia los
+  segmentos por el mapa físico y el buffer queda libre para el siguiente).
+  Desde el sistema, `installer` (capacidad `install`: el espacio principal
+  de fsd, solo para él) instala o actualiza `apps/NOMBRE.aripkg` desde
+  `pkgs/` con un único `replace` tras verificar y comparar versiones (ADR
+  0018). Si el kernel rechaza el `spawn` por cualquier
   motivo, los duplicados preparados se cierran (el kernel solo los retira al
   crear el proceso): antes cada nombre inexistente consumía una entrada de
   la tabla de init. El shell recibe el endpoint del broker en
   lugar del `SPAWNER`.
-- fsd mantiene hasta 8 directorios privados: cada `Bind` (solo por el
-  endpoint principal) crea o reutiliza un endpoint ligado a un prefijo; el
-  bucle lee el principal con 10 ms de espera y los privados sin espera.
-  Desde un privado, `Open`/`Create` califican el nombre como `prefijo/nombre`
-  (rechazando `/` en el nombre) y `List` filtra y recorta el prefijo.
+- fsd mantiene hasta 8 espacios de nombres concedidos: cada `Bind` (solo
+  por el endpoint principal) crea o reutiliza un endpoint ligado a un
+  prefijo, y cada `Share` (ADR 0016) uno ligado a un único fichero en modo
+  lectura; el bucle lee el principal con 10 ms de espera y los concedidos
+  sin espera. Desde un privado, `Open`/`Create` califican el nombre como
+  `prefijo/nombre` (rechazando `/` en el nombre) y `List` filtra y recorta
+  el prefijo. Desde un fichero compartido, `List` muestra solo ese fichero,
+  `Open` solo lo abre a él, y `Create`, `Write`, `Replace`, `Flush`, `Bind`
+  y `Share` responden `Denied`. El broker pide un `Share` por cada nombre
+  de `read_files` del manifiesto y deniega el lanzamiento si el fichero no
+  existe (`sandbox.shared_file`).
 
 - La consola serie del kernel serializa cada mensaje con un spinlock sin
   deshabilitar interrupciones (`console::write_raw`): antes un `info!` del
@@ -781,6 +840,11 @@ segundo brevemente para añadir la región.
   `Unsupported`. Los tests de host usan un ensamblador mínimo de módulos
   para cubrir aritmética, bucles, `if/else` con resultado, recursión,
   `br_table`, globales, `call_indirect`, traps y límites.
+- `Module::parse` valida el módulo entero antes de devolverlo (ADR 0019:
+  tipado de cada función con pila de operandos y marcos de control, índices
+  de tipos, funciones, tabla, globales, exportaciones y `start`); lo que el
+  intérprete no ejecuta se rechaza ahí. El perfil aceptado está en
+  `docs/wasm-profile.md`.
 - `wasm_runner` es una aplicación normal del broker: recibe `SYSTEM`, su
   directorio privado y `HARDWARE`; lee `demo.wasm` (xtask lo compila con
   `-C target-cpu=mvp -C target-feature=+sign-ext,+bulk-memory` y lo deja en
@@ -962,6 +1026,38 @@ services/usb-input             usbd: controlador, enumeración, endpoints de int
   de dispositivo se lee primero en 8 bytes para fijar el tamaño de paquete
   de EP0 con `Evaluate Context`; los intervalos FS/LS se redondean hacia
   abajo (3..=10).
+
+## Supervisión de servicios (etapa 1, ADR 0011)
+
+```text
+libs/supervisor                estados, generaciones, presupuesto de reinicios con espera creciente, plazo de arranque
+services/init                  Supervisor: Resident {kind, probe, endpoint, process, Service}; poll en el bucle del shell
+sdk/proto::status              estado por servicio (protocolo 7) en el endpoint del broker; sdk::status::service_status
+```
+
+- init registra cada servicio residente (`virtio_blk`, `fsd`, `virtio_net`,
+  `virtio_input`, `usb_input`) con su forma de relanzarlo (`Kind`), su sonda
+  (`Probe`) y su política; `launch` crea el proceso, anota la generación y
+  espera a que sirva; `poll` (en cada vuelta del bucle del shell) detecta
+  muertes con `process_wait(0)`, aplica el presupuesto y relanza cuando toca,
+  reclamando de nuevo la función PCI si el driver anterior murió.
+- El endpoint del servicio pertenece a init y se entrega duplicado a cada
+  generación: los clientes no cambian de handle.
+- `restart_storm` (cmdline) reinicia 100 veces `crashy_service` con espera
+  de 1 a 8 ms, comprobando que fsd responde entre medias y que la memoria
+  libre vuelve al nivel anterior (`services.restart_storm`);
+  `shell.services_detail` cubre el estado consultable.
+
+## Plazos y correlación IPC (etapa 1B, ADR 0012)
+
+- `aricode_sys::rpc::call`: un endpoint de respuesta por petición (creado y
+  cerrado en la llamada), envío y recepción con plazo, handles extra que se
+  consumen o se cierran si el envío falla. Lo usan todos los clientes del
+  SDK; `launch::run` es el único que espera la respuesta sin plazo (es la
+  salida del programa).
+- `test=ipc_late` (`ipc.late_reply`): `late_server` contesta la primera
+  petición 800 ms tarde; `late_client` vence a los 200 ms, pide otra y
+  recibe la suya, nunca la tardía, que muere en el endpoint ya cerrado.
 
 ## Hardware real (Fase 34, preparación)
 

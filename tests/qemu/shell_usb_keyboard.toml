@@ -1,0 +1,30 @@
+# Etapa 2 (ADR 0013): el shell lee de un teclado USB HID. init lanza el
+# puente de consola con los servicios de entrada (dos virtio y el USB); el host teclea por QMP (van
+# al teclado USB, el manejador mas reciente) "cpus" + Enter y "shutdown" +
+# Enter al ver que el puente sirve, y el shell los recibe por el anillo del
+# kernel como si vinieran de COM1. Con varias CPUs el prompt y el marcador del
+# puente pueden entrelazarse en la serie, asi que solo se exige la salida.
+name = "shell.usb_keyboard"
+description = "arish con teclado USB HID: el puente de consola lleva las pulsaciones al anillo de entrada del kernel"
+level = "full"
+areas = ["shell", "input", "usb", "console"]
+cmdline = "qemu_exit shell"
+usb_hid = true
+timeout_secs = 60
+
+[host_input]
+marker = "CONSOLE_BRIDGE_READY"
+keys = ["c", "p", "u", "s", "ret", "s", "h", "u", "t", "d", "o", "w", "n", "ret"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "usb-input: dispositivo listo: USB HID Keyboard+Mouse",
+    "AriInit: puente de consola con 3 dispositivo(s) de entrada",
+    "arish: shell de AriCodeOS",
+    "cpus: ",
+    "ari> shutdown",
+    "[host] QMP: 28 eventos de entrada enviados",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "init no responde", "console-bridge: la consola rechaza"]

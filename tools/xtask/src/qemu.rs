@@ -406,7 +406,7 @@ pub fn run_interactive(
         image::write_usb_image(&disk, &esp)?;
         None
     } else {
-        image::write_test_disk(&disk, image::DiskVariant::Slots)?;
+        image::write_test_disk(&disk, image::DiskVariant::Slots, &[])?;
         Some(esp.as_path())
     };
     let _responder = Responder::start()?;
@@ -427,6 +427,8 @@ pub fn run_interactive(
 pub struct Capture {
     pub serial: String,
     pub exit_code: Option<i32>,
+    /// El runner mató QEMU al ver `kill_on`.
+    pub killed: bool,
     pub timed_out: bool,
     pub elapsed: Duration,
 }
@@ -457,6 +459,13 @@ pub struct Headless<'a> {
     pub input_probe: Option<InputProbe<'a>>,
     pub disk_variant: image::DiskVariant,
     pub disk_readonly: bool,
+    /// Reutiliza el disco de pruebas del arranque anterior en vez de
+    /// fabricarlo de nuevo (escenarios con varios arranques).
+    pub keep_disk: bool,
+    /// Mata QEMU (corte de energía) al ver este texto en la serie.
+    pub kill_on: Option<&'a str>,
+    /// Ficheros que van a AriFS del disco de pruebas (paquetes instalados).
+    pub installed: &'a [(String, Vec<u8>)],
     pub cpus: u32,
     pub usb_hid: bool,
     pub usb_legacy_controller: bool,
@@ -478,10 +487,14 @@ pub fn run_headless(
     let vars = image::ovmf_vars_for(workdir)?;
     let disk = workdir.join("disk.img");
     let esp_drive = if disk_variant == image::DiskVariant::UsbImage {
-        image::write_usb_image(&disk, esp)?;
+        if !options.keep_disk {
+            image::write_usb_image(&disk, esp)?;
+        }
         None
     } else {
-        image::write_test_disk(&disk, disk_variant)?;
+        if !options.keep_disk {
+            image::write_test_disk(&disk, disk_variant, options.installed)?;
+        }
         Some(esp)
     };
     let _responder = Responder::start()?;
@@ -530,6 +543,7 @@ pub fn run_headless(
     let mut input_result: Option<String> = None;
     let mut input_thread: Option<std::thread::JoinHandle<String>> = None;
     let mut timed_out = false;
+    let mut killed = false;
     let exit_code = loop {
         if let Some(st) = child.try_wait().map_err(|e| e.to_string())? {
             break st.code();
@@ -539,6 +553,14 @@ pub fn run_headless(
             let _ = child.kill();
             let _ = child.wait();
             break None;
+        }
+        if let Some(marker) = options.kill_on {
+            if count_occurrences(&captured.lock().expect("captura"), marker.as_bytes()) > 0 {
+                killed = true;
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
         }
         if sent < input.lines.len() {
             let prompts =
@@ -599,6 +621,7 @@ pub fn run_headless(
         serial: strip_ansi(&String::from_utf8_lossy(&bytes)),
         exit_code,
         timed_out,
+        killed,
         elapsed: start.elapsed(),
     })
 }

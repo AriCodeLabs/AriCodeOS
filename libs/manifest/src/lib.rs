@@ -7,6 +7,7 @@
 //! name = hello_app
 //! caps = system, fs
 //! memory = 128K
+//! read_files = hola.txt      # ficheros concretos de AriFS en modo lectura (ADR 0016)
 //! ```
 
 #![no_std]
@@ -30,13 +31,16 @@ impl Caps {
     /// Acceso al servicio de bloques: solo para aplicaciones de sistema de la
     /// lista de confianza del broker (`updater`).
     pub const BLOCK: Caps = Caps(1 << 8);
+    /// Espacio principal de fsd para instalar paquetes (ADR 0018): solo para
+    /// `installer`.
+    pub const INSTALL: Caps = Caps(1 << 9);
 
     pub const NONE: Caps = Caps(0);
     /// Las que el broker concede a aplicaciones normales.
     pub const APP_ALLOWED: Caps =
         Caps(Caps::SYSTEM.0 | Caps::FS.0 | Caps::NET.0 | Caps::WINDOW.0 | Caps::INPUT.0);
 
-    const NAMES: [(&'static str, Caps); 9] = [
+    const NAMES: [(&'static str, Caps); 10] = [
         ("system", Caps::SYSTEM),
         ("fs", Caps::FS),
         ("net", Caps::NET),
@@ -46,18 +50,24 @@ impl Caps {
         ("pci", Caps::PCI),
         ("framebuffer", Caps::FRAMEBUFFER),
         ("block", Caps::BLOCK),
+        ("install", Caps::INSTALL),
     ];
 
     /// Aplicaciones de sistema que además pueden pedir `block`.
     pub const TRUSTED_BLOCK: [&'static str; 1] = ["updater"];
+    /// Aplicaciones de sistema que además pueden pedir `install`.
+    pub const TRUSTED_INSTALL: [&'static str; 1] = ["installer"];
 
     /// Capacidades concedibles a la aplicación `name`.
     pub fn allowed_for(name: &str) -> Caps {
+        let mut caps = Caps::APP_ALLOWED;
         if Self::TRUSTED_BLOCK.contains(&name) {
-            Caps::APP_ALLOWED.union(Caps::BLOCK)
-        } else {
-            Caps::APP_ALLOWED
+            caps = caps.union(Caps::BLOCK);
         }
+        if Self::TRUSTED_INSTALL.contains(&name) {
+            caps = caps.union(Caps::INSTALL);
+        }
+        caps
     }
 
     pub fn from_name(name: &str) -> Option<Caps> {
@@ -101,12 +111,17 @@ pub enum ManifestError {
     BadMemory,
     /// Falta `name`.
     MissingName,
+    /// Nombre de fichero inválido o más de `MAX_READ_FILES`.
+    BadFile,
 }
 
 /// Límite de memoria por defecto cuando el manifiesto no lo indica.
 pub const DEFAULT_MEMORY_KIB: u32 = 1024;
 /// Límite máximo que un manifiesto puede pedir (8 MiB, `DMA_MAX_LEN`).
 pub const MAX_MEMORY_KIB: u32 = 8 * 1024;
+
+/// Ficheros compartidos en modo lectura que puede pedir un manifiesto.
+pub const MAX_READ_FILES: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Manifest {
@@ -115,6 +130,11 @@ pub struct Manifest {
     pub caps: Caps,
     /// Memoria (buffers DMA) que puede reservar, en KiB.
     pub memory_kib: u32,
+    /// Ficheros de AriFS (nombre completo) que recibe en modo lectura, en
+    /// el orden del manifiesto (ADR 0016).
+    read_files: [[u8; MAX_NAME]; MAX_READ_FILES],
+    read_files_len: [u8; MAX_READ_FILES],
+    read_files_count: u8,
 }
 
 impl Manifest {
@@ -122,10 +142,22 @@ impl Manifest {
         core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("?")
     }
 
+    /// Ficheros de solo lectura pedidos, en orden.
+    pub fn read_files(&self) -> impl Iterator<Item = &str> + Clone {
+        self.read_files
+            .iter()
+            .zip(&self.read_files_len)
+            .take(self.read_files_count as usize)
+            .map(|(n, len)| core::str::from_utf8(&n[..*len as usize]).unwrap_or("?"))
+    }
+
     pub fn parse(text: &str) -> Result<Self, ManifestError> {
         let mut name: Option<&str> = None;
         let mut caps = Caps::NONE;
         let mut memory_kib = DEFAULT_MEMORY_KIB;
+        let mut read_files = [[0u8; MAX_NAME]; MAX_READ_FILES];
+        let mut read_files_len = [0u8; MAX_READ_FILES];
+        let mut read_files_count = 0usize;
         for raw in text.lines() {
             let line = raw.split('#').next().unwrap_or("").trim();
             if line.is_empty() {
@@ -151,6 +183,16 @@ impl Manifest {
                     }
                 }
                 "memory" => memory_kib = parse_memory(value).ok_or(ManifestError::BadMemory)?,
+                "read_files" => {
+                    for f in value.split(',').map(str::trim).filter(|f| !f.is_empty()) {
+                        if !valid_file_name(f) || read_files_count == MAX_READ_FILES {
+                            return Err(ManifestError::BadFile);
+                        }
+                        read_files[read_files_count][..f.len()].copy_from_slice(f.as_bytes());
+                        read_files_len[read_files_count] = f.len() as u8;
+                        read_files_count += 1;
+                    }
+                }
                 _ => return Err(ManifestError::UnknownKey),
             }
         }
@@ -162,8 +204,23 @@ impl Manifest {
             name_len: name.len() as u8,
             caps,
             memory_kib,
+            read_files,
+            read_files_len,
+            read_files_count: read_files_count as u8,
         })
     }
+}
+
+/// Nombre completo de AriFS: `[A-Za-z0-9._-/]`, sin empezar ni acabar en `/`.
+fn valid_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_NAME
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'))
+        && !name.starts_with('/')
+        && !name.ends_with('/')
+        && !name.contains("//")
 }
 
 /// `64K`, `2M` o KiB sin sufijo; acotado a [`MAX_MEMORY_KIB`].
@@ -199,6 +256,22 @@ mod tests {
         let names: Vec<&str> = m.caps.names().collect();
         assert_eq!(names, ["system", "fs"]);
         assert!(m.caps.difference(Caps::APP_ALLOWED).is_empty());
+    }
+
+    #[test]
+    fn read_files_in_order_and_bounded() {
+        let m = Manifest::parse("name = x\nread_files = hola.txt, docs/guia.md\n").unwrap();
+        let files: Vec<&str> = m.read_files().collect();
+        assert_eq!(files, ["hola.txt", "docs/guia.md"]);
+        assert_eq!(
+            Manifest::parse("name = x\nread_files = /abs"),
+            Err(ManifestError::BadFile)
+        );
+        assert_eq!(
+            Manifest::parse("name = x\nread_files = a, b, c, d, e"),
+            Err(ManifestError::BadFile)
+        );
+        assert_eq!(Manifest::parse("name = x").unwrap().read_files().count(), 0);
     }
 
     #[test]
@@ -253,6 +326,18 @@ mod tests {
         assert!(
             !block.caps.difference(Caps::allowed_for("otra")).is_empty(),
             "block solo para updater"
+        );
+        let install = Manifest::parse("name = installer\ncaps = system, install").unwrap();
+        assert!(install
+            .caps
+            .difference(Caps::allowed_for("installer"))
+            .is_empty());
+        assert!(
+            !install
+                .caps
+                .difference(Caps::allowed_for("updater"))
+                .is_empty(),
+            "install solo para installer"
         );
         let forbidden = Manifest::parse("name = x\ncaps = fs, spawner").unwrap();
         let denied: Vec<&str> = forbidden

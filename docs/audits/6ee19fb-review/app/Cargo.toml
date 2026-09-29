@@ -1,0 +1,14 @@
+[package]
+name="review_app"
+version="0.1.0"
+edition="2021"
+[workspace]
+[dependencies]
+aricode-rt={path="../../../../sdk/runtime"}
+aricode-proto={path="../../../../sdk/proto"}
+[build-dependencies]
+aricode-build={path="../../../../sdk/build"}
+[profile.release]
+opt-level="s"
+lto=true
+panic="abort"

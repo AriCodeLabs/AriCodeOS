@@ -87,7 +87,7 @@ fn trim(s: &[u8]) -> &[u8] {
 
 fn help() {
     sys::print(
-        b"comandos:\n  help      esta ayuda\n  ps        procesos\n  mem       memoria fisica\n  ls        ficheros de AriFS\n  cat NOM   muestra un fichero\n  devices   funciones PCI\n  services  servicios de arranque\n  uptime    tiempo desde el arranque\n  cpus      procesadores en linea\n  net       configuracion de red\n  ping IP   eco ICMP (4 intentos)\n  dns NOM   resuelve un nombre\n  http URL  GET y muestra el cuerpo\n  run PROG  ejecuta un programa del initrd y espera\n  repeat N CMD  repite un comando N veces\n  reboot    reinicia\n  shutdown  apaga\n  exit      termina el shell\n",
+        b"comandos:\n  help      esta ayuda\n  ps        procesos\n  mem       memoria fisica\n  ls        ficheros de AriFS\n  cat NOM   muestra un fichero\n  write NOM TEXTO  guarda TEXTO en el fichero (lo crea o lo reemplaza entero)\n  devices   funciones PCI\n  services  servicios de arranque (--detail: estado del supervisor)\n  uptime    tiempo desde el arranque\n  cpus      procesadores en linea\n  net       configuracion de red\n  ping IP   eco ICMP (4 intentos)\n  dns NOM   resuelve un nombre\n  http URL  GET y muestra el cuerpo\n  run PROG  ejecuta un programa del initrd y espera\n  spawn PROG  lo lanza en segundo plano (no se puede detener)\n  repeat N CMD  repite un comando N veces\n  reboot    reinicia\n  shutdown  apaga\n  exit      termina el shell\n",
     );
 }
 
@@ -231,6 +231,44 @@ fn cat(fs: &mut FsClient, name: &[u8]) {
                 break;
             }
         }
+    }
+    let _ = fs.close(fd);
+}
+
+/// `write NOMBRE TEXTO`: crea el fichero si no existe y sustituye su
+/// contenido entero (más un salto de línea) de forma atómica y duradera
+/// (ADR 0014).
+fn write(fs: &mut FsClient, rest: &[u8]) {
+    let (name, text) = split(rest);
+    let Ok(name) = core::str::from_utf8(name) else {
+        sys::print(b"write: nombre invalido\n");
+        return;
+    };
+    if name.is_empty() {
+        sys::print(b"uso: write NOMBRE TEXTO\n");
+        return;
+    }
+    let fd = match fs.open(name).or_else(|_| fs.create(name)) {
+        Ok(fd) => fd,
+        Err(_) => {
+            sys::print(b"write: no se pudo crear ");
+            sys::print(name.as_bytes());
+            sys::print(b"\n");
+            return;
+        }
+    };
+    let mut content = [0u8; LINE_MAX + 1];
+    content[..text.len()].copy_from_slice(text);
+    content[text.len()] = b'\n';
+    match fs.replace(fd, &content[..text.len() + 1]) {
+        Ok(n) => {
+            sys::print(b"write: ");
+            num(n as u64);
+            sys::print(b" bytes en ");
+            sys::print(name.as_bytes());
+            sys::print(b"\n");
+        }
+        Err(_) => sys::print(b"write: error de escritura\n"),
     }
     let _ = fs.close(fd);
 }
@@ -429,11 +467,51 @@ fn run(arg: &[u8]) {
             num(code);
             sys::print(b"\n");
         }
-        Err(LaunchError::Status(Status::NotFound)) => sys::print(b": no existe en el initrd\n"),
+        Err(LaunchError::Status(Status::NotFound)) => {
+            sys::print(b": no existe en el initrd ni en AriFS\n")
+        }
         Err(LaunchError::Status(Status::Denied)) => {
             sys::print(b": denegado por el broker (pide capacidades del sistema)\n")
         }
         Err(LaunchError::Status(Status::Killed)) => sys::print(b": fue terminado por el kernel\n"),
+        Err(LaunchError::Status(Status::BadManifest)) => sys::print(b": manifiesto invalido\n"),
+        Err(LaunchError::Status(Status::Limit)) => sys::print(b": limite de programas en marcha\n"),
+        Err(LaunchError::Status(_)) => sys::print(b": el broker no pudo lanzarlo\n"),
+        Err(LaunchError::BadName) => sys::print(b": nombre invalido\n"),
+        Err(LaunchError::Ipc(e)) => aricode_rt::print_error(b"", e),
+    }
+}
+
+/// `spawn PROGRAMA [ARG]`: lanzamiento en segundo plano por el broker.
+fn spawn(arg: &[u8]) {
+    use aricode_rt::sys::launch::{self, LaunchError, Status};
+    let Ok(name) = core::str::from_utf8(arg) else {
+        sys::print(b"spawn: nombre invalido\n");
+        return;
+    };
+    if name.is_empty() {
+        sys::print(b"uso: spawn PROGRAMA [ARG]\n");
+        return;
+    }
+    let (prog, num_arg) = match name.split_once(' ') {
+        Some((p, a)) => (p, a.trim().parse::<u64>().unwrap_or(0)),
+        None => (name, 0),
+    };
+    sys::print(b"spawn: ");
+    sys::print(prog.as_bytes());
+    match launch::spawn(BROKER, prog, num_arg) {
+        Ok(()) => sys::print(b" lanzado en segundo plano\n"),
+        Err(LaunchError::Status(Status::Limit)) => {
+            sys::print(b": limite de programas en marcha (");
+            num(4);
+            sys::print(b")\n");
+        }
+        Err(LaunchError::Status(Status::NotFound)) => {
+            sys::print(b": no existe en el initrd ni en AriFS\n")
+        }
+        Err(LaunchError::Status(Status::Denied)) => {
+            sys::print(b": denegado por el broker (pide capacidades del sistema)\n")
+        }
         Err(LaunchError::Status(Status::BadManifest)) => sys::print(b": manifiesto invalido\n"),
         Err(LaunchError::Status(_)) => sys::print(b": el broker no pudo lanzarlo\n"),
         Err(LaunchError::BadName) => sys::print(b": nombre invalido\n"),
@@ -479,6 +557,72 @@ fn services(mask: u64, fs: &FsClient) {
     });
 }
 
+/// `services --detail`: lo que init sabe de cada servicio supervisado.
+fn services_detail() {
+    use aricode_rt::sys::status::{service_status, LastExit};
+    sys::print(b"SERVICIO         ESTADO       GEN  REINICIOS  ULTIMA SALIDA     LISTO DESDE\n");
+    let mut index = 0u8;
+    loop {
+        let entry = match service_status(BROKER, index) {
+            Ok(Some(e)) => e,
+            Ok(None) => break,
+            Err(_) => {
+                sys::print(b"services: init no responde\n");
+                return;
+            }
+        };
+        let name = entry.name_str().as_bytes();
+        sys::print(name);
+        for _ in name.len()..17 {
+            sys::print(b" ");
+        }
+        let state = entry.state.name().as_bytes();
+        sys::print(state);
+        for _ in state.len()..13 {
+            sys::print(b" ");
+        }
+        let mut b = [0u8; 20];
+        let g = aricode_rt::fmt_u64(entry.generation as u64, &mut b);
+        sys::print(g);
+        for _ in g.len()..5 {
+            sys::print(b" ");
+        }
+        let r = aricode_rt::fmt_u64(entry.restarts as u64, &mut b);
+        sys::print(r);
+        for _ in r.len()..11 {
+            sys::print(b" ");
+        }
+        match entry.last_exit {
+            LastExit::None => sys::print(b"-                 "),
+            LastExit::Code => {
+                sys::print(b"codigo ");
+                let c = aricode_rt::fmt_u64(entry.last_code, &mut b);
+                sys::print(c);
+                for _ in c.len()..11 {
+                    sys::print(b" ");
+                }
+            }
+            LastExit::Killed => sys::print(b"fallo (killed)    "),
+            LastExit::StartTimeout => sys::print(b"plazo de arranque "),
+        }
+        if entry.ready_for_ms > 0 {
+            sys::print(b"hace ");
+            num(entry.ready_for_ms / 1000);
+            sys::print(b" s");
+        } else {
+            sys::print(b"-");
+        }
+        if entry.optional {
+            sys::print(b"  (opcional)");
+        }
+        sys::print(b"\n");
+        index += 1;
+        if index == 255 {
+            break;
+        }
+    }
+}
+
 fn main(mask: u64) -> u64 {
     let Ok(mut fs) = FsClient::new(FSD, HW) else {
         sys::print(b"arish: sin cliente de ficheros\n");
@@ -516,7 +660,9 @@ fn execute(
         b"mem" => mem(),
         b"ls" => ls(fs),
         b"cat" => cat(fs, rest),
+        b"write" => write(fs, rest),
         b"devices" => devices(),
+        b"services" if rest == b"--detail" => services_detail(),
         b"services" => services(mask, fs),
         b"uptime" => uptime(),
         b"cpus" => cpus(),
@@ -525,6 +671,7 @@ fn execute(
         b"dns" => dns(net_client, rest),
         b"http" => http_get(net_client, rest),
         b"run" => run(rest),
+        b"spawn" => spawn(rest),
         b"repeat" => {
             let (count, inner) = split(rest);
             let Some(times) = core::str::from_utf8(count)

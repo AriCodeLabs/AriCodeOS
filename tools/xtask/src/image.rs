@@ -356,6 +356,15 @@ pub enum DiskVariant {
     ExhaustedB,
     /// B pendiente con una imagen cuya firma no vale: rechazo y rollback.
     CorruptB,
+    /// Slots normales y un reemplazo de `README` comprometido en el journal
+    /// de AriFS sin aplicar (corte tras el compromiso): fsd lo rehace.
+    FsPendingReplace,
+    /// Slots normales y un byte alterado en la tabla de AriFS: fsd no monta.
+    FsCorrupt,
+    /// El manifiesto del módulo WASM solo concede `print` (ADR 0019).
+    WasmRestricted,
+    /// `demo.wasm` sustituido por un módulo mal tipado: el validador lo rechaza.
+    WasmInvalid,
     /// Imagen para pendrive: la ESP va dentro del disco (sin `fat:` en QEMU).
     UsbImage,
 }
@@ -368,6 +377,10 @@ impl DiskVariant {
             "pending-b" => Self::PendingB,
             "b-exhausted" => Self::ExhaustedB,
             "b-corrupt" => Self::CorruptB,
+            "fs-pending-replace" => Self::FsPendingReplace,
+            "fs-corrupt" => Self::FsCorrupt,
+            "wasm-restricted" => Self::WasmRestricted,
+            "wasm-invalid" => Self::WasmInvalid,
             "usb-image" => Self::UsbImage,
             _ => return None,
         })
@@ -405,6 +418,9 @@ impl aricode_arifs::BlockDevice for VecDisk<'_> {
             .copy_from_slice(buf);
         Ok(())
     }
+    fn flush(&mut self) -> std::result::Result<(), aricode_arifs::FsError> {
+        Ok(())
+    }
 }
 
 /// Primer sector del área en bruto del disco de pruebas: desde aquí hasta el
@@ -417,7 +433,7 @@ pub const RAW_PATTERN_OFFSET: u64 = RAW_PATTERN_LBA - PART_ARI0.0;
 /// Ficheros de ejemplo del disco de pruebas.
 pub const DISK_FILES: &[(&str, &[u8])] = &[
     ("hola.txt", b"Hola desde AriFS\n"),
-    ("README", b"AriCodeOS: disco de pruebas con AriFS v0.\n"),
+    ("README", b"AriCodeOS: disco de pruebas con AriFS v1.\n"),
 ];
 
 /// Imagen de sistema firmada con la clave de desarrollo: contenedor con
@@ -485,7 +501,11 @@ fn write_slot(img: &mut [u8], part: (u64, u64), container: &[u8]) -> Result {
     Ok(())
 }
 
-pub fn write_test_disk(path: &Path, variant: DiskVariant) -> Result {
+pub fn write_test_disk(
+    path: &Path,
+    variant: DiskVariant,
+    installed: &[(String, Vec<u8>)],
+) -> Result {
     if variant == DiskVariant::UsbImage {
         return Err(String::from(
             "la imagen USB necesita la ESP: usar write_usb_image",
@@ -502,6 +522,21 @@ pub fn write_test_disk(path: &Path, variant: DiskVariant) -> Result {
     }
     aricode_gpt::write_disk(&mut img, &parts).map_err(|e| format!("gpt: {e:?}"))?;
     populate_arifs(&mut img, PART_ARI0)?;
+    install_files(&mut img, PART_ARI0, installed)?;
+    match variant {
+        DiskVariant::FsPendingReplace => stage_arifs_replace(&mut img, PART_ARI0)?,
+        DiskVariant::WasmRestricted => {
+            overwrite_arifs(&mut img, PART_ARI0, WASM_MANIFEST_FILE, b"caps = print\n")?
+        }
+        DiskVariant::WasmInvalid => {
+            overwrite_arifs(&mut img, PART_ARI0, WASM_MODULE_FILE, INVALID_WASM)?
+        }
+        DiskVariant::FsCorrupt => {
+            // Primer byte del nombre de la primera entrada en uso.
+            img[(PART_ARI0.0 + aricode_arifs::TABLE_LBA) as usize * 512] ^= 0x20;
+        }
+        _ => {}
+    }
     let (_, last) = PART_ARI0;
     for lba in RAW_PATTERN_LBA..=last {
         let o = lba as usize * 512;
@@ -529,12 +564,64 @@ pub fn write_test_disk(path: &Path, variant: DiskVariant) -> Result {
                 write_slot(&mut img, PART_SYSB, &system_image(2, true)?)?;
                 state = schedule(state, Slot::B);
             }
-            DiskVariant::Slots | DiskVariant::EspOnly | DiskVariant::UsbImage => {}
+            DiskVariant::Slots
+            | DiskVariant::EspOnly
+            | DiskVariant::UsbImage
+            | DiskVariant::FsPendingReplace
+            | DiskVariant::FsCorrupt
+            | DiskVariant::WasmRestricted
+            | DiskVariant::WasmInvalid => {}
         }
         let o = PART_ARIBOOT.0 as usize * 512;
         img[o..o + 512].copy_from_slice(&state.encode());
     }
     io(fs::write(path, img), "escribir disco de pruebas")
+}
+
+/// Añade a AriFS ficheros de cualquier tamaño (paquetes instalados, ADR
+/// 0017): capacidad en múltiplos de 64 sectores.
+fn install_files(img: &mut [u8], part: (u64, u64), files: &[(String, Vec<u8>)]) -> Result {
+    if files.is_empty() {
+        return Ok(());
+    }
+    let mut fs = aricode_arifs::AriFs::open(VecDisk {
+        data: img,
+        base: part.0,
+    })
+    .map_err(|e| format!("arifs: {e:?}"))?;
+    let unit = aricode_arifs::FILE_CAPACITY_SECTORS as usize * 512;
+    for (name, bytes) in files {
+        let units = bytes.len().div_ceil(unit).max(1);
+        let i = fs
+            .create_sized(
+                name,
+                (units * aricode_arifs::FILE_CAPACITY_SECTORS as usize) as u32,
+            )
+            .map_err(|e| format!("arifs {name}: {e:?}"))?;
+        fs.write(i, 0, bytes)
+            .map_err(|e| format!("arifs {name} ({} bytes): {e:?}", bytes.len()))?;
+    }
+    fs.flush().map_err(|e| format!("arifs: {e:?}"))
+}
+
+/// Contenido que `filesystem.replace_recovery` espera leer en `README`.
+pub const RECOVERED_README: &[u8] = b"AriCodeOS: recuperado tras un corte\n";
+
+/// Deja en el journal de AriFS un reemplazo de `README` comprometido y sin
+/// aplicar: el estado exacto que queda tras un corte justo después del
+/// compromiso (ADR 0014). El siguiente montaje debe rehacerlo.
+fn stage_arifs_replace(img: &mut [u8], part: (u64, u64)) -> Result {
+    let mut fs = aricode_arifs::AriFs::open(VecDisk {
+        data: img,
+        base: part.0,
+    })
+    .map_err(|e| format!("arifs: {e:?}"))?;
+    let i = fs
+        .find("README")
+        .ok_or_else(|| String::from("arifs: falta README"))?;
+    fs.stage_replace(i, RECOVERED_README)
+        .map(|_| ())
+        .map_err(|e| format!("arifs README: {e:?}"))
 }
 
 /// Formatea AriFS en `part` con los ficheros de ejemplo y el módulo WASM.
@@ -556,18 +643,52 @@ fn populate_arifs(img: &mut [u8], part: (u64, u64)) -> Result {
         fs.write(i, 0, content)
             .map_err(|e| format!("arifs {name}: {e:?}"))?;
     }
-    // Módulo WebAssembly de ejemplo en el directorio privado de `wasm_runner`
-    // (lo deja `build_wasm_programs`; sin él, el runner informa y sale).
+    // Módulo WebAssembly de ejemplo y su manifiesto en el directorio privado
+    // de `wasm_runner` (lo deja `build_wasm_programs`; sin él, el runner
+    // informa y sale).
     let demo = crate::build_dir().join("demo.wasm");
     if let Ok(bytes) = fs::read(&demo) {
-        let name = "wasm_runner/demo.wasm";
-        let i = fs
-            .create(name)
-            .map_err(|e| format!("arifs {name}: {e:?}"))?;
-        fs.write(i, 0, &bytes)
-            .map_err(|e| format!("arifs {name} ({} bytes): {e:?}", bytes.len()))?;
+        for (name, content) in [
+            (WASM_MODULE_FILE, bytes.as_slice()),
+            (WASM_MANIFEST_FILE, WASM_MANIFEST),
+        ] {
+            let i = fs
+                .create(name)
+                .map_err(|e| format!("arifs {name}: {e:?}"))?;
+            fs.write(i, 0, content)
+                .map_err(|e| format!("arifs {name} ({} bytes): {e:?}", content.len()))?;
+        }
     }
     Ok(())
+}
+
+const WASM_MODULE_FILE: &str = "wasm_runner/demo.wasm";
+const WASM_MANIFEST_FILE: &str = "wasm_runner/demo.manifest";
+/// Lo que el módulo de ejemplo pide (ADR 0019).
+const WASM_MANIFEST: &[u8] = b"caps = print, clock, files\n";
+/// Módulo mal tipado: `main() -> i32` cuyo cuerpo es `i32.const 1; i32.add`
+/// (suma con un solo operando). Analiza bien y no valida.
+const INVALID_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, // cabecera
+    0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7F, // type: () -> i32
+    0x03, 0x02, 0x01, 0x00, // function: tipo 0
+    0x05, 0x03, 0x01, 0x00, 0x01, // memory: 1 pagina
+    0x07, 0x08, 0x01, 0x04, 0x6D, 0x61, 0x69, 0x6E, 0x00, 0x00, // export "main"
+    0x0A, 0x07, 0x01, 0x05, 0x00, 0x41, 0x01, 0x6A, 0x0B, // code
+];
+
+/// Sustituye entero un fichero de AriFS (reemplazo atómico de la librería).
+fn overwrite_arifs(img: &mut [u8], part: (u64, u64), name: &str, bytes: &[u8]) -> Result {
+    let mut fs = aricode_arifs::AriFs::open(VecDisk {
+        data: img,
+        base: part.0,
+    })
+    .map_err(|e| format!("arifs: {e:?}"))?;
+    let i = fs
+        .find(name)
+        .ok_or_else(|| format!("arifs: falta {name}"))?;
+    fs.replace(i, bytes)
+        .map_err(|e| format!("arifs {name}: {e:?}"))
 }
 
 /// Copia privada de las variables OVMF: el firmware las escribe al arrancar.

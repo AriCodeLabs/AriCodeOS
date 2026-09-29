@@ -5,7 +5,7 @@
 #![no_std]
 #![no_main]
 
-use aricode_arifs::{AriFs, BlockDevice, FsError, SECTOR};
+use aricode_arifs::{AriFs, BlockDevice, FsError, Recovery, SECTOR};
 use aricode_proto::fs::{Op, Reply, Request, Status, MAX_IO};
 use aricode_rt::sys::{self, block::BlockClient, Handle};
 
@@ -38,6 +38,9 @@ impl BlockDevice for PartitionDevice {
         self.blk
             .write(self.base_lba + lba, 1)
             .map_err(|_| FsError::Io)
+    }
+    fn flush(&mut self) -> Result<(), FsError> {
+        self.blk.flush().map_err(|_| FsError::Io)
     }
 }
 
@@ -73,7 +76,7 @@ impl Fds {
 
 fn status_of(e: FsError) -> Status {
     match e {
-        FsError::Io | FsError::BadMagic => Status::Io,
+        FsError::Io | FsError::BadMagic | FsError::Corrupt => Status::Io,
         FsError::NotFound => Status::NotFound,
         FsError::Exists => Status::Exists,
         FsError::NoSpace => Status::NoSpace,
@@ -108,16 +111,55 @@ impl ClientBuffers {
     }
 }
 
+/// Lo que un endpoint concedido por el broker deja ver (ADR 0016).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NsKind {
+    /// Directorio privado: los ficheros bajo `nombre/`.
+    Dir,
+    /// Un solo fichero (nombre completo) en modo lectura.
+    ReadOnlyFile,
+}
+
+/// Espacio de nombres ligado a un endpoint: lado de lectura, nombre
+/// (prefijo o fichero) y clase.
+#[derive(Clone, Copy)]
+struct Namespace {
+    ep: Handle,
+    name: [u8; 32],
+    len: usize,
+    kind: NsKind,
+}
+
+impl Namespace {
+    fn name_str(&self) -> &str {
+        core::str::from_utf8(&self.name[..self.len]).unwrap_or("")
+    }
+    /// Nombre con el que un fichero compartido se muestra y se abre: sin
+    /// el directorio que lo contiene.
+    fn bare(&self) -> &str {
+        let n = self.name_str();
+        n.rsplit_once('/').map_or(n, |(_, b)| b)
+    }
+}
+
 /// Nombre completo en la tabla: `prefijo/nombre` dentro de un directorio
 /// privado, o el nombre tal cual desde el endpoint principal. `None` si no
 /// cabe o intenta salir del prefijo.
 fn qualified<'a>(prefix: &str, name: &str, buf: &'a mut [u8; 64]) -> Option<&'a str> {
-    if name.is_empty() || name.contains('/') {
+    if name.is_empty() {
         return None;
     }
     if prefix.is_empty() {
+        // Espacio principal (init): nombres completos, con directorios
+        // (`apps/x.aripkg`); la libreria valida la forma.
+        if name.len() > buf.len() {
+            return None;
+        }
         buf[..name.len()].copy_from_slice(name.as_bytes());
         return core::str::from_utf8(&buf[..name.len()]).ok();
+    }
+    if name.contains('/') {
+        return None;
     }
     let total = prefix.len() + 1 + name.len();
     if total > buf.len() {
@@ -129,18 +171,61 @@ fn qualified<'a>(prefix: &str, name: &str, buf: &'a mut [u8; 64]) -> Option<&'a 
     core::str::from_utf8(&buf[..total]).ok()
 }
 
+/// Reemplazo por trozos a medias (ADR 0018): fichero y endpoint dueño. Solo
+/// uno a la vez, porque el journal es único; lo libera el compromiso, un
+/// error o el cierre del descriptor.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Staging {
+    index: usize,
+    owner: usize,
+}
+
+/// Estado del servicio compartido por todas las peticiones.
+struct Server {
+    fds: Fds,
+    buffers: ClientBuffers,
+    staging: Option<Staging>,
+}
+
 fn handle(
     fs: &mut AriFs<PartitionDevice>,
-    fds: &mut Fds,
-    buffers: &mut ClientBuffers,
-    prefix: &str,
+    srv: &mut Server,
+    ns: Option<&Namespace>,
     owner: usize,
     req: Request,
     data: Option<Handle>,
 ) -> Reply {
     let mut qbuf = [0u8; 64];
+    // Fichero compartido de solo lectura: un solo nombre visible y ninguna
+    // operación que escriba (ADR 0016).
+    if let Some(shared) = ns.filter(|n| n.kind == NsKind::ReadOnlyFile) {
+        match req.op {
+            Op::List => {
+                return match (req.fd, fs.find(shared.name_str())) {
+                    (0, Some(i)) => {
+                        let size = fs.entry(i).map_or(0, |e| e.size);
+                        Reply::ok(size as u64).with_name(shared.bare())
+                    }
+                    _ => Reply::status(Status::NotFound),
+                };
+            }
+            Op::Open => {
+                return match fs.find(shared.name_str()) {
+                    Some(i) if req.name_str() == shared.bare() => srv
+                        .fds
+                        .open(i, owner)
+                        .map_or(Reply::status(Status::NoSpace), |fd| Reply::ok(fd as u64)),
+                    _ => Reply::status(Status::NotFound),
+                };
+            }
+            Op::Read | Op::Close => {}
+            _ => return Reply::status(Status::Denied),
+        }
+    }
+    let prefix = ns.map_or("", Namespace::name_str);
     match req.op {
-        Op::Bind => Reply::status(Status::Invalid), // se atiende fuera, solo en el endpoint principal
+        // Se atienden fuera, solo en el endpoint principal.
+        Op::Bind | Op::Share => Reply::status(Status::Invalid),
         Op::List => {
             // Desde un directorio privado solo se ven sus ficheros, sin prefijo;
             // desde el principal, todos con su nombre completo.
@@ -163,7 +248,8 @@ fn handle(
             }
         }
         Op::Open => match qualified(prefix, req.name_str(), &mut qbuf).and_then(|q| fs.find(q)) {
-            Some(i) => fds
+            Some(i) => srv
+                .fds
                 .open(i, owner)
                 .map_or(Reply::status(Status::NoSpace), |fd| Reply::ok(fd as u64)),
             None => Reply::status(Status::NotFound),
@@ -172,35 +258,72 @@ fn handle(
             .ok_or(FsError::BadName)
             .and_then(|q| fs.create(q))
         {
-            Ok(i) => fds
+            Ok(i) => srv
+                .fds
                 .open(i, owner)
                 .map_or(Reply::status(Status::NoSpace), |fd| Reply::ok(fd as u64)),
             Err(e) => Reply::status(status_of(e)),
         },
         Op::Close => {
-            if fds.close(req.fd, owner) {
+            let index = srv.fds.get(req.fd, owner);
+            if srv.fds.close(req.fd, owner) {
+                if index.is_some_and(|i| srv.staging == Some(Staging { index: i, owner })) {
+                    srv.staging = None;
+                }
                 Reply::ok(0)
             } else {
                 Reply::status(Status::BadFd)
             }
         }
-        Op::Read | Op::Write => {
-            let Some(index) = fds.get(req.fd, owner) else {
+        Op::ReplaceCommit => {
+            let Some(index) = srv.fds.get(req.fd, owner) else {
+                return Reply::status(Status::BadFd);
+            };
+            if srv.staging != Some(Staging { index, owner }) {
+                return Reply::status(Status::Busy);
+            }
+            srv.staging = None;
+            match fs.replace_commit(index, req.len) {
+                Ok(()) => Reply::ok(req.len as u64),
+                Err(e) => Reply::status(status_of(e)),
+            }
+        }
+        Op::Flush => match fs.flush() {
+            Ok(()) => Reply::ok(0),
+            Err(e) => Reply::status(status_of(e)),
+        },
+        Op::Read | Op::Write | Op::Replace | Op::ReplaceChunk => {
+            let Some(index) = srv.fds.get(req.fd, owner) else {
                 return Reply::status(Status::BadFd);
             };
             let Some(dma) = data else {
                 return Reply::status(Status::BadHandles);
             };
             let len = req.len.min(MAX_IO) as usize;
-            let Some(buf) = buffers.map(dma) else {
+            let Some(buf) = srv.buffers.map(dma) else {
                 return Reply::status(Status::BadHandles);
             };
             if buf.len() < len {
                 return Reply::status(Status::Invalid);
             }
+            let mine = Staging { index, owner };
+            if matches!(req.op, Op::Replace | Op::ReplaceChunk)
+                && srv.staging.is_some_and(|s| s != mine)
+            {
+                return Reply::status(Status::Busy);
+            }
             let result = match req.op {
                 Op::Read => fs.read(index, req.offset, &mut buf[..len]),
-                _ => fs.write(index, req.offset, &buf[..len]),
+                Op::Write => fs.write(index, req.offset, &buf[..len]),
+                Op::Replace => {
+                    srv.staging = None;
+                    fs.replace(index, &buf[..len]).map(|()| len)
+                }
+                _ => {
+                    let r = fs.replace_chunk(index, req.offset, &buf[..len]);
+                    srv.staging = r.is_ok().then_some(mine);
+                    r.map(|()| len)
+                }
             };
             match result {
                 Ok(n) => Reply::ok(n as u64),
@@ -220,37 +343,53 @@ fn main(partition_lba: u64) -> u64 {
     };
     let mut fs = match AriFs::open(dev) {
         Ok(fs) => fs,
+        Err(FsError::Corrupt) => {
+            say(b"AriFS corrupto: no se monta");
+            return 3;
+        }
         Err(_) => {
             say(b"la particion no contiene AriFS");
             return 2;
         }
     };
+    match fs.recovery() {
+        Recovery::Clean => {}
+        Recovery::Replayed { index } => {
+            sys::print(b"fsd: reemplazo pendiente de '");
+            sys::print(fs.entry(index).map_or("?", |e| e.name_str()).as_bytes());
+            sys::print(b"' rehecho al montar\n");
+        }
+        Recovery::Discarded => say(b"journal roto descartado al montar"),
+    }
     let mut buf = [0u8; 20];
     sys::print(b"fsd: AriFS montado, ");
     sys::print(aricode_rt::fmt_u64(fs.entries().count() as u64, &mut buf));
     sys::print(b" ficheros\n");
-    let mut fds = Fds([None; 16]);
-    let mut buffers = ClientBuffers {
-        entries: [(0, 0, 0); 8],
-        count: 0,
+    let mut srv = Server {
+        fds: Fds([None; 16]),
+        buffers: ClientBuffers {
+            entries: [(0, 0, 0); 8],
+            count: 0,
+        },
+        staging: None,
     };
     let mut msg = [0u8; Request::LEN];
     let mut handles = [Handle(0); 2];
-    // Directorios privados: endpoint (lado de lectura) y prefijo.
-    let mut namespaces: [Option<(Handle, [u8; 32], usize)>; 8] = [None; 8];
+    // Espacios de nombres concedidos: directorios privados y ficheros
+    // compartidos, cada uno con su endpoint (lado de lectura).
+    let mut namespaces: [Option<Namespace>; 8] = [None; 8];
     say(b"sirviendo peticiones");
     loop {
-        // Endpoint principal (espera corta) y despues cada directorio privado.
+        // Endpoint principal (espera corta) y despues cada espacio concedido.
         for slot in 0..=namespaces.len() {
-            let (endpoint, prefix_buf, prefix_len, timeout) = if slot == 0 {
-                (SERVICE, [0u8; 32], 0, 10)
+            let (endpoint, ns, timeout) = if slot == 0 {
+                (SERVICE, None, 10)
             } else {
                 match namespaces[slot - 1] {
-                    Some((ep, p, n)) => (ep, p, n, 0),
+                    Some(ns) => (ns.ep, Some(ns), 0),
                     None => continue,
                 }
             };
-            let prefix = core::str::from_utf8(&prefix_buf[..prefix_len]).unwrap_or("");
             let Ok((n, nh)) = sys::ipc_receive(endpoint, &mut msg, &mut handles, timeout) else {
                 continue;
             };
@@ -260,11 +399,22 @@ fn main(partition_lba: u64) -> u64 {
             let reply_to = handles[0];
             let data = (nh >= 2).then_some(handles[1]);
             let request = Request::decode(&msg[..n]);
-            if let Some(req @ Request { op: Op::Bind, .. }) = request {
+            if let Some(
+                req @ Request {
+                    op: Op::Bind | Op::Share,
+                    ..
+                },
+            ) = request
+            {
                 if slot != 0 {
                     answer(reply_to, Reply::status(Status::Invalid), None);
                 } else {
-                    match bind(&mut namespaces, req.name_str()) {
+                    let kind = if req.op == Op::Bind {
+                        NsKind::Dir
+                    } else {
+                        NsKind::ReadOnlyFile
+                    };
+                    match grant(&fs, &mut namespaces, req.name_str(), kind) {
                         Ok(client_ep) => answer(reply_to, Reply::ok(0), Some(client_ep)),
                         Err(status) => answer(reply_to, Reply::status(status), None),
                     }
@@ -275,7 +425,7 @@ fn main(partition_lba: u64) -> u64 {
                 continue;
             }
             let reply = match request {
-                Some(req) => handle(&mut fs, &mut fds, &mut buffers, prefix, slot, req, data),
+                Some(req) => handle(&mut fs, &mut srv, ns.as_ref(), slot, req, data),
                 None => Reply::status(Status::Invalid),
             };
             if let Some(d) = data {
@@ -300,28 +450,40 @@ fn answer(reply_to: Handle, reply: Reply, handle: Option<Handle>) {
     let _ = sys::handle_close(reply_to);
 }
 
-/// Crea un directorio privado: endpoint nuevo cuyo lado de escritura se
-/// transfiere al cliente; fsd conserva el de lectura.
-fn bind(
-    namespaces: &mut [Option<(Handle, [u8; 32], usize)>; 8],
-    prefix: &str,
+/// Concede un espacio de nombres: un directorio privado (`Bind`, prefijo
+/// nuevo o existente) o un fichero compartido de solo lectura (`Share`, que
+/// debe existir). Endpoint nuevo cuyo lado de escritura se transfiere al
+/// cliente; fsd conserva el de lectura.
+fn grant(
+    fs: &AriFs<PartitionDevice>,
+    namespaces: &mut [Option<Namespace>; 8],
+    name: &str,
+    kind: NsKind,
 ) -> Result<Handle, Status> {
-    if prefix.is_empty()
-        || prefix.len() > 32
-        || !prefix
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
-    {
+    let valid = match kind {
+        NsKind::Dir => {
+            !name.is_empty()
+                && name.len() <= 32
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+        }
+        NsKind::ReadOnlyFile => name.len() <= 32,
+    };
+    if !valid {
         return Err(Status::Invalid);
     }
-    // El mismo prefijo comparte endpoint: cada lanzamiento de una aplicacion
-    // recibe otro handle al mismo directorio privado.
-    if let Some((ep, _, _)) = namespaces
+    if kind == NsKind::ReadOnlyFile && fs.find(name).is_none() {
+        return Err(Status::NotFound);
+    }
+    // El mismo nombre y clase comparten endpoint: cada lanzamiento de una
+    // aplicacion recibe otro handle al mismo espacio.
+    if let Some(ns) = namespaces
         .iter()
         .flatten()
-        .find(|(_, p, n)| &p[..*n] == prefix.as_bytes())
+        .find(|ns| ns.kind == kind && ns.name_str() == name)
     {
-        return sys::handle_duplicate(*ep, sys::rights::WRITE | sys::rights::TRANSFER)
+        return sys::handle_duplicate(ns.ep, sys::rights::WRITE | sys::rights::TRANSFER)
             .map_err(|_| Status::NoSpace);
     }
     let slot = namespaces
@@ -331,12 +493,23 @@ fn bind(
     let ep = sys::endpoint_create().map_err(|_| Status::NoSpace)?;
     let client = sys::handle_duplicate(ep, sys::rights::WRITE | sys::rights::TRANSFER)
         .map_err(|_| Status::NoSpace)?;
-    let mut p = [0u8; 32];
-    p[..prefix.len()].copy_from_slice(prefix.as_bytes());
-    namespaces[slot] = Some((ep, p, prefix.len()));
-    sys::print(b"fsd: directorio privado '");
-    sys::print(prefix.as_bytes());
-    sys::print(b"'\n");
+    let mut n = [0u8; 32];
+    n[..name.len()].copy_from_slice(name.as_bytes());
+    namespaces[slot] = Some(Namespace {
+        ep,
+        name: n,
+        len: name.len(),
+        kind,
+    });
+    sys::print(match kind {
+        NsKind::Dir => b"fsd: directorio privado '".as_slice(),
+        NsKind::ReadOnlyFile => b"fsd: fichero compartido '".as_slice(),
+    });
+    sys::print(name.as_bytes());
+    sys::print(match kind {
+        NsKind::Dir => b"'\n".as_slice(),
+        NsKind::ReadOnlyFile => b"' (solo lectura)\n".as_slice(),
+    });
     Ok(client)
 }
 

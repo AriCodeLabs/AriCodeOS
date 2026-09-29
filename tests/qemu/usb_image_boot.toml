@@ -16,7 +16,7 @@ serial_contains = [
     "virtio-blk: GPT con 6 particion(es)",
     "ESP LBA 2048..133119",
     "SYSA LBA 139264..163839",
-    "fsd: AriFS montado, 3 ficheros",
+    "fsd: AriFS montado, 4 ficheros",
     "AriInit: servicios de arranque completados",
     "ARICODEOS_KERNEL_READY",
 ]

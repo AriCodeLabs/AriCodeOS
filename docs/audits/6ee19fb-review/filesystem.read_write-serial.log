@@ -1,0 +1,157 @@
+BdsDxe: failed to load Boot0001 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x2,0x0): Not Found
+BdsDxe: loading Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
+BdsDxe: starting Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
+[ INFO]: boot/src/main.rs@042: AriBoot 0.6.0 (AriCodeOS UEFI loader)
+[ INFO]: boot/src/slots.rs@148: slots: estado activo A, sin pendiente
+[ INFO]: boot/src/slots.rs@154: slots: slot activo -> slot A
+[ INFO]: boot/src/slots.rs@180: slots: arrancando desde el slot A (imagen version 1)
+[ INFO]: boot/src/main.rs@083: GOP: 1280x800 stride 1280 Bgr @ 0x80000000
+[ INFO]: boot/src/main.rs@097: ACPI RSDP: 0x1f77e014
+[ INFO]: boot/src/main.rs@108: kernel.elf: 766112 bytes
+[ INFO]: boot/src/main.rs@146: kernel: 688 KiB en phys 0x1de16000, entry 0xffffffff800476c0
+[ INFO]: boot/src/main.rs@332: initrd.img: 893 KiB en phys 0x1dd36000, sha256 9400869d
+[ INFO]: boot/src/main.rs@161: cmdline: qemu_exit boot_slot=A
+[ INFO]: boot/src/main.rs@230: paginas: identidad y mapa fisico hasta 4096 MiB, 14 tablas usadas de 22
+[ INFO]: boot/src/main.rs@263: ExitBootServices -> AriKernel
+
+AriCodeOS booting...
+AriCodeOS Kernel 0.6.0
+[INFO ] cmdline: qemu_exit boot_slot=A
+[INFO ] framebuffer: 1280x800 stride 1280 Bgr @ 0x80000000
+[INFO ] kernel: phys 0x1de16000 virt 0xffffffff80000000 size 688 KiB
+[INFO ] acpi rsdp: 0x1f77e014
+[INFO ] memory map: 122 regiones (desc 48 bytes)
+[INFO ] cpu: GDT, TSS (IST para #DF) e IDT instaladas (cs=0x8 ds=0x10 tr=0x28)
+[INFO ] pmm: 460 MiB libres de 4096 MiB direccionables, bitmap 128 KiB @ 0x100000
+[INFO ] vmm: tablas propias activas (pml4 0x120000), W^X en la imagen, pila 0xffffffff7ffef000..0xffffffff7ffff000 con guard 0xffffffff7ffee000
+[INFO ] vmm: 43 MiB de memoria de arranque devueltos al PMM (502 MiB libres)
+[INFO ] heap: 1024 KiB en 0xffffc00000000000, crece por trozos de 1024 KiB hasta 64 MiB
+[INFO ] acpi: RSDP rev 2 -> XSDT con 7 tablas [FACP APIC HPET MCFG DMAR WAET BGRT]
+[INFO ] acpi: MADT lapic @ 0xfee00000, 1 cpu(s), 1 ioapic(s) [(0, 4273995776, 0)], overrides [(0, 2, 0), (5, 5, 13), (9, 9, 13), (10, 10, 13), (11, 11, 13)]
+[INFO ] acpi: MCFG ecam @ 0xe0000000 segmento 0 buses 0..=255
+[INFO ] acpi: DMAR 48 bits, 1 unidad(es) [(4275634176, false)], 0 region(es) reservadas
+[INFO ] apic: lapic id 0 version 0x14 @ 0xfee00000; timer 62731 ticks/ms (div 16), tick 100 Hz (cuenta 627310)
+[INFO ] ioapic: id 0 @ 0xfec00000, 24 entradas, gsi base 0, todas enmascaradas
+[INFO ] interrupciones habilitadas
+[INFO ] task: hilo main adoptado, idle creado (pilas de 32 KiB con guard); scheduler round robin preemptivo, quantum 20 ms
+[INFO ] smp: 1 CPU en linea (sin APs en la MADT)
+[INFO ] random: generador ChaCha20 sembrado con TSC (sin rdrand: entropia limitada)
+[INFO ] console: entrada por COM1 (GSI 4, vector 0x40)
+[INFO ] console: teclado PS/2 (GSI 1, vector 0x41)
+[INFO ] initrd: 54 ficheros, 893 KiB @ 0x1dd36000, sha256 9400869d
+[INFO ] pci: 00:00.0 8086:29c0 clase 06.00 host bridge (0 BARs)
+[INFO ] pci: 00:01.0 1234:1111 clase 03.00 VGA/display (2 BARs)
+[INFO ] pci: 00:02.0 1af4:1042 clase 01.00 almacenamiento (2 BARs, MSI-X/vendor/vendor/vendor/vendor/vendor)
+[INFO ] pci: 00:03.0 1af4:1041 clase 02.00 Ethernet (2 BARs, MSI-X/vendor/vendor/vendor/vendor/vendor)
+[INFO ] pci: 00:04.0 1af4:1052 clase 09.00 teclado (2 BARs, MSI-X/vendor/vendor/vendor/vendor/vendor)
+[INFO ] pci: 00:05.0 1af4:1052 clase 09.02 raton (2 BARs, MSI-X/vendor/vendor/vendor/vendor/vendor)
+[INFO ] pci: 00:1f.0 8086:2918 clase 06.01 ISA bridge (0 BARs)
+[INFO ] pci: 00:1f.2 8086:2922 clase 01.06 SATA (AHCI) (2 BARs, MSI)
+[INFO ] pci: 00:1f.3 8086:2930 clase 0c.05 SMBus (1 BAR)
+[INFO ] pci: 9 funciones en el segmento 0 (ECAM @ 0xe0000000)
+[INFO ] iommu: 00:01.0 en el dominio identidad 1 (firmware)
+[INFO ] iommu: unidad 0 @ 0xfed90000 version 1.0: 48 bits de invitado, 4 niveles, 65536 dominios, 1 registro(s) de fallo, sin coherencia (clflush); traduccion activa
+[INFO ] iommu: 1 unidad(es) activas, 0 region(es) reservadas (RMRR), dominio identidad para 1 dispositivo(s) del firmware ["00:01.0"]; un dominio por proceso con IOVA = fisica
+[INFO ] user: proceso 1 'init' creado (3 segmentos, 336 KiB, entrada 0x400000, hilo Tid(2))
+AriInit: arrancando
+[INFO ] user: proceso 2 'hello' creado (1 segmentos, 4 KiB, entrada 0x400000, hilo Tid(3))
+hola desde ring 3
+[INFO ] user: proceso 2 'hello' salio con codigo 42
+AriInit: hello termino con 42
+[INFO ] user: proceso 3 'kernel_read' creado (1 segmentos, 4 KiB, entrada 0x400000, hilo Tid(4))
+USER FAULT #PF (14) Page Fault: rip=0x400007 rsp=0x800000 err=0x5 cr2=0xffffffff80000000
+[WARN ] user: proceso 3 'kernel_read' terminado por fallo: #PF lectura
+AriInit: kernel_read fue terminado por el kernel
+[INFO ] user: proceso 4 'crashy_driver' creado (1 segmentos, 4 KiB, entrada 0x400000, hilo Tid(5))
+USER FAULT #PF (14) Page Fault: rip=0x400015 rsp=0x7ffff8 err=0x4 cr2=0x40
+[WARN ] user: proceso 4 'crashy_driver' terminado por fallo: #PF lectura
+AriInit: crashy_driver fallo, reiniciando
+[INFO ] user: proceso 5 'crashy_driver' creado (1 segmentos, 4 KiB, entrada 0x400000, hilo Tid(6))
+[INFO ] user: proceso 5 'crashy_driver' salio con codigo 0
+AriInit: crashy_driver reiniciado con exito
+AriInit: 9 funciones PCI
+[INFO ] pci: 00:02.0 1af4:1042 reclamado (MSI-X entrada 0)
+[INFO ] user: proceso 6 'virtio_blk' creado (3 segmentos, 280 KiB, entrada 0x400000, hilo Tid(7))
+[INFO ] iommu: 00:02.0 asignado al dominio 3 (proceso 6)
+virtio-blk: dispositivo listo
+virtio-blk: flush negociado (VIRTIO_BLK_F_FLUSH)
+virtio-blk: capacidad 98304 sectores
+virtio-blk: GPT con 5 particion(es)
+virtio-blk:   ARI0 LBA 34..6143
+virtio-blk:   SYSA LBA 6144..30719
+virtio-blk:   SYSB LBA 30720..55295
+virtio-blk:   UPDATE LBA 55296..79871
+virtio-blk:   ARIBOOT LBA 79872..79935
+virtio-blk: sirviendo peticiones
+[INFO ] user: proceso 7 'fsd' creado (3 segmentos, 28 KiB, entrada 0x400000, hilo Tid(8))
+[INFO ] user: proceso 8 'fs_client' creado (3 segmentos, 16 KiB, entrada 0x400000, hilo Tid(9))
+fsd: AriFS montado, 4 ficheros
+fsd: sirviendo peticiones
+fs_client: hola.txt (17 bytes)
+fs_client: README (42 bytes)
+fs_client: wasm_runner/demo.wasm (12073 bytes)
+fs_client: wasm_runner/demo.manifest (27 bytes)
+fs_client: hola.txt dice: Hola desde AriFS
+fs_client: reemplazo atomico y flush ok
+fs_client: listar, leer, crear y escribir por IPC ok
+[INFO ] user: proceso 8 'fs_client' salio con codigo 0
+AriInit: servicio de ficheros ok
+[INFO ] user: proceso 9 'blk_client' creado (3 segmentos, 12 KiB, entrada 0x400000, hilo Tid(10))
+blk_client: info, lectura y escritura por IPC ok
+[INFO ] user: proceso 9 'blk_client' salio con codigo 0
+AriInit: servicio de bloques ok
+[INFO ] pci: 00:03.0 1af4:1041 reclamado (MSI-X entrada 0)
+[INFO ] user: proceso 10 'virtio_net' creado (3 segmentos, 316 KiB, entrada 0x400000, hilo Tid(11))
+[INFO ] iommu: 00:03.0 asignado al dominio 5 (proceso 10)
+[INFO ] user: proceso 11 'net_client' creado (3 segmentos, 16 KiB, entrada 0x400000, hilo Tid(12))
+virtio-net: dispositivo listo, MAC 52:54:00:12:34:56
+virtio-net: sirviendo peticiones
+virtio-net: DHCP 10.0.2.15 mascara 255.255.255.0 router 10.0.2.2 dns 10.0.2.3
+net_client: ip 10.0.2.15 router 10.0.2.2 dns 10.0.2.3
+net_client: respuesta de 10.0.2.2 seq 1 rtt 0 ms
+net_client: respuesta de 10.0.2.2 seq 2 rtt 0 ms
+net_client: eco UDP recibido de 10.0.2.2 puerto 31007
+net_client: aricodeos.test -> 10.1.2.3
+net_client: DHCP, ping, UDP y DNS por IPC ok
+[INFO ] user: proceso 11 'net_client' salio con codigo 0
+AriInit: servicio de red ok
+[INFO ] user: proceso 12 'tcp_client' creado (3 segmentos, 16 KiB, entrada 0x400000, hilo Tid(13))
+tcp_client: eco TCP ok
+tcp_client: dos conexiones simultaneas ok
+tcp_client: conexion rechazada detectada
+TCP_LISTEN_READY
+tcp_client: nadie se conecto al servidor
+tcp_client: TCP por IPC ok
+[INFO ] user: proceso 12 'tcp_client' salio con codigo 0
+AriInit: servicio TCP ok
+[INFO ] user: proceso 13 'http_client' creado (3 segmentos, 24 KiB, entrada 0x400000, hilo Tid(14))
+http_client: GET /hola -> 200, 19 bytes: Hola desde el host
+http_client: GET /chunked -> 200 (chunked) ok
+http_client: GET /no-existe -> 404
+http_client: puerto cerrado detectado
+http_client: HTTP GET por TCP ok
+[INFO ] user: proceso 13 'http_client' salio con codigo 0
+AriInit: cliente HTTP ok
+[INFO ] pci: 00:04.0 1af4:1052 reclamado (MSI-X entrada 0)
+[INFO ] user: proceso 14 'virtio_input' creado (3 segmentos, 280 KiB, entrada 0x400000, hilo Tid(15))
+[INFO ] iommu: 00:04.0 asignado al dominio 6 (proceso 14)
+virtio-input: dispositivo listo: QEMU Virtio Keyboard
+virtio-input: sirviendo peticiones
+[INFO ] pci: 00:05.0 1af4:1052 reclamado (MSI-X entrada 0)
+[INFO ] user: proceso 15 'virtio_input' creado (3 segmentos, 280 KiB, entrada 0x400000, hilo Tid(16))
+[INFO ] iommu: 00:05.0 asignado al dominio 7 (proceso 15)
+virtio-input: dispositivo listo: QEMU Virtio Mouse
+virtio-input: sirviendo peticiones
+[INFO ] user: proceso 16 'input_client' creado (3 segmentos, 16 KiB, entrada 0x400000, hilo Tid(17))
+input_client: dispositivo 0: QEMU Virtio Keyboard
+input_client: dispositivo 1: QEMU Virtio Mouse
+INPUT_READY
+input_client: sin mas eventos (nadie tecleo)
+input_client: eventos de entrada por IPC ok
+[INFO ] user: proceso 16 'input_client' salio con codigo 0
+AriInit: servicio de entrada ok
+AriInit: arrancado desde el slot A (activo)
+AriInit: servicios de arranque completados
+[INFO ] user: proceso 1 'init' salio con codigo 0
+[INFO ] init terminado con codigo 0
+ARICODEOS_KERNEL_READY

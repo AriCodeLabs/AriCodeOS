@@ -1,11 +1,10 @@
 //! Cliente del servicio de red (`aricode-proto::net`).
 
-use crate::{self as sys, rights, Error, Handle, TIMEOUT_INFINITE};
+use crate::{self as sys, rights, rpc, Error, Handle};
 use aricode_proto::net::{Info, Op, Reply, Request, Status, MAX_DATAGRAM};
 
 pub struct NetClient {
     service: Handle,
-    reply: Handle,
     dma: Handle,
     buf: u64,
 }
@@ -26,15 +25,9 @@ pub struct Datagram {
 
 impl NetClient {
     pub fn new(service: Handle, hardware: Handle) -> Result<Self, Error> {
-        let reply = sys::endpoint_create()?;
         let dma = sys::dma_alloc(hardware, MAX_DATAGRAM as u64)?;
         let buf = sys::mmio_map(dma)?;
-        Ok(Self {
-            service,
-            reply,
-            dma,
-            buf,
-        })
+        Ok(Self { service, dma, buf })
     }
 
     fn buffer(&mut self) -> &mut [u8] {
@@ -43,22 +36,26 @@ impl NetClient {
     }
 
     fn call(&self, req: Request, with_buffer: bool) -> Result<Reply, NetError> {
-        let reply_w = sys::handle_duplicate(self.reply, rights::WRITE | rights::TRANSFER)
-            .map_err(NetError::Ipc)?;
-        let mut handles = [reply_w, Handle(0)];
-        let mut n = 1;
+        let mut extra = [Handle(0); 1];
+        let mut n = 0;
         if with_buffer {
-            handles[1] =
+            extra[0] =
                 sys::handle_duplicate(self.dma, rights::READ | rights::WRITE | rights::TRANSFER)
                     .map_err(NetError::Ipc)?;
-            n = 2;
+            n = 1;
         }
-        sys::ipc_send(self.service, &req.encode(), &handles[..n], TIMEOUT_INFINITE)
-            .map_err(NetError::Ipc)?;
         let mut msg = [0u8; Reply::LEN];
-        let mut none: [Handle; 0] = [];
-        let (len, _) = sys::ipc_receive(self.reply, &mut msg, &mut none, TIMEOUT_INFINITE)
-            .map_err(NetError::Ipc)?;
+        // El plazo de la peticion (recv, connect, accept, ping) mas el margen.
+        let wait = req.timeout_ms as u64 + rpc::GRACE_MS;
+        let len = rpc::call(
+            self.service,
+            &req.encode(),
+            &extra[..n],
+            rpc::GRACE_MS,
+            wait,
+            &mut msg,
+        )
+        .map_err(NetError::Ipc)?;
         let reply = Reply::decode(&msg[..len]).ok_or(NetError::Ipc(Error::Invalid))?;
         match reply.status {
             Status::Ok => Ok(reply),

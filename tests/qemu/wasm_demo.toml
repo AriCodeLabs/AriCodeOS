@@ -1,6 +1,8 @@
-# Fase 29: wasm_runner (aplicacion con manifiesto system+fs) carga demo.wasm
-# de su directorio privado y lo ejecuta con aricode-wasm; el modulo, compilado
-# con rustc para wasm32, solo usa la Capability API importada (print, uptime).
+# Fase 29 y etapa 4 (ADR 0019): wasm_runner (aplicacion con manifiesto
+# system+fs) carga demo.wasm y demo.manifest de su directorio privado, valida
+# el modulo y lo ejecuta con aricode-wasm; el modulo, compilado con rustc para
+# wasm32, solo usa la Capability API que su manifiesto le concede (print,
+# clock, files) y escribe y relee un fichero.
 name = "wasm.demo"
 description = "runtime WebAssembly en ring 3: modulo portable aislado con Capability API"
 level = "full"
@@ -18,6 +20,8 @@ serial_contains = [
     "wasm: fib(24) = 46368",
     "wasm: uptime ",
     "wasm: suma ponderada 162",
+    "wasm: fichero 'notas' escrito y leido (18 bytes)",
+    "wasm_runner: manifiesto del modulo: print clock files",
     "wasm_runner: main devolvio 42",
     "run: wasm_runner termino con 42",
     "ARICODEOS_SHUTDOWN",

@@ -1,7 +1,7 @@
 //! Compilación de las crates del sistema y comprobaciones estáticas.
 
 use crate::{root, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::string::String;
 
@@ -35,6 +35,7 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("aricode-input", None),
     ("aricode-gfx", None),
     ("aricode-manifest", None),
+    ("aricode-pkg", None),
     ("aricode-wasm", None),
     ("aricode-crypto", None),
     ("aricode-ab", None),
@@ -48,6 +49,8 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("ari-app-fs-probe", Some(KERNEL_TARGET)),
     ("ari-app-win-probe", Some(KERNEL_TARGET)),
     ("ari-app-wasm-runner", Some(KERNEL_TARGET)),
+    ("ari-app-notes-reader", Some(KERNEL_TARGET)),
+    ("ari-app-installer", Some(KERNEL_TARGET)),
     ("wasm-demo", Some(WASM_TARGET)),
     ("user-testprogs", Some(KERNEL_TARGET)),
     ("ariinit", Some(KERNEL_TARGET)),
@@ -55,6 +58,7 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("ari-virtio-net", Some(KERNEL_TARGET)),
     ("ari-virtio-input", Some(KERNEL_TARGET)),
     ("ari-usb-input", Some(KERNEL_TARGET)),
+    ("ari-console-bridge", Some(KERNEL_TARGET)),
     ("ari-compositor", Some(KERNEL_TARGET)),
     ("ari-fsd", Some(KERNEL_TARGET)),
     ("ari-shell", Some(KERNEL_TARGET)),
@@ -104,6 +108,7 @@ pub fn initrd_programs() -> Result<Vec<String>> {
         String::from("virtio_net"),
         String::from("virtio_input"),
         String::from("usb_input"),
+        String::from("console_bridge"),
         String::from("compositor"),
         String::from("fsd"),
         String::from("hello_app"),
@@ -113,6 +118,8 @@ pub fn initrd_programs() -> Result<Vec<String>> {
         String::from("fs_probe"),
         String::from("win_probe"),
         String::from("wasm_runner"),
+        String::from("notes_reader"),
+        String::from("installer"),
         String::from("shell"),
     ];
     let bins = root().join("user/testprogs/src/bin");
@@ -160,6 +167,7 @@ pub fn build_user_programs(release: bool) -> Result<PathBuf> {
         "ari-virtio-net",
         "ari-virtio-input",
         "ari-usb-input",
+        "ari-console-bridge",
         "ari-compositor",
         "ari-fsd",
         "ari-app-hello",
@@ -168,6 +176,8 @@ pub fn build_user_programs(release: bool) -> Result<PathBuf> {
         "ari-app-fs-probe",
         "ari-app-win-probe",
         "ari-app-wasm-runner",
+        "ari-app-notes-reader",
+        "ari-app-installer",
         "ari-shell",
     ] {
         println!("[xtask] build {pkg} ({KERNEL_TARGET})");
@@ -185,6 +195,116 @@ pub fn build_user_programs(release: bool) -> Result<PathBuf> {
         .join("target")
         .join(KERNEL_TARGET)
         .join(profile_dir(release)))
+}
+
+/// Programa construido fuera del árbol y empaquetado (ADR 0017).
+pub struct ExternalApp {
+    pub name: String,
+    pub version: u32,
+    /// Paquete firmado (`aricode-pkg`).
+    pub package: Vec<u8>,
+}
+
+impl ExternalApp {
+    /// Fichero que va a AriFS como programa instalado.
+    pub fn installed(&self) -> (String, Vec<u8>) {
+        (
+            format!("apps/{}{}", self.name, aricode_pkg::EXTENSION),
+            self.package.clone(),
+        )
+    }
+}
+
+/// Compila `dir/Cargo.toml` (un workspace propio con el SDK por ruta) desde
+/// la raíz del repositorio, para que `rust-toolchain.toml` y
+/// `.cargo/config.toml` se apliquen igual que a los programas del initrd, con
+/// `APP_VERSION` fijada; firma el paquete con la clave de desarrollo. `dir`
+/// lleva un único `NOMBRE.manifest`, que da el nombre del binario. Con
+/// `corrupt`, la firma no verifica (pruebas).
+pub fn build_external(
+    dir: &Path,
+    version: u32,
+    release: bool,
+    corrupt: bool,
+) -> Result<ExternalApp> {
+    let dir = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        root().join(dir)
+    };
+    let mut manifests = std::fs::read_dir(&dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "manifest"));
+    let (Some(manifest_path), None) = (manifests.next(), manifests.next()) else {
+        return Err(format!(
+            "{}: hace falta exactamente un NOMBRE.manifest",
+            dir.display()
+        ));
+    };
+    let name = manifest_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let target_dir = crate::build_dir()
+        .join("external")
+        .join(format!("{name}-v{version}"));
+    println!(
+        "[xtask] build externo {name} v{version} ({}, {KERNEL_TARGET})",
+        dir.display()
+    );
+    let mut c = cargo();
+    c.env("APP_VERSION", version.to_string())
+        .args(["build", "--manifest-path"])
+        .arg(dir.join("Cargo.toml"))
+        .args(["--target", KERNEL_TARGET, "--target-dir"])
+        .arg(&target_dir);
+    if release {
+        c.arg("--release");
+    }
+    run(c)?;
+    let elf = target_dir
+        .join(KERNEL_TARGET)
+        .join(profile_dir(release))
+        .join(&name);
+    let elf = crate::image::stripped_elf(&elf)?;
+    let manifest =
+        std::fs::read(&manifest_path).map_err(|e| format!("{}: {e}", manifest_path.display()))?;
+    let seed: [u8; 32] = crate::keys::read_hex(
+        &root()
+            .join(crate::keys::DEV_KEY_DIR)
+            .join(crate::keys::SEED_FILE),
+    )?;
+    let package = aricode_pkg::build(&name, version, &elf, &manifest, &seed, corrupt)
+        .ok_or_else(|| format!("{name}: nombre de paquete invalido"))?;
+    Ok(ExternalApp {
+        name,
+        version,
+        package,
+    })
+}
+
+/// `cargo xtask app-pack DIR [--version N]`: deja `build/pkgs/NOMBRE-N.aripkg`.
+pub fn app_pack(dir: &Path, version: u32, release: bool) -> Result {
+    let app = build_external(dir, version, release, false)?;
+    let out = crate::build_dir().join("pkgs");
+    std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+    let file = out.join(format!(
+        "{}-{}{}",
+        app.name,
+        app.version,
+        aricode_pkg::EXTENSION
+    ));
+    std::fs::write(&file, &app.package).map_err(|e| format!("{}: {e}", file.display()))?;
+    println!(
+        "[xtask] paquete {} v{} ({} bytes) en {}",
+        app.name,
+        app.version,
+        app.package.len(),
+        file.display()
+    );
+    Ok(())
 }
 
 /// Compila los módulos WebAssembly de ejemplo y deja `demo.wasm` en `build/`,
