@@ -782,7 +782,12 @@ segundo brevemente para añadir la región.
   cuando la aplicación quiere `fs`, duplica los endpoints de red,
   compositor y entrada solo si se piden, añade `HARDWARE` solo cuando hay
   buffers que reservar y lanza con la cuota del manifiesto; responde con el
-  código de salida o `Killed`. Si el kernel rechaza el `spawn` por cualquier
+  código de salida o `Killed` cuando el programa termina, sin bloquear
+  init: `launch` deja el proceso en una de las `MAX_RUNNING` (4) ranuras y
+  `poll_launches` responde al recogerlo (ADR 0015). Sin ranura libre el
+  lanzamiento recibe `Limit`. Con `Request::DETACH` (`sys::launch::spawn`,
+  `spawn` en el shell) el broker responde `Started` al crear el proceso y
+  nadie espera su salida. Si el kernel rechaza el `spawn` por cualquier
   motivo, los duplicados preparados se cierran (el kernel solo los retira al
   crear el proceso): antes cada nombre inexistente consumía una entrada de
   la tabla de init. El shell recibe el endpoint del broker en

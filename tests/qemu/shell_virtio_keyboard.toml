@@ -18,7 +18,7 @@ click = "left"
 [expect]
 exit = 33
 serial_contains = [
-    "console-bridge: 2 dispositivo(s) de entrada hacia la consola",
+    "AriInit: puente de consola con 2 dispositivo(s) de entrada",
     "arish: shell de AriCodeOS",
     "cpus: ",
     "ari> shutdown",

@@ -758,7 +758,7 @@ fn run_shell(
     fs_service: Handle,
     net_service: Handle,
     services: u64,
-    broker: &Broker,
+    broker: &mut Broker,
     sup: &mut Supervisor,
 ) -> Result<u64, Error> {
     let fsd = sys::handle_duplicate(fs_service, rights::WRITE | rights::TRANSFER)?;
@@ -792,6 +792,7 @@ fn run_shell(
         }
         sup.poll();
         broker.serve_one(20, sup);
+        broker.poll_launches();
     }
 }
 
@@ -809,6 +810,26 @@ struct Broker {
     compositor: Option<Handle>,
     inputs: [Handle; 4],
     input_count: usize,
+    /// Programas lanzados que aún no han terminado (ADR 0015): proceso y, si
+    /// alguien espera su salida, el endpoint al que responder.
+    running: [Option<Running>; MAX_RUNNING],
+}
+
+/// Programas en marcha a la vez que admite el broker; el siguiente `run` o
+/// `spawn` recibe `Limit`.
+const MAX_RUNNING: usize = 4;
+
+#[derive(Clone, Copy)]
+struct Running {
+    process: Handle,
+    reply_to: Option<Handle>,
+}
+
+/// Resultado inmediato de `launch`: respuesta ya decidida, o un proceso
+/// creado cuya salida hay que esperar en una ranura.
+enum Launched {
+    Reply(LaunchReply),
+    Process(Handle),
 }
 
 impl Broker {
@@ -834,11 +855,31 @@ impl Broker {
             compositor,
             inputs: ins,
             input_count: n,
+            running: [None; MAX_RUNNING],
         })
     }
 
+    /// Responde a los programas que han terminado y libera sus ranuras.
+    fn poll_launches(&mut self) {
+        for slot in self.running.iter_mut() {
+            let Some(r) = *slot else { continue };
+            let reply = match sys::process_wait(r.process, 0) {
+                Err(Error::Timeout) => continue,
+                Ok(code) => LaunchReply::exited(code),
+                Err(Error::Killed) => LaunchReply::status(LaunchStatus::Killed),
+                Err(_) => LaunchReply::status(LaunchStatus::Failed),
+            };
+            let _ = sys::handle_close(r.process);
+            if let Some(reply_to) = r.reply_to {
+                let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
+                let _ = sys::handle_close(reply_to);
+            }
+            *slot = None;
+        }
+    }
+
     /// Atiende como mucho una petición (espera hasta `timeout_ms`).
-    fn serve_one(&self, timeout_ms: u64, sup: &Supervisor) {
+    fn serve_one(&mut self, timeout_ms: u64, sup: &Supervisor) {
         let mut msg = [0u8; LaunchRequest::LEN];
         let mut handles = [Handle(0); 1];
         let Ok((n, nh)) = sys::ipc_receive(self.endpoint, &mut msg, &mut handles, timeout_ms)
@@ -857,20 +898,51 @@ impl Broker {
             let _ = sys::handle_close(reply_to);
             return;
         }
-        let reply = match LaunchRequest::decode(&msg[..n]) {
-            Some(req) => self.launch(req.name_str(), req.arg),
-            None => LaunchReply::status(LaunchStatus::Invalid),
+        let Some(req) = LaunchRequest::decode(&msg[..n]) else {
+            let reply = LaunchReply::status(LaunchStatus::Invalid);
+            let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
+            let _ = sys::handle_close(reply_to);
+            return;
         };
-        let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
-        let _ = sys::handle_close(reply_to);
+        // La ranura se reserva antes de lanzar: sin ranura no hay proceso.
+        let Some(slot) = self.running.iter().position(Option::is_none) else {
+            sys::print(b"AriInit: ");
+            sys::print(req.name_str().as_bytes());
+            sys::print(b": limite de programas en marcha\n");
+            let reply = LaunchReply::status(LaunchStatus::Limit);
+            let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
+            let _ = sys::handle_close(reply_to);
+            return;
+        };
+        match self.launch(req.name_str(), req.arg) {
+            Launched::Reply(reply) => {
+                let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
+                let _ = sys::handle_close(reply_to);
+            }
+            Launched::Process(process) if req.is_detached() => {
+                let reply = LaunchReply::status(LaunchStatus::Started);
+                let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
+                let _ = sys::handle_close(reply_to);
+                self.running[slot] = Some(Running {
+                    process,
+                    reply_to: None,
+                });
+            }
+            Launched::Process(process) => {
+                self.running[slot] = Some(Running {
+                    process,
+                    reply_to: Some(reply_to),
+                });
+            }
+        }
     }
 
     /// Lee el manifiesto (`NOMBRE.manifest` en el initrd), aplica la política y
-    /// ejecuta el programa hasta que termine.
-    fn launch(&self, name: &str, arg: u64) -> LaunchReply {
+    /// lanza el programa; su salida la recoge `poll_launches`.
+    fn launch(&self, name: &str, arg: u64) -> Launched {
         let mut path = [0u8; 48];
         let Some(path) = join(name, ".manifest", &mut path) else {
-            return LaunchReply::status(LaunchStatus::Invalid);
+            return Launched::Reply(LaunchReply::status(LaunchStatus::Invalid));
         };
         let mut text = [0u8; 1024];
         let manifest = match sys::initrd_read(SPAWNER, path, &mut text) {
@@ -879,14 +951,14 @@ impl Broker {
                 .and_then(|t| Manifest::parse(t).ok())
             {
                 Some(m) => Some(m),
-                None => return LaunchReply::status(LaunchStatus::BadManifest),
+                None => return Launched::Reply(LaunchReply::status(LaunchStatus::BadManifest)),
             },
             Err(Error::NotFound) => None,
-            Err(_) => return LaunchReply::status(LaunchStatus::BadManifest),
+            Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::BadManifest)),
         };
         let (caps, memory_kib) = match manifest {
             Some(m) if m.name_str() != name => {
-                return LaunchReply::status(LaunchStatus::BadManifest)
+                return Launched::Reply(LaunchReply::status(LaunchStatus::BadManifest))
             }
             Some(m) => (m.caps, m.memory_kib),
             // Sin manifiesto: solo consola y reloj, memoria minima.
@@ -919,7 +991,7 @@ impl Broker {
                 sys::print(c.as_bytes());
             }
             sys::print(b"\n");
-            return LaunchReply::status(LaunchStatus::Denied);
+            return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
         }
         // Los duplicados preparados se cierran solos si cualquier camino de
         // error sale antes de transferirlos (`Granted::take` los libera al
@@ -930,43 +1002,43 @@ impl Broker {
         if caps.contains(Caps::SYSTEM) {
             match sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER) {
                 Ok(h) => granted.push(h),
-                Err(_) => return LaunchReply::status(LaunchStatus::Failed),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
         }
         if caps.contains(Caps::FS) {
             let Some(fs) = &self.fs else {
-                return LaunchReply::status(LaunchStatus::Denied);
+                return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
             };
             match fs.bind(name) {
                 Ok(h) => granted.push(h),
-                Err(_) => return LaunchReply::status(LaunchStatus::Failed),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
             needs_hw = true;
         }
         if caps.contains(Caps::NET) {
             match sys::handle_duplicate(self.net, rights::WRITE | rights::TRANSFER) {
                 Ok(h) => granted.push(h),
-                Err(_) => return LaunchReply::status(LaunchStatus::Failed),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
             needs_hw = true;
         }
         if caps.contains(Caps::WINDOW) {
             let Some(comp) = self.compositor else {
-                return LaunchReply::status(LaunchStatus::Denied);
+                return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
             };
             match sys::handle_duplicate(comp, rights::WRITE | rights::TRANSFER) {
                 Ok(h) => granted.push(h),
-                Err(_) => return LaunchReply::status(LaunchStatus::Failed),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
             needs_hw = true;
         }
         if caps.contains(Caps::BLOCK) {
             let Some(block) = self.block else {
-                return LaunchReply::status(LaunchStatus::Denied);
+                return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
             };
             match sys::handle_duplicate(block, rights::WRITE | rights::TRANSFER) {
                 Ok(h) => granted.push(h),
-                Err(_) => return LaunchReply::status(LaunchStatus::Failed),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
             needs_hw = true;
         }
@@ -974,14 +1046,14 @@ impl Broker {
             for ep in &self.inputs[..self.input_count] {
                 match sys::handle_duplicate(*ep, rights::WRITE | rights::TRANSFER) {
                     Ok(h) => granted.push(h),
-                    Err(_) => return LaunchReply::status(LaunchStatus::Failed),
+                    Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
                 }
             }
         }
         if needs_hw {
             match sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER) {
                 Ok(h) => granted.push(h),
-                Err(_) => return LaunchReply::status(LaunchStatus::Failed),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
         }
         // El kernel solo retira los handles si llega a crear el proceso; en
@@ -994,19 +1066,13 @@ impl Broker {
                     c
                 }
                 Err(e) => {
-                    return LaunchReply::status(match e {
+                    return Launched::Reply(LaunchReply::status(match e {
                         Error::NotFound => LaunchStatus::NotFound,
                         _ => LaunchStatus::Failed,
-                    });
+                    }));
                 }
             };
-        let result = sys::process_wait(child, TIMEOUT_INFINITE);
-        let _ = sys::handle_close(child);
-        match result {
-            Ok(code) => LaunchReply::exited(code),
-            Err(Error::Killed) => LaunchReply::status(LaunchStatus::Killed),
-            Err(_) => LaunchReply::status(LaunchStatus::Failed),
-        }
+        Launched::Process(child)
     }
 }
 
@@ -1465,7 +1531,7 @@ fn main(arg: u64) -> u64 {
             say(b"sin servicio de ficheros, no se lanza el shell");
             return 15;
         };
-        let Ok(broker) = Broker::new(
+        let Ok(mut broker) = Broker::new(
             fs_service,
             block_service,
             net_service,
@@ -1493,11 +1559,19 @@ fn main(arg: u64) -> u64 {
                     Policy::DRIVER,
                 )
                 .is_some_and(|i| sup.launch(i));
-            if !launched {
+            if launched {
+                // El anuncio va aqui y no en el puente: init imprime antes
+                // de que exista el shell, asi que nada se entrelaza con su
+                // primer prompt. Los servicios de entrada guardan lo que se
+                // teclee hasta que el puente lo lea.
+                sys::print(b"AriInit: puente de consola con ");
+                sys::print(aricode_rt::fmt_u64(inputs as u64, &mut buf));
+                sys::print(b" dispositivo(s) de entrada\nCONSOLE_BRIDGE_READY\n");
+            } else {
                 say(b"puente de consola sin arrancar: el shell solo lee COM1 y PS/2");
             }
         }
-        match run_shell(fs, net_service, services, &broker, &mut sup) {
+        match run_shell(fs, net_service, services, &mut broker, &mut sup) {
             Ok(code) => {
                 sys::print(b"AriInit: shell terminado con ");
                 sys::print(aricode_rt::fmt_u64(code, &mut buf));
