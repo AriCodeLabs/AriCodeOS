@@ -20,6 +20,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ari-app-notes-reader"
+version = "0.6.0"
+dependencies = [
+ "aricode-build",
+ "aricode-proto",
+ "aricode-rt",
+]
+
+[[package]]
 name = "ari-app-perms-check"
 version = "0.6.0"
 dependencies = [

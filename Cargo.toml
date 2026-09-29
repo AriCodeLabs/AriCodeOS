@@ -40,6 +40,7 @@ members = [
     "apps/win-probe",
     "apps/wasm-runner",
     "apps/wasm-demo",
+    "apps/notes-reader",
     "sdk/rust",
     "sdk/proto",
     "user/testprogs",

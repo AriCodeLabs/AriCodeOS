@@ -152,6 +152,10 @@ pub mod fs {
         /// entero del fichero de forma atómica y duradera (ADR 0014); `value`
         /// = bytes escritos.
         Replace = 9,
+        /// Solo por el endpoint principal (el broker): crea un endpoint ligado
+        /// a un único fichero en modo lectura (ADR 0016); la respuesta lo
+        /// transfiere (`WRITE`). Desde él solo se ve, abre y lee ese fichero.
+        Share = 10,
     }
 
     /// Petición (64 bytes): cabecera, argumentos y nombre.
@@ -220,6 +224,7 @@ pub mod fs {
                 7 => Op::Bind,
                 8 => Op::Flush,
                 9 => Op::Replace,
+                10 => Op::Share,
                 _ => return None,
             };
             let mut name = [0u8; MAX_NAME];
@@ -247,6 +252,9 @@ pub mod fs {
         Io = 6,
         BadFd = 7,
         OutOfRange = 8,
+        /// El endpoint no permite la operación (fichero compartido de solo
+        /// lectura, ADR 0016).
+        Denied = 9,
     }
 
     /// Respuesta (64 bytes): estado, valor y nombre (para `List`).
@@ -315,6 +323,7 @@ pub mod fs {
                 6 => Status::Io,
                 7 => Status::BadFd,
                 8 => Status::OutOfRange,
+                9 => Status::Denied,
                 _ => return None,
             };
             let mut name = [0u8; MAX_NAME];

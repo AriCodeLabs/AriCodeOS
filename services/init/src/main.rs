@@ -964,6 +964,7 @@ impl Broker {
             // Sin manifiesto: solo consola y reloj, memoria minima.
             None => (Caps::SYSTEM, 64),
         };
+        let read_files = manifest.as_ref().map(Manifest::read_files);
         let denied = caps.difference(Caps::allowed_for(name));
         sys::print(b"AriInit: lanzar ");
         sys::print(name.as_bytes());
@@ -983,7 +984,18 @@ impl Broker {
         sys::print(b"] memoria ");
         let mut buf = [0u8; 20];
         sys::print(aricode_rt::fmt_u64(memory_kib as u64, &mut buf));
-        sys::print(b" KiB\n");
+        sys::print(b" KiB");
+        if let Some(files) = read_files.clone().filter(|f| f.clone().count() > 0) {
+            sys::print(b" solo lectura [");
+            for (i, f) in files.enumerate() {
+                if i > 0 {
+                    sys::print(b" ");
+                }
+                sys::print(f.as_bytes());
+            }
+            sys::print(b"]");
+        }
+        sys::print(b"\n");
         if !denied.is_empty() {
             sys::print(b"AriInit: denegado, pide capacidades del sistema:");
             for c in denied.names() {
@@ -1011,6 +1023,24 @@ impl Broker {
             };
             match fs.bind(name) {
                 Ok(h) => granted.push(h),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
+            }
+            needs_hw = true;
+        }
+        // Ficheros compartidos de solo lectura (ADR 0016): fsd liga un
+        // endpoint a cada uno; uno inexistente deniega el lanzamiento.
+        for file in read_files.into_iter().flatten() {
+            let Some(fs) = &self.fs else {
+                return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
+            };
+            match fs.share(file) {
+                Ok(h) => granted.push(h),
+                Err(sys::fs::FsError::Status(aricode_proto::fs::Status::NotFound)) => {
+                    sys::print(b"AriInit: denegado, fichero compartido inexistente: ");
+                    sys::print(file.as_bytes());
+                    sys::print(b"\n");
+                    return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
+                }
                 Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
             needs_hw = true;
