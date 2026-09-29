@@ -31,13 +31,16 @@ impl Caps {
     /// Acceso al servicio de bloques: solo para aplicaciones de sistema de la
     /// lista de confianza del broker (`updater`).
     pub const BLOCK: Caps = Caps(1 << 8);
+    /// Espacio principal de fsd para instalar paquetes (ADR 0018): solo para
+    /// `installer`.
+    pub const INSTALL: Caps = Caps(1 << 9);
 
     pub const NONE: Caps = Caps(0);
     /// Las que el broker concede a aplicaciones normales.
     pub const APP_ALLOWED: Caps =
         Caps(Caps::SYSTEM.0 | Caps::FS.0 | Caps::NET.0 | Caps::WINDOW.0 | Caps::INPUT.0);
 
-    const NAMES: [(&'static str, Caps); 9] = [
+    const NAMES: [(&'static str, Caps); 10] = [
         ("system", Caps::SYSTEM),
         ("fs", Caps::FS),
         ("net", Caps::NET),
@@ -47,18 +50,24 @@ impl Caps {
         ("pci", Caps::PCI),
         ("framebuffer", Caps::FRAMEBUFFER),
         ("block", Caps::BLOCK),
+        ("install", Caps::INSTALL),
     ];
 
     /// Aplicaciones de sistema que además pueden pedir `block`.
     pub const TRUSTED_BLOCK: [&'static str; 1] = ["updater"];
+    /// Aplicaciones de sistema que además pueden pedir `install`.
+    pub const TRUSTED_INSTALL: [&'static str; 1] = ["installer"];
 
     /// Capacidades concedibles a la aplicación `name`.
     pub fn allowed_for(name: &str) -> Caps {
+        let mut caps = Caps::APP_ALLOWED;
         if Self::TRUSTED_BLOCK.contains(&name) {
-            Caps::APP_ALLOWED.union(Caps::BLOCK)
-        } else {
-            Caps::APP_ALLOWED
+            caps = caps.union(Caps::BLOCK);
         }
+        if Self::TRUSTED_INSTALL.contains(&name) {
+            caps = caps.union(Caps::INSTALL);
+        }
+        caps
     }
 
     pub fn from_name(name: &str) -> Option<Caps> {
@@ -317,6 +326,18 @@ mod tests {
         assert!(
             !block.caps.difference(Caps::allowed_for("otra")).is_empty(),
             "block solo para updater"
+        );
+        let install = Manifest::parse("name = installer\ncaps = system, install").unwrap();
+        assert!(install
+            .caps
+            .difference(Caps::allowed_for("installer"))
+            .is_empty());
+        assert!(
+            !install
+                .caps
+                .difference(Caps::allowed_for("updater"))
+                .is_empty(),
+            "install solo para installer"
         );
         let forbidden = Manifest::parse("name = x\ncaps = fs, spawner").unwrap();
         let denied: Vec<&str> = forbidden

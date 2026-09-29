@@ -808,6 +808,8 @@ fn run_shell(
 struct Broker {
     endpoint: Handle,
     fs: Option<FsClient>,
+    /// Endpoint principal de fsd, para la capacidad `install` (ADR 0018).
+    fs_root: Option<Handle>,
     block: Option<Handle>,
     net: Handle,
     compositor: Option<Handle>,
@@ -874,6 +876,7 @@ impl Broker {
         Ok(Self {
             endpoint: sys::endpoint_create()?,
             fs,
+            fs_root: fs_service,
             block,
             net,
             compositor,
@@ -1213,6 +1216,16 @@ impl Broker {
                 return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
             };
             match sys::handle_duplicate(block, rights::WRITE | rights::TRANSFER) {
+                Ok(h) => granted.push(h),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
+            }
+            needs_hw = true;
+        }
+        if caps.contains(Caps::INSTALL) {
+            let Some(root) = self.fs_root else {
+                return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
+            };
+            match sys::handle_duplicate(root, rights::WRITE | rights::TRANSFER) {
                 Ok(h) => granted.push(h),
                 Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }

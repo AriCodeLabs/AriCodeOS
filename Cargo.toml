@@ -42,6 +42,7 @@ members = [
     "apps/wasm-runner",
     "apps/wasm-demo",
     "apps/notes-reader",
+    "apps/installer",
     "sdk/rust",
     "sdk/proto",
     "user/testprogs",

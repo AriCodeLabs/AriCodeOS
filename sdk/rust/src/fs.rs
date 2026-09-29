@@ -1,7 +1,7 @@
 //! Cliente del servicio de ficheros (`aricode-proto::fs`).
 
 use crate::{self as sys, rights, rpc, Error, Handle};
-use aricode_proto::fs::{Op, Reply, Request, Status, MAX_IO};
+use aricode_proto::fs::{Op, Reply, Request, Status, MAX_IO, MAX_REPLACE};
 
 pub struct FsClient {
     service: Handle,
@@ -152,18 +152,33 @@ impl FsClient {
         self.call(req, true).map(|r| r.value as usize)
     }
 
-    /// Sustituye el contenido entero del fichero por `data` (máximo `MAX_IO`)
-    /// de forma atómica y duradera (ADR 0014): tras un corte el fichero tiene
-    /// el contenido anterior o el nuevo, nunca una mezcla.
+    /// Sustituye el contenido entero del fichero por `data` (máximo
+    /// `MAX_REPLACE`) de forma atómica y duradera (ADR 0014): tras un corte el
+    /// fichero tiene el contenido anterior o el nuevo, nunca una mezcla. Por
+    /// encima de `MAX_IO` va por trozos al journal y un compromiso (ADR 0018).
     pub fn replace(&mut self, fd: u32, data: &[u8]) -> Result<usize, FsError> {
-        if data.len() > MAX_IO as usize {
+        if data.len() > MAX_REPLACE as usize {
             return Err(FsError::Status(Status::OutOfRange));
         }
-        self.buffer()[..data.len()].copy_from_slice(data);
-        let mut req = Request::new(Op::Replace);
+        if data.len() <= MAX_IO as usize {
+            self.buffer()[..data.len()].copy_from_slice(data);
+            let mut req = Request::new(Op::Replace);
+            req.fd = fd;
+            req.len = data.len() as u32;
+            return self.call(req, true).map(|r| r.value as usize);
+        }
+        for (i, chunk) in data.chunks(MAX_IO as usize).enumerate() {
+            self.buffer()[..chunk.len()].copy_from_slice(chunk);
+            let mut req = Request::new(Op::ReplaceChunk);
+            req.fd = fd;
+            req.offset = (i * MAX_IO as usize) as u32;
+            req.len = chunk.len() as u32;
+            self.call(req, true)?;
+        }
+        let mut req = Request::new(Op::ReplaceCommit);
         req.fd = fd;
         req.len = data.len() as u32;
-        self.call(req, true).map(|r| r.value as usize)
+        self.call(req, false).map(|r| r.value as usize)
     }
 
     /// Hace duraderas las escrituras anteriores (ADR 0014).

@@ -127,6 +127,8 @@ pub mod fs {
     pub const MAX_NAME: usize = 32;
     /// Máximo por petición de lectura/escritura (buffer del cliente).
     pub const MAX_IO: u32 = 4096;
+    /// Máximo de un reemplazo atómico (el journal de AriFS, ADR 0018).
+    pub const MAX_REPLACE: u32 = 32 * 1024;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Op {
@@ -156,6 +158,13 @@ pub mod fs {
         /// a un único fichero en modo lectura (ADR 0016); la respuesta lo
         /// transfiere (`WRITE`). Desde él solo se ve, abre y lee ese fichero.
         Share = 10,
+        /// `fd`, `offset`, `len`; handles `[respuesta, buffer]`: un trozo del
+        /// contenido nuevo al journal, sin comprometer nada (ADR 0018). Solo
+        /// un reemplazo a medias por servicio (`Busy` para los demás).
+        ReplaceChunk = 11,
+        /// `fd`, `len`: compromete y aplica los trozos anteriores de una vez;
+        /// `value` = bytes del contenido nuevo.
+        ReplaceCommit = 12,
     }
 
     /// Petición (64 bytes): cabecera, argumentos y nombre.
@@ -225,6 +234,8 @@ pub mod fs {
                 8 => Op::Flush,
                 9 => Op::Replace,
                 10 => Op::Share,
+                11 => Op::ReplaceChunk,
+                12 => Op::ReplaceCommit,
                 _ => return None,
             };
             let mut name = [0u8; MAX_NAME];
@@ -255,6 +266,8 @@ pub mod fs {
         /// El endpoint no permite la operación (fichero compartido de solo
         /// lectura, ADR 0016).
         Denied = 9,
+        /// Otro reemplazo por trozos está a medias (ADR 0018).
+        Busy = 10,
     }
 
     /// Respuesta (64 bytes): estado, valor y nombre (para `List`).
@@ -324,6 +337,7 @@ pub mod fs {
                 7 => Status::BadFd,
                 8 => Status::OutOfRange,
                 9 => Status::Denied,
+                10 => Status::Busy,
                 _ => return None,
             };
             let mut name = [0u8; MAX_NAME];

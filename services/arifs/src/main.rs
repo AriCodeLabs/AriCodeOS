@@ -171,10 +171,25 @@ fn qualified<'a>(prefix: &str, name: &str, buf: &'a mut [u8; 64]) -> Option<&'a 
     core::str::from_utf8(&buf[..total]).ok()
 }
 
+/// Reemplazo por trozos a medias (ADR 0018): fichero y endpoint dueño. Solo
+/// uno a la vez, porque el journal es único; lo libera el compromiso, un
+/// error o el cierre del descriptor.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Staging {
+    index: usize,
+    owner: usize,
+}
+
+/// Estado del servicio compartido por todas las peticiones.
+struct Server {
+    fds: Fds,
+    buffers: ClientBuffers,
+    staging: Option<Staging>,
+}
+
 fn handle(
     fs: &mut AriFs<PartitionDevice>,
-    fds: &mut Fds,
-    buffers: &mut ClientBuffers,
+    srv: &mut Server,
     ns: Option<&Namespace>,
     owner: usize,
     req: Request,
@@ -196,7 +211,8 @@ fn handle(
             }
             Op::Open => {
                 return match fs.find(shared.name_str()) {
-                    Some(i) if req.name_str() == shared.bare() => fds
+                    Some(i) if req.name_str() == shared.bare() => srv
+                        .fds
                         .open(i, owner)
                         .map_or(Reply::status(Status::NoSpace), |fd| Reply::ok(fd as u64)),
                     _ => Reply::status(Status::NotFound),
@@ -232,7 +248,8 @@ fn handle(
             }
         }
         Op::Open => match qualified(prefix, req.name_str(), &mut qbuf).and_then(|q| fs.find(q)) {
-            Some(i) => fds
+            Some(i) => srv
+                .fds
                 .open(i, owner)
                 .map_or(Reply::status(Status::NoSpace), |fd| Reply::ok(fd as u64)),
             None => Reply::status(Status::NotFound),
@@ -241,40 +258,72 @@ fn handle(
             .ok_or(FsError::BadName)
             .and_then(|q| fs.create(q))
         {
-            Ok(i) => fds
+            Ok(i) => srv
+                .fds
                 .open(i, owner)
                 .map_or(Reply::status(Status::NoSpace), |fd| Reply::ok(fd as u64)),
             Err(e) => Reply::status(status_of(e)),
         },
         Op::Close => {
-            if fds.close(req.fd, owner) {
+            let index = srv.fds.get(req.fd, owner);
+            if srv.fds.close(req.fd, owner) {
+                if index.is_some_and(|i| srv.staging == Some(Staging { index: i, owner })) {
+                    srv.staging = None;
+                }
                 Reply::ok(0)
             } else {
                 Reply::status(Status::BadFd)
+            }
+        }
+        Op::ReplaceCommit => {
+            let Some(index) = srv.fds.get(req.fd, owner) else {
+                return Reply::status(Status::BadFd);
+            };
+            if srv.staging != Some(Staging { index, owner }) {
+                return Reply::status(Status::Busy);
+            }
+            srv.staging = None;
+            match fs.replace_commit(index, req.len) {
+                Ok(()) => Reply::ok(req.len as u64),
+                Err(e) => Reply::status(status_of(e)),
             }
         }
         Op::Flush => match fs.flush() {
             Ok(()) => Reply::ok(0),
             Err(e) => Reply::status(status_of(e)),
         },
-        Op::Read | Op::Write | Op::Replace => {
-            let Some(index) = fds.get(req.fd, owner) else {
+        Op::Read | Op::Write | Op::Replace | Op::ReplaceChunk => {
+            let Some(index) = srv.fds.get(req.fd, owner) else {
                 return Reply::status(Status::BadFd);
             };
             let Some(dma) = data else {
                 return Reply::status(Status::BadHandles);
             };
             let len = req.len.min(MAX_IO) as usize;
-            let Some(buf) = buffers.map(dma) else {
+            let Some(buf) = srv.buffers.map(dma) else {
                 return Reply::status(Status::BadHandles);
             };
             if buf.len() < len {
                 return Reply::status(Status::Invalid);
             }
+            let mine = Staging { index, owner };
+            if matches!(req.op, Op::Replace | Op::ReplaceChunk)
+                && srv.staging.is_some_and(|s| s != mine)
+            {
+                return Reply::status(Status::Busy);
+            }
             let result = match req.op {
                 Op::Read => fs.read(index, req.offset, &mut buf[..len]),
                 Op::Write => fs.write(index, req.offset, &buf[..len]),
-                _ => fs.replace(index, &buf[..len]).map(|()| len),
+                Op::Replace => {
+                    srv.staging = None;
+                    fs.replace(index, &buf[..len]).map(|()| len)
+                }
+                _ => {
+                    let r = fs.replace_chunk(index, req.offset, &buf[..len]);
+                    srv.staging = r.is_ok().then_some(mine);
+                    r.map(|()| len)
+                }
             };
             match result {
                 Ok(n) => Reply::ok(n as u64),
@@ -316,10 +365,13 @@ fn main(partition_lba: u64) -> u64 {
     sys::print(b"fsd: AriFS montado, ");
     sys::print(aricode_rt::fmt_u64(fs.entries().count() as u64, &mut buf));
     sys::print(b" ficheros\n");
-    let mut fds = Fds([None; 16]);
-    let mut buffers = ClientBuffers {
-        entries: [(0, 0, 0); 8],
-        count: 0,
+    let mut srv = Server {
+        fds: Fds([None; 16]),
+        buffers: ClientBuffers {
+            entries: [(0, 0, 0); 8],
+            count: 0,
+        },
+        staging: None,
     };
     let mut msg = [0u8; Request::LEN];
     let mut handles = [Handle(0); 2];
@@ -373,15 +425,7 @@ fn main(partition_lba: u64) -> u64 {
                 continue;
             }
             let reply = match request {
-                Some(req) => handle(
-                    &mut fs,
-                    &mut fds,
-                    &mut buffers,
-                    ns.as_ref(),
-                    slot,
-                    req,
-                    data,
-                ),
+                Some(req) => handle(&mut fs, &mut srv, ns.as_ref(), slot, req, data),
                 None => Reply::status(Status::Invalid),
             };
             if let Some(d) = data {

@@ -562,8 +562,11 @@ segundo brevemente para añadir la región.
   LBA de la partición. Implementa `BlockDevice` sobre `aricode-sys::block`
   (un sector por petición) y atiende `FileServiceProtocol v1`
   (`sdk/proto::fs`): peticiones y respuestas de 64 bytes con `List`,
-  `Open`, `Create`, `Read`, `Write`, `Close`, `Flush` y `Replace`
-  (reemplazo atómico de hasta `MAX_IO`); los datos van por el buffer
+  `Open`, `Create`, `Read`, `Write`, `Close`, `Flush`, `Replace`
+  (reemplazo atómico de hasta `MAX_IO`) y `ReplaceChunk`/`ReplaceCommit`
+  (trozos al journal y compromiso: hasta 32 KiB con la misma garantía; un
+  solo reemplazo a medias por servicio, `Busy` para los demás, liberado por
+  el compromiso, un error o el cierre del descriptor; ADR 0018); los datos van por el buffer
   DMA del cliente (hasta 4 KiB por petición), que fsd mapea una vez y
   reutiliza por dirección física. Los descriptores son globales al servicio
   (16 abiertos) hasta que haya identidad de cliente por capability.
@@ -797,7 +800,10 @@ segundo brevemente para añadir la región.
   `process_spawn_from` (syscall 30: `MANAGE` sobre el `SPAWNER`, `READ`
   sobre el buffer, desplazamiento y longitud del ELF; el kernel copia los
   segmentos por el mapa físico y el buffer queda libre para el siguiente).
-  Si el kernel rechaza el `spawn` por cualquier
+  Desde el sistema, `installer` (capacidad `install`: el espacio principal
+  de fsd, solo para él) instala o actualiza `apps/NOMBRE.aripkg` desde
+  `pkgs/` con un único `replace` tras verificar y comparar versiones (ADR
+  0018). Si el kernel rechaza el `spawn` por cualquier
   motivo, los duplicados preparados se cierran (el kernel solo los retira al
   crear el proceso): antes cada nombre inexistente consumía una entrada de
   la tabla de init. El shell recibe el endpoint del broker en

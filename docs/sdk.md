@@ -84,8 +84,10 @@ con `run NOMBRE` cuando no lo encuentra en el initrd: verifica firma y
 hashes, aplica la misma política al manifiesto y crea el proceso desde el
 buffer con `process_spawn_from`. Un programa instalado no puede pedir más que
 uno del initrd con el mismo manifiesto, y un paquete que no verifica no se
-lanza. El paquete no puede pasar de 256 KiB (buffer de preparación del
-broker) ni de 32 KiB si se quiere reemplazar de forma atómica.
+lanza. Desde el propio sistema, `run installer` instala o actualiza los
+paquetes dejados en `pkgs/` (ADR 0018): verifica cada uno, instala solo
+versiones más nuevas que la instalada y lo hace con un único `replace`
+atómico. El paquete no puede pasar de 32 KiB (el journal de AriFS).
 
 ## Qué recibe un programa
 
@@ -102,7 +104,7 @@ hablar con él. `sys::permissions::granted` recorre lo recibido.
 |------|------|
 | process | `sys::process_spawn_with(spawner, nombre, arg, handles)`, `sys::process_wait`, `sys::process_exit`; hace falta un handle `SPAWNER` con `MANAGE` (init lo tiene; el shell recibe uno para `run`) |
 | ipc | `sys::endpoint_create`, `sys::ipc_send`, `sys::ipc_receive` (256 bytes y hasta 4 handles por mensaje, con plazo); los datos grandes van por buffers DMA compartidos |
-| filesystem | `sys::fs::FsClient` sobre el endpoint de `fsd` y una capacidad `HARDWARE` para su buffer: `list`, `open`, `create`, `read`, `write` (en el sitio, duradero tras `flush`), `replace` (todo-o-nada y duradero, hasta 4 KiB), `flush`, `close` (ADR 0014) |
+| filesystem | `sys::fs::FsClient` sobre el endpoint de `fsd` y una capacidad `HARDWARE` para su buffer: `list`, `open`, `create`, `read`, `write` (en el sitio, duradero tras `flush`), `replace` (todo-o-nada y duradero, hasta 32 KiB: por trozos al journal por encima de 4 KiB), `flush`, `close` (ADR 0014, 0018) |
 | network | `sys::net::NetClient`: `info`, `ping`, UDP (`udp_bind/send/recv`), TCP (`tcp_connect/listen/accept/send/recv/close`), `resolve`; `sys::http::get` encima |
 | window | `sys::window::Window::create(compositor, hardware, w, h, titulo)`, `canvas()` (lienzo `aricode-gfx`), `present`, `poll` (`Key`, `Click`, `Focus`), `close` |
 | input | `sys::input::InputClient` sobre un `inputd`: eventos evdev con instante; `aricode-input::Keyboard` los traduce |
@@ -122,7 +124,7 @@ xtask):
 
 ```text
 name = hello_app
-caps = system, fs      # system | fs | net | window | input | block (solo apps de confianza: updater)
+caps = system, fs      # system | fs | net | window | input | block (solo updater) | install (solo installer)
 memory = 128K          # cuota de buffers DMA (K o M, máximo 8M)
 read_files = hola.txt  # hasta 4 ficheros de AriFS en modo lectura (ADR 0016)
 ```
@@ -130,9 +132,10 @@ read_files = hola.txt  # hasta 4 ficheros de AriFS en modo lectura (ADR 0016)
 Los handles llegan en este orden fijo, solo los pedidos: `SYSTEM` (lectura),
 directorio privado de fsd, un endpoint por fichero de `read_files` (en su
 orden; desde él solo se lista, abre y lee ese fichero, y todo lo demás
-responde `Denied`), endpoint de red, endpoint del compositor, endpoints de
-entrada y, si alguna capacidad necesita buffers (`fs`, `read_files`, `net`,
-`window`), `HARDWARE` al final. Con `sys::permissions::granted` la aplicación
+responde `Denied`), endpoint de red, endpoint del compositor, endpoint de
+bloques, espacio principal de fsd (`install`), endpoints de entrada y, si
+alguna capacidad necesita buffers (`fs`, `read_files`, `net`, `window`,
+`block`, `install`), `HARDWARE` al final. Con `sys::permissions::granted` la aplicación
 los reconoce por tipo sin depender de la posición. Sin manifiesto solo se
 recibe consola y `SYSTEM`. Pedir `spawner`, `pci` o `framebuffer` hace que el
 broker deniegue el lanzamiento.

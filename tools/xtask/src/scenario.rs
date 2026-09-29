@@ -162,6 +162,10 @@ pub struct Scenario {
     /// (ADR 0017).
     #[serde(default)]
     pub install: Vec<String>,
+    /// Paquetes pendientes en `pkgs/` del disco de pruebas: `DIR:VERSION`
+    /// o `DIR:VERSION:corrupt` (firma alterada), para el instalador (ADR 0018).
+    #[serde(default)]
+    pub packages: Vec<String>,
     #[serde(skip)]
     pub file: PathBuf,
 }
