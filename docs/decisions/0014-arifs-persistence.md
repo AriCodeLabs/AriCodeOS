@@ -25,7 +25,9 @@ datos de las aplicaciones.
    transición basta y el formato apenas cambia. `replace(fd, datos)`
    escribe los datos y su CRC en el journal, `flush`, marca la cabecera
    pendiente con su propio CRC, `flush`, copia al fichero, fija el tamaño,
-   `flush`, limpia la cabecera, `flush`. Al montar, una cabecera pendiente
+   `flush`, limpia la cabecera (sin `flush`: una limpieza perdida solo
+   cuesta rehacer un reemplazo ya aplicado, y cada `flush` es un fsync del
+   soporte; etapa 5). Al montar, una cabecera pendiente
    válida con datos que cuadran se rehace (idempotente); una cabecera rota
    o unos datos que no cuadran se descartan: el reemplazo nunca llegó a
    comprometerse y el fichero conserva el contenido anterior.

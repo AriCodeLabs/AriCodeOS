@@ -566,7 +566,9 @@ segundo brevemente para añadir la región.
 - `fsd` (`services/arifs`) recibe de init su endpoint (`READ|WRITE`), el
   del servicio de bloques (`WRITE`) y una capacidad de hardware; `arg` es el
   LBA de la partición. Implementa `BlockDevice` sobre `aricode-sys::block`
-  (un sector por petición) y atiende `FileServiceProtocol v1`
+  (lotes de hasta 8 sectores por petición: la librería agrupa los sectores
+  enteros de cada lectura, escritura, trozo del journal y aplicación, etapa
+  5) y atiende `FileServiceProtocol v1`
   (`sdk/proto::fs`): peticiones y respuestas de 64 bytes con `List`,
   `Open`, `Create`, `Read`, `Write`, `Close`, `Flush`, `Replace`
   (reemplazo atómico de hasta `MAX_IO`) y `ReplaceChunk`/`ReplaceCommit`
