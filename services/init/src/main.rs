@@ -1559,7 +1559,15 @@ fn main(arg: u64) -> u64 {
                     Policy::DRIVER,
                 )
                 .is_some_and(|i| sup.launch(i));
-            if !launched {
+            if launched {
+                // El anuncio va aqui y no en el puente: init imprime antes
+                // de que exista el shell, asi que nada se entrelaza con su
+                // primer prompt. Los servicios de entrada guardan lo que se
+                // teclee hasta que el puente lo lea.
+                sys::print(b"AriInit: puente de consola con ");
+                sys::print(aricode_rt::fmt_u64(inputs as u64, &mut buf));
+                sys::print(b" dispositivo(s) de entrada\nCONSOLE_BRIDGE_READY\n");
+            } else {
                 say(b"puente de consola sin arrancar: el shell solo lee COM1 y PS/2");
             }
         }

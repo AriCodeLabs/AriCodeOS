@@ -20,7 +20,7 @@ keys = ["c", "p", "u", "s", "ret", "s", "h", "u", "t", "d", "o", "w", "n", "ret"
 exit = 33
 serial_contains = [
     "usb-input: dispositivo listo: USB HID Keyboard+Mouse",
-    "console-bridge: 3 dispositivo(s) de entrada hacia la consola",
+    "AriInit: puente de consola con 3 dispositivo(s) de entrada",
     "arish: shell de AriCodeOS",
     "cpus: ",
     "ari> shutdown",

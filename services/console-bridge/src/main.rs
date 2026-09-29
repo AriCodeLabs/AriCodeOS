@@ -46,11 +46,8 @@ fn main(count: u64) -> u64 {
     let mut events = [Event::default(); MAX_EVENTS];
     let mut times = [0u64; MAX_EVENTS];
     let mut text = [0u8; MAX_EVENTS];
-    let mut b = [0u8; 20];
-    sys::print(b"console-bridge: ");
-    sys::print(aricode_rt::fmt_u64(count as u64, &mut b));
-    sys::print(b" dispositivo(s) de entrada hacia la consola\n");
-    sys::print(b"CONSOLE_BRIDGE_READY\n");
+    // Sin anuncio propio: lo hace init antes de lanzar el shell, para que
+    // nada se entrelace con el primer prompt en la consola (varias CPUs).
     loop {
         for (i, client) in clients.iter().take(count).enumerate() {
             let Some(client) = client else { continue };

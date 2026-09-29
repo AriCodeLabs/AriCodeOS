@@ -52,6 +52,9 @@ plan posterior al roadmap pide una sesión útil con esos teclados.
   pasando al shell solo `READ|TRANSFER`.
 - El puente recorre los servicios por turnos con plazo `POLL_MS` (20 ms):
   la latencia máxima de una pulsación crece con el número de dispositivos.
+- El puente no escribe nada al arrancar: init anuncia su lanzamiento
+  (`CONSOLE_BRIDGE_READY`) antes de crear el shell, porque con varias CPUs
+  una línea del puente se entrelazaba con el primer prompt.
 - `shell.usb_keyboard` y `shell.virtio_keyboard` prueban una sesión de
   shell tecleada por QMP en un teclado USB HID y en uno virtio;
   `shell.services_detail` muestra el puente como residente.
