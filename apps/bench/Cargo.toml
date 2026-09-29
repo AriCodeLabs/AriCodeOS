@@ -1,0 +1,19 @@
+[package]
+name = "ari-app-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Medidas reproducibles de AriCodeOS desde ring 3: syscall, IPC y ficheros con percentiles"
+publish = false
+
+[[bin]]
+name = "bench"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+aricode-rt = { path = "../../sdk/runtime" }
+
+[build-dependencies]
+aricode-build = { path = "../../sdk/build" }

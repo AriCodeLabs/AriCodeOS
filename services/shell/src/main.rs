@@ -87,7 +87,7 @@ fn trim(s: &[u8]) -> &[u8] {
 
 fn help() {
     sys::print(
-        b"comandos:\n  help      esta ayuda\n  ps        procesos\n  mem       memoria fisica\n  ls        ficheros de AriFS\n  cat NOM   muestra un fichero\n  write NOM TEXTO  guarda TEXTO en el fichero (lo crea o lo reemplaza entero)\n  devices   funciones PCI\n  services  servicios de arranque (--detail: estado del supervisor)\n  uptime    tiempo desde el arranque\n  cpus      procesadores en linea\n  net       configuracion de red\n  ping IP   eco ICMP (4 intentos)\n  dns NOM   resuelve un nombre\n  http URL  GET y muestra el cuerpo\n  run PROG  ejecuta un programa del initrd y espera\n  spawn PROG  lo lanza en segundo plano (no se puede detener)\n  repeat N CMD  repite un comando N veces\n  reboot    reinicia\n  shutdown  apaga\n  exit      termina el shell\n",
+        b"comandos:\n  help      esta ayuda\n  ps        procesos\n  mem       memoria fisica\n  ls        ficheros de AriFS\n  cat NOM   muestra un fichero\n  write NOM TEXTO  guarda TEXTO en el fichero (lo crea o lo reemplaza entero)\n  devices   funciones PCI\n  services  servicios de arranque (--detail: estado del supervisor)\n  uptime    tiempo desde el arranque\n  cpus      procesadores en linea y reposo por CPU\n  diag      informe completo (uptime, mem, cpus, ps, services)\n  net       configuracion de red\n  ping IP   eco ICMP (4 intentos)\n  dns NOM   resuelve un nombre\n  http URL  GET y muestra el cuerpo\n  run PROG  ejecuta un programa del initrd y espera\n  spawn PROG  lo lanza en segundo plano (no se puede detener)\n  repeat N CMD  repite un comando N veces\n  reboot    reinicia\n  shutdown  apaga\n  exit      termina el shell\n",
     );
 }
 
@@ -172,6 +172,37 @@ fn cpus() {
     sys::print(b"cpus: ");
     num(u64::from_le_bytes(buf));
     sys::print(b" en linea\n");
+    // Reposo por CPU: ciclos en `hlt` frente a los transcurridos.
+    let mut idle = [0u8; 8 * (2 + 16)];
+    let Ok(n) = sys::system_info(SYSTEM, abi::sysinfo::IDLE, &mut idle) else {
+        return;
+    };
+    let words = idle[..n].as_chunks::<8>().0;
+    let (Some(elapsed), Some(cpus)) = (words.first(), words.get(1)) else {
+        return;
+    };
+    let (elapsed, cpus) = (u64::from_le_bytes(*elapsed), u64::from_le_bytes(*cpus));
+    for (i, cycles) in words.iter().skip(2).take(cpus as usize).enumerate() {
+        let cycles = u64::from_le_bytes(*cycles).min(elapsed);
+        sys::print(b"cpu ");
+        num(i as u64);
+        sys::print(b": ");
+        num(cycles * 100 / elapsed.max(1));
+        sys::print(b"% en reposo\n");
+    }
+}
+
+/// `diag`: informe completo en un bloque, para adjuntar al describir un
+/// problema (docs/performance.md).
+fn diag(fs: &mut FsClient, mask: u64) {
+    sys::print(b"=== diagnostico AriCodeOS ===\n");
+    uptime();
+    mem();
+    cpus();
+    ps();
+    services(mask, fs);
+    services_detail();
+    sys::print(b"=== fin del diagnostico ===\n");
 }
 
 fn ls(fs: &FsClient) {
@@ -666,6 +697,7 @@ fn execute(
         b"services" => services(mask, fs),
         b"uptime" => uptime(),
         b"cpus" => cpus(),
+        b"diag" => diag(fs, mask),
         b"net" => net(net_client),
         b"ping" => ping(net_client, rest),
         b"dns" => dns(net_client, rest),

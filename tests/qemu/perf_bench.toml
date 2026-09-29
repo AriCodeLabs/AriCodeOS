@@ -1,0 +1,29 @@
+# Etapa 5 (medidas): `bench` mide syscall, IPC a fsd y ficheros con
+# percentiles; `cpus` muestra el reposo por CPU y `diag` reune un informe.
+# Los valores no se comparan aqui (dependen del host y de TCG): se exige que
+# las medidas se produzcan y que el sistema no este saturado en reposo.
+name = "perf.bench"
+description = "bench: percentiles de syscall, IPC y ficheros; reposo por CPU; informe diag"
+level = "full"
+areas = ["perf", "shell", "sandbox"]
+cmdline = "qemu_exit shell"
+timeout_secs = 180
+stdin = ["run bench", "cpus", "diag", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "bench: calibracion ",
+    "bench: syscall thread_get_tid (10000): p50 ",
+    "bench: ipc fsd list (1000): p50 ",
+    "bench: replace 4 KiB (100): p50 ",
+    "bench: read 4 KiB (100): p50 ",
+    "bench: fin",
+    "run: bench termino con 0",
+    "% en reposo",
+    "=== diagnostico AriCodeOS ===",
+    "SERVICIO         ESTADO       GEN  REINICIOS  ULTIMA SALIDA     LISTO DESDE",
+    "=== fin del diagnostico ===",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "bench: no se pudo calibrar"]

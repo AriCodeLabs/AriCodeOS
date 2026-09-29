@@ -285,6 +285,9 @@ pub mod sysinfo {
     /// Tres `u64`: unidades IOMMU activas, dominios vivos y fallos de DMA
     /// registrados (Fase 33).
     pub const IOMMU: u64 = 6;
+    /// Reposo por CPU (etapa 5): `u64` ciclos de TSC desde el arranque, `u64`
+    /// CPUs en línea y, por cada una, `u64` ciclos pasados en `hlt`.
+    pub const IDLE: u64 = 7;
 
     /// Formato de píxel del framebuffer (32 bpp).
     pub const FB_FORMAT_RGB: u8 = 0;

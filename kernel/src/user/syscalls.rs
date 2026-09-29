@@ -192,6 +192,14 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
     let bytes: Vec<u8> = match kind {
         sysinfo::UPTIME => crate::time::uptime_ms().to_le_bytes().to_vec(),
         sysinfo::CPUS => (crate::cpu::online_count() as u64).to_le_bytes().to_vec(),
+        sysinfo::IDLE => {
+            let mut v = crate::time::tsc_since_boot().to_le_bytes().to_vec();
+            v.extend_from_slice(&(crate::cpu::online_count() as u64).to_le_bytes());
+            for c in crate::cpu::online() {
+                v.extend_from_slice(&c.idle_cycles().to_le_bytes());
+            }
+            v
+        }
         sysinfo::IOMMU => {
             let (units, domains, faults) = crate::iommu::stats();
             let mut v = units.to_le_bytes().to_vec();
