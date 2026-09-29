@@ -406,7 +406,7 @@ pub fn run_interactive(
         image::write_usb_image(&disk, &esp)?;
         None
     } else {
-        image::write_test_disk(&disk, image::DiskVariant::Slots)?;
+        image::write_test_disk(&disk, image::DiskVariant::Slots, &[])?;
         Some(esp.as_path())
     };
     let _responder = Responder::start()?;
@@ -464,6 +464,8 @@ pub struct Headless<'a> {
     pub keep_disk: bool,
     /// Mata QEMU (corte de energía) al ver este texto en la serie.
     pub kill_on: Option<&'a str>,
+    /// Ficheros que van a AriFS del disco de pruebas (paquetes instalados).
+    pub installed: &'a [(String, Vec<u8>)],
     pub cpus: u32,
     pub usb_hid: bool,
     pub usb_legacy_controller: bool,
@@ -491,7 +493,7 @@ pub fn run_headless(
         None
     } else {
         if !options.keep_disk {
-            image::write_test_disk(&disk, disk_variant)?;
+            image::write_test_disk(&disk, disk_variant, options.installed)?;
         }
         Some(esp)
     };

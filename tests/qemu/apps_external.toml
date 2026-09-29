@@ -1,0 +1,29 @@
+# Etapa 4 (aplicaciones externas, ADR 0017): `examples/hello_ext` se construye
+# fuera del workspace con el SDK por ruta, se empaqueta y firma con la clave
+# de desarrollo (`cargo xtask app-pack`), xtask lo instala en AriFS como
+# `apps/hello_ext.aripkg` y el broker lo verifica y lanza desde ahi, con el
+# manifiesto del paquete, cuando no esta en el initrd.
+name = "apps.external"
+description = "aplicacion construida fuera del arbol, empaquetada y firmada, instalada en AriFS y lanzada por el broker"
+level = "full"
+areas = ["apps", "sandbox", "shell", "init"]
+cmdline = "qemu_exit shell"
+install = ["examples/hello_ext"]
+timeout_secs = 120
+stdin = ["run hello_ext 5", "run hello_ext 6", "run no-instalada", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "fs_client: apps/hello_ext.aripkg (",
+    "AriInit: lanzar hello_ext desde AriFS (apps/hello_ext.aripkg version 1, ",
+    " con manifiesto [system fs] memoria 64 KiB",
+    "fsd: directorio privado 'hello_ext'",
+    "hello_ext v1: hola desde fuera del arbol (arg 5)",
+    "hello_ext: fichero privado 'estado' escrito y leido",
+    "run: hello_ext termino con 0",
+    "hello_ext v1: hola desde fuera del arbol (arg 6)",
+    "run: no-instalada: no existe en el initrd ni en AriFS",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "USER FAULT #GP", "manifiesto invalido", "el broker no pudo lanzarlo", "no verifica"]

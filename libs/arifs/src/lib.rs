@@ -357,8 +357,19 @@ impl<D: BlockDevice> AriFs<D> {
         self.dev.write_sector(lba, &s)
     }
 
-    /// Crea un fichero vacío con capacidad fija. Devuelve su índice.
+    /// Crea un fichero vacío con la capacidad fija habitual. Devuelve su índice.
     pub fn create(&mut self, name: &str) -> Result<usize, FsError> {
+        self.create_sized(name, FILE_CAPACITY_SECTORS)
+    }
+
+    /// Como `create`, con capacidad `sectors` (múltiplo de
+    /// `FILE_CAPACITY_SECTORS`): ficheros grandes, como los paquetes
+    /// instalados (ADR 0017). `replace` solo admite hasta la capacidad del
+    /// journal (`FILE_CAPACITY_SECTORS`).
+    pub fn create_sized(&mut self, name: &str, sectors: u32) -> Result<usize, FsError> {
+        if sectors == 0 || !sectors.is_multiple_of(FILE_CAPACITY_SECTORS) {
+            return Err(FsError::OutOfRange);
+        }
         if !valid_name(name) {
             return Err(FsError::BadName);
         }
@@ -371,19 +382,19 @@ impl<D: BlockDevice> AriFs<D> {
             .position(Option::is_none)
             .ok_or(FsError::NoSpace)?;
         let start = self.sb.data_next;
-        if start + FILE_CAPACITY_SECTORS as u64 > self.sb.total_sectors {
+        if start + sectors as u64 > self.sb.total_sectors {
             return Err(FsError::NoSpace);
         }
         let mut entry = Entry {
             name: [0; NAME_LEN],
             name_len: name.len() as u8,
             start_lba: start,
-            capacity_sectors: FILE_CAPACITY_SECTORS,
+            capacity_sectors: sectors,
             size: 0,
         };
         entry.name[..name.len()].copy_from_slice(name.as_bytes());
         self.table[index] = Some(entry);
-        self.sb.data_next = start + FILE_CAPACITY_SECTORS as u64;
+        self.sb.data_next = start + sectors as u64;
         // Primero el superbloque: un corte entre ambos deja espacio
         // reservado sin entrada, nunca una entrada sobre espacio no reservado.
         self.dev.write_sector(0, &self.sb.encode())?;
@@ -462,7 +473,8 @@ impl<D: BlockDevice> AriFs<D> {
     /// prueba de recuperación y el siguiente `open` lo rehace.
     pub fn stage_replace(&mut self, index: usize, data: &[u8]) -> Result<Journal, FsError> {
         let e = *self.entry(index).ok_or(FsError::NotFound)?;
-        if data.len() > e.capacity_bytes() as usize {
+        let journal_capacity = FILE_CAPACITY_SECTORS as usize * SECTOR;
+        if data.len() > e.capacity_bytes() as usize || data.len() > journal_capacity {
             return Err(FsError::OutOfRange);
         }
         // 1. Datos al journal (sectores enteros, sin lectura previa).
@@ -836,6 +848,30 @@ mod tests {
         assert!(
             replayed > 0,
             "algun corte deja un reemplazo comprometido a medias"
+        );
+    }
+
+    #[test]
+    fn sized_files_hold_more_than_the_journal() {
+        let mut fs = AriFs::format(disk(600), 600).unwrap();
+        assert_eq!(fs.create_sized("x", 65), Err(FsError::OutOfRange));
+        assert_eq!(fs.create_sized("x", 0), Err(FsError::OutOfRange));
+        let i = fs
+            .create_sized("apps/grande", 2 * FILE_CAPACITY_SECTORS)
+            .unwrap();
+        let data: Vec<u8> = (0..40_000u32).map(|x| (x % 253) as u8).collect();
+        assert_eq!(fs.write(i, 0, &data).unwrap(), 40_000);
+        assert_eq!(
+            fs.replace(i, &data),
+            Err(FsError::OutOfRange),
+            "el journal no cubre mas de 64 sectores"
+        );
+        let mut fs = AriFs::open(fs.into_device()).unwrap();
+        assert_eq!(content(&mut fs, i), data);
+        let j = fs.create("normal").unwrap();
+        assert_eq!(
+            fs.entry(j).unwrap().start_lba,
+            DATA_LBA + 2 * FILE_CAPACITY_SECTORS as u64
         );
     }
 

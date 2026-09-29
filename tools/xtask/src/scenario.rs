@@ -156,6 +156,12 @@ pub struct Scenario {
     /// ellos la `cmdline`, `stdin` y `expect` del escenario no se usan.
     #[serde(default)]
     pub boots: Vec<Boot>,
+    /// Aplicaciones externas (directorios con `Cargo.toml` y `NOMBRE.manifest`,
+    /// relativos a la raíz) que xtask compila, empaqueta con versión 1 e
+    /// instala en AriFS del disco de pruebas como `apps/NOMBRE.aripkg`
+    /// (ADR 0017).
+    #[serde(default)]
+    pub install: Vec<String>,
     #[serde(skip)]
     pub file: PathBuf,
 }

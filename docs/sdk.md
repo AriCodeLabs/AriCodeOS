@@ -62,6 +62,31 @@ Para que llegue al initrd, el paquete se añade a `Cargo.toml` (workspace), a
 `PACKAGES` y a `build_user_programs`/`initrd_programs` en
 `tools/xtask/src/build.rs`. `apps/hello` es el ejemplo completo.
 
+## Aplicaciones fuera del árbol (etapa 4, ADR 0017)
+
+Una aplicación no tiene por qué vivir en el workspace ni en el initrd.
+`examples/hello_ext` es un crate con su propio `[workspace]`, el SDK por
+ruta (`aricode-rt = { path = "../../sdk/runtime" }`) y un `NOMBRE.manifest`
+al lado:
+
+```bash
+cargo xtask app-pack examples/hello_ext --version 1   # build/pkgs/hello_ext-1.aripkg
+```
+
+Se construye desde la raíz del repositorio, así que usa el mismo
+`rust-toolchain.toml` y `.cargo/config.toml` que los programas del initrd, y
+recibe la versión en `APP_VERSION` al compilar. El paquete (`aricode-pkg`) es
+un solo fichero firmado con la clave de desarrollo: manifiesto del paquete
+(nombre, versión, SHA-256 del programa y de su manifiesto), firma, ELF y
+manifiesto de aplicación. Instalado en AriFS como `apps/NOMBRE.aripkg` (un
+escenario lo hace con `install = ["examples/hello_ext"]`), el broker lo lanza
+con `run NOMBRE` cuando no lo encuentra en el initrd: verifica firma y
+hashes, aplica la misma política al manifiesto y crea el proceso desde el
+buffer con `process_spawn_from`. Un programa instalado no puede pedir más que
+uno del initrd con el mismo manifiesto, y un paquete que no verifica no se
+lanza. El paquete no puede pasar de 256 KiB (buffer de preparación del
+broker) ni de 32 KiB si se quiere reemplazar de forma atómica.
+
 ## Qué recibe un programa
 
 Handles fijos (`aricode_abi::handle`): `0x10001` su proceso, `0x10002` su
