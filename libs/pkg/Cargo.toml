@@ -1,0 +1,21 @@
+[package]
+name = "aricode-pkg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Paquetes de aplicación firmados de AriCodeOS: contenedor con programa, manifiesto de aplicación y firma Ed25519 (no_std; escritor con la feature write)"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+# Escritor para herramientas de host (xtask).
+write = ["aricode-initrd/write"]
+
+[dependencies]
+aricode-crypto = { path = "../crypto" }
+aricode-initrd = { path = "../initrd" }
+
+[dev-dependencies]
+aricode-initrd = { path = "../initrd", features = ["write"] }

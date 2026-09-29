@@ -467,7 +467,9 @@ fn run(arg: &[u8]) {
             num(code);
             sys::print(b"\n");
         }
-        Err(LaunchError::Status(Status::NotFound)) => sys::print(b": no existe en el initrd\n"),
+        Err(LaunchError::Status(Status::NotFound)) => {
+            sys::print(b": no existe en el initrd ni en AriFS\n")
+        }
         Err(LaunchError::Status(Status::Denied)) => {
             sys::print(b": denegado por el broker (pide capacidades del sistema)\n")
         }
@@ -504,7 +506,9 @@ fn spawn(arg: &[u8]) {
             num(4);
             sys::print(b")\n");
         }
-        Err(LaunchError::Status(Status::NotFound)) => sys::print(b": no existe en el initrd\n"),
+        Err(LaunchError::Status(Status::NotFound)) => {
+            sys::print(b": no existe en el initrd ni en AriFS\n")
+        }
         Err(LaunchError::Status(Status::Denied)) => {
             sys::print(b": denegado por el broker (pide capacidades del sistema)\n")
         }

@@ -495,7 +495,11 @@ fn write_slot(img: &mut [u8], part: (u64, u64), container: &[u8]) -> Result {
     Ok(())
 }
 
-pub fn write_test_disk(path: &Path, variant: DiskVariant) -> Result {
+pub fn write_test_disk(
+    path: &Path,
+    variant: DiskVariant,
+    installed: &[(String, Vec<u8>)],
+) -> Result {
     if variant == DiskVariant::UsbImage {
         return Err(String::from(
             "la imagen USB necesita la ESP: usar write_usb_image",
@@ -512,6 +516,7 @@ pub fn write_test_disk(path: &Path, variant: DiskVariant) -> Result {
     }
     aricode_gpt::write_disk(&mut img, &parts).map_err(|e| format!("gpt: {e:?}"))?;
     populate_arifs(&mut img, PART_ARI0)?;
+    install_files(&mut img, PART_ARI0, installed)?;
     match variant {
         DiskVariant::FsPendingReplace => stage_arifs_replace(&mut img, PART_ARI0)?,
         DiskVariant::FsCorrupt => {
@@ -557,6 +562,32 @@ pub fn write_test_disk(path: &Path, variant: DiskVariant) -> Result {
         img[o..o + 512].copy_from_slice(&state.encode());
     }
     io(fs::write(path, img), "escribir disco de pruebas")
+}
+
+/// Añade a AriFS ficheros de cualquier tamaño (paquetes instalados, ADR
+/// 0017): capacidad en múltiplos de 64 sectores.
+fn install_files(img: &mut [u8], part: (u64, u64), files: &[(String, Vec<u8>)]) -> Result {
+    if files.is_empty() {
+        return Ok(());
+    }
+    let mut fs = aricode_arifs::AriFs::open(VecDisk {
+        data: img,
+        base: part.0,
+    })
+    .map_err(|e| format!("arifs: {e:?}"))?;
+    let unit = aricode_arifs::FILE_CAPACITY_SECTORS as usize * 512;
+    for (name, bytes) in files {
+        let units = bytes.len().div_ceil(unit).max(1);
+        let i = fs
+            .create_sized(
+                name,
+                (units * aricode_arifs::FILE_CAPACITY_SECTORS as usize) as u32,
+            )
+            .map_err(|e| format!("arifs {name}: {e:?}"))?;
+        fs.write(i, 0, bytes)
+            .map_err(|e| format!("arifs {name} ({} bytes): {e:?}", bytes.len()))?;
+    }
+    fs.flush().map_err(|e| format!("arifs: {e:?}"))
 }
 
 /// Contenido que `filesystem.replace_recovery` espera leer en `README`.

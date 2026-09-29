@@ -65,6 +65,7 @@ libs/input/          aricode-input: eventos evdev y teclado US (no_std, tests de
 libs/http/           aricode-http: GET, análisis de respuestas, Content-Length y chunked sin alloc (no_std, tests de host)
 libs/net/            aricode-net: Ethernet, ARP, IPv4, ICMP, UDP, TCP, cliente DHCP y DNS sin alloc (no_std, tests de host)
 libs/arifs/          aricode-arifs: AriFS v1, directorio plano con tabla de ficheros de capacidad fija, CRC32 y journal de reemplazo sobre `BlockDevice` (no_std, tests de host con cortes)
+libs/pkg/            aricode-pkg: paquetes de aplicación firmados (manifiesto con nombre, versión y hashes; firma Ed25519; ELF; manifiesto de aplicación)
 sdk/proto/           aricode-proto: protocolos IPC versionados de los servicios (bloques v1, ficheros v1, red v1, entrada v1, ventanas v1, lanzamiento v1) (no_std, tests de host)
 sdk/runtime/         aricode-rt: runtime de programas de usuario (`entry!`, heap de 256 KiB, panic, fmt); reexporta aricode-sys
 sdk/build/           aricode-build: `build.rs` de una línea que enlaza con `sdk/rust/user.ld`
@@ -347,7 +348,7 @@ segundo brevemente para añadir la región.
   `process_spawn` (con transferencia de handles al hijo), `process_wait`,
   `irq_wait`, `mmio_map`, `region_len`, `dma_alloc`, `dma_phys`, `pci_count`,
   `pci_info`, `pci_claim`, `console_read`, `system_info`, `system_power`,
-  `initrd_read`, `pci_info_ext`, `console_inject`.
+  `initrd_read`, `pci_info_ext`, `console_inject`, `process_spawn_from`.
   Los servicios de bloques, ficheros y red no añaden syscalls: son IPC.
 - Los punteros de usuario se validan página a página contra las tablas del
   proceso (`copy_from_user`): un puntero de kernel devuelve `Fault`, nunca se
@@ -787,7 +788,16 @@ segundo brevemente para añadir la región.
   `poll_launches` responde al recogerlo (ADR 0015). Sin ranura libre el
   lanzamiento recibe `Limit`. Con `Request::DETACH` (`sys::launch::spawn`,
   `spawn` en el shell) el broker responde `Started` al crear el proceso y
-  nadie espera su salida. Si el kernel rechaza el `spawn` por cualquier
+  nadie espera su salida. Si el programa no está en el initrd, el broker
+  lo busca instalado en AriFS (`apps/NOMBRE.aripkg`, ADR 0017): copia el
+  paquete por fsd a un buffer DMA de preparación de 256 KiB reservado una
+  vez, lo verifica con `aricode-pkg` (firma Ed25519 del manifiesto del
+  paquete con la clave de desarrollo y SHA-256 del ELF y del manifiesto de
+  aplicación), aplica la política al manifiesto y lo lanza con
+  `process_spawn_from` (syscall 30: `MANAGE` sobre el `SPAWNER`, `READ`
+  sobre el buffer, desplazamiento y longitud del ELF; el kernel copia los
+  segmentos por el mapa físico y el buffer queda libre para el siguiente).
+  Si el kernel rechaza el `spawn` por cualquier
   motivo, los duplicados preparados se cierran (el kernel solo los retira al
   crear el proceso): antes cada nombre inexistente consumía una entrada de
   la tabla de init. El shell recibe el endpoint del broker en

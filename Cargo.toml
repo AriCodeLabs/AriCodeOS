@@ -23,6 +23,7 @@ members = [
     "libs/input",
     "libs/gfx",
     "libs/manifest",
+    "libs/pkg",
     "libs/wasm",
     "libs/crypto",
     "libs/ab",

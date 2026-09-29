@@ -75,7 +75,7 @@ pub fn run(cli: &Cli, release: bool) -> Result {
     let base = image::build_base_esp(release)?;
     let mut failed = Vec::new();
     for s in &selected {
-        if !run_scenario(&base, s, cpus_override)? {
+        if !run_scenario(&base, s, cpus_override, release)? {
             failed.push(s.name.clone());
         }
     }
@@ -99,7 +99,12 @@ struct BootRun<'a> {
     expect: &'a scenario::Expect,
 }
 
-fn run_scenario(base: &std::path::Path, s: &Scenario, cpus_override: Option<u32>) -> Result<bool> {
+fn run_scenario(
+    base: &std::path::Path,
+    s: &Scenario,
+    cpus_override: Option<u32>,
+    release: bool,
+) -> Result<bool> {
     let root = image::scenarios_root();
     let workdir = image::scenario_dir(&root, &s.name)?;
     let runs: Vec<BootRun> = if s.boots.is_empty() {
@@ -123,6 +128,11 @@ fn run_scenario(base: &std::path::Path, s: &Scenario, cpus_override: Option<u32>
     let multi = !s.boots.is_empty();
     let disk_variant = image::DiskVariant::parse(&s.disk)
         .ok_or_else(|| format!("{}: disk '{}' desconocido", s.name, s.disk))?;
+    let mut installed: Vec<(String, Vec<u8>)> = Vec::new();
+    for dir in &s.install {
+        installed
+            .push(build::build_external(std::path::Path::new(dir), 1, release, false)?.installed());
+    }
     let mut problems = Vec::new();
     let mut elapsed = Duration::ZERO;
     let mut logs: Vec<(std::path::PathBuf, String)> = Vec::new();
@@ -156,6 +166,7 @@ fn run_scenario(base: &std::path::Path, s: &Scenario, cpus_override: Option<u32>
             disk_readonly: s.disk_readonly,
             keep_disk: i > 0,
             kill_on: run.kill_on,
+            installed: &installed,
             cpus: s.cpus(cpus_override),
             usb_hid: s.usb_hid,
             usb_legacy_controller: s.usb_legacy_controller,

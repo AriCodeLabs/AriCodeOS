@@ -23,6 +23,9 @@ use aricode_rt::sys::fs::FsClient;
 use aricode_rt::sys::{self, rights, Error, Handle, TIMEOUT_INFINITE};
 use aricode_supervisor::{Action, Exit, Policy, Service, State};
 
+/// Clave pública de desarrollo con la que se firman los paquetes (ADR 0017).
+const PUBKEY_HEX: &str = include_str!("../../../keys/dev/ed25519.pub");
+
 const SPAWNER: Handle = Handle(0x0001_0004);
 const PCI_ROOT: Handle = Handle(0x0001_0005);
 const HARDWARE: Handle = Handle(0x0001_0006);
@@ -813,6 +816,27 @@ struct Broker {
     /// Programas lanzados que aún no han terminado (ADR 0015): proceso y, si
     /// alguien espera su salida, el endpoint al que responder.
     running: [Option<Running>; MAX_RUNNING],
+    /// Buffer DMA de preparación para paquetes instalados en AriFS (ADR
+    /// 0017): handle y dirección, reservado la primera vez que hace falta.
+    stage: Option<(Handle, u64)>,
+}
+
+/// Tamaño del buffer de preparación: un paquete instalado no puede pasar de
+/// aquí.
+const STAGE_LEN: u64 = 256 * 1024;
+
+/// De dónde sale el programa que se lanza.
+#[derive(Clone, Copy)]
+enum Source {
+    Initrd,
+    /// `apps/NOMBRE.aripkg` en AriFS, ya copiado y verificado en el buffer:
+    /// desplazamiento y longitud del ELF, versión del paquete.
+    Installed {
+        elf_offset: u32,
+        elf_len: u32,
+        version: u32,
+        package_len: u32,
+    },
 }
 
 /// Programas en marcha a la vez que admite el broker; el siguiente `run` o
@@ -856,7 +880,96 @@ impl Broker {
             inputs: ins,
             input_count: n,
             running: [None; MAX_RUNNING],
+            stage: None,
         })
+    }
+
+    /// Paquete instalado (`apps/NOMBRE.aripkg`): lo copia al buffer de
+    /// preparación, lo verifica y devuelve su manifiesto de aplicación y
+    /// dónde queda el ELF. Un paquete que no verifica se deniega.
+    fn load_installed(&mut self, name: &str) -> Result<(Manifest, Source), LaunchStatus> {
+        let fs = self.fs.as_mut().ok_or(LaunchStatus::NotFound)?;
+        let mut path = [0u8; 48];
+        let Some(pkg_path) = join("apps/", name, &mut path) else {
+            return Err(LaunchStatus::Invalid);
+        };
+        let mut full = [0u8; 48];
+        let Some(pkg_path) = join(pkg_path, aricode_pkg::EXTENSION, &mut full) else {
+            return Err(LaunchStatus::Invalid);
+        };
+        // Tamaño por el listado del espacio principal.
+        let mut size = None;
+        let mut entry = [0u8; 32];
+        let mut i = 0;
+        while let Ok(Some((n, s))) = fs.list(i, &mut entry) {
+            if &entry[..n] == pkg_path.as_bytes() {
+                size = Some(s);
+                break;
+            }
+            i += 1;
+        }
+        let Some(size) = size else {
+            return Err(LaunchStatus::NotFound);
+        };
+        if size == 0 || size > STAGE_LEN {
+            sys::print(b"AriInit: paquete instalado demasiado grande\n");
+            return Err(LaunchStatus::Failed);
+        }
+        let virt = match self.stage {
+            Some((_, virt)) => virt,
+            None => {
+                let dma = sys::dma_alloc(HARDWARE, STAGE_LEN).map_err(|_| LaunchStatus::Failed)?;
+                let virt = sys::mmio_map(dma).map_err(|_| LaunchStatus::Failed)?;
+                self.stage = Some((dma, virt));
+                virt
+            }
+        };
+        // SAFETY: buffer DMA propio de STAGE_LEN bytes, mapeado RW en init.
+        let stage = unsafe { core::slice::from_raw_parts_mut(virt as *mut u8, STAGE_LEN as usize) };
+        let fd = fs.open(pkg_path).map_err(|_| LaunchStatus::NotFound)?;
+        let total = size as usize;
+        let mut done = 0usize;
+        while done < total {
+            let want = (total - done).min(4096);
+            match fs.read(fd, done as u32, &mut stage[done..done + want]) {
+                Ok(n) if n > 0 => done += n,
+                _ => {
+                    let _ = fs.close(fd);
+                    return Err(LaunchStatus::Failed);
+                }
+            }
+        }
+        let _ = fs.close(fd);
+        let mut pubkey = [0u8; 32];
+        if aricode_crypto::unhex(PUBKEY_HEX.trim(), &mut pubkey).is_none() {
+            return Err(LaunchStatus::Failed);
+        }
+        let package = &stage[..total];
+        let verified = match aricode_pkg::verify(package, &pubkey) {
+            Ok(v) => v,
+            Err(_) => {
+                sys::print(b"AriInit: denegado, el paquete ");
+                sys::print(pkg_path.as_bytes());
+                sys::print(b" no verifica (firma o hashes)\n");
+                return Err(LaunchStatus::Denied);
+            }
+        };
+        let manifest = core::str::from_utf8(verified.app_manifest)
+            .ok()
+            .and_then(|t| Manifest::parse(t).ok())
+            .ok_or(LaunchStatus::BadManifest)?;
+        if verified.manifest.name_str() != name || manifest.name_str() != name {
+            return Err(LaunchStatus::BadManifest);
+        }
+        Ok((
+            manifest,
+            Source::Installed {
+                elf_offset: verified.program_offset(package) as u32,
+                elf_len: verified.program.len() as u32,
+                version: verified.manifest.version,
+                package_len: total as u32,
+            },
+        ))
     }
 
     /// Responde a los programas que han terminado y libera sus ranuras.
@@ -937,24 +1050,41 @@ impl Broker {
         }
     }
 
-    /// Lee el manifiesto (`NOMBRE.manifest` en el initrd), aplica la política y
-    /// lanza el programa; su salida la recoge `poll_launches`.
-    fn launch(&self, name: &str, arg: u64) -> Launched {
+    /// Lee el manifiesto (`NOMBRE.manifest` en el initrd, o el del paquete
+    /// `apps/NOMBRE.aripkg` en AriFS si el programa está instalado, ADR 0017),
+    /// aplica la política y lanza el programa; su salida la recoge
+    /// `poll_launches`.
+    fn launch(&mut self, name: &str, arg: u64) -> Launched {
         let mut path = [0u8; 48];
         let Some(path) = join(name, ".manifest", &mut path) else {
             return Launched::Reply(LaunchReply::status(LaunchStatus::Invalid));
         };
+        // Un byte basta para saber si el programa está en el initrd: TooBig
+        // si existe, NotFound si no.
+        let mut probe = [0u8; 1];
+        let in_initrd = !matches!(
+            sys::initrd_read(SPAWNER, name, &mut probe),
+            Err(Error::NotFound)
+        );
         let mut text = [0u8; 1024];
-        let manifest = match sys::initrd_read(SPAWNER, path, &mut text) {
-            Ok(n) => match core::str::from_utf8(&text[..n])
-                .ok()
-                .and_then(|t| Manifest::parse(t).ok())
-            {
-                Some(m) => Some(m),
-                None => return Launched::Reply(LaunchReply::status(LaunchStatus::BadManifest)),
-            },
-            Err(Error::NotFound) => None,
-            Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::BadManifest)),
+        let (manifest, source) = if in_initrd {
+            let manifest = match sys::initrd_read(SPAWNER, path, &mut text) {
+                Ok(n) => match core::str::from_utf8(&text[..n])
+                    .ok()
+                    .and_then(|t| Manifest::parse(t).ok())
+                {
+                    Some(m) => Some(m),
+                    None => return Launched::Reply(LaunchReply::status(LaunchStatus::BadManifest)),
+                },
+                Err(Error::NotFound) => None,
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::BadManifest)),
+            };
+            (manifest, Source::Initrd)
+        } else {
+            match self.load_installed(name) {
+                Ok((m, source)) => (Some(m), source),
+                Err(status) => return Launched::Reply(LaunchReply::status(status)),
+            }
         };
         let (caps, memory_kib) = match manifest {
             Some(m) if m.name_str() != name => {
@@ -968,6 +1098,22 @@ impl Broker {
         let denied = caps.difference(Caps::allowed_for(name));
         sys::print(b"AriInit: lanzar ");
         sys::print(name.as_bytes());
+        if let Source::Installed {
+            version,
+            package_len,
+            ..
+        } = source
+        {
+            let mut b = [0u8; 20];
+            sys::print(b" desde AriFS (apps/");
+            sys::print(name.as_bytes());
+            sys::print(aricode_pkg::EXTENSION.as_bytes());
+            sys::print(b" version ");
+            sys::print(aricode_rt::fmt_u64(version as u64, &mut b));
+            sys::print(b", ");
+            sys::print(aricode_rt::fmt_u64(package_len as u64, &mut b));
+            sys::print(b" bytes)");
+        }
         sys::print(if manifest.is_some() {
             b" con manifiesto ["
         } else {
@@ -1089,19 +1235,40 @@ impl Broker {
         // El kernel solo retira los handles si llega a crear el proceso; en
         // cualquier fallo el guard los cierra al salir (cerrar uno ya retirado
         // devuelve BadHandle y se ignora).
-        let child =
-            match sys::process_spawn_limited(SPAWNER, name, arg, granted.handles(), memory_kib) {
-                Ok(c) => {
-                    granted.take();
-                    c
-                }
-                Err(e) => {
-                    return Launched::Reply(LaunchReply::status(match e {
-                        Error::NotFound => LaunchStatus::NotFound,
-                        _ => LaunchStatus::Failed,
-                    }));
-                }
-            };
+        let spawned = match source {
+            Source::Initrd => {
+                sys::process_spawn_limited(SPAWNER, name, arg, granted.handles(), memory_kib)
+            }
+            Source::Installed {
+                elf_offset,
+                elf_len,
+                ..
+            } => {
+                let (dma, _) = self.stage.expect("buffer de preparacion reservado");
+                sys::process_spawn_from(
+                    SPAWNER,
+                    dma,
+                    elf_offset,
+                    elf_len,
+                    name,
+                    arg,
+                    granted.handles(),
+                    memory_kib,
+                )
+            }
+        };
+        let child = match spawned {
+            Ok(c) => {
+                granted.take();
+                c
+            }
+            Err(e) => {
+                return Launched::Reply(LaunchReply::status(match e {
+                    Error::NotFound => LaunchStatus::NotFound,
+                    _ => LaunchStatus::Failed,
+                }));
+            }
+        };
         Launched::Process(child)
     }
 }

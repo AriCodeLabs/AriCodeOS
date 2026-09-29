@@ -146,12 +146,20 @@ impl Namespace {
 /// privado, o el nombre tal cual desde el endpoint principal. `None` si no
 /// cabe o intenta salir del prefijo.
 fn qualified<'a>(prefix: &str, name: &str, buf: &'a mut [u8; 64]) -> Option<&'a str> {
-    if name.is_empty() || name.contains('/') {
+    if name.is_empty() {
         return None;
     }
     if prefix.is_empty() {
+        // Espacio principal (init): nombres completos, con directorios
+        // (`apps/x.aripkg`); la libreria valida la forma.
+        if name.len() > buf.len() {
+            return None;
+        }
         buf[..name.len()].copy_from_slice(name.as_bytes());
         return core::str::from_utf8(&buf[..name.len()]).ok();
+    }
+    if name.contains('/') {
+        return None;
     }
     let total = prefix.len() + 1 + name.len();
     if total > buf.len() {

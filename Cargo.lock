@@ -266,6 +266,14 @@ name = "aricode-pci"
 version = "0.6.0"
 
 [[package]]
+name = "aricode-pkg"
+version = "0.6.0"
+dependencies = [
+ "aricode-crypto",
+ "aricode-initrd",
+]
+
+[[package]]
 name = "aricode-pmm"
 version = "0.6.0"
 
@@ -335,8 +343,10 @@ version = "0.6.0"
 dependencies = [
  "aricode-ab",
  "aricode-build",
+ "aricode-crypto",
  "aricode-gpt",
  "aricode-manifest",
+ "aricode-pkg",
  "aricode-proto",
  "aricode-rt",
  "aricode-supervisor",
@@ -649,6 +659,7 @@ dependencies = [
  "aricode-http",
  "aricode-initrd",
  "aricode-net",
+ "aricode-pkg",
  "aricode-proto",
  "serde",
  "toml",
