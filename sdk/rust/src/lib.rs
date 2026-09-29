@@ -159,6 +159,31 @@ pub fn ipc_receive(
     .map(receive_result)
 }
 
+/// Recibe del primero de `endpoints` (hasta `IPC_MAX_ANY`, todos con `READ`)
+/// que tenga mensaje; `handles_out` admite `IPC_MAX_HANDLES`. Devuelve
+/// (índice del endpoint, bytes, handles) (ADR 0020).
+pub fn ipc_receive_any(
+    endpoints: &[Handle],
+    buf: &mut [u8],
+    handles_out: &mut [Handle; abi::IPC_MAX_HANDLES],
+    timeout_ms: u64,
+) -> Result<(usize, usize, usize), Error> {
+    let raw = call6(
+        nr::IPC_RECEIVE_ANY,
+        endpoints.as_ptr() as u64,
+        endpoints.len() as u64,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        handles_out.as_mut_ptr() as u64,
+        timeout_ms,
+    )?;
+    Ok((
+        (raw >> 48) as usize,
+        (raw & 0xFFFF_FFFF) as usize,
+        ((raw >> 32) & 0xFFFF) as usize,
+    ))
+}
+
 /// Crea un proceso del initrd (exige `MANAGE` sobre el `SPAWNER`).
 pub fn process_spawn(spawner: Handle, name: &str, arg: u64) -> Result<Handle, Error> {
     process_spawn_with(spawner, name, arg, &[])

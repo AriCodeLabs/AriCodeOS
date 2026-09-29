@@ -185,6 +185,11 @@ pub mod nr {
     /// por [`spawn_from::Request`] (programas instalados fuera del initrd,
     /// ADR 0017). Exige `MANAGE` sobre el `SPAWNER` y `READ` sobre el buffer.
     pub const PROCESS_SPAWN_FROM: u64 = 30;
+    /// `ipc_receive_any(handles_ptr, count, buf_ptr, buf_len, out_ptr, timeout_ms)
+    /// -> len | n << 32 | index << 48`: recibe del primero de hasta
+    /// `IPC_MAX_ANY` endpoints (`READ` sobre todos) que tenga mensaje; `out_ptr`
+    /// admite `IPC_MAX_HANDLES` handles (ADR 0020).
+    pub const IPC_RECEIVE_ANY: u64 = 31;
 }
 
 /// Petición de `process_spawn_from` (48 bytes en memoria del llamador).
@@ -490,6 +495,8 @@ pub const IPC_MAX_DATA: usize = 256;
 pub const IPC_MAX_HANDLES: usize = 4;
 /// Capacidad de la cola de un endpoint (protección frente a agotamiento).
 pub const IPC_QUEUE_CAPACITY: usize = 16;
+/// Endpoints por llamada a `ipc_receive_any`.
+pub const IPC_MAX_ANY: usize = 16;
 /// Timeout que significa "esperar indefinidamente".
 pub const TIMEOUT_INFINITE: u64 = u64::MAX;
 

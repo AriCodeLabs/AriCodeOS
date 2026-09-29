@@ -60,3 +60,12 @@ Calibración: 3 813 066 ciclos de TSC por ms.
 | read 4 KiB (µs) | 9 994 | 10 101 | 10 135 | ídem |
 
 Reposo de la CPU tras el arranque con shell: 81-82 %.
+
+### Tras `ipc_receive_any` (ADR 0020), misma build salvo fsd
+
+| Medida | p50 | p95 | p99 | Nota |
+|---|---|---|---|---|
+| syscall (ns) | 99 | 129 | 129 | sin cambios |
+| ipc fsd list (µs) | 44 | 46 | 58 | 227 veces menos: fsd espera en todos sus endpoints a la vez |
+| replace 4 KiB (µs) | 5 708 | 6 343 | 6 458 | ahora se ve el trabajo real: unas 20 peticiones de un sector al servicio de bloques y cuatro `flush`; el siguiente candidato es agrupar sectores por petición |
+| read 4 KiB (µs) | 712 | 800 | 838 | ocho lecturas de un sector por IPC al servicio de bloques |
