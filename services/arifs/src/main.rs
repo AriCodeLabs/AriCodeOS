@@ -380,19 +380,27 @@ fn main(partition_lba: u64) -> u64 {
     let mut namespaces: [Option<Namespace>; 8] = [None; 8];
     say(b"sirviendo peticiones");
     loop {
-        // Endpoint principal (espera corta) y despues cada espacio concedido.
-        for slot in 0..=namespaces.len() {
-            let (endpoint, ns, timeout) = if slot == 0 {
-                (SERVICE, None, 10)
-            } else {
-                match namespaces[slot - 1] {
-                    Some(ns) => (ns.ep, Some(ns), 0),
-                    None => continue,
-                }
-            };
-            let Ok((n, nh)) = sys::ipc_receive(endpoint, &mut msg, &mut handles, timeout) else {
-                continue;
-            };
+        // Espera en el endpoint principal y en todos los concedidos a la
+        // vez (ADR 0020): el indice dice por cual llego la peticion.
+        let mut eps = [SERVICE; 9];
+        let mut slots = [0usize; 9];
+        let mut count = 1;
+        for (i, ns) in namespaces.iter().enumerate() {
+            if let Some(ns) = ns {
+                eps[count] = ns.ep;
+                slots[count] = i + 1;
+                count += 1;
+            }
+        }
+        let mut received = [Handle(0); sys::abi::IPC_MAX_HANDLES];
+        let Ok((which, n, nh)) = sys::ipc_receive_any(&eps[..count], &mut msg, &mut received, 1000)
+        else {
+            continue;
+        };
+        handles[..2].copy_from_slice(&received[..2]);
+        {
+            let slot = slots[which];
+            let ns = (slot > 0).then(|| namespaces[slot - 1]).flatten();
             if nh == 0 {
                 continue;
             }

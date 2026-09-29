@@ -348,7 +348,8 @@ segundo brevemente para añadir la región.
   `process_spawn` (con transferencia de handles al hijo), `process_wait`,
   `irq_wait`, `mmio_map`, `region_len`, `dma_alloc`, `dma_phys`, `pci_count`,
   `pci_info`, `pci_claim`, `console_read`, `system_info`, `system_power`,
-  `initrd_read`, `pci_info_ext`, `console_inject`, `process_spawn_from`.
+  `initrd_read`, `pci_info_ext`, `console_inject`, `process_spawn_from`,
+  `ipc_receive_any`.
   Los servicios de bloques, ficheros y red no añaden syscalls: son IPC.
 - Los punteros de usuario se validan página a página contra las tablas del
   proceso (`copy_from_user`): un puntero de kernel devuelve `Fault`, nunca se
@@ -410,6 +411,11 @@ segundo brevemente para añadir la región.
   así que un timeout no pierde capabilities. `ipc_receive` exige `READ`,
   copia los datos y los handles recibidos al espacio del proceso
   (`copy_to_user` valida USER y WRITABLE) y devuelve `len | (n << 32)`.
+- `ipc_receive_any` (syscall 31, ADR 0020) recibe del primero de hasta 16
+  endpoints con mensaje (todos con `READ`, validados antes de esperar) y
+  devuelve su índice en los bits 48..63; los receptores múltiples esperan
+  en una cola común que despierta cualquier envío. fsd espera así en su
+  endpoint principal y en los concedidos a la vez, sin sondeos de 10 ms.
 - Timeouts en ms: `0` no bloquea, `TIMEOUT_INFINITE` espera siempre. Las
   esperas usan `WaitQueue::wait_until_deadline`: el hilo duerme con plazo y
   un `wake` anticipado (`RoundRobin::wake` saca a un dormido de su lista) lo
