@@ -2,7 +2,7 @@
 
 ## Documento maestro de arquitectura, especificaciones técnicas y plan de desarrollo
 
-**Estado:** 0.7.0 (2026-09-29): las 35 fases y las etapas 1 a 4 posteriores al roadmap implementadas y validadas en QEMU; la Fase 34 y el equipo de referencia esperan el portátil. Estado por capacidad en el README  
+**Estado:** 0.8.0 (2026-09-30): las 35 fases, las etapas 1 a 4 posteriores al roadmap y la parte de la 5 sin hardware (medidas, optimizaciones, diagnóstico) implementadas y validadas en QEMU; la Fase 34, el equipo de referencia y la energía esperan el portátil. Estado por capacidad en el README  
 **Versión del documento:** 0.2  
 **Nombre del sistema:** AriCodeOS  
 **Arquitectura inicial:** x86-64  
@@ -3632,7 +3632,27 @@ primera prueba física de la Fase 34.
 
 ---
 
-## 94.7 Después del roadmap: secuencia posterior
+## 94.7 AriCodeOS 0.8
+
+**Estado: completada (2026-09-30), tag `v0.8.0`.** Etapa 5 sin hardware:
+
+- medidas reproducibles desde ring 3 (`bench`: syscall, IPC y ficheros con
+  p50/p95/p99; `docs/performance.md` con el método y la referencia de cada
+  versión), reposo por CPU y el informe `diag`;
+- optimizaciones guiadas por esas medidas: `ipc_receive_any` (ADR 0020) y
+  fsd sin sondeos (la IPC a fsd pasa de 10 ms a 46 µs), lotes de sectores
+  en AriFS y fsd y un `flush` menos por reemplazo (lectura de 4 KiB cinco
+  veces más rápida, reemplazo cuatro veces);
+- diagnóstico consultable: reloj de microsegundos por TSC, sucesos
+  recientes del kernel con su instante y motivo (`sysinfo::EVENTS`,
+  `diag.events`), y `sleep_ms` que duerme al menos lo pedido.
+
+Siguiente: la primera prueba física de la Fase 34 y, con el equipo de
+referencia, energía (estados de reposo, batería) y más dispositivos.
+
+---
+
+## 94.8 Después del roadmap: secuencia posterior
 
 Con las 35 fases implementadas, el desarrollo sigue la secuencia propuesta en
 `docs/audits/2026-09-28-referentes-capacidades-oportunidades.md`, cada
@@ -3645,7 +3665,7 @@ etapa con sus ramas, ADR y escenarios:
 | 2. Sesión útil | completada salvo el equipo de referencia | hecho: shell con teclados USB y virtio (puente de consola, ADR 0013, `shell.usb_keyboard`, `shell.virtio_keyboard`); persistencia de AriFS ante cortes (ADR 0014: CRC32, journal de reemplazo, `flush` de extremo a extremo, `filesystem.replace_recovery`, `filesystem.corrupt_detected`); pendiente: equipo de referencia |
 | 3. Límites y actualización | completada | hecho: actualización entre arranques con el mismo disco y cortes (`[[boots]]`, `kill_on`: `update.full_cycle`, `update.cut_during_install`, `update.rollback_keeps_data`), `write` en el shell (`shell.write_persists`); cuotas y saturación (ADR 0015: broker asíncrono, `spawn`, límite de programas en marcha, `limits.hogs`); permisos por recurso (ADR 0016: `read_files` en el manifiesto, `Share` en fsd, `sandbox.shared_file`) |
 | 4. Aplicaciones externas | completada | hecho: aplicación construida fuera del árbol con el SDK por ruta, empaquetada y firmada (`cargo xtask app-pack`, `aricode-pkg`), instalada en AriFS como un solo fichero y lanzada por el broker tras verificarla (ADR 0017, `apps.external`); instalador de confianza y actualización transaccional desde `pkgs/` con reemplazo atómico por trozos (ADR 0018, `apps.update`, `apps.update_cut`); perfil `aricode-wasm` v1 con validador, manifiesto por módulo y ficheros (ADR 0019, `docs/wasm-profile.md`, `wasm.*`). Etapa completada; WASI queda fuera del perfil a propósito |
-| 5. Optimización y ampliación | en curso | hecho: medidas reproducibles (`bench`: syscall, IPC y ficheros con p50/p95/p99, `docs/performance.md`), reposo por CPU (`sysinfo::IDLE`, `cpus`) e informe `diag` (`perf.bench`); primera optimización guiada por medidas: `ipc_receive_any` y fsd sin sondeos (ADR 0020, `ipc.receive_any`); lotes de sectores en AriFS y fsd y un `flush` menos por reemplazo (lectura de 4 KiB cinco veces más rápida, reemplazo cuatro veces); reloj de µs por TSC y sucesos recientes del kernel consultables desde `diag` (`diag.events`); pendiente: energía (estados de reposo, batería), más dispositivos |
+| 5. Optimización y ampliación | completada salvo lo que necesita hardware | hecho: medidas reproducibles (`bench`: syscall, IPC y ficheros con p50/p95/p99, `docs/performance.md`), reposo por CPU (`sysinfo::IDLE`, `cpus`) e informe `diag` (`perf.bench`); primera optimización guiada por medidas: `ipc_receive_any` y fsd sin sondeos (ADR 0020, `ipc.receive_any`); lotes de sectores en AriFS y fsd y un `flush` menos por reemplazo (lectura de 4 KiB cinco veces más rápida, reemplazo cuatro veces); reloj de µs por TSC y sucesos recientes del kernel consultables desde `diag` (`diag.events`); pendiente: energía (estados de reposo, batería), más dispositivos |
 
 ---
 
