@@ -29,7 +29,7 @@ todavía `validado en hardware`.
 | Criptografía propia, RNG, imágenes firmadas, A/B con rollback | validado en QEMU | `crypto.*`, `update.*`; no es Secure Boot |
 | IOMMU VT-d con dominio por driver | validado en QEMU | `iommu.*` |
 | Imagen USB para pendrive | validado en QEMU (`usb.image_boot`) | pendiente en hardware |
-| Aplicaciones fuera del árbol: paquetes firmados instalados en AriFS (`cargo xtask app-pack`) | validado en QEMU | `apps.*`; instalación desde el propio sistema pendiente |
+| Aplicaciones fuera del árbol: paquetes firmados instalados y actualizados en AriFS (`cargo xtask app-pack`, `installer`) | validado en QEMU, con cortes | `apps.*`; sin distribución por red |
 | Arranque en portátil (Fase 34) | propuesto | necesita el equipo de referencia |
 
 ## Requisitos (Debian 13)

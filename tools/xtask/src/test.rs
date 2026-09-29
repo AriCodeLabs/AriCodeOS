@@ -133,6 +133,38 @@ fn run_scenario(
         installed
             .push(build::build_external(std::path::Path::new(dir), 1, release, false)?.installed());
     }
+    for spec in &s.packages {
+        let mut parts = spec.split(':');
+        let (Some(dir), Some(version)) = (parts.next(), parts.next()) else {
+            return Err(format!(
+                "{}: paquete '{spec}': DIR:VERSION[:corrupt]",
+                s.name
+            ));
+        };
+        let version: u32 = version
+            .parse()
+            .map_err(|_| format!("{}: paquete '{spec}': version invalida", s.name))?;
+        let corrupt = match parts.next() {
+            None => false,
+            Some("corrupt") => true,
+            Some(other) => {
+                return Err(format!(
+                    "{}: paquete '{spec}': '{other}' desconocido",
+                    s.name
+                ))
+            }
+        };
+        let app = build::build_external(std::path::Path::new(dir), version, release, corrupt)?;
+        installed.push((
+            format!(
+                "pkgs/{}-{}{}",
+                app.name,
+                app.version,
+                aricode_pkg::EXTENSION
+            ),
+            app.package,
+        ));
+    }
     let mut problems = Vec::new();
     let mut elapsed = Duration::ZERO;
     let mut logs: Vec<(std::path::PathBuf, String)> = Vec::new();

@@ -50,6 +50,7 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("ari-app-win-probe", Some(KERNEL_TARGET)),
     ("ari-app-wasm-runner", Some(KERNEL_TARGET)),
     ("ari-app-notes-reader", Some(KERNEL_TARGET)),
+    ("ari-app-installer", Some(KERNEL_TARGET)),
     ("wasm-demo", Some(WASM_TARGET)),
     ("user-testprogs", Some(KERNEL_TARGET)),
     ("ariinit", Some(KERNEL_TARGET)),
@@ -118,6 +119,7 @@ pub fn initrd_programs() -> Result<Vec<String>> {
         String::from("win_probe"),
         String::from("wasm_runner"),
         String::from("notes_reader"),
+        String::from("installer"),
         String::from("shell"),
     ];
     let bins = root().join("user/testprogs/src/bin");
@@ -175,6 +177,7 @@ pub fn build_user_programs(release: bool) -> Result<PathBuf> {
         "ari-app-win-probe",
         "ari-app-wasm-runner",
         "ari-app-notes-reader",
+        "ari-app-installer",
         "ari-shell",
     ] {
         println!("[xtask] build {pkg} ({KERNEL_TARGET})");

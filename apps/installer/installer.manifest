@@ -1,0 +1,5 @@
+# Aplicacion de confianza: el espacio principal de fsd (capacidad install)
+# para instalar paquetes en apps/ desde pkgs/ (ADR 0018).
+name = installer
+caps = system, install
+memory = 64K

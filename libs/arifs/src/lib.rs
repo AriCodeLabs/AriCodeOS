@@ -46,6 +46,8 @@ pub const FILE_CAPACITY_SECTORS: u32 = 64;
 pub const JOURNAL_LBA: u64 = TABLE_LBA + TABLE_SECTORS;
 pub const JOURNAL_DATA_LBA: u64 = JOURNAL_LBA + 1;
 pub const DATA_LBA: u64 = JOURNAL_DATA_LBA + FILE_CAPACITY_SECTORS as u64;
+/// Máximo de un reemplazo atómico: el área de datos del journal.
+pub const JOURNAL_CAPACITY_BYTES: usize = FILE_CAPACITY_SECTORS as usize * SECTOR;
 
 const JOURNAL_CLEAR: u32 = 0;
 const JOURNAL_PENDING: u32 = 1;
@@ -462,8 +464,42 @@ impl<D: BlockDevice> AriFs<D> {
     /// (journal de reemplazo): tras un corte el fichero tiene el contenido
     /// anterior o el nuevo, nunca una mezcla. Duradero al volver.
     pub fn replace(&mut self, index: usize, data: &[u8]) -> Result<(), FsError> {
-        let journal = self.stage_replace(index, data)?;
-        // 3. Aplicar y limpiar (idempotente: `open` lo repite si hace falta).
+        self.replace_chunk(index, 0, data)?;
+        self.replace_commit(index, data.len() as u32)
+    }
+
+    /// Un trozo del contenido nuevo al área de datos del journal, sin
+    /// compromiso: nada cambia hasta `replace_commit`. Varios trozos (en
+    /// cualquier orden, dentro de la capacidad del journal y del fichero)
+    /// forman un reemplazo mayor que una petición IPC (ADR 0018).
+    pub fn replace_chunk(&mut self, index: usize, offset: u32, data: &[u8]) -> Result<(), FsError> {
+        let e = *self.entry(index).ok_or(FsError::NotFound)?;
+        let end = offset as usize + data.len();
+        if end > e.capacity_bytes() as usize || end > JOURNAL_CAPACITY_BYTES {
+            return Err(FsError::OutOfRange);
+        }
+        let mut done = 0;
+        let mut s = [0u8; SECTOR];
+        while done < data.len() {
+            let pos = offset as usize + done;
+            let lba = JOURNAL_DATA_LBA + (pos / SECTOR) as u64;
+            let in_sector = pos % SECTOR;
+            let n = (SECTOR - in_sector).min(data.len() - done);
+            if n != SECTOR {
+                self.dev.read_sector(lba, &mut s)?;
+            }
+            s[in_sector..in_sector + n].copy_from_slice(&data[done..done + n]);
+            self.dev.write_sector(lba, &s)?;
+            done += n;
+        }
+        Ok(())
+    }
+
+    /// Compromete los `len` primeros bytes que hay en el journal como nuevo
+    /// contenido del fichero y los aplica (idempotente: `open` lo repite si
+    /// hace falta).
+    pub fn replace_commit(&mut self, index: usize, len: u32) -> Result<(), FsError> {
+        let journal = self.commit_header(index, len)?;
         self.apply_journal(&journal)
     }
 
@@ -472,26 +508,25 @@ impl<D: BlockDevice> AriFs<D> {
     /// justo después del compromiso; xtask lo usa para fabricar discos de
     /// prueba de recuperación y el siguiente `open` lo rehace.
     pub fn stage_replace(&mut self, index: usize, data: &[u8]) -> Result<Journal, FsError> {
+        self.replace_chunk(index, 0, data)?;
+        self.commit_header(index, data.len() as u32)
+    }
+
+    /// Hace duraderos los datos del journal y escribe la cabecera pendiente
+    /// con su CRC (leído del propio journal: es lo que se aplicará).
+    fn commit_header(&mut self, index: usize, len: u32) -> Result<Journal, FsError> {
         let e = *self.entry(index).ok_or(FsError::NotFound)?;
-        let journal_capacity = FILE_CAPACITY_SECTORS as usize * SECTOR;
-        if data.len() > e.capacity_bytes() as usize || data.len() > journal_capacity {
+        if len > e.capacity_bytes() || len as usize > JOURNAL_CAPACITY_BYTES {
             return Err(FsError::OutOfRange);
         }
-        // 1. Datos al journal (sectores enteros, sin lectura previa).
-        let mut s = [0u8; SECTOR];
-        for (i, chunk) in data.chunks(SECTOR).enumerate() {
-            s.fill(0);
-            s[..chunk.len()].copy_from_slice(chunk);
-            self.dev.write_sector(JOURNAL_DATA_LBA + i as u64, &s)?;
-        }
         self.dev.flush()?;
-        // 2. Compromiso: cabecera pendiente con el CRC de los datos.
+        let data_crc = self.journal_crc(len)?;
         self.sequence += 1;
         let journal = Journal {
             state: JOURNAL_PENDING,
             index: index as u32,
-            len: data.len() as u32,
-            data_crc: crc32(data),
+            len,
+            data_crc,
             sequence: self.sequence,
         };
         self.dev.write_sector(JOURNAL_LBA, &journal.encode())?;
@@ -546,9 +581,14 @@ impl<D: BlockDevice> AriFs<D> {
     }
 
     fn journal_data_matches(&mut self, journal: &Journal) -> Result<bool, FsError> {
+        Ok(self.journal_crc(journal.len)? == journal.data_crc)
+    }
+
+    /// CRC-32 de los `len` primeros bytes del área de datos del journal.
+    fn journal_crc(&mut self, len: u32) -> Result<u32, FsError> {
         let mut crc = 0xFFFF_FFFFu32;
         let mut s = [0u8; SECTOR];
-        let mut left = journal.len as usize;
+        let mut left = len as usize;
         let mut lba = JOURNAL_DATA_LBA;
         while left > 0 {
             self.dev.read_sector(lba, &mut s)?;
@@ -557,7 +597,7 @@ impl<D: BlockDevice> AriFs<D> {
             left -= n;
             lba += 1;
         }
-        Ok(!crc == journal.data_crc)
+        Ok(!crc)
     }
 
     fn clear_journal(&mut self) -> Result<(), FsError> {
@@ -849,6 +889,49 @@ mod tests {
             replayed > 0,
             "algun corte deja un reemplazo comprometido a medias"
         );
+    }
+
+    #[test]
+    fn chunked_replace_is_atomic_too() {
+        let old: Vec<u8> = (0..900u32).map(|x| (x % 11) as u8 + b'A').collect();
+        let new: Vec<u8> = (0..9000u32).map(|x| (x % 19) as u8 + b'a').collect();
+        let mut fs = AriFs::format(disk(300), 300).unwrap();
+        let i = fs.create("pkg").unwrap();
+        fs.write(i, 0, &old).unwrap();
+        // Trozos de 4 KiB, como el cliente por IPC, y el ultimo parcial.
+        for (k, chunk) in new.chunks(4096).enumerate() {
+            fs.replace_chunk(i, (k * 4096) as u32, chunk).unwrap();
+            assert_eq!(content(&mut fs, i), old, "nada cambia antes del compromiso");
+        }
+        fs.replace_commit(i, new.len() as u32).unwrap();
+        assert_eq!(content(&mut fs, i), new);
+        assert_eq!(
+            fs.replace_chunk(i, JOURNAL_CAPACITY_BYTES as u32 - 1, b"xx"),
+            Err(FsError::OutOfRange)
+        );
+        // Corte en cada escritura del reemplazo por trozos: viejo o nuevo.
+        let base = fs.into_device().0;
+        let mut fs = AriFs::open(CuttingDisk::new(&base, usize::MAX)).unwrap();
+        for (k, chunk) in old.chunks(4096).enumerate() {
+            fs.replace_chunk(i, (k * 4096) as u32, chunk).unwrap();
+        }
+        fs.replace_commit(i, old.len() as u32).unwrap();
+        let total = fs.into_device().writes;
+        for cut_at in 0..=total {
+            let mut fs = AriFs::open(CuttingDisk::new(&base, cut_at)).unwrap();
+            let mut result = Ok(());
+            for (k, chunk) in old.chunks(4096).enumerate() {
+                result = result.and_then(|()| fs.replace_chunk(i, (k * 4096) as u32, chunk));
+            }
+            let result = result.and_then(|()| fs.replace_commit(i, old.len() as u32));
+            assert_eq!(result.is_ok(), cut_at >= total, "corte en {cut_at}");
+            let mut fs = AriFs::open(fs.into_device().power_off(true)).unwrap();
+            let got = content(&mut fs, i);
+            assert!(
+                got == old || got == new,
+                "corte en {cut_at}: contenido mezclado"
+            );
+        }
     }
 
     #[test]
