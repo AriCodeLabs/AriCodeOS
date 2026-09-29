@@ -11,6 +11,15 @@ pub fn uptime_ms(system: Handle) -> Result<u64, Error> {
     }
 }
 
+/// Microsegundos desde el arranque (TSC calibrado en el kernel).
+pub fn uptime_us(system: Handle) -> Result<u64, Error> {
+    let mut b = [0u8; 8];
+    match sys::system_info(system, abi::sysinfo::UPTIME_US, &mut b)? {
+        8 => Ok(u64::from_le_bytes(b)),
+        _ => Err(Error::Invalid),
+    }
+}
+
 /// Duerme al menos `ms` milisegundos.
 pub fn sleep_ms(ms: u64) {
     sys::thread_sleep(ms);

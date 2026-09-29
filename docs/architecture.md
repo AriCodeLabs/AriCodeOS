@@ -784,6 +784,14 @@ segundo brevemente para añadir la región.
   sobre el TSC calibrado contra `uptime_ms`; `docs/performance.md` fija el
   método y guarda la referencia de cada versión. `perf.bench` exige que las
   medidas se produzcan, no sus valores (dependen del host).
+- Reloj de microsegundos: `apic::init` mide el TSC contra el PIT junto al
+  timer y `time::uptime_us` lo convierte (supone TSC invariante y común a
+  las CPUs; sin calibración cae al tick de 10 ms); `sysinfo::UPTIME_US`.
+- Sucesos recientes del kernel (`events.rs`): anillo de 64 entradas con
+  procesos creados, salidos y matados (con el motivo), fallos de DMA del
+  IOMMU y cuotas de DMA agotadas, con su instante en µs; `sysinfo::EVENTS`
+  los publica a quien tenga `READ` sobre `SYSTEM` y `diag` los muestra
+  (`diag.events`). Sin contenido de mensajes ni de ficheros.
 - Reposo por CPU: el bucle idle acumula los ciclos de TSC pasados en `hlt`
   (`Cpu::idle_cycles`) y `sysinfo::IDLE` los publica junto a los ciclos
   desde el primer tick; `cpus` los muestra como porcentaje y `diag` reúne

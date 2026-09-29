@@ -639,6 +639,12 @@ pub fn on_fault_irq() {
                 let (low, high) = (u.r64(off), u.r64(off + 8));
                 if let Some(f) = FaultRecord::decode(low, high) {
                     FAULTS.fetch_add(1, Ordering::Relaxed);
+                    crate::events::record(
+                        aricode_abi::sysinfo::EventKind::DmaFault,
+                        0,
+                        f.source_id as u64,
+                        aricode_iommu::fault_reason_name(f.reason),
+                    );
                     warn!(
                         "iommu: fallo DMA de {:02x}:{:02x}.{} ({} en {:#x}): {} (motivo {:#x}, unidad {i})",
                         f.bus(),

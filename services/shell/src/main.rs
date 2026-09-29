@@ -202,7 +202,75 @@ fn diag(fs: &mut FsClient, mask: u64) {
     ps();
     services(mask, fs);
     services_detail();
+    events();
     sys::print(b"=== fin del diagnostico ===\n");
+}
+
+/// Sucesos recientes del kernel (`sysinfo::EVENTS`): un renglon por suceso
+/// con su instante.
+fn events() {
+    use abi::sysinfo::{EventEntry, EventKind};
+    let mut buf = [0u8; EventEntry::LEN * 16];
+    let Ok(n) = sys::system_info(SYSTEM, abi::sysinfo::EVENTS, &mut buf) else {
+        sys::print(b"diag: sin acceso a los sucesos\n");
+        return;
+    };
+    sys::print(b"sucesos recientes del kernel:\n");
+    for chunk in buf[..n].as_chunks::<{ EventEntry::LEN }>().0 {
+        let Some(e) = EventEntry::decode(chunk) else {
+            continue;
+        };
+        sys::print(b"  [");
+        num(e.at_us / 1_000_000);
+        sys::print(b".");
+        let frac = (e.at_us / 1000) % 1000;
+        if frac < 100 {
+            sys::print(b"0");
+        }
+        if frac < 10 {
+            sys::print(b"0");
+        }
+        num(frac);
+        sys::print(b" s] ");
+        match e.kind {
+            EventKind::ProcessCreated => {
+                sys::print(b"proceso ");
+                num(e.pid as u64);
+                sys::print(b" '");
+                sys::print(e.name_str().as_bytes());
+                sys::print(b"' creado");
+            }
+            EventKind::ProcessExited => {
+                sys::print(b"proceso ");
+                num(e.pid as u64);
+                sys::print(b" '");
+                sys::print(e.name_str().as_bytes());
+                sys::print(b"' salio con codigo ");
+                num(e.code);
+            }
+            EventKind::ProcessKilled => {
+                sys::print(b"proceso ");
+                num(e.pid as u64);
+                sys::print(b" terminado por fallo: ");
+                sys::print(e.name_str().as_bytes());
+            }
+            EventKind::DmaFault => {
+                sys::print(b"fallo de DMA del dispositivo ");
+                hex(e.code, 4);
+                sys::print(b": ");
+                sys::print(e.name_str().as_bytes());
+            }
+            EventKind::DmaQuota => {
+                sys::print(b"proceso ");
+                num(e.pid as u64);
+                sys::print(b" agoto su cuota de memoria pidiendo ");
+                num(e.code);
+                sys::print(b" bytes");
+            }
+            EventKind::None => sys::print(b"?"),
+        }
+        sys::print(b"\n");
+    }
 }
 
 fn ls(fs: &FsClient) {

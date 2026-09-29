@@ -96,6 +96,13 @@ pub fn init() {
     .expect("apic: mapear LAPIC");
 
     enable_local();
+    // El TSC se mide contra el mismo PIT que el timer: reloj de µs (etapa 5).
+    // SAFETY: rdtsc solo lee el contador de tiempo.
+    let t0 = unsafe { core::arch::x86_64::_rdtsc() };
+    super::pit::wait_ms(10);
+    // SAFETY: ídem.
+    let t1 = unsafe { core::arch::x86_64::_rdtsc() };
+    time::calibrate_tsc(t1.wrapping_sub(t0) / 10);
     let ticks_per_ms = calibrate_timer();
     let initial = (ticks_per_ms * 1000 / time::TICK_HZ) as u32;
     TIMER_INITIAL.store(initial, Ordering::Relaxed);
