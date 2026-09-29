@@ -2,7 +2,7 @@
 
 ## Documento maestro de arquitectura, especificaciones técnicas y plan de desarrollo
 
-**Estado:** 0.6.0 (2026-09-28): las 35 fases implementadas y validadas en QEMU; la Fase 34 espera el portátil. Estado por capacidad en el README  
+**Estado:** 0.7.0 (2026-09-29): las 35 fases y las etapas 1 a 4 posteriores al roadmap implementadas y validadas en QEMU; la Fase 34 y el equipo de referencia esperan el portátil. Estado por capacidad en el README  
 **Versión del documento:** 0.2  
 **Nombre del sistema:** AriCodeOS  
 **Arquitectura inicial:** x86-64  
@@ -3605,7 +3605,34 @@ primera prueba física de la Fase 34.
 
 ---
 
-## 94.6 Después del roadmap: secuencia posterior
+## 94.6 AriCodeOS 0.7
+
+**Estado: completada (2026-09-29), tag `v0.7.0`.** Etapas 1 a 4 de la
+secuencia posterior al roadmap (sección 94.7), cada una con su ADR y sus
+escenarios:
+
+- recuperación observable: supervisor de servicios con estado consultable
+  (ADR 0011) y llamadas IPC con endpoint de respuesta por petición y plazos
+  (ADR 0012);
+- sesión útil: teclados USB y virtio como consola del shell (ADR 0013),
+  AriFS v1 con CRC32, journal de reemplazo atómico y `flush` de extremo a
+  extremo (ADR 0014), `write` en el shell y escenarios de varios arranques
+  sobre el mismo disco con cortes de energía;
+- límites y actualización: broker asíncrono con `spawn` y límite de
+  programas en marcha (ADR 0015), ficheros compartidos de solo lectura por
+  manifiesto (ADR 0016), ciclo completo de actualización A/B entre arranques
+  con rollback que conserva los datos;
+- aplicaciones externas: paquetes firmados construidos fuera del árbol e
+  instalados en AriFS (ADR 0017), instalador de confianza con reemplazo
+  atómico por trozos (ADR 0018), validador WebAssembly y perfil
+  `aricode-wasm` v1 con manifiesto por módulo (ADR 0019).
+
+Siguiente: la etapa 5 (rendimiento, energía y más dispositivos) y la
+primera prueba física de la Fase 34.
+
+---
+
+## 94.7 Después del roadmap: secuencia posterior
 
 Con las 35 fases implementadas, el desarrollo sigue la secuencia propuesta en
 `docs/audits/2026-09-28-referentes-capacidades-oportunidades.md`, cada
@@ -3615,9 +3642,9 @@ etapa con sus ramas, ADR y escenarios:
 |---|---|---|
 | 0. Consolidar | completada (0.6.0) | auditorías resueltas con evidencia; tabla única de estado por capacidad en el README |
 | 1. Recuperación observable | completada | supervisor de servicios (ADR 0011): estados, generaciones, reinicio con presupuesto y espera creciente, endpoint estable entre generaciones, publicación solo tras responder, `status` v1 y `services --detail`; plazos y correlación IPC (ADR 0012): endpoint de respuesta por petición, esperas acotadas, sin reintentos automáticos de escrituras (`ipc.late_reply`) |
-| 2. Sesión útil | en curso | hecho: shell con teclados USB y virtio (puente de consola, ADR 0013, `shell.usb_keyboard`, `shell.virtio_keyboard`); persistencia de AriFS ante cortes (ADR 0014: CRC32, journal de reemplazo, `flush` de extremo a extremo, `filesystem.replace_recovery`, `filesystem.corrupt_detected`); pendiente: equipo de referencia |
-| 3. Límites y actualización | en curso | hecho: actualización entre arranques con el mismo disco y cortes (`[[boots]]`, `kill_on`: `update.full_cycle`, `update.cut_during_install`, `update.rollback_keeps_data`), `write` en el shell (`shell.write_persists`); cuotas y saturación (ADR 0015: broker asíncrono, `spawn`, límite de programas en marcha, `limits.hogs`); permisos por recurso (ADR 0016: `read_files` en el manifiesto, `Share` en fsd, `sandbox.shared_file`) |
-| 4. Aplicaciones externas | en curso | hecho: aplicación construida fuera del árbol con el SDK por ruta, empaquetada y firmada (`cargo xtask app-pack`, `aricode-pkg`), instalada en AriFS como un solo fichero y lanzada por el broker tras verificarla (ADR 0017, `apps.external`); instalador de confianza y actualización transaccional desde `pkgs/` con reemplazo atómico por trozos (ADR 0018, `apps.update`, `apps.update_cut`); perfil `aricode-wasm` v1 con validador, manifiesto por módulo y ficheros (ADR 0019, `docs/wasm-profile.md`, `wasm.*`). Etapa completada; WASI queda fuera del perfil a propósito |
+| 2. Sesión útil | completada salvo el equipo de referencia | hecho: shell con teclados USB y virtio (puente de consola, ADR 0013, `shell.usb_keyboard`, `shell.virtio_keyboard`); persistencia de AriFS ante cortes (ADR 0014: CRC32, journal de reemplazo, `flush` de extremo a extremo, `filesystem.replace_recovery`, `filesystem.corrupt_detected`); pendiente: equipo de referencia |
+| 3. Límites y actualización | completada | hecho: actualización entre arranques con el mismo disco y cortes (`[[boots]]`, `kill_on`: `update.full_cycle`, `update.cut_during_install`, `update.rollback_keeps_data`), `write` en el shell (`shell.write_persists`); cuotas y saturación (ADR 0015: broker asíncrono, `spawn`, límite de programas en marcha, `limits.hogs`); permisos por recurso (ADR 0016: `read_files` en el manifiesto, `Share` en fsd, `sandbox.shared_file`) |
+| 4. Aplicaciones externas | completada | hecho: aplicación construida fuera del árbol con el SDK por ruta, empaquetada y firmada (`cargo xtask app-pack`, `aricode-pkg`), instalada en AriFS como un solo fichero y lanzada por el broker tras verificarla (ADR 0017, `apps.external`); instalador de confianza y actualización transaccional desde `pkgs/` con reemplazo atómico por trozos (ADR 0018, `apps.update`, `apps.update_cut`); perfil `aricode-wasm` v1 con validador, manifiesto por módulo y ficheros (ADR 0019, `docs/wasm-profile.md`, `wasm.*`). Etapa completada; WASI queda fuera del perfil a propósito |
 | 5. Optimización y ampliación | pendiente | rendimiento, energía, más dispositivos |
 
 ---

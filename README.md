@@ -7,9 +7,12 @@ El documento maestro de arquitectura y roadmap es [AriCodeOS.md](AriCodeOS.md).
 Las decisiones de diseño se registran en [docs/decisions/](docs/decisions/) y el
 flujo de ramas (git flow) en [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-**Estado:** 0.6.0 (2026-09-28). Las 35 fases del roadmap (0 a 34) están
-implementadas y probadas en QEMU; la Fase 34 espera su primera prueba en el
-portátil (ver [docs/hardware.md](docs/hardware.md)). La tabla siguiente es
+**Estado:** 0.7.0 (2026-09-29). Las 35 fases del roadmap (0 a 34) están
+implementadas y probadas en QEMU, y las etapas 1 a 4 de la secuencia
+posterior al roadmap (recuperación observable, sesión útil, límites y
+actualización, aplicaciones externas) también; la Fase 34 y el equipo de
+referencia esperan su primera prueba en el portátil (ver
+[docs/hardware.md](docs/hardware.md)). La tabla siguiente es
 la referencia única del estado de cada capacidad: `validado en QEMU` significa
 que hay escenarios en `tests/qemu/` que lo exigen en cada suite; nada está
 todavía `validado en hardware`.
