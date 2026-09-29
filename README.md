@@ -25,7 +25,7 @@ todavía `validado en hardware`.
 | Red IPv4: DHCP, ARP, ICMP, UDP, TCP, DNS, cliente HTTP | prototipo, validado en QEMU | `network.*`; sin TLS ni renovación DHCP |
 | Shell `arish` por consola serie, teclado PS/2 o teclados USB/virtio (puente de consola) | validado en QEMU | `shell.*`, `console.*` |
 | GUI: compositor, ventanas, entrada | prototipo, validado en QEMU | `gui.*` |
-| WASM (intérprete MVP acotado) | prototipo, validado en QEMU | `wasm.*`; sin validación previa ni WASI |
+| WASM: intérprete MVP con validador previo, perfil `aricode-wasm` v1 y manifiesto por módulo | validado en QEMU | `wasm.*`, `docs/wasm-profile.md`; no es WASI |
 | Criptografía propia, RNG, imágenes firmadas, A/B con rollback | validado en QEMU | `crypto.*`, `update.*`; no es Secure Boot |
 | IOMMU VT-d con dominio por driver | validado en QEMU | `iommu.*` |
 | Imagen USB para pendrive | validado en QEMU (`usb.image_boot`) | pendiente en hardware |

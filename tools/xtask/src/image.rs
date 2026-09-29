@@ -361,6 +361,10 @@ pub enum DiskVariant {
     FsPendingReplace,
     /// Slots normales y un byte alterado en la tabla de AriFS: fsd no monta.
     FsCorrupt,
+    /// El manifiesto del módulo WASM solo concede `print` (ADR 0019).
+    WasmRestricted,
+    /// `demo.wasm` sustituido por un módulo mal tipado: el validador lo rechaza.
+    WasmInvalid,
     /// Imagen para pendrive: la ESP va dentro del disco (sin `fat:` en QEMU).
     UsbImage,
 }
@@ -375,6 +379,8 @@ impl DiskVariant {
             "b-corrupt" => Self::CorruptB,
             "fs-pending-replace" => Self::FsPendingReplace,
             "fs-corrupt" => Self::FsCorrupt,
+            "wasm-restricted" => Self::WasmRestricted,
+            "wasm-invalid" => Self::WasmInvalid,
             "usb-image" => Self::UsbImage,
             _ => return None,
         })
@@ -519,6 +525,12 @@ pub fn write_test_disk(
     install_files(&mut img, PART_ARI0, installed)?;
     match variant {
         DiskVariant::FsPendingReplace => stage_arifs_replace(&mut img, PART_ARI0)?,
+        DiskVariant::WasmRestricted => {
+            overwrite_arifs(&mut img, PART_ARI0, WASM_MANIFEST_FILE, b"caps = print\n")?
+        }
+        DiskVariant::WasmInvalid => {
+            overwrite_arifs(&mut img, PART_ARI0, WASM_MODULE_FILE, INVALID_WASM)?
+        }
         DiskVariant::FsCorrupt => {
             // Primer byte del nombre de la primera entrada en uso.
             img[(PART_ARI0.0 + aricode_arifs::TABLE_LBA) as usize * 512] ^= 0x20;
@@ -556,7 +568,9 @@ pub fn write_test_disk(
             | DiskVariant::EspOnly
             | DiskVariant::UsbImage
             | DiskVariant::FsPendingReplace
-            | DiskVariant::FsCorrupt => {}
+            | DiskVariant::FsCorrupt
+            | DiskVariant::WasmRestricted
+            | DiskVariant::WasmInvalid => {}
         }
         let o = PART_ARIBOOT.0 as usize * 512;
         img[o..o + 512].copy_from_slice(&state.encode());
@@ -629,18 +643,52 @@ fn populate_arifs(img: &mut [u8], part: (u64, u64)) -> Result {
         fs.write(i, 0, content)
             .map_err(|e| format!("arifs {name}: {e:?}"))?;
     }
-    // Módulo WebAssembly de ejemplo en el directorio privado de `wasm_runner`
-    // (lo deja `build_wasm_programs`; sin él, el runner informa y sale).
+    // Módulo WebAssembly de ejemplo y su manifiesto en el directorio privado
+    // de `wasm_runner` (lo deja `build_wasm_programs`; sin él, el runner
+    // informa y sale).
     let demo = crate::build_dir().join("demo.wasm");
     if let Ok(bytes) = fs::read(&demo) {
-        let name = "wasm_runner/demo.wasm";
-        let i = fs
-            .create(name)
-            .map_err(|e| format!("arifs {name}: {e:?}"))?;
-        fs.write(i, 0, &bytes)
-            .map_err(|e| format!("arifs {name} ({} bytes): {e:?}", bytes.len()))?;
+        for (name, content) in [
+            (WASM_MODULE_FILE, bytes.as_slice()),
+            (WASM_MANIFEST_FILE, WASM_MANIFEST),
+        ] {
+            let i = fs
+                .create(name)
+                .map_err(|e| format!("arifs {name}: {e:?}"))?;
+            fs.write(i, 0, content)
+                .map_err(|e| format!("arifs {name} ({} bytes): {e:?}", content.len()))?;
+        }
     }
     Ok(())
+}
+
+const WASM_MODULE_FILE: &str = "wasm_runner/demo.wasm";
+const WASM_MANIFEST_FILE: &str = "wasm_runner/demo.manifest";
+/// Lo que el módulo de ejemplo pide (ADR 0019).
+const WASM_MANIFEST: &[u8] = b"caps = print, clock, files\n";
+/// Módulo mal tipado: `main() -> i32` cuyo cuerpo es `i32.const 1; i32.add`
+/// (suma con un solo operando). Analiza bien y no valida.
+const INVALID_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, // cabecera
+    0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7F, // type: () -> i32
+    0x03, 0x02, 0x01, 0x00, // function: tipo 0
+    0x05, 0x03, 0x01, 0x00, 0x01, // memory: 1 pagina
+    0x07, 0x08, 0x01, 0x04, 0x6D, 0x61, 0x69, 0x6E, 0x00, 0x00, // export "main"
+    0x0A, 0x07, 0x01, 0x05, 0x00, 0x41, 0x01, 0x6A, 0x0B, // code
+];
+
+/// Sustituye entero un fichero de AriFS (reemplazo atómico de la librería).
+fn overwrite_arifs(img: &mut [u8], part: (u64, u64), name: &str, bytes: &[u8]) -> Result {
+    let mut fs = aricode_arifs::AriFs::open(VecDisk {
+        data: img,
+        base: part.0,
+    })
+    .map_err(|e| format!("arifs: {e:?}"))?;
+    let i = fs
+        .find(name)
+        .ok_or_else(|| format!("arifs: falta {name}"))?;
+    fs.replace(i, bytes)
+        .map_err(|e| format!("arifs {name}: {e:?}"))
 }
 
 /// Copia privada de las variables OVMF: el firmware las escribe al arrancar.
