@@ -69,3 +69,16 @@ Reposo de la CPU tras el arranque con shell: 81-82 %.
 | ipc fsd list (µs) | 44 | 46 | 58 | 227 veces menos: fsd espera en todos sus endpoints a la vez |
 | replace 4 KiB (µs) | 5 708 | 6 343 | 6 458 | ahora se ve el trabajo real: unas 20 peticiones de un sector al servicio de bloques y cuatro `flush`; el siguiente candidato es agrupar sectores por petición |
 | read 4 KiB (µs) | 712 | 800 | 838 | ocho lecturas de un sector por IPC al servicio de bloques |
+
+### Tras los lotes de sectores y un `flush` menos (etapa 5), misma build salvo AriFS y fsd
+
+| Medida | p50 | p95 | p99 | Nota |
+|---|---|---|---|---|
+| syscall (ns) | 99 | 109 | 129 | sin cambios |
+| ipc fsd list (µs) | 46 | 49 | 63 | sin cambios |
+| replace 4 KiB (µs) | 2 628 | 2 817 | 2 997 | tres `flush` (cada uno un fsync del host, de 0,5 a 3 ms según el disco) y cinco peticiones al servicio de bloques; entre ejecuciones varía con el host más que con el código |
+| read 4 KiB (µs) | 141 | 150 | 234 | una petición de ocho sectores en vez de ocho de uno |
+
+Lo que queda del coste de `replace` es el fsync: reducirlo exige menos
+compromisos (agrupar reemplazos) o un soporte con caché de escritura con
+batería, no más código.

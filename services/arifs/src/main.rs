@@ -27,20 +27,29 @@ struct PartitionDevice {
 
 impl BlockDevice for PartitionDevice {
     fn read_sector(&mut self, lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), FsError> {
-        self.blk
-            .read(self.base_lba + lba, 1)
-            .map_err(|_| FsError::Io)?;
-        buf.copy_from_slice(&self.blk.buffer()[..SECTOR]);
-        Ok(())
+        self.read_sectors(lba, buf)
     }
     fn write_sector(&mut self, lba: u64, buf: &[u8; SECTOR]) -> Result<(), FsError> {
-        self.blk.buffer()[..SECTOR].copy_from_slice(buf);
-        self.blk
-            .write(self.base_lba + lba, 1)
-            .map_err(|_| FsError::Io)
+        self.write_sectors(lba, buf)
     }
     fn flush(&mut self) -> Result<(), FsError> {
         self.blk.flush().map_err(|_| FsError::Io)
+    }
+    /// Un lote entero en una peticion al servicio de bloques (etapa 5).
+    fn read_sectors(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), FsError> {
+        let count = (buf.len() / SECTOR) as u16;
+        self.blk
+            .read(self.base_lba + lba, count)
+            .map_err(|_| FsError::Io)?;
+        buf.copy_from_slice(&self.blk.buffer()[..buf.len()]);
+        Ok(())
+    }
+    fn write_sectors(&mut self, lba: u64, buf: &[u8]) -> Result<(), FsError> {
+        let count = (buf.len() / SECTOR) as u16;
+        self.blk.buffer()[..buf.len()].copy_from_slice(buf);
+        self.blk
+            .write(self.base_lba + lba, count)
+            .map_err(|_| FsError::Io)
     }
 }
 
@@ -334,7 +343,7 @@ fn handle(
 }
 
 fn main(partition_lba: u64) -> u64 {
-    let Ok(blk) = BlockClient::new(BLOCK, HW, 1) else {
+    let Ok(blk) = BlockClient::new(BLOCK, HW, aricode_arifs::MAX_BATCH_SECTORS as u16) else {
         return 1;
     };
     let dev = PartitionDevice {
