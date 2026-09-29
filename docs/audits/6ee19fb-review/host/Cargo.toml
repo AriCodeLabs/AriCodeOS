@@ -1,0 +1,8 @@
+[package]
+name = "aricode-review-6ee19fb"
+version = "0.1.0"
+edition = "2021"
+[workspace]
+[dependencies]
+aricode-arifs = { path = "../../../../libs/arifs" }
+aricode-wasm = { path = "../../../../libs/wasm" }
