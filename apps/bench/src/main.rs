@@ -56,18 +56,13 @@ fn report(name: &[u8], samples: &mut [u64], cycles_per_unit: u64, unit: &[u8]) {
 
 /// Ciclos de TSC por milisegundo, medidos contra el reloj del sistema.
 fn calibrate(system: Handle) -> Option<u64> {
-    let u0 = time::uptime_ms(system).ok()?;
-    // Esperar al siguiente tick para empezar en un borde.
-    let mut start = u0;
-    while start == u0 {
-        start = time::uptime_ms(system).ok()?;
-    }
+    let start = time::uptime_us(system).ok()?;
     let t0 = rdtsc();
     time::sleep_ms(200);
     let t1 = rdtsc();
-    let end = time::uptime_ms(system).ok()?;
-    let ms = end.saturating_sub(start);
-    (ms > 0).then(|| (t1 - t0) / ms)
+    let end = time::uptime_us(system).ok()?;
+    let us = end.saturating_sub(start);
+    (us > 0).then(|| (t1 - t0) * 1000 / us)
 }
 
 fn main(_arg: u64) -> u64 {

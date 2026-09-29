@@ -293,6 +293,113 @@ pub mod sysinfo {
     /// Reposo por CPU (etapa 5): `u64` ciclos de TSC desde el arranque, `u64`
     /// CPUs en línea y, por cada una, `u64` ciclos pasados en `hlt`.
     pub const IDLE: u64 = 7;
+    /// Sucesos recientes del kernel (etapa 5): entradas [`EventEntry`] del más
+    /// antiguo al más reciente, tantas como quepan en el buffer.
+    pub const EVENTS: u64 = 8;
+    /// Un `u64`: microsegundos desde el arranque (TSC calibrado; si no hay
+    /// calibración, el tick en ms por 1000).
+    pub const UPTIME_US: u64 = 9;
+
+    /// Clase de suceso del anillo del kernel.
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum EventKind {
+        None = 0,
+        /// `pid`, `name`.
+        ProcessCreated = 1,
+        /// `pid`, `name`, `code` = código de salida.
+        ProcessExited = 2,
+        /// `pid`, `name` = motivo del kernel (excepción).
+        ProcessKilled = 3,
+        /// `code` = `bus << 8 | dev << 3 | fn` del dispositivo, `name` = motivo.
+        DmaFault = 4,
+        /// `pid`, `name`, `code` = bytes pedidos por encima de la cuota.
+        DmaQuota = 5,
+    }
+
+    impl EventKind {
+        pub fn from_u8(v: u8) -> Self {
+            match v {
+                1 => Self::ProcessCreated,
+                2 => Self::ProcessExited,
+                3 => Self::ProcessKilled,
+                4 => Self::DmaFault,
+                5 => Self::DmaQuota,
+                _ => Self::None,
+            }
+        }
+    }
+
+    pub const EVENT_NAME_LEN: usize = 24;
+
+    /// Suceso del kernel (48 bytes): instante en µs, clase, pid, código y
+    /// nombre o motivo.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct EventEntry {
+        pub at_us: u64,
+        pub kind: EventKind,
+        pub pid: u32,
+        pub code: u64,
+        pub name: [u8; EVENT_NAME_LEN],
+        pub name_len: u8,
+    }
+
+    impl EventEntry {
+        pub const LEN: usize = 48;
+        pub const EMPTY: EventEntry = EventEntry {
+            at_us: 0,
+            kind: EventKind::None,
+            pid: 0,
+            code: 0,
+            name: [0; EVENT_NAME_LEN],
+            name_len: 0,
+        };
+
+        pub fn new(at_us: u64, kind: EventKind, pid: u32, code: u64, name: &str) -> Self {
+            let n = name.len().min(EVENT_NAME_LEN);
+            let mut buf = [0u8; EVENT_NAME_LEN];
+            buf[..n].copy_from_slice(&name.as_bytes()[..n]);
+            Self {
+                at_us,
+                kind,
+                pid,
+                code,
+                name: buf,
+                name_len: n as u8,
+            }
+        }
+
+        pub fn name_str(&self) -> &str {
+            core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("?")
+        }
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[..8].copy_from_slice(&self.at_us.to_le_bytes());
+            b[8] = self.kind as u8;
+            b[9] = self.name_len;
+            b[12..16].copy_from_slice(&self.pid.to_le_bytes());
+            b[16..24].copy_from_slice(&self.code.to_le_bytes());
+            b[24..].copy_from_slice(&self.name);
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN {
+                return None;
+            }
+            let mut name = [0u8; EVENT_NAME_LEN];
+            name.copy_from_slice(&b[24..48]);
+            Some(Self {
+                at_us: u64::from_le_bytes(b[..8].try_into().ok()?),
+                kind: EventKind::from_u8(b[8]),
+                pid: u32::from_le_bytes(b[12..16].try_into().ok()?),
+                code: u64::from_le_bytes(b[16..24].try_into().ok()?),
+                name,
+                name_len: b[9].min(EVENT_NAME_LEN as u8),
+            })
+        }
+    }
 
     /// Formato de píxel del framebuffer (32 bpp).
     pub const FB_FORMAT_RGB: u8 = 0;

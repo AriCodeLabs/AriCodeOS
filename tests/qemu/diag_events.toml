@@ -1,0 +1,24 @@
+# Etapa 5 (diagnostico consultable): el kernel guarda los sucesos recientes
+# (procesos creados y terminados, fallos) en un anillo que `diag` muestra
+# con su instante; un proceso que el kernel mata aparece con el motivo.
+name = "diag.events"
+description = "diag muestra los sucesos recientes del kernel: procesos terminados y matados con motivo"
+level = "full"
+areas = ["diag", "shell", "user"]
+cmdline = "qemu_exit shell"
+timeout_secs = 120
+stdin = ["run hello_app 4", "run kernel_read", "diag", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "run: hello_app termino con 0",
+    "run: kernel_read: fue terminado por el kernel",
+    "sucesos recientes del kernel:",
+    "s] proceso 19 'hello_app' creado",
+    "s] proceso 19 'hello_app' salio con codigo 0",
+    "s] proceso 20 terminado por fallo: #PF lectura",
+    "=== fin del diagnostico ===",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "diag: sin acceso"]

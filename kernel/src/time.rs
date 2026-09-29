@@ -8,16 +8,31 @@ pub const TICK_HZ: u64 = 100;
 pub const MS_PER_TICK: u64 = 1000 / TICK_HZ;
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
-/// TSC en el primer tick: origen de `tsc_since_boot`.
+/// TSC al calibrar (antes del primer tick): origen de `tsc_since_boot`.
 static BOOT_TSC: AtomicU64 = AtomicU64::new(0);
+/// Ciclos de TSC por milisegundo, medidos contra el PIT en el arranque; 0
+/// hasta entonces (el reloj cae al tick).
+static TSC_PER_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Llamado desde el handler del timer. Devuelve el tick recién contado.
 pub fn tick() -> u64 {
-    let t = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
-    if t == 1 {
-        BOOT_TSC.store(rdtsc(), Ordering::Relaxed);
+    TICKS.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+/// Fija el origen y la frecuencia del TSC (lo hace `apic::init` en el BSP
+/// midiendo contra el PIT). Supone un TSC invariante y común a las CPUs.
+pub fn calibrate_tsc(per_ms: u64) {
+    BOOT_TSC.store(rdtsc(), Ordering::Relaxed);
+    TSC_PER_MS.store(per_ms, Ordering::Relaxed);
+}
+
+/// Microsegundos desde el arranque: por el TSC si está calibrado, si no
+/// con la granularidad del tick.
+pub fn uptime_us() -> u64 {
+    match TSC_PER_MS.load(Ordering::Relaxed) {
+        0 => ticks() * MS_PER_TICK * 1000,
+        per_ms => tsc_since_boot() / per_ms.div_ceil(1000).max(1),
     }
-    t
 }
 
 fn rdtsc() -> u64 {
@@ -34,9 +49,9 @@ pub fn ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
 
-/// Milisegundos desde que arrancó el timer, con la granularidad del tick.
+/// Milisegundos desde el arranque (ver `uptime_us`).
 pub fn uptime_ms() -> u64 {
-    ticks() * MS_PER_TICK
+    uptime_us() / 1000
 }
 
 /// Duerme `ms` cediendo la CPU al planificador.

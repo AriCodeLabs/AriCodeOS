@@ -194,6 +194,14 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
     system_object(h, Rights::READ)?;
     let bytes: Vec<u8> = match kind {
         sysinfo::UPTIME => crate::time::uptime_ms().to_le_bytes().to_vec(),
+        sysinfo::UPTIME_US => crate::time::uptime_us().to_le_bytes().to_vec(),
+        sysinfo::EVENTS => {
+            let max = (len as usize) / sysinfo::EventEntry::LEN;
+            crate::events::recent(max)
+                .iter()
+                .flat_map(|e| e.encode())
+                .collect()
+        }
         sysinfo::CPUS => (crate::cpu::online_count() as u64).to_le_bytes().to_vec(),
         sysinfo::IDLE => {
             let mut v = crate::time::tsc_since_boot().to_le_bytes().to_vec();
@@ -622,6 +630,12 @@ fn dma_alloc(h: Handle, len: u64) -> Result<u64, Error> {
     // Cuota del proceso (fijada por quien lo lanzó): se cobra el tamaño
     // redondeado a páginas, que es lo que se reserva.
     if !process::charge_dma(len.next_multiple_of(4096)) {
+        crate::events::record(
+            aricode_abi::sysinfo::EventKind::DmaQuota,
+            process::current_pid().map_or(0, |p| p.0),
+            len,
+            "dma_alloc",
+        );
         return Err(Error::Limit);
     }
     let dma = crate::hw::dma_alloc(len).map_err(|_| Error::Limit)?;
