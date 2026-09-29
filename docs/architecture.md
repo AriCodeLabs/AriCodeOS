@@ -769,6 +769,18 @@ segundo brevemente para añadir la región.
   su hilo y un `SYSTEM` de solo lectura. `hello_app` lo demuestra en
   `shell.commands`.
 
+## Medidas (etapa 5)
+
+- `apps/bench` mide desde ring 3 la latencia de una syscall, de una
+  llamada IPC completa a fsd y de `replace`/`read` de 4 KiB con percentiles
+  sobre el TSC calibrado contra `uptime_ms`; `docs/performance.md` fija el
+  método y guarda la referencia de cada versión. `perf.bench` exige que las
+  medidas se produzcan, no sus valores (dependen del host).
+- Reposo por CPU: el bucle idle acumula los ciclos de TSC pasados en `hlt`
+  (`Cpu::idle_cycles`) y `sysinfo::IDLE` los publica junto a los ciclos
+  desde el primer tick; `cpus` los muestra como porcentaje y `diag` reúne
+  `uptime`, `mem`, `cpus`, `ps` y `services --detail` en un informe.
+
 ## Sandbox de aplicaciones (Fase 28)
 
 - `process_spawn` recibe en su sexto argumento el número de handles y la

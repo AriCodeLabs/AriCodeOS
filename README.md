@@ -33,6 +33,7 @@ todavía `validado en hardware`.
 | IOMMU VT-d con dominio por driver | validado en QEMU | `iommu.*` |
 | Imagen USB para pendrive | validado en QEMU (`usb.image_boot`) | pendiente en hardware |
 | Aplicaciones fuera del árbol: paquetes firmados instalados y actualizados en AriFS (`cargo xtask app-pack`, `installer`) | validado en QEMU, con cortes | `apps.*`; sin distribución por red |
+| Medidas: `bench` (syscall, IPC, ficheros, percentiles), reposo por CPU, informe `diag` | validado en QEMU | `perf.*`, `docs/performance.md`; cifras solo comparables con la misma build y modo de QEMU |
 | Arranque en portátil (Fase 34) | propuesto | necesita el equipo de referencia |
 
 ## Requisitos (Debian 13)

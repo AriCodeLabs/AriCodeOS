@@ -209,8 +209,14 @@ pub fn idle_loop() -> ! {
             KernelIrq::restore(irq);
             yield_now();
         } else {
+            // SAFETY: rdtsc solo lee el contador de tiempo.
+            let t0 = unsafe { core::arch::x86_64::_rdtsc() };
             // SAFETY: habilitar interrupciones y esperar la siguiente.
             unsafe { core::arch::asm!("sti", "hlt", options(nomem, nostack)) };
+            // SAFETY: ídem.
+            let t1 = unsafe { core::arch::x86_64::_rdtsc() };
+            // El hilo idle nunca migra: `current()` es su propia CPU.
+            cpu::current().add_idle_cycles(t1.wrapping_sub(t0));
         }
     }
 }

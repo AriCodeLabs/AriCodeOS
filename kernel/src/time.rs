@@ -8,10 +8,26 @@ pub const TICK_HZ: u64 = 100;
 pub const MS_PER_TICK: u64 = 1000 / TICK_HZ;
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
+/// TSC en el primer tick: origen de `tsc_since_boot`.
+static BOOT_TSC: AtomicU64 = AtomicU64::new(0);
 
 /// Llamado desde el handler del timer. Devuelve el tick recién contado.
 pub fn tick() -> u64 {
-    TICKS.fetch_add(1, Ordering::Relaxed) + 1
+    let t = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+    if t == 1 {
+        BOOT_TSC.store(rdtsc(), Ordering::Relaxed);
+    }
+    t
+}
+
+fn rdtsc() -> u64 {
+    // SAFETY: rdtsc solo lee el contador de tiempo.
+    unsafe { core::arch::x86_64::_rdtsc() }
+}
+
+/// Ciclos de TSC desde el primer tick (para el reposo por CPU, etapa 5).
+pub fn tsc_since_boot() -> u64 {
+    rdtsc().wrapping_sub(BOOT_TSC.load(Ordering::Relaxed))
 }
 
 pub fn ticks() -> u64 {

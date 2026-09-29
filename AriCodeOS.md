@@ -2400,7 +2400,7 @@ Comandos:
 ```text
 help      ps        mem       ls        cat NOM   write NOM TEXTO
 run PROG  spawn PROG  repeat N CMD
-devices   services  uptime    reboot    shutdown  exit
+devices   services  uptime    cpus      diag      reboot    shutdown  exit
 ```
 
 ### Implementado
@@ -3645,7 +3645,7 @@ etapa con sus ramas, ADR y escenarios:
 | 2. Sesión útil | completada salvo el equipo de referencia | hecho: shell con teclados USB y virtio (puente de consola, ADR 0013, `shell.usb_keyboard`, `shell.virtio_keyboard`); persistencia de AriFS ante cortes (ADR 0014: CRC32, journal de reemplazo, `flush` de extremo a extremo, `filesystem.replace_recovery`, `filesystem.corrupt_detected`); pendiente: equipo de referencia |
 | 3. Límites y actualización | completada | hecho: actualización entre arranques con el mismo disco y cortes (`[[boots]]`, `kill_on`: `update.full_cycle`, `update.cut_during_install`, `update.rollback_keeps_data`), `write` en el shell (`shell.write_persists`); cuotas y saturación (ADR 0015: broker asíncrono, `spawn`, límite de programas en marcha, `limits.hogs`); permisos por recurso (ADR 0016: `read_files` en el manifiesto, `Share` en fsd, `sandbox.shared_file`) |
 | 4. Aplicaciones externas | completada | hecho: aplicación construida fuera del árbol con el SDK por ruta, empaquetada y firmada (`cargo xtask app-pack`, `aricode-pkg`), instalada en AriFS como un solo fichero y lanzada por el broker tras verificarla (ADR 0017, `apps.external`); instalador de confianza y actualización transaccional desde `pkgs/` con reemplazo atómico por trozos (ADR 0018, `apps.update`, `apps.update_cut`); perfil `aricode-wasm` v1 con validador, manifiesto por módulo y ficheros (ADR 0019, `docs/wasm-profile.md`, `wasm.*`). Etapa completada; WASI queda fuera del perfil a propósito |
-| 5. Optimización y ampliación | pendiente | rendimiento, energía, más dispositivos |
+| 5. Optimización y ampliación | en curso | hecho: medidas reproducibles (`bench`: syscall, IPC y ficheros con p50/p95/p99, `docs/performance.md`), reposo por CPU (`sysinfo::IDLE`, `cpus`) e informe `diag` (`perf.bench`); pendiente: optimizaciones guiadas por esas medidas, energía, más dispositivos |
 
 ---
 
