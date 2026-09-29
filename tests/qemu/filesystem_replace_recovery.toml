@@ -15,7 +15,7 @@ stdin = ["cat README", "shutdown"]
 exit = 33
 serial_contains = [
     "fsd: reemplazo pendiente de 'README' rehecho al montar",
-    "fsd: AriFS montado, 3 ficheros",
+    "fsd: AriFS montado, 4 ficheros",
     "AriCodeOS: recuperado tras un corte",
     "ARICODEOS_SHUTDOWN",
 ]

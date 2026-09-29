@@ -1,0 +1,25 @@
+     Locking 13 packages to latest compatible versions
+   Compiling aricode-pci v0.6.0 (/var/tmp/aricode-review-6ee19fb-uhBqbF/libs/pci)
+   Compiling aricode-fb-console v0.6.0 (/var/tmp/aricode-review-6ee19fb-uhBqbF/libs/fb-console)
+   Compiling aricode-net v0.6.0 (/var/tmp/aricode-review-6ee19fb-uhBqbF/libs/net)
+   Compiling aricode-proto v0.6.0 (/var/tmp/aricode-review-6ee19fb-uhBqbF/sdk/proto)
+   Compiling aricode-abi v0.6.0 (/var/tmp/aricode-review-6ee19fb-uhBqbF/sdk/abi)
+   Compiling aricode-build v0.6.0 (/var/tmp/aricode-review-6ee19fb-uhBqbF/sdk/build)
+   Compiling aricode-http v0.6.0 (/var/tmp/aricode-review-6ee19fb-uhBqbF/libs/http)
+   Compiling aricode-heap v0.6.0 (/var/tmp/aricode-review-6ee19fb-uhBqbF/libs/heap)
+   Compiling aricode-sync v0.6.0 (/var/tmp/aricode-review-6ee19fb-uhBqbF/libs/sync)
+   Compiling review_app v0.1.0 (/var/tmp/aricode-probes-6ee19fb/app)
+   Compiling aricode-virtio v0.6.0 (/var/tmp/aricode-review-6ee19fb-uhBqbF/libs/virtio)
+   Compiling aricode-gfx v0.6.0 (/var/tmp/aricode-review-6ee19fb-uhBqbF/libs/gfx)
+   Compiling aricode-sys v0.6.0 (/var/tmp/aricode-review-6ee19fb-uhBqbF/sdk/rust)
+   Compiling aricode-rt v0.6.0 (/var/tmp/aricode-review-6ee19fb-uhBqbF/sdk/runtime)
+warning: unused import: `Handle`
+ --> src/main.rs:3:28
+  |
+3 | use aricode_rt::sys::{self,Handle,kind,permissions,rights,rpc};
+  |                            ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `review_app` (bin "review_app") generated 1 warning (run `cargo fix --bin "review_app" -p review_app` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 0.48s

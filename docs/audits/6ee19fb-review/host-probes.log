@@ -1,0 +1,60 @@
+     Locking 2 packages to latest compatible versions
+   Compiling aricode-arifs v0.6.0 (/var/tmp/aricode-review-6ee19fb-uhBqbF/libs/arifs)
+   Compiling aricode-wasm v0.6.0 (/var/tmp/aricode-review-6ee19fb-uhBqbF/libs/wasm)
+   Compiling review-probes v0.1.0 (/var/tmp/aricode-probes-6ee19fb)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.40s
+     Running unittests src/lib.rs (/var/tmp/aricode-probes-6ee19fb/target/debug/deps/review_probes-3b56e22387cbb1d1)
+
+running 7 tests
+
+thread 'tests::reject_inverted_memory_limits' (403947) panicked at src/lib.rs:63:53:
+assertion failed: Module::parse(&b).is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'tests::reject_missing_memory_export' (403948) panicked at src/lib.rs:58:52:
+assertion failed: Module::parse(&b).is_err()
+
+thread 'tests::reject_wrong_global_initializer' (403949) panicked at src/lib.rs:53:50:
+assertion failed: Module::parse(&b).is_err()
+test tests::reject_inverted_memory_limits ... FAILED
+test tests::reject_missing_memory_export ... FAILED
+test tests::reject_wrong_global_initializer ... FAILED
+loop result=Err(Trap("pila vacia"))
+
+thread 'tests::valid_loop_parameters_preserved_on_branch' (403950) panicked at src/lib.rs:74:88:
+assertion `left == right` failed
+  left: Err(Trap("pila vacia"))
+ right: Ok(0)
+test tests::valid_loop_parameters_preserved_on_branch ... FAILED
+partial_commit=Ok(()), second_file="XYNTHETIC_PRIVATE_DATA"
+
+thread 'tests::journal_must_not_reuse_another_files_payload' (403946) panicked at src/lib.rs:30:2:
+must reject a commit larger than initialized data
+length=3, content=[0, 0, 0]
+
+thread 'tests::grown_file_must_not_publish_unpersisted_data' (403945) panicked at src/lib.rs:46:42:
+assertion failed: n == 0 || out == *b"NEW"
+first_lba=70, second_lba=70
+
+thread 'tests::allocation_must_survive_reordered_sector_persistence' (403944) panicked at src/lib.rs:39:2:
+assertion `left != right` failed
+  left: 70
+ right: 70
+test tests::journal_must_not_reuse_another_files_payload ... FAILED
+test tests::grown_file_must_not_publish_unpersisted_data ... FAILED
+test tests::allocation_must_survive_reordered_sector_persistence ... FAILED
+
+failures:
+
+failures:
+    tests::allocation_must_survive_reordered_sector_persistence
+    tests::grown_file_must_not_publish_unpersisted_data
+    tests::journal_must_not_reuse_another_files_payload
+    tests::reject_inverted_memory_limits
+    tests::reject_missing_memory_export
+    tests::reject_wrong_global_initializer
+    tests::valid_loop_parameters_preserved_on_branch
+
+test result: FAILED. 0 passed; 7 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

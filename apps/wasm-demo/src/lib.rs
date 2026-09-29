@@ -1,6 +1,7 @@
-//! Aplicación portable (Fase 29): se compila a `wasm32-unknown-unknown` y
-//! solo conoce la Capability API que el anfitrión (`wasm_runner`) le
-//! importa bajo el módulo `aricode`: nada de POSIX ni de syscalls.
+//! Aplicación portable (Fase 29 y etapa 4): se compila a
+//! `wasm32-unknown-unknown` y solo conoce la Capability API que el anfitrión
+//! (`wasm_runner`) le importa bajo el módulo `aricode`, y solo lo que su
+//! manifiesto (`demo.manifest`) le concede: nada de POSIX ni de syscalls.
 #![no_std]
 
 #[link(wasm_import_module = "aricode")]
@@ -9,6 +10,11 @@ extern "C" {
     fn print(ptr: *const u8, len: u32);
     /// Milisegundos desde el arranque del sistema.
     fn uptime_ms() -> i64;
+    /// Crea o reemplaza entero un fichero del directorio privado del runner;
+    /// devuelve los bytes escritos o -1.
+    fn file_write(name: *const u8, name_len: u32, data: *const u8, len: u32) -> i32;
+    /// Lee un fichero del directorio privado en `buf`; bytes leídos o -1.
+    fn file_read(name: *const u8, name_len: u32, buf: *mut u8, len: u32) -> i32;
 }
 
 fn say(s: &[u8]) {
@@ -65,6 +71,35 @@ pub extern "C" fn main(arg: i64) -> i32 {
     say(b"wasm: suma ponderada ");
     say(fmt_u64(sum as u64, &mut buf));
     say(b"\n");
+    // Un fichero del directorio privado del runner: escribir y releer.
+    let name = b"notas";
+    let text = b"escrito desde wasm";
+    let mut back = [0u8; 32];
+    // SAFETY: punteros a la memoria lineal del módulo; el anfitrión valida.
+    let (written, read) = unsafe {
+        (
+            file_write(
+                name.as_ptr(),
+                name.len() as u32,
+                text.as_ptr(),
+                text.len() as u32,
+            ),
+            file_read(
+                name.as_ptr(),
+                name.len() as u32,
+                back.as_mut_ptr(),
+                back.len() as u32,
+            ),
+        )
+    };
+    if written as usize != text.len() || read as usize != text.len() || &back[..text.len()] != text
+    {
+        say(b"wasm: el fichero no volvio igual\n");
+        return 3;
+    }
+    say(b"wasm: fichero 'notas' escrito y leido (");
+    say(fmt_u64(text.len() as u64, &mut buf));
+    say(b" bytes)\n");
     42
 }
 

@@ -1,0 +1,21 @@
+# Etapa 4 (ADR 0019): el manifiesto del modulo solo concede `print`; el
+# runner rechaza la importacion del reloj antes de ejecutar nada. Lo que el
+# manifiesto no concede no existe para el modulo, aunque el runner lo tenga.
+name = "wasm.restricted"
+description = "modulo WASM con manifiesto restringido: importacion no concedida, no se ejecuta"
+level = "full"
+areas = ["wasm", "sandbox", "shell"]
+cmdline = "qemu_exit shell"
+disk = "wasm-restricted"
+timeout_secs = 90
+stdin = ["run wasm_runner 5", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "wasm_runner: manifiesto del modulo: print",
+    "wasm_runner: importacion aricode.uptime_ms no concedida por el manifiesto del modulo",
+    "run: wasm_runner termino con 12",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "wasm: hola", "el modulo fallo"]

@@ -840,6 +840,11 @@ segundo brevemente para añadir la región.
   `Unsupported`. Los tests de host usan un ensamblador mínimo de módulos
   para cubrir aritmética, bucles, `if/else` con resultado, recursión,
   `br_table`, globales, `call_indirect`, traps y límites.
+- `Module::parse` valida el módulo entero antes de devolverlo (ADR 0019:
+  tipado de cada función con pila de operandos y marcos de control, índices
+  de tipos, funciones, tabla, globales, exportaciones y `start`); lo que el
+  intérprete no ejecuta se rechaza ahí. El perfil aceptado está en
+  `docs/wasm-profile.md`.
 - `wasm_runner` es una aplicación normal del broker: recibe `SYSTEM`, su
   directorio privado y `HARDWARE`; lee `demo.wasm` (xtask lo compila con
   `-C target-cpu=mvp -C target-feature=+sign-ext,+bulk-memory` y lo deja en

@@ -2690,12 +2690,19 @@ No se expone POSIX: el módulo solo importa la Capability API bajo el módulo
 por el anfitrión, que valida cada acceso a memoria. Todo lo que el anfitrión
 no importa no existe para el módulo.
 
+### Etapa 4 (2026-09-29, ADR 0019)
+
+- validación completa del módulo antes de instanciarlo (`Error::Invalid`),
+  perfil `aricode-wasm` v1 documentado en `docs/wasm-profile.md` (no es
+  WASI), manifiesto por módulo (`demo.manifest`, `caps = print, clock,
+  files`) que acota las importaciones, y `file_read`/`file_write` sobre el
+  directorio privado del runner; escenarios `wasm.demo`, `wasm.restricted`
+  y `wasm.invalid`.
+
 ### Pendiente
 
-- más funciones de la Capability API (ficheros, red y ventanas del propio
-  runner) y un formato de manifiesto para módulos WASM;
-- coma flotante y validación completa del módulo antes de ejecutar (hoy se
-  confía en el productor y se comprueba en tiempo de ejecución);
+- más funciones de la Capability API (red y ventanas del propio runner);
+- coma flotante;
 - rendimiento: es un intérprete byte a byte sin precompilación.
 
 ---
@@ -3610,7 +3617,7 @@ etapa con sus ramas, ADR y escenarios:
 | 1. Recuperación observable | completada | supervisor de servicios (ADR 0011): estados, generaciones, reinicio con presupuesto y espera creciente, endpoint estable entre generaciones, publicación solo tras responder, `status` v1 y `services --detail`; plazos y correlación IPC (ADR 0012): endpoint de respuesta por petición, esperas acotadas, sin reintentos automáticos de escrituras (`ipc.late_reply`) |
 | 2. Sesión útil | en curso | hecho: shell con teclados USB y virtio (puente de consola, ADR 0013, `shell.usb_keyboard`, `shell.virtio_keyboard`); persistencia de AriFS ante cortes (ADR 0014: CRC32, journal de reemplazo, `flush` de extremo a extremo, `filesystem.replace_recovery`, `filesystem.corrupt_detected`); pendiente: equipo de referencia |
 | 3. Límites y actualización | en curso | hecho: actualización entre arranques con el mismo disco y cortes (`[[boots]]`, `kill_on`: `update.full_cycle`, `update.cut_during_install`, `update.rollback_keeps_data`), `write` en el shell (`shell.write_persists`); cuotas y saturación (ADR 0015: broker asíncrono, `spawn`, límite de programas en marcha, `limits.hogs`); permisos por recurso (ADR 0016: `read_files` en el manifiesto, `Share` en fsd, `sandbox.shared_file`) |
-| 4. Aplicaciones externas | en curso | hecho: aplicación construida fuera del árbol con el SDK por ruta, empaquetada y firmada (`cargo xtask app-pack`, `aricode-pkg`), instalada en AriFS como un solo fichero y lanzada por el broker tras verificarla (ADR 0017, `apps.external`); instalador de confianza y actualización transaccional desde `pkgs/` con reemplazo atómico por trozos (ADR 0018, `apps.update`, `apps.update_cut`); pendiente: perfil WASI |
+| 4. Aplicaciones externas | en curso | hecho: aplicación construida fuera del árbol con el SDK por ruta, empaquetada y firmada (`cargo xtask app-pack`, `aricode-pkg`), instalada en AriFS como un solo fichero y lanzada por el broker tras verificarla (ADR 0017, `apps.external`); instalador de confianza y actualización transaccional desde `pkgs/` con reemplazo atómico por trozos (ADR 0018, `apps.update`, `apps.update_cut`); perfil `aricode-wasm` v1 con validador, manifiesto por módulo y ficheros (ADR 0019, `docs/wasm-profile.md`, `wasm.*`). Etapa completada; WASI queda fuera del perfil a propósito |
 | 5. Optimización y ampliación | pendiente | rendimiento, energía, más dispositivos |
 
 ---
