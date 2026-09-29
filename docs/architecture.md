@@ -792,11 +792,17 @@ segundo brevemente para añadir la región.
   crear el proceso): antes cada nombre inexistente consumía una entrada de
   la tabla de init. El shell recibe el endpoint del broker en
   lugar del `SPAWNER`.
-- fsd mantiene hasta 8 directorios privados: cada `Bind` (solo por el
-  endpoint principal) crea o reutiliza un endpoint ligado a un prefijo; el
-  bucle lee el principal con 10 ms de espera y los privados sin espera.
-  Desde un privado, `Open`/`Create` califican el nombre como `prefijo/nombre`
-  (rechazando `/` en el nombre) y `List` filtra y recorta el prefijo.
+- fsd mantiene hasta 8 espacios de nombres concedidos: cada `Bind` (solo
+  por el endpoint principal) crea o reutiliza un endpoint ligado a un
+  prefijo, y cada `Share` (ADR 0016) uno ligado a un único fichero en modo
+  lectura; el bucle lee el principal con 10 ms de espera y los concedidos
+  sin espera. Desde un privado, `Open`/`Create` califican el nombre como
+  `prefijo/nombre` (rechazando `/` en el nombre) y `List` filtra y recorta
+  el prefijo. Desde un fichero compartido, `List` muestra solo ese fichero,
+  `Open` solo lo abre a él, y `Create`, `Write`, `Replace`, `Flush`, `Bind`
+  y `Share` responden `Denied`. El broker pide un `Share` por cada nombre
+  de `read_files` del manifiesto y deniega el lanzamiento si el fichero no
+  existe (`sandbox.shared_file`).
 
 - La consola serie del kernel serializa cada mensaje con un spinlock sin
   deshabilitar interrupciones (`console::write_raw`): antes un `info!` del

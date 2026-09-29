@@ -94,8 +94,18 @@ impl FsClient {
     /// Solo para el broker: pide a fsd un endpoint ligado al directorio
     /// privado `prefix` y devuelve el handle recibido (`WRITE`, transferible).
     pub fn bind(&self, prefix: &str) -> Result<Handle, FsError> {
-        let req = Request::new(Op::Bind)
-            .with_name(prefix)
+        self.grant(Op::Bind, prefix)
+    }
+
+    /// Solo para el broker: pide a fsd un endpoint ligado al fichero `name`
+    /// en modo lectura (ADR 0016) y devuelve el handle recibido.
+    pub fn share(&self, name: &str) -> Result<Handle, FsError> {
+        self.grant(Op::Share, name)
+    }
+
+    fn grant(&self, op: Op, name: &str) -> Result<Handle, FsError> {
+        let req = Request::new(op)
+            .with_name(name)
             .ok_or(FsError::Status(Status::Invalid))?;
         let mut msg = [0u8; Reply::LEN];
         let mut handles = [Handle(0); 1];

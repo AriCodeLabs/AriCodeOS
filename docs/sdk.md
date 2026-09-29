@@ -99,11 +99,14 @@ xtask):
 name = hello_app
 caps = system, fs      # system | fs | net | window | input | block (solo apps de confianza: updater)
 memory = 128K          # cuota de buffers DMA (K o M, máximo 8M)
+read_files = hola.txt  # hasta 4 ficheros de AriFS en modo lectura (ADR 0016)
 ```
 
 Los handles llegan en este orden fijo, solo los pedidos: `SYSTEM` (lectura),
-directorio privado de fsd, endpoint de red, endpoint del compositor,
-endpoints de entrada y, si alguna capacidad necesita buffers (`fs`, `net`,
+directorio privado de fsd, un endpoint por fichero de `read_files` (en su
+orden; desde él solo se lista, abre y lee ese fichero, y todo lo demás
+responde `Denied`), endpoint de red, endpoint del compositor, endpoints de
+entrada y, si alguna capacidad necesita buffers (`fs`, `read_files`, `net`,
 `window`), `HARDWARE` al final. Con `sys::permissions::granted` la aplicación
 los reconoce por tipo sin depender de la posición. Sin manifiesto solo se
 recibe consola y `SYSTEM`. Pedir `spawner`, `pci` o `framebuffer` hace que el
