@@ -1,6 +1,9 @@
 //! `fs_probe`: desde otro directorio privado intenta leer, escribir y cerrar
 //! los descriptores 0..16 sin haber abierto nada. fsd debe responder `BadFd`
-//! a todos: los descriptores pertenecen al endpoint que los abrió.
+//! a todos: los descriptores pertenecen al endpoint que los abrió. Después
+//! (auditoría 6ee19fb) comprueba que un compromiso que no cubre sus propios
+//! trozos se rechaza sin filtrar restos del journal de `fs_victim`, y que la
+//! transacción que `fs_victim` dejó a medias caduca y no bloquea la suya.
 #![no_std]
 #![no_main]
 
@@ -48,12 +51,58 @@ fn main(_arg: u64) -> u64 {
     let Ok(own) = fs.create("mio") else {
         return 7;
     };
-    if fs.write(own, 0, b"ok").is_err() || fs.close(own).is_err() {
+    if fs.write(own, 0, b"ok").is_err() {
         return 8;
     }
     sys::print(
         b"fs_probe: descriptores ajenos inaccesibles (BadFd en 16 x lectura, escritura y cierre)\n",
     );
+    // fs_victim dejo un reemplazo a medias: durante un tiempo el journal esta
+    // ocupado (Busy); luego caduca y este reemplazo debe poder hacerse.
+    let mut tries = 0;
+    let mut waited = false;
+    loop {
+        match fs.replace(own, b"reemplazo propio") {
+            Ok(_) => break,
+            Err(FsError::Status(Status::Busy)) if tries < 60 => {
+                waited = true;
+                tries += 1;
+                sys::thread_sleep(100);
+            }
+            Err(_) => return 9,
+        }
+    }
+    if waited {
+        sys::print(b"fs_probe: reemplazo tras una transaccion abandonada ok\n");
+    }
+    // Un trozo de un byte y un compromiso de 22: fsd no puede completar los
+    // bytes con lo que fs_victim dejo en el journal.
+    if fs.replace_chunk(own, 0, b"Y").is_err() {
+        return 10;
+    }
+    match fs.replace_commit(own, 22) {
+        Err(FsError::Status(Status::Invalid)) => {}
+        Ok(_) => {
+            sys::print(b"fs_probe: COMPROMISO INCOMPLETO ACEPTADO\n");
+            return 11;
+        }
+        Err(_) => return 12,
+    }
+    let n = match fs.read(own, 0, &mut buf) {
+        Ok(n) => n,
+        Err(_) => return 13,
+    };
+    if buf[..n].windows(9).any(|w| w == b"YNTHETIC_") {
+        sys::print(b"fs_probe: RESTOS DEL JOURNAL AJENO: ");
+        sys::print(&buf[..n]);
+        sys::print(b"\n");
+        return 14;
+    }
+    if &buf[..n] != b"reemplazo propio" {
+        return 15;
+    }
+    let _ = fs.close(own);
+    sys::print(b"fs_probe: el journal no filtra datos ajenos (compromiso incompleto rechazado)\n");
     0
 }
 

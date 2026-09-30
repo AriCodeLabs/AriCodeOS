@@ -193,6 +193,9 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
         if cmdline.has(keys::RESTART_STORM) {
             init_flags |= aricode_abi::init_arg::RESTART_STORM;
         }
+        if cmdline.has(keys::SERVICE_HANG) {
+            init_flags |= aricode_abi::init_arg::SERVICE_HANG;
+        }
         run_init(init_flags, info.framebuffer);
     }
 

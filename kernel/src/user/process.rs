@@ -62,6 +62,43 @@ pub struct Process {
     /// DMA: solo entonces `wait` puede retirar el proceso (auditoría
     /// 3eb4965, hallazgo 1: con varias CPUs el estado del hilo no basta).
     reaped: bool,
+    /// Hilo principal, para despertarlo si hay que terminarlo.
+    main_tid: aricode_sched::Tid,
+    /// `process_kill` pendiente: el hilo termina al volver a ring 0 o al
+    /// despertar de una espera (auditoría 6ee19fb, hallazgo 4).
+    kill_requested: bool,
+}
+
+/// Motivo con el que termina un proceso al que otro pidió matar.
+pub const KILLED_BY_SUPERVISOR: &str = "terminado por el supervisor";
+
+/// Pide terminar `pid` desde otro proceso: marca la petición y despierta a su
+/// hilo para que la vea. `false` si el proceso no existe o ya terminó.
+pub fn request_kill(pid: Pid) -> bool {
+    let tid = {
+        let mut procs = PROCESSES.lock();
+        let Some(p) = procs.get_mut(&pid) else {
+            return false;
+        };
+        if p.status.is_some() {
+            return true;
+        }
+        p.kill_requested = true;
+        p.main_tid
+    };
+    let _ = scheduler::wake(tid);
+    true
+}
+
+/// El proceso del hilo actual tiene una terminación pendiente.
+pub fn current_kill_requested() -> bool {
+    let Some(pid) = current_pid() else {
+        return false;
+    };
+    PROCESSES
+        .lock()
+        .get(&pid)
+        .is_some_and(|p| p.kill_requested && p.status.is_none())
 }
 
 /// Tamaño a partir del cual una línea incompleta se emite tal cual.
@@ -204,6 +241,8 @@ fn spawn_full(
             dma_used: 0,
             console_line: Vec::new(),
             reaped: false,
+            main_tid: tid,
+            kill_requested: false,
         },
     );
     scheduler::start_thread(thread);
