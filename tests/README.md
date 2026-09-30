@@ -8,7 +8,7 @@ Todos los tests viven en el repositorio y se ejecutan con `cargo xtask test`.
 |---------|----------------------------------------------------------|----------|------------------------------------------|
 | `unit`  | `cargo test` de las crates de host (`libs/*`, protocolo, xtask) | segundos | en cada commit de una feature            |
 | `smoke` | unit + arranque nominal en QEMU (`boot.kernel_ready`)     | ~5 s     | antes de mergear en `develop`            |
-| `full`  | unit + todos los escenarios QEMU (fallos provocados incluidos) | ~20 s    | antes de mergear en `main` (`--all`)     |
+| `full`  | unit + todos los escenarios QEMU (fallos provocados incluidos) | minutos  | antes de mergear en `main` (`--all`)     |
 
 ```bash
 cargo xtask test                    # unit + smoke (por defecto)
@@ -106,7 +106,9 @@ identifica el paso fallido.
 Cada fase del roadmap añade su área y sus escenarios. Existentes: `boot`,
 `panic`, `console`, `interrupts`, `memory`, `timer`, `threads`, `scheduler`,
 `user`, `capabilities`, `ipc`, `init`, `drivers`, `acpi`, `pci`, `virtio`,
-`storage`, `filesystem`, `shell`, `network`, `input`, `gui`, `sandbox`, `wasm`, `crypto`, `update`, `smp`, `iommu`, `usb`, `hardware`, `services`.
+`storage`, `filesystem`, `shell`, `network`, `input`, `gui`, `sandbox`,
+`wasm`, `crypto`, `update`, `smp`, `iommu`, `usb`, `hardware`, `services`,
+`limits`, `apps`, `perf`, `diag`.
 Una rama `feature/f05-physical-memory` ejecuta `--area memory` mientras
 desarrolla y `--all` antes de integrar. Si el filtro no selecciona ningún
 escenario QEMU, el runner falla y lista las áreas conocidas: un filtro mal
