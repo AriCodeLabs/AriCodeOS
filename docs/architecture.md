@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.8.0 (Fases 0 a 34 y etapas 1 a 5 posteriores al roadmap; la 34, la energía y más dispositivos pendientes de hardware)
+## Estado: 0.8.1 (Fases 0 a 34 y etapas 1 a 5 posteriores al roadmap; la 34, la energía y más dispositivos pendientes de hardware)
 
 ```text
 OVMF (UEFI)
@@ -349,7 +349,10 @@ segundo brevemente para añadir la región.
   `irq_wait`, `mmio_map`, `region_len`, `dma_alloc`, `dma_phys`, `pci_count`,
   `pci_info`, `pci_claim`, `console_read`, `system_info`, `system_power`,
   `initrd_read`, `pci_info_ext`, `console_inject`, `process_spawn_from`,
-  `ipc_receive_any`.
+  `ipc_receive_any`, `process_kill` (`MANAGE` sobre el proceso: marca la
+  terminación y despierta a su hilo, que termina al salir de la syscall en
+  curso, al despertar de una espera o en el siguiente tick si estaba en
+  ring 3; `process_wait` devuelve `Killed`; auditoría 6ee19fb, 4).
   Los servicios de bloques, ficheros y red no añaden syscalls: son IPC.
 - Los punteros de usuario se validan página a página contra las tablas del
   proceso (`copy_from_user`): un puntero de kernel devuelve `Fault`, nunca se
@@ -564,8 +567,9 @@ segundo brevemente para añadir la región.
   protocolo de bloques (`T_FLUSH`); sin la característica, `Flush` vuelve
   sin hacer nada y el driver lo anuncia al arrancar.
 - `fsd` (`services/arifs`) recibe de init su endpoint (`READ|WRITE`), el
-  del servicio de bloques (`WRITE`) y una capacidad de hardware; `arg` es el
-  LBA de la partición. Implementa `BlockDevice` sobre `aricode-sys::block`
+  del servicio de bloques (`WRITE`), una capacidad de hardware y `SYSTEM`
+  (lectura, reloj para caducar reemplazos por trozos abandonados); `arg` es
+  el LBA de la partición. Implementa `BlockDevice` sobre `aricode-sys::block`
   (lotes de hasta 8 sectores por petición: la librería agrupa los sectores
   enteros de cada lectura, escritura, trozo del journal y aplicación, etapa
   5) y atiende `FileServiceProtocol v1`

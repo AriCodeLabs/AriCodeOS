@@ -265,6 +265,12 @@ pub fn initrd_read(spawner: Handle, name: &str, buf: &mut [u8]) -> Result<usize,
     .map(|n| n as usize)
 }
 
+/// Termina un proceso ajeno (exige `MANAGE`); después `process_wait` devuelve
+/// `Err(Killed)`. Un proceso ya terminado devuelve `Ok` sin efecto.
+pub fn process_kill(process: Handle) -> Result<(), Error> {
+    call(nr::PROCESS_KILL, process.0 as u64, 0, 0, 0).map(|_| ())
+}
+
 /// Espera la salida de un proceso (exige `WAIT`). `Err(Killed)` si lo terminó el kernel.
 pub fn process_wait(process: Handle, timeout_ms: u64) -> Result<u64, Error> {
     call(nr::PROCESS_WAIT, process.0 as u64, timeout_ms, 0, 0)

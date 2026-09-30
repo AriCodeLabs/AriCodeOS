@@ -31,10 +31,15 @@ datos de las aplicaciones.
    válida con datos que cuadran se rehace (idempotente); una cabecera rota
    o unos datos que no cuadran se descartan: el reemplazo nunca llegó a
    comprometerse y el fichero conserva el contenido anterior.
-3. **Contrato de `write`**: escribe en el sitio, sector a sector, y solo
-   después sube el tamaño. Tras un corte cada sector tiene el contenido
-   viejo o el nuevo; no hay garantía entre sectores. No es duradero hasta
-   `flush`. Quien necesite todo-o-nada usa `replace`.
+3. **Contrato de `write`**: escribe en el sitio, sector a sector, hace
+   `flush` y solo después sube el tamaño. Tras un corte cada sector tiene el
+   contenido viejo o el nuevo; no hay garantía entre sectores; el tamaño
+   nunca cubre datos que no sean duraderos. Quien necesite todo-o-nada usa
+   `replace`. Del mismo modo `create` hace duradera la reserva del
+   superbloque antes de publicar la entrada, porque el soporte puede
+   reordenar sectores hasta `flush` (auditoría 6ee19fb, hallazgo 2), y
+   `open` rechaza (`Corrupt`) metadatos con CRC válido pero incoherentes:
+   ficheros fuera del área asignada o solapados.
 4. **`flush` de extremo a extremo**: `virtio-blk` negocia `VIRTIO_BLK_F_FLUSH`
    y atiende `Op::Flush` del protocolo de bloques (sin él, `Flush` vuelve
    sin hacer nada y el driver lo anuncia al arrancar); `BlockDevice::flush`

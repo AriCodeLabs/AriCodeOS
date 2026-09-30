@@ -21,7 +21,13 @@ instalación no deje un estado a medias. El `replace` atómico de AriFS (ADR
    y aplica. `FsClient::replace` trocea solo cuando hace falta: hasta la
    capacidad del journal (32 KiB) con la misma garantía todo-o-nada. Un
    solo reemplazo puede estar a medias en fsd (`Busy` para los demás); lo
-   libera su compromiso o el cierre de su descriptor.
+   libera su compromiso, el cierre de su descriptor o, si su dueño
+   desaparece, dos segundos sin trozos (auditoría 6ee19fb, hallazgo 3).
+   Una transacción empieza en el desplazamiento 0 y sigue sin huecos, y el
+   compromiso debe cubrir exactamente lo que ella escribió: la librería lo
+   comprueba (`BadTransaction`, `Invalid` por IPC), así que un compromiso
+   nunca puede llevarse restos del journal de otra aplicación (auditoría
+   6ee19fb, hallazgo 1).
 2. **Instalador de confianza** (`apps/installer`, capacidad `install` solo
    para él, como `block` lo es para `updater`): recibe el espacio principal
    de fsd, recorre `pkgs/*.aripkg`, verifica cada paquete con la clave de

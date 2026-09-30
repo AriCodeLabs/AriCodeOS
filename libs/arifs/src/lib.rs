@@ -64,6 +64,9 @@ pub enum FsError {
     BadName,
     /// Lectura o escritura fuera de la capacidad del fichero.
     OutOfRange,
+    /// Compromiso de un reemplazo por trozos que no empezó en cero, tiene
+    /// huecos o no cubre la longitud comprometida (auditoría 6ee19fb, 1).
+    BadTransaction,
 }
 
 /// Dispositivo de bloques de 512 bytes. `flush` hace duraderas las
@@ -256,6 +259,20 @@ impl Journal {
     }
 }
 
+/// Iteración sobre las entradas en uso de una tabla (con índice).
+mod alloc_free {
+    use super::{Entry, MAX_FILES};
+    pub struct Entries<'a>(pub &'a [Option<Entry>; MAX_FILES]);
+    impl<'a> Entries<'a> {
+        pub fn iter(&self) -> impl Iterator<Item = (usize, &'a Entry)> + '_ {
+            self.0
+                .iter()
+                .enumerate()
+                .filter_map(|(i, e)| e.as_ref().map(|e| (i, e)))
+        }
+    }
+}
+
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= NAME_LEN
@@ -286,6 +303,9 @@ pub struct AriFs<D: BlockDevice> {
     table: [Option<Entry>; MAX_FILES],
     sequence: u64,
     recovery: Recovery,
+    /// Reemplazo por trozos en curso: fichero y siguiente desplazamiento
+    /// esperado. Solo se compromete lo que esta transacción escribió.
+    staged: Option<(usize, u32)>,
 }
 
 impl<D: BlockDevice> AriFs<D> {
@@ -302,15 +322,45 @@ impl<D: BlockDevice> AriFs<D> {
                 table[t as usize * (SECTOR / ENTRY_LEN) + i] = Entry::decode(e)?;
             }
         }
+        Self::check_layout(&sb, &table)?;
         let mut fs = Self {
             dev,
             sb,
             table,
             sequence: 0,
             recovery: Recovery::Clean,
+            staged: None,
         };
         fs.recover()?;
         Ok(fs)
+    }
+
+    /// Los metadatos deben ser coherentes entre sí, no solo tener CRC:
+    /// cada fichero dentro del área asignada y sin solaparse con otro
+    /// (auditoría 6ee19fb, hallazgo 2).
+    fn check_layout(sb: &Superblock, table: &[Option<Entry>; MAX_FILES]) -> Result<(), FsError> {
+        if sb.data_next < DATA_LBA || sb.data_next > sb.total_sectors {
+            return Err(FsError::Corrupt);
+        }
+        let used: alloc_free::Entries<'_> = alloc_free::Entries(table);
+        for (i, a) in used.iter() {
+            let a_end = a.start_lba + a.capacity_sectors as u64;
+            if a.capacity_sectors == 0 || a.start_lba < DATA_LBA || a_end > sb.data_next {
+                return Err(FsError::Corrupt);
+            }
+            if a.size > a.capacity_bytes() {
+                return Err(FsError::Corrupt);
+            }
+            for (j, b) in used.iter() {
+                if j > i
+                    && a.start_lba < b.start_lba + b.capacity_sectors as u64
+                    && b.start_lba < a_end
+                {
+                    return Err(FsError::Corrupt);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Crea un sistema de archivos vacío sobre `total_sectors` sectores.
@@ -335,6 +385,7 @@ impl<D: BlockDevice> AriFs<D> {
             table: [None; MAX_FILES],
             sequence: 0,
             recovery: Recovery::Clean,
+            staged: None,
         })
     }
 
@@ -416,9 +467,13 @@ impl<D: BlockDevice> AriFs<D> {
         entry.name[..name.len()].copy_from_slice(name.as_bytes());
         self.table[index] = Some(entry);
         self.sb.data_next = start + sectors as u64;
-        // Primero el superbloque: un corte entre ambos deja espacio
-        // reservado sin entrada, nunca una entrada sobre espacio no reservado.
+        // Primero el superbloque y una barrera: el soporte puede reordenar
+        // sectores hasta `flush`, y una entrada publicada sobre espacio no
+        // reservado dejaría dos ficheros solapados al volver a asignarlo
+        // (auditoría 6ee19fb, hallazgo 2). Un corte entre ambos deja espacio
+        // reservado sin entrada, que no rompe nada.
         self.dev.write_sector(0, &self.sb.encode())?;
+        self.dev.flush()?;
         self.write_table_entry(index)?;
         Ok(index)
     }
@@ -498,6 +553,10 @@ impl<D: BlockDevice> AriFs<D> {
         }
         self.copy_to_device(e.start_lba, offset as usize, data)?;
         if end as u32 > e.size {
+            // Los datos deben ser duraderos antes de publicar el tamaño que
+            // los cubre: sin barrera, un corte podía conservar el tamaño y
+            // perder los datos (auditoría 6ee19fb, hallazgo 2).
+            self.dev.flush()?;
             let entry = self.table[index].as_mut().ok_or(FsError::NotFound)?;
             entry.size = end as u32;
             self.write_table_entry(index)?;
@@ -523,7 +582,25 @@ impl<D: BlockDevice> AriFs<D> {
         if end > e.capacity_bytes() as usize || end > JOURNAL_CAPACITY_BYTES {
             return Err(FsError::OutOfRange);
         }
-        self.copy_to_device(JOURNAL_DATA_LBA, offset as usize, data)
+        // Una transacción empieza en cero y sigue sin huecos: así el
+        // compromiso solo puede cubrir bytes que ella escribió, nunca restos
+        // de otro reemplazo (auditoría 6ee19fb, hallazgo 1).
+        if offset == 0 {
+            self.staged = Some((index, 0));
+        }
+        match self.staged {
+            Some((i, next)) if i == index && next == offset => {}
+            _ => return Err(FsError::BadTransaction),
+        }
+        self.copy_to_device(JOURNAL_DATA_LBA, offset as usize, data)?;
+        self.staged = Some((index, end as u32));
+        Ok(())
+    }
+
+    /// Descarta el reemplazo por trozos en curso, si lo hay (el dueño se
+    /// fue o tardó demasiado): el siguiente trozo deberá empezar en cero.
+    pub fn abandon_replace(&mut self) {
+        self.staged = None;
     }
 
     /// Compromete los `len` primeros bytes que hay en el journal como nuevo
@@ -550,6 +627,10 @@ impl<D: BlockDevice> AriFs<D> {
         if len > e.capacity_bytes() || len as usize > JOURNAL_CAPACITY_BYTES {
             return Err(FsError::OutOfRange);
         }
+        if self.staged != Some((index, len)) {
+            return Err(FsError::BadTransaction);
+        }
+        self.staged = None;
         self.dev.flush()?;
         let data_crc = self.journal_crc(len)?;
         self.sequence += 1;
@@ -1043,6 +1124,153 @@ mod tests {
         let n = fs.read(i, 0, &mut buf).unwrap();
         buf.truncate(n);
         buf
+    }
+
+    /// Disco con caché de escritura que, al cortar, conserva solo los
+    /// sectores pendientes que `keep` elige: el contrato de `BlockDevice` no
+    /// promete orden antes de `flush` (auditoría 6ee19fb, hallazgo 2).
+    struct SubsetDisk {
+        persisted: Vec<u8>,
+        pending: Vec<(u64, [u8; SECTOR])>,
+    }
+
+    impl SubsetDisk {
+        fn new(base: &[u8]) -> Self {
+            Self {
+                persisted: base.to_vec(),
+                pending: Vec::new(),
+            }
+        }
+        fn power_off(mut self, keep: impl Fn(u64) -> bool) -> MemDisk {
+            for (lba, s) in &self.pending {
+                if keep(*lba) {
+                    let o = *lba as usize * SECTOR;
+                    self.persisted[o..o + SECTOR].copy_from_slice(s);
+                }
+            }
+            MemDisk(self.persisted)
+        }
+    }
+
+    impl BlockDevice for SubsetDisk {
+        fn read_sector(&mut self, lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), FsError> {
+            if let Some((_, s)) = self.pending.iter().rev().find(|(l, _)| *l == lba) {
+                buf.copy_from_slice(s);
+                return Ok(());
+            }
+            let o = lba as usize * SECTOR;
+            buf.copy_from_slice(&self.persisted[o..o + SECTOR]);
+            Ok(())
+        }
+        fn write_sector(&mut self, lba: u64, buf: &[u8; SECTOR]) -> Result<(), FsError> {
+            self.pending.push((lba, *buf));
+            Ok(())
+        }
+        fn flush(&mut self) -> Result<(), FsError> {
+            for (lba, s) in self.pending.drain(..) {
+                let o = lba as usize * SECTOR;
+                self.persisted[o..o + SECTOR].copy_from_slice(&s);
+            }
+            Ok(())
+        }
+    }
+
+    fn is_table(lba: u64) -> bool {
+        (TABLE_LBA..TABLE_LBA + TABLE_SECTORS).contains(&lba)
+    }
+
+    #[test]
+    fn reordered_metadata_never_overlaps_files() {
+        let mut fs = AriFs::format(disk(400), 400).unwrap();
+        fs.create("a").unwrap();
+        let base = fs.into_device().0;
+        // Corte tras `create` conservando solo la tabla (la entrada) y
+        // perdiendo lo demás pendiente: la reserva ya estaba en el
+        // superbloque por la barrera, así que nada se solapa.
+        for keep_table_only in [true, false] {
+            let mut fs = AriFs::open(SubsetDisk::new(&base)).unwrap();
+            let b = fs.create("b").unwrap();
+            let first = fs.entry(b).unwrap().start_lba;
+            let dev = fs.into_device().power_off(|lba| {
+                if keep_table_only {
+                    is_table(lba)
+                } else {
+                    lba == 0
+                }
+            });
+            let mut fs = AriFs::open(dev).unwrap();
+            let c = fs.create("c").unwrap();
+            let second = fs.entry(c).unwrap().start_lba;
+            assert_ne!(
+                second, first,
+                "espacio reasignado (tabla sola: {keep_table_only})"
+            );
+            let mut used: Vec<(u64, u64)> = fs
+                .entries()
+                .map(|(_, e)| (e.start_lba, e.start_lba + e.capacity_sectors as u64))
+                .collect();
+            used.sort_unstable();
+            for w in used.windows(2) {
+                assert!(w[0].1 <= w[1].0, "ficheros solapados: {used:?}");
+            }
+        }
+        // Un tamaño publicado sin sus datos: la barrera de `write` lo impide.
+        let mut fs = AriFs::open(SubsetDisk::new(&base)).unwrap();
+        let a = fs.find("a").unwrap();
+        fs.write(a, 0, b"NEW").unwrap();
+        let mut fs = AriFs::open(fs.into_device().power_off(is_table)).unwrap();
+        let mut back = [0u8; 8];
+        assert_eq!(fs.read(a, 0, &mut back).unwrap(), 3);
+        assert_eq!(&back[..3], b"NEW", "tamano sin datos");
+        // Metadatos con CRC correcto pero solapados: no se monta.
+        let mut fs = AriFs::format(disk(400), 400).unwrap();
+        let x = fs.create("x").unwrap();
+        fs.create("y").unwrap();
+        let start = fs.entry(x).unwrap().start_lba;
+        let mut img = fs.into_device().0;
+        let mut overlapped = Entry {
+            name: [0; NAME_LEN],
+            name_len: 1,
+            start_lba: start,
+            capacity_sectors: FILE_CAPACITY_SECTORS,
+            size: 0,
+        };
+        overlapped.name[0] = b'y';
+        let o = TABLE_LBA as usize * SECTOR + ENTRY_LEN;
+        img[o..o + ENTRY_LEN].copy_from_slice(&overlapped.encode());
+        assert_eq!(AriFs::open(MemDisk(img)).err(), Some(FsError::Corrupt));
+    }
+
+    #[test]
+    fn chunked_commit_only_covers_its_own_bytes() {
+        let mut fs = AriFs::format(disk(400), 400).unwrap();
+        let a = fs.create("app_a/notas").unwrap();
+        let b = fs.create("app_b/notas").unwrap();
+        fs.write(b, 0, b"propio").unwrap();
+        fs.replace(a, b"XYNTHETIC_PRIVATE_DATA").unwrap();
+        // B manda un byte y compromete 22: no puede llevarse restos de A.
+        fs.replace_chunk(b, 0, b"Y").unwrap();
+        assert_eq!(fs.replace_commit(b, 22), Err(FsError::BadTransaction));
+        assert_eq!(content(&mut fs, b), b"propio");
+        // Un trozo que no empieza en cero, o con hueco, tampoco vale.
+        assert_eq!(fs.replace_chunk(b, 5, b"gap"), Err(FsError::BadTransaction));
+        fs.replace_chunk(b, 0, b"abc").unwrap();
+        assert_eq!(fs.replace_chunk(b, 4, b"d"), Err(FsError::BadTransaction));
+        // Compromiso de otro fichero con la transacción de este: rechazado.
+        fs.replace_chunk(b, 0, b"abc").unwrap();
+        assert_eq!(fs.replace_commit(a, 3), Err(FsError::BadTransaction));
+        // La transacción correcta sigue funcionando y se consume.
+        fs.replace_chunk(b, 0, b"abc").unwrap();
+        fs.replace_chunk(b, 3, b"de").unwrap();
+        fs.replace_commit(b, 5).unwrap();
+        assert_eq!(content(&mut fs, b), b"abcde");
+        assert_eq!(fs.replace_commit(b, 5), Err(FsError::BadTransaction));
+        // Abandonar una transacción a medias deja el journal libre para otra.
+        fs.replace_chunk(b, 0, b"a medias").unwrap();
+        fs.abandon_replace();
+        assert_eq!(fs.replace_commit(b, 8), Err(FsError::BadTransaction));
+        fs.replace(a, b"otra").unwrap();
+        assert_eq!(content(&mut fs, a), b"otra");
     }
 
     #[test]

@@ -102,7 +102,7 @@ hablar con él. `sys::permissions::granted` recorre lo recibido.
 
 | Área | Cómo |
 |------|------|
-| process | `sys::process_spawn_with(spawner, nombre, arg, handles)`, `sys::process_wait`, `sys::process_exit`; hace falta un handle `SPAWNER` con `MANAGE` (init lo tiene; el shell recibe uno para `run`) |
+| process | `sys::process_spawn_with(spawner, nombre, arg, handles)`, `sys::process_wait`, `sys::process_kill` (`MANAGE` sobre el proceso; después `process_wait` devuelve `Killed`), `sys::process_exit`; hace falta un handle `SPAWNER` con `MANAGE` (init lo tiene; el shell recibe uno para `run`) |
 | ipc | `sys::endpoint_create`, `sys::ipc_send`, `sys::ipc_receive` (256 bytes y hasta 4 handles por mensaje, con plazo), `sys::ipc_receive_any` (el primero de hasta 16 endpoints con mensaje, con su índice; ADR 0020); los datos grandes van por buffers DMA compartidos |
 | filesystem | `sys::fs::FsClient` sobre el endpoint de `fsd` y una capacidad `HARDWARE` para su buffer: `list`, `open`, `create`, `read`, `write` (en el sitio, duradero tras `flush`), `replace` (todo-o-nada y duradero, hasta 32 KiB: por trozos al journal por encima de 4 KiB), `flush`, `close` (ADR 0014, 0018) |
 | network | `sys::net::NetClient`: `info`, `ping`, UDP (`udp_bind/send/recv`), TCP (`tcp_connect/listen/accept/send/recv/close`), `resolve`; `sys::http::get` encima |

@@ -101,6 +101,8 @@ pub struct Global {
     pub ty: ValType,
     pub mutable: bool,
     pub init: Value,
+    /// Tipo de la constante del inicializador (debe coincidir con `ty`).
+    pub init_ty: ValType,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -117,6 +119,8 @@ pub struct Module<'a> {
     pub imports: Vec<Import>,
     pub functions: Vec<Function>,
     pub table: Vec<Option<u32>>,
+    /// Límites declarados de la tabla (mínimo, máximo), si hay tabla.
+    pub table_limits: Option<(u32, Option<u32>)>,
     pub memory_pages: Option<(u32, Option<u32>)>,
     pub globals: Vec<Global>,
     pub exports: Vec<Export>,
@@ -220,17 +224,25 @@ impl<'a> Reader<'a> {
 }
 
 /// Evalúa una expresión constante de inicialización (`i32.const`, `i64.const`).
-fn const_expr(r: &mut Reader) -> Result<Value, Error> {
+/// Expresión constante con el tipo de su constante (para validar
+/// inicializadores de globales y desplazamientos de segmentos).
+fn const_expr_typed(r: &mut Reader) -> Result<(ValType, Value), Error> {
     let v = match r.u8()? {
-        0x41 => r.i32()? as u32 as u64,
-        0x42 => r.i64()? as u64,
+        0x41 => (ValType::I32, r.i32()? as u32 as u64),
+        0x42 => (ValType::I64, r.i64()? as u64),
         0x43 => {
             let b = r.bytes(4)?;
-            u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64
+            (
+                ValType::F32,
+                u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64,
+            )
         }
         0x44 => {
             let b = r.bytes(8)?;
-            u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+            (
+                ValType::F64,
+                u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
+            )
         }
         _ => return Err(Error::Unsupported("expresion constante")),
     };
@@ -251,6 +263,7 @@ impl<'a> Module<'a> {
             imports: Vec::new(),
             functions: Vec::new(),
             table: Vec::new(),
+            table_limits: None,
             memory_pages: None,
             globals: Vec::new(),
             exports: Vec::new(),
@@ -319,13 +332,12 @@ impl<'a> Module<'a> {
                         }
                         let flags = s.u8()?;
                         let min = s.u32()?;
-                        if flags & 1 != 0 {
-                            s.u32()?;
-                        }
+                        let max = if flags & 1 != 0 { Some(s.u32()?) } else { None };
                         if min > 4096 {
                             return Err(Error::Unsupported("tabla grande"));
                         }
                         m.table = alloc::vec![None; min as usize];
+                        m.table_limits = Some((min, max));
                     }
                 }
                 5 => {
@@ -340,8 +352,13 @@ impl<'a> Module<'a> {
                     for _ in 0..s.u32()? {
                         let ty = s.valtype()?;
                         let mutable = s.u8()? == 1;
-                        let init = const_expr(&mut s)?;
-                        m.globals.push(Global { ty, mutable, init });
+                        let (init_ty, init) = const_expr_typed(&mut s)?;
+                        m.globals.push(Global {
+                            ty,
+                            mutable,
+                            init,
+                            init_ty,
+                        });
                     }
                 }
                 7 => {
@@ -366,7 +383,11 @@ impl<'a> Module<'a> {
                         if flags != 0 {
                             return Err(Error::Unsupported("segmento de elementos"));
                         }
-                        let offset = const_expr(&mut s)? as usize;
+                        let (offset_ty, offset) = const_expr_typed(&mut s)?;
+                        if offset_ty != ValType::I32 {
+                            return Err(Error::Invalid("desplazamiento de elementos no i32"));
+                        }
+                        let offset = offset as usize;
                         let n = s.u32()? as usize;
                         for i in 0..n {
                             let f = s.u32()?;
@@ -419,7 +440,11 @@ impl<'a> Module<'a> {
                         if flags != 0 {
                             return Err(Error::Unsupported("segmento de datos pasivo"));
                         }
-                        let offset = const_expr(&mut s)? as u32;
+                        let (offset_ty, offset) = const_expr_typed(&mut s)?;
+                        if offset_ty != ValType::I32 {
+                            return Err(Error::Invalid("desplazamiento de datos no i32"));
+                        }
+                        let offset = offset as u32;
                         let len = s.u32()? as usize;
                         let start = s.pos;
                         s.bytes(len)?;
@@ -484,6 +509,9 @@ struct Label {
     height: usize,
     /// Valores que deja el bloque al salir por `br`.
     arity: usize,
+    /// Parámetros del bloque: lo que conserva un `br` a un `loop`
+    /// (auditoría 6ee19fb, observación).
+    params: usize,
 }
 
 struct Frame {
@@ -651,17 +679,19 @@ impl<'m, 'a> Instance<'m, 'a> {
         if idx < frame_labels_base {
             return Err(Error::Malformed("etiqueta de otro marco"));
         }
-        let (target, height, arity, is_loop) = {
+        let (target, height, arity, is_loop, params) = {
             let l = &self.labels[idx];
             (
                 l.loop_start.unwrap_or(l.end),
                 l.height,
                 l.arity,
                 l.loop_start.is_some(),
+                l.params,
             )
         };
-        // Conservar los valores de salida del bloque y descartar el resto.
-        let keep = if is_loop { 0 } else { arity };
+        // Conservar los valores de salida del bloque (o los parámetros del
+        // `loop`, que vuelven a entrar) y descartar el resto.
+        let keep = if is_loop { params } else { arity };
         let len = self.stack.len();
         if len < height + keep {
             return Err(Error::Trap("pila insuficiente en br"));
@@ -714,6 +744,7 @@ impl<'m, 'a> Instance<'m, 'a> {
                 loop_start: None,
                 height: this.stack.len(),
                 arity: ty.results.len(),
+                params: 0,
             });
             frames.push(Frame {
                 func: index as usize - n_imports,
@@ -783,6 +814,7 @@ impl<'m, 'a> Instance<'m, 'a> {
                         loop_start: (op == 0x03).then_some(start),
                         height: self.stack.len() - arity.0,
                         arity: arity.1,
+                        params: arity.0,
                     });
                 }
                 0x04 => {
@@ -794,6 +826,7 @@ impl<'m, 'a> Instance<'m, 'a> {
                         loop_start: None,
                         height: self.stack.len() - arity.0,
                         arity: arity.1,
+                        params: arity.0,
                     });
                     if cond == 0 {
                         match else_pos {
@@ -1919,6 +1952,48 @@ mod tests {
         let mut truncated = b.build();
         truncated.truncate(truncated.len() - 3);
         assert!(Module::parse(&truncated).is_err());
+    }
+
+    /// Módulos mínimos de la auditoría 6ee19fb (hallazgo 6 y observación),
+    /// contrastados con `WebAssembly.validate` de Node: tres inválidos y un
+    /// `loop` con parámetro que debe devolver 0.
+    #[test]
+    fn audit_fixtures_structural_validation_and_loop_params() {
+        // global i32 inicializada con i64.const
+        let wrong_global = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x06, 0x06, 0x01, 0x7F, 0x00, 0x42,
+            0x01, 0x0B,
+        ];
+        assert_eq!(
+            Module::parse(&wrong_global).err(),
+            Some(Error::Invalid("tipo del inicializador de global"))
+        );
+        // exportación de memoria 99 sin memoria
+        let missing_memory = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x07, 0x05, 0x01, 0x01, 0x6D, 0x02,
+            0x63,
+        ];
+        assert_eq!(
+            Module::parse(&missing_memory).err(),
+            Some(Error::Invalid("exportacion fuera de rango"))
+        );
+        // memoria con mínimo 2 y máximo 1
+        let inverted_limits = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x05, 0x04, 0x01, 0x01, 0x02, 0x01,
+        ];
+        assert_eq!(
+            Module::parse(&inverted_limits).err(),
+            Some(Error::Invalid("limites de memoria"))
+        );
+        // loop (param i32) con br_if: cuenta atrás desde 2 y devuelve 0
+        let loop_params = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0A, 0x02, 0x60, 0x00, 0x01,
+            0x7F, 0x60, 0x01, 0x7F, 0x01, 0x7F, 0x03, 0x02, 0x01, 0x00, 0x07, 0x08, 0x01, 0x04,
+            0x6D, 0x61, 0x69, 0x6E, 0x00, 0x00, 0x0A, 0x16, 0x01, 0x14, 0x01, 0x01, 0x7F, 0x41,
+            0x02, 0x03, 0x01, 0x22, 0x00, 0x41, 0x01, 0x6B, 0x22, 0x00, 0x20, 0x00, 0x0D, 0x00,
+            0x0B, 0x0B,
+        ];
+        assert_eq!(run(&loop_params, "main", &[]), Ok(0));
     }
 
     /// El validador rechaza antes de ejecutar lo que el intérprete solo
