@@ -2,7 +2,7 @@
 
 ## Documento maestro de arquitectura, especificaciones técnicas y plan de desarrollo
 
-**Estado:** 0.8.0 (2026-09-30): las 35 fases, las etapas 1 a 4 posteriores al roadmap y la parte de la 5 sin hardware (medidas, optimizaciones, diagnóstico) implementadas y validadas en QEMU; la Fase 34, el equipo de referencia y la energía esperan el portátil. Estado por capacidad en el README  
+**Estado:** 0.8.1 (2026-09-30): las 35 fases, las etapas 1 a 4 posteriores al roadmap y la parte de la 5 sin hardware (medidas, optimizaciones, diagnóstico) implementadas y validadas en QEMU, con la auditoría 6ee19fb corregida; la Fase 34, el equipo de referencia y la energía esperan el portátil. Estado por capacidad en el README  
 **Versión del documento:** 0.2  
 **Nombre del sistema:** AriCodeOS  
 **Arquitectura inicial:** x86-64  
@@ -3634,7 +3634,13 @@ primera prueba física de la Fase 34.
 
 ## 94.7 AriCodeOS 0.8
 
-**Estado: completada (2026-09-30), tag `v0.8.0`.** Etapa 5 sin hardware:
+**Estado: completada (2026-09-30), tags `v0.8.0` y `v0.8.1`.** Etapa 5 sin
+hardware, y en 0.8.1 la auditoría `6ee19fb`
+(`docs/audits/2026-09-29-services-persistence-packages-wasm-6ee19fb.md`):
+compromisos por trozos acotados a su transacción, barreras antes de
+publicar metadatos, transacciones abandonadas con plazo, `process_kill`
+para servicios que no responden, firmas de importaciones y validación
+estructural WASM, y parámetros de `loop`.
 
 - medidas reproducibles desde ring 3 (`bench`: syscall, IPC y ficheros con
   p50/p95/p99; `docs/performance.md` con el método y la referencia de cada
