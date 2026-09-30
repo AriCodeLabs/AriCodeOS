@@ -1,0 +1,20 @@
+# Auditoria 6ee19fb, hallazgo 5: un modulo valido importa aricode.file_write
+# con una firma distinta de la del anfitrion. El runner la compara al enlazar
+# y no ejecuta nada (antes accedia a argumentos que no existian y moria).
+name = "wasm.bad_import"
+description = "modulo WASM con una importacion de firma incompatible: rechazada al enlazar, sin ejecutar"
+level = "full"
+areas = ["wasm", "sandbox", "shell"]
+cmdline = "qemu_exit shell"
+disk = "wasm-bad-import"
+timeout_secs = 90
+stdin = ["run wasm_runner 5", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "wasm_runner: importacion aricode.file_write con firma incompatible",
+    "run: wasm_runner termino con 14",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "panic en programa", "el modulo fallo"]

@@ -39,6 +39,15 @@ El estudio `docs/audits/2026-09-28-referentes-capacidades-oportunidades.md`
    prueba a 100 reinicios mientras fsd sigue atendiendo y comprueba que la
    memoria libre vuelve al nivel anterior.
 
+## Nota (auditoría 6ee19fb, hallazgo 4)
+
+Cuando la sonda de arranque vence, el supervisor no da por muerta la
+generación sin más: si el proceso sigue vivo lo termina con `process_kill`
+y espera a que el kernel lo recoja (hasta 2 s) antes de anunciar la muerte
+y programar la siguiente; así la nueva generación no compite con la
+anterior por sus dispositivos PCI. Si aun así no termina, el servicio queda
+fallido sin relanzar (`services.start_timeout`).
+
 ## Consecuencias
 
 - La supervisión vive en init mientras init viva (modo `shell`/`gui`); en

@@ -81,6 +81,7 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         nr::IPC_RECEIVE_ANY => ipc_receive_any(
             frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9,
         ),
+        nr::PROCESS_KILL => process_kill(h),
         nr::CONSOLE_READ => console_read(h, frame.rsi, frame.rdx, frame.r10),
         nr::CONSOLE_INJECT => console_inject(h, frame.rsi, frame.rdx),
         nr::SYSTEM_INFO => system_info(h, frame.rsi, frame.rdx, frame.r10),
@@ -91,6 +92,11 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
             Err(Error::NoSys)
         }
     };
+    // Una terminación pedida por otro proceso se ejecuta aquí, con la
+    // syscall ya cerrada y sin locks tomados (auditoría 6ee19fb, hallazgo 4).
+    if process::current_kill_requested() {
+        process::kill_current(process::KILLED_BY_SUPERVISOR);
+    }
     match result {
         Ok(v) => v as i64,
         Err(e) => e.to_raw(),
@@ -550,6 +556,20 @@ fn pci_claim(root: Handle, index: usize, out_ptr: u64) -> Result<u64, Error> {
     })?;
     process::copy_to_user(out_ptr, &raw)?;
     Ok(aricode_abi::PCI_CLAIM_HANDLES as u64)
+}
+
+/// `process_kill` (auditoría 6ee19fb, hallazgo 4): exige `MANAGE` sobre el
+/// proceso; lo marca para terminar y despierta a su hilo.
+fn process_kill(h: Handle) -> Result<u64, Error> {
+    let pid = with_handles(|t| match lookup(t, h, Rights::MANAGE)?.kind {
+        ObjectKind::Process(p) => Ok(p),
+        _ => Err(Error::Invalid),
+    })?;
+    if process::request_kill(pid) {
+        Ok(0)
+    } else {
+        Err(Error::BadHandle)
+    }
 }
 
 fn process_wait(h: Handle, timeout_ms: u64) -> Result<u64, Error> {

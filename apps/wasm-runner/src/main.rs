@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use aricode_rt::fmt_u64;
 use aricode_rt::sys::fs::FsClient;
 use aricode_rt::sys::{self, kind, permissions, time, Handle};
-use aricode_wasm::{Error, Host, Instance, Module, Value};
+use aricode_wasm::{Error, FuncType, Host, Instance, Module, ValType, Value};
 
 const MODULE_FILE: &str = "demo.wasm";
 const MANIFEST_FILE: &str = "demo.manifest";
@@ -70,6 +70,21 @@ impl Api {
             Api::FileRead | Api::FileWrite => Cap::Files,
         }
     }
+
+    /// Firma que el anfitrión implementa; la importación del módulo debe
+    /// declarar exactamente esta (auditoría 6ee19fb, hallazgo 5).
+    fn signature(self) -> (&'static [ValType], &'static [ValType]) {
+        use ValType::{I32, I64};
+        match self {
+            Api::Print => (&[I32, I32], &[]),
+            Api::UptimeMs => (&[], &[I64]),
+            Api::FileRead | Api::FileWrite => (&[I32, I32, I32, I32], &[I32]),
+        }
+    }
+}
+
+fn same_signature(ty: &FuncType, params: &[ValType], results: &[ValType]) -> bool {
+    ty.params.as_slice() == params && ty.results.as_slice() == results
 }
 
 /// Manifiesto del módulo: `caps = a, b` (comentarios con `#`).
@@ -342,7 +357,24 @@ fn main(arg: u64) -> u64 {
             sys::print(b" no concedida por el manifiesto del modulo\n");
             return 12;
         }
+        let (params, results) = api.signature();
+        let declared = module.types.get(imp.type_index as usize);
+        if !declared.is_some_and(|ty| same_signature(ty, params, results)) {
+            sys::print(b"wasm_runner: importacion aricode.");
+            sys::print(&imp.name);
+            sys::print(b" con firma incompatible\n");
+            return 14;
+        }
         imports.push(Some(api));
+    }
+    // `main(i64) -> i32`: si el modulo exporta otra cosa, no se ejecuta.
+    let main_ok = module
+        .exported_function("main")
+        .and_then(|i| module.function_type(i).ok())
+        .is_some_and(|ty| same_signature(ty, &[ValType::I64], &[ValType::I32]));
+    if !main_ok {
+        say(b"main con firma incompatible (se espera main(i64) -> i32)");
+        return 15;
     }
     // 3. Memoria lineal en un buffer DMA (cuenta contra la cuota).
     let Ok(dma) = sys::dma_alloc(hw, MEMORY_BYTES) else {

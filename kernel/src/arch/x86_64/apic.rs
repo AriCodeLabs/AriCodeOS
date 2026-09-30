@@ -201,14 +201,14 @@ pub fn send_startup(lapic_id: u32, vector: u8) {
 }
 
 /// Entrada para vectores >= 32 desde `exceptions::handle`.
-pub fn handle_interrupt(vector: u8) {
+pub fn handle_interrupt(vector: u8, from_user: bool) {
     match vector {
         TIMER_VECTOR => {
             // Solo el BSP lleva el reloj; los APs solo consumen quantum.
             let bsp = crate::cpu::is_bsp();
             let now = if bsp { time::tick() } else { time::ticks() };
             eoi();
-            crate::task::scheduler::on_tick(now, bsp);
+            crate::task::scheduler::on_tick(now, bsp, from_user);
         }
         RESCHED_VECTOR => {
             // Solo hay que salir de `hlt`: el bucle idle revisa la cola.

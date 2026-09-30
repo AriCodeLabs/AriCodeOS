@@ -113,7 +113,13 @@ pub fn adopt_idle(idx: usize) {
 /// Llamado desde el handler del timer (interrupciones deshabilitadas, EOI
 /// ya enviado). En el BSP despierta a los dormidos; en todas, preempta si el
 /// quantum expiró. Antes de `init` no hace nada.
-pub fn on_tick(now: u64, bsp: bool) {
+pub fn on_tick(now: u64, bsp: bool, from_user: bool) {
+    // Un hilo de usuario que no hace syscalls (bucle infinito) solo pasa por
+    // aquí: si su proceso tiene una terminación pendiente, termina ya, igual
+    // que ante una excepción (auditoría 6ee19fb, hallazgo 4).
+    if from_user && crate::user::process::current_kill_requested() {
+        crate::user::process::kill_current(crate::user::process::KILLED_BY_SUPERVISOR);
+    }
     let woke = if bsp {
         let mut guard = SCHED.lock();
         let Some(s) = guard.as_mut() else {
@@ -157,7 +163,9 @@ pub fn sleep_ms(ms: u64) {
     let until = crate::time::ticks() + ms.div_ceil(crate::time::MS_PER_TICK) + 1;
     loop {
         sleep_until(until);
-        if crate::time::ticks() >= until {
+        // Un despertar anticipado por `process_kill` no vuelve a dormir: la
+        // syscall termina el proceso al salir (auditoría 6ee19fb, 4).
+        if crate::time::ticks() >= until || crate::user::process::current_kill_requested() {
             return;
         }
     }

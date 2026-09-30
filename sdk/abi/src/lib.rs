@@ -53,6 +53,9 @@ pub mod init_arg {
     /// Solo tests (`restart_storm`): init reinicia 100 veces un servicio de
     /// prueba bajo el supervisor y comprueba que no se pierden recursos.
     pub const RESTART_STORM: u64 = 64;
+    /// Solo tests (`service_hang`): init lanza un servicio que nunca responde
+    /// y comprueba que el supervisor lo termina y no deja procesos vivos.
+    pub const SERVICE_HANG: u64 = 128;
     /// Solo tests (`init_fail_late`): init falla al final del arranque, antes
     /// de confirmar el slot, para comprobar que el estado sigue pendiente.
     pub const FAIL_LATE: u64 = 32;
@@ -190,6 +193,11 @@ pub mod nr {
     /// `IPC_MAX_ANY` endpoints (`READ` sobre todos) que tenga mensaje; `out_ptr`
     /// admite `IPC_MAX_HANDLES` handles (ADR 0020).
     pub const IPC_RECEIVE_ANY: u64 = 31;
+    /// `process_kill(process)`: exige `MANAGE` sobre el proceso. Lo termina
+    /// como si hubiera fallado (`Killed`, motivo "terminado por el
+    /// supervisor"): su hilo sale en cuanto vuelve a ring 0 o al despertar de
+    /// una espera. `process_wait` devuelve `Killed` (auditoría 6ee19fb, 4).
+    pub const PROCESS_KILL: u64 = 32;
 }
 
 /// Petición de `process_spawn_from` (48 bytes en memoria del llamador).

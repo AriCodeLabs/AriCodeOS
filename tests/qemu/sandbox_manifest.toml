@@ -50,9 +50,11 @@ serial_contains = [
     "hello_app: hola desde una aplicacion del SDK (arg 9)",
     "fs_victim: secreto escrito, descriptor abierto al salir",
     "fs_probe: descriptores ajenos inaccesibles (BadFd en 16 x lectura, escritura y cierre)",
+    "fs_probe: reemplazo tras una transaccion abandonada ok",
+    "fs_probe: el journal no filtra datos ajenos (compromiso incompleto rechazado)",
     "run: fs_probe termino con 0",
     "run: win_probe: denegado por el broker",
     "hello_app: hola desde una aplicacion del SDK (arg 10)",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "veo ficheros ajenos", "pude abrir", "la cuota no se aplico", "un hueco oculto", "el broker no pudo lanzarlo", "ACCESO CRUZADO"]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "veo ficheros ajenos", "pude abrir", "la cuota no se aplico", "un hueco oculto", "el broker no pudo lanzarlo", "ACCESO CRUZADO", "COMPROMISO INCOMPLETO", "RESTOS DEL JOURNAL"]

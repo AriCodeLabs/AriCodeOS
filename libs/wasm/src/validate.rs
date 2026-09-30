@@ -508,8 +508,25 @@ pub fn validate(module: &Module) -> Result<(), Error> {
         }
     }
     for e in &module.exports {
-        if e.kind == 0 && e.index >= total {
+        let ok = match e.kind {
+            0 => e.index < total,
+            1 => module.table_limits.is_some() && e.index == 0,
+            2 => module.memory_pages.is_some() && e.index == 0,
+            3 => (e.index as usize) < module.globals.len(),
+            _ => false,
+        };
+        if !ok {
             return Err(invalid("exportacion fuera de rango"));
+        }
+    }
+    if let Some((min, max)) = module.memory_pages {
+        if min > 65536 || max.is_some_and(|max| max < min || max > 65536) {
+            return Err(invalid("limites de memoria"));
+        }
+    }
+    if let Some((min, max)) = module.table_limits {
+        if max.is_some_and(|max| max < min) {
+            return Err(invalid("limites de tabla"));
         }
     }
     if let Some(s) = module.start {
@@ -524,6 +541,9 @@ pub fn validate(module: &Module) -> Result<(), Error> {
     for g in &module.globals {
         if matches!(g.ty, ValType::F32 | ValType::F64) {
             return Err(Error::Unsupported("coma flotante"));
+        }
+        if g.init_ty != g.ty {
+            return Err(invalid("tipo del inicializador de global"));
         }
     }
     let mut v = Validator {
