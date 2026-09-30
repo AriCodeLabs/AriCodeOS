@@ -1,0 +1,4 @@
+# Medidas: reloj del sistema y un directorio privado para las de ficheros.
+name = bench
+caps = system, fs
+memory = 64K

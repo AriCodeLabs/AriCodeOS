@@ -15,6 +15,7 @@ mod arch;
 mod console;
 mod console_input;
 mod cpu;
+mod events;
 mod framebuffer;
 mod hw;
 mod initrd;

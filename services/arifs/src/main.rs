@@ -27,20 +27,29 @@ struct PartitionDevice {
 
 impl BlockDevice for PartitionDevice {
     fn read_sector(&mut self, lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), FsError> {
-        self.blk
-            .read(self.base_lba + lba, 1)
-            .map_err(|_| FsError::Io)?;
-        buf.copy_from_slice(&self.blk.buffer()[..SECTOR]);
-        Ok(())
+        self.read_sectors(lba, buf)
     }
     fn write_sector(&mut self, lba: u64, buf: &[u8; SECTOR]) -> Result<(), FsError> {
-        self.blk.buffer()[..SECTOR].copy_from_slice(buf);
-        self.blk
-            .write(self.base_lba + lba, 1)
-            .map_err(|_| FsError::Io)
+        self.write_sectors(lba, buf)
     }
     fn flush(&mut self) -> Result<(), FsError> {
         self.blk.flush().map_err(|_| FsError::Io)
+    }
+    /// Un lote entero en una peticion al servicio de bloques (etapa 5).
+    fn read_sectors(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), FsError> {
+        let count = (buf.len() / SECTOR) as u16;
+        self.blk
+            .read(self.base_lba + lba, count)
+            .map_err(|_| FsError::Io)?;
+        buf.copy_from_slice(&self.blk.buffer()[..buf.len()]);
+        Ok(())
+    }
+    fn write_sectors(&mut self, lba: u64, buf: &[u8]) -> Result<(), FsError> {
+        let count = (buf.len() / SECTOR) as u16;
+        self.blk.buffer()[..buf.len()].copy_from_slice(buf);
+        self.blk
+            .write(self.base_lba + lba, count)
+            .map_err(|_| FsError::Io)
     }
 }
 
@@ -334,7 +343,7 @@ fn handle(
 }
 
 fn main(partition_lba: u64) -> u64 {
-    let Ok(blk) = BlockClient::new(BLOCK, HW, 1) else {
+    let Ok(blk) = BlockClient::new(BLOCK, HW, aricode_arifs::MAX_BATCH_SECTORS as u16) else {
         return 1;
     };
     let dev = PartitionDevice {
@@ -380,19 +389,27 @@ fn main(partition_lba: u64) -> u64 {
     let mut namespaces: [Option<Namespace>; 8] = [None; 8];
     say(b"sirviendo peticiones");
     loop {
-        // Endpoint principal (espera corta) y despues cada espacio concedido.
-        for slot in 0..=namespaces.len() {
-            let (endpoint, ns, timeout) = if slot == 0 {
-                (SERVICE, None, 10)
-            } else {
-                match namespaces[slot - 1] {
-                    Some(ns) => (ns.ep, Some(ns), 0),
-                    None => continue,
-                }
-            };
-            let Ok((n, nh)) = sys::ipc_receive(endpoint, &mut msg, &mut handles, timeout) else {
-                continue;
-            };
+        // Espera en el endpoint principal y en todos los concedidos a la
+        // vez (ADR 0020): el indice dice por cual llego la peticion.
+        let mut eps = [SERVICE; 9];
+        let mut slots = [0usize; 9];
+        let mut count = 1;
+        for (i, ns) in namespaces.iter().enumerate() {
+            if let Some(ns) = ns {
+                eps[count] = ns.ep;
+                slots[count] = i + 1;
+                count += 1;
+            }
+        }
+        let mut received = [Handle(0); sys::abi::IPC_MAX_HANDLES];
+        let Ok((which, n, nh)) = sys::ipc_receive_any(&eps[..count], &mut msg, &mut received, 1000)
+        else {
+            continue;
+        };
+        handles[..2].copy_from_slice(&received[..2]);
+        {
+            let slot = slots[which];
+            let ns = (slot > 0).then(|| namespaces[slot - 1]).flatten();
             if nh == 0 {
                 continue;
             }

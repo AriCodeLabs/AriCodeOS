@@ -55,6 +55,8 @@ pub struct Cpu {
     idle_running: AtomicBool,
     idle_tid: AtomicU32,
     tables: PerCpuCell<Tables>,
+    /// Ciclos de TSC pasados en `hlt` (etapa 5, `sysinfo::IDLE`).
+    idle_cycles: AtomicU64,
 }
 
 pub const OFF_SELF: usize = 0;
@@ -85,7 +87,15 @@ impl Cpu {
             idle_running: AtomicBool::new(false),
             idle_tid: AtomicU32::new(u32::MAX),
             tables: PerCpuCell::new(Tables::new()),
+            idle_cycles: AtomicU64::new(0),
         }
+    }
+
+    pub fn idle_cycles(&self) -> u64 {
+        self.idle_cycles.load(Ordering::Relaxed)
+    }
+    pub fn add_idle_cycles(&self, cycles: u64) {
+        self.idle_cycles.fetch_add(cycles, Ordering::Relaxed);
     }
 
     pub fn index(&self) -> usize {

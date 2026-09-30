@@ -78,6 +78,9 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         nr::PROCESS_WAIT => process_wait(h, frame.rsi),
         nr::IPC_SEND => ipc_send(h, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9),
         nr::IPC_RECEIVE => ipc_receive(h, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9),
+        nr::IPC_RECEIVE_ANY => ipc_receive_any(
+            frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9,
+        ),
         nr::CONSOLE_READ => console_read(h, frame.rsi, frame.rdx, frame.r10),
         nr::CONSOLE_INJECT => console_inject(h, frame.rsi, frame.rdx),
         nr::SYSTEM_INFO => system_info(h, frame.rsi, frame.rdx, frame.r10),
@@ -191,7 +194,23 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
     system_object(h, Rights::READ)?;
     let bytes: Vec<u8> = match kind {
         sysinfo::UPTIME => crate::time::uptime_ms().to_le_bytes().to_vec(),
+        sysinfo::UPTIME_US => crate::time::uptime_us().to_le_bytes().to_vec(),
+        sysinfo::EVENTS => {
+            let max = (len as usize) / sysinfo::EventEntry::LEN;
+            crate::events::recent(max)
+                .iter()
+                .flat_map(|e| e.encode())
+                .collect()
+        }
         sysinfo::CPUS => (crate::cpu::online_count() as u64).to_le_bytes().to_vec(),
+        sysinfo::IDLE => {
+            let mut v = crate::time::tsc_since_boot().to_le_bytes().to_vec();
+            v.extend_from_slice(&(crate::cpu::online_count() as u64).to_le_bytes());
+            for c in crate::cpu::online() {
+                v.extend_from_slice(&c.idle_cycles().to_le_bytes());
+            }
+            v
+        }
         sysinfo::IOMMU => {
             let (units, domains, faults) = crate::iommu::stats();
             let mut v = units.to_le_bytes().to_vec();
@@ -336,6 +355,55 @@ fn ipc_receive(
     let raw: Vec<u8> = received.iter().flat_map(|h| h.to_le_bytes()).collect();
     process::copy_to_user(out_ptr, &raw)?;
     Ok(n as u64 | ((received.len() as u64) << 32))
+}
+
+/// `ipc_receive_any` (ADR 0020): como `ipc_receive` sobre el primero de
+/// varios endpoints con mensaje; el índice va en los bits 48..63.
+fn ipc_receive_any(
+    handles_ptr: u64,
+    count: u64,
+    buf_ptr: u64,
+    buf_len: u64,
+    out_ptr: u64,
+    timeout_ms: u64,
+) -> Result<u64, Error> {
+    if count == 0 || count as usize > aricode_abi::IPC_MAX_ANY {
+        return Err(Error::Invalid);
+    }
+    if buf_len as usize > IPC_MAX_DATA {
+        return Err(Error::TooBig);
+    }
+    let raw = process::copy_from_user(handles_ptr, count * 4)?;
+    // Todos validados antes de esperar; los Arc mantienen vivos los objetos.
+    let objs: Vec<ObjectRef> = raw
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| endpoint_of(Handle(u32::from_le_bytes(*c)), Rights::READ))
+        .collect::<Result<_, _>>()?;
+    process::copy_to_user(buf_ptr, &[])?;
+    let endpoints: Vec<&crate::ipc::Endpoint> = objs
+        .iter()
+        .map(|o| match &o.kind {
+            ObjectKind::Endpoint(e) => e,
+            _ => unreachable!(),
+        })
+        .collect();
+    let (index, msg) = crate::ipc::receive_any(&endpoints, timeout_ms)?;
+    let n = msg.data.len().min(buf_len as usize);
+    process::copy_to_user(buf_ptr, &msg.data[..n])?;
+    let received: Vec<u32> = with_handles(|t| {
+        Ok(msg
+            .handles
+            .into_iter()
+            .take(IPC_MAX_HANDLES)
+            .filter_map(|(o, r)| t.insert(o, r).ok())
+            .map(|h| h.0)
+            .collect())
+    })?;
+    let raw: Vec<u8> = received.iter().flat_map(|h| h.to_le_bytes()).collect();
+    process::copy_to_user(out_ptr, &raw)?;
+    Ok(n as u64 | ((received.len() as u64) << 32) | ((index as u64) << 48))
 }
 
 fn process_spawn(
@@ -562,6 +630,12 @@ fn dma_alloc(h: Handle, len: u64) -> Result<u64, Error> {
     // Cuota del proceso (fijada por quien lo lanzó): se cobra el tamaño
     // redondeado a páginas, que es lo que se reserva.
     if !process::charge_dma(len.next_multiple_of(4096)) {
+        crate::events::record(
+            aricode_abi::sysinfo::EventKind::DmaQuota,
+            process::current_pid().map_or(0, |p| p.0),
+            len,
+            "dma_alloc",
+        );
         return Err(Error::Limit);
     }
     let dma = crate::hw::dma_alloc(len).map_err(|_| Error::Limit)?;

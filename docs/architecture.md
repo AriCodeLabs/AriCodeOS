@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.7.0 (Fases 0 a 34 y etapas 1 a 4 posteriores al roadmap; la 34 pendiente de hardware)
+## Estado: 0.8.0 (Fases 0 a 34 y etapas 1 a 5 posteriores al roadmap; la 34, la energía y más dispositivos pendientes de hardware)
 
 ```text
 OVMF (UEFI)
@@ -348,7 +348,8 @@ segundo brevemente para añadir la región.
   `process_spawn` (con transferencia de handles al hijo), `process_wait`,
   `irq_wait`, `mmio_map`, `region_len`, `dma_alloc`, `dma_phys`, `pci_count`,
   `pci_info`, `pci_claim`, `console_read`, `system_info`, `system_power`,
-  `initrd_read`, `pci_info_ext`, `console_inject`, `process_spawn_from`.
+  `initrd_read`, `pci_info_ext`, `console_inject`, `process_spawn_from`,
+  `ipc_receive_any`.
   Los servicios de bloques, ficheros y red no añaden syscalls: son IPC.
 - Los punteros de usuario se validan página a página contra las tablas del
   proceso (`copy_from_user`): un puntero de kernel devuelve `Fault`, nunca se
@@ -410,6 +411,11 @@ segundo brevemente para añadir la región.
   así que un timeout no pierde capabilities. `ipc_receive` exige `READ`,
   copia los datos y los handles recibidos al espacio del proceso
   (`copy_to_user` valida USER y WRITABLE) y devuelve `len | (n << 32)`.
+- `ipc_receive_any` (syscall 31, ADR 0020) recibe del primero de hasta 16
+  endpoints con mensaje (todos con `READ`, validados antes de esperar) y
+  devuelve su índice en los bits 48..63; los receptores múltiples esperan
+  en una cola común que despierta cualquier envío. fsd espera así en su
+  endpoint principal y en los concedidos a la vez, sin sondeos de 10 ms.
 - Timeouts en ms: `0` no bloquea, `TIMEOUT_INFINITE` espera siempre. Las
   esperas usan `WaitQueue::wait_until_deadline`: el hilo duerme con plazo y
   un `wake` anticipado (`RoundRobin::wake` saca a un dormido de su lista) lo
@@ -560,7 +566,9 @@ segundo brevemente para añadir la región.
 - `fsd` (`services/arifs`) recibe de init su endpoint (`READ|WRITE`), el
   del servicio de bloques (`WRITE`) y una capacidad de hardware; `arg` es el
   LBA de la partición. Implementa `BlockDevice` sobre `aricode-sys::block`
-  (un sector por petición) y atiende `FileServiceProtocol v1`
+  (lotes de hasta 8 sectores por petición: la librería agrupa los sectores
+  enteros de cada lectura, escritura, trozo del journal y aplicación, etapa
+  5) y atiende `FileServiceProtocol v1`
   (`sdk/proto::fs`): peticiones y respuestas de 64 bytes con `List`,
   `Open`, `Create`, `Read`, `Write`, `Close`, `Flush`, `Replace`
   (reemplazo atómico de hasta `MAX_IO`) y `ReplaceChunk`/`ReplaceCommit`
@@ -768,6 +776,26 @@ segundo brevemente para añadir la región.
   ejecuta `run PROGRAMA [ARG]`: el hijo solo recibe la consola, su proceso,
   su hilo y un `SYSTEM` de solo lectura. `hello_app` lo demuestra en
   `shell.commands`.
+
+## Medidas (etapa 5)
+
+- `apps/bench` mide desde ring 3 la latencia de una syscall, de una
+  llamada IPC completa a fsd y de `replace`/`read` de 4 KiB con percentiles
+  sobre el TSC calibrado contra `uptime_ms`; `docs/performance.md` fija el
+  método y guarda la referencia de cada versión. `perf.bench` exige que las
+  medidas se produzcan, no sus valores (dependen del host).
+- Reloj de microsegundos: `apic::init` mide el TSC contra el PIT junto al
+  timer y `time::uptime_us` lo convierte (supone TSC invariante y común a
+  las CPUs; sin calibración cae al tick de 10 ms); `sysinfo::UPTIME_US`.
+- Sucesos recientes del kernel (`events.rs`): anillo de 64 entradas con
+  procesos creados, salidos y matados (con el motivo), fallos de DMA del
+  IOMMU y cuotas de DMA agotadas, con su instante en µs; `sysinfo::EVENTS`
+  los publica a quien tenga `READ` sobre `SYSTEM` y `diag` los muestra
+  (`diag.events`). Sin contenido de mensajes ni de ficheros.
+- Reposo por CPU: el bucle idle acumula los ciclos de TSC pasados en `hlt`
+  (`Cpu::idle_cycles`) y `sysinfo::IDLE` los publica junto a los ciclos
+  desde el primer tick; `cpus` los muestra como porcentaje y `diag` reúne
+  `uptime`, `mem`, `cpus`, `ps` y `services --detail` en un informe.
 
 ## Sandbox de aplicaciones (Fase 28)
 

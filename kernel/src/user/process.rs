@@ -207,6 +207,12 @@ fn spawn_full(
         },
     );
     scheduler::start_thread(thread);
+    crate::events::record(
+        aricode_abi::sysinfo::EventKind::ProcessCreated,
+        pid.0,
+        0,
+        name,
+    );
     info!(
         "user: proceso {} '{name}' creado ({} segmentos, {} KiB, entrada {:#x}, hilo {tid:?})",
         pid.0,
@@ -292,9 +298,21 @@ fn finish(pid: Pid, status: ExitStatus) -> ! {
     waiters.wake_all();
     match status {
         ExitStatus::Exited(code) => {
+            crate::events::record(
+                aricode_abi::sysinfo::EventKind::ProcessExited,
+                pid.0,
+                code,
+                &name,
+            );
             info!("user: proceso {} '{name}' salio con codigo {code}", pid.0)
         }
         ExitStatus::Killed(why) => {
+            crate::events::record(
+                aricode_abi::sysinfo::EventKind::ProcessKilled,
+                pid.0,
+                0,
+                why,
+            );
             warn!(
                 "user: proceso {} '{name}' terminado por fallo: {why}",
                 pid.0

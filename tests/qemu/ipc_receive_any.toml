@@ -1,0 +1,18 @@
+# Etapa 5 (ADR 0020): ipc_receive_any recibe del primero de varios endpoints
+# con mensaje, con plazo, y rechaza handles sin READ o que no son endpoints
+# antes de esperar.
+name = "ipc.receive_any"
+description = "test=user_ipc_any: recepcion desde varios endpoints con plazo e indice del que respondio"
+level = "full"
+areas = ["ipc", "user"]
+cmdline = "qemu_exit test=user_ipc_any"
+timeout_secs = 30
+
+[expect]
+exit = 33
+serial_contains = [
+    "ipc_any: recepcion desde varios endpoints ok",
+    "user: 'ipc_any' terminado: Exited(0)",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "USER FAULT", "debia", "inesperado"]

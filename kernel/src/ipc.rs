@@ -79,8 +79,22 @@ impl Endpoint {
             drop(q);
             self.sent.fetch_add(1, Ordering::Relaxed);
             self.receivers.wake_one();
+            // Los receptores de varios endpoints (ADR 0020) esperan en una
+            // cola común y vuelven a mirar los suyos.
+            ANY_RECEIVERS.wake_all();
             return Ok(());
         }
+    }
+
+    /// Saca el mensaje más antiguo sin esperar.
+    fn try_receive(&self) -> Option<Message> {
+        let msg = self.queue.lock().pop_front()?;
+        self.senders.wake_one();
+        Some(msg)
+    }
+
+    fn has_message(&self) -> bool {
+        !self.queue.lock().is_empty()
     }
 
     /// Saca el mensaje más antiguo; si no hay espera hasta `timeout_ms`.
@@ -95,6 +109,28 @@ impl Endpoint {
         let msg = self.queue.lock().pop_front().ok_or(Error::Timeout)?;
         self.senders.wake_one();
         Ok(msg)
+    }
+}
+
+/// Cola de espera de `receive_any`: la despierta cualquier envío.
+static ANY_RECEIVERS: WaitQueue = WaitQueue::new();
+
+/// Recibe del primero (por orden) de `endpoints` que tenga mensaje; devuelve
+/// su índice. Espera hasta `timeout_ms` (ADR 0020).
+pub fn receive_any(endpoints: &[&Endpoint], timeout_ms: u64) -> Result<(usize, Message), Error> {
+    let deadline = Endpoint::deadline(timeout_ms);
+    loop {
+        let timed_out = ANY_RECEIVERS
+            .wait_until_deadline(|| endpoints.iter().any(|e| e.has_message()), deadline);
+        if timed_out {
+            return Err(Error::Timeout);
+        }
+        // Otro receptor puede haberse llevado el mensaje: volver a esperar.
+        for (i, e) in endpoints.iter().enumerate() {
+            if let Some(msg) = e.try_receive() {
+                return Ok((i, msg));
+            }
+        }
     }
 }
 

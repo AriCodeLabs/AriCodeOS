@@ -152,7 +152,9 @@ pub fn sleep_until(until: u64) {
 /// Duerme al menos `ms`. Un despertar anticipado (un `wake` espurio de una
 /// cola en la que este hilo esperó antes) vuelve a dormir hasta el plazo.
 pub fn sleep_ms(ms: u64) {
-    let until = crate::time::ticks() + ms.div_ceil(crate::time::MS_PER_TICK);
+    // Un tick más: el actual ya ha transcurrido en parte, y "al menos `ms`"
+    // se mide con el reloj de µs, no con el tick (etapa 5).
+    let until = crate::time::ticks() + ms.div_ceil(crate::time::MS_PER_TICK) + 1;
     loop {
         sleep_until(until);
         if crate::time::ticks() >= until {
@@ -209,8 +211,14 @@ pub fn idle_loop() -> ! {
             KernelIrq::restore(irq);
             yield_now();
         } else {
+            // SAFETY: rdtsc solo lee el contador de tiempo.
+            let t0 = unsafe { core::arch::x86_64::_rdtsc() };
             // SAFETY: habilitar interrupciones y esperar la siguiente.
             unsafe { core::arch::asm!("sti", "hlt", options(nomem, nostack)) };
+            // SAFETY: ídem.
+            let t1 = unsafe { core::arch::x86_64::_rdtsc() };
+            // El hilo idle nunca migra: `current()` es su propia CPU.
+            cpu::current().add_idle_cycles(t1.wrapping_sub(t0));
         }
     }
 }

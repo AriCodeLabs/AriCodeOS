@@ -43,6 +43,7 @@ members = [
     "apps/wasm-demo",
     "apps/notes-reader",
     "apps/installer",
+    "apps/bench",
     "sdk/rust",
     "sdk/proto",
     "user/testprogs",
@@ -90,7 +91,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 license = "UNLICENSED"
 repository = "https://github.com/lynxcraft/aricodeos"

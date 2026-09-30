@@ -72,7 +72,26 @@ pub trait BlockDevice {
     fn read_sector(&mut self, lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), FsError>;
     fn write_sector(&mut self, lba: u64, buf: &[u8; SECTOR]) -> Result<(), FsError>;
     fn flush(&mut self) -> Result<(), FsError>;
+    /// Varios sectores seguidos (`buf.len()` múltiplo de `SECTOR`, hasta
+    /// `MAX_BATCH_SECTORS`); por defecto uno a uno. Un dispositivo por IPC
+    /// los agrupa en una petición (etapa 5).
+    fn read_sectors(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), FsError> {
+        for (i, chunk) in buf.as_chunks_mut::<SECTOR>().0.iter_mut().enumerate() {
+            self.read_sector(lba + i as u64, chunk)?;
+        }
+        Ok(())
+    }
+    fn write_sectors(&mut self, lba: u64, buf: &[u8]) -> Result<(), FsError> {
+        for (i, chunk) in buf.as_chunks::<SECTOR>().0.iter().enumerate() {
+            self.write_sector(lba + i as u64, chunk)?;
+        }
+        Ok(())
+    }
 }
+
+/// Sectores por lote en `read_sectors`/`write_sectors`.
+pub const MAX_BATCH_SECTORS: usize = 8;
+const BATCH_BYTES: usize = MAX_BATCH_SECTORS * SECTOR;
 
 /// CRC-32 (IEEE 802.3, reflejado) incremental, sin tabla: los metadatos son
 /// pequeños. Empieza en `crc32_init()` y termina con `!`.
@@ -412,18 +431,57 @@ impl<D: BlockDevice> AriFs<D> {
             return Ok(0);
         }
         let len = buf.len().min((e.size - offset) as usize);
+        self.copy_from_device(e.start_lba, offset as usize, &mut buf[..len])?;
+        Ok(len)
+    }
+
+    /// Copia `out.len()` bytes desde la posición `pos` (bytes) del área que
+    /// empieza en `base`: sectores parciales uno a uno, los enteros por lotes.
+    fn copy_from_device(&mut self, base: u64, pos: usize, out: &mut [u8]) -> Result<(), FsError> {
         let mut done = 0;
         let mut s = [0u8; SECTOR];
-        while done < len {
-            let pos = offset as usize + done;
-            let lba = e.start_lba + (pos / SECTOR) as u64;
-            self.dev.read_sector(lba, &mut s)?;
-            let in_sector = pos % SECTOR;
-            let n = (SECTOR - in_sector).min(len - done);
-            buf[done..done + n].copy_from_slice(&s[in_sector..in_sector + n]);
-            done += n;
+        while done < out.len() {
+            let at = pos + done;
+            let lba = base + (at / SECTOR) as u64;
+            let in_sector = at % SECTOR;
+            let left = out.len() - done;
+            if in_sector == 0 && left >= SECTOR {
+                let n = (left / SECTOR).min(MAX_BATCH_SECTORS) * SECTOR;
+                self.dev.read_sectors(lba, &mut out[done..done + n])?;
+                done += n;
+            } else {
+                self.dev.read_sector(lba, &mut s)?;
+                let n = (SECTOR - in_sector).min(left);
+                out[done..done + n].copy_from_slice(&s[in_sector..in_sector + n]);
+                done += n;
+            }
         }
-        Ok(done)
+        Ok(())
+    }
+
+    /// Escribe `data` en la posición `pos` del área que empieza en `base`:
+    /// los sectores parciales se leen antes; los enteros van por lotes.
+    fn copy_to_device(&mut self, base: u64, pos: usize, data: &[u8]) -> Result<(), FsError> {
+        let mut done = 0;
+        let mut s = [0u8; SECTOR];
+        while done < data.len() {
+            let at = pos + done;
+            let lba = base + (at / SECTOR) as u64;
+            let in_sector = at % SECTOR;
+            let left = data.len() - done;
+            if in_sector == 0 && left >= SECTOR {
+                let n = (left / SECTOR).min(MAX_BATCH_SECTORS) * SECTOR;
+                self.dev.write_sectors(lba, &data[done..done + n])?;
+                done += n;
+            } else {
+                self.dev.read_sector(lba, &mut s)?;
+                let n = (SECTOR - in_sector).min(left);
+                s[in_sector..in_sector + n].copy_from_slice(&data[done..done + n]);
+                self.dev.write_sector(lba, &s)?;
+                done += n;
+            }
+        }
+        Ok(())
     }
 
     /// Escribe `data` en `offset` (sin huecos: `offset <= size`) dentro de la
@@ -438,26 +496,13 @@ impl<D: BlockDevice> AriFs<D> {
         if end > e.capacity_bytes() as usize {
             return Err(FsError::OutOfRange);
         }
-        let mut done = 0;
-        let mut s = [0u8; SECTOR];
-        while done < data.len() {
-            let pos = offset as usize + done;
-            let lba = e.start_lba + (pos / SECTOR) as u64;
-            let in_sector = pos % SECTOR;
-            let n = (SECTOR - in_sector).min(data.len() - done);
-            if n != SECTOR {
-                self.dev.read_sector(lba, &mut s)?;
-            }
-            s[in_sector..in_sector + n].copy_from_slice(&data[done..done + n]);
-            self.dev.write_sector(lba, &s)?;
-            done += n;
-        }
+        self.copy_to_device(e.start_lba, offset as usize, data)?;
         if end as u32 > e.size {
             let entry = self.table[index].as_mut().ok_or(FsError::NotFound)?;
             entry.size = end as u32;
             self.write_table_entry(index)?;
         }
-        Ok(done)
+        Ok(data.len())
     }
 
     /// Sustituye el contenido entero del fichero por `data` de forma atómica
@@ -478,21 +523,7 @@ impl<D: BlockDevice> AriFs<D> {
         if end > e.capacity_bytes() as usize || end > JOURNAL_CAPACITY_BYTES {
             return Err(FsError::OutOfRange);
         }
-        let mut done = 0;
-        let mut s = [0u8; SECTOR];
-        while done < data.len() {
-            let pos = offset as usize + done;
-            let lba = JOURNAL_DATA_LBA + (pos / SECTOR) as u64;
-            let in_sector = pos % SECTOR;
-            let n = (SECTOR - in_sector).min(data.len() - done);
-            if n != SECTOR {
-                self.dev.read_sector(lba, &mut s)?;
-            }
-            s[in_sector..in_sector + n].copy_from_slice(&data[done..done + n]);
-            self.dev.write_sector(lba, &s)?;
-            done += n;
-        }
-        Ok(())
+        self.copy_to_device(JOURNAL_DATA_LBA, offset as usize, data)
     }
 
     /// Compromete los `len` primeros bytes que hay en el journal como nuevo
@@ -539,19 +570,24 @@ impl<D: BlockDevice> AriFs<D> {
     fn apply_journal(&mut self, journal: &Journal) -> Result<(), FsError> {
         let index = journal.index as usize;
         let e = *self.entry(index).ok_or(FsError::NotFound)?;
-        let sectors = (journal.len as usize).div_ceil(SECTOR) as u64;
-        let mut s = [0u8; SECTOR];
-        for i in 0..sectors {
-            self.dev.read_sector(JOURNAL_DATA_LBA + i, &mut s)?;
-            self.dev.write_sector(e.start_lba + i, &s)?;
+        let sectors = (journal.len as usize).div_ceil(SECTOR);
+        let mut batch = [0u8; BATCH_BYTES];
+        let mut done = 0;
+        while done < sectors {
+            let n = (sectors - done).min(MAX_BATCH_SECTORS);
+            let buf = &mut batch[..n * SECTOR];
+            self.dev.read_sectors(JOURNAL_DATA_LBA + done as u64, buf)?;
+            self.dev.write_sectors(e.start_lba + done as u64, buf)?;
+            done += n;
         }
         let entry = self.table[index].as_mut().ok_or(FsError::NotFound)?;
         entry.size = journal.len;
         self.write_table_entry(index)?;
         self.dev.flush()?;
-        self.dev
-            .write_sector(JOURNAL_LBA, &Journal::CLEAR.encode())?;
-        self.dev.flush()
+        // La limpieza no necesita `flush`: si se pierde, el siguiente `open`
+        // rehace un reemplazo ya aplicado (idempotente). Cada `flush` es un
+        // fsync del soporte y domina el coste del reemplazo (etapa 5).
+        self.dev.write_sector(JOURNAL_LBA, &Journal::CLEAR.encode())
     }
 
     /// Rehace un reemplazo comprometido (cabecera válida y pendiente, datos
@@ -587,15 +623,17 @@ impl<D: BlockDevice> AriFs<D> {
     /// CRC-32 de los `len` primeros bytes del área de datos del journal.
     fn journal_crc(&mut self, len: u32) -> Result<u32, FsError> {
         let mut crc = 0xFFFF_FFFFu32;
-        let mut s = [0u8; SECTOR];
+        let mut batch = [0u8; BATCH_BYTES];
         let mut left = len as usize;
         let mut lba = JOURNAL_DATA_LBA;
         while left > 0 {
-            self.dev.read_sector(lba, &mut s)?;
-            let n = left.min(SECTOR);
-            crc = crc32_update(crc, &s[..n]);
+            let sectors = left.div_ceil(SECTOR).min(MAX_BATCH_SECTORS);
+            let buf = &mut batch[..sectors * SECTOR];
+            self.dev.read_sectors(lba, buf)?;
+            let n = left.min(buf.len());
+            crc = crc32_update(crc, &buf[..n]);
             left -= n;
-            lba += 1;
+            lba += sectors as u64;
         }
         Ok(!crc)
     }
@@ -932,6 +970,79 @@ mod tests {
                 "corte en {cut_at}: contenido mezclado"
             );
         }
+    }
+
+    /// Disco que cuenta peticiones: los lotes reducen las llamadas y el
+    /// contenido no cambia respecto a ir sector a sector.
+    struct CountingDisk {
+        inner: MemDisk,
+        calls: usize,
+    }
+    impl BlockDevice for CountingDisk {
+        fn read_sector(&mut self, lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), FsError> {
+            self.calls += 1;
+            self.inner.read_sector(lba, buf)
+        }
+        fn write_sector(&mut self, lba: u64, buf: &[u8; SECTOR]) -> Result<(), FsError> {
+            self.calls += 1;
+            self.inner.write_sector(lba, buf)
+        }
+        fn flush(&mut self) -> Result<(), FsError> {
+            Ok(())
+        }
+        fn read_sectors(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), FsError> {
+            self.calls += 1;
+            let o = lba as usize * SECTOR;
+            buf.copy_from_slice(&self.inner.0[o..o + buf.len()]);
+            Ok(())
+        }
+        fn write_sectors(&mut self, lba: u64, buf: &[u8]) -> Result<(), FsError> {
+            self.calls += 1;
+            let o = lba as usize * SECTOR;
+            self.inner.0[o..o + buf.len()].copy_from_slice(buf);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn batched_io_matches_sector_io_with_fewer_calls() {
+        let data: Vec<u8> = (0..9000u32).map(|x| (x % 241) as u8).collect();
+        let mut fs = AriFs::format(disk(300), 300).unwrap();
+        let i = fs.create("lotes").unwrap();
+        // Desalineado por ambos extremos: parciales al principio y al final.
+        fs.write(i, 0, &data[..7]).unwrap();
+        fs.write(i, 7, &data[7..]).unwrap();
+        let mut back = std::vec![0u8; 9000];
+        assert_eq!(fs.read(i, 0, &mut back).unwrap(), 9000);
+        assert_eq!(back, data);
+        assert_eq!(fs.read(i, 513, &mut back[..1000]).unwrap(), 1000);
+        assert_eq!(&back[..1000], &data[513..1513]);
+        let mut counting = CountingDisk {
+            inner: fs.into_device(),
+            calls: 0,
+        };
+        counting.calls = 0;
+        let mut fs = AriFs::open(counting).unwrap();
+        let mut out = std::vec![0u8; 4096];
+        let before = fs.dev.calls;
+        assert_eq!(fs.read(i, 0, &mut out).unwrap(), 4096);
+        assert_eq!(
+            fs.dev.calls - before,
+            1,
+            "4 KiB alineados: una sola peticion"
+        );
+        let before = fs.dev.calls;
+        fs.replace(i, &data[..4096]).unwrap();
+        let used = fs.dev.calls - before;
+        assert!(used <= 8, "reemplazo de 4 KiB en {used} peticiones");
+        assert_eq!(content_of_counting(&mut fs, i), &data[..4096]);
+    }
+
+    fn content_of_counting(fs: &mut AriFs<CountingDisk>, i: usize) -> Vec<u8> {
+        let mut buf = std::vec![0u8; 40_000];
+        let n = fs.read(i, 0, &mut buf).unwrap();
+        buf.truncate(n);
+        buf
     }
 
     #[test]

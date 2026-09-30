@@ -7,11 +7,13 @@ El documento maestro de arquitectura y roadmap es [AriCodeOS.md](AriCodeOS.md).
 Las decisiones de diseño se registran en [docs/decisions/](docs/decisions/) y el
 flujo de ramas (git flow) en [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-**Estado:** 0.7.0 (2026-09-29). Las 35 fases del roadmap (0 a 34) están
+**Estado:** 0.8.0 (2026-09-30). Las 35 fases del roadmap (0 a 34) están
 implementadas y probadas en QEMU, y las etapas 1 a 4 de la secuencia
 posterior al roadmap (recuperación observable, sesión útil, límites y
-actualización, aplicaciones externas) también; la Fase 34 y el equipo de
-referencia esperan su primera prueba en el portátil (ver
+actualización, aplicaciones externas) también, más la parte de la etapa 5
+que no necesita hardware (medidas, optimizaciones guiadas por ellas y
+diagnóstico consultable); la Fase 34, el equipo de referencia y la energía
+esperan su primera prueba en el portátil (ver
 [docs/hardware.md](docs/hardware.md)). La tabla siguiente es
 la referencia única del estado de cada capacidad: `validado en QEMU` significa
 que hay escenarios en `tests/qemu/` que lo exigen en cada suite; nada está
@@ -33,6 +35,7 @@ todavía `validado en hardware`.
 | IOMMU VT-d con dominio por driver | validado en QEMU | `iommu.*` |
 | Imagen USB para pendrive | validado en QEMU (`usb.image_boot`) | pendiente en hardware |
 | Aplicaciones fuera del árbol: paquetes firmados instalados y actualizados en AriFS (`cargo xtask app-pack`, `installer`) | validado en QEMU, con cortes | `apps.*`; sin distribución por red |
+| Medidas: `bench` (syscall, IPC, ficheros, percentiles), reposo por CPU, informe `diag` | validado en QEMU | `perf.*`, `docs/performance.md`; cifras solo comparables con la misma build y modo de QEMU |
 | Arranque en portátil (Fase 34) | propuesto | necesita el equipo de referencia |
 
 ## Requisitos (Debian 13)
