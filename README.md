@@ -1,122 +1,137 @@
 # AriCodeOS
 
-Sistema operativo desde cero: microkernel en Rust `no_std`, arranque UEFI,
-x86-64, seguridad por capabilities y drivers en espacio de usuario.
+An operating system built from scratch: a Rust `no_std` microkernel, UEFI
+boot, x86-64, capability-based security and user-space drivers.
 
-El documento maestro de arquitectura y roadmap es [AriCodeOS.md](AriCodeOS.md).
-Las decisiones de diseño se registran en [docs/decisions/](docs/decisions/) y el
-flujo de ramas (git flow) en [docs/WORKFLOW.md](docs/WORKFLOW.md).
+**Languages.** The code, the console messages and the design documentation
+are written in Spanish, which is the canonical language of the project. This
+README and the three onboarding guides under [docs/en/](docs/en/) are kept in
+English for contributors: the [git workflow](docs/en/WORKFLOW.md), the
+[application SDK](docs/en/sdk.md) and the [test suite](docs/en/tests.md).
+The Spanish README is [README.es.md](README.es.md).
 
-**Estado:** 0.8.1 (2026-09-30). Las 35 fases del roadmap (0 a 34) están
-implementadas y probadas en QEMU, y las etapas 1 a 4 de la secuencia
-posterior al roadmap (recuperación observable, sesión útil, límites y
-actualización, aplicaciones externas) también, más la parte de la etapa 5
-que no necesita hardware (medidas, optimizaciones guiadas por ellas y
-diagnóstico consultable); la Fase 34, el equipo de referencia y la energía
-esperan su primera prueba en el portátil (ver
-[docs/hardware.md](docs/hardware.md)). La tabla siguiente es
-la referencia única del estado de cada capacidad: `validado en QEMU` significa
-que hay escenarios en `tests/qemu/` que lo exigen en cada suite; nada está
-todavía `validado en hardware`.
+The master architecture and roadmap document is [AriCodeOS.md](AriCodeOS.md)
+(Spanish). Design decisions are recorded as ADRs in
+[docs/decisions/](docs/decisions/) and the branch flow (git flow) in
+[docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-| Capacidad | Estado | Pruebas |
+**Status:** 0.8.1 (2026-09-30). All 35 roadmap phases (0 to 34) are
+implemented and tested in QEMU, as are stages 1 to 4 of the post-roadmap
+sequence (observable recovery, a useful session, limits and updates,
+external applications) and the part of stage 5 that needs no hardware
+(measurements, measurement-driven optimisations and queryable diagnostics);
+Phase 34, the reference machine and power management await their first run
+on the laptop (see [docs/hardware.md](docs/hardware.md), Spanish). The table
+below is the single reference for the state of each capability:
+`validated in QEMU` means there are scenarios in `tests/qemu/` that require
+it in every suite run; nothing is `validated on hardware` yet.
+
+| Capability | State | Tests |
 |---|---|---|
-| Arranque UEFI, kernel, memoria, excepciones, heap | validado en QEMU | `boot.*`, `memory.*`, `interrupts.*` |
-| Hilos, scheduler preemptivo, SMP (APs, IPI, TLB shootdown, afinidad) | validado en QEMU (1 y 4 CPUs) | `threads.*`, `scheduler.*`, `smp.*`, `--cpus 4` |
-| Procesos ring 3, syscalls, handles con derechos, revocación, IPC con transferencia | validado en QEMU | `user.*`, `capabilities.*`, `ipc.*` |
-| init como device manager y broker de capabilities; sandbox por manifiesto | validado en QEMU | `init.*`, `sandbox.*` |
-| Drivers en ring 3: virtio-blk, virtio-net, virtio-input, xHCI + USB HID | validado en QEMU | `drivers.*`, `virtio.*`, `storage.*`, `network.*`, `input.*`, `usb.*` |
-| AriFS (ficheros, directorios privados por app, CRC32, reemplazo atómico con journal, `flush`) | validado en QEMU y con cortes inyectados en host | `filesystem.*`; ADR 0014 fija el contrato ante cortes |
-| Red IPv4: DHCP, ARP, ICMP, UDP, TCP, DNS, cliente HTTP | prototipo, validado en QEMU | `network.*`; sin TLS ni renovación DHCP |
-| Shell `arish` por consola serie, teclado PS/2 o teclados USB/virtio (puente de consola) | validado en QEMU | `shell.*`, `console.*` |
-| GUI: compositor, ventanas, entrada | prototipo, validado en QEMU | `gui.*` |
-| WASM: intérprete MVP con validador previo, perfil `aricode-wasm` v1 y manifiesto por módulo | validado en QEMU | `wasm.*`, `docs/wasm-profile.md`; no es WASI |
-| Criptografía propia, RNG, imágenes firmadas, A/B con rollback | validado en QEMU | `crypto.*`, `update.*`; no es Secure Boot |
-| IOMMU VT-d con dominio por driver | validado en QEMU | `iommu.*` |
-| Imagen USB para pendrive | validado en QEMU (`usb.image_boot`) | pendiente en hardware |
-| Aplicaciones fuera del árbol: paquetes firmados instalados y actualizados en AriFS (`cargo xtask app-pack`, `installer`) | validado en QEMU, con cortes | `apps.*`; sin distribución por red |
-| Medidas: `bench` (syscall, IPC, ficheros, percentiles), reposo por CPU, informe `diag` | validado en QEMU | `perf.*`, `docs/performance.md`; cifras solo comparables con la misma build y modo de QEMU |
-| Arranque en portátil (Fase 34) | propuesto | necesita el equipo de referencia |
+| UEFI boot, kernel, memory, exceptions, heap | validated in QEMU | `boot.*`, `memory.*`, `interrupts.*` |
+| Threads, preemptive scheduler, SMP (APs, IPIs, TLB shootdown, affinity) | validated in QEMU (1 and 4 CPUs) | `threads.*`, `scheduler.*`, `smp.*`, `--cpus 4` |
+| Ring 3 processes, syscalls, handles with rights, revocation, IPC with handle transfer | validated in QEMU | `user.*`, `capabilities.*`, `ipc.*` |
+| init as device manager and capability broker; per-manifest sandbox | validated in QEMU | `init.*`, `sandbox.*` |
+| Ring 3 drivers: virtio-blk, virtio-net, virtio-input, xHCI + USB HID | validated in QEMU | `drivers.*`, `virtio.*`, `storage.*`, `network.*`, `input.*`, `usb.*` |
+| AriFS (files, private directories per app, CRC32, atomic replace with a journal, `flush`) | validated in QEMU and with power cuts injected on the host | `filesystem.*`; ADR 0014 fixes the contract under power cuts |
+| IPv4 networking: DHCP, ARP, ICMP, UDP, TCP, DNS, HTTP client | prototype, validated in QEMU | `network.*`; no TLS, no DHCP renewal |
+| `arish` shell over the serial console, a PS/2 keyboard or USB/virtio keyboards (console bridge) | validated in QEMU | `shell.*`, `console.*` |
+| GUI: compositor, windows, input | prototype, validated in QEMU | `gui.*` |
+| WASM: MVP interpreter with an up-front validator, the `aricode-wasm` v1 profile and a per-module manifest | validated in QEMU | `wasm.*`, `docs/wasm-profile.md`; not WASI |
+| In-house cryptography, RNG, signed images, A/B with rollback | validated in QEMU | `crypto.*`, `update.*`; not Secure Boot |
+| VT-d IOMMU with one domain per driver | validated in QEMU | `iommu.*` |
+| USB stick image | validated in QEMU (`usb.image_boot`) | pending on hardware |
+| Out-of-tree applications: signed packages installed and updated in AriFS (`cargo xtask app-pack`, `installer`) | validated in QEMU, with power cuts | `apps.*`; no network distribution |
+| Measurements: `bench` (syscall, IPC, files, percentiles), idle time per CPU, `diag` report | validated in QEMU | `perf.*`, `docs/performance.md`; figures only comparable with the same build and QEMU mode |
+| Booting on a laptop (Phase 34) | proposed | needs the reference machine |
 
-## Requisitos (Debian 13)
+## Requirements (Debian 13)
 
 ```bash
 sudo apt install qemu-system-x86 ovmf nasm clang lld gdb git make
-rustup target add wasm32-unknown-unknown   # modulos WebAssembly de ejemplo (apps/wasm-demo)
+rustup target add wasm32-unknown-unknown   # example WebAssembly modules (apps/wasm-demo)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-`rust-toolchain.toml` fija la versión de Rust y añade automáticamente los
-targets `x86_64-unknown-none` y `x86_64-unknown-uefi`.
+`rust-toolchain.toml` pins the Rust version and adds the
+`x86_64-unknown-none` and `x86_64-unknown-uefi` targets automatically.
 
-## Uso
+## Usage
 
 ```bash
-cargo xtask build          # compila AriBoot y AriKernel (release)
-cargo xtask image          # monta build/esp/ (BOOTX64.EFI, aricodeos/kernel.elf, aricodeos/initrd.img)
-cargo xtask run            # arranca en QEMU + OVMF, serie en la terminal (salir: Ctrl-A X)
-cargo xtask run --cmdline shell   # arranca con el shell interactivo (arish) en la consola serie
-cargo xtask run --cmdline gui     # compositor y dos ventanas de prueba en la pantalla de QEMU
-cargo xtask run --cpus 4   # arranca con cuatro procesadores (SMP)
-cargo xtask run --usb-hid  # añade un xHCI con teclado y raton USB
-cargo xtask test           # unit + smoke (arranque nominal en QEMU)
-cargo xtask test --all     # unit + todos los escenarios QEMU; obligatorio antes de main
-cargo xtask test --area boot   # solo los escenarios de un área
-cargo xtask test --all --cpus 4   # toda la suite con cuatro CPUs: estrés del kernel SMP
-cargo xtask usb-image      # build/aricodeos-usb.img para grabar en un pendrive (docs/hardware.md)
+cargo xtask build          # builds AriBoot and AriKernel (release)
+cargo xtask image          # assembles build/esp/ (BOOTX64.EFI, aricodeos/kernel.elf, aricodeos/initrd.img)
+cargo xtask run            # boots in QEMU + OVMF, serial on the terminal (quit: Ctrl-A X)
+cargo xtask run --cmdline shell   # boots with the interactive shell (arish) on the serial console
+cargo xtask run --cmdline gui     # compositor and two demo windows on the QEMU display
+cargo xtask run --cpus 4   # boots with four processors (SMP)
+cargo xtask run --usb-hid  # adds an xHCI controller with a USB keyboard and mouse
+cargo xtask test           # unit + smoke (nominal boot in QEMU)
+cargo xtask test --all     # unit + every QEMU scenario; mandatory before main
+cargo xtask test --area boot   # only the scenarios of one area
+cargo xtask test --all --cpus 4   # the whole suite with four CPUs: SMP stress test of the kernel
+cargo xtask usb-image      # build/aricodeos-usb.img to write to a USB stick (docs/hardware.md)
+cargo xtask app-pack DIR --version N   # builds, packages and signs an out-of-tree application (docs/en/sdk.md)
 cargo xtask check          # rustfmt --check + clippy -D warnings
 ```
 
-Añade `--debug` a cualquier comando para usar el perfil de desarrollo. Los
-niveles de test están descritos en [tests/README.md](tests/README.md).
+Add `--debug` to any command to use the development profile. The test levels
+are described in [docs/en/tests.md](docs/en/tests.md).
 
-Los programas de usuario y `init` van en `aricodeos/initrd.img`, que `cargo
-xtask image` construye a partir de `user/testprogs` y `services/init`.
+User programs and `init` go into `aricodeos/initrd.img`, which `cargo xtask
+image` builds from `user/testprogs`, `services/*` and `apps/*`.
 
-## Estructura
+## Layout
 
 ```text
-boot-protocol/   ABI BootInfo compartido por bootloader y kernel
-libs/            librerías no_std con tests de host: elf, x86-paging, x86-cpu, pmm, heap, sync, sched, handles, cmdline, fb-console, acpi, pci, virtio, iommu, ...
-sdk/abi/         ABI de syscalls compartido entre kernel y espacio de usuario
-sdk/rust/        aricode-sys: wrappers de syscall y linker script de los programas de usuario
-user/testprogs/  programas de prueba de ring 3 y drivers de prueba (Rust y ensamblador), empaquetados en el initrd
-services/init/   AriInit, primer proceso de usuario y device manager provisional
-services/virtio-blk/ driver virtio-blk y servicio de bloques por IPC en ring 3
-services/arifs/  fsd: servicio de ficheros AriFS v1 por IPC en ring 3
-services/virtio-net/ netd: driver virtio-net y pila de red (DHCP, ping, UDP, TCP, DNS) por IPC en ring 3
-services/virtio-input/ inputd: driver virtio-input (teclado, raton) con eventos por IPC en ring 3
-services/compositor/ compositor: ventanas, cursor y enrutado de entrada sobre el framebuffer, en ring 3
-libs/gfx/        graficos 2D sin alloc (lienzos, texto, cursor, escritorio) con tests de host
-libs/input/      eventos evdev y teclado US con tests de host
-libs/net/        pila de red mínima sin alloc con tests de host
-libs/http/       cliente HTTP GET mínimo (Content-Length, chunked) con tests de host
-services/shell/  arish: shell interactivo en ring 3
-libs/arifs/      AriFS v1: sistema de archivos plano con CRC32, journal de reemplazo y tests de host con cortes
-sdk/proto/       protocolos IPC de los servicios
-sdk/runtime/     aricode-rt: runtime de los programas de usuario (entry!, heap, panic)
-sdk/build/       aricode-build: build.rs de una linea para programas de usuario
-apps/hello/      aplicacion de ejemplo del SDK con su manifiesto (ver docs/sdk.md)
-libs/manifest/   manifiestos de aplicacion: capacidades pedidas y cuota de memoria
-libs/crypto/     SHA-256, SHA-512, Ed25519 y ChaCha20 desde cero con vectores oficiales
-keys/dev/        par Ed25519 de desarrollo (solo pruebas; ver su README)
-libs/wasm/       interprete WebAssembly MVP (enteros, memoria acotada, importaciones) con tests de host
-apps/wasm-demo/  modulo WebAssembly portable de ejemplo; apps/wasm-runner lo ejecuta con la Capability API
-apps/updater/    actualizador A/B: verifica la imagen de UPDATE y la instala en el slot inactivo
-libs/ab/         estado de arranque A/B, imagenes firmadas y politica de slots (AriBoot, init, updater)
-boot/            AriBoot: cargador UEFI (crate `ariboot`)
-kernel/          AriKernel (crate `arikernel`), ELF64 en la mitad alta
-tools/xtask/     automatización: build, imagen, QEMU, tests, lint
-tests/qemu/      escenarios de integración declarativos (TOML)
-docs/            arquitectura, flujo de trabajo y ADRs
-build/           salida generada (ESP, OVMF_VARS, disk.img, logs); no versionar
+boot-protocol/   BootInfo ABI shared by the bootloader and the kernel
+libs/            no_std libraries with host tests: elf, x86-paging, x86-cpu, pmm, heap, sync, sched, handles, cmdline, fb-console, acpi, pci, virtio, iommu, ...
+sdk/abi/         syscall ABI shared by the kernel and user space
+sdk/rust/        aricode-sys: syscall wrappers and the linker script of user programs
+user/testprogs/  ring 3 test programs and test drivers (Rust and assembly), packed into the initrd
+services/init/   AriInit, the first user process, device manager and capability broker
+services/virtio-blk/ virtio-blk driver and block service over IPC, in ring 3
+services/arifs/  fsd: AriFS v1 file service over IPC, in ring 3
+services/virtio-net/ netd: virtio-net driver and network stack (DHCP, ping, UDP, TCP, DNS) over IPC, in ring 3
+services/virtio-input/ inputd: virtio-input driver (keyboard, mouse) with events over IPC, in ring 3
+services/usb-input/ usbd: xHCI driver and USB HID keyboard/mouse (boot protocol), in ring 3
+services/console-bridge/ console bridge: user keyboards feed the kernel console for the shell
+services/compositor/ compositor: windows, cursor and input routing over the framebuffer, in ring 3
+libs/gfx/        2D graphics without alloc (canvases, text, cursor, desktop) with host tests
+libs/input/      evdev events and a US keyboard with host tests
+libs/net/        minimal network stack without alloc, with host tests
+libs/http/       minimal HTTP GET client (Content-Length, chunked) with host tests
+services/shell/  arish: interactive shell in ring 3
+libs/arifs/      AriFS v1: flat file system with CRC32, a replace journal and host tests with power cuts
+libs/supervisor/ service life cycle: states, generations, restart budget and back-off
+sdk/proto/       IPC protocols of the services
+sdk/runtime/     aricode-rt: runtime of user programs (entry!, heap, panic)
+sdk/build/       aricode-build: one-line build.rs for user programs
+apps/hello/      SDK example application with its manifest (see docs/en/sdk.md)
+apps/installer/  trusted installer: installs or updates signed packages from pkgs/
+apps/bench/      reproducible measurements from ring 3 (docs/performance.md)
+examples/hello_ext/ out-of-tree application built with cargo xtask app-pack
+libs/manifest/   application manifests: requested capabilities, memory quota, read-only files
+libs/pkg/        signed application packages (manifest with hashes, Ed25519 signature, ELF, app manifest)
+libs/crypto/     SHA-256, SHA-512, Ed25519 and ChaCha20 from scratch, checked against the official vectors
+keys/dev/        development Ed25519 key pair (tests only; see its README)
+libs/wasm/       WebAssembly MVP interpreter (integers, bounded memory, imports) with validator and host tests
+apps/wasm-demo/  portable WebAssembly example module; apps/wasm-runner runs it with the Capability API
+apps/updater/    A/B updater: verifies the UPDATE image and installs it in the inactive slot
+libs/ab/         A/B boot state, signed images and slot policy (AriBoot, init, updater)
+boot/            AriBoot: UEFI loader (crate `ariboot`)
+kernel/          AriKernel (crate `arikernel`), ELF64 in the higher half
+tools/xtask/     automation: build, image, QEMU, tests, lint
+tests/qemu/      declarative integration scenarios (TOML)
+docs/            architecture, workflow, ADRs and audits (Spanish); docs/en/ onboarding guides (English)
+build/           generated output (ESP, OVMF_VARS, disk.img, logs); never committed
 ```
 
-## Test de aceptación
+## Acceptance test
 
-`tests/qemu/boot_kernel_ready.toml` arranca QEMU sin pantalla con
-`isa-debug-exit`, captura la serie y exige que aparezca
-`ARICODEOS_KERNEL_READY`, que no haya `KERNEL PANIC` y que QEMU termine con
-código 33. Los escenarios `full` inyectan fallos (ELF truncado, kernel
-ausente, panic provocado) y exigen el código 35. Los logs quedan en
-`build/scenarios/<nombre>/serial.log`.
+`tests/qemu/boot_kernel_ready.toml` boots QEMU headless with
+`isa-debug-exit`, captures the serial output and requires
+`ARICODEOS_KERNEL_READY` to appear, no `KERNEL PANIC`, and QEMU to exit
+with code 33. The `full` scenarios inject faults (truncated ELF, missing
+kernel, provoked panic) and require code 35. Logs are kept in
+`build/scenarios/<name>/serial.log`.

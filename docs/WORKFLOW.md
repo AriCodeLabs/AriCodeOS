@@ -82,6 +82,16 @@ Cada fase del roadmap añade sus tests en la misma rama que su código: nuevos
     hallazgo corregido lleva una regresión (unitaria o escenario QEMU) en la
     misma rama `fix/*`.
 
+## Idiomas
+
+El español es el idioma canónico del proyecto: código, mensajes de consola,
+documento maestro, arquitectura, ADR y auditorías. Solo los documentos de
+entrada para colaboradores tienen versión en inglés: `README.md` (el
+principal en GitHub; el español es `README.es.md`) y `docs/en/` con este
+flujo de trabajo, la guía del SDK y la de tests. Quien cambie uno de esos
+documentos actualiza las dos versiones en la misma rama; lo demás no se
+traduce para que no se desfase.
+
 ## Mensajes de commit
 
 Primera línea en imperativo, corta, con el ámbito cuando ayude:
