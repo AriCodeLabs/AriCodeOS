@@ -48,6 +48,7 @@ payload = "hola desde el host"  # el eco se anota en la captura como "[host] son
 disk = "slots"                  # disco: slots (defecto) | esp-only | pending-b | b-exhausted | b-corrupt | usb-image (la ESP va dentro del disco)
                                 #        | fs-pending-replace (reemplazo de AriFS comprometido sin aplicar) | fs-corrupt (tabla de AriFS alterada)
                                 #        | wasm-restricted (manifiesto del modulo solo con print) | wasm-invalid (demo.wasm mal tipado)
+                                #        | wasm-bad-import (demo.wasm importa una funcion del anfitrion con otra firma)
 disk_readonly = false           # true: el disco de pruebas se presenta como solo lectura
 cpus = 4                        # procesadores (-smp N); sin declarar: 1, o lo que fuerce `--cpus N`
 usb_hid = true                  # añade qemu-xhci con un teclado y un ratón USB (los eventos QMP van al USB)

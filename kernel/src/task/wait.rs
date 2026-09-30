@@ -56,6 +56,12 @@ impl WaitQueue {
                     KernelIrq::restore(irq);
                     return false;
                 }
+                // Un proceso al que pidieron terminar no vuelve a dormir: la
+                // espera vence y la syscall lo termina al salir.
+                if crate::user::process::current_kill_requested() {
+                    KernelIrq::restore(irq);
+                    return true;
+                }
                 if deadline.is_some_and(|d| crate::time::ticks() >= d) {
                     KernelIrq::restore(irq);
                     return true;

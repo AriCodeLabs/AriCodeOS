@@ -1,7 +1,8 @@
 //! fsd (Fase 20): servicio de ficheros AriFS en ring 3 sobre el servicio de
 //! bloques. Handles: 0x10004 = endpoint propio (READ|WRITE), 0x10005 =
-//! endpoint del servicio de bloques (WRITE), 0x10006 = HARDWARE (DMA).
-//! `arg` = LBA absoluto de la partición AriFS.
+//! endpoint del servicio de bloques (WRITE), 0x10006 = HARDWARE (DMA),
+//! 0x10007 = SYSTEM (READ, reloj para los plazos). `arg` = LBA absoluto de
+//! la partición AriFS.
 #![no_std]
 #![no_main]
 
@@ -12,6 +13,15 @@ use aricode_rt::sys::{self, block::BlockClient, Handle};
 const SERVICE: Handle = Handle(0x0001_0004);
 const BLOCK: Handle = Handle(0x0001_0005);
 const HW: Handle = Handle(0x0001_0006);
+const SYSTEM: Handle = Handle(0x0001_0007);
+/// Un reemplazo por trozos sin actividad durante este tiempo se considera
+/// abandonado (su dueño murió o se fue): el siguiente lo sustituye
+/// (auditoría 6ee19fb, hallazgo 3).
+const STAGING_TIMEOUT_MS: u64 = 2_000;
+
+fn now_ms() -> u64 {
+    aricode_rt::sys::time::uptime_ms(SYSTEM).unwrap_or(0)
+}
 
 fn say(msg: &[u8]) {
     sys::print(b"fsd: ");
@@ -89,7 +99,7 @@ fn status_of(e: FsError) -> Status {
         FsError::NotFound => Status::NotFound,
         FsError::Exists => Status::Exists,
         FsError::NoSpace => Status::NoSpace,
-        FsError::BadName => Status::Invalid,
+        FsError::BadName | FsError::BadTransaction => Status::Invalid,
         FsError::OutOfRange => Status::OutOfRange,
     }
 }
@@ -180,13 +190,26 @@ fn qualified<'a>(prefix: &str, name: &str, buf: &'a mut [u8; 64]) -> Option<&'a 
     core::str::from_utf8(&buf[..total]).ok()
 }
 
-/// Reemplazo por trozos a medias (ADR 0018): fichero y endpoint dueño. Solo
-/// uno a la vez, porque el journal es único; lo libera el compromiso, un
-/// error o el cierre del descriptor.
+/// Reemplazo por trozos a medias (ADR 0018): fichero, endpoint dueño e
+/// instante del último trozo. Solo uno a la vez, porque el journal es único;
+/// lo libera el compromiso, un error, el cierre del descriptor o, si su
+/// dueño desaparece, el plazo `STAGING_TIMEOUT_MS`. Qué bytes cubre lo
+/// vigila la librería: el compromiso solo acepta lo que la transacción
+/// escribió desde cero y sin huecos.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Staging {
     index: usize,
     owner: usize,
+    last_ms: u64,
+}
+
+impl Staging {
+    fn same(&self, index: usize, owner: usize) -> bool {
+        self.index == index && self.owner == owner
+    }
+    fn abandoned(&self, now: u64) -> bool {
+        now.saturating_sub(self.last_ms) >= STAGING_TIMEOUT_MS
+    }
 }
 
 /// Estado del servicio compartido por todas las peticiones.
@@ -276,8 +299,9 @@ fn handle(
         Op::Close => {
             let index = srv.fds.get(req.fd, owner);
             if srv.fds.close(req.fd, owner) {
-                if index.is_some_and(|i| srv.staging == Some(Staging { index: i, owner })) {
+                if index.is_some_and(|i| srv.staging.is_some_and(|s| s.same(i, owner))) {
                     srv.staging = None;
+                    fs.abandon_replace();
                 }
                 Reply::ok(0)
             } else {
@@ -288,13 +312,16 @@ fn handle(
             let Some(index) = srv.fds.get(req.fd, owner) else {
                 return Reply::status(Status::BadFd);
             };
-            if srv.staging != Some(Staging { index, owner }) {
+            if !srv.staging.is_some_and(|s| s.same(index, owner)) {
                 return Reply::status(Status::Busy);
             }
             srv.staging = None;
             match fs.replace_commit(index, req.len) {
                 Ok(()) => Reply::ok(req.len as u64),
-                Err(e) => Reply::status(status_of(e)),
+                Err(e) => {
+                    fs.abandon_replace();
+                    Reply::status(status_of(e))
+                }
             }
         }
         Op::Flush => match fs.flush() {
@@ -315,11 +342,16 @@ fn handle(
             if buf.len() < len {
                 return Reply::status(Status::Invalid);
             }
-            let mine = Staging { index, owner };
-            if matches!(req.op, Op::Replace | Op::ReplaceChunk)
-                && srv.staging.is_some_and(|s| s != mine)
-            {
-                return Reply::status(Status::Busy);
+            let now = now_ms();
+            if matches!(req.op, Op::Replace | Op::ReplaceChunk) {
+                if let Some(s) = srv.staging.filter(|s| !s.same(index, owner)) {
+                    if !s.abandoned(now) {
+                        return Reply::status(Status::Busy);
+                    }
+                    // El dueño anterior no volvió: su transacción se descarta.
+                    srv.staging = None;
+                    fs.abandon_replace();
+                }
             }
             let result = match req.op {
                 Op::Read => fs.read(index, req.offset, &mut buf[..len]),
@@ -330,7 +362,14 @@ fn handle(
                 }
                 _ => {
                     let r = fs.replace_chunk(index, req.offset, &buf[..len]);
-                    srv.staging = r.is_ok().then_some(mine);
+                    srv.staging = r.is_ok().then_some(Staging {
+                        index,
+                        owner,
+                        last_ms: now,
+                    });
+                    if r.is_err() {
+                        fs.abandon_replace();
+                    }
                     r.map(|()| len)
                 }
             };

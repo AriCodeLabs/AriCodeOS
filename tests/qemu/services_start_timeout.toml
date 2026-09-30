@@ -1,0 +1,22 @@
+# Auditoria 6ee19fb, hallazgo 4: un servicio que arranca pero nunca responde
+# a su sonda. Al vencer, el supervisor lo termina (process_kill) y espera a
+# que el kernel lo recoja antes de relanzar; con el presupuesto agotado no
+# queda ningun proceso suyo vivo reteniendo recursos.
+name = "services.start_timeout"
+description = "supervisor: servicio que no responde, terminado por el supervisor al vencer la sonda; ningun proceso vivo"
+level = "full"
+areas = ["services", "init", "user"]
+cmdline = "qemu_exit service_hang"
+timeout_secs = 90
+
+[expect]
+exit = 33
+serial_contains = [
+    "hang_service: arrancado y sin intencion de responder",
+    "'hang_service' terminado por fallo: terminado por el supervisor",
+    "AriInit: servicio hang_service no llego a servir; reinicio en",
+    "AriInit: servicio hang_service no llego a servir; presupuesto de reinicios agotado: sistema degradado",
+    "AriInit: hang_service: 0 proceso(s) vivo(s) tras agotar el presupuesto",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "no debia llegar a servir", "no llego a fallido", "no responde ni termina"]

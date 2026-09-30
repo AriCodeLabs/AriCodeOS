@@ -168,16 +168,32 @@ impl FsClient {
             return self.call(req, true).map(|r| r.value as usize);
         }
         for (i, chunk) in data.chunks(MAX_IO as usize).enumerate() {
-            self.buffer()[..chunk.len()].copy_from_slice(chunk);
-            let mut req = Request::new(Op::ReplaceChunk);
-            req.fd = fd;
-            req.offset = (i * MAX_IO as usize) as u32;
-            req.len = chunk.len() as u32;
-            self.call(req, true)?;
+            self.replace_chunk(fd, (i * MAX_IO as usize) as u32, chunk)?;
         }
+        self.replace_commit(fd, data.len() as u32)
+    }
+
+    /// Un trozo (máximo `MAX_IO`) de un reemplazo por partes: el primero en
+    /// `offset` 0 y los demás seguidos, sin huecos; nada cambia hasta
+    /// `replace_commit`. `Busy` si otro cliente tiene un reemplazo a medias.
+    pub fn replace_chunk(&mut self, fd: u32, offset: u32, chunk: &[u8]) -> Result<(), FsError> {
+        if chunk.len() > MAX_IO as usize {
+            return Err(FsError::Status(Status::OutOfRange));
+        }
+        self.buffer()[..chunk.len()].copy_from_slice(chunk);
+        let mut req = Request::new(Op::ReplaceChunk);
+        req.fd = fd;
+        req.offset = offset;
+        req.len = chunk.len() as u32;
+        self.call(req, true).map(|_| ())
+    }
+
+    /// Compromete los `len` bytes enviados con `replace_chunk` (exactamente
+    /// los de esta transacción; si no, `Invalid`) y los aplica de una vez.
+    pub fn replace_commit(&mut self, fd: u32, len: u32) -> Result<usize, FsError> {
         let mut req = Request::new(Op::ReplaceCommit);
         req.fd = fd;
-        req.len = data.len() as u32;
+        req.len = len;
         self.call(req, false).map(|r| r.value as usize)
     }
 

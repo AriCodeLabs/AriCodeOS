@@ -309,7 +309,9 @@ fn start_fsd(
     let own = sys::handle_duplicate(fs_service, rights::READ | rights::WRITE | rights::TRANSFER)?;
     let blk = sys::handle_duplicate(block_service, rights::WRITE | rights::TRANSFER)?;
     let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
-    sys::process_spawn_with(SPAWNER, "fsd", partition_lba, &[own, blk, hw])
+    // SYSTEM (lectura): reloj para caducar reemplazos por trozos abandonados.
+    let system = sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER)?;
+    sys::process_spawn_with(SPAWNER, "fsd", partition_lba, &[own, blk, hw, system])
 }
 
 /// Cómo se (re)lanza un servicio residente.
@@ -528,9 +530,34 @@ impl Supervisor {
             }
             true
         } else {
-            self.announce_death(i, now_ms(), Exit::StartTimeout);
+            self.start_timeout(i);
             false
         }
+    }
+
+    /// El servicio no llegó a servir: si sigue vivo se termina y se espera
+    /// a que el kernel lo recoja antes de dar por muerta la generación; así
+    /// la siguiente no compite con él por sus dispositivos (auditoría
+    /// 6ee19fb, hallazgo 4). Si no se deja terminar, queda fallido sin
+    /// relanzar.
+    fn start_timeout(&mut self, i: usize) {
+        let Some(r) = self.slots[i].as_mut() else {
+            return;
+        };
+        let mut stuck = false;
+        if let Some(h) = r.process {
+            if matches!(sys::process_wait(h, 0), Err(Error::Timeout)) {
+                let _ = sys::process_kill(h);
+                stuck = matches!(sys::process_wait(h, 2000), Err(Error::Timeout));
+            }
+        }
+        if stuck {
+            sys::print(b"AriInit: servicio ");
+            sys::print(r.name.as_bytes());
+            sys::print(b" no responde ni termina: fallido, no se relanza\n");
+            r.sup.stop();
+        }
+        self.announce_death(i, now_ms(), Exit::StartTimeout);
     }
 
     /// Registra la muerte de `i`, cierra su proceso y anuncia la decisión.
@@ -580,7 +607,7 @@ impl Supervisor {
                     Err(Error::Timeout) => {
                         if let Some(r) = self.slots[i].as_mut() {
                             if r.sup.tick(now) == Action::Timeout {
-                                self.announce_death(i, now, Exit::StartTimeout);
+                                self.start_timeout(i);
                             }
                         }
                     }
@@ -630,6 +657,64 @@ impl Supervisor {
         }
         .with_name(r.name)
     }
+}
+
+/// Servicio que nunca responde (`service_hang`): tras vencer la sonda el
+/// supervisor debe terminarlo; con el presupuesto agotado no queda ningún
+/// proceso `hang_service` vivo.
+fn service_hang(sup: &mut Supervisor) -> Result<(), u64> {
+    let ep = sys::endpoint_create().map_err(|_| 50u64)?;
+    let policy = Policy {
+        max_restarts: 1,
+        backoff_initial_ms: 100,
+        backoff_max_ms: 100,
+        start_timeout_ms: 1000,
+        stable_ms: 60_000,
+    };
+    let i = sup
+        .register(
+            "hang_service",
+            Kind::Program { arg: 0 },
+            Probe::Ping,
+            ep,
+            true,
+            policy,
+        )
+        .ok_or(50u64)?;
+    if sup.launch(i) {
+        say(b"hang_service no debia llegar a servir");
+        return Err(51);
+    }
+    // Relanzamientos hasta agotar el presupuesto.
+    let t0 = now_ms();
+    while sup.state(i) != State::Failed && now_ms().saturating_sub(t0) < 20_000 {
+        sup.poll();
+        sys::thread_sleep(50);
+    }
+    if sup.state(i) != State::Failed {
+        say(b"hang_service no llego a fallido");
+        return Err(52);
+    }
+    // Ningun proceso hang_service vivo: el supervisor los termino.
+    let mut buf = [0u8; sys::abi::sysinfo::ProcessEntry::LEN * 48];
+    let n = sys::system_info(SYSTEM, sys::abi::sysinfo::PROCESSES, &mut buf).map_err(|_| 53u64)?;
+    let alive = buf[..n]
+        .as_chunks::<{ sys::abi::sysinfo::ProcessEntry::LEN }>()
+        .0
+        .iter()
+        .filter_map(|c| sys::abi::sysinfo::ProcessEntry::decode(c))
+        .filter(|e| {
+            e.name_str() == "hang_service" && e.state == sys::abi::sysinfo::ProcessState::Running
+        })
+        .count();
+    let mut b = [0u8; 20];
+    sys::print(b"AriInit: hang_service: ");
+    sys::print(aricode_rt::fmt_u64(alive as u64, &mut b));
+    sys::print(b" proceso(s) vivo(s) tras agotar el presupuesto\n");
+    if alive != 0 {
+        return Err(54);
+    }
+    Ok(())
 }
 
 /// Reinicios provocados (`restart_storm`): un servicio de prueba que muere
@@ -1718,6 +1803,14 @@ fn main(arg: u64) -> u64 {
             return 40;
         };
         if let Err(code) = restart_storm(&mut sup, &mut fs) {
+            return code;
+        }
+    }
+    // 10c. Servicio que no responde (solo tests, `service_hang`): la sonda de
+    //      arranque vence, el supervisor lo termina y no queda ningun proceso
+    //      suyo vivo (auditoria 6ee19fb, hallazgo 4).
+    if arg & sys::abi::init_arg::SERVICE_HANG != 0 {
+        if let Err(code) = service_hang(&mut sup) {
             return code;
         }
     }

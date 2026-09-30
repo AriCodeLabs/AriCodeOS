@@ -17,7 +17,7 @@ pub fn handle(frame: &mut InterruptFrame) {
         }
         0..=31 if frame.cs & 3 == 3 => user_fault(frame),
         0..=31 => fatal(frame),
-        v => super::apic::handle_interrupt(v),
+        v => super::apic::handle_interrupt(v, frame.cs & 3 == 3),
     }
 }
 

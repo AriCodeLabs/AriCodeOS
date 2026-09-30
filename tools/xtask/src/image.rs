@@ -365,6 +365,9 @@ pub enum DiskVariant {
     WasmRestricted,
     /// `demo.wasm` sustituido por un módulo mal tipado: el validador lo rechaza.
     WasmInvalid,
+    /// `demo.wasm` importa `aricode.file_write` con otra firma: el runner no
+    /// lo enlaza (auditoría 6ee19fb, hallazgo 5).
+    WasmBadImport,
     /// Imagen para pendrive: la ESP va dentro del disco (sin `fat:` en QEMU).
     UsbImage,
 }
@@ -381,6 +384,7 @@ impl DiskVariant {
             "fs-corrupt" => Self::FsCorrupt,
             "wasm-restricted" => Self::WasmRestricted,
             "wasm-invalid" => Self::WasmInvalid,
+            "wasm-bad-import" => Self::WasmBadImport,
             "usb-image" => Self::UsbImage,
             _ => return None,
         })
@@ -531,6 +535,9 @@ pub fn write_test_disk(
         DiskVariant::WasmInvalid => {
             overwrite_arifs(&mut img, PART_ARI0, WASM_MODULE_FILE, INVALID_WASM)?
         }
+        DiskVariant::WasmBadImport => {
+            overwrite_arifs(&mut img, PART_ARI0, WASM_MODULE_FILE, BAD_IMPORT_WASM)?
+        }
         DiskVariant::FsCorrupt => {
             // Primer byte del nombre de la primera entrada en uso.
             img[(PART_ARI0.0 + aricode_arifs::TABLE_LBA) as usize * 512] ^= 0x20;
@@ -570,7 +577,8 @@ pub fn write_test_disk(
             | DiskVariant::FsPendingReplace
             | DiskVariant::FsCorrupt
             | DiskVariant::WasmRestricted
-            | DiskVariant::WasmInvalid => {}
+            | DiskVariant::WasmInvalid
+            | DiskVariant::WasmBadImport => {}
         }
         let o = PART_ARIBOOT.0 as usize * 512;
         img[o..o + 512].copy_from_slice(&state.encode());
@@ -675,6 +683,19 @@ const INVALID_WASM: &[u8] = &[
     0x05, 0x03, 0x01, 0x00, 0x01, // memory: 1 pagina
     0x07, 0x08, 0x01, 0x04, 0x6D, 0x61, 0x69, 0x6E, 0x00, 0x00, // export "main"
     0x0A, 0x07, 0x01, 0x05, 0x00, 0x41, 0x01, 0x6A, 0x0B, // code
+];
+
+/// Módulo válido que importa `aricode.file_write` como `() -> i32` y lo llama
+/// desde `main(i64) -> i32` (fixture de la auditoría 6ee19fb): el runner debe
+/// rechazar la firma antes de ejecutar.
+const BAD_IMPORT_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, // cabecera
+    0x01, 0x0A, 0x02, 0x60, 0x00, 0x01, 0x7F, 0x60, 0x01, 0x7E, 0x01, 0x7F, // tipos
+    0x02, 0x16, 0x01, 0x07, 0x61, 0x72, 0x69, 0x63, 0x6F, 0x64, 0x65, 0x0A, 0x66, 0x69, 0x6C, 0x65,
+    0x5F, 0x77, 0x72, 0x69, 0x74, 0x65, 0x00, 0x00, // import aricode.file_write: tipo 0
+    0x03, 0x02, 0x01, 0x01, // function: tipo 1
+    0x07, 0x08, 0x01, 0x04, 0x6D, 0x61, 0x69, 0x6E, 0x00, 0x01, // export "main" = func 1
+    0x0A, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0B, // main: call 0
 ];
 
 /// Sustituye entero un fichero de AriFS (reemplazo atómico de la librería).

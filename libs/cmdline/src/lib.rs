@@ -75,6 +75,9 @@ pub mod keys {
     pub const INIT_FAIL_LATE: &str = "init_fail_late";
     /// `restart_storm`: init somete a un servicio de prueba a 100 reinicios.
     pub const RESTART_STORM: &str = "restart_storm";
+    /// `service_hang`: init lanza un servicio de prueba que nunca responde y
+    /// comprueba que el supervisor lo termina al vencer su sonda.
+    pub const SERVICE_HANG: &str = "service_hang";
     /// `smp=off`: no arrancar los procesadores de aplicación (hardware real).
     pub const SMP: &str = "smp";
     /// `iommu=off`: no activar la traducción DMA (hardware real).
