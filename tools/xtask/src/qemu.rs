@@ -223,12 +223,23 @@ fn run_input_probe(
             }
         }
         std::thread::sleep(Duration::from_millis(100));
+        // "a" pulsa y suelta; "shift+dot" pulsa los modificadores, la tecla,
+        // y los suelta en orden inverso.
         for key in keys {
-            for down in [true, false] {
+            let parts: Vec<&str> = key.split('+').collect();
+            for part in &parts {
                 step(
                     &mut qmp,
                     format!(
-                        r#"{{"type":"key","data":{{"down":{down},"key":{{"type":"qcode","data":"{key}"}}}}}}"#
+                        r#"{{"type":"key","data":{{"down":true,"key":{{"type":"qcode","data":"{part}"}}}}}}"#
+                    ),
+                )?;
+            }
+            for part in parts.iter().rev() {
+                step(
+                    &mut qmp,
+                    format!(
+                        r#"{{"type":"key","data":{{"down":false,"key":{{"type":"qcode","data":"{part}"}}}}}}"#
                     ),
                 )?;
             }

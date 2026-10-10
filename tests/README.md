@@ -60,7 +60,7 @@ packages = ["examples/hello_ext:2", "examples/hello_ext:3:corrupt"]  # paquetes 
 
 [host_input]                    # opcional: entrada inyectada por QMP al ver marker
 marker = "INPUT_READY"
-keys = ["h", "o", "l", "a", "ret"]   # nombres qcode de QEMU, pulsación y suelta en kbd0
+keys = ["h", "o", "l", "a", "ret"]   # nombres qcode de QEMU, pulsación y suelta en kbd0   # "shift+dot" mantiene los modificadores mientras se pulsa la tecla
 mouse_rel = [10, -5]            # movimiento relativo en mouse0
 click = "left"                  # botón pulsado y soltado; resultado en "[host] QMP: ..."
 
