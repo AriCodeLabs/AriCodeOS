@@ -56,7 +56,8 @@ sin exclusividad y tipos de memoria estándar, ADR 0021). El equipo: Intel de
 
 | Funciona | Falta |
 |---|---|
-| AriBoot: slots, GOP 800x600, kernel e initrd verificados | Red por cable: driver `rtl_net` (ADR 0024), por comprobar en el portátil con `net`, `ping` y `dns` |
+| AriBoot: slots, GOP 800x600, kernel e initrd verificados | Wi-Fi Atheros AR9485 (fuera de alcance: ath9k, 802.11 y WPA2) |
+| Red por cable con `rtl_net` (ADR 0024): DHCP, `ping` al router en 1 ms y `dns google.com` resueltos (2026-10-10) | |
 | Pendrive como servicio de bloques por USB (ADR 0023; "USB Disk 3.0", sin `SYNCHRONIZE CACHE`), fsd, confirmación del slot A y shell por el teclado PS/2 (2026-10-10) | EHCI sin driver (solo xHCI) |
 | Kernel: memoria, ACPI, APIC, PCI (17 funciones), init y sus pruebas, `ARICODEOS_KERNEL_READY` | Energía: estados de reposo y batería |
 | Teclado PS/2 en la consola del kernel (retroceso incluido) | |

@@ -109,7 +109,7 @@ received.
 | process | `sys::process_spawn_with(spawner, name, arg, handles)`, `sys::process_wait`, `sys::process_kill` (`MANAGE` on the process; afterwards `process_wait` returns `Killed`), `sys::process_exit`; needs a `SPAWNER` handle with `MANAGE` (init has it; the shell gets one for `run`) |
 | ipc | `sys::endpoint_create`, `sys::ipc_send`, `sys::ipc_receive` (256 bytes and up to 4 handles per message, with a deadline), `sys::ipc_receive_any` (the first of up to 16 endpoints with a message, with its index; ADR 0020); large data goes through shared DMA buffers |
 | filesystem | `sys::fs::FsClient` over the `fsd` endpoint and a `HARDWARE` capability for its buffer: `list`, `open`, `create`, `read`, `write` (in place, durable after `flush`), `replace` (all-or-nothing and durable, up to 32 KiB: in chunks to the journal above 4 KiB), `flush`, `close` (ADR 0014, 0018) |
-| network | `sys::net::NetClient`: `info`, `ping`, UDP (`udp_bind/send/recv`), TCP (`tcp_connect/listen/accept/send/recv/close`), `resolve`; `sys::http::get` on top |
+| network | `sys::net::NetClient`: `info`, `link` (physical link state, even before DHCP), `ping`, UDP (`udp_bind/send/recv`), TCP (`tcp_connect/listen/accept/send/recv/close`), `resolve`; `sys::http::get` on top |
 | window | `sys::window::Window::create(compositor, hardware, w, h, title)`, `canvas()` (an `aricode-gfx` canvas), `present`, `poll` (`Key`, `Click`, `Focus`), `close` |
 | input | `sys::input::InputClient` over an `inputd`: evdev events with timestamps; `aricode-input::Keyboard` translates them |
 | console | `sys::console_write` (`WRITE`), `sys::console_read` (`READ`, with a deadline); `sys::console_inject` requires `MANAGE` and is only used by init's console bridge (ADR 0013) |

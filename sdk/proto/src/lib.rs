@@ -358,6 +358,10 @@ pub mod fs {
 pub mod net {
     pub const PROTOCOL: u8 = 3;
     pub const VERSION: u8 = 1;
+    /// Respuestas de `Op::Link`.
+    pub const LINK_UNKNOWN: u64 = 0;
+    pub const LINK_DOWN: u64 = 1;
+    pub const LINK_UP: u64 = 2;
     /// Máximo de un datagrama por petición (buffer del cliente).
     pub const MAX_DATAGRAM: u16 = 1472;
     /// Puerto UDP del respondedor de pruebas del host (eco y DNS), alcanzable
@@ -404,6 +408,9 @@ pub mod net {
         TcpRecv = 12,
         /// Cierre ordenado de `sock`.
         TcpClose = 13,
+        /// Estado del enlace físico: `value` = [`LINK_UNKNOWN`], [`LINK_DOWN`]
+        /// o [`LINK_UP`]. Funciona sin configuración DHCP.
+        Link = 14,
     }
 
     /// Petición (64 bytes). Los nombres DNS no viajan en el mensaje: van por
@@ -466,6 +473,7 @@ pub mod net {
                 11 => Op::TcpSend,
                 12 => Op::TcpRecv,
                 13 => Op::TcpClose,
+                14 => Op::Link,
                 _ => return None,
             };
             let mut addr = [0u8; 4];
@@ -1282,6 +1290,8 @@ mod tests {
             mac: [0x52, 0x54, 0, 0x12, 0x34, 0x56],
         };
         assert_eq!(Info::decode(&info.encode()), info);
+        let link = Request::new(Op::Link);
+        assert_eq!(Request::decode(&link.encode()).unwrap().op, Op::Link);
         let mut bad = r.encode();
         bad[2] = 99;
         assert!(Request::decode(&bad).is_none());

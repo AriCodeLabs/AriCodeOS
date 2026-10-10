@@ -34,6 +34,8 @@ pub trait Link {
     fn send_frame(&mut self, frame: &[u8]) -> bool;
     /// Siguiente trama recibida copiada a `out`, o `None` si no hay ninguna.
     fn recv_frame(&mut self, out: &mut [u8; MAX_FRAME]) -> Option<usize>;
+    /// Enlace físico arriba, abajo o desconocido (`None`).
+    fn link_up(&self) -> Option<bool>;
 }
 
 /// Traza con el nombre del driver como prefijo.
@@ -857,6 +859,14 @@ impl<L: Link> Stack<L> {
             | Op::TcpSend
             | Op::TcpRecv
             | Op::TcpClose => self.tcp_handle(req, reply_to, buf, now),
+            Op::Link => {
+                let state = match self.link.link_up() {
+                    None => aricode_proto::net::LINK_UNKNOWN,
+                    Some(false) => aricode_proto::net::LINK_DOWN,
+                    Some(true) => aricode_proto::net::LINK_UP,
+                };
+                answer(reply_to, Reply::ok(state));
+            }
             Op::Info => match self.config {
                 Some(c) => {
                     let info = Info {

@@ -68,6 +68,12 @@ impl NetClient {
             .map(|r| Info::decode(&r.data))
     }
 
+    /// Estado del enlace físico (`LINK_UNKNOWN`, `LINK_DOWN` o `LINK_UP`),
+    /// disponible aunque DHCP no haya terminado.
+    pub fn link(&self) -> Result<u64, NetError> {
+        self.call(Request::new(Op::Link), false).map(|r| r.value)
+    }
+
     /// Eco ICMP; devuelve el RTT en ms.
     pub fn ping(&self, addr: [u8; 4], seq: u16, timeout_ms: u32) -> Result<u64, NetError> {
         let mut req = Request::new(Op::Ping);

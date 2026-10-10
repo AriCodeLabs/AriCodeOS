@@ -3683,8 +3683,9 @@ secuencias de escape de terminal desde cualquier teclado). La Fase 34 queda
 completada en lo esencial. Red: ADR 0024 saca la pila de red de virtio-net
 a `ari-net-core` (trait `Link`) y añade `rtl-net` para la Realtek del
 portátil, sin emulación en QEMU (librería probada en el anfitrión, driver
-en el portátil). Faltan la energía, el Wi-Fi (ath9k y WPA2, fuera de alcance
-por ahora) y EHCI.
+en el portátil). Undécima foto: **red por cable funcionando en el portátil**
+(DHCP, ping al router, DNS). Faltan la energía, el Wi-Fi (ath9k y WPA2,
+fuera de alcance por ahora) y EHCI.
 
 Siguiente: repetir la prueba física con la imagen corregida y, con el
 equipo de referencia, energía (estados de reposo, batería) y más dispositivos.
