@@ -1,0 +1,43 @@
+# Fase 34 (ADR 0023): el disco de pruebas es un pendrive USB (usb-storage en
+# el xHCI) y no hay virtio-blk. usbd lo enumera como almacenamiento masivo
+# bulk-only, lo sirve con el protocolo de bloques, init monta fsd encima y
+# el shell escribe un fichero que sobrevive a un reinicio (SYNCHRONIZE CACHE
+# en el flush de AriFS).
+name = "usb.storage"
+description = "pendrive USB como servicio de bloques: fsd y shell sobre usbd, escritura duradera"
+level = "full"
+areas = ["usb", "storage", "filesystem", "init", "shell"]
+usb_storage = true
+timeout_secs = 90
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["ls", "write notas.txt hola usb", "cat notas.txt", "reboot"]
+[boots.expect]
+exit = 0
+serial_contains = [
+    "AriInit: sin virtio-blk",
+    "usb-input: almacenamiento USB en puerto",
+    "usb-input: dispositivo listo: USB HID (sin dispositivos)",
+    "AriInit: servicio de bloques por USB (",
+    "AriInit: servicio de ficheros ok",
+    "AriInit: servicio de bloques ok",
+    "arish: shell de AriCodeOS",
+    "hola.txt",
+    "write: 9 bytes en notas.txt",
+    "hola usb",
+    "AriCodeOS: reiniciando",
+]
+serial_absent = ["KERNEL PANIC", "write: error", "fallo en la inicializacion del xHCI"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["cat notas.txt", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "AriInit: servicio de bloques por USB (",
+    "hola usb",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC"]

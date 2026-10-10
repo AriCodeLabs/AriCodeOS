@@ -48,6 +48,7 @@ libs/heap/           aricode-heap: heap first-fit con lista de libres, fusión y
 libs/sync/           aricode-sync: IrqLock/SpinLock con política de interrupciones enchufable, restaurada entre giros; force_unlock (no_std, tests de host)
 libs/fat/            aricode-fat: FAT32 mínimo con nombres largos para construir y leer la ESP de la imagen USB (no_std + alloc, tests de host)
 libs/xhci/           aricode-xhci: xHCI y USB: registros, TRB, anillos, contextos, ERST, SETUP y descriptores (no_std, tests de host)
+libs/usb-storage/    aricode-usb-storage: transporte bulk-only (CBW/CSW) y CDB SCSI de bloque, tests de host
 libs/iommu/          aricode-iommu: Intel VT-d: registros, capacidades, entradas raíz/contexto, paginación de segundo nivel, registros de fallo (no_std, tests de host)
 libs/sched/          aricode-sched: política round robin sobre Tid con estados, sueño, bloqueo, salida, varias CPUs, afinidad y despertares pendientes (no_std + alloc, tests de host)
 libs/handles/        aricode-handles: tabla de handles con generación y derechos, duplicación solo reductora (no_std + alloc, tests de host)
@@ -1026,7 +1027,7 @@ kernel/src/iommu.rs            unidades, dominios por proceso, attach/map_region
 ```text
 libs/xhci                      estructuras xHCI/USB (sin hardware)
 libs/input                     HidBootKeyboard / HidBootMouse: informes de arranque -> eventos evdev
-services/usb-input             usbd: controlador, enumeración, endpoints de interrupción, servicio de entrada
+services/usb-input             usbd: controlador xHCI, enumeración, endpoints de interrupción (servicio de entrada) y masivos (almacenamiento bulk-only como servicio de bloques, ADR 0023)
 ```
 
 - init lanza `usb_input` por cada función PCI de clase `0c.03` con el contrato
@@ -1140,6 +1141,13 @@ sdk/proto::status              estado por servicio (protocolo 7) en el endpoint 
   controlador pide scratchpads (QEMU ninguno) y el buffer fijo de 64 KiB no
   los cabía. `Params::dma_arena_bytes` lo dimensiona y el driver nombra el
   paso que falla.
+- Sexta foto: xHCI listo (8 puertos, 32 slots, 16 scratchpads), servicio de
+  entrada ok, `ARICODEOS_KERNEL_READY`; ningún dispositivo en los puertos
+  porque en los Intel 7 series los puertos USB quedan en los EHCI hasta que
+  el sistema los enruta al xHCI (registros XUSB2PR/USB3_PSSEN). ADR 0023:
+  usbd enruta los puertos, pide la cesión al firmware y sirve el pendrive
+  como servicio de bloques; sin virtio-blk, init monta fsd sobre él
+  (escenario `usb.storage`).
 
 ## Pila de arranque y consola (auditoría 3eb4965)
 

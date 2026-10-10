@@ -1,0 +1,272 @@
+//! Almacenamiento masivo USB (ADR 0023): el transporte bulk-only (BOT) y
+//! el subconjunto de comandos SCSI que necesita un servicio de bloques.
+//! Solo codifica y decodifica; las transferencias las hace el driver xHCI.
+
+#![no_std]
+
+/// Command Block Wrapper (31 bytes, USB Mass Storage Bulk-Only 1.0, 5.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cbw {
+    pub tag: u32,
+    /// Bytes de la fase de datos (0 si no hay).
+    pub data_len: u32,
+    /// Datos del dispositivo al anfitrión.
+    pub data_in: bool,
+    pub lun: u8,
+    pub cdb: Cdb,
+}
+
+impl Cbw {
+    pub const LEN: usize = 31;
+    const SIGNATURE: [u8; 4] = *b"USBC";
+
+    pub fn encode(&self) -> [u8; Self::LEN] {
+        let mut b = [0u8; Self::LEN];
+        b[..4].copy_from_slice(&Self::SIGNATURE);
+        b[4..8].copy_from_slice(&self.tag.to_le_bytes());
+        b[8..12].copy_from_slice(&self.data_len.to_le_bytes());
+        b[12] = if self.data_in { 0x80 } else { 0 };
+        b[13] = self.lun & 0xF;
+        b[14] = self.cdb.len;
+        b[15..31].copy_from_slice(&self.cdb.bytes);
+        b
+    }
+}
+
+/// Command Status Wrapper (13 bytes, 5.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Csw {
+    pub tag: u32,
+    /// Bytes de la fase de datos que no se transfirieron.
+    pub residue: u32,
+    pub status: CswStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CswStatus {
+    Passed,
+    /// El comando falló: `REQUEST SENSE` dice por qué.
+    Failed,
+    /// Error de fase: hay que resetear el transporte.
+    PhaseError,
+}
+
+impl Csw {
+    pub const LEN: usize = 13;
+    const SIGNATURE: [u8; 4] = *b"USBS";
+
+    /// `None` si la firma, la longitud o el estado no son válidos.
+    pub fn parse(b: &[u8]) -> Option<Self> {
+        if b.len() < Self::LEN || b[..4] != Self::SIGNATURE {
+            return None;
+        }
+        let status = match b[12] {
+            0 => CswStatus::Passed,
+            1 => CswStatus::Failed,
+            2 => CswStatus::PhaseError,
+            _ => return None,
+        };
+        Some(Self {
+            tag: u32::from_le_bytes(b[4..8].try_into().ok()?),
+            residue: u32::from_le_bytes(b[8..12].try_into().ok()?),
+            status,
+        })
+    }
+}
+
+/// Command Descriptor Block SCSI (hasta 16 bytes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cdb {
+    pub bytes: [u8; 16],
+    pub len: u8,
+}
+
+impl Cdb {
+    fn new(b: &[u8]) -> Self {
+        let mut bytes = [0u8; 16];
+        bytes[..b.len()].copy_from_slice(b);
+        Self {
+            bytes,
+            len: b.len() as u8,
+        }
+    }
+}
+
+/// Comandos SCSI de bloque (SBC-3 / SPC-4) que usa el servicio de bloques.
+pub mod scsi {
+    use super::Cdb;
+
+    pub const INQUIRY_LEN: u16 = 36;
+    pub const SENSE_LEN: u16 = 18;
+    pub const READ_CAPACITY_LEN: u16 = 8;
+
+    pub fn test_unit_ready() -> Cdb {
+        Cdb::new(&[0x00, 0, 0, 0, 0, 0])
+    }
+    pub fn request_sense() -> Cdb {
+        Cdb::new(&[0x03, 0, 0, 0, SENSE_LEN as u8, 0])
+    }
+    pub fn inquiry() -> Cdb {
+        Cdb::new(&[0x12, 0, 0, 0, INQUIRY_LEN as u8, 0])
+    }
+    pub fn read_capacity10() -> Cdb {
+        Cdb::new(&[0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+    }
+    pub fn read10(lba: u32, blocks: u16) -> Cdb {
+        let l = lba.to_be_bytes();
+        let n = blocks.to_be_bytes();
+        Cdb::new(&[0x28, 0, l[0], l[1], l[2], l[3], 0, n[0], n[1], 0])
+    }
+    pub fn write10(lba: u32, blocks: u16) -> Cdb {
+        let l = lba.to_be_bytes();
+        let n = blocks.to_be_bytes();
+        Cdb::new(&[0x2A, 0, l[0], l[1], l[2], l[3], 0, n[0], n[1], 0])
+    }
+    /// `SYNCHRONIZE CACHE(10)` de todo el medio: hace duraderas las escrituras.
+    pub fn synchronize_cache10() -> Cdb {
+        Cdb::new(&[0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+    }
+
+    /// Respuesta a `INQUIRY` (36 bytes): tipo de periférico y nombres.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Inquiry {
+        /// 0 = acceso directo (disco); 5 = CD/DVD.
+        pub peripheral_type: u8,
+        pub removable: bool,
+        pub vendor: [u8; 8],
+        pub product: [u8; 16],
+    }
+
+    impl Inquiry {
+        pub fn parse(b: &[u8]) -> Option<Self> {
+            if b.len() < INQUIRY_LEN as usize {
+                return None;
+            }
+            Some(Self {
+                peripheral_type: b[0] & 0x1F,
+                removable: b[1] & 0x80 != 0,
+                vendor: b[8..16].try_into().ok()?,
+                product: b[16..32].try_into().ok()?,
+            })
+        }
+    }
+
+    /// Respuesta a `READ CAPACITY(10)`: último LBA y bytes por bloque.
+    /// `None` si el dispositivo no cabe en 32 bits (devuelve `u32::MAX`).
+    pub fn parse_read_capacity10(b: &[u8]) -> Option<(u32, u32)> {
+        if b.len() < READ_CAPACITY_LEN as usize {
+            return None;
+        }
+        let last_lba = u32::from_be_bytes(b[..4].try_into().ok()?);
+        let block_len = u32::from_be_bytes(b[4..8].try_into().ok()?);
+        (last_lba != u32::MAX && block_len != 0).then_some((last_lba, block_len))
+    }
+
+    /// Datos de sentido fijos (`REQUEST SENSE`): clave, código y calificador.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Sense {
+        pub key: u8,
+        pub asc: u8,
+        pub ascq: u8,
+    }
+
+    impl Sense {
+        /// Clave 6: el dispositivo acaba de encenderse o cambió el medio; se
+        /// reintenta el comando.
+        pub const UNIT_ATTENTION: u8 = 6;
+        /// Clave 2: no está listo (sin medio o arrancando).
+        pub const NOT_READY: u8 = 2;
+
+        pub fn parse(b: &[u8]) -> Option<Self> {
+            if b.len() < 14 || b[0] & 0x7F != 0x70 && b[0] & 0x7F != 0x71 {
+                return None;
+            }
+            Some(Self {
+                key: b[2] & 0xF,
+                asc: b[12],
+                ascq: b[13],
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cbw_and_csw_round_trip() {
+        let cbw = Cbw {
+            tag: 0x1234_5678,
+            data_len: 512,
+            data_in: true,
+            lun: 0,
+            cdb: scsi::read10(7, 1),
+        };
+        let b = cbw.encode();
+        assert_eq!(&b[..4], b"USBC");
+        assert_eq!(u32::from_le_bytes(b[4..8].try_into().unwrap()), 0x1234_5678);
+        assert_eq!(u32::from_le_bytes(b[8..12].try_into().unwrap()), 512);
+        assert_eq!((b[12], b[13], b[14]), (0x80, 0, 10));
+        assert_eq!(&b[15..25], &[0x28, 0, 0, 0, 0, 7, 0, 0, 1, 0]);
+        let mut csw = [0u8; 13];
+        csw[..4].copy_from_slice(b"USBS");
+        csw[4..8].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+        csw[8..12].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(
+            Csw::parse(&csw),
+            Some(Csw {
+                tag: 0x1234_5678,
+                residue: 0,
+                status: CswStatus::Passed
+            })
+        );
+        csw[12] = 1;
+        assert_eq!(Csw::parse(&csw).unwrap().status, CswStatus::Failed);
+        csw[12] = 2;
+        assert_eq!(Csw::parse(&csw).unwrap().status, CswStatus::PhaseError);
+        csw[12] = 3;
+        assert!(Csw::parse(&csw).is_none());
+        csw[0] = b'X';
+        assert!(Csw::parse(&csw).is_none());
+        assert!(Csw::parse(&csw[..12]).is_none());
+    }
+
+    #[test]
+    fn scsi_cdbs_and_replies() {
+        assert_eq!(scsi::test_unit_ready().len, 6);
+        assert_eq!(scsi::inquiry().bytes[4], 36);
+        assert_eq!(scsi::request_sense().bytes[4], 18);
+        let w = scsi::write10(0x0102_0304, 16);
+        assert_eq!(&w.bytes[..10], &[0x2A, 0, 1, 2, 3, 4, 0, 0, 16, 0]);
+        assert_eq!(scsi::synchronize_cache10().bytes[0], 0x35);
+        assert_eq!(scsi::read_capacity10().len, 10);
+
+        let mut inq = [0u8; 36];
+        inq[0] = 0x00;
+        inq[1] = 0x80;
+        inq[8..16].copy_from_slice(b"AriCode ");
+        inq[16..32].copy_from_slice(b"Pendrive        ");
+        let i = scsi::Inquiry::parse(&inq).unwrap();
+        assert_eq!((i.peripheral_type, i.removable), (0, true));
+        assert_eq!(&i.vendor, b"AriCode ");
+        assert!(scsi::Inquiry::parse(&inq[..35]).is_none());
+
+        let cap = [0, 0, 0x20, 0x00, 0, 0, 2, 0];
+        assert_eq!(scsi::parse_read_capacity10(&cap), Some((0x2000, 512)));
+        assert!(scsi::parse_read_capacity10(&[0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 2, 0]).is_none());
+        assert!(scsi::parse_read_capacity10(&[0, 0, 0x20, 0, 0, 0, 0, 0]).is_none());
+
+        let mut sense = [0u8; 18];
+        sense[0] = 0x70;
+        sense[2] = 6;
+        sense[12] = 0x29;
+        let s = scsi::Sense::parse(&sense).unwrap();
+        assert_eq!(
+            (s.key, s.asc, s.ascq),
+            (scsi::Sense::UNIT_ATTENTION, 0x29, 0)
+        );
+        sense[0] = 0x00;
+        assert!(scsi::Sense::parse(&sense).is_none());
+    }
+}

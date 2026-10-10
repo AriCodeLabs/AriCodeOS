@@ -18,6 +18,9 @@ pub struct UsbOptions {
     pub hid_msi: bool,
     /// Además un EHCI (clase 0c.03, interfaz 0x20): no es xHCI.
     pub legacy_controller: bool,
+    /// El disco de pruebas cuelga del xHCI como almacenamiento USB
+    /// (`usb-storage`) en vez de virtio-blk (ADR 0023).
+    pub storage: bool,
 }
 
 fn base_command(
@@ -44,7 +47,8 @@ fn base_command(
     // IOMMU VT-d (Fase 33) antes que cualquier dispositivo PCI; los virtio
     // llevan `iommu_platform=on` para que su DMA pase por la traduccion.
     q.args(["-device", "intel-iommu,aw-bits=48"]);
-    // Disco virtio-blk moderno (sin interfaz legacy) para el driver de usuario.
+    // Disco de pruebas: virtio-blk moderno (sin interfaz legacy) para el
+    // driver de usuario o, con `usb.storage`, un pendrive en el xHCI.
     q.args([
         "-drive",
         &format!(
@@ -53,10 +57,12 @@ fn base_command(
             if disk_readonly { ",readonly=on" } else { "" }
         ),
     ]);
-    q.args([
-        "-device",
-        "virtio-blk-pci,drive=disk0,disable-legacy=on,disable-modern=off,iommu_platform=on",
-    ]);
+    if !usb.storage {
+        q.args([
+            "-device",
+            "virtio-blk-pci,drive=disk0,disable-legacy=on,disable-modern=off,iommu_platform=on",
+        ]);
+    }
     q.args([
         "-drive",
         &format!("if=pflash,format=raw,readonly=on,file={OVMF_CODE}"),
@@ -95,16 +101,22 @@ fn base_command(
         "-device",
         "virtio-mouse-pci,id=mouse0,disable-legacy=on,disable-modern=off,iommu_platform=on",
     ]);
-    if usb.hid {
-        // xHCI con teclado y raton USB HID (Fase 25, segunda parte).
+    if usb.hid || usb.storage {
+        // xHCI (Fase 25, segunda parte) con teclado y raton USB HID y/o el
+        // disco de pruebas como almacenamiento USB.
         let xhci = if usb.hid_msi {
             "qemu-xhci,id=xhci,msi=on,msix=off"
         } else {
             "qemu-xhci,id=xhci"
         };
         q.args(["-device", xhci]);
-        q.args(["-device", "usb-kbd,bus=xhci.0"]);
-        q.args(["-device", "usb-mouse,bus=xhci.0"]);
+        if usb.hid {
+            q.args(["-device", "usb-kbd,bus=xhci.0"]);
+            q.args(["-device", "usb-mouse,bus=xhci.0"]);
+        }
+        if usb.storage {
+            q.args(["-device", "usb-storage,bus=xhci.0,drive=disk0"]);
+        }
     }
     if usb.legacy_controller {
         // EHCI (clase 0c.03, interfaz 0x20): no es xHCI.

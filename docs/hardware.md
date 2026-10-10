@@ -43,7 +43,9 @@ y `ARIBOOT` (estado A/B). Es la misma imagen que arranca el escenario
    la tercera, limpia la pantalla e informa de CPU, memoria, ACPI, APIC, SMP,
    PCI e IOMMU y lanza init.
 3. Con `shell` en la cmdline aparece `ari> `. Comandos útiles: `cpus`,
-   `mem`, `devices`, `ps`, `uptime`, `reboot`, `shutdown`.
+   `mem`, `devices`, `ps`, `uptime`, `ls`, `cat`, `write`, `reboot`,
+   `shutdown`. El sistema de ficheros es la partición ARI0 del propio
+   pendrive, servida por usbd (ADR 0023).
 
 ## Estado en el portátil de pruebas (2026-10-10)
 
@@ -54,10 +56,10 @@ sin exclusividad y tipos de memoria estándar, ADR 0021). El equipo: Intel de
 
 | Funciona | Falta |
 |---|---|
-| AriBoot: slots, GOP 800x600, kernel e initrd verificados | Driver de bloques para el pendrive (USB o AHCI): sin él no hay fsd, no se confirma el arranque y el shell no se lanza |
+| AriBoot: slots, GOP 800x600, kernel e initrd verificados | Por comprobar: el pendrive como servicio de bloques por USB (ADR 0023), fsd, confirmación del slot y shell por el teclado PS/2 |
 | Kernel: memoria, ACPI, APIC, PCI (17 funciones), init y sus pruebas, `ARICODEOS_KERNEL_READY` | EHCI sin driver (solo xHCI) |
 | Teclado PS/2 en la consola del kernel | Red: sin driver para la Realtek |
-| xHCI con MSI (ADR 0022; el controlador no tiene MSI-X) | |
+| xHCI con MSI (ADR 0022; el controlador no tiene MSI-X), 8 puertos, 16 scratchpads, servicio de entrada ok | Por comprobar: enrutado de los puertos al xHCI (en estos Intel nacen en los EHCI) y almacenamiento USB (ADR 0023) |
 
 ## Si algo falla
 
@@ -77,6 +79,9 @@ cualquier sistema) o regenerando la imagen con `--cmdline`:
 | No hay teclado | comprobar que el firmware expone el i8042 (algunos lo desactivan con "USB legacy"); la traza `console: teclado PS/2` debe aparecer |
 | "usb-input: sin BAR 0 o sin IRQ entre las capabilities" | La función no tiene MSI ni MSI-X (la traza `pci: … reclamado (…)` lo dice); INTx no está soportado |
 | "usb-input: fallo en la inicializacion del xHCI: …" | El paso que falló: capabilities, memoria DMA (el buffer se dimensiona con los scratchpads que pide el controlador), reset o arranque |
+| "usb-input: sin almacenamiento USB" con el pendrive conectado | El pendrive no está en el xHCI: comprobar la traza `puertos Intel enrutados al xHCI`; si no aparece, el puerto cuelga de un EHCI sin driver (probar otro puerto, los azules suelen ser xHCI) |
+| "usb-input: puerto N: …" con un error de INQUIRY, TEST UNIT READY o READ CAPACITY | El pendrive no responde al protocolo bulk-only; anotar la línea |
+| "AriInit: sin particion ARI0 en el disco" | El pendrive no lleva la imagen de `cargo xtask usb-image` (o se grabó otra cosa encima) |
 
 Anotar (o fotografiar) las últimas líneas antes del fallo: `EXCEPTION`,
 `KERNEL PANIC` y `iommu: fallo DMA` llevan la información necesaria.

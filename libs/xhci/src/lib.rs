@@ -151,6 +151,8 @@ pub mod trb_type {
     pub const ADDRESS_DEVICE: u32 = 11;
     pub const CONFIGURE_ENDPOINT: u32 = 12;
     pub const EVALUATE_CONTEXT: u32 = 13;
+    pub const RESET_ENDPOINT: u32 = 14;
+    pub const SET_TR_DEQUEUE: u32 = 16;
     pub const NOOP_COMMAND: u32 = 23;
     pub const TRANSFER_EVENT: u32 = 32;
     pub const COMMAND_COMPLETION: u32 = 33;
@@ -160,6 +162,8 @@ pub mod trb_type {
 /// Códigos de terminación de los eventos.
 pub mod completion {
     pub const SUCCESS: u8 = 1;
+    /// El endpoint respondió STALL (queda parado hasta Reset Endpoint).
+    pub const STALL: u8 = 6;
     pub const SHORT_PACKET: u8 = 13;
 }
 
@@ -167,6 +171,8 @@ pub const TRB_CYCLE: u32 = 1 << 0;
 const TRB_TOGGLE_CYCLE: u32 = 1 << 1;
 /// Interrupt on Short Packet.
 const TRB_ISP: u32 = 1 << 2;
+/// Chain: el TRB siguiente pertenece al mismo TD.
+const TRB_CHAIN: u32 = 1 << 4;
 /// Interrupt on Completion.
 const TRB_IOC: u32 = 1 << 5;
 /// Immediate Data (el parámetro es el dato, no un puntero).
@@ -241,6 +247,20 @@ impl Trb {
         t.control |= (slot as u32) << 24;
         t
     }
+    /// Reset Endpoint: saca al endpoint `dci` del estado parado (tras STALL).
+    pub fn reset_endpoint(slot: u8, dci: u8) -> Self {
+        let mut t = Self::with_type(trb_type::RESET_ENDPOINT);
+        t.control |= (dci as u32) << 16 | (slot as u32) << 24;
+        t
+    }
+    /// Set TR Dequeue Pointer: el controlador sigue el anillo de `dci` desde
+    /// `pointer` (dirección del TRB con el bit de ciclo del productor).
+    pub fn set_tr_dequeue(slot: u8, dci: u8, pointer: u64, cycle: bool) -> Self {
+        let mut t = Self::with_type(trb_type::SET_TR_DEQUEUE);
+        t.parameter = (pointer & !0xF) | cycle as u64;
+        t.control |= (dci as u32) << 16 | (slot as u32) << 24;
+        t
+    }
     /// Setup Stage con los 8 bytes del paquete SETUP como dato inmediato.
     /// `TRT`: 0 sin datos, 2 datos OUT, 3 datos IN.
     pub fn setup_stage(setup: &SetupPacket) -> Self {
@@ -279,10 +299,16 @@ impl Trb {
     /// Transferencia normal (endpoint de interrupción) con aviso al terminar,
     /// también si el paquete es corto.
     pub fn normal(buffer_phys: u64, len: u32) -> Self {
+        Self::normal_part(buffer_phys, len, 0, false)
+    }
+
+    /// Un TRB de un TD de varios: `td_size` = paquetes que quedan tras este
+    /// TRB (acotado a 31), `chain` si no es el último. Solo el último avisa.
+    pub fn normal_part(buffer_phys: u64, len: u32, td_size: u32, chain: bool) -> Self {
         let mut t = Self::with_type(trb_type::NORMAL);
         t.parameter = buffer_phys;
-        t.status = len;
-        t.control |= TRB_IOC | TRB_ISP;
+        t.status = len | td_size.min(31) << 17;
+        t.control |= if chain { TRB_CHAIN } else { TRB_IOC | TRB_ISP };
         t
     }
 
@@ -423,9 +449,44 @@ pub fn erst_entry(segment_phys: u64, trbs: u16) -> [u8; 16] {
 
 /// Tipos de endpoint del contexto (bits 5:3 de la palabra 1).
 pub mod ep_type {
-    pub const CONTROL: u32 = 4;
+    pub const BULK_OUT: u32 = 2;
     pub const INTERRUPT_OUT: u32 = 3;
+    pub const CONTROL: u32 = 4;
+    pub const BULK_IN: u32 = 6;
     pub const INTERRUPT_IN: u32 = 7;
+}
+
+/// Un TD de transferencia masiva como TRBs normales: ninguno cruza un límite
+/// de 64 KiB (xHCI 4.11.7), los no finales encadenan con el tamaño de TD
+/// (paquetes pendientes) y solo el último avisa. Devuelve cuántos TRBs hay;
+/// `None` si no caben en `out`.
+pub fn bulk_trbs(buffer_phys: u64, len: u32, max_packet: u16, out: &mut [Trb]) -> Option<usize> {
+    const BOUNDARY: u64 = 64 * 1024;
+    let max_packet = max_packet.max(1) as u64;
+    let mut parts: [(u64, u32); 8] = [(0, 0); 8];
+    let mut n = 0;
+    let (mut phys, mut left) = (buffer_phys, len as u64);
+    while left > 0 {
+        let to_boundary = BOUNDARY - (phys % BOUNDARY);
+        let chunk = left.min(to_boundary);
+        if n == parts.len() {
+            return None;
+        }
+        parts[n] = (phys, chunk as u32);
+        n += 1;
+        phys += chunk;
+        left -= chunk;
+    }
+    if n == 0 || n > out.len() {
+        return None;
+    }
+    let mut sent = 0u64;
+    for (i, &(p, l)) in parts[..n].iter().enumerate() {
+        sent += l as u64;
+        let remaining_packets = (len as u64 - sent).div_ceil(max_packet) as u32;
+        out[i] = Trb::normal_part(p, l, remaining_packets, i + 1 < n);
+    }
+    Some(n)
 }
 
 /// Índice de contexto de dispositivo (DCI) de un endpoint USB.
@@ -483,6 +544,24 @@ impl EndpointContext {
             ring_phys,
             ring_cycle: true,
             average_trb_len: 8,
+            max_esit_payload: 0,
+        }
+    }
+
+    /// Endpoint masivo (bulk) IN u OUT.
+    pub fn bulk(max_packet_size: u16, ring_phys: u64, device_to_host: bool) -> Self {
+        Self {
+            ep_type: if device_to_host {
+                ep_type::BULK_IN
+            } else {
+                ep_type::BULK_OUT
+            },
+            max_packet_size,
+            interval: 0,
+            error_count: 3,
+            ring_phys,
+            ring_cycle: true,
+            average_trb_len: max_packet_size,
             max_esit_payload: 0,
         }
     }
@@ -571,6 +650,7 @@ pub struct SetupPacket {
 }
 
 pub mod request {
+    pub const CLEAR_FEATURE: u8 = 1;
     pub const GET_DESCRIPTOR: u8 = 6;
     pub const SET_CONFIGURATION: u8 = 9;
     /// Clase HID: protocolo de arranque (0) o de informe (1).
@@ -592,6 +672,17 @@ impl SetupPacket {
             value: (kind as u16) << 8 | index as u16,
             index: 0,
             length,
+        }
+    }
+    /// `CLEAR_FEATURE(ENDPOINT_HALT)` sobre el endpoint `address` (bit 7 =
+    /// IN), tras un STALL en una transferencia masiva.
+    pub fn clear_endpoint_halt(address: u8) -> Self {
+        Self {
+            request_type: 0x02,
+            request: request::CLEAR_FEATURE,
+            value: 0,
+            index: address as u16,
+            length: 0,
         }
     }
     pub fn set_configuration(value: u8) -> Self {
@@ -671,6 +762,70 @@ pub struct HidInterface {
     pub endpoint: u8,
     pub max_packet_size: u16,
     pub b_interval: u8,
+}
+
+/// Interfaz de almacenamiento masivo (clase 8, subclase 6 SCSI transparente,
+/// protocolo 0x50 bulk-only) con sus endpoints masivos.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageInterface {
+    pub interface: u8,
+    pub bulk_in: u8,
+    pub bulk_out: u8,
+    pub max_packet_in: u16,
+    pub max_packet_out: u16,
+}
+
+/// Primera interfaz de almacenamiento bulk-only de un descriptor de
+/// configuración completo, con el valor de configuración.
+pub fn parse_storage_interface(d: &[u8]) -> Option<(u8, StorageInterface)> {
+    if d.len() < 9 || d[1] != request::DESC_CONFIGURATION {
+        return None;
+    }
+    let total = (u16::from_le_bytes([d[2], d[3]]) as usize).min(d.len());
+    let config_value = d[5];
+    let mut off = 0;
+    let mut current: Option<StorageInterface> = None;
+    while off + 2 <= total {
+        let len = d[off] as usize;
+        if len < 2 || off + len > total {
+            break;
+        }
+        let e = &d[off..off + len];
+        match e[1] {
+            4 if len >= 9 => {
+                if let Some(i) = current.filter(|i| i.bulk_in != 0 && i.bulk_out != 0) {
+                    return Some((config_value, i));
+                }
+                current = (e[5] == 8 && e[6] == 6 && e[7] == 0x50).then_some(StorageInterface {
+                    interface: e[2],
+                    bulk_in: 0,
+                    bulk_out: 0,
+                    max_packet_in: 0,
+                    max_packet_out: 0,
+                });
+            }
+            5 if len >= 7 => {
+                if let Some(i) = current.as_mut() {
+                    let addr = e[2];
+                    let max_packet = u16::from_le_bytes([e[4], e[5]]) & 0x7FF;
+                    if e[3] & 0x3 == 2 {
+                        if addr & 0x80 != 0 && i.bulk_in == 0 {
+                            i.bulk_in = addr & 0xF;
+                            i.max_packet_in = max_packet;
+                        } else if addr & 0x80 == 0 && i.bulk_out == 0 {
+                            i.bulk_out = addr & 0xF;
+                            i.max_packet_out = max_packet;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        off += len;
+    }
+    current
+        .filter(|i| i.bulk_in != 0 && i.bulk_out != 0)
+        .map(|i| (config_value, i))
 }
 
 /// Recorre un descriptor de configuración completo y devuelve su valor de
@@ -994,6 +1149,78 @@ mod tests {
         assert!(parse_configuration(&cfg[..8], &mut out).is_none());
         let setup = SetupPacket::hid_set_protocol(1, 0).to_bytes();
         assert_eq!(setup, [0x21, 0x0B, 0, 0, 1, 0, 0, 0]);
+        // Sin interfaz de almacenamiento.
+        assert!(parse_storage_interface(&cfg).is_none());
+    }
+
+    #[test]
+    fn storage_interface_and_bulk_endpoints() {
+        // Pendrive: interfaz 0 de clase 8/6/0x50 con bulk IN 0x81 (512) y
+        // bulk OUT 0x02 (512), precedida de una interfaz de otra clase.
+        let mut cfg = Vec::new();
+        cfg.extend_from_slice(&[9, 2, 0, 0, 2, 1, 0, 0x80, 50]);
+        cfg.extend_from_slice(&[9, 4, 0, 0, 1, 0xFF, 0, 0, 0]);
+        cfg.extend_from_slice(&[7, 5, 0x83, 3, 8, 0, 7]);
+        cfg.extend_from_slice(&[9, 4, 1, 0, 2, 8, 6, 0x50, 0]);
+        cfg.extend_from_slice(&[7, 5, 0x81, 2, 0, 2, 0]);
+        cfg.extend_from_slice(&[7, 5, 0x02, 2, 0, 2, 0]);
+        let total = cfg.len() as u16;
+        cfg[2..4].copy_from_slice(&total.to_le_bytes());
+        assert_eq!(
+            parse_storage_interface(&cfg),
+            Some((
+                1,
+                StorageInterface {
+                    interface: 1,
+                    bulk_in: 1,
+                    bulk_out: 2,
+                    max_packet_in: 512,
+                    max_packet_out: 512,
+                }
+            ))
+        );
+        let ctx = EndpointContext::bulk(512, 0x1000, true).to_words();
+        assert_eq!((ctx[1] >> 3) & 7, ep_type::BULK_IN);
+        assert_eq!(
+            (EndpointContext::bulk(512, 0x1000, false).to_words()[1] >> 3) & 7,
+            ep_type::BULK_OUT
+        );
+        assert_eq!(
+            SetupPacket::clear_endpoint_halt(0x81).to_bytes(),
+            [0x02, 1, 0, 0, 0x81, 0, 0, 0]
+        );
+        let t = Trb::reset_endpoint(3, 2);
+        assert_eq!((t.trb_type(), t.slot_id(), t.endpoint_id()), (14, 3, 2));
+        let t = Trb::set_tr_dequeue(3, 2, 0x2340, true);
+        assert_eq!((t.trb_type(), t.parameter), (16, 0x2341));
+    }
+
+    #[test]
+    fn bulk_td_never_crosses_64k() {
+        let mut out = [Trb::noop_command(); 4];
+        // 8 KiB que cruzan un límite de 64 KiB: dos TRBs, el primero encadenado
+        // con los paquetes (512 B) que quedan, el último con IOC.
+        let n = bulk_trbs(0x1_F000, 8192, 512, &mut out).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(
+            (out[0].parameter, out[0].status & 0x1FFFF),
+            (0x1_F000, 4096)
+        );
+        assert_eq!((out[0].status >> 17) & 0x1F, 8);
+        assert_ne!(out[0].control & TRB_CHAIN, 0);
+        assert_eq!(out[0].control & TRB_IOC, 0);
+        assert_eq!(
+            (out[1].parameter, out[1].status & 0x1FFFF),
+            (0x2_0000, 4096)
+        );
+        assert_eq!((out[1].status >> 17) & 0x1F, 0);
+        assert_eq!(out[1].control & TRB_CHAIN, 0);
+        assert_ne!(out[1].control & TRB_IOC, 0);
+        // Sin cruce: un solo TRB con IOC.
+        assert_eq!(bulk_trbs(0x1000, 31, 512, &mut out), Some(1));
+        assert_ne!(out[0].control & TRB_IOC, 0);
+        assert_eq!(bulk_trbs(0x1000, 0, 512, &mut out), None);
+        assert_eq!(bulk_trbs(0x1_F000, 8192, 512, &mut out[..1]), None);
     }
 
     extern crate std;
