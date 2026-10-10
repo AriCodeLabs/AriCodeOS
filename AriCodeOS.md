@@ -3668,8 +3668,12 @@ cargador, y el kernel vuelve a reservar lo suyo al recuperar la memoria de
 arranque. Con eso, cuarta foto: **primer arranque completo de AriCodeOS en
 hardware real** (kernel, PCI, init y `ARICODEOS_KERNEL_READY`). El xHCI del
 equipo solo tiene MSI: ADR 0022 añade MSI a `pci_claim` (escenario
-`shell.usb_keyboard_msi`). Pendiente para tener shell en el portátil: un
-driver de bloques para el pendrive.
+`shell.usb_keyboard_msi`). Sexta foto: xHCI listo pero sin dispositivos
+(los puertos de estos Intel nacen en los EHCI). ADR 0023: usbd enruta los
+puertos al xHCI, pide la cesión al firmware y sirve el pendrive como
+servicio de bloques (bulk-only, SCSI); sin virtio-blk, init monta fsd y el
+shell sobre él (escenario `usb.storage`, con escritura que sobrevive a un
+reinicio).
 
 Siguiente: repetir la prueba física con la imagen corregida y, con el
 equipo de referencia, energía (estados de reposo, batería) y más dispositivos.

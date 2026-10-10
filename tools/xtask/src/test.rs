@@ -204,6 +204,7 @@ fn run_scenario(
                 hid: s.usb_hid,
                 hid_msi: s.usb_hid_msi,
                 legacy_controller: s.usb_legacy_controller,
+                storage: s.usb_storage,
             },
         };
         let cap = qemu::run_headless(

@@ -148,6 +148,10 @@ pub struct Scenario {
     /// controladores Intel de 2012: el kernel debe programar la capability MSI.
     #[serde(default)]
     pub usb_hid_msi: bool,
+    /// El disco de pruebas va por USB (`usb-storage` en el xHCI) y no hay
+    /// virtio-blk: usbd lo sirve como servicio de bloques (ADR 0023).
+    #[serde(default)]
+    pub usb_storage: bool,
     /// Añade además un controlador USB anterior a xHCI (EHCI): init no debe
     /// entregárselo al driver xHCI ni bloquearse por él.
     #[serde(default)]

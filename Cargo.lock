@@ -136,6 +136,7 @@ dependencies = [
  "aricode-proto",
  "aricode-rt",
  "aricode-sys",
+ "aricode-usb-storage",
  "aricode-xhci",
 ]
 
@@ -331,6 +332,10 @@ dependencies = [
  "aricode-proto",
  "aricode-virtio",
 ]
+
+[[package]]
+name = "aricode-usb-storage"
+version = "0.8.1"
 
 [[package]]
 name = "aricode-virtio"

@@ -299,6 +299,68 @@ fn confirm_boot_slot(arg: u64, block_service: Handle) {
     }
 }
 
+/// Sobre un servicio de bloques ya en marcha: fsd en la partición ARI0
+/// (por nombre en la GPT: el disco de pruebas y la imagen USB la colocan en
+/// LBA distintos), su cliente de prueba y el cliente de bloques. Devuelve el
+/// endpoint de fsd o el código de salida de init.
+fn start_storage_stack(sup: &mut Supervisor, service: Handle) -> Result<Handle, u64> {
+    let mut buf = [0u8; 20];
+    let Ok(fs_ep) = sys::endpoint_create() else {
+        return Err(12);
+    };
+    let ari0 = BlockClient::new(service, HARDWARE, 16)
+        .ok()
+        .and_then(|mut blk| find_partition(&mut blk, "ARI0"));
+    let Some((ari0_lba, _)) = ari0 else {
+        say(b"sin particion ARI0 en el disco");
+        return Err(12);
+    };
+    let launched = sup
+        .register(
+            "fsd",
+            Kind::Fs {
+                block_service: service,
+                partition_lba: ari0_lba,
+            },
+            Probe::None,
+            fs_ep,
+            false,
+            Policy::DRIVER,
+        )
+        .is_some_and(|i| sup.launch(i));
+    if !launched {
+        say(b"fsd no arranco");
+        return Err(13);
+    }
+    match run_block_client("fs_client", fs_ep, 0) {
+        Ok(0) => say(b"servicio de ficheros ok"),
+        Ok(code) => {
+            sys::print(b"AriInit: fs_client salio con ");
+            sys::print(aricode_rt::fmt_u64(code, &mut buf));
+            sys::print(b"\n");
+            return Err(14);
+        }
+        Err(e) => {
+            aricode_rt::print_error(b"AriInit: fs_client", e);
+            return Err(14);
+        }
+    }
+    match run_block_client("blk_client", service, ari0_lba + RAW_AREA_OFFSET) {
+        Ok(0) => say(b"servicio de bloques ok"),
+        Ok(code) => {
+            sys::print(b"AriInit: blk_client salio con ");
+            sys::print(aricode_rt::fmt_u64(code, &mut buf));
+            sys::print(b"\n");
+            return Err(11);
+        }
+        Err(e) => {
+            aricode_rt::print_error(b"AriInit: blk_client", e);
+            return Err(11);
+        }
+    }
+    Ok(fs_ep)
+}
+
 /// Lanza fsd con su endpoint (READ|WRITE), el del servicio de bloques (WRITE)
 /// y una capacidad de hardware; `arg` = LBA de la partición.
 fn start_fsd(
@@ -318,8 +380,13 @@ fn start_fsd(
 #[derive(Clone, Copy)]
 enum Kind {
     /// Driver PCI con el contrato de `start_driver`; `with_system` añade
-    /// `SYSTEM` (lectura) como extra.
-    Driver { pci_index: u64, with_system: bool },
+    /// `SYSTEM` (lectura) como extra y `block` un endpoint de servicio de
+    /// bloques (ADR 0023: usbd lo sirve si encuentra almacenamiento).
+    Driver {
+        pci_index: u64,
+        with_system: bool,
+        block: Option<Handle>,
+    },
     /// fsd sobre el servicio de bloques.
     Fs {
         block_service: Handle,
@@ -476,19 +543,34 @@ impl Supervisor {
             Kind::Driver {
                 pci_index,
                 with_system,
+                block,
             } => {
-                let system = if with_system {
+                let mut extras = [Handle(0); 2];
+                let mut n = 0;
+                let mut failed = false;
+                if with_system {
                     match sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER) {
-                        Ok(h) => Some(h),
-                        Err(e) => Err(e).ok(),
+                        Ok(h) => {
+                            extras[n] = h;
+                            n += 1;
+                        }
+                        Err(_) => failed = true,
                     }
+                }
+                if let Some(ep) = block {
+                    match sys::handle_duplicate(ep, rights::READ | rights::WRITE | rights::TRANSFER)
+                    {
+                        Ok(h) => {
+                            extras[n] = h;
+                            n += 1;
+                        }
+                        Err(_) => failed = true,
+                    }
+                }
+                if failed {
+                    Err(Error::Limit)
                 } else {
-                    None
-                };
-                match system {
-                    Some(h) => start_driver(r.name, pci_index, r.endpoint, &[h]),
-                    None if with_system => Err(Error::Limit),
-                    None => start_driver(r.name, pci_index, r.endpoint, &[]),
+                    start_driver(r.name, pci_index, r.endpoint, &extras[..n])
                 }
             }
             Kind::Fs {
@@ -1525,6 +1607,7 @@ fn main(arg: u64) -> u64 {
                     Kind::Driver {
                         pci_index: index,
                         with_system: false,
+                        block: None,
                     },
                     Probe::None,
                     service,
@@ -1537,65 +1620,12 @@ fn main(arg: u64) -> u64 {
             }
             services |= SERVICE_BLOCK;
             block_service = Some(service);
-            // Servicio de ficheros sobre la particion ARI0 (por nombre en la
-            // GPT: el disco de pruebas y la imagen USB la colocan en LBA
-            // distintos) y su cliente.
-            let Ok(fs_ep) = sys::endpoint_create() else {
-                return 12;
-            };
-            let ari0 = BlockClient::new(service, HARDWARE, 16)
-                .ok()
-                .and_then(|mut blk| find_partition(&mut blk, "ARI0"));
-            let Some((ari0_lba, _)) = ari0 else {
-                say(b"sin particion ARI0 en el disco");
-                return 12;
-            };
-            let launched = sup
-                .register(
-                    "fsd",
-                    Kind::Fs {
-                        block_service: service,
-                        partition_lba: ari0_lba,
-                    },
-                    Probe::None,
-                    fs_ep,
-                    false,
-                    Policy::DRIVER,
-                )
-                .is_some_and(|i| sup.launch(i));
-            if !launched {
-                say(b"fsd no arranco");
-                return 13;
-            }
-            services |= SERVICE_FS;
-            match run_block_client("fs_client", fs_ep, 0) {
-                Ok(0) => {
-                    say(b"servicio de ficheros ok");
+            match start_storage_stack(&mut sup, service) {
+                Ok(fs_ep) => {
+                    services |= SERVICE_FS;
                     fs_service = Some(fs_ep);
                 }
-                Ok(code) => {
-                    sys::print(b"AriInit: fs_client salio con ");
-                    sys::print(aricode_rt::fmt_u64(code, &mut buf));
-                    sys::print(b"\n");
-                    return 14;
-                }
-                Err(e) => {
-                    aricode_rt::print_error(b"AriInit: fs_client", e);
-                    return 14;
-                }
-            }
-            match run_block_client("blk_client", service, ari0_lba + RAW_AREA_OFFSET) {
-                Ok(0) => say(b"servicio de bloques ok"),
-                Ok(code) => {
-                    sys::print(b"AriInit: blk_client salio con ");
-                    sys::print(aricode_rt::fmt_u64(code, &mut buf));
-                    sys::print(b"\n");
-                    return 11;
-                }
-                Err(e) => {
-                    aricode_rt::print_error(b"AriInit: blk_client", e);
-                    return 11;
-                }
+                Err(code) => return code,
             }
         }
         None => say(b"sin virtio-blk"),
@@ -1612,6 +1642,7 @@ fn main(arg: u64) -> u64 {
                     Kind::Driver {
                         pci_index: index,
                         with_system: true,
+                        block: None,
                     },
                     Probe::None,
                     net_service,
@@ -1684,6 +1715,7 @@ fn main(arg: u64) -> u64 {
                 Kind::Driver {
                     pci_index: index,
                     with_system: true,
+                    block: None,
                 },
                 Probe::Input,
                 ep,
@@ -1701,6 +1733,7 @@ fn main(arg: u64) -> u64 {
     // Controladores USB (clase 0c.03): solo los xHCI (interfaz 0x30) tienen
     // driver; usbd enumera teclados y ratones HID y los sirve como un unico
     // dispositivo de entrada, que se publica cuando responde.
+    let mut usb_block: Option<Handle> = None;
     let mut next = 0;
     while let Some(index) = find_pci_class_from(0x0C, 0x03, next) {
         next = index + 1;
@@ -1722,12 +1755,20 @@ fn main(arg: u64) -> u64 {
         let Ok(ep) = sys::endpoint_create() else {
             return 21;
         };
+        // Cada xHCI recibe ademas un endpoint de bloques, que sirve si
+        // encuentra almacenamiento USB (ADR 0023); el primero es el que
+        // init usa si no hay virtio-blk.
+        let Ok(block_ep) = sys::endpoint_create() else {
+            return 21;
+        };
+        let block = Some(block_ep);
         let launched = sup
             .register(
                 "usb_input",
                 Kind::Driver {
                     pci_index: index,
                     with_system: true,
+                    block,
                 },
                 Probe::Input,
                 ep,
@@ -1739,6 +1780,9 @@ fn main(arg: u64) -> u64 {
             say(b"entrada usb_input lista");
             input_eps[inputs] = ep;
             inputs += 1;
+            if usb_block.is_none() {
+                usb_block = block;
+            }
         } else {
             say(b"usb_input no llego a servir; se descarta");
         }
@@ -1774,6 +1818,29 @@ fn main(arg: u64) -> u64 {
         }
     } else {
         say(b"sin dispositivos de entrada");
+    }
+    // 9b. Sin virtio-blk: el almacenamiento USB, si usbd lo encontro, es el
+    //     servicio de bloques y sobre el va fsd (ADR 0023).
+    if block_service.is_none() {
+        if let Some(ep) = usb_block {
+            match BlockClient::new(ep, HARDWARE, 1).and_then(|b| b.capacity()) {
+                Ok(capacity) if capacity > 0 => {
+                    sys::print(b"AriInit: servicio de bloques por USB (");
+                    sys::print(aricode_rt::fmt_u64(capacity, &mut buf));
+                    sys::print(b" sectores)\n");
+                    services |= SERVICE_BLOCK;
+                    block_service = Some(ep);
+                    match start_storage_stack(&mut sup, ep) {
+                        Ok(fs_ep) => {
+                            services |= SERVICE_FS;
+                            fs_service = Some(fs_ep);
+                        }
+                        Err(code) => return code,
+                    }
+                }
+                _ => say(b"sin almacenamiento USB"),
+            }
+        }
     }
     // 10. Interfaz grafica: compositor con el framebuffer y las entradas, y dos
     //     aplicaciones que dibujan a la vez.
