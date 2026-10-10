@@ -168,7 +168,14 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
         arch::x86_64::smp::start_aps(info);
     }
     random::init();
-    console_input::init();
+    let layout = match cmdline.get(keys::KBD) {
+        None => aricode_input::Layout::Us,
+        Some(name) => aricode_input::Layout::parse(name).unwrap_or_else(|| {
+            warn!("cmdline: kbd={name} desconocido, se usa us");
+            aricode_input::Layout::Us
+        }),
+    };
+    console_input::init(layout);
     initrd::init(info);
     pci::init();
     if cmdline.get(keys::IOMMU) == Some("off") {

@@ -163,6 +163,11 @@ y `page_tables_base/size` qué tablas recupera al activar las suyas.
   parpadea con la consola quieta (sin escrituras desde el parpadeo
   anterior); cualquier escritura lo oculta antes de pintar, así que las
   celdas nunca contienen el cursor.
+- Disposiciones: `aricode_input::Layout` (`Us`, `Es`; la española con
+  `AltGr` para `@ # [ ] { } \ | ~` y sin las teclas no ASCII). `kbd=es` en
+  la cmdline la aplica al teclado PS/2 del kernel (escenario
+  `console.ps2_es`, con combinaciones `shift+dot` por QMP); el puente de
+  consola y el compositor siguen en US.
 - Las teclas de edición (flechas, inicio, fin, suprimir) llegan a la consola
   como las secuencias de escape de un terminal serie (`ESC [ A`…, `ESC [ 3 ~`),
   vengan del teclado PS/2 del kernel, del puente de consola o del compositor:

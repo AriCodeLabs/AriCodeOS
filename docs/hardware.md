@@ -21,6 +21,7 @@ interno no se toca**; AriCodeOS arranca y escribe solo en su pendrive.
 
 ```bash
 cargo xtask usb-image                       # build/aricodeos-usb.img, cmdline "shell"
+cargo xtask usb-image --cmdline "shell kbd=es"   # teclado español (`:` en mayúscula+punto, `@` con AltGr)
 cargo xtask usb-image --cmdline "shell log=debug"
 lsblk                                       # identificar el pendrive (p. ej. /dev/sdX), NUNCA el disco interno
 sudo dd if=build/aricodeos-usb.img of=/dev/sdX bs=4M conv=fsync status=progress
@@ -96,6 +97,7 @@ cualquier sistema) o regenerando la imagen con `--cmdline`:
 | Pantalla negra o dispositivos que no responden tras "iommu:" | `iommu=off` |
 | Demasiada salida | `log=warn`; poca: `log=debug` |
 | No hay teclado | comprobar que el firmware expone el i8042 (algunos lo desactivan con "USB legacy"); la traza `console: teclado PS/2` debe aparecer |
+| Mayúscula+punto escribe `>` en vez de `:` | El teclado es español y la consola usa la disposición US: `kbd=es` en la cmdline (`cargo xtask usb-image --cmdline "shell kbd=es"`). Solo afecta al teclado PS/2 del kernel; los USB y virtio siguen en US |
 | "usb-input: sin BAR 0 o sin IRQ entre las capabilities" | La función no tiene MSI ni MSI-X (la traza `pci: … reclamado (…)` lo dice); INTx no está soportado |
 | "usb-input: fallo en la inicializacion del xHCI: …" | El paso que falló: capabilities, memoria DMA (el buffer se dimensiona con los scratchpads que pide el controlador), reset o arranque |
 | "usb-input: sin almacenamiento USB" con el pendrive conectado | El pendrive no está en el xHCI: comprobar la traza `puertos Intel enrutados al xHCI`; si no aparece, el puerto cuelga de un EHCI sin driver (probar otro puerto, los azules suelen ser xHCI) |
