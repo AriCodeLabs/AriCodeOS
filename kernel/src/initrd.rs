@@ -19,8 +19,8 @@ fn digest_prefix(bytes: &[u8]) -> [u8; 4] {
 
 fn bytes_of(info: &BootInfo) -> &'static [u8] {
     let virt = crate::memory::phys::phys_to_virt(info.initrd_address);
-    // SAFETY: AriBoot copió la imagen a memoria de tipo Kernel, que nunca se
-    // libera; el mapa físico está activo.
+    // SAFETY: AriBoot copió la imagen a páginas que el kernel conserva
+    // (`BootInfo::kernel_ranges`); el mapa físico está activo.
     unsafe { core::slice::from_raw_parts(virt as *const u8, info.initrd_size as usize) }
 }
 

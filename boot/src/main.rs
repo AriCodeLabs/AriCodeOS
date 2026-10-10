@@ -9,8 +9,8 @@
 
 extern crate alloc;
 
+mod memmap;
 mod qemu;
-
 mod slots;
 
 use alloc::vec::Vec;
@@ -21,8 +21,8 @@ use aricode_x86_paging::{
     WRITABLE,
 };
 use boot_protocol::{
-    Beacon, BootInfo, FramebufferInfo, MemoryMap, PixelFormat, BOOT_PROTOCOL_MAGIC,
-    BOOT_PROTOCOL_VERSION, KERNEL_VIRT_BASE, MEMORY_TYPE_KERNEL, PHYS_MAP_BASE,
+    Beacon, BootInfo, FramebufferInfo, MemoryMap, MemoryRegionKind, PixelFormat,
+    BOOT_PROTOCOL_MAGIC, BOOT_PROTOCOL_VERSION, KERNEL_VIRT_BASE, PHYS_MAP_BASE,
 };
 use core::ptr::NonNull;
 use log::{error, info, warn};
@@ -34,7 +34,10 @@ use uefi::table::cfg::ConfigTableEntry;
 use uefi::{cstr16, system, CStr16, Status};
 
 const KERNEL_STACK_PAGES: usize = 16; // 64 KiB
-const KERNEL_MEM: MemoryType = MemoryType::custom(MEMORY_TYPE_KERNEL);
+/// Tipo de las páginas reservadas para el kernel. Estándar a propósito (ADR
+/// 0021): con un tipo propio del rango OS loader algunos firmwares se cuelgan
+/// en `GetMemoryMap`. El kernel conserva estas páginas por `kernel_ranges`.
+const KERNEL_MEM: MemoryType = MemoryType::LOADER_DATA;
 
 #[uefi::entry]
 fn main() -> Status {
@@ -173,25 +176,19 @@ fn run(
     // `framebuffer` describe exactamente esa memoria.
     let step =
         |n: u32| unsafe { framebuffer.beacon(framebuffer.address as *mut u8, Beacon::step(n)) };
-    info!("memoria: consultando el mapa UEFI");
-    let snapshot = boot::memory_map(MemoryType::LOADER_DATA).map_err(|_| "memory map")?;
+    let snapshot = memmap::snapshot()?;
     step(0);
-    let meta = snapshot.meta();
-    let mut phys_limit: u64 = 0;
-    let mut regions = 0usize;
-    for d in snapshot.entries() {
-        regions += 1;
-        if matches!(d.ty, MemoryType::RESERVED | MemoryType::UNUSABLE) {
-            continue;
-        }
-        phys_limit = phys_limit.max(d.phys_start + d.page_count * PAGE_SIZE);
-    }
-    phys_limit = phys_limit.max(4 << 30); // al menos 4 GiB (MMIO clásico bajo 4G)
-    phys_limit = phys_limit.next_multiple_of(HUGE_2M);
+    let phys_limit = snapshot
+        .regions()
+        .filter(|d| d.kind() != MemoryRegionKind::Reserved)
+        .map(|d| d.end())
+        .max()
+        .unwrap_or(0)
+        .max(4 << 30) // al menos 4 GiB (MMIO clásico bajo 4G)
+        .next_multiple_of(HUGE_2M);
     info!(
-        "memoria: {regions} regiones UEFI ({} bytes, descriptor de {}), limite fisico {} MiB",
-        meta.map_size,
-        meta.desc_size,
+        "memoria: {} regiones UEFI, limite fisico {} MiB",
+        snapshot.map.descriptor_count,
         phys_limit >> 20
     );
     drop(snapshot);
@@ -271,6 +268,9 @@ fn run(
         kernel_stack_base: stack_base,
         kernel_stack_size: KERNEL_STACK_PAGES as u64 * PAGE_SIZE,
         page_table_root: tables.root_phys(),
+        page_tables_base: pool_mem.as_ptr() as u64,
+        page_tables_size: pool_pages as u64 * PAGE_SIZE,
+        boot_info_address: boot_info_page.as_ptr() as u64,
         initrd_address,
         initrd_size,
         cmdline_address,
@@ -334,9 +334,8 @@ fn alloc_pages(pages: usize, what: &'static str) -> Result<NonNull<u8>, &'static
     })
 }
 
-/// Carga `\aricodeos\initrd.img` (opcional) en páginas de tipo kernel.
 /// Copia el initrd (de la imagen de slot, o de la ESP si no lo hay) a páginas
-/// de tipo kernel.
+/// del kernel.
 fn load_initrd(from_slot: Option<Vec<u8>>) -> Result<(u64, u64), &'static str> {
     let bytes = match from_slot {
         Some(b) => b,
@@ -368,7 +367,7 @@ fn load_initrd(from_slot: Option<Vec<u8>>) -> Result<(u64, u64), &'static str> {
     Ok((dst.as_ptr() as u64, bytes.len() as u64))
 }
 
-/// Copia la cmdline a páginas de tipo kernel. Devuelve (dirección, tamaño).
+/// Copia la cmdline a páginas del kernel. Devuelve (dirección, tamaño).
 fn copy_cmdline(bytes: &[u8]) -> Result<(u64, u64), &'static str> {
     if bytes.is_empty() {
         return Ok((0, 0));

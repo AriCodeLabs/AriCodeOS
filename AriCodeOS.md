@@ -3658,9 +3658,14 @@ grabado con `cargo xtask usb-image`): AriBoot arrancó, verificó el slot A y
 la pantalla se detuvo en la línea de slots. Causa: la apertura exclusiva del
 GOP desconectaba la consola del firmware, así que las trazas siguientes (y
 cualquier fallo posterior) quedaban a ciegas. Corrección en
-`fix/f34-first-boot-visibility`: GOP sin exclusividad, línea `memoria:` con
-las regiones UEFI y balizas de arranque (`Beacon`) que acotan un cuelgue
-entre `ExitBootServices` y la consola del kernel (`docs/hardware.md`).
+`fix/f34-first-boot-visibility`: GOP sin exclusividad, trazas `memoria:` y
+balizas de arranque (`Beacon`) que acotan un cuelgue aunque el firmware deje
+de pintar (`docs/hardware.md`). Con las trazas visibles, la segunda y
+tercera foto sitúan el cuelgue en la primera `GetMemoryMap`, justo después
+de reservar páginas con un tipo de memoria propio: ADR 0021, AriBoot reserva
+solo `LOADER_DATA`, BootInfo v4 lleva `kernel_ranges()` y las tablas del
+cargador, y el kernel vuelve a reservar lo suyo al recuperar la memoria de
+arranque.
 
 Siguiente: repetir la prueba física con la imagen corregida y, con el
 equipo de referencia, energía (estados de reposo, batería) y más dispositivos.

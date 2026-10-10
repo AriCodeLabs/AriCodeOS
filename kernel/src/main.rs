@@ -145,7 +145,7 @@ fn check_boot_stack(info: &BootInfo) {
 
 /// Segunda etapa, ya sobre la pila definitiva y las tablas del kernel.
 extern "C" fn kernel_main(info: *const BootInfo) -> ! {
-    // SAFETY: mismo puntero validado en `kernel_entry`; memoria de tipo Kernel
+    // SAFETY: mismo puntero validado en `kernel_entry`; página conservada
     // accesible por el mapa físico.
     let info = unsafe { &*info };
     let cmdline = CmdLine::new(unsafe { info.cmdline() });
@@ -289,9 +289,7 @@ fn report_kernel(info: &BootInfo) {
 }
 
 fn report_memory(info: &BootInfo) {
-    const NAMES: [&str; 7] = [
-        "free", "kernel", "boot", "firmware", "acpi", "mmio", "reserved",
-    ];
+    const NAMES: [&str; 6] = ["free", "boot", "firmware", "acpi", "mmio", "reserved"];
     let mut totals = [0u64; NAMES.len()];
     let mut count = 0u32;
     // SAFETY: el mapa está en memoria de boot accesible por el mapa físico.

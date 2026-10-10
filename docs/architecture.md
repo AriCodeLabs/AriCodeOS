@@ -9,7 +9,7 @@ Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 OVMF (UEFI)
   -> EFI/BOOT/BOOTX64.EFI            AriBoot        boot/
        GOP, ACPI RSDP, cmdline.txt, kernel.elf, initrd.img, tablas de
-       páginas (identidad + mapa físico lineal + kernel), BootInfo v3,
+       páginas (identidad + mapa físico lineal + kernel), BootInfo v4,
        ExitBootServices, salto
   -> aricodeos/kernel.elf            AriKernel      kernel/
        consola serie + framebuffer (fuente 8x16), logger con niveles,
@@ -37,7 +37,7 @@ OVMF (UEFI)
 ## Crates
 
 ```text
-boot-protocol/       ABI BootInfo (v3): mapa UEFI, framebuffer, RSDP, kernel, pila, PML4, cmdline, mapa físico
+boot-protocol/       ABI BootInfo (v4): mapa UEFI, framebuffer, RSDP, kernel, pila, PML4 y tablas, BootInfo, cmdline, mapa físico, rangos conservados
 libs/elf/            aricode-elf: parser ELF64 mínimo (no_std, tests de host)
 libs/x86-paging/     aricode-x86-paging: tablas de 4 niveles genéricas en FrameAlloc/PhysMap (no_std, tests de host)
 libs/cmdline/        aricode-cmdline: `clave` / `clave=valor` sin alloc (no_std, tests de host)
@@ -119,7 +119,7 @@ Invariantes de seguridad de memoria en el cargador (auditoría 2026-09-26,
 
 ## Contrato AriBoot -> AriKernel
 
-Definido en `boot-protocol/` (`BootInfo`, versión 3, ADR 0009). Al entrar al kernel:
+Definido en `boot-protocol/` (`BootInfo`, versión 4, ADR 0009 y 0021). Al entrar al kernel:
 
 - interrupciones deshabilitadas;
 - CR3 apunta a tablas construidas por AriBoot: identidad con páginas de 2 MiB
@@ -135,8 +135,11 @@ Definido en `boot-protocol/` (`BootInfo`, versión 3, ADR 0009). Al entrar al ke
 - si existía `\aricodeos\cmdline.txt`, su contenido está copiado en memoria
   de kernel y referenciado por `cmdline_address/size`.
 
-Toda la memoria que el kernel debe conservar (imagen, pila, tablas, BootInfo)
-está marcada en el mapa UEFI con el tipo `0x8000_0000` (`MemoryRegionKind::Kernel`).
+Toda la memoria que AriBoot reserva es `LOADER_DATA` (ADR 0021: con tipos
+propios algunos firmwares se cuelgan en `GetMemoryMap`). En el mapa es
+memoria de arranque (`Boot`); `BootInfo::kernel_ranges()` (imagen, pila
+inicial, página del `BootInfo`, initrd, cmdline) dice qué conserva el kernel
+y `page_tables_base/size` qué tablas recupera al activar las suyas.
 
 ## Consola y logging (Fase 3)
 
@@ -435,7 +438,7 @@ segundo brevemente para añadir la región.
 
 ## Initrd e init (Fase 15)
 
-- AriBoot carga `\aricodeos\initrd.img` en páginas de tipo Kernel y lo
+- AriBoot carga `\aricodeos\initrd.img` en páginas que el kernel conserva y lo
   entrega en `BootInfo::initrd_*`. Formato propio (`aricode-initrd`): magia,
   número de entradas y, por fichero, nombre y datos alineados a 8 bytes; el
   lector valida la imagen entera al abrirla y no copia nada.
@@ -1119,8 +1122,13 @@ sdk/proto::status              estado por servicio (protocolo 7) en el endpoint 
   kernel, `FramebufferInfo::beacon` (`Beacon` en `boot-protocol`, que también
   centraliza `encode` del formato de píxel) pinta cuadrados en la fila
   superior: blanco antes de salir de boot services, verde antes del salto y
-  naranja en `kernel_entry`; la consola los borra al acoplarse. Tabla de
-  lectura en `docs/hardware.md`.
+  naranja en `kernel_entry`, y cian por cada paso del cargador tras la
+  cmdline; la consola los borra al acoplarse. Tabla de lectura en
+  `docs/hardware.md`.
+- Segunda y tercera foto: el firmware se para en la primera `GetMemoryMap`,
+  justo tras reservar con un tipo de memoria propio. ADR 0021: AriBoot pasa a
+  `LOADER_DATA`, BootInfo v4 describe lo que el kernel conserva y
+  `boot/src/memmap.rs` lee el mapa con llamadas directas trazadas.
 
 ## Pila de arranque y consola (auditoría 3eb4965)
 
@@ -1194,8 +1202,9 @@ sdk/proto::status              estado por servicio (protocolo 7) en el endpoint 
 - El heap nunca devuelve trozos al PMM ni compacta; el slab/size-class de la
   sección 16 llegará cuando haya métricas que lo pidan. Las tablas intermedias
   creadas durante un crecimiento fallido tampoco se devuelven (se reutilizan).
-- Las tablas del cargador (tipo `Kernel` en el mapa) no se recuperan: su
-  extensión no se conoce con precisión.
+- Las tablas del cargador se recuperan en `reclaim_boot_memory` (ADR 0021:
+  `page_tables_base/size` en `BootInfo`); las páginas de `kernel_ranges()`
+  se vuelven a reservar tras liberar la memoria de arranque.
 - La invalidación de TLB sigue siendo explícita en cada ruta que desmapea:
   local (`invlpg`) donde ninguna otra CPU pudo usar la traducción (heap al
   deshacer un crecimiento, pilas de hilo que no se reutilizan) y con

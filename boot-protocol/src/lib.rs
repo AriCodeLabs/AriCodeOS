@@ -11,7 +11,7 @@
 pub const BOOT_PROTOCOL_MAGIC: u64 = 0x3145_444F_4349_5241;
 
 /// Versión del protocolo. El kernel rechaza versiones que no entiende.
-pub const BOOT_PROTOCOL_VERSION: u32 = 3;
+pub const BOOT_PROTOCOL_VERSION: u32 = 4;
 
 /// Dirección virtual base donde se enlaza y se mapea el kernel (mitad alta,
 /// últimos 2 GiB del espacio canónico: compatible con `code-model=kernel`).
@@ -29,11 +29,6 @@ pub const KERNEL_PATH: &str = "\\aricodeos\\kernel.elf";
 /// Línea de comandos opcional del kernel (ver crate `aricode-cmdline`).
 pub const CMDLINE_PATH: &str = "\\aricodeos\\cmdline.txt";
 
-/// Tipo de memoria UEFI (rango OEM/OS loader) con el que AriBoot marca todas
-/// las páginas que el kernel debe conservar: imagen del kernel, tablas de
-/// páginas iniciales, pila y el propio `BootInfo`.
-pub const MEMORY_TYPE_KERNEL: u32 = 0x8000_0000;
-
 /// Firma de la función de entrada del kernel.
 ///
 /// AriBoot salta aquí con interrupciones deshabilitadas, paginación activa
@@ -47,7 +42,12 @@ pub const MEMORY_TYPE_KERNEL: u32 = 0x8000_0000;
 pub type KernelEntry = unsafe extern "C" fn(boot_info: *const BootInfo) -> !;
 
 /// Información entregada por el bootloader. Vive en una página propia
-/// (tipo `MEMORY_TYPE_KERNEL`) accesible por identidad.
+/// (`boot_info_address`) accesible por identidad.
+///
+/// Toda la memoria que AriBoot reserva para el kernel es `LOADER_DATA`
+/// (ADR 0021): algunos firmwares se cuelgan en `GetMemoryMap` con tipos de
+/// memoria propios. En el mapa esas páginas son `Boot`; el kernel conserva
+/// las que describe [`BootInfo::kernel_ranges`] y recupera el resto.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct BootInfo {
@@ -78,6 +78,12 @@ pub struct BootInfo {
 
     /// Dirección física del PML4 activo al entrar al kernel.
     pub page_table_root: u64,
+    /// Páginas (base y tamaño) de las tablas que AriBoot construyó; el kernel
+    /// las recupera cuando activa las suyas.
+    pub page_tables_base: u64,
+    pub page_tables_size: u64,
+    /// Dirección física de la página que contiene este `BootInfo`.
+    pub boot_info_address: u64,
 
     /// initrd: reservado para fases posteriores. 0 si no hay.
     pub initrd_address: u64,
@@ -116,6 +122,21 @@ impl BootInfo {
             self.cmdline_size as usize,
         );
         core::str::from_utf8(bytes).unwrap_or("")
+    }
+
+    /// Rangos físicos `[inicio, fin)` que el kernel debe conservar aunque el
+    /// mapa UEFI los anuncie como memoria de arranque: imagen, pila inicial,
+    /// página del `BootInfo`, initrd y cmdline (vacíos si no existen). Las
+    /// tablas de AriBoot no están: se recuperan al activar las del kernel.
+    pub fn kernel_ranges(&self) -> [(u64, u64); 5] {
+        let range = |base: u64, size: u64| (base, base.saturating_add(size));
+        [
+            range(self.kernel_phys_base, self.kernel_size),
+            range(self.kernel_stack_base, self.kernel_stack_size),
+            range(self.boot_info_address, 4096),
+            range(self.initrd_address, self.initrd_size),
+            range(self.cmdline_address, self.cmdline_size),
+        ]
     }
 
     /// Iterador sobre el mapa de memoria a través del mapa físico.
@@ -213,19 +234,18 @@ impl MemoryDescriptor {
 pub enum MemoryRegionKind {
     /// Utilizable inmediatamente por el allocator físico.
     Free = 0,
-    /// Imagen, tablas, pila y BootInfo del kernel. Nunca liberar.
-    Kernel = 1,
-    /// Datos del bootloader y de boot services. Reclamable una vez el kernel
-    /// ha copiado lo que necesita del `BootInfo`.
-    Boot = 2,
+    /// Datos del bootloader y de boot services, incluidas las páginas que
+    /// AriBoot reservó para el kernel. Reclamable salvo
+    /// [`BootInfo::kernel_ranges`].
+    Boot = 1,
     /// Código/datos de runtime services. Reservado mientras se usen.
-    Firmware = 3,
+    Firmware = 2,
     /// Tablas ACPI (reclamable) y NVS (no).
-    Acpi = 4,
+    Acpi = 3,
     /// Regiones MMIO / puertos.
-    Mmio = 5,
+    Mmio = 4,
     /// Reservado, inutilizable o desconocido.
-    Reserved = 6,
+    Reserved = 5,
 }
 
 impl MemoryRegionKind {
@@ -236,8 +256,7 @@ impl MemoryRegionKind {
             5 | 6 => Self::Firmware, // RuntimeServices*
             9 | 10 => Self::Acpi,    // AcpiReclaim, AcpiNvs
             11 | 12 => Self::Mmio,   // Mmio, MmioPortSpace
-            MEMORY_TYPE_KERNEL => Self::Kernel,
-            _ => Self::Reserved, // Reserved, Unusable, Pal, Persistent...
+            _ => Self::Reserved,     // Reserved, Unusable, Pal, Persistent...
         }
     }
 }
@@ -487,9 +506,10 @@ mod tests {
         );
         assert_eq!(MemoryRegionKind::from_uefi_type(9), MemoryRegionKind::Acpi);
         assert_eq!(MemoryRegionKind::from_uefi_type(11), MemoryRegionKind::Mmio);
+        // Los tipos propios del rango OS loader ya no significan nada.
         assert_eq!(
-            MemoryRegionKind::from_uefi_type(MEMORY_TYPE_KERNEL),
-            MemoryRegionKind::Kernel
+            MemoryRegionKind::from_uefi_type(0x8000_0000),
+            MemoryRegionKind::Reserved
         );
         assert_eq!(
             MemoryRegionKind::from_uefi_type(0),
@@ -510,9 +530,7 @@ mod tests {
         // UEFI puede usar descriptores mas grandes que la estructura: stride 48.
         const STRIDE: usize = 48;
         let mut buf = [0u8; STRIDE * 2];
-        for (i, (ty, start, pages)) in [(7u32, 0x1000u64, 4u64), (MEMORY_TYPE_KERNEL, 0x9000, 1)]
-            .iter()
-            .enumerate()
+        for (i, (ty, start, pages)) in [(7u32, 0x1000u64, 4u64), (2, 0x9000, 1)].iter().enumerate()
         {
             let d = MemoryDescriptor {
                 ty: *ty,
@@ -535,7 +553,29 @@ mod tests {
         assert_eq!(v.items[0].kind(), MemoryRegionKind::Free);
         assert_eq!(v.items[0].size_bytes(), 4 * 4096);
         assert_eq!(v.items[0].end(), 0x1000 + 4 * 4096);
-        assert_eq!(v.items[1].kind(), MemoryRegionKind::Kernel);
+        assert_eq!(v.items[1].kind(), MemoryRegionKind::Boot);
+    }
+
+    #[test]
+    fn kernel_ranges_cover_what_the_kernel_keeps() {
+        let mut info = unsafe { core::mem::zeroed::<BootInfo>() };
+        info.kernel_phys_base = 0x10_0000;
+        info.kernel_size = 0x8_0000;
+        info.kernel_stack_base = 0x20_0000;
+        info.kernel_stack_size = 0x1_0000;
+        info.boot_info_address = 0x21_0000;
+        info.page_tables_base = 0x30_0000;
+        info.page_tables_size = 0x4_0000;
+        info.cmdline_address = 0x22_0000;
+        info.cmdline_size = 17;
+        let r = info.kernel_ranges();
+        assert_eq!(r[0], (0x10_0000, 0x18_0000));
+        assert_eq!(r[1], (0x20_0000, 0x21_0000));
+        assert_eq!(r[2], (0x21_0000, 0x21_1000));
+        assert_eq!(r[3], (0, 0), "sin initrd: rango vacio");
+        assert_eq!(r[4], (0x22_0000, 0x22_0011));
+        // Las tablas del cargador se recuperan: no estan entre lo conservado.
+        assert!(r.iter().all(|&(s, _)| s != info.page_tables_base));
     }
 
     #[test]

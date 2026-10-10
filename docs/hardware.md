@@ -54,6 +54,8 @@ cualquier sistema) o regenerando la imagen con `--cmdline`:
 | Síntoma | Probar |
 |---|---|
 | Se para en "slots: arrancando desde el slot…" sin más líneas | Imagen anterior a 0.8.2: AriBoot abría el GOP en exclusiva y el firmware dejaba de pintar la consola. Regrabar con una imagen actual |
+| Se para en "memoria: GetMemoryMap (tamano)" sin la línea de respuesta | El firmware no vuelve de `GetMemoryMap`. En imágenes anteriores a 0.8.2 lo provocaba el tipo de memoria propio de AriBoot (ADR 0021); con una imagen actual, anotar las líneas `kernel:` e `initrd.img:` |
+| "GetMemoryMap: respuesta invalida" | El firmware responde fuera de la especificación; anotar la línea `memoria: GetMemoryMap ->` |
 | Se para tras "ExitBootServices -> AriKernel" | Mirar las balizas (abajo) |
 | Se cuelga tras "smp:" o con varias CPUs | `smp=off` |
 | Pantalla negra o dispositivos que no responden tras "iommu:" | `iommu=off` |
@@ -76,7 +78,7 @@ para antes.
 
 | Pantalla | Dónde se paró |
 |---|---|
-| Última línea `cmdline:` o `memoria: consultando…`, sin cuadrados cian | El firmware no responde: a su consola de texto (si falta `memoria: consultando`) o a `GetMemoryMap` (si está) |
+| Última línea `cmdline:` o una de `memoria: GetMemoryMap…`, sin cuadrados cian | El firmware no responde: a su consola de texto (si falta la línea `memoria:`) o a `GetMemoryMap` (si está) |
 | Cuadrados cian (hasta cuatro, a la derecha de los tres primeros huecos) y nada más | Paso del cargador en que se paró: 1 mapa de memoria leído, 2 tablas reservadas, 3 mapa físico construido, 4 kernel mapeado |
 | Trazas de AriBoot hasta `ExitBootServices -> AriKernel`, ningún cuadrado | El framebuffer que anuncia la línea `GOP:` no es la pantalla (dirección o formato erróneos); anotar esa línea |
 | Cuadrado blanco | En `ExitBootServices` (firmware) |
