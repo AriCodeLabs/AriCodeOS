@@ -21,12 +21,12 @@ use aricode_x86_paging::{
     WRITABLE,
 };
 use boot_protocol::{
-    BootInfo, FramebufferInfo, MemoryMap, PixelFormat, BOOT_PROTOCOL_MAGIC, BOOT_PROTOCOL_VERSION,
-    KERNEL_VIRT_BASE, MEMORY_TYPE_KERNEL, PHYS_MAP_BASE,
+    Beacon, BootInfo, FramebufferInfo, MemoryMap, PixelFormat, BOOT_PROTOCOL_MAGIC,
+    BOOT_PROTOCOL_VERSION, KERNEL_VIRT_BASE, MEMORY_TYPE_KERNEL, PHYS_MAP_BASE,
 };
 use core::ptr::NonNull;
 use log::{error, info, warn};
-use uefi::boot::{self, AllocateType, MemoryType};
+use uefi::boot::{self, AllocateType, MemoryType, OpenProtocolAttributes, OpenProtocolParams};
 use uefi::mem::memory_map::MemoryMap as _;
 use uefi::proto::console::gop::{self, GraphicsOutput};
 use uefi::proto::media::file::{File, FileAttribute, FileInfo, FileMode};
@@ -169,7 +169,9 @@ fn run(
     // gigantes (p. ej. PCIe 64 bits) que el kernel mapeará bajo demanda.
     let snapshot = boot::memory_map(MemoryType::LOADER_DATA).map_err(|_| "memory map")?;
     let mut phys_limit: u64 = 0;
+    let mut regions = 0usize;
     for d in snapshot.entries() {
+        regions += 1;
         if matches!(d.ty, MemoryType::RESERVED | MemoryType::UNUSABLE) {
             continue;
         }
@@ -178,6 +180,10 @@ fn run(
     phys_limit = phys_limit.max(4 << 30); // al menos 4 GiB (MMIO clásico bajo 4G)
     phys_limit = phys_limit.next_multiple_of(HUGE_2M);
     drop(snapshot);
+    info!(
+        "memoria: {regions} regiones UEFI, limite fisico {} MiB",
+        phys_limit >> 20
+    );
 
     // 7. Tablas de páginas: identidad (solo para el cargador), mapa físico
     // lineal en PHYS_MAP_BASE (lo que usará el kernel) y kernel en la mitad alta.
@@ -228,8 +234,7 @@ fn run(
             .map_err(|_| "tablas: kernel")?;
     }
     info!(
-        "paginas: identidad y mapa fisico hasta {} MiB, {} tablas usadas de {}",
-        phys_limit >> 20,
+        "paginas: identidad y mapa fisico, {} tablas usadas de {}",
         tables.allocator().used_pages(),
         pool_pages
     );
@@ -261,6 +266,12 @@ fn run(
     };
 
     info!("ExitBootServices -> AriKernel");
+    // Balizas para hardware sin serie (docs/hardware.md): blanca antes de
+    // salir de boot services, verde justo antes del salto.
+    // SAFETY: el firmware mantiene el framebuffer identidad-mapeado y las
+    // tablas nuevas tambien lo cubren (identidad hasta phys_limit o mapa
+    // fisico); `framebuffer` describe exactamente esa memoria.
+    unsafe { framebuffer.beacon(framebuffer.address as *mut u8, Beacon::LOADER_BEFORE_EXIT) };
 
     // 9. Salir de boot services. A partir de aquí: sin log, sin allocator.
     // SAFETY: no quedan referencias a protocolos ni a memoria de boot services
@@ -273,6 +284,8 @@ fn run(
     };
     // El buffer del mapa debe sobrevivir: no liberar (tampoco se podría).
     core::mem::forget(final_map);
+    // SAFETY: como la baliza anterior; ExitBootServices no cambia el paginado.
+    unsafe { framebuffer.beacon(framebuffer.address as *mut u8, Beacon::LOADER_JUMP) };
 
     let boot_info_ptr = boot_info_page.as_ptr() as *mut BootInfo;
     // SAFETY: página propia, alineada, identidad-mapeada en las tablas nuevas.
@@ -377,7 +390,21 @@ fn framebuffer_info() -> FramebufferInfo {
     let Ok(handle) = boot::get_handle_for_protocol::<GraphicsOutput>() else {
         return FramebufferInfo::none();
     };
-    let Ok(mut gop) = boot::open_protocol_exclusive::<GraphicsOutput>(handle) else {
+    // Apertura no exclusiva: la exclusiva desconecta al driver de consola del
+    // firmware y en hardware real la pantalla deja de mostrar las trazas de
+    // AriBoot (lo ultimo visible era la linea de slots).
+    // SAFETY: solo se leen el modo y la direccion del framebuffer; el firmware
+    // sigue pintando su consola hasta ExitBootServices.
+    let Ok(mut gop) = (unsafe {
+        boot::open_protocol::<GraphicsOutput>(
+            OpenProtocolParams {
+                handle,
+                agent: boot::image_handle(),
+                controller: None,
+            },
+            OpenProtocolAttributes::GetProtocol,
+        )
+    }) else {
         return FramebufferInfo::none();
     };
     let mode = gop.current_mode_info();

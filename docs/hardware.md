@@ -37,8 +37,11 @@ y `ARIBOOT` (estado A/B). Es la misma imagen que arranca el escenario
 1. Con el portátil apagado, conectar el pendrive y entrar en el menú de
    arranque del firmware (F12, Esc, F9 según la marca). Elegir el pendrive
    en modo UEFI.
-2. AriBoot muestra sus trazas en pantalla y salta al kernel; el kernel
-   informa de CPU, memoria, ACPI, APIC, SMP, PCI e IOMMU y lanza init.
+2. AriBoot muestra sus trazas en pantalla (slots, GOP, ACPI, kernel,
+   cmdline, memoria, paginas, `ExitBootServices -> AriKernel`), pinta dos
+   balizas en la esquina superior izquierda y salta al kernel; el kernel pinta
+   la tercera, limpia la pantalla e informa de CPU, memoria, ACPI, APIC, SMP,
+   PCI e IOMMU y lanza init.
 3. Con `shell` en la cmdline aparece `ari> `. Comandos útiles: `cpus`,
    `mem`, `devices`, `ps`, `uptime`, `reboot`, `shutdown`.
 
@@ -50,6 +53,8 @@ cualquier sistema) o regenerando la imagen con `--cmdline`:
 
 | Síntoma | Probar |
 |---|---|
+| Se para en "slots: arrancando desde el slot…" sin más líneas | Imagen anterior a 0.8.2: AriBoot abría el GOP en exclusiva y el firmware dejaba de pintar la consola. Regrabar con una imagen actual |
+| Se para tras "ExitBootServices -> AriKernel" | Mirar las balizas (abajo) |
 | Se cuelga tras "smp:" o con varias CPUs | `smp=off` |
 | Pantalla negra o dispositivos que no responden tras "iommu:" | `iommu=off` |
 | Demasiada salida | `log=warn`; poca: `log=debug` |
@@ -57,6 +62,22 @@ cualquier sistema) o regenerando la imagen con `--cmdline`:
 
 Anotar (o fotografiar) las últimas líneas antes del fallo: `EXCEPTION`,
 `KERNEL PANIC` y `iommu: fallo DMA` llevan la información necesaria.
+
+### Balizas
+
+Entre `ExitBootServices` y la primera línea del kernel no hay trazas (ya no
+hay firmware y el kernel aún no tiene consola). Para ver hasta dónde llega el
+arranque, AriBoot y el kernel pintan cuadrados de 32 px en la fila superior
+de la pantalla (`Beacon` en `boot-protocol`); la consola del kernel los borra
+al iniciarse, así que solo se ven si algo se para antes.
+
+| Pantalla | Dónde se paró |
+|---|---|
+| Trazas de AriBoot hasta `ExitBootServices -> AriKernel`, ningún cuadrado | El framebuffer que anuncia la línea `GOP:` no es la pantalla (dirección o formato erróneos); anotar esa línea |
+| Cuadrado blanco | En `ExitBootServices` (firmware) |
+| Blanco y verde | En el salto al kernel: tablas de páginas, pila o la validación de `BootInfo` |
+| Blanco, verde y naranja, sin texto | Entre la entrada del kernel y su consola (hash del initrd) o la consola no pinta |
+| Texto del kernel | Seguir las trazas; ver la tabla anterior |
 
 ## Almacenamiento
 

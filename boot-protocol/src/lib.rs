@@ -289,6 +289,88 @@ impl FramebufferInfo {
             _reserved: 0,
         }
     }
+
+    /// Codifica un color (8 bits por canal) como píxel de 32 bits según
+    /// `pixel_format`. Con `None` devuelve 0.
+    pub fn encode(&self, r: u8, g: u8, b: u8) -> u32 {
+        match self.pixel_format {
+            PixelFormat::Rgb => (r as u32) | (g as u32) << 8 | (b as u32) << 16,
+            PixelFormat::Bgr => (b as u32) | (g as u32) << 8 | (r as u32) << 16,
+            PixelFormat::Bitmask => {
+                let place = |v: u8, mask: u32| -> u32 {
+                    if mask == 0 {
+                        return 0;
+                    }
+                    let shift = mask.trailing_zeros();
+                    let bits = (mask >> shift).count_ones().min(8);
+                    ((v as u32) >> (8 - bits)) << shift
+                };
+                place(r, self.red_mask) | place(g, self.green_mask) | place(b, self.blue_mask)
+            }
+            PixelFormat::None => 0,
+        }
+    }
+
+    /// Pinta una baliza de arranque: un cuadrado de [`Beacon::SIZE`] píxeles en
+    /// la fila superior de la pantalla, en la posición `beacon.index`. Sin
+    /// puerto serie, las balizas dicen hasta dónde llegó el arranque antes de
+    /// que el kernel tenga consola (`docs/hardware.md`). Se recorta a la
+    /// pantalla y a `size`; sin framebuffer no hace nada.
+    ///
+    /// # Safety
+    /// `base` debe apuntar a los `size` bytes del framebuffer, mapeados y
+    /// escribibles.
+    pub unsafe fn beacon(&self, base: *mut u8, beacon: Beacon) {
+        if self.address == 0 || self.pixel_format == PixelFormat::None {
+            return;
+        }
+        let [r, g, b] = beacon.rgb;
+        let pixel = self.encode(r, g, b);
+        let x0 = Beacon::GAP + beacon.index * (Beacon::SIZE + Beacon::GAP);
+        let x1 = (x0 + Beacon::SIZE).min(self.width);
+        let y1 = (Beacon::GAP + Beacon::SIZE).min(self.height);
+        let pixels = (self.size / 4) as usize;
+        for y in Beacon::GAP..y1 {
+            for x in x0..x1 {
+                let idx = y as usize * self.stride as usize + x as usize;
+                if idx >= pixels {
+                    return;
+                }
+                // SAFETY: `idx` está dentro de `size` y de la pantalla; el
+                // llamador garantiza que `base` es el framebuffer mapeado.
+                unsafe { base.cast::<u32>().add(idx).write_volatile(pixel) };
+            }
+        }
+    }
+}
+
+/// Baliza de arranque: posición en la fila superior y color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Beacon {
+    pub index: u32,
+    pub rgb: [u8; 3],
+}
+
+impl Beacon {
+    /// Lado del cuadrado en píxeles.
+    pub const SIZE: u32 = 32;
+    /// Separación entre balizas y respecto al borde.
+    pub const GAP: u32 = 8;
+    /// AriBoot, justo antes de `ExitBootServices` (blanca).
+    pub const LOADER_BEFORE_EXIT: Beacon = Beacon {
+        index: 0,
+        rgb: [255, 255, 255],
+    };
+    /// AriBoot, tras `ExitBootServices` y justo antes de saltar al kernel (verde).
+    pub const LOADER_JUMP: Beacon = Beacon {
+        index: 1,
+        rgb: [0, 200, 0],
+    };
+    /// AriKernel, en la entrada, antes de la consola (naranja).
+    pub const KERNEL_ENTRY: Beacon = Beacon {
+        index: 2,
+        rgb: [255, 160, 0],
+    };
 }
 
 // Comprobaciones de layout en tiempo de compilación.
@@ -298,7 +380,84 @@ const _: () = assert!(core::mem::size_of::<MemoryMap>() == 16);
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
+    use std::vec;
+    use std::vec::Vec;
+
+    fn fb(width: u32, height: u32, stride: u32, pixel_format: PixelFormat) -> FramebufferInfo {
+        FramebufferInfo {
+            address: 0x8000_0000,
+            size: stride as u64 * height as u64 * 4,
+            width,
+            height,
+            stride,
+            pixel_format,
+            red_mask: 0xF800,
+            green_mask: 0x07E0,
+            blue_mask: 0x001F,
+            _reserved: 0,
+        }
+    }
+
+    #[test]
+    fn encodes_pixels_by_format() {
+        assert_eq!(
+            fb(1, 1, 1, PixelFormat::Rgb).encode(0x11, 0x22, 0x33),
+            0x0033_2211
+        );
+        assert_eq!(
+            fb(1, 1, 1, PixelFormat::Bgr).encode(0x11, 0x22, 0x33),
+            0x0011_2233
+        );
+        // Máscaras 5-6-5: cada canal se recorta a sus bits.
+        assert_eq!(
+            fb(1, 1, 1, PixelFormat::Bitmask).encode(0xFF, 0x00, 0xFF),
+            0xF81F
+        );
+        assert_eq!(fb(1, 1, 1, PixelFormat::None).encode(0xFF, 0xFF, 0xFF), 0);
+    }
+
+    #[test]
+    fn beacon_paints_its_square_only() {
+        let info = fb(200, 100, 256, PixelFormat::Rgb);
+        let mut buf = vec![0u32; 256 * 100];
+        unsafe { info.beacon(buf.as_mut_ptr().cast(), Beacon::LOADER_JUMP) };
+        let x0 = Beacon::GAP + Beacon::SIZE + Beacon::GAP;
+        let pixel = info.encode(0, 200, 0);
+        let lit: Vec<(usize, usize)> = (0..100)
+            .flat_map(|y| (0..256).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf[y * 256 + x] != 0)
+            .collect();
+        assert_eq!(lit.len(), (Beacon::SIZE * Beacon::SIZE) as usize);
+        for &(x, y) in &lit {
+            assert!(x >= x0 as usize && x < (x0 + Beacon::SIZE) as usize);
+            assert!(y >= Beacon::GAP as usize && y < (Beacon::GAP + Beacon::SIZE) as usize);
+            assert_eq!(buf[y * 256 + x], pixel);
+        }
+    }
+
+    #[test]
+    fn beacon_clips_to_screen_and_size() {
+        // Pantalla de 20 px de ancho: la baliza 0 se recorta en x; la 1 cae fuera.
+        let mut info = fb(20, 30, 20, PixelFormat::Bgr);
+        let mut buf = vec![0u32; 20 * 30];
+        unsafe { info.beacon(buf.as_mut_ptr().cast(), Beacon::LOADER_BEFORE_EXIT) };
+        let lit = buf.iter().filter(|&&p| p != 0).count();
+        assert_eq!(lit, ((20 - Beacon::GAP) * (30 - Beacon::GAP)) as usize);
+        buf.fill(0);
+        unsafe { info.beacon(buf.as_mut_ptr().cast(), Beacon::LOADER_JUMP) };
+        assert!(buf.iter().all(|&p| p == 0));
+        // `size` menor que la pantalla: no se escribe más allá.
+        info.size = 20 * 10 * 4;
+        buf.fill(0);
+        unsafe { info.beacon(buf.as_mut_ptr().cast(), Beacon::LOADER_BEFORE_EXIT) };
+        assert!(buf[20 * 10..].iter().all(|&p| p == 0));
+        assert!(buf[..20 * 10].iter().any(|&p| p != 0));
+        // Sin framebuffer no toca nada.
+        let none = FramebufferInfo::none();
+        unsafe { none.beacon(core::ptr::null_mut(), Beacon::KERNEL_ENTRY) };
+    }
 
     #[test]
     fn classifies_uefi_memory_types() {

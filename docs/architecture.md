@@ -1111,6 +1111,16 @@ sdk/proto::status              estado por servicio (protocolo 7) en el endpoint 
   ESP del escenario, más ARI0, SYSA (imagen firmada), SYSB/UPDATE vacías y
   ARIBOOT; `disk = "usb-image"` arranca un escenario desde esa imagen sin el
   disco `fat:` de QEMU. Guía en `docs/hardware.md`.
+- Primer arranque en el portátil (2026-10-10): AriBoot abre el GOP sin
+  exclusividad (`OpenProtocolAttributes::GetProtocol`), igual que los
+  `BlockIO`; la apertura exclusiva desconectaba el driver de consola del
+  firmware y en hardware real las trazas se cortaban tras la línea de slots.
+  Para la ventana sin trazas entre `ExitBootServices` y la consola del
+  kernel, `FramebufferInfo::beacon` (`Beacon` en `boot-protocol`, que también
+  centraliza `encode` del formato de píxel) pinta cuadrados en la fila
+  superior: blanco antes de salir de boot services, verde antes del salto y
+  naranja en `kernel_entry`; la consola los borra al acoplarse. Tabla de
+  lectura en `docs/hardware.md`.
 
 ## Pila de arranque y consola (auditoría 3eb4965)
 
