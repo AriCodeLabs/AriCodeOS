@@ -3,13 +3,13 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.8.1 (Fases 0 a 34 y etapas 1 a 5 posteriores al roadmap; la 34, la energía y más dispositivos pendientes de hardware)
+## Estado: 0.9.0 (Fases 0 a 34 y etapas 1 a 5 posteriores al roadmap; primer arranque en hardware real con disco USB, consola y red; energía, Wi-Fi y EHCI pendientes)
 
 ```text
 OVMF (UEFI)
   -> EFI/BOOT/BOOTX64.EFI            AriBoot        boot/
        GOP, ACPI RSDP, cmdline.txt, kernel.elf, initrd.img, tablas de
-       páginas (identidad + mapa físico lineal + kernel), BootInfo v3,
+       páginas (identidad + mapa físico lineal + kernel), BootInfo v4,
        ExitBootServices, salto
   -> aricodeos/kernel.elf            AriKernel      kernel/
        consola serie + framebuffer (fuente 8x16), logger con niveles,
@@ -37,7 +37,7 @@ OVMF (UEFI)
 ## Crates
 
 ```text
-boot-protocol/       ABI BootInfo (v3): mapa UEFI, framebuffer, RSDP, kernel, pila, PML4, cmdline, mapa físico
+boot-protocol/       ABI BootInfo (v4): mapa UEFI, framebuffer, RSDP, kernel, pila, PML4 y tablas, BootInfo, cmdline, mapa físico, rangos conservados
 libs/elf/            aricode-elf: parser ELF64 mínimo (no_std, tests de host)
 libs/x86-paging/     aricode-x86-paging: tablas de 4 niveles genéricas en FrameAlloc/PhysMap (no_std, tests de host)
 libs/cmdline/        aricode-cmdline: `clave` / `clave=valor` sin alloc (no_std, tests de host)
@@ -48,6 +48,8 @@ libs/heap/           aricode-heap: heap first-fit con lista de libres, fusión y
 libs/sync/           aricode-sync: IrqLock/SpinLock con política de interrupciones enchufable, restaurada entre giros; force_unlock (no_std, tests de host)
 libs/fat/            aricode-fat: FAT32 mínimo con nombres largos para construir y leer la ESP de la imagen USB (no_std + alloc, tests de host)
 libs/xhci/           aricode-xhci: xHCI y USB: registros, TRB, anillos, contextos, ERST, SETUP y descriptores (no_std, tests de host)
+libs/usb-storage/    aricode-usb-storage: transporte bulk-only (CBW/CSW) y CDB SCSI de bloque, tests de host
+libs/rtl8169/        aricode-rtl8169: registros, descriptores y arranque de la familia r8169 sobre un trait Regs, tests de host
 libs/iommu/          aricode-iommu: Intel VT-d: registros, capacidades, entradas raíz/contexto, paginación de segundo nivel, registros de fallo (no_std, tests de host)
 libs/sched/          aricode-sched: política round robin sobre Tid con estados, sueño, bloqueo, salida, varias CPUs, afinidad y despertares pendientes (no_std + alloc, tests de host)
 libs/handles/        aricode-handles: tabla de handles con generación y derechos, duplicación solo reductora (no_std + alloc, tests de host)
@@ -79,15 +81,17 @@ user/testprogs/      programas de prueba de ring 3 (Rust y ensamblador) enlazado
 services/init/       AriInit: primer proceso; recibe SPAWNER y la raíz PCI, lanza/supervisa servicios y reclama dispositivos para sus drivers
 services/virtio-blk/ driver virtio-blk en ring 3 y servicio de bloques por IPC (interfaz moderna, cola 0 en DMA, MSI-X, GPT)
 services/virtio-net/ netd: driver virtio-net y pila de red (DHCP, ARP, ICMP, UDP, TCP, DNS) por IPC en ring 3
+services/net-core/   ari-net-core: pila IPv4 mínima y servidor NetServiceProtocol, independientes de la tarjeta (trait Link, ADR 0024)
+services/rtl-net/    driver Realtek r8169 (RTL8169/8168/8101) en ring 3 sobre ari-net-core; sin emulación en QEMU
 services/compositor/ compositor: dueño del framebuffer, ventanas, cursor y enrutado de entrada en ring 3
 services/virtio-input/ inputd: driver virtio-input (un proceso por teclado o ratón) y eventos por IPC en ring 3
 services/arifs/      fsd: servicio de ficheros AriFS en ring 3 sobre el servicio de bloques
-services/shell/      arish: shell interactivo en ring 3 (help, ps, mem, ls, cat, devices, services, uptime, reboot, shutdown, exit)
+services/shell/      arish: shell interactivo en ring 3 (help, ps, mem, ls, cat, write, devices, services, uptime, cpus, diag, net, run, spawn, repeat, reboot, shutdown, exit; historial con las flechas)
 boot/                ariboot: integra lo anterior con la crate `uefi`
 kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log con IrqLock y try_lock),
                      arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions, port, pic, pit, apic, ioapic, msr, syscall, usermode},
                      acpi (localización de tablas), pci (ECAM, enumeración, reclamación con sondeo de BARs y MSI-X),
-                     hw (IrqLine por GSI o MSI-X, Region, DmaBuffer, ventanas sin caché, registro de vectores, banco de pruebas),
+                     hw (IrqLine por GSI, MSI-X o MSI, Region, DmaBuffer, ventanas sin caché, registro de vectores, banco de pruebas),
                      object (KernelObject revocable, tabla inicial), ipc (Endpoint, Message, benchmark), initrd,
                      user/{process (cargador ELF, copy_from/to_user, espera de salida), programs (initrd), syscalls},
                      memory/{phys, pmm, vmm, heap}, sync (política IRQ), time,
@@ -119,7 +123,7 @@ Invariantes de seguridad de memoria en el cargador (auditoría 2026-09-26,
 
 ## Contrato AriBoot -> AriKernel
 
-Definido en `boot-protocol/` (`BootInfo`, versión 3, ADR 0009). Al entrar al kernel:
+Definido en `boot-protocol/` (`BootInfo`, versión 4, ADR 0009 y 0021). Al entrar al kernel:
 
 - interrupciones deshabilitadas;
 - CR3 apunta a tablas construidas por AriBoot: identidad con páginas de 2 MiB
@@ -135,8 +139,11 @@ Definido en `boot-protocol/` (`BootInfo`, versión 3, ADR 0009). Al entrar al ke
 - si existía `\aricodeos\cmdline.txt`, su contenido está copiado en memoria
   de kernel y referenciado por `cmdline_address/size`.
 
-Toda la memoria que el kernel debe conservar (imagen, pila, tablas, BootInfo)
-está marcada en el mapa UEFI con el tipo `0x8000_0000` (`MemoryRegionKind::Kernel`).
+Toda la memoria que AriBoot reserva es `LOADER_DATA` (ADR 0021: con tipos
+propios algunos firmwares se cuelgan en `GetMemoryMap`). En el mapa es
+memoria de arranque (`Boot`); `BootInfo::kernel_ranges()` (imagen, pila
+inicial, página del `BootInfo`, initrd, cmdline) dice qué conserva el kernel
+y `page_tables_base/size` qué tablas recupera al activar las suyas.
 
 ## Consola y logging (Fase 3)
 
@@ -148,7 +155,23 @@ está marcada en el mapa UEFI con el tipo `0x8000_0000` (`MemoryRegionKind::Kern
 - El panic handler escribe solo por serie (`serial_println!`): no toca estado
   compartido, por si el panic ocurre a medio escribir en el framebuffer.
 - La consola de framebuffer mantiene una copia de las celdas y repinta al
-  hacer scroll; nunca lee de VRAM.
+  hacer scroll; nunca lee de VRAM. Entiende el retroceso (`\x08`, el cursor
+  vuelve una celda) y pinta un cursor `_` que alterna un hilo del kernel
+  (`console::start_cursor_thread`, cada 500 ms, con `try_lock`). Ni el tick
+  (no se pinta desde handlers) ni el bucle idle: una llamada más en ese
+  bucle, que gira mucho, frenaba todo el sistema en QEMU un 25 %. Solo
+  parpadea con la consola quieta (sin escrituras desde el parpadeo
+  anterior); cualquier escritura lo oculta antes de pintar, así que las
+  celdas nunca contienen el cursor.
+- Disposiciones: `aricode_input::Layout` (`Us`, `Es`; la española con
+  `AltGr` para `@ # [ ] { } \ | ~` y sin las teclas no ASCII). `kbd=es` en
+  la cmdline la aplica al teclado PS/2 del kernel (escenario
+  `console.ps2_es`, con combinaciones `shift+dot` por QMP); el puente de
+  consola y el compositor siguen en US.
+- Las teclas de edición (flechas, inicio, fin, suprimir) llegan a la consola
+  como las secuencias de escape de un terminal serie (`ESC [ A`…, `ESC [ 3 ~`),
+  vengan del teclado PS/2 del kernel, del puente de consola o del compositor:
+  `aricode_input::Keyboard::feed` devuelve `KeyBytes` (hasta 4 bytes).
 
 ## CPU (Fase 4)
 
@@ -435,7 +458,7 @@ segundo brevemente para añadir la región.
 
 ## Initrd e init (Fase 15)
 
-- AriBoot carga `\aricodeos\initrd.img` en páginas de tipo Kernel y lo
+- AriBoot carga `\aricodeos\initrd.img` en páginas que el kernel conserva y lo
   entrega en `BootInfo::initrd_*`. Formato propio (`aricode-initrd`): magia,
   número de entradas y, por fichero, nombre y datos alineados a 8 bytes; el
   lector valida la imagen entera al abrirla y no copia nada.
@@ -500,7 +523,8 @@ segundo brevemente para añadir la región.
   reclama una función: el kernel habilita memoria y bus master, deshabilita
   INTx, sondea el tamaño de cada BAR de memoria, programa la entrada 0 de
   MSI-X hacia un vector de dispositivo (tabla mapeada en una ventana sin
-  caché del kernel) y devuelve nueve handles: espacio de configuración
+  caché del kernel) o, si la función no tiene MSI-X, su capability MSI con
+  un solo mensaje (ADR 0022), y devuelve nueve handles: espacio de configuración
   (MMIO), `Hardware`, IRQ y los seis BARs (0 si ausentes), todos con
   `TRANSFER`.
 - `process_spawn` transfiere handles al hijo (aparecen desde
@@ -624,7 +648,17 @@ segundo brevemente para añadir la región.
   su salida y la anota.
 - `arish` lee líneas con eco y retroceso, y despacha los comandos sin
   `alloc` (formato con `fmt_u64`/`fmt_hex` de la biblioteca de programas
-  de usuario). `cat` lee por bloques de 1 KiB con `FsClient`.
+  de usuario). `cat` lee por bloques de 1 KiB con `FsClient`. Las flechas
+  arriba y abajo (`ESC [ A` / `ESC [ B`) recorren un historial de las ocho
+  últimas líneas distintas, que se pueden editar antes de ejecutar; el resto
+  de secuencias de escape se descartan (escenario `shell.history`). `diag
+  NOM` captura la salida del informe (consola y buffer de 16 KiB) y la guarda
+  en AriFS; `cargo xtask fs-cat DISCO [NOMBRE]` la lee desde el anfitrión
+  (escenario `shell.diag_file`, test de `fscat` sobre el disco de pruebas).
+  El informe incluye `net`: `Op::Link` (14) del protocolo de red responde el
+  estado del enlace físico (`LINK_UP`/`LINK_DOWN`/`LINK_UNKNOWN`) aunque
+  DHCP no haya terminado, y el resumen de `services` nombra papeles
+  (bloques, red, entrada), no drivers.
 - El runner (`qemu::run_headless`) acepta `Input { prompt, lines }`: lee la
   serie de forma incremental y envía la línea `k` cuando el prompt ha
   aparecido `k + 1` veces, así los tests son deterministas sin esperas
@@ -1022,7 +1056,7 @@ kernel/src/iommu.rs            unidades, dominios por proceso, attach/map_region
 ```text
 libs/xhci                      estructuras xHCI/USB (sin hardware)
 libs/input                     HidBootKeyboard / HidBootMouse: informes de arranque -> eventos evdev
-services/usb-input             usbd: controlador, enumeración, endpoints de interrupción, servicio de entrada
+services/usb-input             usbd: controlador xHCI, enumeración, endpoints de interrupción (servicio de entrada) y masivos (almacenamiento bulk-only como servicio de bloques, ADR 0023)
 ```
 
 - init lanza `usb_input` por cada función PCI de clase `0c.03` con el contrato
@@ -1111,6 +1145,56 @@ sdk/proto::status              estado por servicio (protocolo 7) en el endpoint 
   ESP del escenario, más ARI0, SYSA (imagen firmada), SYSB/UPDATE vacías y
   ARIBOOT; `disk = "usb-image"` arranca un escenario desde esa imagen sin el
   disco `fat:` de QEMU. Guía en `docs/hardware.md`.
+- Primer arranque en el portátil (2026-10-10): AriBoot abre el GOP sin
+  exclusividad (`OpenProtocolAttributes::GetProtocol`), igual que los
+  `BlockIO`; la apertura exclusiva desconectaba el driver de consola del
+  firmware y en hardware real las trazas se cortaban tras la línea de slots.
+  Para la ventana sin trazas entre `ExitBootServices` y la consola del
+  kernel, `FramebufferInfo::beacon` (`Beacon` en `boot-protocol`, que también
+  centraliza `encode` del formato de píxel) pinta cuadrados en la fila
+  superior: blanco antes de salir de boot services, verde antes del salto y
+  naranja en `kernel_entry`, y cian por cada paso del cargador tras la
+  cmdline; la consola los borra al acoplarse. Tabla de lectura en
+  `docs/hardware.md`.
+- Segunda y tercera foto: el firmware se para en la primera `GetMemoryMap`,
+  justo tras reservar con un tipo de memoria propio. ADR 0021: AriBoot pasa a
+  `LOADER_DATA`, BootInfo v4 describe lo que el kernel conserva y
+  `boot/src/memmap.rs` lee el mapa con llamadas directas trazadas.
+- Cuarta foto (2026-10-10): **primer arranque completo en hardware**. El
+  kernel enumera 17 funciones PCI (ECAM en `0xf8000000`), no hay DMAR, init
+  pasa sus pruebas de arranque y termina en `ARICODEOS_KERNEL_READY`. Lo que
+  falta: el xHCI (`8086:1e31`) solo tiene MSI, no MSI-X, y el driver no
+  recibía IRQ (ADR 0022 lo resuelve); los EHCI no tienen driver; sin driver
+  de bloques para el pendrive no hay fsd y init no lanza el shell.
+- Quinta foto: `reclamado (MSI)` y el driver cae en la reserva DMA: el
+  controlador pide scratchpads (QEMU ninguno) y el buffer fijo de 64 KiB no
+  los cabía. `Params::dma_arena_bytes` lo dimensiona y el driver nombra el
+  paso que falla.
+- Séptima y octava foto: el pendrive se lee por USB, `fs_client` fallaba
+  en el flush (el pendrive rechaza `SYNCHRONIZE CACHE`; usbd lo tolera) y
+  después **shell interactivo en el portátil** con el teclado PS/2. El
+  retroceso pintaba `?`: la consola de framebuffer no entendía `\x08` y
+  ahora mueve el cursor una celda.
+- Sexta foto: xHCI listo (8 puertos, 32 slots, 16 scratchpads), servicio de
+  entrada ok, `ARICODEOS_KERNEL_READY`; ningún dispositivo en los puertos
+  porque en los Intel 7 series los puertos USB quedan en los EHCI hasta que
+  el sistema los enruta al xHCI (registros XUSB2PR/USB3_PSSEN). ADR 0023:
+  usbd enruta los puertos, pide la cesión al firmware y sirve el pendrive
+  como servicio de bloques; sin virtio-blk, init monta fsd sobre él
+  (escenario `usb.storage`).
+- Octava y novena foto: shell interactivo sobre el pendrive con teclado
+  PS/2, cursor e historial. Red: ADR 0024 saca la pila a `ari-net-core` y
+  añade `rtl-net` para la Realtek `10ec:8136`; sin virtio-net, init lo
+  lanza y omite los clientes de prueba del respondedor de QEMU.
+- Undécima foto: **red por cable en el portátil**: `net` muestra la
+  dirección por DHCP (192.168.1.24), `ping` al router responde en 1 ms y
+  `dns google.com` resuelve. Toda la pila (ARP, IPv4, ICMP, UDP, DHCP, DNS)
+  funciona sobre `rtl-net` a la primera.
+- Décima foto: `rtl_net` no arrancaba ("el ELF no cabe en la region de
+  usuario"): faltaba su `build.rs` y se enlazó en la dirección por defecto.
+  `cargo xtask build` comprueba ahora el punto de entrada de cada programa
+  del initrd, y `diag NOM` + `cargo xtask fs-cat` dan un canal de
+  diagnóstico sin fotos.
 
 ## Pila de arranque y consola (auditoría 3eb4965)
 
@@ -1184,8 +1268,9 @@ sdk/proto::status              estado por servicio (protocolo 7) en el endpoint 
 - El heap nunca devuelve trozos al PMM ni compacta; el slab/size-class de la
   sección 16 llegará cuando haya métricas que lo pidan. Las tablas intermedias
   creadas durante un crecimiento fallido tampoco se devuelven (se reutilizan).
-- Las tablas del cargador (tipo `Kernel` en el mapa) no se recuperan: su
-  extensión no se conoce con precisión.
+- Las tablas del cargador se recuperan en `reclaim_boot_memory` (ADR 0021:
+  `page_tables_base/size` en `BootInfo`); las páginas de `kernel_ranges()`
+  se vuelven a reservar tras liberar la memoria de arranque.
 - La invalidación de TLB sigue siendo explícita en cada ruta que desmapea:
   local (`invlpg`) donde ninguna otra CPU pudo usar la traducción (heap al
   deshacer un crecimiento, pilas de hilo que no se reutilizan) y con

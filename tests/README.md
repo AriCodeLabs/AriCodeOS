@@ -8,7 +8,7 @@ Todos los tests viven en el repositorio y se ejecutan con `cargo xtask test`.
 |---------|----------------------------------------------------------|----------|------------------------------------------|
 | `unit`  | `cargo test` de las crates de host (`libs/*`, protocolo, xtask) | segundos | en cada commit de una feature            |
 | `smoke` | unit + arranque nominal en QEMU (`boot.kernel_ready`)     | ~5 s     | antes de mergear en `develop`            |
-| `full`  | unit + todos los escenarios QEMU (fallos provocados incluidos) | ~20 s    | antes de mergear en `main` (`--all`)     |
+| `full`  | unit + todos los escenarios QEMU (fallos provocados incluidos) | minutos  | antes de mergear en `main` (`--all`)     |
 
 ```bash
 cargo xtask test                    # unit + smoke (por defecto)
@@ -52,13 +52,15 @@ disk = "slots"                  # disco: slots (defecto) | esp-only | pending-b 
 disk_readonly = false           # true: el disco de pruebas se presenta como solo lectura
 cpus = 4                        # procesadores (-smp N); sin declarar: 1, o lo que fuerce `--cpus N`
 usb_hid = true                  # añade qemu-xhci con un teclado y un ratón USB (los eventos QMP van al USB)
+usb_hid_msi = true              # ese xHCI solo ofrece MSI, sin MSI-X (como los Intel de 2012)
+usb_storage = true              # el disco de pruebas cuelga del xHCI como almacenamiento USB; no hay virtio-blk
 usb_legacy_controller = true    # añade además un EHCI (clase 0c.03 pero no xHCI)
 install = ["examples/hello_ext"]  # apps externas que xtask compila, firma (version 1) e instala en AriFS como apps/NOMBRE.aripkg
 packages = ["examples/hello_ext:2", "examples/hello_ext:3:corrupt"]  # paquetes pendientes en pkgs/ (DIR:VERSION[:corrupt]) para `run installer`
 
 [host_input]                    # opcional: entrada inyectada por QMP al ver marker
 marker = "INPUT_READY"
-keys = ["h", "o", "l", "a", "ret"]   # nombres qcode de QEMU, pulsación y suelta en kbd0
+keys = ["h", "o", "l", "a", "ret"]   # nombres qcode de QEMU, pulsación y suelta en kbd0   # "shift+dot" mantiene los modificadores mientras se pulsa la tecla
 mouse_rel = [10, -5]            # movimiento relativo en mouse0
 click = "left"                  # botón pulsado y soltado; resultado en "[host] QMP: ..."
 
@@ -106,7 +108,9 @@ identifica el paso fallido.
 Cada fase del roadmap añade su área y sus escenarios. Existentes: `boot`,
 `panic`, `console`, `interrupts`, `memory`, `timer`, `threads`, `scheduler`,
 `user`, `capabilities`, `ipc`, `init`, `drivers`, `acpi`, `pci`, `virtio`,
-`storage`, `filesystem`, `shell`, `network`, `input`, `gui`, `sandbox`, `wasm`, `crypto`, `update`, `smp`, `iommu`, `usb`, `hardware`, `services`.
+`storage`, `filesystem`, `shell`, `network`, `input`, `gui`, `sandbox`,
+`wasm`, `crypto`, `update`, `smp`, `iommu`, `usb`, `hardware`, `services`,
+`limits`, `apps`, `perf`, `diag`.
 Una rama `feature/f05-physical-memory` ejecuta `--area memory` mientras
 desarrolla y `--all` antes de integrar. Si el filtro no selecciona ningún
 escenario QEMU, el runner falla y lista las áreas conocidas: un filtro mal

@@ -9,14 +9,27 @@ use std::time::{Duration, Instant};
 
 /// `esp`: directorio que QEMU expone como disco FAT; `None` cuando la ESP va
 /// dentro de la imagen de disco (imagen USB).
+/// Controladores USB de la máquina virtual.
+#[derive(Clone, Copy, Default)]
+pub struct UsbOptions {
+    /// xHCI con un teclado y un ratón USB HID.
+    pub hid: bool,
+    /// Ese xHCI solo ofrece MSI (sin MSI-X).
+    pub hid_msi: bool,
+    /// Además un EHCI (clase 0c.03, interfaz 0x20): no es xHCI.
+    pub legacy_controller: bool,
+    /// El disco de pruebas cuelga del xHCI como almacenamiento USB
+    /// (`usb-storage`) en vez de virtio-blk (ADR 0023).
+    pub storage: bool,
+}
+
 fn base_command(
     esp: Option<&Path>,
     vars: &Path,
     disk: &Path,
     disk_readonly: bool,
     cpus: u32,
-    usb_hid: bool,
-    usb_legacy_controller: bool,
+    usb: UsbOptions,
 ) -> Command {
     let mut q = Command::new("qemu-system-x86_64");
     q.current_dir(root());
@@ -34,7 +47,8 @@ fn base_command(
     // IOMMU VT-d (Fase 33) antes que cualquier dispositivo PCI; los virtio
     // llevan `iommu_platform=on` para que su DMA pase por la traduccion.
     q.args(["-device", "intel-iommu,aw-bits=48"]);
-    // Disco virtio-blk moderno (sin interfaz legacy) para el driver de usuario.
+    // Disco de pruebas: virtio-blk moderno (sin interfaz legacy) para el
+    // driver de usuario o, con `usb.storage`, un pendrive en el xHCI.
     q.args([
         "-drive",
         &format!(
@@ -43,10 +57,12 @@ fn base_command(
             if disk_readonly { ",readonly=on" } else { "" }
         ),
     ]);
-    q.args([
-        "-device",
-        "virtio-blk-pci,drive=disk0,disable-legacy=on,disable-modern=off,iommu_platform=on",
-    ]);
+    if !usb.storage {
+        q.args([
+            "-device",
+            "virtio-blk-pci,drive=disk0,disable-legacy=on,disable-modern=off,iommu_platform=on",
+        ]);
+    }
     q.args([
         "-drive",
         &format!("if=pflash,format=raw,readonly=on,file={OVMF_CODE}"),
@@ -85,13 +101,24 @@ fn base_command(
         "-device",
         "virtio-mouse-pci,id=mouse0,disable-legacy=on,disable-modern=off,iommu_platform=on",
     ]);
-    if usb_hid {
-        // xHCI con teclado y raton USB HID (Fase 25, segunda parte).
-        q.args(["-device", "qemu-xhci,id=xhci"]);
-        q.args(["-device", "usb-kbd,bus=xhci.0"]);
-        q.args(["-device", "usb-mouse,bus=xhci.0"]);
+    if usb.hid || usb.storage {
+        // xHCI (Fase 25, segunda parte) con teclado y raton USB HID y/o el
+        // disco de pruebas como almacenamiento USB.
+        let xhci = if usb.hid_msi {
+            "qemu-xhci,id=xhci,msi=on,msix=off"
+        } else {
+            "qemu-xhci,id=xhci"
+        };
+        q.args(["-device", xhci]);
+        if usb.hid {
+            q.args(["-device", "usb-kbd,bus=xhci.0"]);
+            q.args(["-device", "usb-mouse,bus=xhci.0"]);
+        }
+        if usb.storage {
+            q.args(["-device", "usb-storage,bus=xhci.0,drive=disk0"]);
+        }
     }
-    if usb_legacy_controller {
+    if usb.legacy_controller {
         // EHCI (clase 0c.03, interfaz 0x20): no es xHCI.
         q.args(["-device", "usb-ehci,id=ehci"]);
     }
@@ -196,12 +223,23 @@ fn run_input_probe(
             }
         }
         std::thread::sleep(Duration::from_millis(100));
+        // "a" pulsa y suelta; "shift+dot" pulsa los modificadores, la tecla,
+        // y los suelta en orden inverso.
         for key in keys {
-            for down in [true, false] {
+            let parts: Vec<&str> = key.split('+').collect();
+            for part in &parts {
                 step(
                     &mut qmp,
                     format!(
-                        r#"{{"type":"key","data":{{"down":{down},"key":{{"type":"qcode","data":"{key}"}}}}}}"#
+                        r#"{{"type":"key","data":{{"down":true,"key":{{"type":"qcode","data":"{part}"}}}}}}"#
+                    ),
+                )?;
+            }
+            for part in parts.iter().rev() {
+                step(
+                    &mut qmp,
+                    format!(
+                        r#"{{"type":"key","data":{{"down":false,"key":{{"type":"qcode","data":"{part}"}}}}}}"#
                     ),
                 )?;
             }
@@ -410,7 +448,11 @@ pub fn run_interactive(
         Some(esp.as_path())
     };
     let _responder = Responder::start()?;
-    let mut q = base_command(esp_drive, &vars, &disk, false, cpus, usb_hid, false);
+    let usb = UsbOptions {
+        hid: usb_hid,
+        ..UsbOptions::default()
+    };
+    let mut q = base_command(esp_drive, &vars, &disk, false, cpus, usb);
     if cmdline.split_whitespace().any(|w| w == "gui") {
         // Con `gui` hace falta ver la pantalla: ventana de QEMU y serie en la terminal.
         println!("[xtask] QEMU con pantalla (serie en la terminal; salir: cerrar la ventana)");
@@ -467,8 +509,7 @@ pub struct Headless<'a> {
     /// Ficheros que van a AriFS del disco de pruebas (paquetes instalados).
     pub installed: &'a [(String, Vec<u8>)],
     pub cpus: u32,
-    pub usb_hid: bool,
-    pub usb_legacy_controller: bool,
+    pub usb: UsbOptions,
 }
 
 pub fn run_headless(
@@ -507,8 +548,7 @@ pub fn run_headless(
         &disk,
         disk_readonly,
         options.cpus,
-        options.usb_hid,
-        options.usb_legacy_controller,
+        options.usb,
     )
     .args(["-display", "none", "-monitor", "none", "-serial", "stdio"])
     .args([

@@ -33,7 +33,7 @@ mod time;
 mod user;
 
 use aricode_cmdline::{keys, CmdLine};
-use boot_protocol::{BootInfo, BOOT_PROTOCOL_MAGIC, BOOT_PROTOCOL_VERSION};
+use boot_protocol::{Beacon, BootInfo, BOOT_PROTOCOL_MAGIC, BOOT_PROTOCOL_VERSION};
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
 use log::{debug, info, trace, warn, LevelFilter};
@@ -57,6 +57,13 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     let info = validate_boot_info(boot_info);
     let fb_end = info.framebuffer.address + info.framebuffer.size;
     memory::phys::init(info.phys_map_offset, info.phys_map_limit, fb_end);
+    if info.framebuffer.address != 0 {
+        // Baliza "el kernel ha arrancado" para hardware sin serie
+        // (docs/hardware.md); la consola la borra al iniciarse.
+        let base = memory::phys::phys_to_virt(info.framebuffer.address) as *mut u8;
+        // SAFETY: AriBoot mapeó el framebuffer completo en el mapa físico.
+        unsafe { info.framebuffer.beacon(base, Beacon::KERNEL_ENTRY) };
+    }
     initrd::snapshot_digest(info);
 
     // SAFETY: AriBoot copió la cmdline a memoria de kernel accesible por el mapa físico.
@@ -138,7 +145,7 @@ fn check_boot_stack(info: &BootInfo) {
 
 /// Segunda etapa, ya sobre la pila definitiva y las tablas del kernel.
 extern "C" fn kernel_main(info: *const BootInfo) -> ! {
-    // SAFETY: mismo puntero validado en `kernel_entry`; memoria de tipo Kernel
+    // SAFETY: mismo puntero validado en `kernel_entry`; página conservada
     // accesible por el mapa físico.
     let info = unsafe { &*info };
     let cmdline = CmdLine::new(unsafe { info.cmdline() });
@@ -154,13 +161,21 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     info!("interrupciones habilitadas");
 
     task::init();
+    console::start_cursor_thread();
     if cmdline.get(keys::SMP) == Some("off") {
         info!("smp: desactivado por la linea de comandos (smp=off); 1 CPU");
     } else {
         arch::x86_64::smp::start_aps(info);
     }
     random::init();
-    console_input::init();
+    let layout = match cmdline.get(keys::KBD) {
+        None => aricode_input::Layout::Us,
+        Some(name) => aricode_input::Layout::parse(name).unwrap_or_else(|| {
+            warn!("cmdline: kbd={name} desconocido, se usa us");
+            aricode_input::Layout::Us
+        }),
+    };
+    console_input::init(layout);
     initrd::init(info);
     pci::init();
     if cmdline.get(keys::IOMMU) == Some("off") {
@@ -282,9 +297,7 @@ fn report_kernel(info: &BootInfo) {
 }
 
 fn report_memory(info: &BootInfo) {
-    const NAMES: [&str; 7] = [
-        "free", "kernel", "boot", "firmware", "acpi", "mmio", "reserved",
-    ];
+    const NAMES: [&str; 6] = ["free", "boot", "firmware", "acpi", "mmio", "reserved"];
     let mut totals = [0u64; NAMES.len()];
     let mut count = 0u32;
     // SAFETY: el mapa está en memoria de boot accesible por el mapa físico.

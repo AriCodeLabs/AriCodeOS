@@ -18,7 +18,20 @@ pub const BTN_LEFT: u16 = 0x110;
 pub const BTN_RIGHT: u16 = 0x111;
 pub const BTN_MIDDLE: u16 = 0x112;
 
+pub const KEY_MINUS: u16 = 12;
+pub const KEY_EQUAL: u16 = 13;
+pub const KEY_LEFTBRACE: u16 = 26;
+pub const KEY_RIGHTBRACE: u16 = 27;
 pub const KEY_ENTER: u16 = 28;
+pub const KEY_SEMICOLON: u16 = 39;
+pub const KEY_APOSTROPHE: u16 = 40;
+pub const KEY_GRAVE: u16 = 41;
+pub const KEY_BACKSLASH: u16 = 43;
+pub const KEY_COMMA: u16 = 51;
+pub const KEY_DOT: u16 = 52;
+pub const KEY_SLASH: u16 = 53;
+/// Tecla `<` de los teclados ISO (junto a la mayúscula izquierda).
+pub const KEY_102ND: u16 = 86;
 pub const KEY_LEFTSHIFT: u16 = 42;
 pub const KEY_RIGHTSHIFT: u16 = 54;
 pub const KEY_BACKSPACE: u16 = 14;
@@ -62,12 +75,43 @@ impl Event {
     }
 }
 
-/// Teclado US: seguimiento de mayúsculas y traducción de pulsaciones.
+/// Disposición del teclado: US (QWERTY ANSI) o española (ISO, con `AltGr`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    #[default]
+    Us,
+    Es,
+}
+
+impl Layout {
+    /// Nombre de la cmdline (`kbd=es`).
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "us" => Some(Self::Us),
+            "es" => Some(Self::Es),
+            _ => None,
+        }
+    }
+}
+
+/// Teclado: seguimiento de mayúsculas, `AltGr` y traducción de pulsaciones
+/// según la disposición.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Keyboard {
     shift: bool,
     caps: bool,
+    altgr: bool,
+    layout: Layout,
 }
+
+/// Teclado español (ISO): códigos evdev 1..=86 (esc..`<`). Lo que no es
+/// ASCII (ñ, ç, acentos, º, ¡, ¿, ·) no produce nada.
+const ES_PLAIN: &[u8; 87] =
+    b"\0\x1b1234567890'\0\x08\tqwertyuiop`+\n\0asdfghjkl\0\0\0\0\0zxcvbnm,.-\0*\0 \0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0<";
+const ES_SHIFTED: &[u8; 87] =
+    b"\0\x1b!\"\0$%&/()=?\0\x08\tQWERTYUIOP^*\n\0ASDFGHJKL\0\0\0\0\0ZXCVBNM;:_\0*\0 \0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0>";
+const ES_ALTGR: &[u8; 87] =
+    b"\0\0|@#~\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0[]\0\0\0\0\0\0\0\0\0\0\0\0{\\\0}\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 
 /// Fila de códigos evdev 1..=57 (esc..espacio) sin y con mayúsculas.
 const PLAIN: &[u8; 58] =
@@ -77,44 +121,131 @@ const SHIFTED: &[u8; 58] =
 
 impl Keyboard {
     pub const fn new() -> Self {
+        Self::with_layout(Layout::Us)
+    }
+
+    pub const fn with_layout(layout: Layout) -> Self {
         Self {
             shift: false,
             caps: false,
+            altgr: false,
+            layout,
         }
     }
 
-    /// Procesa un evento; devuelve el carácter producido, si lo hay.
-    pub fn feed(&mut self, ev: Event) -> Option<u8> {
+    pub fn set_layout(&mut self, layout: Layout) {
+        self.layout = layout;
+    }
+
+    pub fn layout(&self) -> Layout {
+        self.layout
+    }
+
+    /// Procesa un evento; devuelve los bytes que produce (ninguno, un
+    /// carácter o una secuencia de escape ANSI para las teclas de edición).
+    pub fn feed(&mut self, ev: Event) -> KeyBytes {
         if ev.kind != EV_KEY {
-            return None;
+            return KeyBytes::NONE;
         }
         match ev.code {
             KEY_LEFTSHIFT | KEY_RIGHTSHIFT => {
                 self.shift = ev.value != 0;
-                return None;
+                return KeyBytes::NONE;
             }
             KEY_CAPSLOCK => {
                 if ev.value == 1 {
                     self.caps = !self.caps;
                 }
-                return None;
+                return KeyBytes::NONE;
+            }
+            KEY_RIGHTALT => {
+                self.altgr = ev.value != 0;
+                return KeyBytes::NONE;
             }
             _ => {}
         }
         if ev.value != 1 {
-            return None; // solo pulsaciones (no repeticiones ni sueltas)
+            return KeyBytes::NONE; // solo pulsaciones (no repeticiones ni sueltas)
+        }
+        // Teclas de edición: las mismas secuencias que envía un terminal
+        // serie, para que el shell las trate igual vengan de donde vengan.
+        let escape: Option<&[u8]> = match ev.code {
+            KEY_UP => Some(b"\x1b[A"),
+            KEY_DOWN => Some(b"\x1b[B"),
+            KEY_RIGHT => Some(b"\x1b[C"),
+            KEY_LEFT => Some(b"\x1b[D"),
+            KEY_HOME => Some(b"\x1b[H"),
+            KEY_END => Some(b"\x1b[F"),
+            KEY_DELETE => Some(b"\x1b[3~"),
+            _ => None,
+        };
+        if let Some(seq) = escape {
+            return KeyBytes::sequence(seq);
         }
         let i = ev.code as usize;
-        if i >= PLAIN.len() {
-            return None;
+        let (plain, shifted, altgr) = match self.layout {
+            Layout::Us if i < PLAIN.len() => (PLAIN[i], SHIFTED[i], 0),
+            Layout::Es if i < ES_PLAIN.len() => (ES_PLAIN[i], ES_SHIFTED[i], ES_ALTGR[i]),
+            _ => return KeyBytes::NONE,
+        };
+        if self.altgr {
+            return if altgr == 0 {
+                KeyBytes::NONE
+            } else {
+                KeyBytes::single(altgr)
+            };
         }
-        let (plain, shifted) = (PLAIN[i], SHIFTED[i]);
         if plain == 0 {
-            return None;
+            return KeyBytes::NONE;
         }
         let letter = plain.is_ascii_lowercase();
         let upper = self.shift ^ (self.caps && letter);
-        Some(if upper { shifted } else { plain })
+        let b = if upper { shifted } else { plain };
+        if b == 0 {
+            KeyBytes::NONE
+        } else {
+            KeyBytes::single(b)
+        }
+    }
+}
+
+/// Bytes que produce una pulsación: nada, un carácter o una secuencia de
+/// escape (hasta 4 bytes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyBytes {
+    buf: [u8; 4],
+    len: u8,
+}
+
+impl KeyBytes {
+    pub const NONE: Self = Self {
+        buf: [0; 4],
+        len: 0,
+    };
+
+    const fn single(b: u8) -> Self {
+        Self {
+            buf: [b, 0, 0, 0],
+            len: 1,
+        }
+    }
+
+    fn sequence(seq: &[u8]) -> Self {
+        let mut buf = [0u8; 4];
+        let len = seq.len().min(4);
+        buf[..len].copy_from_slice(&seq[..len]);
+        Self {
+            buf,
+            len: len as u8,
+        }
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.buf[..self.len as usize]
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 }
 
@@ -504,48 +635,100 @@ mod tests {
         let mut out = alloc_free_buf();
         let mut n = 0;
         for code in [35u16, 24, 38, 30, KEY_ENTER] {
-            if let Some(c) = k.feed(key(code, 1)) {
+            for &c in k.feed(key(code, 1)).as_slice() {
                 out[n] = c;
                 n += 1;
             }
-            assert_eq!(k.feed(key(code, 0)), None, "soltar no produce nada");
+            assert!(k.feed(key(code, 0)).is_empty(), "soltar no produce nada");
         }
         assert_eq!(&out[..n], b"hola\n");
+        // Teclas de edición: secuencias ANSI; la repetición no produce nada.
+        assert_eq!(k.feed(key(KEY_UP, 1)).as_slice(), b"\x1b[A");
+        assert_eq!(k.feed(key(KEY_DOWN, 1)).as_slice(), b"\x1b[B");
+        assert_eq!(k.feed(key(KEY_LEFT, 1)).as_slice(), b"\x1b[D");
+        assert_eq!(k.feed(key(KEY_DELETE, 1)).as_slice(), b"\x1b[3~");
+        assert!(k.feed(key(KEY_UP, 2)).is_empty());
     }
 
     #[test]
     fn shift_caps_and_repeats() {
         let mut k = Keyboard::new();
-        assert_eq!(k.feed(key(KEY_LEFTSHIFT, 1)), None);
-        assert_eq!(k.feed(key(30, 1)), Some(b'A'));
-        assert_eq!(k.feed(key(2, 1)), Some(b'!'));
+        assert!(k.feed(key(KEY_LEFTSHIFT, 1)).is_empty());
+        assert_eq!(k.feed(key(30, 1)).as_slice(), b"A");
+        assert_eq!(k.feed(key(2, 1)).as_slice(), b"!");
         k.feed(key(KEY_LEFTSHIFT, 0));
-        assert_eq!(k.feed(key(2, 1)), Some(b'1'));
-        assert_eq!(k.feed(key(KEY_CAPSLOCK, 1)), None);
-        assert_eq!(k.feed(key(30, 1)), Some(b'A'), "bloq mayus");
+        assert_eq!(k.feed(key(2, 1)).as_slice(), b"1");
+        assert!(k.feed(key(KEY_CAPSLOCK, 1)).is_empty());
+        assert_eq!(k.feed(key(30, 1)).as_slice(), b"A", "bloq mayus");
         assert_eq!(
-            k.feed(key(2, 1)),
-            Some(b'1'),
+            k.feed(key(2, 1)).as_slice(),
+            b"1",
             "bloq mayus no afecta a digitos"
         );
         k.feed(key(KEY_LEFTSHIFT, 1));
-        assert_eq!(k.feed(key(30, 1)), Some(b'a'), "shift invierte bloq mayus");
-        assert_eq!(k.feed(key(30, 2)), None, "repeticion ignorada");
-        assert_eq!(k.feed(key(200, 1)), None, "codigo fuera de tabla");
         assert_eq!(
-            k.feed(Event {
+            k.feed(key(30, 1)).as_slice(),
+            b"a",
+            "shift invierte bloq mayus"
+        );
+        assert!(k.feed(key(30, 2)).is_empty(), "repeticion ignorada");
+        assert!(k.feed(key(200, 1)).is_empty(), "codigo fuera de tabla");
+        assert!(k
+            .feed(Event {
                 kind: EV_REL,
                 code: 0,
                 value: 1
-            }),
-            None
-        );
+            })
+            .is_empty());
     }
 
     fn alloc_free_buf() -> [u8; 16] {
         [0; 16]
     }
 
+    #[test]
+    fn spanish_layout_shift_altgr_and_dead_keys() {
+        let mut k = Keyboard::with_layout(Layout::Es);
+        assert_eq!(Layout::parse("es"), Some(Layout::Es));
+        assert_eq!(Layout::parse("fr"), None);
+        // `.` y, con mayúsculas, `:`; `7` y `/`; `-` y `_`; `<` y `>`.
+        assert_eq!(k.feed(key(KEY_DOT, 1)).as_slice(), b".");
+        k.feed(key(KEY_LEFTSHIFT, 1));
+        assert_eq!(k.feed(key(KEY_DOT, 1)).as_slice(), b":");
+        assert_eq!(k.feed(key(8, 1)).as_slice(), b"/");
+        assert_eq!(k.feed(key(KEY_SLASH, 1)).as_slice(), b"_");
+        assert_eq!(k.feed(key(KEY_102ND, 1)).as_slice(), b">");
+        assert_eq!(k.feed(key(3, 1)).as_slice(), b"\"");
+        assert!(k.feed(key(4, 1)).is_empty(), "shift+3 es · (no ASCII)");
+        k.feed(key(KEY_LEFTSHIFT, 0));
+        assert_eq!(k.feed(key(KEY_102ND, 1)).as_slice(), b"<");
+        assert_eq!(k.feed(key(KEY_SLASH, 1)).as_slice(), b"-");
+        assert_eq!(k.feed(key(KEY_MINUS, 1)).as_slice(), b"'");
+        // AltGr: @ # [ ] { } \ | ~.
+        k.feed(key(KEY_RIGHTALT, 1));
+        assert_eq!(k.feed(key(3, 1)).as_slice(), b"@");
+        assert_eq!(k.feed(key(4, 1)).as_slice(), b"#");
+        assert_eq!(k.feed(key(KEY_LEFTBRACE, 1)).as_slice(), b"[");
+        assert_eq!(k.feed(key(KEY_RIGHTBRACE, 1)).as_slice(), b"]");
+        assert_eq!(k.feed(key(KEY_APOSTROPHE, 1)).as_slice(), b"{");
+        assert_eq!(k.feed(key(KEY_BACKSLASH, 1)).as_slice(), b"}");
+        assert_eq!(k.feed(key(KEY_GRAVE, 1)).as_slice(), b"\\");
+        assert_eq!(k.feed(key(2, 1)).as_slice(), b"|");
+        assert_eq!(k.feed(key(5, 1)).as_slice(), b"~");
+        assert!(k.feed(key(30, 1)).is_empty(), "AltGr+a no produce nada");
+        k.feed(key(KEY_RIGHTALT, 0));
+        assert_eq!(k.feed(key(30, 1)).as_slice(), b"a");
+        // ñ, ç y la tecla º no son ASCII.
+        assert!(k.feed(key(KEY_SEMICOLON, 1)).is_empty());
+        assert!(k.feed(key(KEY_BACKSLASH, 1)).is_empty());
+        assert!(k.feed(key(KEY_GRAVE, 1)).is_empty());
+        // El teclado US no cambia.
+        let mut us = Keyboard::new();
+        us.feed(key(KEY_LEFTSHIFT, 1));
+        assert_eq!(us.feed(key(KEY_DOT, 1)).as_slice(), b">");
+        us.set_layout(Layout::Es);
+        assert_eq!(us.feed(key(KEY_DOT, 1)).as_slice(), b":");
+    }
     #[test]
     fn scancode_set1_to_evdev_and_ascii() {
         let mut d = ScancodeSet1::new();
@@ -555,7 +738,7 @@ mod tests {
         let mut n = 0;
         for byte in [0x23u8, 0xA3, 0x18, 0x98, 0x26, 0xA6, 0x1E, 0x9E, 0x1C, 0x9C] {
             if let Some(ev) = d.feed(byte) {
-                if let Some(c) = k.feed(ev) {
+                for &c in k.feed(ev).as_slice() {
                     out[n] = c;
                     n += 1;
                 }
@@ -572,7 +755,7 @@ mod tests {
             })
         );
         k.feed(d.feed(0x2A).unwrap());
-        assert_eq!(k.feed(d.feed(0x1E).unwrap()), Some(b'A'));
+        assert_eq!(k.feed(d.feed(0x1E).unwrap()).as_slice(), b"A");
         k.feed(d.feed(0xAA).unwrap());
         // Extendidas: E0 48 = flecha arriba; E0 53 = suprimir; E0 con codigo desconocido se ignora.
         assert_eq!(d.feed(0xE0), None);
@@ -655,7 +838,7 @@ mod tests {
         let mut chars = [0u8; 4];
         let mut c = 0;
         for ev in &out[..n] {
-            if let Some(ch) = text.feed(*ev) {
+            for &ch in text.feed(*ev).as_slice() {
                 chars[c] = ch;
                 c += 1;
             }

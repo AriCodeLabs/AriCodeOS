@@ -12,6 +12,7 @@
 extern crate alloc;
 
 use aricode_proto::block::{Op, Reply, Request, Status, MAX_SECTORS};
+use aricode_rt::sys::block::ClientBuffers;
 use aricode_rt::sys::virtio_pci::{DmaRegion, Queue, Transport, IRQ, SERVICE};
 use aricode_rt::sys::{self, Error, Handle, TIMEOUT_INFINITE};
 use aricode_virtio::blk;
@@ -148,37 +149,11 @@ fn report_partitions(dev: &mut Device) {
     }
 }
 
-/// Mapeos de buffers DMA de clientes, reutilizados por direccion fisica
-/// (cada `mmio_map` crea un mapeo nuevo que no se libera hasta salir).
-struct ClientBuffers {
-    entries: [(u64, u64); 8], // (phys, len)
-    count: usize,
-}
-
-impl ClientBuffers {
-    fn map(&mut self, dma: Handle) -> Option<(u64, u64)> {
-        let phys = sys::dma_phys(dma).ok()?;
-        let len = sys::region_len(dma).ok()?;
-        if let Some(e) = self.entries[..self.count].iter().find(|e| e.0 == phys) {
-            return Some(*e);
-        }
-        sys::mmio_map(dma).ok()?;
-        if self.count < self.entries.len() {
-            self.entries[self.count] = (phys, len);
-            self.count += 1;
-        }
-        Some((phys, len))
-    }
-}
-
 /// Bucle de servicio: una peticion por mensaje, respuesta por el endpoint
 /// transferido en el mensaje.
 fn serve(dev: &mut Device) -> ! {
     let capacity = dev.capacity();
-    let mut buffers = ClientBuffers {
-        entries: [(0, 0); 8],
-        count: 0,
-    };
+    let mut buffers = ClientBuffers::new();
     let mut msg = [0u8; 32];
     let mut handles = [Handle(0); 2];
     say(b"sirviendo peticiones");

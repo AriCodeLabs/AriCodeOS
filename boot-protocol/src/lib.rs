@@ -11,7 +11,7 @@
 pub const BOOT_PROTOCOL_MAGIC: u64 = 0x3145_444F_4349_5241;
 
 /// Versión del protocolo. El kernel rechaza versiones que no entiende.
-pub const BOOT_PROTOCOL_VERSION: u32 = 3;
+pub const BOOT_PROTOCOL_VERSION: u32 = 4;
 
 /// Dirección virtual base donde se enlaza y se mapea el kernel (mitad alta,
 /// últimos 2 GiB del espacio canónico: compatible con `code-model=kernel`).
@@ -29,11 +29,6 @@ pub const KERNEL_PATH: &str = "\\aricodeos\\kernel.elf";
 /// Línea de comandos opcional del kernel (ver crate `aricode-cmdline`).
 pub const CMDLINE_PATH: &str = "\\aricodeos\\cmdline.txt";
 
-/// Tipo de memoria UEFI (rango OEM/OS loader) con el que AriBoot marca todas
-/// las páginas que el kernel debe conservar: imagen del kernel, tablas de
-/// páginas iniciales, pila y el propio `BootInfo`.
-pub const MEMORY_TYPE_KERNEL: u32 = 0x8000_0000;
-
 /// Firma de la función de entrada del kernel.
 ///
 /// AriBoot salta aquí con interrupciones deshabilitadas, paginación activa
@@ -47,7 +42,12 @@ pub const MEMORY_TYPE_KERNEL: u32 = 0x8000_0000;
 pub type KernelEntry = unsafe extern "C" fn(boot_info: *const BootInfo) -> !;
 
 /// Información entregada por el bootloader. Vive en una página propia
-/// (tipo `MEMORY_TYPE_KERNEL`) accesible por identidad.
+/// (`boot_info_address`) accesible por identidad.
+///
+/// Toda la memoria que AriBoot reserva para el kernel es `LOADER_DATA`
+/// (ADR 0021): algunos firmwares se cuelgan en `GetMemoryMap` con tipos de
+/// memoria propios. En el mapa esas páginas son `Boot`; el kernel conserva
+/// las que describe [`BootInfo::kernel_ranges`] y recupera el resto.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct BootInfo {
@@ -78,6 +78,12 @@ pub struct BootInfo {
 
     /// Dirección física del PML4 activo al entrar al kernel.
     pub page_table_root: u64,
+    /// Páginas (base y tamaño) de las tablas que AriBoot construyó; el kernel
+    /// las recupera cuando activa las suyas.
+    pub page_tables_base: u64,
+    pub page_tables_size: u64,
+    /// Dirección física de la página que contiene este `BootInfo`.
+    pub boot_info_address: u64,
 
     /// initrd: reservado para fases posteriores. 0 si no hay.
     pub initrd_address: u64,
@@ -116,6 +122,21 @@ impl BootInfo {
             self.cmdline_size as usize,
         );
         core::str::from_utf8(bytes).unwrap_or("")
+    }
+
+    /// Rangos físicos `[inicio, fin)` que el kernel debe conservar aunque el
+    /// mapa UEFI los anuncie como memoria de arranque: imagen, pila inicial,
+    /// página del `BootInfo`, initrd y cmdline (vacíos si no existen). Las
+    /// tablas de AriBoot no están: se recuperan al activar las del kernel.
+    pub fn kernel_ranges(&self) -> [(u64, u64); 5] {
+        let range = |base: u64, size: u64| (base, base.saturating_add(size));
+        [
+            range(self.kernel_phys_base, self.kernel_size),
+            range(self.kernel_stack_base, self.kernel_stack_size),
+            range(self.boot_info_address, 4096),
+            range(self.initrd_address, self.initrd_size),
+            range(self.cmdline_address, self.cmdline_size),
+        ]
     }
 
     /// Iterador sobre el mapa de memoria a través del mapa físico.
@@ -213,19 +234,18 @@ impl MemoryDescriptor {
 pub enum MemoryRegionKind {
     /// Utilizable inmediatamente por el allocator físico.
     Free = 0,
-    /// Imagen, tablas, pila y BootInfo del kernel. Nunca liberar.
-    Kernel = 1,
-    /// Datos del bootloader y de boot services. Reclamable una vez el kernel
-    /// ha copiado lo que necesita del `BootInfo`.
-    Boot = 2,
+    /// Datos del bootloader y de boot services, incluidas las páginas que
+    /// AriBoot reservó para el kernel. Reclamable salvo
+    /// [`BootInfo::kernel_ranges`].
+    Boot = 1,
     /// Código/datos de runtime services. Reservado mientras se usen.
-    Firmware = 3,
+    Firmware = 2,
     /// Tablas ACPI (reclamable) y NVS (no).
-    Acpi = 4,
+    Acpi = 3,
     /// Regiones MMIO / puertos.
-    Mmio = 5,
+    Mmio = 4,
     /// Reservado, inutilizable o desconocido.
-    Reserved = 6,
+    Reserved = 5,
 }
 
 impl MemoryRegionKind {
@@ -236,8 +256,7 @@ impl MemoryRegionKind {
             5 | 6 => Self::Firmware, // RuntimeServices*
             9 | 10 => Self::Acpi,    // AcpiReclaim, AcpiNvs
             11 | 12 => Self::Mmio,   // Mmio, MmioPortSpace
-            MEMORY_TYPE_KERNEL => Self::Kernel,
-            _ => Self::Reserved, // Reserved, Unusable, Pal, Persistent...
+            _ => Self::Reserved,     // Reserved, Unusable, Pal, Persistent...
         }
     }
 }
@@ -289,6 +308,101 @@ impl FramebufferInfo {
             _reserved: 0,
         }
     }
+
+    /// Codifica un color (8 bits por canal) como píxel de 32 bits según
+    /// `pixel_format`. Con `None` devuelve 0.
+    pub fn encode(&self, r: u8, g: u8, b: u8) -> u32 {
+        match self.pixel_format {
+            PixelFormat::Rgb => (r as u32) | (g as u32) << 8 | (b as u32) << 16,
+            PixelFormat::Bgr => (b as u32) | (g as u32) << 8 | (r as u32) << 16,
+            PixelFormat::Bitmask => {
+                let place = |v: u8, mask: u32| -> u32 {
+                    if mask == 0 {
+                        return 0;
+                    }
+                    let shift = mask.trailing_zeros();
+                    let bits = (mask >> shift).count_ones().min(8);
+                    ((v as u32) >> (8 - bits)) << shift
+                };
+                place(r, self.red_mask) | place(g, self.green_mask) | place(b, self.blue_mask)
+            }
+            PixelFormat::None => 0,
+        }
+    }
+
+    /// Pinta una baliza de arranque: un cuadrado de [`Beacon::SIZE`] píxeles en
+    /// la fila superior de la pantalla, en la posición `beacon.index`. Sin
+    /// puerto serie, las balizas dicen hasta dónde llegó el arranque antes de
+    /// que el kernel tenga consola (`docs/hardware.md`). Se recorta a la
+    /// pantalla y a `size`; sin framebuffer no hace nada.
+    ///
+    /// # Safety
+    /// `base` debe apuntar a los `size` bytes del framebuffer, mapeados y
+    /// escribibles.
+    pub unsafe fn beacon(&self, base: *mut u8, beacon: Beacon) {
+        if self.address == 0 || self.pixel_format == PixelFormat::None {
+            return;
+        }
+        let [r, g, b] = beacon.rgb;
+        let pixel = self.encode(r, g, b);
+        let x0 = Beacon::GAP + beacon.index * (Beacon::SIZE + Beacon::GAP);
+        let x1 = (x0 + Beacon::SIZE).min(self.width);
+        let y1 = (Beacon::GAP + Beacon::SIZE).min(self.height);
+        let pixels = (self.size / 4) as usize;
+        for y in Beacon::GAP..y1 {
+            for x in x0..x1 {
+                let idx = y as usize * self.stride as usize + x as usize;
+                if idx >= pixels {
+                    return;
+                }
+                // SAFETY: `idx` está dentro de `size` y de la pantalla; el
+                // llamador garantiza que `base` es el framebuffer mapeado.
+                unsafe { base.cast::<u32>().add(idx).write_volatile(pixel) };
+            }
+        }
+    }
+}
+
+/// Baliza de arranque: posición en la fila superior y color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Beacon {
+    pub index: u32,
+    pub rgb: [u8; 3],
+}
+
+impl Beacon {
+    /// Lado del cuadrado en píxeles.
+    pub const SIZE: u32 = 32;
+    /// Separación entre balizas y respecto al borde.
+    pub const GAP: u32 = 8;
+    /// AriBoot, justo antes de `ExitBootServices` (blanca).
+    pub const LOADER_BEFORE_EXIT: Beacon = Beacon {
+        index: 0,
+        rgb: [255, 255, 255],
+    };
+    /// AriBoot, tras `ExitBootServices` y justo antes de saltar al kernel (verde).
+    pub const LOADER_JUMP: Beacon = Beacon {
+        index: 1,
+        rgb: [0, 200, 0],
+    };
+    /// AriKernel, en la entrada, antes de la consola (naranja).
+    pub const KERNEL_ENTRY: Beacon = Beacon {
+        index: 2,
+        rgb: [255, 160, 0],
+    };
+    /// Primera posición de los pasos del cargador (cian).
+    pub const FIRST_STEP: u32 = 3;
+
+    /// Paso `n` del cargador tras la cmdline (cian, a la derecha de las tres
+    /// anteriores): 0 mapa de memoria leído, 1 tablas reservadas, 2 mapa
+    /// físico construido, 3 kernel mapeado. Distingue un cuelgue del firmware
+    /// (consola o mapa de memoria) de uno del propio cargador.
+    pub const fn step(n: u32) -> Beacon {
+        Beacon {
+            index: Self::FIRST_STEP + n,
+            rgb: [0, 255, 255],
+        }
+    }
 }
 
 // Comprobaciones de layout en tiempo de compilación.
@@ -298,7 +412,87 @@ const _: () = assert!(core::mem::size_of::<MemoryMap>() == 16);
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
+    use std::vec;
+    use std::vec::Vec;
+
+    fn fb(width: u32, height: u32, stride: u32, pixel_format: PixelFormat) -> FramebufferInfo {
+        FramebufferInfo {
+            address: 0x8000_0000,
+            size: stride as u64 * height as u64 * 4,
+            width,
+            height,
+            stride,
+            pixel_format,
+            red_mask: 0xF800,
+            green_mask: 0x07E0,
+            blue_mask: 0x001F,
+            _reserved: 0,
+        }
+    }
+
+    #[test]
+    fn encodes_pixels_by_format() {
+        assert_eq!(
+            fb(1, 1, 1, PixelFormat::Rgb).encode(0x11, 0x22, 0x33),
+            0x0033_2211
+        );
+        assert_eq!(
+            fb(1, 1, 1, PixelFormat::Bgr).encode(0x11, 0x22, 0x33),
+            0x0011_2233
+        );
+        // Máscaras 5-6-5: cada canal se recorta a sus bits.
+        assert_eq!(
+            fb(1, 1, 1, PixelFormat::Bitmask).encode(0xFF, 0x00, 0xFF),
+            0xF81F
+        );
+        assert_eq!(fb(1, 1, 1, PixelFormat::None).encode(0xFF, 0xFF, 0xFF), 0);
+    }
+
+    #[test]
+    fn beacon_paints_its_square_only() {
+        let info = fb(200, 100, 256, PixelFormat::Rgb);
+        let mut buf = vec![0u32; 256 * 100];
+        unsafe { info.beacon(buf.as_mut_ptr().cast(), Beacon::LOADER_JUMP) };
+        let x0 = Beacon::GAP + Beacon::SIZE + Beacon::GAP;
+        let pixel = info.encode(0, 200, 0);
+        let lit: Vec<(usize, usize)> = (0..100)
+            .flat_map(|y| (0..256).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf[y * 256 + x] != 0)
+            .collect();
+        assert_eq!(lit.len(), (Beacon::SIZE * Beacon::SIZE) as usize);
+        for &(x, y) in &lit {
+            assert!(x >= x0 as usize && x < (x0 + Beacon::SIZE) as usize);
+            assert!(y >= Beacon::GAP as usize && y < (Beacon::GAP + Beacon::SIZE) as usize);
+            assert_eq!(buf[y * 256 + x], pixel);
+        }
+    }
+
+    #[test]
+    fn beacon_clips_to_screen_and_size() {
+        // Pantalla de 20 px de ancho: la baliza 0 se recorta en x; la 1 cae fuera.
+        let mut info = fb(20, 30, 20, PixelFormat::Bgr);
+        let mut buf = vec![0u32; 20 * 30];
+        unsafe { info.beacon(buf.as_mut_ptr().cast(), Beacon::LOADER_BEFORE_EXIT) };
+        let lit = buf.iter().filter(|&&p| p != 0).count();
+        assert_eq!(lit, ((20 - Beacon::GAP) * (30 - Beacon::GAP)) as usize);
+        buf.fill(0);
+        unsafe { info.beacon(buf.as_mut_ptr().cast(), Beacon::LOADER_JUMP) };
+        assert!(buf.iter().all(|&p| p == 0));
+        // `size` menor que la pantalla: no se escribe más allá.
+        info.size = 20 * 10 * 4;
+        buf.fill(0);
+        unsafe { info.beacon(buf.as_mut_ptr().cast(), Beacon::LOADER_BEFORE_EXIT) };
+        assert!(buf[20 * 10..].iter().all(|&p| p == 0));
+        assert!(buf[..20 * 10].iter().any(|&p| p != 0));
+        // Los pasos del cargador van a la derecha de las tres balizas fijas.
+        assert_eq!(Beacon::step(0).index, Beacon::KERNEL_ENTRY.index + 1);
+        assert_eq!(Beacon::step(3).index, 6);
+        // Sin framebuffer no toca nada.
+        let none = FramebufferInfo::none();
+        unsafe { none.beacon(core::ptr::null_mut(), Beacon::KERNEL_ENTRY) };
+    }
 
     #[test]
     fn classifies_uefi_memory_types() {
@@ -312,9 +506,10 @@ mod tests {
         );
         assert_eq!(MemoryRegionKind::from_uefi_type(9), MemoryRegionKind::Acpi);
         assert_eq!(MemoryRegionKind::from_uefi_type(11), MemoryRegionKind::Mmio);
+        // Los tipos propios del rango OS loader ya no significan nada.
         assert_eq!(
-            MemoryRegionKind::from_uefi_type(MEMORY_TYPE_KERNEL),
-            MemoryRegionKind::Kernel
+            MemoryRegionKind::from_uefi_type(0x8000_0000),
+            MemoryRegionKind::Reserved
         );
         assert_eq!(
             MemoryRegionKind::from_uefi_type(0),
@@ -335,9 +530,7 @@ mod tests {
         // UEFI puede usar descriptores mas grandes que la estructura: stride 48.
         const STRIDE: usize = 48;
         let mut buf = [0u8; STRIDE * 2];
-        for (i, (ty, start, pages)) in [(7u32, 0x1000u64, 4u64), (MEMORY_TYPE_KERNEL, 0x9000, 1)]
-            .iter()
-            .enumerate()
+        for (i, (ty, start, pages)) in [(7u32, 0x1000u64, 4u64), (2, 0x9000, 1)].iter().enumerate()
         {
             let d = MemoryDescriptor {
                 ty: *ty,
@@ -360,7 +553,29 @@ mod tests {
         assert_eq!(v.items[0].kind(), MemoryRegionKind::Free);
         assert_eq!(v.items[0].size_bytes(), 4 * 4096);
         assert_eq!(v.items[0].end(), 0x1000 + 4 * 4096);
-        assert_eq!(v.items[1].kind(), MemoryRegionKind::Kernel);
+        assert_eq!(v.items[1].kind(), MemoryRegionKind::Boot);
+    }
+
+    #[test]
+    fn kernel_ranges_cover_what_the_kernel_keeps() {
+        let mut info = unsafe { core::mem::zeroed::<BootInfo>() };
+        info.kernel_phys_base = 0x10_0000;
+        info.kernel_size = 0x8_0000;
+        info.kernel_stack_base = 0x20_0000;
+        info.kernel_stack_size = 0x1_0000;
+        info.boot_info_address = 0x21_0000;
+        info.page_tables_base = 0x30_0000;
+        info.page_tables_size = 0x4_0000;
+        info.cmdline_address = 0x22_0000;
+        info.cmdline_size = 17;
+        let r = info.kernel_ranges();
+        assert_eq!(r[0], (0x10_0000, 0x18_0000));
+        assert_eq!(r[1], (0x20_0000, 0x21_0000));
+        assert_eq!(r[2], (0x21_0000, 0x21_1000));
+        assert_eq!(r[3], (0, 0), "sin initrd: rango vacio");
+        assert_eq!(r[4], (0x22_0000, 0x22_0011));
+        // Las tablas del cargador se recuperan: no estan entre lo conservado.
+        assert!(r.iter().all(|&(s, _)| s != info.page_tables_base));
     }
 
     #[test]

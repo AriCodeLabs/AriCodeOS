@@ -109,3 +109,41 @@ impl BlockClient {
         .map(|_| ())
     }
 }
+
+/// Buffers DMA de clientes mapeados en un servidor de bloques, reutilizados
+/// por dirección física (cada `mmio_map` crea un mapeo nuevo que no se
+/// libera hasta salir del proceso).
+pub struct ClientBuffers {
+    entries: [(u64, u64); 8], // (phys, len)
+    count: usize,
+}
+
+impl Default for ClientBuffers {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ClientBuffers {
+    pub const fn new() -> Self {
+        Self {
+            entries: [(0, 0); 8],
+            count: 0,
+        }
+    }
+
+    /// Dirección física y longitud del buffer `dma`, mapeándolo la primera vez.
+    pub fn map(&mut self, dma: Handle) -> Option<(u64, u64)> {
+        let phys = sys::dma_phys(dma).ok()?;
+        let len = sys::region_len(dma).ok()?;
+        if let Some(e) = self.entries[..self.count].iter().find(|e| e.0 == phys) {
+            return Some(*e);
+        }
+        sys::mmio_map(dma).ok()?;
+        if self.count < self.entries.len() {
+            self.entries[self.count] = (phys, len);
+            self.count += 1;
+        }
+        Some((phys, len))
+    }
+}

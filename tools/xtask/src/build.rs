@@ -107,6 +107,7 @@ pub fn initrd_programs() -> Result<Vec<String>> {
         String::from("init"),
         String::from("virtio_blk"),
         String::from("virtio_net"),
+        String::from("rtl_net"),
         String::from("virtio_input"),
         String::from("usb_input"),
         String::from("console_bridge"),
@@ -167,6 +168,7 @@ pub fn build_user_programs(release: bool) -> Result<PathBuf> {
         "ariinit",
         "ari-virtio-blk",
         "ari-virtio-net",
+        "ari-rtl-net",
         "ari-virtio-input",
         "ari-usb-input",
         "ari-console-bridge",
@@ -194,10 +196,36 @@ pub fn build_user_programs(release: bool) -> Result<PathBuf> {
         // 0x400000 es válido, y coincide con el `core` precompilado (LTO).
         run(c)?;
     }
-    Ok(root()
+    let out = root()
         .join("target")
         .join(KERNEL_TARGET)
-        .join(profile_dir(release)))
+        .join(profile_dir(release));
+    // Un programa sin su `build.rs` (`aricode_build::user_program`) se enlaza
+    // en la direccion por defecto y el kernel lo rechaza al arrancar ("el
+    // ELF no cabe en la region de usuario"): mejor fallar aqui.
+    for name in initrd_programs()? {
+        let bin = out.join(&name);
+        let header = std::fs::read(&bin).map_err(|e| format!("{}: {e}", bin.display()))?;
+        check_user_elf(&name, &header)?;
+    }
+    Ok(out)
+}
+
+/// Direccion base de los programas de usuario (`aricode-build`).
+pub const USER_BASE: u64 = 0x40_0000;
+
+/// El punto de entrada del ELF debe estar en la region de usuario.
+pub fn check_user_elf(name: &str, elf: &[u8]) -> Result {
+    if elf.len() < 32 || &elf[..4] != b"\x7fELF" {
+        return Err(format!("{name}: no es un ELF"));
+    }
+    let entry = u64::from_le_bytes(elf[24..32].try_into().expect("8 bytes"));
+    if entry < USER_BASE {
+        return Err(format!(
+            "{name}: punto de entrada {entry:#x} fuera de la region de usuario (falta build.rs con aricode_build::user_program)"
+        ));
+    }
+    Ok(())
 }
 
 /// Programa construido fuera del árbol y empaquetado (ADR 0017).
@@ -385,4 +413,20 @@ pub fn check() -> Result {
         run(c)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_elf_entry_must_be_in_user_region() {
+        let mut elf = [0u8; 64];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[24..32].copy_from_slice(&0x0020_1d00u64.to_le_bytes());
+        assert!(check_user_elf("x", &elf).unwrap_err().contains("build.rs"));
+        elf[24..32].copy_from_slice(&0x0040_0000u64.to_le_bytes());
+        assert!(check_user_elf("x", &elf).is_ok());
+        assert!(check_user_elf("x", b"nope").is_err());
+    }
 }

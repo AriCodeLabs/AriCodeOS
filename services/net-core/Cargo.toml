@@ -1,0 +1,16 @@
+[package]
+name = "ari-net-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Nucleo del servicio de red en ring 3: pila IPv4 minima y servidor NetServiceProtocol, independiente de la tarjeta"
+
+[lib]
+test = false
+bench = false
+
+[dependencies]
+aricode-sys = { path = "../../sdk/rust" }
+aricode-proto = { path = "../../sdk/proto" }
+aricode-net = { path = "../../libs/net" }
+aricode-rt = { path = "../../sdk/runtime" }

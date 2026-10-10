@@ -21,6 +21,7 @@ interno no se toca**; AriCodeOS arranca y escribe solo en su pendrive.
 
 ```bash
 cargo xtask usb-image                       # build/aricodeos-usb.img, cmdline "shell"
+cargo xtask usb-image --cmdline "shell kbd=es"   # teclado español (`:` en mayúscula+punto, `@` con AltGr)
 cargo xtask usb-image --cmdline "shell log=debug"
 lsblk                                       # identificar el pendrive (p. ej. /dev/sdX), NUNCA el disco interno
 sudo dd if=build/aricodeos-usb.img of=/dev/sdX bs=4M conv=fsync status=progress
@@ -37,10 +38,48 @@ y `ARIBOOT` (estado A/B). Es la misma imagen que arranca el escenario
 1. Con el portátil apagado, conectar el pendrive y entrar en el menú de
    arranque del firmware (F12, Esc, F9 según la marca). Elegir el pendrive
    en modo UEFI.
-2. AriBoot muestra sus trazas en pantalla y salta al kernel; el kernel
-   informa de CPU, memoria, ACPI, APIC, SMP, PCI e IOMMU y lanza init.
+2. AriBoot muestra sus trazas en pantalla (slots, GOP, ACPI, kernel,
+   cmdline, memoria, paginas, `ExitBootServices -> AriKernel`), pinta dos
+   balizas en la esquina superior izquierda y salta al kernel; el kernel pinta
+   la tercera, limpia la pantalla e informa de CPU, memoria, ACPI, APIC, SMP,
+   PCI e IOMMU y lanza init.
 3. Con `shell` en la cmdline aparece `ari> `. Comandos útiles: `cpus`,
-   `mem`, `devices`, `ps`, `uptime`, `reboot`, `shutdown`.
+   `mem`, `devices`, `ps`, `uptime`, `ls`, `cat`, `write`, `reboot`,
+   `shutdown`. El sistema de ficheros es la partición ARI0 del propio
+   pendrive, servida por usbd (ADR 0023).
+
+## Estado en el portátil de pruebas (2026-10-10)
+
+Primer arranque completo conseguido tras dos correcciones de AriBoot (GOP
+sin exclusividad y tipos de memoria estándar, ADR 0021). El equipo: Intel de
+2012 (xHCI `8086:1e31`, dos EHCI), Realtek `10ec:8136` (Ethernet) y
+`10ec:5286` (lector de tarjetas), Atheros `168c:0032` (Wi-Fi), sin DMAR.
+
+| Funciona | Falta |
+|---|---|
+| AriBoot: slots, GOP 800x600, kernel e initrd verificados | Wi-Fi Atheros AR9485 (fuera de alcance: ath9k, 802.11 y WPA2) |
+| Red por cable con `rtl_net` (ADR 0024): DHCP, `ping` al router en 1 ms y `dns google.com` resueltos (2026-10-10) | |
+| Pendrive como servicio de bloques por USB (ADR 0023; "USB Disk 3.0", sin `SYNCHRONIZE CACHE`), fsd, confirmación del slot A y shell por el teclado PS/2 (2026-10-10) | EHCI sin driver (solo xHCI) |
+| Kernel: memoria, ACPI, APIC, PCI (17 funciones), init y sus pruebas, `ARICODEOS_KERNEL_READY` | Energía: estados de reposo y batería |
+| Teclado PS/2 en la consola del kernel (retroceso incluido) | |
+| xHCI con MSI (ADR 0022; el controlador no tiene MSI-X), cesión del firmware, puertos enrutados, 8 puertos, 16 scratchpads, servicio de entrada ok | |
+
+## Diagnóstico sin fotos
+
+El shell guarda el informe completo en el propio pendrive y el anfitrión lo
+lee de la partición ARI0:
+
+```bash
+# en el portátil
+ari> diag diag.txt
+ari> shutdown
+# en el anfitrión, con el pendrive conectado como /dev/sdX
+sudo dd if=/dev/sdX of=build/usb-dump.img bs=1M count=70 status=none
+cargo xtask fs-cat build/usb-dump.img            # lista los ficheros de ARI0
+cargo xtask fs-cat build/usb-dump.img diag.txt   # uptime, memoria, CPUs, procesos, servicios, PCI y sucesos
+```
+
+Los 70 MiB cubren la partición ARI0 de la imagen USB (LBA 133120 a 139263).
 
 ## Si algo falla
 
@@ -50,13 +89,49 @@ cualquier sistema) o regenerando la imagen con `--cmdline`:
 
 | Síntoma | Probar |
 |---|---|
+| Se para en "slots: arrancando desde el slot…" sin más líneas | Imagen anterior a 0.8.2: AriBoot abría el GOP en exclusiva y el firmware dejaba de pintar la consola. Regrabar con una imagen actual |
+| Se para en "memoria: GetMemoryMap (tamano)" sin la línea de respuesta | El firmware no vuelve de `GetMemoryMap`. En imágenes anteriores a 0.8.2 lo provocaba el tipo de memoria propio de AriBoot (ADR 0021); con una imagen actual, anotar las líneas `kernel:` e `initrd.img:` |
+| "GetMemoryMap: respuesta invalida" | El firmware responde fuera de la especificación; anotar la línea `memoria: GetMemoryMap ->` |
+| Se para tras "ExitBootServices -> AriKernel" | Mirar las balizas (abajo) |
 | Se cuelga tras "smp:" o con varias CPUs | `smp=off` |
 | Pantalla negra o dispositivos que no responden tras "iommu:" | `iommu=off` |
 | Demasiada salida | `log=warn`; poca: `log=debug` |
 | No hay teclado | comprobar que el firmware expone el i8042 (algunos lo desactivan con "USB legacy"); la traza `console: teclado PS/2` debe aparecer |
+| Mayúscula+punto escribe `>` en vez de `:` | El teclado es español y la consola usa la disposición US: `kbd=es` en la cmdline (`cargo xtask usb-image --cmdline "shell kbd=es"`). Solo afecta al teclado PS/2 del kernel; los USB y virtio siguen en US |
+| "usb-input: sin BAR 0 o sin IRQ entre las capabilities" | La función no tiene MSI ni MSI-X (la traza `pci: … reclamado (…)` lo dice); INTx no está soportado |
+| "usb-input: fallo en la inicializacion del xHCI: …" | El paso que falló: capabilities, memoria DMA (el buffer se dimensiona con los scratchpads que pide el controlador), reset o arranque |
+| "usb-input: sin almacenamiento USB" con el pendrive conectado | El pendrive no está en el xHCI: comprobar la traza `puertos Intel enrutados al xHCI`; si no aparece, el puerto cuelga de un EHCI sin driver (probar otro puerto, los azules suelen ser xHCI) |
+| "usb-input: puerto N: …" con un error de INQUIRY, TEST UNIT READY o READ CAPACITY | El pendrive no responde al protocolo bulk-only; anotar la línea |
+| "AriInit: sin particion ARI0 en el disco" | El pendrive no lleva la imagen de `cargo xtask usb-image` (o se grabó otra cosa encima) |
+| "process: el ELF no cabe en la region de usuario" al lanzar un programa | El binario no se enlazó en la región de usuario (le falta `build.rs` con `aricode_build::user_program`); `cargo xtask build` lo detecta ahora antes de generar la imagen |
+| "rtl-net: sin enlace (cable desconectado?)" | El PHY no ve portadora: cable, o el firmware no dejó la autonegociación hecha (rtl-net no programa el PHY todavía) |
+| "rtl-net: fallo en la inicializacion: …" | Sin BAR de memoria, sin DMA o la tarjeta no completa el reset; anotar la línea `pci: … 10ec:8136 reclamado (…)` |
+| `net` en el shell sin dirección tras unos segundos | DHCP sin respuesta: comprobar el enlace (`rtl-net: enlace a N Mb/s`) y que la red tenga servidor DHCP |
+| "AriInit: fs_client salio con 6" u otro código, y antes "usb-input: WRITE(10) … rechazado: sentido k/asc/ascq" | El pendrive rechaza escrituras; el sentido (clave/asc/ascq) dice por qué (7/… = protegido contra escritura). Un pendrive que no admite `SYNCHRONIZE CACHE` se anuncia y no es un error |
 
 Anotar (o fotografiar) las últimas líneas antes del fallo: `EXCEPTION`,
 `KERNEL PANIC` y `iommu: fallo DMA` llevan la información necesaria.
+
+### Balizas
+
+Entre `ExitBootServices` y la primera línea del kernel no hay trazas (ya no
+hay firmware y el kernel aún no tiene consola). Para ver hasta dónde llega el
+arranque, AriBoot y el kernel pintan cuadrados de 32 px en la fila superior
+de la pantalla (`Beacon` en `boot-protocol`): los tres primeros huecos son
+blanco, verde y naranja; a su derecha, cuadrados cian por cada paso del
+cargador desde la cmdline (sirven aunque la consola del firmware se pare).
+La consola del kernel los borra al iniciarse, así que solo se ven si algo se
+para antes.
+
+| Pantalla | Dónde se paró |
+|---|---|
+| Última línea `cmdline:` o una de `memoria: GetMemoryMap…`, sin cuadrados cian | El firmware no responde: a su consola de texto (si falta la línea `memoria:`) o a `GetMemoryMap` (si está) |
+| Cuadrados cian (hasta cuatro, a la derecha de los tres primeros huecos) y nada más | Paso del cargador en que se paró: 1 mapa de memoria leído, 2 tablas reservadas, 3 mapa físico construido, 4 kernel mapeado |
+| Trazas de AriBoot hasta `ExitBootServices -> AriKernel`, ningún cuadrado | El framebuffer que anuncia la línea `GOP:` no es la pantalla (dirección o formato erróneos); anotar esa línea |
+| Cuadrado blanco | En `ExitBootServices` (firmware) |
+| Blanco y verde | En el salto al kernel: tablas de páginas, pila o la validación de `BootInfo` |
+| Blanco, verde y naranja, sin texto | Entre la entrada del kernel y su consola (hash del initrd) o la consola no pinta |
+| Texto del kernel | Seguir las trazas; ver la tabla anterior |
 
 ## Almacenamiento
 

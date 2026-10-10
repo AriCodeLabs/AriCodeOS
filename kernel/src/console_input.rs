@@ -9,7 +9,7 @@ use crate::arch::x86_64::ioapic;
 use crate::arch::x86_64::port::{inb, io_wait, outb};
 use crate::sync::IrqLock;
 use crate::task::wait::WaitQueue;
-use aricode_input::{Keyboard, ScancodeSet1};
+use aricode_input::{Keyboard, Layout, ScancodeSet1};
 use log::{info, warn};
 
 const COM1: u16 = 0x3F8;
@@ -77,7 +77,8 @@ static PS2: IrqLock<Ps2> = IrqLock::new(Ps2 {
 
 /// Enruta la IRQ de COM1 al vector propio y habilita la interrupción de
 /// recepción del UART. Requiere I/O APIC e interrupciones activas.
-pub fn init() {
+pub fn init(layout: Layout) {
+    PS2.lock().keyboard.set_layout(layout);
     let (gsi, ov) = crate::acpi::with(|a| a.madt.isa_irq_to_gsi(COM1_ISA_IRQ));
     let (level, low) = ov
         .map(|o| (o.level_triggered(), o.active_low()))
@@ -198,7 +199,13 @@ fn init_ps2() {
     ps2_write_data(0xF4);
     let _ = ps2_read();
     ps2_flush();
-    info!("console: teclado PS/2 (GSI {gsi}, vector {KEYBOARD_VECTOR:#x})");
+    info!(
+        "console: teclado PS/2 (GSI {gsi}, vector {KEYBOARD_VECTOR:#x}, disposicion {})",
+        match PS2.lock().keyboard.layout() {
+            Layout::Us => "us",
+            Layout::Es => "es",
+        }
+    );
 }
 
 /// Handler del vector del teclado: scancodes del conjunto 1 a texto.
@@ -220,7 +227,7 @@ pub fn on_keyboard_irq() {
                 continue;
             }
             if let Some(ev) = ps2.decoder.feed(byte) {
-                if let Some(c) = ps2.keyboard.feed(ev) {
+                for &c in ps2.keyboard.feed(ev).as_slice() {
                     ring.push(c);
                     pushed = true;
                 }

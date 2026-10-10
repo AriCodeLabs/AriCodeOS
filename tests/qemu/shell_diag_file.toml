@@ -1,0 +1,22 @@
+# Fase 34: `diag NOM` guarda el informe en AriFS para leerlo desde el
+# anfitrion con `cargo xtask fs-cat` (diagnostico del portatil sin fotos).
+name = "shell.diag_file"
+description = "arish: diag NOM escribe el informe completo en AriFS y cat lo relee"
+level = "full"
+areas = ["shell", "filesystem"]
+cmdline = "qemu_exit shell"
+timeout_secs = 60
+stdin = ["diag diag.txt", "ls", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "=== diagnostico AriCodeOS ===",
+    "PID  ESTADO      NOMBRE",
+    "1af4:1042 clase 01.00",
+    "=== fin del diagnostico ===",
+    "bytes en diag.txt",
+    "diag.txt",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "diag: no se pudo guardar"]

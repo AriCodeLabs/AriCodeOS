@@ -46,6 +46,10 @@ pub struct Console<S: Surface> {
     rows: usize,
     cursor_col: usize,
     cursor_row: usize,
+    /// Celda donde está pintado el cursor (`_`), si lo está.
+    cursor_drawn: Option<(usize, usize)>,
+    /// Hubo escrituras desde el último parpadeo: la consola no está quieta.
+    wrote_since_blink: bool,
     fg: Rgb,
     bg: Rgb,
     cells: [u8; MAX_CELLS],
@@ -63,6 +67,8 @@ impl<S: Surface> Console<S> {
             rows: 0,
             cursor_col: 0,
             cursor_row: 0,
+            cursor_drawn: None,
+            wrote_since_blink: false,
             fg: Self::DEFAULT_FG,
             bg: Self::DEFAULT_BG,
             cells: [b' '; MAX_CELLS],
@@ -114,6 +120,7 @@ impl<S: Surface> Console<S> {
         self.cells[..self.cols * self.rows].fill(b' ');
         self.cursor_col = 0;
         self.cursor_row = 0;
+        self.cursor_drawn = None;
         if let Some(s) = self.surface.as_mut() {
             let h = s.height();
             s.fill_rows(0, h, self.bg);
@@ -125,10 +132,43 @@ impl<S: Surface> Console<S> {
         self.cells[row * self.cols + col]
     }
 
+    /// Alterna el cursor: un `_` en la celda donde se escribirá lo siguiente.
+    /// Lo llama el kernel periódicamente; cualquier escritura lo oculta
+    /// antes de pintar, así que el contenido de las celdas no cambia.
+    pub fn blink(&mut self) {
+        if self.cursor_drawn.is_some() {
+            self.hide_cursor();
+            return;
+        }
+        // Mientras fluye texto no se pinta: el cursor solo tiene sentido en
+        // una consola quieta (y pintar sobre texto en movimiento cuesta).
+        if core::mem::take(&mut self.wrote_since_blink) {
+            return;
+        }
+        if self.surface.is_none() || self.cols == 0 {
+            return;
+        }
+        let col = self.cursor_col.min(self.cols - 1);
+        let row = self.cursor_row;
+        self.draw_glyph(col, row, b'_');
+        self.cursor_drawn = Some((col, row));
+    }
+
+    fn hide_cursor(&mut self) {
+        if let Some((col, row)) = self.cursor_drawn.take() {
+            self.draw_cell(col, row);
+        }
+    }
+
     pub fn write_char(&mut self, ch: char) {
+        self.hide_cursor();
+        self.wrote_since_blink = true;
         match ch {
             '\n' => self.newline(),
             '\r' => self.cursor_col = 0,
+            // Retroceso: el cursor vuelve una celda; borrar es cosa de quien
+            // escribe (el shell manda "\x08 \x08").
+            '\u{8}' => self.cursor_col = self.cursor_col.saturating_sub(1),
             '\t' => {
                 let next = (self.cursor_col / 8 + 1) * 8;
                 while self.cursor_col < next.min(self.cols) {
@@ -178,10 +218,14 @@ impl<S: Surface> Console<S> {
     }
 
     fn draw_cell(&mut self, col: usize, row: usize) {
+        let b = self.cells[row * self.cols + col];
+        self.draw_glyph(col, row, b);
+    }
+
+    fn draw_glyph(&mut self, col: usize, row: usize, b: u8) {
         let Some(surface) = self.surface.as_mut() else {
             return;
         };
-        let b = self.cells[row * self.cols + col];
         let glyph = &GLYPHS[(b - FIRST_CHAR) as usize];
         let x0 = col * GLYPH_WIDTH;
         let y0 = row * GLYPH_HEIGHT;
@@ -304,6 +348,67 @@ mod tests {
             C::DEFAULT_BG
         };
         assert_eq!(c.surface().unwrap().at(dx, dy), expect);
+    }
+
+    #[test]
+    fn backspace_moves_cursor_back_without_drawing() {
+        let mut c = C::new(Mem::new(64, 32));
+        write!(c, "ab\u{8} \u{8}").unwrap();
+        assert_eq!(c.cell(0, 0), b'a');
+        assert_eq!(c.cell(1, 0), b' ');
+        assert_eq!(c.cursor_col, 1);
+        // En la columna 0 no retrocede a la linea anterior.
+        write!(c, "\u{8}\u{8}x").unwrap();
+        assert_eq!(c.cell(0, 0), b'x');
+    }
+
+    #[test]
+    fn cursor_blinks_without_touching_cells() {
+        let mut c = C::new(Mem::new(64, 32));
+        write!(c, "a").unwrap();
+        // El primer parpadeo tras escribir solo anota que la consola estuvo
+        // activa; el siguiente, ya quieta, pinta.
+        c.blink();
+        let bottom = &GLYPHS[(b'_' - FIRST_CHAR) as usize];
+        let (dy, dx) = bottom
+            .iter()
+            .enumerate()
+            .find_map(|(dy, bits)| {
+                (0..GLYPH_WIDTH)
+                    .find(|dx| bits & (0x80 >> dx) != 0)
+                    .map(|dx| (dy, dx))
+            })
+            .expect("'_' tiene pixeles");
+        let (x, y) = (GLYPH_WIDTH + dx, dy);
+        assert_eq!(c.surface().unwrap().at(x, y), C::DEFAULT_BG);
+        c.blink();
+        assert_eq!(
+            c.surface().unwrap().at(x, y),
+            C::DEFAULT_FG,
+            "cursor pintado"
+        );
+        assert_eq!(c.cell(1, 0), b' ', "la celda no cambia");
+        c.blink();
+        assert_eq!(
+            c.surface().unwrap().at(x, y),
+            C::DEFAULT_BG,
+            "cursor borrado"
+        );
+        // Escribir con el cursor pintado lo oculta antes: la celda muestra 'b'.
+        c.blink();
+        write!(c, "b").unwrap();
+        assert_eq!(c.cursor_drawn, None);
+        assert_eq!(c.cell(1, 0), b'b');
+        let glyph_b = &GLYPHS[(b'b' - FIRST_CHAR) as usize];
+        let on = glyph_b[dy] & (0x80 >> dx) != 0;
+        assert_eq!(
+            c.surface().unwrap().at(x, y),
+            if on { C::DEFAULT_FG } else { C::DEFAULT_BG }
+        );
+        // Sin pantalla no hace nada.
+        let mut e = C::empty();
+        e.blink();
+        assert_eq!(e.cursor(), (0, 0));
     }
 
     #[test]

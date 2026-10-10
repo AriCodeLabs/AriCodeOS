@@ -14,6 +14,7 @@ bench = false
 
 [dependencies]
 aricode-sys = { path = "../../sdk/rust" }
+ari-net-core = { path = "../net-core" }
 aricode-virtio = { path = "../../libs/virtio" }
 aricode-proto = { path = "../../sdk/proto" }
 aricode-net = { path = "../../libs/net" }

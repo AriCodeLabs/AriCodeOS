@@ -1,0 +1,22 @@
+# Fase 34: teclado espanol (`kbd=es`) en la consola PS/2. El host teclea
+# "hola", mayuscula+punto (`:` en la disposicion espanola, `>` en la US) y
+# mayuscula+7 (`/`) por QMP; el kernel recibe "hola:/".
+name = "console.ps2_es"
+description = "teclado PS/2 con disposicion espanola: mayuscula+punto es ':' y mayuscula+7 es '/'"
+level = "full"
+areas = ["console", "hardware"]
+cmdline = "qemu_exit test=console_ps2 kbd=es"
+timeout_secs = 40
+
+[host_input]
+marker = "CONSOLE_PS2_READY"
+keys = ["h", "o", "l", "a", "shift+dot", "shift+7", "ret"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "disposicion es)",
+    "console: linea PS/2 'hola:/' (6 bytes, 18 scancodes)",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "nadie tecleo"]

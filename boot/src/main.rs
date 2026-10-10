@@ -9,8 +9,8 @@
 
 extern crate alloc;
 
+mod memmap;
 mod qemu;
-
 mod slots;
 
 use alloc::vec::Vec;
@@ -21,12 +21,12 @@ use aricode_x86_paging::{
     WRITABLE,
 };
 use boot_protocol::{
-    BootInfo, FramebufferInfo, MemoryMap, PixelFormat, BOOT_PROTOCOL_MAGIC, BOOT_PROTOCOL_VERSION,
-    KERNEL_VIRT_BASE, MEMORY_TYPE_KERNEL, PHYS_MAP_BASE,
+    Beacon, BootInfo, FramebufferInfo, MemoryMap, MemoryRegionKind, PixelFormat,
+    BOOT_PROTOCOL_MAGIC, BOOT_PROTOCOL_VERSION, KERNEL_VIRT_BASE, PHYS_MAP_BASE,
 };
 use core::ptr::NonNull;
 use log::{error, info, warn};
-use uefi::boot::{self, AllocateType, MemoryType};
+use uefi::boot::{self, AllocateType, MemoryType, OpenProtocolAttributes, OpenProtocolParams};
 use uefi::mem::memory_map::MemoryMap as _;
 use uefi::proto::console::gop::{self, GraphicsOutput};
 use uefi::proto::media::file::{File, FileAttribute, FileInfo, FileMode};
@@ -34,7 +34,10 @@ use uefi::table::cfg::ConfigTableEntry;
 use uefi::{cstr16, system, CStr16, Status};
 
 const KERNEL_STACK_PAGES: usize = 16; // 64 KiB
-const KERNEL_MEM: MemoryType = MemoryType::custom(MEMORY_TYPE_KERNEL);
+/// Tipo de las páginas reservadas para el kernel. Estándar a propósito (ADR
+/// 0021): con un tipo propio del rango OS loader algunos firmwares se cuelgan
+/// en `GetMemoryMap`. El kernel conserva estas páginas por `kernel_ranges`.
+const KERNEL_MEM: MemoryType = MemoryType::LOADER_DATA;
 
 #[uefi::entry]
 fn main() -> Status {
@@ -167,22 +170,34 @@ fn run(
     // 6. Extensión física a mapear: mapa actual + framebuffer.
     // Se excluyen Reserved/Unusable: el firmware suele anunciar aperturas MMIO
     // gigantes (p. ej. PCIe 64 bits) que el kernel mapeará bajo demanda.
-    let snapshot = boot::memory_map(MemoryType::LOADER_DATA).map_err(|_| "memory map")?;
-    let mut phys_limit: u64 = 0;
-    for d in snapshot.entries() {
-        if matches!(d.ty, MemoryType::RESERVED | MemoryType::UNUSABLE) {
-            continue;
-        }
-        phys_limit = phys_limit.max(d.phys_start + d.page_count * PAGE_SIZE);
-    }
-    phys_limit = phys_limit.max(4 << 30); // al menos 4 GiB (MMIO clásico bajo 4G)
-    phys_limit = phys_limit.next_multiple_of(HUGE_2M);
+    // Las balizas de paso (cian) acotan un cuelgue en hardware aunque la
+    // consola del firmware deje de pintar (docs/hardware.md).
+    // SAFETY: el firmware mantiene el framebuffer identidad-mapeado y
+    // `framebuffer` describe exactamente esa memoria.
+    let step =
+        |n: u32| unsafe { framebuffer.beacon(framebuffer.address as *mut u8, Beacon::step(n)) };
+    let snapshot = memmap::snapshot()?;
+    step(0);
+    let phys_limit = snapshot
+        .regions()
+        .filter(|d| d.kind() != MemoryRegionKind::Reserved)
+        .map(|d| d.end())
+        .max()
+        .unwrap_or(0)
+        .max(4 << 30) // al menos 4 GiB (MMIO clásico bajo 4G)
+        .next_multiple_of(HUGE_2M);
+    info!(
+        "memoria: {} regiones UEFI, limite fisico {} MiB",
+        snapshot.map.descriptor_count,
+        phys_limit >> 20
+    );
     drop(snapshot);
 
     // 7. Tablas de páginas: identidad (solo para el cargador), mapa físico
     // lineal en PHYS_MAP_BASE (lo que usará el kernel) y kernel en la mitad alta.
     let pool_pages = paging::pool_size_for(phys_limit, 2, kernel_pages as u64);
     let pool_mem = alloc_pages(pool_pages, "page tables")?;
+    step(1);
     // SAFETY: `pool_mem` son `pool_pages` páginas recién reservadas por UEFI,
     // alineadas, identidad-mapeadas y de uso exclusivo hasta que el kernel las herede.
     let pool = unsafe { BumpFrames::new(pool_mem.as_ptr() as u64, pool_pages) };
@@ -193,6 +208,7 @@ fn run(
     tables
         .map_range_2m(PHYS_MAP_BASE, 0, phys_limit, WRITABLE | NO_EXECUTE | GLOBAL)
         .map_err(|_| "tablas: mapa fisico")?;
+    step(2);
     if framebuffer.address != 0 {
         let fb_start = framebuffer.address & !(HUGE_2M - 1);
         let fb_end = (framebuffer.address + framebuffer.size).next_multiple_of(HUGE_2M);
@@ -227,9 +243,9 @@ fn run(
             )
             .map_err(|_| "tablas: kernel")?;
     }
+    step(3);
     info!(
-        "paginas: identidad y mapa fisico hasta {} MiB, {} tablas usadas de {}",
-        phys_limit >> 20,
+        "paginas: identidad y mapa fisico, {} tablas usadas de {}",
         tables.allocator().used_pages(),
         pool_pages
     );
@@ -252,6 +268,9 @@ fn run(
         kernel_stack_base: stack_base,
         kernel_stack_size: KERNEL_STACK_PAGES as u64 * PAGE_SIZE,
         page_table_root: tables.root_phys(),
+        page_tables_base: pool_mem.as_ptr() as u64,
+        page_tables_size: pool_pages as u64 * PAGE_SIZE,
+        boot_info_address: boot_info_page.as_ptr() as u64,
         initrd_address,
         initrd_size,
         cmdline_address,
@@ -261,6 +280,12 @@ fn run(
     };
 
     info!("ExitBootServices -> AriKernel");
+    // Balizas para hardware sin serie (docs/hardware.md): blanca antes de
+    // salir de boot services, verde justo antes del salto.
+    // SAFETY: el firmware mantiene el framebuffer identidad-mapeado y las
+    // tablas nuevas tambien lo cubren (identidad hasta phys_limit o mapa
+    // fisico); `framebuffer` describe exactamente esa memoria.
+    unsafe { framebuffer.beacon(framebuffer.address as *mut u8, Beacon::LOADER_BEFORE_EXIT) };
 
     // 9. Salir de boot services. A partir de aquí: sin log, sin allocator.
     // SAFETY: no quedan referencias a protocolos ni a memoria de boot services
@@ -273,6 +298,8 @@ fn run(
     };
     // El buffer del mapa debe sobrevivir: no liberar (tampoco se podría).
     core::mem::forget(final_map);
+    // SAFETY: como la baliza anterior; ExitBootServices no cambia el paginado.
+    unsafe { framebuffer.beacon(framebuffer.address as *mut u8, Beacon::LOADER_JUMP) };
 
     let boot_info_ptr = boot_info_page.as_ptr() as *mut BootInfo;
     // SAFETY: página propia, alineada, identidad-mapeada en las tablas nuevas.
@@ -307,9 +334,8 @@ fn alloc_pages(pages: usize, what: &'static str) -> Result<NonNull<u8>, &'static
     })
 }
 
-/// Carga `\aricodeos\initrd.img` (opcional) en páginas de tipo kernel.
 /// Copia el initrd (de la imagen de slot, o de la ESP si no lo hay) a páginas
-/// de tipo kernel.
+/// del kernel.
 fn load_initrd(from_slot: Option<Vec<u8>>) -> Result<(u64, u64), &'static str> {
     let bytes = match from_slot {
         Some(b) => b,
@@ -341,7 +367,7 @@ fn load_initrd(from_slot: Option<Vec<u8>>) -> Result<(u64, u64), &'static str> {
     Ok((dst.as_ptr() as u64, bytes.len() as u64))
 }
 
-/// Copia la cmdline a páginas de tipo kernel. Devuelve (dirección, tamaño).
+/// Copia la cmdline a páginas del kernel. Devuelve (dirección, tamaño).
 fn copy_cmdline(bytes: &[u8]) -> Result<(u64, u64), &'static str> {
     if bytes.is_empty() {
         return Ok((0, 0));
@@ -377,7 +403,21 @@ fn framebuffer_info() -> FramebufferInfo {
     let Ok(handle) = boot::get_handle_for_protocol::<GraphicsOutput>() else {
         return FramebufferInfo::none();
     };
-    let Ok(mut gop) = boot::open_protocol_exclusive::<GraphicsOutput>(handle) else {
+    // Apertura no exclusiva: la exclusiva desconecta al driver de consola del
+    // firmware y en hardware real la pantalla deja de mostrar las trazas de
+    // AriBoot (lo ultimo visible era la linea de slots).
+    // SAFETY: solo se leen el modo y la direccion del framebuffer; el firmware
+    // sigue pintando su consola hasta ExitBootServices.
+    let Ok(mut gop) = (unsafe {
+        boot::open_protocol::<GraphicsOutput>(
+            OpenProtocolParams {
+                handle,
+                agent: boot::image_handle(),
+                controller: None,
+            },
+            OpenProtocolAttributes::GetProtocol,
+        )
+    }) else {
         return FramebufferInfo::none();
     };
     let mode = gop.current_mode_info();

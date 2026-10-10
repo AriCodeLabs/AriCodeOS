@@ -135,25 +135,32 @@ pub fn init(info: &BootInfo) -> u64 {
     KERNEL_STACK_TOP
 }
 
-/// Devuelve al PMM las regiones `Boot` del mapa UEFI (cargador y boot
-/// services). El kernel ya no usa nada de ellas: el `BootInfo`, la cmdline y
-/// el mapa físico viven en regiones de tipo `Kernel`... salvo el buffer del
-/// propio mapa de memoria, que se libera en último lugar y no se vuelve a leer.
+/// Devuelve al PMM las regiones `Boot` del mapa UEFI (cargador, boot
+/// services y las tablas de AriBoot, ya inactivas) salvo las páginas que el
+/// kernel sigue usando (`BootInfo::kernel_ranges`: imagen, pila inicial,
+/// `BootInfo`, initrd y cmdline), que vuelven a reservarse. El buffer del
+/// propio mapa de memoria se libera también y no se vuelve a leer.
 fn reclaim_boot_memory(info: &BootInfo) {
-    let mut reclaimed = 0u64;
+    let before = pmm::stats().free_bytes();
     // SAFETY: mapa físico activo (reconstruido arriba) y buffer intacto.
     for d in unsafe { info.memory_regions() }.filter(|d| d.kind() == MemoryRegionKind::Boot) {
         // La memoria baja sigue reservada (trampolín SMP, dispositivos heredados).
         let start = d.phys_start.max(pmm::LOW_RESERVED_END);
         if start < d.end() {
             pmm::with(|p| p.free_range(start, d.end()));
-            reclaimed += d.end() - start;
         }
+    }
+    let mut kept = 0u64;
+    for (start, end) in info.kernel_ranges() {
+        let end = end.next_multiple_of(PAGE_SIZE);
+        pmm::with(|p| p.reserve_range(start, end));
+        kept += end.saturating_sub(start);
     }
     let s = pmm::stats();
     info!(
-        "vmm: {} MiB de memoria de arranque devueltos al PMM ({} MiB libres)",
-        reclaimed >> 20,
+        "vmm: {} MiB de memoria de arranque devueltos al PMM ({} KiB conservados para el kernel, {} MiB libres)",
+        s.free_bytes().saturating_sub(before) >> 20,
+        kept >> 10,
         s.free_bytes() >> 20
     );
 }

@@ -15,7 +15,7 @@ keys = ["h", "o", "l", "a", "ret"]
 [expect]
 exit = 33
 serial_contains = [
-    "console: teclado PS/2 (GSI 1, vector 0x41)",
+    "console: teclado PS/2 (GSI 1, vector 0x41, disposicion us)",
     "console: linea PS/2 'hola' (4 bytes, 10 scancodes)",
     "[host] QMP: 10 eventos de entrada enviados",
     "ARICODEOS_KERNEL_READY",

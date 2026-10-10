@@ -150,7 +150,7 @@ fn read_cr(which: u8) -> u64 {
 /// La página del trampolín debe ser RAM que el firmware dejó libre o de
 /// arranque (nunca reservada ni NVS).
 fn trampoline_page_usable(info: &BootInfo) -> bool {
-    // SAFETY: el mapa vive en memoria de tipo Kernel accesible por el mapa físico.
+    // SAFETY: el mapa vive en memoria de arranque accesible por el mapa físico.
     unsafe { info.memory_regions() }.any(|d| {
         matches!(d.kind(), MemoryRegionKind::Free | MemoryRegionKind::Boot)
             && d.phys_start <= TRAMPOLINE_PHYS
