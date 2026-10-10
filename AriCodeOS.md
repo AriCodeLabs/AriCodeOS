@@ -3665,7 +3665,11 @@ tercera foto sitúan el cuelgue en la primera `GetMemoryMap`, justo después
 de reservar páginas con un tipo de memoria propio: ADR 0021, AriBoot reserva
 solo `LOADER_DATA`, BootInfo v4 lleva `kernel_ranges()` y las tablas del
 cargador, y el kernel vuelve a reservar lo suyo al recuperar la memoria de
-arranque.
+arranque. Con eso, cuarta foto: **primer arranque completo de AriCodeOS en
+hardware real** (kernel, PCI, init y `ARICODEOS_KERNEL_READY`). El xHCI del
+equipo solo tiene MSI: ADR 0022 añade MSI a `pci_claim` (escenario
+`shell.usb_keyboard_msi`). Pendiente para tener shell en el portátil: un
+driver de bloques para el pendrive.
 
 Siguiente: repetir la prueba física con la imagen corregida y, con el
 equipo de referencia, energía (estados de reposo, batería) y más dispositivos.

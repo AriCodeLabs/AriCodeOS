@@ -200,8 +200,11 @@ fn run_scenario(
             kill_on: run.kill_on,
             installed: &installed,
             cpus: s.cpus(cpus_override),
-            usb_hid: s.usb_hid,
-            usb_legacy_controller: s.usb_legacy_controller,
+            usb: qemu::UsbOptions {
+                hid: s.usb_hid,
+                hid_msi: s.usb_hid_msi,
+                legacy_controller: s.usb_legacy_controller,
+            },
         };
         let cap = qemu::run_headless(
             &esp,

@@ -9,14 +9,24 @@ use std::time::{Duration, Instant};
 
 /// `esp`: directorio que QEMU expone como disco FAT; `None` cuando la ESP va
 /// dentro de la imagen de disco (imagen USB).
+/// Controladores USB de la máquina virtual.
+#[derive(Clone, Copy, Default)]
+pub struct UsbOptions {
+    /// xHCI con un teclado y un ratón USB HID.
+    pub hid: bool,
+    /// Ese xHCI solo ofrece MSI (sin MSI-X).
+    pub hid_msi: bool,
+    /// Además un EHCI (clase 0c.03, interfaz 0x20): no es xHCI.
+    pub legacy_controller: bool,
+}
+
 fn base_command(
     esp: Option<&Path>,
     vars: &Path,
     disk: &Path,
     disk_readonly: bool,
     cpus: u32,
-    usb_hid: bool,
-    usb_legacy_controller: bool,
+    usb: UsbOptions,
 ) -> Command {
     let mut q = Command::new("qemu-system-x86_64");
     q.current_dir(root());
@@ -85,13 +95,18 @@ fn base_command(
         "-device",
         "virtio-mouse-pci,id=mouse0,disable-legacy=on,disable-modern=off,iommu_platform=on",
     ]);
-    if usb_hid {
+    if usb.hid {
         // xHCI con teclado y raton USB HID (Fase 25, segunda parte).
-        q.args(["-device", "qemu-xhci,id=xhci"]);
+        let xhci = if usb.hid_msi {
+            "qemu-xhci,id=xhci,msi=on,msix=off"
+        } else {
+            "qemu-xhci,id=xhci"
+        };
+        q.args(["-device", xhci]);
         q.args(["-device", "usb-kbd,bus=xhci.0"]);
         q.args(["-device", "usb-mouse,bus=xhci.0"]);
     }
-    if usb_legacy_controller {
+    if usb.legacy_controller {
         // EHCI (clase 0c.03, interfaz 0x20): no es xHCI.
         q.args(["-device", "usb-ehci,id=ehci"]);
     }
@@ -410,7 +425,11 @@ pub fn run_interactive(
         Some(esp.as_path())
     };
     let _responder = Responder::start()?;
-    let mut q = base_command(esp_drive, &vars, &disk, false, cpus, usb_hid, false);
+    let usb = UsbOptions {
+        hid: usb_hid,
+        ..UsbOptions::default()
+    };
+    let mut q = base_command(esp_drive, &vars, &disk, false, cpus, usb);
     if cmdline.split_whitespace().any(|w| w == "gui") {
         // Con `gui` hace falta ver la pantalla: ventana de QEMU y serie en la terminal.
         println!("[xtask] QEMU con pantalla (serie en la terminal; salir: cerrar la ventana)");
@@ -467,8 +486,7 @@ pub struct Headless<'a> {
     /// Ficheros que van a AriFS del disco de pruebas (paquetes instalados).
     pub installed: &'a [(String, Vec<u8>)],
     pub cpus: u32,
-    pub usb_hid: bool,
-    pub usb_legacy_controller: bool,
+    pub usb: UsbOptions,
 }
 
 pub fn run_headless(
@@ -507,8 +525,7 @@ pub fn run_headless(
         &disk,
         disk_readonly,
         options.cpus,
-        options.usb_hid,
-        options.usb_legacy_controller,
+        options.usb,
     )
     .args(["-display", "none", "-monitor", "none", "-serial", "stdio"])
     .args([

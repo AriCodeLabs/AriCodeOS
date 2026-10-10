@@ -1,0 +1,29 @@
+# Fase 34 (ADR 0022): el xHCI del portatil de pruebas (Intel 7 series) no
+# tiene MSI-X, solo MSI. Mismo escenario que shell.usb_keyboard con el xHCI
+# de QEMU sin MSI-X: el kernel programa la capability MSI y el driver recibe
+# sus interrupciones por ella.
+name = "shell.usb_keyboard_msi"
+description = "arish con teclado USB HID sobre un xHCI que solo ofrece MSI (sin MSI-X)"
+level = "full"
+areas = ["shell", "input", "usb", "console", "pci"]
+cmdline = "qemu_exit shell"
+usb_hid = true
+usb_hid_msi = true
+timeout_secs = 60
+
+[host_input]
+marker = "CONSOLE_BRIDGE_READY"
+keys = ["c", "p", "u", "s", "ret", "s", "h", "u", "t", "d", "o", "w", "n", "ret"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "1b36:000d reclamado (MSI)",
+    "usb-input: dispositivo listo: USB HID Keyboard+Mouse",
+    "AriInit: puente de consola con 3 dispositivo(s) de entrada",
+    "arish: shell de AriCodeOS",
+    "cpus: ",
+    "ari> shutdown",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "init no responde", "fallo en la inicializacion del xHCI", "sin BAR 0 o sin IRQ"]

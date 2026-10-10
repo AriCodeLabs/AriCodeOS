@@ -190,8 +190,14 @@ mod exit {
 
 impl Controller {
     fn open(mask: u64, clock: Clock) -> Result<Self, u64> {
-        let bar = bar_handle(mask, 0).ok_or(exit::MAP_BAR)?;
-        let base = Mmio(sys::mmio_map(bar).map_err(|_| exit::MAP_BAR)?);
+        let Some(bar) = bar_handle(mask, 0) else {
+            say(b"sin BAR 0 o sin IRQ entre las capabilities");
+            return Err(exit::MAP_BAR);
+        };
+        let base = Mmio(sys::mmio_map(bar).map_err(|_| {
+            say(b"no se pudo mapear el BAR 0");
+            exit::MAP_BAR
+        })?);
         // Los registros de capacidad se leen por palabras de 32 bits: QEMU no
         // atiende accesos de 16 bits en HCIVERSION.
         let cap0 = base.r32(cap::CAPLENGTH);
@@ -215,7 +221,7 @@ impl Controller {
         let op = Mmio(base.0 + caplength);
         let runtime = Mmio(base.0 + (base.r32(cap::RTSOFF) & !0x1F) as u64);
         let doorbells = Mmio(base.0 + (base.r32(cap::DBOFF) & !0x3) as u64);
-        let region = DmaRegion::alloc(64 * 1024).map_err(|_| exit::DMA)?;
+        let region = DmaRegion::alloc(params.dma_arena_bytes()).map_err(|_| exit::DMA)?;
         let mut arena = Arena { region, next: 0 };
 
         // Parar y reiniciar el controlador.
@@ -737,7 +743,14 @@ fn main(mask: u64) -> u64 {
             return 0;
         }
         Err(step) => {
-            say(b"fallo en la inicializacion del xHCI");
+            sys::print(b"usb-input: fallo en la inicializacion del xHCI: ");
+            sys::print(match step {
+                exit::MAP_BAR => b"capabilities o mapeo del BAR\n",
+                exit::DMA => b"memoria DMA (buffer insuficiente)\n",
+                exit::RESET_TIMEOUT => b"el controlador no completa el reset\n",
+                exit::START_TIMEOUT => b"el controlador no arranca\n",
+                _ => b"paso desconocido\n",
+            });
             return step;
         }
     };
@@ -747,7 +760,9 @@ fn main(mask: u64) -> u64 {
     num(ctl.params.max_slots as u64);
     sys::print(b" slots, contextos de ");
     num(ctl.params.context_bytes() as u64);
-    sys::print(b" bytes)\n");
+    sys::print(b" bytes, ");
+    num(ctl.params.scratchpad_buffers as u64);
+    sys::print(b" scratchpads)\n");
     // Dar tiempo a que los puertos vean el dispositivo tras el reset.
     let settle = ctl.clock.now() + 100;
     while ctl.clock.now() < settle {

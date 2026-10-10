@@ -87,7 +87,7 @@ boot/                ariboot: integra lo anterior con la crate `uefi`
 kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log con IrqLock y try_lock),
                      arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions, port, pic, pit, apic, ioapic, msr, syscall, usermode},
                      acpi (localización de tablas), pci (ECAM, enumeración, reclamación con sondeo de BARs y MSI-X),
-                     hw (IrqLine por GSI o MSI-X, Region, DmaBuffer, ventanas sin caché, registro de vectores, banco de pruebas),
+                     hw (IrqLine por GSI, MSI-X o MSI, Region, DmaBuffer, ventanas sin caché, registro de vectores, banco de pruebas),
                      object (KernelObject revocable, tabla inicial), ipc (Endpoint, Message, benchmark), initrd,
                      user/{process (cargador ELF, copy_from/to_user, espera de salida), programs (initrd), syscalls},
                      memory/{phys, pmm, vmm, heap}, sync (política IRQ), time,
@@ -503,7 +503,8 @@ segundo brevemente para añadir la región.
   reclama una función: el kernel habilita memoria y bus master, deshabilita
   INTx, sondea el tamaño de cada BAR de memoria, programa la entrada 0 de
   MSI-X hacia un vector de dispositivo (tabla mapeada en una ventana sin
-  caché del kernel) y devuelve nueve handles: espacio de configuración
+  caché del kernel) o, si la función no tiene MSI-X, su capability MSI con
+  un solo mensaje (ADR 0022), y devuelve nueve handles: espacio de configuración
   (MMIO), `Hardware`, IRQ y los seis BARs (0 si ausentes), todos con
   `TRANSFER`.
 - `process_spawn` transfiere handles al hijo (aparecen desde
@@ -1129,6 +1130,16 @@ sdk/proto::status              estado por servicio (protocolo 7) en el endpoint 
   justo tras reservar con un tipo de memoria propio. ADR 0021: AriBoot pasa a
   `LOADER_DATA`, BootInfo v4 describe lo que el kernel conserva y
   `boot/src/memmap.rs` lee el mapa con llamadas directas trazadas.
+- Cuarta foto (2026-10-10): **primer arranque completo en hardware**. El
+  kernel enumera 17 funciones PCI (ECAM en `0xf8000000`), no hay DMAR, init
+  pasa sus pruebas de arranque y termina en `ARICODEOS_KERNEL_READY`. Lo que
+  falta: el xHCI (`8086:1e31`) solo tiene MSI, no MSI-X, y el driver no
+  recibía IRQ (ADR 0022 lo resuelve); los EHCI no tienen driver; sin driver
+  de bloques para el pendrive no hay fsd y init no lanza el shell.
+- Quinta foto: `reclamado (MSI)` y el driver cae en la reserva DMA: el
+  controlador pide scratchpads (QEMU ninguno) y el buffer fijo de 64 KiB no
+  los cabía. `Params::dma_arena_bytes` lo dimensiona y el driver nombra el
+  paso que falla.
 
 ## Pila de arranque y consola (auditoría 3eb4965)
 
