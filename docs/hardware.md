@@ -62,6 +62,23 @@ sin exclusividad y tipos de memoria estándar, ADR 0021). El equipo: Intel de
 | Teclado PS/2 en la consola del kernel (retroceso incluido) | |
 | xHCI con MSI (ADR 0022; el controlador no tiene MSI-X), cesión del firmware, puertos enrutados, 8 puertos, 16 scratchpads, servicio de entrada ok | |
 
+## Diagnóstico sin fotos
+
+El shell guarda el informe completo en el propio pendrive y el anfitrión lo
+lee de la partición ARI0:
+
+```bash
+# en el portátil
+ari> diag diag.txt
+ari> shutdown
+# en el anfitrión, con el pendrive conectado como /dev/sdX
+sudo dd if=/dev/sdX of=build/usb-dump.img bs=1M count=70 status=none
+cargo xtask fs-cat build/usb-dump.img            # lista los ficheros de ARI0
+cargo xtask fs-cat build/usb-dump.img diag.txt   # uptime, memoria, CPUs, procesos, servicios, PCI y sucesos
+```
+
+Los 70 MiB cubren la partición ARI0 de la imagen USB (LBA 133120 a 139263).
+
 ## Si algo falla
 
 Los interruptores de la cmdline aislan subsistemas. Se editan en
@@ -83,6 +100,7 @@ cualquier sistema) o regenerando la imagen con `--cmdline`:
 | "usb-input: sin almacenamiento USB" con el pendrive conectado | El pendrive no está en el xHCI: comprobar la traza `puertos Intel enrutados al xHCI`; si no aparece, el puerto cuelga de un EHCI sin driver (probar otro puerto, los azules suelen ser xHCI) |
 | "usb-input: puerto N: …" con un error de INQUIRY, TEST UNIT READY o READ CAPACITY | El pendrive no responde al protocolo bulk-only; anotar la línea |
 | "AriInit: sin particion ARI0 en el disco" | El pendrive no lleva la imagen de `cargo xtask usb-image` (o se grabó otra cosa encima) |
+| "process: el ELF no cabe en la region de usuario" al lanzar un programa | El binario no se enlazó en la región de usuario (le falta `build.rs` con `aricode_build::user_program`); `cargo xtask build` lo detecta ahora antes de generar la imagen |
 | "rtl-net: sin enlace (cable desconectado?)" | El PHY no ve portadora: cable, o el firmware no dejó la autonegociación hecha (rtl-net no programa el PHY todavía) |
 | "rtl-net: fallo en la inicializacion: …" | Sin BAR de memoria, sin DMA o la tarjeta no completa el reset; anotar la línea `pci: … 10ec:8136 reclamado (…)` |
 | `net` en el shell sin dirección tras unos segundos | DHCP sin respuesta: comprobar el enlace (`rtl-net: enlace a N Mb/s`) y que la red tenga servidor DHCP |

@@ -646,7 +646,10 @@ segundo brevemente para añadir la región.
   de usuario). `cat` lee por bloques de 1 KiB con `FsClient`. Las flechas
   arriba y abajo (`ESC [ A` / `ESC [ B`) recorren un historial de las ocho
   últimas líneas distintas, que se pueden editar antes de ejecutar; el resto
-  de secuencias de escape se descartan (escenario `shell.history`).
+  de secuencias de escape se descartan (escenario `shell.history`). `diag
+  NOM` captura la salida del informe (consola y buffer de 16 KiB) y la guarda
+  en AriFS; `cargo xtask fs-cat DISCO [NOMBRE]` la lee desde el anfitrión
+  (escenario `shell.diag_file`, test de `fscat` sobre el disco de pruebas).
 - El runner (`qemu::run_headless`) acepta `Input { prompt, lines }`: lee la
   serie de forma incremental y envía la línea `k` cuando el prompt ha
   aparecido `k + 1` veces, así los tests son deterministas sin esperas
@@ -1174,6 +1177,11 @@ sdk/proto::status              estado por servicio (protocolo 7) en el endpoint 
   PS/2, cursor e historial. Red: ADR 0024 saca la pila a `ari-net-core` y
   añade `rtl-net` para la Realtek `10ec:8136`; sin virtio-net, init lo
   lanza y omite los clientes de prueba del respondedor de QEMU.
+- Décima foto: `rtl_net` no arrancaba ("el ELF no cabe en la region de
+  usuario"): faltaba su `build.rs` y se enlazó en la dirección por defecto.
+  `cargo xtask build` comprueba ahora el punto de entrada de cada programa
+  del initrd, y `diag NOM` + `cargo xtask fs-cat` dan un canal de
+  diagnóstico sin fotos.
 
 ## Pila de arranque y consola (auditoría 3eb4965)
 

@@ -6,6 +6,7 @@
 //! cargo xtask run   [--debug] [--cmdline S] [--cpus N] [--usb-image] [--usb-hid]   image + QEMU interactivo
 //! cargo xtask usb-image [--cmdline S]         imagen GPT para pendrive en build/aricodeos-usb.img
 //! cargo xtask test  [opciones]                niveles de test (ver tests/README.md)
+//! cargo xtask fs-cat DISCO [NOMBRE]          lee un fichero de ARI0 (o lista) de una imagen o volcado
 //!     --level unit|smoke|full                 por defecto: unit + smoke
 //!     --all                                   unit + full (obligatorio antes de main)
 //!     --area boot[,memory,...]                solo escenarios QEMU de esas áreas
@@ -19,6 +20,7 @@
 //! ```
 
 mod build;
+mod fscat;
 mod image;
 mod keys;
 mod qemu;
@@ -91,6 +93,10 @@ fn main() -> ExitCode {
             ),
             None => Err(String::from("uso: xtask app-pack DIR [--version N]")),
         },
+        "fs-cat" => match cli.positional(1) {
+            Some(disk) => fscat::run(Path::new(disk), cli.positional(2)),
+            None => Err(String::from("uso: xtask fs-cat DISCO [NOMBRE]")),
+        },
         "keygen" => keys::keygen(&root().join(cli.positional(1).unwrap_or(keys::DEV_KEY_DIR))),
         "sign" => match (cli.positional(1), cli.positional(2)) {
             (Some(seed), Some(file)) => keys::sign(Path::new(seed), Path::new(file)),
@@ -105,7 +111,7 @@ fn main() -> ExitCode {
             _ => Err(String::from("uso: xtask verify PUB FICHERO [FIRMA]")),
         },
         _ => {
-            eprintln!("uso: cargo xtask <build|image|run|test|check|usb-image|app-pack|keygen|sign|verify> [--debug] (ver tools/xtask/src/main.rs)");
+            eprintln!("uso: cargo xtask <build|image|run|test|check|usb-image|fs-cat|app-pack|keygen|sign|verify> [--debug] (ver tools/xtask/src/main.rs)");
             return ExitCode::from(2);
         }
     };
