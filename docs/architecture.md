@@ -3,7 +3,7 @@
 La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
 Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
 
-## Estado: 0.8.1 (Fases 0 a 34 y etapas 1 a 5 posteriores al roadmap; la 34, la energía y más dispositivos pendientes de hardware)
+## Estado: 0.9.0 (Fases 0 a 34 y etapas 1 a 5 posteriores al roadmap; primer arranque en hardware real con disco USB, consola y red; energía, Wi-Fi y EHCI pendientes)
 
 ```text
 OVMF (UEFI)

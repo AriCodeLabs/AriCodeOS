@@ -9,17 +9,21 @@ El documento maestro de arquitectura y roadmap es [AriCodeOS.md](AriCodeOS.md).
 Las decisiones de diseño se registran en [docs/decisions/](docs/decisions/) y el
 flujo de ramas (git flow) en [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-**Estado:** 0.8.1 (2026-09-30). Las 35 fases del roadmap (0 a 34) están
+**Estado:** 0.9.0 (2026-10-10). Las 35 fases del roadmap (0 a 34) están
 implementadas y probadas en QEMU, y las etapas 1 a 4 de la secuencia
 posterior al roadmap (recuperación observable, sesión útil, límites y
 actualización, aplicaciones externas) también, más la parte de la etapa 5
 que no necesita hardware (medidas, optimizaciones guiadas por ellas y
-diagnóstico consultable); la Fase 34, el equipo de referencia y la energía
-esperan su primera prueba en el portátil (ver
-[docs/hardware.md](docs/hardware.md)). La tabla siguiente es
-la referencia única del estado de cada capacidad: `validado en QEMU` significa
-que hay escenarios en `tests/qemu/` que lo exigen en cada suite; nada está
-todavía `validado en hardware`.
+diagnóstico consultable). La Fase 34 ya ha tenido sus primeras pruebas en el
+portátil de referencia (un Intel 7 series): AriBoot, el kernel, init, el
+shell con el teclado PS/2, el pendrive como disco del sistema (xHCI con MSI,
+almacenamiento bulk-only) y la red por cable (driver Realtek r8169: DHCP,
+ping, DNS) funcionan ahí; quedan la energía, el Wi-Fi y EHCI (ver
+[docs/hardware.md](docs/hardware.md)). La tabla siguiente es la referencia
+única del estado de cada capacidad: `validado en QEMU` significa que hay
+escenarios en `tests/qemu/` que lo exigen en cada suite; `validado en
+hardware`, que se ha ejercitado en el portátil y la evidencia está en
+`docs/hardware.md`.
 
 | Capacidad | Estado | Pruebas |
 |---|---|---|

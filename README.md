@@ -15,16 +15,21 @@ The master architecture and roadmap document is [AriCodeOS.md](AriCodeOS.md)
 [docs/decisions/](docs/decisions/) and the branch flow (git flow) in
 [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-**Status:** 0.8.1 (2026-09-30). All 35 roadmap phases (0 to 34) are
+**Status:** 0.9.0 (2026-10-10). All 35 roadmap phases (0 to 34) are
 implemented and tested in QEMU, as are stages 1 to 4 of the post-roadmap
 sequence (observable recovery, a useful session, limits and updates,
 external applications) and the part of stage 5 that needs no hardware
-(measurements, measurement-driven optimisations and queryable diagnostics);
-Phase 34, the reference machine and power management await their first run
-on the laptop (see [docs/hardware.md](docs/hardware.md), Spanish). The table
-below is the single reference for the state of each capability:
-`validated in QEMU` means there are scenarios in `tests/qemu/` that require
-it in every suite run; nothing is `validated on hardware` yet.
+(measurements, measurement-driven optimisations and queryable diagnostics).
+Phase 34 has had its first runs on the reference laptop (an Intel 7 series
+machine): AriBoot, the kernel, init, the shell on the PS/2 keyboard, the USB
+stick as the system disk (xHCI with MSI, bulk-only storage) and wired
+networking (Realtek r8169 driver: DHCP, ping, DNS) all work there; power
+management, Wi-Fi and EHCI remain (see
+[docs/hardware.md](docs/hardware.md), Spanish). The table below is the
+single reference for the state of each capability: `validated in QEMU`
+means there are scenarios in `tests/qemu/` that require it in every suite
+run; `validated on hardware` means it has been exercised on the laptop and
+the evidence is recorded in `docs/hardware.md`.
 
 | Capability | State | Tests |
 |---|---|---|

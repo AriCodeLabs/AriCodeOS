@@ -2,7 +2,7 @@
 
 ## Documento maestro de arquitectura, especificaciones técnicas y plan de desarrollo
 
-**Estado:** 0.8.1 (2026-09-30): las 35 fases, las etapas 1 a 4 posteriores al roadmap y la parte de la 5 sin hardware (medidas, optimizaciones, diagnóstico) implementadas y validadas en QEMU, con la auditoría 6ee19fb corregida; la Fase 34, el equipo de referencia y la energía esperan el portátil. Estado por capacidad en el README  
+**Estado:** 0.9.0 (2026-10-10): las 35 fases, las etapas 1 a 4 posteriores al roadmap y la parte de la 5 sin hardware implementadas y validadas en QEMU; primer arranque en hardware real (Fase 34): pendrive como disco por USB, consola PS/2, red por cable; quedan energía, Wi-Fi y EHCI. Estado por capacidad en el README  
 **Versión del documento:** 0.2  
 **Nombre del sistema:** AriCodeOS  
 **Arquitectura inicial:** x86-64  
@@ -3702,10 +3702,41 @@ etapa con sus ramas, ADR y escenarios:
 |---|---|---|
 | 0. Consolidar | completada (0.6.0) | auditorías resueltas con evidencia; tabla única de estado por capacidad en el README |
 | 1. Recuperación observable | completada | supervisor de servicios (ADR 0011): estados, generaciones, reinicio con presupuesto y espera creciente, endpoint estable entre generaciones, publicación solo tras responder, `status` v1 y `services --detail`; plazos y correlación IPC (ADR 0012): endpoint de respuesta por petición, esperas acotadas, sin reintentos automáticos de escrituras (`ipc.late_reply`) |
-| 2. Sesión útil | completada salvo el equipo de referencia | hecho: shell con teclados USB y virtio (puente de consola, ADR 0013, `shell.usb_keyboard`, `shell.virtio_keyboard`); persistencia de AriFS ante cortes (ADR 0014: CRC32, journal de reemplazo, `flush` de extremo a extremo, `filesystem.replace_recovery`, `filesystem.corrupt_detected`); pendiente: equipo de referencia |
+| 2. Sesión útil | completada | hecho: shell con teclados USB y virtio (puente de consola, ADR 0013, `shell.usb_keyboard`, `shell.virtio_keyboard`); persistencia de AriFS ante cortes (ADR 0014: CRC32, journal de reemplazo, `flush` de extremo a extremo, `filesystem.replace_recovery`, `filesystem.corrupt_detected`); equipo de referencia: el portátil de la Fase 34 (0.9.0) |
 | 3. Límites y actualización | completada | hecho: actualización entre arranques con el mismo disco y cortes (`[[boots]]`, `kill_on`: `update.full_cycle`, `update.cut_during_install`, `update.rollback_keeps_data`), `write` en el shell (`shell.write_persists`); cuotas y saturación (ADR 0015: broker asíncrono, `spawn`, límite de programas en marcha, `limits.hogs`); permisos por recurso (ADR 0016: `read_files` en el manifiesto, `Share` en fsd, `sandbox.shared_file`) |
 | 4. Aplicaciones externas | completada | hecho: aplicación construida fuera del árbol con el SDK por ruta, empaquetada y firmada (`cargo xtask app-pack`, `aricode-pkg`), instalada en AriFS como un solo fichero y lanzada por el broker tras verificarla (ADR 0017, `apps.external`); instalador de confianza y actualización transaccional desde `pkgs/` con reemplazo atómico por trozos (ADR 0018, `apps.update`, `apps.update_cut`); perfil `aricode-wasm` v1 con validador, manifiesto por módulo y ficheros (ADR 0019, `docs/wasm-profile.md`, `wasm.*`). Etapa completada; WASI queda fuera del perfil a propósito |
-| 5. Optimización y ampliación | completada salvo lo que necesita hardware | hecho: medidas reproducibles (`bench`: syscall, IPC y ficheros con p50/p95/p99, `docs/performance.md`), reposo por CPU (`sysinfo::IDLE`, `cpus`) e informe `diag` (`perf.bench`); primera optimización guiada por medidas: `ipc_receive_any` y fsd sin sondeos (ADR 0020, `ipc.receive_any`); lotes de sectores en AriFS y fsd y un `flush` menos por reemplazo (lectura de 4 KiB cinco veces más rápida, reemplazo cuatro veces); reloj de µs por TSC y sucesos recientes del kernel consultables desde `diag` (`diag.events`); pendiente: energía (estados de reposo, batería), más dispositivos |
+| 5. Optimización y ampliación | en curso: hardware real alcanzado (0.9.0) | hecho: medidas reproducibles (`bench`: syscall, IPC y ficheros con p50/p95/p99, `docs/performance.md`), reposo por CPU (`sysinfo::IDLE`, `cpus`) e informe `diag` (`perf.bench`); primera optimización guiada por medidas: `ipc_receive_any` y fsd sin sondeos (ADR 0020, `ipc.receive_any`); lotes de sectores en AriFS y fsd y un `flush` menos por reemplazo (lectura de 4 KiB cinco veces más rápida, reemplazo cuatro veces); reloj de µs por TSC y sucesos recientes del kernel consultables desde `diag` (`diag.events`); en el portátil (0.9.0, ADR 0021 a 0024): arranque con tipos de memoria estándar, MSI, pendrive por USB como disco, teclado PS/2 con disposición española, cursor e historial, red Realtek por cable, `diag` a fichero y `fs-cat`; pendiente: energía (estados de reposo, batería), Wi-Fi, EHCI |
+
+---
+
+## 94.9 AriCodeOS 0.9
+
+**Estado: completada (2026-10-10), tag `v0.9.0`.** Primer arranque de
+AriCodeOS en hardware real (Fase 34, portátil Intel 7 series), en once
+fotos y cuatro ADR:
+
+- AriBoot visible en firmware real (GOP sin exclusividad, balizas, trazas
+  del mapa de memoria) y tipos de memoria UEFI estándar con BootInfo v4
+  (ADR 0021): el firmware se colgaba en `GetMemoryMap` con tipos propios;
+- MSI además de MSI-X para los drivers de usuario (ADR 0022), buffer DMA del
+  xHCI dimensionado por los scratchpads, cesión del firmware y enrutado de
+  los puertos Intel al xHCI;
+- el pendrive como disco del sistema: almacenamiento USB bulk-only servido
+  por usbd como servicio de bloques, fsd y shell encima, `SYNCHRONIZE
+  CACHE` opcional (ADR 0023, `usb.storage`);
+- consola de pantalla con retroceso, cursor (hilo del kernel) e historial
+  del shell con las flechas (secuencias de escape desde cualquier teclado),
+  disposición española (`kbd=es`), `diag NOM` guardado en AriFS y
+  `cargo xtask fs-cat` para leerlo desde el anfitrión;
+- red por cable: pila de red compartida (`ari-net-core`) y driver Realtek
+  r8169 (ADR 0024); DHCP, ping y DNS funcionando en el portátil; estado del
+  enlace en el protocolo de red;
+- una comprobación del punto de entrada de cada programa del initrd al
+  construir, y el plazo de `smp.process_reap` ajustado a la carga del
+  anfitrión.
+
+Siguiente: energía (estados de reposo, batería), más dispositivos del
+portátil (EHCI, Wi-Fi fuera de alcance por ahora) y seguir la etapa 5.
 
 ---
 
