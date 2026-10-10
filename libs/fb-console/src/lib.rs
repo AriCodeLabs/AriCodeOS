@@ -48,6 +48,8 @@ pub struct Console<S: Surface> {
     cursor_row: usize,
     /// Celda donde está pintado el cursor (`_`), si lo está.
     cursor_drawn: Option<(usize, usize)>,
+    /// Hubo escrituras desde el último parpadeo: la consola no está quieta.
+    wrote_since_blink: bool,
     fg: Rgb,
     bg: Rgb,
     cells: [u8; MAX_CELLS],
@@ -66,6 +68,7 @@ impl<S: Surface> Console<S> {
             cursor_col: 0,
             cursor_row: 0,
             cursor_drawn: None,
+            wrote_since_blink: false,
             fg: Self::DEFAULT_FG,
             bg: Self::DEFAULT_BG,
             cells: [b' '; MAX_CELLS],
@@ -137,6 +140,11 @@ impl<S: Surface> Console<S> {
             self.hide_cursor();
             return;
         }
+        // Mientras fluye texto no se pinta: el cursor solo tiene sentido en
+        // una consola quieta (y pintar sobre texto en movimiento cuesta).
+        if core::mem::take(&mut self.wrote_since_blink) {
+            return;
+        }
         if self.surface.is_none() || self.cols == 0 {
             return;
         }
@@ -154,6 +162,7 @@ impl<S: Surface> Console<S> {
 
     pub fn write_char(&mut self, ch: char) {
         self.hide_cursor();
+        self.wrote_since_blink = true;
         match ch {
             '\n' => self.newline(),
             '\r' => self.cursor_col = 0,
@@ -357,6 +366,9 @@ mod tests {
     fn cursor_blinks_without_touching_cells() {
         let mut c = C::new(Mem::new(64, 32));
         write!(c, "a").unwrap();
+        // El primer parpadeo tras escribir solo anota que la consola estuvo
+        // activa; el siguiente, ya quieta, pinta.
+        c.blink();
         let bottom = &GLYPHS[(b'_' - FIRST_CHAR) as usize];
         let (dy, dx) = bottom
             .iter()
@@ -385,6 +397,7 @@ mod tests {
         // Escribir con el cursor pintado lo oculta antes: la celda muestra 'b'.
         c.blink();
         write!(c, "b").unwrap();
+        assert_eq!(c.cursor_drawn, None);
         assert_eq!(c.cell(1, 0), b'b');
         let glyph_b = &GLYPHS[(b'b' - FIRST_CHAR) as usize];
         let on = glyph_b[dy] & (0x80 >> dx) != 0;

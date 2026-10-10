@@ -70,12 +70,24 @@ pub fn write_serial(args: core::fmt::Arguments) {
     let _ = Serial.write_fmt(args);
 }
 
-/// Alterna el cursor de la consola de framebuffer (desde el tick del reloj;
-/// si la consola está ocupada se salta el parpadeo).
-pub fn blink_cursor() {
-    if let Some(mut guard) = FB.try_lock() {
-        if guard.is_attached() {
-            guard.blink();
+/// Hilo del kernel que alterna el cursor de la consola de framebuffer dos
+/// veces por segundo. Un hilo propio y no el tick ni el bucle idle: pintar
+/// desde un handler no procede, y una llamada más en el bucle idle (que gira
+/// mucho) frenaba todo el sistema en QEMU un 25 %. Si la consola está
+/// ocupada se salta el parpadeo; la consola solo parpadea si está quieta.
+pub fn start_cursor_thread() {
+    if let Err(e) = crate::task::scheduler::spawn("cursor", cursor_thread, 0) {
+        log::warn!("console: sin hilo del cursor ({e})");
+    }
+}
+
+extern "C" fn cursor_thread(_arg: usize) {
+    loop {
+        crate::task::scheduler::sleep_ms(500);
+        if let Some(mut guard) = FB.try_lock() {
+            if guard.is_attached() {
+                guard.blink();
+            }
         }
     }
 }

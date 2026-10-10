@@ -208,10 +208,6 @@ pub fn handle_interrupt(vector: u8, from_user: bool) {
             let bsp = crate::cpu::is_bsp();
             let now = if bsp { time::tick() } else { time::ticks() };
             eoi();
-            // Cursor de la consola de pantalla: dos veces por segundo.
-            if bsp && now.is_multiple_of(time::TICK_HZ / 2) {
-                crate::console::blink_cursor();
-            }
             crate::task::scheduler::on_tick(now, bsp, from_user);
         }
         RESCHED_VECTOR => {
