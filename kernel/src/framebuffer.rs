@@ -62,24 +62,7 @@ impl MmioSurface {
     }
 
     fn encode(&self, Rgb(r, g, b): Rgb) -> u32 {
-        match self.info.pixel_format {
-            PixelFormat::Rgb => (r as u32) | (g as u32) << 8 | (b as u32) << 16,
-            PixelFormat::Bgr => (b as u32) | (g as u32) << 8 | (r as u32) << 16,
-            PixelFormat::Bitmask => {
-                let place = |v: u8, mask: u32| -> u32 {
-                    if mask == 0 {
-                        return 0;
-                    }
-                    let shift = mask.trailing_zeros();
-                    let bits = (mask >> shift).count_ones().min(8);
-                    ((v as u32) >> (8 - bits)) << shift
-                };
-                place(r, self.info.red_mask)
-                    | place(g, self.info.green_mask)
-                    | place(b, self.info.blue_mask)
-            }
-            PixelFormat::None => 0,
-        }
+        self.info.encode(r, g, b)
     }
 }
 

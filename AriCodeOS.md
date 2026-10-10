@@ -3653,8 +3653,17 @@ estructural WASM, y parámetros de `loop`.
   recientes del kernel con su instante y motivo (`sysinfo::EVENTS`,
   `diag.events`), y `sleep_ms` que duerme al menos lo pedido.
 
-Siguiente: la primera prueba física de la Fase 34 y, con el equipo de
-referencia, energía (estados de reposo, batería) y más dispositivos.
+Primera prueba física de la Fase 34 (2026-10-10, portátil con el pendrive
+grabado con `cargo xtask usb-image`): AriBoot arrancó, verificó el slot A y
+la pantalla se detuvo en la línea de slots. Causa: la apertura exclusiva del
+GOP desconectaba la consola del firmware, así que las trazas siguientes (y
+cualquier fallo posterior) quedaban a ciegas. Corrección en
+`fix/f34-first-boot-visibility`: GOP sin exclusividad, línea `memoria:` con
+las regiones UEFI y balizas de arranque (`Beacon`) que acotan un cuelgue
+entre `ExitBootServices` y la consola del kernel (`docs/hardware.md`).
+
+Siguiente: repetir la prueba física con la imagen corregida y, con el
+equipo de referencia, energía (estados de reposo, batería) y más dispositivos.
 
 ---
 

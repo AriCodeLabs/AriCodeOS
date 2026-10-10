@@ -33,7 +33,7 @@ mod time;
 mod user;
 
 use aricode_cmdline::{keys, CmdLine};
-use boot_protocol::{BootInfo, BOOT_PROTOCOL_MAGIC, BOOT_PROTOCOL_VERSION};
+use boot_protocol::{Beacon, BootInfo, BOOT_PROTOCOL_MAGIC, BOOT_PROTOCOL_VERSION};
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
 use log::{debug, info, trace, warn, LevelFilter};
@@ -57,6 +57,13 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     let info = validate_boot_info(boot_info);
     let fb_end = info.framebuffer.address + info.framebuffer.size;
     memory::phys::init(info.phys_map_offset, info.phys_map_limit, fb_end);
+    if info.framebuffer.address != 0 {
+        // Baliza "el kernel ha arrancado" para hardware sin serie
+        // (docs/hardware.md); la consola la borra al iniciarse.
+        let base = memory::phys::phys_to_virt(info.framebuffer.address) as *mut u8;
+        // SAFETY: AriBoot mapeó el framebuffer completo en el mapa físico.
+        unsafe { info.framebuffer.beacon(base, Beacon::KERNEL_ENTRY) };
+    }
     initrd::snapshot_digest(info);
 
     // SAFETY: AriBoot copió la cmdline a memoria de kernel accesible por el mapa físico.
