@@ -59,6 +59,18 @@ fn find_pci(vendor: u16, device: u16) -> Option<u64> {
     find_pci_from(vendor, device, 0)
 }
 
+/// Primera función PCI del fabricante `vendor` con la clase `class.subclass`.
+fn find_pci_vendor_class(vendor: u16, class: u8, subclass: u8) -> Option<u64> {
+    let n = sys::pci_count(PCI_ROOT).ok()?;
+    (0..n).find(|&i| {
+        sys::pci_info(PCI_ROOT, i).is_ok_and(|v| {
+            sys::abi::pci_info::vendor(v) == vendor
+                && sys::abi::pci_info::class(v) == class
+                && sys::abi::pci_info::subclass(v) == subclass
+        })
+    })
+}
+
 /// Primera función PCI de la clase `class.subclass` a partir de `start`.
 fn find_pci_class_from(class: u8, subclass: u8, start: u64) -> Option<u64> {
     let n = sys::pci_count(PCI_ROOT).ok()?;
@@ -1695,7 +1707,35 @@ fn main(arg: u64) -> u64 {
                 }
             }
         }
-        None => say(b"sin virtio-net"),
+        None => match find_pci_vendor_class(0x10EC, 0x02, 0x00) {
+            // Realtek r8169 (ADR 0024): el driver se lanza y obtiene la
+            // direccion por DHCP; los clientes de prueba hablan con el
+            // respondedor de QEMU, que en hardware no existe, asi que no se
+            // ejecutan. `net`, `ping`, `dns` y `http` del shell sirven de prueba.
+            Some(index) => {
+                let launched = sup
+                    .register(
+                        "rtl_net",
+                        Kind::Driver {
+                            pci_index: index,
+                            with_system: true,
+                            block: None,
+                        },
+                        Probe::None,
+                        net_service,
+                        true,
+                        Policy::DRIVER,
+                    )
+                    .is_some_and(|i| sup.launch(i));
+                if launched {
+                    services |= SERVICE_NET;
+                    say(b"servicio de red por Realtek (sin clientes de prueba)");
+                } else {
+                    say(b"rtl_net no arranco");
+                }
+            }
+            None => say(b"sin virtio-net ni Realtek"),
+        },
     }
     // 9. Dispositivos de entrada virtio (teclado, raton): un driver por cada uno.
     let mut input_eps = [Handle(0); 4];

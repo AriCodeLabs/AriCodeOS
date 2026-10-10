@@ -49,6 +49,7 @@ libs/sync/           aricode-sync: IrqLock/SpinLock con política de interrupcio
 libs/fat/            aricode-fat: FAT32 mínimo con nombres largos para construir y leer la ESP de la imagen USB (no_std + alloc, tests de host)
 libs/xhci/           aricode-xhci: xHCI y USB: registros, TRB, anillos, contextos, ERST, SETUP y descriptores (no_std, tests de host)
 libs/usb-storage/    aricode-usb-storage: transporte bulk-only (CBW/CSW) y CDB SCSI de bloque, tests de host
+libs/rtl8169/        aricode-rtl8169: registros, descriptores y arranque de la familia r8169 sobre un trait Regs, tests de host
 libs/iommu/          aricode-iommu: Intel VT-d: registros, capacidades, entradas raíz/contexto, paginación de segundo nivel, registros de fallo (no_std, tests de host)
 libs/sched/          aricode-sched: política round robin sobre Tid con estados, sueño, bloqueo, salida, varias CPUs, afinidad y despertares pendientes (no_std + alloc, tests de host)
 libs/handles/        aricode-handles: tabla de handles con generación y derechos, duplicación solo reductora (no_std + alloc, tests de host)
@@ -80,6 +81,8 @@ user/testprogs/      programas de prueba de ring 3 (Rust y ensamblador) enlazado
 services/init/       AriInit: primer proceso; recibe SPAWNER y la raíz PCI, lanza/supervisa servicios y reclama dispositivos para sus drivers
 services/virtio-blk/ driver virtio-blk en ring 3 y servicio de bloques por IPC (interfaz moderna, cola 0 en DMA, MSI-X, GPT)
 services/virtio-net/ netd: driver virtio-net y pila de red (DHCP, ARP, ICMP, UDP, TCP, DNS) por IPC en ring 3
+services/net-core/   ari-net-core: pila IPv4 mínima y servidor NetServiceProtocol, independientes de la tarjeta (trait Link, ADR 0024)
+services/rtl-net/    driver Realtek r8169 (RTL8169/8168/8101) en ring 3 sobre ari-net-core; sin emulación en QEMU
 services/compositor/ compositor: dueño del framebuffer, ventanas, cursor y enrutado de entrada en ring 3
 services/virtio-input/ inputd: driver virtio-input (un proceso por teclado o ratón) y eventos por IPC en ring 3
 services/arifs/      fsd: servicio de ficheros AriFS en ring 3 sobre el servicio de bloques
@@ -1167,6 +1170,10 @@ sdk/proto::status              estado por servicio (protocolo 7) en el endpoint 
   usbd enruta los puertos, pide la cesión al firmware y sirve el pendrive
   como servicio de bloques; sin virtio-blk, init monta fsd sobre él
   (escenario `usb.storage`).
+- Octava y novena foto: shell interactivo sobre el pendrive con teclado
+  PS/2, cursor e historial. Red: ADR 0024 saca la pila a `ari-net-core` y
+  añade `rtl-net` para la Realtek `10ec:8136`; sin virtio-net, init lo
+  lanza y omite los clientes de prueba del respondedor de QEMU.
 
 ## Pila de arranque y consola (auditoría 3eb4965)
 
