@@ -3677,8 +3677,11 @@ reinicio). Séptima foto: el pendrive se lee, pero rechaza `SYNCHRONIZE
 CACHE` (tolerado desde entonces). Octava foto (2026-10-10): **shell
 interactivo de AriCodeOS en el portátil**, con AriFS en el pendrive y el
 teclado PS/2; el retroceso en la consola de framebuffer se corrigió a
-continuación. La Fase 34 queda completada en lo esencial; faltan la energía
-y los drivers del equipo (red Realtek, EHCI).
+continuación, junto con un cursor que parpadea en la consola de pantalla y el
+historial del shell con las flechas (las teclas de edición viajan como
+secuencias de escape de terminal desde cualquier teclado). La Fase 34 queda
+completada en lo esencial; faltan la energía y los drivers del equipo (red
+Realtek, EHCI).
 
 Siguiente: repetir la prueba física con la imagen corregida y, con el
 equipo de referencia, energía (estados de reposo, batería) y más dispositivos.

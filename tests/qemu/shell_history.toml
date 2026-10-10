@@ -1,0 +1,30 @@
+# Fase 34: historial del shell con las flechas. El runner teclea la secuencia
+# `ESC [ A` (flecha arriba, la misma que envia un teclado PS/2 o USB por la
+# consola), borra el final de la linea recuperada y escribe otro nombre: el
+# comando resultante solo puede venir del historial. `ESC [ B` vuelve a la
+# linea vacia.
+name = "shell.history"
+description = "arish: flecha arriba recupera el ultimo comando y se puede editar; flecha abajo lo descarta"
+level = "full"
+areas = ["shell", "console"]
+cmdline = "qemu_exit shell"
+timeout_secs = 60
+stdin = [
+    "write uno.txt abc",
+    "\u001b[A\u0008\u0008\u0008\u0008\u0008\u0008\u0008\u0008\u0008\u0008\u0008dos.txt xyz",
+    "cat dos.txt",
+    "\u001b[A\u001b[A\u001b[B\u001b[B",
+    "\u001b[3~ls",
+    "shutdown",
+]
+
+[expect]
+exit = 33
+serial_contains = [
+    "write: 4 bytes en uno.txt",
+    "write: 4 bytes en dos.txt",
+    "xyz",
+    "dos.txt             4 bytes",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "comando desconocido", "write: error"]

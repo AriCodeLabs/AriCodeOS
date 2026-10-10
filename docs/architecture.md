@@ -83,7 +83,7 @@ services/virtio-net/ netd: driver virtio-net y pila de red (DHCP, ARP, ICMP, UDP
 services/compositor/ compositor: dueño del framebuffer, ventanas, cursor y enrutado de entrada en ring 3
 services/virtio-input/ inputd: driver virtio-input (un proceso por teclado o ratón) y eventos por IPC en ring 3
 services/arifs/      fsd: servicio de ficheros AriFS en ring 3 sobre el servicio de bloques
-services/shell/      arish: shell interactivo en ring 3 (help, ps, mem, ls, cat, devices, services, uptime, reboot, shutdown, exit)
+services/shell/      arish: shell interactivo en ring 3 (help, ps, mem, ls, cat, write, devices, services, uptime, cpus, diag, net, run, spawn, repeat, reboot, shutdown, exit; historial con las flechas)
 boot/                ariboot: integra lo anterior con la crate `uefi`
 kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log con IrqLock y try_lock),
                      arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions, port, pic, pit, apic, ioapic, msr, syscall, usermode},
@@ -152,7 +152,15 @@ y `page_tables_base/size` qué tablas recupera al activar las suyas.
 - El panic handler escribe solo por serie (`serial_println!`): no toca estado
   compartido, por si el panic ocurre a medio escribir en el framebuffer.
 - La consola de framebuffer mantiene una copia de las celdas y repinta al
-  hacer scroll; nunca lee de VRAM.
+  hacer scroll; nunca lee de VRAM. Entiende el retroceso (`\x08`, el cursor
+  vuelve una celda) y pinta un cursor `_` que el tick del reloj alterna dos
+  veces por segundo (`console::blink_cursor`, con `try_lock`: si la consola
+  está ocupada se salta); cualquier escritura lo oculta antes de pintar, así
+  que las celdas nunca contienen el cursor.
+- Las teclas de edición (flechas, inicio, fin, suprimir) llegan a la consola
+  como las secuencias de escape de un terminal serie (`ESC [ A`…, `ESC [ 3 ~`),
+  vengan del teclado PS/2 del kernel, del puente de consola o del compositor:
+  `aricode_input::Keyboard::feed` devuelve `KeyBytes` (hasta 4 bytes).
 
 ## CPU (Fase 4)
 
@@ -629,7 +637,10 @@ segundo brevemente para añadir la región.
   su salida y la anota.
 - `arish` lee líneas con eco y retroceso, y despacha los comandos sin
   `alloc` (formato con `fmt_u64`/`fmt_hex` de la biblioteca de programas
-  de usuario). `cat` lee por bloques de 1 KiB con `FsClient`.
+  de usuario). `cat` lee por bloques de 1 KiB con `FsClient`. Las flechas
+  arriba y abajo (`ESC [ A` / `ESC [ B`) recorren un historial de las ocho
+  últimas líneas distintas, que se pueden editar antes de ejecutar; el resto
+  de secuencias de escape se descartan (escenario `shell.history`).
 - El runner (`qemu::run_headless`) acepta `Input { prompt, lines }`: lee la
   serie de forma incremental y envía la línea `k` cuando el prompt ha
   aparecido `k + 1` veces, así los tests son deterministas sin esperas

@@ -77,7 +77,7 @@ fn main(count: u64) -> u64 {
                 // reunir teclado y raton (USB HID) en un solo dispositivo.
                 let is_button = ev.kind == EV_KEY && ev.code >= 0x100;
                 if ev.kind == EV_KEY && !is_button && (Some(i) == keyboard || keyboard.is_none()) {
-                    if let Some(ch) = kbd.feed(ev) {
+                    for &ch in kbd.feed(ev).as_slice() {
                         if ch == b'\n' {
                             sys::print(b"input_client: teclado: ");
                             sys::print(&line[..line_len]);

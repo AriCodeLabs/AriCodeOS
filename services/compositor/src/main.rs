@@ -188,7 +188,8 @@ impl Compositor {
             }
             return;
         }
-        if let Some(ch) = self.keyboard.feed(ev) {
+        // Cada byte de la tecla (las de edición son secuencias de escape).
+        for &ch in self.keyboard.feed(ev).as_slice() {
             if let Some(id) = self.desktop.focus {
                 self.deliver(id, Event::Key(ch));
             }

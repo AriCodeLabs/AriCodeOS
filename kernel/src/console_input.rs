@@ -220,7 +220,7 @@ pub fn on_keyboard_irq() {
                 continue;
             }
             if let Some(ev) = ps2.decoder.feed(byte) {
-                if let Some(c) = ps2.keyboard.feed(ev) {
+                for &c in ps2.keyboard.feed(ev).as_slice() {
                     ring.push(c);
                     pushed = true;
                 }

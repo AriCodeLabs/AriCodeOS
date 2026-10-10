@@ -70,6 +70,16 @@ pub fn write_serial(args: core::fmt::Arguments) {
     let _ = Serial.write_fmt(args);
 }
 
+/// Alterna el cursor de la consola de framebuffer (desde el tick del reloj;
+/// si la consola está ocupada se salta el parpadeo).
+pub fn blink_cursor() {
+    if let Some(mut guard) = FB.try_lock() {
+        if guard.is_attached() {
+            guard.blink();
+        }
+    }
+}
+
 /// Escribe texto sin formato de log en todas las salidas (marcadores, banner).
 pub fn write_raw(args: core::fmt::Arguments) {
     let _serial = serial_guard();
