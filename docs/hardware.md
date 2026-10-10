@@ -68,11 +68,16 @@ Anotar (o fotografiar) las últimas líneas antes del fallo: `EXCEPTION`,
 Entre `ExitBootServices` y la primera línea del kernel no hay trazas (ya no
 hay firmware y el kernel aún no tiene consola). Para ver hasta dónde llega el
 arranque, AriBoot y el kernel pintan cuadrados de 32 px en la fila superior
-de la pantalla (`Beacon` en `boot-protocol`); la consola del kernel los borra
-al iniciarse, así que solo se ven si algo se para antes.
+de la pantalla (`Beacon` en `boot-protocol`): los tres primeros huecos son
+blanco, verde y naranja; a su derecha, cuadrados cian por cada paso del
+cargador desde la cmdline (sirven aunque la consola del firmware se pare).
+La consola del kernel los borra al iniciarse, así que solo se ven si algo se
+para antes.
 
 | Pantalla | Dónde se paró |
 |---|---|
+| Última línea `cmdline:` o `memoria: consultando…`, sin cuadrados cian | El firmware no responde: a su consola de texto (si falta `memoria: consultando`) o a `GetMemoryMap` (si está) |
+| Cuadrados cian (hasta cuatro, a la derecha de los tres primeros huecos) y nada más | Paso del cargador en que se paró: 1 mapa de memoria leído, 2 tablas reservadas, 3 mapa físico construido, 4 kernel mapeado |
 | Trazas de AriBoot hasta `ExitBootServices -> AriKernel`, ningún cuadrado | El framebuffer que anuncia la línea `GOP:` no es la pantalla (dirección o formato erróneos); anotar esa línea |
 | Cuadrado blanco | En `ExitBootServices` (firmware) |
 | Blanco y verde | En el salto al kernel: tablas de páginas, pila o la validación de `BootInfo` |

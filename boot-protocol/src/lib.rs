@@ -371,6 +371,19 @@ impl Beacon {
         index: 2,
         rgb: [255, 160, 0],
     };
+    /// Primera posición de los pasos del cargador (cian).
+    pub const FIRST_STEP: u32 = 3;
+
+    /// Paso `n` del cargador tras la cmdline (cian, a la derecha de las tres
+    /// anteriores): 0 mapa de memoria leído, 1 tablas reservadas, 2 mapa
+    /// físico construido, 3 kernel mapeado. Distingue un cuelgue del firmware
+    /// (consola o mapa de memoria) de uno del propio cargador.
+    pub const fn step(n: u32) -> Beacon {
+        Beacon {
+            index: Self::FIRST_STEP + n,
+            rgb: [0, 255, 255],
+        }
+    }
 }
 
 // Comprobaciones de layout en tiempo de compilación.
@@ -454,6 +467,9 @@ mod tests {
         unsafe { info.beacon(buf.as_mut_ptr().cast(), Beacon::LOADER_BEFORE_EXIT) };
         assert!(buf[20 * 10..].iter().all(|&p| p == 0));
         assert!(buf[..20 * 10].iter().any(|&p| p != 0));
+        // Los pasos del cargador van a la derecha de las tres balizas fijas.
+        assert_eq!(Beacon::step(0).index, Beacon::KERNEL_ENTRY.index + 1);
+        assert_eq!(Beacon::step(3).index, 6);
         // Sin framebuffer no toca nada.
         let none = FramebufferInfo::none();
         unsafe { none.beacon(core::ptr::null_mut(), Beacon::KERNEL_ENTRY) };
