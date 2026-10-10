@@ -125,6 +125,10 @@ impl Link for Nic {
     fn recv_frame(&mut self, out: &mut [u8; MAX_FRAME]) -> Option<usize> {
         Nic::recv_frame(self, out)
     }
+    fn link_up(&self) -> Option<bool> {
+        // Sin VIRTIO_NET_F_STATUS negociado el enlace virtual siempre esta.
+        Some(true)
+    }
 }
 
 fn main(mask: u64) -> u64 {

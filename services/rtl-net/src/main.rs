@@ -179,6 +179,10 @@ impl Link for Nic {
         true
     }
 
+    fn link_up(&self) -> Option<bool> {
+        Some(link_state(self.regs.r8(reg::PHY_STATUS)).up)
+    }
+
     fn recv_frame(&mut self, out: &mut [u8; MAX_FRAME]) -> Option<usize> {
         let _ = ack_interrupts(&self.regs);
         loop {

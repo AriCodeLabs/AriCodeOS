@@ -7,6 +7,7 @@
 #![no_std]
 #![no_main]
 
+use aricode_proto::net::{Status as NetStatus, LINK_DOWN, LINK_UP};
 use aricode_rt::sys::net::{NetClient, NetError};
 use aricode_rt::sys::{self, abi, fs::FsClient, Handle, TIMEOUT_INFINITE};
 use aricode_rt::{fmt_hex, fmt_u64};
@@ -216,7 +217,7 @@ fn trim(s: &[u8]) -> &[u8] {
 
 fn help() {
     print(
-        b"comandos:\n  help      esta ayuda\n  ps        procesos\n  mem       memoria fisica\n  ls        ficheros de AriFS\n  cat NOM   muestra un fichero\n  write NOM TEXTO  guarda TEXTO en el fichero (lo crea o lo reemplaza entero)\n  devices   funciones PCI\n  services  servicios de arranque (--detail: estado del supervisor)\n  uptime    tiempo desde el arranque\n  cpus      procesadores en linea y reposo por CPU\n  diag [NOM]  informe completo (uptime, mem, cpus, ps, services, devices); con NOM lo guarda en AriFS\n  net       configuracion de red\n  ping IP   eco ICMP (4 intentos)\n  dns NOM   resuelve un nombre\n  http URL  GET y muestra el cuerpo\n  run PROG  ejecuta un programa del initrd y espera\n  spawn PROG  lo lanza en segundo plano (no se puede detener)\n  repeat N CMD  repite un comando N veces\n  reboot    reinicia\n  shutdown  apaga\n  exit      termina el shell\n",
+        b"comandos:\n  help      esta ayuda\n  ps        procesos\n  mem       memoria fisica\n  ls        ficheros de AriFS\n  cat NOM   muestra un fichero\n  write NOM TEXTO  guarda TEXTO en el fichero (lo crea o lo reemplaza entero)\n  devices   funciones PCI\n  services  servicios de arranque (--detail: estado del supervisor)\n  uptime    tiempo desde el arranque\n  cpus      procesadores en linea y reposo por CPU\n  diag [NOM]  informe completo (uptime, mem, cpus, ps, services, net, devices); con NOM lo guarda en AriFS\n  net       configuracion de red\n  ping IP   eco ICMP (4 intentos)\n  dns NOM   resuelve un nombre\n  http URL  GET y muestra el cuerpo\n  run PROG  ejecuta un programa del initrd y espera\n  spawn PROG  lo lanza en segundo plano (no se puede detener)\n  repeat N CMD  repite un comando N veces\n  reboot    reinicia\n  shutdown  apaga\n  exit      termina el shell\n",
     );
 }
 
@@ -325,7 +326,7 @@ fn cpus() {
 /// problema (docs/performance.md).
 /// Informe completo; con un nombre, además se guarda en AriFS para leerlo
 /// desde el anfitrión (`cargo xtask fs-cat`, docs/hardware.md).
-fn diag(fs: &mut FsClient, mask: u64, rest: &[u8]) {
+fn diag(fs: &mut FsClient, net_client: &NetClient, mask: u64, rest: &[u8]) {
     let name = trim(rest);
     if !name.is_empty() {
         capture_with(|(_, len, active)| {
@@ -340,6 +341,9 @@ fn diag(fs: &mut FsClient, mask: u64, rest: &[u8]) {
     ps();
     services(mask, fs);
     services_detail();
+    if mask & SERVICE_NET != 0 {
+        net(net_client);
+    }
     devices();
     events();
     print(b"=== fin del diagnostico ===\n");
@@ -583,7 +587,17 @@ fn net_error(e: NetError) {
 }
 
 fn net(client: &NetClient) {
+    print(b"enlace  ");
+    print(match client.link() {
+        Ok(LINK_UP) => b"arriba\n",
+        Ok(LINK_DOWN) => b"abajo (cable?)\n",
+        Ok(_) => b"desconocido\n",
+        Err(_) => b"sin respuesta del servicio de red\n",
+    });
     match client.info() {
+        Err(NetError::Status(NetStatus::NoRoute)) => {
+            print(b"ip      sin direccion (DHCP pendiente)\n");
+        }
         Ok(i) => {
             print(b"ip      ");
             print_ip(i.address);
@@ -778,7 +792,9 @@ fn spawn(arg: &[u8]) {
 }
 
 fn services(mask: u64, fs: &FsClient) {
-    print(b"bloques   virtio_blk  ");
+    // Por papel, no por driver: en QEMU son virtio; en el portatil, usbd y
+    // rtl_net (`services --detail` da los nombres reales).
+    print(b"bloques   servicio    ");
     print(if mask & SERVICE_BLOCK != 0 {
         b"activo\n"
     } else {
@@ -795,13 +811,13 @@ fn services(mask: u64, fs: &FsClient) {
             b"activo, no responde\n"
         });
     }
-    print(b"red       virtio_net  ");
+    print(b"red       servicio    ");
     print(if mask & SERVICE_NET != 0 {
         b"activo\n"
     } else {
         b"ausente\n"
     });
-    print(b"entrada   virtio_input ");
+    print(b"entrada   servicio    ");
     print(if mask & SERVICE_INPUT != 0 {
         b"activo\n"
     } else {
@@ -926,7 +942,7 @@ fn execute(
         b"services" => services(mask, fs),
         b"uptime" => uptime(),
         b"cpus" => cpus(),
-        b"diag" => diag(fs, mask, rest),
+        b"diag" => diag(fs, net_client, mask, rest),
         b"net" => net(net_client),
         b"ping" => ping(net_client, rest),
         b"dns" => dns(net_client, rest),
