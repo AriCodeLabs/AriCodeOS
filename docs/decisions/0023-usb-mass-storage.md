@@ -58,5 +58,11 @@ enrutados a los EHCI (sin driver) y el xHCI no veía ningún dispositivo.
   dura milisegundos.
 - `READ(10)`/`WRITE(10)` limitan el disco a 2 TiB; los sectores de 4 KiB
   nativos no se admiten.
+- Séptima foto del portátil: el pendrive se lee pero `fs_client` falla al
+  crear un fichero. Muchos pendrives rechazan `SYNCHRONIZE CACHE` como
+  petición ilegal (no tienen caché que vaciar): usbd lo detecta por el
+  sentido (`Sense::command_unsupported`), lo anuncia una vez y el flush
+  pasa a ser inmediato; los demás comandos rechazados se anuncian con su
+  sentido para diagnosticarlos desde una foto.
 - Si usbd muere, el supervisor lo relanza y fsd ve errores de E/S hasta
   entonces; el endpoint de bloques es de init y sobrevive.

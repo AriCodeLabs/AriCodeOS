@@ -155,6 +155,11 @@ struct Storage {
     small: (u64, u64),
     /// Sectores de 512 bytes.
     capacity: u64,
+    /// El dispositivo admite `SYNCHRONIZE CACHE`; si lo rechaza como no
+    /// soportado, el flush no tiene nada que vaciar.
+    sync_cache: bool,
+    /// Errores de E/S anunciados (se acotan para no inundar la consola).
+    errors_reported: u8,
 }
 
 /// Por qué falló un comando SCSI.
@@ -750,6 +755,8 @@ impl Controller {
             csw,
             small,
             capacity: 0,
+            sync_cache: true,
+            errors_reported: 0,
         });
         if let Err(why) = self.storage_init(port) {
             self.storage = None;
@@ -962,18 +969,81 @@ impl Controller {
         } else {
             scsi::read10(lba32, count)
         };
+        let name: &[u8] = if write { b"WRITE(10)" } else { b"READ(10)" };
         for _ in 0..2 {
             match self.scsi(cdb, Some((phys, count as u32 * 512, !write))) {
                 Ok(()) => return true,
                 Err(ScsiFail::Failed) => {
-                    if self.sense().map(|s| s.key) != Some(scsi::Sense::UNIT_ATTENTION) {
+                    let sense = self.sense();
+                    if sense.map(|s| s.key) != Some(scsi::Sense::UNIT_ATTENTION) {
+                        self.report_error(name, lba, sense);
                         return false;
                     }
                 }
-                Err(ScsiFail::Transport) => return false,
+                Err(ScsiFail::Transport) => {
+                    self.report_error(name, lba, None);
+                    return false;
+                }
             }
         }
+        self.report_error(name, lba, None);
         false
+    }
+
+    /// Hace duraderas las escrituras (`SYNCHRONIZE CACHE`). Un dispositivo
+    /// que no implementa el comando no tiene caché que vaciar: se anota una
+    /// vez y el flush pasa a ser inmediato.
+    fn flush(&mut self) -> bool {
+        if !self.storage.as_ref().is_some_and(|s| s.sync_cache) {
+            return self.storage.is_some();
+        }
+        match self.scsi(scsi::synchronize_cache10(), None) {
+            Ok(()) => true,
+            Err(ScsiFail::Failed) => {
+                let sense = self.sense();
+                if sense.is_some_and(|s| s.command_unsupported()) {
+                    if let Some(st) = self.storage.as_mut() {
+                        st.sync_cache = false;
+                    }
+                    say(b"el dispositivo no admite SYNCHRONIZE CACHE; flush sin efecto");
+                    true
+                } else {
+                    self.report_error(b"SYNCHRONIZE CACHE", 0, sense);
+                    false
+                }
+            }
+            Err(ScsiFail::Transport) => {
+                self.report_error(b"SYNCHRONIZE CACHE", 0, None);
+                false
+            }
+        }
+    }
+
+    /// Anuncia un comando fallido con su sentido (las primeras veces).
+    fn report_error(&mut self, what: &[u8], lba: u64, sense: Option<scsi::Sense>) {
+        let Some(st) = self.storage.as_mut() else {
+            return;
+        };
+        if st.errors_reported >= 4 {
+            return;
+        }
+        st.errors_reported += 1;
+        sys::print(b"usb-input: ");
+        sys::print(what);
+        sys::print(b" lba ");
+        num(lba);
+        match sense {
+            Some(s) => {
+                sys::print(b" rechazado: sentido ");
+                num(s.key as u64);
+                sys::print(b"/");
+                num(s.asc as u64);
+                sys::print(b"/");
+                num(s.ascq as u64);
+                sys::print(b"\n");
+            }
+            None => sys::print(b" fallo en el transporte\n"),
+        }
     }
 
     fn report_interface(&self, hid: &HidInterface, port: u8) {
@@ -1154,7 +1224,7 @@ fn serve_block(ctl: &mut Controller, buffers: &mut ClientBuffers, msg: &[u8], ha
         Some(BlockRequest {
             op: BlockOp::Flush, ..
         }) => BlockReply {
-            status: if ctl.scsi(scsi::synchronize_cache10(), None).is_ok() {
+            status: if ctl.flush() {
                 BlockStatus::Ok
             } else {
                 BlockStatus::Io

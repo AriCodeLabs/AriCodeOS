@@ -82,6 +82,7 @@ cualquier sistema) o regenerando la imagen con `--cmdline`:
 | "usb-input: sin almacenamiento USB" con el pendrive conectado | El pendrive no está en el xHCI: comprobar la traza `puertos Intel enrutados al xHCI`; si no aparece, el puerto cuelga de un EHCI sin driver (probar otro puerto, los azules suelen ser xHCI) |
 | "usb-input: puerto N: …" con un error de INQUIRY, TEST UNIT READY o READ CAPACITY | El pendrive no responde al protocolo bulk-only; anotar la línea |
 | "AriInit: sin particion ARI0 en el disco" | El pendrive no lleva la imagen de `cargo xtask usb-image` (o se grabó otra cosa encima) |
+| "AriInit: fs_client salio con 6" u otro código, y antes "usb-input: WRITE(10) … rechazado: sentido k/asc/ascq" | El pendrive rechaza escrituras; el sentido (clave/asc/ascq) dice por qué (7/… = protegido contra escritura). Un pendrive que no admite `SYNCHRONIZE CACHE` se anuncia y no es un error |
 
 Anotar (o fotografiar) las últimas líneas antes del fallo: `EXCEPTION`,
 `KERNEL PANIC` y `iommu: fallo DMA` llevan la información necesaria.
