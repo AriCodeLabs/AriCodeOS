@@ -1181,6 +1181,10 @@ sdk/proto::status              estado por servicio (protocolo 7) en el endpoint 
   PS/2, cursor e historial. Red: ADR 0024 saca la pila a `ari-net-core` y
   añade `rtl-net` para la Realtek `10ec:8136`; sin virtio-net, init lo
   lanza y omite los clientes de prueba del respondedor de QEMU.
+- Undécima foto: **red por cable en el portátil**: `net` muestra la
+  dirección por DHCP (192.168.1.24), `ping` al router responde en 1 ms y
+  `dns google.com` resuelve. Toda la pila (ARP, IPv4, ICMP, UDP, DHCP, DNS)
+  funciona sobre `rtl-net` a la primera.
 - Décima foto: `rtl_net` no arrancaba ("el ELF no cabe en la region de
   usuario"): faltaba su `build.rs` y se enlazó en la dirección por defecto.
   `cargo xtask build` comprueba ahora el punto de entrada de cada programa
