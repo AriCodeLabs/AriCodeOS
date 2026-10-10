@@ -52,6 +52,7 @@ disk = "slots"                  # disco: slots (defecto) | esp-only | pending-b 
 disk_readonly = false           # true: el disco de pruebas se presenta como solo lectura
 cpus = 4                        # procesadores (-smp N); sin declarar: 1, o lo que fuerce `--cpus N`
 usb_hid = true                  # añade qemu-xhci con un teclado y un ratón USB (los eventos QMP van al USB)
+usb_hid_msi = true              # ese xHCI solo ofrece MSI, sin MSI-X (como los Intel de 2012)
 usb_legacy_controller = true    # añade además un EHCI (clase 0c.03 pero no xHCI)
 install = ["examples/hello_ext"]  # apps externas que xtask compila, firma (version 1) e instala en AriFS como apps/NOMBRE.aripkg
 packages = ["examples/hello_ext:2", "examples/hello_ext:3:corrupt"]  # paquetes pendientes en pkgs/ (DIR:VERSION[:corrupt]) para `run installer`

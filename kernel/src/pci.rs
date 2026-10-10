@@ -7,7 +7,7 @@ use crate::object::{KernelObject, ObjectKind, ObjectRef};
 use crate::sync::IrqLock;
 use alloc::vec::Vec;
 use aricode_handles::Rights;
-use aricode_pci::{bars, cap_name, capabilities, Address, Bar, Header, CAP_MSIX};
+use aricode_pci::{bars, cap_name, capabilities, Address, Bar, Header, CAP_MSI, CAP_MSIX};
 use aricode_x86_paging::{CACHE_DISABLE, GLOBAL, NO_EXECUTE, WRITABLE, WRITE_THROUGH};
 use log::{info, warn};
 
@@ -23,6 +23,8 @@ pub struct PciDevice {
     pub capability_ids: Vec<u8>,
     /// Desplazamiento de la capability MSI-X en el espacio de configuración.
     pub msix_cap: Option<u8>,
+    /// Desplazamiento de la capability MSI (se usa si no hay MSI-X).
+    pub msi_cap: Option<u8>,
     /// Objeto de configuración entregado al driver actual: mientras viva
     /// (algún handle lo referencia) la función está reclamada; cuando el
     /// driver muere y sus handles desaparecen, init puede reclamarla de nuevo
@@ -144,6 +146,7 @@ pub fn init() {
                     bars: bars(&cfg),
                     capability_ids: caps.iter().map(|c| c.id).collect(),
                     msix_cap: caps.iter().find(|c| c.id == CAP_MSIX).map(|c| c.offset),
+                    msi_cap: caps.iter().find(|c| c.id == CAP_MSI).map(|c| c.offset),
                     claimed: None,
                 });
             }
@@ -264,7 +267,8 @@ pub struct Claimed {
 }
 
 /// Reclama la función `index` para un driver: habilita memoria y bus master,
-/// sondea los BARs, programa MSI-X (entrada 0) y construye las capabilities.
+/// sondea los BARs, programa MSI-X (entrada 0) o, sin MSI-X, MSI (ADR 0022)
+/// y construye las capabilities.
 pub fn claim(index: usize) -> Result<Claimed, &'static str> {
     let ecam_guard = ECAM.lock();
     let ecam = ecam_guard.as_ref().ok_or("pci: sin ECAM")?;
@@ -310,7 +314,6 @@ pub fn claim(index: usize) -> Result<Claimed, &'static str> {
         Rights::MANAGE.union(Rights::TRANSFER),
     ));
     // 3..9: BARs de memoria con su tamaño.
-    let mut msix_table: Option<(u64, u64)> = None; // (phys de la tabla, no usado aún)
     for (bar_index, bar) in &d.bars {
         if let Bar::Memory { address, is_64, .. } = bar {
             let size = probe_bar_size(ecam, addr, *bar_index, *is_64);
@@ -328,7 +331,8 @@ pub fn claim(index: usize) -> Result<Claimed, &'static str> {
             ));
         }
     }
-    // 2: MSI-X, entrada 0, si el dispositivo la tiene.
+    // 2: IRQ por MSI-X (entrada 0) o, si la función no tiene MSI-X, por MSI.
+    let mut irq_kind: Option<&str> = None;
     if let Some(cap) = d.msix_cap {
         let cap = cap as u64;
         let table = read_u32(ecam, addr, cap + 4);
@@ -348,11 +352,21 @@ pub fn claim(index: usize) -> Result<Claimed, &'static str> {
                 irq,
                 Rights::READ.union(Rights::WAIT).union(Rights::TRANSFER),
             ));
-            msix_table = Some((table_phys, 0));
+            irq_kind = Some("MSI-X entrada 0");
+        }
+    }
+    if irq_kind.is_none() {
+        if let Some(cap) = d.msi_cap {
+            let irq = crate::hw::register_msi(config_ptr(ecam, addr, 0), cap)?;
+            handles[2] = Some((
+                irq,
+                Rights::READ.union(Rights::WAIT).union(Rights::TRANSFER),
+            ));
+            irq_kind = Some("MSI");
         }
     }
     info!(
-        "pci: {} {:04x}:{:04x} {}{}",
+        "pci: {} {:04x}:{:04x} {}{}{}{}",
         addr,
         d.header.vendor,
         d.header.device,
@@ -361,11 +375,9 @@ pub fn claim(index: usize) -> Result<Claimed, &'static str> {
         } else {
             "reclamado"
         },
-        if msix_table.is_some() {
-            " (MSI-X entrada 0)"
-        } else {
-            ""
-        }
+        irq_kind.map_or("", |_| " ("),
+        irq_kind.unwrap_or(""),
+        irq_kind.map_or("", |_| ")")
     );
     Ok(Claimed { handles })
 }

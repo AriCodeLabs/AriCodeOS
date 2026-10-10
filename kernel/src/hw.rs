@@ -17,11 +17,14 @@ use log::warn;
 pub const DEVICE_VECTOR_FIRST: u8 = 0x30;
 pub const DEVICE_VECTOR_LAST: u8 = 0x3F;
 
-/// Origen de una línea: una GSI del I/O APIC o una entrada MSI-X (tabla
-/// mapeada por el kernel, índice de entrada).
+/// Origen de una línea: una GSI del I/O APIC, una entrada MSI-X (tabla
+/// mapeada por el kernel, índice de entrada) o una capability MSI (espacio
+/// de configuración de la función en el ECAM y desplazamiento de la
+/// capability; ADR 0022).
 pub enum IrqSource {
     Gsi { gsi: u32, level: bool },
     Msix { table_virt: u64, entry: u32 },
+    Msi { cfg_virt: u64, cap: u8 },
 }
 
 /// Una línea de interrupción enrutada a un vector. Al soltarse el último
@@ -49,6 +52,7 @@ impl IrqLine {
         match self.source {
             IrqSource::Gsi { gsi, .. } => gsi,
             IrqSource::Msix { entry, .. } => entry,
+            IrqSource::Msi { .. } => 0,
         }
     }
 
@@ -75,6 +79,7 @@ impl Drop for IrqLine {
             IrqSource::Msix { table_virt, entry } => {
                 msix_write(table_virt, entry, 0, 0, MSIX_MASKED)
             }
+            IrqSource::Msi { cfg_virt, cap } => msi_enable(cfg_virt, cap, false),
         }
         VECTORS.lock().remove(&self.vector);
     }
@@ -123,30 +128,104 @@ pub(crate) fn map_uc(phys: u64, len: u64) -> Result<u64, &'static str> {
     Ok(virt + offset)
 }
 
-/// Crea el objeto IRQ de una entrada MSI-X: asigna vector y programa la
-/// entrada hacia el LAPIC de arranque.
-pub fn register_msix(table_phys: u64, entry: u32) -> Result<ObjectRef, &'static str> {
-    let table_virt = map_uc(table_phys, 16 * (entry as u64 + 1))?;
-    let mut vectors = VECTORS.lock();
-    let vector = (DEVICE_VECTOR_FIRST..=DEVICE_VECTOR_LAST)
+/// Dirección de mensaje MSI/MSI-X hacia el LAPIC de arranque (sin
+/// redirección ni modo lógico).
+fn message_address() -> u64 {
+    0xFEE0_0000 | ((apic::bsp_id() as u64) << 12)
+}
+
+fn allocate_vector(vectors: &BTreeMap<u8, Weak<KernelObject>>) -> Result<u8, &'static str> {
+    (DEVICE_VECTOR_FIRST..=DEVICE_VECTOR_LAST)
         .find(|v| !vectors.contains_key(v))
-        .ok_or("hw: sin vectores libres")?;
-    let lapic_id = apic::bsp_id() as u64;
-    msix_write(
-        table_virt,
-        entry,
-        0xFEE0_0000 | (lapic_id << 12),
-        vector as u32,
-        0,
-    );
+        .ok_or("hw: sin vectores libres")
+}
+
+fn new_line(
+    vectors: &mut BTreeMap<u8, Weak<KernelObject>>,
+    source: IrqSource,
+    vector: u8,
+) -> ObjectRef {
     let obj = KernelObject::new(ObjectKind::Irq(IrqLine {
-        source: IrqSource::Msix { table_virt, entry },
+        source,
         vector,
         pending: AtomicU32::new(0),
         waiters: WaitQueue::new(),
     }));
     vectors.insert(vector, alloc::sync::Arc::downgrade(&obj));
-    Ok(obj)
+    obj
+}
+
+/// Crea el objeto IRQ de una entrada MSI-X: asigna vector y programa la
+/// entrada hacia el LAPIC de arranque.
+pub fn register_msix(table_phys: u64, entry: u32) -> Result<ObjectRef, &'static str> {
+    let table_virt = map_uc(table_phys, 16 * (entry as u64 + 1))?;
+    let mut vectors = VECTORS.lock();
+    let vector = allocate_vector(&vectors)?;
+    msix_write(table_virt, entry, message_address(), vector as u32, 0);
+    Ok(new_line(
+        &mut vectors,
+        IrqSource::Msix { table_virt, entry },
+        vector,
+    ))
+}
+
+/// Crea el objeto IRQ de una capability MSI (un solo mensaje): asigna vector,
+/// programa dirección y datos hacia el LAPIC de arranque y habilita MSI.
+/// Para funciones sin MSI-X (los controladores Intel de 2012, por ejemplo).
+pub fn register_msi(cfg_virt: u64, cap: u8) -> Result<ObjectRef, &'static str> {
+    let mut vectors = VECTORS.lock();
+    let vector = allocate_vector(&vectors)?;
+    msi_program(cfg_virt, cap, message_address(), vector as u16);
+    Ok(new_line(
+        &mut vectors,
+        IrqSource::Msi { cfg_virt, cap },
+        vector,
+    ))
+}
+
+/// Capability MSI (PCI 3.0, 6.8.1): control en +2 (bit 0 habilitar, bits
+/// 6:4 mensajes habilitados, bit 7 direcciones de 64 bits, bit 8 máscara por
+/// vector), dirección en +4 (y +8 la parte alta con 64 bits), datos en +8 o
+/// +0xC y máscara en +0xC o +0x10.
+const MSI_ENABLE: u16 = 0x0001;
+const MSI_MULTIPLE_ENABLE: u16 = 0x0070;
+const MSI_64BIT: u16 = 0x0080;
+const MSI_MASKABLE: u16 = 0x0100;
+
+fn msi_program(cfg_virt: u64, cap: u8, addr: u64, data: u16) {
+    let base = cfg_virt + cap as u64;
+    // SAFETY: el ECAM está mapeado sin caché por `pci::init` y `cap` es la
+    // capability MSI de una función reclamada; accesos alineados.
+    unsafe {
+        let ctrl = ((base + 2) as *const u16).read_volatile();
+        // Deshabilitado y con un solo mensaje mientras se programa.
+        ((base + 2) as *mut u16).write_volatile(ctrl & !(MSI_ENABLE | MSI_MULTIPLE_ENABLE));
+        ((base + 4) as *mut u32).write_volatile(addr as u32);
+        let data_off = if ctrl & MSI_64BIT != 0 {
+            ((base + 8) as *mut u32).write_volatile((addr >> 32) as u32);
+            0xC
+        } else {
+            8
+        };
+        ((base + data_off) as *mut u16).write_volatile(data);
+        if ctrl & MSI_MASKABLE != 0 {
+            ((base + data_off + 4) as *mut u32).write_volatile(0);
+        }
+    }
+    msi_enable(cfg_virt, cap, true);
+}
+
+fn msi_enable(cfg_virt: u64, cap: u8, on: bool) {
+    let ctrl_ptr = (cfg_virt + cap as u64 + 2) as *mut u16;
+    // SAFETY: ídem `msi_program`.
+    unsafe {
+        let ctrl = ctrl_ptr.read_volatile() & !MSI_MULTIPLE_ENABLE;
+        ctrl_ptr.write_volatile(if on {
+            ctrl | MSI_ENABLE
+        } else {
+            ctrl & !MSI_ENABLE
+        });
+    }
 }
 
 /// Región MMIO de un dispositivo (física, sin caché) o un buffer DMA

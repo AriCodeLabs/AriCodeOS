@@ -190,8 +190,14 @@ mod exit {
 
 impl Controller {
     fn open(mask: u64, clock: Clock) -> Result<Self, u64> {
-        let bar = bar_handle(mask, 0).ok_or(exit::MAP_BAR)?;
-        let base = Mmio(sys::mmio_map(bar).map_err(|_| exit::MAP_BAR)?);
+        let Some(bar) = bar_handle(mask, 0) else {
+            say(b"sin BAR 0 o sin IRQ entre las capabilities");
+            return Err(exit::MAP_BAR);
+        };
+        let base = Mmio(sys::mmio_map(bar).map_err(|_| {
+            say(b"no se pudo mapear el BAR 0");
+            exit::MAP_BAR
+        })?);
         // Los registros de capacidad se leen por palabras de 32 bits: QEMU no
         // atiende accesos de 16 bits en HCIVERSION.
         let cap0 = base.r32(cap::CAPLENGTH);

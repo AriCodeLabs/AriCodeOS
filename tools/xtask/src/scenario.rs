@@ -144,6 +144,10 @@ pub struct Scenario {
     /// eventos QMP van entonces al teclado USB (el manejador más reciente).
     #[serde(default)]
     pub usb_hid: bool,
+    /// El xHCI de `usb_hid` solo ofrece MSI (sin MSI-X), como los
+    /// controladores Intel de 2012: el kernel debe programar la capability MSI.
+    #[serde(default)]
+    pub usb_hid_msi: bool,
     /// Añade además un controlador USB anterior a xHCI (EHCI): init no debe
     /// entregárselo al driver xHCI ni bloquearse por él.
     #[serde(default)]

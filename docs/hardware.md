@@ -45,6 +45,20 @@ y `ARIBOOT` (estado A/B). Es la misma imagen que arranca el escenario
 3. Con `shell` en la cmdline aparece `ari> `. Comandos útiles: `cpus`,
    `mem`, `devices`, `ps`, `uptime`, `reboot`, `shutdown`.
 
+## Estado en el portátil de pruebas (2026-10-10)
+
+Primer arranque completo conseguido tras dos correcciones de AriBoot (GOP
+sin exclusividad y tipos de memoria estándar, ADR 0021). El equipo: Intel de
+2012 (xHCI `8086:1e31`, dos EHCI), Realtek `10ec:8136` (Ethernet) y
+`10ec:5286` (lector de tarjetas), Atheros `168c:0032` (Wi-Fi), sin DMAR.
+
+| Funciona | Falta |
+|---|---|
+| AriBoot: slots, GOP 800x600, kernel e initrd verificados | Driver de bloques para el pendrive (USB o AHCI): sin él no hay fsd, no se confirma el arranque y el shell no se lanza |
+| Kernel: memoria, ACPI, APIC, PCI (17 funciones), init y sus pruebas, `ARICODEOS_KERNEL_READY` | EHCI sin driver (solo xHCI) |
+| Teclado PS/2 en la consola del kernel | Red: sin driver para la Realtek |
+| xHCI con MSI (ADR 0022; el controlador no tiene MSI-X) | |
+
 ## Si algo falla
 
 Los interruptores de la cmdline aislan subsistemas. Se editan en
@@ -61,6 +75,7 @@ cualquier sistema) o regenerando la imagen con `--cmdline`:
 | Pantalla negra o dispositivos que no responden tras "iommu:" | `iommu=off` |
 | Demasiada salida | `log=warn`; poca: `log=debug` |
 | No hay teclado | comprobar que el firmware expone el i8042 (algunos lo desactivan con "USB legacy"); la traza `console: teclado PS/2` debe aparecer |
+| "usb-input: sin BAR 0 o sin IRQ entre las capabilities" | La función no tiene MSI ni MSI-X (la traza `pci: … reclamado (…)` lo dice); INTx no está soportado |
 
 Anotar (o fotografiar) las últimas líneas antes del fallo: `EXCEPTION`,
 `KERNEL PANIC` y `iommu: fallo DMA` llevan la información necesaria.
