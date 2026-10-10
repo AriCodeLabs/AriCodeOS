@@ -1141,6 +1141,11 @@ sdk/proto::status              estado por servicio (protocolo 7) en el endpoint 
   controlador pide scratchpads (QEMU ninguno) y el buffer fijo de 64 KiB no
   los cabía. `Params::dma_arena_bytes` lo dimensiona y el driver nombra el
   paso que falla.
+- Séptima y octava foto: el pendrive se lee por USB, `fs_client` fallaba
+  en el flush (el pendrive rechaza `SYNCHRONIZE CACHE`; usbd lo tolera) y
+  después **shell interactivo en el portátil** con el teclado PS/2. El
+  retroceso pintaba `?`: la consola de framebuffer no entendía `\x08` y
+  ahora mueve el cursor una celda.
 - Sexta foto: xHCI listo (8 puertos, 32 slots, 16 scratchpads), servicio de
   entrada ok, `ARICODEOS_KERNEL_READY`; ningún dispositivo en los puertos
   porque en los Intel 7 series los puertos USB quedan en los EHCI hasta que

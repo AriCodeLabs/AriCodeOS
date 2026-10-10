@@ -56,10 +56,11 @@ sin exclusividad y tipos de memoria estándar, ADR 0021). El equipo: Intel de
 
 | Funciona | Falta |
 |---|---|
-| AriBoot: slots, GOP 800x600, kernel e initrd verificados | Por comprobar: el pendrive como servicio de bloques por USB (ADR 0023), fsd, confirmación del slot y shell por el teclado PS/2 |
-| Kernel: memoria, ACPI, APIC, PCI (17 funciones), init y sus pruebas, `ARICODEOS_KERNEL_READY` | EHCI sin driver (solo xHCI) |
-| Teclado PS/2 en la consola del kernel | Red: sin driver para la Realtek |
-| xHCI con MSI (ADR 0022; el controlador no tiene MSI-X), 8 puertos, 16 scratchpads, servicio de entrada ok | Por comprobar: enrutado de los puertos al xHCI (en estos Intel nacen en los EHCI) y almacenamiento USB (ADR 0023) |
+| AriBoot: slots, GOP 800x600, kernel e initrd verificados | Red: sin driver para la Realtek |
+| Pendrive como servicio de bloques por USB (ADR 0023; "USB Disk 3.0", sin `SYNCHRONIZE CACHE`), fsd, confirmación del slot A y shell por el teclado PS/2 (2026-10-10) | EHCI sin driver (solo xHCI) |
+| Kernel: memoria, ACPI, APIC, PCI (17 funciones), init y sus pruebas, `ARICODEOS_KERNEL_READY` | Energía: estados de reposo y batería |
+| Teclado PS/2 en la consola del kernel (retroceso incluido) | |
+| xHCI con MSI (ADR 0022; el controlador no tiene MSI-X), cesión del firmware, puertos enrutados, 8 puertos, 16 scratchpads, servicio de entrada ok | |
 
 ## Si algo falla
 

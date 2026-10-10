@@ -3673,7 +3673,12 @@ equipo solo tiene MSI: ADR 0022 añade MSI a `pci_claim` (escenario
 puertos al xHCI, pide la cesión al firmware y sirve el pendrive como
 servicio de bloques (bulk-only, SCSI); sin virtio-blk, init monta fsd y el
 shell sobre él (escenario `usb.storage`, con escritura que sobrevive a un
-reinicio).
+reinicio). Séptima foto: el pendrive se lee, pero rechaza `SYNCHRONIZE
+CACHE` (tolerado desde entonces). Octava foto (2026-10-10): **shell
+interactivo de AriCodeOS en el portátil**, con AriFS en el pendrive y el
+teclado PS/2; el retroceso en la consola de framebuffer se corrigió a
+continuación. La Fase 34 queda completada en lo esencial; faltan la energía
+y los drivers del equipo (red Realtek, EHCI).
 
 Siguiente: repetir la prueba física con la imagen corregida y, con el
 equipo de referencia, energía (estados de reposo, batería) y más dispositivos.

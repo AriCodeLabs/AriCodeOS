@@ -129,6 +129,9 @@ impl<S: Surface> Console<S> {
         match ch {
             '\n' => self.newline(),
             '\r' => self.cursor_col = 0,
+            // Retroceso: el cursor vuelve una celda; borrar es cosa de quien
+            // escribe (el shell manda "\x08 \x08").
+            '\u{8}' => self.cursor_col = self.cursor_col.saturating_sub(1),
             '\t' => {
                 let next = (self.cursor_col / 8 + 1) * 8;
                 while self.cursor_col < next.min(self.cols) {
@@ -304,6 +307,18 @@ mod tests {
             C::DEFAULT_BG
         };
         assert_eq!(c.surface().unwrap().at(dx, dy), expect);
+    }
+
+    #[test]
+    fn backspace_moves_cursor_back_without_drawing() {
+        let mut c = C::new(Mem::new(64, 32));
+        write!(c, "ab\u{8} \u{8}").unwrap();
+        assert_eq!(c.cell(0, 0), b'a');
+        assert_eq!(c.cell(1, 0), b' ');
+        assert_eq!(c.cursor_col, 1);
+        // En la columna 0 no retrocede a la linea anterior.
+        write!(c, "\u{8}\u{8}x").unwrap();
+        assert_eq!(c.cell(0, 0), b'x');
     }
 
     #[test]
