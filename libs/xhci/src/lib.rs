@@ -111,6 +111,16 @@ impl Params {
         }
     }
 
+    /// Bytes del buffer DMA que necesita el driver: 64 KiB para DCBAA,
+    /// anillos, ERST y contextos de los dispositivos, más una página por cada
+    /// scratchpad que pida el controlador (los Intel de 2012 piden decenas;
+    /// QEMU ninguno) y una de holgura por la alineación de los scratchpads.
+    pub fn dma_arena_bytes(&self) -> u64 {
+        const BASE: u64 = 64 * 1024;
+        const PAGE: u64 = 4096;
+        BASE + (self.scratchpad_buffers as u64 + 1) * PAGE
+    }
+
     /// Bytes de cada contexto (slot o endpoint).
     pub fn context_bytes(&self) -> usize {
         if self.context_size_64 {
@@ -742,6 +752,12 @@ mod tests {
             35
         );
         assert_eq!(Params::decode(0, 0, 4).context_bytes(), 64);
+        // Sin scratchpads basta la base; con 35, 35 páginas más una de holgura.
+        assert_eq!(Params::decode(0, 0, 4).dma_arena_bytes(), 64 * 1024 + 4096);
+        assert_eq!(
+            Params::decode(0, 1 << 21 | 3 << 27, 4).dma_arena_bytes(),
+            64 * 1024 + 36 * 4096
+        );
         assert_eq!(speed::default_ep0_max_packet(speed::FULL), 8);
         assert_eq!(speed::default_ep0_max_packet(speed::HIGH), 64);
         assert_eq!(speed::default_ep0_max_packet(speed::SUPER), 512);

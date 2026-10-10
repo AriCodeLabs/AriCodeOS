@@ -76,6 +76,7 @@ cualquier sistema) o regenerando la imagen con `--cmdline`:
 | Demasiada salida | `log=warn`; poca: `log=debug` |
 | No hay teclado | comprobar que el firmware expone el i8042 (algunos lo desactivan con "USB legacy"); la traza `console: teclado PS/2` debe aparecer |
 | "usb-input: sin BAR 0 o sin IRQ entre las capabilities" | La función no tiene MSI ni MSI-X (la traza `pci: … reclamado (…)` lo dice); INTx no está soportado |
+| "usb-input: fallo en la inicializacion del xHCI: …" | El paso que falló: capabilities, memoria DMA (el buffer se dimensiona con los scratchpads que pide el controlador), reset o arranque |
 
 Anotar (o fotografiar) las últimas líneas antes del fallo: `EXCEPTION`,
 `KERNEL PANIC` y `iommu: fallo DMA` llevan la información necesaria.

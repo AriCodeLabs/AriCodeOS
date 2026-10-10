@@ -1136,6 +1136,10 @@ sdk/proto::status              estado por servicio (protocolo 7) en el endpoint 
   falta: el xHCI (`8086:1e31`) solo tiene MSI, no MSI-X, y el driver no
   recibía IRQ (ADR 0022 lo resuelve); los EHCI no tienen driver; sin driver
   de bloques para el pendrive no hay fsd y init no lanza el shell.
+- Quinta foto: `reclamado (MSI)` y el driver cae en la reserva DMA: el
+  controlador pide scratchpads (QEMU ninguno) y el buffer fijo de 64 KiB no
+  los cabía. `Params::dma_arena_bytes` lo dimensiona y el driver nombra el
+  paso que falla.
 
 ## Pila de arranque y consola (auditoría 3eb4965)
 
