@@ -10,6 +10,7 @@ serial_contains = [
     "vmm: tablas propias activas",
     "W^X en la imagen",
     "de memoria de arranque devueltos al PMM",
+    "KiB conservados para el kernel",
     "ARICODEOS_KERNEL_READY",
 ]
 serial_absent = ["KERNEL PANIC", "EXCEPTION"]
