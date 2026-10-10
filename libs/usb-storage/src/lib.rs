@@ -176,6 +176,16 @@ pub mod scsi {
         pub const UNIT_ATTENTION: u8 = 6;
         /// Clave 2: no está listo (sin medio o arrancando).
         pub const NOT_READY: u8 = 2;
+        /// Clave 5: comando o campo no válidos para este dispositivo.
+        pub const ILLEGAL_REQUEST: u8 = 5;
+
+        /// El dispositivo no implementa el comando (petición ilegal por
+        /// código de operación o campo inválidos): muchos pendrives
+        /// rechazan así `SYNCHRONIZE CACHE`, y entonces no hay caché que
+        /// vaciar.
+        pub fn command_unsupported(&self) -> bool {
+            self.key == Self::ILLEGAL_REQUEST && matches!(self.asc, 0x20 | 0x24)
+        }
 
         pub fn parse(b: &[u8]) -> Option<Self> {
             if b.len() < 14 || b[0] & 0x7F != 0x70 && b[0] & 0x7F != 0x71 {
@@ -266,6 +276,14 @@ mod tests {
             (s.key, s.asc, s.ascq),
             (scsi::Sense::UNIT_ATTENTION, 0x29, 0)
         );
+        assert!(!s.command_unsupported());
+        sense[2] = 5;
+        sense[12] = 0x20;
+        assert!(scsi::Sense::parse(&sense).unwrap().command_unsupported());
+        sense[12] = 0x24;
+        assert!(scsi::Sense::parse(&sense).unwrap().command_unsupported());
+        sense[12] = 0x21; // LBA fuera de rango: no es "no soportado"
+        assert!(!scsi::Sense::parse(&sense).unwrap().command_unsupported());
         sense[0] = 0x00;
         assert!(scsi::Sense::parse(&sense).is_none());
     }
