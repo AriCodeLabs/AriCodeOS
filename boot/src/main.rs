@@ -167,7 +167,16 @@ fn run(
     // 6. Extensión física a mapear: mapa actual + framebuffer.
     // Se excluyen Reserved/Unusable: el firmware suele anunciar aperturas MMIO
     // gigantes (p. ej. PCIe 64 bits) que el kernel mapeará bajo demanda.
+    // Las balizas de paso (cian) acotan un cuelgue en hardware aunque la
+    // consola del firmware deje de pintar (docs/hardware.md).
+    // SAFETY: el firmware mantiene el framebuffer identidad-mapeado y
+    // `framebuffer` describe exactamente esa memoria.
+    let step =
+        |n: u32| unsafe { framebuffer.beacon(framebuffer.address as *mut u8, Beacon::step(n)) };
+    info!("memoria: consultando el mapa UEFI");
     let snapshot = boot::memory_map(MemoryType::LOADER_DATA).map_err(|_| "memory map")?;
+    step(0);
+    let meta = snapshot.meta();
     let mut phys_limit: u64 = 0;
     let mut regions = 0usize;
     for d in snapshot.entries() {
@@ -179,16 +188,19 @@ fn run(
     }
     phys_limit = phys_limit.max(4 << 30); // al menos 4 GiB (MMIO clásico bajo 4G)
     phys_limit = phys_limit.next_multiple_of(HUGE_2M);
-    drop(snapshot);
     info!(
-        "memoria: {regions} regiones UEFI, limite fisico {} MiB",
+        "memoria: {regions} regiones UEFI ({} bytes, descriptor de {}), limite fisico {} MiB",
+        meta.map_size,
+        meta.desc_size,
         phys_limit >> 20
     );
+    drop(snapshot);
 
     // 7. Tablas de páginas: identidad (solo para el cargador), mapa físico
     // lineal en PHYS_MAP_BASE (lo que usará el kernel) y kernel en la mitad alta.
     let pool_pages = paging::pool_size_for(phys_limit, 2, kernel_pages as u64);
     let pool_mem = alloc_pages(pool_pages, "page tables")?;
+    step(1);
     // SAFETY: `pool_mem` son `pool_pages` páginas recién reservadas por UEFI,
     // alineadas, identidad-mapeadas y de uso exclusivo hasta que el kernel las herede.
     let pool = unsafe { BumpFrames::new(pool_mem.as_ptr() as u64, pool_pages) };
@@ -199,6 +211,7 @@ fn run(
     tables
         .map_range_2m(PHYS_MAP_BASE, 0, phys_limit, WRITABLE | NO_EXECUTE | GLOBAL)
         .map_err(|_| "tablas: mapa fisico")?;
+    step(2);
     if framebuffer.address != 0 {
         let fb_start = framebuffer.address & !(HUGE_2M - 1);
         let fb_end = (framebuffer.address + framebuffer.size).next_multiple_of(HUGE_2M);
@@ -233,6 +246,7 @@ fn run(
             )
             .map_err(|_| "tablas: kernel")?;
     }
+    step(3);
     info!(
         "paginas: identidad y mapa fisico, {} tablas usadas de {}",
         tables.allocator().used_pages(),
