@@ -153,10 +153,13 @@ y `page_tables_base/size` qué tablas recupera al activar las suyas.
   compartido, por si el panic ocurre a medio escribir en el framebuffer.
 - La consola de framebuffer mantiene una copia de las celdas y repinta al
   hacer scroll; nunca lee de VRAM. Entiende el retroceso (`\x08`, el cursor
-  vuelve una celda) y pinta un cursor `_` que el tick del reloj alterna dos
-  veces por segundo (`console::blink_cursor`, con `try_lock`: si la consola
-  está ocupada se salta); cualquier escritura lo oculta antes de pintar, así
-  que las celdas nunca contienen el cursor.
+  vuelve una celda) y pinta un cursor `_` que alterna un hilo del kernel
+  (`console::start_cursor_thread`, cada 500 ms, con `try_lock`). Ni el tick
+  (no se pinta desde handlers) ni el bucle idle: una llamada más en ese
+  bucle, que gira mucho, frenaba todo el sistema en QEMU un 25 %. Solo
+  parpadea con la consola quieta (sin escrituras desde el parpadeo
+  anterior); cualquier escritura lo oculta antes de pintar, así que las
+  celdas nunca contienen el cursor.
 - Las teclas de edición (flechas, inicio, fin, suprimir) llegan a la consola
   como las secuencias de escape de un terminal serie (`ESC [ A`…, `ESC [ 3 ~`),
   vengan del teclado PS/2 del kernel, del puente de consola o del compositor:

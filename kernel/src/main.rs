@@ -161,6 +161,7 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     info!("interrupciones habilitadas");
 
     task::init();
+    console::start_cursor_thread();
     if cmdline.get(keys::SMP) == Some("off") {
         info!("smp: desactivado por la linea de comandos (smp=off); 1 CPU");
     } else {

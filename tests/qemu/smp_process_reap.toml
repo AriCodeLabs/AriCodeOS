@@ -7,7 +7,9 @@ level = "full"
 areas = ["smp", "user", "memory"]
 cmdline = "qemu_exit test=process_reap"
 cpus = 4
-timeout_secs = 60
+# 180 procesos con la consola de pantalla haciendo scroll: entre 20 y 50 s en
+# TCG segun la carga del anfitrion.
+timeout_secs = 120
 
 [expect]
 exit = 33
