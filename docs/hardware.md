@@ -56,7 +56,7 @@ sin exclusividad y tipos de memoria estándar, ADR 0021). El equipo: Intel de
 
 | Funciona | Falta |
 |---|---|
-| AriBoot: slots, GOP 800x600, kernel e initrd verificados | Red: sin driver para la Realtek |
+| AriBoot: slots, GOP 800x600, kernel e initrd verificados | Red por cable: driver `rtl_net` (ADR 0024), por comprobar en el portátil con `net`, `ping` y `dns` |
 | Pendrive como servicio de bloques por USB (ADR 0023; "USB Disk 3.0", sin `SYNCHRONIZE CACHE`), fsd, confirmación del slot A y shell por el teclado PS/2 (2026-10-10) | EHCI sin driver (solo xHCI) |
 | Kernel: memoria, ACPI, APIC, PCI (17 funciones), init y sus pruebas, `ARICODEOS_KERNEL_READY` | Energía: estados de reposo y batería |
 | Teclado PS/2 en la consola del kernel (retroceso incluido) | |
@@ -83,6 +83,9 @@ cualquier sistema) o regenerando la imagen con `--cmdline`:
 | "usb-input: sin almacenamiento USB" con el pendrive conectado | El pendrive no está en el xHCI: comprobar la traza `puertos Intel enrutados al xHCI`; si no aparece, el puerto cuelga de un EHCI sin driver (probar otro puerto, los azules suelen ser xHCI) |
 | "usb-input: puerto N: …" con un error de INQUIRY, TEST UNIT READY o READ CAPACITY | El pendrive no responde al protocolo bulk-only; anotar la línea |
 | "AriInit: sin particion ARI0 en el disco" | El pendrive no lleva la imagen de `cargo xtask usb-image` (o se grabó otra cosa encima) |
+| "rtl-net: sin enlace (cable desconectado?)" | El PHY no ve portadora: cable, o el firmware no dejó la autonegociación hecha (rtl-net no programa el PHY todavía) |
+| "rtl-net: fallo en la inicializacion: …" | Sin BAR de memoria, sin DMA o la tarjeta no completa el reset; anotar la línea `pci: … 10ec:8136 reclamado (…)` |
+| `net` en el shell sin dirección tras unos segundos | DHCP sin respuesta: comprobar el enlace (`rtl-net: enlace a N Mb/s`) y que la red tenga servidor DHCP |
 | "AriInit: fs_client salio con 6" u otro código, y antes "usb-input: WRITE(10) … rechazado: sentido k/asc/ascq" | El pendrive rechaza escrituras; el sentido (clave/asc/ascq) dice por qué (7/… = protegido contra escritura). Un pendrive que no admite `SYNCHRONIZE CACHE` se anuncia y no es un error |
 
 Anotar (o fotografiar) las últimas líneas antes del fallo: `EXCEPTION`,

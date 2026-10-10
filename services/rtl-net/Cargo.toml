@@ -1,0 +1,22 @@
+[package]
+name = "ari-rtl-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Driver Realtek r8169 (RTL8169/8168/8101) en ring 3 y servicio de red sobre ari-net-core"
+
+[[bin]]
+name = "rtl_net"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+aricode-sys = { path = "../../sdk/rust" }
+ari-net-core = { path = "../net-core" }
+aricode-rtl8169 = { path = "../../libs/rtl8169" }
+aricode-net = { path = "../../libs/net" }
+aricode-rt = { path = "../../sdk/runtime" }
+
+[build-dependencies]
+aricode-build = { path = "../../sdk/build" }

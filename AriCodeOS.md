@@ -3680,8 +3680,11 @@ teclado PS/2; el retroceso en la consola de framebuffer se corrigió a
 continuación, junto con un cursor que parpadea en la consola de pantalla y el
 historial del shell con las flechas (las teclas de edición viajan como
 secuencias de escape de terminal desde cualquier teclado). La Fase 34 queda
-completada en lo esencial; faltan la energía y los drivers del equipo (red
-Realtek, EHCI).
+completada en lo esencial. Red: ADR 0024 saca la pila de red de virtio-net
+a `ari-net-core` (trait `Link`) y añade `rtl-net` para la Realtek del
+portátil, sin emulación en QEMU (librería probada en el anfitrión, driver
+en el portátil). Faltan la energía, el Wi-Fi (ath9k y WPA2, fuera de alcance
+por ahora) y EHCI.
 
 Siguiente: repetir la prueba física con la imagen corregida y, con el
 equipo de referencia, energía (estados de reposo, batería) y más dispositivos.
