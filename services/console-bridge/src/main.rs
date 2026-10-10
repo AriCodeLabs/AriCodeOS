@@ -45,7 +45,8 @@ fn main(count: u64) -> u64 {
     let mut keyboards = [Keyboard::new(); MAX_INPUTS];
     let mut events = [Event::default(); MAX_EVENTS];
     let mut times = [0u64; MAX_EVENTS];
-    let mut text = [0u8; MAX_EVENTS];
+    // Hasta 4 bytes por tecla (secuencias de escape de las flechas).
+    let mut text = [0u8; MAX_EVENTS * 4];
     // Sin anuncio propio: lo hace init antes de lanzar el shell, para que
     // nada se entrelace con el primer prompt en la consola (varias CPUs).
     loop {
@@ -65,7 +66,7 @@ fn main(count: u64) -> u64 {
                 if ev.kind == EV_KEY && ev.code >= 0x100 {
                     continue;
                 }
-                if let Some(ch) = keyboards[i].feed(ev) {
+                for &ch in keyboards[i].feed(ev).as_slice() {
                     text[len] = ch;
                     len += 1;
                 }

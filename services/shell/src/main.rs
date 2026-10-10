@@ -40,15 +40,111 @@ fn hex(v: u64, width: usize) {
 }
 
 /// Lee una línea con eco, retroceso y fin en CR o LF.
-fn read_line(line: &mut [u8; LINE_MAX]) -> usize {
+/// Últimas líneas ejecutadas, para las flechas arriba y abajo.
+const HISTORY: usize = 8;
+
+struct History {
+    lines: [[u8; LINE_MAX]; HISTORY],
+    lens: [usize; HISTORY],
+    /// Líneas guardadas (hasta `HISTORY`); la más reciente es `next - 1`.
+    count: usize,
+    next: usize,
+}
+
+impl History {
+    const fn new() -> Self {
+        Self {
+            lines: [[0; LINE_MAX]; HISTORY],
+            lens: [0; HISTORY],
+            count: 0,
+            next: 0,
+        }
+    }
+
+    /// Guarda una línea no vacía distinta de la última.
+    fn push(&mut self, line: &[u8]) {
+        if line.is_empty() || self.back(1) == Some(line) {
+            return;
+        }
+        self.lines[self.next][..line.len()].copy_from_slice(line);
+        self.lens[self.next] = line.len();
+        self.next = (self.next + 1) % HISTORY;
+        self.count = (self.count + 1).min(HISTORY);
+    }
+
+    /// La línea `n` posiciones hacia atrás (1 = la más reciente).
+    fn back(&self, n: usize) -> Option<&[u8]> {
+        if n == 0 || n > self.count {
+            return None;
+        }
+        let i = (self.next + HISTORY - n) % HISTORY;
+        Some(&self.lines[i][..self.lens[i]])
+    }
+}
+
+/// Sustituye lo tecleado por `text`, borrándolo también en pantalla.
+fn replace_line(line: &mut [u8; LINE_MAX], len: &mut usize, text: &[u8]) {
+    for _ in 0..*len {
+        sys::print(b"\x08 \x08");
+    }
+    let n = text.len().min(LINE_MAX);
+    line[..n].copy_from_slice(&text[..n]);
+    *len = n;
+    sys::print(&line[..n]);
+}
+
+/// Lee una línea de la consola con edición mínima: retroceso y, con las
+/// flechas arriba y abajo (secuencias `ESC [ A` / `ESC [ B`, como las de un
+/// terminal serie), el historial. El resto de secuencias se descartan.
+fn read_line(line: &mut [u8; LINE_MAX], history: &History) -> usize {
     let mut len = 0;
     let mut chunk = [0u8; 64];
+    // Secuencia de escape en curso: 0 nada, 1 `ESC`, 2 `ESC [`, 3 parámetro
+    // numérico pendiente de su final (`~`).
+    let mut esc = 0u8;
+    // Posición en el historial: 0 = línea nueva, n = `n` hacia atrás.
+    let mut back = 0usize;
     loop {
         let Ok(n) = sys::console_read(CONSOLE_IN, &mut chunk, TIMEOUT_INFINITE) else {
             continue;
         };
         for &b in &chunk[..n] {
+            match esc {
+                1 => {
+                    esc = if b == b'[' { 2 } else { 0 };
+                    continue;
+                }
+                2 => {
+                    esc = 0;
+                    match b {
+                        b'A' => {
+                            if let Some(text) = history.back(back + 1) {
+                                back += 1;
+                                replace_line(line, &mut len, text);
+                            }
+                        }
+                        b'B' => {
+                            if back > 0 {
+                                back -= 1;
+                                let text = history.back(back).unwrap_or(b"");
+                                replace_line(line, &mut len, text);
+                            }
+                        }
+                        b'0'..=b'9' => esc = 3,
+                        _ => {}
+                    }
+                    continue;
+                }
+                3 => {
+                    if !b.is_ascii_digit() {
+                        esc = 0;
+                    }
+                    continue;
+                }
+                _ => {}
+            }
             match b {
+                0x1B => esc = 1,
                 b'\r' | b'\n' => {
                     sys::print(b"\n");
                     return len;
@@ -733,9 +829,11 @@ fn main(mask: u64) -> u64 {
     };
     sys::print(b"arish: shell de AriCodeOS (help para ayuda)\n");
     let mut line = [0u8; LINE_MAX];
+    let mut history = History::new();
     loop {
         sys::print(PROMPT);
-        let len = read_line(&mut line);
+        let len = read_line(&mut line, &history);
+        history.push(&line[..len]);
         if execute(&mut fs, &mut net_client, mask, &line[..len], 0) {
             return 0;
         }
