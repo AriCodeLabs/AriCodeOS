@@ -509,8 +509,13 @@ pub fn threads_selftest() {
         "frames no devueltos tras reap: {}",
         free_before - free_after
     );
-    let expected = 1 + cpu::online_count();
-    assert_eq!(thread_count(), expected, "solo main y un idle por CPU");
+    // main, el hilo del cursor de la consola y un idle por CPU.
+    let expected = 2 + cpu::online_count();
+    assert_eq!(
+        thread_count(),
+        expected,
+        "solo main, el hilo del cursor y un idle por CPU"
+    );
     assert_eq!(current_tid(), MAIN_TID);
     info!(
         "threads selftest ok (alternancia {}, {N} workers terminados y recogidos, {} frames en tablas)",
