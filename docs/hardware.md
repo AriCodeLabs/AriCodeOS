@@ -140,3 +140,16 @@ The first boot does not need to write anything. When the block service on
 the USB stick is tested (AHCI/NVMe/USB have no driver yet; the USB stick is
 only read by the firmware to boot), it will be done first in read-only mode
 and always on the USB stick itself or a dedicated USB drive.
+
+## Power-off and line editing (2026-10-11)
+
+- `shutdown` powers the machine off through ACPI S5: at boot the kernel
+  reads the FADT and the `\_S5_` package of the DSDT and logs
+  `acpi: power-off through S5 (SLP_TYP a/b, PM1a ..., PM1b ...)`. If the
+  firmware ignores the request, the console says
+  `ACPI power-off had no effect; halting (it is safe to switch off)`.
+- The shell edits the line like a terminal: Left/Right, Home/End
+  (Ctrl-A/Ctrl-E), insert and delete anywhere (Backspace, Delete), Ctrl-U to
+  clear, Up/Down for the history.
+- HTTPS is not supported yet (`http: invalid url`): it needs TLS 1.3 and
+  certificate verification, planned after SSH.
