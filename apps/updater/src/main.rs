@@ -40,15 +40,31 @@ const URL_FILE: &str = "update_url";
 const MANIFEST_FILE: &str = "manifest.txt";
 const HTTP_TIMEOUT_MS: u32 = 15_000;
 
-fn say(msg: &[u8]) {
-    sys::print(b"updater: ");
+/// Everything printed, kept for `last.log` (the shell shows it to a remote
+/// session, whose user cannot see the console).
+struct Log(core::cell::RefCell<Vec<u8>>);
+// SAFETY: the updater is single-threaded.
+unsafe impl Sync for Log {}
+static LOG: Log = Log(core::cell::RefCell::new(Vec::new()));
+const LOG_FILE: &str = "last.log";
+const LOG_MAX: usize = 4096;
+
+fn out(msg: &[u8]) {
     sys::print(msg);
-    sys::print(b"\n");
+    let mut log = LOG.0.borrow_mut();
+    let room = LOG_MAX.saturating_sub(log.len());
+    log.extend_from_slice(&msg[..msg.len().min(room)]);
+}
+
+fn say(msg: &[u8]) {
+    out(b"updater: ");
+    out(msg);
+    out(b"\n");
 }
 
 fn num(v: u64) {
     let mut b = [0u8; 20];
-    sys::print(fmt_u64(v, &mut b));
+    out(fmt_u64(v, &mut b));
 }
 
 fn find_partition(blk: &mut BlockClient, name: &str) -> Option<(u64, u64)> {
@@ -202,15 +218,15 @@ fn channel(net: &mut NetClient, url: &str) -> Option<Channel> {
             parsed
         }
         Ok(f) => {
-            sys::print(b"updater: channel manifest: HTTP ");
+            out(b"updater: channel manifest: HTTP ");
             num(f.status as u64);
-            sys::print(b"\n");
+            out(b"\n");
             None
         }
         Err(e) => {
-            sys::print(b"updater: channel manifest: ");
-            sys::print(http_error(e));
-            sys::print(b"\n");
+            out(b"updater: channel manifest: ");
+            out(http_error(e));
+            out(b"\n");
             None
         }
     }
@@ -231,11 +247,11 @@ fn download(
         say(b"channel image does not fit the UPDATE partition");
         return false;
     }
-    sys::print(b"updater: downloading ");
-    sys::print(ch.image.as_bytes());
-    sys::print(b" (");
+    out(b"updater: downloading ");
+    out(ch.image.as_bytes());
+    out(b" (");
     num(ch.size as u64);
-    sys::print(b" bytes)\n");
+    out(b" bytes)\n");
     // Invalidate any previous image first.
     blk.buffer()[..512].fill(0);
     if blk.write(update.0, 1).is_err() {
@@ -295,9 +311,9 @@ fn download(
         Ok(s) => s,
         Err(e) => {
             if !failed {
-                sys::print(b"updater: download failed: ");
-                sys::print(http_error(e));
-                sys::print(b"\n");
+                out(b"updater: download failed: ");
+                out(http_error(e));
+                out(b"\n");
             } else {
                 say(b"cannot write the UPDATE partition");
             }
@@ -305,9 +321,9 @@ fn download(
         }
     };
     if status != 200 {
-        sys::print(b"updater: image download: HTTP ");
+        out(b"updater: image download: HTTP ");
         num(status as u64);
-        sys::print(b"\n");
+        out(b"\n");
         return false;
     }
     // Tail: pad the last partial sector and flush.
@@ -339,7 +355,7 @@ fn download(
     true
 }
 
-fn main(arg: u64) -> u64 {
+fn run(arg: u64) -> u64 {
     let Ok(mut blk) = BlockClient::new(BLOCK, HW, CHUNK) else {
         say(b"need the block service (block capability)");
         return 2;
@@ -397,18 +413,18 @@ fn main(arg: u64) -> u64 {
             return 22;
         };
         let installed = load_image(&mut blk, active_part, image, &pk).map(|(_, v)| v);
-        sys::print(b"updater: installed version ");
+        out(b"updater: installed version ");
         match installed {
             Some(v) => num(v as u64),
-            None => sys::print(b"unknown"),
+            None => out(b"unknown"),
         }
-        sys::print(b", channel offers version ");
+        out(b", channel offers version ");
         num(ch.version as u64);
         if installed == Some(ch.version) {
-            sys::print(b": up to date\n");
+            out(b": up to date\n");
             return 0;
         }
-        sys::print(b"\n");
+        out(b"\n");
         if arg == ARG_CHECK {
             return 0;
         }
@@ -427,20 +443,20 @@ fn main(arg: u64) -> u64 {
         say(b"image does not fit the slot");
         return 10;
     }
-    sys::print(b"updater: UPDATE image version ");
+    out(b"updater: UPDATE image version ");
     num(version as u64);
-    sys::print(b" verified (");
+    out(b" verified (");
     num(len as u64);
-    sys::print(b" bytes)\n");
+    out(b" bytes)\n");
     // 4. Copy header + container to the inactive slot (sector by sector, disk
     //    to disk; the in-memory copy was only used for verification).
     if !copy_sectors(&mut blk, update.0, slot_part.0, sectors + 1) {
         say(b"error writing the slot");
         return 14;
     }
-    sys::print(b"updater: installed into slot ");
-    sys::print(target.name().as_bytes());
-    sys::print(b"\n");
+    out(b"updater: installed into slot ");
+    out(target.name().as_bytes());
+    out(b"\n");
     // 5. Schedule the slot: pending with tries.
     let next = schedule(state, target);
     blk.buffer()[..512].copy_from_slice(&next.encode());
@@ -453,13 +469,13 @@ fn main(arg: u64) -> u64 {
     }
     match BootState::decode(&blk.buffer()[..512]) {
         Some(s) if s.pending == Some((target, aricode_ab::DEFAULT_TRIES)) => {
-            sys::print(b"updater: state: active ");
-            sys::print(s.active.name().as_bytes());
-            sys::print(b", pending ");
-            sys::print(target.name().as_bytes());
-            sys::print(b" (");
+            out(b"updater: state: active ");
+            out(s.active.name().as_bytes());
+            out(b", pending ");
+            out(target.name().as_bytes());
+            out(b" (");
             num(aricode_ab::DEFAULT_TRIES as u64);
-            sys::print(b" tries); reboot to try it\n");
+            out(b" tries); reboot to try it\n");
             0
         }
         _ => {
@@ -467,6 +483,23 @@ fn main(arg: u64) -> u64 {
             17
         }
     }
+}
+
+fn main(arg: u64) -> u64 {
+    let code = run(arg);
+    // The log for the shell (private directory); best effort.
+    if let Ok(mut fs) = FsClient::new(FS, HW) {
+        let log = LOG.0.borrow();
+        let _ = fs
+            .open(LOG_FILE)
+            .or_else(|_| fs.create(LOG_FILE))
+            .and_then(|fd| {
+                let r = fs.replace(fd, &log);
+                let _ = fs.close(fd);
+                r
+            });
+    }
+    code
 }
 
 aricode_rt::entry!(main);

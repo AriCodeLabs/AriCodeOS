@@ -792,7 +792,12 @@ fn update(fs: &mut FsClient, rest: &[u8]) {
             return;
         }
     };
-    match launch::run(BROKER, "updater", arg) {
+    let result = launch::run(BROKER, "updater", arg);
+    if session() {
+        // The updater printed on the console; show its log here.
+        show_file(fs, UPDATER_LOG_FILE);
+    }
+    match result {
         Ok(0) => {}
         Ok(code) => {
             print(b"update: updater exited with ");
@@ -804,6 +809,23 @@ fn update(fs: &mut FsClient, rest: &[u8]) {
             launch_failure(e);
         }
     }
+}
+
+/// Prints a file, if it exists (no message otherwise).
+fn show_file(fs: &mut FsClient, name: &str) {
+    let Ok(fd) = fs.open(name) else {
+        return;
+    };
+    let mut buf = [0u8; 512];
+    let mut offset = 0u32;
+    while let Ok(n) = fs.read(fd, offset, &mut buf) {
+        if n == 0 {
+            break;
+        }
+        print(&buf[..n]);
+        offset += n as u32;
+    }
+    let _ = fs.close(fd);
 }
 
 /// Explains why the broker did not run a program (after the program name).
@@ -827,8 +849,9 @@ fn launch_failure(e: aricode_rt::sys::launch::LaunchError) {
 const UPDATER_APPLY: u64 = 0;
 const UPDATER_FETCH: u64 = 1;
 const UPDATER_CHECK: u64 = 2;
-/// Channel URL in the updater's private directory.
+/// Channel URL and last run's log in the updater's private directory.
 const UPDATE_URL_FILE: &str = "updater/update_url";
+const UPDATER_LOG_FILE: &str = "updater/last.log";
 
 /// Asks the broker (init) to run an initrd program with the capabilities
 /// of its manifest and waits for it to exit.
