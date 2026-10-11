@@ -685,6 +685,18 @@ impl SetupPacket {
             length: 0,
         }
     }
+    /// Bulk-Only Mass Storage Reset (BOT 3.1) on `interface`: the device
+    /// drops the current command and the host then clears both bulk halts
+    /// (Reset Recovery, BOT 5.3.4).
+    pub fn mass_storage_reset(interface: u8) -> Self {
+        Self {
+            request_type: 0x21,
+            request: 0xFF,
+            value: 0,
+            index: interface as u16,
+            length: 0,
+        }
+    }
     pub fn set_configuration(value: u8) -> Self {
         Self {
             request_type: 0x00,

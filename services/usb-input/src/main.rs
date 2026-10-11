@@ -145,6 +145,8 @@ struct Bulk {
 struct Storage {
     device: usize,
     slot: u8,
+    /// Interface number (Bulk-Only Mass Storage Reset).
+    interface: u8,
     bulk_in: Bulk,
     bulk_out: Bulk,
     tag: u32,
@@ -165,8 +167,9 @@ struct Storage {
 /// Why a SCSI command failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScsiFail {
-    /// Failed bulk transfer or invalid CSW.
-    Transport,
+    /// Failed bulk transfer or invalid CSW, with the xHCI completion code
+    /// of the failed transfer (0: timeout, invalid CSW or phase error).
+    Transport(u8),
     /// The device rejected the command (`REQUEST SENSE` says why).
     Failed,
 }
@@ -738,6 +741,7 @@ impl Controller {
         self.storage = Some(Storage {
             device: index,
             slot,
+            interface: iface.interface,
             bulk_in: Bulk {
                 dci: dci_in,
                 address: 0x80 | iface.bulk_in,
@@ -796,7 +800,7 @@ impl Controller {
                         return Err("TEST UNIT READY rejected");
                     }
                 }
-                Err(ScsiFail::Transport) => return Err("TEST UNIT READY: no response"),
+                Err(ScsiFail::Transport(_)) => return Err("TEST UNIT READY: no response"),
             }
             let until = self.clock.now() + 100;
             while self.clock.now() < until {
@@ -903,7 +907,7 @@ impl Controller {
     /// in the CSW is recovered as BOT 6.7 requires; the CSW gives the status.
     fn scsi(&mut self, cdb: Cdb, data: Option<(u64, u32, bool)>) -> Result<(), ScsiFail> {
         let (tag, cbw_phys, cbw_virt, csw_phys, csw_virt) = {
-            let st = self.storage.as_mut().ok_or(ScsiFail::Transport)?;
+            let st = self.storage.as_mut().ok_or(ScsiFail::Transport(0))?;
             st.tag = st.tag.wrapping_add(1);
             (st.tag, st.cbw.0, st.cbw.1, st.csw.0, st.csw.1)
         };
@@ -916,15 +920,15 @@ impl Controller {
         };
         // SAFETY: CBW in the driver's DMA buffer.
         unsafe { (cbw_virt as *mut [u8; Cbw::LEN]).write_volatile(cbw.encode()) };
-        if self.bulk(false, cbw_phys, Cbw::LEN as u32, 1000).is_err() {
+        if let Err(code) = self.bulk(false, cbw_phys, Cbw::LEN as u32, 1000) {
             self.recover_bulk(false);
-            return Err(ScsiFail::Transport);
+            return Err(ScsiFail::Transport(code));
         }
         if let Some((phys, len, dir_in)) = data {
             match self.bulk(dir_in, phys, len, 5000) {
                 Ok(_) => {}
                 Err(completion::STALL) => self.recover_bulk(dir_in),
-                Err(_) => return Err(ScsiFail::Transport),
+                Err(code) => return Err(ScsiFail::Transport(code)),
             }
         }
         let mut csw = self.bulk(true, csw_phys, Csw::LEN as u32, 1000);
@@ -932,17 +936,17 @@ impl Controller {
             self.recover_bulk(true);
             csw = self.bulk(true, csw_phys, Csw::LEN as u32, 1000);
         }
-        csw.map_err(|_| ScsiFail::Transport)?;
+        csw.map_err(ScsiFail::Transport)?;
         // SAFETY: CSW in the driver's DMA buffer.
         let raw = unsafe { (csw_virt as *const [u8; Csw::LEN]).read_volatile() };
-        let csw = Csw::parse(&raw).ok_or(ScsiFail::Transport)?;
+        let csw = Csw::parse(&raw).ok_or(ScsiFail::Transport(0))?;
         if csw.tag != tag {
-            return Err(ScsiFail::Transport);
+            return Err(ScsiFail::Transport(0));
         }
         match csw.status {
             CswStatus::Passed => Ok(()),
             CswStatus::Failed => Err(ScsiFail::Failed),
-            CswStatus::PhaseError => Err(ScsiFail::Transport),
+            CswStatus::PhaseError => Err(ScsiFail::Transport(0)),
         }
     }
 
@@ -958,8 +962,23 @@ impl Controller {
         scsi::Sense::parse(unsafe { core::slice::from_raw_parts(virt as *const u8, 64) })
     }
 
-    /// Reads or writes `count` sectors in the client's DMA buffer;
-    /// a rejection due to unit attention is retried once.
+    /// Reset Recovery (BOT 5.3.4) after a failed transfer: Bulk-Only Mass
+    /// Storage Reset, then both bulk pipes unhalted. Some sticks answer the
+    /// first commands after a write with transaction errors; this puts the
+    /// transport back in a known state before the command is retried.
+    fn reset_recovery(&mut self) {
+        let Some((device, interface)) = self.storage.as_ref().map(|s| (s.device, s.interface))
+        else {
+            return;
+        };
+        let _ = self.control(device, SetupPacket::mass_storage_reset(interface), None);
+        self.recover_bulk(true);
+        self.recover_bulk(false);
+    }
+
+    /// Reads or writes `count` sectors in the client's DMA buffer. A
+    /// rejection due to unit attention is retried once; a transport failure
+    /// is retried up to three times after a Reset Recovery and a pause.
     fn block_io(&mut self, write: bool, lba: u64, count: u16, phys: u64) -> bool {
         let Ok(lba32) = u32::try_from(lba) else {
             return false;
@@ -970,9 +989,15 @@ impl Controller {
             scsi::read10(lba32, count)
         };
         let name: &[u8] = if write { b"WRITE(10)" } else { b"READ(10)" };
-        for _ in 0..2 {
+        let mut transport_failures = 0;
+        for _ in 0..5 {
             match self.scsi(cdb, Some((phys, count as u32 * 512, !write))) {
-                Ok(()) => return true,
+                Ok(()) => {
+                    if transport_failures > 0 {
+                        say(b"transfer recovered after a reset");
+                    }
+                    return true;
+                }
                 Err(ScsiFail::Failed) => {
                     let sense = self.sense();
                     if sense.map(|s| s.key) != Some(scsi::Sense::UNIT_ATTENTION) {
@@ -980,9 +1005,17 @@ impl Controller {
                         return false;
                     }
                 }
-                Err(ScsiFail::Transport) => {
-                    self.report_error(name, lba, None);
-                    return false;
+                Err(ScsiFail::Transport(code)) => {
+                    transport_failures += 1;
+                    sys::print(b"usb-input: transfer failed (completion code ");
+                    num(code as u64);
+                    sys::print(b"), reset recovery\n");
+                    if transport_failures > 3 {
+                        self.report_error(name, lba, None);
+                        return false;
+                    }
+                    self.reset_recovery();
+                    sys::time::sleep_ms(100);
                 }
             }
         }
@@ -1012,7 +1045,7 @@ impl Controller {
                     false
                 }
             }
-            Err(ScsiFail::Transport) => {
+            Err(ScsiFail::Transport(_)) => {
                 self.report_error(b"SYNCHRONIZE CACHE", 0, None);
                 false
             }
