@@ -65,14 +65,18 @@ impl Entropy {
         h.update(&fresh);
         h.update(&sys::time::uptime_us(SYSTEM).unwrap_or(0).to_le_bytes());
         let state = h.finish();
-        let e = Self { state, counter: 0 };
-        // Save a successor for the next boot (never the state in use).
-        let next = e.derive(b"next boot");
+        Self { state, counter: 0 }
+    }
+
+    /// Saves a successor for the next boot (never the state in use). Done
+    /// after the start-up reads: some USB sticks stop answering for a
+    /// moment right after a write.
+    fn save_next(&self, fs: &mut FsClient) {
+        let next = self.derive(b"next boot");
         let mut hex = [0u8; 65];
         let n = aricode_crypto::hex(&next, &mut hex[..64]).len();
         hex[n] = b'\n';
         write_file(fs, SEED_FILE, &hex[..n + 1]);
-        e
     }
 
     fn derive(&self, label: &[u8]) -> [u8; 32] {
@@ -348,10 +352,9 @@ fn ready() {
     );
 }
 
-fn authorized(fs: &mut FsClient) -> Vec<[u8; 32]> {
-    read_file(fs, AUTHORIZED_KEYS)
-        .map(|t| parse_authorized_keys(&t))
-        .unwrap_or_default()
+/// Keys from `authorized_keys`; `None` if the file cannot be read.
+fn authorized(fs: &mut FsClient) -> Option<Vec<[u8; 32]>> {
+    read_file(fs, AUTHORIZED_KEYS).map(|t| parse_authorized_keys(&t))
 }
 
 fn main(_arg: u64) -> u64 {
@@ -364,7 +367,7 @@ fn main(_arg: u64) -> u64 {
         return 2;
     };
     let mut entropy = Entropy::load(&mut fs);
-    let mut keys = authorized(&mut fs);
+    let mut keys = authorized(&mut fs).unwrap_or_default();
     let mut announced = false;
     if keys.is_empty() {
         say(b"no authorized_keys in AriFS: not listening (install a key with cargo xtask usb-image --authorized-key, or write authorized_keys ... from the console)");
@@ -373,11 +376,12 @@ fn main(_arg: u64) -> u64 {
         // Closed until the owner installs a key; checked every few seconds.
         while keys.is_empty() {
             sys::time::sleep_ms(5_000);
-            keys = authorized(&mut fs);
+            keys = authorized(&mut fs).unwrap_or_default();
         }
         say(b"authorized_keys found");
     }
     let seed = host_key(&mut fs, &mut entropy);
+    entropy.save_next(&mut fs);
     let listener = match net.tcp_listen(PORT) {
         Ok(l) => l,
         Err(_) => {
@@ -403,15 +407,20 @@ fn main(_arg: u64) -> u64 {
         sys::print(b"sshd: connection from ");
         print_ip(peer);
         sys::print(b"\n");
-        let keys = authorized(&mut fs);
+        // Reread per connection so a key added or removed from the console
+        // counts; a read that fails keeps the last keys read successfully.
+        match authorized(&mut fs) {
+            Some(k) => keys = k,
+            None => say(b"cannot reread authorized_keys; keeping the last keys read"),
+        }
         if keys.is_empty() {
-            // authorized_keys removed while running: refuse everything.
+            // authorized_keys emptied while running: refuse everything.
             say(b"authorized_keys is empty now: connection refused");
             let _ = net.tcp_close(sock);
             continue;
         }
         let rng = entropy.next();
-        serve(&mut net, sock, peer, seed, rng, keys);
+        serve(&mut net, sock, peer, seed, rng, keys.clone());
         let _ = net.tcp_close(sock);
         say(b"connection closed");
     }
