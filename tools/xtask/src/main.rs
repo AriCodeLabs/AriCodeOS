@@ -4,7 +4,9 @@
 //! cargo xtask build [--debug]                 builds AriBoot and AriKernel
 //! cargo xtask image [--debug]                 build + assembles build/esp/
 //! cargo xtask run   [--debug] [--cmdline S] [--cpus N] [--usb-image] [--usb-hid]   image + interactive QEMU
-//! cargo xtask usb-image [--cmdline S] [--authorized-key KEY.pub]  GPT image for a USB stick at build/aricodeos-usb.img
+//! cargo xtask usb-image [--cmdline S] [--authorized-key KEY.pub] [--update-url URL]  GPT image for a USB stick at build/aricodeos-usb.img
+//! cargo xtask publish-update [--version N]   signed system image + manifest in build/update/ (ADR 0027)
+//! cargo xtask serve-update [--version N] [--port P]  publish-update + HTTP server for `update` on the machines (default port 8080)
 //! cargo xtask test  [opciones]                test levels (see tests/README.md)
 //! cargo xtask fs-cat DISK [NAME]             reads a file from ARI0 (or lists it) in an image or dump
 //!     --level unit|smoke|full                 default: unit + smoke
@@ -74,10 +76,20 @@ fn main() -> ExitCode {
             cli.flag("--usb-image"),
             cli.flag("--usb-hid"),
         ),
+        "publish-update" => image::publish_update(release, version_flag(&cli)).map(|_| ()),
+        "serve-update" => image::publish_update(release, version_flag(&cli)).and_then(|dir| {
+            qemu::serve_update(
+                &dir,
+                cli.value("--port")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(8080),
+            )
+        }),
         "usb-image" => image::build_usb_image(
             release,
             cli.value("--cmdline").unwrap_or("shell"),
             cli.value("--authorized-key").map(Path::new),
+            cli.value("--update-url"),
         )
             .map(|p| {
                 println!(
@@ -139,4 +151,11 @@ pub fn root() -> PathBuf {
 
 pub fn build_dir() -> PathBuf {
     root().join("build")
+}
+
+/// `--version N` (default 1).
+fn version_flag(cli: &Cli) -> u32 {
+    cli.value("--version")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
 }

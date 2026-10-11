@@ -179,6 +179,17 @@ fn run_scenario(
         }
         None => None,
     };
+    if s.host_update {
+        image::publish_update(release, 2)?;
+        installed.push((
+            String::from(image::UPDATE_URL_FILE),
+            format!(
+                "http://10.0.2.2:{}/update/\n",
+                aricode_proto::net::TEST_HTTP_PORT
+            )
+            .into_bytes(),
+        ));
+    }
     let _https = if s.host_https {
         let (servers, ca) = https_servers(&workdir.join("tls"))?;
         installed.push((String::from("trusted_ca.der"), ca));

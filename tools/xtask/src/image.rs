@@ -350,6 +350,7 @@ pub fn build_usb_image(
     release: bool,
     cmdline: &str,
     authorized_key: Option<&Path>,
+    update_url: Option<&str>,
 ) -> Result<PathBuf> {
     let base = build_base_esp(release)?;
     let esp = build_scenario_esp(
@@ -380,6 +381,18 @@ pub fn build_usb_image(
             aricode_ssh::fingerprint(&aricode_crypto::ed25519::public_key(&seed))
         );
     }
+    if let Some(url) = update_url {
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return Err(format!(
+                "--update-url {url}: must start with http:// or https://"
+            ));
+        }
+        extra.push((
+            String::from(UPDATE_URL_FILE),
+            format!("{url}\n").into_bytes(),
+        ));
+        println!("[xtask] update channel {url}");
+    }
     let out = crate::build_dir().join("aricodeos-usb.img");
     write_usb_image(&out, &esp, &extra)?;
     Ok(out)
@@ -390,6 +403,9 @@ pub enum DiskVariant {
     /// Slot A active with the current image; B empty; UPDATE with version 2.
     #[default]
     Slots,
+    /// Like `Slots` but with an empty UPDATE partition: only a download can
+    /// fill it (network update scenarios).
+    UpdateEmpty,
     /// No slot or state partitions: AriBoot boots from the ESP.
     EspOnly,
     /// B installed (version 2) and pending with 3 attempts.
@@ -418,6 +434,7 @@ impl DiskVariant {
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "slots" => Self::Slots,
+            "update-empty" => Self::UpdateEmpty,
             "esp-only" => Self::EspOnly,
             "pending-b" => Self::PendingB,
             "b-exhausted" => Self::ExhaustedB,
@@ -600,7 +617,9 @@ pub fn write_test_disk(
         let v1 = system_image(1, false)?;
         let v2 = system_image(2, false)?;
         write_slot(&mut img, PART_SYSA, &v1)?;
-        write_slot(&mut img, PART_UPDATE, &v2)?;
+        if variant != DiskVariant::UpdateEmpty {
+            write_slot(&mut img, PART_UPDATE, &v2)?;
+        }
         let mut state = BootState::fresh(Slot::A);
         match variant {
             DiskVariant::PendingB => {
@@ -617,6 +636,7 @@ pub fn write_test_disk(
                 state = schedule(state, Slot::B);
             }
             DiskVariant::Slots
+            | DiskVariant::UpdateEmpty
             | DiskVariant::EspOnly
             | DiskVariant::UsbImage
             | DiskVariant::FsPendingReplace
@@ -890,4 +910,43 @@ fn ssh_host_key(path: &Path) -> Result<([u8; 32], Vec<u8>)> {
     let text = format!("{}\n", aricode_crypto::hex(&seed, &mut hex));
     io(fs::write(path, &text), "write the SSH host key")?;
     Ok((seed, text.into_bytes()))
+}
+
+/// The updater's channel URL file in AriFS (its private directory).
+pub const UPDATE_URL_FILE: &str = "updater/update_url";
+
+/// Channel directory with the published image (`publish_update`).
+pub fn update_dir() -> PathBuf {
+    crate::build_dir().join("update")
+}
+
+/// `cargo xtask publish-update [--version N]` (ADR 0027): writes the signed
+/// system image `aricodeos-N.img` (slot layout: ARISLOT header + container)
+/// and `manifest.txt` (version, file name, size, SHA-256) into
+/// `build/update/`, ready to be served over HTTP.
+pub fn publish_update(release: bool, version: u32) -> Result<PathBuf> {
+    build_base_esp(release)?;
+    let container = system_image(version, false)?;
+    let mut image = aricode_ab::Image::header(container.len() as u32).to_vec();
+    image.extend_from_slice(&container);
+    let dir = update_dir();
+    io(fs::create_dir_all(&dir), "create build/update")?;
+    let name = format!("aricodeos-{version}.img");
+    io(fs::write(dir.join(&name), &image), "write the update image")?;
+    let mut hex = [0u8; 64];
+    let manifest = format!(
+        "version = {version}\nimage = {name}\nsize = {}\nsha256 = {}\n",
+        image.len(),
+        aricode_crypto::hex(&aricode_crypto::sha256::sha256(&image), &mut hex)
+    );
+    io(
+        fs::write(dir.join("manifest.txt"), manifest),
+        "write manifest.txt",
+    )?;
+    println!(
+        "[xtask] update channel at {}: version {version}, {} bytes",
+        dir.display(),
+        image.len()
+    );
+    Ok(dir)
 }

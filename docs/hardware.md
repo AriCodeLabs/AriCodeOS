@@ -183,3 +183,27 @@ still appears on the laptop's screen.
 Without `--authorized-key` the image has no `authorized_keys` and sshd does
 not listen: no port is open. Refused keys are logged on the laptop with the
 peer's address.
+
+## Updating without the USB stick (ADR 0027)
+
+On the development machine, from the repository:
+
+```bash
+cargo xtask serve-update --version 2 --port 8765
+```
+
+It builds and signs the current system image, publishes it in `build/update/`
+and serves it on the LAN (any free port; the default 8080 is often taken);
+bump `--version` on every publication (the laptop skips a version equal to
+the one it runs). On the laptop, console or SSH:
+
+```text
+update http://192.168.1.16:8765/     # first time: saves the channel URL
+update check                         # installed and available versions
+update                               # download, verify, install into the inactive slot
+reboot
+```
+
+The loader boots the new slot; if it does not come up, three attempts later
+it returns to the previous one. The channel URL can also be baked into the
+stick with `cargo xtask usb-image --update-url URL`.

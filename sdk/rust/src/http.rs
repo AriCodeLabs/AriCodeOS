@@ -74,5 +74,7 @@ pub fn get(
         Error::Malformed => HttpError::Malformed,
         Error::TooBig => HttpError::TooBig,
         Error::Unsupported => HttpError::Unsupported,
+        // The buffer sink never aborts.
+        Error::Aborted => HttpError::Malformed,
     })
 }

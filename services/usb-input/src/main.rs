@@ -15,7 +15,7 @@ use aricode_proto::block::{
     Op as BlockOp, Reply as BlockReply, Request as BlockRequest, Status as BlockStatus, MAX_SECTORS,
 };
 use aricode_proto::input::{Event as WireEvent, Op, Reply, Request, Status, MAX_EVENTS};
-use aricode_rt::sys::block::ClientBuffers;
+use aricode_rt::sys::block::map_client_buffer;
 use aricode_rt::sys::virtio_pci::{bar_handle, extra_handle, DmaRegion, Mmio, CFG, IRQ, SERVICE};
 use aricode_rt::sys::{self, abi, Handle};
 use aricode_usb_storage::{scsi, Cbw, Cdb, Csw, CswStatus};
@@ -1205,7 +1205,7 @@ fn intel_route_ports(cfg: &Mmio) -> bool {
 }
 
 /// One block protocol request on the USB storage.
-fn serve_block(ctl: &mut Controller, buffers: &mut ClientBuffers, msg: &[u8], handles: &[Handle]) {
+fn serve_block(ctl: &mut Controller, msg: &[u8], handles: &[Handle]) {
     let reply_to = handles[0];
     let capacity = ctl.storage.as_ref().map_or(0, |s| s.capacity);
     let invalid = BlockReply {
@@ -1245,7 +1245,7 @@ fn serve_block(ctl: &mut Controller, buffers: &mut ClientBuffers, msg: &[u8], ha
             {
                 invalid
             } else {
-                match buffers.map(handles[1]) {
+                match map_client_buffer(handles[1]) {
                     Some((phys, len)) if len >= count as u64 * 512 => {
                         if ctl.block_io(op == BlockOp::Write, lba, count, phys) {
                             BlockReply {
@@ -1377,7 +1377,6 @@ fn main(mask: u64) -> u64 {
     } else {
         &[SERVICE]
     };
-    let mut buffers = ClientBuffers::new();
     let mut pending = Pending {
         buf: [(Event::default(), 0); RING],
         head: 0,
@@ -1401,7 +1400,7 @@ fn main(mask: u64) -> u64 {
                 continue;
             }
             if which == 1 {
-                serve_block(&mut ctl, &mut buffers, &msg[..n], &handles[..nh]);
+                serve_block(&mut ctl, &msg[..n], &handles[..nh]);
                 continue;
             }
             let reply_to = handles[0];

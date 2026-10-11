@@ -281,10 +281,75 @@ fn http_serve(mut stream: std::net::TcpStream) {
     let response: Vec<u8> = match path {
         "/hola" => b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 19\r\nConnection: close\r\n\r\nHola desde el host\n".to_vec(),
         "/chunked" => b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nd\r\nprimer trozo,\r\ne\r\n segundo trozo\r\n0\r\n\r\n".to_vec(),
+        // The update channel published by `publish_update` (ADR 0027).
+        p if p.starts_with("/update/") => file_response(&image::update_dir(), &p["/update/".len()..]),
         _ => b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nno existe".to_vec(),
     };
     let _ = stream.write_all(&response);
     let _ = stream.flush();
+}
+
+/// `200` with the file `name` of `dir` (plain names only), or `404`.
+pub fn file_response(dir: &Path, name: &str) -> Vec<u8> {
+    let plain = !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b));
+    match plain.then(|| std::fs::read(dir.join(name)).ok()).flatten() {
+        Some(data) => {
+            let mut r = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                data.len()
+            )
+            .into_bytes();
+            r.extend_from_slice(&data);
+            r
+        }
+        None => {
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found"
+                .to_vec()
+        }
+    }
+}
+
+/// `cargo xtask serve-update`: serves the channel directory on `port` (all
+/// interfaces) until interrupted; `GET /manifest.txt`, `GET /aricodeos-N.img`.
+pub fn serve_update(dir: &Path, port: u16) -> Result {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind(("0.0.0.0", port))
+        .map_err(|e| format!("cannot listen on port {port}: {e}"))?;
+    println!(
+        "[xtask] serving {} on port {port}; on the machine: update http://<this host>:{port}/",
+        dir.display()
+    );
+    for stream in listener.incoming().flatten() {
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+        let mut stream = stream;
+        let mut buf = [0u8; 2048];
+        let mut have = 0;
+        while have < buf.len() {
+            match stream.read(&mut buf[have..]) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => have += n,
+            }
+            if buf[..have].windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let request = String::from_utf8_lossy(&buf[..have]);
+        let path = request.split(' ').nth(1).unwrap_or("/");
+        let name = path.trim_start_matches('/');
+        println!(
+            "[xtask] {} GET /{name}",
+            stream
+                .peer_addr()
+                .map(|a| a.to_string())
+                .unwrap_or_default()
+        );
+        let _ = stream.write_all(&file_response(dir, name));
+        let _ = stream.flush();
+    }
+    Ok(())
 }
 
 /// Echoes a TCP connection until the peer closes it.

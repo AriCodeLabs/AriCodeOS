@@ -31,6 +31,8 @@ pub enum Error<E> {
     TooBig,
     /// Unsupported encoding or protocol switch.
     Unsupported,
+    /// The caller's sink refused more body data (`fetch_with`).
+    Aborted,
 }
 
 /// Result of a GET: status code and body bytes written.
@@ -358,6 +360,33 @@ pub fn fetch<T: Transport>(
     url: &Url,
     out: &mut [u8],
 ) -> Result<Fetched, Error<T::Error>> {
+    let mut body_len = 0;
+    let mut truncated = false;
+    let mut sink = |chunk: &[u8]| {
+        let room = out.len() - body_len;
+        let n = chunk.len().min(room);
+        out[body_len..body_len + n].copy_from_slice(&chunk[..n]);
+        body_len += n;
+        truncated |= n < chunk.len();
+        true
+    };
+    let status = fetch_with(t, url, &mut sink)?;
+    Ok(Fetched {
+        status,
+        body_len,
+        truncated,
+    })
+}
+
+/// Streaming `GET`: every piece of the body goes to `sink` as it arrives
+/// (any size, in order); the sink returns `false` to abort (`Aborted`).
+/// Returns the status code. The connection is consumed to the end of the
+/// body so the caller can tell a complete download from a cut one.
+pub fn fetch_with<T: Transport>(
+    t: &mut T,
+    url: &Url,
+    sink: &mut dyn FnMut(&[u8]) -> bool,
+) -> Result<u16, Error<T::Error>> {
     let mut host_buf = [0u8; MAX_HOST + 6];
     let host = url.host_header(&mut host_buf);
     let mut req = [0u8; MAX_HOST + 6 + 512];
@@ -390,61 +419,56 @@ pub fn fetch<T: Transport>(
         }
     };
     let rest = &head[response.header_len..have];
-    let (body_len, truncated) = match response.body {
-        BodyLength::Length(len) => read_length(t, rest, len, out)?,
-        BodyLength::UntilClose => read_until_close(t, rest, out)?,
-        BodyLength::Chunked => read_chunked(t, rest, out)?,
-    };
-    Ok(Fetched {
-        status: response.status,
-        body_len,
-        truncated,
-    })
+    match response.body {
+        BodyLength::Length(len) => read_length(t, rest, len, sink)?,
+        BodyLength::UntilClose => read_until_close(t, rest, sink)?,
+        BodyLength::Chunked => read_chunked(t, rest, sink)?,
+    }
+    Ok(response.status)
+}
+
+fn deliver<E>(sink: &mut dyn FnMut(&[u8]) -> bool, data: &[u8]) -> Result<(), Error<E>> {
+    if data.is_empty() || sink(data) {
+        Ok(())
+    } else {
+        Err(Error::Aborted)
+    }
 }
 
 fn read_length<T: Transport>(
     t: &mut T,
     rest: &[u8],
     len: usize,
-    out: &mut [u8],
-) -> Result<(usize, bool), Error<T::Error>> {
-    let truncated = len > out.len();
-    let len = len.min(out.len());
+    sink: &mut dyn FnMut(&[u8]) -> bool,
+) -> Result<(), Error<T::Error>> {
     let first = rest.len().min(len);
-    out[..first].copy_from_slice(&rest[..first]);
-    let mut body_len = first;
-    while body_len < len {
-        match t.recv(&mut out[body_len..len]).map_err(Error::Transport)? {
+    deliver(sink, &rest[..first])?;
+    let mut got = first;
+    let mut buf = [0u8; 1024];
+    while got < len {
+        let want = (len - got).min(buf.len());
+        match t.recv(&mut buf[..want]).map_err(Error::Transport)? {
             0 => return Err(Error::Malformed),
-            k => body_len += k,
+            k => {
+                deliver(sink, &buf[..k])?;
+                got += k;
+            }
         }
     }
-    Ok((body_len, truncated))
+    Ok(())
 }
 
 fn read_until_close<T: Transport>(
     t: &mut T,
     rest: &[u8],
-    out: &mut [u8],
-) -> Result<(usize, bool), Error<T::Error>> {
-    if rest.len() > out.len() {
-        out.copy_from_slice(&rest[..out.len()]);
-        return Ok((out.len(), true));
-    }
-    out[..rest.len()].copy_from_slice(rest);
-    let mut body_len = rest.len();
+    sink: &mut dyn FnMut(&[u8]) -> bool,
+) -> Result<(), Error<T::Error>> {
+    deliver(sink, rest)?;
+    let mut buf = [0u8; 1024];
     loop {
-        if body_len == out.len() {
-            // Destination full: tell a clean end from leftover content.
-            let mut probe = [0u8; 1];
-            return match t.recv(&mut probe).map_err(Error::Transport)? {
-                0 => Ok((body_len, false)),
-                _ => Ok((body_len, true)),
-            };
-        }
-        match t.recv(&mut out[body_len..]).map_err(Error::Transport)? {
-            0 => return Ok((body_len, false)),
-            k => body_len += k,
+        match t.recv(&mut buf).map_err(Error::Transport)? {
+            0 => return Ok(()),
+            k => deliver(sink, &buf[..k])?,
         }
     }
 }
@@ -452,13 +476,13 @@ fn read_until_close<T: Transport>(
 fn read_chunked<T: Transport>(
     t: &mut T,
     rest: &[u8],
-    out: &mut [u8],
-) -> Result<(usize, bool), Error<T::Error>> {
+    sink: &mut dyn FnMut(&[u8]) -> bool,
+) -> Result<(), Error<T::Error>> {
     let mut dec = ChunkDecoder::new();
     let mut raw = [0u8; 1024];
+    let mut out = [0u8; 1024];
     let mut raw_len = 0;
     let mut pending = rest;
-    let mut body_len = 0;
     loop {
         // Fill `raw` with what was left over from the headers before reading more.
         if !pending.is_empty() {
@@ -468,21 +492,18 @@ fn read_chunked<T: Transport>(
             pending = &pending[n..];
         }
         let (used, written) = dec
-            .feed(&raw[..raw_len], &mut out[body_len..])
+            .feed(&raw[..raw_len], &mut out)
             .map_err(|_| Error::Malformed)?;
-        body_len += written;
+        deliver(sink, &out[..written])?;
         raw.copy_within(used..raw_len, 0);
         raw_len -= used;
         if dec.done() {
-            return Ok((body_len, false));
-        }
-        if dec.wants_output() && body_len == out.len() {
-            return Ok((body_len, true));
+            return Ok(());
         }
         if used == 0 && written == 0 && raw_len == raw.len() {
             return Err(Error::Malformed);
         }
-        if !pending.is_empty() {
+        if !pending.is_empty() || (used > 0 || written > 0) && raw_len > 0 {
             continue;
         }
         match t.recv(&mut raw[raw_len..]).map_err(Error::Transport)? {
@@ -870,5 +891,30 @@ mod tests {
             Err(Error::Malformed),
             "close in the middle of the headers"
         );
+    }
+
+    #[test]
+    fn streaming_fetch_delivers_everything_and_can_abort() {
+        let mut raw = b"HTTP/1.1 200 OK\r\nContent-Length: 3000\r\n\r\n".to_vec();
+        raw.extend((0..3000u32).map(|i| (i % 251) as u8));
+        let mut t = Mock::new(&[&raw]);
+        let mut got = Vec::new();
+        let url = Url::parse("h/").unwrap();
+        let status = fetch_with(&mut t, &url, &mut |c: &[u8]| {
+            got.extend_from_slice(c);
+            true
+        })
+        .unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(got, raw[raw.len() - 3000..]);
+        // The sink aborts after the first piece.
+        let mut t = Mock::new(&[&raw]);
+        let mut pieces = 0;
+        let r = fetch_with(&mut t, &url, &mut |_: &[u8]| {
+            pieces += 1;
+            false
+        });
+        assert_eq!(r, Err(Error::Aborted));
+        assert_eq!(pieces, 1);
     }
 }

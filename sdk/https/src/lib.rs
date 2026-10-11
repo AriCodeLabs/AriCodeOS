@@ -31,6 +31,8 @@ pub enum HttpsError {
     TooBig,
     /// Unsupported encoding or protocol switch.
     Unsupported,
+    /// The caller's sink refused more data (`get_with`).
+    Aborted,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -145,7 +147,7 @@ impl Transport for Stream<'_> {
 /// Downloads `url` (`http://` or `https://`, literal IP or name resolved by
 /// netd) into `out`. `system` (READ) provides randomness and the clock for
 /// TLS; `extra_roots` are trust anchors (DER) added to the embedded ones,
-/// e.g. a private CA.
+/// e.g. a private CA. A body larger than `out` is truncated.
 pub fn get(
     net: &mut NetClient,
     system: Handle,
@@ -154,6 +156,33 @@ pub fn get(
     out: &mut [u8],
     timeout_ms: u32,
 ) -> Result<Fetched, HttpsError> {
+    let mut body_len = 0;
+    let mut truncated = false;
+    let mut sink = |chunk: &[u8]| {
+        let n = chunk.len().min(out.len() - body_len);
+        out[body_len..body_len + n].copy_from_slice(&chunk[..n]);
+        body_len += n;
+        truncated |= n < chunk.len();
+        true
+    };
+    let status = get_with(net, system, extra_roots, url, timeout_ms, &mut sink)?;
+    Ok(Fetched {
+        status,
+        body_len,
+        truncated,
+    })
+}
+
+/// Streaming download: the body goes to `sink` piece by piece (any size,
+/// in order), which returns `false` to abort. Returns the status code.
+pub fn get_with(
+    net: &mut NetClient,
+    system: Handle,
+    extra_roots: &[Vec<u8>],
+    url: &str,
+    timeout_ms: u32,
+    sink: &mut dyn FnMut(&[u8]) -> bool,
+) -> Result<u16, HttpsError> {
     let url = Url::parse(url).ok_or(HttpsError::BadUrl)?;
     let addr = match aricode_net::Ipv4Addr::parse(url.host) {
         Some(ip) => ip.0,
@@ -188,7 +217,7 @@ pub fn get(
         true => stream.handshake().map_err(Error::Transport),
         false => Ok(()),
     }
-    .and_then(|()| aricode_http::fetch(&mut stream, &url, out));
+    .and_then(|()| aricode_http::fetch_with(&mut stream, &url, sink));
     if let Some(tls) = stream.tls.as_mut() {
         let mut bye = Vec::new();
         tls.client.close(&mut bye);
@@ -202,5 +231,6 @@ pub fn get(
         Error::Malformed => HttpsError::Malformed,
         Error::TooBig => HttpsError::TooBig,
         Error::Unsupported => HttpsError::Unsupported,
+        Error::Aborted => HttpsError::Aborted,
     })
 }
