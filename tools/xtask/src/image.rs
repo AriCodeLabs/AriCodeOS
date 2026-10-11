@@ -315,7 +315,9 @@ pub fn write_usb_image(path: &Path, esp_dir: &Path, extra: &[(String, Vec<u8>)])
         })
         .map_err(|e| format!("arifs: {e:?}"))?;
         for (name, content) in extra {
-            let i = fs.create(name).map_err(|e| format!("arifs {name}: {e:?}"))?;
+            let i = fs
+                .create(name)
+                .map_err(|e| format!("arifs {name}: {e:?}"))?;
             fs.write(i, 0, content)
                 .map_err(|e| format!("arifs {name}: {e:?}"))?;
         }
@@ -344,7 +346,11 @@ pub fn write_usb_image(path: &Path, esp_dir: &Path, extra: &[(String, Vec<u8>)])
 /// `cargo xtask usb-image [--cmdline S]`: image ready to `dd` onto a USB stick.
 /// `authorized_key`: an OpenSSH public key file installed in ARI0 as
 /// `authorized_keys`, so the machine accepts SSH logins with that key.
-pub fn build_usb_image(release: bool, cmdline: &str, authorized_key: Option<&Path>) -> Result<PathBuf> {
+pub fn build_usb_image(
+    release: bool,
+    cmdline: &str,
+    authorized_key: Option<&Path>,
+) -> Result<PathBuf> {
     let base = build_base_esp(release)?;
     let esp = build_scenario_esp(
         &base,
@@ -357,7 +363,10 @@ pub fn build_usb_image(release: bool, cmdline: &str, authorized_key: Option<&Pat
     if let Some(key) = authorized_key {
         let text = io(fs::read(key), "read the public key")?;
         if !text.starts_with(b"ssh-ed25519 ") {
-            return Err(format!("{}: only ssh-ed25519 keys are accepted", key.display()));
+            return Err(format!(
+                "{}: only ssh-ed25519 keys are accepted",
+                key.display()
+            ));
         }
         extra.push((String::from("authorized_keys"), text));
         println!("[xtask] authorized_keys from {}", key.display());
