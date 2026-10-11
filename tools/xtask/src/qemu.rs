@@ -314,42 +314,52 @@ pub fn file_response(dir: &Path, name: &str) -> Vec<u8> {
 
 /// `cargo xtask serve-update`: serves the channel directory on `port` (all
 /// interfaces) until interrupted; `GET /manifest.txt`, `GET /aricodeos-N.img`.
+/// One thread per connection with read and write timeouts: a client that
+/// stalls mid-download must not block the next one.
 pub fn serve_update(dir: &Path, port: u16) -> Result {
-    use std::io::Write;
     let listener = std::net::TcpListener::bind(("0.0.0.0", port))
         .map_err(|e| format!("cannot listen on port {port}: {e}"))?;
     println!(
         "[xtask] serving {} on port {port}; on the machine: update http://<this host>:{port}/",
         dir.display()
     );
+    let dir = dir.to_path_buf();
     for stream in listener.incoming().flatten() {
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-        let mut stream = stream;
-        let mut buf = [0u8; 2048];
-        let mut have = 0;
-        while have < buf.len() {
-            match stream.read(&mut buf[have..]) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => have += n,
-            }
-            if buf[..have].windows(4).any(|w| w == b"\r\n\r\n") {
-                break;
-            }
-        }
-        let request = String::from_utf8_lossy(&buf[..have]);
-        let path = request.split(' ').nth(1).unwrap_or("/");
-        let name = path.trim_start_matches('/');
-        println!(
-            "[xtask] {} GET /{name}",
-            stream
-                .peer_addr()
-                .map(|a| a.to_string())
-                .unwrap_or_default()
-        );
-        let _ = stream.write_all(&file_response(dir, name));
-        let _ = stream.flush();
+        let dir = dir.clone();
+        std::thread::spawn(move || serve_update_connection(stream, &dir));
     }
     Ok(())
+}
+
+fn serve_update_connection(mut stream: std::net::TcpStream, dir: &Path) {
+    use std::io::Write;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
+    let peer = stream
+        .peer_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_default();
+    let mut buf = [0u8; 2048];
+    let mut have = 0;
+    while have < buf.len() {
+        match stream.read(&mut buf[have..]) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => have += n,
+        }
+        if buf[..have].windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+    }
+    let request = String::from_utf8_lossy(&buf[..have]);
+    let path = request.split(' ').nth(1).unwrap_or("/");
+    let name = path.trim_start_matches('/').to_string();
+    let response = file_response(dir, &name);
+    let outcome = match stream.write_all(&response).and_then(|()| stream.flush()) {
+        Ok(()) => format!("{} bytes sent", response.len()),
+        Err(e) => format!("failed: {e}"),
+    };
+    println!("[xtask] {peer} GET /{name}: {outcome}");
+    let _ = std::io::stdout().flush();
 }
 
 /// Echoes a TCP connection until the peer closes it.

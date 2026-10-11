@@ -977,8 +977,11 @@ impl Controller {
     }
 
     /// Reads or writes `count` sectors in the client's DMA buffer. A
-    /// rejection due to unit attention is retried once; a transport failure
-    /// is retried up to three times after a Reset Recovery and a pause.
+    /// rejection due to unit attention is retried once. A transport failure
+    /// (a stick that stops answering for a moment, typically right after a
+    /// write) is retried after growing pauses; a Reset Recovery is only
+    /// tried once the pauses did not help, since some sticks take long to
+    /// come back from it.
     fn block_io(&mut self, write: bool, lba: u64, count: u16, phys: u64) -> bool {
         let Ok(lba32) = u32::try_from(lba) else {
             return false;
@@ -989,12 +992,13 @@ impl Controller {
             scsi::read10(lba32, count)
         };
         let name: &[u8] = if write { b"WRITE(10)" } else { b"READ(10)" };
+        const PAUSES_MS: [u64; 5] = [50, 200, 500, 1000, 2000];
         let mut transport_failures = 0;
-        for _ in 0..5 {
+        for _ in 0..7 {
             match self.scsi(cdb, Some((phys, count as u32 * 512, !write))) {
                 Ok(()) => {
                     if transport_failures > 0 {
-                        say(b"transfer recovered after a reset");
+                        say(b"transfer recovered");
                     }
                     return true;
                 }
@@ -1006,16 +1010,22 @@ impl Controller {
                     }
                 }
                 Err(ScsiFail::Transport(code)) => {
-                    transport_failures += 1;
-                    sys::print(b"usb-input: transfer failed (completion code ");
-                    num(code as u64);
-                    sys::print(b"), reset recovery\n");
-                    if transport_failures > 3 {
+                    if transport_failures >= PAUSES_MS.len() {
                         self.report_error(name, lba, None);
                         return false;
                     }
-                    self.reset_recovery();
-                    sys::time::sleep_ms(100);
+                    let pause = PAUSES_MS[transport_failures];
+                    transport_failures += 1;
+                    sys::print(b"usb-input: transfer failed (completion code ");
+                    num(code as u64);
+                    sys::print(b"), retry in ");
+                    num(pause);
+                    sys::print(b" ms\n");
+                    if transport_failures == 3 {
+                        say(b"reset recovery");
+                        self.reset_recovery();
+                    }
+                    sys::time::sleep_ms(pause);
                 }
             }
         }
