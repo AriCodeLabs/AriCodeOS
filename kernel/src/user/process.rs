@@ -45,7 +45,8 @@ pub struct Process {
     mmio_next: u64,
     /// Virtual ranges pointing at memory not owned by the process (MMIO, DMA):
     /// unmapped without freeing when the address space is destroyed.
-    foreign: Vec<(u64, u64)>,
+    /// Foreign (MMIO/DMA) mappings: virtual start, physical start, span.
+    foreign: Vec<(u64, u64, u64)>,
     /// `None` once the address space has been freed.
     mapper: Option<Mapper<vmm::PmmFrames, OffsetMap>>,
     pub entry: u64,
@@ -383,7 +384,7 @@ pub fn release_address_space(pid: u32) {
     if let Some((mut m, foreign)) = taken {
         // Foreign memory (MMIO, DMA): unmapped without freeing; its owners
         // are the device or the DMA object.
-        for (virt, len) in foreign {
+        for (virt, _, len) in foreign {
             for page in (virt..virt + len).step_by(PAGE_SIZE as usize) {
                 let _ = m.unmap_4k(page);
             }
@@ -589,6 +590,11 @@ pub fn map_foreign(phys: u64, len: u64, cacheable: bool) -> Result<u64, aricode_
     let offset = phys & (PAGE_SIZE - 1);
     let start = phys - offset;
     let span = (offset + len).next_multiple_of(PAGE_SIZE);
+    // Mapping the same region again (a server mapping a client's buffer on
+    // every request) reuses the existing mapping instead of leaking one.
+    if let Some((virt, _, _)) = p.foreign.iter().find(|f| f.1 == start && f.2 == span) {
+        return Ok(virt + offset);
+    }
     let virt = p.mmio_next;
     // The MMIO/DMA area is above the user stack (8 MiB) and grows upwards
     // to the end of user space.
@@ -605,6 +611,6 @@ pub fn map_foreign(phys: u64, len: u64, cacheable: bool) -> Result<u64, aricode_
     m.map_range_4k(virt, start, span, flags)
         .map_err(|_| aricode_abi::Error::Limit)?;
     p.mmio_next += span;
-    p.foreign.push((virt, span));
+    p.foreign.push((virt, start, span));
     Ok(virt + offset)
 }

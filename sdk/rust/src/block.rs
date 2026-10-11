@@ -110,40 +110,13 @@ impl BlockClient {
     }
 }
 
-/// Client DMA buffers mapped in a block server, reused by physical address
-/// (each `mmio_map` creates a new mapping that is not released until the
-/// process exits).
-pub struct ClientBuffers {
-    entries: [(u64, u64); 8], // (phys, len)
-    count: usize,
-}
-
-impl Default for ClientBuffers {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ClientBuffers {
-    pub const fn new() -> Self {
-        Self {
-            entries: [(0, 0); 8],
-            count: 0,
-        }
-    }
-
-    /// Physical address and length of the `dma` buffer, mapping it the first time.
-    pub fn map(&mut self, dma: Handle) -> Option<(u64, u64)> {
-        let phys = sys::dma_phys(dma).ok()?;
-        let len = sys::region_len(dma).ok()?;
-        if let Some(e) = self.entries[..self.count].iter().find(|e| e.0 == phys) {
-            return Some(*e);
-        }
-        sys::mmio_map(dma).ok()?;
-        if self.count < self.entries.len() {
-            self.entries[self.count] = (phys, len);
-            self.count += 1;
-        }
-        Some((phys, len))
-    }
+/// Physical address and length of a client's `dma` buffer, mapped into this
+/// server (and its devices' IOMMU domain) for the request. Mapping again is
+/// idempotent in the kernel, and the IOMMU entry is restored if the buffer
+/// was freed and a new client got the same physical pages.
+pub fn map_client_buffer(dma: Handle) -> Option<(u64, u64)> {
+    let phys = sys::dma_phys(dma).ok()?;
+    let len = sys::region_len(dma).ok()?;
+    sys::mmio_map(dma).ok()?;
+    Some((phys, len))
 }

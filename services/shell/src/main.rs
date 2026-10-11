@@ -234,7 +234,8 @@ fn trim(s: &[u8]) -> &[u8] {
 
 fn help() {
     print(
-        b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  cpus      online processors and idle time per CPU\n  diag [NAME]  full report (uptime, mem, cpus, ps, services, net, devices); with NAME saves it to AriFS\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body (http:// or https://)\n  run PROG  run an initrd program and wait\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
+        b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  cpus      online processors and idle time per CPU\n  diag [NAME]  full report (uptime, mem, cpus, ps, services, net, devices); with NAME saves it to AriFS\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body (http:// or https://)\n  run PROG  run an initrd program and wait\n\
+  update [URL|check|apply]  system update over the network (ADR 0027): downloads the signed image from the channel URL (saved for later runs), installs it in the inactive slot; then `reboot`\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
     );
 }
 
@@ -740,6 +741,7 @@ fn http_get(fs: &mut FsClient, client: &mut NetClient, arg: &[u8]) {
             print(b"http: response uses an unsupported encoding or protocol\n")
         }
         Err(HttpsError::TooBig) => print(b"http: response headers too large\n"),
+        Err(HttpsError::Aborted) => print(b"http: download aborted\n"),
     }
 }
 
@@ -765,10 +767,73 @@ fn tls_error(e: aricode_tls::Error) -> &'static [u8] {
     }
 }
 
+/// `update [URL|check|apply]`: runs the updater (ADR 0027). With a URL,
+/// saves it first as the update channel (`updater/update_url`). `check`
+/// only reports the installed and available versions; `apply` installs
+/// whatever is already in the UPDATE partition.
+fn update(fs: &mut FsClient, rest: &[u8]) {
+    use aricode_rt::sys::launch;
+    let arg = match rest {
+        b"" => UPDATER_FETCH,
+        b"check" => UPDATER_CHECK,
+        b"apply" => UPDATER_APPLY,
+        url if url.starts_with(b"http://") || url.starts_with(b"https://") => {
+            let mut content = [0u8; LINE_MAX + 1];
+            content[..url.len()].copy_from_slice(url);
+            content[url.len()] = b'\n';
+            if save_file(fs, UPDATE_URL_FILE, &content[..url.len() + 1]).is_err() {
+                print(b"update: could not save the channel URL\n");
+                return;
+            }
+            UPDATER_FETCH
+        }
+        _ => {
+            print(b"usage: update [http[s]://host[:port]/path/ | check | apply]\n");
+            return;
+        }
+    };
+    match launch::run(BROKER, "updater", arg) {
+        Ok(0) => {}
+        Ok(code) => {
+            print(b"update: updater exited with ");
+            num(code);
+            print(b"\n");
+        }
+        Err(e) => {
+            print(b"update: updater");
+            launch_failure(e);
+        }
+    }
+}
+
+/// Explains why the broker did not run a program (after the program name).
+fn launch_failure(e: aricode_rt::sys::launch::LaunchError) {
+    use aricode_rt::sys::launch::{LaunchError, Status};
+    match e {
+        LaunchError::Status(Status::NotFound) => print(b": not found in the initrd or AriFS\n"),
+        LaunchError::Status(Status::Denied) => {
+            print(b": denied by the broker (requests system capabilities)\n")
+        }
+        LaunchError::Status(Status::Killed) => print(b": was killed by the kernel\n"),
+        LaunchError::Status(Status::BadManifest) => print(b": invalid manifest\n"),
+        LaunchError::Status(Status::Limit) => print(b": running program limit reached\n"),
+        LaunchError::Status(_) => print(b": the broker could not launch it\n"),
+        LaunchError::BadName => print(b": invalid name\n"),
+        LaunchError::Ipc(e) => aricode_rt::print_error(b"", e),
+    }
+}
+
+/// Updater arguments (`apps/updater`).
+const UPDATER_APPLY: u64 = 0;
+const UPDATER_FETCH: u64 = 1;
+const UPDATER_CHECK: u64 = 2;
+/// Channel URL in the updater's private directory.
+const UPDATE_URL_FILE: &str = "updater/update_url";
+
 /// Asks the broker (init) to run an initrd program with the capabilities
 /// of its manifest and waits for it to exit.
 fn run(arg: &[u8]) {
-    use aricode_rt::sys::launch::{self, LaunchError, Status};
+    use aricode_rt::sys::launch;
     let Ok(name) = core::str::from_utf8(arg) else {
         print(b"run: invalid name\n");
         return;
@@ -792,18 +857,7 @@ fn run(arg: &[u8]) {
             num(code);
             print(b"\n");
         }
-        Err(LaunchError::Status(Status::NotFound)) => {
-            print(b": not found in the initrd or AriFS\n")
-        }
-        Err(LaunchError::Status(Status::Denied)) => {
-            print(b": denied by the broker (requests system capabilities)\n")
-        }
-        Err(LaunchError::Status(Status::Killed)) => print(b": was killed by the kernel\n"),
-        Err(LaunchError::Status(Status::BadManifest)) => print(b": invalid manifest\n"),
-        Err(LaunchError::Status(Status::Limit)) => print(b": running program limit reached\n"),
-        Err(LaunchError::Status(_)) => print(b": the broker could not launch it\n"),
-        Err(LaunchError::BadName) => print(b": invalid name\n"),
-        Err(LaunchError::Ipc(e)) => aricode_rt::print_error(b"", e),
+        Err(e) => launch_failure(e),
     }
 }
 
@@ -1022,6 +1076,7 @@ fn execute(
         b"dns" => dns(net_client, rest),
         b"http" => http_get(fs, net_client, rest),
         b"run" => run(rest),
+        b"update" => update(fs, rest),
         b"spawn" => spawn(rest),
         b"repeat" => {
             let (count, inner) = split(rest);

@@ -62,6 +62,8 @@ dependencies = [
  "aricode-build",
  "aricode-crypto",
  "aricode-gpt",
+ "aricode-https",
+ "aricode-proto",
  "aricode-rt",
 ]
 

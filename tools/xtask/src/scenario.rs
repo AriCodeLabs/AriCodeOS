@@ -150,8 +150,12 @@ pub struct Scenario {
     /// `trusted_ca.der`, one self-signed and untrusted.
     #[serde(default)]
     pub host_https: bool,
+    /// Publishes a version-2 system image into `build/update/`, served by the
+    /// test HTTP server at `http://10.0.2.2:17010/update/` (ADR 0027).
+    #[serde(default)]
+    pub host_update: bool,
     /// Initial state of the test disk (`image::DiskVariant`): `slots`
-    /// (default), `esp-only`, `pending-b`, `b-exhausted`, `b-corrupt`,
+    /// (default), `update-empty`, `esp-only`, `pending-b`, `b-exhausted`, `b-corrupt`,
     /// `fs-pending-replace`, `fs-corrupt`, `wasm-restricted`, `wasm-invalid`,
     /// `wasm-bad-import`.
     #[serde(default = "default_disk")]

@@ -3,7 +3,7 @@ name = "ari-app-updater"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "AriCodeOS A/B updater: verifies the UPDATE image and installs it into the inactive slot"
+description = "AriCodeOS A/B updater: downloads the signed image from the update channel, verifies it and installs it into the inactive slot"
 publish = false
 
 [[bin]]
@@ -17,6 +17,8 @@ aricode-rt = { path = "../../sdk/runtime" }
 aricode-gpt = { path = "../../libs/gpt" }
 aricode-ab = { path = "../../libs/ab" }
 aricode-crypto = { path = "../../libs/crypto" }
+aricode-https = { path = "../../sdk/https" }
+aricode-proto = { path = "../../sdk/proto" }
 
 [build-dependencies]
 aricode-build = { path = "../../sdk/build" }

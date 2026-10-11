@@ -1319,3 +1319,15 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   `openssl s_server`).
 - init waits for sshd's `Ready` session message before starting the console
   shell, so their console output never interleaves.
+
+## Network updates (ADR 0027)
+
+- Channel: `build/update/{manifest.txt, aricodeos-N.img}` from `cargo xtask
+  publish-update`, served by `serve-update` or any web server.
+- `apps/updater` (caps system, fs, net, block): channel manifest, version
+  comparison with the active slot, streaming download into `UPDATE`
+  (`aricode-https::get_with` over `aricode-http::fetch_with`), then the
+  Phase 30 verification and install. Shell `update [URL|check|apply]`.
+- Kernel `map_foreign` is idempotent per region; servers map client buffers
+  per request (`block::map_client_buffer`).
+- Scenario `update.network` (`host_update = true`, disk `update-empty`).
