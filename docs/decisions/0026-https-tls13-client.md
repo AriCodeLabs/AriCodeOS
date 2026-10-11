@@ -46,10 +46,19 @@ SHA-256.
    self-signed one): the first fetch succeeds, the second is refused with
    `certificate signed by an unknown authority`.
 
+## Certificate purpose (audit of 8910d1f, finding 1)
+
+`verify_chain` rejects a leaf whose `extendedKeyUsage` lacks `serverAuth`
+(or `anyExtendedKeyUsage`), or whose `keyUsage` lacks `digitalSignature`,
+with `Error::WrongPurpose` (RFC 5280 4.2.1.12; RFC 8446 4.4.2.2, the server
+signs with its key in TLS 1.3). A certificate without those extensions is
+unrestricted. Test chains `purpose-ok`, `purpose-client` and
+`purpose-nosign` cover the control and both refusals; the shell reports
+`certificate not issued for a TLS server`.
+
 ## Consequences
 
-- No revocation checking (CRL/OCSP), name constraints, extended key usage,
-  IP-address SANs, session resumption, 0-RTT, ALPN or client certificates.
+- No revocation checking (CRL/OCSP), name constraints, IP-address SANs, session resumption, 0-RTT, ALPN or client certificates.
   A HelloRetryRequest (server insisting on another group) fails.
 - Only TLS 1.3: servers limited to TLS 1.2 cannot be reached.
 - Responses are limited by the shell's 8 KiB buffer; HTTP/1.1 only.

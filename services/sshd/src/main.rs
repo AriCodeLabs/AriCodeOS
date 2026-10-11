@@ -32,6 +32,10 @@ const SYSTEM: Handle = Handle(0x0001_0007);
 const SESSIONS: Handle = Handle(0x0001_0008);
 
 const PORT: u16 = 22;
+/// A connection that has not authenticated after this long is dropped: the
+/// server attends one connection at a time, so an idle client must not
+/// hold the port.
+const AUTH_DEADLINE_MS: u64 = 30_000;
 const HOST_KEY_FILE: &str = "ssh_host_ed25519_key";
 const AUTHORIZED_KEYS: &str = "authorized_keys";
 const SEED_FILE: &str = "random_seed";
@@ -209,6 +213,7 @@ fn serve(
     if !send(net, sock, &mut out) {
         return;
     }
+    let started = now_ms();
     let mut session: Option<Session> = None;
     let mut buf = [0u8; 1400];
     let mut msg = [0u8; abi::IPC_MAX_DATA];
@@ -288,6 +293,14 @@ fn serve(
             }
             Err(NetError::Status(Status::Timeout)) => {}
             Err(_) => break,
+        }
+        if !server.is_authenticated() && now_ms().saturating_sub(started) > AUTH_DEADLINE_MS {
+            sys::print(b"sshd: authentication timeout from ");
+            print_ip(peer);
+            sys::print(b"\n");
+            server.drop_connection(b"authentication timeout", &mut out);
+            send(net, sock, &mut out);
+            break;
         }
         // Shell output to the client; an empty message means it exited.
         while let Some(s) = &session {
@@ -387,6 +400,10 @@ fn main(_arg: u64) -> u64 {
         let _ = net.tcp_close(sock);
         say(b"connection closed");
     }
+}
+
+fn now_ms() -> u64 {
+    sys::time::uptime_us(SYSTEM).unwrap_or(0) / 1000
 }
 
 fn print_ip(ip: [u8; 4]) {

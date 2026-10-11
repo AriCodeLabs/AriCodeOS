@@ -424,12 +424,29 @@ pub struct SshProbe<'a> {
     pub marker: &'a str,
     pub commands: &'a [String],
     pub key: std::path::PathBuf,
+    pub idle_client: bool,
 }
 
 /// Runs each command over SSH; the result is one block of `[host] ssh`
 /// lines: the command, every output line and the exit status.
-fn run_ssh_probe(commands: &[String], key: &Path) -> String {
+fn run_ssh_probe(commands: &[String], key: &Path, idle_client: bool) -> String {
     let mut lines = Vec::new();
+    // An idle client that holds a connection without identifying itself;
+    // kept open for the whole probe (sshd must drop it on its own).
+    let idle = idle_client.then(|| {
+        let addr =
+            std::net::SocketAddr::from(([127, 0, 0, 1], aricode_proto::net::TEST_SSH_FORWARD_PORT));
+        match std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
+            Ok(s) => {
+                lines.push(String::from("[host] ssh idle client connected"));
+                Some(s)
+            }
+            Err(e) => {
+                lines.push(format!("[host] ssh idle client: no connection ({e})"));
+                None
+            }
+        }
+    });
     for cmd in commands {
         let out = Command::new("ssh")
             .args([
@@ -444,7 +461,7 @@ fn run_ssh_probe(commands: &[String], key: &Path) -> String {
                 "-o",
                 "UserKnownHostsFile=/dev/null",
                 "-o",
-                "ConnectTimeout=20",
+                "ConnectTimeout=90",
                 "-o",
                 "LogLevel=ERROR",
             ])
@@ -470,6 +487,7 @@ fn run_ssh_probe(commands: &[String], key: &Path) -> String {
             Err(e) => lines.push(format!("[host] ssh: cannot run ssh ({e})")),
         }
     }
+    drop(idle);
     lines.join("\n")
 }
 
@@ -690,7 +708,10 @@ pub fn run_headless(
             {
                 let commands = p.commands.to_vec();
                 let key = p.key.clone();
-                ssh_thread = Some(std::thread::spawn(move || run_ssh_probe(&commands, &key)));
+                let idle = p.idle_client;
+                ssh_thread = Some(std::thread::spawn(move || {
+                    run_ssh_probe(&commands, &key, idle)
+                }));
             }
             if ssh_thread.as_ref().is_some_and(|t| t.is_finished()) {
                 ssh_result = ssh_thread.take().and_then(|t| t.join().ok());

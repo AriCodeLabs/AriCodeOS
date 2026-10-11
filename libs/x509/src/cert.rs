@@ -31,6 +31,11 @@ mod oid {
 
 /// keyUsage bit 5 (keyCertSign), in the first content byte.
 const KEY_CERT_SIGN: u8 = 0x04;
+/// keyUsage bit 0 (digitalSignature), in the first content byte.
+const DIGITAL_SIGNATURE: u8 = 0x80;
+/// extendedKeyUsage purposes that allow authenticating a TLS server.
+const SERVER_AUTH: &[u8] = &[0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01];
+const ANY_EXTENDED_KEY_USAGE: &[u8] = &[0x55, 0x1d, 0x25, 0x00];
 /// GeneralName `dNSName [2] IA5String` (implicit, primitive).
 const DNS_NAME: u8 = 0x82;
 
@@ -49,6 +54,8 @@ pub(crate) struct Parsed<'a> {
     pub max_path_len: Option<u32>,
     pub dns_names: Vec<&'a str>,
     pub common_name: Option<&'a str>,
+    pub digital_signature: bool,
+    pub server_auth: bool,
 }
 
 impl<'a> Parsed<'a> {
@@ -89,6 +96,8 @@ impl<'a> Parsed<'a> {
             not_after,
             public_key,
             is_ca: false,
+            digital_signature: true,
+            server_auth: true,
             max_path_len: None,
             dns_names: Vec::new(),
             common_name: common_name(subject.value)?,
@@ -130,6 +139,17 @@ impl<'a> Parsed<'a> {
                         return Err(Error::Malformed);
                     }
                     cert_sign = bits.get(1).is_some_and(|b| b & KEY_CERT_SIGN != 0);
+                    self.digital_signature =
+                        bits.get(1).is_some_and(|b| b & DIGITAL_SIGNATURE != 0);
+                }
+                oid::EXTENDED_KEY_USAGE => {
+                    let mut purposes = Reader::new(der::single(value, der::SEQUENCE)?);
+                    let mut server = false;
+                    while !purposes.is_empty() {
+                        let purpose = purposes.expect(der::OID)?;
+                        server |= purpose == SERVER_AUTH || purpose == ANY_EXTENDED_KEY_USAGE;
+                    }
+                    self.server_auth = server;
                 }
                 oid::SUBJECT_ALT_NAME => {
                     let mut names = Reader::new(der::single(value, der::SEQUENCE)?);
@@ -141,7 +161,7 @@ impl<'a> Parsed<'a> {
                     }
                 }
                 // Understood well enough to ignore even when critical.
-                oid::EXTENDED_KEY_USAGE | oid::CERTIFICATE_POLICIES => {}
+                oid::CERTIFICATE_POLICIES => {}
                 _ if critical => return Err(Error::Unsupported),
                 _ => {}
             }
@@ -190,6 +210,8 @@ impl<'a> Certificate<'a> {
             max_path_len: p.max_path_len,
             dns_names: p.dns_names,
             common_name: p.common_name,
+            digital_signature: p.digital_signature,
+            server_auth: p.server_auth,
         })
     }
 }

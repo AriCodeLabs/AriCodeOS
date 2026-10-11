@@ -2,22 +2,27 @@
 # authorized_keys in AriFS and, once sshd listens, runs commands with the
 # host's OpenSSH client through the forwarded port. Each command runs in a
 # quiet session shell launched by init; the last one powers the machine off
-# from the remote session.
+# from the remote session. An idle TCP client connects first and never
+# identifies itself: sshd drops it after its authentication deadline and
+# then serves the real client.
 name = "ssh.exec"
 description = "sshd: public-key login from the host's OpenSSH client, commands in session shells, shutdown over SSH"
 level = "full"
 areas = ["ssh", "network", "shell"]
 cmdline = "qemu_exit shell"
-timeout_secs = 150
+timeout_secs = 200
 
 [host_ssh]
 marker = "sshd: listening on port 22"
 commands = ["ls", "cat hola.txt", "write remote.txt written over ssh", "cat remote.txt", "shutdown"]
+idle_client = true
 
 [expect]
 exit = 33
 serial_contains = [
     "sshd: new host key generated and saved",
+    "[host] ssh idle client connected",
+    "sshd: authentication timeout from 10.0.2.2",
     "1 authorized key(s)",
     "sshd: user 'ari' authenticated from 10.0.2.2",
     "[host] ssh $ ls",
