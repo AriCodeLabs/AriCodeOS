@@ -1,4 +1,4 @@
-//! Handles (Fase 12): cada paso que falla devuelve su numero; exito = 11.
+//! Handles (Phase 12): each failing step returns its number; success = 11.
 #![no_std]
 #![no_main]
 

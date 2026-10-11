@@ -1,4 +1,4 @@
-//! Montaje de la partición EFI (directorio que QEMU expone como FAT).
+//! Assembles the EFI partition (directory QEMU exposes as FAT).
 
 use crate::build::{build_os, Artifacts};
 use crate::scenario::Inject;
@@ -18,38 +18,38 @@ fn io<T>(r: std::io::Result<T>, what: &str) -> Result<T> {
     r.map_err(|e| format!("{what}: {e}"))
 }
 
-/// Raíz de los directorios de trabajo de los escenarios.
+/// Root of the scenarios' working directories.
 pub fn scenarios_root() -> PathBuf {
     build_dir().join("scenarios")
 }
 
-/// ESP base en `build/esp/`: BOOTX64.EFI + kernel.elf, sin cmdline.
+/// Base ESP at `build/esp/`: BOOTX64.EFI + kernel.elf, no cmdline.
 pub fn build_base_esp(release: bool) -> Result<PathBuf> {
     let a = build_os(release)?;
     let esp = build_dir().join("esp");
     write_esp(&esp, &a, None)?;
-    println!("[xtask] imagen ESP en {}", esp.display());
+    println!("[xtask] ESP image at {}", esp.display());
     Ok(esp)
 }
 
-/// Directorio de trabajo de un escenario bajo `scenarios_root`, listo para ser
-/// borrado y reescrito.
+/// Working directory of a scenario under `scenarios_root`, ready to be
+/// removed and rewritten.
 ///
-/// Además de la validación léxica del nombre, se comprueba la contención real:
-/// ni el directorio del escenario ni su `esp` pueden ser enlaces simbólicos, y
-/// la ruta canónica resultante debe seguir dentro de la raíz canónica. Así un
-/// enlace preexistente no puede redirigir el `remove_dir_all` fuera del árbol.
+/// Besides the lexical validation of the name, real containment is checked:
+/// neither the scenario directory nor its `esp` may be symlinks, and the
+/// resulting canonical path must stay inside the canonical root. That way a
+/// pre-existing link cannot redirect `remove_dir_all` outside the tree.
 pub fn scenario_dir(scenarios_root: &Path, name: &str) -> Result<PathBuf> {
     crate::scenario::validate_name(name)?;
-    io(fs::create_dir_all(scenarios_root), "crear scenarios/")?;
-    let root = io(scenarios_root.canonicalize(), "canonicalizar scenarios/")?;
+    io(fs::create_dir_all(scenarios_root), "create scenarios/")?;
+    let root = io(scenarios_root.canonicalize(), "canonicalize scenarios/")?;
     let dir = root.join(name);
     reject_symlink(&dir)?;
     reject_symlink(&dir.join("esp"))?;
-    io(fs::create_dir_all(&dir), "crear dir del escenario")?;
-    let real = io(dir.canonicalize(), "canonicalizar dir del escenario")?;
+    io(fs::create_dir_all(&dir), "create scenario dir")?;
+    let real = io(dir.canonicalize(), "canonicalize scenario dir")?;
     if !real.starts_with(&root) {
-        return Err(format!("{} escapa de {}", real.display(), root.display()));
+        return Err(format!("{} escapes {}", real.display(), root.display()));
     }
     Ok(real)
 }
@@ -57,14 +57,14 @@ pub fn scenario_dir(scenarios_root: &Path, name: &str) -> Result<PathBuf> {
 fn reject_symlink(path: &Path) -> Result {
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => Err(format!(
-            "{} es un enlace simbolico; no se usa como destino",
+            "{} is a symlink; not used as a target",
             path.display()
         )),
         _ => Ok(()),
     }
 }
 
-/// ESP para un escenario: copia del base + cmdline + inyecciones de fallo.
+/// ESP for a scenario: copy of the base + cmdline + fault injections.
 pub fn build_scenario_esp(
     base: &Path,
     scenarios_root: &Path,
@@ -76,35 +76,35 @@ pub fn build_scenario_esp(
     let _ = fs::remove_dir_all(&esp);
     copy_dir(base, &esp)?;
     if !cmdline.trim().is_empty() {
-        io(fs::write(esp.join(CMDLINE), cmdline), "escribir cmdline")?;
+        io(fs::write(esp.join(CMDLINE), cmdline), "write cmdline")?;
     }
     let kernel = esp.join(KERNEL);
     if inject.remove_kernel {
-        io(fs::remove_file(&kernel), "quitar kernel")?;
+        io(fs::remove_file(&kernel), "remove kernel")?;
         return Ok(esp);
     }
     if let Some(n) = inject.truncate_kernel {
-        let data = io(fs::read(&kernel), "leer kernel")?;
+        let data = io(fs::read(&kernel), "read kernel")?;
         io(
             fs::write(&kernel, &data[..n.min(data.len())]),
-            "truncar kernel",
+            "truncate kernel",
         )?;
     }
     if let Some(entry) = inject.patch_entry {
-        let mut data = io(fs::read(&kernel), "leer kernel")?;
+        let mut data = io(fs::read(&kernel), "read kernel")?;
         elf_patch::set_entry(&mut data, entry)?;
-        io(fs::write(&kernel, &data), "parchear e_entry")?;
+        io(fs::write(&kernel, &data), "patch e_entry")?;
     }
     if inject.add_empty_segment_at_entry {
-        let mut data = io(fs::read(&kernel), "leer kernel")?;
+        let mut data = io(fs::read(&kernel), "read kernel")?;
         elf_patch::append_empty_rw_segment_at_entry(&mut data)?;
-        io(fs::write(&kernel, &data), "anadir segmento vacio")?;
+        io(fs::write(&kernel, &data), "add empty segment")?;
     }
     Ok(esp)
 }
 
-/// Manipulaciones mínimas de un ELF64 para inyectar fallos. Solo lo que los
-/// escenarios necesitan; no es un parser general.
+/// Minimal ELF64 manipulations to inject faults. Only what the scenarios
+/// need; not a general parser.
 mod elf_patch {
     use crate::Result;
 
@@ -123,38 +123,38 @@ mod elf_patch {
 
     pub fn set_entry(data: &mut [u8], entry: u64) -> Result {
         if data.len() < 64 {
-            return Err("patch_entry: kernel demasiado corto".into());
+            return Err("patch_entry: kernel too short".into());
         }
         data[E_ENTRY..E_ENTRY + 8].copy_from_slice(&entry.to_le_bytes());
         Ok(())
     }
 
-    /// Añade un PT_LOAD RW con `memsz = 0`, `vaddr = e_entry` y alineación 1
-    /// en el hueco que sigue a la tabla de program headers.
+    /// Adds an RW PT_LOAD with `memsz = 0`, `vaddr = e_entry` and alignment 1
+    /// in the gap that follows the program header table.
     pub fn append_empty_rw_segment_at_entry(data: &mut [u8]) -> Result {
         if data.len() < 64 {
-            return Err("add_empty_segment: kernel demasiado corto".into());
+            return Err("add_empty_segment: kernel too short".into());
         }
         let phoff = u64_at(data, E_PHOFF) as usize;
         let phentsize = u16_at(data, E_PHENTSIZE) as usize;
         let phnum = u16_at(data, E_PHNUM) as usize;
         if phentsize != 56 {
             return Err(format!(
-                "add_empty_segment: phentsize {phentsize} no soportado"
+                "add_empty_segment: phentsize {phentsize} not supported"
             ));
         }
         let new_ph = phoff + phentsize * phnum;
-        // El primer byte de contenido de segmento marca el fin del hueco disponible.
+        // The first byte of segment content marks the end of the available gap.
         let first_content = (0..phnum)
             .map(|i| u64_at(data, phoff + i * phentsize + 8) as usize)
             .filter(|&off| off > 0)
             .min()
             .unwrap_or(data.len());
         if new_ph + phentsize > first_content || new_ph + phentsize > data.len() {
-            return Err("add_empty_segment: sin hueco tras los program headers".into());
+            return Err("add_empty_segment: no gap after the program headers".into());
         }
         if data[new_ph..new_ph + phentsize].iter().any(|&b| b != 0) {
-            return Err("add_empty_segment: el hueco no esta a cero".into());
+            return Err("add_empty_segment: the gap is not zeroed".into());
         }
         let entry = u64_at(data, E_ENTRY);
         let ph = &mut data[new_ph..new_ph + phentsize];
@@ -171,17 +171,17 @@ mod elf_patch {
     }
 }
 
-/// Empaqueta `init` y los programas de usuario en un initrd.
+/// Packs `init` and the user programs into an initrd.
 fn build_initrd(user_bin: &Path) -> Result<Vec<u8>> {
     let names = crate::build::initrd_programs()?;
-    // Programas sin informacion de depuracion: el initrd pasa de ~5 MiB a
-    // unos cientos de KiB y el arranque es mas rapido.
+    // Programs without debug info: the initrd goes from ~5 MiB to a few
+    // hundred KiB and boot is faster.
     let mut contents: Vec<(String, Vec<u8>)> = names
         .iter()
         .map(|n| stripped_elf(&user_bin.join(n)).map(|d| (n.clone(), d)))
         .collect::<Result<_>>()?;
     for (name, path) in crate::build::initrd_manifests()? {
-        contents.push((name.clone(), io(fs::read(&path), &format!("leer {name}"))?));
+        contents.push((name.clone(), io(fs::read(&path), &format!("read {name}"))?));
     }
     let files: Vec<(&str, &[u8])> = contents
         .iter()
@@ -195,34 +195,34 @@ fn write_esp(esp: &Path, a: &Artifacts, cmdline: Option<&str>) -> Result {
     for rel in [BOOTX64, KERNEL] {
         io(
             fs::create_dir_all(esp.join(rel).parent().unwrap()),
-            "crear ESP",
+            "create ESP",
         )?;
     }
-    io(fs::copy(&a.ariboot, esp.join(BOOTX64)), "copiar ariboot")?;
-    io(fs::copy(&a.kernel, esp.join(KERNEL)), "copiar kernel")?;
+    io(fs::copy(&a.ariboot, esp.join(BOOTX64)), "copy ariboot")?;
+    io(fs::copy(&a.kernel, esp.join(KERNEL)), "copy kernel")?;
     io(
         fs::write(esp.join(INITRD), build_initrd(&a.user_bin)?),
-        "escribir initrd",
+        "write initrd",
     )?;
     if let Some(c) = cmdline {
-        io(fs::write(esp.join(CMDLINE), c), "escribir cmdline")?;
+        io(fs::write(esp.join(CMDLINE), c), "write cmdline")?;
     }
     Ok(())
 }
 
-/// Disco de pruebas virtio-blk: 12 MiB con GPT y cinco particiones. Se
-/// regenera en cada arranque (los tests escriben en él).
+/// virtio-blk test disk: 12 MiB with GPT and five partitions. It is
+/// regenerated on every boot (the tests write to it).
 ///
 /// ```text
-/// ARI0     34..6143      AriFS con ficheros de ejemplo (patrón en bruto desde el LBA 4096)
-/// SYSA     6144..30719   imagen de sistema firmada, slot A (versión 1), 12 MiB
-/// SYSB     30720..55295  slot B (vacío, o la variante que pida el escenario)
-/// UPDATE   55296..79871  imagen de actualización (versión 2) que instala `updater`
-/// ARIBOOT  79872..79935  estado de arranque A/B (sector 0)
+/// ARI0     34..6143      AriFS with sample files (raw pattern from LBA 4096)
+/// SYSA     6144..30719   signed system image, slot A (version 1), 12 MiB
+/// SYSB     30720..55295  slot B (empty, or the variant the scenario asks for)
+/// UPDATE   55296..79871  update image (version 2) that `updater` installs
+/// ARIBOOT  79872..79935  A/B boot state (sector 0)
 /// ```
 ///
-/// El kernel de las imágenes va sin información de depuración (`strip`) si la
-/// herramienta existe; con ella el ELF supera los 8 MiB.
+/// The images' kernel carries no debug info (`strip`) if the tool exists;
+/// with it the ELF exceeds 8 MiB.
 pub const DISK_SECTORS: u64 = 98304;
 pub const PART_ARI0: (u64, u64) = (34, 6143);
 pub const PART_SYSA: (u64, u64) = (6144, 30719);
@@ -230,17 +230,17 @@ pub const PART_SYSB: (u64, u64) = (30720, 55295);
 pub const PART_UPDATE: (u64, u64) = (55296, 79871);
 pub const PART_ARIBOOT: (u64, u64) = (79872, 79935);
 
-/// Estado inicial del disco que pide un escenario (`disk = "..."`).
-/// Imagen para un pendrive (Fase 34): GPT con la ESP (FAT32, 64 MiB) y las
-/// mismas particiones de AriCodeOS que el disco de pruebas, alineadas a 1 MiB.
+/// Initial disk state a scenario asks for (`disk = "..."`).
+/// Image for a USB stick (Phase 34): GPT with the ESP (FAT32, 64 MiB) and the
+/// same AriCodeOS partitions as the test disk, aligned to 1 MiB.
 ///
 /// ```text
 /// ESP      2048..133119     EFI/BOOT/BOOTX64.EFI, aricodeos/{kernel.elf,initrd.img,cmdline.txt}
-/// ARI0     133120..139263   AriFS con los ficheros de ejemplo
-/// SYSA     139264..163839   imagen de sistema firmada, slot A
-/// SYSB     163840..188415   slot B (vacío)
-/// UPDATE   188416..212991   vacía
-/// ARIBOOT  212992..213055   estado de arranque: A activo
+/// ARI0     133120..139263   AriFS with the sample files
+/// SYSA     139264..163839   signed system image, slot A
+/// SYSB     163840..188415   slot B (empty)
+/// UPDATE   188416..212991   empty
+/// ARIBOOT  212992..213055   boot state: A active
 /// ```
 pub const USB_SECTORS: u64 = 213_120;
 pub const USB_PART_ESP: (u64, u64) = (2048, 133_119);
@@ -249,14 +249,14 @@ pub const USB_PART_SYSA: (u64, u64) = (139_264, 163_839);
 pub const USB_PART_SYSB: (u64, u64) = (163_840, 188_415);
 pub const USB_PART_UPDATE: (u64, u64) = (188_416, 212_991);
 pub const USB_PART_ARIBOOT: (u64, u64) = (212_992, 213_055);
-/// GUID de tipo de la partición de sistema EFI, en el orden en disco.
+/// EFI system partition type GUID, in on-disk byte order.
 pub const ESP_TYPE_GUID: [u8; 16] = [
     0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11, 0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B,
 ];
 
-/// Ficheros de un directorio (recursivo) como rutas relativas con `/`.
+/// Files of a directory (recursive) as relative paths with `/`.
 fn walk_files(dir: &Path, prefix: &str, out: &mut Vec<(String, PathBuf)>) -> Result {
-    let mut entries: Vec<_> = io(fs::read_dir(dir), "leer dir")?
+    let mut entries: Vec<_> = io(fs::read_dir(dir), "read dir")?
         .collect::<std::io::Result<Vec<_>>>()
         .map_err(|e| e.to_string())?;
     entries.sort_by_key(|e| e.file_name());
@@ -276,8 +276,8 @@ fn walk_files(dir: &Path, prefix: &str, out: &mut Vec<(String, PathBuf)>) -> Res
     Ok(())
 }
 
-/// Escribe la imagen USB completa en `path` con el contenido de `esp_dir`
-/// como partición EFI y el slot A cargado con la imagen de sistema.
+/// Writes the full USB image to `path` with the contents of `esp_dir` as
+/// the EFI partition and slot A loaded with the system image.
 pub fn write_usb_image(path: &Path, esp_dir: &Path) -> Result {
     let esp_sectors = (USB_PART_ESP.1 - USB_PART_ESP.0 + 1) as u32;
     let mut fat =
@@ -285,7 +285,7 @@ pub fn write_usb_image(path: &Path, esp_dir: &Path) -> Result {
     let mut files = Vec::new();
     walk_files(esp_dir, "", &mut files)?;
     for (rel, p) in &files {
-        let data = io(fs::read(p), "leer fichero de la ESP")?;
+        let data = io(fs::read(p), "read ESP file")?;
         fat.add_file(rel, &data)
             .map_err(|e| format!("fat {rel}: {e:?}"))?;
     }
@@ -307,8 +307,8 @@ pub fn write_usb_image(path: &Path, esp_dir: &Path) -> Result {
     let fat_img = fat.finish();
     img[o..o + fat_img.len()].copy_from_slice(&fat_img);
     populate_arifs(&mut img, USB_PART_ARI0)?;
-    // Area en bruto en la cola de ARI0, al mismo desplazamiento que en el
-    // disco de pruebas (init se lo indica a blk_client).
+    // Raw area at the tail of ARI0, at the same offset as on the test disk
+    // (init passes it to blk_client).
     for lba in USB_PART_ARI0.0 + RAW_PATTERN_OFFSET..=USB_PART_ARI0.1 {
         let o = lba as usize * 512;
         img[o..o + 8].copy_from_slice(b"ARIDISK\0");
@@ -318,9 +318,9 @@ pub fn write_usb_image(path: &Path, esp_dir: &Path) -> Result {
     let state = aricode_ab::BootState::fresh(aricode_ab::Slot::A);
     let o = USB_PART_ARIBOOT.0 as usize * 512;
     img[o..o + 512].copy_from_slice(&state.encode());
-    io(fs::write(path, &img), "escribir imagen USB")?;
+    io(fs::write(path, &img), "write USB image")?;
     println!(
-        "[xtask] imagen USB en {} ({} MiB, {} ficheros en la ESP)",
+        "[xtask] USB image at {} ({} MiB, {} files in the ESP)",
         path.display(),
         img.len() >> 20,
         files.len()
@@ -328,7 +328,7 @@ pub fn write_usb_image(path: &Path, esp_dir: &Path) -> Result {
     Ok(())
 }
 
-/// `cargo xtask usb-image [--cmdline S]`: imagen lista para `dd` en un pendrive.
+/// `cargo xtask usb-image [--cmdline S]`: image ready to `dd` onto a USB stick.
 pub fn build_usb_image(release: bool, cmdline: &str) -> Result<PathBuf> {
     let base = build_base_esp(release)?;
     let esp = build_scenario_esp(
@@ -345,30 +345,30 @@ pub fn build_usb_image(release: bool, cmdline: &str) -> Result<PathBuf> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DiskVariant {
-    /// Slot A activo con la imagen actual; B vacío; UPDATE con la versión 2.
+    /// Slot A active with the current image; B empty; UPDATE with version 2.
     #[default]
     Slots,
-    /// Sin particiones de slots ni estado: AriBoot arranca desde la ESP.
+    /// No slot or state partitions: AriBoot boots from the ESP.
     EspOnly,
-    /// B instalado (versión 2) y pendiente con 3 intentos.
+    /// B installed (version 2) and pending with 3 attempts.
     PendingB,
-    /// B pendiente pero sin intentos: rollback a A.
+    /// B pending but with no attempts left: rollback to A.
     ExhaustedB,
-    /// B pendiente con una imagen cuya firma no vale: rechazo y rollback.
+    /// B pending with an image whose signature is invalid: rejection and rollback.
     CorruptB,
-    /// Slots normales y un reemplazo de `README` comprometido en el journal
-    /// de AriFS sin aplicar (corte tras el compromiso): fsd lo rehace.
+    /// Normal slots and a committed but unapplied `README` replacement in the
+    /// AriFS journal (power cut after commit): fsd replays it.
     FsPendingReplace,
-    /// Slots normales y un byte alterado en la tabla de AriFS: fsd no monta.
+    /// Normal slots and a corrupted byte in the AriFS table: fsd does not mount.
     FsCorrupt,
-    /// El manifiesto del módulo WASM solo concede `print` (ADR 0019).
+    /// The WASM module's manifest grants only `print` (ADR 0019).
     WasmRestricted,
-    /// `demo.wasm` sustituido por un módulo mal tipado: el validador lo rechaza.
+    /// `demo.wasm` replaced with an ill-typed module: the validator rejects it.
     WasmInvalid,
-    /// `demo.wasm` importa `aricode.file_write` con otra firma: el runner no
-    /// lo enlaza (auditoría 6ee19fb, hallazgo 5).
+    /// `demo.wasm` imports `aricode.file_write` with another signature: the
+    /// runner does not link it (audit 6ee19fb, finding 5).
     WasmBadImport,
-    /// Imagen para pendrive: la ESP va dentro del disco (sin `fat:` en QEMU).
+    /// USB stick image: the ESP lives inside the disk (no `fat:` in QEMU).
     UsbImage,
 }
 
@@ -427,26 +427,29 @@ impl aricode_arifs::BlockDevice for VecDisk<'_> {
     }
 }
 
-/// Primer sector del área en bruto del disco de pruebas: desde aquí hasta el
-/// final de la partición cada sector lleva `ARIDISK\0` y su LBA, fuera del
-/// alcance de AriFS (32 ficheros × 64 sectores caben antes).
+/// First sector of the test disk's raw area: from here to the end of the
+/// partition every sector holds `ARIDISK\0` and its LBA, out of AriFS's
+/// reach (32 files x 64 sectors fit before it).
 pub const RAW_PATTERN_LBA: u64 = 4096;
-/// Desplazamiento del area en bruto dentro de ARI0 (igual en todos los discos).
+/// Offset of the raw area inside ARI0 (the same on every disk).
 pub const RAW_PATTERN_OFFSET: u64 = RAW_PATTERN_LBA - PART_ARI0.0;
 
-/// Ficheros de ejemplo del disco de pruebas.
+/// Sample files of the test disk.
 pub const DISK_FILES: &[(&str, &[u8])] = &[
     ("hola.txt", b"Hola desde AriFS\n"),
     ("README", b"AriCodeOS: disco de pruebas con AriFS v1.\n"),
 ];
 
-/// Imagen de sistema firmada con la clave de desarrollo: contenedor con
-/// manifiesto (versión y hashes), firma, kernel e initrd de la ESP base.
-/// Con `corrupt`, la firma se altera para que el cargador la rechace.
+/// System image signed with the development key: a container with the
+/// manifest (version and hashes), signature, kernel and initrd of the base
+/// ESP. With `corrupt`, the signature is altered so the loader rejects it.
 pub fn system_image(version: u32, corrupt: bool) -> Result<Vec<u8>> {
     let esp = crate::build_dir().join("esp");
     let kernel = stripped_elf(&esp.join(KERNEL))?;
-    let initrd = io(fs::read(esp.join(INITRD)), "leer initrd.img de la ESP base")?;
+    let initrd = io(
+        fs::read(esp.join(INITRD)),
+        "read initrd.img from the base ESP",
+    )?;
     let manifest = aricode_ab::Manifest {
         version,
         kernel_sha256: aricode_crypto::sha256::sha256(&kernel),
@@ -469,12 +472,12 @@ pub fn system_image(version: u32, corrupt: bool) -> Result<Vec<u8>> {
         ("kernel.elf", kernel.as_slice()),
         ("initrd.img", initrd.as_slice()),
     ])
-    .map_err(|e| format!("imagen de sistema: {e:?}"))
+    .map_err(|e| format!("system image: {e:?}"))
 }
 
-/// ELF sin secciones de depuración (el kernel y el initrd solo necesitan los
-/// segmentos `PT_LOAD`; con depuración el kernel supera los 5 MiB). Si no hay
-/// `strip`, se usa el fichero tal cual.
+/// ELF without debug sections (the kernel and the initrd only need the
+/// `PT_LOAD` segments; with debug info the kernel exceeds 5 MiB). Without
+/// `strip`, the file is used as is.
 pub fn stripped_elf(path: &Path) -> Result<Vec<u8>> {
     let dir = crate::build_dir().join("stripped");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -485,17 +488,17 @@ pub fn stripped_elf(path: &Path) -> Result<Vec<u8>> {
         .arg(path)
         .status();
     match status {
-        Ok(st) if st.success() => io(fs::read(&out), "leer ELF sin depuracion"),
-        _ => io(fs::read(path), &format!("leer {}", path.display())),
+        Ok(st) if st.success() => io(fs::read(&out), "read stripped ELF"),
+        _ => io(fs::read(path), &format!("read {}", path.display())),
     }
 }
 
-/// Escribe cabecera + contenedor al principio de una partición.
+/// Writes header + container at the start of a partition.
 fn write_slot(img: &mut [u8], part: (u64, u64), container: &[u8]) -> Result {
     let cap = (part.1 - part.0 + 1) as usize * 512 - 512;
     if container.len() > cap {
         return Err(format!(
-            "la imagen de sistema ({} bytes) no cabe en el slot ({cap} bytes)",
+            "the system image ({} bytes) does not fit in the slot ({cap} bytes)",
             container.len()
         ));
     }
@@ -512,7 +515,7 @@ pub fn write_test_disk(
 ) -> Result {
     if variant == DiskVariant::UsbImage {
         return Err(String::from(
-            "la imagen USB necesita la ESP: usar write_usb_image",
+            "the USB image needs the ESP: use write_usb_image",
         ));
     }
     let mut img = vec![0u8; DISK_SECTORS as usize * 512];
@@ -539,7 +542,7 @@ pub fn write_test_disk(
             overwrite_arifs(&mut img, PART_ARI0, WASM_MODULE_FILE, BAD_IMPORT_WASM)?
         }
         DiskVariant::FsCorrupt => {
-            // Primer byte del nombre de la primera entrada en uso.
+            // First byte of the name of the first entry in use.
             img[(PART_ARI0.0 + aricode_arifs::TABLE_LBA) as usize * 512] ^= 0x20;
         }
         _ => {}
@@ -583,11 +586,11 @@ pub fn write_test_disk(
         let o = PART_ARIBOOT.0 as usize * 512;
         img[o..o + 512].copy_from_slice(&state.encode());
     }
-    io(fs::write(path, img), "escribir disco de pruebas")
+    io(fs::write(path, img), "write test disk")
 }
 
-/// Añade a AriFS ficheros de cualquier tamaño (paquetes instalados, ADR
-/// 0017): capacidad en múltiplos de 64 sectores.
+/// Adds files of any size to AriFS (installed packages, ADR 0017):
+/// capacity in multiples of 64 sectors.
 fn install_files(img: &mut [u8], part: (u64, u64), files: &[(String, Vec<u8>)]) -> Result {
     if files.is_empty() {
         return Ok(());
@@ -612,12 +615,12 @@ fn install_files(img: &mut [u8], part: (u64, u64), files: &[(String, Vec<u8>)]) 
     fs.flush().map_err(|e| format!("arifs: {e:?}"))
 }
 
-/// Contenido que `filesystem.replace_recovery` espera leer en `README`.
+/// Contents `filesystem.replace_recovery` expects to read in `README`.
 pub const RECOVERED_README: &[u8] = b"AriCodeOS: recuperado tras un corte\n";
 
-/// Deja en el journal de AriFS un reemplazo de `README` comprometido y sin
-/// aplicar: el estado exacto que queda tras un corte justo después del
-/// compromiso (ADR 0014). El siguiente montaje debe rehacerlo.
+/// Leaves a committed but unapplied `README` replacement in the AriFS
+/// journal: the exact state left by a power cut right after the commit
+/// (ADR 0014). The next mount must replay it.
 fn stage_arifs_replace(img: &mut [u8], part: (u64, u64)) -> Result {
     let mut fs = aricode_arifs::AriFs::open(VecDisk {
         data: img,
@@ -626,13 +629,13 @@ fn stage_arifs_replace(img: &mut [u8], part: (u64, u64)) -> Result {
     .map_err(|e| format!("arifs: {e:?}"))?;
     let i = fs
         .find("README")
-        .ok_or_else(|| String::from("arifs: falta README"))?;
+        .ok_or_else(|| String::from("arifs: README missing"))?;
     fs.stage_replace(i, RECOVERED_README)
         .map(|_| ())
         .map_err(|e| format!("arifs README: {e:?}"))
 }
 
-/// Formatea AriFS en `part` con los ficheros de ejemplo y el módulo WASM.
+/// Formats AriFS in `part` with the sample files and the WASM module.
 fn populate_arifs(img: &mut [u8], part: (u64, u64)) -> Result {
     let (first, last) = part;
     let sectors = last - first + 1;
@@ -651,9 +654,9 @@ fn populate_arifs(img: &mut [u8], part: (u64, u64)) -> Result {
         fs.write(i, 0, content)
             .map_err(|e| format!("arifs {name}: {e:?}"))?;
     }
-    // Módulo WebAssembly de ejemplo y su manifiesto en el directorio privado
-    // de `wasm_runner` (lo deja `build_wasm_programs`; sin él, el runner
-    // informa y sale).
+    // Sample WebAssembly module and its manifest in `wasm_runner`'s private
+    // directory (`build_wasm_programs` produces it; without it, the runner
+    // reports and exits).
     let demo = crate::build_dir().join("demo.wasm");
     if let Ok(bytes) = fs::read(&demo) {
         for (name, content) in [
@@ -672,33 +675,33 @@ fn populate_arifs(img: &mut [u8], part: (u64, u64)) -> Result {
 
 const WASM_MODULE_FILE: &str = "wasm_runner/demo.wasm";
 const WASM_MANIFEST_FILE: &str = "wasm_runner/demo.manifest";
-/// Lo que el módulo de ejemplo pide (ADR 0019).
+/// What the sample module asks for (ADR 0019).
 const WASM_MANIFEST: &[u8] = b"caps = print, clock, files\n";
-/// Módulo mal tipado: `main() -> i32` cuyo cuerpo es `i32.const 1; i32.add`
-/// (suma con un solo operando). Analiza bien y no valida.
+/// Ill-typed module: `main() -> i32` whose body is `i32.const 1; i32.add`
+/// (an add with a single operand). It parses but does not validate.
 const INVALID_WASM: &[u8] = &[
-    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, // cabecera
+    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, // header
     0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7F, // type: () -> i32
-    0x03, 0x02, 0x01, 0x00, // function: tipo 0
-    0x05, 0x03, 0x01, 0x00, 0x01, // memory: 1 pagina
+    0x03, 0x02, 0x01, 0x00, // function: type 0
+    0x05, 0x03, 0x01, 0x00, 0x01, // memory: 1 page
     0x07, 0x08, 0x01, 0x04, 0x6D, 0x61, 0x69, 0x6E, 0x00, 0x00, // export "main"
     0x0A, 0x07, 0x01, 0x05, 0x00, 0x41, 0x01, 0x6A, 0x0B, // code
 ];
 
-/// Módulo válido que importa `aricode.file_write` como `() -> i32` y lo llama
-/// desde `main(i64) -> i32` (fixture de la auditoría 6ee19fb): el runner debe
-/// rechazar la firma antes de ejecutar.
+/// Valid module that imports `aricode.file_write` as `() -> i32` and calls it
+/// from `main(i64) -> i32` (audit 6ee19fb fixture): the runner must reject
+/// the signature before running.
 const BAD_IMPORT_WASM: &[u8] = &[
-    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, // cabecera
-    0x01, 0x0A, 0x02, 0x60, 0x00, 0x01, 0x7F, 0x60, 0x01, 0x7E, 0x01, 0x7F, // tipos
+    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, // header
+    0x01, 0x0A, 0x02, 0x60, 0x00, 0x01, 0x7F, 0x60, 0x01, 0x7E, 0x01, 0x7F, // types
     0x02, 0x16, 0x01, 0x07, 0x61, 0x72, 0x69, 0x63, 0x6F, 0x64, 0x65, 0x0A, 0x66, 0x69, 0x6C, 0x65,
-    0x5F, 0x77, 0x72, 0x69, 0x74, 0x65, 0x00, 0x00, // import aricode.file_write: tipo 0
-    0x03, 0x02, 0x01, 0x01, // function: tipo 1
+    0x5F, 0x77, 0x72, 0x69, 0x74, 0x65, 0x00, 0x00, // import aricode.file_write: type 0
+    0x03, 0x02, 0x01, 0x01, // function: type 1
     0x07, 0x08, 0x01, 0x04, 0x6D, 0x61, 0x69, 0x6E, 0x00, 0x01, // export "main" = func 1
     0x0A, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0B, // main: call 0
 ];
 
-/// Sustituye entero un fichero de AriFS (reemplazo atómico de la librería).
+/// Replaces an AriFS file entirely (the library's atomic replace).
 fn overwrite_arifs(img: &mut [u8], part: (u64, u64), name: &str, bytes: &[u8]) -> Result {
     let mut fs = aricode_arifs::AriFs::open(VecDisk {
         data: img,
@@ -707,28 +710,28 @@ fn overwrite_arifs(img: &mut [u8], part: (u64, u64), name: &str, bytes: &[u8]) -
     .map_err(|e| format!("arifs: {e:?}"))?;
     let i = fs
         .find(name)
-        .ok_or_else(|| format!("arifs: falta {name}"))?;
+        .ok_or_else(|| format!("arifs: {name} missing"))?;
     fs.replace(i, bytes)
         .map_err(|e| format!("arifs {name}: {e:?}"))
 }
 
-/// Copia privada de las variables OVMF: el firmware las escribe al arrancar.
+/// Private copy of the OVMF variables: the firmware writes them at boot.
 pub fn ovmf_vars_for(dir: &Path) -> Result<PathBuf> {
-    io(fs::create_dir_all(dir), "crear dir")?;
+    io(fs::create_dir_all(dir), "create dir")?;
     let vars = dir.join("OVMF_VARS.fd");
-    io(fs::copy(OVMF_VARS, &vars), "copiar OVMF_VARS")?;
+    io(fs::copy(OVMF_VARS, &vars), "copy OVMF_VARS")?;
     Ok(vars)
 }
 
 fn copy_dir(from: &Path, to: &Path) -> Result {
-    io(fs::create_dir_all(to), "crear dir")?;
-    for entry in io(fs::read_dir(from), "leer dir")? {
-        let entry = io(entry, "entrada")?;
+    io(fs::create_dir_all(to), "create dir")?;
+    for entry in io(fs::read_dir(from), "read dir")? {
+        let entry = io(entry, "entry")?;
         let target = to.join(entry.file_name());
         if entry.path().is_dir() {
             copy_dir(&entry.path(), &target)?;
         } else {
-            io(fs::copy(entry.path(), target), "copiar")?;
+            io(fs::copy(entry.path(), target), "copy")?;
         }
     }
     Ok(())
@@ -751,7 +754,7 @@ mod tests {
 
     #[test]
     fn symlinked_scenario_dir_is_rejected_and_outside_data_survives() {
-        // Revision de auditoria, hallazgo 2.
+        // Audit review, finding 2.
         let tmp = TempDir::new("image-symlink");
         let base = fake_base(&tmp);
         let root = tmp.path().join("scenarios");
@@ -763,10 +766,10 @@ mod tests {
 
         let err =
             build_scenario_esp(&base, &root, "boot.probe", "", &Inject::default()).unwrap_err();
-        assert!(err.contains("enlace simbolico"), "{err}");
+        assert!(err.contains("symlink"), "{err}");
         assert!(
             outside.join("esp/marker").exists(),
-            "el centinela externo debe sobrevivir"
+            "the outside sentinel must survive"
         );
         assert!(!outside.join(KERNEL).exists());
     }
@@ -803,21 +806,21 @@ mod tests {
 
     #[test]
     fn empty_segment_injection_appends_a_load_header() {
-        // ELF minimo: cabecera + 1 phdr + hueco a cero + contenido en 0x100.
+        // Minimal ELF: header + 1 phdr + zeroed gap + content at 0x100.
         let mut d = vec![0u8; 0x110];
         d[E_PHOFF_TEST..E_PHOFF_TEST + 8].copy_from_slice(&64u64.to_le_bytes());
         d[54..56].copy_from_slice(&56u16.to_le_bytes());
         d[56..58].copy_from_slice(&1u16.to_le_bytes());
         d[24..32].copy_from_slice(&0x1234u64.to_le_bytes());
         d[64..68].copy_from_slice(&1u32.to_le_bytes());
-        d[72..80].copy_from_slice(&0x100u64.to_le_bytes()); // offset del contenido
+        d[72..80].copy_from_slice(&0x100u64.to_le_bytes()); // content offset
         elf_patch::append_empty_rw_segment_at_entry(&mut d).unwrap();
         assert_eq!(u16::from_le_bytes([d[56], d[57]]), 2);
         let ph = &d[64 + 56..64 + 112];
         assert_eq!(u32::from_le_bytes(ph[0..4].try_into().unwrap()), 1);
         assert_eq!(u64::from_le_bytes(ph[16..24].try_into().unwrap()), 0x1234);
         assert_eq!(u64::from_le_bytes(ph[40..48].try_into().unwrap()), 0);
-        // Sin hueco: el contenido empieza justo tras la tabla.
+        // No gap: the content starts right after the table.
         let mut d2 = d.clone();
         d2[72..80].copy_from_slice(&(64u64 + 112).to_le_bytes());
         assert!(elf_patch::append_empty_rw_segment_at_entry(&mut d2).is_err());

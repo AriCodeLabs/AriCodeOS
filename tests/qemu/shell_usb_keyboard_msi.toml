@@ -1,9 +1,9 @@
-# Fase 34 (ADR 0022): el xHCI del portatil de pruebas (Intel 7 series) no
-# tiene MSI-X, solo MSI. Mismo escenario que shell.usb_keyboard con el xHCI
-# de QEMU sin MSI-X: el kernel programa la capability MSI y el driver recibe
-# sus interrupciones por ella.
+# Phase 34 (ADR 0022): the xHCI of the test laptop (Intel 7 series) has no
+# MSI-X, only MSI. Same scenario as shell.usb_keyboard with the QEMU xHCI
+# without MSI-X: the kernel programs the MSI capability and the driver receives
+# its interrupts through it.
 name = "shell.usb_keyboard_msi"
-description = "arish con teclado USB HID sobre un xHCI que solo ofrece MSI (sin MSI-X)"
+description = "arish with a USB HID keyboard on an xHCI that only offers MSI (no MSI-X)"
 level = "full"
 areas = ["shell", "input", "usb", "console", "pci"]
 cmdline = "qemu_exit shell"
@@ -18,12 +18,12 @@ keys = ["c", "p", "u", "s", "ret", "s", "h", "u", "t", "d", "o", "w", "n", "ret"
 [expect]
 exit = 33
 serial_contains = [
-    "1b36:000d reclamado (MSI)",
-    "usb-input: dispositivo listo: USB HID Keyboard+Mouse",
-    "AriInit: puente de consola con 3 dispositivo(s) de entrada",
-    "arish: shell de AriCodeOS",
+    "1b36:000d claimed (MSI)",
+    "usb-input: device ready: USB HID Keyboard+Mouse",
+    "AriInit: console bridge with 3 input device(s)",
+    "arish: AriCodeOS shell",
     "cpus: ",
     "ari> shutdown",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "init no responde", "fallo en la inicializacion del xHCI", "sin BAR 0 o sin IRQ"]
+serial_absent = ["KERNEL PANIC", "init no responde", "xHCI initialization failed", "no BAR 0 or no IRQ"]

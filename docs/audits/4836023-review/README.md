@@ -1,64 +1,64 @@
-# Evidencias de la revisión de `4836023`
+# Evidence from the `4836023` review
 
-Las reproducciones se ejecutaron en copias temporales del commit, sin
-modificar el kernel ni los servicios. Los fallos esperados de estas pruebas
-son independientes de la batería oficial.
+The reproductions were run in temporary copies of the commit, without
+modifying the kernel or the services. The expected failures of these tests
+are independent of the official suite.
 
-## Teclado
+## Keyboard
 
-Copiar `keyboard-report.rs` a `libs/input/tests/review.rs` en una copia del
-commit y ejecutar:
+Copy `keyboard-report.rs` to `libs/input/tests/review.rs` in a copy of the
+commit and run:
 
 ```sh
 cargo test -p aricode-input --test review -- --nocapture
 ```
 
-`keyboard.log` conserva la aserción fallida: dos pulsaciones nuevas en lugar
-de seis; repetir el informe no entrega las omitidas.
+`keyboard.log` keeps the failed assertion: two new presses instead
+of six; repeating the report does not deliver the missing ones.
 
-## Intervalos
+## Intervals
 
-Copiar `interval.rs` a `libs/xhci/tests/review.rs` y ejecutar:
+Copy `interval.rs` to `libs/xhci/tests/review.rs` and run:
 
 ```sh
 cargo test -p aricode-xhci --test review -- --nocapture
 ```
 
-`interval.log` conserva las dos aserciones fallidas. Los valores esperados
-proceden de la sección 6.2.3.6 de la especificación xHCI enlazada en el informe.
+`interval.log` keeps the two failed assertions. The expected values
+come from section 6.2.3.6 of the xHCI specification linked in the report.
 
-## Controlador EHCI adicional
+## Additional EHCI controller
 
-En una copia sin los tests de host anteriores, aplicar
-`legacy-controller.patch`, copiar `audit_usb_legacy.toml` a `tests/qemu` y
-ejecutar:
+In a copy without the previous host tests, apply
+`legacy-controller.patch`, copy `audit_usb_legacy.toml` to `tests/qemu` and
+run:
 
 ```sh
 cargo xtask test --all --area audit_usb_legacy
 ```
 
-El parche solo añade `-device usb-ehci,id=review_ehci` cuando el escenario
-activa `usb_hid`; conserva el xHCI y sus dispositivos. `legacy-serial.log`
-recoge la salida del invitado. `legacy-tests.log` conserva el timeout de
-90 segundos y la ausencia de los marcadores de arranque completo.
+The patch only adds `-device usb-ehci,id=review_ehci` when the scenario
+enables `usb_hid`; it keeps the xHCI and its devices. `legacy-serial.log`
+captures the guest output. `legacy-tests.log` keeps the 90-second
+timeout and the absence of the boot-complete markers.
 
-En la ejecución de auditoría se cambiaron 17007–17010 por 30007–30010 en
+In the audit run, 17007–17010 were changed to 30007–30010 in
 `sdk/proto/src/lib.rs`, `user/testprogs/src/bin/http_client.rs`,
-`tests/qemu/shell_commands.toml` y `tests/qemu/network_stack.toml`.
-También se usó un alias del ejecutable QEMU. Son ajustes de aislamiento;
-no forman parte del defecto ni del parche de reproducción. No ejecutar
-baterías simultáneas que compartan puertos.
+`tests/qemu/shell_commands.toml` and `tests/qemu/network_stack.toml`.
+An alias for the QEMU executable was also used. These are isolation adjustments;
+they are not part of the defect or of the reproduction patch. Do not run
+suites concurrently that share ports.
 
-## Batería oficial
+## Official suite
 
-`check.log` contiene el resultado correcto de `cargo xtask check`. El informe
-principal recoge el resultado final de las pruebas oficiales; su copia
-aislada usa puertos 29007–29010 y no contiene estas pruebas adicionales.
+`check.log` contains the passing result of `cargo xtask check`. The main
+report records the final result of the official tests; its isolated
+copy uses ports 29007–29010 and does not contain these additional tests.
 
-Resultado final: 212 pruebas de host y 81 escenarios QEMU correctos.
-`tests-first.log` contiene 43 escenarios antes del agotamiento de `/tmp`;
-`tests-remaining.log` contiene los 38 restantes y termina con cero fallos.
-Los tests de host se repiten en el segundo lote; el recuento de 212 no los
-duplica. `prior-regressions.log` conserva los marcadores de las correcciones
-anteriores. Las imágenes y compilaciones temporales se eliminaron después
-de guardar estas evidencias.
+Final result: 212 host tests and 81 QEMU scenarios passing.
+`tests-first.log` contains 43 scenarios before `/tmp` ran out of space;
+`tests-remaining.log` contains the remaining 38 and ends with zero failures.
+The host tests are repeated in the second batch; the count of 212 does not
+double them. `prior-regressions.log` keeps the markers from the previous
+fixes. The temporary images and builds were deleted after
+saving this evidence.

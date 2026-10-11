@@ -1,8 +1,8 @@
-//! Núcleo del servicio de red (Fase 22, ADR 0024): pila mínima (ARP, IPv4,
-//! ICMP, UDP, DHCP, DNS, TCP) y servidor de `NetServiceProtocol v1`,
-//! independiente de la tarjeta. Cada driver aporta un [`Link`] (MAC, enviar
-//! y recibir tramas) y llama a [`run`]; virtio-net y rtl-net lo comparten.
-//! Un solo hilo: alterna la recepción, las peticiones IPC y los plazos.
+//! Network service core (Phase 22, ADR 0024): minimal stack (ARP, IPv4,
+//! ICMP, UDP, DHCP, DNS, TCP) and `NetServiceProtocol v1` server,
+//! independent of the NIC. Each driver supplies a [`Link`] (MAC, send
+//! and receive frames) and calls [`run`]; virtio-net and rtl-net share it.
+//! Single thread: alternates between reception, IPC requests and timeouts.
 
 #![no_std]
 
@@ -27,18 +27,18 @@ const PING_ID: u16 = 0xA51C;
 const DHCP_RETRY_MS: u64 = 1000;
 const ARP_WAIT_MS: u64 = 1000;
 
-/// Enlace con la tarjeta: tramas Ethernet completas, sin cabeceras propias.
+/// Link to the NIC: complete Ethernet frames, no headers of its own.
 pub trait Link {
     fn mac(&self) -> MacAddr;
-    /// Transmite una trama; `false` si no hay ranura (el llamador la pierde).
+    /// Transmits a frame; `false` if there is no free slot (the caller loses it).
     fn send_frame(&mut self, frame: &[u8]) -> bool;
-    /// Siguiente trama recibida copiada a `out`, o `None` si no hay ninguna.
+    /// Next received frame copied into `out`, or `None` if there is none.
     fn recv_frame(&mut self, out: &mut [u8; MAX_FRAME]) -> Option<usize>;
-    /// Enlace físico arriba, abajo o desconocido (`None`).
+    /// Physical link up, down or unknown (`None`).
     fn link_up(&self) -> Option<bool>;
 }
 
-/// Traza con el nombre del driver como prefijo.
+/// Trace line prefixed with the driver name.
 pub fn say(name: &str, msg: &[u8]) {
     sys::print(name.as_bytes());
     sys::print(b": ");
@@ -51,7 +51,7 @@ fn print_ip(ip: Ipv4Addr) {
     sys::print(ip.format(&mut b));
 }
 
-/// Reloj en ms a partir de `system_info`.
+/// Clock in ms based on `system_info`.
 pub struct Clock(pub Handle);
 
 impl Clock {
@@ -82,21 +82,21 @@ struct PendingRecv {
 struct Socket {
     port: u16,
     recv: Option<PendingRecv>,
-    /// Último datagrama sin recoger (remitente, puerto, datos).
+    /// Last uncollected datagram (sender, port, data).
     queued: Option<(Ipv4Addr, u16, usize)>,
     data: [u8; MAX_DATAGRAM as usize],
 }
 
-/// Socket TCP: una conexión (o un puerto de escucha) y sus esperas.
+/// TCP socket: one connection (or a listening port) and its waits.
 struct TcpSock {
     conn: Connection,
     listening: bool,
-    /// Conexión entrante aún no entregada por `TcpAccept` (índice del socket).
+    /// Incoming connection not yet handed out by `TcpAccept` (socket index).
     accepted_from: Option<u16>,
     connect: Option<(Handle, u64)>,
     accept: Option<(Handle, u64)>,
     recv: Option<PendingRecv>,
-    /// El usuario ya cerró: liberar el slot cuando la conexión termine.
+    /// The user already closed it: free the slot when the connection ends.
     user_closed: bool,
 }
 
@@ -120,7 +120,7 @@ struct PendingDns {
     deadline: u64,
 }
 
-/// Trama a la espera de resolver ARP.
+/// Frame waiting for ARP resolution.
 struct Deferred {
     next_hop: Ipv4Addr,
     len: usize,
@@ -128,7 +128,7 @@ struct Deferred {
     deadline: u64,
 }
 
-/// Mapeos de buffers de clientes por dirección física.
+/// Client buffer mappings by physical address.
 struct ClientBuffers {
     entries: [(u64, u64, u64); 8],
     count: usize,
@@ -149,7 +149,7 @@ impl ClientBuffers {
                 v
             }
         };
-        // SAFETY: buffer del cliente mapeado RW en este proceso.
+        // SAFETY: client buffer mapped RW in this process.
         Some(unsafe { core::slice::from_raw_parts_mut(virt as *mut u8, len as usize) })
     }
 }
@@ -167,15 +167,15 @@ pub struct Stack<L: Link> {
     pings: [Option<PendingPing>; MAX_PINGS],
     sockets: [Option<Socket>; MAX_SOCKETS],
     dns: [Option<PendingDns>; MAX_DNS],
-    /// En el heap: cada socket lleva 8 KiB de buffers y la pila es de 64 KiB.
+    /// On the heap: each socket carries 8 KiB of buffers and the stack is 64 KiB.
     tcp: [Option<Box<TcpSock>>; MAX_TCP],
     tcp_next_port: u16,
     deferred: [Option<Deferred>; 4],
     buffers: ClientBuffers,
-    /// Puerto UDP efímero para consultas DNS.
+    /// Ephemeral UDP port for DNS queries.
     dns_port: u16,
-    /// Buffer de cliente que una petición pendiente conserva (recepciones):
-    /// el bucle principal no lo cierra al despachar.
+    /// Client buffer kept by a pending request (receives):
+    /// the main loop does not close it after dispatching.
     retained: Option<Handle>,
 }
 
@@ -222,9 +222,9 @@ impl<L: Link> Stack<L> {
             .unwrap_or(Ipv4Addr::UNSPECIFIED)
     }
 
-    // ---------------- emisión ----------------
+    // ---------------- transmit ----------------
 
-    /// Envía una trama Ethernet con `payload` construido por `fill`.
+    /// Sends an Ethernet frame whose `payload` is built by `fill`.
     fn send_eth(
         &mut self,
         dst: MacAddr,
@@ -246,8 +246,8 @@ impl<L: Link> Stack<L> {
         self.link.send_frame(&frame[..h + n])
     }
 
-    /// Siguiente salto para `dst`: el propio destino si está en la subred,
-    /// si no el router.
+    /// Next hop for `dst`: the destination itself if it is on the subnet,
+    /// otherwise the router.
     fn next_hop(&self, dst: Ipv4Addr) -> Option<Ipv4Addr> {
         let c = self.config?;
         if dst == Ipv4Addr::BROADCAST || dst.same_subnet(c.address, c.subnet_mask) {
@@ -259,8 +259,8 @@ impl<L: Link> Stack<L> {
         }
     }
 
-    /// Envía un paquete IPv4 a `dst` con `payload` de protocolo `proto`.
-    /// Sin MAC conocida lo aparca y lanza ARP.
+    /// Sends an IPv4 packet to `dst` with a `payload` of protocol `proto`.
+    /// With no known MAC it parks the packet and sends an ARP request.
     fn send_ipv4(&mut self, dst: Ipv4Addr, proto: u8, payload: &[u8]) -> Result<(), Status> {
         let src = self.my_ip();
         let next_hop = self.next_hop(dst).ok_or(Status::NoRoute)?;
@@ -332,7 +332,7 @@ impl<L: Link> Stack<L> {
         self.send_ipv4(dst, ipv4::PROTO_UDP, &seg[..n])
     }
 
-    /// Envía el DHCP que corresponda (difusión desde 0.0.0.0).
+    /// Sends the appropriate DHCP message (broadcast from 0.0.0.0).
     fn dhcp_step(&mut self, now: u64) {
         if self.dhcp.state() == dhcp::State::Bound || now < self.dhcp_next {
             return;
@@ -369,7 +369,7 @@ impl<L: Link> Stack<L> {
         });
     }
 
-    // ---------------- recepción ----------------
+    // ---------------- receive ----------------
 
     fn on_frame(&mut self, frame: &[u8], now: u64) {
         let Some((eh, payload)) = eth::Header::parse(frame) else {
@@ -437,7 +437,7 @@ impl<L: Link> Stack<L> {
             return;
         };
         if !echo.reply {
-            // Responder al eco: el anfitrión puede hacernos ping.
+            // Answer the echo: the host may ping us.
             let reply = icmp::Echo {
                 reply: true,
                 ..echo
@@ -482,7 +482,7 @@ impl<L: Link> Stack<L> {
                     sys::print(self.name.as_bytes());
                     sys::print(b": DHCP ");
                     print_ip(c.address);
-                    sys::print(b" mascara ");
+                    sys::print(b" mask ");
                     print_ip(c.subnet_mask);
                     sys::print(b" router ");
                     print_ip(c.router);
@@ -527,7 +527,7 @@ impl<L: Link> Stack<L> {
         let Some((h, payload)) = tcp::Header::parse(ih.src, ih.dst, b) else {
             return;
         };
-        // Conexión existente con la misma cuádrupla.
+        // Existing connection with the same 4-tuple.
         let existing = self.tcp.iter().position(|s| {
             s.as_ref().is_some_and(|s| {
                 !s.listening
@@ -543,7 +543,7 @@ impl<L: Link> Stack<L> {
                 .on_segment(&h, payload, now);
             return;
         }
-        // SYN a un puerto en escucha: nueva conexión pasiva.
+        // SYN to a listening port: new passive connection.
         if h.flags & tcp::FLAG_SYN == 0 || h.flags & tcp::FLAG_ACK != 0 {
             return;
         }
@@ -564,15 +564,15 @@ impl<L: Link> Stack<L> {
         self.tcp[slot] = Some(sock);
     }
 
-    /// Emite segmentos pendientes y resuelve esperas de todas las conexiones.
+    /// Emits pending segments and resolves waits on every connection.
     fn tcp_poll(&mut self, now: u64) {
         let mut seg = [0u8; tcp::MAX_SEGMENT];
         for i in 0..MAX_TCP {
             if self.tcp[i].as_ref().is_none_or(|s| s.listening) {
                 continue;
             }
-            // Sacar el socket del slot mientras se emite: `send_ipv4` necesita
-            // el resto de la pila.
+            // Take the socket out of its slot while emitting: `send_ipv4` needs
+            // the rest of the stack.
             let mut sock = self.tcp[i].take().unwrap();
             let (remote, _) = sock.conn.remote();
             while let Some(n) = sock.conn.poll(now, &mut seg) {
@@ -585,7 +585,7 @@ impl<L: Link> Stack<L> {
             let Some(sock) = self.tcp[i].as_mut() else {
                 continue;
             };
-            // Conexión activa resuelta.
+            // Active connection resolved.
             if let Some((reply_to, deadline)) = sock.connect {
                 if sock.conn.is_established() {
                     sock.connect = None;
@@ -601,7 +601,7 @@ impl<L: Link> Stack<L> {
                     answer(reply_to, Reply::status(status));
                 }
             }
-            // Recepción pendiente.
+            // Pending receive.
             if sock.recv.is_some()
                 && (sock.conn.recv_available() > 0
                     || sock.conn.recv_finished()
@@ -621,12 +621,12 @@ impl<L: Link> Stack<L> {
                     deliver_recv(&mut self.buffers, pending, from, port, &data[..n]);
                 }
             }
-            // Liberar conexiones terminadas que el usuario ya cerró.
+            // Free finished connections the user already closed.
             if sock.user_closed && sock.conn.is_closed() {
                 self.tcp[i] = None;
             }
         }
-        // Entregar conexiones aceptadas a los `TcpAccept` pendientes.
+        // Hand accepted connections to pending `TcpAccept` calls.
         for i in 0..MAX_TCP {
             let Some(from) = self.tcp[i].as_ref().and_then(|s| s.accepted_from) else {
                 continue;
@@ -768,7 +768,7 @@ impl<L: Link> Stack<L> {
                     max_len: req.len.min(MAX_DATAGRAM),
                     deadline: now + req.timeout_ms.max(1) as u64,
                 });
-                self.retained = Some(buf); // se cierra al entregar o al vencer
+                self.retained = Some(buf); // closed on delivery or on timeout
             }
             Op::TcpClose => {
                 let Some(sock) = self.tcp.get_mut(req.sock as usize).and_then(|s| s.as_mut())
@@ -816,7 +816,7 @@ impl<L: Link> Stack<L> {
         }
     }
 
-    // ---------------- plazos ----------------
+    // ---------------- timeouts ----------------
 
     fn expire(&mut self, now: u64) {
         for slot in self.pings.iter_mut() {
@@ -845,11 +845,11 @@ impl<L: Link> Stack<L> {
         }
     }
 
-    // ---------------- peticiones IPC ----------------
+    // ---------------- IPC requests ----------------
 
-    /// Atiende una petición. El handle del buffer del cliente lo cierra el
-    /// bucle principal salvo que quede en `retained` (recepción pendiente),
-    /// así ningún camino de error deja handles huérfanos.
+    /// Serves one request. The client buffer handle is closed by the
+    /// main loop unless it is left in `retained` (pending receive), so no
+    /// error path leaves orphan handles.
     fn handle(&mut self, req: Request, reply_to: Handle, buf: Option<Handle>, now: u64) {
         let addr = Ipv4Addr(req.addr);
         match req.op {
@@ -985,7 +985,7 @@ impl<L: Link> Stack<L> {
                     deliver_recv(&mut self.buffers, pending, from, port, &data[..len]);
                 } else {
                     sock.recv = Some(pending);
-                    self.retained = Some(buf); // se cierra al entregar o al vencer
+                    self.retained = Some(buf); // closed on delivery or on timeout
                 }
             }
             Op::Dns => {
@@ -1003,7 +1003,7 @@ impl<L: Link> Stack<L> {
                 } else {
                     (addr, if req.port == 0 { dns::PORT } else { req.port })
                 };
-                // El nombre viaja entero en el buffer del cliente (hasta 253 bytes).
+                // The whole name travels in the client buffer (up to 253 bytes).
                 let len = req.len as usize;
                 if len == 0 || len > dns::MAX_NAME {
                     return answer(reply_to, Reply::status(Status::Invalid));
@@ -1038,7 +1038,7 @@ impl<L: Link> Stack<L> {
     }
 }
 
-/// Entrega un datagrama a una recepción pendiente y libera sus handles.
+/// Delivers a datagram to a pending receive and releases its handles.
 fn deliver_recv(
     buffers: &mut ClientBuffers,
     pending: PendingRecv,
@@ -1058,18 +1058,18 @@ fn deliver_recv(
     answer(pending.reply_to, reply);
 }
 
-/// Responde por el endpoint transferido y lo cierra.
+/// Replies through the transferred endpoint and closes it.
 fn answer(reply_to: Handle, reply: Reply) {
     let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
     let _ = sys::handle_close(reply_to);
 }
 
-/// Anuncia la MAC y sirve peticiones para siempre: recepción de tramas,
-/// hasta ocho peticiones IPC por vuelta, plazos y espera de la IRQ.
+/// Announces the MAC and serves requests forever: frame reception,
+/// up to eight IPC requests per round, timeouts and waiting for the IRQ.
 pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
     let mut hex = [0u8; 16];
     sys::print(name.as_bytes());
-    sys::print(b": dispositivo listo, MAC ");
+    sys::print(b": device ready, MAC ");
     for (i, b) in link.mac().0.iter().enumerate() {
         if i > 0 {
             sys::print(b":");
@@ -1081,7 +1081,7 @@ pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
     let mut frame = [0u8; MAX_FRAME];
     let mut msg = [0u8; Request::LEN];
     let mut handles = [Handle(0); 2];
-    say(name, b"sirviendo peticiones");
+    say(name, b"serving requests");
     loop {
         let now = stack.clock.now();
         stack.dhcp_step(now);

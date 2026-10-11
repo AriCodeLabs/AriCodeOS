@@ -1,9 +1,9 @@
-//! `installer` (etapa 4, ADR 0018): aplicación de confianza que recibe el
-//! espacio principal de fsd (capacidad `install`) e instala o actualiza los
-//! paquetes firmados dejados en `pkgs/`: verifica cada uno con la clave de
-//! desarrollo, compara su versión con la instalada en `apps/NOMBRE.aripkg`
-//! y, si es más nueva, la sustituye con un único `replace` atómico. Un
-//! paquete que no verifica o que no es más nuevo se ignora y se dice.
+//! `installer` (stage 4, ADR 0018): trusted app that receives the main fsd
+//! space (`install` capability) and installs or updates the signed packages
+//! left in `pkgs/`: it verifies each one with the development key, compares
+//! its version with the one installed at `apps/NAME.aripkg` and, if newer,
+//! replaces it with a single atomic `replace`. A package that fails
+//! verification or is not newer is skipped, and the installer says so.
 #![no_std]
 #![no_main]
 
@@ -14,7 +14,7 @@ use aricode_rt::sys::fs::FsClient;
 use aricode_rt::sys::{self, kind, permissions};
 
 const PUBKEY_HEX: &str = include_str!("../../../keys/dev/ed25519.pub");
-/// Un paquete instalado se sustituye de una vez: el journal de AriFS (32 KiB).
+/// An installed package is replaced in one go: the AriFS journal (32 KiB).
 const MAX_PACKAGE: u64 = 32 * 1024;
 const MAX_PENDING: usize = 8;
 
@@ -29,7 +29,7 @@ fn num(v: u64) {
     sys::print(aricode_rt::fmt_u64(v, &mut b));
 }
 
-/// Lee un fichero entero (hasta `MAX_PACKAGE`) del espacio principal.
+/// Reads a whole file (up to `MAX_PACKAGE`) from the main space.
 fn read_all(fs: &mut FsClient, name: &str, size: u64) -> Option<Vec<u8>> {
     if size == 0 || size > MAX_PACKAGE {
         return None;
@@ -50,8 +50,8 @@ fn read_all(fs: &mut FsClient, name: &str, size: u64) -> Option<Vec<u8>> {
     Some(data)
 }
 
-/// Versión del paquete instalado con ese nombre; 0 si no hay ninguno o el
-/// que hay no verifica (se puede sustituir).
+/// Version of the installed package with that name; 0 if there is none or
+/// the existing one fails verification (it can be replaced).
 fn installed_version(fs: &mut FsClient, path: &str, pubkey: &[u8; 32]) -> u32 {
     let mut entry = [0u8; 32];
     let mut i = 0;
@@ -85,7 +85,7 @@ fn main(_arg: u64) -> u64 {
         }
     });
     let (Some(ep), Some(hw)) = (root, hardware) else {
-        say(b"necesito el espacio principal de ficheros (capacidad install)");
+        say(b"need the main file space (install capability)");
         return 1;
     };
     let Ok(mut fs) = FsClient::new(ep, hw) else {
@@ -95,7 +95,7 @@ fn main(_arg: u64) -> u64 {
     if aricode_crypto::unhex(PUBKEY_HEX.trim(), &mut pubkey).is_none() {
         return 3;
     }
-    // Paquetes pendientes: `pkgs/*.aripkg`, en el orden del directorio.
+    // Pending packages: `pkgs/*.aripkg`, in directory order.
     let mut pending: [([u8; 32], usize, u64); MAX_PENDING] = [([0; 32], 0, 0); MAX_PENDING];
     let mut count = 0;
     let mut entry = [0u8; 32];
@@ -105,7 +105,7 @@ fn main(_arg: u64) -> u64 {
         let name = &entry[..n];
         if name.starts_with(b"pkgs/") && name.ends_with(aricode_pkg::EXTENSION.as_bytes()) {
             if count == MAX_PENDING {
-                say(b"demasiados paquetes pendientes; se atienden los primeros");
+                say(b"too many pending packages; handling the first ones");
                 break;
             }
             pending[count] = (entry, n, size);
@@ -113,7 +113,7 @@ fn main(_arg: u64) -> u64 {
         }
     }
     if count == 0 {
-        say(b"nada que instalar en pkgs/");
+        say(b"nothing to install in pkgs/");
         return 0;
     }
     let (mut installed, mut ignored) = (0u64, 0u64);
@@ -124,7 +124,7 @@ fn main(_arg: u64) -> u64 {
         let Some(bytes) = read_all(&mut fs, path, *size) else {
             sys::print(b"installer: ");
             sys::print(path.as_bytes());
-            say(b" no se puede leer o es demasiado grande: se ignora");
+            say(b" cannot be read or is too large: skipped");
             ignored += 1;
             continue;
         };
@@ -133,7 +133,7 @@ fn main(_arg: u64) -> u64 {
             Err(_) => {
                 sys::print(b"installer: ");
                 sys::print(path.as_bytes());
-                sys::print(b" no verifica: se ignora\n");
+                sys::print(b" fails verification: skipped\n");
                 ignored += 1;
                 continue;
             }
@@ -156,32 +156,32 @@ fn main(_arg: u64) -> u64 {
             sys::print(app.as_bytes());
             sys::print(b" version ");
             num(version as u64);
-            sys::print(b" ya instalada (actual ");
+            sys::print(b" already installed (current ");
             num(current as u64);
             sys::print(b")\n");
             ignored += 1;
             continue;
         }
-        sys::print(b"installer: instalando ");
+        sys::print(b"installer: installing ");
         sys::print(app.as_bytes());
         sys::print(b" version ");
         num(version as u64);
-        sys::print(b" (desde ");
+        sys::print(b" (from ");
         sys::print(path.as_bytes());
         sys::print(b")\n");
         let fd = match fs.open(target).or_else(|_| fs.create(target)) {
             Ok(fd) => fd,
             Err(_) => {
-                say(b"no se pudo abrir ni crear el paquete instalado");
+                say(b"could not open or create the installed package");
                 return 4;
             }
         };
-        // Un solo reemplazo atomico: tras un corte hay la version anterior o
-        // la nueva, nunca una mezcla.
+        // A single atomic replace: after a power cut there is either the old
+        // version or the new one, never a mix.
         let result = fs.replace(fd, &bytes);
         let _ = fs.close(fd);
         if result != Ok(bytes.len()) {
-            say(b"error al escribir el paquete instalado");
+            say(b"error writing the installed package");
             return 5;
         }
         sys::print(b"installer: ");
@@ -190,16 +190,16 @@ fn main(_arg: u64) -> u64 {
         num(current as u64);
         sys::print(b" -> ");
         num(version as u64);
-        sys::print(b" instalado (");
+        sys::print(b" installed (");
         sys::print(target.as_bytes());
         sys::print(b")\n");
         installed += 1;
     }
     sys::print(b"installer: ");
     num(installed);
-    sys::print(b" paquete(s) instalado(s), ");
+    sys::print(b" package(s) installed, ");
     num(ignored);
-    sys::print(b" ignorado(s)\n");
+    sys::print(b" skipped\n");
     0
 }
 

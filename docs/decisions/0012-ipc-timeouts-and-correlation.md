@@ -1,40 +1,40 @@
-# ADR 0012: Plazos, correlación y reintentos en las llamadas IPC del SDK
+# ADR 0012: Deadlines, correlation and retries in SDK IPC calls
 
-- **Fecha:** 2026-09-28
-- **Estado:** Aceptada
+- **Date:** 2026-09-28
+- **Status:** Accepted
 
-## Contexto
+## Context
 
-Los clientes del SDK (bloques, ficheros, red, ventanas, entrada, broker)
-reutilizaban un endpoint de respuesta por cliente y esperaban sin plazo. Una
-respuesta que llegara después de un plazo vencido quedaba en ese endpoint y
-la consumía la petición siguiente; un servidor muerto dejaba al cliente
-esperando para siempre. El estudio de 2026-09-28 (etapa 1B) pide un contrato
-uniforme de fallos, plazos y reintentos.
+The SDK clients (block, files, network, windows, input, broker)
+reused one reply endpoint per client and waited without a deadline. A
+reply that arrived after an expired deadline stayed on that endpoint and
+was consumed by the next request; a dead server left the client
+waiting forever. The 2026-09-28 study (stage 1B) calls for a uniform
+contract for failures, deadlines and retries.
 
-## Decisión
+## Decision
 
-1. **Un endpoint de respuesta por petición** (`aricode_sys::rpc::call`): el
-   cliente crea el endpoint, envía su duplicado con la petición, espera la
-   respuesta y lo cierra. Una respuesta tardía llega a un endpoint cerrado
-   y se pierde; nunca se atribuye a otra petición. No hace falta cambiar
-   los protocolos: la correlación la da el canal, no un identificador.
-2. **Toda espera está acotada**: envío y recepción llevan plazo. Cada
-   cliente elige el suyo (plazo pedido más un margen para el servicio); solo
-   el broker de lanzamiento espera sin plazo la salida del programa, porque
-   esa espera es el resultado.
-3. **Un plazo vencido no deshace nada**: el resultado de esa petición es
-   desconocido (pudo ejecutarse). El SDK no reintenta escrituras por su
-   cuenta; el llamador decide con esa información. Las lecturas y consultas
-   sin efectos pueden reintentarse.
-4. **Servidor muerto**: el cliente recibe `Timeout`; con el supervisor
-   (ADR 0011) el endpoint sigue siendo válido y la siguiente generación
-   atiende las peticiones nuevas.
+1. **One reply endpoint per request** (`aricode_sys::rpc::call`): the
+   client creates the endpoint, sends its duplicate with the request, waits for the
+   reply and closes it. A late reply reaches a closed endpoint
+   and is lost; it is never attributed to another request. The
+   protocols do not need to change: the channel provides the correlation, not an identifier.
+2. **Every wait is bounded**: send and receive carry a deadline. Each
+   client chooses its own (the requested deadline plus a margin for the service); only
+   the launch broker waits without a deadline for the program's exit, because
+   that wait is the result.
+3. **An expired deadline undoes nothing**: the result of that request is
+   unknown (it may have executed). The SDK does not retry writes on its
+   own; the caller decides with that information. Side-effect-free reads and queries
+   can be retried.
+4. **Dead server**: the client gets `Timeout`; with the supervisor
+   (ADR 0011) the endpoint stays valid and the next generation
+   serves new requests.
 
-## Consecuencias
+## Consequences
 
-- Coste de dos syscalls más por llamada (crear y cerrar el endpoint), que
-  las medidas de IPC (`ipc.ping_pong`) siguen acotando.
-- `test=ipc_late` (`ipc.late_reply`) demuestra el descarte de la respuesta
-  tardía y la correlación; los escenarios de servicios cubren los plazos
-  con servidores muertos.
+- Costs two more syscalls per call (create and close the endpoint), which
+  the IPC measurements (`ipc.ping_pong`) keep bounded.
+- `test=ipc_late` (`ipc.late_reply`) demonstrates discarding the late
+  reply and the correlation; the services scenarios cover deadlines
+  with dead servers.

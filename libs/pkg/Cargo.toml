@@ -3,14 +3,14 @@ name = "aricode-pkg"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Paquetes de aplicación firmados de AriCodeOS: contenedor con programa, manifiesto de aplicación y firma Ed25519 (no_std; escritor con la feature write)"
+description = "AriCodeOS signed application packages: container with program, application manifest and Ed25519 signature (no_std; writer behind the write feature)"
 
 [lib]
 path = "src/lib.rs"
 
 [features]
 default = []
-# Escritor para herramientas de host (xtask).
+# Writer for host tools (xtask).
 write = ["aricode-initrd/write"]
 
 [dependencies]

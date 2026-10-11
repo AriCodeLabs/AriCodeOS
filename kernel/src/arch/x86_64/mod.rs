@@ -1,4 +1,4 @@
-//! x86-64: GDT/TSS, IDT, stubs de interrupción y manejo de excepciones.
+//! x86-64: GDT/TSS, IDT, interrupt stubs and exception handling.
 
 pub mod apic;
 pub mod exceptions;
@@ -15,10 +15,10 @@ pub mod smp;
 pub mod syscall;
 pub mod usermode;
 
-/// Instala en el BSP sus tablas por CPU (GDT + TSS con pila IST para #DF),
-/// la IDT, `syscall` y la base de GS. Debe llamarse una vez, con
-/// interrupciones deshabilitadas, antes de cualquier operación que pueda
-/// fallar de forma controlada. Los APs repiten lo mismo en `smp::ap_entry`.
+/// Installs the BSP's per-CPU tables (GDT + TSS with an IST stack for #DF),
+/// the IDT, `syscall` and the GS base. Must be called once, with interrupts
+/// disabled, before any operation that can fail in a controlled way. The
+/// APs repeat the same steps in `smp::ap_entry`.
 pub fn init() {
     let bsp = crate::cpu::slot(0);
     gdt::init_for(bsp);

@@ -1,9 +1,9 @@
-# Fase 33: un driver de prueba recibe el virtio-blk, lee un sector en su
-# buffer (traducido) y luego ordena al dispositivo escribir en memoria que no
-# es suya: la unidad lo bloquea y registra el fallo; el dominio se libera con
-# el proceso.
+# Phase 33: a test driver is handed the virtio-blk, reads a sector into its
+# (translated) buffer and then tells the device to write to memory it does not
+# own: the unit blocks it and records the fault; the domain is released with
+# the process.
 name = "audit.iommu_reassignment"
-description = "test=iommu: DMA legitimo traducido, DMA a memoria ajena bloqueado y registrado, dominio liberado"
+description = "test=iommu: legitimate DMA translated, DMA to foreign memory blocked and logged, domain released"
 level = "full"
 areas = ["audit_iommu"]
 cmdline = "qemu_exit test=iommu"

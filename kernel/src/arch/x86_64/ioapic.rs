@@ -1,11 +1,11 @@
-//! I/O APIC: enruta interrupciones globales (GSI) a vectores del LAPIC.
+//! I/O APIC: routes global system interrupts (GSI) to LAPIC vectors.
 
 use crate::memory::vmm;
 use crate::sync::IrqLock;
 use aricode_x86_paging::{CACHE_DISABLE, GLOBAL, NO_EXECUTE, WRITABLE, WRITE_THROUGH};
 use log::{info, warn};
 
-/// Ventana virtual del primer I/O APIC (justo tras el LAPIC).
+/// Virtual window of the first I/O APIC (right after the LAPIC).
 const IOAPIC_VIRT: u64 = 0xFFFF_D000_0000_1000;
 const IOREGSEL: u64 = 0x00;
 const IOWIN: u64 = 0x10;
@@ -26,8 +26,8 @@ struct IoApic {
 static IOAPIC: IrqLock<Option<IoApic>> = IrqLock::new(None);
 
 fn read(reg: u32) -> u32 {
-    // SAFETY: registros MMIO del I/O APIC mapeados en `init`; acceso serializado
-    // por el lock del llamador.
+    // SAFETY: I/O APIC MMIO registers mapped in `init`; access serialized by
+    // the caller's lock.
     unsafe {
         ((IOAPIC_VIRT + IOREGSEL) as *mut u32).write_volatile(reg);
         ((IOAPIC_VIRT + IOWIN) as *const u32).read_volatile()
@@ -35,17 +35,17 @@ fn read(reg: u32) -> u32 {
 }
 
 fn write(reg: u32, value: u32) {
-    // SAFETY: ídem `read`.
+    // SAFETY: same as `read`.
     unsafe {
         ((IOAPIC_VIRT + IOREGSEL) as *mut u32).write_volatile(reg);
         ((IOAPIC_VIRT + IOWIN) as *mut u32).write_volatile(value);
     }
 }
 
-/// Mapea el primer I/O APIC de la MADT y enmascara todas sus entradas.
+/// Maps the first I/O APIC from the MADT and masks all its entries.
 pub fn init() {
     let Some(ioapic) = crate::acpi::with(|a| a.madt.io_apics.first().copied()) else {
-        warn!("ioapic: ninguno en la MADT");
+        warn!("ioapic: none in the MADT");
         return;
     };
     vmm::with(|m| {
@@ -55,7 +55,7 @@ pub fn init() {
             WRITABLE | NO_EXECUTE | GLOBAL | CACHE_DISABLE | WRITE_THROUGH,
         )
     })
-    .expect("ioapic: mapear");
+    .expect("ioapic: map");
     let mut guard = IOAPIC.lock();
     let entries = ((read(REG_VER) >> 16) & 0xFF) + 1;
     for i in 0..entries {
@@ -63,7 +63,7 @@ pub fn init() {
         write(RED_TBL + 2 * i + 1, 0);
     }
     info!(
-        "ioapic: id {} @ {:#x}, {entries} entradas, gsi base {}, todas enmascaradas",
+        "ioapic: id {} @ {:#x}, {entries} entries, gsi base {}, all masked",
         read(REG_ID) >> 24,
         ioapic.address,
         ioapic.gsi_base
@@ -81,7 +81,7 @@ fn entry_index(gsi: u32) -> Option<u32> {
     (idx < io.entries).then_some(idx)
 }
 
-/// Enruta `gsi` al `vector` del LAPIC `lapic_id`, desenmascarada.
+/// Routes `gsi` to `vector` on LAPIC `lapic_id`, unmasked.
 pub fn route(
     gsi: u32,
     vector: u8,
@@ -89,7 +89,7 @@ pub fn route(
     level: bool,
     active_low: bool,
 ) -> Result<(), &'static str> {
-    let idx = entry_index(gsi).ok_or("ioapic: gsi fuera de rango")?;
+    let idx = entry_index(gsi).ok_or("ioapic: gsi out of range")?;
     let mut low = vector as u64;
     if level {
         low |= LEVEL;

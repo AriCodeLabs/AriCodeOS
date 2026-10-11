@@ -1,8 +1,8 @@
-//! Tiempo: reloj monótono del sistema (ms desde el arranque) y esperas.
+//! Time: the system monotonic clock (ms since boot) and sleeps.
 
 use crate::{self as sys, abi, Error, Handle};
 
-/// Milisegundos desde el arranque, leídos con un handle `SYSTEM` (`READ`).
+/// Milliseconds since boot, read with a `SYSTEM` handle (`READ`).
 pub fn uptime_ms(system: Handle) -> Result<u64, Error> {
     let mut b = [0u8; 8];
     match sys::system_info(system, abi::sysinfo::UPTIME, &mut b)? {
@@ -11,7 +11,7 @@ pub fn uptime_ms(system: Handle) -> Result<u64, Error> {
     }
 }
 
-/// Microsegundos desde el arranque (TSC calibrado en el kernel).
+/// Microseconds since boot (TSC calibrated in the kernel).
 pub fn uptime_us(system: Handle) -> Result<u64, Error> {
     let mut b = [0u8; 8];
     match sys::system_info(system, abi::sysinfo::UPTIME_US, &mut b)? {
@@ -20,12 +20,12 @@ pub fn uptime_us(system: Handle) -> Result<u64, Error> {
     }
 }
 
-/// Duerme al menos `ms` milisegundos.
+/// Sleeps for at least `ms` milliseconds.
 pub fn sleep_ms(ms: u64) {
     sys::thread_sleep(ms);
 }
 
-/// Reloj sobre un handle `SYSTEM`: `elapsed` desde su creación.
+/// Clock over a `SYSTEM` handle: `elapsed` since its creation.
 pub struct Clock {
     system: Handle,
     start: u64,

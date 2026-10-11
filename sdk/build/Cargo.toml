@@ -3,7 +3,7 @@ name = "aricode-build"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Ayuda de build.rs para programas de usuario de AriCodeOS: enlaza con el linker script del SDK"
+description = "build.rs helper for AriCodeOS user programs: links with the SDK linker script"
 
 [lib]
 path = "src/lib.rs"

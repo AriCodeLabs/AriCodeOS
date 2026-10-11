@@ -1,7 +1,7 @@
-//! `updater` (Fase 30): lee la imagen de la partición `UPDATE`, verifica su
-//! firma y sus hashes con la clave pública de desarrollo, la copia al slot
-//! inactivo y deja ese slot pendiente con tres intentos. AriBoot lo probará
-//! en el siguiente arranque e init lo confirmará si el sistema levanta.
+//! `updater` (Phase 30): reads the image from the `UPDATE` partition, verifies
+//! its signature and hashes with the development public key, copies it to the
+//! inactive slot and marks that slot pending with three tries. AriBoot will
+//! try it on the next boot and init will confirm it if the system comes up.
 #![no_std]
 #![no_main]
 
@@ -13,7 +13,7 @@ use aricode_rt::sys::block::BlockClient;
 use aricode_rt::sys::{self, kind, permissions};
 
 const PUBKEY_HEX: &str = include_str!("../../../keys/dev/ed25519.pub");
-/// Buffer DMA donde se carga y verifica la imagen entera.
+/// DMA buffer where the whole image is loaded and verified.
 const IMAGE_BUFFER: u64 = 4 * 1024 * 1024;
 const CHUNK: u16 = 16;
 
@@ -50,7 +50,7 @@ fn find_partition(blk: &mut BlockClient, name: &str) -> Option<(u64, u64)> {
         .map(|p| (p.first_lba, p.last_lba))
 }
 
-/// Copia `sectors` sectores desde `src` a `dst` a través del buffer del cliente.
+/// Copies `sectors` sectors from `src` to `dst` through the client buffer.
 fn copy_sectors(blk: &mut BlockClient, src: u64, dst: u64, sectors: u64) -> bool {
     let mut done = 0;
     while done < sectors {
@@ -73,7 +73,7 @@ fn main(_arg: u64) -> u64 {
         }
     });
     let (Some(block), Some(hw)) = (block, hardware) else {
-        say(b"necesito el servicio de bloques (capacidad block)");
+        say(b"need the block service (block capability)");
         return 1;
     };
     let Ok(mut blk) = BlockClient::new(block, hw, CHUNK) else {
@@ -83,13 +83,13 @@ fn main(_arg: u64) -> u64 {
     if aricode_crypto::unhex(PUBKEY_HEX.trim(), &mut pk).is_none() {
         return 3;
     }
-    // 1. Particiones.
+    // 1. Partitions.
     let Some(update) = find_partition(&mut blk, PART_UPDATE) else {
-        say(b"sin particion UPDATE");
+        say(b"no UPDATE partition");
         return 4;
     };
     let Some(state_part) = find_partition(&mut blk, PART_STATE) else {
-        say(b"sin particion ARIBOOT");
+        say(b"no ARIBOOT partition");
         return 5;
     };
     if blk.read(state_part.0, 1).is_err() {
@@ -98,30 +98,30 @@ fn main(_arg: u64) -> u64 {
     let state = BootState::decode(&blk.buffer()[..512]).unwrap_or(BootState::fresh(Slot::A));
     let target = state.active.other();
     let Some(slot_part) = find_partition(&mut blk, target.partition()) else {
-        say(b"sin particion para el slot inactivo");
+        say(b"no partition for the inactive slot");
         return 7;
     };
-    // 2. Cargar la imagen de UPDATE en un buffer DMA y verificarla.
+    // 2. Load the UPDATE image into a DMA buffer and verify it.
     if blk.read(update.0, 1).is_err() {
         return 8;
     }
     let Ok(len) = Image::container_len(&blk.buffer()[..512]) else {
-        say(b"UPDATE no contiene una imagen de sistema");
+        say(b"UPDATE does not contain a system image");
         return 9;
     };
     let sectors = (len as u64).div_ceil(512);
     if (sectors + 1) * 512 > IMAGE_BUFFER || sectors + 1 > slot_part.1 - slot_part.0 + 1 {
-        say(b"la imagen no cabe");
+        say(b"image does not fit");
         return 10;
     }
     let Ok(dma) = sys::dma_alloc(hw, IMAGE_BUFFER) else {
-        say(b"sin memoria para la imagen (cuota)");
+        say(b"no memory for the image (quota)");
         return 11;
     };
     let Ok(virt) = sys::mmio_map(dma) else {
         return 11;
     };
-    // SAFETY: buffer DMA propio de IMAGE_BUFFER bytes, mapeado RW.
+    // SAFETY: our own DMA buffer of IMAGE_BUFFER bytes, mapped RW.
     let image = unsafe { core::slice::from_raw_parts_mut(virt as *mut u8, IMAGE_BUFFER as usize) };
     let mut done = 0u64;
     while done < sectors {
@@ -136,29 +136,29 @@ fn main(_arg: u64) -> u64 {
     let version = match Image::verify(&image[..len as usize], &pk) {
         Ok(v) => v.manifest.version,
         Err(_) => {
-            say(b"la imagen de UPDATE no verifica (firma o hashes); no se instala");
+            say(b"UPDATE image fails verification (signature or hashes); not installing");
             return 13;
         }
     };
-    sys::print(b"updater: imagen en UPDATE version ");
+    sys::print(b"updater: UPDATE image version ");
     num(version as u64);
-    sys::print(b" verificada (");
+    sys::print(b" verified (");
     num(len as u64);
     sys::print(b" bytes)\n");
-    // 3. Copiar cabecera + contenedor al slot inactivo (sector a sector, del
-    //    disco al disco; la copia en memoria ya sirvio para verificar).
+    // 3. Copy header + container to the inactive slot (sector by sector, disk
+    //    to disk; the in-memory copy was only used for verification).
     if !copy_sectors(&mut blk, update.0, slot_part.0, sectors + 1) {
-        say(b"error escribiendo el slot");
+        say(b"error writing the slot");
         return 14;
     }
-    sys::print(b"updater: instalada en el slot ");
+    sys::print(b"updater: installed into slot ");
     sys::print(target.name().as_bytes());
     sys::print(b"\n");
-    // 4. Programar el slot: pendiente con intentos.
+    // 4. Schedule the slot: pending with tries.
     let next = schedule(state, target);
     blk.buffer()[..512].copy_from_slice(&next.encode());
     if blk.write(state_part.0, 1).is_err() {
-        say(b"error escribiendo el estado de arranque");
+        say(b"error writing the boot state");
         return 15;
     }
     if blk.read(state_part.0, 1).is_err() {
@@ -166,17 +166,17 @@ fn main(_arg: u64) -> u64 {
     }
     match BootState::decode(&blk.buffer()[..512]) {
         Some(s) if s.pending == Some((target, aricode_ab::DEFAULT_TRIES)) => {
-            sys::print(b"updater: estado: activo ");
+            sys::print(b"updater: state: active ");
             sys::print(s.active.name().as_bytes());
-            sys::print(b", pendiente ");
+            sys::print(b", pending ");
             sys::print(target.name().as_bytes());
             sys::print(b" (");
             num(aricode_ab::DEFAULT_TRIES as u64);
-            sys::print(b" intentos); reinicia para probarlo\n");
+            sys::print(b" tries); reboot to try it\n");
             0
         }
         _ => {
-            say(b"el estado releido no coincide");
+            say(b"boot state read back does not match");
             17
         }
     }

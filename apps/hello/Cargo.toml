@@ -3,7 +3,7 @@ name = "ari-app-hello"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Aplicacion de ejemplo del SDK de AriCodeOS: consola, tiempo y permisos"
+description = "AriCodeOS SDK sample app: console, time and permissions"
 publish = false
 
 [[bin]]

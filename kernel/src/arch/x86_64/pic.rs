@@ -1,5 +1,5 @@
-//! 8259 PIC heredado: se remapea fuera de los vectores de excepción y se
-//! enmascara por completo. Las interrupciones llegan por el APIC.
+//! Legacy 8259 PIC: remapped away from the exception vectors and fully
+//! masked. Interrupts arrive through the APIC.
 
 use super::port::{inb, io_wait, outb};
 
@@ -8,13 +8,13 @@ const PIC1_DATA: u16 = 0x21;
 const PIC2_CMD: u16 = 0xA0;
 const PIC2_DATA: u16 = 0xA1;
 
-/// Vectores a los que se remapean IRQ0..15 antes de enmascararlos: aunque
-/// llegara una espuria, no colisionaría con una excepción (0..31).
+/// Vectors IRQ0..15 are remapped to before masking them: even if a spurious
+/// one arrived, it would not collide with an exception (0..31).
 pub const PIC1_OFFSET: u8 = 0x20;
 pub const PIC2_OFFSET: u8 = 0x28;
 
 pub fn disable() {
-    // SAFETY: secuencia de inicialización ICW1..ICW4 del 8259 y máscara total.
+    // SAFETY: 8259 ICW1..ICW4 initialization sequence and full mask.
     unsafe {
         outb(PIC1_CMD, 0x11); // ICW1: init + ICW4
         io_wait();
@@ -24,15 +24,15 @@ pub fn disable() {
         io_wait();
         outb(PIC2_DATA, PIC2_OFFSET);
         io_wait();
-        outb(PIC1_DATA, 4); // ICW3: esclavo en IRQ2
+        outb(PIC1_DATA, 4); // ICW3: slave on IRQ2
         io_wait();
         outb(PIC2_DATA, 2);
         io_wait();
-        outb(PIC1_DATA, 0x01); // ICW4: modo 8086
+        outb(PIC1_DATA, 0x01); // ICW4: 8086 mode
         io_wait();
         outb(PIC2_DATA, 0x01);
         io_wait();
-        outb(PIC1_DATA, 0xFF); // enmascarar todo
+        outb(PIC1_DATA, 0xFF); // mask everything
         outb(PIC2_DATA, 0xFF);
         let _ = inb(PIC1_DATA);
     }

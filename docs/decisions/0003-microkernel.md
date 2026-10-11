@@ -1,16 +1,16 @@
-# ADR 0003: Microkernel pragmático
+# ADR 0003: Pragmatic microkernel
 
-- **Fecha:** 2026-09-26
-- **Estado:** Aceptada
+- **Date:** 2026-09-26
+- **Status:** Accepted
 
-## Decisión
+## Decision
 
-El kernel contiene solo scheduler, memoria virtual, IPC, interrupciones,
-capabilities y SMP. Almacenamiento, red, USB, audio, filesystem, compositor y
-device manager viven en espacio de usuario.
+The kernel contains only the scheduler, virtual memory, IPC, interrupts,
+capabilities and SMP. Storage, networking, USB, audio, the filesystem, the
+compositor and the device manager live in user space.
 
-## Consecuencias
+## Consequences
 
-- `fallo de driver != fallo del kernel`; los drivers se pueden reiniciar.
-- El IPC es crítico y se mide desde las primeras fases.
-- Coste: más cambios de contexto que un monolítico; se optimizará con métricas.
+- `driver failure != kernel failure`; drivers can be restarted.
+- IPC is critical and is measured from the early phases.
+- Cost: more context switches than a monolithic kernel; it will be optimised with metrics.

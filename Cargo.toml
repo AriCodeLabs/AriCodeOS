@@ -65,7 +65,7 @@ members = [
     "tools/xtask",
 ]
 
-# Crates con tests unitarios de host (`cargo xtask test --level unit`).
+# Crates with host unit tests (`cargo xtask test --level unit`).
 default-members = [
     "boot-protocol",
     "libs/elf",
@@ -102,8 +102,8 @@ edition = "2021"
 license = "UNLICENSED"
 repository = "https://github.com/lynxcraft/aricodeos"
 
-# Perfiles compartidos por bootloader y kernel.
-# panic = "abort": no hay unwinding en no_std.
+# Profiles shared by the bootloader and the kernel.
+# panic = "abort": there is no unwinding in no_std.
 [profile.dev]
 panic = "abort"
 opt-level = 1

@@ -1,8 +1,8 @@
-//! Local APIC: habilitación, vector espurio, EOI, timer periódico calibrado
-//! con el PIT (Fase 8) e interrupciones entre procesadores (Fase 32).
+//! Local APIC: enabling, spurious vector, EOI, periodic timer calibrated
+//! with the PIT (Phase 8) and inter-processor interrupts (Phase 32).
 //!
-//! El LAPIC de cada CPU está en la misma dirección virtual: cada una ve el
-//! suyo. El BSP calibra el timer una vez y los APs reutilizan la cuenta.
+//! Every CPU's LAPIC is at the same virtual address: each one sees its own.
+//! The BSP calibrates the timer once and the APs reuse the count.
 
 use super::msr;
 use crate::memory::vmm;
@@ -13,19 +13,19 @@ use aricode_x86_paging::{CACHE_DISABLE, GLOBAL, NO_EXECUTE, WRITABLE, WRITE_THRO
 use core::sync::atomic::{AtomicU32, Ordering};
 use log::{info, warn};
 
-/// Dirección virtual donde se mapea el LAPIC (una página, sin caché).
+/// Virtual address where the LAPIC is mapped (one page, uncached).
 const LAPIC_VIRT: u64 = 0xFFFF_D000_0000_0000;
 
 pub const TIMER_VECTOR: u8 = 0x20;
-/// IPI: hay trabajo para una CPU en idle (solo la saca de `hlt`).
+/// IPI: there is work for an idle CPU (only takes it out of `hlt`).
 pub const RESCHED_VECTOR: u8 = 0x21;
-/// IPI: invalidar TLB (ver `smp::flush_others`).
+/// IPI: invalidate the TLB (see `smp::flush_others`).
 pub const TLB_FLUSH_VECTOR: u8 = 0x22;
-/// IPI: detener la CPU para siempre (pánico).
+/// IPI: halt the CPU forever (panic).
 pub const HALT_VECTOR: u8 = 0x23;
 pub const SPURIOUS_VECTOR: u8 = 0xFF;
 
-// Registros (desplazamientos sobre la base).
+// Registers (offsets from the base).
 const REG_ID: u32 = 0x020;
 const REG_VERSION: u32 = 0x030;
 const REG_TPR: u32 = 0x080;
@@ -50,25 +50,25 @@ const ICR_LEVEL_ASSERT: u32 = 1 << 14;
 const ICR_ALL_EXCLUDING_SELF: u32 = 0b11 << 18;
 
 static SPURIOUS: AtomicU32 = AtomicU32::new(0);
-/// Cuenta inicial del timer para `TICK_HZ`, calibrada por el BSP.
+/// Initial timer count for `TICK_HZ`, calibrated by the BSP.
 static TIMER_INITIAL: AtomicU32 = AtomicU32::new(0);
 static BSP_ID: AtomicU32 = AtomicU32::new(0);
 
 fn read(reg: u32) -> u32 {
-    // SAFETY: registro MMIO del LAPIC dentro de la página mapeada en `init`.
+    // SAFETY: LAPIC MMIO register within the page mapped in `init`.
     unsafe { ((LAPIC_VIRT + reg as u64) as *const u32).read_volatile() }
 }
 
 fn write(reg: u32, value: u32) {
-    // SAFETY: ídem `read`.
+    // SAFETY: same as `read`.
     unsafe { ((LAPIC_VIRT + reg as u64) as *mut u32).write_volatile(value) }
 }
 
-/// Habilita el LAPIC de la CPU que llama (bit global del MSR, TPR y SVR).
+/// Enables the calling CPU's LAPIC (global MSR bit, TPR and SVR).
 fn enable_local() {
     let base_msr = msr::read(msr::IA32_APIC_BASE);
-    // Bit 11: habilitación global del APIC (en xAPIC). El MSR es por CPU.
-    // SAFETY: habilitar el APIC global no cambia su dirección base.
+    // Bit 11: global APIC enable (in xAPIC). The MSR is per CPU.
+    // SAFETY: enabling the global APIC does not change its base address.
     unsafe { msr::write(msr::IA32_APIC_BASE, base_msr | (1 << 11)) };
     write(REG_TPR, 0);
     write(REG_SVR, SVR_ENABLE | SPURIOUS_VECTOR as u32);
@@ -81,9 +81,9 @@ fn start_timer(initial: u32) {
     write(REG_TIMER_INIT, initial);
 }
 
-/// Mapea el LAPIC, lo habilita y arranca el timer periódico a `time::TICK_HZ`.
-/// Debe llamarse en el BSP con las interrupciones deshabilitadas y la IDT
-/// instalada.
+/// Maps the LAPIC, enables it and starts the periodic timer at
+/// `time::TICK_HZ`. Must be called on the BSP with interrupts disabled and
+/// the IDT installed.
 pub fn init() {
     let phys = msr::read(msr::IA32_APIC_BASE) & 0x000F_FFFF_FFFF_F000;
     vmm::with(|m| {
@@ -93,14 +93,14 @@ pub fn init() {
             WRITABLE | NO_EXECUTE | GLOBAL | CACHE_DISABLE | WRITE_THROUGH,
         )
     })
-    .expect("apic: mapear LAPIC");
+    .expect("apic: map LAPIC");
 
     enable_local();
-    // El TSC se mide contra el mismo PIT que el timer: reloj de µs (etapa 5).
-    // SAFETY: rdtsc solo lee el contador de tiempo.
+    // The TSC is measured against the same PIT as the timer: microsecond clock (stage 5).
+    // SAFETY: rdtsc only reads the time stamp counter.
     let t0 = unsafe { core::arch::x86_64::_rdtsc() };
     super::pit::wait_ms(10);
-    // SAFETY: ídem.
+    // SAFETY: same as above.
     let t1 = unsafe { core::arch::x86_64::_rdtsc() };
     time::calibrate_tsc(t1.wrapping_sub(t0) / 10);
     let ticks_per_ms = calibrate_timer();
@@ -111,7 +111,7 @@ pub fn init() {
     crate::cpu::current().set_lapic_id(id());
 
     info!(
-        "apic: lapic id {} version {:#x} @ {phys:#x}; timer {} ticks/ms (div 16), tick {} Hz (cuenta {initial})",
+        "apic: lapic id {} version {:#x} @ {phys:#x}; timer {} ticks/ms (div 16), tick {} Hz (count {initial})",
         id(),
         read(REG_VERSION) & 0xFF,
         ticks_per_ms,
@@ -119,32 +119,32 @@ pub fn init() {
     );
 }
 
-/// Habilita el LAPIC de un AP y arranca su timer con la cuenta del BSP.
+/// Enables an AP's LAPIC and starts its timer with the BSP's count.
 pub fn init_local() {
     enable_local();
     start_timer(TIMER_INITIAL.load(Ordering::Relaxed));
 }
 
-/// Cuenta cuántos ticks del timer (divisor 16) caben en 10 ms de PIT.
+/// Counts how many timer ticks (divisor 16) fit in 10 ms of PIT.
 fn calibrate_timer() -> u64 {
     const SAMPLE_MS: u64 = 10;
     write(REG_TIMER_DIVIDE, DIVIDE_BY_16);
-    write(REG_LVT_TIMER, LVT_MASKED); // cuenta única, sin interrupción
+    write(REG_LVT_TIMER, LVT_MASKED); // one-shot count, no interrupt
     write(REG_TIMER_INIT, u32::MAX);
     super::pit::wait_ms(SAMPLE_MS);
     let elapsed = u32::MAX - read(REG_TIMER_CURRENT);
-    write(REG_TIMER_INIT, 0); // parar
+    write(REG_TIMER_INIT, 0); // stop
     let per_ms = elapsed as u64 / SAMPLE_MS;
-    assert!(per_ms > 0, "apic: el timer no avanza");
+    assert!(per_ms > 0, "apic: the timer does not advance");
     per_ms
 }
 
-/// Identificador LAPIC de la CPU que llama.
+/// LAPIC identifier of the calling CPU.
 pub fn id() -> u32 {
     read(REG_ID) >> 24
 }
 
-/// Identificador LAPIC del BSP: destino de las IRQ de dispositivo.
+/// LAPIC identifier of the BSP: destination of device IRQs.
 pub fn bsp_id() -> u8 {
     BSP_ID.load(Ordering::Relaxed) as u8
 }
@@ -162,15 +162,15 @@ fn wait_icr_idle() {
     while read(REG_ICR_LOW) & ICR_PENDING != 0 {
         spins += 1;
         if spins == 1 << 24 {
-            warn!("apic: ICR ocupado demasiado tiempo");
+            warn!("apic: ICR busy for too long");
             return;
         }
         core::hint::spin_loop();
     }
 }
 
-/// Escribe el ICR (destino y orden) sin que una interrupción de esta misma
-/// CPU pueda colarse entre las dos mitades.
+/// Writes the ICR (destination and command) without letting an interrupt on
+/// this same CPU slip in between the two halves.
 fn icr_send(high: u32, low: u32) {
     let irq = KernelIrq::save_and_disable();
     wait_icr_idle();
@@ -180,38 +180,38 @@ fn icr_send(high: u32, low: u32) {
     KernelIrq::restore(irq);
 }
 
-/// IPI fija de `vector` a la CPU con LAPIC `lapic_id`.
+/// Fixed IPI with `vector` to the CPU with LAPIC `lapic_id`.
 pub fn send_ipi(lapic_id: u32, vector: u8) {
     icr_send(lapic_id << 24, vector as u32);
 }
 
-/// IPI fija de `vector` a todas las demás CPUs.
+/// Fixed IPI with `vector` to all other CPUs.
 pub fn broadcast_ipi(vector: u8) {
     icr_send(0, ICR_ALL_EXCLUDING_SELF | vector as u32);
 }
 
-/// INIT a un AP: lo deja esperando un SIPI.
+/// INIT to an AP: leaves it waiting for a SIPI.
 pub fn send_init(lapic_id: u32) {
     icr_send(lapic_id << 24, ICR_DELIVERY_INIT | ICR_LEVEL_ASSERT);
 }
 
-/// SIPI: el AP arranca en modo real en la página `vector << 12`.
+/// SIPI: the AP starts in real mode at page `vector << 12`.
 pub fn send_startup(lapic_id: u32, vector: u8) {
     icr_send(lapic_id << 24, ICR_DELIVERY_STARTUP | vector as u32);
 }
 
-/// Entrada para vectores >= 32 desde `exceptions::handle`.
+/// Entry for vectors >= 32 from `exceptions::handle`.
 pub fn handle_interrupt(vector: u8, from_user: bool) {
     match vector {
         TIMER_VECTOR => {
-            // Solo el BSP lleva el reloj; los APs solo consumen quantum.
+            // Only the BSP keeps the clock; the APs only consume quantum.
             let bsp = crate::cpu::is_bsp();
             let now = if bsp { time::tick() } else { time::ticks() };
             eoi();
             crate::task::scheduler::on_tick(now, bsp, from_user);
         }
         RESCHED_VECTOR => {
-            // Solo hay que salir de `hlt`: el bucle idle revisa la cola.
+            // Only need to leave `hlt`: the idle loop checks the queue.
             eoi();
         }
         TLB_FLUSH_VECTOR => {
@@ -227,7 +227,7 @@ pub fn handle_interrupt(vector: u8, from_user: bool) {
             eoi();
         }
         SPURIOUS_VECTOR => {
-            // Sin EOI por especificación.
+            // No EOI, per the specification.
             SPURIOUS.fetch_add(1, Ordering::Relaxed);
         }
         crate::hw::DEVICE_VECTOR_FIRST..=crate::hw::DEVICE_VECTOR_LAST => {
@@ -243,7 +243,7 @@ pub fn handle_interrupt(vector: u8, from_user: bool) {
             eoi();
         }
         v => {
-            warn!("interrupcion inesperada, vector {v}");
+            warn!("unexpected interrupt, vector {v}");
             eoi();
         }
     }

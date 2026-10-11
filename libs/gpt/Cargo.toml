@@ -3,7 +3,7 @@ name = "aricode-gpt"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Tabla de particiones GPT: CRC32, cabecera, entradas; escritor para herramientas (no_std)"
+description = "GPT partition table: CRC32, header, entries; writer for tools (no_std)"
 
 [lib]
 path = "src/lib.rs"

@@ -1,5 +1,5 @@
-# Recibe SYSTEM, un directorio privado y HARDWARE; va cerrandolos y comprueba
-# que permissions::granted sigue enumerando los restantes.
+# Receives SYSTEM, a private directory and HARDWARE; closes them one by one and
+# checks that permissions::granted still lists the remaining ones.
 name = perms_check
 caps = system, fs
 memory = 64K

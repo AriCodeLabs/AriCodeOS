@@ -1,8 +1,8 @@
-# Fase 22: netd (virtio-net en ring 3) obtiene direccion por DHCP de la red
-# de usuario de QEMU, responde ARP, hace ping al router, intercambia UDP y
-# resuelve un nombre contra el respondedor de pruebas del host.
+# Phase 22: netd (virtio-net in ring 3) gets an address via DHCP from the QEMU
+# user network, answers ARP, pings the router, exchanges UDP and
+# resolves a name against the host test responder.
 name = "network.stack"
-description = "virtio-net + DHCP + ARP + ICMP + UDP + DNS por IPC"
+description = "virtio-net + DHCP + ARP + ICMP + UDP + DNS over IPC"
 level = "full"
 areas = ["network", "virtio", "init"]
 cmdline = "qemu_exit"
@@ -11,16 +11,16 @@ timeout_secs = 60
 [expect]
 exit = 33
 serial_contains = [
-    "virtio-net: dispositivo listo, MAC ",
-    "virtio-net: sirviendo peticiones",
-    "virtio-net: DHCP 10.0.2.15 mascara 255.255.255.0 router 10.0.2.2 dns 10.0.2.3",
+    "virtio-net: device ready, MAC ",
+    "virtio-net: serving requests",
+    "virtio-net: DHCP 10.0.2.15 mask 255.255.255.0 router 10.0.2.2 dns 10.0.2.3",
     "net_client: ip 10.0.2.15 router 10.0.2.2 dns 10.0.2.3",
-    "net_client: respuesta de 10.0.2.2 seq 1 rtt ",
-    "net_client: respuesta de 10.0.2.2 seq 2 rtt ",
-    "net_client: eco UDP recibido de 10.0.2.2 puerto 17007",
+    "net_client: reply from 10.0.2.2 seq 1 rtt ",
+    "net_client: reply from 10.0.2.2 seq 2 rtt ",
+    "net_client: UDP echo received from 10.0.2.2 port 17007",
     "net_client: aricodeos.test -> 10.1.2.3",
-    "net_client: DHCP, ping, UDP y DNS por IPC ok",
-    "AriInit: servicio de red ok",
+    "net_client: DHCP, ping, UDP and DNS over IPC ok",
+    "AriInit: network service ok",
     "ARICODEOS_KERNEL_READY",
 ]
-serial_absent = ["KERNEL PANIC", "fallo en la inicializacion", "USER STACK OVERFLOW"]
+serial_absent = ["KERNEL PANIC", "initialization failed", "USER STACK OVERFLOW"]

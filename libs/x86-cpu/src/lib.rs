@@ -1,11 +1,11 @@
-//! Estructuras de la arquitectura x86-64 que se pueden construir y probar en
-//! host: descriptores de segmento, TSS, entradas de IDT y la tabla de
-//! excepciones. Las instrucciones privilegiadas (`lgdt`, `lidt`, `ltr`,
-//! `iretq`) viven en `kernel/src/arch/x86_64`.
+//! x86-64 architecture structures that can be built and tested on the
+//! host: segment descriptors, TSS, IDT entries and the exception
+//! table. The privileged instructions (`lgdt`, `lidt`, `ltr`,
+//! `iretq`) live in `kernel/src/arch/x86_64`.
 
 #![no_std]
 
-/// Puntero para `lgdt`/`lidt`.
+/// Pointer for `lgdt`/`lidt`.
 #[repr(C, packed(2))]
 #[derive(Debug, Clone, Copy)]
 pub struct DescriptorTablePointer {
@@ -13,7 +13,7 @@ pub struct DescriptorTablePointer {
     pub base: u64,
 }
 
-/// Selector de segmento (índice << 3 | TI << 2 | RPL).
+/// Segment selector (index << 3 | TI << 2 | RPL).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Selector(pub u16);
 
@@ -27,7 +27,7 @@ impl Selector {
     }
 }
 
-/// Descriptor de segmento de 8 bytes (modo largo).
+/// 8-byte segment descriptor (long mode).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SegmentDescriptor(pub u64);
 
@@ -35,9 +35,9 @@ impl SegmentDescriptor {
     const LIMIT_LOW: u64 = 0xFFFF;
     const LIMIT_HIGH: u64 = 0xF << 48;
     const PRESENT: u64 = 1 << 47;
-    const USER_SEGMENT: u64 = 1 << 44; // S = código/datos
+    const USER_SEGMENT: u64 = 1 << 44; // S = code/data
     const EXECUTABLE: u64 = 1 << 43;
-    const READ_WRITE: u64 = 1 << 41; // lectura (código) / escritura (datos)
+    const READ_WRITE: u64 = 1 << 41; // read (code) / write (data)
     const LONG_MODE: u64 = 1 << 53;
     const DEFAULT_32: u64 = 1 << 54;
     const GRANULARITY_4K: u64 = 1 << 55;
@@ -45,7 +45,7 @@ impl SegmentDescriptor {
 
     pub const NULL: SegmentDescriptor = SegmentDescriptor(0);
 
-    /// Código de 64 bits, ejecutable y legible, base 0, límite completo.
+    /// 64-bit code, executable and readable, base 0, full limit.
     pub const fn code64(dpl: u8) -> Self {
         SegmentDescriptor(
             Self::LIMIT_LOW
@@ -60,7 +60,7 @@ impl SegmentDescriptor {
         )
     }
 
-    /// Datos legibles y escribibles, base 0, límite completo.
+    /// Readable and writable data, base 0, full limit.
     pub const fn data(dpl: u8) -> Self {
         SegmentDescriptor(
             Self::LIMIT_LOW
@@ -79,15 +79,15 @@ impl SegmentDescriptor {
     }
 }
 
-/// Task State Segment de 64 bits (§8.7 del manual de Intel, vol. 3A).
+/// 64-bit Task State Segment (§8.7 of the Intel manual, vol. 3A).
 #[repr(C, packed(4))]
 #[derive(Debug, Clone, Copy)]
 pub struct Tss {
     _reserved0: u32,
-    /// Pilas para cambios de privilegio a ring 0..2.
+    /// Stacks for privilege changes to ring 0..2.
     pub rsp: [u64; 3],
     _reserved1: u64,
-    /// Interrupt Stack Table: `ist[0]` es IST1.
+    /// Interrupt Stack Table: `ist[0]` is IST1.
     pub ist: [u64; 7],
     _reserved2: u64,
     _reserved3: u16,
@@ -105,7 +105,7 @@ impl Tss {
             ist: [0; 7],
             _reserved2: 0,
             _reserved3: 0,
-            // Sin mapa de E/S: base más allá del límite.
+            // No I/O map: base beyond the limit.
             iomap_base: Self::SIZE as u16,
         }
     }
@@ -117,7 +117,7 @@ impl Default for Tss {
     }
 }
 
-/// Descriptor de sistema de 16 bytes para un TSS disponible.
+/// 16-byte system descriptor for an available TSS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TssDescriptor {
     pub low: u64,
@@ -125,14 +125,14 @@ pub struct TssDescriptor {
 }
 
 impl TssDescriptor {
-    /// `base` es la dirección virtual del `Tss`; el límite es `Tss::SIZE - 1`.
+    /// `base` is the virtual address of the `Tss`; the limit is `Tss::SIZE - 1`.
     pub const fn new(base: u64) -> Self {
         const TYPE_TSS_AVAILABLE: u64 = 0x9;
         let limit = (Tss::SIZE - 1) as u64;
         let low = (limit & 0xFFFF)
             | ((base & 0xFF_FFFF) << 16)
             | (TYPE_TSS_AVAILABLE << 40)
-            | (1 << 47) // presente
+            | (1 << 47) // present
             | (((limit >> 16) & 0xF) << 48)
             | (((base >> 24) & 0xFF) << 56);
         let high = base >> 32;
@@ -140,16 +140,16 @@ impl TssDescriptor {
     }
 }
 
-/// Layout de GDT que exige `syscall`/`sysret`: `STAR[47:32]` = código
-/// kernel (y datos = +8); `STAR[63:48]` = base tal que datos usuario = +8 y
-/// código usuario = +16.
+/// GDT layout required by `syscall`/`sysret`: `STAR[47:32]` = kernel
+/// code (and data = +8); `STAR[63:48]` = base such that user data = +8 and
+/// user code = +16.
 ///
 /// ```text
-/// 0x00 nulo
-/// 0x08 código kernel (DPL 0)
-/// 0x10 datos kernel  (DPL 0)
-/// 0x18 datos usuario (DPL 3)   <- STAR[63:48] = 0x10 => SS = 0x18 | 3
-/// 0x20 código usuario (DPL 3)  <-                        CS = 0x20 | 3
+/// 0x00 null
+/// 0x08 kernel code (DPL 0)
+/// 0x10 kernel data (DPL 0)
+/// 0x18 user data   (DPL 3)   <- STAR[63:48] = 0x10 => SS = 0x18 | 3
+/// 0x20 user code   (DPL 3)   <-                        CS = 0x20 | 3
 /// 0x28 TSS (16 bytes)
 /// ```
 pub mod layout {
@@ -159,11 +159,11 @@ pub mod layout {
     pub const USER_DATA: Selector = Selector(0x18 | 3);
     pub const USER_CODE: Selector = Selector(0x20 | 3);
     pub const TSS: Selector = Selector(0x28);
-    /// Valor de `IA32_STAR` para este layout.
+    /// Value of `IA32_STAR` for this layout.
     pub const STAR: u64 = ((0x10u64) << 48) | ((0x08u64) << 32);
 }
 
-/// Tabla global de descriptores con capacidad fija.
+/// Global descriptor table with fixed capacity.
 #[repr(C, align(8))]
 #[derive(Debug, Clone, Copy)]
 pub struct Gdt<const N: usize> {
@@ -172,7 +172,7 @@ pub struct Gdt<const N: usize> {
 }
 
 impl<const N: usize> Gdt<N> {
-    /// GDT con la entrada nula ya colocada.
+    /// GDT with the null entry already in place.
     pub const fn new() -> Self {
         Gdt {
             entries: [0; N],
@@ -181,7 +181,7 @@ impl<const N: usize> Gdt<N> {
     }
 
     pub fn push(&mut self, d: SegmentDescriptor) -> Selector {
-        assert!(self.len < N, "GDT llena");
+        assert!(self.len < N, "GDT full");
         let idx = self.len;
         self.entries[idx] = d.0;
         self.len += 1;
@@ -189,7 +189,7 @@ impl<const N: usize> Gdt<N> {
     }
 
     pub fn push_tss(&mut self, d: TssDescriptor) -> Selector {
-        assert!(self.len + 1 < N, "GDT llena");
+        assert!(self.len + 1 < N, "GDT full");
         let idx = self.len;
         self.entries[idx] = d.low;
         self.entries[idx + 1] = d.high;
@@ -221,15 +221,15 @@ impl<const N: usize> Default for Gdt<N> {
     }
 }
 
-/// Entrada de IDT de 16 bytes.
+/// 16-byte IDT entry.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IdtEntry {
     offset_low: u16,
     selector: u16,
-    /// bits 0..2: índice IST (0 = ninguno).
+    /// bits 0..2: IST index (0 = none).
     ist: u8,
-    /// P | DPL | 0 | tipo (0xE = puerta de interrupción de 64 bits).
+    /// P | DPL | 0 | type (0xE = 64-bit interrupt gate).
     type_attr: u8,
     offset_mid: u16,
     offset_high: u32,
@@ -251,7 +251,7 @@ impl IdtEntry {
         }
     }
 
-    /// Puerta de interrupción (IF se borra al entrar). `ist` en 0..=7.
+    /// Interrupt gate (IF is cleared on entry). `ist` in 0..=7.
     pub const fn interrupt_gate(handler: u64, cs: Selector, ist: u8, dpl: u8) -> Self {
         IdtEntry {
             offset_low: handler as u16,
@@ -275,7 +275,7 @@ impl IdtEntry {
     }
 }
 
-/// Tabla de descriptores de interrupción completa.
+/// Full interrupt descriptor table.
 #[repr(C, align(16))]
 pub struct Idt {
     entries: [IdtEntry; 256],
@@ -307,7 +307,7 @@ impl Default for Idt {
     }
 }
 
-/// Excepciones de la arquitectura (vectores 0..=31).
+/// Architecture exceptions (vectors 0..=31).
 pub mod exception {
     pub const DIVIDE_ERROR: u8 = 0;
     pub const DEBUG: u8 = 1;
@@ -330,12 +330,12 @@ pub mod exception {
     pub const VIRTUALIZATION: u8 = 20;
     pub const CONTROL_PROTECTION: u8 = 21;
 
-    /// Vectores para los que la CPU empuja un código de error.
+    /// Vectors for which the CPU pushes an error code.
     pub const fn has_error_code(vector: u8) -> bool {
         matches!(vector, 8 | 10 | 11 | 12 | 13 | 14 | 17 | 21 | 29 | 30)
     }
 
-    /// Mnemónico y nombre. Vectores >= 32 son interrupciones externas.
+    /// Mnemonic and name. Vectors >= 32 are external interrupts.
     pub const fn name(vector: u8) -> (&'static str, &'static str) {
         match vector {
             0 => ("#DE", "Divide Error"),
@@ -367,7 +367,7 @@ pub mod exception {
         }
     }
 
-    /// Bits del código de error de #PF.
+    /// #PF error code bits.
     pub const PF_PRESENT: u64 = 1 << 0;
     pub const PF_WRITE: u64 = 1 << 1;
     pub const PF_USER: u64 = 1 << 2;
@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn segment_descriptors_match_known_encodings() {
-        // Valores clásicos de un kernel de 64 bits (base 0, límite 4G, G=1).
+        // Classic values of a 64-bit kernel (base 0, limit 4G, G=1).
         assert_eq!(SegmentDescriptor::code64(0).0, 0x00AF_9A00_0000_FFFF);
         assert_eq!(SegmentDescriptor::data(0).0, 0x00CF_9200_0000_FFFF);
         assert_eq!(SegmentDescriptor::code64(3).0, 0x00AF_FA00_0000_FFFF);
@@ -396,8 +396,8 @@ mod tests {
         let d = TssDescriptor::new(base);
         assert_eq!(d.low & 0xFFFF, (Tss::SIZE - 1) as u64);
         assert_eq!((d.low >> 16) & 0xFF_FFFF, base & 0xFF_FFFF);
-        assert_eq!((d.low >> 40) & 0xF, 0x9, "tipo TSS disponible");
-        assert!(d.low & (1 << 47) != 0, "presente");
+        assert_eq!((d.low >> 40) & 0xF, 0x9, "available TSS type");
+        assert!(d.low & (1 << 47) != 0, "present");
         assert_eq!((d.low >> 56) & 0xFF, (base >> 24) & 0xFF);
         assert_eq!(d.high, base >> 32);
         let t = Tss::new();
@@ -414,7 +414,7 @@ mod tests {
         let tss = g.push_tss(TssDescriptor::new(0x1000));
         assert_eq!(cs, layout::KERNEL_CODE);
         assert_eq!(ds, layout::KERNEL_DATA);
-        assert_eq!(uds, layout::USER_DATA, "RPL 3 incluido");
+        assert_eq!(uds, layout::USER_DATA, "RPL 3 included");
         assert_eq!(ucs, layout::USER_CODE);
         assert_eq!(tss, layout::TSS);
         assert_eq!(g.len(), 7);
@@ -426,7 +426,7 @@ mod tests {
             ((layout::STAR >> 32) & 0xFFFF) as u16,
             layout::KERNEL_CODE.0
         );
-        assert_eq!(g.entry(0), 0, "entrada nula");
+        assert_eq!(g.entry(0), 0, "null entry");
         let p = g.pointer();
         assert_eq!({ p.limit }, 7 * 8 - 1);
         assert_eq!({ p.base }, g.entries.as_ptr() as u64);
@@ -435,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "GDT llena")]
+    #[should_panic(expected = "GDT full")]
     fn gdt_overflow_panics() {
         let mut g: Gdt<2> = Gdt::new();
         g.push(SegmentDescriptor::data(0));

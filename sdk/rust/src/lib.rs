@@ -1,6 +1,6 @@
-//! Llamadas al sistema desde espacio de usuario (primer trozo del SDK,
-//! sección 27). Sin `alloc`, sin `std`: solo la instrucción `syscall` y
-//! wrappers tipados sobre `aricode-abi`.
+//! System calls from user space (first piece of the SDK, section 27). No
+//! `alloc`, no `std`: just the `syscall` instruction and typed wrappers over
+//! `aricode-abi`.
 
 #![no_std]
 
@@ -20,7 +20,7 @@ pub mod window;
 pub use aricode_abi::{self as abi, handle, kind, rights, Error, TIMEOUT_INFINITE};
 use aricode_abi::{decode, nr, receive_result};
 
-/// Handle de usuario (opaco).
+/// User handle (opaque).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Handle(pub u32);
 
@@ -34,8 +34,8 @@ impl Handle {
 #[inline(always)]
 pub fn raw_syscall(number: u64, a: u64, b: u64, c: u64, d: u64, e: u64, f: u64) -> i64 {
     let ret: i64;
-    // SAFETY: convención del ABI de AriCodeOS; `rcx` y `r11` los destruye la
-    // instrucción y se declaran como salidas descartadas.
+    // SAFETY: AriCodeOS ABI convention; `rcx` and `r11` are clobbered by the
+    // instruction and declared as discarded outputs.
     unsafe {
         core::arch::asm!(
             "syscall",
@@ -56,7 +56,7 @@ pub fn raw_syscall(number: u64, a: u64, b: u64, c: u64, d: u64, e: u64, f: u64) 
 
 #[cfg(not(target_arch = "x86_64"))]
 pub fn raw_syscall(_n: u64, _a: u64, _b: u64, _c: u64, _d: u64, _e: u64, _f: u64) -> i64 {
-    unimplemented!("solo x86-64")
+    unimplemented!("x86-64 only")
 }
 
 fn call(number: u64, a: u64, b: u64, c: u64, d: u64) -> Result<u64, Error> {
@@ -116,7 +116,7 @@ pub fn object_id(h: Handle) -> Result<u64, Error> {
     call(nr::OBJECT_ID, h.0 as u64, 0, 0, 0)
 }
 
-/// Revoca el objeto para todos sus handles (exige `MANAGE`).
+/// Revokes the object for all its handles (requires `MANAGE`).
 pub fn object_revoke(h: Handle) -> Result<(), Error> {
     call(nr::OBJECT_REVOKE, h.0 as u64, 0, 0, 0).map(|_| ())
 }
@@ -125,7 +125,7 @@ pub fn endpoint_create() -> Result<Handle, Error> {
     call(nr::ENDPOINT_CREATE, 0, 0, 0, 0).map(|v| Handle(v as u32))
 }
 
-/// Envía `data` y transfiere `handles` (se retiran de este proceso).
+/// Sends `data` and transfers `handles` (they are removed from this process).
 pub fn ipc_send(ep: Handle, data: &[u8], handles: &[Handle], timeout_ms: u64) -> Result<(), Error> {
     call6(
         nr::IPC_SEND,
@@ -139,8 +139,8 @@ pub fn ipc_send(ep: Handle, data: &[u8], handles: &[Handle], timeout_ms: u64) ->
     .map(|_| ())
 }
 
-/// Recibe en `buf` y escribe los handles recibidos en `handles_out`.
-/// Devuelve (bytes, handles).
+/// Receives into `buf` and writes the received handles into `handles_out`.
+/// Returns (bytes, handles).
 pub fn ipc_receive(
     ep: Handle,
     buf: &mut [u8],
@@ -159,9 +159,9 @@ pub fn ipc_receive(
     .map(receive_result)
 }
 
-/// Recibe del primero de `endpoints` (hasta `IPC_MAX_ANY`, todos con `READ`)
-/// que tenga mensaje; `handles_out` admite `IPC_MAX_HANDLES`. Devuelve
-/// (índice del endpoint, bytes, handles) (ADR 0020).
+/// Receives from the first of `endpoints` (up to `IPC_MAX_ANY`, all with
+/// `READ`) that has a message; `handles_out` holds `IPC_MAX_HANDLES`. Returns
+/// (endpoint index, bytes, handles) (ADR 0020).
 pub fn ipc_receive_any(
     endpoints: &[Handle],
     buf: &mut [u8],
@@ -184,13 +184,13 @@ pub fn ipc_receive_any(
     ))
 }
 
-/// Crea un proceso del initrd (exige `MANAGE` sobre el `SPAWNER`).
+/// Creates a process from the initrd (requires `MANAGE` on the `SPAWNER`).
 pub fn process_spawn(spawner: Handle, name: &str, arg: u64) -> Result<Handle, Error> {
     process_spawn_with(spawner, name, arg, &[])
 }
 
-/// Como `process_spawn`, transfiriendo `handles` al hijo (aparecen en él a
-/// partir de `0x0001_0004` en el mismo orden; exigen `TRANSFER`).
+/// Like `process_spawn`, transferring `handles` to the child (they appear in
+/// it from `0x0001_0004` on, in the same order; they require `TRANSFER`).
 pub fn process_spawn_with(
     spawner: Handle,
     name: &str,
@@ -200,8 +200,8 @@ pub fn process_spawn_with(
     process_spawn_limited(spawner, name, arg, handles, 0)
 }
 
-/// Como `process_spawn_with`, fijando la cuota de memoria DMA del hijo en
-/// KiB (0 = sin límite).
+/// Like `process_spawn_with`, setting the child's DMA memory quota in KiB
+/// (0 = unlimited).
 pub fn process_spawn_limited(
     spawner: Handle,
     name: &str,
@@ -221,9 +221,9 @@ pub fn process_spawn_limited(
     .map(|h| Handle(h as u32))
 }
 
-/// Crea un proceso con un ELF que está en el buffer DMA `elf` (`elf_len`
-/// bytes desde `elf_offset`) del llamador (ADR 0017); exige `MANAGE` sobre el
-/// `SPAWNER` y `READ` sobre el buffer. Handles y cuota como en
+/// Creates a process from an ELF held in the caller's DMA buffer `elf`
+/// (`elf_len` bytes from `elf_offset`) (ADR 0017); requires `MANAGE` on the
+/// `SPAWNER` and `READ` on the buffer. Handles and quota as in
 /// `process_spawn_limited`.
 #[allow(clippy::too_many_arguments)]
 pub fn process_spawn_from(
@@ -251,7 +251,7 @@ pub fn process_spawn_from(
     .map(|h| Handle(h as u32))
 }
 
-/// Copia un fichero del initrd en `buf` (exige `READ` sobre el `SPAWNER`).
+/// Copies an initrd file into `buf` (requires `READ` on the `SPAWNER`).
 pub fn initrd_read(spawner: Handle, name: &str, buf: &mut [u8]) -> Result<usize, Error> {
     abi::decode(raw_syscall(
         nr::INITRD_READ,
@@ -265,23 +265,23 @@ pub fn initrd_read(spawner: Handle, name: &str, buf: &mut [u8]) -> Result<usize,
     .map(|n| n as usize)
 }
 
-/// Termina un proceso ajeno (exige `MANAGE`); después `process_wait` devuelve
-/// `Err(Killed)`. Un proceso ya terminado devuelve `Ok` sin efecto.
+/// Terminates another process (requires `MANAGE`); afterwards `process_wait`
+/// returns `Err(Killed)`. An already finished process returns `Ok` with no effect.
 pub fn process_kill(process: Handle) -> Result<(), Error> {
     call(nr::PROCESS_KILL, process.0 as u64, 0, 0, 0).map(|_| ())
 }
 
-/// Espera la salida de un proceso (exige `WAIT`). `Err(Killed)` si lo terminó el kernel.
+/// Waits for a process to exit (requires `WAIT`). `Err(Killed)` if the kernel terminated it.
 pub fn process_wait(process: Handle, timeout_ms: u64) -> Result<u64, Error> {
     call(nr::PROCESS_WAIT, process.0 as u64, timeout_ms, 0, 0)
 }
 
-/// Espera interrupciones de la línea (exige `WAIT`); devuelve cuántas llegaron.
+/// Waits for interrupts on the line (requires `WAIT`); returns how many arrived.
 pub fn irq_wait(irq: Handle, timeout_ms: u64) -> Result<u64, Error> {
     call(nr::IRQ_WAIT, irq.0 as u64, timeout_ms, 0, 0)
 }
 
-/// Mapea una región MMIO o DMA en el proceso; devuelve su dirección virtual.
+/// Maps an MMIO or DMA region into the process; returns its virtual address.
 pub fn mmio_map(region: Handle) -> Result<u64, Error> {
     call(nr::MMIO_MAP, region.0 as u64, 0, 0, 0)
 }
@@ -290,7 +290,7 @@ pub fn region_len(region: Handle) -> Result<u64, Error> {
     call(nr::REGION_LEN, region.0 as u64, 0, 0, 0)
 }
 
-/// Reserva un buffer DMA (exige `MANAGE` sobre un objeto `HARDWARE`).
+/// Allocates a DMA buffer (requires `MANAGE` on a `HARDWARE` object).
 pub fn dma_alloc(hardware: Handle, len: u64) -> Result<Handle, Error> {
     call(nr::DMA_ALLOC, hardware.0 as u64, len, 0, 0).map(|v| Handle(v as u32))
 }
@@ -303,17 +303,17 @@ pub fn pci_count(root: Handle) -> Result<u64, Error> {
     call(nr::PCI_COUNT, root.0 as u64, 0, 0, 0)
 }
 
-/// Información empaquetada de la función `index` (ver `abi::pci_info`).
+/// Packed information about function `index` (see `abi::pci_info`).
 pub fn pci_info(root: Handle, index: u64) -> Result<u64, Error> {
     call(nr::PCI_INFO, root.0 as u64, index, 0, 0)
 }
 
-/// Campos extendidos de la función `index` (ver `abi::pci_info::prog_if`).
+/// Extended fields of function `index` (see `abi::pci_info::prog_if`).
 pub fn pci_info_ext(root: Handle, index: u64) -> Result<u64, Error> {
     call(nr::PCI_INFO_EXT, root.0 as u64, index, 0, 0)
 }
 
-/// Reclama la función `index`: devuelve sus handles (ver `abi::nr::PCI_CLAIM`).
+/// Claims function `index`: returns its handles (see `abi::nr::PCI_CLAIM`).
 pub fn pci_claim(root: Handle, index: u64) -> Result<[Handle; abi::PCI_CLAIM_HANDLES], Error> {
     let mut raw = [0u32; abi::PCI_CLAIM_HANDLES];
     call(
@@ -326,8 +326,8 @@ pub fn pci_claim(root: Handle, index: u64) -> Result<[Handle; abi::PCI_CLAIM_HAN
     Ok(raw.map(Handle))
 }
 
-/// Lee de la consola hasta `buf.len()` bytes; bloquea hasta que haya al
-/// menos uno o venza `timeout_ms`.
+/// Reads up to `buf.len()` bytes from the console; blocks until there is at
+/// least one or `timeout_ms` expires.
 pub fn console_read(console: Handle, buf: &mut [u8], timeout_ms: u64) -> Result<usize, Error> {
     abi::decode(raw_syscall(
         nr::CONSOLE_READ,
@@ -341,8 +341,8 @@ pub fn console_read(console: Handle, buf: &mut [u8], timeout_ms: u64) -> Result<
     .map(|n| n as usize)
 }
 
-/// Escribe texto de un teclado de usuario en el anillo de entrada de consola
-/// (exige `MANAGE` sobre la consola; ADR 0013). Devuelve los bytes aceptados.
+/// Writes text from a user-space keyboard into the console input ring
+/// (requires `MANAGE` on the console; ADR 0013). Returns the bytes accepted.
 pub fn console_inject(console: Handle, bytes: &[u8]) -> Result<usize, Error> {
     call(
         nr::CONSOLE_INJECT,
@@ -354,7 +354,7 @@ pub fn console_inject(console: Handle, bytes: &[u8]) -> Result<usize, Error> {
     .map(|n| n as usize)
 }
 
-/// Consulta del sistema (`abi::sysinfo`); devuelve los bytes escritos en `buf`.
+/// System query (`abi::sysinfo`); returns the bytes written into `buf`.
 pub fn system_info(system: Handle, kind: u64, buf: &mut [u8]) -> Result<usize, Error> {
     abi::decode(raw_syscall(
         nr::SYSTEM_INFO,
@@ -368,14 +368,14 @@ pub fn system_info(system: Handle, kind: u64, buf: &mut [u8]) -> Result<usize, E
     .map(|n| n as usize)
 }
 
-/// Bytes aleatorios del kernel (hasta `sysinfo::RANDOM_MAX` por llamada) con
-/// un handle `SYSTEM` (`READ`); devuelve cuántos escribió.
+/// Random bytes from the kernel (up to `sysinfo::RANDOM_MAX` per call) with a
+/// `SYSTEM` handle (`READ`); returns how many were written.
 pub fn random(system: Handle, buf: &mut [u8]) -> Result<usize, Error> {
     let n = buf.len().min(abi::sysinfo::RANDOM_MAX as usize);
     system_info(system, abi::sysinfo::RANDOM, &mut buf[..n])
 }
 
-/// Apaga o reinicia (`abi::power`). Solo retorna si el kernel rechaza la acción.
+/// Powers off or reboots (`abi::power`). Only returns if the kernel rejects the action.
 pub fn system_power(system: Handle, action: u64) -> Error {
     match abi::decode(raw_syscall(
         nr::SYSTEM_POWER,
@@ -391,7 +391,7 @@ pub fn system_power(system: Handle, action: u64) -> Error {
     }
 }
 
-/// Ayuda para programas de prueba: escribe en la consola ignorando errores.
+/// Helper for test programs: writes to the console, ignoring errors.
 pub fn print(bytes: &[u8]) {
     let _ = console_write(Handle::CONSOLE, bytes);
 }

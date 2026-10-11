@@ -1,8 +1,8 @@
-# Fase 33: QEMU arranca con intel-iommu y los virtio con iommu_platform=on;
-# el kernel activa la traduccion, asigna cada dispositivo al dominio de su
-# driver y el arranque normal (bloques, ficheros, red, entrada) sigue igual.
+# Phase 33: QEMU starts with intel-iommu and the virtio devices with iommu_platform=on;
+# the kernel enables translation, assigns each device to its driver's
+# domain and the normal boot (block, files, network, input) is unchanged.
 name = "iommu.enabled"
-description = "VT-d activo: dominios por driver, todos los servicios de arranque funcionan traducidos"
+description = "VT-d enabled: per-driver domains, all boot services work translated"
 level = "smoke"
 areas = ["iommu", "drivers", "init"]
 cmdline = "qemu_exit"
@@ -11,18 +11,18 @@ timeout_secs = 60
 [expect]
 exit = 33
 serial_contains = [
-    "acpi: DMAR 48 bits, 1 unidad(es)",
-    "iommu: unidad 0 @ 0xfed90000 version 1.0",
-    "traduccion activa",
-    "iommu: 1 unidad(es) activas",
-    "iommu: 00:02.0 asignado al dominio",
-    "iommu: 00:03.0 asignado al dominio",
-    "iommu: 00:04.0 asignado al dominio",
-    "iommu: 00:05.0 asignado al dominio",
-    "virtio-blk: dispositivo listo",
-    "AriInit: servicio de red ok",
-    "AriInit: servicio de entrada ok",
-    "AriInit: servicios de arranque completados",
+    "acpi: DMAR 48 bits, 1 unit(s)",
+    "iommu: unit 0 @ 0xfed90000 version 1.0",
+    "translation active",
+    "iommu: 1 active unit(s)",
+    "iommu: 00:02.0 assigned to domain",
+    "iommu: 00:03.0 assigned to domain",
+    "iommu: 00:04.0 assigned to domain",
+    "iommu: 00:05.0 assigned to domain",
+    "virtio-blk: device ready",
+    "AriInit: network service ok",
+    "AriInit: input service ok",
+    "AriInit: boot services completed",
     "ARICODEOS_KERNEL_READY",
 ]
-serial_absent = ["KERNEL PANIC", "iommu: fallo DMA", "NO activada"]
+serial_absent = ["KERNEL PANIC", "iommu: DMA fault", "NOT enabled"]

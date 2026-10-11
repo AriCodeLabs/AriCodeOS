@@ -1,23 +1,23 @@
-//! HTTP/1.1 mínimo (Fase 24): peticiones `GET`, análisis de respuestas y
-//! descarga completa sobre un [`Transport`] abstracto, sin `alloc` y sobre
-//! buffers del llamador. La lógica no toca la red, así que se prueba en
-//! host con un transporte simulado; el SDK solo aporta el transporte TCP.
-//! TLS llegará más adelante.
+//! Minimal HTTP/1.1 (Phase 24): `GET` requests, response parsing and
+//! complete download over an abstract [`Transport`], without `alloc` and on
+//! caller-supplied buffers. The logic does not touch the network, so it is
+//! tested on the host with a simulated transport; the SDK only supplies the TCP transport.
+//! TLS will come later.
 
 #![no_std]
 
-/// Longitud máxima de un nombre de host (RFC 1035).
+/// Maximum length of a host name (RFC 1035).
 pub const MAX_HOST: usize = 253;
-/// Cabeceras de respuesta que se aceptan como máximo.
+/// Maximum number of response header bytes accepted.
 pub const MAX_HEADERS: usize = 2048;
-/// Longitud máxima de una línea de tamaño de chunk (con extensiones).
+/// Maximum length of a chunk size line (with extensions).
 const MAX_CHUNK_LINE: usize = 256;
 
-/// Canal de bytes ya conectado al servidor.
+/// Byte channel already connected to the server.
 pub trait Transport {
     type Error;
     fn send_all(&mut self, data: &[u8]) -> Result<(), Self::Error>;
-    /// Lee hasta `out.len()` bytes; `Ok(0)` es el cierre limpio del servidor.
+    /// Reads up to `out.len()` bytes; `Ok(0)` is a clean close by the server.
     fn recv(&mut self, out: &mut [u8]) -> Result<usize, Self::Error>;
 }
 
@@ -25,22 +25,22 @@ pub trait Transport {
 pub enum Error<E> {
     BadUrl,
     Transport(E),
-    /// La respuesta no es HTTP, está truncada o su framing es inválido.
+    /// The response is not HTTP, is truncated or its framing is invalid.
     Malformed,
-    /// Cabeceras o cuerpo no caben en los buffers del llamador.
+    /// Headers or body do not fit in the caller's buffers.
     TooBig,
-    /// Codificación o cambio de protocolo que no se soporta.
+    /// Unsupported encoding or protocol switch.
     Unsupported,
 }
 
-/// Resultado de un GET: código de estado y bytes del cuerpo escritos.
+/// Result of a GET: status code and body bytes written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fetched {
     pub status: u16,
     pub body_len: usize,
 }
 
-/// Escribe `GET path HTTP/1.1` con `Host` y `Connection: close`.
+/// Writes `GET path HTTP/1.1` with `Host` and `Connection: close`.
 pub fn write_get(host: &str, path: &str, out: &mut [u8]) -> Option<usize> {
     let parts: [&[u8]; 5] = [
         b"GET ",
@@ -57,7 +57,7 @@ pub fn write_get(host: &str, path: &str, out: &mut [u8]) -> Option<usize> {
     Some(n)
 }
 
-/// URL `http://host[:port]/path` descompuesta.
+/// Parsed `http://host[:port]/path` URL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Url<'a> {
     pub host: &'a str,
@@ -66,8 +66,8 @@ pub struct Url<'a> {
 }
 
 impl<'a> Url<'a> {
-    /// Acepta `http://host`, `host:puerto/ruta` y `host/ruta`. Rechaza
-    /// `https`, hosts vacíos o de más de [`MAX_HOST`] bytes y espacios.
+    /// Accepts `http://host`, `host:port/path` and `host/path`. Rejects
+    /// `https`, empty hosts or hosts longer than [`MAX_HOST`] bytes, and spaces.
     pub fn parse(s: &'a str) -> Option<Self> {
         let rest = s.strip_prefix("http://").unwrap_or(s);
         if rest.starts_with("https://") || rest.is_empty() {
@@ -92,7 +92,7 @@ impl<'a> Url<'a> {
         Some(Url { host, port, path })
     }
 
-    /// `host[:puerto]` para la cabecera `Host` (el puerto 80 se omite).
+    /// `host[:port]` for the `Host` header (port 80 is omitted).
     pub fn host_header<'b>(&self, out: &'b mut [u8; MAX_HOST + 6]) -> &'b str {
         let h = self.host.as_bytes();
         out[..h.len()].copy_from_slice(h);
@@ -119,31 +119,31 @@ impl<'a> Url<'a> {
 pub enum BodyLength {
     Length(usize),
     Chunked,
-    /// Hasta que el servidor cierre.
+    /// Until the server closes.
     UntilClose,
 }
 
-/// Cabecera de respuesta analizada.
+/// Parsed response header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Response {
     pub status: u16,
     pub body: BodyLength,
-    /// Desplazamiento del cuerpo dentro del buffer analizado.
+    /// Offset of the body inside the parsed buffer.
     pub header_len: usize,
 }
 
 impl Response {
-    /// Respuesta provisional (1xx): precede a la final.
+    /// Interim response (1xx): precedes the final one.
     pub fn is_informational(&self) -> bool {
         (100..200).contains(&self.status)
     }
 }
 
-/// Analiza la línea de estado y las cabeceras. `None` si aún no ha llegado
-/// la línea vacía; `Some(Err(()))` si la respuesta no es HTTP o su framing
-/// es inválido (`Transfer-Encoding` distinta de `chunked`, `Content-Length`
-/// repetido con valores distintos o no numérico). `Transfer-Encoding:
-/// chunked` prevalece sobre `Content-Length` sea cual sea el orden
+/// Parses the status line and the headers. `None` if the empty line has
+/// not arrived yet; `Some(Err(()))` if the response is not HTTP or its framing
+/// is invalid (`Transfer-Encoding` other than `chunked`, `Content-Length`
+/// repeated with different values or not numeric). `Transfer-Encoding:
+/// chunked` takes precedence over `Content-Length` whatever the order
 /// (RFC 9112 §6.3).
 pub fn parse_response(buf: &[u8]) -> Option<Result<Response, ()>> {
     let end = find(buf, b"\r\n\r\n")? + 4;
@@ -179,7 +179,7 @@ pub fn parse_response(buf: &[u8]) -> Option<Result<Response, ()>> {
             }
             content_length = Some(n);
         } else if name.eq_ignore_ascii_case("transfer-encoding") {
-            // Solo se soporta `chunked` como codificación final.
+            // Only `chunked` is supported as the final encoding.
             let last = value.rsplit(',').next().unwrap_or("").trim();
             if !last.eq_ignore_ascii_case("chunked") {
                 return Some(Err(()));
@@ -210,24 +210,24 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChunkState {
-    /// Esperando la línea `tamaño[;ext]\r\n`.
+    /// Waiting for the `size[;ext]\r\n` line.
     Size,
-    /// Copiando datos del trozo actual.
+    /// Copying data of the current chunk.
     Data,
-    /// Esperando el `\r\n` que sigue a los datos (bytes ya vistos).
+    /// Waiting for the `\r\n` that follows the data (bytes already seen).
     DataEnd(u8),
-    /// Tras el trozo de tamaño 0: líneas de trailer hasta una vacía.
+    /// After the size-0 chunk: trailer lines until an empty one.
     Trailer,
     Done,
 }
 
-/// Error de un cuerpo `chunked` inválido.
+/// Error from an invalid `chunked` body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkError;
 
-/// Decodificador incremental de `Transfer-Encoding: chunked`. Conserva el
-/// estado entre llamadas, así que los trozos pueden ser mayores que el buffer
-/// de entrada y los límites de línea pueden caer entre dos lecturas.
+/// Incremental `Transfer-Encoding: chunked` decoder. Keeps its state
+/// between calls, so chunks may be larger than the input buffer and
+/// line boundaries may fall between two reads.
 #[derive(Debug, Clone, Copy)]
 pub struct ChunkDecoder {
     state: ChunkState,
@@ -252,15 +252,15 @@ impl ChunkDecoder {
         self.state == ChunkState::Done
     }
 
-    /// Quedan datos del trozo actual por copiar: solo avanza si hay sitio en
-    /// la salida.
+    /// Data of the current chunk remains to be copied: only advances if there
+    /// is room in the output.
     pub fn wants_output(&self) -> bool {
         self.state == ChunkState::Data && self.remaining > 0
     }
 
-    /// Consume lo que pueda de `input` y escribe datos en `out`. Devuelve
-    /// `(bytes de entrada consumidos, bytes escritos)`. Sin progreso significa
-    /// que falta entrada (o salida, si `wants_output`).
+    /// Consumes what it can from `input` and writes data into `out`. Returns
+    /// `(input bytes consumed, bytes written)`. No progress means that
+    /// more input is needed (or output, if `wants_output`).
     pub fn feed(&mut self, input: &[u8], out: &mut [u8]) -> Result<(usize, usize), ChunkError> {
         let mut i = 0;
         let mut written = 0;
@@ -333,9 +333,9 @@ impl ChunkDecoder {
     }
 }
 
-/// Envía un `GET` de `url` por `t` y deja el cuerpo en `out`. Las respuestas
-/// 1xx previas se consumen; un cierre con error del transporte nunca se
-/// toma por una descarga completa.
+/// Sends a `GET` for `url` over `t` and leaves the body in `out`. Preceding
+/// 1xx responses are consumed; a transport error close is never
+/// taken for a complete download.
 pub fn fetch<T: Transport>(
     t: &mut T,
     url: &Url,
@@ -347,7 +347,7 @@ pub fn fetch<T: Transport>(
     let n = write_get(host, url.path, &mut req).ok_or(Error::BadUrl)?;
     t.send_all(&req[..n]).map_err(Error::Transport)?;
 
-    // Cabeceras: acumular hasta la línea vacía; saltar respuestas 1xx.
+    // Headers: accumulate up to the empty line; skip 1xx responses.
     let mut head = [0u8; MAX_HEADERS];
     let mut have = 0;
     let response = loop {
@@ -417,7 +417,7 @@ fn read_until_close<T: Transport>(
     let mut body_len = rest.len();
     loop {
         if body_len == out.len() {
-            // Destino lleno: distinguir fin limpio de contenido sobrante.
+            // Destination full: tell a clean end from leftover content.
             let mut probe = [0u8; 1];
             return match t.recv(&mut probe).map_err(Error::Transport)? {
                 0 => Ok(body_len),
@@ -442,7 +442,7 @@ fn read_chunked<T: Transport>(
     let mut pending = rest;
     let mut body_len = 0;
     loop {
-        // Rellenar `raw` con lo que sobró de las cabeceras antes de leer más.
+        // Fill `raw` with what was left over from the headers before reading more.
         if !pending.is_empty() {
             let n = pending.len().min(raw.len() - raw_len);
             raw[raw_len..raw_len + n].copy_from_slice(&pending[..n]);
@@ -483,8 +483,8 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
 
-    /// Transporte simulado: entrega `parts` respetando un máximo por lectura
-    /// (como el buffer DMA de 1472 bytes del cliente real) y después `end`.
+    /// Simulated transport: delivers `parts` honoring a per-read maximum
+    /// (like the real client's 1472-byte DMA buffer) and then `end`.
     struct Mock {
         incoming: VecDeque<Vec<u8>>,
         end: Result<usize, &'static str>,
@@ -566,7 +566,7 @@ mod tests {
         assert!(Url::parse("").is_none());
         assert!(Url::parse("host:puerto/").is_none());
         let long = std::format!("{}.test", "a".repeat(MAX_HOST));
-        assert!(Url::parse(&long).is_none(), "host de mas de 253 bytes");
+        assert!(Url::parse(&long).is_none(), "host longer than 253 bytes");
     }
 
     #[test]
@@ -588,7 +588,7 @@ mod tests {
         assert_eq!(&raw[r.header_len..], b"hola!");
         assert!(
             parse_response(b"HTTP/1.1 200 OK\r\nContent-Le").is_none(),
-            "incompleta"
+            "incomplete"
         );
         assert_eq!(parse_response(b"SSH-2.0\r\n\r\n"), Some(Err(())));
         assert_eq!(parse_response(b"HTTP/1.1 abc\r\n\r\n"), Some(Err(())));
@@ -607,12 +607,12 @@ mod tests {
         assert_eq!(
             parse_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n"),
             Some(Err(())),
-            "codificacion no soportada"
+            "unsupported encoding"
         );
         assert_eq!(
             parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\n"),
             Some(Err(())),
-            "longitudes contradictorias"
+            "contradictory lengths"
         );
         assert_eq!(
             parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: x\r\n\r\n"),
@@ -635,8 +635,8 @@ mod tests {
         assert_eq!((used, written, dec.done()), (full.len(), 10, true));
         assert_eq!(&out[..10], b"hola mundo");
 
-        // Byte a byte, como hace el lector: acumula lo no consumido y vuelve a
-        // alimentar. Las lineas de tamaño, los datos y los CRLF se partan donde sea.
+        // Byte by byte, as the reader does: accumulates what was not consumed and
+        // feeds it again. Size lines, data and CRLFs are split anywhere.
         let mut dec = ChunkDecoder::new();
         let mut got = Vec::new();
         let mut pending: Vec<u8> = Vec::new();
@@ -651,7 +651,7 @@ mod tests {
         assert!(pending.is_empty());
         assert_eq!(got, b"hola mundo");
 
-        // Salida pequeña: el trozo se copia por partes.
+        // Small output: the chunk is copied in parts.
         let mut dec = ChunkDecoder::new();
         let input = b"a\r\n0123456789\r\n0\r\n\r\n";
         let mut o = [0u8; 4];
@@ -673,7 +673,7 @@ mod tests {
         assert_eq!(
             dec.feed(huge.as_bytes(), &mut out),
             Err(ChunkError),
-            "tamaño absurdo"
+            "absurd size"
         );
         let mut dec = ChunkDecoder::new();
         assert_eq!(dec.feed(b"zz\r\n", &mut out), Err(ChunkError));
@@ -681,7 +681,7 @@ mod tests {
         assert_eq!(
             dec.feed(b"4\r\nholaXX", &mut out),
             Err(ChunkError),
-            "sin CRLF tras los datos"
+            "no CRLF after the data"
         );
         let mut dec = ChunkDecoder::new();
         let long_line = vec![b'1'; MAX_CHUNK_LINE + 1];
@@ -690,7 +690,7 @@ mod tests {
         assert_eq!(
             dec.feed(b"4\r\nho", &mut out),
             Ok((5, 2)),
-            "incompleto, sin error"
+            "incomplete, no error"
         );
     }
 
@@ -705,7 +705,7 @@ mod tests {
             }
         );
         assert_eq!(b, b"hello");
-        // Cuerpo repartido en varias lecturas.
+        // Body spread over several reads.
         let (f, b) = body(
             &[
                 b"HTTP/1.1 200 OK\r\nContent-Len",
@@ -739,9 +739,9 @@ mod tests {
             }
         );
         assert!(b.iter().all(|&c| c == b'x'));
-        // Y si no cabe, TooBig sin panico.
+        // And if it does not fit, TooBig without panicking.
         assert_eq!(get(&[&raw], 4095), Err(Error::TooBig));
-        // Trozos partidos en los limites de linea y de datos.
+        // Chunks split at line and data boundaries.
         let parts: [&[u8]; 6] = [
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
             b"d\r",
@@ -761,7 +761,7 @@ mod tests {
                 64
             ),
             Err(Error::Malformed),
-            "cierre antes del trozo final"
+            "close before the final chunk"
         );
     }
 
@@ -798,7 +798,7 @@ mod tests {
         assert_eq!(
             fetch(&mut t, &url, &mut [0u8; 5]),
             Err(Error::Transport("reset")),
-            "tambien al sondear con el destino lleno"
+            "also when probing with the destination full"
         );
     }
 
@@ -834,7 +834,7 @@ mod tests {
         assert_eq!(
             get(&[b"HTTP/1.1 200 OK\r\n"], 8),
             Err(Error::Malformed),
-            "cierre a mitad de cabeceras"
+            "close in the middle of the headers"
         );
     }
 }

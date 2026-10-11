@@ -1,45 +1,45 @@
-# ADR 0010: Objetos del kernel por handle con generación y derechos
+# ADR 0010: Kernel objects by handle with generation and rights
 
-- **Fecha:** 2026-09-26
-- **Estado:** Aceptada
+- **Date:** 2026-09-26
+- **Status:** Accepted
 
-## Contexto
+## Context
 
-La sección 24 del documento maestro exige que las aplicaciones no manejen
-punteros ni identificadores globales de objetos del kernel, y la sección 25
-que el acceso dependa de una capability explícita.
+Section 24 of the master document requires that applications never handle
+pointers or global identifiers of kernel objects, and section 25
+that access depends on an explicit capability.
 
-## Decisión
+## Decision
 
-Cada proceso tiene una tabla de handles (`libs/handles`) con límite fijo. Un
-handle es un `u32` opaco con índice (16 bits) y generación (16 bits); `0`
-nunca es válido. Cada entrada lleva un `Arc<KernelObject>` y unos `Rights`.
-Las reglas:
+Each process has a handle table (`libs/handles`) with a fixed limit. A
+handle is an opaque `u32` with an index (16 bits) and a generation (16 bits); `0`
+is never valid. Each entry holds an `Arc<KernelObject>` and some `Rights`.
+The rules:
 
-1. Un handle cerrado no vuelve a ser válido aunque su índice se reutilice
-   (la generación cambia).
-2. Un handle inventado solo sería válido si acertara índice y generación de
-   una entrada viva.
-3. Duplicar exige el derecho `DUPLICATE` y solo puede reducir derechos.
-4. Cada syscall que opera sobre un objeto declara el derecho que exige
+1. A closed handle never becomes valid again even if its index is reused
+   (the generation changes).
+2. A made-up handle would only be valid if it guessed the index and generation of
+   a live entry.
+3. Duplicating requires the `DUPLICATE` right and can only reduce rights.
+4. Every syscall that operates on an object declares the right it requires
    (`console_write` -> `WRITE`, `object_id` -> `READ`).
-5. Los identificadores informativos (tid, pid) que devuelve `object_id` no
-   dan acceso: solo el handle lo da.
+5. The informational identifiers (tid, pid) returned by `object_id` do not
+   grant access: only the handle does.
 
-Todo proceso arranca con tres handles fijos: su proceso, su hilo principal y
-la consola (`sdk/abi::handle`).
+Every process starts with three fixed handles: its process, its main thread and
+the console (`sdk/abi::handle`).
 
-## Alternativas
+## Alternatives
 
-- Identificadores globales (números de hilo, de proceso) como argumento de
-  syscall: cualquiera podría nombrar cualquier objeto; descartado.
-- Handles sin generación: un handle cerrado y reasignado daría acceso a un
-  objeto ajeno; descartado.
+- Global identifiers (thread numbers, process numbers) as syscall
+  arguments: anyone could name any object; rejected.
+- Handles without a generation: a closed and reassigned handle would grant access to
+  someone else's object; rejected.
 
-## Consecuencias
+## Consequences
 
-- El ABI pasa a versión 2: `console_write` recibe un handle.
-- La Fase 13 (capabilities) extiende este modelo con delegación entre
-  procesos (`TRANSFER`) y revocación, sin cambiar la representación.
-- Las tablas viven en el kernel y cuentan contra el límite del proceso
-  (sección 52).
+- The ABI moves to version 2: `console_write` takes a handle.
+- Phase 13 (capabilities) extends this model with delegation between
+  processes (`TRANSFER`) and revocation, without changing the representation.
+- The tables live in the kernel and count against the process limit
+  (section 52).

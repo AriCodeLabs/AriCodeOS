@@ -1,50 +1,49 @@
-# ADR 0016: Permisos por recurso: ficheros compartidos de solo lectura
+# ADR 0016: Per-resource permissions: read-only shared files
 
-- **Fecha:** 2026-09-28
-- **Estado:** Aceptada
+- **Date:** 2026-09-28
+- **Status:** Accepted
 
-## Contexto
+## Context
 
-El manifiesto (Fase 28) concede capacidades por servicio: `fs` da un
-directorio privado entero. No había forma de dar a una aplicación acceso a
-un fichero concreto de otro sitio, ni de darlo solo en lectura. El estudio
-de 2026-09-28 (etapa 3, apartado C) pide empezar por "un archivo
-seleccionado en modo lectura" con la restricción aplicada por el servidor,
-no por el manifiesto: escribir el permiso no basta para hacerlo efectivo.
+The manifest (Phase 28) grants capabilities per service: `fs` gives a whole
+private directory. There was no way to give an application access to a
+specific file elsewhere, or to give it read-only. The 2026-09-28 study
+(stage 3, section C) asks to start with "a selected file in read mode",
+with the restriction enforced by the server, not by the manifest: writing
+the permission down is not enough to make it effective.
 
-## Decisión
+## Decision
 
-1. **`read_files = a, b` en el manifiesto** (hasta 4 nombres completos de
-   AriFS). El broker pide a fsd un endpoint por fichero (`Op::Share`, solo
-   por el endpoint principal) y lo entrega tras el directorio privado, en
-   el orden del manifiesto. Si el fichero no existe, el lanzamiento se
-   deniega antes de crear el proceso.
-2. **fsd aplica la restricción.** Un endpoint compartido es un espacio de
-   nombres de un solo fichero: `List` muestra solo ese fichero (con su
-   nombre sin prefijo), `Open` solo lo abre a él, `Read` y `Close`
-   funcionan, y `Create`, `Write`, `Replace`, `Flush`, `Bind` y `Share`
-   responden `Denied`. Los descriptores siguen perteneciendo al endpoint
-   que los abrió (auditoría del SDK).
-3. **La autoridad va con el objeto**, no con la identidad: dos aplicaciones
-   con el mismo manifiesto reciben duplicados del mismo endpoint
-   compartido; una con directorio privado y otra con fichero compartido
-   reciben objetos distintos. Cerrar o perder el endpoint de una no afecta
-   al resto.
+1. **`read_files = a, b` in the manifest** (up to 4 full AriFS names). The
+   broker asks fsd for one endpoint per file (`Op::Share`, only through the
+   main endpoint) and hands them over after the private directory, in
+   manifest order. If the file does not exist, the launch is denied before
+   the process is created.
+2. **fsd enforces the restriction.** A shared endpoint is a single-file
+   namespace: `List` shows only that file (with its name unprefixed),
+   `Open` opens only that file, `Read` and `Close` work, and `Create`,
+   `Write`, `Replace`, `Flush`, `Bind` and `Share` answer `Denied`.
+   Descriptors still belong to the endpoint that opened them (SDK audit).
+3. **Authority travels with the object**, not with the identity: two
+   applications with the same manifest receive duplicates of the same
+   shared endpoint; one with a private directory and another with a shared
+   file receive different objects. Closing or losing one's endpoint does
+   not affect the others.
 
-## Alternativas descartadas
+## Rejected alternatives
 
-- Concesión por identidad de cliente en fsd: exige que fsd conozca quién
-  llama y una política duplicada; el modelo de capabilities ya expresa el
-  permiso con el endpoint.
-- Un flag de solo lectura en `Bind` (directorio entero en lectura): más
-  amplio de lo que pide la etapa y no cubre "un fichero de fuera".
+- Grants by client identity in fsd: requires fsd to know who is calling
+  and a duplicated policy; the capability model already expresses the
+  permission with the endpoint.
+- A read-only flag on `Bind` (whole directory read-only): broader than
+  what the stage asks for and does not cover "a file from elsewhere".
 
-## Consecuencias
+## Consequences
 
-- `sandbox.shared_file`: `notes_reader` (manifiesto `read_files =
-  hola.txt`) lista y lee el fichero, recibe `Denied` al escribir y no ve
-  `README`; `hello_app` en la misma sesión sigue con su directorio privado.
-- Escribir en un fichero compartido, compartir directorios completos y un
-  selector de ficheros para conceder en tiempo de sesión son etapas
-  posteriores; el mecanismo (`Share` con una restricción por endpoint) es
-  el mismo.
+- `sandbox.shared_file`: `notes_reader` (manifest `read_files =
+  hola.txt`) lists and reads the file, gets `Denied` when writing and does
+  not see `README`; `hello_app` in the same session keeps its private
+  directory.
+- Writing to a shared file, sharing whole directories and a file picker
+  for granting at session time are later stages; the mechanism (`Share`
+  with a per-endpoint restriction) is the same.

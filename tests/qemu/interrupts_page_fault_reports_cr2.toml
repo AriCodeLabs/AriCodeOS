@@ -1,5 +1,5 @@
 name = "interrupts.page_fault_reports_cr2"
-description = "test=page_fault -> #PF con CR2, tipo de acceso y modo"
+description = "test=page_fault -> #PF with CR2, access type and mode"
 level = "full"
 areas = ["interrupts"]
 cmdline = "qemu_exit test=page_fault"

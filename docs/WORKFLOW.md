@@ -1,21 +1,21 @@
-# Flujo de trabajo Git (git flow)
+# Git workflow (git flow)
 
-`main` nunca recibe commits directos. Todo el trabajo entra por ramas y se
-integra en `develop`; `main` solo avanza con versiones etiquetadas.
+`main` never receives direct commits. All work enters through branches and
+is integrated in `develop`; `main` only moves forward with tagged versions.
 
-## Ramas
+## Branches
 
 ```text
-main        -> siempre arrancable; solo merges desde develop (release) o hotfix/*; cada merge lleva tag vX.Y.Z
-develop     -> rama de integración; siempre debe pasar `cargo xtask test`
-feature/*   -> nueva funcionalidad, parte de develop, vuelve a develop
-fix/*       -> corrección de un defecto en develop, parte de develop, vuelve a develop
-hotfix/*    -> corrección urgente sobre una versión publicada, parte de main, vuelve a main Y develop
-release/*   -> (opcional) estabilización previa a un tag; parte de develop, vuelve a main y develop
-experiment/*-> prototipos que pueden romperse; nunca se mergean tal cual
+main        -> always bootable; only merges from develop (release) or hotfix/*; every merge carries a tag vX.Y.Z
+develop     -> integration branch; must always pass `cargo xtask test`
+feature/*   -> new functionality, branched from develop, merged back into develop
+fix/*       -> fix for a defect in develop, branched from develop, merged back into develop
+hotfix/*    -> urgent fix on a published version, branched from main, merged into main AND develop
+release/*   -> (optional) stabilisation before a tag; branched from develop, merged into main and develop
+experiment/*-> prototypes that may break; never merged as they are
 ```
 
-Nombres en minúsculas con guiones y, cuando aplique, la fase del roadmap:
+Lower-case names with hyphens and, where it applies, the roadmap phase:
 
 ```text
 feature/f04-gdt-idt
@@ -24,80 +24,83 @@ fix/loader-identity-map-limit
 hotfix/serial-init-order
 ```
 
-## Ciclo de una feature
+## Life cycle of a feature
 
 ```bash
 git checkout develop && git pull --ff-only
 git checkout -b feature/f04-gdt-idt
-# ... commits pequeños y con mensaje descriptivo ...
-cargo xtask check && cargo xtask test        # obligatorio antes de integrar
+# ... small commits with descriptive messages ...
+cargo xtask check && cargo xtask test        # mandatory before integrating
 git checkout develop
-git merge --no-ff feature/f04-gdt-idt        # --no-ff: la rama queda visible en el historial
+git merge --no-ff feature/f04-gdt-idt        # --no-ff: the branch stays visible in the history
 git branch -d feature/f04-gdt-idt
 ```
 
-## Publicar una versión
+## Publishing a version
 
 ```bash
 git checkout develop && cargo xtask check && cargo xtask test
 git checkout main
 git merge --no-ff develop
-git tag -a v0.0.2 -m "AriCodeOS 0.0.2: memoria y logging"
+git tag -a v0.0.2 -m "AriCodeOS 0.0.2: memory and logging"
 git checkout develop
 ```
 
-## Niveles de test por rama
+## Test levels per branch
 
-Los tests viven en el repositorio (`tests/README.md`) y tienen tres niveles
-para que cada fase evalúe lo más rápido posible sin perder cobertura:
-
-```text
-en una feature/* o fix/*   cargo xtask test --level unit           (segundos, en cada commit)
-                           cargo xtask test --area <áreas de la fase>   (solo sus escenarios QEMU)
-antes de mergear a develop cargo xtask check && cargo xtask test   (unit + smoke)
-antes de mergear a main    cargo xtask check && cargo xtask test --all   (unit + full)
-```
-
-Cada fase del roadmap añade sus tests en la misma rama que su código: nuevos
-`#[cfg(test)]` en las crates y nuevos `tests/qemu/*.toml` con su área.
-
-## Reglas
-
-1. Ningún commit directo en `main` ni en `develop`: siempre desde una rama.
-2. `--no-ff` en todos los merges de integración.
-3. Antes de mergear: `cargo xtask check` y el nivel de test que exige la rama
-   destino (tabla anterior) en verde.
-4. Un tema por rama. Si aparece un bug ajeno durante una feature, se abre `fix/*`.
-5. Cada fase terminada (Definition of Done, sección 98 del documento maestro)
-   se integra en `develop` y, si cierra una versión de la sección 64, se
-   etiqueta en `main`.
-6. Decisiones de arquitectura: ADR en `docs/decisions/` dentro de la misma rama.
-7. Código factorizado: lógica reutilizable en `libs/*` (no_std, con tests de
-   host); las crates bare-metal solo integran.
-8. Sin código muerto ni obsoleto: cuando una corrección sustituye a otra cosa,
-   la anterior se borra en el mismo commit. `clippy -D warnings` lo vigila.
-9. El comportamiento de test se pide por cmdline (`qemu_exit`, `test=...`),
-   nunca con features de compilación (ADR 0007).
-10. Las auditorías se guardan en `docs/audits/` con su resolución; cada
-    hallazgo corregido lleva una regresión (unitaria o escenario QEMU) en la
-    misma rama `fix/*`.
-
-## Idiomas
-
-El español es el idioma canónico del proyecto: código, mensajes de consola,
-documento maestro, arquitectura, ADR y auditorías. Solo los documentos de
-entrada para colaboradores tienen versión en inglés: `README.md` (el
-principal en GitHub; el español es `README.es.md`) y `docs/en/` con este
-flujo de trabajo, la guía del SDK y la de tests. Quien cambie uno de esos
-documentos actualiza las dos versiones en la misma rama; lo demás no se
-traduce para que no se desfase.
-
-## Mensajes de commit
-
-Primera línea en imperativo, corta, con el ámbito cuando ayude:
+The tests live in the repository ([tests/README.md](../tests/README.md)) and have three levels
+so that each phase runs the fastest check that still gives coverage:
 
 ```text
-kernel: instalar GDT y TSS propias
-ariboot: limitar identidad a memoria no reservada
-docs: ADR 0007 sobre formato de la IDT
+on a feature/* or fix/*    cargo xtask test --level unit           (seconds, on every commit)
+                           cargo xtask test --area <areas of the phase>   (only its QEMU scenarios)
+before merging into develop cargo xtask check && cargo xtask test   (unit + smoke)
+before merging into main   cargo xtask check && cargo xtask test --all   (unit + full)
 ```
+
+Every roadmap phase adds its tests in the same branch as its code: new
+`#[cfg(test)]` in the crates and new `tests/qemu/*.toml` with its area.
+
+## Rules
+
+1. No direct commits on `main` or `develop`: always from a branch.
+2. `--no-ff` on every integration merge.
+3. Before merging: `cargo xtask check` and the test level required by the
+   target branch (table above) must be green.
+4. One topic per branch. If an unrelated bug shows up during a feature, open
+   a `fix/*`.
+5. Every finished phase (Definition of Done, section 98 of the master
+   document) is integrated into `develop` and, if it closes a version from
+   section 64, tagged on `main`.
+6. Architecture decisions: an ADR in `docs/decisions/` within the same branch.
+7. Factored code: reusable logic goes into `libs/*` (no_std, with host
+   tests); the bare-metal crates only integrate.
+8. No dead or obsolete code: when a fix replaces something, the old code is
+   deleted in the same commit. `clippy -D warnings` enforces it.
+9. Test behaviour is requested on the command line (`qemu_exit`, `test=...`),
+   never through compile-time features (ADR 0007).
+10. Audits are kept in `docs/audits/` with their resolution; every fixed
+    finding carries a regression (unit test or QEMU scenario) in the same
+    `fix/*` branch.
+
+## Languages
+
+English is the canonical language of the project: code, comments, runtime
+and console messages, ADRs, documentation and tests. The only maintained
+translation is `README.es.md`, the Spanish version of `README.md`; whoever
+changes `README.md` updates `README.es.md` in the same branch. The master
+document (`AriCodeOS.md`) and the audit reports in `docs/audits/` were
+translated to English as well (2026-10-11). Test data (sample files such as
+`hola.txt` and their contents) is data, not prose, and keeps its text.
+
+## Commit messages
+
+First line in the imperative, short, with the scope when it helps:
+
+```text
+kernel: install own GDT and TSS
+ariboot: limit the identity map to non-reserved memory
+docs: ADR 0007 on the IDT format
+```
+
+Commit messages are written in English. (The older history is in Spanish.)

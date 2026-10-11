@@ -1,10 +1,10 @@
-# Fase 29 y etapa 4 (ADR 0019): wasm_runner (aplicacion con manifiesto
-# system+fs) carga demo.wasm y demo.manifest de su directorio privado, valida
-# el modulo y lo ejecuta con aricode-wasm; el modulo, compilado con rustc para
-# wasm32, solo usa la Capability API que su manifiesto le concede (print,
-# clock, files) y escribe y relee un fichero.
+# Phase 29 and stage 4 (ADR 0019): wasm_runner (an application with a
+# system+fs manifest) loads demo.wasm and demo.manifest from its private directory, validates
+# the module and runs it with aricode-wasm; the module, compiled with rustc for
+# wasm32, only uses the Capability API its manifest grants it (print,
+# clock, files) and writes and re-reads a file.
 name = "wasm.demo"
-description = "runtime WebAssembly en ring 3: modulo portable aislado con Capability API"
+description = "WebAssembly runtime in ring 3: isolated portable module with the Capability API"
 level = "full"
 areas = ["wasm", "sandbox", "shell"]
 cmdline = "qemu_exit shell"
@@ -14,16 +14,16 @@ stdin = ["run wasm_runner 5", "shutdown"]
 [expect]
 exit = 33
 serial_contains = [
-    "AriInit: lanzar wasm_runner con manifiesto [system fs] memoria 512 KiB",
-    "wasm_runner: modulo demo.wasm cargado (",
-    "wasm: hola desde WebAssembly (arg 5)",
+    "AriInit: launch wasm_runner with manifest [system fs] memory 512 KiB",
+    "wasm_runner: module demo.wasm loaded (",
+    "wasm: hello from WebAssembly (arg 5)",
     "wasm: fib(24) = 46368",
     "wasm: uptime ",
-    "wasm: suma ponderada 162",
-    "wasm: fichero 'notas' escrito y leido (18 bytes)",
-    "wasm_runner: manifiesto del modulo: print clock files",
-    "wasm_runner: main devolvio 42",
-    "run: wasm_runner termino con 42",
+    "wasm: weighted sum 162",
+    "wasm: file 'notas' written and read (18 bytes)",
+    "wasm_runner: module manifest: print clock files",
+    "wasm_runner: main returned 42",
+    "run: wasm_runner exited with 42",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "el modulo fallo", "importacion desconocida"]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "module failed", "unknown import"]

@@ -1,13 +1,13 @@
-# Auditoria 9d8c7e5, hallazgo 2: un crecimiento fallido por falta de frames no
-# pierde paginas ni deja mapped avanzado, y el heap vuelve a crecer cuando hay
-# memoria.
+# Audit 9d8c7e5, finding 2: a growth that fails for lack of frames does not
+# leak pages or leave mapped advanced, and the heap grows again once there is
+# memory.
 name = "memory.heap_oom_recovers"
-description = "test=heap_oom: fallo de crecimiento sin fugas y reintento con exito"
+description = "test=heap_oom: growth failure without leaks and a successful retry"
 level = "full"
 areas = ["memory"]
 cmdline = "qemu_exit test=heap_oom"
 
 [expect]
 exit = 33
-serial_contains = ["heap oom selftest ok (fallo con 8 frames,", "ARICODEOS_KERNEL_READY"]
+serial_contains = ["heap oom selftest ok (failure with 8 frames,", "ARICODEOS_KERNEL_READY"]
 serial_absent = ["KERNEL PANIC"]

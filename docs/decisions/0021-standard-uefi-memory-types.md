@@ -1,52 +1,54 @@
-# ADR 0021: AriBoot reserva con tipos de memoria UEFI estándar
+# ADR 0021: AriBoot reserves memory with standard UEFI memory types
 
-- **Fecha:** 2026-10-10
-- **Estado:** Aceptada
+- **Date:** 2026-10-10
+- **Status:** Accepted
 
-## Contexto
+## Context
 
-Hasta la 0.8.1 AriBoot marcaba todas las páginas que el kernel debía
-conservar (imagen, pila, `BootInfo`, tablas, initrd, cmdline) con un tipo de
-memoria propio del rango OS loader (`0x8000_0000`, `MemoryRegionKind::Kernel`),
-y el kernel recuperaba sin más el resto de la memoria de arranque (`Boot`).
+Up to 0.8.1 AriBoot marked every page the kernel had to keep (image,
+stack, `BootInfo`, tables, initrd, cmdline) with a custom memory type from
+the OS loader range (`0x8000_0000`, `MemoryRegionKind::Kernel`), and the
+kernel simply reclaimed the rest of the boot memory (`Boot`).
 
-En la primera prueba física (Fase 34, portátil de pruebas) AriBoot se para
-en la primera llamada a `GetMemoryMap`, justo después de esas reservas. La
-crate `uefi` avisa en `MemoryType::custom` de que algunos firmwares se
-cuelgan o se comportan mal con tipos propios (OSDev: "My bootloader hangs if
-I use user defined EFI_MEMORY_TYPE values"); Linux y GRUB solo usan tipos
-estándar. Además, `uefi::boot::memory_map` encadena varias llamadas con
-`assert!`s y sin trazas, así que en hardware no se sabe en cuál se para.
+On the first physical test (Phase 34, test laptop) AriBoot stops at the
+first call to `GetMemoryMap`, right after those reservations. The `uefi`
+crate warns in `MemoryType::custom` that some firmwares hang or misbehave
+with custom types (OSDev: "My bootloader hangs if I use user defined
+EFI_MEMORY_TYPE values"); Linux and GRUB only use standard types. In
+addition, `uefi::boot::memory_map` chains several calls with `assert!`s
+and no tracing, so on hardware there is no way to tell which one it stops
+at.
 
-## Decisión
+## Decision
 
-1. **Solo tipos estándar.** AriBoot reserva todas sus páginas como
-   `LOADER_DATA`. `MEMORY_TYPE_KERNEL` y `MemoryRegionKind::Kernel`
-   desaparecen; en el mapa esas páginas son `Boot`.
-2. **BootInfo v4** añade `page_tables_base`, `page_tables_size` y
-   `boot_info_address`, y `BootInfo::kernel_ranges()` devuelve los rangos que
-   el kernel debe conservar: imagen, pila inicial, página del `BootInfo`,
-   initrd y cmdline. Las tablas de AriBoot no están: el kernel las recupera
-   al activar las suyas, cosa que antes no podía hacer porque no conocía su
-   extensión.
-3. **Recuperación con reserva explícita.** `vmm::reclaim_boot_memory`
-   libera las regiones `Boot` (las reservas del cargador pueden quedar
-   fusionadas con otras `LOADER_DATA` del firmware en un mismo descriptor) y
-   después vuelve a reservar `kernel_ranges()`. La traza dice cuánto se
-   devolvió y cuánto se conservó.
-4. **Mapa de memoria con llamadas directas y trazadas.** `boot/src/memmap.rs`
-   llama a `GetMemoryMap` dos veces (tamaño y lectura) anotando estado y
-   tamaños antes y después, valida la respuesta en vez de `assert!`, y recorre
-   los descriptores con el iterador de `boot-protocol`. `ExitBootServices`
-   sigue usando la crate.
+1. **Standard types only.** AriBoot reserves all its pages as
+   `LOADER_DATA`. `MEMORY_TYPE_KERNEL` and `MemoryRegionKind::Kernel` are
+   removed; in the map those pages are `Boot`.
+2. **BootInfo v4** adds `page_tables_base`, `page_tables_size` and
+   `boot_info_address`, and `BootInfo::kernel_ranges()` returns the ranges
+   the kernel must keep: image, initial stack, the `BootInfo` page, initrd
+   and cmdline. AriBoot's page tables are not included: the kernel
+   reclaims them when it activates its own, which it could not do before
+   because it did not know their extent.
+3. **Reclaim with explicit re-reservation.** `vmm::reclaim_boot_memory`
+   frees the `Boot` regions (the loader's reservations may be merged with
+   other firmware `LOADER_DATA` in the same descriptor) and then reserves
+   `kernel_ranges()` again. The trace says how much was returned and how
+   much was kept.
+4. **Memory map with direct, traced calls.** `boot/src/memmap.rs` calls
+   `GetMemoryMap` twice (size and read), logging status and sizes before
+   and after, validates the response instead of using `assert!`, and walks
+   the descriptors with the `boot-protocol` iterator. `ExitBootServices`
+   still uses the crate.
 
-## Consecuencias
+## Consequences
 
-- La imagen del kernel, su pila y el `BootInfo` viven en memoria `Boot`
-  hasta que el kernel la clasifica; cualquier código que recupere memoria de
-  arranque debe pasar por `reclaim_boot_memory` y respetar `kernel_ranges()`.
-- El mapa del kernel tiene un tipo menos; `report_memory` y los tests de
-  `boot-protocol` se ajustan. Protocolo incompatible con kernels v3.
-- Las tablas de AriBoot (decenas de KiB) vuelven al PMM.
-- `docs/hardware.md` describe cómo leer las trazas `memoria:` y las balizas
-  si un firmware se para en el mapa de memoria.
+- The kernel image, its stack and the `BootInfo` live in `Boot` memory
+  until the kernel classifies it; any code that reclaims boot memory must
+  go through `reclaim_boot_memory` and respect `kernel_ranges()`.
+- The kernel's map has one type fewer; `report_memory` and the
+  `boot-protocol` tests are adjusted. The protocol is incompatible with v3
+  kernels.
+- AriBoot's page tables (tens of KiB) go back to the PMM.
+- `docs/hardware.md` describes how to read the `memory:` traces and the
+  beacons if a firmware stops at the memory map.

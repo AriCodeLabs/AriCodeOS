@@ -1,7 +1,7 @@
-# Fase 32: con -smp 4 el kernel arranca los tres APs por INIT-SIPI y todos
-# quedan en linea antes de lanzar init; el arranque nominal sigue igual.
+# Phase 32: with -smp 4 the kernel starts the three APs via INIT-SIPI and all
+# are online before init is launched; the nominal boot is unchanged.
 name = "smp.boot"
-description = "-smp 4: los APs arrancan por INIT-SIPI, quedan en linea y el arranque normal completa"
+description = "-smp 4: the APs start via INIT-SIPI, come online and the normal boot completes"
 level = "smoke"
 areas = ["smp", "init"]
 cmdline = "qemu_exit"
@@ -12,8 +12,8 @@ timeout_secs = 60
 exit = 33
 serial_contains = [
     "acpi: MADT lapic @ 0xfee00000, 4 cpu(s)",
-    "smp: 4 CPUs en linea (3 AP de 3 arrancados), lapic ids [0, 1, 2, 3]",
-    "AriInit: servicios de arranque completados",
+    "smp: 4 CPUs online (3 of 3 APs started), lapic ids [0, 1, 2, 3]",
+    "AriInit: boot services completed",
     "ARICODEOS_KERNEL_READY",
 ]
 serial_absent = ["KERNEL PANIC", "no respondio al SIPI"]

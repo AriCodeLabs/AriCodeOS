@@ -1,4 +1,4 @@
-//! ChaCha20 (RFC 7539): flujo de bloques de 64 bytes; base del RNG del kernel.
+//! ChaCha20 (RFC 7539): stream of 64-byte blocks; basis of the kernel RNG.
 
 const CONSTANTS: [u32; 4] = [0x61707865, 0x3320646e, 0x79622d32, 0x6b206574];
 
@@ -14,7 +14,7 @@ fn quarter(s: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
     s[b] = (s[b] ^ s[c]).rotate_left(7);
 }
 
-/// Un bloque de flujo para `key`, `nonce` (96 bits) y `counter`.
+/// One keystream block for `key`, `nonce` (96 bits) and `counter`.
 pub fn block(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> [u8; 64] {
     let mut state = [0u32; 16];
     state[..4].copy_from_slice(&CONSTANTS);
@@ -43,8 +43,8 @@ pub fn block(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> [u8; 64] {
     out
 }
 
-/// Generador determinista: bloques consecutivos de ChaCha20 sobre una clave
-/// semilla; `reseed` mezcla entropía nueva en la clave.
+/// Deterministic generator: consecutive ChaCha20 blocks over a seed key;
+/// `reseed` mixes fresh entropy into the key.
 pub struct Rng {
     key: [u8; 32],
     nonce: [u8; 12],
@@ -64,7 +64,7 @@ impl Rng {
         }
     }
 
-    /// Nueva clave = ChaCha(clave actual) XOR entropía: nunca peor que antes.
+    /// New key = ChaCha(current key) XOR entropy: never worse than before.
     pub fn reseed(&mut self, entropy: &[u8; 32]) {
         let mix = block(&self.key, &self.nonce, u32::MAX);
         for (k, (m, e)) in self.key.iter_mut().zip(mix.iter().zip(entropy)) {
@@ -80,7 +80,7 @@ impl Rng {
                 self.buf = block(&self.key, &self.nonce, self.counter);
                 self.counter = self.counter.wrapping_add(1);
                 if self.counter == 0 {
-                    // Al agotar el contador, avanzar el nonce.
+                    // When the counter is exhausted, advance the nonce.
                     let n = u32::from_le_bytes([
                         self.nonce[0],
                         self.nonce[1],

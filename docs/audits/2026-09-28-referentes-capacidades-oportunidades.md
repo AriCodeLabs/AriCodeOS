@@ -1,281 +1,283 @@
-# Referentes, capacidades y oportunidades para AriCodeOS
+# References, capabilities and opportunities for AriCodeOS
 
-Fecha: 2026-09-28. Base: `4836023e6e4e4afa66125106a18f457107ae70bf`, rama
-`fix/audit-4836023`, con modificaciones locales en curso.
+Date: 2026-09-28. Base: `4836023e6e4e4afa66125106a18f457107ae70bf`, branch
+`fix/audit-4836023`, with local changes in progress.
 
-Estudio comparativo y propuesta de desarrollo; no es una nueva auditoría de
-correcciones ni acredita que se hayan ejecutado pruebas en este turno. Las
-implementaciones sugeridas no se han aplicado. Las fuentes externas describen
-los referentes; las prioridades, diseños y criterios de aceptación son propuestas
-para AriCodeOS, no prestaciones atribuidas a esos proyectos.
+Comparative study and development proposal; this is not a new fix audit, nor
+does it attest that tests were run in this session. The suggested
+implementations have not been applied. External sources describe the reference
+projects; priorities, designs and acceptance criteria are proposals for
+AriCodeOS, not features attributed to those projects.
 
-La oportunidad principal es convertir la arquitectura actual en un sistema que
-se pueda usar, diagnosticar y recuperar de manera predecible. Rust, microkernel,
-capabilities y WASM tienen precedentes: la diferenciación deberá demostrarse en
-experiencia de uso, recuperación, rendimiento y facilidad para crear aplicaciones.
+The main opportunity is to turn the current architecture into a system that can
+be used, diagnosed and recovered predictably. Rust, microkernel, capabilities
+and WASM all have precedents: differentiation will have to be demonstrated in
+user experience, recovery, performance and ease of building applications.
 
-## 1. Qué podemos aprender de otros proyectos
+## 1. What we can learn from other projects
 
-| Referente | Capacidades documentadas | Aprendizaje aplicable y límites |
+| Reference | Documented capabilities | Applicable lesson and limits |
 | --- | --- | --- |
-| Genode Labs: [Genode/Sculpt](https://genode.org/download/sculpt) | Microkernel, capabilities, drivers aislados, máquinas virtuales y una interfaz que muestra componentes y relaciones. | Hacer visibles las conexiones entre servicios y sus permisos. Una vista administrativa podría servir para configurar y diagnosticar AriCodeOS. No implica adoptar sus kernels ni su infraestructura completa. |
-| Google: [Fuchsia, capabilities](https://fuchsia.dev/fuchsia-src/concepts/components/v2/capabilities) | Los componentes declaran lo que ofrecen y consumen; el entorno establece rutas explícitas y dependencias. | Evolucionar el manifiesto desde una lista de permisos hacia contratos entre servicios, con dependencias obligatorias y opcionales. |
-| Oxide: [Hubris](https://hubris.oxide.computer/) | Rust, tareas aisladas, reinicio de drivers y depuración con Humility, incluida inspección del sistema y volcados. | Diseñar recuperación y diagnóstico junto con cada driver. Su configuración estática para microcontroladores no se traslada directamente a un escritorio dinámico. |
-| QNX: [herencia de prioridad en IPC](https://qnx.com/developers/docs/8.0/com.qnx.doc.neutrino.sys_arch/topic/ipc_Priority_inheritance_messages.html) | El trabajo de los servidores recibe prioridades relacionadas con las de los clientes para limitar la inversión de prioridad. | Cuando AriCodeOS incorpore prioridades, considerar también las cadenas de llamadas IPC. No basta con cambiar el scheduler; tampoco demostraría tiempo real estricto por sí solo. |
-| Ant Group y colaboradores: [Asterinas/OSTD](https://www.usenix.org/conference/atc25/presentation/peng-yuke) | Framework Rust que separa las operaciones de bajo nivel del código de servicios. | Reforzar APIs seguras para memoria, DMA y MMIO. Su [framekernel](https://asterinas.github.io/book/kernel/the-framekernel-architecture.html) comparte espacio de direcciones: copiar esa arquitectura eliminaría una propiedad importante de nuestro aislamiento actual. |
-| Comunidad: [Redox OS](https://github.com/redox-os/book/blob/master/src/introduction.md) | Sistema de propósito general en Rust, microkernel y orientación Unix/POSIX. | Referente para estudiar el esfuerzo de SDK, herramientas y aplicaciones. Compatibilidad selectiva puede facilitar ports sin convertir POSIX en la arquitectura del kernel. |
-| Investigación: [LionsOS/UNSW](https://lionsos.org/) | Componentes sobre seL4, separación entre drivers y multiplexación, colas y configuración principalmente estática. | Separar transporte de hardware, política y clientes. LionsOS se declara experimental y no tiene todavía una historia completa de verificación; no debe confundirse con las pruebas del kernel seL4. |
+| Genode Labs: [Genode/Sculpt](https://genode.org/download/sculpt) | Microkernel, capabilities, isolated drivers, virtual machines and a UI that shows components and their relationships. | Make connections between services and their permissions visible. An administrative view could be used to configure and diagnose AriCodeOS. It does not imply adopting its kernels or its full infrastructure. |
+| Google: [Fuchsia, capabilities](https://fuchsia.dev/fuchsia-src/concepts/components/v2/capabilities) | Components declare what they offer and consume; the environment sets up explicit routes and dependencies. | Evolve the manifest from a list of permissions into contracts between services, with required and optional dependencies. |
+| Oxide: [Hubris](https://hubris.oxide.computer/) | Rust, isolated tasks, driver restarts and debugging with Humility, including system inspection and dumps. | Design recovery and diagnostics together with each driver. Its static configuration for microcontrollers does not carry over directly to a dynamic desktop. |
+| QNX: [priority inheritance in IPC](https://qnx.com/developers/docs/8.0/com.qnx.doc.neutrino.sys_arch/topic/ipc_Priority_inheritance_messages.html) | Server work receives priorities tied to those of its clients to bound priority inversion. | When AriCodeOS adds priorities, also consider IPC call chains. Changing the scheduler is not enough; nor would it by itself demonstrate hard real time. |
+| Ant Group and collaborators: [Asterinas/OSTD](https://www.usenix.org/conference/atc25/presentation/peng-yuke) | Rust framework that separates low-level operations from service code. | Strengthen safe APIs for memory, DMA and MMIO. Its [framekernel](https://asterinas.github.io/book/kernel/the-framekernel-architecture.html) shares an address space: copying that architecture would remove an important property of our current isolation. |
+| Community: [Redox OS](https://github.com/redox-os/book/blob/master/src/introduction.md) | General-purpose system in Rust, microkernel, Unix/POSIX oriented. | A reference for studying the effort behind the SDK, tooling and applications. Selective compatibility can ease ports without making POSIX the kernel architecture. |
+| Research: [LionsOS/UNSW](https://lionsos.org/) | Components on seL4, separation between drivers and multiplexing, queues and mostly static configuration. | Separate hardware transport, policy and clients. LionsOS describes itself as experimental and does not yet have a complete verification story; it must not be confused with the seL4 kernel proofs. |
 
-Otros dos referentes transversales: [WASI](https://wasi.dev/) define interfaces
-portables y un modelo de autoridad explícita para aplicaciones Wasm;
-[TUF](https://theupdateframework.io/docs/overview/) aborda autenticidad y frescura
-de actualizaciones, así como el impacto de claves comprometidas. Son útiles para
-evitar protocolos privados innecesarios y completar el modelo de actualización.
+Two other cross-cutting references: [WASI](https://wasi.dev/) defines portable
+interfaces and an explicit authority model for Wasm applications;
+[TUF](https://theupdateframework.io/docs/overview/) addresses authenticity and
+freshness of updates, as well as the impact of compromised keys. They help avoid
+unnecessary private protocols and complete the update model.
 
-## 2. Qué tenemos y qué significa realmente
+## 2. What we have and what it really means
 
-La base local consultada es [arquitectura](../architecture.md),
-[documento maestro](../../AriCodeOS.md), [SDK](../sdk.md),
-[hardware](../hardware.md), manifiestos y protocolos. «Implementado» aquí
-significa presente en el código/documentación, no madurez de producción.
+The local sources consulted are [architecture](../architecture.md),
+[master document](../../AriCodeOS.md), [SDK](../sdk.md),
+[hardware](../hardware.md), manifests and protocols. "Implemented" here means
+present in the code/documentation, not production maturity.
 
-| Área | Base existente | Siguiente escalón |
+| Area | Existing base | Next step |
 | --- | --- | --- |
-| Kernel | Rust `no_std`, UEFI, x86-64, memoria protegida, procesos, IPC, SMP. | Recurso por proceso, rendimiento bajo carga y validación física. |
-| Autoridad | Handles con derechos, revocación, broker, manifiestos y directorio privado de app. | Permisos por recurso/operación, concesiones temporales, política editable y explicación de denegaciones. |
-| Servicios y drivers | Drivers en ring 3, supervisión desde init, virtio, xHCI/HID y VT-d. | Recuperación de clientes, cierre de canales, hotplug y política cuando falta aislamiento DMA. |
-| Aplicaciones | SDK Rust y runtime propio; intérprete WASM con límites de pasos/profundidad. | Validación previa de módulos, interfaces útiles, compatibilidad y herramientas para terceros. |
-| Actualizaciones | Imágenes firmadas, slots A/B, intentos y rollback. | Secuencia completa entre arranques, cortes de energía, salud del sistema y migración de datos. |
-| Escritorio | Compositor, superficies, foco y entrada. | Terminal gráfico, texto internacional, portapapeles controlado y uso real con teclado USB. |
-| Almacenamiento y red | AriFS inicial, bloques virtio, IPv4/DHCP/TCP/DNS/HTTP. | Persistencia ante fallos, almacenamiento físico, red estable y TLS. |
-| Validación | Bibliotecas comprobables en host y escenarios QEMU con inyección de fallos. | Pruebas de duración, hardware, regresiones de rendimiento y fallos entre componentes. |
+| Kernel | Rust `no_std`, UEFI, x86-64, protected memory, processes, IPC, SMP. | Per-process resources, performance under load and physical validation. |
+| Authority | Handles with rights, revocation, broker, manifests and private app directory. | Per-resource/per-operation permissions, temporary grants, editable policy and explanation of denials. |
+| Services and drivers | Ring 3 drivers, supervision from init, virtio, xHCI/HID and VT-d. | Client recovery, channel shutdown, hotplug and policy when DMA isolation is missing. |
+| Applications | Rust SDK and own runtime; WASM interpreter with step/depth limits. | Up-front module validation, useful interfaces, compatibility and third-party tooling. |
+| Updates | Signed images, A/B slots, attempts and rollback. | Full sequence across boots, power cuts, system health and data migration. |
+| Desktop | Compositor, surfaces, focus and input. | Graphical terminal, international text, controlled clipboard and real use with a USB keyboard. |
+| Storage and network | Initial AriFS, virtio block, IPv4/DHCP/TCP/DNS/HTTP. | Crash-safe persistence, physical storage, stable networking and TLS. |
+| Validation | Host-testable libraries and QEMU scenarios with fault injection. | Long-running tests, hardware, performance regressions and cross-component failures. |
 
-Hay trabajo local para filtrar xHCI, comprobar que los servicios de entrada
-responden antes de publicarlos y limitar las esperas de `InputClient`, además de
-correcciones HID. Debe revisarse y probarse antes de dar por cerrada la
-[auditoría 4836023](2026-09-28-usb-hid-4836023.md). La propuesta siguiente
-generaliza ese trabajo; no lo considera ausente.
+There is local work to filter xHCI, check that input services respond before
+publishing them and bound `InputClient` waits, plus HID fixes. It must be
+reviewed and tested before closing the
+[4836023 audit](2026-09-28-usb-hid-4836023.md). The proposal below generalizes
+that work; it does not treat it as absent.
 
-La documentación contiene estados antiguos: README anuncia 0.1.0, la cabecera del
-documento maestro 0.0.7 y arquitectura 0.5.1; algunos puntos de «Deuda conocida»
-contradicen funciones ya descritas. Conviene mantener una tabla única con
-`propuesto / prototipo / validado en QEMU / validado en hardware` y enlazar sus
-pruebas. Una fase «completada» no significa que sus extensiones también lo estén.
+The documentation contains stale states: the README announces 0.1.0, the master
+document header 0.0.7 and the architecture doc 0.5.1; some "Known debt" items
+contradict features already described. It would be worth keeping a single table
+with `proposed / prototype / validated in QEMU / validated on hardware` and
+linking its tests. A "completed" phase does not mean its extensions are too.
 
-## 3. Mejoras prioritarias y cómo implementarlas
+## 3. Priority improvements and how to implement them
 
-Las prioridades siguientes expresan orden de desarrollo, no severidad de bugs.
-El esfuerzo es relativo: pequeño, medio o grande; no es una estimación de fechas.
+The priorities below express development order, not bug severity. Effort is
+relative: small, medium or large; it is not a date estimate.
 
-### A. Contrato común de vida y recuperación de servicios
+### A. Common service lifecycle and recovery contract
 
-**Prioridad inmediata; esfuerzo medio/grande.** La supervisión ya existe.
-Ampliarla con estados `Starting`, `Ready`, `Degraded`, `Stopping` y `Failed`,
-plazos de arranque, dependencias y un máximo de reinicios con espera creciente.
-Un servicio opcional ausente debe permitir continuar en modo degradado.
+**Immediate priority; medium/large effort.** Supervision already exists.
+Extend it with `Starting`, `Ready`, `Degraded`, `Stopping` and `Failed` states,
+startup deadlines, dependencies and a maximum number of restarts with increasing
+backoff. A missing optional service should allow continuing in degraded mode.
 
-En [init](../../services/init/src/main.rs), generalizar el mecanismo de entrada a
-un supervisor reutilizable. Introducir identidad de instancia —una generación
-de servicio distinta de la generación de los handles— y reconexión de clientes.
-Definir cómo se detiene el dispositivo, se retiran IRQ/DMA y se recuperan recursos
-antes de reiniciarlo. Si no puede detenerse DMA con garantías, mantener el
-dispositivo aislado y no reutilizar prematuramente sus buffers.
+In [init](../../services/init/src/main.rs), generalize the input mechanism into
+a reusable supervisor. Introduce instance identity (a service generation
+distinct from the handle generation) and client reconnection. Define how the
+device is stopped, IRQ/DMA withdrawn and resources reclaimed before restarting
+it. If DMA cannot be stopped with guarantees, keep the device isolated and do
+not reuse its buffers prematurely.
 
-**Aceptación:** provocar 100 reinicios de un driver de prueba mientras otro
-servicio sigue funcionando; comparar memoria, handles y mapeos antes/después.
-Comprobar tanto recuperación como agotamiento del límite de reinicios.
+**Acceptance:** trigger 100 restarts of a test driver while another service
+keeps running; compare memory, handles and mappings before/after. Check both
+recovery and exhaustion of the restart limit.
 
-### B. Semántica IPC de fallos, plazos y reintentos
+### B. IPC semantics for failures, deadlines and retries
 
-**Prioridad inmediata; esfuerzo medio/grande.** Ya hay timeouts y protocolos
-versionados. Falta convertirlos en un contrato uniforme del SDK.
+**Immediate priority; medium/large effort.** Timeouts and versioned protocols
+already exist. What is missing is turning them into a uniform SDK contract.
 
-En [protocolos](../../sdk/proto/src/lib.rs) y clientes, añadir identificador de
-petición, generación del servidor y plazo total. Definir cierre del lado servidor,
-despertar de clientes y respuesta tardía. La cancelación debe distinguir
-«no se ejecutó» de «resultado desconocido»; un timeout no deshace una operación.
-Para escrituras, evitar reintentos automáticos sin un mecanismo de deduplicación
-o transacción persistente. Para lecturas, documentar cuándo puede reintentarse.
+In [protocols](../../sdk/proto/src/lib.rs) and clients, add a request
+identifier, server generation and total deadline. Define server-side close,
+client wakeup and late responses. Cancellation must distinguish "not executed"
+from "outcome unknown"; a timeout does not undo an operation. For writes, avoid
+automatic retries without a deduplication mechanism or persistent transaction.
+For reads, document when a retry is allowed.
 
-**Aceptación:** retrasar una respuesta hasta después del timeout y emitir otra
-petición; nunca confundir ambas. Reiniciar un servidor durante una escritura y
-devolver un resultado definido, sin prometer ejecución exactamente una vez.
+**Acceptance:** delay a response until after the timeout and issue another
+request; never confuse the two. Restart a server during a write and return a
+defined result, without promising exactly-once execution.
 
-### C. Manifiestos con recursos concretos y dependencias
+### C. Manifests with concrete resources and dependencies
 
-**Prioridad siguiente; esfuerzo medio/grande.** Hoy
-[Manifest](../../libs/manifest/src/lib.rs) declara `name`, `caps` y `memory`;
-la cuota de memoria se refiere a buffers DMA. Extender con versión de esquema,
-servicios requeridos/opcionales, derechos y límites independientes.
+**Next priority; medium/large effort.** Today
+[Manifest](../../libs/manifest/src/lib.rs) declares `name`, `caps` and `memory`;
+the memory quota refers to DMA buffers. Extend it with a schema version,
+required/optional services, rights and independent limits.
 
-Empezar con un archivo seleccionado en modo lectura y red por servicio/destino;
-el broker entrega un endpoint restringido y el servidor aplica la restricción.
-Escribir el permiso en el manifiesto no basta para hacerlo efectivo. Mantener la
-autorización ligada a objetos y rutas; una identidad de cliente por sí sola no
-otorga autoridad. La concesión efectiva será la intersección de petición, política
-y capacidades disponibles. Inspiración: las rutas de Fuchsia citadas arriba.
+Start with a single selected file in read-only mode and network per
+service/destination; the broker hands out a restricted endpoint and the server
+enforces the restriction. Writing the permission in the manifest is not enough
+to make it effective. Keep authorization tied to objects and routes; a client
+identity alone does not grant authority. The effective grant will be the
+intersection of request, policy and available capabilities. Inspiration: the
+Fuchsia routes cited above.
 
-**Aceptación:** dos apps reciben objetos distintos, una solo lectura; cambiar la
-política afecta a nuevas concesiones según contrato, y revocar una concesión no
-revoca accidentalmente recursos ajenos. Una dependencia opcional ausente no
-impide arrancar; ciclos obligatorios se rechazan antes del lanzamiento.
+**Acceptance:** two apps receive different objects, one read-only; changing the
+policy affects new grants according to the contract, and revoking a grant does
+not accidentally revoke someone else's resources. A missing optional dependency
+does not prevent startup; required cycles are rejected before launch.
 
-### D. Cuotas completas y respuesta bajo saturación
+### D. Complete quotas and behaviour under saturation
 
-**Prioridad siguiente; esfuerzo grande.** CPU y handles ya están pendientes en
-el roadmap. Añadir límites de colas IPC, procesos, memoria compartida y recursos
-retenidos por servidores en nombre de un cliente. Definir quién paga un buffer
-transferido y reservar recursos para diagnóstico y recuperación.
+**Next priority; large effort.** CPU and handles are already pending on the
+roadmap. Add limits for IPC queues, processes, shared memory and resources held
+by servers on behalf of a client. Define who pays for a transferred buffer and
+reserve resources for diagnostics and recovery.
 
-Empezar por contadores y rechazo predecible en asignación; después presupuestos
-de CPU. Si se introducen prioridades, estudiar propagación en llamadas IPC y
-límites para que una app no se eleve indefinidamente. QNX aporta un precedente,
-no una implementación que pueda copiarse sin adaptar su semántica.
+Start with counters and predictable rejection at allocation; then CPU budgets.
+If priorities are introduced, study propagation across IPC calls and limits so
+an app cannot raise itself indefinitely. QNX provides a precedent, not an
+implementation that can be copied without adapting its semantics.
 
-**Aceptación:** una app que satura CPU, handles o peticiones recibe límites
-observables y otra sigue progresando dentro del objetivo medido de latencia.
+**Acceptance:** an app that saturates CPU, handles or requests hits observable
+limits while another keeps making progress within the measured latency target.
 
-### E. Diagnóstico consultable, no solo mensajes de serie
+### E. Queryable diagnostics, not just serial messages
 
-**Prioridad inmediata en versión mínima; esfuerzo medio.** La observabilidad ya
-figura en el roadmap. Implementar un esquema acotado de estado por servicio:
-versión, generación, salud, último error, reinicios, colas, memoria y tiempos.
-Empezar con `services --detail`, `caps` y exportación de un informe desde el shell;
-la interfaz gráfica puede venir después.
+**Immediate priority for a minimal version; medium effort.** Observability is
+already on the roadmap. Implement a bounded per-service status schema: version,
+generation, health, last error, restarts, queues, memory and timings. Start with
+`services --detail`, `caps` and exporting a report from the shell; the graphical
+interface can come later.
 
-Fuchsia ofrece [Inspect](https://fuchsia.dev/fuchsia-src/development/diagnostics/inspect)
-para publicar estado estructurado; Hubris aporta el ejemplo de inspección y
-volcados. Para AriCodeOS proponemos un buffer circular con identificadores de
-petición y build, sin contenido privado de archivos ni mensajes por defecto.
-El acceso al estado de otros procesos requerirá una capability de diagnóstico.
+Fuchsia offers [Inspect](https://fuchsia.dev/fuchsia-src/development/diagnostics/inspect)
+for publishing structured state; Hubris provides the example of inspection and
+dumps. For AriCodeOS we propose a ring buffer with request and build
+identifiers, with no private file contents or messages by default. Access to
+other processes' state will require a diagnostics capability.
 
-**Aceptación:** distinguir «espera hardware», «espera servicio» y «agotó cuota»
-desde un informe; desactivar el lector no bloquea al productor ni hace crecer
-memoria sin límite. Conservar símbolos del build permite interpretar el volcado.
+**Acceptance:** distinguish "waiting on hardware", "waiting on service" and
+"quota exhausted" from a report; disabling the reader neither blocks the
+producer nor grows memory without bound. Keeping the build symbols makes it
+possible to interpret the dump.
 
-### F. Actualización completa y datos recuperables
+### F. Complete update and recoverable data
 
-**Prioridad inmediata para las pruebas; implementación posterior por etapas;
-esfuerzo grande.** A/B y firmas ya existen. Añadir un escenario que conserve
-el mismo disco, instale B, reinicie, confirme B o vuelva a A. Inyectar interrupciones
-en cada fase de escritura y verificar datos, no solo mensajes de arranque.
+**Immediate priority for tests; staged implementation later; large effort.**
+A/B and signatures already exist. Add a scenario that keeps the same disk,
+installs B, reboots, and confirms B or falls back to A. Inject interruptions at
+every write phase and verify data, not just boot messages.
 
-La confirmación debe depender de servicios esenciales y una operación de lectura/
-escritura, no únicamente de que el kernel esté vivo. Versionar también los datos
-de apps: un rollback del sistema no revierte automáticamente una migración.
-Antes de distribuir por red, diseñar rotación de claves y metadatos de versiones
-con TUF como referente. Separar recuperación autorizada de rechazo de versiones
-obsoletas; cualquier política de caducidad necesita una fuente de tiempo y una
-regla explícita para equipos sin reloj fiable.
+Confirmation must depend on essential services and a read/write operation, not
+merely on the kernel being alive. Version app data too: a system rollback does
+not automatically revert a migration. Before distributing over the network,
+design key rotation and version metadata with TUF as a reference. Separate
+authorized recovery from rejection of obsolete versions; any expiry policy needs
+a time source and an explicit rule for machines without a reliable clock.
 
-**Aceptación:** cada corte lleva a una imagen válida o a recuperación explícita,
-sin confirmar una instalación incompleta ni destruir los datos anteriores.
-La firma de imagen no equivale a una cadena UEFI Secure Boot: la guía actual
-requiere desactivarlo. El cargador y la ruta de recuperación también forman parte
-de la futura cadena de confianza.
+**Acceptance:** every cut leads to a valid image or explicit recovery, without
+confirming an incomplete install or destroying previous data. Image signing is
+not equivalent to a UEFI Secure Boot chain: the current guide requires
+disabling it. The loader and the recovery path are also part of the future
+chain of trust.
 
-### G. Drivers y almacenamiento para una máquina concreta
+### G. Drivers and storage for a specific machine
 
-**Prioridad inmediata de planificación; esfuerzo grande.** Elegir el portátil
-de referencia y registrar PCI IDs, firmware, almacenamiento, USB e IOMMU.
-Implementar el controlador de almacenamiento que necesite esa máquina; AHCI,
-NVMe y USB mass storage son proyectos separados.
+**Immediate planning priority; large effort.** Choose the reference laptop and
+record PCI IDs, firmware, storage, USB and IOMMU. Implement the storage
+controller that machine needs; AHCI, NVMe and USB mass storage are separate
+projects.
 
-El firmware puede leer el pendrive para arrancar, pero eso no da al kernel acceso
-posterior al pendrive ni al disco. USB HID tampoco proporciona almacenamiento USB.
-Para entrada, añadir desconexión/reconexión, identificación individual, limpieza
-de teclas retenidas y después hubs y descriptores HID más generales.
+The firmware can read the USB stick to boot, but that does not give the kernel
+later access to the stick or the disk. USB HID does not provide USB storage
+either. For input, add disconnect/reconnect, per-device identification, clearing
+of held keys, and later hubs and more general HID descriptors.
 
-**Aceptación:** completar un arranque y sesión de entrada en el equipo elegido;
-probar persistencia sobre un soporte de pruebas cuando exista su driver. Publicar
-qué funciona en QEMU, qué funciona físicamente y qué modo carece de IOMMU.
+**Acceptance:** complete a boot and input session on the chosen machine; test
+persistence on a test medium once its driver exists. Publish what works in
+QEMU, what works physically and which mode lacks an IOMMU.
 
-### H. WASM útil para aplicaciones de terceros
+### H. WASM useful for third-party applications
 
-**Prioridad siguiente; esfuerzo grande.** El intérprete ya limita pasos,
-profundidad y memoria, pero no valida completamente el módulo antes de ejecutarlo
-y su API importada es mínima. Priorizar validador, manifiesto por módulo y recursos
-concedidos al módulo, separados de los privilegios del runner.
+**Next priority; large effort.** The interpreter already limits steps, depth and
+memory, but does not fully validate the module before running it and its
+imported API is minimal. Prioritize a validator, a per-module manifest and
+resources granted to the module, separate from the runner's privileges.
 
-Implementar primero archivos, reloj y una interfaz de aplicación pequeña;
-seleccionar un perfil WASI explícito y comprobarlo con herramientas externas.
-La documentación consultada ya describe WASI 0.3 y Component Model: no asumir que
-un módulo MVP actual lo soporta por añadir unas funciones. Comparar extender el
-intérprete con integrar un runtime compatible tras estudiar `no_std`, memoria,
-portabilidad, licencia y mantenimiento. JIT y SIMD pueden esperar a las métricas.
+Implement files, clock and a small application interface first; select an
+explicit WASI profile and check it with external tools. The documentation
+consulted already describes WASI 0.3 and the Component Model: do not assume a
+current MVP module supports it just by adding a few functions. Compare extending
+the interpreter with integrating a compatible runtime after studying `no_std`,
+memory, portability, licence and maintenance. JIT and SIMD can wait for metrics.
 
-**Aceptación:** ejecutar la misma app de prueba en AriCodeOS y un runtime de
-referencia usando exactamente el perfil declarado; rechazar módulos inválidos y
-accesos no concedidos. Una llamada importada bloqueante también necesita plazo:
-el contador de instrucciones no limita por sí solo ese tiempo.
+**Acceptance:** run the same test app on AriCodeOS and a reference runtime using
+exactly the declared profile; reject invalid modules and ungranted accesses. A
+blocking imported call also needs a deadline: the instruction counter alone does
+not bound that time.
 
-## 4. Áreas que conviene añadir o concretar en el backlog
+## 4. Areas worth adding to or refining in the backlog
 
-No se afirma que todas estén ausentes del proyecto. La columna «situación»
-separa previsiones existentes de detalles que este estudio propone desarrollar.
+This does not claim they are all absent from the project. The "status" column
+separates existing plans from details this study proposes to develop.
 
-| Área / situación | Implementación útil | Cómo comprobar el resultado |
+| Area / status | Useful implementation | How to check the result |
 | --- | --- | --- |
-| Persistencia: AriFS inicial | Contrato de `flush`, escrituras parciales, reemplazo atómico y recuperación; elegir journal o copy-on-write mediante ADR. | Cortes durante datos y metadatos, disco lleno y corrupción detectada. A/B no sustituye estas garantías. |
-| Red: deuda ya documentada | Renovación DHCP, cambios de enlace, DNS con plazos, buffers limitados y mejora gradual de TCP. TLS como biblioteca/servicio evaluado. | Pérdida/reordenación, cambio de dirección y reconexión. HTTPS exige confianza de certificados, tiempo y entropía. |
-| Energía: ampliar roadmap | Reloj monotónico, batería, temperatura, estados de reposo y suspensión/reanudación con contratos por driver. | Medir consumo y reanudar conservando temporizadores, DMA y estado de entrada coherentes. |
-| Escritorio: GUI inicial | Terminal gráfico conectado a USB, edición de línea, fuente Unicode, distribución española, foco y redimensionado. | Escribir, editar y guardar un archivo sin consola serie; probar ñ, tildes y pérdida de foco. |
-| Accesibilidad: concretar diseño | Escalado, alto contraste, navegación por teclado y árbol semántico para futuras ayudas. | Completar operaciones principales sin ratón; evitar que toda la UI sea solo píxeles sin semántica. |
-| Permisos de escritorio: ampliar sandbox | Selector de archivos que entregue acceso al archivo elegido; portapapeles, captura de pantalla y entrada global mediados. | Una app sin concesión no observa otras ventanas; retirar acceso tiene efecto definido. |
-| ABI y SDK: ya previstos | Esquema de protocolos, generación de codecs y matriz cliente/servidor por versión. | Compatibilidad N/N−1 cuando se prometa; versiones desconocidas fallan claramente. [FIDL](https://fuchsia.dev/fuchsia-src/reference/fidl/language/versioning) es un referente, no una garantía automática de ABI. |
-| Paquetes: ya previstos | Identidad por editor y contenido, manifiesto firmado, instalación transaccional y separación entre datos y binarios. | Instalar, interrumpir, actualizar y desinstalar sin pérdida accidental de datos ni ampliación silenciosa de permisos. [Fuchsia](https://fuchsia.dev/fuchsia-src/concepts/packages/package) ilustra almacenamiento por contenido. |
-| Memoria/CPU: ampliar medidas | Latencia IPC p50/p95/p99, colas, cambios de contexto y tiempo en locks; optimizar después con lotes y colas por CPU. | Comparación con igual build, carga, CPU y modo QEMU/KVM; no extrapolar TCG a hardware. |
-| Compartición de memoria: generalizar base existente | Separar buffers CPU compartidos de DMA; objetos tipados con dueño, permisos y duración de mapeos. | Revocación, cierre, transferencia y limpieza tras muerte sin uso de memoria ya liberada. |
-| Garantías: `unsafe` ya tiene política | Inventario de operaciones inseguras y contratos para MMIO/DMA; empezar modelos de estados por handles, IPC y actualización. | Pruebas de propiedades e intercalados, revisión de APIs seguras y correspondencia con el código. Las [pruebas de seL4 tienen supuestos explícitos](https://sel4.systems/Verification/assumptions.html); pruebas unitarias no equivalen a verificación formal. |
-| Entropía y secretos: base inicial | Fuentes de entropía adicionales, estado «no inicializado», API que indique indisponibilidad y almacenamiento de claves separado por app. | Comportamiento sin RDRAND y sin fuente fiable; no presentar TSC como garantía criptográfica. |
-| Cadena de construcción: concretar operación | Builds reproducibles, dependencias fijadas, procedencia de artefactos, inventario de licencias y símbolos por versión. | Dos builds controlados producen el mismo artefacto sin firma; explicar diferencias de herramientas y metadatos. |
-| CI y pruebas: roadmap existente | Ejecutor unit/QEMU con tiempo y espacio acotados, retención de evidencias y reproducción por commit. | Un fallo conserva logs y comando; no agota disco. No se ha encontrado `.github/`, pero eso no descarta CI externa. |
-| Compatibilidad: ya prevista | Portar unas aplicaciones mediante SDK/WASM; valorar libc parcial o VM para necesidades concretas. | Matriz de programas que realmente funcionan y coste de mantenimiento; posponer POSIX completo y Windows. |
-| Audio, Wi-Fi y GPU: ya contemplados | Elegir hardware y casos de uso; audio necesita plazos y permisos, Wi-Fi necesita reconexión/credenciales, GPU gestión de buffers. | Una app y un dispositivo de referencia por subsistema antes de ampliar soporte. |
+| Persistence: initial AriFS | `flush` contract, partial writes, atomic replace and recovery; choose journal or copy-on-write via ADR. | Cuts during data and metadata writes, full disk and detected corruption. A/B does not replace these guarantees. |
+| Network: debt already documented | DHCP renewal, link changes, DNS with deadlines, bounded buffers and gradual TCP improvement. TLS as an evaluated library/service. | Loss/reordering, address change and reconnection. HTTPS requires certificate trust, time and entropy. |
+| Power: extend roadmap | Monotonic clock, battery, temperature, idle states and suspend/resume with per-driver contracts. | Measure consumption and resume with timers, DMA and input state kept consistent. |
+| Desktop: initial GUI | Graphical terminal connected to USB, line editing, Unicode font, Spanish layout, focus and resizing. | Type, edit and save a file without a serial console; test ñ, accents and focus loss. |
+| Accessibility: refine design | Scaling, high contrast, keyboard navigation and a semantic tree for future assistive tools. | Complete the main operations without a mouse; avoid a UI that is only pixels with no semantics. |
+| Desktop permissions: extend sandbox | File picker that grants access to the chosen file; mediated clipboard, screen capture and global input. | An app without a grant cannot observe other windows; revoking access has a defined effect. |
+| ABI and SDK: already planned | Protocol schema, codec generation and a client/server matrix per version. | N/N−1 compatibility when promised; unknown versions fail clearly. [FIDL](https://fuchsia.dev/fuchsia-src/reference/fidl/language/versioning) is a reference, not an automatic ABI guarantee. |
+| Packages: already planned | Publisher- and content-based identity, signed manifest, transactional install and separation of data and binaries. | Install, interrupt, update and uninstall without accidental data loss or silent permission expansion. [Fuchsia](https://fuchsia.dev/fuchsia-src/concepts/packages/package) illustrates content-addressed storage. |
+| Memory/CPU: extend measurements | IPC latency p50/p95/p99, queues, context switches and time in locks; optimize later with batching and per-CPU queues. | Comparison with the same build, load, CPU and QEMU/KVM mode; do not extrapolate TCG to hardware. |
+| Memory sharing: generalize existing base | Separate shared CPU buffers from DMA; typed objects with owner, permissions and mapping lifetime. | Revocation, close, transfer and cleanup after death without use of already freed memory. |
+| Guarantees: `unsafe` already has a policy | Inventory of unsafe operations and contracts for MMIO/DMA; start state models for handles, IPC and update. | Property and interleaving tests, review of safe APIs and correspondence with the code. The [seL4 proofs have explicit assumptions](https://sel4.systems/Verification/assumptions.html); unit tests are not formal verification. |
+| Entropy and secrets: initial base | Additional entropy sources, an "uninitialized" state, an API that signals unavailability and per-app separated key storage. | Behaviour without RDRAND and without a reliable source; do not present the TSC as a cryptographic guarantee. |
+| Build chain: refine operation | Reproducible builds, pinned dependencies, artifact provenance, licence inventory and per-version symbols. | Two controlled builds produce the same unsigned artifact; explain tooling and metadata differences. |
+| CI and tests: existing roadmap | Unit/QEMU runner with bounded time and space, evidence retention and per-commit reproduction. | A failure keeps logs and command; it does not exhaust the disk. No `.github/` was found, but that does not rule out external CI. |
+| Compatibility: already planned | Port a few applications via SDK/WASM; consider a partial libc or a VM for specific needs. | Matrix of programs that actually work and maintenance cost; postpone full POSIX and Windows. |
+| Audio, Wi-Fi and GPU: already considered | Choose hardware and use cases; audio needs deadlines and permissions, Wi-Fi needs reconnection/credentials, GPU needs buffer management. | One reference app and device per subsystem before expanding support. |
 
-## 5. Ideas para diferenciar AriCodeOS
+## 5. Ideas to differentiate AriCodeOS
 
-Son propuestas de producto, no afirmaciones de novedad mundial.
+These are product proposals, not claims of world-first novelty.
 
-1. **Un sistema que explica un bloqueo.** Un comando o panel muestra la cadena
-   `app → servicio → driver`, el recurso esperado y el plazo. Requiere contratos
-   IPC y diagnóstico; empezaría como herramienta de texto, con acceso restringido.
-2. **Permisos para una tarea concreta.** El usuario selecciona un documento y
-   concede lectura a una app durante esa sesión. Se apoya en un selector de
-   confianza y endpoints restringidos; no requiere conceder todo el directorio.
-3. **Recuperación visible y comprobable.** Al reiniciar un driver, el sistema
-   informa qué funciones se recuperaron y cuáles perdieron estado. Una demo
-   reproducible puede demostrar continuidad de otras aplicaciones sin ocultar
-   interrupciones ni prometer recuperar una escritura desconocida.
-4. **Modo de diagnóstico desde USB.** Un entorno mínimo inventaría hardware,
-   explica qué drivers faltan y exporta un informe local. Empezar por pantalla y
-   serie; exportar a un archivo requerirá un driver de almacenamiento operativo.
-5. **SDK con ejecución en el host.** Implementaciones simuladas de servicios
-   permiten desarrollar y probar lógica de apps en Linux; QEMU comprueba ABI,
-   aislamiento y comportamiento real. Reduce el coste de participar en el proyecto.
-6. **Perfil de sistema reproducible.** Describir servicios, versiones, rutas y
-   límites en una configuración validada al construir. Usar el mismo perfil para
-   la imagen y las pruebas; más adelante visualizarlo como hace Sculpt.
-7. **Informe de salud por versión.** Publicar tiempos, consumo, recuperación,
-   dispositivos probados y límites conocidos junto a cada imagen. Separar lo
-   demostrado de lo previsto haría las comparaciones mucho más creíbles.
+1. **A system that explains a hang.** A command or panel shows the chain
+   `app → service → driver`, the awaited resource and the deadline. Requires IPC
+   contracts and diagnostics; it would start as a text tool, with restricted
+   access.
+2. **Permissions for a specific task.** The user selects a document and grants
+   an app read access for that session. It relies on a trusted picker and
+   restricted endpoints; it does not require granting the whole directory.
+3. **Visible, verifiable recovery.** When a driver restarts, the system reports
+   which functions recovered and which lost state. A reproducible demo can show
+   continuity of other applications without hiding interruptions or promising
+   to recover an unknown write.
+4. **Diagnostic mode from USB.** A minimal environment inventories hardware,
+   explains which drivers are missing and exports a local report. Start with
+   screen and serial; exporting to a file will require a working storage driver.
+5. **SDK with host execution.** Simulated service implementations let app logic
+   be developed and tested on Linux; QEMU checks ABI, isolation and real
+   behaviour. It lowers the cost of contributing to the project.
+6. **Reproducible system profile.** Describe services, versions, routes and
+   limits in a configuration validated at build time. Use the same profile for
+   the image and the tests; later visualize it the way Sculpt does.
+7. **Per-release health report.** Publish timings, consumption, recovery, tested
+   devices and known limits alongside each image. Separating what is
+   demonstrated from what is planned would make comparisons much more credible.
 
-## 6. Secuencia recomendada
+## 6. Recommended sequence
 
-| Etapa | Resultado entregable | Dependencias / puerta de salida |
+| Stage | Deliverable | Dependencies / exit gate |
 | --- | --- | --- |
-| 0. Consolidar | Revisar los cambios locales de USB, ejecutar regresiones y actualizar el estado de capacidades. | Auditoría resuelta con evidencia; no deducirlo de que exista un parche. |
-| 1. Recuperación observable | Contrato común de servicios, peticiones correlacionadas, diagnóstico mínimo y pruebas de muerte/reinicio. | Sin esperas huérfanas; recursos regresan al nivel esperado; estado degradado explícito. |
-| 2. Una sesión útil | Terminal con USB, equipo de referencia y ruta de persistencia seleccionada y probada. | Escribir y recuperar un archivo, apagar/reiniciar y reproducir la sesión en el equipo soportado. |
-| 3. Límites y actualización | Cuotas adicionales, permisos por recurso, cortes de escritura y actualización entre arranques. | Otra app sigue funcionando bajo carga; rollback conserva datos compatibles. |
-| 4. Aplicaciones externas | SDK reproducible, perfil WASM/WASI documentado, paquetes y compatibilidad controlada. | Una app desarrollada fuera del árbol se construye, instala, ejecuta y actualiza. |
-| 5. Optimización y ampliación | Rendimiento, energía, más dispositivos, audio y compatibilidad adicional. | Cada ampliación responde a una carga o necesidad concreta y tiene hardware/pruebas de referencia. |
+| 0. Consolidate | Review the local USB changes, run regressions and update the capability status. | Audit resolved with evidence; do not infer it from the existence of a patch. |
+| 1. Observable recovery | Common service contract, correlated requests, minimal diagnostics and death/restart tests. | No orphaned waits; resources return to the expected level; explicit degraded state. |
+| 2. A useful session | Terminal with USB, reference machine and a selected, tested persistence path. | Write and recover a file, shut down/reboot and reproduce the session on the supported machine. |
+| 3. Limits and update | Additional quotas, per-resource permissions, write cuts and update across boots. | Another app keeps working under load; rollback preserves compatible data. |
+| 4. External applications | Reproducible SDK, documented WASM/WASI profile, packages and controlled compatibility. | An app developed outside the tree is built, installed, run and updated. |
+| 5. Optimization and expansion | Performance, power, more devices, audio and additional compatibility. | Each expansion answers a concrete workload or need and has reference hardware/tests. |
 
-Las investigaciones pueden solaparse; no conviene abrir a la vez nuevos frentes
-de GPU, Wi-Fi, navegador, JIT, POSIX completo y múltiples arquitecturas. El primer
-objetivo demostrable propuesto es una sesión local útil que sobreviva al fallo
-de un componente y pueda actualizarse conservando sus datos.
+Research tracks can overlap; it is not advisable to open new fronts on GPU,
+Wi-Fi, browser, JIT, full POSIX and multiple architectures at the same time. The
+first proposed demonstrable goal is a useful local session that survives the
+failure of a component and can be updated while preserving its data.
 
-Cada implementación debe entrar por su propia rama y ADR cuando cambie un
-contrato, siguiendo [WORKFLOW](../WORKFLOW.md). Este estudio no cambia el roadmap
-oficial ni da por implementada ninguna propuesta.
+Each implementation should land through its own branch, plus an ADR when it
+changes a contract, following [WORKFLOW](../WORKFLOW.md). This study does not
+change the official roadmap nor treat any proposal as implemented.

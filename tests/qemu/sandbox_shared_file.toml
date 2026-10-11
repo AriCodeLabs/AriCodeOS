@@ -1,10 +1,10 @@
-# Etapa 3 (permisos por recurso, ADR 0016): el manifiesto de notes_reader pide
-# un fichero concreto en modo lectura; el broker le entrega un endpoint de fsd
-# ligado a ese fichero, fsd aplica la restriccion (Denied al escribir, el
-# resto invisible) y hello_app, con su directorio privado, recibe un objeto
-# distinto en la misma sesion.
+# Stage 3 (per-resource permissions, ADR 0016): the notes_reader manifest requests
+# a specific file in read mode; the broker hands it an fsd endpoint
+# bound to that file, fsd enforces the restriction (Denied on write, everything
+# else invisible) and hello_app, with its private directory, gets a different
+# object in the same session.
 name = "sandbox.shared_file"
-description = "read_files: un fichero compartido de solo lectura por app, aplicado por fsd"
+description = "read_files: one shared read-only file per app, enforced by fsd"
 level = "full"
 areas = ["sandbox", "filesystem", "shell", "init"]
 cmdline = "qemu_exit shell"
@@ -14,14 +14,14 @@ stdin = ["run notes_reader", "run hello_app 3", "shutdown"]
 [expect]
 exit = 33
 serial_contains = [
-    "AriInit: lanzar notes_reader con manifiesto [system] memoria 64 KiB solo lectura [hola.txt]",
-    "fsd: fichero compartido 'hola.txt' (solo lectura)",
+    "AriInit: launch notes_reader with manifest [system] memory 64 KiB read-only [hola.txt]",
+    "fsd: shared file 'hola.txt' (read-only)",
     "notes_reader: hola.txt (17 bytes): Hola desde AriFS",
-    "notes_reader: solo lectura respetada (Denied en create, write, replace y flush; README invisible)",
-    "run: notes_reader termino con 0",
-    "fsd: directorio privado 'hello_app'",
-    "hello_app: fichero privado 'notas' escrito y leido",
-    "run: hello_app termino con 0",
+    "notes_reader: read-only enforced (Denied on create, write, replace and flush; README invisible)",
+    "run: notes_reader exited with 0",
+    "fsd: private directory 'hello_app'",
+    "hello_app: private file 'notas' written and read",
+    "run: hello_app exited with 0",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "pude escribir", "pude abrir", "veo mas de un fichero", "denegado"]
+serial_absent = ["KERNEL PANIC", "pude escribir", "pude abrir", "I see more than one file", "denied"]

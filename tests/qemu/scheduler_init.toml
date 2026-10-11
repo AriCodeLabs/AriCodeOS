@@ -1,10 +1,10 @@
 name = "scheduler.init"
-description = "scheduler round robin preemptivo anunciado con su quantum"
+description = "preemptive round-robin scheduler announced with its quantum"
 level = "smoke"
 areas = ["scheduler", "threads"]
 cmdline = "qemu_exit"
 
 [expect]
 exit = 33
-serial_contains = ["scheduler round robin preemptivo, quantum 20 ms", "ARICODEOS_KERNEL_READY"]
+serial_contains = ["round-robin scheduler, quantum 20 ms", "ARICODEOS_KERNEL_READY"]
 serial_absent = ["KERNEL PANIC"]

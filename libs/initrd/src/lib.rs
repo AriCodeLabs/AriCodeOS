@@ -1,13 +1,13 @@
-//! Initrd de AriCodeOS (Fase 15): archivo plano de ficheros con nombre.
+//! AriCodeOS initrd (Phase 15): flat archive of named files.
 //!
 //! ```text
-//! cabecera   "ARIRD\x01"  (6 bytes)  count: u16 LE
-//! entrada    name_len: u16 LE | name (UTF-8) | data_len: u32 LE | pad a 8 | data | pad a 8
+//! header     "ARIRD\x01"  (6 bytes)  count: u16 LE
+//! entry      name_len: u16 LE | name (UTF-8) | data_len: u32 LE | pad to 8 | data | pad to 8
 //! ```
 //!
-//! El lector no copia nada: devuelve slices sobre la imagen. Los datos de
-//! cada fichero empiezan alineados a 8 bytes dentro de la imagen; como el
-//! kernel carga la imagen alineada a página, cada ELF queda alineado a 8.
+//! The reader copies nothing: it returns slices over the image. The data of
+//! each file starts 8-byte aligned within the image; since the
+//! kernel loads the image page aligned, every ELF ends up 8-byte aligned.
 
 #![no_std]
 
@@ -48,7 +48,7 @@ impl<'a> Initrd<'a> {
         }
         let count = u16::from_le_bytes([data[6], data[7]]) as usize;
         let initrd = Self { data, count };
-        // Validar la estructura completa una sola vez.
+        // Validate the whole structure once.
         let mut n = 0;
         for e in initrd.entries() {
             e?;
@@ -121,7 +121,7 @@ impl<'a> Entries<'a> {
     }
 }
 
-/// Escritor para herramientas de host.
+/// Writer for host tools.
 #[cfg(feature = "write")]
 pub fn build(files: &[(&str, &[u8])]) -> Result<std::vec::Vec<u8>, InitrdError> {
     use std::vec::Vec;
@@ -153,19 +153,19 @@ mod tests {
         let img = build(&[
             ("init", b"\x7FELF"),
             ("hello", b"abcdefghijk"),
-            ("vacio", b""),
+            ("empty", b""),
         ])
         .unwrap();
         let rd = Initrd::parse(&img).unwrap();
         assert_eq!(rd.len(), 3);
         assert_eq!(rd.find("init"), Some(&b"\x7FELF"[..]));
         assert_eq!(rd.find("hello"), Some(&b"abcdefghijk"[..]));
-        assert_eq!(rd.find("vacio"), Some(&b""[..]));
-        assert_eq!(rd.find("nada"), None);
+        assert_eq!(rd.find("empty"), Some(&b""[..]));
+        assert_eq!(rd.find("nothing"), None);
         for e in rd.entries() {
             let e = e.unwrap();
             let off = e.data.as_ptr() as usize - img.as_ptr() as usize;
-            assert_eq!(off % 8, 0, "{} no alineado", e.name);
+            assert_eq!(off % 8, 0, "{} not aligned", e.name);
         }
     }
 
@@ -181,10 +181,10 @@ mod tests {
         bad[0] = b'X';
         assert_eq!(Initrd::parse(&bad).err(), Some(InitrdError::BadMagic));
         let mut more = img.clone();
-        more[6] = 2; // anuncia dos entradas, hay una
+        more[6] = 2; // announces two entries, there is one
         assert_eq!(Initrd::parse(&more).err(), Some(InitrdError::Truncated));
         assert_eq!(
-            build(&[("con/barra", b"")]).err(),
+            build(&[("with/slash", b"")]).err(),
             Some(InitrdError::BadName)
         );
         assert!(Initrd::parse(b"ARI").is_err());

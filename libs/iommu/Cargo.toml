@@ -3,7 +3,7 @@ name = "aricode-iommu"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Estructuras de Intel VT-d: registros, tabla raíz y de contexto, paginación de segundo nivel y registros de fallo (no_std)"
+description = "Intel VT-d structures: registers, root and context tables, second-level paging and fault records (no_std)"
 
 [lib]
 path = "src/lib.rs"

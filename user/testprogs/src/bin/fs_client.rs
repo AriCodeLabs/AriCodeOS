@@ -1,5 +1,5 @@
-//! Cliente del servicio de ficheros (Fase 20): lista, abre, lee, crea,
-//! escribe, reemplaza, hace flush y relee por IPC. Handles: 0x10004 = fsd (WRITE), 0x10005 = HARDWARE.
+//! File service client (Phase 20): lists, opens, reads, creates, writes,
+//! replaces, flushes and reads back over IPC. Handles: 0x10004 = fsd (WRITE), 0x10005 = HARDWARE.
 #![no_std]
 #![no_main]
 
@@ -14,7 +14,7 @@ fn main(_arg: u64) -> u64 {
     let Ok(mut fs) = FsClient::new(FSD, HW) else {
         return 1;
     };
-    // 1. Listado.
+    // 1. Listing.
     let mut name = [0u8; 32];
     let mut count = 0;
     let mut saw_hola = false;
@@ -33,7 +33,7 @@ fn main(_arg: u64) -> u64 {
     if count < 2 || !saw_hola {
         return 2;
     }
-    // 2. Leer hola.txt.
+    // 2. Read hola.txt.
     let Ok(fd) = fs.open("hola.txt") else {
         return 3;
     };
@@ -45,20 +45,20 @@ fn main(_arg: u64) -> u64 {
     if &data[..n] != b"Hola desde AriFS\n" {
         return 5;
     }
-    sys::print(b"fs_client: hola.txt dice: ");
+    sys::print(b"fs_client: hola.txt says: ");
     sys::print(&data[..n]);
     let _ = fs.close(fd);
-    // 3. Crear, escribir, releer. Con un disco que ya arranco antes el
-    //    fichero existe: se abre y se sobrescribe.
+    // 3. Create, write, read back. On a disk that already booted before, the
+    //    file exists: it is opened and overwritten.
     let fd = match fs.create("nuevo.txt") {
         Ok(fd) => fd,
         Err(FsError::Status(Status::Exists)) => {
-            sys::print(b"fs_client: nuevo.txt ya existia (disco persistente)\n");
+            sys::print(b"fs_client: nuevo.txt already existed (persistent disk)\n");
             let Ok(fd) = fs.open("nuevo.txt") else {
                 return 6;
             };
-            // Vaciarlo para que las comprobaciones siguientes vean lo mismo
-            // que en un disco recien formateado.
+            // Empty it so the following checks see the same as on a freshly
+            // formatted disk.
             if fs.replace(fd, b"").is_err() {
                 return 6;
             }
@@ -72,8 +72,8 @@ fn main(_arg: u64) -> u64 {
     if fs.read(fd, 8, &mut data) != Ok(12) || &data[..12] != b"desde ring 3" {
         return 8;
     }
-    // 4. Reemplazo atomico (ADR 0014): el contenido entero cambia de una vez
-    //    y queda duradero; flush explicito de las escrituras anteriores.
+    // 4. Atomic replace (ADR 0014): the whole content changes at once and is
+    //    durable; explicit flush of the previous writes.
     if fs.replace(fd, b"contenido reemplazado de una vez") != Ok(32) {
         return 12;
     }
@@ -83,8 +83,8 @@ fn main(_arg: u64) -> u64 {
     if fs.flush().is_err() {
         return 14;
     }
-    sys::print(b"fs_client: reemplazo atomico y flush ok\n");
-    // 5. Errores: crear duplicado, abrir inexistente, fd cerrado.
+    sys::print(b"fs_client: atomic replace and flush ok\n");
+    // 5. Errors: duplicate create, open of a missing file, closed fd.
     if fs.create("nuevo.txt").is_ok() {
         return 9;
     }
@@ -94,7 +94,7 @@ fn main(_arg: u64) -> u64 {
     if fs.close(fd).is_err() || fs.read(fd, 0, &mut data).is_ok() || fs.replace(fd, b"x").is_ok() {
         return 11;
     }
-    sys::print(b"fs_client: listar, leer, crear y escribir por IPC ok\n");
+    sys::print(b"fs_client: list, read, create and write over IPC ok\n");
     0
 }
 

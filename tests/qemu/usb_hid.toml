@@ -1,9 +1,9 @@
-# Fase 25 (segunda parte): xHCI con teclado y raton USB HID. El kernel entrega
-# el controlador al driver usb_input; el host inyecta por QMP "hola" + Enter,
-# un movimiento y un clic (van al teclado y raton USB, los manejadores mas
-# recientes) y input_client los lee por IPC.
+# Phase 25 (part two): xHCI with a USB HID keyboard and mouse. The kernel hands
+# the controller to the usb_input driver; the host injects over QMP "hola" + Enter,
+# a move and a click (they go to the USB keyboard and mouse, the most recent
+# handlers) and input_client reads them over IPC.
 name = "usb.hid"
-description = "test=usb_hid: xHCI + teclado y raton USB HID (protocolo de arranque) con eventos inyectados por QMP"
+description = "test=usb_hid: xHCI + USB HID keyboard and mouse (boot protocol) with events injected via QMP"
 level = "full"
 areas = ["usb", "input", "drivers"]
 cmdline = "qemu_exit test=usb_hid"
@@ -19,16 +19,16 @@ click = "left"
 [expect]
 exit = 33
 serial_contains = [
-    "usb-input: xHCI listo (",
-    "teclado HID (protocolo de arranque, 8 bytes por informe",
-    "raton HID (protocolo de arranque,",
-    "usb-input: dispositivo listo: USB HID Keyboard+Mouse",
-    "input_client: dispositivo 0: USB HID Keyboard+Mouse",
-    "input_client: teclado: hola",
-    "input_client: raton: boton izquierdo pulsado",
-    "input_client: raton: dx=10 dy=-5",
-    "input_client: eventos de entrada por IPC ok",
+    "usb-input: xHCI ready (",
+    "HID keyboard (boot protocol, 8 bytes per report",
+    "HID mouse (boot protocol,",
+    "usb-input: device ready: USB HID Keyboard+Mouse",
+    "input_client: device 0: USB HID Keyboard+Mouse",
+    "input_client: keyboard: hola",
+    "input_client: mouse: left button pressed",
+    "input_client: mouse: dx=10 dy=-5",
+    "input_client: input events over IPC ok",
     "usb hid selftest ok",
     "ARICODEOS_KERNEL_READY",
 ]
-serial_absent = ["KERNEL PANIC", "USER FAULT", "nadie tecleo", "fallo en la inicializacion"]
+serial_absent = ["KERNEL PANIC", "USER FAULT", "nobody typed", "initialization failed"]

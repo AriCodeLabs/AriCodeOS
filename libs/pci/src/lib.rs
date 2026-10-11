@@ -1,5 +1,5 @@
-//! PCI Express (sección 30): todo lo que se puede calcular y decodificar sin
-//! tocar hardware. El kernel aporta las lecturas del espacio de configuración.
+//! PCI Express (section 30): everything that can be computed and decoded without
+//! touching hardware. The kernel provides the configuration space reads.
 
 #![no_std]
 
@@ -7,7 +7,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-/// Dirección de una función PCI.
+/// Address of a PCI function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Address {
     pub segment: u16,
@@ -17,7 +17,7 @@ pub struct Address {
 }
 
 impl Address {
-    /// Desplazamiento dentro de la región ECAM del segmento.
+    /// Offset within the segment's ECAM region.
     pub const fn ecam_offset(&self, bus_start: u8) -> u64 {
         (((self.bus - bus_start) as u64) << 20)
             | ((self.device as u64) << 15)
@@ -31,7 +31,7 @@ impl core::fmt::Display for Address {
     }
 }
 
-/// Cabecera común (primeros 64 bytes) de una función.
+/// Common header (first 64 bytes) of a function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
     pub vendor: u16,
@@ -57,7 +57,7 @@ fn u32_at(d: &[u8], o: usize) -> u32 {
 }
 
 impl Header {
-    /// `None` si no hay función (vendor 0xFFFF) o el slice es corto.
+    /// `None` if there is no function (vendor 0xFFFF) or the slice is short.
     pub fn parse(cfg: &[u8]) -> Option<Self> {
         if cfg.len() < 64 {
             return None;
@@ -84,7 +84,7 @@ impl Header {
         self.status & STATUS_CAPABILITIES != 0
     }
 
-    /// Bus secundario de un puente PCI-PCI (tipo de cabecera 1).
+    /// Secondary bus of a PCI-PCI bridge (header type 1).
     pub fn secondary_bus(cfg: &[u8]) -> Option<u8> {
         (cfg.len() > 0x19 && cfg[14] & 0x7F == 1).then(|| cfg[0x19])
     }
@@ -94,9 +94,9 @@ impl Header {
             (0x01, 0x01) => "IDE",
             (0x01, 0x06) => "SATA (AHCI)",
             (0x01, 0x08) => "NVMe",
-            (0x01, _) => "almacenamiento",
+            (0x01, _) => "storage",
             (0x02, 0x00) => "Ethernet",
-            (0x02, _) => "red",
+            (0x02, _) => "network",
             (0x03, _) => "VGA/display",
             (0x04, _) => "multimedia",
             (0x06, 0x00) => "host bridge",
@@ -105,11 +105,11 @@ impl Header {
             (0x06, _) => "bridge",
             (0x0C, 0x03) => "USB",
             (0x0C, 0x05) => "SMBus",
-            (0x0C, _) => "bus serie",
-            (0x09, 0x00) => "teclado",
-            (0x09, 0x02) => "raton",
-            (0x09, _) => "entrada",
-            _ => "otro",
+            (0x0C, _) => "serial bus",
+            (0x09, 0x00) => "keyboard",
+            (0x09, 0x02) => "mouse",
+            (0x09, _) => "input",
+            _ => "other",
         }
     }
 }
@@ -126,7 +126,7 @@ pub enum Bar {
     },
 }
 
-/// Decodifica los BARs de una cabecera tipo 0 (6) o tipo 1 (2).
+/// Decodes the BARs of a type 0 (6) or type 1 (2) header.
 pub fn bars(cfg: &[u8]) -> Vec<(usize, Bar)> {
     let count = if cfg.len() > 14 && cfg[14] & 0x7F == 1 {
         2
@@ -168,7 +168,7 @@ pub fn bars(cfg: &[u8]) -> Vec<(usize, Bar)> {
     out
 }
 
-/// Tamaño de un BAR a partir del valor leído tras escribir todo unos.
+/// Size of a BAR from the value read back after writing all ones.
 pub const fn bar_size_from_probe(probed: u32, is_io: bool) -> u32 {
     let mask = if is_io { !0x3u32 } else { !0xFu32 };
     (!(probed & mask)).wrapping_add(1)
@@ -185,7 +185,7 @@ pub struct Capability {
     pub offset: u8,
 }
 
-/// Recorre la lista de capabilities (tolerante a bucles).
+/// Walks the capability list (loop tolerant).
 pub fn capabilities(cfg: &[u8]) -> Vec<Capability> {
     let mut out = Vec::new();
     let Some(h) = Header::parse(cfg) else {
@@ -236,11 +236,11 @@ mod tests {
             header_type: 0,
             multifunction: false,
         };
-        assert_eq!(h.class_name(), "teclado");
+        assert_eq!(h.class_name(), "keyboard");
         h.subclass = 0x02;
-        assert_eq!(h.class_name(), "raton");
+        assert_eq!(h.class_name(), "mouse");
         h.subclass = 0x80;
-        assert_eq!(h.class_name(), "entrada");
+        assert_eq!(h.class_name(), "input");
     }
     use alloc::vec;
 
@@ -297,8 +297,8 @@ mod tests {
         let mut c = config(0x1234, 0x1111, 0x03, 0x00, 0);
         c[0x10..0x14].copy_from_slice(&0xFD00_0008u32.to_le_bytes()); // mem32 prefetchable
         c[0x14..0x18].copy_from_slice(&0xC001u32.to_le_bytes()); // io
-        c[0x18..0x1C].copy_from_slice(&0x0000_000Cu32.to_le_bytes()); // mem64 prefetchable, bajo
-        c[0x1C..0x20].copy_from_slice(&0x0000_0008u32.to_le_bytes()); // alto
+        c[0x18..0x1C].copy_from_slice(&0x0000_000Cu32.to_le_bytes()); // mem64 prefetchable, low
+        c[0x1C..0x20].copy_from_slice(&0x0000_0008u32.to_le_bytes()); // high
         let b = bars(&c);
         assert_eq!(
             b[0],
@@ -336,9 +336,9 @@ mod tests {
         c[0x40] = CAP_MSIX;
         c[0x41] = 0x50;
         c[0x50] = CAP_MSI;
-        c[0x51] = 0x40; // bucle
+        c[0x51] = 0x40; // loop
         let caps = capabilities(&c);
-        assert_eq!(caps.len(), 48, "el guardia corta el bucle");
+        assert_eq!(caps.len(), 48, "the guard breaks the loop");
         assert_eq!(
             caps[0],
             Capability {

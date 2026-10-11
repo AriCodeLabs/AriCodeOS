@@ -1,10 +1,10 @@
 name = "user.kernel_read_killed"
-description = "leer memoria del kernel desde ring 3 -> #PF, proceso terminado, kernel intacto"
+description = "reading kernel memory from ring 3 -> #PF, process killed, kernel intact"
 level = "full"
 areas = ["user"]
 cmdline = "qemu_exit test=user_kernel_read"
 
 [expect]
 exit = 33
-serial_contains = ["USER FAULT #PF (14)", "cr2=0xffffffff80000000", "terminado por fallo: #PF lectura", "terminado: Killed", "ARICODEOS_KERNEL_READY"]
-serial_absent = ["KERNEL PANIC", "salio con codigo"]
+serial_contains = ["USER FAULT #PF (14)", "cr2=0xffffffff80000000", "killed: #PF read", "exited: Killed", "ARICODEOS_KERNEL_READY"]
+serial_absent = ["KERNEL PANIC", "exited with code"]

@@ -3,7 +3,7 @@ name = "ari-virtio-input"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Driver virtio-input (teclado, raton) y servicio de eventos de entrada de AriCodeOS en espacio de usuario"
+description = "AriCodeOS user-space virtio-input driver (keyboard, mouse) and input event service"
 publish = false
 
 [[bin]]

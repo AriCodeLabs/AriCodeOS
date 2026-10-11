@@ -1,33 +1,33 @@
-//! Heap del kernel (Fase 7): lista enlazada de bloques libres, first-fit,
-//! con fusión de vecinos al liberar.
+//! Kernel heap (Phase 7): linked list of free blocks, first-fit,
+//! coalescing neighbours on free.
 //!
-//! Cada asignación lleva una cabecera de 16 bytes justo antes del puntero
-//! devuelto con el bloque real que ocupa, de modo que `deallocate` no depende
-//! del `Layout` que le pasen y las alineaciones grandes no pierden memoria.
+//! Every allocation carries a 16-byte header right before the returned
+//! pointer with the actual block it occupies, so `deallocate` does not depend
+//! on the `Layout` it is given and large alignments do not leak memory.
 //!
-//! `no_std`, sin `alloc`. Se prueba en host sobre un buffer del heap del
-//! proceso. Es el paso "linked-list allocator" de la sección 16 del documento
-//! maestro; el slab/size-class llegará cuando haya métricas que lo pidan.
+//! `no_std`, no `alloc`. Tested on the host over a buffer from the process
+//! heap. This is the "linked-list allocator" step of section 16 of the master
+//! document; slab/size classes will come when metrics call for them.
 
 #![no_std]
 
 use core::alloc::Layout;
 use core::ptr::NonNull;
 
-/// Granularidad de tamaños y alineación mínima del heap.
+/// Size granularity and minimum alignment of the heap.
 pub const GRANULE: usize = 16;
-/// Bloque libre mínimo: debe albergar un `FreeBlock`.
+/// Minimum free block: must hold a `FreeBlock`.
 pub const MIN_BLOCK: usize = 32;
 const HEADER: usize = 16;
 
-/// Nodo de la lista de bloques libres, situado al principio del bloque.
+/// Free-list node, placed at the start of the block.
 #[repr(C)]
 struct FreeBlock {
     size: usize,
     next: Option<NonNull<FreeBlock>>,
 }
 
-/// Cabecera de una asignación viva, justo antes del puntero devuelto.
+/// Header of a live allocation, right before the returned pointer.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct AllocHeader {
@@ -37,11 +37,11 @@ struct AllocHeader {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HeapStats {
-    /// Bytes administrados (suma de regiones añadidas).
+    /// Managed bytes (sum of added regions).
     pub total: usize,
-    /// Bytes en bloques libres.
+    /// Bytes in free blocks.
     pub free: usize,
-    /// Asignaciones vivas.
+    /// Live allocations.
     pub allocations: usize,
 }
 
@@ -50,8 +50,8 @@ pub struct Heap {
     stats: HeapStats,
 }
 
-// SAFETY: el heap no comparte nada por sí mismo; el llamador serializa el
-// acceso (en el kernel, `SingleCpu`/spinlock).
+// SAFETY: the heap shares nothing by itself; the caller serialises
+// access (in the kernel, `SingleCpu`/spinlock).
 unsafe impl Send for Heap {}
 
 impl Heap {
@@ -70,21 +70,21 @@ impl Heap {
         self.stats
     }
 
-    /// Añade `[start, start+size)` al heap como bloque libre.
+    /// Adds `[start, start+size)` to the heap as a free block.
     ///
     /// # Safety
     ///
-    /// La región debe ser memoria válida, escribible, alineada a `GRANULE`,
-    /// de tamaño múltiplo de `GRANULE` y >= `MIN_BLOCK`, de uso exclusivo del
-    /// heap mientras viva, y no solapar regiones ya añadidas.
+    /// The region must be valid, writable memory, aligned to `GRANULE`,
+    /// with a size that is a multiple of `GRANULE` and >= `MIN_BLOCK`, used
+    /// exclusively by the heap while it lives, and not overlapping regions already added.
     pub unsafe fn add_region(&mut self, start: usize, size: usize) {
         assert!(start.is_multiple_of(GRANULE) && size.is_multiple_of(GRANULE) && size >= MIN_BLOCK);
         self.stats.total += size;
         self.insert_free(start, size);
     }
 
-    /// Inserta un bloque libre manteniendo la lista ordenada por dirección y
-    /// fusionándolo con sus vecinos.
+    /// Inserts a free block keeping the list sorted by address and
+    /// coalescing it with its neighbours.
     unsafe fn insert_free(&mut self, start: usize, size: usize) {
         self.stats.free += size;
         let mut prev: Option<NonNull<FreeBlock>> = None;
@@ -96,14 +96,14 @@ impl Heap {
             prev = Some(c);
             cur = c.as_ref().next;
         }
-        // Fusionar con el siguiente.
+        // Coalesce with the next one.
         let (mut size, next) = match cur {
             Some(n) if start + size == n.as_ptr() as usize => {
                 (size + n.as_ref().size, n.as_ref().next)
             }
             _ => (size, cur),
         };
-        // Fusionar con el anterior.
+        // Coalesce with the previous one.
         match prev {
             Some(mut p) if p.as_ptr() as usize + p.as_ref().size == start => {
                 size += p.as_ref().size;
@@ -122,36 +122,36 @@ impl Heap {
         }
     }
 
-    /// Tamaño y alineación efectivos. `None` si el redondeo no es representable.
+    /// Effective size and alignment. `None` if the rounding is not representable.
     fn round(layout: Layout) -> Option<(usize, usize)> {
         let size = layout.size().max(1).checked_next_multiple_of(GRANULE)?;
         let align = layout.align().max(GRANULE);
         Some((size, align))
     }
 
-    /// `None` si no hay bloque adecuado o si la petición no es representable
-    /// en el espacio de direcciones. Nunca modifica la lista antes de haber
-    /// comprobado que la asignación cabe.
+    /// `None` if there is no suitable block or if the request is not
+    /// representable in the address space. Never modifies the list before
+    /// checking that the allocation fits.
     pub fn allocate(&mut self, layout: Layout) -> Option<NonNull<u8>> {
         let (size, align) = Self::round(layout)?;
         self.allocate_rounded(size, align)
     }
 
-    /// Núcleo de `allocate` con `size` múltiplo de `GRANULE` y `align`
-    /// potencia de dos >= `GRANULE`. Separado para poder probar la aritmética
-    /// con valores que `Layout` no admite pero que en la mitad alta del
-    /// espacio virtual del kernel aparecen con layouts válidos.
+    /// Core of `allocate` with `size` a multiple of `GRANULE` and `align` a
+    /// power of two >= `GRANULE`. Split out to test the arithmetic
+    /// with values `Layout` does not accept but that do occur with valid layouts
+    /// in the upper half of the kernel virtual address space.
     fn allocate_rounded(&mut self, size: usize, align: usize) -> Option<NonNull<u8>> {
         let mut prev: Option<NonNull<FreeBlock>> = None;
         let mut cur = self.head;
         while let Some(c) = cur {
-            // SAFETY: `c` es un nodo válido de nuestra lista.
+            // SAFETY: `c` is a valid node of our list.
             let (block_start, block_size, next) =
                 unsafe { (c.as_ptr() as usize, c.as_ref().size, c.as_ref().next) };
             let block_end = block_start + block_size;
-            // Aritmética comprobada: en la mitad alta del espacio virtual una
-            // petición grande o una alineación enorme desbordan `usize` y un
-            // valor envuelto pasaría la comprobación `used_end <= block_end`.
+            // Checked arithmetic: in the upper half of the virtual address space a
+            // large request or a huge alignment overflows `usize`, and a
+            // wrapped value would pass the `used_end <= block_end` check.
             let fits = (block_start + HEADER)
                 .checked_next_multiple_of(align)
                 .and_then(|user| user.checked_add(size).map(|end| (user, end)))
@@ -163,8 +163,8 @@ impl Heap {
                 } else {
                     block_end
                 };
-                // Sacar el bloque de la lista.
-                // SAFETY: `prev`, si existe, es un nodo válido.
+                // Unlink the block from the list.
+                // SAFETY: `prev`, if present, is a valid node.
                 unsafe {
                     match prev {
                         Some(mut p) => p.as_mut().next = next,
@@ -173,14 +173,14 @@ impl Heap {
                 }
                 self.stats.free -= block_size;
                 if used_end < block_end {
-                    // SAFETY: resto del bloque, >= MIN_BLOCK y alineado.
+                    // SAFETY: remainder of the block, >= MIN_BLOCK and aligned.
                     unsafe { self.insert_free(used_end, block_end - used_end) };
                 }
                 let header = AllocHeader {
                     block_start,
                     block_size: used_end - block_start,
                 };
-                // SAFETY: `user - HEADER >= block_start`, dentro del bloque.
+                // SAFETY: `user - HEADER >= block_start`, inside the block.
                 unsafe { ((user - HEADER) as *mut AllocHeader).write(header) };
                 self.stats.allocations += 1;
                 return NonNull::new(user as *mut u8);
@@ -193,20 +193,20 @@ impl Heap {
 
     /// # Safety
     ///
-    /// `ptr` debe provenir de `allocate` de este heap y no haberse liberado.
+    /// `ptr` must come from `allocate` of this heap and not have been freed.
     pub unsafe fn deallocate(&mut self, ptr: NonNull<u8>, _layout: Layout) {
         let header = ((ptr.as_ptr() as usize - HEADER) as *const AllocHeader).read();
         self.stats.allocations -= 1;
         self.insert_free(header.block_start, header.block_size);
     }
 
-    /// Número de bloques libres (para tests y diagnóstico).
+    /// Number of free blocks (for tests and diagnostics).
     pub fn free_blocks(&self) -> usize {
         let mut n = 0;
         let mut cur = self.head;
         while let Some(c) = cur {
             n += 1;
-            // SAFETY: nodo válido de la lista.
+            // SAFETY: valid list node.
             cur = unsafe { c.as_ref().next };
         }
         n
@@ -260,9 +260,9 @@ mod tests {
         unsafe { h.deallocate(a, l(100, 8)) };
         unsafe { h.deallocate(b, l(200, 8)) };
         assert_eq!(h.stats().allocations, 0);
-        assert_eq!(h.stats().free, 4096, "todo vuelve al heap");
-        assert_eq!(h.free_blocks(), 1, "los bloques se fusionan");
-        // Se reutiliza la misma direccion.
+        assert_eq!(h.stats().free, 4096, "everything returns to the heap");
+        assert_eq!(h.free_blocks(), 1, "blocks are coalesced");
+        // The same address is reused.
         assert_eq!(h.allocate(l(100, 8)).unwrap(), a);
     }
 
@@ -280,7 +280,7 @@ mod tests {
             h.deallocate(q, l(8, 4096));
             h.deallocate(_pad, l(24, 8));
         }
-        assert_eq!(h.stats().free, 16384, "sin fugas con alineaciones grandes");
+        assert_eq!(h.stats().free, 16384, "no leaks with large alignments");
         assert_eq!(h.free_blocks(), 1);
     }
 
@@ -297,31 +297,31 @@ mod tests {
 
     #[test]
     fn unrepresentable_requests_return_none_and_leave_list_intact() {
-        // Auditoria 9d8c7e5, hallazgo 1: sin aritmetica comprobada un tamaño
-        // enorme envuelve y se escribe fuera del heap.
+        // Audit 9d8c7e5, finding 1: without checked arithmetic a huge size
+        // wraps around and writes outside the heap.
         let r = Region::new(4096);
         let mut h = r.heap();
-        // En el kernel el heap vive en 0xFFFF_C000_..., donde un `Layout`
-        // valido de 64 TiB ya desborda `user + size`. En host la region esta
-        // en direcciones bajas, asi que se ejercita `allocate_rounded` con
-        // tamaños que `Layout` no admite: la aritmetica debe rechazarlos sin
-        // tocar la lista.
+        // In the kernel the heap lives at 0xFFFF_C000_..., where a valid
+        // 64 TiB `Layout` already overflows `user + size`. On the host the region
+        // is at low addresses, so `allocate_rounded` is exercised with
+        // sizes `Layout` does not accept: the arithmetic must reject them without
+        // touching the list.
         assert!(
             h.allocate_rounded(usize::MAX - 15, GRANULE).is_none(),
-            "user + size desborda"
+            "user + size overflows"
         );
         assert!(
             h.allocate_rounded(GRANULE, 1 << 63).is_none(),
-            "alineacion fuera del bloque"
+            "alignment outside the block"
         );
-        // El redondeo del propio `Layout` tampoco puede desbordar.
+        // Rounding of the `Layout` itself cannot overflow either.
         assert!(Heap::round(l(isize::MAX as usize, 1)).is_some());
-        // Alineacion enorme con layout valido: el multiplo siguiente no cabe.
+        // Huge alignment with a valid layout: the next multiple does not fit.
         assert!(h.allocate(l(16, 1 << 62)).is_none());
         assert_eq!(h.stats().free, 4096);
         assert_eq!(h.free_blocks(), 1);
         assert_eq!(h.stats().allocations, 0);
-        // Y el heap sigue operativo.
+        // And the heap is still usable.
         assert!(h.allocate(l(64, 8)).is_some());
     }
 
@@ -336,11 +336,14 @@ mod tests {
             unsafe { core::ptr::write_bytes(p.as_ptr(), i as u8, size) };
             live.push((p, l(size, 8)));
         }
-        // Liberar en orden pseudoaleatorio y comprobar que no hay solapes.
+        // Free in pseudo-random order and check there are no overlaps.
         for (i, (p, lay)) in live.iter().enumerate() {
             let expect = i as u8;
             let bytes = unsafe { core::slice::from_raw_parts(p.as_ptr(), lay.size()) };
-            assert!(bytes.iter().all(|&b| b == expect), "asignacion {i} pisada");
+            assert!(
+                bytes.iter().all(|&b| b == expect),
+                "allocation {i} overwritten"
+            );
         }
         let mut order: Vec<usize> = (0..live.len()).collect();
         order.sort_by_key(|&i| (i * 7919) % 500);
@@ -359,10 +362,10 @@ mod tests {
         let mut h = r1.heap();
         unsafe { h.add_region(r2.ptr as usize, 4096) };
         assert_eq!(h.stats().total, 8192);
-        // Asignacion que deja una cola menor que MIN_BLOCK: se absorbe.
+        // Allocation leaving a tail smaller than MIN_BLOCK: it is absorbed.
         let a = h.allocate(l(4096 - HEADER - 8, 8)).unwrap();
-        assert_eq!(h.free_blocks(), 1, "la cola pequena no crea un bloque");
-        unsafe { h.deallocate(a, l(1, 1)) }; // el layout no importa: la cabecera manda
+        assert_eq!(h.free_blocks(), 1, "the small tail does not create a block");
+        unsafe { h.deallocate(a, l(1, 1)) }; // the layout does not matter: the header rules
         assert_eq!(h.stats().free, 8192);
     }
 }

@@ -9,5 +9,5 @@ fn every_new_key_in_a_full_report_is_delivered() {
     let presses = out[..n].iter().filter(|e| e.kind == EV_KEY && e.value == 1).count();
     let repeated = keyboard.feed(&report, &mut out);
     println!("events={n}, new_presses={presses}, repeated_report_events={repeated}");
-    assert_eq!(presses, 6, "las seis teclas nuevas deben llegar al consumidor");
+    assert_eq!(presses, 6, "all six new keys must reach the consumer");
 }

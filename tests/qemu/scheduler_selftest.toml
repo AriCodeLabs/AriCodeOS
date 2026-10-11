@@ -1,5 +1,5 @@
 name = "scheduler.selftest"
-description = "test=sched: equidad entre hilos que no ceden, sueño de 50 ms, bloqueo y despertar"
+description = "test=sched: fairness between threads that never yield, 50 ms sleep, block and wake"
 level = "full"
 areas = ["scheduler"]
 cmdline = "qemu_exit test=sched"
@@ -7,5 +7,5 @@ timeout_secs = 40
 
 [expect]
 exit = 33
-serial_contains = ["sched selftest ok (busy [", "preempciones, sleep 50 ms ->", "wait_one/wake_all)", "ARICODEOS_KERNEL_READY"]
+serial_contains = ["sched selftest ok (busy [", "preemptions, sleep 50 ms ->", "wait_one/wake_all)", "ARICODEOS_KERNEL_READY"]
 serial_absent = ["KERNEL PANIC"]

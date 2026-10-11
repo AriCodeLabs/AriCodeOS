@@ -1,4 +1,4 @@
-//! Escenarios de test QEMU declarados en `tests/qemu/*.toml`.
+//! QEMU test scenarios declared in `tests/qemu/*.toml`.
 
 use crate::{root, Result};
 use serde::Deserialize;
@@ -7,11 +7,11 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Level {
-    /// Solo tests unitarios de host (segundos).
+    /// Host unit tests only (seconds).
     Unit,
-    /// Unit + el arranque nominal en QEMU. Nivel por defecto y mínimo para `develop`.
+    /// Unit + the nominal QEMU boot. Default level and minimum for `develop`.
     Smoke,
-    /// Todos los escenarios QEMU, incluidos fallos provocados. Obligatorio hacia `main`.
+    /// Every QEMU scenario, including induced failures. Required for `main`.
     Full,
 }
 
@@ -22,7 +22,7 @@ impl std::str::FromStr for Level {
             "unit" => Ok(Self::Unit),
             "smoke" => Ok(Self::Smoke),
             "full" => Ok(Self::Full),
-            other => Err(format!("nivel desconocido '{other}' (unit|smoke|full)")),
+            other => Err(format!("unknown level '{other}' (unit|smoke|full)")),
         }
     }
 }
@@ -30,14 +30,14 @@ impl std::str::FromStr for Level {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Inject {
-    /// Recorta `kernel.elf` a N bytes antes de arrancar.
+    /// Truncates `kernel.elf` to N bytes before booting.
     pub truncate_kernel: Option<usize>,
-    /// Elimina `kernel.elf` de la ESP.
+    /// Removes `kernel.elf` from the ESP.
     #[serde(default)]
     pub remove_kernel: bool,
-    /// Sobrescribe `e_entry` del kernel con este valor.
+    /// Overwrites the kernel's `e_entry` with this value.
     pub patch_entry: Option<u64>,
-    /// Añade un `PT_LOAD` RW vacío (`memsz = 0`, alineación 1) en `e_entry`.
+    /// Adds an empty RW `PT_LOAD` (`memsz = 0`, alignment 1) at `e_entry`.
     #[serde(default)]
     pub add_empty_segment_at_entry: bool,
 }
@@ -62,16 +62,16 @@ pub struct HostInput {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Expect {
-    /// Código de salida de QEMU esperado. `isa-debug-exit` devuelve
-    /// `(valor << 1) | 1`: el sistema escribe 0x10 en éxito (33) y 0x11 en
-    /// fallo reportado por AriBoot o AriKernel (35). Un `reboot` termina
-    /// QEMU con 0 (`-no-reboot`).
+    /// Expected QEMU exit code. `isa-debug-exit` returns
+    /// `(value << 1) | 1`: the system writes 0x10 on success (33) and 0x11
+    /// on a failure reported by AriBoot or AriKernel (35). A `reboot` ends
+    /// QEMU with 0 (`-no-reboot`).
     pub exit: Option<i32>,
     #[serde(default)]
     pub serial_contains: Vec<String>,
     #[serde(default)]
     pub serial_absent: Vec<String>,
-    /// El runner debió matar QEMU al ver `kill_on` (corte de energía).
+    /// The runner had to kill QEMU on seeing `kill_on` (power cut).
     #[serde(default)]
     pub killed: bool,
 }
@@ -85,9 +85,9 @@ impl Expect {
     }
 }
 
-/// Un arranque de un escenario con varios (`[[boots]]`): el disco de pruebas
-/// se conserva entre arranques y cada uno lleva su cmdline, sus líneas de
-/// consola y lo que se espera de él.
+/// One boot of a multi-boot scenario (`[[boots]]`): the test disk is kept
+/// across boots and each one has its own cmdline, console lines and
+/// expectations.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Boot {
@@ -95,7 +95,7 @@ pub struct Boot {
     pub cmdline: String,
     #[serde(default)]
     pub stdin: Vec<String>,
-    /// Mata QEMU (corte de energía) en cuanto la serie muestra este texto.
+    /// Kills QEMU (power cut) as soon as the serial output shows this text.
     pub kill_on: Option<String>,
     pub expect: Expect,
 }
@@ -108,79 +108,79 @@ pub struct Scenario {
     pub description: String,
     pub level: Level,
     pub areas: Vec<String>,
-    /// Contenido de `aricodeos/cmdline.txt`. `qemu_exit` hace que el sistema
-    /// termine QEMU en vez de quedarse en `hlt`.
+    /// Contents of `aricodeos/cmdline.txt`. `qemu_exit` makes the system
+    /// exit QEMU instead of staying in `hlt`.
     #[serde(default = "default_cmdline")]
     pub cmdline: String,
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
-    /// Líneas que el runner envía por la consola serie, una cada vez que la
-    /// salida muestra `prompt` (la primera al primer prompt).
+    /// Lines the runner sends over the serial console, one each time the
+    /// output shows `prompt` (the first one at the first prompt).
     #[serde(default)]
     pub stdin: Vec<String>,
-    /// Texto que anuncia que el sistema espera una línea.
+    /// Text announcing that the system is waiting for a line.
     #[serde(default = "default_prompt")]
     pub prompt: String,
-    /// Sonda TCP del host: al ver `marker` se conecta al puerto redirigido
-    /// al invitado, envía `payload` y anota el eco como `[host] ...`.
+    /// Host TCP probe: on seeing `marker` it connects to the port forwarded
+    /// to the guest, sends `payload` and records the echo as `[host] ...`.
     pub host_tcp: Option<HostTcp>,
-    /// Inyección de entrada por QMP al ver `marker`: teclas (nombres qcode
-    /// de QEMU) en el teclado virtio, movimiento relativo y clic en el ratón.
+    /// QMP input injection on seeing `marker`: keys (QEMU qcode names) on
+    /// the virtio keyboard, relative motion and a click on the mouse.
     pub host_input: Option<HostInput>,
-    /// Estado inicial del disco de pruebas (`image::DiskVariant`): `slots`
-    /// (por defecto), `esp-only`, `pending-b`, `b-exhausted`, `b-corrupt`,
+    /// Initial state of the test disk (`image::DiskVariant`): `slots`
+    /// (default), `esp-only`, `pending-b`, `b-exhausted`, `b-corrupt`,
     /// `fs-pending-replace`, `fs-corrupt`, `wasm-restricted`, `wasm-invalid`,
     /// `wasm-bad-import`.
     #[serde(default = "default_disk")]
     pub disk: String,
-    /// Presenta el disco de pruebas como solo lectura (fallos de escritura).
+    /// Presents the test disk as read-only (write failures).
     #[serde(default)]
     pub disk_readonly: bool,
-    /// Procesadores de la máquina virtual (`-smp N`). Sin declarar vale 1 y
-    /// `cargo xtask test --cpus N` lo sustituye; un valor explícito se
-    /// respeta siempre (el escenario depende de ese número de CPUs).
+    /// Virtual machine processors (`-smp N`). When undeclared it is 1 and
+    /// `cargo xtask test --cpus N` overrides it; an explicit value is always
+    /// honoured (the scenario depends on that CPU count).
     pub cpus: Option<u32>,
-    /// Añade un controlador xHCI con un teclado y un ratón USB HID. Los
-    /// eventos QMP van entonces al teclado USB (el manejador más reciente).
+    /// Adds an xHCI controller with a USB HID keyboard and mouse. QMP events
+    /// then go to the USB keyboard (the most recent handler).
     #[serde(default)]
     pub usb_hid: bool,
-    /// El xHCI de `usb_hid` solo ofrece MSI (sin MSI-X), como los
-    /// controladores Intel de 2012: el kernel debe programar la capability MSI.
+    /// The `usb_hid` xHCI offers MSI only (no MSI-X), like 2012 Intel
+    /// controllers: the kernel must program the MSI capability.
     #[serde(default)]
     pub usb_hid_msi: bool,
-    /// El disco de pruebas va por USB (`usb-storage` en el xHCI) y no hay
-    /// virtio-blk: usbd lo sirve como servicio de bloques (ADR 0023).
+    /// The test disk is attached over USB (`usb-storage` on the xHCI) and
+    /// there is no virtio-blk: usbd serves it as a block service (ADR 0023).
     #[serde(default)]
     pub usb_storage: bool,
-    /// Añade además un controlador USB anterior a xHCI (EHCI): init no debe
-    /// entregárselo al driver xHCI ni bloquearse por él.
+    /// Also adds a pre-xHCI USB controller (EHCI): init must neither hand it
+    /// to the xHCI driver nor hang on it.
     #[serde(default)]
     pub usb_legacy_controller: bool,
     #[serde(default)]
     pub inject: Inject,
-    /// Lo que se espera del único arranque (sin `[[boots]]`).
+    /// What is expected from the single boot (without `[[boots]]`).
     #[serde(default)]
     pub expect: Expect,
-    /// Varios arranques sobre el mismo disco de pruebas (ver [`Boot`]); con
-    /// ellos la `cmdline`, `stdin` y `expect` del escenario no se usan.
+    /// Several boots on the same test disk (see [`Boot`]); with them the
+    /// scenario's `cmdline`, `stdin` and `expect` are not used.
     #[serde(default)]
     pub boots: Vec<Boot>,
-    /// Aplicaciones externas (directorios con `Cargo.toml` y `NOMBRE.manifest`,
-    /// relativos a la raíz) que xtask compila, empaqueta con versión 1 e
-    /// instala en AriFS del disco de pruebas como `apps/NOMBRE.aripkg`
-    /// (ADR 0017).
+    /// External applications (directories with `Cargo.toml` and
+    /// `NAME.manifest`, relative to the root) that xtask builds, packs as
+    /// version 1 and installs into the test disk's AriFS as
+    /// `apps/NAME.aripkg` (ADR 0017).
     #[serde(default)]
     pub install: Vec<String>,
-    /// Paquetes pendientes en `pkgs/` del disco de pruebas: `DIR:VERSION`
-    /// o `DIR:VERSION:corrupt` (firma alterada), para el instalador (ADR 0018).
+    /// Pending packages in the test disk's `pkgs/`: `DIR:VERSION` or
+    /// `DIR:VERSION:corrupt` (tampered signature), for the installer (ADR 0018).
     #[serde(default)]
     pub packages: Vec<String>,
     #[serde(skip)]
     pub file: PathBuf,
 }
 
-/// Un nombre de escenario también es un nombre de directorio bajo
-/// `build/scenarios/`: solo `[a-z0-9._-]`, sin empezar por `.`, sin `..`.
+/// A scenario name is also a directory name under `build/scenarios/`:
+/// only `[a-z0-9._-]`, not starting with `.`, no `..`.
 pub fn validate_name(name: &str) -> Result<()> {
     let ok = !name.is_empty()
         && name.len() <= 64
@@ -192,7 +192,9 @@ pub fn validate_name(name: &str) -> Result<()> {
     if ok {
         Ok(())
     } else {
-        Err(format!("nombre de escenario invalido '{name}': usar [a-z0-9._-], sin '/', sin '..', sin '.' inicial"))
+        Err(format!(
+            "invalid scenario name '{name}': use [a-z0-9._-], no '/', no '..', no leading '.'"
+        ))
     }
 }
 
@@ -215,13 +217,13 @@ pub fn scenarios_dir() -> PathBuf {
     root().join("tests/qemu")
 }
 
-/// Carga todos los escenarios de `tests/qemu/` ordenados por nombre.
+/// Loads every scenario in `tests/qemu/`, sorted by name.
 pub fn load_all() -> Result<Vec<Scenario>> {
     load_from(&scenarios_dir())
 }
 
-/// Carga los escenarios de un directorio. Un TOML inválido o un nombre no
-/// admitido es error: un test mal escrito no debe pasar en silencio.
+/// Loads the scenarios in a directory. Invalid TOML or a disallowed name is
+/// an error: a badly written test must not pass silently.
 pub fn load_from(dir: &Path) -> Result<Vec<Scenario>> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
@@ -233,20 +235,20 @@ pub fn load_from(dir: &Path) -> Result<Vec<Scenario>> {
                 toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
             if s.level == Level::Unit {
                 return Err(format!(
-                    "{}: un escenario QEMU no puede ser de nivel unit",
+                    "{}: a QEMU scenario cannot be level unit",
                     path.display()
                 ));
             }
             validate_name(&s.name).map_err(|e| format!("{}: {e}", path.display()))?;
             if s.boots.is_empty() == s.expect.is_empty() {
                 return Err(format!(
-                    "{}: un escenario lleva [expect] o [[boots]], no ambos ni ninguno",
+                    "{}: a scenario has [expect] or [[boots]], not both and not neither",
                     path.display()
                 ));
             }
             if !s.boots.is_empty() && !s.stdin.is_empty() {
                 return Err(format!(
-                    "{}: con [[boots]] las lineas de consola van en cada arranque",
+                    "{}: with [[boots]] the console lines go in each boot",
                     path.display()
                 ));
             }
@@ -259,8 +261,8 @@ pub fn load_from(dir: &Path) -> Result<Vec<Scenario>> {
 }
 
 impl Scenario {
-    /// CPUs con las que arranca el escenario: las declaradas, o el valor
-    /// forzado por `--cpus`, o 1.
+    /// CPUs the scenario boots with: the declared ones, or the value forced
+    /// by `--cpus`, or 1.
     pub fn cpus(&self, forced: Option<u32>) -> u32 {
         self.cpus.or(forced).unwrap_or(1)
     }
@@ -271,9 +273,8 @@ impl Scenario {
     }
 }
 
-/// Selecciona escenarios por nivel y áreas. Para smoke/full, una selección
-/// vacía es un error: un filtro mal escrito no debe dar un éxito sin arrancar
-/// nada.
+/// Selects scenarios by level and areas. For smoke/full, an empty selection
+/// is an error: a mistyped filter must not succeed without booting anything.
 pub fn select<'a>(
     all: &'a [Scenario],
     level: Level,
@@ -293,12 +294,15 @@ pub fn select<'a>(
             .map(|s| s.name.as_str())
             .collect();
         let mut msg = format!(
-            "ningun escenario QEMU coincide con nivel {level:?} y areas [{}]. Areas conocidas: {}",
+            "no QEMU scenario matches level {level:?} and areas [{}]. Known areas: {}",
             areas.join(","),
             known.join(", ")
         );
         if !higher.is_empty() {
-            msg.push_str(&format!(". Con --all entrarian: {}", higher.join(", ")));
+            msg.push_str(&format!(
+                ". With --all these would run: {}",
+                higher.join(", ")
+            ));
         }
         return Err(msg);
     }
@@ -311,10 +315,10 @@ mod tests {
 
     #[test]
     fn repo_scenarios_have_known_disk_variants() {
-        for sc in load_all().expect("escenarios") {
+        for sc in load_all().expect("scenarios") {
             assert!(
                 crate::image::DiskVariant::parse(&sc.disk).is_some(),
-                "{}: disk '{}' desconocido",
+                "{}: unknown disk '{}'",
                 sc.name,
                 sc.disk
             );
@@ -323,17 +327,17 @@ mod tests {
 
     #[test]
     fn repo_scenarios_are_valid_and_unique() {
-        let all = load_all().expect("tests/qemu/*.toml deben parsear");
+        let all = load_all().expect("tests/qemu/*.toml must parse");
         assert!(!all.is_empty());
         let mut names: Vec<_> = all.iter().map(|s| s.name.as_str()).collect();
         names.dedup();
-        assert_eq!(names.len(), all.len(), "nombres duplicados");
+        assert_eq!(names.len(), all.len(), "duplicate names");
         assert!(
             all.iter().any(|s| s.level == Level::Smoke),
-            "debe existir al menos un smoke"
+            "there must be at least one smoke"
         );
         for s in &all {
-            assert!(!s.areas.is_empty(), "{}: sin areas", s.name);
+            assert!(!s.areas.is_empty(), "{}: no areas", s.name);
         }
     }
 
@@ -350,16 +354,19 @@ mod tests {
             scenario("boot.ok", "smoke", "\"boot\""),
             scenario("boot.panic", "full", "\"boot\", \"panic\""),
         ];
-        // area inexistente (auditoria, hallazgo 5)
+        // nonexistent area (audit, finding 5)
         let err = select(&all, Level::Smoke, &["booot".into()]).unwrap_err();
         assert!(
             err.contains("booot") && err.contains("boot, panic"),
             "{err}"
         );
-        // area cuyo unico escenario es full
+        // area whose only scenario is full
         let err = select(&all, Level::Smoke, &["panic".into()]).unwrap_err();
-        assert!(err.contains("Con --all entrarian: boot.panic"), "{err}");
-        // en unit la seleccion vacia es normal
+        assert!(
+            err.contains("With --all these would run: boot.panic"),
+            "{err}"
+        );
+        // at unit level an empty selection is normal
         assert!(select(&all, Level::Unit, &["booot".into()])
             .unwrap()
             .is_empty());
@@ -368,7 +375,7 @@ mod tests {
 
     #[test]
     fn load_rejects_invalid_names() {
-        // Revision de auditoria, hallazgo 3: la validacion debe ocurrir al cargar.
+        // Audit review, finding 3: validation must happen at load time.
         let tmp = crate::test_util::TempDir::new("scenarios-load");
         std::fs::write(
             tmp.path().join("bad.toml"),
@@ -376,7 +383,7 @@ mod tests {
         )
         .unwrap();
         let err = load_from(tmp.path()).unwrap_err();
-        assert!(err.contains("nombre de escenario invalido"), "{err}");
+        assert!(err.contains("invalid scenario name"), "{err}");
     }
 
     #[test]
@@ -391,10 +398,10 @@ mod tests {
             "Boot.Ready",
             "a b",
         ] {
-            assert!(validate_name(bad).is_err(), "{bad:?} deberia rechazarse");
+            assert!(validate_name(bad).is_err(), "{bad:?} should be rejected");
         }
         for good in ["boot.kernel_ready", "memory.oom-2", "x"] {
-            assert!(validate_name(good).is_ok(), "{good:?} deberia aceptarse");
+            assert!(validate_name(good).is_ok(), "{good:?} should be accepted");
         }
     }
 

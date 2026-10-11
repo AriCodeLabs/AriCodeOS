@@ -1,11 +1,12 @@
-# Medidas de rendimiento
+# Performance measurements
 
-Qué se mide, cómo se reproduce y qué significan los números. Todas las
-cifras son de QEMU con TCG (sin KVM) en el equipo de desarrollo: sirven para
-comparar builds entre sí, no para predecir hardware real. Un cambio de host,
-de modo de QEMU o de número de CPUs invalida la comparación.
+What is measured, how to reproduce it and what the numbers mean. All
+figures come from QEMU with TCG (no KVM) on the development machine: they
+are for comparing builds against each other, not for predicting real
+hardware. A change of host, QEMU mode or CPU count invalidates the
+comparison.
 
-## Cómo
+## How
 
 ```bash
 cargo xtask run --cmdline "shell"
@@ -13,72 +14,72 @@ ari> run bench
 ari> cpus
 ```
 
-O el escenario `perf.bench` (`cargo xtask test --all --area perf`), cuyo
-`serial.log` conserva los números. Ejecutar `run bench` dos veces y quedarse
-con la segunda: la primera paga las páginas del programa y los buffers.
+Or the `perf.bench` scenario (`cargo xtask test --all --area perf`), whose
+`serial.log` keeps the numbers. Run `run bench` twice and keep the second
+result: the first one pays for the program's pages and the buffers.
 
-## Qué mide `bench`
+## What `bench` measures
 
-`apps/bench` es una aplicación normal del broker (`system`, `fs`, 64 KiB):
-no ve nada que no vea cualquier otra aplicación.
+`apps/bench` is an ordinary broker application (`system`, `fs`, 64 KiB):
+it sees nothing that any other application cannot see.
 
-| Medida | Qué incluye | Muestras |
+| Measurement | What it includes | Samples |
 |---|---|---|
-| `syscall thread_get_tid` | entrada y salida por `syscall`, sin trabajo | 10 000 |
-| `ipc fsd list` | `rpc::call` completo: crear endpoint de respuesta, enviar, esperar, recibir, cerrar; el bucle de fsd (espera de 10 ms en el principal, sin espera en los concedidos) | 1 000 |
-| `replace 4 KiB` | reemplazo atómico: journal, dos `flush` a virtio-blk, copia y limpieza | 100 |
-| `read 4 KiB` | una lectura por IPC con copia por el buffer DMA del cliente | 100 |
+| `syscall thread_get_tid` | entry and exit via `syscall`, no work | 10 000 |
+| `ipc fsd list` | full `rpc::call`: create reply endpoint, send, wait, receive, close; the fsd loop (10 ms wait on the main endpoint, no wait on granted ones) | 1 000 |
+| `replace 4 KiB` | atomic replace: journal, two `flush` to virtio-blk, copy and cleanup | 100 |
+| `read 4 KiB` | one read over IPC with a copy through the client's DMA buffer | 100 |
 
-Percentiles p50, p95 y p99 sobre el TSC, calibrado contra el reloj del
-sistema (200 ms; granularidad de 10 ms, error menor del 5 %).
+Percentiles p50, p95 and p99 over the TSC, calibrated against the system
+clock (200 ms; 10 ms granularity, error under 5 %).
 
-## Reposo por CPU
+## Per-CPU idle
 
-`cpus` muestra, además de las CPUs en línea, el porcentaje de ciclos que
-cada una ha pasado en `hlt` desde el arranque (`sysinfo::IDLE`): con el
-sistema quieto debe ser alto; una CPU al 0 % en reposo tiene un hilo que
-no duerme (`ps` lo enseña). Es la base de las medidas de energía: sin
-`hlt` no hay estados de reposo que ahorren nada.
+Besides the online CPUs, `cpus` shows the percentage of cycles each one has
+spent in `hlt` since boot (`sysinfo::IDLE`): with the system quiet it
+should be high; a CPU at 0 % while idle has a thread that does not sleep
+(`ps` shows it). This is the basis for power measurements: without `hlt`
+there are no sleep states to save anything.
 
-## Informe
+## Report
 
-`diag` reúne en un solo bloque `uptime`, `mem`, `cpus`, `ps` y
-`services --detail`: es lo que se pide a alguien que informa de un problema.
+`diag` gathers `uptime`, `mem`, `cpus`, `ps` and `services --detail` into a
+single block: it is what you ask from someone reporting a problem.
 
-## Referencia (0.7, QEMU 10 TCG, 1 CPU, `-cpu qemu64`)
+## Baseline (0.7, QEMU 10 TCG, 1 CPU, `-cpu qemu64`)
 
-Se rellena con la primera ejecución de `perf.bench` de cada versión; los
-valores sirven de alarma (una regresión del doble se nota), no de garantía.
+Filled in with the first `perf.bench` run of each version; the values serve
+as an alarm (a 2x regression is noticeable), not as a guarantee.
 
-Calibración: 3 813 066 ciclos de TSC por ms.
+Calibration: 3 813 066 TSC cycles per ms.
 
-| Medida | p50 | p95 | p99 | Nota |
+| Measurement | p50 | p95 | p99 | Note |
 |---|---|---|---|---|
-| syscall (ns) | 99 | 109 | 119 | TCG traduce el camino una vez; no extrapolar a hardware |
-| ipc fsd list (µs) | 9 993 | 10 078 | 10 227 | dominada por la espera de 10 ms del bucle de fsd sobre el endpoint principal: las peticiones por endpoints concedidos esperaban a que venciera (ADR 0020 lo corrige) |
-| replace 4 KiB (µs) | 9 999 | 10 266 | 12 585 | ídem; el trabajo real (journal y dos `flush`) queda enmascarado |
-| read 4 KiB (µs) | 9 994 | 10 101 | 10 135 | ídem |
+| syscall (ns) | 99 | 109 | 119 | TCG translates the path once; do not extrapolate to hardware |
+| ipc fsd list (µs) | 9 993 | 10 078 | 10 227 | dominated by the fsd loop's 10 ms wait on the main endpoint: requests on granted endpoints waited for it to expire (ADR 0020 fixes it) |
+| replace 4 KiB (µs) | 9 999 | 10 266 | 12 585 | same; the real work (journal and two `flush`) is masked |
+| read 4 KiB (µs) | 9 994 | 10 101 | 10 135 | same |
 
-Reposo de la CPU tras el arranque con shell: 81-82 %.
+CPU idle after booting with shell: 81-82 %.
 
-### Tras `ipc_receive_any` (ADR 0020), misma build salvo fsd
+### After `ipc_receive_any` (ADR 0020), same build except fsd
 
-| Medida | p50 | p95 | p99 | Nota |
+| Measurement | p50 | p95 | p99 | Note |
 |---|---|---|---|---|
-| syscall (ns) | 99 | 129 | 129 | sin cambios |
-| ipc fsd list (µs) | 44 | 46 | 58 | 227 veces menos: fsd espera en todos sus endpoints a la vez |
-| replace 4 KiB (µs) | 5 708 | 6 343 | 6 458 | ahora se ve el trabajo real: unas 20 peticiones de un sector al servicio de bloques y cuatro `flush`; el siguiente candidato es agrupar sectores por petición |
-| read 4 KiB (µs) | 712 | 800 | 838 | ocho lecturas de un sector por IPC al servicio de bloques |
+| syscall (ns) | 99 | 129 | 129 | unchanged |
+| ipc fsd list (µs) | 44 | 46 | 58 | 227 times less: fsd waits on all its endpoints at once |
+| replace 4 KiB (µs) | 5 708 | 6 343 | 6 458 | the real work is now visible: about 20 single-sector requests to the block service and four `flush`; the next candidate is batching sectors per request |
+| read 4 KiB (µs) | 712 | 800 | 838 | eight single-sector reads over IPC to the block service |
 
-### Tras los lotes de sectores y un `flush` menos (etapa 5), misma build salvo AriFS y fsd
+### After sector batching and one fewer `flush` (stage 5), same build except AriFS and fsd
 
-| Medida | p50 | p95 | p99 | Nota |
+| Measurement | p50 | p95 | p99 | Note |
 |---|---|---|---|---|
-| syscall (ns) | 99 | 109 | 129 | sin cambios |
-| ipc fsd list (µs) | 46 | 49 | 63 | sin cambios |
-| replace 4 KiB (µs) | 2 628 | 2 817 | 2 997 | tres `flush` (cada uno un fsync del host, de 0,5 a 3 ms según el disco) y cinco peticiones al servicio de bloques; entre ejecuciones varía con el host más que con el código |
-| read 4 KiB (µs) | 141 | 150 | 234 | una petición de ocho sectores en vez de ocho de uno |
+| syscall (ns) | 99 | 109 | 129 | unchanged |
+| ipc fsd list (µs) | 46 | 49 | 63 | unchanged |
+| replace 4 KiB (µs) | 2 628 | 2 817 | 2 997 | three `flush` (each one a host fsync, 0.5 to 3 ms depending on the disk) and five requests to the block service; between runs it varies with the host more than with the code |
+| read 4 KiB (µs) | 141 | 150 | 234 | one eight-sector request instead of eight single-sector ones |
 
-Lo que queda del coste de `replace` es el fsync: reducirlo exige menos
-compromisos (agrupar reemplazos) o un soporte con caché de escritura con
-batería, no más código.
+What remains of the cost of `replace` is the fsync: reducing it requires
+fewer commits (batching replacements) or storage with a battery-backed
+write cache, not more code.

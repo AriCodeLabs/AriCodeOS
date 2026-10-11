@@ -1,10 +1,10 @@
-//! Tabla de handles (Fase 12): las aplicaciones no manejan punteros a objetos
-//! del kernel sino handles opacos con derechos.
+//! Handle table (Phase 12): applications do not hold pointers to kernel
+//! objects but opaque handles with rights.
 //!
-//! Un [`Handle`] codifica índice y generación: un handle cerrado deja de ser
-//! válido aunque su índice se reutilice, y un valor inventado solo es válido
-//! si acierta índice y generación. Los derechos solo pueden reducirse al
-//! duplicar, nunca ampliarse.
+//! A [`Handle`] encodes index and generation: a closed handle stops being
+//! valid even if its index is reused, and a made-up value is only valid
+//! if it guesses both index and generation. Rights can only be reduced when
+//! duplicating, never extended.
 
 #![no_std]
 
@@ -12,7 +12,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-/// Derechos sobre un objeto. Conjunto pequeño y explícito (sección 25).
+/// Rights over an object. Small, explicit set (section 25).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rights(pub u32);
 
@@ -33,14 +33,14 @@ impl Rights {
     pub const fn union(self, other: Rights) -> Rights {
         Rights(self.0 | other.0)
     }
-    /// `true` si todos los bits están definidos.
+    /// `true` if every bit is defined.
     pub const fn is_valid(self) -> bool {
         self.0 & !Self::ALL.0 == 0
     }
 }
 
-/// Handle opaco: índice en los 16 bits bajos, generación en los altos.
-/// `Handle(0)` nunca es válido.
+/// Opaque handle: index in the low 16 bits, generation in the high ones.
+/// `Handle(0)` is never valid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Handle(pub u32);
 
@@ -62,13 +62,13 @@ impl Handle {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandleError {
-    /// No existe, está cerrado o es inventado.
+    /// Does not exist, is closed or was made up.
     BadHandle,
-    /// El handle no tiene los derechos requeridos.
+    /// The handle lacks the required rights.
     Denied,
-    /// Se intentó obtener derechos que el origen no tiene, o bits inválidos.
+    /// Attempt to obtain rights the source does not have, or invalid bits.
     Escalation,
-    /// Límite de handles del proceso alcanzado (sección 52).
+    /// Per-process handle limit reached (section 52).
     TableFull,
 }
 
@@ -80,7 +80,7 @@ struct Slot<T> {
 
 pub struct HandleTable<T> {
     slots: Vec<Option<Slot<T>>>,
-    /// Generación que recibirá la próxima inserción en cada índice.
+    /// Generation the next insertion at each index will receive.
     generations: Vec<u16>,
     free: Vec<usize>,
     limit: usize,
@@ -116,8 +116,8 @@ impl<T> HandleTable<T> {
             Some(i) => i,
             None => {
                 self.slots.push(None);
-                // La generación 0 se salta: así `Handle(0)` y los handles con
-                // generación 0 nunca coinciden con uno vivo.
+                // Generation 0 is skipped: this way `Handle(0)` and handles with
+                // generation 0 never match a live one.
                 self.generations.push(1);
                 self.slots.len() - 1
             }
@@ -140,13 +140,13 @@ impl<T> HandleTable<T> {
         }
     }
 
-    /// Objeto y derechos de un handle válido.
+    /// Object and rights of a valid handle.
     pub fn get(&self, handle: Handle) -> Result<(&T, Rights), HandleError> {
         let slot = self.slot(handle)?;
         Ok((&slot.object, slot.rights))
     }
 
-    /// Objeto de un handle que además posee `required`.
+    /// Object of a handle that also holds `required`.
     pub fn get_checked(&self, handle: Handle, required: Rights) -> Result<&T, HandleError> {
         let slot = self.slot(handle)?;
         if slot.rights.contains(required) {
@@ -156,20 +156,20 @@ impl<T> HandleTable<T> {
         }
     }
 
-    /// Cierra el handle y devuelve el objeto. El índice queda invalidado
-    /// para ese valor de handle para siempre (nueva generación).
+    /// Closes the handle and returns the object. The index is invalidated
+    /// for that handle value forever (new generation).
     pub fn remove(&mut self, handle: Handle) -> Result<T, HandleError> {
         let index = self.slot(handle).map(|_| handle.index().unwrap_or(0))?;
-        let slot = self.slots[index].take().expect("slot comprobado");
+        let slot = self.slots[index].take().expect("slot checked");
         self.generations[index] = self.generations[index].wrapping_add(1).max(1);
         self.free.push(index);
         self.live -= 1;
         Ok(slot.object)
     }
 
-    /// Retira el handle para transferirlo a otra tabla: exige `TRANSFER`.
-    /// Devuelve el objeto y sus derechos (sin `TRANSFER` el receptor no podría
-    /// reenviarlo salvo que se le conceda expresamente: se conserva tal cual).
+    /// Removes the handle to transfer it to another table: requires `TRANSFER`.
+    /// Returns the object and its rights (kept as they are: without `TRANSFER` the
+    /// receiver could not forward it unless explicitly granted).
     pub fn take(&mut self, handle: Handle) -> Result<(T, Rights), HandleError> {
         let rights = self.get(handle)?.1;
         if !rights.contains(Rights::TRANSFER) {
@@ -179,8 +179,8 @@ impl<T> HandleTable<T> {
         Ok((object, rights))
     }
 
-    /// Nuevo handle al mismo objeto con `rights`, que debe ser subconjunto de
-    /// los del origen; el origen necesita `DUPLICATE`.
+    /// New handle to the same object with `rights`, which must be a subset of
+    /// the source's; the source needs `DUPLICATE`.
     pub fn duplicate(&mut self, handle: Handle, rights: Rights) -> Result<Handle, HandleError>
     where
         T: Clone,
@@ -205,11 +205,11 @@ mod tests {
     fn insert_get_and_rights() {
         let mut t: HandleTable<&str> = HandleTable::new(8);
         let h = t
-            .insert("consola", Rights::WRITE.union(Rights::DUPLICATE))
+            .insert("console", Rights::WRITE.union(Rights::DUPLICATE))
             .unwrap();
         assert_ne!(h, Handle::INVALID);
-        assert_eq!(t.get(h).unwrap(), (&"consola", Rights(0b110)));
-        assert_eq!(t.get_checked(h, Rights::WRITE).unwrap(), &"consola");
+        assert_eq!(t.get(h).unwrap(), (&"console", Rights(0b110)));
+        assert_eq!(t.get_checked(h, Rights::WRITE).unwrap(), &"console");
         assert_eq!(t.get_checked(h, Rights::READ), Err(HandleError::Denied));
         assert_eq!(t.len(), 1);
     }
@@ -223,12 +223,12 @@ mod tests {
         assert_eq!(
             t.get(Handle(h.0 ^ 0x10000)),
             Err(HandleError::BadHandle),
-            "generacion incorrecta"
+            "wrong generation"
         );
         assert_eq!(t.remove(h), Ok(7));
-        assert_eq!(t.get(h), Err(HandleError::BadHandle), "cerrado");
+        assert_eq!(t.get(h), Err(HandleError::BadHandle), "closed");
         assert_eq!(t.remove(h), Err(HandleError::BadHandle));
-        // El indice se reutiliza con otra generacion: el handle viejo sigue muerto.
+        // The index is reused with another generation: the old handle stays dead.
         let h2 = t.insert(8, Rights::READ).unwrap();
         assert_eq!(h2.index(), h.index());
         assert_ne!(h2, h);
@@ -251,12 +251,12 @@ mod tests {
         assert_eq!(
             t.duplicate(ro, Rights::READ),
             Err(HandleError::Denied),
-            "sin DUPLICATE"
+            "without DUPLICATE"
         );
         assert_eq!(
             t.duplicate(h, Rights(0x8000_0000)),
             Err(HandleError::Escalation),
-            "bits invalidos"
+            "invalid bits"
         );
         assert_eq!(t.insert(2, Rights(0x100)), Err(HandleError::Escalation));
     }
@@ -272,7 +272,7 @@ mod tests {
         assert_eq!(
             a.get(movable),
             Err(HandleError::BadHandle),
-            "ya no esta en el origen"
+            "no longer in the source"
         );
         let hb = b.insert(obj, rights).unwrap();
         assert_eq!(

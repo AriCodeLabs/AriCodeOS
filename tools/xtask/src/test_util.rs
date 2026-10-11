@@ -1,11 +1,11 @@
-//! Utilidades solo para tests del xtask.
+//! Test-only helpers for xtask.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-/// Directorio temporal único, borrado al soltarse.
+/// Unique temporary directory, removed on drop.
 pub struct TempDir(PathBuf);
 
 impl TempDir {
@@ -14,7 +14,7 @@ impl TempDir {
         let dir =
             std::env::temp_dir().join(format!("aricodeos-xtask-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("crear tempdir");
+        std::fs::create_dir_all(&dir).expect("create tempdir");
         Self(dir)
     }
 

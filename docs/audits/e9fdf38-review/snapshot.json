@@ -1,6 +1,6 @@
 {
   "base": "e9fdf3819ffa7aeb2463443e3f6546121a2b1a1a",
-  "note": "Incluye los cambios sin commit de Fase 30 al iniciar la revision",
+  "note": "Includes the uncommitted Phase 30 changes present when the review started",
   "sha256": {
     "services/arifs/src/main.rs": "f2c6c14c54093e2aece62d58640db7ab8acb7c3b8ca3efdd6d8af50191545e67",
     "services/init/src/main.rs": "4296c8aa42d3a65a0973479bddfa95699ab5658d71c5fb44135f02625ce887ed",

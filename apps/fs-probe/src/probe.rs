@@ -1,9 +1,10 @@
-//! `fs_probe`: desde otro directorio privado intenta leer, escribir y cerrar
-//! los descriptores 0..16 sin haber abierto nada. fsd debe responder `BadFd`
-//! a todos: los descriptores pertenecen al endpoint que los abrió. Después
-//! (auditoría 6ee19fb) comprueba que un compromiso que no cubre sus propios
-//! trozos se rechaza sin filtrar restos del journal de `fs_victim`, y que la
-//! transacción que `fs_victim` dejó a medias caduca y no bloquea la suya.
+//! `fs_probe`: from another private directory it tries to read, write and
+//! close descriptors 0..16 without having opened anything. fsd must answer
+//! `BadFd` to all of them: descriptors belong to the endpoint that opened
+//! them. Then (audit 6ee19fb) it checks that a commit that does not cover its
+//! own chunks is rejected without leaking leftovers from `fs_victim`'s
+//! journal, and that the transaction `fs_victim` left half done expires and
+//! does not block its own.
 #![no_std]
 #![no_main]
 
@@ -30,7 +31,7 @@ fn main(_arg: u64) -> u64 {
     for fd in 0..16u32 {
         match fs.read(fd, 0, &mut buf) {
             Ok(n) => {
-                sys::print(b"fs_probe: ACCESO CRUZADO en lectura: ");
+                sys::print(b"fs_probe: CROSS ACCESS on read: ");
                 sys::print(&buf[..n]);
                 sys::print(b"\n");
                 return 3;
@@ -39,15 +40,15 @@ fn main(_arg: u64) -> u64 {
             Err(_) => return 4,
         }
         if !matches!(fs.write(fd, 0, b"X"), Err(FsError::Status(Status::BadFd))) {
-            sys::print(b"fs_probe: ACCESO CRUZADO en escritura\n");
+            sys::print(b"fs_probe: CROSS ACCESS on write\n");
             return 5;
         }
         if !matches!(fs.close(fd), Err(FsError::Status(Status::BadFd))) {
-            sys::print(b"fs_probe: ACCESO CRUZADO en cierre\n");
+            sys::print(b"fs_probe: CROSS ACCESS on close\n");
             return 6;
         }
     }
-    // Y su propio directorio sigue funcionando.
+    // And its own directory still works.
     let Ok(own) = fs.create("mio") else {
         return 7;
     };
@@ -55,10 +56,10 @@ fn main(_arg: u64) -> u64 {
         return 8;
     }
     sys::print(
-        b"fs_probe: descriptores ajenos inaccesibles (BadFd en 16 x lectura, escritura y cierre)\n",
+        b"fs_probe: foreign descriptors inaccessible (BadFd on 16 x read, write and close)\n",
     );
-    // fs_victim dejo un reemplazo a medias: durante un tiempo el journal esta
-    // ocupado (Busy); luego caduca y este reemplazo debe poder hacerse.
+    // fs_victim left a replace half done: for a while the journal is busy
+    // (Busy); then it expires and this replace must go through.
     let mut tries = 0;
     let mut waited = false;
     loop {
@@ -73,17 +74,17 @@ fn main(_arg: u64) -> u64 {
         }
     }
     if waited {
-        sys::print(b"fs_probe: reemplazo tras una transaccion abandonada ok\n");
+        sys::print(b"fs_probe: replace after an abandoned transaction ok\n");
     }
-    // Un trozo de un byte y un compromiso de 22: fsd no puede completar los
-    // bytes con lo que fs_victim dejo en el journal.
+    // A one-byte chunk and a commit of 22: fsd must not fill the missing
+    // bytes with what fs_victim left in the journal.
     if fs.replace_chunk(own, 0, b"Y").is_err() {
         return 10;
     }
     match fs.replace_commit(own, 22) {
         Err(FsError::Status(Status::Invalid)) => {}
         Ok(_) => {
-            sys::print(b"fs_probe: COMPROMISO INCOMPLETO ACEPTADO\n");
+            sys::print(b"fs_probe: INCOMPLETE COMMIT ACCEPTED\n");
             return 11;
         }
         Err(_) => return 12,
@@ -93,7 +94,7 @@ fn main(_arg: u64) -> u64 {
         Err(_) => return 13,
     };
     if buf[..n].windows(9).any(|w| w == b"YNTHETIC_") {
-        sys::print(b"fs_probe: RESTOS DEL JOURNAL AJENO: ");
+        sys::print(b"fs_probe: FOREIGN JOURNAL LEFTOVERS: ");
         sys::print(&buf[..n]);
         sys::print(b"\n");
         return 14;
@@ -102,7 +103,7 @@ fn main(_arg: u64) -> u64 {
         return 15;
     }
     let _ = fs.close(own);
-    sys::print(b"fs_probe: el journal no filtra datos ajenos (compromiso incompleto rechazado)\n");
+    sys::print(b"fs_probe: journal does not leak foreign data (incomplete commit rejected)\n");
     0
 }
 

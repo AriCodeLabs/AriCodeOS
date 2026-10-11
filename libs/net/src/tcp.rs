@@ -1,7 +1,7 @@
-//! TCP (RFC 793) mínimo y sin `alloc`: cabecera, y una conexión con buffers
-//! fijos, retransmisión con temporizador exponencial y cierre ordenado. La
-//! conexión no envía nada por sí misma: `poll` produce como mucho un
-//! segmento por llamada y el llamador lo transmite.
+//! Minimal TCP (RFC 793) without `alloc`: header, and a connection with fixed
+//! buffers, retransmission with an exponential timer and orderly close. The
+//! connection sends nothing on its own: `poll` produces at most one
+//! segment per call and the caller transmits it.
 
 use crate::ipv4::{pseudo_header_sum, PROTO_TCP};
 use crate::{be16, be32, checksum, Ipv4Addr};
@@ -13,11 +13,11 @@ pub const FLAG_RST: u8 = 0x04;
 pub const FLAG_PSH: u8 = 0x08;
 pub const FLAG_ACK: u8 = 0x10;
 
-/// Tamaño máximo de segmento que anunciamos y usamos.
+/// Maximum segment size we announce and use.
 pub const MSS: usize = 1400;
 pub const SEND_BUF: usize = 4096;
 pub const RECV_BUF: usize = 4096;
-/// Segmento máximo que produce `poll` (cabecera + opción MSS + datos).
+/// Largest segment `poll` produces (header + MSS option + data).
 pub const MAX_SEGMENT: usize = HEADER_LEN + 4 + MSS;
 const INITIAL_RTO_MS: u64 = 500;
 const MAX_RTO_MS: u64 = 8000;
@@ -35,7 +35,7 @@ pub struct Header {
 }
 
 impl Header {
-    /// Analiza y valida (offset de datos, checksum). Devuelve la carga útil.
+    /// Parses and validates (data offset, checksum). Returns the payload.
     pub fn parse(src: Ipv4Addr, dst: Ipv4Addr, b: &[u8]) -> Option<(Header, &[u8])> {
         if b.len() < HEADER_LEN {
             return None;
@@ -60,7 +60,7 @@ impl Header {
         ))
     }
 
-    /// Escribe el segmento completo (con opción MSS si `mss` y checksum).
+    /// Writes the complete segment (with MSS option if `mss`, and checksum).
     pub fn write(
         &self,
         src: Ipv4Addr,
@@ -120,18 +120,18 @@ pub enum State {
     TimeWait,
 }
 
-/// Por qué se cerró una conexión.
+/// Why a connection was closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseReason {
-    /// Cierre ordenado completado.
+    /// Orderly close completed.
     Graceful,
-    /// El otro extremo envió RST.
+    /// The peer sent RST.
     Reset,
-    /// Demasiadas retransmisiones sin respuesta.
+    /// Too many retransmissions without a reply.
     Timeout,
 }
 
-/// Anillo de bytes de tamaño fijo.
+/// Fixed-size byte ring.
 struct Ring<const N: usize> {
     buf: [u8; N],
     head: usize,
@@ -170,7 +170,7 @@ impl<const N: usize> Ring<N> {
         self.head = (self.head + n) % N;
         self.len -= n;
     }
-    /// Copia `[offset, offset + out.len())` sin consumir.
+    /// Copies `[offset, offset + out.len())` without consuming.
     fn peek(&self, offset: usize, out: &mut [u8]) -> usize {
         let n = out.len().min(self.len.saturating_sub(offset));
         for (i, slot) in out[..n].iter_mut().enumerate() {
@@ -187,22 +187,22 @@ pub struct Connection {
     remote_port: u16,
     state: State,
     reason: Option<CloseReason>,
-    /// Primer byte no confirmado y siguiente byte a enviar.
+    /// First unacknowledged byte and next byte to send.
     snd_una: u32,
     snd_nxt: u32,
-    /// Ventana anunciada por el otro extremo.
+    /// Window announced by the peer.
     snd_wnd: u16,
     rcv_nxt: u32,
-    /// Datos aceptados y no confirmados/no enviados (desde `snd_una`).
+    /// Data accepted and not yet acknowledged/sent (from `snd_una`).
     send: Ring<SEND_BUF>,
     recv: Ring<RECV_BUF>,
-    /// Hay que enviar SYN (activo o SYN|ACK pasivo).
+    /// SYN must be sent (active, or passive SYN|ACK).
     syn_pending: bool,
-    /// El usuario pidió cerrar: FIN tras los datos.
+    /// The user asked to close: FIN after the data.
     fin_queued: bool,
-    /// FIN ya enviado (su número de secuencia es `snd_nxt - 1`).
+    /// FIN already sent (its sequence number is `snd_nxt - 1`).
     fin_sent: bool,
-    /// El otro extremo cerró su lado.
+    /// The peer closed its side.
     peer_fin: bool,
     need_ack: bool,
     rto_ms: u64,
@@ -250,18 +250,18 @@ impl Connection {
     pub fn local_port(&self) -> u16 {
         self.local_port
     }
-    /// La conexión ha terminado del todo (incluido TIME-WAIT).
+    /// The connection has fully ended (TIME-WAIT included).
     pub fn is_closed(&self) -> bool {
         self.state == State::Closed
     }
     pub fn is_established(&self) -> bool {
         matches!(self.state, State::Established | State::CloseWait)
     }
-    /// Bytes listos para `recv`.
+    /// Bytes ready for `recv`.
     pub fn recv_available(&self) -> usize {
         self.recv.len
     }
-    /// El otro extremo cerró y no queda nada por leer.
+    /// The peer closed and there is nothing left to read.
     pub fn recv_finished(&self) -> bool {
         self.peer_fin && self.recv.len == 0
     }
@@ -272,7 +272,7 @@ impl Connection {
         self.retries
     }
 
-    /// Apertura activa: envía SYN en el siguiente `poll`.
+    /// Active open: sends SYN on the next `poll`.
     pub fn connect(&mut self, iss: u32, now: u64) {
         self.snd_una = iss;
         self.snd_nxt = iss;
@@ -281,12 +281,12 @@ impl Connection {
         self.arm_timer(now);
     }
 
-    /// Apertura pasiva: espera un SYN.
+    /// Passive open: waits for a SYN.
     pub fn listen(&mut self) {
         self.state = State::Listen;
     }
 
-    /// Acepta datos del usuario; devuelve cuántos caben.
+    /// Accepts user data; returns how much fits.
     pub fn send(&mut self, data: &[u8]) -> usize {
         if !self.is_established() || self.fin_queued {
             return 0;
@@ -294,16 +294,16 @@ impl Connection {
         self.send.push(data)
     }
 
-    /// Entrega datos recibidos en orden.
+    /// Delivers received data in order.
     pub fn recv(&mut self, out: &mut [u8]) -> usize {
         let n = self.recv.pop(out);
         if n > 0 {
-            self.need_ack = true; // anunciar la ventana liberada
+            self.need_ack = true; // announce the freed window
         }
         n
     }
 
-    /// Cierre ordenado: FIN tras vaciar el buffer de envío.
+    /// Orderly close: FIN after draining the send buffer.
     pub fn close(&mut self) {
         match self.state {
             State::Closed | State::Listen => self.finish(CloseReason::Graceful),
@@ -320,12 +320,12 @@ impl Connection {
         }
     }
 
-    /// Aborta: el siguiente `poll` emite RST y la conexión queda cerrada.
+    /// Aborts: the next `poll` emits RST and the connection is closed.
     pub fn abort(&mut self) {
         if self.state != State::Closed {
             self.reason = Some(CloseReason::Reset);
             self.state = State::Closed;
-            self.need_ack = true; // reutilizado como "enviar RST"
+            self.need_ack = true; // reused as "send RST"
         }
     }
 
@@ -367,14 +367,14 @@ impl Connection {
         )
     }
 
-    /// Bytes enviados y aún no confirmados.
+    /// Bytes sent and not yet acknowledged.
     fn inflight(&self) -> usize {
         self.snd_nxt.wrapping_sub(self.snd_una) as usize
     }
 
-    /// Siguiente segmento a transmitir, si lo hay. Llamar hasta `None`.
+    /// Next segment to transmit, if any. Call until `None`.
     pub fn poll(&mut self, now: u64, out: &mut [u8]) -> Option<usize> {
-        // RST tras abort.
+        // RST after abort.
         if self.state == State::Closed {
             if self.need_ack && self.reason == Some(CloseReason::Reset) {
                 self.need_ack = false;
@@ -391,7 +391,7 @@ impl Connection {
             self.finish(CloseReason::Graceful);
             return None;
         }
-        // Retransmisión por temporizador.
+        // Timer-driven retransmission.
         if let Some(at) = self.retransmit_at {
             if now >= at {
                 self.retries += 1;
@@ -404,7 +404,7 @@ impl Connection {
                 return self.retransmit(out);
             }
         }
-        // SYN inicial.
+        // Initial SYN.
         if self.syn_pending {
             self.syn_pending = false;
             let flags = if self.state == State::SynReceived {
@@ -418,7 +418,7 @@ impl Connection {
             self.need_ack = false;
             return seg;
         }
-        // Datos nuevos.
+        // New data.
         if matches!(
             self.state,
             State::Established | State::CloseWait | State::FinWait1 | State::LastAck
@@ -441,7 +441,7 @@ impl Connection {
                 self.need_ack = false;
                 return seg;
             }
-            // FIN cuando todo está enviado.
+            // FIN once everything has been sent.
             if self.fin_queued && !self.fin_sent && unsent == 0 {
                 self.fin_sent = true;
                 let seg = self.emit(
@@ -463,7 +463,7 @@ impl Connection {
         None
     }
 
-    /// Reenvía desde `snd_una`: SYN, primer trozo de datos o FIN.
+    /// Resends from `snd_una`: SYN, first data chunk or FIN.
     fn retransmit(&mut self, out: &mut [u8]) -> Option<usize> {
         match self.state {
             State::SynSent => self.emit(self.header(FLAG_SYN, self.snd_una), true, &[], out),
@@ -501,7 +501,7 @@ impl Connection {
         }
     }
 
-    /// Procesa un segmento dirigido a esta conexión.
+    /// Processes a segment addressed to this connection.
     pub fn on_segment(&mut self, h: &Header, payload: &[u8], now: u64) {
         if h.flags & FLAG_RST != 0 {
             if self.state != State::Listen {
@@ -542,7 +542,7 @@ impl Connection {
     }
 
     fn on_synchronized(&mut self, h: &Header, payload: &[u8], now: u64) {
-        // ACK: avanzar snd_una y soltar datos confirmados.
+        // ACK: advance snd_una and release acknowledged data.
         if h.flags & FLAG_ACK != 0 && seq_lt(self.snd_una, h.ack) && seq_le(h.ack, self.snd_nxt) {
             let acked = h.ack.wrapping_sub(self.snd_una) as usize;
             let syn_or_fin = usize::from(self.state == State::SynReceived)
@@ -569,16 +569,16 @@ impl Connection {
         } else if h.flags & FLAG_ACK != 0 {
             self.snd_wnd = h.window;
         }
-        // Datos en orden.
+        // In-order data.
         if !payload.is_empty() {
             if h.seq == self.rcv_nxt && !self.peer_fin {
                 let n = self.recv.push(payload);
                 self.rcv_nxt = self.rcv_nxt.wrapping_add(n as u32);
             }
-            // Fuera de orden o duplicado: solo ACK (el otro extremo retransmite).
+            // Out of order or duplicate: ACK only (the peer retransmits).
             self.need_ack = true;
         }
-        // FIN del otro extremo (tras sus datos).
+        // FIN from the peer (after its data).
         if h.flags & FLAG_FIN != 0
             && !self.peer_fin
             && h.seq.wrapping_add(payload.len() as u32) == self.rcv_nxt
@@ -617,12 +617,12 @@ mod tests {
     const A: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 15);
     const B: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
 
-    /// Dos extremos y un cable con pérdidas controladas.
+    /// Two endpoints and a wire with controlled losses.
     struct Pair {
         a: Connection,
         b: Connection,
         now: u64,
-        /// Devuelve `true` para descartar el segmento n-ésimo.
+        /// Returns `true` to drop the n-th segment.
         drop: fn(usize) -> bool,
         count: usize,
         delivered: usize,
@@ -644,7 +644,7 @@ mod tests {
             }
         }
 
-        /// Un intercambio: vacía la salida de A hacia B y de B hacia A.
+        /// One exchange: drains A's output towards B and B's towards A.
         fn step(&mut self) -> bool {
             let mut moved = false;
             let mut buf = [0u8; MAX_SEGMENT];
@@ -692,7 +692,7 @@ mod tests {
         p.run(10);
         assert_eq!(p.a.recv(&mut out), 9);
         assert_eq!(&out[..9], b"respuesta");
-        // Cierre iniciado por A.
+        // Close initiated by A.
         p.a.close();
         p.run(10);
         assert_eq!(p.a.state(), State::FinWait2);
@@ -709,25 +709,21 @@ mod tests {
 
     #[test]
     fn retransmits_lost_syn_and_data() {
-        // Se pierden el primer SYN y el quinto segmento (los datos: SYN
-        // reenviado = 2, SYN|ACK = 3, ACK = 4).
+        // The first SYN and the fifth segment are lost (the data: SYN
+        // resent = 2, SYN|ACK = 3, ACK = 4).
         let mut p = Pair::new(|n| n == 1 || n == 5);
         p.run(10);
-        assert_eq!(
-            p.a.state(),
-            State::SynSent,
-            "SYN perdido, aun sin respuesta"
-        );
+        assert_eq!(p.a.state(), State::SynSent, "SYN lost, still no reply");
         p.run(INITIAL_RTO_MS + 20);
-        assert_eq!(p.a.state(), State::Established, "SYN retransmitido");
+        assert_eq!(p.a.state(), State::Established, "SYN retransmitted");
         assert!(
             p.a.retries() == 0,
-            "las retransmisiones se olvidan al confirmar"
+            "retransmissions are forgotten once acknowledged"
         );
         p.a.send(b"datos");
         p.run(10);
         let mut out = [0u8; 16];
-        assert_eq!(p.b.recv(&mut out), 0, "el segmento de datos se perdio");
+        assert_eq!(p.b.recv(&mut out), 0, "the data segment was lost");
         p.run(INITIAL_RTO_MS + 20);
         assert_eq!(p.b.recv(&mut out), 5);
         assert_eq!(&out[..5], b"datos");
@@ -745,7 +741,7 @@ mod tests {
     #[test]
     fn random_loss_keeps_stream_in_order() {
         fn lossy(n: usize) -> bool {
-            // Pseudoaleatorio determinista: ~25 % de perdidas.
+            // Deterministic pseudo-random: ~25 % losses.
             (n.wrapping_mul(2654435761) >> 7) % 4 == 0
         }
         let mut p = Pair::new(lossy);
@@ -769,8 +765,8 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(got.len(), data.len(), "todo llega");
-        assert_eq!(got, data, "en orden y sin duplicados");
+        assert_eq!(got.len(), data.len(), "everything arrives");
+        assert_eq!(got, data, "in order and without duplicates");
     }
 
     #[test]
@@ -815,7 +811,7 @@ mod tests {
         assert!(payload.is_empty());
         assert!(
             Header::parse(A, Ipv4Addr::new(10, 0, 2, 3), &buf[..n]).is_none(),
-            "otra direccion"
+            "another address"
         );
         assert!(seq_lt(u32::MAX - 1, 1) && !seq_lt(1, u32::MAX - 1));
     }

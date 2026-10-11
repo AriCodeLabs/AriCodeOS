@@ -1,5 +1,5 @@
-//! Localización y parseo de las tablas ACPI estáticas a través del mapa
-//! físico (`libs/acpi`). Sin AML (sección 31).
+//! Locating and parsing the static ACPI tables through the physical map
+//! (`libs/acpi`). No AML (section 31).
 
 use crate::memory::phys;
 use crate::sync::IrqLock;
@@ -12,23 +12,23 @@ use log::{info, warn};
 pub struct AcpiInfo {
     pub madt: Madt,
     pub mcfg: Vec<McfgEntry>,
-    /// Unidades de remapeo DMA (VT-d), si la plataforma las declara.
+    /// DMA remapping units (VT-d), if the platform declares them.
     pub dmar: Option<Dmar>,
 }
 
 static ACPI: IrqLock<Option<AcpiInfo>> = IrqLock::new(None);
 
-/// Slice de `len` bytes en la física `phys`, si cae dentro del mapa lineal.
+/// Slice of `len` bytes at physical `phys`, if it lies within the linear map.
 fn phys_slice(addr: u64, len: usize) -> Option<&'static [u8]> {
     if addr == 0 || addr.checked_add(len as u64)? > phys::limit() {
         return None;
     }
-    // SAFETY: rango dentro del mapa físico lineal; las tablas ACPI son de
-    // solo lectura y viven en memoria que el kernel nunca libera.
+    // SAFETY: range within the linear physical map; the ACPI tables are
+    // read-only and live in memory the kernel never frees.
     Some(unsafe { core::slice::from_raw_parts(phys::phys_to_virt(addr) as *const u8, len) })
 }
 
-/// Tabla completa (cabecera + cuerpo) en `addr`.
+/// Whole table (header + body) at `addr`.
 fn table_at(addr: u64) -> Option<(&'static [u8], SdtHeader)> {
     let head = SdtHeader::parse(phys_slice(addr, SdtHeader::LEN)?).ok()?;
     let full = phys_slice(addr, head.length as usize)?;
@@ -37,26 +37,26 @@ fn table_at(addr: u64) -> Option<(&'static [u8], SdtHeader)> {
 
 pub fn init(info: &BootInfo) {
     let Some(rsdp_bytes) = phys_slice(info.rsdp_address, Rsdp::MAX_LEN) else {
-        warn!("acpi: sin RSDP");
+        warn!("acpi: no RSDP");
         return;
     };
     let rsdp = match Rsdp::parse(rsdp_bytes) {
         Ok(r) => r,
         Err(e) => {
-            warn!("acpi: RSDP invalido ({e:?})");
+            warn!("acpi: invalid RSDP ({e:?})");
             return;
         }
     };
     let (root, is_xsdt) = rsdp.root();
     let Some((root_table, _)) = table_at(root) else {
-        warn!("acpi: tabla raiz inaccesible en {root:#x}");
+        warn!("acpi: root table unreachable at {root:#x}");
         return;
     };
     let entries = match root_entries(root_table, is_xsdt) {
         Ok(e) => e,
         Err(e) => {
             warn!(
-                "acpi: {} invalida ({e:?})",
+                "acpi: invalid {} ({e:?})",
                 if is_xsdt { "XSDT" } else { "RSDT" }
             );
             return;
@@ -72,21 +72,21 @@ pub fn init(info: &BootInfo) {
         match &head.signature {
             b"APIC" => match Madt::parse(table) {
                 Ok(m) => acpi.madt = m,
-                Err(e) => warn!("acpi: MADT invalida ({e:?})"),
+                Err(e) => warn!("acpi: invalid MADT ({e:?})"),
             },
             b"MCFG" => match aricode_acpi::parse_mcfg(table) {
                 Ok(m) => acpi.mcfg = m,
-                Err(e) => warn!("acpi: MCFG invalida ({e:?})"),
+                Err(e) => warn!("acpi: invalid MCFG ({e:?})"),
             },
             b"DMAR" => match Dmar::parse(table) {
                 Ok(d) => acpi.dmar = Some(d),
-                Err(e) => warn!("acpi: DMAR invalida ({e:?})"),
+                Err(e) => warn!("acpi: invalid DMAR ({e:?})"),
             },
             _ => {}
         }
     }
     info!(
-        "acpi: RSDP rev {} -> {} con {} tablas [{}]",
+        "acpi: RSDP rev {} -> {} with {} tables [{}]",
         rsdp.revision,
         if is_xsdt { "XSDT" } else { "RSDT" },
         names.len(),
@@ -110,13 +110,13 @@ pub fn init(info: &BootInfo) {
     );
     for e in &acpi.mcfg {
         info!(
-            "acpi: MCFG ecam @ {:#x} segmento {} buses {}..={}",
+            "acpi: MCFG ecam @ {:#x} segment {} buses {}..={}",
             e.base, e.segment, e.bus_start, e.bus_end
         );
     }
     if let Some(d) = &acpi.dmar {
         info!(
-            "acpi: DMAR {} bits, {} unidad(es) {:?}, {} region(es) reservadas",
+            "acpi: DMAR {} bits, {} unit(s) {:?}, {} reserved region(s)",
             d.host_address_width,
             d.units.len(),
             d.units
@@ -129,7 +129,7 @@ pub fn init(info: &BootInfo) {
     *ACPI.lock() = Some(acpi);
 }
 
-/// Acceso a la información ACPI (vacía si no se pudo leer).
+/// Access to the ACPI information (empty if it could not be read).
 pub fn with<R>(f: impl FnOnce(&AcpiInfo) -> R) -> R {
     static EMPTY: AcpiInfo = AcpiInfo {
         madt: Madt {

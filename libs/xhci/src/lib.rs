@@ -1,14 +1,14 @@
-//! xHCI (Fase 25, segunda parte): todo lo que el driver de ring 3 necesita
-//! saber del controlador y del protocolo USB sin tocar hardware:
-//! desplazamientos y bits de registro, TRB (comandos, transferencias y
-//! eventos), anillos con bit de ciclo y TRB de enlace, contextos de slot y
-//! endpoint (de 32 o 64 bytes), tabla de segmentos del anillo de eventos,
-//! paquetes SETUP y descriptores USB. Se prueba en host; el driver solo
-//! copia estas estructuras a memoria DMA y escribe MMIO.
+//! xHCI (Phase 25, second part): everything the ring 3 driver needs to
+//! know about the controller and the USB protocol without touching hardware:
+//! register offsets and bits, TRBs (commands, transfers and
+//! events), rings with cycle bit and link TRB, slot and endpoint
+//! contexts (32 or 64 bytes), event ring segment table,
+//! SETUP packets and USB descriptors. Tested on the host; the driver only
+//! copies these structures into DMA memory and writes MMIO.
 
 #![no_std]
 
-/// Registros de capacidad (desde la base del BAR0).
+/// Capability registers (from the BAR0 base).
 pub mod cap {
     pub const CAPLENGTH: u64 = 0x00;
     pub const HCIVERSION: u64 = 0x02;
@@ -19,7 +19,7 @@ pub mod cap {
     pub const RTSOFF: u64 = 0x18;
 }
 
-/// Registros operacionales (desde `base + CAPLENGTH`).
+/// Operational registers (from `base + CAPLENGTH`).
 pub mod op {
     pub const USBCMD: u64 = 0x00;
     pub const USBSTS: u64 = 0x04;
@@ -27,7 +27,7 @@ pub mod op {
     pub const CRCR: u64 = 0x18;
     pub const DCBAAP: u64 = 0x30;
     pub const CONFIG: u64 = 0x38;
-    /// Registros de puerto: `PORTSC` del puerto `n` (desde 1) en `0x400 + 0x10 * (n - 1)`.
+    /// Port registers: `PORTSC` of port `n` (from 1) at `0x400 + 0x10 * (n - 1)`.
     pub const PORT_BASE: u64 = 0x400;
     pub const PORT_STRIDE: u64 = 0x10;
 
@@ -38,7 +38,7 @@ pub mod op {
     pub const STS_EINT: u32 = 1 << 3;
     pub const STS_PORT_CHANGE: u32 = 1 << 4;
     pub const STS_NOT_READY: u32 = 1 << 11;
-    /// Ring Cycle State del anillo de comandos.
+    /// Ring Cycle State of the command ring.
     pub const CRCR_RCS: u64 = 1 << 0;
 
     pub const PORTSC_CCS: u32 = 1 << 0;
@@ -48,7 +48,7 @@ pub mod op {
     pub const PORTSC_CSC: u32 = 1 << 17;
     pub const PORTSC_PEC: u32 = 1 << 18;
     pub const PORTSC_PRC: u32 = 1 << 21;
-    /// Bits RW1C de cambio: se escriben a 1 para limpiarlos, nunca por accidente.
+    /// RW1C change bits: written as 1 to clear them, never by accident.
     pub const PORTSC_CHANGE_BITS: u32 = 0x00FE_0000;
 
     pub fn port_speed(portsc: u32) -> u8 {
@@ -56,7 +56,7 @@ pub mod op {
     }
 }
 
-/// Registros de runtime (desde `base + RTSOFF`): interrupter 0.
+/// Runtime registers (from `base + RTSOFF`): interrupter 0.
 pub mod rt {
     pub const IMAN: u64 = 0x20;
     pub const IMOD: u64 = 0x24;
@@ -65,18 +65,18 @@ pub mod rt {
     pub const ERDP: u64 = 0x38;
     pub const IMAN_PENDING: u32 = 1 << 0;
     pub const IMAN_ENABLE: u32 = 1 << 1;
-    /// Event Handler Busy (RW1C) en ERDP.
+    /// Event Handler Busy (RW1C) in ERDP.
     pub const ERDP_EHB: u64 = 1 << 3;
 }
 
-/// Velocidades del campo Port Speed de PORTSC y del contexto de slot.
+/// Speeds of the PORTSC Port Speed field and of the slot context.
 pub mod speed {
     pub const FULL: u8 = 1;
     pub const LOW: u8 = 2;
     pub const HIGH: u8 = 3;
     pub const SUPER: u8 = 4;
 
-    /// Tamaño máximo de paquete del endpoint 0 por defecto para cada velocidad.
+    /// Default endpoint 0 max packet size for each speed.
     pub fn default_ep0_max_packet(speed: u8) -> u16 {
         match speed {
             LOW | FULL => 8,
@@ -86,7 +86,7 @@ pub mod speed {
     }
 }
 
-/// HCSPARAMS1 / HCSPARAMS2 / HCCPARAMS1 decodificados.
+/// Decoded HCSPARAMS1 / HCSPARAMS2 / HCCPARAMS1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Params {
     pub max_slots: u8,
@@ -111,17 +111,17 @@ impl Params {
         }
     }
 
-    /// Bytes del buffer DMA que necesita el driver: 64 KiB para DCBAA,
-    /// anillos, ERST y contextos de los dispositivos, más una página por cada
-    /// scratchpad que pida el controlador (los Intel de 2012 piden decenas;
-    /// QEMU ninguno) y una de holgura por la alineación de los scratchpads.
+    /// Bytes of DMA buffer the driver needs: 64 KiB for the DCBAA,
+    /// rings, ERST and device contexts, plus one page for each
+    /// scratchpad the controller asks for (2012 Intel parts ask for dozens;
+    /// QEMU none) and one spare for scratchpad alignment.
     pub fn dma_arena_bytes(&self) -> u64 {
         const BASE: u64 = 64 * 1024;
         const PAGE: u64 = 4096;
         BASE + (self.scratchpad_buffers as u64 + 1) * PAGE
     }
 
-    /// Bytes de cada contexto (slot o endpoint).
+    /// Bytes of each context (slot or endpoint).
     pub fn context_bytes(&self) -> usize {
         if self.context_size_64 {
             64
@@ -140,7 +140,7 @@ pub struct Trb {
     pub control: u32,
 }
 
-/// Tipos de TRB (bits 15:10 de `control`).
+/// TRB types (bits 15:10 of `control`).
 pub mod trb_type {
     pub const NORMAL: u32 = 1;
     pub const SETUP_STAGE: u32 = 2;
@@ -159,10 +159,10 @@ pub mod trb_type {
     pub const PORT_STATUS_CHANGE: u32 = 34;
 }
 
-/// Códigos de terminación de los eventos.
+/// Event completion codes.
 pub mod completion {
     pub const SUCCESS: u8 = 1;
-    /// El endpoint respondió STALL (queda parado hasta Reset Endpoint).
+    /// The endpoint answered STALL (it stays halted until Reset Endpoint).
     pub const STALL: u8 = 6;
     pub const SHORT_PACKET: u8 = 13;
 }
@@ -171,11 +171,11 @@ pub const TRB_CYCLE: u32 = 1 << 0;
 const TRB_TOGGLE_CYCLE: u32 = 1 << 1;
 /// Interrupt on Short Packet.
 const TRB_ISP: u32 = 1 << 2;
-/// Chain: el TRB siguiente pertenece al mismo TD.
+/// Chain: the next TRB belongs to the same TD.
 const TRB_CHAIN: u32 = 1 << 4;
 /// Interrupt on Completion.
 const TRB_IOC: u32 = 1 << 5;
-/// Immediate Data (el parámetro es el dato, no un puntero).
+/// Immediate Data (the parameter is the data, not a pointer).
 const TRB_IDT: u32 = 1 << 6;
 const TRB_DIR_IN: u32 = 1 << 16;
 
@@ -194,15 +194,15 @@ impl Trb {
     pub fn slot_id(&self) -> u8 {
         (self.control >> 24) as u8
     }
-    /// Endpoint (DCI) de un Transfer Event.
+    /// Endpoint (DCI) of a Transfer Event.
     pub fn endpoint_id(&self) -> u8 {
         ((self.control >> 16) & 0x1F) as u8
     }
-    /// Bytes no transferidos (Transfer Event).
+    /// Bytes not transferred (Transfer Event).
     pub fn residual(&self) -> u32 {
         self.status & 0x00FF_FFFF
     }
-    /// Puerto de un Port Status Change Event.
+    /// Port of a Port Status Change Event.
     pub fn port_id(&self) -> u8 {
         (self.parameter >> 24) as u8
     }
@@ -247,22 +247,22 @@ impl Trb {
         t.control |= (slot as u32) << 24;
         t
     }
-    /// Reset Endpoint: saca al endpoint `dci` del estado parado (tras STALL).
+    /// Reset Endpoint: takes endpoint `dci` out of the halted state (after STALL).
     pub fn reset_endpoint(slot: u8, dci: u8) -> Self {
         let mut t = Self::with_type(trb_type::RESET_ENDPOINT);
         t.control |= (dci as u32) << 16 | (slot as u32) << 24;
         t
     }
-    /// Set TR Dequeue Pointer: el controlador sigue el anillo de `dci` desde
-    /// `pointer` (dirección del TRB con el bit de ciclo del productor).
+    /// Set TR Dequeue Pointer: the controller follows the ring of `dci` from
+    /// `pointer` (TRB address with the producer cycle bit).
     pub fn set_tr_dequeue(slot: u8, dci: u8, pointer: u64, cycle: bool) -> Self {
         let mut t = Self::with_type(trb_type::SET_TR_DEQUEUE);
         t.parameter = (pointer & !0xF) | cycle as u64;
         t.control |= (dci as u32) << 16 | (slot as u32) << 24;
         t
     }
-    /// Setup Stage con los 8 bytes del paquete SETUP como dato inmediato.
-    /// `TRT`: 0 sin datos, 2 datos OUT, 3 datos IN.
+    /// Setup Stage with the 8 bytes of the SETUP packet as immediate data.
+    /// `TRT`: 0 no data, 2 OUT data, 3 IN data.
     pub fn setup_stage(setup: &SetupPacket) -> Self {
         let mut t = Self::with_type(trb_type::SETUP_STAGE);
         t.parameter = u64::from_le_bytes(setup.to_bytes());
@@ -286,8 +286,8 @@ impl Trb {
         }
         t
     }
-    /// Status Stage; su dirección es la contraria a la de los datos (o IN si
-    /// no hubo datos). Con `IOC` para saber que la transferencia acabó.
+    /// Status Stage; its direction is the opposite of the data (or IN if
+    /// there was no data). With `IOC` to know that the transfer finished.
     pub fn status_stage(device_to_host: bool) -> Self {
         let mut t = Self::with_type(trb_type::STATUS_STAGE);
         if device_to_host {
@@ -296,14 +296,14 @@ impl Trb {
         t.control |= TRB_IOC;
         t
     }
-    /// Transferencia normal (endpoint de interrupción) con aviso al terminar,
-    /// también si el paquete es corto.
+    /// Normal transfer (interrupt endpoint) with notification on completion,
+    /// also if the packet is short.
     pub fn normal(buffer_phys: u64, len: u32) -> Self {
         Self::normal_part(buffer_phys, len, 0, false)
     }
 
-    /// Un TRB de un TD de varios: `td_size` = paquetes que quedan tras este
-    /// TRB (acotado a 31), `chain` si no es el último. Solo el último avisa.
+    /// One TRB of a multi-TRB TD: `td_size` = packets left after this
+    /// TRB (capped at 31), `chain` if it is not the last. Only the last one notifies.
     pub fn normal_part(buffer_phys: u64, len: u32, td_size: u32, chain: bool) -> Self {
         let mut t = Self::with_type(trb_type::NORMAL);
         t.parameter = buffer_phys;
@@ -328,9 +328,9 @@ impl Trb {
     }
 }
 
-/// Anillo de productor (comandos o transferencias): `size - 1` TRB útiles y
-/// un TRB de enlace al final con `Toggle Cycle`. Guarda el estado del
-/// productor; el contenido lo escribe el llamador donde `next` le diga.
+/// Producer ring (commands or transfers): `size - 1` usable TRBs and
+/// a link TRB at the end with `Toggle Cycle`. Keeps the producer state;
+/// the caller writes the contents wherever `next` tells it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProducerRing {
     pub phys: u64,
@@ -339,22 +339,22 @@ pub struct ProducerRing {
     pub cycle: bool,
 }
 
-/// Lo que hay que escribir en el anillo para encolar un TRB: la posición y
-/// los bytes (con el bit de ciclo correcto) y, si toca, el TRB de enlace
-/// actualizado.
+/// What must be written to the ring to enqueue a TRB: the position and
+/// the bytes (with the correct cycle bit) and, when due, the updated
+/// link TRB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Enqueued {
     pub index: usize,
     pub trb: Trb,
-    /// Dirección física del TRB (para casar eventos de terminación).
+    /// Physical address of the TRB (to match completion events).
     pub phys: u64,
-    /// El enlace hay que reescribirlo con este ciclo antes de dar la vuelta.
+    /// The link must be rewritten with this cycle before wrapping around.
     pub link: Option<(usize, Trb)>,
 }
 
 impl ProducerRing {
     pub fn new(phys: u64, size: usize) -> Self {
-        assert!(size >= 2, "anillo demasiado pequeno");
+        assert!(size >= 2, "ring too small");
         Self {
             phys,
             size,
@@ -363,17 +363,17 @@ impl ProducerRing {
         }
     }
 
-    /// TRB de enlace inicial (último slot, apunta al principio, con toggle).
+    /// Initial link TRB (last slot, points to the start, with toggle).
     pub fn initial_link(&self) -> (usize, Trb) {
         let mut link = Trb::link(self.phys, true);
-        // El enlace nace con el ciclo del productor: la primera vuelta lo
-        // encuentra "suyo" solo cuando el productor lo alcance y lo reescriba.
+        // The link starts with the producer cycle: the first pass only
+        // finds it "owned" once the producer reaches and rewrites it.
         link.control |= TRB_CYCLE;
         link.control &= !TRB_CYCLE;
         (self.size - 1, link)
     }
 
-    /// Encola `trb` (sin bit de ciclo) y avanza.
+    /// Enqueues `trb` (without cycle bit) and advances.
     pub fn push(&mut self, mut trb: Trb) -> Enqueued {
         trb.control = (trb.control & !TRB_CYCLE) | if self.cycle { TRB_CYCLE } else { 0 };
         let index = self.enqueue;
@@ -381,8 +381,8 @@ impl ProducerRing {
         self.enqueue += 1;
         let mut link = None;
         if self.enqueue == self.size - 1 {
-            // Enlace: se le da el ciclo actual para que el consumidor lo siga y
-            // el productor pasa al ciclo contrario en la vuelta.
+            // Link: it gets the current cycle so that the consumer follows it and
+            // the producer switches to the opposite cycle on wrap-around.
             let mut l = Trb::link(self.phys, true);
             if self.cycle {
                 l.control |= TRB_CYCLE;
@@ -400,8 +400,8 @@ impl ProducerRing {
     }
 }
 
-/// Consumidor del anillo de eventos (un segmento): sabe qué TRB es el
-/// siguiente y con qué bit de ciclo debe venir para ser válido.
+/// Event ring consumer (one segment): knows which TRB comes
+/// next and with which cycle bit it must arrive to be valid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EventRing {
     pub phys: u64,
@@ -420,7 +420,7 @@ impl EventRing {
         }
     }
 
-    /// Si `trb` (leído en `dequeue`) es un evento nuevo, avanza y lo devuelve.
+    /// If `trb` (read at `dequeue`) is a new event, advances and returns it.
     pub fn accept(&mut self, trb: Trb) -> Option<Trb> {
         if trb.cycle() != self.cycle {
             return None;
@@ -433,13 +433,13 @@ impl EventRing {
         Some(trb)
     }
 
-    /// Valor a escribir en ERDP tras procesar: puntero actual con EHB.
+    /// Value to write to ERDP after processing: current pointer with EHB.
     pub fn dequeue_pointer(&self) -> u64 {
         (self.phys + (self.dequeue * Trb::LEN) as u64) | rt::ERDP_EHB
     }
 }
 
-/// Entrada de la Event Ring Segment Table (16 bytes).
+/// Event Ring Segment Table entry (16 bytes).
 pub fn erst_entry(segment_phys: u64, trbs: u16) -> [u8; 16] {
     let mut b = [0u8; 16];
     b[..8].copy_from_slice(&segment_phys.to_le_bytes());
@@ -447,7 +447,7 @@ pub fn erst_entry(segment_phys: u64, trbs: u16) -> [u8; 16] {
     b
 }
 
-/// Tipos de endpoint del contexto (bits 5:3 de la palabra 1).
+/// Endpoint types of the context (bits 5:3 of word 1).
 pub mod ep_type {
     pub const BULK_OUT: u32 = 2;
     pub const INTERRUPT_OUT: u32 = 3;
@@ -456,10 +456,10 @@ pub mod ep_type {
     pub const INTERRUPT_IN: u32 = 7;
 }
 
-/// Un TD de transferencia masiva como TRBs normales: ninguno cruza un límite
-/// de 64 KiB (xHCI 4.11.7), los no finales encadenan con el tamaño de TD
-/// (paquetes pendientes) y solo el último avisa. Devuelve cuántos TRBs hay;
-/// `None` si no caben en `out`.
+/// A bulk transfer TD as normal TRBs: none crosses a 64 KiB
+/// boundary (xHCI 4.11.7), non-final ones chain with the TD size
+/// (pending packets) and only the last one notifies. Returns how many TRBs there are;
+/// `None` if they do not fit in `out`.
 pub fn bulk_trbs(buffer_phys: u64, len: u32, max_packet: u16, out: &mut [Trb]) -> Option<usize> {
     const BOUNDARY: u64 = 64 * 1024;
     let max_packet = max_packet.max(1) as u64;
@@ -489,7 +489,7 @@ pub fn bulk_trbs(buffer_phys: u64, len: u32, max_packet: u16, out: &mut [Trb]) -
     Some(n)
 }
 
-/// Índice de contexto de dispositivo (DCI) de un endpoint USB.
+/// Device context index (DCI) of a USB endpoint.
 pub fn dci(endpoint_number: u8, device_to_host: bool) -> u8 {
     if endpoint_number == 0 {
         1
@@ -498,12 +498,12 @@ pub fn dci(endpoint_number: u8, device_to_host: bool) -> u8 {
     }
 }
 
-/// Contexto de slot (las 8 primeras palabras; el resto es reservado).
+/// Slot context (the first 8 words; the rest is reserved).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SlotContext {
     pub route_string: u32,
     pub speed: u8,
-    /// Último DCI válido del dispositivo.
+    /// Last valid DCI of the device.
     pub context_entries: u8,
     pub root_hub_port: u8,
 }
@@ -519,15 +519,15 @@ impl SlotContext {
     }
 }
 
-/// Contexto de endpoint.
+/// Endpoint context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct EndpointContext {
     pub ep_type: u32,
     pub max_packet_size: u16,
-    /// Intervalo de sondeo: `2^interval * 125 us`.
+    /// Polling interval: `2^interval * 125 us`.
     pub interval: u8,
     pub error_count: u8,
-    /// Anillo de transferencia con su Dequeue Cycle State.
+    /// Transfer ring with its Dequeue Cycle State.
     pub ring_phys: u64,
     pub ring_cycle: bool,
     pub average_trb_len: u16,
@@ -548,7 +548,7 @@ impl EndpointContext {
         }
     }
 
-    /// Endpoint masivo (bulk) IN u OUT.
+    /// Bulk endpoint, IN or OUT.
     pub fn bulk(max_packet_size: u16, ring_phys: u64, device_to_host: bool) -> Self {
         Self {
             ep_type: if device_to_host {
@@ -593,11 +593,11 @@ impl EndpointContext {
     }
 }
 
-/// Intervalo de un endpoint de interrupción a partir de `bInterval`.
-/// Alta velocidad y superior: `2^(bInterval-1)` microframes. Baja y
-/// completa: `bInterval` está en ms y el campo es `floor(log2(ms * 8))`,
-/// acotado a 3..=10 (xHCI 6.2.3.6, tabla 6-12: se redondea hacia abajo, al
-/// periodo igual o menor, nunca mayor).
+/// Interval of an interrupt endpoint derived from `bInterval`.
+/// High speed and above: `2^(bInterval-1)` microframes. Low and
+/// full speed: `bInterval` is in ms and the field is `floor(log2(ms * 8))`,
+/// clamped to 3..=10 (xHCI 6.2.3.6, table 6-12: rounded down, to the
+/// equal or shorter period, never longer).
 pub fn interrupt_interval(speed: u8, b_interval: u8) -> u8 {
     match speed {
         speed::HIGH | speed::SUPER => b_interval.clamp(1, 16) - 1,
@@ -609,9 +609,9 @@ pub fn interrupt_interval(speed: u8, b_interval: u8) -> u8 {
     }
 }
 
-/// Escribe un Input Context: control (drop/add flags), slot y los endpoints
-/// dados por DCI, con contextos de `context_bytes` cada uno. Devuelve los
-/// bytes usados.
+/// Writes an Input Context: control (drop/add flags), slot and the endpoints
+/// given by DCI, with contexts of `context_bytes` each. Returns the
+/// bytes used.
 pub fn write_input_context(
     out: &mut [u8],
     context_bytes: usize,
@@ -626,7 +626,7 @@ pub fn write_input_context(
             out[base + 4 * i..base + 4 * i + 4].copy_from_slice(&w.to_le_bytes());
         }
     };
-    // Input Control Context: palabra 0 drop flags, palabra 1 add flags.
+    // Input Control Context: word 0 drop flags, word 1 add flags.
     let mut icc = [0u32; 8];
     icc[1] = add_flags;
     put(out, 0, &icc);
@@ -639,7 +639,7 @@ pub fn write_input_context(
     (max + 1) * context_bytes
 }
 
-/// Paquete SETUP de una petición de control (8 bytes).
+/// SETUP packet of a control request (8 bytes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetupPacket {
     pub request_type: u8,
@@ -653,7 +653,7 @@ pub mod request {
     pub const CLEAR_FEATURE: u8 = 1;
     pub const GET_DESCRIPTOR: u8 = 6;
     pub const SET_CONFIGURATION: u8 = 9;
-    /// Clase HID: protocolo de arranque (0) o de informe (1).
+    /// HID class: boot protocol (0) or report protocol (1).
     pub const HID_SET_PROTOCOL: u8 = 0x0B;
     pub const HID_SET_IDLE: u8 = 0x0A;
     pub const DESC_DEVICE: u8 = 1;
@@ -674,8 +674,8 @@ impl SetupPacket {
             length,
         }
     }
-    /// `CLEAR_FEATURE(ENDPOINT_HALT)` sobre el endpoint `address` (bit 7 =
-    /// IN), tras un STALL en una transferencia masiva.
+    /// `CLEAR_FEATURE(ENDPOINT_HALT)` on endpoint `address` (bit 7 =
+    /// IN), after a STALL in a bulk transfer.
     pub fn clear_endpoint_halt(address: u8) -> Self {
         Self {
             request_type: 0x02,
@@ -694,7 +694,7 @@ impl SetupPacket {
             length: 0,
         }
     }
-    /// HID `SET_PROTOCOL`: 0 = protocolo de arranque (informes fijos).
+    /// HID `SET_PROTOCOL`: 0 = boot protocol (fixed reports).
     pub fn hid_set_protocol(interface: u8, protocol: u16) -> Self {
         Self {
             request_type: 0x21,
@@ -704,7 +704,7 @@ impl SetupPacket {
             length: 0,
         }
     }
-    /// HID `SET_IDLE` con duración 0: informe solo cuando cambia algo.
+    /// HID `SET_IDLE` with duration 0: report only when something changes.
     pub fn hid_set_idle(interface: u8) -> Self {
         Self {
             request_type: 0x21,
@@ -725,7 +725,7 @@ impl SetupPacket {
     }
 }
 
-/// Descriptor de dispositivo (lo que el driver usa).
+/// Device descriptor (what the driver uses).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceDescriptor {
     pub usb_version: u16,
@@ -753,19 +753,19 @@ impl DeviceDescriptor {
     }
 }
 
-/// Interfaz HID de arranque encontrada en un descriptor de configuración.
+/// Boot HID interface found in a configuration descriptor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HidInterface {
     pub interface: u8,
-    /// 1 teclado, 2 ratón (protocolo de arranque).
+    /// 1 keyboard, 2 mouse (boot protocol).
     pub protocol: u8,
     pub endpoint: u8,
     pub max_packet_size: u16,
     pub b_interval: u8,
 }
 
-/// Interfaz de almacenamiento masivo (clase 8, subclase 6 SCSI transparente,
-/// protocolo 0x50 bulk-only) con sus endpoints masivos.
+/// Mass storage interface (class 8, subclass 6 transparent SCSI,
+/// protocol 0x50 bulk-only) with its bulk endpoints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StorageInterface {
     pub interface: u8,
@@ -775,8 +775,8 @@ pub struct StorageInterface {
     pub max_packet_out: u16,
 }
 
-/// Primera interfaz de almacenamiento bulk-only de un descriptor de
-/// configuración completo, con el valor de configuración.
+/// First bulk-only storage interface of a complete configuration
+/// descriptor, with the configuration value.
 pub fn parse_storage_interface(d: &[u8]) -> Option<(u8, StorageInterface)> {
     if d.len() < 9 || d[1] != request::DESC_CONFIGURATION {
         return None;
@@ -828,9 +828,9 @@ pub fn parse_storage_interface(d: &[u8]) -> Option<(u8, StorageInterface)> {
         .map(|i| (config_value, i))
 }
 
-/// Recorre un descriptor de configuración completo y devuelve su valor de
-/// configuración y las interfaces HID de arranque (clase 3, subclase 1) con
-/// su endpoint de interrupción IN.
+/// Walks a complete configuration descriptor and returns its configuration
+/// value and the boot HID interfaces (class 3, subclass 1) with
+/// their IN interrupt endpoint.
 pub fn parse_configuration(d: &[u8], out: &mut [Option<HidInterface>; 4]) -> Option<(u8, usize)> {
     if d.len() < 9 || d[1] != request::DESC_CONFIGURATION {
         return None;
@@ -907,7 +907,7 @@ mod tests {
             35
         );
         assert_eq!(Params::decode(0, 0, 4).context_bytes(), 64);
-        // Sin scratchpads basta la base; con 35, 35 páginas más una de holgura.
+        // Without scratchpads the base is enough; with 35, 35 more pages plus a spare one.
         assert_eq!(Params::decode(0, 0, 4).dma_arena_bytes(), 64 * 1024 + 4096);
         assert_eq!(
             Params::decode(0, 1 << 21 | 3 << 27, 4).dma_arena_bytes(),
@@ -928,21 +928,21 @@ mod tests {
         assert_eq!(
             interrupt_interval(speed::FULL, 10),
             6,
-            "10 ms se redondea hacia abajo a 8 ms"
+            "10 ms is rounded down to 8 ms"
         );
         assert_eq!(interrupt_interval(speed::FULL, 3), 4, "3 ms -> 2 ms");
         assert_eq!(interrupt_interval(speed::LOW, 1), 3);
         assert_eq!(interrupt_interval(speed::LOW, 0), 3);
-        assert_eq!(interrupt_interval(speed::FULL, 129), 10, "tope del campo");
+        assert_eq!(interrupt_interval(speed::FULL, 129), 10, "field maximum");
         assert_eq!(interrupt_interval(speed::FULL, 255), 10);
-        // Auditoria 4836023, hallazgo 2: campo en rango y periodo nunca
-        // mayor que el pedido (salvo el minimo de 1 ms).
+        // Audit 4836023, finding 2: field in range and period never
+        // longer than requested (except the 1 ms minimum).
         for b in 1..=255u8 {
             let i = interrupt_interval(speed::FULL, b);
             assert!((3..=10).contains(&i));
             assert!(
                 (1u32 << i) <= (b as u32) * 8,
-                "nunca un periodo mayor: {b} -> {i}"
+                "never a longer period: {b} -> {i}"
             );
         }
     }
@@ -959,7 +959,7 @@ mod tests {
         let s = Trb::setup_stage(&setup);
         assert_eq!(s.trb_type(), trb_type::SETUP_STAGE);
         assert_eq!(s.status, 8);
-        assert_eq!((s.control >> 16) & 3, 3, "TRT = datos IN");
+        assert_eq!((s.control >> 16) & 3, 3, "TRT = IN data");
         assert!(s.control & TRB_IDT != 0);
         assert_eq!(s.parameter.to_le_bytes(), setup.to_bytes());
         let no_data = Trb::setup_stage(&SetupPacket::set_configuration(1));
@@ -971,7 +971,7 @@ mod tests {
         assert!(st.control & TRB_IOC != 0 && st.control & TRB_DIR_IN == 0);
         let n = Trb::normal(0xA000, 8);
         assert!(n.control & (TRB_IOC | TRB_ISP) == (TRB_IOC | TRB_ISP));
-        // Evento de terminación de comando: código 1, slot 3.
+        // Command completion event: code 1, slot 3.
         let ev = Trb {
             parameter: 0x100,
             status: 1 << 24,
@@ -1011,16 +1011,16 @@ mod tests {
         assert_eq!(b.index, 1);
         let c = r.push(Trb::noop_command());
         assert_eq!(c.index, 2);
-        // Al llenar el último util se reescribe el enlace con el ciclo actual (1)
-        // y el productor pasa al ciclo 0.
-        let (li, l) = c.link.expect("enlace");
+        // Filling the last usable one rewrites the link with the current cycle (1)
+        // and the producer switches to cycle 0.
+        let (li, l) = c.link.expect("link");
         assert_eq!(li, 3);
         assert!(l.cycle());
         assert_eq!(r.enqueue, 0);
         assert!(!r.cycle);
         let d = r.push(Trb::noop_command());
         assert_eq!(d.index, 0);
-        assert!(!d.trb.cycle(), "segunda vuelta con ciclo 0");
+        assert!(!d.trb.cycle(), "second pass with cycle 0");
     }
 
     #[test]
@@ -1039,7 +1039,7 @@ mod tests {
         assert_eq!(e.dequeue_pointer(), 0x2010 | rt::ERDP_EHB);
         assert!(e.accept(fresh).is_some());
         assert_eq!(e.dequeue, 0);
-        assert!(!e.cycle, "vuelta: ahora los eventos nuevos llevan ciclo 0");
+        assert!(!e.cycle, "wrap-around: new events now carry cycle 0");
         assert_eq!(e.accept(fresh), None);
         assert!(e.accept(stale).is_some());
         let entry = erst_entry(0x2000, 2);
@@ -1064,7 +1064,7 @@ mod tests {
         let ep0 = EndpointContext::control(64, 0x3000);
         let w = ep0.to_words();
         assert_eq!(w[1], 3 << 1 | ep_type::CONTROL << 3 | 64 << 16);
-        assert_eq!(w[2], 0x3001, "dequeue con DCS = 1");
+        assert_eq!(w[2], 0x3001, "dequeue with DCS = 1");
         assert_eq!(w[4], 8);
         let int = EndpointContext::interrupt_in(8, 6, 0x4000);
         let w = int.to_words();
@@ -1093,7 +1093,7 @@ mod tests {
         );
         assert!(
             buf[5 * 32..].iter().all(|&b| b == 0),
-            "el resto queda a cero"
+            "the rest stays zeroed"
         );
         let used64 = write_input_context(&mut buf, 64, 0b11, &slot, &[(1, ep0)]);
         assert_eq!(used64, 3 * 64);
@@ -1110,9 +1110,9 @@ mod tests {
         assert_eq!((d.vendor, d.product), (0x0627, 0x0001));
         assert_eq!(d.configurations, 1);
         assert!(DeviceDescriptor::parse(&dev[..17]).is_none());
-        // Configuración con dos interfaces HID de arranque: teclado (ep 1 IN,
-        // 8 bytes, 7 ms) y ratón (ep 2 IN, 4 bytes, 10 ms), más un endpoint
-        // OUT que se ignora.
+        // Configuration with two boot HID interfaces: keyboard (ep 1 IN,
+        // 8 bytes, 7 ms) and mouse (ep 2 IN, 4 bytes, 10 ms), plus an OUT
+        // endpoint that is ignored.
         let mut cfg = Vec::new();
         cfg.extend_from_slice(&[9, 2, 0, 0, 2, 1, 0, 0xA0, 50]);
         cfg.extend_from_slice(&[9, 4, 0, 0, 1, 3, 1, 1, 0]);
@@ -1149,14 +1149,14 @@ mod tests {
         assert!(parse_configuration(&cfg[..8], &mut out).is_none());
         let setup = SetupPacket::hid_set_protocol(1, 0).to_bytes();
         assert_eq!(setup, [0x21, 0x0B, 0, 0, 1, 0, 0, 0]);
-        // Sin interfaz de almacenamiento.
+        // No storage interface.
         assert!(parse_storage_interface(&cfg).is_none());
     }
 
     #[test]
     fn storage_interface_and_bulk_endpoints() {
-        // Pendrive: interfaz 0 de clase 8/6/0x50 con bulk IN 0x81 (512) y
-        // bulk OUT 0x02 (512), precedida de una interfaz de otra clase.
+        // USB stick: interface 0 of class 8/6/0x50 with bulk IN 0x81 (512) and
+        // bulk OUT 0x02 (512), preceded by an interface of another class.
         let mut cfg = Vec::new();
         cfg.extend_from_slice(&[9, 2, 0, 0, 2, 1, 0, 0x80, 50]);
         cfg.extend_from_slice(&[9, 4, 0, 0, 1, 0xFF, 0, 0, 0]);
@@ -1198,8 +1198,8 @@ mod tests {
     #[test]
     fn bulk_td_never_crosses_64k() {
         let mut out = [Trb::noop_command(); 4];
-        // 8 KiB que cruzan un límite de 64 KiB: dos TRBs, el primero encadenado
-        // con los paquetes (512 B) que quedan, el último con IOC.
+        // 8 KiB crossing a 64 KiB boundary: two TRBs, the first chained
+        // with the packets (512 B) left, the last one with IOC.
         let n = bulk_trbs(0x1_F000, 8192, 512, &mut out).unwrap();
         assert_eq!(n, 2);
         assert_eq!(
@@ -1216,7 +1216,7 @@ mod tests {
         assert_eq!((out[1].status >> 17) & 0x1F, 0);
         assert_eq!(out[1].control & TRB_CHAIN, 0);
         assert_ne!(out[1].control & TRB_IOC, 0);
-        // Sin cruce: un solo TRB con IOC.
+        // No crossing: a single TRB with IOC.
         assert_eq!(bulk_trbs(0x1000, 31, 512, &mut out), Some(1));
         assert_ne!(out[0].control & TRB_IOC, 0);
         assert_eq!(bulk_trbs(0x1000, 0, 512, &mut out), None);

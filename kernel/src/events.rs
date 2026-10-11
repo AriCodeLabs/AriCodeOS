@@ -1,9 +1,9 @@
-//! Sucesos recientes del kernel (etapa 5, diagnóstico consultable): un
-//! anillo acotado con lo que un informe de problema necesita saber sin
-//! leer la consola serie: procesos creados y terminados (con el motivo si
-//! los mató el kernel), fallos de DMA del IOMMU y cuotas agotadas. Lo
-//! publica `sysinfo::EVENTS` a quien tenga `READ` sobre `SYSTEM`; nunca
-//! lleva contenido de mensajes ni de ficheros.
+//! Recent kernel events (stage 5, queryable diagnostics): a bounded ring
+//! with what a problem report needs to know without reading the serial
+//! console: processes created and exited (with the reason if the kernel
+//! killed them), IOMMU DMA faults and exhausted quotas. Published by
+//! `sysinfo::EVENTS` to whoever holds `READ` on `SYSTEM`; it never carries
+//! message or file contents.
 
 use crate::sync::IrqLock;
 use aricode_abi::sysinfo::{EventEntry, EventKind};
@@ -22,7 +22,7 @@ static RING: IrqLock<Ring> = IrqLock::new(Ring {
     len: 0,
 });
 
-/// Anota un suceso; si el anillo está lleno se pierde el más antiguo.
+/// Records an event; if the ring is full the oldest one is dropped.
 pub fn record(kind: EventKind, pid: u32, code: u64, name: &str) {
     let entry = EventEntry::new(crate::time::uptime_us(), kind, pid, code, name);
     let mut r = RING.lock();
@@ -32,7 +32,7 @@ pub fn record(kind: EventKind, pid: u32, code: u64, name: &str) {
     r.len = (r.len + 1).min(CAPACITY);
 }
 
-/// Los últimos `max` sucesos, del más antiguo al más reciente.
+/// The last `max` events, oldest first.
 pub fn recent(max: usize) -> alloc::vec::Vec<EventEntry> {
     let r = RING.lock();
     let n = r.len.min(max);

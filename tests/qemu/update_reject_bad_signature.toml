@@ -1,7 +1,7 @@
-# Fase 30: la imagen de B pendiente lleva una firma alterada: AriBoot la
-# rechaza, descarta el pendiente y arranca A.
+# Phase 30: the pending B image carries a tampered signature: AriBoot
+# rejects it, discards the pending state and boots A.
 name = "update.reject_bad_signature"
-description = "imagen con firma invalida: rechazo y rollback"
+description = "image with an invalid signature: rejection and rollback"
 level = "full"
 areas = ["update", "boot", "crypto"]
 cmdline = "qemu_exit"
@@ -10,9 +10,9 @@ disk = "b-corrupt"
 [expect]
 exit = 33
 serial_contains = [
-    "slots: slot B rechazado: firma invalida",
-    "slots: imagen del slot pendiente rechazada: rollback al activo -> slot A",
-    "slots: arrancando desde el slot A (imagen version 1)",
+    "slots: slot B rejected: invalid signature",
+    "slots: pending slot image rejected: rollback to active -> slot A",
+    "slots: booting from slot A (image version 1)",
     "ARICODEOS_KERNEL_READY",
 ]
 serial_absent = ["KERNEL PANIC", "boot_slot=B"]

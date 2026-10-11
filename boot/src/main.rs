@@ -1,8 +1,8 @@
-//! AriBoot: cargador UEFI de AriCodeOS.
+//! AriBoot: the AriCodeOS UEFI loader.
 //!
-//! Secuencia (sección 11 del documento maestro):
-//!   GOP framebuffer -> ACPI RSDP -> cargar kernel.elf -> reservar memoria ->
-//!   tablas de páginas -> BootInfo -> ExitBootServices -> salto al kernel.
+//! Sequence (section 11 of the master document):
+//!   GOP framebuffer -> ACPI RSDP -> load kernel.elf -> reserve memory ->
+//!   page tables -> BootInfo -> ExitBootServices -> jump to the kernel.
 
 #![no_std]
 #![no_main]
@@ -34,9 +34,9 @@ use uefi::table::cfg::ConfigTableEntry;
 use uefi::{cstr16, system, CStr16, Status};
 
 const KERNEL_STACK_PAGES: usize = 16; // 64 KiB
-/// Tipo de las páginas reservadas para el kernel. Estándar a propósito (ADR
-/// 0021): con un tipo propio del rango OS loader algunos firmwares se cuelgan
-/// en `GetMemoryMap`. El kernel conserva estas páginas por `kernel_ranges`.
+/// Memory type of the pages reserved for the kernel. Standard on purpose (ADR
+/// 0021): with a custom type from the OS loader range some firmwares hang in
+/// `GetMemoryMap`. The kernel keeps these pages through `kernel_ranges`.
 const KERNEL_MEM: MemoryType = MemoryType::LOADER_DATA;
 
 #[uefi::entry]
@@ -47,13 +47,13 @@ fn main() -> Status {
         env!("CARGO_PKG_VERSION")
     );
 
-    // La cmdline es opcional; se copia a memoria de kernel para que sobreviva
-    // a ExitBootServices y la vea AriKernel.
+    // The cmdline is optional; it is copied into kernel memory so that it
+    // survives ExitBootServices and AriKernel can see it.
     let mut cmdline_bytes = read_file(cstr16!("\\aricodeos\\cmdline.txt")).unwrap_or_default();
     let qemu_exit = CmdLine::from_bytes(&cmdline_bytes).has(keys::QEMU_EXIT);
 
-    // Arranque A/B: si hay una imagen de slot valida, el kernel sabe desde
-    // donde arranco (y si debe confirmarlo) por la cmdline.
+    // A/B boot: if there is a valid slot image, the kernel learns from the
+    // cmdline where it booted from (and whether it must confirm it).
     let loaded = slots::load();
     if let Some(l) = &loaded {
         cmdline_bytes.extend_from_slice(b" boot_slot=");
@@ -66,7 +66,7 @@ fn main() -> Status {
     match run(&cmdline_bytes, loaded) {
         Ok(never) => match never {},
         Err(e) => {
-            error!("AriBoot: fallo irrecuperable: {e}");
+            error!("AriBoot: unrecoverable failure: {e}");
             if qemu_exit {
                 qemu::exit(qemu::ExitCode::Failed);
             }
@@ -80,7 +80,7 @@ fn run(
     cmdline_bytes: &[u8],
     loaded: Option<slots::Loaded>,
 ) -> Result<core::convert::Infallible, &'static str> {
-    // 1. Framebuffer GOP (opcional: sin GOP seguimos solo con serie).
+    // 1. GOP framebuffer (optional: without GOP we continue with serial only).
     let framebuffer = framebuffer_info();
     if framebuffer.address != 0 {
         info!(
@@ -92,19 +92,19 @@ fn run(
             framebuffer.address
         );
     } else {
-        warn!("GOP: no disponible");
+        warn!("GOP: not available");
     }
 
     // 2. ACPI RSDP.
     let rsdp = find_rsdp();
     info!("ACPI RSDP: {rsdp:#x}");
 
-    // 3. Kernel ELF: de la imagen de slot verificada o, si no, de la ESP.
+    // 3. Kernel ELF: from the verified slot image or, failing that, from the ESP.
     let (kernel_data, initrd_data) = match loaded {
         Some(l) => (l.kernel, Some(l.initrd)),
         None => (
             read_file(cstr16!("\\aricodeos\\kernel.elf"))
-                .map_err(|_| "no se pudo leer \\aricodeos\\kernel.elf")?,
+                .map_err(|_| "could not read \\aricodeos\\kernel.elf")?,
             None,
         ),
     };
@@ -113,47 +113,47 @@ fn run(
         error!("kernel.elf: {e:?}");
         match e {
             elf::ElfError::EntryOutsideText => {
-                "kernel.elf: punto de entrada fuera de un segmento ejecutable"
+                "kernel.elf: entry point outside an executable segment"
             }
             elf::ElfError::AddressOverflow | elf::ElfError::OverlappingSegments => {
-                "kernel.elf: segmentos invalidos"
+                "kernel.elf: invalid segments"
             }
-            _ => "kernel.elf: ELF64 invalido",
+            _ => "kernel.elf: invalid ELF64",
         }
     })?;
     let (virt_lo, virt_hi) = elf.virt_range();
     if virt_lo != KERNEL_VIRT_BASE {
-        error!("kernel enlazado en {virt_lo:#x}, se esperaba {KERNEL_VIRT_BASE:#x}");
-        return Err("kernel.elf: direccion base incorrecta");
+        error!("kernel linked at {virt_lo:#x}, expected {KERNEL_VIRT_BASE:#x}");
+        return Err("kernel.elf: wrong base address");
     }
     let kernel_size = virt_hi - virt_lo;
     let kernel_pages = (kernel_size / PAGE_SIZE) as usize;
 
-    // 4. Reservar e instalar el kernel en memoria física contigua.
+    // 4. Reserve contiguous physical memory and install the kernel there.
     let kernel_phys = alloc_pages(kernel_pages, "kernel")?;
-    // SAFETY: región recién reservada de `kernel_pages` páginas.
+    // SAFETY: freshly reserved region of `kernel_pages` pages.
     unsafe { core::ptr::write_bytes(kernel_phys.as_ptr(), 0, kernel_pages * PAGE_SIZE as usize) };
     for seg in &elf.segments {
         let src = elf.segment_bytes(seg);
         let offset = seg.vaddr - virt_lo;
-        // Defensa en profundidad: el parser ya garantiza que [vaddr, end) cabe
-        // en virt_range; se vuelve a comprobar contra la reserva real.
+        // Defence in depth: the parser already guarantees that [vaddr, end)
+        // fits in virt_range; re-check it against the actual reservation.
         if offset + src.len() as u64 > kernel_size {
-            return Err("kernel.elf: segmento fuera de la reserva");
+            return Err("kernel.elf: segment outside the reservation");
         }
         let dst = kernel_phys.as_ptr() as u64 + offset;
-        // SAFETY: `dst..dst+len` está dentro de las `kernel_pages` reservadas (comprobado arriba).
+        // SAFETY: `dst..dst+len` lies within the reserved `kernel_pages` (checked above).
         unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst as *mut u8, src.len()) };
     }
     let kernel_phys_base = kernel_phys.as_ptr() as u64;
     info!(
-        "kernel: {} KiB en phys {:#x}, entry {:#x}",
+        "kernel: {} KiB at phys {:#x}, entry {:#x}",
         kernel_size / 1024,
         kernel_phys_base,
         elf.entry
     );
 
-    // 5. Pila del kernel y página de BootInfo.
+    // 5. Kernel stack and BootInfo page.
     let stack = alloc_pages(KERNEL_STACK_PAGES, "stack")?;
     let stack_base = stack.as_ptr() as u64;
     let stack_top = stack_base + KERNEL_STACK_PAGES as u64 * PAGE_SIZE;
@@ -167,13 +167,13 @@ fn run(
         );
     }
 
-    // 6. Extensión física a mapear: mapa actual + framebuffer.
-    // Se excluyen Reserved/Unusable: el firmware suele anunciar aperturas MMIO
-    // gigantes (p. ej. PCIe 64 bits) que el kernel mapeará bajo demanda.
-    // Las balizas de paso (cian) acotan un cuelgue en hardware aunque la
-    // consola del firmware deje de pintar (docs/hardware.md).
-    // SAFETY: el firmware mantiene el framebuffer identidad-mapeado y
-    // `framebuffer` describe exactamente esa memoria.
+    // 6. Physical extent to map: current map + framebuffer.
+    // Reserved/Unusable are excluded: firmware often advertises huge MMIO
+    // apertures (e.g. 64-bit PCIe) that the kernel will map on demand.
+    // The step beacons (cyan) narrow down a hang on hardware even if the
+    // firmware console stops drawing (docs/hardware.md).
+    // SAFETY: the firmware keeps the framebuffer identity-mapped and
+    // `framebuffer` describes exactly that memory.
     let step =
         |n: u32| unsafe { framebuffer.beacon(framebuffer.address as *mut u8, Beacon::step(n)) };
     let snapshot = memmap::snapshot()?;
@@ -184,35 +184,35 @@ fn run(
         .map(|d| d.end())
         .max()
         .unwrap_or(0)
-        .max(4 << 30) // al menos 4 GiB (MMIO clásico bajo 4G)
+        .max(4 << 30) // at least 4 GiB (classic MMIO below 4G)
         .next_multiple_of(HUGE_2M);
     info!(
-        "memoria: {} regiones UEFI, limite fisico {} MiB",
+        "memory: {} UEFI regions, physical limit {} MiB",
         snapshot.map.descriptor_count,
         phys_limit >> 20
     );
     drop(snapshot);
 
-    // 7. Tablas de páginas: identidad (solo para el cargador), mapa físico
-    // lineal en PHYS_MAP_BASE (lo que usará el kernel) y kernel en la mitad alta.
+    // 7. Page tables: identity (for the loader only), linear physical map at
+    // PHYS_MAP_BASE (what the kernel will use) and the kernel in the higher half.
     let pool_pages = paging::pool_size_for(phys_limit, 2, kernel_pages as u64);
     let pool_mem = alloc_pages(pool_pages, "page tables")?;
     step(1);
-    // SAFETY: `pool_mem` son `pool_pages` páginas recién reservadas por UEFI,
-    // alineadas, identidad-mapeadas y de uso exclusivo hasta que el kernel las herede.
+    // SAFETY: `pool_mem` is `pool_pages` pages freshly reserved by UEFI,
+    // aligned, identity-mapped and exclusively ours until the kernel inherits them.
     let pool = unsafe { BumpFrames::new(pool_mem.as_ptr() as u64, pool_pages) };
-    let mut tables = Mapper::new(pool, IdentityMap).map_err(|_| "tablas: sin paginas")?;
+    let mut tables = Mapper::new(pool, IdentityMap).map_err(|_| "tables: out of pages")?;
     tables
         .map_range_2m(0, 0, phys_limit, WRITABLE)
-        .map_err(|_| "tablas: identidad")?;
+        .map_err(|_| "tables: identity")?;
     tables
         .map_range_2m(PHYS_MAP_BASE, 0, phys_limit, WRITABLE | NO_EXECUTE | GLOBAL)
-        .map_err(|_| "tablas: mapa fisico")?;
+        .map_err(|_| "tables: physical map")?;
     step(2);
     if framebuffer.address != 0 {
         let fb_start = framebuffer.address & !(HUGE_2M - 1);
         let fb_end = (framebuffer.address + framebuffer.size).next_multiple_of(HUGE_2M);
-        // Solo la parte que quede fuera del mapa físico ya construido.
+        // Only the part outside the physical map already built.
         let start = fb_start.max(phys_limit);
         if start < fb_end {
             tables
@@ -222,7 +222,7 @@ fn run(
                     fb_end - start,
                     WRITABLE | NO_EXECUTE | GLOBAL,
                 )
-                .map_err(|_| "tablas: framebuffer")?;
+                .map_err(|_| "tables: framebuffer")?;
         }
     }
     for seg in &elf.segments {
@@ -241,16 +241,16 @@ fn run(
                 end - start,
                 flags,
             )
-            .map_err(|_| "tablas: kernel")?;
+            .map_err(|_| "tables: kernel")?;
     }
     step(3);
     info!(
-        "paginas: identidad y mapa fisico, {} tablas usadas de {}",
+        "paging: identity and physical map, {} of {} tables used",
         tables.allocator().used_pages(),
         pool_pages
     );
 
-    // 8. BootInfo (el mapa de memoria se rellena tras ExitBootServices).
+    // 8. BootInfo (the memory map is filled in after ExitBootServices).
     let mut boot_info = BootInfo {
         magic: BOOT_PROTOCOL_MAGIC,
         version: BOOT_PROTOCOL_VERSION,
@@ -280,36 +280,36 @@ fn run(
     };
 
     info!("ExitBootServices -> AriKernel");
-    // Balizas para hardware sin serie (docs/hardware.md): blanca antes de
-    // salir de boot services, verde justo antes del salto.
-    // SAFETY: el firmware mantiene el framebuffer identidad-mapeado y las
-    // tablas nuevas tambien lo cubren (identidad hasta phys_limit o mapa
-    // fisico); `framebuffer` describe exactamente esa memoria.
+    // Beacons for hardware without serial (docs/hardware.md): white before
+    // leaving boot services, green right before the jump.
+    // SAFETY: the firmware keeps the framebuffer identity-mapped and the new
+    // tables cover it too (identity up to phys_limit or the physical map);
+    // `framebuffer` describes exactly that memory.
     unsafe { framebuffer.beacon(framebuffer.address as *mut u8, Beacon::LOADER_BEFORE_EXIT) };
 
-    // 9. Salir de boot services. A partir de aquí: sin log, sin allocator.
-    // SAFETY: no quedan referencias a protocolos ni a memoria de boot services
-    // que vayamos a usar; el mapa devuelto vive en LOADER_DATA (identidad).
+    // 9. Exit boot services. From here on: no log, no allocator.
+    // SAFETY: no references remain to protocols or boot services memory that
+    // we will use; the returned map lives in LOADER_DATA (identity).
     let final_map = unsafe { boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) };
     boot_info.memory_map = MemoryMap {
         descriptors: final_map.buffer().as_ptr() as u64,
         descriptor_size: final_map.meta().desc_size as u32,
         descriptor_count: final_map.len() as u32,
     };
-    // El buffer del mapa debe sobrevivir: no liberar (tampoco se podría).
+    // The map buffer must survive: do not free it (it could not be freed anyway).
     core::mem::forget(final_map);
-    // SAFETY: como la baliza anterior; ExitBootServices no cambia el paginado.
+    // SAFETY: as for the previous beacon; ExitBootServices does not change paging.
     unsafe { framebuffer.beacon(framebuffer.address as *mut u8, Beacon::LOADER_JUMP) };
 
     let boot_info_ptr = boot_info_page.as_ptr() as *mut BootInfo;
-    // SAFETY: página propia, alineada, identidad-mapeada en las tablas nuevas.
+    // SAFETY: our own page, aligned, identity-mapped in the new tables.
     unsafe { boot_info_ptr.write(boot_info) };
 
-    // 10. Salto. La pila y el BootInfo se entregan a través del mapa físico
-    // para que el kernel no dependa nunca de la identidad. rsp = top - 8 para
-    // cumplir la alineación de entrada del ABI.
-    // SAFETY: tablas construidas arriba mapean este código (identidad), la pila
-    // y el kernel; el kernel no retorna.
+    // 10. Jump. The stack and BootInfo are handed over through the physical
+    // map so the kernel never depends on the identity map. rsp = top - 8 to
+    // satisfy the ABI entry alignment.
+    // SAFETY: the tables built above map this code (identity), the stack and
+    // the kernel; the kernel does not return.
     unsafe {
         paging::enable_nxe();
         core::arch::asm!(
@@ -329,20 +329,20 @@ fn run(
 
 fn alloc_pages(pages: usize, what: &'static str) -> Result<NonNull<u8>, &'static str> {
     boot::allocate_pages(AllocateType::AnyPages, KERNEL_MEM, pages).map_err(|e| {
-        error!("allocate_pages({pages}) para {what}: {e:?}");
-        "sin memoria"
+        error!("allocate_pages({pages}) for {what}: {e:?}");
+        "out of memory"
     })
 }
 
-/// Copia el initrd (de la imagen de slot, o de la ESP si no lo hay) a páginas
-/// del kernel.
+/// Copies the initrd (from the slot image, or from the ESP if there is none)
+/// into kernel pages.
 fn load_initrd(from_slot: Option<Vec<u8>>) -> Result<(u64, u64), &'static str> {
     let bytes = match from_slot {
         Some(b) => b,
         None => match read_file(cstr16!("\\aricodeos\\initrd.img")) {
             Ok(b) => b,
             Err(_) => {
-                warn!("initrd.img: ausente");
+                warn!("initrd.img: missing");
                 return Ok((0, 0));
             }
         },
@@ -352,11 +352,11 @@ fn load_initrd(from_slot: Option<Vec<u8>>) -> Result<(u64, u64), &'static str> {
     }
     let pages = bytes.len().div_ceil(PAGE_SIZE as usize);
     let dst = alloc_pages(pages, "initrd")?;
-    // SAFETY: `dst` tiene `pages * 4096 >= bytes.len()` bytes recién reservados.
+    // SAFETY: `dst` has `pages * 4096 >= bytes.len()` freshly reserved bytes.
     unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.as_ptr(), bytes.len()) };
     let digest = aricode_crypto::sha256::sha256(&bytes);
     info!(
-        "initrd.img: {} KiB en phys {:#x}, sha256 {:02x}{:02x}{:02x}{:02x}",
+        "initrd.img: {} KiB at phys {:#x}, sha256 {:02x}{:02x}{:02x}{:02x}",
         bytes.len() / 1024,
         dst.as_ptr() as u64,
         digest[0],
@@ -367,14 +367,14 @@ fn load_initrd(from_slot: Option<Vec<u8>>) -> Result<(u64, u64), &'static str> {
     Ok((dst.as_ptr() as u64, bytes.len() as u64))
 }
 
-/// Copia la cmdline a páginas del kernel. Devuelve (dirección, tamaño).
+/// Copies the cmdline into kernel pages. Returns (address, size).
 fn copy_cmdline(bytes: &[u8]) -> Result<(u64, u64), &'static str> {
     if bytes.is_empty() {
         return Ok((0, 0));
     }
     let pages = bytes.len().div_ceil(PAGE_SIZE as usize);
     let dst = alloc_pages(pages, "cmdline")?;
-    // SAFETY: `dst` tiene `pages * 4096 >= bytes.len()` bytes recién reservados.
+    // SAFETY: `dst` has `pages * 4096 >= bytes.len()` freshly reserved bytes.
     unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.as_ptr(), bytes.len()) };
     Ok((dst.as_ptr() as u64, bytes.len() as u64))
 }
@@ -403,11 +403,11 @@ fn framebuffer_info() -> FramebufferInfo {
     let Ok(handle) = boot::get_handle_for_protocol::<GraphicsOutput>() else {
         return FramebufferInfo::none();
     };
-    // Apertura no exclusiva: la exclusiva desconecta al driver de consola del
-    // firmware y en hardware real la pantalla deja de mostrar las trazas de
-    // AriBoot (lo ultimo visible era la linea de slots).
-    // SAFETY: solo se leen el modo y la direccion del framebuffer; el firmware
-    // sigue pintando su consola hasta ExitBootServices.
+    // Non-exclusive open: an exclusive one disconnects the firmware console
+    // driver and on real hardware the screen stops showing AriBoot's traces
+    // (the last visible thing was the slots line).
+    // SAFETY: only the framebuffer mode and address are read; the firmware
+    // keeps drawing its console until ExitBootServices.
     let Ok(mut gop) = (unsafe {
         boot::open_protocol::<GraphicsOutput>(
             OpenProtocolParams {

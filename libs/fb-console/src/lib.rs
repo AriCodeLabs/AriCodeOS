@@ -1,15 +1,15 @@
-//! Consola de texto sobre un framebuffer lineal de 32 bpp.
+//! Text console on top of a 32 bpp linear framebuffer.
 //!
-//! `no_std`, sin `alloc`: la rejilla de caracteres vive dentro de la propia
-//! `Console` (tamaño máximo fijo, unas 32 KiB). Por eso la consola se
-//! construye vacía y constante (`Console::empty`) en un `static` y se le
-//! acopla la superficie después (`attach`): devolverla por valor pondría la
-//! rejilla en la pila, que en el arranque del kernel es pequeña. El acceso a
-//! los píxeles se abstrae en [`Surface`] para que el kernel escriba MMIO con
-//! `write_volatile` y los tests de host usen un `Vec<u32>`.
+//! `no_std`, no `alloc`: the character grid lives inside the `Console`
+//! itself (fixed maximum size, about 32 KiB). That is why the console is
+//! built empty and const (`Console::empty`) in a `static` and the surface is
+//! attached afterwards (`attach`): returning it by value would put the grid
+//! on the stack, which is small during kernel boot. Pixel access is
+//! abstracted in [`Surface`] so the kernel writes MMIO with
+//! `write_volatile` and host tests use a `Vec<u32>`.
 //!
-//! El scroll no lee del framebuffer (leer VRAM es lento): se conserva una
-//! copia de los caracteres y se vuelve a pintar la pantalla.
+//! Scrolling does not read from the framebuffer (reading VRAM is slow): a
+//! copy of the characters is kept and the screen is repainted.
 
 #![no_std]
 
@@ -17,16 +17,16 @@ pub mod font;
 
 use font::{FIRST_CHAR, GLYPHS, GLYPH_HEIGHT, GLYPH_WIDTH, LAST_CHAR};
 
-/// Color RGB de 8 bits por canal; la `Surface` lo codifica a su formato.
+/// RGB color, 8 bits per channel; the `Surface` encodes it to its format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
-/// Destino de píxeles. Coordenadas en píxeles, origen arriba a la izquierda.
+/// Pixel sink. Coordinates in pixels, origin at the top left.
 pub trait Surface {
     fn width(&self) -> usize;
     fn height(&self) -> usize;
     fn put(&mut self, x: usize, y: usize, color: Rgb);
-    /// Rellena `rows` filas de píxeles completas desde `y`.
+    /// Fills `rows` full pixel rows starting at `y`.
     fn fill_rows(&mut self, y: usize, rows: usize, color: Rgb) {
         for yy in y..(y + rows).min(self.height()) {
             for x in 0..self.width() {
@@ -36,19 +36,19 @@ pub trait Surface {
     }
 }
 
-/// Máximo de celdas de texto: 240 columnas x 135 filas cubre 1920x2160.
+/// Maximum text cells: 240 columns x 135 rows covers 1920x2160.
 pub const MAX_CELLS: usize = 240 * 135;
 
 pub struct Console<S: Surface> {
-    /// `None` hasta `attach`: sin pantalla, la consola no dibuja nada.
+    /// `None` until `attach`: without a screen, the console draws nothing.
     surface: Option<S>,
     cols: usize,
     rows: usize,
     cursor_col: usize,
     cursor_row: usize,
-    /// Celda donde está pintado el cursor (`_`), si lo está.
+    /// Cell where the cursor (`_`) is drawn, if it is.
     cursor_drawn: Option<(usize, usize)>,
-    /// Hubo escrituras desde el último parpadeo: la consola no está quieta.
+    /// There were writes since the last blink: the console is not idle.
     wrote_since_blink: bool,
     fg: Rgb,
     bg: Rgb,
@@ -59,7 +59,7 @@ impl<S: Surface> Console<S> {
     pub const DEFAULT_FG: Rgb = Rgb(0xD8, 0xDE, 0xE9);
     pub const DEFAULT_BG: Rgb = Rgb(0x10, 0x12, 0x18);
 
-    /// Consola sin pantalla, construible en un `static`.
+    /// Console without a screen, constructible in a `static`.
     pub const fn empty() -> Self {
         Self {
             surface: None,
@@ -75,12 +75,12 @@ impl<S: Surface> Console<S> {
         }
     }
 
-    /// Acopla la pantalla y la limpia. Se hace sobre la consola ya alojada
-    /// (en un `static`), sin mover la rejilla.
+    /// Attaches the screen and clears it. Done on the already placed console
+    /// (in a `static`), without moving the grid.
     pub fn attach(&mut self, surface: S) {
         let cols = (surface.width() / GLYPH_WIDTH).max(1);
         let rows = (surface.height() / GLYPH_HEIGHT).max(1);
-        // Si la pantalla es mayor que MAX_CELLS se recortan filas, no columnas.
+        // If the screen is larger than MAX_CELLS, rows are cut, not columns.
         self.cols = cols;
         self.rows = rows.min(MAX_CELLS / cols);
         self.surface = Some(surface);
@@ -91,8 +91,8 @@ impl<S: Surface> Console<S> {
         self.surface.is_some()
     }
 
-    /// Crea la consola con pantalla y la limpia (tests de host: la rejilla
-    /// pasa por la pila, que ahí es grande).
+    /// Creates the console with a screen and clears it (host tests: the grid
+    /// goes through the stack, which is large there).
     pub fn new(surface: S) -> Self {
         let mut c = Self::empty();
         c.attach(surface);
@@ -127,21 +127,21 @@ impl<S: Surface> Console<S> {
         }
     }
 
-    /// Carácter en una celda (para tests y depuración).
+    /// Character in a cell (for tests and debugging).
     pub fn cell(&self, col: usize, row: usize) -> u8 {
         self.cells[row * self.cols + col]
     }
 
-    /// Alterna el cursor: un `_` en la celda donde se escribirá lo siguiente.
-    /// Lo llama el kernel periódicamente; cualquier escritura lo oculta
-    /// antes de pintar, así que el contenido de las celdas no cambia.
+    /// Toggles the cursor: a `_` in the cell where the next write will go.
+    /// The kernel calls it periodically; any write hides it before painting,
+    /// so cell contents never change.
     pub fn blink(&mut self) {
         if self.cursor_drawn.is_some() {
             self.hide_cursor();
             return;
         }
-        // Mientras fluye texto no se pinta: el cursor solo tiene sentido en
-        // una consola quieta (y pintar sobre texto en movimiento cuesta).
+        // While text is flowing nothing is painted: the cursor only makes sense
+        // on an idle console (and painting over moving text is costly).
         if core::mem::take(&mut self.wrote_since_blink) {
             return;
         }
@@ -166,8 +166,8 @@ impl<S: Surface> Console<S> {
         match ch {
             '\n' => self.newline(),
             '\r' => self.cursor_col = 0,
-            // Retroceso: el cursor vuelve una celda; borrar es cosa de quien
-            // escribe (el shell manda "\x08 \x08").
+            // Backspace: the cursor moves back one cell; erasing is up to the
+            // writer (the shell sends "\x08 \x08").
             '\u{8}' => self.cursor_col = self.cursor_col.saturating_sub(1),
             '\t' => {
                 let next = (self.cursor_col / 8 + 1) * 8;
@@ -298,7 +298,7 @@ mod tests {
     fn renders_glyph_pixels_from_font() {
         let mut c = C::new(Mem::new(64, 32));
         c.write_char('|');
-        // '|' de Terminus: columna central encendida en las filas del medio.
+        // Terminus '|': central column lit in the middle rows.
         let glyph = &GLYPHS[(b'|' - FIRST_CHAR) as usize];
         let mut lit = 0;
         for (dy, bits) in glyph.iter().enumerate() {
@@ -312,7 +312,7 @@ mod tests {
                 lit += (bits & (0x80 >> dx) != 0) as usize;
             }
         }
-        assert!(lit > 0, "el glifo no puede estar vacio");
+        assert!(lit > 0, "the glyph cannot be empty");
         assert_eq!(c.cursor(), (1, 0));
     }
 
@@ -334,12 +334,12 @@ mod tests {
         for i in 0..5 {
             writeln!(c, "L{i}").unwrap();
         }
-        // Cinco lineas + salto final en 4 filas: quedan L2, L3, L4 y una vacia.
+        // Five lines + final newline in 4 rows: L2, L3, L4 and an empty one remain.
         assert_eq!(c.cell(1, 0), b'2');
         assert_eq!(c.cell(1, 2), b'4');
         assert_eq!(c.cell(0, 3), b' ');
         assert_eq!(c.cursor(), (0, 3));
-        // Lo pintado coincide con las celdas: fila 0 muestra 'L'.
+        // What is painted matches the cells: row 0 shows 'L'.
         let glyph = &GLYPHS[(b'L' - FIRST_CHAR) as usize];
         let (dx, dy) = (1, 8);
         let expect = if glyph[dy] & (0x80 >> dx) != 0 {
@@ -357,7 +357,7 @@ mod tests {
         assert_eq!(c.cell(0, 0), b'a');
         assert_eq!(c.cell(1, 0), b' ');
         assert_eq!(c.cursor_col, 1);
-        // En la columna 0 no retrocede a la linea anterior.
+        // In column 0 it does not go back to the previous line.
         write!(c, "\u{8}\u{8}x").unwrap();
         assert_eq!(c.cell(0, 0), b'x');
     }
@@ -366,8 +366,8 @@ mod tests {
     fn cursor_blinks_without_touching_cells() {
         let mut c = C::new(Mem::new(64, 32));
         write!(c, "a").unwrap();
-        // El primer parpadeo tras escribir solo anota que la consola estuvo
-        // activa; el siguiente, ya quieta, pinta.
+        // The first blink after writing only notes that the console was
+        // active; the next one, now idle, paints.
         c.blink();
         let bottom = &GLYPHS[(b'_' - FIRST_CHAR) as usize];
         let (dy, dx) = bottom
@@ -378,23 +378,23 @@ mod tests {
                     .find(|dx| bits & (0x80 >> dx) != 0)
                     .map(|dx| (dy, dx))
             })
-            .expect("'_' tiene pixeles");
+            .expect("'_' has pixels");
         let (x, y) = (GLYPH_WIDTH + dx, dy);
         assert_eq!(c.surface().unwrap().at(x, y), C::DEFAULT_BG);
         c.blink();
         assert_eq!(
             c.surface().unwrap().at(x, y),
             C::DEFAULT_FG,
-            "cursor pintado"
+            "cursor painted"
         );
-        assert_eq!(c.cell(1, 0), b' ', "la celda no cambia");
+        assert_eq!(c.cell(1, 0), b' ', "the cell does not change");
         c.blink();
         assert_eq!(
             c.surface().unwrap().at(x, y),
             C::DEFAULT_BG,
-            "cursor borrado"
+            "cursor erased"
         );
-        // Escribir con el cursor pintado lo oculta antes: la celda muestra 'b'.
+        // Writing with the cursor painted hides it first: the cell shows 'b'.
         c.blink();
         write!(c, "b").unwrap();
         assert_eq!(c.cursor_drawn, None);
@@ -405,7 +405,7 @@ mod tests {
             c.surface().unwrap().at(x, y),
             if on { C::DEFAULT_FG } else { C::DEFAULT_BG }
         );
-        // Sin pantalla no hace nada.
+        // Without a screen it does nothing.
         let mut e = C::empty();
         e.blink();
         assert_eq!(e.cursor(), (0, 0));
@@ -425,7 +425,7 @@ mod tests {
         let mut c = EMPTY;
         assert!(!c.is_attached());
         assert!(c.surface().is_none());
-        // Sin pantalla no dibuja ni falla.
+        // Without a screen it neither draws nor fails.
         c.write_str("nada").unwrap();
         assert_eq!(c.cols(), 0);
         c.attach(Mem::new(640, 480));

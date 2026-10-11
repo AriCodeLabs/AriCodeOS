@@ -1,16 +1,16 @@
-# ADR 0004: Seguridad basada en capabilities
+# ADR 0004: Capability-based security
 
-- **Fecha:** 2026-09-26
-- **Estado:** Aceptada
+- **Date:** 2026-09-26
+- **Status:** Accepted
 
-## Decisión
+## Decision
 
-Los recursos son objetos kernel accesibles solo mediante handles/capabilities
-que codifican objeto, derechos, delegabilidad y lifetime. Identidad no implica
-acceso; una aplicación arranca sin privilegios.
+Resources are kernel objects reachable only through handles/capabilities
+that encode object, rights, delegability and lifetime. Identity does not imply
+access; an application starts without privileges.
 
-## Consecuencias
+## Consequences
 
-- Las syscalls operan sobre handles, no sobre identificadores globales.
-- Los drivers reciben solo MMIO, IRQ y DMA autorizados.
-- La identidad humana (usuarios) se separa de la autoridad (capabilities).
+- Syscalls operate on handles, not on global identifiers.
+- Drivers receive only authorised MMIO, IRQ and DMA.
+- Human identity (users) is separated from authority (capabilities).

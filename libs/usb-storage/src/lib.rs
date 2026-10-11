@@ -1,6 +1,6 @@
-//! Almacenamiento masivo USB (ADR 0023): el transporte bulk-only (BOT) y
-//! el subconjunto de comandos SCSI que necesita un servicio de bloques.
-//! Solo codifica y decodifica; las transferencias las hace el driver xHCI.
+//! USB mass storage (ADR 0023): the bulk-only transport (BOT) and the
+//! subset of SCSI commands a block service needs.
+//! Only encodes and decodes; the xHCI driver performs the transfers.
 
 #![no_std]
 
@@ -8,9 +8,9 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cbw {
     pub tag: u32,
-    /// Bytes de la fase de datos (0 si no hay).
+    /// Bytes in the data phase (0 if there is none).
     pub data_len: u32,
-    /// Datos del dispositivo al anfitrión.
+    /// Data from the device to the host.
     pub data_in: bool,
     pub lun: u8,
     pub cdb: Cdb,
@@ -37,7 +37,7 @@ impl Cbw {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Csw {
     pub tag: u32,
-    /// Bytes de la fase de datos que no se transfirieron.
+    /// Bytes of the data phase that were not transferred.
     pub residue: u32,
     pub status: CswStatus,
 }
@@ -45,9 +45,9 @@ pub struct Csw {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CswStatus {
     Passed,
-    /// El comando falló: `REQUEST SENSE` dice por qué.
+    /// The command failed: `REQUEST SENSE` says why.
     Failed,
-    /// Error de fase: hay que resetear el transporte.
+    /// Phase error: the transport must be reset.
     PhaseError,
 }
 
@@ -55,7 +55,7 @@ impl Csw {
     pub const LEN: usize = 13;
     const SIGNATURE: [u8; 4] = *b"USBS";
 
-    /// `None` si la firma, la longitud o el estado no son válidos.
+    /// `None` if the signature, length or status are not valid.
     pub fn parse(b: &[u8]) -> Option<Self> {
         if b.len() < Self::LEN || b[..4] != Self::SIGNATURE {
             return None;
@@ -74,7 +74,7 @@ impl Csw {
     }
 }
 
-/// Command Descriptor Block SCSI (hasta 16 bytes).
+/// SCSI Command Descriptor Block (up to 16 bytes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cdb {
     pub bytes: [u8; 16],
@@ -92,7 +92,7 @@ impl Cdb {
     }
 }
 
-/// Comandos SCSI de bloque (SBC-3 / SPC-4) que usa el servicio de bloques.
+/// SCSI block commands (SBC-3 / SPC-4) used by the block service.
 pub mod scsi {
     use super::Cdb;
 
@@ -122,15 +122,15 @@ pub mod scsi {
         let n = blocks.to_be_bytes();
         Cdb::new(&[0x2A, 0, l[0], l[1], l[2], l[3], 0, n[0], n[1], 0])
     }
-    /// `SYNCHRONIZE CACHE(10)` de todo el medio: hace duraderas las escrituras.
+    /// `SYNCHRONIZE CACHE(10)` of the whole medium: makes writes durable.
     pub fn synchronize_cache10() -> Cdb {
         Cdb::new(&[0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0])
     }
 
-    /// Respuesta a `INQUIRY` (36 bytes): tipo de periférico y nombres.
+    /// `INQUIRY` response (36 bytes): peripheral type and names.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Inquiry {
-        /// 0 = acceso directo (disco); 5 = CD/DVD.
+        /// 0 = direct access (disk); 5 = CD/DVD.
         pub peripheral_type: u8,
         pub removable: bool,
         pub vendor: [u8; 8],
@@ -151,8 +151,8 @@ pub mod scsi {
         }
     }
 
-    /// Respuesta a `READ CAPACITY(10)`: último LBA y bytes por bloque.
-    /// `None` si el dispositivo no cabe en 32 bits (devuelve `u32::MAX`).
+    /// `READ CAPACITY(10)` response: last LBA and bytes per block.
+    /// `None` if the device does not fit in 32 bits (it returns `u32::MAX`).
     pub fn parse_read_capacity10(b: &[u8]) -> Option<(u32, u32)> {
         if b.len() < READ_CAPACITY_LEN as usize {
             return None;
@@ -162,7 +162,7 @@ pub mod scsi {
         (last_lba != u32::MAX && block_len != 0).then_some((last_lba, block_len))
     }
 
-    /// Datos de sentido fijos (`REQUEST SENSE`): clave, código y calificador.
+    /// Fixed-format sense data (`REQUEST SENSE`): key, code and qualifier.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Sense {
         pub key: u8,
@@ -171,18 +171,18 @@ pub mod scsi {
     }
 
     impl Sense {
-        /// Clave 6: el dispositivo acaba de encenderse o cambió el medio; se
-        /// reintenta el comando.
+        /// Key 6: the device has just powered on or the medium changed; the
+        /// command is retried.
         pub const UNIT_ATTENTION: u8 = 6;
-        /// Clave 2: no está listo (sin medio o arrancando).
+        /// Key 2: not ready (no medium or starting up).
         pub const NOT_READY: u8 = 2;
-        /// Clave 5: comando o campo no válidos para este dispositivo.
+        /// Key 5: command or field not valid for this device.
         pub const ILLEGAL_REQUEST: u8 = 5;
 
-        /// El dispositivo no implementa el comando (petición ilegal por
-        /// código de operación o campo inválidos): muchos pendrives
-        /// rechazan así `SYNCHRONIZE CACHE`, y entonces no hay caché que
-        /// vaciar.
+        /// The device does not implement the command (illegal request due
+        /// to an invalid operation code or field): many USB sticks reject
+        /// `SYNCHRONIZE CACHE` this way, and then there is no cache to
+        /// write back.
         pub fn command_unsupported(&self) -> bool {
             self.key == Self::ILLEGAL_REQUEST && matches!(self.asc, 0x20 | 0x24)
         }
@@ -282,7 +282,7 @@ mod tests {
         assert!(scsi::Sense::parse(&sense).unwrap().command_unsupported());
         sense[12] = 0x24;
         assert!(scsi::Sense::parse(&sense).unwrap().command_unsupported());
-        sense[12] = 0x21; // LBA fuera de rango: no es "no soportado"
+        sense[12] = 0x21; // LBA out of range: not "unsupported"
         assert!(!scsi::Sense::parse(&sense).unwrap().command_unsupported());
         sense[0] = 0x00;
         assert!(scsi::Sense::parse(&sense).is_none());

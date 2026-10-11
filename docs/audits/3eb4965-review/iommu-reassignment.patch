@@ -4,7 +4,7 @@
          enabled(),
          "iommu: sin unidad VT-d (QEMU necesita -device intel-iommu)"
      );
-+    // Auditoria: mismo dispositivo asignado sucesivamente a dos dominios.
++    // Audit: the same device assigned to two domains in succession.
 +    const FIRST: u32 = 1001;
 +    const SECOND: u32 = 1002;
 +    let sid = aricode_iommu::source_id(0, 2, 0);

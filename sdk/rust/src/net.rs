@@ -1,4 +1,4 @@
-//! Cliente del servicio de red (`aricode-proto::net`).
+//! Network service client (`aricode-proto::net`).
 
 use crate::{self as sys, rights, rpc, Error, Handle};
 use aricode_proto::net::{Info, Op, Reply, Request, Status, MAX_DATAGRAM};
@@ -15,7 +15,7 @@ pub enum NetError {
     Status(Status),
 }
 
-/// Datagrama recibido: remitente y longitud.
+/// Received datagram: sender and length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Datagram {
     pub from: [u8; 4],
@@ -31,7 +31,7 @@ impl NetClient {
     }
 
     fn buffer(&mut self) -> &mut [u8] {
-        // SAFETY: buffer DMA de MAX_DATAGRAM bytes mapeado RW, exclusivo del cliente.
+        // SAFETY: DMA buffer of MAX_DATAGRAM bytes mapped RW, exclusive to the client.
         unsafe { core::slice::from_raw_parts_mut(self.buf as *mut u8, MAX_DATAGRAM as usize) }
     }
 
@@ -45,7 +45,7 @@ impl NetClient {
             n = 1;
         }
         let mut msg = [0u8; Reply::LEN];
-        // El plazo de la peticion (recv, connect, accept, ping) mas el margen.
+        // The request deadline (recv, connect, accept, ping) plus the slack.
         let wait = req.timeout_ms as u64 + rpc::GRACE_MS;
         let len = rpc::call(
             self.service,
@@ -68,13 +68,13 @@ impl NetClient {
             .map(|r| Info::decode(&r.data))
     }
 
-    /// Estado del enlace físico (`LINK_UNKNOWN`, `LINK_DOWN` o `LINK_UP`),
-    /// disponible aunque DHCP no haya terminado.
+    /// Physical link state (`LINK_UNKNOWN`, `LINK_DOWN` or `LINK_UP`),
+    /// available even if DHCP has not finished.
     pub fn link(&self) -> Result<u64, NetError> {
         self.call(Request::new(Op::Link), false).map(|r| r.value)
     }
 
-    /// Eco ICMP; devuelve el RTT en ms.
+    /// ICMP echo; returns the RTT in ms.
     pub fn ping(&self, addr: [u8; 4], seq: u16, timeout_ms: u32) -> Result<u64, NetError> {
         let mut req = Request::new(Op::Ping);
         req.addr = addr;
@@ -146,7 +146,7 @@ impl NetClient {
         self.call(req, false).map(|r| r.value as u16)
     }
 
-    /// Acepta una conexión: devuelve el socket nuevo y el remitente.
+    /// Accepts a connection: returns the new socket and the peer.
     pub fn tcp_accept(&self, sock: u16, timeout_ms: u32) -> Result<(u16, [u8; 4], u16), NetError> {
         let mut req = Request::new(Op::TcpAccept);
         req.sock = sock;
@@ -155,7 +155,7 @@ impl NetClient {
             .map(|r| (r.value as u16, r.addr(), r.port))
     }
 
-    /// Encola datos; devuelve los aceptados (puede ser menos que `data`).
+    /// Queues data; returns how much was accepted (may be less than `data`).
     pub fn tcp_send(&mut self, sock: u16, data: &[u8]) -> Result<usize, NetError> {
         let len = data.len().min(MAX_DATAGRAM as usize);
         self.buffer()[..len].copy_from_slice(&data[..len]);
@@ -165,7 +165,7 @@ impl NetClient {
         self.call(req, true).map(|r| r.value as usize)
     }
 
-    /// Envía todo `data`, esperando cuando el buffer está lleno.
+    /// Sends all of `data`, waiting when the buffer is full.
     pub fn tcp_send_all(&mut self, sock: u16, data: &[u8]) -> Result<(), NetError> {
         let mut done = 0;
         let mut idle = 0;
@@ -183,7 +183,7 @@ impl NetClient {
         Ok(())
     }
 
-    /// Recibe datos; `Ok(0)` significa que el otro extremo cerró.
+    /// Receives data; `Ok(0)` means the other end closed.
     pub fn tcp_recv(
         &mut self,
         sock: u16,
@@ -206,8 +206,8 @@ impl NetClient {
         self.call(req, false).map(|_| ())
     }
 
-    /// Resuelve un nombre (hasta 253 bytes, sin recortes); `server` =
-    /// `Some((ip, puerto))` o `None` para el servidor DNS de la configuración.
+    /// Resolves a name (up to 253 bytes, not truncated); `server` =
+    /// `Some((ip, port))` or `None` for the configured DNS server.
     pub fn resolve(
         &mut self,
         name: &str,

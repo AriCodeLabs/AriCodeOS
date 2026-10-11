@@ -3,7 +3,7 @@ name = "aricode-manifest"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Manifiestos de aplicaciones de AriCodeOS: capacidades pedidas y límites (no_std)"
+description = "AriCodeOS application manifests: requested capabilities and limits (no_std)"
 
 [lib]
 path = "src/lib.rs"

@@ -1,8 +1,8 @@
-# Fase 21: init lanza el shell (cmdline `shell`) tras los servicios de
-# arranque; el runner teclea comandos al ver el prompt y termina con shutdown,
-# que el kernel convierte en salida limpia de QEMU.
+# Phase 21: init launches the shell (cmdline `shell`) after the boot
+# services; the runner types commands when it sees the prompt and ends with shutdown,
+# which the kernel turns into a clean QEMU exit.
 name = "shell.commands"
-description = "arish: help, uptime, mem, ps, ls, cat, devices, services, net, ping, dns, error y shutdown"
+description = "arish: help, uptime, mem, ps, ls, cat, devices, services, net, ping, dns, error and shutdown"
 level = "full"
 areas = ["shell", "filesystem", "network", "init"]
 cmdline = "qemu_exit shell"
@@ -30,33 +30,33 @@ stdin = [
 [expect]
 exit = 33
 serial_contains = [
-    "arish: shell de AriCodeOS",
+    "arish: AriCodeOS shell",
     "ari> help",
-    "  shutdown  apaga",
+    "  shutdown  power off",
     "uptime: ",
-    "memoria fisica utilizable: ",
-    "PID  ESTADO      NOMBRE",
+    "usable physical memory: ",
+    "PID  STATE       NAME",
     "shell",
     "hola.txt            17 bytes",
     "ari> cat hola.txt",
     "Hola desde AriFS",
-    "cat: no existe no-existe",
-    "1af4:1042  clase 01.00",
-    "ficheros  fsd         activo, responde",
-    "red       servicio    activo",
-    "enlace  arriba",
+    "cat: not found: no-existe",
+    "1af4:1042  class 01.00",
+    "files     fsd         active, responding",
+    "network   service     active",
+    "link    up",
     "ip      10.0.2.15",
-    "respuesta de 10.0.2.2: seq=4 tiempo=",
-    "4 de 4 respuestas",
+    "reply from 10.0.2.2: seq=4 time=",
+    "4 of 4 replies",
     "HTTP 200, 19 bytes",
     "Hola desde el host",
-    "hello_app: hola desde una aplicacion del SDK (arg 7)",
+    "hello_app: hello from an SDK app (arg 7)",
     "hello_app: 6 handles",
     "hello_app: uptime ",
-    "run: hello_app termino con 0",
-    "run: no-existe: no existe en el initrd",
-    "comando desconocido: nada (help)",
-    "AriCodeOS: apagando el sistema",
+    "run: hello_app exited with 0",
+    "run: no-existe: not found in the initrd",
+    "unknown command: nada (help)",
+    "AriCodeOS: shutting down",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_absent = ["KERNEL PANIC", "ARICODEOS_KERNEL_READY"]

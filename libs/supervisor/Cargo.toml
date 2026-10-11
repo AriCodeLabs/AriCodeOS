@@ -3,7 +3,7 @@ name = "aricode-supervisor"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Ciclo de vida y recuperación de servicios: estados, generaciones, presupuesto de reinicios con espera creciente y plazos de arranque (no_std, tests de host)"
+description = "Service lifecycle and recovery: states, generations, restart budget with growing backoff and startup deadlines (no_std, host tests)"
 
 [lib]
 path = "src/lib.rs"

@@ -1,6 +1,6 @@
-# Arranque nominal: la piedra angular del CI (sección 109 del documento maestro).
+# Nominal boot: the cornerstone of CI (section 109 of the master document).
 name = "boot.kernel_ready"
-description = "AriBoot carga el kernel, que reporta hardware y emite READY"
+description = "AriBoot loads the kernel, which reports hardware and emits READY"
 level = "smoke"
 areas = ["boot"]
 cmdline = "qemu_exit"

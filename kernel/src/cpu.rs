@@ -1,13 +1,12 @@
-//! Estado por CPU (Fase 32): tablas propias (GDT, TSS, pila de #DF), hilo en
-//! ejecución, quantum y scratch de `syscall`.
+//! Per-CPU state (Phase 32): own tables (GDT, TSS, #DF stack), running
+//! thread, quantum and the `syscall` scratch slot.
 //!
-//! `IA32_GS_BASE` apunta al `Cpu` de la CPU mientras ejecuta en ring 0 y se
-//! intercambia con `swapgs` en cada transición con ring 3, así que el código
-//! de ensamblador llega a sus campos con `gs:[desplazamiento]` y el de Rust
-//! con un único acceso relativo a GS, que es atómico frente a una migración:
-//! un hilo que lee "mi hilo actual" siempre se lee a sí mismo, en la CPU que
-//! sea. Para cualquier otro campo hay que deshabilitar interrupciones antes
-//! de tomar `current()`.
+//! `IA32_GS_BASE` points to the CPU's `Cpu` while it runs in ring 0 and is
+//! swapped with `swapgs` on every transition to/from ring 3, so assembly
+//! code reaches its fields with `gs:[offset]` and Rust code with a single
+//! GS-relative access, which is atomic with respect to migration: a thread
+//! reading "my current thread" always reads itself, on whatever CPU. For
+//! any other field, interrupts must be disabled before calling `current()`.
 
 use crate::arch::x86_64::gdt::Tables;
 use crate::arch::x86_64::msr;
@@ -17,12 +16,12 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 pub const MAX_CPUS: usize = 16;
 
-/// Celda de estado que solo toca la CPU dueña, con interrupciones
-/// deshabilitadas (o durante su propio arranque).
+/// State cell touched only by its owning CPU, with interrupts disabled (or
+/// during its own startup).
 pub struct PerCpuCell<T>(UnsafeCell<T>);
 
-// SAFETY: el acceso queda restringido por contrato a la CPU dueña, que no
-// puede ser interrumpida mientras lo usa (ver `get`).
+// SAFETY: access is restricted by contract to the owning CPU, which cannot
+// be interrupted while using it (see `get`).
 unsafe impl<T> Sync for PerCpuCell<T> {}
 
 impl<T> PerCpuCell<T> {
@@ -32,7 +31,7 @@ impl<T> PerCpuCell<T> {
 
     /// # Safety
     ///
-    /// Solo desde la CPU dueña y sin que una interrupción pueda reentrar.
+    /// Only from the owning CPU and with no interrupt able to re-enter.
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn get(&self) -> &mut T {
         &mut *self.0.get()
@@ -41,11 +40,11 @@ impl<T> PerCpuCell<T> {
 
 #[repr(C)]
 pub struct Cpu {
-    /// Dirección de este mismo `Cpu` (`gs:[0]`).
+    /// Address of this very `Cpu` (`gs:[0]`).
     self_ptr: AtomicU64,
-    /// Pila de kernel del hilo actual para la entrada por `syscall`.
+    /// Kernel stack of the current thread for `syscall` entry.
     kernel_rsp: AtomicU64,
-    /// Scratch de `syscall_entry` para el `rsp` de usuario.
+    /// `syscall_entry` scratch slot for the user `rsp`.
     user_rsp: AtomicU64,
     current: AtomicU32,
     quantum_left: AtomicU32,
@@ -55,7 +54,7 @@ pub struct Cpu {
     idle_running: AtomicBool,
     idle_tid: AtomicU32,
     tables: PerCpuCell<Tables>,
-    /// Ciclos de TSC pasados en `hlt` (etapa 5, `sysinfo::IDLE`).
+    /// TSC cycles spent in `hlt` (stage 5, `sysinfo::IDLE`).
     idle_cycles: AtomicU64,
 }
 
@@ -110,7 +109,7 @@ impl Cpu {
     pub fn is_online(&self) -> bool {
         self.online.load(Ordering::Acquire)
     }
-    /// La CPU ya atiende interrupciones y planifica.
+    /// The CPU now services interrupts and schedules.
     pub fn set_online(&self) {
         self.online.store(true, Ordering::Release);
     }
@@ -123,27 +122,27 @@ impl Cpu {
     pub fn is_idle(&self) -> bool {
         self.idle_running.load(Ordering::Relaxed)
     }
-    /// Hilo que pasa a ejecutar en esta CPU (solo desde ella, con IF = 0).
+    /// Thread that starts running on this CPU (only from it, with IF = 0).
     pub fn set_current(&self, tid: u32, quantum: u32) {
         self.current.store(tid, Ordering::Relaxed);
         self.quantum_left.store(quantum, Ordering::Relaxed);
         self.idle_running
             .store(tid == self.idle_tid(), Ordering::Relaxed);
     }
-    /// Resta un tick al quantum; `true` si expiró.
+    /// Takes one tick off the quantum; `true` if it expired.
     pub fn quantum_tick(&self) -> bool {
         self.quantum_left.fetch_sub(1, Ordering::Relaxed) <= 1
     }
-    /// Pila de kernel del hilo actual para `syscall` (solo la CPU dueña).
+    /// Kernel stack of the current thread for `syscall` (owning CPU only).
     pub fn set_kernel_rsp(&self, top: u64) {
         self.kernel_rsp.store(top, Ordering::Relaxed);
     }
 
-    /// Tablas de esta CPU.
+    /// This CPU's tables.
     ///
     /// # Safety
     ///
-    /// Solo desde la propia CPU con interrupciones deshabilitadas.
+    /// Only from this very CPU with interrupts disabled.
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn tables(&self) -> &mut Tables {
         self.tables.get()
@@ -164,16 +163,16 @@ pub fn slot(index: usize) -> &'static Cpu {
     &CPUS[index]
 }
 
-/// Apunta `IA32_GS_BASE` de la CPU que llama a `cpu`. Después de cargar la
-/// GDT (cargar un selector en GS pone su base a cero) y antes de cualquier
-/// acceso relativo a GS.
+/// Points the calling CPU's `IA32_GS_BASE` at `cpu`. After loading the GDT
+/// (loading a selector into GS zeroes its base) and before any GS-relative
+/// access.
 pub fn activate(cpu: &'static Cpu) {
     const IA32_GS_BASE: u32 = 0xC000_0101;
     const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
     let addr = cpu as *const Cpu as u64;
     cpu.self_ptr.store(addr, Ordering::Relaxed);
-    // SAFETY: bases de segmento; el `Cpu` es estático y nunca se mueve. El
-    // valor de usuario (KERNEL_GS_BASE hasta el primer swapgs) es cero.
+    // SAFETY: segment bases; the `Cpu` is static and never moves. The user
+    // value (KERNEL_GS_BASE until the first swapgs) is zero.
     unsafe {
         msr::write(IA32_GS_BASE, addr);
         msr::write(IA32_KERNEL_GS_BASE, 0);
@@ -182,7 +181,7 @@ pub fn activate(cpu: &'static Cpu) {
 
 fn gs_read_u64(offset: usize) -> u64 {
     let v: u64;
-    // SAFETY: lectura relativa a GS dentro del `Cpu` de esta CPU.
+    // SAFETY: GS-relative read within this CPU's `Cpu`.
     unsafe {
         asm!("mov {}, gs:[{}]", out(reg) v, in(reg) offset, options(nostack, readonly, preserves_flags))
     };
@@ -191,26 +190,26 @@ fn gs_read_u64(offset: usize) -> u64 {
 
 fn gs_read_u32(offset: usize) -> u32 {
     let v: u32;
-    // SAFETY: ídem.
+    // SAFETY: same as above.
     unsafe {
         asm!("mov {:e}, gs:[{}]", out(reg) v, in(reg) offset, options(nostack, readonly, preserves_flags))
     };
     v
 }
 
-/// `Cpu` de la CPU que ejecuta. Solo es estable mientras las interrupciones
-/// estén deshabilitadas (si no, el hilo puede migrar tras leerlo).
+/// `Cpu` of the executing CPU. Only stable while interrupts are disabled
+/// (otherwise the thread may migrate after reading it).
 pub fn current() -> &'static Cpu {
-    // SAFETY: gs:[0] guarda la dirección de un `Cpu` estático (`activate`).
+    // SAFETY: gs:[0] holds the address of a static `Cpu` (`activate`).
     unsafe { &*(gs_read_u64(OFF_SELF) as *const Cpu) }
 }
 
-/// Índice de la CPU que ejecuta en este instante.
+/// Index of the CPU executing right now.
 pub fn id() -> u32 {
     gs_read_u32(OFF_INDEX)
 }
 
-/// Hilo en ejecución en esta CPU: el propio llamador, en cualquier CPU.
+/// Thread running on this CPU: the caller itself, on any CPU.
 pub fn current_tid() -> u32 {
     gs_read_u32(OFF_CURRENT)
 }
@@ -227,7 +226,7 @@ pub fn online_count() -> usize {
     online().count()
 }
 
-/// Alguna CPU distinta de `me` que esté en su hilo idle (para despertarla).
+/// Some CPU other than `me` that is in its idle thread (to wake it up).
 pub fn idle_other_than(me: u32) -> Option<&'static Cpu> {
     online().find(|c| c.index != me && c.is_idle())
 }

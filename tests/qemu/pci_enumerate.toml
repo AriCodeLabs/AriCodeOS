@@ -1,8 +1,8 @@
-# Fase 17: enumeracion PCIe por ECAM (MCFG). La maquina q35 de QEMU expone
+# Phase 17: PCIe enumeration via ECAM (MCFG). The QEMU q35 machine exposes
 # host bridge 8086:29c0, VGA 1234:1111, ISA bridge 8086:2918, SATA 8086:2922
-# y SMBus 8086:2930.
+# and SMBus 8086:2930.
 name = "pci.enumerate"
-description = "ECAM mapeado y funciones de q35 enumeradas con clase, BARs y capabilities"
+description = "ECAM mapped and q35 functions enumerated with class, BARs and capabilities"
 level = "smoke"
 areas = ["pci", "drivers"]
 cmdline = "qemu_exit"
@@ -10,15 +10,15 @@ cmdline = "qemu_exit"
 [expect]
 exit = 33
 serial_contains = [
-    "pci: 00:00.0 8086:29c0 clase 06.00 host bridge",
-    "pci: 00:01.0 1234:1111 clase 03.00 VGA/display",
-    "pci: 00:1f.0 8086:2918 clase 06.01 ISA bridge",
-    "pci: 00:1f.2 8086:2922 clase 01.06 SATA (AHCI)",
-    "pci: 00:02.0 1af4:1042 clase 01.00 almacenamiento",
-    "pci: 00:03.0 1af4:1041 clase 02.00 Ethernet",
-    "pci: 00:04.0 1af4:1052 clase 09.00 teclado",
-    "pci: 00:05.0 1af4:1052 clase 09.02 raton",
-    "pci: 9 funciones en el segmento 0 (ECAM @ 0xe0000000)",
+    "pci: 00:00.0 8086:29c0 class 06.00 host bridge",
+    "pci: 00:01.0 1234:1111 class 03.00 VGA/display",
+    "pci: 00:1f.0 8086:2918 class 06.01 ISA bridge",
+    "pci: 00:1f.2 8086:2922 class 01.06 SATA (AHCI)",
+    "pci: 00:02.0 1af4:1042 class 01.00 storage",
+    "pci: 00:03.0 1af4:1041 class 02.00 Ethernet",
+    "pci: 00:04.0 1af4:1052 class 09.00 keyboard",
+    "pci: 00:05.0 1af4:1052 class 09.02 mouse",
+    "pci: 9 functions in segment 0 (ECAM @ 0xe0000000)",
     "ARICODEOS_KERNEL_READY",
 ]
-serial_absent = ["KERNEL PANIC", "sin MCFG"]
+serial_absent = ["KERNEL PANIC", "no MCFG"]

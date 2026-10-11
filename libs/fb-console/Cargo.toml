@@ -3,7 +3,7 @@ name = "aricode-fb-console"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Consola de texto sobre framebuffer lineal (no_std, sin alloc)"
+description = "Text console on a linear framebuffer (no_std, no alloc)"
 
 [lib]
 path = "src/lib.rs"

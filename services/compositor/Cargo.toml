@@ -3,7 +3,7 @@ name = "ari-compositor"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Compositor de ventanas de AriCodeOS en espacio de usuario"
+description = "AriCodeOS user-space window compositor"
 publish = false
 
 [[bin]]

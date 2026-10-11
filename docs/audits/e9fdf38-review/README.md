@@ -1,72 +1,71 @@
-# Reproducciones de la revisión de sandbox, Wasm, criptografía y A/B
+# Reproductions for the sandbox, Wasm, cryptography and A/B review
 
-Estas pruebas expresan el comportamiento esperado y fallan en la copia
-revisada. No son correcciones ni forman parte de la batería normal.
-`snapshot.json` identifica los archivos revisados y su commit base; el
-arranque A/B estaba sin confirmar en Git al tomar la copia.
+These tests express the expected behavior and fail on the reviewed copy.
+They are not fixes and are not part of the normal suite.
+`snapshot.json` identifies the reviewed files and their base commit; the A/B
+boot work was uncommitted in Git when the copy was taken.
 
 ## Host
 
-Desde la raíz del repositorio:
+From the repository root:
 
 ```bash
 cargo test --manifest-path docs/audits/e9fdf38-review/Cargo.toml --bin wasm_probe -- --nocapture
 cargo run --manifest-path docs/audits/e9fdf38-review/Cargo.toml --bin fs_probe
 ```
 
-`wasm_probe` ejecuta directamente `aricode-wasm`: comprueba los límites de
-memoria, el borrado al instanciar y crecer, y la función `start`.
+`wasm_probe` runs `aricode-wasm` directly: it checks memory bounds, zeroing
+on instantiation and growth, and the `start` function.
 
-`fs_probe` conserva la lógica de `Fds`, `qualified`, `ClientBuffers` y `handle`
-extraída del servicio revisado. Usa AriFS y el protocolo originales, un disco
-en memoria y tres consultas DMA simuladas. Demuestra que un prefijo distinto
-puede usar el descriptor de la víctima; no simula IPC ni el kernel.
+`fs_probe` keeps the `Fds`, `qualified`, `ClientBuffers` and `handle` logic
+extracted from the reviewed service. It uses the original AriFS and protocol,
+an in-memory disk and three simulated DMA queries. It shows that a different
+prefix can use the victim's descriptor; it does not simulate IPC or the kernel.
 
-## QEMU: aislamiento y fugas del broker
+## QEMU: isolation and broker leaks
 
-Usar una copia independiente del repositorio para no añadir programas de
-prueba a una imagen de trabajo:
+Use a separate copy of the repository to avoid adding test programs to a
+working image:
 
-1. Copiar `qemu/review_victim.rs` y `qemu/review_attacker.rs` a
+1. Copy `qemu/review_victim.rs` and `qemu/review_attacker.rs` to
    `user/testprogs/src/bin/`.
-2. Crear `apps/review/` y copiar allí los tres archivos `.manifest`.
-3. Copiar los dos `.toml` a `tests/qemu/`.
-4. Ejecutar `cargo xtask test --all --area review`.
+2. Create `apps/review/` and copy the three `.manifest` files there.
+3. Copy the two `.toml` files to `tests/qemu/`.
+4. Run `cargo xtask test --all --area review`.
 
-No es necesario crear paquetes: xtask descubre los binarios de testprogs y
-los manifiestos. La víctima termina dejando abierto su archivo privado;
-el atacante intenta leer descriptores 0–15 desde otro directorio. El segundo
-escenario pide repetidamente `system, window` sin arrancar la GUI y después
-intenta ejecutar `hello_app`.
+No packages need to be created: xtask discovers the testprogs binaries and
+the manifests. The victim exits leaving its private file open; the attacker
+tries to read descriptors 0–15 from another directory. The second scenario
+repeatedly requests `system, window` without starting the GUI and then tries
+to run `hello_app`.
 
-## QEMU: arranque A/B
+## QEMU: A/B boot
 
-Los scripts `qemu/readonly_boot.py` y `qemu/early_confirm.py` se ejecutan
-desde la raíz de la copia de pruebas, después de generar los escenarios
-`boot.kernel_ready` y `crypto.random`. Necesitan los artefactos de Fase 30
-en `build/esp` y `build/scenarios` y OVMF en las rutas indicadas.
+The scripts `qemu/readonly_boot.py` and `qemu/early_confirm.py` are run from
+the root of the test copy, after building the `boot.kernel_ready` and
+`crypto.random` scenarios. They need the Phase 30 artifacts in `build/esp`
+and `build/scenarios`, and OVMF at the indicated paths.
 
-Crean discos propios en `build/review-readonly` y `build/review-early-confirm`.
-Copian la imagen firmada de A a B y preparan B con tres intentos. El primero
-arranca dos veces en solo lectura, sin ejecutar init. El segundo permite
-escrituras e introduce una red restringida para observar un fallo de init
-posterior a la confirmación. Imprimen la serie relevante y el estado del disco;
-no contienen aserciones automáticas de éxito o fracaso.
+They create their own disks in `build/review-readonly` and
+`build/review-early-confirm`. They copy A's signed image to B and set up B
+with three attempts. The first boots twice read-only, without running init.
+The second allows writes and introduces a restricted network to observe an
+init failure after confirmation. They print the relevant serial output and
+the disk state; they contain no automatic pass/fail assertions.
 
-## Permisos de la clave privada
+## Private key permissions
 
-En un directorio temporal nuevo, ejecutar `xtask keygen` bajo `umask 022` y
-examinar los permisos de `ed25519.seed` con `stat`. En la revisión se obtuvo
-`0644`; no es necesario mostrar el contenido ni conservar la semilla.
+In a fresh temporary directory, run `xtask keygen` under `umask 022` and
+inspect the permissions of `ed25519.seed` with `stat`. The review got `0644`;
+there is no need to show the contents or keep the seed.
 
-## Aislamiento de la ejecución original
+## Isolation of the original run
 
-La primera batería de QEMU fue terminada con SIGTERM mientras otra batería
-estaba activa en el workspace. La segunda usó una copia independiente, los
-puertos 27007–27010 en lugar de 17007–17010 y nombres distintos para los
-ejecutables del runner y QEMU. Solo se ajustaron las constantes de puertos de
-prueba, las URLs del cliente HTTP de prueba, el comando de QEMU y las
-expectativas correspondientes. Los archivos
-de los hallazgos permanecieron iguales a `snapshot.json`.
-La repetición de `virtio.blk_rw` usa la expectativa corregida en `ade2d04`
-(98304 sectores para el disco A/B).
+The first QEMU suite was terminated with SIGTERM while another suite was
+active in the workspace. The second used a separate copy, ports 27007–27010
+instead of 17007–17010, and different names for the runner and QEMU
+executables. Only the test port constants, the test HTTP client URLs, the
+QEMU command and the corresponding expectations were adjusted. The files
+of the findings remained identical to `snapshot.json`.
+The `virtio.blk_rw` rerun uses the expectation corrected in `ade2d04`
+(98304 sectors for the A/B disk).

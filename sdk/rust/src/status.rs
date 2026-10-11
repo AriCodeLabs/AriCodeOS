@@ -1,13 +1,13 @@
-//! Cliente del estado de servicios (`aricode-proto::status`): pregunta a
-//! init, por el endpoint del broker, por cada servicio supervisado.
+//! Service status client (`aricode-proto::status`): asks init, through the
+//! broker endpoint, about each supervised service.
 
 use crate::{rpc, Error, Handle};
 use aricode_proto::status::Request;
 pub use aricode_proto::status::{LastExit, Reply, State};
 
-/// Estado del servicio `index`; `Ok(None)` cuando no hay más. Cada petición
-/// usa un endpoint de respuesta propio y esperas acotadas: una respuesta
-/// tardía de otra petición nunca se confunde con esta.
+/// Status of service `index`; `Ok(None)` when there are no more. Each request
+/// uses its own reply endpoint and bounded waits: a late reply to another
+/// request is never mistaken for this one.
 pub fn service_status(broker: Handle, index: u8) -> Result<Option<Reply>, Error> {
     let mut msg = [0u8; Reply::LEN];
     let len = rpc::call(

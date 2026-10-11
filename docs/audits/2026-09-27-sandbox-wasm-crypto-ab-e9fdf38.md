@@ -1,294 +1,292 @@
-# Revisión de sandbox, WebAssembly, criptografía y arranque A/B
+# Sandbox, WebAssembly, cryptography and A/B boot review
 
-Fecha: 2026-09-27. Base Git: `e9fdf38`.
-Alcance: cambios posteriores a `28e745a`, incluidas las fases 28, 29 y 31,
-las correcciones de la auditoría anterior y el trabajo de Fase 30 sin commit
-presente al iniciar esta revisión (versión de workspace 0.4.0).
+Date: 2026-09-27. Git base: `e9fdf38`.
+Scope: changes after `28e745a`, including phases 28, 29 and 31, the fixes
+from the previous audit, and the uncommitted Phase 30 work present when this
+review started (workspace version 0.4.0).
 
-La revisión se hizo sobre una copia aislada. Los hashes de los archivos
-señalados están en [snapshot.json](e9fdf38-review/snapshot.json): citar solo
-`e9fdf38` no reproduce los cambios A/B que aún no estaban confirmados.
-No se modificó código de producción ni se aplicaron correcciones.
+The review was done on an isolated copy. The hashes of the flagged files are
+in [snapshot.json](e9fdf38-review/snapshot.json): citing only `e9fdf38` does
+not reproduce the A/B changes that were not yet committed.
+No production code was modified and no fixes were applied.
 
-Durante la revisión, Fase 30 se integró en `ade2d04` (implementación `ab4af73`).
-Los siete archivos de producción identificados en `snapshot.json` mantienen
-exactamente los mismos hashes en esa integración.
+During the review, Phase 30 was merged in `ade2d04` (implementation `ab4af73`).
+The seven production files identified in `snapshot.json` keep exactly the
+same hashes in that merge.
 
-## Hallazgos
+## Findings
 
-| # | Prioridad | Problema | Estado |
+| # | Priority | Issue | Status |
 | --- | --- | --- | --- |
-| 1 | P1 | Un descriptor global permite acceder a archivos de otro directorio privado | Pendiente |
-| 2 | P1 | `keygen` crea la semilla privada con permisos de lectura para otros usuarios | Pendiente |
-| 3 | P1 | Se confirma un slot antes de completar el arranque de los servicios | Pendiente |
-| 4 | P2 | Se arranca un slot pendiente aunque falle la persistencia del contador | Pendiente |
-| 5 | P2 | Las denegaciones previas a `process_spawn_limited` todavía pierden handles | Pendiente |
-| 6 | P2 | Wasm comprueba los accesos contra la reserva del host, no contra la memoria actual del módulo | Pendiente |
-| 7 | P2 | Wasm conserva bytes anteriores al instanciar y al ampliar la memoria | Pendiente |
-| 8 | P2 | El runner ignora la función `start` de los módulos Wasm | Pendiente |
+| 1 | P1 | A global descriptor allows access to files in another private directory | Pending |
+| 2 | P1 | `keygen` creates the private seed readable by other users | Pending |
+| 3 | P1 | A slot is confirmed before service startup completes | Pending |
+| 4 | P2 | A pending slot is booted even if persisting the counter fails | Pending |
+| 5 | P2 | Denials before `process_spawn_limited` still leak handles | Pending |
+| 6 | P2 | Wasm checks accesses against the host reservation, not the module's current memory | Pending |
+| 7 | P2 | Wasm keeps stale bytes when instantiating and growing memory | Pending |
+| 8 | P2 | The runner ignores the `start` function of Wasm modules | Pending |
 
-P1 requiere atención prioritaria; P2 es un defecto funcional que debe corregirse.
-La revisión no constituye una verificación formal de las primitivas criptográficas
-ni una auditoría exhaustiva de todo el sistema operativo.
+P1 requires priority attention; P2 is a functional defect that must be fixed.
+This review is not a formal verification of the cryptographic primitives nor
+an exhaustive audit of the whole operating system.
 
-## Validación y evidencias
+## Validation and evidence
 
-- `cargo xtask check`: correcto en la copia original, antes de añadir las
-  reproducciones y adaptar los puertos de prueba.
-- Pruebas de host de la batería: 184 correctas.
-- Resultado QEMU consolidado tras las repeticiones: **65 escenarios oficiales
-  correctos**. Los dos escenarios nuevos, `review.fs_isolation` y
-  `review.broker_leak`, fallan de forma reproducible y confirman los hallazgos
-  1 y 5. El consolidado y los resultados individuales se conservan en
-  `review-results.json`; no se presenta la ejecución inicial como una pasada
-  completa sin errores.
-- La primera ejecución de QEMU recibió SIGTERM mientras había otra batería
-  activa en el workspace. No se considera una ejecución completa ni un fallo
-  funcional de AriCodeOS.
-- La segunda ejecución utiliza los puertos 27007–27010 y nombres diferentes
-  para el runner y QEMU. Se conservan las mismas rutas de producción de los
-  hallazgos; solo se adapta la infraestructura de pruebas y se añaden dos
-  escenarios de reproducción.
-- Se repitieron los escenarios afectados al completar la adaptación de las
-  URLs HTTP de test. La expectativa de capacidad de `virtio.blk_rw` se tomó de
-  `ade2d04`: durante la revisión se corrigió de 8192 a 98304 sectores, acordes
-  con el disco A/B. Estos fallos de infraestructura y expectativa no se cuentan
-  entre los hallazgos pendientes.
-- Las cuatro aserciones adicionales de Wasm fallan con los resultados
-  descritos en los hallazgos 6–8. Ejecutan directamente `aricode-wasm`.
-- La prueba aislada de archivos obtiene `SECRET` desde otro prefijo y falla
-  su aserción de aislamiento. Usa el handler extraído, AriFS y el protocolo
-  originales; simula el disco y tres consultas DMA.
-- Las reproducciones A/B ejecutan QEMU sobre discos propios: dos arranques
-  en solo lectura y un arranque con red restringida, respectivamente.
-- La prueba de `keygen` usa un directorio nuevo y `umask 022`; no se conserva
-  ni se muestra la semilla generada.
+- `cargo xtask check`: passes on the original copy, before adding the
+  reproductions and adapting the test ports.
+- Suite host tests: 184 passing.
+- Consolidated QEMU result after reruns: **65 official scenarios passing**.
+  The two new scenarios, `review.fs_isolation` and `review.broker_leak`, fail
+  reproducibly and confirm findings 1 and 5. The consolidated and individual
+  results are kept in `review-results.json`; the initial run is not presented
+  as a complete error-free pass.
+- The first QEMU run received SIGTERM while another suite was active in the
+  workspace. It is not considered a complete run nor a functional failure of
+  AriCodeOS.
+- The second run uses ports 27007–27010 and different names for the runner
+  and QEMU. The production paths of the findings are unchanged; only the test
+  infrastructure is adapted and two reproduction scenarios are added.
+- The affected scenarios were rerun after finishing the adaptation of the test
+  HTTP URLs. The capacity expectation for `virtio.blk_rw` was taken from
+  `ade2d04`: during the review it was corrected from 8192 to 98304 sectors,
+  matching the A/B disk. These infrastructure and expectation failures are not
+  counted among the pending findings.
+- The four additional Wasm assertions fail with the results described in
+  findings 6–8. They run `aricode-wasm` directly.
+- The isolated file test obtains `SECRET` from another prefix and fails its
+  isolation assertion. It uses the original extracted handler, AriFS and
+  protocol; it simulates the disk and three DMA queries.
+- The A/B reproductions run QEMU on their own disks: two read-only boots and
+  one boot with a restricted network, respectively.
+- The `keygen` test uses a fresh directory and `umask 022`; the generated seed
+  is neither kept nor shown.
 
-Los logs locales están en `build/audit/e9fdf38-worktree/` y las instrucciones
-y fuentes de las reproducciones en [e9fdf38-review/](e9fdf38-review/README.md).
-Los logs y discos son artefactos generados, no archivos versionados.
+Local logs are in `build/audit/e9fdf38-worktree/`, and the instructions and
+sources for the reproductions are in [e9fdf38-review/](e9fdf38-review/README.md).
+Logs and disks are generated artifacts, not versioned files.
 
-## 1. [P1] Los descriptores de fsd no están ligados al directorio privado
+## 1. [P1] fsd descriptors are not bound to the private directory
 
-Código: [services/arifs/src/main.rs](../../services/arifs/src/main.rs),
-líneas 172–195; tabla única creada en `main`, línea 224 de la copia revisada.
+Code: [services/arifs/src/main.rs](../../services/arifs/src/main.rs),
+lines 172–195; single table created in `main`, line 224 of the reviewed copy.
 
-`Open`, `Create` y `List` aplican el prefijo del endpoint, pero `Read`, `Write`
-y `Close` consultan la misma tabla `Fds` para todos los endpoints. El número
-de descriptor no incluye el directorio propietario y no se comprueba que el
-archivo pertenezca al prefijo que envía la petición.
+`Open`, `Create` and `List` apply the endpoint prefix, but `Read`, `Write`
+and `Close` look up the same `Fds` table for every endpoint. The descriptor
+number does not include the owning directory, and nothing checks that the
+file belongs to the prefix sending the request.
 
-Una aplicación con su propio endpoint privado puede probar los descriptores
-0–15 y leer, modificar o cerrar archivos abiertos desde otro directorio.
-También funciona después de que el propietario termine sin cerrar su descriptor,
-porque fsd conserva esa entrada. No hace falta obtener el endpoint de la víctima.
+An application with its own private endpoint can probe descriptors 0–15 and
+read, modify or close files opened from another directory. This also works
+after the owner exits without closing its descriptor, because fsd keeps that
+entry. Obtaining the victim's endpoint is not required.
 
-Reproducción de host: crear `victim/secret.txt`, escribir `SECRET`, conservar
-el descriptor 0 y enviar `Read(fd=0)` con prefijo `attacker`. Resultado:
-`Status::Ok` y los seis bytes `SECRET`, frente al rechazo esperado.
+Host reproduction: create `victim/secret.txt`, write `SECRET`, keep
+descriptor 0 and send `Read(fd=0)` with prefix `attacker`. Result:
+`Status::Ok` and the six bytes `SECRET`, instead of the expected rejection.
 
-La reproducción QEMU usa dos aplicaciones con manifiestos `caps = fs` y
-directorios distintos. La primera escribe `VICTIM_SECRET` y termina sin
-`Close`; la segunda intenta leer los descriptores 0–15 sin abrir ese archivo.
-Resultado observado: `REVIEW_CROSS_NAMESPACE_READ: VICTIM_SECRET` y salida 1
-del atacante. El escenario falla las expectativas de aislamiento.
+The QEMU reproduction uses two applications with `caps = fs` manifests and
+different directories. The first writes `VICTIM_SECRET` and exits without
+`Close`; the second tries to read descriptors 0–15 without opening that file.
+Observed result: `REVIEW_CROSS_NAMESPACE_READ: VICTIM_SECRET` and exit 1
+from the attacker. The scenario fails the isolation expectations.
 
-Corrección: asociar cada descriptor al namespace o mantener una tabla por
-namespace y validar pertenencia en todas las operaciones, incluido `Close`.
-La regresión debe intentar lectura, escritura y cierre cruzados; comprobar
-solo `List` o `Open` por nombre no cubre este acceso.
+Fix: associate each descriptor with its namespace, or keep one table per
+namespace, and validate ownership in every operation, including `Close`.
+The regression must attempt cross-namespace read, write and close; checking
+only `List` or `Open` by name does not cover this access.
 
-## 2. [P1] La semilla privada se escribe con permisos demasiado amplios
+## 2. [P1] The private seed is written with overly broad permissions
 
-Código: [tools/xtask/src/keys.rs](../../tools/xtask/src/keys.rs), líneas 32–35
-y 48–52.
+Code: [tools/xtask/src/keys.rs](../../tools/xtask/src/keys.rs), lines 32–35
+and 48–52.
 
-`keygen` usa `write_hex`, que termina en `fs::write`, tanto para la clave
-pública como para la semilla privada. No establece permisos privados sobre
-esta última. Con `umask 022`, la semilla se crea con modo `0644`; el directorio
-nuevo también es accesible bajo esa configuración si sus ancestros lo permiten.
+`keygen` uses `write_hex`, which ends in `fs::write`, for both the public key
+and the private seed. It sets no private permissions on the latter. With
+`umask 022`, the seed is created with mode `0644`; the new directory is also
+accessible under that configuration if its ancestors allow it.
 
-Reproducción: ejecutar `xtask keygen` en un directorio temporal nuevo bajo
-`umask 022`. Resultado: `ed25519.seed = 0644`, `ed25519.pub = 0644`, salida 0.
-No se trata de la clave de desarrollo publicada deliberadamente en `keys/dev`,
-sino de las nuevas claves privadas que genera el comando.
+Reproduction: run `xtask keygen` in a fresh temporary directory under
+`umask 022`. Result: `ed25519.seed = 0644`, `ed25519.pub = 0644`, exit 0.
+This is not about the development key deliberately published in `keys/dev`,
+but about the new private keys the command generates.
 
-Impacto: otros usuarios locales que puedan recorrer el directorio pueden
-copiar la semilla y firmar como su propietario.
+Impact: other local users who can traverse the directory can copy the seed
+and sign as its owner.
 
-Corrección: crear la semilla con permisos `0600` desde su apertura y creación
-exclusiva. No depender del umask ni de un `chmod` posterior a escribirla.
-Regresión: comprobar que no existen bits de acceso para grupo u otros bajo
-un umask permisivo y que una clave existente no se sobrescribe.
+Fix: create the seed with `0600` permissions at open time, with exclusive
+creation. Do not rely on the umask or on a `chmod` after writing it.
+Regression: check that no group or other access bits exist under a permissive
+umask and that an existing key is not overwritten.
 
-## 3. [P1] Init confirma el slot antes de saber si completa el arranque
+## 3. [P1] Init confirms the slot before knowing whether boot completes
 
-Código: [services/init/src/main.rs](../../services/init/src/main.rs),
-líneas 604–608.
+Code: [services/init/src/main.rs](../../services/init/src/main.rs),
+lines 604–608.
 
-`confirm_boot_slot` se llama después de comprobar bloques y archivos, pero
-antes de iniciar y comprobar red, entrada, GUI y broker. Aún hay múltiples
-rutas posteriores que terminan init con un error. La confirmación ya ha
-convertido el slot pendiente en activo y eliminado el mecanismo de reintentos.
+`confirm_boot_slot` is called after checking blocks and files, but before
+starting and checking network, input, GUI and broker. Multiple later paths
+still terminate init with an error. By then the confirmation has already
+turned the pending slot into the active one and removed the retry mechanism.
 
-Reproducción QEMU: preparar A activo y B pendiente con tres intentos y arrancar
-con una red de usuario restringida. Se observa, en este orden:
+QEMU reproduction: set up A active and B pending with three attempts, and
+boot with a restricted user network. The following is observed, in this order:
 
 ```text
-AriInit: arranque confirmado en el slot B
+AriInit: boot confirmed in slot B
 net_client: ip 10.0.2.15 router 0.0.0.0 dns 0.0.0.0
-AriInit: net_client salio con 4
-init terminado con codigo 18
+AriInit: net_client exited with 4
+init terminated with code 18
 ```
 
-El sector ARIBOOT queda con `active = B`, `pending = None`, intentos 0.
-Por tanto, los siguientes arranques ya no pueden agotar los intentos de ese
-slot y volver automáticamente a A por este fallo de inicialización. La sonda
-provoca una configuración de red inválida; la misma ruta afecta a una imagen
-nueva cuyo servicio de red falle después de superar las pruebas de almacenamiento.
+The ARIBOOT sector is left with `active = B`, `pending = None`, attempts 0.
+Therefore later boots can no longer exhaust that slot's attempts and fall
+back to A automatically because of this initialization failure. The probe
+causes an invalid network configuration; the same path affects a new image
+whose network service fails after passing the storage checks.
 
-Corrección: confirmar únicamente después de superar todos los requisitos de
-salud del arranque solicitado, justo antes de entregar el control al shell o
-de declarar el sistema listo. Mantener el estado pendiente en las salidas de
-error. Añadir una regresión que compruebe el sector tras un fallo tardío de init.
+Fix: confirm only after all health requirements of the requested boot have
+been met, right before handing control to the shell or declaring the system
+ready. Keep the pending state on error exits. Add a regression that checks
+the sector after a late init failure.
 
-## 4. [P2] Un fallo al guardar los intentos no impide arrancar el pendiente
+## 4. [P2] A failure to save attempts does not prevent booting the pending slot
 
-Código: [boot/src/slots.rs](../../boot/src/slots.rs), líneas 164–184.
+Code: [boot/src/slots.rs](../../boot/src/slots.rs), lines 164–184.
 
-Cuando `disk.write` falla al persistir `decision.state`, AriBoot solo imprime
-un aviso y devuelve la imagen elegida. Si era un slot pendiente, arranca aunque
-el decremento de intentos no haya quedado guardado.
+When `disk.write` fails to persist `decision.state`, AriBoot only prints a
+warning and returns the chosen image. If it was a pending slot, it boots even
+though the attempt decrement was not saved.
 
-Reproducción QEMU: presentar el disco con `readonly=on`, A activo y B pendiente
-con tres intentos. Ambos arranques consecutivos muestran:
+QEMU reproduction: attach the disk with `readonly=on`, A active and B pending
+with three attempts. Both consecutive boots show:
 
 ```text
-slots: estado activo A, pendiente B (3 intentos)
-slots: no se pudo escribir el estado de arranque
-slots: arrancando desde el slot B
+slots: state active A, pending B (3 attempts)
+slots: could not write boot state
+slots: booting from slot B
 ```
 
-Los dos arranques usan `test=random` para terminar sin confirmación desde init.
-Esto prueba que el contador no avanza; no simula un fallo del kernel de B.
-Si B no consigue arrancar, esta ruta puede repetir indefinidamente el mismo
-slot en vez de alcanzar el rollback.
+Both boots use `test=random` to finish without confirmation from init.
+This proves the counter does not advance; it does not simulate a failure of
+B's kernel. If B fails to boot, this path can repeat the same slot
+indefinitely instead of reaching rollback.
 
-Corrección: no arrancar un pendiente si no se pudo guardar su intento. Volver
-al slot activo verificado o a la recuperación, sin hacer depender esa elección
-de que la escritura que acaba de fallar vuelva a funcionar. Una regresión debe
-cubrir fallo de escritura y de flush del estado.
+Fix: do not boot a pending slot if its attempt could not be saved. Fall back
+to the verified active slot or to recovery, without making that choice depend
+on the write that just failed working again. A regression must cover both
+write and flush failures of the state.
 
-## 5. [P2] Persisten fugas del broker en los retornos anteriores al spawn
+## 5. [P2] Broker leaks persist on returns before the spawn
 
-Código: [services/init/src/main.rs](../../services/init/src/main.rs),
-líneas 366–395, especialmente el retorno de `WINDOW` sin compositor.
+Code: [services/init/src/main.rs](../../services/init/src/main.rs),
+lines 366–395, especially the `WINDOW` return without a compositor.
 
-La corrección anterior cierra `granted` si falla `process_spawn_limited`,
-pero hay retornos después de conceder algunos handles y antes de llegar a
-esa llamada. Por ejemplo, con `caps = system, window` se duplica `SYSTEM` y
-después se devuelve `Denied` si el arranque no incluye GUI. Ese duplicado no
-se libera. Las rutas de error al preparar otros servicios tienen el mismo patrón.
+The previous fix closes `granted` if `process_spawn_limited` fails, but there
+are returns after granting some handles and before reaching that call. For
+example, with `caps = system, window`, `SYSTEM` is duplicated and then
+`Denied` is returned if the boot does not include the GUI. That duplicate is
+not released. The error paths when preparing other services follow the same
+pattern.
 
-Reproducción QEMU: un manifiesto `review_window` que pide `system, window`,
-arranque `qemu_exit shell`, `repeat 300 run review_window` y después
-`run hello_app 7`. No se necesita un ELF para el primer nombre: la denegación
-ocurre antes de intentar cargarlo.
+QEMU reproduction: a `review_window` manifest requesting `system, window`,
+boot `qemu_exit shell`, `repeat 300 run review_window` and then
+`run hello_app 7`. No ELF is needed for the first name: the denial happens
+before trying to load it.
 
-Resultado observado: tras las denegaciones aparece `el broker no pudo lanzarlo`
-y `hello_app` ya no llega a ejecutarse. El escenario falla la expectativa de
-su salida correcta.
+Observed result: after the denials, `the broker could not launch it` appears
+and `hello_app` no longer runs. The scenario fails the expectation of its
+successful output.
 
-Impacto: las denegaciones consumen la tabla de handles de init hasta impedir
-otros lanzamientos. La regresión existente `repeat 300 run no-existe` no cubre
-esta ruta: sus errores sí llegan a la limpieza añadida alrededor del spawn.
+Impact: denials exhaust init's handle table until other launches are blocked.
+The existing regression `repeat 300 run no-existe` does not cover this path:
+its errors do reach the cleanup added around the spawn.
 
-Corrección: usar limpieza común o un guard para todos los handles preparados
-durante `launch`, incluidos los retornos por servicios ausentes y fallos al
-duplicar. Desactivar esa limpieza únicamente cuando se haya transferido su
-propiedad. Añadir el caso de denegación tras una concesión parcial.
+Fix: use common cleanup or a guard for all handles prepared during `launch`,
+including returns due to missing services and duplication failures. Disarm
+that cleanup only once ownership has been transferred. Add the case of a
+denial after a partial grant.
 
-## 6. [P2] Wasm accede más allá del tamaño actual de su memoria lineal
+## 6. [P2] Wasm accesses beyond the current size of its linear memory
 
-Código: [libs/wasm/src/lib.rs](../../libs/wasm/src/lib.rs), líneas 907–919;
-afecta también a segmentos de datos, operaciones bulk y memoria entregada al host.
+Code: [libs/wasm/src/lib.rs](../../libs/wasm/src/lib.rs), lines 907–919;
+also affects data segments, bulk operations and memory passed to the host.
 
-`memory_pages` registra el tamaño actual, pero las cargas y escrituras reciben
-el slice completo proporcionado por el anfitrión. En el runner ese buffer tiene
-cuatro páginas, aunque el módulo declare una sola. Un máximo declarado de una
-página no limita estos accesos: solo interviene al ejecutar `memory.grow`.
+`memory_pages` records the current size, but loads and stores receive the
+full slice provided by the host. In the runner that buffer has four pages,
+even if the module declares only one. A declared maximum of one page does
+not limit these accesses: it only applies when executing `memory.grow`.
 
-Reproducción directa: módulo con mínimo y máximo de una página, buffer anfitrión
-de cuatro páginas y `i32.load8_u` en dirección 65536. Con `0x5a` en esa posición,
-devuelve `Ok(90)` en vez de un trap. No se ha observado acceso fuera del slice
-de Rust ni fuera del proceso: se elude el límite de memoria del módulo.
+Direct reproduction: a module with a minimum and maximum of one page, a
+four-page host buffer and `i32.load8_u` at address 65536. With `0x5a` at that
+position, it returns `Ok(90)` instead of a trap. No access outside the Rust
+slice or outside the process was observed: the module's memory limit is
+bypassed.
 
-Corrección: comprobar accesos e inicialización contra
-`memory_pages * PAGE`, reservando la capacidad total del buffer para decidir
-si puede crecer. Entregar también a los imports únicamente la memoria activa.
-La especificación exige trap cuando un acceso supera el tamaño actual de la
-memoria: [WebAssembly Core 1.0](https://webassembly.github.io/spec/versions/core/WebAssembly-1.0.pdf).
+Fix: check accesses and initialization against `memory_pages * PAGE`,
+reserving the total buffer capacity for deciding whether it can grow. Also
+pass only the active memory to imports. The specification requires a trap
+when an access exceeds the current memory size:
+[WebAssembly Core 1.0](https://webassembly.github.io/spec/versions/core/WebAssembly-1.0.pdf).
 
-## 7. [P2] La memoria inicial y la ampliada no se ponen a cero
+## 7. [P2] Initial and grown memory are not zeroed
 
-Código: [libs/wasm/src/lib.rs](../../libs/wasm/src/lib.rs), líneas 496–505
-y 934–936.
+Code: [libs/wasm/src/lib.rs](../../libs/wasm/src/lib.rs), lines 496–505
+and 934–936.
 
-`Instance::new` copia segmentos de datos sin limpiar el resto de la memoria.
-`memory.grow` solo modifica el contador de páginas. Si el buffer anfitrión
-contiene datos de un uso anterior, el módulo los recibe como memoria nueva.
+`Instance::new` copies data segments without clearing the rest of memory.
+`memory.grow` only changes the page counter. If the host buffer contains data
+from a previous use, the module receives it as fresh memory.
 
-Dos pruebas directas con un buffer relleno de `0xaa` devuelven `Ok(170)`:
-una lee el byte 0 tras instanciar y otra lee el primer byte de la página recién
-añadida. Ambas esperan cero. En el runner actual los buffers DMA nuevos se
-inicializan a cero; el defecto está en el contrato reutilizable de la biblioteca
-y se manifiesta al usar memoria preexistente o reutilizarla entre instancias.
+Two direct tests with a buffer filled with `0xaa` return `Ok(170)`: one reads
+byte 0 after instantiation and the other reads the first byte of the newly
+added page. Both expect zero. In the current runner, new DMA buffers are
+zero-initialized; the defect is in the library's reusable contract and shows
+up when using preexisting memory or reusing it across instances.
 
-Corrección: limpiar la memoria activa antes de aplicar los segmentos y poner
-a cero cada región añadida al crecer. Mantener las dos regresiones con buffers
-no vacíos. La inicialización a cero forma parte de la
-[asignación de memoria de WebAssembly](https://webassembly.github.io/spec/core/exec/modules.html#alloc-mem).
+Fix: clear the active memory before applying the segments and zero each
+region added on growth. Keep both regressions with non-empty buffers. Zero
+initialization is part of
+[WebAssembly memory allocation](https://webassembly.github.io/spec/core/exec/modules.html#alloc-mem).
 
-## 8. [P2] La función start se analiza, pero no se ejecuta
+## 8. [P2] The start function is parsed but not executed
 
-Código: [apps/wasm-runner/src/main.rs](../../apps/wasm-runner/src/main.rs),
-líneas 151–160; `Module::parse` conserva el índice en `module.start`.
+Code: [apps/wasm-runner/src/main.rs](../../apps/wasm-runner/src/main.rs),
+lines 151–160; `Module::parse` keeps the index in `module.start`.
 
-Después de crear `Instance`, el runner llama directamente a `main` sin invocar
-`module.start`. La biblioteca tampoco la ejecuta durante la instanciación.
-Un módulo que depende de esa inicialización se acepta y ejecuta con estado
-incorrecto; un trap de su función de inicio también queda ignorado.
+After creating the `Instance`, the runner calls `main` directly without
+invoking `module.start`. The library does not run it during instantiation
+either. A module that depends on that initialization is accepted and runs
+with incorrect state; a trap in its start function is also ignored.
 
-Reproducción directa del mismo flujo: un módulo tiene una global inicializada
-a 0, una función `start` que escribe 42 y una exportación que devuelve la global.
-El resultado es `Ok(0)` en vez de `Ok(42)`.
+Direct reproduction of the same flow: a module has a global initialized to 0,
+a `start` function that writes 42, and an export that returns the global.
+The result is `Ok(0)` instead of `Ok(42)`.
 
-Corrección: ejecutar `start` una sola vez después de inicializar memoria/tablas
-y resolver imports, propagando los traps antes de ejecutar exportaciones; o
-rechazar explícitamente estos módulos mientras no se soporte. La función de
-inicio debe invocarse durante la
-[instanciación de WebAssembly](https://webassembly.github.io/spec/core/exec/modules.html#instantiation).
+Fix: run `start` exactly once after initializing memory/tables and resolving
+imports, propagating traps before running exports; or explicitly reject these
+modules until it is supported. The start function must be invoked during
+[WebAssembly instantiation](https://webassembly.github.io/spec/core/exec/modules.html#instantiation).
 
-## Seguimiento
+## Follow-up
 
-Las dos correcciones de la [auditoría anterior](2026-09-27-sdk-28e745a.md)
-están presentes en esta copia: enumeración que salta huecos y limpieza tras
-fallos del spawn. El hallazgo 5 identifica una ruta anterior al spawn que esas
-correcciones no cubrieron.
+Both fixes from the [previous audit](2026-09-27-sdk-28e745a.md) are present
+in this copy: enumeration that skips gaps, and cleanup after spawn failures.
+Finding 5 identifies a path before the spawn that those fixes did not cover.
 
-Los ocho hallazgos quedan pendientes de corrección y regresión en ramas
-`fix/*`, según [WORKFLOW.md](../WORKFLOW.md). Esta revisión no crea commits,
-no integra ramas y no cambia los archivos de producción del workspace.
+All eight findings remain pending fix and regression in `fix/*` branches,
+per [WORKFLOW.md](../WORKFLOW.md). This review creates no commits, merges no
+branches and does not change the workspace's production files.
 
-## Resolución (rama `fix/audit-e9fdf38`, 2026-09-27)
+## Resolution (branch `fix/audit-e9fdf38`, 2026-09-27)
 
-| # | Estado | Corrección | Regresión |
-|---|--------|------------|-----------|
-| 1 | Corregido | fsd guarda en cada descriptor el endpoint que lo abrió; `Read`, `Write` y `Close` exigen que coincida con el que pregunta (`BadFd` si no). Dos lanzamientos de la misma aplicación comparten directorio y descriptores por diseño (misma identidad). | `sandbox.manifest`: `fs_victim` deja un descriptor abierto con `VICTIM_SECRET`; `fs_probe`, desde otro directorio, exige `BadFd` en lectura, escritura y cierre de los 16 descriptores y que su propio directorio siga funcionando. |
-| 2 | Corregido | `keygen` escribe la semilla con `OpenOptions` (`create_new` + `mode(0o600)`) desde su creación; la clave pública sigue siendo legible. | `keys::tests::keygen_sign_verify_round_trip` comprueba que la semilla no tiene bits de grupo ni de otros. |
-| 3 | Corregido | `confirm_boot_slot` se ejecuta al final de la secuencia, tras red, TCP, HTTP, entrada y GUI; cualquier retorno de error anterior deja el estado pendiente. | `update.no_confirm_on_late_failure`: `init_fail_late` (solo tests, vía cmdline) hace fallar a init justo antes de confirmar; el estado releído sigue `pendiente B (2 intentos)` y no hay confirmación. |
-| 4 | Corregido | Si no se puede persistir el intento de un slot pendiente, AriBoot no lo arranca: `aricode-ab::unpersisted` vuelve al activo conservando el pendiente. | `update.readonly_no_pending_boot` (`disk_readonly = true`, nuevo campo de escenario): con B pendiente y disco de solo lectura arranca A. |
-| 5 | Corregido | `Granted` (guard con `Drop`) cierra todos los duplicados preparados en `launch` salvo que `take` los haya entregado al kernel; cubre las denegaciones por servicios ausentes y los fallos al duplicar. | `sandbox.manifest`: `repeat 300 run win_probe` (manifiesto `system, window` sin GUI, denegado tras conceder SYSTEM) seguido de `run hello_app 10`, que debe funcionar. |
-| 6 | Corregido | Cargas, almacenamientos, `memory.copy`/`fill`, segmentos de datos y la memoria que ven las importaciones se acotan a `memory_pages * PAGE`; el resto del buffer del anfitrión solo sirve para crecer. | `memory_is_bounded_by_current_pages_not_host_buffer`. |
-| 7 | Corregido | `Instance::new` pone a cero la memoria activa antes de los segmentos de datos y `memory.grow` limpia las páginas nuevas. | `memory_starts_and_grows_zeroed` (buffers rellenos de `0xAA`). |
-| 8 | Corregido | `Instance::start` ejecuta la función `start` (propagando traps); `wasm_runner` la llama antes de `main`. | `start_function_runs_before_exports` (global fijada por `start`; `start` con trap). |
+| # | Status | Fix | Regression |
+|---|--------|-----|------------|
+| 1 | Fixed | fsd stores in each descriptor the endpoint that opened it; `Read`, `Write` and `Close` require it to match the caller (`BadFd` otherwise). Two launches of the same application share directory and descriptors by design (same identity). | `sandbox.manifest`: `fs_victim` leaves a descriptor open with `VICTIM_SECRET`; `fs_probe`, from another directory, requires `BadFd` on read, write and close for all 16 descriptors and that its own directory still works. |
+| 2 | Fixed | `keygen` writes the seed with `OpenOptions` (`create_new` + `mode(0o600)`) from creation; the public key remains readable. | `keys::tests::keygen_sign_verify_round_trip` checks that the seed has no group or other bits. |
+| 3 | Fixed | `confirm_boot_slot` runs at the end of the sequence, after network, TCP, HTTP, input and GUI; any earlier error return leaves the state pending. | `update.no_confirm_on_late_failure`: `init_fail_late` (tests only, via cmdline) makes init fail right before confirming; the re-read state is still `pending B (2 attempts)` and there is no confirmation. |
+| 4 | Fixed | If the attempt for a pending slot cannot be persisted, AriBoot does not boot it: `aricode-ab::unpersisted` falls back to the active slot while keeping the pending one. | `update.readonly_no_pending_boot` (`disk_readonly = true`, new scenario field): with B pending and a read-only disk, A boots. |
+| 5 | Fixed | `Granted` (guard with `Drop`) closes all duplicates prepared in `launch` unless `take` has handed them to the kernel; covers denials due to missing services and duplication failures. | `sandbox.manifest`: `repeat 300 run win_probe` (`system, window` manifest without GUI, denied after granting SYSTEM) followed by `run hello_app 10`, which must work. |
+| 6 | Fixed | Loads, stores, `memory.copy`/`fill`, data segments and the memory seen by imports are bounded to `memory_pages * PAGE`; the rest of the host buffer is only used for growth. | `memory_is_bounded_by_current_pages_not_host_buffer`. |
+| 7 | Fixed | `Instance::new` zeroes the active memory before the data segments, and `memory.grow` clears the new pages. | `memory_starts_and_grows_zeroed` (buffers filled with `0xAA`). |
+| 8 | Fixed | `Instance::start` runs the `start` function (propagating traps); `wasm_runner` calls it before `main`. | `start_function_runs_before_exports` (global set by `start`; `start` with a trap). |

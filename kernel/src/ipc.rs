@@ -1,6 +1,6 @@
-//! IPC por endpoints (Fase 14): colas acotadas de mensajes pequeños con
-//! transferencia de handles, bloqueo con timeout y despertar por cola de
-//! espera. La pieza central del microkernel (sección 23).
+//! Endpoint IPC (Phase 14): bounded queues of small messages with handle
+//! transfer, blocking with timeout and wake-up through wait queues. The
+//! centerpiece of the microkernel (section 23).
 
 use crate::object::ObjectRef;
 use crate::sync::IrqLock;
@@ -13,7 +13,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 pub struct Message {
     pub data: Vec<u8>,
-    /// Capabilities transferidas: ya retiradas del emisor.
+    /// Transferred capabilities: already removed from the sender.
     pub handles: Vec<(ObjectRef, Rights)>,
 }
 
@@ -40,7 +40,7 @@ impl Endpoint {
         }
     }
 
-    /// Mensajes enviados en total (para el benchmark).
+    /// Total messages sent (for the benchmark).
     pub fn sent(&self) -> u64 {
         self.sent.load(Ordering::Relaxed)
     }
@@ -53,10 +53,10 @@ impl Endpoint {
         }
     }
 
-    /// Encola un mensaje construido por `build` solo cuando hay sitio, dentro
-    /// de la sección crítica de la cola: así las capabilities se retiran del
-    /// emisor únicamente si el envío se produce, y un timeout no las toca.
-    /// `build` no debe bloquear (se ejecuta con el lock de la cola tomado).
+    /// Enqueues a message built by `build` only when there is room, inside the
+    /// queue's critical section: capabilities are thus removed from the
+    /// sender only if the send happens, and a timeout leaves them alone.
+    /// `build` must not block (it runs with the queue lock held).
     pub fn send_with(
         &self,
         timeout_ms: u64,
@@ -71,7 +71,7 @@ impl Endpoint {
                 return Err(Error::Timeout);
             }
             let mut q = self.queue.lock();
-            // Otro emisor puede haber ocupado la plaza entre la espera y aquí.
+            // Another sender may have taken the slot between the wait and here.
             if q.len() >= IPC_QUEUE_CAPACITY {
                 continue;
             }
@@ -79,14 +79,14 @@ impl Endpoint {
             drop(q);
             self.sent.fetch_add(1, Ordering::Relaxed);
             self.receivers.wake_one();
-            // Los receptores de varios endpoints (ADR 0020) esperan en una
-            // cola común y vuelven a mirar los suyos.
+            // Receivers on several endpoints (ADR 0020) wait on a shared queue
+            // and re-check their own endpoints.
             ANY_RECEIVERS.wake_all();
             return Ok(());
         }
     }
 
-    /// Saca el mensaje más antiguo sin esperar.
+    /// Takes the oldest message without waiting.
     fn try_receive(&self) -> Option<Message> {
         let msg = self.queue.lock().pop_front()?;
         self.senders.wake_one();
@@ -97,7 +97,7 @@ impl Endpoint {
         !self.queue.lock().is_empty()
     }
 
-    /// Saca el mensaje más antiguo; si no hay espera hasta `timeout_ms`.
+    /// Takes the oldest message; if there is none, waits up to `timeout_ms`.
     pub fn receive(&self, timeout_ms: u64) -> Result<Message, Error> {
         let deadline = Self::deadline(timeout_ms);
         let timed_out = self
@@ -112,11 +112,11 @@ impl Endpoint {
     }
 }
 
-/// Cola de espera de `receive_any`: la despierta cualquier envío.
+/// Wait queue for `receive_any`: woken by any send.
 static ANY_RECEIVERS: WaitQueue = WaitQueue::new();
 
-/// Recibe del primero (por orden) de `endpoints` que tenga mensaje; devuelve
-/// su índice. Espera hasta `timeout_ms` (ADR 0020).
+/// Receives from the first (in order) of `endpoints` that has a message;
+/// returns its index. Waits up to `timeout_ms` (ADR 0020).
 pub fn receive_any(endpoints: &[&Endpoint], timeout_ms: u64) -> Result<(usize, Message), Error> {
     let deadline = Endpoint::deadline(timeout_ms);
     loop {
@@ -125,7 +125,7 @@ pub fn receive_any(endpoints: &[&Endpoint], timeout_ms: u64) -> Result<(usize, M
         if timed_out {
             return Err(Error::Timeout);
         }
-        // Otro receptor puede haberse llevado el mensaje: volver a esperar.
+        // Another receiver may have taken the message: wait again.
         for (i, e) in endpoints.iter().enumerate() {
             if let Some(msg) = e.try_receive() {
                 return Ok((i, msg));
@@ -134,13 +134,12 @@ pub fn receive_any(endpoints: &[&Endpoint], timeout_ms: u64) -> Result<(usize, M
     }
 }
 
-/// Banco de medida (`test=ipc`): un servidor y un cliente de usuario hacen
-/// ping-pong a través de un endpoint creado por el kernel. Mide el round
-/// trip con el TSC. Ver `user/testprogs/src/bin/ipc_{server,client}.rs`.
-/// Autoprueba de correlación (`test=ipc_late`, etapa 1B): una respuesta que
-/// llega después del plazo del cliente nunca se confunde con la de la
-/// petición siguiente, porque cada petición usa su propio endpoint de
-/// respuesta.
+/// Benchmark (`test=ipc`): a user server and client play ping-pong through
+/// an endpoint created by the kernel. Measures the round trip with the TSC.
+/// See `user/testprogs/src/bin/ipc_{server,client}.rs`.
+/// Correlation self-test (`test=ipc_late`, stage 1B): a reply that arrives
+/// after the client's deadline is never mistaken for the reply to the next
+/// request, because each request uses its own reply endpoint.
 pub fn late_reply_selftest() {
     use crate::object::{KernelObject, ObjectKind};
     use crate::user::{process, programs};
@@ -155,28 +154,26 @@ pub fn late_reply_selftest() {
             Rights::READ.union(Rights::WRITE).union(Rights::DUPLICATE),
         )],
     )
-    .expect("servidor");
+    .expect("server");
     let client = process::spawn_with_handles(
         "late_client",
         programs::by_name("late_client").expect("late_client"),
         vec![(ep, Rights::WRITE.union(Rights::DUPLICATE))],
     )
-    .expect("cliente");
+    .expect("client");
     let client_status = process::wait(client);
     let server_status = process::wait(server);
     assert_eq!(
         client_status,
         process::ExitStatus::Exited(0),
-        "cliente: {client_status:?}"
+        "client: {client_status:?}"
     );
     assert_eq!(
         server_status,
         process::ExitStatus::Exited(0),
-        "servidor: {server_status:?}"
+        "server: {server_status:?}"
     );
-    log::info!(
-        "ipc late reply selftest ok (plazo vencido, respuesta tardia descartada, sin confusion)"
-    );
+    log::info!("ipc late reply selftest ok (deadline expired, late reply discarded, no mix-up)");
 }
 
 pub fn selftest() {
@@ -186,23 +183,23 @@ pub fn selftest() {
 
     let ep = KernelObject::new(ObjectKind::Endpoint(Endpoint::new()));
     let server_rights = Rights::READ.union(Rights::WRITE).union(Rights::DUPLICATE);
-    let client_rights = Rights::WRITE.union(Rights::DUPLICATE); // sin READ: no puede recibir
+    let client_rights = Rights::WRITE.union(Rights::DUPLICATE); // no READ: cannot receive
     let server = process::spawn_with_handles(
         "ipc_server",
         programs::by_name("ipc_server").expect("ipc_server"),
         vec![(ep.clone(), server_rights)],
     )
-    .expect("servidor");
-    // SAFETY: rdtsc solo lee el contador de tiempo.
+    .expect("server");
+    // SAFETY: rdtsc only reads the time stamp counter.
     let t0 = unsafe { core::arch::x86_64::_rdtsc() };
     let client = process::spawn_with_handles(
         "ipc_client",
         programs::by_name("ipc_client").expect("ipc_client"),
         vec![(ep.clone(), client_rights)],
     )
-    .expect("cliente");
+    .expect("client");
     let client_status = process::wait(client);
-    // SAFETY: ídem.
+    // SAFETY: same as above.
     let t1 = unsafe { core::arch::x86_64::_rdtsc() };
     let server_status = process::wait(server);
     let sent = match &ep.kind {
@@ -212,16 +209,16 @@ pub fn selftest() {
     assert_eq!(
         client_status,
         process::ExitStatus::Exited(0),
-        "cliente: {client_status:?}"
+        "client: {client_status:?}"
     );
     assert_eq!(
         server_status,
         process::ExitStatus::Exited(0),
-        "servidor: {server_status:?}"
+        "server: {server_status:?}"
     );
-    let round_trips = sent.saturating_sub(1); // el "quit" no cuenta
+    let round_trips = sent.saturating_sub(1); // the "quit" does not count
     log::info!(
-        "ipc selftest ok: {round_trips} round trips, {} ciclos TSC por round trip (incluye crear el cliente)",
+        "ipc selftest ok: {round_trips} round trips, {} TSC cycles per round trip (includes creating the client)",
         (t1 - t0) / round_trips.max(1)
     );
 }

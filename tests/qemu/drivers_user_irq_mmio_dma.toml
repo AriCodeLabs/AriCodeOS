@@ -1,8 +1,8 @@
-# Fase 16: un driver de usuario atiende IRQ0 del PIT por una capability IRQ,
-# reserva y mapea un buffer DMA, y otro pinta el framebuffer por una
-# capability MMIO. El kernel verifica el pixel pintado.
+# Phase 16: a user-space driver services PIT IRQ0 through an IRQ capability,
+# allocates and maps a DMA buffer, and another one paints the framebuffer through an
+# MMIO capability. The kernel checks the painted pixel.
 name = "drivers.user_irq_mmio_dma"
-description = "test=drivers: IRQ, DMA y MMIO desde ring 3 con capabilities"
+description = "test=drivers: IRQ, DMA and MMIO from ring 3 with capabilities"
 level = "full"
 areas = ["drivers", "user"]
 cmdline = "qemu_exit test=drivers"
@@ -10,5 +10,5 @@ timeout_secs = 40
 
 [expect]
 exit = 33
-serial_contains = ["drivers selftest ok (IRQ0 atendida en ring 3", "framebuffer pintado desde ring 3)", "ARICODEOS_KERNEL_READY"]
-serial_absent = ["KERNEL PANIC", "USER FAULT", "sin linea registrada"]
+serial_contains = ["drivers selftest ok (IRQ0 serviced in ring 3", "framebuffer painted from ring 3)", "ARICODEOS_KERNEL_READY"]
+serial_absent = ["KERNEL PANIC", "USER FAULT", "has no registered line"]

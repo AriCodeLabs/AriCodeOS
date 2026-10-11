@@ -1,29 +1,26 @@
-//! Allocator de frames físicos de 4 KiB por bitmap (Fase 5).
+//! Bitmap allocator of 4 KiB physical frames (Phase 5).
 //!
-//! Un bit por frame, 1 = ocupado. El almacenamiento del bitmap lo aporta el
-//! llamador (en el kernel, una región libre del mapa UEFI), así que la crate
-//! no necesita `alloc` y se prueba en host con un `Vec<u64>`.
+//! One bit per frame, 1 = used. The bitmap storage is provided by the
+//! caller (in the kernel, a free region of the UEFI map), so the crate
+//! needs no `alloc` and is tested on the host with a `Vec<u64>`.
 //!
-//! Política: todo empieza ocupado; el kernel libera explícitamente las
-//! regiones `Free` del mapa y vuelve a reservar lo que no debe entregarse
-//! (frame 0, memoria baja, el propio bitmap).
+//! Policy: everything starts used; the kernel explicitly frees the
+//! `Free` regions of the map and reserves again what must not be handed out
+//! (frame 0, low memory, the bitmap itself).
 
 #![no_std]
 
 pub const FRAME_SIZE: u64 = 4096;
 
-/// Un frame físico, identificado por su dirección base (múltiplo de 4 KiB).
+/// A physical frame, identified by its base address (a multiple of 4 KiB).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Frame(u64);
 
 impl Frame {
     /// # Panics
-    /// Si `addr` no está alineado a frame.
+    /// If `addr` is not frame aligned.
     pub const fn from_addr(addr: u64) -> Self {
-        assert!(
-            addr.is_multiple_of(FRAME_SIZE),
-            "direccion no alineada a frame"
-        );
+        assert!(addr.is_multiple_of(FRAME_SIZE), "address not frame aligned");
         Frame(addr)
     }
     pub const fn containing(addr: u64) -> Self {
@@ -42,23 +39,23 @@ impl Frame {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PmmError {
-    /// El frame no pertenece al rango administrado.
+    /// The frame is outside the managed range.
     OutOfRange,
-    /// El frame ya estaba libre.
+    /// The frame was already free.
     DoubleFree,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Stats {
-    /// Frames direccionables (tamaño del bitmap, huecos incluidos).
+    /// Addressable frames (bitmap size, holes included).
     pub total_frames: usize,
-    /// Frames de RAM entregados al asignador con `free_range`.
+    /// RAM frames handed to the allocator with `free_range`.
     pub usable_frames: usize,
     pub free_frames: usize,
 }
 
 impl Stats {
-    /// Frames de RAM utilizable ocupados ahora mismo.
+    /// Usable RAM frames currently in use.
     pub const fn used_frames(&self) -> usize {
         self.usable_frames - self.free_frames
     }
@@ -71,37 +68,34 @@ impl Stats {
 }
 
 pub struct BitmapAllocator<'a> {
-    /// 1 = ocupado. Los bits más allá de `frames` están siempre a 1.
+    /// 1 = used. Bits beyond `frames` are always 1.
     bits: &'a mut [u64],
     frames: usize,
-    /// Frames de RAM entregados con `free_range` (para estadísticas).
+    /// RAM frames handed over with `free_range` (for statistics).
     usable: usize,
     free: usize,
-    /// Primer word que puede contener un bit libre (heurística, nunca mayor
-    /// que el verdadero primero).
+    /// First word that may contain a free bit (heuristic, never greater
+    /// than the real first one).
     hint: usize,
 }
 
 impl<'a> BitmapAllocator<'a> {
-    /// Palabras de 64 bits necesarias para `frames` frames.
+    /// 64-bit words needed for `frames` frames.
     pub const fn words_for(frames: usize) -> usize {
         frames.div_ceil(64)
     }
 
-    /// Bytes necesarios para el bitmap de `frames` frames.
+    /// Bytes needed for the bitmap of `frames` frames.
     pub const fn bytes_for(frames: usize) -> usize {
         Self::words_for(frames) * 8
     }
 
-    /// Administra los frames `0..frames`, todos marcados como ocupados.
+    /// Manages frames `0..frames`, all marked as used.
     ///
     /// # Panics
-    /// Si `bits` es demasiado pequeño.
+    /// If `bits` is too small.
     pub fn new(bits: &'a mut [u64], frames: usize) -> Self {
-        assert!(
-            bits.len() >= Self::words_for(frames),
-            "bitmap demasiado pequeno"
-        );
+        assert!(bits.len() >= Self::words_for(frames), "bitmap too small");
         bits.fill(u64::MAX);
         Self {
             bits,
@@ -150,14 +144,14 @@ impl<'a> BitmapAllocator<'a> {
         }
     }
 
-    /// Marca como libres los frames contenidos por completo en `[start, end)`.
-    /// Los frames parciales de los bordes quedan ocupados. Fuera de rango se ignora.
+    /// Marks as free the frames fully contained in `[start, end)`.
+    /// Partial frames at the edges stay used. Anything out of range is ignored.
     pub fn free_range(&mut self, start: u64, end: u64) {
         if end <= start {
             return;
         }
         let first = start.div_ceil(FRAME_SIZE) as usize;
-        let last = (end / FRAME_SIZE) as usize; // exclusivo
+        let last = (end / FRAME_SIZE) as usize; // exclusive
         for n in first..last.min(self.frames) {
             if self.get(n) {
                 self.usable += 1;
@@ -166,7 +160,7 @@ impl<'a> BitmapAllocator<'a> {
         }
     }
 
-    /// Marca como ocupados todos los frames que tocan `[start, end)`.
+    /// Marks as used every frame touching `[start, end)`.
     pub fn reserve_range(&mut self, start: u64, end: u64) {
         if end <= start {
             return;
@@ -182,7 +176,7 @@ impl<'a> BitmapAllocator<'a> {
         self.in_range(f) && !self.get(f.number() as usize)
     }
 
-    /// Entrega el frame libre más bajo.
+    /// Hands out the lowest free frame.
     pub fn allocate(&mut self) -> Option<Frame> {
         let words = self.bits.len();
         for w in self.hint..words {
@@ -201,9 +195,9 @@ impl<'a> BitmapAllocator<'a> {
         None
     }
 
-    /// `count` frames consecutivos cuyo primero está alineado a `align_frames`
-    /// (potencia de dos, >= 1). Búsqueda lineal: para reservas grandes y raras
-    /// (DMA, tablas iniciales), no para la ruta rápida.
+    /// `count` consecutive frames whose first one is aligned to `align_frames`
+    /// (a power of two, >= 1). Linear search: for large, rare allocations
+    /// (DMA, initial tables), not for the fast path.
     pub fn allocate_contiguous(&mut self, count: usize, align_frames: usize) -> Option<Frame> {
         assert!(count > 0 && align_frames.is_power_of_two());
         let mut start = self.hint * 64;
@@ -234,7 +228,7 @@ impl<'a> BitmapAllocator<'a> {
         Ok(())
     }
 
-    /// Libera `count` frames consecutivos desde `first`.
+    /// Frees `count` consecutive frames starting at `first`.
     pub fn free_contiguous(&mut self, first: Frame, count: usize) -> Result<(), PmmError> {
         for i in 0..count as u64 {
             self.free(Frame::from_number(first.number() + i))?;
@@ -260,12 +254,12 @@ mod tests {
         let mut p = BitmapAllocator::new(&mut bits, n);
         assert_eq!(p.stats().free_frames, 0);
         assert!(p.allocate().is_none());
-        // [0x1800, 0x8800): frames completos 2..=7 (6 frames); bordes parciales fuera.
+        // [0x1800, 0x8800): whole frames 2..=7 (6 frames); partial edges left out.
         p.free_range(0x1800, 0x8800);
         assert_eq!(p.stats().free_frames, 6);
         assert_eq!(p.stats().usable_frames, 6);
         assert_eq!(p.stats().total_frames, 100);
-        // Repetir el rango no cuenta dos veces la RAM utilizable.
+        // Repeating the range does not count usable RAM twice.
         p.free_range(0x1800, 0x8800);
         assert_eq!(p.stats().usable_frames, 6);
         assert!(!p.is_free(Frame::from_number(1)));
@@ -287,7 +281,7 @@ mod tests {
         seen.insert(a);
         seen.insert(b);
         while let Some(f) = p.allocate() {
-            assert!(seen.insert(f), "frame repetido {f:?}");
+            assert!(seen.insert(f), "repeated frame {f:?}");
         }
         assert_eq!(seen.len(), n);
         assert_eq!(p.stats().free_frames, 0);
@@ -302,7 +296,7 @@ mod tests {
         assert!(p.free(f).is_ok());
         assert_eq!(p.free(f), Err(PmmError::DoubleFree));
         assert_eq!(p.free(Frame::from_number(99)), Err(PmmError::OutOfRange));
-        // Tras liberar, el mismo frame vuelve a ser el primero.
+        // After freeing, the same frame is the first one again.
         assert_eq!(p.allocate(), Some(f));
     }
 
@@ -311,12 +305,12 @@ mod tests {
         let (mut bits, n) = pmm(200);
         let mut p = BitmapAllocator::new(&mut bits, n);
         p.free_range(0, 200 * FRAME_SIZE);
-        p.reserve_range(0x1001, 0x2FFF); // toca frames 1 y 2
+        p.reserve_range(0x1001, 0x2FFF); // touches frames 1 and 2
         assert!(p.is_free(Frame::from_number(0)));
         assert!(!p.is_free(Frame::from_number(1)));
         assert!(!p.is_free(Frame::from_number(2)));
         assert!(p.is_free(Frame::from_number(3)));
-        // Agotar los primeros 130 frames mueve el hint; liberar uno bajo lo devuelve.
+        // Exhausting the first 130 frames moves the hint; freeing a low one brings it back.
         let first = p.allocate().unwrap();
         for _ in 0..129 {
             p.allocate().unwrap();
@@ -330,9 +324,9 @@ mod tests {
         let (mut bits, n) = pmm(64);
         let mut p = BitmapAllocator::new(&mut bits, n);
         p.free_range(0, 64 * FRAME_SIZE);
-        p.reserve_range(3 * FRAME_SIZE, 4 * FRAME_SIZE); // hueco en el frame 3
+        p.reserve_range(3 * FRAME_SIZE, 4 * FRAME_SIZE); // hole at frame 3
         let f = p.allocate_contiguous(4, 4).unwrap();
-        assert_eq!(f, Frame::from_number(4), "0..4 tiene el frame 3 ocupado");
+        assert_eq!(f, Frame::from_number(4), "0..4 has frame 3 in use");
         let g = p.allocate_contiguous(2, 1).unwrap();
         assert_eq!(g, Frame::from_number(0));
         assert_eq!(p.stats().used_frames(), 7);
@@ -352,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "demasiado pequeno")]
+    #[should_panic(expected = "too small")]
     fn rejects_small_bitmap() {
         let mut bits = [0u64; 1];
         BitmapAllocator::new(&mut bits, 65);

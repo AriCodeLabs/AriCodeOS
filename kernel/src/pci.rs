@@ -1,6 +1,5 @@
-//! Enumeración PCIe por ECAM (Fase 17) y reclamación de dispositivos para
-//! drivers de usuario (Fase 18): sondeo de BARs, MSI-X y entrega de
-//! capabilities.
+//! PCIe enumeration through ECAM (Phase 17) and device claiming for user
+//! drivers (Phase 18): BAR probing, MSI-X and capability hand-over.
 
 use crate::memory::vmm;
 use crate::object::{KernelObject, ObjectKind, ObjectRef};
@@ -11,7 +10,7 @@ use aricode_pci::{bars, cap_name, capabilities, Address, Bar, Header, CAP_MSI, C
 use aricode_x86_paging::{CACHE_DISABLE, GLOBAL, NO_EXECUTE, WRITABLE, WRITE_THROUGH};
 use log::{info, warn};
 
-/// Ventana virtual del ECAM (hasta 256 MiB: 256 buses).
+/// Virtual ECAM window (up to 256 MiB: 256 buses).
 const ECAM_VIRT: u64 = 0xFFFF_D100_0000_0000;
 const BUS_BYTES: u64 = 1 << 20;
 
@@ -21,19 +20,19 @@ pub struct PciDevice {
     pub header: Header,
     pub bars: Vec<(usize, Bar)>,
     pub capability_ids: Vec<u8>,
-    /// Desplazamiento de la capability MSI-X en el espacio de configuración.
+    /// Offset of the MSI-X capability in configuration space.
     pub msix_cap: Option<u8>,
-    /// Desplazamiento de la capability MSI (se usa si no hay MSI-X).
+    /// Offset of the MSI capability (used if there is no MSI-X).
     pub msi_cap: Option<u8>,
-    /// Objeto de configuración entregado al driver actual: mientras viva
-    /// (algún handle lo referencia) la función está reclamada; cuando el
-    /// driver muere y sus handles desaparecen, init puede reclamarla de nuevo
-    /// para reiniciarlo (etapa 1: recuperación de servicios).
+    /// Configuration object handed to the current driver: while it lives
+    /// (some handle refers to it) the function is claimed; when the driver
+    /// dies and its handles go away, init can claim it again to restart it
+    /// (stage 1: service recovery).
     pub claimed: Option<alloc::sync::Weak<KernelObject>>,
 }
 
 impl PciDevice {
-    /// `true` si un driver vivo tiene la función.
+    /// `true` if a live driver holds the function.
     pub fn is_claimed(&self) -> bool {
         self.claimed.as_ref().is_some_and(|w| w.strong_count() > 0)
     }
@@ -53,21 +52,21 @@ fn config_ptr(ecam: &Ecam, addr: Address, off: u64) -> u64 {
 }
 
 fn read_u32(ecam: &Ecam, addr: Address, off: u64) -> u32 {
-    // SAFETY: dentro de la ventana ECAM mapeada en `init`; acceso alineado.
+    // SAFETY: within the ECAM window mapped in `init`; aligned access.
     unsafe { (config_ptr(ecam, addr, off) as *const u32).read_volatile() }
 }
 
 fn write_u32(ecam: &Ecam, addr: Address, off: u64, v: u32) {
-    // SAFETY: ídem `read_u32`; escritura de configuración del dispositivo.
+    // SAFETY: same as `read_u32`; device configuration write.
     unsafe { (config_ptr(ecam, addr, off) as *mut u32).write_volatile(v) }
 }
 
 fn write_u16(ecam: &Ecam, addr: Address, off: u64, v: u16) {
-    // SAFETY: ídem.
+    // SAFETY: same as above.
     unsafe { (config_ptr(ecam, addr, off) as *mut u16).write_volatile(v) }
 }
 
-/// Copia los 256 bytes de configuración de una función (lecturas de 32 bits).
+/// Copies a function's 256 configuration bytes (32-bit reads).
 fn read_config(ecam: &Ecam, addr: Address) -> [u8; 256] {
     let mut cfg = [0u8; 256];
     for off in (0..256).step_by(4) {
@@ -76,11 +75,11 @@ fn read_config(ecam: &Ecam, addr: Address) -> [u8; 256] {
     cfg
 }
 
-/// Mapea el ECAM y enumera todas las funciones alcanzables. La lista queda
-/// disponible para `pci_claim` a través de la raíz PCI de `init`.
+/// Maps the ECAM and enumerates every reachable function. The list is then
+/// available to `pci_claim` through `init`'s PCI root.
 pub fn init() {
     let Some(entry) = crate::acpi::with(|a| a.mcfg.first().copied()) else {
-        warn!("pci: sin MCFG, enumeracion omitida");
+        warn!("pci: no MCFG, enumeration skipped");
         return;
     };
     let buses = entry.bus_end as u64 - entry.bus_start as u64 + 1;
@@ -92,7 +91,7 @@ pub fn init() {
             WRITABLE | NO_EXECUTE | GLOBAL | CACHE_DISABLE | WRITE_THROUGH,
         )
     })
-    .expect("pci: mapear ECAM");
+    .expect("pci: map ECAM");
     let ecam = Ecam {
         base: entry.base,
         bus_start: entry.bus_start,
@@ -160,7 +159,7 @@ pub fn init() {
             .filter(|n| *n != "?")
             .collect();
         info!(
-            "pci: {} {:04x}:{:04x} clase {:02x}.{:02x} {} ({} BAR{}{})",
+            "pci: {} {:04x}:{:04x} class {:02x}.{:02x} {} ({} BAR{}{})",
             d.address,
             d.header.vendor,
             d.header.device,
@@ -177,7 +176,7 @@ pub fn init() {
         );
     }
     info!(
-        "pci: {} funciones en el segmento {} (ECAM @ {:#x})",
+        "pci: {} functions in segment {} (ECAM @ {:#x})",
         found.len(),
         entry.segment,
         ecam.base
@@ -190,7 +189,7 @@ pub fn count() -> usize {
     DEVICES.lock().len()
 }
 
-/// Funciones de la clase dada (`bus, dispositivo, función`).
+/// Functions of the given class (`bus, device, function`).
 pub fn functions_of_class(class: u8) -> Vec<(u8, u8, u8)> {
     DEVICES
         .lock()
@@ -200,7 +199,7 @@ pub fn functions_of_class(class: u8) -> Vec<(u8, u8, u8)> {
         .collect()
 }
 
-/// Índice de la primera función de la clase dada sin reclamar.
+/// Index of the first unclaimed function of the given class.
 pub fn find_class(class: u8, subclass: u8) -> Option<usize> {
     DEVICES
         .lock()
@@ -208,7 +207,7 @@ pub fn find_class(class: u8, subclass: u8) -> Option<usize> {
         .position(|d| d.header.class == class && d.header.subclass == subclass && !d.is_claimed())
 }
 
-/// Índice de la primera función `vendor:device` sin reclamar.
+/// Index of the first unclaimed `vendor:device` function.
 pub fn find(vendor: u16, device: u16) -> Option<usize> {
     DEVICES
         .lock()
@@ -216,7 +215,7 @@ pub fn find(vendor: u16, device: u16) -> Option<usize> {
         .position(|d| d.header.vendor == vendor && d.header.device == device && !d.is_claimed())
 }
 
-/// Información empaquetada (`aricode_abi::pci_info`) de la función `index`.
+/// Packed information (`aricode_abi::pci_info`) for function `index`.
 pub fn info_packed(index: usize) -> Option<u64> {
     let devs = DEVICES.lock();
     let d = devs.get(index)?;
@@ -231,7 +230,7 @@ pub fn info_packed(index: usize) -> Option<u64> {
     ))
 }
 
-/// Campos extendidos (`aricode_abi::pci_info::pack_ext`) de la función `index`.
+/// Extended fields (`aricode_abi::pci_info::pack_ext`) for function `index`.
 pub fn info_ext_packed(index: usize) -> Option<u64> {
     let devs = DEVICES.lock();
     let d = devs.get(index)?;
@@ -242,7 +241,7 @@ pub fn info_ext_packed(index: usize) -> Option<u64> {
     ))
 }
 
-/// Tamaño de un BAR de memoria por sondeo (escribir unos, leer, restaurar).
+/// Size of a memory BAR by probing (write ones, read, restore).
 fn probe_bar_size(ecam: &Ecam, addr: Address, index: usize, is_64: bool) -> u64 {
     let off = 0x10 + 4 * index as u64;
     let orig_lo = read_u32(ecam, addr, off);
@@ -260,27 +259,27 @@ fn probe_bar_size(ecam: &Ecam, addr: Address, index: usize, is_64: bool) -> u64 
     (!mask).wrapping_add(1)
 }
 
-/// Capabilities de un dispositivo reclamado, en el orden del ABI
+/// Capabilities of a claimed device, in ABI order
 /// (`aricode_abi::nr::PCI_CLAIM`).
 pub struct Claimed {
     pub handles: [Option<(ObjectRef, Rights)>; aricode_abi::PCI_CLAIM_HANDLES],
 }
 
-/// Reclama la función `index` para un driver: habilita memoria y bus master,
-/// sondea los BARs, programa MSI-X (entrada 0) o, sin MSI-X, MSI (ADR 0022)
-/// y construye las capabilities.
+/// Claims function `index` for a driver: enables memory and bus master,
+/// probes the BARs, programs MSI-X (entry 0) or, without MSI-X, MSI
+/// (ADR 0022) and builds the capabilities.
 pub fn claim(index: usize) -> Result<Claimed, &'static str> {
     let ecam_guard = ECAM.lock();
-    let ecam = ecam_guard.as_ref().ok_or("pci: sin ECAM")?;
+    let ecam = ecam_guard.as_ref().ok_or("pci: no ECAM")?;
     let mut devs = DEVICES.lock();
-    let d = devs.get_mut(index).ok_or("pci: indice fuera de rango")?;
+    let d = devs.get_mut(index).ok_or("pci: index out of range")?;
     if d.is_claimed() {
-        return Err("pci: ya reclamado");
+        return Err("pci: already claimed");
     }
     let reclaimed = d.claimed.is_some();
     let addr = d.address;
 
-    // Command: memory space (bit 1) + bus master (bit 2); INTx deshabilitada (bit 10).
+    // Command: memory space (bit 1) + bus master (bit 2); INTx disabled (bit 10).
     let cmd = read_u32(ecam, addr, 0x04);
     write_u32(
         ecam,
@@ -298,7 +297,7 @@ pub fn claim(index: usize) -> Result<Claimed, &'static str> {
         addr.device,
         addr.function,
     ));
-    // 0: espacio de configuración (la página ECAM de la función).
+    // 0: configuration space (the function's ECAM page).
     let cfg_phys = ecam.base + addr.ecam_offset(ecam.bus_start);
     let cfg = KernelObject::new(ObjectKind::Mmio(crate::hw::Region {
         phys: cfg_phys,
@@ -308,12 +307,12 @@ pub fn claim(index: usize) -> Result<Claimed, &'static str> {
     }));
     d.claimed = Some(alloc::sync::Arc::downgrade(&cfg));
     handles[0] = Some((cfg, mmio_rights));
-    // 1: capacidad de hardware (DMA).
+    // 1: hardware capability (DMA).
     handles[1] = Some((
         KernelObject::new(ObjectKind::Hardware),
         Rights::MANAGE.union(Rights::TRANSFER),
     ));
-    // 3..9: BARs de memoria con su tamaño.
+    // 3..9: memory BARs with their size.
     for (bar_index, bar) in &d.bars {
         if let Bar::Memory { address, is_64, .. } = bar {
             let size = probe_bar_size(ecam, addr, *bar_index, *is_64);
@@ -331,7 +330,7 @@ pub fn claim(index: usize) -> Result<Claimed, &'static str> {
             ));
         }
     }
-    // 2: IRQ por MSI-X (entrada 0) o, si la función no tiene MSI-X, por MSI.
+    // 2: IRQ via MSI-X (entry 0) or, if the function has no MSI-X, via MSI.
     let mut irq_kind: Option<&str> = None;
     if let Some(cap) = d.msix_cap {
         let cap = cap as u64;
@@ -345,14 +344,14 @@ pub fn claim(index: usize) -> Result<Claimed, &'static str> {
         if let Some(bar_phys) = bar_phys {
             let table_phys = bar_phys + table_offset;
             let irq = crate::hw::register_msix(table_phys, 0)?;
-            // Habilitar MSI-X (bit 15) sin enmascarar la función (bit 14).
+            // Enable MSI-X (bit 15) without masking the function (bit 14).
             let ctrl = read_u32(ecam, addr, cap) >> 16;
             write_u16(ecam, addr, cap + 2, (ctrl as u16 | 0x8000) & !0x4000);
             handles[2] = Some((
                 irq,
                 Rights::READ.union(Rights::WAIT).union(Rights::TRANSFER),
             ));
-            irq_kind = Some("MSI-X entrada 0");
+            irq_kind = Some("MSI-X entry 0");
         }
     }
     if irq_kind.is_none() {
@@ -371,9 +370,9 @@ pub fn claim(index: usize) -> Result<Claimed, &'static str> {
         d.header.vendor,
         d.header.device,
         if reclaimed {
-            "reclamado de nuevo (el driver anterior murio)"
+            "claimed again (the previous driver died)"
         } else {
-            "reclamado"
+            "claimed"
         },
         irq_kind.map_or("", |_| " ("),
         irq_kind.unwrap_or(""),

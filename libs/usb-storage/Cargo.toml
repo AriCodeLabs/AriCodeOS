@@ -3,6 +3,6 @@ name = "aricode-usb-storage"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Almacenamiento masivo USB: bulk-only transport (CBW/CSW) y comandos SCSI de bloque"
+description = "USB mass storage: bulk-only transport (CBW/CSW) and SCSI block commands"
 
 [dependencies]

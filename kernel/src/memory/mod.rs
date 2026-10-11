@@ -1,4 +1,4 @@
-//! Gestión de memoria del kernel.
+//! Kernel memory management.
 
 pub mod heap;
 pub mod phys;

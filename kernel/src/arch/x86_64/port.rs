@@ -1,16 +1,16 @@
-//! E/S por puertos (`in`/`out`).
+//! Port I/O (`in`/`out`).
 
 use core::arch::asm;
 
 /// # Safety
-/// Escribir en un puerto tiene efectos en hardware; el llamador conoce el dispositivo.
+/// Writing to a port has hardware effects; the caller knows the device.
 #[inline]
 pub unsafe fn outb(port: u16, value: u8) {
     asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags));
 }
 
 /// # Safety
-/// Leer un puerto puede tener efectos secundarios en el dispositivo.
+/// Reading a port may have side effects on the device.
 #[inline]
 pub unsafe fn inb(port: u16) -> u8 {
     let value: u8;
@@ -18,9 +18,9 @@ pub unsafe fn inb(port: u16) -> u8 {
     value
 }
 
-/// Retardo corto clásico: una escritura a un puerto no usado.
+/// Classic short delay: a write to an unused port.
 #[inline]
 pub fn io_wait() {
-    // SAFETY: el puerto 0x80 (POST) no tiene efectos en hardware moderno.
+    // SAFETY: port 0x80 (POST) has no effect on modern hardware.
     unsafe { outb(0x80, 0) };
 }

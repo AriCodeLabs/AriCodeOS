@@ -1,7 +1,7 @@
-# Fase 32: autoprueba SMP con 4 CPUs: afinidad y paralelismo real, migracion
-# de hilos, TLB shootdown observado desde otra CPU y un lock disputado.
+# Phase 32: SMP self-test with 4 CPUs: affinity and real parallelism, thread
+# migration, TLB shootdown observed from another CPU and a contended lock.
 name = "smp.selftest"
-description = "test=smp con -smp 4: afinidad, paralelismo, migracion, TLB shootdown y locks disputados"
+description = "test=smp with -smp 4: affinity, parallelism, migration, TLB shootdown and contended locks"
 level = "full"
 areas = ["smp", "scheduler", "threads"]
 cmdline = "qemu_exit test=smp"
@@ -11,10 +11,10 @@ timeout_secs = 60
 [expect]
 exit = 33
 serial_contains = [
-    "smp: 4 CPUs en linea",
+    "smp: 4 CPUs online",
     "smp selftest ok (4 CPUs:",
-    "shootdown visto por la CPU 1 (3 IPI)",
-    "contador 80000)",
+    "shootdown seen by CPU 1 (3 IPI)",
+    "counter 80000)",
     "ARICODEOS_KERNEL_READY",
 ]
 serial_absent = ["KERNEL PANIC"]

@@ -1,7 +1,7 @@
-//! Gráficos 2D (Fase 26): lienzos de 32 bpp `0x00RRGGBB` sobre buffers del
-//! llamador, recorte, texto con la fuente de la consola, un cursor y el
-//! modelo de escritorio del compositor (ventanas con orden z, foco y
-//! prueba de impacto). Sin `alloc`: todo se prueba en host sobre `Vec<u32>`.
+//! 2D graphics (Phase 26): 32 bpp `0x00RRGGBB` canvases over caller
+//! buffers, clipping, text with the console font, a cursor and the
+//! compositor desktop model (windows with z-order, focus and
+//! hit testing). No `alloc`: everything is tested on the host over `Vec<u32>`.
 
 #![no_std]
 
@@ -51,7 +51,7 @@ impl Rect {
     }
 }
 
-/// Lienzo sobre un buffer ajeno: `stride` píxeles por fila.
+/// Canvas over a borrowed buffer: `stride` pixels per row.
 pub struct Canvas<'a> {
     pub pixels: &'a mut [u32],
     pub width: u32,
@@ -60,7 +60,7 @@ pub struct Canvas<'a> {
 }
 
 impl<'a> Canvas<'a> {
-    /// `None` si el buffer no cubre `height` filas de `stride` píxeles.
+    /// `None` if the buffer does not cover `height` rows of `stride` pixels.
     pub fn new(pixels: &'a mut [u32], width: u32, height: u32, stride: u32) -> Option<Self> {
         if stride < width || (pixels.len() as u64) < stride as u64 * height as u64 {
             return None;
@@ -97,7 +97,7 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    /// Copia `src` con su esquina superior izquierda en `(x, y)`, recortando.
+    /// Copies `src` with its top-left corner at `(x, y)`, clipping.
     pub fn blit(&mut self, src: &Canvas, x: i32, y: i32) {
         let dst_rect = Rect::new(x, y, src.width, src.height).intersect(&self.bounds());
         for dy in 0..dst_rect.h as i32 {
@@ -110,8 +110,8 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    /// Texto con la fuente 8x16 de la consola; `None` en el fondo deja el
-    /// píxel como estaba.
+    /// Text with the console 8x16 font; `None` as background leaves the
+    /// pixel unchanged.
     pub fn text(&mut self, x: i32, y: i32, s: &str, fg: Color, bg: Option<Color>) {
         for (i, ch) in s.bytes().enumerate() {
             let glyph = if (FIRST_CHAR..=LAST_CHAR).contains(&ch) {
@@ -137,7 +137,7 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    /// Dibuja el cursor (flecha de 12x19: 1 = negro, 2 = blanco) en `(x, y)`.
+    /// Draws the cursor (12x19 arrow: `#` = black, `.` = white) at `(x, y)`.
     pub fn cursor(&mut self, x: i32, y: i32) {
         for (row, line) in CURSOR.iter().enumerate() {
             for (col, cell) in line.bytes().enumerate() {
@@ -179,23 +179,23 @@ const CURSOR: [&str; CURSOR_H as usize] = [
     "       ##   ",
 ];
 
-/// Alto de la barra de título y grosor del borde de una ventana.
+/// Title bar height and border thickness of a window.
 pub const TITLE_H: u32 = 20;
 pub const BORDER: u32 = 2;
 pub const MAX_WINDOWS: usize = 8;
 
-/// Colores del escritorio.
+/// Desktop colors.
 pub const DESKTOP_BG: Color = rgb(0x1e, 0x29, 0x3b);
 pub const TITLE_ACTIVE: Color = rgb(0x3b, 0x82, 0xf6);
 pub const TITLE_INACTIVE: Color = rgb(0x64, 0x74, 0x8b);
 pub const TITLE_TEXT: Color = rgb(0xff, 0xff, 0xff);
 
-/// Ventana del escritorio: el contenido lo pinta el cliente en su propio
-/// buffer; aquí solo se guarda su geometría.
+/// Desktop window: the client paints the content in its own
+/// buffer; only its geometry is kept here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Window {
     pub id: u32,
-    /// Rectángulo del contenido (sin marco) en pantalla.
+    /// Content rectangle (without frame) on screen.
     pub content: Rect,
     pub title: [u8; 24],
     pub title_len: u8,
@@ -205,7 +205,7 @@ impl Window {
     pub fn title_str(&self) -> &str {
         core::str::from_utf8(&self.title[..self.title_len as usize]).unwrap_or("?")
     }
-    /// Marco completo: borde y barra de título.
+    /// Full frame: border and title bar.
     pub fn frame(&self) -> Rect {
         Rect::new(
             self.content.x - BORDER as i32,
@@ -216,11 +216,11 @@ impl Window {
     }
 }
 
-/// Qué hay bajo un punto de la pantalla.
+/// What lies under a point of the screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
     Desktop,
-    /// Ventana y coordenadas relativas al contenido (negativas en el marco).
+    /// Window and coordinates relative to the content (negative on the frame).
     Window {
         id: u32,
         x: i32,
@@ -228,12 +228,12 @@ pub enum Hit {
     },
 }
 
-/// Escritorio: hasta `MAX_WINDOWS` ventanas en orden z (la última, encima),
-/// foco y posición del puntero.
+/// Desktop: up to `MAX_WINDOWS` windows in z-order (the last one on top),
+/// focus and pointer position.
 pub struct Desktop {
     pub screen: Rect,
     windows: [Option<Window>; MAX_WINDOWS],
-    /// Orden z: índices de `windows`, del fondo al frente.
+    /// Z-order: indices into `windows`, from back to front.
     order: [u8; MAX_WINDOWS],
     count: usize,
     pub focus: Option<u32>,
@@ -258,8 +258,8 @@ impl Desktop {
         self.count
     }
 
-    /// Crea una ventana en cascada (cada una 40 px más abajo y a la derecha)
-    /// y la pone al frente. `None` si no hay sitio.
+    /// Creates a cascaded window (each one 40 px further down and right)
+    /// and brings it to the front. `None` if there is no room.
     pub fn create(&mut self, w: u32, h: u32, title: &str) -> Option<u32> {
         if self.count == MAX_WINDOWS || w == 0 || h == 0 {
             return None;
@@ -305,14 +305,14 @@ impl Desktop {
         self.windows.iter().flatten().find(|w| w.id == id)
     }
 
-    /// Ventanas del fondo al frente.
+    /// Windows from back to front.
     pub fn iter(&self) -> impl Iterator<Item = &Window> + '_ {
         self.order[..self.count]
             .iter()
             .filter_map(move |&i| self.windows[i as usize].as_ref())
     }
 
-    /// Trae `id` al frente y le da el foco.
+    /// Brings `id` to the front and gives it focus.
     pub fn raise(&mut self, id: u32) {
         if let Some(pos) = (0..self.count)
             .position(|i| self.windows[self.order[i] as usize].is_some_and(|w| w.id == id))
@@ -324,7 +324,7 @@ impl Desktop {
         }
     }
 
-    /// Ventana más alta bajo `(x, y)` (marco incluido).
+    /// Topmost window under `(x, y)` (frame included).
     pub fn hit(&self, x: i32, y: i32) -> Hit {
         for w in self.iter().collect_rev() {
             if w.frame().contains(x, y) {
@@ -338,7 +338,7 @@ impl Desktop {
         Hit::Desktop
     }
 
-    /// Mueve el puntero con un desplazamiento relativo, acotado a la pantalla.
+    /// Moves the pointer by a relative offset, clamped to the screen.
     pub fn move_pointer(&mut self, dx: i32, dy: i32) {
         let (x, y) = self.pointer;
         self.pointer = (
@@ -347,9 +347,9 @@ impl Desktop {
         );
     }
 
-    /// Pinta el escritorio completo en `out`: fondo, marcos, contenidos y el
-    /// cursor. `draw_content(ventana, lienzo)` pinta el contenido de cada
-    /// ventana (normalmente un `blit` de su buffer en `content.x/y`).
+    /// Paints the whole desktop into `out`: background, frames, contents and the
+    /// cursor. `draw_content(window, canvas)` paints the content of each
+    /// window (usually a `blit` of its buffer at `content.x/y`).
     pub fn compose(&self, out: &mut Canvas, mut draw_content: impl FnMut(&Window, &mut Canvas)) {
         out.fill(DESKTOP_BG);
         for w in self.iter() {
@@ -368,7 +368,7 @@ impl Desktop {
     }
 }
 
-/// Recolecta hasta `MAX_WINDOWS` referencias en orden inverso sin `alloc`.
+/// Collects up to `MAX_WINDOWS` references in reverse order without `alloc`.
 trait CollectRev<'a> {
     fn collect_rev(self) -> RevIter<'a>;
 }
@@ -427,24 +427,24 @@ mod tests {
         let mut buf = Vec::new();
         let mut c = canvas(&mut buf, 8, 8);
         c.fill(rgb(1, 2, 3));
-        c.fill_rect(&Rect::new(-2, 6, 4, 10), rgb(9, 9, 9)); // recortado a (0..2, 6..8)
+        c.fill_rect(&Rect::new(-2, 6, 4, 10), rgb(9, 9, 9)); // clipped to (0..2, 6..8)
         assert_eq!(c.get(1, 7), Some(rgb(9, 9, 9)));
         assert_eq!(c.get(2, 7), Some(rgb(1, 2, 3)));
         assert_eq!(c.get(8, 0), None);
         let mut sbuf = vec![rgb(7, 7, 7); 4];
         let src = Canvas::new(&mut sbuf, 2, 2, 2).unwrap();
-        c.blit(&src, 7, 7); // solo el pixel (7,7) cae dentro
+        c.blit(&src, 7, 7); // only pixel (7,7) falls inside
         assert_eq!(c.get(7, 7), Some(rgb(7, 7, 7)));
         assert_eq!(c.get(6, 7), Some(rgb(1, 2, 3)));
-        c.blit(&src, -1, -1); // solo (0,0)
+        c.blit(&src, -1, -1); // only (0,0)
         assert_eq!(c.get(0, 0), Some(rgb(7, 7, 7)));
         assert!(
             Canvas::new(&mut [0u32; 4], 4, 2, 4).is_none(),
-            "buffer corto"
+            "short buffer"
         );
         assert!(
             Canvas::new(&mut [0u32; 8], 4, 2, 2).is_none(),
-            "stride menor que el ancho"
+            "stride smaller than width"
         );
     }
 
@@ -456,7 +456,7 @@ mod tests {
         c.text(0, 0, "Hi", rgb(255, 255, 255), None);
         let lit = buf.iter().filter(|&&p| p != 0).count();
         assert!(lit > 10 && lit < 2 * 8 * 16);
-        // Texto parcialmente fuera no entra en panico.
+        // Partially outside text does not panic.
         let mut c = canvas(&mut buf, 40, 20);
         c.text(36, 10, "xyz", 1, Some(2));
         c.cursor(35, 15);
@@ -473,7 +473,7 @@ mod tests {
         let wb = *d.get(b).unwrap();
         assert_eq!(wa.content, Rect::new(40, 60, 200, 100));
         assert_eq!(wb.content, Rect::new(80, 100, 200, 100));
-        // B esta encima en la zona solapada.
+        // B is on top in the overlapping area.
         assert_eq!(
             d.hit(100, 120),
             Hit::Window {
@@ -491,7 +491,7 @@ mod tests {
             }
         );
         assert_eq!(d.hit(600, 400), Hit::Desktop);
-        // Clic en la barra de titulo de A: coordenadas negativas, y A sube.
+        // Click on A's title bar: negative coordinates, and A is raised.
         assert_eq!(
             d.hit(50, 45),
             Hit::Window {
@@ -547,7 +547,7 @@ mod tests {
             screen.get(wb.content.x + 1, wb.content.y + 1),
             Some(rgb(0, 0, 255))
         );
-        // En el solape gana B.
+        // B wins in the overlap.
         assert_eq!(
             screen.get(wb.content.x + 1, wb.content.y + 1),
             Some(rgb(0, 0, 255))
@@ -556,7 +556,7 @@ mod tests {
             screen.get(wa.content.x + 90, wa.content.y + 50),
             Some(rgb(0, 0, 255))
         );
-        // Barra de titulo de B activa, la de A inactiva; fondo fuera.
+        // B's title bar active, A's inactive; background outside.
         assert_eq!(
             screen.get(wb.content.x + 90, wb.content.y - 5),
             Some(TITLE_ACTIVE)
@@ -566,6 +566,6 @@ mod tests {
             Some(TITLE_INACTIVE)
         );
         assert_eq!(screen.get(300, 230), Some(DESKTOP_BG));
-        assert_eq!(screen.get(5, 5), Some(rgb(0, 0, 0)), "punta del cursor");
+        assert_eq!(screen.get(5, 5), Some(rgb(0, 0, 0)), "cursor tip");
     }
 }

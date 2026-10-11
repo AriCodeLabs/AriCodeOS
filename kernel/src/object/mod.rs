@@ -1,6 +1,6 @@
-//! Objetos del kernel (Fase 12) con revocación (Fase 13). Las aplicaciones
-//! solo los alcanzan por handles con derechos (`libs/handles`); nunca por
-//! punteros ni por identificadores globales.
+//! Kernel objects (Phase 12) with revocation (Phase 13). Applications only
+//! reach them through handles with rights (`libs/handles`); never through
+//! pointers or global identifiers.
 
 use crate::user::process::Pid;
 use alloc::sync::Arc;
@@ -14,22 +14,22 @@ pub enum ObjectKind {
     Process(Pid),
     Console,
     Endpoint(crate::ipc::Endpoint),
-    /// Capacidad de crear procesos desde el initrd.
+    /// Capability to create processes from the initrd.
     Spawner,
     Irq(crate::hw::IrqLine),
     Mmio(crate::hw::Region),
     Dma(crate::hw::DmaBuffer),
-    /// Capacidad de reservar recursos de hardware (buffers DMA).
+    /// Capability to reserve hardware resources (DMA buffers).
     Hardware,
-    /// Raíz PCI: enumerar y reclamar dispositivos.
+    /// PCI root: enumerate and claim devices.
     PciRoot,
-    /// Estado del sistema: información (`READ`) y apagado/reinicio (`MANAGE`).
+    /// System state: information (`READ`) and shutdown/reboot (`MANAGE`).
     System,
 }
 
-/// Objeto compartido por todos los handles que lo referencian. Revocarlo
-/// invalida cada uno de esos handles a la vez, en todos los procesos, sin
-/// tener que encontrarlos (sección 25: lifetime y revocación).
+/// Object shared by every handle that refers to it. Revoking it invalidates
+/// all of those handles at once, in every process, without having to find
+/// them (section 25: lifetime and revocation).
 pub struct KernelObject {
     pub kind: ObjectKind,
     revoked: AtomicBool,
@@ -43,8 +43,8 @@ impl KernelObject {
         })
     }
 
-    /// Identificador informativo del objeto (tid, pid). No da acceso: solo
-    /// el handle lo da.
+    /// Informational object identifier (tid, pid). It grants no access: only
+    /// the handle does.
     pub fn id(&self) -> u64 {
         match self.kind {
             ObjectKind::Thread(t) => t.0 as u64,
@@ -82,11 +82,11 @@ impl KernelObject {
 pub type ObjectRef = Arc<KernelObject>;
 pub type Handles = HandleTable<ObjectRef>;
 
-/// Handles por proceso (sección 52: límite de recursos).
+/// Handles per process (section 52: resource limits).
 pub const HANDLE_LIMIT: usize = 256;
 
-/// Tabla inicial de un proceso: él mismo, su hilo principal y la consola,
-/// en ese orden, para que coincidan con `aricode_abi::handle`.
+/// Initial table of a process: itself, its main thread and the console, in
+/// that order, so they match `aricode_abi::handle`.
 pub fn initial_table(pid: Pid, main_thread: Tid) -> Handles {
     let mut t = HandleTable::new(HANDLE_LIMIT);
     let self_h = t
@@ -94,26 +94,26 @@ pub fn initial_table(pid: Pid, main_thread: Tid) -> Handles {
             KernelObject::new(ObjectKind::Process(pid)),
             Rights::MANAGE.union(Rights::READ).union(Rights::DUPLICATE),
         )
-        .expect("tabla vacia");
+        .expect("empty table");
     let thread_h = t
         .insert(
             KernelObject::new(ObjectKind::Thread(main_thread)),
             Rights::READ.union(Rights::WAIT).union(Rights::DUPLICATE),
         )
-        .expect("tabla vacia");
+        .expect("empty table");
     let console_h = t
         .insert(
             KernelObject::new(ObjectKind::Console),
             Rights::WRITE.union(Rights::DUPLICATE),
         )
-        .expect("tabla vacia");
+        .expect("empty table");
     debug_assert_eq!(self_h, Handle(aricode_abi::handle::SELF_PROCESS));
     debug_assert_eq!(thread_h, Handle(aricode_abi::handle::MAIN_THREAD));
     debug_assert_eq!(console_h, Handle(aricode_abi::handle::CONSOLE));
     t
 }
 
-/// Objeto de un handle que posee `required` y no está revocado.
+/// Object behind a handle that holds `required` and is not revoked.
 pub fn lookup(
     t: &Handles,
     handle: Handle,
@@ -126,7 +126,7 @@ pub fn lookup(
     Ok(obj)
 }
 
-/// Traduce errores de la tabla a errores del ABI.
+/// Translates table errors into ABI errors.
 pub fn abi_error(e: HandleError) -> aricode_abi::Error {
     match e {
         HandleError::BadHandle => aricode_abi::Error::BadHandle,

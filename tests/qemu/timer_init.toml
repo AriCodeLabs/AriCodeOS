@@ -1,10 +1,10 @@
 name = "timer.init"
-description = "PIC enmascarado, LAPIC habilitado, timer calibrado a 100 Hz, interrupciones activas"
+description = "PIC masked, LAPIC enabled, timer calibrated to 100 Hz, interrupts enabled"
 level = "smoke"
 areas = ["timer", "interrupts"]
 cmdline = "qemu_exit"
 
 [expect]
 exit = 33
-serial_contains = ["[INFO ] apic: lapic id 0 version", "tick 100 Hz", "[INFO ] interrupciones habilitadas", "ARICODEOS_KERNEL_READY"]
+serial_contains = ["[INFO ] apic: lapic id 0 version", "tick 100 Hz", "[INFO ] interrupts enabled", "ARICODEOS_KERNEL_READY"]
 serial_absent = ["KERNEL PANIC", "interrupcion inesperada"]

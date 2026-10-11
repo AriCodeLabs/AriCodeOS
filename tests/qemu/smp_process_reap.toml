@@ -1,17 +1,17 @@
-# Auditoria 3eb4965, hallazgo 1: con varias CPUs, la CPU que espera podia
-# retirar el proceso antes de que la que lo recogia liberase su espacio, y
-# los frames se perdian. Lotes de procesos en 4 CPUs con recuento de frames.
+# Audit 3eb4965, finding 1: with several CPUs, the waiting CPU could
+# retire the process before the reaping CPU had freed its address space, and
+# frames were leaked. Batches of processes on 4 CPUs with frame accounting.
 name = "smp.process_reap"
-description = "test=process_reap con -smp 4: recogida y espera en CPUs distintas sin perder frames"
+description = "test=process_reap with -smp 4: reap and wait on different CPUs without leaking frames"
 level = "full"
 areas = ["smp", "user", "memory"]
 cmdline = "qemu_exit test=process_reap"
 cpus = 4
-# 180 procesos con la consola de pantalla haciendo scroll: entre 20 y 50 s en
-# TCG segun la carga del anfitrion.
+# 180 processes with the screen console scrolling: between 20 and 50 s under
+# TCG depending on host load.
 timeout_secs = 120
 
 [expect]
 exit = 33
-serial_contains = ["smp: 4 CPUs en linea", "process reap selftest ok (180 procesos creados y esperados en 4 CPU(s)", "ARICODEOS_KERNEL_READY"]
+serial_contains = ["smp: 4 CPUs online", "process reap selftest ok (180 processes created and waited for on 4 CPU(s)", "ARICODEOS_KERNEL_READY"]
 serial_absent = ["KERNEL PANIC", "frames perdidos"]

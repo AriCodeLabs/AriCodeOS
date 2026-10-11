@@ -3,7 +3,7 @@ name = "ari-rtl-net"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Driver Realtek r8169 (RTL8169/8168/8101) en ring 3 y servicio de red sobre ari-net-core"
+description = "Ring 3 Realtek r8169 (RTL8169/8168/8101) driver and network service on top of ari-net-core"
 
 [[bin]]
 name = "rtl_net"

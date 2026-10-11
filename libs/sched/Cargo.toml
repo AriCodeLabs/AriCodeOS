@@ -3,7 +3,7 @@ name = "aricode-sched"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Política de planificación round robin sobre identificadores de hilo (no_std + alloc)"
+description = "Round-robin scheduling policy over thread identifiers (no_std + alloc)"
 
 [lib]
 path = "src/lib.rs"

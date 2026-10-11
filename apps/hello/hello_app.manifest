@@ -1,4 +1,4 @@
-# Aplicacion de ejemplo del SDK: reloj del sistema y un directorio privado.
+# SDK sample app: system clock and a private directory.
 name = hello_app
 caps = system, fs
 memory = 128K

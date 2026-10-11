@@ -1,9 +1,9 @@
-# Auditoria e9fdf38, hallazgo 3: init solo confirma el slot pendiente cuando
-# todos los servicios de arranque han funcionado. Con `init_fail_late` init
-# falla al final: el estado debe seguir pendiente (2 intentos, uno consumido
-# por AriBoot) y no aparecer ninguna confirmacion.
+# Audit e9fdf38, finding 3: init only confirms the pending slot when
+# all boot services have worked. With `init_fail_late` init
+# fails at the end: the state must stay pending (2 attempts, one consumed
+# by AriBoot) and no confirmation must appear.
 name = "update.no_confirm_on_late_failure"
-description = "un fallo tardio de init no confirma el slot pendiente"
+description = "a late init failure does not confirm the pending slot"
 level = "full"
 areas = ["update", "init"]
 cmdline = "qemu_exit init_fail_late"
@@ -12,10 +12,10 @@ disk = "pending-b"
 [expect]
 exit = 33
 serial_contains = [
-    "slots: arrancando desde el slot B (imagen version 2, pendiente de confirmacion)",
-    "AriInit: fallo tardio provocado (init_fail_late): no se confirma el slot",
-    "AriInit: estado de arranque: activo A, pendiente B (2 intentos)",
-    "init terminado con codigo 99",
+    "slots: booting from slot B (image version 2, pending confirmation)",
+    "AriInit: induced late failure (init_fail_late): slot not confirmed",
+    "AriInit: boot state: active A, pending B (2 tries)",
+    "init exited with code 99",
     "ARICODEOS_KERNEL_READY",
 ]
-serial_absent = ["KERNEL PANIC", "arranque confirmado"]
+serial_absent = ["KERNEL PANIC", "boot confirmed"]

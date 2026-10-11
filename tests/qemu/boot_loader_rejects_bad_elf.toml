@@ -1,11 +1,11 @@
-# Fault injection: kernel.elf truncado. AriBoot debe rechazarlo y terminar con fallo.
+# Fault injection: truncated kernel.elf. AriBoot must reject it and exit with failure.
 name = "boot.loader_rejects_bad_elf"
-description = "kernel.elf truncado -> AriBoot reporta ELF invalido, sin saltar"
+description = "truncated kernel.elf -> AriBoot reports an invalid ELF, without jumping"
 level = "full"
 areas = ["boot"]
 cmdline = "qemu_exit"
 
-# Sin slots: estos escenarios prueban el camino de la ESP.
+# No slots: these scenarios exercise the ESP path.
 disk = "esp-only"
 
 [inject]
@@ -13,5 +13,5 @@ truncate_kernel = 3000
 
 [expect]
 exit = 35
-serial_contains = ["kernel.elf: ELF64 invalido"]
+serial_contains = ["kernel.elf: invalid ELF64"]
 serial_absent = ["AriCodeOS booting...", "ARICODEOS_KERNEL_READY"]

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Ejecuta las regresiones de la revisión HTTP; se esperan fallos en 0be8fc1.
+"""Run the HTTP review regressions; failures are expected at 0be8fc1.
 
-Solo compila y prueba en host. Sustituye NetClient por un transporte simulado
-y carga el módulo HTTP original, sin modificar archivos de producción.
+Builds and tests on the host only. Replaces NetClient with a simulated transport
+and loads the original HTTP module, without modifying production files.
 """
 
 from pathlib import Path
@@ -18,7 +18,7 @@ def main():
     (project / "src").mkdir(parents=True, exist_ok=True)
     cargo = os.environ.get("CARGO") or shutil.which("cargo")
     if not cargo:
-        raise SystemExit("cargo no está disponible")
+        raise SystemExit("cargo is not available")
 
     manifest = [
         '[package]',
@@ -50,7 +50,7 @@ def main():
             result = subprocess.run(
                 command, cwd=root, stdout=output, stderr=subprocess.STDOUT
             )
-        print(f"{profile}: código {result.returncode}; {log}")
+        print(f"{profile}: exit code {result.returncode}; {log}")
         failed |= result.returncode != 0
     return int(failed)
 

@@ -1,5 +1,5 @@
-//! Cliente HTTP GET sobre `NetClient` (Fase 24): resuelve, conecta y delega
-//! toda la lógica HTTP en `aricode-http`, que se prueba en host.
+//! HTTP GET client over `NetClient` (Phase 24): resolves, connects and
+//! delegates all HTTP logic to `aricode-http`, which is tested on the host.
 
 use crate::net::{NetClient, NetError};
 pub use aricode_http::Fetched;
@@ -11,15 +11,15 @@ pub enum HttpError {
     Resolve(NetError),
     Connect(NetError),
     Io(NetError),
-    /// La respuesta no es HTTP, está truncada o su framing es inválido.
+    /// The response is not HTTP, is truncated or has invalid framing.
     Malformed,
-    /// Cabeceras o cuerpo no caben en el buffer del llamador.
+    /// Headers or body do not fit in the caller's buffer.
     TooBig,
-    /// Codificación o cambio de protocolo que no se soporta.
+    /// Unsupported encoding or protocol switch.
     Unsupported,
 }
 
-/// Conexión TCP de netd vista como transporte HTTP.
+/// netd TCP connection seen as an HTTP transport.
 struct Stream<'a> {
     net: &'a mut NetClient,
     sock: u16,
@@ -36,7 +36,7 @@ impl Transport for Stream<'_> {
     }
 }
 
-/// Descarga `url` (IP literal o nombre resuelto por netd) en `out`.
+/// Downloads `url` (literal IP or name resolved by netd) into `out`.
 pub fn get(
     net: &mut NetClient,
     url: &str,

@@ -1,5 +1,5 @@
-//! Cliente del broker de lanzamiento (`aricode-proto::launch`): pedir a init
-//! que ejecute un programa del initrd con las capabilities de su manifiesto.
+//! Launch broker client (`aricode-proto::launch`): asks init to run an
+//! initrd program with the capabilities from its manifest.
 
 use crate::{rpc, Error, Handle, TIMEOUT_INFINITE};
 pub use aricode_proto::launch::Status;
@@ -9,14 +9,14 @@ use aricode_proto::launch::{Reply, Request};
 pub enum LaunchError {
     Ipc(Error),
     Status(Status),
-    /// Nombre vacío o demasiado largo.
+    /// Empty or too long name.
     BadName,
 }
 
-/// Ejecuta `name` con `arg` a través del broker y devuelve su código de salida.
+/// Runs `name` with `arg` through the broker and returns its exit code.
 pub fn run(broker: Handle, name: &str, arg: u64) -> Result<u64, LaunchError> {
     let req = Request::new(name, arg).ok_or(LaunchError::BadName)?;
-    // La respuesta es la salida del programa: la unica espera sin plazo.
+    // The reply is the program's exit: the only unbounded wait.
     let mut msg = [0u8; Reply::LEN];
     let len = rpc::call(
         broker,
@@ -34,8 +34,9 @@ pub fn run(broker: Handle, name: &str, arg: u64) -> Result<u64, LaunchError> {
     }
 }
 
-/// Lanza `name` con `arg` en segundo plano: vuelve en cuanto el broker ha
-/// creado el proceso (ADR 0015). No hay forma de esperar ni detenerlo.
+/// Launches `name` with `arg` in the background: returns as soon as the
+/// broker has created the process (ADR 0015). There is no way to wait for it
+/// or stop it.
 pub fn spawn(broker: Handle, name: &str, arg: u64) -> Result<(), LaunchError> {
     let req = Request::new(name, arg)
         .ok_or(LaunchError::BadName)?

@@ -1,8 +1,8 @@
-# Fase 32: con 4 CPUs los procesos de usuario se reparten entre ellas: el
-# shell, los servicios y las aplicaciones lanzadas por el broker funcionan
-# igual (syscalls, IPC, excepciones de usuario y salida limpia).
+# Phase 32: with 4 CPUs user processes are spread across them: the
+# shell, the services and the applications launched by the broker work
+# the same (syscalls, IPC, user exceptions and clean exit).
 name = "smp.shell_user"
-description = "-smp 4 con shell: cpus, ps, run de aplicaciones y un proceso que muere, todo en paralelo"
+description = "-smp 4 with shell: cpus, ps, running applications and a dying process, all in parallel"
 level = "full"
 areas = ["smp", "shell", "user", "init"]
 cmdline = "qemu_exit shell"
@@ -22,17 +22,17 @@ stdin = [
 [expect]
 exit = 33
 serial_contains = [
-    "smp: 4 CPUs en linea",
-    "arish: shell de AriCodeOS",
-    "cpus: 4 en linea",
+    "smp: 4 CPUs online",
+    "arish: AriCodeOS shell",
+    "cpus: 4 online",
     "uptime: ",
-    "hello_app: hola desde una aplicacion del SDK (arg 7)",
-    "run: hello_app termino con 0",
-    "hello_app: hola desde una aplicacion del SDK (arg 8)",
-    "perms_check: la enumeracion salta huecos ok",
-    "run: perms_check termino con 0",
-    "PID  ESTADO      NOMBRE",
-    "AriCodeOS: apagando el sistema",
+    "hello_app: hello from an SDK app (arg 7)",
+    "run: hello_app exited with 0",
+    "hello_app: hello from an SDK app (arg 8)",
+    "perms_check: enumeration skips gaps ok",
+    "run: perms_check exited with 0",
+    "PID  STATE       NAME",
+    "AriCodeOS: shutting down",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_absent = ["KERNEL PANIC", "ARICODEOS_KERNEL_READY"]

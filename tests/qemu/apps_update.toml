@@ -1,9 +1,9 @@
-# Etapa 4 (ADR 0018): hello_ext v1 instalado; en pkgs/ hay la version 2 y una
-# version 3 con la firma alterada. El instalador (aplicacion de confianza con
-# la capacidad install) instala la 2 con un reemplazo atomico e ignora la 3;
-# tras reiniciar sigue la 2 y volver a instalar no hace nada.
+# Stage 4 (ADR 0018): hello_ext v1 is installed; pkgs/ holds version 2 and a
+# version 3 with a tampered signature. The installer (a trusted application with
+# the install capability) installs 2 with an atomic replace and ignores 3;
+# after a reboot 2 is still there and installing again does nothing.
 name = "apps.update"
-description = "installer: actualiza un paquete instalado desde pkgs/, rechaza una firma mala y la version persiste tras reiniciar"
+description = "installer: updates an installed package from pkgs/, rejects a bad signature and the version persists across reboot"
 level = "full"
 areas = ["apps", "sandbox", "update", "shell"]
 install = ["examples/hello_ext"]
@@ -16,18 +16,18 @@ stdin = ["run hello_ext 1", "run installer", "run hello_ext 2", "reboot"]
 [boots.expect]
 exit = 0
 serial_contains = [
-    "hello_ext v1: hola desde fuera del arbol (arg 1)",
-    "AriInit: lanzar installer con manifiesto [system install] memoria 64 KiB",
-    "installer: instalando hello_ext version 2 (desde pkgs/hello_ext-2.aripkg)",
-    "installer: hello_ext 1 -> 2 instalado (apps/hello_ext.aripkg)",
-    "installer: pkgs/hello_ext-3.aripkg no verifica: se ignora",
-    "installer: 1 paquete(s) instalado(s), 1 ignorado(s)",
-    "run: installer termino con 0",
-    "AriInit: lanzar hello_ext desde AriFS (apps/hello_ext.aripkg version 2, ",
-    "hello_ext v2: hola desde fuera del arbol (arg 2)",
-    "AriCodeOS: reiniciando",
+    "hello_ext v1: hello from outside the tree (arg 1)",
+    "AriInit: launch installer with manifest [system install] memory 64 KiB",
+    "installer: installing hello_ext version 2 (from pkgs/hello_ext-2.aripkg)",
+    "installer: hello_ext 1 -> 2 installed (apps/hello_ext.aripkg)",
+    "installer: pkgs/hello_ext-3.aripkg fails verification: skipped",
+    "installer: 1 package(s) installed, 1 skipped",
+    "run: installer exited with 0",
+    "AriInit: launch hello_ext from AriFS (apps/hello_ext.aripkg version 2, ",
+    "hello_ext v2: hello from outside the tree (arg 2)",
+    "AriCodeOS: rebooting",
 ]
-serial_absent = ["KERNEL PANIC", "denegado", "installer: error"]
+serial_absent = ["KERNEL PANIC", "denied", "installer: error"]
 
 [[boots]]
 cmdline = "qemu_exit shell"
@@ -35,10 +35,10 @@ stdin = ["run hello_ext 3", "run installer", "shutdown"]
 [boots.expect]
 exit = 33
 serial_contains = [
-    "hello_ext v2: hola desde fuera del arbol (arg 3)",
-    "installer: hello_ext version 2 ya instalada (actual 2)",
-    "installer: pkgs/hello_ext-3.aripkg no verifica: se ignora",
-    "installer: 0 paquete(s) instalado(s), 2 ignorado(s)",
+    "hello_ext v2: hello from outside the tree (arg 3)",
+    "installer: hello_ext version 2 already installed (current 2)",
+    "installer: pkgs/hello_ext-3.aripkg fails verification: skipped",
+    "installer: 0 package(s) installed, 2 skipped",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "denegado", "installer: error", "hello_ext v1"]
+serial_absent = ["KERNEL PANIC", "denied", "installer: error", "hello_ext v1"]

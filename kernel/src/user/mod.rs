@@ -1,5 +1,5 @@
-//! Espacio de usuario (Fase 11): procesos con espacio de direcciones propio,
-//! programas de prueba embebidos y despacho de syscalls.
+//! User space (Phase 11): processes with their own address space,
+//! embedded test programs and syscall dispatch.
 
 pub mod process;
 pub mod programs;
