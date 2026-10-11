@@ -22,6 +22,7 @@ const OPT_END: u8 = 255;
 pub const DISCOVER: u8 = 1;
 pub const OFFER: u8 = 2;
 pub const REQUEST: u8 = 3;
+pub const DECLINE: u8 = 4;
 pub const ACK: u8 = 5;
 pub const NAK: u8 = 6;
 
@@ -143,6 +144,9 @@ pub enum State {
     Init,
     Selecting,
     Requesting,
+    /// Acknowledged; the caller probes the address with ARP (RFC 2131
+    /// 4.4.1) and then calls `address_free` or `address_in_use`.
+    Probing,
     Bound,
 }
 
@@ -171,6 +175,37 @@ impl Client {
 
     pub fn state(&self) -> State {
         self.state
+    }
+
+    /// The acknowledged address while it is being probed.
+    pub fn probing(&self) -> Option<Ipv4Addr> {
+        (self.state == State::Probing)
+            .then(|| self.config.map(|c| c.address))
+            .flatten()
+    }
+
+    /// Nobody answered the probe: the lease is in use.
+    pub fn address_free(&mut self) {
+        if self.state == State::Probing {
+            self.state = State::Bound;
+        }
+    }
+
+    /// Another host answered the probe: `DHCPDECLINE` for the server (the
+    /// message to broadcast) and back to the start; the caller should wait
+    /// about ten seconds before polling again (RFC 2131 3.1.5).
+    pub fn address_in_use(&mut self, out: &mut [u8]) -> Option<usize> {
+        let cfg = self.config.take()?;
+        self.state = State::Init;
+        self.offer = None;
+        write_message(
+            self.xid,
+            self.mac,
+            DECLINE,
+            Some(cfg.address),
+            Some(cfg.server),
+            out,
+        )
     }
 
     pub fn config(&self) -> Option<Config> {
@@ -204,7 +239,7 @@ impl Client {
                     out,
                 )
             }
-            State::Bound => None,
+            State::Probing | State::Bound => None,
         }
     }
 
@@ -233,7 +268,7 @@ impl Client {
                     cfg.server = self.offer.map(|o| o.config.server).unwrap_or_default();
                 }
                 self.config = Some(cfg);
-                self.state = State::Bound;
+                self.state = State::Probing;
                 None
             }
             (State::Requesting, NAK) => {
@@ -332,7 +367,12 @@ mod tests {
                 &mut out
             )
             .is_none());
+        assert_eq!(c.state(), State::Probing);
+        assert_eq!(c.probing(), Some(Ipv4Addr::new(10, 0, 2, 15)));
+        assert!(c.poll(&mut out).is_none(), "nothing to send while probing");
+        c.address_free();
         assert_eq!(c.state(), State::Bound);
+        assert_eq!(c.probing(), None);
         let cfg = c.config().unwrap();
         assert_eq!(cfg.address, Ipv4Addr::new(10, 0, 2, 15));
         assert_eq!(cfg.subnet_mask, Ipv4Addr::new(255, 255, 255, 0));
@@ -358,5 +398,37 @@ mod tests {
         assert!(n.is_some(), "after NAK it goes back to DISCOVER");
         assert_eq!(c.state(), State::Selecting);
         assert!(Message::parse(&[0u8; 100]).is_none());
+    }
+
+    #[test]
+    fn address_in_use_is_declined() {
+        let mut c = Client::new(MacAddr([1; 6]), 9);
+        let mut out = [0u8; MAX_LEN];
+        c.poll(&mut out).unwrap();
+        c.on_message(
+            &server_message(9, OFFER, Ipv4Addr::new(10, 0, 2, 15)),
+            &mut out,
+        )
+        .unwrap();
+        c.on_message(
+            &server_message(9, ACK, Ipv4Addr::new(10, 0, 2, 15)),
+            &mut out,
+        );
+        assert_eq!(c.probing(), Some(Ipv4Addr::new(10, 0, 2, 15)));
+        let n = c.address_in_use(&mut out).unwrap();
+        assert!(n >= 300);
+        assert_eq!(out[FIXED_LEN..FIXED_LEN + 3], [OPT_MSG_TYPE, 1, DECLINE]);
+        assert!(
+            out[FIXED_LEN..n]
+                .windows(6)
+                .any(|w| w == [OPT_REQUESTED_IP, 4, 10, 0, 2, 15]),
+            "the declined address goes in the message"
+        );
+        assert_eq!(c.state(), State::Init);
+        assert!(c.config().is_none());
+        // Next poll starts over with DISCOVER.
+        let n = c.poll(&mut out).unwrap();
+        assert_eq!(out[FIXED_LEN..FIXED_LEN + 3], [OPT_MSG_TYPE, 1, DISCOVER]);
+        assert!(n >= 300);
     }
 }

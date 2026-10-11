@@ -25,6 +25,10 @@ const MAX_TCP: usize = 8;
 const TCP_EPHEMERAL_FIRST: u16 = 50000;
 const PING_ID: u16 = 0xA51C;
 const DHCP_RETRY_MS: u64 = 1000;
+/// Wait for an answer to the ARP probe of an acknowledged address.
+const DHCP_PROBE_MS: u64 = 600;
+/// Pause before asking again after declining an address in use.
+const DHCP_DECLINE_PAUSE_MS: u64 = 10_000;
 const ARP_WAIT_MS: u64 = 1000;
 
 /// Link to the NIC: complete Ethernet frames, no headers of its own.
@@ -44,6 +48,16 @@ pub fn say(name: &str, msg: &[u8]) {
     sys::print(b": ");
     sys::print(msg);
     sys::print(b"\n");
+}
+
+fn print_mac(mac: MacAddr) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for (i, b) in mac.0.iter().enumerate() {
+        if i > 0 {
+            sys::print(b":");
+        }
+        sys::print(&[HEX[(b >> 4) as usize], HEX[(b & 15) as usize]]);
+    }
 }
 
 fn print_ip(ip: Ipv4Addr) {
@@ -160,6 +174,8 @@ pub struct Stack<L: Link> {
     pub clock: Clock,
     dhcp: dhcp::Client,
     dhcp_next: u64,
+    /// End of the ARP probe of the acknowledged address (0: no probe).
+    probe_deadline: u64,
     config: Option<dhcp::Config>,
     arp: arp::Cache<8>,
     ip_id: u16,
@@ -197,6 +213,7 @@ impl<L: Link> Stack<L> {
             name,
             clock,
             dhcp_next: 0,
+            probe_deadline: 0,
             config: None,
             arp: arp::Cache::new(),
             ip_id: 1,
@@ -334,7 +351,20 @@ impl<L: Link> Stack<L> {
 
     /// Sends the appropriate DHCP message (broadcast from 0.0.0.0).
     fn dhcp_step(&mut self, now: u64) {
-        if self.dhcp.state() == dhcp::State::Bound || now < self.dhcp_next {
+        match self.dhcp.state() {
+            dhcp::State::Bound => return,
+            dhcp::State::Probing => {
+                // Nobody claimed the address during the probe: use it.
+                if now >= self.probe_deadline {
+                    self.probe_deadline = 0;
+                    self.dhcp.address_free();
+                    self.apply_lease();
+                }
+                return;
+            }
+            _ => {}
+        }
+        if now < self.dhcp_next {
             return;
         }
         let mut msg = [0u8; dhcp::MAX_LEN];
@@ -379,16 +409,52 @@ impl<L: Link> Stack<L> {
             return;
         }
         match eh.ethertype {
-            eth::ETHERTYPE_ARP => self.on_arp(payload),
+            eth::ETHERTYPE_ARP => self.on_arp(payload, now),
             eth::ETHERTYPE_IPV4 => self.on_ipv4(payload, now),
             _ => {}
         }
     }
 
-    fn on_arp(&mut self, b: &[u8]) {
+    /// The acknowledged and probed address becomes the configuration.
+    fn apply_lease(&mut self) {
+        self.config = self.dhcp.config();
+        if let Some(c) = self.config {
+            sys::print(self.name.as_bytes());
+            sys::print(b": DHCP ");
+            print_ip(c.address);
+            sys::print(b" mask ");
+            print_ip(c.subnet_mask);
+            sys::print(b" router ");
+            print_ip(c.router);
+            sys::print(b" dns ");
+            print_ip(c.dns);
+            sys::print(b"\n");
+            let router = c.router;
+            self.send_arp_request(router);
+        }
+    }
+
+    fn on_arp(&mut self, b: &[u8], now: u64) {
         let Some(p) = arp::Packet::parse(b) else {
             return;
         };
+        if self.dhcp.probing().is_some_and(|a| a == p.sender_ip) && p.sender_mac != self.link.mac()
+        {
+            // Someone answered the probe: decline and start over later.
+            sys::print(self.name.as_bytes());
+            sys::print(b": DHCP address ");
+            print_ip(p.sender_ip);
+            sys::print(b" is already used by ");
+            print_mac(p.sender_mac);
+            sys::print(b"; declined, asking again\n");
+            let mut msg = [0u8; dhcp::MAX_LEN];
+            if let Some(n) = self.dhcp.address_in_use(&mut msg) {
+                self.broadcast_dhcp(&msg[..n]);
+            }
+            self.probe_deadline = 0;
+            self.dhcp_next = now + DHCP_DECLINE_PAUSE_MS;
+            return;
+        }
         if !p.sender_ip.is_unspecified() {
             self.arp.insert(p.sender_ip, p.sender_mac);
             self.flush_deferred(p.sender_ip, p.sender_mac);
@@ -476,22 +542,15 @@ impl<L: Link> Stack<L> {
             if let Some(n) = response {
                 self.broadcast_dhcp(&out[..n]);
             }
-            if self.dhcp.state() == dhcp::State::Bound {
-                self.config = self.dhcp.config();
-                if let Some(c) = self.config {
-                    sys::print(self.name.as_bytes());
-                    sys::print(b": DHCP ");
-                    print_ip(c.address);
-                    sys::print(b" mask ");
-                    print_ip(c.subnet_mask);
-                    sys::print(b" router ");
-                    print_ip(c.router);
-                    sys::print(b" dns ");
-                    print_ip(c.dns);
-                    sys::print(b"\n");
-                    let router = c.router;
-                    self.send_arp_request(router);
-                }
+            if let Some(address) = self.dhcp.probing() {
+                // Acknowledged: ARP probe (sender 0.0.0.0) before using it,
+                // in case another host already has the address (RFC 2131
+                // 4.4.1); `dhcp_step` applies the lease when nobody answers.
+                let probe = arp::Packet::request(self.link.mac(), Ipv4Addr::UNSPECIFIED, address);
+                self.send_eth(MacAddr::BROADCAST, eth::ETHERTYPE_ARP, |out| {
+                    probe.write(out)
+                });
+                self.probe_deadline = now + DHCP_PROBE_MS;
             }
             return;
         }

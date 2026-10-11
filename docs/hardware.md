@@ -165,7 +165,9 @@ as usual:
 cargo xtask usb-image --cmdline "shell kbd=es" --authorized-key ~/.ssh/id_ed25519.pub
 ```
 
-With the network cable connected, the boot log shows
+With the network cable connected, the boot log shows a `DHCP` line with the
+address (if another host already uses the offered address, the log says so
+and the laptop asks for another one), then
 `sshd: listening on port 22, host key SHA256:..., 1 authorized key(s)`;
 `net` shows the address. From the other machine:
 

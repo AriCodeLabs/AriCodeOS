@@ -1331,3 +1331,12 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
 - Kernel `map_foreign` is idempotent per region; servers map client buffers
   per request (`block::map_client_buffer`).
 - Scenario `update.network` (`host_update = true`, disk `update-empty`).
+
+## DHCP address probe (2026-10-12)
+
+After `DHCPACK` the network service probes the address with an ARP request
+(sender 0.0.0.0) for 600 ms before using it (RFC 2131 4.4.1). An answer from
+another MAC means the address is already in use on the LAN (a stale lease
+or a static host): the service sends `DHCPDECLINE`, logs the offending MAC
+and asks again ten seconds later. Found on the laptop, whose lease
+collided with a phone using a randomised MAC.
