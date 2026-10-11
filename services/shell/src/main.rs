@@ -15,7 +15,10 @@ use aricode_rt::{fmt_hex, fmt_u64};
 const FSD: Handle = Handle(0x0001_0004);
 const HW: Handle = Handle(0x0001_0005);
 const SYSTEM: Handle = Handle(0x0001_0006);
+/// Console input, or the session input endpoint in session mode.
 const CONSOLE_IN: Handle = Handle(0x0001_0007);
+/// Session output endpoint (session mode only, ADR 0025).
+const SESSION_OUT: Handle = Handle(0x0001_000B);
 const PCI_ROOT: Handle = Handle(0x0001_0008);
 const NETD: Handle = Handle(0x0001_0009);
 const BROKER: Handle = Handle(0x0001_000A);
@@ -50,10 +53,34 @@ fn capture_with<R>(f: impl FnOnce(&mut ([u8; CAPTURE_MAX], usize, bool)) -> R) -
     f(unsafe { &mut *CAPTURE.state.get() })
 }
 
-/// Writes to the console and, while capture is active, also to the buffer
-/// (whatever does not fit is lost).
+/// I/O mode, fixed at start: 0 console, 1 session, 2 quiet session.
+static MODE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+const MODE_SESSION: u8 = 1;
+const MODE_QUIET: u8 = 2;
+
+fn session() -> bool {
+    MODE.load(core::sync::atomic::Ordering::Relaxed) != 0
+}
+
+fn quiet() -> bool {
+    MODE.load(core::sync::atomic::Ordering::Relaxed) == MODE_QUIET
+}
+
+/// Sends `b` to the session output in IPC-sized pieces.
+fn session_write(b: &[u8]) {
+    for chunk in b.chunks(abi::IPC_MAX_DATA) {
+        let _ = sys::ipc_send(SESSION_OUT, chunk, &[], 2000);
+    }
+}
+
+/// Writes to the console (or the session) and, while capture is active,
+/// also to the buffer (whatever does not fit is lost).
 fn print(b: &[u8]) {
-    sys::print(b);
+    if session() {
+        session_write(b);
+    } else {
+        sys::print(b);
+    }
     capture_with(|(buf, len, active)| {
         if *active {
             let n = b.len().min(CAPTURE_MAX - *len);
@@ -125,19 +152,65 @@ impl aricode_lineedit::History for History {
 /// cursor movement (arrows, Home/End, Ctrl-A/E), insert and delete anywhere
 /// (backspace, Delete), Ctrl-U to clear, and the history on the up and down
 /// arrows. Keys arrive as a terminal sends them, from any keyboard.
-fn read_line(line: &mut [u8; LINE_MAX], history: &History) -> usize {
+/// Bytes read but not yet consumed: one read can carry the end of a line
+/// and the start of the next (a pasted block, or sshd sending a command
+/// followed by `exit`).
+struct Input {
+    buf: [u8; abi::IPC_MAX_DATA],
+    start: usize,
+    end: usize,
+}
+
+impl Input {
+    const fn new() -> Self {
+        Self {
+            buf: [0; abi::IPC_MAX_DATA],
+            start: 0,
+            end: 0,
+        }
+    }
+
+    /// Next byte, waiting for more input when empty; `None` when the remote
+    /// side of a session hung up.
+    fn next(&mut self) -> Option<u8> {
+        while self.start == self.end {
+            let n = if session() {
+                let mut handles = [Handle(0); 1];
+                match sys::ipc_receive(CONSOLE_IN, &mut self.buf, &mut handles, TIMEOUT_INFINITE) {
+                    Ok((0, _)) | Err(_) => return None,
+                    Ok((n, _)) => n,
+                }
+            } else {
+                sys::console_read(CONSOLE_IN, &mut self.buf[..64], TIMEOUT_INFINITE).unwrap_or(0)
+            };
+            self.start = 0;
+            self.end = n;
+        }
+        let b = self.buf[self.start];
+        self.start += 1;
+        Some(b)
+    }
+}
+
+/// Reads a line with the editor in `aricode-lineedit`: cursor movement
+/// (arrows, Home/End, Ctrl-A/E), insert and delete anywhere (backspace,
+/// Delete), Ctrl-U to clear, and the history on the up and down arrows.
+/// Keys arrive as a terminal sends them, from any keyboard or from a
+/// session. `None` when a session's remote side hung up; a quiet session
+/// does not echo.
+fn read_line(input: &mut Input, line: &mut [u8; LINE_MAX], history: &History) -> Option<usize> {
     let mut editor: aricode_lineedit::Editor<LINE_MAX> = aricode_lineedit::Editor::new();
-    let mut chunk = [0u8; 64];
     loop {
-        let Ok(n) = sys::console_read(CONSOLE_IN, &mut chunk, TIMEOUT_INFINITE) else {
-            continue;
+        let b = input.next()?;
+        let event = if quiet() {
+            editor.feed(b, history, &mut |_| {})
+        } else {
+            editor.feed(b, history, &mut |out| print(out))
         };
-        for &b in &chunk[..n] {
-            if editor.feed(b, history, &mut |out| print(out)) == aricode_lineedit::Event::Submit {
-                let text = editor.line();
-                line[..text.len()].copy_from_slice(text);
-                return text.len();
-            }
+        if event == aricode_lineedit::Event::Submit {
+            let text = editor.line();
+            line[..text.len()].copy_from_slice(text);
+            return Some(text.len());
         }
     }
 }
@@ -836,6 +909,15 @@ fn services_detail() {
 }
 
 fn main(mask: u64) -> u64 {
+    use aricode_proto::session::{SHELL_QUIET, SHELL_SESSION};
+    if mask & SHELL_SESSION != 0 {
+        let mode = if mask & SHELL_QUIET != 0 {
+            MODE_QUIET
+        } else {
+            MODE_SESSION
+        };
+        MODE.store(mode, core::sync::atomic::Ordering::Relaxed);
+    }
     let Ok(mut fs) = FsClient::new(FSD, HW) else {
         print(b"arish: no file client\n");
         return 1;
@@ -844,17 +926,29 @@ fn main(mask: u64) -> u64 {
         print(b"arish: no network client\n");
         return 2;
     };
-    print(b"arish: AriCodeOS shell (type help for help)\n");
+    if !quiet() {
+        print(b"arish: AriCodeOS shell (type help for help)\n");
+    }
     let mut line = [0u8; LINE_MAX];
     let mut history = History::new();
+    let mut input = Input::new();
     loop {
-        print(PROMPT);
-        let len = read_line(&mut line, &history);
+        if !quiet() {
+            print(PROMPT);
+        }
+        let Some(len) = read_line(&mut input, &mut line, &history) else {
+            break;
+        };
         history.push(&line[..len]);
         if execute(&mut fs, &mut net_client, mask, &line[..len], 0) {
-            return 0;
+            break;
         }
     }
+    if session() {
+        // End of stream: sshd closes the channel.
+        let _ = sys::ipc_send(SESSION_OUT, &[], &[], 2000);
+    }
+    0
 }
 
 /// Executes a line; returns `true` if the shell must exit. `depth` bounds

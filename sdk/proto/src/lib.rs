@@ -375,6 +375,8 @@ pub mod net {
     pub const TEST_TCP_LISTEN_PORT: u16 = 7;
     /// Port of the host test HTTP server.
     pub const TEST_HTTP_PORT: u16 = 17010;
+    /// Host port forwarded (`hostfwd`) to the guest's SSH port 22.
+    pub const TEST_SSH_FORWARD_PORT: u16 = 17022;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Op {
@@ -1385,6 +1387,85 @@ mod tests {
 /// plan): the shell and the diagnostic tools query it through
 /// the broker endpoint; init tells requests apart by the protocol
 /// byte. One request per service (`index` from 0) until `NotFound`.
+/// Remote sessions (ADR 0025): `sshd` asks init for a shell or a single
+/// command over a dedicated endpoint. The request carries three handles:
+/// `[reply (WRITE), shell input (READ|TRANSFER), shell output
+/// (WRITE|TRANSFER)]`. init launches `arish` in session mode on them: the
+/// shell reads what the client types from the input endpoint and writes
+/// its output to the output endpoint, as raw bytes of up to
+/// `IPC_MAX_DATA` per message. An empty message in either direction means
+/// end of stream (hang-up to the shell, exit to sshd).
+pub mod session {
+    pub const PROTOCOL: u8 = 8;
+    pub const VERSION: u8 = 1;
+    /// Shell argument bit: I/O through the session endpoints.
+    pub const SHELL_SESSION: u64 = 1 << 16;
+    /// Shell argument bit: no banner, prompt or echo (single command).
+    pub const SHELL_QUIET: u64 = 1 << 17;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Kind {
+        /// Interactive shell (prompt, echo, line editing).
+        Shell = 0,
+        /// Commands fed by sshd, no prompt or echo.
+        Exec = 1,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Request {
+        pub kind: Kind,
+    }
+
+    impl Request {
+        pub const LEN: usize = 8;
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            [PROTOCOL, VERSION, self.kind as u8, 0, 0, 0, 0, 0]
+        }
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN || b[0] != PROTOCOL || b[1] != VERSION {
+                return None;
+            }
+            let kind = match b[2] {
+                0 => Kind::Shell,
+                1 => Kind::Exec,
+                _ => return None,
+            };
+            Some(Self { kind })
+        }
+    }
+
+    /// Reply: `[PROTOCOL, VERSION, ok]`.
+    pub fn reply(ok: bool) -> [u8; 4] {
+        [PROTOCOL, VERSION, ok as u8, 0]
+    }
+
+    pub fn reply_ok(b: &[u8]) -> bool {
+        b.len() >= 3 && b[0] == PROTOCOL && b[1] == VERSION && b[2] == 1
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn round_trip() {
+            for kind in [Kind::Shell, Kind::Exec] {
+                assert_eq!(
+                    Request::decode(&Request { kind }.encode()),
+                    Some(Request { kind })
+                );
+            }
+            assert_eq!(
+                Request::decode(&[PROTOCOL, VERSION, 9, 0, 0, 0, 0, 0]),
+                None
+            );
+            assert_eq!(Request::decode(&[7, VERSION, 0, 0, 0, 0, 0, 0]), None);
+            assert!(reply_ok(&reply(true)));
+            assert!(!reply_ok(&reply(false)));
+        }
+    }
+}
+
 pub mod status {
     pub const PROTOCOL: u8 = 7;
     pub const VERSION: u8 = 1;

@@ -55,6 +55,7 @@ members = [
     "services/virtio-blk",
     "services/net-core",
     "services/rtl-net",
+    "services/sshd",
     "services/virtio-net",
     "services/virtio-input",
     "services/usb-input",

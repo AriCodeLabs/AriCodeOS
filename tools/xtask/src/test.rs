@@ -157,6 +157,28 @@ fn run_scenario(
             app.package,
         ));
     }
+    // SSH scenarios: a client key pair in the scenario directory, its
+    // public half installed as `authorized_keys`.
+    let ssh_key = match &s.host_ssh {
+        Some(_) => {
+            let dir = workdir.join("ssh");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let key = dir.join("id_ed25519");
+            let st = std::process::Command::new("ssh-keygen")
+                .args(["-q", "-t", "ed25519", "-N", "", "-C", "aricode-test", "-f"])
+                .arg(&key)
+                .status()
+                .map_err(|e| format!("{}: ssh-keygen: {e}", s.name))?;
+            if !st.success() {
+                return Err(format!("{}: ssh-keygen failed", s.name));
+            }
+            let public = std::fs::read(dir.join("id_ed25519.pub")).map_err(|e| e.to_string())?;
+            installed.push((String::from("authorized_keys"), public));
+            Some(key)
+        }
+        None => None,
+    };
     let mut problems = Vec::new();
     let mut elapsed = Duration::ZERO;
     let mut logs: Vec<(std::path::PathBuf, String)> = Vec::new();
@@ -182,9 +204,18 @@ fn run_scenario(
             mouse_rel: h.mouse_rel,
             click: h.click.as_deref(),
         });
+        let ssh_probe = match (&s.host_ssh, &ssh_key) {
+            (Some(h), Some(key)) => Some(qemu::SshProbe {
+                marker: &h.marker,
+                commands: &h.commands,
+                key: key.clone(),
+            }),
+            _ => None,
+        };
         let options = qemu::Headless {
             input,
             probe,
+            ssh_probe,
             input_probe,
             disk_variant,
             disk_readonly: s.disk_readonly,

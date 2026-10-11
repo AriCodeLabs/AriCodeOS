@@ -278,7 +278,8 @@ fn walk_files(dir: &Path, prefix: &str, out: &mut Vec<(String, PathBuf)>) -> Res
 
 /// Writes the full USB image to `path` with the contents of `esp_dir` as
 /// the EFI partition and slot A loaded with the system image.
-pub fn write_usb_image(path: &Path, esp_dir: &Path) -> Result {
+/// `extra`: additional files for the ARI0 partition (e.g. `authorized_keys`).
+pub fn write_usb_image(path: &Path, esp_dir: &Path, extra: &[(String, Vec<u8>)]) -> Result {
     let esp_sectors = (USB_PART_ESP.1 - USB_PART_ESP.0 + 1) as u32;
     let mut fat =
         aricode_fat::Fat32Builder::new(esp_sectors, 1).map_err(|e| format!("fat: {e:?}"))?;
@@ -307,6 +308,18 @@ pub fn write_usb_image(path: &Path, esp_dir: &Path) -> Result {
     let fat_img = fat.finish();
     img[o..o + fat_img.len()].copy_from_slice(&fat_img);
     populate_arifs(&mut img, USB_PART_ARI0)?;
+    if !extra.is_empty() {
+        let mut fs = aricode_arifs::AriFs::open(VecDisk {
+            data: &mut img,
+            base: USB_PART_ARI0.0,
+        })
+        .map_err(|e| format!("arifs: {e:?}"))?;
+        for (name, content) in extra {
+            let i = fs.create(name).map_err(|e| format!("arifs {name}: {e:?}"))?;
+            fs.write(i, 0, content)
+                .map_err(|e| format!("arifs {name}: {e:?}"))?;
+        }
+    }
     // Raw area at the tail of ARI0, at the same offset as on the test disk
     // (init passes it to blk_client).
     for lba in USB_PART_ARI0.0 + RAW_PATTERN_OFFSET..=USB_PART_ARI0.1 {
@@ -329,7 +342,9 @@ pub fn write_usb_image(path: &Path, esp_dir: &Path) -> Result {
 }
 
 /// `cargo xtask usb-image [--cmdline S]`: image ready to `dd` onto a USB stick.
-pub fn build_usb_image(release: bool, cmdline: &str) -> Result<PathBuf> {
+/// `authorized_key`: an OpenSSH public key file installed in ARI0 as
+/// `authorized_keys`, so the machine accepts SSH logins with that key.
+pub fn build_usb_image(release: bool, cmdline: &str, authorized_key: Option<&Path>) -> Result<PathBuf> {
     let base = build_base_esp(release)?;
     let esp = build_scenario_esp(
         &base,
@@ -338,8 +353,17 @@ pub fn build_usb_image(release: bool, cmdline: &str) -> Result<PathBuf> {
         cmdline,
         &Default::default(),
     )?;
+    let mut extra = Vec::new();
+    if let Some(key) = authorized_key {
+        let text = io(fs::read(key), "read the public key")?;
+        if !text.starts_with(b"ssh-ed25519 ") {
+            return Err(format!("{}: only ssh-ed25519 keys are accepted", key.display()));
+        }
+        extra.push((String::from("authorized_keys"), text));
+        println!("[xtask] authorized_keys from {}", key.display());
+    }
     let out = crate::build_dir().join("aricodeos-usb.img");
-    write_usb_image(&out, &esp)?;
+    write_usb_image(&out, &esp, &extra)?;
     Ok(out)
 }
 

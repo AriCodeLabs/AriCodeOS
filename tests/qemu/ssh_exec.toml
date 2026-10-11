@@ -1,0 +1,32 @@
+# SSH (ADR 0025): the runner generates a client key, installs it as
+# authorized_keys in AriFS and, once sshd listens, runs commands with the
+# host's OpenSSH client through the forwarded port. Each command runs in a
+# quiet session shell launched by init; the last one powers the machine off
+# from the remote session.
+name = "ssh.exec"
+description = "sshd: public-key login from the host's OpenSSH client, commands in session shells, shutdown over SSH"
+level = "full"
+areas = ["ssh", "network", "shell"]
+cmdline = "qemu_exit shell"
+timeout_secs = 150
+
+[host_ssh]
+marker = "sshd: listening on port 22"
+commands = ["ls", "cat hola.txt", "write remote.txt written over ssh", "cat remote.txt", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "sshd: new host key generated and saved",
+    "1 authorized key(s)",
+    "sshd: user 'ari' authenticated",
+    "[host] ssh $ ls",
+    "[host] ssh| hola.txt",
+    "[host] ssh| authorized_keys",
+    "[host] ssh| Hola desde AriFS",
+    "[host] ssh| write: 17 bytes to remote.txt",
+    "[host] ssh| written over ssh",
+    "[host] ssh exit 0",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "connection dropped", "Permission denied"]

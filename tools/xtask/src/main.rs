@@ -4,7 +4,7 @@
 //! cargo xtask build [--debug]                 builds AriBoot and AriKernel
 //! cargo xtask image [--debug]                 build + assembles build/esp/
 //! cargo xtask run   [--debug] [--cmdline S] [--cpus N] [--usb-image] [--usb-hid]   image + interactive QEMU
-//! cargo xtask usb-image [--cmdline S]         GPT image for a USB stick at build/aricodeos-usb.img
+//! cargo xtask usb-image [--cmdline S] [--authorized-key KEY.pub]  GPT image for a USB stick at build/aricodeos-usb.img
 //! cargo xtask test  [opciones]                test levels (see tests/README.md)
 //! cargo xtask fs-cat DISK [NAME]             reads a file from ARI0 (or lists it) in an image or dump
 //!     --level unit|smoke|full                 default: unit + smoke
@@ -74,7 +74,11 @@ fn main() -> ExitCode {
             cli.flag("--usb-image"),
             cli.flag("--usb-hid"),
         ),
-        "usb-image" => image::build_usb_image(release, cli.value("--cmdline").unwrap_or("shell"))
+        "usb-image" => image::build_usb_image(
+            release,
+            cli.value("--cmdline").unwrap_or("shell"),
+            cli.value("--authorized-key").map(Path::new),
+        )
             .map(|p| {
                 println!(
                     "[xtask] write with: sudo dd if={} of=/dev/sdX bs=4M conv=fsync status=progress (see docs/hardware.md)",
