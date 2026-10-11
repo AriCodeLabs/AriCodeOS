@@ -94,7 +94,10 @@ mod tests {
         packet.extend_from_slice(&(body.len() as u32).to_be_bytes());
         packet.extend_from_slice(&body);
         let tag = c.seal(7, &mut packet);
-        assert_eq!(packet, hex("a39afcbc2c4315434e8f592d0440ce83b2fdb25940da9a8db23e"));
+        assert_eq!(
+            packet,
+            hex("a39afcbc2c4315434e8f592d0440ce83b2fdb25940da9a8db23e")
+        );
         assert_eq!(tag.to_vec(), hex("0f02f7a115a0a3475d077bc53de85dcc"));
         // The receiver reads the length first, then authenticates and opens.
         let enc_len: [u8; 4] = packet[..4].try_into().unwrap();

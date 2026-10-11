@@ -346,6 +346,13 @@ name = "aricode-sched"
 version = "0.9.0"
 
 [[package]]
+name = "aricode-ssh"
+version = "0.9.0"
+dependencies = [
+ "aricode-crypto",
+]
+
+[[package]]
 name = "aricode-supervisor"
 version = "0.9.0"
 
