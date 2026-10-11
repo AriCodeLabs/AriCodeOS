@@ -1305,3 +1305,17 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   follows can arrive in one message.
 - Tests: `[host_ssh]` in scenarios (generated client key, `authorized_keys`
   installed, host port 17022 forwarded to 22); `ssh.exec`.
+
+## HTTPS (ADR 0026)
+
+- `aricode-crypto`: SHA-384, HMAC, HKDF, ChaCha20-Poly1305 and AES-GCM,
+  big integers with RSA PKCS#1 v1.5/PSS verification, ECDSA P-256/P-384.
+- `aricode-x509`: DER, certificates, chain verification, host names, 17
+  embedded roots. `aricode-tls`: TLS 1.3 client state machine.
+- Kernel: CMOS real-time clock read at boot (`rtc.rs`, `sysinfo::WALLCLOCK`).
+- `sdk/https` (`aricode-https`): HTTP/HTTPS GET over the TCP service; the
+  shell's `http` uses it, with `trusted_ca.der` from AriFS as an optional
+  extra root. Scenario `net.https` (`host_https = true` starts the host's
+  `openssl s_server`).
+- init waits for sshd's `Ready` session message before starting the console
+  shell, so their console output never interleaves.

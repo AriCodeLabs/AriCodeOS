@@ -377,6 +377,10 @@ pub mod net {
     pub const TEST_HTTP_PORT: u16 = 17010;
     /// Host port forwarded (`hostfwd`) to the guest's SSH port 22.
     pub const TEST_SSH_FORWARD_PORT: u16 = 17022;
+    /// Host HTTPS test servers (`openssl s_server`): a certificate from the
+    /// scenario's test CA, and an untrusted self-signed one.
+    pub const TEST_HTTPS_PORT: u16 = 17443;
+    pub const TEST_HTTPS_UNTRUSTED_PORT: u16 = 17444;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Op {
@@ -1409,6 +1413,9 @@ pub mod session {
         Shell = 0,
         /// Commands fed by sshd, no prompt or echo.
         Exec = 1,
+        /// sshd is listening (no handles): init starts the console shell
+        /// only after this, so the two never interleave on the console.
+        Ready = 2,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1428,6 +1435,7 @@ pub mod session {
             let kind = match b[2] {
                 0 => Kind::Shell,
                 1 => Kind::Exec,
+                2 => Kind::Ready,
                 _ => return None,
             };
             Some(Self { kind })
@@ -1449,7 +1457,7 @@ pub mod session {
 
         #[test]
         fn round_trip() {
-            for kind in [Kind::Shell, Kind::Exec] {
+            for kind in [Kind::Shell, Kind::Exec, Kind::Ready] {
                 assert_eq!(
                     Request::decode(&Request { kind }.encode()),
                     Some(Request { kind })

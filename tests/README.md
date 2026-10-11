@@ -58,6 +58,7 @@ usb_storage = true              # the test disk hangs off the xHCI as USB mass s
 [host_ssh]                      # SSH from the host (ADR 0025): a client key is generated and installed as authorized_keys;
 marker = "sshd: listening on port 22"   # on seeing the marker, each command runs with the host's ssh through
 commands = ["ls", "shutdown"]   # host port 17022; output joins the log as "[host] ssh $ CMD", "[host] ssh| LINE", "[host] ssh exit N"
+host_https = true               # two host HTTPS servers (openssl s_server -www) on 17443 (cert from a test CA installed as trusted_ca.der) and 17444 (self-signed)
 usb_legacy_controller = true    # also adds an EHCI (class 0c.03 but not xHCI)
 install = ["examples/hello_ext"]  # external apps xtask builds, signs (version 1) and installs in AriFS as apps/NAME.aripkg
 packages = ["examples/hello_ext:2", "examples/hello_ext:3:corrupt"]  # pending packages in pkgs/ (DIR:VERSION[:corrupt]) for `run installer`

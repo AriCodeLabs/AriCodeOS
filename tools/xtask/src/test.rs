@@ -179,6 +179,13 @@ fn run_scenario(
         }
         None => None,
     };
+    let _https = if s.host_https {
+        let (servers, ca) = https_servers(&workdir.join("tls"))?;
+        installed.push((String::from("trusted_ca.der"), ca));
+        Some(servers)
+    } else {
+        None
+    };
     let mut problems = Vec::new();
     let mut elapsed = Duration::ZERO;
     let mut logs: Vec<(std::path::PathBuf, String)> = Vec::new();
@@ -305,4 +312,143 @@ fn run_scenario(
         }
     }
     Ok(ok)
+}
+
+/// HTTPS servers for `host_https` scenarios, killed when dropped.
+struct HttpsServers(Vec<std::process::Child>);
+
+impl Drop for HttpsServers {
+    fn drop(&mut self) {
+        for c in &mut self.0 {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
+/// Generates a test CA, a leaf for `10.0.2.2` signed by it and a
+/// self-signed leaf, and starts one `openssl s_server -www` for each leaf.
+/// Returns the servers and the CA certificate (DER).
+fn https_servers(dir: &std::path::Path) -> Result<(HttpsServers, Vec<u8>)> {
+    use std::process::{Command, Stdio};
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let run = |args: &[&str]| -> Result {
+        let st = Command::new("openssl")
+            .args(args)
+            .current_dir(dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|e| format!("openssl: {e}"))?;
+        if st.success() {
+            Ok(())
+        } else {
+            Err(format!("openssl {} failed", args.join(" ")))
+        }
+    };
+    let ec = [
+        "-newkey",
+        "ec",
+        "-pkeyopt",
+        "ec_paramgen_curve:prime256v1",
+        "-nodes",
+    ];
+    run(&[
+        &["req", "-x509"],
+        &ec[..],
+        &[
+            "-keyout",
+            "ca.key",
+            "-out",
+            "ca.pem",
+            "-days",
+            "30",
+            "-subj",
+            "/CN=AriCodeOS test CA",
+            "-addext",
+            "basicConstraints=critical,CA:TRUE",
+            "-addext",
+            "keyUsage=critical,keyCertSign",
+        ],
+    ]
+    .concat())?;
+    run(&[
+        &["req"],
+        &ec[..],
+        &[
+            "-keyout",
+            "leaf.key",
+            "-out",
+            "leaf.csr",
+            "-subj",
+            "/CN=10.0.2.2",
+        ],
+    ]
+    .concat())?;
+    std::fs::write(
+        dir.join("leaf.ext"),
+        "subjectAltName=DNS:10.0.2.2\nbasicConstraints=CA:FALSE\n",
+    )
+    .map_err(|e| e.to_string())?;
+    run(&[
+        "x509",
+        "-req",
+        "-in",
+        "leaf.csr",
+        "-CA",
+        "ca.pem",
+        "-CAkey",
+        "ca.key",
+        "-CAcreateserial",
+        "-out",
+        "leaf.pem",
+        "-days",
+        "30",
+        "-extfile",
+        "leaf.ext",
+    ])?;
+    run(&[
+        &["req", "-x509"],
+        &ec[..],
+        &[
+            "-keyout",
+            "self.key",
+            "-out",
+            "self.pem",
+            "-days",
+            "30",
+            "-subj",
+            "/CN=10.0.2.2",
+            "-addext",
+            "subjectAltName=DNS:10.0.2.2",
+        ],
+    ]
+    .concat())?;
+    run(&["x509", "-in", "ca.pem", "-outform", "der", "-out", "ca.der"])?;
+    let ca = std::fs::read(dir.join("ca.der")).map_err(|e| e.to_string())?;
+    let mut servers = HttpsServers(Vec::new());
+    for (port, cert, key) in [
+        (aricode_proto::net::TEST_HTTPS_PORT, "leaf.pem", "leaf.key"),
+        (
+            aricode_proto::net::TEST_HTTPS_UNTRUSTED_PORT,
+            "self.pem",
+            "self.key",
+        ),
+    ] {
+        let child = Command::new("openssl")
+            .args([
+                "s_server", "-www", "-tls1_3", "-quiet", "-cert", cert, "-key", key, "-accept",
+            ])
+            .arg(format!("127.0.0.1:{port}"))
+            .current_dir(dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("openssl s_server: {e}"))?;
+        servers.0.push(child);
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    Ok((servers, ca))
 }

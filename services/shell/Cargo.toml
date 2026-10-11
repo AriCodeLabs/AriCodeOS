@@ -18,6 +18,9 @@ aricode-rt = { path = "../../sdk/runtime" }
 aricode-net = { path = "../../libs/net" }
 aricode-proto = { path = "../../sdk/proto" }
 aricode-lineedit = { path = "../../libs/lineedit" }
+aricode-https = { path = "../../sdk/https" }
+aricode-tls = { path = "../../libs/tls" }
+aricode-x509 = { path = "../../libs/x509" }
 
 [build-dependencies]
 aricode-build = { path = "../../sdk/build" }

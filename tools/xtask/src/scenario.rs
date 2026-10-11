@@ -140,6 +140,11 @@ pub struct Scenario {
     pub host_input: Option<HostInput>,
     #[serde(default)]
     pub host_ssh: Option<HostSsh>,
+    /// HTTPS servers on the host (`openssl s_server -www`): one with a
+    /// certificate for `10.0.2.2` from a test CA installed in AriFS as
+    /// `trusted_ca.der`, one self-signed and untrusted.
+    #[serde(default)]
+    pub host_https: bool,
     /// Initial state of the test disk (`image::DiskVariant`): `slots`
     /// (default), `esp-only`, `pending-b`, `b-exhausted`, `b-corrupt`,
     /// `fs-pending-replace`, `fs-corrupt`, `wasm-restricted`, `wasm-invalid`,

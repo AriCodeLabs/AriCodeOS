@@ -201,6 +201,7 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
     let bytes: Vec<u8> = match kind {
         sysinfo::UPTIME => crate::time::uptime_ms().to_le_bytes().to_vec(),
         sysinfo::UPTIME_US => crate::time::uptime_us().to_le_bytes().to_vec(),
+        sysinfo::WALLCLOCK => crate::rtc::unix_now().to_le_bytes().to_vec(),
         sysinfo::EVENTS => {
             let max = (len as usize) / sysinfo::EventEntry::LEN;
             crate::events::recent(max)

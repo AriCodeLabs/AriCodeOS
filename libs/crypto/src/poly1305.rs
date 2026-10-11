@@ -9,27 +9,42 @@ fn le32(b: &[u8]) -> u32 {
     u32::from_le_bytes([b[0], b[1], b[2], b[3]])
 }
 
-/// Tag of `msg` under the one-time `key`.
-pub fn tag(key: &[u8; KEY_LEN], msg: &[u8]) -> [u8; TAG_LEN] {
-    const M: u32 = 0x3ff_ffff;
-    let r0 = le32(&key[0..]) & 0x3ff_ffff;
-    let r1 = (le32(&key[3..]) >> 2) & 0x3ff_ff03;
-    let r2 = (le32(&key[6..]) >> 4) & 0x3ff_c0ff;
-    let r3 = (le32(&key[9..]) >> 6) & 0x3f0_3fff;
-    let r4 = (le32(&key[12..]) >> 8) & 0x00f_ffff;
-    let (s1, s2, s3, s4) = (r1 * 5, r2 * 5, r3 * 5, r4 * 5);
-    let (mut h0, mut h1, mut h2, mut h3, mut h4) = (0u32, 0u32, 0u32, 0u32, 0u32);
+const M: u32 = 0x3ff_ffff;
 
-    for chunk in msg.chunks(16) {
-        let mut block = [0u8; 17];
-        block[..chunk.len()].copy_from_slice(chunk);
-        // A full block carries the 2^128 bit; a short one is padded with 1.
-        let hibit = if chunk.len() == 16 {
-            1 << 24
-        } else {
-            block[chunk.len()] = 1;
-            0
-        };
+/// Incremental Poly1305 state (the AEAD of RFC 8439 feeds zero-padded
+/// segments without assembling them in one buffer).
+pub struct Poly1305 {
+    r: [u32; 5],
+    h: [u32; 5],
+    s: [u32; 4],
+}
+
+impl Poly1305 {
+    pub fn new(key: &[u8; KEY_LEN]) -> Self {
+        Self {
+            r: [
+                le32(&key[0..]) & 0x3ff_ffff,
+                (le32(&key[3..]) >> 2) & 0x3ff_ff03,
+                (le32(&key[6..]) >> 4) & 0x3ff_c0ff,
+                (le32(&key[9..]) >> 6) & 0x3f0_3fff,
+                (le32(&key[12..]) >> 8) & 0x00f_ffff,
+            ],
+            h: [0; 5],
+            s: [
+                le32(&key[16..]),
+                le32(&key[20..]),
+                le32(&key[24..]),
+                le32(&key[28..]),
+            ],
+        }
+    }
+
+    /// Absorbs one 16-byte block; `hibit` is `1 << 24` for a full block and
+    /// 0 for a short final block already padded with its 0x01 byte.
+    fn block(&mut self, block: &[u8; 16], hibit: u32) {
+        let [r0, r1, r2, r3, r4] = self.r;
+        let (s1, s2, s3, s4) = (r1 * 5, r2 * 5, r3 * 5, r4 * 5);
+        let [mut h0, mut h1, mut h2, mut h3, mut h4] = self.h;
         h0 += le32(&block[0..]) & M;
         h1 += (le32(&block[3..]) >> 2) & M;
         h2 += (le32(&block[6..]) >> 4) & M;
@@ -61,63 +76,93 @@ pub fn tag(key: &[u8; KEY_LEN], msg: &[u8]) -> [u8; TAG_LEN] {
         let c = h0 >> 26;
         h0 &= M;
         h1 += c;
+        self.h = [h0, h1, h2, h3, h4];
     }
 
-    // Full carry, then h mod p by comparing against h + 5 - 2^130.
-    let mut c = h1 >> 26;
-    h1 &= M;
-    h2 += c;
-    c = h2 >> 26;
-    h2 &= M;
-    h3 += c;
-    c = h3 >> 26;
-    h3 &= M;
-    h4 += c;
-    c = h4 >> 26;
-    h4 &= M;
-    h0 += c * 5;
-    c = h0 >> 26;
-    h0 &= M;
-    h1 += c;
+    /// Absorbs `data` as full blocks, zero-padding the last one to 16 bytes
+    /// (the `pad16` construction of the RFC 8439 AEAD).
+    pub fn update_padded(&mut self, data: &[u8]) {
+        for chunk in data.chunks(16) {
+            let mut b = [0u8; 16];
+            b[..chunk.len()].copy_from_slice(chunk);
+            self.block(&b, 1 << 24);
+        }
+    }
 
-    let mut g0 = h0.wrapping_add(5);
-    c = g0 >> 26;
-    g0 &= M;
-    let mut g1 = h1.wrapping_add(c);
-    c = g1 >> 26;
-    g1 &= M;
-    let mut g2 = h2.wrapping_add(c);
-    c = g2 >> 26;
-    g2 &= M;
-    let mut g3 = h3.wrapping_add(c);
-    c = g3 >> 26;
-    g3 &= M;
-    let g4 = h4.wrapping_add(c).wrapping_sub(1 << 26);
-    // g4 negative (top bit set): h < p, keep h; otherwise take g.
-    let take_g = (g4 >> 31).wrapping_sub(1);
-    let sel = |h: u32, g: u32| (h & !take_g) | (g & take_g);
-    let (h0, h1, h2, h3, h4) = (
-        sel(h0, g0),
-        sel(h1, g1),
-        sel(h2, g2),
-        sel(h3, g3),
-        sel(h4, g4),
-    );
+    pub fn finish(self) -> [u8; TAG_LEN] {
+        let [mut h0, mut h1, mut h2, mut h3, mut h4] = self.h;
+        // Full carry, then h mod p by comparing against h + 5 - 2^130.
+        let mut c = h1 >> 26;
+        h1 &= M;
+        h2 += c;
+        c = h2 >> 26;
+        h2 &= M;
+        h3 += c;
+        c = h3 >> 26;
+        h3 &= M;
+        h4 += c;
+        c = h4 >> 26;
+        h4 &= M;
+        h0 += c * 5;
+        c = h0 >> 26;
+        h0 &= M;
+        h1 += c;
 
-    let w0 = h0 | (h1 << 26);
-    let w1 = (h1 >> 6) | (h2 << 20);
-    let w2 = (h2 >> 12) | (h3 << 14);
-    let w3 = (h3 >> 18) | (h4 << 8);
-    let mut out = [0u8; TAG_LEN];
-    let mut f = w0 as u64 + le32(&key[16..]) as u64;
-    out[0..4].copy_from_slice(&(f as u32).to_le_bytes());
-    f = w1 as u64 + le32(&key[20..]) as u64 + (f >> 32);
-    out[4..8].copy_from_slice(&(f as u32).to_le_bytes());
-    f = w2 as u64 + le32(&key[24..]) as u64 + (f >> 32);
-    out[8..12].copy_from_slice(&(f as u32).to_le_bytes());
-    f = w3 as u64 + le32(&key[28..]) as u64 + (f >> 32);
-    out[12..16].copy_from_slice(&(f as u32).to_le_bytes());
-    out
+        let mut g0 = h0.wrapping_add(5);
+        c = g0 >> 26;
+        g0 &= M;
+        let mut g1 = h1.wrapping_add(c);
+        c = g1 >> 26;
+        g1 &= M;
+        let mut g2 = h2.wrapping_add(c);
+        c = g2 >> 26;
+        g2 &= M;
+        let mut g3 = h3.wrapping_add(c);
+        c = g3 >> 26;
+        g3 &= M;
+        let g4 = h4.wrapping_add(c).wrapping_sub(1 << 26);
+        // g4 negative (top bit set): h < p, keep h; otherwise take g.
+        let take_g = (g4 >> 31).wrapping_sub(1);
+        let sel = |h: u32, g: u32| (h & !take_g) | (g & take_g);
+        let (h0, h1, h2, h3, h4) = (
+            sel(h0, g0),
+            sel(h1, g1),
+            sel(h2, g2),
+            sel(h3, g3),
+            sel(h4, g4),
+        );
+
+        let w = [
+            h0 | (h1 << 26),
+            (h1 >> 6) | (h2 << 20),
+            (h2 >> 12) | (h3 << 14),
+            (h3 >> 18) | (h4 << 8),
+        ];
+        let mut out = [0u8; TAG_LEN];
+        let mut f = 0u64;
+        for i in 0..4 {
+            f = w[i] as u64 + self.s[i] as u64 + (f >> 32);
+            out[4 * i..4 * i + 4].copy_from_slice(&(f as u32).to_le_bytes());
+        }
+        out
+    }
+}
+
+/// Tag of `msg` under the one-time `key`.
+pub fn tag(key: &[u8; KEY_LEN], msg: &[u8]) -> [u8; TAG_LEN] {
+    let mut p = Poly1305::new(key);
+    let (blocks, rest) = msg.as_chunks::<16>();
+    for b in blocks {
+        p.block(b, 1 << 24);
+    }
+    if !rest.is_empty() {
+        // A short final block is padded with 1 and carries no 2^128 bit.
+        let mut b = [0u8; 16];
+        b[..rest.len()].copy_from_slice(rest);
+        b[rest.len()] = 1;
+        p.block(&b, 0);
+    }
+    p.finish()
 }
 
 #[cfg(test)]
