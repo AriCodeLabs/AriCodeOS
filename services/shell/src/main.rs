@@ -713,7 +713,11 @@ fn http_get(fs: &mut FsClient, client: &mut NetClient, arg: &[u8]) {
             num(f.status as u64);
             print(b", ");
             num(f.body_len as u64);
-            print(b" bytes\n");
+            print(if f.truncated {
+                b" bytes shown (body truncated to 8 KiB)\n"
+            } else {
+                b" bytes\n"
+            });
             print(&body[..f.body_len]);
             if f.body_len > 0 && body[f.body_len - 1] != b'\n' {
                 print(b"\n");
@@ -735,7 +739,7 @@ fn http_get(fs: &mut FsClient, client: &mut NetClient, arg: &[u8]) {
         Err(HttpsError::Unsupported) => {
             print(b"http: response uses an unsupported encoding or protocol\n")
         }
-        Err(HttpsError::TooBig) => print(b"http: response too large (8 KiB)\n"),
+        Err(HttpsError::TooBig) => print(b"http: response headers too large\n"),
     }
 }
 
