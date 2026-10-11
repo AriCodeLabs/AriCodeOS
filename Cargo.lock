@@ -143,11 +143,14 @@ name = "ari-shell"
 version = "0.9.0"
 dependencies = [
  "aricode-build",
+ "aricode-https",
  "aricode-lineedit",
  "aricode-net",
  "aricode-proto",
  "aricode-rt",
  "aricode-sys",
+ "aricode-tls",
+ "aricode-x509",
 ]
 
 [[package]]
@@ -294,6 +297,17 @@ name = "aricode-http"
 version = "0.9.0"
 
 [[package]]
+name = "aricode-https"
+version = "0.9.0"
+dependencies = [
+ "aricode-http",
+ "aricode-net",
+ "aricode-sys",
+ "aricode-tls",
+ "aricode-x509",
+]
+
+[[package]]
 name = "aricode-initrd"
 version = "0.9.0"
 
@@ -385,6 +399,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aricode-tls"
+version = "0.9.0"
+dependencies = [
+ "aricode-crypto",
+ "aricode-x509",
+]
+
+[[package]]
 name = "aricode-usb-storage"
 version = "0.9.0"
 
@@ -398,6 +420,13 @@ dependencies = [
 [[package]]
 name = "aricode-wasm"
 version = "0.9.0"
+
+[[package]]
+name = "aricode-x509"
+version = "0.9.0"
+dependencies = [
+ "aricode-crypto",
+]
 
 [[package]]
 name = "aricode-x86-cpu"

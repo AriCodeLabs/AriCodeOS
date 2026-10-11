@@ -1,0 +1,16 @@
+[package]
+name = "aricode-https"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HTTP and HTTPS GET for AriCodeOS programs: aricode-http over the TCP service, with TLS 1.3 (aricode-tls) for https:// URLs (needs alloc)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+aricode-sys = { path = "../rust" }
+aricode-http = { path = "../../libs/http" }
+aricode-net = { path = "../../libs/net" }
+aricode-tls = { path = "../../libs/tls" }
+aricode-x509 = { path = "../../libs/x509" }

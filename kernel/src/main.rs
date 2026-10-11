@@ -26,6 +26,7 @@ mod object;
 mod pci;
 mod qemu;
 mod random;
+mod rtc;
 mod serial;
 mod sync;
 mod task;
@@ -168,6 +169,7 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
         arch::x86_64::smp::start_aps(info);
     }
     random::init();
+    rtc::init();
     let layout = match cmdline.get(keys::KBD) {
         None => aricode_input::Layout::Us,
         Some(name) => aricode_input::Layout::parse(name).unwrap_or_else(|| {

@@ -9,20 +9,64 @@
 //! - [`x25519`] (RFC 7748), [`poly1305`] (RFC 8439) and [`ssh_chachapoly`]
 //!   (`chacha20-poly1305@openssh.com`): the SSH transport (ADR 0025).
 //!
+//! - TLS 1.3 client (HTTPS): [`sha512::Sha384`], [`hmac`], [`hkdf`]
+//!   (RFC 5869), [`aead`] (ChaCha20-Poly1305 of RFC 8439 and AES-GCM over
+//!   [`aes`]) and [`rsa`] signature verification (PKCS#1 v1.5 and PSS) over
+//!   [`bigint`].
+//!
 //! Ed25519 operations are not constant time; they verify signatures and,
 //! for the SSH host key, sign with a key that lives on the device. X25519
 //! uses a constant-time ladder because its scalar is the ephemeral secret.
 
 #![no_std]
 
+pub mod aead;
+pub mod aes;
+pub mod bigint;
 pub mod chacha20;
+pub mod ecdsa;
 pub mod ed25519;
 mod field25519;
+pub mod hkdf;
+pub mod hmac;
+mod p_curves;
 pub mod poly1305;
+pub mod rsa;
 pub mod sha256;
 pub mod sha512;
 pub mod ssh_chachapoly;
 pub mod x25519;
+
+/// Hash functions selectable at run time (signature schemes, certificates).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hash {
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+impl Hash {
+    /// Digest length in bytes.
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(self) -> usize {
+        match self {
+            Hash::Sha256 => sha256::DIGEST_LEN,
+            Hash::Sha384 => sha512::SHA384_DIGEST_LEN,
+            Hash::Sha512 => sha512::DIGEST_LEN,
+        }
+    }
+
+    /// Hashes `data` into the front of `out`; returns the digest length.
+    pub fn digest(self, data: &[u8], out: &mut [u8; 64]) -> usize {
+        let n = self.len();
+        match self {
+            Hash::Sha256 => out[..n].copy_from_slice(&sha256::sha256(data)),
+            Hash::Sha384 => out[..n].copy_from_slice(&sha512::sha384(data)),
+            Hash::Sha512 => out[..n].copy_from_slice(&sha512::sha512(data)),
+        }
+        n
+    }
+}
 
 /// Equality comparison without short-circuit (for tags and signatures).
 pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
@@ -76,5 +120,18 @@ mod tests {
         assert!(unhex("dead", &mut back).is_none());
         assert!(unhex("zzzzzzzz", &mut back).is_none());
         assert!(ct_eq(b"abc", b"abc") && !ct_eq(b"abc", b"abd") && !ct_eq(b"ab", b"abc"));
+    }
+
+    #[test]
+    fn hash_dispatch() {
+        let mut out = [0u8; 64];
+        for (h, len) in [(Hash::Sha256, 32), (Hash::Sha384, 48), (Hash::Sha512, 64)] {
+            assert_eq!(h.len(), len);
+            assert_eq!(h.digest(b"abc", &mut out), len);
+        }
+        // The last call (SHA-512) wrote all 64 bytes.
+        assert_eq!(out, sha512::sha512(b"abc"));
+        Hash::Sha256.digest(b"abc", &mut out);
+        assert_eq!(out[..32], sha256::sha256(b"abc"));
     }
 }

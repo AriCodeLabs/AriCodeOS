@@ -57,20 +57,26 @@ pub fn write_get(host: &str, path: &str, out: &mut [u8]) -> Option<usize> {
     Some(n)
 }
 
-/// Parsed `http://host[:port]/path` URL.
+/// Parsed `http[s]://host[:port]/path` URL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Url<'a> {
     pub host: &'a str,
     pub port: u16,
     pub path: &'a str,
+    /// `https://`: the transport must be TLS (default port 443).
+    pub secure: bool,
 }
 
 impl<'a> Url<'a> {
-    /// Accepts `http://host`, `host:port/path` and `host/path`. Rejects
-    /// `https`, empty hosts or hosts longer than [`MAX_HOST`] bytes, and spaces.
+    /// Accepts `http://host`, `https://host`, `host:port/path` and
+    /// `host/path` (plain HTTP). Rejects empty hosts or hosts longer than
+    /// [`MAX_HOST`] bytes, and spaces.
     pub fn parse(s: &'a str) -> Option<Self> {
-        let rest = s.strip_prefix("http://").unwrap_or(s);
-        if rest.starts_with("https://") || rest.is_empty() {
+        let (rest, secure) = match s.strip_prefix("https://") {
+            Some(r) => (r, true),
+            None => (s.strip_prefix("http://").unwrap_or(s), false),
+        };
+        if rest.is_empty() || rest.contains("://") {
             return None;
         }
         let (authority, path) = match rest.find('/') {
@@ -79,7 +85,7 @@ impl<'a> Url<'a> {
         };
         let (host, port) = match authority.rsplit_once(':') {
             Some((h, p)) => (h, p.parse().ok()?),
-            None => (authority, 80),
+            None => (authority, if secure { 443 } else { 80 }),
         };
         if host.is_empty()
             || host.len() > MAX_HOST
@@ -89,15 +95,21 @@ impl<'a> Url<'a> {
         {
             return None;
         }
-        Some(Url { host, port, path })
+        Some(Url {
+            host,
+            port,
+            path,
+            secure,
+        })
     }
 
-    /// `host[:port]` for the `Host` header (port 80 is omitted).
+    /// `host[:port]` for the `Host` header (the scheme's default port is
+    /// omitted).
     pub fn host_header<'b>(&self, out: &'b mut [u8; MAX_HOST + 6]) -> &'b str {
         let h = self.host.as_bytes();
         out[..h.len()].copy_from_slice(h);
         let mut n = h.len();
-        if self.port != 80 {
+        if self.port != if self.secure { 443 } else { 80 } {
             out[n] = b':';
             n += 1;
             let mut digits = [0u8; 5];
@@ -554,7 +566,8 @@ mod tests {
             Url {
                 host: "10.0.2.2",
                 port: 17010,
-                path: "/hola"
+                path: "/hola",
+                secure: false,
             }
         );
         let mut hb = [0u8; MAX_HOST + 6];
@@ -562,7 +575,16 @@ mod tests {
         let u = Url::parse("example.org").unwrap();
         assert_eq!((u.host, u.port, u.path), ("example.org", 80, "/"));
         assert_eq!(u.host_header(&mut hb), "example.org");
-        assert!(Url::parse("https://x").is_none());
+        let s = Url::parse("https://www.example.org/a?b").unwrap();
+        assert_eq!(
+            (s.host, s.port, s.path, s.secure),
+            ("www.example.org", 443, "/a?b", true)
+        );
+        assert_eq!(s.host_header(&mut hb), "www.example.org");
+        let s = Url::parse("https://h:8443").unwrap();
+        assert_eq!((s.port, s.host_header(&mut hb)), (8443, "h:8443"));
+        assert!(Url::parse("http://https://x").is_none());
+        assert!(Url::parse("ftp://x").is_none());
         assert!(Url::parse("").is_none());
         assert!(Url::parse("host:puerto/").is_none());
         let long = std::format!("{}.test", "a".repeat(MAX_HOST));

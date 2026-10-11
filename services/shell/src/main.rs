@@ -7,6 +7,8 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use aricode_proto::net::{Status as NetStatus, LINK_DOWN, LINK_UP};
 use aricode_rt::sys::net::{NetClient, NetError};
 use aricode_rt::sys::{self, abi, fs::FsClient, Handle, TIMEOUT_INFINITE};
@@ -232,7 +234,7 @@ fn trim(s: &[u8]) -> &[u8] {
 
 fn help() {
     print(
-        b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  cpus      online processors and idle time per CPU\n  diag [NAME]  full report (uptime, mem, cpus, ps, services, net, devices); with NAME saves it to AriFS\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body\n  run PROG  run an initrd program and wait\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
+        b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  cpus      online processors and idle time per CPU\n  diag [NAME]  full report (uptime, mem, cpus, ps, services, net, devices); with NAME saves it to AriFS\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body (http:// or https://)\n  run PROG  run an initrd program and wait\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
     );
 }
 
@@ -684,17 +686,28 @@ fn dns(client: &mut NetClient, arg: &[u8]) {
     }
 }
 
-fn http_get(client: &mut NetClient, arg: &[u8]) {
+fn http_get(fs: &mut FsClient, client: &mut NetClient, arg: &[u8]) {
+    use aricode_https::HttpsError;
     let Ok(url) = core::str::from_utf8(arg) else {
         print(b"http: invalid url\n");
         return;
     };
     if url.is_empty() {
-        print(b"usage: http [http://]host[:port][/path]\n");
+        print(b"usage: http [http[s]://]host[:port][/path]\n");
         return;
     }
-    let mut body = [0u8; 4096];
-    match aricode_rt::sys::http::get(client, url, &mut body, 5000) {
+    // An extra trust anchor in AriFS (a private CA), if there is one.
+    let mut extra = alloc::vec::Vec::new();
+    if let Ok(fd) = fs.open(TRUSTED_CA) {
+        let mut der = alloc::vec![0u8; 4096];
+        if let Ok(n) = fs.read(fd, 0, &mut der) {
+            der.truncate(n);
+            extra.push(der);
+        }
+        let _ = fs.close(fd);
+    }
+    let mut body = [0u8; 8192];
+    match aricode_https::get(client, SYSTEM, &extra, url, &mut body, 8000) {
         Ok(f) => {
             print(b"HTTP ");
             num(f.status as u64);
@@ -706,20 +719,44 @@ fn http_get(client: &mut NetClient, arg: &[u8]) {
                 print(b"\n");
             }
         }
-        Err(aricode_rt::sys::http::HttpError::BadUrl) => print(b"http: invalid url\n"),
-        Err(aricode_rt::sys::http::HttpError::Resolve(e)) => net_error(e),
-        Err(aricode_rt::sys::http::HttpError::Connect(e)) => {
+        Err(HttpsError::BadUrl) => print(b"http: invalid url\n"),
+        Err(HttpsError::Resolve(e)) => net_error(e),
+        Err(HttpsError::Connect(e)) => {
             print(b"http: could not connect: ");
             net_error(e);
         }
-        Err(aricode_rt::sys::http::HttpError::Io(e)) => net_error(e),
-        Err(aricode_rt::sys::http::HttpError::Malformed) => print(b"http: invalid response\n"),
-        Err(aricode_rt::sys::http::HttpError::Unsupported) => {
+        Err(HttpsError::Io(e)) => net_error(e),
+        Err(HttpsError::Tls(e)) => {
+            print(b"http: TLS: ");
+            print(tls_error(e));
+            print(b"\n");
+        }
+        Err(HttpsError::Malformed) => print(b"http: invalid response\n"),
+        Err(HttpsError::Unsupported) => {
             print(b"http: response uses an unsupported encoding or protocol\n")
         }
-        Err(aricode_rt::sys::http::HttpError::TooBig) => {
-            print(b"http: response too large (4 KiB)\n")
-        }
+        Err(HttpsError::TooBig) => print(b"http: response too large (8 KiB)\n"),
+    }
+}
+
+/// AriFS file with an extra trusted root certificate (DER) for `http`.
+const TRUSTED_CA: &str = "trusted_ca.der";
+
+/// Short explanation of a TLS failure.
+fn tls_error(e: aricode_tls::Error) -> &'static [u8] {
+    use aricode_tls::Error as E;
+    use aricode_x509::Error as X;
+    match e {
+        E::Certificate(X::Expired) => b"certificate expired",
+        E::Certificate(X::NotYetValid) => b"certificate not yet valid (check the clock)",
+        E::Certificate(X::NameMismatch) => b"certificate does not match the host name",
+        E::Certificate(X::UnknownIssuer) => b"certificate signed by an unknown authority",
+        E::Certificate(X::BadSignature) => b"invalid certificate signature",
+        E::Certificate(_) => b"certificate rejected",
+        E::Alert(_) => b"the server sent an alert",
+        E::Unsupported(_) => b"the server needs an unsupported TLS feature",
+        E::Decrypt => b"record authentication failed",
+        E::Protocol(_) => b"protocol error",
     }
 }
 
@@ -978,7 +1015,7 @@ fn execute(
         b"net" => net(net_client),
         b"ping" => ping(net_client, rest),
         b"dns" => dns(net_client, rest),
-        b"http" => http_get(net_client, rest),
+        b"http" => http_get(fs, net_client, rest),
         b"run" => run(rest),
         b"spawn" => spawn(rest),
         b"repeat" => {

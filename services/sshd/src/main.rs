@@ -273,6 +273,16 @@ fn main(_arg: u64) -> u64 {
     if keys.is_empty() {
         say(b"no keys in authorized_keys: every login will be refused");
     }
+    // Tell init we are up, so it can start the console shell.
+    let _ = sys::ipc_send(
+        SESSIONS,
+        &session::Request {
+            kind: session::Kind::Ready,
+        }
+        .encode(),
+        &[],
+        1000,
+    );
     loop {
         let (sock, peer, _) = match net.tcp_accept(listener, 60_000) {
             Ok(c) => c,

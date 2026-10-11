@@ -2118,6 +2118,11 @@ fn main(arg: u64) -> u64 {
                     )
                     .is_some_and(|i| sup.launch(i));
                 if launched {
+                    // Wait (bounded) for sshd to report that it listens, so
+                    // its boot lines do not interleave with the shell prompt.
+                    let mut msg = [0u8; aricode_proto::session::Request::LEN];
+                    let mut none = [Handle(0); 1];
+                    let _ = sys::ipc_receive(endpoint, &mut msg, &mut none, 5000);
                     sessions = Some(Sessions {
                         endpoint,
                         children: [None; MAX_SESSIONS],

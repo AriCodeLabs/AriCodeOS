@@ -44,6 +44,10 @@ pub fn get(
     timeout_ms: u32,
 ) -> Result<Fetched, HttpError> {
     let url = Url::parse(url).ok_or(HttpError::BadUrl)?;
+    // Plain HTTP only; `aricode-https` adds TLS (it needs `alloc`).
+    if url.secure {
+        return Err(HttpError::BadUrl);
+    }
     let addr = match aricode_net::Ipv4Addr::parse(url.host) {
         Some(ip) => ip.0,
         None => net

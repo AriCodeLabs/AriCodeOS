@@ -45,3 +45,13 @@ impl Clock {
         self.now_ms().saturating_sub(self.start)
     }
 }
+
+/// Unix seconds from the real-time clock, or `None` if the kernel could not
+/// read it.
+pub fn unix_seconds(system: Handle) -> Option<u64> {
+    let mut b = [0u8; 8];
+    match sys::system_info(system, abi::sysinfo::WALLCLOCK, &mut b) {
+        Ok(8) => Some(u64::from_le_bytes(b)).filter(|&t| t != 0),
+        _ => None,
+    }
+}

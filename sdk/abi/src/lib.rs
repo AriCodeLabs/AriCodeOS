@@ -307,6 +307,9 @@ pub mod sysinfo {
     /// One `u64`: microseconds since boot (calibrated TSC; without
     /// calibration, the ms tick times 1000).
     pub const UPTIME_US: u64 = 9;
+    /// One `u64`: Unix seconds from the CMOS real-time clock (read at boot,
+    /// advanced with the uptime); 0 if the RTC could not be read.
+    pub const WALLCLOCK: u64 = 10;
 
     /// Event class of the kernel ring.
     #[repr(u8)]
