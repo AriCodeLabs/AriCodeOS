@@ -1,17 +1,17 @@
 [alias]
 xtask = "run --package xtask --release --"
 
-# Kernel: ELF estático en la mitad alta. code-model=kernel permite direcciones
-# en los últimos 2 GiB con desplazamientos de 32 bits con signo.
+# Kernel: static ELF in the higher half. code-model=kernel allows addresses
+# in the top 2 GiB with signed 32-bit displacements.
 [target.x86_64-unknown-none]
 rustflags = [
     "-C", "relocation-model=static",
     "-C", "code-model=kernel",
 ]
 
-# Módulos WebAssembly de ejemplo: solo MVP con las extensiones que entiende
-# `aricode-wasm` (sign-ext, bulk-memory); pila pequeña para que el módulo
-# quepa en la memoria que le da el anfitrión.
+# Sample WebAssembly modules: MVP only, plus the extensions `aricode-wasm`
+# understands (sign-ext, bulk-memory); small stack so the module fits in
+# the memory the host gives it.
 [target.wasm32-unknown-unknown]
 rustflags = [
     "-C", "target-cpu=mvp",

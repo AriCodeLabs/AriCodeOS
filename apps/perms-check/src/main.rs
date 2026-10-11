@@ -1,13 +1,13 @@
-//! `perms_check`: regresión de la auditoría del SDK (hallazgo 2). Recibe tres
-//! handles extra (`SYSTEM`, endpoint, `HARDWARE`), cierra el primero y luego
-//! el del medio, y exige que `permissions::granted` siga listando los que
-//! quedan: un hueco no esconde los permisos posteriores.
+//! `perms_check`: regression for the SDK audit (finding 2). It receives three
+//! extra handles (`SYSTEM`, endpoint, `HARDWARE`), closes the first and then
+//! the middle one, and requires `permissions::granted` to keep listing the
+//! remaining ones: a gap does not hide later permissions.
 #![no_std]
 #![no_main]
 
 use aricode_rt::sys::{self, kind, permissions, Handle};
 
-/// Devuelve cuántos handles extra enumera `granted` y una máscara por tipo.
+/// Returns how many extra handles `granted` lists and a flag per kind.
 fn survey() -> (u32, bool, bool, bool) {
     let (mut extra, mut system, mut endpoint, mut hardware) = (0, false, false, false);
     permissions::granted(|h, _| {
@@ -27,7 +27,7 @@ fn report(step: &[u8], s: (u32, bool, bool, bool)) {
     sys::print(step);
     sys::print(b":");
     if s.1 {
-        sys::print(b" sistema");
+        sys::print(b" system");
     }
     if s.2 {
         sys::print(b" endpoint");
@@ -36,37 +36,37 @@ fn report(step: &[u8], s: (u32, bool, bool, bool)) {
         sys::print(b" hardware");
     }
     if s.0 == 0 {
-        sys::print(b" (ninguno)");
+        sys::print(b" (none)");
     }
     sys::print(b"\n");
 }
 
 fn main(_arg: u64) -> u64 {
     let start = survey();
-    report(b"al arrancar", start);
+    report(b"at start", start);
     if start != (3, true, true, true) {
         return 1;
     }
-    // Renunciar al primero (SYSTEM, 0x10004): debe seguir viendose el resto.
+    // Drop the first one (SYSTEM, 0x10004): the rest must still be visible.
     if permissions::drop_handle(Handle(permissions::FIRST_EXTRA)).is_err() {
         return 2;
     }
     let after_first = survey();
-    report(b"sin el sistema", after_first);
+    report(b"without system", after_first);
     if after_first != (2, false, true, true) {
-        sys::print(b"perms_check: un hueco oculto los permisos restantes\n");
+        sys::print(b"perms_check: a gap hid the remaining permissions\n");
         return 3;
     }
-    // Hueco en el medio: cerrar el endpoint (0x10005) y conservar HARDWARE.
+    // Gap in the middle: close the endpoint (0x10005) and keep HARDWARE.
     if permissions::drop_handle(Handle(permissions::FIRST_EXTRA + 1)).is_err() {
         return 4;
     }
     let after_middle = survey();
-    report(b"sin el endpoint", after_middle);
+    report(b"without endpoint", after_middle);
     if after_middle != (1, false, false, true) {
         return 5;
     }
-    sys::print(b"perms_check: la enumeracion salta huecos ok\n");
+    sys::print(b"perms_check: enumeration skips gaps ok\n");
     0
 }
 

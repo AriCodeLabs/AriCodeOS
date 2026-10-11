@@ -1,4 +1,4 @@
-# Aplicacion externa: reloj del sistema y un directorio privado en AriFS.
+# External application: system clock and a private directory on AriFS.
 name = hello_ext
 caps = system, fs
 memory = 64K

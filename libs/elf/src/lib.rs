@@ -1,7 +1,7 @@
-//! Parser mínimo de ELF64 (x86-64, little endian, `ET_EXEC`) para cargar el
-//! kernel: cabecera, program headers `PT_LOAD` y punto de entrada.
+//! Minimal ELF64 parser (x86-64, little endian, `ET_EXEC`) to load the
+//! kernel: header, `PT_LOAD` program headers and entry point.
 //!
-//! `no_std` + `alloc`. Se prueba en host con `cargo test -p aricode-elf`.
+//! `no_std` + `alloc`. Tested on the host with `cargo test -p aricode-elf`.
 
 #![no_std]
 
@@ -29,11 +29,11 @@ impl Segment {
     pub fn executable(&self) -> bool {
         self.flags & PF_X != 0
     }
-    /// Fin exclusivo en memoria. Garantizado sin overflow por `Elf::parse`.
+    /// Exclusive end in memory. Guaranteed overflow-free by `Elf::parse`.
     pub fn end(&self) -> u64 {
         self.vaddr + self.memsz
     }
-    /// Rango [inicio, fin) redondeado a página. Garantizado sin overflow por `Elf::parse`.
+    /// Page-rounded [start, end) range. Guaranteed overflow-free by `Elf::parse`.
     pub fn page_range(&self) -> (u64, u64) {
         (
             self.vaddr & !PAGE_MASK,
@@ -50,8 +50,8 @@ const PAGE_MASK: u64 = 0xFFF;
 pub struct Elf<'a> {
     data: &'a [u8],
     pub entry: u64,
-    /// Segmentos `PT_LOAD` con `memsz > 0`, validados: sin overflow, sin
-    /// solapes por página. Los vacíos se descartan en `parse`.
+    /// `PT_LOAD` segments with `memsz > 0`, validated: no overflow, no
+    /// per-page overlap. Empty ones are dropped in `parse`.
     pub segments: Vec<Segment>,
 }
 
@@ -74,13 +74,13 @@ pub enum ElfError {
     NotExecutable,
     NotX86_64,
     BadProgramHeader,
-    /// Sin segmentos `PT_LOAD`.
+    /// No `PT_LOAD` segments.
     NoSegments,
-    /// `vaddr + memsz` (o su redondeo a página) no es representable.
+    /// `vaddr + memsz` (or its page rounding) is not representable.
     AddressOverflow,
-    /// Dos segmentos `PT_LOAD` se solapan en memoria (a granularidad de página).
+    /// Two `PT_LOAD` segments overlap in memory (at page granularity).
     OverlappingSegments,
-    /// `e_entry` no cae dentro de un segmento `PT_LOAD` ejecutable.
+    /// `e_entry` does not fall inside an executable `PT_LOAD` segment.
     EntryOutsideText,
 }
 
@@ -145,7 +145,7 @@ impl<'a> Elf<'a> {
             {
                 return Err(ElfError::BadProgramHeader);
             }
-            // Todo el rango, incluido el redondeo a página, debe ser representable.
+            // The whole range, page rounding included, must be representable.
             if seg
                 .vaddr
                 .checked_add(seg.memsz)
@@ -154,10 +154,10 @@ impl<'a> Elf<'a> {
             {
                 return Err(ElfError::AddressOverflow);
             }
-            // Un PT_LOAD con memsz == 0 no ocupa memoria: se descarta aquí para
-            // que ni la reserva, ni la copia ni el mapeo lo vean. Si se
-            // conservara, su `page_range` (una página completa si vaddr no
-            // está alineado) podría pisar los permisos de otro segmento.
+            // A PT_LOAD with memsz == 0 occupies no memory: it is dropped here so
+            // that neither allocation, copy nor mapping sees it. If it were
+            // kept, its `page_range` (a full page if vaddr is not
+            // aligned) could overwrite another segment's permissions.
             if seg.memsz == 0 {
                 continue;
             }
@@ -177,8 +177,8 @@ impl<'a> Elf<'a> {
         })
     }
 
-    /// Dos segmentos no pueden compartir páginas: la reserva y el mapeo se
-    /// hacen por página y con permisos por segmento. (Los vacíos ya no están.)
+    /// Two segments cannot share pages: allocation and mapping are done
+    /// per page with per-segment permissions. (Empty ones are already gone.)
     fn check_no_overlap(segments: &[Segment]) -> Result<(), ElfError> {
         for (i, a) in segments.iter().enumerate() {
             let (a0, a1) = a.page_range();
@@ -196,8 +196,8 @@ impl<'a> Elf<'a> {
         &self.data[seg.offset as usize..(seg.offset + seg.filesz) as usize]
     }
 
-    /// Rango virtual [min, max) cubierto por los segmentos, alineado a página.
-    /// Sin overflow: `parse` ya validó cada segmento.
+    /// Virtual range [min, max) covered by the segments, page aligned.
+    /// No overflow: `parse` already validated every segment.
     pub fn virt_range(&self) -> (u64, u64) {
         self.segments
             .iter()
@@ -211,7 +211,7 @@ mod tests {
     use super::*;
     use alloc::vec;
 
-    /// Construye un ELF64 mínimo con `n` program headers PT_LOAD.
+    /// Builds a minimal ELF64 with `n` PT_LOAD program headers.
     fn build_elf(entry: u64, segs: &[(u64, u64, u64, u32)]) -> Vec<u8> {
         let mut d = vec![0u8; 64 + 56 * segs.len() + 64];
         d[0..4].copy_from_slice(b"\x7FELF");
@@ -240,23 +240,23 @@ mod tests {
 
     #[test]
     fn rejects_entry_outside_executable_segment() {
-        // entry = 0 (auditoría, hallazgo 3)
+        // entry = 0 (audit, finding 3)
         let d = build_elf(0, &[(TEXT, 16, 16, PF_X | 4)]);
         assert_eq!(Elf::parse(&d).unwrap_err(), ElfError::EntryOutsideText);
-        // entry dentro de un segmento NX
+        // entry inside an NX segment
         let d = build_elf(
             TEXT + 0x3000,
             &[(TEXT, 16, 16, PF_X | 4), (TEXT + 0x3000, 8, 8, PF_W | 4)],
         );
         assert_eq!(Elf::parse(&d).unwrap_err(), ElfError::EntryOutsideText);
-        // entry justo al final del texto (exclusivo)
+        // entry right at the end of text (exclusive)
         let d = build_elf(TEXT + 16, &[(TEXT, 16, 16, PF_X | 4)]);
         assert_eq!(Elf::parse(&d).unwrap_err(), ElfError::EntryOutsideText);
     }
 
     #[test]
     fn rejects_address_overflow() {
-        // vaddr + memsz envuelve (auditoría, hallazgo 1)
+        // vaddr + memsz wraps around (audit, finding 1)
         let d = build_elf(
             TEXT,
             &[
@@ -265,7 +265,7 @@ mod tests {
             ],
         );
         assert_eq!(Elf::parse(&d).unwrap_err(), ElfError::AddressOverflow);
-        // vaddr + memsz cabe pero el redondeo a página no
+        // vaddr + memsz fits but the page rounding does not
         let d = build_elf(
             TEXT,
             &[
@@ -274,7 +274,7 @@ mod tests {
             ],
         );
         assert_eq!(Elf::parse(&d).unwrap_err(), ElfError::AddressOverflow);
-        // memsz enorme
+        // huge memsz
         let d = build_elf(TEXT, &[(TEXT, 1, u64::MAX, PF_X | 4)]);
         assert_eq!(Elf::parse(&d).unwrap_err(), ElfError::AddressOverflow);
     }
@@ -290,8 +290,8 @@ mod tests {
 
     #[test]
     fn empty_segments_are_dropped_and_cannot_clobber_text() {
-        // Revision de auditoria, hallazgo 1: PT_LOAD RW vacio, sin alinear,
-        // sobre la pagina de la entrada. Debe desaparecer del resultado.
+        // Audit review, finding 1: empty, unaligned RW PT_LOAD
+        // on the entry page. It must vanish from the result.
         let d = build_elf(
             TEXT + 0x10,
             &[
@@ -304,7 +304,7 @@ mod tests {
         assert_eq!(elf.segments.len(), 2);
         assert!(elf.segments.iter().all(|s| s.memsz > 0));
         assert_eq!(elf.virt_range(), (TEXT, TEXT + 0x4000));
-        // Un ELF cuyo unico PT_LOAD es vacio no tiene nada que cargar.
+        // An ELF whose only PT_LOAD is empty has nothing to load.
         let d = build_elf(TEXT, &[(TEXT, 0, 0, PF_X | 4)]);
         assert_eq!(Elf::parse(&d).unwrap_err(), ElfError::NoSegments);
     }
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn rejects_segment_with_filesz_beyond_data() {
         let mut d = build_elf(0, &[(0x1000, 4, 4, 0)]);
-        d[64 + 32..64 + 40].copy_from_slice(&10_000u64.to_le_bytes()); // filesz gigante
+        d[64 + 32..64 + 40].copy_from_slice(&10_000u64.to_le_bytes()); // huge filesz
         d[64 + 40..64 + 48].copy_from_slice(&10_000u64.to_le_bytes());
         assert!(matches!(Elf::parse(&d), Err(ElfError::BadProgramHeader)));
     }

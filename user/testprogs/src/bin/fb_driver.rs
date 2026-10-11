@@ -1,5 +1,5 @@
-//! Driver de prueba: pinta el framebuffer a traves de una capability MMIO.
-//! Handle 0x10004 = region MMIO del framebuffer (READ|WRITE); arg = stride.
+//! Test driver: paints the framebuffer through an MMIO capability.
+//! Handle 0x10004 = framebuffer MMIO region (READ|WRITE); arg = stride.
 #![no_std]
 #![no_main]
 
@@ -22,7 +22,7 @@ fn main(stride: u64) -> u64 {
             if (idx + 1) * 4 > len {
                 return 3;
             }
-            // SAFETY: dentro de la region mapeada, comprobado contra `len`.
+            // SAFETY: inside the mapped region, checked against `len`.
             unsafe { pixels.add(idx as usize).write_volatile(COLOR) };
         }
     }

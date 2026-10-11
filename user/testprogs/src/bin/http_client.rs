@@ -1,6 +1,6 @@
-//! Cliente HTTP de prueba (Fase 24): GET contra el servidor del host, con
-//! cuerpo por Content-Length, chunked, 404 y una URL con nombre resuelto por
-//! el respondedor DNS. Handles: 0x10004 = netd, 0x10005 = HARDWARE.
+//! Test HTTP client (Phase 24): GET against the host server, with a
+//! Content-Length body, chunked, 404 and a URL whose name is resolved by the
+//! DNS responder. Handles: 0x10004 = netd, 0x10005 = HARDWARE.
 #![no_std]
 #![no_main]
 
@@ -26,7 +26,7 @@ fn main(_arg: u64) -> u64 {
     }
     let mut body = [0u8; 4096];
     let mut buf = [0u8; 20];
-    // 1. Cuerpo con Content-Length.
+    // 1. Body with Content-Length.
     match http::get(&mut net, "http://10.0.2.2:17010/hola", &mut body, 5000) {
         Ok(f) if f.status == 200 && &body[..f.body_len] == b"Hola desde el host\n" => {
             sys::print(b"http_client: GET /hola -> 200, ");
@@ -36,7 +36,7 @@ fn main(_arg: u64) -> u64 {
         }
         _ => return 3,
     }
-    // 2. Cuerpo chunked.
+    // 2. Chunked body.
     match http::get(&mut net, "10.0.2.2:17010/chunked", &mut body, 5000) {
         Ok(f) if f.status == 200 && &body[..f.body_len] == b"primer trozo, segundo trozo" => {
             sys::print(b"http_client: GET /chunked -> 200 (chunked) ok\n");
@@ -48,16 +48,16 @@ fn main(_arg: u64) -> u64 {
         Ok(f) if f.status == 404 => sys::print(b"http_client: GET /no-existe -> 404\n"),
         _ => return 5,
     }
-    // 4. Puerto cerrado: error de conexion.
+    // 4. Closed port: connection error.
     match http::get(&mut net, "http://10.0.2.2:17011/", &mut body, 3000) {
-        Err(HttpError::Connect(_)) => sys::print(b"http_client: puerto cerrado detectado\n"),
+        Err(HttpError::Connect(_)) => sys::print(b"http_client: closed port detected\n"),
         _ => return 6,
     }
     if http::get(&mut net, "https://10.0.2.2/", &mut body, 1000) != Err(HttpError::BadUrl) {
         return 7;
     }
     let _ = TEST_HTTP_PORT;
-    sys::print(b"http_client: HTTP GET por TCP ok\n");
+    sys::print(b"http_client: HTTP GET over TCP ok\n");
     0
 }
 

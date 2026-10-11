@@ -1,4 +1,4 @@
-//! ARP para IPv4 sobre Ethernet (RFC 826) y una caché pequeña.
+//! ARP for IPv4 over Ethernet (RFC 826) and a small cache.
 
 use crate::{be16, Ipv4Addr, MacAddr};
 
@@ -26,7 +26,7 @@ impl Packet {
         }
     }
 
-    /// Respuesta a `request` desde `mac`/`ip`.
+    /// Reply to `request` from `mac`/`ip`.
     pub fn reply_to(request: &Packet, mac: MacAddr, ip: Ipv4Addr) -> Self {
         Self {
             op: OP_REPLY,
@@ -82,7 +82,7 @@ impl Packet {
     }
 }
 
-/// Caché ARP de tamaño fijo con reemplazo del más antiguo.
+/// Fixed-size ARP cache that replaces the oldest entry.
 pub struct Cache<const N: usize> {
     entries: [Option<(Ipv4Addr, MacAddr)>; N],
     next: usize,
@@ -142,7 +142,7 @@ mod tests {
         assert_eq!(reply.op, OP_REPLY);
         assert_eq!(reply.target_mac, me);
         assert_eq!(reply.target_ip, ip);
-        buf[4] = 8; // longitud de hardware incorrecta
+        buf[4] = 8; // wrong hardware length
         assert!(Packet::parse(&buf).is_none());
     }
 
@@ -152,9 +152,9 @@ mod tests {
         let m = |x| MacAddr([x; 6]);
         c.insert(Ipv4Addr::new(1, 1, 1, 1), m(1));
         c.insert(Ipv4Addr::new(2, 2, 2, 2), m(2));
-        c.insert(Ipv4Addr::new(1, 1, 1, 1), m(9)); // actualiza
+        c.insert(Ipv4Addr::new(1, 1, 1, 1), m(9)); // updates
         assert_eq!(c.lookup(Ipv4Addr::new(1, 1, 1, 1)), Some(m(9)));
-        c.insert(Ipv4Addr::new(3, 3, 3, 3), m(3)); // expulsa la mas antigua (slot 0)
+        c.insert(Ipv4Addr::new(3, 3, 3, 3), m(3)); // evicts the oldest (slot 0)
         assert_eq!(c.lookup(Ipv4Addr::new(1, 1, 1, 1)), None);
         assert_eq!(c.lookup(Ipv4Addr::new(2, 2, 2, 2)), Some(m(2)));
         assert_eq!(c.lookup(Ipv4Addr::new(3, 3, 3, 3)), Some(m(3)));

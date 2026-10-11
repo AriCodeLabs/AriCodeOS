@@ -1,9 +1,9 @@
-# Etapa 3 (estudio F): la version nueva falla en cada arranque (init no
-# confirma), AriBoot agota los tres intentos y vuelve a A. Los datos escritos
-# en AriFS antes de actualizar siguen ahi tras el rollback: A/B protege el
-# sistema y no toca la particion de datos.
+# Stage 3 (study F): the new version fails on every boot (init does not
+# confirm), AriBoot uses up the three attempts and goes back to A. The data written
+# to AriFS before the update is still there after the rollback: A/B protects the
+# system and does not touch the data partition.
 name = "update.rollback_keeps_data"
-description = "tres arranques fallidos de B, rollback a A y los datos de AriFS intactos"
+description = "three failed boots of B, rollback to A and the AriFS data intact"
 level = "full"
 areas = ["update", "boot", "init", "shell"]
 timeout_secs = 120
@@ -14,9 +14,9 @@ stdin = ["write notas.txt datos de la version 1", "run updater", "reboot"]
 [boots.expect]
 exit = 0
 serial_contains = [
-    "write: 22 bytes en notas.txt",
-    "updater: estado: activo A, pendiente B (3 intentos); reinicia para probarlo",
-    "AriCodeOS: reiniciando",
+    "write: 22 bytes to notas.txt",
+    "updater: state: active A, pending B (3 tries); reboot to try it",
+    "AriCodeOS: rebooting",
 ]
 serial_absent = ["KERNEL PANIC"]
 
@@ -25,34 +25,34 @@ cmdline = "qemu_exit init_fail_late"
 [boots.expect]
 exit = 33
 serial_contains = [
-    "slots: estado activo A, pendiente B (3 intentos)",
-    "slots: arrancando desde el slot B (imagen version 2, pendiente de confirmacion)",
-    "AriInit: fallo tardio provocado (init_fail_late): no se confirma el slot",
-    "init terminado con codigo 99",
+    "slots: state active A, pending B (3 tries)",
+    "slots: booting from slot B (image version 2, pending confirmation)",
+    "AriInit: induced late failure (init_fail_late): slot not confirmed",
+    "init exited with code 99",
 ]
-serial_absent = ["KERNEL PANIC", "arranque confirmado"]
+serial_absent = ["KERNEL PANIC", "boot confirmed"]
 
 [[boots]]
 cmdline = "qemu_exit init_fail_late"
 [boots.expect]
 exit = 33
 serial_contains = [
-    "slots: estado activo A, pendiente B (2 intentos)",
-    "slots: arrancando desde el slot B (imagen version 2, pendiente de confirmacion)",
-    "init terminado con codigo 99",
+    "slots: state active A, pending B (2 tries)",
+    "slots: booting from slot B (image version 2, pending confirmation)",
+    "init exited with code 99",
 ]
-serial_absent = ["KERNEL PANIC", "arranque confirmado"]
+serial_absent = ["KERNEL PANIC", "boot confirmed"]
 
 [[boots]]
 cmdline = "qemu_exit init_fail_late"
 [boots.expect]
 exit = 33
 serial_contains = [
-    "slots: estado activo A, pendiente B (1 intentos)",
-    "slots: arrancando desde el slot B (imagen version 2, pendiente de confirmacion)",
-    "init terminado con codigo 99",
+    "slots: state active A, pending B (1 tries)",
+    "slots: booting from slot B (image version 2, pending confirmation)",
+    "init exited with code 99",
 ]
-serial_absent = ["KERNEL PANIC", "arranque confirmado"]
+serial_absent = ["KERNEL PANIC", "boot confirmed"]
 
 [[boots]]
 cmdline = "qemu_exit shell"
@@ -60,11 +60,11 @@ stdin = ["cat notas.txt", "shutdown"]
 [boots.expect]
 exit = 33
 serial_contains = [
-    "slots: estado activo A, pendiente B (0 intentos)",
-    "slots: slot pendiente agotado: rollback al activo -> slot A",
-    "slots: arrancando desde el slot A (imagen version 1)",
-    "AriInit: arrancado desde el slot A (activo)",
+    "slots: state active A, pending B (0 tries)",
+    "slots: pending slot exhausted: rollback to active -> slot A",
+    "slots: booting from slot A (image version 1)",
+    "AriInit: booted from slot A (active)",
     "datos de la version 1",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "boot_slot=B", "cat: no existe"]
+serial_absent = ["KERNEL PANIC", "boot_slot=B", "cat: not found:"]

@@ -1,6 +1,6 @@
-/* AriKernel: ELF64 estático enlazado en la mitad alta.
- * Segmentos separados y alineados a página para poder aplicar W^X
- * desde el bootloader (texto RX, rodata R, data/bss RW). */
+/* AriKernel: static ELF64 linked in the higher half.
+ * Separate, page-aligned segments so the bootloader can enforce W^X
+ * (text RX, rodata R, data/bss RW). */
 ENTRY(kernel_entry)
 
 KERNEL_VIRT_BASE = 0xFFFFFFFF80000000;

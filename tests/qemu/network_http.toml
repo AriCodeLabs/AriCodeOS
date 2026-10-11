@@ -1,7 +1,7 @@
-# Fase 24: primera aplicacion de red. GET contra el servidor HTTP de pruebas
-# del host: Content-Length, chunked, 404 y puerto cerrado.
+# Phase 24: first network application. GET against the host test HTTP
+# server: Content-Length, chunked, 404 and closed port.
 name = "network.http"
-description = "cliente HTTP GET sobre TCP por IPC"
+description = "HTTP GET client over TCP via IPC"
 level = "full"
 areas = ["network", "init"]
 cmdline = "qemu_exit"
@@ -13,9 +13,9 @@ serial_contains = [
     "http_client: GET /hola -> 200, 19 bytes: Hola desde el host",
     "http_client: GET /chunked -> 200 (chunked) ok",
     "http_client: GET /no-existe -> 404",
-    "http_client: puerto cerrado detectado",
-    "http_client: HTTP GET por TCP ok",
-    "AriInit: cliente HTTP ok",
+    "http_client: closed port detected",
+    "http_client: HTTP GET over TCP ok",
+    "AriInit: HTTP client ok",
     "ARICODEOS_KERNEL_READY",
 ]
 serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW"]

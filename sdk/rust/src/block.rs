@@ -1,5 +1,5 @@
-//! Cliente del servicio de bloques (`aricode-proto::block`) con un buffer DMA
-//! propio: la memoria la aporta el cliente y el dispositivo escribe en ella.
+//! Block service client (`aricode-proto::block`) with its own DMA buffer:
+//! the client provides the memory and the device writes into it.
 
 use crate::{self as sys, rights, rpc, Error, Handle};
 use aricode_proto::block::{Op, Reply, Request, Status, MAX_SECTORS};
@@ -12,8 +12,8 @@ pub struct BlockClient {
 }
 
 impl BlockClient {
-    /// `service`: endpoint del servicio (WRITE); `hardware`: capacidad para
-    /// reservar el buffer DMA de `sectors` sectores (máximo `MAX_SECTORS`).
+    /// `service`: service endpoint (WRITE); `hardware`: capability to
+    /// allocate the DMA buffer of `sectors` sectors (at most `MAX_SECTORS`).
     pub fn new(service: Handle, hardware: Handle, sectors: u16) -> Result<Self, Error> {
         let sectors = sectors.clamp(1, MAX_SECTORS) as u64;
         let dma = sys::dma_alloc(hardware, sectors * 512)?;
@@ -26,9 +26,9 @@ impl BlockClient {
         })
     }
 
-    /// Buffer de datos (`sectors * 512` bytes).
+    /// Data buffer (`sectors * 512` bytes).
     pub fn buffer(&mut self) -> &mut [u8] {
-        // SAFETY: buffer DMA mapeado RW en este proceso, exclusivo del cliente.
+        // SAFETY: DMA buffer mapped RW in this process, exclusive to the client.
         unsafe { core::slice::from_raw_parts_mut(self.buf as *mut u8, self.buf_len as usize) }
     }
 
@@ -70,7 +70,7 @@ impl BlockClient {
         )?)
     }
 
-    /// Lee `count` sectores en el buffer.
+    /// Reads `count` sectors into the buffer.
     pub fn read(&self, lba: u64, count: u16) -> Result<(), Error> {
         Self::check(self.call(
             Request {
@@ -83,7 +83,7 @@ impl BlockClient {
         .map(|_| ())
     }
 
-    /// Escribe `count` sectores desde el buffer.
+    /// Writes `count` sectors from the buffer.
     pub fn write(&self, lba: u64, count: u16) -> Result<(), Error> {
         Self::check(self.call(
             Request {
@@ -96,7 +96,7 @@ impl BlockClient {
         .map(|_| ())
     }
 
-    /// Hace duraderas las escrituras anteriores (ADR 0014).
+    /// Makes previous writes durable (ADR 0014).
     pub fn flush(&self) -> Result<(), Error> {
         Self::check(self.call(
             Request {
@@ -110,9 +110,9 @@ impl BlockClient {
     }
 }
 
-/// Buffers DMA de clientes mapeados en un servidor de bloques, reutilizados
-/// por dirección física (cada `mmio_map` crea un mapeo nuevo que no se
-/// libera hasta salir del proceso).
+/// Client DMA buffers mapped in a block server, reused by physical address
+/// (each `mmio_map` creates a new mapping that is not released until the
+/// process exits).
 pub struct ClientBuffers {
     entries: [(u64, u64); 8], // (phys, len)
     count: usize,
@@ -132,7 +132,7 @@ impl ClientBuffers {
         }
     }
 
-    /// Dirección física y longitud del buffer `dma`, mapeándolo la primera vez.
+    /// Physical address and length of the `dma` buffer, mapping it the first time.
     pub fn map(&mut self, dma: Handle) -> Option<(u64, u64)> {
         let phys = sys::dma_phys(dma).ok()?;
         let len = sys::region_len(dma).ok()?;

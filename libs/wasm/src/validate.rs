@@ -1,18 +1,18 @@
-//! Validación de módulos antes de ejecutarlos (etapa 4, ADR 0019): el
-//! algoritmo de tipado del apéndice de la especificación (pila de operandos
-//! con tipos, marcos de control, código inalcanzable polimórfico) acotado al
-//! subconjunto que ejecuta el intérprete. Un módulo que no valida no se
-//! instancia: los índices fuera de rango, las pilas desequilibradas y las
-//! instrucciones no soportadas se rechazan aquí, no a mitad de ejecución.
+//! Module validation before execution (stage 4, ADR 0019): the typing
+//! algorithm from the specification appendix (typed operand stack, control
+//! frames, polymorphic unreachable code) restricted to the subset the
+//! interpreter executes. A module that does not validate is not
+//! instantiated: out-of-range indices, unbalanced stacks and unsupported
+//! instructions are rejected here, not halfway through execution.
 
 use super::{Error, Function, Module, Reader, ValType};
 use alloc::vec::Vec;
 
-/// Bloques anidados como máximo dentro de una función.
+/// Maximum nested blocks inside a function.
 const MAX_NESTING: usize = 1024;
 
-/// Tipo en la pila de validación: `None` es "desconocido" (tras código
-/// inalcanzable), que encaja con cualquiera.
+/// Type on the validation stack: `None` is "unknown" (after unreachable
+/// code), which matches anything.
 type Slot = Option<ValType>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -34,7 +34,7 @@ struct Frame {
 
 struct Validator<'m, 'a> {
     module: &'m Module<'a>,
-    /// Tipo (índice) de cada función, importadas primero.
+    /// Type (index) of each function, imported ones first.
     func_types: Vec<u32>,
     locals: Vec<ValType>,
     vals: Vec<Slot>,
@@ -51,20 +51,20 @@ impl<'m, 'a> Validator<'m, 'a> {
     }
 
     fn pop_val(&mut self) -> Result<Slot, Error> {
-        let frame = self.ctrls.last().ok_or(invalid("sin marco"))?;
+        let frame = self.ctrls.last().ok_or(invalid("no frame"))?;
         if self.vals.len() == frame.height {
             return if frame.unreachable {
                 Ok(None)
             } else {
-                Err(invalid("pila vacia"))
+                Err(invalid("empty stack"))
             };
         }
-        self.vals.pop().ok_or(invalid("pila vacia"))
+        self.vals.pop().ok_or(invalid("empty stack"))
     }
 
     fn pop_expect(&mut self, expect: ValType) -> Result<(), Error> {
         match self.pop_val()? {
-            Some(actual) if actual != expect => Err(invalid("tipo de operando")),
+            Some(actual) if actual != expect => Err(invalid("operand type")),
             _ => Ok(()),
         }
     }
@@ -89,7 +89,7 @@ impl<'m, 'a> Validator<'m, 'a> {
         end: Vec<ValType>,
     ) -> Result<(), Error> {
         if self.ctrls.len() >= MAX_NESTING {
-            return Err(invalid("anidamiento"));
+            return Err(invalid("nesting"));
         }
         let height = self.vals.len();
         self.push_vals(&start);
@@ -105,14 +105,14 @@ impl<'m, 'a> Validator<'m, 'a> {
 
     fn pop_ctrl(&mut self) -> Result<Frame, Error> {
         let (end, height) = {
-            let frame = self.ctrls.last().ok_or(invalid("end sin bloque"))?;
+            let frame = self.ctrls.last().ok_or(invalid("end without block"))?;
             (frame.end.clone(), frame.height)
         };
         self.pop_vals(&end)?;
         if self.vals.len() != height {
-            return Err(invalid("valores sobrantes al cerrar el bloque"));
+            return Err(invalid("leftover values at block end"));
         }
-        self.ctrls.pop().ok_or(invalid("end sin bloque"))
+        self.ctrls.pop().ok_or(invalid("end without block"))
     }
 
     fn label_types(&self, depth: u32) -> Result<Vec<ValType>, Error> {
@@ -120,7 +120,7 @@ impl<'m, 'a> Validator<'m, 'a> {
             .ctrls
             .len()
             .checked_sub(1 + depth as usize)
-            .ok_or(invalid("etiqueta fuera de rango"))?;
+            .ok_or(invalid("label out of range"))?;
         let frame = &self.ctrls[idx];
         Ok(if frame.kind == Kind::Loop {
             frame.start.clone()
@@ -130,7 +130,7 @@ impl<'m, 'a> Validator<'m, 'a> {
     }
 
     fn unreachable(&mut self) -> Result<(), Error> {
-        let frame = self.ctrls.last_mut().ok_or(invalid("sin marco"))?;
+        let frame = self.ctrls.last_mut().ok_or(invalid("no frame"))?;
         self.vals.truncate(frame.height);
         frame.unreachable = true;
         Ok(())
@@ -140,16 +140,16 @@ impl<'m, 'a> Validator<'m, 'a> {
         let ti = *self
             .func_types
             .get(index as usize)
-            .ok_or(invalid("funcion fuera de rango"))?;
+            .ok_or(invalid("function out of range"))?;
         self.module
             .types
             .get(ti as usize)
-            .ok_or(invalid("tipo fuera de rango"))
+            .ok_or(invalid("type out of range"))
     }
 
-    /// Tipo de bloque: vacío, un resultado, o un tipo de función por índice.
+    /// Block type: empty, one result, or a function type by index.
     fn block_type(&self, r: &mut Reader) -> Result<(Vec<ValType>, Vec<ValType>), Error> {
-        let b = *r.b.get(r.pos).ok_or(invalid("tipo de bloque"))?;
+        let b = *r.b.get(r.pos).ok_or(invalid("block type"))?;
         if b == 0x40 {
             r.pos += 1;
             return Ok((Vec::new(), Vec::new()));
@@ -163,13 +163,13 @@ impl<'m, 'a> Validator<'m, 'a> {
             .module
             .types
             .get(ti as usize)
-            .ok_or(invalid("tipo de bloque fuera de rango"))?;
+            .ok_or(invalid("block type out of range"))?;
         Ok((ty.params.clone(), ty.results.clone()))
     }
 
     fn memory(&self) -> Result<(), Error> {
         if self.module.memory_pages.is_none() {
-            return Err(invalid("instruccion de memoria sin memoria"));
+            return Err(invalid("memory instruction without memory"));
         }
         Ok(())
     }
@@ -188,7 +188,7 @@ impl<'m, 'a> Validator<'m, 'a> {
             }
         }
         if r.pos != f.code_start {
-            return Err(invalid("declaracion de locales"));
+            return Err(invalid("locals declaration"));
         }
         self.vals.clear();
         self.ctrls.clear();
@@ -200,7 +200,7 @@ impl<'m, 'a> Validator<'m, 'a> {
             self.instruction(op, &mut r)?;
         }
         if r.pos != f.code_end {
-            return Err(invalid("codigo tras el end de la funcion"));
+            return Err(invalid("code after function end"));
         }
         Ok(())
     }
@@ -225,14 +225,14 @@ impl<'m, 'a> Validator<'m, 'a> {
             0x05 => {
                 let frame = self.pop_ctrl()?;
                 if frame.kind != Kind::If {
-                    return Err(invalid("else sin if"));
+                    return Err(invalid("else without if"));
                 }
                 self.push_ctrl(Kind::Else, frame.start, frame.end)?;
             }
             0x0B => {
                 let frame = self.pop_ctrl()?;
                 if frame.kind == Kind::If && frame.start != frame.end {
-                    return Err(invalid("if sin else con resultados"));
+                    return Err(invalid("if without else with results"));
                 }
                 self.push_vals(&frame.end);
             }
@@ -258,9 +258,9 @@ impl<'m, 'a> Validator<'m, 'a> {
                 for l in labels {
                     let types = self.label_types(l)?;
                     if types.len() != default.len() {
-                        return Err(invalid("br_table con aridades distintas"));
+                        return Err(invalid("br_table with different arities"));
                     }
-                    // Cada etiqueta debe aceptar lo que hay en la pila.
+                    // Every label must accept what is on the stack.
                     self.pop_vals(&types)?;
                     self.push_vals(&types);
                 }
@@ -281,16 +281,16 @@ impl<'m, 'a> Validator<'m, 'a> {
             0x11 => {
                 let ti = r.u32()?;
                 if r.u8()? != 0 {
-                    return Err(invalid("call_indirect: tabla"));
+                    return Err(invalid("call_indirect: table"));
                 }
                 if self.module.table.is_empty() {
-                    return Err(invalid("call_indirect sin tabla"));
+                    return Err(invalid("call_indirect without table"));
                 }
                 let ty = self
                     .module
                     .types
                     .get(ti as usize)
-                    .ok_or(invalid("tipo fuera de rango"))?;
+                    .ok_or(invalid("type out of range"))?;
                 let (params, results) = (ty.params.clone(), ty.results.clone());
                 self.pop_expect(I32)?;
                 self.pop_vals(&params)?;
@@ -305,7 +305,7 @@ impl<'m, 'a> Validator<'m, 'a> {
                 let b = self.pop_val()?;
                 let t = match (a, b) {
                     (Some(x), Some(y)) if x != y => {
-                        return Err(invalid("select con tipos distintos"))
+                        return Err(invalid("select with different types"))
                     }
                     (Some(x), _) | (_, Some(x)) => Some(x),
                     (None, None) => None,
@@ -314,7 +314,7 @@ impl<'m, 'a> Validator<'m, 'a> {
             }
             0x1C => {
                 if r.u32()? != 1 {
-                    return Err(invalid("select con varios tipos"));
+                    return Err(invalid("select with several types"));
                 }
                 let t = r.valtype()?;
                 self.pop_expect(I32)?;
@@ -326,7 +326,7 @@ impl<'m, 'a> Validator<'m, 'a> {
                 let t = *self
                     .locals
                     .get(r.u32()? as usize)
-                    .ok_or(invalid("local fuera de rango"))?;
+                    .ok_or(invalid("local out of range"))?;
                 match op {
                     0x20 => self.push_val(Some(t)),
                     0x21 => self.pop_expect(t)?,
@@ -341,12 +341,12 @@ impl<'m, 'a> Validator<'m, 'a> {
                     .module
                     .globals
                     .get(r.u32()? as usize)
-                    .ok_or(invalid("global fuera de rango"))?;
+                    .ok_or(invalid("global out of range"))?;
                 if op == 0x23 {
                     self.push_val(Some(g.ty));
                 } else {
                     if !g.mutable {
-                        return Err(invalid("global.set sobre una global inmutable"));
+                        return Err(invalid("global.set on an immutable global"));
                     }
                     self.pop_expect(g.ty)?;
                 }
@@ -356,7 +356,7 @@ impl<'m, 'a> Validator<'m, 'a> {
                 r.u32()?;
                 r.u32()?;
                 let t = match op {
-                    0x2A | 0x2B => return Err(Error::Unsupported("coma flotante")),
+                    0x2A | 0x2B => return Err(Error::Unsupported("floating point")),
                     0x28 | 0x2C..=0x2F => I32,
                     _ => I64,
                 };
@@ -368,7 +368,7 @@ impl<'m, 'a> Validator<'m, 'a> {
                 r.u32()?;
                 r.u32()?;
                 let t = match op {
-                    0x38 | 0x39 => return Err(Error::Unsupported("coma flotante")),
+                    0x38 | 0x39 => return Err(Error::Unsupported("floating point")),
                     0x36 | 0x3A | 0x3B => I32,
                     _ => I64,
                 };
@@ -394,7 +394,7 @@ impl<'m, 'a> Validator<'m, 'a> {
                 r.i64()?;
                 self.push_val(Some(I64));
             }
-            0x43 | 0x44 => return Err(Error::Unsupported("coma flotante")),
+            0x43 | 0x44 => return Err(Error::Unsupported("floating point")),
             0x45 => {
                 self.pop_expect(I32)?;
                 self.push_val(Some(I32));
@@ -463,10 +463,10 @@ impl<'m, 'a> Validator<'m, 'a> {
                     self.pop_expect(I32)?;
                     self.pop_expect(I32)?;
                 }
-                _ => return Err(Error::Unsupported("prefijo 0xFC")),
+                _ => return Err(Error::Unsupported("0xFC prefix")),
             },
             0x5B..=0x66 | 0x8B..=0xA6 | 0xA8..=0xAB | 0xAE..=0xBF => {
-                return Err(Error::Unsupported("coma flotante"))
+                return Err(Error::Unsupported("floating point"))
             }
             _ => return Err(Error::Unsupported("opcode")),
         }
@@ -480,31 +480,31 @@ fn r_valtype(b: u8) -> Result<ValType, Error> {
         0x7E => ValType::I64,
         0x7D => ValType::F32,
         0x7C => ValType::F64,
-        _ => return Err(invalid("tipo de valor")),
+        _ => return Err(invalid("value type")),
     })
 }
 
-/// Valida el módulo entero: índices de tipos, funciones, tabla, globales,
-/// exportaciones y `start`, y el cuerpo de cada función con el algoritmo de
-/// tipado. `Module::parse` lo llama antes de devolver el módulo.
+/// Validates the whole module: indices of types, functions, table, globals,
+/// exports and `start`, and the body of each function with the typing
+/// algorithm. `Module::parse` calls it before returning the module.
 pub fn validate(module: &Module) -> Result<(), Error> {
     let mut func_types = Vec::new();
     for imp in &module.imports {
         if module.types.get(imp.type_index as usize).is_none() {
-            return Err(invalid("importacion con tipo fuera de rango"));
+            return Err(invalid("import with type out of range"));
         }
         func_types.push(imp.type_index);
     }
     for f in &module.functions {
         if module.types.get(f.type_index as usize).is_none() {
-            return Err(invalid("funcion con tipo fuera de rango"));
+            return Err(invalid("function with type out of range"));
         }
         func_types.push(f.type_index);
     }
     let total = func_types.len() as u32;
     for entry in module.table.iter().flatten() {
         if *entry >= total {
-            return Err(invalid("elemento de tabla fuera de rango"));
+            return Err(invalid("table element out of range"));
         }
     }
     for e in &module.exports {
@@ -516,34 +516,34 @@ pub fn validate(module: &Module) -> Result<(), Error> {
             _ => false,
         };
         if !ok {
-            return Err(invalid("exportacion fuera de rango"));
+            return Err(invalid("export out of range"));
         }
     }
     if let Some((min, max)) = module.memory_pages {
         if min > 65536 || max.is_some_and(|max| max < min || max > 65536) {
-            return Err(invalid("limites de memoria"));
+            return Err(invalid("memory limits"));
         }
     }
     if let Some((min, max)) = module.table_limits {
         if max.is_some_and(|max| max < min) {
-            return Err(invalid("limites de tabla"));
+            return Err(invalid("table limits"));
         }
     }
     if let Some(s) = module.start {
         let ti = *func_types
             .get(s as usize)
-            .ok_or(invalid("start fuera de rango"))?;
+            .ok_or(invalid("start out of range"))?;
         let ty = &module.types[ti as usize];
         if !ty.params.is_empty() || !ty.results.is_empty() {
-            return Err(invalid("start con parametros o resultados"));
+            return Err(invalid("start with params or results"));
         }
     }
     for g in &module.globals {
         if matches!(g.ty, ValType::F32 | ValType::F64) {
-            return Err(Error::Unsupported("coma flotante"));
+            return Err(Error::Unsupported("floating point"));
         }
         if g.init_ty != g.ty {
-            return Err(invalid("tipo del inicializador de global"));
+            return Err(invalid("global initializer type"));
         }
     }
     let mut v = Validator {

@@ -1,5 +1,5 @@
-//! GPT (UEFI 2.x, §5.3): lectura de cabecera y entradas con verificación de
-//! CRC32, y escritura para el disco de pruebas de xtask.
+//! GPT (UEFI 2.x, §5.3): reading of header and entries with CRC32
+//! verification, and writing for the xtask test disk.
 
 #![no_std]
 
@@ -10,7 +10,7 @@ pub const SECTOR: usize = 512;
 const SIGNATURE: &[u8; 8] = b"EFI PART";
 pub const ENTRY_LEN: usize = 128;
 
-/// CRC-32 (IEEE 802.3, reflejado), el que usa GPT.
+/// CRC-32 (IEEE 802.3, reflected), the one GPT uses.
 pub fn crc32(data: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
     for &b in data {
@@ -56,7 +56,7 @@ fn u64_at(d: &[u8], o: usize) -> u64 {
 }
 
 impl Header {
-    /// Parsea y verifica el CRC de una cabecera (un sector).
+    /// Parses a header (one sector) and verifies its CRC.
     pub fn parse(sector: &[u8]) -> Result<Self, GptError> {
         if sector.len() < 92 {
             return Err(GptError::Truncated);
@@ -94,7 +94,7 @@ impl Header {
         })
     }
 
-    /// Bytes que ocupa la tabla de entradas (múltiplo de sector).
+    /// Bytes taken by the entry table (a multiple of the sector size).
     pub fn entries_bytes(&self) -> usize {
         (self.entry_count as usize * ENTRY_LEN).next_multiple_of(SECTOR)
     }
@@ -106,7 +106,7 @@ pub struct Partition {
     pub guid: [u8; 16],
     pub first_lba: u64,
     pub last_lba: u64,
-    /// Nombre UTF-16LE convertido a ASCII (los no ASCII se vuelven `?`).
+    /// UTF-16LE name converted to ASCII (non-ASCII characters become `?`).
     pub name: [u8; 36],
     pub name_len: usize,
 }
@@ -120,7 +120,7 @@ impl Partition {
     }
 }
 
-/// Entradas no vacías de la tabla, verificando su CRC contra la cabecera.
+/// Non-empty entries of the table, verifying their CRC against the header.
 pub fn partitions(
     header: &Header,
     table: &[u8],
@@ -163,14 +163,14 @@ pub fn partitions(
     Ok(n)
 }
 
-/// GUID de tipo de las particiones de AriCodeOS.
+/// Type GUID of the AriCodeOS partitions.
 pub const ARICODEOS_DATA_GUID: [u8; 16] = [
     0x41, 0x52, 0x49, 0x43, 0x4F, 0x44, 0x45, 0x4F, 0x53, 0x2D, 0x44, 0x41, 0x54, 0x41, 0x30, 0x31,
 ];
 
-/// Escribe un disco GPT completo (MBR protector, cabeceras, tabla) con las
-/// particiones dadas sobre `disk` (múltiplo de sector). Devuelve los LBA
-/// usables `[first, last]`.
+/// Writes a complete GPT disk (protective MBR, headers, table) with the
+/// given partitions over `disk` (a multiple of the sector size). Returns the
+/// usable LBAs `[first, last]`.
 #[cfg(feature = "write")]
 pub fn write_disk(
     disk: &mut [u8],
@@ -184,7 +184,7 @@ pub fn write_disk(
     }
     let first_usable = 2 + table_sectors;
     let last_usable = sectors - 2 - table_sectors;
-    // MBR protector.
+    // Protective MBR.
     let mbr = &mut disk[..SECTOR];
     mbr.fill(0);
     mbr[446] = 0;
@@ -193,7 +193,7 @@ pub fn write_disk(
     mbr[446 + 12..446 + 16].copy_from_slice(&(sectors.min(0xFFFF_FFFF) as u32 - 1).to_le_bytes());
     mbr[510] = 0x55;
     mbr[511] = 0xAA;
-    // Tabla de entradas.
+    // Entry table.
     let mut table = std::vec![0u8; ENTRIES as usize * ENTRY_LEN];
     for (i, (name, first, last, type_guid)) in parts.iter().enumerate() {
         if *first < first_usable || *last > last_usable || first > last {
@@ -268,10 +268,10 @@ mod tests {
         assert_eq!((p.first_lba, p.last_lba, p.sectors()), (40, 200, 161));
         assert_eq!(p.name_str(), "ARI");
         assert_eq!(p.type_guid, ARICODEOS_DATA_GUID);
-        // Cabecera de respaldo tambien valida.
+        // The backup header is valid too.
         let b = Header::parse(&disk[255 * 512..]).unwrap();
         assert_eq!(b.current_lba, 255);
-        // MBR protector.
+        // Protective MBR.
         assert_eq!(disk[446 + 4], 0xEE);
         assert_eq!(&disk[510..512], &[0x55, 0xAA]);
     }
@@ -296,7 +296,7 @@ mod tests {
         );
         assert!(
             write_disk(&mut disk, &[("A", 1, 100, [1; 16])]).is_err(),
-            "LBA fuera del rango usable"
+            "LBA outside the usable range"
         );
     }
 }

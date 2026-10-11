@@ -1,31 +1,31 @@
-//! Salida por puerto serie COM1 (16550). Única consola fiable en M0 y la que
-//! captura el test runner de QEMU.
+//! Output on serial port COM1 (16550). The only reliable console in M0 and
+//! the one the QEMU test runner captures.
 
 use crate::arch::x86_64::port::{inb, outb};
 use core::fmt;
 
 const COM1: u16 = 0x3F8;
 
-/// Puerto serie COM1. Tipo sin estado: los registros del UART son el estado.
+/// Serial port COM1. Stateless type: the UART registers are the state.
 pub struct Serial;
 
 impl Serial {
-    /// Configura 115200 8N1 sin interrupciones, FIFO activada.
+    /// Configures 115200 8N1 without interrupts, FIFO enabled.
     pub fn init(&self) {
-        // SAFETY: secuencia estándar de inicialización del 16550 sobre COM1.
+        // SAFETY: standard 16550 initialization sequence on COM1.
         unsafe {
-            outb(COM1 + 1, 0x00); // sin interrupciones
+            outb(COM1 + 1, 0x00); // no interrupts
             outb(COM1 + 3, 0x80); // DLAB on
             outb(COM1, 0x01); // divisor 1 -> 115200
             outb(COM1 + 1, 0x00);
             outb(COM1 + 3, 0x03); // 8N1, DLAB off
-            outb(COM1 + 2, 0xC7); // FIFO on, limpiar, umbral 14
+            outb(COM1 + 2, 0xC7); // FIFO on, clear, threshold 14
             outb(COM1 + 4, 0x0B); // DTR, RTS, OUT2
         }
     }
 
     fn write_byte(&self, byte: u8) {
-        // SAFETY: lectura de LSR y escritura de THR sobre COM1.
+        // SAFETY: LSR read and THR write on COM1.
         unsafe {
             while inb(COM1 + 5) & 0x20 == 0 {}
             outb(COM1, byte);
@@ -45,7 +45,7 @@ impl fmt::Write for Serial {
     }
 }
 
-/// Texto sin formato de log en todas las consolas (serie y framebuffer).
+/// Text without log formatting on every console (serial and framebuffer).
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => { $crate::console::write_raw(format_args!($($arg)*)) };
@@ -57,9 +57,9 @@ macro_rules! println {
     ($($arg:tt)*) => { $crate::console::write_raw(format_args!("{}\n", format_args!($($arg)*))) };
 }
 
-/// Solo serie: para excepciones y el panic handler, que no deben tocar la
-/// consola de framebuffer. Cada mensaje sale entero (lock de la serie con
-/// espera acotada; ver `console::write_serial`).
+/// Serial only: for exceptions and the panic handler, which must not touch
+/// the framebuffer console. Each message goes out whole (serial lock with a
+/// bounded wait; see `console::write_serial`).
 #[macro_export]
 macro_rules! serial_println {
     () => { $crate::console::write_serial(format_args!("\n")) };

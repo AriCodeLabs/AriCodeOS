@@ -1,7 +1,7 @@
-//! Ed25519 (RFC 8032) desde cero: aritmética en GF(2^255-19) con cinco limbs
-//! de 51 bits, puntos en coordenadas extendidas, escalares módulo L por
-//! división larga. Pensado para verificar firmas de manifiestos en el
-//! arranque; firmar es tarea del host. No es de tiempo constante.
+//! Ed25519 (RFC 8032) from scratch: GF(2^255-19) arithmetic with five 51-bit
+//! limbs, points in extended coordinates, scalars modulo L by long
+//! division. Meant to verify manifest signatures at boot; signing is the
+//! host's job. Not constant time.
 
 use crate::sha512::Sha512;
 
@@ -9,14 +9,14 @@ pub const PUBLIC_KEY_LEN: usize = 32;
 pub const SEED_LEN: usize = 32;
 pub const SIGNATURE_LEN: usize = 64;
 
-// ---------------------------------------------------------------- campo
+// ---------------------------------------------------------------- field
 
-/// Elemento de GF(p), p = 2^255 - 19, en cinco limbs de 51 bits.
+/// Element of GF(p), p = 2^255 - 19, in five 51-bit limbs.
 #[derive(Clone, Copy, Debug)]
 struct Fe([u64; 5]);
 
 const MASK51: u64 = (1 << 51) - 1;
-/// p en limbs de 51 bits.
+/// p in 51-bit limbs.
 const P: [u64; 5] = [
     0x7FFFFFFFFFFED,
     0x7FFFFFFFFFFFF,
@@ -33,7 +33,7 @@ impl Fe {
         Fe([v & MASK51, v >> 51, 0, 0, 0])
     }
 
-    /// Carga 255 bits little-endian (el bit 255 se ignora).
+    /// Loads 255 little-endian bits (bit 255 is ignored).
     fn from_bytes(b: &[u8; 32]) -> Fe {
         let load = |i: usize| -> u64 {
             let mut v = 0u64;
@@ -50,7 +50,7 @@ impl Fe {
         Fe([l0, l1, l2, l3, l4])
     }
 
-    /// Propaga acarreos: deja cada limb por debajo de 2^51 (+ pequeño exceso).
+    /// Propagates carries: leaves each limb below 2^51 (+ a small excess).
     fn carry(mut self) -> Fe {
         for i in 0..4 {
             let c = self.0[i] >> 51;
@@ -66,10 +66,10 @@ impl Fe {
         self
     }
 
-    /// Representación canónica en [0, p).
+    /// Canonical representation in [0, p).
     fn to_bytes(self) -> [u8; 32] {
         let mut h = self.carry().carry();
-        // Restar p si h >= p.
+        // Subtract p if h >= p.
         let mut q = (h.0[0] + 19) >> 51;
         for limb in &h.0[1..] {
             q = (limb + q) >> 51;
@@ -85,7 +85,7 @@ impl Fe {
         let bits = |i: usize| h.0[i] as u128;
         let packed: u128 = bits(0) | bits(1) << 51 | bits(2) << 102;
         out[..16].copy_from_slice(&packed.to_le_bytes());
-        // bits 128.. : resto del limb 2 (25 bits), limbs 3 y 4.
+        // bits 128.. : rest of limb 2 (25 bits), limbs 3 and 4.
         let upper: u128 = (bits(2) >> 26) | bits(3) << 25 | bits(4) << 76;
         out[16..].copy_from_slice(&upper.to_le_bytes());
         out
@@ -103,7 +103,7 @@ impl Fe {
     }
 
     fn sub(self, o: Fe) -> Fe {
-        // self + 2p - o evita negativos (los limbs de self están reducidos).
+        // self + 2p - o avoids negatives (the limbs of self are reduced).
         Fe([
             self.0[0] + 2 * P[0] - o.0[0],
             self.0[1] + 2 * P[1] - o.0[1],
@@ -142,7 +142,7 @@ impl Fe {
         self.mul(self)
     }
 
-    /// self^exp, exponente little-endian.
+    /// self^exp, little-endian exponent.
     fn pow(self, exp: &[u8; 32]) -> Fe {
         let mut result = Fe::ONE;
         for i in (0..256).rev() {
@@ -198,9 +198,9 @@ fn curve_d() -> Fe {
         .mul(Fe::from_u64(121666).invert())
 }
 
-// ---------------------------------------------------------------- puntos
+// ---------------------------------------------------------------- points
 
-/// Punto en coordenadas extendidas (X, Y, Z, T), x = X/Z, y = Y/Z, T = XY/Z.
+/// Point in extended coordinates (X, Y, Z, T), x = X/Z, y = Y/Z, T = XY/Z.
 #[derive(Clone, Copy, Debug)]
 struct Point {
     x: Fe,
@@ -269,7 +269,7 @@ impl Curve {
         }
     }
 
-    /// Multiplicación escalar (doblado y suma, de tiempo variable).
+    /// Scalar multiplication (double and add, variable time).
     fn mul(&self, scalar: &[u8; 32], p: &Point) -> Point {
         let mut r = self.identity();
         for i in (0..256).rev() {
@@ -328,13 +328,13 @@ impl Curve {
     fn base(&self) -> Point {
         let mut b = [0x66u8; 32];
         b[0] = 0x58;
-        self.decompress(&b).expect("punto base")
+        self.decompress(&b).expect("base point")
     }
 }
 
-// ---------------------------------------------------------------- escalares mod L
+// ---------------------------------------------------------------- scalars mod L
 
-/// L = 2^252 + 27742317777372353535851937790883648493, en limbs u64 LE.
+/// L = 2^252 + 27742317777372353535851937790883648493, in LE u64 limbs.
 const L: [u64; 4] = [
     0x5812631a5cf5d3ed,
     0x14def9dea2f79cd6,
@@ -361,12 +361,12 @@ fn sub_in_place(a: &mut [u64; 4], b: &[u64; 4]) {
     }
 }
 
-/// x mod L para x de hasta 512 bits (limbs LE), por división larga binaria.
+/// x mod L for x of up to 512 bits (LE limbs), by binary long division.
 fn reduce_limbs(x: &[u64; 8]) -> [u64; 4] {
     let mut rem = [0u64; 4];
     for i in (0..512).rev() {
         let bit = (x[i / 64] >> (i % 64)) & 1;
-        // rem = rem * 2 + bit (cabe: rem < L < 2^253)
+        // rem = rem * 2 + bit (fits: rem < L < 2^253)
         let mut carry = bit;
         for limb in rem.iter_mut() {
             let top = *limb >> 63;
@@ -398,7 +398,7 @@ fn bytes_from_limbs(l: &[u64; 4]) -> [u8; 32] {
     out
 }
 
-/// Reduce un hash de 64 bytes módulo L.
+/// Reduces a 64-byte hash modulo L.
 fn reduce(h: &[u8; 64]) -> [u8; 32] {
     bytes_from_limbs(&reduce_limbs(&limbs_from_bytes(h)))
 }
@@ -410,8 +410,8 @@ fn mul_add(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> [u8; 32] {
         limbs_from_bytes(b),
         limbs_from_bytes(c),
     );
-    // Producto escolar con acarreo por fila: cada suma parcial cabe en u128
-    // (limb*limb + limb + acarreo < 2^128), a diferencia de acumular columnas.
+    // Schoolbook product with a carry per row: each partial sum fits in u128
+    // (limb*limb + limb + carry < 2^128), unlike accumulating columns.
     let mut limbs = [0u64; 8];
     for i in 0..4 {
         let mut carry = 0u128;
@@ -431,7 +431,7 @@ fn mul_add(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> [u8; 32] {
     bytes_from_limbs(&reduce_limbs(&limbs))
 }
 
-/// `s` es un escalar canónico (< L).
+/// `s` is a canonical scalar (< L).
 fn is_canonical(s: &[u8; 32]) -> bool {
     let l = limbs_from_bytes(s);
     !ge(&[l[0], l[1], l[2], l[3]], &L)
@@ -445,7 +445,7 @@ fn clamp(a: &mut [u8; 32]) {
 
 // ---------------------------------------------------------------- API
 
-/// Clave pública derivada de la semilla de 32 bytes.
+/// Public key derived from the 32-byte seed.
 pub fn public_key(seed: &[u8; SEED_LEN]) -> [u8; PUBLIC_KEY_LEN] {
     let h = crate::sha512::sha512(seed);
     let mut a = [0u8; 32];
@@ -455,7 +455,7 @@ pub fn public_key(seed: &[u8; SEED_LEN]) -> [u8; PUBLIC_KEY_LEN] {
     c.compress(&c.mul(&a, &c.base()))
 }
 
-/// Firma `msg` con la semilla (RFC 8032 §5.1.6).
+/// Signs `msg` with the seed (RFC 8032 §5.1.6).
 pub fn sign(seed: &[u8; SEED_LEN], msg: &[u8]) -> [u8; SIGNATURE_LEN] {
     let h = crate::sha512::sha512(seed);
     let mut a = [0u8; 32];
@@ -485,7 +485,7 @@ pub fn sign(seed: &[u8; SEED_LEN], msg: &[u8]) -> [u8; SIGNATURE_LEN] {
     sig
 }
 
-/// Verifica `sig` sobre `msg` con la clave pública `pk` (RFC 8032 §5.1.7).
+/// Verifies `sig` over `msg` with the public key `pk` (RFC 8032 §5.1.7).
 pub fn verify(pk: &[u8; PUBLIC_KEY_LEN], msg: &[u8], sig: &[u8; SIGNATURE_LEN]) -> bool {
     let mut rb = [0u8; 32];
     let mut s = [0u8; 32];
@@ -531,7 +531,7 @@ mod tests {
         assert!(v.add(v.neg()).is_zero());
         let bytes_back = Fe::from_bytes(&v.to_bytes());
         assert!(bytes_back.eq(v));
-        // p mismo debe reducirse a 0.
+        // p itself must reduce to 0.
         let mut p = [0xFFu8; 32];
         p[0] = 0xED;
         p[31] = 0x7F;
@@ -591,10 +591,10 @@ mod tests {
             let msg_len = msg.len() / 2;
             unhex(msg, &mut m[..msg_len]).unwrap();
             let m = &m[..msg_len];
-            assert_eq!(public_key(&seed), pk, "clave publica");
-            assert_eq!(sign(&seed, m), sig, "firma");
-            assert!(verify(&pk, m, &sig), "verificacion");
-            // Mensaje alterado, firma alterada y clave ajena fallan.
+            assert_eq!(public_key(&seed), pk, "public key");
+            assert_eq!(sign(&seed, m), sig, "signature");
+            assert!(verify(&pk, m, &sig), "verification");
+            // Altered message, altered signature and foreign key fail.
             let mut bad_msg = [0u8; 3];
             bad_msg[..msg_len].copy_from_slice(m);
             bad_msg[msg_len] = 1;
@@ -615,15 +615,15 @@ mod tests {
 
     #[test]
     fn scalar_products_with_large_limbs_do_not_overflow() {
-        // Regresion: acumular columnas de cuatro productos u64*u64 en un u128
-        // desbordaba con semillas como [9; 32]; ahora el acarreo va por filas.
+        // Regression: accumulating columns of four u64*u64 products in a u128
+        // overflowed with seeds such as [9; 32]; now the carry goes per row.
         let all = [0xFFu8; 32];
         let p = mul_add(&all, &all, &all);
         assert!(is_canonical(&p));
         for seed in [[9u8; 32], [0xFFu8; 32], [0x80u8; 32], [0x5Au8; 32]] {
             let pk = public_key(&seed);
             let sig = sign(&seed, b"limbs grandes");
-            assert!(verify(&pk, b"limbs grandes", &sig), "semilla {:?}", seed[0]);
+            assert!(verify(&pk, b"limbs grandes", &sig), "seed {:?}", seed[0]);
         }
     }
 
@@ -634,13 +634,13 @@ mod tests {
         let msg: [u8; 1000] = core::array::from_fn(|i| (i % 253) as u8);
         let sig = sign(&seed, &msg);
         assert!(verify(&pk, &msg, &sig));
-        // Firma no canonica (S >= L) se rechaza.
+        // Non-canonical signature (S >= L) is rejected.
         let mut noncanon = sig;
         noncanon[32..].copy_from_slice(&bytes_from_limbs(&L));
         assert!(!verify(&pk, &msg, &noncanon));
-        // Clave publica no decodificable.
+        // Undecodable public key.
         let mut bad_pk = pk;
         bad_pk[31] = 0xFF;
-        let _ = verify(&bad_pk, &msg, &sig); // no debe entrar en panico
+        let _ = verify(&bad_pk, &msg, &sig); // must not panic
     }
 }

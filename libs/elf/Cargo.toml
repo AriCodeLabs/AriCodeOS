@@ -3,7 +3,7 @@ name = "aricode-elf"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Parser ELF64 mínimo (no_std) usado por AriBoot"
+description = "Minimal ELF64 parser (no_std) used by AriBoot"
 
 [lib]
 path = "src/lib.rs"

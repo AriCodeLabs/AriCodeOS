@@ -1,9 +1,9 @@
-//! rtl-net (Fase 34, ADR 0024): driver en ring 3 para las Realtek de la
-//! familia r8169 (RTL8169/8168/8101; la RTL8136 del portátil de pruebas)
-//! sobre el núcleo de red compartido (`ari-net-core`). Recibe el contrato de
-//! driver de init (`SERVICE`, cfg, hardware, IRQ, BARs) y `SYSTEM` como
-//! extra. Anillos de 16 descriptores de recepción y 8 de transmisión con un
-//! buffer de 2 KiB cada uno en un solo buffer DMA.
+//! rtl-net (Phase 34, ADR 0024): ring 3 driver for the Realtek r8169
+//! family (RTL8169/8168/8101; the RTL8136 in the test laptop) on top of
+//! the shared network core (`ari-net-core`). Receives the driver contract
+//! from init (`SERVICE`, cfg, hardware, IRQ, BARs) and `SYSTEM` as an
+//! extra. Rings of 16 receive and 8 transmit descriptors, each with a
+//! 2 KiB buffer, all in a single DMA buffer.
 #![no_std]
 #![no_main]
 
@@ -17,13 +17,13 @@ const NAME: &str = "rtl-net";
 const RX_SLOTS: usize = 16;
 const TX_SLOTS: usize = 8;
 const SLOT: u64 = 2048;
-/// Anillos al principio (alineados a 256), buffers desde los 4 KiB.
+/// Rings at the start (256-aligned), buffers from 4 KiB onwards.
 const RX_RING_OFF: u64 = 0;
 const TX_RING_OFF: u64 = 1024;
 const BUFFERS_OFF: u64 = 4096;
 const DMA_BYTES: u64 = BUFFERS_OFF + SLOT * (RX_SLOTS + TX_SLOTS) as u64;
 
-/// Códigos de salida de la inicialización.
+/// Initialization exit codes.
 mod exit {
     pub const NO_BAR: u64 = 10;
     pub const DMA: u64 = 11;
@@ -67,12 +67,12 @@ impl Nic {
     }
 
     fn read_desc(&self, ring_off: u64, i: usize) -> Desc {
-        // SAFETY: descriptor dentro del buffer DMA del driver.
+        // SAFETY: descriptor inside the driver's DMA buffer.
         Desc::from_bytes(&unsafe { self.desc_virt(ring_off, i).read_volatile() })
     }
 
     fn write_desc(&self, ring_off: u64, i: usize, d: Desc) {
-        // SAFETY: ídem.
+        // SAFETY: same as above.
         unsafe { self.desc_virt(ring_off, i).write_volatile(d.to_bytes()) };
     }
 
@@ -111,7 +111,7 @@ impl Nic {
             );
         }
         for i in 0..TX_SLOTS {
-            // Sin OWN: libres para el driver; EOR en el último.
+            // No OWN: free for the driver; EOR on the last one.
             let mut d = Desc::tx(nic.tx_buffer_phys(i), 0, i + 1 == TX_SLOTS);
             d.opts1 &= !aricode_rtl8169::desc::OWN;
             nic.write_desc(TX_RING_OFF, i, d);
@@ -122,13 +122,13 @@ impl Nic {
             nic.dma.phys + TX_RING_OFF,
             SLOT as u16,
         );
-        // Enlace: hasta 3 s a que el PHY lo anuncie; sin él, DHCP reintenta.
+        // Link: up to 3 s for the PHY to announce it; without it, DHCP retries.
         let deadline = clock.now() + 3000;
         loop {
             let link = link_state(nic.regs.r8(reg::PHY_STATUS));
             if link.up {
                 let mut b = [0u8; 20];
-                sys::print(b"rtl-net: enlace a ");
+                sys::print(b"rtl-net: link at ");
                 sys::print(aricode_rt::fmt_u64(link.mbps as u64, &mut b));
                 sys::print(if link.full_duplex {
                     b" Mb/s full duplex\n"
@@ -138,10 +138,7 @@ impl Nic {
                 break;
             }
             if clock.now() >= deadline {
-                say(
-                    NAME,
-                    b"sin enlace (cable desconectado?); se sigue intentando",
-                );
+                say(NAME, b"no link (cable unplugged?); still trying");
                 break;
             }
             let _ = sys::irq_wait(IRQ, 100);
@@ -161,10 +158,10 @@ impl Link for Nic {
         }
         let i = self.tx_next;
         if self.read_desc(TX_RING_OFF, i).opts1 & aricode_rtl8169::desc::OWN != 0 {
-            return false; // la tarjeta aún no ha enviado el descriptor más antiguo
+            return false; // the card has not sent the oldest descriptor yet
         }
         let off = BUFFERS_OFF + SLOT * (RX_SLOTS + i) as u64;
-        // Tramas cortas rellenas a 60 bytes: la tarjeta no siempre lo hace.
+        // Short frames padded to 60 bytes: the card does not always do it.
         let len = frame.len().max(60);
         let buf = self.dma.slice_mut(off, len as u64);
         buf[..frame.len()].copy_from_slice(frame);
@@ -197,7 +194,7 @@ impl Link for Nic {
             if len > 0 {
                 out[..len].copy_from_slice(self.dma.slice_mut(off, len as u64));
             }
-            // Devolver el descriptor a la tarjeta y avanzar.
+            // Hand the descriptor back to the card and advance.
             self.write_desc(
                 RX_RING_OFF,
                 i,
@@ -216,11 +213,11 @@ fn main(mask: u64) -> u64 {
     let nic = match Nic::setup(mask, &clock) {
         Ok(n) => n,
         Err(step) => {
-            sys::print(b"rtl-net: fallo en la inicializacion: ");
+            sys::print(b"rtl-net: initialization failed: ");
             sys::print(match step {
-                exit::NO_BAR => b"sin BAR de memoria\n",
-                exit::DMA => b"sin memoria DMA\n",
-                _ => b"la tarjeta no completa el reset\n",
+                exit::NO_BAR => b"no memory BAR\n",
+                exit::DMA => b"no DMA memory\n",
+                _ => b"the card does not complete the reset\n",
             });
             return step;
         }

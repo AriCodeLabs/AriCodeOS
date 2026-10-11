@@ -1,18 +1,18 @@
-//! Supervisión de servicios (etapa 1 del plan posterior al roadmap):
-//! el contrato común de vida de un servicio que `init` aplica a cada driver
-//! y servicio residente. La política no sabe de procesos ni de IPC: recibe
-//! hechos (`starting`, `ready`, `died`, `tick`) y devuelve la acción que
-//! toca (`Restart`, `GiveUp`, `Timeout`). Así se prueba en host.
+//! Service supervision (stage 1 of the post-roadmap plan):
+//! the common service lifecycle contract that `init` applies to every driver
+//! and resident service. The policy knows nothing about processes or IPC: it receives
+//! facts (`starting`, `ready`, `died`, `tick`) and returns the action that
+//! is due (`Restart`, `GiveUp`, `Timeout`). This way it is tested on the host.
 //!
-//! - Estados: `Stopped`, `Starting`, `Ready`, `Degraded`, `Failed`.
-//! - Generación: cada arranque tiene un número nuevo; un cliente que guarde
-//!   la generación sabe si el servicio con el que hablaba es otro.
-//! - Presupuesto de reinicios con espera creciente (se dobla hasta un tope)
-//!   y que se recupera si el servicio se mantiene estable un tiempo.
-//! - Plazo de arranque: un servicio que no anuncia `ready` a tiempo cuenta
-//!   como muerto.
-//! - Un servicio opcional que agota su presupuesto deja al sistema en modo
-//!   degradado; uno obligatorio lo deja en `Failed`.
+//! - States: `Stopped`, `Starting`, `Ready`, `Degraded`, `Failed`.
+//! - Generation: every start gets a new number; a client that keeps
+//!   the generation knows whether the service it was talking to is a different one.
+//! - Restart budget with growing backoff (doubles up to a cap)
+//!   that is restored if the service stays stable for a while.
+//! - Startup deadline: a service that does not announce `ready` in time counts
+//!   as dead.
+//! - An optional service that exhausts its budget leaves the system in degraded
+//!   mode; a mandatory one leaves it `Failed`.
 
 #![no_std]
 
@@ -21,9 +21,9 @@ pub enum State {
     Stopped,
     Starting,
     Ready,
-    /// Sigue vivo pero con una función perdida (lo anuncia el propio servicio o init).
+    /// Still alive but with a lost function (announced by the service itself or by init).
     Degraded,
-    /// Sin presupuesto de reinicios: no se vuelve a intentar.
+    /// No restart budget left: it is not tried again.
     Failed,
 }
 
@@ -31,35 +31,35 @@ pub enum State {
 pub enum Exit {
     Code(u64),
     Killed,
-    /// No anunció `ready` dentro del plazo de arranque.
+    /// Did not announce `ready` within the startup deadline.
     StartTimeout,
 }
 
-/// Lo que el supervisor debe hacer tras un hecho.
+/// What the supervisor must do after a fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Nothing,
-    /// Volver a lanzar el servicio en el instante indicado (ms).
+    /// Launch the service again at the given instant (ms).
     Restart {
         at: u64,
     },
-    /// Ya toca lanzarlo (llamar a `starting` tras crear el proceso).
+    /// Launch it now (call `starting` after creating the process).
     Start,
-    /// Presupuesto agotado: el servicio queda `Failed`.
+    /// Budget exhausted: the service stays `Failed`.
     GiveUp,
-    /// El arranque excedió su plazo: tratar como muerte (`died(StartTimeout)`).
+    /// Startup exceeded its deadline: treat as a death (`died(StartTimeout)`).
     Timeout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Policy {
-    /// Reinicios permitidos antes de rendirse.
+    /// Restarts allowed before giving up.
     pub max_restarts: u32,
     pub backoff_initial_ms: u64,
     pub backoff_max_ms: u64,
-    /// Tiempo máximo entre `starting` y `ready`.
+    /// Maximum time between `starting` and `ready`.
     pub start_timeout_ms: u64,
-    /// Tras este tiempo en `Ready` el presupuesto vuelve a estar completo.
+    /// After this long in `Ready` the budget is full again.
     pub stable_ms: u64,
 }
 
@@ -80,7 +80,7 @@ pub struct Status {
     pub restarts: u32,
     pub last_exit: Option<Exit>,
     pub backoff_ms: u64,
-    /// Instante (ms) del último `ready`, si lo hubo.
+    /// Instant (ms) of the last `ready`, if any.
     pub ready_at: Option<u64>,
 }
 
@@ -137,7 +137,7 @@ impl Service {
         }
     }
 
-    /// El proceso acaba de crearse: nueva generación, plazo de arranque en marcha.
+    /// The process was just created: new generation, startup deadline running.
     pub fn starting(&mut self, now: u64) -> u32 {
         self.generation += 1;
         self.state = State::Starting;
@@ -148,7 +148,7 @@ impl Service {
         self.generation
     }
 
-    /// El servicio responde (sonda o anuncio propio).
+    /// The service answers (probe or its own announcement).
     pub fn ready(&mut self, now: u64) {
         if matches!(self.state, State::Starting | State::Degraded) {
             self.state = State::Ready;
@@ -156,21 +156,21 @@ impl Service {
         }
     }
 
-    /// Retirar el servicio a propósito: queda `Stopped` sin reinicio pendiente.
+    /// Retire the service on purpose: it stays `Stopped` with no pending restart.
     pub fn stop(&mut self) {
         self.state = State::Stopped;
         self.restart_at = None;
         self.ready_at = None;
     }
 
-    /// Vivo, pero con una función perdida.
+    /// Alive, but with a lost function.
     pub fn degraded(&mut self) {
         if matches!(self.state, State::Starting | State::Ready) {
             self.state = State::Degraded;
         }
     }
 
-    /// El proceso terminó (o su arranque venció). Decide si se reinicia.
+    /// The process exited (or its startup expired). Decides whether to restart.
     pub fn died(&mut self, now: u64, exit: Exit) -> Action {
         self.last_exit = Some(exit);
         self.ready_at = None;
@@ -192,8 +192,8 @@ impl Service {
         Action::Restart { at }
     }
 
-    /// Paso de tiempo: reinicio pendiente que ya toca, plazo de arranque
-    /// vencido o estabilidad alcanzada (presupuesto restaurado).
+    /// Time step: a pending restart that is now due, an expired startup
+    /// deadline or stability reached (budget restored).
     pub fn tick(&mut self, now: u64) -> Action {
         match self.state {
             State::Stopped => match self.restart_at {
@@ -224,8 +224,8 @@ impl Service {
         }
     }
 
-    /// Cómo afecta al sistema un servicio en `Failed`: opcional -> degradado,
-    /// obligatorio -> fallo.
+    /// How a `Failed` service affects the system: optional -> degraded,
+    /// mandatory -> failure.
     pub fn system_state_if_failed(&self) -> State {
         if self.optional {
             State::Degraded
@@ -262,14 +262,14 @@ mod tests {
             match s.died(now, Exit::Killed) {
                 Action::Restart { at } => {
                     let expected = (10u64 << (i - 1).min(20)).min(160);
-                    assert_eq!(at - now, expected, "espera del reinicio {i}");
+                    assert_eq!(at - now, expected, "backoff of restart {i}");
                     assert_eq!(s.tick(at - 1), Action::Nothing);
                     assert_eq!(s.tick(at), Action::Start);
                     now = at;
                     generations.push(s.starting(now));
                     s.ready(now);
                 }
-                other => panic!("reinicio {i}: {other:?}"),
+                other => panic!("restart {i}: {other:?}"),
             }
         }
         assert_eq!(s.status().restarts, 100);
@@ -295,7 +295,7 @@ mod tests {
         assert_eq!(s.died(40, Exit::Killed), Action::GiveUp);
         assert_eq!(s.state(), State::Failed);
         assert_eq!(s.tick(100_000), Action::Nothing);
-        assert_eq!(s.system_state_if_failed(), State::Degraded, "opcional");
+        assert_eq!(s.system_state_if_failed(), State::Degraded, "optional");
         assert_eq!(s.status().last_exit, Some(Exit::Killed));
         let mandatory = Service::new(policy(), false);
         assert_eq!(mandatory.system_state_if_failed(), State::Failed);
@@ -327,9 +327,9 @@ mod tests {
         assert_eq!(s.tick(30 + 4999), Action::Nothing);
         assert_eq!(s.status().restarts, 2);
         assert_eq!(s.tick(30 + 5000), Action::Nothing);
-        assert_eq!(s.status().restarts, 0, "presupuesto restaurado");
+        assert_eq!(s.status().restarts, 0, "budget restored");
         assert_eq!(s.status().backoff_ms, 0);
-        // La siguiente muerte vuelve a la espera inicial.
+        // The next death goes back to the initial backoff.
         assert!(matches!(
             s.died(6000, Exit::Killed),
             Action::Restart { at: 6010 }
@@ -348,7 +348,7 @@ mod tests {
         assert_eq!(s.state(), State::Stopped);
         assert_eq!(s.tick(10), Action::Nothing);
         assert_eq!(s.tick(10_000), Action::Nothing);
-        // Un nuevo arranque explicito sigue siendo posible.
+        // A new explicit start is still possible.
         assert_eq!(s.starting(20), 2);
     }
 
@@ -360,7 +360,7 @@ mod tests {
         assert_eq!(
             s.state(),
             State::Stopped,
-            "ready sin starting no cambia nada"
+            "ready without starting changes nothing"
         );
         s.starting(0);
         s.degraded();

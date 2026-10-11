@@ -1,10 +1,10 @@
-# Fase 34 (ADR 0023): el disco de pruebas es un pendrive USB (usb-storage en
-# el xHCI) y no hay virtio-blk. usbd lo enumera como almacenamiento masivo
-# bulk-only, lo sirve con el protocolo de bloques, init monta fsd encima y
-# el shell escribe un fichero que sobrevive a un reinicio (SYNCHRONIZE CACHE
-# en el flush de AriFS).
+# Phase 34 (ADR 0023): the test disk is a USB stick (usb-storage on
+# the xHCI) and there is no virtio-blk. usbd enumerates it as bulk-only mass
+# storage, serves it with the block protocol, init mounts fsd on top and
+# the shell writes a file that survives a reboot (SYNCHRONIZE CACHE
+# on AriFS flush).
 name = "usb.storage"
-description = "pendrive USB como servicio de bloques: fsd y shell sobre usbd, escritura duradera"
+description = "USB stick as block service: fsd and shell on top of usbd, durable write"
 level = "full"
 areas = ["usb", "storage", "filesystem", "init", "shell"]
 usb_storage = true
@@ -16,19 +16,19 @@ stdin = ["ls", "write notas.txt hola usb", "cat notas.txt", "reboot"]
 [boots.expect]
 exit = 0
 serial_contains = [
-    "AriInit: sin virtio-blk",
-    "usb-input: almacenamiento USB en puerto",
-    "usb-input: dispositivo listo: USB HID (sin dispositivos)",
-    "AriInit: servicio de bloques por USB (",
-    "AriInit: servicio de ficheros ok",
-    "AriInit: servicio de bloques ok",
-    "arish: shell de AriCodeOS",
+    "AriInit: no virtio-blk",
+    "usb-input: USB storage on port",
+    "usb-input: device ready: USB HID (no devices)",
+    "AriInit: block service via USB (",
+    "AriInit: file service ok",
+    "AriInit: block service ok",
+    "arish: AriCodeOS shell",
     "hola.txt",
-    "write: 9 bytes en notas.txt",
+    "write: 9 bytes to notas.txt",
     "hola usb",
-    "AriCodeOS: reiniciando",
+    "AriCodeOS: rebooting",
 ]
-serial_absent = ["KERNEL PANIC", "write: error", "fallo en la inicializacion del xHCI"]
+serial_absent = ["KERNEL PANIC", "write: error", "xHCI initialization failed"]
 
 [[boots]]
 cmdline = "qemu_exit shell"
@@ -36,7 +36,7 @@ stdin = ["cat notas.txt", "shutdown"]
 [boots.expect]
 exit = 33
 serial_contains = [
-    "AriInit: servicio de bloques por USB (",
+    "AriInit: block service via USB (",
     "hola usb",
     "ARICODEOS_SHUTDOWN",
 ]

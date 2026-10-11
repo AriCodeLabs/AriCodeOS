@@ -1,12 +1,12 @@
-# Etapa 3 (cuotas y saturacion, ADR 0015): tres programas que consumen CPU
-# en segundo plano (`spawn`) mientras, en la cuarta ranura del broker, un
-# programa que agota su tabla de handles recibe `Limit` y solo se afecta a si
-# mismo, y otra aplicacion se lanza, usa fsd y termina; el cuarto hog ocupa la
-# ultima ranura y el quinto se rechaza de forma predecible; el shell sigue
-# respondiendo. Una sola CPU a proposito: es el caso duro para el reparto por
-# turnos.
+# Stage 3 (quotas and saturation, ADR 0015): three CPU-burning programs
+# in the background (`spawn`) while, in the fourth broker slot, a
+# program that exhausts its handle table gets `Limit` and only affects
+# itself, and another application launches, uses fsd and exits; the fourth hog takes the
+# last slot and the fifth is rejected predictably; the shell keeps
+# responding. A single CPU on purpose: it is the hard case for round-robin
+# scheduling.
 name = "limits.hogs"
-description = "saturacion de CPU y handles: limites observables y otra app sigue progresando (1 CPU)"
+description = "CPU and handle saturation: observable limits and another app keeps making progress (1 CPU)"
 level = "full"
 areas = ["limits", "sandbox", "shell", "init"]
 cmdline = "qemu_exit shell"
@@ -27,17 +27,17 @@ stdin = [
 [expect]
 exit = 33
 serial_contains = [
-    "spawn: cpu_hog lanzado en segundo plano",
-    "cpu_hog: consumiendo CPU",
-    "spawn: cpu_hog: limite de programas en marcha (4)",
-    "handle_hog: limite de handles alcanzado (Limit) tras crear 252 endpoints",
-    "handle_hog: tabla liberada, se puede seguir creando ok",
-    "run: handle_hog termino con 0",
-    "hello_app: hola desde una aplicacion del SDK (arg 7)",
-    "hello_app: fichero privado 'notas' escrito y leido",
-    "hello_app: cuota de memoria respetada (Limit)",
-    "run: hello_app termino con 0",
-    "activo      cpu_hog",
+    "spawn: cpu_hog launched in the background",
+    "cpu_hog: burning CPU",
+    "spawn: cpu_hog: running program limit reached (4)",
+    "handle_hog: handle limit reached (Limit) after creating 252 endpoints",
+    "handle_hog: table freed, creation works again ok",
+    "run: handle_hog exited with 0",
+    "hello_app: hello from an SDK app (arg 7)",
+    "hello_app: private file 'notas' written and read",
+    "hello_app: memory quota enforced (Limit)",
+    "run: hello_app exited with 0",
+    "running     cpu_hog",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "init no responde", "handle_hog: error inesperado"]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "init no responde", "handle_hog: unexpected error"]

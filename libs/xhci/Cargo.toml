@@ -3,7 +3,7 @@ name = "aricode-xhci"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Estructuras de xHCI (USB 3) y del protocolo USB: registros, TRB, anillos, contextos de dispositivo y descriptores (no_std, tests de host)"
+description = "xHCI (USB 3) and USB protocol structures: registers, TRBs, rings, device contexts and descriptors (no_std, host tests)"
 
 [lib]
 path = "src/lib.rs"

@@ -1,32 +1,32 @@
-//! Protocolos IPC versionados de los servicios (sección 75). Cada mensaje es
-//! un bloque de bytes de tamaño fijo con un identificador de protocolo y
-//! versión al principio, de modo que un servicio rechaza lo que no entiende.
+//! Versioned IPC protocols of the services (section 75). Each message is a
+//! fixed-size block of bytes starting with a protocol identifier and
+//! version, so a service rejects what it does not understand.
 
 #![no_std]
 
-/// Protocolo del servicio de bloques (`BlockServiceProtocol v1`).
+/// Block service protocol (`BlockServiceProtocol v1`).
 pub mod block {
     pub const PROTOCOL: u8 = 1;
     pub const VERSION: u8 = 1;
-    /// Sectores por petición como máximo (buffer DMA de 8 KiB).
+    /// Maximum sectors per request (8 KiB DMA buffer).
     pub const MAX_SECTORS: u16 = 16;
     pub const SECTOR_SIZE: u64 = 512;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Op {
-        /// Capacidad en sectores en `Reply::value`.
+        /// Capacity in sectors in `Reply::value`.
         Info = 1,
-        /// Lee `count` sectores desde `lba` al buffer DMA transferido.
+        /// Reads `count` sectors from `lba` into the transferred DMA buffer.
         Read = 2,
-        /// Escribe `count` sectores desde el buffer DMA transferido en `lba`.
+        /// Writes `count` sectors from the transferred DMA buffer at `lba`.
         Write = 3,
-        /// Hace duraderas las escrituras anteriores (ADR 0014); solo lleva
-        /// la respuesta. Sin `VIRTIO_BLK_F_FLUSH` vuelve sin hacer nada.
+        /// Makes previous writes durable (ADR 0014); carries only
+        /// the reply handle. Without `VIRTIO_BLK_F_FLUSH` it returns without doing anything.
         Flush = 4,
     }
 
-    /// Petición (16 bytes). Handles del mensaje: `[respuesta (WRITE), buffer DMA (READ|WRITE)]`;
-    /// `Info` solo lleva la respuesta.
+    /// Request (16 bytes). Message handles: `[reply (WRITE), DMA buffer (READ|WRITE)]`;
+    /// `Info` carries only the reply handle.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Request {
         pub op: Op,
@@ -70,19 +70,19 @@ pub mod block {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Status {
         Ok = 0,
-        /// Petición mal formada o fuera de límites.
+        /// Malformed or out-of-bounds request.
         Invalid = 1,
-        /// Error del dispositivo.
+        /// Device error.
         Io = 2,
-        /// Faltan handles o no son del tipo esperado.
+        /// Handles missing or not of the expected kind.
         BadHandles = 3,
     }
 
-    /// Respuesta (16 bytes).
+    /// Reply (16 bytes).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Reply {
         pub status: Status,
-        /// Capacidad (`Info`) o sectores transferidos.
+        /// Capacity (`Info`) or sectors transferred.
         pub value: u64,
     }
 
@@ -117,57 +117,57 @@ pub mod block {
     }
 }
 
-/// Protocolo del servicio de ficheros (`FileServiceProtocol v1`).
+/// File service protocol (`FileServiceProtocol v1`).
 ///
-/// Los datos de ficheros no viajan en el mensaje (256 bytes): el cliente
-/// transfiere un buffer DMA y el servicio lee o escribe en él.
+/// File data does not travel in the message (256 bytes): the client
+/// transfers a DMA buffer and the service reads from or writes to it.
 pub mod fs {
     pub const PROTOCOL: u8 = 2;
     pub const VERSION: u8 = 1;
     pub const MAX_NAME: usize = 32;
-    /// Máximo por petición de lectura/escritura (buffer del cliente).
+    /// Maximum per read/write request (client buffer).
     pub const MAX_IO: u32 = 4096;
-    /// Máximo de un reemplazo atómico (el journal de AriFS, ADR 0018).
+    /// Maximum size of an atomic replace (the AriFS journal, ADR 0018).
     pub const MAX_REPLACE: u32 = 32 * 1024;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Op {
-        /// `arg` = índice; respuesta: `value` = tamaño, nombre en `Reply::name`.
+        /// `arg` = index; reply: `value` = size, name in `Reply::name`.
         List = 1,
-        /// Nombre en la petición; respuesta: `value` = descriptor.
+        /// Name in the request; reply: `value` = descriptor.
         Open = 2,
-        /// Nombre en la petición; crea vacío; respuesta: `value` = descriptor.
+        /// Name in the request; creates it empty; reply: `value` = descriptor.
         Create = 3,
-        /// `fd`, `offset`, `len`; handles `[respuesta, buffer]`; `value` = leídos.
+        /// `fd`, `offset`, `len`; handles `[reply, buffer]`; `value` = bytes read.
         Read = 4,
-        /// `fd`, `offset`, `len`; handles `[respuesta, buffer]`; `value` = escritos.
+        /// `fd`, `offset`, `len`; handles `[reply, buffer]`; `value` = bytes written.
         Write = 5,
         /// `fd`.
         Close = 6,
-        /// Solo por el endpoint principal (el broker): crea un endpoint ligado
-        /// al prefijo `name/`; la respuesta transfiere ese endpoint (`WRITE`).
-        /// Quien lo reciba solo ve y crea ficheros bajo su prefijo.
+        /// Main endpoint only (the broker): creates an endpoint bound
+        /// to the prefix `name/`; the reply transfers that endpoint (`WRITE`).
+        /// Whoever receives it only sees and creates files under its prefix.
         Bind = 7,
-        /// Hace duraderas las escrituras anteriores (ADR 0014).
+        /// Makes previous writes durable (ADR 0014).
         Flush = 8,
-        /// `fd`, `len`; handles `[respuesta, buffer]`: sustituye el contenido
-        /// entero del fichero de forma atómica y duradera (ADR 0014); `value`
-        /// = bytes escritos.
+        /// `fd`, `len`; handles `[reply, buffer]`: replaces the whole file
+        /// content atomically and durably (ADR 0014); `value`
+        /// = bytes written.
         Replace = 9,
-        /// Solo por el endpoint principal (el broker): crea un endpoint ligado
-        /// a un único fichero en modo lectura (ADR 0016); la respuesta lo
-        /// transfiere (`WRITE`). Desde él solo se ve, abre y lee ese fichero.
+        /// Main endpoint only (the broker): creates an endpoint bound
+        /// to a single file in read-only mode (ADR 0016); the reply
+        /// transfers it (`WRITE`). Through it only that file can be seen, opened and read.
         Share = 10,
-        /// `fd`, `offset`, `len`; handles `[respuesta, buffer]`: un trozo del
-        /// contenido nuevo al journal, sin comprometer nada (ADR 0018). Solo
-        /// un reemplazo a medias por servicio (`Busy` para los demás).
+        /// `fd`, `offset`, `len`; handles `[reply, buffer]`: one chunk of the
+        /// new content to the journal, without committing anything (ADR 0018). Only
+        /// one replace in progress per service (`Busy` for the others).
         ReplaceChunk = 11,
-        /// `fd`, `len`: compromete y aplica los trozos anteriores de una vez;
-        /// `value` = bytes del contenido nuevo.
+        /// `fd`, `len`: commits and applies the previous chunks at once;
+        /// `value` = bytes of the new content.
         ReplaceCommit = 12,
     }
 
-    /// Petición (64 bytes): cabecera, argumentos y nombre.
+    /// Request (64 bytes): header, arguments and name.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Request {
         pub op: Op,
@@ -192,7 +192,7 @@ pub mod fs {
             }
         }
 
-        /// `None` si el nombre no cabe: nunca se recorta un identificador.
+        /// `None` if the name does not fit: an identifier is never truncated.
         pub fn with_name(mut self, name: &str) -> Option<Self> {
             if name.len() > MAX_NAME {
                 return None;
@@ -263,14 +263,14 @@ pub mod fs {
         Io = 6,
         BadFd = 7,
         OutOfRange = 8,
-        /// El endpoint no permite la operación (fichero compartido de solo
-        /// lectura, ADR 0016).
+        /// The endpoint does not allow the operation (shared read-only
+        /// file, ADR 0016).
         Denied = 9,
-        /// Otro reemplazo por trozos está a medias (ADR 0018).
+        /// Another chunked replace is in progress (ADR 0018).
         Busy = 10,
     }
 
-    /// Respuesta (64 bytes): estado, valor y nombre (para `List`).
+    /// Reply (64 bytes): status, value and name (for `List`).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Reply {
         pub status: Status,
@@ -352,69 +352,69 @@ pub mod fs {
     }
 }
 
-/// Protocolo del servicio de red (`NetServiceProtocol v1`). Los datagramas
-/// viajan por el buffer DMA del cliente; el mensaje lleva direcciones,
-/// puertos y longitudes.
+/// Network service protocol (`NetServiceProtocol v1`). Datagrams
+/// travel through the client's DMA buffer; the message carries addresses,
+/// ports and lengths.
 pub mod net {
     pub const PROTOCOL: u8 = 3;
     pub const VERSION: u8 = 1;
-    /// Respuestas de `Op::Link`.
+    /// `Op::Link` replies.
     pub const LINK_UNKNOWN: u64 = 0;
     pub const LINK_DOWN: u64 = 1;
     pub const LINK_UP: u64 = 2;
-    /// Máximo de un datagrama por petición (buffer del cliente).
+    /// Maximum datagram size per request (client buffer).
     pub const MAX_DATAGRAM: u16 = 1472;
-    /// Puerto UDP del respondedor de pruebas del host (eco y DNS), alcanzable
-    /// desde el invitado en la dirección del anfitrión virtual (10.0.2.2).
+    /// UDP port of the host test responder (echo and DNS), reachable
+    /// from the guest at the virtual host address (10.0.2.2).
     pub const TEST_RESPONDER_PORT: u16 = 17007;
-    /// Puerto TCP del servidor de eco de pruebas del host.
+    /// TCP port of the host test echo server.
     pub const TEST_TCP_ECHO_PORT: u16 = 17008;
-    /// Puerto del host redirigido (`hostfwd`) al puerto TCP 7 del invitado.
+    /// Host port forwarded (`hostfwd`) to guest TCP port 7.
     pub const TEST_TCP_FORWARD_PORT: u16 = 17009;
-    /// Puerto TCP en el que escucha el programa de prueba del invitado.
+    /// TCP port the guest test program listens on.
     pub const TEST_TCP_LISTEN_PORT: u16 = 7;
-    /// Puerto del servidor HTTP de pruebas del host.
+    /// Port of the host test HTTP server.
     pub const TEST_HTTP_PORT: u16 = 17010;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Op {
-        /// Configuración: `Reply::data` = ip, máscara, router, dns, mac.
+        /// Configuration: `Reply::data` = ip, netmask, router, dns, mac.
         Info = 1,
-        /// Eco ICMP a `addr` con `id` como secuencia; `value` = RTT en ms.
+        /// ICMP echo to `addr` with `id` as sequence; `value` = RTT in ms.
         Ping = 2,
-        /// Reserva el puerto UDP `port`; `value` = socket.
+        /// Binds UDP port `port`; `value` = socket.
         UdpBind = 3,
-        /// Envía `len` bytes del buffer desde `sock` a `addr:port`.
+        /// Sends `len` bytes of the buffer from `sock` to `addr:port`.
         UdpSend = 4,
-        /// Espera hasta `timeout_ms` un datagrama en `sock`; `value` = bytes,
-        /// remitente en `Reply::data`/`Reply::port`.
+        /// Waits up to `timeout_ms` for a datagram on `sock`; `value` = bytes,
+        /// sender in `Reply::data`/`Reply::port`.
         UdpRecv = 5,
-        /// Libera `sock`.
+        /// Releases `sock`.
         UdpClose = 6,
-        /// Resuelve el nombre que viaja en el buffer del cliente (`len` bytes,
-        /// hasta 253) en `addr:port` (0 = servidor DHCP).
+        /// Resolves the name carried in the client buffer (`len` bytes,
+        /// up to 253) at `addr:port` (0 = DHCP server).
         Dns = 7,
-        /// Conecta con `addr:port`; espera hasta `timeout_ms`; `value` = socket.
+        /// Connects to `addr:port`; waits up to `timeout_ms`; `value` = socket.
         TcpConnect = 8,
-        /// Escucha en `port`; `value` = socket de escucha.
+        /// Listens on `port`; `value` = listening socket.
         TcpListen = 9,
-        /// Espera hasta `timeout_ms` una conexión en `sock`; `value` = socket
-        /// nuevo, remitente en `Reply::data`/`Reply::port`.
+        /// Waits up to `timeout_ms` for a connection on `sock`; `value` = new
+        /// socket, peer in `Reply::data`/`Reply::port`.
         TcpAccept = 10,
-        /// Encola `len` bytes del buffer; `value` = aceptados (0 si está lleno).
+        /// Queues `len` bytes of the buffer; `value` = accepted (0 if full).
         TcpSend = 11,
-        /// Espera hasta `timeout_ms` datos en `sock`; `value` = bytes (0 = el
-        /// otro extremo cerró).
+        /// Waits up to `timeout_ms` for data on `sock`; `value` = bytes (0 = the
+        /// other end closed).
         TcpRecv = 12,
-        /// Cierre ordenado de `sock`.
+        /// Orderly close of `sock`.
         TcpClose = 13,
-        /// Estado del enlace físico: `value` = [`LINK_UNKNOWN`], [`LINK_DOWN`]
-        /// o [`LINK_UP`]. Funciona sin configuración DHCP.
+        /// Physical link state: `value` = [`LINK_UNKNOWN`], [`LINK_DOWN`]
+        /// or [`LINK_UP`]. Works without DHCP configuration.
         Link = 14,
     }
 
-    /// Petición (64 bytes). Los nombres DNS no viajan en el mensaje: van por
-    /// el buffer del cliente, sin límite artificial.
+    /// Request (64 bytes). DNS names do not travel in the message: they go through
+    /// the client buffer, without an artificial limit.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Request {
         pub op: Op,
@@ -495,22 +495,22 @@ pub mod net {
     pub enum Status {
         Ok = 0,
         Invalid = 1,
-        /// Plazo vencido sin respuesta.
+        /// Deadline expired without a reply.
         Timeout = 2,
-        /// Sin configuración de red todavía (DHCP en curso).
+        /// No network configuration yet (DHCP in progress).
         NoRoute = 3,
         BadHandles = 4,
-        /// Demasiadas peticiones pendientes.
+        /// Too many pending requests.
         Busy = 5,
         BadSock = 6,
         InUse = 7,
-        /// El servidor DNS respondió sin dirección.
+        /// The DNS server answered without an address.
         NotFound = 8,
-        /// La conexión fue rechazada o reiniciada por el otro extremo.
+        /// The connection was refused or reset by the other end.
         Reset = 9,
     }
 
-    /// Respuesta (48 bytes): estado, valor, puerto y datos (direcciones).
+    /// Reply (48 bytes): status, value, port and data (addresses).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Reply {
         pub status: Status,
@@ -591,7 +591,7 @@ pub mod net {
         }
     }
 
-    /// Configuración de red tal como viaja en `Reply::data` de `Info`.
+    /// Network configuration as carried in `Reply::data` of `Info`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
     pub struct Info {
         pub address: [u8; 4],
@@ -624,20 +624,20 @@ pub mod net {
     }
 }
 
-/// Protocolo del servicio de entrada (`InputServiceProtocol v1`): eventos
-/// evdev de un dispositivo virtio-input.
+/// Input service protocol (`InputServiceProtocol v1`): evdev events
+/// from a virtio-input device.
 pub mod input {
     pub const PROTOCOL: u8 = 4;
     pub const VERSION: u8 = 1;
-    /// Eventos por respuesta.
+    /// Events per reply.
     pub const MAX_EVENTS: usize = 4;
     pub const MAX_NAME: usize = 32;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Op {
-        /// Nombre del dispositivo en `Reply::name`.
+        /// Device name in `Reply::name`.
         Info = 1,
-        /// Espera hasta `timeout_ms` y devuelve hasta `MAX_EVENTS` eventos.
+        /// Waits up to `timeout_ms` and returns up to `MAX_EVENTS` events.
         Read = 2,
     }
 
@@ -684,7 +684,7 @@ pub mod input {
         Busy = 3,
     }
 
-    /// Evento (8 bytes, formato evdev): tipo, código, valor.
+    /// Event (8 bytes, evdev format): type, code, value.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
     pub struct Event {
         pub kind: u16,
@@ -692,9 +692,9 @@ pub mod input {
         pub value: u32,
     }
 
-    /// Respuesta (104 bytes): estado, número de eventos, eventos, el instante
-    /// (ms de arranque) en que el servicio recibió cada uno, y nombre. Los
-    /// instantes permiten ordenar eventos de varios dispositivos.
+    /// Reply (104 bytes): status, number of events, events, the timestamp
+    /// (ms since boot) at which the service received each one, and name. The
+    /// timestamps allow ordering events from several devices.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Reply {
         pub status: Status,
@@ -721,7 +721,7 @@ pub mod input {
             }
         }
 
-        /// Eventos con sus instantes (`times[i]` acompaña a `events[i]`).
+        /// Events with their timestamps (`times[i]` goes with `events[i]`).
         pub fn events(events: &[Event], times: &[u64]) -> Self {
             let mut r = Self::status(Status::Ok);
             let n = events.len().min(times.len()).min(MAX_EVENTS);
@@ -731,7 +731,7 @@ pub mod input {
             r
         }
 
-        /// `None` si el nombre no cabe.
+        /// `None` if the name does not fit.
         pub fn with_name(mut self, name: &str) -> Option<Self> {
             if name.len() > MAX_NAME {
                 return None;
@@ -805,28 +805,28 @@ pub mod input {
     }
 }
 
-/// Protocolo del compositor (`WindowProtocol v1`): ventanas cuyo contenido
-/// vive en un buffer DMA del cliente, y eventos de entrada ya enrutados.
+/// Compositor protocol (`WindowProtocol v1`): windows whose content
+/// lives in a client DMA buffer, and already routed input events.
 pub mod window {
     pub const PROTOCOL: u8 = 5;
     pub const VERSION: u8 = 1;
     pub const MAX_TITLE: usize = 24;
-    /// Ventana máxima (píxeles por lado).
+    /// Maximum window size (pixels per side).
     pub const MAX_SIDE: u32 = 4096;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Op {
-        /// Crea una ventana `w`x`h` con `title`; handles `[respuesta, buffer]`
-        /// (el buffer tiene `w*h*4` bytes en `0x00RRGGBB`); `value` = id.
+        /// Creates a `w`x`h` window with `title`; handles `[reply, buffer]`
+        /// (the buffer has `w*h*4` bytes in `0x00RRGGBB`); `value` = id.
         Create = 1,
-        /// El contenido del buffer cambió: recomponer.
+        /// The buffer content changed: recompose.
         Present = 2,
-        /// Espera hasta `timeout_ms` un evento de la ventana.
+        /// Waits up to `timeout_ms` for a window event.
         Poll = 3,
         Close = 4,
     }
 
-    /// Petición (64 bytes).
+    /// Request (64 bytes).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Request {
         pub op: Op,
@@ -853,7 +853,7 @@ pub mod window {
             }
         }
 
-        /// `None` si el título no cabe.
+        /// `None` if the title does not fit.
         pub fn with_title(mut self, title: &str) -> Option<Self> {
             if title.len() > MAX_TITLE {
                 return None;
@@ -917,18 +917,18 @@ pub mod window {
         Timeout = 5,
     }
 
-    /// Evento entregado a una ventana.
+    /// Event delivered to a window.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Event {
-        /// Carácter ya traducido por el compositor.
+        /// Character already translated by the compositor.
         Key(u8),
-        /// Botón pulsado en coordenadas del contenido.
+        /// Button pressed, in content coordinates.
         Click { x: i32, y: i32, button: u8 },
-        /// La ventana ganó (`true`) o perdió el foco.
+        /// The window gained (`true`) or lost focus.
         Focus(bool),
     }
 
-    /// Respuesta (32 bytes): estado, valor y evento opcional.
+    /// Reply (32 bytes): status, value and optional event.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Reply {
         pub status: Status,
@@ -1020,9 +1020,9 @@ pub mod window {
     }
 }
 
-/// Protocolo del broker de lanzamiento (`LaunchProtocol v1`): un programa
-/// pide a init que ejecute otro; init lee su manifiesto, decide qué
-/// capabilities entrega y devuelve el código de salida.
+/// Launch broker protocol (`LaunchProtocol v1`): a program
+/// asks init to run another; init reads its manifest, decides which
+/// capabilities to hand over and returns the exit code.
 pub mod launch {
     pub const PROTOCOL: u8 = 6;
     pub const VERSION: u8 = 1;
@@ -1033,17 +1033,17 @@ pub mod launch {
         pub arg: u64,
         pub name: [u8; MAX_NAME],
         pub name_len: u8,
-        /// `DETACH`: responder `Started` al crear el proceso, sin esperar su
-        /// salida (ADR 0015).
+        /// `DETACH`: reply `Started` when the process is created, without waiting
+        /// for it to exit (ADR 0015).
         pub flags: u8,
     }
 
     impl Request {
         pub const LEN: usize = 48;
-        /// Lanzamiento en segundo plano.
+        /// Background launch.
         pub const DETACH: u8 = 1;
 
-        /// `None` si el nombre no cabe.
+        /// `None` if the name does not fit.
         pub fn new(name: &str, arg: u64) -> Option<Self> {
             if name.is_empty() || name.len() > MAX_NAME {
                 return None;
@@ -1100,22 +1100,22 @@ pub mod launch {
     #[repr(u8)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Status {
-        /// `value` = código de salida del programa.
+        /// `value` = exit code of the program.
         Ok = 0,
         Invalid = 1,
-        /// No hay tal programa en el initrd.
+        /// No such program in the initrd.
         NotFound = 2,
-        /// El manifiesto pide capacidades que el broker no concede.
+        /// The manifest asks for capabilities the broker does not grant.
         Denied = 3,
-        /// El programa murió por un fallo.
+        /// The program died from a fault.
         Killed = 4,
-        /// Manifiesto ilegible.
+        /// Unreadable manifest.
         BadManifest = 5,
-        /// El broker no pudo lanzarlo (recursos).
+        /// The broker could not launch it (resources).
         Failed = 6,
-        /// Lanzado en segundo plano (`DETACH`); `value` = 0.
+        /// Launched in the background (`DETACH`); `value` = 0.
         Started = 7,
-        /// Límite de programas en marcha del broker (ADR 0015).
+        /// Broker limit of running programs (ADR 0015).
         Limit = 8,
     }
 
@@ -1336,7 +1336,7 @@ mod tests {
             Request::new(Op::Open)
                 .with_name("abcdefghijklmnopqrstuvwxyz0123456789")
                 .is_none(),
-            "un nombre largo se rechaza, nunca se recorta"
+            "a long name is rejected, never truncated"
         );
         let exact = "a".repeat(MAX_NAME);
         assert_eq!(
@@ -1355,11 +1355,11 @@ mod tests {
         assert_eq!(Request::decode(&r.encode()), Some(r));
         let mut bad = r.encode();
         bad[1] = 9;
-        assert_eq!(Request::decode(&bad), None, "version desconocida");
+        assert_eq!(Request::decode(&bad), None, "unknown version");
         bad = r.encode();
         bad[2] = 7;
-        assert_eq!(Request::decode(&bad), None, "op desconocida");
-        assert_eq!(Request::decode(&r.encode()[..8]), None, "truncada");
+        assert_eq!(Request::decode(&bad), None, "unknown op");
+        assert_eq!(Request::decode(&r.encode()[..8]), None, "truncated");
     }
 
     #[test]
@@ -1381,10 +1381,10 @@ mod tests {
     }
 }
 
-/// Estado de los servicios supervisados por init (etapa 1 del plan posterior
-/// al roadmap): el shell y las herramientas de diagnóstico lo consultan por
-/// el endpoint del broker; init distingue las peticiones por el byte de
-/// protocolo. Una petición por servicio (`index` desde 0) hasta `NotFound`.
+/// Status of the services supervised by init (stage 1 of the post-roadmap
+/// plan): the shell and the diagnostic tools query it through
+/// the broker endpoint; init tells requests apart by the protocol
+/// byte. One request per service (`index` from 0) until `NotFound`.
 pub mod status {
     pub const PROTOCOL: u8 = 7;
     pub const VERSION: u8 = 1;
@@ -1414,7 +1414,7 @@ pub mod status {
         }
     }
 
-    /// Estado de vida (`aricode_supervisor::State`) en el cable.
+    /// Lifecycle state (`aricode_supervisor::State`) on the wire.
     #[repr(u8)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum State {
@@ -1428,11 +1428,11 @@ pub mod status {
     impl State {
         pub fn name(self) -> &'static str {
             match self {
-                State::Stopped => "parado",
-                State::Starting => "arrancando",
-                State::Ready => "listo",
-                State::Degraded => "degradado",
-                State::Failed => "fallido",
+                State::Stopped => "stopped",
+                State::Starting => "starting",
+                State::Ready => "ready",
+                State::Degraded => "degraded",
+                State::Failed => "failed",
             }
         }
         fn from_u8(v: u8) -> Option<Self> {
@@ -1447,7 +1447,7 @@ pub mod status {
         }
     }
 
-    /// Última salida del servicio en el cable.
+    /// Last exit of the service on the wire.
     #[repr(u8)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum LastExit {
@@ -1468,7 +1468,7 @@ pub mod status {
         pub restarts: u32,
         pub last_exit: LastExit,
         pub last_code: u64,
-        /// Milisegundos desde el último `listo` (0 si no lo está).
+        /// Milliseconds since the last `ready` (0 if it is not ready).
         pub ready_for_ms: u64,
     }
 
@@ -1557,7 +1557,7 @@ pub mod status {
             assert_eq!(
                 Request::decode(&[6, 1, 0, 0, 0, 0, 0, 0]),
                 None,
-                "otro protocolo"
+                "another protocol"
             );
             let reply = Reply {
                 found: true,
@@ -1574,11 +1574,11 @@ pub mod status {
             let d = Reply::decode(&reply.encode()).unwrap();
             assert_eq!(d, reply);
             assert_eq!(d.name_str(), "virtio_input_00");
-            assert_eq!(d.state.name(), "degradado");
+            assert_eq!(d.state.name(), "degraded");
             assert!(!Reply::decode(&Reply::not_found().encode()).unwrap().found);
             let mut bad = reply.encode();
             bad[3] = 9;
-            assert_eq!(Reply::decode(&bad), None, "estado desconocido");
+            assert_eq!(Reply::decode(&bad), None, "unknown state");
         }
     }
 }

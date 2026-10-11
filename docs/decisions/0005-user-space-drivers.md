@@ -1,15 +1,15 @@
-# ADR 0005: Drivers en espacio de usuario
+# ADR 0005: User-space drivers
 
-- **Fecha:** 2026-09-26
-- **Estado:** Aceptada
+- **Date:** 2026-09-26
+- **Status:** Accepted
 
-## Decisión
+## Decision
 
-Todo driver que técnicamente pueda vivir fuera del kernel lo hará, como proceso
-aislado con capabilities de hardware concretas. En QEMU se empieza por virtio.
+Every driver that can technically live outside the kernel will do so, as an
+isolated process with specific hardware capabilities. In QEMU we start with virtio.
 
-## Consecuencias
+## Consequences
 
-- Requiere IPC eficiente y una API de driver (Fase 16).
-- El IOMMU es una característica de seguridad importante (Fase 33).
-- Primer hardware real limitado a una "Reference Machine" definida.
+- Requires efficient IPC and a driver API (Phase 16).
+- The IOMMU is an important security feature (Phase 33).
+- First real hardware limited to a defined "Reference Machine".

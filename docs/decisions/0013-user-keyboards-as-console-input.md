@@ -1,60 +1,61 @@
-# ADR 0013: Teclados de usuario como entrada de consola (puente de consola)
+# ADR 0013: User-space keyboards as console input (console bridge)
 
-- **Fecha:** 2026-09-28
-- **Estado:** Aceptada
+- **Date:** 2026-09-28
+- **Status:** Accepted
 
-## Contexto
+## Context
 
-La consola es del kernel: COM1 y el teclado PS/2 llegan por interrupción a
-un anillo que `console_read` (syscall 24) entrega a quien tiene `READ`
-sobre el objeto `Console`. Los teclados virtio-input y USB HID viven en
-ring 3 (`inputd`, `usbd`) y solo los leen el compositor y los programas
-que reciben su endpoint. En un equipo sin puerto serie ni PS/2 (un portátil
-con teclado USB interno, Fase 34) el shell no tenía teclado. La etapa 2 del
-plan posterior al roadmap pide una sesión útil con esos teclados.
+The console belongs to the kernel: COM1 and the PS/2 keyboard arrive by
+interrupt into a ring that `console_read` (syscall 24) hands to whoever
+holds `READ` on the `Console` object. The virtio-input and USB HID
+keyboards live in ring 3 (`inputd`, `usbd`) and are read only by the
+compositor and by programs that receive their endpoint. On a machine with
+no serial port and no PS/2 (a laptop with an internal USB keyboard,
+Phase 34) the shell had no keyboard. Stage 2 of the post-roadmap plan asks
+for a usable session with those keyboards.
 
-## Decisión
+## Decision
 
-1. **La consola sigue en el kernel.** El shell lee un solo anillo sin saber
-   de dónde viene cada byte; COM1 y PS/2 siguen funcionando sin procesos de
-   usuario (pánicos, arranque temprano, tests de consola).
-2. **Nueva syscall `console_inject` (29)**: escribe texto en el anillo de
-   entrada de consola. Exige `MANAGE` sobre un objeto `Console`; `READ`
-   (lo que reciben el shell y los programas) no basta. Solo init recibe el
-   handle con `MANAGE` y lo delega a quien decide.
-3. **Un servicio `console_bridge`** (`services/console-bridge`) recibe la
-   entrada de consola con `MANAGE` y los endpoints de los servicios de
-   entrada, traduce las pulsaciones con `aricode_input::Keyboard` (un
-   estado por teclado, los botones del ratón se ignoran) y las inyecta.
-   Init lo lanza como residente supervisado (ADR 0011, política de driver)
-   en modo `shell`, solo cuando no hay compositor: los servicios de entrada
-   admiten un lector a la espera y con GUI los eventos son del compositor.
-4. **Un lector por servicio de entrada.** Mientras el puente corre, un
-   programa lanzado desde el shell que pida entrada compite con él y verá
-   `Busy` o perderá pulsaciones. Es el contrato de la etapa 2 (sesión de
-   shell); la sesión gráfica no lanza el puente.
+1. **The console stays in the kernel.** The shell reads a single ring
+   without knowing where each byte comes from; COM1 and PS/2 keep working
+   without user processes (panics, early boot, console tests).
+2. **New syscall `console_inject` (29)**: writes text into the console
+   input ring. It requires `MANAGE` on a `Console` object; `READ` (what the
+   shell and programs receive) is not enough. Only init receives the
+   handle with `MANAGE`, and it delegates it to whoever it chooses.
+3. **A `console_bridge` service** (`services/console-bridge`) receives the
+   console input with `MANAGE` and the endpoints of the input services,
+   translates key presses with `aricode_input::Keyboard` (one state per
+   keyboard; mouse buttons are ignored) and injects them. Init launches it
+   as a supervised resident (ADR 0011, driver policy) in `shell` mode, only
+   when there is no compositor: the input services accept one waiting
+   reader, and with a GUI the events belong to the compositor.
+4. **One reader per input service.** While the bridge runs, a program
+   launched from the shell that asks for input competes with it and will
+   see `Busy` or lose key presses. This is the stage 2 contract (shell
+   session); the graphical session does not launch the bridge.
 
-## Alternativas descartadas
+## Rejected alternatives
 
-- Mover la consola a espacio de usuario (un `consoled` con COM1 y PS/2):
-  añade un proceso al camino de pánico y arranque temprano y obliga a
-  transferir la línea serie, sin ganar nada para el shell.
-- Que el shell lea los endpoints de entrada él mismo: duplica la traducción
-  en cada lector de consola (shell, programas de prueba) y ata al shell a
-  los servicios de entrada; con el puente el shell sigue leyendo un
-  `Console` con `READ`.
-- Un sistema de foco de entrada (rutar eventos entre puente, compositor y
-  aplicaciones): es la etapa 4 (aplicaciones externas), no la 2.
+- Moving the console to user space (a `consoled` with COM1 and PS/2): adds
+  a process to the panic and early-boot path and forces handing over the
+  serial line, with no gain for the shell.
+- Having the shell read the input endpoints itself: duplicates the
+  translation in every console reader (shell, test programs) and ties the
+  shell to the input services; with the bridge the shell keeps reading a
+  `Console` with `READ`.
+- An input focus system (routing events between bridge, compositor and
+  applications): that is stage 4 (external applications), not stage 2.
 
-## Consecuencias
+## Consequences
 
-- Init recibe `0x10008` con `READ|MANAGE|DUPLICATE|TRANSFER` y sigue
-  pasando al shell solo `READ|TRANSFER`.
-- El puente recorre los servicios por turnos con plazo `POLL_MS` (20 ms):
-  la latencia máxima de una pulsación crece con el número de dispositivos.
-- El puente no escribe nada al arrancar: init anuncia su lanzamiento
-  (`CONSOLE_BRIDGE_READY`) antes de crear el shell, porque con varias CPUs
-  una línea del puente se entrelazaba con el primer prompt.
-- `shell.usb_keyboard` y `shell.virtio_keyboard` prueban una sesión de
-  shell tecleada por QMP en un teclado USB HID y en uno virtio;
-  `shell.services_detail` muestra el puente como residente.
+- Init receives `0x10008` with `READ|MANAGE|DUPLICATE|TRANSFER` and still
+  passes only `READ|TRANSFER` to the shell.
+- The bridge polls the services in turn with a `POLL_MS` (20 ms) timeout:
+  the worst-case latency of a key press grows with the number of devices.
+- The bridge writes nothing at startup: init announces its launch
+  (`CONSOLE_BRIDGE_READY`) before creating the shell, because with several
+  CPUs a line from the bridge got interleaved with the first prompt.
+- `shell.usb_keyboard` and `shell.virtio_keyboard` test a shell session
+  typed via QMP on a USB HID keyboard and on a virtio one;
+  `shell.services_detail` shows the bridge as a resident.

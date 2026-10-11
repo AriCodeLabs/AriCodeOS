@@ -1,8 +1,8 @@
-//! Línea de comandos del kernel: `clave` o `clave=valor` separados por
-//! espacios. Sin `alloc`: itera sobre el `&str` original.
+//! Kernel command line: `key` or `key=value` separated by
+//! spaces. No `alloc`: iterates over the original `&str`.
 //!
-//! La leen AriBoot (para saber si debe terminar QEMU ante un fallo) y
-//! AriKernel (modo test, fallos provocados...). Fichero en la ESP:
+//! Read by AriBoot (to know whether to exit QEMU on failure) and
+//! AriKernel (test mode, injected failures...). File on the ESP:
 //! `\aricodeos\cmdline.txt`.
 
 #![no_std]
@@ -17,7 +17,7 @@ impl<'a> CmdLine<'a> {
         Self { raw }
     }
 
-    /// Construye desde bytes; ignora contenido no UTF-8 devolviendo una línea vacía.
+    /// Builds from bytes; non-UTF-8 content yields an empty line.
     pub fn from_bytes(bytes: &'a [u8]) -> Self {
         Self {
             raw: core::str::from_utf8(bytes).unwrap_or(""),
@@ -41,12 +41,12 @@ impl<'a> CmdLine<'a> {
             })
     }
 
-    /// `true` si `key` aparece (con o sin valor).
+    /// `true` if `key` appears (with or without a value).
     pub fn has(&self, key: &str) -> bool {
         self.entries().any(|(k, _)| k == key)
     }
 
-    /// Valor de la última aparición de `key=valor`.
+    /// Value of the last occurrence of `key=value`.
     pub fn get(&self, key: &str) -> Option<&'a str> {
         self.entries()
             .filter(|(k, _)| *k == key)
@@ -55,34 +55,34 @@ impl<'a> CmdLine<'a> {
     }
 }
 
-/// Claves reconocidas. Centralizadas para que bootloader y kernel coincidan.
+/// Recognised keys. Centralised so that bootloader and kernel agree.
 pub mod keys {
-    /// Terminar QEMU con `isa-debug-exit` al acabar (éxito) o fallar (error).
+    /// Exit QEMU with `isa-debug-exit` on completion (success) or failure (error).
     pub const QEMU_EXIT: &str = "qemu_exit";
-    /// Fallo provocado para tests: `test=panic`.
+    /// Injected failure for tests: `test=panic`.
     pub const TEST: &str = "test";
-    /// Nivel máximo de log: `log=trace|debug|info|warn|error|off`.
+    /// Maximum log level: `log=trace|debug|info|warn|error|off`.
     pub const LOG: &str = "log";
-    /// `shell`: init lanza el shell interactivo tras los servicios de arranque.
+    /// `shell`: init launches the interactive shell after the boot services.
     pub const SHELL: &str = "shell";
-    /// `gui`: el kernel deja el framebuffer al compositor de usuario.
+    /// `gui`: the kernel hands the framebuffer to the user-space compositor.
     pub const GUI: &str = "gui";
-    /// `kbd=us|es`: disposición del teclado PS/2 de la consola (US por defecto).
+    /// `kbd=us|es`: PS/2 keyboard layout of the console (US by default).
     pub const KBD: &str = "kbd";
-    /// `boot_slot=A|B`: AriBoot lo añade cuando arranca desde una partición de
-    /// slot; `boot_pending` acompaña si el slot espera confirmación.
+    /// `boot_slot=A|B`: AriBoot adds it when booting from a slot
+    /// partition; `boot_pending` comes along if the slot awaits confirmation.
     pub const BOOT_SLOT: &str = "boot_slot";
     pub const BOOT_PENDING: &str = "boot_pending";
-    /// `init_fail_late`: init falla tras los servicios y antes de confirmar.
+    /// `init_fail_late`: init fails after the services and before confirming.
     pub const INIT_FAIL_LATE: &str = "init_fail_late";
-    /// `restart_storm`: init somete a un servicio de prueba a 100 reinicios.
+    /// `restart_storm`: init subjects a test service to 100 restarts.
     pub const RESTART_STORM: &str = "restart_storm";
-    /// `service_hang`: init lanza un servicio de prueba que nunca responde y
-    /// comprueba que el supervisor lo termina al vencer su sonda.
+    /// `service_hang`: init launches a test service that never answers and
+    /// checks that the supervisor kills it when its probe expires.
     pub const SERVICE_HANG: &str = "service_hang";
-    /// `smp=off`: no arrancar los procesadores de aplicación (hardware real).
+    /// `smp=off`: do not start the application processors (real hardware).
     pub const SMP: &str = "smp";
-    /// `iommu=off`: no activar la traducción DMA (hardware real).
+    /// `iommu=off`: do not enable DMA translation (real hardware).
     pub const IOMMU: &str = "iommu";
 }
 

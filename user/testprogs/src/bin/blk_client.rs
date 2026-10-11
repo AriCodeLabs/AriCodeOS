@@ -1,6 +1,6 @@
-//! Cliente del servicio de bloques (Fase 19): info, lectura y escritura por
-//! IPC con un buffer DMA propio. Handles: 0x10004 = endpoint del servicio
-//! (WRITE), 0x10005 = HARDWARE (para el buffer DMA). Exito = 0.
+//! Block service client (Phase 19): info, read and write over IPC with its
+//! own DMA buffer. Handles: 0x10004 = service endpoint (WRITE), 0x10005 =
+//! HARDWARE (for the DMA buffer). Success = 0.
 #![no_std]
 #![no_main]
 
@@ -8,8 +8,7 @@ use aricode_proto::block::{Op, Reply, Request, Status};
 use aricode_rt::sys::{self, rights, Handle, TIMEOUT_INFINITE};
 
 const BLK: Handle = Handle(0x0001_0004);
-/// Primer sector del área en bruto del disco de pruebas (`xtask`).
-/// Primer LBA del area en bruto en el disco de pruebas (`arg` = 0).
+/// First LBA of the raw area on the test disk (`xtask`), used when `arg` = 0.
 const RAW_DEFAULT: u64 = 4096;
 const HW: Handle = Handle(0x0001_0005);
 
@@ -38,13 +37,13 @@ impl Client {
     }
 
     fn sector(&mut self, i: usize) -> &mut [u8] {
-        // SAFETY: buffer DMA de 8 KiB mapeado RW en este proceso.
+        // SAFETY: 8 KiB DMA buffer mapped RW in this process.
         unsafe { core::slice::from_raw_parts_mut((self.buf + 512 * i as u64) as *mut u8, 512) }
     }
 }
 
 fn main(arg: u64) -> u64 {
-    // init pasa el inicio del area en bruto (cola de ARI0) del disco que haya.
+    // init passes the start of the raw area (tail of ARI0) of whatever disk is present.
     let raw = if arg == 0 { RAW_DEFAULT } else { arg };
     let Ok(reply) = sys::endpoint_create() else {
         return 1;
@@ -56,7 +55,7 @@ fn main(arg: u64) -> u64 {
         return 3;
     };
     let mut c = Client { reply, dma, buf };
-    // 1. Capacidad.
+    // 1. Capacity.
     let capacity = match c.call(
         Request {
             op: Op::Info,
@@ -71,8 +70,8 @@ fn main(arg: u64) -> u64 {
         }) if value > 0 => value,
         _ => return 4,
     };
-    // 2. Leer 4 sectores del area en bruto (a partir del LBA 4096, tras el
-    //    espacio reservado a AriFS) y comprobar el patron.
+    // 2. Read 4 sectors of the raw area (from LBA 4096, after the space
+    //    reserved for AriFS) and check the pattern.
     match c.call(
         Request {
             op: Op::Read,
@@ -93,7 +92,7 @@ fn main(arg: u64) -> u64 {
             return 6;
         }
     }
-    // 3. Escribir un patron en el LBA raw + 100 y releerlo.
+    // 3. Write a pattern at LBA raw + 100 and read it back.
     for (i, b) in c.sector(0).iter_mut().enumerate() {
         *b = (i as u8).wrapping_mul(13).wrapping_add(1);
     }
@@ -133,7 +132,7 @@ fn main(arg: u64) -> u64 {
     {
         return 9;
     }
-    // 4. Fuera de rango y sin buffer: errores limpios.
+    // 4. Out of range and without a buffer: clean errors.
     if c.call(
         Request {
             op: Op::Read,
@@ -160,7 +159,7 @@ fn main(arg: u64) -> u64 {
     {
         return 11;
     }
-    sys::print(b"blk_client: info, lectura y escritura por IPC ok\n");
+    sys::print(b"blk_client: info, read and write over IPC ok\n");
     0
 }
 

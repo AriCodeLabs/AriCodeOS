@@ -1,44 +1,44 @@
-# Evidencias de la revisión de `3eb4965`
+# Evidence for the `3eb4965` review
 
-Estas pruebas son instrumentación de auditoría, no correcciones. Se
-ejecutaron en copias temporales; no modifican el código de producción.
+These tests are audit instrumentation, not fixes. They were run on temporary
+copies; they do not modify production code.
 
-## Recogida de procesos
+## Process reaping
 
-- `reap-interleaving.patch`: barrera en `release_address_space` y
-  observación de la retirada en `wait_until`. Sustituye la cesión por espera
-  activa en esa ventana para que la CPU del padre no recoja el proceso.
-- `audit_reap.toml`: adaptación de `user.hello` con cuatro CPU.
-- `reap-serial.log`: resultado observado, `mapper=true` al retirar el
-  proceso y `process_present=false` cuando continúa la recogida.
+- `reap-interleaving.patch`: barrier in `release_address_space` and
+  observation of the removal in `wait_until`. Replaces yielding with busy
+  waiting in that window so the parent's CPU does not reap the process.
+- `audit_reap.toml`: adaptation of `user.hello` with four CPUs.
+- `reap-serial.log`: observed result, `mapper=true` when the process is
+  removed and `process_present=false` when reaping continues.
 
-En una copia de `3eb4965`, aplicar el parche, copiar el TOML a `tests/qemu`
-y ejecutar `cargo xtask test --all --area audit_reap`. El escenario conserva
-las expectativas funcionales de `user.hello` y pasa; los marcadores `AUDIT`
-documentan la intercalación defectuosa.
+On a copy of `3eb4965`, apply the patch, copy the TOML to `tests/qemu`
+and run `cargo xtask test --all --area audit_reap`. The scenario keeps
+the functional expectations of `user.hello` and passes; the `AUDIT`
+markers document the faulty interleaving.
 
-## Reasignación de IOMMU
+## IOMMU reassignment
 
-- `iommu-reassignment.patch`: añade una comprobación de ciclo de vida al
-  principio de `iommu::selftest`, usando dos identificadores de dominio de
-  prueba y la función PCI `00:02.0` de la configuración QEMU del proyecto.
-- `audit_iommu.toml`: selección independiente de ese escenario.
-- `iommu-serial.log`: contexto presente en el segundo dominio antes de
-  liberar el primero, ausente después; aserción fallida.
+- `iommu-reassignment.patch`: adds a lifecycle check at the start of
+  `iommu::selftest`, using two test domain identifiers and PCI function
+  `00:02.0` from the project's QEMU configuration.
+- `audit_iommu.toml`: standalone selection of that scenario.
+- `iommu-serial.log`: context present in the second domain before
+  freeing the first, absent afterwards; failed assertion.
 
-En otra copia limpia de `3eb4965`, aplicar solo este parche, copiar el TOML
-a `tests/qemu` y ejecutar `cargo xtask test --all --area audit_iommu`.
-En el commit revisado se espera un fallo de aserción.
+On another clean copy of `3eb4965`, apply only this patch, copy the TOML
+to `tests/qemu` and run `cargo xtask test --all --area audit_iommu`.
+An assertion failure is expected on the reviewed commit.
 
-Para ambas reproducciones se usaron puertos 28007–28010 en lugar de
-17007–17010 y un alias del ejecutable QEMU. La batería oficial aislada usó
-27007–27010. Son ajustes para evitar interferencias con otras ejecuciones;
-no forman parte de los parches del kernel. No ejecutar dos baterías en los
-mismos puertos simultáneamente.
+Both reproductions used ports 28007–28010 instead of 17007–17010 and an
+alias for the QEMU executable. The isolated official suite used
+27007–27010. These are adjustments to avoid interference with other runs;
+they are not part of the kernel patches. Do not run two suites on the
+same ports simultaneously.
 
-## Batería oficial
+## Official suite
 
-`check.log`: formato y Clippy correctos. `tests.log`: 203 pruebas de host
-y 77 escenarios QEMU correctos, sobre la copia aislada sin instrumentación
-del kernel. Los fallos de las reproducciones adicionales no pertenecen a
-esta batería oficial.
+`check.log`: formatting and Clippy pass. `tests.log`: 203 host tests
+and 77 QEMU scenarios pass, on the isolated copy without kernel
+instrumentation. The failures of the additional reproductions do not
+belong to this official suite.

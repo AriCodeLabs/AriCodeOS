@@ -1,7 +1,7 @@
-# Con la pila apuntando a memoria no mapeada solo la pila IST permite que el
-# handler de #DF llegue a ejecutarse y deje diagnostico.
+# With the stack pointing at unmapped memory, only the IST stack lets the
+# #DF handler actually run and leave diagnostics.
 name = "interrupts.double_fault_uses_ist"
-description = "test=double_fault -> #DF atendido en la pila IST"
+description = "test=double_fault -> #DF handled on the IST stack"
 level = "full"
 areas = ["interrupts"]
 cmdline = "qemu_exit test=double_fault"

@@ -1,15 +1,15 @@
-//! Runtime de los programas de usuario (Fase 27): `_start`, heap, panic y
-//! utilidades de formato sin `alloc`. Todo programa de AriCodeOS (servicios,
-//! aplicaciones y programas de prueba) depende de esta crate y del SDK de
-//! syscalls y servicios (`aricode-sys`, reexportado como `sys`).
+//! Runtime for user programs (Phase 27): `_start`, heap, panic and
+//! formatting helpers without `alloc`. Every AriCodeOS program (services,
+//! applications and test programs) depends on this crate and on the
+//! syscall and service SDK (`aricode-sys`, re-exported as `sys`).
 //!
-//! Un programa mínimo:
+//! A minimal program:
 //!
 //! ```ignore
 //! #![no_std]
 //! #![no_main]
 //! use aricode_rt::sys;
-//! fn main(arg: u64) -> u64 { sys::print(b"hola\n"); 0 }
+//! fn main(arg: u64) -> u64 { sys::print(b"hello\n"); 0 }
 //! aricode_rt::entry!(main);
 //! ```
 
@@ -19,9 +19,9 @@ extern crate alloc;
 
 pub use aricode_sys as sys;
 
-/// Heap de los programas de usuario: 256 KiB estáticos servidos por
-/// `aricode-heap` (el mismo allocator que el kernel) tras un spinlock. Sin
-/// crecimiento: los servicios y drivers usan poca memoria dinámica.
+/// User program heap: 256 KiB of static memory served by
+/// `aricode-heap` (the same allocator as the kernel) behind a spinlock. No
+/// growth: services and drivers use little dynamic memory.
 mod user_heap {
     use aricode_heap::Heap;
     use aricode_sync::SpinLock;
@@ -32,7 +32,7 @@ mod user_heap {
 
     #[repr(align(4096))]
     struct Arena(UnsafeCell<[u8; SIZE]>);
-    // SAFETY: solo se accede bajo el lock del heap.
+    // SAFETY: only accessed under the heap lock.
     unsafe impl Sync for Arena {}
     static ARENA: Arena = Arena(UnsafeCell::new([0; SIZE]));
 
@@ -50,7 +50,7 @@ mod user_heap {
             let mut guard = self.heap.lock();
             let heap = guard.get_or_insert_with(|| {
                 let mut h = Heap::empty();
-                // SAFETY: región estática alineada a página, exclusiva del heap.
+                // SAFETY: static page-aligned region, exclusive to the heap.
                 unsafe { h.add_region(ARENA.0.get() as usize, SIZE) };
                 h
             });
@@ -58,7 +58,7 @@ mod user_heap {
         }
     }
 
-    // SAFETY: acceso serializado por el spinlock; los punteros provienen de `alloc`.
+    // SAFETY: access serialized by the spinlock; pointers come from `alloc`.
     unsafe impl GlobalAlloc for UserHeap {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             self.with(|h| {
@@ -74,10 +74,10 @@ mod user_heap {
     }
 }
 
-/// Código de salida del panic handler.
+/// Exit code of the panic handler.
 pub const PANIC_EXIT_CODE: u64 = 255;
 
-/// Imprime `prefix` seguido del error del ABI (su código numérico).
+/// Prints `prefix` followed by the ABI error (its numeric code).
 pub fn print_error(prefix: &[u8], e: sys::Error) {
     let mut buf = [0u8; 20];
     sys::print(prefix);
@@ -86,7 +86,7 @@ pub fn print_error(prefix: &[u8], e: sys::Error) {
     sys::print(b"\n");
 }
 
-/// Formatea un entero en decimal sin `alloc` (para mensajes de consola).
+/// Formats an integer in decimal without `alloc` (for console messages).
 pub fn fmt_u64(mut v: u64, buf: &mut [u8; 20]) -> &[u8] {
     let mut i = buf.len();
     if v == 0 {
@@ -101,7 +101,7 @@ pub fn fmt_u64(mut v: u64, buf: &mut [u8; 20]) -> &[u8] {
     &buf[i..]
 }
 
-/// Formatea un entero en hexadecimal con `width` dígitos (relleno con ceros).
+/// Formats an integer in hexadecimal with `width` digits (zero-padded).
 pub fn fmt_hex(v: u64, width: usize, buf: &mut [u8; 16]) -> &[u8] {
     let width = width.clamp(1, 16);
     for (i, slot) in buf.iter_mut().enumerate().take(width) {
@@ -115,8 +115,8 @@ pub fn fmt_hex(v: u64, width: usize, buf: &mut [u8; 16]) -> &[u8] {
     &buf[..width]
 }
 
-/// Define `_start` para un `fn main(arg: u64) -> u64`: `arg` es el valor que
-/// pasó quien creó el proceso y el resultado es el código de salida.
+/// Defines `_start` for a `fn main(arg: u64) -> u64`: `arg` is the value
+/// passed by the process creator and the result is the exit code.
 #[macro_export]
 macro_rules! entry {
     ($main:path) => {
@@ -128,13 +128,13 @@ macro_rules! entry {
 
         #[panic_handler]
         fn panic(_: &core::panic::PanicInfo) -> ! {
-            $crate::sys::print(b"panic en programa de usuario\n");
+            $crate::sys::print(b"panic in user program\n");
             $crate::sys::process_exit($crate::PANIC_EXIT_CODE)
         }
     };
 }
 
-/// Binario cuya entrada está en ensamblador (`_start` global en el .s).
+/// Binary whose entry point is in assembly (global `_start` in the .s file).
 #[macro_export]
 macro_rules! asm_program {
     ($file:literal) => {

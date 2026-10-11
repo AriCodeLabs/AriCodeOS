@@ -1,9 +1,9 @@
-//! Entrada de consola (Fases 21 y 34): recepción por COM1 y por el teclado
-//! PS/2 del i8042, ambas con interrupción. Los handlers dejan los bytes en
-//! un anillo común y despiertan a quien espera en `console_read`. La consola
-//! es del kernel: los procesos solo la ven a través de un handle `CONSOLE`
-//! con `READ`. El teclado PS/2 es la consola de un portátil sin puerto serie
-//! (Fase 34); los teclados de verdad (virtio, USB) siguen en ring 3.
+//! Console input (Phases 21 and 34): reception on COM1 and on the i8042 PS/2
+//! keyboard, both interrupt-driven. The handlers put the bytes in a shared
+//! ring and wake whoever waits in `console_read`. The console belongs to the
+//! kernel: processes only see it through a `CONSOLE` handle with `READ`.
+//! The PS/2 keyboard is the console of a laptop without a serial port
+//! (Phase 34); real keyboard drivers (virtio, USB) stay in ring 3.
 
 use crate::arch::x86_64::ioapic;
 use crate::arch::x86_64::port::{inb, io_wait, outb};
@@ -13,11 +13,11 @@ use aricode_input::{Keyboard, Layout, ScancodeSet1};
 use log::{info, warn};
 
 const COM1: u16 = 0x3F8;
-/// IRQ ISA de COM1.
+/// ISA IRQ of COM1.
 const COM1_ISA_IRQ: u8 = 4;
-/// Vector propio, fuera del rango de dispositivos de usuario (`hw`).
+/// Dedicated vector, outside the user device range (`hw`).
 pub const SERIAL_VECTOR: u8 = 0x40;
-/// Vector del teclado PS/2.
+/// PS/2 keyboard vector.
 pub const KEYBOARD_VECTOR: u8 = 0x41;
 const PS2_DATA: u16 = 0x60;
 const PS2_STATUS: u16 = 0x64;
@@ -75,8 +75,8 @@ static PS2: IrqLock<Ps2> = IrqLock::new(Ps2 {
     bytes: 0,
 });
 
-/// Enruta la IRQ de COM1 al vector propio y habilita la interrupción de
-/// recepción del UART. Requiere I/O APIC e interrupciones activas.
+/// Routes the COM1 IRQ to its dedicated vector and enables the UART receive
+/// interrupt. Requires the I/O APIC and interrupts enabled.
 pub fn init(layout: Layout) {
     PS2.lock().keyboard.set_layout(layout);
     let (gsi, ov) = crate::acpi::with(|a| a.madt.isa_irq_to_gsi(COM1_ISA_IRQ));
@@ -85,20 +85,20 @@ pub fn init(layout: Layout) {
         .unwrap_or((false, false));
     let lapic_id = crate::arch::x86_64::apic::bsp_id();
     if let Err(e) = ioapic::route(gsi, SERIAL_VECTOR, lapic_id, level, low) {
-        warn!("console: sin entrada por serie ({e})");
+        warn!("console: no serial input ({e})");
         return;
     }
-    // SAFETY: IER de COM1; solo habilita la interrupción "dato recibido".
+    // SAFETY: COM1 IER; only enables the "data received" interrupt.
     unsafe { outb(COM1 + 1, 0x01) };
-    info!("console: entrada por COM1 (GSI {gsi}, vector {SERIAL_VECTOR:#x})");
+    info!("console: input on COM1 (GSI {gsi}, vector {SERIAL_VECTOR:#x})");
     init_ps2();
 }
 
-/// Espera acotada a que el controlador acepte un byte (buffer de entrada
-/// vacío). Sin controlador el registro de estado lee 0xFF y nunca se cumple.
+/// Bounded wait for the controller to accept a byte (input buffer empty).
+/// Without a controller the status register reads 0xFF and it never holds.
 fn ps2_can_write() -> bool {
     for _ in 0..50_000 {
-        // SAFETY: lectura del registro de estado del i8042.
+        // SAFETY: read of the i8042 status register.
         if unsafe { inb(PS2_STATUS) } & 0x02 == 0 {
             return true;
         }
@@ -109,7 +109,7 @@ fn ps2_can_write() -> bool {
 
 fn ps2_read() -> Option<u8> {
     for _ in 0..50_000 {
-        // SAFETY: estado y dato del i8042.
+        // SAFETY: i8042 status and data.
         unsafe {
             if inb(PS2_STATUS) & 0x01 != 0 {
                 return Some(inb(PS2_DATA));
@@ -124,7 +124,7 @@ fn ps2_command(cmd: u8) -> bool {
     if !ps2_can_write() {
         return false;
     }
-    // SAFETY: orden al controlador i8042.
+    // SAFETY: command to the i8042 controller.
     unsafe { outb(PS2_COMMAND, cmd) };
     true
 }
@@ -133,14 +133,14 @@ fn ps2_write_data(v: u8) -> bool {
     if !ps2_can_write() {
         return false;
     }
-    // SAFETY: byte de datos al i8042 (controlador o teclado).
+    // SAFETY: data byte to the i8042 (controller or keyboard).
     unsafe { outb(PS2_DATA, v) };
     true
 }
 
 fn ps2_flush() {
     for _ in 0..32 {
-        // SAFETY: vaciar el buffer de salida del i8042.
+        // SAFETY: drain the i8042 output buffer.
         unsafe {
             if inb(PS2_STATUS) & 0x01 == 0 {
                 break;
@@ -150,22 +150,22 @@ fn ps2_flush() {
     }
 }
 
-/// Inicializa el controlador i8042 y su teclado si existen: puertos
-/// deshabilitados, configuración con IRQ1 y traducción al conjunto 1,
-/// autotest, puerto 1 habilitado, IRQ1 enrutada y teclado explorando.
+/// Initializes the i8042 controller and its keyboard if present: ports
+/// disabled, configuration with IRQ1 and translation to set 1, self-test,
+/// port 1 enabled, IRQ1 routed and keyboard scanning.
 fn init_ps2() {
     ps2_command(0xAD);
     ps2_command(0xA7);
     ps2_flush();
     if !ps2_command(0x20) {
-        info!("console: sin controlador PS/2");
+        info!("console: no PS/2 controller");
         return;
     }
     let Some(cfg) = ps2_read() else {
-        info!("console: sin controlador PS/2");
+        info!("console: no PS/2 controller");
         return;
     };
-    // IRQ1 sí, IRQ12 no, reloj del puerto 1 activo, traducción al conjunto 1.
+    // IRQ1 on, IRQ12 off, port 1 clock enabled, translation to set 1.
     let cfg = (cfg | 0x01 | 0x40) & !0x02 & !0x10;
     ps2_command(0x60);
     ps2_write_data(cfg);
@@ -173,11 +173,11 @@ fn init_ps2() {
     match ps2_read() {
         Some(0x55) => {}
         other => {
-            info!("console: el controlador PS/2 no supera el autotest ({other:?})");
+            info!("console: the PS/2 controller fails its self-test ({other:?})");
             return;
         }
     }
-    // Algunos controladores pierden la configuración con el autotest.
+    // Some controllers lose their configuration on self-test.
     ps2_command(0x60);
     ps2_write_data(cfg);
     ps2_command(0xAE);
@@ -192,15 +192,15 @@ fn init_ps2() {
         level,
         low,
     ) {
-        warn!("console: teclado PS/2 sin interrupcion ({e})");
+        warn!("console: PS/2 keyboard without interrupt ({e})");
         return;
     }
-    // Teclado: explorar (0xF4); el ACK llega por la interrupción o se descarta.
+    // Keyboard: enable scanning (0xF4); the ACK arrives via the interrupt or is discarded.
     ps2_write_data(0xF4);
     let _ = ps2_read();
     ps2_flush();
     info!(
-        "console: teclado PS/2 (GSI {gsi}, vector {KEYBOARD_VECTOR:#x}, disposicion {})",
+        "console: PS/2 keyboard (GSI {gsi}, vector {KEYBOARD_VECTOR:#x}, layout {})",
         match PS2.lock().keyboard.layout() {
             Layout::Us => "us",
             Layout::Es => "es",
@@ -208,19 +208,19 @@ fn init_ps2() {
     );
 }
 
-/// Handler del vector del teclado: scancodes del conjunto 1 a texto.
+/// Keyboard vector handler: set 1 scancodes to text.
 pub fn on_keyboard_irq() {
     let mut pushed = false;
     {
         let mut ps2 = PS2.lock();
         let mut ring = RING.lock();
         loop {
-            // SAFETY: estado y dato del i8042; bit 5 = dato del ratón.
+            // SAFETY: i8042 status and data; bit 5 = mouse data.
             let status = unsafe { inb(PS2_STATUS) };
             if status & 0x01 == 0 {
                 break;
             }
-            // SAFETY: ídem.
+            // SAFETY: same as above.
             let byte = unsafe { inb(PS2_DATA) };
             ps2.bytes += 1;
             if status & 0x20 != 0 {
@@ -239,10 +239,10 @@ pub fn on_keyboard_irq() {
     }
 }
 
-/// Handler del vector serie: vacía el FIFO de recepción en el anillo.
+/// Serial vector handler: drains the receive FIFO into the ring.
 pub fn on_irq() {
     let mut ring = RING.lock();
-    // SAFETY: LSR bit 0 = dato disponible; RBR devuelve el byte recibido.
+    // SAFETY: LSR bit 0 = data available; RBR returns the received byte.
     unsafe {
         while inb(COM1 + 5) & 0x01 != 0 {
             ring.push(inb(COM1));
@@ -252,8 +252,8 @@ pub fn on_irq() {
     WAITERS.wake_all();
 }
 
-/// Copia hasta `buf.len()` bytes disponibles; espera al primero hasta
-/// `deadline` (ticks). Devuelve 0 solo si venció el plazo.
+/// Copies up to `buf.len()` available bytes; waits for the first one until
+/// `deadline` (ticks). Returns 0 only if the deadline expired.
 pub fn read(buf: &mut [u8], deadline: Option<u64>) -> usize {
     if buf.is_empty() {
         return 0;
@@ -276,9 +276,9 @@ pub fn read(buf: &mut [u8], deadline: Option<u64>) -> usize {
     n
 }
 
-/// Texto de un teclado de usuario (syscall `console_inject`, ADR 0013) al
-/// mismo anillo que COM1 y el PS/2. Devuelve los bytes aceptados; los que
-/// no caben se cuentan como descartados.
+/// Text from a user-space keyboard (syscall `console_inject`, ADR 0013) into
+/// the same ring as COM1 and PS/2. Returns the bytes accepted; those that
+/// do not fit are counted as dropped.
 pub fn inject(bytes: &[u8]) -> usize {
     let mut ring = RING.lock();
     let mut n = 0;
@@ -294,13 +294,14 @@ pub fn inject(bytes: &[u8]) -> usize {
     n
 }
 
-/// Bytes descartados por anillo lleno (diagnóstico).
+/// Bytes dropped because the ring was full (diagnostics).
 pub fn dropped() -> u64 {
     RING.lock().dropped
 }
 
-/// Autoprueba (`test=console_ps2`): el host teclea una línea en el teclado
-/// PS/2 (QMP) al ver `CONSOLE_PS2_READY` y el kernel la recibe por IRQ1.
+/// Self-test (`test=console_ps2`): the host types a line on the PS/2
+/// keyboard (QMP) on seeing `CONSOLE_PS2_READY` and the kernel receives it
+/// through IRQ1.
 pub fn ps2_selftest() {
     crate::println!("CONSOLE_PS2_READY");
     let deadline = crate::time::ticks() + 15 * crate::time::TICK_HZ;
@@ -308,12 +309,12 @@ pub fn ps2_selftest() {
     let mut buf = [0u8; 64];
     loop {
         let n = read(&mut buf, Some(deadline));
-        assert!(n > 0, "nadie tecleo por PS/2 en 15 s");
+        assert!(n > 0, "nobody typed on PS/2 within 15 s");
         for &b in &buf[..n] {
             if b == b'\n' || b == b'\r' {
                 let text = core::str::from_utf8(&line).unwrap_or("?");
                 crate::println!(
-                    "console: linea PS/2 '{text}' ({} bytes, {} scancodes)",
+                    "console: PS/2 line '{text}' ({} bytes, {} scancodes)",
                     line.len(),
                     PS2.lock().bytes
                 );
@@ -324,15 +325,15 @@ pub fn ps2_selftest() {
     }
 }
 
-/// Autoprueba (`test=console_input`): un plazo vence sin entrada, luego se
-/// lee una línea que el runner envía al ver `CONSOLE_INPUT_READY`.
+/// Self-test (`test=console_input`): a deadline expires without input, then
+/// a line sent by the runner on seeing `CONSOLE_INPUT_READY` is read.
 pub fn selftest() {
     let mut buf = [0u8; 64];
     let deadline = Some(crate::time::ticks() + 10);
     assert_eq!(
         read(&mut buf, deadline),
         0,
-        "sin entrada debe vencer el plazo"
+        "without input the deadline must expire"
     );
     crate::println!("CONSOLE_INPUT_READY");
     let mut line = alloc::vec::Vec::new();
@@ -342,7 +343,7 @@ pub fn selftest() {
             if b == b'\n' || b == b'\r' {
                 let text = core::str::from_utf8(&line).unwrap_or("?");
                 crate::println!(
-                    "console: linea '{text}' ({} bytes, {} descartados)",
+                    "console: line '{text}' ({} bytes, {} dropped)",
                     line.len(),
                     dropped()
                 );

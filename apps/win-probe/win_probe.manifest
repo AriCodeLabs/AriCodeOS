@@ -1,4 +1,4 @@
-# Pide una ventana: sin compositor el broker deniega tras haber preparado SYSTEM.
+# Requests a window: without a compositor the broker denies it after granting SYSTEM.
 name = win_probe
 caps = system, window
 memory = 64K

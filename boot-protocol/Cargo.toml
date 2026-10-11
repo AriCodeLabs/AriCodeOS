@@ -3,6 +3,6 @@ name = "boot-protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "ABI compartido entre AriBoot y AriKernel (BootInfo v1)"
+description = "ABI shared between AriBoot and AriKernel (BootInfo v1)"
 
 [dependencies]

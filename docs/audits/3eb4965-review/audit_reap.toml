@@ -1,5 +1,5 @@
 name = "audit.reap"
-description = "programa en ring 3 escribe por syscall y sale con 42"
+description = "ring 3 program writes via syscall and exits with 42"
 level = "smoke"
 areas = ["audit_reap"]
 cpus = 4

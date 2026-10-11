@@ -3,7 +3,7 @@ name = "aricode-proto"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Protocolos IPC de los servicios de AriCodeOS (codificación de mensajes, no_std)"
+description = "IPC protocols of the AriCodeOS services (message encoding, no_std)"
 
 [lib]
 path = "src/lib.rs"

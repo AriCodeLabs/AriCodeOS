@@ -1,13 +1,13 @@
-//! Criptografía (Fase 31): las cuatro primitivas que necesita la cadena de
-//! confianza, escritas desde cero y comprobadas con los vectores oficiales
-//! (FIPS 180-4, RFC 8032, RFC 7539). Sin `alloc`.
+//! Cryptography (Phase 31): the four primitives the chain of trust needs,
+//! written from scratch and checked against the official vectors
+//! (FIPS 180-4, RFC 8032, RFC 7539). No `alloc`.
 //!
-//! - [`sha256`] y [`sha512`]: hashes de imágenes y de mensajes.
-//! - [`ed25519`]: firma de manifiestos (la clave privada solo vive en el host).
-//! - [`chacha20`]: generador determinista para el RNG del kernel.
+//! - [`sha256`] and [`sha512`]: image and message hashes.
+//! - [`ed25519`]: manifest signatures (the private key only lives on the host).
+//! - [`chacha20`]: deterministic generator for the kernel RNG.
 //!
-//! Las operaciones de Ed25519 no son de tiempo constante: el sistema solo
-//! verifica firmas con claves públicas; firmar es cosa del host (xtask).
+//! Ed25519 operations are not constant time: the system only verifies
+//! signatures with public keys; signing is the host's job (xtask).
 
 #![no_std]
 
@@ -16,7 +16,7 @@ pub mod ed25519;
 pub mod sha256;
 pub mod sha512;
 
-/// Comparación de igualdad sin cortocircuito (para etiquetas y firmas).
+/// Equality comparison without short-circuit (for tags and signatures).
 pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -28,7 +28,7 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// Escribe `bytes` en hexadecimal minúsculo en `out` (2 caracteres por byte).
+/// Writes `bytes` as lowercase hexadecimal into `out` (2 characters per byte).
 pub fn hex<'a>(bytes: &[u8], out: &'a mut [u8]) -> &'a str {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let n = bytes.len().min(out.len() / 2);
@@ -39,8 +39,8 @@ pub fn hex<'a>(bytes: &[u8], out: &'a mut [u8]) -> &'a str {
     core::str::from_utf8(&out[..2 * n]).unwrap_or("")
 }
 
-/// Analiza hexadecimal (mayúsculas o minúsculas) en `out`; `None` si la
-/// longitud no cuadra o hay caracteres inválidos.
+/// Parses hexadecimal (upper or lower case) into `out`; `None` if the
+/// length does not match or there are invalid characters.
 pub fn unhex(text: &str, out: &mut [u8]) -> Option<()> {
     let t = text.as_bytes();
     if t.len() != out.len() * 2 {

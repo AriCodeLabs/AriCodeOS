@@ -1,4 +1,4 @@
-// Syscall inexistente: debe devolver -1 (NoSys); sale con 7 si es asi, 8 si no.
+// Nonexistent syscall: must return -1 (NoSys); exits with 7 if so, 8 otherwise.
 .section .text._start, "ax"
 .global _start
 _start:

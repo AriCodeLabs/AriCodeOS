@@ -1,9 +1,9 @@
-# Etapa 5 (medidas): `bench` mide syscall, IPC a fsd y ficheros con
-# percentiles; `cpus` muestra el reposo por CPU y `diag` reune un informe.
-# Los valores no se comparan aqui (dependen del host y de TCG): se exige que
-# las medidas se produzcan y que el sistema no este saturado en reposo.
+# Stage 5 (measurements): `bench` measures syscalls, IPC to fsd and files with
+# percentiles; `cpus` shows per-CPU idle time and `diag` gathers a report.
+# Values are not compared here (they depend on the host and on TCG): what is required is that
+# the measurements are produced and that the system is not saturated when idle.
 name = "perf.bench"
-description = "bench: percentiles de syscall, IPC y ficheros; reposo por CPU; informe diag"
+description = "bench: syscall, IPC and file percentiles; per-CPU idle; diag report"
 level = "full"
 areas = ["perf", "shell", "sandbox"]
 cmdline = "qemu_exit shell"
@@ -13,17 +13,17 @@ stdin = ["run bench", "cpus", "diag", "shutdown"]
 [expect]
 exit = 33
 serial_contains = [
-    "bench: calibracion ",
+    "bench: calibration ",
     "bench: syscall thread_get_tid (10000): p50 ",
     "bench: ipc fsd list (1000): p50 ",
     "bench: replace 4 KiB (100): p50 ",
     "bench: read 4 KiB (100): p50 ",
-    "bench: fin",
-    "run: bench termino con 0",
-    "% en reposo",
-    "=== diagnostico AriCodeOS ===",
-    "SERVICIO         ESTADO       GEN  REINICIOS  ULTIMA SALIDA     LISTO DESDE",
-    "=== fin del diagnostico ===",
+    "bench: done",
+    "run: bench exited with 0",
+    "% idle",
+    "=== AriCodeOS diagnostics ===",
+    "SERVICE          STATE        GEN  RESTARTS   LAST EXIT         READY FOR",
+    "=== end of diagnostics ===",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_absent = ["KERNEL PANIC", "bench: no se pudo calibrar"]

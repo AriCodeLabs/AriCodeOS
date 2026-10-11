@@ -1,16 +1,16 @@
-# Fase 26: con `gui` el kernel cede el framebuffer; init lanza el compositor
-# con las entradas virtio y dos aplicaciones que pintan a la vez. El host
-# mueve el raton sobre la ventana B, hace clic (foco) y teclea 'h': solo B
-# recibe la tecla.
+# Phase 26: with `gui` the kernel hands over the framebuffer; init launches the compositor
+# with the virtio inputs and two applications that paint at the same time. The host
+# moves the mouse over window B, clicks (focus) and types 'h': only B
+# receives the key.
 name = "gui.two_windows"
-description = "compositor en ring 3: dos ventanas aisladas, foco por clic y teclado enrutado"
+description = "ring 3 compositor: two isolated windows, click-to-focus and routed keyboard"
 level = "full"
 areas = ["gui", "input", "init"]
 cmdline = "qemu_exit gui"
 timeout_secs = 120
 
 [host_input]
-marker = "compositor: escritorio listo con 2 ventanas"
+marker = "compositor: desktop ready with 2 windows"
 mouse_rel = [-180, -20]
 click = "left"
 keys = ["h"]
@@ -18,21 +18,21 @@ keys = ["h"]
 [expect]
 exit = 33
 serial_contains = [
-    "framebuffer: 1280x800 stride 1280 Bgr @ 0x80000000 (reservado para el compositor)",
-    "compositor: pantalla 1280x800",
-    "compositor: ventana 1 'Demo A' 400x300",
-    "compositor: ventana 2 'Demo B' 400x300",
-    "gui_demo A: ventana presentada",
-    "gui_demo B: ventana presentada",
-    "compositor: ventana 1 muestra (50,70) = 0xc04040",
-    "compositor: ventana 2 muestra (90,110) = 0x4080c0",
-    "compositor: escritorio listo con 2 ventanas",
-    "gui_demo B: foco ganado",
-    "gui_demo B: clic boton 1 en (380,280)",
-    "gui_demo B: tecla 'h'",
-    "gui_demo A: sin teclas",
-    "AriInit: gui ok (2 aplicaciones)",
-    "[host] QMP: 6 eventos de entrada enviados",
+    "framebuffer: 1280x800 stride 1280 Bgr @ 0x80000000 (reserved for the compositor)",
+    "compositor: screen 1280x800",
+    "compositor: window 1 'Demo A' 400x300",
+    "compositor: window 2 'Demo B' 400x300",
+    "gui_demo A: window presented",
+    "gui_demo B: window presented",
+    "compositor: window 1 sample (50,70) = 0xc04040",
+    "compositor: window 2 sample (90,110) = 0x4080c0",
+    "compositor: desktop ready with 2 windows",
+    "gui_demo B: focus gained",
+    "gui_demo B: click button 1 at (380,280)",
+    "gui_demo B: key 'h'",
+    "gui_demo A: no keys",
+    "AriInit: gui ok (2 applications)",
+    "[host] QMP: 6 input events sent",
     "ARICODEOS_KERNEL_READY",
 ]
-serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "gui_demo A: tecla", "gui_demo A: foco ganado"]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "gui_demo A: key", "gui_demo A: focus gained"]

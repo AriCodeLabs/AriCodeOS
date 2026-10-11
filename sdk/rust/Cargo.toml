@@ -3,7 +3,7 @@ name = "aricode-sys"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Wrappers de syscall de AriCodeOS para programas de usuario (no_std)"
+description = "AriCodeOS syscall wrappers for user programs (no_std)"
 
 [lib]
 path = "src/lib.rs"

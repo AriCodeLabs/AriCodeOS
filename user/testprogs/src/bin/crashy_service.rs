@@ -1,7 +1,7 @@
-//! Servicio de prueba para el supervisor (etapa 1): atiende "ping" con
-//! "pong" por el endpoint 0x10004; ante "die" contesta "pong" y muere por
-//! fallo. Sirve para provocar reinicios deterministas y comprobar que el
-//! endpoint, que es de init, sobrevive a cada generacion.
+//! Test service for the supervisor (stage 1): answers "ping" with "pong" on
+//! endpoint 0x10004; on "die" it replies "pong" and then crashes. Used to
+//! trigger deterministic restarts and check that the endpoint, owned by init,
+//! survives every generation.
 #![no_std]
 #![no_main]
 
@@ -21,13 +21,13 @@ fn main(_arg: u64) -> u64 {
             b"die" if nh == 1 => true,
             _ => return 4,
         };
-        // El endpoint de respuesta puede haber desaparecido (cliente que ya
-        // no espera): no es motivo para morir.
+        // The reply endpoint may be gone (a client that stopped waiting):
+        // that is no reason to die.
         let _ = sys::ipc_send(handles[0], b"pong", &[], 500);
         let _ = sys::handle_close(handles[0]);
         if die {
-            // SAFETY: fallo deliberado; la pagina 0 nunca esta mapeada y la
-            // direccion se oculta al compilador para que emita la lectura.
+            // SAFETY: deliberate fault; page 0 is never mapped and the address
+            // is hidden from the compiler so that it emits the read.
             let bad = core::hint::black_box(0x40u64) as *const u64;
             return unsafe { bad.read_volatile() };
         }

@@ -1,10 +1,10 @@
-# Fase 33: un driver de prueba recibe el virtio-blk, lee un sector en su
-# buffer (traducido) y luego ordena al dispositivo escribir en memoria que no
-# es suya: la unidad lo bloquea y registra el fallo; el dominio se libera con
-# el proceso. Ademas (auditoria 3eb4965, hallazgo 2) una funcion reasignada
-# a otro dominio conserva su contexto cuando el anterior se libera.
+# Phase 33: a test driver receives the virtio-blk, reads a sector into its
+# (translated) buffer and then tells the device to write to memory that is not
+# its own: the unit blocks it and logs the fault; the domain is freed with
+# the process. Also (audit 3eb4965, finding 2) a function reassigned
+# to another domain keeps its context when the previous one is freed.
 name = "iommu.isolation"
-description = "test=iommu: DMA legitimo traducido, DMA a memoria ajena bloqueado y registrado, dominio liberado"
+description = "test=iommu: legitimate DMA translated, DMA to foreign memory blocked and logged, domain freed"
 level = "full"
 areas = ["iommu", "drivers", "user"]
 cmdline = "qemu_exit test=iommu"
@@ -13,13 +13,13 @@ timeout_secs = 40
 [expect]
 exit = 33
 serial_contains = [
-    "iommu: 00:02.0 asignado al dominio",
-    "en el dominio identidad",
-    "iommu: fallo DMA de 00:02.0 (escritura en 0x1000):",
-    "dma_rogue: lectura legitima ok, DMA a memoria ajena bloqueado (",
-    "iommu selftest ok (lectura legitima traducida, DMA a memoria ajena bloqueado con",
-    "y la memoria intacta, dominio liberado, reasignacion de 00:02.0 conservada)",
-    "iommu: 00:02.0 reasignado del dominio del proceso 1001 al dominio",
+    "iommu: 00:02.0 assigned to domain",
+    "in identity domain",
+    "iommu: DMA fault from 00:02.0 (write at 0x1000):",
+    "dma_rogue: legitimate read ok, DMA to foreign memory blocked (",
+    "iommu selftest ok (legitimate read translated, DMA to foreign memory blocked with",
+    "memory intact, domain freed, reassignment of 00:02.0 kept)",
+    "iommu: 00:02.0 reassigned from the domain of process 1001 to domain",
     "ARICODEOS_KERNEL_READY",
 ]
 serial_absent = ["KERNEL PANIC", "USER FAULT"]

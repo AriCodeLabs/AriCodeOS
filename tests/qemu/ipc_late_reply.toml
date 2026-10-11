@@ -1,8 +1,8 @@
-# Etapa 1B (semantica IPC de plazos): una respuesta que llega despues del
-# plazo del cliente se descarta y nunca se confunde con la de la peticion
-# siguiente (endpoint de respuesta nuevo por peticion en el SDK).
+# Stage 1B (IPC deadline semantics): a reply that arrives after the
+# client's deadline is discarded and never mistaken for the reply to the
+# next request (a fresh reply endpoint per request in the SDK).
 name = "ipc.late_reply"
-description = "test=ipc_late: plazo vencido, respuesta tardia descartada y peticiones correlacionadas"
+description = "test=ipc_late: expired deadline, late reply discarded and requests correlated"
 level = "full"
 areas = ["ipc", "user"]
 cmdline = "qemu_exit test=ipc_late"
@@ -11,8 +11,8 @@ timeout_secs = 40
 [expect]
 exit = 33
 serial_contains = [
-    "late_client: plazo vencido, respuesta tardia descartada, respuestas correlacionadas ok",
+    "late_client: deadline expired, late reply discarded, replies correlated ok",
     "ipc late reply selftest ok",
     "ARICODEOS_KERNEL_READY",
 ]
-serial_absent = ["KERNEL PANIC", "USER FAULT", "respuesta confundida"]
+serial_absent = ["KERNEL PANIC", "USER FAULT", "mixed-up reply"]

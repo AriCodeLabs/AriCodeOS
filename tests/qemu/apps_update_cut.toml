@@ -1,8 +1,8 @@
-# Etapa 4 (ADR 0018): corte de energia mientras el instalador sustituye el
-# paquete. Al volver, el paquete instalado es la version anterior o la nueva
-# (nunca una mezcla) y se lanza; el instalador termina la actualizacion.
+# Stage 4 (ADR 0018): power cut while the installer is replacing the
+# package. On the next boot the installed package is either the old or the new version
+# (never a mix) and it launches; the installer finishes the update.
 name = "apps.update_cut"
-description = "corte durante la instalacion de un paquete: el instalado sigue lanzandose y la actualizacion se completa despues"
+description = "power cut while installing a package: the installed one still launches and the update completes afterwards"
 level = "full"
 areas = ["apps", "update", "filesystem", "shell"]
 install = ["examples/hello_ext"]
@@ -12,10 +12,10 @@ timeout_secs = 180
 [[boots]]
 cmdline = "qemu_exit shell"
 stdin = ["run installer"]
-kill_on = "installer: instalando hello_ext version 2"
+kill_on = "installer: installing hello_ext version 2"
 [boots.expect]
 killed = true
-serial_contains = ["installer: instalando hello_ext version 2"]
+serial_contains = ["installer: installing hello_ext version 2"]
 serial_absent = ["KERNEL PANIC"]
 
 [[boots]]
@@ -24,11 +24,11 @@ stdin = ["run hello_ext 7", "run installer", "run hello_ext 8", "shutdown"]
 [boots.expect]
 exit = 33
 serial_contains = [
-    "fsd: AriFS montado",
-    ": hola desde fuera del arbol (arg 7)",
-    "run: hello_ext termino con 0",
-    "run: installer termino con 0",
-    "hello_ext v2: hola desde fuera del arbol (arg 8)",
+    "fsd: AriFS mounted",
+    ": hello from outside the tree (arg 7)",
+    "run: hello_ext exited with 0",
+    "run: installer exited with 0",
+    "hello_ext v2: hello from outside the tree (arg 8)",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "AriFS corrupto", "no verifica", "denegado", "installer: error"]
+serial_absent = ["KERNEL PANIC", "AriFS corrupto", "no verifica", "denied", "installer: error"]

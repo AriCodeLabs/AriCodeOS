@@ -3,7 +3,7 @@ name = "wasm-demo"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Modulo WebAssembly de ejemplo: aplicacion portable que usa la Capability API de AriCodeOS"
+description = "Sample WebAssembly module: portable app using the AriCodeOS Capability API"
 publish = false
 
 [lib]

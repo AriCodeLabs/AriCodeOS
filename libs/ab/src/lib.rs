@@ -1,17 +1,17 @@
-//! Actualización A/B (Fase 30). Tres piezas puras, probadas en host y usadas
-//! por AriBoot, init, el actualizador y xtask:
+//! A/B update (Phase 30). Three pure pieces, tested on the host and used
+//! by AriBoot, init, the updater and xtask:
 //!
-//! - [`BootState`]: el sector 0 de la partición `ARIBOOT` (slot activo, slot
-//!   pendiente con contador de intentos, CRC).
-//! - [`Image`]: una imagen de sistema en una partición de slot: cabecera
-//!   `ARISLOT` con la longitud, y a continuación un contenedor `aricode-initrd`
-//!   con `manifest`, `manifest.sig`, `kernel.elf` e `initrd.img`. El
-//!   manifiesto lleva la versión y los SHA-256 de kernel e initrd; la firma
-//!   Ed25519 cubre el manifiesto entero.
-//! - [`choose`]/[`confirm`]: la política de arranque: un slot pendiente se
-//!   intenta mientras le queden intentos; si se agotan o su imagen no
-//!   verifica, se vuelve al activo (rollback); el sistema arrancado confirma
-//!   y el pendiente pasa a activo.
+//! - [`BootState`]: sector 0 of the `ARIBOOT` partition (active slot,
+//!   pending slot with a try counter, CRC).
+//! - [`Image`]: a system image in a slot partition: an `ARISLOT` header
+//!   with the length, followed by an `aricode-initrd` container
+//!   with `manifest`, `manifest.sig`, `kernel.elf` and `initrd.img`. The
+//!   manifest carries the version and the SHA-256 of kernel and initrd; the
+//!   Ed25519 signature covers the whole manifest.
+//! - [`choose`]/[`confirm`]: the boot policy: a pending slot is tried
+//!   while it has tries left; if they run out or its image does not
+//!   verify, boot falls back to the active one (rollback); the booted system
+//!   confirms and the pending slot becomes active.
 
 #![no_std]
 
@@ -21,9 +21,9 @@ use aricode_initrd::Initrd;
 pub const STATE_MAGIC: &[u8; 8] = b"ARIBOOT\0";
 pub const IMAGE_MAGIC: &[u8; 8] = b"ARISLOT\0";
 pub const SECTOR: usize = 512;
-/// Intentos que recibe un slot recién instalado.
+/// Tries granted to a freshly installed slot.
 pub const DEFAULT_TRIES: u8 = 3;
-/// Nombres de partición que busca el cargador.
+/// Partition names the loader looks for.
 pub const PART_STATE: &str = "ARIBOOT";
 pub const PART_SLOT_A: &str = "SYSA";
 pub const PART_SLOT_B: &str = "SYSB";
@@ -69,13 +69,13 @@ impl Slot {
     }
 }
 
-/// Estado de arranque (sector 0 de `ARIBOOT`).
+/// Boot state (sector 0 of `ARIBOOT`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BootState {
     pub active: Slot,
-    /// Slot instalado a la espera de confirmación, con sus intentos restantes.
+    /// Slot installed and awaiting confirmation, with its remaining tries.
     pub pending: Option<(Slot, u8)>,
-    /// Arranques contados por el cargador.
+    /// Boots counted by the loader.
     pub boot_count: u32,
 }
 
@@ -91,7 +91,7 @@ impl BootState {
     pub fn encode(&self) -> [u8; SECTOR] {
         let mut s = [0u8; SECTOR];
         s[..8].copy_from_slice(STATE_MAGIC);
-        s[8] = 1; // versión del formato
+        s[8] = 1; // format version
         s[9] = self.active.code();
         match self.pending {
             Some((slot, tries)) => {
@@ -109,7 +109,7 @@ impl BootState {
         s
     }
 
-    /// `None` si el sector no es un estado válido (magia, versión o CRC).
+    /// `None` if the sector is not a valid state (magic, version or CRC).
     pub fn decode(s: &[u8]) -> Option<Self> {
         if s.len() < 64 || &s[..8] != STATE_MAGIC || s[8] != 1 {
             return None;
@@ -132,20 +132,20 @@ impl BootState {
     }
 }
 
-/// Qué slot arrancar y qué estado escribir antes de hacerlo.
+/// Which slot to boot and which state to write before doing so.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Decision {
     pub slot: Slot,
-    /// `true` si el slot arrancado espera confirmación.
+    /// `true` if the booted slot awaits confirmation.
     pub pending: bool,
-    /// Estado a escribir en `ARIBOOT` antes de saltar al kernel.
+    /// State to write to `ARIBOOT` before jumping to the kernel.
     pub state: BootState,
-    /// Motivo legible (para el log del cargador).
+    /// Human-readable reason (for the loader log).
     pub reason: &'static str,
 }
 
-/// Política de arranque: consume un intento del slot pendiente o vuelve al
-/// activo cuando se agotan.
+/// Boot policy: consumes one try of the pending slot or falls back to the
+/// active one when they run out.
 pub fn choose(state: BootState) -> Decision {
     let mut next = state;
     next.boot_count = state.boot_count.wrapping_add(1);
@@ -156,7 +156,7 @@ pub fn choose(state: BootState) -> Decision {
                 slot,
                 pending: true,
                 state: next,
-                reason: "slot pendiente con intentos",
+                reason: "pending slot with tries left",
             }
         }
         Some((_, _)) => {
@@ -165,20 +165,20 @@ pub fn choose(state: BootState) -> Decision {
                 slot: state.active,
                 pending: false,
                 state: next,
-                reason: "slot pendiente agotado: rollback al activo",
+                reason: "pending slot exhausted: rollback to active",
             }
         }
         None => Decision {
             slot: state.active,
             pending: false,
             state: next,
-            reason: "slot activo",
+            reason: "active slot",
         },
     }
 }
 
-/// Si la imagen del slot elegido no verifica, el cargador descarta el
-/// pendiente y vuelve al activo.
+/// If the image of the chosen slot does not verify, the loader drops the
+/// pending slot and falls back to the active one.
 pub fn reject(state: BootState) -> Decision {
     let mut next = state;
     next.pending = None;
@@ -186,23 +186,23 @@ pub fn reject(state: BootState) -> Decision {
         slot: state.active,
         pending: false,
         state: next,
-        reason: "imagen del slot pendiente rechazada: rollback al activo",
+        reason: "pending slot image rejected: rollback to active",
     }
 }
 
-/// No se pudo guardar el intento consumido del pendiente: sin contador
-/// persistido no se arranca el pendiente (podría repetirse sin fin); se vuelve
-/// al activo y el pendiente se conserva para cuando el disco vuelva a escribir.
+/// The consumed try of the pending slot could not be saved: without a
+/// persisted counter the pending slot is not booted (it could repeat forever);
+/// boot falls back to the active one and the pending slot is kept for when the disk writes again.
 pub fn unpersisted(state: BootState) -> Decision {
     Decision {
         slot: state.active,
         pending: false,
         state,
-        reason: "intento del pendiente no persistido: arranque del activo",
+        reason: "pending try not persisted: booting active",
     }
 }
 
-/// El sistema arrancado desde `slot` funciona: pasa a activo.
+/// The system booted from `slot` works: it becomes active.
 pub fn confirm(state: BootState, slot: Slot) -> BootState {
     BootState {
         active: slot,
@@ -211,7 +211,7 @@ pub fn confirm(state: BootState, slot: Slot) -> BootState {
     }
 }
 
-/// Estado tras instalar una imagen nueva en el slot inactivo.
+/// State after installing a new image in the inactive slot.
 pub fn schedule(state: BootState, slot: Slot) -> BootState {
     BootState {
         active: state.active,
@@ -220,7 +220,7 @@ pub fn schedule(state: BootState, slot: Slot) -> BootState {
     }
 }
 
-// ---------------------------------------------------------------- imágenes
+// ---------------------------------------------------------------- images
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageError {
@@ -232,7 +232,7 @@ pub enum ImageError {
     HashMismatch(&'static str),
 }
 
-/// Manifiesto analizado.
+/// Parsed manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Manifest {
     pub version: u32,
@@ -272,7 +272,7 @@ impl Manifest {
         })
     }
 
-    /// Texto canónico del manifiesto (lo que se firma).
+    /// Canonical manifest text (what gets signed).
     pub fn write<'a>(&self, out: &'a mut [u8; 192]) -> &'a str {
         let mut n = 0;
         let mut put = |s: &[u8], n: &mut usize| {
@@ -308,7 +308,7 @@ impl Manifest {
     }
 }
 
-/// Imagen verificada: referencias a los bytes dentro del contenedor.
+/// Verified image: references to the bytes inside the container.
 #[derive(Debug, Clone, Copy)]
 pub struct Verified<'a> {
     pub manifest: Manifest,
@@ -319,7 +319,7 @@ pub struct Verified<'a> {
 pub struct Image;
 
 impl Image {
-    /// Cabecera de un slot: magia y longitud del contenedor que sigue.
+    /// Slot header: magic and length of the container that follows.
     pub fn header(container_len: u32) -> [u8; SECTOR] {
         let mut h = [0u8; SECTOR];
         h[..8].copy_from_slice(IMAGE_MAGIC);
@@ -327,7 +327,7 @@ impl Image {
         h
     }
 
-    /// Longitud del contenedor según la cabecera del slot.
+    /// Container length according to the slot header.
     pub fn container_len(header: &[u8]) -> Result<u32, ImageError> {
         if header.len() < 12 || &header[..8] != IMAGE_MAGIC {
             return Err(ImageError::BadHeader);
@@ -339,8 +339,8 @@ impl Image {
         Ok(len)
     }
 
-    /// Verifica un contenedor: firma del manifiesto con `pubkey` y hashes de
-    /// kernel e initrd. Solo devuelve datos si todo cuadra.
+    /// Verifies a container: manifest signature with `pubkey` and hashes of
+    /// kernel and initrd. Only returns data if everything matches.
     pub fn verify<'a>(container: &'a [u8], pubkey: &[u8; 32]) -> Result<Verified<'a>, ImageError> {
         let rd = Initrd::parse(container).map_err(|_| ImageError::BadContainer)?;
         let manifest_bytes = rd
@@ -411,7 +411,7 @@ mod tests {
         let fresh = BootState::fresh(Slot::A);
         let d = choose(fresh);
         assert_eq!((d.slot, d.pending, d.state.boot_count), (Slot::A, false, 1));
-        // Instalar B: tres intentos, luego rollback.
+        // Install B: three tries, then rollback.
         let mut st = schedule(fresh, Slot::B);
         assert_eq!(st.pending, Some((Slot::B, 3)));
         for tries_left in [2u8, 1, 0] {
@@ -421,16 +421,16 @@ mod tests {
             st = d.state;
         }
         let d = choose(st);
-        assert_eq!((d.slot, d.pending), (Slot::A, false), "agotado");
+        assert_eq!((d.slot, d.pending), (Slot::A, false), "exhausted");
         assert_eq!(d.state.pending, None);
-        // Confirmacion tras el primer arranque bueno.
+        // Confirmation after the first good boot.
         let d = choose(schedule(fresh, Slot::B));
         let confirmed = confirm(d.state, d.slot);
         assert_eq!((confirmed.active, confirmed.pending), (Slot::B, None));
-        // Imagen rechazada: rollback inmediato.
+        // Rejected image: immediate rollback.
         let r = reject(schedule(fresh, Slot::B));
         assert_eq!((r.slot, r.state.pending), (Slot::A, None));
-        // Sin poder persistir el intento: arranca el activo y el pendiente sigue.
+        // Try cannot be persisted: the active slot boots and the pending one stays.
         let u = unpersisted(schedule(fresh, Slot::B));
         assert_eq!((u.slot, u.pending), (Slot::A, false));
         assert_eq!(u.state.pending, Some((Slot::B, DEFAULT_TRIES)));
@@ -473,20 +473,20 @@ mod tests {
     fn image_verification() {
         let seed = [9u8; 32];
         let pk = ed25519::public_key(&seed);
-        let kernel = b"ELF falso pero consistente".to_vec();
-        let initrd = b"ARIRD falso".to_vec();
+        let kernel = b"fake but consistent ELF".to_vec();
+        let initrd = b"fake ARIRD".to_vec();
         let img = build(&seed, 7, &kernel, &initrd);
         let v = Image::verify(&img, &pk).unwrap();
         assert_eq!(v.manifest.version, 7);
         assert_eq!(v.kernel, kernel.as_slice());
         assert_eq!(v.initrd, initrd.as_slice());
-        // Otra clave.
+        // Another key.
         let other = ed25519::public_key(&[1u8; 32]);
         assert_eq!(
             Image::verify(&img, &other).err(),
             Some(ImageError::BadSignature)
         );
-        // Kernel alterado dentro del contenedor: hash distinto.
+        // Kernel tampered inside the container: different hash.
         let mut tampered = img.clone();
         let pos = tampered
             .windows(kernel.len())
@@ -497,7 +497,7 @@ mod tests {
             Image::verify(&tampered, &pk).err(),
             Some(ImageError::HashMismatch("kernel.elf"))
         );
-        // Contenedor sin firma.
+        // Container without signature.
         let unsigned =
             aricode_initrd::build(&[("manifest", &b"version = 1"[..]), ("kernel.elf", &b"k"[..])])
                 .unwrap();
@@ -505,7 +505,7 @@ mod tests {
             Image::verify(&unsigned, &pk).err(),
             Some(ImageError::MissingFile("manifest.sig"))
         );
-        // Cabecera de slot.
+        // Slot header.
         let h = Image::header(img.len() as u32);
         assert_eq!(Image::container_len(&h), Ok(img.len() as u32));
         assert_eq!(

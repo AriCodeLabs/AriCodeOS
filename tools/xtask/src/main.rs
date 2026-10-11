@@ -1,22 +1,22 @@
-//! xtask: automatización de AriCodeOS.
+//! xtask: AriCodeOS automation.
 //!
 //! ```text
-//! cargo xtask build [--debug]                 compila AriBoot y AriKernel
-//! cargo xtask image [--debug]                 build + monta build/esp/
-//! cargo xtask run   [--debug] [--cmdline S] [--cpus N] [--usb-image] [--usb-hid]   image + QEMU interactivo
-//! cargo xtask usb-image [--cmdline S]         imagen GPT para pendrive en build/aricodeos-usb.img
-//! cargo xtask test  [opciones]                niveles de test (ver tests/README.md)
-//! cargo xtask fs-cat DISCO [NOMBRE]          lee un fichero de ARI0 (o lista) de una imagen o volcado
-//!     --level unit|smoke|full                 por defecto: unit + smoke
-//!     --all                                   unit + full (obligatorio antes de main)
-//!     --area boot[,memory,...]                solo escenarios QEMU de esas áreas
-//!     --cpus N                                N procesadores en los escenarios que no declaran cpus
-//!     --list                                  muestra los escenarios y sale
+//! cargo xtask build [--debug]                 builds AriBoot and AriKernel
+//! cargo xtask image [--debug]                 build + assembles build/esp/
+//! cargo xtask run   [--debug] [--cmdline S] [--cpus N] [--usb-image] [--usb-hid]   image + interactive QEMU
+//! cargo xtask usb-image [--cmdline S]         GPT image for a USB stick at build/aricodeos-usb.img
+//! cargo xtask test  [opciones]                test levels (see tests/README.md)
+//! cargo xtask fs-cat DISK [NAME]             reads a file from ARI0 (or lists it) in an image or dump
+//!     --level unit|smoke|full                 default: unit + smoke
+//!     --all                                   unit + full (required before main)
+//!     --area boot[,memory,...]                only QEMU scenarios from those areas
+//!     --cpus N                                N processors for scenarios that do not declare cpus
+//!     --list                                  lists the scenarios and exits
 //! cargo xtask check                           fmt --check + clippy -D warnings
-//! cargo xtask app-pack DIR [--version N] [--debug]   compila, empaqueta y firma una app externa (DIR/Cargo.toml + NOMBRE.manifest) en build/pkgs/
-//! cargo xtask keygen [DIR]                    par Ed25519 (por defecto keys/dev)
-//! cargo xtask sign SEED FICHERO               escribe FICHERO.sig
-//! cargo xtask verify PUB FICHERO [FIRMA]      comprueba una firma
+//! cargo xtask app-pack DIR [--version N] [--debug]   builds, packs and signs an external app (DIR/Cargo.toml + NAME.manifest) into build/pkgs/
+//! cargo xtask keygen [DIR]                    Ed25519 key pair (default keys/dev)
+//! cargo xtask sign SEED FILE                  writes FILE.sig
+//! cargo xtask verify PUB FILE [SIG]           checks a signature
 //! ```
 
 mod build;
@@ -44,7 +44,7 @@ impl Cli {
         let i = self.args.iter().position(|a| a == name)?;
         self.args.get(i + 1).map(String::as_str)
     }
-    /// Argumento posicional `n` (desde 1), ignorando opciones `--x`.
+    /// Positional argument `n` (1-based), ignoring `--x` options.
     fn positional(&self, n: usize) -> Option<&str> {
         self.args
             .iter()
@@ -77,7 +77,7 @@ fn main() -> ExitCode {
         "usb-image" => image::build_usb_image(release, cli.value("--cmdline").unwrap_or("shell"))
             .map(|p| {
                 println!(
-                    "[xtask] grabar con: sudo dd if={} of=/dev/sdX bs=4M conv=fsync status=progress (ver docs/hardware.md)",
+                    "[xtask] write with: sudo dd if={} of=/dev/sdX bs=4M conv=fsync status=progress (see docs/hardware.md)",
                     p.display()
                 )
             }),
@@ -91,16 +91,16 @@ fn main() -> ExitCode {
                     .unwrap_or(1),
                 release,
             ),
-            None => Err(String::from("uso: xtask app-pack DIR [--version N]")),
+            None => Err(String::from("usage: xtask app-pack DIR [--version N]")),
         },
         "fs-cat" => match cli.positional(1) {
             Some(disk) => fscat::run(Path::new(disk), cli.positional(2)),
-            None => Err(String::from("uso: xtask fs-cat DISCO [NOMBRE]")),
+            None => Err(String::from("usage: xtask fs-cat DISK [NAME]")),
         },
         "keygen" => keys::keygen(&root().join(cli.positional(1).unwrap_or(keys::DEV_KEY_DIR))),
         "sign" => match (cli.positional(1), cli.positional(2)) {
             (Some(seed), Some(file)) => keys::sign(Path::new(seed), Path::new(file)),
-            _ => Err(String::from("uso: xtask sign SEED FICHERO")),
+            _ => Err(String::from("usage: xtask sign SEED FILE")),
         },
         "verify" => match (cli.positional(1), cli.positional(2)) {
             (Some(pk), Some(file)) => keys::verify(
@@ -108,10 +108,10 @@ fn main() -> ExitCode {
                 Path::new(file),
                 cli.positional(3).map(Path::new),
             ),
-            _ => Err(String::from("uso: xtask verify PUB FICHERO [FIRMA]")),
+            _ => Err(String::from("usage: xtask verify PUB FILE [SIG]")),
         },
         _ => {
-            eprintln!("uso: cargo xtask <build|image|run|test|check|usb-image|fs-cat|app-pack|keygen|sign|verify> [--debug] (ver tools/xtask/src/main.rs)");
+            eprintln!("usage: cargo xtask <build|image|run|test|check|usb-image|fs-cat|app-pack|keygen|sign|verify> [--debug] (see tools/xtask/src/main.rs)");
             return ExitCode::from(2);
         }
     };

@@ -1,12 +1,12 @@
-//! usbd (Fase 25, segunda parte; ADR 0023): driver xHCI en ring 3 para
-//! teclados y ratones USB HID con protocolo de arranque y para un
-//! dispositivo de almacenamiento masivo (bulk-only, SCSI). Recibe el
-//! contrato de driver de init (`SERVICE`, cfg, hardware, IRQ, BAR0) y, como
-//! extras, `SYSTEM` (`READ`) para el reloj y el endpoint del servicio de
-//! bloques. Enumera los puertos con dispositivo, configura cada interfaz HID
-//! de arranque, sondea sus endpoints de interrupción y entrega los eventos
-//! por IPC (`InputServiceProtocol v1`) como un único dispositivo de entrada;
-//! el almacenamiento se sirve con el protocolo de bloques (`aricode-proto::block`).
+//! usbd (Phase 25, second part; ADR 0023): ring 3 xHCI driver for
+//! USB HID keyboards and mice using the boot protocol, and for one
+//! mass storage device (bulk-only, SCSI). Receives the driver contract
+//! from init (`SERVICE`, cfg, hardware, IRQ, BAR0) and, as extras,
+//! `SYSTEM` (`READ`) for the clock and the block service endpoint.
+//! Enumerates the ports with a device attached, configures each boot HID
+//! interface, polls its interrupt endpoints and delivers the events
+//! over IPC (`InputServiceProtocol v1`) as a single input device;
+//! storage is served with the block protocol (`aricode-proto::block`).
 #![no_std]
 #![no_main]
 
@@ -29,7 +29,7 @@ const CMD_RING_TRBS: usize = 16;
 const EVENT_RING_TRBS: usize = 32;
 const XFER_RING_TRBS: usize = 16;
 const MAX_DEVICES: usize = 4;
-/// TRB de informe pendientes por endpoint de interrupción.
+/// Pending report TRBs per interrupt endpoint.
 const REPORTS_IN_FLIGHT: usize = 4;
 const RING: usize = 128;
 
@@ -56,7 +56,7 @@ impl Clock {
     }
 }
 
-/// Reserva lineal dentro del buffer DMA del driver (alineación de 64 bytes).
+/// Linear allocator inside the driver's DMA buffer (64-byte alignment).
 struct Arena {
     region: DmaRegion,
     next: u64,
@@ -75,16 +75,16 @@ impl Arena {
 }
 
 fn write_trb(virt: u64, trb: &Trb) {
-    // SAFETY: `virt` es un TRB dentro del buffer DMA del driver.
+    // SAFETY: `virt` is a TRB inside the driver's DMA buffer.
     unsafe { (virt as *mut [u8; Trb::LEN]).write_volatile(trb.to_bytes()) };
 }
 
 fn read_trb(virt: u64) -> Trb {
-    // SAFETY: ídem.
+    // SAFETY: same as above.
     Trb::from_bytes(&unsafe { (virt as *const [u8; Trb::LEN]).read_volatile() })
 }
 
-/// Anillo de productor con su memoria.
+/// Producer ring with its memory.
 struct Ring {
     state: ProducerRing,
     virt: u64,
@@ -99,7 +99,7 @@ impl Ring {
         Some(Self { state, virt })
     }
 
-    /// Encola un TRB y devuelve su dirección física.
+    /// Enqueues a TRB and returns its physical address.
     fn push(&mut self, trb: Trb) -> u64 {
         let e = self.state.push(trb);
         write_trb(self.virt + (e.index * Trb::LEN) as u64, &e.trb);
@@ -113,9 +113,9 @@ impl Ring {
 struct Endpoint {
     dci: u8,
     ring: Ring,
-    /// Ya llegó el primer informe (traza de diagnóstico).
+    /// The first report has arrived (diagnostic trace).
     seen: bool,
-    /// Informes en vuelo: (TRB, buffer físico, buffer virtual).
+    /// Reports in flight: (TRB, physical buffer, virtual buffer).
     reports: [(u64, u64, u64); REPORTS_IN_FLIGHT],
     report_len: u16,
 }
@@ -124,50 +124,50 @@ struct UsbDevice {
     slot: u8,
     ep0: Ring,
     endpoints: [Option<Endpoint>; MAX_DEVICES],
-    /// Por endpoint: teclado o ratón.
+    /// Per endpoint: keyboard or mouse.
     decoders: [Decoder; MAX_DEVICES],
-    /// Input context del dispositivo (físico, virtual, bytes) y su contexto
-    /// de slot, para configurar endpoints después de direccionarlo.
+    /// Device input context (physical, virtual, bytes) and its slot
+    /// context, to configure endpoints after addressing it.
     input_ctx: (u64, u64, u64),
     slot_ctx: SlotContext,
 }
 
-/// Endpoint masivo de un dispositivo de almacenamiento.
+/// Bulk endpoint of a storage device.
 struct Bulk {
     dci: u8,
-    /// Dirección USB del endpoint (bit 7 = IN), para `CLEAR_FEATURE`.
+    /// USB endpoint address (bit 7 = IN), for `CLEAR_FEATURE`.
     address: u8,
     ring: Ring,
     max_packet: u16,
 }
 
-/// Dispositivo de almacenamiento masivo bulk-only (uno como máximo).
+/// Bulk-only mass storage device (at most one).
 struct Storage {
     device: usize,
     slot: u8,
     bulk_in: Bulk,
     bulk_out: Bulk,
     tag: u32,
-    /// CBW, CSW y respuestas pequeñas (INQUIRY, sentido, capacidad) en el
-    /// buffer DMA del driver: (físico, virtual).
+    /// CBW, CSW and small responses (INQUIRY, sense, capacity) in the
+    /// driver's DMA buffer: (physical, virtual).
     cbw: (u64, u64),
     csw: (u64, u64),
     small: (u64, u64),
-    /// Sectores de 512 bytes.
+    /// 512-byte sectors.
     capacity: u64,
-    /// El dispositivo admite `SYNCHRONIZE CACHE`; si lo rechaza como no
-    /// soportado, el flush no tiene nada que vaciar.
+    /// The device supports `SYNCHRONIZE CACHE`; if it rejects it as
+    /// unsupported, the flush has nothing to write back.
     sync_cache: bool,
-    /// Errores de E/S anunciados (se acotan para no inundar la consola).
+    /// I/O errors reported (capped so as not to flood the console).
     errors_reported: u8,
 }
 
-/// Por qué falló un comando SCSI.
+/// Why a SCSI command failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScsiFail {
-    /// Transferencia masiva fallida o CSW inválido.
+    /// Failed bulk transfer or invalid CSW.
     Transport,
-    /// El dispositivo rechazó el comando (`REQUEST SENSE` dice por qué).
+    /// The device rejected the command (`REQUEST SENSE` says why).
     Failed,
 }
 
@@ -195,12 +195,12 @@ struct Controller {
     clock: Clock,
     keyboards: u8,
     mice: u8,
-    /// Los puertos se enrutaron de los EHCI al xHCI (Intel): hay que dar
-    /// más tiempo a que los dispositivos aparezcan.
+    /// The ports were routed from the EHCI controllers to the xHCI (Intel):
+    /// devices need more time to show up.
     ports_switched: bool,
 }
 
-/// Evento pendiente de entregar al cliente.
+/// Event pending delivery to the client.
 struct Pending {
     buf: [(Event, u64); RING],
     head: usize,
@@ -233,7 +233,7 @@ impl Pending {
     }
 }
 
-/// Códigos de salida de la inicialización (estables para los escenarios).
+/// Initialization exit codes (stable for the scenarios).
 mod exit {
     pub const MAP_BAR: u64 = 10;
     pub const NOT_XHCI: u64 = 11;
@@ -245,19 +245,19 @@ mod exit {
 impl Controller {
     fn open(mask: u64, clock: Clock) -> Result<Self, u64> {
         let Some(bar) = bar_handle(mask, 0) else {
-            say(b"sin BAR 0 o sin IRQ entre las capabilities");
+            say(b"no BAR 0 or no IRQ among the capabilities");
             return Err(exit::MAP_BAR);
         };
         let base = Mmio(sys::mmio_map(bar).map_err(|_| {
-            say(b"no se pudo mapear el BAR 0");
+            say(b"could not map BAR 0");
             exit::MAP_BAR
         })?);
         let cfg = Mmio(sys::mmio_map(CFG).map_err(|_| {
-            say(b"no se pudo mapear el espacio de configuracion");
+            say(b"could not map the configuration space");
             exit::MAP_BAR
         })?);
-        // Los registros de capacidad se leen por palabras de 32 bits: QEMU no
-        // atiende accesos de 16 bits en HCIVERSION.
+        // The capability registers are read as 32-bit words: QEMU does not
+        // serve 16-bit accesses to HCIVERSION.
         let cap0 = base.r32(cap::CAPLENGTH);
         let caplength = (cap0 & 0xFF) as u64;
         let version = (cap0 >> 16) as u16;
@@ -282,11 +282,11 @@ impl Controller {
         let region = DmaRegion::alloc(params.dma_arena_bytes()).map_err(|_| exit::DMA)?;
         let mut arena = Arena { region, next: 0 };
 
-        // El firmware puede seguir siendo dueño del controlador (SMM):
-        // pedirle que lo ceda antes de tocarlo.
+        // The firmware may still own the controller (SMM):
+        // ask it to hand it over before touching it.
         bios_handoff(&base, &clock);
 
-        // Parar y reiniciar el controlador.
+        // Stop and reset the controller.
         op.w32(op::USBCMD, op.r32(op::USBCMD) & !op::CMD_RUN);
         wait_bits(&op, op::USBSTS, op::STS_HALTED, true, &clock, 200).ok_or(exit::RESET_TIMEOUT)?;
         op.w32(op::USBCMD, op::CMD_RESET);
@@ -294,7 +294,7 @@ impl Controller {
         wait_bits(&op, op::USBSTS, op::STS_NOT_READY, false, &clock, 500)
             .ok_or(exit::RESET_TIMEOUT)?;
 
-        // Estructuras: DCBAA, scratchpads, anillo de comandos, anillo de eventos y ERST.
+        // Structures: DCBAA, scratchpads, command ring, event ring and ERST.
         let slots = params.max_slots as u64;
         let (dcbaa_phys, dcbaa_virt) = arena.alloc((slots + 1) * 8, 64).ok_or(exit::DMA)?;
         let mut scratch_virt = 0;
@@ -303,10 +303,10 @@ impl Controller {
             let (arr_phys, arr_virt) = arena.alloc(n * 8, 64).ok_or(exit::DMA)?;
             for i in 0..n {
                 let (page_phys, _) = arena.alloc(4096, 4096).ok_or(exit::DMA)?;
-                // SAFETY: entrada del array de scratchpads dentro del buffer DMA.
+                // SAFETY: scratchpad array entry inside the DMA buffer.
                 unsafe { ((arr_virt + 8 * i) as *mut u64).write_volatile(page_phys) };
             }
-            // SAFETY: entrada 0 de la DCBAA.
+            // SAFETY: DCBAA entry 0.
             unsafe { (dcbaa_virt as *mut u64).write_volatile(arr_phys) };
             scratch_virt = arr_virt;
         }
@@ -315,7 +315,7 @@ impl Controller {
             .alloc((EVENT_RING_TRBS * Trb::LEN) as u64, 64)
             .ok_or(exit::DMA)?;
         let (erst_phys, erst_virt) = arena.alloc(16, 64).ok_or(exit::DMA)?;
-        // SAFETY: entrada de la ERST dentro del buffer DMA.
+        // SAFETY: ERST entry inside the DMA buffer.
         unsafe {
             (erst_virt as *mut [u8; 16]).write_volatile(erst_entry(ev_phys, EVENT_RING_TRBS as u16))
         };
@@ -368,7 +368,7 @@ impl Controller {
         self.doorbells.w32(4 * slot as u64, target);
     }
 
-    /// Siguiente evento del anillo, si lo hay; actualiza ERDP.
+    /// Next event in the ring, if any; updates ERDP.
     fn next_event(&mut self) -> Option<Trb> {
         let trb = read_trb(self.events_virt + (self.events.dequeue * Trb::LEN) as u64);
         let ev = self.events.accept(trb)?;
@@ -376,7 +376,7 @@ impl Controller {
         Some(ev)
     }
 
-    /// Envía un comando y espera su terminación (código, slot).
+    /// Sends a command and waits for its completion (code, slot).
     fn command(&mut self, trb: Trb, timeout_ms: u64) -> Option<(u8, u8)> {
         let phys = self.cmd.push(trb);
         self.ring_doorbell(0, 0);
@@ -395,15 +395,15 @@ impl Controller {
         }
     }
 
-    /// Eventos que llegan mientras se espera otra cosa: los de transferencia
-    /// se procesan al vuelo (informes), los demás se ignoran.
+    /// Events that arrive while waiting for something else: transfer events
+    /// are processed on the fly (reports), the rest are ignored.
     fn stash_event(&mut self, ev: Trb) {
         if ev.trb_type() == trb_type::TRANSFER_EVENT {
             self.handle_transfer_event(ev, None);
         }
     }
 
-    /// Transferencia de control en EP0 de `slot`; espera el Status Stage.
+    /// Control transfer on EP0 of `slot`; waits for the Status Stage.
     fn control(
         &mut self,
         slot_index: usize,
@@ -440,55 +440,55 @@ impl Controller {
         }
     }
 
-    /// Enumera un puerto con dispositivo conectado: reset, slot, dirección,
-    /// descriptores, configuración e interfaces HID.
+    /// Enumerates a port with a device attached: reset, slot, address,
+    /// descriptors, configuration and HID interfaces.
     fn enumerate_port(&mut self, port: u8) -> Result<(), &'static str> {
         let sc = self.portsc(port);
         if sc & op::PORTSC_CCS == 0 {
-            return Err("sin dispositivo");
+            return Err("no device");
         }
         if sc & op::PORTSC_PED == 0 {
-            // USB 2: hay que resetear el puerto; USB 3 se habilita solo.
+            // USB 2: the port must be reset; USB 3 enables itself.
             let keep = sc & op::PORTSC_POWER;
             self.write_portsc(port, keep | op::PORTSC_RESET);
             let deadline = self.clock.now() + 500;
             while self.portsc(port) & op::PORTSC_PED == 0 {
                 if self.clock.now() >= deadline {
-                    return Err("el puerto no se habilita tras el reset");
+                    return Err("the port is not enabled after the reset");
                 }
                 let _ = sys::irq_wait(IRQ, 5);
             }
         }
-        // Limpiar los bits de cambio del puerto.
+        // Clear the port change bits.
         let sc = self.portsc(port);
         self.write_portsc(
             port,
             (sc & op::PORTSC_POWER) | (sc & op::PORTSC_CHANGE_BITS),
         );
         let spd = op::port_speed(self.portsc(port));
-        // Tirar los Port Status Change pendientes.
+        // Drop pending Port Status Change events.
         while let Some(ev) = self.next_event() {
             self.stash_event(ev);
         }
 
         let (code, slot) = self
             .command(Trb::enable_slot(), 500)
-            .ok_or("Enable Slot sin respuesta")?;
+            .ok_or("Enable Slot: no response")?;
         if code != completion::SUCCESS || slot == 0 {
-            return Err("Enable Slot fallo");
+            return Err("Enable Slot failed");
         }
         let ctx_bytes = self.params.context_bytes();
         let (dev_ctx_phys, _) = self
             .arena
             .alloc((32 * ctx_bytes) as u64, 64)
-            .ok_or("sin DMA")?;
-        // SAFETY: entrada `slot` de la DCBAA.
+            .ok_or("no DMA")?;
+        // SAFETY: DCBAA entry `slot`.
         unsafe { ((self.dcbaa_virt + 8 * slot as u64) as *mut u64).write_volatile(dev_ctx_phys) };
-        let ep0 = Ring::new(&mut self.arena, XFER_RING_TRBS).ok_or("sin DMA")?;
+        let ep0 = Ring::new(&mut self.arena, XFER_RING_TRBS).ok_or("no DMA")?;
         let (in_phys, in_virt) = self
             .arena
             .alloc((33 * ctx_bytes) as u64, 64)
-            .ok_or("sin DMA")?;
+            .ok_or("no DMA")?;
         let slot_ctx = SlotContext {
             route_string: 0,
             speed: spd,
@@ -498,7 +498,7 @@ impl Controller {
         let ep0_ctx = EndpointContext::control(speed::default_ep0_max_packet(spd), ep0.state.phys);
         let in_len = (33 * ctx_bytes) as u64;
         write_input_context(
-            // SAFETY: input context dentro del buffer DMA.
+            // SAFETY: input context inside the DMA buffer.
             unsafe { core::slice::from_raw_parts_mut(in_virt as *mut u8, in_len as usize) },
             ctx_bytes,
             0b11,
@@ -507,15 +507,15 @@ impl Controller {
         );
         let (code, _) = self
             .command(Trb::address_device(in_phys, slot), 1000)
-            .ok_or("Address Device sin respuesta")?;
+            .ok_or("Address Device: no response")?;
         if code != completion::SUCCESS {
-            return Err("Address Device fallo");
+            return Err("Address Device failed");
         }
         let index = self
             .devices
             .iter()
             .position(|d| d.is_none())
-            .ok_or("demasiados dispositivos")?;
+            .ok_or("too many devices")?;
         self.devices[index] = Some(UsbDevice {
             slot,
             ep0,
@@ -525,27 +525,27 @@ impl Controller {
             slot_ctx,
         });
 
-        // Descriptor de dispositivo en dos pasos (xHCI 4.3, paso 7): primero
-        // solo 8 bytes, que caben en cualquier EP0, para conocer
-        // bMaxPacketSize0; si difiere del supuesto se corrige el contexto con
-        // Evaluate Context y solo entonces se pide el descriptor completo.
-        let (buf_phys, buf_virt) = self.arena.alloc(512, 64).ok_or("sin DMA")?;
+        // Device descriptor in two steps (xHCI 4.3, step 7): first only
+        // 8 bytes, which fit in any EP0, to learn bMaxPacketSize0; if it
+        // differs from the assumed value the context is fixed with
+        // Evaluate Context and only then is the full descriptor requested.
+        let (buf_phys, buf_virt) = self.arena.alloc(512, 64).ok_or("no DMA")?;
         self.control(
             index,
             SetupPacket::get_descriptor(aricode_xhci::request::DESC_DEVICE, 0, 8),
             Some((buf_phys, 8)),
         )
-        .ok_or("GET_DESCRIPTOR(device, 8 bytes) fallo")?;
-        // SAFETY: buffer DMA de 512 bytes del driver.
+        .ok_or("GET_DESCRIPTOR(device, 8 bytes) failed")?;
+        // SAFETY: the driver's 512-byte DMA buffer.
         let raw = unsafe { core::slice::from_raw_parts(buf_virt as *const u8, 512) };
         let max_packet0 = raw[7] as u16;
         if raw[1] != aricode_xhci::request::DESC_DEVICE || max_packet0 == 0 {
-            return Err("cabecera del descriptor de dispositivo invalida");
+            return Err("invalid device descriptor header");
         }
         if max_packet0 != speed::default_ep0_max_packet(spd) && spd != speed::SUPER {
             let ep0_ctx = EndpointContext::control(max_packet0, ep0_ctx.ring_phys);
             write_input_context(
-                // SAFETY: ídem.
+                // SAFETY: same as above.
                 unsafe { core::slice::from_raw_parts_mut(in_virt as *mut u8, in_len as usize) },
                 ctx_bytes,
                 0b10,
@@ -554,9 +554,9 @@ impl Controller {
             );
             let (code, _) = self
                 .command(Trb::evaluate_context(in_phys, slot), 500)
-                .ok_or("Evaluate Context sin respuesta")?;
+                .ok_or("Evaluate Context: no response")?;
             if code != completion::SUCCESS {
-                return Err("Evaluate Context (tamano de paquete de EP0) fallo");
+                return Err("Evaluate Context (EP0 packet size) failed");
             }
         }
         self.control(
@@ -568,56 +568,56 @@ impl Controller {
             ),
             Some((buf_phys, DeviceDescriptor::LEN)),
         )
-        .ok_or("GET_DESCRIPTOR(device) fallo")?;
-        let desc = DeviceDescriptor::parse(raw).ok_or("descriptor de dispositivo invalido")?;
-        // Configuración completa.
+        .ok_or("GET_DESCRIPTOR(device) failed")?;
+        let desc = DeviceDescriptor::parse(raw).ok_or("invalid device descriptor")?;
+        // Full configuration.
         self.control(
             index,
             SetupPacket::get_descriptor(aricode_xhci::request::DESC_CONFIGURATION, 0, 9),
             Some((buf_phys, 9)),
         )
-        .ok_or("GET_DESCRIPTOR(config) fallo")?;
+        .ok_or("GET_DESCRIPTOR(config) failed")?;
         let total = u16::from_le_bytes([raw[2], raw[3]]).clamp(9, 512);
         self.control(
             index,
             SetupPacket::get_descriptor(aricode_xhci::request::DESC_CONFIGURATION, 0, total),
             Some((buf_phys, total)),
         )
-        .ok_or("GET_DESCRIPTOR(config completa) fallo")?;
+        .ok_or("GET_DESCRIPTOR(full config) failed")?;
         let mut hids = [None; 4];
         let (config_value, n) =
             aricode_xhci::parse_configuration(&raw[..total as usize], &mut hids)
-                .ok_or("configuracion invalida")?;
+                .ok_or("invalid configuration")?;
         if n == 0 {
-            // Sin HID: ¿almacenamiento masivo bulk-only (ADR 0023)?
+            // No HID: bulk-only mass storage (ADR 0023)?
             let Some((value, iface)) = parse_storage_interface(&raw[..total as usize]) else {
-                return Err("sin interfaces HID de arranque ni de almacenamiento");
+                return Err("no boot HID or storage interfaces");
             };
             if self.storage.is_some() {
-                return Err("ya hay un dispositivo de almacenamiento; se ignora");
+                return Err("a storage device is already present; ignoring");
             }
             self.control(index, SetupPacket::set_configuration(value), None)
-                .ok_or("SET_CONFIGURATION fallo")?;
+                .ok_or("SET_CONFIGURATION failed")?;
             return self.configure_storage(index, port, iface);
         }
         self.control(index, SetupPacket::set_configuration(config_value), None)
-            .ok_or("SET_CONFIGURATION fallo")?;
+            .ok_or("SET_CONFIGURATION failed")?;
 
-        // Cada interfaz HID: protocolo de arranque, endpoint de interrupción
-        // configurado y varios informes en vuelo.
+        // Each HID interface: boot protocol, interrupt endpoint
+        // configured and several reports in flight.
         let mut max_dci = 1u8;
         let mut eps: [(u8, EndpointContext); 4] = [(0, EndpointContext::default()); 4];
         let mut prepared = 0;
         for hid in hids.iter().flatten() {
             self.control(index, SetupPacket::hid_set_protocol(hid.interface, 0), None)
-                .ok_or("SET_PROTOCOL fallo")?;
+                .ok_or("SET_PROTOCOL failed")?;
             let _ = self.control(index, SetupPacket::hid_set_idle(hid.interface), None);
             let d = dci(hid.endpoint, true);
-            let ring = Ring::new(&mut self.arena, XFER_RING_TRBS).ok_or("sin DMA")?;
+            let ring = Ring::new(&mut self.arena, XFER_RING_TRBS).ok_or("no DMA")?;
             let report_len = hid.max_packet_size.clamp(1, 64);
             let mut reports = [(0u64, 0u64, 0u64); REPORTS_IN_FLIGHT];
             for r in reports.iter_mut() {
-                let (p, v) = self.arena.alloc(64, 64).ok_or("sin DMA")?;
+                let (p, v) = self.arena.alloc(64, 64).ok_or("no DMA")?;
                 *r = (0, p, v);
             }
             let ctx = EndpointContext::interrupt_in(
@@ -628,7 +628,7 @@ impl Controller {
             eps[prepared] = (d, ctx);
             prepared += 1;
             max_dci = max_dci.max(d);
-            let dev = self.devices[index].as_mut().ok_or("dispositivo")?;
+            let dev = self.devices[index].as_mut().ok_or("device")?;
             let ep_index = dev
                 .endpoints
                 .iter()
@@ -662,7 +662,7 @@ impl Controller {
             ..slot_ctx
         };
         write_input_context(
-            // SAFETY: ídem.
+            // SAFETY: same as above.
             unsafe { core::slice::from_raw_parts_mut(in_virt as *mut u8, in_len as usize) },
             ctx_bytes,
             add_flags,
@@ -671,12 +671,12 @@ impl Controller {
         );
         let (code, _) = self
             .command(Trb::configure_endpoint(in_phys, slot), 1000)
-            .ok_or("Configure Endpoint sin respuesta")?;
+            .ok_or("Configure Endpoint: no response")?;
         if code != completion::SUCCESS {
-            return Err("Configure Endpoint fallo");
+            return Err("Configure Endpoint failed");
         }
-        // Informes en vuelo.
-        let dev = self.devices[index].as_mut().ok_or("dispositivo")?;
+        // Reports in flight.
+        let dev = self.devices[index].as_mut().ok_or("device")?;
         for ep in dev.endpoints.iter_mut().flatten() {
             for r in ep.reports.iter_mut() {
                 r.0 = ep.ring.push(Trb::normal(r.1, ep.report_len as u32));
@@ -687,17 +687,17 @@ impl Controller {
         Ok(())
     }
 
-    /// Configura los endpoints masivos de una interfaz de almacenamiento,
-    /// identifica el dispositivo (INQUIRY), espera a que esté listo y lee su
-    /// capacidad. Solo se admiten bloques de 512 bytes.
+    /// Configures the bulk endpoints of a storage interface, identifies
+    /// the device (INQUIRY), waits for it to become ready and reads its
+    /// capacity. Only 512-byte blocks are supported.
     fn configure_storage(
         &mut self,
         index: usize,
         port: u8,
         iface: StorageInterface,
     ) -> Result<(), &'static str> {
-        let ring_in = Ring::new(&mut self.arena, XFER_RING_TRBS).ok_or("sin DMA")?;
-        let ring_out = Ring::new(&mut self.arena, XFER_RING_TRBS).ok_or("sin DMA")?;
+        let ring_in = Ring::new(&mut self.arena, XFER_RING_TRBS).ok_or("no DMA")?;
+        let ring_out = Ring::new(&mut self.arena, XFER_RING_TRBS).ok_or("no DMA")?;
         let (dci_in, dci_out) = (dci(iface.bulk_in, true), dci(iface.bulk_out, false));
         let eps = [
             (
@@ -710,7 +710,7 @@ impl Controller {
             ),
         ];
         let (slot, (in_phys, in_virt, in_len), slot_ctx) = {
-            let dev = self.devices[index].as_ref().ok_or("dispositivo")?;
+            let dev = self.devices[index].as_ref().ok_or("device")?;
             (dev.slot, dev.input_ctx, dev.slot_ctx)
         };
         let slot_ctx = SlotContext {
@@ -719,7 +719,7 @@ impl Controller {
         };
         let ctx_bytes = self.params.context_bytes();
         write_input_context(
-            // SAFETY: input context del dispositivo dentro del buffer DMA.
+            // SAFETY: the device input context inside the DMA buffer.
             unsafe { core::slice::from_raw_parts_mut(in_virt as *mut u8, in_len as usize) },
             ctx_bytes,
             1 | 1 << dci_in | 1 << dci_out,
@@ -728,13 +728,13 @@ impl Controller {
         );
         let (code, _) = self
             .command(Trb::configure_endpoint(in_phys, slot), 1000)
-            .ok_or("Configure Endpoint sin respuesta")?;
+            .ok_or("Configure Endpoint: no response")?;
         if code != completion::SUCCESS {
-            return Err("Configure Endpoint (almacenamiento) fallo");
+            return Err("Configure Endpoint (storage) failed");
         }
-        let cbw = self.arena.alloc(64, 64).ok_or("sin DMA")?;
-        let csw = self.arena.alloc(64, 64).ok_or("sin DMA")?;
-        let small = self.arena.alloc(64, 64).ok_or("sin DMA")?;
+        let cbw = self.arena.alloc(64, 64).ok_or("no DMA")?;
+        let csw = self.arena.alloc(64, 64).ok_or("no DMA")?;
+        let small = self.arena.alloc(64, 64).ok_or("no DMA")?;
         self.storage = Some(Storage {
             device: index,
             slot,
@@ -765,20 +765,20 @@ impl Controller {
         Ok(())
     }
 
-    /// INQUIRY, TEST UNIT READY (con reintentos mientras el dispositivo
-    /// arranca) y READ CAPACITY(10).
+    /// INQUIRY, TEST UNIT READY (with retries while the device
+    /// starts up) and READ CAPACITY(10).
     fn storage_init(&mut self, port: u8) -> Result<(), &'static str> {
-        let (small_phys, small_virt) = self.storage.as_ref().ok_or("almacenamiento")?.small;
-        // SAFETY: buffer propio de 64 bytes en el DMA del driver.
+        let (small_phys, small_virt) = self.storage.as_ref().ok_or("storage")?.small;
+        // SAFETY: own 64-byte buffer in the driver's DMA memory.
         let small = || unsafe { core::slice::from_raw_parts(small_virt as *const u8, 64) };
         self.scsi(
             scsi::inquiry(),
             Some((small_phys, scsi::INQUIRY_LEN as u32, true)),
         )
-        .map_err(|_| "INQUIRY fallo")?;
-        let inq = scsi::Inquiry::parse(small()).ok_or("INQUIRY invalido")?;
+        .map_err(|_| "INQUIRY failed")?;
+        let inq = scsi::Inquiry::parse(small()).ok_or("invalid INQUIRY")?;
         if inq.peripheral_type != 0 {
-            return Err("no es un dispositivo de acceso directo (disco)");
+            return Err("not a direct access device (disk)");
         }
         let mut ready = false;
         for _ in 0..20 {
@@ -793,10 +793,10 @@ impl Controller {
                         sense.map(|s| s.key),
                         Some(scsi::Sense::UNIT_ATTENTION | scsi::Sense::NOT_READY)
                     ) {
-                        return Err("TEST UNIT READY rechazado");
+                        return Err("TEST UNIT READY rejected");
                     }
                 }
-                Err(ScsiFail::Transport) => return Err("TEST UNIT READY sin respuesta"),
+                Err(ScsiFail::Transport) => return Err("TEST UNIT READY: no response"),
             }
             let until = self.clock.now() + 100;
             while self.clock.now() < until {
@@ -804,23 +804,23 @@ impl Controller {
             }
         }
         if !ready {
-            return Err("el dispositivo no llega a estar listo");
+            return Err("the device never becomes ready");
         }
         self.scsi(
             scsi::read_capacity10(),
             Some((small_phys, scsi::READ_CAPACITY_LEN as u32, true)),
         )
-        .map_err(|_| "READ CAPACITY fallo")?;
+        .map_err(|_| "READ CAPACITY failed")?;
         let (last_lba, block_len) =
-            scsi::parse_read_capacity10(small()).ok_or("READ CAPACITY invalido")?;
+            scsi::parse_read_capacity10(small()).ok_or("invalid READ CAPACITY")?;
         if block_len != 512 {
-            return Err("bloques distintos de 512 bytes: no soportado");
+            return Err("blocks other than 512 bytes: not supported");
         }
         let capacity = last_lba as u64 + 1;
         if let Some(st) = self.storage.as_mut() {
             st.capacity = capacity;
         }
-        sys::print(b"usb-input: almacenamiento USB en puerto ");
+        sys::print(b"usb-input: USB storage on port ");
         num(port as u64);
         sys::print(b": ");
         sys::print(inq.vendor.trim_ascii());
@@ -828,13 +828,13 @@ impl Controller {
         sys::print(inq.product.trim_ascii());
         sys::print(b", ");
         num(capacity);
-        sys::print(b" sectores\n");
+        sys::print(b" sectors\n");
         Ok(())
     }
 
-    /// Transferencia masiva síncrona por el endpoint IN u OUT del
-    /// almacenamiento. `Ok(bytes no transferidos)` o el código de
-    /// terminación del xHCI (`completion::STALL` incluido; 0 = sin evento).
+    /// Synchronous bulk transfer on the storage IN or OUT endpoint.
+    /// `Ok(bytes not transferred)` or the xHCI completion code
+    /// (`completion::STALL` included; 0 = no event).
     fn bulk(&mut self, dir_in: bool, phys: u64, len: u32, timeout_ms: u64) -> Result<u32, u8> {
         let (slot, dci, last) = {
             let st = self.storage.as_mut().ok_or(0u8)?;
@@ -876,8 +876,8 @@ impl Controller {
         }
     }
 
-    /// Recupera un endpoint masivo parado (STALL): Reset Endpoint, el
-    /// anillo sigue desde donde va el productor y `CLEAR_FEATURE(HALT)`.
+    /// Recovers a halted (STALL) bulk endpoint: Reset Endpoint, the ring
+    /// continues from where the producer is, and `CLEAR_FEATURE(HALT)`.
     fn recover_bulk(&mut self, dir_in: bool) {
         let (slot, dci, address, pointer, cycle, device) = {
             let Some(st) = self.storage.as_ref() else {
@@ -898,9 +898,9 @@ impl Controller {
         let _ = self.control(device, SetupPacket::clear_endpoint_halt(address), None);
     }
 
-    /// Un comando SCSI por el transporte bulk-only: CBW, datos (si hay, en
-    /// `(físico, bytes, hacia el anfitrión)`) y CSW. Un STALL en los datos o
-    /// en el CSW se recupera como manda BOT 6.7; el estado lo da el CSW.
+    /// One SCSI command over the bulk-only transport: CBW, data (if any, as
+    /// `(physical, bytes, towards the host)`) and CSW. A STALL in the data or
+    /// in the CSW is recovered as BOT 6.7 requires; the CSW gives the status.
     fn scsi(&mut self, cdb: Cdb, data: Option<(u64, u32, bool)>) -> Result<(), ScsiFail> {
         let (tag, cbw_phys, cbw_virt, csw_phys, csw_virt) = {
             let st = self.storage.as_mut().ok_or(ScsiFail::Transport)?;
@@ -914,7 +914,7 @@ impl Controller {
             lun: 0,
             cdb,
         };
-        // SAFETY: CBW en el buffer DMA del driver.
+        // SAFETY: CBW in the driver's DMA buffer.
         unsafe { (cbw_virt as *mut [u8; Cbw::LEN]).write_volatile(cbw.encode()) };
         if self.bulk(false, cbw_phys, Cbw::LEN as u32, 1000).is_err() {
             self.recover_bulk(false);
@@ -933,7 +933,7 @@ impl Controller {
             csw = self.bulk(true, csw_phys, Csw::LEN as u32, 1000);
         }
         csw.map_err(|_| ScsiFail::Transport)?;
-        // SAFETY: CSW en el buffer DMA del driver.
+        // SAFETY: CSW in the driver's DMA buffer.
         let raw = unsafe { (csw_virt as *const [u8; Csw::LEN]).read_volatile() };
         let csw = Csw::parse(&raw).ok_or(ScsiFail::Transport)?;
         if csw.tag != tag {
@@ -946,7 +946,7 @@ impl Controller {
         }
     }
 
-    /// `REQUEST SENSE` tras un comando rechazado.
+    /// `REQUEST SENSE` after a rejected command.
     fn sense(&mut self) -> Option<scsi::Sense> {
         let (phys, virt) = self.storage.as_ref()?.small;
         self.scsi(
@@ -954,12 +954,12 @@ impl Controller {
             Some((phys, scsi::SENSE_LEN as u32, true)),
         )
         .ok()?;
-        // SAFETY: buffer propio de 64 bytes en el DMA del driver.
+        // SAFETY: own 64-byte buffer in the driver's DMA memory.
         scsi::Sense::parse(unsafe { core::slice::from_raw_parts(virt as *const u8, 64) })
     }
 
-    /// Lectura o escritura de `count` sectores en el buffer DMA del cliente;
-    /// un rechazo por atención de unidad se reintenta una vez.
+    /// Reads or writes `count` sectors in the client's DMA buffer;
+    /// a rejection due to unit attention is retried once.
     fn block_io(&mut self, write: bool, lba: u64, count: u16, phys: u64) -> bool {
         let Ok(lba32) = u32::try_from(lba) else {
             return false;
@@ -990,9 +990,9 @@ impl Controller {
         false
     }
 
-    /// Hace duraderas las escrituras (`SYNCHRONIZE CACHE`). Un dispositivo
-    /// que no implementa el comando no tiene caché que vaciar: se anota una
-    /// vez y el flush pasa a ser inmediato.
+    /// Makes writes durable (`SYNCHRONIZE CACHE`). A device that does
+    /// not implement the command has no cache to write back: it is noted
+    /// once and the flush becomes immediate.
     fn flush(&mut self) -> bool {
         if !self.storage.as_ref().is_some_and(|s| s.sync_cache) {
             return self.storage.is_some();
@@ -1005,7 +1005,7 @@ impl Controller {
                     if let Some(st) = self.storage.as_mut() {
                         st.sync_cache = false;
                     }
-                    say(b"el dispositivo no admite SYNCHRONIZE CACHE; flush sin efecto");
+                    say(b"the device does not support SYNCHRONIZE CACHE; flush is a no-op");
                     true
                 } else {
                     self.report_error(b"SYNCHRONIZE CACHE", 0, sense);
@@ -1019,7 +1019,7 @@ impl Controller {
         }
     }
 
-    /// Anuncia un comando fallido con su sentido (las primeras veces).
+    /// Reports a failed command with its sense data (the first few times).
     fn report_error(&mut self, what: &[u8], lba: u64, sense: Option<scsi::Sense>) {
         let Some(st) = self.storage.as_mut() else {
             return;
@@ -1034,7 +1034,7 @@ impl Controller {
         num(lba);
         match sense {
             Some(s) => {
-                sys::print(b" rechazado: sentido ");
+                sys::print(b" rejected: sense ");
                 num(s.key as u64);
                 sys::print(b"/");
                 num(s.asc as u64);
@@ -1042,26 +1042,26 @@ impl Controller {
                 num(s.ascq as u64);
                 sys::print(b"\n");
             }
-            None => sys::print(b" fallo en el transporte\n"),
+            None => sys::print(b" transport failure\n"),
         }
     }
 
     fn report_interface(&self, hid: &HidInterface, port: u8) {
-        sys::print(b"usb-input: puerto ");
+        sys::print(b"usb-input: port ");
         num(port as u64);
         sys::print(match hid.protocol {
-            1 => b": teclado HID (protocolo de arranque, ",
-            2 => b": raton HID (protocolo de arranque, ",
-            _ => b": interfaz HID desconocida (",
+            1 => b": HID keyboard (boot protocol, ",
+            2 => b": HID mouse (boot protocol, ",
+            _ => b": unknown HID interface (",
         });
         num(hid.max_packet_size as u64);
-        sys::print(b" bytes por informe, endpoint ");
+        sys::print(b" bytes per report, endpoint ");
         num(hid.endpoint as u64);
         sys::print(b")\n");
     }
 
-    /// Un Transfer Event de un endpoint de interrupción: decodifica el informe
-    /// y vuelve a encolar el TRB.
+    /// A Transfer Event from an interrupt endpoint: decodes the report
+    /// and requeues the TRB.
     fn handle_transfer_event(&mut self, ev: Trb, pending: Option<&mut Pending>) {
         let now = self.clock.now();
         let mut out = [Event::default(); MAX_REPORT_EVENTS];
@@ -1080,15 +1080,15 @@ impl Controller {
                 let got = (ep.report_len as u32).saturating_sub(ev.residual()) as usize;
                 if !ep.seen {
                     ep.seen = true;
-                    sys::print(b"usb-input: primer informe del slot ");
+                    sys::print(b"usb-input: first report from slot ");
                     num(dev.slot as u64);
                     sys::print(b" (");
                     num(got as u64);
-                    sys::print(b" bytes, codigo ");
+                    sys::print(b" bytes, code ");
                     num(ev.completion_code() as u64);
                     sys::print(b")\n");
                 }
-                // SAFETY: buffer de informe del driver (64 bytes).
+                // SAFETY: the driver's report buffer (64 bytes).
                 let report = unsafe { core::slice::from_raw_parts(r.2 as *const u8, got.min(64)) };
                 let n = match decoder {
                     Decoder::Keyboard(k) => k.feed(report, &mut out),
@@ -1107,9 +1107,9 @@ impl Controller {
         }
     }
 
-    /// Recoge los eventos del anillo; los informes van a `pending`.
+    /// Collects the ring events; reports go to `pending`.
     fn poll(&mut self, pending: &mut Pending) {
-        // Reconocer la interrupción del interrupter 0.
+        // Acknowledge the interrupt of interrupter 0.
         let iman = self.runtime.r32(rt::IMAN);
         if iman & rt::IMAN_PENDING != 0 {
             self.runtime.w32(rt::IMAN, iman);
@@ -1134,17 +1134,17 @@ impl Controller {
     }
 }
 
-/// Cesión del controlador por el firmware (xHCI 4.22.1, capability USB
-/// Legacy Support): se pide la propiedad al sistema, se espera a que el
-/// firmware suelte la suya y se apagan sus SMI. Sin la capability (QEMU) no
-/// hay nada que hacer.
+/// Controller handoff from the firmware (xHCI 4.22.1, USB Legacy Support
+/// capability): the OS requests ownership, waits for the firmware to
+/// release its own and turns off its SMIs. Without the capability (QEMU)
+/// there is nothing to do.
 fn bios_handoff(base: &Mmio, clock: &Clock) {
     const LEGACY_SUPPORT: u32 = 1;
     const BIOS_OWNED: u32 = 1 << 16;
     const OS_OWNED: u32 = 1 << 24;
-    /// Bits reservados del control/estado heredado que se conservan.
+    /// Reserved bits of the legacy control/status register that are preserved.
     const KEEP: u32 = 0x7 << 1 | 0xFF << 5 | 0x7 << 17;
-    /// Bits de estado (escribir 1 los limpia).
+    /// Status bits (writing 1 clears them).
     const EVENTS: u32 = 0x7 << 29;
     let mut off = ((base.r32(cap::HCCPARAMS1) >> 16) & 0xFFFF) as u64 * 4;
     for _ in 0..32 {
@@ -1160,9 +1160,9 @@ fn bios_handoff(base: &Mmio, clock: &Clock) {
                     let _ = sys::irq_wait(IRQ, 5);
                 }
                 say(if base.r32(off) & BIOS_OWNED == 0 {
-                    b"el firmware cedio el xHCI"
+                    b"the firmware released the xHCI"
                 } else {
-                    b"el firmware no cede el xHCI; se continua"
+                    b"the firmware does not release the xHCI; continuing"
                 });
             }
             let ctl = base.r32(off + 4);
@@ -1177,10 +1177,10 @@ fn bios_handoff(base: &Mmio, clock: &Clock) {
     }
 }
 
-/// Intel 7 series (Panther Point) y posteriores: los puertos USB 2 y 3
-/// compartidos nacen en los EHCI y el xHCI solo los ve si el sistema los
-/// enruta (registros XUSB2PR y USB3_PSSEN del espacio de configuración,
-/// como `usb_enable_intel_xhci_ports` en Linux). Devuelve si cambió algo.
+/// Intel 7 series (Panther Point) and later: the shared USB 2 and 3
+/// ports start out on the EHCI controllers and the xHCI only sees them if
+/// the OS routes them (XUSB2PR and USB3_PSSEN registers in configuration
+/// space, like `usb_enable_intel_xhci_ports` in Linux). Returns whether anything changed.
 fn intel_route_ports(cfg: &Mmio) -> bool {
     const XUSB2PR: u64 = 0xD0;
     const USB2PRM: u64 = 0xD4;
@@ -1196,7 +1196,7 @@ fn intel_route_ports(cfg: &Mmio) -> bool {
     }
     cfg.w32(USB3_PSSEN, usb3);
     cfg.w32(XUSB2PR, usb2);
-    sys::print(b"usb-input: puertos Intel enrutados al xHCI (USB2 ");
+    sys::print(b"usb-input: Intel ports routed to the xHCI (USB2 ");
     num(usb2 as u64);
     sys::print(b", USB3 ");
     num(usb3 as u64);
@@ -1204,7 +1204,7 @@ fn intel_route_ports(cfg: &Mmio) -> bool {
     true
 }
 
-/// Una petición del protocolo de bloques sobre el almacenamiento USB.
+/// One block protocol request on the USB storage.
 fn serve_block(ctl: &mut Controller, buffers: &mut ClientBuffers, msg: &[u8], handles: &[Handle]) {
     let reply_to = handles[0];
     let capacity = ctl.storage.as_ref().map_or(0, |s| s.capacity);
@@ -1274,7 +1274,7 @@ fn serve_block(ctl: &mut Controller, buffers: &mut ClientBuffers, msg: &[u8], ha
     let _ = sys::handle_close(reply_to);
 }
 
-/// Espera acotada a que `reg & mask` valga `set`.
+/// Bounded wait for `reg & mask` to equal `set`.
 fn wait_bits(
     mmio: &Mmio,
     reg: u64,
@@ -1305,7 +1305,7 @@ fn device_name(ctl: &Controller) -> &'static str {
         (true, true) => "USB HID Keyboard+Mouse",
         (true, false) => "USB HID Keyboard",
         (false, true) => "USB HID Mouse",
-        (false, false) => "USB HID (sin dispositivos)",
+        (false, false) => "USB HID (no devices)",
     }
 }
 
@@ -1314,32 +1314,32 @@ fn main(mask: u64) -> u64 {
     let mut ctl = match Controller::open(mask, clock) {
         Ok(c) => c,
         Err(exit::NOT_XHCI) => {
-            say(b"el controlador no es xHCI; se omite");
+            say(b"the controller is not xHCI; skipping");
             return 0;
         }
         Err(step) => {
-            sys::print(b"usb-input: fallo en la inicializacion del xHCI: ");
+            sys::print(b"usb-input: xHCI initialization failed: ");
             sys::print(match step {
-                exit::MAP_BAR => b"capabilities o mapeo del BAR\n",
-                exit::DMA => b"memoria DMA (buffer insuficiente)\n",
-                exit::RESET_TIMEOUT => b"el controlador no completa el reset\n",
-                exit::START_TIMEOUT => b"el controlador no arranca\n",
-                _ => b"paso desconocido\n",
+                exit::MAP_BAR => b"capabilities or BAR mapping\n",
+                exit::DMA => b"DMA memory (buffer too small)\n",
+                exit::RESET_TIMEOUT => b"the controller does not complete the reset\n",
+                exit::START_TIMEOUT => b"the controller does not start\n",
+                _ => b"unknown step\n",
             });
             return step;
         }
     };
-    sys::print(b"usb-input: xHCI listo (");
+    sys::print(b"usb-input: xHCI ready (");
     num(ctl.params.max_ports as u64);
-    sys::print(b" puertos, ");
+    sys::print(b" ports, ");
     num(ctl.params.max_slots as u64);
-    sys::print(b" slots, contextos de ");
+    sys::print(b" slots, contexts of ");
     num(ctl.params.context_bytes() as u64);
     sys::print(b" bytes, ");
     num(ctl.params.scratchpad_buffers as u64);
     sys::print(b" scratchpads)\n");
-    // Dar tiempo a que los puertos vean el dispositivo tras el reset (más si
-    // acaban de cambiar de controlador).
+    // Give the ports time to see the device after the reset (more if
+    // they have just switched controllers).
     let settle = ctl.clock.now() + if ctl.ports_switched { 500 } else { 100 };
     while ctl.clock.now() < settle {
         let _ = sys::irq_wait(IRQ, 10);
@@ -1351,7 +1351,7 @@ fn main(mask: u64) -> u64 {
         match ctl.enumerate_port(port) {
             Ok(()) => {}
             Err(e) => {
-                sys::print(b"usb-input: puerto ");
+                sys::print(b"usb-input: port ");
                 num(port as u64);
                 sys::print(b": ");
                 sys::print(e.as_bytes());
@@ -1359,17 +1359,17 @@ fn main(mask: u64) -> u64 {
             }
         }
     }
-    sys::print(b"usb-input: dispositivo listo: ");
+    sys::print(b"usb-input: device ready: ");
     sys::print(device_name(&ctl).as_bytes());
     sys::print(b"\n");
     if ctl.storage.is_none() {
-        say(b"sin almacenamiento USB");
+        say(b"no USB storage");
     }
 
-    // Segundo extra (opcional; init lo pasa, el banco de pruebas del kernel
-    // no): endpoint del servicio de bloques (ADR 0023). Sin el, ese numero
-    // de handle puede ser uno creado por el propio driver (buffers DMA), asi
-    // que se comprueba el tipo del objeto.
+    // Second extra (optional; init passes it, the kernel test bench
+    // does not): block service endpoint (ADR 0023). Without it, that handle
+    // number may be one created by the driver itself (DMA buffers), so
+    // the object type is checked.
     let block_ep = extra_handle(mask, 1);
     let has_block = sys::object_kind(block_ep) == Ok(abi::kind::ENDPOINT);
     let endpoints: &[Handle] = if has_block {
@@ -1388,7 +1388,7 @@ fn main(mask: u64) -> u64 {
     let mut handles = [Handle(0); abi::IPC_MAX_HANDLES];
     let mut events = [WireEvent::default(); MAX_EVENTS];
     let mut times = [0u64; MAX_EVENTS];
-    say(b"sirviendo peticiones");
+    say(b"serving requests");
     loop {
         ctl.poll(&mut pending);
         let now = ctl.clock.now();

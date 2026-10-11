@@ -1,13 +1,13 @@
-# Aplicacion construida fuera del arbol de AriCodeOS: su propio workspace,
-# el SDK por ruta y la misma cadena de herramientas (rust-toolchain.toml y
-# .cargo/config.toml del repositorio se aplican al construir desde su raiz
-# con `cargo xtask app-pack examples/hello_ext`).
+# Application built outside the AriCodeOS tree: its own workspace, the SDK
+# by path and the same toolchain (the repository's rust-toolchain.toml and
+# .cargo/config.toml apply when building from its root with
+# `cargo xtask app-pack examples/hello_ext`).
 [package]
 name = "hello-ext"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Ejemplo de aplicacion externa de AriCodeOS instalada en AriFS"
+description = "Example external AriCodeOS application installed on AriFS"
 publish = false
 
 [[bin]]

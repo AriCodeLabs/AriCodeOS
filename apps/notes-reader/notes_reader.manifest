@@ -1,5 +1,5 @@
-# Aplicacion de ejemplo: un fichero concreto de AriFS en modo lectura, sin
-# directorio privado ni acceso al resto (ADR 0016).
+# Sample app: one specific AriFS file in read mode, with no private
+# directory and no access to anything else (ADR 0016).
 name = notes_reader
 caps = system
 read_files = hola.txt

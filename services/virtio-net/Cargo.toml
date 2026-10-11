@@ -3,7 +3,7 @@ name = "ari-virtio-net"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Driver virtio-net y servicio de red (ARP, IPv4, ICMP, UDP, DHCP, DNS) de AriCodeOS en espacio de usuario"
+description = "AriCodeOS user-space virtio-net driver and network service (ARP, IPv4, ICMP, UDP, DHCP, DNS)"
 publish = false
 
 [[bin]]

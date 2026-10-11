@@ -1,4 +1,4 @@
-//! Cliente del servicio de entrada (`aricode-proto::input`).
+//! Input service client (`aricode-proto::input`).
 
 use crate::{rpc, Error, Handle};
 pub use aricode_proto::input::Event;
@@ -19,8 +19,8 @@ impl InputClient {
         Ok(Self { service })
     }
 
-    /// Margen sobre el plazo pedido para que un servicio muerto no deje al
-    /// cliente esperando para siempre (auditoría 4836023, hallazgo 1).
+    /// Slack over the requested deadline so a dead service does not leave the
+    /// client waiting forever (audit 4836023, finding 1).
     const REPLY_GRACE_MS: u64 = 5000;
 
     fn call(&self, req: Request) -> Result<Reply, InputError> {
@@ -42,7 +42,7 @@ impl InputClient {
         }
     }
 
-    /// Nombre del dispositivo, copiado en `out`; devuelve su longitud.
+    /// Device name, copied into `out`; returns its length.
     pub fn name(&self, out: &mut [u8; 32]) -> Result<usize, InputError> {
         let r = self.call(Request {
             op: Op::Info,
@@ -53,8 +53,8 @@ impl InputClient {
         Ok(n)
     }
 
-    /// Espera eventos hasta `timeout_ms`; devuelve cuántos hay en `out`, con
-    /// el instante (ms de arranque) de cada uno en `times`.
+    /// Waits for events up to `timeout_ms`; returns how many are in `out`,
+    /// with the timestamp (ms since boot) of each one in `times`.
     pub fn read(
         &self,
         timeout_ms: u32,

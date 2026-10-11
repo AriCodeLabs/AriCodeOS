@@ -1,4 +1,4 @@
-//! Cabecera IPv4 (RFC 791) sin opciones ni fragmentación.
+//! IPv4 header (RFC 791) without options or fragmentation.
 
 use crate::{be16, checksum, Ipv4Addr};
 
@@ -15,7 +15,7 @@ pub struct Header {
     pub protocol: u8,
     pub ttl: u8,
     pub identification: u16,
-    /// Longitud de la carga útil (sin cabecera).
+    /// Payload length (without the header).
     pub payload_len: u16,
 }
 
@@ -37,8 +37,8 @@ impl Header {
         }
     }
 
-    /// Analiza y valida (versión, IHL, checksum, longitud); devuelve la carga
-    /// útil recortada a `total_length`. Rechaza fragmentos.
+    /// Parses and validates (version, IHL, checksum, length); returns the
+    /// payload trimmed to `total_length`. Rejects fragments.
     pub fn parse(b: &[u8]) -> Option<(Header, &[u8])> {
         if b.len() < HEADER_LEN || b[0] >> 4 != 4 {
             return None;
@@ -56,7 +56,7 @@ impl Header {
         }
         let flags_frag = be16(&b[6..8]);
         if flags_frag & 0x2000 != 0 || flags_frag & 0x1FFF != 0 {
-            return None; // fragmento
+            return None; // fragment
         }
         let mut src = [0u8; 4];
         let mut dst = [0u8; 4];
@@ -75,7 +75,7 @@ impl Header {
         ))
     }
 
-    /// Escribe la cabecera (20 bytes, DF, checksum calculado).
+    /// Writes the header (20 bytes, DF, computed checksum).
     pub fn write(&self, out: &mut [u8]) -> Option<usize> {
         if out.len() < HEADER_LEN {
             return None;
@@ -97,7 +97,7 @@ impl Header {
     }
 }
 
-/// Suma parcial de la pseudocabecera IPv4 para UDP/TCP.
+/// Partial sum of the IPv4 pseudo-header for UDP/TCP.
 pub fn pseudo_header_sum(src: Ipv4Addr, dst: Ipv4Addr, protocol: u8, len: u16) -> u32 {
     let mut sum = 0u32;
     for pair in src
@@ -131,21 +131,21 @@ mod tests {
         let (parsed, payload) = Header::parse(&buf).unwrap();
         assert_eq!(parsed, h);
         assert_eq!(payload, &[1, 2, 3, 4, 5, 6, 7, 8]);
-        // Checksum corrupto.
+        // Corrupt checksum.
         let mut bad = buf;
         bad[8] = 1;
         assert!(Header::parse(&bad).is_none());
-        // Longitud total mayor que el buffer.
+        // Total length larger than the buffer.
         let mut short = buf;
         short[3] = 0xFF;
         let sum = checksum(0, &short[..HEADER_LEN]);
-        // Recalcular para aislar la comprobacion de longitud.
+        // Recompute to isolate the length check.
         short[10..12].copy_from_slice(&[0, 0]);
         let sum2 = checksum(0, &short[..HEADER_LEN]);
         short[10..12].copy_from_slice(&sum2.to_be_bytes());
         let _ = sum;
         assert!(Header::parse(&short).is_none());
-        // Fragmento.
+        // Fragment.
         let mut frag = buf;
         frag[6..8].copy_from_slice(&0x2000u16.to_be_bytes());
         frag[10..12].copy_from_slice(&[0, 0]);

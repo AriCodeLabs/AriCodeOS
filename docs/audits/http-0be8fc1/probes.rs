@@ -30,8 +30,8 @@ pub mod net {
         }
     }
 }
-// `http.rs` del SDK: tras la corrección solo adapta `NetClient` al `Transport`
-// de `aricode-http`; la lógica HTTP vive en la crate y se prueba allí.
+// The SDK's `http.rs`: after the fix it only adapts `NetClient` to the
+// `Transport` of `aricode-http`; the HTTP logic lives in that crate and is tested there.
 #[path = "__ARICODEOS_ROOT__/sdk/rust/src/http.rs"]
 pub mod http;
 
@@ -78,15 +78,15 @@ mod tests {
     }
     #[test]
     fn dns_request_preserves_hostname() {
-        // Tras la correccion el nombre no viaja en el mensaje IPC (que lo
-        // recortaba a 40 bytes) sino en el buffer del cliente; la consulta DNS
-        // que construye netd lo conserva entero.
+        // After the fix the name no longer travels in the IPC message (which
+        // truncated it to 40 bytes) but in the client buffer; the DNS query
+        // that netd builds keeps it whole.
         let host = format!("{}.example.test", "a".repeat(30));
         let mut q = [0u8; 512];
         let n = aricode_net::dns::write_query(1, &host, &mut q).unwrap();
         let mut name = [0u8; aricode_net::dns::MAX_NAME];
         assert_eq!(aricode_net::dns::query_name(&q[..n], &mut name), Some(host.as_str()));
-        assert!(aricode_proto::net::Request::LEN == 64, "el mensaje ya no lleva campo de nombre");
+        assert!(aricode_proto::net::Request::LEN == 64, "the message no longer carries a name field");
     }
     #[test]
     fn chunk_size_arithmetic_does_not_panic() {

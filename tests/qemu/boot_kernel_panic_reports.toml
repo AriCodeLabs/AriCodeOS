@@ -1,12 +1,12 @@
-# Fault injection: panic provocado en el kernel. Debe imprimir el bloque de
-# panic (sección 53) y terminar QEMU con codigo de fallo.
+# Fault injection: deliberate kernel panic. It must print the panic block
+# (section 53) and terminate QEMU with a failure code.
 name = "boot.kernel_panic_reports"
-description = "test=panic -> bloque KERNEL PANIC legible y exit 35"
+description = "test=panic -> readable KERNEL PANIC block and exit 35"
 level = "full"
 areas = ["boot", "panic"]
 cmdline = "qemu_exit test=panic"
 
 [expect]
 exit = 35
-serial_contains = ["ARICODEOS KERNEL PANIC", "Reason: test=panic: fallo provocado", "Where: kernel/src/main.rs"]
+serial_contains = ["ARICODEOS KERNEL PANIC", "Reason: test=panic: deliberate failure", "Where: kernel/src/main.rs"]
 serial_absent = ["ARICODEOS_KERNEL_READY"]

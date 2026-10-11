@@ -3,7 +3,7 @@ name = "arikernel"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "AriKernel: núcleo de AriCodeOS"
+description = "AriKernel: the AriCodeOS kernel"
 
 [[bin]]
 name = "arikernel"

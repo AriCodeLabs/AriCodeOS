@@ -1,118 +1,118 @@
-//! Protocolo de arranque de AriCodeOS: ABI compartido entre AriBoot y AriKernel.
+//! AriCodeOS boot protocol: the ABI shared between AriBoot and AriKernel.
 //!
-//! Esta crate no depende de nada y no contiene lógica: solo el layout `repr(C)`
-//! de la información que el bootloader entrega al kernel y las constantes que
-//! ambos deben acordar. Cualquier cambio incompatible incrementa
+//! This crate has no dependencies and contains no logic: only the `repr(C)`
+//! layout of the information the bootloader hands to the kernel and the
+//! constants both must agree on. Any incompatible change bumps
 //! [`BOOT_PROTOCOL_VERSION`].
 
 #![no_std]
 
-/// "ARICODE1" en ASCII, little endian. Primer campo de [`BootInfo`].
+/// "ARICODE1" in ASCII, little endian. First field of [`BootInfo`].
 pub const BOOT_PROTOCOL_MAGIC: u64 = 0x3145_444F_4349_5241;
 
-/// Versión del protocolo. El kernel rechaza versiones que no entiende.
+/// Protocol version. The kernel rejects versions it does not understand.
 pub const BOOT_PROTOCOL_VERSION: u32 = 4;
 
-/// Dirección virtual base donde se enlaza y se mapea el kernel (mitad alta,
-/// últimos 2 GiB del espacio canónico: compatible con `code-model=kernel`).
+/// Virtual base address where the kernel is linked and mapped (higher half,
+/// last 2 GiB of the canonical space: compatible with `code-model=kernel`).
 pub const KERNEL_VIRT_BASE: u64 = 0xFFFF_FFFF_8000_0000;
 
-/// Base del mapa lineal de memoria física (entrada 256 del PML4). AriBoot
-/// mapea ahí toda la memoria física no reservada, RW y NX, de modo que el
-/// kernel accede a cualquier dirección física `p` en `PHYS_MAP_BASE + p`
-/// desde su primera instrucción y sin depender del mapa de identidad.
+/// Base of the linear physical memory map (PML4 entry 256). AriBoot maps all
+/// non-reserved physical memory there, RW and NX, so the kernel reaches any
+/// physical address `p` at `PHYS_MAP_BASE + p` from its first instruction,
+/// without depending on the identity map.
 pub const PHYS_MAP_BASE: u64 = 0xFFFF_8000_0000_0000;
 
-/// Ruta del kernel dentro de la partición EFI, tal y como la abre AriBoot.
+/// Path of the kernel inside the EFI partition, as AriBoot opens it.
 pub const KERNEL_PATH: &str = "\\aricodeos\\kernel.elf";
 
-/// Línea de comandos opcional del kernel (ver crate `aricode-cmdline`).
+/// Optional kernel command line (see the `aricode-cmdline` crate).
 pub const CMDLINE_PATH: &str = "\\aricodeos\\cmdline.txt";
 
-/// Firma de la función de entrada del kernel.
+/// Signature of the kernel entry function.
 ///
-/// AriBoot salta aquí con interrupciones deshabilitadas, paginación activa
-/// (identidad para toda la memoria física, mapa físico en `PHYS_MAP_BASE` y
-/// kernel en `KERNEL_VIRT_BASE`), `rsp` apuntando a la pila reservada a través
-/// del mapa físico y `rdi` = puntero a `BootInfo` a través del mapa físico.
+/// AriBoot jumps here with interrupts disabled, paging enabled (identity for
+/// all physical memory, physical map at `PHYS_MAP_BASE` and kernel at
+/// `KERNEL_VIRT_BASE`), `rsp` pointing to the reserved stack through the
+/// physical map and `rdi` = pointer to `BootInfo` through the physical map.
 ///
-/// Todas las direcciones contenidas en `BootInfo` son físicas; el kernel las
-/// convierte con `phys_map_offset`. La identidad es solo para el cargador y
-/// el kernel no debe contar con ella.
+/// All addresses contained in `BootInfo` are physical; the kernel converts
+/// them with `phys_map_offset`. The identity map is for the loader only and
+/// the kernel must not rely on it.
 pub type KernelEntry = unsafe extern "C" fn(boot_info: *const BootInfo) -> !;
 
-/// Información entregada por el bootloader. Vive en una página propia
-/// (`boot_info_address`) accesible por identidad.
+/// Information handed over by the bootloader. Lives in its own page
+/// (`boot_info_address`) reachable through the identity map.
 ///
-/// Toda la memoria que AriBoot reserva para el kernel es `LOADER_DATA`
-/// (ADR 0021): algunos firmwares se cuelgan en `GetMemoryMap` con tipos de
-/// memoria propios. En el mapa esas páginas son `Boot`; el kernel conserva
-/// las que describe [`BootInfo::kernel_ranges`] y recupera el resto.
+/// All memory AriBoot reserves for the kernel is `LOADER_DATA` (ADR 0021):
+/// some firmwares hang in `GetMemoryMap` with custom memory types. In the map
+/// those pages are `Boot`; the kernel keeps the ones described by
+/// [`BootInfo::kernel_ranges`] and reclaims the rest.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct BootInfo {
-    /// Debe ser [`BOOT_PROTOCOL_MAGIC`].
+    /// Must be [`BOOT_PROTOCOL_MAGIC`].
     pub magic: u64,
-    /// Debe ser [`BOOT_PROTOCOL_VERSION`].
+    /// Must be [`BOOT_PROTOCOL_VERSION`].
     pub version: u32,
-    /// `size_of::<BootInfo>()` según el bootloader. Permite extender la
-    /// estructura al final sin romper kernels antiguos.
+    /// `size_of::<BootInfo>()` according to the bootloader. Allows extending
+    /// the structure at the end without breaking older kernels.
     pub size: u32,
 
     pub memory_map: MemoryMap,
     pub framebuffer: FramebufferInfo,
 
-    /// Dirección física del RSDP de ACPI, o 0 si el firmware no lo expone.
+    /// Physical address of the ACPI RSDP, or 0 if the firmware does not expose it.
     pub rsdp_address: u64,
 
-    /// Dirección física donde se cargó la imagen del kernel.
+    /// Physical address where the kernel image was loaded.
     pub kernel_phys_base: u64,
-    /// Dirección virtual del primer byte del kernel (= `KERNEL_VIRT_BASE`).
+    /// Virtual address of the first kernel byte (= `KERNEL_VIRT_BASE`).
     pub kernel_virt_base: u64,
-    /// Tamaño en bytes ocupado por el kernel en memoria (redondeado a página).
+    /// Size in bytes taken by the kernel in memory (rounded up to a page).
     pub kernel_size: u64,
 
-    /// Dirección física de la pila inicial del kernel (base) y su tamaño.
+    /// Physical address of the initial kernel stack (base) and its size.
     pub kernel_stack_base: u64,
     pub kernel_stack_size: u64,
 
-    /// Dirección física del PML4 activo al entrar al kernel.
+    /// Physical address of the PML4 active on kernel entry.
     pub page_table_root: u64,
-    /// Páginas (base y tamaño) de las tablas que AriBoot construyó; el kernel
-    /// las recupera cuando activa las suyas.
+    /// Pages (base and size) of the tables AriBoot built; the kernel reclaims
+    /// them once it activates its own.
     pub page_tables_base: u64,
     pub page_tables_size: u64,
-    /// Dirección física de la página que contiene este `BootInfo`.
+    /// Physical address of the page containing this `BootInfo`.
     pub boot_info_address: u64,
 
-    /// initrd: reservado para fases posteriores. 0 si no hay.
+    /// initrd: reserved for later phases. 0 if there is none.
     pub initrd_address: u64,
     pub initrd_size: u64,
 
-    /// Línea de comandos (UTF-8, sin terminador) copiada por AriBoot a memoria
-    /// de tipo `MEMORY_TYPE_KERNEL`. `cmdline_size == 0` si no existe.
+    /// Command line (UTF-8, no terminator) copied by AriBoot into memory of
+    /// type `MEMORY_TYPE_KERNEL`. `cmdline_size == 0` if there is none.
     pub cmdline_address: u64,
     pub cmdline_size: u64,
 
-    /// Desplazamiento del mapa físico lineal (= `PHYS_MAP_BASE`): la dirección
-    /// física `p` es accesible en `p + phys_map_offset`.
+    /// Offset of the linear physical map (= `PHYS_MAP_BASE`): physical
+    /// address `p` is reachable at `p + phys_map_offset`.
     pub phys_map_offset: u64,
-    /// Fin (exclusivo) de la memoria física cubierta por el mapa lineal.
+    /// End (exclusive) of the physical memory covered by the linear map.
     pub phys_map_limit: u64,
 }
 
 impl BootInfo {
-    /// Dirección virtual, a través del mapa físico, de una dirección física.
+    /// Virtual address, through the physical map, of a physical address.
     pub const fn phys_to_virt(&self, phys: u64) -> u64 {
         phys + self.phys_map_offset
     }
 
-    /// Línea de comandos como `&str` (vacía si no hay o no es UTF-8).
+    /// Command line as `&str` (empty if missing or not UTF-8).
     ///
     /// # Safety
     ///
-    /// El mapa físico descrito por `phys_map_offset` debe estar activo y la
-    /// cmdline debe permanecer inmutable durante el lifetime devuelto.
+    /// The physical map described by `phys_map_offset` must be active and the
+    /// cmdline must stay immutable for the returned lifetime.
     pub unsafe fn cmdline(&self) -> &str {
         if self.cmdline_size == 0 {
             return "";
@@ -124,10 +124,10 @@ impl BootInfo {
         core::str::from_utf8(bytes).unwrap_or("")
     }
 
-    /// Rangos físicos `[inicio, fin)` que el kernel debe conservar aunque el
-    /// mapa UEFI los anuncie como memoria de arranque: imagen, pila inicial,
-    /// página del `BootInfo`, initrd y cmdline (vacíos si no existen). Las
-    /// tablas de AriBoot no están: se recuperan al activar las del kernel.
+    /// Physical ranges `[start, end)` the kernel must keep even though the
+    /// UEFI map advertises them as boot memory: image, initial stack,
+    /// `BootInfo` page, initrd and cmdline (empty if absent). AriBoot's
+    /// tables are not included: they are reclaimed once the kernel's are active.
     pub fn kernel_ranges(&self) -> [(u64, u64); 5] {
         let range = |base: u64, size: u64| (base, base.saturating_add(size));
         [
@@ -139,37 +139,37 @@ impl BootInfo {
         ]
     }
 
-    /// Iterador sobre el mapa de memoria a través del mapa físico.
+    /// Iterator over the memory map through the physical map.
     ///
     /// # Safety
     ///
-    /// El mapa físico debe estar activo y el buffer de descriptores intacto.
+    /// The physical map must be active and the descriptor buffer intact.
     pub unsafe fn memory_regions(&self) -> MemoryMapIter {
         self.memory_map.iter(self.phys_map_offset)
     }
 }
 
-/// Mapa de memoria UEFI tal y como lo devolvió `ExitBootServices`.
+/// UEFI memory map as returned by `ExitBootServices`.
 ///
-/// Los descriptores se recorren con paso `descriptor_size` (no
-/// `size_of::<MemoryDescriptor>()`), como exige la especificación UEFI.
+/// Descriptors are walked with stride `descriptor_size` (not
+/// `size_of::<MemoryDescriptor>()`), as the UEFI specification requires.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct MemoryMap {
-    /// Dirección física del primer descriptor.
+    /// Physical address of the first descriptor.
     pub descriptors: u64,
     pub descriptor_size: u32,
     pub descriptor_count: u32,
 }
 
 impl MemoryMap {
-    /// Itera los descriptores leyéndolos en `descriptors + virt_offset`.
+    /// Iterates the descriptors, reading them at `descriptors + virt_offset`.
     ///
     /// # Safety
     ///
-    /// El buffer de descriptores (`descriptors + virt_offset`,
-    /// `descriptor_size * descriptor_count` bytes) debe estar mapeado y sin
-    /// modificar mientras viva el iterador.
+    /// The descriptor buffer (`descriptors + virt_offset`,
+    /// `descriptor_size * descriptor_count` bytes) must be mapped and left
+    /// unmodified while the iterator lives.
     pub unsafe fn iter(&self, virt_offset: u64) -> MemoryMapIter {
         MemoryMapIter {
             map: *self,
@@ -196,13 +196,13 @@ impl Iterator for MemoryMapIter {
             + self.virt_offset
             + self.index as u64 * self.map.descriptor_size as u64;
         self.index += 1;
-        // SAFETY: el llamador de `MemoryMap::iter` garantizó que el buffer es
-        // accesible; `read_unaligned` tolera descriptores con padding extra.
+        // SAFETY: the caller of `MemoryMap::iter` guaranteed the buffer is
+        // accessible; `read_unaligned` tolerates descriptors with extra padding.
         Some(unsafe { core::ptr::read_unaligned(addr as *const MemoryDescriptor) })
     }
 }
 
-/// `EFI_MEMORY_DESCRIPTOR` (UEFI 2.x, §7.2). Layout fijo por especificación.
+/// `EFI_MEMORY_DESCRIPTOR` (UEFI 2.x, §7.2). Layout fixed by the specification.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MemoryDescriptor {
@@ -228,23 +228,23 @@ impl MemoryDescriptor {
     }
 }
 
-/// Clasificación propia de AriCodeOS sobre los tipos de memoria UEFI.
+/// AriCodeOS's own classification of the UEFI memory types.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryRegionKind {
-    /// Utilizable inmediatamente por el allocator físico.
+    /// Immediately usable by the physical allocator.
     Free = 0,
-    /// Datos del bootloader y de boot services, incluidas las páginas que
-    /// AriBoot reservó para el kernel. Reclamable salvo
+    /// Bootloader and boot services data, including the pages AriBoot
+    /// reserved for the kernel. Reclaimable except for
     /// [`BootInfo::kernel_ranges`].
     Boot = 1,
-    /// Código/datos de runtime services. Reservado mientras se usen.
+    /// Runtime services code/data. Reserved while they are in use.
     Firmware = 2,
-    /// Tablas ACPI (reclamable) y NVS (no).
+    /// ACPI tables (reclaimable) and NVS (not reclaimable).
     Acpi = 3,
-    /// Regiones MMIO / puertos.
+    /// MMIO regions / ports.
     Mmio = 4,
-    /// Reservado, inutilizable o desconocido.
+    /// Reserved, unusable or unknown.
     Reserved = 5,
 }
 
@@ -261,30 +261,30 @@ impl MemoryRegionKind {
     }
 }
 
-/// Formato de píxel del framebuffer GOP.
+/// Pixel format of the GOP framebuffer.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelFormat {
-    /// 32 bpp, byte 0 = R, 1 = G, 2 = B, 3 = reservado.
+    /// 32 bpp, byte 0 = R, 1 = G, 2 = B, 3 = reserved.
     Rgb = 0,
-    /// 32 bpp, byte 0 = B, 1 = G, 2 = R, 3 = reservado.
+    /// 32 bpp, byte 0 = B, 1 = G, 2 = R, 3 = reserved.
     Bgr = 1,
-    /// Máscaras explícitas en `FramebufferInfo::{red,green,blue}_mask`.
+    /// Explicit masks in `FramebufferInfo::{red,green,blue}_mask`.
     Bitmask = 2,
-    /// Sin framebuffer lineal accesible (o GOP ausente).
+    /// No accessible linear framebuffer (or GOP missing).
     None = 3,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FramebufferInfo {
-    /// Dirección física del framebuffer. 0 si no hay.
+    /// Physical address of the framebuffer. 0 if there is none.
     pub address: u64,
-    /// Tamaño en bytes.
+    /// Size in bytes.
     pub size: u64,
     pub width: u32,
     pub height: u32,
-    /// Píxeles por línea (puede ser mayor que `width`).
+    /// Pixels per line (may be larger than `width`).
     pub stride: u32,
     pub pixel_format: PixelFormat,
     pub red_mask: u32,
@@ -309,8 +309,8 @@ impl FramebufferInfo {
         }
     }
 
-    /// Codifica un color (8 bits por canal) como píxel de 32 bits según
-    /// `pixel_format`. Con `None` devuelve 0.
+    /// Encodes a color (8 bits per channel) as a 32-bit pixel according to
+    /// `pixel_format`. Returns 0 for `None`.
     pub fn encode(&self, r: u8, g: u8, b: u8) -> u32 {
         match self.pixel_format {
             PixelFormat::Rgb => (r as u32) | (g as u32) << 8 | (b as u32) << 16,
@@ -330,15 +330,15 @@ impl FramebufferInfo {
         }
     }
 
-    /// Pinta una baliza de arranque: un cuadrado de [`Beacon::SIZE`] píxeles en
-    /// la fila superior de la pantalla, en la posición `beacon.index`. Sin
-    /// puerto serie, las balizas dicen hasta dónde llegó el arranque antes de
-    /// que el kernel tenga consola (`docs/hardware.md`). Se recorta a la
-    /// pantalla y a `size`; sin framebuffer no hace nada.
+    /// Paints a boot beacon: a square of [`Beacon::SIZE`] pixels in the top
+    /// row of the screen, at position `beacon.index`. Without a serial port,
+    /// beacons tell how far the boot got before the kernel has a console
+    /// (`docs/hardware.md`). Clipped to the screen and to `size`; does
+    /// nothing without a framebuffer.
     ///
     /// # Safety
-    /// `base` debe apuntar a los `size` bytes del framebuffer, mapeados y
-    /// escribibles.
+    /// `base` must point to the `size` bytes of the framebuffer, mapped and
+    /// writable.
     pub unsafe fn beacon(&self, base: *mut u8, beacon: Beacon) {
         if self.address == 0 || self.pixel_format == PixelFormat::None {
             return;
@@ -355,15 +355,15 @@ impl FramebufferInfo {
                 if idx >= pixels {
                     return;
                 }
-                // SAFETY: `idx` está dentro de `size` y de la pantalla; el
-                // llamador garantiza que `base` es el framebuffer mapeado.
+                // SAFETY: `idx` is within `size` and the screen; the caller
+                // guarantees that `base` is the mapped framebuffer.
                 unsafe { base.cast::<u32>().add(idx).write_volatile(pixel) };
             }
         }
     }
 }
 
-/// Baliza de arranque: posición en la fila superior y color.
+/// Boot beacon: position in the top row and color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Beacon {
     pub index: u32,
@@ -371,32 +371,32 @@ pub struct Beacon {
 }
 
 impl Beacon {
-    /// Lado del cuadrado en píxeles.
+    /// Side of the square in pixels.
     pub const SIZE: u32 = 32;
-    /// Separación entre balizas y respecto al borde.
+    /// Spacing between beacons and from the edge.
     pub const GAP: u32 = 8;
-    /// AriBoot, justo antes de `ExitBootServices` (blanca).
+    /// AriBoot, right before `ExitBootServices` (white).
     pub const LOADER_BEFORE_EXIT: Beacon = Beacon {
         index: 0,
         rgb: [255, 255, 255],
     };
-    /// AriBoot, tras `ExitBootServices` y justo antes de saltar al kernel (verde).
+    /// AriBoot, after `ExitBootServices` and right before jumping to the kernel (green).
     pub const LOADER_JUMP: Beacon = Beacon {
         index: 1,
         rgb: [0, 200, 0],
     };
-    /// AriKernel, en la entrada, antes de la consola (naranja).
+    /// AriKernel, at entry, before the console (orange).
     pub const KERNEL_ENTRY: Beacon = Beacon {
         index: 2,
         rgb: [255, 160, 0],
     };
-    /// Primera posición de los pasos del cargador (cian).
+    /// First position of the loader steps (cyan).
     pub const FIRST_STEP: u32 = 3;
 
-    /// Paso `n` del cargador tras la cmdline (cian, a la derecha de las tres
-    /// anteriores): 0 mapa de memoria leído, 1 tablas reservadas, 2 mapa
-    /// físico construido, 3 kernel mapeado. Distingue un cuelgue del firmware
-    /// (consola o mapa de memoria) de uno del propio cargador.
+    /// Loader step `n` after the cmdline (cyan, to the right of the three
+    /// above): 0 memory map read, 1 tables reserved, 2 physical map built,
+    /// 3 kernel mapped. Tells a firmware hang (console or memory map) apart
+    /// from one in the loader itself.
     pub const fn step(n: u32) -> Beacon {
         Beacon {
             index: Self::FIRST_STEP + n,
@@ -405,7 +405,7 @@ impl Beacon {
     }
 }
 
-// Comprobaciones de layout en tiempo de compilación.
+// Compile-time layout checks.
 const _: () = assert!(core::mem::size_of::<MemoryDescriptor>() == 40);
 const _: () = assert!(core::mem::size_of::<FramebufferInfo>() == 48);
 const _: () = assert!(core::mem::size_of::<MemoryMap>() == 16);
@@ -442,7 +442,7 @@ mod tests {
             fb(1, 1, 1, PixelFormat::Bgr).encode(0x11, 0x22, 0x33),
             0x0011_2233
         );
-        // Máscaras 5-6-5: cada canal se recorta a sus bits.
+        // 5-6-5 masks: each channel is truncated to its bits.
         assert_eq!(
             fb(1, 1, 1, PixelFormat::Bitmask).encode(0xFF, 0x00, 0xFF),
             0xF81F
@@ -471,7 +471,7 @@ mod tests {
 
     #[test]
     fn beacon_clips_to_screen_and_size() {
-        // Pantalla de 20 px de ancho: la baliza 0 se recorta en x; la 1 cae fuera.
+        // 20 px wide screen: beacon 0 is clipped in x; beacon 1 falls outside.
         let mut info = fb(20, 30, 20, PixelFormat::Bgr);
         let mut buf = vec![0u32; 20 * 30];
         unsafe { info.beacon(buf.as_mut_ptr().cast(), Beacon::LOADER_BEFORE_EXIT) };
@@ -480,16 +480,16 @@ mod tests {
         buf.fill(0);
         unsafe { info.beacon(buf.as_mut_ptr().cast(), Beacon::LOADER_JUMP) };
         assert!(buf.iter().all(|&p| p == 0));
-        // `size` menor que la pantalla: no se escribe más allá.
+        // `size` smaller than the screen: nothing is written beyond it.
         info.size = 20 * 10 * 4;
         buf.fill(0);
         unsafe { info.beacon(buf.as_mut_ptr().cast(), Beacon::LOADER_BEFORE_EXIT) };
         assert!(buf[20 * 10..].iter().all(|&p| p == 0));
         assert!(buf[..20 * 10].iter().any(|&p| p != 0));
-        // Los pasos del cargador van a la derecha de las tres balizas fijas.
+        // Loader steps go to the right of the three fixed beacons.
         assert_eq!(Beacon::step(0).index, Beacon::KERNEL_ENTRY.index + 1);
         assert_eq!(Beacon::step(3).index, 6);
-        // Sin framebuffer no toca nada.
+        // Without a framebuffer nothing is touched.
         let none = FramebufferInfo::none();
         unsafe { none.beacon(core::ptr::null_mut(), Beacon::KERNEL_ENTRY) };
     }
@@ -506,7 +506,7 @@ mod tests {
         );
         assert_eq!(MemoryRegionKind::from_uefi_type(9), MemoryRegionKind::Acpi);
         assert_eq!(MemoryRegionKind::from_uefi_type(11), MemoryRegionKind::Mmio);
-        // Los tipos propios del rango OS loader ya no significan nada.
+        // Custom types from the OS loader range no longer mean anything.
         assert_eq!(
             MemoryRegionKind::from_uefi_type(0x8000_0000),
             MemoryRegionKind::Reserved
@@ -527,7 +527,7 @@ mod tests {
 
     #[test]
     fn iterates_descriptors_with_firmware_stride() {
-        // UEFI puede usar descriptores mas grandes que la estructura: stride 48.
+        // UEFI may use descriptors larger than the struct: stride 48.
         const STRIDE: usize = 48;
         let mut buf = [0u8; STRIDE * 2];
         for (i, (ty, start, pages)) in [(7u32, 0x1000u64, 4u64), (2, 0x9000, 1)].iter().enumerate()
@@ -572,9 +572,9 @@ mod tests {
         assert_eq!(r[0], (0x10_0000, 0x18_0000));
         assert_eq!(r[1], (0x20_0000, 0x21_0000));
         assert_eq!(r[2], (0x21_0000, 0x21_1000));
-        assert_eq!(r[3], (0, 0), "sin initrd: rango vacio");
+        assert_eq!(r[3], (0, 0), "no initrd: empty range");
         assert_eq!(r[4], (0x22_0000, 0x22_0011));
-        // Las tablas del cargador se recuperan: no estan entre lo conservado.
+        // The loader's tables are reclaimed: they are not among the kept ranges.
         assert!(r.iter().all(|&(s, _)| s != info.page_tables_base));
     }
 
@@ -583,7 +583,7 @@ mod tests {
         let text = b"qemu_exit test=panic";
         let mut info = unsafe { core::mem::zeroed::<BootInfo>() };
         assert_eq!(unsafe { info.cmdline() }, "");
-        // Direccion "fisica" desplazada: el offset del mapa la corrige.
+        // Shifted "physical" address: the map offset corrects it.
         info.phys_map_offset = 0x1000;
         info.cmdline_address = text.as_ptr() as u64 - 0x1000;
         info.cmdline_size = text.len() as u64;
@@ -591,7 +591,7 @@ mod tests {
         assert_eq!(info.phys_to_virt(0x10), 0x1010);
     }
 
-    /// Colector fijo sin `alloc` para tests `no_std`.
+    /// Fixed-size collector without `alloc` for `no_std` tests.
     mod alloc_free {
         pub struct Collect<T: Copy + Default, const N: usize> {
             pub items: [T; N],

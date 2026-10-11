@@ -1,10 +1,10 @@
 name = "user.privileged_killed"
-description = "hlt en ring 3 -> #GP, proceso terminado"
+description = "hlt in ring 3 -> #GP, process killed"
 level = "full"
 areas = ["user"]
 cmdline = "qemu_exit test=user_privileged"
 
 [expect]
 exit = 33
-serial_contains = ["USER FAULT #GP (13)", "terminado por fallo: #GP", "ARICODEOS_KERNEL_READY"]
-serial_absent = ["KERNEL PANIC", "salio con codigo"]
+serial_contains = ["USER FAULT #GP (13)", "killed: #GP", "ARICODEOS_KERNEL_READY"]
+serial_absent = ["KERNEL PANIC", "exited with code"]

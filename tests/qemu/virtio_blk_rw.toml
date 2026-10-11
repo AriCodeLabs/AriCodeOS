@@ -1,8 +1,8 @@
-# Fase 18: init reclama el virtio-blk por la raiz PCI (BARs sondeados, MSI-X
-# programada) y lanza el driver de usuario, que negocia por la interfaz
-# moderna, crea la cola en DMA y lee y escribe sectores del disco de pruebas.
+# Phase 18: init claims the virtio-blk through the PCI root (BARs probed, MSI-X
+# programmed) and launches the user-space driver, which negotiates over the modern
+# interface, creates the queue in DMA memory and reads and writes test disk sectors.
 name = "virtio.blk_rw"
-description = "driver virtio-blk en ring 3: negociacion, cola DMA, MSI-X, lectura y escritura"
+description = "virtio-blk driver in ring 3: negotiation, DMA queue, MSI-X, read and write"
 level = "full"
 areas = ["virtio", "drivers", "init"]
 cmdline = "qemu_exit"
@@ -10,14 +10,14 @@ cmdline = "qemu_exit"
 [expect]
 exit = 33
 serial_contains = [
-    "pci: 00:02.0 1af4:1042 clase 01.00 almacenamiento",
-    "reclamado (MSI-X entrada 0)",
-    "virtio-blk: dispositivo listo",
-    "virtio-blk: capacidad 98304 sectores",
-    "virtio-blk: GPT con 5 particion(es)",
-    "virtio-blk: sirviendo peticiones",
-    "AriInit: servicio de bloques ok",
+    "pci: 00:02.0 1af4:1042 class 01.00 storage",
+    "claimed (MSI-X entry 0)",
+    "virtio-blk: device ready",
+    "virtio-blk: capacity 98304 sectors",
+    "virtio-blk: GPT with 5 partition(s)",
+    "virtio-blk: serving requests",
+    "AriInit: block service ok",
     "ARICODEOS_KERNEL_READY",
 ]
-# USER FAULT aparece porque init mata a proposito a kernel_read y crashy_driver.
-serial_absent = ["KERNEL PANIC", "fallo en la"]
+# USER FAULT appears because init deliberately kills kernel_read and crashy_driver.
+serial_absent = ["KERNEL PANIC", "initialization failed"]

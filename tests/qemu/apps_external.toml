@@ -1,10 +1,10 @@
-# Etapa 4 (aplicaciones externas, ADR 0017): `examples/hello_ext` se construye
-# fuera del workspace con el SDK por ruta, se empaqueta y firma con la clave
-# de desarrollo (`cargo xtask app-pack`), xtask lo instala en AriFS como
-# `apps/hello_ext.aripkg` y el broker lo verifica y lanza desde ahi, con el
-# manifiesto del paquete, cuando no esta en el initrd.
+# Stage 4 (external applications, ADR 0017): `examples/hello_ext` is built
+# outside the workspace against the SDK by path, packaged and signed with the
+# development key (`cargo xtask app-pack`); xtask installs it in AriFS as
+# `apps/hello_ext.aripkg` and the broker verifies and launches it from there,
+# with the package manifest, when it is not in the initrd.
 name = "apps.external"
-description = "aplicacion construida fuera del arbol, empaquetada y firmada, instalada en AriFS y lanzada por el broker"
+description = "application built out of tree, packaged and signed, installed in AriFS and launched by the broker"
 level = "full"
 areas = ["apps", "sandbox", "shell", "init"]
 cmdline = "qemu_exit shell"
@@ -16,14 +16,14 @@ stdin = ["run hello_ext 5", "run hello_ext 6", "run no-instalada", "shutdown"]
 exit = 33
 serial_contains = [
     "fs_client: apps/hello_ext.aripkg (",
-    "AriInit: lanzar hello_ext desde AriFS (apps/hello_ext.aripkg version 1, ",
-    " con manifiesto [system fs] memoria 64 KiB",
-    "fsd: directorio privado 'hello_ext'",
-    "hello_ext v1: hola desde fuera del arbol (arg 5)",
-    "hello_ext: fichero privado 'estado' escrito y leido",
-    "run: hello_ext termino con 0",
-    "hello_ext v1: hola desde fuera del arbol (arg 6)",
-    "run: no-instalada: no existe en el initrd ni en AriFS",
+    "AriInit: launch hello_ext from AriFS (apps/hello_ext.aripkg version 1, ",
+    " with manifest [system fs] memory 64 KiB",
+    "fsd: private directory 'hello_ext'",
+    "hello_ext v1: hello from outside the tree (arg 5)",
+    "hello_ext: private file 'estado' written and read back",
+    "run: hello_ext exited with 0",
+    "hello_ext v1: hello from outside the tree (arg 6)",
+    "run: no-instalada: not found in the initrd or AriFS",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "USER FAULT #GP", "manifiesto invalido", "el broker no pudo lanzarlo", "no verifica"]
+serial_absent = ["KERNEL PANIC", "USER FAULT #GP", "manifiesto invalido", "the broker could not launch it", "no verifica"]

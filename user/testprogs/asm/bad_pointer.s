@@ -1,4 +1,4 @@
-// console_write con puntero de kernel: debe devolver -2 (Fault); sale con 9 si es asi, 10 si no.
+// console_write with a kernel pointer: must return -2 (Fault); exits with 9 if so, 10 otherwise.
 .section .text._start, "ax"
 .global _start
 _start:

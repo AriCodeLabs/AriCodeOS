@@ -1,14 +1,14 @@
-//! Intel VT-d (Fase 33): lo que el kernel necesita para aislar el DMA de
-//! cada driver en su dominio, sin tocar hardware: desplazamientos y bits de
-//! registro, decodificación de capacidades, entradas de la tabla raíz y de
-//! contexto, paginación de segundo nivel (3 o 4 niveles) y registros de
-//! fallo. Todo se prueba en host; el kernel solo lee y escribe MMIO.
+//! Intel VT-d (Phase 33): what the kernel needs to isolate each driver's DMA
+//! in its own domain, without touching hardware: register offsets and bits,
+//! capability decoding, root and context table entries, second-level paging
+//! (3 or 4 levels) and fault records. Everything is tested on the host; the
+//! kernel only reads and writes MMIO.
 
 #![no_std]
 
 use aricode_x86_paging::{FrameAlloc, PhysMap, PAGE_SIZE};
 
-/// Desplazamientos de los registros de una unidad de remapeo.
+/// Register offsets of a remapping unit.
 pub mod regs {
     pub const VERSION: u64 = 0x00;
     pub const CAPABILITY: u64 = 0x08;
@@ -22,7 +22,7 @@ pub mod regs {
     pub const FAULT_EVENT_DATA: u64 = 0x3C;
     pub const FAULT_EVENT_ADDRESS: u64 = 0x40;
     pub const FAULT_EVENT_UPPER_ADDRESS: u64 = 0x44;
-    /// El registro IOTLB está en `iro + 8`; IVA en `iro` (ver `ExtendedCapability::iotlb_offset`).
+    /// The IOTLB register is at `iro + 8`; IVA at `iro` (see `ExtendedCapability::iotlb_offset`).
     pub const IOTLB_FROM_IRO: u64 = 8;
 }
 
@@ -36,14 +36,14 @@ pub mod gcmd {
 /// Context Command (64 bits).
 pub mod ccmd {
     pub const INVALIDATE: u64 = 1 << 63;
-    /// Granularidad global (CIRG = 01).
+    /// Global granularity (CIRG = 01).
     pub const GLOBAL: u64 = 1 << 61;
 }
 
-/// Registro IOTLB (64 bits).
+/// IOTLB register (64 bits).
 pub mod iotlb {
     pub const INVALIDATE: u64 = 1 << 63;
-    /// Granularidad global (IIRG = 01).
+    /// Global granularity (IIRG = 01).
     pub const GLOBAL: u64 = 1 << 60;
     pub const DRAIN_READS: u64 = 1 << 49;
     pub const DRAIN_WRITES: u64 = 1 << 48;
@@ -53,7 +53,7 @@ pub mod iotlb {
 pub mod fsts {
     pub const PRIMARY_FAULT_OVERFLOW: u32 = 1 << 0;
     pub const PRIMARY_PENDING_FAULT: u32 = 1 << 1;
-    /// Bits que se limpian escribiendo 1 (todos menos PPF, que es de solo lectura).
+    /// Write-1-to-clear bits (all but PPF, which is read-only).
     pub const CLEAR_MASK: u32 = 0xFD;
 }
 
@@ -63,25 +63,25 @@ pub mod fectl {
     pub const INTERRUPT_PENDING: u32 = 1 << 30;
 }
 
-/// Registro de capacidades.
+/// Capability register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capability(pub u64);
 
 impl Capability {
-    /// Dominios que soporta la unidad: `2^(4 + 2·ND)`.
+    /// Domains supported by the unit: `2^(4 + 2*ND)`.
     pub fn domains(self) -> u32 {
         1 << (4 + 2 * (self.0 & 0b111) as u32)
     }
-    /// Bits de dirección de invitado soportados (MGAW + 1).
+    /// Supported guest address bits (MGAW + 1).
     pub fn guest_address_width(self) -> u8 {
         (((self.0 >> 16) & 0x3F) + 1) as u8
     }
-    /// Anchos de paginación de segundo nivel soportados (SAGAW): bit 1 =
-    /// 39 bits (3 niveles), bit 2 = 48 bits (4 niveles).
+    /// Supported second-level paging widths (SAGAW): bit 1 =
+    /// 39 bits (3 levels), bit 2 = 48 bits (4 levels).
     pub fn sagaw(self) -> u8 {
         ((self.0 >> 8) & 0x1F) as u8
     }
-    /// Niveles de paginación a usar: el mayor soportado hasta 4.
+    /// Paging levels to use: the largest supported up to 4.
     pub fn levels(self) -> Option<u8> {
         if self.sagaw() & (1 << 2) != 0 {
             Some(4)
@@ -91,20 +91,20 @@ impl Capability {
             None
         }
     }
-    /// Desplazamiento en bytes del primer registro de fallo.
+    /// Byte offset of the first fault record register.
     pub fn fault_record_offset(self) -> u64 {
         ((self.0 >> 24) & 0x3FF) * 16
     }
-    /// Número de registros de fallo.
+    /// Number of fault record registers.
     pub fn fault_records(self) -> u32 {
         (((self.0 >> 40) & 0xFF) + 1) as u32
     }
-    /// Hace falta vaciar el buffer de escritura tras modificar tablas.
+    /// The write buffer must be flushed after modifying tables.
     pub fn write_buffer_flush(self) -> bool {
         self.0 & (1 << 4) != 0
     }
-    /// Modo de caché: la unidad cachea también entradas no presentes y hay
-    /// que invalidar tras cada mapeo (emuladores).
+    /// Caching mode: the unit also caches non-present entries and every
+    /// mapping must be invalidated (emulators).
     pub fn caching_mode(self) -> bool {
         self.0 & (1 << 7) != 0
     }
@@ -116,17 +116,17 @@ impl Capability {
     }
 }
 
-/// Registro de capacidades extendidas.
+/// Extended capability register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExtendedCapability(pub u64);
 
 impl ExtendedCapability {
-    /// Los accesos de la unidad a las tablas son coherentes con la caché de
-    /// la CPU; si no, hay que `clflush` cada entrada escrita.
+    /// The unit's table accesses are coherent with the CPU cache; otherwise
+    /// every written entry must be `clflush`ed.
     pub fn coherent(self) -> bool {
         self.0 & 1 != 0
     }
-    /// Desplazamiento en bytes de los registros IVA/IOTLB.
+    /// Byte offset of the IVA/IOTLB registers.
     pub fn iotlb_offset(self) -> u64 {
         ((self.0 >> 8) & 0x3FF) * 16
     }
@@ -135,7 +135,7 @@ impl ExtendedCapability {
     }
 }
 
-/// Entrada de la tabla raíz (16 bytes, una por bus).
+/// Root table entry (16 bytes, one per bus).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct RootEntry {
@@ -161,8 +161,8 @@ impl RootEntry {
     }
 }
 
-/// Entrada de contexto (16 bytes, una por función de un bus): dominio y
-/// raíz de sus tablas de segundo nivel.
+/// Context entry (16 bytes, one per function of a bus): domain and root of
+/// its second-level tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct ContextEntry {
@@ -173,13 +173,13 @@ pub struct ContextEntry {
 impl ContextEntry {
     pub const NOT_PRESENT: ContextEntry = ContextEntry { low: 0, high: 0 };
 
-    /// Traducción de segundo nivel (TT = 00) con `levels` niveles (3 o 4).
+    /// Second-level translation (TT = 00) with `levels` levels (3 or 4).
     pub fn new(second_level_root: u64, domain: u16, levels: u8) -> Self {
         debug_assert!(second_level_root.is_multiple_of(PAGE_SIZE));
         let aw = match levels {
             3 => 0b001,
             4 => 0b010,
-            _ => panic!("niveles de paginacion no soportados"),
+            _ => panic!("unsupported paging levels"),
         };
         ContextEntry {
             low: second_level_root | 1,
@@ -197,10 +197,10 @@ impl ContextEntry {
     }
 }
 
-/// Un fallo de DMA registrado por la unidad.
+/// A DMA fault recorded by the unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FaultRecord {
-    /// Dirección de la petición (alineada a página).
+    /// Request address (page aligned).
     pub address: u64,
     /// `bus << 8 | dev << 3 | func`.
     pub source_id: u16,
@@ -209,7 +209,7 @@ pub struct FaultRecord {
 }
 
 impl FaultRecord {
-    /// Decodifica un registro de 128 bits; `None` si no hay fallo (F = 0).
+    /// Decodes a 128-bit record; `None` if there is no fault (F = 0).
     pub fn decode(low: u64, high: u64) -> Option<Self> {
         if high & (1 << 63) == 0 {
             return None;
@@ -233,28 +233,28 @@ impl FaultRecord {
     }
 }
 
-/// Identificador de origen PCI tal como lo usa la unidad.
+/// PCI source identifier as used by the unit.
 pub const fn source_id(bus: u8, device: u8, function: u8) -> u16 {
     (bus as u16) << 8 | (device as u16 & 0x1F) << 3 | (function as u16 & 0x7)
 }
 
-/// Nombre de un motivo de fallo de traducción (tabla de la especificación).
+/// Name of a translation fault reason (table from the specification).
 pub fn fault_reason_name(reason: u8) -> &'static str {
     match reason {
-        0x1 => "entrada raiz no presente",
-        0x2 => "entrada de contexto no presente",
-        0x3 => "entrada de contexto invalida",
-        0x4 => "direccion fuera del ancho soportado",
-        0x5 => "escritura en pagina sin permiso de escritura",
-        0x6 => "lectura de pagina sin permiso de lectura",
-        0x7 => "entrada de segundo nivel no presente",
-        0x8 => "error al leer la tabla raiz",
-        0x9 => "error al leer la tabla de contexto",
-        0xA => "campo reservado en la entrada raiz",
-        0xB => "campo reservado en la entrada de contexto",
-        0xC => "campo reservado en la paginacion de segundo nivel",
-        0xD => "error al leer la paginacion de segundo nivel",
-        _ => "motivo desconocido",
+        0x1 => "root entry not present",
+        0x2 => "context entry not present",
+        0x3 => "invalid context entry",
+        0x4 => "address beyond supported width",
+        0x5 => "write to page without write permission",
+        0x6 => "read from page without read permission",
+        0x7 => "second-level entry not present",
+        0x8 => "error reading root table",
+        0x9 => "error reading context table",
+        0xA => "reserved field in root entry",
+        0xB => "reserved field in context entry",
+        0xC => "reserved field in second-level paging",
+        0xD => "error reading second-level paging",
+        _ => "unknown reason",
     }
 }
 
@@ -262,7 +262,7 @@ pub fn fault_reason_name(reason: u8) -> &'static str {
 pub enum IommuError {
     OutOfFrames,
     Unaligned,
-    /// La dirección no cabe en los niveles configurados.
+    /// The address does not fit in the configured levels.
     OutOfRange,
     AlreadyMapped,
     NotMapped,
@@ -272,11 +272,11 @@ const SL_READ: u64 = 1 << 0;
 const SL_WRITE: u64 = 1 << 1;
 const SL_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
-/// Tablas de paginación de segundo nivel de un dominio: traducen la
-/// dirección que emite el dispositivo (IOVA) a física. Cada entrada lleva
-/// permisos R/W en vez de PRESENT; una entrada con ambos a cero no existe.
-/// `flush` se llama con la dirección virtual de cada entrada escrita (para
-/// `clflush` cuando la unidad no es coherente con la caché).
+/// Second-level paging tables of a domain: they translate the address the
+/// device emits (IOVA) to physical. Each entry carries R/W permissions
+/// instead of PRESENT; an entry with both cleared does not exist.
+/// `flush` is called with the virtual address of each written entry (for
+/// `clflush` when the unit is not cache coherent).
 pub struct SecondLevel<A: FrameAlloc, M: PhysMap> {
     root: u64,
     levels: u8,
@@ -287,7 +287,7 @@ pub struct SecondLevel<A: FrameAlloc, M: PhysMap> {
 
 impl<A: FrameAlloc, M: PhysMap> SecondLevel<A, M> {
     pub fn new(mut alloc: A, map: M, levels: u8, flush: Option<fn(u64)>) -> Option<Self> {
-        assert!(matches!(levels, 3 | 4), "niveles no soportados");
+        assert!(matches!(levels, 3 | 4), "unsupported levels");
         let root = alloc.alloc_frame()?;
         let mut sl = Self {
             root,
@@ -306,19 +306,19 @@ impl<A: FrameAlloc, M: PhysMap> SecondLevel<A, M> {
     pub fn levels(&self) -> u8 {
         self.levels
     }
-    /// Primera dirección que ya no se puede traducir.
+    /// First address that can no longer be translated.
     pub fn limit(&self) -> u64 {
         1 << (12 + 9 * self.levels as u64)
     }
 
     fn table(&self, phys: u64) -> &[u64; 512] {
-        // SAFETY: `phys` es una tabla creada por este mapper (o su raíz),
-        // accesible por `map` según el contrato de `PhysMap`.
+        // SAFETY: `phys` is a table created by this mapper (or its root),
+        // accessible through `map` per the `PhysMap` contract.
         unsafe { &*(self.map.phys_to_virt(phys) as *const [u64; 512]) }
     }
 
     fn table_mut(&mut self, phys: u64) -> &mut [u64; 512] {
-        // SAFETY: ídem `table`; el acceso exclusivo lo da `&mut self`.
+        // SAFETY: same as `table`; `&mut self` gives exclusive access.
         unsafe { &mut *(self.map.phys_to_virt(phys) as *mut [u64; 512]) }
     }
 
@@ -336,8 +336,8 @@ impl<A: FrameAlloc, M: PhysMap> SecondLevel<A, M> {
     fn write(&mut self, table: u64, index: usize, value: u64) {
         let flush = self.flush;
         let t = self.table_mut(table);
-        // SAFETY: entrada de una tabla propia; escritura volátil para que la
-        // unidad la vea en el orden programado.
+        // SAFETY: entry of one of our own tables; volatile write so the unit
+        // sees it in program order.
         unsafe { core::ptr::write_volatile(&mut t[index], value) };
         if let Some(f) = flush {
             f(&t[index] as *const u64 as u64);
@@ -348,7 +348,7 @@ impl<A: FrameAlloc, M: PhysMap> SecondLevel<A, M> {
         ((iova >> (12 + 9 * level as u64)) & 0x1FF) as usize
     }
 
-    /// Tabla hoja (nivel 1) para `iova`, creando intermedias si `create`.
+    /// Leaf table (level 1) for `iova`, creating intermediate ones if `create`.
     fn leaf_table(&mut self, iova: u64, create: bool) -> Result<Option<u64>, IommuError> {
         let mut table = self.root;
         for level in (1..self.levels).rev() {
@@ -379,8 +379,8 @@ impl<A: FrameAlloc, M: PhysMap> SecondLevel<A, M> {
         Ok(())
     }
 
-    /// Mapea una página de 4 KiB: `iova -> phys`, lectura siempre y escritura
-    /// si `write`.
+    /// Maps a 4 KiB page: `iova -> phys`, always readable and writable
+    /// if `write`.
     pub fn map_4k(&mut self, iova: u64, phys: u64, write: bool) -> Result<(), IommuError> {
         self.check(iova)?;
         if !phys.is_multiple_of(PAGE_SIZE) {
@@ -388,7 +388,7 @@ impl<A: FrameAlloc, M: PhysMap> SecondLevel<A, M> {
         }
         let leaf = self
             .leaf_table(iova, true)?
-            .expect("con create siempre hay hoja");
+            .expect("with create there is always a leaf");
         let idx = Self::index(iova, 0);
         if self.table(leaf)[idx] & (SL_READ | SL_WRITE) != 0 {
             return Err(IommuError::AlreadyMapped);
@@ -401,7 +401,7 @@ impl<A: FrameAlloc, M: PhysMap> SecondLevel<A, M> {
         Ok(())
     }
 
-    /// Retira la página `iova` y devuelve la física que tenía.
+    /// Removes page `iova` and returns the physical address it had.
     pub fn unmap_4k(&mut self, iova: u64) -> Result<u64, IommuError> {
         self.check(iova)?;
         let leaf = self.leaf_table(iova, false)?.ok_or(IommuError::NotMapped)?;
@@ -414,7 +414,7 @@ impl<A: FrameAlloc, M: PhysMap> SecondLevel<A, M> {
         Ok(e & SL_ADDR_MASK)
     }
 
-    /// Física y permiso de escritura de `iova`, si está mapeada.
+    /// Physical address and write permission of `iova`, if mapped.
     pub fn translate(&mut self, iova: u64) -> Option<(u64, bool)> {
         let page = iova & !(PAGE_SIZE - 1);
         self.check(page).ok()?;
@@ -426,8 +426,8 @@ impl<A: FrameAlloc, M: PhysMap> SecondLevel<A, M> {
         Some((e & SL_ADDR_MASK | (iova & 0xFFF), e & SL_WRITE != 0))
     }
 
-    /// Entrega a `free` todos los frames de tablas (intermedias y raíz) y
-    /// consume el mapper. Las páginas hoja no son suyas.
+    /// Hands every table frame (intermediate and root) to `free` and
+    /// consumes the mapper. Leaf pages are not its own.
     pub fn free_tables(self, mut free: impl FnMut(u64)) {
         fn walk<A: FrameAlloc, M: PhysMap>(
             sl: &SecondLevel<A, M>,
@@ -488,8 +488,8 @@ mod tests {
 
     #[test]
     fn capability_fields() {
-        // ND = 2 (256 dominios), SAGAW = 0b110 (39 y 48 bits), MGAW = 47
-        // (48 bits), FRO = 0x22 (0x220 bytes), NFR = 0 (1 registro), CM.
+        // ND = 2 (256 domains), SAGAW = 0b110 (39 and 48 bits), MGAW = 47
+        // (48 bits), FRO = 0x22 (0x220 bytes), NFR = 0 (1 record), CM.
         let cap = Capability(
             0b010
                 | (0b110 << 8)
@@ -528,8 +528,8 @@ mod tests {
         assert!(c.present());
         assert_eq!(c.domain(), 7);
         assert_eq!(c.second_level_root(), 0xABCD_E000);
-        assert_eq!(c.high & 0b111, 0b010, "AW de 48 bits");
-        assert_eq!(c.low & 0b1100, 0, "TT = segundo nivel");
+        assert_eq!(c.high & 0b111, 0b010, "48-bit AW");
+        assert_eq!(c.low & 0b1100, 0, "TT = second level");
         assert_eq!(ContextEntry::new(0x1000, 1, 3).high & 0b111, 0b001);
         assert!(!ContextEntry::NOT_PRESENT.present());
     }
@@ -543,8 +543,8 @@ mod tests {
         assert_eq!((f.bus(), f.device(), f.function()), (0, 2, 0));
         assert_eq!(f.reason, 7);
         assert!(f.is_read);
-        assert_eq!(fault_reason_name(7), "entrada de segundo nivel no presente");
-        assert_eq!(fault_reason_name(0x77), "motivo desconocido");
+        assert_eq!(fault_reason_name(7), "second-level entry not present");
+        assert_eq!(fault_reason_name(0x77), "unknown reason");
         assert_eq!(source_id(1, 31, 7), 0x01FF);
     }
 
@@ -570,7 +570,7 @@ mod tests {
             assert_eq!(sl.translate(0x2000), Some((0x6000, false)));
             assert_eq!(sl.translate(0x3000), None);
             assert_eq!(sl.translate(sl.limit() - PAGE_SIZE), None);
-            // La ultima pagina traducible tambien funciona.
+            // The last translatable page works too.
             let last = sl.limit() - PAGE_SIZE;
             assert_eq!(sl.map_4k(last, 0x9000, true), Ok(()));
             assert_eq!(sl.translate(last), Some((0x9000, true)));
@@ -578,8 +578,8 @@ mod tests {
             assert_eq!(sl.unmap_4k(0x1000), Err(IommuError::NotMapped));
             assert_eq!(sl.unmap_4k(0x8000), Err(IommuError::NotMapped));
             assert_eq!(sl.translate(0x1000), None);
-            // Tablas: raiz + (levels-1) intermedias para 0x1000 y otras
-            // (levels-1) para la ultima pagina.
+            // Tables: root + (levels-1) intermediate for 0x1000 and another
+            // (levels-1) for the last page.
             let mut freed = 0;
             sl.free_tables(|_| freed += 1);
             assert_eq!(freed, 1 + 2 * (levels as usize - 1));
@@ -597,12 +597,9 @@ mod tests {
         )
         .unwrap();
         let after_root = FLUSHED.load(Ordering::Relaxed);
-        assert_eq!(
-            after_root, 64,
-            "la raiz se pone a cero por lineas de 64 bytes"
-        );
+        assert_eq!(after_root, 64, "the root is zeroed in 64-byte lines");
         sl.map_4k(0x1000, 0x2000, true).unwrap();
-        // Dos tablas nuevas (2 x 64 lineas) + 2 entradas intermedias + 1 hoja.
+        // Two new tables (2 x 64 lines) + 2 intermediate entries + 1 leaf.
         assert_eq!(FLUSHED.load(Ordering::Relaxed) - after_root, 2 * 64 + 3);
     }
 }

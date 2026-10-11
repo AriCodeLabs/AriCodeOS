@@ -1,4 +1,4 @@
-//! Lanzamiento de QEMU + OVMF, interactivo o con captura de serie.
+//! Launches QEMU + OVMF, interactively or capturing the serial output.
 
 use crate::image::{self, OVMF_CODE};
 use crate::{build_dir, root, Result};
@@ -7,19 +7,19 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// `esp`: directorio que QEMU expone como disco FAT; `None` cuando la ESP va
-/// dentro de la imagen de disco (imagen USB).
-/// Controladores USB de la máquina virtual.
+/// `esp`: directory QEMU exposes as a FAT disk; `None` when the ESP lives
+/// inside the disk image (USB image).
+/// USB controllers of the virtual machine.
 #[derive(Clone, Copy, Default)]
 pub struct UsbOptions {
-    /// xHCI con un teclado y un ratón USB HID.
+    /// xHCI with a USB HID keyboard and mouse.
     pub hid: bool,
-    /// Ese xHCI solo ofrece MSI (sin MSI-X).
+    /// That xHCI offers MSI only (no MSI-X).
     pub hid_msi: bool,
-    /// Además un EHCI (clase 0c.03, interfaz 0x20): no es xHCI.
+    /// An extra EHCI (class 0c.03, interface 0x20): not xHCI.
     pub legacy_controller: bool,
-    /// El disco de pruebas cuelga del xHCI como almacenamiento USB
-    /// (`usb-storage`) en vez de virtio-blk (ADR 0023).
+    /// The test disk hangs off the xHCI as USB storage (`usb-storage`)
+    /// instead of virtio-blk (ADR 0023).
     pub storage: bool,
 }
 
@@ -44,11 +44,11 @@ fn base_command(
         "512M",
         "-no-reboot",
     ]);
-    // IOMMU VT-d (Fase 33) antes que cualquier dispositivo PCI; los virtio
-    // llevan `iommu_platform=on` para que su DMA pase por la traduccion.
+    // VT-d IOMMU (Phase 33) before any PCI device; the virtio devices carry
+    // `iommu_platform=on` so their DMA goes through translation.
     q.args(["-device", "intel-iommu,aw-bits=48"]);
-    // Disco de pruebas: virtio-blk moderno (sin interfaz legacy) para el
-    // driver de usuario o, con `usb.storage`, un pendrive en el xHCI.
+    // Test disk: modern virtio-blk (no legacy interface) for the user-space
+    // driver or, with `usb.storage`, a USB stick on the xHCI.
     q.args([
         "-drive",
         &format!(
@@ -77,9 +77,9 @@ fn base_command(
             &format!("format=raw,file=fat:rw:{}", esp.display()),
         ]);
     }
-    // Red de usuario (slirp): DHCP en 10.0.2.2, DNS en 10.0.2.3; el anfitrión
-    // virtual 10.0.2.2 redirige UDP/TCP al loopback del host, donde escucha
-    // el respondedor de pruebas.
+    // User networking (slirp): DHCP at 10.0.2.2, DNS at 10.0.2.3; the virtual
+    // host 10.0.2.2 forwards UDP/TCP to the host loopback, where the test
+    // responder listens.
     q.args([
         "-netdev",
         &format!(
@@ -92,7 +92,7 @@ fn base_command(
         "-device",
         "virtio-net-pci,netdev=net0,disable-legacy=on,disable-modern=off,iommu_platform=on",
     ]);
-    // Teclado y ratón virtio con id fijo: QMP inyecta eventos por dispositivo.
+    // virtio keyboard and mouse with fixed ids: QMP injects events per device.
     q.args([
         "-device",
         "virtio-keyboard-pci,id=kbd0,disable-legacy=on,disable-modern=off,iommu_platform=on",
@@ -102,8 +102,8 @@ fn base_command(
         "virtio-mouse-pci,id=mouse0,disable-legacy=on,disable-modern=off,iommu_platform=on",
     ]);
     if usb.hid || usb.storage {
-        // xHCI (Fase 25, segunda parte) con teclado y raton USB HID y/o el
-        // disco de pruebas como almacenamiento USB.
+        // xHCI (Phase 25, part two) with a USB HID keyboard and mouse and/or
+        // the test disk as USB storage.
         let xhci = if usb.hid_msi {
             "qemu-xhci,id=xhci,msi=on,msix=off"
         } else {
@@ -119,15 +119,15 @@ fn base_command(
         }
     }
     if usb.legacy_controller {
-        // EHCI (clase 0c.03, interfaz 0x20): no es xHCI.
+        // EHCI (class 0c.03, interface 0x20): not xHCI.
         q.args(["-device", "usb-ehci,id=ehci"]);
     }
     q.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     q
 }
 
-/// Inyección de entrada por QMP: al ver `marker` en la serie se teclean
-/// `keys` (nombres qcode de QEMU) y se mueve y pulsa el ratón.
+/// QMP input injection: on seeing `marker` in the serial output, `keys` (QEMU
+/// qcode names) are typed and the mouse is moved and clicked.
 pub struct InputProbe<'a> {
     pub marker: &'a str,
     pub keys: &'a [String],
@@ -135,8 +135,8 @@ pub struct InputProbe<'a> {
     pub click: Option<&'a str>,
 }
 
-/// Cliente QMP mínimo sobre un socket Unix: negociación y comandos JSON
-/// escritos a mano (solo cadenas y números); espera `return` o `error`.
+/// Minimal QMP client over a Unix socket: handshake and hand-written JSON
+/// commands (strings and numbers only); waits for `return` or `error`.
 struct Qmp {
     stream: std::os::unix::net::UnixStream,
     reader: std::io::BufReader<std::os::unix::net::UnixStream>,
@@ -162,7 +162,7 @@ impl Qmp {
         loop {
             let mut line = String::new();
             if self.reader.read_line(&mut line)? == 0 {
-                return Err(std::io::Error::other("QMP cerrado"));
+                return Err(std::io::Error::other("QMP closed"));
             }
             if line.contains(r#""return""#) {
                 return Ok(());
@@ -173,9 +173,9 @@ impl Qmp {
         }
     }
 
-    /// Sin `device`: QMP solo admite ahí una pantalla, no un dispositivo de
-    /// entrada; el evento va al manejador activo de su tipo (los virtio se
-    /// registran después que el i8042 y tienen prioridad).
+    /// No `device`: QMP only accepts a display there, not an input device;
+    /// the event goes to the active handler of its type (the virtio devices
+    /// register after the i8042 and take priority).
     fn send_event(&mut self, event: &str) -> std::io::Result<()> {
         self.execute(&format!(
             r#"{{"execute":"input-send-event","arguments":{{"events":[{event}]}}}}"#
@@ -191,7 +191,7 @@ fn run_input_probe(
 ) -> String {
     let mut qmp = match Qmp::connect(path) {
         Ok(q) => q,
-        Err(e) => return format!("[host] QMP: sin conexion ({e})"),
+        Err(e) => return format!("[host] QMP: no connection ({e})"),
     };
     let mut sent = 0;
     let mut step = |qmp: &mut Qmp, event: String| -> Result {
@@ -200,7 +200,7 @@ fn run_input_probe(
         Ok(())
     };
     let result: Result = (|| {
-        // Orden natural: apuntar, pulsar y despues teclear.
+        // Natural order: point, click, then type.
         if let Some((dx, dy)) = mouse_rel {
             step(
                 &mut qmp,
@@ -211,8 +211,8 @@ fn run_input_probe(
                 format!(r#"{{"type":"rel","data":{{"axis":"y","value":{dy}}}}}"#),
             )?;
         }
-        // Una pausa breve entre fases: el compositor ordena por instante de
-        // llegada y un usuario real no pulsa y teclea en el mismo milisegundo.
+        // A short pause between phases: the compositor orders by arrival time
+        // and a real user does not click and type in the same millisecond.
         std::thread::sleep(Duration::from_millis(100));
         if let Some(button) = click {
             for down in [true, false] {
@@ -223,8 +223,8 @@ fn run_input_probe(
             }
         }
         std::thread::sleep(Duration::from_millis(100));
-        // "a" pulsa y suelta; "shift+dot" pulsa los modificadores, la tecla,
-        // y los suelta en orden inverso.
+        // "a" presses and releases; "shift+dot" presses the modifiers, then the
+        // key, and releases them in reverse order.
         for key in keys {
             let parts: Vec<&str> = key.split('+').collect();
             for part in &parts {
@@ -247,21 +247,21 @@ fn run_input_probe(
         Ok(())
     })();
     match result {
-        Ok(()) => format!("[host] QMP: {sent} eventos de entrada enviados"),
-        Err(e) => format!("[host] QMP: fallo tras {sent} eventos ({e})"),
+        Ok(()) => format!("[host] QMP: {sent} input events sent"),
+        Err(e) => format!("[host] QMP: failed after {sent} events ({e})"),
     }
 }
 
-/// Respondedor de pruebas en el loopback del host: por UDP devuelve un
-/// registro A fijo a las consultas DNS y hace eco de lo demás; por TCP hace
-/// eco de cada conexión. Vive mientras exista el valor devuelto.
+/// Test responder on the host loopback: over UDP it returns a fixed A record
+/// for DNS queries and echoes everything else; over TCP it echoes every
+/// connection. It lives as long as the returned value exists.
 pub struct Responder {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
-/// Servidor HTTP de pruebas: `/hola` (Content-Length), `/chunked`
-/// (Transfer-Encoding: chunked) y 404 para el resto.
+/// Test HTTP server: `/hola` (Content-Length), `/chunked`
+/// (Transfer-Encoding: chunked) and 404 for everything else.
 fn http_serve(mut stream: std::net::TcpStream) {
     use std::io::Write;
     let mut buf = [0u8; 2048];
@@ -286,7 +286,7 @@ fn http_serve(mut stream: std::net::TcpStream) {
     let _ = stream.flush();
 }
 
-/// Eco de una conexión TCP hasta que el otro extremo cierra.
+/// Echoes a TCP connection until the peer closes it.
 fn tcp_echo(mut stream: std::net::TcpStream) {
     use std::io::Write;
     let mut buf = [0u8; 4096];
@@ -297,10 +297,10 @@ fn tcp_echo(mut stream: std::net::TcpStream) {
     }
 }
 
-/// Dirección que el respondedor devuelve a toda consulta DNS.
+/// Address the responder returns for every DNS query.
 pub const RESPONDER_DNS_ANSWER: aricode_net::Ipv4Addr = aricode_net::Ipv4Addr::new(10, 1, 2, 3);
 
-/// Respuesta a un datagrama recibido por el respondedor.
+/// Reply to a datagram received by the responder.
 pub fn responder_reply(datagram: &[u8], out: &mut [u8]) -> usize {
     if let Some(n) = aricode_net::dns::write_answer(datagram, RESPONDER_DNS_ANSWER, 60, out) {
         let mut name = [0u8; aricode_net::dns::MAX_NAME];
@@ -319,13 +319,13 @@ impl Responder {
         use std::sync::Arc;
         let port = aricode_proto::net::TEST_RESPONDER_PORT;
         let socket = std::net::UdpSocket::bind(("127.0.0.1", port))
-            .map_err(|e| format!("respondedor UDP en 127.0.0.1:{port}: {e}"))?;
+            .map_err(|e| format!("UDP responder on 127.0.0.1:{port}: {e}"))?;
         socket
             .set_read_timeout(Some(Duration::from_millis(100)))
             .map_err(|e| e.to_string())?;
         let tcp_port = aricode_proto::net::TEST_TCP_ECHO_PORT;
         let listener = std::net::TcpListener::bind(("127.0.0.1", tcp_port))
-            .map_err(|e| format!("servidor de eco TCP en 127.0.0.1:{tcp_port}: {e}"))?;
+            .map_err(|e| format!("TCP echo server on 127.0.0.1:{tcp_port}: {e}"))?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
@@ -341,7 +341,7 @@ impl Responder {
         });
         let http_port = aricode_proto::net::TEST_HTTP_PORT;
         let http_listener = std::net::TcpListener::bind(("127.0.0.1", http_port))
-            .map_err(|e| format!("servidor HTTP de pruebas en 127.0.0.1:{http_port}: {e}"))?;
+            .map_err(|e| format!("test HTTP server on 127.0.0.1:{http_port}: {e}"))?;
         http_listener
             .set_nonblocking(true)
             .map_err(|e| e.to_string())?;
@@ -353,7 +353,7 @@ impl Responder {
         })
     }
 
-    /// Acepta conexiones hasta `stop` y atiende cada una en su hilo.
+    /// Accepts connections until `stop` and serves each one on its own thread.
     fn accept_loop(
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
         listener: std::net::TcpListener,
@@ -383,9 +383,9 @@ impl Drop for Responder {
     }
 }
 
-/// Sonda TCP del host: al ver `marker` en la serie se conecta al puerto
-/// redirigido, envía `payload` y comprueba el eco. El resultado se añade a la
-/// captura como una línea `[host] ...` para que el escenario lo exija.
+/// Host TCP probe: on seeing `marker` in the serial output it connects to the
+/// forwarded port, sends `payload` and checks the echo. The result is appended
+/// to the capture as a `[host] ...` line so the scenario can require it.
 pub struct TcpProbe<'a> {
     pub marker: &'a str,
     pub payload: &'a str,
@@ -397,11 +397,11 @@ fn run_tcp_probe(payload: &str) -> String {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = match std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
         Ok(s) => s,
-        Err(e) => return format!("[host] sonda TCP: sin conexion ({e})"),
+        Err(e) => return format!("[host] TCP probe: no connection ({e})"),
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     if stream.write_all(payload.as_bytes()).is_err() {
-        return String::from("[host] sonda TCP: fallo al enviar");
+        return String::from("[host] TCP probe: send failed");
     }
     let mut got = Vec::new();
     let mut buf = [0u8; 512];
@@ -412,9 +412,9 @@ fn run_tcp_probe(payload: &str) -> String {
         }
     }
     if got == payload.as_bytes() {
-        format!("[host] sonda TCP: eco de {} bytes recibido", got.len())
+        format!("[host] TCP probe: echo of {} bytes received", got.len())
     } else {
-        format!("[host] sonda TCP: eco incorrecto ({} bytes)", got.len())
+        format!("[host] TCP probe: wrong echo ({} bytes)", got.len())
     }
 }
 
@@ -440,7 +440,7 @@ pub fn run_interactive(
     let vars = image::ovmf_vars_for(&build_dir())?;
     let disk = build_dir().join("disk.img");
     let esp_drive = if usb_image {
-        // Como en un pendrive: la ESP dentro del disco GPT, sin `fat:`.
+        // As on a USB stick: the ESP inside the GPT disk, no `fat:`.
         image::write_usb_image(&disk, &esp)?;
         None
     } else {
@@ -454,11 +454,11 @@ pub fn run_interactive(
     };
     let mut q = base_command(esp_drive, &vars, &disk, false, cpus, usb);
     if cmdline.split_whitespace().any(|w| w == "gui") {
-        // Con `gui` hace falta ver la pantalla: ventana de QEMU y serie en la terminal.
-        println!("[xtask] QEMU con pantalla (serie en la terminal; salir: cerrar la ventana)");
+        // With `gui` the screen must be visible: QEMU window and serial in the terminal.
+        println!("[xtask] QEMU with display (serial in the terminal; quit: close the window)");
         q.args(["-serial", "stdio"]);
     } else {
-        println!("[xtask] QEMU (salir: Ctrl-A X)");
+        println!("[xtask] QEMU (quit: Ctrl-A X)");
         q.arg("-nographic");
     }
     let st = q.status().map_err(|e| format!("qemu: {e}"))?;
@@ -469,14 +469,14 @@ pub fn run_interactive(
 pub struct Capture {
     pub serial: String,
     pub exit_code: Option<i32>,
-    /// El runner mató QEMU al ver `kill_on`.
+    /// The runner killed QEMU on seeing `kill_on`.
     pub killed: bool,
     pub timed_out: bool,
     pub elapsed: Duration,
 }
 
-/// Entrada guiada por la salida: cada línea se envía cuando la serie ha
-/// mostrado `prompt` tantas veces como líneas ya enviadas más una.
+/// Output-driven input: each line is sent once the serial output has shown
+/// `prompt` as many times as the lines already sent plus one.
 pub struct Input<'a> {
     pub prompt: &'a str,
     pub lines: &'a [String],
@@ -492,21 +492,21 @@ fn count_occurrences(haystack: &[u8], needle: &[u8]) -> usize {
         .count()
 }
 
-/// Arranca sin pantalla, captura la serie, alimenta `input` y espera hasta
+/// Boots headless, captures the serial output, feeds `input` and waits up to
 /// `timeout`.
-/// Todo lo que un escenario pide al runner además de la ESP y el plazo.
+/// Everything a scenario asks of the runner besides the ESP and the timeout.
 pub struct Headless<'a> {
     pub input: Input<'a>,
     pub probe: Option<TcpProbe<'a>>,
     pub input_probe: Option<InputProbe<'a>>,
     pub disk_variant: image::DiskVariant,
     pub disk_readonly: bool,
-    /// Reutiliza el disco de pruebas del arranque anterior en vez de
-    /// fabricarlo de nuevo (escenarios con varios arranques).
+    /// Reuses the previous boot's test disk instead of building it again
+    /// (multi-boot scenarios).
     pub keep_disk: bool,
-    /// Mata QEMU (corte de energía) al ver este texto en la serie.
+    /// Kills QEMU (power cut) on seeing this text in the serial output.
     pub kill_on: Option<&'a str>,
-    /// Ficheros que van a AriFS del disco de pruebas (paquetes instalados).
+    /// Files that go into the test disk's AriFS (installed packages).
     pub installed: &'a [(String, Vec<u8>)],
     pub cpus: u32,
     pub usb: UsbOptions,
@@ -573,7 +573,7 @@ pub fn run_headless(
         loop {
             match stdout.read(&mut chunk) {
                 Ok(0) | Err(_) => break,
-                Ok(n) => sink.lock().expect("captura").extend_from_slice(&chunk[..n]),
+                Ok(n) => sink.lock().expect("capture").extend_from_slice(&chunk[..n]),
             }
         }
     });
@@ -595,7 +595,7 @@ pub fn run_headless(
             break None;
         }
         if let Some(marker) = options.kill_on {
-            if count_occurrences(&captured.lock().expect("captura"), marker.as_bytes()) > 0 {
+            if count_occurrences(&captured.lock().expect("capture"), marker.as_bytes()) > 0 {
                 killed = true;
                 let _ = child.kill();
                 let _ = child.wait();
@@ -604,7 +604,7 @@ pub fn run_headless(
         }
         if sent < input.lines.len() {
             let prompts =
-                count_occurrences(&captured.lock().expect("captura"), input.prompt.as_bytes());
+                count_occurrences(&captured.lock().expect("capture"), input.prompt.as_bytes());
             if prompts > sent {
                 if let Some(w) = stdin.as_mut() {
                     let _ = w.write_all(format!("{}\n", input.lines[sent]).as_bytes());
@@ -616,7 +616,7 @@ pub fn run_headless(
         if let Some(p) = probe {
             if probe_thread.is_none()
                 && probe_result.is_none()
-                && count_occurrences(&captured.lock().expect("captura"), p.marker.as_bytes()) > 0
+                && count_occurrences(&captured.lock().expect("capture"), p.marker.as_bytes()) > 0
             {
                 let payload = p.payload.to_string();
                 probe_thread = Some(std::thread::spawn(move || run_tcp_probe(&payload)));
@@ -628,7 +628,7 @@ pub fn run_headless(
         if let Some(p) = input_probe {
             if input_thread.is_none()
                 && input_result.is_none()
-                && count_occurrences(&captured.lock().expect("captura"), p.marker.as_bytes()) > 0
+                && count_occurrences(&captured.lock().expect("capture"), p.marker.as_bytes()) > 0
             {
                 let path = qmp_path.clone();
                 let keys = p.keys.to_vec();
@@ -652,8 +652,8 @@ pub fn run_headless(
         input_result = t.join().ok();
     }
     let _ = std::fs::remove_file(&qmp_path);
-    reader.join().map_err(|_| "lector de serie")?;
-    let mut bytes = captured.lock().expect("captura").clone();
+    reader.join().map_err(|_| "serial reader")?;
+    let mut bytes = captured.lock().expect("capture").clone();
     for line in [probe_result, input_result].into_iter().flatten() {
         bytes.extend_from_slice(format!("\n{line}\n").as_bytes());
     }
@@ -666,7 +666,7 @@ pub fn run_headless(
     })
 }
 
-/// Elimina las secuencias de escape que OVMF emite por la consola serie.
+/// Strips the escape sequences OVMF emits on the serial console.
 fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -712,7 +712,7 @@ mod tests {
             super::count_occurrences(b"ari> x\nari> y\nari> ", b"ari> "),
             3
         );
-        assert_eq!(super::count_occurrences(b"nada", b"ari> "), 0);
+        assert_eq!(super::count_occurrences(b"none", b"ari> "), 0);
         assert_eq!(super::count_occurrences(b"aaaa", b""), 0);
     }
 
@@ -721,6 +721,6 @@ mod tests {
     #[test]
     fn strips_csi_sequences() {
         assert_eq!(strip_ansi("\x1b[2J\x1b[01;01Hhola\x1b[=3h"), "hola");
-        assert_eq!(strip_ansi("sin escapes"), "sin escapes");
+        assert_eq!(strip_ansi("no escapes"), "no escapes");
     }
 }

@@ -1,8 +1,8 @@
-# Etapa 2 (sesion util): escribir un fichero desde el shell, reiniciar con el
-# mismo disco y volver a leerlo. `[[boots]]` conserva el disco de pruebas entre
-# arranques; el reemplazo es atomico y duradero (ADR 0014).
+# Stage 2 (useful session): write a file from the shell, reboot with the
+# same disk and read it again. `[[boots]]` keeps the test disk across
+# boots; the replace is atomic and durable (ADR 0014).
 name = "shell.write_persists"
-description = "arish: write crea o reemplaza un fichero y su contenido sobrevive a un reinicio"
+description = "arish: write creates or replaces a file and its content survives a reboot"
 level = "full"
 areas = ["shell", "filesystem", "storage"]
 timeout_secs = 60
@@ -13,9 +13,9 @@ stdin = ["write notas.txt hola persistente", "cat notas.txt", "reboot"]
 [boots.expect]
 exit = 0
 serial_contains = [
-    "write: 17 bytes en notas.txt",
+    "write: 17 bytes to notas.txt",
     "hola persistente",
-    "AriCodeOS: reiniciando",
+    "AriCodeOS: rebooting",
 ]
 serial_absent = ["KERNEL PANIC", "write: error"]
 
@@ -25,9 +25,9 @@ stdin = ["cat notas.txt", "shutdown"]
 [boots.expect]
 exit = 33
 serial_contains = [
-    "fsd: AriFS montado, 6 ficheros",
-    "fs_client: nuevo.txt ya existia (disco persistente)",
+    "fsd: AriFS mounted, 6 files",
+    "fs_client: nuevo.txt already existed (persistent disk)",
     "hola persistente",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "cat: no existe"]
+serial_absent = ["KERNEL PANIC", "cat: not found:"]

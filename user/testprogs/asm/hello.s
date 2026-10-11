@@ -10,4 +10,4 @@ _start:
     mov edi, 42
     syscall
     ud2
-1:  .ascii "hola desde ring 3\n"
+1:  .ascii "hello from ring 3\n"

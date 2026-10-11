@@ -3,7 +3,7 @@ name = "aricode-heap"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Heap first-fit con lista de bloques libres y fusión (no_std, sin alloc)"
+description = "First-fit heap with a coalescing free-block list (no_std, no alloc)"
 
 [lib]
 path = "src/lib.rs"

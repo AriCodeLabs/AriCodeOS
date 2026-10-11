@@ -1,15 +1,15 @@
-//! Intérprete WebAssembly (Fase 29): el subconjunto MVP con enteros que
-//! producen `rustc` (`-C target-cpu=mvp`) y otros compiladores para módulos
-//! `no_std`: control estructurado, locales y globales, memoria lineal con
-//! límites comprobados, llamadas directas e indirectas e importaciones de
-//! funciones. Sin coma flotante (traps con `Unsupported`), sin SIMD.
+//! WebAssembly interpreter (Phase 29): the integer MVP subset that `rustc`
+//! (`-C target-cpu=mvp`) and other compilers produce for `no_std` modules:
+//! structured control, locals and globals, linear memory with checked
+//! bounds, direct and indirect calls and function imports. No floating
+//! point (traps with `Unsupported`), no SIMD.
 //!
-//! El módulo se analiza una vez ([`Module::parse`]); la ejecución
-//! ([`Instance::call`]) recorre el código byte a byte con una pila de valores
-//! y una de etiquetas acotadas. Toda operación sobre memoria comprueba
-//! límites: un módulo hostil solo puede fallar, nunca salir de su memoria.
-//! La memoria lineal la aporta el anfitrión como un `&mut [u8]` (en el
-//! sistema, un buffer DMA acotado por la cuota de la aplicación).
+//! The module is parsed once ([`Module::parse`]); execution
+//! ([`Instance::call`]) walks the code byte by byte with a bounded value
+//! stack and label stack. Every memory operation checks bounds: a hostile
+//! module can only fail, never escape its memory.
+//! Linear memory is supplied by the host as a `&mut [u8]` (in the
+//! system, a DMA buffer bounded by the application's quota).
 
 #![no_std]
 
@@ -21,31 +21,31 @@ use alloc::vec::Vec;
 pub use validate::validate;
 
 pub const PAGE: usize = 65536;
-/// Profundidad máxima de llamadas anidadas.
+/// Maximum depth of nested calls.
 pub const MAX_CALL_DEPTH: usize = 64;
-/// Valores en la pila de operandos, en total.
+/// Values on the operand stack, in total.
 pub const MAX_STACK: usize = 16 * 1024;
-/// Pasos de ejecución por llamada a `call` (contra bucles infinitos).
+/// Execution steps per `call` invocation (against infinite loops).
 pub const MAX_STEPS: u64 = 50_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
-    /// Módulo malformado o con secciones no soportadas.
+    /// Malformed module or one with unsupported sections.
     Malformed(&'static str),
-    /// Función, tipo o índice fuera de rango.
+    /// Function, type or index out of range.
     OutOfRange,
     Unsupported(&'static str),
-    /// Trap en ejecución: `unreachable`, división por cero, acceso fuera de memoria...
+    /// Runtime trap: `unreachable`, division by zero, out-of-bounds memory access...
     Trap(&'static str),
     StackOverflow,
-    /// Demasiados pasos.
+    /// Too many steps.
     Fuel,
-    /// Una importación no tiene anfitrión.
+    /// An import has no host.
     MissingImport,
-    /// El módulo no valida (tipado, índices, pilas): se rechaza antes de
-    /// instanciarlo (ADR 0019).
+    /// The module does not validate (typing, indices, stacks): rejected before
+    /// instantiating it (ADR 0019).
     Invalid(&'static str),
-    /// Exportación no encontrada.
+    /// Export not found.
     NoExport,
 }
 
@@ -63,8 +63,8 @@ pub struct FuncType {
     pub results: Vec<ValType>,
 }
 
-/// Valor en la pila: los tipos se comprueban por construcción del módulo;
-/// aquí todo es un `u64` (i32 con extensión de ceros, i64, bits de f32/f64).
+/// Value on the stack: types are checked by module construction; here
+/// everything is a `u64` (zero-extended i32, i64, f32/f64 bits).
 pub type Value = u64;
 
 #[derive(Debug, Clone)]
@@ -84,14 +84,14 @@ pub struct Export {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Function {
-    /// Índice de la función en el espacio de funciones (importadas primero).
+    /// Index of the function in the function space (imported ones first).
     pub index: u32,
     pub type_index: u32,
-    /// Locales declaradas (sin parámetros).
+    /// Declared locals (without parameters).
     pub locals: u32,
-    /// Posición de la declaración de locales (tipos) dentro del módulo.
+    /// Position of the locals declaration (types) inside the module.
     pub locals_decl: usize,
-    /// Rango del cuerpo (instrucciones) dentro del módulo.
+    /// Range of the body (instructions) inside the module.
     pub code_start: usize,
     pub code_end: usize,
 }
@@ -101,7 +101,7 @@ pub struct Global {
     pub ty: ValType,
     pub mutable: bool,
     pub init: Value,
-    /// Tipo de la constante del inicializador (debe coincidir con `ty`).
+    /// Type of the initializer constant (must match `ty`).
     pub init_ty: ValType,
 }
 
@@ -112,14 +112,14 @@ pub struct DataSegment {
     pub len: usize,
 }
 
-/// Módulo analizado; conserva una referencia a los bytes originales.
+/// Parsed module; keeps a reference to the original bytes.
 pub struct Module<'a> {
     bytes: &'a [u8],
     pub types: Vec<FuncType>,
     pub imports: Vec<Import>,
     pub functions: Vec<Function>,
     pub table: Vec<Option<u32>>,
-    /// Límites declarados de la tabla (mínimo, máximo), si hay tabla.
+    /// Declared table limits (minimum, maximum), if there is a table.
     pub table_limits: Option<(u32, Option<u32>)>,
     pub memory_pages: Option<(u32, Option<u32>)>,
     pub globals: Vec<Global>,
@@ -141,7 +141,7 @@ impl<'a> Reader<'a> {
         let v = *self
             .b
             .get(self.pos)
-            .ok_or(Error::Malformed("fin inesperado"))?;
+            .ok_or(Error::Malformed("unexpected end"))?;
         self.pos += 1;
         Ok(v)
     }
@@ -201,14 +201,8 @@ impl<'a> Reader<'a> {
     fn bytes(&mut self, n: usize) -> Result<&'a [u8], Error> {
         let s = self
             .b
-            .get(
-                self.pos
-                    ..self
-                        .pos
-                        .checked_add(n)
-                        .ok_or(Error::Malformed("longitud"))?,
-            )
-            .ok_or(Error::Malformed("fin inesperado"))?;
+            .get(self.pos..self.pos.checked_add(n).ok_or(Error::Malformed("length"))?)
+            .ok_or(Error::Malformed("unexpected end"))?;
         self.pos += n;
         Ok(s)
     }
@@ -218,14 +212,14 @@ impl<'a> Reader<'a> {
             0x7E => ValType::I64,
             0x7D => ValType::F32,
             0x7C => ValType::F64,
-            _ => return Err(Error::Malformed("tipo de valor")),
+            _ => return Err(Error::Malformed("value type")),
         })
     }
 }
 
-/// Evalúa una expresión constante de inicialización (`i32.const`, `i64.const`).
-/// Expresión constante con el tipo de su constante (para validar
-/// inicializadores de globales y desplazamientos de segmentos).
+/// Evaluates a constant initialization expression (`i32.const`, `i64.const`).
+/// Constant expression with the type of its constant (to validate global
+/// initializers and segment offsets).
 fn const_expr_typed(r: &mut Reader) -> Result<(ValType, Value), Error> {
     let v = match r.u8()? {
         0x41 => (ValType::I32, r.i32()? as u32 as u64),
@@ -244,10 +238,10 @@ fn const_expr_typed(r: &mut Reader) -> Result<(ValType, Value), Error> {
                 u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
             )
         }
-        _ => return Err(Error::Unsupported("expresion constante")),
+        _ => return Err(Error::Unsupported("constant expression")),
     };
     if r.u8()? != 0x0B {
-        return Err(Error::Malformed("fin de expresion constante"));
+        return Err(Error::Malformed("end of constant expression"));
     }
     Ok(v)
 }
@@ -255,7 +249,7 @@ fn const_expr_typed(r: &mut Reader) -> Result<(ValType, Value), Error> {
 impl<'a> Module<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self, Error> {
         if bytes.len() < 8 || &bytes[..4] != b"\0asm" || bytes[4..8] != [1, 0, 0, 0] {
-            return Err(Error::Malformed("cabecera"));
+            return Err(Error::Malformed("header"));
         }
         let mut m = Module {
             bytes,
@@ -276,9 +270,9 @@ impl<'a> Module<'a> {
             let id = r.u8()?;
             let size = r.u32()? as usize;
             let start = r.pos;
-            let end = start.checked_add(size).ok_or(Error::Malformed("seccion"))?;
+            let end = start.checked_add(size).ok_or(Error::Malformed("section"))?;
             if end > bytes.len() {
-                return Err(Error::Malformed("seccion truncada"));
+                return Err(Error::Malformed("truncated section"));
             }
             let mut s = Reader::new(bytes, start);
             match id {
@@ -286,7 +280,7 @@ impl<'a> Module<'a> {
                 1 => {
                     for _ in 0..s.u32()? {
                         if s.u8()? != 0x60 {
-                            return Err(Error::Malformed("tipo de funcion"));
+                            return Err(Error::Malformed("function type"));
                         }
                         let np = s.u32()?;
                         let mut params = Vec::new();
@@ -316,7 +310,7 @@ impl<'a> Module<'a> {
                                     type_index,
                                 });
                             }
-                            _ => return Err(Error::Unsupported("importacion no funcional")),
+                            _ => return Err(Error::Unsupported("non-function import")),
                         }
                     }
                 }
@@ -328,13 +322,13 @@ impl<'a> Module<'a> {
                 4 => {
                     for _ in 0..s.u32()? {
                         if s.u8()? != 0x70 {
-                            return Err(Error::Malformed("tipo de tabla"));
+                            return Err(Error::Malformed("table type"));
                         }
                         let flags = s.u8()?;
                         let min = s.u32()?;
                         let max = if flags & 1 != 0 { Some(s.u32()?) } else { None };
                         if min > 4096 {
-                            return Err(Error::Unsupported("tabla grande"));
+                            return Err(Error::Unsupported("large table"));
                         }
                         m.table = alloc::vec![None; min as usize];
                         m.table_limits = Some((min, max));
@@ -381,11 +375,11 @@ impl<'a> Module<'a> {
                     for _ in 0..s.u32()? {
                         let flags = s.u32()?;
                         if flags != 0 {
-                            return Err(Error::Unsupported("segmento de elementos"));
+                            return Err(Error::Unsupported("element segment"));
                         }
                         let (offset_ty, offset) = const_expr_typed(&mut s)?;
                         if offset_ty != ValType::I32 {
-                            return Err(Error::Invalid("desplazamiento de elementos no i32"));
+                            return Err(Error::Invalid("non-i32 element offset"));
                         }
                         let offset = offset as usize;
                         let n = s.u32()? as usize;
@@ -394,7 +388,7 @@ impl<'a> Module<'a> {
                             let slot = m
                                 .table
                                 .get_mut(offset + i)
-                                .ok_or(Error::Malformed("elemento fuera de la tabla"))?;
+                                .ok_or(Error::Malformed("element outside the table"))?;
                             *slot = Some(f);
                         }
                     }
@@ -402,7 +396,7 @@ impl<'a> Module<'a> {
                 10 => {
                     let count = s.u32()? as usize;
                     if count != func_types.len() {
-                        return Err(Error::Malformed("cuerpos != funciones"));
+                        return Err(Error::Malformed("bodies != functions"));
                     }
                     for (i, type_index) in func_types.iter().copied().enumerate() {
                         let body_size = s.u32()? as usize;
@@ -410,18 +404,18 @@ impl<'a> Module<'a> {
                         let index = m.imports.len() as u32 + i as u32;
                         let body_end = body_start
                             .checked_add(body_size)
-                            .ok_or(Error::Malformed("cuerpo"))?;
+                            .ok_or(Error::Malformed("body"))?;
                         if body_end > end {
-                            return Err(Error::Malformed("cuerpo truncado"));
+                            return Err(Error::Malformed("truncated body"));
                         }
                         let mut locals = 0u32;
                         for _ in 0..s.u32()? {
                             let n = s.u32()?;
                             s.valtype()?;
-                            locals = locals.checked_add(n).ok_or(Error::Malformed("locales"))?;
+                            locals = locals.checked_add(n).ok_or(Error::Malformed("locals"))?;
                         }
                         if locals > 4096 {
-                            return Err(Error::Unsupported("demasiadas locales"));
+                            return Err(Error::Unsupported("too many locals"));
                         }
                         m.functions.push(Function {
                             index,
@@ -438,11 +432,11 @@ impl<'a> Module<'a> {
                     for _ in 0..s.u32()? {
                         let flags = s.u32()?;
                         if flags != 0 {
-                            return Err(Error::Unsupported("segmento de datos pasivo"));
+                            return Err(Error::Unsupported("passive data segment"));
                         }
                         let (offset_ty, offset) = const_expr_typed(&mut s)?;
                         if offset_ty != ValType::I32 {
-                            return Err(Error::Invalid("desplazamiento de datos no i32"));
+                            return Err(Error::Invalid("non-i32 data offset"));
                         }
                         let offset = offset as u32;
                         let len = s.u32()? as usize;
@@ -452,12 +446,12 @@ impl<'a> Module<'a> {
                     }
                 }
                 12 => {} // data count
-                _ => return Err(Error::Malformed("seccion desconocida")),
+                _ => return Err(Error::Malformed("unknown section")),
             }
             r.pos = end;
         }
         if func_types.len() != m.functions.len() {
-            return Err(Error::Malformed("faltan cuerpos"));
+            return Err(Error::Malformed("missing bodies"));
         }
         validate(&m)?;
         Ok(m)
@@ -467,7 +461,7 @@ impl<'a> Module<'a> {
         &self.bytes[e.name_start..e.name_start + e.name_len]
     }
 
-    /// Índice de función exportada con ese nombre.
+    /// Index of the exported function with that name.
     pub fn exported_function(&self, name: &str) -> Option<u32> {
         self.exports
             .iter()
@@ -475,7 +469,7 @@ impl<'a> Module<'a> {
             .map(|e| e.index)
     }
 
-    /// Tipo de la función `index` (importadas primero).
+    /// Type of function `index` (imported ones first).
     pub fn function_type(&self, index: u32) -> Result<&FuncType, Error> {
         let ti = if (index as usize) < self.imports.len() {
             self.imports[index as usize].type_index
@@ -488,29 +482,29 @@ impl<'a> Module<'a> {
         self.types.get(ti as usize).ok_or(Error::OutOfRange)
     }
 
-    /// Páginas iniciales de memoria declaradas.
+    /// Declared initial memory pages.
     pub fn initial_pages(&self) -> u32 {
         self.memory_pages.map(|(min, _)| min).unwrap_or(0)
     }
 }
 
-/// Funciones que el anfitrión ofrece al módulo. `call(índice de importación,
-/// argumentos, memoria)` devuelve el resultado (o 0 si no hay).
+/// Functions the host offers the module. `call(import index,
+/// arguments, memory)` returns the result (or 0 if there is none).
 pub trait Host {
     fn call(&mut self, import: usize, args: &[Value], memory: &mut [u8]) -> Result<Value, Error>;
 }
 
 struct Label {
-    /// Posición de la instrucción siguiente al `end` (o del `else`).
+    /// Position of the instruction after the `end` (or of the `else`).
     end: usize,
-    /// `loop`: saltar al inicio.
+    /// `loop`: jump to the start.
     loop_start: Option<usize>,
-    /// Altura de la pila al entrar (sin los parámetros del bloque).
+    /// Stack height on entry (without the block parameters).
     height: usize,
-    /// Valores que deja el bloque al salir por `br`.
+    /// Values the block leaves when exiting through `br`.
     arity: usize,
-    /// Parámetros del bloque: lo que conserva un `br` a un `loop`
-    /// (auditoría 6ee19fb, observación).
+    /// Block parameters: what a `br` to a `loop` keeps
+    /// (audit 6ee19fb, observation).
     params: usize,
 }
 
@@ -523,35 +517,35 @@ struct Frame {
     results: usize,
 }
 
-/// Instancia: módulo más estado mutable (globales, memoria del anfitrión).
+/// Instance: module plus mutable state (globals, host memory).
 pub struct Instance<'m, 'a> {
     module: &'m Module<'a>,
     globals: Vec<Value>,
     stack: Vec<Value>,
     labels: Vec<Label>,
-    /// Fin de cada bloque, calculado la primera vez que se entra.
+    /// End of each block, computed the first time it is entered.
     memory_pages: u32,
 }
 
 impl<'m, 'a> Instance<'m, 'a> {
-    /// Crea la instancia y copia los segmentos de datos en `memory`.
+    /// Creates the instance and copies the data segments into `memory`.
     pub fn new(module: &'m Module<'a>, memory: &mut [u8]) -> Result<Self, Error> {
         let pages = module.initial_pages();
         let active = (pages as usize) * PAGE;
         if active > memory.len() {
-            return Err(Error::Trap("memoria insuficiente para el modulo"));
+            return Err(Error::Trap("not enough memory for the module"));
         }
-        // La memoria lineal nace a cero aunque el buffer del anfitrion traiga
-        // restos; los segmentos de datos deben caer dentro de las paginas
-        // iniciales, no del buffer entero.
+        // Linear memory starts zeroed even if the host buffer carries
+        // leftovers; data segments must fall inside the initial pages, not
+        // inside the whole buffer.
         memory[..active].fill(0);
         for d in &module.data {
             let end = (d.offset as usize)
                 .checked_add(d.len)
-                .ok_or(Error::Trap("segmento de datos fuera de memoria"))?;
+                .ok_or(Error::Trap("data segment out of memory"))?;
             let dst = memory[..active]
                 .get_mut(d.offset as usize..end)
-                .ok_or(Error::Trap("segmento de datos fuera de memoria"))?;
+                .ok_or(Error::Trap("data segment out of memory"))?;
             dst.copy_from_slice(&module.bytes[d.start..d.start + d.len]);
         }
         Ok(Self {
@@ -567,13 +561,13 @@ impl<'m, 'a> Instance<'m, 'a> {
         self.globals.get(index).copied()
     }
 
-    /// Bytes de memoria lineal actualmente válidos (`memory_pages * PAGE`).
+    /// Bytes of linear memory currently valid (`memory_pages * PAGE`).
     pub fn memory_len(&self) -> usize {
         self.memory_pages as usize * PAGE
     }
 
-    /// Ejecuta la función `start` del módulo si la declara. Debe llamarse una
-    /// vez, tras `new` y antes de cualquier exportación; propaga sus traps.
+    /// Runs the module's `start` function if it declares one. Must be called
+    /// once, after `new` and before any export; propagates its traps.
     pub fn start(&mut self, memory: &mut [u8], host: &mut dyn Host) -> Result<(), Error> {
         match self.module.start {
             Some(index) => self.invoke(index, &[], memory, host).map(|_| ()),
@@ -581,8 +575,8 @@ impl<'m, 'a> Instance<'m, 'a> {
         }
     }
 
-    /// Llama a la función exportada `name` con `args`; devuelve su primer
-    /// resultado (0 si no tiene).
+    /// Calls the exported function `name` with `args`; returns its first
+    /// result (0 if it has none).
     pub fn call(
         &mut self,
         name: &str,
@@ -626,15 +620,15 @@ impl<'m, 'a> Instance<'m, 'a> {
     }
 
     fn pop(&mut self) -> Result<Value, Error> {
-        self.stack.pop().ok_or(Error::Trap("pila vacia"))
+        self.stack.pop().ok_or(Error::Trap("empty stack"))
     }
 
     fn pop32(&mut self) -> Result<u32, Error> {
         self.pop().map(|v| v as u32)
     }
 
-    /// Salta al final del bloque que empieza en `pc` (tras su opcode y tipo)
-    /// devolviendo (posición del `else` si lo hay, posición tras `end`).
+    /// Jumps to the end of the block starting at `pc` (after its opcode and type)
+    /// returning (position of the `else` if any, position after `end`).
     fn find_block_end(
         &self,
         func: &Function,
@@ -667,7 +661,7 @@ impl<'m, 'a> Instance<'m, 'a> {
             }
             pc = r.pos;
         }
-        Err(Error::Malformed("bloque sin fin"))
+        Err(Error::Malformed("block without end"))
     }
 
     fn branch(&mut self, depth: u32, frame_labels_base: usize) -> Result<Option<usize>, Error> {
@@ -675,9 +669,9 @@ impl<'m, 'a> Instance<'m, 'a> {
             .labels
             .len()
             .checked_sub(1 + depth as usize)
-            .ok_or(Error::Malformed("etiqueta"))?;
+            .ok_or(Error::Malformed("label"))?;
         if idx < frame_labels_base {
-            return Err(Error::Malformed("etiqueta de otro marco"));
+            return Err(Error::Malformed("label of another frame"));
         }
         let (target, height, arity, is_loop, params) = {
             let l = &self.labels[idx];
@@ -689,12 +683,12 @@ impl<'m, 'a> Instance<'m, 'a> {
                 l.params,
             )
         };
-        // Conservar los valores de salida del bloque (o los parámetros del
-        // `loop`, que vuelven a entrar) y descartar el resto.
+        // Keep the block's output values (or the parameters of the
+        // `loop`, which re-enters) and discard the rest.
         let keep = if is_loop { params } else { arity };
         let len = self.stack.len();
         if len < height + keep {
-            return Err(Error::Trap("pila insuficiente en br"));
+            return Err(Error::Trap("stack too short in br"));
         }
         let from = len - keep;
         self.stack.copy_within(from..len, height);
@@ -714,7 +708,7 @@ impl<'m, 'a> Instance<'m, 'a> {
         let mut locals: Vec<Value> = Vec::new();
         let mut steps = 0u64;
 
-        // Entrar en una función: parámetros ya en la pila.
+        // Entering a function: parameters already on the stack.
         let enter = |this: &mut Self,
                      frames: &mut Vec<Frame>,
                      locals: &mut Vec<Value>,
@@ -730,7 +724,7 @@ impl<'m, 'a> Instance<'m, 'a> {
             let ty = module.function_type(index)?;
             let nparams = ty.params.len();
             if this.stack.len() < nparams {
-                return Err(Error::Trap("faltan argumentos"));
+                return Err(Error::Trap("missing arguments"));
             }
             let locals_base = locals.len();
             let args_start = this.stack.len() - nparams;
@@ -738,7 +732,7 @@ impl<'m, 'a> Instance<'m, 'a> {
             this.stack.truncate(args_start);
             locals.resize(locals_base + nparams + f.locals as usize, 0);
             let labels_base = this.labels.len();
-            // Etiqueta implícita de la función: `br` a ella es `return`.
+            // Implicit function label: a `br` to it is a `return`.
             this.labels.push(Label {
                 end: f.code_end,
                 loop_start: None,
@@ -765,7 +759,7 @@ impl<'m, 'a> Instance<'m, 'a> {
             let ty = module.function_type(import as u32)?;
             let n = ty.params.len();
             if this.stack.len() < n {
-                return Err(Error::Trap("faltan argumentos"));
+                return Err(Error::Trap("missing arguments"));
             }
             let args: Vec<Value> = this.stack.split_off(this.stack.len() - n);
             let active = this.memory_len().min(memory.len());
@@ -788,7 +782,7 @@ impl<'m, 'a> Instance<'m, 'a> {
             let func = module.functions[frame.func];
             let code = &module.bytes[..func.code_end];
             if frame.pc >= code.len() {
-                // Fin de función (sin `end` explícito): retorno.
+                // End of function (without an explicit `end`): return.
                 let fr = frames.pop().unwrap();
                 self.finish_frame(&fr, &mut locals)?;
                 continue;
@@ -839,16 +833,16 @@ impl<'m, 'a> Instance<'m, 'a> {
                     }
                 }
                 0x05 => {
-                    // Fin de la rama `then`: saltar al `end` del bloque.
+                    // End of the `then` branch: jump to the block's `end`.
                     let l = self
                         .labels
                         .pop()
-                        .ok_or(Error::Malformed("else sin bloque"))?;
+                        .ok_or(Error::Malformed("else without block"))?;
                     next_pc = Some(l.end);
                 }
                 0x0B => {
                     if self.labels.len() == frame_labels_base + 1 {
-                        // `end` de la función: retorno.
+                        // Function `end`: return.
                         let fr = frames.pop().unwrap();
                         self.labels.pop();
                         self.finish_frame(&fr, &mut locals)?;
@@ -912,20 +906,20 @@ impl<'m, 'a> Instance<'m, 'a> {
                 }
                 0x11 => {
                     let type_index = r.u32()?;
-                    r.u8()?; // tabla 0
+                    r.u8()?; // table 0
                     let elem = self.pop32()? as usize;
                     let index = module
                         .table
                         .get(elem)
                         .copied()
                         .flatten()
-                        .ok_or(Error::Trap("call_indirect: entrada vacia"))?;
+                        .ok_or(Error::Trap("call_indirect: empty entry"))?;
                     let expected = module
                         .types
                         .get(type_index as usize)
                         .ok_or(Error::OutOfRange)?;
                     if module.function_type(index)? != expected {
-                        return Err(Error::Trap("call_indirect: tipo distinto"));
+                        return Err(Error::Trap("call_indirect: type mismatch"));
                     }
                     frame.pc = r.pos;
                     if (index as usize) < n_imports {
@@ -961,7 +955,7 @@ impl<'m, 'a> Instance<'m, 'a> {
                 }
                 0x22 => {
                     let i = r.u32()? as usize;
-                    let v = *self.stack.last().ok_or(Error::Trap("pila vacia"))?;
+                    let v = *self.stack.last().ok_or(Error::Trap("empty stack"))?;
                     *locals.get_mut(locals_base + i).ok_or(Error::OutOfRange)? = v;
                 }
                 0x23 => {
@@ -1004,7 +998,7 @@ impl<'m, 'a> Instance<'m, 'a> {
                         .and_then(|(_, max)| max)
                         .unwrap_or(u32::MAX) as u64;
                     if new * PAGE as u64 <= memory.len() as u64 && new <= max {
-                        // Las paginas nuevas nacen a cero.
+                        // New pages start zeroed.
                         memory[old as usize * PAGE..new as usize * PAGE].fill(0);
                         self.memory_pages = new as u32;
                         self.push(old as u64)?;
@@ -1020,7 +1014,7 @@ impl<'m, 'a> Instance<'m, 'a> {
                     let v = r.i64()?;
                     self.push(v as u64)?;
                 }
-                0x43 | 0x44 => return Err(Error::Unsupported("coma flotante")),
+                0x43 | 0x44 => return Err(Error::Unsupported("floating point")),
                 0x45..=0x4F | 0x67..=0x78 => {
                     let v = self.exec_i32(op)?;
                     self.push(v)?;
@@ -1072,7 +1066,7 @@ impl<'m, 'a> Instance<'m, 'a> {
                         let end_dst = dst.checked_add(n).ok_or(Error::Trap("memory.copy"))?;
                         let active = self.memory_len();
                         if end_src > active || end_dst > active {
-                            return Err(Error::Trap("acceso fuera de memoria"));
+                            return Err(Error::Trap("out-of-bounds memory access"));
                         }
                         memory.copy_within(src..end_src, dst);
                     }
@@ -1083,11 +1077,11 @@ impl<'m, 'a> Instance<'m, 'a> {
                         let dst = self.pop32()? as usize;
                         let end = dst.checked_add(n).ok_or(Error::Trap("memory.fill"))?;
                         if end > self.memory_len() {
-                            return Err(Error::Trap("acceso fuera de memoria"));
+                            return Err(Error::Trap("out-of-bounds memory access"));
                         }
                         memory[dst..end].fill(v);
                     }
-                    _ => return Err(Error::Unsupported("prefijo 0xFC")),
+                    _ => return Err(Error::Unsupported("0xFC prefix")),
                 },
                 _ => return Err(Error::Unsupported("opcode")),
             }
@@ -1096,7 +1090,7 @@ impl<'m, 'a> Instance<'m, 'a> {
         }
     }
 
-    /// `br` que puede ser un retorno de función (etiqueta implícita).
+    /// `br` that may be a function return (implicit label).
     fn branch_or_return(
         &mut self,
         depth: u32,
@@ -1106,19 +1100,19 @@ impl<'m, 'a> Instance<'m, 'a> {
             .labels
             .len()
             .checked_sub(1 + depth as usize)
-            .ok_or(Error::Malformed("etiqueta"))?;
+            .ok_or(Error::Malformed("label"))?;
         if idx == frame_labels_base {
-            return Ok(None); // retorno: `finish_frame` recorta la pila
+            return Ok(None); // return: `finish_frame` trims the stack
         }
         self.branch(depth, frame_labels_base)
     }
 
-    /// Salida de una función: deja `results` valores sobre `stack_base` y
-    /// libera locales y etiquetas del marco.
+    /// Function exit: leaves `results` values on top of `stack_base` and
+    /// frees the frame's locals and labels.
     fn finish_frame(&mut self, fr: &Frame, locals: &mut Vec<Value>) -> Result<(), Error> {
         let len = self.stack.len();
         if len < fr.stack_base + fr.results {
-            return Err(Error::Trap("resultados insuficientes"));
+            return Err(Error::Trap("not enough results"));
         }
         let from = len - fr.results;
         self.stack.copy_within(from..len, fr.stack_base);
@@ -1159,26 +1153,25 @@ impl<'m, 'a> Instance<'m, 'a> {
             0x6C => a.wrapping_mul(b) as u64,
             0x6D => {
                 if sb == 0 {
-                    return Err(Error::Trap("division por cero"));
+                    return Err(Error::Trap("division by zero"));
                 }
-                sa.checked_div(sb)
-                    .ok_or(Error::Trap("desbordamiento en division"))? as u32 as u64
+                sa.checked_div(sb).ok_or(Error::Trap("division overflow"))? as u32 as u64
             }
             0x6E => {
                 if b == 0 {
-                    return Err(Error::Trap("division por cero"));
+                    return Err(Error::Trap("division by zero"));
                 }
                 (a / b) as u64
             }
             0x6F => {
                 if sb == 0 {
-                    return Err(Error::Trap("division por cero"));
+                    return Err(Error::Trap("division by zero"));
                 }
                 sa.wrapping_rem(sb) as u32 as u64
             }
             0x70 => {
                 if b == 0 {
-                    return Err(Error::Trap("division por cero"));
+                    return Err(Error::Trap("division by zero"));
                 }
                 (a % b) as u64
             }
@@ -1225,26 +1218,25 @@ impl<'m, 'a> Instance<'m, 'a> {
             0x7E => a.wrapping_mul(b),
             0x7F => {
                 if sb == 0 {
-                    return Err(Error::Trap("division por cero"));
+                    return Err(Error::Trap("division by zero"));
                 }
-                sa.checked_div(sb)
-                    .ok_or(Error::Trap("desbordamiento en division"))? as u64
+                sa.checked_div(sb).ok_or(Error::Trap("division overflow"))? as u64
             }
             0x80 => {
                 if b == 0 {
-                    return Err(Error::Trap("division por cero"));
+                    return Err(Error::Trap("division by zero"));
                 }
                 a / b
             }
             0x81 => {
                 if sb == 0 {
-                    return Err(Error::Trap("division por cero"));
+                    return Err(Error::Trap("division by zero"));
                 }
                 sa.wrapping_rem(sb) as u64
             }
             0x82 => {
                 if b == 0 {
-                    return Err(Error::Trap("division por cero"));
+                    return Err(Error::Trap("division by zero"));
                 }
                 a % b
             }
@@ -1261,9 +1253,9 @@ impl<'m, 'a> Instance<'m, 'a> {
     }
 }
 
-/// Aridad (parámetros, resultados) de un tipo de bloque.
+/// Arity (parameters, results) of a block type.
 fn block_arity(r: &mut Reader, module: &Module) -> Result<(usize, usize), Error> {
-    let b = *r.b.get(r.pos).ok_or(Error::Malformed("tipo de bloque"))?;
+    let b = *r.b.get(r.pos).ok_or(Error::Malformed("block type"))?;
     if b == 0x40 {
         r.pos += 1;
         return Ok((0, 0));
@@ -1278,7 +1270,7 @@ fn block_arity(r: &mut Reader, module: &Module) -> Result<(usize, usize), Error>
 }
 
 fn skip_blocktype(r: &mut Reader) -> Result<(), Error> {
-    let b = *r.b.get(r.pos).ok_or(Error::Malformed("tipo de bloque"))?;
+    let b = *r.b.get(r.pos).ok_or(Error::Malformed("block type"))?;
     if b == 0x40 || matches!(b, 0x7C..=0x7F) {
         r.pos += 1;
     } else {
@@ -1287,7 +1279,7 @@ fn skip_blocktype(r: &mut Reader) -> Result<(), Error> {
     Ok(())
 }
 
-/// Salta los inmediatos de una instrucción (para localizar fines de bloque).
+/// Skips the immediates of an instruction (to locate block ends).
 fn skip_immediates(op: u8, r: &mut Reader) -> Result<(), Error> {
     match op {
         0x0C | 0x0D | 0x10 | 0x20..=0x24 => {
@@ -1335,7 +1327,7 @@ fn skip_immediates(op: u8, r: &mut Reader) -> Result<(), Error> {
             11 => {
                 r.u8()?;
             }
-            _ => return Err(Error::Unsupported("prefijo 0xFC")),
+            _ => return Err(Error::Unsupported("0xFC prefix")),
         },
         _ => {}
     }
@@ -1346,7 +1338,7 @@ fn effective(base: u32, offset: u32, size: usize, memory: &[u8]) -> Result<usize
     let addr = base as u64 + offset as u64;
     let end = addr + size as u64;
     if end > memory.len() as u64 {
-        return Err(Error::Trap("acceso fuera de memoria"));
+        return Err(Error::Trap("out-of-bounds memory access"));
     }
     Ok(addr as usize)
 }
@@ -1357,7 +1349,7 @@ fn load(memory: &[u8], base: u32, offset: u32, op: u8) -> Result<Value, Error> {
         0x29 => 8,
         0x2C | 0x2D | 0x30 | 0x31 => 1,
         0x2E | 0x2F | 0x32 | 0x33 => 2,
-        _ => return Err(Error::Unsupported("carga en coma flotante")),
+        _ => return Err(Error::Unsupported("floating-point load")),
     };
     let a = effective(base, offset, size, memory)?;
     let b = &memory[a..a + size];
@@ -1384,7 +1376,7 @@ fn store(memory: &mut [u8], base: u32, offset: u32, op: u8, v: Value) -> Result<
         0x37 => 8,
         0x3A | 0x3C => 1,
         0x3B | 0x3D => 2,
-        _ => return Err(Error::Unsupported("almacenamiento en coma flotante")),
+        _ => return Err(Error::Unsupported("floating-point store")),
     };
     let a = effective(base, offset, size, memory)?;
     let bytes = v.to_le_bytes();
@@ -1398,8 +1390,8 @@ mod tests {
     use super::*;
     use std::vec;
 
-    /// Ensamblador mínimo para los tests: un módulo con tipos, importaciones,
-    /// funciones, memoria de una página, exportaciones y datos.
+    /// Minimal assembler for the tests: a module with types, imports,
+    /// functions, one memory page, exports and data.
     struct Builder {
         types: Vec<(Vec<u8>, Vec<u8>)>,
         imports: Vec<(&'static str, &'static str, u32)>,
@@ -1506,7 +1498,7 @@ mod tests {
                 leb(self.table.len() as u32, &mut b);
                 section(4, &b, &mut out);
             }
-            section(5, &[1, 0, 1], &mut out); // memoria: 1 pagina
+            section(5, &[1, 0, 1], &mut out); // memory: 1 page
             if !self.globals.is_empty() {
                 let mut b = Vec::new();
                 leb(self.globals.len() as u32, &mut b);
@@ -1589,7 +1581,7 @@ mod tests {
         inst.call(name, args, &mut mem, &mut NoHost)
     }
 
-    // Codigos: 0x20 local.get, 0x41 i32.const, 0x6A add, 0x6C mul, 0x6B sub
+    // Codes: 0x20 local.get, 0x41 i32.const, 0x6A add, 0x6C mul, 0x6B sub
 
     #[test]
     fn arithmetic_and_locals() {
@@ -1676,9 +1668,9 @@ mod tests {
         assert_eq!(run(&wasm, "f", &[100, 0x11223344]), Ok(0x33));
         assert_eq!(
             run(&wasm, "f", &[PAGE as u64 - 2, 1]),
-            Err(Error::Trap("acceso fuera de memoria"))
+            Err(Error::Trap("out-of-bounds memory access"))
         );
-        // Los datos iniciales llegan a memoria.
+        // The initial data reaches memory.
         let m = Module::parse(&wasm).unwrap();
         let mut mem = vec![0u8; PAGE];
         let _ = Instance::new(&m, &mut mem).unwrap();
@@ -1695,12 +1687,12 @@ mod tests {
         b.export("unreach", unreach);
         let forever = b.func(t, 0, &[0x03, 0x40, 0x0C, 0, 0x0B, 0x41, 0]);
         b.export("forever", forever);
-        let recurse = b.func(t, 0, &[0x20, 0, 0x10, 3]); // se llama a si misma (indice 3)
+        let recurse = b.func(t, 0, &[0x20, 0, 0x10, 3]); // calls itself (index 3)
         b.export("recurse", recurse);
         let wasm = b.build();
         assert_eq!(
             run(&wasm, "div", &[0]),
-            Err(Error::Trap("division por cero"))
+            Err(Error::Trap("division by zero"))
         );
         assert_eq!(run(&wasm, "div", &[2]), Ok(0));
         assert_eq!(run(&wasm, "unreach", &[0]), Err(Error::Trap("unreachable")));
@@ -1754,7 +1746,7 @@ mod tests {
         // global: g = g + a; return g
         let g = b.func(t, 0, &[0x23, 0, 0x20, 0, 0x6A, 0x24, 0, 0x23, 0]);
         b.export("g", g);
-        // indirecta: call_indirect tabla[a] con tipo t, argumento 1
+        // indirect: call_indirect table[a] with type t, argument 1
         b.table = vec![sw, g];
         let ind = b.func(t, 0, &[0x41, 1, 0x20, 0, 0x11, t as u8, 0]);
         b.export("ind", ind);
@@ -1767,7 +1759,7 @@ mod tests {
         assert_eq!(run(&wasm, "ind", &[1]), Ok(6), "g(1)");
         assert_eq!(
             run(&wasm, "ind", &[5]),
-            Err(Error::Trap("call_indirect: entrada vacia"))
+            Err(Error::Trap("call_indirect: empty entry"))
         );
     }
 
@@ -1801,7 +1793,7 @@ mod tests {
         let f = b.func(t, 0, &code);
         b.export("f", f);
         assert_eq!(run(&b.build(), "f", &[]), Ok(7));
-        // Relleno fuera de la pagina: trap, sin panico.
+        // Fill outside the page: trap, no panic.
         let mut big = Builder::new();
         let t2 = big.ty(&[], &[0x7F]);
         let g = big.func(
@@ -1814,13 +1806,13 @@ mod tests {
         big.export("g", g);
         assert_eq!(
             run(&big.build(), "g", &[]),
-            Err(Error::Trap("acceso fuera de memoria"))
+            Err(Error::Trap("out-of-bounds memory access"))
         );
     }
 
     #[test]
     fn memory_is_bounded_by_current_pages_not_host_buffer() {
-        // Modulo de 1 pagina (max 1) sobre un buffer de 4: leer en 65536 es trap.
+        // 1-page module (max 1) over a 4-page buffer: reading at 65536 traps.
         let mut b = Builder::new();
         let t = b.ty(&[0x7F], &[0x7F]);
         let f = b.func(t, 0, &[0x20, 0, 0x2D, 0, 0]);
@@ -1835,17 +1827,17 @@ mod tests {
         assert_eq!(inst.memory_len(), PAGE);
         assert_eq!(
             inst.call("ld", &[PAGE as u64], &mut mem, &mut NoHost),
-            Err(Error::Trap("acceso fuera de memoria"))
+            Err(Error::Trap("out-of-bounds memory access"))
         );
         assert_eq!(
             inst.call("st", &[PAGE as u64], &mut mem, &mut NoHost),
-            Err(Error::Trap("acceso fuera de memoria"))
+            Err(Error::Trap("out-of-bounds memory access"))
         );
         assert_eq!(
             inst.call("ld", &[(PAGE - 1) as u64], &mut mem, &mut NoHost),
             Ok(0)
         );
-        // El anfitrion tampoco ve mas alla de la memoria activa.
+        // The host does not see beyond the active memory either.
         struct Peek;
         impl Host for Peek {
             fn call(&mut self, _: usize, _: &[Value], memory: &mut [u8]) -> Result<Value, Error> {
@@ -1870,19 +1862,19 @@ mod tests {
         let t = b.ty(&[], &[0x7F]);
         let ld0 = b.func(t, 0, &[0x41, 0, 0x2D, 0, 0]);
         b.export("ld0", ld0);
-        // grow 1 pagina y leer el primer byte de la nueva.
+        // grow 1 page and read the first byte of the new one.
         let grow = b.func(t, 0, &[0x41, 1, 0x40, 0, 0x1A, 0x41, 0, 0x2D, 0, 0]);
         b.export("grow", grow);
         b.data.push((8, vec![1, 2, 3]));
         let wasm = b.build();
-        // El constructor de pruebas declara memoria {min 1} sin maximo.
+        // The test builder declares memory {min 1} without a maximum.
         let m = Module::parse(&wasm).unwrap();
         let mut mem = vec![0xAAu8; 4 * PAGE];
         let mut inst = Instance::new(&m, &mut mem).unwrap();
-        assert_eq!(mem[0], 0, "memoria inicial a cero");
-        assert_eq!(&mem[8..11], &[1, 2, 3], "datos aplicados");
+        assert_eq!(mem[0], 0, "initial memory zeroed");
+        assert_eq!(&mem[8..11], &[1, 2, 3], "data applied");
         assert_eq!(inst.call("ld0", &[], &mut mem, &mut NoHost), Ok(0));
-        // Tras crecer, el byte 65536 (antes 0xAA en el buffer) debe ser 0.
+        // After growing, byte 65536 (previously 0xAA in the buffer) must be 0.
         let mut b2 = Builder::new();
         let t2 = b2.ty(&[], &[0x7F]);
         let g = b2.func(
@@ -1917,11 +1909,11 @@ mod tests {
         assert_eq!(
             inst.call("get", &[], &mut mem, &mut NoHost),
             Ok(0),
-            "sin start aun"
+            "no start yet"
         );
         inst.start(&mut mem, &mut NoHost).unwrap();
         assert_eq!(inst.call("get", &[], &mut mem, &mut NoHost), Ok(42));
-        // Un start que hace trap se propaga.
+        // A start that traps is propagated.
         let mut b = Builder::new();
         let tv = b.ty(&[], &[]);
         let bad = b.func(tv, 0, &[0x00]);
@@ -1939,7 +1931,7 @@ mod tests {
     fn rejects_bad_modules() {
         assert_eq!(
             Module::parse(b"nope").err(),
-            Some(Error::Malformed("cabecera"))
+            Some(Error::Malformed("header"))
         );
         let mut b = Builder::new();
         let t = b.ty(&[], &[0x7F]);
@@ -1947,45 +1939,45 @@ mod tests {
         b.export("f", 0);
         assert_eq!(
             run(&b.build(), "f", &[]),
-            Err(Error::Unsupported("coma flotante"))
+            Err(Error::Unsupported("floating point"))
         );
         let mut truncated = b.build();
         truncated.truncate(truncated.len() - 3);
         assert!(Module::parse(&truncated).is_err());
     }
 
-    /// Módulos mínimos de la auditoría 6ee19fb (hallazgo 6 y observación),
-    /// contrastados con `WebAssembly.validate` de Node: tres inválidos y un
-    /// `loop` con parámetro que debe devolver 0.
+    /// Minimal modules from audit 6ee19fb (finding 6 and observation),
+    /// checked against Node's `WebAssembly.validate`: three invalid ones and a
+    /// `loop` with a parameter that must return 0.
     #[test]
     fn audit_fixtures_structural_validation_and_loop_params() {
-        // global i32 inicializada con i64.const
+        // i32 global initialized with i64.const
         let wrong_global = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x06, 0x06, 0x01, 0x7F, 0x00, 0x42,
             0x01, 0x0B,
         ];
         assert_eq!(
             Module::parse(&wrong_global).err(),
-            Some(Error::Invalid("tipo del inicializador de global"))
+            Some(Error::Invalid("global initializer type"))
         );
-        // exportación de memoria 99 sin memoria
+        // export of memory 99 without memory
         let missing_memory = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x07, 0x05, 0x01, 0x01, 0x6D, 0x02,
             0x63,
         ];
         assert_eq!(
             Module::parse(&missing_memory).err(),
-            Some(Error::Invalid("exportacion fuera de rango"))
+            Some(Error::Invalid("export out of range"))
         );
-        // memoria con mínimo 2 y máximo 1
+        // memory with minimum 2 and maximum 1
         let inverted_limits = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x05, 0x04, 0x01, 0x01, 0x02, 0x01,
         ];
         assert_eq!(
             Module::parse(&inverted_limits).err(),
-            Some(Error::Invalid("limites de memoria"))
+            Some(Error::Invalid("memory limits"))
         );
-        // loop (param i32) con br_if: cuenta atrás desde 2 y devuelve 0
+        // loop (param i32) with br_if: counts down from 2 and returns 0
         let loop_params = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0A, 0x02, 0x60, 0x00, 0x01,
             0x7F, 0x60, 0x01, 0x7F, 0x01, 0x7F, 0x03, 0x02, 0x01, 0x00, 0x07, 0x08, 0x01, 0x04,
@@ -1996,8 +1988,8 @@ mod tests {
         assert_eq!(run(&loop_params, "main", &[]), Ok(0));
     }
 
-    /// El validador rechaza antes de ejecutar lo que el intérprete solo
-    /// descubriría a mitad de camino (ADR 0019).
+    /// The validator rejects before execution what the interpreter would
+    /// only discover halfway through (ADR 0019).
     #[test]
     fn validator_rejects_ill_typed_modules() {
         fn invalid(code: &[u8], params: &[u8], results: &[u8]) -> Option<Error> {
@@ -2007,47 +1999,47 @@ mod tests {
             b.export("f", f);
             Module::parse(&b.build()).err()
         }
-        // Pila vacia al sumar.
+        // Empty stack when adding.
         assert_eq!(
             invalid(&[0x41, 1, 0x6A], &[], &[0x7F]),
-            Some(Error::Invalid("pila vacia"))
+            Some(Error::Invalid("empty stack"))
         );
-        // i64 donde se espera i32.
+        // i64 where i32 is expected.
         assert_eq!(
             invalid(&[0x42, 1, 0x41, 2, 0x6A], &[], &[0x7F]),
-            Some(Error::Invalid("tipo de operando"))
+            Some(Error::Invalid("operand type"))
         );
-        // Valor sobrante al terminar la funcion.
+        // Leftover value at function end.
         assert_eq!(
             invalid(&[0x41, 1, 0x41, 2], &[], &[0x7F]),
-            Some(Error::Invalid("valores sobrantes al cerrar el bloque"))
+            Some(Error::Invalid("leftover values at block end"))
         );
-        // Etiqueta inexistente.
+        // Nonexistent label.
         assert_eq!(
             invalid(&[0x0C, 5], &[], &[]),
-            Some(Error::Invalid("etiqueta fuera de rango"))
+            Some(Error::Invalid("label out of range"))
         );
-        // `if` con resultado y sin `else`.
+        // `if` with a result and no `else`.
         assert_eq!(
             invalid(&[0x41, 1, 0x04, 0x7F, 0x41, 7, 0x0B], &[], &[0x7F]),
-            Some(Error::Invalid("if sin else con resultados"))
+            Some(Error::Invalid("if without else with results"))
         );
-        // Local y global fuera de rango; opcode desconocido.
+        // Local and global out of range; unknown opcode.
         assert_eq!(
             invalid(&[0x20, 9], &[], &[0x7F]),
-            Some(Error::Invalid("local fuera de rango"))
+            Some(Error::Invalid("local out of range"))
         );
         assert_eq!(
             invalid(&[0x23, 0], &[], &[0x7F]),
-            Some(Error::Invalid("global fuera de rango"))
+            Some(Error::Invalid("global out of range"))
         );
         assert_eq!(
             invalid(&[0xD0], &[], &[]),
             Some(Error::Unsupported("opcode"))
         );
-        // Codigo inalcanzable: la pila es polimorfica y el resto valida.
+        // Unreachable code: the stack is polymorphic and the rest validates.
         assert_eq!(invalid(&[0x00, 0x6A], &[], &[0x7F]), None);
-        // Un modulo correcto sigue pasando.
+        // A correct module still passes.
         assert_eq!(invalid(&[0x20, 0, 0x41, 1, 0x6A], &[0x7F], &[0x7F]), None);
     }
 }

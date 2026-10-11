@@ -1,4 +1,4 @@
-//! ICMP eco (RFC 792): lo justo para `ping`.
+//! ICMP echo (RFC 792): just enough for `ping`.
 
 use crate::{be16, checksum};
 
@@ -14,8 +14,8 @@ pub struct Echo {
 }
 
 impl Echo {
-    /// Analiza un mensaje ICMP; solo eco petición/respuesta con checksum
-    /// válido. Devuelve también la carga útil.
+    /// Parses an ICMP message; only echo request/reply with a valid
+    /// checksum. Also returns the payload.
     pub fn parse(b: &[u8]) -> Option<(Echo, &[u8])> {
         if b.len() < HEADER_LEN || checksum(0, b) != 0 || b[1] != 0 {
             return None;
@@ -35,7 +35,7 @@ impl Echo {
         ))
     }
 
-    /// Escribe cabecera y carga útil con checksum.
+    /// Writes header and payload with checksum.
     pub fn write(&self, payload: &[u8], out: &mut [u8]) -> Option<usize> {
         let len = HEADER_LEN + payload.len();
         if out.len() < len {

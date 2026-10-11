@@ -1,8 +1,8 @@
-# Fase 25 (segunda parte): en el arranque normal init lanza usb_input para el
-# xHCI ademas de los drivers virtio-input, y el servicio de entrada queda
-# con tres dispositivos.
+# Phase 25 (part two): on a normal boot init launches usb_input for the
+# xHCI in addition to the virtio-input drivers, and the input service ends up
+# with three devices.
 name = "usb.hid_boot"
-description = "arranque normal con xHCI: init lanza usb_input junto a los virtio-input"
+description = "normal boot with xHCI: init launches usb_input alongside the virtio-input drivers"
 level = "full"
 areas = ["usb", "input", "init"]
 cmdline = "qemu_exit"
@@ -12,11 +12,11 @@ timeout_secs = 90
 [expect]
 exit = 33
 serial_contains = [
-    "clase 0c.03",
-    "usb-input: dispositivo listo: USB HID Keyboard+Mouse",
-    "input_client: dispositivo 2: USB HID Keyboard+Mouse",
-    "AriInit: servicio de entrada ok",
-    "AriInit: servicios de arranque completados",
+    "class 0c.03",
+    "usb-input: device ready: USB HID Keyboard+Mouse",
+    "input_client: device 2: USB HID Keyboard+Mouse",
+    "AriInit: input service ok",
+    "AriInit: boot services completed",
     "ARICODEOS_KERNEL_READY",
 ]
-serial_absent = ["KERNEL PANIC", "fallo en la inicializacion del xHCI"]
+serial_absent = ["KERNEL PANIC", "xHCI initialization failed"]

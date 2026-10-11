@@ -1,5 +1,5 @@
-//! Cliente del compositor (`aricode-proto::window`): una ventana con su
-//! buffer DMA de contenido y sus eventos.
+//! Compositor client (`aricode-proto::window`): a window with its
+//! content DMA buffer and its events.
 
 use crate::{self as sys, rights, rpc, Error, Handle};
 use aricode_gfx::Canvas;
@@ -10,7 +10,7 @@ use aricode_proto::window::{Op, Reply, Request, Status};
 pub enum WindowError {
     Ipc(Error),
     Status(Status),
-    /// Título demasiado largo o tamaño inválido.
+    /// Title too long or invalid size.
     Invalid,
 }
 
@@ -24,8 +24,8 @@ pub struct Window {
 }
 
 impl Window {
-    /// Crea la ventana: reserva el buffer de contenido con `hardware` y lo
-    /// transfiere al compositor junto con la petición.
+    /// Creates the window: allocates the content buffer with `hardware` and
+    /// transfers it to the compositor along with the request.
     pub fn create(
         service: Handle,
         hardware: Handle,
@@ -62,19 +62,19 @@ impl Window {
         self.id
     }
 
-    /// Lienzo sobre el buffer de contenido.
+    /// Canvas over the content buffer.
     pub fn canvas(&mut self) -> Canvas<'_> {
         let n = (self.width * self.height) as usize;
-        // SAFETY: buffer DMA propio de `width*height*4` bytes, mapeado RW.
+        // SAFETY: our own DMA buffer of `width*height*4` bytes, mapped RW.
         let pixels = unsafe { core::slice::from_raw_parts_mut(self.pixels as *mut u32, n) };
-        Canvas::new(pixels, self.width, self.height, self.width).expect("buffer de la ventana")
+        Canvas::new(pixels, self.width, self.height, self.width).expect("window buffer")
     }
 
     fn call(&self, req: Request, with_buffer: bool) -> Result<Reply, WindowError> {
         let mut extra = [Handle(0); 1];
         let mut n = 0;
         if with_buffer {
-            // `mmio_map` exige READ|WRITE aunque el compositor solo lea.
+            // `mmio_map` requires READ|WRITE even though the compositor only reads.
             extra[0] =
                 sys::handle_duplicate(self.dma, rights::READ | rights::WRITE | rights::TRANSFER)
                     .map_err(WindowError::Ipc)?;
@@ -104,12 +104,12 @@ impl Window {
         r
     }
 
-    /// Pide al compositor que vuelva a pintar el contenido.
+    /// Asks the compositor to repaint the content.
     pub fn present(&self) -> Result<(), WindowError> {
         self.call(self.request(Op::Present), false).map(|_| ())
     }
 
-    /// Siguiente evento, o `None` si vence el plazo.
+    /// Next event, or `None` if the deadline expires.
     pub fn poll(&self, timeout_ms: u32) -> Result<Option<Event>, WindowError> {
         let mut req = self.request(Op::Poll);
         req.timeout_ms = timeout_ms;

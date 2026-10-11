@@ -1,8 +1,8 @@
-# Auditoria e9fdf38, hallazgo 4: si AriBoot no puede persistir el intento del
-# slot pendiente (disco de solo lectura), no arranca ese slot, que podria
-# repetirse sin fin, sino el activo.
+# Audit e9fdf38, finding 4: if AriBoot cannot persist the attempt for the
+# pending slot (read-only disk), it does not boot that slot, which could
+# repeat forever, but the active one instead.
 name = "update.readonly_no_pending_boot"
-description = "sin poder guardar el intento, AriBoot arranca el slot activo"
+description = "unable to save the attempt, AriBoot boots the active slot"
 level = "full"
 areas = ["update", "boot"]
 cmdline = "qemu_exit test=random"
@@ -12,10 +12,10 @@ disk_readonly = true
 [expect]
 exit = 33
 serial_contains = [
-    "slots: estado activo A, pendiente B (3 intentos)",
-    "slots: no se pudo escribir el estado de arranque",
-    "slots: intento del pendiente no persistido: arranque del activo -> slot A",
-    "slots: arrancando desde el slot A (imagen version 1)",
+    "slots: state active A, pending B (3 tries)",
+    "slots: could not write the boot state",
+    "slots: pending try not persisted: booting active -> slot A",
+    "slots: booting from slot A (image version 1)",
     "ARICODEOS_KERNEL_READY",
 ]
 serial_absent = ["KERNEL PANIC", "boot_slot=B"]

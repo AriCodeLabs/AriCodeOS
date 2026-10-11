@@ -3,6 +3,6 @@ name = "aricode-rtl8169"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Familia Realtek RTL8169/8168/8101: registros, descriptores y secuencia de arranque (sin E/S propia)"
+description = "Realtek RTL8169/8168/8101 family: registers, descriptors and bring-up sequence (no I/O of its own)"
 
 [dependencies]

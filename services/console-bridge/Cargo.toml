@@ -3,7 +3,7 @@ name = "ari-console-bridge"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Puente de consola de AriCodeOS: lleva las pulsaciones de los teclados de usuario (virtio, USB HID) al anillo de entrada de consola del kernel"
+description = "AriCodeOS console bridge: forwards key presses from user-space keyboards (virtio, USB HID) to the kernel console input ring"
 publish = false
 
 [[bin]]

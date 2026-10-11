@@ -3,7 +3,7 @@ name = "aricode-x86-cpu"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Codificación de descriptores x86-64 (GDT, TSS, IDT) y tabla de excepciones (no_std)"
+description = "x86-64 descriptor encoding (GDT, TSS, IDT) and exception table (no_std)"
 
 [lib]
 path = "src/lib.rs"

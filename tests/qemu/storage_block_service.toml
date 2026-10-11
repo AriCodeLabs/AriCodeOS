@@ -1,9 +1,9 @@
-# Fase 19: el driver virtio-blk es un servicio residente; init crea su
-# endpoint, lo lanza con las capabilities del dispositivo y un cliente lee y
-# escribe por IPC con su propio buffer DMA (el dispositivo escribe en el
-# directamente). El disco lleva GPT con una particion AriCodeOS.
+# Phase 19: the virtio-blk driver is a resident service; init creates its
+# endpoint, launches it with the device capabilities and a client reads and
+# writes over IPC with its own DMA buffer (the device writes into it
+# directly). The disk has a GPT with an AriCodeOS partition.
 name = "storage.block_service"
-description = "servicio de bloques por IPC: GPT, info, lectura/escritura zero-copy, errores limpios"
+description = "block service over IPC: GPT, info, zero-copy read/write, clean errors"
 level = "full"
 areas = ["storage", "virtio", "init"]
 cmdline = "qemu_exit"
@@ -11,11 +11,11 @@ cmdline = "qemu_exit"
 [expect]
 exit = 33
 serial_contains = [
-    "virtio-blk: GPT con 5 particion(es)",
+    "virtio-blk: GPT with 5 partition(s)",
     "virtio-blk:   ARI0 LBA 34..6143",
-    "virtio-blk: sirviendo peticiones",
-    "blk_client: info, lectura y escritura por IPC ok",
-    "AriInit: servicio de bloques ok",
+    "virtio-blk: serving requests",
+    "blk_client: info, read and write over IPC ok",
+    "AriInit: block service ok",
     "ARICODEOS_KERNEL_READY",
 ]
-serial_absent = ["KERNEL PANIC", "fallo en la", "tabla GPT corrupta", "sin GPT"]
+serial_absent = ["KERNEL PANIC", "initialization failed", "corrupt GPT table", "no GPT"]

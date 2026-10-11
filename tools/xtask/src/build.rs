@@ -1,4 +1,4 @@
-//! Compilación de las crates del sistema y comprobaciones estáticas.
+//! Builds the system crates and runs static checks.
 
 use crate::{root, Result};
 use std::path::{Path, PathBuf};
@@ -9,8 +9,8 @@ pub const UEFI_TARGET: &str = "x86_64-unknown-uefi";
 pub const KERNEL_TARGET: &str = "x86_64-unknown-none";
 pub const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
-/// Paquetes del workspace y el target con el que se compilan/lintan.
-/// Única fuente de verdad para `check` y para los tests unitarios de host.
+/// Workspace packages and the target they are built/linted with.
+/// Single source of truth for `check` and for the host unit tests.
 pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("boot-protocol", None),
     ("aricode-elf", None),
@@ -81,7 +81,7 @@ pub fn run(mut c: Command) -> Result {
     if st.success() {
         Ok(())
     } else {
-        Err(format!("comando fallido: {c:?}"))
+        Err(format!("command failed: {c:?}"))
     }
 }
 
@@ -96,12 +96,12 @@ fn profile_dir(release: bool) -> &'static str {
 pub struct Artifacts {
     pub ariboot: PathBuf,
     pub kernel: PathBuf,
-    /// Directorio con `init` y los programas de usuario.
+    /// Directory with `init` and the user programs.
     pub user_bin: PathBuf,
 }
 
-/// Programas que van al initrd: `init`, los servicios, las aplicaciones y los
-/// binarios de `user/testprogs`.
+/// Programs that go into the initrd: `init`, the services, the applications
+/// and the `user/testprogs` binaries.
 pub fn initrd_programs() -> Result<Vec<String>> {
     let mut names = vec![
         String::from("init"),
@@ -136,8 +136,8 @@ pub fn initrd_programs() -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// Manifiestos de aplicaciones (`apps/*/NOMBRE.manifest`): van al initrd con
-/// su nombre de fichero, junto al programa que describen.
+/// Application manifests (`apps/*/NAME.manifest`): they go into the initrd
+/// under their file name, next to the program they describe.
 pub fn initrd_manifests() -> Result<Vec<(String, PathBuf)>> {
     let apps = root().join("apps");
     let mut out = Vec::new();
@@ -160,8 +160,8 @@ pub fn initrd_manifests() -> Result<Vec<(String, PathBuf)>> {
     Ok(out)
 }
 
-/// Compila `init` y los programas de usuario (ELF estáticos en 0x400000) y
-/// devuelve el directorio con los binarios.
+/// Builds `init` and the user programs (static ELFs at 0x400000) and
+/// returns the directory with the binaries.
 pub fn build_user_programs(release: bool) -> Result<PathBuf> {
     for pkg in [
         "user-testprogs",
@@ -191,18 +191,18 @@ pub fn build_user_programs(release: bool) -> Result<PathBuf> {
         if release {
             c.arg("--release");
         }
-        // Mismos flags que el kernel (.cargo/config.toml): el modelo de código
-        // `kernel` admite direcciones absolutas de 32 bits con signo, así que
-        // 0x400000 es válido, y coincide con el `core` precompilado (LTO).
+        // Same flags as the kernel (.cargo/config.toml): the `kernel` code
+        // model allows signed 32-bit absolute addresses, so 0x400000 is
+        // valid, and it matches the precompiled `core` (LTO).
         run(c)?;
     }
     let out = root()
         .join("target")
         .join(KERNEL_TARGET)
         .join(profile_dir(release));
-    // Un programa sin su `build.rs` (`aricode_build::user_program`) se enlaza
-    // en la direccion por defecto y el kernel lo rechaza al arrancar ("el
-    // ELF no cabe en la region de usuario"): mejor fallar aqui.
+    // A program without its `build.rs` (`aricode_build::user_program`) is
+    // linked at the default address and the kernel rejects it at boot (the
+    // ELF does not fit in the user region): better to fail here.
     for name in initrd_programs()? {
         let bin = out.join(&name);
         let header = std::fs::read(&bin).map_err(|e| format!("{}: {e}", bin.display()))?;
@@ -211,33 +211,33 @@ pub fn build_user_programs(release: bool) -> Result<PathBuf> {
     Ok(out)
 }
 
-/// Direccion base de los programas de usuario (`aricode-build`).
+/// Base address of the user programs (`aricode-build`).
 pub const USER_BASE: u64 = 0x40_0000;
 
-/// El punto de entrada del ELF debe estar en la region de usuario.
+/// The ELF entry point must be in the user region.
 pub fn check_user_elf(name: &str, elf: &[u8]) -> Result {
     if elf.len() < 32 || &elf[..4] != b"\x7fELF" {
-        return Err(format!("{name}: no es un ELF"));
+        return Err(format!("{name}: not an ELF"));
     }
     let entry = u64::from_le_bytes(elf[24..32].try_into().expect("8 bytes"));
     if entry < USER_BASE {
         return Err(format!(
-            "{name}: punto de entrada {entry:#x} fuera de la region de usuario (falta build.rs con aricode_build::user_program)"
+            "{name}: entry point {entry:#x} outside the user region (missing build.rs with aricode_build::user_program)"
         ));
     }
     Ok(())
 }
 
-/// Programa construido fuera del árbol y empaquetado (ADR 0017).
+/// Program built out of tree and packaged (ADR 0017).
 pub struct ExternalApp {
     pub name: String,
     pub version: u32,
-    /// Paquete firmado (`aricode-pkg`).
+    /// Signed package (`aricode-pkg`).
     pub package: Vec<u8>,
 }
 
 impl ExternalApp {
-    /// Fichero que va a AriFS como programa instalado.
+    /// File that goes to AriFS as an installed program.
     pub fn installed(&self) -> (String, Vec<u8>) {
         (
             format!("apps/{}{}", self.name, aricode_pkg::EXTENSION),
@@ -246,12 +246,12 @@ impl ExternalApp {
     }
 }
 
-/// Compila `dir/Cargo.toml` (un workspace propio con el SDK por ruta) desde
-/// la raíz del repositorio, para que `rust-toolchain.toml` y
-/// `.cargo/config.toml` se apliquen igual que a los programas del initrd, con
-/// `APP_VERSION` fijada; firma el paquete con la clave de desarrollo. `dir`
-/// lleva un único `NOMBRE.manifest`, que da el nombre del binario. Con
-/// `corrupt`, la firma no verifica (pruebas).
+/// Builds `dir/Cargo.toml` (its own workspace with the SDK by path) from the
+/// repository root, so that `rust-toolchain.toml` and `.cargo/config.toml`
+/// apply just as they do to the initrd programs, with `APP_VERSION` set;
+/// signs the package with the development key. `dir` holds a single
+/// `NAME.manifest`, which gives the binary name. With `corrupt`, the
+/// signature does not verify (tests).
 pub fn build_external(
     dir: &Path,
     version: u32,
@@ -269,7 +269,7 @@ pub fn build_external(
         .filter(|p| p.extension().is_some_and(|x| x == "manifest"));
     let (Some(manifest_path), None) = (manifests.next(), manifests.next()) else {
         return Err(format!(
-            "{}: hace falta exactamente un NOMBRE.manifest",
+            "{}: exactly one NAME.manifest is required",
             dir.display()
         ));
     };
@@ -282,7 +282,7 @@ pub fn build_external(
         .join("external")
         .join(format!("{name}-v{version}"));
     println!(
-        "[xtask] build externo {name} v{version} ({}, {KERNEL_TARGET})",
+        "[xtask] external build {name} v{version} ({}, {KERNEL_TARGET})",
         dir.display()
     );
     let mut c = cargo();
@@ -308,7 +308,7 @@ pub fn build_external(
             .join(crate::keys::SEED_FILE),
     )?;
     let package = aricode_pkg::build(&name, version, &elf, &manifest, &seed, corrupt)
-        .ok_or_else(|| format!("{name}: nombre de paquete invalido"))?;
+        .ok_or_else(|| format!("{name}: invalid package name"))?;
     Ok(ExternalApp {
         name,
         version,
@@ -316,7 +316,7 @@ pub fn build_external(
     })
 }
 
-/// `cargo xtask app-pack DIR [--version N]`: deja `build/pkgs/NOMBRE-N.aripkg`.
+/// `cargo xtask app-pack DIR [--version N]`: produces `build/pkgs/NAME-N.aripkg`.
 pub fn app_pack(dir: &Path, version: u32, release: bool) -> Result {
     let app = build_external(dir, version, release, false)?;
     let out = crate::build_dir().join("pkgs");
@@ -329,7 +329,7 @@ pub fn app_pack(dir: &Path, version: u32, release: bool) -> Result {
     ));
     std::fs::write(&file, &app.package).map_err(|e| format!("{}: {e}", file.display()))?;
     println!(
-        "[xtask] paquete {} v{} ({} bytes) en {}",
+        "[xtask] package {} v{} ({} bytes) at {}",
         app.name,
         app.version,
         app.package.len(),
@@ -338,8 +338,8 @@ pub fn app_pack(dir: &Path, version: u32, release: bool) -> Result {
     Ok(())
 }
 
-/// Compila los módulos WebAssembly de ejemplo y deja `demo.wasm` en `build/`,
-/// desde donde `write_test_disk` lo copia al directorio privado del runner.
+/// Builds the sample WebAssembly modules and leaves `demo.wasm` in `build/`,
+/// from where `write_test_disk` copies it into the runner's private directory.
 pub fn build_wasm_programs(release: bool) -> Result {
     println!("[xtask] build wasm-demo ({WASM_TARGET})");
     let mut c = cargo();
@@ -359,8 +359,8 @@ pub fn build_wasm_programs(release: bool) -> Result {
     Ok(())
 }
 
-/// Compila AriBoot y AriKernel. Un único binario de cada uno sirve para todos
-/// los escenarios: el comportamiento de test se controla por cmdline.
+/// Builds AriBoot and AriKernel. A single binary of each serves every
+/// scenario: test behaviour is controlled through the cmdline.
 pub fn build_os(release: bool) -> Result<Artifacts> {
     let user_bin = build_user_programs(release)?;
     build_wasm_programs(release)?;
@@ -387,7 +387,7 @@ pub fn build_os(release: bool) -> Result<Artifacts> {
     })
 }
 
-/// Tests unitarios de host de todas las crates que no son bare-metal.
+/// Host unit tests of every crate that is not bare-metal.
 pub fn unit_tests() -> Result {
     let mut c = cargo();
     c.args(["test", "--workspace"]);

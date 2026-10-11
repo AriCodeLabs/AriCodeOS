@@ -3,7 +3,7 @@ name = "aricode-pci"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "PCI/PCIe: direccionamiento ECAM, cabecera de configuración, BARs y capabilities (no_std + alloc)"
+description = "PCI/PCIe: ECAM addressing, configuration header, BARs and capabilities (no_std + alloc)"
 
 [lib]
 path = "src/lib.rs"

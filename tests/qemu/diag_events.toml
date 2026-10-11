@@ -1,8 +1,8 @@
-# Etapa 5 (diagnostico consultable): el kernel guarda los sucesos recientes
-# (procesos creados y terminados, fallos) en un anillo que `diag` muestra
-# con su instante; un proceso que el kernel mata aparece con el motivo.
+# Stage 5 (queryable diagnostics): the kernel keeps recent events
+# (processes created and exited, faults) in a ring that `diag` shows
+# with their timestamp; a process killed by the kernel appears with the reason.
 name = "diag.events"
-description = "diag muestra los sucesos recientes del kernel: procesos terminados y matados con motivo"
+description = "diag shows recent kernel events: exited processes and killed ones with the reason"
 level = "full"
 areas = ["diag", "shell", "user"]
 cmdline = "qemu_exit shell"
@@ -12,13 +12,13 @@ stdin = ["run hello_app 4", "run kernel_read", "diag", "shutdown"]
 [expect]
 exit = 33
 serial_contains = [
-    "run: hello_app termino con 0",
-    "run: kernel_read: fue terminado por el kernel",
-    "sucesos recientes del kernel:",
-    "s] proceso 19 'hello_app' creado",
-    "s] proceso 19 'hello_app' salio con codigo 0",
-    "s] proceso 20 terminado por fallo: #PF lectura",
-    "=== fin del diagnostico ===",
+    "run: hello_app exited with 0",
+    "run: kernel_read: was killed by the kernel",
+    "recent kernel events:",
+    "s] process 19 'hello_app' created",
+    "s] process 19 'hello_app' exited with code 0",
+    "s] process 20 killed by fault: #PF read",
+    "=== end of diagnostics ===",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "diag: sin acceso"]
+serial_absent = ["KERNEL PANIC", "diag: no access"]

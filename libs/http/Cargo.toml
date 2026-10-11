@@ -3,7 +3,7 @@ name = "aricode-http"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "HTTP/1.1 mínimo de AriCodeOS: peticiones GET y análisis de respuestas (no_std, sin alloc)"
+description = "AriCodeOS minimal HTTP/1.1: GET requests and response parsing (no_std, no alloc)"
 
 [lib]
 path = "src/lib.rs"

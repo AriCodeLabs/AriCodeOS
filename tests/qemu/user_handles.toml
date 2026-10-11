@@ -1,13 +1,13 @@
-# Fase 12: un proceso no puede usar handles inventados, cerrados, sin derechos
-# ni escalar derechos al duplicar. Exito = codigo 11; cualquier otro codigo
-# es el paso que fallo.
+# Phase 12: a process cannot use forged or closed handles, handles without rights,
+# or escalate rights when duplicating. Success = code 11; any other code
+# is the step that failed.
 name = "user.handles"
-description = "handles: object_kind, inventado, duplicado sin derechos, escalada, cerrado, objeto equivocado"
+description = "handles: object_kind, forged, duplicated without rights, escalation, closed, wrong object"
 level = "full"
 areas = ["user", "capabilities"]
 cmdline = "qemu_exit test=user_handles"
 
 [expect]
 exit = 33
-serial_contains = ["'handles' salio con codigo 11", "ARICODEOS_KERNEL_READY"]
+serial_contains = ["'handles' exited with code 11", "ARICODEOS_KERNEL_READY"]
 serial_absent = ["KERNEL PANIC", "USER FAULT", "ok\n"]

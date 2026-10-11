@@ -1,13 +1,13 @@
-//! Gestor de memoria virtual (Fase 6): tablas de páginas propias del kernel.
+//! Virtual memory manager (Phase 6): the kernel's own page tables.
 //!
-//! Al activarse sustituye a las tablas del cargador:
-//! - la imagen del kernel se mapea por secciones del linker script con W^X
-//!   (.text RX, .rodata R, .data/.bss RW, todo NX salvo .text);
-//! - el mapa físico lineal (`PHYS_MAP_BASE`) se reconstruye RW+NX;
-//! - el framebuffer se cubre aunque quede fuera de la RAM;
-//! - desaparece la identidad;
-//! - una pila nueva con guard page sustituye a la del cargador;
-//! - la memoria de arranque (`Boot`) vuelve al PMM.
+//! When activated they replace the loader's tables:
+//! - the kernel image is mapped per linker-script section with W^X
+//!   (.text RX, .rodata R, .data/.bss RW, everything NX except .text);
+//! - the linear physical map (`PHYS_MAP_BASE`) is rebuilt RW+NX;
+//! - the framebuffer is covered even if it lies outside RAM;
+//! - the identity map goes away;
+//! - a new stack with a guard page replaces the loader's;
+//! - boot memory (`Boot`) goes back to the PMM.
 
 use super::phys;
 use super::pmm;
@@ -19,14 +19,14 @@ use aricode_x86_paging::{
 use boot_protocol::{BootInfo, MemoryRegionKind, KERNEL_VIRT_BASE};
 use log::{debug, info};
 
-/// Pila principal del kernel: 64 KiB justo debajo de la imagen, con una
-/// guard page sin mapear por debajo.
+/// Main kernel stack: 64 KiB right below the image, with an unmapped guard
+/// page below it.
 pub const KERNEL_STACK_SIZE: u64 = 64 * 1024;
 pub const KERNEL_STACK_TOP: u64 = KERNEL_VIRT_BASE - PAGE_SIZE;
 pub const KERNEL_STACK_BOTTOM: u64 = KERNEL_STACK_TOP - KERNEL_STACK_SIZE;
 pub const KERNEL_STACK_GUARD: u64 = KERNEL_STACK_BOTTOM - PAGE_SIZE;
 
-/// Frames para tablas de páginas desde el PMM.
+/// Frames for page tables from the PMM.
 pub struct PmmFrames;
 
 impl FrameAlloc for PmmFrames {
@@ -52,22 +52,22 @@ fn sym(s: &u8) -> u64 {
     s as *const u8 as u64
 }
 
-/// Construye y activa las tablas propias. Devuelve la cima de la pila nueva.
+/// Builds and activates the kernel's own tables. Returns the top of the new stack.
 ///
 /// # Panics
-/// Si no hay frames suficientes o el layout del kernel no es el esperado.
+/// If there are not enough frames or the kernel layout is not as expected.
 pub fn init(info: &BootInfo) -> u64 {
     let offset = phys::offset();
     let limit = phys::limit();
-    let mut m = Mapper::new(PmmFrames, OffsetMap(offset)).expect("vmm: sin frames para el PML4");
-    // La mitad alta completa (256 PDPT, 1 MiB) existe desde el principio:
-    // los procesos la comparten y ven todo mapeo futuro del kernel.
+    let mut m = Mapper::new(PmmFrames, OffsetMap(offset)).expect("vmm: no frames for the PML4");
+    // The whole higher half (256 PDPTs, 1 MiB) exists from the start:
+    // processes share it and see every future kernel mapping.
     m.preallocate_kernel_half()
-        .expect("vmm: sin frames para la mitad alta");
+        .expect("vmm: no frames for the higher half");
 
-    // Mapa físico lineal.
+    // Linear physical map.
     m.map_range_2m(offset, 0, limit, WRITABLE | NO_EXECUTE | GLOBAL)
-        .expect("vmm: mapa fisico");
+        .expect("vmm: physical map");
     let fb = &info.framebuffer;
     if fb.address != 0 {
         let start = (fb.address & !(HUGE_2M - 1)).max(limit);
@@ -83,8 +83,8 @@ pub fn init(info: &BootInfo) -> u64 {
         }
     }
 
-    // Imagen del kernel por secciones (W^X).
-    // SAFETY: símbolos definidos por kernel.ld; solo se toma su dirección.
+    // Kernel image per section (W^X).
+    // SAFETY: symbols defined by kernel.ld; only their address is taken.
     let (text, rodata, data) = unsafe {
         (
             (sym(&__text_start), sym(&__text_end)),
@@ -98,36 +98,36 @@ pub fn init(info: &BootInfo) -> u64 {
         (".rodata", rodata, GLOBAL | NO_EXECUTE),
         (".data/.bss", data, GLOBAL | NO_EXECUTE | WRITABLE),
     ] {
-        // Los símbolos de inicio están alineados por el linker script; los de
-        // fin marcan el último byte usado y la siguiente sección empieza en la
-        // página siguiente, así que redondear hacia arriba no solapa nada.
-        assert!(start.is_multiple_of(PAGE_SIZE), "{name} no alineada");
+        // Start symbols are aligned by the linker script; end symbols mark
+        // the last byte used and the next section starts on the next page,
+        // so rounding up overlaps nothing.
+        assert!(start.is_multiple_of(PAGE_SIZE), "{name} not aligned");
         let end = end.next_multiple_of(PAGE_SIZE);
         m.map_range_4k(start, kernel_phys(start), end - start, flags)
             .unwrap_or_else(|e| panic!("vmm: {name}: {e:?}"));
         debug!("vmm: {name:<11} {start:#x}..{end:#x} {}", describe(flags));
     }
 
-    // Pila nueva con guard page: la guard simplemente no se mapea.
+    // New stack with a guard page: the guard is simply not mapped.
     for virt in (KERNEL_STACK_BOTTOM..KERNEL_STACK_TOP).step_by(PAGE_SIZE as usize) {
-        let frame = pmm::with(|p| p.allocate()).expect("vmm: sin frames para la pila");
+        let frame = pmm::with(|p| p.allocate()).expect("vmm: no frames for the stack");
         m.map_4k(virt, frame.addr(), WRITABLE | NO_EXECUTE | GLOBAL)
-            .expect("vmm: pila");
+            .expect("vmm: stack");
     }
     assert_eq!(
         m.translate(KERNEL_STACK_GUARD),
         None,
-        "la guard page no debe estar mapeada"
+        "the guard page must not be mapped"
     );
 
     let root = m.root_phys();
-    // SAFETY: las tablas nuevas mapean el código que se está ejecutando, la
-    // pila actual (mapa físico) y todos los datos del kernel; `root` es un
-    // PML4 completo construido arriba.
+    // SAFETY: the new tables map the code being executed, the current stack
+    // (physical map) and all kernel data; `root` is a complete PML4 built
+    // above.
     unsafe { core::arch::asm!("mov cr3, {}", in(reg) root, options(nostack, preserves_flags)) };
     *VMM.lock() = Some(m);
     info!(
-        "vmm: tablas propias activas (pml4 {root:#x}), W^X en la imagen, pila {:#x}..{:#x} con guard {:#x}",
+        "vmm: own tables active (pml4 {root:#x}), W^X on the image, stack {:#x}..{:#x} with guard {:#x}",
         KERNEL_STACK_BOTTOM, KERNEL_STACK_TOP, KERNEL_STACK_GUARD
     );
 
@@ -135,16 +135,16 @@ pub fn init(info: &BootInfo) -> u64 {
     KERNEL_STACK_TOP
 }
 
-/// Devuelve al PMM las regiones `Boot` del mapa UEFI (cargador, boot
-/// services y las tablas de AriBoot, ya inactivas) salvo las páginas que el
-/// kernel sigue usando (`BootInfo::kernel_ranges`: imagen, pila inicial,
-/// `BootInfo`, initrd y cmdline), que vuelven a reservarse. El buffer del
-/// propio mapa de memoria se libera también y no se vuelve a leer.
+/// Returns the `Boot` regions of the UEFI map (loader, boot services and
+/// AriBoot's now inactive tables) to the PMM, except the pages the kernel
+/// still uses (`BootInfo::kernel_ranges`: image, initial stack, `BootInfo`,
+/// initrd and cmdline), which are reserved again. The memory map buffer
+/// itself is freed too and never read again.
 fn reclaim_boot_memory(info: &BootInfo) {
     let before = pmm::stats().free_bytes();
-    // SAFETY: mapa físico activo (reconstruido arriba) y buffer intacto.
+    // SAFETY: physical map active (rebuilt above) and buffer intact.
     for d in unsafe { info.memory_regions() }.filter(|d| d.kind() == MemoryRegionKind::Boot) {
-        // La memoria baja sigue reservada (trampolín SMP, dispositivos heredados).
+        // Low memory stays reserved (SMP trampoline, legacy devices).
         let start = d.phys_start.max(pmm::LOW_RESERVED_END);
         if start < d.end() {
             pmm::with(|p| p.free_range(start, d.end()));
@@ -158,7 +158,7 @@ fn reclaim_boot_memory(info: &BootInfo) {
     }
     let s = pmm::stats();
     info!(
-        "vmm: {} MiB de memoria de arranque devueltos al PMM ({} KiB conservados para el kernel, {} MiB libres)",
+        "vmm: {} MiB of boot memory returned to the PMM ({} KiB kept for the kernel, {} MiB free)",
         s.free_bytes().saturating_sub(before) >> 20,
         kept >> 10,
         s.free_bytes() >> 20
@@ -174,65 +174,61 @@ fn describe(flags: u64) -> &'static str {
     }
 }
 
-/// Acceso exclusivo a las tablas activas.
+/// Exclusive access to the active tables.
 ///
 /// # Panics
-/// Si `init` no se ha ejecutado.
+/// If `init` has not run.
 pub fn with<R>(f: impl FnOnce(&mut KernelMapper) -> R) -> R {
     let mut guard = VMM.lock();
-    f(guard.as_mut().expect("VMM no inicializado"))
+    f(guard.as_mut().expect("VMM not initialized"))
 }
 
-/// Invalida la traducción de `virt` en esta CPU y, por IPI, en las demás
-/// (Fase 32). Para páginas de la mitad del kernel que otra CPU puede haber
-/// usado. Debe llamarse con interrupciones habilitadas y sin locks tomados.
+/// Invalidates the translation of `virt` on this CPU and, via IPI, on the
+/// others (Phase 32). For kernel-half pages another CPU may have used. Must
+/// be called with interrupts enabled and no locks held.
 pub fn flush_page(virt: u64) {
-    // SAFETY: invalidación de una entrada de TLB; sin efectos en memoria.
+    // SAFETY: invalidation of a TLB entry; no memory effects.
     unsafe { core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags)) };
     crate::arch::x86_64::smp::flush_others(Some(virt));
 }
 
-/// `true` si `addr` cae en la guard page de la pila del kernel.
+/// `true` if `addr` falls in the kernel stack guard page.
 pub fn in_stack_guard(addr: u64) -> bool {
     (KERNEL_STACK_GUARD..KERNEL_STACK_BOTTOM).contains(&addr)
 }
 
-/// Autoprueba (`test=vmm`): traducciones coherentes con lo que se mapeó,
-/// mapeo y desmapeo de una página nueva, y errores esperados.
+/// Self-test (`test=vmm`): translations consistent with what was mapped,
+/// mapping and unmapping a new page, and expected errors.
 pub fn selftest() {
     let _probe_virt = with(|m| {
-        // .text es ejecutable y no escribible; .data al revés.
-        // SAFETY: solo direcciones de símbolos.
+        // .text is executable and not writable; .data the other way round.
+        // SAFETY: only symbol addresses.
         let (text, data) = unsafe { (sym(&__text_start), sym(&__data_start)) };
-        let (_, tf) = m.translate(text).expect("text mapeado");
+        let (_, tf) = m.translate(text).expect("text mapped");
         assert!(
             tf & NO_EXECUTE == 0 && tf & WRITABLE == 0,
-            ".text debe ser R-X"
+            ".text must be R-X"
         );
-        let (_, df) = m.translate(data).expect("data mapeado");
+        let (_, df) = m.translate(data).expect("data mapped");
         assert!(
             df & NO_EXECUTE != 0 && df & WRITABLE != 0,
-            ".data debe ser RW-"
+            ".data must be RW-"
         );
-        // El mapa físico traduce por desplazamiento.
+        // The physical map translates by offset.
         let probe = 0x20_0000u64;
         assert_eq!(
             m.translate(phys::phys_to_virt(probe)).map(|t| t.0),
             Some(probe)
         );
-        // La identidad ya no existe.
-        assert_eq!(
-            m.translate(probe),
-            None,
-            "la identidad debe haber desaparecido"
-        );
+        // The identity map no longer exists.
+        assert_eq!(m.translate(probe), None, "the identity map must be gone");
         assert_eq!(m.translate(KERNEL_STACK_GUARD), None);
-        // Mapear, escribir, leer y desmapear una página nueva.
+        // Map, write, read and unmap a new page.
         let frame = pmm::with(|p| p.allocate()).expect("frame");
         let virt = 0xFFFF_9000_0000_0000u64;
         m.map_4k(virt, frame.addr(), WRITABLE | NO_EXECUTE)
             .expect("map");
-        // SAFETY: página recién mapeada RW, exclusiva de esta prueba.
+        // SAFETY: freshly mapped RW page, exclusive to this test.
         unsafe {
             (virt as *mut u64).write_volatile(0x5EA5_0DE5);
             assert_eq!(
@@ -250,7 +246,7 @@ pub fn selftest() {
         let _ = FRAME_SIZE;
         virt
     });
-    // Fuera del lock del VMM: la invalidación avisa a las demás CPUs.
+    // Outside the VMM lock: the invalidation notifies the other CPUs.
     flush_page(0xFFFF_9000_0000_0000u64);
-    info!("vmm selftest ok (W^X, mapa fisico, sin identidad, map/unmap)");
+    info!("vmm selftest ok (W^X, physical map, no identity map, map/unmap)");
 }

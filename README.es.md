@@ -1,6 +1,6 @@
 # AriCodeOS
 
-*Versión en español. El README principal, [README.md](README.md), está en inglés para colaboradores; las guías de incorporación traducidas están en [docs/en/](docs/en/). El resto de la documentación es en español y es la canónica.*
+*Traducción al español de [README.md](README.md). El inglés es el idioma canónico del proyecto: el código, los mensajes, el documento maestro [AriCodeOS.md](AriCodeOS.md), la documentación de `docs/` (auditorías incluidas) y `tests/README.md` están en inglés.*
 
 Sistema operativo desde cero: microkernel en Rust `no_std`, arranque UEFI,
 x86-64, seguridad por capabilities y drivers en espacio de usuario.
@@ -114,7 +114,7 @@ boot/            AriBoot: cargador UEFI (crate `ariboot`)
 kernel/          AriKernel (crate `arikernel`), ELF64 en la mitad alta
 tools/xtask/     automatización: build, imagen, QEMU, tests, lint
 tests/qemu/      escenarios de integración declarativos (TOML)
-docs/            arquitectura, flujo de trabajo y ADRs
+docs/            arquitectura, flujo de trabajo, guía del SDK, ADRs y auditorías
 build/           salida generada (ESP, OVMF_VARS, disk.img, logs); no versionar
 ```
 

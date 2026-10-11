@@ -1,61 +1,61 @@
-# ADR 0011: Ciclo de vida de los servicios residentes y estado consultable
+# ADR 0011: Lifecycle of resident services and queryable status
 
-- **Fecha:** 2026-09-28
-- **Estado:** Aceptada
+- **Date:** 2026-09-28
+- **Status:** Accepted
 
-## Contexto
+## Context
 
-Hasta 0.6.0, `init` lanzaba cada driver y servicio residente una vez y solo
-comprobaba su salida en el arranque. Un servicio que moría después dejaba a
-sus clientes esperando en un endpoint sin servidor, y nada informaba de ello.
-El estudio `docs/audits/2026-09-28-referentes-capacidades-oportunidades.md`
-(etapa 1, "recuperación observable") pide un contrato común de vida.
+Up to 0.6.0, `init` launched each driver and resident service once and only
+checked its exit during boot. A service that died later left its clients
+waiting on an endpoint with no server, and nothing reported it.
+The study `docs/audits/2026-09-28-referentes-capacidades-oportunidades.md`
+(stage 1, "observable recovery") calls for a common lifecycle contract.
 
-## Decisión
+## Decision
 
-1. **Estados y generaciones** (`libs/supervisor`, sin dependencias, probado en
-   host): `Stopped`, `Starting`, `Ready`, `Degraded`, `Failed`. Cada arranque
-   de un servicio recibe una generación nueva. Un servicio es obligatorio u
-   opcional: si un opcional agota su presupuesto, el sistema queda
-   degradado; si lo agota uno obligatorio, fallido.
-2. **Reinicio con presupuesto**: tras una muerte (salida, fallo o plazo de
-   arranque vencido) el supervisor espera `backoff_initial · 2^(n-1)` ms,
-   acotado a `backoff_max`, hasta `max_restarts` veces; tras `stable_ms` en
-   `Ready` el presupuesto se restaura. Política por defecto para drivers:
-   5 reinicios, 100 ms a 5 s, plazo de arranque 5 s, estabilidad 60 s.
-3. **El endpoint es de init y no cambia**: la identidad estable de un servicio
-   es su endpoint; cada generación recibe un duplicado. Los clientes siguen
-   enviando al mismo endpoint y la nueva generación atiende lo encolado.
-   Una función PCI cuyo driver murió puede reclamarse de nuevo: el kernel la
-   considera libre cuando ya no existe ningún handle de su objeto de
-   configuración (`PciDevice::claimed` es un `Weak`).
-4. **Publicar solo lo que responde**: un servicio con sonda (`Info` de
-   entrada, `ping`) se publica cuando contesta; si no contesta o su proceso
-   termina, cuenta como muerte por plazo de arranque.
-5. **Estado consultable**: protocolo `status` v1 (`sdk/proto`, protocolo 7)
-   servido por init en el endpoint del broker, una petición por servicio;
-   `services --detail` en el shell lo muestra. No lleva contenido privado.
-6. **Test por cmdline** (ADR 0007): `restart_storm` somete a un servicio de
-   prueba a 100 reinicios mientras fsd sigue atendiendo y comprueba que la
-   memoria libre vuelve al nivel anterior.
+1. **States and generations** (`libs/supervisor`, no dependencies, tested on
+   the host): `Stopped`, `Starting`, `Ready`, `Degraded`, `Failed`. Each start
+   of a service gets a new generation. A service is mandatory or
+   optional: if an optional one exhausts its budget, the system becomes
+   degraded; if a mandatory one does, failed.
+2. **Restart with a budget**: after a death (exit, fault or expired start
+   deadline) the supervisor waits `backoff_initial · 2^(n-1)` ms,
+   capped at `backoff_max`, up to `max_restarts` times; after `stable_ms` in
+   `Ready` the budget is restored. Default policy for drivers:
+   5 restarts, 100 ms to 5 s, start deadline 5 s, stability 60 s.
+3. **The endpoint belongs to init and does not change**: the stable identity of a service
+   is its endpoint; each generation receives a duplicate. Clients keep
+   sending to the same endpoint and the new generation serves what is queued.
+   A PCI function whose driver died can be claimed again: the kernel
+   considers it free once no handle to its configuration object exists
+   any more (`PciDevice::claimed` is a `Weak`).
+4. **Publish only what responds**: a service with a probe (`Info` on
+   startup, `ping`) is published when it answers; if it does not answer or its process
+   exits, it counts as a death by start deadline.
+5. **Queryable status**: protocol `status` v1 (`sdk/proto`, protocol 7)
+   served by init on the broker endpoint, one request per service;
+   `services --detail` in the shell shows it. It carries no private content.
+6. **Test via cmdline** (ADR 0007): `restart_storm` subjects a test
+   service to 100 restarts while fsd keeps serving and checks that
+   free memory returns to its previous level.
 
-## Nota (auditoría 6ee19fb, hallazgo 4)
+## Note (audit 6ee19fb, finding 4)
 
-Cuando la sonda de arranque vence, el supervisor no da por muerta la
-generación sin más: si el proceso sigue vivo lo termina con `process_kill`
-y espera a que el kernel lo recoja (hasta 2 s) antes de anunciar la muerte
-y programar la siguiente; así la nueva generación no compite con la
-anterior por sus dispositivos PCI. Si aun así no termina, el servicio queda
-fallido sin relanzar (`services.start_timeout`).
+When the start probe expires, the supervisor does not simply consider the
+generation dead: if the process is still alive it terminates it with `process_kill`
+and waits for the kernel to reap it (up to 2 s) before announcing the death
+and scheduling the next one; that way the new generation does not compete with the
+previous one for its PCI devices. If it still does not exit, the service is left
+failed without relaunching (`services.start_timeout`).
 
-## Consecuencias
+## Consequences
 
-- La supervisión vive en init mientras init viva (modo `shell`/`gui`); en
-  un arranque de prueba sin shell init termina y no hay a quién reiniciar.
-- Un cliente con una petición en curso cuando el servidor muere no recibe
-  respuesta: el resultado de esa petición es desconocido. Los clientes
-  acotan sus esperas y no reintentan escrituras automáticamente (etapa 1B
-  se ocupará de la correlación y la semántica de reintento).
-- Reiniciar un driver no detiene el DMA en curso del dispositivo: con el
-  IOMMU activo el dominio del proceso muerto se retira antes de que sus
-  frames se reutilicen; sin IOMMU el reinicio es un riesgo documentado.
+- Supervision lives in init for as long as init lives (`shell`/`gui` mode); in
+  a test boot without a shell init exits and there is nobody to restart.
+- A client with a request in flight when the server dies gets no
+  reply: the result of that request is unknown. Clients
+  bound their waits and do not retry writes automatically (stage 1B
+  will handle correlation and retry semantics).
+- Restarting a driver does not stop the device's in-flight DMA: with the
+  IOMMU active the dead process's domain is withdrawn before its
+  frames are reused; without an IOMMU the restart is a documented risk.

@@ -3,7 +3,7 @@ name = "ari-app-notes-reader"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Aplicacion de ejemplo del SDK de AriCodeOS: lee un fichero compartido de solo lectura por el broker"
+description = "AriCodeOS SDK sample app: reads a file shared read-only by the broker"
 publish = false
 
 [[bin]]

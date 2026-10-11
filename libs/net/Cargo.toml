@@ -3,7 +3,7 @@ name = "aricode-net"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Pila de red mínima de AriCodeOS: Ethernet, ARP, IPv4, ICMP, UDP, DHCP y DNS (no_std, sin alloc)"
+description = "AriCodeOS minimal network stack: Ethernet, ARP, IPv4, ICMP, UDP, DHCP and DNS (no_std, no alloc)"
 
 [lib]
 path = "src/lib.rs"

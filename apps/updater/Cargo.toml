@@ -3,7 +3,7 @@ name = "ari-app-updater"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Actualizador A/B de AriCodeOS: verifica la imagen de UPDATE y la instala en el slot inactivo"
+description = "AriCodeOS A/B updater: verifies the UPDATE image and installs it into the inactive slot"
 publish = false
 
 [[bin]]

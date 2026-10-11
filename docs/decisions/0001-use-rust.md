@@ -1,30 +1,30 @@
-# ADR 0001: Rust `no_std` como lenguaje del kernel (frente a AriCode)
+# ADR 0001: Rust `no_std` as the kernel language (versus AriCode)
 
-- **Fecha:** 2026-09-26
-- **Estado:** Aceptada
+- **Date:** 2026-09-26
+- **Status:** Accepted
 
-## Contexto
+## Context
 
-El proyecto dispone de un compilador propio, AriCode (`~/git-proyect/aricoderoot`),
-y había que decidir si el kernel se escribía con él o con Rust. La valoración
-completa está en la sección 7.4 del documento maestro.
+The project has its own compiler, AriCode (`~/git-proyect/aricoderoot`),
+and we had to decide whether the kernel would be written with it or with Rust.
+The full assessment is in section 7.4 of the master document.
 
-## Decisión
+## Decision
 
-Kernel, bootloader, drivers y servicios base se escriben en Rust `no_std`.
-AriCode no forma parte del Trusted Computing Base.
+The kernel, bootloader, drivers and base services are written in Rust `no_std`.
+AriCode is not part of the Trusted Computing Base.
 
-## Alternativas
+## Alternatives
 
-- **AriCode.** Descartado en su estado actual: único target `x86_64-linux`,
-  prólogo con syscalls Linux, sin punteros crudos, `unsafe`, asm, FFI, layout
-  controlado ni objetos enlazables. Hacerlo viable equivale a escribir un
-  compilador de sistemas nuevo.
-- **C.** Descartado como lenguaje principal por ausencia de memory safety.
+- **AriCode.** Rejected in its current state: single target `x86_64-linux`,
+  prologue with Linux syscalls, no raw pointers, `unsafe`, asm, FFI, controlled
+  layout or linkable objects. Making it viable amounts to writing a new
+  systems compiler.
+- **C.** Rejected as the main language because it lacks memory safety.
 
-## Consecuencias
+## Consequences
 
-- Toolchain vía rustup con targets `x86_64-unknown-none` y `x86_64-unknown-uefi`.
-- AriCode se integrará encima del kernel como carga de trabajo de usuario
-  (sección 105 del documento maestro).
-- Revisar si AriCode incorpora backend freestanding y FFI reales.
+- Toolchain via rustup with the `x86_64-unknown-none` and `x86_64-unknown-uefi` targets.
+- AriCode will be integrated on top of the kernel as a user workload
+  (section 105 of the master document).
+- Revisit if AriCode gains a real freestanding backend and FFI.

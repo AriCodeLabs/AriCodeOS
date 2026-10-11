@@ -1,9 +1,9 @@
-//! `wasm_runner` (Fase 29 y etapa 4, ADR 0019): ejecuta `demo.wasm` de su
-//! directorio privado con `aricode-wasm`. El módulo no ve syscalls ni POSIX:
-//! solo las funciones que este anfitrión le importa bajo `aricode`, y solo
-//! las que su manifiesto (`demo.manifest`, `caps = print, clock, files`)
-//! le concede; su memoria lineal es un buffer DMA acotado por la cuota del
-//! runner. El módulo se valida entero antes de instanciarse.
+//! `wasm_runner` (Phase 29 and stage 4, ADR 0019): runs `demo.wasm` from its
+//! private directory with `aricode-wasm`. The module sees no syscalls or
+//! POSIX: only the functions this host imports into it under `aricode`, and
+//! only those its manifest (`demo.manifest`, `caps = print, clock, files`)
+//! grants; its linear memory is a DMA buffer bounded by the runner's quota.
+//! The whole module is validated before it is instantiated.
 #![no_std]
 #![no_main]
 
@@ -17,9 +17,9 @@ use aricode_wasm::{Error, FuncType, Host, Instance, Module, ValType, Value};
 
 const MODULE_FILE: &str = "demo.wasm";
 const MANIFEST_FILE: &str = "demo.manifest";
-/// Memoria lineal del módulo: 4 páginas.
+/// Module linear memory: 4 pages.
 const MEMORY_BYTES: u64 = 4 * aricode_wasm::PAGE as u64;
-/// Nombres de fichero que un módulo puede pasar a `file_*`.
+/// Maximum length of file names a module can pass to `file_*`.
 const MAX_FILE_NAME: usize = 32;
 
 fn say(msg: &[u8]) {
@@ -28,7 +28,7 @@ fn say(msg: &[u8]) {
     sys::print(b"\n");
 }
 
-/// Capacidades que un módulo puede pedir en su manifiesto.
+/// Capabilities a module can request in its manifest.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Cap {
     Print,
@@ -44,7 +44,7 @@ impl Cap {
     ];
 }
 
-/// Capability API que ve el módulo, y la capacidad que exige cada función.
+/// Capability API seen by the module, and the capability each function requires.
 #[derive(Clone, Copy)]
 enum Api {
     Print,
@@ -71,8 +71,8 @@ impl Api {
         }
     }
 
-    /// Firma que el anfitrión implementa; la importación del módulo debe
-    /// declarar exactamente esta (auditoría 6ee19fb, hallazgo 5).
+    /// Signature the host implements; the module import must declare exactly
+    /// this one (audit 6ee19fb, finding 5).
     fn signature(self) -> (&'static [ValType], &'static [ValType]) {
         use ValType::{I32, I64};
         match self {
@@ -87,22 +87,22 @@ fn same_signature(ty: &FuncType, params: &[ValType], results: &[ValType]) -> boo
     ty.params.as_slice() == params && ty.results.as_slice() == results
 }
 
-/// Manifiesto del módulo: `caps = a, b` (comentarios con `#`).
+/// Module manifest: `caps = a, b` (comments with `#`).
 fn parse_caps(text: &str, out: &mut [bool; 3]) -> Result<(), &'static str> {
     for raw in text.lines() {
         let line = raw.split('#').next().unwrap_or("").trim();
         if line.is_empty() {
             continue;
         }
-        let (key, value) = line.split_once('=').ok_or("linea sin '='")?;
+        let (key, value) = line.split_once('=').ok_or("line without '='")?;
         if key.trim() != "caps" {
-            return Err("clave desconocida");
+            return Err("unknown key");
         }
         for c in value.split(',').map(str::trim).filter(|c| !c.is_empty()) {
             let i = Cap::NAMES
                 .iter()
                 .position(|(n, _)| *n == c)
-                .ok_or("capacidad desconocida")?;
+                .ok_or("unknown capability")?;
             out[i] = true;
         }
     }
@@ -116,21 +116,17 @@ struct AriHost {
 }
 
 impl AriHost {
-    /// Nombre de fichero desde la memoria del módulo: corto y sin `/`.
+    /// File name from module memory: short and without `/`.
     fn file_name(memory: &[u8], ptr: usize, len: usize) -> Result<&str, Error> {
         if len == 0 || len > MAX_FILE_NAME {
-            return Err(Error::Trap("nombre de fichero"));
+            return Err(Error::Trap("file name"));
         }
         let bytes = memory
-            .get(
-                ptr..ptr
-                    .checked_add(len)
-                    .ok_or(Error::Trap("nombre de fichero"))?,
-            )
-            .ok_or(Error::Trap("nombre fuera de memoria"))?;
-        let name = core::str::from_utf8(bytes).map_err(|_| Error::Trap("nombre de fichero"))?;
+            .get(ptr..ptr.checked_add(len).ok_or(Error::Trap("file name"))?)
+            .ok_or(Error::Trap("name out of memory"))?;
+        let name = core::str::from_utf8(bytes).map_err(|_| Error::Trap("file name"))?;
         if name.contains('/') {
-            return Err(Error::Trap("nombre de fichero"));
+            return Err(Error::Trap("file name"));
         }
         Ok(name)
     }
@@ -143,7 +139,7 @@ impl Host for AriHost {
                 let (ptr, len) = (args[0] as usize, args[1] as usize);
                 let bytes = memory
                     .get(ptr..ptr.checked_add(len).ok_or(Error::Trap("print"))?)
-                    .ok_or(Error::Trap("print fuera de memoria"))?;
+                    .ok_or(Error::Trap("print out of memory"))?;
                 sys::print(bytes);
                 Ok(0)
             }
@@ -151,14 +147,14 @@ impl Host for AriHost {
                 .system
                 .and_then(|s| time::uptime_ms(s).ok())
                 .unwrap_or(0)),
-            // `file_write(name, name_len, data, data_len) -> bytes o -1`:
-            // crea o reemplaza entero (atomico) en el directorio privado.
+            // `file_write(name, name_len, data, data_len) -> bytes or -1`:
+            // creates or replaces the whole file (atomically) in the private directory.
             Some(Api::FileWrite) => {
                 let name = Self::file_name(memory, args[0] as usize, args[1] as usize)?;
                 let (ptr, len) = (args[2] as usize, args[3] as usize);
                 let data = memory
                     .get(ptr..ptr.checked_add(len).ok_or(Error::Trap("file_write"))?)
-                    .ok_or(Error::Trap("datos fuera de memoria"))?;
+                    .ok_or(Error::Trap("data out of memory"))?;
                 let Ok(fd) = self.fs.open(name).or_else(|_| self.fs.create(name)) else {
                     return Ok(u32::MAX as u64);
                 };
@@ -166,12 +162,12 @@ impl Host for AriHost {
                 let _ = self.fs.close(fd);
                 Ok(r.map_or(u32::MAX as u64, |n| n as u64))
             }
-            // `file_read(name, name_len, buf, buf_len) -> bytes o -1`.
+            // `file_read(name, name_len, buf, buf_len) -> bytes or -1`.
             Some(Api::FileRead) => {
                 let name = Self::file_name(memory, args[0] as usize, args[1] as usize)?;
                 let (ptr, len) = (args[2] as usize, args[3] as usize);
-                // El nombre vive en la memoria del modulo: abrir antes de
-                // tomar el buffer de salida, que la presta mutable.
+                // The name lives in module memory: open before taking the
+                // output buffer, which borrows that memory mutably.
                 let Ok(fd) = self.fs.open(name) else {
                     return Ok(u32::MAX as u64);
                 };
@@ -180,7 +176,7 @@ impl Host for AriHost {
                     .and_then(|end| memory.get_mut(ptr..end))
                 else {
                     let _ = self.fs.close(fd);
-                    return Err(Error::Trap("buffer fuera de memoria"));
+                    return Err(Error::Trap("buffer out of memory"));
                 };
                 let mut done = 0;
                 while done < out.len() {
@@ -207,19 +203,19 @@ impl Host for AriHost {
 
 fn describe(e: Error) -> &'static str {
     match e {
-        Error::Malformed(_) => "modulo malformado",
-        Error::Invalid(_) => "modulo invalido",
-        Error::OutOfRange => "indice fuera de rango",
-        Error::Unsupported(_) => "instruccion no soportada",
+        Error::Malformed(_) => "malformed module",
+        Error::Invalid(_) => "invalid module",
+        Error::OutOfRange => "index out of range",
+        Error::Unsupported(_) => "unsupported instruction",
         Error::Trap(_) => "trap",
-        Error::StackOverflow => "pila agotada",
-        Error::Fuel => "demasiados pasos",
-        Error::MissingImport => "importacion desconocida",
-        Error::NoExport => "sin exportacion main",
+        Error::StackOverflow => "stack exhausted",
+        Error::Fuel => "too many steps",
+        Error::MissingImport => "unknown import",
+        Error::NoExport => "no main export",
     }
 }
 
-/// Detalle de un error de validación o de instrucción no soportada.
+/// Detail of a validation error or an unsupported instruction.
 fn detail(e: Error) -> Option<&'static str> {
     match e {
         Error::Invalid(what) | Error::Unsupported(what) | Error::Malformed(what) => Some(what),
@@ -239,7 +235,7 @@ fn report(prefix: &[u8], e: Error) {
     sys::print(b"\n");
 }
 
-/// Lee un fichero entero del directorio privado (hasta `max` bytes).
+/// Reads a whole file from the private directory (up to `max` bytes).
 fn read_file(fs: &mut FsClient, name: &str, max: usize) -> Result<Vec<u8>, u64> {
     let fd = fs.open(name).map_err(|_| 3u64)?;
     let mut bytes = Vec::new();
@@ -274,48 +270,48 @@ fn main(arg: u64) -> u64 {
         }
     });
     let (Some(ep), Some(hw)) = (fs_ep, hardware) else {
-        say(b"necesito fs y hardware (ver el manifiesto)");
+        say(b"need fs and hardware (see the manifest)");
         return 1;
     };
-    // 1. Modulo y su manifiesto desde el directorio privado.
+    // 1. Module and its manifest from the private directory.
     let Ok(mut fs) = FsClient::new(ep, hw) else {
         return 2;
     };
     let bytes = match read_file(&mut fs, MODULE_FILE, 64 * 1024) {
         Ok(b) => b,
         Err(3) => {
-            say(b"no encuentro demo.wasm en mi directorio");
+            say(b"cannot find demo.wasm in my directory");
             return 3;
         }
         Err(5) => {
-            say(b"modulo demasiado grande");
+            say(b"module too large");
             return 5;
         }
         Err(code) => return code,
     };
     let mut buf = [0u8; 20];
-    sys::print(b"wasm_runner: modulo demo.wasm cargado (");
+    sys::print(b"wasm_runner: module demo.wasm loaded (");
     sys::print(fmt_u64(bytes.len() as u64, &mut buf));
     sys::print(b" bytes)\n");
     let mut granted = [false; 3];
     match read_file(&mut fs, MANIFEST_FILE, 1024) {
         Ok(text) => {
             let parsed = core::str::from_utf8(&text)
-                .map_err(|_| "no es texto")
+                .map_err(|_| "not text")
                 .and_then(|t| parse_caps(t, &mut granted));
             if let Err(why) = parsed {
-                sys::print(b"wasm_runner: manifiesto del modulo invalido: ");
+                sys::print(b"wasm_runner: invalid module manifest: ");
                 sys::print(why.as_bytes());
                 sys::print(b"\n");
                 return 11;
             }
         }
         Err(_) => {
-            say(b"el modulo no trae manifiesto (demo.manifest): no se ejecuta");
+            say(b"module has no manifest (demo.manifest): not running");
             return 11;
         }
     }
-    sys::print(b"wasm_runner: manifiesto del modulo:");
+    sys::print(b"wasm_runner: module manifest:");
     for (i, (name, _)) in Cap::NAMES.iter().enumerate() {
         if granted[i] {
             sys::print(b" ");
@@ -323,7 +319,7 @@ fn main(arg: u64) -> u64 {
         }
     }
     sys::print(b"\n");
-    // 2. Analizar y validar; resolver importaciones por nombre y capacidad.
+    // 2. Parse and validate; resolve imports by name and capability.
     let module = match Module::parse(&bytes) {
         Ok(m) => m,
         Err(e) => {
@@ -339,7 +335,7 @@ fn main(arg: u64) -> u64 {
             None
         };
         let Some(api) = api else {
-            sys::print(b"wasm_runner: importacion desconocida ");
+            sys::print(b"wasm_runner: unknown import ");
             sys::print(&imp.module);
             sys::print(b".");
             sys::print(&imp.name);
@@ -352,39 +348,39 @@ fn main(arg: u64) -> u64 {
             .position(|(_, c)| *c == cap)
             .is_some_and(|i| granted[i]);
         if !allowed {
-            sys::print(b"wasm_runner: importacion aricode.");
+            sys::print(b"wasm_runner: import aricode.");
             sys::print(&imp.name);
-            sys::print(b" no concedida por el manifiesto del modulo\n");
+            sys::print(b" not granted by the module manifest\n");
             return 12;
         }
         let (params, results) = api.signature();
         let declared = module.types.get(imp.type_index as usize);
         if !declared.is_some_and(|ty| same_signature(ty, params, results)) {
-            sys::print(b"wasm_runner: importacion aricode.");
+            sys::print(b"wasm_runner: import aricode.");
             sys::print(&imp.name);
-            sys::print(b" con firma incompatible\n");
+            sys::print(b" has an incompatible signature\n");
             return 14;
         }
         imports.push(Some(api));
     }
-    // `main(i64) -> i32`: si el modulo exporta otra cosa, no se ejecuta.
+    // `main(i64) -> i32`: if the module exports anything else, it is not run.
     let main_ok = module
         .exported_function("main")
         .and_then(|i| module.function_type(i).ok())
         .is_some_and(|ty| same_signature(ty, &[ValType::I64], &[ValType::I32]));
     if !main_ok {
-        say(b"main con firma incompatible (se espera main(i64) -> i32)");
+        say(b"main has an incompatible signature (expected main(i64) -> i32)");
         return 15;
     }
-    // 3. Memoria lineal en un buffer DMA (cuenta contra la cuota).
+    // 3. Linear memory in a DMA buffer (counts against the quota).
     let Ok(dma) = sys::dma_alloc(hw, MEMORY_BYTES) else {
-        say(b"sin memoria para el modulo");
+        say(b"no memory for the module");
         return 8;
     };
     let Ok(virt) = sys::mmio_map(dma) else {
         return 8;
     };
-    // SAFETY: buffer DMA propio de MEMORY_BYTES, mapeado RW.
+    // SAFETY: our own DMA buffer of MEMORY_BYTES, mapped RW.
     let memory = unsafe { core::slice::from_raw_parts_mut(virt as *mut u8, MEMORY_BYTES as usize) };
     let mut instance = match Instance::new(&module, memory) {
         Ok(i) => i,
@@ -398,20 +394,20 @@ fn main(arg: u64) -> u64 {
         system,
         fs,
     };
-    // 4. Inicializacion del modulo (funcion `start`) y ejecucion.
+    // 4. Module initialization (`start` function) and execution.
     if let Err(e) = instance.start(memory, &mut host) {
-        report(b"la funcion start fallo: ", e);
+        report(b"start function failed: ", e);
         return 10;
     }
     match instance.call("main", &[arg], memory, &mut host) {
         Ok(code) => {
-            sys::print(b"wasm_runner: main devolvio ");
+            sys::print(b"wasm_runner: main returned ");
             sys::print(fmt_u64(code as u32 as u64, &mut buf));
             sys::print(b"\n");
             code as u32 as u64
         }
         Err(e) => {
-            report(b"el modulo fallo: ", e);
+            report(b"module failed: ", e);
             13
         }
     }

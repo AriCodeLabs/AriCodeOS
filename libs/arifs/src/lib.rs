@@ -1,35 +1,35 @@
-//! AriFS v1 (Fase 20 y etapa 2, ADR 0014): un directorio plano de hasta 32
-//! ficheros con capacidad fija, sin fragmentación, con sumas de control en
-//! los metadatos, un journal de reemplazo atómico y un contrato de `flush`.
+//! AriFS v1 (Phase 20 and stage 2, ADR 0014): a flat directory of up to 32
+//! fixed-capacity files, without fragmentation, with checksums on the
+//! metadata, an atomic replace journal and a `flush` contract.
 //!
 //! ```text
-//! LBA 0        superbloque (512 bytes): magia, versión, sectores, siguiente
-//!              LBA de datos, CRC32
-//! LBA 1..4     tabla: 32 entradas de 64 bytes (nombre, LBA, capacidad,
-//!              tamaño, CRC32 por entrada)
-//! LBA 5        cabecera del journal: estado, fichero, longitud, CRC32 de
-//!              los datos, secuencia, CRC32 de la cabecera
-//! LBA 6..69    datos del journal (la capacidad de un fichero)
-//! LBA 70..     datos: bloques de capacidad fija asignados de forma incremental
+//! LBA 0        superblock (512 bytes): magic, version, sectors, next
+//!              data LBA, CRC32
+//! LBA 1..4     table: 32 entries of 64 bytes (name, LBA, capacity,
+//!              size, per-entry CRC32)
+//! LBA 5        journal header: state, file, length, data CRC32,
+//!              sequence, header CRC32
+//! LBA 6..69    journal data (the capacity of one file)
+//! LBA 70..     data: fixed-capacity blocks allocated incrementally
 //! ```
 //!
-//! Contrato de persistencia:
+//! Persistence contract:
 //!
-//! - un sector de 512 bytes se escribe entero o no se escribe (supuesto del
-//!   soporte); nada se asume sobre el orden entre sectores salvo tras `flush`;
-//! - `write` escribe en el sitio: tras un corte cada sector tiene el contenido
-//!   viejo o el nuevo, y el tamaño solo crece cuando los datos ya están;
-//! - `replace` es atómico: tras un corte el fichero tiene entero el contenido
-//!   anterior o entero el nuevo. Los datos y su CRC van primero al journal,
-//!   luego se marca pendiente, se aplican y se limpia, con `flush` entre
-//!   fases; `open` rehace un reemplazo pendiente válido y descarta una
-//!   cabecera rota (el reemplazo nunca llegó a comprometerse);
-//! - `open` rechaza (`Corrupt`) un superbloque o una entrada en uso cuyo
-//!   CRC no cuadra: no se monta un sistema del que no se puede fiar.
+//! - a 512-byte sector is written whole or not at all (an assumption about
+//!   the medium); nothing is assumed about ordering between sectors except after `flush`;
+//! - `write` writes in place: after a power cut each sector holds the old
+//!   or the new contents, and the size only grows once the data is there;
+//! - `replace` is atomic: after a power cut the file holds either the whole
+//!   previous contents or the whole new ones. The data and its CRC go to the
+//!   journal first, then it is marked pending, applied and cleared, with `flush`
+//!   between phases; `open` redoes a valid pending replace and discards a
+//!   broken header (the replace was never committed);
+//! - `open` rejects (`Corrupt`) a superblock or an in-use entry whose CRC
+//!   does not match: a file system that cannot be trusted is not mounted.
 //!
-//! Los LBA son relativos a la partición. Todo el acceso pasa por
-//! [`BlockDevice`], así que la librería se prueba en host sobre un `Vec`,
-//! incluidos cortes en cada escritura del reemplazo.
+//! LBAs are relative to the partition. All access goes through
+//! [`BlockDevice`], so the library is tested on the host over a `Vec`,
+//! including power cuts at every write of the replace.
 
 #![no_std]
 
@@ -41,12 +41,12 @@ pub const ENTRY_LEN: usize = 64;
 pub const NAME_LEN: usize = 32;
 pub const TABLE_LBA: u64 = 1;
 pub const TABLE_SECTORS: u64 = (MAX_FILES * ENTRY_LEN / SECTOR) as u64;
-/// Capacidad por fichero: 64 sectores (32 KiB).
+/// Capacity per file: 64 sectors (32 KiB).
 pub const FILE_CAPACITY_SECTORS: u32 = 64;
 pub const JOURNAL_LBA: u64 = TABLE_LBA + TABLE_SECTORS;
 pub const JOURNAL_DATA_LBA: u64 = JOURNAL_LBA + 1;
 pub const DATA_LBA: u64 = JOURNAL_DATA_LBA + FILE_CAPACITY_SECTORS as u64;
-/// Máximo de un reemplazo atómico: el área de datos del journal.
+/// Maximum size of an atomic replace: the journal data area.
 pub const JOURNAL_CAPACITY_BYTES: usize = FILE_CAPACITY_SECTORS as usize * SECTOR;
 
 const JOURNAL_CLEAR: u32 = 0;
@@ -56,28 +56,28 @@ const JOURNAL_PENDING: u32 = 1;
 pub enum FsError {
     Io,
     BadMagic,
-    /// Un CRC de metadatos no cuadra: no se monta.
+    /// A metadata CRC does not match: not mounted.
     Corrupt,
     NotFound,
     Exists,
     NoSpace,
     BadName,
-    /// Lectura o escritura fuera de la capacidad del fichero.
+    /// Read or write beyond the file capacity.
     OutOfRange,
-    /// Compromiso de un reemplazo por trozos que no empezó en cero, tiene
-    /// huecos o no cubre la longitud comprometida (auditoría 6ee19fb, 1).
+    /// Commit of a chunked replace that did not start at zero, has gaps or
+    /// does not cover the committed length (audit 6ee19fb, 1).
     BadTransaction,
 }
 
-/// Dispositivo de bloques de 512 bytes. `flush` hace duraderas las
-/// escrituras anteriores antes de volver.
+/// 512-byte block device. `flush` makes previous writes durable before
+/// returning.
 pub trait BlockDevice {
     fn read_sector(&mut self, lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), FsError>;
     fn write_sector(&mut self, lba: u64, buf: &[u8; SECTOR]) -> Result<(), FsError>;
     fn flush(&mut self) -> Result<(), FsError>;
-    /// Varios sectores seguidos (`buf.len()` múltiplo de `SECTOR`, hasta
-    /// `MAX_BATCH_SECTORS`); por defecto uno a uno. Un dispositivo por IPC
-    /// los agrupa en una petición (etapa 5).
+    /// Several consecutive sectors (`buf.len()` a multiple of `SECTOR`, up to
+    /// `MAX_BATCH_SECTORS`); one at a time by default. An IPC device groups
+    /// them into one request (stage 5).
     fn read_sectors(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), FsError> {
         for (i, chunk) in buf.as_chunks_mut::<SECTOR>().0.iter_mut().enumerate() {
             self.read_sector(lba + i as u64, chunk)?;
@@ -92,12 +92,12 @@ pub trait BlockDevice {
     }
 }
 
-/// Sectores por lote en `read_sectors`/`write_sectors`.
+/// Sectors per batch in `read_sectors`/`write_sectors`.
 pub const MAX_BATCH_SECTORS: usize = 8;
 const BATCH_BYTES: usize = MAX_BATCH_SECTORS * SECTOR;
 
-/// CRC-32 (IEEE 802.3, reflejado) incremental, sin tabla: los metadatos son
-/// pequeños. Empieza en `crc32_init()` y termina con `!`.
+/// Incremental CRC-32 (IEEE 802.3, reflected), without a table: the metadata
+/// is small. Starts at `crc32_init()` and ends with `!`.
 const fn crc32_update(mut crc: u32, data: &[u8]) -> u32 {
     let mut i = 0;
     while i < data.len() {
@@ -130,7 +130,7 @@ fn u64_at(b: &[u8], off: usize) -> u64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Superblock {
     pub total_sectors: u64,
-    /// Siguiente LBA libre para datos.
+    /// Next free LBA for data.
     pub data_next: u64,
 }
 
@@ -174,12 +174,12 @@ impl Entry {
     pub fn capacity_bytes(&self) -> u32 {
         self.capacity_sectors * SECTOR as u32
     }
-    /// El CRC (bytes 36..40) cubre el resto de la entrada.
+    /// The CRC (bytes 36..40) covers the rest of the entry.
     fn encode(&self) -> [u8; ENTRY_LEN] {
         let mut e = [0u8; ENTRY_LEN];
         e[..NAME_LEN].copy_from_slice(&self.name);
         e[32] = self.name_len;
-        e[33] = 1; // en uso
+        e[33] = 1; // in use
         e[40..48].copy_from_slice(&self.start_lba.to_le_bytes());
         e[48..52].copy_from_slice(&self.capacity_sectors.to_le_bytes());
         e[52..56].copy_from_slice(&self.size.to_le_bytes());
@@ -190,8 +190,8 @@ impl Entry {
     fn checksum(e: &[u8]) -> u32 {
         !crc32_update(crc32_update(0xFFFF_FFFF, &e[..36]), &e[40..ENTRY_LEN])
     }
-    /// `Ok(None)` si la entrada está libre; `Corrupt` si está en uso y el
-    /// CRC no cuadra.
+    /// `Ok(None)` if the entry is free; `Corrupt` if it is in use and the
+    /// CRC does not match.
     fn decode(e: &[u8]) -> Result<Option<Self>, FsError> {
         if e[33] == 0 {
             return Ok(None);
@@ -211,8 +211,8 @@ impl Entry {
     }
 }
 
-/// Cabecera del journal de reemplazo (un sector). Opaca fuera de la
-/// librería: solo la devuelve `stage_replace`.
+/// Replace journal header (one sector). Opaque outside the library: only
+/// `stage_replace` returns it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Journal {
     state: u32,
@@ -244,7 +244,7 @@ impl Journal {
         s
     }
 
-    /// `None` si la cabecera no es válida (magia o CRC): equivale a limpia.
+    /// `None` if the header is not valid (magic or CRC): equivalent to clean.
     fn decode(s: &[u8; SECTOR]) -> Option<Self> {
         if &s[..8] != JOURNAL_MAGIC || u32_at(s, SECTOR - 4) != crc32(&s[..SECTOR - 4]) {
             return None;
@@ -259,7 +259,7 @@ impl Journal {
     }
 }
 
-/// Iteración sobre las entradas en uso de una tabla (con índice).
+/// Iteration over the in-use entries of a table (with index).
 mod alloc_free {
     use super::{Entry, MAX_FILES};
     pub struct Entries<'a>(pub &'a [Option<Entry>; MAX_FILES]);
@@ -284,33 +284,33 @@ fn valid_name(name: &str) -> bool {
         && !name.contains("//")
 }
 
-/// Qué encontró `open` en el journal.
+/// What `open` found in the journal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Recovery {
-    /// Journal limpio.
+    /// Clean journal.
     Clean,
-    /// Un reemplazo comprometido y no aplicado del todo se rehízo.
+    /// A committed replace that was not fully applied was redone.
     Replayed { index: usize },
-    /// Cabecera rota o datos que no cuadran con su CRC: el reemplazo nunca
-    /// llegó a comprometerse y se descartó.
+    /// Broken header or data not matching its CRC: the replace was never
+    /// committed and was discarded.
     Discarded,
 }
 
-/// Un sistema de archivos abierto sobre un dispositivo.
+/// A file system opened on a device.
 pub struct AriFs<D: BlockDevice> {
     dev: D,
     sb: Superblock,
     table: [Option<Entry>; MAX_FILES],
     sequence: u64,
     recovery: Recovery,
-    /// Reemplazo por trozos en curso: fichero y siguiente desplazamiento
-    /// esperado. Solo se compromete lo que esta transacción escribió.
+    /// Chunked replace in progress: file and next expected offset. Only what
+    /// this transaction wrote gets committed.
     staged: Option<(usize, u32)>,
 }
 
 impl<D: BlockDevice> AriFs<D> {
-    /// Abre un sistema de archivos existente (lee superbloque y tabla,
-    /// comprueba los CRC y rehace o descarta un reemplazo pendiente).
+    /// Opens an existing file system (reads superblock and table, checks
+    /// the CRCs and redoes or discards a pending replace).
     pub fn open(mut dev: D) -> Result<Self, FsError> {
         let mut s = [0u8; SECTOR];
         dev.read_sector(0, &mut s)?;
@@ -335,9 +335,9 @@ impl<D: BlockDevice> AriFs<D> {
         Ok(fs)
     }
 
-    /// Los metadatos deben ser coherentes entre sí, no solo tener CRC:
-    /// cada fichero dentro del área asignada y sin solaparse con otro
-    /// (auditoría 6ee19fb, hallazgo 2).
+    /// The metadata must be mutually consistent, not just carry a CRC:
+    /// every file inside the allocated area and not overlapping another
+    /// (audit 6ee19fb, finding 2).
     fn check_layout(sb: &Superblock, table: &[Option<Entry>; MAX_FILES]) -> Result<(), FsError> {
         if sb.data_next < DATA_LBA || sb.data_next > sb.total_sectors {
             return Err(FsError::Corrupt);
@@ -363,7 +363,7 @@ impl<D: BlockDevice> AriFs<D> {
         Ok(())
     }
 
-    /// Crea un sistema de archivos vacío sobre `total_sectors` sectores.
+    /// Creates an empty file system on `total_sectors` sectors.
     pub fn format(mut dev: D, total_sectors: u64) -> Result<Self, FsError> {
         if total_sectors < DATA_LBA + FILE_CAPACITY_SECTORS as u64 {
             return Err(FsError::NoSpace);
@@ -393,7 +393,7 @@ impl<D: BlockDevice> AriFs<D> {
         self.sb
     }
 
-    /// Resultado de la recuperación al abrir.
+    /// Result of the recovery on open.
     pub fn recovery(&self) -> Recovery {
         self.recovery
     }
@@ -429,15 +429,15 @@ impl<D: BlockDevice> AriFs<D> {
         self.dev.write_sector(lba, &s)
     }
 
-    /// Crea un fichero vacío con la capacidad fija habitual. Devuelve su índice.
+    /// Creates an empty file with the usual fixed capacity. Returns its index.
     pub fn create(&mut self, name: &str) -> Result<usize, FsError> {
         self.create_sized(name, FILE_CAPACITY_SECTORS)
     }
 
-    /// Como `create`, con capacidad `sectors` (múltiplo de
-    /// `FILE_CAPACITY_SECTORS`): ficheros grandes, como los paquetes
-    /// instalados (ADR 0017). `replace` solo admite hasta la capacidad del
-    /// journal (`FILE_CAPACITY_SECTORS`).
+    /// Like `create`, with capacity `sectors` (a multiple of
+    /// `FILE_CAPACITY_SECTORS`): large files, such as installed packages
+    /// (ADR 0017). `replace` only supports up to the journal capacity
+    /// (`FILE_CAPACITY_SECTORS`).
     pub fn create_sized(&mut self, name: &str, sectors: u32) -> Result<usize, FsError> {
         if sectors == 0 || !sectors.is_multiple_of(FILE_CAPACITY_SECTORS) {
             return Err(FsError::OutOfRange);
@@ -467,19 +467,19 @@ impl<D: BlockDevice> AriFs<D> {
         entry.name[..name.len()].copy_from_slice(name.as_bytes());
         self.table[index] = Some(entry);
         self.sb.data_next = start + sectors as u64;
-        // Primero el superbloque y una barrera: el soporte puede reordenar
-        // sectores hasta `flush`, y una entrada publicada sobre espacio no
-        // reservado dejaría dos ficheros solapados al volver a asignarlo
-        // (auditoría 6ee19fb, hallazgo 2). Un corte entre ambos deja espacio
-        // reservado sin entrada, que no rompe nada.
+        // Superblock first, then a barrier: the medium may reorder sectors
+        // until `flush`, and an entry published over unreserved space would
+        // leave two overlapping files when it is allocated again
+        // (audit 6ee19fb, finding 2). A cut between both leaves reserved
+        // space without an entry, which breaks nothing.
         self.dev.write_sector(0, &self.sb.encode())?;
         self.dev.flush()?;
         self.write_table_entry(index)?;
         Ok(index)
     }
 
-    /// Lee hasta `buf.len()` bytes desde `offset`. Devuelve los bytes leídos
-    /// (0 al final del fichero).
+    /// Reads up to `buf.len()` bytes from `offset`. Returns the bytes read
+    /// (0 at end of file).
     pub fn read(&mut self, index: usize, offset: u32, buf: &mut [u8]) -> Result<usize, FsError> {
         let e = *self.entry(index).ok_or(FsError::NotFound)?;
         if offset >= e.size {
@@ -490,8 +490,8 @@ impl<D: BlockDevice> AriFs<D> {
         Ok(len)
     }
 
-    /// Copia `out.len()` bytes desde la posición `pos` (bytes) del área que
-    /// empieza en `base`: sectores parciales uno a uno, los enteros por lotes.
+    /// Copies `out.len()` bytes from position `pos` (bytes) of the area that
+    /// starts at `base`: partial sectors one at a time, whole ones in batches.
     fn copy_from_device(&mut self, base: u64, pos: usize, out: &mut [u8]) -> Result<(), FsError> {
         let mut done = 0;
         let mut s = [0u8; SECTOR];
@@ -514,8 +514,8 @@ impl<D: BlockDevice> AriFs<D> {
         Ok(())
     }
 
-    /// Escribe `data` en la posición `pos` del área que empieza en `base`:
-    /// los sectores parciales se leen antes; los enteros van por lotes.
+    /// Writes `data` at position `pos` of the area that starts at `base`:
+    /// partial sectors are read first; whole ones go in batches.
     fn copy_to_device(&mut self, base: u64, pos: usize, data: &[u8]) -> Result<(), FsError> {
         let mut done = 0;
         let mut s = [0u8; SECTOR];
@@ -539,9 +539,9 @@ impl<D: BlockDevice> AriFs<D> {
         Ok(())
     }
 
-    /// Escribe `data` en `offset` (sin huecos: `offset <= size`) dentro de la
-    /// capacidad, en el sitio. Actualiza el tamaño después de los datos. No
-    /// es duradero hasta `flush`.
+    /// Writes `data` at `offset` (no gaps: `offset <= size`) within the
+    /// capacity, in place. Updates the size after the data. Not durable
+    /// until `flush`.
     pub fn write(&mut self, index: usize, offset: u32, data: &[u8]) -> Result<usize, FsError> {
         let e = *self.entry(index).ok_or(FsError::NotFound)?;
         if offset > e.size {
@@ -553,9 +553,9 @@ impl<D: BlockDevice> AriFs<D> {
         }
         self.copy_to_device(e.start_lba, offset as usize, data)?;
         if end as u32 > e.size {
-            // Los datos deben ser duraderos antes de publicar el tamaño que
-            // los cubre: sin barrera, un corte podía conservar el tamaño y
-            // perder los datos (auditoría 6ee19fb, hallazgo 2).
+            // The data must be durable before publishing the size that
+            // covers it: without a barrier, a cut could keep the size and
+            // lose the data (audit 6ee19fb, finding 2).
             self.dev.flush()?;
             let entry = self.table[index].as_mut().ok_or(FsError::NotFound)?;
             entry.size = end as u32;
@@ -564,27 +564,27 @@ impl<D: BlockDevice> AriFs<D> {
         Ok(data.len())
     }
 
-    /// Sustituye el contenido entero del fichero por `data` de forma atómica
-    /// (journal de reemplazo): tras un corte el fichero tiene el contenido
-    /// anterior o el nuevo, nunca una mezcla. Duradero al volver.
+    /// Atomically replaces the whole file contents with `data` (replace
+    /// journal): after a cut the file holds the previous contents or the
+    /// new ones, never a mix. Durable on return.
     pub fn replace(&mut self, index: usize, data: &[u8]) -> Result<(), FsError> {
         self.replace_chunk(index, 0, data)?;
         self.replace_commit(index, data.len() as u32)
     }
 
-    /// Un trozo del contenido nuevo al área de datos del journal, sin
-    /// compromiso: nada cambia hasta `replace_commit`. Varios trozos (en
-    /// cualquier orden, dentro de la capacidad del journal y del fichero)
-    /// forman un reemplazo mayor que una petición IPC (ADR 0018).
+    /// One chunk of the new contents into the journal data area, without
+    /// committing: nothing changes until `replace_commit`. Several chunks (in
+    /// any order, within the journal and file capacity) make up a replace
+    /// larger than one IPC request (ADR 0018).
     pub fn replace_chunk(&mut self, index: usize, offset: u32, data: &[u8]) -> Result<(), FsError> {
         let e = *self.entry(index).ok_or(FsError::NotFound)?;
         let end = offset as usize + data.len();
         if end > e.capacity_bytes() as usize || end > JOURNAL_CAPACITY_BYTES {
             return Err(FsError::OutOfRange);
         }
-        // Una transacción empieza en cero y sigue sin huecos: así el
-        // compromiso solo puede cubrir bytes que ella escribió, nunca restos
-        // de otro reemplazo (auditoría 6ee19fb, hallazgo 1).
+        // A transaction starts at zero and continues without gaps: that way
+        // the commit can only cover bytes it wrote, never leftovers of
+        // another replace (audit 6ee19fb, finding 1).
         if offset == 0 {
             self.staged = Some((index, 0));
         }
@@ -597,31 +597,31 @@ impl<D: BlockDevice> AriFs<D> {
         Ok(())
     }
 
-    /// Descarta el reemplazo por trozos en curso, si lo hay (el dueño se
-    /// fue o tardó demasiado): el siguiente trozo deberá empezar en cero.
+    /// Discards the chunked replace in progress, if any (the owner went
+    /// away or took too long): the next chunk must start at zero.
     pub fn abandon_replace(&mut self) {
         self.staged = None;
     }
 
-    /// Compromete los `len` primeros bytes que hay en el journal como nuevo
-    /// contenido del fichero y los aplica (idempotente: `open` lo repite si
-    /// hace falta).
+    /// Commits the first `len` bytes in the journal as the new contents of
+    /// the file and applies them (idempotent: `open` repeats it if
+    /// needed).
     pub fn replace_commit(&mut self, index: usize, len: u32) -> Result<(), FsError> {
         let journal = self.commit_header(index, len)?;
         self.apply_journal(&journal)
     }
 
-    /// Las dos primeras fases de `replace`: deja un reemplazo comprometido
-    /// en el journal sin aplicarlo. Es lo que queda en disco tras un corte
-    /// justo después del compromiso; xtask lo usa para fabricar discos de
-    /// prueba de recuperación y el siguiente `open` lo rehace.
+    /// The first two phases of `replace`: leaves a committed replace in the
+    /// journal without applying it. It is what stays on disk after a cut
+    /// right after the commit; xtask uses it to build recovery test disks
+    /// and the next `open` redoes it.
     pub fn stage_replace(&mut self, index: usize, data: &[u8]) -> Result<Journal, FsError> {
         self.replace_chunk(index, 0, data)?;
         self.commit_header(index, data.len() as u32)
     }
 
-    /// Hace duraderos los datos del journal y escribe la cabecera pendiente
-    /// con su CRC (leído del propio journal: es lo que se aplicará).
+    /// Makes the journal data durable and writes the pending header with
+    /// its CRC (read from the journal itself: it is what will be applied).
     fn commit_header(&mut self, index: usize, len: u32) -> Result<Journal, FsError> {
         let e = *self.entry(index).ok_or(FsError::NotFound)?;
         if len > e.capacity_bytes() || len as usize > JOURNAL_CAPACITY_BYTES {
@@ -646,8 +646,8 @@ impl<D: BlockDevice> AriFs<D> {
         Ok(journal)
     }
 
-    /// Copia los datos del journal al fichero, fija el tamaño y limpia la
-    /// cabecera, con `flush` entre ambas fases.
+    /// Copies the journal data into the file, sets the size and clears the
+    /// header, with `flush` between both phases.
     fn apply_journal(&mut self, journal: &Journal) -> Result<(), FsError> {
         let index = journal.index as usize;
         let e = *self.entry(index).ok_or(FsError::NotFound)?;
@@ -665,14 +665,14 @@ impl<D: BlockDevice> AriFs<D> {
         entry.size = journal.len;
         self.write_table_entry(index)?;
         self.dev.flush()?;
-        // La limpieza no necesita `flush`: si se pierde, el siguiente `open`
-        // rehace un reemplazo ya aplicado (idempotente). Cada `flush` es un
-        // fsync del soporte y domina el coste del reemplazo (etapa 5).
+        // Clearing does not need `flush`: if it is lost, the next `open`
+        // redoes an already applied replace (idempotent). Each `flush` is an
+        // fsync of the medium and dominates the cost of the replace (stage 5).
         self.dev.write_sector(JOURNAL_LBA, &Journal::CLEAR.encode())
     }
 
-    /// Rehace un reemplazo comprometido (cabecera válida y pendiente, datos
-    /// que cuadran con su CRC) o descarta uno que no llegó a comprometerse.
+    /// Redoes a committed replace (valid pending header, data matching its
+    /// CRC) or discards one that was never committed.
     fn recover(&mut self) -> Result<(), FsError> {
         let mut s = [0u8; SECTOR];
         self.dev.read_sector(JOURNAL_LBA, &mut s)?;
@@ -701,7 +701,7 @@ impl<D: BlockDevice> AriFs<D> {
         Ok(self.journal_crc(journal.len)? == journal.data_crc)
     }
 
-    /// CRC-32 de los `len` primeros bytes del área de datos del journal.
+    /// CRC-32 of the first `len` bytes of the journal data area.
     fn journal_crc(&mut self, len: u32) -> Result<u32, FsError> {
         let mut crc = 0xFFFF_FFFFu32;
         let mut batch = [0u8; BATCH_BYTES];
@@ -725,14 +725,14 @@ impl<D: BlockDevice> AriFs<D> {
         self.dev.flush()
     }
 
-    /// Trunca a cero bytes.
+    /// Truncates to zero bytes.
     pub fn truncate(&mut self, index: usize) -> Result<(), FsError> {
         let entry = self.table[index].as_mut().ok_or(FsError::NotFound)?;
         entry.size = 0;
         self.write_table_entry(index)
     }
 
-    /// Hace duraderas las escrituras anteriores (`write`, `create`, `truncate`).
+    /// Makes previous writes durable (`write`, `create`, `truncate`).
     pub fn flush(&mut self) -> Result<(), FsError> {
         self.dev.flush()
     }
@@ -790,8 +790,8 @@ mod tests {
         assert_eq!(&buf[..17], b"Hola desde AriFS\n");
         assert_eq!(fs.read(i, 5, &mut buf).unwrap(), 12);
         assert_eq!(&buf[..12], b"desde AriFS\n");
-        assert_eq!(fs.read(i, 17, &mut buf).unwrap(), 0, "fin de fichero");
-        // Reabrir desde el dispositivo: tabla y superbloque persistidos.
+        assert_eq!(fs.read(i, 17, &mut buf).unwrap(), 0, "end of file");
+        // Reopen from the device: table and superblock persisted.
         let dev = fs.into_device();
         let mut fs = AriFs::open(dev).unwrap();
         assert_eq!(fs.recovery(), Recovery::Clean);
@@ -814,7 +814,7 @@ mod tests {
         assert_eq!(fs.read(i, 0, &mut buf).unwrap(), 1504);
         assert_eq!(&buf[..1500], &data[..]);
         assert_eq!(&buf[1500..1504], b"tail");
-        // Sobrescritura parcial en medio.
+        // Partial overwrite in the middle.
         assert_eq!(fs.write(i, 510, b"XXXX").unwrap(), 4);
         assert_eq!(fs.read(i, 508, &mut buf[..8]).unwrap(), 8);
         assert_eq!(&buf[2..6], b"XXXX");
@@ -831,21 +831,18 @@ mod tests {
         assert_eq!(fs.create("/abs"), Err(FsError::BadName));
         assert_eq!(fs.create("dir/"), Err(FsError::BadName));
         assert_eq!(fs.create("a//b"), Err(FsError::BadName));
-        assert!(
-            fs.create("app/notas").is_ok(),
-            "prefijo de directorio privado"
-        );
+        assert!(fs.create("app/notas").is_ok(), "private directory prefix");
         assert_eq!(fs.create(""), Err(FsError::BadName));
         let i = fs.create("a").unwrap();
         assert_eq!(fs.create("a"), Err(FsError::Exists));
-        assert_eq!(fs.write(i, 10, b"x"), Err(FsError::OutOfRange), "hueco");
+        assert_eq!(fs.write(i, 10, b"x"), Err(FsError::OutOfRange), "gap");
         let too_big = std::vec![0u8; FILE_CAPACITY_SECTORS as usize * SECTOR + 1];
         assert_eq!(fs.write(i, 0, &too_big), Err(FsError::OutOfRange));
         assert_eq!(fs.replace(i, &too_big), Err(FsError::OutOfRange));
         assert_eq!(fs.read(99, 0, &mut [0u8; 4]), Err(FsError::NotFound));
         assert_eq!(fs.replace(99, b"x"), Err(FsError::NotFound));
         assert_eq!(fs.find("zzz"), None);
-        // Disco lleno: sin espacio para mas ficheros de 64 sectores.
+        // Disk full: no room for more 64-sector files.
         let mut fs = AriFs::format(disk(2000), 2000).unwrap();
         fs.create("a").unwrap();
         let mut created = 1;
@@ -859,7 +856,7 @@ mod tests {
         );
         assert!(
             fs.replace(0, b"aun cabe").is_ok(),
-            "el journal no depende del espacio de datos"
+            "the journal does not depend on data space"
         );
         assert_eq!(AriFs::open(disk(10)).err(), Some(FsError::BadMagic));
         assert_eq!(AriFs::format(disk(5), 5).err(), Some(FsError::NoSpace));
@@ -875,7 +872,7 @@ mod tests {
         let mut buf = std::vec![0u8; 2000];
         assert_eq!(fs.read(i, 0, &mut buf).unwrap(), 1500);
         assert_eq!(&buf[..1500], &long[..]);
-        // Mas corto que el anterior: el tamaño baja.
+        // Shorter than the previous one: the size shrinks.
         fs.replace(i, b"corto").unwrap();
         assert_eq!(fs.read(i, 0, &mut buf).unwrap(), 5);
         assert_eq!(&buf[..5], b"corto");
@@ -883,16 +880,16 @@ mod tests {
         assert_eq!(fs.recovery(), Recovery::Clean);
         assert_eq!(fs.read(i, 0, &mut buf).unwrap(), 5);
         assert_eq!(&buf[..5], b"corto");
-        // Vacío también vale.
+        // Empty works too.
         fs.replace(i, b"").unwrap();
         assert_eq!(fs.entry(i).unwrap().size, 0);
     }
 
-    /// Disco con caché volátil y corte programado: las escrituras quedan en
-    /// caché hasta `flush`; desde la escritura `cut_at` todo devuelve `Io` y,
-    /// al "apagar", la caché se pierde (`lose_cache`) o se conserva (el
-    /// soporte alcanzó a escribirla). Ambos extremos acotan cualquier
-    /// subconjunto perdido porque cada fase del reemplazo termina en `flush`.
+    /// Disk with a volatile cache and a scheduled cut: writes stay in the
+    /// cache until `flush`; from write `cut_at` on everything returns `Io` and,
+    /// on "power off", the cache is lost (`lose_cache`) or kept (the medium
+    /// managed to write it). Both extremes bound any lost subset because
+    /// every phase of the replace ends in `flush`.
     struct CuttingDisk {
         persisted: Vec<u8>,
         cache: Vec<(u64, [u8; SECTOR])>,
@@ -968,35 +965,35 @@ mod tests {
         let i = fs.create("notas").unwrap();
         fs.write(i, 0, &old).unwrap();
         let base = fs.into_device().0;
-        // Sin corte: cuenta las escrituras de un reemplazo completo.
+        // No cut: counts the writes of a complete replace.
         let mut fs = AriFs::open(CuttingDisk::new(&base, usize::MAX)).unwrap();
         fs.replace(i, &new).unwrap();
         let total = fs.into_device().writes;
         assert!(
             total > 8,
-            "el reemplazo escribe datos, cabecera, fichero, tabla y limpieza"
+            "the replace writes data, header, file, table and cleanup"
         );
         let mut replayed = 0;
         for cut_at in 0..=total {
             for lose_cache in [true, false] {
                 let mut fs = AriFs::open(CuttingDisk::new(&base, cut_at)).unwrap();
                 let result = fs.replace(i, &new);
-                assert_eq!(result.is_ok(), cut_at >= total, "corte en {cut_at}");
+                assert_eq!(result.is_ok(), cut_at >= total, "cut at {cut_at}");
                 let mut fs = AriFs::open(fs.into_device().power_off(lose_cache)).unwrap();
                 let got = content(&mut fs, i);
                 match fs.recovery() {
                     Recovery::Replayed { index } => {
                         assert_eq!(index, i);
-                        assert_eq!(got, new, "corte en {cut_at}: rehecho");
+                        assert_eq!(got, new, "cut at {cut_at}: redone");
                         replayed += 1;
                     }
-                    Recovery::Discarded => assert_eq!(got, old, "corte en {cut_at}: descartado"),
+                    Recovery::Discarded => assert_eq!(got, old, "cut at {cut_at}: discarded"),
                     Recovery::Clean => assert!(
                         got == old || got == new,
-                        "corte en {cut_at} (cache perdida {lose_cache}): contenido mezclado"
+                        "cut at {cut_at} (cache lost {lose_cache}): mixed contents"
                     ),
                 }
-                // Tras recuperar, el sistema sigue sirviendo.
+                // After recovery, the system keeps serving.
                 fs.replace(i, b"despues").unwrap();
                 assert_eq!(content(&mut fs, i), b"despues");
                 let mut fs = AriFs::open(fs.into_device()).unwrap();
@@ -1006,7 +1003,7 @@ mod tests {
         }
         assert!(
             replayed > 0,
-            "algun corte deja un reemplazo comprometido a medias"
+            "some cut leaves a committed replace half done"
         );
     }
 
@@ -1017,10 +1014,14 @@ mod tests {
         let mut fs = AriFs::format(disk(300), 300).unwrap();
         let i = fs.create("pkg").unwrap();
         fs.write(i, 0, &old).unwrap();
-        // Trozos de 4 KiB, como el cliente por IPC, y el ultimo parcial.
+        // 4 KiB chunks, like the IPC client, and a partial last one.
         for (k, chunk) in new.chunks(4096).enumerate() {
             fs.replace_chunk(i, (k * 4096) as u32, chunk).unwrap();
-            assert_eq!(content(&mut fs, i), old, "nada cambia antes del compromiso");
+            assert_eq!(
+                content(&mut fs, i),
+                old,
+                "nothing changes before the commit"
+            );
         }
         fs.replace_commit(i, new.len() as u32).unwrap();
         assert_eq!(content(&mut fs, i), new);
@@ -1028,7 +1029,7 @@ mod tests {
             fs.replace_chunk(i, JOURNAL_CAPACITY_BYTES as u32 - 1, b"xx"),
             Err(FsError::OutOfRange)
         );
-        // Corte en cada escritura del reemplazo por trozos: viejo o nuevo.
+        // Cut at every write of the chunked replace: old or new.
         let base = fs.into_device().0;
         let mut fs = AriFs::open(CuttingDisk::new(&base, usize::MAX)).unwrap();
         for (k, chunk) in old.chunks(4096).enumerate() {
@@ -1043,18 +1044,15 @@ mod tests {
                 result = result.and_then(|()| fs.replace_chunk(i, (k * 4096) as u32, chunk));
             }
             let result = result.and_then(|()| fs.replace_commit(i, old.len() as u32));
-            assert_eq!(result.is_ok(), cut_at >= total, "corte en {cut_at}");
+            assert_eq!(result.is_ok(), cut_at >= total, "cut at {cut_at}");
             let mut fs = AriFs::open(fs.into_device().power_off(true)).unwrap();
             let got = content(&mut fs, i);
-            assert!(
-                got == old || got == new,
-                "corte en {cut_at}: contenido mezclado"
-            );
+            assert!(got == old || got == new, "cut at {cut_at}: mixed contents");
         }
     }
 
-    /// Disco que cuenta peticiones: los lotes reducen las llamadas y el
-    /// contenido no cambia respecto a ir sector a sector.
+    /// Disk that counts requests: batches reduce the calls and the contents
+    /// do not change compared to going sector by sector.
     struct CountingDisk {
         inner: MemDisk,
         calls: usize,
@@ -1090,7 +1088,7 @@ mod tests {
         let data: Vec<u8> = (0..9000u32).map(|x| (x % 241) as u8).collect();
         let mut fs = AriFs::format(disk(300), 300).unwrap();
         let i = fs.create("lotes").unwrap();
-        // Desalineado por ambos extremos: parciales al principio y al final.
+        // Misaligned at both ends: partial sectors at the start and at the end.
         fs.write(i, 0, &data[..7]).unwrap();
         fs.write(i, 7, &data[7..]).unwrap();
         let mut back = std::vec![0u8; 9000];
@@ -1107,15 +1105,11 @@ mod tests {
         let mut out = std::vec![0u8; 4096];
         let before = fs.dev.calls;
         assert_eq!(fs.read(i, 0, &mut out).unwrap(), 4096);
-        assert_eq!(
-            fs.dev.calls - before,
-            1,
-            "4 KiB alineados: una sola peticion"
-        );
+        assert_eq!(fs.dev.calls - before, 1, "aligned 4 KiB: a single request");
         let before = fs.dev.calls;
         fs.replace(i, &data[..4096]).unwrap();
         let used = fs.dev.calls - before;
-        assert!(used <= 8, "reemplazo de 4 KiB en {used} peticiones");
+        assert!(used <= 8, "4 KiB replace in {used} requests");
         assert_eq!(content_of_counting(&mut fs, i), &data[..4096]);
     }
 
@@ -1126,9 +1120,9 @@ mod tests {
         buf
     }
 
-    /// Disco con caché de escritura que, al cortar, conserva solo los
-    /// sectores pendientes que `keep` elige: el contrato de `BlockDevice` no
-    /// promete orden antes de `flush` (auditoría 6ee19fb, hallazgo 2).
+    /// Disk with a write cache that, on a cut, keeps only the pending
+    /// sectors `keep` chooses: the `BlockDevice` contract does not promise
+    /// ordering before `flush` (audit 6ee19fb, finding 2).
     struct SubsetDisk {
         persisted: Vec<u8>,
         pending: Vec<(u64, [u8; SECTOR])>,
@@ -1184,9 +1178,9 @@ mod tests {
         let mut fs = AriFs::format(disk(400), 400).unwrap();
         fs.create("a").unwrap();
         let base = fs.into_device().0;
-        // Corte tras `create` conservando solo la tabla (la entrada) y
-        // perdiendo lo demás pendiente: la reserva ya estaba en el
-        // superbloque por la barrera, así que nada se solapa.
+        // Cut after `create` keeping only the table (the entry) and losing
+        // everything else pending: the reservation was already in the
+        // superblock thanks to the barrier, so nothing overlaps.
         for keep_table_only in [true, false] {
             let mut fs = AriFs::open(SubsetDisk::new(&base)).unwrap();
             let b = fs.create("b").unwrap();
@@ -1203,7 +1197,7 @@ mod tests {
             let second = fs.entry(c).unwrap().start_lba;
             assert_ne!(
                 second, first,
-                "espacio reasignado (tabla sola: {keep_table_only})"
+                "space reallocated (table only: {keep_table_only})"
             );
             let mut used: Vec<(u64, u64)> = fs
                 .entries()
@@ -1211,18 +1205,18 @@ mod tests {
                 .collect();
             used.sort_unstable();
             for w in used.windows(2) {
-                assert!(w[0].1 <= w[1].0, "ficheros solapados: {used:?}");
+                assert!(w[0].1 <= w[1].0, "overlapping files: {used:?}");
             }
         }
-        // Un tamaño publicado sin sus datos: la barrera de `write` lo impide.
+        // A size published without its data: the `write` barrier prevents it.
         let mut fs = AriFs::open(SubsetDisk::new(&base)).unwrap();
         let a = fs.find("a").unwrap();
         fs.write(a, 0, b"NEW").unwrap();
         let mut fs = AriFs::open(fs.into_device().power_off(is_table)).unwrap();
         let mut back = [0u8; 8];
         assert_eq!(fs.read(a, 0, &mut back).unwrap(), 3);
-        assert_eq!(&back[..3], b"NEW", "tamano sin datos");
-        // Metadatos con CRC correcto pero solapados: no se monta.
+        assert_eq!(&back[..3], b"NEW", "size without data");
+        // Metadata with a correct CRC but overlapping: not mounted.
         let mut fs = AriFs::format(disk(400), 400).unwrap();
         let x = fs.create("x").unwrap();
         fs.create("y").unwrap();
@@ -1248,24 +1242,24 @@ mod tests {
         let b = fs.create("app_b/notas").unwrap();
         fs.write(b, 0, b"propio").unwrap();
         fs.replace(a, b"XYNTHETIC_PRIVATE_DATA").unwrap();
-        // B manda un byte y compromete 22: no puede llevarse restos de A.
+        // B sends one byte and commits 22: it cannot take leftovers of A.
         fs.replace_chunk(b, 0, b"Y").unwrap();
         assert_eq!(fs.replace_commit(b, 22), Err(FsError::BadTransaction));
         assert_eq!(content(&mut fs, b), b"propio");
-        // Un trozo que no empieza en cero, o con hueco, tampoco vale.
+        // A chunk that does not start at zero, or with a gap, is rejected too.
         assert_eq!(fs.replace_chunk(b, 5, b"gap"), Err(FsError::BadTransaction));
         fs.replace_chunk(b, 0, b"abc").unwrap();
         assert_eq!(fs.replace_chunk(b, 4, b"d"), Err(FsError::BadTransaction));
-        // Compromiso de otro fichero con la transacción de este: rechazado.
+        // Committing another file with this file's transaction: rejected.
         fs.replace_chunk(b, 0, b"abc").unwrap();
         assert_eq!(fs.replace_commit(a, 3), Err(FsError::BadTransaction));
-        // La transacción correcta sigue funcionando y se consume.
+        // The correct transaction keeps working and is consumed.
         fs.replace_chunk(b, 0, b"abc").unwrap();
         fs.replace_chunk(b, 3, b"de").unwrap();
         fs.replace_commit(b, 5).unwrap();
         assert_eq!(content(&mut fs, b), b"abcde");
         assert_eq!(fs.replace_commit(b, 5), Err(FsError::BadTransaction));
-        // Abandonar una transacción a medias deja el journal libre para otra.
+        // Abandoning a half-done transaction leaves the journal free for another.
         fs.replace_chunk(b, 0, b"a medias").unwrap();
         fs.abandon_replace();
         assert_eq!(fs.replace_commit(b, 8), Err(FsError::BadTransaction));
@@ -1286,7 +1280,7 @@ mod tests {
         assert_eq!(
             fs.replace(i, &data),
             Err(FsError::OutOfRange),
-            "el journal no cubre mas de 64 sectores"
+            "the journal does not cover more than 64 sectors"
         );
         let mut fs = AriFs::open(fs.into_device()).unwrap();
         assert_eq!(content(&mut fs, i), data);
@@ -1303,7 +1297,7 @@ mod tests {
         let i = fs.create("README").unwrap();
         fs.write(i, 0, b"antes").unwrap();
         fs.stage_replace(i, b"recuperado tras un corte").unwrap();
-        assert_eq!(content_of(&mut fs, i), b"antes", "sin aplicar todavia");
+        assert_eq!(content_of(&mut fs, i), b"antes", "not applied yet");
         let mut fs = AriFs::open(fs.into_device()).unwrap();
         assert_eq!(fs.recovery(), Recovery::Replayed { index: i });
         assert_eq!(content_of(&mut fs, i), b"recuperado tras un corte");
@@ -1319,27 +1313,27 @@ mod tests {
         let i = fs.create("a").unwrap();
         fs.write(i, 0, b"intacto").unwrap();
         let base = fs.into_device().0;
-        // Superbloque tocado.
+        // Superblock tampered with.
         let mut img = base.clone();
         img[9] ^= 0x01;
         assert_eq!(AriFs::open(MemDisk(img)).err(), Some(FsError::Corrupt));
-        // Entrada en uso tocada (un byte del nombre).
+        // In-use entry tampered with (one byte of the name).
         let mut img = base.clone();
         img[TABLE_LBA as usize * SECTOR] ^= 0x20;
         assert_eq!(AriFs::open(MemDisk(img)).err(), Some(FsError::Corrupt));
-        // Entrada libre con basura: sigue libre (no esta en uso).
+        // Free entry with garbage: still free (not in use).
         let mut img = base.clone();
         img[TABLE_LBA as usize * SECTOR + ENTRY_LEN + 3] = 0x55;
         assert!(AriFs::open(MemDisk(img)).is_ok());
-        // Cabecera del journal rota (CRC): se descarta, el fichero no cambia.
+        // Broken journal header (CRC): discarded, the file does not change.
         let mut img = base.clone();
         img[JOURNAL_LBA as usize * SECTOR + 8] = JOURNAL_PENDING as u8;
         let mut fs = AriFs::open(MemDisk(img)).unwrap();
         assert_eq!(fs.recovery(), Recovery::Discarded);
         assert_eq!(content(&mut fs, i), b"intacto");
         let fs = AriFs::open(fs.into_device()).unwrap();
-        assert_eq!(fs.recovery(), Recovery::Clean, "la limpieza se escribio");
-        // Cabecera pendiente valida pero datos que no cuadran con su CRC.
+        assert_eq!(fs.recovery(), Recovery::Clean, "the cleanup was written");
+        // Valid pending header but data not matching its CRC.
         let journal = Journal {
             state: JOURNAL_PENDING,
             index: i as u32,
@@ -1353,7 +1347,7 @@ mod tests {
         let mut fs = AriFs::open(MemDisk(img)).unwrap();
         assert_eq!(fs.recovery(), Recovery::Discarded);
         assert_eq!(content(&mut fs, i), b"intacto");
-        // Cabecera pendiente valida con datos correctos: se rehace.
+        // Valid pending header with correct data: redone.
         let journal = Journal {
             data_crc: crc32(b"nuevo"),
             ..journal
@@ -1365,6 +1359,6 @@ mod tests {
         let mut fs = AriFs::open(MemDisk(img)).unwrap();
         assert_eq!(fs.recovery(), Recovery::Replayed { index: i });
         assert_eq!(content(&mut fs, i), b"nuevo");
-        assert_eq!(fs.sequence, 9, "la secuencia continua desde el journal");
+        assert_eq!(fs.sequence, 9, "the sequence continues from the journal");
     }
 }

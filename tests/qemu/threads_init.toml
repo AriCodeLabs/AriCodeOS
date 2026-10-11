@@ -1,10 +1,10 @@
 name = "threads.init"
-description = "hilo main adoptado e idle creado"
+description = "main thread adopted and idle created"
 level = "smoke"
 areas = ["threads"]
 cmdline = "qemu_exit"
 
 [expect]
 exit = 33
-serial_contains = ["[INFO ] task: hilo main adoptado, idle creado", "ARICODEOS_KERNEL_READY"]
+serial_contains = ["[INFO ] task: main thread adopted, idle created", "ARICODEOS_KERNEL_READY"]
 serial_absent = ["KERNEL PANIC"]

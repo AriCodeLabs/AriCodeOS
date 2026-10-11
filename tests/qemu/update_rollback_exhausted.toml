@@ -1,7 +1,7 @@
-# Fase 30: B pendiente pero sin intentos restantes: AriBoot hace rollback a A
-# y borra el pendiente.
+# Phase 30: B pending but with no attempts left: AriBoot rolls back to A
+# and clears the pending state.
 name = "update.rollback_exhausted"
-description = "slot pendiente agotado: rollback al activo"
+description = "pending slot exhausted: rollback to the active one"
 level = "full"
 areas = ["update", "boot"]
 cmdline = "qemu_exit"
@@ -10,10 +10,10 @@ disk = "b-exhausted"
 [expect]
 exit = 33
 serial_contains = [
-    "slots: estado activo A, pendiente B (0 intentos)",
-    "slots: slot pendiente agotado: rollback al activo -> slot A",
-    "slots: arrancando desde el slot A (imagen version 1)",
-    "AriInit: arrancado desde el slot A (activo)",
+    "slots: state active A, pending B (0 tries)",
+    "slots: pending slot exhausted: rollback to active -> slot A",
+    "slots: booting from slot A (image version 1)",
+    "AriInit: booted from slot A (active)",
     "ARICODEOS_KERNEL_READY",
 ]
 serial_absent = ["KERNEL PANIC", "boot_slot=B"]

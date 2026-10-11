@@ -1,73 +1,74 @@
-# ADR 0014: Persistencia de AriFS: sumas de control, journal de reemplazo y `flush`
+# ADR 0014: AriFS persistence: checksums, replace journal and `flush`
 
-- **Fecha:** 2026-09-28
-- **Estado:** Aceptada
+- **Date:** 2026-09-28
+- **Status:** Accepted
 
-## Contexto
+## Context
 
-AriFS v0 escribía en el sitio sin sumas de control ni `flush`: un corte
-durante una escritura podía dejar un fichero mezclado, un metadato roto
-pasaba por bueno y nada garantizaba que lo escrito hubiera llegado al
-soporte. El estudio de 2026-09-28 (etapa 2) pide un contrato explícito de
-`flush`, escrituras parciales, reemplazo atómico y recuperación, y elegir
-entre journal y copy-on-write con un ADR. A/B protege el sistema, no los
-datos de las aplicaciones.
+AriFS v0 wrote in place with no checksums and no `flush`: a power cut
+during a write could leave a mixed file, broken metadata passed as valid,
+and nothing guaranteed that what was written had reached the medium. The
+2026-09-28 study (stage 2) asks for an explicit contract for `flush`,
+partial writes, atomic replacement and recovery, and for choosing between
+a journal and copy-on-write in an ADR. A/B protects the system, not
+application data.
 
-## Decisión
+## Decision
 
-1. **Formato v1 con CRC32** en el superbloque y en cada entrada en uso de la
-   tabla. `open` devuelve `Corrupt` si alguno no cuadra y fsd no monta: un
-   sistema del que no se puede fiar no se sirve ni se "repara" borrando.
-   No hay compatibilidad con v0 (era un prototipo; xtask reformatea).
-2. **Journal de reemplazo** (un sector de cabecera y 64 de datos, entre la
-   tabla y los datos) en lugar de copy-on-write: los ficheros tienen
-   capacidad fija y sin fragmentación, así que un solo bloque de
-   transición basta y el formato apenas cambia. `replace(fd, datos)`
-   escribe los datos y su CRC en el journal, `flush`, marca la cabecera
-   pendiente con su propio CRC, `flush`, copia al fichero, fija el tamaño,
-   `flush`, limpia la cabecera (sin `flush`: una limpieza perdida solo
-   cuesta rehacer un reemplazo ya aplicado, y cada `flush` es un fsync del
-   soporte; etapa 5). Al montar, una cabecera pendiente
-   válida con datos que cuadran se rehace (idempotente); una cabecera rota
-   o unos datos que no cuadran se descartan: el reemplazo nunca llegó a
-   comprometerse y el fichero conserva el contenido anterior.
-3. **Contrato de `write`**: escribe en el sitio, sector a sector, hace
-   `flush` y solo después sube el tamaño. Tras un corte cada sector tiene el
-   contenido viejo o el nuevo; no hay garantía entre sectores; el tamaño
-   nunca cubre datos que no sean duraderos. Quien necesite todo-o-nada usa
-   `replace`. Del mismo modo `create` hace duradera la reserva del
-   superbloque antes de publicar la entrada, porque el soporte puede
-   reordenar sectores hasta `flush` (auditoría 6ee19fb, hallazgo 2), y
-   `open` rechaza (`Corrupt`) metadatos con CRC válido pero incoherentes:
-   ficheros fuera del área asignada o solapados.
-4. **`flush` de extremo a extremo**: `virtio-blk` negocia `VIRTIO_BLK_F_FLUSH`
-   y atiende `Op::Flush` del protocolo de bloques (sin él, `Flush` vuelve
-   sin hacer nada y el driver lo anuncia al arrancar); `BlockDevice::flush`
-   lo lleva a la librería; el protocolo de ficheros gana `Flush` y `Replace`
-   y el SDK `FsClient::{flush, replace}`.
-5. **Supuesto del soporte**: un sector de 512 bytes se escribe entero o no
-   se escribe. Sin ese supuesto ningún esquema con una sola copia de la
-   cabecera es seguro; se documenta para el equipo de referencia.
+1. **Format v1 with CRC32** in the superblock and in every in-use table
+   entry. `open` returns `Corrupt` if any of them does not match, and fsd
+   does not mount: a file system that cannot be trusted is neither served
+   nor "repaired" by deleting. There is no compatibility with v0 (it was a
+   prototype; xtask reformats).
+2. **Replace journal** (one header sector and 64 data sectors, between the
+   table and the data) instead of copy-on-write: files have fixed capacity
+   and no fragmentation, so a single transition block is enough and the
+   format barely changes. `replace(fd, data)` writes the data and its CRC
+   to the journal, `flush`, marks the header pending with its own CRC,
+   `flush`, copies to the file, sets the size, `flush`, clears the header
+   (without `flush`: a lost clear only costs redoing an already applied
+   replace, and every `flush` is an fsync of the medium; stage 5). On
+   mount, a valid pending header with matching data is replayed
+   (idempotent); a broken header or mismatching data is discarded: the
+   replace was never committed and the file keeps its previous contents.
+3. **`write` contract**: writes in place, sector by sector, does a `flush`
+   and only then grows the size. After a cut each sector holds either the
+   old or the new contents; there is no guarantee across sectors; the size
+   never covers data that is not durable. Whoever needs all-or-nothing
+   uses `replace`. Likewise `create` makes the superblock reservation
+   durable before publishing the entry, because the medium may reorder
+   sectors until `flush` (audit 6ee19fb, finding 2), and `open` rejects
+   (`Corrupt`) metadata with a valid CRC that is inconsistent: files
+   outside the allocated area or overlapping.
+4. **End-to-end `flush`**: `virtio-blk` negotiates `VIRTIO_BLK_F_FLUSH` and
+   handles `Op::Flush` of the block protocol (without it, `Flush` returns
+   without doing anything and the driver announces this at startup);
+   `BlockDevice::flush` carries it to the library; the file protocol gains
+   `Flush` and `Replace`, and the SDK gains `FsClient::{flush, replace}`.
+5. **Medium assumption**: a 512-byte sector is written entirely or not at
+   all. Without that assumption no scheme with a single copy of the header
+   is safe; it is documented for the reference machine.
 
-## Alternativas descartadas
+## Rejected alternatives
 
-- **Copy-on-write con dos copias por fichero**: dobla el espacio de datos
-  (invade el área en bruto del disco de pruebas) y sigue necesitando un
-  puntero atómico; no aporta nada frente al journal con capacidad fija.
-- **Journal general de escrituras parciales**: multiplica las escrituras de
-  cada `write` y complica la reproducción; el caso de uso de la etapa
-  (guardar un fichero entero) lo cubre `replace`.
-- **Reparar al montar** (descartar entradas corruptas y seguir): oculta
-  pérdidas; se prefiere fallar visible y dejar la decisión a quien opera.
+- **Copy-on-write with two copies per file**: doubles the data space
+  (encroaches on the raw area of the test disk) and still needs an atomic
+  pointer; it adds nothing over the journal with fixed capacity.
+- **General journal for partial writes**: multiplies the writes of every
+  `write` and complicates replay; the stage's use case (saving a whole
+  file) is covered by `replace`.
+- **Repair on mount** (discard corrupt entries and carry on): hides losses;
+  failing visibly and leaving the decision to the operator is preferred.
 
-## Consecuencias
+## Consequences
 
-- Los tests de host de `libs/arifs` cortan un reemplazo en cada escritura,
-  con la caché perdida o conservada, y comprueban que el fichero queda
-  entero (viejo o nuevo) y que el sistema sigue sirviendo. También cubren
-  CRC de superbloque y tabla, journal roto y datos que no cuadran.
-- `filesystem.replace_recovery` (disco `fs-pending-replace`) y
-  `filesystem.corrupt_detected` (disco `fs-corrupt`) lo prueban en QEMU;
-  `filesystem.read_write` exige el `flush` negociado y un `replace` por IPC.
-- `replace` por IPC admite hasta `MAX_IO` (4 KiB) por petición: el tamaño de
-  una nota, no de un módulo; las escrituras largas siguen siendo `write`.
+- The `libs/arifs` host tests cut a replace at every write, with the cache
+  lost or kept, and check that the file stays whole (old or new) and that
+  the file system keeps serving. They also cover superblock and table CRCs,
+  a broken journal and mismatching data.
+- `filesystem.replace_recovery` (disk `fs-pending-replace`) and
+  `filesystem.corrupt_detected` (disk `fs-corrupt`) test it in QEMU;
+  `filesystem.read_write` requires the negotiated `flush` and a `replace`
+  over IPC.
+- `replace` over IPC accepts up to `MAX_IO` (4 KiB) per request: the size
+  of a note, not of a module; long writes are still `write`.

@@ -1,21 +1,21 @@
-//! Transición a ring 3.
+//! Transition to ring 3.
 
 use aricode_x86_cpu::layout;
 use core::arch::asm;
 
-/// Salta a `rip` en ring 3 con la pila `rsp`, `arg` en `rdi` e interrupciones
-/// habilitadas.
-/// Nunca retorna: el proceso solo vuelve al kernel por `syscall`,
-/// interrupción o excepción.
+/// Jumps to `rip` in ring 3 with stack `rsp`, `arg` in `rdi` and interrupts
+/// enabled.
+/// Never returns: the process only comes back to the kernel through
+/// `syscall`, an interrupt or an exception.
 ///
 /// # Safety
 ///
-/// `rip` y `rsp` deben estar mapeados con USER en el espacio activo; la pila
-/// de kernel del hilo debe estar fijada en el TSS y en `syscall`.
+/// `rip` and `rsp` must be mapped USER in the active address space; the
+/// thread's kernel stack must be set in the TSS and for `syscall`.
 pub unsafe fn enter(rip: u64, rsp: u64, arg: u64) -> ! {
     const RFLAGS_IF: u64 = 1 << 9;
-    // `cli` antes del `swapgs`: entre ambos y el `iretq` la CPU esta en ring 0
-    // con el GS de usuario, y una interrupcion no lo intercambiaria.
+    // `cli` before `swapgs`: between it and `iretq` the CPU is in ring 0
+    // with the user GS, and an interrupt would not swap it.
     asm!(
         "cli",
         "mov ds, {ds:x}",

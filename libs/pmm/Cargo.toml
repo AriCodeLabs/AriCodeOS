@@ -3,7 +3,7 @@ name = "aricode-pmm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Allocator de frames físicos por bitmap (no_std, sin alloc)"
+description = "Bitmap physical frame allocator (no_std, no alloc)"
 
 [lib]
 path = "src/lib.rs"

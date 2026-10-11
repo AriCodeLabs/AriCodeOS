@@ -1,7 +1,7 @@
-# Fase 32: la misma autoprueba con una sola CPU degrada limpiamente (sin
-# APs, sin IPI): el codigo SMP no depende de que haya mas de un procesador.
+# Phase 32: the same self-test with a single CPU degrades cleanly (no
+# APs, no IPI): the SMP code does not depend on there being more than one processor.
 name = "smp.single_cpu_selftest"
-description = "test=smp con una CPU: sin APs ni IPI la autoprueba pasa igual"
+description = "test=smp with one CPU: without APs or IPI the self-test still passes"
 level = "full"
 areas = ["smp"]
 cmdline = "qemu_exit test=smp"
@@ -10,7 +10,7 @@ cpus = 1
 [expect]
 exit = 33
 serial_contains = [
-    "smp: 1 CPU en linea (sin APs en la MADT)",
+    "smp: 1 CPU online (no APs in the MADT)",
     "smp selftest ok (1 CPUs:",
     "(0 IPI)",
     "ARICODEOS_KERNEL_READY",

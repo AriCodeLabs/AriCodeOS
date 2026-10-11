@@ -1,8 +1,8 @@
-# Fase 23: TCP en netd. Eco contra el servidor del host, dos conexiones a la
-# vez, puerto cerrado (RST) y un servidor en el invitado al que el host se
-# conecta por hostfwd cuando ve TCP_LISTEN_READY.
+# Phase 23: TCP in netd. Echo against the host server, two connections at the
+# same time, closed port (RST) and a server in the guest that the host
+# connects to through hostfwd when it sees TCP_LISTEN_READY.
 name = "network.tcp"
-description = "TCP por IPC: conexion, eco, varias conexiones, RST, escucha y aceptacion"
+description = "TCP over IPC: connect, echo, multiple connections, RST, listen and accept"
 level = "full"
 areas = ["network", "init"]
 cmdline = "qemu_exit"
@@ -15,14 +15,14 @@ payload = "hola desde el host"
 [expect]
 exit = 33
 serial_contains = [
-    "tcp_client: eco TCP ok",
-    "tcp_client: dos conexiones simultaneas ok",
-    "tcp_client: conexion rechazada detectada",
-    "tcp_client: conexion entrante de 10.0.2.2 puerto ",
-    "tcp_client: eco al host de 18 bytes",
-    "[host] sonda TCP: eco de 18 bytes recibido",
-    "tcp_client: TCP por IPC ok",
-    "AriInit: servicio TCP ok",
+    "tcp_client: TCP echo ok",
+    "tcp_client: two simultaneous connections ok",
+    "tcp_client: refused connection detected",
+    "tcp_client: incoming connection from 10.0.2.2 port ",
+    "tcp_client: echoed to the host 18 bytes",
+    "[host] TCP probe: echo of 18 bytes received",
+    "tcp_client: TCP over IPC ok",
+    "AriInit: TCP service ok",
     "ARICODEOS_KERNEL_READY",
 ]
-serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "nadie se conecto"]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "nobody connected"]

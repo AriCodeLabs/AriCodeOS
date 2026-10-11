@@ -1,67 +1,67 @@
-//! ABI de syscalls de AriCodeOS (sección 22 del documento maestro).
+//! AriCodeOS syscall ABI (section 22 of the master document).
 //!
-//! Convención x86-64: número en `rax`, argumentos en `rdi, rsi, rdx, r10, r8,
-//! r9`, resultado en `rax`. `rcx` y `r11` los destruye la instrucción
-//! `syscall`; el resto de registros se conservan. Un resultado negativo en
-//! el rango `-4095..=-1` es un [`Error`].
+//! x86-64 convention: number in `rax`, arguments in `rdi, rsi, rdx, r10, r8,
+//! r9`, result in `rax`. `rcx` and `r11` are clobbered by the `syscall`
+//! instruction; all other registers are preserved. A negative result in
+//! the range `-4095..=-1` is an [`Error`].
 //!
-//! Los recursos se nombran por handles (sección 24): enteros opacos de 32
-//! bits con derechos asociados; `0` nunca es válido. Todo proceso arranca con
-//! los handles de [`handle::SELF_PROCESS`], [`handle::MAIN_THREAD`] y
+//! Resources are named by handles (section 24): opaque 32-bit integers
+//! with associated rights; `0` is never valid. Every process starts with
+//! the handles [`handle::SELF_PROCESS`], [`handle::MAIN_THREAD`] and
 //! [`handle::CONSOLE`].
 //!
-//! Durante `0.x` el ABI puede cambiar (sección 74). Versión actual: 2.
+//! During `0.x` the ABI may change (section 74). Current version: 2.
 
 #![no_std]
 
 pub const ABI_VERSION: u32 = 3;
 
-/// Handles iniciales de todo proceso.
+/// Initial handles of every process.
 pub mod handle {
-    /// Handle con el que `init` recibe el objeto `SPAWNER` (`MANAGE`).
+    /// Handle through which `init` receives the `SPAWNER` object (`MANAGE`).
     pub const INIT_SPAWNER: u32 = 0x0001_0004;
-    /// Handle con el que `init` recibe la raíz PCI (`READ|MANAGE`).
+    /// Handle through which `init` receives the PCI root (`READ|MANAGE`).
     pub const INIT_PCI_ROOT: u32 = 0x0001_0005;
-    /// El propio proceso (`MANAGE | READ | DUPLICATE`).
+    /// The process itself (`MANAGE | READ | DUPLICATE`).
     pub const SELF_PROCESS: u32 = 0x0001_0001;
-    /// El hilo principal (`READ | WAIT | DUPLICATE`).
+    /// The main thread (`READ | WAIT | DUPLICATE`).
     pub const MAIN_THREAD: u32 = 0x0001_0002;
-    /// Consola del kernel (`WRITE | DUPLICATE`).
+    /// Kernel console (`WRITE | DUPLICATE`).
     pub const CONSOLE: u32 = 0x0001_0003;
-    /// Handle con el que `init` recibe la capacidad de hardware (`MANAGE`).
+    /// Handle through which `init` receives the hardware capability (`MANAGE`).
     pub const INIT_HARDWARE: u32 = 0x0001_0006;
-    /// Handle con el que `init` recibe el objeto `SYSTEM` (`READ|MANAGE`).
+    /// Handle through which `init` receives the `SYSTEM` object (`READ|MANAGE`).
     pub const INIT_SYSTEM: u32 = 0x0001_0007;
-    /// Handle con el que `init` recibe la entrada de consola (`READ`).
+    /// Handle through which `init` receives the console input (`READ`).
     pub const INIT_CONSOLE_IN: u32 = 0x0001_0008;
-    /// Handle con el que `init` recibe el framebuffer (`MMIO`, `READ|WRITE`).
+    /// Handle through which `init` receives the framebuffer (`MMIO`, `READ|WRITE`).
     pub const INIT_FRAMEBUFFER: u32 = 0x0001_0009;
 }
 
-/// Bits del `arg` que el kernel pasa a `init`.
+/// Bits of the `arg` the kernel passes to `init`.
 pub mod init_arg {
-    /// La cmdline pide un shell interactivo (`shell`).
+    /// The cmdline asks for an interactive shell (`shell`).
     pub const SHELL: u64 = 1;
-    /// La cmdline pide la interfaz gráfica (`gui`): el kernel no pinta en el
-    /// framebuffer y init lanza el compositor.
+    /// The cmdline asks for the graphical interface (`gui`): the kernel does not
+    /// draw on the framebuffer and init launches the compositor.
     pub const GUI: u64 = 2;
-    /// El sistema arrancó desde el slot A (o B) de una partición de sistema.
+    /// The system booted from slot A (or B) of a system partition.
     pub const BOOT_SLOT_A: u64 = 4;
     pub const BOOT_SLOT_B: u64 = 8;
-    /// El slot arrancado espera confirmación: init debe marcarlo activo.
+    /// The booted slot awaits confirmation: init must mark it active.
     pub const BOOT_PENDING: u64 = 16;
-    /// Solo tests (`restart_storm`): init reinicia 100 veces un servicio de
-    /// prueba bajo el supervisor y comprueba que no se pierden recursos.
+    /// Tests only (`restart_storm`): init restarts a test service 100 times
+    /// under the supervisor and checks that no resources are leaked.
     pub const RESTART_STORM: u64 = 64;
-    /// Solo tests (`service_hang`): init lanza un servicio que nunca responde
-    /// y comprueba que el supervisor lo termina y no deja procesos vivos.
+    /// Tests only (`service_hang`): init launches a service that never answers
+    /// and checks that the supervisor kills it and leaves no live processes.
     pub const SERVICE_HANG: u64 = 128;
-    /// Solo tests (`init_fail_late`): init falla al final del arranque, antes
-    /// de confirmar el slot, para comprobar que el estado sigue pendiente.
+    /// Tests only (`init_fail_late`): init fails at the end of startup, before
+    /// confirming the slot, to check that the state stays pending.
     pub const FAIL_LATE: u64 = 32;
 }
 
-/// Derechos (bits) tal y como los ve el espacio de usuario.
+/// Rights (bits) as seen by user space.
 pub mod rights {
     pub const READ: u32 = 1 << 0;
     pub const WRITE: u32 = 1 << 1;
@@ -72,36 +72,36 @@ pub mod rights {
     pub const MANAGE: u32 = 1 << 6;
 }
 
-/// Tipos de objeto devueltos por `object_kind`.
+/// Object kinds returned by `object_kind`.
 pub mod kind {
     pub const THREAD: u64 = 1;
     pub const PROCESS: u64 = 2;
     pub const CONSOLE: u64 = 3;
     pub const ENDPOINT: u64 = 4;
-    /// Capacidad de crear procesos desde el initrd (solo `init` la recibe).
+    /// Capability to create processes from the initrd (only `init` receives it).
     pub const SPAWNER: u64 = 5;
-    /// Línea de interrupción de un dispositivo.
+    /// Interrupt line of a device.
     pub const IRQ: u64 = 6;
-    /// Región MMIO de un dispositivo.
+    /// MMIO region of a device.
     pub const MMIO: u64 = 7;
-    /// Buffer DMA (memoria física contigua).
+    /// DMA buffer (contiguous physical memory).
     pub const DMA: u64 = 8;
-    /// Capacidad de reservar recursos de hardware (buffers DMA).
+    /// Capability to allocate hardware resources (DMA buffers).
     pub const HARDWARE: u64 = 9;
-    /// Raíz PCI: enumeración y reclamación de dispositivos (solo `init`).
+    /// PCI root: device enumeration and claiming (`init` only).
     pub const PCI_ROOT: u64 = 10;
-    /// Estado del sistema (`READ`: información; `MANAGE`: apagar, reiniciar).
+    /// System state (`READ`: information; `MANAGE`: power off, reboot).
     pub const SYSTEM: u64 = 11;
 }
 
-/// Límite exclusivo del espacio de usuario (mitad baja canónica).
+/// Exclusive limit of user space (canonical lower half).
 pub const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
 
-/// Números de syscall.
+/// Syscall numbers.
 pub mod nr {
-    /// `process_exit(code)`: nunca retorna.
+    /// `process_exit(code)`: never returns.
     pub const PROCESS_EXIT: u64 = 0;
-    /// `console_write(handle, ptr, len) -> bytes escritos`; exige `WRITE`.
+    /// `console_write(handle, ptr, len) -> bytes written`; requires `WRITE`.
     pub const CONSOLE_WRITE: u64 = 1;
     /// `thread_yield()`.
     pub const THREAD_YIELD: u64 = 2;
@@ -113,112 +113,112 @@ pub mod nr {
     pub const ABI_VERSION: u64 = 5;
     /// `handle_close(handle)`.
     pub const HANDLE_CLOSE: u64 = 6;
-    /// `handle_duplicate(handle, rights) -> handle`; exige `DUPLICATE` y
-    /// `rights` subconjunto de los del origen.
+    /// `handle_duplicate(handle, rights) -> handle`; requires `DUPLICATE` and
+    /// `rights` a subset of the source's.
     pub const HANDLE_DUPLICATE: u64 = 7;
     /// `object_kind(handle) -> kind::*`.
     pub const OBJECT_KIND: u64 = 8;
-    /// `object_id(handle) -> tid | pid`; exige `READ`. La consola devuelve 0.
+    /// `object_id(handle) -> tid | pid`; requires `READ`. The console returns 0.
     pub const OBJECT_ID: u64 = 9;
-    /// `object_revoke(handle)`: invalida el objeto para todos sus handles,
-    /// en todos los procesos; exige `MANAGE`.
+    /// `object_revoke(handle)`: invalidates the object for all its handles,
+    /// in every process; requires `MANAGE`.
     pub const OBJECT_REVOKE: u64 = 10;
-    /// `endpoint_create() -> handle` con `READ|WRITE|DUPLICATE|TRANSFER|MANAGE`.
+    /// `endpoint_create() -> handle` with `READ|WRITE|DUPLICATE|TRANSFER|MANAGE`.
     pub const ENDPOINT_CREATE: u64 = 11;
     /// `ipc_send(ep, data_ptr, data_len, handles_ptr, handles_len, timeout_ms)`;
-    /// exige `WRITE` sobre `ep` y `TRANSFER` sobre cada handle enviado (que
-    /// se retira del emisor). `timeout_ms`: 0 = no bloquear,
-    /// [`TIMEOUT_INFINITE`] = esperar siempre.
+    /// requires `WRITE` on `ep` and `TRANSFER` on each handle sent (which
+    /// is removed from the sender). `timeout_ms`: 0 = do not block,
+    /// [`TIMEOUT_INFINITE`] = wait forever.
     pub const IPC_SEND: u64 = 12;
     /// `ipc_receive(ep, buf_ptr, buf_len, handles_out_ptr, handles_max, timeout_ms)
-    /// -> data_len | (handles_recibidos << 32)`; exige `READ` sobre `ep`.
+    /// -> data_len | (handles_received << 32)`; requires `READ` on `ep`.
     pub const IPC_RECEIVE: u64 = 13;
     /// `process_spawn(spawner, name_ptr, name_len, arg, handles_ptr, handles_len)
-    /// -> handle de proceso`; exige `MANAGE` sobre un objeto `SPAWNER` y
-    /// `TRANSFER` sobre cada handle, que se retira del padre y aparece en el
-    /// hijo a partir de `0x0001_0004` en el mismo orden. El hijo recibe `arg`
-    /// en `rdi`.
+    /// -> process handle`; requires `MANAGE` on a `SPAWNER` object and
+    /// `TRANSFER` on each handle, which is removed from the parent and appears in
+    /// the child from `0x0001_0004` on, in the same order. The child receives `arg`
+    /// in `rdi`.
     pub const PROCESS_SPAWN: u64 = 14;
-    /// `process_wait(process, timeout_ms) -> código de salida`; exige `WAIT`.
-    /// Un proceso terminado por el kernel devuelve `Error::Killed`.
+    /// `process_wait(process, timeout_ms) -> exit code`; requires `WAIT`.
+    /// A process terminated by the kernel returns `Error::Killed`.
     pub const PROCESS_WAIT: u64 = 15;
-    /// `irq_wait(irq, timeout_ms) -> interrupciones acumuladas`; exige `WAIT`.
+    /// `irq_wait(irq, timeout_ms) -> accumulated interrupts`; requires `WAIT`.
     pub const IRQ_WAIT: u64 = 16;
-    /// `mmio_map(region) -> dirección virtual`; exige `READ|WRITE` sobre un
-    /// objeto MMIO o DMA. Cada llamada crea un mapeo nuevo.
+    /// `mmio_map(region) -> virtual address`; requires `READ|WRITE` on an
+    /// MMIO or DMA object. Each call creates a new mapping.
     pub const MMIO_MAP: u64 = 17;
-    /// `region_len(region) -> bytes`; exige `READ`.
+    /// `region_len(region) -> bytes`; requires `READ`.
     pub const REGION_LEN: u64 = 18;
-    /// `dma_alloc(hardware, len) -> handle DMA`; exige `MANAGE` sobre un objeto
-    /// `HARDWARE`. Memoria física contigua, máximo `DMA_MAX_LEN`.
+    /// `dma_alloc(hardware, len) -> DMA handle`; requires `MANAGE` on a
+    /// `HARDWARE` object. Contiguous physical memory, at most `DMA_MAX_LEN`.
     pub const DMA_ALLOC: u64 = 19;
-    /// `dma_phys(dma) -> dirección física`; exige `READ`.
+    /// `dma_phys(dma) -> physical address`; requires `READ`.
     pub const DMA_PHYS: u64 = 20;
-    /// `pci_count(root) -> funciones enumeradas`; exige `READ` sobre `PCI_ROOT`.
+    /// `pci_count(root) -> enumerated functions`; requires `READ` on `PCI_ROOT`.
     pub const PCI_COUNT: u64 = 21;
-    /// `pci_info(root, index) -> PciInfo empaquetado` (ver [`pci_info`]); exige `READ`.
+    /// `pci_info(root, index) -> packed PciInfo` (see [`pci_info`]); requires `READ`.
     pub const PCI_INFO: u64 = 22;
-    /// `pci_claim(root, index, out_ptr) -> handles escritos`; exige `MANAGE`.
-    /// Escribe [`PCI_CLAIM_HANDLES`] `u32` en `out_ptr`: espacio de
-    /// configuración (MMIO), `HARDWARE`, IRQ MSI-X (0 si no hay) y los seis
-    /// BARs de memoria (0 si ausente o de E/S). El dispositivo queda con
-    /// memoria y bus master habilitados y MSI-X en la entrada 0.
+    /// `pci_claim(root, index, out_ptr) -> handles written`; requires `MANAGE`.
+    /// Writes [`PCI_CLAIM_HANDLES`] `u32`s to `out_ptr`: configuration
+    /// space (MMIO), `HARDWARE`, MSI-X IRQ (0 if none) and the six memory
+    /// BARs (0 if absent or I/O). The device is left with memory and bus
+    /// master enabled and MSI-X on entry 0.
     pub const PCI_CLAIM: u64 = 23;
-    /// `console_read(console, ptr, len, timeout_ms) -> bytes leídos (>= 1)`;
-    /// exige `READ`. Bloquea hasta que haya entrada o venza el plazo (`Timeout`).
+    /// `console_read(console, ptr, len, timeout_ms) -> bytes read (>= 1)`;
+    /// requires `READ`. Blocks until there is input or the deadline expires (`Timeout`).
     pub const CONSOLE_READ: u64 = 24;
-    /// `system_info(system, kind, ptr, len) -> bytes escritos` (ver [`sysinfo`]);
-    /// exige `READ`.
+    /// `system_info(system, kind, ptr, len) -> bytes written` (see [`sysinfo`]);
+    /// requires `READ`.
     pub const SYSTEM_INFO: u64 = 25;
-    /// `system_power(system, action)` (ver [`power`]); exige `MANAGE`. No retorna.
+    /// `system_power(system, action)` (see [`power`]); requires `MANAGE`. Does not return.
     pub const SYSTEM_POWER: u64 = 26;
-    /// `initrd_read(spawner, name_ptr, name_len, buf, len) -> bytes copiados`;
-    /// exige `READ` sobre el `SPAWNER`. `TooBig` si el fichero no cabe.
+    /// `initrd_read(spawner, name_ptr, name_len, buf, len) -> bytes copied`;
+    /// requires `READ` on the `SPAWNER`. `TooBig` if the file does not fit.
     pub const INITRD_READ: u64 = 27;
     /// `pci_info_ext(root, index) -> prog_if | revision << 8 | header_type << 16`
-    /// (ver `pci_info::prog_if`); exige `READ` sobre la raíz PCI.
+    /// (see `pci_info::prog_if`); requires `READ` on the PCI root.
     pub const PCI_INFO_EXT: u64 = 28;
-    /// `console_inject(console, ptr, len) -> bytes aceptados`; exige `MANAGE`
-    /// sobre un `Console`. Escribe texto de un teclado de usuario en el anillo
-    /// de entrada de consola (puente de consola, ADR 0013); los bytes que no
-    /// caben se descartan y se cuentan.
+    /// `console_inject(console, ptr, len) -> bytes accepted`; requires `MANAGE`
+    /// on a `Console`. Writes text from a user-space keyboard into the console
+    /// input ring (console bridge, ADR 0013); bytes that do not fit are
+    /// dropped and counted.
     pub const CONSOLE_INJECT: u64 = 29;
     /// `process_spawn_from(spawner, req_ptr, arg, handles_ptr, limits) -> handle`;
-    /// como `PROCESS_SPAWN` con el ELF en un buffer DMA del llamador descrito
-    /// por [`spawn_from::Request`] (programas instalados fuera del initrd,
-    /// ADR 0017). Exige `MANAGE` sobre el `SPAWNER` y `READ` sobre el buffer.
+    /// like `PROCESS_SPAWN` with the ELF in a caller DMA buffer described
+    /// by [`spawn_from::Request`] (programs installed outside the initrd,
+    /// ADR 0017). Requires `MANAGE` on the `SPAWNER` and `READ` on the buffer.
     pub const PROCESS_SPAWN_FROM: u64 = 30;
     /// `ipc_receive_any(handles_ptr, count, buf_ptr, buf_len, out_ptr, timeout_ms)
-    /// -> len | n << 32 | index << 48`: recibe del primero de hasta
-    /// `IPC_MAX_ANY` endpoints (`READ` sobre todos) que tenga mensaje; `out_ptr`
-    /// admite `IPC_MAX_HANDLES` handles (ADR 0020).
+    /// -> len | n << 32 | index << 48`: receives from the first of up to
+    /// `IPC_MAX_ANY` endpoints (`READ` on all) that has a message; `out_ptr`
+    /// holds `IPC_MAX_HANDLES` handles (ADR 0020).
     pub const IPC_RECEIVE_ANY: u64 = 31;
-    /// `process_kill(process)`: exige `MANAGE` sobre el proceso. Lo termina
-    /// como si hubiera fallado (`Killed`, motivo "terminado por el
-    /// supervisor"): su hilo sale en cuanto vuelve a ring 0 o al despertar de
-    /// una espera. `process_wait` devuelve `Killed` (auditoría 6ee19fb, 4).
+    /// `process_kill(process)`: requires `MANAGE` on the process. Terminates it
+    /// as if it had faulted (`Killed`, reason "terminated by the
+    /// supervisor"): its thread exits as soon as it returns to ring 0 or wakes
+    /// from a wait. `process_wait` returns `Killed` (audit 6ee19fb, 4).
     pub const PROCESS_KILL: u64 = 32;
 }
 
-/// Petición de `process_spawn_from` (48 bytes en memoria del llamador).
+/// `process_spawn_from` request (48 bytes in caller memory).
 pub mod spawn_from {
     pub const LEN: usize = 48;
     pub const MAX_NAME: usize = 32;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Request {
-        /// Handle del buffer DMA que contiene el ELF (`READ`).
+        /// Handle of the DMA buffer containing the ELF (`READ`).
         pub dma: u32,
-        /// Desplazamiento del ELF dentro del buffer.
+        /// Offset of the ELF within the buffer.
         pub elf_offset: u32,
-        /// Bytes del ELF.
+        /// ELF size in bytes.
         pub elf_len: u32,
         pub name: [u8; MAX_NAME],
         pub name_len: u8,
     }
 
     impl Request {
-        /// `None` si el nombre está vacío o no cabe.
+        /// `None` if the name is empty or does not fit.
         pub fn new(dma: u32, elf_offset: u32, elf_len: u32, name: &str) -> Option<Self> {
             if name.is_empty() || name.len() > MAX_NAME {
                 return None;
@@ -265,8 +265,8 @@ pub mod spawn_from {
     }
 }
 
-/// Sexto argumento de `process_spawn`: número de handles (bits 0..7) y
-/// límite de memoria DMA del hijo en KiB (bits 8..). 0 KiB = sin límite.
+/// Sixth argument of `process_spawn`: number of handles (bits 0..7) and
+/// DMA memory limit of the child in KiB (bits 8..). 0 KiB = unlimited.
 pub mod spawn_limits {
     pub const fn pack(handles: usize, memory_kib: u32) -> u64 {
         (handles as u64 & 0xFF) | (memory_kib as u64) << 8
@@ -279,49 +279,49 @@ pub mod spawn_limits {
     }
 }
 
-/// Consultas de `system_info` y formato de sus respuestas.
+/// `system_info` queries and the format of their replies.
 pub mod sysinfo {
-    /// Un `u64`: milisegundos desde el arranque.
+    /// One `u64`: milliseconds since boot.
     pub const UPTIME: u64 = 0;
-    /// Dos `u64`: frames de RAM utilizable y frames libres.
+    /// Two `u64`s: usable RAM frames and free frames.
     pub const MEMORY: u64 = 1;
-    /// Tantas [`ProcessEntry`] como quepan en el buffer.
+    /// As many [`ProcessEntry`] as fit in the buffer.
     pub const PROCESSES: u64 = 2;
-    /// Un [`Framebuffer`] (40 bytes): geometría y formato de la pantalla GOP.
+    /// One [`Framebuffer`] (40 bytes): geometry and format of the GOP screen.
     pub const FRAMEBUFFER: u64 = 3;
-    /// Hasta `RANDOM_MAX` bytes aleatorios del generador del kernel (la
-    /// longitud pedida es la del buffer).
+    /// Up to `RANDOM_MAX` random bytes from the kernel generator (the
+    /// requested length is the buffer's).
     pub const RANDOM: u64 = 4;
     pub const RANDOM_MAX: u64 = 256;
-    /// Un `u64`: CPUs en línea (Fase 32).
+    /// One `u64`: online CPUs (Phase 32).
     pub const CPUS: u64 = 5;
-    /// Tres `u64`: unidades IOMMU activas, dominios vivos y fallos de DMA
-    /// registrados (Fase 33).
+    /// Three `u64`s: active IOMMU units, live domains and recorded DMA
+    /// faults (Phase 33).
     pub const IOMMU: u64 = 6;
-    /// Reposo por CPU (etapa 5): `u64` ciclos de TSC desde el arranque, `u64`
-    /// CPUs en línea y, por cada una, `u64` ciclos pasados en `hlt`.
+    /// Per-CPU idle time (stage 5): `u64` TSC cycles since boot, `u64`
+    /// online CPUs and, for each one, `u64` cycles spent in `hlt`.
     pub const IDLE: u64 = 7;
-    /// Sucesos recientes del kernel (etapa 5): entradas [`EventEntry`] del más
-    /// antiguo al más reciente, tantas como quepan en el buffer.
+    /// Recent kernel events (stage 5): [`EventEntry`] entries from oldest
+    /// to newest, as many as fit in the buffer.
     pub const EVENTS: u64 = 8;
-    /// Un `u64`: microsegundos desde el arranque (TSC calibrado; si no hay
-    /// calibración, el tick en ms por 1000).
+    /// One `u64`: microseconds since boot (calibrated TSC; without
+    /// calibration, the ms tick times 1000).
     pub const UPTIME_US: u64 = 9;
 
-    /// Clase de suceso del anillo del kernel.
+    /// Event class of the kernel ring.
     #[repr(u8)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum EventKind {
         None = 0,
         /// `pid`, `name`.
         ProcessCreated = 1,
-        /// `pid`, `name`, `code` = código de salida.
+        /// `pid`, `name`, `code` = exit code.
         ProcessExited = 2,
-        /// `pid`, `name` = motivo del kernel (excepción).
+        /// `pid`, `name` = kernel reason (exception).
         ProcessKilled = 3,
-        /// `code` = `bus << 8 | dev << 3 | fn` del dispositivo, `name` = motivo.
+        /// `code` = `bus << 8 | dev << 3 | fn` of the device, `name` = reason.
         DmaFault = 4,
-        /// `pid`, `name`, `code` = bytes pedidos por encima de la cuota.
+        /// `pid`, `name`, `code` = bytes requested above the quota.
         DmaQuota = 5,
     }
 
@@ -340,8 +340,8 @@ pub mod sysinfo {
 
     pub const EVENT_NAME_LEN: usize = 24;
 
-    /// Suceso del kernel (48 bytes): instante en µs, clase, pid, código y
-    /// nombre o motivo.
+    /// Kernel event (48 bytes): timestamp in us, class, pid, code and
+    /// name or reason.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct EventEntry {
         pub at_us: u64,
@@ -409,7 +409,7 @@ pub mod sysinfo {
         }
     }
 
-    /// Formato de píxel del framebuffer (32 bpp).
+    /// Framebuffer pixel format (32 bpp).
     pub const FB_FORMAT_RGB: u8 = 0;
     pub const FB_FORMAT_BGR: u8 = 1;
     pub const FB_FORMAT_BITMASK: u8 = 2;
@@ -418,7 +418,7 @@ pub mod sysinfo {
     pub struct Framebuffer {
         pub width: u32,
         pub height: u32,
-        /// Píxeles por fila.
+        /// Pixels per row.
         pub stride: u32,
         pub format: u8,
         pub size: u64,
@@ -462,7 +462,7 @@ pub mod sysinfo {
 
     pub const PROCESS_NAME_LEN: usize = 24;
 
-    /// Estado de un proceso en [`ProcessEntry`].
+    /// State of a process in [`ProcessEntry`].
     #[repr(u8)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ProcessState {
@@ -471,8 +471,8 @@ pub mod sysinfo {
         Killed = 2,
     }
 
-    /// Entrada de la lista de procesos (32 bytes): pid, estado, código de
-    /// salida (si terminó) y nombre.
+    /// Process list entry (32 bytes): pid, state, exit code
+    /// (if it finished) and name.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct ProcessEntry {
         pub pid: u32,
@@ -535,16 +535,16 @@ pub mod sysinfo {
     }
 }
 
-/// Acciones de `system_power`.
+/// `system_power` actions.
 pub mod power {
     pub const SHUTDOWN: u64 = 0;
     pub const REBOOT: u64 = 1;
 }
 
-/// Número de handles que escribe `pci_claim`.
+/// Number of handles written by `pci_claim`.
 pub const PCI_CLAIM_HANDLES: usize = 9;
 
-/// Empaquetado de `pci_info`: `vendor << 48 | device << 32 | class << 24 |
+/// `pci_info` packing: `vendor << 48 | device << 32 | class << 24 |
 /// subclass << 16 | bus << 8 | dev << 3 | func`.
 pub mod pci_info {
     pub const fn pack(
@@ -586,67 +586,67 @@ pub mod pci_info {
         (v & 7) as u8
     }
 
-    /// Campos de `pci_info_ext`.
+    /// `pci_info_ext` fields.
     pub const fn pack_ext(prog_if: u8, revision: u8, header_type: u8) -> u64 {
         prog_if as u64 | (revision as u64) << 8 | (header_type as u64) << 16
     }
-    /// Programming Interface: distingue variantes de una misma clase (xHCI
-    /// es `0c.03` con interfaz `0x30`; EHCI `0x20`, OHCI `0x10`, UHCI `0x00`).
+    /// Programming Interface: tells apart variants of the same class (xHCI
+    /// is `0c.03` with interface `0x30`; EHCI `0x20`, OHCI `0x10`, UHCI `0x00`).
     pub const fn prog_if(ext: u64) -> u8 {
         ext as u8
     }
     pub const fn revision(ext: u64) -> u8 {
         (ext >> 8) as u8
     }
-    /// Interfaz de programación del xHCI.
+    /// xHCI programming interface.
     pub const XHCI_PROG_IF: u8 = 0x30;
 }
 
-/// Máximo de un buffer DMA por llamada (sección 52).
+/// Maximum DMA buffer size per call (section 52).
 pub const DMA_MAX_LEN: u64 = 8 * 1024 * 1024;
 
-/// Límites de un mensaje IPC (sección 23: mensajes pequeños y rápidos).
+/// IPC message limits (section 23: small, fast messages).
 pub const IPC_MAX_DATA: usize = 256;
 pub const IPC_MAX_HANDLES: usize = 4;
-/// Capacidad de la cola de un endpoint (protección frente a agotamiento).
+/// Endpoint queue capacity (protection against exhaustion).
 pub const IPC_QUEUE_CAPACITY: usize = 16;
-/// Endpoints por llamada a `ipc_receive_any`.
+/// Endpoints per `ipc_receive_any` call.
 pub const IPC_MAX_ANY: usize = 16;
-/// Timeout que significa "esperar indefinidamente".
+/// Timeout meaning "wait indefinitely".
 pub const TIMEOUT_INFINITE: u64 = u64::MAX;
 
-/// Descompone el resultado de `ipc_receive`.
+/// Splits the result of `ipc_receive`.
 pub const fn receive_result(raw: u64) -> (usize, usize) {
     ((raw & 0xFFFF_FFFF) as usize, (raw >> 32) as usize)
 }
 
-/// Errores devueltos por el kernel (negados en `rax`).
+/// Errors returned by the kernel (negated in `rax`).
 #[repr(i64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
-    /// Número de syscall desconocido.
+    /// Unknown syscall number.
     NoSys = 1,
-    /// Puntero o rango fuera del espacio de usuario o no mapeado.
+    /// Pointer or range outside user space or not mapped.
     Fault = 2,
-    /// Argumento inválido.
+    /// Invalid argument.
     Invalid = 3,
-    /// Handle inexistente, cerrado o inventado.
+    /// Nonexistent, closed or forged handle.
     BadHandle = 4,
-    /// El handle no tiene los derechos necesarios.
+    /// The handle lacks the required rights.
     Denied = 5,
-    /// Intento de obtener más derechos de los que se tienen.
+    /// Attempt to obtain more rights than are held.
     Escalation = 6,
-    /// Límite de recursos del proceso.
+    /// Process resource limit.
     Limit = 7,
-    /// El objeto fue revocado: el handle existe pero ya no da acceso.
+    /// The object was revoked: the handle exists but no longer grants access.
     Revoked = 8,
-    /// Se agotó el plazo (o `timeout_ms == 0` y la operación bloquearía).
+    /// The deadline expired (or `timeout_ms == 0` and the operation would block).
     Timeout = 9,
-    /// Mensaje o buffer por encima de los límites.
+    /// Message or buffer above the limits.
     TooBig = 10,
-    /// El proceso esperado fue terminado por el kernel (excepción en ring 3).
+    /// The awaited process was terminated by the kernel (exception in ring 3).
     Killed = 11,
-    /// No existe un fichero con ese nombre en el initrd.
+    /// No file with that name exists in the initrd.
     NotFound = 12,
 }
 
@@ -674,7 +674,7 @@ impl Error {
     }
 }
 
-/// Convierte el `rax` devuelto en `Result`.
+/// Converts the returned `rax` into a `Result`.
 pub const fn decode(raw: i64) -> Result<u64, Error> {
     if raw < 0 && raw >= -4095 {
         match Error::from_raw(raw) {
@@ -686,7 +686,7 @@ pub const fn decode(raw: i64) -> Result<u64, Error> {
     }
 }
 
-/// `true` si `[ptr, ptr+len)` cae íntegramente en el espacio de usuario.
+/// `true` if `[ptr, ptr+len)` lies entirely within user space.
 pub const fn user_range_ok(ptr: u64, len: u64) -> bool {
     match ptr.checked_add(len) {
         Some(end) => end <= USER_SPACE_END,
@@ -733,7 +733,7 @@ mod tests {
             1,
             ProcessState::Running,
             0,
-            "un-nombre-demasiado-largo-para-la-entrada",
+            "a-name-far-too-long-for-the-entry",
         );
         assert_eq!(long.name_len as usize, PROCESS_NAME_LEN);
         let mut bad = e.encode();
@@ -753,13 +753,13 @@ mod tests {
         assert_eq!(
             decode(-4096),
             Ok((-4096i64) as u64),
-            "fuera del rango de error es un valor"
+            "outside the error range it is a value"
         );
         assert_eq!(decode(42), Ok(42));
         assert_eq!(
             decode(-77),
             Err(Error::Invalid),
-            "codigo desconocido se normaliza"
+            "unknown code is normalized"
         );
     }
 

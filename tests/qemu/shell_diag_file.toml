@@ -1,7 +1,7 @@
-# Fase 34: `diag NOM` guarda el informe en AriFS para leerlo desde el
-# anfitrion con `cargo xtask fs-cat` (diagnostico del portatil sin fotos).
+# Phase 34: `diag NAME` saves the report in AriFS so it can be read from the
+# host with `cargo xtask fs-cat` (laptop diagnostics without photos).
 name = "shell.diag_file"
-description = "arish: diag NOM escribe el informe completo en AriFS y cat lo relee"
+description = "arish: diag NAME writes the full report to AriFS and cat reads it back"
 level = "full"
 areas = ["shell", "filesystem"]
 cmdline = "qemu_exit shell"
@@ -11,11 +11,11 @@ stdin = ["diag diag.txt", "ls", "shutdown"]
 [expect]
 exit = 33
 serial_contains = [
-    "=== diagnostico AriCodeOS ===",
-    "PID  ESTADO      NOMBRE",
-    "1af4:1042 clase 01.00",
-    "=== fin del diagnostico ===",
-    "bytes en diag.txt",
+    "=== AriCodeOS diagnostics ===",
+    "PID  STATE       NAME",
+    "1af4:1042 class 01.00",
+    "=== end of diagnostics ===",
+    "bytes to diag.txt",
     "diag.txt",
     "ARICODEOS_SHUTDOWN",
 ]

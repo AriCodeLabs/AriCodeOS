@@ -1,8 +1,8 @@
-# Fase 15: sin test= el kernel lanza init del initrd con la capacidad SPAWNER.
-# init lanza servicios, ve un fallo como Killed y comprueba que sin MANAGE no
-# se puede crear procesos.
+# Phase 15: without test= the kernel launches init from the initrd with the SPAWNER capability.
+# init launches services, sees a fault as Killed and checks that without MANAGE
+# processes cannot be created.
 name = "init.boot"
-description = "arranque normal: init lanza hello, ve morir kernel_read y comprueba la capacidad SPAWNER"
+description = "normal boot: init launches hello, sees kernel_read die and checks the SPAWNER capability"
 level = "smoke"
 areas = ["init", "user"]
 cmdline = "qemu_exit"
@@ -12,21 +12,21 @@ exit = 33
 serial_contains = [
     "initrd.img:",
     "[INFO ] initrd:",
-    "AriInit: arrancando",
-    "AriInit: hello termino con 42",
-    "AriInit: kernel_read fue terminado por el kernel",
-    "AriInit: crashy_driver fallo, reiniciando",
-    "AriInit: crashy_driver reiniciado con exito",
-    "AriInit: 9 funciones PCI",
-    "virtio-blk: dispositivo listo",
-    "AriInit: servicio de ficheros ok",
-    "AriInit: servicio de bloques ok",
-    "AriInit: servicio de red ok",
-    "AriInit: servicio TCP ok",
-    "AriInit: cliente HTTP ok",
-    "AriInit: servicio de entrada ok",
-    "AriInit: servicios de arranque completados",
-    "[INFO ] init terminado con codigo 0",
+    "AriInit: starting",
+    "AriInit: hello exited with 42",
+    "AriInit: kernel_read was killed by the kernel",
+    "AriInit: crashy_driver crashed, restarting",
+    "AriInit: crashy_driver restarted successfully",
+    "AriInit: 9 PCI functions",
+    "virtio-blk: device ready",
+    "AriInit: file service ok",
+    "AriInit: block service ok",
+    "AriInit: network service ok",
+    "AriInit: TCP service ok",
+    "AriInit: HTTP client ok",
+    "AriInit: input service ok",
+    "AriInit: boot services completed",
+    "[INFO ] init exited with code 0",
     "ARICODEOS_KERNEL_READY",
 ]
-serial_absent = ["KERNEL PANIC", "init terminado por fallo"]
+serial_absent = ["KERNEL PANIC", "init killed"]

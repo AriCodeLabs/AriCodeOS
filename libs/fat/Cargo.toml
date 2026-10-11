@@ -3,7 +3,7 @@ name = "aricode-fat"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "FAT32 mínimo: construcción de imágenes de partición EFI con nombres largos y lectura de ficheros (no_std + alloc)"
+description = "Minimal FAT32: builds EFI partition images with long names and reads files (no_std + alloc)"
 
 [lib]
 path = "src/lib.rs"

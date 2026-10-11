@@ -1,9 +1,9 @@
-//! arish (Fase 21): shell interactivo en ring 3. Solo ve lo que init le da:
-//! 0x10004 = endpoint de fsd (WRITE), 0x10005 = HARDWARE (buffer DMA),
-//! 0x10006 = SYSTEM (READ|MANAGE), 0x10007 = entrada de consola (READ),
-//! 0x10008 = raíz PCI (READ), 0x10009 = endpoint de netd (WRITE), 0x1000A =
-//! broker de lanzamiento de init (WRITE) para `run`. `arg` = máscara de
-//! servicios en ejecución. El shell no puede crear procesos por sí mismo.
+//! arish (Phase 21): interactive shell in ring 3. It only sees what init
+//! gives it: 0x10004 = fsd endpoint (WRITE), 0x10005 = HARDWARE (DMA buffer),
+//! 0x10006 = SYSTEM (READ|MANAGE), 0x10007 = console input (READ),
+//! 0x10008 = PCI root (READ), 0x10009 = netd endpoint (WRITE), 0x1000A =
+//! init's launch broker (WRITE) for `run`. `arg` = mask of running
+//! services. The shell cannot create processes by itself.
 #![no_std]
 #![no_main]
 
@@ -20,7 +20,7 @@ const PCI_ROOT: Handle = Handle(0x0001_0008);
 const NETD: Handle = Handle(0x0001_0009);
 const BROKER: Handle = Handle(0x0001_000A);
 
-/// Bits de `arg`: servicios que init dejó en marcha.
+/// Bits of `arg`: services that init left running.
 const SERVICE_BLOCK: u64 = 1;
 const SERVICE_FS: u64 = 2;
 const SERVICE_NET: u64 = 4;
@@ -30,15 +30,15 @@ const SERVICE_GUI: u64 = 16;
 const PROMPT: &[u8] = b"ari> ";
 const LINE_MAX: usize = 256;
 
-/// Captura de la salida para `diag NOM`: un solo hilo, así que una celda
-/// estática basta.
+/// Output capture for `diag NAME`: single-threaded, so a static cell is
+/// enough.
 const CAPTURE_MAX: usize = 16 * 1024;
 
 struct Capture {
     state: core::cell::UnsafeCell<([u8; CAPTURE_MAX], usize, bool)>,
 }
 
-// SAFETY: el shell tiene un único hilo; nadie más toca la captura.
+// SAFETY: the shell has a single thread; nobody else touches the capture.
 unsafe impl Sync for Capture {}
 
 static CAPTURE: Capture = Capture {
@@ -46,12 +46,12 @@ static CAPTURE: Capture = Capture {
 };
 
 fn capture_with<R>(f: impl FnOnce(&mut ([u8; CAPTURE_MAX], usize, bool)) -> R) -> R {
-    // SAFETY: un solo hilo y sin reentrada: `f` no vuelve a llamar aquí.
+    // SAFETY: single thread and no reentrancy: `f` does not call back here.
     f(unsafe { &mut *CAPTURE.state.get() })
 }
 
-/// Escribe en la consola y, con la captura activa, también en el buffer
-/// (lo que no cabe se pierde).
+/// Writes to the console and, while capture is active, also to the buffer
+/// (whatever does not fit is lost).
 fn print(b: &[u8]) {
     sys::print(b);
     capture_with(|(buf, len, active)| {
@@ -73,14 +73,13 @@ fn hex(v: u64, width: usize) {
     print(fmt_hex(v, width, &mut buf));
 }
 
-/// Lee una línea con eco, retroceso y fin en CR o LF.
-/// Últimas líneas ejecutadas, para las flechas arriba y abajo.
+/// Last executed lines, for the up and down arrows.
 const HISTORY: usize = 8;
 
 struct History {
     lines: [[u8; LINE_MAX]; HISTORY],
     lens: [usize; HISTORY],
-    /// Líneas guardadas (hasta `HISTORY`); la más reciente es `next - 1`.
+    /// Stored lines (up to `HISTORY`); the most recent is `next - 1`.
     count: usize,
     next: usize,
 }
@@ -95,7 +94,7 @@ impl History {
         }
     }
 
-    /// Guarda una línea no vacía distinta de la última.
+    /// Stores a non-empty line that differs from the last one.
     fn push(&mut self, line: &[u8]) {
         if line.is_empty() || self.back(1) == Some(line) {
             return;
@@ -106,7 +105,7 @@ impl History {
         self.count = (self.count + 1).min(HISTORY);
     }
 
-    /// La línea `n` posiciones hacia atrás (1 = la más reciente).
+    /// The line `n` positions back (1 = the most recent).
     fn back(&self, n: usize) -> Option<&[u8]> {
         if n == 0 || n > self.count {
             return None;
@@ -116,7 +115,7 @@ impl History {
     }
 }
 
-/// Sustituye lo tecleado por `text`, borrándolo también en pantalla.
+/// Replaces what was typed with `text`, erasing it on screen too.
 fn replace_line(line: &mut [u8; LINE_MAX], len: &mut usize, text: &[u8]) {
     for _ in 0..*len {
         print(b"\x08 \x08");
@@ -127,16 +126,16 @@ fn replace_line(line: &mut [u8; LINE_MAX], len: &mut usize, text: &[u8]) {
     print(&line[..n]);
 }
 
-/// Lee una línea de la consola con edición mínima: retroceso y, con las
-/// flechas arriba y abajo (secuencias `ESC [ A` / `ESC [ B`, como las de un
-/// terminal serie), el historial. El resto de secuencias se descartan.
+/// Reads a line from the console with minimal editing: backspace and, with
+/// the up and down arrows (sequences `ESC [ A` / `ESC [ B`, as sent by a
+/// serial terminal), the history. Other sequences are discarded.
 fn read_line(line: &mut [u8; LINE_MAX], history: &History) -> usize {
     let mut len = 0;
     let mut chunk = [0u8; 64];
-    // Secuencia de escape en curso: 0 nada, 1 `ESC`, 2 `ESC [`, 3 parámetro
-    // numérico pendiente de su final (`~`).
+    // Escape sequence in progress: 0 none, 1 `ESC`, 2 `ESC [`, 3 numeric
+    // parameter awaiting its terminator (`~`).
     let mut esc = 0u8;
-    // Posición en el historial: 0 = línea nueva, n = `n` hacia atrás.
+    // Position in the history: 0 = new line, n = `n` back.
     let mut back = 0usize;
     loop {
         let Ok(n) = sys::console_read(CONSOLE_IN, &mut chunk, TIMEOUT_INFINITE) else {
@@ -200,7 +199,7 @@ fn read_line(line: &mut [u8; LINE_MAX], history: &History) -> usize {
     }
 }
 
-/// Divide en (comando, resto) por el primer espacio.
+/// Splits into (command, rest) at the first space.
 fn split(line: &[u8]) -> (&[u8], &[u8]) {
     let line = trim(line);
     match line.iter().position(|&b| b == b' ') {
@@ -217,7 +216,7 @@ fn trim(s: &[u8]) -> &[u8] {
 
 fn help() {
     print(
-        b"comandos:\n  help      esta ayuda\n  ps        procesos\n  mem       memoria fisica\n  ls        ficheros de AriFS\n  cat NOM   muestra un fichero\n  write NOM TEXTO  guarda TEXTO en el fichero (lo crea o lo reemplaza entero)\n  devices   funciones PCI\n  services  servicios de arranque (--detail: estado del supervisor)\n  uptime    tiempo desde el arranque\n  cpus      procesadores en linea y reposo por CPU\n  diag [NOM]  informe completo (uptime, mem, cpus, ps, services, net, devices); con NOM lo guarda en AriFS\n  net       configuracion de red\n  ping IP   eco ICMP (4 intentos)\n  dns NOM   resuelve un nombre\n  http URL  GET y muestra el cuerpo\n  run PROG  ejecuta un programa del initrd y espera\n  spawn PROG  lo lanza en segundo plano (no se puede detener)\n  repeat N CMD  repite un comando N veces\n  reboot    reinicia\n  shutdown  apaga\n  exit      termina el shell\n",
+        b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  cpus      online processors and idle time per CPU\n  diag [NAME]  full report (uptime, mem, cpus, ps, services, net, devices); with NAME saves it to AriFS\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body\n  run PROG  run an initrd program and wait\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
     );
 }
 
@@ -225,10 +224,10 @@ fn ps() {
     use abi::sysinfo::{ProcessEntry, ProcessState};
     let mut buf = [0u8; ProcessEntry::LEN * 32];
     let Ok(n) = sys::system_info(SYSTEM, abi::sysinfo::PROCESSES, &mut buf) else {
-        print(b"ps: sin acceso al sistema\n");
+        print(b"ps: no system access\n");
         return;
     };
-    print(b"PID  ESTADO      NOMBRE\n");
+    print(b"PID  STATE       NAME\n");
     for chunk in buf[..n].as_chunks::<{ ProcessEntry::LEN }>().0 {
         let Some(e) = ProcessEntry::decode(chunk) else {
             continue;
@@ -240,16 +239,16 @@ fn ps() {
             print(b" ");
         }
         match e.state {
-            ProcessState::Running => print(b"activo      "),
+            ProcessState::Running => print(b"running     "),
             ProcessState::Exited => {
-                print(b"salio(");
+                print(b"exited(");
                 num(e.exit_code as u64);
                 print(b")");
-                for _ in fmt_u64(e.exit_code as u64, &mut b).len()..5 {
+                for _ in fmt_u64(e.exit_code as u64, &mut b).len()..4 {
                     print(b" ");
                 }
             }
-            ProcessState::Killed => print(b"terminado   "),
+            ProcessState::Killed => print(b"killed      "),
         }
         print(e.name_str().as_bytes());
         print(b"\n");
@@ -259,26 +258,26 @@ fn ps() {
 fn mem() {
     let mut buf = [0u8; 16];
     if sys::system_info(SYSTEM, abi::sysinfo::MEMORY, &mut buf) != Ok(16) {
-        print(b"mem: sin acceso al sistema\n");
+        print(b"mem: no system access\n");
         return;
     }
     let total = u64::from_le_bytes(buf[..8].try_into().unwrap());
     let free = u64::from_le_bytes(buf[8..].try_into().unwrap());
-    print(b"memoria fisica utilizable: ");
+    print(b"usable physical memory: ");
     num(total * 4 / 1024);
     print(b" MiB total, ");
     num(free * 4 / 1024);
-    print(b" MiB libres, ");
+    print(b" MiB free, ");
     num((total - free) * 4 / 1024);
-    print(b" MiB en uso (");
+    print(b" MiB in use (");
     num(total);
-    print(b" frames de 4 KiB)\n");
+    print(b" 4 KiB frames)\n");
 }
 
 fn uptime() {
     let mut buf = [0u8; 8];
     if sys::system_info(SYSTEM, abi::sysinfo::UPTIME, &mut buf) != Ok(8) {
-        print(b"uptime: sin acceso al sistema\n");
+        print(b"uptime: no system access\n");
         return;
     }
     let ms = u64::from_le_bytes(buf);
@@ -296,13 +295,13 @@ fn uptime() {
 fn cpus() {
     let mut buf = [0u8; 8];
     if sys::system_info(SYSTEM, abi::sysinfo::CPUS, &mut buf) != Ok(8) {
-        print(b"cpus: sin acceso al sistema\n");
+        print(b"cpus: no system access\n");
         return;
     }
     print(b"cpus: ");
     num(u64::from_le_bytes(buf));
-    print(b" en linea\n");
-    // Reposo por CPU: ciclos en `hlt` frente a los transcurridos.
+    print(b" online\n");
+    // Idle per CPU: cycles spent in `hlt` versus elapsed cycles.
     let mut idle = [0u8; 8 * (2 + 16)];
     let Ok(n) = sys::system_info(SYSTEM, abi::sysinfo::IDLE, &mut idle) else {
         return;
@@ -318,14 +317,13 @@ fn cpus() {
         num(i as u64);
         print(b": ");
         num(cycles * 100 / elapsed.max(1));
-        print(b"% en reposo\n");
+        print(b"% idle\n");
     }
 }
 
-/// `diag`: informe completo en un bloque, para adjuntar al describir un
-/// problema (docs/performance.md).
-/// Informe completo; con un nombre, además se guarda en AriFS para leerlo
-/// desde el anfitrión (`cargo xtask fs-cat`, docs/hardware.md).
+/// `diag`: full report in one block, to attach when describing a problem
+/// (docs/performance.md). With a name it is also saved to AriFS, to read it
+/// from the host (`cargo xtask fs-cat`, docs/hardware.md).
 fn diag(fs: &mut FsClient, net_client: &NetClient, mask: u64, rest: &[u8]) {
     let name = trim(rest);
     if !name.is_empty() {
@@ -334,7 +332,7 @@ fn diag(fs: &mut FsClient, net_client: &NetClient, mask: u64, rest: &[u8]) {
             *active = true;
         });
     }
-    print(b"=== diagnostico AriCodeOS ===\n");
+    print(b"=== AriCodeOS diagnostics ===\n");
     uptime();
     mem();
     cpus();
@@ -346,7 +344,7 @@ fn diag(fs: &mut FsClient, net_client: &NetClient, mask: u64, rest: &[u8]) {
     }
     devices();
     events();
-    print(b"=== fin del diagnostico ===\n");
+    print(b"=== end of diagnostics ===\n");
     if name.is_empty() {
         return;
     }
@@ -355,25 +353,25 @@ fn diag(fs: &mut FsClient, net_client: &NetClient, mask: u64, rest: &[u8]) {
         *len
     });
     let Ok(name) = core::str::from_utf8(name) else {
-        print(b"diag: nombre invalido\n");
+        print(b"diag: invalid name\n");
         return;
     };
-    // SAFETY: la captura ya está cerrada; se lee lo escrito.
+    // SAFETY: the capture is already closed; we read what was written.
     let data =
         capture_with(|(buf, _, _)| unsafe { core::slice::from_raw_parts(buf.as_ptr(), len) });
     match save_file(fs, name, data) {
         Ok(n) => {
             print(b"diag: ");
             num(n as u64);
-            print(b" bytes en ");
+            print(b" bytes to ");
             print(name.as_bytes());
             print(b"\n");
         }
-        Err(()) => print(b"diag: no se pudo guardar el informe\n"),
+        Err(()) => print(b"diag: could not save the report\n"),
     }
 }
 
-/// Crea o reemplaza entero el fichero `name` con `data`.
+/// Creates the file `name`, or replaces it entirely, with `data`.
 fn save_file(fs: &mut FsClient, name: &str, data: &[u8]) -> Result<usize, ()> {
     let fd = fs.open(name).or_else(|_| fs.create(name)).map_err(|_| ())?;
     let r = fs.replace(fd, data).map_err(|_| ());
@@ -381,16 +379,16 @@ fn save_file(fs: &mut FsClient, name: &str, data: &[u8]) -> Result<usize, ()> {
     r
 }
 
-/// Sucesos recientes del kernel (`sysinfo::EVENTS`): un renglon por suceso
-/// con su instante.
+/// Recent kernel events (`sysinfo::EVENTS`): one line per event with its
+/// timestamp.
 fn events() {
     use abi::sysinfo::{EventEntry, EventKind};
     let mut buf = [0u8; EventEntry::LEN * 16];
     let Ok(n) = sys::system_info(SYSTEM, abi::sysinfo::EVENTS, &mut buf) else {
-        print(b"diag: sin acceso a los sucesos\n");
+        print(b"diag: no access to events\n");
         return;
     };
-    print(b"sucesos recientes del kernel:\n");
+    print(b"recent kernel events:\n");
     for chunk in buf[..n].as_chunks::<{ EventEntry::LEN }>().0 {
         let Some(e) = EventEntry::decode(chunk) else {
             continue;
@@ -409,36 +407,36 @@ fn events() {
         print(b" s] ");
         match e.kind {
             EventKind::ProcessCreated => {
-                print(b"proceso ");
+                print(b"process ");
                 num(e.pid as u64);
                 print(b" '");
                 print(e.name_str().as_bytes());
-                print(b"' creado");
+                print(b"' created");
             }
             EventKind::ProcessExited => {
-                print(b"proceso ");
+                print(b"process ");
                 num(e.pid as u64);
                 print(b" '");
                 print(e.name_str().as_bytes());
-                print(b"' salio con codigo ");
+                print(b"' exited with code ");
                 num(e.code);
             }
             EventKind::ProcessKilled => {
-                print(b"proceso ");
+                print(b"process ");
                 num(e.pid as u64);
-                print(b" terminado por fallo: ");
+                print(b" killed by fault: ");
                 print(e.name_str().as_bytes());
             }
             EventKind::DmaFault => {
-                print(b"fallo de DMA del dispositivo ");
+                print(b"DMA fault from device ");
                 hex(e.code, 4);
                 print(b": ");
                 print(e.name_str().as_bytes());
             }
             EventKind::DmaQuota => {
-                print(b"proceso ");
+                print(b"process ");
                 num(e.pid as u64);
-                print(b" agoto su cuota de memoria pidiendo ");
+                print(b" exhausted its memory quota requesting ");
                 num(e.code);
                 print(b" bytes");
             }
@@ -464,28 +462,28 @@ fn ls(fs: &FsClient) {
             }
             Ok(None) => break,
             Err(_) => {
-                print(b"ls: el servicio de ficheros no responde\n");
+                print(b"ls: file service not responding\n");
                 return;
             }
         }
     }
     num(i as u64);
-    print(b" fichero(s)\n");
+    print(b" file(s)\n");
 }
 
 fn cat(fs: &mut FsClient, name: &[u8]) {
     let Ok(name) = core::str::from_utf8(name) else {
-        print(b"cat: nombre invalido\n");
+        print(b"cat: invalid name\n");
         return;
     };
     if name.is_empty() {
-        print(b"uso: cat NOMBRE\n");
+        print(b"usage: cat NAME\n");
         return;
     }
     let fd = match fs.open(name) {
         Ok(fd) => fd,
         Err(_) => {
-            print(b"cat: no existe ");
+            print(b"cat: not found: ");
             print(name.as_bytes());
             print(b"\n");
             return;
@@ -501,7 +499,7 @@ fn cat(fs: &mut FsClient, name: &[u8]) {
                 offset += n as u32;
             }
             Err(_) => {
-                print(b"cat: error de lectura\n");
+                print(b"cat: read error\n");
                 break;
             }
         }
@@ -509,17 +507,16 @@ fn cat(fs: &mut FsClient, name: &[u8]) {
     let _ = fs.close(fd);
 }
 
-/// `write NOMBRE TEXTO`: crea el fichero si no existe y sustituye su
-/// contenido entero (más un salto de línea) de forma atómica y duradera
-/// (ADR 0014).
+/// `write NAME TEXT`: creates the file if it does not exist and replaces
+/// its whole content (plus a newline) atomically and durably (ADR 0014).
 fn write(fs: &mut FsClient, rest: &[u8]) {
     let (name, text) = split(rest);
     let Ok(name) = core::str::from_utf8(name) else {
-        print(b"write: nombre invalido\n");
+        print(b"write: invalid name\n");
         return;
     };
     if name.is_empty() {
-        print(b"uso: write NOMBRE TEXTO\n");
+        print(b"usage: write NAME TEXT\n");
         return;
     }
     let mut content = [0u8; LINE_MAX + 1];
@@ -529,17 +526,17 @@ fn write(fs: &mut FsClient, rest: &[u8]) {
         Ok(n) => {
             print(b"write: ");
             num(n as u64);
-            print(b" bytes en ");
+            print(b" bytes to ");
             print(name.as_bytes());
             print(b"\n");
         }
-        Err(()) => print(b"write: error de escritura\n"),
+        Err(()) => print(b"write: write error\n"),
     }
 }
 
 fn devices() {
     let Ok(n) = sys::pci_count(PCI_ROOT) else {
-        print(b"devices: sin acceso a PCI\n");
+        print(b"devices: no PCI access\n");
         return;
     };
     for i in 0..n {
@@ -555,14 +552,14 @@ fn devices() {
         hex(abi::pci_info::vendor(v) as u64, 4);
         print(b":");
         hex(abi::pci_info::device(v) as u64, 4);
-        print(b"  clase ");
+        print(b"  class ");
         hex(abi::pci_info::class(v) as u64, 2);
         print(b".");
         hex(abi::pci_info::subclass(v) as u64, 2);
         print(b"\n");
     }
     num(n);
-    print(b" funcion(es) PCI\n");
+    print(b" PCI function(s)\n");
 }
 
 fn print_ip(ip: [u8; 4]) {
@@ -574,34 +571,32 @@ fn net_error(e: NetError) {
     match e {
         NetError::Status(abi_status) => {
             print(match abi_status {
-                aricode_proto::net::Status::Timeout => {
-                    b"sin respuesta (plazo vencido)\n" as &[u8]
-                }
-                aricode_proto::net::Status::NoRoute => b"sin configuracion de red\n",
-                aricode_proto::net::Status::NotFound => b"nombre desconocido\n",
-                _ => b"el servicio de red rechazo la peticion\n",
+                aricode_proto::net::Status::Timeout => b"no reply (timed out)\n" as &[u8],
+                aricode_proto::net::Status::NoRoute => b"no network configuration\n",
+                aricode_proto::net::Status::NotFound => b"unknown name\n",
+                _ => b"network service rejected the request\n",
             });
         }
-        NetError::Ipc(_) => print(b"el servicio de red no responde\n"),
+        NetError::Ipc(_) => print(b"network service not responding\n"),
     }
 }
 
 fn net(client: &NetClient) {
-    print(b"enlace  ");
+    print(b"link    ");
     print(match client.link() {
-        Ok(LINK_UP) => b"arriba\n",
-        Ok(LINK_DOWN) => b"abajo (cable?)\n",
-        Ok(_) => b"desconocido\n",
-        Err(_) => b"sin respuesta del servicio de red\n",
+        Ok(LINK_UP) => b"up\n",
+        Ok(LINK_DOWN) => b"down (cable?)\n",
+        Ok(_) => b"unknown\n",
+        Err(_) => b"no reply from network service\n",
     });
     match client.info() {
         Err(NetError::Status(NetStatus::NoRoute)) => {
-            print(b"ip      sin direccion (DHCP pendiente)\n");
+            print(b"ip      no address (DHCP pending)\n");
         }
         Ok(i) => {
             print(b"ip      ");
             print_ip(i.address);
-            print(b"\nmascara ");
+            print(b"\nmask    ");
             print_ip(i.mask);
             print(b"\nrouter  ");
             print_ip(i.router);
@@ -625,7 +620,7 @@ fn ping(client: &NetClient, arg: &[u8]) {
         .ok()
         .and_then(aricode_net::Ipv4Addr::parse)
     else {
-        print(b"uso: ping A.B.C.D\n");
+        print(b"usage: ping A.B.C.D\n");
         return;
     };
     let mut received = 0;
@@ -633,11 +628,11 @@ fn ping(client: &NetClient, arg: &[u8]) {
         match client.ping(ip.0, seq, 1000) {
             Ok(rtt) => {
                 received += 1;
-                print(b"respuesta de ");
+                print(b"reply from ");
                 print_ip(ip.0);
                 print(b": seq=");
                 num(seq as u64);
-                print(b" tiempo=");
+                print(b" time=");
                 num(rtt);
                 print(b" ms\n");
             }
@@ -650,16 +645,16 @@ fn ping(client: &NetClient, arg: &[u8]) {
         }
     }
     num(received);
-    print(b" de 4 respuestas\n");
+    print(b" of 4 replies\n");
 }
 
 fn dns(client: &mut NetClient, arg: &[u8]) {
     let Ok(name) = core::str::from_utf8(arg) else {
-        print(b"dns: nombre invalido\n");
+        print(b"dns: invalid name\n");
         return;
     };
     if name.is_empty() {
-        print(b"uso: dns NOMBRE\n");
+        print(b"usage: dns NAME\n");
         return;
     }
     match client.resolve(name, None, 3000) {
@@ -675,11 +670,11 @@ fn dns(client: &mut NetClient, arg: &[u8]) {
 
 fn http_get(client: &mut NetClient, arg: &[u8]) {
     let Ok(url) = core::str::from_utf8(arg) else {
-        print(b"http: url invalida\n");
+        print(b"http: invalid url\n");
         return;
     };
     if url.is_empty() {
-        print(b"uso: http [http://]host[:puerto][/ruta]\n");
+        print(b"usage: http [http://]host[:port][/path]\n");
         return;
     }
     let mut body = [0u8; 4096];
@@ -695,74 +690,74 @@ fn http_get(client: &mut NetClient, arg: &[u8]) {
                 print(b"\n");
             }
         }
-        Err(aricode_rt::sys::http::HttpError::BadUrl) => print(b"http: url invalida\n"),
+        Err(aricode_rt::sys::http::HttpError::BadUrl) => print(b"http: invalid url\n"),
         Err(aricode_rt::sys::http::HttpError::Resolve(e)) => net_error(e),
         Err(aricode_rt::sys::http::HttpError::Connect(e)) => {
-            print(b"http: no se pudo conectar: ");
+            print(b"http: could not connect: ");
             net_error(e);
         }
         Err(aricode_rt::sys::http::HttpError::Io(e)) => net_error(e),
-        Err(aricode_rt::sys::http::HttpError::Malformed) => print(b"http: respuesta no valida\n"),
+        Err(aricode_rt::sys::http::HttpError::Malformed) => print(b"http: invalid response\n"),
         Err(aricode_rt::sys::http::HttpError::Unsupported) => {
-            print(b"http: respuesta con codificacion o protocolo no soportado\n")
+            print(b"http: response uses an unsupported encoding or protocol\n")
         }
         Err(aricode_rt::sys::http::HttpError::TooBig) => {
-            print(b"http: respuesta demasiado grande (4 KiB)\n")
+            print(b"http: response too large (4 KiB)\n")
         }
     }
 }
 
-/// Pide al broker (init) que ejecute un programa del initrd con las
-/// capabilities de su manifiesto y espera su salida.
+/// Asks the broker (init) to run an initrd program with the capabilities
+/// of its manifest and waits for it to exit.
 fn run(arg: &[u8]) {
     use aricode_rt::sys::launch::{self, LaunchError, Status};
     let Ok(name) = core::str::from_utf8(arg) else {
-        print(b"run: nombre invalido\n");
+        print(b"run: invalid name\n");
         return;
     };
     if name.is_empty() {
-        print(b"uso: run PROGRAMA [ARG]\n");
+        print(b"usage: run PROGRAM [ARG]\n");
         return;
     }
     let (prog, num_arg) = match name.split_once(' ') {
         Some((p, a)) => (p, a.trim().parse::<u64>().unwrap_or(0)),
         None => (name, 0),
     };
-    // El resultado se imprime entero al final: mientras el programa corre,
-    // su salida y la del broker se intercalan con la nuestra.
+    // The result is printed in one piece at the end: while the program runs,
+    // its output and the broker's interleave with ours.
     let result = launch::run(BROKER, prog, num_arg);
     print(b"run: ");
     print(prog.as_bytes());
     match result {
         Ok(code) => {
-            print(b" termino con ");
+            print(b" exited with ");
             num(code);
             print(b"\n");
         }
         Err(LaunchError::Status(Status::NotFound)) => {
-            print(b": no existe en el initrd ni en AriFS\n")
+            print(b": not found in the initrd or AriFS\n")
         }
         Err(LaunchError::Status(Status::Denied)) => {
-            print(b": denegado por el broker (pide capacidades del sistema)\n")
+            print(b": denied by the broker (requests system capabilities)\n")
         }
-        Err(LaunchError::Status(Status::Killed)) => print(b": fue terminado por el kernel\n"),
-        Err(LaunchError::Status(Status::BadManifest)) => print(b": manifiesto invalido\n"),
-        Err(LaunchError::Status(Status::Limit)) => print(b": limite de programas en marcha\n"),
-        Err(LaunchError::Status(_)) => print(b": el broker no pudo lanzarlo\n"),
-        Err(LaunchError::BadName) => print(b": nombre invalido\n"),
+        Err(LaunchError::Status(Status::Killed)) => print(b": was killed by the kernel\n"),
+        Err(LaunchError::Status(Status::BadManifest)) => print(b": invalid manifest\n"),
+        Err(LaunchError::Status(Status::Limit)) => print(b": running program limit reached\n"),
+        Err(LaunchError::Status(_)) => print(b": the broker could not launch it\n"),
+        Err(LaunchError::BadName) => print(b": invalid name\n"),
         Err(LaunchError::Ipc(e)) => aricode_rt::print_error(b"", e),
     }
 }
 
-/// `spawn PROGRAMA [ARG]`: lanzamiento en segundo plano por el broker.
+/// `spawn PROGRAM [ARG]`: background launch through the broker.
 fn spawn(arg: &[u8]) {
     use aricode_rt::sys::launch::{self, LaunchError, Status};
     let Ok(name) = core::str::from_utf8(arg) else {
-        print(b"spawn: nombre invalido\n");
+        print(b"spawn: invalid name\n");
         return;
     };
     if name.is_empty() {
-        print(b"uso: spawn PROGRAMA [ARG]\n");
+        print(b"usage: spawn PROGRAM [ARG]\n");
         return;
     }
     let (prog, num_arg) = match name.split_once(' ') {
@@ -772,76 +767,76 @@ fn spawn(arg: &[u8]) {
     print(b"spawn: ");
     print(prog.as_bytes());
     match launch::spawn(BROKER, prog, num_arg) {
-        Ok(()) => print(b" lanzado en segundo plano\n"),
+        Ok(()) => print(b" launched in the background\n"),
         Err(LaunchError::Status(Status::Limit)) => {
-            print(b": limite de programas en marcha (");
+            print(b": running program limit reached (");
             num(4);
             print(b")\n");
         }
         Err(LaunchError::Status(Status::NotFound)) => {
-            print(b": no existe en el initrd ni en AriFS\n")
+            print(b": not found in the initrd or AriFS\n")
         }
         Err(LaunchError::Status(Status::Denied)) => {
-            print(b": denegado por el broker (pide capacidades del sistema)\n")
+            print(b": denied by the broker (requests system capabilities)\n")
         }
-        Err(LaunchError::Status(Status::BadManifest)) => print(b": manifiesto invalido\n"),
-        Err(LaunchError::Status(_)) => print(b": el broker no pudo lanzarlo\n"),
-        Err(LaunchError::BadName) => print(b": nombre invalido\n"),
+        Err(LaunchError::Status(Status::BadManifest)) => print(b": invalid manifest\n"),
+        Err(LaunchError::Status(_)) => print(b": the broker could not launch it\n"),
+        Err(LaunchError::BadName) => print(b": invalid name\n"),
         Err(LaunchError::Ipc(e)) => aricode_rt::print_error(b"", e),
     }
 }
 
 fn services(mask: u64, fs: &FsClient) {
-    // Por papel, no por driver: en QEMU son virtio; en el portatil, usbd y
-    // rtl_net (`services --detail` da los nombres reales).
-    print(b"bloques   servicio    ");
+    // By role, not by driver: under QEMU they are virtio; on the laptop, usbd
+    // and rtl_net (`services --detail` gives the real names).
+    print(b"block     service     ");
     print(if mask & SERVICE_BLOCK != 0 {
-        b"activo\n"
+        b"active\n"
     } else {
-        b"ausente\n"
+        b"absent\n"
     });
-    print(b"ficheros  fsd         ");
+    print(b"files     fsd         ");
     if mask & SERVICE_FS == 0 {
-        print(b"ausente\n");
+        print(b"absent\n");
     } else {
         let mut name = [0u8; 32];
         print(if fs.list(0, &mut name).is_ok() {
-            b"activo, responde\n"
+            b"active, responding\n"
         } else {
-            b"activo, no responde\n"
+            b"active, not responding\n"
         });
     }
-    print(b"red       servicio    ");
+    print(b"network   service     ");
     print(if mask & SERVICE_NET != 0 {
-        b"activo\n"
+        b"active\n"
     } else {
-        b"ausente\n"
+        b"absent\n"
     });
-    print(b"entrada   servicio    ");
+    print(b"input     service     ");
     print(if mask & SERVICE_INPUT != 0 {
-        b"activo\n"
+        b"active\n"
     } else {
-        b"ausente\n"
+        b"absent\n"
     });
-    print(b"grafico   compositor  ");
+    print(b"graphics  compositor  ");
     print(if mask & SERVICE_GUI != 0 {
-        b"activo\n"
+        b"active\n"
     } else {
-        b"ausente (arranca con `gui`)\n"
+        b"absent (start with `gui`)\n"
     });
 }
 
-/// `services --detail`: lo que init sabe de cada servicio supervisado.
+/// `services --detail`: what init knows about each supervised service.
 fn services_detail() {
     use aricode_rt::sys::status::{service_status, LastExit};
-    print(b"SERVICIO         ESTADO       GEN  REINICIOS  ULTIMA SALIDA     LISTO DESDE\n");
+    print(b"SERVICE          STATE        GEN  RESTARTS   LAST EXIT         READY FOR\n");
     let mut index = 0u8;
     loop {
         let entry = match service_status(BROKER, index) {
             Ok(Some(e)) => e,
             Ok(None) => break,
             Err(_) => {
-                print(b"services: init no responde\n");
+                print(b"services: init not responding\n");
                 return;
             }
         };
@@ -869,25 +864,25 @@ fn services_detail() {
         match entry.last_exit {
             LastExit::None => print(b"-                 "),
             LastExit::Code => {
-                print(b"codigo ");
+                print(b"code ");
                 let c = aricode_rt::fmt_u64(entry.last_code, &mut b);
                 print(c);
-                for _ in c.len()..11 {
+                for _ in c.len()..13 {
                     print(b" ");
                 }
             }
-            LastExit::Killed => print(b"fallo (killed)    "),
-            LastExit::StartTimeout => print(b"plazo de arranque "),
+            LastExit::Killed => print(b"crash (killed)    "),
+            LastExit::StartTimeout => print(b"start timeout     "),
         }
         if entry.ready_for_ms > 0 {
-            print(b"hace ");
+            print(b"for ");
             num(entry.ready_for_ms / 1000);
             print(b" s");
         } else {
             print(b"-");
         }
         if entry.optional {
-            print(b"  (opcional)");
+            print(b"  (optional)");
         }
         print(b"\n");
         index += 1;
@@ -899,14 +894,14 @@ fn services_detail() {
 
 fn main(mask: u64) -> u64 {
     let Ok(mut fs) = FsClient::new(FSD, HW) else {
-        print(b"arish: sin cliente de ficheros\n");
+        print(b"arish: no file client\n");
         return 1;
     };
     let Ok(mut net_client) = NetClient::new(NETD, HW) else {
-        print(b"arish: sin cliente de red\n");
+        print(b"arish: no network client\n");
         return 2;
     };
-    print(b"arish: shell de AriCodeOS (help para ayuda)\n");
+    print(b"arish: AriCodeOS shell (type help for help)\n");
     let mut line = [0u8; LINE_MAX];
     let mut history = History::new();
     loop {
@@ -919,8 +914,8 @@ fn main(mask: u64) -> u64 {
     }
 }
 
-/// Ejecuta una línea; devuelve `true` si el shell debe terminar. `depth`
-/// acota la recursión de `repeat`.
+/// Executes a line; returns `true` if the shell must exit. `depth` bounds
+/// the recursion of `repeat`.
 fn execute(
     fs: &mut FsClient,
     net_client: &mut NetClient,
@@ -955,11 +950,11 @@ fn execute(
                 .ok()
                 .and_then(|c| c.parse::<u32>().ok())
             else {
-                print(b"uso: repeat N COMANDO\n");
+                print(b"usage: repeat N COMMAND\n");
                 return false;
             };
             if depth > 0 || inner.is_empty() {
-                print(b"repeat: sin anidar y con un comando\n");
+                print(b"repeat: no nesting, and a command is required\n");
                 return false;
             }
             for _ in 0..times.min(10_000) {
@@ -976,7 +971,7 @@ fn execute(
         }
         b"exit" => return true,
         other => {
-            print(b"comando desconocido: ");
+            print(b"unknown command: ");
             print(other);
             print(b" (help)\n");
         }

@@ -1,8 +1,8 @@
-# Fase 30: con el disco por defecto AriBoot encuentra ARIBOOT (A activo, sin
-# pendiente), verifica la firma y los hashes de la imagen del slot A y arranca
-# desde ella; init ve el slot en su arg.
+# Phase 30: with the default disk AriBoot finds ARIBOOT (A active, nothing
+# pending), verifies the signature and hashes of the slot A image and boots
+# from it; init sees the slot in its arg.
 name = "update.slot_a"
-description = "arranque A/B nominal: imagen firmada del slot A verificada por AriBoot"
+description = "nominal A/B boot: signed slot A image verified by AriBoot"
 level = "smoke"
 areas = ["update", "boot"]
 cmdline = "qemu_exit"
@@ -10,10 +10,10 @@ cmdline = "qemu_exit"
 [expect]
 exit = 33
 serial_contains = [
-    "slots: estado activo A, sin pendiente",
-    "slots: arrancando desde el slot A (imagen version 1)",
+    "slots: state active A, no pending",
+    "slots: booting from slot A (image version 1)",
     "cmdline: qemu_exit boot_slot=A",
-    "AriInit: arrancado desde el slot A (activo)",
+    "AriInit: booted from slot A (active)",
     "ARICODEOS_KERNEL_READY",
 ]
-serial_absent = ["KERNEL PANIC", "arranque desde la ESP"]
+serial_absent = ["KERNEL PANIC", "booting from the ESP"]

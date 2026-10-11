@@ -1,4 +1,4 @@
-//! Orquestación de niveles de test: unit (host) -> smoke/full (QEMU).
+//! Test level orchestration: unit (host) -> smoke/full (QEMU).
 
 use crate::scenario::{self, Level, Scenario};
 use crate::{build, image, qemu, Cli, Result};
@@ -25,7 +25,7 @@ pub fn run(cli: &Cli, release: bool) -> Result {
             v.parse::<u32>()
                 .ok()
                 .filter(|n| (1..=64).contains(n))
-                .ok_or_else(|| format!("--cpus {v}: se esperaba un numero de 1 a 64"))?,
+                .ok_or_else(|| format!("--cpus {v}: expected a number from 1 to 64"))?,
         ),
         None => None,
     };
@@ -52,20 +52,17 @@ pub fn run(cli: &Cli, release: bool) -> Result {
     }
 
     println!(
-        "[xtask] nivel {level:?}{}{}",
+        "[xtask] level {level:?}{}{}",
         if areas.is_empty() {
             String::new()
         } else {
             format!(", areas {}", areas.join(","))
         },
-        cpus_override.map_or(String::new(), |n| format!(
-            ", {n} CPUs en todos los escenarios"
-        ))
+        cpus_override.map_or(String::new(), |n| format!(", {n} CPUs in every scenario"))
     );
 
-    // Nivel unit: siempre, salvo que se filtre por área (una feature puede
-    // querer solo sus escenarios QEMU; los unit siguen siendo baratos y se
-    // ejecutan igual).
+    // Unit level: always, even when filtering by area (a feature may want
+    // only its QEMU scenarios; unit tests are still cheap and run anyway).
     println!("[xtask] unit tests (host)");
     build::unit_tests()?;
     if level == Level::Unit {
@@ -80,18 +77,18 @@ pub fn run(cli: &Cli, release: bool) -> Result {
         }
     }
     println!(
-        "[xtask] {} escenarios QEMU, {} fallidos",
+        "[xtask] {} QEMU scenarios, {} failed",
         selected.len(),
         failed.len()
     );
     if failed.is_empty() {
         Ok(())
     } else {
-        Err(format!("escenarios fallidos: {}", failed.join(", ")))
+        Err(format!("failed scenarios: {}", failed.join(", ")))
     }
 }
 
-/// Un arranque a ejecutar: el único del escenario o cada uno de `[[boots]]`.
+/// One boot to run: the scenario's only boot, or each one in `[[boots]]`.
 struct BootRun<'a> {
     cmdline: &'a str,
     stdin: &'a [String],
@@ -127,7 +124,7 @@ fn run_scenario(
     };
     let multi = !s.boots.is_empty();
     let disk_variant = image::DiskVariant::parse(&s.disk)
-        .ok_or_else(|| format!("{}: disk '{}' desconocido", s.name, s.disk))?;
+        .ok_or_else(|| format!("{}: unknown disk '{}'", s.name, s.disk))?;
     let mut installed: Vec<(String, Vec<u8>)> = Vec::new();
     for dir in &s.install {
         installed
@@ -137,22 +134,17 @@ fn run_scenario(
         let mut parts = spec.split(':');
         let (Some(dir), Some(version)) = (parts.next(), parts.next()) else {
             return Err(format!(
-                "{}: paquete '{spec}': DIR:VERSION[:corrupt]",
+                "{}: package '{spec}': DIR:VERSION[:corrupt]",
                 s.name
             ));
         };
         let version: u32 = version
             .parse()
-            .map_err(|_| format!("{}: paquete '{spec}': version invalida", s.name))?;
+            .map_err(|_| format!("{}: package '{spec}': invalid version", s.name))?;
         let corrupt = match parts.next() {
             None => false,
             Some("corrupt") => true,
-            Some(other) => {
-                return Err(format!(
-                    "{}: paquete '{spec}': '{other}' desconocido",
-                    s.name
-                ))
-            }
+            Some(other) => return Err(format!("{}: package '{spec}': unknown '{other}'", s.name)),
         };
         let app = build::build_external(std::path::Path::new(dir), version, release, corrupt)?;
         installed.push((
@@ -169,7 +161,7 @@ fn run_scenario(
     let mut elapsed = Duration::ZERO;
     let mut logs: Vec<(std::path::PathBuf, String)> = Vec::new();
     for (i, run) in runs.iter().enumerate() {
-        // Cada arranque tiene su ESP (su cmdline); el disco es el mismo.
+        // Each boot has its own ESP (its cmdline); the disk is shared.
         let esp_name = if multi {
             format!("{}.boot{}", s.name, i + 1)
         } else {
@@ -221,7 +213,7 @@ fn run_scenario(
         let _ = std::fs::write(&log, &cap.serial);
         elapsed += cap.elapsed;
         let prefix = if multi {
-            format!("arranque {}: ", i + 1)
+            format!("boot {}: ", i + 1)
         } else {
             String::new()
         };
@@ -235,20 +227,20 @@ fn run_scenario(
             problems.push(format!(
                 "{prefix}{}",
                 if expect.killed {
-                    "QEMU no llego a matarse en kill_on"
+                    "QEMU was not killed on kill_on"
                 } else {
-                    "QEMU matado sin esperarlo"
+                    "QEMU killed unexpectedly"
                 }
             ));
         }
         for needle in &expect.serial_contains {
             if !cap.serial.contains(needle) {
-                problems.push(format!("{prefix}falta '{needle}'"));
+                problems.push(format!("{prefix}missing '{needle}'"));
             }
         }
         for needle in &expect.serial_absent {
             if cap.serial.contains(needle) {
-                problems.push(format!("{prefix}aparece '{needle}'"));
+                problems.push(format!("{prefix}unexpected '{needle}'"));
             }
         }
         if cap.timed_out {
@@ -256,7 +248,7 @@ fn run_scenario(
         }
         logs.push((log, cap.serial));
         if !problems.is_empty() {
-            // Los arranques siguientes dependen de este: no dicen nada nuevo.
+            // Later boots depend on this one: they would tell nothing new.
             break;
         }
     }
