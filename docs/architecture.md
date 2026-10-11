@@ -1289,3 +1289,19 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   delete anywhere, Home/End, Ctrl-A/E/U, history), redrawing with plain text
   and backspace only; the framebuffer console's backspace wraps to the
   previous row (scenario `shell.line_editing`, host tests).
+
+## SSH (ADR 0025)
+
+- `aricode-crypto`: shared GF(2^255-19) field, X25519 (constant-time
+  ladder), Poly1305 and `chacha20-poly1305@openssh.com`.
+- `aricode-ssh`: SSH-2 server state machine (curve25519-sha256 with strict
+  KEX, ssh-ed25519, chacha20-poly1305, publickey auth, one session channel),
+  tested on the host against the OpenSSH client.
+- `services/sshd`: port 22 over the network service; host key and
+  `authorized_keys` in AriFS. For `shell`/`exec` it asks init (session
+  endpoint, `aricode-proto::session`) for an `arish` in session mode, whose
+  input and output are IPC endpoints instead of the console. The shell keeps
+  unconsumed input between lines (`Input`), so a command and the `exit` that
+  follows can arrive in one message.
+- Tests: `[host_ssh]` in scenarios (generated client key, `authorized_keys`
+  installed, host port 17022 forwarded to 22); `ssh.exec`.

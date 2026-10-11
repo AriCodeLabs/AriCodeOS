@@ -153,3 +153,25 @@ and always on the USB stick itself or a dedicated USB drive.
   clear, Up/Down for the history.
 - HTTPS is not supported yet (`http: invalid url`): it needs TLS 1.3 and
   certificate verification, planned after SSH.
+
+## SSH into the laptop (ADR 0025)
+
+Build the image with your public key (only `ssh-ed25519` keys) and write it
+as usual:
+
+```bash
+cargo xtask usb-image --cmdline "shell kbd=es" --authorized-key ~/.ssh/id_ed25519.pub
+```
+
+With the network cable connected, the boot log shows
+`sshd: listening on port 22, host key SHA256:..., 1 authorized key(s)`;
+`net` shows the address. From the other machine:
+
+```bash
+ssh ari@192.168.1.24            # interactive shell (any user name)
+ssh ari@192.168.1.24 diag       # a single command
+```
+
+The first connection asks to confirm the host key: compare it with the
+`SHA256:` fingerprint on the laptop's screen. One connection at a time;
+output of programs started with `run` still appears on the laptop's screen.

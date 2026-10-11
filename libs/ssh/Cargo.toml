@@ -1,0 +1,9 @@
+[package]
+name = "aricode-ssh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SSH-2 server protocol as a state machine: curve25519-sha256, ssh-ed25519, chacha20-poly1305@openssh.com, public-key auth and one session channel (no I/O)"
+
+[dependencies]
+aricode-crypto = { path = "../crypto" }

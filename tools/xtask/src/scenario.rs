@@ -49,6 +49,17 @@ pub struct HostTcp {
     pub payload: String,
 }
 
+/// SSH from the host (ADR 0025): a client key is generated and installed
+/// as `authorized_keys` in AriFS; on seeing `marker` the host's `ssh` runs
+/// each command through the forwarded port and its output joins the log
+/// as `[host] ssh ...` lines.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostSsh {
+    pub marker: String,
+    pub commands: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostInput {
@@ -127,6 +138,8 @@ pub struct Scenario {
     /// QMP input injection on seeing `marker`: keys (QEMU qcode names) on
     /// the virtio keyboard, relative motion and a click on the mouse.
     pub host_input: Option<HostInput>,
+    #[serde(default)]
+    pub host_ssh: Option<HostSsh>,
     /// Initial state of the test disk (`image::DiskVariant`): `slots`
     /// (default), `esp-only`, `pending-b`, `b-exhausted`, `b-corrupt`,
     /// `fs-pending-replace`, `fs-corrupt`, `wasm-restricted`, `wasm-invalid`,

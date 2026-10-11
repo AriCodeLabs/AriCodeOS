@@ -1,0 +1,23 @@
+[package]
+name = "ari-sshd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AriCodeOS SSH server in ring 3: aricode-ssh over the TCP service, session shells launched by init"
+publish = false
+
+[[bin]]
+name = "sshd"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+aricode-sys = { path = "../../sdk/rust" }
+aricode-proto = { path = "../../sdk/proto" }
+aricode-ssh = { path = "../../libs/ssh" }
+aricode-crypto = { path = "../../libs/crypto" }
+aricode-rt = { path = "../../sdk/runtime" }
+
+[build-dependencies]
+aricode-build = { path = "../../sdk/build" }

@@ -54,6 +54,10 @@ cpus = 4                        # processors (-smp N); undeclared: 1, or whateve
 usb_hid = true                  # adds qemu-xhci with a USB keyboard and mouse (QMP events go to the USB devices)
 usb_hid_msi = true              # that xHCI offers MSI only, no MSI-X (like 2012 Intel controllers)
 usb_storage = true              # the test disk hangs off the xHCI as USB mass storage; there is no virtio-blk
+
+[host_ssh]                      # SSH from the host (ADR 0025): a client key is generated and installed as authorized_keys;
+marker = "sshd: listening on port 22"   # on seeing the marker, each command runs with the host's ssh through
+commands = ["ls", "shutdown"]   # host port 17022; output joins the log as "[host] ssh $ CMD", "[host] ssh| LINE", "[host] ssh exit N"
 usb_legacy_controller = true    # also adds an EHCI (class 0c.03 but not xHCI)
 install = ["examples/hello_ext"]  # external apps xtask builds, signs (version 1) and installs in AriFS as apps/NAME.aripkg
 packages = ["examples/hello_ext:2", "examples/hello_ext:3:corrupt"]  # pending packages in pkgs/ (DIR:VERSION[:corrupt]) for `run installer`

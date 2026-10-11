@@ -25,7 +25,7 @@ stdin = ["cat notas.txt", "shutdown"]
 [boots.expect]
 exit = 33
 serial_contains = [
-    "fsd: AriFS mounted, 6 files",
+    "fsd: AriFS mounted, 7 files",
     "fs_client: nuevo.txt already existed (persistent disk)",
     "hola persistente",
     "ARICODEOS_SHUTDOWN",

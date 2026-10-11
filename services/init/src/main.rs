@@ -415,6 +415,13 @@ enum Kind {
         inputs: [Handle; MAX_INPUTS],
         count: usize,
     },
+    /// SSH server (ADR 0025): network and file endpoints, and the endpoint
+    /// where it asks init for session shells.
+    Sshd {
+        fs: Handle,
+        net: Handle,
+        sessions: Handle,
+    },
 }
 
 /// Input services that init hands out (compositor, broker, bridge).
@@ -448,6 +455,20 @@ fn start_console_bridge(inputs: &[Handle]) -> Result<Handle, Error> {
     result
 }
 
+/// Launches sshd with `[net (WRITE), fs (WRITE), hardware, SYSTEM (READ),
+/// sessions (WRITE)]`. It gets no SPAWNER: shells are launched by init.
+fn start_sshd(fs: Handle, net: Handle, sessions: Handle) -> Result<Handle, Error> {
+    let w = rights::WRITE | rights::TRANSFER;
+    let handles = [
+        sys::handle_duplicate(net, w)?,
+        sys::handle_duplicate(fs, w)?,
+        sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?,
+        sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER)?,
+        sys::handle_duplicate(sessions, w)?,
+    ];
+    sys::process_spawn_with(SPAWNER, "sshd", 0, &handles)
+}
+
 /// How to check that the service is already serving.
 #[derive(Clone, Copy)]
 enum Probe {
@@ -471,7 +492,7 @@ struct Resident {
     sup: Service,
 }
 
-const MAX_RESIDENTS: usize = 8;
+const MAX_RESIDENTS: usize = 10;
 
 /// Supervisor of resident services (stage 1 of the post-roadmap plan):
 /// states, generations, restart with increasing backoff and a budget, and
@@ -597,6 +618,7 @@ impl Supervisor {
                     .and_then(|ep| sys::process_spawn_with(SPAWNER, r.name, arg, &[ep]))
             }
             Kind::ConsoleBridge { inputs, count } => start_console_bridge(&inputs[..count]),
+            Kind::Sshd { fs, net, sessions } => start_sshd(fs, net, sessions),
         };
         let now = now_ms();
         let process = match spawned {
@@ -944,28 +966,19 @@ fn run_shell(
     services: u64,
     broker: &mut Broker,
     sup: &mut Supervisor,
+    mut sessions: Option<&mut Sessions>,
 ) -> Result<u64, Error> {
-    let fsd = sys::handle_duplicate(fs_service, rights::WRITE | rights::TRANSFER)?;
-    let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
-    // With DUPLICATE the shell can in turn pass a read-only SYSTEM to the
-    // programs it launches with `run`.
-    let system = sys::handle_duplicate(
-        SYSTEM,
-        rights::READ | rights::MANAGE | rights::DUPLICATE | rights::TRANSFER,
-    )?;
     let console_in = sys::handle_duplicate(CONSOLE_IN, rights::READ | rights::TRANSFER)?;
-    let pci = sys::handle_duplicate(PCI_ROOT, rights::READ | rights::TRANSFER)?;
-    let netd = sys::handle_duplicate(net_service, rights::WRITE | rights::TRANSFER)?;
-    // The shell does not get the SPAWNER: it asks the broker (init) to launch.
-    let launch = sys::handle_duplicate(broker.endpoint, rights::WRITE | rights::TRANSFER)?;
-    let child = sys::process_spawn_with(
-        SPAWNER,
-        "shell",
+    let child = spawn_shell(
+        fs_service,
+        net_service,
+        broker.endpoint,
+        console_in,
+        None,
         services,
-        &[fsd, hw, system, console_in, pci, netd, launch],
     )?;
-    // Serve launch and status requests, and watch the resident services,
-    // while the shell is alive.
+    // Serve launch, status and session requests, and watch the resident
+    // services, while the shell is alive.
     loop {
         match sys::process_wait(child, 0) {
             Err(Error::Timeout) => {}
@@ -977,6 +990,109 @@ fn run_shell(
         sup.poll();
         broker.serve_one(20, sup);
         broker.poll_launches();
+        if let Some(s) = sessions.as_deref_mut() {
+            s.serve(fs_service, net_service, services, broker.endpoint);
+        }
+    }
+}
+
+/// Launches `arish` with the file endpoint (WRITE), hardware for its
+/// buffer, the system (READ|MANAGE), its input (`input`, transferred: the
+/// console or a session endpoint), the read-only PCI root, the network
+/// endpoint (WRITE), the broker for `run`, and, in session mode, the
+/// session output endpoint (`output`, transferred). `arg` = active services
+/// plus the session bits.
+fn spawn_shell(
+    fs_service: Handle,
+    net_service: Handle,
+    broker: Handle,
+    input: Handle,
+    output: Option<Handle>,
+    arg: u64,
+) -> Result<Handle, Error> {
+    let fsd = sys::handle_duplicate(fs_service, rights::WRITE | rights::TRANSFER)?;
+    let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
+    // With DUPLICATE the shell can in turn pass a read-only SYSTEM to the
+    // programs it launches with `run`.
+    let system = sys::handle_duplicate(
+        SYSTEM,
+        rights::READ | rights::MANAGE | rights::DUPLICATE | rights::TRANSFER,
+    )?;
+    let pci = sys::handle_duplicate(PCI_ROOT, rights::READ | rights::TRANSFER)?;
+    let netd = sys::handle_duplicate(net_service, rights::WRITE | rights::TRANSFER)?;
+    // The shell does not get the SPAWNER: it asks the broker (init) to launch.
+    let launch = sys::handle_duplicate(broker, rights::WRITE | rights::TRANSFER)?;
+    let mut handles = [fsd, hw, system, input, pci, netd, launch, Handle(0)];
+    let n = match output {
+        Some(out) => {
+            handles[7] = out;
+            8
+        }
+        None => 7,
+    };
+    sys::process_spawn_with(SPAWNER, "shell", arg, &handles[..n])
+}
+
+/// Session shells for sshd (ADR 0025): requests arrive on `endpoint`;
+/// finished shells are reaped on every pass.
+struct Sessions {
+    endpoint: Handle,
+    children: [Option<Handle>; MAX_SESSIONS],
+}
+
+const MAX_SESSIONS: usize = 4;
+
+impl Sessions {
+    fn serve(&mut self, fs: Handle, net: Handle, services: u64, broker: Handle) {
+        use aricode_proto::session::{self, Kind as SessionKind};
+        for c in self.children.iter_mut() {
+            if let Some(h) = *c {
+                if sys::process_wait(h, 0) != Err(Error::Timeout) {
+                    let _ = sys::handle_close(h);
+                    *c = None;
+                }
+            }
+        }
+        let mut msg = [0u8; session::Request::LEN];
+        let mut handles = [Handle(0); 3];
+        let Ok((n, nh)) = sys::ipc_receive(self.endpoint, &mut msg, &mut handles, 0) else {
+            return;
+        };
+        if nh < 3 {
+            for h in &handles[..nh] {
+                let _ = sys::handle_close(*h);
+            }
+            return;
+        }
+        let [reply_to, input, output] = handles;
+        let slot = self.children.iter().position(Option::is_none);
+        let spawned = match (session::Request::decode(&msg[..n]), slot) {
+            (Some(req), Some(slot)) => {
+                let quiet = if req.kind == SessionKind::Exec {
+                    session::SHELL_QUIET
+                } else {
+                    0
+                };
+                let arg = services | session::SHELL_SESSION | quiet;
+                match spawn_shell(fs, net, broker, input, Some(output), arg) {
+                    Ok(child) => {
+                        self.children[slot] = Some(child);
+                        true
+                    }
+                    Err(_) => false,
+                }
+            }
+            _ => {
+                let _ = sys::handle_close(input);
+                let _ = sys::handle_close(output);
+                false
+            }
+        };
+        if !spawned {
+            say(b"session shell refused (limit or invalid request)");
+        }
+        let _ = sys::ipc_send(reply_to, &session::reply(spawned), &[], 0);
+        let _ = sys::handle_close(reply_to);
     }
 }
 
@@ -1982,7 +2098,43 @@ fn main(arg: u64) -> u64 {
                 say(b"console bridge not started: the shell only reads COM1 and PS/2");
             }
         }
-        match run_shell(fs, net_service, services, &mut broker, &mut sup) {
+        // SSH (ADR 0025): with a network service, sshd serves remote shells
+        // that init launches on its behalf.
+        let mut sessions = None;
+        if services & SERVICE_NET != 0 {
+            if let Ok(endpoint) = sys::endpoint_create() {
+                let launched = sup
+                    .register(
+                        "sshd",
+                        Kind::Sshd {
+                            fs,
+                            net: net_service,
+                            sessions: endpoint,
+                        },
+                        Probe::None,
+                        Handle(0),
+                        true,
+                        Policy::DRIVER,
+                    )
+                    .is_some_and(|i| sup.launch(i));
+                if launched {
+                    sessions = Some(Sessions {
+                        endpoint,
+                        children: [None; MAX_SESSIONS],
+                    });
+                } else {
+                    say(b"sshd did not start");
+                }
+            }
+        }
+        match run_shell(
+            fs,
+            net_service,
+            services,
+            &mut broker,
+            &mut sup,
+            sessions.as_mut(),
+        ) {
             Ok(code) => {
                 sys::print(b"AriInit: shell exited with ");
                 sys::print(aricode_rt::fmt_u64(code, &mut buf));

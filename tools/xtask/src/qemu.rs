@@ -83,9 +83,10 @@ fn base_command(
     q.args([
         "-netdev",
         &format!(
-            "user,id=net0,hostfwd=tcp:127.0.0.1:{}-:{}",
+            "user,id=net0,hostfwd=tcp:127.0.0.1:{}-:{},hostfwd=tcp:127.0.0.1:{}-:22",
             aricode_proto::net::TEST_TCP_FORWARD_PORT,
-            aricode_proto::net::TEST_TCP_LISTEN_PORT
+            aricode_proto::net::TEST_TCP_LISTEN_PORT,
+            aricode_proto::net::TEST_SSH_FORWARD_PORT
         ),
     ]);
     q.args([
@@ -418,6 +419,59 @@ fn run_tcp_probe(payload: &str) -> String {
     }
 }
 
+/// SSH probe: commands run with the host's `ssh` and the scenario's key.
+pub struct SshProbe<'a> {
+    pub marker: &'a str,
+    pub commands: &'a [String],
+    pub key: std::path::PathBuf,
+}
+
+/// Runs each command over SSH; the result is one block of `[host] ssh`
+/// lines: the command, every output line and the exit status.
+fn run_ssh_probe(commands: &[String], key: &Path) -> String {
+    let mut lines = Vec::new();
+    for cmd in commands {
+        let out = Command::new("ssh")
+            .args([
+                "-F",
+                "/dev/null",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "StrictHostKeyChecking=no",
+            ])
+            .args([
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                "-o",
+                "ConnectTimeout=20",
+                "-o",
+                "LogLevel=ERROR",
+            ])
+            .arg("-i")
+            .arg(key)
+            .args(["-p", &aricode_proto::net::TEST_SSH_FORWARD_PORT.to_string()])
+            .arg("ari@127.0.0.1")
+            .arg(cmd)
+            .stdin(Stdio::null())
+            .output();
+        match out {
+            Ok(o) => {
+                lines.push(format!("[host] ssh $ {cmd}"));
+                for l in String::from_utf8_lossy(&o.stdout).lines() {
+                    lines.push(format!("[host] ssh| {l}"));
+                }
+                for l in String::from_utf8_lossy(&o.stderr).lines() {
+                    lines.push(format!("[host] ssh stderr: {l}"));
+                }
+                lines.push(format!("[host] ssh exit {}", o.status.code().unwrap_or(-1)));
+            }
+            Err(e) => lines.push(format!("[host] ssh: cannot run ssh ({e})")),
+        }
+    }
+    lines.join("\n")
+}
+
 pub fn run_interactive(
     release: bool,
     cmdline: &str,
@@ -441,7 +495,7 @@ pub fn run_interactive(
     let disk = build_dir().join("disk.img");
     let esp_drive = if usb_image {
         // As on a USB stick: the ESP inside the GPT disk, no `fat:`.
-        image::write_usb_image(&disk, &esp)?;
+        image::write_usb_image(&disk, &esp, &[])?;
         None
     } else {
         image::write_test_disk(&disk, image::DiskVariant::Slots, &[])?;
@@ -498,6 +552,7 @@ fn count_occurrences(haystack: &[u8], needle: &[u8]) -> usize {
 pub struct Headless<'a> {
     pub input: Input<'a>,
     pub probe: Option<TcpProbe<'a>>,
+    pub ssh_probe: Option<SshProbe<'a>>,
     pub input_probe: Option<InputProbe<'a>>,
     pub disk_variant: image::DiskVariant,
     pub disk_readonly: bool,
@@ -529,7 +584,7 @@ pub fn run_headless(
     let disk = workdir.join("disk.img");
     let esp_drive = if disk_variant == image::DiskVariant::UsbImage {
         if !options.keep_disk {
-            image::write_usb_image(&disk, esp)?;
+            image::write_usb_image(&disk, esp, &[])?;
         }
         None
     } else {
@@ -581,6 +636,8 @@ pub fn run_headless(
     let mut probe_result: Option<String> = None;
     let mut probe_thread: Option<std::thread::JoinHandle<String>> = None;
     let mut input_result: Option<String> = None;
+    let mut ssh_result: Option<String> = None;
+    let mut ssh_thread: Option<std::thread::JoinHandle<String>> = None;
     let mut input_thread: Option<std::thread::JoinHandle<String>> = None;
     let mut timed_out = false;
     let mut killed = false;
@@ -625,6 +682,19 @@ pub fn run_headless(
                 probe_result = probe_thread.take().and_then(|t| t.join().ok());
             }
         }
+        if let Some(p) = options.ssh_probe.as_ref() {
+            if ssh_thread.is_none()
+                && ssh_result.is_none()
+                && count_occurrences(&captured.lock().expect("capture"), p.marker.as_bytes()) > 0
+            {
+                let commands = p.commands.to_vec();
+                let key = p.key.clone();
+                ssh_thread = Some(std::thread::spawn(move || run_ssh_probe(&commands, &key)));
+            }
+            if ssh_thread.as_ref().is_some_and(|t| t.is_finished()) {
+                ssh_result = ssh_thread.take().and_then(|t| t.join().ok());
+            }
+        }
         if let Some(p) = input_probe {
             if input_thread.is_none()
                 && input_result.is_none()
@@ -651,10 +721,16 @@ pub fn run_headless(
     if let Some(t) = input_thread.take() {
         input_result = t.join().ok();
     }
+    if let Some(t) = ssh_thread.take() {
+        ssh_result = t.join().ok();
+    }
     let _ = std::fs::remove_file(&qmp_path);
     reader.join().map_err(|_| "serial reader")?;
     let mut bytes = captured.lock().expect("capture").clone();
-    for line in [probe_result, input_result].into_iter().flatten() {
+    for line in [probe_result, input_result, ssh_result]
+        .into_iter()
+        .flatten()
+    {
         bytes.extend_from_slice(format!("\n{line}\n").as_bytes());
     }
     Ok(Capture {

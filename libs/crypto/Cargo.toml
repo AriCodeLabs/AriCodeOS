@@ -3,7 +3,7 @@ name = "aricode-crypto"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "AriCodeOS cryptographic primitives: SHA-256, SHA-512, Ed25519 and ChaCha20 (no_std, no dependencies)"
+description = "AriCodeOS cryptographic primitives: SHA-256, SHA-512, Ed25519, X25519, ChaCha20, Poly1305 and the OpenSSH ChaCha20-Poly1305 cipher (no_std, no dependencies)"
 
 [lib]
 path = "src/lib.rs"
