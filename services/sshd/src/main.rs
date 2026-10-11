@@ -108,21 +108,30 @@ fn write_file(fs: &mut FsClient, name: &str, data: &[u8]) -> bool {
         .is_some()
 }
 
+/// Whole file, or `None` if it does not exist or cannot be read. A read
+/// error (a USB stick that fails a transfer) is retried a few times before
+/// giving up: a truncated `authorized_keys` must never pass as empty.
 fn read_file(fs: &mut FsClient, name: &str) -> Option<Vec<u8>> {
     let fd = fs.open(name).ok()?;
     let mut data = Vec::new();
     let mut chunk = [0u8; 512];
-    loop {
+    let mut errors = 0;
+    let complete = loop {
         match fs.read(fd, data.len() as u32, &mut chunk) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break true,
             Ok(n) => data.extend_from_slice(&chunk[..n]),
+            Err(_) if errors < 3 => {
+                errors += 1;
+                sys::time::sleep_ms(200);
+            }
+            Err(_) => break false,
         }
         if data.len() > 64 * 1024 {
-            break;
+            break false;
         }
-    }
+    };
     let _ = fs.close(fd);
-    Some(data)
+    complete.then_some(data)
 }
 
 /// The host key seed: read from AriFS, or created and saved on first start.
@@ -355,14 +364,18 @@ fn main(_arg: u64) -> u64 {
         return 2;
     };
     let mut entropy = Entropy::load(&mut fs);
-    let keys = authorized(&mut fs);
+    let mut keys = authorized(&mut fs);
+    let mut announced = false;
     if keys.is_empty() {
-        say(b"no authorized_keys in AriFS: not listening (install a key with cargo xtask usb-image --authorized-key)");
+        say(b"no authorized_keys in AriFS: not listening (install a key with cargo xtask usb-image --authorized-key, or write authorized_keys ... from the console)");
         ready();
-        // Stay resident doing nothing: init keeps the session endpoint.
-        loop {
-            sys::time::sleep_ms(3_600_000);
+        announced = true;
+        // Closed until the owner installs a key; checked every few seconds.
+        while keys.is_empty() {
+            sys::time::sleep_ms(5_000);
+            keys = authorized(&mut fs);
         }
+        say(b"authorized_keys found");
     }
     let seed = host_key(&mut fs, &mut entropy);
     let listener = match net.tcp_listen(PORT) {
@@ -379,7 +392,9 @@ fn main(_arg: u64) -> u64 {
     sys::print(b", ");
     sys::print(aricode_rt::fmt_u64(keys.len() as u64, &mut b));
     sys::print(b" authorized key(s)\n");
-    ready();
+    if !announced {
+        ready();
+    }
     loop {
         let (sock, peer, _) = match net.tcp_accept(listener, 60_000) {
             Ok(c) => c,
