@@ -37,7 +37,11 @@ pub enum Error<E> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fetched {
     pub status: u16,
+    /// Bytes of body in the caller's buffer.
     pub body_len: usize,
+    /// The body did not fit: `body_len` is the buffer size and the rest
+    /// was discarded (the connection is closed anyway).
+    pub truncated: bool,
 }
 
 /// Writes `GET path HTTP/1.1` with `Host` and `Connection: close`.
@@ -347,7 +351,8 @@ impl ChunkDecoder {
 
 /// Sends a `GET` for `url` over `t` and leaves the body in `out`. Preceding
 /// 1xx responses are consumed; a transport error close is never
-/// taken for a complete download.
+/// taken for a complete download. A body larger than `out` is truncated
+/// (`Fetched::truncated`); `TooBig` is only for headers that do not fit.
 pub fn fetch<T: Transport>(
     t: &mut T,
     url: &Url,
@@ -385,7 +390,7 @@ pub fn fetch<T: Transport>(
         }
     };
     let rest = &head[response.header_len..have];
-    let body_len = match response.body {
+    let (body_len, truncated) = match response.body {
         BodyLength::Length(len) => read_length(t, rest, len, out)?,
         BodyLength::UntilClose => read_until_close(t, rest, out)?,
         BodyLength::Chunked => read_chunked(t, rest, out)?,
@@ -393,6 +398,7 @@ pub fn fetch<T: Transport>(
     Ok(Fetched {
         status: response.status,
         body_len,
+        truncated,
     })
 }
 
@@ -401,10 +407,9 @@ fn read_length<T: Transport>(
     rest: &[u8],
     len: usize,
     out: &mut [u8],
-) -> Result<usize, Error<T::Error>> {
-    if len > out.len() {
-        return Err(Error::TooBig);
-    }
+) -> Result<(usize, bool), Error<T::Error>> {
+    let truncated = len > out.len();
+    let len = len.min(out.len());
     let first = rest.len().min(len);
     out[..first].copy_from_slice(&rest[..first]);
     let mut body_len = first;
@@ -414,16 +419,17 @@ fn read_length<T: Transport>(
             k => body_len += k,
         }
     }
-    Ok(body_len)
+    Ok((body_len, truncated))
 }
 
 fn read_until_close<T: Transport>(
     t: &mut T,
     rest: &[u8],
     out: &mut [u8],
-) -> Result<usize, Error<T::Error>> {
+) -> Result<(usize, bool), Error<T::Error>> {
     if rest.len() > out.len() {
-        return Err(Error::TooBig);
+        out.copy_from_slice(&rest[..out.len()]);
+        return Ok((out.len(), true));
     }
     out[..rest.len()].copy_from_slice(rest);
     let mut body_len = rest.len();
@@ -432,12 +438,12 @@ fn read_until_close<T: Transport>(
             // Destination full: tell a clean end from leftover content.
             let mut probe = [0u8; 1];
             return match t.recv(&mut probe).map_err(Error::Transport)? {
-                0 => Ok(body_len),
-                _ => Err(Error::TooBig),
+                0 => Ok((body_len, false)),
+                _ => Ok((body_len, true)),
             };
         }
         match t.recv(&mut out[body_len..]).map_err(Error::Transport)? {
-            0 => return Ok(body_len),
+            0 => return Ok((body_len, false)),
             k => body_len += k,
         }
     }
@@ -447,7 +453,7 @@ fn read_chunked<T: Transport>(
     t: &mut T,
     rest: &[u8],
     out: &mut [u8],
-) -> Result<usize, Error<T::Error>> {
+) -> Result<(usize, bool), Error<T::Error>> {
     let mut dec = ChunkDecoder::new();
     let mut raw = [0u8; 1024];
     let mut raw_len = 0;
@@ -468,10 +474,10 @@ fn read_chunked<T: Transport>(
         raw.copy_within(used..raw_len, 0);
         raw_len -= used;
         if dec.done() {
-            return Ok(body_len);
+            return Ok((body_len, false));
         }
         if dec.wants_output() && body_len == out.len() {
-            return Err(Error::TooBig);
+            return Ok((body_len, true));
         }
         if used == 0 && written == 0 && raw_len == raw.len() {
             return Err(Error::Malformed);
@@ -723,7 +729,8 @@ mod tests {
             f,
             Fetched {
                 status: 200,
-                body_len: 5
+                body_len: 5,
+                truncated: false,
             }
         );
         assert_eq!(b, b"hello");
@@ -741,9 +748,10 @@ mod tests {
             get(&[b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhe"], 5),
             Err(Error::Malformed)
         );
+        let (f, b) = body(&[b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nhello!"], 5);
         assert_eq!(
-            get(&[b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nhello!"], 5),
-            Err(Error::TooBig)
+            (f.body_len, f.truncated, b.as_slice()),
+            (5, true, &b"hello"[..])
         );
     }
 
@@ -757,12 +765,14 @@ mod tests {
             f,
             Fetched {
                 status: 200,
-                body_len: 4096
+                body_len: 4096,
+                truncated: false,
             }
         );
         assert!(b.iter().all(|&c| c == b'x'));
-        // And if it does not fit, TooBig without panicking.
-        assert_eq!(get(&[&raw], 4095), Err(Error::TooBig));
+        // And if it does not fit, the body is truncated without panicking.
+        let (f, _) = body(&[&raw], 4095);
+        assert_eq!((f.body_len, f.truncated), (4095, true));
         // Chunks split at line and data boundaries.
         let parts: [&[u8]; 6] = [
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
@@ -795,15 +805,16 @@ mod tests {
             get(&[b"HTTP/1.0 200 OK\r\n\r\n"], 0),
             Ok(Fetched {
                 status: 200,
-                body_len: 0
+                body_len: 0,
+                truncated: false,
             })
         );
-        assert_eq!(
-            get(&[b"HTTP/1.0 200 OK\r\n\r\nhello!"], 5),
-            Err(Error::TooBig)
-        );
+        let (f, _) = body(&[b"HTTP/1.0 200 OK\r\n\r\nhello!"], 5);
+        assert_eq!((f.body_len, f.truncated), (5, true));
         let (f, _) = body(&[b"HTTP/1.0 200 OK\r\n\r\nhello"], 6);
-        assert_eq!(f.body_len, 5);
+        assert_eq!((f.body_len, f.truncated), (5, false));
+        let (f, _) = body(&[b"HTTP/1.0 200 OK\r\n\r\nhello"], 5);
+        assert_eq!((f.body_len, f.truncated), (5, false));
     }
 
     #[test]
@@ -833,7 +844,8 @@ mod tests {
             (
                 Fetched {
                     status: 200,
-                    body_len: 5
+                    body_len: 5,
+                    truncated: false,
                 },
                 &b"hello"[..]
             )

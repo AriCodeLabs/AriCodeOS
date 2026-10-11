@@ -13,7 +13,8 @@ pub enum HttpError {
     Io(NetError),
     /// The response is not HTTP, is truncated or has invalid framing.
     Malformed,
-    /// Headers or body do not fit in the caller's buffer.
+    /// The response headers do not fit (a body that does not fit is
+    /// truncated: see `Fetched::truncated`).
     TooBig,
     /// Unsupported encoding or protocol switch.
     Unsupported,
