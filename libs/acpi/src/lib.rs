@@ -412,10 +412,160 @@ impl Dmar {
     }
 }
 
+/// What the kernel needs from the FADT (`FACP`) to power off through S5.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Fadt {
+    /// Physical address of the DSDT (`X_DSDT` when present and non-zero).
+    pub dsdt: u64,
+    /// Port of the SMI command register (0 if the system is ACPI-only).
+    pub smi_cmd: u32,
+    /// Value written to `smi_cmd` to switch the firmware to ACPI mode.
+    pub acpi_enable: u8,
+    /// I/O ports of the PM1a/PM1b control blocks (0 if absent).
+    pub pm1a_cnt: u32,
+    pub pm1b_cnt: u32,
+}
+
+/// Parses the fields of the FADT used for S5 (ACPI 6.x, table 5.9).
+pub fn parse_fadt(table: &[u8]) -> Result<Fadt, AcpiError> {
+    let h = validate_table(table, b"FACP")?;
+    let len = (h.length as usize).min(table.len());
+    let u32_at = |o: usize| -> u32 {
+        if o + 4 <= len {
+            u32::from_le_bytes(table[o..o + 4].try_into().unwrap())
+        } else {
+            0
+        }
+    };
+    if len < 72 {
+        return Err(AcpiError::Truncated);
+    }
+    let mut dsdt = u32_at(40) as u64;
+    if len >= 148 {
+        let x = u64::from_le_bytes(table[140..148].try_into().unwrap());
+        if x != 0 {
+            dsdt = x;
+        }
+    }
+    Ok(Fadt {
+        dsdt,
+        smi_cmd: u32_at(48),
+        acpi_enable: table[52],
+        pm1a_cnt: u32_at(64),
+        pm1b_cnt: u32_at(68),
+    })
+}
+
+/// `SLP_TYPa`/`SLP_TYPb` of the `\_S5_` package in a DSDT (or SSDT), found
+/// by scanning the AML for `_S5_` followed by `PackageOp`, as small loaders
+/// do without an AML interpreter. Each value is a byte (`BytePrefix` 0x0A
+/// followed by the value) or the `ZeroOp`/`OneOp` constants.
+pub fn find_s5(aml: &[u8]) -> Option<(u8, u8)> {
+    let mut i = 0;
+    while i + 4 <= aml.len() {
+        if &aml[i..i + 4] != b"_S5_" {
+            i += 1;
+            continue;
+        }
+        // A name declaration: preceded by NameOp (0x08), optionally with a
+        // root (`\`) prefix in between.
+        let named =
+            (i >= 1 && aml[i - 1] == 0x08) || (i >= 2 && aml[i - 1] == b'\\' && aml[i - 2] == 0x08);
+        let mut j = i + 4;
+        if !named || aml.get(j) != Some(&0x12) {
+            i += 1;
+            continue;
+        }
+        j += 1;
+        // PkgLength: the top two bits of the first byte give the extra bytes.
+        let lead = *aml.get(j)?;
+        j += 1 + (lead >> 6) as usize;
+        j += 1; // NumElements
+        let value = |j: &mut usize| -> Option<u8> {
+            let b = *aml.get(*j)?;
+            *j += 1;
+            match b {
+                0x0A => {
+                    let v = *aml.get(*j)?;
+                    *j += 1;
+                    Some(v)
+                }
+                0x00 => Some(0),
+                0x01 => Some(1),
+                0xFF => Some(0xFF),
+                v if v < 0x08 => Some(v),
+                _ => None,
+            }
+        };
+        let a = value(&mut j)?;
+        let b = value(&mut j)?;
+        return Some((a & 7, b & 7));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[test]
+    fn fadt_fields_for_s5() {
+        let mut body = vec![0u8; 244 - 36];
+        let put = |b: &mut Vec<u8>, off: usize, v: &[u8]| {
+            b[off - 36..off - 36 + v.len()].copy_from_slice(v)
+        };
+        put(&mut body, 40, &0x7FE0_0000u32.to_le_bytes());
+        put(&mut body, 48, &0xB2u32.to_le_bytes());
+        put(&mut body, 52, &[0xA0]);
+        put(&mut body, 64, &0x604u32.to_le_bytes());
+        let f = parse_fadt(&table(b"FACP", &body)).unwrap();
+        assert_eq!(
+            f,
+            Fadt {
+                dsdt: 0x7FE0_0000,
+                smi_cmd: 0xB2,
+                acpi_enable: 0xA0,
+                pm1a_cnt: 0x604,
+                pm1b_cnt: 0
+            }
+        );
+        // X_DSDT wins when present.
+        put(&mut body, 140, &0x1_2345_0000u64.to_le_bytes());
+        assert_eq!(
+            parse_fadt(&table(b"FACP", &body)).unwrap().dsdt,
+            0x1_2345_0000
+        );
+        assert_eq!(
+            parse_fadt(&table(b"FACP", &body[..20])),
+            Err(AcpiError::Truncated)
+        );
+        assert!(parse_fadt(&table(b"APIC", &body)).is_err());
+    }
+
+    #[test]
+    fn s5_package_variants() {
+        // Name (_S5_, Package (4) { 0x05, 0x05, Zero, Zero }) with BytePrefix.
+        let aml = [
+            0x10, 0x08, b'_', b'S', b'5', b'_', 0x12, 0x0A, 0x04, 0x0A, 0x05, 0x0A, 0x05, 0x00,
+            0x00,
+        ];
+        assert_eq!(find_s5(&aml), Some((5, 5)));
+        // QEMU style: root prefix, Zero constants (SLP_TYP 0).
+        let aml = [
+            0x08, b'\\', b'_', b'S', b'5', b'_', 0x12, 0x06, 0x04, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(find_s5(&aml), Some((0, 0)));
+        // Bare small integers (some firmware) and a two-byte PkgLength.
+        let aml = [
+            0x08, b'_', b'S', b'5', b'_', 0x12, 0x40, 0x00, 0x04, 0x07, 0x07, 0x00, 0x00,
+        ];
+        assert_eq!(find_s5(&aml), Some((7, 7)));
+        // `_S5_` used as a reference, not a declaration, is skipped.
+        let aml = [0x70, b'_', b'S', b'5', b'_', 0x12, 0x06, 0x04, 0x0A, 0x05];
+        assert_eq!(find_s5(&aml), None);
+        assert_eq!(find_s5(b"no sleep states here"), None);
+    }
 
     /// Sets byte `at` so that `t[..len]` sums to zero.
     fn with_checksum(mut t: Vec<u8>, at: usize, len: usize) -> Vec<u8> {

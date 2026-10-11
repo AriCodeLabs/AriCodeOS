@@ -1277,3 +1277,15 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   shootdown (`vmm::flush_page`) in the VMM self-test and `test=smp`; there is
   no generic mechanism that decides on its own.
 - The loader depends on the `uefi` crate (see ADR 0006).
+
+## Power-off and line editing (2026-10-11)
+
+- `aricode_acpi::parse_fadt` and `find_s5` (a scan of the AML for the
+  `\_S5_` package, no interpreter) give the kernel the PM1 control blocks and
+  the S5 sleep types; `power::acpi_poweroff` enables ACPI mode through
+  `SMI_CMD` if needed and writes `SLP_TYP | SLP_EN`. `shutdown` uses it unless
+  `qemu_exit` is set (scenario `power.acpi_shutdown`).
+- `aricode-lineedit`: the shell's line editor (cursor movement, insert and
+  delete anywhere, Home/End, Ctrl-A/E/U, history), redrawing with plain text
+  and backspace only; the framebuffer console's backspace wraps to the
+  previous row (scenario `shell.line_editing`, host tests).

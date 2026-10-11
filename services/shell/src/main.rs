@@ -115,85 +115,28 @@ impl History {
     }
 }
 
-/// Replaces what was typed with `text`, erasing it on screen too.
-fn replace_line(line: &mut [u8; LINE_MAX], len: &mut usize, text: &[u8]) {
-    for _ in 0..*len {
-        print(b"\x08 \x08");
+impl aricode_lineedit::History for History {
+    fn back(&self, n: usize) -> Option<&[u8]> {
+        History::back(self, n)
     }
-    let n = text.len().min(LINE_MAX);
-    line[..n].copy_from_slice(&text[..n]);
-    *len = n;
-    print(&line[..n]);
 }
 
-/// Reads a line from the console with minimal editing: backspace and, with
-/// the up and down arrows (sequences `ESC [ A` / `ESC [ B`, as sent by a
-/// serial terminal), the history. Other sequences are discarded.
+/// Reads a line from the console with the editor in `aricode-lineedit`:
+/// cursor movement (arrows, Home/End, Ctrl-A/E), insert and delete anywhere
+/// (backspace, Delete), Ctrl-U to clear, and the history on the up and down
+/// arrows. Keys arrive as a terminal sends them, from any keyboard.
 fn read_line(line: &mut [u8; LINE_MAX], history: &History) -> usize {
-    let mut len = 0;
+    let mut editor: aricode_lineedit::Editor<LINE_MAX> = aricode_lineedit::Editor::new();
     let mut chunk = [0u8; 64];
-    // Escape sequence in progress: 0 none, 1 `ESC`, 2 `ESC [`, 3 numeric
-    // parameter awaiting its terminator (`~`).
-    let mut esc = 0u8;
-    // Position in the history: 0 = new line, n = `n` back.
-    let mut back = 0usize;
     loop {
         let Ok(n) = sys::console_read(CONSOLE_IN, &mut chunk, TIMEOUT_INFINITE) else {
             continue;
         };
         for &b in &chunk[..n] {
-            match esc {
-                1 => {
-                    esc = if b == b'[' { 2 } else { 0 };
-                    continue;
-                }
-                2 => {
-                    esc = 0;
-                    match b {
-                        b'A' => {
-                            if let Some(text) = history.back(back + 1) {
-                                back += 1;
-                                replace_line(line, &mut len, text);
-                            }
-                        }
-                        b'B' => {
-                            if back > 0 {
-                                back -= 1;
-                                let text = history.back(back).unwrap_or(b"");
-                                replace_line(line, &mut len, text);
-                            }
-                        }
-                        b'0'..=b'9' => esc = 3,
-                        _ => {}
-                    }
-                    continue;
-                }
-                3 => {
-                    if !b.is_ascii_digit() {
-                        esc = 0;
-                    }
-                    continue;
-                }
-                _ => {}
-            }
-            match b {
-                0x1B => esc = 1,
-                b'\r' | b'\n' => {
-                    print(b"\n");
-                    return len;
-                }
-                0x08 | 0x7F => {
-                    if len > 0 {
-                        len -= 1;
-                        print(b"\x08 \x08");
-                    }
-                }
-                0x20..=0x7E if len < LINE_MAX => {
-                    line[len] = b;
-                    len += 1;
-                    print(&[b]);
-                }
-                _ => {}
+            if editor.feed(b, history, &mut |out| print(out)) == aricode_lineedit::Event::Submit {
+                let text = editor.line();
+                line[..text.len()].copy_from_slice(text);
+                return text.len();
             }
         }
     }
