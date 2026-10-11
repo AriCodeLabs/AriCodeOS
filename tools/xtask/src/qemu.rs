@@ -448,7 +448,8 @@ fn run_ssh_probe(commands: &[String], key: &Path) -> String {
                 "-o",
                 "LogLevel=ERROR",
             ])
-            .arg("-i")
+            // Only the scenario's key: the agent's keys would be refused first.
+            .args(["-o", "IdentitiesOnly=yes", "-i"])
             .arg(key)
             .args(["-p", &aricode_proto::net::TEST_SSH_FORWARD_PORT.to_string()])
             .arg("ari@127.0.0.1")

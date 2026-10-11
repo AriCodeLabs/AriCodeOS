@@ -210,6 +210,7 @@ fn init_ps2() {
 
 /// Keyboard vector handler: set 1 scancodes to text.
 pub fn on_keyboard_irq() {
+    crate::random::stir();
     let mut pushed = false;
     {
         let mut ps2 = PS2.lock();
@@ -241,6 +242,7 @@ pub fn on_keyboard_irq() {
 
 /// Serial vector handler: drains the receive FIFO into the ring.
 pub fn on_irq() {
+    crate::random::stir();
     let mut ring = RING.lock();
     // SAFETY: LSR bit 0 = data available; RBR returns the received byte.
     unsafe {

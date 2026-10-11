@@ -19,7 +19,7 @@ exit = 33
 serial_contains = [
     "sshd: new host key generated and saved",
     "1 authorized key(s)",
-    "sshd: user 'ari' authenticated",
+    "sshd: user 'ari' authenticated from 10.0.2.2",
     "[host] ssh $ ls",
     "[host] ssh| hola.txt",
     "[host] ssh| authorized_keys",
@@ -29,4 +29,4 @@ serial_contains = [
     "[host] ssh exit 0",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "connection dropped", "Permission denied"]
+serial_absent = ["KERNEL PANIC", "connection dropped", "Permission denied", "sshd: refused key"]

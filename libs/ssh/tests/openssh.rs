@@ -192,17 +192,23 @@ fn unknown_key_is_refused() {
     let port = listener.local_addr().unwrap().port();
     let server = std::thread::spawn(move || {
         let mut authenticated = false;
-        serve(listener, vec![other], |e, _, _| {
-            if matches!(e, Event::Authenticated { .. }) {
-                authenticated = true;
-            }
+        let mut refused = Vec::new();
+        serve(listener, vec![other], |e, _, _| match e {
+            Event::Authenticated { .. } => authenticated = true,
+            Event::AuthFailed { user } => refused.push(user.clone()),
+            _ => {}
         });
-        authenticated
+        (authenticated, refused)
     });
     let o = ssh(&dir, port, &[]).arg("true").output().unwrap();
     // The client gives up once its only key is refused and closes.
     let _ = TcpStream::connect(("127.0.0.1", port));
-    assert!(!server.join().unwrap(), "must not authenticate");
+    let (authenticated, refused) = server.join().unwrap();
+    assert!(!authenticated, "must not authenticate");
+    assert!(
+        refused.iter().any(|u| u == "ari"),
+        "the refused key must be reported: {refused:?}"
+    );
     assert_eq!(o.status.code(), Some(255));
     assert!(
         String::from_utf8_lossy(&o.stderr).contains("Permission denied"),

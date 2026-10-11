@@ -43,6 +43,38 @@ would open an unauthenticated shell on the user's network.
    runs commands with the host's `ssh` (`ssh.exec`: ls, cat, write and
    shutdown over SSH).
 
+## Security notes (2026-10-11)
+
+- **Closed by default.** Without an `authorized_keys` file holding at least
+  one `ssh-ed25519` key, sshd does not open port 22 at all. There is no
+  password authentication and no default key: the only way in is a key the
+  owner installed (`cargo xtask usb-image --authorized-key`, or `write
+  authorized_keys ...` from the console). Removing the file closes the door
+  for new connections.
+- **Nothing secret in the repository.** The repository holds no SSH keys.
+  Test clients get a fresh key pair per run (`ssh-keygen` into the scenario
+  directory), never committed. `keys/dev` holds only the documented image
+  signing key for QEMU tests, unrelated to SSH.
+- **Entropy.** CPUs without `rdrand` gave the kernel generator little more
+  than the cycle counter. Every device, keyboard and serial interrupt now
+  stirs the cycle counter into a pool mixed into each read; sshd also
+  carries a seed across boots (`random_seed` in AriFS, replaced on every
+  start) and the host key for a USB image is generated on the build host
+  from `/dev/urandom` (`build/ssh_host_ed25519_key`, fingerprint printed at
+  build time so it can be checked against the first `ssh` prompt).
+- **Audit trail.** Every refused key is logged with the user name and the
+  peer address; after ten failures the connection is dropped.
+- **Who can read the files.** `authorized_keys`, the host key and the seed
+  live in the AriFS root. Programs launched through the broker see only
+  their private directory; the console shell, sshd and an authenticated
+  SSH session can read and change them (an authenticated user already has
+  the shell).
+- **Exposure.** The laptop sits on the local network behind the router;
+  sshd is only reachable from the Internet if a port is forwarded to it.
+  The protocol parser runs before authentication, so the surface is the
+  SSH library itself; it only accepts one algorithm per slot and bounded
+  packet sizes.
+
 ## Consequences
 
 - Remote shells have the same capabilities as the console shell (files,
