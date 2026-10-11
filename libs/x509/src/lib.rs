@@ -42,6 +42,10 @@ pub enum Error {
     NotCa,
     NameMismatch,
     ChainTooLong,
+    /// The leaf may not authenticate a TLS server: extendedKeyUsage without
+    /// serverAuth, or keyUsage without digitalSignature (RFC 5280 4.2.1.12,
+    /// RFC 8446 4.4.2.2).
+    WrongPurpose,
 }
 
 /// Subject public key; slices point into the certificate.
@@ -93,6 +97,12 @@ pub struct Certificate<'a> {
     pub dns_names: Vec<&'a str>,
     /// First subject commonName.
     pub common_name: Option<&'a str>,
+    /// keyUsage digitalSignature (true without a keyUsage extension). TLS
+    /// 1.3 server authentication signs with the key, so it is required.
+    pub digital_signature: bool,
+    /// extendedKeyUsage includes serverAuth or anyExtendedKeyUsage (true
+    /// without the extension).
+    pub server_auth: bool,
 }
 
 /// Checks `signature` over `message` with `key`. False on any mismatch
@@ -191,6 +201,9 @@ pub fn verify_chain<'a>(
     check_validity(leaf.not_before, leaf.not_after, now)?;
     if !matches_hostname(&leaf, host) {
         return Err(Error::NameMismatch);
+    }
+    if !leaf.server_auth || !leaf.digital_signature {
+        return Err(Error::WrongPurpose);
     }
     let anchors: Vec<Parsed> = roots.iter().filter_map(|r| Parsed::parse(r).ok()).collect();
     let mut used = vec![false; chain.len()];

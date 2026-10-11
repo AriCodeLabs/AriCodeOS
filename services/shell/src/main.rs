@@ -756,6 +756,7 @@ fn tls_error(e: aricode_tls::Error) -> &'static [u8] {
         E::Certificate(X::NameMismatch) => b"certificate does not match the host name",
         E::Certificate(X::UnknownIssuer) => b"certificate signed by an unknown authority",
         E::Certificate(X::BadSignature) => b"invalid certificate signature",
+        E::Certificate(X::WrongPurpose) => b"certificate not issued for a TLS server",
         E::Certificate(_) => b"certificate rejected",
         E::Alert(_) => b"the server sent an alert",
         E::Unsupported(_) => b"the server needs an unsupported TLS feature",

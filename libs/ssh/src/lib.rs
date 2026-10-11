@@ -121,6 +121,9 @@ struct Channel {
     sent_eof: bool,
     sent_close: bool,
     pending: Vec<u8>,
+    /// `exit` was requested while `pending` could not be sent: finished
+    /// once the client widens its window.
+    exit_code: Option<u32>,
 }
 
 pub struct Server {
@@ -220,6 +223,17 @@ impl Server {
         self.host_public
     }
 
+    /// The client has proved it holds an authorized key.
+    pub fn is_authenticated(&self) -> bool {
+        matches!(self.phase, Phase::Connected)
+    }
+
+    /// Drops the connection with a DISCONNECT (reason 2, protocol error)
+    /// carrying `text`; used for clients that do not progress.
+    pub fn drop_connection(&mut self, text: &[u8], out: &mut Vec<u8>) {
+        self.disconnect(2, text, out);
+    }
+
     pub fn is_closed(&self) -> bool {
         self.phase == Phase::Closed
     }
@@ -313,13 +327,18 @@ impl Server {
         self.flush_channel(out);
     }
 
-    /// Ends the session: exit status, EOF and close.
+    /// Ends the session: exit status, EOF and close, once every byte given
+    /// to `send_data` has gone out (the rest waits for the client's window).
     pub fn exit(&mut self, code: u32, out: &mut Vec<u8>) {
         self.flush_channel(out);
         let Some(ch) = self.channel.as_mut() else {
             return;
         };
         if ch.sent_close {
+            return;
+        }
+        if !ch.pending.is_empty() {
+            ch.exit_code = Some(code);
             return;
         }
         let id = ch.remote_id;
@@ -515,6 +534,15 @@ impl Server {
                     ch.remote_window = ch.remote_window.saturating_add(add);
                 }
                 self.flush_channel(out);
+                // A deferred exit completes once nothing is pending.
+                if let Some(code) = self
+                    .channel
+                    .as_ref()
+                    .filter(|c| c.pending.is_empty())
+                    .and_then(|c| c.exit_code)
+                {
+                    self.exit(code, out);
+                }
             }
             msg::CHANNEL_EOF if self.phase == Phase::Connected => events.push(Event::Eof),
             msg::CHANNEL_CLOSE if self.phase == Phase::Connected => {
@@ -741,6 +769,7 @@ impl Server {
             sent_eof: false,
             sent_close: false,
             pending: Vec::new(),
+            exit_code: None,
         });
         let mut w = Writer::new(msg::CHANNEL_OPEN_CONFIRMATION);
         w.u32(sender).u32(0).u32(RECV_WINDOW).u32(MAX_PACKET);

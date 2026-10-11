@@ -103,6 +103,20 @@ printf 'subjectAltName=DNS:long.example.org\n' >long.ext
 issue long-leaf '/CN=long.example.org' $parent long.ext $LEAF_FROM $LEAF_TO -sha256
 der long-leaf
 
+# Purpose restrictions under the EC intermediate (RFC 5280 EKU, RFC 8446
+# digitalSignature): a control with both, one for clients only, one whose
+# key may not sign.
+for n in purpose-ok purpose-client purpose-nosign; do
+    key $n -algorithm EC -pkeyopt ec_paramgen_curve:P-256
+done
+printf 'basicConstraints=critical,CA:FALSE\nsubjectAltName=DNS:purpose.example.org\nextendedKeyUsage=critical,serverAuth\nkeyUsage=critical,digitalSignature\n' >purpose-ok.ext
+printf 'basicConstraints=critical,CA:FALSE\nsubjectAltName=DNS:purpose.example.org\nextendedKeyUsage=critical,clientAuth\nkeyUsage=critical,digitalSignature\n' >purpose-client.ext
+printf 'basicConstraints=critical,CA:FALSE\nsubjectAltName=DNS:purpose.example.org\nextendedKeyUsage=critical,serverAuth\nkeyUsage=critical,keyEncipherment\n' >purpose-nosign.ext
+for n in purpose-ok purpose-client purpose-nosign; do
+    issue $n '/CN=purpose.example.org' ec-int $n.ext $LEAF_FROM $LEAF_TO -sha256
+    der $n
+done
+
 # Leaf with an unknown critical extension.
 key crit-leaf -algorithm EC -pkeyopt ec_paramgen_curve:P-256
 printf 'subjectAltName=DNS:crit.example.org\n1.3.6.1.4.1.55555.1=critical,ASN1:NULL\n' >crit.ext

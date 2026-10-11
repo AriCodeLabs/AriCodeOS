@@ -58,6 +58,11 @@ pub struct HostTcp {
 pub struct HostSsh {
     pub marker: String,
     pub commands: Vec<String>,
+    /// Opens a TCP connection to port 22 first and keeps it idle (never
+    /// sends its identification) while the commands run: they must still
+    /// be served once sshd drops the idle client.
+    #[serde(default)]
+    pub idle_client: bool,
 }
 
 #[derive(Debug, Deserialize)]

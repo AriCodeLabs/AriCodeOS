@@ -216,6 +216,7 @@ fn run_scenario(
                 marker: &h.marker,
                 commands: &h.commands,
                 key: key.clone(),
+                idle_client: h.idle_client,
             }),
             _ => None,
         };

@@ -69,7 +69,7 @@ impl Error {
             Error::Decrypt => 20,                       // bad_record_mac
             Error::Certificate(X::UnknownIssuer) => 48, // unknown_ca
             Error::Certificate(X::Expired | X::NotYetValid) => 45, // certificate_expired
-            Error::Certificate(X::Unsupported) => 43,   // unsupported_certificate
+            Error::Certificate(X::Unsupported | X::WrongPurpose) => 43, // unsupported_certificate
             Error::Certificate(_) => 42,                // bad_certificate
             Error::Protocol(_) if connected => 10,      // unexpected_message
             Error::Protocol(_) | Error::Unsupported(_) => 40, // handshake_failure

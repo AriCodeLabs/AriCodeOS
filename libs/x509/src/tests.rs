@@ -383,3 +383,41 @@ fn embedded_roots_parse_and_self_verify() {
     }
     assert!(verified >= 15, "{verified}");
 }
+
+#[test]
+fn purpose_restrictions() {
+    let roots = [cert!("ec-root")];
+    let now = Some(NOW);
+    let host = "purpose.example.org";
+    let ok = verify_chain(&[cert!("purpose-ok"), cert!("ec-int")], &roots, host, now).unwrap();
+    assert!(ok.server_auth && ok.digital_signature);
+    // extendedKeyUsage = clientAuth only.
+    let client = Certificate::parse(cert!("purpose-client")).unwrap();
+    assert!(!client.server_auth && client.digital_signature);
+    assert_eq!(
+        verify_chain(
+            &[cert!("purpose-client"), cert!("ec-int")],
+            &roots,
+            host,
+            now
+        )
+        .err(),
+        Some(Error::WrongPurpose)
+    );
+    // keyUsage without digitalSignature.
+    let nosign = Certificate::parse(cert!("purpose-nosign")).unwrap();
+    assert!(nosign.server_auth && !nosign.digital_signature);
+    assert_eq!(
+        verify_chain(
+            &[cert!("purpose-nosign"), cert!("ec-int")],
+            &roots,
+            host,
+            now
+        )
+        .err(),
+        Some(Error::WrongPurpose)
+    );
+    // Without the extensions there is no restriction.
+    let plain = Certificate::parse(cert!("ec-leaf")).unwrap();
+    assert!(plain.server_auth && plain.digital_signature);
+}

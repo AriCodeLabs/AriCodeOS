@@ -64,6 +64,17 @@ would open an unauthenticated shell on the user's network.
   build time so it can be checked against the first `ssh` prompt).
 - **Audit trail.** Every refused key is logged with the user name and the
   peer address; after ten failures the connection is dropped.
+- **No monopoly by idle clients** (audit of 8910d1f, finding 2). A
+  connection that has not authenticated within 30 seconds is dropped with a
+  DISCONNECT and logged, so a client that opens TCP and sends nothing cannot
+  hold the single served connection. Scenario `ssh.exec` keeps such a client
+  open while the real commands run. Authenticated sessions have no idle
+  limit; the owner closes them.
+- **Output is never cut by the close** (audit finding 3). `Server::exit`
+  defers the exit status, EOF and close until every byte handed to
+  `send_data` has left; with a client window smaller than the output, the
+  close waits for the window adjustments. Regression test with 3 MiB
+  through the OpenSSH client.
 - **Who can read the files.** `authorized_keys`, the host key and the seed
   live in the AriFS root. Programs launched through the broker see only
   their private directory; the console shell, sshd and an authenticated

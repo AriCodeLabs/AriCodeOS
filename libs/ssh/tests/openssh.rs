@@ -218,3 +218,36 @@ fn unknown_key_is_refused() {
     let _ = (base64::encode(&ed25519_blob(&other), true), &dir);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Output larger than the client's initial window (2 MiB in OpenSSH) must
+/// arrive whole before the exit status: `exit` waits for the window.
+#[test]
+fn large_output_is_delivered_whole() {
+    if !tools() {
+        return;
+    }
+    let dir = tmpdir("large-output");
+    let keys = parse_authorized_keys(&client_key(&dir));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let expected = 3 * 1024 * 1024;
+    let server = std::thread::spawn(move || {
+        serve(listener, keys, |e, s, out| {
+            if matches!(e, Event::Exec { .. }) {
+                s.send_data(&vec![b'x'; expected], out);
+                s.exit(0, out);
+            }
+        });
+    });
+    let o = ssh(&dir, port, &[]).arg("large-output").output().unwrap();
+    server.join().unwrap();
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert_eq!(o.stdout.len(), expected, "output lost before the close");
+    assert!(o.stdout.iter().all(|&b| b == b'x'));
+    let _ = std::fs::remove_dir_all(&dir);
+}
