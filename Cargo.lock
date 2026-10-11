@@ -143,6 +143,7 @@ name = "ari-shell"
 version = "0.9.0"
 dependencies = [
  "aricode-build",
+ "aricode-lineedit",
  "aricode-net",
  "aricode-proto",
  "aricode-rt",
@@ -294,6 +295,10 @@ version = "0.9.0"
 dependencies = [
  "aricode-x86-paging",
 ]
+
+[[package]]
+name = "aricode-lineedit"
+version = "0.9.0"
 
 [[package]]
 name = "aricode-manifest"

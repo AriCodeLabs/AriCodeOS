@@ -168,7 +168,16 @@ impl<S: Surface> Console<S> {
             '\r' => self.cursor_col = 0,
             // Backspace: the cursor moves back one cell; erasing is up to the
             // writer (the shell sends "\x08 \x08").
-            '\u{8}' => self.cursor_col = self.cursor_col.saturating_sub(1),
+            // At the start of a row it goes to the end of the previous one,
+            // so a line longer than the screen can be edited back.
+            '\u{8}' => {
+                if self.cursor_col > 0 {
+                    self.cursor_col = self.cursor_col.min(self.cols) - 1;
+                } else if self.cursor_row > 0 {
+                    self.cursor_row -= 1;
+                    self.cursor_col = self.cols.saturating_sub(1);
+                }
+            }
             '\t' => {
                 let next = (self.cursor_col / 8 + 1) * 8;
                 while self.cursor_col < next.min(self.cols) {
@@ -357,9 +366,26 @@ mod tests {
         assert_eq!(c.cell(0, 0), b'a');
         assert_eq!(c.cell(1, 0), b' ');
         assert_eq!(c.cursor_col, 1);
-        // In column 0 it does not go back to the previous line.
+        // In column 0 of the first row it stays put.
         write!(c, "\u{8}\u{8}x").unwrap();
         assert_eq!(c.cell(0, 0), b'x');
+    }
+
+    #[test]
+    fn backspace_wraps_to_the_previous_row() {
+        // 64 px wide = 8 columns: 9 characters wrap onto the second row.
+        let mut c = C::new(Mem::new(64, 32));
+        write!(c, "abcdefghi").unwrap();
+        assert_eq!(c.cursor(), (1, 1));
+        write!(c, "\u{8}\u{8}").unwrap();
+        assert_eq!(c.cursor(), (7, 0), "back to the last column of row 0");
+        write!(c, "H").unwrap();
+        assert_eq!(c.cell(7, 0), b'H');
+        // A full row leaves the cursor pending at the end: backspace lands on
+        // the last cell, not one before it.
+        let mut c = C::new(Mem::new(64, 32));
+        write!(c, "abcdefgh\u{8}X").unwrap();
+        assert_eq!(c.cell(7, 0), b'X');
     }
 
     #[test]

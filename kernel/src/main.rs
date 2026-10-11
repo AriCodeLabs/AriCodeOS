@@ -487,10 +487,15 @@ fn run_user_program(name: &str) {
 }
 
 /// Orderly shutdown requested from user space (`system_power`): with
-/// `qemu_exit` it terminates QEMU successfully; on real hardware it halts
-/// the CPU.
+/// `qemu_exit` it terminates QEMU successfully; otherwise it powers the
+/// machine off through ACPI S5 and, if the firmware does not cooperate,
+/// halts the CPU.
 pub fn shutdown() -> ! {
     println!("ARICODEOS_SHUTDOWN");
+    if !QEMU_EXIT.load(Ordering::Relaxed) {
+        arch::x86_64::power::acpi_poweroff();
+        println!("AriCodeOS: ACPI power-off had no effect; halting (it is safe to switch off)");
+    }
     finish(qemu::ExitCode::Success)
 }
 

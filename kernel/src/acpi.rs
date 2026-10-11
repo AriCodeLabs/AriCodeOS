@@ -4,7 +4,7 @@
 use crate::memory::phys;
 use crate::sync::IrqLock;
 use alloc::vec::Vec;
-use aricode_acpi::{root_entries, Dmar, Madt, McfgEntry, Rsdp, SdtHeader};
+use aricode_acpi::{root_entries, Dmar, Fadt, Madt, McfgEntry, Rsdp, SdtHeader};
 use boot_protocol::BootInfo;
 use log::{info, warn};
 
@@ -14,6 +14,10 @@ pub struct AcpiInfo {
     pub mcfg: Vec<McfgEntry>,
     /// DMA remapping units (VT-d), if the platform declares them.
     pub dmar: Option<Dmar>,
+    /// FADT fields for powering off, and the `\_S5_` sleep types found in
+    /// the DSDT (`None`: no ACPI power-off on this machine).
+    pub fadt: Option<Fadt>,
+    pub s5: Option<(u8, u8)>,
 }
 
 static ACPI: IrqLock<Option<AcpiInfo>> = IrqLock::new(None);
@@ -82,7 +86,27 @@ pub fn init(info: &BootInfo) {
                 Ok(d) => acpi.dmar = Some(d),
                 Err(e) => warn!("acpi: invalid DMAR ({e:?})"),
             },
+            b"FACP" => match aricode_acpi::parse_fadt(table) {
+                Ok(f) => acpi.fadt = Some(f),
+                Err(e) => warn!("acpi: invalid FADT ({e:?})"),
+            },
+            b"SSDT" if acpi.s5.is_none() => acpi.s5 = aricode_acpi::find_s5(table),
             _ => {}
+        }
+    }
+    // \_S5_ normally lives in the DSDT, which only the FADT points to.
+    if let Some(f) = acpi.fadt {
+        if let Some((dsdt, _)) = table_at(f.dsdt) {
+            if let Some(s5) = aricode_acpi::find_s5(dsdt) {
+                acpi.s5 = Some(s5);
+            }
+        }
+        match acpi.s5 {
+            Some((a, b)) => info!(
+                "acpi: power-off through S5 (SLP_TYP {a}/{b}, PM1a {:#x}, PM1b {:#x})",
+                f.pm1a_cnt, f.pm1b_cnt
+            ),
+            None => warn!("acpi: no \\_S5_ package; shutdown will only halt the CPU"),
         }
     }
     info!(
@@ -140,6 +164,8 @@ pub fn with<R>(f: impl FnOnce(&AcpiInfo) -> R) -> R {
         },
         mcfg: Vec::new(),
         dmar: None,
+        fadt: None,
+        s5: None,
     };
     let guard = ACPI.lock();
     f(guard.as_ref().unwrap_or(&EMPTY))
