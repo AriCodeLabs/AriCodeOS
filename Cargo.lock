@@ -764,6 +764,7 @@ dependencies = [
  "aricode-net",
  "aricode-pkg",
  "aricode-proto",
+ "aricode-ssh",
  "serde",
  "toml",
 ]

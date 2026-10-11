@@ -11,7 +11,7 @@ exit = 33
 serial_contains = [
     "random: ChaCha20 generator seeded with",
     "random: source",
-    "ok, sample",
+    "interrupt stirs, sample",
     "ARICODEOS_KERNEL_READY",
 ]
 serial_absent = ["KERNEL PANIC"]

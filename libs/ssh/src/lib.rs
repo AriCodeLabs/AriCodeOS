@@ -76,6 +76,9 @@ const MAX_AUTH_FAILURES: u32 = 10;
 pub enum Event {
     /// The client proved it holds an authorized key.
     Authenticated { user: String },
+    /// A public-key attempt was refused (key not authorized or bad
+    /// signature); the connection goes on until `MAX_AUTH_FAILURES`.
+    AuthFailed { user: String },
     /// Interactive shell requested (`pty` if a terminal was asked for).
     Shell { pty: bool },
     /// A single command.
@@ -641,6 +644,13 @@ impl Server {
             self.disconnect(7, b"service not available", out);
             return Ok(());
         }
+        if method == NONE {
+            // A query for the supported methods (RFC 4252 5.2), not an attempt.
+            let mut w = Writer::new(msg::USERAUTH_FAILURE);
+            w.string(b"publickey").bool(false);
+            self.send_packet(&w.0, out);
+            return Ok(());
+        }
         if method == b"publickey" {
             let has_sig = r.bool().ok_or(bad)?;
             let alg = r.string().ok_or(bad)?;
@@ -690,6 +700,9 @@ impl Server {
             }
         }
         self.auth_failures += 1;
+        events.push(Event::AuthFailed {
+            user: String::from_utf8_lossy(user).into_owned(),
+        });
         if self.auth_failures > MAX_AUTH_FAILURES {
             self.disconnect(14, b"too many authentication failures", out);
             return Ok(());

@@ -275,6 +275,7 @@ pub fn register_irq(gsi: u32, level: bool, active_low: bool) -> Result<ObjectRef
 
 /// Entry from the APIC for device vectors.
 pub fn handle_device_irq(vector: u8) {
+    crate::random::stir();
     let line = VECTORS.lock().get(&vector).and_then(Weak::upgrade);
     match line.as_ref().map(|o| &o.kind) {
         Some(ObjectKind::Irq(l)) => l.fire(),

@@ -5,8 +5,13 @@
 //!
 //! Handles from init: `[net (WRITE), fs (WRITE), hardware, SYSTEM (READ),
 //! sessions (WRITE)]`. In AriFS: `ssh_host_ed25519_key` (the host key seed
-//! in hex, created on first start) and `authorized_keys` (OpenSSH format,
-//! `ssh-ed25519` lines; read on every connection).
+//! in hex; installed by `cargo xtask usb-image --authorized-key`, or
+//! created on first start), `authorized_keys` (OpenSSH format,
+//! `ssh-ed25519` lines; read on every connection) and `random_seed`
+//! (entropy carried across boots).
+//!
+//! Closed by default: without an `authorized_keys` file with at least one
+//! key, sshd does not listen at all.
 #![no_std]
 #![no_main]
 
@@ -29,6 +34,7 @@ const SESSIONS: Handle = Handle(0x0001_0008);
 const PORT: u16 = 22;
 const HOST_KEY_FILE: &str = "ssh_host_ed25519_key";
 const AUTHORIZED_KEYS: &str = "authorized_keys";
+const SEED_FILE: &str = "random_seed";
 
 fn say(msg: &[u8]) {
     sys::print(b"sshd: ");
@@ -36,10 +42,66 @@ fn say(msg: &[u8]) {
     sys::print(b"\n");
 }
 
-fn random32() -> [u8; 32] {
-    let mut b = [0u8; 32];
-    let _ = sys::random(SYSTEM, &mut b);
-    b
+/// Entropy carried across boots (`random_seed` in AriFS), mixed with the
+/// kernel generator: a laptop without `rdrand` has little entropy at boot,
+/// so every boot adds to what the previous ones gathered.
+struct Entropy {
+    state: [u8; 32],
+    counter: u64,
+}
+
+impl Entropy {
+    fn load(fs: &mut FsClient) -> Self {
+        let mut h = aricode_crypto::sha256::Sha256::new();
+        if let Some(saved) = read_file(fs, SEED_FILE) {
+            h.update(&saved);
+        }
+        let mut fresh = [0u8; 32];
+        let _ = sys::random(SYSTEM, &mut fresh);
+        h.update(&fresh);
+        h.update(&sys::time::uptime_us(SYSTEM).unwrap_or(0).to_le_bytes());
+        let state = h.finish();
+        let e = Self { state, counter: 0 };
+        // Save a successor for the next boot (never the state in use).
+        let next = e.derive(b"next boot");
+        let mut hex = [0u8; 65];
+        let n = aricode_crypto::hex(&next, &mut hex[..64]).len();
+        hex[n] = b'\n';
+        write_file(fs, SEED_FILE, &hex[..n + 1]);
+        e
+    }
+
+    fn derive(&self, label: &[u8]) -> [u8; 32] {
+        let mut h = aricode_crypto::sha256::Sha256::new();
+        h.update(&self.state);
+        h.update(label);
+        h.update(&self.counter.to_le_bytes());
+        h.finish()
+    }
+
+    /// Fresh 32 bytes: state, kernel randomness and a counter.
+    fn next(&mut self) -> [u8; 32] {
+        let mut fresh = [0u8; 32];
+        let _ = sys::random(SYSTEM, &mut fresh);
+        self.counter += 1;
+        let mut h = aricode_crypto::sha256::Sha256::new();
+        h.update(&self.derive(b"fresh"));
+        h.update(&fresh);
+        self.state = h.finish();
+        self.derive(b"output")
+    }
+}
+
+fn write_file(fs: &mut FsClient, name: &str, data: &[u8]) -> bool {
+    fs.open(name)
+        .or_else(|_| fs.create(name))
+        .ok()
+        .and_then(|fd| {
+            let r = fs.replace(fd, data).ok();
+            let _ = fs.close(fd);
+            r
+        })
+        .is_some()
 }
 
 fn read_file(fs: &mut FsClient, name: &str) -> Option<Vec<u8>> {
@@ -60,7 +122,7 @@ fn read_file(fs: &mut FsClient, name: &str) -> Option<Vec<u8>> {
 }
 
 /// The host key seed: read from AriFS, or created and saved on first start.
-fn host_key(fs: &mut FsClient) -> [u8; 32] {
+fn host_key(fs: &mut FsClient, entropy: &mut Entropy) -> [u8; 32] {
     if let Some(text) = read_file(fs, HOST_KEY_FILE) {
         let mut seed = [0u8; 32];
         if aricode_crypto::unhex(core::str::from_utf8(&text).unwrap_or("").trim(), &mut seed)
@@ -70,20 +132,11 @@ fn host_key(fs: &mut FsClient) -> [u8; 32] {
         }
         say(b"host key file is invalid; generating a new one");
     }
-    let seed = random32();
+    let seed = entropy.next();
     let mut hex = [0u8; 65];
-    let text = aricode_crypto::hex(&seed, &mut hex[..64]).len();
-    hex[text] = b'\n';
-    let saved = fs
-        .open(HOST_KEY_FILE)
-        .or_else(|_| fs.create(HOST_KEY_FILE))
-        .ok()
-        .and_then(|fd| {
-            let r = fs.replace(fd, &hex[..text + 1]).ok();
-            let _ = fs.close(fd);
-            r
-        });
-    say(if saved.is_some() {
+    let n = aricode_crypto::hex(&seed, &mut hex[..64]).len();
+    hex[n] = b'\n';
+    say(if write_file(fs, HOST_KEY_FILE, &hex[..n + 1]) {
         b"new host key generated and saved"
     } else {
         b"new host key generated (could not save it: it changes on every boot)"
@@ -142,8 +195,15 @@ fn send(net: &mut NetClient, sock: u16, out: &mut Vec<u8>) -> bool {
     ok
 }
 
-fn serve(net: &mut NetClient, sock: u16, seed: [u8; 32], authorized: Vec<[u8; 32]>) {
-    let mut server = Server::new(seed, random32(), authorized);
+fn serve(
+    net: &mut NetClient,
+    sock: u16,
+    peer: [u8; 4],
+    seed: [u8; 32],
+    rng: [u8; 32],
+    authorized: Vec<[u8; 32]>,
+) {
+    let mut server = Server::new(seed, rng, authorized);
     let mut out = Vec::new();
     server.start(&mut out);
     if !send(net, sock, &mut out) {
@@ -164,7 +224,16 @@ fn serve(net: &mut NetClient, sock: u16, seed: [u8; 32], authorized: Vec<[u8; 32
                         Event::Authenticated { user } => {
                             sys::print(b"sshd: user '");
                             sys::print(user.as_bytes());
-                            sys::print(b"' authenticated\n");
+                            sys::print(b"' authenticated from ");
+                            print_ip(peer);
+                            sys::print(b"\n");
+                        }
+                        Event::AuthFailed { user } => {
+                            sys::print(b"sshd: refused key for '");
+                            sys::print(user.as_bytes());
+                            sys::print(b"' from ");
+                            print_ip(peer);
+                            sys::print(b"\n");
                         }
                         Event::Shell { .. } | Event::Exec { .. } if session.is_some() => {}
                         Event::Shell { .. } => match open_session(session::Kind::Shell) {
@@ -244,36 +313,8 @@ fn serve(net: &mut NetClient, sock: u16, seed: [u8; 32], authorized: Vec<[u8; 32
     }
 }
 
-fn main(_arg: u64) -> u64 {
-    let Ok(mut fs) = FsClient::new(FS, HW) else {
-        say(b"no file client");
-        return 1;
-    };
-    let Ok(mut net) = NetClient::new(NET, HW) else {
-        say(b"no network client");
-        return 2;
-    };
-    let seed = host_key(&mut fs);
-    let listener = match net.tcp_listen(PORT) {
-        Ok(l) => l,
-        Err(_) => {
-            say(b"cannot listen on port 22");
-            return 3;
-        }
-    };
-    let keys = read_file(&mut fs, AUTHORIZED_KEYS)
-        .map(|t| parse_authorized_keys(&t))
-        .unwrap_or_default();
-    let mut b = [0u8; 20];
-    sys::print(b"sshd: listening on port 22, host key ");
-    sys::print(fingerprint(&aricode_crypto::ed25519::public_key(&seed)).as_bytes());
-    sys::print(b", ");
-    sys::print(aricode_rt::fmt_u64(keys.len() as u64, &mut b));
-    sys::print(b" authorized key(s)\n");
-    if keys.is_empty() {
-        say(b"no keys in authorized_keys: every login will be refused");
-    }
-    // Tell init we are up, so it can start the console shell.
+fn ready() {
+    // Tell init we are up (listening or not), so it starts the console shell.
     let _ = sys::ipc_send(
         SESSIONS,
         &session::Request {
@@ -283,22 +324,74 @@ fn main(_arg: u64) -> u64 {
         &[],
         1000,
     );
+}
+
+fn authorized(fs: &mut FsClient) -> Vec<[u8; 32]> {
+    read_file(fs, AUTHORIZED_KEYS)
+        .map(|t| parse_authorized_keys(&t))
+        .unwrap_or_default()
+}
+
+fn main(_arg: u64) -> u64 {
+    let Ok(mut fs) = FsClient::new(FS, HW) else {
+        say(b"no file client");
+        return 1;
+    };
+    let Ok(mut net) = NetClient::new(NET, HW) else {
+        say(b"no network client");
+        return 2;
+    };
+    let mut entropy = Entropy::load(&mut fs);
+    let keys = authorized(&mut fs);
+    if keys.is_empty() {
+        say(b"no authorized_keys in AriFS: not listening (install a key with cargo xtask usb-image --authorized-key)");
+        ready();
+        // Stay resident doing nothing: init keeps the session endpoint.
+        loop {
+            sys::time::sleep_ms(3_600_000);
+        }
+    }
+    let seed = host_key(&mut fs, &mut entropy);
+    let listener = match net.tcp_listen(PORT) {
+        Ok(l) => l,
+        Err(_) => {
+            say(b"cannot listen on port 22");
+            ready();
+            return 3;
+        }
+    };
+    let mut b = [0u8; 20];
+    sys::print(b"sshd: listening on port 22, host key ");
+    sys::print(fingerprint(&aricode_crypto::ed25519::public_key(&seed)).as_bytes());
+    sys::print(b", ");
+    sys::print(aricode_rt::fmt_u64(keys.len() as u64, &mut b));
+    sys::print(b" authorized key(s)\n");
+    ready();
     loop {
         let (sock, peer, _) = match net.tcp_accept(listener, 60_000) {
             Ok(c) => c,
             Err(_) => continue,
         };
-        let mut ip = [0u8; 15];
         sys::print(b"sshd: connection from ");
-        sys::print(aricode_net_format(peer, &mut ip));
+        print_ip(peer);
         sys::print(b"\n");
-        let keys = read_file(&mut fs, AUTHORIZED_KEYS)
-            .map(|t| parse_authorized_keys(&t))
-            .unwrap_or_default();
-        serve(&mut net, sock, seed, keys);
+        let keys = authorized(&mut fs);
+        if keys.is_empty() {
+            // authorized_keys removed while running: refuse everything.
+            say(b"authorized_keys is empty now: connection refused");
+            let _ = net.tcp_close(sock);
+            continue;
+        }
+        let rng = entropy.next();
+        serve(&mut net, sock, peer, seed, rng, keys);
         let _ = net.tcp_close(sock);
         say(b"connection closed");
     }
+}
+
+fn print_ip(ip: [u8; 4]) {
+    let mut b = [0u8; 15];
+    sys::print(aricode_net_format(ip, &mut b));
 }
 
 /// Dotted quad without pulling in the network library.

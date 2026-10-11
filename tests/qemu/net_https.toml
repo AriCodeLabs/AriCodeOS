@@ -20,9 +20,10 @@ stdin = [
 exit = 33
 serial_contains = [
     "rtc: 20",
+    "sshd: no authorized_keys in AriFS: not listening",
     "HTTP 200,",
     "s_server -www",
     "http: TLS: certificate signed by an unknown authority",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "http: invalid response"]
+serial_absent = ["KERNEL PANIC", "http: invalid response", "sshd: listening"]

@@ -370,6 +370,15 @@ pub fn build_usb_image(
         }
         extra.push((String::from("authorized_keys"), text));
         println!("[xtask] authorized_keys from {}", key.display());
+        // Host key made here with the host's randomness (a laptop without
+        // rdrand has little entropy on its first boot); kept in build/ so
+        // rebuilt images keep the fingerprint.
+        let (seed, hex) = ssh_host_key(&crate::build_dir().join("ssh_host_ed25519_key"))?;
+        extra.push((String::from("ssh_host_ed25519_key"), hex));
+        println!(
+            "[xtask] SSH host key {} (build/ssh_host_ed25519_key)",
+            aricode_ssh::fingerprint(&aricode_crypto::ed25519::public_key(&seed))
+        );
     }
     let out = crate::build_dir().join("aricodeos-usb.img");
     write_usb_image(&out, &esp, &extra)?;
@@ -860,4 +869,25 @@ mod tests {
     }
 
     const E_PHOFF_TEST: usize = 32;
+}
+
+/// The SSH host key seed at `path` (hex, one line), created from
+/// `/dev/urandom` if missing. Returns the seed and the file's bytes.
+fn ssh_host_key(path: &Path) -> Result<([u8; 32], Vec<u8>)> {
+    let mut seed = [0u8; 32];
+    if let Ok(text) = fs::read_to_string(path) {
+        if aricode_crypto::unhex(text.trim(), &mut seed).is_some() {
+            return Ok((seed, text.into_bytes()));
+        }
+        return Err(format!("{}: not a 64-digit hex seed", path.display()));
+    }
+    use std::io::Read;
+    io(
+        fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut seed)),
+        "read /dev/urandom",
+    )?;
+    let mut hex = [0u8; 64];
+    let text = format!("{}\n", aricode_crypto::hex(&seed, &mut hex));
+    io(fs::write(path, &text), "write the SSH host key")?;
+    Ok((seed, text.into_bytes()))
 }

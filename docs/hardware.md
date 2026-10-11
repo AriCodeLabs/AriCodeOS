@@ -175,5 +175,11 @@ ssh ari@192.168.1.24 diag       # a single command
 ```
 
 The first connection asks to confirm the host key: compare it with the
-`SHA256:` fingerprint on the laptop's screen. One connection at a time;
-output of programs started with `run` still appears on the laptop's screen.
+`SHA256:` fingerprint printed by `usb-image` (the key is generated on this
+machine and kept in `build/ssh_host_ed25519_key`) and shown on the laptop's
+screen. One connection at a time; output of programs started with `run`
+still appears on the laptop's screen.
+
+Without `--authorized-key` the image has no `authorized_keys` and sshd does
+not listen: no port is open. Refused keys are logged on the laptop with the
+peer's address.
