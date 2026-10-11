@@ -45,6 +45,17 @@ pub fn block(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> [u8; 64] {
 
 /// Deterministic generator: consecutive ChaCha20 blocks over a seed key;
 /// `reseed` mixes fresh entropy into the key.
+/// XORs `data` with the keystream for (`key`, `nonce`) starting at block
+/// `counter` (encryption and decryption are the same operation).
+pub fn xor_keystream(key: &[u8; 32], nonce: &[u8; 12], counter: u32, data: &mut [u8]) {
+    for (i, chunk) in data.chunks_mut(64).enumerate() {
+        let ks = block(key, nonce, counter.wrapping_add(i as u32));
+        for (b, k) in chunk.iter_mut().zip(ks.iter()) {
+            *b ^= k;
+        }
+    }
+}
+
 pub struct Rng {
     key: [u8; 32],
     nonce: [u8; 12],

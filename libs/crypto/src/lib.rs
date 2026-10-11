@@ -4,17 +4,25 @@
 //!
 //! - [`sha256`] and [`sha512`]: image and message hashes.
 //! - [`ed25519`]: manifest signatures (the private key only lives on the host).
-//! - [`chacha20`]: deterministic generator for the kernel RNG.
+//! - [`chacha20`]: deterministic generator for the kernel RNG and the SSH
+//!   stream cipher.
+//! - [`x25519`] (RFC 7748), [`poly1305`] (RFC 8439) and [`ssh_chachapoly`]
+//!   (`chacha20-poly1305@openssh.com`): the SSH transport (ADR 0025).
 //!
-//! Ed25519 operations are not constant time: the system only verifies
-//! signatures with public keys; signing is the host's job (xtask).
+//! Ed25519 operations are not constant time; they verify signatures and,
+//! for the SSH host key, sign with a key that lives on the device. X25519
+//! uses a constant-time ladder because its scalar is the ephemeral secret.
 
 #![no_std]
 
 pub mod chacha20;
 pub mod ed25519;
+mod field25519;
+pub mod poly1305;
 pub mod sha256;
 pub mod sha512;
+pub mod ssh_chachapoly;
+pub mod x25519;
 
 /// Equality comparison without short-circuit (for tags and signatures).
 pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
