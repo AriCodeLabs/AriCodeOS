@@ -1,6 +1,6 @@
 # Incident 0001: USB stick bulk transfers fail with transaction errors
 
-- **Opened:** 2026-10-12. **Status:** open; driver fixes merged (`develop` 9bd36e8), root cause awaiting the laptop dump.
+- **Opened:** 2026-10-12. **Status:** cause established 2026-10-13 (slow write confirmation of the stick versus our command timeouts); fix in progress.
 - **Hardware:** ASUS laptop, Intel 7 series chipset, xHCI 8086:1e31 (MSI,
   16 scratchpads, Intel port routing), no IOMMU, 4 CPUs, 3981 MiB. Boot
   stick "USB Disk 3.0", 30433280 sectors, rejects `SYNCHRONIZE CACHE`.
@@ -477,3 +477,42 @@ Reading:
 - To confirm on the host: time the writes of the same region from Linux
   (`dd` with `oflag=direct` in 8 KiB chunks, watching per-write latency
   and the kernel log).
+
+## Host-side measurement (2026-10-13, Linux, same stick)
+
+Linux drives the stick with `usb-storage` at SuperSpeed (no UAS), write
+cache disabled. Writing the `UPDATE` region (2.3 MiB) in 8 KiB chunks
+with O_DIRECT and `fdatasync` per chunk, then reading it back:
+
+| Pass | Write time | Chunks slower than 200 ms | Slowest chunk | Read-back |
+|---|---|---|---|---|
+| 1 | 3.6 s | 3 (LBAs 191808, 191824 and one more) | 1458 ms | intact |
+| 2 | 0.6 s | 0 | - | intact |
+| 3 | 0.6 s | 0 | - | intact |
+| whole partition, 12 MiB | 1.0 s | 0 | - | intact |
+
+No kernel message, no error, no data loss. The stick simply takes up to
+seconds to confirm some writes (NAND housekeeping), invisible under
+Linux's 30 s per-command timeout.
+
+## Cause
+
+The stick (Innostor IS918, 1f75:0918) occasionally confirms a WRITE
+seconds after accepting its data. Our driver declared the command dead
+after 1 s (old CSW timeout) or 3 s (current), stopped the endpoint, and
+the old driver then sent the next CBW to a device still busy, which
+produced the USB transaction errors (code 4) and, after a Bulk-Only
+reset issued to a busy device, a device that stopped answering. The
+transfer path and the laptop's controller are not at fault; the endpoint
+recovery merged on 2026-10-12 is correct and necessary but does not
+remove the trigger.
+
+## Fix (specification-based)
+
+The Bulk-Only Transport specifies no timeout; SCSI stacks use a
+per-command timeout of 30 s (Linux `sd`). READ/WRITE get a 30 s command
+timeout covering data and CSW (CBW 1 s), the request budget and the
+chain of client waits follow (block client and file client waits raised
+accordingly), and the strict-mode scenarios adapt their timeouts. A
+post-write quiet period is not needed: the device signals readiness by
+returning the CSW.
