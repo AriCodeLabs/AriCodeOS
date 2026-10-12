@@ -12,6 +12,7 @@ extern crate alloc;
 
 mod acpi;
 mod arch;
+mod boot_args;
 mod console;
 mod console_input;
 mod cpu;
@@ -152,6 +153,7 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     let cmdline = CmdLine::new(unsafe { info.cmdline() });
     debug!("kernel_main on stack {:#x}", memory::vmm::KERNEL_STACK_TOP);
     memory::heap::init();
+    boot_args::set(cmdline.raw());
 
     acpi::init(info);
     arch::x86_64::pic::disable();

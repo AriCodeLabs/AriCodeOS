@@ -183,6 +183,9 @@ pub mod nr {
     /// input ring (console bridge, ADR 0013); bytes that do not fit are
     /// dropped and counted.
     pub const CONSOLE_INJECT: u64 = 29;
+    /// `event_record(code, name_ptr, name_len)`: a `Fault` event in the
+    /// kernel ring for the calling process (ADR 0028).
+    pub const EVENT_RECORD: u64 = 33;
     /// `process_spawn_from(spawner, req_ptr, arg, handles_ptr, limits) -> handle`;
     /// like `PROCESS_SPAWN` with the ELF in a caller DMA buffer described
     /// by [`spawn_from::Request`] (programs installed outside the initrd,
@@ -310,6 +313,9 @@ pub mod sysinfo {
     /// One `u64`: Unix seconds from the CMOS real-time clock (read at boot,
     /// advanced with the uptime); 0 if the RTC could not be read.
     pub const WALLCLOCK: u64 = 10;
+    /// The kernel command line as given by the loader (UTF-8 bytes): any
+    /// program can read boot flags such as `strict` (ADR 0028).
+    pub const CMDLINE: u64 = 11;
 
     /// Event class of the kernel ring.
     #[repr(u8)]
@@ -326,6 +332,9 @@ pub mod sysinfo {
         DmaFault = 4,
         /// `pid`, `name`, `code` = bytes requested above the quota.
         DmaQuota = 5,
+        /// Reported by a program with `event_record` (ADR 0028): `pid`,
+        /// `name` = what failed, `code` = its reason code.
+        Fault = 6,
     }
 
     impl EventKind {
@@ -336,6 +345,7 @@ pub mod sysinfo {
                 3 => Self::ProcessKilled,
                 4 => Self::DmaFault,
                 5 => Self::DmaQuota,
+                6 => Self::Fault,
                 _ => Self::None,
             }
         }

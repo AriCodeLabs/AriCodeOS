@@ -84,6 +84,13 @@ pub mod keys {
     pub const SMP: &str = "smp";
     /// `iommu=off`: do not enable DMA translation (real hardware).
     pub const IOMMU: &str = "iommu";
+    /// Failure protocol (ADR 0028): a component halts on its first
+    /// unexpected failure and init restarts nothing.
+    pub const STRICT: &str = "strict";
+    /// Tests only (`usb_fault=N` or `usb_fault=idle`): the USB storage driver
+    /// treats its N-th block request, or the first one after two idle
+    /// seconds, as a transport failure.
+    pub const USB_FAULT: &str = "usb_fault";
 }
 
 #[cfg(test)]

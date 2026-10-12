@@ -104,3 +104,10 @@ docs: ADR 0007 on the IDT format
 ```
 
 Commit messages are written in English. (The older history is in Spanish.)
+
+## Failures
+
+Anything that goes wrong follows `docs/FAILURE-PROTOCOL.md` (ADR 0028):
+record it in `docs/incidents/`, instrument with `strict`, study it from
+several angles before changing code, fix with a test, audit, close.
+Workarounds are bounded, counted and visible in `diag`.

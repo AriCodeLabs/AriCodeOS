@@ -182,6 +182,13 @@ enum Decoder {
 }
 
 struct Controller {
+    /// `strict` boot flag: halt on the first transport failure.
+    strict: bool,
+    /// `usb_fault=N|idle` (tests): an injected transport failure on the
+    /// N-th block request, or on the first one after two idle seconds.
+    fault_inject: FaultInject,
+    /// Last block request (ms), for `usb_fault=idle`.
+    last_request_ms: u64,
     base: Mmio,
     op: Mmio,
     runtime: Mmio,
@@ -243,6 +250,8 @@ mod exit {
     pub const DMA: u64 = 12;
     pub const RESET_TIMEOUT: u64 = 13;
     pub const START_TIMEOUT: u64 = 14;
+    /// `strict`: a transport failure halted the driver (ADR 0028).
+    pub const TRANSPORT_FAULT: u64 = 15;
 }
 
 impl Controller {
@@ -337,6 +346,9 @@ impl Controller {
             .ok_or(exit::START_TIMEOUT)?;
 
         Ok(Self {
+            strict: false,
+            fault_inject: FaultInject::None,
+            last_request_ms: 0,
             base,
             op,
             runtime,
@@ -962,6 +974,62 @@ impl Controller {
         scsi::Sense::parse(unsafe { core::slice::from_raw_parts(virt as *const u8, 64) })
     }
 
+    /// A transport failure as a kernel fault event: `usb r|w lba N` with the
+    /// completion code (`diag` shows it; `usb_fault` injections say so).
+    fn record_fault(&self, write: bool, lba: u64, code: u8, injected: bool) {
+        let mut name = [0u8; 24];
+        let prefix: &[u8] = match (write, injected) {
+            (false, false) => b"usb read lba ",
+            (true, false) => b"usb write lba ",
+            (false, true) => b"usb inj read lba ",
+            (true, true) => b"usb inj write lba ",
+        };
+        name[..prefix.len()].copy_from_slice(prefix);
+        let mut digits = [0u8; 20];
+        let d = aricode_rt::fmt_u64(lba, &mut digits);
+        let n = (prefix.len() + d.len()).min(name.len());
+        name[prefix.len()..n].copy_from_slice(&d[..n - prefix.len()]);
+        if let Ok(text) = core::str::from_utf8(&name[..n]) {
+            let _ = sys::event_record(code as u64, text);
+        }
+    }
+
+    /// `strict` (ADR 0028): dump what a transport failure looked like and
+    /// stop; init does not restart the driver, the state stays inspectable.
+    fn halt(&mut self, write: bool, lba: u64, count: u16, code: u8, attempt: usize) -> ! {
+        sys::print(b"usb-input: strict: halting on a transport failure\n");
+        sys::print(b"  command   ");
+        sys::print(if write { b"WRITE(10)" } else { b"READ(10)" });
+        sys::print(b" lba ");
+        num(lba);
+        sys::print(b" count ");
+        num(count as u64);
+        sys::print(b"\n  completion code ");
+        num(code as u64);
+        sys::print(b" attempt ");
+        num(attempt as u64);
+        if let Some(st) = self.storage.as_ref() {
+            sys::print(b"\n  slot ");
+            num(st.slot as u64);
+            sys::print(b" bulk in dci ");
+            num(st.bulk_in.dci as u64);
+            sys::print(b" enqueue ");
+            num(st.bulk_in.ring.state.enqueue as u64);
+            sys::print(b" cycle ");
+            num(st.bulk_in.ring.state.cycle as u64);
+            sys::print(b"; bulk out dci ");
+            num(st.bulk_out.dci as u64);
+            sys::print(b" enqueue ");
+            num(st.bulk_out.ring.state.enqueue as u64);
+            sys::print(b" cycle ");
+            num(st.bulk_out.ring.state.cycle as u64);
+            sys::print(b"; tag ");
+            num(st.tag as u64);
+        }
+        sys::print(b"\n");
+        sys::process_exit(exit::TRANSPORT_FAULT)
+    }
+
     /// Reset Recovery (BOT 5.3.4) after a failed transfer: Bulk-Only Mass
     /// Storage Reset, then both bulk pipes unhalted. Some sticks answer the
     /// first commands after a write with transaction errors; this puts the
@@ -979,9 +1047,9 @@ impl Controller {
     /// Reads or writes `count` sectors in the client's DMA buffer. A
     /// rejection due to unit attention is retried once. A transport failure
     /// (a stick that stops answering for a moment, typically right after a
-    /// write) is retried after growing pauses; a Reset Recovery is only
-    /// tried once the pauses did not help, since some sticks take long to
-    /// come back from it.
+    /// write) is retried after growing pauses; a Reset Recovery is the last
+    /// resort, after every pause, since some sticks never come back from
+    /// it.
     fn block_io(&mut self, write: bool, lba: u64, count: u16, phys: u64) -> bool {
         let Ok(lba32) = u32::try_from(lba) else {
             return false;
@@ -992,10 +1060,19 @@ impl Controller {
             scsi::read10(lba32, count)
         };
         let name: &[u8] = if write { b"WRITE(10)" } else { b"READ(10)" };
-        const PAUSES_MS: [u64; 5] = [50, 200, 500, 1000, 2000];
+        const PAUSES_MS: [u64; 6] = [50, 200, 500, 1000, 2000, 3000];
         let mut transport_failures = 0;
-        for _ in 0..7 {
-            match self.scsi(cdb, Some((phys, count as u32 * 512, !write))) {
+        let now = self.clock.now();
+        let injected_now = self.fault_inject.due(now, self.last_request_ms);
+        self.last_request_ms = now;
+        for attempt in 0..8 {
+            let injected = injected_now && attempt == 0;
+            let result = if injected {
+                Err(ScsiFail::Transport(completion::USB_TRANSACTION_ERROR))
+            } else {
+                self.scsi(cdb, Some((phys, count as u32 * 512, !write)))
+            };
+            match result {
                 Ok(()) => {
                     if transport_failures > 0 {
                         say(b"transfer recovered");
@@ -1010,6 +1087,12 @@ impl Controller {
                     }
                 }
                 Err(ScsiFail::Transport(code)) => {
+                    // Never hidden: every failed transfer is an event
+                    // (ADR 0028), retried or not.
+                    self.record_fault(write, lba, code, injected);
+                    if self.strict {
+                        self.halt(write, lba, count, code, transport_failures);
+                    }
                     if transport_failures >= PAUSES_MS.len() {
                         self.report_error(name, lba, None);
                         return false;
@@ -1021,11 +1104,11 @@ impl Controller {
                     sys::print(b"), retry in ");
                     num(pause);
                     sys::print(b" ms\n");
-                    if transport_failures == 3 {
-                        say(b"reset recovery");
+                    sys::time::sleep_ms(pause);
+                    if transport_failures == PAUSES_MS.len() {
+                        say(b"reset recovery (last resort)");
                         self.reset_recovery();
                     }
-                    sys::time::sleep_ms(pause);
                 }
             }
         }
@@ -1352,10 +1435,70 @@ fn device_name(ctl: &Controller) -> &'static str {
     }
 }
 
+/// Test fault injection (`usb_fault`, ADR 0028).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FaultInject {
+    None,
+    /// Block requests left before the injected failure.
+    Count(u32),
+    /// The first block request after two idle seconds (once).
+    AfterIdle,
+}
+
+impl FaultInject {
+    const IDLE_MS: u64 = 2000;
+
+    fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("idle") => Self::AfterIdle,
+            Some(n) => n.parse().map_or(Self::None, Self::Count),
+            None => Self::None,
+        }
+    }
+
+    /// Whether this request fails; advances the state.
+    fn due(&mut self, now: u64, last_request_ms: u64) -> bool {
+        match *self {
+            Self::None => false,
+            Self::Count(1) => {
+                *self = Self::None;
+                true
+            }
+            Self::Count(n) => {
+                *self = Self::Count(n - 1);
+                false
+            }
+            Self::AfterIdle if last_request_ms > 0 && now - last_request_ms >= Self::IDLE_MS => {
+                *self = Self::None;
+                true
+            }
+            Self::AfterIdle => false,
+        }
+    }
+}
+
 fn main(mask: u64) -> u64 {
     let clock = Clock(extra_handle(mask, 0));
+    let mut args = [0u8; 256];
+    let (strict, fault_inject) = match sys::cmdline(clock.0, &mut args) {
+        Some(text) => {
+            let c = aricode_cmdline::CmdLine::new(text);
+            (
+                c.has(aricode_cmdline::keys::STRICT),
+                FaultInject::parse(c.get(aricode_cmdline::keys::USB_FAULT)),
+            )
+        }
+        None => (false, FaultInject::None),
+    };
     let mut ctl = match Controller::open(mask, clock) {
-        Ok(c) => c,
+        Ok(mut c) => {
+            c.strict = strict;
+            c.fault_inject = fault_inject;
+            if strict {
+                say(b"strict mode: the first transport failure halts the driver");
+            }
+            c
+        }
         Err(exit::NOT_XHCI) => {
             say(b"the controller is not xHCI; skipping");
             return 0;

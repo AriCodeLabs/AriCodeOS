@@ -163,6 +163,8 @@ pub mod trb_type {
 pub mod completion {
     pub const SUCCESS: u8 = 1;
     /// The endpoint answered STALL (it stays halted until Reset Endpoint).
+    /// The device did not answer or answered badly on the bus.
+    pub const USB_TRANSACTION_ERROR: u8 = 4;
     pub const STALL: u8 = 6;
     pub const SHORT_PACKET: u8 = 13;
 }

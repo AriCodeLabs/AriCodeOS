@@ -407,12 +407,6 @@ fn main(_arg: u64) -> u64 {
         sys::print(b"sshd: connection from ");
         print_ip(peer);
         sys::print(b"\n");
-        // Reread per connection so a key added or removed from the console
-        // counts; a read that fails keeps the last keys read successfully.
-        match authorized(&mut fs) {
-            Some(k) => keys = k,
-            None => say(b"cannot reread authorized_keys; keeping the last keys read"),
-        }
         if keys.is_empty() {
             // authorized_keys emptied while running: refuse everything.
             say(b"authorized_keys is empty now: connection refused");
@@ -423,6 +417,13 @@ fn main(_arg: u64) -> u64 {
         serve(&mut net, sock, peer, seed, rng, keys.clone());
         let _ = net.tcp_close(sock);
         say(b"connection closed");
+        // Reread between connections so a key added or removed from the
+        // console counts, without delaying the next client's banner behind
+        // a slow disk; a read that fails keeps the last keys read.
+        match authorized(&mut fs) {
+            Some(k) => keys = k,
+            None => say(b"cannot reread authorized_keys; keeping the last keys read"),
+        }
     }
 }
 
