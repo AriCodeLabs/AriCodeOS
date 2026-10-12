@@ -411,3 +411,29 @@ Decisive next check, independent of our driver: a read-write test of
 that sector range on the development machine (`badblocks -w` over the
 `UPDATE` partition, scratch space) and the same download on a second
 stick.
+
+## Second laptop run with `strict` (2026-10-12 14:03, develop 06fc219)
+
+Same sequence. The short write/read commands pass again; `update` fails
+again at the same place:
+
+```
+[53.457 s] fault reported by process 7: usb sense fail (code 0)
+[53.502 s] fault reported by process 7: usb w lba 188433 (code 0)
+[53.946 s] process 7 'usb_input' exited with code 15
+```
+
+- WRITE(10) at LBA 188433, count 16, again: the second 8 KiB chunk of the
+  `UPDATE` partition (header sector 188416 zeroed first, data from
+  188417). Deterministic across two boots.
+- Completion code 0 (no event within the timeout) and then REQUEST SENSE
+  itself got no answer: after that write the device answers nothing.
+- Earlier the same day the old driver had downloaded versions 4 and 5
+  into the same partition (its console output was not seen; it may have
+  retried silently).
+
+Decision: test the stick's flash at those addresses from Linux on the
+host, independently of our driver (write and read back a 2.3 MiB
+pattern at sector 188416 and watch the kernel log). If Linux sees the
+same stall or errors, the stick is the cause; if not, the difference is
+in our transfer (SuperSpeed sequencing, write pattern, timing).
