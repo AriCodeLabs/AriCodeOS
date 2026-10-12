@@ -17,6 +17,8 @@ stdin = ["ls", "write notas.txt hola usb", "cat notas.txt", "reboot"]
 exit = 0
 serial_contains = [
     "AriInit: no virtio-blk",
+    "usb-input: storage device 46f4:0001 bcdUSB ",
+    "speed 4 (super)",
     "usb-input: USB storage on port",
     "usb-input: device ready: USB HID (no devices)",
     "AriInit: block service via USB (",
