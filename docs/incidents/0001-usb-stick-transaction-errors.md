@@ -320,3 +320,36 @@ write-then-read sequence; the first transport failure halts the driver
 with the full dump, which the decision table of study A reads. The A/B
 with the fc846ae image (built, in a separate worktree) follows if the
 dump does not settle the trigger.
+
+## Laptop run with the merged driver and `strict` (2026-10-12, develop 9bd36e8)
+
+Sequence driven over SSH at machine speed: `write p1.txt`, `cat p1.txt`,
+`write p2.txt`, `cat p2.txt`, `write p3.txt`, `cat p3.txt`, `update
+check`: no failure. Then `update` (download of the 2.3 MiB channel image
+into `UPDATE`): the host server's write to the laptop stalled after
+30 s, and the laptop's `diag`, fetched over SSH afterwards, shows:
+
+```
+[102.922 s] fault reported by process 7: usb w lba 188433 (code 0)
+[103.277 s] process 7 'usb_input' exited with code 15
+usb_input  failed  1  1  code 15  (optional)   <- strict: not restarted
+```
+
+- The failing command is a WRITE at LBA 188433, the second chunk of the
+  `UPDATE` partition (which starts at 188416): early in a run of
+  sequential 8 KiB writes.
+- Completion code 0: no Transfer Event within the stage timeout (5 s data
+  or 3 s CSW), not a transaction error (4). The device stopped answering
+  entirely (NAK or silence) rather than failing handshakes.
+- The system stayed up: network, sshd, fsd and the shell alive; the
+  updater exited with 23 once the file client's wait expired.
+- Observed cost of the design: each SSH connection rereads
+  `authorized_keys` between connections and waits for the dead file
+  service (45 s), so the SSH banner is delayed and short client timeouts
+  fail; `diag` was obtained with a 170 s connect timeout. Follow-up:
+  sshd should skip the reread while the file service is failing (keep
+  the last keys, retry at most once a minute with a short wait).
+
+The console shows the `strict` halt dump (stage, direction, endpoint
+states, PORTSC, USBSTS) for this failure; it is transcribed below when
+photographed.
