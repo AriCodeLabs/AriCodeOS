@@ -84,6 +84,7 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         nr::PROCESS_KILL => process_kill(h),
         nr::CONSOLE_READ => console_read(h, frame.rsi, frame.rdx, frame.r10),
         nr::CONSOLE_INJECT => console_inject(h, frame.rsi, frame.rdx),
+        nr::EVENT_RECORD => event_record(h, frame.rsi, frame.rdx),
         nr::SYSTEM_INFO => system_info(h, frame.rsi, frame.rdx, frame.r10),
         nr::SYSTEM_POWER => system_power(h, frame.rsi),
         nr::INITRD_READ => initrd_read(h, frame.rsi, frame.rdx, frame.r10, frame.r8),
@@ -202,6 +203,7 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
         sysinfo::UPTIME => crate::time::uptime_ms().to_le_bytes().to_vec(),
         sysinfo::UPTIME_US => crate::time::uptime_us().to_le_bytes().to_vec(),
         sysinfo::WALLCLOCK => crate::rtc::unix_now().to_le_bytes().to_vec(),
+        sysinfo::CMDLINE => crate::boot_args::get().into_bytes(),
         sysinfo::EVENTS => {
             let max = (len as usize) / sysinfo::EventEntry::LEN;
             crate::events::recent(max)
@@ -636,6 +638,25 @@ fn mmio_map(h: Handle) -> Result<u64, Error> {
         }
     }
     Ok(virt)
+}
+
+/// `event_record(code, name_ptr, name_len)` (ADR 0028): a `Fault` event
+/// for the calling process. `h` carries the reason code (the first
+/// argument slot), `name` is at most `EVENT_NAME_LEN` bytes.
+fn event_record(code: Handle, name_ptr: u64, name_len: u64) -> Result<u64, Error> {
+    if name_len == 0 || name_len > aricode_abi::sysinfo::EVENT_NAME_LEN as u64 {
+        return Err(Error::Invalid);
+    }
+    let raw = process::copy_from_user(name_ptr, name_len)?;
+    let name = core::str::from_utf8(&raw).map_err(|_| Error::Invalid)?;
+    let pid = process::current_pid().map_or(0, |p| p.0);
+    crate::events::record(
+        aricode_abi::sysinfo::EventKind::Fault,
+        pid,
+        code.0 as u64,
+        name,
+    );
+    Ok(0)
 }
 
 fn dma_alloc(h: Handle, len: u64) -> Result<u64, Error> {

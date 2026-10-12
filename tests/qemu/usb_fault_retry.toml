@@ -1,0 +1,25 @@
+# Failure protocol (ADR 0028): without `strict`, a transport failure
+# (injected on the first block request after the boot settles (two idle seconds)) is retried after a pause and the
+# transfer recovers, but the failure is never hidden: it is printed and
+# recorded as a fault event that `diag` lists.
+name = "usb.fault_retry"
+description = "usbd: an injected transport failure is retried, recovered, and still recorded in diag"
+level = "full"
+areas = ["usb", "storage", "diag"]
+usb_storage = true
+cmdline = "qemu_exit shell usb_fault=idle"
+timeout_secs = 90
+stdin = ["repeat 10 ping 10.0.2.2", "write probe.txt after idle", "diag", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "usb-input: transfer failed (completion code 4), retry in 50 ms",
+    "usb-input: transfer recovered",
+    "write: 11 bytes to probe.txt",
+    "fault reported by process",
+    "usb inj write lba",
+    "(code 4)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "strict", "transport failure"]

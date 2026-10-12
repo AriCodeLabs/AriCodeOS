@@ -1,0 +1,28 @@
+# Failure protocol (ADR 0028): with `strict`, the USB storage driver halts
+# on its first transport failure (here injected on the first block request after the boot settles (two idle seconds)
+# with `usb_fault=idle`) after dumping its state and recording a fault event;
+# init does not restart it. The system stays up: the shell works and
+# `diag` lists the fault.
+name = "strict.usb_halt"
+description = "strict: an injected USB transport failure halts usbd with a state dump, no restart, fault in diag"
+level = "full"
+areas = ["usb", "storage", "init", "diag"]
+usb_storage = true
+cmdline = "qemu_exit shell strict usb_fault=idle"
+timeout_secs = 90
+stdin = ["repeat 10 ping 10.0.2.2", "write probe.txt after idle", "diag", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: strict mode: a failing service is not restarted",
+    "usb-input: strict mode: the first transport failure halts the driver",
+    "usb-input: strict: halting on a transport failure",
+    "  completion code 4 attempt 0",
+    "AriInit: service usb_input exited; strict mode: not restarted (inspect with diag)",
+    "fault reported by process",
+    "usb inj write lba",
+    "(code 4)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "restart in"]

@@ -459,6 +459,15 @@ fn events() {
                 num(e.code);
                 print(b" bytes");
             }
+            EventKind::Fault => {
+                print(b"fault reported by process ");
+                num(e.pid as u64);
+                print(b": ");
+                print(e.name_str().as_bytes());
+                print(b" (code ");
+                num(e.code);
+                print(b")");
+            }
             EventKind::None => print(b"?"),
         }
         print(b"\n");

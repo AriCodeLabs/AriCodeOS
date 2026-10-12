@@ -497,6 +497,13 @@ const MAX_RESIDENTS: usize = 10;
 /// Supervisor of resident services (stage 1 of the post-roadmap plan):
 /// states, generations, restart with increasing backoff and a budget, and
 /// queryable status (`status` v1) for the shell.
+/// `strict` on the command line (ADR 0028): nothing is restarted.
+static STRICT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+fn strict() -> bool {
+    STRICT.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 struct Supervisor {
     slots: [Option<Resident>; MAX_RESIDENTS],
     count: usize,
@@ -529,6 +536,10 @@ impl Supervisor {
     ) -> Option<usize> {
         if self.count == MAX_RESIDENTS {
             return None;
+        }
+        let mut policy = policy;
+        if strict() {
+            policy.max_restarts = 0;
         }
         let i = self.count;
         self.slots[i] = Some(Resident {
@@ -702,6 +713,7 @@ impl Supervisor {
                 sys::print(aricode_rt::fmt_u64(at.saturating_sub(now), &mut b));
                 sys::print(b" ms\n");
             }
+            _ if strict() => sys::print(b"; strict mode: not restarted (inspect with diag)\n"),
             _ => {
                 sys::print(b"; restart budget exhausted: ");
                 sys::print(if r.sup.is_optional() {
@@ -1680,6 +1692,13 @@ fn run_gui(inputs: &[Handle]) -> Result<Handle, u64> {
 
 fn main(arg: u64) -> u64 {
     say(b"starting");
+    let mut args = [0u8; 256];
+    if sys::cmdline(SYSTEM, &mut args)
+        .is_some_and(|c| aricode_cmdline::CmdLine::new(c).has(aricode_cmdline::keys::STRICT))
+    {
+        STRICT.store(true, core::sync::atomic::Ordering::Relaxed);
+        say(b"strict mode: a failing service is not restarted");
+    }
     let mut fs_service = None;
     let mut block_service = None;
     let mut services = 0u64;

@@ -18,6 +18,7 @@ aricode-rt = { path = "../../sdk/runtime" }
 aricode-manifest = { path = "../../libs/manifest" }
 aricode-proto = { path = "../../sdk/proto" }
 aricode-gpt = { path = "../../libs/gpt" }
+aricode-cmdline = { path = "../../libs/cmdline" }
 aricode-ab = { path = "../../libs/ab" }
 aricode-supervisor = { path = "../../libs/supervisor" }
 aricode-pkg = { path = "../../libs/pkg" }

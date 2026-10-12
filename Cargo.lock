@@ -172,6 +172,7 @@ name = "ari-usb-input"
 version = "0.9.0"
 dependencies = [
  "aricode-build",
+ "aricode-cmdline",
  "aricode-input",
  "aricode-proto",
  "aricode-rt",
@@ -448,6 +449,7 @@ version = "0.9.0"
 dependencies = [
  "aricode-ab",
  "aricode-build",
+ "aricode-cmdline",
  "aricode-crypto",
  "aricode-gpt",
  "aricode-manifest",

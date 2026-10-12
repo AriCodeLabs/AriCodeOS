@@ -355,6 +355,28 @@ pub fn console_inject(console: Handle, bytes: &[u8]) -> Result<usize, Error> {
 }
 
 /// System query (`abi::sysinfo`); returns the bytes written into `buf`.
+/// Records a `Fault` event in the kernel ring for this process (ADR 0028):
+/// `code` is the component's reason code, `name` what failed (at most
+/// `sysinfo::EVENT_NAME_LEN` bytes). `diag` lists it.
+pub fn event_record(code: u64, name: &str) -> Result<(), Error> {
+    abi::decode(raw_syscall(
+        nr::EVENT_RECORD,
+        code,
+        name.as_ptr() as u64,
+        name.len() as u64,
+        0,
+        0,
+        0,
+    ))
+    .map(|_| ())
+}
+
+/// The kernel command line into `buf` (`sysinfo::CMDLINE`), as text.
+pub fn cmdline(system: Handle, buf: &mut [u8]) -> Option<&str> {
+    let n = system_info(system, abi::sysinfo::CMDLINE, buf).ok()?;
+    core::str::from_utf8(&buf[..n]).ok()
+}
+
 pub fn system_info(system: Handle, kind: u64, buf: &mut [u8]) -> Result<usize, Error> {
     abi::decode(raw_syscall(
         nr::SYSTEM_INFO,
