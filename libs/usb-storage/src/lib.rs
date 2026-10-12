@@ -65,9 +65,44 @@ pub mod fault {
 
     /// `prefix` followed by `lba`; `None` if it does not fit `out`.
     pub fn lba_name<'a>(prefix: &str, lba: u64, out: &'a mut [u8; NAME_LEN]) -> Option<&'a str> {
+        if prefix.len() > out.len() {
+            return None;
+        }
+        out[..prefix.len()].copy_from_slice(prefix.as_bytes());
+        let len = put_decimal(out, prefix.len(), lba)?;
+        core::str::from_utf8(&out[..len]).ok()
+    }
+
+    /// The device's own reason for a failed command (`REQUEST SENSE`):
+    /// `usb sense K A Q` with the key in decimal and ASC / ASCQ as two hex
+    /// digits, the SCSI convention (`usb sense 3 11 00`: unrecovered error).
+    pub fn sense_name<'a>(
+        sense: &super::scsi::Sense,
+        out: &'a mut [u8; NAME_LEN],
+    ) -> Option<&'a str> {
+        const PREFIX: &str = "usb sense ";
+        out[..PREFIX.len()].copy_from_slice(PREFIX.as_bytes());
+        let mut len = put_decimal(out, PREFIX.len(), sense.key as u64)?;
+        for byte in [sense.asc, sense.ascq] {
+            if len + 3 > out.len() {
+                return None;
+            }
+            out[len] = b' ';
+            out[len + 1] = HEX[(byte >> 4) as usize];
+            out[len + 2] = HEX[(byte & 0xF) as usize];
+            len += 3;
+        }
+        core::str::from_utf8(&out[..len]).ok()
+    }
+
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    /// Writes `v` in decimal at `out[pos..]`; the new length, or `None` if
+    /// it does not fit.
+    fn put_decimal(out: &mut [u8], pos: usize, v: u64) -> Option<usize> {
         let mut digits = [0u8; 20];
         let mut i = digits.len();
-        let mut v = lba;
+        let mut v = v;
         loop {
             i -= 1;
             digits[i] = b'0' + (v % 10) as u8;
@@ -77,13 +112,12 @@ pub mod fault {
             }
         }
         let d = &digits[i..];
-        let len = prefix.len() + d.len();
+        let len = pos + d.len();
         if len > out.len() {
             return None;
         }
-        out[..prefix.len()].copy_from_slice(prefix.as_bytes());
-        out[prefix.len()..len].copy_from_slice(d);
-        core::str::from_utf8(&out[..len]).ok()
+        out[pos..len].copy_from_slice(d);
+        Some(len)
     }
 }
 
@@ -364,6 +398,24 @@ mod tests {
             fault::lba_name(fault::INJECTED_WRITE, u64::MAX, &mut out),
             None
         );
+        // The device's reason: key decimal, ASC / ASCQ hex (SCSI convention).
+        let unrecovered = scsi::Sense {
+            key: 3,
+            asc: 0x11,
+            ascq: 0x00,
+        };
+        assert_eq!(
+            fault::sense_name(&unrecovered, &mut out),
+            Some("usb sense 3 11 00")
+        );
+        let worst = scsi::Sense {
+            key: 15,
+            asc: 0xff,
+            ascq: 0xff,
+        };
+        let name = fault::sense_name(&worst, &mut out).expect("fits");
+        assert_eq!(name, "usb sense 15 ff ff");
+        assert!(name.len() <= fault::NAME_LEN);
     }
 
     #[test]

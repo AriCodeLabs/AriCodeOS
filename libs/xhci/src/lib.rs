@@ -162,6 +162,17 @@ pub mod speed {
     pub const HIGH: u8 = 3;
     pub const SUPER: u8 = 4;
 
+    /// Name of a PORTSC / slot speed value for the console.
+    pub fn name(speed: u8) -> &'static str {
+        match speed {
+            FULL => "full",
+            LOW => "low",
+            HIGH => "high",
+            SUPER => "super",
+            _ => "unknown",
+        }
+    }
+
     /// Default endpoint 0 max packet size for each speed.
     pub fn default_ep0_max_packet(speed: u8) -> u16 {
         match speed {
@@ -1275,6 +1286,9 @@ mod tests {
         assert_eq!(speed::default_ep0_max_packet(speed::FULL), 8);
         assert_eq!(speed::default_ep0_max_packet(speed::HIGH), 64);
         assert_eq!(speed::default_ep0_max_packet(speed::SUPER), 512);
+        assert_eq!(speed::name(speed::HIGH), "high");
+        assert_eq!(speed::name(speed::SUPER), "super");
+        assert_eq!(speed::name(9), "unknown");
         assert_eq!(op::port_speed(3 << 10 | 1), 3);
         assert_eq!(interrupt_interval(speed::HIGH, 4), 3);
         assert_eq!(interrupt_interval(speed::HIGH, 0), 0);

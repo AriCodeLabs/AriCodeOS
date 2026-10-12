@@ -155,6 +155,24 @@ fn record(name: &str, code: u64) {
     let _ = sys::event_record(code, name);
 }
 
+/// The device's reason for a failed command as a fault event
+/// (`usb sense K A Q`, the ASC / ASCQ in hex).
+fn record_sense(sense: &scsi::Sense) {
+    let mut name = [0u8; fault::NAME_LEN];
+    if let Some(text) = fault::sense_name(sense, &mut name) {
+        record(text, sense.key as u64);
+    }
+}
+
+/// `K/0xAA/0xQQ`: sense key in decimal, ASC and ASCQ in hex (SPC-4 4.5).
+fn print_sense(sense: &scsi::Sense) {
+    num(sense.key as u64);
+    sys::print(b"/");
+    hex(sense.asc as u64);
+    sys::print(b"/");
+    hex(sense.ascq as u64);
+}
+
 struct Clock(Handle);
 
 impl Clock {
@@ -266,6 +284,39 @@ struct UsbDevice {
     dev_ctx_virt: u64,
 }
 
+/// What the storage device said it is at enumeration, and the speed its
+/// port negotiated: printed then, and again in every failure dump so that
+/// it survives on the console.
+#[derive(Clone, Copy)]
+struct Identity {
+    vendor: u16,
+    product: u16,
+    usb_version: u16,
+    max_power_ma: u16,
+    /// PSIV of the port (1 full, 2 low, 3 high, 4 super).
+    speed: u8,
+}
+
+impl Identity {
+    fn print(&self, port: u8) {
+        sys::print(b"device ");
+        hex4(self.vendor as u64);
+        sys::print(b":");
+        hex4(self.product as u64);
+        sys::print(b" bcdUSB ");
+        hex4(self.usb_version as u64);
+        sys::print(b" bMaxPower ");
+        num(self.max_power_ma as u64);
+        sys::print(b" mA port ");
+        num(port as u64);
+        sys::print(b" speed ");
+        num(self.speed as u64);
+        sys::print(b" (");
+        sys::print(speed::name(self.speed).as_bytes());
+        sys::print(b")");
+    }
+}
+
 /// Bulk endpoint of a storage device.
 struct Bulk {
     dci: u8,
@@ -344,14 +395,17 @@ struct Storage {
     transport: Transport,
     /// Re-enumerations since the last successful command or connection.
     reenumerations: u8,
+    identity: Identity,
 }
 
 /// Why a SCSI command failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScsiFail {
     /// A bulk transfer failed, with the xHCI completion code
-    /// (`completion::NO_EVENT` for a timeout or a refused transfer).
-    Transport(u8),
+    /// (`completion::NO_EVENT` for a timeout or a refused transfer) and,
+    /// when the CSW read after the failure said Command Failed and the
+    /// device answered REQUEST SENSE, its own reason.
+    Transport(u8, Option<scsi::Sense>),
     /// The CSW was invalid, for another command or a phase error.
     Csw,
     /// The transport is not Ready: no CBW was sent (BOT 5.3).
@@ -363,7 +417,7 @@ enum ScsiFail {
 impl ScsiFail {
     fn code(self) -> u8 {
         match self {
-            Self::Transport(code) => code,
+            Self::Transport(code, _) => code,
             Self::Csw | Self::NotReady | Self::Failed => completion::NO_EVENT,
         }
     }
@@ -1226,19 +1280,16 @@ impl Controller {
                 return Err("a storage device is already present; ignoring");
             }
             // What the device says it is, and the speed the port negotiated
-            // (PSIV; 3 = High Speed), for the incident record.
-            sys::print(b"usb-input: storage device ");
-            hex4(desc.vendor as u64);
-            sys::print(b":");
-            hex4(desc.product as u64);
-            sys::print(b" bcdUSB ");
-            hex4(desc.usb_version as u64);
-            sys::print(b" bMaxPower ");
-            num(raw[8] as u64 * 2);
-            sys::print(b" mA, port ");
-            num(port as u64);
-            sys::print(b" speed ");
-            num(spd as u64);
+            // (PSIV), for the incident record; repeated in every dump.
+            let identity = Identity {
+                vendor: desc.vendor,
+                product: desc.product,
+                usb_version: desc.usb_version,
+                max_power_ma: raw[8] as u16 * 2,
+                speed: spd,
+            };
+            sys::print(b"usb-input: storage ");
+            identity.print(port);
             sys::print(b"\n");
             self.control(
                 index,
@@ -1247,7 +1298,7 @@ impl Controller {
                 self.control_step(deadline, CONTROL_TIMEOUT_MS),
             )
             .map_err(|_| "SET_CONFIGURATION failed")?;
-            return self.configure_storage(index, port, iface, ready_wait_ms, deadline);
+            return self.configure_storage(index, port, iface, identity, ready_wait_ms, deadline);
         }
         self.control(
             index,
@@ -1374,6 +1425,7 @@ impl Controller {
         index: usize,
         port: u8,
         iface: StorageInterface,
+        identity: Identity,
         ready_wait_ms: u64,
         deadline: u64,
     ) -> Result<(), &'static str> {
@@ -1455,6 +1507,7 @@ impl Controller {
             errors_reported: 0,
             transport: Transport::Enumerating,
             reenumerations: 0,
+            identity,
         });
         if let Err(why) = self.storage_init(port, ready_wait_ms, deadline) {
             // The caller disables the slot; the storage stays, to be
@@ -1909,6 +1962,8 @@ impl Controller {
             return;
         };
         sys::print(b"  ");
+        st.identity.print(st.port);
+        sys::print(b"\n  ");
         for d in [1u8, st.bulk_in.dci, st.bulk_out.dci] {
             sys::print(b"ep ");
             num(d as u64);
@@ -1968,7 +2023,7 @@ impl Controller {
             self.inject_now = None;
             say(b"injected fault: the endpoint is given up");
             self.give_up_endpoint(budget.deadline);
-            return Err(ScsiFail::Transport(completion::NO_EVENT));
+            return Err(ScsiFail::Transport(completion::NO_EVENT, None));
         }
         if self.inject_now == Some(Injection::Csw) {
             // Test injection: a CSW read with no command outstanding. The
@@ -2094,7 +2149,7 @@ impl Controller {
             if stage != Stage::Cbw && !enumerating {
                 self.request_reset_recovery();
             }
-            return ScsiFail::Transport(code);
+            return ScsiFail::Transport(code, None);
         }
         let Some((device, dci, in_dci, csw_phys, csw_virt)) =
             self.storage.as_ref().and_then(|st| {
@@ -2102,15 +2157,16 @@ impl Controller {
                 Some((st.device?, ep.dci, st.bulk_in.dci, st.csw.0, st.csw.1))
             })
         else {
-            return ScsiFail::Transport(code);
+            return ScsiFail::Transport(code, None);
         };
         if !self.recover_endpoint(device, dci, code, budget.deadline) {
             self.give_up_endpoint(budget.deadline);
-            return ScsiFail::Transport(code);
+            return ScsiFail::Transport(code, None);
         }
         if enumerating {
-            return ScsiFail::Transport(code);
+            return ScsiFail::Transport(code, None);
         }
+        let mut sense = None;
         match after_transfer_failure(stage) {
             Next::ResetRecovery => self.request_reset_recovery(),
             Next::ReadCsw => {
@@ -2132,6 +2188,16 @@ impl Controller {
                                 sys::print(b" residue ");
                                 num(csw.residue as u64);
                                 sys::print(b"; transport ready\n");
+                                if csw.status == CswStatus::Failed {
+                                    // The device closed the command as failed:
+                                    // its reason (SPC-4 REQUEST SENSE) is asked
+                                    // for now, within the budget, before
+                                    // anything else touches the transport.
+                                    sense = self.sense(budget);
+                                    if sense.is_none() {
+                                        say(b"REQUEST SENSE after the failed command gave no sense data");
+                                    }
+                                }
                             }
                             Err(e) => {
                                 self.report_csw_error(e, tag);
@@ -2151,7 +2217,7 @@ impl Controller {
                 }
             }
         }
-        ScsiFail::Transport(code)
+        ScsiFail::Transport(code, sense)
     }
 
     /// No command puts the endpoint back. Outside an enumeration (whose
@@ -2575,7 +2641,15 @@ impl Controller {
     /// `strict` (ADR 0028): dump what a transport failure looked like and
     /// stop; init does not restart the driver, the state stays inspectable.
     /// The xHCI endpoint recovery has run; the BOT Reset Recovery has not.
-    fn halt(&mut self, write: bool, lba: u64, count: u16, code: u8, attempt: usize) -> ! {
+    fn halt(
+        &mut self,
+        write: bool,
+        lba: u64,
+        count: u16,
+        code: u8,
+        attempt: usize,
+        sense: Option<scsi::Sense>,
+    ) -> ! {
         sys::print(b"usb-input: strict: halting on a transport failure\n");
         sys::print(b"  command   ");
         sys::print(if write { b"WRITE(10)" } else { b"READ(10)" });
@@ -2587,6 +2661,11 @@ impl Controller {
         num(code as u64);
         sys::print(b" attempt ");
         num(attempt as u64);
+        sys::print(b"\n  device sense ");
+        match sense {
+            Some(sense) => print_sense(&sense),
+            None => sys::print(b"not available (no CSW with Command Failed, or no sense data)"),
+        }
         if let Some(st) = self.storage.as_ref() {
             sys::print(b"\n  slot ");
             num(st.slot as u64);
@@ -2656,6 +2735,9 @@ impl Controller {
                 }
                 Err(ScsiFail::Failed) => {
                     let sense = self.sense(budget);
+                    if let Some(sense) = sense {
+                        record_sense(&sense);
+                    }
                     if sense.map(|s| s.key) == Some(scsi::Sense::UNIT_ATTENTION)
                         && !unit_attention_retried
                     {
@@ -2683,8 +2765,24 @@ impl Controller {
                     if let Some(text) = fault::lba_name(prefix, lba, &mut name_buf) {
                         record(text, code as u64);
                     }
+                    let sense = match fail {
+                        ScsiFail::Transport(_, sense) => sense,
+                        _ => None,
+                    };
+                    if let Some(sense) = sense {
+                        // The device's own verdict on the command whose
+                        // transfer failed, always printed and recorded.
+                        sys::print(b"usb-input: ");
+                        sys::print(name);
+                        sys::print(b" lba ");
+                        num(lba);
+                        sys::print(b": the device reports the command failed, sense ");
+                        print_sense(&sense);
+                        sys::print(b"\n");
+                        record_sense(&sense);
+                    }
                     if self.strict {
-                        self.halt(write, lba, count, code, transport_failures);
+                        self.halt(write, lba, count, code, transport_failures, sense);
                     }
                     transport_failures += 1;
                     if transport_failures == 1
@@ -2720,6 +2818,9 @@ impl Controller {
             Ok(()) => true,
             Err(ScsiFail::Failed) => {
                 let sense = self.sense(budget);
+                if let Some(sense) = sense {
+                    record_sense(&sense);
+                }
                 if sense.is_some_and(|s| s.command_unsupported()) {
                     if let Some(st) = self.storage.as_mut() {
                         st.sync_cache = false;
@@ -2737,6 +2838,9 @@ impl Controller {
             }
             Err(fail) => {
                 record("usb flush fail", fail.code() as u64);
+                if let ScsiFail::Transport(_, Some(sense)) = fail {
+                    record_sense(&sense);
+                }
                 self.report_error(b"SYNCHRONIZE CACHE", 0, None);
                 false
             }
@@ -2755,11 +2859,7 @@ impl Controller {
         match sense {
             Some(s) => {
                 sys::print(b" rejected: sense ");
-                num(s.key as u64);
-                sys::print(b"/");
-                num(s.asc as u64);
-                sys::print(b"/");
-                num(s.ascq as u64);
+                print_sense(&s);
                 sys::print(b"\n");
             }
             None => sys::print(b" transport failure\n"),
