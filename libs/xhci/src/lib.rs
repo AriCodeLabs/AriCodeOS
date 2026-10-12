@@ -35,24 +35,110 @@ pub mod op {
     pub const CMD_RESET: u32 = 1 << 1;
     pub const CMD_INTE: u32 = 1 << 2;
     pub const STS_HALTED: u32 = 1 << 0;
+    /// Host System Error: a DMA or system bus fault seen by the controller.
+    pub const STS_HSE: u32 = 1 << 2;
     pub const STS_EINT: u32 = 1 << 3;
     pub const STS_PORT_CHANGE: u32 = 1 << 4;
     pub const STS_NOT_READY: u32 = 1 << 11;
+    /// Host Controller Error: the controller stopped on an internal error.
+    pub const STS_HCE: u32 = 1 << 12;
     /// Ring Cycle State of the command ring.
     pub const CRCR_RCS: u64 = 1 << 0;
 
     pub const PORTSC_CCS: u32 = 1 << 0;
     pub const PORTSC_PED: u32 = 1 << 1;
+    pub const PORTSC_OCA: u32 = 1 << 3;
     pub const PORTSC_RESET: u32 = 1 << 4;
     pub const PORTSC_POWER: u32 = 1 << 9;
     pub const PORTSC_CSC: u32 = 1 << 17;
     pub const PORTSC_PEC: u32 = 1 << 18;
+    pub const PORTSC_WRC: u32 = 1 << 19;
+    pub const PORTSC_OCC: u32 = 1 << 20;
     pub const PORTSC_PRC: u32 = 1 << 21;
+    pub const PORTSC_PLC: u32 = 1 << 22;
+    pub const PORTSC_CEC: u32 = 1 << 23;
     /// RW1C change bits: written as 1 to clear them, never by accident.
     pub const PORTSC_CHANGE_BITS: u32 = 0x00FE_0000;
+    /// The device behind the port disconnected, reconnected or was reset:
+    /// the slot addressing it no longer does (xHCI 4.19.2, USB 2.0 9.1).
+    pub const PORTSC_DEVICE_LOST: u32 = PORTSC_CSC | PORTSC_PRC | PORTSC_WRC;
 
     pub fn port_speed(portsc: u32) -> u8 {
         ((portsc >> 10) & 0xF) as u8
+    }
+
+    /// Port Link State (PLS, bits 8:5): 0 is U0.
+    pub fn port_link_state(portsc: u32) -> u8 {
+        ((portsc >> 5) & 0xF) as u8
+    }
+
+    /// PORTSC decoded as text (xHCI 5.4.8) for the console:
+    /// `CCS=1 PED=1 OCA=0 PR=0 PLS=0 PP=1 speed=3 CSC=0 PEC=0 WRC=0 OCC=0
+    /// PRC=0 PLC=0 CEC=0`. `out` needs 96 bytes.
+    pub fn describe_portsc(portsc: u32, out: &mut [u8]) -> &str {
+        const FLAGS: [(&str, u32); 12] = [
+            ("CCS", PORTSC_CCS),
+            ("PED", PORTSC_PED),
+            ("OCA", PORTSC_OCA),
+            ("PR", PORTSC_RESET),
+            ("PLS", 0),
+            ("PP", PORTSC_POWER),
+            ("speed", 0),
+            ("CSC", PORTSC_CSC),
+            ("PEC", PORTSC_PEC),
+            ("WRC", PORTSC_WRC),
+            ("OCC", PORTSC_OCC),
+            ("PRC", PORTSC_PRC),
+        ];
+        let mut w = super::TextOut { out, len: 0 };
+        for (i, (name, bit)) in FLAGS.iter().enumerate() {
+            if i > 0 {
+                w.put(" ");
+            }
+            w.put(name);
+            w.put("=");
+            let value = match *name {
+                "PLS" => port_link_state(portsc),
+                "speed" => port_speed(portsc),
+                _ => (portsc & bit != 0) as u8,
+            };
+            w.num(value);
+        }
+        w.put(" PLC=");
+        w.num((portsc & PORTSC_PLC != 0) as u8);
+        w.put(" CEC=");
+        w.num((portsc & PORTSC_CEC != 0) as u8);
+        let len = w.len;
+        core::str::from_utf8(&out[..len]).unwrap_or("")
+    }
+}
+
+/// Minimal text writer over a byte buffer (console lines without `alloc`).
+struct TextOut<'a> {
+    out: &'a mut [u8],
+    len: usize,
+}
+
+impl TextOut<'_> {
+    fn put(&mut self, s: &str) {
+        let n = s.len().min(self.out.len() - self.len);
+        self.out[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
+        self.len += n;
+    }
+    fn num(&mut self, mut v: u8) {
+        let mut digits = [0u8; 3];
+        let mut n = 0;
+        loop {
+            digits[n] = b'0' + v % 10;
+            n += 1;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        for i in (0..n).rev() {
+            self.put(core::str::from_utf8(&digits[i..i + 1]).unwrap_or("?"));
+        }
     }
 }
 
@@ -148,10 +234,12 @@ pub mod trb_type {
     pub const STATUS_STAGE: u32 = 4;
     pub const LINK: u32 = 6;
     pub const ENABLE_SLOT: u32 = 9;
+    pub const DISABLE_SLOT: u32 = 10;
     pub const ADDRESS_DEVICE: u32 = 11;
     pub const CONFIGURE_ENDPOINT: u32 = 12;
     pub const EVALUATE_CONTEXT: u32 = 13;
     pub const RESET_ENDPOINT: u32 = 14;
+    pub const STOP_ENDPOINT: u32 = 15;
     pub const SET_TR_DEQUEUE: u32 = 16;
     pub const NOOP_COMMAND: u32 = 23;
     pub const TRANSFER_EVENT: u32 = 32;
@@ -159,14 +247,225 @@ pub mod trb_type {
     pub const PORT_STATUS_CHANGE: u32 = 34;
 }
 
-/// Event completion codes.
+/// Event completion codes (xHCI 6.4.5). The driver uses 0, which the
+/// controller never produces, for "no event" (a timeout).
 pub mod completion {
+    pub const NO_EVENT: u8 = 0;
     pub const SUCCESS: u8 = 1;
-    /// The endpoint answered STALL (it stays halted until Reset Endpoint).
-    /// The device did not answer or answered badly on the bus.
+    pub const DATA_BUFFER_ERROR: u8 = 2;
+    pub const BABBLE_DETECTED: u8 = 3;
+    /// The device did not answer or answered badly on the bus, CErr times
+    /// in a row; the endpoint is Halted (4.10.2.1).
     pub const USB_TRANSACTION_ERROR: u8 = 4;
+    pub const TRB_ERROR: u8 = 5;
+    /// The endpoint answered STALL (it stays halted until Reset Endpoint).
     pub const STALL: u8 = 6;
     pub const SHORT_PACKET: u8 = 13;
+    /// A command was issued to a slot or endpoint in the wrong state (for
+    /// example Reset Endpoint on an endpoint that is not Halted).
+    pub const CONTEXT_STATE_ERROR: u8 = 19;
+    /// A Stop Endpoint command retired the TD in progress (4.6.9).
+    pub const STOPPED: u8 = 26;
+    pub const STOPPED_LENGTH_INVALID: u8 = 27;
+    pub const STOPPED_SHORT_PACKET: u8 = 28;
+    pub const SPLIT_TRANSACTION_ERROR: u8 = 36;
+
+    /// The Transfer Event a Stop Endpoint command produces for the TD it
+    /// interrupted.
+    pub fn is_stopped(code: u8) -> bool {
+        matches!(
+            code,
+            STOPPED | STOPPED_LENGTH_INVALID | STOPPED_SHORT_PACKET
+        )
+    }
+
+    /// Name of a code for the console (empty if unknown).
+    pub fn name(code: u8) -> &'static str {
+        match code {
+            NO_EVENT => "no event",
+            SUCCESS => "Success",
+            DATA_BUFFER_ERROR => "Data Buffer Error",
+            BABBLE_DETECTED => "Babble Detected",
+            USB_TRANSACTION_ERROR => "USB Transaction Error",
+            TRB_ERROR => "TRB Error",
+            STALL => "Stall Error",
+            SHORT_PACKET => "Short Packet",
+            CONTEXT_STATE_ERROR => "Context State Error",
+            STOPPED => "Stopped",
+            STOPPED_LENGTH_INVALID => "Stopped - Length Invalid",
+            STOPPED_SHORT_PACKET => "Stopped - Short Packet",
+            SPLIT_TRANSACTION_ERROR => "Split Transaction Error",
+            _ => "",
+        }
+    }
+}
+
+/// Endpoint Context states (word 0 bits 2:0, xHCI 6.2.3 and figure 4-5).
+pub mod ep_state {
+    pub const DISABLED: u8 = 0;
+    pub const RUNNING: u8 = 1;
+    pub const HALTED: u8 = 2;
+    pub const STOPPED: u8 = 3;
+    pub const ERROR: u8 = 4;
+
+    pub fn name(state: u8) -> &'static str {
+        match state {
+            DISABLED => "Disabled",
+            RUNNING => "Running",
+            HALTED => "Halted",
+            STOPPED => "Stopped",
+            ERROR => "Error",
+            _ => "",
+        }
+    }
+}
+
+/// Endpoint state and TR Dequeue Pointer read from an Output Endpoint
+/// Context (the first 16 bytes). `None` if the slice is too short.
+pub fn endpoint_status(ctx: &[u8]) -> Option<(u8, u64)> {
+    if ctx.len() < 16 {
+        return None;
+    }
+    let w0 = u32::from_le_bytes(ctx[..4].try_into().ok()?);
+    let lo = u32::from_le_bytes(ctx[8..12].try_into().ok()?);
+    let hi = u32::from_le_bytes(ctx[12..16].try_into().ok()?);
+    Some(((w0 & 7) as u8, ((hi as u64) << 32 | lo as u64) & !0xF))
+}
+
+/// What the driver does to an endpoint whose transfer ended with
+/// completion code `code` (`completion::NO_EVENT` for a timeout) while the
+/// Endpoint Context reads `state` (xHCI 4.8.3: doorbells are ignored
+/// unless the endpoint is Running).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointRecovery {
+    /// Running and nothing in progress to retire: nothing to do.
+    Nothing,
+    /// Running with a TD that never completed: Stop Endpoint (4.6.9), then
+    /// Set TR Dequeue past it (4.6.10) before the ring is used again.
+    StopAndRetire,
+    /// Stopped by someone else (a Stopped Transfer Event): Set TR Dequeue
+    /// past the interrupted TD (4.6.10).
+    SetDequeue,
+    /// Halted (4.10.2.1): Reset Endpoint with TSP = 0 (4.6.8), Set TR
+    /// Dequeue (4.6.10) and, on a bulk endpoint, `CLEAR_FEATURE(ENDPOINT_HALT)`
+    /// to the device for every halting code: the reset restarts the host's
+    /// data toggle at DATA0 and only that request restarts the device's
+    /// (USB 2.0 9.4.5); otherwise mismatched packets are ACKed and
+    /// discarded (8.6.4). EP0 is exempt (a control pipe's STALL ends with
+    /// the next SETUP, 8.5.3.4).
+    ResetHalted,
+    /// Disabled or Error: no command puts it back; the device must be
+    /// configured again.
+    Reenumerate,
+}
+
+impl EndpointRecovery {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Nothing => "nothing to retire",
+            Self::StopAndRetire => "Stop Endpoint, Set TR Dequeue",
+            Self::SetDequeue => "Set TR Dequeue",
+            Self::ResetHalted => "Reset Endpoint, Set TR Dequeue, CLEAR_FEATURE(ENDPOINT_HALT)",
+            Self::Reenumerate => "endpoint unusable: re-enumerate",
+        }
+    }
+}
+
+pub fn endpoint_recovery(code: u8, state: u8) -> EndpointRecovery {
+    match state {
+        ep_state::HALTED => EndpointRecovery::ResetHalted,
+        ep_state::RUNNING if code == completion::NO_EVENT => EndpointRecovery::StopAndRetire,
+        ep_state::RUNNING => EndpointRecovery::Nothing,
+        ep_state::STOPPED => EndpointRecovery::SetDequeue,
+        _ => EndpointRecovery::Reenumerate,
+    }
+}
+
+/// No transfer or command starts with less than this left on its
+/// deadline: a TRB enqueued and never waited for would complete into a
+/// buffer the driver has already released (incident 0001, audit 2 N1).
+pub const MIN_START_MS: u64 = 5;
+
+/// `Some(min(deadline, now + timeout_ms))`, or `None` when the step must
+/// not start because less than `MIN_START_MS` is left.
+pub fn step_deadline(now: u64, deadline: u64, timeout_ms: u64) -> Option<u64> {
+    if deadline < now.saturating_add(MIN_START_MS) {
+        return None;
+    }
+    Some(deadline.min(now.saturating_add(timeout_ms)))
+}
+
+/// Time budget of one request. Transfers (bulk stages, a CSW re-read)
+/// must end `reserve_ms` before `deadline`, so that the recovery a failure
+/// needs (Reset or Stop Endpoint, Set TR Dequeue, CLEAR_FEATURE, Disable
+/// Slot, each with its own command timeout) still fits; recovery commands
+/// may run until `deadline`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    pub deadline: u64,
+    pub reserve_ms: u64,
+}
+
+impl Budget {
+    pub fn new(now: u64, budget_ms: u64, reserve_ms: u64) -> Self {
+        Self {
+            deadline: now + budget_ms,
+            reserve_ms,
+        }
+    }
+
+    /// End of the transfer window: `deadline - reserve`.
+    pub fn transfer_window(&self) -> u64 {
+        self.deadline.saturating_sub(self.reserve_ms)
+    }
+
+    /// Deadline of a transfer with its own `timeout_ms`; `None` when the
+    /// window is (nearly) over.
+    pub fn transfer(&self, now: u64, timeout_ms: u64) -> Option<u64> {
+        step_deadline(now, self.transfer_window(), timeout_ms)
+    }
+
+    /// Deadline of a recovery command with its own `timeout_ms`; `None`
+    /// when the budget is (nearly) over.
+    pub fn recovery(&self, now: u64, timeout_ms: u64) -> Option<u64> {
+        step_deadline(now, self.deadline, timeout_ms)
+    }
+
+    /// Whether a transfer of `needed_ms` still fits in the window.
+    pub fn fits_transfer(&self, now: u64, needed_ms: u64) -> bool {
+        now + needed_ms <= self.transfer_window()
+    }
+
+    /// A budget of at most `budget_ms` that also ends by `enclosing`
+    /// (the deadline of the step it runs in), whose transfer window is at
+    /// least `min_window_ms`: the reserve shrinks when the enclosing
+    /// deadline is short, and `None` says the command must not start at
+    /// all because not even the minimum window fits.
+    pub fn within(
+        now: u64,
+        enclosing: u64,
+        budget_ms: u64,
+        reserve_ms: u64,
+        min_window_ms: u64,
+    ) -> Option<Self> {
+        let deadline = (now + budget_ms).min(enclosing);
+        let total = deadline.saturating_sub(now);
+        if total < min_window_ms {
+            return None;
+        }
+        Some(Self {
+            deadline,
+            reserve_ms: reserve_ms.min(total - min_window_ms),
+        })
+    }
+}
+
+/// Soft Retry (xHCI 4.6.8.1): a USB Transaction Error that halted the
+/// endpoint can be retried in place with Reset Endpoint TSP = 1, which
+/// keeps the data toggle, and a doorbell. The TSP flag exists from xHCI
+/// 1.1 (`hci_version` is HCIVERSION, BCD).
+pub fn soft_retry_applies(hci_version: u16, code: u8, state: u8) -> bool {
+    hci_version >= 0x0110 && code == completion::USB_TRANSACTION_ERROR && state == ep_state::HALTED
 }
 
 pub const TRB_CYCLE: u32 = 1 << 0;
@@ -179,6 +478,8 @@ const TRB_CHAIN: u32 = 1 << 4;
 const TRB_IOC: u32 = 1 << 5;
 /// Immediate Data (the parameter is the data, not a pointer).
 const TRB_IDT: u32 = 1 << 6;
+/// Transfer State Preserve (Reset Endpoint, xHCI 1.1).
+const TRB_TSP: u32 = 1 << 9;
 const TRB_DIR_IN: u32 = 1 << 16;
 
 impl Trb {
@@ -249,9 +550,27 @@ impl Trb {
         t.control |= (slot as u32) << 24;
         t
     }
-    /// Reset Endpoint: takes endpoint `dci` out of the halted state (after STALL).
-    pub fn reset_endpoint(slot: u8, dci: u8) -> Self {
+    pub fn disable_slot(slot: u8) -> Self {
+        let mut t = Self::with_type(trb_type::DISABLE_SLOT);
+        t.control |= (slot as u32) << 24;
+        t
+    }
+    /// Reset Endpoint (4.6.8): takes endpoint `dci` out of the Halted state
+    /// (it fails with Context State Error otherwise). `preserve_state`
+    /// (TSP, xHCI 1.1) keeps the data toggle for a Soft Retry (4.6.8.1);
+    /// without it the toggle restarts at DATA0.
+    pub fn reset_endpoint(slot: u8, dci: u8, preserve_state: bool) -> Self {
         let mut t = Self::with_type(trb_type::RESET_ENDPOINT);
+        t.control |= (dci as u32) << 16 | (slot as u32) << 24;
+        if preserve_state {
+            t.control |= TRB_TSP;
+        }
+        t
+    }
+    /// Stop Endpoint (4.6.9): the controller retires the TD in progress
+    /// with a Stopped Transfer Event and leaves the endpoint Stopped.
+    pub fn stop_endpoint(slot: u8, dci: u8) -> Self {
+        let mut t = Self::with_type(trb_type::STOP_ENDPOINT);
         t.control |= (dci as u32) << 16 | (slot as u32) << 24;
         t
     }
@@ -375,6 +694,14 @@ impl ProducerRing {
         (self.size - 1, link)
     }
 
+    /// Back to an empty ring (the caller zeroes the memory and rewrites
+    /// `initial_link`): what a controller sees after Configure Endpoint
+    /// points it at `phys` with DCS = 1.
+    pub fn reset(&mut self) {
+        self.enqueue = 0;
+        self.cycle = true;
+    }
+
     /// Enqueues `trb` (without cycle bit) and advances.
     pub fn push(&mut self, mut trb: Trb) -> Enqueued {
         trb.control = (trb.control & !TRB_CYCLE) | if self.cycle { TRB_CYCLE } else { 0 };
@@ -389,6 +716,10 @@ impl ProducerRing {
             if self.cycle {
                 l.control |= TRB_CYCLE;
             }
+            // A TD that continues past the wrap carries its Chain bit on
+            // the Link TRB too (xHCI 4.11.5.1), or the controller would
+            // treat the link as the end of the TD.
+            l.control |= trb.control & TRB_CHAIN;
             link = Some((self.size - 1, l));
             self.enqueue = 0;
             self.cycle = !self.cycle;
@@ -611,12 +942,13 @@ pub fn interrupt_interval(speed: u8, b_interval: u8) -> u8 {
     }
 }
 
-/// Writes an Input Context: control (drop/add flags), slot and the endpoints
-/// given by DCI, with contexts of `context_bytes` each. Returns the
-/// bytes used.
+/// Writes an Input Context: control (drop and add flags, xHCI 6.2.2.2),
+/// slot and the endpoints given by DCI, with contexts of `context_bytes`
+/// each. Returns the bytes used.
 pub fn write_input_context(
     out: &mut [u8],
     context_bytes: usize,
+    drop_flags: u32,
     add_flags: u32,
     slot: &SlotContext,
     endpoints: &[(u8, EndpointContext)],
@@ -630,6 +962,7 @@ pub fn write_input_context(
     };
     // Input Control Context: word 0 drop flags, word 1 add flags.
     let mut icc = [0u32; 8];
+    icc[0] = drop_flags;
     icc[1] = add_flags;
     put(out, 0, &icc);
     put(out, 1, &slot.to_words());
@@ -652,6 +985,7 @@ pub struct SetupPacket {
 }
 
 pub mod request {
+    pub const GET_STATUS: u8 = 0;
     pub const CLEAR_FEATURE: u8 = 1;
     pub const GET_DESCRIPTOR: u8 = 6;
     pub const SET_CONFIGURATION: u8 = 9;
@@ -674,6 +1008,17 @@ impl SetupPacket {
             value: (kind as u16) << 8 | index as u16,
             index: 0,
             length,
+        }
+    }
+    /// `GET_STATUS` of the device (USB 2.0 9.4.5, 2 bytes): the smallest
+    /// request that tells whether the device answers on EP0 again.
+    pub fn get_device_status() -> Self {
+        Self {
+            request_type: 0x80,
+            request: request::GET_STATUS,
+            value: 0,
+            index: 0,
+            length: 2,
         }
     }
     /// `CLEAR_FEATURE(ENDPOINT_HALT)` on endpoint `address` (bit 7 =
@@ -1035,6 +1380,184 @@ mod tests {
         let d = r.push(Trb::noop_command());
         assert_eq!(d.index, 0);
         assert!(!d.trb.cycle(), "second pass with cycle 0");
+        assert_eq!(
+            l.control & TRB_CHAIN,
+            0,
+            "a TD that ended keeps the link unchained"
+        );
+        // A multi-TRB TD that spans the wrap: the Link TRB carries the
+        // Chain bit (xHCI 4.11.5.1) so the controller continues the TD.
+        r.push(Trb::noop_command());
+        let e = r.push(Trb::normal_part(0x5000, 512, 1, true));
+        let (_, l) = e.link.expect("link");
+        assert_ne!(
+            l.control & TRB_CHAIN,
+            0,
+            "chained TRB before the wrap chains the link"
+        );
+        assert!(!l.cycle(), "link carries the producer cycle of that pass");
+        r.reset();
+        assert_eq!((r.enqueue, r.cycle), (0, true));
+        let (li, link) = r.initial_link();
+        assert_eq!(li, 3);
+        assert!(!link.cycle());
+    }
+
+    #[test]
+    fn endpoint_status_and_recovery_decisions() {
+        // Output Endpoint Context: Halted (2), dequeue 0x1_2345_6780 with DCS = 1.
+        let mut ctx = [0u8; 32];
+        ctx[0] = 2;
+        ctx[8..12].copy_from_slice(&0x2345_6781u32.to_le_bytes());
+        ctx[12..16].copy_from_slice(&1u32.to_le_bytes());
+        assert_eq!(
+            endpoint_status(&ctx),
+            Some((ep_state::HALTED, 0x1_2345_6780))
+        );
+        assert_eq!(endpoint_status(&ctx[..15]), None);
+        assert_eq!(ep_state::name(ep_state::RUNNING), "Running");
+        // Halted: Reset Endpoint, Set TR Dequeue and CLEAR_FEATURE(ENDPOINT_HALT)
+        // for every halting code (the toggle must be reset on both sides).
+        for code in [
+            completion::STALL,
+            completion::USB_TRANSACTION_ERROR,
+            completion::BABBLE_DETECTED,
+            completion::DATA_BUFFER_ERROR,
+            completion::SPLIT_TRANSACTION_ERROR,
+            completion::NO_EVENT,
+        ] {
+            assert_eq!(
+                endpoint_recovery(code, ep_state::HALTED),
+                EndpointRecovery::ResetHalted,
+                "code {code}"
+            );
+        }
+        // A timeout on a Running endpoint retires the TD with Stop Endpoint;
+        // an error that did not halt it leaves nothing to retire.
+        assert_eq!(
+            endpoint_recovery(completion::NO_EVENT, ep_state::RUNNING),
+            EndpointRecovery::StopAndRetire
+        );
+        assert_eq!(
+            endpoint_recovery(completion::USB_TRANSACTION_ERROR, ep_state::RUNNING),
+            EndpointRecovery::Nothing
+        );
+        assert_eq!(
+            endpoint_recovery(completion::STOPPED, ep_state::STOPPED),
+            EndpointRecovery::SetDequeue
+        );
+        assert_eq!(
+            endpoint_recovery(completion::NO_EVENT, ep_state::DISABLED),
+            EndpointRecovery::Reenumerate
+        );
+        assert_eq!(
+            endpoint_recovery(completion::STALL, ep_state::ERROR),
+            EndpointRecovery::Reenumerate
+        );
+        // Soft Retry: transaction error, Halted, xHCI 1.1 or later.
+        assert!(soft_retry_applies(
+            0x0110,
+            completion::USB_TRANSACTION_ERROR,
+            ep_state::HALTED
+        ));
+        assert!(!soft_retry_applies(
+            0x0100,
+            completion::USB_TRANSACTION_ERROR,
+            ep_state::HALTED
+        ));
+        assert!(!soft_retry_applies(
+            0x0110,
+            completion::STALL,
+            ep_state::HALTED
+        ));
+        assert!(!soft_retry_applies(
+            0x0110,
+            completion::USB_TRANSACTION_ERROR,
+            ep_state::RUNNING
+        ));
+        assert!(completion::is_stopped(completion::STOPPED_LENGTH_INVALID));
+        assert!(!completion::is_stopped(completion::SUCCESS));
+        assert_eq!(completion::name(4), "USB Transaction Error");
+        assert_eq!(completion::name(19), "Context State Error");
+        assert_eq!(completion::name(200), "");
+    }
+
+    #[test]
+    fn budget_arithmetic() {
+        // 8 s budget from t = 1000 with a 3 s recovery reserve: transfers
+        // end at 6000 at the latest, recovery commands at 9000.
+        let b = Budget::new(1000, 8000, 3000);
+        assert_eq!(b.transfer_window(), 6000);
+        assert_eq!(b.transfer(1000, 5000), Some(6000), "capped by the window");
+        assert_eq!(b.transfer(1000, 1000), Some(2000), "its own timeout first");
+        assert_eq!(b.transfer(5990, 1000), Some(6000));
+        assert_eq!(b.transfer(5996, 1000), None, "less than MIN_START_MS left");
+        assert_eq!(
+            b.transfer(7000, 1000),
+            None,
+            "window over: recovery time only"
+        );
+        assert_eq!(b.recovery(7000, 500), Some(7500));
+        assert_eq!(b.recovery(8800, 500), Some(9000), "capped by the deadline");
+        assert_eq!(b.recovery(8996, 500), None);
+        assert!(b.fits_transfer(1000, 5000));
+        assert!(!b.fits_transfer(1001, 5000));
+        assert_eq!(step_deadline(10, 100, 50), Some(60));
+        assert_eq!(step_deadline(96, 100, 50), None);
+        assert_eq!(step_deadline(200, 100, 50), None, "already expired");
+        let short = Budget::new(0, 1000, 3000);
+        assert_eq!(
+            short.transfer_window(),
+            0,
+            "reserve larger than the budget: no transfers"
+        );
+        assert_eq!(short.transfer(0, 100), None);
+        assert_eq!(short.recovery(0, 100), Some(100));
+        // A command inside a step: the full budget when the step is long,
+        // a reduced reserve when it is short, refused when the minimum
+        // window (CBW + a DATA slice + CSW) cannot fit.
+        let long = Budget::within(1000, 100_000, 12_000, 3000, 5000).unwrap();
+        assert_eq!((long.deadline, long.reserve_ms), (13_000, 3000));
+        let tight = Budget::within(1000, 6500, 12_000, 3000, 5000).unwrap();
+        assert_eq!((tight.deadline, tight.reserve_ms), (6500, 500));
+        assert_eq!(tight.transfer_window(), 6000, "the minimum window survives");
+        let exact = Budget::within(1000, 6000, 12_000, 3000, 5000).unwrap();
+        assert_eq!(
+            (exact.deadline, exact.reserve_ms, exact.transfer_window()),
+            (6000, 0, 6000)
+        );
+        assert_eq!(
+            Budget::within(1000, 5999, 12_000, 3000, 5000),
+            None,
+            "no room: refused up front"
+        );
+        assert_eq!(
+            Budget::within(1000, 500, 12_000, 3000, 5000),
+            None,
+            "already expired"
+        );
+    }
+
+    #[test]
+    fn portsc_decoding() {
+        let mut buf = [0u8; 96];
+        // Connected, enabled, powered, High Speed, U0, no change bits.
+        let v = op::PORTSC_CCS | op::PORTSC_PED | op::PORTSC_POWER | 3 << 10;
+        assert_eq!(
+            op::describe_portsc(v, &mut buf),
+            "CCS=1 PED=1 OCA=0 PR=0 PLS=0 PP=1 speed=3 CSC=0 PEC=0 WRC=0 OCC=0 PRC=0 PLC=0 CEC=0"
+        );
+        // Disconnected with CSC, link in RxDetect (5).
+        let v = op::PORTSC_POWER | op::PORTSC_CSC | 5 << 5;
+        assert_eq!(
+            op::describe_portsc(v, &mut buf),
+            "CCS=0 PED=0 OCA=0 PR=0 PLS=5 PP=1 speed=0 CSC=1 PEC=0 WRC=0 OCC=0 PRC=0 PLC=0 CEC=0"
+        );
+        assert_eq!(op::port_link_state(15 << 5), 15);
+        assert_ne!(op::PORTSC_DEVICE_LOST & op::PORTSC_PRC, 0);
+        assert_eq!(op::PORTSC_DEVICE_LOST & op::PORTSC_PEC, 0);
+        // A short buffer truncates instead of panicking.
+        assert_eq!(op::describe_portsc(v, &mut buf[..5]), "CCS=0");
     }
 
     #[test]
@@ -1086,7 +1609,7 @@ mod tests {
         assert_eq!(w[1] >> 3 & 7, ep_type::INTERRUPT_IN);
         assert_eq!(w[4], 8 | 8 << 16);
         let mut buf = [0xFFu8; 33 * 64];
-        let used = write_input_context(&mut buf, 32, 0b1011, &slot, &[(1, ep0), (3, int)]);
+        let used = write_input_context(&mut buf, 32, 0, 0b1011, &slot, &[(1, ep0), (3, int)]);
         assert_eq!(used, 5 * 32);
         assert_eq!(
             u32::from_le_bytes(buf[4..8].try_into().unwrap()),
@@ -1109,7 +1632,7 @@ mod tests {
             buf[5 * 32..].iter().all(|&b| b == 0),
             "the rest stays zeroed"
         );
-        let used64 = write_input_context(&mut buf, 64, 0b11, &slot, &[(1, ep0)]);
+        let used64 = write_input_context(&mut buf, 64, 0, 0b11, &slot, &[(1, ep0)]);
         assert_eq!(used64, 3 * 64);
     }
 
@@ -1203,8 +1726,18 @@ mod tests {
             SetupPacket::clear_endpoint_halt(0x81).to_bytes(),
             [0x02, 1, 0, 0, 0x81, 0, 0, 0]
         );
-        let t = Trb::reset_endpoint(3, 2);
+        let t = Trb::reset_endpoint(3, 2, false);
         assert_eq!((t.trb_type(), t.slot_id(), t.endpoint_id()), (14, 3, 2));
+        assert_eq!(t.control & TRB_TSP, 0);
+        assert_ne!(Trb::reset_endpoint(3, 2, true).control & TRB_TSP, 0);
+        let t = Trb::stop_endpoint(3, 4);
+        assert_eq!((t.trb_type(), t.slot_id(), t.endpoint_id()), (15, 3, 4));
+        let t = Trb::disable_slot(5);
+        assert_eq!((t.trb_type(), t.slot_id()), (10, 5));
+        assert_eq!(
+            SetupPacket::get_device_status().to_bytes(),
+            [0x80, 0, 0, 0, 0, 0, 2, 0]
+        );
         let t = Trb::set_tr_dequeue(3, 2, 0x2340, true);
         assert_eq!((t.trb_type(), t.parameter), (16, 0x2341));
     }

@@ -9,7 +9,9 @@ level = "full"
 areas = ["usb", "storage", "init", "diag"]
 usb_storage = true
 cmdline = "qemu_exit shell strict usb_fault=idle"
-timeout_secs = 90
+# The shell's write waits for fsd (45 s), which waits for the halted
+# driver's block reply (35 s), before `diag` and `shutdown` run.
+timeout_secs = 150
 stdin = ["repeat 10 ping 10.0.2.2", "write probe.txt after idle", "diag", "shutdown"]
 
 [expect]
@@ -21,7 +23,7 @@ serial_contains = [
     "  completion code 4 attempt 0",
     "AriInit: service usb_input exited; strict mode: not restarted (inspect with diag)",
     "fault reported by process",
-    "usb inj write lba",
+    "usb inj w lba",
     "(code 4)",
     "ARICODEOS_SHUTDOWN",
 ]
