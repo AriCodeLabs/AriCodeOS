@@ -350,6 +350,37 @@ usb_input  failed  1  1  code 15  (optional)   <- strict: not restarted
   sshd should skip the reread while the file service is failing (keep
   the last keys, retry at most once a minute with a short wait).
 
-The console shows the `strict` halt dump (stage, direction, endpoint
-states, PORTSC, USBSTS) for this failure; it is transcribed below when
-photographed.
+Console dump (photo; the lines above the dump had scrolled away):
+
+```
+usb-input: ... Set TR Dequeue slot 1 dci 3: completion code 1 (Success)
+usb-input: CSW received after the failure: status 1 residue 0; transport ready
+usb-input: strict: halting on a transport failure
+  command   WRITE(10) lba 188433 count 16
+  completion code 0 attempt 0
+  ep 1 Running dequeue 0x49f740; ep 3 Running dequeue 0x49fe80; ep 4 Running dequeue 0x49ff80;
+  port 5 PORTSC 0x1203 CCS=1 PED=1 OCA=0 PR=0 PLS=0 PP=1 speed=4 CSC=0 PEC=0 WRC=0 OCC=0 PRC=0 PLC=0 CEC=0; USBSTS 0x18 HSE=0 HCE=0
+```
+
+Reading it with the study A decision table:
+
+- Every endpoint is Running and PORTSC is clean (connected, enabled, link
+  U0, no change bits), USBSTS has no host error: the controller was not
+  left in an invalid state and the link did not drop. The trigger is the
+  device.
+- `speed=4`: the stick runs at SuperSpeed on an xHCI USB 3 port, not at
+  High Speed as the studies assumed. Study B's note applies: at
+  SuperSpeed a sequence-number mismatch never realigns by itself.
+- The recovery of the new driver worked: Stop Endpoint and Set TR
+  Dequeue succeeded, the transport returned to Ready, and the CSW read
+  after the failure arrived with **status 1 (Command Failed)**: the stick
+  itself reports that the WRITE failed, after staying silent beyond the
+  5 s data (or 3 s CSW) timeout. The device's reason (sense key, ASC,
+  ASCQ) was not requested before the halt; the driver now does that
+  (next run).
+
+Working hypothesis after this run: the stick's flash fails on writes in
+that region (or under sustained sequential writes), its firmware stalls
+while handling the failure, and the earlier transaction errors were the
+same stalls seen through the old driver's broken recovery. To be
+confirmed with the sense data and with a second stick on the same port.
