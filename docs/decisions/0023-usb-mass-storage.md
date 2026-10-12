@@ -67,3 +67,12 @@ no driver) and the xHCI saw no device at all.
   data so they can be diagnosed from a photo.
 - If usbd dies, the supervisor relaunches it and fsd sees I/O errors until
   then; the block endpoint belongs to init and survives.
+
+## Note (2026-10-12, incident 0001)
+
+The transport error handling of the first version turned a single USB
+transaction error into timeouts and a dead device. The driver now
+recovers endpoints as xHCI 4.6.8-4.6.10 and 4.8.3 require, follows the
+Bulk-Only Transport rules for outstanding commands and Reset Recovery,
+re-enumerates a device that drops or resets, and bounds its work per
+request below the clients' waits. See `docs/incidents/0001-*`.

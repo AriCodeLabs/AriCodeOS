@@ -1,6 +1,6 @@
 # Incident 0001: USB stick bulk transfers fail with transaction errors
 
-- **Opened:** 2026-10-12. **Status:** open, under investigation.
+- **Opened:** 2026-10-12. **Status:** open; driver fixes merged (`develop` 9bd36e8), root cause awaiting the laptop dump.
 - **Hardware:** ASUS laptop, Intel 7 series chipset, xHCI 8086:1e31 (MSI,
   16 scratchpads, Intel port routing), no IOMMU, 4 CPUs, 3981 MiB. Boot
   stick "USB Disk 3.0", 30433280 sectors, rejects `SYNCHRONIZE CACHE`.
@@ -301,3 +301,22 @@ What the laptop dump should now show, per the decision table of study A:
   to roughly ten per boot before "no DMA".
 - A post-write quiet period is still not implemented: it is decided after
   the dump, as planned.
+
+## Audits
+
+Four audit rounds of the driver branch, each in its own file:
+[audit 1](0001-audit-1-endpoint-recovery.md) (not mergeable: toggle
+desynchronisation, re-entrant recovery, request budget, buffer release),
+[audit 2](0001-audit-2-endpoint-recovery.md) (steps started with expired
+deadlines, unreal step bound, unjustified timeouts), [audit 3](0001-audit-3-endpoint-recovery.md)
+(re-enumeration could never run a SCSI command, chain arithmetic,
+bookkeeping lost across storage replacement), [audit 4](0001-audit-4-endpoint-recovery.md)
+(safe to merge). Merged into `develop` as 9bd36e8 on 2026-10-12.
+
+## Next
+
+Boot the laptop from the stick built with `strict` and run the
+write-then-read sequence; the first transport failure halts the driver
+with the full dump, which the decision table of study A reads. The A/B
+with the fc846ae image (built, in a separate worktree) follows if the
+dump does not settle the trigger.
