@@ -51,6 +51,109 @@ pub enum CswStatus {
     PhaseError,
 }
 
+/// Fault event names of the storage driver (`sys::event_record`, ADR
+/// 0028): at most `NAME_LEN` bytes, so an LBA prefix leaves room for the
+/// ten digits of a READ(10)/WRITE(10) address.
+pub mod fault {
+    pub const NAME_LEN: usize = 24;
+    /// Prefixes followed by the LBA in decimal.
+    pub const READ: &str = "usb r lba ";
+    pub const WRITE: &str = "usb w lba ";
+    pub const INJECTED_READ: &str = "usb inj r lba ";
+    pub const INJECTED_WRITE: &str = "usb inj w lba ";
+    pub const LBA_PREFIXES: [&str; 4] = [READ, WRITE, INJECTED_READ, INJECTED_WRITE];
+
+    /// `prefix` followed by `lba`; `None` if it does not fit `out`.
+    pub fn lba_name<'a>(prefix: &str, lba: u64, out: &'a mut [u8; NAME_LEN]) -> Option<&'a str> {
+        let mut digits = [0u8; 20];
+        let mut i = digits.len();
+        let mut v = lba;
+        loop {
+            i -= 1;
+            digits[i] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        let d = &digits[i..];
+        let len = prefix.len() + d.len();
+        if len > out.len() {
+            return None;
+        }
+        out[..prefix.len()].copy_from_slice(prefix.as_bytes());
+        out[prefix.len()..len].copy_from_slice(d);
+        core::str::from_utf8(&out[..len]).ok()
+    }
+}
+
+/// Stage of a Bulk-Only command (BOT 5.3): the three transfers of the
+/// transport state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    Cbw,
+    Data,
+    Csw,
+}
+
+impl Stage {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Cbw => "CBW",
+            Self::Data => "DATA",
+            Self::Csw => "CSW",
+        }
+    }
+}
+
+/// What the host does once a transfer at some stage failed and the xHCI
+/// endpoint that reported it is back in service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Next {
+    /// Read the CSW once (BOT 6.7.2 and 6.7.3): a device that completed
+    /// the command delivers it and the transport is Ready again.
+    ReadCsw,
+    /// Reset Recovery (BOT 5.3.4) before any new CBW: whether the device
+    /// holds a command is unknown.
+    ResetRecovery,
+}
+
+/// BOT 5.3 and 6.7: after the CBW was sent the transport returns to Ready
+/// only through a CSW or a Reset Recovery, so a data or CSW failure is
+/// followed by one CSW read; a CBW that failed may or may not have reached
+/// the device (BOT 6.6.1 for a STALL), so only a Reset Recovery leaves it
+/// in a known state.
+pub fn after_transfer_failure(stage: Stage) -> Next {
+    match stage {
+        Stage::Cbw => Next::ResetRecovery,
+        Stage::Data | Stage::Csw => Next::ReadCsw,
+    }
+}
+
+/// Why a received CSW does not close the command (BOT 6.3): all of them
+/// require a Reset Recovery before the next CBW.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CswError {
+    /// Signature, length or status byte not valid (BOT 6.3.1).
+    Invalid,
+    /// A valid CSW for another command (dCSWTag, BOT 6.3.1 and 6.4).
+    TagMismatch(Csw),
+    /// bCSWStatus 2 (BOT 6.3.1 and 6.7, phase error).
+    PhaseError(Csw),
+}
+
+/// Checks the CSW received for the command with `tag`.
+pub fn check_csw(raw: &[u8], tag: u32) -> Result<Csw, CswError> {
+    let csw = Csw::parse(raw).ok_or(CswError::Invalid)?;
+    if csw.tag != tag {
+        return Err(CswError::TagMismatch(csw));
+    }
+    if csw.status == CswStatus::PhaseError {
+        return Err(CswError::PhaseError(csw));
+    }
+    Ok(csw)
+}
+
 impl Csw {
     pub const LEN: usize = 13;
     const SIGNATURE: [u8; 4] = *b"USBS";
@@ -240,6 +343,56 @@ mod tests {
         csw[0] = b'X';
         assert!(Csw::parse(&csw).is_none());
         assert!(Csw::parse(&csw[..12]).is_none());
+    }
+
+    #[test]
+    fn fault_names_fit_any_lba() {
+        let mut out = [0u8; fault::NAME_LEN];
+        for prefix in fault::LBA_PREFIXES {
+            let name = fault::lba_name(prefix, u32::MAX as u64, &mut out).expect("fits");
+            assert!(
+                name.starts_with(prefix) && name.ends_with("4294967295"),
+                "{name}"
+            );
+            assert!(name.len() <= fault::NAME_LEN);
+        }
+        assert_eq!(
+            fault::lba_name(fault::READ, 0, &mut out),
+            Some("usb r lba 0")
+        );
+        assert_eq!(
+            fault::lba_name(fault::INJECTED_WRITE, u64::MAX, &mut out),
+            None
+        );
+    }
+
+    #[test]
+    fn transport_rules_after_a_failure() {
+        assert_eq!(after_transfer_failure(Stage::Cbw), Next::ResetRecovery);
+        assert_eq!(after_transfer_failure(Stage::Data), Next::ReadCsw);
+        assert_eq!(after_transfer_failure(Stage::Csw), Next::ReadCsw);
+        assert_eq!(Stage::Data.name(), "DATA");
+        let mut csw = [0u8; 13];
+        csw[..4].copy_from_slice(b"USBS");
+        csw[4..8].copy_from_slice(&7u32.to_le_bytes());
+        csw[8..12].copy_from_slice(&512u32.to_le_bytes());
+        assert_eq!(
+            check_csw(&csw, 7),
+            Ok(Csw {
+                tag: 7,
+                residue: 512,
+                status: CswStatus::Passed
+            })
+        );
+        assert!(matches!(
+            check_csw(&csw, 8),
+            Err(CswError::TagMismatch(Csw { tag: 7, .. }))
+        ));
+        csw[12] = 2;
+        assert!(matches!(check_csw(&csw, 7), Err(CswError::PhaseError(_))));
+        csw[0] = b'X';
+        assert_eq!(check_csw(&csw, 7), Err(CswError::Invalid));
+        assert_eq!(check_csw(&csw[..12], 7), Err(CswError::Invalid));
     }
 
     #[test]

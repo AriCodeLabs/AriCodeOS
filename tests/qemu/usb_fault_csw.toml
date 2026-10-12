@@ -1,0 +1,56 @@
+# Failure protocol (ADR 0028), incident 0001: a real halt on the bulk IN
+# endpoint. `usb_fault=idle:csw` makes the driver read a CSW with no
+# command outstanding on the first block request after two idle seconds;
+# the emulated stick answers with a STALL, which halts the endpoint. The
+# driver must see the Halted state, issue Reset Endpoint and Set TR Dequeue
+# (xHCI 4.6.8, 4.6.10), send CLEAR_FEATURE(ENDPOINT_HALT) (USB 2.0 9.4.5),
+# read the CSW once more (BOT 6.7.2), and when it stalls again leave the
+# Reset Recovery (BOT 5.3.4) to the idle loop: the request answers Io and
+# the next write succeeds.
+name = "usb.fault_csw"
+description = "usbd: a STALL on the bulk IN endpoint is recovered per xHCI/BOT, the request answers Io and the next one succeeds"
+level = "full"
+areas = ["usb", "storage", "diag"]
+usb_storage = true
+cmdline = "qemu_exit shell usb_fault=idle:csw"
+timeout_secs = 90
+stdin = [
+    "repeat 10 ping 10.0.2.2",
+    "write probe.txt after idle",
+    "repeat 3 ping 10.0.2.2",
+    "write probe.txt second try",
+    "diag",
+    "shutdown",
+]
+
+[expect]
+exit = 33
+serial_contains = [
+    "usb-input: injected fault: reading a CSW with no command outstanding",
+    "usb-input: CSW IN dci ",
+    "completion code 6 (Stall Error)",
+    "Halted, dequeue",
+    "Reset Endpoint, Set TR Dequeue, CLEAR_FEATURE(ENDPOINT_HALT)",
+    "usb-input: Reset Endpoint slot ",
+    "usb-input: Set TR Dequeue slot ",
+    "CLEAR_FEATURE(ENDPOINT_HALT) endpoint 0x81: ok",
+    "usb-input: reset recovery (BOT 5.3.4) pending: the class reset is sent when idle",
+    "write: write error",
+    "usb-input: reset recovery (BOT 5.3.4): Bulk-Only Mass Storage Reset",
+    "usb-input: reset recovery done: transport ready",
+    "write: 11 bytes to probe.txt",
+    "fault reported by process",
+    "usb inj w lba",
+    "(code 6)",
+    "usb csw2 fail",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "strict",
+    "Context State Error",
+    "stray transfer event",
+    "no completion event",
+    "usb cmd fail",
+    "re-enumerating",
+]

@@ -3,6 +3,12 @@
 use crate::{self as sys, rights, rpc, Error, Handle};
 use aricode_proto::fs::{Op, Reply, Request, Status, MAX_IO, MAX_REPLACE};
 
+/// Reply wait of a file request (ms): above the block client's
+/// (`block::REPLY_WAIT_MS`, 35 s) plus the file service's own work, so a
+/// slow disk is latency for the caller and never a reply the service
+/// delivers to nobody.
+pub const REPLY_WAIT_MS: u64 = 45_000;
+
 pub struct FsClient {
     service: Handle,
     dma: Handle,
@@ -42,7 +48,7 @@ impl FsClient {
             &req.encode(),
             &extra[..n],
             rpc::GRACE_MS,
-            rpc::GRACE_MS,
+            REPLY_WAIT_MS,
             &mut msg,
         )
         .map_err(FsError::Ipc)?;
@@ -114,7 +120,7 @@ impl FsClient {
             &req.encode(),
             &[],
             rpc::GRACE_MS,
-            rpc::GRACE_MS,
+            REPLY_WAIT_MS,
             &mut msg,
             &mut handles,
         )

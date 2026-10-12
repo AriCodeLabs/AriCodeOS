@@ -4,6 +4,16 @@
 use crate::{self as sys, rights, rpc, Error, Handle};
 use aricode_proto::block::{Op, Reply, Request, Status, MAX_SECTORS};
 
+/// Reply wait of a block request (ms). Chain of waits (incident 0001): the
+/// USB storage server spends at most `REQUEST_BUDGET_MS` = 12 s on one
+/// request, and a request may first queue behind one idle-loop
+/// maintenance step (`REENUMERATE_STEP_MS` = 6 s, a bounded
+/// re-enumeration, the longest step) and one other request:
+/// 12 + 6 + 12 = 30 s < 35 s, assuming at most two concurrent block
+/// clients (one queued request). The file client above waits longer still
+/// (`fs::REPLY_WAIT_MS`, 45 s).
+pub const REPLY_WAIT_MS: u64 = 35_000;
+
 pub struct BlockClient {
     service: Handle,
     dma: Handle,
@@ -32,6 +42,12 @@ impl BlockClient {
         unsafe { core::slice::from_raw_parts_mut(self.buf as *mut u8, self.buf_len as usize) }
     }
 
+    /// One request: the send waits `rpc::GRACE_MS` for the server queue,
+    /// the reply `REPLY_WAIT_MS`. The USB storage server releases the
+    /// buffer handle only after every transfer on it completed, was
+    /// retired, or its slot was disabled; with a reply wait above the
+    /// server's worst case a slow disk shows up here as latency, never as
+    /// a client that gave up while the device still owned its buffer.
     fn call(&self, req: Request, with_buffer: bool) -> Result<Reply, Error> {
         let mut extra = [Handle(0); 1];
         let mut n = 0;
@@ -46,7 +62,7 @@ impl BlockClient {
             &req.encode(),
             &extra[..n],
             rpc::GRACE_MS,
-            rpc::GRACE_MS,
+            REPLY_WAIT_MS,
             &mut msg,
         )?;
         Reply::decode(&msg[..len]).ok_or(Error::Invalid)

@@ -87,9 +87,12 @@ pub mod keys {
     /// Failure protocol (ADR 0028): a component halts on its first
     /// unexpected failure and init restarts nothing.
     pub const STRICT: &str = "strict";
-    /// Tests only (`usb_fault=N` or `usb_fault=idle`): the USB storage driver
-    /// treats its N-th block request, or the first one after two idle
-    /// seconds, as a transport failure.
+    /// Tests only (`usb_fault=N`, `usb_fault=idle`, optionally `:csw`): the
+    /// USB storage driver treats its N-th block request, or the first one
+    /// after two idle seconds, as a transport failure on the CBW; with
+    /// `:csw` it reads a CSW with no command outstanding instead, so the
+    /// bulk IN endpoint really halts (STALL) and the halted-endpoint
+    /// recovery runs.
     pub const USB_FAULT: &str = "usb_fault";
 }
 

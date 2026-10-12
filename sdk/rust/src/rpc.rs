@@ -66,5 +66,7 @@ pub fn call_handles(
 }
 
 /// Slack on top of the deadline a request asks for: what the service is
-/// granted to answer when it is alive.
+/// granted to answer when it is alive. Clients of services whose work is
+/// bounded by a device use their own, longer reply waits
+/// (`block::REPLY_WAIT_MS`, `fs::REPLY_WAIT_MS`).
 pub const GRACE_MS: u64 = 5000;

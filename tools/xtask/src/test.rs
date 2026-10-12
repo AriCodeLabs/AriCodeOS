@@ -462,5 +462,24 @@ fn https_servers(dir: &std::path::Path) -> Result<(HttpsServers, Vec<u8>)> {
         servers.0.push(child);
     }
     std::thread::sleep(Duration::from_millis(300));
+    // Fail loudly if a server died or the port is held by a leftover
+    // process (a killed earlier run): the scenario would otherwise talk to
+    // a stale server with another CA and report a certificate error.
+    for (child, port) in servers.0.iter_mut().zip([
+        aricode_proto::net::TEST_HTTPS_PORT,
+        aricode_proto::net::TEST_HTTPS_UNTRUSTED_PORT,
+    ]) {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(format!(
+                "HTTPS test server on port {port} exited at start ({status}); is the port in use by a leftover openssl?"
+            ));
+        }
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)).is_err() {
+            return Err(format!(
+                "HTTPS test server on port {port} is not accepting connections"
+            ));
+        }
+    }
     Ok((servers, ca))
 }

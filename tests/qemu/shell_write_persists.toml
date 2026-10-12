@@ -25,7 +25,9 @@ stdin = ["cat notas.txt", "shutdown"]
 [boots.expect]
 exit = 33
 serial_contains = [
-    "fsd: AriFS mounted, 7 files",
+    # hola.txt, README, the WASM demo pair, nuevo.txt and the file written in
+    # boot 1; sshd writes no seed while it has no authorized_keys.
+    "fsd: AriFS mounted, 6 files",
     "fs_client: nuevo.txt already existed (persistent disk)",
     "hola persistente",
     "ARICODEOS_SHUTDOWN",

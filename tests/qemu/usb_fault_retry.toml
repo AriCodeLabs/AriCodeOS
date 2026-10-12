@@ -1,25 +1,57 @@
-# Failure protocol (ADR 0028): without `strict`, a transport failure
-# (injected on the first block request after the boot settles (two idle seconds)) is retried after a pause and the
-# transfer recovers, but the failure is never hidden: it is printed and
-# recorded as a fault event that `diag` lists.
+# Failure protocol (ADR 0028): without `strict`, an injected transport
+# failure (a USB Transaction Error reported on the CBW of the first block
+# request after the boot settles, two idle seconds) is never hidden: it is
+# printed with the controller's state and recorded as a fault event that
+# `diag` lists. The endpoint is not Halted, so nothing is reset; a CBW
+# failure needs a Reset Recovery (BOT 5.3.4) before any new CBW, which
+# runs from the idle loop: the request itself answers Io (the shell's
+# first write fails) and the next write, once the transport is Ready
+# again, succeeds.
 name = "usb.fault_retry"
-description = "usbd: an injected transport failure is retried, recovered, and still recorded in diag"
+description = "usbd: an injected CBW transaction error answers Io, is recovered when idle (reset recovery) and recorded in diag"
 level = "full"
 areas = ["usb", "storage", "diag"]
 usb_storage = true
 cmdline = "qemu_exit shell usb_fault=idle"
 timeout_secs = 90
-stdin = ["repeat 10 ping 10.0.2.2", "write probe.txt after idle", "diag", "shutdown"]
+stdin = [
+    "repeat 10 ping 10.0.2.2",
+    "write probe.txt after idle",
+    "repeat 3 ping 10.0.2.2",
+    "write probe.txt second try",
+    "diag",
+    "shutdown",
+]
 
 [expect]
 exit = 33
 serial_contains = [
-    "usb-input: transfer failed (completion code 4), retry in 50 ms",
-    "usb-input: transfer recovered",
+    "usb-input: CBW OUT dci ",
+    "completion code 4 (USB Transaction Error)",
+    "injected",
+    "Running, dequeue",
+    "nothing to retire",
+    "usb-input: reset recovery (BOT 5.3.4) pending: the class reset is sent when idle",
+    "usb-input: WRITE(10) lba ",
+    "transport failure",
+    "write: write error",
+    "usb-input: reset recovery (BOT 5.3.4): Bulk-Only Mass Storage Reset",
+    "usb-input: the device answers GET_STATUS",
+    "Configure Endpoint (drop + add) slot",
+    "CLEAR_FEATURE(ENDPOINT_HALT) endpoint 0x81: ok",
+    "usb-input: reset recovery done: transport ready",
     "write: 11 bytes to probe.txt",
     "fault reported by process",
-    "usb inj write lba",
+    "usb inj w lba",
     "(code 4)",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "strict", "transport failure"]
+serial_absent = [
+    "KERNEL PANIC",
+    "strict",
+    "Context State Error",
+    "stray transfer event",
+    "no completion event",
+    "usb cmd fail",
+    "re-enumerating",
+]
