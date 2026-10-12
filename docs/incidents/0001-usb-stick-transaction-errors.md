@@ -384,3 +384,30 @@ that region (or under sustained sequential writes), its firmware stalls
 while handling the failure, and the earlier transaction errors were the
 same stalls seen through the old driver's broken recovery. To be
 confirmed with the sense data and with a second stick on the same port.
+
+## Second laptop run with `strict` (develop 06fc219, REQUEST SENSE added)
+
+Same sequence. Short writes and reads: no failure. `update`: the
+download failed again at **the same command**, `WRITE(10) lba 188433
+count 16`, completion code 0, at 53.5 s of uptime (the run before: at
+102.9 s). `diag` events:
+
+```
+[53.457 s] fault reported by process 7: usb sense fail (code 0)
+[53.502 s] fault reported by process 7: usb w lba 188433 (code 0)
+[53.946 s] process 7 'usb_input' exited with code 15
+```
+
+- The REQUEST SENSE after the Command Failed CSW did not get an answer
+  either (`usb sense fail`), so the device's reason is still unknown; the
+  console dump says which (no answer or no budget left).
+- Two runs, two boots, the same LBA: the failure is deterministic for
+  that sector range (188433-188448, the second 8 KiB chunk of the
+  `UPDATE` partition), while the first chunk (188417) and all the small
+  AriFS writes succeed. Versions 4 and 5 were downloaded into the same
+  partition without error on 2026-10-12 before the driver rewrite.
+
+Decisive next check, independent of our driver: a read-write test of
+that sector range on the development machine (`badblocks -w` over the
+`UPDATE` partition, scratch space) and the same download on a second
+stick.
