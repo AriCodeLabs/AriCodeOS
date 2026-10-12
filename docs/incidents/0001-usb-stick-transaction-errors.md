@@ -437,3 +437,43 @@ host, independently of our driver (write and read back a 2.3 MiB
 pattern at sector 188416 and watch the kernel log). If Linux sees the
 same stall or errors, the stick is the cause; if not, the difference is
 in our transfer (SuperSpeed sequencing, write pattern, timing).
+
+Console dump of the second run (photo):
+
+```
+usb-input: recovering dci 3 (state 1 Running, dequeue 0x4a0e80): Stop Endpoint, Set TR Dequeue
+usb-input: dci 3: TD stopped at trb 0x4a0ea0, completion code 26 (Stopped)
+usb-input: Stop Endpoint slot 1 dci 3: completion code 1 (Success)
+usb-input: Set TR Dequeue slot 1 dci 3: completion code 1 (Success)
+usb-input: CSW IN dci 3 refused: the request's transfer window is over
+usb-input: reset recovery (BOT 5.3.4) pending: the class reset is sent when idle
+usb-input: strict: halting on a transport failure
+  command   WRITE(10) lba 188433 count 16
+  completion code 0 attempt 0
+  device sense not available (no CSW with Command Failed, or no sense data)
+  slot 1 bulk in dci 3 enqueue 3 cycle 1; bulk out dci 4 enqueue 14 cycle 1; tag 716; transport reset pending
+  device 1f75:0918 bcdUSB 0310 bMaxPower 124 mA port 5 speed 4 (super)
+  ep 1 Running dequeue 0x4a0740; ep 3 Stopped dequeue 0x4a0eb0; ep 4 Running dequeue 0x4a0f80;
+  port 5 PORTSC 0x1203 CCS=1 PED=1 OCA=0 PR=0 PLS=0 PP=1 speed=4 ...; USBSTS 0x18 HSE=0 HCE=0
+```
+
+Reading:
+
+- The timeout was on the bulk IN endpoint (dci 3): the **CSW stage** of
+  the WRITE. The device accepted the 8 KiB of data (OUT completed) and
+  did not return the status within the 3 s CSW timeout. The host-side
+  recovery worked exactly as specified (TD stopped with code 26, Stop
+  Endpoint and Set TR Dequeue Success); the CSW re-read and the REQUEST
+  SENSE were refused because the request's transfer window was spent.
+- Device: 1f75:0918, Innostor IS918 USB 3.0 flash controller, at
+  SuperSpeed, 124 mA. Tag 716: the 716th command of the boot.
+- Revised working hypothesis: the stick takes seconds to complete some
+  writes (internal garbage collection on cheap NAND, no `SYNCHRONIZE
+  CACHE`), our CSW timeout (3 s now, 1 s in the old driver) declares it
+  dead, and the old driver's next CBW to a still-busy device produced the
+  transaction errors. Linux's 30 s SCSI command timeout would simply see
+  a slow stick. The first run's failure at the same LBA and the "device
+  answers nothing" after the stall fit a firmware busy for seconds.
+- To confirm on the host: time the writes of the same region from Linux
+  (`dd` with `oflag=direct` in 8 KiB chunks, watching per-write latency
+  and the kernel log).
