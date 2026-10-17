@@ -44,7 +44,7 @@ the evidence is recorded in `docs/hardware.md`.
 | In-house cryptography, RNG, signed images, A/B with rollback | validated in QEMU | `crypto.*`, `update.*`; not Secure Boot |
 | VT-d IOMMU with one domain per driver | validated in QEMU | `iommu.*` |
 | USB stick image | validated in QEMU (`usb.image_boot`) | pending on hardware |
-| Out-of-tree applications: signed packages installed and updated in AriFS (`cargo xtask app-pack`, `installer`) | validated in QEMU, with power cuts | `apps.*`; no network distribution |
+| Out-of-tree applications: signed packages installed and updated in AriFS (`cargo xtask app-pack`, `installer`) | validated in QEMU, with power cuts | `apps.*`; network upgrades from signed update sources (ADR 0029) |
 | Measurements: `bench` (syscall, IPC, files, percentiles), idle time per CPU, `diag` report | validated in QEMU | `perf.*`, `docs/performance.md`; figures only comparable with the same build and QEMU mode |
 | Booting on a laptop (Phase 34) | proposed | needs the reference machine |
 
@@ -120,7 +120,8 @@ libs/crypto/     SHA-256, SHA-512, Ed25519 and ChaCha20 from scratch, checked ag
 keys/dev/        development Ed25519 key pair (tests only; see its README)
 libs/wasm/       WebAssembly MVP interpreter (integers, bounded memory, imports) with validator and host tests
 apps/wasm-demo/  portable WebAssembly example module; apps/wasm-runner runs it with the Capability API
-apps/updater/    A/B updater: verifies the UPDATE image and installs it in the inactive slot
+apps/updater/    update client: signed indexes from the owner's sources, system image into the inactive slot, app packages for the installer (ADR 0029)
+libs/update-index/ update sources, signed index, version and downgrade rules (ADR 0029)
 libs/ab/         A/B boot state, signed images and slot policy (AriBoot, init, updater)
 boot/            AriBoot: UEFI loader (crate `ariboot`)
 kernel/          AriKernel (crate `arikernel`), ELF64 in the higher half

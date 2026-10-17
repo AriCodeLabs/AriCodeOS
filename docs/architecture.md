@@ -68,10 +68,11 @@ libs/http/           aricode-http: GET, response parsing, Content-Length and chu
 libs/net/            aricode-net: Ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP client and DNS without alloc (no_std, host tests)
 libs/arifs/          aricode-arifs: AriFS v1, flat directory with a fixed-capacity file table, CRC32 and replacement journal over `BlockDevice` (no_std, host tests with power cuts)
 libs/pkg/            aricode-pkg: signed application packages (manifest with name, version and hashes; Ed25519 signature; ELF; application manifest)
+libs/update-index/   aricode-update-index: update sources, signed index, rollback serials, version and downgrade rules (ADR 0029)
 sdk/proto/           aricode-proto: versioned IPC protocols of the services (block v1, file v1, net v1, input v1, window v1, launch v1) (no_std, host tests)
 sdk/runtime/         aricode-rt: user program runtime (`entry!`, 256 KiB heap, panic, fmt); re-exports aricode-sys
 sdk/build/           aricode-build: one-line `build.rs` that links with `sdk/rust/user.ld`
-apps/updater/        updater: verifies the UPDATE image and installs it in the inactive slot (`block` capability)
+apps/updater/        updater: signed indexes from the update sources, system image into the inactive slot, packages for the installer (`block`, `install`; ADR 0029)
 apps/wasm-demo/      wasm_demo.wasm: portable module compiled to wasm32 that only uses the imported Capability API
 apps/wasm-runner/    wasm_runner: WebAssembly runtime as an application with a manifest (reads the module from its private directory)
 apps/hello/          hello_app: SDK example application (console, permissions, time)
@@ -1324,13 +1325,37 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
 
 - Channel: `build/update/{manifest.txt, aricodeos-N.img}` from `cargo xtask
   publish-update`, served by `serve-update` or any web server.
-- `apps/updater` (caps system, fs, net, block): channel manifest, version
+- `apps/updater` (then caps system, fs, net, block): channel manifest, version
   comparison with the active slot, streaming download into `UPDATE`
   (`aricode-https::get_with` over `aricode-http::fetch_with`), then the
   Phase 30 verification and install. Shell `update [URL|check|apply]`.
 - Kernel `map_foreign` is idempotent per region; servers map client buffers
   per request (`block::map_client_buffer`).
 - Scenario `update.network` (`host_update = true`, disk `update-empty`).
+
+## Update sources and signed index (ADR 0029)
+
+- `libs/update-index` (`aricode-update-index`, no_std + alloc, host tests):
+  index format and strict parser, Ed25519 verification before parsing,
+  rollback serials, version comparison and the downgrade rule, best offer
+  across sources, the source list (normalization, migration from
+  `update_url`), stored index copies, the `updates.log` history, and the
+  updater and installer argument constants.
+- `apps/updater` (caps system, net, block, install): `REFRESH` fetches and
+  verifies each source's `index`/`index.sig`, stores verified copies in
+  `updater/index-N` and reports; `UPGRADE` re-verifies them, downloads the
+  system image into its memory buffer, checks size, SHA-256, its signed
+  manifest and version, writes the inactive slot (header last) and
+  schedules it; packages are checked the same way and staged in
+  `pkgs/NAME.aripkg`. `APPLY` installs the `UPDATE` partition as before.
+- `apps/installer`: `ALLOW_DOWNGRADE` flag, history lines, fault events.
+- Shell: `update`, `update add|remove|sources|apply`, `upgrade
+  [--allow-downgrade]` (runs the installer when the updater staged packages).
+- xtask: `publish-update [--version N | --no-system] [--app DIR:VERSION]`,
+  `usb-image --update-source URL`, scenario table `[host_update]`.
+- Scenarios: `update.sources`, `update.migrate_legacy_url`,
+  `update.network`, `update.tampered_index`, `update.refuse_downgrade`,
+  `apps.upgrade_network`.
 
 ## DHCP address probe (2026-10-12)
 

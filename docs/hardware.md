@@ -186,26 +186,31 @@ Without `--authorized-key` the image has no `authorized_keys` and sshd does
 not listen: no port is open. Refused keys are logged on the laptop with the
 peer's address.
 
-## Updating without the USB stick (ADR 0027)
+## Updating without the USB stick (ADR 0027, ADR 0029)
 
 On the development machine, from the repository:
 
 ```bash
-cargo xtask serve-update --version 2 --port 8765
+cargo xtask serve-update --version 2 --port 8765 [--app examples/hello_ext:2]
 ```
 
-It builds and signs the current system image, publishes it in `build/update/`
-and serves it on the LAN (any free port; the default 8080 is often taken);
-bump `--version` on every publication (the laptop skips a version equal to
-the one it runs). On the laptop, console or SSH:
+It builds and signs the current system image (and the given app packages),
+writes the signed `index` and `index.sig` into `build/update/` and serves it
+on the LAN (any free port; the default 8080 is often taken). Bump
+`--version` on every publication: the laptop never reinstalls the version it
+runs and refuses an older one. On the laptop, console or SSH:
 
 ```text
-update http://192.168.1.16:8765/     # first time: saves the channel URL
-update check                         # installed and available versions
-update                               # download, verify, install into the inactive slot
+update add 192.168.1.16:8765         # first time: register the source
+update                               # verify the index, show what is new (installs nothing)
+upgrade                              # verify and install it; the system goes to the inactive slot
 reboot
 ```
 
 The loader boots the new slot; if it does not come up, three attempts later
-it returns to the previous one. The channel URL can also be baked into the
-stick with `cargo xtask usb-image --update-url URL`.
+it returns to the previous one. `update sources` lists the sources, `update
+remove N` drops one, `cat updates.log` shows what was installed and
+`upgrade --allow-downgrade` is the only way back to an older version. The
+source can also be baked into the stick with `cargo xtask usb-image
+--update-source URL`; a stick made with the old `--update-url` is migrated
+on its first `update`.
