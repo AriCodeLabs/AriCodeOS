@@ -104,9 +104,9 @@ one-file directory. `history::tests`: `appended` starts with the new line
 when the log is absent, appends when it is present, refuses a failed read,
 trims an overgrown log and refuses one far over the limit.
 
-`cargo xtask check`, `cargo test -p aricode-update-index` (36: 25
-existing, 8 `files`, 2 `history`, 1 `installed_path`) and `cargo test -p
-xtask` (27) pass on the branch.
+`cargo xtask check`, `cargo test -p aricode-update-index` (40: 25
+existing, 8 `files`, 2 `history`, 1 `installed_path`, 4 `run`) and
+`cargo test -p xtask` (27) pass on the branch.
 
 No QEMU-level regression was added: there is no file-service fault
 injection today (the test-only command-line keys are `test`, `shell_fault`,
@@ -160,6 +160,41 @@ asked for these corrections, made in the third commit:
   of a client that died; see incident 0011
   (`0011-arifs-descriptors-not-reclaimed.md`). With this fix a full table
   is refused visibly instead of being read as "absent".
+
+## Second audit (2026-10-18, fourth commit)
+
+- A1 (test gap). The end of a `STAGED` run is now
+  `aricode_update_index::run::settle_staged(prior, outcomes)`, a pure
+  function over one `Outcome` per entry (`Installed`, `Refused(code)`,
+  `Failed(code)`): a failure anywhere keeps `[staged]` and the exit code is
+  the first failure's; otherwise the list is consumed and the code is the
+  refusal recorded before the entries (malformed lines), else the first
+  refusal's nonzero code, else 0. The installer only produces the outcomes
+  and applies the decision. Host tests (`run::tests`, over the `files`
+  mock for the state text): all installed consumes with code 0 and keeps
+  the plan; refusals consume and name the first fault; a failure keeps the
+  list unchanged and exits nonzero; a failure wins over refusals in any
+  order, the first of two failures names the code, an empty list is a
+  no-op. The updater's `report` decision (unreadable state: no plan saved,
+  nonzero) was not factored: it is one `Result` match around a write, and
+  the messages are the only logic.
+- A2. `write_state_section` updates the in-memory `state` only on an
+  acknowledged write. If the `[staged]` clear's reply is lost after the
+  replace landed, `[installed]` written from the old text would bring the
+  list back (harmless: the next run refuses the same versions as already
+  installed, but confusing). The installer now re-reads the state after a
+  failed clear and writes nothing more if that read fails too; the
+  invariant is stated at the call.
+- A3. `report` with an unreadable state (or a failed plan write) no longer
+  ends with "everything is up to date" or "N upgrade(s) available: run
+  upgrade": it says "N upgrade(s) found but the plan was not saved
+  (updater/state could not be read | write failed): run update again". Its
+  exit code is the first failure of the run (`first()`), so a disk error
+  is not overwritten by a later state fault; every failure is still its
+  own fault event.
+- A4. The kept-list message now says what is true: "staged list kept for
+  inspection in updater/state (a failure, not a refusal); upgrade stages
+  again".
 
 ## Open
 

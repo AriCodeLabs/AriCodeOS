@@ -45,6 +45,7 @@ use aricode_proto::fs::Status;
 use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::{self, kind, permissions};
 use aricode_update_index::files::{self, Files, ReadError};
+use aricode_update_index::run::{self, Outcome};
 use aricode_update_index::{self as upd, compare, installer_arg, lists, Change};
 
 /// An installed package is replaced in one go: the AriFS journal (32 KiB).
@@ -468,68 +469,64 @@ fn install_staged(fs: &mut FsClient, allow_downgrade: bool, pubkey: &[u8; 32]) -
     };
     let text = lists::section(&state, lists::STAGED).unwrap_or_default();
     let (entries, rejected) = lists::parse_staged(&text);
-    let mut result = 0;
-    // A refusal (tampered, unverified, downgrade, same version) consumes
-    // the list; a failure (a request the file service did not answer, a
-    // write error) keeps it, so what was staged stays visible and can be
-    // installed by the next run.
-    let mut failed = false;
+    // What happens to the list and the exit code is `run::settle_staged`
+    // (host-tested): refusals consume the list, a failure keeps it.
+    let mut prior = 0;
     if rejected > 0 {
-        result = fault(
+        prior = fault(
             code::STAGE,
             "inst-stage-path",
             &format!("{rejected} staged entry(ies) name another file or are malformed: refused"),
         );
     }
-    let (mut done, mut skipped) = (0u64, 0u64);
+    let mut outcomes: Vec<Outcome> = Vec::new();
     for e in &entries {
         let path = upd::main_path(e.file);
         let bytes = match read_all(fs, &path, MAX_PACKAGE) {
             Ok(Some(bytes)) if sha256(&bytes) == e.sha256 => bytes,
             Ok(_) | Err(ReadError::TooLarge) => {
-                result = fault(
+                outcomes.push(Outcome::Refused(fault(
                     code::STAGE,
                     "inst-stage-hash",
                     &format!("{path} missing or not what the updater staged: refused"),
-                );
-                skipped += 1;
+                )));
                 continue;
             }
             Err(ReadError::Failed(err)) => {
-                result = fault(
+                outcomes.push(Outcome::Failed(fault(
                     code::PKG_READ,
                     "inst-pkg-read",
                     &format!("{path} cannot be read ({err:?}): refused"),
-                );
-                failed = true;
-                skipped += 1;
+                )));
                 continue;
             }
         };
         match aricode_pkg::verify(&bytes, pubkey) {
             Ok(v) if v.manifest.name_str() == e.name && v.manifest.version == e.version => {}
             _ => {
-                result = fault(
+                outcomes.push(Outcome::Refused(fault(
                     code::VERIFY,
                     "inst-pkg-verify",
                     &format!("{path} fails verification or differs from the staged list: refused"),
-                );
-                skipped += 1;
+                )));
                 continue;
             }
         }
         match install_one(fs, &bytes, &path, allow_downgrade, pubkey) {
-            Ok(true) => done += 1,
-            Ok(false) => skipped += 1,
+            Ok(true) => outcomes.push(Outcome::Installed),
+            // Refused by `install_one` (its fault is recorded there; the
+            // same version is no fault): no exit code of its own, as before.
+            Ok(false) => outcomes.push(Outcome::Refused(0)),
             Err(code) => {
-                result = code;
-                failed = true;
+                outcomes.push(Outcome::Failed(code));
                 break;
             }
         }
     }
-    if failed {
-        say!("staged list kept (a failure, not a refusal): run upgrade again");
+    let end = run::settle_staged(prior, &outcomes);
+    let mut result = end.code;
+    if !end.consume {
+        say!("staged list kept for inspection in updater/state (a failure, not a refusal); upgrade stages again");
     } else if !write_state_section(fs, &mut state, lists::STAGED, "") {
         // Consumed: a later run (with or without --allow-downgrade) cannot
         // install the same files again.
@@ -538,8 +535,21 @@ fn install_staged(fs: &mut FsClient, allow_downgrade: bool, pubkey: &[u8; 32]) -
             "inst-stage-clear",
             "cannot empty the staged list",
         );
+        // `state` only follows an acknowledged write. The clear's reply
+        // may have been lost after the replace landed: writing
+        // `[installed]` from the old text would bring the list back, so
+        // the state is read again, and nothing more is written when that
+        // fails too (one more fault, after a failed write, is not noise).
+        match read_state(fs) {
+            Ok(fresh) => state = fresh,
+            Err(_) => return result,
+        }
     }
-    say!("{done} package(s) installed, {skipped} skipped");
+    say!(
+        "{} package(s) installed, {} skipped",
+        end.installed,
+        end.skipped
+    );
     let listed = write_installed(fs, &mut state, pubkey);
     if result != 0 {
         result

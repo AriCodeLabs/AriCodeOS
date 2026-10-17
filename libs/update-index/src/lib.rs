@@ -28,7 +28,8 @@
 //! downgrade rules ([`policy`]), the source list ([`sources`]), the stored
 //! copy of a verified index ([`stored`]), optional-file reads that never
 //! mistake a failure for absence ([`files`]), the lists the updater and the
-//! installer exchange ([`lists`]) and the install history ([`history`]).
+//! installer exchange ([`lists`]), the end of a staged install ([`run`])
+//! and the install history ([`history`]).
 
 #![no_std]
 
@@ -39,6 +40,7 @@ pub mod history;
 pub mod index;
 pub mod lists;
 pub mod policy;
+pub mod run;
 pub mod sources;
 pub mod stored;
 

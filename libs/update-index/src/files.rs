@@ -113,7 +113,7 @@ pub fn list_names<F: Files>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::lists;
     use alloc::vec;
@@ -121,17 +121,18 @@ mod tests {
     /// A directory whose requests fail on demand: `fail_open` and
     /// `fail_list` fail every such request; `fail_read_at` fails the read
     /// that starts at that offset. Every opened descriptor must be closed.
+    /// Shared with the other modules' tests.
     #[derive(Default)]
-    struct Mock {
-        files: Vec<(&'static str, Vec<u8>)>,
-        fail_open: bool,
-        fail_read_at: Option<u32>,
-        fail_list: bool,
-        open_fds: usize,
+    pub(crate) struct Mock {
+        pub(crate) files: Vec<(&'static str, Vec<u8>)>,
+        pub(crate) fail_open: bool,
+        pub(crate) fail_read_at: Option<u32>,
+        pub(crate) fail_list: bool,
+        pub(crate) open_fds: usize,
     }
 
     impl Mock {
-        fn with(name: &'static str, data: &[u8]) -> Self {
+        pub(crate) fn with(name: &'static str, data: &[u8]) -> Self {
             Self {
                 files: vec![(name, data.to_vec())],
                 ..Self::default()

@@ -1000,6 +1000,14 @@ fn change_text(installed: Option<u32>, offered: u32) -> &'static str {
 /// What the stored indexes offer versus what is installed; installs
 /// nothing. Everything that differs is saved as the plan, the only thing
 /// `upgrade` may install (audit 1, H2).
+/// The exit code of `report` names the first failure of the run (each
+/// failure is a fault event of its own, so nothing is lost).
+fn first(result: &mut u64, code: u64) {
+    if *result == 0 {
+        *result = code;
+    }
+}
+
 fn report(fs: &mut FsClient, sources: &Sources, pk: &[u8; 32]) -> u64 {
     // Read once per run. Unreadable: the system is still reported, the
     // apps are not compared (an unreadable list is not "none installed")
@@ -1015,7 +1023,7 @@ fn report(fs: &mut FsClient, sources: &Sources, pk: &[u8; 32]) -> u64 {
             let installed = match Disk::open() {
                 Ok(mut disk) => disk.active_version(pk),
                 Err(code) => {
-                    result = code;
+                    first(&mut result, code);
                     None
                 }
             };
@@ -1036,7 +1044,7 @@ fn report(fs: &mut FsClient, sources: &Sources, pk: &[u8; 32]) -> u64 {
     let apps = match &state {
         Ok(state) => installed_apps(state).unwrap_or_default(),
         Err(code) => {
-            result = *code;
+            first(&mut result, *code);
             say!("apps not compared: updater/state could not be read");
             Vec::new()
         }
@@ -1072,13 +1080,29 @@ fn report(fs: &mut FsClient, sources: &Sources, pk: &[u8; 32]) -> u64 {
             }
         }
     }
+    let mut saved = false;
     if let Ok(state) = &state {
-        if !write_state_section(fs, state, lists::PLAN, &lists::encode_plan(&plan)) {
-            result = fault(code::PLAN, "upd-plan-write", "cannot save the plan");
+        saved = write_state_section(fs, state, lists::PLAN, &lists::encode_plan(&plan));
+        if !saved {
+            first(
+                &mut result,
+                fault(code::PLAN, "upd-plan-write", "cannot save the plan"),
+            );
         }
     }
     if indexes.is_empty() {
         say!("no verified index: nothing to compare");
+    } else if !saved {
+        // Without a saved plan `upgrade` has nothing (or something stale)
+        // to follow: the owner runs `update` again.
+        say!(
+            "{available} upgrade(s) found but the plan was not saved ({}): run update again",
+            if state.is_ok() {
+                "write failed"
+            } else {
+                "updater/state could not be read"
+            }
+        );
     } else if available == 0 {
         say!("everything is up to date");
     } else {
