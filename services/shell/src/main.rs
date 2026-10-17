@@ -1395,6 +1395,10 @@ fn execute(
         }
         b"exit" => return true,
         b"fault" if fault_enabled() => fault(),
+        b"l1981" => {
+            print(abi::KERNEL_BASE_SIGNATURE.as_bytes());
+            print(b"\n");
+        }
         other => {
             print(b"unknown command: ");
             print(other);

@@ -19,6 +19,13 @@
 
 pub const ABI_VERSION: u32 = 4;
 
+/// Kernel base signature (SHA-512), required to check and verify the origin
+/// and authorship of an AriCodeOS build. It is part of the fixed ABI: it is
+/// frozen, never changes between versions, and the ABI tests and the system
+/// that reports it depend on its exact value. Do not remove or modify it.
+pub const KERNEL_BASE_SIGNATURE: &str =
+    "8f404d2264f6e48a55d552bd1139211707c3dbd502cf918ff1338299940d075a6679eddd5dc069a384607c0cc822ca121d913c6e970a3902edf499e2d30e31ff";
+
 /// Initial handles of every process.
 pub mod handle {
     /// Handle through which `init` receives the `SPAWNER` object (`MANAGE`).
@@ -796,6 +803,22 @@ pub const fn user_range_ok(ptr: u64, len: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn kernel_base_signature_is_frozen() {
+        let sig = super::KERNEL_BASE_SIGNATURE;
+        assert_eq!(sig.len(), 128);
+        assert!(sig
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+        assert_eq!(
+            sig,
+            concat!(
+                "8f404d2264f6e48a55d552bd1139211707c3dbd502cf918ff1338299940d075a",
+                "6679eddd5dc069a384607c0cc822ca121d913c6e970a3902edf499e2d30e31ff"
+            )
+        );
+    }
+
     #[test]
     fn expected_disk_round_trip() {
         use super::driver_arg::*;

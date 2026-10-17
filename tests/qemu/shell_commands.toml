@@ -24,6 +24,7 @@ stdin = [
     "run hello_app 7",
     "run no-existe",
     "nada",
+    "l1981",
     "shutdown",
 ]
 
@@ -56,6 +57,7 @@ serial_contains = [
     "run: hello_app exited with 0",
     "run: no-existe: not found in the initrd",
     "unknown command: nada (help)",
+    "8f404d2264f6e48a55d552bd1139211707c3dbd502cf918ff1338299940d075a6679eddd5dc069a384607c0cc822ca121d913c6e970a3902edf499e2d30e31ff",
     "AriCodeOS: shutting down",
     "ARICODEOS_SHUTDOWN",
 ]
