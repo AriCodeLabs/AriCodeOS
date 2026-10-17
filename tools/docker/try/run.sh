@@ -14,10 +14,10 @@ cp /usr/share/OVMF/OVMF_VARS_4M.fd "$work/vars.fd"
 cat <<EOF
 AriCodeOS ${ARICODEOS_VERSION} in QEMU (no KVM: give it a few seconds).
 AriCodeOS by Edwin F. Veliz Jaramillo (lynxcraft), licensed under Apache-2.0.
-https://aricode.org  https://github.com/AriCodeLabs/AriCodeOS
+https://www.aricodeos.org/  https://github.com/AriCodeLabs/AriCodeOS
 
 At the ari> prompt try: help, ps, mem, cpus, services, net, ls, diag,
-ping 10.0.2.2, dns aricode.org, http https://aricode.org
+ping 10.0.2.2, dns www.aricodeos.org, http https://www.aricodeos.org/
 Quit with Ctrl-A X. Found something? Please open an issue on GitHub.
 
 EOF

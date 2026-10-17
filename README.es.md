@@ -87,6 +87,16 @@ ningún puerto ni contiene claves. Un resultado de QEMU dentro de Docker es un
 resultado de QEMU: no sustituye a las comprobaciones en hardware de
 `docs/hardware.md`.
 
+Para probar el sistema sin compilarlo, `tools/docker/try/Dockerfile` mete la
+imagen del pendrive en una imagen que la arranca en QEMU con el shell `ari>`
+en tu terminal (se sale con Ctrl-A X):
+
+```bash
+cargo xtask usb-image
+docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.10.0 .
+docker run --rm -it aricodeos
+```
+
 ## Uso
 
 ```bash

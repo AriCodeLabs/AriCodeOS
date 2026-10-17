@@ -6,7 +6,7 @@
 # shell) on your terminal. Same QEMU machine as `cargo xtask run`: q35,
 # qemu64, VT-d, virtio disk and network, no KVM, so it runs on any host
 # with Docker. This image is for trying the system; development uses the
-# image of the root Dockerfile.
+# image of `tools/docker/Dockerfile`.
 #
 # Build, from the repository root, after `cargo xtask usb-image`:
 #   docker build -f tools/docker/try/Dockerfile --build-arg VERSION=0.10.0 -t aricodeos .
@@ -31,7 +31,7 @@ LABEL org.opencontainers.image.title="AriCodeOS" \
       org.opencontainers.image.description="AriCodeOS booted in QEMU: a capability-based microkernel operating system in Rust" \
       org.opencontainers.image.version="$VERSION" \
       org.opencontainers.image.authors="Edwin F. Veliz Jaramillo (lynxcraft)" \
-      org.opencontainers.image.url="https://aricode.org" \
+      org.opencontainers.image.url="https://www.aricodeos.org/" \
       org.opencontainers.image.source="https://github.com/AriCodeLabs/AriCodeOS" \
       org.opencontainers.image.licenses="Apache-2.0"
 

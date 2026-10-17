@@ -84,6 +84,16 @@ the crate downloads between runs. The image exposes no port and holds no
 key. A QEMU result inside Docker is a QEMU result: it does not replace the
 hardware checks of `docs/hardware.md`.
 
+To try the system without building it, `tools/docker/try/Dockerfile` packs
+the USB stick image into an image that boots it in QEMU with the `ari>`
+shell on your terminal (quit with Ctrl-A X):
+
+```bash
+cargo xtask usb-image
+docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.10.0 .
+docker run --rm -it aricodeos
+```
+
 ## Usage
 
 ```bash
