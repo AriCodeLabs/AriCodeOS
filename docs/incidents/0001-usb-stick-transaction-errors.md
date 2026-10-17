@@ -654,3 +654,13 @@ Open after this change:
 - A given-up HID endpoint stays silent for the rest of the boot: HID
   devices are not re-enumerated (only the storage is), not even after a
   reconnection.
+- First QEMU runs of the HID scenarios (2026-10-17): the injection never
+  fired because QMP keys reached the virtio keyboard, the most recently
+  activated QEMU input handler under `shell`; `usb.hid_fault` and
+  `strict.usb_hid_halt` now run without virtio input (`usb_hid_only_input`)
+  and pace their keys (`key_delay_ms`, the usb-kbd queue holds 16
+  scancodes). `shell.usb_keyboard` and `shell.usb_keyboard_msi` have the
+  same routing and in fact type on the virtio keyboard; they still pass
+  but do not exercise USB typing. QEMU's xHCI also sets a stopped
+  interrupt endpoint Running again from its kick timer (against 4.6.9),
+  so the HID recovery there reads Stopped or Running by timing.
