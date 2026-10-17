@@ -921,29 +921,48 @@ fn run_updater(fs: &mut FsClient, arg: u64) -> Option<u64> {
 }
 
 /// Reads a whole small file: `Ok(None)` if it does not exist.
+/// The main file space as `update_index::files::Files`: only an explicit
+/// `NotFound` means a file is absent; any other failure is an error, never
+/// mistaken for "missing" (incident 0008).
+struct MainFiles<'a>(&'a mut FsClient);
+
+impl update_index::files::Files for MainFiles<'_> {
+    type Fd = u32;
+    type Error = aricode_rt::sys::fs::FsError;
+
+    fn open(&mut self, name: &str) -> Result<Option<u32>, Self::Error> {
+        use aricode_proto::fs::Status;
+        use aricode_rt::sys::fs::FsError;
+        match self.0.open(name) {
+            Ok(fd) => Ok(Some(fd)),
+            Err(FsError::Status(Status::NotFound)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn read(&mut self, fd: &u32, offset: u32, out: &mut [u8]) -> Result<usize, Self::Error> {
+        self.0.read(*fd, offset, out)
+    }
+
+    fn close(&mut self, fd: u32) {
+        let _ = self.0.close(fd);
+    }
+
+    fn list(
+        &mut self,
+        index: u32,
+        name_out: &mut [u8; update_index::files::NAME_LEN],
+    ) -> Result<Option<(usize, u64)>, Self::Error> {
+        self.0.list(index, name_out)
+    }
+}
+
 fn read_small(
     fs: &mut FsClient,
     name: &str,
     max: usize,
 ) -> Result<Option<alloc::vec::Vec<u8>>, ()> {
-    use aricode_proto::fs::Status;
-    use aricode_rt::sys::fs::FsError;
-    let fd = match fs.open(name) {
-        Ok(fd) => fd,
-        Err(FsError::Status(Status::NotFound)) => return Ok(None),
-        Err(_) => return Err(()),
-    };
-    let mut data = alloc::vec::Vec::new();
-    let mut chunk = [0u8; 512];
-    let result = loop {
-        match fs.read(fd, data.len() as u32, &mut chunk) {
-            Ok(0) => break Ok(Some(data)),
-            Ok(n) if data.len() + n <= max => data.extend_from_slice(&chunk[..n]),
-            _ => break Err(()),
-        }
-    };
-    let _ = fs.close(fd);
-    result
+    update_index::files::read_optional(&mut MainFiles(fs), name, max).map_err(|_| ())
 }
 
 /// The source list, migrating `update_url` (ADR 0027) when there is no
@@ -993,10 +1012,6 @@ fn save_sources(fs: &mut FsClient, sources: &update_index::Sources, event: &str)
         return false;
     }
     let history_path = update_index::main_path(update_index::HISTORY_FILE);
-    let existing = read_small(fs, &history_path, update_index::HISTORY_MAX)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
     let line = alloc::format!(
         "{event} (from {})",
         if session() {
@@ -1005,7 +1020,22 @@ fn save_sources(fs: &mut FsClient, sources: &update_index::Sources, event: &str)
             "the console"
         }
     );
-    let log = update_index::history::append(&existing, &line, update_index::HISTORY_MAX);
+    // A history that cannot be read is not rewritten (incident 0008): the
+    // source change is done and was said, but the older lines are never
+    // replaced by this one.
+    let log = match update_index::history::appended(
+        &mut MainFiles(fs),
+        &history_path,
+        &line,
+        update_index::HISTORY_MAX,
+    ) {
+        Ok(log) => log,
+        Err(_) => {
+            print(b"update: cannot read the install history: not rewritten\n");
+            let _ = sys::event_record(2, "sh-history-read");
+            return true;
+        }
+    };
     if save_file(fs, &history_path, &log).is_err() {
         print(b"update: cannot write the install history\n");
     }
