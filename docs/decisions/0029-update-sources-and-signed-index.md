@@ -227,8 +227,12 @@ There is no key rotation in the protocol yet (see below).
   uses `sources`, `indexes` (every stored copy), `state` (installed, plan
   and staged sections), `last.log`, `history.log` and up to four stage
   files, plus `update_url` on migrated machines. A first `update` and a
-  system `upgrade` need four free entries (`update.fs_nearly_full`); a
-  full table is a visible write fault, never a silent skip.
+  system `upgrade` need four free entries, one more per staged package
+  (`update.fs_nearly_full` covers the system and one app with five); a
+  full table is a visible write fault, never a silent skip. A `state` or
+  `indexes` file that cannot be read (or is oversized) is a fault and is
+  not rewritten in that run, so neither the exchanged lists nor the stored
+  serials are reset silently.
 - Limits: four sources, four staged packages per `upgrade`, a 4 KiB index,
   sixteen apps per index, 32 KiB packages, app names of 20 bytes, the
   4 MiB image buffer.

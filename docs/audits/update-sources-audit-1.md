@@ -79,3 +79,13 @@ New scenarios (not run): `update.installed_unknown` (H1, disk
 `pending-b-older-update`), `apps.downgrade_allowed` (positive
 `upgrade --allow-downgrade` through STAGED), `apps.staged_tampered`
 (`inst-stage-hash`, `inst-stage-path`), `update.fs_nearly_full` (R3).
+
+### Final re-audit (2026-10-17)
+
+Verdict: safe to merge once QEMU passes. Three low items, fixed:
+
+| Id | Finding | Resolution |
+|----|---------|------------|
+| L-a | Read errors silently reset state: `read_stored` and `read_state` treated an unreadable or oversized file as empty, and the next write dropped its content (stored serials included). | Updater: `read_state` (`apps/updater/src/main.rs` 253) returns an error after fault `upd-state-unreadable`, and `write_state_section` refuses to rewrite it; `read_stored` (709) records `upd-indexes-unreadable` and sets `INDEXES_UNREADABLE` (706), after which `write_stored` refuses to rewrite `indexes` for the rest of the run (735). Installer: `read_state` (`apps/installer/src/main.rs` 189) distinguishes a missing file from an unreadable one (`inst-state-unreadable`), `write_state_section` (207) refuses, and STAGED stops without touching the list (359). |
+| L-b | The UX branch opened the disk and recorded faults on machines without A/B partitions. | `Disk::probe` (updater 351, over `open_with(false)`, 357) returns `None` silently; the branch uses it (1210). |
+| L-c | `update.fs_nearly_full` did not cover an app upgrade. | Five free entries (`FS_FREE_ENTRIES`, `tools/xtask/src/image.rs` 719); the scenario installs hello_ext v1 and upgrades the system and hello_ext 2 through one stage file, ending with `32 file(s)`. |

@@ -54,6 +54,7 @@ mod code {
     pub const INSTALLED_INVALID: u64 = 9;
     pub const STAGE: u64 = 10;
     pub const LIST: u64 = 11;
+    pub const STATE: u64 = 12;
 }
 
 macro_rules! say {
@@ -183,15 +184,30 @@ fn installed_apps(fs: &mut FsClient, pubkey: &[u8; 32]) -> Vec<(String, u32)> {
 }
 
 /// The exchange file with the updater (`updater/state`), empty if missing.
-fn read_state(fs: &mut FsClient) -> String {
-    read_all(fs, &upd::main_path(upd::STATE_FILE), 16 * 1024)
+/// A read error or an oversized file is a fault, and the file is then
+/// neither used nor rewritten (final re-audit, L-a).
+fn read_state(fs: &mut FsClient) -> Result<String, u64> {
+    let path = upd::main_path(upd::STATE_FILE);
+    if file_size(fs, &path).is_none() {
+        return Ok(String::new());
+    }
+    read_all(fs, &path, 16 * 1024)
         .map(|b| String::from_utf8_lossy(&b).into_owned())
-        .unwrap_or_default()
+        .ok_or_else(|| {
+            fault(
+                code::STATE,
+                "inst-state-unreadable",
+                "updater/state cannot be read or is too large: not used, not rewritten",
+            )
+        })
 }
 
-/// Replaces one section of the exchange file.
+/// Replaces one section of the exchange file; refused when it could not
+/// be read.
 fn write_state_section(fs: &mut FsClient, name: &str, body: &str) -> bool {
-    let state = read_state(fs);
+    let Ok(state) = read_state(fs) else {
+        return false;
+    };
     write_file(
         fs,
         &upd::main_path(upd::STATE_FILE),
@@ -338,7 +354,10 @@ fn install_pending(fs: &mut FsClient, pubkey: &[u8; 32]) -> u64 {
 /// `STAGED`: what the updater listed in the `[staged]` section of
 /// `updater/state`, nothing else.
 fn install_staged(fs: &mut FsClient, allow_downgrade: bool, pubkey: &[u8; 32]) -> u64 {
-    let state = read_state(fs);
+    let state = match read_state(fs) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
     let text = lists::section(&state, lists::STAGED).unwrap_or("");
     let (entries, rejected) = lists::parse_staged(text);
     let mut result = 0;

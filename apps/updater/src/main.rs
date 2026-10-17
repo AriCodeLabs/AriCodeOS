@@ -42,7 +42,7 @@ use aricode_update_index::{
     self as upd, best_app, best_system, check_fresh, compare, stored, updater_arg, Change, Index,
     Migration, Sources,
 };
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const SYSTEM: Handle = Handle(0x0001_0004);
 const FS: Handle = Handle(0x0001_0005);
@@ -63,6 +63,8 @@ const RUN_DEADLINE_MS: u64 = 10 * 60 * 1000;
 /// Largest package: an installed package is replaced in one go (the AriFS
 /// journal, ADR 0018).
 const MAX_PACKAGE: usize = 32 * 1024;
+/// Largest exchange file with the installer (`state`).
+const MAX_STATE: usize = 16 * 1024;
 /// Largest `index.sig` (128 hex digits and a newline, with room).
 const MAX_SIGNATURE: usize = 256;
 
@@ -90,6 +92,7 @@ mod code {
     pub const INDEX_MISSING: u64 = 35;
     pub const INSTALLED_LIST: u64 = 36;
     pub const PLAN: u64 = 37;
+    pub const STATE_UNREADABLE: u64 = 38;
     pub const DOWNGRADE_REFUSED: u64 = 40;
     pub const DOWNLOAD: u64 = 41;
     pub const DOWNLOAD_MISMATCH: u64 = 42;
@@ -243,18 +246,27 @@ fn load_sources(fs: &mut FsClient) -> Result<Sources, u64> {
     Ok(sources)
 }
 
-/// The exchange file with the installer (`state`); empty when missing or
-/// unreadable (each section then counts as absent).
-fn read_state(fs: &mut FsClient) -> String {
-    read_text(fs, upd::STATE_FILE, 16 * 1024)
-        .ok()
-        .flatten()
-        .unwrap_or_default()
+/// The exchange file with the installer (`state`); empty when missing. A
+/// read error or an oversized file is a fault, and then the file is
+/// neither used nor rewritten in this run (final re-audit, L-a): its other
+/// sections are never reset silently.
+fn read_state(fs: &mut FsClient) -> Result<String, u64> {
+    read_text(fs, upd::STATE_FILE, MAX_STATE)
+        .map(Option::unwrap_or_default)
+        .map_err(|()| {
+            fault(
+                code::STATE_UNREADABLE,
+                "upd-state-unreadable",
+                "updater/state cannot be read or is too large: not used, not rewritten",
+            )
+        })
 }
 
-/// Replaces one section of `state`.
+/// Replaces one section of `state`; refused when it could not be read.
 fn write_state_section(fs: &mut FsClient, name: &str, body: &str) -> bool {
-    let state = read_state(fs);
+    let Ok(state) = read_state(fs) else {
+        return false;
+    };
     write_file(
         fs,
         upd::STATE_FILE,
@@ -265,7 +277,7 @@ fn write_state_section(fs: &mut FsClient, name: &str, body: &str) -> bool {
 /// The installed apps, as the installer listed them just before this run.
 /// `None` (after a fault) when the list is missing or unreadable.
 fn installed_apps(fs: &mut FsClient) -> Option<Vec<(String, u32)>> {
-    let state = read_state(fs);
+    let state = read_state(fs).ok()?;
     let text = match lists::section(&state, lists::INSTALLED) {
         Some(t) => t,
         None => {
@@ -331,6 +343,25 @@ struct Disk {
 
 impl Disk {
     fn open() -> Result<Self, u64> {
+        Self::open_with(true)
+    }
+
+    /// The disk if this machine has the A/B layout; nothing said or
+    /// recorded when it has not (final re-audit, L-b).
+    fn probe() -> Option<Self> {
+        Self::open_with(false).ok()
+    }
+
+    /// `report`: whether failures are faults (`open`) or a silent `None`
+    /// (`probe`).
+    fn open_with(report: bool) -> Result<Self, u64> {
+        let fault = |code: u64, event: &str, msg: &str| {
+            if report {
+                fault(code, event, msg)
+            } else {
+                code
+            }
+        };
         let Ok(mut blk) = BlockClient::new(BLOCK, HW, CHUNK) else {
             return Err(fault(
                 code::NO_BLOCK,
@@ -669,13 +700,26 @@ fn download_fault(code: u64, event: &str, msg: String) -> u64 {
 
 // ---------------------------------------------------------------- indexes
 
+/// Set when `indexes` could not be read in this run: it is then never
+/// rewritten, so the stored serials (rollback protection) are not forgotten
+/// silently (final re-audit, L-a).
+static INDEXES_UNREADABLE: AtomicBool = AtomicBool::new(false);
+
 /// The stored indexes (`indexes`), raw, one per source slot.
 fn read_stored(fs: &mut FsClient) -> Vec<Vec<u8>> {
     let max = upd::MAX_SOURCES * (upd::MAX_INDEX + 1024);
-    let bytes = read_file(fs, upd::INDEXES_FILE, max)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    let bytes = match read_file(fs, upd::INDEXES_FILE, max) {
+        Ok(b) => b.unwrap_or_default(),
+        Err(()) => {
+            INDEXES_UNREADABLE.store(true, Ordering::Relaxed);
+            fault(
+                code::INDEX_STORE,
+                "upd-indexes-unreadable",
+                "the stored indexes cannot be read or are too large: not used, not rewritten in this run",
+            );
+            Vec::new()
+        }
+    };
     stored::decode_all(&bytes).unwrap_or_else(|| {
         fault(
             code::INDEX_STORE,
@@ -688,6 +732,9 @@ fn read_stored(fs: &mut FsClient) -> Vec<Vec<u8>> {
 
 /// Saves the stored copies (one file for every source, audit 1 R3).
 fn write_stored(fs: &mut FsClient, slots: &[Vec<u8>]) -> bool {
+    if INDEXES_UNREADABLE.load(Ordering::Relaxed) {
+        return false;
+    }
     let bytes = if slots.iter().all(Vec::is_empty) {
         Vec::new()
     } else {
@@ -1118,7 +1165,10 @@ fn upgrade(
     allow_downgrade: bool,
     pk: &[u8; 32],
 ) -> u64 {
-    let state = read_state(fs);
+    let state = match read_state(fs) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
     let Some(plan_text) = lists::section(&state, lists::PLAN) else {
         return fault(
             code::PLAN,
@@ -1157,10 +1207,11 @@ fn upgrade(
         if !plan.contains(&PlanItem::System(entry.version)) {
             if plan.iter().any(|p| matches!(p, PlanItem::System(_))) {
                 result = not_reported("system", entry.version);
-            } else if let Ok(mut disk) = Disk::open() {
+            } else if let Some(mut disk) = Disk::probe() {
                 // The plan has no system line (it was up to date at
                 // `update`), yet an index offers a newer one: say so instead
-                // of staying silent (re-audit, UX).
+                // of staying silent (re-audit, UX). Machines without the A/B
+                // layout are skipped silently.
                 if let Some(installed) = disk.active_version(pk) {
                     if entry.version > installed {
                         result = not_reported("system", entry.version);

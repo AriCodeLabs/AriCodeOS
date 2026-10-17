@@ -50,7 +50,7 @@ disk = "slots"                  # disk: slots (default) | esp-only | pending-b |
                                 #       | wasm-restricted (module manifest with print only) | wasm-invalid (ill-typed demo.wasm)
                                 #       | wasm-bad-import (demo.wasm imports a host function with another signature)
                                 #       | a-corrupt (slot A fails verification: ESP boot, installed version unknown)
-                                #       | pending-b-older-update (B v2 pending, UPDATE holds v1) | fs-nearly-full (4 free AriFS entries)
+                                #       | pending-b-older-update (B v2 pending, UPDATE holds v1) | fs-nearly-full (5 free AriFS entries)
 disk_readonly = false           # true: the test disk is presented read-only
 cpus = 4                        # processors (-smp N); undeclared: 1, or whatever `--cpus N` forces
 usb_hid = true                  # adds qemu-xhci with a USB keyboard and mouse (QMP events go to the USB devices)

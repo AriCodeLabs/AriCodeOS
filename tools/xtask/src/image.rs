@@ -713,9 +713,10 @@ fn install_files(img: &mut [u8], part: (u64, u64), files: &[(String, Vec<u8>)]) 
 }
 
 /// Free AriFS entries left by `fs-nearly-full`: exactly what a first
-/// `update` and a system `upgrade` create in the updater's directory
-/// (`state`, `indexes`, `last.log`, `history.log`; re-audit, R3).
-pub const FS_FREE_ENTRIES: usize = 4;
+/// `update` and an `upgrade` of the system and one installed app create in
+/// the updater's directory (`state`, `indexes`, `last.log`, `history.log`,
+/// `pkg-1.aripkg`; re-audit R3, final re-audit L-c).
+pub const FS_FREE_ENTRIES: usize = 5;
 
 /// Fills the AriFS table with empty `fill-NN` files until only `free`
 /// entries are left.
