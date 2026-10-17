@@ -5,6 +5,11 @@
 Sistema operativo desde cero: microkernel en Rust `no_std`, arranque UEFI,
 x86-64, seguridad por capabilities y drivers en espacio de usuario.
 
+Guías para contribuir (en inglés): [CONTRIBUTING.md](CONTRIBUTING.md), el
+[flujo de git](docs/WORKFLOW.md), el [SDK de aplicaciones](docs/sdk.md) y
+la [suite de pruebas](tests/README.md). Avisos de seguridad:
+[SECURITY.md](SECURITY.md).
+
 El documento maestro de arquitectura y roadmap es [AriCodeOS.md](AriCodeOS.md).
 Las decisiones de diseño se registran en [docs/decisions/](docs/decisions/) y el
 flujo de ramas (git flow) en [docs/WORKFLOW.md](docs/WORKFLOW.md).

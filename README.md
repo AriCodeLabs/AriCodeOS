@@ -4,9 +4,10 @@ An operating system built from scratch: a Rust `no_std` microkernel, UEFI
 boot, x86-64, capability-based security and user-space drivers.
 
 A Spanish translation of this README is available in
-[README.es.md](README.es.md). Contributor guides: the
-[git workflow](docs/WORKFLOW.md), the [application SDK](docs/sdk.md) and the
-[test suite](tests/README.md).
+[README.es.md](README.es.md). Contributor guides:
+[CONTRIBUTING.md](CONTRIBUTING.md), the [git workflow](docs/WORKFLOW.md),
+the [application SDK](docs/sdk.md) and the [test suite](tests/README.md).
+Security reports: [SECURITY.md](SECURITY.md).
 
 The master architecture and roadmap document is [AriCodeOS.md](AriCodeOS.md).
 Design decisions are recorded as ADRs in
