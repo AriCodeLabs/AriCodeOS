@@ -719,19 +719,38 @@ impl Trb {
         t.control |= TRB_IOC;
         t
     }
-    /// Normal transfer (interrupt endpoint) with notification on completion,
-    /// also if the packet is short.
+    /// Normal transfer (interrupt IN endpoint, HID reports) with
+    /// notification on completion, also if the packet is short.
     pub fn normal(buffer_phys: u64, len: u32) -> Self {
-        Self::normal_part(buffer_phys, len, 0, false)
+        Self::normal_part(buffer_phys, len, 0, false, true)
     }
 
     /// One TRB of a multi-TRB TD: `td_size` = packets left after this
-    /// TRB (capped at 31), `chain` if it is not the last. Only the last one notifies.
-    pub fn normal_part(buffer_phys: u64, len: u32, td_size: u32, chain: bool) -> Self {
+    /// TRB (capped at 31), `chain` if it is not the last, `dir_in` for a
+    /// device-to-host transfer. Only the last TRB notifies (IOC), and only
+    /// an IN TRB gets ISP: a short packet is something the host receives,
+    /// and xHCI 1.0 does not allow Interrupt on Short Packet on OUT TRBs
+    /// (Linux `xhci_queue_bulk_tx` sets it for IN only; QEMU ignores it,
+    /// real hosts may not). Trap: "ISP on the last TRB only" and "the last
+    /// TRB's event closes the transfer" (`td_bytes_moved`, the driver's
+    /// `bulk`) hold together; a host that emitted one event for a mid-TD
+    /// short packet would otherwise leave the driver waiting for an event
+    /// that never comes.
+    pub fn normal_part(
+        buffer_phys: u64,
+        len: u32,
+        td_size: u32,
+        chain: bool,
+        dir_in: bool,
+    ) -> Self {
         let mut t = Self::with_type(trb_type::NORMAL);
         t.parameter = buffer_phys;
         t.status = len | td_size.min(31) << 17;
-        t.control |= if chain { TRB_CHAIN } else { TRB_IOC | TRB_ISP };
+        t.control |= match (chain, dir_in) {
+            (true, _) => TRB_CHAIN,
+            (false, true) => TRB_IOC | TRB_ISP,
+            (false, false) => TRB_IOC,
+        };
         t
     }
 
@@ -898,9 +917,16 @@ pub mod ep_type {
 
 /// A bulk transfer TD as normal TRBs: none crosses a 64 KiB
 /// boundary (xHCI 4.11.7), non-final ones chain with the TD size
-/// (pending packets) and only the last one notifies. Returns how many TRBs there are;
-/// `None` if they do not fit in `out`.
-pub fn bulk_trbs(buffer_phys: u64, len: u32, max_packet: u16, out: &mut [Trb]) -> Option<usize> {
+/// (pending packets) and only the last one notifies (ISP too, for an IN
+/// TD; `Trb::normal_part`). Returns how many TRBs there are; `None` if
+/// they do not fit in `out`.
+pub fn bulk_trbs(
+    buffer_phys: u64,
+    len: u32,
+    max_packet: u16,
+    dir_in: bool,
+    out: &mut [Trb],
+) -> Option<usize> {
     const BOUNDARY: u64 = 64 * 1024;
     let max_packet = max_packet.max(1) as u64;
     let mut parts: [(u64, u32); 8] = [(0, 0); 8];
@@ -924,26 +950,32 @@ pub fn bulk_trbs(buffer_phys: u64, len: u32, max_packet: u16, out: &mut [Trb]) -
     for (i, &(p, l)) in parts[..n].iter().enumerate() {
         sent += l as u64;
         let remaining_packets = (len as u64 - sent).div_ceil(max_packet) as u32;
-        out[i] = Trb::normal_part(p, l, remaining_packets, i + 1 < n);
+        out[i] = Trb::normal_part(p, l, remaining_packets, i + 1 < n, dir_in);
     }
     Some(n)
 }
 
-/// Bytes a bulk TD moved, from the first Success or Short Packet event of
-/// its TRBs: `lens` are the TRBs' transfer lengths, `event_trb` the index
-/// of the TRB the event points at and `residual` its TRB Transfer Length
-/// field, which counts the bytes of that TRB alone that were not
-/// transferred (xHCI 4.11.5.2, 6.4.2.1): a residual is never the count
-/// moved (incident 0007, audit of the fix). A short packet in the middle of
-/// the TD ends it: the earlier TRBs moved everything, the later ones
-/// nothing, and the last TRB's own event (IOC) reports its whole length as
-/// not transferred, so the first event decides. Never more than the TD.
+/// Bytes a bulk TD moved, from the Success or Short Packet event that ends
+/// it: `lens` are the TRBs' transfer lengths, `event_trb` the index of the
+/// TRB the event points at and `residual` its TRB Transfer Length field,
+/// the bytes not transferred (xHCI 6.4.2.1): a residual is never the count
+/// moved (incident 0007, audit of the fix). Only the last TRB has IOC and
+/// ISP (`Trb::normal_part`), so the one event is the last TRB's, and for
+/// it the count is the TD's length minus the residual: exact when the
+/// controller reports the whole TD's shortfall on the end TRB (Linux's
+/// reading, `process_bulk_intr_td`: requested minus remaining), and the
+/// sum of the earlier TRBs when it reports only the last TRB's own length
+/// (QEMU on a mid-TD short packet; that TRB's own shortfall is then not
+/// reported, the count is never too high). An event on an earlier TRB,
+/// were a host to emit one, counts the TRBs before it plus its own bytes
+/// (Linux's `sum_trb_lengths` case). Never more than the TD.
 pub fn td_bytes_moved(lens: &[u32], event_trb: usize, residual: u32) -> u32 {
-    let before: u32 = lens[..event_trb.min(lens.len())].iter().sum();
-    before
-        + lens
-            .get(event_trb)
-            .map_or(0, |len| len.saturating_sub(residual))
+    let total: u32 = lens.iter().sum();
+    if event_trb + 1 >= lens.len() {
+        return total.saturating_sub(residual);
+    }
+    let before: u32 = lens[..event_trb].iter().sum();
+    before + lens[event_trb].saturating_sub(residual)
 }
 
 /// Device context index (DCI) of a USB endpoint.
@@ -1515,7 +1547,7 @@ mod tests {
         // A multi-TRB TD that spans the wrap: the Link TRB carries the
         // Chain bit (xHCI 4.11.5.1) so the controller continues the TD.
         r.push(Trb::noop_command());
-        let e = r.push(Trb::normal_part(0x5000, 512, 1, true));
+        let e = r.push(Trb::normal_part(0x5000, 512, 1, true, true));
         let (_, l) = e.link.expect("link");
         assert_ne!(
             l.control & TRB_CHAIN,
@@ -1929,8 +1961,11 @@ mod tests {
         let mut out = [Trb::noop_command(); 4];
         // 8 KiB crossing a 64 KiB boundary: two TRBs, the first chained
         // with the packets (512 B) left, the last one with IOC.
-        let n = bulk_trbs(0x1_F000, 8192, 512, &mut out).unwrap();
+        let n = bulk_trbs(0x1_F000, 8192, 512, true, &mut out).unwrap();
         assert_eq!(n, 2);
+        // ISP on the last TRB only, and only for IN.
+        assert_eq!(out[0].control & TRB_ISP, 0);
+        assert_ne!(out[1].control & TRB_ISP, 0);
         assert_eq!(
             (out[0].parameter, out[0].status & 0x1FFFF),
             (0x1_F000, 4096)
@@ -1945,12 +1980,16 @@ mod tests {
         assert_eq!((out[1].status >> 17) & 0x1F, 0);
         assert_eq!(out[1].control & TRB_CHAIN, 0);
         assert_ne!(out[1].control & TRB_IOC, 0);
-        // No crossing: a single TRB with IOC.
-        assert_eq!(bulk_trbs(0x1000, 31, 512, &mut out), Some(1));
+        // No crossing: a single TRB with IOC; an OUT TD (a CBW) without ISP
+        // (xHCI 1.0: ISP is not for OUT TRBs).
+        assert_eq!(bulk_trbs(0x1000, 31, 512, false, &mut out), Some(1));
         assert_ne!(out[0].control & TRB_IOC, 0);
-        assert_eq!(bulk_trbs(0x1000, 0, 512, &mut out), None);
-        assert_eq!(bulk_trbs(0x1_F000, 8192, 512, &mut out[..1]), None);
-        assert_eq!(out[0].transfer_length(), 31);
+        assert_eq!(out[0].control & TRB_ISP, 0);
+        assert_eq!(bulk_trbs(0x1000, 13, 512, true, &mut out), Some(1));
+        assert_ne!(out[0].control & TRB_ISP, 0);
+        assert_eq!(bulk_trbs(0x1000, 0, 512, true, &mut out), None);
+        assert_eq!(bulk_trbs(0x1_F000, 8192, 512, true, &mut out[..1]), None);
+        assert_eq!(out[0].transfer_length(), 13);
     }
 
     #[test]
@@ -1961,13 +2000,25 @@ mod tests {
         assert_eq!(td_bytes_moved(&[13], 0, 5), 8);
         assert_eq!(td_bytes_moved(&[13], 0, 13), 0);
         assert_eq!(td_bytes_moved(&[13], 0, 99), 0);
-        // Two TRBs (4096 + 4096): a short packet in the first one, nothing
-        // after it.
-        assert_eq!(td_bytes_moved(&[4096, 4096], 0, 1024), 3072);
-        // Short in the last one: the first moved everything.
+        // Two TRBs (4096 + 4096), a short packet in the first one by 1024
+        // bytes; the one event is the last TRB's (ISP and IOC are only
+        // there). Linux's reading: the end TRB's residual is the whole
+        // TD's shortfall.
+        assert_eq!(td_bytes_moved(&[4096, 4096], 1, 1024 + 4096), 3072);
+        // QEMU's reading: the last TRB's own length; the first TRB's
+        // shortfall is not reported, the count is the earlier TRBs' sum.
+        assert_eq!(td_bytes_moved(&[4096, 4096], 1, 4096), 4096);
+        // Short in the last one: both readings agree.
         assert_eq!(td_bytes_moved(&[4096, 4096], 1, 512), 4096 + 3584);
-        // The last TRB's event alone (nothing short before it): complete.
+        // Complete.
         assert_eq!(td_bytes_moved(&[4096, 4096], 1, 0), 8192);
+        // An event on an earlier TRB (no host emits one today): its own
+        // bytes plus the TRBs before it.
+        assert_eq!(td_bytes_moved(&[4096, 4096], 0, 1024), 3072);
+        assert_eq!(td_bytes_moved(&[1024, 4096, 4096], 1, 96), 1024 + 4000);
+        // Bounded.
+        assert_eq!(td_bytes_moved(&[4096, 4096], 1, 9000), 0);
+        assert_eq!(td_bytes_moved(&[], 0, 0), 0);
     }
 
     extern crate std;

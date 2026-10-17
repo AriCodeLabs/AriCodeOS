@@ -32,13 +32,18 @@ event's residual instead of the bytes moved, so this count was not
 available to begin with.
 
 Multi-TRB data TDs: a data stage that crosses a 64 KiB boundary is split
-into several TRBs (`bulk_trbs`); the Transfer Event's residual counts the
-bytes of the TRB that generated it only. `aricode_xhci::td_bytes_moved`
-sums the lengths of the TRBs before the first Success or Short Packet
-event and adds that TRB's length minus its residual (as Linux's
-`sum_trb_lengths`); a short packet in the middle of the TD ends it, so the
-later TRBs moved nothing and the last TRB's IOC event, which reports its
-whole length as not transferred, does not override the first event.
+into several TRBs (`bulk_trbs`); only the last one carries IOC and ISP, so
+the one Transfer Event is the last TRB's. `aricode_xhci::td_bytes_moved`
+takes the TD's length minus that event's residual: exact when the
+controller reports the whole TD's shortfall on the end TRB (Linux's
+reading in `process_bulk_intr_td`: requested minus remaining), and the sum
+of the earlier TRBs when it reports only the last TRB's own length (QEMU
+on a mid-TD short packet; that TRB's own shortfall is then not reported,
+so the count is never too high). An event on an earlier TRB, were a host
+to emit one, counts the TRBs before it plus its own bytes (the case Linux
+handles with `sum_trb_lengths`). "ISP on the last TRB only" and "the last
+TRB's event closes the transfer" are one decision, noted next to
+`Trb::normal_part` and `Controller::bulk`.
 
 ## Fix
 
@@ -66,6 +71,27 @@ whole length as not transferred, does not override the first event.
   (`dCSWDataResidue`) is not injected: the emulated stick never reports
   one for a complete transfer, and the decision is covered by the host
   test of `bytes_not_moved`.
+
+## Second audit (2026-10-18, commits `2c4130a..925cf48`): follow-up
+
+- `td_bytes_moved` overstated the count for a mid-TD short packet under
+  Linux's reading (the last TRB's own length minus a TD-wide residual
+  clamped to 0 and the earlier TRBs were counted whole): the last TRB now
+  uses the TD's length minus the residual (above); host test with both
+  readings.
+- **Hardware-relevant, to watch on the laptop:** ISP (Interrupt on Short
+  Packet) was set on the last TRB of OUT TDs too, since the storage class
+  joined usbd (`e042994f`). xHCI 1.0 does not allow it on OUT TRBs and
+  Linux sets it for IN only; QEMU ignores it, a real controller may not.
+  `Trb::normal_part` now sets ISP for IN TDs only (CBWs and WRITE data
+  stages no longer carry it). Not exercised on the laptop yet.
+- The short data stage has its own text in both drivers (`… bytes not
+  transferred: short data stage (BOT 6.7.2), the request answers Io`; the
+  xHCI driver no longer prints "transport failure" for it, and its strict
+  header says `halting on a short data stage`) and is recorded as the
+  request too, `usb [inj] r|w lba N` with the bytes short as the code, so
+  `diag` shows which request and whether it was injected; the scenarios
+  assert `usb inj w lba 34 (code 512)` (not yet run after this change).
 
 ## QEMU run (2026-10-18, branch at `494954c`)
 

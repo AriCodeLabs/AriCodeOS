@@ -190,6 +190,16 @@ fn record_sense(sense: &scsi::Sense) {
     }
 }
 
+/// The fault event of a block request (`usb [inj] r|w lba N`, ADR 0028)
+/// with `code`: the completion code of a transport failure, the bytes
+/// short of a short data stage.
+fn record_lba(write: bool, injected: bool, lba: u64, code: u64) {
+    let mut name = [0u8; fault::NAME_LEN];
+    if let Some(text) = fault::lba_name(fault::lba_prefix(write, injected), lba, &mut name) {
+        record(text, code);
+    }
+}
+
 /// `K/0xAA/0xQQ`: sense key in decimal, ASC and ASCQ in hex (SPC-4 4.5).
 fn print_sense(sense: &scsi::Sense) {
     num(sense.key as u64);
@@ -659,6 +669,14 @@ enum Decoder {
     None,
     Keyboard(HidBootKeyboard),
     Mouse(HidBootMouse),
+}
+
+/// The block request a strict halt dumps.
+#[derive(Clone, Copy)]
+struct HaltedRequest {
+    write: bool,
+    lba: u64,
+    count: u16,
 }
 
 /// What a failed bulk transfer looked like (the decision table line).
@@ -2360,7 +2378,7 @@ impl Controller {
                 .bulk_mut(dir_in)
                 .ok_or(BulkFail::Failed(completion::NO_EVENT))?;
             let mut trbs = [Trb::noop_command(); 4];
-            let n = bulk_trbs(phys, len, ep.max_packet, &mut trbs)
+            let n = bulk_trbs(phys, len, ep.max_packet, dir_in, &mut trbs)
                 .ok_or(BulkFail::Failed(completion::NO_EVENT))?;
             let mut td = [0u64; 4];
             let mut lens = [0u32; 4];
@@ -2372,10 +2390,14 @@ impl Controller {
         };
         self.ring_doorbell(slot, dci as u32);
         let mut soft_retried = false;
-        // The bytes moved, decided by the first Success or Short Packet
-        // event of the TD (xHCI 4.11.5.2: a short packet in the middle ends
-        // the TD, and the last TRB's event then reports its whole length as
-        // not transferred); the last TRB's event closes the transfer.
+        // The bytes moved, from the Success or Short Packet event that ends
+        // the TD (`td_bytes_moved`). Only the last TRB has IOC and ISP
+        // (`Trb::normal_part`), so the one event is the last TRB's and it
+        // closes the transfer. Trap: were ISP ever set on earlier TRBs, a
+        // mid-TD short packet would produce an event here first; the first
+        // event decides and the last TRB's still closes, so the loop copes,
+        // but "ISP on the last TRB only" and "the last TRB's event closes"
+        // must be changed together.
         let mut moved = None;
         loop {
             while let Some(ev) = self.next_event() {
@@ -3221,25 +3243,31 @@ impl Controller {
         scsi::Sense::parse(unsafe { core::slice::from_raw_parts(virt as *const u8, 64) })
     }
 
-    /// `strict` (ADR 0028): dump what a transport failure looked like and
-    /// stop; init does not restart the driver, the state stays inspectable.
-    /// The xHCI endpoint recovery has run; the BOT Reset Recovery has not.
+    /// `strict` (ADR 0028): dump what a block request's failure (`why`: a
+    /// transport failure, a short data stage) looked like and stop; init
+    /// does not restart the driver, the state stays inspectable. The xHCI
+    /// endpoint recovery has run; the BOT Reset Recovery has not.
     fn halt(
         &mut self,
-        write: bool,
-        lba: u64,
-        count: u16,
+        why: &[u8],
+        request: HaltedRequest,
         code: u8,
         attempt: usize,
         sense: Option<scsi::Sense>,
     ) -> ! {
-        sys::print(b"usb-input: strict: halting on a transport failure\n");
+        sys::print(b"usb-input: strict: halting on a ");
+        sys::print(why);
+        sys::print(b"\n");
         sys::print(b"  command   ");
-        sys::print(if write { b"WRITE(10)" } else { b"READ(10)" });
+        sys::print(if request.write {
+            b"WRITE(10)"
+        } else {
+            b"READ(10)"
+        });
         sys::print(b" lba ");
-        num(lba);
+        num(request.lba);
         sys::print(b" count ");
-        num(count as u64);
+        num(request.count as u64);
         sys::print(b"\n  completion code ");
         num(code as u64);
         sys::print(b" attempt ");
@@ -3320,26 +3348,30 @@ impl Controller {
                     // Part of the sectors were not moved (BOT 6.7.2, 6.7.3):
                     // a READ would hand the client stale bytes, a WRITE did
                     // not reach the medium whole. Never a success (incident
-                    // 0010); the transport is Ready, nothing to recover.
+                    // 0010), and not a transport failure either: the
+                    // transport is Ready, nothing to recover, the request
+                    // answers Io. Recorded as the kind and as the request
+                    // (`usb [inj] r|w lba N`, code = the bytes short).
                     sys::print(b"usb-input: ");
                     sys::print(name);
                     sys::print(b" lba ");
                     num(lba);
                     sys::print(b": ");
                     num(short as u64);
-                    sys::print(b" bytes not transferred\n");
+                    sys::print(
+                        b" bytes not transferred: short data stage (BOT 6.7.2), the request answers Io\n",
+                    );
                     record(fault::SHORT_DATA, short as u64);
+                    record_lba(write, injected, lba, short as u64);
                     if self.strict {
                         self.halt(
-                            write,
-                            lba,
-                            count,
+                            b"short data stage",
+                            HaltedRequest { write, lba, count },
                             completion::SUCCESS,
                             transport_failures,
                             None,
                         );
                     }
-                    self.report_error(name, lba, None);
                     return false;
                 }
                 Err(ScsiFail::Failed) => {
@@ -3364,16 +3396,7 @@ impl Controller {
                     let code = fail.code();
                     // Never hidden: every failed transfer is an event
                     // (ADR 0028), retried or not.
-                    let prefix = match (write, injected) {
-                        (false, false) => fault::READ,
-                        (true, false) => fault::WRITE,
-                        (false, true) => fault::INJECTED_READ,
-                        (true, true) => fault::INJECTED_WRITE,
-                    };
-                    let mut name_buf = [0u8; fault::NAME_LEN];
-                    if let Some(text) = fault::lba_name(prefix, lba, &mut name_buf) {
-                        record(text, code as u64);
-                    }
+                    record_lba(write, injected, lba, code as u64);
                     let sense = match fail {
                         ScsiFail::Transport(_, sense) => sense,
                         _ => None,
@@ -3391,7 +3414,13 @@ impl Controller {
                         record_sense(&sense);
                     }
                     if self.strict {
-                        self.halt(write, lba, count, code, transport_failures, sense);
+                        self.halt(
+                            b"transport failure",
+                            HaltedRequest { write, lba, count },
+                            code,
+                            transport_failures,
+                            sense,
+                        );
                     }
                     transport_failures += 1;
                     if transport_failures == 1

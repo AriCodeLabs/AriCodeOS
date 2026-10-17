@@ -78,14 +78,17 @@ host-tested and the residual-to-moved translation lived in the driver.
 Second fix (same branch):
 
 - `aricode_xhci::td_bytes_moved(lens, event_trb, residual)` (host-tested)
-  turns the first Success or Short Packet event of a TD into bytes moved:
-  the sum of the earlier TRBs' lengths plus the event TRB's length minus
-  its residual. The event's residual applies to its own TRB only; a short
-  packet in the middle of a split TD ends it, the later TRBs move nothing
-  and the last TRB's IOC event reports its whole length as not transferred,
-  so the first such event decides (Linux `sum_trb_lengths` does the same).
-  `Controller::bulk` now returns `Ok(bytes moved)` like the EHCI driver,
-  `Trb::transfer_length` reads the TRB field.
+  turns the Success or Short Packet event that ends a TD into bytes moved.
+  Only the last TRB carries IOC and ISP, so the event is the last TRB's
+  and the count is the TD's length minus its residual: exact when the
+  controller reports the TD's whole shortfall there (Linux's reading,
+  `process_bulk_intr_td`: requested minus remaining) and the earlier TRBs'
+  sum when it reports only the last TRB's own length (QEMU on a mid-TD
+  short packet). An event on an earlier TRB, were a host to emit one,
+  counts the TRBs before it plus its own bytes (Linux's `sum_trb_lengths`
+  case). Incident 0010 has the detail. `Controller::bulk` now returns
+  `Ok(bytes moved)` like the EHCI driver, `Trb::transfer_length` reads the
+  TRB field.
 - `CswError::Length(0)` had the event code 0, indistinguishable from
   `Invalid` in `diag`: a wrong length is now its own event,
   `usb csw length` with the bytes moved as the code, and the rest is

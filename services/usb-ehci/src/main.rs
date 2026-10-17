@@ -193,6 +193,16 @@ fn record_sense(sense: &scsi::Sense) {
     }
 }
 
+/// The fault event of a block request (`usb [inj] r|w lba N`, ADR 0028)
+/// with `code`: the failure code of a transfer failure, the bytes short of
+/// a short data stage.
+fn record_lba(write: bool, injected: bool, lba: u64, code: u64) {
+    let mut name = [0u8; fault::NAME_LEN];
+    if let Some(text) = fault::lba_name(fault::lba_prefix(write, injected), lba, &mut name) {
+        record(text, code);
+    }
+}
+
 /// `K/0xAA/0xQQ`: sense key in decimal, ASC and ASCQ in hex (SPC-4 4.5).
 fn print_sense(sense: &scsi::Sense) {
     num(sense.key as u64);
@@ -2997,16 +3007,22 @@ impl Ehci {
                 Ok(0) => return true,
                 Ok(short) => {
                     // Part of the sectors were not moved: the client's
-                    // buffer would hold stale bytes (BOT 6.7.2, 6.7.3).
+                    // buffer would hold stale bytes (BOT 6.7.2, 6.7.3). Not a
+                    // transport failure: the transport is ready, the request
+                    // answers Io. Recorded as the kind and as the request
+                    // (`usb [inj] r|w lba N`, code = the bytes short).
                     sys::print(b"usb-ehci: ");
                     sys::print(name);
                     sys::print(b" lba ");
                     num(lba);
                     sys::print(b": ");
                     num(short as u64);
-                    sys::print(b" bytes not transferred\n");
+                    sys::print(
+                        b" bytes not transferred: short data stage (BOT 6.7.2), the request answers Io\n",
+                    );
                     record(fault::SHORT_DATA, short as u64);
-                    self.strict_halt(name);
+                    record_lba(write, injected, lba, short as u64);
+                    self.strict_halt(b"short data stage");
                     return false;
                 }
                 Err(ScsiFail::Failed) => {
@@ -3040,16 +3056,7 @@ impl Ehci {
                     return false;
                 }
                 Err(ScsiFail::Transport(fail, sense)) => {
-                    let prefix = match (write, injected) {
-                        (false, false) => fault::READ,
-                        (true, false) => fault::WRITE,
-                        (false, true) => fault::INJECTED_READ,
-                        (true, true) => fault::INJECTED_WRITE,
-                    };
-                    let mut buf = [0u8; fault::NAME_LEN];
-                    if let Some(text) = fault::lba_name(prefix, lba, &mut buf) {
-                        record(text, fail.code());
-                    }
+                    record_lba(write, injected, lba, fail.code());
                     if let Some(sense) = sense {
                         sys::print(b"usb-ehci: ");
                         sys::print(name);

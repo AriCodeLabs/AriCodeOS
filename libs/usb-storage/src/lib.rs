@@ -64,6 +64,18 @@ pub mod fault {
     pub const INJECTED_READ: &str = "usb inj r lba ";
     pub const INJECTED_WRITE: &str = "usb inj w lba ";
     pub const LBA_PREFIXES: [&str; 4] = [READ, WRITE, INJECTED_READ, INJECTED_WRITE];
+
+    /// The prefix of a block request's fault event: READ or WRITE, injected
+    /// by `usb_fault` or real.
+    pub fn lba_prefix(write: bool, injected: bool) -> &'static str {
+        match (write, injected) {
+            (false, false) => READ,
+            (true, false) => WRITE,
+            (false, true) => INJECTED_READ,
+            (true, true) => INJECTED_WRITE,
+        }
+    }
+
     /// A CSW with a bad signature or status, for another command or with a
     /// phase error (`CswError::event`), code 0.
     pub const CSW_INVALID: &str = "usb csw invalid";
@@ -513,6 +525,13 @@ mod tests {
         assert_eq!(
             fault::lba_name(fault::READ, 0, &mut out),
             Some("usb r lba 0")
+        );
+        assert_eq!(fault::lba_prefix(false, false), fault::READ);
+        assert_eq!(fault::lba_prefix(true, false), fault::WRITE);
+        assert_eq!(fault::lba_prefix(false, true), fault::INJECTED_READ);
+        assert_eq!(
+            fault::lba_name(fault::lba_prefix(true, true), 34, &mut out),
+            Some("usb inj w lba 34")
         );
         assert_eq!(
             fault::lba_name(fault::INJECTED_WRITE, u64::MAX, &mut out),

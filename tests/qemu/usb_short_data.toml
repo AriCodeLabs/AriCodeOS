@@ -34,6 +34,7 @@ serial_contains = [
     "write: 11 bytes to probe.txt",
     "fault reported by process",
     "usb short data (code 512)",
+    "usb inj w lba 34 (code 512)",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_absent = [
