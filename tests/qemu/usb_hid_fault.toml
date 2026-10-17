@@ -1,0 +1,56 @@
+# Failure protocol (ADR 0028), incident 0001, audit 1 F14: a failed transfer
+# on a HID interrupt endpoint is recorded and recovered instead of leaving
+# the keyboard dead. `usb_fault=1:hid` treats the first HID report (the
+# Enter press typed first, harmless if lost) as a USB Transaction Error:
+# the driver prints it, records a fault event, and from the idle loop stops
+# the endpoint for real (Stop Endpoint, xHCI 4.6.9; QEMU's usb-hid never
+# STALLs its interrupt IN endpoint, so the Halted branch cannot be produced
+# here), reads its state (Stopped), sends Set TR Dequeue (4.6.10) and
+# queues every report TRB again. The keys typed afterwards reach the shell:
+# `diag` lists the fault and `shutdown` ends the run.
+name = "usb.hid_fault"
+description = "usbd: a failed HID report is recorded, its interrupt endpoint recovered from the idle loop and typing continues"
+level = "full"
+areas = ["usb", "input", "diag"]
+cmdline = "qemu_exit shell usb_fault=1:hid"
+usb_hid = true
+timeout_secs = 60
+
+[host_input]
+marker = "CONSOLE_BRIDGE_READY"
+keys = [
+    "ret",
+    "d", "i", "a", "g", "ret",
+    "s", "h", "u", "t", "d", "o", "w", "n", "ret",
+]
+
+[expect]
+exit = 33
+serial_contains = [
+    "usb-input: device ready: USB HID Keyboard+Mouse",
+    "AriInit: console bridge with 3 input device(s)",
+    "completion code 4 (USB Transaction Error), injected",
+    "; recovered from the idle loop",
+    "usb-input: Stop Endpoint slot ",
+    "(state 3 Stopped, dequeue ",
+    "): Set TR Dequeue",
+    "usb-input: Set TR Dequeue slot ",
+    " recovered: reports queued again",
+    "fault reported by process",
+    "usb inj hid (code 4)",
+    "ari> shutdown",
+    "[host] QMP: 30 input events sent",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "strict",
+    "usb hid err",
+    "usb hid lost",
+    "given up",
+    "recovery attempt",
+    "usb cmd fail",
+    "usb cmd refused",
+    "usb cmd pending",
+    "Context State Error",
+]

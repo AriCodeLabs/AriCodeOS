@@ -18,6 +18,11 @@
 //! waited for), and everything slower (the Bulk-Only Reset Recovery, BOT
 //! 5.3.4, and re-enumeration after a port change) runs from the idle loop,
 //! one bounded step per iteration, while block requests answer `Io`.
+//! A failed HID report is recorded and its interrupt endpoint recovered
+//! the same way from the idle loop (the report TRBs are queued again); a
+//! device re-enumerated while still on its port keeps its slot, contexts
+//! and rings (Reset Device, xHCI 4.6.11), so re-enumerations do not
+//! consume DMA memory.
 #![no_std]
 #![no_main]
 
@@ -34,10 +39,10 @@ use aricode_usb_storage::{
 };
 use aricode_xhci::{
     bulk_trbs, cap, completion, dci, endpoint_recovery, endpoint_status, ep_state, erst_entry, op,
-    parse_storage_interface, rt, soft_retry_applies, speed, step_deadline, trb_type,
-    write_input_context, Budget, DeviceDescriptor, EndpointContext, EndpointRecovery, EventRing,
-    HidInterface, Params, ProducerRing, SetupPacket, SlotContext, StorageInterface, Trb,
-    MIN_START_MS,
+    parse_storage_interface, rt, slot_reuse, slot_state, slot_status, soft_retry_applies, speed,
+    step_deadline, trb_type, write_input_context, Budget, DeviceDescriptor, EndpointContext,
+    EndpointRecovery, EventRing, HidInterface, Params, ProducerRing, SetupPacket, SlotContext,
+    SlotReuse, StorageInterface, Trb, MIN_START_MS,
 };
 
 const CMD_RING_TRBS: usize = 16;
@@ -118,6 +123,14 @@ const BOOT_READY_WAIT_MS: u64 = 2000;
 const REENUMERATE_READY_WAIT_MS: u64 = 500;
 /// Bound of the boot-time enumeration of one port.
 const BOOT_ENUMERATION_MS: u64 = 10_000;
+/// Recovery attempts of a HID interrupt endpoint without a good report in
+/// between; once spent the endpoint is given up (loudly, `usb hid lost`)
+/// for the rest of the boot: HID devices are not enumerated again.
+const HID_RECOVERY_ATTEMPTS: u8 = 3;
+/// Size of the Output Device Context and of the Input Context, in
+/// contexts (slot + 31 endpoints; the Input Control Context on top).
+const DEVICE_CONTEXTS: usize = 32;
+const INPUT_CONTEXTS: usize = 33;
 
 fn say(msg: &[u8]) {
     sys::print(b"usb-input: ");
@@ -224,7 +237,9 @@ fn read_trb(virt: u64) -> Trb {
     Trb::from_bytes(&unsafe { (virt as *const [u8; Trb::LEN]).read_volatile() })
 }
 
-/// Producer ring with its memory.
+/// Producer ring with its memory. Copyable so that the memory of a
+/// device being enumerated again can be handed to its new incarnation.
+#[derive(Clone, Copy)]
 struct Ring {
     state: ProducerRing,
     virt: u64,
@@ -270,29 +285,61 @@ impl Ring {
     }
 }
 
+/// A failed transfer on a HID interrupt endpoint, waiting for its
+/// recovery from the idle loop (`maintain_hid`).
+#[derive(Clone, Copy)]
+struct HidFault {
+    /// Completion code of the Transfer Event.
+    code: u8,
+    /// The report TRB it pointed at.
+    trb: u64,
+    /// `usb_fault=...:hid`: the report arrived and is treated as failed.
+    injected: bool,
+    /// Reset Endpoint ran; `CLEAR_FEATURE(ENDPOINT_HALT)` must still reach
+    /// the device before reports are queued again (USB 2.0 9.4.5).
+    clear_halt: bool,
+}
+
+/// Interrupt IN endpoint of a HID interface.
 struct Endpoint {
     dci: u8,
+    /// USB endpoint address (bit 7 = IN), for `CLEAR_FEATURE`.
+    address: u8,
     ring: Ring,
     /// The first report has arrived (diagnostic trace).
     seen: bool,
-    /// Reports in flight: (TRB, physical buffer, virtual buffer).
+    /// Reports: (TRB on the ring or 0 when none is, physical buffer,
+    /// virtual buffer).
     reports: [(u64, u64, u64); REPORTS_IN_FLIGHT],
     report_len: u16,
+    fault: Option<HidFault>,
+    /// Recovery attempts since the last good report.
+    failures: u8,
+}
+
+/// DMA memory of a device slot: Output Device Context (physical,
+/// virtual), EP0 transfer ring and Input Context (physical, virtual,
+/// bytes). Reused when the device is enumerated again on the same slot
+/// (Reset Device) or, once a Disable Slot completed, by the next slot
+/// (`Controller::spare_slot`).
+#[derive(Clone, Copy)]
+struct SlotMemory {
+    dev_ctx: (u64, u64),
+    ep0: Ring,
+    input_ctx: (u64, u64, u64),
 }
 
 struct UsbDevice {
     slot: u8,
-    ep0: Ring,
+    /// Contexts and EP0 ring. The Output Device Context holds the
+    /// controller's slot and endpoint states and dequeue pointers, read
+    /// before every recovery step.
+    mem: SlotMemory,
     endpoints: [Option<Endpoint>; MAX_DEVICES],
     /// Per endpoint: keyboard or mouse.
     decoders: [Decoder; MAX_DEVICES],
-    /// Device input context (physical, virtual, bytes) and its slot
-    /// context, to configure endpoints after addressing it.
-    input_ctx: (u64, u64, u64),
+    /// Slot context written at addressing, to configure endpoints later.
     slot_ctx: SlotContext,
-    /// Output Device Context (virtual): the controller's endpoint states
-    /// and dequeue pointers, read before every recovery step.
-    dev_ctx_virt: u64,
 }
 
 /// What the storage device said it is at enumeration, and the speed its
@@ -380,6 +427,40 @@ impl Transport {
     }
 }
 
+/// DMA memory of the storage device besides its slot: both bulk rings and
+/// the CBW, CSW and small-response buffers. Handed from a storage being
+/// enumerated again to its new incarnation (`Controller::spare_storage`).
+#[derive(Clone, Copy)]
+struct StorageMemory {
+    ring_in: Ring,
+    ring_out: Ring,
+    cbw: (u64, u64),
+    csw: (u64, u64),
+    small: (u64, u64),
+}
+
+impl StorageMemory {
+    fn alloc(arena: &mut Arena) -> Option<Self> {
+        Some(Self {
+            ring_in: Ring::new(arena, XFER_RING_TRBS)?,
+            ring_out: Ring::new(arena, XFER_RING_TRBS)?,
+            cbw: arena.alloc(64, 64)?,
+            csw: arena.alloc(64, 64)?,
+            small: arena.alloc(64, 64)?,
+        })
+    }
+
+    fn of(st: &Storage) -> Self {
+        Self {
+            ring_in: st.bulk_in.ring,
+            ring_out: st.bulk_out.ring,
+            cbw: st.cbw,
+            csw: st.csw,
+            small: st.small,
+        }
+    }
+}
+
 /// Bulk-only mass storage device (at most one).
 struct Storage {
     /// Index in `devices`; `None` once its slot was disabled.
@@ -406,6 +487,10 @@ struct Storage {
     transport: Transport,
     /// Re-enumerations since the last successful command or connection.
     reenumerations: u8,
+    /// A connect status change was seen on the port since the slot was
+    /// addressed: the device that slot addressed is gone (xHCI 4.19.2), so
+    /// the slot is disabled rather than reset.
+    reconnected: bool,
     identity: Identity,
 }
 
@@ -466,6 +551,14 @@ enum Injection {
     /// The endpoint is given up as if no command put it back: Disable
     /// Slot and the whole re-enumeration run.
     Reenum,
+    /// The device is treated as not answering any more: the request
+    /// answers Io and the idle loop resets the port and enumerates the
+    /// device again on its slot (Reset Device, xHCI 4.6.11).
+    Reset,
+    /// A HID report that arrived is treated as a USB Transaction Error;
+    /// the idle loop stops the interrupt endpoint (a real Stopped state)
+    /// and recovers it.
+    Hid,
 }
 
 /// Outcome of a command TRB.
@@ -501,7 +594,8 @@ struct TransferFault {
 struct Controller {
     /// `strict` boot flag: halt on the first transport failure.
     strict: bool,
-    /// `usb_fault=N|idle[:cbw|:csw|:reenum]` (tests): an injected failure.
+    /// `usb_fault=N|idle[:cbw|:csw|:reenum|:reset|:hid]` (tests): an
+    /// injected failure.
     fault_inject: FaultInject,
     /// The injected failure due in the current request, until it is used.
     inject_now: Option<Injection>,
@@ -516,8 +610,9 @@ struct Controller {
     slot_to_disable: Option<u8>,
     /// Client buffer handle kept until a Disable Slot completes.
     held_buffer: Option<Handle>,
-    /// Last block request (ms), for `usb_fault=idle`.
+    /// Last block request and last HID report (ms), for `usb_fault=idle`.
     last_request_ms: u64,
+    last_report_ms: u64,
     op: Mmio,
     runtime: Mmio,
     doorbells: Mmio,
@@ -531,6 +626,15 @@ struct Controller {
     dcbaa_virt: u64,
     devices: [Option<UsbDevice>; MAX_DEVICES],
     storage: Option<Storage>,
+    /// Slot memory of a released device, reused by the next slot once no
+    /// Disable Slot is outstanding (the controller then owns none of it,
+    /// xHCI 4.6.4): the linear arena never grows with re-enumerations.
+    spare_slot: Option<SlotMemory>,
+    /// Storage memory handed to the storage being enumerated again.
+    spare_storage: Option<StorageMemory>,
+    /// Descriptor buffer (512 bytes) of every enumeration: (physical,
+    /// virtual). Enumerations never overlap.
+    desc_buf: (u64, u64),
     clock: Clock,
     keyboards: u8,
     mice: u8,
@@ -659,6 +763,7 @@ impl Controller {
             (erst_virt as *mut [u8; 16]).write_volatile(erst_entry(ev_phys, EVENT_RING_TRBS as u16))
         };
         let events = EventRing::new(ev_phys, EVENT_RING_TRBS);
+        let desc_buf = arena.alloc(512, 64).ok_or(exit::DMA)?;
 
         op.w32(op::CONFIG, params.max_slots as u32);
         op.w64(op::DCBAAP, dcbaa_phys);
@@ -681,6 +786,7 @@ impl Controller {
             slot_to_disable: None,
             held_buffer: None,
             last_request_ms: 0,
+            last_report_ms: 0,
             op,
             runtime,
             doorbells,
@@ -693,6 +799,9 @@ impl Controller {
             dcbaa_virt,
             devices: [None, None, None, None],
             storage: None,
+            spare_slot: None,
+            spare_storage: None,
+            desc_buf,
             clock,
             keyboards: 0,
             mice: 0,
@@ -963,6 +1072,7 @@ impl Controller {
             say(b"the storage device reconnected or was reset: re-enumerating");
             if sc & op::PORTSC_CSC != 0 {
                 st.reenumerations = 0;
+                st.reconnected = true;
             }
             st.transport = Transport::Reenumerate {
                 not_before: now + DEBOUNCE_MS,
@@ -1004,13 +1114,14 @@ impl Controller {
                 .as_mut()
                 .ok_or(completion::NO_EVENT)?;
             let mut td = [0u64; 3];
-            td[0] = dev.ep0.push(Trb::setup_stage(&setup));
+            td[0] = dev.mem.ep0.push(Trb::setup_stage(&setup));
             let mut n = 1;
             if let Some((phys, len)) = data {
-                td[n] = dev.ep0.push(Trb::data_stage(phys, len, setup.is_in()));
+                td[n] = dev.mem.ep0.push(Trb::data_stage(phys, len, setup.is_in()));
                 n += 1;
             }
             td[n] = dev
+                .mem
                 .ep0
                 .push(Trb::status_stage(data.is_none() || !setup.is_in()));
             n += 1;
@@ -1072,19 +1183,16 @@ impl Controller {
         sys::print(b"\n");
     }
 
-    /// Enumerates a port with a device attached: reset, slot, address,
-    /// descriptors, configuration and HID interfaces or storage, all
-    /// within `deadline`. `force_reset` resets the port even if it is
-    /// enabled (a device that stopped answering: the last resort). A
-    /// failure after Enable Slot disables the slot again (xHCI 4.6.4), so
-    /// no slot or device entry is left behind.
-    fn enumerate_port(
+    /// Resets port `port` if it is not enabled or `force_reset` (a device
+    /// that stopped answering: the last resort), clears its change bits and
+    /// consumes the Port Status Change events this produced, within
+    /// `deadline`. Returns the port speed (PSIV).
+    fn prepare_port(
         &mut self,
         port: u8,
         force_reset: bool,
-        ready_wait_ms: u64,
         deadline: u64,
-    ) -> Result<(), &'static str> {
+    ) -> Result<u8, &'static str> {
         let sc = self.portsc(port);
         if sc & op::PORTSC_CCS == 0 {
             return Err("no device");
@@ -1116,60 +1224,220 @@ impl Controller {
         while let Some(ev) = self.next_event() {
             self.dispatch(ev, None);
         }
+        Ok(spd)
+    }
 
+    /// Enumerates a port with a device attached on a new slot: port reset,
+    /// Enable Slot, then `enumerate_slot`, all within `deadline`. A failure
+    /// after Enable Slot disables the slot again (xHCI 4.6.4), so no slot
+    /// or device entry is left behind.
+    fn enumerate_port(
+        &mut self,
+        port: u8,
+        force_reset: bool,
+        ready_wait_ms: u64,
+        deadline: u64,
+    ) -> Result<(), &'static str> {
+        let spd = self.prepare_port(port, force_reset, deadline)?;
         let (code, slot) = self
             .command(Trb::enable_slot(), self.until(deadline, 500))
             .map_err(|i| no_completion(i, "Enable Slot: refused", "Enable Slot: no response"))?;
         if code != completion::SUCCESS || slot == 0 {
             return Err("Enable Slot failed");
         }
-        let result = self.enumerate_slot(port, slot, spd, ready_wait_ms, deadline);
+        let result = self
+            .add_device(slot)
+            .and_then(|index| self.enumerate_slot(index, port, spd, ready_wait_ms, deadline));
         if result.is_err() {
-            if let Some(i) = self
-                .devices
-                .iter()
-                .position(|d| d.as_ref().is_some_and(|d| d.slot == slot))
-            {
-                self.devices[i] = None;
-            }
-            // The slot is still enabled (a recovery during the enumeration
-            // leaves it to this cleanup): disabled once, within the step; a
-            // refused or pending Disable Slot is finished by the idle loop.
-            self.issue_disable_slot(slot, deadline);
+            self.release_slot(slot, deadline);
         }
         result
     }
 
-    /// Everything after Enable Slot (xHCI 4.3): address, descriptors,
-    /// configuration, and the HID or storage interfaces.
+    /// Enumerates the device of `devices[index]` again on its own slot
+    /// (incident 0001, audit 1 F10): the port is reset if `force_reset` or
+    /// disabled, the slot is taken back to the Default state as its state
+    /// requires (`reset_slot`), and `enumerate_slot` addresses and
+    /// configures the device with the same Output Device Context, EP0 ring
+    /// and Input Context. Within `deadline`; any failure disables the slot
+    /// (xHCI 4.6.4) and leaves the next attempt to a new slot.
+    fn reenumerate_in_place(
+        &mut self,
+        index: usize,
+        port: u8,
+        force_reset: bool,
+        ready_wait_ms: u64,
+        deadline: u64,
+    ) -> Result<(), &'static str> {
+        let Some(slot) = self.devices[index].as_ref().map(|d| d.slot) else {
+            return Err("no device entry");
+        };
+        let result = self
+            .reset_slot(index, slot, port, force_reset, deadline)
+            .and_then(|spd| self.enumerate_slot(index, port, spd, ready_wait_ms, deadline));
+        if result.is_err() {
+            self.release_slot(slot, deadline);
+        }
+        result
+    }
+
+    /// Port reset (if due), then the slot of `devices[index]` back to the
+    /// Default state: Reset Device (xHCI 4.6.11, which the section has
+    /// software issue once the device itself was reset on its port) when
+    /// the slot is Addressed or Configured, nothing when it already is
+    /// Default (4.6.5 addresses a Default slot), a failure otherwise. Its
+    /// EP0 ring and endpoint entries are emptied. Returns the port speed.
+    fn reset_slot(
+        &mut self,
+        index: usize,
+        slot: u8,
+        port: u8,
+        force_reset: bool,
+        deadline: u64,
+    ) -> Result<u8, &'static str> {
+        let spd = self.prepare_port(port, force_reset, deadline)?;
+        let state = self.slot_state_of(index).ok_or("no device entry")?;
+        let plan = slot_reuse(state);
+        sys::print(b"usb-input: slot ");
+        num(slot as u64);
+        sys::print(b" is ");
+        sys::print(slot_state::name(state).as_bytes());
+        sys::print(match plan {
+            SlotReuse::ResetDevice => b": Reset Device (xHCI 4.6.11), then Address Device\n",
+            SlotReuse::Readdress => b": Address Device without Reset Device (xHCI 4.6.5)\n",
+            SlotReuse::Replace => b": not addressed, the slot is replaced\n",
+        });
+        match plan {
+            SlotReuse::ResetDevice => {
+                if !self.command_checked(Trb::reset_device(slot), b"Reset Device", deadline) {
+                    return Err("Reset Device failed");
+                }
+            }
+            SlotReuse::Readdress => {}
+            SlotReuse::Replace => return Err("slot not addressed"),
+        }
+        // Reset Device aborted every transfer and disabled every endpoint
+        // but EP0, which nothing rings until Address Device hands the
+        // controller its ring again (4.6.5 takes the TR Dequeue Pointer and
+        // DCS from the Input Context): the EP0 ring is emptied in place.
+        let dev = self.devices[index].as_mut().ok_or("no device entry")?;
+        dev.mem.ep0.reset();
+        dev.endpoints = [None, None, None, None];
+        dev.decoders = [Decoder::None; MAX_DEVICES];
+        Ok(spd)
+    }
+
+    /// A new device entry for `slot` with its slot memory, the DCBAA
+    /// pointing at its Output Device Context. Returns its index.
+    fn add_device(&mut self, slot: u8) -> Result<usize, &'static str> {
+        let index = self
+            .devices
+            .iter()
+            .position(|d| d.is_none())
+            .ok_or("too many devices")?;
+        let mem = self.slot_memory().ok_or("no DMA")?;
+        // SAFETY: DCBAA entry `slot`.
+        unsafe { ((self.dcbaa_virt + 8 * slot as u64) as *mut u64).write_volatile(mem.dev_ctx.0) };
+        self.devices[index] = Some(UsbDevice {
+            slot,
+            mem,
+            endpoints: [None, None, None, None],
+            decoders: [Decoder::None; MAX_DEVICES],
+            slot_ctx: SlotContext::default(),
+        });
+        Ok(index)
+    }
+
+    /// Slot memory for a new slot: the spare of a released slot when no
+    /// Disable Slot is outstanding (the controller owns none of it any
+    /// more, xHCI 4.6.4), with its Output Device Context zeroed (4.3.3)
+    /// and its EP0 ring emptied; otherwise a new allocation.
+    fn slot_memory(&mut self) -> Option<SlotMemory> {
+        let ctx_bytes = self.params.context_bytes();
+        if self.pending_disable.is_none() && self.slot_to_disable.is_none() {
+            if let Some(mut mem) = self.spare_slot.take() {
+                // SAFETY: the Output Device Context inside the driver's DMA
+                // buffer, owned by no slot now.
+                unsafe {
+                    core::slice::from_raw_parts_mut(
+                        mem.dev_ctx.1 as *mut u8,
+                        DEVICE_CONTEXTS * ctx_bytes,
+                    )
+                    .fill(0)
+                };
+                mem.ep0.reset();
+                return Some(mem);
+            }
+        }
+        let dev_ctx = self.arena.alloc((DEVICE_CONTEXTS * ctx_bytes) as u64, 64)?;
+        let ep0 = Ring::new(&mut self.arena, XFER_RING_TRBS)?;
+        let in_len = (INPUT_CONTEXTS * ctx_bytes) as u64;
+        let (in_phys, in_virt) = self.arena.alloc(in_len, 64)?;
+        Some(SlotMemory {
+            dev_ctx,
+            ep0,
+            input_ctx: (in_phys, in_virt, in_len),
+        })
+    }
+
+    /// The device entry of `slot` goes away (its memory becomes the spare)
+    /// and the slot is disabled (xHCI 4.6.4), once, within `deadline`; a
+    /// refused or pending Disable Slot is finished by the idle loop.
+    fn release_slot(&mut self, slot: u8, deadline: u64) {
+        if let Some(i) = self
+            .devices
+            .iter()
+            .position(|d| d.as_ref().is_some_and(|d| d.slot == slot))
+        {
+            self.release_device(i);
+        }
+        self.issue_disable_slot(slot, deadline);
+    }
+
+    /// Removes `devices[index]`, keeping its slot memory as the spare.
+    /// The caller disables its slot; `slot_memory` does not reuse the
+    /// spare before that Disable Slot completed. Returns the slot.
+    fn release_device(&mut self, index: usize) -> Option<u8> {
+        let dev = self.devices[index].take()?;
+        if self.spare_slot.is_none() {
+            self.spare_slot = Some(dev.mem);
+        }
+        Some(dev.slot)
+    }
+
+    /// Slot State of `devices[index]`, as the controller wrote it in the
+    /// Output Slot Context.
+    fn slot_state_of(&self, index: usize) -> Option<u8> {
+        let dev = self.devices[index].as_ref()?;
+        // SAFETY: Output Slot Context of the slot, inside the driver's DMA
+        // buffer; the controller writes it, so it is read volatile.
+        let bytes = unsafe { (dev.mem.dev_ctx.1 as *const [u8; 16]).read_volatile() };
+        slot_status(&bytes)
+    }
+
+    /// Everything after the slot is Enabled or Default (xHCI 4.3): address,
+    /// descriptors, configuration, and the HID or storage interfaces of the
+    /// device in `devices[index]`, on its own slot memory.
     fn enumerate_slot(
         &mut self,
+        index: usize,
         port: u8,
-        slot: u8,
         spd: u8,
         ready_wait_ms: u64,
         deadline: u64,
     ) -> Result<(), &'static str> {
         let ctx_bytes = self.params.context_bytes();
-        let (dev_ctx_phys, dev_ctx_virt) = self
-            .arena
-            .alloc((32 * ctx_bytes) as u64, 64)
-            .ok_or("no DMA")?;
-        // SAFETY: DCBAA entry `slot`.
-        unsafe { ((self.dcbaa_virt + 8 * slot as u64) as *mut u64).write_volatile(dev_ctx_phys) };
-        let ep0 = Ring::new(&mut self.arena, XFER_RING_TRBS).ok_or("no DMA")?;
-        let (in_phys, in_virt) = self
-            .arena
-            .alloc((33 * ctx_bytes) as u64, 64)
-            .ok_or("no DMA")?;
+        let (slot, ep0_phys, (in_phys, in_virt, in_len)) = {
+            let dev = self.devices[index].as_ref().ok_or("no device entry")?;
+            (dev.slot, dev.mem.ep0.state.phys, dev.mem.input_ctx)
+        };
         let slot_ctx = SlotContext {
             route_string: 0,
             speed: spd,
             context_entries: 1,
             root_hub_port: port,
         };
-        let ep0_ctx = EndpointContext::control(speed::default_ep0_max_packet(spd), ep0.state.phys);
-        let in_len = (33 * ctx_bytes) as u64;
+        let ep0_ctx = EndpointContext::control(speed::default_ep0_max_packet(spd), ep0_phys);
         write_input_context(
             // SAFETY: input context inside the DMA buffer.
             unsafe { core::slice::from_raw_parts_mut(in_virt as *mut u8, in_len as usize) },
@@ -1190,26 +1458,15 @@ impl Controller {
         if code != completion::SUCCESS {
             return Err("Address Device failed");
         }
-        let index = self
-            .devices
-            .iter()
-            .position(|d| d.is_none())
-            .ok_or("too many devices")?;
-        self.devices[index] = Some(UsbDevice {
-            slot,
-            ep0,
-            endpoints: [None, None, None, None],
-            decoders: [Decoder::None; MAX_DEVICES],
-            input_ctx: (in_phys, in_virt, in_len),
-            slot_ctx,
-            dev_ctx_virt,
-        });
+        if let Some(dev) = self.devices[index].as_mut() {
+            dev.slot_ctx = slot_ctx;
+        }
 
         // Device descriptor in two steps (xHCI 4.3, step 7): first only
         // 8 bytes, which fit in any EP0, to learn bMaxPacketSize0; if it
         // differs from the assumed value the context is fixed with
         // Evaluate Context and only then is the full descriptor requested.
-        let (buf_phys, buf_virt) = self.arena.alloc(512, 64).ok_or("no DMA")?;
+        let (buf_phys, buf_virt) = self.desc_buf;
         self.control(
             index,
             SetupPacket::get_descriptor(aricode_xhci::request::DESC_DEVICE, 0, 8),
@@ -1368,10 +1625,13 @@ impl Controller {
             };
             dev.endpoints[ep_index] = Some(Endpoint {
                 dci: d,
+                address: 0x80 | hid.endpoint,
                 ring,
                 seen: false,
                 reports,
                 report_len,
+                fault: None,
+                failures: 0,
             });
             match hid.protocol {
                 1 => self.keyboards += 1,
@@ -1440,8 +1700,25 @@ impl Controller {
         ready_wait_ms: u64,
         deadline: u64,
     ) -> Result<(), &'static str> {
-        let ring_in = Ring::new(&mut self.arena, XFER_RING_TRBS).ok_or("no DMA")?;
-        let ring_out = Ring::new(&mut self.arena, XFER_RING_TRBS).ok_or("no DMA")?;
+        // The memory of the storage this one replaces, if any: its bulk
+        // endpoints are Disabled (Reset Device or a completed Disable Slot,
+        // xHCI 4.6.11 / 4.6.4), so the controller follows neither ring and
+        // both are emptied in place.
+        let mem = match self.spare_storage.take() {
+            Some(mut mem) => {
+                mem.ring_in.reset();
+                mem.ring_out.reset();
+                mem
+            }
+            None => StorageMemory::alloc(&mut self.arena).ok_or("no DMA")?,
+        };
+        let StorageMemory {
+            ring_in,
+            ring_out,
+            cbw,
+            csw,
+            small,
+        } = mem;
         let (dci_in, dci_out) = (dci(iface.bulk_in, true), dci(iface.bulk_out, false));
         let eps = [
             (
@@ -1455,7 +1732,7 @@ impl Controller {
         ];
         let (slot, (in_phys, in_virt, in_len), slot_ctx) = {
             let dev = self.devices[index].as_ref().ok_or("device")?;
-            (dev.slot, dev.input_ctx, dev.slot_ctx)
+            (dev.slot, dev.mem.input_ctx, dev.slot_ctx)
         };
         let slot_ctx = SlotContext {
             context_entries: dci_in.max(dci_out),
@@ -1489,9 +1766,6 @@ impl Controller {
         if let Some(dev) = self.devices[index].as_mut() {
             dev.slot_ctx = slot_ctx;
         }
-        let cbw = self.arena.alloc(64, 64).ok_or("no DMA")?;
-        let csw = self.arena.alloc(64, 64).ok_or("no DMA")?;
-        let small = self.arena.alloc(64, 64).ok_or("no DMA")?;
         self.storage = Some(Storage {
             device: Some(index),
             slot,
@@ -1518,6 +1792,7 @@ impl Controller {
             errors_reported: 0,
             transport: Transport::Enumerating,
             reenumerations: 0,
+            reconnected: false,
             identity,
         });
         if let Err(why) = self.storage_init(port, ready_wait_ms, deadline) {
@@ -1634,7 +1909,7 @@ impl Controller {
     /// controller wrote them in the Output Device Context.
     fn ep_status(&self, slot_index: usize, dci: u8) -> Option<(u8, u64)> {
         let dev = self.devices[slot_index].as_ref()?;
-        let base = dev.dev_ctx_virt + (dci as usize * self.params.context_bytes()) as u64;
+        let base = dev.mem.dev_ctx.1 + (dci as usize * self.params.context_bytes()) as u64;
         // SAFETY: Output Endpoint Context of the slot, inside the driver's
         // DMA buffer; the controller writes it, so it is read volatile.
         let bytes = unsafe { (base as *const [u8; 16]).read_volatile() };
@@ -1666,23 +1941,30 @@ impl Controller {
         })
     }
 
-    /// Transfer ring of endpoint `dci` of device `slot_index` (EP0 or a
-    /// storage bulk endpoint).
+    /// Transfer ring of endpoint `dci` of device `slot_index` (EP0, a
+    /// storage bulk endpoint or a HID interrupt endpoint).
     fn ring_mut(&mut self, slot_index: usize, dci: u8) -> Option<&mut Ring> {
+        let dev = self.devices[slot_index].as_mut()?;
         if dci == 1 {
-            return self.devices[slot_index].as_mut().map(|d| &mut d.ep0);
+            return Some(&mut dev.mem.ep0);
         }
-        let st = self
+        if let Some(st) = self
             .storage
             .as_mut()
-            .filter(|s| s.device == Some(slot_index))?;
-        if st.bulk_in.dci == dci {
-            Some(&mut st.bulk_in.ring)
-        } else if st.bulk_out.dci == dci {
-            Some(&mut st.bulk_out.ring)
-        } else {
-            None
+            .filter(|s| s.device == Some(slot_index))
+        {
+            if st.bulk_in.dci == dci {
+                return Some(&mut st.bulk_in.ring);
+            }
+            if st.bulk_out.dci == dci {
+                return Some(&mut st.bulk_out.ring);
+            }
         }
+        dev.endpoints
+            .iter_mut()
+            .flatten()
+            .find(|e| e.dci == dci)
+            .map(|e| &mut e.ring)
     }
 
     /// Set TR Dequeue Pointer (xHCI 4.6.10) to the software enqueue
@@ -1711,12 +1993,41 @@ impl Controller {
     /// command is bounded by `deadline`. Returns whether the endpoint
     /// accepts doorbells again.
     fn recover_endpoint(&mut self, slot_index: usize, dci: u8, code: u8, deadline: u64) -> bool {
-        let Some(slot) = self.devices[slot_index].as_ref().map(|d| d.slot) else {
+        let Some((slot, plan)) = self.recovery_plan(slot_index, dci, code) else {
             return false;
         };
-        let Some((state, dequeue)) = self.ep_status(slot_index, dci) else {
+        let Some(mut ok) = self.host_recovery(slot_index, slot, dci, plan, deadline) else {
             return false;
         };
+        if plan == EndpointRecovery::ResetHalted {
+            let address = self
+                .storage
+                .as_ref()
+                .filter(|st| st.device == Some(slot_index))
+                .and_then(|st| {
+                    [&st.bulk_in, &st.bulk_out]
+                        .into_iter()
+                        .find(|b| b.dci == dci)
+                        .map(|b| b.address)
+                });
+            if let Some(address) = address {
+                ok = self.clear_feature_halt(slot_index, address, deadline) && ok;
+            }
+        }
+        ok
+    }
+
+    /// The slot of device `slot_index` and the recovery plan of its
+    /// endpoint `dci` after a transfer ended with `code`, from the Endpoint
+    /// Context state (xHCI 4.8.3), printed. `None` without a device entry.
+    fn recovery_plan(
+        &self,
+        slot_index: usize,
+        dci: u8,
+        code: u8,
+    ) -> Option<(u8, EndpointRecovery)> {
+        let slot = self.devices[slot_index].as_ref()?.slot;
+        let (state, dequeue) = self.ep_status(slot_index, dci)?;
         let plan = endpoint_recovery(code, state);
         sys::print(b"usb-input: recovering dci ");
         num(dci as u64);
@@ -1729,7 +2040,26 @@ impl Controller {
         sys::print(b"): ");
         sys::print(plan.name().as_bytes());
         sys::print(b"\n");
-        match plan {
+        Some((slot, plan))
+    }
+
+    /// The controller side of `plan` for endpoint `dci` (the device side,
+    /// `CLEAR_FEATURE(ENDPOINT_HALT)` after a Reset Endpoint, is the
+    /// caller's), every command bounded by `deadline`: Reset Endpoint
+    /// with TSP = 0 only when Halted (4.6.8), Stop Endpoint when a TD is
+    /// still Running (4.6.9), Set TR Dequeue past the abandoned TDs
+    /// (4.6.10). `None` when Reset Endpoint failed: the endpoint is still
+    /// Halted and Set TR Dequeue would fail too (4.6.10), so nothing else
+    /// may be sent. Otherwise whether the endpoint accepts doorbells again.
+    fn host_recovery(
+        &mut self,
+        slot_index: usize,
+        slot: u8,
+        dci: u8,
+        plan: EndpointRecovery,
+        deadline: u64,
+    ) -> Option<bool> {
+        Some(match plan {
             EndpointRecovery::Nothing => true,
             EndpointRecovery::StopAndRetire => {
                 self.stop_endpoint(slot, dci, deadline)
@@ -1742,27 +2072,12 @@ impl Controller {
                     b"Reset Endpoint",
                     deadline,
                 ) {
-                    // Still Halted: Set TR Dequeue would fail too (4.6.10).
-                    return false;
+                    return None;
                 }
-                let mut ok = self.set_dequeue(slot_index, slot, dci, deadline);
-                let address = self
-                    .storage
-                    .as_ref()
-                    .filter(|st| st.device == Some(slot_index))
-                    .and_then(|st| {
-                        [&st.bulk_in, &st.bulk_out]
-                            .into_iter()
-                            .find(|b| b.dci == dci)
-                            .map(|b| b.address)
-                    });
-                if let Some(address) = address {
-                    ok = self.clear_feature_halt(slot_index, address, deadline) && ok;
-                }
-                ok
+                self.set_dequeue(slot_index, slot, dci, deadline)
             }
             EndpointRecovery::Reenumerate => false,
-        }
+        })
     }
 
     /// `CLEAR_FEATURE(ENDPOINT_HALT)` (USB 2.0 9.4.5): the device leaves
@@ -1989,11 +2304,17 @@ impl Controller {
             }
             sys::print(b"; ");
         }
-        let sc = self.portsc(st.port);
+        sys::print(b"\n");
+        self.dump_port(st.port);
+    }
+
+    /// `  port N PORTSC ... decoded; USBSTS ... HSE= HCE=` (one line).
+    fn dump_port(&self, port: u8) {
+        let sc = self.portsc(port);
         let sts = self.op.r32(op::USBSTS);
         let mut text = [0u8; 96];
-        sys::print(b"\n  port ");
-        num(st.port as u64);
+        sys::print(b"  port ");
+        num(port as u64);
         sys::print(b" PORTSC ");
         hex(sc as u64);
         sys::print(b" ");
@@ -2034,6 +2355,23 @@ impl Controller {
             self.inject_now = None;
             say(b"injected fault: the endpoint is given up");
             self.give_up_endpoint(budget.deadline);
+            return Err(ScsiFail::Transport(completion::NO_EVENT, None));
+        }
+        if self.inject_now == Some(Injection::Reset) {
+            // Test injection: the device is treated as not answering, as
+            // when it rejects the class reset (`send_class_reset`): the
+            // request answers Io and the idle loop resets the port and
+            // enumerates the device again on its own slot.
+            self.inject_now = None;
+            say(b"injected fault: the device is re-enumerated in place after a port reset");
+            let now = self.clock.now();
+            self.transition(
+                Transport::Ready,
+                Transport::Reenumerate {
+                    not_before: now,
+                    reset_port: true,
+                },
+            );
             return Err(ScsiFail::Transport(completion::NO_EVENT, None));
         }
         if self.inject_now == Some(Injection::Csw) {
@@ -2261,11 +2599,11 @@ impl Controller {
     /// Disable Slot (xHCI 4.6.4) of the storage device, if it still has
     /// one (`None` otherwise): the device entry goes away now, whatever
     /// the command's fate (`issue_disable_slot` tracks a pending or refused
-    /// one).
+    /// one), and its memory becomes the spare slot memory.
     fn disable_storage_slot(&mut self, deadline: u64) -> Option<Issued> {
         let device = self.storage.as_mut().and_then(|st| st.device.take())?;
-        let dev = self.devices[device].take()?;
-        Some(self.issue_disable_slot(dev.slot, deadline))
+        let slot = self.release_device(device)?;
+        Some(self.issue_disable_slot(slot, deadline))
     }
 
     /// Reset Recovery (BOT 5.3.4) is due: the class reset and what follows
@@ -2499,7 +2837,7 @@ impl Controller {
                     dev.slot,
                     ep.dci,
                     EndpointContext::bulk(ep.max_packet, ep.ring.state.phys, dir_in),
-                    dev.input_ctx,
+                    dev.mem.input_ctx,
                     dev.slot_ctx,
                 ))
             })
@@ -2523,15 +2861,20 @@ impl Controller {
     }
 
     /// The storage device is enumerated again on its port (xHCI 4.3)
-    /// within `deadline`: its old slot is disabled (4.6.4) if it still has
-    /// one, the port is reset if `reset_port` (the last resort for a
-    /// device that stopped answering), and the device is addressed and
-    /// configured from scratch. It is served again only if it is the same
-    /// medium (same capacity; a device that never answered READ CAPACITY
-    /// has none to compare). Consecutive attempts are counted across
-    /// recoveries (`Storage::reenumerations`), a run out of time counts
-    /// too, and the storage is given up after `REENUMERATE_ATTEMPTS`. The
-    /// DMA memory of the old slot stays allocated (linear arena).
+    /// within `deadline`, the port reset first if `reset_port` (the last
+    /// resort for a device that stopped answering). A device still on the
+    /// port keeps its slot: Reset Device (4.6.11) and Address Device on the
+    /// same Output Device Context, EP0 ring and Input Context, its bulk
+    /// rings and buffers emptied and reused (`reenumerate_in_place`). The
+    /// slot is disabled (4.6.4) instead when the device is gone, a new
+    /// connection replaced it, the attempts are spent, or a previous
+    /// attempt already released it (a failed Reset Device or addressing);
+    /// a new slot then reuses the released memory. Either way the arena
+    /// does not grow. It is served again only if it is the same medium
+    /// (same capacity; a device that never answered READ CAPACITY has none
+    /// to compare). Consecutive attempts are counted across recoveries
+    /// (`Storage::reenumerations`), a run out of time counts too, and the
+    /// storage is given up after `REENUMERATE_ATTEMPTS`.
     fn reenumerate_storage(&mut self, reset_port: bool, deadline: u64) {
         if self.pending_disable.is_some() {
             // The old slot is still being disabled: no new slot and no
@@ -2550,7 +2893,10 @@ impl Controller {
         if let Some(st) = self.storage.as_mut() {
             st.reenumerations = st.reenumerations.saturating_add(1);
         }
-        let Some((port, attempt)) = self.storage.as_ref().map(|s| (s.port, s.reenumerations))
+        let Some((port, attempt, reconnected)) = self
+            .storage
+            .as_ref()
+            .map(|s| (s.port, s.reenumerations, s.reconnected))
         else {
             return;
         };
@@ -2563,15 +2909,21 @@ impl Controller {
         num(attempt as u64);
         sys::print(b")\n");
         record("usb reenum", attempt as u64);
-        self.disable_storage_slot(deadline);
-        if self.pending_disable.is_some() || self.slot_to_disable.is_some() {
-            // Disable Slot not completed or refused: it is finished by the
-            // idle loop before the next attempt; this one is not counted.
-            if let Some(st) = self.storage.as_mut() {
-                st.reenumerations -= 1;
+        let present = self.portsc(port) & op::PORTSC_CCS != 0;
+        if attempt > REENUMERATE_ATTEMPTS || !present || reconnected {
+            // The device the slot addressed is gone or given up (xHCI
+            // 4.6.4, 4.19.2): its slot is released.
+            self.disable_storage_slot(deadline);
+            if self.pending_disable.is_some() || self.slot_to_disable.is_some() {
+                // Disable Slot not completed or refused: it is finished by
+                // the idle loop before the next attempt; this one is not
+                // counted.
+                if let Some(st) = self.storage.as_mut() {
+                    st.reenumerations -= 1;
+                }
+                say(b"re-enumeration postponed until the old slot is disabled");
+                return;
             }
-            say(b"re-enumeration postponed until the old slot is disabled");
-            return;
         }
         let Some(mut old) = self.storage.take() else {
             return;
@@ -2583,13 +2935,31 @@ impl Controller {
             self.storage = Some(old);
             return;
         }
-        if self.portsc(port) & op::PORTSC_CCS == 0 {
+        if !present {
             say(b"no device on the storage port: requests fail until it is connected again");
             old.transport = Transport::Gone;
             self.storage = Some(old);
             return;
         }
-        match self.enumerate_port(port, reset_port, REENUMERATE_READY_WAIT_MS, deadline) {
+        // From here on the old storage owns no slot: on success the new one
+        // does, on failure the slot was released.
+        let device = old.device.take();
+        old.reconnected = false;
+        self.spare_storage = Some(StorageMemory::of(&old));
+        let result = match device {
+            Some(index) => self.reenumerate_in_place(
+                index,
+                port,
+                reset_port,
+                REENUMERATE_READY_WAIT_MS,
+                deadline,
+            ),
+            None => self.enumerate_port(port, reset_port, REENUMERATE_READY_WAIT_MS, deadline),
+        };
+        // Not taken when the enumeration failed before the storage was
+        // configured: the memory stays with `old`.
+        self.spare_storage = None;
+        match result {
             Ok(()) => match self.storage.as_mut() {
                 Some(st) if old.capacity == 0 || st.capacity == old.capacity => {
                     st.sync_cache = old.sync_cache;
@@ -2723,7 +3093,7 @@ impl Controller {
         let name: &[u8] = if write { b"WRITE(10)" } else { b"READ(10)" };
         let start = self.clock.now();
         let budget = Budget::new(start, REQUEST_BUDGET_MS, RECOVERY_RESERVE_MS);
-        self.inject_now = self.fault_inject.due(start, self.last_request_ms);
+        self.inject_now = self.fault_inject.due(start, self.last_request_ms, false);
         self.last_request_ms = start;
         if self.transport() != Some(Transport::Ready) {
             self.inject_now = None;
@@ -2919,10 +3289,20 @@ impl Controller {
         sys::print(b")\n");
     }
 
-    /// A Transfer Event from an interrupt endpoint: decodes the report
-    /// and requeues the TRB. False if no report TRB matches it.
+    /// A Transfer Event from a HID interrupt endpoint. The event retires
+    /// its report TRB (xHCI 4.10.1). A completed report (Success or Short
+    /// Packet) is decoded into `pending` and its TRB queued again, unless
+    /// the endpoint waits for a recovery, which queues every report again
+    /// itself. Any other code is a failed transfer (4.10.2: STALL, USB
+    /// Transaction Error, Babble and the like halt the endpoint): it is
+    /// printed, recorded as a fault event (ADR 0028) and its recovery left
+    /// to the idle loop (`maintain_hid`), because this runs inside other
+    /// waits (commands, control and bulk transfers) that must not nest
+    /// recovery commands. A Stopped code is the TD a Stop Endpoint of that
+    /// recovery retired (4.6.9). False if no report TRB matches the event.
     fn handle_transfer_event(&mut self, ev: Trb, pending: Option<&mut Pending>) -> bool {
         let now = self.clock.now();
+        let code = ev.completion_code();
         let mut out = [Event::default(); MAX_REPORT_EVENTS];
         for dev in self.devices.iter_mut().flatten() {
             if dev.slot != ev.slot_id() {
@@ -2936,6 +3316,65 @@ impl Controller {
                 let Some(r) = ep.reports.iter_mut().find(|r| r.0 == ev.parameter) else {
                     continue;
                 };
+                r.0 = 0;
+                if completion::is_stopped(code) {
+                    sys::print(b"usb-input: HID slot ");
+                    num(dev.slot as u64);
+                    sys::print(b" dci ");
+                    num(ep.dci as u64);
+                    sys::print(b": TD stopped at trb ");
+                    hex(ev.parameter);
+                    sys::print(b", ");
+                    code_text(code);
+                    sys::print(b"\n");
+                    return true;
+                }
+                let injected = completion::is_success(code)
+                    && self
+                        .fault_inject
+                        .due(now, self.last_report_ms, true)
+                        .is_some();
+                if completion::is_success(code) {
+                    self.last_report_ms = now;
+                }
+                if injected || !completion::is_success(code) {
+                    let code = if injected {
+                        completion::USB_TRANSACTION_ERROR
+                    } else {
+                        code
+                    };
+                    sys::print(b"usb-input: HID report on slot ");
+                    num(dev.slot as u64);
+                    sys::print(b" dci ");
+                    num(ep.dci as u64);
+                    sys::print(b" failed: ");
+                    code_text(code);
+                    if injected {
+                        sys::print(b", injected");
+                    }
+                    sys::print(b", residual ");
+                    num(ev.residual() as u64);
+                    sys::print(b", trb ");
+                    hex(ev.parameter);
+                    sys::print(b"; recovered from the idle loop\n");
+                    record(
+                        if injected {
+                            "usb inj hid"
+                        } else {
+                            "usb hid err"
+                        },
+                        code as u64,
+                    );
+                    if ep.fault.is_none() {
+                        ep.fault = Some(HidFault {
+                            code,
+                            trb: ev.parameter,
+                            injected,
+                            clear_halt: false,
+                        });
+                    }
+                    return true;
+                }
                 let got = (ep.report_len as u32).saturating_sub(ev.residual()) as usize;
                 if !ep.seen {
                     ep.seen = true;
@@ -2944,7 +3383,7 @@ impl Controller {
                     sys::print(b" (");
                     num(got as u64);
                     sys::print(b" bytes, code ");
-                    num(ev.completion_code() as u64);
+                    num(code as u64);
                     sys::print(b")\n");
                 }
                 // SAFETY: the driver's report buffer (64 bytes).
@@ -2959,12 +3398,184 @@ impl Controller {
                         p.push(*e, now);
                     }
                 }
-                r.0 = ep.ring.push(Trb::normal(r.1, ep.report_len as u32));
-                self.doorbells.w32(4 * dev.slot as u64, ep.dci as u32);
+                ep.failures = 0;
+                if ep.fault.is_none() {
+                    r.0 = ep.ring.push(Trb::normal(r.1, ep.report_len as u32));
+                    self.doorbells.w32(4 * dev.slot as u64, ep.dci as u32);
+                }
                 return true;
             }
         }
         false
+    }
+
+    /// Idle-loop recovery of one failed HID interrupt endpoint per
+    /// iteration, within `MAINTENANCE_STEP_MS`. In `strict` mode the first
+    /// failure halts the driver with a dump before anything is touched
+    /// (ADR 0028). The plan follows the Endpoint Context state (xHCI
+    /// 4.8.3, `endpoint_recovery`): Halted takes Reset Endpoint with TSP =
+    /// 0 (4.6.8) and Set TR Dequeue (4.6.10), then
+    /// `CLEAR_FEATURE(ENDPOINT_HALT)` to the device (USB 2.0 9.4.5: the
+    /// halt feature is mandatory on interrupt endpoints, and only that
+    /// request restarts the device's data toggle at DATA0 with the host's);
+    /// Stopped takes Set TR Dequeue; Running (an error that did not halt
+    /// it) needs no command. When the plan moved the dequeue pointer every
+    /// report TRB is queued again, otherwise only those retired. Attempts
+    /// are bounded by `HID_RECOVERY_ATTEMPTS` without a good report in
+    /// between; then the endpoint is given up loudly. Every command result
+    /// is printed and a failure recorded (`command_checked`).
+    fn maintain_hid(&mut self) {
+        let Some((index, e, fault)) = self.devices.iter().enumerate().find_map(|(i, d)| {
+            d.as_ref()?
+                .endpoints
+                .iter()
+                .enumerate()
+                .find_map(|(e, ep)| Some((i, e, ep.as_ref()?.fault?)))
+        }) else {
+            return;
+        };
+        if self.strict {
+            self.halt_hid(index, e, fault);
+        }
+        let step = self.after(MAINTENANCE_STEP_MS);
+        let Some((slot, dci, address, failures)) = self.devices[index].as_ref().and_then(|d| {
+            let ep = d.endpoints[e].as_ref()?;
+            Some((d.slot, ep.dci, ep.address, ep.failures))
+        }) else {
+            return;
+        };
+        if failures >= HID_RECOVERY_ATTEMPTS {
+            sys::print(b"usb-input: HID endpoint dci ");
+            num(dci as u64);
+            sys::print(b" of slot ");
+            num(slot as u64);
+            sys::print(b" given up after ");
+            num(failures as u64);
+            sys::print(b" recovery attempts: no more reports from it in this boot\n");
+            record("usb hid lost", dci as u64);
+            self.set_hid_fault(index, e, None);
+            return;
+        }
+        if let Some(ep) = self.devices[index]
+            .as_mut()
+            .and_then(|d| d.endpoints[e].as_mut())
+        {
+            ep.failures += 1;
+        }
+        let mut fault = fault;
+        if fault.injected {
+            // Test injection: the report arrived, so the endpoint is still
+            // Running. Stop Endpoint (4.6.9) retires the TD in flight and
+            // leaves it Stopped, so that the recovery below works from a
+            // state the controller wrote, not from the injected code. Once:
+            // a later attempt starts from whatever state this left.
+            self.stop_endpoint(slot, dci, step);
+            fault.injected = false;
+            self.set_hid_fault(index, e, Some(fault));
+        }
+        let Some((_, plan)) = self.recovery_plan(index, dci, fault.code) else {
+            return;
+        };
+        let host_ok = match self.host_recovery(index, slot, dci, plan, step) {
+            Some(ok) => {
+                fault.clear_halt |= plan == EndpointRecovery::ResetHalted;
+                ok
+            }
+            None => false,
+        };
+        if host_ok && fault.clear_halt && self.clear_feature_halt(index, address, step) {
+            fault.clear_halt = false;
+        }
+        if !host_ok || fault.clear_halt {
+            sys::print(b"usb-input: HID endpoint dci ");
+            num(dci as u64);
+            sys::print(b" of slot ");
+            num(slot as u64);
+            sys::print(b": recovery attempt ");
+            num(failures as u64 + 1);
+            sys::print(b" failed; tried again from the idle loop\n");
+            self.set_hid_fault(index, e, Some(fault));
+            return;
+        }
+        self.set_hid_fault(index, e, None);
+        self.requeue_reports(index, e, plan.abandons_ring());
+        sys::print(b"usb-input: HID endpoint dci ");
+        num(dci as u64);
+        sys::print(b" of slot ");
+        num(slot as u64);
+        sys::print(b" recovered: reports queued again\n");
+    }
+
+    fn set_hid_fault(&mut self, index: usize, e: usize, fault: Option<HidFault>) {
+        if let Some(ep) = self.devices[index]
+            .as_mut()
+            .and_then(|d| d.endpoints[e].as_mut())
+        {
+            ep.fault = fault;
+        }
+    }
+
+    /// Queues the report TRBs of endpoint `e` of `devices[index]` again:
+    /// all of them when `all` (Set TR Dequeue skipped whatever was on the
+    /// ring), otherwise those retired, and rings its doorbell.
+    fn requeue_reports(&mut self, index: usize, e: usize, all: bool) {
+        let Some(dev) = self.devices[index].as_mut() else {
+            return;
+        };
+        let slot = dev.slot;
+        let Some(ep) = dev.endpoints[e].as_mut() else {
+            return;
+        };
+        for r in ep.reports.iter_mut() {
+            if all || r.0 == 0 {
+                r.0 = ep.ring.push(Trb::normal(r.1, ep.report_len as u32));
+            }
+        }
+        let dci = ep.dci;
+        self.ring_doorbell(slot, dci as u32);
+    }
+
+    /// `strict` (ADR 0028): dump what the HID transfer failure looked like
+    /// and stop before any recovery; init does not restart the driver.
+    fn halt_hid(&self, index: usize, e: usize, fault: HidFault) -> ! {
+        sys::print(b"usb-input: strict: halting on a HID transfer failure\n");
+        if let Some(dev) = self.devices[index].as_ref() {
+            if let Some(ep) = dev.endpoints[e].as_ref() {
+                sys::print(b"  slot ");
+                num(dev.slot as u64);
+                sys::print(b" dci ");
+                num(ep.dci as u64);
+                sys::print(b" endpoint ");
+                hex(ep.address as u64);
+                sys::print(b" ");
+                code_text(fault.code);
+                if fault.injected {
+                    sys::print(b", injected");
+                }
+                sys::print(b" trb ");
+                hex(fault.trb);
+                sys::print(b"\n  ep ");
+                num(ep.dci as u64);
+                match self.ep_status(index, ep.dci) {
+                    Some((state, dequeue)) => {
+                        sys::print(b" ");
+                        sys::print(ep_state::name(state).as_bytes());
+                        sys::print(b" dequeue ");
+                        hex(dequeue);
+                    }
+                    None => sys::print(b" (no context)"),
+                }
+                sys::print(b"; ring enqueue ");
+                num(ep.ring.state.enqueue as u64);
+                sys::print(b" cycle ");
+                num(ep.ring.state.cycle as u64);
+                sys::print(b"; reports on the ring ");
+                num(ep.reports.iter().filter(|r| r.0 != 0).count() as u64);
+                sys::print(b"\n");
+            }
+            self.dump_port(dev.slot_ctx.root_hub_port);
+        }
+        sys::process_exit(exit::TRANSPORT_FAULT)
     }
 
     /// Collects the ring events; reports go to `pending`.
@@ -3165,13 +3776,14 @@ fn device_name(ctl: &Controller) -> &'static str {
 }
 
 /// Test fault injection (`usb_fault`, ADR 0028): `N` or `idle`, with an
-/// optional kind: `cbw` (the default), `csw` or `reenum` (`Injection`).
+/// optional kind: `cbw` (the default), `csw`, `reenum`, `reset` or `hid`
+/// (`Injection`). `hid` counts HID reports, the others block requests.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FaultInject {
     None,
-    /// Block requests left before the injected failure.
+    /// Block requests (HID reports) left before the injected failure.
     Count(u32, Injection),
-    /// The first block request after two idle seconds (once).
+    /// The first block request (HID report) after two idle seconds (once).
     AfterIdle(Injection),
 }
 
@@ -3187,6 +3799,8 @@ impl FaultInject {
             "cbw" => Injection::Cbw,
             "csw" => Injection::Csw,
             "reenum" => Injection::Reenum,
+            "reset" => Injection::Reset,
+            "hid" => Injection::Hid,
             _ => return Self::None,
         };
         match when {
@@ -3195,8 +3809,15 @@ impl FaultInject {
         }
     }
 
-    /// The failure injected in this request, if any; advances the state.
-    fn due(&mut self, now: u64, last_request_ms: u64) -> Option<Injection> {
+    /// The failure injected in this block request (`hid` false) or HID
+    /// report (`hid` true), if any; advances the state only for an
+    /// injection of that path. `last_ms` is the previous one's time.
+    fn due(&mut self, now: u64, last_ms: u64, hid: bool) -> Option<Injection> {
+        if let Self::Count(_, kind) | Self::AfterIdle(kind) = *self {
+            if (kind == Injection::Hid) != hid {
+                return None;
+            }
+        }
         match *self {
             Self::None => None,
             Self::Count(1, stage) => {
@@ -3207,9 +3828,7 @@ impl FaultInject {
                 *self = Self::Count(n - 1, stage);
                 None
             }
-            Self::AfterIdle(stage)
-                if last_request_ms > 0 && now - last_request_ms >= Self::IDLE_MS =>
-            {
+            Self::AfterIdle(stage) if last_ms > 0 && now - last_ms >= Self::IDLE_MS => {
                 *self = Self::None;
                 Some(stage)
             }
@@ -3319,6 +3938,7 @@ fn main(mask: u64) -> u64 {
     loop {
         ctl.poll(&mut pending);
         ctl.maintain_storage();
+        ctl.maintain_hid();
         let now = ctl.clock.now();
         for _ in 0..8 {
             let Ok((which, n, nh)) = sys::ipc_receive_any(endpoints, &mut msg, &mut handles, 0)
