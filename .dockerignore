@@ -1,0 +1,4 @@
+# The Dockerfile copies nothing from the checkout (it is mounted at run
+# time), so the build context stays empty.
+*
+!Dockerfile

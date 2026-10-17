@@ -61,6 +61,29 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 `rust-toolchain.toml` fija la versión de Rust y añade automáticamente los
 targets `x86_64-unknown-none` y `x86_64-unknown-uefi`.
 
+### Docker
+
+El mismo entorno sin instalar nada en el equipo: el `Dockerfile` construye
+una imagen con los paquetes de Debian 13 de arriba, la versión fijada de
+Rust y QEMU/OVMF. El repositorio se monta, no se copia, así que las pruebas
+corren sobre los ficheros que estás editando. QEMU corre sin KVM, por lo que
+la imagen funciona en cualquier máquina con Docker (más lenta que en el
+equipo).
+
+```bash
+docker build -t aricodeos-dev .
+docker run --rm -it -v "$PWD":/src -v aricodeos-cargo:/usr/local/cargo/registry \
+    --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask check
+docker run --rm -it -v "$PWD":/src -v aricodeos-cargo:/usr/local/cargo/registry \
+    --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask test --all
+```
+
+`--user` mantiene `build/` y `target/` como tuyos; el volumen con nombre
+conserva las descargas de crates entre ejecuciones. La imagen no expone
+ningún puerto ni contiene claves. Un resultado de QEMU dentro de Docker es un
+resultado de QEMU: no sustituye a las comprobaciones en hardware de
+`docs/hardware.md`.
+
 ## Uso
 
 ```bash
