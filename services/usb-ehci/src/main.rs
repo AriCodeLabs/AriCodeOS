@@ -74,13 +74,26 @@ const CBW_TIMEOUT_MS: u64 = 1000;
 const MEDIUM_WINDOW_MS: u64 = 30_000;
 const NO_MEDIUM_WINDOW_MS: u64 = 5000;
 const MIN_STAGE_MS: u64 = 1000;
-/// Worst case of one medium command with every recovery step timing out:
-/// the command (31 s), CLEAR_FEATURE (5 s), the CSW read (1 s) and a
-/// REQUEST SENSE (6 s) whose own failure costs CLEAR_FEATURE, a CSW read
-/// and a Reset Recovery (5 + 1 + 15 s): 64 s. The block client waits
-/// `REPLY_WAIT_MS` (90 s), so a unit attention retry only starts while
-/// 64 s are left.
-const WORST_MEDIUM_COMMAND_MS: u64 = 64_000;
+/// Hard bounds of the driver's units of work. Every transfer inside one
+/// (recovery, REQUEST SENSE, hub GetPortStatus, ClearTTBuffer included)
+/// is cut to its deadline, and one that cannot start in time is refused
+/// without touching the controller (`Fail::Refused`). A block request
+/// gets the CBW, the 30 s medium window and 5 s of recovery; recovery
+/// that does not fit is postponed (a Reset Recovery runs before the next
+/// CBW, BOT 5.3.4). A block client waits `REPLY_WAIT_MS` (90 s) from its
+/// send: the longest step that may be running (an enumeration, 15 s) plus
+/// two requests (one queued) fit: 15 + 36 + 36 = 87 s.
+const REQUEST_BUDGET_MS: u64 = CBW_TIMEOUT_MS + MEDIUM_WINDOW_MS + 5000;
+const ATTACH_STEP_MS: u64 = 15_000;
+const HUB_POLL_STEP_MS: u64 = 5000;
+const _: () = assert!(ATTACH_STEP_MS + 2 * REQUEST_BUDGET_MS < REPLY_WAIT_MS);
+const _: () = assert!(HUB_POLL_STEP_MS <= ATTACH_STEP_MS);
+/// The input service's Info waits for the boot enumeration at most this
+/// long (init's readiness probe gives a driver about 3 s), and the whole
+/// boot enumeration is bounded: ports still pending after it are
+/// enumerated later, as hot-plugged ones.
+const INFO_WAIT_MS: u64 = 2500;
+const BOOT_ENUMERATION_MS: u64 = 30_000;
 /// Interrupt on Async Advance (EHCI 4.8.2): the controller sets it at its
 /// next pass over the async schedule, well within this bound.
 const IAA_TIMEOUT_MS: u64 = 100;
@@ -311,7 +324,19 @@ struct Storage {
     /// The Reset Recovery failed: requests fail until the device is
     /// plugged in again.
     broken: bool,
+    /// A Reset Recovery is owed (it did not fit in the request that needed
+    /// it): it runs before the next CBW (BOT 5.3.4).
+    needs_reset: bool,
     errors_reported: u8,
+}
+
+/// What the block service's clients were given: a device is served again
+/// after an unplug only if it is the same (capacity and INQUIRY names).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Served {
+    capacity: u64,
+    vendor: [u8; 8],
+    product: [u8; 16],
 }
 
 /// How a transfer failed.
@@ -327,6 +352,9 @@ enum Fail {
     Buffer,
     /// The controller did not confirm it released the queue head.
     Lost,
+    /// Not started: the deadline of the current unit of work had passed.
+    /// Nothing reached the controller.
+    Refused,
 }
 
 impl Fail {
@@ -340,6 +368,7 @@ impl Fail {
             Self::Timeout => "timeout",
             Self::Buffer => "buffer",
             Self::Lost => "lost",
+            Self::Refused => "no time",
         }
     }
 
@@ -349,6 +378,7 @@ impl Fail {
             Self::Timeout => 6,
             Self::Buffer => 7,
             Self::Lost => 8,
+            Self::Refused => 9,
         }
     }
 
@@ -364,9 +394,10 @@ impl Fail {
                 hex(t as u64);
                 sys::print(b")");
             }
-            Self::Timeout => sys::print(b"timeout (queue head retired)"),
+            Self::Timeout => sys::print(b"timeout"),
             Self::Buffer => sys::print(b"buffer not addressable by the qTDs"),
             Self::Lost => sys::print(b"the controller did not release the queue head"),
+            Self::Refused => sys::print(b"not started: no time left in this unit of work"),
         }
     }
 }
@@ -453,16 +484,25 @@ mod exit {
     pub const HOST_SYSTEM_ERROR: u64 = 16;
 }
 
-/// Test fault injection (`usb_fault=N|idle`, ADR 0028): a transaction
-/// error reported on the CBW of a block request without touching the
-/// controller; the Reset Recovery that follows is real.
+/// What `usb_fault` injects (tests).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Injection {
+    /// A transaction error reported on the CBW without touching the
+    /// controller; the Reset Recovery that follows is real.
+    Cbw,
+    /// A CSW read with no command outstanding: the device STALLs its bulk
+    /// IN pipe, a real halt that the recovery clears.
+    Csw,
+}
+
+/// Test fault injection (`usb_fault=N|idle[:cbw|:csw]`, ADR 0028).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FaultInject {
     None,
     /// Block requests left before the injected failure.
-    Count(u32),
+    Count(u32, Injection),
     /// The first block request after two idle seconds (once).
-    AfterIdle,
+    AfterIdle(Injection),
 }
 
 impl FaultInject {
@@ -473,32 +513,38 @@ impl FaultInject {
             return Self::None;
         };
         let (when, kind) = value.split_once(':').unwrap_or((value, "cbw"));
-        if kind != "cbw" {
-            say(b"usb_fault: only the CBW failure is injected by the EHCI driver; ignored");
-            return Self::None;
-        }
+        let kind = match kind {
+            "cbw" => Injection::Cbw,
+            "csw" => Injection::Csw,
+            _ => {
+                say(b"usb_fault: the EHCI driver injects cbw or csw only; ignored");
+                return Self::None;
+            }
+        };
         match when {
-            "idle" => Self::AfterIdle,
-            n => n.parse().map_or(Self::None, Self::Count),
+            "idle" => Self::AfterIdle(kind),
+            n => n.parse().map_or(Self::None, |n| Self::Count(n, kind)),
         }
     }
 
-    fn due(&mut self, now: u64, last_request_ms: u64) -> bool {
+    fn due(&mut self, now: u64, last_request_ms: u64) -> Option<Injection> {
         match *self {
-            Self::None => false,
-            Self::Count(1) => {
+            Self::None => None,
+            Self::Count(1, kind) => {
                 *self = Self::None;
-                true
+                Some(kind)
             }
-            Self::Count(n) => {
-                *self = Self::Count(n - 1);
-                false
+            Self::Count(n, kind) => {
+                *self = Self::Count(n - 1, kind);
+                None
             }
-            Self::AfterIdle if last_request_ms > 0 && now - last_request_ms >= Self::IDLE_MS => {
+            Self::AfterIdle(kind)
+                if last_request_ms > 0 && now - last_request_ms >= Self::IDLE_MS =>
+            {
                 *self = Self::None;
-                true
+                Some(kind)
             }
-            Self::AfterIdle => false,
+            Self::AfterIdle(_) => None,
         }
     }
 }
@@ -544,6 +590,14 @@ struct Ehci {
     buffer_unsafe: bool,
     /// REQUEST SENSE in progress: a failure inside it asks for no more sense.
     in_sense: bool,
+    /// Deadline of the unit of work in progress (`with_deadline`).
+    deadline: Option<u64>,
+    /// The storage the block service has handed out (`Served`).
+    served: Option<Served>,
+    /// When the driver started (boot enumeration bounds).
+    started: u64,
+    /// Input events waiting for the client.
+    events: Pending,
     keyboards: u8,
     mice: u8,
 }
@@ -758,6 +812,14 @@ impl Ehci {
             boot_done: false,
             buffer_unsafe: false,
             in_sense: false,
+            deadline: None,
+            served: None,
+            started: now,
+            events: Pending {
+                buf: [(Event::default(), 0); RING],
+                head: 0,
+                len: 0,
+            },
             keyboards: 0,
             mice: 0,
         };
@@ -771,6 +833,23 @@ impl Ehci {
 
     fn now(&self) -> u64 {
         self.clock.now()
+    }
+
+    /// Runs one unit of work with a deadline `ms` from now (or the
+    /// enclosing one if sooner); every transfer inside is cut to it.
+    fn with_deadline<T>(&mut self, ms: u64, f: impl FnOnce(&mut Self) -> T) -> T {
+        let outer = self.deadline;
+        let mine = self.now() + ms;
+        self.deadline = Some(outer.map_or(mine, |d| d.min(mine)));
+        let result = f(self);
+        self.deadline = outer;
+        result
+    }
+
+    /// Whether the input service's Info may be answered: after the boot
+    /// enumeration, or once `INFO_WAIT_MS` passed.
+    fn info_ready(&self) -> bool {
+        self.boot_done || self.now() >= self.started + INFO_WAIT_MS
     }
 
     fn pause(&self, ms: u64) {
@@ -888,6 +967,7 @@ impl Ehci {
         say(b"the controller did not confirm the async advance (EHCI 4.8.2): queue head lost");
         record("ehci iaa timeout", p as u64);
         self.pipes[p].lost = true;
+        self.strict_halt(b"async advance timeout");
         false
     }
 
@@ -961,6 +1041,7 @@ impl Ehci {
                 say(b"the frame index does not advance: interrupt queue head lost");
                 record("ehci frindex stuck", p as u64);
                 self.pipes[p].lost = true;
+                self.strict_halt(b"frame index stuck");
                 return false;
             }
             sys::thread_yield();
@@ -1021,11 +1102,6 @@ impl Ehci {
         }
         if self.pipes[p].lost {
             return Err(Fail::Lost);
-        }
-        // A late async advance from an unlink that timed out: QEMU stops
-        // walking the async schedule while the status bit stays set.
-        if self.op.r32(op::USBSTS) & op::STS_ASYNC_ADVANCE != 0 {
-            self.op.w32(op::USBSTS, op::STS_ASYNC_ADVANCE);
         }
         let qh = self.pipes[p].qh.1;
         w32(qh + QueueHead::NEXT_QTD, link::TERMINATE);
@@ -1113,19 +1189,35 @@ impl Ehci {
         Some(Ok(moved))
     }
 
-    /// Runs a chain on an async queue head until `deadline`. A queue that
+    /// Runs a chain on an async queue head until `deadline` (cut to the
+    /// deadline of the unit of work; refused if that has passed). A queue that
     /// halted stays halted for the caller to report (and dump) before it
     /// calls `overlay_idle`; one still running at the deadline is retired:
     /// out of the schedule, idle, back in.
     fn run(&mut self, p: usize, steps: &[Step], deadline: u64) -> Result<u32, Fail> {
-        self.submit(p, steps)?;
+        let deadline = self.deadline.map_or(deadline, |cap| deadline.min(cap));
         let start = self.now();
+        if start >= deadline {
+            return Err(Fail::Refused);
+        }
+        self.submit(p, steps)?;
         loop {
             if let Some(result) = self.scan(p, steps) {
                 return result;
             }
             let now = self.now();
             if now >= deadline {
+                // `strict`: the dump shows the queue as the timeout left it,
+                // before it is retired.
+                if self.strict {
+                    let kind = if self.pipes[p].desc.endpoint == 0 {
+                        "ctrl"
+                    } else {
+                        "transfer"
+                    };
+                    self.report_failure(kind, p, Fail::Timeout);
+                    self.strict_halt(b"transfer timeout");
+                }
                 if !self.async_unlink(p) {
                     return Err(Fail::Lost);
                 }
@@ -1198,7 +1290,7 @@ impl Ehci {
         match self.run(p, &steps[..n + 1], deadline) {
             Ok(moved) => Ok(moved.saturating_sub(8)),
             Err(fail) => {
-                if fail != Fail::Lost && self.unplugged(p) {
+                if !matches!(fail, Fail::Lost | Fail::Refused) && self.unplugged(p) {
                     self.overlay_idle(p, true);
                     return Err(fail);
                 }
@@ -1209,7 +1301,7 @@ impl Ehci {
                     sys::print(b" ");
                 }
                 sys::print(b"\n");
-                if !(optional && fail.is_stall()) {
+                if !(optional && fail.is_stall()) && fail != Fail::Refused {
                     self.strict_halt(b"control transfer");
                 }
                 if fail != Fail::Lost {
@@ -1296,6 +1388,7 @@ impl Ehci {
             num(need as u64);
             sys::print(b" expected\n");
             record("ehci short reply", moved as u64);
+            self.strict_halt(what.as_bytes());
             return Err("short reply to a control request");
         }
         Ok(moved)
@@ -1315,6 +1408,10 @@ impl Ehci {
         let Some(d) = self.pipe_device(p).and_then(|i| self.devices[i]) else {
             return false;
         };
+        if self.strict && matches!(d.parent, Parent::Hub(..)) {
+            say(b"strict: controller state before asking the hub about the port");
+            self.dump();
+        }
         if self.port_connected(d.parent) {
             return false;
         }
@@ -1928,6 +2025,7 @@ impl Ehci {
             capacity: 0,
             sync_cache: true,
             broken: false,
+            needs_reset: false,
             errors_reported: 0,
         });
         // The device was detached by the caller on failure, which frees
@@ -1943,7 +2041,7 @@ impl Ehci {
             scsi::inquiry(),
             Some((small_phys, scsi::INQUIRY_LEN as u32, true)),
             NO_MEDIUM_WINDOW_MS,
-            false,
+            None,
         )
         .map_err(|e| self.scsi_failed(e, "INQUIRY failed"))?;
         let inq = scsi::Inquiry::parse(small()).ok_or("invalid INQUIRY")?;
@@ -1952,7 +2050,7 @@ impl Ehci {
         }
         let ready_until = self.now() + READY_WAIT_MS;
         loop {
-            match self.scsi(scsi::test_unit_ready(), None, NO_MEDIUM_WINDOW_MS, false) {
+            match self.scsi(scsi::test_unit_ready(), None, NO_MEDIUM_WINDOW_MS, None) {
                 Ok(_) => break,
                 Err(ScsiFail::Failed) => {
                     let sense = self.sense();
@@ -1987,7 +2085,7 @@ impl Ehci {
             scsi::read_capacity10(),
             Some((small_phys, scsi::READ_CAPACITY_LEN as u32, true)),
             NO_MEDIUM_WINDOW_MS,
-            false,
+            None,
         )
         .map_err(|e| self.scsi_failed(e, "READ CAPACITY failed"))?;
         let (last_lba, block_len) =
@@ -1996,6 +2094,35 @@ impl Ehci {
             return Err("blocks other than 512 bytes: not supported");
         }
         let capacity = last_lba as u64 + 1;
+        let identity = Served {
+            capacity,
+            vendor: inq.vendor,
+            product: inq.product,
+        };
+        match self.served {
+            None => self.served = Some(identity),
+            Some(served) if served == identity => {
+                self.print_parent(parent);
+                sys::print(b": the served storage device is back\n");
+            }
+            Some(served) => {
+                // Another stick must never silently become the disk the
+                // clients were using: it is left unconfigured and the block
+                // service keeps answering Io until the served one returns.
+                self.print_parent(parent);
+                sys::print(b": a different storage device (");
+                num(capacity);
+                sys::print(b" sectors, was ");
+                num(served.capacity);
+                sys::print(b"): not served\n");
+                record("ehci other storage", capacity);
+                if let Some(st) = self.storage.take() {
+                    self.pipe_free(st.bulk_in.pipe);
+                    self.pipe_free(st.bulk_out.pipe);
+                }
+                return Ok(());
+            }
+        }
         if let Some(st) = self.storage.as_mut() {
             st.capacity = capacity;
         }
@@ -2042,9 +2169,23 @@ impl Ehci {
                 continue;
             }
             self.pipe_free(hid.pipe);
-            match hid.decoder {
-                Decoder::Keyboard(_) => self.keyboards -= 1,
-                Decoder::Mouse(_) => self.mice -= 1,
+            // An empty report releases every key and button still held, so
+            // nothing stays pressed after an unplug.
+            let mut out = [Event::default(); MAX_REPORT_EVENTS];
+            let mut decoder = hid.decoder;
+            let n = match &mut decoder {
+                Decoder::Keyboard(k) => {
+                    self.keyboards -= 1;
+                    k.feed(&[0; 8], &mut out)
+                }
+                Decoder::Mouse(m) => {
+                    self.mice -= 1;
+                    m.feed(&[0; 4], &mut out)
+                }
+            };
+            let now = self.now();
+            for e in &out[..n] {
+                self.events.push(*e, now);
             }
             self.hids[h] = None;
         }
@@ -2056,7 +2197,7 @@ impl Ehci {
                 self.pipe_free(bulk_out);
                 self.storage = None;
                 if served {
-                    say(b"USB storage removed: block requests fail until it is back");
+                    say(b"USB storage removed: block requests answer Io until it is back");
                     record("ehci storage removed", 0);
                 }
             }
@@ -2086,9 +2227,15 @@ impl Ehci {
     /// changes, the hub poll and at most one enumeration that is due.
     fn service_ports(&mut self) {
         let sts = self.op.r32(op::USBSTS);
-        if sts & op::STS_HOST_SYSTEM_ERROR != 0 {
-            say(b"host system error: the controller halted (EHCI 4.15.2.4)");
-            record("ehci host system error", sts as u64);
+        // A host system error halts the controller (4.15.2.4); a halt for
+        // any other reason is just as fatal: nothing runs any more.
+        if sts & (op::STS_HOST_SYSTEM_ERROR | op::STS_HALTED) != 0 {
+            say(if sts & op::STS_HOST_SYSTEM_ERROR != 0 {
+                b"host system error: the controller halted (EHCI 4.15.2.4)"
+            } else {
+                b"the controller halted unexpectedly (USBSTS.HCHalted)"
+            });
+            record("ehci controller halted", sts as u64);
             self.dump();
             sys::process_exit(exit::HOST_SYSTEM_ERROR);
         }
@@ -2112,7 +2259,7 @@ impl Ehci {
         }
         let now = self.now();
         if now >= self.next_hub_poll {
-            self.poll_hubs();
+            self.with_deadline(HUB_POLL_STEP_MS, Self::poll_hubs);
             self.next_hub_poll = self.now() + HUB_POLL_MS;
         }
         let due = self
@@ -2121,10 +2268,15 @@ impl Ehci {
             .position(|e| e.is_some_and(|(_, at)| at <= now));
         if let Some(k) = due {
             if let Some((parent, _)) = self.pending[k].take() {
-                self.attach(parent);
+                self.with_deadline(ATTACH_STEP_MS, |c| c.attach(parent));
             }
         }
-        if !self.boot_done && self.pending.iter().all(|e| e.is_none()) {
+        let boot_over = self.now() >= self.started + BOOT_ENUMERATION_MS;
+        if !self.boot_done && (self.pending.iter().all(|e| e.is_none()) || boot_over) {
+            if boot_over {
+                say(b"boot enumeration took too long; the ports still pending come later");
+                record("ehci boot enumeration", 0);
+            }
             self.boot_done = true;
             sys::print(b"usb-ehci: device ready: ");
             sys::print(device_name(self).as_bytes());
@@ -2187,7 +2339,11 @@ impl Ehci {
     fn port_connected(&mut self, parent: Parent) -> bool {
         match parent {
             Parent::Root(port) => self.portsc(port) & portsc::CONNECTED != 0,
-            Parent::Hub(h, port) => self.hub_port_status(h, port).is_ok_and(|s| s.connected()),
+            // A hub that does not answer says nothing about the port: the
+            // failure stays a failure.
+            Parent::Hub(h, port) => self
+                .hub_port_status(h, port)
+                .map_or(true, |s| s.connected()),
         }
     }
 
@@ -2212,7 +2368,7 @@ impl Ehci {
     }
 
     /// Collects finished reports into `pending` and rearms their qTDs.
-    fn poll_hids(&mut self, pending: &mut Pending) {
+    fn poll_hids(&mut self) {
         let now = self.now();
         let mut out = [Event::default(); MAX_REPORT_EVENTS];
         for h in 0..MAX_HIDS {
@@ -2245,7 +2401,7 @@ impl Ehci {
                         Decoder::Mouse(m) => m.feed(report, &mut out),
                     };
                     for e in &out[..n] {
-                        pending.push(*e, now);
+                        self.events.push(*e, now);
                     }
                     self.hids[h] = Some(hid);
                     self.arm(h);
@@ -2302,11 +2458,19 @@ impl Ehci {
         cdb: Cdb,
         data: Option<(u64, u32, bool)>,
         window_ms: u64,
-        inject: bool,
+        inject: Option<Injection>,
     ) -> Result<u32, ScsiFail> {
+        // BOT 5.3.4: no CBW while a Reset Recovery is owed.
+        if self
+            .storage
+            .as_ref()
+            .is_some_and(|st| st.needs_reset && !st.broken)
+        {
+            self.reset_recovery();
+        }
         let (tag, cbw, csw, bulk_in, bulk_out) = {
             let st = self.storage.as_mut().ok_or(ScsiFail::Broken)?;
-            if st.broken {
+            if st.broken || st.needs_reset {
                 return Err(ScsiFail::Broken);
             }
             st.tag = st.tag.wrapping_add(1);
@@ -2322,10 +2486,30 @@ impl Ehci {
         };
         // SAFETY: the CBW buffer in the driver's DMA memory.
         unsafe { (cbw.1 as *mut [u8; Cbw::LEN]).write_volatile(wrapper.encode()) };
-        if inject {
-            say(b"injected fault: transaction error reported on the CBW");
-            let fail = Fail::Error(TransferError::Transaction, 0);
-            return Err(self.transfer_failure(Stage::Cbw, false, fail, tag, window_end));
+        match inject {
+            Some(Injection::Cbw) => {
+                say(b"injected fault: transaction error reported on the CBW");
+                let fail = Fail::Error(TransferError::Transaction, 0);
+                return Err(self.transfer_failure(Stage::Cbw, false, fail, tag, window_end));
+            }
+            Some(Injection::Csw) => {
+                // No CBW: the device has no command and answers the CSW read
+                // with a STALL (BOT 6.7.2 path on a real halt).
+                say(b"injected fault: reading a CSW with no command outstanding");
+                return Err(
+                    match self.bulk(bulk_in, true, csw.0, Csw::LEN as u32, window_end) {
+                        Ok(_) => {
+                            say(b"the device delivered a CSW for no command");
+                            if !self.strict {
+                                self.reset_recovery();
+                            }
+                            ScsiFail::Csw
+                        }
+                        Err(fail) => self.transfer_failure(Stage::Csw, true, fail, tag, window_end),
+                    },
+                );
+            }
+            None => {}
         }
         let deadline = self.now() + CBW_TIMEOUT_MS;
         if let Err(fail) = self.bulk(bulk_out, false, cbw.0, Cbw::LEN as u32, deadline) {
@@ -2392,6 +2576,18 @@ impl Ehci {
         }) else {
             return ScsiFail::Transport(fail, None);
         };
+        if fail == Fail::Refused {
+            // Nothing reached the controller. Once the CBW went out the
+            // command is outstanding: only a Reset Recovery closes it.
+            say(b"no time left in this request: the stage was not started");
+            record("ehci no time", stage as u64);
+            if stage != Stage::Cbw {
+                if let Some(st) = self.storage.as_mut() {
+                    st.needs_reset = true;
+                }
+            }
+            return ScsiFail::Transport(fail, None);
+        }
         if fail != Fail::Lost && self.unplugged(pipe) {
             self.overlay_idle(pipe, true);
             return ScsiFail::Gone;
@@ -2413,9 +2609,11 @@ impl Ehci {
         }
         self.overlay_idle(pipe, true);
         self.clear_tt(pipe, fail, hub::TT_BULK, dir_in);
-        if fail.is_stall() && !self.clear_bulk_halt(dir_in) {
-            self.storage_broken();
-            return ScsiFail::Transport(fail, None);
+        if fail.is_stall() {
+            if let Err(e) = self.clear_bulk_halt(dir_in) {
+                self.recovery_failed(e);
+                return ScsiFail::Transport(fail, None);
+            }
         }
         let mut sense = None;
         match after_transfer_failure(stage) {
@@ -2445,16 +2643,24 @@ impl Ehci {
                     }
                     Err(f2) => {
                         self.report_failure("bulk in", bulk_in, f2);
-                        if f2 == Fail::Lost {
-                            self.storage_broken();
-                            return ScsiFail::Transport(fail, None);
-                        }
-                        self.overlay_idle(bulk_in, true);
-                        self.clear_tt(bulk_in, f2, hub::TT_BULK, true);
-                        if f2.is_stall() && !self.clear_bulk_halt(true) {
-                            self.storage_broken();
-                        } else {
-                            self.reset_recovery();
+                        match f2 {
+                            Fail::Lost => self.storage_broken(),
+                            Fail::Refused => self.recovery_failed(f2),
+                            _ => {
+                                self.overlay_idle(bulk_in, true);
+                                self.clear_tt(bulk_in, f2, hub::TT_BULK, true);
+                                // BOT 6.7.2: the second CSW read failed too;
+                                // a STALL is cleared, then Reset Recovery.
+                                let cleared = if f2.is_stall() {
+                                    self.clear_bulk_halt(true)
+                                } else {
+                                    Ok(())
+                                };
+                                match cleared {
+                                    Ok(()) => self.reset_recovery(),
+                                    Err(e) => self.recovery_failed(e),
+                                }
+                            }
                         }
                     }
                 }
@@ -2465,26 +2671,35 @@ impl Ehci {
 
     /// `CLEAR_FEATURE(ENDPOINT_HALT)` on a bulk endpoint; its queue head
     /// restarts at DATA0 (USB 2.0 9.4.5).
-    fn clear_bulk_halt(&mut self, dir_in: bool) -> bool {
+    fn clear_bulk_halt(&mut self, dir_in: bool) -> Result<(), Fail> {
         let Some((ep0, bulk)) = self.storage.as_ref().and_then(|st| {
             let b = if dir_in { st.bulk_in } else { st.bulk_out };
             Some((self.devices[st.device]?.ep0, b))
         }) else {
-            return false;
+            return Err(Fail::Lost);
         };
-        if self
-            .control(
-                ep0,
-                SetupPacket::clear_endpoint_halt(bulk.address),
-                None,
-                false,
-            )
-            .is_err()
-        {
-            return false;
-        }
+        self.control(
+            ep0,
+            SetupPacket::clear_endpoint_halt(bulk.address),
+            None,
+            false,
+        )?;
         self.overlay_idle(bulk.pipe, false);
-        true
+        Ok(())
+    }
+
+    /// A recovery step did not complete: for lack of time the Reset
+    /// Recovery is owed to the next command; otherwise the storage is
+    /// unusable until it is plugged in again.
+    fn recovery_failed(&mut self, fail: Fail) {
+        if fail == Fail::Refused {
+            if let Some(st) = self.storage.as_mut() {
+                st.needs_reset = true;
+            }
+            say(b"Reset Recovery postponed (no time left): it runs before the next command");
+        } else {
+            self.storage_broken();
+        }
     }
 
     /// Reset Recovery (BOT 5.3.4): Bulk-Only Mass Storage Reset, then both
@@ -2500,15 +2715,19 @@ impl Ehci {
         };
         say(b"Reset Recovery (BOT 5.3.4): mass storage reset, both bulk halts cleared");
         record("ehci reset recovery", 0);
-        let ok = self
+        let result = self
             .control(ep0, SetupPacket::mass_storage_reset(interface), None, false)
-            .is_ok()
-            && self.clear_bulk_halt(true)
-            && self.clear_bulk_halt(false);
-        if ok {
-            say(b"Reset Recovery done; transport ready");
-        } else {
-            self.storage_broken();
+            .map(|_| ())
+            .and_then(|()| self.clear_bulk_halt(true))
+            .and_then(|()| self.clear_bulk_halt(false));
+        match result {
+            Ok(()) => {
+                if let Some(st) = self.storage.as_mut() {
+                    st.needs_reset = false;
+                }
+                say(b"Reset Recovery done; transport ready");
+            }
+            Err(e) => self.recovery_failed(e),
         }
     }
 
@@ -2531,7 +2750,7 @@ impl Ehci {
             scsi::request_sense(),
             Some((phys, scsi::SENSE_LEN as u32, true)),
             NO_MEDIUM_WINDOW_MS,
-            false,
+            None,
         );
         self.in_sense = false;
         if let Err(e) = result {
@@ -2549,6 +2768,12 @@ impl Ehci {
     /// the LBA and not retried: the Bulk-Only recovery has run and the
     /// request answers `Io`.
     fn block_io(&mut self, write: bool, lba: u64, count: u16, phys: u64) -> bool {
+        self.with_deadline(REQUEST_BUDGET_MS, |c| {
+            c.block_io_within(write, lba, count, phys)
+        })
+    }
+
+    fn block_io_within(&mut self, write: bool, lba: u64, count: u16, phys: u64) -> bool {
         let Ok(lba32) = u32::try_from(lba) else {
             return false;
         };
@@ -2563,7 +2788,7 @@ impl Ehci {
         self.last_request_ms = now;
         let mut unit_attention_retried = false;
         loop {
-            let injected = inject;
+            let injected = inject.is_some();
             let data = Some((phys, count as u32 * 512, !write));
             match self.scsi(cdb, data, MEDIUM_WINDOW_MS, inject) {
                 Ok(0) => return true,
@@ -2586,13 +2811,17 @@ impl Ehci {
                     if let Some(sense) = sense {
                         record_sense(&sense);
                     }
-                    let time_left = self.now() - now + WORST_MEDIUM_COMMAND_MS < REPLY_WAIT_MS;
+                    // The retry needs a whole command window inside the
+                    // request's deadline.
+                    let time_left = self
+                        .deadline
+                        .is_some_and(|d| self.now() + CBW_TIMEOUT_MS + MEDIUM_WINDOW_MS <= d);
                     if sense.map(|s| s.key) == Some(scsi::Sense::UNIT_ATTENTION)
                         && !unit_attention_retried
                         && time_left
                     {
                         unit_attention_retried = true;
-                        inject = false;
+                        inject = None;
                         continue;
                     }
                     self.report_error(name, lba, sense);
@@ -2631,7 +2860,11 @@ impl Ehci {
                     if fail == Fail::Lost {
                         self.buffer_unsafe = true;
                     }
-                    self.strict_halt(name);
+                    // Running out of the request's time is not a device
+                    // failure; everything else halts under `strict`.
+                    if fail != Fail::Refused {
+                        self.strict_halt(name);
+                    }
                     self.report_error(name, lba, None);
                     return false;
                 }
@@ -2642,10 +2875,14 @@ impl Ehci {
     /// Makes writes durable (`SYNCHRONIZE CACHE`). A device that does not
     /// implement the command has no cache to write back (ADR 0023).
     fn flush(&mut self) -> bool {
+        self.with_deadline(REQUEST_BUDGET_MS, Self::flush_within)
+    }
+
+    fn flush_within(&mut self) -> bool {
         if !self.storage.as_ref().is_some_and(|s| s.sync_cache) {
             return self.storage.is_some();
         }
-        match self.scsi(scsi::synchronize_cache10(), None, MEDIUM_WINDOW_MS, false) {
+        match self.scsi(scsi::synchronize_cache10(), None, MEDIUM_WINDOW_MS, None) {
             Ok(_) => true,
             Err(ScsiFail::Failed) => {
                 let sense = self.sense();
@@ -2670,6 +2907,10 @@ impl Ehci {
             Err(fail) => {
                 if let ScsiFail::Transport(f, _) = fail {
                     record("ehci flush fail", f.code());
+                    if f == Fail::Refused {
+                        self.report_error(b"SYNCHRONIZE CACHE", 0, None);
+                        return false;
+                    }
                 }
                 self.strict_halt(b"SYNCHRONIZE CACHE");
                 self.report_error(b"SYNCHRONIZE CACHE", 0, None);
@@ -2854,6 +3095,10 @@ fn serve_block(ctl: &mut Ehci, msg: &[u8], handles: &[Handle]) {
     };
     let reply = match BlockRequest::decode(msg) {
         None => invalid,
+        // The served storage is absent (unplugged, or replaced by another
+        // device that is not served): its clients get Io, never another
+        // disk's data (audit ehci-1, H1).
+        Some(_) if capacity == 0 && ctl.served.is_some() => io,
         Some(_) if capacity == 0 => invalid,
         Some(BlockRequest {
             op: BlockOp::Info, ..
@@ -2929,6 +3174,13 @@ fn endpoint_gone(e: sys::Error) -> bool {
     matches!(e, sys::Error::BadHandle | sys::Error::Revoked)
 }
 
+fn answer_info(ctl: &Ehci, reply_to: Handle) {
+    let reply = Reply::status(Status::Ok)
+        .with_name(device_name(ctl))
+        .unwrap_or(Reply::status(Status::Ok));
+    answer(reply_to, reply);
+}
+
 fn answer(reply_to: Handle, reply: Reply) {
     let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
     let _ = sys::handle_close(reply_to);
@@ -2997,11 +3249,10 @@ fn main(mask: u64) -> u64 {
     // so its type is checked.
     let block_ep = extra_handle(mask, 1);
     let has_block = sys::object_kind(block_ep) == Ok(abi::kind::ENDPOINT);
-    let mut pending = Pending {
-        buf: [(Event::default(), 0); RING],
-        head: 0,
-        len: 0,
-    };
+    // Info requests held until the boot enumeration is over (or
+    // `INFO_WAIT_MS` passed), so the device name is the final one.
+    let mut held = [Handle(0); abi::IPC_QUEUE_CAPACITY];
+    let mut held_len = 0;
     let mut waiting: Option<(Handle, u64)> = None;
     let mut msg = [0u8; 32];
     let mut handles = [Handle(0); abi::IPC_MAX_HANDLES];
@@ -3044,17 +3295,19 @@ fn main(mask: u64) -> u64 {
             let reply_to = handles[0];
             match Request::decode(&msg[..n]) {
                 Some(Request { op: Op::Info, .. }) => {
-                    let reply = Reply::status(Status::Ok)
-                        .with_name(device_name(&ctl))
-                        .unwrap_or(Reply::status(Status::Ok));
-                    answer(reply_to, reply);
+                    if ctl.info_ready() || held_len == held.len() {
+                        answer_info(&ctl, reply_to);
+                    } else {
+                        held[held_len] = reply_to;
+                        held_len += 1;
+                    }
                 }
                 Some(Request {
                     op: Op::Read,
                     timeout_ms,
                 }) => {
-                    if pending.len > 0 {
-                        let n = pending.take(&mut events, &mut times);
+                    if ctl.events.len > 0 {
+                        let n = ctl.events.take(&mut events, &mut times);
                         answer(reply_to, Reply::events(&events[..n], &times[..n]));
                     } else if waiting.is_some() {
                         answer(reply_to, Reply::status(Status::Busy));
@@ -3065,10 +3318,10 @@ fn main(mask: u64) -> u64 {
                 None => answer(reply_to, Reply::status(Status::Invalid)),
             }
         }
-        ctl.poll_hids(&mut pending);
+        ctl.poll_hids();
         if let Some((reply_to, deadline)) = waiting {
-            if pending.len > 0 {
-                let n = pending.take(&mut events, &mut times);
+            if ctl.events.len > 0 {
+                let n = ctl.events.take(&mut events, &mut times);
                 answer(reply_to, Reply::events(&events[..n], &times[..n]));
                 waiting = None;
             } else if ctl.now() >= deadline {
@@ -3077,6 +3330,12 @@ fn main(mask: u64) -> u64 {
             }
         }
         ctl.service_ports();
+        if held_len > 0 && ctl.info_ready() {
+            for h in &held[..held_len] {
+                answer_info(&ctl, *h);
+            }
+            held_len = 0;
+        }
     }
 }
 
