@@ -37,7 +37,6 @@ use aricode_crypto::sha256::sha256;
 use aricode_rt::sys::fs::FsClient;
 use aricode_rt::sys::{self, kind, permissions};
 use aricode_update_index::{self as upd, compare, installer_arg, lists, Change};
-use core::sync::atomic::{AtomicBool, Ordering};
 
 /// An installed package is replaced in one go: the AriFS journal (32 KiB).
 const MAX_PACKAGE: u64 = 32 * 1024;
@@ -202,21 +201,28 @@ fn read_state(fs: &mut FsClient) -> Result<String, u64> {
                 "updater/state cannot be read or is too large: not used, not rewritten",
             )
         })?;
-    // A damaged file is read without misattributing lines and rewritten
-    // canonically by the next write; recorded once per run (fix
-    // update-state-sections).
-    if lists::needs_repair(&text) && !STATE_REPAIR_RECORDED.swap(true, Ordering::Relaxed) {
+    // Structural damage is repaired as `lists` documents and stored at
+    // once (an atomic replace), so the fault says exactly what happened
+    // (fix update-state-sections).
+    if !lists::needs_repair(&text) {
+        return Ok(text);
+    }
+    let fixed = lists::repaired(&text);
+    if write_file(fs, &path, fixed.as_bytes()) {
         fault(
             code::STATE_REPAIRED,
             "inst-state-repaired",
-            "updater/state was damaged (repeated or unknown sections): recovered and rewritten canonically",
+            "updater/state was damaged (repeated or unknown sections): repaired and saved; a repeated plan or staged list was dropped",
+        );
+    } else {
+        fault(
+            code::STATE_REPAIRED,
+            "inst-state-repaired",
+            "updater/state was damaged (repeated or unknown sections): repaired for this run, but the repair could not be saved",
         );
     }
-    Ok(text)
+    Ok(fixed)
 }
-
-/// The state repair fault is recorded once per run.
-static STATE_REPAIR_RECORDED: AtomicBool = AtomicBool::new(false);
 
 /// Replaces one section of the exchange file; refused when it could not
 /// be read.

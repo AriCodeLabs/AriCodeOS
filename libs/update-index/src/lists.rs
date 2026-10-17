@@ -29,16 +29,28 @@ pub const STAGED: &str = "staged";
 const SECTIONS: [&str; 3] = [INSTALLED, PLAN, STAGED];
 
 /// The state file parsed line by line. A line `[name]` with a known name
-/// starts that section; every other line belongs to the section above it.
-/// Damage is recovered without misattributing anything (fix
-/// update-state-sections): a repeated header starts its section again (the
-/// last occurrence wins, it is the most recent write), and lines under an
-/// unknown header or before the first header are dropped. Any of these
-/// sets `repaired`.
+/// starts that section; every other non-blank line belongs to the section
+/// above it. Line endings (`\n` or `\r\n`), a missing final newline and
+/// blank lines are formatting, not damage.
+///
+/// Structural damage is recovered without guessing (fix
+/// update-state-sections, incident 0006). The order of copies in a damaged
+/// file says nothing reliable about which one was written last, so:
+///
+/// - a repeated `[plan]` or `[staged]` makes that section empty: both are
+///   recomputed (`update` writes the plan again, `upgrade` stages again),
+///   and acting on a possibly stale copy could install something the owner
+///   was never shown;
+/// - a repeated `[installed]` keeps its last copy, which is only advisory
+///   (the installer rewrites it before every updater run), and the file is
+///   flagged as damaged like any other repair;
+/// - lines under an unknown header or before the first header are dropped.
+///
+/// Any of these sets `damaged`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct State {
     bodies: [Option<String>; 3],
-    repaired: bool,
+    damaged: bool,
 }
 
 fn header(line: &str) -> Option<&str> {
@@ -48,17 +60,23 @@ fn header(line: &str) -> Option<&str> {
 impl State {
     fn parse(text: &str) -> Self {
         let mut state = Self::default();
+        let mut repeated = [false; 3];
         let mut current: Option<usize> = None;
-        for line in text.lines() {
+        for line in text.lines().map(|l| l.trim_end_matches('\r')) {
+            if line.trim().is_empty() {
+                continue;
+            }
             if let Some(name) = header(line) {
                 current = SECTIONS.iter().position(|n| *n == name);
                 match current {
-                    Some(i) if state.bodies[i].is_some() => {
-                        state.repaired = true;
+                    Some(i) => {
+                        if state.bodies[i].is_some() {
+                            repeated[i] = true;
+                            state.damaged = true;
+                        }
                         state.bodies[i] = Some(String::new());
                     }
-                    Some(i) => state.bodies[i] = Some(String::new()),
-                    None => state.repaired = true,
+                    None => state.damaged = true,
                 }
                 continue;
             }
@@ -67,7 +85,13 @@ impl State {
                     body.push_str(line);
                     body.push('\n');
                 }
-                None => state.repaired = true,
+                None => state.damaged = true,
+            }
+        }
+        for name in [PLAN, STAGED] {
+            let i = SECTIONS.iter().position(|n| *n == name).unwrap_or(0);
+            if repeated[i] {
+                state.bodies[i] = Some(String::new());
             }
         }
         state
@@ -103,8 +127,8 @@ pub fn section(text: &str, name: &str) -> Option<String> {
 }
 
 /// `text` rewritten canonically with section `name` replaced by `body`:
-/// every section appears once, in the order installed, plan, staged, and
-/// damage found while reading is dropped.
+/// every section appears once, in the order installed, plan, staged, with
+/// damage handled as [`State`] describes.
 pub fn with_section(text: &str, name: &str, body: &str) -> String {
     let mut state = State::parse(text);
     if let Some(i) = SECTIONS.iter().position(|n| *n == name) {
@@ -113,11 +137,18 @@ pub fn with_section(text: &str, name: &str, body: &str) -> String {
     state.encode()
 }
 
-/// Whether `text` is damaged (repeated or unknown headers, stray lines) and
-/// will be repaired by the next write: the caller records it as a fault.
+/// Whether `text` has structural damage (a repeated or unknown header,
+/// lines outside a section). Formatting (line endings, blank lines, the
+/// final newline) is not damage.
 pub fn needs_repair(text: &str) -> bool {
-    let state = State::parse(text);
-    state.repaired || state.encode() != text
+    State::parse(text).damaged
+}
+
+/// The canonical form of `text` (what the next write would store), with
+/// damage handled as [`State`] describes: callers store it as soon as they
+/// find damage.
+pub fn repaired(text: &str) -> String {
+    State::parse(text).encode()
 }
 
 /// `name version` per line.
@@ -316,31 +347,57 @@ mod tests {
 
     #[test]
     fn damaged_files_are_recovered_and_flagged() {
-        // The file found on the laptop.
+        // The file found on the laptop: [plan] repeated, so the plan is
+        // distrusted (empty) and recomputed by the next `update`.
         let laptop = "[installed]\n[plan]\n[plan]\n[plan]\nsystem 3\n[staged]\n";
         assert!(needs_repair(laptop));
         assert_eq!(section(laptop, INSTALLED).as_deref(), Some(""));
-        assert_eq!(section(laptop, PLAN).as_deref(), Some("system 3\n"));
+        assert_eq!(section(laptop, PLAN).as_deref(), Some(""));
         assert_eq!(section(laptop, STAGED).as_deref(), Some(""));
-        assert_eq!(parse_plan(&section(laptop, PLAN).unwrap()).1, 0);
-        let repaired = with_section(laptop, INSTALLED, "hello_ext 2\n");
-        assert_eq!(
-            repaired,
-            "[installed]\nhello_ext 2\n[plan]\nsystem 3\n[staged]\n"
+        assert_eq!(repaired(laptop), "[installed]\n[plan]\n[staged]\n");
+        assert!(!needs_repair(&repaired(laptop)));
+        let rewritten = with_section(laptop, PLAN, "system 3\n");
+        assert_eq!(rewritten, "[installed]\n[plan]\nsystem 3\n[staged]\n");
+        assert!(!needs_repair(&rewritten));
+        // Out of order: the later copy is not necessarily the newer one
+        // (here the plan meant system 3). Neither copy is used.
+        let shuffled = "[installed]\n[staged]\n[plan]\nsystem 3\n[staged]\n[plan]\nsystem 4\n";
+        assert!(needs_repair(shuffled));
+        assert_eq!(section(shuffled, PLAN).as_deref(), Some(""));
+        assert_eq!(section(shuffled, STAGED).as_deref(), Some(""));
+        // A repeated [staged] is emptied: nothing stale is ever installed.
+        let staged = alloc::format!(
+            "[staged]\npkg-1.aripkg a 1 {0}\n[staged]\npkg-2.aripkg b 2 {0}\n",
+            "00".repeat(32)
         );
-        assert!(!needs_repair(&repaired));
-        // The most recent copy of a repeated section wins.
-        let twice = "[plan]\nsystem 2\n[plan]\nsystem 3\n";
-        assert_eq!(section(twice, PLAN).as_deref(), Some("system 3\n"));
-        assert!(needs_repair(twice));
+        assert!(needs_repair(&staged));
+        assert_eq!(section(&staged, STAGED).as_deref(), Some(""));
+        // A repeated [installed] keeps its last copy (advisory, rewritten by
+        // the installer before every run) and is flagged.
+        let installed = "[installed]\na 1\n[installed]\na 2\n";
+        assert!(needs_repair(installed));
+        assert_eq!(section(installed, INSTALLED).as_deref(), Some("a 2\n"));
         // Unknown sections and stray lines are dropped, never attributed.
         let odd = "stray\n[other]\nx 1\n[installed]\na 1\n";
         assert!(needs_repair(odd));
         assert_eq!(section(odd, INSTALLED).as_deref(), Some("a 1\n"));
         assert_eq!(with_section(odd, PLAN, ""), "[installed]\na 1\n[plan]\n");
-        // A canonical file is not flagged.
-        assert!(!needs_repair(""));
-        assert!(!needs_repair("[installed]\na 1\n[plan]\n"));
+    }
+
+    #[test]
+    fn formatting_is_not_damage() {
+        for text in [
+            "",
+            "[installed]\na 1\n[plan]\n",
+            "[installed]\r\na 1\r\n[plan]\r\nsystem 3\r\n",
+            "[installed]\na 1\n[plan]\nsystem 3",
+            "\n\n[installed]\n\na 1\n\n[plan]\n",
+        ] {
+            assert!(!needs_repair(text), "{text:?}");
+        }
+        let crlf = "[installed]\r\na 1\r\n[plan]\r\nsystem 3\r\n";
+        assert_eq!(section(crlf, PLAN).as_deref(), Some("system 3\n"));
+        assert_eq!(repaired(crlf), "[installed]\na 1\n[plan]\nsystem 3\n");
     }
 
     #[test]

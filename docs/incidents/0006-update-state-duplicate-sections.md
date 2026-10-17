@@ -38,17 +38,30 @@ empty last section, which is why they did not show it.
 ## Fix
 
 - `lists` parses the state file line by line into its three sections
-  (`State`): a known header starts its section, a repeated header starts
-  it again (the last copy is the most recent write), lines under unknown
-  headers or before the first header are dropped, and any of this marks
-  the file as repaired. `with_section` always writes one header per
-  section in a fixed order; bodies cannot contain header lines.
-- The updater and the installer record a fault event (`upd-state-repaired`,
-  `inst-state-repaired`, once per run) when they read a damaged file; the
-  next write stores it canonically, so the laptop's file repairs itself on
-  its next `update`.
+  (`State`); `with_section` always writes one header per section in a
+  fixed order, and bodies cannot contain header lines.
+- Damaged files are recovered without guessing. The order of copies in a
+  damaged file does not tell which one was written last (an independent
+  audit showed an out-of-order example where the later `[plan]` is the
+  stale one), so a repeated `[plan]` or `[staged]` is emptied: both are
+  recomputable by running `update` and `upgrade` again, and a stale copy
+  could install something the owner was never shown. A repeated
+  `[installed]` keeps its last copy (advisory: the installer rewrites it
+  before every updater run) and is flagged like any repair. Lines under an
+  unknown header or before the first header are dropped. Only this
+  structural damage counts; CRLF line endings, blank lines and a missing
+  final newline do not.
+- The updater and the installer store the repaired file at once when they
+  read a damaged one (atomic replace) and record `upd-state-repaired`
+  (code 47) or `inst-state-repaired` (code 13), with a message saying
+  whether the repair was saved. On the laptop the first run after the fix
+  repairs the file (the plan is dropped) and the next `update` writes a
+  fresh plan.
 - Host tests: every sequence of four rewrites drawn from six bodies
   (empty ones included) stays canonical with no rejected line; the
-  laptop's file is recovered (`plan` = `system 3`) and flagged.
+  laptop's file, the out-of-order example, a repeated `[staged]`, a
+  repeated `[installed]`, unknown headers and stray lines are recovered
+  and flagged; CRLF, blank lines and a missing final newline are not
+  flagged.
 - QEMU scenario `update.state_rewrites` (no installed apps, `update`
   twice, `upgrade`, `update`): no "invalid line(s)" and no repair.

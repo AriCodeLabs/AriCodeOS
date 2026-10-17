@@ -288,21 +288,28 @@ fn read_state(fs: &mut FsClient) -> Result<String, u64> {
                 "updater/state cannot be read or is too large: not used, not rewritten",
             )
         })?;
-    // A damaged file (repeated or unknown sections) is read without
-    // misattributing lines and rewritten canonically by the next write;
-    // the repair is recorded once per run (fix update-state-sections).
-    if lists::needs_repair(&text) && !STATE_REPAIR_RECORDED.swap(true, Ordering::Relaxed) {
+    // Structural damage (repeated or unknown sections) is repaired as
+    // `lists` documents and stored at once (an atomic replace), so the
+    // fault says exactly what happened (fix update-state-sections).
+    if !lists::needs_repair(&text) {
+        return Ok(text);
+    }
+    let fixed = lists::repaired(&text);
+    if write_file(fs, upd::STATE_FILE, fixed.as_bytes()) {
         fault(
             code::STATE_REPAIRED,
             "upd-state-repaired",
-            "updater/state was damaged (repeated or unknown sections): recovered and rewritten canonically",
+            "updater/state was damaged (repeated or unknown sections): repaired and saved; a repeated plan or staged list was dropped (run update again)",
+        );
+    } else {
+        fault(
+            code::STATE_REPAIRED,
+            "upd-state-repaired",
+            "updater/state was damaged (repeated or unknown sections): repaired for this run, but the repair could not be saved",
         );
     }
-    Ok(text)
+    Ok(fixed)
 }
-
-/// The state repair fault is recorded once per run.
-static STATE_REPAIR_RECORDED: AtomicBool = AtomicBool::new(false);
 
 /// Replaces one section of `state`; refused when it could not be read.
 fn write_state_section(fs: &mut FsClient, name: &str, body: &str) -> bool {
