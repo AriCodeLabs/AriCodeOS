@@ -94,6 +94,7 @@ mod code {
     pub const PLAN: u64 = 37;
     pub const STATE_UNREADABLE: u64 = 38;
     pub const FS_FULL: u64 = 39;
+    pub const STATE_REPAIRED: u64 = 47;
     pub const DOWNGRADE_REFUSED: u64 = 40;
     pub const DOWNLOAD: u64 = 41;
     pub const DOWNLOAD_MISMATCH: u64 = 42;
@@ -278,7 +279,7 @@ fn load_sources(fs: &mut FsClient) -> Result<Sources, u64> {
 /// neither used nor rewritten in this run (final re-audit, L-a): its other
 /// sections are never reset silently.
 fn read_state(fs: &mut FsClient) -> Result<String, u64> {
-    read_text(fs, upd::STATE_FILE, MAX_STATE)
+    let text = read_text(fs, upd::STATE_FILE, MAX_STATE)
         .map(Option::unwrap_or_default)
         .map_err(|()| {
             fault(
@@ -286,8 +287,22 @@ fn read_state(fs: &mut FsClient) -> Result<String, u64> {
                 "upd-state-unreadable",
                 "updater/state cannot be read or is too large: not used, not rewritten",
             )
-        })
+        })?;
+    // A damaged file (repeated or unknown sections) is read without
+    // misattributing lines and rewritten canonically by the next write;
+    // the repair is recorded once per run (fix update-state-sections).
+    if lists::needs_repair(&text) && !STATE_REPAIR_RECORDED.swap(true, Ordering::Relaxed) {
+        fault(
+            code::STATE_REPAIRED,
+            "upd-state-repaired",
+            "updater/state was damaged (repeated or unknown sections): recovered and rewritten canonically",
+        );
+    }
+    Ok(text)
 }
+
+/// The state repair fault is recorded once per run.
+static STATE_REPAIR_RECORDED: AtomicBool = AtomicBool::new(false);
 
 /// Replaces one section of `state`; refused when it could not be read.
 fn write_state_section(fs: &mut FsClient, name: &str, body: &str) -> bool {
@@ -316,7 +331,7 @@ fn installed_apps(fs: &mut FsClient) -> Option<Vec<(String, u32)>> {
             return None;
         }
     };
-    let (apps, rejected) = lists::parse_installed(text);
+    let (apps, rejected) = lists::parse_installed(&text);
     if rejected > 0 {
         fault(
             code::INSTALLED_LIST,
@@ -1203,7 +1218,7 @@ fn upgrade(
             "nothing reported yet: run update first",
         );
     };
-    let (plan, rejected) = lists::parse_plan(plan_text);
+    let (plan, rejected) = lists::parse_plan(&plan_text);
     if rejected > 0 {
         fault(
             code::PLAN,

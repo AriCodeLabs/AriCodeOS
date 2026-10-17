@@ -26,47 +26,98 @@ pub const INSTALLED: &str = "installed";
 pub const PLAN: &str = "plan";
 pub const STAGED: &str = "staged";
 
-/// The body of section `name` (`[name]` up to the next header); `None` when
-/// the section is absent.
-pub fn section<'a>(text: &'a str, name: &str) -> Option<&'a str> {
-    let header = alloc::format!("[{name}]\n");
-    let start = if text.starts_with(&header) {
-        header.len()
-    } else {
-        text.find(&alloc::format!("\n{header}"))? + header.len() + 1
-    };
-    let body = &text[start..];
-    let end = body
-        .match_indices("\n[")
-        .next()
-        .map_or(body.len(), |(i, _)| i + 1);
-    Some(&body[..end])
+const SECTIONS: [&str; 3] = [INSTALLED, PLAN, STAGED];
+
+/// The state file parsed line by line. A line `[name]` with a known name
+/// starts that section; every other line belongs to the section above it.
+/// Damage is recovered without misattributing anything (fix
+/// update-state-sections): a repeated header starts its section again (the
+/// last occurrence wins, it is the most recent write), and lines under an
+/// unknown header or before the first header are dropped. Any of these
+/// sets `repaired`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct State {
+    bodies: [Option<String>; 3],
+    repaired: bool,
 }
 
-/// `text` with section `name` replaced by `body` (added at the end if it
-/// was absent); the other sections are kept as they are.
-pub fn with_section(text: &str, name: &str, body: &str) -> String {
-    let mut out = String::new();
-    let mut put = |n: &str, b: &str| {
-        let _ = writeln!(out, "[{n}]");
-        out.push_str(b);
-        if !b.is_empty() && !b.ends_with('\n') {
-            out.push('\n');
+fn header(line: &str) -> Option<&str> {
+    line.strip_prefix('[')?.strip_suffix(']')
+}
+
+impl State {
+    fn parse(text: &str) -> Self {
+        let mut state = Self::default();
+        let mut current: Option<usize> = None;
+        for line in text.lines() {
+            if let Some(name) = header(line) {
+                current = SECTIONS.iter().position(|n| *n == name);
+                match current {
+                    Some(i) if state.bodies[i].is_some() => {
+                        state.repaired = true;
+                        state.bodies[i] = Some(String::new());
+                    }
+                    Some(i) => state.bodies[i] = Some(String::new()),
+                    None => state.repaired = true,
+                }
+                continue;
+            }
+            match current.and_then(|i| state.bodies[i].as_mut()) {
+                Some(body) => {
+                    body.push_str(line);
+                    body.push('\n');
+                }
+                None => state.repaired = true,
+            }
         }
-    };
-    let mut replaced = false;
-    for n in [INSTALLED, PLAN, STAGED] {
-        if n == name {
-            put(n, body);
-            replaced = true;
-        } else if let Some(b) = section(text, n) {
-            put(n, b);
-        }
+        state
     }
-    if !replaced {
-        put(name, body);
+
+    fn encode(&self) -> String {
+        let mut out = String::new();
+        for (name, body) in SECTIONS.iter().zip(&self.bodies) {
+            if let Some(body) = body {
+                let _ = writeln!(out, "[{name}]");
+                out.push_str(body);
+            }
+        }
+        out
+    }
+}
+
+/// Normalizes a section body: whole lines, no header lines (a body can
+/// never forge another section).
+fn clean_body(body: &str) -> String {
+    let mut out = String::new();
+    for line in body.lines().filter(|l| header(l).is_none()) {
+        out.push_str(line);
+        out.push('\n');
     }
     out
+}
+
+/// The body of section `name`; `None` when the section is absent.
+pub fn section(text: &str, name: &str) -> Option<String> {
+    let i = SECTIONS.iter().position(|n| *n == name)?;
+    State::parse(text).bodies[i].take()
+}
+
+/// `text` rewritten canonically with section `name` replaced by `body`:
+/// every section appears once, in the order installed, plan, staged, and
+/// damage found while reading is dropped.
+pub fn with_section(text: &str, name: &str, body: &str) -> String {
+    let mut state = State::parse(text);
+    if let Some(i) = SECTIONS.iter().position(|n| *n == name) {
+        state.bodies[i] = Some(clean_body(body));
+    }
+    state.encode()
+}
+
+/// Whether `text` is damaged (repeated or unknown headers, stray lines) and
+/// will be repaired by the next write: the caller records it as a fault.
+pub fn needs_repair(text: &str) -> bool {
+    let state = State::parse(text);
+    state.repaired || state.encode() != text
 }
 
 /// `name version` per line.
@@ -207,16 +258,89 @@ mod tests {
     fn sections_are_replaced_independently() {
         let t = with_section("", PLAN, "system 3\n");
         let t = with_section(&t, INSTALLED, "hello_ext 2\n");
-        assert_eq!(section(&t, PLAN), Some("system 3\n"));
-        assert_eq!(section(&t, INSTALLED), Some("hello_ext 2\n"));
+        assert_eq!(section(&t, PLAN).as_deref(), Some("system 3\n"));
+        assert_eq!(section(&t, INSTALLED).as_deref(), Some("hello_ext 2\n"));
         assert_eq!(section(&t, STAGED), None);
         let t = with_section(&t, PLAN, "");
-        assert_eq!(section(&t, PLAN), Some(""));
-        assert_eq!(section(&t, INSTALLED), Some("hello_ext 2\n"));
-        // A body cannot forge another section: lines are parsed per section.
-        let t = with_section(&t, STAGED, "pkg-1.aripkg a 1 00\n");
-        assert_eq!(section(&t, INSTALLED), Some("hello_ext 2\n"));
+        assert_eq!(section(&t, PLAN).as_deref(), Some(""));
+        assert_eq!(section(&t, INSTALLED).as_deref(), Some("hello_ext 2\n"));
+        // A body cannot forge another section.
+        let t = with_section(&t, STAGED, "pkg-1.aripkg a 1 00\n[installed]\nevil 9\n");
+        assert_eq!(section(&t, INSTALLED).as_deref(), Some("hello_ext 2\n"));
         assert_eq!(t.matches("[staged]").count(), 1);
+        assert!(!needs_repair(&t));
+    }
+
+    /// Fix update-state-sections: on the laptop, two `update` runs and one
+    /// `upgrade` left `[plan]` three times. Every rewrite, in any order and
+    /// with empty bodies, must leave one header per section and no line
+    /// any parser rejects.
+    #[test]
+    fn rewrites_stay_canonical() {
+        let bodies = [
+            (INSTALLED, ""),
+            (INSTALLED, "hello_ext 2\n"),
+            (PLAN, ""),
+            (PLAN, "system 3\napp hello_ext 2\n"),
+            (STAGED, ""),
+            (STAGED, "pkg-1.aripkg hello_ext 2 0000000000000000000000000000000000000000000000000000000000000000\n"),
+        ];
+        // Every order of six writes drawn from the list, repeated: a cheap
+        // deterministic sweep (6^4 sequences).
+        for seq in 0..6usize.pow(4) {
+            let mut text = String::new();
+            let mut n = seq;
+            let mut last = [None, None, None];
+            for _ in 0..4 {
+                let (name, body) = bodies[n % 6];
+                n /= 6;
+                text = with_section(&text, name, body);
+                last[SECTIONS.iter().position(|s| *s == name).unwrap()] = Some(body);
+                assert!(!needs_repair(&text), "{text:?}");
+                for (i, name) in SECTIONS.iter().enumerate() {
+                    assert_eq!(
+                        text.matches(&alloc::format!("[{name}]")).count(),
+                        usize::from(last[i].is_some())
+                    );
+                    assert_eq!(section(&text, name).as_deref(), last[i]);
+                }
+                let installed = section(&text, INSTALLED).unwrap_or_default();
+                let plan = section(&text, PLAN).unwrap_or_default();
+                let staged = section(&text, STAGED).unwrap_or_default();
+                assert_eq!(parse_installed(&installed).1, 0, "{text:?}");
+                assert_eq!(parse_plan(&plan).1, 0, "{text:?}");
+                assert_eq!(parse_staged(&staged).1, 0, "{text:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn damaged_files_are_recovered_and_flagged() {
+        // The file found on the laptop.
+        let laptop = "[installed]\n[plan]\n[plan]\n[plan]\nsystem 3\n[staged]\n";
+        assert!(needs_repair(laptop));
+        assert_eq!(section(laptop, INSTALLED).as_deref(), Some(""));
+        assert_eq!(section(laptop, PLAN).as_deref(), Some("system 3\n"));
+        assert_eq!(section(laptop, STAGED).as_deref(), Some(""));
+        assert_eq!(parse_plan(&section(laptop, PLAN).unwrap()).1, 0);
+        let repaired = with_section(laptop, INSTALLED, "hello_ext 2\n");
+        assert_eq!(
+            repaired,
+            "[installed]\nhello_ext 2\n[plan]\nsystem 3\n[staged]\n"
+        );
+        assert!(!needs_repair(&repaired));
+        // The most recent copy of a repeated section wins.
+        let twice = "[plan]\nsystem 2\n[plan]\nsystem 3\n";
+        assert_eq!(section(twice, PLAN).as_deref(), Some("system 3\n"));
+        assert!(needs_repair(twice));
+        // Unknown sections and stray lines are dropped, never attributed.
+        let odd = "stray\n[other]\nx 1\n[installed]\na 1\n";
+        assert!(needs_repair(odd));
+        assert_eq!(section(odd, INSTALLED).as_deref(), Some("a 1\n"));
+        assert_eq!(with_section(odd, PLAN, ""), "[installed]\na 1\n[plan]\n");
+        // A canonical file is not flagged.
+        assert!(!needs_repair(""));
+        assert!(!needs_repair("[installed]\na 1\n[plan]\n"));
     }
 
     #[test]

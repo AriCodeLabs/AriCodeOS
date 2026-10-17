@@ -1,0 +1,37 @@
+# updater/state rewrites (fix update-state-sections): on the laptop (no
+# installed apps, so an empty `[installed]` section first in the file), two
+# `update` runs and one `upgrade` left `[plan]` three times in
+# updater/state, and the extra headers were reported as invalid lines of
+# the neighbouring sections. The same sequence here, plus one more
+# `update`, rewrites every section several times (installer LIST before
+# each run, plan by every `update`, staged by `upgrade`): no invalid line
+# and no repair may be reported.
+name = "update.state_rewrites"
+description = "repeated update and upgrade keep updater/state canonical (one header per section)"
+level = "full"
+areas = ["update", "network", "shell"]
+timeout_secs = 240
+
+[host_update]
+system = 2
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update", "update", "upgrade", "update", "cat updater/state", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "updater: 1 upgrade(s) available: run upgrade",
+    "updater: system 2 installed: reboot to apply",
+    "[installed]",
+    "[plan]",
+    "[staged]",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "invalid line(s)",
+    "state-repaired",
+    "update: updater exited with",
+    "update: installer exited",
+]
