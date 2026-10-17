@@ -1,0 +1,46 @@
+# Unknown installed system (ADR 0029, decision 5; audit 1, H1): slot A is
+# active but its image fails verification, so AriBoot boots from the ESP and
+# nobody can tell which system is installed. `update` reports it, `upgrade`
+# refuses to replace what it cannot identify (fault event), and only
+# `upgrade --allow-downgrade` installs the offered image into slot B, which
+# the next boot tries.
+name = "update.installed_unknown"
+description = "a system whose installed version cannot be verified is only replaced with --allow-downgrade"
+level = "full"
+areas = ["update", "network", "shell", "boot"]
+disk = "a-corrupt"
+timeout_secs = 180
+
+[host_update]
+system = 2
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update", "upgrade", "diag", "upgrade --allow-downgrade", "reboot"]
+[boots.expect]
+exit = 0
+serial_contains = [
+    "slots: slot A rejected: invalid signature",
+    "slots: no valid image; booting from the ESP",
+    "updater: system: installed unknown, source 1 offers 2: installed version unknown; upgrade refuses it without --allow-downgrade",
+    "updater: system: installed version unknown (unreadable or unverifiable): refused (--allow-downgrade to force)",
+    "update: updater exited with 46",
+    ": upd-installed-unknown (code 46)",
+    "updater: system: installed version unknown; installing 2 (--allow-downgrade)",
+    "updater: installed into slot B",
+    "updater: state: active A, pending B (3 tries); reboot to try it",
+    "AriCodeOS: rebooting",
+]
+serial_absent = ["KERNEL PANIC"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "slots: booting from slot B (image version 2, pending confirmation)",
+    "AriInit: boot confirmed on slot B",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC"]

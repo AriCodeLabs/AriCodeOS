@@ -15,9 +15,6 @@ use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtoco
 use uefi::proto::media::block::BlockIO;
 
 const SECTOR: usize = 512;
-/// Public key that signs the images (development; see `keys/dev/README.md`).
-const PUBKEY_HEX: &str = include_str!("../../keys/dev/ed25519.pub");
-
 /// Chosen and verified system image.
 pub struct Loaded {
     pub kernel: Vec<u8>,
@@ -57,12 +54,6 @@ fn find<'a>(parts: &'a [Partition], name: &str) -> Option<&'a Partition> {
     parts.iter().find(|p| p.name_str() == name)
 }
 
-fn pubkey() -> Option<[u8; 32]> {
-    let mut pk = [0u8; 32];
-    aricode_crypto::unhex(PUBKEY_HEX.trim(), &mut pk)?;
-    Some(pk)
-}
-
 /// Reads and verifies a slot image. Returns kernel, initrd and version.
 fn load_slot(
     disk: &mut Disk,
@@ -96,10 +87,8 @@ fn load_slot(
 
 /// Tries to boot from the slots. `None` = boot from the ESP.
 pub fn load() -> Option<Loaded> {
-    let Some(pk) = pubkey() else {
-        warn!("slots: invalid development public key");
-        return None;
-    };
+    // The build's trust anchor (ADR 0029); an invalid key does not compile.
+    let pk = aricode_crypto::trust::public_key();
     let handles = boot::find_handles::<BlockIO>().ok()?;
     for handle in handles {
         // Non-exclusive open: an exclusive open disconnects the drivers using

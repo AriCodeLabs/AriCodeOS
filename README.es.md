@@ -40,7 +40,7 @@ hardware`, que se ha ejercitado en el portátil y la evidencia está en
 | Criptografía propia, RNG, imágenes firmadas, A/B con rollback | validado en QEMU | `crypto.*`, `update.*`; no es Secure Boot |
 | IOMMU VT-d con dominio por driver | validado en QEMU | `iommu.*` |
 | Imagen USB para pendrive | validado en QEMU (`usb.image_boot`) | pendiente en hardware |
-| Aplicaciones fuera del árbol: paquetes firmados instalados y actualizados en AriFS (`cargo xtask app-pack`, `installer`) | validado en QEMU, con cortes | `apps.*`; sin distribución por red |
+| Aplicaciones fuera del árbol: paquetes firmados instalados y actualizados en AriFS (`cargo xtask app-pack`, `installer`) | validado en QEMU, con cortes | `apps.*`; actualización por red desde fuentes con índice firmado (ADR 0029) |
 | Medidas: `bench` (syscall, IPC, ficheros, percentiles), reposo por CPU, informe `diag` | validado en QEMU | `perf.*`, `docs/performance.md`; cifras solo comparables con la misma build y modo de QEMU |
 | Arranque en portátil (Fase 34) | propuesto | necesita el equipo de referencia |
 
@@ -108,7 +108,8 @@ libs/crypto/     SHA-256, SHA-512, Ed25519 y ChaCha20 desde cero con vectores of
 keys/dev/        par Ed25519 de desarrollo (solo pruebas; ver su README)
 libs/wasm/       interprete WebAssembly MVP (enteros, memoria acotada, importaciones) con tests de host
 apps/wasm-demo/  modulo WebAssembly portable de ejemplo; apps/wasm-runner lo ejecuta con la Capability API
-apps/updater/    actualizador A/B: verifica la imagen de UPDATE y la instala en el slot inactivo
+apps/updater/    cliente de actualizacion: indices firmados de las fuentes del dueño, imagen del sistema al slot inactivo, paquetes de apps para el instalador (ADR 0029)
+libs/update-index/ fuentes de actualizacion, indice firmado, reglas de version y de downgrade (ADR 0029)
 libs/ab/         estado de arranque A/B, imagenes firmadas y politica de slots (AriBoot, init, updater)
 boot/            AriBoot: cargador UEFI (crate `ariboot`)
 kernel/          AriKernel (crate `arikernel`), ELF64 en la mitad alta

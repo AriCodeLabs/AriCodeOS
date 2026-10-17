@@ -67,6 +67,37 @@ pub struct HostSsh {
     pub idle_client: bool,
 }
 
+/// What the scenario's update source offers and how the machine knows it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostUpdate {
+    /// System image version offered; no system image when absent.
+    pub system: Option<u32>,
+    /// App packages offered: `DIR:VERSION`.
+    #[serde(default)]
+    pub apps: Vec<String>,
+    /// The index is altered after signing (the updater must refuse it).
+    #[serde(default)]
+    pub tamper_index: bool,
+    /// The image is altered after the index recorded its SHA-256 (the
+    /// updater must refuse the download).
+    #[serde(default)]
+    pub tamper_image: bool,
+    /// The machine already holds a verified copy of this source's index
+    /// with a higher serial (the published one must be refused as stale).
+    #[serde(default)]
+    pub stale_index: bool,
+    /// How the machine knows the source: `sources` (registered in
+    /// `updater/sources`), `legacy-url` (the ADR 0027 `updater/update_url`,
+    /// to be migrated) or `none` (the scenario adds it from the shell).
+    #[serde(default = "default_update_source")]
+    pub source: String,
+}
+
+fn default_update_source() -> String {
+    String::from("sources")
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostInput {
@@ -159,10 +190,9 @@ pub struct Scenario {
     /// `trusted_ca.der`, one self-signed and untrusted.
     #[serde(default)]
     pub host_https: bool,
-    /// Publishes a version-2 system image into `build/update/`, served by the
-    /// test HTTP server at `http://10.0.2.2:17010/update/` (ADR 0027).
-    #[serde(default)]
-    pub host_update: bool,
+    /// An update source published into `build/update-test/` and served by
+    /// the test HTTP server at `http://10.0.2.2:17010/update/` (ADR 0029).
+    pub host_update: Option<HostUpdate>,
     /// Initial state of the test disk (`image::DiskVariant`): `slots`
     /// (default), `update-empty`, `esp-only`, `pending-b`, `b-exhausted`, `b-corrupt`,
     /// `fs-pending-replace`, `fs-corrupt`, `wasm-restricted`, `wasm-invalid`,
@@ -220,6 +250,14 @@ pub struct Scenario {
     /// `DIR:VERSION:corrupt` (tampered signature), for the installer (ADR 0018).
     #[serde(default)]
     pub packages: Vec<String>,
+    /// Packages already staged by the updater: `DIR:VERSION`, or
+    /// `DIR:VERSION:wrong-hash` (the staged list's SHA-256 does not match
+    /// the stage file), for `run installer 2` (ADR 0029).
+    #[serde(default)]
+    pub staged: Vec<String>,
+    /// Adds a staged line naming a file outside the stage files.
+    #[serde(default)]
+    pub staged_bad_path: bool,
     #[serde(skip)]
     pub file: PathBuf,
 }

@@ -35,6 +35,7 @@ dependencies = [
  "aricode-crypto",
  "aricode-pkg",
  "aricode-rt",
+ "aricode-update-index",
 ]
 
 [[package]]
@@ -63,8 +64,10 @@ dependencies = [
  "aricode-crypto",
  "aricode-gpt",
  "aricode-https",
+ "aricode-pkg",
  "aricode-proto",
  "aricode-rt",
+ "aricode-update-index",
 ]
 
 [[package]]
@@ -152,6 +155,7 @@ dependencies = [
  "aricode-rt",
  "aricode-sys",
  "aricode-tls",
+ "aricode-update-index",
  "aricode-x509",
 ]
 
@@ -407,6 +411,13 @@ version = "0.10.0"
 dependencies = [
  "aricode-crypto",
  "aricode-x509",
+]
+
+[[package]]
+name = "aricode-update-index"
+version = "0.9.0"
+dependencies = [
+ "aricode-crypto",
 ]
 
 [[package]]
@@ -769,6 +780,7 @@ dependencies = [
  "aricode-pkg",
  "aricode-proto",
  "aricode-ssh",
+ "aricode-update-index",
  "serde",
  "toml",
 ]

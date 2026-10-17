@@ -1,0 +1,51 @@
+# AriFS table nearly full (re-audit R3, final re-audit L-c): hello_ext v1 is
+# installed, a source is registered, and only five of the 32 entries are
+# free for the updater. The source offers system 2 and hello_ext 2. A first
+# `update` and an `upgrade` of both create exactly five files in the
+# updater's directory (state, indexes, last.log, history.log, one stage
+# file pkg-1.aripkg); the installer then replaces apps/hello_ext.aripkg in
+# place. Everything succeeds and the table ends full.
+#
+# The disk is filled to leave one more entry: init's fs_client self-test
+# creates nuevo.txt on every boot, before the shell. The first QEMU run
+# (2026-10-17) left five entries in all, nuevo.txt took one, and
+# pkg-1.aripkg could not be created (`ls` showed the four other updater
+# files and nuevo.txt).
+name = "update.fs_nearly_full"
+description = "update and an upgrade of the system and one app fit in an AriFS table with five free entries"
+level = "full"
+areas = ["update", "apps", "network", "shell", "filesystem"]
+disk = "fs-nearly-full"
+install = ["examples/hello_ext"]
+timeout_secs = 240
+
+[host_update]
+system = 2
+apps = ["examples/hello_ext:2"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update", "upgrade", "run hello_ext 6", "ls", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "updater: source 1 http://10.0.2.2:17010/update/: index verified (serial ",
+    "updater: system: installed 1, source 1 offers 2: upgrade available",
+    "updater: app hello_ext: installed 1, source 1 offers 2: upgrade available",
+    "updater: installed into slot B",
+    "updater: system 2 installed: reboot to apply",
+    "updater: app hello_ext version 2 verified and staged as updater/pkg-1.aripkg",
+    "installer: hello_ext 1 -> 2 installed (apps/hello_ext.aripkg)",
+    "hello_ext v2: hello from outside the tree (arg 6)",
+    "32 file(s)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "update: updater exited with",
+    "update: installer exited",
+    "cannot store",
+    "cannot save",
+    "cannot write",
+    "unreadable",
+]

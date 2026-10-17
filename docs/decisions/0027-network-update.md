@@ -1,7 +1,10 @@
 # ADR 0027: System updates over the network
 
 - **Date:** 2026-10-11
-- **Status:** Accepted
+- **Status:** Accepted; the channel (one URL, `manifest.txt`, `update
+  [URL|check]`, downloads into `UPDATE`) is replaced by ADR 0029 (sources,
+  signed index, `update`/`upgrade`, downloads verified in memory). The
+  transport rule (decision 2) and the kernel fix (decision 6) stand.
 
 ## Context
 

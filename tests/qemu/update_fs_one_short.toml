@@ -1,0 +1,39 @@
+# AriFS table one entry short (ADR 0029, AriFS-table paragraph): the same
+# machine as update.fs_nearly_full with one free entry less. `update` still
+# fits (state, indexes, last.log); `upgrade` reserves the files it will
+# need (history.log, one stage file) before anything irreversible, cannot
+# create the stage file, and refuses the whole upgrade with a fault event:
+# the system is not scheduled and no app is staged.
+name = "update.fs_one_short"
+description = "a full AriFS table refuses the whole upgrade before any install"
+level = "full"
+areas = ["update", "apps", "network", "shell", "filesystem"]
+disk = "fs-one-short"
+install = ["examples/hello_ext"]
+timeout_secs = 180
+
+[host_update]
+system = 2
+apps = ["examples/hello_ext:2"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update", "upgrade", "diag", "ls", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "updater: source 1 http://10.0.2.2:17010/update/: index verified (serial ",
+    "updater: 2 upgrade(s) available: run upgrade",
+    "updater: AriFS has no room for 1 more file(s) this upgrade needs: nothing installed",
+    "update: updater exited with 39",
+    ": upd-fs-full (code 39)",
+    "32 file(s)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "downloading aricodeos",
+    "installed into slot",
+    "staged as",
+    "installer: installing",
+]

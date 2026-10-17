@@ -1,0 +1,31 @@
+# The installer's STAGED mode trusts nothing it did not verify (ADR 0029,
+# decision 5): the staged list names hello_ext v2 with a SHA-256 that does
+# not match the stage file, and a line naming pkgs/evil.aripkg. Both are
+# refused with fault events, nothing is installed, and the list is consumed
+# so a second run finds nothing.
+name = "apps.staged_tampered"
+description = "installer STAGED: a stage file that differs from the list and a path outside the stage files are refused"
+level = "full"
+areas = ["apps", "update", "shell"]
+install = ["examples/hello_ext"]
+staged = ["examples/hello_ext:2:wrong-hash"]
+staged_bad_path = true
+timeout_secs = 150
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["run installer 2", "run installer 2", "run hello_ext 4", "diag", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "installer: 1 staged entry(ies) name another file or are malformed: refused",
+    "installer: updater/pkg-1.aripkg missing or not what the updater staged: refused",
+    "installer: 0 package(s) installed, 1 skipped",
+    "run: installer exited with 10",
+    "installer: 0 package(s) installed, 0 skipped",
+    "hello_ext v1: hello from outside the tree (arg 4)",
+    ": inst-stage-path (code 10)",
+    ": inst-stage-hash (code 10)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "installing hello_ext", "hello_ext v2:"]

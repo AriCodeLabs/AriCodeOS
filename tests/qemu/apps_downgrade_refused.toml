@@ -1,0 +1,48 @@
+# App downgrade rule (ADR 0029, decision 5, audit 1 H2): hello_ext v1 is
+# installed and pkgs/ holds v2 and then v1. The installer installs v2 and
+# refuses v1 as a downgrade; asked for --allow-downgrade outside staged
+# packages it refuses to run at all. A source offering v1 is reported as
+# older and `upgrade` refuses it; v2 stays installed. Every refusal is a
+# fault event.
+name = "apps.downgrade_refused"
+description = "older app packages are refused by the installer and by upgrade; --allow-downgrade only for staged packages"
+level = "full"
+areas = ["apps", "update", "network", "shell"]
+install = ["examples/hello_ext"]
+packages = ["examples/hello_ext:2", "examples/hello_ext:1"]
+timeout_secs = 200
+
+[host_update]
+apps = ["examples/hello_ext:1"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = [
+    "run installer",
+    "run installer 1",
+    "diag",
+    "update",
+    "upgrade",
+    "run hello_ext 3",
+    "diag",
+    "shutdown",
+]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "installer: installing hello_ext version 2 (from pkgs/hello_ext-2.aripkg)",
+    "installer: hello_ext 1 -> 2 installed (apps/hello_ext.aripkg)",
+    "installer: hello_ext version 1 is older than the installed 2: refused (downgrade)",
+    "installer: 1 package(s) installed, 1 skipped",
+    "installer: argument 1 refused (--allow-downgrade only applies to staged packages)",
+    "run: installer exited with 6",
+    ": inst-downgrade-refused (code 8)",
+    ": inst-flags-refused (code 6)",
+    "updater: app hello_ext: installed 2, source 1 offers 1: older than installed; upgrade refuses it without --allow-downgrade",
+    "updater: app hello_ext: refused: version 1 is older than the installed 2 (--allow-downgrade to force)",
+    "update: updater exited with 40",
+    ": upd-downgrade-refused (code 40)",
+    "hello_ext v2: hello from outside the tree (arg 3)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "hello_ext v1:", "staged as", "hello_ext 2 -> 1"]

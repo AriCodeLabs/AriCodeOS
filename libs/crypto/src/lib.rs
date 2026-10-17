@@ -37,6 +37,7 @@ pub mod rsa;
 pub mod sha256;
 pub mod sha512;
 pub mod ssh_chachapoly;
+pub mod trust;
 pub mod x25519;
 
 /// Hash functions selectable at run time (signature schemes, certificates).

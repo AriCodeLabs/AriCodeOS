@@ -1,0 +1,46 @@
+# Downgrade rule (ADR 0029): slot B holds version 2 pending and is confirmed
+# on boot; the source offers version 1, validly signed. `update` reports it
+# as older, `upgrade` refuses it and records a fault event, and only
+# `upgrade --allow-downgrade` installs it into the inactive slot A, which
+# the next boot tries.
+name = "update.refuse_downgrade"
+description = "an older signed system image is refused unless upgrade --allow-downgrade"
+level = "full"
+areas = ["update", "network", "shell", "boot"]
+disk = "pending-b"
+timeout_secs = 180
+
+[host_update]
+system = 1
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update", "upgrade", "diag", "upgrade --allow-downgrade", "reboot"]
+[boots.expect]
+exit = 0
+serial_contains = [
+    "AriInit: boot confirmed on slot B",
+    "updater: system: installed 2, source 1 offers 1: older than installed; upgrade refuses it without --allow-downgrade",
+    "updater: system: refused: version 1 is older than the installed 2 (--allow-downgrade to force)",
+    "update: updater exited with 40",
+    ": upd-downgrade-refused (code 40)",
+    "updater: system: downgrading from 2 to 1 (--allow-downgrade)",
+    "updater: downloading aricodeos-1.img (",
+    "updater: system image version 1 verified (signature and SHA-256)",
+    "updater: installed into slot A",
+    "updater: state: active B, pending A (3 tries); reboot to try it",
+    "AriCodeOS: rebooting",
+]
+serial_absent = ["KERNEL PANIC", "rollback"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "slots: booting from slot A (image version 1, pending confirmation)",
+    "AriInit: boot confirmed on slot A",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "rollback"]
