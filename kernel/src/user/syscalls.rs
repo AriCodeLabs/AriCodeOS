@@ -304,7 +304,15 @@ fn endpoint_create_pair(t: &mut crate::object::Handles) -> Result<u64, Error> {
         .union(Rights::DUPLICATE)
         .union(Rights::TRANSFER);
     match insert(t, ep, send) {
-        Ok(s) => Ok(receive.0 as u64 | (s.0 as u64) << 32),
+        Ok(s) => {
+            let packed = receive.0 as u64 | (s.0 as u64) << 32;
+            // The result must not read as an error code (-4095..=-1): that
+            // needs the low half >= 0xFFFF_F001, i.e. a handle index far
+            // above `HANDLE_LIMIT`; handles have the generation in their
+            // high 16 bits, so the value may well be negative as an i64.
+            debug_assert!(aricode_abi::decode(packed as i64).is_ok());
+            Ok(packed)
+        }
         Err(e) => {
             let _ = t.remove(receive);
             Err(e)
@@ -339,6 +347,20 @@ fn endpoint_of(h: Handle, required: Rights) -> Result<ObjectRef, Error> {
     })
 }
 
+/// A handle listed twice would be taken once and then fail, dropping the
+/// capability already taken (audit robustness-1, L3): refused up front.
+fn distinct(handles: &[Handle]) -> Result<(), Error> {
+    if handles
+        .iter()
+        .enumerate()
+        .any(|(i, h)| handles[..i].contains(h))
+    {
+        Err(Error::Invalid)
+    } else {
+        Ok(())
+    }
+}
+
 fn ipc_send(
     ep: Handle,
     data_ptr: u64,
@@ -361,6 +383,7 @@ fn ipc_send(
         .collect();
     // Check now that all are transferable (early error) and only remove them
     // once the endpoint confirms the slot: a timeout loses nothing.
+    distinct(&user_handles)?;
     with_handles(|t| {
         for uh in &user_handles {
             lookup(t, *uh, Rights::TRANSFER)?;
@@ -556,6 +579,7 @@ fn spawn_from_bytes(
         .map(|c| Handle(u32::from_le_bytes(*c)))
         .collect();
     // Validate all before removing any.
+    distinct(&user_handles)?;
     let extra: Vec<(Cap, Rights)> = with_handles(|t| {
         for uh in &user_handles {
             lookup(t, *uh, Rights::TRANSFER)?;

@@ -6,7 +6,7 @@
 //! 0x10004 = service endpoint (WRITE), 0x10005 = sync endpoint (WRITE).
 //! `arg` = case (see `peer_server`); case 4 runs alone, with its own
 //! endpoints: send side gone, receive side gone, `ipc_receive_any`,
-//! `endpoint_close` and revocation. Success = 0; otherwise the failing step.
+//! `endpoint_close`, a handle listed twice and revocation. Success = 0; otherwise the failing step.
 #![no_std]
 #![no_main]
 
@@ -151,7 +151,20 @@ fn local_endpoints() -> u64 {
     {
         return 63;
     }
-    // 5. Revocation also invalidates the handles.
+    // 5. A handle listed twice is refused and none is lost.
+    let Ok((r, w)) = sys::endpoint_create_pair() else {
+        return 67;
+    };
+    let Ok(t) = sys::handle_duplicate(w, rights::WRITE | rights::TRANSFER) else {
+        return 68;
+    };
+    if sys::ipc_send(w, b"x", &[t, t], 0) != Err(Error::Invalid)
+        || sys::object_kind(t).is_err()
+        || sys::handle_close(r).is_err()
+    {
+        return 69;
+    }
+    // 6. Revocation also invalidates the handles.
     let Ok(e) = sys::endpoint_create() else {
         return 64;
     };

@@ -250,11 +250,15 @@ pub fn settle_later(obj: ObjectRef) {
 
 /// Completes the closing of the endpoints queued by `settle_later`:
 /// discards their queues and wakes their waiters. Called with no lock held
-/// (end of every syscall, after reaping finished threads). Discarding a
+/// (end of every syscall, after reaping finished threads). A capability a
+/// kernel thread drops outside both (a self-test) is settled at the next
+/// syscall or reap on any CPU. Discarding a
 /// queue drops capabilities, which may queue more endpoints: handled
 /// iteratively here, never by recursion.
 pub fn settle_closed() {
-    if !PENDING_ANY.swap(false, Ordering::AcqRel) {
+    // A plain load first: this runs at the end of every syscall, and a swap
+    // would take the cache line exclusively on every CPU each time.
+    if !PENDING_ANY.load(Ordering::Relaxed) || !PENDING_ANY.swap(false, Ordering::AcqRel) {
         return;
     }
     loop {

@@ -149,7 +149,8 @@ pub mod nr {
     /// is removed from the sender). `timeout_ms`: 0 = do not block,
     /// [`TIMEOUT_INFINITE`] = wait forever. [`Error::PeerClosed`] once no
     /// `READ` handle on the endpoint exists any more (ADR 0030), also for a
-    /// sender already waiting for room in the queue.
+    /// sender already waiting for room in the queue. A handle listed twice
+    /// is `Invalid` (nothing is transferred).
     pub const IPC_SEND: u64 = 12;
     /// `ipc_receive(ep, buf_ptr, buf_len, handles_out_ptr, handles_max, timeout_ms)
     /// -> data_len | (handles_received << 32)`; requires `READ` on `ep`.
@@ -160,7 +161,7 @@ pub mod nr {
     /// -> process handle`; requires `MANAGE` on a `SPAWNER` object and
     /// `TRANSFER` on each handle, which is removed from the parent and appears in
     /// the child from `0x0001_0004` on, in the same order. The child receives `arg`
-    /// in `rdi`.
+    /// in `rdi`. A handle listed twice is `Invalid` (nothing is transferred).
     pub const PROCESS_SPAWN: u64 = 14;
     /// `process_wait(process, timeout_ms) -> exit code`; requires `WAIT`.
     /// A process terminated by the kernel returns `Error::Killed`.
