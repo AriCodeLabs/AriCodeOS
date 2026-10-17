@@ -556,7 +556,7 @@ pub const RAW_PATTERN_LBA: u64 = 4096;
 /// carries no test or sample data (incident 0005).
 pub const USB_FILES: &[(&str, &[u8])] = &[(
     "README",
-    b"AriCodeOS system stick: this AriFS partition holds your files.\nhttps://github.com/lynxcraft/aricodeos\n",
+    b"AriCodeOS system stick: this AriFS partition holds your files.\nhttps://github.com/AriCodeLabs/AriCodeOS\n",
 )];
 
 /// Sample files of the test disk.
@@ -953,7 +953,9 @@ mod tests {
         let names: Vec<&str> = fs.entries().map(|(_, e)| e.name_str()).collect();
         assert_eq!(names, ["README"]);
         let readme = USB_FILES[0].1;
-        assert!(readme.is_ascii() && readme.ends_with(b"https://github.com/lynxcraft/aricodeos\n"));
+        assert!(
+            readme.is_ascii() && readme.ends_with(b"https://github.com/AriCodeLabs/AriCodeOS\n")
+        );
     }
 
     #[test]

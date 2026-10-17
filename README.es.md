@@ -2,6 +2,8 @@
 
 *Traducción al español de [README.md](README.md). El inglés es el idioma canónico del proyecto: el código, los mensajes, el documento maestro [AriCodeOS.md](AriCodeOS.md), la documentación de `docs/` (auditorías incluidas) y `tests/README.md` están en inglés.*
 
+Web: https://www.aricodeos.org/ · Repositorio: https://github.com/AriCodeLabs/AriCodeOS
+
 Sistema operativo desde cero: microkernel en Rust `no_std`, arranque UEFI,
 x86-64, seguridad por capabilities y drivers en espacio de usuario.
 

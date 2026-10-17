@@ -114,7 +114,8 @@ version = "0.10.0"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors"]
-repository = "https://github.com/lynxcraft/aricodeos"
+homepage = "https://www.aricodeos.org/"
+repository = "https://github.com/AriCodeLabs/AriCodeOS"
 
 # Profiles shared by the bootloader and the kernel.
 # panic = "abort": there is no unwinding in no_std.
