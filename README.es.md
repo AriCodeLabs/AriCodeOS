@@ -40,6 +40,7 @@ hardware`, que se ha ejercitado en el portátil y la evidencia está en
 | Criptografía propia, RNG, imágenes firmadas, A/B con rollback | validado en QEMU | `crypto.*`, `update.*`; no es Secure Boot |
 | IOMMU VT-d con dominio por driver | validado en QEMU | `iommu.*` |
 | Imagen USB para pendrive | validado en QEMU (`usb.image_boot`) | pendiente en hardware |
+| Driver EHCI (USB 2.0): puertos raíz, hubs USB 2.0, teclados y ratones HID de arranque, almacenamiento bulk-only (ADR 0029) | escrito, tests de host; escenarios QEMU escritos pero aún sin ejecutar | `usb.ehci_*`, `strict.ehci_halt`; los hubs solo en hardware (QEMU no tiene hub de alta velocidad) |
 | Aplicaciones fuera del árbol: paquetes firmados instalados y actualizados en AriFS (`cargo xtask app-pack`, `installer`) | validado en QEMU, con cortes | `apps.*`; sin distribución por red |
 | Medidas: `bench` (syscall, IPC, ficheros, percentiles), reposo por CPU, informe `diag` | validado en QEMU | `perf.*`, `docs/performance.md`; cifras solo comparables con la misma build y modo de QEMU |
 | Arranque en portátil (Fase 34) | propuesto | necesita el equipo de referencia |
@@ -92,6 +93,7 @@ services/virtio-blk/ driver virtio-blk y servicio de bloques por IPC en ring 3
 services/arifs/  fsd: servicio de ficheros AriFS v1 por IPC en ring 3
 services/virtio-net/ netd: driver virtio-net y pila de red (DHCP, ping, UDP, TCP, DNS) por IPC en ring 3
 services/virtio-input/ inputd: driver virtio-input (teclado, raton) con eventos por IPC en ring 3
+services/usb-ehci/ usb_ehci: driver EHCI con hubs USB 2.0, teclado/raton USB HID y almacenamiento USB, en ring 3 (ADR 0029)
 services/compositor/ compositor: ventanas, cursor y enrutado de entrada sobre el framebuffer, en ring 3
 libs/gfx/        graficos 2D sin alloc (lienzos, texto, cursor, escritorio) con tests de host
 libs/input/      eventos evdev y teclado US con tests de host

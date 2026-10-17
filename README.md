@@ -44,6 +44,7 @@ the evidence is recorded in `docs/hardware.md`.
 | In-house cryptography, RNG, signed images, A/B with rollback | validated in QEMU | `crypto.*`, `update.*`; not Secure Boot |
 | VT-d IOMMU with one domain per driver | validated in QEMU | `iommu.*` |
 | USB stick image | validated in QEMU (`usb.image_boot`) | pending on hardware |
+| EHCI (USB 2.0) driver: root ports, USB 2.0 hubs, boot HID keyboards and mice, bulk-only storage (ADR 0029) | written, host tests; QEMU scenarios written but not yet run | `usb.ehci_*`, `strict.ehci_halt`; hubs only on hardware (QEMU has no high-speed hub) |
 | Out-of-tree applications: signed packages installed and updated in AriFS (`cargo xtask app-pack`, `installer`) | validated in QEMU, with power cuts | `apps.*`; no network distribution |
 | Measurements: `bench` (syscall, IPC, files, percentiles), idle time per CPU, `diag` report | validated in QEMU | `perf.*`, `docs/performance.md`; figures only comparable with the same build and QEMU mode |
 | Booting on a laptop (Phase 34) | proposed | needs the reference machine |
@@ -98,6 +99,7 @@ services/arifs/  fsd: AriFS v1 file service over IPC, in ring 3
 services/virtio-net/ netd: virtio-net driver and network stack (DHCP, ping, UDP, TCP, DNS) over IPC, in ring 3
 services/virtio-input/ inputd: virtio-input driver (keyboard, mouse) with events over IPC, in ring 3
 services/usb-input/ usbd: xHCI driver and USB HID keyboard/mouse (boot protocol), in ring 3
+services/usb-ehci/ usb_ehci: EHCI driver with USB 2.0 hubs, USB HID keyboard/mouse and USB storage, in ring 3 (ADR 0029)
 services/console-bridge/ console bridge: user keyboards feed the kernel console for the shell
 services/compositor/ compositor: windows, cursor and input routing over the framebuffer, in ring 3
 libs/gfx/        2D graphics without alloc (canvases, text, cursor, desktop) with host tests
