@@ -690,6 +690,7 @@ pub fn smp_selftest() {
     // CPU that never runs a roamer within it fails the test, after the
     // report says which CPU it was and how much of the wait it spent idle.
     const MIGRATION_DEADLINE_MS: u64 = 10_000;
+    const MIGRATION_WARN_MS: u64 = 1_000;
     const MIN_ROUNDS: u32 = 500;
     static MASKS: [AtomicU32; 2 * cpu::MAX_CPUS] = [const { AtomicU32::new(0) }; 2 * cpu::MAX_CPUS];
     static ROAM_STOP: AtomicBool = AtomicBool::new(false);
@@ -729,6 +730,13 @@ pub fn smp_selftest() {
         }
         sleep_ms(10);
     };
+    // Passing late is still worth seeing (audit robustness-1, L8): the
+    // deadline must not hide a scheduler that got slow at migrating.
+    if roam_ms > MIGRATION_WARN_MS {
+        log::warn!(
+            "smp selftest: every CPU reached only after {roam_ms} ms (more than {MIGRATION_WARN_MS} ms): host load or a scheduler regression, see incident 0002"
+        );
+    }
     ROAM_STOP.store(true, Ordering::Relaxed);
     while roamers.iter().any(|t| state(*t).is_some()) {
         yield_now();

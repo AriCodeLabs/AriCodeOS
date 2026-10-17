@@ -78,6 +78,8 @@ then fails with the same assertion. How to read it:
 
 10 s is two orders of magnitude above the usual time on a quiet host;
 a CPU that never runs a roamer in that time fails the test either way.
+So that the deadline does not hide a regression (audit robustness-1, L8),
+a pass that needed more than 1 s logs a warning with the time.
 Not run in QEMU on this branch (the test ports were in use); the
 scenario `smp.selftest` now also expects `every CPU reached in`.
 
