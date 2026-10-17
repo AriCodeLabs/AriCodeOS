@@ -43,3 +43,22 @@
 - Discriminate: reflash the stick (slot A active with the current
   build). Link up there → H1 (then compare the two builds of `rtl_net`
   and init); link down → H2/H3.
+
+## Result of the discrimination (2026-10-17)
+
+Stick reflashed with `develop` a236c68 (slot A active), same cable and
+router port: `booted from slot A (active)`, `link up`, DHCP address
+192.168.1.27 (the router no longer hands out .24), SSH working. The only
+fault event is the known `SYNCHRONIZE CACHE` rejection at boot (sense
+5/20/00).
+
+So the NIC, the cable and the port work with the current build, and the
+link was missing only with the test-built image of 2026-10-12 07:02 in
+slot B, across a warm and a further restart. H1 is the leading
+hypothesis; H2 (a NIC state left by the warm reboot that only that boot
+sequence hit) is not excluded, because the stick reflash also meant a
+full power cycle. Next: reproduce on purpose by publishing an image from
+the current build to the real channel, updating the laptop and
+rebooting into slot B. If the link comes up, the 2026-10-12 build is the
+suspect and its `rtl_net`/init are compared with the current ones; if it
+does not, the warm reboot path of `rtl_net` is investigated.
