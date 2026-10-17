@@ -2,17 +2,24 @@
 # MSI-X, only MSI. Same scenario as shell.usb_keyboard with the QEMU xHCI
 # without MSI-X: the kernel programs the MSI capability and the driver receives
 # its interrupts through it.
+# The virtio keyboard and mouse are left out (`usb_hid_only_input`): QEMU
+# sends QMP input to the most recently activated handler, which under
+# `shell` is the virtio keyboard (activated when its driver starts), and
+# until 2026-10-17 this scenario passed typing on it (incident 0001). Keys
+# are paced (`key_delay_ms`): QEMU's usb-kbd queues at most 16 scancodes.
 name = "shell.usb_keyboard_msi"
 description = "arish with a USB HID keyboard on an xHCI that only offers MSI (no MSI-X)"
 level = "full"
 areas = ["shell", "input", "usb", "console", "pci"]
 cmdline = "qemu_exit shell"
 usb_hid = true
+usb_hid_only_input = true
 usb_hid_msi = true
 timeout_secs = 60
 
 [host_input]
 marker = "CONSOLE_BRIDGE_READY"
+key_delay_ms = 30
 keys = ["c", "p", "u", "s", "ret", "s", "h", "u", "t", "d", "o", "w", "n", "ret"]
 
 [expect]
@@ -20,7 +27,8 @@ exit = 33
 serial_contains = [
     "1b36:000d claimed (MSI)",
     "usb-input: device ready: USB HID Keyboard+Mouse",
-    "AriInit: console bridge with 3 input device(s)",
+    "AriInit: console bridge with 1 input device(s)",
+    "usb-input: first report from slot ",
     "arish: AriCodeOS shell",
     "cpus: ",
     "ari> shutdown",

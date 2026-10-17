@@ -1,0 +1,28 @@
+# `update apply` and the downgrade rule (ADR 0029, decision 5; audit 1,
+# M4): slot B (version 2) is confirmed on boot and the UPDATE partition
+# holds version 1. `update apply` verifies it and refuses the downgrade with
+# a fault event; `update apply --allow-downgrade` installs it into slot A.
+name = "update.apply_refuses_older"
+description = "update apply refuses an older UPDATE image unless --allow-downgrade"
+level = "full"
+areas = ["update", "shell"]
+disk = "pending-b-older-update"
+timeout_secs = 120
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update apply", "diag", "update apply --allow-downgrade", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "AriInit: boot confirmed on slot B",
+    "updater: UPDATE image version 1 verified (",
+    "updater: system: refused: version 1 is older than the installed 2 (--allow-downgrade to force)",
+    "update: updater exited with 40",
+    ": upd-downgrade-refused (code 40)",
+    "updater: system: downgrading from 2 to 1 (--allow-downgrade)",
+    "updater: installed into slot A",
+    "updater: state: active B, pending A (3 tries); reboot to try it",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "rollback"]

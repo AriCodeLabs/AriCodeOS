@@ -59,3 +59,15 @@ failed without relaunching (`services.start_timeout`).
 - Restarting a driver does not stop the device's in-flight DMA: with the
   IOMMU active the dead process's domain is withdrawn before its
   frames are reused; without an IOMMU the restart is a documented risk.
+
+## Note (ADR 0030, 2026-10-17)
+
+init keeps the receive side of every supervised endpoint so that the next
+generation serves the same endpoint; the kernel therefore cannot tell on
+its own that a dead service will not come back. When the supervisor gives
+a service up (restart budget exhausted, or `strict`), it closes the
+endpoints the service served with `endpoint_close`: queued requests and
+every later one fail at once with `PeerClosed` instead of waiting their
+reply timeouts. A request the dead process was holding fails at once in
+any case, since its reply capability dies with the process. A closed
+endpoint is never served again.

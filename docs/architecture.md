@@ -68,10 +68,11 @@ libs/http/           aricode-http: GET, response parsing, Content-Length and chu
 libs/net/            aricode-net: Ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP client and DNS without alloc (no_std, host tests)
 libs/arifs/          aricode-arifs: AriFS v1, flat directory with a fixed-capacity file table, CRC32 and replacement journal over `BlockDevice` (no_std, host tests with power cuts)
 libs/pkg/            aricode-pkg: signed application packages (manifest with name, version and hashes; Ed25519 signature; ELF; application manifest)
+libs/update-index/   aricode-update-index: update sources, signed index, rollback serials, version and downgrade rules (ADR 0029)
 sdk/proto/           aricode-proto: versioned IPC protocols of the services (block v1, file v1, net v1, input v1, window v1, launch v1) (no_std, host tests)
 sdk/runtime/         aricode-rt: user program runtime (`entry!`, 256 KiB heap, panic, fmt); re-exports aricode-sys
 sdk/build/           aricode-build: one-line `build.rs` that links with `sdk/rust/user.ld`
-apps/updater/        updater: verifies the UPDATE image and installs it in the inactive slot (`block` capability)
+apps/updater/        updater: signed indexes from the update sources, system image into the inactive slot, packages staged for the installer (`fs`, `net`, `block`; ADR 0029)
 apps/wasm-demo/      wasm_demo.wasm: portable module compiled to wasm32 that only uses the imported Capability API
 apps/wasm-runner/    wasm_runner: WebAssembly runtime as an application with a manifest (reads the module from its private directory)
 apps/hello/          hello_app: SDK example application (console, permissions, time)
@@ -372,7 +373,8 @@ latter briefly to add the region.
   `irq_wait`, `mmio_map`, `region_len`, `dma_alloc`, `dma_phys`, `pci_count`,
   `pci_info`, `pci_claim`, `console_read`, `system_info`, `system_power`,
   `initrd_read`, `pci_info_ext`, `console_inject`, `process_spawn_from`,
-  `ipc_receive_any`, `process_kill` (`MANAGE` on the process: marks it for
+  `ipc_receive_any`, `endpoint_create_pair`, `endpoint_close` (ADR 0030),
+  `process_kill` (`MANAGE` on the process: marks it for
   termination and wakes its thread, which exits on leaving the current
   syscall, on waking from a wait, or on the next tick if it was in
   ring 3; `process_wait` returns `Killed`; audit 6ee19fb, 4).
@@ -430,7 +432,19 @@ latter briefly to add the region.
   and receivers) and a send counter. `endpoint_create` gives the creator
   `READ|WRITE|DUPLICATE|TRANSFER|MANAGE`; the usual client/server
   model is: the client creates a reply endpoint and sends in each
-  message a duplicate with `WRITE|TRANSFER`.
+  message a duplicate with `WRITE|TRANSFER` (the SDK uses
+  `endpoint_create_pair`, which splits the two sides into two handles).
+- Peer gone (ADR 0030): the kernel counts the capabilities of each side
+  of an endpoint (`object::Cap`: `READ` = receive side, `WRITE` = send
+  side) wherever they live: handle tables, messages in flight, lists of
+  handles for a new process. A process's handles are released when it is
+  reaped. When the last capability of a side goes, the side closes for
+  good: with no receiver the queue is discarded and every present and
+  future send fails with `PeerClosed`; with no sender a receiver gets the
+  queued messages and then `PeerClosed`. The work after the close (discard
+  the queue, wake the waiters) runs in `ipc::settle_closed` at the end of
+  each syscall and after reaping, never under a lock.
+  `object_revoke` and `endpoint_close` (`MANAGE`) close both sides.
 - `ipc_send` requires `WRITE` on the endpoint and `TRANSFER` on each handle;
   handles are removed from the sender only once the queue confirms the slot
   (`Endpoint::send_with` builds the message inside the critical section),
@@ -560,7 +574,10 @@ latter briefly to add the region.
   MBR, a GPT with backup and an `ARI0` partition of type AriCodeOS.
 - `blk_client` (ring 3) tests info, partition read, write and
   read-back, out-of-range LBA (`Invalid`) and a request without a buffer
-  (`BadHandles`). `storage.block_service` requires it.
+  (`BadHandles`). `storage.block_service` requires it. Like the other
+  test clients it runs only with `selftest` on the command line (ADR
+  0032); every boot runs only init's read-only health check (Info and
+  the GPT read).
 - User programs have a 64 KiB stack and the kernel diagnoses
   `USER STACK OVERFLOW` when a fault hits its guard page (the 16 KiB GPT
   table on the stack caused it; it now goes on the program's heap).
@@ -609,7 +626,8 @@ latter briefly to add the region.
 - `aricode-sys::fs::FsClient` wraps the reply endpoint, the DMA buffer
   and the calls; `fs_client` (ring 3) lists, reads `hola.txt`, creates and writes
   `nuevo.txt`, replaces it in one go, does `flush`, reads back and checks
-  `Exists`, `NotFound` and `BadFd`. `filesystem.read_write` requires it (and the
+  `Exists`, `NotFound` and `BadFd`, only with `selftest` (ADR 0032; a
+  normal boot only lists). `filesystem.read_write` requires it (and the
   negotiated `flush`); `init.boot` requires the success message;
   `filesystem.replace_recovery` redoes on mount a replace cut after
   the commit and `filesystem.corrupt_detected` rejects a tampered table.
@@ -1086,12 +1104,33 @@ services/usb-input             usbd: xHCI controller, enumeration, interrupt end
   event type, not by device.
 - Selection and publication (audit 4836023): `pci_info_ext` exposes the
   programming interface and init only hands `usb_input` the `0c.03` functions
-  with interface `0x30`; any input service is published once it
+  with interface `0x30` (the EHCIs, `0x20`, get `usb_ehci`, ADR 0031); any input service is published once it
   answers `Info` (`input_service_ready`), and `InputClient` bounds its
   waits so a dead service does not block the client. The device
   descriptor is first read as 8 bytes to set the EP0 packet size
   with `Evaluate Context`; FS/LS intervals are rounded
   down (3..=10).
+
+## USB 2.0 over EHCI (ADR 0031)
+
+```text
+libs/ehci                      EHCI registers, queue heads and qTDs (32/64-bit), legacy handoff, hub class (no hardware)
+services/usb-ehci              usb_ehci: EHCI controller, root ports and USB 2.0 hubs, HID (periodic schedule), bulk-only storage (async schedule)
+```
+
+- init launches `usb_ehci` for each `0c.03` function with interface `0x20`,
+  after every xHCI, with the same contract and extras as usbd. Intel EHCIs
+  have no MSI: the driver polls (main loop period 8 ms) and never uses an IRQ.
+- Bring-up per EHCI 4.1 and 5.1 (USBLEGSUP handoff, HCRESET, frame list,
+  async head, `CONFIGFLAG`); enumeration of root ports and hubs (the rate
+  matching hub of Intel 6/7 series), split transactions through the hub's
+  transaction translator for full- and low-speed devices.
+- One queue head per endpoint from a fixed pool; qTDs are handed to idle
+  queue heads only; async queue heads leave the schedule with the async
+  advance doorbell, interrupt ones two frames before reuse.
+- Failures per ADR 0028: reported with the qTD token, recorded as
+  `ehci ...` events, recovered only as USB 2.0 9.4.5 and BOT 5.3.4 say,
+  `strict` dumps and halts.
 
 ## Service supervision (stage 1, ADR 0011)
 
@@ -1324,13 +1363,49 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
 
 - Channel: `build/update/{manifest.txt, aricodeos-N.img}` from `cargo xtask
   publish-update`, served by `serve-update` or any web server.
-- `apps/updater` (caps system, fs, net, block): channel manifest, version
+- `apps/updater` (then caps system, fs, net, block): channel manifest, version
   comparison with the active slot, streaming download into `UPDATE`
   (`aricode-https::get_with` over `aricode-http::fetch_with`), then the
   Phase 30 verification and install. Shell `update [URL|check|apply]`.
 - Kernel `map_foreign` is idempotent per region; servers map client buffers
   per request (`block::map_client_buffer`).
 - Scenario `update.network` (`host_update = true`, disk `update-empty`).
+
+## Update sources and signed index (ADR 0029)
+
+- `libs/update-index` (`aricode-update-index`, no_std + alloc, host tests):
+  index format and strict parser, Ed25519 verification before parsing,
+  rollback serials, version comparison and the downgrade rule, best offer
+  across sources, the source list (normalization, migration from
+  `update_url`), stored index copies, the installed/plan/staged lists the
+  updater and the installer exchange, the history, and the argument
+  constants of both programs.
+- `apps/updater` (caps system, fs, net, block; no main file space):
+  `REFRESH` fetches and verifies each source's `index`/`index.sig`
+  (bounded, with a run deadline), stores verified copies in
+  `updater/indexes`, reports and saves the plan in `updater/state`; `UPGRADE` re-verifies the
+  copies, installs only planned items: the system image (memory download,
+  size, SHA-256, signed manifest and version checked, slot header zeroed
+  first and written last) and packages staged as `updater/pkg-N.aripkg`
+  with the `[staged]` section of `updater/state`. `APPLY` installs the `UPDATE` partition under the
+  downgrade rule. Unknown installed system versions count as downgrades.
+- `apps/installer`: `LIST` writes `[installed]` of `updater/state`; `STAGED` installs
+  only the staged list (checked against it, then emptied);
+  `ALLOW_DOWNGRADE` only with `STAGED`; history lines and fault events.
+- `aricode_crypto::trust`: the build's public key (development by default,
+  `--signing-key DIR` through `ARICODE_SIGNING_PUB`) for AriBoot, init, the
+  installer and the updater.
+- Shell: `update`, `update add|remove|sources|apply [--allow-downgrade]`,
+  `upgrade [--allow-downgrade]` (installer `LIST` before the updater,
+  installer `STAGED` after it).
+- xtask: `publish-update [--version N | --no-system] [--app DIR:VERSION]
+  [--no-legacy-manifest] [--signing-key DIR]` (atomic, legacy
+  `manifest.txt` for the transition release), `usb-image --update-source
+  URL --signing-key DIR`, scenario table `[host_update]`.
+- Scenarios: `update.sources`, `update.migrate_legacy_url`,
+  `update.network`, `update.tampered_index`, `update.tampered_image`,
+  `update.stale_index`, `update.refuse_downgrade`, `apps.upgrade_network`,
+  `apps.downgrade_refused`.
 
 ## DHCP address probe (2026-10-12)
 

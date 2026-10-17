@@ -58,6 +58,10 @@ before merging into develop cargo xtask check && cargo xtask test   (unit + smok
 before merging into main   cargo xtask check && cargo xtask test --all   (unit + full)
 ```
 
+The full suite can run on any machine with Docker, without installing the
+toolchain: see "Docker" in [README.md](../README.md). The result counts the
+same as a host run of the same command.
+
 Every roadmap phase adds its tests in the same branch as its code: new
 `#[cfg(test)]` in the crates and new `tests/qemu/*.toml` with its area.
 

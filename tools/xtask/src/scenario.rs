@@ -67,6 +67,37 @@ pub struct HostSsh {
     pub idle_client: bool,
 }
 
+/// What the scenario's update source offers and how the machine knows it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostUpdate {
+    /// System image version offered; no system image when absent.
+    pub system: Option<u32>,
+    /// App packages offered: `DIR:VERSION`.
+    #[serde(default)]
+    pub apps: Vec<String>,
+    /// The index is altered after signing (the updater must refuse it).
+    #[serde(default)]
+    pub tamper_index: bool,
+    /// The image is altered after the index recorded its SHA-256 (the
+    /// updater must refuse the download).
+    #[serde(default)]
+    pub tamper_image: bool,
+    /// The machine already holds a verified copy of this source's index
+    /// with a higher serial (the published one must be refused as stale).
+    #[serde(default)]
+    pub stale_index: bool,
+    /// How the machine knows the source: `sources` (registered in
+    /// `updater/sources`), `legacy-url` (the ADR 0027 `updater/update_url`,
+    /// to be migrated) or `none` (the scenario adds it from the shell).
+    #[serde(default = "default_update_source")]
+    pub source: String,
+}
+
+fn default_update_source() -> String {
+    String::from("sources")
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostInput {
@@ -75,6 +106,13 @@ pub struct HostInput {
     pub keys: Vec<String>,
     pub mouse_rel: Option<(i32, i32)>,
     pub click: Option<String>,
+    /// Pause after each key event (ms). QEMU's usb-kbd queues at most 16
+    /// scancodes (`QUEUE_LENGTH`, hw/input/hid.c) and drops whole events
+    /// beyond that, while the guest drains it only at the interrupt
+    /// endpoint's polling rate: more than 8 keys typed at QMP speed lose
+    /// keystrokes on the USB keyboard.
+    #[serde(default)]
+    pub key_delay_ms: u64,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -130,6 +168,12 @@ pub struct Scenario {
     /// exit QEMU instead of staying in `hlt`.
     #[serde(default = "default_cmdline")]
     pub cmdline: String,
+    /// Adds `selftest` to the cmdline of every boot (default): init runs
+    /// its test-only boot checks, which write to the test disk and talk to
+    /// the QEMU test hosts (incident 0005, ADR 0032). `false` boots like a
+    /// real machine: only the read-only health checks.
+    #[serde(default = "default_selftest")]
+    pub selftest: bool,
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
     /// Lines the runner sends over the serial console, one each time the
@@ -152,10 +196,9 @@ pub struct Scenario {
     /// `trusted_ca.der`, one self-signed and untrusted.
     #[serde(default)]
     pub host_https: bool,
-    /// Publishes a version-2 system image into `build/update/`, served by the
-    /// test HTTP server at `http://10.0.2.2:17010/update/` (ADR 0027).
-    #[serde(default)]
-    pub host_update: bool,
+    /// An update source published into `build/update-test/` and served by
+    /// the test HTTP server at `http://10.0.2.2:17010/update/` (ADR 0029).
+    pub host_update: Option<HostUpdate>,
     /// Initial state of the test disk (`image::DiskVariant`): `slots`
     /// (default), `update-empty`, `esp-only`, `pending-b`, `b-exhausted`, `b-corrupt`,
     /// `fs-pending-replace`, `fs-corrupt`, `wasm-restricted`, `wasm-invalid`,
@@ -170,9 +213,19 @@ pub struct Scenario {
     /// honoured (the scenario depends on that CPU count).
     pub cpus: Option<u32>,
     /// Adds an xHCI controller with a USB HID keyboard and mouse. QMP events
-    /// then go to the USB keyboard (the most recent handler).
+    /// go to the most recently activated input handler: the USB keyboard
+    /// only while no virtio-input driver has started (QEMU activates a
+    /// virtio keyboard when its guest driver sets DRIVER_OK, after the
+    /// usb-kbd activated itself at realize), so under `shell`, where init
+    /// starts the virtio-input drivers, they reach the virtio keyboard
+    /// unless `usb_hid_only_input` is set.
     #[serde(default)]
     pub usb_hid: bool,
+    /// No virtio keyboard and mouse: the USB HID devices (`usb_hid` on the
+    /// xHCI or `usb_ehci_hid` on the EHCI) are the only input devices, so
+    /// QMP input reaches them whatever the guest starts.
+    #[serde(default)]
+    pub usb_hid_only_input: bool,
     /// The `usb_hid` xHCI offers MSI only (no MSI-X), like 2012 Intel
     /// controllers: the kernel must program the MSI capability.
     #[serde(default)]
@@ -181,10 +234,22 @@ pub struct Scenario {
     /// there is no virtio-blk: usbd serves it as a block service (ADR 0023).
     #[serde(default)]
     pub usb_storage: bool,
-    /// Also adds a pre-xHCI USB controller (EHCI): init must neither hand it
-    /// to the xHCI driver nor hang on it.
+    /// Also adds an EHCI with no devices: init launches the EHCI driver
+    /// for it next to the xHCI driver (ADR 0031).
     #[serde(default)]
     pub usb_legacy_controller: bool,
+    /// An EHCI with a USB keyboard and mouse; QMP events then go to them
+    /// (the most recent handlers). ADR 0031.
+    #[serde(default)]
+    pub usb_ehci_hid: bool,
+    /// The test disk is attached to an EHCI as `usb-storage` and there is
+    /// no virtio-blk: the EHCI driver serves it as a block service.
+    #[serde(default)]
+    pub usb_ehci_storage: bool,
+    /// An ICH9 EHCI with a UHCI companion and a full-speed USB keyboard:
+    /// the EHCI driver hands the port to the companion (ADR 0031).
+    #[serde(default)]
+    pub usb_ehci_companion_kbd: bool,
     #[serde(default)]
     pub inject: Inject,
     /// What is expected from the single boot (without `[[boots]]`).
@@ -204,6 +269,14 @@ pub struct Scenario {
     /// `DIR:VERSION:corrupt` (tampered signature), for the installer (ADR 0018).
     #[serde(default)]
     pub packages: Vec<String>,
+    /// Packages already staged by the updater: `DIR:VERSION`, or
+    /// `DIR:VERSION:wrong-hash` (the staged list's SHA-256 does not match
+    /// the stage file), for `run installer 2` (ADR 0029).
+    #[serde(default)]
+    pub staged: Vec<String>,
+    /// Adds a staged line naming a file outside the stage files.
+    #[serde(default)]
+    pub staged_bad_path: bool,
     #[serde(skip)]
     pub file: PathBuf,
 }
@@ -229,6 +302,9 @@ pub fn validate_name(name: &str) -> Result<()> {
 
 fn default_cmdline() -> String {
     "qemu_exit".into()
+}
+fn default_selftest() -> bool {
+    true
 }
 fn default_timeout() -> u64 {
     30
@@ -290,6 +366,19 @@ pub fn load_from(dir: &Path) -> Result<Vec<Scenario>> {
 }
 
 impl Scenario {
+    /// What a boot of this scenario writes to `aricodeos/cmdline.txt`: its
+    /// declared `cmdline` plus `selftest` unless the scenario opts out.
+    pub fn boot_cmdline(&self, cmdline: &str) -> String {
+        let key = aricode_cmdline::keys::SELFTEST;
+        if self.selftest && !aricode_cmdline::CmdLine::new(cmdline).has_flag(key) {
+            format!("{} {key}", cmdline.trim_end())
+                .trim_start()
+                .to_string()
+        } else {
+            cmdline.to_string()
+        }
+    }
+
     /// CPUs the scenario boots with: the declared ones, or the value forced
     /// by `--cpus`, or 1.
     pub fn cpus(&self, forced: Option<u32>) -> u32 {
@@ -452,5 +541,41 @@ mod tests {
         assert!(!s.matches(Level::Full, &["memory".into()]));
         assert_eq!(s.cmdline, "qemu_exit");
         assert_eq!(s.timeout_secs, 30);
+    }
+
+    #[test]
+    fn selftest_is_added_unless_the_scenario_opts_out() {
+        let mut s = scenario("x", "full", "\"init\"");
+        assert!(s.selftest);
+        assert_eq!(
+            s.boot_cmdline("qemu_exit shell"),
+            "qemu_exit shell selftest"
+        );
+        assert_eq!(s.boot_cmdline("qemu_exit selftest"), "qemu_exit selftest");
+        assert_eq!(s.boot_cmdline(""), "selftest");
+        s.selftest = false;
+        assert_eq!(s.boot_cmdline("qemu_exit shell"), "qemu_exit shell");
+        let off: Scenario = toml::from_str(
+            "name = \"y\"\nlevel = \"full\"\nareas = [\"init\"]\nselftest = false\n[expect]\nexit = 33\n",
+        )
+        .unwrap();
+        assert!(!off.selftest);
+    }
+
+    #[test]
+    fn repo_has_a_scenario_without_selftest() {
+        // At least one scenario boots like a real machine (incident 0005).
+        assert!(load_all().expect("scenarios").iter().any(|s| !s.selftest));
+    }
+
+    #[test]
+    fn nearly_full_arifs_scenarios_boot_without_selftest() {
+        // `fill_arifs` leaves exactly the entries the updater needs; the
+        // selftest `fs_client` would take one for `nuevo.txt`.
+        for s in load_all().expect("scenarios") {
+            if matches!(s.disk.as_str(), "fs-nearly-full" | "fs-one-short") {
+                assert!(!s.selftest, "{}: needs selftest = false", s.name);
+            }
+        }
     }
 }

@@ -1,0 +1,30 @@
+# Tampered image (ADR 0029, audit 1): the index is genuine and signed, but
+# the image file was changed after the index recorded its SHA-256. The
+# updater downloads it into memory, sees the mismatch and refuses it with a
+# fault event before writing anything; slot B is never touched.
+name = "update.tampered_image"
+description = "an image that does not match the signed index is refused before any write"
+level = "full"
+areas = ["update", "network", "shell", "crypto"]
+disk = "update-empty"
+timeout_secs = 150
+
+[host_update]
+system = 2
+tamper_image = true
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update", "upgrade", "diag", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "updater: source 1 http://10.0.2.2:17010/update/: index verified (serial ",
+    "updater: system: installed 1, source 1 offers 2: upgrade available",
+    "updater: downloading aricodeos-2.img (",
+    "updater: system image SHA-256 does not match the signed index; not installing",
+    "update: updater exited with 42",
+    ": upd-image-sha256 (code 42)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "installed into slot", "pending B", "image version 2 verified"]

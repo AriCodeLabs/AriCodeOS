@@ -12,7 +12,7 @@ exit = 33
 serial_contains = [
     "slots: state active A, no pending",
     "slots: booting from slot A (image version 1)",
-    "cmdline: qemu_exit boot_slot=A",
+    "cmdline: qemu_exit selftest boot_slot=A",
     "AriInit: booted from slot A (active)",
     "ARICODEOS_KERNEL_READY",
 ]

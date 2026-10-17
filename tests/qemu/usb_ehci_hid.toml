@@ -1,0 +1,53 @@
+# ADR 0031: a USB keyboard and mouse on QEMU's EHCI (high speed, no
+# companion controllers, no MSI). init launches usb_ehci for the EHCI; the
+# driver enumerates both devices on its root ports, polls their interrupt
+# endpoints through the periodic schedule and serves them as one input
+# device. The host injects "hola" + Enter, a move and a click over QMP and
+# input_client reads them.
+# The virtio keyboard and mouse are left out (`usb_hid_only_input`): QEMU
+# sends QMP input to the most recently activated handler, which is the
+# virtio keyboard once its driver starts (incident 0001, "QEMU input
+# routing"), so the keys would never reach the EHCI keyboard. The keys are
+# paced (`key_delay_ms`): QEMU's usb-kbd holds at most 16 scancodes.
+name = "usb.ehci_hid"
+description = "EHCI driver: USB HID keyboard and mouse (boot protocol) through the periodic schedule, events injected via QMP"
+level = "full"
+areas = ["usb", "input", "init", "drivers"]
+cmdline = "qemu_exit"
+usb_ehci_hid = true
+usb_hid_only_input = true
+timeout_secs = 90
+
+[host_input]
+marker = "INPUT_READY"
+key_delay_ms = 30
+keys = ["h", "o", "l", "a", "ret"]
+mouse_rel = [10, -5]
+click = "left"
+
+[expect]
+exit = 33
+serial_contains = [
+    "usb-ehci: EHCI ready (",
+    "usb-ehci: port 1: device 0627:0001 class 0 bcdUSB 0200 speed high address 1",
+    "usb-ehci: port 1: HID keyboard (boot protocol, 8 bytes per report",
+    "usb-ehci: port 2: HID mouse (boot protocol,",
+    "usb-ehci: device ready: EHCI HID Keyboard+Mouse",
+    "AriInit: usb_ehci input ready",
+    "input_client: device 0: EHCI HID Keyboard+Mouse",
+    "usb-ehci: first report from address 1 (",
+    "usb-ehci: first report from address 2 (",
+    "input_client: keyboard: hola",
+    "input_client: mouse: left button pressed",
+    "input_client: mouse: dx=10 dy=-5",
+    "input_client: input events over IPC ok",
+    "AriInit: input service ok",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "nobody typed",
+    "initialization failed",
+    "transfer to address",
+    "has no driver",
+]

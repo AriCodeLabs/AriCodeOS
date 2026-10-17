@@ -22,19 +22,42 @@ pub const HW: Handle = Handle(0x0001_0006);
 pub const IRQ: Handle = Handle(0x0001_0007);
 pub const FIRST_BAR_HANDLE: u32 = 0x0001_0008;
 
-/// Handle of BAR `bar` according to the mask, if present.
+/// Bit of the mask that says the IRQ handle was passed.
+pub const IRQ_PRESENT: u64 = 1 << 15;
+
+/// Where the BARs start: right after the IRQ handle, or in its place when
+/// the function has no IRQ (`start_driver` skips absent handles).
+fn first_bar_handle(mask: u64) -> u32 {
+    if mask & IRQ_PRESENT != 0 {
+        FIRST_BAR_HANDLE
+    } else {
+        FIRST_BAR_HANDLE - 1
+    }
+}
+
+/// Handle of BAR `bar` according to the mask, if present, for drivers that
+/// need an IRQ: `None` also when there is none.
 pub fn bar_handle(mask: u64, bar: u8) -> Option<Handle> {
-    if mask & (1 << bar) == 0 || mask & (1 << 15) == 0 {
+    if mask & IRQ_PRESENT == 0 {
+        return None;
+    }
+    polled_bar_handle(mask, bar)
+}
+
+/// Handle of BAR `bar` for a driver that also works without an IRQ, by
+/// polling (EHCI functions on Intel chipsets have neither MSI nor MSI-X).
+pub fn polled_bar_handle(mask: u64, bar: u8) -> Option<Handle> {
+    if mask & (1 << bar) == 0 {
         return None;
     }
     let before = (mask & ((1u64 << bar) - 1)).count_ones();
-    Some(Handle(FIRST_BAR_HANDLE + before))
+    Some(Handle(first_bar_handle(mask) + before))
 }
 
 /// First handle after the BARs: driver-specific extras, in the order
 /// init passed them.
 pub fn extra_handle(mask: u64, index: u32) -> Handle {
-    Handle(FIRST_BAR_HANDLE + (mask & 0x3F).count_ones() + index)
+    Handle(first_bar_handle(mask) + (mask & 0x3F).count_ones() + index)
 }
 
 /// MMIO registers of a mapped virtio structure.
@@ -244,5 +267,27 @@ impl Transport {
 
     pub fn needs_reset(&self) -> bool {
         self.common.r8(common::DEVICE_STATUS) & status::NEEDS_RESET != 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handle_layout_with_and_without_irq() {
+        // IRQ + BAR0 + BAR2: [service, cfg, hw, irq, bar0, bar2, extras...].
+        let mask = IRQ_PRESENT | 1 | 1 << 2;
+        assert_eq!(bar_handle(mask, 0), Some(Handle(FIRST_BAR_HANDLE)));
+        assert_eq!(bar_handle(mask, 2), Some(Handle(FIRST_BAR_HANDLE + 1)));
+        assert_eq!(bar_handle(mask, 1), None);
+        assert_eq!(polled_bar_handle(mask, 2), bar_handle(mask, 2));
+        assert_eq!(extra_handle(mask, 0), Handle(FIRST_BAR_HANDLE + 2));
+        // No IRQ (EHCI on Intel): everything moves down into its place.
+        let mask = 1;
+        assert_eq!(bar_handle(mask, 0), None);
+        assert_eq!(polled_bar_handle(mask, 0), Some(IRQ));
+        assert_eq!(extra_handle(mask, 0), Handle(FIRST_BAR_HANDLE));
+        assert_eq!(extra_handle(mask, 1), Handle(FIRST_BAR_HANDLE + 1));
     }
 }

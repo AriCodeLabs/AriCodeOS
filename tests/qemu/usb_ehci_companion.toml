@@ -1,0 +1,27 @@
+# ADR 0031, EHCI 4.2.2: a full-speed keyboard (usb-kbd with usb_version=1)
+# on an ICH9 EHCI with a UHCI companion. QEMU's ich9-usb-ehci1 declares the
+# companion (N_CC = 1). After the root port reset the port is not enabled
+# (not high speed), so usb_ehci must not enumerate the device: it hands the
+# port to the companion by writing PORTSC.PO. The UHCI has no driver.
+# QEMU's companion-less usb-ehci refuses a full-speed device at attach, so
+# this is the emulated path to a non-high-speed root port.
+name = "usb.ehci_companion"
+description = "EHCI driver: a full-speed device on a root port is handed to the companion controller (PORTSC.PO), never enumerated"
+level = "full"
+areas = ["usb", "init"]
+cmdline = "qemu_exit"
+usb_ehci_companion_kbd = true
+timeout_secs = 90
+
+[expect]
+exit = 33
+serial_contains = [
+    "usb-ehci: EHCI ready (",
+    "1 companion controllers",
+    "usb-ehci: port 1: full-speed device handed to a companion controller (EHCI 4.2.2)",
+    "usb-ehci: device ready: EHCI HID (no devices)",
+    "has no driver (interface 0x00",
+    "AriInit: usb_ehci input ready",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "transfer to address", "EHCI initialization failed", "without companion controllers"]

@@ -72,8 +72,15 @@ impl KernelObject {
         }
     }
 
-    pub fn revoke(&self) {
+    /// Invalidates every handle to the object. An endpoint also closes both
+    /// of its sides, so nobody keeps waiting on it (ADR 0030).
+    pub fn revoke(self: &Arc<Self>) {
         self.revoked.store(true, Ordering::Release);
+        if let ObjectKind::Endpoint(ep) = &self.kind {
+            if ep.shut_down() {
+                crate::ipc::settle_later(self.clone());
+            }
+        }
     }
 
     pub fn is_revoked(&self) -> bool {
@@ -82,7 +89,54 @@ impl KernelObject {
 }
 
 pub type ObjectRef = Arc<KernelObject>;
-pub type Handles = HandleTable<ObjectRef>;
+
+/// A capability: the object plus its share of the endpoint sides its rights
+/// open (ADR 0030). Every capability lives in exactly one place (a handle
+/// table, a message in flight, a list of handles for a new process) and
+/// moves between them without being copied, so the endpoint counts exactly
+/// how many `READ` and `WRITE` capabilities exist. Dropping the last one of
+/// a side closes it; the work that follows (discarding the queue, waking
+/// waiters) is deferred to a point without locks (`ipc::settle_closed`),
+/// because a capability may be dropped with a process table or a queue
+/// locked.
+pub struct Cap {
+    obj: ObjectRef,
+    receive: bool,
+    send: bool,
+}
+
+impl Cap {
+    pub fn new(obj: ObjectRef, rights: Rights) -> Self {
+        let (receive, send) = match &obj.kind {
+            ObjectKind::Endpoint(ep) => {
+                let sides = (
+                    rights.contains(Rights::READ),
+                    rights.contains(Rights::WRITE),
+                );
+                ep.open_sides(sides.0, sides.1);
+                sides
+            }
+            _ => (false, false),
+        };
+        Self { obj, receive, send }
+    }
+
+    pub fn object(&self) -> &ObjectRef {
+        &self.obj
+    }
+}
+
+impl Drop for Cap {
+    fn drop(&mut self) {
+        if let ObjectKind::Endpoint(ep) = &self.obj.kind {
+            if ep.close_sides(self.receive, self.send) {
+                crate::ipc::settle_later(self.obj.clone());
+            }
+        }
+    }
+}
+
+pub type Handles = HandleTable<Cap>;
 
 /// Handles per process (section 52: resource limits).
 pub const HANDLE_LIMIT: usize = 256;
@@ -91,28 +145,37 @@ pub const HANDLE_LIMIT: usize = 256;
 /// that order, so they match `aricode_abi::handle`.
 pub fn initial_table(pid: Pid, main_thread: Tid) -> Handles {
     let mut t = HandleTable::new(HANDLE_LIMIT);
-    let self_h = t
-        .insert(
-            KernelObject::new(ObjectKind::Process(pid)),
-            Rights::MANAGE.union(Rights::READ).union(Rights::DUPLICATE),
-        )
-        .expect("empty table");
-    let thread_h = t
-        .insert(
-            KernelObject::new(ObjectKind::Thread(main_thread)),
-            Rights::READ.union(Rights::WAIT).union(Rights::DUPLICATE),
-        )
-        .expect("empty table");
-    let console_h = t
-        .insert(
-            KernelObject::new(ObjectKind::Console),
-            Rights::WRITE.union(Rights::DUPLICATE),
-        )
-        .expect("empty table");
+    let self_h = insert(
+        &mut t,
+        KernelObject::new(ObjectKind::Process(pid)),
+        Rights::MANAGE.union(Rights::READ).union(Rights::DUPLICATE),
+    )
+    .expect("empty table");
+    let thread_h = insert(
+        &mut t,
+        KernelObject::new(ObjectKind::Thread(main_thread)),
+        Rights::READ.union(Rights::WAIT).union(Rights::DUPLICATE),
+    )
+    .expect("empty table");
+    let console_h = insert(
+        &mut t,
+        KernelObject::new(ObjectKind::Console),
+        Rights::WRITE.union(Rights::DUPLICATE),
+    )
+    .expect("empty table");
     debug_assert_eq!(self_h, Handle(aricode_abi::handle::SELF_PROCESS));
     debug_assert_eq!(thread_h, Handle(aricode_abi::handle::MAIN_THREAD));
     debug_assert_eq!(console_h, Handle(aricode_abi::handle::CONSOLE));
     t
+}
+
+/// New handle with `rights` to `obj` (a capability made here).
+pub fn insert(
+    t: &mut Handles,
+    obj: ObjectRef,
+    rights: Rights,
+) -> Result<Handle, aricode_abi::Error> {
+    t.insert(Cap::new(obj, rights), rights).map_err(abi_error)
 }
 
 /// Object behind a handle that holds `required` and is not revoked.
@@ -121,7 +184,7 @@ pub fn lookup(
     handle: Handle,
     required: Rights,
 ) -> Result<&ObjectRef, aricode_abi::Error> {
-    let obj = t.get_checked(handle, required).map_err(abi_error)?;
+    let obj = t.get_checked(handle, required).map_err(abi_error)?.object();
     if obj.is_revoked() {
         return Err(aricode_abi::Error::Revoked);
     }

@@ -1,0 +1,29 @@
+# Rollback protection (ADR 0029, decision 6): the machine already holds a
+# verified copy of the source's index with a higher serial. The published
+# index, validly signed but older, is refused as stale with a fault event,
+# and the copy verified earlier is kept and still used for the report.
+name = "update.stale_index"
+description = "an older (replayed) signed index is refused and the verified copy is kept"
+level = "full"
+areas = ["update", "network", "shell", "crypto"]
+timeout_secs = 120
+
+[host_update]
+system = 2
+stale_index = true
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update", "diag", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "updater: source 1 http://10.0.2.2:17010/update/: index refused (Stale {",
+    "older than the one already verified",
+    "updater: source 1: keeping the index verified earlier (serial ",
+    "updater: system: installed 1, source 1 offers 2: upgrade available",
+    "update: updater exited with 32",
+    ": upd-index-stale (code 32)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "index verified (serial", "installed into slot"]

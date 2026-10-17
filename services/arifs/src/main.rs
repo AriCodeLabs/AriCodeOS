@@ -442,10 +442,17 @@ fn main(partition_lba: u64) -> u64 {
             }
         }
         let mut received = [Handle(0); sys::abi::IPC_MAX_HANDLES];
-        let Ok((which, n, nh)) = sys::ipc_receive_any(&eps[..count], &mut msg, &mut received, 1000)
-        else {
-            continue;
-        };
+        let (which, n, nh) =
+            match sys::ipc_receive_any(&eps[..count], &mut msg, &mut received, 1000) {
+                Ok(r) => r,
+                // Every endpoint closed, or one revoked (ADR 0030): nothing
+                // will arrive again and the call would return at once.
+                Err(e) if e.endpoint_gone() => {
+                    say(b"service endpoints closed; exiting");
+                    return 8;
+                }
+                Err(_) => continue,
+            };
         handles[..2].copy_from_slice(&received[..2]);
         {
             let slot = slots[which];

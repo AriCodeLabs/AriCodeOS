@@ -1,0 +1,48 @@
+# App upgrade from a source (ADR 0029): hello_ext v1 is installed and the
+# source's signed index offers hello_ext v2 (no system image). `update`
+# reports it; `upgrade` downloads the package, checks it against the index
+# and its own signature, stages it in the updater's directory and runs the
+# installer on what was staged, which verifies it again and replaces
+# apps/hello_ext.aripkg atomically.
+name = "apps.upgrade_network"
+description = "upgrade: app package from a source, verified twice, installed through the installer"
+level = "full"
+areas = ["apps", "update", "network", "shell"]
+install = ["examples/hello_ext"]
+timeout_secs = 180
+
+[host_update]
+apps = ["examples/hello_ext:2"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = [
+    "run hello_ext 1",
+    "update",
+    "upgrade",
+    "run hello_ext 2",
+    "update",
+    "cat updater/history.log",
+    "shutdown",
+]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "hello_ext v1: hello from outside the tree (arg 1)",
+    "updater: source 1 http://10.0.2.2:17010/update/: index verified (serial ",
+    "no system image, 1 app(s))",
+    "updater: system: no source offers a system image",
+    "updater: app hello_ext: installed 1, source 1 offers 2: upgrade available",
+    "updater: downloading hello_ext-2.aripkg (",
+    "updater: app hello_ext version 2 verified and staged as updater/pkg-1.aripkg",
+    "updater: 1 package(s) staged for the installer",
+    "AriInit: launch installer with manifest [system install] memory 64 KiB",
+    "installer: installing hello_ext version 2 (from updater/pkg-1.aripkg)",
+    "installer: hello_ext 1 -> 2 installed (apps/hello_ext.aripkg)",
+    "installer: 1 package(s) installed, 0 skipped",
+    "hello_ext v2: hello from outside the tree (arg 2)",
+    "updater: app hello_ext: installed 2, source 1 offers 2: up to date",
+    "app hello_ext 1 -> 2 installed (apps/hello_ext.aripkg)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "update: updater exited with", "update: installer exited", "index refused", "refused (downgrade)", "installed into slot"]

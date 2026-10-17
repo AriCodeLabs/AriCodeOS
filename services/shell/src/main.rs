@@ -15,6 +15,7 @@ use aricode_proto::net::{Status as NetStatus, LINK_DOWN, LINK_UP};
 use aricode_rt::sys::net::{NetClient, NetError};
 use aricode_rt::sys::{self, abi, fs::FsClient, Handle, TIMEOUT_INFINITE};
 use aricode_rt::{fmt_hex, fmt_u64};
+use aricode_update_index::{self as update_index, installer_arg, updater_arg};
 
 const FSD: Handle = Handle(0x0001_0004);
 const HW: Handle = Handle(0x0001_0005);
@@ -64,6 +65,25 @@ const MODE_QUIET: u8 = 2;
 
 fn session() -> bool {
     MODE.load(core::sync::atomic::Ordering::Relaxed) != 0
+}
+
+/// `fault` is accepted only when the boot command line asks for it
+/// (`shell_fault`, tests only; ADR 0007).
+fn fault_enabled() -> bool {
+    let mut buf = [0u8; 256];
+    sys::cmdline(SYSTEM, &mut buf)
+        .is_some_and(|c| aricode_cmdline::CmdLine::new(c).has(aricode_cmdline::keys::SHELL_FAULT))
+}
+
+/// Deliberate crash (`fault`, tests only): the shell dies by a page fault
+/// without ending its session, as a shell with a bug would.
+fn fault() -> ! {
+    print(b"arish: crashing on purpose (shell_fault)\n");
+    // SAFETY: deliberate fault; page 0 is never mapped and the address is
+    // hidden from the compiler so that it emits the read.
+    let bad = core::hint::black_box(0x40u64) as *const u64;
+    let v = unsafe { bad.read_volatile() };
+    sys::process_exit(v)
 }
 
 fn quiet() -> bool {
@@ -237,7 +257,7 @@ fn trim(s: &[u8]) -> &[u8] {
 fn help() {
     print(
         b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  cpus      online processors and idle time per CPU\n  diag [NAME]  full report (uptime, mem, cpus, ps, services, net, devices); with NAME saves it to AriFS\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body (http:// or https://)\n  run PROG  run an initrd program and wait\n\
-  update [URL|check|apply]  system update over the network (ADR 0027): downloads the signed image from the channel URL (saved for later runs), installs it in the inactive slot; then `reboot`\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
+  update    fetch and verify the signed index of every source and show what is new (installs nothing; ADR 0029)\n  update add URL|IP[:PORT]  register an update source\n  update remove N|URL  unregister a source\n  update sources  list the sources\n  update apply [--allow-downgrade]  install the image in the UPDATE partition\n  upgrade [--allow-downgrade]  install what the last `update` found (system into the inactive slot, then `reboot`; apps through the installer)\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
     );
 }
 
@@ -778,47 +798,290 @@ fn tls_error(e: aricode_tls::Error) -> &'static [u8] {
     }
 }
 
-/// `update [URL|check|apply]`: runs the updater (ADR 0027). With a URL,
-/// saves it first as the update channel (`updater/update_url`). `check`
-/// only reports the installed and available versions; `apply` installs
-/// whatever is already in the UPDATE partition.
+/// `update ...` (ADR 0029): without arguments runs the updater to fetch
+/// and verify every source's index and report; `add`, `remove` and
+/// `sources` edit the source list, which only the owner can reach (this
+/// shell, on the console or in an authenticated SSH session); `apply`
+/// installs the image already in the UPDATE partition (Phase 30).
 fn update(fs: &mut FsClient, rest: &[u8]) {
-    use aricode_rt::sys::launch;
-    let arg = match rest {
-        b"" => UPDATER_FETCH,
-        b"check" => UPDATER_CHECK,
-        b"apply" => UPDATER_APPLY,
-        url if url.starts_with(b"http://") || url.starts_with(b"https://") => {
-            let mut content = [0u8; LINE_MAX + 1];
-            content[..url.len()].copy_from_slice(url);
-            content[url.len()] = b'\n';
-            if save_file(fs, UPDATE_URL_FILE, &content[..url.len() + 1]).is_err() {
-                print(b"update: could not save the channel URL\n");
-                return;
+    let (sub, arg) = split(rest);
+    match (sub, arg) {
+        (b"", _) => {
+            if list_installed(fs) {
+                run_updater(fs, updater_arg::REFRESH);
             }
-            UPDATER_FETCH
         }
+        (b"apply", b"") => {
+            run_updater(fs, updater_arg::APPLY);
+        }
+        (b"apply", b"--allow-downgrade") => {
+            run_updater(fs, updater_arg::APPLY | updater_arg::ALLOW_DOWNGRADE);
+        }
+        (b"sources", b"") => sources_list(fs),
+        (b"add", a) if !a.is_empty() => source_add(fs, a),
+        (b"remove", a) if !a.is_empty() => source_remove(fs, a),
+        _ => print(
+            b"usage: update [add URL|IP[:PORT] | remove N|URL | sources | apply [--allow-downgrade]]\n",
+        ),
+    }
+}
+
+/// The installer writes the installed apps to the `[installed]` section of `updater/state`, which
+/// is how the updater learns them without the main file space (ADR 0029,
+/// decision 8). `false` (after saying why) if it failed.
+fn list_installed(fs: &mut FsClient) -> bool {
+    run_installer(fs, installer_arg::LIST) == Some(0)
+}
+
+/// Runs the installer with `flags`; its exit code, or `None` if it could
+/// not be launched. Failures are reported here.
+fn run_installer(fs: &mut FsClient, flags: u64) -> Option<u64> {
+    use aricode_rt::sys::launch;
+    let result = launch::run(BROKER, "installer", flags);
+    if session() && flags != installer_arg::LIST {
+        // The installer prints on the console; its installs are in the history.
+        print(b"install history:\n");
+        show_file(fs, &update_index::main_path(update_index::HISTORY_FILE));
+    }
+    match result {
+        Ok(0) => Some(0),
+        Ok(code) => {
+            print(b"update: installer exited with ");
+            num(code);
+            print(b"\n");
+            Some(code)
+        }
+        Err(e) => {
+            print(b"update: installer");
+            launch_failure(e);
+            None
+        }
+    }
+}
+
+/// `upgrade [--allow-downgrade]`: the updater installs the system image and
+/// stages app packages from the verified indexes; the installer then
+/// installs the staged packages, with the same downgrade rule.
+fn upgrade(fs: &mut FsClient, rest: &[u8]) {
+    let allow_downgrade = match rest {
+        b"" => false,
+        b"--allow-downgrade" => true,
         _ => {
-            print(b"usage: update [http[s]://host[:port]/path/ | check | apply]\n");
+            print(b"usage: upgrade [--allow-downgrade]\n");
             return;
         }
     };
+    if !list_installed(fs) {
+        return;
+    }
+    let mut arg = updater_arg::UPGRADE;
+    if allow_downgrade {
+        arg |= updater_arg::ALLOW_DOWNGRADE;
+    }
+    let Some(code) = run_updater(fs, arg) else {
+        return;
+    };
+    if code & updater_arg::EXIT_APPS_STAGED == 0 {
+        return;
+    }
+    // Only what the updater staged; the downgrade flag goes nowhere else
+    // (ADR 0029, decision 5).
+    let mut flags = installer_arg::STAGED;
+    if allow_downgrade {
+        flags |= installer_arg::ALLOW_DOWNGRADE;
+    }
+    run_installer(fs, flags);
+}
+
+/// Runs the updater with `arg` and reports a failure; the exit code, or
+/// `None` if it could not be launched.
+fn run_updater(fs: &mut FsClient, arg: u64) -> Option<u64> {
+    use aricode_rt::sys::launch;
     let result = launch::run(BROKER, "updater", arg);
     if session() {
         // The updater printed on the console; show its log here.
-        show_file(fs, UPDATER_LOG_FILE);
+        show_file(fs, &update_index::main_path(update_index::UPDATER_LOG_FILE));
     }
     match result {
-        Ok(0) => {}
         Ok(code) => {
-            print(b"update: updater exited with ");
-            num(code);
-            print(b"\n");
+            let failure = code & !updater_arg::EXIT_APPS_STAGED;
+            if failure != 0 {
+                print(b"update: updater exited with ");
+                num(failure);
+                print(b"\n");
+            }
+            Some(code)
         }
         Err(e) => {
             print(b"update: updater");
             launch_failure(e);
+            None
         }
+    }
+}
+
+/// Reads a whole small file: `Ok(None)` if it does not exist.
+fn read_small(
+    fs: &mut FsClient,
+    name: &str,
+    max: usize,
+) -> Result<Option<alloc::vec::Vec<u8>>, ()> {
+    use aricode_proto::fs::Status;
+    use aricode_rt::sys::fs::FsError;
+    let fd = match fs.open(name) {
+        Ok(fd) => fd,
+        Err(FsError::Status(Status::NotFound)) => return Ok(None),
+        Err(_) => return Err(()),
+    };
+    let mut data = alloc::vec::Vec::new();
+    let mut chunk = [0u8; 512];
+    let result = loop {
+        match fs.read(fd, data.len() as u32, &mut chunk) {
+            Ok(0) => break Ok(Some(data)),
+            Ok(n) if data.len() + n <= max => data.extend_from_slice(&chunk[..n]),
+            _ => break Err(()),
+        }
+    };
+    let _ = fs.close(fd);
+    result
+}
+
+/// The source list, migrating `update_url` (ADR 0027) when there is no
+/// list yet. `None` (after saying why) if it cannot be read.
+fn load_sources(fs: &mut FsClient) -> Option<update_index::Sources> {
+    let text = |fs: &mut FsClient, name| {
+        read_small(fs, name, 2048)
+            .map(|d| d.map(|d| alloc::string::String::from_utf8_lossy(&d).into_owned()))
+    };
+    let sources_path = update_index::main_path(update_index::SOURCES_FILE);
+    let Ok(list) = text(fs, &sources_path) else {
+        print(b"update: cannot read the source list\n");
+        return None;
+    };
+    if list.is_none() {
+        let legacy_path = update_index::main_path(update_index::LEGACY_URL_FILE);
+        let legacy = text(fs, &legacy_path).ok().flatten();
+        match update_index::Sources::migrate(None, legacy.as_deref()) {
+            update_index::Migration::Migrated(sources) => {
+                if save_file(fs, &sources_path, sources.to_text().as_bytes()).is_err() {
+                    print(b"update: cannot save the migrated source list\n");
+                    return None;
+                }
+                print(b"update: update_url migrated to the source list\n");
+                return Some(sources);
+            }
+            update_index::Migration::InvalidLegacy(_) => {
+                print(b"update: updater/update_url is not a valid source: refused, not migrated\n");
+                let _ = sys::event_record(1, "sh-legacy-url-invalid");
+            }
+            update_index::Migration::NotNeeded => {}
+        }
+    }
+    let (sources, rejected) = update_index::Sources::parse(list.as_deref().unwrap_or(""));
+    if rejected > 0 {
+        num(rejected as u64);
+        print(b" invalid line(s) in the source list ignored\n");
+    }
+    Some(sources)
+}
+
+/// Saves the list and records the change in the install history.
+fn save_sources(fs: &mut FsClient, sources: &update_index::Sources, event: &str) -> bool {
+    let sources_path = update_index::main_path(update_index::SOURCES_FILE);
+    if save_file(fs, &sources_path, sources.to_text().as_bytes()).is_err() {
+        print(b"update: cannot save the source list\n");
+        return false;
+    }
+    let history_path = update_index::main_path(update_index::HISTORY_FILE);
+    let existing = read_small(fs, &history_path, update_index::HISTORY_MAX)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let line = alloc::format!(
+        "{event} (from {})",
+        if session() {
+            "an SSH session"
+        } else {
+            "the console"
+        }
+    );
+    let log = update_index::history::append(&existing, &line, update_index::HISTORY_MAX);
+    if save_file(fs, &history_path, &log).is_err() {
+        print(b"update: cannot write the install history\n");
+    }
+    true
+}
+
+fn sources_list(fs: &mut FsClient) {
+    let Some(sources) = load_sources(fs) else {
+        return;
+    };
+    if sources.is_empty() {
+        print(b"update: no sources (update add URL)\n");
+        return;
+    }
+    print(b"update sources:\n");
+    for (i, url) in sources.iter().enumerate() {
+        print(b"  ");
+        num(i as u64 + 1);
+        print(b"  ");
+        print(url.as_bytes());
+        print(b"\n");
+    }
+}
+
+fn source_error(e: update_index::SourceError) {
+    use update_index::SourceError as E;
+    print(match e {
+        E::Invalid => {
+            b"update: invalid source: use http[s]://host[:port]/path/ or IP[:PORT][/path]\n"
+                .as_slice()
+        }
+        E::UnsupportedScheme => b"update: only http:// and https:// sources are accepted\n",
+        E::TooLong => b"update: source URL too long\n",
+        E::Duplicate => b"update: source already registered\n",
+        E::Full => b"update: source list full (4 sources); remove one first\n",
+        E::NotFound => b"update: no such source (see update sources)\n",
+    });
+}
+
+fn source_add(fs: &mut FsClient, arg: &[u8]) {
+    let Ok(input) = core::str::from_utf8(arg) else {
+        source_error(update_index::SourceError::Invalid);
+        return;
+    };
+    let Some(mut sources) = load_sources(fs) else {
+        return;
+    };
+    let url = match sources.add(input) {
+        Ok(url) => alloc::string::String::from(url),
+        Err(e) => return source_error(e),
+    };
+    if save_sources(fs, &sources, &alloc::format!("source added: {url}")) {
+        print(b"update: source ");
+        num(sources.len() as u64);
+        print(b" added: ");
+        print(url.as_bytes());
+        print(b" (run update to fetch its index)\n");
+    }
+}
+
+fn source_remove(fs: &mut FsClient, arg: &[u8]) {
+    let Ok(spec) = core::str::from_utf8(arg) else {
+        source_error(update_index::SourceError::NotFound);
+        return;
+    };
+    let Some(mut sources) = load_sources(fs) else {
+        return;
+    };
+    let url = match sources.remove(spec) {
+        Ok(url) => url,
+        Err(e) => return source_error(e),
+    };
+    if save_sources(fs, &sources, &alloc::format!("source removed: {url}")) {
+        print(b"update: source removed: ");
+        print(url.as_bytes());
+        print(b"\n");
     }
 }
 
@@ -855,14 +1118,6 @@ fn launch_failure(e: aricode_rt::sys::launch::LaunchError) {
         LaunchError::Ipc(e) => aricode_rt::print_error(b"", e),
     }
 }
-
-/// Updater arguments (`apps/updater`).
-const UPDATER_APPLY: u64 = 0;
-const UPDATER_FETCH: u64 = 1;
-const UPDATER_CHECK: u64 = 2;
-/// Channel URL and last run's log in the updater's private directory.
-const UPDATE_URL_FILE: &str = "updater/update_url";
-const UPDATER_LOG_FILE: &str = "updater/last.log";
 
 /// Asks the broker (init) to run an initrd program with the capabilities
 /// of its manifest and waits for it to exit.
@@ -1111,6 +1366,7 @@ fn execute(
         b"http" => http_get(fs, net_client, rest),
         b"run" => run(rest),
         b"update" => update(fs, rest),
+        b"upgrade" => upgrade(fs, rest),
         b"spawn" => spawn(rest),
         b"repeat" => {
             let (count, inner) = split(rest);
@@ -1138,6 +1394,11 @@ fn execute(
             aricode_rt::print_error(b"shutdown", sys::system_power(SYSTEM, abi::power::SHUTDOWN));
         }
         b"exit" => return true,
+        b"fault" if fault_enabled() => fault(),
+        b"l1981" => {
+            print(abi::KERNEL_BASE_SIGNATURE.as_bytes());
+            print(b"\n");
+        }
         other => {
             print(b"unknown command: ");
             print(other);

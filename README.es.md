@@ -2,14 +2,21 @@
 
 *Traducción al español de [README.md](README.md). El inglés es el idioma canónico del proyecto: el código, los mensajes, el documento maestro [AriCodeOS.md](AriCodeOS.md), la documentación de `docs/` (auditorías incluidas) y `tests/README.md` están en inglés.*
 
+Web: https://www.aricodeos.org/ · Repositorio: https://github.com/AriCodeLabs/AriCodeOS
+
 Sistema operativo desde cero: microkernel en Rust `no_std`, arranque UEFI,
 x86-64, seguridad por capabilities y drivers en espacio de usuario.
+
+Guías para contribuir (en inglés): [CONTRIBUTING.md](CONTRIBUTING.md), el
+[flujo de git](docs/WORKFLOW.md), el [SDK de aplicaciones](docs/sdk.md) y
+la [suite de pruebas](tests/README.md). Avisos de seguridad:
+[SECURITY.md](SECURITY.md).
 
 El documento maestro de arquitectura y roadmap es [AriCodeOS.md](AriCodeOS.md).
 Las decisiones de diseño se registran en [docs/decisions/](docs/decisions/) y el
 flujo de ramas (git flow) en [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-**Estado:** 0.9.0 (2026-10-10). Las 35 fases del roadmap (0 a 34) están
+**Estado:** 0.11.0 (2026-10-17). Las 35 fases del roadmap (0 a 34) están
 implementadas y probadas en QEMU, y las etapas 1 a 4 de la secuencia
 posterior al roadmap (recuperación observable, sesión útil, límites y
 actualización, aplicaciones externas) también, más la parte de la etapa 5
@@ -40,7 +47,8 @@ hardware`, que se ha ejercitado en el portátil y la evidencia está en
 | Criptografía propia, RNG, imágenes firmadas, A/B con rollback | validado en QEMU | `crypto.*`, `update.*`; no es Secure Boot |
 | IOMMU VT-d con dominio por driver | validado en QEMU | `iommu.*` |
 | Imagen USB para pendrive | validado en QEMU (`usb.image_boot`) | pendiente en hardware |
-| Aplicaciones fuera del árbol: paquetes firmados instalados y actualizados en AriFS (`cargo xtask app-pack`, `installer`) | validado en QEMU, con cortes | `apps.*`; sin distribución por red |
+| Driver EHCI (USB 2.0): puertos raíz, hubs USB 2.0, teclados y ratones HID de arranque, almacenamiento bulk-only (ADR 0031) | escrito, tests de host; escenarios QEMU escritos pero aún sin ejecutar | `usb.ehci_*`, `strict.ehci_halt`; los hubs solo en hardware (QEMU no tiene hub de alta velocidad) |
+| Aplicaciones fuera del árbol: paquetes firmados instalados y actualizados en AriFS (`cargo xtask app-pack`, `installer`) | validado en QEMU, con cortes | `apps.*`; actualización por red desde fuentes con índice firmado (ADR 0029) |
 | Medidas: `bench` (syscall, IPC, ficheros, percentiles), reposo por CPU, informe `diag` | validado en QEMU | `perf.*`, `docs/performance.md`; cifras solo comparables con la misma build y modo de QEMU |
 | Arranque en portátil (Fase 34) | propuesto | necesita el equipo de referencia |
 
@@ -54,6 +62,52 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 `rust-toolchain.toml` fija la versión de Rust y añade automáticamente los
 targets `x86_64-unknown-none` y `x86_64-unknown-uefi`.
+
+### Docker
+
+El mismo entorno sin instalar nada en el equipo: `tools/docker/Dockerfile`
+construye
+una imagen con los paquetes de Debian 13 de arriba, la versión fijada de
+Rust y QEMU/OVMF. El repositorio se monta, no se copia, así que las pruebas
+corren sobre los ficheros que estás editando. QEMU corre sin KVM, por lo que
+la imagen funciona en cualquier máquina con Docker (más lenta que en el
+equipo).
+
+```bash
+docker build -t aricodeos-dev -f tools/docker/Dockerfile .
+docker run --rm -it -v "$PWD":/src -v aricodeos-cargo:/usr/local/cargo/registry \
+    --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask check
+docker run --rm -it -v "$PWD":/src -v aricodeos-cargo:/usr/local/cargo/registry \
+    --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask test --all
+```
+
+`--user` mantiene `build/` y `target/` como tuyos; el volumen con nombre
+conserva las descargas de crates entre ejecuciones. La imagen no expone
+ningún puerto ni contiene claves. Un resultado de QEMU dentro de Docker es un
+resultado de QEMU: no sustituye a las comprobaciones en hardware de
+`docs/hardware.md`.
+
+Para probar el sistema sin compilarlo, `tools/docker/try/Dockerfile` mete la
+imagen del pendrive en una imagen que la arranca en QEMU con el shell `ari>`
+en tu terminal (se sale con Ctrl-A X):
+
+```bash
+cargo xtask usb-image
+docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.11.0 .
+docker run --rm -it aricodeos
+```
+
+## Clave de firma de las versiones
+
+Las imágenes y actualizaciones publicadas se firman con la clave de
+versiones del proyecto, cuya mitad pública está en [keys/release/](keys/release/):
+
+```text
+1d3e24f3c7c753a5bcb384041ace6481736decd86345eab71e2a6ff410ad446e
+```
+
+La clave de desarrollo de `keys/dev/` es solo para pruebas y QEMU: su
+semilla es pública. Véase `docs/hardware.md`, "Signing key".
 
 ## Uso
 
@@ -92,6 +146,7 @@ services/virtio-blk/ driver virtio-blk y servicio de bloques por IPC en ring 3
 services/arifs/  fsd: servicio de ficheros AriFS v1 por IPC en ring 3
 services/virtio-net/ netd: driver virtio-net y pila de red (DHCP, ping, UDP, TCP, DNS) por IPC en ring 3
 services/virtio-input/ inputd: driver virtio-input (teclado, raton) con eventos por IPC en ring 3
+services/usb-ehci/ usb_ehci: driver EHCI con hubs USB 2.0, teclado/raton USB HID y almacenamiento USB, en ring 3 (ADR 0031)
 services/compositor/ compositor: ventanas, cursor y enrutado de entrada sobre el framebuffer, en ring 3
 libs/gfx/        graficos 2D sin alloc (lienzos, texto, cursor, escritorio) con tests de host
 libs/input/      eventos evdev y teclado US con tests de host
@@ -108,7 +163,8 @@ libs/crypto/     SHA-256, SHA-512, Ed25519 y ChaCha20 desde cero con vectores of
 keys/dev/        par Ed25519 de desarrollo (solo pruebas; ver su README)
 libs/wasm/       interprete WebAssembly MVP (enteros, memoria acotada, importaciones) con tests de host
 apps/wasm-demo/  modulo WebAssembly portable de ejemplo; apps/wasm-runner lo ejecuta con la Capability API
-apps/updater/    actualizador A/B: verifica la imagen de UPDATE y la instala en el slot inactivo
+apps/updater/    cliente de actualizacion: indices firmados de las fuentes del dueño, imagen del sistema al slot inactivo, paquetes de apps para el instalador (ADR 0029)
+libs/update-index/ fuentes de actualizacion, indice firmado, reglas de version y de downgrade (ADR 0029)
 libs/ab/         estado de arranque A/B, imagenes firmadas y politica de slots (AriBoot, init, updater)
 boot/            AriBoot: cargador UEFI (crate `ariboot`)
 kernel/          AriKernel (crate `arikernel`), ELF64 en la mitad alta

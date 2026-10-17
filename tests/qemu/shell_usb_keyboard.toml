@@ -1,26 +1,34 @@
 # Stage 2 (ADR 0013): the shell reads from a USB HID keyboard. init launches the
-# console bridge with the input services (two virtio and the USB one); the host types over QMP (they go
-# to the USB keyboard, the most recent handler) "cpus" + Enter and "shutdown" +
-# Enter once it sees the bridge serving, and the shell receives them through the kernel
-# ring as if they came from COM1. With several CPUs the prompt and the bridge
-# marker may interleave on serial, so only the output is required.
+# console bridge with the USB input service as its only input device; the host
+# types over QMP "cpus" + Enter and "shutdown" + Enter once it sees the bridge
+# serving, and the shell receives them through the kernel ring as if they came
+# from COM1. With several CPUs the prompt and the bridge marker may interleave
+# on serial, so only the output is required.
+# The virtio keyboard and mouse are left out (`usb_hid_only_input`): QEMU
+# sends QMP input to the most recently activated handler, which under
+# `shell` is the virtio keyboard (activated when its driver starts), and
+# until 2026-10-17 this scenario passed typing on it (incident 0001). Keys
+# are paced (`key_delay_ms`): QEMU's usb-kbd queues at most 16 scancodes.
 name = "shell.usb_keyboard"
 description = "arish with a USB HID keyboard: the console bridge carries keystrokes to the kernel input ring"
 level = "full"
 areas = ["shell", "input", "usb", "console"]
 cmdline = "qemu_exit shell"
 usb_hid = true
+usb_hid_only_input = true
 timeout_secs = 60
 
 [host_input]
 marker = "CONSOLE_BRIDGE_READY"
+key_delay_ms = 30
 keys = ["c", "p", "u", "s", "ret", "s", "h", "u", "t", "d", "o", "w", "n", "ret"]
 
 [expect]
 exit = 33
 serial_contains = [
     "usb-input: device ready: USB HID Keyboard+Mouse",
-    "AriInit: console bridge with 3 input device(s)",
+    "AriInit: console bridge with 1 input device(s)",
+    "usb-input: first report from slot ",
     "arish: AriCodeOS shell",
     "cpus: ",
     "ari> shutdown",

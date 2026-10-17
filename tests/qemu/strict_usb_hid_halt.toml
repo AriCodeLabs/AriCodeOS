@@ -1,0 +1,42 @@
+# Failure protocol (ADR 0028), incident 0001, audit 1 F14: with `strict`, the
+# first failed HID report (injected on the first report with
+# `usb_fault=1:hid`) halts usbd with a dump of the interrupt endpoint
+# before any recovery command, the fault is recorded, and init does not
+# restart the driver. The shell is driven over the serial console (the USB
+# keyboard is gone): `diag` lists the fault and `shutdown` ends the run.
+# The pings only keep the shell busy until the host has typed the key.
+# No virtio keyboard and mouse (`usb_hid_only_input`): otherwise QMP input
+# goes to the virtio keyboard, the most recently activated handler.
+name = "strict.usb_hid_halt"
+description = "strict: an injected HID transfer failure halts usbd with an endpoint dump, no restart, fault in diag"
+level = "full"
+areas = ["usb", "input", "init", "diag"]
+cmdline = "qemu_exit shell strict usb_fault=1:hid"
+usb_hid = true
+usb_hid_only_input = true
+timeout_secs = 120
+stdin = ["repeat 10 ping 10.0.2.2", "diag", "shutdown"]
+
+[host_input]
+marker = "CONSOLE_BRIDGE_READY"
+keys = ["ret"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: strict mode: a failing service is not restarted",
+    "usb-input: strict mode: the first transport failure halts the driver",
+    "completion code 4 (USB Transaction Error), injected",
+    "usb-input: strict: halting on a HID transfer failure",
+    " Running dequeue ",
+    "AriInit: service usb_input exited; strict mode: not restarted (inspect with diag)",
+    "fault reported by process",
+    "usb inj hid (code 4)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "restart in",
+    "usb-input: Stop Endpoint slot ",
+    "reports queued again",
+]

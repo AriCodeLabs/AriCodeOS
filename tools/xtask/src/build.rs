@@ -38,10 +38,12 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("aricode-gfx", None),
     ("aricode-manifest", None),
     ("aricode-pkg", None),
+    ("aricode-update-index", None),
     ("aricode-wasm", None),
     ("aricode-crypto", None),
     ("aricode-ab", None),
     ("aricode-proto", None),
+    ("aricode-ehci", None),
     ("aricode-sys", None),
     ("aricode-build", None),
     ("aricode-rt", Some(KERNEL_TARGET)),
@@ -61,10 +63,25 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("ari-virtio-net", Some(KERNEL_TARGET)),
     ("ari-virtio-input", Some(KERNEL_TARGET)),
     ("ari-usb-input", Some(KERNEL_TARGET)),
+    ("ari-usb-ehci", Some(KERNEL_TARGET)),
     ("ari-console-bridge", Some(KERNEL_TARGET)),
     ("ari-compositor", Some(KERNEL_TARGET)),
     ("ari-fsd", Some(KERNEL_TARGET)),
     ("ari-shell", Some(KERNEL_TARGET)),
+    ("ari-net-core", Some(KERNEL_TARGET)),
+    ("ari-rtl-net", Some(KERNEL_TARGET)),
+    ("ari-sshd", Some(KERNEL_TARGET)),
+    ("aricode-https", Some(KERNEL_TARGET)),
+    ("aricode-fat", None),
+    ("aricode-iommu", None),
+    ("aricode-lineedit", None),
+    ("aricode-rtl8169", None),
+    ("aricode-ssh", None),
+    ("aricode-supervisor", None),
+    ("aricode-tls", None),
+    ("aricode-usb-storage", None),
+    ("aricode-x509", None),
+    ("aricode-xhci", None),
     ("ariboot", Some(UEFI_TARGET)),
     ("arikernel", Some(KERNEL_TARGET)),
     ("xtask", None),
@@ -73,6 +90,13 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
 pub fn cargo() -> Command {
     let mut c = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     c.current_dir(root());
+    // The verifiers embed the selected public key (`aricode_crypto::trust`);
+    // with the development key the variable is removed so a stray value in
+    // the environment cannot change what a build trusts.
+    match crate::keys::signing_public_hex() {
+        Some(key) => c.env(crate::keys::SIGNING_PUB_ENV, key),
+        None => c.env_remove(crate::keys::SIGNING_PUB_ENV),
+    };
     c
 }
 
@@ -113,6 +137,7 @@ pub fn initrd_programs() -> Result<Vec<String>> {
         String::from("sshd"),
         String::from("virtio_input"),
         String::from("usb_input"),
+        String::from("usb_ehci"),
         String::from("console_bridge"),
         String::from("compositor"),
         String::from("fsd"),
@@ -175,6 +200,7 @@ pub fn build_user_programs(release: bool) -> Result<PathBuf> {
         "ari-sshd",
         "ari-virtio-input",
         "ari-usb-input",
+        "ari-usb-ehci",
         "ari-console-bridge",
         "ari-compositor",
         "ari-fsd",
@@ -306,13 +332,16 @@ pub fn build_external(
     let elf = crate::image::stripped_elf(&elf)?;
     let manifest =
         std::fs::read(&manifest_path).map_err(|e| format!("{}: {e}", manifest_path.display()))?;
-    let seed: [u8; 32] = crate::keys::read_hex(
-        &root()
-            .join(crate::keys::DEV_KEY_DIR)
-            .join(crate::keys::SEED_FILE),
-    )?;
+    let seed = crate::keys::signing_seed()?;
     let package = aricode_pkg::build(&name, version, &elf, &manifest, &seed, corrupt)
         .ok_or_else(|| format!("{name}: invalid package name"))?;
+    // Post-build check (re-audit, R1): a package meant to be valid must
+    // verify with the key the build embeds.
+    if !corrupt && aricode_pkg::verify(&package, &crate::keys::expected_public_key()?).is_err() {
+        return Err(format!(
+            "{name}: the package does not verify with the embedded public key"
+        ));
+    }
     Ok(ExternalApp {
         name,
         version,
@@ -422,6 +451,36 @@ pub fn check() -> Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every workspace package is linted by `check` and, when it runs on the
+    /// host, unit-tested: a package missing from `PACKAGES` was silently
+    /// never linted (found 2026-10-17: 14 packages, sshd among them).
+    #[test]
+    fn every_workspace_package_is_listed() {
+        let read = |p: &std::path::Path| -> toml::Table {
+            std::fs::read_to_string(p)
+                .expect("read Cargo.toml")
+                .parse()
+                .expect("parse Cargo.toml")
+        };
+        let workspace = read(&root().join("Cargo.toml"));
+        let members = workspace["workspace"]["members"]
+            .as_array()
+            .expect("workspace members");
+        let mut missing = Vec::new();
+        for member in members {
+            let dir = member.as_str().expect("member path");
+            let manifest = read(&root().join(dir).join("Cargo.toml"));
+            let name = manifest["package"]["name"].as_str().expect("package name");
+            if name != "xtask" && !PACKAGES.iter().any(|(p, _)| *p == name) {
+                missing.push(name.to_string());
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "packages missing from PACKAGES: {missing:?}"
+        );
+    }
 
     #[test]
     fn user_elf_entry_must_be_in_user_region() {

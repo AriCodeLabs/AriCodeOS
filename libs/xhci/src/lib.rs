@@ -254,6 +254,7 @@ pub mod trb_type {
     pub const RESET_ENDPOINT: u32 = 14;
     pub const STOP_ENDPOINT: u32 = 15;
     pub const SET_TR_DEQUEUE: u32 = 16;
+    pub const RESET_DEVICE: u32 = 17;
     pub const NOOP_COMMAND: u32 = 23;
     pub const TRANSFER_EVENT: u32 = 32;
     pub const COMMAND_COMPLETION: u32 = 33;
@@ -273,6 +274,9 @@ pub mod completion {
     pub const TRB_ERROR: u8 = 5;
     /// The endpoint answered STALL (it stays halted until Reset Endpoint).
     pub const STALL: u8 = 6;
+    /// The command named a slot that is not enabled (Disable Slot on a
+    /// slot the controller already released counts as released).
+    pub const SLOT_NOT_ENABLED: u8 = 11;
     pub const SHORT_PACKET: u8 = 13;
     /// A command was issued to a slot or endpoint in the wrong state (for
     /// example Reset Endpoint on an endpoint that is not Halted).
@@ -282,6 +286,22 @@ pub mod completion {
     pub const STOPPED_LENGTH_INVALID: u8 = 27;
     pub const STOPPED_SHORT_PACKET: u8 = 28;
     pub const SPLIT_TRANSACTION_ERROR: u8 = 36;
+
+    /// A Disable Slot that ended with `code` released the slot (xHCI
+    /// 4.6.4: the controller frees the slot's resources on successful
+    /// completion; Slot Not Enabled says it held nothing). After any other
+    /// code the controller may still own the slot's contexts and rings, so
+    /// their memory must never be reused (Linux frees the virt device only
+    /// after a successful Disable Slot, `xhci_free_virt_device`).
+    pub fn disable_slot_released(code: u8) -> bool {
+        matches!(code, SUCCESS | SLOT_NOT_ENABLED)
+    }
+
+    /// A transfer that completed: Short Packet is how an IN transfer that
+    /// got less than its buffer ends (xHCI 4.10.1.1), not an error.
+    pub fn is_success(code: u8) -> bool {
+        matches!(code, SUCCESS | SHORT_PACKET)
+    }
 
     /// The Transfer Event a Stop Endpoint command produces for the TD it
     /// interrupted.
@@ -302,6 +322,7 @@ pub mod completion {
             USB_TRANSACTION_ERROR => "USB Transaction Error",
             TRB_ERROR => "TRB Error",
             STALL => "Stall Error",
+            SLOT_NOT_ENABLED => "Slot Not Enabled Error",
             SHORT_PACKET => "Short Packet",
             CONTEXT_STATE_ERROR => "Context State Error",
             STOPPED => "Stopped",
@@ -330,6 +351,55 @@ pub mod ep_state {
             ERROR => "Error",
             _ => "",
         }
+    }
+}
+
+/// Slot Context states (word 3 bits 31:27, xHCI 6.2.2 and figure 4-1).
+pub mod slot_state {
+    /// Disabled or Enabled: the controller has not addressed the slot.
+    pub const DISABLED_OR_ENABLED: u8 = 0;
+    pub const DEFAULT: u8 = 1;
+    pub const ADDRESSED: u8 = 2;
+    pub const CONFIGURED: u8 = 3;
+
+    pub fn name(state: u8) -> &'static str {
+        match state {
+            DISABLED_OR_ENABLED => "Disabled/Enabled",
+            DEFAULT => "Default",
+            ADDRESSED => "Addressed",
+            CONFIGURED => "Configured",
+            _ => "",
+        }
+    }
+}
+
+/// Slot State read from an Output Slot Context (the first 16 bytes).
+/// `None` if the slice is too short.
+pub fn slot_status(ctx: &[u8]) -> Option<u8> {
+    let w3 = u32::from_le_bytes(ctx.get(12..16)?.try_into().ok()?);
+    Some((w3 >> 27) as u8)
+}
+
+/// How the slot of a device that is still on its port is brought back to
+/// address 0 before it is enumerated again, reusing the slot, its Output
+/// Device Context and its rings (incident 0001, audit 1 F10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotReuse {
+    /// Addressed or Configured: Reset Device (xHCI 4.6.11) aborts the
+    /// device's transfers, disables every endpoint but EP0 and leaves the
+    /// slot Default; Address Device (4.6.5) follows.
+    ResetDevice,
+    /// Any other state (Reset Device would end in Context State Error):
+    /// the slot is disabled (4.6.4) and a new one enabled. A slot the
+    /// driver keeps is always Addressed or Configured: every failure after
+    /// Reset Device or Address Device releases the slot.
+    Replace,
+}
+
+pub fn slot_reuse(state: u8) -> SlotReuse {
+    match state {
+        slot_state::ADDRESSED | slot_state::CONFIGURED => SlotReuse::ResetDevice,
+        _ => SlotReuse::Replace,
     }
 }
 
@@ -381,6 +451,16 @@ impl EndpointRecovery {
             Self::ResetHalted => "Reset Endpoint, Set TR Dequeue, CLEAR_FEATURE(ENDPOINT_HALT)",
             Self::Reenumerate => "endpoint unusable: re-enumerate",
         }
+    }
+
+    /// The plan ends with Set TR Dequeue to the software enqueue pointer
+    /// (4.6.10): every TRB still on the ring is skipped, so whatever was
+    /// pending there must be queued again.
+    pub fn abandons_ring(self) -> bool {
+        matches!(
+            self,
+            Self::StopAndRetire | Self::SetDequeue | Self::ResetHalted
+        )
     }
 }
 
@@ -578,6 +658,15 @@ impl Trb {
         if preserve_state {
             t.control |= TRB_TSP;
         }
+        t
+    }
+    /// Reset Device (4.6.11): issued after the device itself was reset on
+    /// its port; the controller aborts the device's transfers, disables
+    /// every endpoint but EP0 and leaves the slot Default, so that Address
+    /// Device can address it again on the same slot.
+    pub fn reset_device(slot: u8) -> Self {
+        let mut t = Self::with_type(trb_type::RESET_DEVICE);
+        t.control |= (slot as u32) << 24;
         t
     }
     /// Stop Endpoint (4.6.9): the controller retires the TD in progress
@@ -1496,6 +1585,61 @@ mod tests {
         assert_eq!(completion::name(4), "USB Transaction Error");
         assert_eq!(completion::name(19), "Context State Error");
         assert_eq!(completion::name(200), "");
+        // Interrupt IN reports: Short Packet is a completed report; Stopped
+        // codes are neither a report nor an error.
+        assert!(completion::is_success(completion::SUCCESS));
+        assert!(completion::is_success(completion::SHORT_PACKET));
+        for code in [
+            completion::STALL,
+            completion::USB_TRANSACTION_ERROR,
+            completion::BABBLE_DETECTED,
+            completion::STOPPED,
+            completion::NO_EVENT,
+        ] {
+            assert!(!completion::is_success(code), "code {code}");
+        }
+        // Plans that end with Set TR Dequeue abandon the TRBs on the ring.
+        assert!(EndpointRecovery::ResetHalted.abandons_ring());
+        assert!(EndpointRecovery::SetDequeue.abandons_ring());
+        assert!(EndpointRecovery::StopAndRetire.abandons_ring());
+        assert!(!EndpointRecovery::Nothing.abandons_ring());
+        assert!(!EndpointRecovery::Reenumerate.abandons_ring());
+    }
+
+    #[test]
+    fn slot_state_and_reuse_decisions() {
+        // Output Slot Context, word 3: Slot State 3 (Configured), address 5.
+        let mut ctx = [0u8; 32];
+        ctx[12..16].copy_from_slice(&(3u32 << 27 | 5).to_le_bytes());
+        assert_eq!(slot_status(&ctx), Some(slot_state::CONFIGURED));
+        assert_eq!(slot_status(&ctx[..15]), None);
+        assert_eq!(slot_state::name(slot_state::DEFAULT), "Default");
+        // Reset Device only where xHCI 4.6.11 accepts it; anything else
+        // gets a new slot.
+        assert_eq!(slot_reuse(slot_state::CONFIGURED), SlotReuse::ResetDevice);
+        assert_eq!(slot_reuse(slot_state::ADDRESSED), SlotReuse::ResetDevice);
+        assert_eq!(slot_reuse(slot_state::DEFAULT), SlotReuse::Replace);
+        assert_eq!(
+            slot_reuse(slot_state::DISABLED_OR_ENABLED),
+            SlotReuse::Replace
+        );
+        assert_eq!(slot_reuse(7), SlotReuse::Replace);
+        let t = Trb::reset_device(4);
+        assert_eq!(t.trb_type(), trb_type::RESET_DEVICE);
+        assert_eq!(t.slot_id(), 4);
+        assert_eq!(t.endpoint_id(), 0);
+        assert_eq!(t.parameter, 0);
+        // Slot memory is reusable only after a Disable Slot that released it.
+        assert!(completion::disable_slot_released(completion::SUCCESS));
+        assert!(completion::disable_slot_released(
+            completion::SLOT_NOT_ENABLED
+        ));
+        assert!(!completion::disable_slot_released(completion::NO_EVENT));
+        assert!(!completion::disable_slot_released(
+            completion::CONTEXT_STATE_ERROR
+        ));
+        assert!(!completion::disable_slot_released(completion::TRB_ERROR));
+        assert_eq!(completion::name(11), "Slot Not Enabled Error");
     }
 
     #[test]

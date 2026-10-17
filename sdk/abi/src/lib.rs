@@ -12,11 +12,19 @@
 //! the handles [`handle::SELF_PROCESS`], [`handle::MAIN_THREAD`] and
 //! [`handle::CONSOLE`].
 //!
-//! During `0.x` the ABI may change (section 74). Current version: 2.
+//! During `0.x` the ABI may change (section 74). Current version: 4
+//! (ADR 0030: `Error::PeerClosed`, `endpoint_create_pair`, `endpoint_close`).
 
 #![no_std]
 
-pub const ABI_VERSION: u32 = 3;
+pub const ABI_VERSION: u32 = 4;
+
+/// Kernel base signature (SHA-512), required to check and verify the origin
+/// and authorship of an AriCodeOS build. It is part of the fixed ABI: it is
+/// frozen, never changes between versions, and the ABI tests and the system
+/// that reports it depend on its exact value. Do not remove or modify it.
+pub const KERNEL_BASE_SIGNATURE: &str =
+    "8f404d2264f6e48a55d552bd1139211707c3dbd502cf918ff1338299940d075a6679eddd5dc069a384607c0cc822ca121d913c6e970a3902edf499e2d30e31ff";
 
 /// Initial handles of every process.
 pub mod handle {
@@ -61,6 +69,37 @@ pub mod init_arg {
     /// Tests only (`init_fail_late`): init fails at the end of startup, before
     /// confirming the slot, to check that the state stays pending.
     pub const FAIL_LATE: u64 = 32;
+}
+
+/// Bits of the `arg` init passes to a PCI driver (`start_driver`), above
+/// the BAR (bits 0..5) and IRQ (bit 15) bits.
+pub mod driver_arg {
+    /// The driver is relaunched after serving the system disk (ADR 0031):
+    /// bits 17..63 carry the first 47 bits of that disk's GPT disk GUID,
+    /// and the driver serves no other disk.
+    pub const EXPECTED_DISK: u64 = 1 << 16;
+    const DIGEST_BITS: u32 = 47;
+
+    /// The first 47 bits of a GPT disk GUID.
+    pub const fn digest(guid: &[u8; 16]) -> u64 {
+        u64::from_le_bytes([
+            guid[0], guid[1], guid[2], guid[3], guid[4], guid[5], guid[6], guid[7],
+        ]) & ((1 << DIGEST_BITS) - 1)
+    }
+
+    /// The bits that ask a relaunched driver for the disk `guid`.
+    pub const fn expected_disk(guid: &[u8; 16]) -> u64 {
+        EXPECTED_DISK | digest(guid) << 17
+    }
+
+    /// The expected disk digest in `arg`, if any.
+    pub const fn expected_digest(arg: u64) -> Option<u64> {
+        if arg & EXPECTED_DISK != 0 {
+            Some(arg >> 17)
+        } else {
+            None
+        }
+    }
 }
 
 /// Rights (bits) as seen by user space.
@@ -123,23 +162,44 @@ pub mod nr {
     /// `object_id(handle) -> tid | pid`; requires `READ`. The console returns 0.
     pub const OBJECT_ID: u64 = 9;
     /// `object_revoke(handle)`: invalidates the object for all its handles,
-    /// in every process; requires `MANAGE`.
+    /// in every process; requires `MANAGE`. Revoking an endpoint also closes
+    /// both of its sides: queued messages are discarded and every thread
+    /// waiting on it wakes with [`Error::PeerClosed`] (ADR 0030).
     pub const OBJECT_REVOKE: u64 = 10;
     /// `endpoint_create() -> handle` with `READ|WRITE|DUPLICATE|TRANSFER|MANAGE`.
     pub const ENDPOINT_CREATE: u64 = 11;
+    /// `endpoint_create_pair() -> receive | send << 32`: a new endpoint with
+    /// its two sides in separate handles, the receive one with
+    /// `READ|DUPLICATE|TRANSFER|MANAGE` and the send one with
+    /// `WRITE|DUPLICATE|TRANSFER` (ADR 0030). A reply endpoint made this way
+    /// reports [`Error::PeerClosed`] to its receiver once every send handle
+    /// is gone, instead of letting it wait for its deadline.
+    pub const ENDPOINT_CREATE_PAIR: u64 = 34;
+    /// `endpoint_close(ep)`: requires `MANAGE` on the endpoint. Closes both
+    /// of its sides for every holder (ADR 0030): queued messages are
+    /// discarded, and sends and receives, waiting or not, fail with
+    /// [`Error::PeerClosed`] from then on. Unlike `object_revoke` the
+    /// handles stay valid. For a supervisor that gives up on a service
+    /// whose endpoint it keeps.
+    pub const ENDPOINT_CLOSE: u64 = 35;
     /// `ipc_send(ep, data_ptr, data_len, handles_ptr, handles_len, timeout_ms)`;
     /// requires `WRITE` on `ep` and `TRANSFER` on each handle sent (which
     /// is removed from the sender). `timeout_ms`: 0 = do not block,
-    /// [`TIMEOUT_INFINITE`] = wait forever.
+    /// [`TIMEOUT_INFINITE`] = wait forever. [`Error::PeerClosed`] once no
+    /// `READ` handle on the endpoint exists any more (ADR 0030), also for a
+    /// sender already waiting for room in the queue. A handle listed twice
+    /// is `Invalid` (nothing is transferred).
     pub const IPC_SEND: u64 = 12;
     /// `ipc_receive(ep, buf_ptr, buf_len, handles_out_ptr, handles_max, timeout_ms)
     /// -> data_len | (handles_received << 32)`; requires `READ` on `ep`.
+    /// Queued messages are delivered first; then [`Error::PeerClosed`] once
+    /// no `WRITE` handle on the endpoint exists any more (ADR 0030).
     pub const IPC_RECEIVE: u64 = 13;
     /// `process_spawn(spawner, name_ptr, name_len, arg, handles_ptr, handles_len)
     /// -> process handle`; requires `MANAGE` on a `SPAWNER` object and
     /// `TRANSFER` on each handle, which is removed from the parent and appears in
     /// the child from `0x0001_0004` on, in the same order. The child receives `arg`
-    /// in `rdi`.
+    /// in `rdi`. A handle listed twice is `Invalid` (nothing is transferred).
     pub const PROCESS_SPAWN: u64 = 14;
     /// `process_wait(process, timeout_ms) -> exit code`; requires `WAIT`.
     /// A process terminated by the kernel returns `Error::Killed`.
@@ -196,7 +256,8 @@ pub mod nr {
     /// `ipc_receive_any(handles_ptr, count, buf_ptr, buf_len, out_ptr, timeout_ms)
     /// -> len | n << 32 | index << 48`: receives from the first of up to
     /// `IPC_MAX_ANY` endpoints (`READ` on all) that has a message; `out_ptr`
-    /// holds `IPC_MAX_HANDLES` handles (ADR 0020).
+    /// holds `IPC_MAX_HANDLES` handles (ADR 0020). [`Error::PeerClosed`]
+    /// only when every endpoint is empty and has lost its send side.
     pub const IPC_RECEIVE_ANY: u64 = 31;
     /// `process_kill(process)`: requires `MANAGE` on the process. Terminates it
     /// as if it had faulted (`Killed`, reason "terminated by the
@@ -615,6 +676,8 @@ pub mod pci_info {
     }
     /// xHCI programming interface.
     pub const XHCI_PROG_IF: u8 = 0x30;
+    /// EHCI programming interface (USB 2.0, ADR 0031).
+    pub const EHCI_PROG_IF: u8 = 0x20;
 }
 
 /// Maximum DMA buffer size per call (section 52).
@@ -663,9 +726,35 @@ pub enum Error {
     Killed = 11,
     /// No file with that name exists in the initrd.
     NotFound = 12,
+    /// The other side of the endpoint is gone (ADR 0030): a send finds no
+    /// `READ` handle left (the server exited or closed it, or the endpoint
+    /// was revoked), or a receive finds the queue empty and no `WRITE`
+    /// handle left (for a reply endpoint: the server dropped the request
+    /// without answering, typically because it died).
+    PeerClosed = 13,
+    /// SDK level, never returned by a syscall (`rpc::call`, ADR 0030): the
+    /// service endpoint refused the request because nobody can receive on
+    /// it any more (`PeerClosed` or `Revoked` on the send). Permanent: the
+    /// caller must stop using that endpoint.
+    ServiceGone = 14,
+    /// SDK level, never returned by a syscall (`rpc::call`, ADR 0030): the
+    /// request was accepted but dropped unanswered (the server died holding
+    /// it, or it was discarded with a queue). Not permanent: a supervised
+    /// service is relaunched on the same endpoint, so a later request may
+    /// be served; retry after a short pause.
+    ReplyLost = 15,
 }
 
 impl Error {
+    /// For a raw syscall on an endpoint the caller holds (a server
+    /// receiving on its own endpoint): the endpoint can never deliver again
+    /// (ADR 0030), its other side being gone (`PeerClosed`) or the endpoint
+    /// revoked. Retrying is pointless. Clients of `rpc::call` get the
+    /// finer `ServiceGone` (permanent) and `ReplyLost` (retry) instead.
+    pub const fn endpoint_gone(self) -> bool {
+        matches!(self, Error::PeerClosed | Error::Revoked)
+    }
+
     pub const fn to_raw(self) -> i64 {
         -(self as i64)
     }
@@ -684,6 +773,9 @@ impl Error {
             10 => Some(Error::TooBig),
             11 => Some(Error::Killed),
             12 => Some(Error::NotFound),
+            13 => Some(Error::PeerClosed),
+            14 => Some(Error::ServiceGone),
+            15 => Some(Error::ReplyLost),
             _ => None,
         }
     }
@@ -711,6 +803,37 @@ pub const fn user_range_ok(ptr: u64, len: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn kernel_base_signature_is_frozen() {
+        let sig = super::KERNEL_BASE_SIGNATURE;
+        assert_eq!(sig.len(), 128);
+        assert!(sig
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+        assert_eq!(
+            sig,
+            concat!(
+                "8f404d2264f6e48a55d552bd1139211707c3dbd502cf918ff1338299940d075a",
+                "6679eddd5dc069a384607c0cc822ca121d913c6e970a3902edf499e2d30e31ff"
+            )
+        );
+    }
+
+    #[test]
+    fn expected_disk_round_trip() {
+        use super::driver_arg::*;
+        let guid = [0xFFu8; 16];
+        let arg = 0x3F | 1 << 15 | expected_disk(&guid);
+        assert_eq!(arg & 0x3F, 0x3F, "BAR bits untouched");
+        assert_ne!(arg & 1 << 15, 0, "IRQ bit untouched");
+        assert_eq!(expected_digest(arg), Some(digest(&guid)));
+        assert_eq!(digest(&guid), (1 << 47) - 1);
+        let mut other = guid;
+        other[0] = 0;
+        assert_ne!(expected_digest(arg), Some(digest(&other)));
+        assert_eq!(expected_digest(0x3F | 1 << 15), None);
+    }
+
     #[test]
     fn spawn_limits_pack() {
         use super::spawn_limits::*;
@@ -764,6 +887,13 @@ mod tests {
         assert_eq!(Error::Fault.to_raw(), -2);
         assert_eq!(Error::from_raw(-2), Some(Error::Fault));
         assert_eq!(Error::from_raw(-99), None);
+        assert_eq!(Error::PeerClosed.to_raw(), -13);
+        assert_eq!(decode(-13), Err(Error::PeerClosed));
+        assert!(Error::PeerClosed.endpoint_gone() && Error::Revoked.endpoint_gone());
+        assert!(!Error::Timeout.endpoint_gone());
+        for e in [Error::ServiceGone, Error::ReplyLost] {
+            assert_eq!(Error::from_raw(e.to_raw()), Some(e));
+        }
         assert_eq!(decode(-1), Err(Error::NoSys));
         assert_eq!(
             decode(-4096),

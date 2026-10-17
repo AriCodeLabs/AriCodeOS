@@ -16,6 +16,7 @@
 extern crate alloc;
 
 pub mod base64;
+pub mod keys_refresh;
 pub mod wire;
 
 use alloc::string::String;

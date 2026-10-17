@@ -28,6 +28,12 @@ pub fn scenarios_root() -> PathBuf {
 /// Base ESP at `build/esp/`: BOOTX64.EFI + kernel.elf, no cmdline.
 pub fn build_base_esp(release: bool) -> Result<PathBuf> {
     let a = build_os(release)?;
+    // Every verifier must embed the key the images are signed with
+    // (re-audit, R1).
+    crate::keys::check_embedded_key(&a.ariboot)?;
+    for verifier in ["init", "installer", "updater"] {
+        crate::keys::check_embedded_key(&a.user_bin.join(verifier))?;
+    }
     let esp = build_dir().join("esp");
     write_esp(&esp, &a, None)?;
     println!("[xtask] ESP image at {}", esp.display());
@@ -238,7 +244,7 @@ pub const PART_ARIBOOT: (u64, u64) = (79872, 79935);
 ///
 /// ```text
 /// ESP      2048..133119     EFI/BOOT/BOOTX64.EFI, aricodeos/{kernel.elf,initrd.img,cmdline.txt}
-/// ARI0     133120..139263   AriFS with the sample files
+/// ARI0     133120..139263   AriFS with only `USB_FILES` (a README)
 /// SYSA     139264..163839   signed system image, slot A
 /// SYSB     163840..188415   slot B (empty)
 /// UPDATE   188416..212991   empty
@@ -281,7 +287,13 @@ fn walk_files(dir: &Path, prefix: &str, out: &mut Vec<(String, PathBuf)>) -> Res
 /// Writes the full USB image to `path` with the contents of `esp_dir` as
 /// the EFI partition and slot A loaded with the system image.
 /// `extra`: additional files for the ARI0 partition (e.g. `authorized_keys`).
-pub fn write_usb_image(path: &Path, esp_dir: &Path, extra: &[(String, Vec<u8>)]) -> Result {
+/// `disk_guid`: the GPT disk GUID (random for real sticks, fixed for tests).
+pub fn write_usb_image(
+    path: &Path,
+    esp_dir: &Path,
+    extra: &[(String, Vec<u8>)],
+    disk_guid: [u8; 16],
+) -> Result {
     let esp_sectors = (USB_PART_ESP.1 - USB_PART_ESP.0 + 1) as u32;
     let mut fat =
         aricode_fat::Fat32Builder::new(esp_sectors, 1).map_err(|e| format!("fat: {e:?}"))?;
@@ -294,8 +306,9 @@ pub fn write_usb_image(path: &Path, esp_dir: &Path, extra: &[(String, Vec<u8>)])
     }
     let mut img = vec![0u8; USB_SECTORS as usize * 512];
     let guid = aricode_gpt::ARICODEOS_DATA_GUID;
-    aricode_gpt::write_disk(
+    aricode_gpt::write_disk_with_guid(
         &mut img,
+        disk_guid,
         &[
             ("ESP", USB_PART_ESP.0, USB_PART_ESP.1, ESP_TYPE_GUID),
             ("ARI0", USB_PART_ARI0.0, USB_PART_ARI0.1, guid),
@@ -309,7 +322,7 @@ pub fn write_usb_image(path: &Path, esp_dir: &Path, extra: &[(String, Vec<u8>)])
     let o = USB_PART_ESP.0 as usize * 512;
     let fat_img = fat.finish();
     img[o..o + fat_img.len()].copy_from_slice(&fat_img);
-    populate_arifs(&mut img, USB_PART_ARI0)?;
+    format_arifs(&mut img, USB_PART_ARI0, USB_FILES)?;
     if !extra.is_empty() {
         let mut fs = aricode_arifs::AriFs::open(VecDisk {
             data: &mut img,
@@ -324,13 +337,9 @@ pub fn write_usb_image(path: &Path, esp_dir: &Path, extra: &[(String, Vec<u8>)])
                 .map_err(|e| format!("arifs {name}: {e:?}"))?;
         }
     }
-    // Raw area at the tail of ARI0, at the same offset as on the test disk
-    // (init passes it to blk_client).
-    for lba in USB_PART_ARI0.0 + RAW_PATTERN_OFFSET..=USB_PART_ARI0.1 {
-        let o = lba as usize * 512;
-        img[o..o + 8].copy_from_slice(b"ARIDISK\0");
-        img[o + 8..o + 16].copy_from_slice(&lba.to_le_bytes());
-    }
+    // No test data (incident 0005): neither the `ARIDISK` raw-area pattern
+    // nor the test disk's sample files. A `selftest` boot from the stick
+    // stops at `fs_client`'s first check (no `hola.txt`), before any write.
     write_slot(&mut img, USB_PART_SYSA, &system_image(1, false)?)?;
     let state = aricode_ab::BootState::fresh(aricode_ab::Slot::A);
     let o = USB_PART_ARIBOOT.0 as usize * 512;
@@ -352,8 +361,19 @@ pub fn build_usb_image(
     release: bool,
     cmdline: &str,
     authorized_key: Option<&Path>,
-    update_url: Option<&str>,
+    update_source: Option<&str>,
 ) -> Result<PathBuf> {
+    let line = aricode_cmdline::CmdLine::new(cmdline);
+    if let Some(key) = line.first_of(aricode_cmdline::keys::TEST_ONLY) {
+        return Err(format!(
+            "--cmdline \"{cmdline}\": `{key}` is a test-only key (aricode_cmdline::keys::TEST_ONLY) and does not belong on a stick for a real machine"
+        ));
+    }
+    if let Some(key) = line.first_of(aricode_cmdline::keys::LOADER_ONLY) {
+        return Err(format!(
+            "--cmdline \"{cmdline}\": `{key}` is added by AriBoot when it boots a slot (aricode_cmdline::keys::LOADER_ONLY); do not write it"
+        ));
+    }
     let base = build_base_esp(release)?;
     let esp = build_scenario_esp(
         &base,
@@ -383,21 +403,43 @@ pub fn build_usb_image(
             aricode_ssh::fingerprint(&aricode_crypto::ed25519::public_key(&seed))
         );
     }
-    if let Some(url) = update_url {
-        if !url.starts_with("http://") && !url.starts_with("https://") {
-            return Err(format!(
-                "--update-url {url}: must start with http:// or https://"
-            ));
-        }
+    if let Some(input) = update_source {
+        let mut sources = aricode_update_index::Sources::default();
+        let url = sources
+            .add(input)
+            .map_err(|e| format!("--update-source {input}: {e:?}"))?
+            .to_string();
         extra.push((
-            String::from(UPDATE_URL_FILE),
-            format!("{url}\n").into_bytes(),
+            aricode_update_index::main_path(aricode_update_index::SOURCES_FILE),
+            sources.to_text().into_bytes(),
         ));
-        println!("[xtask] update channel {url}");
+        println!("[xtask] update source {url}");
     }
+    // Every stick gets its own disk GUID from OS entropy: the storage
+    // drivers use it to tell AriCodeOS sticks apart (ADR 0031).
+    let disk_guid = random_disk_guid()?;
+    println!("[xtask] GPT disk GUID {}", hex_lower(&disk_guid));
     let out = crate::build_dir().join("aricodeos-usb.img");
-    write_usb_image(&out, &esp, &extra)?;
+    write_usb_image(&out, &esp, &extra, disk_guid)?;
     Ok(out)
+}
+
+/// A random GPT disk GUID (version 4 / RFC 4122 variant bits in GPT's
+/// mixed-endian layout) from `/dev/urandom`.
+fn random_disk_guid() -> Result<[u8; 16]> {
+    use std::io::Read;
+    let mut g = [0u8; 16];
+    io(
+        fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut g)),
+        "read /dev/urandom",
+    )?;
+    g[7] = (g[7] & 0x0F) | 0x40;
+    g[8] = (g[8] & 0x3F) | 0x80;
+    Ok(g)
+}
+
+fn hex_lower(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -416,6 +458,18 @@ pub enum DiskVariant {
     ExhaustedB,
     /// B pending with an image whose signature is invalid: rejection and rollback.
     CorruptB,
+    /// A active with an image whose signature is invalid: AriBoot boots
+    /// from the ESP and the installed version is unknown (ADR 0029, H1).
+    CorruptA,
+    /// Like `PendingB` (B version 2 is confirmed on boot) but UPDATE holds
+    /// version 1: `update apply` must refuse the downgrade.
+    PendingBOlderUpdate,
+    /// Normal slots and an AriFS table with only `FS_FREE_ENTRIES` free
+    /// entries (filler files): what `update` and `upgrade` need must fit.
+    FsNearlyFull,
+    /// Like `FsNearlyFull` with one entry less: `upgrade` must refuse
+    /// before installing anything.
+    FsOneShort,
     /// Normal slots and a committed but unapplied `README` replacement in the
     /// AriFS journal (power cut after commit): fsd replays it.
     FsPendingReplace,
@@ -441,6 +495,10 @@ impl DiskVariant {
             "pending-b" => Self::PendingB,
             "b-exhausted" => Self::ExhaustedB,
             "b-corrupt" => Self::CorruptB,
+            "a-corrupt" => Self::CorruptA,
+            "pending-b-older-update" => Self::PendingBOlderUpdate,
+            "fs-nearly-full" => Self::FsNearlyFull,
+            "fs-one-short" => Self::FsOneShort,
             "fs-pending-replace" => Self::FsPendingReplace,
             "fs-corrupt" => Self::FsCorrupt,
             "wasm-restricted" => Self::WasmRestricted,
@@ -492,8 +550,14 @@ impl aricode_arifs::BlockDevice for VecDisk<'_> {
 /// partition every sector holds `ARIDISK\0` and its LBA, out of AriFS's
 /// reach (32 files x 64 sectors fit before it).
 pub const RAW_PATTERN_LBA: u64 = 4096;
-/// Offset of the raw area inside ARI0 (the same on every disk).
-pub const RAW_PATTERN_OFFSET: u64 = RAW_PATTERN_LBA - PART_ARI0.0;
+
+/// The only file of a stick's ARI0 besides what `usb-image` is asked to
+/// install (`authorized_keys`, host key, update source): the owner's disk
+/// carries no test or sample data (incident 0005).
+pub const USB_FILES: &[(&str, &[u8])] = &[(
+    "README",
+    b"AriCodeOS system stick: this AriFS partition holds your files.\nhttps://github.com/AriCodeLabs/AriCodeOS\n",
+)];
 
 /// Sample files of the test disk.
 pub const DISK_FILES: &[(&str, &[u8])] = &[
@@ -518,22 +582,28 @@ pub fn system_image(version: u32, corrupt: bool) -> Result<Vec<u8>> {
     };
     let mut buf = [0u8; 192];
     let text = manifest.write(&mut buf).as_bytes().to_vec();
-    let seed: [u8; 32] = crate::keys::read_hex(
-        &crate::root()
-            .join(crate::keys::DEV_KEY_DIR)
-            .join(crate::keys::SEED_FILE),
-    )?;
+    let seed = crate::keys::signing_seed()?;
     let mut sig = aricode_crypto::ed25519::sign(&seed, &text);
     if corrupt {
         sig[5] ^= 0x40;
     }
-    aricode_initrd::build(&[
+    let container = aricode_initrd::build(&[
         ("manifest", text.as_slice()),
         ("manifest.sig", &sig[..]),
         ("kernel.elf", kernel.as_slice()),
         ("initrd.img", initrd.as_slice()),
     ])
-    .map_err(|e| format!("system image: {e:?}"))
+    .map_err(|e| format!("system image: {e:?}"))?;
+    // Post-build check (re-audit, R1): a valid image must verify with the
+    // key the build embeds.
+    if !corrupt
+        && aricode_ab::Image::verify(&container, &crate::keys::expected_public_key()?).is_err()
+    {
+        return Err(String::from(
+            "system image does not verify with the embedded public key",
+        ));
+    }
+    Ok(container)
 }
 
 /// ELF without debug sections (the kernel and the initrd only need the
@@ -589,7 +659,7 @@ pub fn write_test_disk(
         parts.push(("ARIBOOT", PART_ARIBOOT.0, PART_ARIBOOT.1, guid));
     }
     aricode_gpt::write_disk(&mut img, &parts).map_err(|e| format!("gpt: {e:?}"))?;
-    populate_arifs(&mut img, PART_ARI0)?;
+    populate_test_arifs(&mut img, PART_ARI0)?;
     install_files(&mut img, PART_ARI0, installed)?;
     match variant {
         DiskVariant::FsPendingReplace => stage_arifs_replace(&mut img, PART_ARI0)?,
@@ -602,6 +672,8 @@ pub fn write_test_disk(
         DiskVariant::WasmBadImport => {
             overwrite_arifs(&mut img, PART_ARI0, WASM_MODULE_FILE, BAD_IMPORT_WASM)?
         }
+        DiskVariant::FsNearlyFull => fill_arifs(&mut img, PART_ARI0, FS_FREE_ENTRIES)?,
+        DiskVariant::FsOneShort => fill_arifs(&mut img, PART_ARI0, FS_FREE_ENTRIES - 1)?,
         DiskVariant::FsCorrupt => {
             // First byte of the name of the first entry in use.
             img[(PART_ARI0.0 + aricode_arifs::TABLE_LBA) as usize * 512] ^= 0x20;
@@ -618,13 +690,19 @@ pub fn write_test_disk(
         use aricode_ab::{schedule, BootState, Slot};
         let v1 = system_image(1, false)?;
         let v2 = system_image(2, false)?;
-        write_slot(&mut img, PART_SYSA, &v1)?;
-        if variant != DiskVariant::UpdateEmpty {
-            write_slot(&mut img, PART_UPDATE, &v2)?;
+        if variant == DiskVariant::CorruptA {
+            write_slot(&mut img, PART_SYSA, &system_image(1, true)?)?;
+        } else {
+            write_slot(&mut img, PART_SYSA, &v1)?;
+        }
+        match variant {
+            DiskVariant::UpdateEmpty => {}
+            DiskVariant::PendingBOlderUpdate => write_slot(&mut img, PART_UPDATE, &v1)?,
+            _ => write_slot(&mut img, PART_UPDATE, &v2)?,
         }
         let mut state = BootState::fresh(Slot::A);
         match variant {
-            DiskVariant::PendingB => {
+            DiskVariant::PendingB | DiskVariant::PendingBOlderUpdate => {
                 write_slot(&mut img, PART_SYSB, &v2)?;
                 state = schedule(state, Slot::B);
             }
@@ -638,6 +716,9 @@ pub fn write_test_disk(
                 state = schedule(state, Slot::B);
             }
             DiskVariant::Slots
+            | DiskVariant::CorruptA
+            | DiskVariant::FsNearlyFull
+            | DiskVariant::FsOneShort
             | DiskVariant::UpdateEmpty
             | DiskVariant::EspOnly
             | DiskVariant::UsbImage
@@ -679,6 +760,33 @@ fn install_files(img: &mut [u8], part: (u64, u64), files: &[(String, Vec<u8>)]) 
     fs.flush().map_err(|e| format!("arifs: {e:?}"))
 }
 
+/// Free AriFS entries left for the updater by `fs-nearly-full`: exactly
+/// what a first `update` and an `upgrade` of the system and one installed
+/// app create in the updater's directory (`state`, `indexes`, `last.log`,
+/// `history.log`, `pkg-1.aripkg`; re-audit R3, final re-audit L-c). The
+/// QEMU run of 2026-10-17 confirmed these five files in `ls`.
+pub const FS_FREE_ENTRIES: usize = 5;
+
+/// Fills the AriFS table with empty `fill-NN` files until only `free`
+/// entries are left. Scenarios on these disks boot without `selftest`:
+/// its `fs_client` would take one more entry for `nuevo.txt` (incident
+/// 0005), which is what made the first QEMU run of `update.fs_nearly_full`
+/// fail.
+fn fill_arifs(img: &mut [u8], part: (u64, u64), free: usize) -> Result {
+    let mut fs = aricode_arifs::AriFs::open(VecDisk {
+        data: img,
+        base: part.0,
+    })
+    .map_err(|e| format!("arifs: {e:?}"))?;
+    let used = fs.entries().count();
+    for i in 0..aricode_arifs::MAX_FILES.saturating_sub(used + free) {
+        let name = format!("fill-{i:02}");
+        fs.create(&name)
+            .map_err(|e| format!("arifs {name}: {e:?}"))?;
+    }
+    fs.flush().map_err(|e| format!("arifs: {e:?}"))
+}
+
 /// Contents `filesystem.replace_recovery` expects to read in `README`.
 pub const RECOVERED_README: &[u8] = b"AriCodeOS: recuperado tras un corte\n";
 
@@ -699,8 +807,8 @@ fn stage_arifs_replace(img: &mut [u8], part: (u64, u64)) -> Result {
         .map_err(|e| format!("arifs README: {e:?}"))
 }
 
-/// Formats AriFS in `part` with the sample files and the WASM module.
-fn populate_arifs(img: &mut [u8], part: (u64, u64)) -> Result {
+/// Formats AriFS in `part` with `files`.
+fn format_arifs(img: &mut [u8], part: (u64, u64), files: &[(&str, &[u8])]) -> Result {
     let (first, last) = part;
     let sectors = last - first + 1;
     let mut fs = aricode_arifs::AriFs::format(
@@ -711,30 +819,28 @@ fn populate_arifs(img: &mut [u8], part: (u64, u64)) -> Result {
         sectors,
     )
     .map_err(|e| format!("arifs: {e:?}"))?;
-    for (name, content) in DISK_FILES {
+    for (name, content) in files {
         let i = fs
             .create(name)
             .map_err(|e| format!("arifs {name}: {e:?}"))?;
         fs.write(i, 0, content)
-            .map_err(|e| format!("arifs {name}: {e:?}"))?;
-    }
-    // Sample WebAssembly module and its manifest in `wasm_runner`'s private
-    // directory (`build_wasm_programs` produces it; without it, the runner
-    // reports and exits).
-    let demo = crate::build_dir().join("demo.wasm");
-    if let Ok(bytes) = fs::read(&demo) {
-        for (name, content) in [
-            (WASM_MODULE_FILE, bytes.as_slice()),
-            (WASM_MANIFEST_FILE, WASM_MANIFEST),
-        ] {
-            let i = fs
-                .create(name)
-                .map_err(|e| format!("arifs {name}: {e:?}"))?;
-            fs.write(i, 0, content)
-                .map_err(|e| format!("arifs {name} ({} bytes): {e:?}", content.len()))?;
-        }
+            .map_err(|e| format!("arifs {name} ({} bytes): {e:?}", content.len()))?;
     }
     Ok(())
+}
+
+/// Test disk: AriFS with the sample files and the sample WebAssembly module
+/// and its manifest in `wasm_runner`'s private directory
+/// (`build_wasm_programs` produces it; without it, the runner reports and
+/// exits).
+fn populate_test_arifs(img: &mut [u8], part: (u64, u64)) -> Result {
+    let demo = fs::read(crate::build_dir().join("demo.wasm")).ok();
+    let mut files = DISK_FILES.to_vec();
+    if let Some(bytes) = &demo {
+        files.push((WASM_MODULE_FILE, bytes));
+        files.push((WASM_MANIFEST_FILE, WASM_MANIFEST));
+    }
+    format_arifs(img, part, &files)
 }
 
 const WASM_MODULE_FILE: &str = "wasm_runner/demo.wasm";
@@ -817,6 +923,42 @@ mod tests {
     }
 
     #[test]
+    fn usb_image_refuses_test_only_keys() {
+        // Incident 0005 audit: checked before anything is built.
+        for cmdline in [
+            "shell selftest",
+            "qemu_exit shell",
+            "shell usb_fault=idle",
+            "test=panic",
+        ] {
+            let err = build_usb_image(false, cmdline, None, None).unwrap_err();
+            assert!(err.contains("test-only key"), "{cmdline}: {err}");
+        }
+        for cmdline in ["shell boot_slot=A", "shell boot_pending"] {
+            let err = build_usb_image(false, cmdline, None, None).unwrap_err();
+            assert!(err.contains("added by AriBoot"), "{cmdline}: {err}");
+        }
+    }
+
+    #[test]
+    fn stick_arifs_holds_only_the_readme() {
+        let sectors = USB_PART_ARI0.1 - USB_PART_ARI0.0 + 1;
+        let mut img = vec![0u8; sectors as usize * 512];
+        format_arifs(&mut img, (0, sectors - 1), USB_FILES).unwrap();
+        let fs = aricode_arifs::AriFs::open(VecDisk {
+            data: &mut img,
+            base: 0,
+        })
+        .unwrap();
+        let names: Vec<&str> = fs.entries().map(|(_, e)| e.name_str()).collect();
+        assert_eq!(names, ["README"]);
+        let readme = USB_FILES[0].1;
+        assert!(
+            readme.is_ascii() && readme.ends_with(b"https://github.com/AriCodeLabs/AriCodeOS\n")
+        );
+    }
+
+    #[test]
     fn symlinked_scenario_dir_is_rejected_and_outside_data_survives() {
         // Audit review, finding 2.
         let tmp = TempDir::new("image-symlink");
@@ -891,6 +1033,84 @@ mod tests {
     }
 
     const E_PHOFF_TEST: usize = 32;
+
+    #[test]
+    fn legacy_manifest_never_goes_below_the_published_version() {
+        // Re-audit, R4.
+        let tmp = TempDir::new("legacy-manifest");
+        let dir = tmp.path().join("source");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("manifest.txt"), "version = 3\nimage = a.img\n").unwrap();
+        let older = Channel {
+            system: Some(2),
+            legacy_manifest: true,
+            ..Channel::default()
+        };
+        let err = check_legacy_manifest(&dir, &older).unwrap_err();
+        assert!(err.contains("below the published 3"), "{err}");
+        let without = Channel {
+            legacy_manifest: false,
+            ..older
+        };
+        assert!(check_legacy_manifest(&dir, &without).is_ok());
+        let newer = Channel {
+            system: Some(4),
+            legacy_manifest: true,
+            ..Channel::default()
+        };
+        assert!(check_legacy_manifest(&dir, &newer).is_ok());
+    }
+
+    fn dev_public_key() -> [u8; 32] {
+        crate::keys::read_hex(
+            &crate::root()
+                .join(crate::keys::DEV_KEY_DIR)
+                .join(crate::keys::PUB_FILE),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn published_index_verifies_with_the_dev_key_and_tampering_is_caught() {
+        // ADR 0029: what publish-update writes is what the updater accepts,
+        // and a tampered publication is what it refuses.
+        let tmp = TempDir::new("publish-index");
+        let dir = tmp.path().join("source");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("stale.img"), b"left from an older publication").unwrap();
+        publish_update_to(&dir, true, &Channel::default()).unwrap();
+        assert!(
+            !dir.join("stale.img").exists(),
+            "one publication per directory"
+        );
+        let index = fs::read(dir.join(aricode_update_index::INDEX_FILE)).unwrap();
+        let sig = fs::read(dir.join(aricode_update_index::SIGNATURE_FILE)).unwrap();
+        let parsed = aricode_update_index::verify(&index, &sig, &dev_public_key()).unwrap();
+        assert!(parsed.system.is_none() && parsed.apps.is_empty());
+        // Republishing never lowers the serial, whatever the clock says
+        // (audit 1, L3), and leaves no staging directories behind (L2).
+        let first = parsed.serial;
+        publish_update_to(&dir, true, &Channel::default()).unwrap();
+        let again = fs::read_to_string(dir.join(aricode_update_index::INDEX_FILE)).unwrap();
+        assert!(aricode_update_index::Index::parse(&again).unwrap().serial > first);
+        assert!(!tmp.path().join("source.new").exists() && !tmp.path().join("source.old").exists());
+        assert!(
+            parsed.serial > 1_700_000_000,
+            "serial is the publication time"
+        );
+
+        let tampered = Channel {
+            tamper_index: true,
+            ..Channel::default()
+        };
+        publish_update_to(&dir, true, &tampered).unwrap();
+        let index = fs::read(dir.join(aricode_update_index::INDEX_FILE)).unwrap();
+        let sig = fs::read(dir.join(aricode_update_index::SIGNATURE_FILE)).unwrap();
+        assert_eq!(
+            aricode_update_index::verify(&index, &sig, &dev_public_key()),
+            Err(aricode_update_index::IndexError::BadSignature)
+        );
+    }
 }
 
 /// The SSH host key seed at `path` (hex, one line), created from
@@ -914,10 +1134,6 @@ fn ssh_host_key(path: &Path) -> Result<([u8; 32], Vec<u8>)> {
     Ok((seed, text.into_bytes()))
 }
 
-/// The updater's channel URL file in AriFS (its private directory).
-pub const UPDATE_URL_FILE: &str = "updater/update_url";
-
-/// Channel directory with the published image (`publish_update`).
 /// Channel directory of the scenarios (`host_update`): separate from
 /// `update_dir()` so a test run can never replace what a real machine
 /// downloads (incident 0003).
@@ -925,42 +1141,280 @@ pub fn test_update_dir() -> PathBuf {
     crate::build_dir().join("update-test")
 }
 
+/// Channel directory that `serve-update` publishes for real machines.
 pub fn update_dir() -> PathBuf {
     crate::build_dir().join("update")
 }
 
-/// `cargo xtask publish-update [--version N]` (ADR 0027): writes the signed
-/// system image `aricodeos-N.img` (slot layout: ARISLOT header + container)
-/// and `manifest.txt` (version, file name, size, SHA-256) into
-/// `build/update/`, ready to be served over HTTP.
-pub fn publish_update(release: bool, version: u32) -> Result<PathBuf> {
-    publish_update_to(&update_dir(), release, version)
+/// What a published source offers (ADR 0029).
+#[derive(Debug, Default)]
+pub struct Channel {
+    /// System image version; `None` publishes no system image.
+    pub system: Option<u32>,
+    /// App packages: (directory of the external app, version).
+    pub apps: Vec<(String, u32)>,
+    /// Also write the ADR 0027 `manifest.txt` next to the image, so machines
+    /// still running the single-channel updater can fetch this build (the
+    /// transition release, ADR 0029 decision 9).
+    pub legacy_manifest: bool,
+    /// Alter the index after signing it (tests: the updater must refuse it).
+    pub tamper_index: bool,
+    /// Alter the image after the index recorded its SHA-256 (tests: the
+    /// updater must refuse the download).
+    pub tamper_image: bool,
 }
 
-/// `publish_update` into `dir` (the scenarios use `test_update_dir()`).
-pub fn publish_update_to(dir: &Path, release: bool, version: u32) -> Result<PathBuf> {
-    build_base_esp(release)?;
-    let container = system_image(version, false)?;
-    let mut image = aricode_ab::Image::header(container.len() as u32).to_vec();
-    image.extend_from_slice(&container);
-    let dir = dir.to_path_buf();
-    io(fs::create_dir_all(&dir), "create build/update")?;
-    let name = format!("aricodeos-{version}.img");
-    io(fs::write(dir.join(&name), &image), "write the update image")?;
-    let mut hex = [0u8; 64];
-    let manifest = format!(
-        "version = {version}\nimage = {name}\nsize = {}\nsha256 = {}\n",
-        image.len(),
-        aricode_crypto::hex(&aricode_crypto::sha256::sha256(&image), &mut hex)
-    );
-    io(
-        fs::write(dir.join("manifest.txt"), manifest),
-        "write manifest.txt",
+/// Index serial (audit 1, L3): the Unix time, but always above the serial
+/// of the publication being replaced, so a slow or wrong clock can never
+/// publish an index the machines refuse as stale. A serial pushed far into
+/// the future (a clock error) is recovered on each machine with `update
+/// remove N`, `update` (which forgets that source's stored copy) and
+/// `update add URL` (ADR 0029, decision 6).
+fn index_serial(previous: Option<u64>) -> Result<u64> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(|e| format!("system clock before 1970: {e}"))?;
+    Ok(previous.map_or(now, |p| now.max(p + 1)))
+}
+
+/// The serial of the index currently published in `dir`, if any.
+fn published_serial(dir: &Path) -> Option<u64> {
+    let text = fs::read_to_string(dir.join(aricode_update_index::INDEX_FILE)).ok()?;
+    aricode_update_index::Index::parse(&text)
+        .ok()
+        .map(|i| i.serial)
+}
+
+/// The system version currently published in `dir`: from its index, or
+/// from an ADR 0027 `manifest.txt`.
+fn published_system_version(dir: &Path) -> Option<u32> {
+    if let Ok(text) = fs::read_to_string(dir.join(aricode_update_index::INDEX_FILE)) {
+        if let Ok(index) = aricode_update_index::Index::parse(&text) {
+            return index.system.map(|s| s.version);
+        }
+    }
+    fs::read_to_string(dir.join("manifest.txt"))
+        .ok()?
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("version = ")?.trim().parse().ok())
+}
+
+/// Re-audit, R4: an ADR 0027 updater installs any version that differs
+/// from the one it runs, older ones included. `manifest.txt` is therefore
+/// never published for a version below the one already published.
+fn check_legacy_manifest(dir: &Path, channel: &Channel) -> Result {
+    let (true, Some(version)) = (channel.legacy_manifest, channel.system) else {
+        return Ok(());
+    };
+    match published_system_version(dir) {
+        Some(published) if version < published => Err(format!(
+            "refusing to publish manifest.txt for system {version} below the published {published}: \
+             ADR 0027 updaters would downgrade to it (use --no-legacy-manifest)"
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// `index.sig` for `text`, signed with the selected key (hex line).
+fn sign_index(text: &str) -> Result<String> {
+    let seed = crate::keys::signing_seed()?;
+    let signature = aricode_crypto::ed25519::sign(&seed, text.as_bytes());
+    let mut hex = [0u8; 128];
+    Ok(format!("{}\n", aricode_crypto::hex(&signature, &mut hex)))
+}
+
+/// A stored copy (slot 1 of `updater/indexes`) of the index published in `dir`, for
+/// source `url`, re-signed with a serial ahead of the published one: the
+/// machine then sees the published index as stale (scenario
+/// `update.stale_index`).
+pub fn stored_copy_ahead(dir: &Path, url: &str) -> Result<Vec<u8>> {
+    let text = io(
+        fs::read_to_string(dir.join(aricode_update_index::INDEX_FILE)),
+        "read the published index",
     )?;
+    let mut index =
+        aricode_update_index::Index::parse(&text).map_err(|e| format!("published index: {e:?}"))?;
+    index.serial += 1000;
+    let ahead = index.write();
+    let sig = sign_index(&ahead)?;
+    Ok(aricode_update_index::stored::encode(
+        url,
+        sig.as_bytes(),
+        ahead.as_bytes(),
+    ))
+}
+
+/// `cargo xtask publish-update` (ADR 0027, ADR 0029): publishes into `dir`
+/// one complete update source: the signed system image `aricodeos-N.img`
+/// (slot layout: ARISLOT header + container), the app packages
+/// `NAME-V.aripkg`, the `index` listing them (version, file, size, SHA-256),
+/// `index.sig` (its Ed25519 signature with the selected key) and, for the
+/// transition release, the ADR 0027 `manifest.txt`. Everything is written
+/// into a sibling directory first and moved into place at the end (audit
+/// 1, L2), so a machine fetching meanwhile sees the old publication or the
+/// new one, never a mix of files.
+pub fn publish_update_to(dir: &Path, release: bool, channel: &Channel) -> Result<PathBuf> {
+    use aricode_update_index::{AppEntry, Index, SystemEntry};
+    let name = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("{}: not a directory name", dir.display()))?;
+    let staging = dir.with_file_name(format!("{name}.new"));
+    let old = dir.with_file_name(format!("{name}.old"));
+    for d in [dir, &staging, &old] {
+        reject_symlink(d)?;
+    }
+    for d in [&staging, &old] {
+        if d.exists() {
+            io(fs::remove_dir_all(d), "remove a leftover publication")?;
+        }
+    }
+    check_legacy_manifest(dir, channel)?;
+    io(fs::create_dir_all(&staging), "create the update directory")?;
+    let sha = aricode_crypto::sha256::sha256;
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    if let Some(version) = channel.system {
+        build_base_esp(release)?;
+        let container = system_image(version, false)?;
+        let mut image = aricode_ab::Image::header(container.len() as u32).to_vec();
+        image.extend_from_slice(&container);
+        files.push((format!("aricodeos-{version}.img"), image));
+    }
+    let mut apps = Vec::new();
+    for (app_dir, version) in &channel.apps {
+        let app = crate::build::build_external(Path::new(app_dir), *version, release, false)?;
+        let file = format!("{}-{}{}", app.name, app.version, aricode_pkg::EXTENSION);
+        apps.push((app.name, app.version, file.clone()));
+        files.push((file, app.package));
+    }
+    let data = |name: &str| -> &[u8] {
+        &files
+            .iter()
+            .find(|(n, _)| n == name)
+            .expect("published file")
+            .1
+    };
+    let size = |name: &str| -> Result<u32> {
+        u32::try_from(data(name).len()).map_err(|_| format!("{name}: too large"))
+    };
+    let system_file = channel.system.map(|v| format!("aricodeos-{v}.img"));
+    let index = Index {
+        serial: index_serial(published_serial(dir))?,
+        system: match (channel.system, &system_file) {
+            (Some(version), Some(file)) => Some(SystemEntry {
+                version,
+                file,
+                size: size(file)?,
+                sha256: sha(data(file)),
+            }),
+            _ => None,
+        },
+        apps: apps
+            .iter()
+            .map(|(name, version, file)| {
+                Ok(AppEntry {
+                    name,
+                    version: *version,
+                    file,
+                    size: size(file)?,
+                    sha256: sha(data(file)),
+                })
+            })
+            .collect::<Result<_>>()?,
+    };
+    let mut text = index.write();
+    // The index must parse back exactly as published (names, sizes, the
+    // 20-byte app name limit).
+    if Index::parse(&text).as_ref() != Ok(&index) {
+        return Err(String::from(
+            "the index does not parse back (an app name over 20 bytes?)",
+        ));
+    }
+    let signature = sign_index(&text)?;
+    let legacy = match (&index.system, channel.legacy_manifest) {
+        (Some(s), true) => {
+            let mut hex = [0u8; 64];
+            Some(format!(
+                "version = {}\nimage = {}\nsize = {}\nsha256 = {}\n",
+                s.version,
+                s.file,
+                s.size,
+                aricode_crypto::hex(&s.sha256, &mut hex)
+            ))
+        }
+        _ => None,
+    };
+    let serial = index.serial;
+    drop(index);
+    if channel.tamper_index {
+        let line = format!("serial = {serial}\n");
+        text = text.replace(&line, &format!("serial = {}\n", serial + 1));
+    }
+    if channel.tamper_image {
+        let Some(file) = &system_file else {
+            return Err(String::from("tamper_image needs a system image"));
+        };
+        let image = &mut files
+            .iter_mut()
+            .find(|(n, _)| n == file)
+            .expect("published image")
+            .1;
+        let last = image.len() - 1;
+        image[last] ^= 0x01;
+    }
+    for (name, data) in &files {
+        io(
+            fs::write(staging.join(name), data),
+            &format!("write {name}"),
+        )?;
+    }
+    io(
+        fs::write(staging.join(aricode_update_index::INDEX_FILE), &text),
+        "write index",
+    )?;
+    io(
+        fs::write(
+            staging.join(aricode_update_index::SIGNATURE_FILE),
+            signature,
+        ),
+        "write index.sig",
+    )?;
+    if let Some(manifest) = legacy {
+        io(
+            fs::write(staging.join("manifest.txt"), manifest),
+            "write manifest.txt",
+        )?;
+    }
+    if dir.exists() {
+        io(fs::rename(dir, &old), "move the previous publication aside")?;
+    }
+    io(fs::rename(&staging, dir), "move the publication into place")?;
+    if old.exists() {
+        io(fs::remove_dir_all(&old), "remove the previous publication")?;
+    }
     println!(
-        "[xtask] update channel at {}: version {version}, {} bytes",
+        "[xtask] update source at {}: serial {serial}, {}, {} app(s){}{}{}",
         dir.display(),
-        image.len()
+        channel
+            .system
+            .map_or(String::from("no system image"), |v| format!("system {v}")),
+        apps.len(),
+        if channel.legacy_manifest && channel.system.is_some() {
+            ", plus manifest.txt for ADR 0027 updaters"
+        } else {
+            ""
+        },
+        if channel.tamper_index {
+            " (index TAMPERED after signing, for tests)"
+        } else {
+            ""
+        },
+        if channel.tamper_image {
+            " (image TAMPERED after indexing, for tests)"
+        } else {
+            ""
+        }
     );
-    Ok(dir)
+    Ok(dir.to_path_buf())
 }

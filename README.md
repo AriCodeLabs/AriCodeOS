@@ -1,19 +1,22 @@
 # AriCodeOS
 
+Website: https://www.aricodeos.org/ · Repository: https://github.com/AriCodeLabs/AriCodeOS
+
 An operating system built from scratch: a Rust `no_std` microkernel, UEFI
 boot, x86-64, capability-based security and user-space drivers.
 
 A Spanish translation of this README is available in
-[README.es.md](README.es.md). Contributor guides: the
-[git workflow](docs/WORKFLOW.md), the [application SDK](docs/sdk.md) and the
-[test suite](tests/README.md).
+[README.es.md](README.es.md). Contributor guides:
+[CONTRIBUTING.md](CONTRIBUTING.md), the [git workflow](docs/WORKFLOW.md),
+the [application SDK](docs/sdk.md) and the [test suite](tests/README.md).
+Security reports: [SECURITY.md](SECURITY.md).
 
 The master architecture and roadmap document is [AriCodeOS.md](AriCodeOS.md).
 Design decisions are recorded as ADRs in
 [docs/decisions/](docs/decisions/) and the branch flow (git flow) in
 [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-**Status:** 0.9.0 (2026-10-10). All 35 roadmap phases (0 to 34) are
+**Status:** 0.11.0 (2026-10-17). All 35 roadmap phases (0 to 34) are
 implemented and tested in QEMU, as are stages 1 to 4 of the post-roadmap
 sequence (observable recovery, a useful session, limits and updates,
 external applications) and the part of stage 5 that needs no hardware
@@ -44,7 +47,8 @@ the evidence is recorded in `docs/hardware.md`.
 | In-house cryptography, RNG, signed images, A/B with rollback | validated in QEMU | `crypto.*`, `update.*`; not Secure Boot |
 | VT-d IOMMU with one domain per driver | validated in QEMU | `iommu.*` |
 | USB stick image | validated in QEMU (`usb.image_boot`) | pending on hardware |
-| Out-of-tree applications: signed packages installed and updated in AriFS (`cargo xtask app-pack`, `installer`) | validated in QEMU, with power cuts | `apps.*`; no network distribution |
+| EHCI (USB 2.0) driver: root ports, USB 2.0 hubs, boot HID keyboards and mice, bulk-only storage (ADR 0031) | written, host tests; QEMU scenarios written but not yet run | `usb.ehci_*`, `strict.ehci_halt`; hubs only on hardware (QEMU has no high-speed hub) |
+| Out-of-tree applications: signed packages installed and updated in AriFS (`cargo xtask app-pack`, `installer`) | validated in QEMU, with power cuts | `apps.*`; network upgrades from signed update sources (ADR 0029) |
 | Measurements: `bench` (syscall, IPC, files, percentiles), idle time per CPU, `diag` report | validated in QEMU | `perf.*`, `docs/performance.md`; figures only comparable with the same build and QEMU mode |
 | Booting on a laptop (Phase 34) | proposed | needs the reference machine |
 
@@ -58,6 +62,49 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 `rust-toolchain.toml` pins the Rust version and adds the
 `x86_64-unknown-none` and `x86_64-unknown-uefi` targets automatically.
+
+### Docker
+
+The same environment without installing anything on the host:
+`tools/docker/Dockerfile` builds an image with the Debian 13 packages above, the pinned
+Rust toolchain and QEMU/OVMF. The checkout is mounted, not copied, so the
+tests run on the files you are editing. QEMU runs without KVM, so the image
+works on any machine with Docker (slower than on the host).
+
+```bash
+docker build -t aricodeos-dev -f tools/docker/Dockerfile .
+docker run --rm -it -v "$PWD":/src -v aricodeos-cargo:/usr/local/cargo/registry \
+    --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask check
+docker run --rm -it -v "$PWD":/src -v aricodeos-cargo:/usr/local/cargo/registry \
+    --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask test --all
+```
+
+`--user` keeps `build/` and `target/` owned by you; the named volume keeps
+the crate downloads between runs. The image exposes no port and holds no
+key. A QEMU result inside Docker is a QEMU result: it does not replace the
+hardware checks of `docs/hardware.md`.
+
+To try the system without building it, `tools/docker/try/Dockerfile` packs
+the USB stick image into an image that boots it in QEMU with the `ari>`
+shell on your terminal (quit with Ctrl-A X):
+
+```bash
+cargo xtask usb-image
+docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.11.0 .
+docker run --rm -it aricodeos
+```
+
+## Release signing key
+
+Published images and updates are signed with the project's release key,
+whose public half is in [keys/release/](keys/release/):
+
+```text
+1d3e24f3c7c753a5bcb384041ace6481736decd86345eab71e2a6ff410ad446e
+```
+
+The development key in `keys/dev/` is for tests and QEMU only: its seed
+is public. See `docs/hardware.md`, "Signing key".
 
 ## Usage
 
@@ -98,6 +145,7 @@ services/arifs/  fsd: AriFS v1 file service over IPC, in ring 3
 services/virtio-net/ netd: virtio-net driver and network stack (DHCP, ping, UDP, TCP, DNS) over IPC, in ring 3
 services/virtio-input/ inputd: virtio-input driver (keyboard, mouse) with events over IPC, in ring 3
 services/usb-input/ usbd: xHCI driver and USB HID keyboard/mouse (boot protocol), in ring 3
+services/usb-ehci/ usb_ehci: EHCI driver with USB 2.0 hubs, USB HID keyboard/mouse and USB storage, in ring 3 (ADR 0031)
 services/console-bridge/ console bridge: user keyboards feed the kernel console for the shell
 services/compositor/ compositor: windows, cursor and input routing over the framebuffer, in ring 3
 libs/gfx/        2D graphics without alloc (canvases, text, cursor, desktop) with host tests
@@ -120,7 +168,8 @@ libs/crypto/     SHA-256, SHA-512, Ed25519 and ChaCha20 from scratch, checked ag
 keys/dev/        development Ed25519 key pair (tests only; see its README)
 libs/wasm/       WebAssembly MVP interpreter (integers, bounded memory, imports) with validator and host tests
 apps/wasm-demo/  portable WebAssembly example module; apps/wasm-runner runs it with the Capability API
-apps/updater/    A/B updater: verifies the UPDATE image and installs it in the inactive slot
+apps/updater/    update client: signed indexes from the owner's sources, system image into the inactive slot, app packages for the installer (ADR 0029)
+libs/update-index/ update sources, signed index, version and downgrade rules (ADR 0029)
 libs/ab/         A/B boot state, signed images and slot policy (AriBoot, init, updater)
 boot/            AriBoot: UEFI loader (crate `ariboot`)
 kernel/          AriKernel (crate `arikernel`), ELF64 in the higher half

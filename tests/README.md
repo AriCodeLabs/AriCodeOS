@@ -36,7 +36,11 @@ name = "area.name"              # unique; only [a-z0-9._-]; also the directory u
 description = "one line"
 level = "smoke" | "full"
 areas = ["boot", "memory"]      # to filter with --area
-cmdline = "qemu_exit ..."       # written to aricodeos/cmdline.txt
+cmdline = "qemu_exit ..."       # written to aricodeos/cmdline.txt, with " selftest" appended (below)
+selftest = true                 # default: init also runs its test clients (they write to the test disk and talk to
+                                # the test hosts at 10.0.2.2); false boots like a real machine, health checks only
+                                # (ADR 0032; init.no_selftest, init.no_selftest_usb, usb.image_boot, update.fs_nearly_full,
+                                # update.fs_one_short)
 timeout_secs = 30
 stdin = ["ls", "shutdown"]      # optional: lines the runner types on the serial console
 prompt = "ari> "                # each line is sent when the prompt appears once more (default "ari> ")
@@ -49,9 +53,12 @@ disk = "slots"                  # disk: slots (default) | esp-only | pending-b |
                                 #       | fs-pending-replace (an AriFS replace committed but not applied) | fs-corrupt (AriFS table altered)
                                 #       | wasm-restricted (module manifest with print only) | wasm-invalid (ill-typed demo.wasm)
                                 #       | wasm-bad-import (demo.wasm imports a host function with another signature)
+                                #       | a-corrupt (slot A fails verification: ESP boot, installed version unknown)
+                                #       | pending-b-older-update (B v2 pending, UPDATE holds v1) | fs-nearly-full (5 entries free for the updater) | fs-one-short (4)
 disk_readonly = false           # true: the test disk is presented read-only
 cpus = 4                        # processors (-smp N); undeclared: 1, or whatever `--cpus N` forces
 usb_hid = true                  # adds qemu-xhci with a USB keyboard and mouse (QMP events go to the USB devices)
+usb_hid_only_input = true       # no virtio keyboard/mouse, so QMP input reaches the USB HID devices (xHCI or EHCI)
 usb_hid_msi = true              # that xHCI offers MSI only, no MSI-X (like 2012 Intel controllers)
 usb_storage = true              # the test disk hangs off the xHCI as USB mass storage; there is no virtio-blk
 
@@ -60,10 +67,21 @@ marker = "sshd: listening on port 22"   # on seeing the marker, each command run
 commands = ["ls", "shutdown"]   # host port 17022; output joins the log as "[host] ssh $ CMD", "[host] ssh| LINE", "[host] ssh exit N"
 idle_client = true              # a TCP client that never identifies itself holds port 22 first; sshd must drop it
 host_https = true               # two host HTTPS servers (openssl s_server -www) on 17443 (cert from a test CA installed as trusted_ca.der) and 17444 (self-signed)
-host_update = true              # publishes a version-2 system image in build/update/, served at http://10.0.2.2:17010/update/ (ADR 0027), and installs updater/update_url
-usb_legacy_controller = true    # also adds an EHCI (class 0c.03 but not xHCI)
+[host_update]                   # an update source (ADR 0029) published in build/update-test/ and served at http://10.0.2.2:17010/update/
+system = 2                      # system image version offered (omit: no system image)
+apps = ["examples/hello_ext:2"] # app packages offered (DIR:VERSION)
+tamper_index = true             # the index is altered after signing (the updater must refuse it)
+tamper_image = true             # the image is altered after the index recorded its SHA-256
+stale_index = true              # the machine already holds a verified copy with a higher serial
+source = "sources"              # sources (installs updater/sources) | legacy-url (installs the ADR 0027 updater/update_url) | none
+usb_legacy_controller = true    # also adds an EHCI with no devices (the EHCI driver runs next to usbd)
+usb_ehci_hid = true             # an EHCI with a USB keyboard and mouse (high speed) for usb_ehci (ADR 0031)
+usb_ehci_storage = true         # the test disk hangs off the EHCI as USB mass storage; there is no virtio-blk
+usb_ehci_companion_kbd = true   # an ICH9 EHCI with a UHCI companion and a full-speed USB keyboard (port handover)
 install = ["examples/hello_ext"]  # external apps xtask builds, signs (version 1) and installs in AriFS as apps/NAME.aripkg
 packages = ["examples/hello_ext:2", "examples/hello_ext:3:corrupt"]  # pending packages in pkgs/ (DIR:VERSION[:corrupt]) for `run installer`
+staged = ["examples/hello_ext:2:wrong-hash"]  # packages already staged for `run installer 2` (DIR:VERSION[:wrong-hash])
+staged_bad_path = true          # adds a staged line naming pkgs/evil.aripkg
 
 [host_input]                    # optional: input injected through QMP when marker is seen
 marker = "INPUT_READY"
@@ -80,7 +98,8 @@ add_empty_segment_at_entry = true   # adds an empty RW PT_LOAD (memsz 0) at e_en
 [expect]
 exit = 33                       # 33 = success, 35 = failure reported by the system, 0 = reboot (-no-reboot)
 serial_contains = ["..."]
-serial_absent = ["..."]
+serial_absent = ["..."]         # every capture ends with "[host] guest frames other than ARP and DHCP: N", counted in the
+                                # QEMU filter-dump capture of the guest network (net.pcap in the scenario directory)
 ```
 
 A scenario with several boots on the same disk declares `[[boots]]` instead

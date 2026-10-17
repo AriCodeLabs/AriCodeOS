@@ -83,7 +83,7 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     println!("AriCodeOS booting...");
     println!("AriCodeOS Kernel {VERSION}");
     println!(
-        "AriCodeOS by Edwin F. Veliz Jaramillo (lynxcraft), https://github.com/lynxcraft/aricodeos"
+        "AriCodeOS by Edwin F. Veliz Jaramillo (lynxcraft), https://github.com/AriCodeLabs/AriCodeOS"
     );
 
     let (level, level_error) = log_level_from(&cmdline);
@@ -344,6 +344,7 @@ fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
         "iommu" => iommu::selftest(),
         "ipc" => ipc::selftest(),
         "ipc_late" => ipc::late_reply_selftest(),
+        "ipc_peer" => ipc::peer_closed_selftest(),
         "drivers" => hw::selftest(info),
         "usb_hid" => hw::usb_hid_selftest(),
         "random" => random::selftest(),

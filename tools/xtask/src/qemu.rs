@@ -18,11 +18,22 @@ pub struct UsbOptions {
     pub hid: bool,
     /// That xHCI offers MSI only (no MSI-X).
     pub hid_msi: bool,
+    /// No virtio keyboard and mouse: QMP input reaches the USB HID devices
+    /// (xHCI or EHCI).
+    pub hid_only_input: bool,
     /// An extra EHCI (class 0c.03, interface 0x20): not xHCI.
     pub legacy_controller: bool,
     /// The test disk hangs off the xHCI as USB storage (`usb-storage`)
     /// instead of virtio-blk (ADR 0023).
     pub storage: bool,
+    /// An EHCI with a USB keyboard and mouse (high speed) for the EHCI
+    /// driver (ADR 0031).
+    pub ehci_hid: bool,
+    /// The test disk hangs off an EHCI as USB storage instead of virtio-blk.
+    pub ehci_storage: bool,
+    /// An ICH9 EHCI with a UHCI companion and a full-speed keyboard: the
+    /// EHCI driver must hand the port over (EHCI 4.2.2).
+    pub ehci_companion_kbd: bool,
 }
 
 fn base_command(
@@ -50,7 +61,8 @@ fn base_command(
     // `iommu_platform=on` so their DMA goes through translation.
     q.args(["-device", "intel-iommu,aw-bits=48"]);
     // Test disk: modern virtio-blk (no legacy interface) for the user-space
-    // driver or, with `usb.storage`, a USB stick on the xHCI.
+    // driver or, with `usb.storage` / `usb.ehci_storage`, a USB stick on the
+    // xHCI / the EHCI.
     q.args([
         "-drive",
         &format!(
@@ -59,7 +71,7 @@ fn base_command(
             if disk_readonly { ",readonly=on" } else { "" }
         ),
     ]);
-    if !usb.storage {
+    if !usb.storage && !usb.ehci_storage {
         q.args([
             "-device",
             "virtio-blk-pci,drive=disk0,disable-legacy=on,disable-modern=off,iommu_platform=on",
@@ -93,17 +105,25 @@ fn base_command(
     ]);
     q.args([
         "-device",
-        "virtio-net-pci,netdev=net0,disable-legacy=on,disable-modern=off,iommu_platform=on",
+        &format!(
+            "virtio-net-pci,netdev=net0,mac={},disable-legacy=on,disable-modern=off,iommu_platform=on",
+            GUEST_MAC.map(|b| format!("{b:02x}")).join(":")
+        ),
     ]);
     // virtio keyboard and mouse with fixed ids: QMP injects events per device.
-    q.args([
-        "-device",
-        "virtio-keyboard-pci,id=kbd0,disable-legacy=on,disable-modern=off,iommu_platform=on",
-    ]);
-    q.args([
-        "-device",
-        "virtio-mouse-pci,id=mouse0,disable-legacy=on,disable-modern=off,iommu_platform=on",
-    ]);
+    // Left out when the USB HID devices must be the only input (QEMU sends
+    // QMP input to the most recently activated handler, and a virtio
+    // keyboard activates when its guest driver starts).
+    if !usb.hid_only_input {
+        q.args([
+            "-device",
+            "virtio-keyboard-pci,id=kbd0,disable-legacy=on,disable-modern=off,iommu_platform=on",
+        ]);
+        q.args([
+            "-device",
+            "virtio-mouse-pci,id=mouse0,disable-legacy=on,disable-modern=off,iommu_platform=on",
+        ]);
+    }
     if usb.hid || usb.storage {
         // xHCI (Phase 25, part two) with a USB HID keyboard and mouse and/or
         // the test disk as USB storage.
@@ -121,9 +141,22 @@ fn base_command(
             q.args(["-device", "usb-storage,bus=xhci.0,drive=disk0"]);
         }
     }
-    if usb.legacy_controller {
-        // EHCI (class 0c.03, interface 0x20): not xHCI.
+    if usb.legacy_controller || usb.ehci_hid || usb.ehci_storage {
+        // EHCI (class 0c.03, interface 0x20, ADR 0031); QEMU's is ICH4-like,
+        // with no companion controllers and no MSI.
         q.args(["-device", "usb-ehci,id=ehci"]);
+        if usb.ehci_hid {
+            q.args(["-device", "usb-kbd,bus=ehci.0"]);
+            q.args(["-device", "usb-mouse,bus=ehci.0"]);
+        }
+        if usb.ehci_storage {
+            q.args(["-device", "usb-storage,bus=ehci.0,drive=disk0"]);
+        }
+    }
+    if usb.ehci_companion_kbd {
+        q.args(["-device", "ich9-usb-ehci1,id=ehcic"]);
+        q.args(["-device", "ich9-usb-uhci1,masterbus=ehcic.0,firstport=0"]);
+        q.args(["-device", "usb-kbd,bus=ehcic.0,usb_version=1"]);
     }
     q.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     q
@@ -136,6 +169,8 @@ pub struct InputProbe<'a> {
     pub keys: &'a [String],
     pub mouse_rel: Option<(i32, i32)>,
     pub click: Option<&'a str>,
+    /// Pause after each key event (ms); none by default.
+    pub key_delay_ms: u64,
 }
 
 /// Minimal QMP client over a Unix socket: handshake and hand-written JSON
@@ -191,6 +226,7 @@ fn run_input_probe(
     keys: &[String],
     mouse_rel: Option<(i32, i32)>,
     click: Option<&str>,
+    key_delay: Duration,
 ) -> String {
     let mut qmp = match Qmp::connect(path) {
         Ok(q) => q,
@@ -237,6 +273,7 @@ fn run_input_probe(
                         r#"{{"type":"key","data":{{"down":true,"key":{{"type":"qcode","data":"{part}"}}}}}}"#
                     ),
                 )?;
+                std::thread::sleep(key_delay);
             }
             for part in parts.iter().rev() {
                 step(
@@ -245,6 +282,7 @@ fn run_input_probe(
                         r#"{{"type":"key","data":{{"down":false,"key":{{"type":"qcode","data":"{part}"}}}}}}"#
                     ),
                 )?;
+                std::thread::sleep(key_delay);
             }
         }
         Ok(())
@@ -264,7 +302,8 @@ pub struct Responder {
 }
 
 /// Test HTTP server: `/hola` (Content-Length), `/chunked`
-/// (Transfer-Encoding: chunked) and 404 for everything else.
+/// (Transfer-Encoding: chunked), `/big-headers` (5 KiB of headers, the
+/// size github.com sends) and 404 for everything else.
 fn http_serve(mut stream: std::net::TcpStream) {
     use std::io::Write;
     let mut buf = [0u8; 2048];
@@ -283,6 +322,14 @@ fn http_serve(mut stream: std::net::TcpStream) {
     let response: Vec<u8> = match path {
         "/hola" => b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 19\r\nConnection: close\r\n\r\nHola desde el host\n".to_vec(),
         "/chunked" => b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nd\r\nprimer trozo,\r\ne\r\n segundo trozo\r\n0\r\n\r\n".to_vec(),
+        "/big-headers" => {
+            let mut r = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n".to_vec();
+            for i in 0..40 {
+                r.extend(format!("X-Filler-{i:02}: {}\r\n", "x".repeat(110)).as_bytes());
+            }
+            r.extend(b"Content-Length: 15\r\nConnection: close\r\n\r\nbig headers ok\n");
+            r
+        }
         // The scenarios' update channel (ADR 0027), never the real one.
         p if p.starts_with("/update/") => file_response(&image::test_update_dir(), &p["/update/".len()..]),
         _ => b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nno existe".to_vec(),
@@ -591,7 +638,7 @@ pub fn run_interactive(
     let disk = build_dir().join("disk.img");
     let esp_drive = if usb_image {
         // As on a USB stick: the ESP inside the GPT disk, no `fat:`.
-        image::write_usb_image(&disk, &esp, &[])?;
+        image::write_usb_image(&disk, &esp, &[], aricode_gpt::TEST_DISK_GUID)?;
         None
     } else {
         image::write_test_disk(&disk, image::DiskVariant::Slots, &[])?;
@@ -614,6 +661,71 @@ pub fn run_interactive(
     let st = q.status().map_err(|e| format!("qemu: {e}"))?;
     println!("[xtask] qemu exit: {:?}", st.code());
     Ok(())
+}
+
+/// MAC address of the guest's virtio-net (QEMU's default for the first
+/// NIC, pinned so the network capture can tell the guest's frames apart).
+pub const GUEST_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+
+/// Frames the guest sent in a pcap capture of its network (QEMU
+/// `filter-dump`), of any ethertype (IPv4, IPv6, VLAN-tagged or anything
+/// else), except ARP and DHCP (IPv4 UDP 68 -> 67). A boot without
+/// `selftest` must send none of them (incident 0005): every one is a
+/// contact with the test hosts or with something else. `None` if the
+/// capture is not a readable Ethernet pcap; a truncated last record (QEMU
+/// killed) ends the count.
+pub fn guest_frames(pcap: &[u8], guest: [u8; 6]) -> Option<usize> {
+    let header = pcap.get(..24)?;
+    let little = match header[..4] {
+        [0xd4, 0xc3, 0xb2, 0xa1] | [0x4d, 0x3c, 0xb2, 0xa1] => true,
+        [0xa1, 0xb2, 0xc3, 0xd4] | [0xa1, 0xb2, 0x3c, 0x4d] => false,
+        _ => return None,
+    };
+    let u32_at = |b: &[u8]| {
+        let b: [u8; 4] = b.try_into().expect("4 bytes");
+        if little {
+            u32::from_le_bytes(b)
+        } else {
+            u32::from_be_bytes(b)
+        }
+    };
+    if u32_at(&header[20..24]) != 1 {
+        return None; // not Ethernet
+    }
+    let mut count = 0;
+    let mut rest = &pcap[24..];
+    while rest.len() >= 16 {
+        let len = u32_at(&rest[8..12]) as usize;
+        let Some(frame) = rest.get(16..16 + len) else {
+            break;
+        };
+        rest = &rest[16 + len..];
+        if frame.get(6..12) == Some(&guest[..]) && !is_arp_or_dhcp(frame) {
+            count += 1;
+        }
+    }
+    Some(count)
+}
+
+/// ARP or DHCP (IPv4, UDP 68 -> 67), after any 802.1Q/802.1ad tags.
+fn is_arp_or_dhcp(frame: &[u8]) -> bool {
+    let mut at = 12;
+    while let Some(&[a, b]) = frame.get(at..at + 2) {
+        match [a, b] {
+            [0x81, 0x00] | [0x88, 0xA8] => at += 4,
+            [0x08, 0x06] => return true,
+            [0x08, 0x00] => {
+                let ip = &frame[at + 2..];
+                let Some(&first) = ip.first() else {
+                    return false;
+                };
+                let ihl = (first & 0x0F) as usize * 4;
+                return ip.get(9) == Some(&17) && ip.get(ihl..ihl + 4) == Some(&[0, 68, 0, 67][..]);
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 pub struct Capture {
@@ -680,7 +792,7 @@ pub fn run_headless(
     let disk = workdir.join("disk.img");
     let esp_drive = if disk_variant == image::DiskVariant::UsbImage {
         if !options.keep_disk {
-            image::write_usb_image(&disk, esp, &[])?;
+            image::write_usb_image(&disk, esp, &[], aricode_gpt::TEST_DISK_GUID)?;
         }
         None
     } else {
@@ -692,6 +804,10 @@ pub fn run_headless(
     let _responder = Responder::start()?;
     let qmp_path = workdir.join("qmp.sock");
     let _ = std::fs::remove_file(&qmp_path);
+    // Every frame on the guest's network, for the count of guest
+    // frames appended to the capture.
+    let pcap_path = workdir.join("net.pcap");
+    let _ = std::fs::remove_file(&pcap_path);
     let start = Instant::now();
     let mut child = base_command(
         esp_drive,
@@ -701,6 +817,13 @@ pub fn run_headless(
         options.cpus,
         options.usb,
     )
+    .args([
+        "-object",
+        &format!(
+            "filter-dump,id=netdump,netdev=net0,file={}",
+            pcap_path.display()
+        ),
+    ])
     .args(["-display", "none", "-monitor", "none", "-serial", "stdio"])
     .args([
         "-qmp",
@@ -803,8 +926,9 @@ pub fn run_headless(
                 let keys = p.keys.to_vec();
                 let rel = p.mouse_rel;
                 let click = p.click.map(String::from);
+                let delay = Duration::from_millis(p.key_delay_ms);
                 input_thread = Some(std::thread::spawn(move || {
-                    run_input_probe(&path, &keys, rel, click.as_deref())
+                    run_input_probe(&path, &keys, rel, click.as_deref(), delay)
                 }));
             }
             if input_thread.as_ref().is_some_and(|t| t.is_finished()) {
@@ -832,6 +956,16 @@ pub fn run_headless(
     {
         bytes.extend_from_slice(format!("\n{line}\n").as_bytes());
     }
+    let frames = std::fs::read(&pcap_path)
+        .ok()
+        .and_then(|pcap| guest_frames(&pcap, GUEST_MAC));
+    bytes.extend_from_slice(
+        match frames {
+            Some(n) => format!("\n[host] guest frames other than ARP and DHCP: {n}\n"),
+            None => String::from("\n[host] guest frames: no readable capture\n"),
+        }
+        .as_bytes(),
+    );
     Ok(Capture {
         serial: strip_ansi(&String::from_utf8_lossy(&bytes)),
         exit_code,
@@ -879,6 +1013,93 @@ mod tests {
                 60
             ))
         );
+    }
+
+    /// Ethernet frame from `src` with ethertype `kind` and `payload`.
+    fn frame(src: [u8; 6], kind: [u8; 2], payload: &[u8]) -> Vec<u8> {
+        let mut f = vec![0xFF; 6];
+        f.extend_from_slice(&src);
+        f.extend_from_slice(&kind);
+        f.extend_from_slice(payload);
+        f
+    }
+
+    /// IPv4 header (20 bytes) with `proto`, then 4 bytes of ports and padding.
+    fn ipv4(proto: u8, sport: u16, dport: u16) -> Vec<u8> {
+        let mut p = vec![0x45, 0, 0, 40, 0, 0, 0, 0, 64, proto, 0, 0];
+        p.extend_from_slice(&[10, 0, 2, 15, 10, 0, 2, 2]);
+        p.extend_from_slice(&sport.to_be_bytes());
+        p.extend_from_slice(&dport.to_be_bytes());
+        p.extend_from_slice(&[0; 16]);
+        p
+    }
+
+    fn pcap(little: bool, frames: &[Vec<u8>]) -> Vec<u8> {
+        let w = |v: u32| {
+            if little {
+                v.to_le_bytes()
+            } else {
+                v.to_be_bytes()
+            }
+        };
+        let mut out = Vec::new();
+        // magic, version 2.4 (two u16 read here as one u32), zone, sigfigs,
+        // snaplen, link type 1 (Ethernet).
+        let version = if little { 0x0004_0002 } else { 0x0002_0004 };
+        for v in [0xa1b2_c3d4, version, 0, 0, 65_535, 1] {
+            out.extend_from_slice(&w(v));
+        }
+        for f in frames {
+            out.extend_from_slice(&w(0));
+            out.extend_from_slice(&w(0));
+            out.extend_from_slice(&w(f.len() as u32));
+            out.extend_from_slice(&w(f.len() as u32));
+            out.extend_from_slice(f);
+        }
+        out
+    }
+
+    #[test]
+    fn counts_guest_frames_except_arp_and_dhcp() {
+        use super::{guest_frames, GUEST_MAC};
+        let slirp = [0x52, 0x55, 0x0a, 0x00, 0x02, 0x02];
+        let ip = [0x08, 0x00];
+        let tagged = |kind: [u8; 2], payload: &[u8]| {
+            let mut p = vec![0x00, 0x05];
+            p.extend_from_slice(&kind);
+            p.extend_from_slice(payload);
+            frame(GUEST_MAC, [0x81, 0x00], &p)
+        };
+        let frames = [
+            frame(GUEST_MAC, ip, &ipv4(17, 68, 67)),  // DHCP: not counted
+            frame(GUEST_MAC, [0x08, 0x06], &[0; 28]), // ARP: not counted
+            frame(slirp, ip, &ipv4(17, 67, 68)),      // from slirp: not counted
+            tagged([0x08, 0x06], &[0; 28]),           // ARP in a VLAN: not counted
+            tagged(ip, &ipv4(17, 68, 67)),            // DHCP in a VLAN: not counted
+            frame(GUEST_MAC, ip, &ipv4(17, 7, 17_007)), // UDP to the responder
+            frame(GUEST_MAC, ip, &ipv4(1, 0, 0)),     // ICMP
+            frame(GUEST_MAC, ip, &ipv4(6, 49_152, 17_010)), // TCP to the HTTP server
+            frame(GUEST_MAC, [0x86, 0xDD], &[0x60; 40]), // IPv6
+            tagged(ip, &ipv4(17, 7, 17_007)),         // UDP in a VLAN
+            frame(GUEST_MAC, [0x88, 0xCC], &[0; 20]), // LLDP: any other ethertype
+            frame(GUEST_MAC, ip, &[]),                // truncated IPv4 header
+        ];
+        for little in [true, false] {
+            assert_eq!(guest_frames(&pcap(little, &frames), GUEST_MAC), Some(7));
+            assert_eq!(
+                guest_frames(&pcap(little, &frames[..5]), GUEST_MAC),
+                Some(0)
+            );
+        }
+        // A truncated last record ends the count; garbage is unreadable.
+        let mut cut = pcap(true, &frames);
+        cut.truncate(cut.len() - 10);
+        assert_eq!(guest_frames(&cut, GUEST_MAC), Some(6));
+        assert_eq!(
+            guest_frames(b"not a pcap at all, not at all", GUEST_MAC),
+            None
+        );
+        assert_eq!(guest_frames(&[], GUEST_MAC), None);
     }
 
     #[test]

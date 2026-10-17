@@ -21,6 +21,8 @@ aricode-lineedit = { path = "../../libs/lineedit" }
 aricode-https = { path = "../../sdk/https" }
 aricode-tls = { path = "../../libs/tls" }
 aricode-x509 = { path = "../../libs/x509" }
+aricode-update-index = { path = "../../libs/update-index" }
+aricode-cmdline = { path = "../../libs/cmdline" }
 
 [build-dependencies]
 aricode-build = { path = "../../sdk/build" }

@@ -92,7 +92,7 @@ pub fn run(cli: &Cli, release: bool) -> Result {
 
 /// One boot to run: the scenario's only boot, or each one in `[[boots]]`.
 struct BootRun<'a> {
-    cmdline: &'a str,
+    cmdline: String,
     stdin: &'a [String],
     kill_on: Option<&'a str>,
     expect: &'a scenario::Expect,
@@ -108,7 +108,7 @@ fn run_scenario(
     let workdir = image::scenario_dir(&root, &s.name)?;
     let runs: Vec<BootRun> = if s.boots.is_empty() {
         vec![BootRun {
-            cmdline: &s.cmdline,
+            cmdline: s.boot_cmdline(&s.cmdline),
             stdin: &s.stdin,
             kill_on: None,
             expect: &s.expect,
@@ -117,7 +117,7 @@ fn run_scenario(
         s.boots
             .iter()
             .map(|b| BootRun {
-                cmdline: &b.cmdline,
+                cmdline: s.boot_cmdline(&b.cmdline),
                 stdin: &b.stdin,
                 kill_on: b.kill_on.as_deref(),
                 expect: &b.expect,
@@ -159,6 +159,45 @@ fn run_scenario(
             app.package,
         ));
     }
+    // Packages already staged for the installer (`installer` STAGED mode):
+    // the stage files and the `[staged]` section of `updater/state`.
+    if !s.staged.is_empty() || s.staged_bad_path {
+        use aricode_update_index::lists::{self, StagedEntry};
+        let mut packages = Vec::new();
+        for spec in &s.staged {
+            let (base, wrong_hash) = match spec.strip_suffix(":wrong-hash") {
+                Some(b) => (b, true),
+                None => (spec.as_str(), false),
+            };
+            let (dir, version) = crate::app_spec(base).map_err(|e| format!("{}: {e}", s.name))?;
+            let app = build::build_external(std::path::Path::new(&dir), version, release, false)?;
+            packages.push((app, wrong_hash));
+        }
+        let mut entries = Vec::new();
+        for (i, (app, wrong_hash)) in packages.iter().enumerate() {
+            let file = aricode_update_index::staged_package_file(i)
+                .ok_or_else(|| format!("{}: too many staged packages", s.name))?;
+            let mut sha256 = aricode_crypto::sha256::sha256(&app.package);
+            if *wrong_hash {
+                sha256[0] ^= 0xFF;
+            }
+            entries.push(StagedEntry {
+                file,
+                name: &app.name,
+                version: app.version,
+                sha256,
+            });
+            installed.push((aricode_update_index::main_path(file), app.package.clone()));
+        }
+        let mut body = lists::encode_staged(&entries);
+        if s.staged_bad_path {
+            body.push_str(&format!("pkgs/evil.aripkg evil 1 {}\n", "00".repeat(32)));
+        }
+        installed.push((
+            aricode_update_index::main_path(aricode_update_index::STATE_FILE),
+            lists::with_section("", lists::STAGED, &body).into_bytes(),
+        ));
+    }
     // SSH scenarios: a client key pair in the scenario directory, its
     // public half installed as `authorized_keys`.
     let ssh_key = match &s.host_ssh {
@@ -181,16 +220,47 @@ fn run_scenario(
         }
         None => None,
     };
-    if s.host_update {
-        image::publish_update_to(&image::test_update_dir(), release, 2)?;
-        installed.push((
-            String::from(image::UPDATE_URL_FILE),
-            format!(
-                "http://10.0.2.2:{}/update/\n",
-                aricode_proto::net::TEST_HTTP_PORT
-            )
-            .into_bytes(),
-        ));
+    if let Some(u) = &s.host_update {
+        let channel = image::Channel {
+            system: u.system,
+            apps: u
+                .apps
+                .iter()
+                .map(|spec| crate::app_spec(spec).map_err(|e| format!("{}: {e}", s.name)))
+                .collect::<Result<_>>()?,
+            legacy_manifest: false,
+            tamper_index: u.tamper_index,
+            tamper_image: u.tamper_image,
+        };
+        image::publish_update_to(&image::test_update_dir(), release, &channel)?;
+        let url = format!(
+            "http://10.0.2.2:{}/update/\n",
+            aricode_proto::net::TEST_HTTP_PORT
+        );
+        if u.stale_index {
+            let ahead = image::stored_copy_ahead(&image::test_update_dir(), url.trim())?;
+            installed.push((
+                aricode_update_index::main_path(aricode_update_index::INDEXES_FILE),
+                aricode_update_index::stored::encode_all(&[ahead]),
+            ));
+        }
+        match u.source.as_str() {
+            "sources" => installed.push((
+                aricode_update_index::main_path(aricode_update_index::SOURCES_FILE),
+                url.into_bytes(),
+            )),
+            "legacy-url" => installed.push((
+                aricode_update_index::main_path(aricode_update_index::LEGACY_URL_FILE),
+                url.into_bytes(),
+            )),
+            "none" => {}
+            other => {
+                return Err(format!(
+                    "{}: host_update.source '{other}': sources, legacy-url or none",
+                    s.name
+                ))
+            }
+        }
     }
     let _https = if s.host_https {
         let (servers, ca) = https_servers(&workdir.join("tls"))?;
@@ -209,7 +279,7 @@ fn run_scenario(
         } else {
             s.name.clone()
         };
-        let esp = image::build_scenario_esp(base, &root, &esp_name, run.cmdline, &s.inject)?;
+        let esp = image::build_scenario_esp(base, &root, &esp_name, &run.cmdline, &s.inject)?;
         let input = qemu::Input {
             prompt: &s.prompt,
             lines: run.stdin,
@@ -223,6 +293,7 @@ fn run_scenario(
             keys: &h.keys,
             mouse_rel: h.mouse_rel,
             click: h.click.as_deref(),
+            key_delay_ms: h.key_delay_ms,
         });
         let ssh_probe = match (&s.host_ssh, &ssh_key) {
             (Some(h), Some(key)) => Some(qemu::SshProbe {
@@ -247,8 +318,12 @@ fn run_scenario(
             usb: qemu::UsbOptions {
                 hid: s.usb_hid,
                 hid_msi: s.usb_hid_msi,
+                hid_only_input: s.usb_hid_only_input,
                 legacy_controller: s.usb_legacy_controller,
                 storage: s.usb_storage,
+                ehci_hid: s.usb_ehci_hid,
+                ehci_storage: s.usb_ehci_storage,
+                ehci_companion_kbd: s.usb_ehci_companion_kbd,
             },
         };
         let cap = qemu::run_headless(
