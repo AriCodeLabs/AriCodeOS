@@ -71,7 +71,8 @@ For a request/reply call (ADR 0012) this gives:
    with `process_wait`. It is now released when the process is reaped
    (right after its address space and IOMMU domain), so a dead server's
    receive side and the reply capabilities it held close at once, whether
-   or not anybody waits for it.
+   or not anybody waits for it. They are released and settled before the
+   process is marked reaped.
 5. **`endpoint_create_pair` (syscall 34)** returns a receive handle
    (`READ|DUPLICATE|TRANSFER|MANAGE`) and a send handle
    (`WRITE|DUPLICATE|TRANSFER`) in one call. `rpc::call` uses it: the
@@ -85,12 +86,16 @@ For a request/reply call (ADR 0012) this gives:
    on every endpoint a service served (its endpoint and, for a USB
    controller, the block endpoint) when it gives the service up (budget
    exhausted or `strict`): it is the holder of the receive side that knows
-   nobody will serve it again. While a restart is pending, queued requests
-   wait for the next generation, as ADR 0012 promised.
+   nobody will serve it again. It does not when the process could not be
+   killed (it may still be serving). While a restart is pending, queued
+   requests wait for the next generation, as ADR 0012 promised.
 7. **ABI version 4**: new error code, two new syscalls, and the changed
    meaning of sends to an endpoint nobody can receive from (they used to
-   succeed and the message was lost; a late reply now gets `PeerClosed`,
-   which servers already ignore).
+   succeed and the message was lost; a late reply now gets `PeerClosed`).
+   Most servers ignore the result of a reply send; usb-input reports it
+   (`block reply undelivered`, a fault event), and now does so whenever a
+   client gave up before the reply, as its comment always intended. A
+   handle listed twice in `ipc_send` or `process_spawn` is `Invalid`.
 
 ## Consequences
 
@@ -113,9 +118,51 @@ For a request/reply call (ADR 0012) this gives:
 - A closed side never reopens: an endpoint closed by `endpoint_close` or by
   losing its receive side cannot be served again; a supervisor that wants
   to serve again creates a new endpoint.
+- **`PeerClosed` and `Revoked` are permanent** (`Error::endpoint_gone`).
+  A client must stop retrying an endpoint that reported either: the error
+  comes back at once forever, so a polling loop that treats it like a
+  timeout spins. console-bridge and the compositor drop that input device
+  (logged once); fsd, virtio-blk, virtio-input, net-core and usb-input exit
+  when their service endpoints are closed; sshd exits when the network
+  service is gone. `Timeout` keeps meaning "try again later".
+- Kernel threads: a capability a kernel thread drops outside a syscall and
+  outside `reap()` (self-tests) is settled at the next syscall or reap on
+  any CPU.
+- `endpoint_create_pair` packs two 32-bit handles into the 64-bit result;
+  handles carry their generation in the high 16 bits, so the value can be
+  negative as an `i64`, but it never falls in the error range
+  (-4095..=-1), which would need a handle index far above `HANDLE_LIMIT`
+  (asserted in debug builds).
+- Releasing a reaped process's capabilities runs in `reap()` with
+  interrupts disabled, like the address space release it follows. It is
+  bounded (at most 256 capabilities; a closing endpoint discards at most 16
+  messages of 4 capabilities each, iteratively) and measured: above 1 ms
+  it is logged and recorded as a `slow capability release` fault event.
+  Capabilities are released and their endpoints settled before the process
+  counts as reaped, so `process_wait` returns after they are gone.
 - Not covered: a server alive but stuck (it holds the request and never
   answers) still costs the full wait; the client's deadline is not carried
-  in the protocols (incident 0001, open item).
+  in the protocols (incident 0001, open item). Reference cycles through
+  queues leak: an endpoint whose own `READ` capability sits in its queue
+  (directly or through other endpoints' queues) never loses its receive
+  side, so neither closes nor is freed. This was already an `Arc` cycle
+  before; counting does not make it worse, and breaking it needs a
+  collector or a rule against queuing an endpoint's receive side on
+  itself.
+
+## Resolution of audit 1 (`docs/audits/robustness-audit-1.md`)
+
+- B1: services stop using an endpoint that is gone (consequence above).
+- B2: history rebuilt so every commit builds; this ADR renumbered to 0030.
+- B3: the QEMU suite is run centrally.
+- M1, L4, L5: sshd (ADR 0025 note).
+- M2, M3, L1, L3: kernel (consequences above; `settle_closed` loads the
+  flag before swapping it).
+- M4: pre-existing, incident 0004, not fixed here.
+- L2, L7: documented above. L6: init's probes use reply pairs. L8: the
+  SMP self-test warns when migration takes over 1 s (incident 0002).
+- Reviewer 1: init does not close the endpoints of a service it could not
+  kill (it may still be serving).
 
 ## Rejected alternatives
 
