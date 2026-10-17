@@ -3738,6 +3738,60 @@ photos and four ADRs:
 Next: power management (sleep states, battery), more laptop devices
 (EHCI; Wi-Fi out of scope for now) and continuing stage 5.
 
+## 94.10 AriCodeOS 0.10
+
+**Status: completed (2026-10-17), tag `v0.10.0`.** The laptop became a
+machine you reach and update over the network, and the project adopted
+a failure protocol after its first hard hardware incident. Four ADRs,
+three incidents, licensed under Apache-2.0.
+
+- whole project in English (code, messages, documentation, tests); the
+  Spanish README is a translation;
+- full console line editing (cursor, insert and delete anywhere,
+  history) and ACPI power-off (FADT, `\_S5_`), verified on the laptop;
+- SSH server (ADR 0025): curve25519-sha256 with strict KEX, ssh-ed25519,
+  chacha20-poly1305@openssh.com, public-key login only, closed by
+  default without `authorized_keys`, session shells launched by init,
+  host key generated on the build host, refused keys logged, idle
+  clients dropped after 30 s; tested against the OpenSSH client;
+- HTTPS (ADR 0026): TLS 1.3 client with X.509 chain, host name, date
+  (CMOS real-time clock) and key-usage checks, 17 embedded roots, the
+  crypto it needs (SHA-384, HMAC, HKDF, AES-GCM, ChaCha20-Poly1305, RSA
+  and ECDSA verification); tested against RFC 8448 and `openssl
+  s_server`, and on real sites from the laptop;
+- an external audit of SSH and HTTPS (three findings, all fixed with
+  regression tests);
+- network updates (ADR 0027): `update` downloads a signed system image
+  from a channel over HTTP(S) into the A/B scheme, `cargo xtask
+  serve-update` publishes it; verified on the laptop, versions 2 to 5
+  installed and booted without the USB stick;
+- DHCP probes the offered address with ARP and declines it when another
+  host uses it;
+- failure protocol (ADR 0028, `docs/FAILURE-PROTOCOL.md`): failures are
+  never hidden, `strict` halts the failing component with a state dump
+  instead of looping, every anomaly is a fault event in `diag`, doubt
+  triggers independent studies before any change, every fix is audited;
+- incident 0001, the USB stick: three independent studies and four audit
+  rounds rebuilt the storage driver's error handling to the xHCI and
+  Bulk-Only Transport specifications (endpoint recovery at every stage,
+  no command while another is outstanding, timed-out transfers retired,
+  re-enumeration of a device that drops, bounded budgets below the
+  clients' waits, REQUEST SENSE after a failed command); measurements on
+  the laptop and under Linux then showed the cause: the stick confirms
+  some writes seconds after accepting them, so SCSI commands get the
+  30 s window SCSI stacks use; the network update that failed every
+  time now completes;
+- incident 0003: a test run had overwritten the real update channel;
+  the scenarios now use their own directory;
+- authorship and license: Apache-2.0, NOTICE with the attribution
+  requirement, SPDX headers in every source, AUTHORS, notices for AI
+  systems.
+
+Open: IPC peer-gone notification (a client of a dead server waits its
+full timeout), the `update`/`upgrade` protocol with sources, HID
+endpoint recovery, Reset Device for re-enumeration, EHCI, incident 0003
+reproduction, the SMP self-test under host load (incident 0002).
+
 ---
 
 # 95. Real hardware: the right moment
