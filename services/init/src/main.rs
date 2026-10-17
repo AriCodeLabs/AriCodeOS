@@ -348,7 +348,10 @@ fn start_storage_stack(sup: &mut Supervisor, service: Handle) -> Result<Handle, 
         say(b"fsd did not start");
         return Err(13);
     }
-    match run_block_client("fs_client", fs_ep, 0) {
+    // fsd is watched while its test client runs: if it dies for good (a
+    // corrupt AriFS), the supervisor closes its endpoint and the client
+    // fails at once instead of waiting its full reply timeout.
+    match run_block_client_supervised("fs_client", fs_ep, 0, sup) {
         Ok(0) => say(b"file service ok"),
         Ok(code) => {
             sys::print(b"AriInit: fs_client exited with ");
@@ -492,6 +495,33 @@ struct Resident {
     endpoint: Handle,
     process: Option<Handle>,
     sup: Service,
+}
+
+impl Resident {
+    /// The service will not be relaunched: closes the endpoints it served
+    /// (ADR 0030). init keeps their receive side for the next generation,
+    /// so without this the kernel cannot tell that nobody will serve them
+    /// and every client would wait its full reply timeout; closed, queued
+    /// and future requests fail at once with `PeerClosed`.
+    fn retire_endpoints(&self) {
+        let block = match self.kind {
+            Kind::Driver { block, .. } => block,
+            _ => None,
+        };
+        let mut closed = false;
+        for ep in [Some(self.endpoint), block]
+            .into_iter()
+            .flatten()
+            .filter(|h| h.0 != 0)
+        {
+            closed |= sys::endpoint_close(ep).is_ok();
+        }
+        if closed {
+            sys::print(b"AriInit: endpoints of ");
+            sys::print(self.name.as_bytes());
+            sys::print(b" closed: their clients fail at once\n");
+        }
+    }
 }
 
 const MAX_RESIDENTS: usize = 10;
@@ -724,6 +754,9 @@ impl Supervisor {
                     b"required service failed\n"
                 });
             }
+        }
+        if !matches!(action, Action::Restart { .. }) {
+            r.retire_endpoints();
         }
     }
 
@@ -962,10 +995,32 @@ const RAW_AREA_OFFSET: u64 = 4096 - 34;
 /// Launches a client of a service with its endpoint (WRITE only) and a
 /// hardware capability for its DMA buffer, and waits for it to exit.
 fn run_block_client(name: &str, service: Handle, arg: u64) -> Result<u64, Error> {
+    let child = spawn_block_client(name, service, arg)?;
+    let result = sys::process_wait(child, TIMEOUT_INFINITE);
+    let _ = sys::handle_close(child);
+    result
+}
+
+fn spawn_block_client(name: &str, service: Handle, arg: u64) -> Result<Handle, Error> {
     let ep = sys::handle_duplicate(service, rights::WRITE | rights::TRANSFER)?;
     let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
-    let child = sys::process_spawn_with(SPAWNER, name, arg, &[ep, hw])?;
-    let result = sys::process_wait(child, TIMEOUT_INFINITE);
+    sys::process_spawn_with(SPAWNER, name, arg, &[ep, hw])
+}
+
+/// Like `run_block_client`, polling the supervisor while the client runs.
+fn run_block_client_supervised(
+    name: &str,
+    service: Handle,
+    arg: u64,
+    sup: &mut Supervisor,
+) -> Result<u64, Error> {
+    let child = spawn_block_client(name, service, arg)?;
+    let result = loop {
+        match sys::process_wait(child, 100) {
+            Err(Error::Timeout) => sup.poll(),
+            other => break other,
+        }
+    };
     let _ = sys::handle_close(child);
     result
 }

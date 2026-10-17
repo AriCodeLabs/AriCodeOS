@@ -12,11 +12,12 @@
 //! the handles [`handle::SELF_PROCESS`], [`handle::MAIN_THREAD`] and
 //! [`handle::CONSOLE`].
 //!
-//! During `0.x` the ABI may change (section 74). Current version: 2.
+//! During `0.x` the ABI may change (section 74). Current version: 4
+//! (ADR 0030: `Error::PeerClosed`, `endpoint_create_pair`, `endpoint_close`).
 
 #![no_std]
 
-pub const ABI_VERSION: u32 = 3;
+pub const ABI_VERSION: u32 = 4;
 
 /// Initial handles of every process.
 pub mod handle {
@@ -123,17 +124,37 @@ pub mod nr {
     /// `object_id(handle) -> tid | pid`; requires `READ`. The console returns 0.
     pub const OBJECT_ID: u64 = 9;
     /// `object_revoke(handle)`: invalidates the object for all its handles,
-    /// in every process; requires `MANAGE`.
+    /// in every process; requires `MANAGE`. Revoking an endpoint also closes
+    /// both of its sides: queued messages are discarded and every thread
+    /// waiting on it wakes with [`Error::PeerClosed`] (ADR 0030).
     pub const OBJECT_REVOKE: u64 = 10;
     /// `endpoint_create() -> handle` with `READ|WRITE|DUPLICATE|TRANSFER|MANAGE`.
     pub const ENDPOINT_CREATE: u64 = 11;
+    /// `endpoint_create_pair() -> receive | send << 32`: a new endpoint with
+    /// its two sides in separate handles, the receive one with
+    /// `READ|DUPLICATE|TRANSFER|MANAGE` and the send one with
+    /// `WRITE|DUPLICATE|TRANSFER` (ADR 0030). A reply endpoint made this way
+    /// reports [`Error::PeerClosed`] to its receiver once every send handle
+    /// is gone, instead of letting it wait for its deadline.
+    pub const ENDPOINT_CREATE_PAIR: u64 = 34;
+    /// `endpoint_close(ep)`: requires `MANAGE` on the endpoint. Closes both
+    /// of its sides for every holder (ADR 0030): queued messages are
+    /// discarded, and sends and receives, waiting or not, fail with
+    /// [`Error::PeerClosed`] from then on. Unlike `object_revoke` the
+    /// handles stay valid. For a supervisor that gives up on a service
+    /// whose endpoint it keeps.
+    pub const ENDPOINT_CLOSE: u64 = 35;
     /// `ipc_send(ep, data_ptr, data_len, handles_ptr, handles_len, timeout_ms)`;
     /// requires `WRITE` on `ep` and `TRANSFER` on each handle sent (which
     /// is removed from the sender). `timeout_ms`: 0 = do not block,
-    /// [`TIMEOUT_INFINITE`] = wait forever.
+    /// [`TIMEOUT_INFINITE`] = wait forever. [`Error::PeerClosed`] once no
+    /// `READ` handle on the endpoint exists any more (ADR 0030), also for a
+    /// sender already waiting for room in the queue.
     pub const IPC_SEND: u64 = 12;
     /// `ipc_receive(ep, buf_ptr, buf_len, handles_out_ptr, handles_max, timeout_ms)
     /// -> data_len | (handles_received << 32)`; requires `READ` on `ep`.
+    /// Queued messages are delivered first; then [`Error::PeerClosed`] once
+    /// no `WRITE` handle on the endpoint exists any more (ADR 0030).
     pub const IPC_RECEIVE: u64 = 13;
     /// `process_spawn(spawner, name_ptr, name_len, arg, handles_ptr, handles_len)
     /// -> process handle`; requires `MANAGE` on a `SPAWNER` object and
@@ -196,7 +217,8 @@ pub mod nr {
     /// `ipc_receive_any(handles_ptr, count, buf_ptr, buf_len, out_ptr, timeout_ms)
     /// -> len | n << 32 | index << 48`: receives from the first of up to
     /// `IPC_MAX_ANY` endpoints (`READ` on all) that has a message; `out_ptr`
-    /// holds `IPC_MAX_HANDLES` handles (ADR 0020).
+    /// holds `IPC_MAX_HANDLES` handles (ADR 0020). [`Error::PeerClosed`]
+    /// only when every endpoint is empty and has lost its send side.
     pub const IPC_RECEIVE_ANY: u64 = 31;
     /// `process_kill(process)`: requires `MANAGE` on the process. Terminates it
     /// as if it had faulted (`Killed`, reason "terminated by the
@@ -663,6 +685,12 @@ pub enum Error {
     Killed = 11,
     /// No file with that name exists in the initrd.
     NotFound = 12,
+    /// The other side of the endpoint is gone (ADR 0030): a send finds no
+    /// `READ` handle left (the server exited or closed it, or the endpoint
+    /// was revoked), or a receive finds the queue empty and no `WRITE`
+    /// handle left (for a reply endpoint: the server dropped the request
+    /// without answering, typically because it died).
+    PeerClosed = 13,
 }
 
 impl Error {
@@ -684,6 +712,7 @@ impl Error {
             10 => Some(Error::TooBig),
             11 => Some(Error::Killed),
             12 => Some(Error::NotFound),
+            13 => Some(Error::PeerClosed),
             _ => None,
         }
     }
@@ -764,6 +793,8 @@ mod tests {
         assert_eq!(Error::Fault.to_raw(), -2);
         assert_eq!(Error::from_raw(-2), Some(Error::Fault));
         assert_eq!(Error::from_raw(-99), None);
+        assert_eq!(Error::PeerClosed.to_raw(), -13);
+        assert_eq!(decode(-13), Err(Error::PeerClosed));
         assert_eq!(decode(-1), Err(Error::NoSys));
         assert_eq!(
             decode(-4096),

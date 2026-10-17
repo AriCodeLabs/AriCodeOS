@@ -529,3 +529,21 @@ fsd refuses a corrupt AriFS and exits) learns it only when its own wait
 expires (now 120 s for the file client, 90 s for the block client), not
 at once. The kernel has no "peer gone" notification on IPC endpoints;
 until it has one, the scenario's timeout is 200 s. Open item.
+
+## Follow-ups landed (2026-10-17, branch `fix/robustness-incidents`)
+
+- **Peer gone on IPC** ([ADR 0030](../decisions/0030-ipc-peer-closed.md)).
+  The kernel counts the `READ` and `WRITE` capabilities of every endpoint
+  and releases a process's handles when it is reaped. A client whose
+  request the server died holding, or whose request sat in the queue of
+  an endpoint that lost its last receiver, gets `Error::PeerClosed` at
+  once; so does a send to such an endpoint. init keeps the receive side of
+  supervised endpoints for the next generation, so it closes them
+  (`endpoint_close`) when it gives a service up: in `strict` mode a dead
+  `usb_input` now closes its block endpoint at once and fsd's block
+  requests fail immediately instead of after 90 s. The waits of the chain
+  above are unchanged: they only apply now to a server that is alive and
+  slow. `filesystem.corrupt_detected` is back to a 60 s timeout (init
+  watches fsd while its test client runs and closes the endpoint once the
+  restart budget is spent). Not run yet in QEMU on this branch: scenarios
+  `ipc.peer_closed` (new) and `filesystem.corrupt_detected`.

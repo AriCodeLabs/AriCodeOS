@@ -1,0 +1,25 @@
+# ADR 0030 (incident 0001, known limitation): a client whose server is gone
+# learns it at once with PeerClosed instead of waiting its reply timeout.
+# The kernel self-test runs four cases with a 30 s client wait each and
+# fails any case that takes 5 s or more: the server dies holding the
+# request, dies with the request queued, dies with a sender blocked on a
+# full queue, and the endpoint-local cases (send side gone, receive side
+# gone, ipc_receive_any, endpoint_close, revocation).
+name = "ipc.peer_closed"
+description = "test=ipc_peer: dead server reported at once with PeerClosed (held request, queued request, blocked sender, local cases)"
+level = "full"
+areas = ["ipc", "user"]
+cmdline = "qemu_exit test=ipc_peer"
+timeout_secs = 40
+
+[expect]
+exit = 33
+serial_contains = [
+    "peer_client: case 1 ok",
+    "peer_client: case 2 ok",
+    "peer_client: case 3 ok",
+    "peer_client: case 4 ok",
+    "ipc peer closed selftest ok",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "USER FAULT"]

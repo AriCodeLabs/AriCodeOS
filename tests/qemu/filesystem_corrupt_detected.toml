@@ -2,18 +2,24 @@
 # byte and its CRC does not match. fsd detects it and refuses to mount; init does not
 # accept the file service and exits with code 14 instead of
 # carrying on with data that cannot be trusted.
+# ADR 0030: init supervises fsd while its test client runs; once the restart
+# budget is exhausted it closes fsd's endpoint and the client's queued
+# request fails at once with PeerClosed (it used to wait the file client's
+# full 120 s reply timeout, so this scenario needed 200 s).
 name = "filesystem.corrupt_detected"
-description = "AriFS with corrupt metadata: fsd does not mount and the boot reflects it"
+description = "AriFS with corrupt metadata: fsd does not mount, its endpoint is closed and the boot reflects it at once"
 level = "full"
 areas = ["filesystem", "storage", "init"]
 cmdline = "qemu_exit"
 disk = "fs-corrupt"
-timeout_secs = 200
+timeout_secs = 60
 
 [expect]
 exit = 33
 serial_contains = [
     "fsd: AriFS corrupt: not mounting",
+    "AriInit: service fsd exited; restart budget exhausted: required service failed",
+    "AriInit: endpoints of fsd closed: their clients fail at once",
     "AriInit: fs_client exited with 2",
     "init exited with code 14",
     "ARICODEOS_KERNEL_READY",

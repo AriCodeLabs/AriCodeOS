@@ -29,7 +29,10 @@ contract for failures, deadlines and retries.
    can be retried.
 4. **Dead server**: the client gets `Timeout`; with the supervisor
    (ADR 0011) the endpoint stays valid and the next generation
-   serves new requests.
+   serves new requests. Superseded in part by ADR 0030: a request the
+   dead server held, or one queued on an endpoint with no receiver left,
+   ends at once with `PeerClosed`; `Timeout` remains for a server that is
+   alive and slow.
 
 ## Consequences
 

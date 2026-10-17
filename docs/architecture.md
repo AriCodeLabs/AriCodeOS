@@ -372,7 +372,8 @@ latter briefly to add the region.
   `irq_wait`, `mmio_map`, `region_len`, `dma_alloc`, `dma_phys`, `pci_count`,
   `pci_info`, `pci_claim`, `console_read`, `system_info`, `system_power`,
   `initrd_read`, `pci_info_ext`, `console_inject`, `process_spawn_from`,
-  `ipc_receive_any`, `process_kill` (`MANAGE` on the process: marks it for
+  `ipc_receive_any`, `endpoint_create_pair`, `endpoint_close` (ADR 0030),
+  `process_kill` (`MANAGE` on the process: marks it for
   termination and wakes its thread, which exits on leaving the current
   syscall, on waking from a wait, or on the next tick if it was in
   ring 3; `process_wait` returns `Killed`; audit 6ee19fb, 4).
@@ -430,7 +431,19 @@ latter briefly to add the region.
   and receivers) and a send counter. `endpoint_create` gives the creator
   `READ|WRITE|DUPLICATE|TRANSFER|MANAGE`; the usual client/server
   model is: the client creates a reply endpoint and sends in each
-  message a duplicate with `WRITE|TRANSFER`.
+  message a duplicate with `WRITE|TRANSFER` (the SDK uses
+  `endpoint_create_pair`, which splits the two sides into two handles).
+- Peer gone (ADR 0030): the kernel counts the capabilities of each side
+  of an endpoint (`object::Cap`: `READ` = receive side, `WRITE` = send
+  side) wherever they live: handle tables, messages in flight, lists of
+  handles for a new process. A process's handles are released when it is
+  reaped. When the last capability of a side goes, the side closes for
+  good: with no receiver the queue is discarded and every present and
+  future send fails with `PeerClosed`; with no sender a receiver gets the
+  queued messages and then `PeerClosed`. The work after the close (discard
+  the queue, wake the waiters) runs in `ipc::settle_closed` at the end of
+  each syscall and after reaping, never under a lock.
+  `object_revoke` and `endpoint_close` (`MANAGE`) close both sides.
 - `ipc_send` requires `WRITE` on the endpoint and `TRANSFER` on each handle;
   handles are removed from the sender only once the queue confirms the slot
   (`Endpoint::send_with` builds the message inside the critical section),

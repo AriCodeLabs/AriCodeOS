@@ -5,6 +5,7 @@
 
 use crate::arch::x86_64::usermode;
 use crate::memory::{phys, pmm, vmm};
+use crate::object::Cap;
 use crate::sync::IrqLock;
 use crate::task::scheduler;
 use alloc::collections::BTreeMap;
@@ -116,7 +117,7 @@ pub fn spawn(name: &str, elf_bytes: &[u8]) -> Result<Pid, &'static str> {
     spawn_with_handles(name, elf_bytes, Vec::new())
 }
 
-/// Extra capabilities and the `_start` argument.
+/// Extra capabilities (objects the kernel grants) and the `_start` argument.
 pub fn spawn_with_handles_and_arg(
     name: &str,
     elf_bytes: &[u8],
@@ -124,7 +125,29 @@ pub fn spawn_with_handles_and_arg(
     arg: u64,
     dma_quota: u64,
 ) -> Result<Pid, &'static str> {
+    spawn_with_caps(name, elf_bytes, grants(extra), arg, dma_quota)
+}
+
+/// Like `spawn_with_handles_and_arg` with capabilities that already exist
+/// (taken from the parent's table): they move into the child as they are.
+pub fn spawn_with_caps(
+    name: &str,
+    elf_bytes: &[u8],
+    extra: Vec<(Cap, aricode_handles::Rights)>,
+    arg: u64,
+    dma_quota: u64,
+) -> Result<Pid, &'static str> {
     spawn_full(name, elf_bytes, extra, arg, dma_quota)
+}
+
+/// Capabilities for objects the kernel grants to a new process.
+fn grants(
+    extra: Vec<(crate::object::ObjectRef, aricode_handles::Rights)>,
+) -> Vec<(Cap, aricode_handles::Rights)> {
+    extra
+        .into_iter()
+        .map(|(obj, rights)| (Cap::new(obj, rights), rights))
+        .collect()
 }
 
 /// Base of user MMIO/DMA mappings.
@@ -137,13 +160,13 @@ pub fn spawn_with_handles(
     elf_bytes: &[u8],
     extra: Vec<(crate::object::ObjectRef, aricode_handles::Rights)>,
 ) -> Result<Pid, &'static str> {
-    spawn_full(name, elf_bytes, extra, 0, 0)
+    spawn_full(name, elf_bytes, grants(extra), 0, 0)
 }
 
 fn spawn_full(
     name: &str,
     elf_bytes: &[u8],
-    extra: Vec<(crate::object::ObjectRef, aricode_handles::Rights)>,
+    extra: Vec<(Cap, aricode_handles::Rights)>,
     arg: u64,
     dma_quota: u64,
 ) -> Result<Pid, &'static str> {
@@ -403,12 +426,18 @@ pub fn release_address_space(pid: u32) {
         log::debug!("user: address space of process {pid} freed ({n} frames)");
     }
     crate::iommu::release(pid);
-    // Fully reaped: now it can be removed from the table.
-    let waiters = PROCESSES.lock().get_mut(&Pid(pid)).map(|p| {
+    // Fully reaped: the capabilities go now (not when a parent gets around
+    // to `wait`), so the endpoints this process served or was to answer on
+    // close at once (ADR 0030). Dropped outside the process table lock.
+    let reaped = PROCESSES.lock().get_mut(&Pid(pid)).map(|p| {
         p.reaped = true;
-        p.exit_wait.clone()
+        (
+            p.exit_wait.clone(),
+            core::mem::replace(&mut p.handles, aricode_handles::HandleTable::new(0)),
+        )
     });
-    if let Some(w) = waiters {
+    if let Some((w, handles)) = reaped {
+        drop(handles);
         w.wake_all();
     }
 }

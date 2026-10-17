@@ -419,6 +419,9 @@ fn reap() {
         }
         drop(z);
     }
+    // Endpoints closed by the capabilities just released (ADR 0030), or by
+    // any capability dropped outside a syscall: no lock is held here.
+    crate::ipc::settle_closed();
 }
 
 /// `true` if `addr` falls in the guard page of some thread's stack. Used

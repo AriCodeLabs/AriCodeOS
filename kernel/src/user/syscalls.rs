@@ -6,7 +6,7 @@
 use super::process;
 use crate::arch::x86_64::syscall::SyscallFrame;
 use crate::ipc::Message;
-use crate::object::{abi_error, lookup, KernelObject, ObjectKind, ObjectRef};
+use crate::object::{abi_error, insert, lookup, Cap, KernelObject, ObjectKind, ObjectRef};
 use crate::task::scheduler;
 use alloc::vec::Vec;
 use aricode_abi::{nr, Error, ABI_VERSION, IPC_MAX_DATA, IPC_MAX_HANDLES};
@@ -31,9 +31,11 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         nr::HANDLE_CLOSE => with_handles(|t| t.remove(h).map(|_| 0).map_err(abi_error)),
         nr::HANDLE_DUPLICATE => with_handles(|t| {
             lookup(t, h, Rights::NONE)?;
-            t.duplicate(h, Rights(frame.rsi as u32))
-                .map(|n| n.0 as u64)
-                .map_err(abi_error)
+            t.duplicate(h, Rights(frame.rsi as u32), |cap, rights| {
+                Cap::new(cap.object().clone(), rights)
+            })
+            .map(|n| n.0 as u64)
+            .map_err(abi_error)
         }),
         nr::OBJECT_KIND => with_handles(|t| lookup(t, h, Rights::NONE).map(|o| o.kind_code())),
         nr::OBJECT_ID => with_handles(|t| lookup(t, h, Rights::READ).map(|o| o.id())),
@@ -48,8 +50,10 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
                 .union(Rights::DUPLICATE)
                 .union(Rights::TRANSFER)
                 .union(Rights::MANAGE);
-            t.insert(ep, rights).map(|h| h.0 as u64).map_err(abi_error)
+            insert(t, ep, rights).map(|h| h.0 as u64)
         }),
+        nr::ENDPOINT_CREATE_PAIR => with_handles(endpoint_create_pair),
+        nr::ENDPOINT_CLOSE => endpoint_close(h),
         nr::IRQ_WAIT => irq_wait(h, frame.rsi),
         nr::MMIO_MAP => mmio_map(h),
         nr::REGION_LEN => with_handles(|t| match lookup(t, h, Rights::READ)?.kind {
@@ -95,6 +99,9 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
             Err(Error::NoSys)
         }
     };
+    // Endpoints whose last capability of a side this syscall dropped
+    // (ADR 0030): their queues and waiters are settled with no lock held.
+    crate::ipc::settle_closed();
     // A termination requested by another process runs here, with the
     // syscall already complete and no locks held (audit 6ee19fb, finding 4).
     if process::current_kill_requested() {
@@ -279,6 +286,48 @@ fn system_power(h: Handle, action: u64) -> Result<u64, Error> {
     }
 }
 
+/// `endpoint_create_pair` (ADR 0030): the receive side and the send side of
+/// a new endpoint in two handles, so the creator can give the send side
+/// away and keep none of it (a reply endpoint learns that the server is
+/// gone when its last send capability is).
+fn endpoint_create_pair(t: &mut crate::object::Handles) -> Result<u64, Error> {
+    let ep = KernelObject::new(ObjectKind::Endpoint(crate::ipc::Endpoint::new()));
+    let receive = insert(
+        t,
+        ep.clone(),
+        Rights::READ
+            .union(Rights::DUPLICATE)
+            .union(Rights::TRANSFER)
+            .union(Rights::MANAGE),
+    )?;
+    let send = Rights::WRITE
+        .union(Rights::DUPLICATE)
+        .union(Rights::TRANSFER);
+    match insert(t, ep, send) {
+        Ok(s) => Ok(receive.0 as u64 | (s.0 as u64) << 32),
+        Err(e) => {
+            let _ = t.remove(receive);
+            Err(e)
+        }
+    }
+}
+
+/// `endpoint_close` (ADR 0030): with `MANAGE`, closes both sides of the
+/// endpoint for every holder, without invalidating the handles (unlike
+/// revocation, they can still be duplicated and passed on). A supervisor
+/// that keeps the receive side for the next generation of a service uses
+/// it when it gives the service up.
+fn endpoint_close(h: Handle) -> Result<u64, Error> {
+    let obj = endpoint_of(h, Rights::MANAGE)?;
+    let ObjectKind::Endpoint(endpoint) = &obj.kind else {
+        unreachable!()
+    };
+    if endpoint.shut_down() {
+        crate::ipc::settle_later(obj.clone());
+    }
+    Ok(0)
+}
+
 /// Endpoint behind a handle with `required`, or `Invalid` if the object is not an endpoint.
 fn endpoint_of(h: Handle, required: Rights) -> Result<ObjectRef, Error> {
     with_handles(|t| {
@@ -322,7 +371,7 @@ fn ipc_send(
         unreachable!()
     };
     endpoint.send_with(timeout_ms, || {
-        let handles: Vec<(ObjectRef, Rights)> = with_handles(|t| {
+        let handles: Vec<(Cap, Rights)> = with_handles(|t| {
             user_handles
                 .iter()
                 .map(|uh| t.take(*uh).map_err(abi_error))
@@ -507,7 +556,7 @@ fn spawn_from_bytes(
         .map(|c| Handle(u32::from_le_bytes(*c)))
         .collect();
     // Validate all before removing any.
-    let extra: Vec<(ObjectRef, Rights)> = with_handles(|t| {
+    let extra: Vec<(Cap, Rights)> = with_handles(|t| {
         for uh in &user_handles {
             lookup(t, *uh, Rights::TRANSFER)?;
         }
@@ -516,7 +565,7 @@ fn spawn_from_bytes(
             .map(|uh| t.take(*uh).map_err(abi_error))
             .collect()
     })?;
-    let pid = match process::spawn_with_handles_and_arg(name, elf, extra, arg, dma_quota) {
+    let pid = match process::spawn_with_caps(name, elf, extra, arg, dma_quota) {
         Ok(pid) => pid,
         Err(e) => {
             warn!("process_spawn '{name}': {e}");
@@ -528,9 +577,7 @@ fn spawn_from_bytes(
         .union(Rights::MANAGE)
         .union(Rights::DUPLICATE);
     with_handles(|t| {
-        t.insert(KernelObject::new(ObjectKind::Process(pid)), rights)
-            .map(|h| h.0 as u64)
-            .map_err(abi_error)
+        insert(t, KernelObject::new(ObjectKind::Process(pid)), rights).map(|h| h.0 as u64)
     })
 }
 
@@ -552,7 +599,7 @@ fn pci_claim(root: Handle, index: usize, out_ptr: u64) -> Result<u64, Error> {
         let mut out = Vec::with_capacity(aricode_abi::PCI_CLAIM_HANDLES * 4);
         for slot in claimed.handles {
             let value = match slot {
-                Some((obj, rights)) => t.insert(obj, rights).map_err(abi_error)?.0,
+                Some((obj, rights)) => insert(t, obj, rights)?.0,
                 None => 0,
             };
             out.extend_from_slice(&value.to_le_bytes());
@@ -693,5 +740,5 @@ fn dma_alloc(h: Handle, len: u64) -> Result<u64, Error> {
         .union(Rights::WRITE)
         .union(Rights::DUPLICATE)
         .union(Rights::TRANSFER);
-    with_handles(|t| t.insert(dma, rights).map(|h| h.0 as u64).map_err(abi_error))
+    with_handles(|t| insert(t, dma, rights).map(|h| h.0 as u64))
 }

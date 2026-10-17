@@ -4,8 +4,16 @@
 //! carries its own reply endpoint, which is closed when done, and every wait
 //! is bounded. A late reply reaches a closed endpoint and is lost: it is
 //! never attributed to another request.
+//!
+//! A server that is gone is reported at once (ADR 0030): the client keeps
+//! only the receive side of its reply endpoint and the send side travels
+//! with the request, so `Error::PeerClosed` comes back as soon as the
+//! service endpoint has no receiver left (on the send) or the request is
+//! dropped unanswered (on the reply wait: the server died holding it, or
+//! it was discarded from the queue of a server that is gone). The full
+//! reply wait is only spent on a server that is alive and slow.
 
-use crate::{self as sys, rights, Error, Handle};
+use crate::{self as sys, Error, Handle};
 
 /// Extra handles a request may carry besides the reply one.
 pub const MAX_EXTRA: usize = 3;
@@ -48,9 +56,8 @@ pub fn call_handles(
     if extra.len() > MAX_EXTRA {
         return Err(Error::Invalid);
     }
-    let reply = sys::endpoint_create()?;
+    let (reply, reply_w) = sys::endpoint_create_pair()?;
     let result = (|| {
-        let reply_w = sys::handle_duplicate(reply, rights::WRITE | rights::TRANSFER)?;
         let mut handles = [Handle(0); MAX_EXTRA + 1];
         handles[0] = reply_w;
         handles[1..1 + extra.len()].copy_from_slice(extra);

@@ -4,26 +4,39 @@
 //! transfer, blocking with timeout and wake-up through wait queues. The
 //! centerpiece of the microkernel (section 23).
 
-use crate::object::ObjectRef;
+use crate::object::{Cap, ObjectKind, ObjectRef};
 use crate::sync::IrqLock;
 use crate::task::wait::WaitQueue;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use aricode_abi::{Error, IPC_QUEUE_CAPACITY, TIMEOUT_INFINITE};
 use aricode_handles::Rights;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 pub struct Message {
     pub data: Vec<u8>,
     /// Transferred capabilities: already removed from the sender.
-    pub handles: Vec<(ObjectRef, Rights)>,
+    pub handles: Vec<(Cap, Rights)>,
 }
 
+/// An endpoint has two sides (ADR 0030): the receive side is every
+/// capability with `READ` on it, the send side every capability with
+/// `WRITE`. When the last capability of a side is dropped (handle closed,
+/// process reaped, message discarded) that side closes for good: no
+/// capability can be made for it again, since duplicating needs one.
 pub struct Endpoint {
     queue: IrqLock<VecDeque<Message>>,
     receivers: WaitQueue,
     senders: WaitQueue,
     sent: AtomicU64,
+    receive_caps: AtomicUsize,
+    send_caps: AtomicUsize,
+    /// Set once (last `READ` capability gone, or revoked): sends fail with
+    /// `PeerClosed` and the queue is discarded.
+    receive_closed: AtomicBool,
+    /// Set once (last `WRITE` capability gone, or revoked): an empty queue
+    /// means `PeerClosed` for receivers.
+    send_closed: AtomicBool,
 }
 
 impl Default for Endpoint {
@@ -39,12 +52,69 @@ impl Endpoint {
             receivers: WaitQueue::new(),
             senders: WaitQueue::new(),
             sent: AtomicU64::new(0),
+            receive_caps: AtomicUsize::new(0),
+            send_caps: AtomicUsize::new(0),
+            receive_closed: AtomicBool::new(false),
+            send_closed: AtomicBool::new(false),
         }
     }
 
     /// Total messages sent (for the benchmark).
     pub fn sent(&self) -> u64 {
         self.sent.load(Ordering::Relaxed)
+    }
+
+    /// A capability with these sides was made (`Cap::new`).
+    pub fn open_sides(&self, receive: bool, send: bool) {
+        if receive {
+            self.receive_caps.fetch_add(1, Ordering::AcqRel);
+        }
+        if send {
+            self.send_caps.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    /// A capability with these sides was dropped. `true` if a side closed
+    /// now: the caller hands the endpoint to `settle_later`. Only atomics
+    /// here, since the caller may hold any lock.
+    pub fn close_sides(&self, receive: bool, send: bool) -> bool {
+        let mut closed = false;
+        if receive && self.receive_caps.fetch_sub(1, Ordering::AcqRel) == 1 {
+            closed |= !self.receive_closed.swap(true, Ordering::AcqRel);
+        }
+        if send && self.send_caps.fetch_sub(1, Ordering::AcqRel) == 1 {
+            closed |= !self.send_closed.swap(true, Ordering::AcqRel);
+        }
+        closed
+    }
+
+    /// Closes both sides (revocation). `true` if one of them was open.
+    pub fn shut_down(&self) -> bool {
+        let receive = !self.receive_closed.swap(true, Ordering::AcqRel);
+        let send = !self.send_closed.swap(true, Ordering::AcqRel);
+        receive || send
+    }
+
+    fn receive_closed(&self) -> bool {
+        self.receive_closed.load(Ordering::Acquire)
+    }
+
+    fn send_closed(&self) -> bool {
+        self.send_closed.load(Ordering::Acquire)
+    }
+
+    /// After a side closed: discards the queue if nobody can receive it any
+    /// more (the capabilities inside are dropped, which may close other
+    /// endpoints: a reply endpoint whose only `WRITE` travelled in a
+    /// request) and wakes every waiter so it sees the new state.
+    fn settle(&self) {
+        if self.receive_closed() {
+            let discarded = core::mem::take(&mut *self.queue.lock());
+            drop(discarded);
+        }
+        self.senders.wake_all();
+        self.receivers.wake_all();
+        ANY_RECEIVERS.wake_all();
     }
 
     fn deadline(timeout_ms: u64) -> Option<u64> {
@@ -59,6 +129,8 @@ impl Endpoint {
     /// queue's critical section: capabilities are thus removed from the
     /// sender only if the send happens, and a timeout leaves them alone.
     /// `build` must not block (it runs with the queue lock held).
+    /// `PeerClosed` once the receive side is closed, also for a sender
+    /// already waiting for room.
     pub fn send_with(
         &self,
         timeout_ms: u64,
@@ -66,13 +138,23 @@ impl Endpoint {
     ) -> Result<(), Error> {
         let deadline = Self::deadline(timeout_ms);
         loop {
-            let timed_out = self
-                .senders
-                .wait_until_deadline(|| self.queue.lock().len() < IPC_QUEUE_CAPACITY, deadline);
+            let timed_out = self.senders.wait_until_deadline(
+                || self.receive_closed() || self.queue.lock().len() < IPC_QUEUE_CAPACITY,
+                deadline,
+            );
+            if self.receive_closed() {
+                return Err(Error::PeerClosed);
+            }
             if timed_out {
                 return Err(Error::Timeout);
             }
             let mut q = self.queue.lock();
+            // Checked under the queue lock: `settle` discards the queue under
+            // the same lock after the flag is set, so no message is left
+            // behind in a queue nobody will read.
+            if self.receive_closed() {
+                return Err(Error::PeerClosed);
+            }
             // Another sender may have taken the slot between the wait and here.
             if q.len() >= IPC_QUEUE_CAPACITY {
                 continue;
@@ -99,18 +181,29 @@ impl Endpoint {
         !self.queue.lock().is_empty()
     }
 
+    /// Nothing queued and nobody left to send: a receive would wait forever.
+    fn drained_and_closed(&self) -> bool {
+        self.send_closed() && !self.has_message()
+    }
+
     /// Takes the oldest message; if there is none, waits up to `timeout_ms`.
+    /// Queued messages are delivered first; then `PeerClosed` once the send
+    /// side is closed.
     pub fn receive(&self, timeout_ms: u64) -> Result<Message, Error> {
         let deadline = Self::deadline(timeout_ms);
-        let timed_out = self
-            .receivers
-            .wait_until_deadline(|| !self.queue.lock().is_empty(), deadline);
-        if timed_out {
-            return Err(Error::Timeout);
+        // Woken without a message (another receiver took it, or the
+        // deadline passed): `Timeout`, as before.
+        let _ = self.receivers.wait_until_deadline(
+            || self.send_closed() || !self.queue.lock().is_empty(),
+            deadline,
+        );
+        if let Some(msg) = self.try_receive() {
+            return Ok(msg);
         }
-        let msg = self.queue.lock().pop_front().ok_or(Error::Timeout)?;
-        self.senders.wake_one();
-        Ok(msg)
+        if self.send_closed() {
+            return Err(Error::PeerClosed);
+        }
+        Err(Error::Timeout)
     }
 }
 
@@ -118,19 +211,60 @@ impl Endpoint {
 static ANY_RECEIVERS: WaitQueue = WaitQueue::new();
 
 /// Receives from the first (in order) of `endpoints` that has a message;
-/// returns its index. Waits up to `timeout_ms` (ADR 0020).
+/// returns its index. Waits up to `timeout_ms` (ADR 0020). `PeerClosed`
+/// only when every endpoint is empty and has lost its send side: one closed
+/// endpoint among live ones is just one that stays empty.
 pub fn receive_any(endpoints: &[&Endpoint], timeout_ms: u64) -> Result<(usize, Message), Error> {
     let deadline = Endpoint::deadline(timeout_ms);
     loop {
-        let timed_out = ANY_RECEIVERS
-            .wait_until_deadline(|| endpoints.iter().any(|e| e.has_message()), deadline);
-        if timed_out {
-            return Err(Error::Timeout);
-        }
-        // Another receiver may have taken the message: wait again.
+        let all_closed = || endpoints.iter().all(|e| e.drained_and_closed());
+        let timed_out = ANY_RECEIVERS.wait_until_deadline(
+            || all_closed() || endpoints.iter().any(|e| e.has_message()),
+            deadline,
+        );
         for (i, e) in endpoints.iter().enumerate() {
             if let Some(msg) = e.try_receive() {
                 return Ok((i, msg));
+            }
+        }
+        if all_closed() {
+            return Err(Error::PeerClosed);
+        }
+        if timed_out {
+            return Err(Error::Timeout);
+        }
+        // Another receiver took the message: wait again.
+    }
+}
+
+/// Endpoints with a side closed since the last `settle_closed`.
+static PENDING: IrqLock<Vec<ObjectRef>> = IrqLock::new(Vec::new());
+static PENDING_ANY: AtomicBool = AtomicBool::new(false);
+
+/// Queues `obj` (an endpoint that just lost a side) for `settle_closed`.
+/// Safe under any lock: `PENDING` is a leaf lock.
+pub fn settle_later(obj: ObjectRef) {
+    PENDING.lock().push(obj);
+    PENDING_ANY.store(true, Ordering::Release);
+}
+
+/// Completes the closing of the endpoints queued by `settle_later`:
+/// discards their queues and wakes their waiters. Called with no lock held
+/// (end of every syscall, after reaping finished threads). Discarding a
+/// queue drops capabilities, which may queue more endpoints: handled
+/// iteratively here, never by recursion.
+pub fn settle_closed() {
+    if !PENDING_ANY.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    loop {
+        let batch = core::mem::take(&mut *PENDING.lock());
+        if batch.is_empty() {
+            return;
+        }
+        for obj in batch {
+            if let ObjectKind::Endpoint(ep) = &obj.kind {
+                ep.settle();
             }
         }
     }
@@ -176,6 +310,73 @@ pub fn late_reply_selftest() {
         "server: {server_status:?}"
     );
     log::info!("ipc late reply selftest ok (deadline expired, late reply discarded, no mix-up)");
+}
+
+/// Peer-gone self-test (`test=ipc_peer`, ADR 0030): a client whose server
+/// dies learns it at once with `PeerClosed`, whether the server died
+/// holding the request, with the request still queued or with the client
+/// blocked on a full queue; plus the endpoint-local cases (`peer_client`
+/// case 4). The client waits 30 s everywhere; each case must end well
+/// within `CASE_BOUND_MS`.
+pub fn peer_closed_selftest() {
+    use crate::object::KernelObject;
+    use crate::user::{process, programs};
+    use alloc::vec;
+
+    const CASE_BOUND_MS: u64 = 5_000;
+    let server_elf = programs::by_name("peer_server").expect("peer_server");
+    let client_elf = programs::by_name("peer_client").expect("peer_client");
+    let mut took = [0u64; 4];
+    for case in 1..=4u64 {
+        let t0 = crate::time::uptime_ms();
+        let server = (case < 4).then(|| {
+            // Fresh endpoints per case: a closed side never reopens.
+            let ep = KernelObject::new(ObjectKind::Endpoint(Endpoint::new()));
+            let sync = KernelObject::new(ObjectKind::Endpoint(Endpoint::new()));
+            let server = process::spawn_with_handles_and_arg(
+                "peer_server",
+                server_elf,
+                vec![(ep.clone(), Rights::READ), (sync.clone(), Rights::READ)],
+                case,
+                0,
+            )
+            .expect("peer_server");
+            (server, ep, sync)
+        });
+        let handles = match &server {
+            Some((_, ep, sync)) => vec![
+                (ep.clone(), Rights::WRITE.union(Rights::DUPLICATE)),
+                (sync.clone(), Rights::WRITE),
+            ],
+            None => vec![],
+        };
+        let client =
+            process::spawn_with_handles_and_arg("peer_client", client_elf, handles, case, 0)
+                .expect("peer_client");
+        let client_status = process::wait(client);
+        if let Some((server, _, _)) = server {
+            let server_status = process::wait(server);
+            assert_eq!(
+                server_status,
+                process::ExitStatus::Exited(0),
+                "peer_server case {case}: {server_status:?}"
+            );
+        }
+        let elapsed = crate::time::uptime_ms() - t0;
+        assert_eq!(
+            client_status,
+            process::ExitStatus::Exited(0),
+            "peer_client case {case}: {client_status:?} after {elapsed} ms"
+        );
+        assert!(
+            elapsed < CASE_BOUND_MS,
+            "peer_client case {case} took {elapsed} ms: the dead peer was not reported at once"
+        );
+        took[case as usize - 1] = elapsed;
+    }
+    log::info!(
+        "ipc peer closed selftest ok (server died holding the request, with it queued, with a sender blocked; local cases; ms per case {took:?}, client waits 30000)"
+    );
 }
 
 pub fn selftest() {
