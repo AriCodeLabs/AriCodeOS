@@ -73,14 +73,18 @@ works on any machine with Docker (slower than on the host).
 
 ```bash
 docker build -t aricodeos-dev -f tools/docker/Dockerfile .
-docker run --rm -it -v "$PWD":/src -v aricodeos-cargo:/usr/local/cargo/registry \
+docker run --rm -it -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/cargo/registry \
     --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask check
-docker run --rm -it -v "$PWD":/src -v aricodeos-cargo:/usr/local/cargo/registry \
+docker run --rm -it -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/cargo/registry \
     --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask test --all
 ```
 
 `--user` keeps `build/` and `target/` owned by you; the named volume keeps
-the crate downloads between runs. The image exposes no port and holds no
+the crate downloads between runs. The checkout is mounted at the same path
+it has on the host (`-v "$PWD":"$PWD" -w "$PWD"`), because artifacts in
+`target/` embed absolute paths (the SDK's linker script, for one): with a
+different path, host-built artifacts reused inside the container point
+at files that do not exist there. The image exposes no port and holds no
 key. A QEMU result inside Docker is a QEMU result: it does not replace the
 hardware checks of `docs/hardware.md`.
 
