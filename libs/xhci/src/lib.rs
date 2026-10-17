@@ -274,6 +274,9 @@ pub mod completion {
     pub const TRB_ERROR: u8 = 5;
     /// The endpoint answered STALL (it stays halted until Reset Endpoint).
     pub const STALL: u8 = 6;
+    /// The command named a slot that is not enabled (Disable Slot on a
+    /// slot the controller already released counts as released).
+    pub const SLOT_NOT_ENABLED: u8 = 11;
     pub const SHORT_PACKET: u8 = 13;
     /// A command was issued to a slot or endpoint in the wrong state (for
     /// example Reset Endpoint on an endpoint that is not Halted).
@@ -283,6 +286,16 @@ pub mod completion {
     pub const STOPPED_LENGTH_INVALID: u8 = 27;
     pub const STOPPED_SHORT_PACKET: u8 = 28;
     pub const SPLIT_TRANSACTION_ERROR: u8 = 36;
+
+    /// A Disable Slot that ended with `code` released the slot (xHCI
+    /// 4.6.4: the controller frees the slot's resources on successful
+    /// completion; Slot Not Enabled says it held nothing). After any other
+    /// code the controller may still own the slot's contexts and rings, so
+    /// their memory must never be reused (Linux frees the virt device only
+    /// after a successful Disable Slot, `xhci_free_virt_device`).
+    pub fn disable_slot_released(code: u8) -> bool {
+        matches!(code, SUCCESS | SLOT_NOT_ENABLED)
+    }
 
     /// A transfer that completed: Short Packet is how an IN transfer that
     /// got less than its buffer ends (xHCI 4.10.1.1), not an error.
@@ -309,6 +322,7 @@ pub mod completion {
             USB_TRANSACTION_ERROR => "USB Transaction Error",
             TRB_ERROR => "TRB Error",
             STALL => "Stall Error",
+            SLOT_NOT_ENABLED => "Slot Not Enabled Error",
             SHORT_PACKET => "Short Packet",
             CONTEXT_STATE_ERROR => "Context State Error",
             STOPPED => "Stopped",
@@ -375,19 +389,16 @@ pub enum SlotReuse {
     /// device's transfers, disables every endpoint but EP0 and leaves the
     /// slot Default; Address Device (4.6.5) follows.
     ResetDevice,
-    /// Already Default (a Reset Device completed, the addressing did not):
-    /// Reset Device would end in Context State Error; Address Device
-    /// (4.6.5, valid in Default with BSR = 0) follows directly.
-    Readdress,
-    /// The controller does not hold the slot as addressed: the slot is
-    /// disabled (4.6.4) and a new one enabled.
+    /// Any other state (Reset Device would end in Context State Error):
+    /// the slot is disabled (4.6.4) and a new one enabled. A slot the
+    /// driver keeps is always Addressed or Configured: every failure after
+    /// Reset Device or Address Device releases the slot.
     Replace,
 }
 
 pub fn slot_reuse(state: u8) -> SlotReuse {
     match state {
         slot_state::ADDRESSED | slot_state::CONFIGURED => SlotReuse::ResetDevice,
-        slot_state::DEFAULT => SlotReuse::Readdress,
         _ => SlotReuse::Replace,
     }
 }
@@ -1603,11 +1614,11 @@ mod tests {
         assert_eq!(slot_status(&ctx), Some(slot_state::CONFIGURED));
         assert_eq!(slot_status(&ctx[..15]), None);
         assert_eq!(slot_state::name(slot_state::DEFAULT), "Default");
-        // Reset Device only where xHCI 4.6.11 accepts it; a Default slot
-        // is addressed directly; anything else gets a new slot.
+        // Reset Device only where xHCI 4.6.11 accepts it; anything else
+        // gets a new slot.
         assert_eq!(slot_reuse(slot_state::CONFIGURED), SlotReuse::ResetDevice);
         assert_eq!(slot_reuse(slot_state::ADDRESSED), SlotReuse::ResetDevice);
-        assert_eq!(slot_reuse(slot_state::DEFAULT), SlotReuse::Readdress);
+        assert_eq!(slot_reuse(slot_state::DEFAULT), SlotReuse::Replace);
         assert_eq!(
             slot_reuse(slot_state::DISABLED_OR_ENABLED),
             SlotReuse::Replace
@@ -1618,6 +1629,17 @@ mod tests {
         assert_eq!(t.slot_id(), 4);
         assert_eq!(t.endpoint_id(), 0);
         assert_eq!(t.parameter, 0);
+        // Slot memory is reusable only after a Disable Slot that released it.
+        assert!(completion::disable_slot_released(completion::SUCCESS));
+        assert!(completion::disable_slot_released(
+            completion::SLOT_NOT_ENABLED
+        ));
+        assert!(!completion::disable_slot_released(completion::NO_EVENT));
+        assert!(!completion::disable_slot_released(
+            completion::CONTEXT_STATE_ERROR
+        ));
+        assert!(!completion::disable_slot_released(completion::TRB_ERROR));
+        assert_eq!(completion::name(11), "Slot Not Enabled Error");
     }
 
     #[test]

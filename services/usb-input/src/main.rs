@@ -73,10 +73,11 @@ const TRANSFER_WINDOW_MS: u64 = CBW_TIMEOUT_MS + SCSI_COMMAND_TIMEOUT_MS;
 /// the transfer window plus `RECOVERY_RESERVE_MS` for the recovery
 /// commands of a failed transfer (31 + 3 = 34 s). Chain of waits: the
 /// block client waits `aricode_sys::block::REPLY_WAIT_MS` (90 s) > this
-/// budget (34 s) + the longest idle-loop maintenance step
-/// (`REENUMERATE_STEP_MS`, 6 s) + one queued request (34 s) = 74 s; the
-/// file client waits 120 s > 90 s. The chain assumes at most two
-/// concurrent block clients (one queued request).
+/// budget (34 s) + the idle-loop maintenance of one iteration, the
+/// longest storage step (`REENUMERATE_STEP_MS`, 6 s) plus one HID
+/// recovery step (`maintain_hid`, `MAINTENANCE_STEP_MS`, 3 s) + one queued
+/// request (34 s) = 77 s; the file client waits 120 s > 90 s. The chain
+/// assumes at most two concurrent block clients (one queued request).
 const REQUEST_BUDGET_MS: u64 = TRANSFER_WINDOW_MS + RECOVERY_RESERVE_MS;
 /// What a failed transfer may need before the request returns: Reset or
 /// Stop Endpoint (500) + Set TR Dequeue (500) + CLEAR_FEATURE with its own
@@ -123,6 +124,16 @@ const BOOT_READY_WAIT_MS: u64 = 2000;
 const REENUMERATE_READY_WAIT_MS: u64 = 500;
 /// Bound of the boot-time enumeration of one port.
 const BOOT_ENUMERATION_MS: u64 = 10_000;
+/// Wait before a HID recovery attempt, times the attempts already made
+/// (the backoff of `Transport::Reenumerate`, `RESET_POLL_MS`): a device
+/// that keeps failing is given time to settle instead of being given up
+/// within milliseconds (incident 0001 audit 5 M3).
+const HID_RETRY_MS: u64 = RESET_POLL_MS;
+/// Failures of one HID endpoint printed and recorded individually; later
+/// ones are counted (`Endpoint::faults`) and the count printed when the
+/// endpoint recovers or is given up, so a babbling device cannot flood the
+/// console or the event ring (like `Controller::may_report`).
+const HID_FAULT_REPORTS: u32 = 8;
 /// Recovery attempts of a HID interrupt endpoint without a good report in
 /// between; once spent the endpoint is given up (loudly, `usb hid lost`)
 /// for the rest of the boot: HID devices are not enumerated again.
@@ -162,16 +173,6 @@ fn code_text(code: u8) {
     sys::print(b" (");
     sys::print(completion::name(code).as_bytes());
     sys::print(b")");
-}
-
-/// Message for a command that produced no completion: `refused` was
-/// already explained by `command_on` (no time left), `pending` was waited
-/// for in vain.
-fn no_completion(issued: Issued, refused: &'static str, pending: &'static str) -> &'static str {
-    match issued {
-        Issued::Refused => refused,
-        _ => pending,
-    }
 }
 
 /// A fault event in the kernel ring (ADR 0028; `diag` lists it).
@@ -298,6 +299,9 @@ struct HidFault {
     /// Reset Endpoint ran; `CLEAR_FEATURE(ENDPOINT_HALT)` must still reach
     /// the device before reports are queued again (USB 2.0 9.4.5).
     clear_halt: bool,
+    /// No recovery attempt before this time (ms): `HID_RETRY_MS` times the
+    /// attempts already made.
+    not_before: u64,
 }
 
 /// Interrupt IN endpoint of a HID interface.
@@ -315,6 +319,59 @@ struct Endpoint {
     fault: Option<HidFault>,
     /// Recovery attempts since the last good report.
     failures: u8,
+    /// Failed transfers in this boot (`HID_FAULT_REPORTS`).
+    faults: u32,
+}
+
+impl Endpoint {
+    /// A transfer on this endpoint of `slot` failed with `code` (event
+    /// `ev`; `injected` by `usb_fault=...:hid`): printed and recorded as a
+    /// fault event (ADR 0028) up to `HID_FAULT_REPORTS` times, then only
+    /// counted; the recovery is left to the idle loop, after
+    /// `HID_RETRY_MS` times the attempts already made.
+    fn failed(&mut self, slot: u8, code: u8, ev: Trb, injected: bool, now: u64) {
+        self.faults = self.faults.saturating_add(1);
+        if self.faults <= HID_FAULT_REPORTS {
+            sys::print(b"usb-input: HID report on slot ");
+            num(slot as u64);
+            sys::print(b" dci ");
+            num(self.dci as u64);
+            sys::print(b" failed: ");
+            code_text(code);
+            if injected {
+                sys::print(b", injected");
+            }
+            sys::print(b", residual ");
+            num(ev.residual() as u64);
+            sys::print(b", trb ");
+            hex(ev.parameter);
+            sys::print(b"; recovered from the idle loop\n");
+            record(
+                if injected {
+                    "usb inj hid"
+                } else {
+                    "usb hid err"
+                },
+                code as u64,
+            );
+            if self.faults == HID_FAULT_REPORTS {
+                sys::print(b"usb-input: HID slot ");
+                num(slot as u64);
+                sys::print(b" dci ");
+                num(self.dci as u64);
+                sys::print(b": further failures are counted, not printed\n");
+            }
+        }
+        if self.fault.is_none() {
+            self.fault = Some(HidFault {
+                code,
+                trb: ev.parameter,
+                injected,
+                clear_halt: false,
+                not_before: now + HID_RETRY_MS * self.failures as u64,
+            });
+        }
+    }
 }
 
 /// DMA memory of a device slot: Output Device Context (physical,
@@ -603,8 +660,9 @@ struct Controller {
     /// controller may still own a client buffer (`held_buffer`). Kept here,
     /// not in `Storage`, so that a re-enumeration does not lose it.
     retire_failed: bool,
-    /// Disable Slot command TRB issued without a completion yet.
-    pending_disable: Option<u64>,
+    /// Disable Slot command TRB issued without a completion yet, and the
+    /// slot it disables.
+    pending_disable: Option<(u64, u8)>,
     /// A slot whose Disable Slot was refused for lack of time: the idle
     /// loop issues it before anything else.
     slot_to_disable: Option<u8>,
@@ -620,15 +678,24 @@ struct Controller {
     version: u16,
     params: Params,
     arena: Arena,
+    /// Arena bytes in use once the boot enumeration ended: a
+    /// re-enumeration must not add to it (incident 0001 audit 5 M4).
+    arena_after_boot: u64,
     cmd: Ring,
     events: EventRing,
     events_virt: u64,
     dcbaa_virt: u64,
     devices: [Option<UsbDevice>; MAX_DEVICES],
     storage: Option<Storage>,
-    /// Slot memory of a released device, reused by the next slot once no
-    /// Disable Slot is outstanding (the controller then owns none of it,
-    /// xHCI 4.6.4): the linear arena never grows with re-enumerations.
+    /// Input events decoded from HID reports, waiting for the client.
+    pending: Pending,
+    /// Memory of the slot whose Disable Slot is outstanding (refused or
+    /// pending): it becomes `spare_slot` only when that command completes
+    /// releasing the slot (`completion::disable_slot_released`, xHCI
+    /// 4.6.4), and is abandoned otherwise.
+    disabling: Option<(u8, SlotMemory)>,
+    /// Slot memory of a device whose slot was released, reused by the next
+    /// slot: the linear arena does not grow with re-enumerations.
     spare_slot: Option<SlotMemory>,
     /// Storage memory handed to the storage being enumerated again.
     spare_storage: Option<StorageMemory>,
@@ -793,12 +860,19 @@ impl Controller {
             version,
             params,
             arena,
+            arena_after_boot: 0,
             cmd,
             events,
             events_virt: ev_virt,
             dcbaa_virt,
             devices: [None, None, None, None],
             storage: None,
+            pending: Pending {
+                buf: [(Event::default(), 0); RING],
+                head: 0,
+                len: 0,
+            },
+            disabling: None,
             spare_slot: None,
             spare_storage: None,
             desc_buf,
@@ -849,16 +923,8 @@ impl Controller {
         Some(ev)
     }
 
-    /// Sends a command and waits for its completion (code, slot) until
-    /// `deadline`; `None` if it was refused or did not complete.
-    fn command(&mut self, trb: Trb, deadline: u64) -> Result<(u8, u8), Issued> {
-        match self.command_on(trb, deadline, None) {
-            Issued::Done(code, slot) => Ok((code, slot)),
-            other => Err(other),
-        }
-    }
-
-    /// `command` that, while a Stop Endpoint on `stopping` (slot, DCI) is
+    /// Sends a command and waits for its completion until `deadline`;
+    /// while a Stop Endpoint on `stopping` (slot, DCI) is
     /// in flight, consumes the Stopped Transfer Event the controller
     /// generates for the interrupted TD before completing it (xHCI 4.6.9).
     /// Nothing is enqueued when `deadline` is within `MIN_START_MS`: a
@@ -891,7 +957,7 @@ impl Controller {
                     sys::print(b"\n");
                     continue;
                 }
-                self.dispatch(ev, None);
+                self.dispatch(ev);
             }
             if self.clock.now() >= deadline {
                 return Issued::Pending(phys);
@@ -905,11 +971,29 @@ impl Controller {
     /// reads the codes) and anything but Success is a fault event
     /// (`usb cmd fail`). True on Success.
     fn command_checked(&mut self, trb: Trb, name: &[u8], deadline: u64) -> bool {
-        let issued = match step_deadline(self.clock.now(), deadline, COMMAND_TIMEOUT_MS) {
+        self.command_ok(trb, name, deadline, COMMAND_TIMEOUT_MS)
+    }
+
+    /// `command_timed`, true on Success.
+    fn command_ok(&mut self, trb: Trb, name: &[u8], deadline: u64, timeout_ms: u64) -> bool {
+        matches!(
+            self.command_timed(trb, name, deadline, timeout_ms),
+            Issued::Done(completion::SUCCESS, _)
+        )
+    }
+
+    /// A command bounded by `deadline` and its own `timeout_ms`, refused
+    /// without touching the ring when less than `MIN_START_MS` is left
+    /// (`step_deadline`). Its outcome is always printed and anything but
+    /// Success is a fault event (`report_command`, incident 0001 audit 5
+    /// M2: the enumeration's commands too).
+    fn command_timed(&mut self, trb: Trb, name: &[u8], deadline: u64, timeout_ms: u64) -> Issued {
+        let issued = match step_deadline(self.clock.now(), deadline, timeout_ms) {
             Some(deadline) => self.command_on(trb, deadline, None),
             None => Issued::Refused,
         };
-        self.report_command(name, trb, issued)
+        self.report_command(name, trb, issued);
+        issued
     }
 
     /// Stop Endpoint (xHCI 4.6.9): the TD in progress is retired with a
@@ -927,7 +1011,11 @@ impl Controller {
         sys::print(b"usb-input: ");
         sys::print(name);
         sys::print(b" slot ");
-        num(trb.slot_id() as u64);
+        // Enable Slot names no slot: the completion carries the new one.
+        num(match issued {
+            Issued::Done(_, slot) if trb.slot_id() == 0 => slot,
+            _ => trb.slot_id(),
+        } as u64);
         if trb.endpoint_id() != 0 {
             sys::print(b" dci ");
             num(trb.endpoint_id() as u64);
@@ -957,14 +1045,17 @@ impl Controller {
     }
 
     /// Events that arrive while waiting for something else, and the main
-    /// loop's: reports go to `pending`, port changes are handled, a late
+    /// loop's: reports go to `self.pending` wherever they arrive (incident
+    /// 0001 audit 5 M5: key events seen inside a command or transfer wait
+    /// used to be dropped), port changes are handled, a late
     /// Disable Slot releases the client buffer it was holding, anything
     /// else unexpected is printed.
-    fn dispatch(&mut self, ev: Trb, pending: Option<&mut Pending>) {
+    fn dispatch(&mut self, ev: Trb) {
         match ev.trb_type() {
             trb_type::TRANSFER_EVENT => {
-                if !self.handle_transfer_event(ev, pending) {
+                if !self.handle_transfer_event(ev) {
                     self.stray_transfer(ev);
+                    self.stray_on_hid(ev);
                 }
             }
             trb_type::PORT_STATUS_CHANGE => self.port_change(ev.port_id()),
@@ -974,34 +1065,96 @@ impl Controller {
                 sys::print(b": ");
                 code_text(ev.completion_code());
                 sys::print(b"\n");
-                if self.pending_disable == Some(ev.parameter) {
+                if let Some((_, slot)) = self
+                    .pending_disable
+                    .filter(|&(phys, _)| phys == ev.parameter)
+                {
                     self.pending_disable = None;
                     if ev.completion_code() != completion::SUCCESS {
                         record("usb cmd fail", ev.completion_code() as u64);
                     }
-                    self.slot_disabled();
+                    self.slot_disabled(slot, ev.completion_code());
                 }
             }
             _ => {}
         }
     }
 
-    /// A Disable Slot completed (xHCI 4.6.4: on Success the controller owns
-    /// none of the slot's TDs any more). The client buffer held for it is
-    /// released on any completion: nothing more can be done for it (the
-    /// caller recorded a code other than Success).
-    fn slot_disabled(&mut self) {
+    /// The Disable Slot of `slot` completed with `code` (xHCI 4.6.4: on
+    /// Success the controller owns none of the slot's TDs, contexts or
+    /// rings any more). The client buffer held for it is released on any
+    /// completion: nothing more can be done for it (the caller recorded a
+    /// code other than Success). The slot's memory becomes the spare and
+    /// its DCBAA entry is cleared only when the slot was released (Success
+    /// or Slot Not Enabled, `completion::disable_slot_released`; Linux
+    /// frees the virt device likewise only then); otherwise the controller
+    /// may still use it and it is abandoned (incident 0001 audit 5 M1).
+    fn slot_disabled(&mut self, slot: u8, code: u8) {
         self.retire_failed = false;
         if let Some(buffer) = self.held_buffer.take() {
             say(b"slot disabled: releasing the client buffer it could still write");
             let _ = sys::handle_close(buffer);
         }
+        let mem = match self.disabling.take() {
+            Some((s, mem)) if s == slot => mem,
+            other => {
+                self.disabling = other;
+                return;
+            }
+        };
+        if !completion::disable_slot_released(code) {
+            self.abandon_slot_memory(b"Disable Slot did not release the slot", code);
+            return;
+        }
+        self.set_dcbaa(slot, 0);
+        if self.spare_slot.is_some() {
+            self.abandon_slot_memory(b"a spare is already held", code);
+            return;
+        }
+        self.spare_slot = Some(mem);
     }
 
-    /// Disable Slot (xHCI 4.6.4) for `slot`, bounded by `deadline`: a
-    /// completion releases the held buffer; a pending one is matched later
-    /// in `dispatch`; a refused one is retried by the idle loop first thing.
-    fn issue_disable_slot(&mut self, slot: u8, deadline: u64) -> Issued {
+    /// Slot memory that is never reused: printed with what stays
+    /// allocated, recorded (`usb slot mem abandoned`).
+    fn abandon_slot_memory(&self, why: &[u8], code: u8) {
+        sys::print(b"usb-input: slot memory abandoned: ");
+        sys::print(why);
+        sys::print(b" (");
+        code_text(code);
+        sys::print(b"); ");
+        num(
+            ((DEVICE_CONTEXTS + INPUT_CONTEXTS) * self.params.context_bytes()
+                + XFER_RING_TRBS * Trb::LEN) as u64,
+        );
+        sys::print(b" bytes of the DMA arena stay allocated\n");
+        record("usb slot mem abandoned", code as u64);
+    }
+
+    /// DCBAA entry of `slot`: its Output Device Context, or 0 once the
+    /// slot is released.
+    fn set_dcbaa(&self, slot: u8, phys: u64) {
+        // SAFETY: DCBAA entry `slot` inside the driver's DMA buffer.
+        unsafe { ((self.dcbaa_virt + 8 * slot as u64) as *mut u64).write_volatile(phys) };
+    }
+
+    /// Disable Slot (xHCI 4.6.4) for `slot`, bounded by `deadline`, with
+    /// the slot's memory `mem` (`None` when it was handed over before, for
+    /// a retried command): a completion releases the held buffer and
+    /// decides the memory's fate (`slot_disabled`); a pending one is
+    /// matched later in `dispatch`; a refused one is retried by the idle
+    /// loop first thing.
+    fn issue_disable_slot(&mut self, slot: u8, mem: Option<SlotMemory>, deadline: u64) -> Issued {
+        if let Some(mem) = mem {
+            if let Some((other, _)) = self.disabling.replace((slot, mem)) {
+                sys::print(b"usb-input: Disable Slot of slot ");
+                num(other as u64);
+                sys::print(b" still outstanding\n");
+                self.abandon_slot_memory(
+                    b"another Disable Slot is outstanding",
+                    completion::NO_EVENT,
+                );
+            }
+        }
         let trb = Trb::disable_slot(slot);
         let issued = match step_deadline(self.clock.now(), deadline, COMMAND_TIMEOUT_MS) {
             Some(deadline) => self.command_on(trb, deadline, None),
@@ -1009,8 +1162,8 @@ impl Controller {
         };
         self.report_command(b"Disable Slot", trb, issued);
         match issued {
-            Issued::Done(..) => self.slot_disabled(),
-            Issued::Pending(phys) => self.pending_disable = Some(phys),
+            Issued::Done(code, _) => self.slot_disabled(slot, code),
+            Issued::Pending(phys) => self.pending_disable = Some((phys, slot)),
             Issued::Refused => self.slot_to_disable = Some(slot),
         }
         issued
@@ -1022,8 +1175,10 @@ impl Controller {
         self.until(deadline, transfer_ms + EP0_RECOVERY_MS)
     }
 
-    /// A Transfer Event that belongs to no TD in progress: printed and
-    /// ignored (a late completion of a TD that was already retired).
+    /// A Transfer Event that belongs to no TD in progress (a late
+    /// completion of a TD that was already retired, or Panther Point's
+    /// spurious Success after a Short Packet, audit 1 F15): printed; an
+    /// error code is also recorded (`usb stray err`, audit 5 L3).
     fn stray_transfer(&self, ev: Trb) {
         sys::print(b"usb-input: stray transfer event: slot ");
         num(ev.slot_id() as u64);
@@ -1036,6 +1191,10 @@ impl Controller {
         sys::print(b" residual ");
         num(ev.residual() as u64);
         sys::print(b"\n");
+        let code = ev.completion_code();
+        if !completion::is_success(code) && !completion::is_stopped(code) {
+            record("usb stray err", code as u64);
+        }
     }
 
     /// Port Status Change: PORTSC is printed before its change bits are
@@ -1153,7 +1312,7 @@ impl Controller {
                         }
                     }
                 }
-                self.dispatch(ev, None);
+                self.dispatch(ev);
             }
             if self.clock.now() >= transfer_end {
                 self.report_control_failure(setup, completion::NO_EVENT, start, None);
@@ -1222,7 +1381,7 @@ impl Controller {
         let spd = op::port_speed(self.portsc(port));
         // Pending Port Status Change events (the reset's) are consumed now.
         while let Some(ev) = self.next_event() {
-            self.dispatch(ev, None);
+            self.dispatch(ev);
         }
         Ok(spd)
     }
@@ -1239,12 +1398,10 @@ impl Controller {
         deadline: u64,
     ) -> Result<(), &'static str> {
         let spd = self.prepare_port(port, force_reset, deadline)?;
-        let (code, slot) = self
-            .command(Trb::enable_slot(), self.until(deadline, 500))
-            .map_err(|i| no_completion(i, "Enable Slot: refused", "Enable Slot: no response"))?;
-        if code != completion::SUCCESS || slot == 0 {
-            return Err("Enable Slot failed");
-        }
+        let slot = match self.command_timed(Trb::enable_slot(), b"Enable Slot", deadline, 500) {
+            Issued::Done(completion::SUCCESS, slot) if slot != 0 => slot,
+            _ => return Err("Enable Slot failed"),
+        };
         let result = self
             .add_device(slot)
             .and_then(|index| self.enumerate_slot(index, port, spd, ready_wait_ms, deadline));
@@ -1282,11 +1439,11 @@ impl Controller {
     }
 
     /// Port reset (if due), then the slot of `devices[index]` back to the
-    /// Default state: Reset Device (xHCI 4.6.11, which the section has
-    /// software issue once the device itself was reset on its port) when
-    /// the slot is Addressed or Configured, nothing when it already is
-    /// Default (4.6.5 addresses a Default slot), a failure otherwise. Its
-    /// EP0 ring and endpoint entries are emptied. Returns the port speed.
+    /// Default state with Reset Device (xHCI 4.6.11, which the section has
+    /// software issue once the device itself was reset on its port). Only
+    /// an Addressed or Configured slot accepts it; any other state is a
+    /// failure and the caller replaces the slot. Its EP0 ring and endpoint
+    /// entries are emptied. Returns the port speed.
     fn reset_slot(
         &mut self,
         index: usize,
@@ -1304,8 +1461,7 @@ impl Controller {
         sys::print(slot_state::name(state).as_bytes());
         sys::print(match plan {
             SlotReuse::ResetDevice => b": Reset Device (xHCI 4.6.11), then Address Device\n",
-            SlotReuse::Readdress => b": Address Device without Reset Device (xHCI 4.6.5)\n",
-            SlotReuse::Replace => b": not addressed, the slot is replaced\n",
+            SlotReuse::Replace => b": Reset Device does not apply, the slot is replaced\n",
         });
         match plan {
             SlotReuse::ResetDevice => {
@@ -1313,7 +1469,6 @@ impl Controller {
                     return Err("Reset Device failed");
                 }
             }
-            SlotReuse::Readdress => {}
             SlotReuse::Replace => return Err("slot not addressed"),
         }
         // Reset Device aborted every transfer and disabled every endpoint
@@ -1336,8 +1491,7 @@ impl Controller {
             .position(|d| d.is_none())
             .ok_or("too many devices")?;
         let mem = self.slot_memory().ok_or("no DMA")?;
-        // SAFETY: DCBAA entry `slot`.
-        unsafe { ((self.dcbaa_virt + 8 * slot as u64) as *mut u64).write_volatile(mem.dev_ctx.0) };
+        self.set_dcbaa(slot, mem.dev_ctx.0);
         self.devices[index] = Some(UsbDevice {
             slot,
             mem,
@@ -1348,26 +1502,26 @@ impl Controller {
         Ok(index)
     }
 
-    /// Slot memory for a new slot: the spare of a released slot when no
-    /// Disable Slot is outstanding (the controller owns none of it any
-    /// more, xHCI 4.6.4), with its Output Device Context zeroed (4.3.3)
-    /// and its EP0 ring emptied; otherwise a new allocation.
+    /// Slot memory for a new slot: the spare of a released slot (it only
+    /// becomes the spare once its Disable Slot released the slot, so the
+    /// controller owns none of it, xHCI 4.6.4), with its Output Device
+    /// Context zeroed (4.3.3) and its EP0 ring emptied; otherwise a new
+    /// allocation.
     fn slot_memory(&mut self) -> Option<SlotMemory> {
         let ctx_bytes = self.params.context_bytes();
-        if self.pending_disable.is_none() && self.slot_to_disable.is_none() {
-            if let Some(mut mem) = self.spare_slot.take() {
-                // SAFETY: the Output Device Context inside the driver's DMA
-                // buffer, owned by no slot now.
-                unsafe {
-                    core::slice::from_raw_parts_mut(
-                        mem.dev_ctx.1 as *mut u8,
-                        DEVICE_CONTEXTS * ctx_bytes,
-                    )
-                    .fill(0)
-                };
-                mem.ep0.reset();
-                return Some(mem);
-            }
+        if let Some(mut mem) = self.spare_slot.take() {
+            say(b"reusing the DMA memory of a released slot");
+            // SAFETY: the Output Device Context inside the driver's DMA
+            // buffer, owned by no slot now.
+            unsafe {
+                core::slice::from_raw_parts_mut(
+                    mem.dev_ctx.1 as *mut u8,
+                    DEVICE_CONTEXTS * ctx_bytes,
+                )
+                .fill(0)
+            };
+            mem.ep0.reset();
+            return Some(mem);
         }
         let dev_ctx = self.arena.alloc((DEVICE_CONTEXTS * ctx_bytes) as u64, 64)?;
         let ep0 = Ring::new(&mut self.arena, XFER_RING_TRBS)?;
@@ -1380,29 +1534,18 @@ impl Controller {
         })
     }
 
-    /// The device entry of `slot` goes away (its memory becomes the spare)
-    /// and the slot is disabled (xHCI 4.6.4), once, within `deadline`; a
-    /// refused or pending Disable Slot is finished by the idle loop.
+    /// The device entry of `slot` goes away and the slot is disabled
+    /// (xHCI 4.6.4), once, within `deadline`, with its memory handed to
+    /// `issue_disable_slot`; a refused or pending Disable Slot is finished
+    /// by the idle loop.
     fn release_slot(&mut self, slot: u8, deadline: u64) {
-        if let Some(i) = self
+        let mem = self
             .devices
             .iter()
             .position(|d| d.as_ref().is_some_and(|d| d.slot == slot))
-        {
-            self.release_device(i);
-        }
-        self.issue_disable_slot(slot, deadline);
-    }
-
-    /// Removes `devices[index]`, keeping its slot memory as the spare.
-    /// The caller disables its slot; `slot_memory` does not reuse the
-    /// spare before that Disable Slot completed. Returns the slot.
-    fn release_device(&mut self, index: usize) -> Option<u8> {
-        let dev = self.devices[index].take()?;
-        if self.spare_slot.is_none() {
-            self.spare_slot = Some(dev.mem);
-        }
-        Some(dev.slot)
+            .and_then(|i| self.devices[i].take())
+            .map(|dev| dev.mem);
+        self.issue_disable_slot(slot, mem, deadline);
     }
 
     /// Slot State of `devices[index]`, as the controller wrote it in the
@@ -1447,15 +1590,12 @@ impl Controller {
             &slot_ctx,
             &[(1, ep0_ctx)],
         );
-        let (code, _) = self
-            .command(
-                Trb::address_device(in_phys, slot),
-                self.until(deadline, 1000),
-            )
-            .map_err(|i| {
-                no_completion(i, "Address Device: refused", "Address Device: no response")
-            })?;
-        if code != completion::SUCCESS {
+        if !self.command_ok(
+            Trb::address_device(in_phys, slot),
+            b"Address Device",
+            deadline,
+            1000,
+        ) {
             return Err("Address Device failed");
         }
         if let Some(dev) = self.devices[index].as_mut() {
@@ -1491,19 +1631,12 @@ impl Controller {
                 &slot_ctx,
                 &[(1, ep0_ctx)],
             );
-            let (code, _) = self
-                .command(
-                    Trb::evaluate_context(in_phys, slot),
-                    self.until(deadline, 500),
-                )
-                .map_err(|i| {
-                    no_completion(
-                        i,
-                        "Evaluate Context: refused",
-                        "Evaluate Context: no response",
-                    )
-                })?;
-            if code != completion::SUCCESS {
+            if !self.command_ok(
+                Trb::evaluate_context(in_phys, slot),
+                b"Evaluate Context",
+                deadline,
+                500,
+            ) {
                 return Err("Evaluate Context (EP0 packet size) failed");
             }
         }
@@ -1632,6 +1765,7 @@ impl Controller {
                 report_len,
                 fault: None,
                 failures: 0,
+                faults: 0,
             });
             match hid.protocol {
                 1 => self.keyboards += 1,
@@ -1657,19 +1791,12 @@ impl Controller {
             &slot_ctx,
             &eps[..prepared],
         );
-        let (code, _) = self
-            .command(
-                Trb::configure_endpoint(in_phys, slot),
-                self.until(deadline, 1000),
-            )
-            .map_err(|i| {
-                no_completion(
-                    i,
-                    "Configure Endpoint: refused",
-                    "Configure Endpoint: no response",
-                )
-            })?;
-        if code != completion::SUCCESS {
+        if !self.command_ok(
+            Trb::configure_endpoint(in_phys, slot),
+            b"Configure Endpoint",
+            deadline,
+            1000,
+        ) {
             return Err("Configure Endpoint failed");
         }
         // Reports in flight.
@@ -1748,19 +1875,12 @@ impl Controller {
             &slot_ctx,
             &eps,
         );
-        let (code, _) = self
-            .command(
-                Trb::configure_endpoint(in_phys, slot),
-                self.until(deadline, 1000),
-            )
-            .map_err(|i| {
-                no_completion(
-                    i,
-                    "Configure Endpoint: refused",
-                    "Configure Endpoint: no response",
-                )
-            })?;
-        if code != completion::SUCCESS {
+        if !self.command_ok(
+            Trb::configure_endpoint(in_phys, slot),
+            b"Configure Endpoint",
+            deadline,
+            1000,
+        ) {
             return Err("Configure Endpoint (storage) failed");
         }
         if let Some(dev) = self.devices[index].as_mut() {
@@ -2235,7 +2355,7 @@ impl Controller {
                         }
                     }
                 }
-                self.dispatch(ev, None);
+                self.dispatch(ev);
             }
             if self.clock.now() >= end {
                 fault.code = completion::NO_EVENT;
@@ -2599,11 +2719,11 @@ impl Controller {
     /// Disable Slot (xHCI 4.6.4) of the storage device, if it still has
     /// one (`None` otherwise): the device entry goes away now, whatever
     /// the command's fate (`issue_disable_slot` tracks a pending or refused
-    /// one), and its memory becomes the spare slot memory.
+    /// one and decides when its memory may be reused).
     fn disable_storage_slot(&mut self, deadline: u64) -> Option<Issued> {
         let device = self.storage.as_mut().and_then(|st| st.device.take())?;
-        let slot = self.release_device(device)?;
-        Some(self.issue_disable_slot(slot, deadline))
+        let dev = self.devices[device].take()?;
+        Some(self.issue_disable_slot(dev.slot, Some(dev.mem), deadline))
     }
 
     /// Reset Recovery (BOT 5.3.4) is due: the class reset and what follows
@@ -2628,7 +2748,7 @@ impl Controller {
         // first: until it is disabled a held client buffer stays held and
         // no re-enumeration starts.
         if let Some(slot) = self.slot_to_disable.take() {
-            self.issue_disable_slot(slot, step);
+            self.issue_disable_slot(slot, None, step);
             return;
         }
         let Some(before) = self.transport() else {
@@ -3001,6 +3121,19 @@ impl Controller {
                 self.storage = Some(old);
             }
         }
+        self.report_arena();
+    }
+
+    /// `DMA arena: N of M bytes used, D more than after the boot
+    /// enumeration`: the evidence that re-enumerations reuse their memory.
+    fn report_arena(&self) {
+        sys::print(b"usb-input: DMA arena: ");
+        num(self.arena.next);
+        sys::print(b" of ");
+        num(self.arena.region.len);
+        sys::print(b" bytes used, ");
+        num(self.arena.next.saturating_sub(self.arena_after_boot));
+        sys::print(b" more than after the boot enumeration\n");
     }
 
     /// `REQUEST SENSE` after a rejected command; a transport failure here
@@ -3300,7 +3433,7 @@ impl Controller {
     /// waits (commands, control and bulk transfers) that must not nest
     /// recovery commands. A Stopped code is the TD a Stop Endpoint of that
     /// recovery retired (4.6.9). False if no report TRB matches the event.
-    fn handle_transfer_event(&mut self, ev: Trb, pending: Option<&mut Pending>) -> bool {
+    fn handle_transfer_event(&mut self, ev: Trb) -> bool {
         let now = self.clock.now();
         let code = ev.completion_code();
         let mut out = [Event::default(); MAX_REPORT_EVENTS];
@@ -3343,36 +3476,7 @@ impl Controller {
                     } else {
                         code
                     };
-                    sys::print(b"usb-input: HID report on slot ");
-                    num(dev.slot as u64);
-                    sys::print(b" dci ");
-                    num(ep.dci as u64);
-                    sys::print(b" failed: ");
-                    code_text(code);
-                    if injected {
-                        sys::print(b", injected");
-                    }
-                    sys::print(b", residual ");
-                    num(ev.residual() as u64);
-                    sys::print(b", trb ");
-                    hex(ev.parameter);
-                    sys::print(b"; recovered from the idle loop\n");
-                    record(
-                        if injected {
-                            "usb inj hid"
-                        } else {
-                            "usb hid err"
-                        },
-                        code as u64,
-                    );
-                    if ep.fault.is_none() {
-                        ep.fault = Some(HidFault {
-                            code,
-                            trb: ev.parameter,
-                            injected,
-                            clear_halt: false,
-                        });
-                    }
+                    ep.failed(dev.slot, code, ev, injected, now);
                     return true;
                 }
                 let got = (ep.report_len as u32).saturating_sub(ev.residual()) as usize;
@@ -3393,10 +3497,8 @@ impl Controller {
                     Decoder::Mouse(m) => m.feed(report, &mut out),
                     Decoder::None => 0,
                 };
-                if let Some(p) = pending {
-                    for e in &out[..n] {
-                        p.push(*e, now);
-                    }
+                for e in &out[..n] {
+                    self.pending.push(*e, now);
                 }
                 ep.failures = 0;
                 if ep.fault.is_none() {
@@ -3425,12 +3527,16 @@ impl Controller {
     /// between; then the endpoint is given up loudly. Every command result
     /// is printed and a failure recorded (`command_checked`).
     fn maintain_hid(&mut self) {
+        let now = self.clock.now();
         let Some((index, e, fault)) = self.devices.iter().enumerate().find_map(|(i, d)| {
             d.as_ref()?
                 .endpoints
                 .iter()
                 .enumerate()
-                .find_map(|(e, ep)| Some((i, e, ep.as_ref()?.fault?)))
+                .find_map(|(e, ep)| {
+                    let f = ep.as_ref()?.fault?;
+                    (self.strict || now >= f.not_before).then_some((i, e, f))
+                })
         }) else {
             return;
         };
@@ -3438,10 +3544,12 @@ impl Controller {
             self.halt_hid(index, e, fault);
         }
         let step = self.after(MAINTENANCE_STEP_MS);
-        let Some((slot, dci, address, failures)) = self.devices[index].as_ref().and_then(|d| {
-            let ep = d.endpoints[e].as_ref()?;
-            Some((d.slot, ep.dci, ep.address, ep.failures))
-        }) else {
+        let Some((slot, dci, address, failures, faults)) =
+            self.devices[index].as_ref().and_then(|d| {
+                let ep = d.endpoints[e].as_ref()?;
+                Some((d.slot, ep.dci, ep.address, ep.failures, ep.faults))
+            })
+        else {
             return;
         };
         if failures >= HID_RECOVERY_ATTEMPTS {
@@ -3451,7 +3559,9 @@ impl Controller {
             num(slot as u64);
             sys::print(b" given up after ");
             num(failures as u64);
-            sys::print(b" recovery attempts: no more reports from it in this boot\n");
+            sys::print(b" recovery attempts (");
+            num(faults as u64);
+            sys::print(b" failed transfers): no more reports from it in this boot\n");
             record("usb hid lost", dci as u64);
             self.set_hid_fault(index, e, None);
             return;
@@ -3493,7 +3603,11 @@ impl Controller {
             num(slot as u64);
             sys::print(b": recovery attempt ");
             num(failures as u64 + 1);
-            sys::print(b" failed; tried again from the idle loop\n");
+            sys::print(b" failed; tried again from the idle loop in ");
+            let wait = HID_RETRY_MS * (failures as u64 + 1);
+            num(wait);
+            sys::print(b" ms\n");
+            fault.not_before = self.clock.now() + wait;
             self.set_hid_fault(index, e, Some(fault));
             return;
         }
@@ -3503,7 +3617,35 @@ impl Controller {
         num(dci as u64);
         sys::print(b" of slot ");
         num(slot as u64);
-        sys::print(b" recovered: reports queued again\n");
+        sys::print(b" recovered: reports queued again (");
+        num(faults as u64);
+        sys::print(b" failed transfers in this boot)\n");
+    }
+
+    /// A stray Transfer Event (no report TRB matches it) with an error code
+    /// on a HID endpoint: the endpoint may have halted on a TD the driver
+    /// no longer tracks, so it is marked for recovery like any failed
+    /// report (incident 0001 audit 5 L3; `stray_transfer` printed and
+    /// recorded it).
+    fn stray_on_hid(&mut self, ev: Trb) {
+        let code = ev.completion_code();
+        if completion::is_success(code) || completion::is_stopped(code) {
+            return;
+        }
+        let now = self.clock.now();
+        for dev in self.devices.iter_mut().flatten() {
+            if dev.slot != ev.slot_id() {
+                continue;
+            }
+            if let Some(ep) = dev
+                .endpoints
+                .iter_mut()
+                .flatten()
+                .find(|ep| ep.dci == ev.endpoint_id())
+            {
+                ep.failed(dev.slot, code, ev, false, now);
+            }
+        }
     }
 
     fn set_hid_fault(&mut self, index: usize, e: usize, fault: Option<HidFault>) {
@@ -3578,15 +3720,15 @@ impl Controller {
         sys::process_exit(exit::TRANSPORT_FAULT)
     }
 
-    /// Collects the ring events; reports go to `pending`.
-    fn poll(&mut self, pending: &mut Pending) {
+    /// Collects the ring events; reports go to `self.pending`.
+    fn poll(&mut self) {
         // Acknowledge the interrupt of interrupter 0.
         let iman = self.runtime.r32(rt::IMAN);
         if iman & rt::IMAN_PENDING != 0 {
             self.runtime.w32(rt::IMAN, iman);
         }
         while let Some(ev) = self.next_event() {
-            self.dispatch(ev, Some(pending));
+            self.dispatch(ev);
         }
     }
 }
@@ -3909,6 +4051,12 @@ fn main(mask: u64) -> u64 {
     sys::print(b"usb-input: device ready: ");
     sys::print(device_name(&ctl).as_bytes());
     sys::print(b"\n");
+    ctl.arena_after_boot = ctl.arena.next;
+    sys::print(b"usb-input: DMA arena: ");
+    num(ctl.arena.next);
+    sys::print(b" of ");
+    num(ctl.arena.region.len);
+    sys::print(b" bytes used after the boot enumeration\n");
     if ctl.storage.is_none() {
         say(b"no USB storage");
     }
@@ -3924,11 +4072,6 @@ fn main(mask: u64) -> u64 {
     } else {
         &[SERVICE]
     };
-    let mut pending = Pending {
-        buf: [(Event::default(), 0); RING],
-        head: 0,
-        len: 0,
-    };
     let mut waiting: Option<(Handle, u64)> = None;
     let mut msg = [0u8; 32];
     let mut handles = [Handle(0); abi::IPC_MAX_HANDLES];
@@ -3936,7 +4079,7 @@ fn main(mask: u64) -> u64 {
     let mut times = [0u64; MAX_EVENTS];
     say(b"serving requests");
     loop {
-        ctl.poll(&mut pending);
+        ctl.poll();
         ctl.maintain_storage();
         ctl.maintain_hid();
         let now = ctl.clock.now();
@@ -3964,8 +4107,8 @@ fn main(mask: u64) -> u64 {
                     op: Op::Read,
                     timeout_ms,
                 }) => {
-                    if pending.len > 0 {
-                        let n = pending.take(&mut events, &mut times);
+                    if ctl.pending.len > 0 {
+                        let n = ctl.pending.take(&mut events, &mut times);
                         answer(reply_to, Reply::events(&events[..n], &times[..n]));
                     } else if waiting.is_some() {
                         answer(reply_to, Reply::status(Status::Busy));
@@ -3977,8 +4120,8 @@ fn main(mask: u64) -> u64 {
             }
         }
         if let Some((reply_to, deadline)) = waiting {
-            if pending.len > 0 {
-                let n = pending.take(&mut events, &mut times);
+            if ctl.pending.len > 0 {
+                let n = ctl.pending.take(&mut events, &mut times);
                 answer(reply_to, Reply::events(&events[..n], &times[..n]));
                 waiting = None;
             } else if now >= deadline {

@@ -6,8 +6,11 @@
 # (xHCI 4.6.11) to the Configured slot, addresses it again (4.6.5) on the
 # same Output Device Context, EP0 ring and Input Context, configures the
 # bulk endpoints on their rings emptied in place and runs INQUIRY / TEST
-# UNIT READY / READ CAPACITY. No slot is disabled or enabled and no DMA
-# memory is allocated; the same medium comes back in service and the next
+# UNIT READY / READ CAPACITY. No slot is disabled and no DMA memory is
+# allocated: the driver prints the arena usage after the re-enumeration
+# against the one after the boot enumeration (Enable Slot is printed at
+# boot, so its absence afterwards is proven by the arena line and the
+# absent Disable Slot). The same medium comes back in service and the next
 # write succeeds.
 name = "usb.reset_device"
 description = "usbd: re-enumeration of a device still on its port uses Reset Device and reuses the slot and its memory"
@@ -37,6 +40,8 @@ serial_contains = [
     "usb-input: storage device ",
     "usb-input: USB storage on port ",
     "usb-input: storage device back in service",
+    "bytes used after the boot enumeration",
+    "bytes used, 0 more than after the boot enumeration",
     "write: 11 bytes to probe.txt",
     "fault reported by process",
     "usb inj w lba",
@@ -48,8 +53,9 @@ serial_absent = [
     "KERNEL PANIC",
     "strict",
     "Disable Slot",
-    "Enable Slot",
     "no DMA",
+    "slot memory abandoned",
+    "reusing the DMA memory of a released slot",
     "given up until",
     "re-enumeration failed",
     "a different medium",

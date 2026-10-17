@@ -576,8 +576,8 @@ buffers from the linear DMA arena (about 6 KiB each time). Now:
 - A device still on its port (no connect status change since its slot was
   addressed, the slot not released by an earlier failure) is enumerated
   again on its own slot: port reset when due, then Reset Device (xHCI
-  4.6.11) if the slot is Addressed or Configured, nothing if it is already
-  Default, Address Device (4.6.5) on the same Input Context with the EP0
+  4.6.11) if the slot is Addressed or Configured (any other state replaces
+  the slot), Address Device (4.6.5) on the same Input Context with the EP0
   ring emptied in place, the bulk rings emptied in place before Configure
   Endpoint. Host tested: `slot_status`, `slot_reuse`, `Trb::reset_device`.
 - Disable Slot stays for a device that is gone, a new connection, the
@@ -586,10 +586,9 @@ buffers from the linear DMA arena (about 6 KiB each time). Now:
   the in-place path (Reset Device or a later step); the next attempt then
   takes a new slot.
 - Even then nothing is allocated again: the released slot memory is kept
-  as a spare and reused by the next Enable Slot once no Disable Slot is
-  outstanding (the controller owns none of it, 4.6.4; its Output Device
-  Context is zeroed first, 4.3.3), the storage's bulk rings and buffers go
-  to its next incarnation, and the descriptor buffer is allocated once.
+  as a spare and reused by the next Enable Slot (its Output Device Context
+  zeroed first, 4.3.3), the storage's bulk rings and buffers go to its next
+  incarnation, and the descriptor buffer is allocated once.
 - Budgets unchanged: every step keeps its deadline (`REENUMERATE_STEP_MS`,
   each command through `command_checked` / `step_deadline`), Reset Device
   takes the place of Disable Slot + Enable Slot in the step.
@@ -599,10 +598,47 @@ buffers from the linear DMA arena (about 6 KiB each time). Now:
   given-up path (`usb.reenum`) still runs Disable Slot and a new slot,
   now on the reused memory.
 
+Changes after [audit 5](0001-audit-5-hid-reset-device.md):
+
+- M1: a released slot's memory becomes the spare only when its Disable Slot
+  completes with Success or Slot Not Enabled (`completion::disable_slot_released`,
+  host tested; xHCI 4.6.4, Linux `xhci_free_virt_device`), and then its
+  DCBAA entry is cleared. Until then it is held with the outstanding command
+  (`Controller::disabling`); any other code abandons it, printed and
+  recorded (`usb slot mem abandoned`).
+- M2: Enable Slot, Address Device, Evaluate Context and Configure Endpoint
+  print their completion codes and record anything but Success (`usb cmd
+  fail`) through `command_timed`, with the same timeouts as before.
+- M3: HID recovery attempts back off: `HidFault::not_before`, 200 ms times
+  the attempts already made (`HID_RETRY_MS`, as `Transport::Reenumerate`
+  waits `RESET_POLL_MS`).
+- M4: the arena usage is printed after the boot enumeration and after each
+  re-enumeration, with the bytes added since boot; `usb.reset_device` and
+  `usb.reenum` require 0. Reuse of a released slot's memory is printed.
+- M5: decoded HID events go to the controller's queue wherever the report
+  arrives; key events seen inside command, control or bulk waits (the
+  storage path, `maintain_hid`, the in-place re-enumeration) are no longer
+  dropped.
+- M6: the wait chain counts one HID recovery step in the same idle
+  iteration: 34 + 6 + 3 + 34 = 77 s < 90 s.
+- M7: each HID endpoint prints and records its first `HID_FAULT_REPORTS` =
+  8 failures; later ones are counted and the count printed when it recovers
+  or is given up.
+- L1: `SlotReuse::Readdress` removed: a kept slot is always Addressed or
+  Configured, since every failure after Reset Device releases the slot.
+- L2: memory dropped because a spare is already held (or another Disable
+  Slot is outstanding) is printed and recorded as abandoned.
+- L3: stray Transfer Events with an error code are recorded (`usb stray
+  err`); on a HID endpoint they also mark it for recovery.
+- L5 (Panther Point's spurious Success after a Short Packet, audit 1 F15)
+  still prints a stray line on hardware; Success strays are not recorded.
+
 Open after this change:
 
-- The three scenarios were written but not run on this branch (the QEMU
-  ports were in use); they must pass before merging.
+- The three new scenarios and the changed `usb.reenum` were written but
+  not run on this branch (the QEMU ports were in use); they and the
+  existing usb, strict, hid and keyboard scenarios must pass before
+  merging (audit 5 H1).
 - QEMU cannot produce the Halted branch of the HID recovery: its usb-hid
   never STALLs the interrupt IN endpoint and answers
   `CLEAR_FEATURE(ENDPOINT_HALT)` with a STALL (hw/usb/desc.c implements no
@@ -611,12 +647,10 @@ Open after this change:
   exercised only on hardware; the bulk version of the same sequence runs
   in `usb.fault_csw`.
 - Reset Device has only run against QEMU's xHCI, which accepts it in any
-  enabled slot state; the laptop's Panther Point (xHCI 1.0) follows 4.6.11
-  strictly (Context State Error outside Addressed/Configured, which the
-  driver avoids by reading the slot state first).
+  enabled slot state. To verify on the laptop: how the Panther Point (xHCI
+  1.0) handles it. The specification (4.6.11) gives Context State Error
+  outside Addressed/Configured, which the driver avoids by reading the slot
+  state first; whether the hardware follows it exactly is not known.
 - A given-up HID endpoint stays silent for the rest of the boot: HID
   devices are not re-enumerated (only the storage is), not even after a
   reconnection.
-- Reports that arrive while the driver waits inside a storage command are
-  decoded with no event queue (`dispatch(ev, None)`) and their key events
-  are dropped: pre-existing, separate from F14, not fixed here.
