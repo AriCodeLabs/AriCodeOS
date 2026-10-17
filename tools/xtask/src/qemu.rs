@@ -28,6 +28,9 @@ pub struct UsbOptions {
     pub ehci_hid: bool,
     /// The test disk hangs off an EHCI as USB storage instead of virtio-blk.
     pub ehci_storage: bool,
+    /// An ICH9 EHCI with a UHCI companion and a full-speed keyboard: the
+    /// EHCI driver must hand the port over (EHCI 4.2.2).
+    pub ehci_companion_kbd: bool,
 }
 
 fn base_command(
@@ -138,6 +141,11 @@ fn base_command(
         if usb.ehci_storage {
             q.args(["-device", "usb-storage,bus=ehci.0,drive=disk0"]);
         }
+    }
+    if usb.ehci_companion_kbd {
+        q.args(["-device", "ich9-usb-ehci1,id=ehcic"]);
+        q.args(["-device", "ich9-usb-uhci1,masterbus=ehcic.0,firstport=0"]);
+        q.args(["-device", "usb-kbd,bus=ehcic.0,usb_version=1"]);
     }
     q.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     q

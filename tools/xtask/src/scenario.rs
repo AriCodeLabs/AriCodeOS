@@ -193,6 +193,10 @@ pub struct Scenario {
     /// no virtio-blk: the EHCI driver serves it as a block service.
     #[serde(default)]
     pub usb_ehci_storage: bool,
+    /// An ICH9 EHCI with a UHCI companion and a full-speed USB keyboard:
+    /// the EHCI driver hands the port to the companion (ADR 0031).
+    #[serde(default)]
+    pub usb_ehci_companion_kbd: bool,
     #[serde(default)]
     pub inject: Inject,
     /// What is expected from the single boot (without `[[boots]]`).

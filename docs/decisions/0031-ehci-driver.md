@@ -2,7 +2,10 @@
 
 - **Date:** 2026-10-17
 - **Status:** Accepted (written and host-tested; QEMU scenarios written,
-  not yet run; not yet exercised on the laptop)
+  not yet run; not yet exercised on the laptop). Hubs, split transactions
+  through a transaction translator, the 64-bit layouts and real endpoint
+  halts on hardware are unverified until the laptop runs it; audit
+  `docs/audits/ehci-audit-1.md` applied.
 
 ## Context
 
@@ -106,22 +109,42 @@ Three facts shape the driver:
    storage device that answers "medium not present" (an empty card reader)
    stays enumerated without a block service. A queue head
    the controller does not release is never reused, nor the client buffer
-   it pointed to. A unit attention is retried once, only while the block
-   client's 90 s wait still covers the worst case of the retry (64 s); the
-   SCSI windows are 30 s for medium commands and 5 s for commands that
-   touch no medium. With `strict` the first failure dumps USBCMD, USBSTS,
-   FRINDEX, every PORTSC and every queue head with its qTD tokens before
-   any recovery, and the driver exits with code 15; init restarts nothing.
-   A host system error (4.15.2.4) dumps and exits with code 16. When its
-   service endpoint is closed or revoked (init gave the service up), the
-   driver exits instead of polling on.
+   it pointed to. The SCSI windows are 30 s for medium commands and 5 s for
+   commands that touch no medium.
+   **Deadlines.** Every unit of work has a hard deadline that cuts every
+   transfer inside it (recovery, REQUEST SENSE, hub GetPortStatus and
+   ClearTTBuffer included); a transfer that cannot start in time is refused
+   without touching the controller. A block request gets 36 s (CBW, the
+   30 s window, 5 s of recovery), an enumeration 15 s, a hub poll 5 s: a
+   block client waiting 90 s covers a running enumeration and two requests
+   (15 + 36 + 36 = 87 s, checked at compile time). A Reset Recovery that
+   does not fit is owed and runs before the next CBW (BOT 5.3.4). A unit
+   attention is retried once, only if a whole command window still fits.
+   **Strict.** With `strict` the first failure (a timeout included, before
+   its queue head is retired; an async advance or frame index that never
+   comes; a short control reply) dumps USBCMD, USBSTS, FRINDEX, every
+   PORTSC and every queue head with its qTD tokens before any recovery,
+   and the driver exits with code 15; init restarts nothing. A host
+   system error (4.15.2.4) or any unexpected HCHalted dumps and exits with
+   code 16. When its service endpoint is closed or revoked (init gave the
+   service up), the driver exits instead of polling on.
+   **Served identity.** The first storage device served (capacity and
+   INQUIRY vendor/product) is remembered. After it is unplugged the block
+   service answers `Io`, and a device that comes back is served again only
+   if it is the same; a different one is reported, recorded and left
+   unconfigured, so another stick never silently becomes the disk.
 8. **Init.** For class `0c.03` init launches usbd for interface `0x30`
    first and then `usb_ehci` for interface `0x20`; other interfaces (UHCI,
-   OHCI) still get "has no driver". Every USB driver gets a block endpoint;
-   without virtio-blk the first one that reports a capacity becomes the
-   block service. `usb_ehci` serves its block endpoint only after its boot
-   enumeration (every port seen at start, including hub ports) is done, so
-   init's single capacity question waits for it.
+   OHCI) still get "has no driver". Every USB driver gets a block endpoint,
+   registered with the supervisor together with the input endpoint;
+   without virtio-blk the first USB block service whose GPT has the ARI0
+   partition becomes the system disk, and with none init goes on without
+   storage ("no USB storage with an ARI0 partition") instead of stopping.
+   `usb_ehci` serves its block endpoint only after its boot enumeration
+   (every port seen at start, including hub ports; at most 30 s), so
+   init's capacity question waits for it, and holds the input service's
+   Info for at most 2.5 s (inside init's readiness probe) so the device
+   name is the final one.
 9. **Port routing is left alone.** The EHCI driver never touches `XUSB2PR`
    or `USB3_PSSEN` (they live in the xHCI's configuration space); usbd
    keeps routing the switchable ports to the xHCI. Because usbd runs first
@@ -150,6 +173,17 @@ Three facts shape the driver:
   and left unconfigured with a line on the console.
 - Polling costs a wake-up every 8 ms per EHCI; HID reports are seen within
   about one poll period plus the endpoint's interval.
+- **Power (follow-up, not measured yet).** Both schedules stay enabled for
+  the driver's lifetime, so the controller reads memory every micro-frame
+  even with nothing attached, and every hub port gets a GetPortStatus each
+  second (about 8 control transfers per second on a rate matching hub).
+  The intended change is the hub's status-change interrupt endpoint (USB
+  2.0 11.12.4) instead of the per-port poll, and turning the periodic
+  and async schedules off while they are empty (EHCI 4.8.1 handshake on
+  USBSTS.PSS/ASS). It is left for a follow-up because it changes the
+  scheduling model; its cost must be measured on the laptop first
+  (`bench` idle time per CPU and battery drain with and without the EHCI
+  drivers).
 - Hubs and split transactions cannot be tested in QEMU (its hub is full
   speed and cannot hang off an EHCI without companions); they are covered
   by host tests of the layouts and wait for the laptop.
@@ -158,5 +192,8 @@ Three facts shape the driver:
 - A medium inserted later into a card reader is not noticed (no media
   polling); the reader must be plugged in again.
 - QEMU scenarios (`usb.ehci_hid`, `usb.ehci_storage`, `usb.ehci_fault`,
-  `strict.ehci_halt`, and the revised `usb.hid_boot_with_ehci`) were written
-  with this ADR but not run when it was accepted.
+  `usb.ehci_fault_csw` (a real bulk IN STALL), `usb.ehci_companion` (a
+  full-speed keyboard on an ICH9 EHCI with a UHCI companion: the handover,
+  or the "no companion" report if the emulated EHCI declares none),
+  `strict.ehci_halt`, and the revised `usb.hid_boot_with_ehci`) were
+  written with this ADR but not run when it was accepted.
