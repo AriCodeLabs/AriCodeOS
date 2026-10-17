@@ -35,8 +35,27 @@ Dev key committed: anyone on the LAN can sign images and packages on
 dev-key builds; a production key is required before network upgrades on
 untrusted networks.
 
-## Resolution
+## Resolution (commit 8886d1e)
 
-See the commit after this file on the branch and the report attached to
-it: every item is either fixed (with the file and line) or recorded as
-open in ADR 0029.
+| Id | Resolution |
+|----|------------|
+| H1 | Unknown installed system version refused without `--allow-downgrade`, fault `upd-installed-unknown`: `apps/updater/src/main.rs` `decide` (500-513), used by `report`, `upgrade` and `apply`. |
+| H2 | `update` writes the plan (`report`, main.rs 847-864), `upgrade` installs only planned items (`upd-not-reported`, 1132); packages staged as `updater/pkg-N.aripkg` + `updater/staged` (`stage_app` 1011); installer `STAGED` mode only (`apps/installer/src/main.rs` `install_staged` 327, stage-file names only 337, list emptied 380), `ALLOW_DOWNGRADE` only with `STAGED` (424); lists in `libs/update-index/src/lists.rs`. |
+| H3 | `publish-update` writes `manifest.txt` by default (`tools/xtask/src/image.rs` 1131), `--no-legacy-manifest` (`main.rs` 205); `docs/hardware.md`, ADR 0029 decision 9. |
+| M1 | Fault events: `Disk::open` (updater 314-361), key (1225), services (1243), invalid `update_url` (229, shell 956), list changed (801), no verified index (793), installed list missing (255); installer: invalid installed package listed and loudly replaced (177, 232). |
+| M2 | Updater caps `system, fs, net, block` (`apps/updater/updater.manifest`), removed from `TRUSTED_INSTALL` (`libs/manifest/src/lib.rs` 62); installed apps via installer `LIST` (`write_installed` 187, shell `list_installed` 813); raw `block` limit recorded as follow-up in ADR 0029 decision 8. |
+| M3 | Bounded sink and run deadline: updater `fetch` (591), `RUN_DEADLINE_MS` (62), fault `upd-deadline`. |
+| M4 | `apply` under the downgrade rule (543), shell `update apply --allow-downgrade` (798). |
+| M5 | Disk opened only when a system image is involved (`report`, `upgrade`). |
+| M6 | Reasoning in `apps/installer/src/main.rs` 23-27 and ADR 0029: the 64 KiB quota is DMA only; packages use the 256 KiB static heap, peak under 80 KiB. Not tight. |
+| L1 | Old header zeroed and flushed first (`Disk::install`, 424-440). |
+| L2 | Built in `NAME.new`, moved into place (`image.rs` 1054-1060); signing key below. |
+| L3 | `index_serial` (image.rs 1000); recovery documented (ADR decision 6) and `forget_stored` (updater 666). |
+| L4 | `normalize_source` (`libs/update-index/src/sources.rs` 48-80). |
+| L5 | `MAX_APP_NAME = 20` (`libs/update-index/src/index.rs` 14), checked at publish (parse-back). |
+| L6 | Documented in ADR 0029 (limits): four stage slots, at most 16 files in `updater/`. |
+| L7 | Open, listed in ADR 0029. |
+| Key | `aricode_crypto::trust` (`libs/crypto/src/trust.rs` 13) used by AriBoot, init, installer, updater; `--signing-key DIR` (`tools/xtask/src/keys.rs` 30, refuses in-repo seeds 50, warning 35; `build.rs` 81). |
+
+New scenarios (not run): `update.tampered_image`, `update.stale_index`,
+`apps.downgrade_refused`.
