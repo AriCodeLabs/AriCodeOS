@@ -119,8 +119,17 @@ it, no downgrades unless asked, and every install logged.
    `update_url`, a list changed since the last update, a source without a
    verified index, an installed package failing verification (listed by
    the installer, never replaced silently), and every download or
-   verification failure. The updater's last output is in
-   `updater/last.log`, shown to remote sessions.
+   verification failure. A structurally damaged `updater/state`
+   (repeated or unknown section headers, lines outside a section;
+   incident 0006) is repaired and saved at once when it is read, and
+   recorded as `upd-state-repaired` (updater, code 47) or
+   `inst-state-repaired` (installer, code 13): a repeated `[plan]` or
+   `[staged]` is dropped (both are recomputed by running `update` and
+   `upgrade` again), a repeated `[installed]` keeps its last copy (it is
+   rewritten by the installer before every updater run). Line endings,
+   blank lines and a missing final newline are formatting, not damage.
+   The updater's last output is in `updater/last.log`, shown to remote
+   sessions.
 
 8. **Capabilities (least privilege).** The updater keeps `system, fs,
    net, block`: its `fs` grant is its private directory `updater/`. It

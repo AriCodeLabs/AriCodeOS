@@ -94,6 +94,7 @@ mod code {
     pub const PLAN: u64 = 37;
     pub const STATE_UNREADABLE: u64 = 38;
     pub const FS_FULL: u64 = 39;
+    pub const STATE_REPAIRED: u64 = 47;
     pub const DOWNGRADE_REFUSED: u64 = 40;
     pub const DOWNLOAD: u64 = 41;
     pub const DOWNLOAD_MISMATCH: u64 = 42;
@@ -278,7 +279,7 @@ fn load_sources(fs: &mut FsClient) -> Result<Sources, u64> {
 /// neither used nor rewritten in this run (final re-audit, L-a): its other
 /// sections are never reset silently.
 fn read_state(fs: &mut FsClient) -> Result<String, u64> {
-    read_text(fs, upd::STATE_FILE, MAX_STATE)
+    let text = read_text(fs, upd::STATE_FILE, MAX_STATE)
         .map(Option::unwrap_or_default)
         .map_err(|()| {
             fault(
@@ -286,7 +287,28 @@ fn read_state(fs: &mut FsClient) -> Result<String, u64> {
                 "upd-state-unreadable",
                 "updater/state cannot be read or is too large: not used, not rewritten",
             )
-        })
+        })?;
+    // Structural damage (repeated or unknown sections) is repaired as
+    // `lists` documents and stored at once (an atomic replace), so the
+    // fault says exactly what happened (fix update-state-sections).
+    if !lists::needs_repair(&text) {
+        return Ok(text);
+    }
+    let fixed = lists::repaired(&text);
+    if write_file(fs, upd::STATE_FILE, fixed.as_bytes()) {
+        fault(
+            code::STATE_REPAIRED,
+            "upd-state-repaired",
+            "updater/state was damaged (repeated or unknown sections): repaired and saved; a repeated plan or staged list was dropped (run update again)",
+        );
+    } else {
+        fault(
+            code::STATE_REPAIRED,
+            "upd-state-repaired",
+            "updater/state was damaged (repeated or unknown sections): repaired for this run, but the repair could not be saved",
+        );
+    }
+    Ok(fixed)
 }
 
 /// Replaces one section of `state`; refused when it could not be read.
@@ -316,7 +338,7 @@ fn installed_apps(fs: &mut FsClient) -> Option<Vec<(String, u32)>> {
             return None;
         }
     };
-    let (apps, rejected) = lists::parse_installed(text);
+    let (apps, rejected) = lists::parse_installed(&text);
     if rejected > 0 {
         fault(
             code::INSTALLED_LIST,
@@ -1203,7 +1225,7 @@ fn upgrade(
             "nothing reported yet: run update first",
         );
     };
-    let (plan, rejected) = lists::parse_plan(plan_text);
+    let (plan, rejected) = lists::parse_plan(&plan_text);
     if rejected > 0 {
         fault(
             code::PLAN,

@@ -55,6 +55,7 @@ mod code {
     pub const STAGE: u64 = 10;
     pub const LIST: u64 = 11;
     pub const STATE: u64 = 12;
+    pub const STATE_REPAIRED: u64 = 13;
 }
 
 macro_rules! say {
@@ -191,7 +192,7 @@ fn read_state(fs: &mut FsClient) -> Result<String, u64> {
     if file_size(fs, &path).is_none() {
         return Ok(String::new());
     }
-    read_all(fs, &path, 16 * 1024)
+    let text = read_all(fs, &path, 16 * 1024)
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .ok_or_else(|| {
             fault(
@@ -199,7 +200,28 @@ fn read_state(fs: &mut FsClient) -> Result<String, u64> {
                 "inst-state-unreadable",
                 "updater/state cannot be read or is too large: not used, not rewritten",
             )
-        })
+        })?;
+    // Structural damage is repaired as `lists` documents and stored at
+    // once (an atomic replace), so the fault says exactly what happened
+    // (fix update-state-sections).
+    if !lists::needs_repair(&text) {
+        return Ok(text);
+    }
+    let fixed = lists::repaired(&text);
+    if write_file(fs, &path, fixed.as_bytes()) {
+        fault(
+            code::STATE_REPAIRED,
+            "inst-state-repaired",
+            "updater/state was damaged (repeated or unknown sections): repaired and saved; a repeated plan or staged list was dropped",
+        );
+    } else {
+        fault(
+            code::STATE_REPAIRED,
+            "inst-state-repaired",
+            "updater/state was damaged (repeated or unknown sections): repaired for this run, but the repair could not be saved",
+        );
+    }
+    Ok(fixed)
 }
 
 /// Replaces one section of the exchange file; refused when it could not
@@ -358,8 +380,8 @@ fn install_staged(fs: &mut FsClient, allow_downgrade: bool, pubkey: &[u8; 32]) -
         Ok(s) => s,
         Err(code) => return code,
     };
-    let text = lists::section(&state, lists::STAGED).unwrap_or("");
-    let (entries, rejected) = lists::parse_staged(text);
+    let text = lists::section(&state, lists::STAGED).unwrap_or_default();
+    let (entries, rejected) = lists::parse_staged(&text);
     let mut result = 0;
     if rejected > 0 {
         result = fault(
