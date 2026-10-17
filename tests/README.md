@@ -49,6 +49,8 @@ disk = "slots"                  # disk: slots (default) | esp-only | pending-b |
                                 #       | fs-pending-replace (an AriFS replace committed but not applied) | fs-corrupt (AriFS table altered)
                                 #       | wasm-restricted (module manifest with print only) | wasm-invalid (ill-typed demo.wasm)
                                 #       | wasm-bad-import (demo.wasm imports a host function with another signature)
+                                #       | a-corrupt (slot A fails verification: ESP boot, installed version unknown)
+                                #       | pending-b-older-update (B v2 pending, UPDATE holds v1) | fs-nearly-full (4 free AriFS entries)
 disk_readonly = false           # true: the test disk is presented read-only
 cpus = 4                        # processors (-smp N); undeclared: 1, or whatever `--cpus N` forces
 usb_hid = true                  # adds qemu-xhci with a USB keyboard and mouse (QMP events go to the USB devices)
@@ -70,6 +72,8 @@ source = "sources"              # sources (installs updater/sources) | legacy-ur
 usb_legacy_controller = true    # also adds an EHCI (class 0c.03 but not xHCI)
 install = ["examples/hello_ext"]  # external apps xtask builds, signs (version 1) and installs in AriFS as apps/NAME.aripkg
 packages = ["examples/hello_ext:2", "examples/hello_ext:3:corrupt"]  # pending packages in pkgs/ (DIR:VERSION[:corrupt]) for `run installer`
+staged = ["examples/hello_ext:2:wrong-hash"]  # packages already staged for `run installer 2` (DIR:VERSION[:wrong-hash])
+staged_bad_path = true          # adds a staged line naming pkgs/evil.aripkg
 
 [host_input]                    # optional: input injected through QMP when marker is seen
 marker = "INPUT_READY"

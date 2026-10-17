@@ -1,0 +1,39 @@
+# Explicit app downgrade (ADR 0029, decision 5): hello_ext v2 is installed
+# (from pkgs/) and the source offers v1. `upgrade --allow-downgrade` stages
+# v1 and the installer, in STAGED mode with the flag, installs it; the
+# history records the downgrade.
+name = "apps.downgrade_allowed"
+description = "upgrade --allow-downgrade installs an older app through the staged path"
+level = "full"
+areas = ["apps", "update", "network", "shell"]
+install = ["examples/hello_ext"]
+packages = ["examples/hello_ext:2"]
+timeout_secs = 200
+
+[host_update]
+apps = ["examples/hello_ext:1"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = [
+    "run installer",
+    "update",
+    "upgrade --allow-downgrade",
+    "run hello_ext 5",
+    "cat updater/history.log",
+    "shutdown",
+]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "installer: hello_ext 1 -> 2 installed (apps/hello_ext.aripkg)",
+    "updater: app hello_ext: installed 2, source 1 offers 1: older than installed; upgrade refuses it without --allow-downgrade",
+    "updater: app hello_ext: downgrading from 2 to 1 (--allow-downgrade)",
+    "updater: app hello_ext version 1 verified and staged as updater/pkg-1.aripkg",
+    "installer: installing hello_ext version 1 (from updater/pkg-1.aripkg)",
+    "installer: hello_ext 2 -> 1 installed (apps/hello_ext.aripkg)",
+    "hello_ext v1: hello from outside the tree (arg 5)",
+    "app hello_ext 2 -> 1 installed (apps/hello_ext.aripkg)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "update: updater exited with", "update: installer exited", "refused (downgrade)"]

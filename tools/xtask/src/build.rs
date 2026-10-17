@@ -317,6 +317,13 @@ pub fn build_external(
     let seed = crate::keys::signing_seed()?;
     let package = aricode_pkg::build(&name, version, &elf, &manifest, &seed, corrupt)
         .ok_or_else(|| format!("{name}: invalid package name"))?;
+    // Post-build check (re-audit, R1): a package meant to be valid must
+    // verify with the key the build embeds.
+    if !corrupt && aricode_pkg::verify(&package, &crate::keys::expected_public_key()?).is_err() {
+        return Err(format!(
+            "{name}: the package does not verify with the embedded public key"
+        ));
+    }
     Ok(ExternalApp {
         name,
         version,

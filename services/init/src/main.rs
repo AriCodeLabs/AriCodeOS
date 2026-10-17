@@ -1250,9 +1250,7 @@ impl Broker {
             }
         }
         let _ = fs.close(fd);
-        let Some(pubkey) = aricode_crypto::trust::public_key() else {
-            return Err(LaunchStatus::Failed);
-        };
+        let pubkey = aricode_crypto::trust::public_key();
         let package = &stage[..total];
         let verified = match aricode_pkg::verify(package, &pubkey) {
             Ok(v) => v,

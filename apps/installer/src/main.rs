@@ -9,12 +9,12 @@
 //! Argument (`aricode_update_index::installer_arg`):
 //!
 //! - no flag: the packages left in `pkgs/` (ADR 0018); never a downgrade.
-//! - `STAGED`: only the packages the updater listed in `updater/staged`,
+//! - `STAGED`: only the packages the updater listed in `[staged]` of `updater/state`,
 //!   from the fixed stage files of its directory, each checked against the
 //!   SHA-256, name and version listed there; the list is emptied once
 //!   consumed. `ALLOW_DOWNGRADE` (the shell's `upgrade --allow-downgrade`)
 //!   is accepted only together with `STAGED` (ADR 0029, decision 5).
-//! - `LIST`: only writes the installed apps to `updater/installed`, which
+//! - `LIST`: only writes the installed apps to `[installed]` of `updater/state`, which
 //!   is how the updater learns them without the main file space.
 //!
 //! Every install goes to the history (`updater/history.log`); every refusal
@@ -46,7 +46,6 @@ const MAX_PENDING: usize = 8;
 mod code {
     pub const NO_SPACE: u64 = 1;
     pub const NO_CLIENT: u64 = 2;
-    pub const KEY: u64 = 3;
     pub const OPEN: u64 = 4;
     pub const WRITE: u64 = 5;
     pub const BAD_FLAGS: u64 = 6;
@@ -183,14 +182,27 @@ fn installed_apps(fs: &mut FsClient, pubkey: &[u8; 32]) -> Vec<(String, u32)> {
     apps
 }
 
+/// The exchange file with the updater (`updater/state`), empty if missing.
+fn read_state(fs: &mut FsClient) -> String {
+    read_all(fs, &upd::main_path(upd::STATE_FILE), 16 * 1024)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default()
+}
+
+/// Replaces one section of the exchange file.
+fn write_state_section(fs: &mut FsClient, name: &str, body: &str) -> bool {
+    let state = read_state(fs);
+    write_file(
+        fs,
+        &upd::main_path(upd::STATE_FILE),
+        lists::with_section(&state, name, body).as_bytes(),
+    )
+}
+
 /// `LIST`, and after every install: the installed apps for the updater.
 fn write_installed(fs: &mut FsClient, pubkey: &[u8; 32]) -> u64 {
     let apps = installed_apps(fs, pubkey);
-    if write_file(
-        fs,
-        &upd::main_path(upd::INSTALLED_FILE),
-        lists::encode_installed(&apps).as_bytes(),
-    ) {
+    if write_state_section(fs, lists::INSTALLED, &lists::encode_installed(&apps)) {
         0
     } else {
         fault(
@@ -323,13 +335,12 @@ fn install_pending(fs: &mut FsClient, pubkey: &[u8; 32]) -> u64 {
     write_installed(fs, pubkey)
 }
 
-/// `STAGED`: what the updater listed in `updater/staged`, nothing else.
+/// `STAGED`: what the updater listed in the `[staged]` section of
+/// `updater/state`, nothing else.
 fn install_staged(fs: &mut FsClient, allow_downgrade: bool, pubkey: &[u8; 32]) -> u64 {
-    let list_path = upd::main_path(upd::STAGED_FILE);
-    let text = read_all(fs, &list_path, 4096)
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
-        .unwrap_or_default();
-    let (entries, rejected) = lists::parse_staged(&text);
+    let state = read_state(fs);
+    let text = lists::section(&state, lists::STAGED).unwrap_or("");
+    let (entries, rejected) = lists::parse_staged(text);
     let mut result = 0;
     if rejected > 0 {
         result = fault(
@@ -374,7 +385,7 @@ fn install_staged(fs: &mut FsClient, allow_downgrade: bool, pubkey: &[u8; 32]) -
     }
     // Consumed: a later run (with or without --allow-downgrade) cannot
     // install the same files again.
-    if !write_file(fs, &list_path, b"") {
+    if !write_state_section(fs, lists::STAGED, "") {
         result = fault(
             code::WRITE,
             "inst-stage-clear",
@@ -409,9 +420,7 @@ fn main(arg: u64) -> u64 {
     let Ok(mut fs) = FsClient::new(ep, hw) else {
         return fault(code::NO_CLIENT, "inst-no-client", "no file client");
     };
-    let Some(pubkey) = aricode_crypto::trust::public_key() else {
-        return fault(code::KEY, "inst-key", "invalid embedded public key");
-    };
+    let pubkey = aricode_crypto::trust::public_key();
     let allow_downgrade = arg & installer_arg::ALLOW_DOWNGRADE != 0;
     let staged = arg & installer_arg::STAGED != 0;
     let list = arg & installer_arg::LIST != 0;

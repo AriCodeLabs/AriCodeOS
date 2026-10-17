@@ -69,11 +69,11 @@ it, no downgrades unless asked, and every install logged.
 
 4. **`update` reports and plans, `upgrade` follows the plan.** `update`
    (updater argument `REFRESH`) first has the installer write the installed
-   apps to `updater/installed` (installer `LIST`), then fetches every
-   source's index, keeps the verified copies in `updater/index-N` (source
+   apps to the `[installed]` section of `updater/state` (installer `LIST`), then fetches every
+   source's index, keeps the verified copies in `updater/indexes` (per source slot:
    URL, signature, exact bytes), reports for the system (version of the
    active slot, verified from disk) and for each installed app the best
-   offer, and saves everything that differs as `updater/plan`. It installs
+   offer, and saves everything that differs as the `[plan]` section. It installs
    nothing. `upgrade` (argument `UPGRADE`) verifies the stored copies
    again instead of trusting AriFS and installs only items of the plan at
    the version the plan names (`upd-not-reported` otherwise): the system
@@ -81,7 +81,7 @@ it, no downgrades unless asked, and every install logged.
    is zeroed and flushed first, the new header written last, then the slot
    is scheduled with three tries; `reboot to apply`), and app packages
    staged in the updater's directory as `pkg-1.aripkg`..`pkg-4.aripkg`
-   with `updater/staged` listing file, name, version and SHA-256. The shell
+   with the `[staged]` section listing file, name, version and SHA-256. The shell
    then runs the installer with `STAGED`, which installs exactly those
    files after checking them against the list and their own signature, and
    empties the list. `upgrade` only upgrades installed apps; new apps are
@@ -127,7 +127,7 @@ it, no downgrades unless asked, and every install logged.
    does not get the main file space: it parses network input, and `install`
    would give it journaled writes to `authorized_keys`, the SSH host key,
    `trusted_ca.der` and `apps/`. Installed versions reach it in
-   `updater/installed`; staged packages leave through `updater/staged`; the
+   `[installed]` of `updater/state`; staged packages leave through its `[staged]` section; the
    installer (main space, `install`, trust list `installer` only) does the
    installing. Follow-up: the raw `block` grant still reaches every
    partition, ARI0 included; it should be limited to `UPDATE`, `ARIBOOT`
@@ -142,7 +142,12 @@ it, no downgrades unless asked, and every install logged.
    updater only read `manifest.txt`: for this release `publish-update`
    also writes it next to the image by default, so they can fetch this
    build over the network with their `update`; after that they speak the
-   new protocol and `--no-legacy-manifest` drops it. `update URL` and
+   new protocol and `--no-legacy-manifest` drops it. Because an ADR 0027
+   updater installs any version that differs from its own, older ones
+   included, `publish-update` refuses to write `manifest.txt` for a system
+   version below the one already published. After the transition release
+   the legacy manifest becomes opt-in (the default flips to no
+   `manifest.txt`, and a `--legacy-manifest` flag asks for it). `update URL` and
    `update check` are replaced by `update add URL` and `update`;
    `update apply` remains. `cargo xtask usb-image --update-source URL`
    writes `updater/sources`.
@@ -171,7 +176,8 @@ required before network upgrades on untrusted networks:
 1. `cargo xtask keygen /secure/offline/dir` on a machine that does not
    serve updates. The seed never enters the repository: xtask refuses a
    `--signing-key` directory inside it, and checks that seed and public key
-   are a pair.
+   are a pair. The verified public key is kept for the whole run and never
+   read again.
 2. `cargo xtask usb-image --signing-key /secure/offline/dir` builds the
    system with that public key embedded (`ARICODE_SIGNING_PUB`; cargo
    rebuilds the verifiers when it changes) and signs slot A with it. The
@@ -180,6 +186,12 @@ required before network upgrades on untrusted networks:
    `serve-update`) builds with the same key and signs the image, the
    packages and the index. A machine built with one key refuses everything
    signed with another.
+
+After every build xtask checks that AriBoot, init, the installer and the
+updater carry the trust anchor with exactly the selected key, and that the
+system images and packages it signs verify with it; a mismatch fails the
+build. The key is decoded at compile time, so an invalid
+`ARICODE_SIGNING_PUB` does not build.
 
 There is no key rotation in the protocol yet (see below).
 
@@ -193,7 +205,9 @@ There is no key rotation in the protocol yet (see below).
   (stage files only), history. `xtask`: a published index verifies with the
   development key and a tampered one does not, serials only grow,
   publication leaves no staging directory, signing keys must be a pair
-  outside the repository. `aricode-crypto`: the embedded key parses.
+  outside the repository, the post-build anchor check, the legacy
+  manifest never going below the published version. `aricode-crypto`:
+  the embedded key and the compile-time decoder.
 - Installer memory: the 64 KiB quota is DMA only (the file client's 4 KiB
   buffer); packages use the runtime's 256 KiB static heap, whose peak
   during an install is under 80 KiB (one 32 KiB package, the installed copy
@@ -202,15 +216,22 @@ There is no key rotation in the protocol yet (see below).
   `update.network` (system upgrade and reboot into the new slot),
   `update.tampered_index`, `update.tampered_image`, `update.stale_index`,
   `update.refuse_downgrade`, `apps.upgrade_network`,
-  `apps.downgrade_refused`; `ssh.exec` and `update.apply` follow the new
-  messages.
+  `apps.downgrade_refused`, `apps.downgrade_allowed`,
+  `apps.staged_tampered`, `update.installed_unknown`,
+  `update.apply_refuses_older`, `update.fs_nearly_full`; `ssh.exec` and
+  `update.apply` follow the new messages.
 - The transport stays untrusted (ADR 0027, decision 2): HTTP is enough for
   integrity; HTTPS adds privacy and hides which versions a machine fetches.
   The updater trusts only the embedded root certificates for HTTPS.
-- Limits: four sources and four staged packages per `upgrade` (each is an
-  AriFS file, and the AriFS table holds 32 entries in all: the updater's
-  directory can reach 16), a 4 KiB index, sixteen apps per index, 32 KiB
-  packages, app names of 20 bytes, the 4 MiB image buffer.
+- AriFS table (32 entries in all, re-audit R3): the updater's directory
+  uses `sources`, `indexes` (every stored copy), `state` (installed, plan
+  and staged sections), `last.log`, `history.log` and up to four stage
+  files, plus `update_url` on migrated machines. A first `update` and a
+  system `upgrade` need four free entries (`update.fs_nearly_full`); a
+  full table is a visible write fault, never a silent skip.
+- Limits: four sources, four staged packages per `upgrade`, a 4 KiB index,
+  sixteen apps per index, 32 KiB packages, app names of 20 bytes, the
+  4 MiB image buffer.
 - Open: key rotation and revocation (a signed key list in the index);
   freshness against a source that keeps serving one old index forever (an
   expiry date needs a trusted clock); binding an index to the source that

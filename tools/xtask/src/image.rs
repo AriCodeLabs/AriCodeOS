@@ -28,6 +28,12 @@ pub fn scenarios_root() -> PathBuf {
 /// Base ESP at `build/esp/`: BOOTX64.EFI + kernel.elf, no cmdline.
 pub fn build_base_esp(release: bool) -> Result<PathBuf> {
     let a = build_os(release)?;
+    // Every verifier must embed the key the images are signed with
+    // (re-audit, R1).
+    crate::keys::check_embedded_key(&a.ariboot)?;
+    for verifier in ["init", "installer", "updater"] {
+        crate::keys::check_embedded_key(&a.user_bin.join(verifier))?;
+    }
     let esp = build_dir().join("esp");
     write_esp(&esp, &a, None)?;
     println!("[xtask] ESP image at {}", esp.display());
@@ -416,6 +422,15 @@ pub enum DiskVariant {
     ExhaustedB,
     /// B pending with an image whose signature is invalid: rejection and rollback.
     CorruptB,
+    /// A active with an image whose signature is invalid: AriBoot boots
+    /// from the ESP and the installed version is unknown (ADR 0029, H1).
+    CorruptA,
+    /// Like `PendingB` (B version 2 is confirmed on boot) but UPDATE holds
+    /// version 1: `update apply` must refuse the downgrade.
+    PendingBOlderUpdate,
+    /// Normal slots and an AriFS table with only `FS_FREE_ENTRIES` free
+    /// entries (filler files): what `update` and `upgrade` need must fit.
+    FsNearlyFull,
     /// Normal slots and a committed but unapplied `README` replacement in the
     /// AriFS journal (power cut after commit): fsd replays it.
     FsPendingReplace,
@@ -441,6 +456,9 @@ impl DiskVariant {
             "pending-b" => Self::PendingB,
             "b-exhausted" => Self::ExhaustedB,
             "b-corrupt" => Self::CorruptB,
+            "a-corrupt" => Self::CorruptA,
+            "pending-b-older-update" => Self::PendingBOlderUpdate,
+            "fs-nearly-full" => Self::FsNearlyFull,
             "fs-pending-replace" => Self::FsPendingReplace,
             "fs-corrupt" => Self::FsCorrupt,
             "wasm-restricted" => Self::WasmRestricted,
@@ -523,13 +541,23 @@ pub fn system_image(version: u32, corrupt: bool) -> Result<Vec<u8>> {
     if corrupt {
         sig[5] ^= 0x40;
     }
-    aricode_initrd::build(&[
+    let container = aricode_initrd::build(&[
         ("manifest", text.as_slice()),
         ("manifest.sig", &sig[..]),
         ("kernel.elf", kernel.as_slice()),
         ("initrd.img", initrd.as_slice()),
     ])
-    .map_err(|e| format!("system image: {e:?}"))
+    .map_err(|e| format!("system image: {e:?}"))?;
+    // Post-build check (re-audit, R1): a valid image must verify with the
+    // key the build embeds.
+    if !corrupt
+        && aricode_ab::Image::verify(&container, &crate::keys::expected_public_key()?).is_err()
+    {
+        return Err(String::from(
+            "system image does not verify with the embedded public key",
+        ));
+    }
+    Ok(container)
 }
 
 /// ELF without debug sections (the kernel and the initrd only need the
@@ -598,6 +626,7 @@ pub fn write_test_disk(
         DiskVariant::WasmBadImport => {
             overwrite_arifs(&mut img, PART_ARI0, WASM_MODULE_FILE, BAD_IMPORT_WASM)?
         }
+        DiskVariant::FsNearlyFull => fill_arifs(&mut img, PART_ARI0, FS_FREE_ENTRIES)?,
         DiskVariant::FsCorrupt => {
             // First byte of the name of the first entry in use.
             img[(PART_ARI0.0 + aricode_arifs::TABLE_LBA) as usize * 512] ^= 0x20;
@@ -614,13 +643,19 @@ pub fn write_test_disk(
         use aricode_ab::{schedule, BootState, Slot};
         let v1 = system_image(1, false)?;
         let v2 = system_image(2, false)?;
-        write_slot(&mut img, PART_SYSA, &v1)?;
-        if variant != DiskVariant::UpdateEmpty {
-            write_slot(&mut img, PART_UPDATE, &v2)?;
+        if variant == DiskVariant::CorruptA {
+            write_slot(&mut img, PART_SYSA, &system_image(1, true)?)?;
+        } else {
+            write_slot(&mut img, PART_SYSA, &v1)?;
+        }
+        match variant {
+            DiskVariant::UpdateEmpty => {}
+            DiskVariant::PendingBOlderUpdate => write_slot(&mut img, PART_UPDATE, &v1)?,
+            _ => write_slot(&mut img, PART_UPDATE, &v2)?,
         }
         let mut state = BootState::fresh(Slot::A);
         match variant {
-            DiskVariant::PendingB => {
+            DiskVariant::PendingB | DiskVariant::PendingBOlderUpdate => {
                 write_slot(&mut img, PART_SYSB, &v2)?;
                 state = schedule(state, Slot::B);
             }
@@ -634,6 +669,8 @@ pub fn write_test_disk(
                 state = schedule(state, Slot::B);
             }
             DiskVariant::Slots
+            | DiskVariant::CorruptA
+            | DiskVariant::FsNearlyFull
             | DiskVariant::UpdateEmpty
             | DiskVariant::EspOnly
             | DiskVariant::UsbImage
@@ -671,6 +708,28 @@ fn install_files(img: &mut [u8], part: (u64, u64), files: &[(String, Vec<u8>)]) 
             .map_err(|e| format!("arifs {name}: {e:?}"))?;
         fs.write(i, 0, bytes)
             .map_err(|e| format!("arifs {name} ({} bytes): {e:?}", bytes.len()))?;
+    }
+    fs.flush().map_err(|e| format!("arifs: {e:?}"))
+}
+
+/// Free AriFS entries left by `fs-nearly-full`: exactly what a first
+/// `update` and a system `upgrade` create in the updater's directory
+/// (`state`, `indexes`, `last.log`, `history.log`; re-audit, R3).
+pub const FS_FREE_ENTRIES: usize = 4;
+
+/// Fills the AriFS table with empty `fill-NN` files until only `free`
+/// entries are left.
+fn fill_arifs(img: &mut [u8], part: (u64, u64), free: usize) -> Result {
+    let mut fs = aricode_arifs::AriFs::open(VecDisk {
+        data: img,
+        base: part.0,
+    })
+    .map_err(|e| format!("arifs: {e:?}"))?;
+    let used = fs.entries().count();
+    for i in 0..aricode_arifs::MAX_FILES.saturating_sub(used + free) {
+        let name = format!("fill-{i:02}");
+        fs.create(&name)
+            .map_err(|e| format!("arifs {name}: {e:?}"))?;
     }
     fs.flush().map_err(|e| format!("arifs: {e:?}"))
 }
@@ -888,6 +947,33 @@ mod tests {
 
     const E_PHOFF_TEST: usize = 32;
 
+    #[test]
+    fn legacy_manifest_never_goes_below_the_published_version() {
+        // Re-audit, R4.
+        let tmp = TempDir::new("legacy-manifest");
+        let dir = tmp.path().join("source");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("manifest.txt"), "version = 3\nimage = a.img\n").unwrap();
+        let older = Channel {
+            system: Some(2),
+            legacy_manifest: true,
+            ..Channel::default()
+        };
+        let err = check_legacy_manifest(&dir, &older).unwrap_err();
+        assert!(err.contains("below the published 3"), "{err}");
+        let without = Channel {
+            legacy_manifest: false,
+            ..older
+        };
+        assert!(check_legacy_manifest(&dir, &without).is_ok());
+        let newer = Channel {
+            system: Some(4),
+            legacy_manifest: true,
+            ..Channel::default()
+        };
+        assert!(check_legacy_manifest(&dir, &newer).is_ok());
+    }
+
     fn dev_public_key() -> [u8; 32] {
         crate::keys::read_hex(
             &crate::root()
@@ -1013,6 +1099,36 @@ fn published_serial(dir: &Path) -> Option<u64> {
         .map(|i| i.serial)
 }
 
+/// The system version currently published in `dir`: from its index, or
+/// from an ADR 0027 `manifest.txt`.
+fn published_system_version(dir: &Path) -> Option<u32> {
+    if let Ok(text) = fs::read_to_string(dir.join(aricode_update_index::INDEX_FILE)) {
+        if let Ok(index) = aricode_update_index::Index::parse(&text) {
+            return index.system.map(|s| s.version);
+        }
+    }
+    fs::read_to_string(dir.join("manifest.txt"))
+        .ok()?
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("version = ")?.trim().parse().ok())
+}
+
+/// Re-audit, R4: an ADR 0027 updater installs any version that differs
+/// from the one it runs, older ones included. `manifest.txt` is therefore
+/// never published for a version below the one already published.
+fn check_legacy_manifest(dir: &Path, channel: &Channel) -> Result {
+    let (true, Some(version)) = (channel.legacy_manifest, channel.system) else {
+        return Ok(());
+    };
+    match published_system_version(dir) {
+        Some(published) if version < published => Err(format!(
+            "refusing to publish manifest.txt for system {version} below the published {published}: \
+             ADR 0027 updaters would downgrade to it (use --no-legacy-manifest)"
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// `index.sig` for `text`, signed with the selected key (hex line).
 fn sign_index(text: &str) -> Result<String> {
     let seed = crate::keys::signing_seed()?;
@@ -1021,7 +1137,7 @@ fn sign_index(text: &str) -> Result<String> {
     Ok(format!("{}\n", aricode_crypto::hex(&signature, &mut hex)))
 }
 
-/// A stored copy (`updater/index-1`) of the index published in `dir`, for
+/// A stored copy (slot 1 of `updater/indexes`) of the index published in `dir`, for
 /// source `url`, re-signed with a serial ahead of the published one: the
 /// machine then sees the published index as stale (scenario
 /// `update.stale_index`).
@@ -1067,6 +1183,7 @@ pub fn publish_update_to(dir: &Path, release: bool, channel: &Channel) -> Result
             io(fs::remove_dir_all(d), "remove a leftover publication")?;
         }
     }
+    check_legacy_manifest(dir, channel)?;
     io(fs::create_dir_all(&staging), "create the update directory")?;
     let sha = aricode_crypto::sha256::sha256;
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();

@@ -234,6 +234,14 @@ pub struct Scenario {
     /// `DIR:VERSION:corrupt` (tampered signature), for the installer (ADR 0018).
     #[serde(default)]
     pub packages: Vec<String>,
+    /// Packages already staged by the updater: `DIR:VERSION`, or
+    /// `DIR:VERSION:wrong-hash` (the staged list's SHA-256 does not match
+    /// the stage file), for `run installer 2` (ADR 0029).
+    #[serde(default)]
+    pub staged: Vec<String>,
+    /// Adds a staged line naming a file outside the stage files.
+    #[serde(default)]
+    pub staged_bad_path: bool,
     #[serde(skip)]
     pub file: PathBuf,
 }

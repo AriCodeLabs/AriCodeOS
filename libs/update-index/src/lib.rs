@@ -75,28 +75,22 @@ pub const HISTORY_FILE: &str = "history.log";
 pub const HISTORY_MAX: usize = 2048;
 /// Output of the updater's last run (shown to remote sessions).
 pub const UPDATER_LOG_FILE: &str = "last.log";
-/// Installed apps and versions, written by the installer before every
-/// updater run ([`lists::encode_installed`]).
-pub const INSTALLED_FILE: &str = "installed";
-/// What the last `update` reported as installable ([`lists::PlanItem`]);
-/// `upgrade` installs nothing outside it.
-pub const PLAN_FILE: &str = "plan";
-/// Packages the last `upgrade` staged for the installer
-/// ([`lists::StagedEntry`]); the installer empties it once consumed.
-pub const STAGED_FILE: &str = "staged";
+/// The exchange between the updater and the installer, one file with three
+/// sections ([`lists::section`]) so the AriFS table (32 entries in all) is
+/// spared (audit 1, R3): `[installed]` (written by the installer before
+/// every updater run), `[plan]` (what the last `update` reported; `upgrade`
+/// installs nothing outside it) and `[staged]` (packages the last
+/// `upgrade` staged; the installer empties it once consumed).
+pub const STATE_FILE: &str = "state";
+/// The verified copies of every source's index, one file
+/// ([`stored::encode_all`]).
+pub const INDEXES_FILE: &str = "indexes";
 /// Most packages staged by one `upgrade` (each one is an AriFS file).
 pub const MAX_STAGED: usize = 4;
 
 /// `name` inside the updater's directory, as the main file space sees it.
 pub fn main_path(name: &str) -> alloc::string::String {
     alloc::format!("{UPDATER_DIR}/{name}")
-}
-
-/// Stored, verified index of the source in position `slot` (0-based) of
-/// the list (`index-1` ...).
-pub fn stored_index_file(slot: usize) -> Option<&'static str> {
-    const FILES: [&str; MAX_SOURCES] = ["index-1", "index-2", "index-3", "index-4"];
-    FILES.get(slot).copied()
 }
 
 /// Staged package number `slot` (0-based): `pkg-1.aripkg` ... The installer
@@ -134,8 +128,8 @@ pub mod installer_arg {
     /// With `STAGED` only: a package older than the installed one may
     /// replace it. Refused in any other mode.
     pub const ALLOW_DOWNGRADE: u64 = 1;
-    /// Install only what the updater listed in `updater/staged`.
+    /// Install only what the updater listed in `[staged]` of `updater/state`.
     pub const STAGED: u64 = 2;
-    /// Only write the installed apps to `updater/installed`.
+    /// Only write the installed apps to `[installed]` of `updater/state`.
     pub const LIST: u64 = 4;
 }

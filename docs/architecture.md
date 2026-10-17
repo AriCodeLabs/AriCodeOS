@@ -1345,13 +1345,13 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
 - `apps/updater` (caps system, fs, net, block; no main file space):
   `REFRESH` fetches and verifies each source's `index`/`index.sig`
   (bounded, with a run deadline), stores verified copies in
-  `updater/index-N`, reports and saves the plan; `UPGRADE` re-verifies the
+  `updater/indexes`, reports and saves the plan in `updater/state`; `UPGRADE` re-verifies the
   copies, installs only planned items: the system image (memory download,
   size, SHA-256, signed manifest and version checked, slot header zeroed
   first and written last) and packages staged as `updater/pkg-N.aripkg`
-  with `updater/staged`. `APPLY` installs the `UPDATE` partition under the
+  with the `[staged]` section of `updater/state`. `APPLY` installs the `UPDATE` partition under the
   downgrade rule. Unknown installed system versions count as downgrades.
-- `apps/installer`: `LIST` writes `updater/installed`; `STAGED` installs
+- `apps/installer`: `LIST` writes `[installed]` of `updater/state`; `STAGED` installs
   only the staged list (checked against it, then emptied);
   `ALLOW_DOWNGRADE` only with `STAGED`; history lines and fault events.
 - `aricode_crypto::trust`: the build's public key (development by default,

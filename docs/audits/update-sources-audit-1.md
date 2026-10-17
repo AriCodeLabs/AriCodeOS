@@ -59,3 +59,23 @@ untrusted networks.
 
 New scenarios (not run): `update.tampered_image`, `update.stale_index`,
 `apps.downgrade_refused`.
+
+## Re-audit (2026-10-17)
+
+Verdict: safe to merge after QEMU, provided R1 is fixed. All items below
+are fixed on the branch (commit after this section's first version; line
+numbers as of that commit).
+
+| Id | Finding | Resolution |
+|----|---------|------------|
+| R1 | The build could silently embed the dev key: `signing_public_hex` reread `DIR/ed25519.pub` on every `cargo()` call and a read error meant "dev key". | The verified public key (bytes and hex) is stored with the directory in a `OnceLock` at selection and never reread (`tools/xtask/src/keys.rs` 31, 96, 102); `cargo()` uses it (`build.rs` 80). Post-build check: every verifier binary must carry the trust anchor with exactly the expected key (`keys.rs` 112, called from `image.rs` 33-35), and every valid system image (`image.rs` 557) and package (`build.rs` 324) must verify with it; otherwise the build fails. Checked by hand with a production key and with the dev key. |
+| R2 | Invalid `ARICODE_SIGNING_PUB` only failed at run time; stale AriBoot message. | The key is decoded by a `const fn` into the tagged `TRUST_ANCHOR` static (`libs/crypto/src/trust.rs` 33, 53): an invalid key is a compile error (checked: `ARICODE_SIGNING_PUB=zz` stops the build with "expected 64 hex digits"); `public_key()` (77) reads it with a volatile load so the bytes stay in the binary. AriBoot's "invalid development public key" branch is gone (`boot/src/slots.rs` 91), as are the run-time key checks in init, the installer and the updater. |
+| R3 | The 32-entry AriFS table could fill and block `update`. | `installed`, `plan` and `staged` are sections of one `updater/state` file (`libs/update-index/src/lib.rs` 84, `lists.rs` 31-48; updater 248-256, installer 186-193); the four stored indexes are one `updater/indexes` file (`lib.rs` 87, `stored.rs` 73-86, updater 690). A first `update` plus a system `upgrade` need four entries; disk variant `fs-nearly-full` (`image.rs` 718-722) and scenario `update.fs_nearly_full`. |
+| R4 | Legacy `manifest.txt` could downgrade ADR 0027 machines. | `publish-update` refuses to write it for a version below the published one (`image.rs` 1119, host test); ADR 0029 decision 9 documents making it opt-in after the transition release. |
+| UX | Upgrade was silent when the plan had no system line but an index offered a newer system. | `upd-not-reported` fault and message (updater 1163). |
+
+New scenarios (not run): `update.installed_unknown` (H1, disk
+`a-corrupt`), `update.apply_refuses_older` (M4, disk
+`pending-b-older-update`), `apps.downgrade_allowed` (positive
+`upgrade --allow-downgrade` through STAGED), `apps.staged_tampered`
+(`inst-stage-hash`, `inst-stage-path`), `update.fs_nearly_full` (R3).

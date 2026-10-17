@@ -69,7 +69,6 @@ const MAX_SIGNATURE: usize = 256;
 /// Exit codes; failures are also fault events with the same code (ADR 0028).
 mod code {
     pub const NO_BLOCK: u64 = 2;
-    pub const KEY: u64 = 3;
     pub const NO_UPDATE_PART: u64 = 4;
     pub const NO_STATE_PART: u64 = 5;
     pub const STATE_READ: u64 = 6;
@@ -244,12 +243,32 @@ fn load_sources(fs: &mut FsClient) -> Result<Sources, u64> {
     Ok(sources)
 }
 
+/// The exchange file with the installer (`state`); empty when missing or
+/// unreadable (each section then counts as absent).
+fn read_state(fs: &mut FsClient) -> String {
+    read_text(fs, upd::STATE_FILE, 16 * 1024)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+/// Replaces one section of `state`.
+fn write_state_section(fs: &mut FsClient, name: &str, body: &str) -> bool {
+    let state = read_state(fs);
+    write_file(
+        fs,
+        upd::STATE_FILE,
+        lists::with_section(&state, name, body).as_bytes(),
+    )
+}
+
 /// The installed apps, as the installer listed them just before this run.
 /// `None` (after a fault) when the list is missing or unreadable.
 fn installed_apps(fs: &mut FsClient) -> Option<Vec<(String, u32)>> {
-    let text = match read_text(fs, upd::INSTALLED_FILE, 4096) {
-        Ok(Some(t)) => t,
-        _ => {
+    let state = read_state(fs);
+    let text = match lists::section(&state, lists::INSTALLED) {
+        Some(t) => t,
+        None => {
             fault(
                 code::INSTALLED_LIST,
                 "upd-installed-missing",
@@ -258,7 +277,7 @@ fn installed_apps(fs: &mut FsClient) -> Option<Vec<(String, u32)>> {
             return None;
         }
     };
-    let (apps, rejected) = lists::parse_installed(&text);
+    let (apps, rejected) = lists::parse_installed(text);
     if rejected > 0 {
         fault(
             code::INSTALLED_LIST,
@@ -650,31 +669,42 @@ fn download_fault(code: u64, event: &str, msg: String) -> u64 {
 
 // ---------------------------------------------------------------- indexes
 
-/// The stored indexes (`index-N`), raw, one per slot.
+/// The stored indexes (`indexes`), raw, one per source slot.
 fn read_stored(fs: &mut FsClient) -> Vec<Vec<u8>> {
-    (0..upd::MAX_SOURCES)
-        .map(|slot| {
-            upd::stored_index_file(slot)
-                .and_then(|name| read_file(fs, name, upd::MAX_INDEX + 512).ok().flatten())
-                .unwrap_or_default()
-        })
-        .collect()
+    let max = upd::MAX_SOURCES * (upd::MAX_INDEX + 1024);
+    let bytes = read_file(fs, upd::INDEXES_FILE, max)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    stored::decode_all(&bytes).unwrap_or_else(|| {
+        fault(
+            code::INDEX_STORE,
+            "upd-indexes-damaged",
+            "the stored indexes are damaged: ignored; run update",
+        );
+        alloc::vec![Vec::new(); upd::MAX_SOURCES]
+    })
+}
+
+/// Saves the stored copies (one file for every source, audit 1 R3).
+fn write_stored(fs: &mut FsClient, slots: &[Vec<u8>]) -> bool {
+    let bytes = if slots.iter().all(Vec::is_empty) {
+        Vec::new()
+    } else {
+        stored::encode_all(slots)
+    };
+    write_file(fs, upd::INDEXES_FILE, &bytes)
 }
 
 /// With no source left, `update` drops every stored copy: a source added
 /// again starts from its current serial (ADR 0029, decision 6).
 fn forget_stored(fs: &mut FsClient) {
-    for (slot, bytes) in read_stored(fs).iter().enumerate() {
-        let Some(name) = upd::stored_index_file(slot) else {
-            continue;
-        };
-        if !bytes.is_empty() && !write_file(fs, name, b"") {
-            fault(
-                code::INDEX_STORE,
-                "upd-index-store",
-                "cannot drop a stored index",
-            );
-        }
+    if read_stored(fs).iter().any(|b| !b.is_empty()) && !write_stored(fs, &[]) {
+        fault(
+            code::INDEX_STORE,
+            "upd-index-store",
+            "cannot drop the stored indexes",
+        );
     }
 }
 
@@ -757,20 +787,12 @@ fn refresh(fs: &mut FsClient, net: &mut NetClient, sources: &Sources, pk: &[u8; 
         );
         next[slot] = stored::encode(url, &sig, &index_bytes);
     }
-    for (slot, bytes) in next.iter().enumerate() {
-        if *bytes == previous[slot] {
-            continue;
-        }
-        let Some(name) = upd::stored_index_file(slot) else {
-            continue;
-        };
-        if !write_file(fs, name, bytes) {
-            result = fault(
-                code::INDEX_STORE,
-                "upd-index-store",
-                "cannot store a verified index",
-            );
-        }
+    if next != previous && !write_stored(fs, &next) {
+        result = fault(
+            code::INDEX_STORE,
+            "upd-index-store",
+            "cannot store the verified indexes",
+        );
     }
     let status = report(fs, sources, pk);
     if result != 0 {
@@ -905,7 +927,7 @@ fn report(fs: &mut FsClient, sources: &Sources, pk: &[u8; 32]) -> u64 {
             }
         }
     }
-    if !write_file(fs, upd::PLAN_FILE, lists::encode_plan(&plan).as_bytes()) {
+    if !write_state_section(fs, lists::PLAN, &lists::encode_plan(&plan)) {
         result = fault(code::PLAN, "upd-plan-write", "cannot save the plan");
     }
     if indexes.is_empty() {
@@ -1096,17 +1118,15 @@ fn upgrade(
     allow_downgrade: bool,
     pk: &[u8; 32],
 ) -> u64 {
-    let plan_text = match read_text(fs, upd::PLAN_FILE, 4096) {
-        Ok(Some(t)) => t,
-        _ => {
-            return fault(
-                code::PLAN,
-                "upd-no-plan",
-                "nothing reported yet: run update first",
-            )
-        }
+    let state = read_state(fs);
+    let Some(plan_text) = lists::section(&state, lists::PLAN) else {
+        return fault(
+            code::PLAN,
+            "upd-no-plan",
+            "nothing reported yet: run update first",
+        );
     };
-    let (plan, rejected) = lists::parse_plan(&plan_text);
+    let (plan, rejected) = lists::parse_plan(plan_text);
     if rejected > 0 {
         fault(
             code::PLAN,
@@ -1137,6 +1157,15 @@ fn upgrade(
         if !plan.contains(&PlanItem::System(entry.version)) {
             if plan.iter().any(|p| matches!(p, PlanItem::System(_))) {
                 result = not_reported("system", entry.version);
+            } else if let Ok(mut disk) = Disk::open() {
+                // The plan has no system line (it was up to date at
+                // `update`), yet an index offers a newer one: say so instead
+                // of staying silent (re-audit, UX).
+                if let Some(installed) = disk.active_version(pk) {
+                    if entry.version > installed {
+                        result = not_reported("system", entry.version);
+                    }
+                }
             }
         } else {
             match Disk::open() {
@@ -1200,11 +1229,7 @@ fn upgrade(
             Err(code) => result = code,
         }
     }
-    if !write_file(
-        fs,
-        upd::STAGED_FILE,
-        lists::encode_staged(&staged).as_bytes(),
-    ) {
+    if !write_state_section(fs, lists::STAGED, &lists::encode_staged(&staged)) {
         return fault(
             code::FILE_WRITE,
             "upd-staged-write",
@@ -1221,9 +1246,7 @@ fn upgrade(
 
 fn run(arg: u64) -> u64 {
     DEADLINE.store(now_ms().saturating_add(RUN_DEADLINE_MS), Ordering::Relaxed);
-    let Some(pk) = aricode_crypto::trust::public_key() else {
-        return fault(code::KEY, "upd-key", "invalid embedded public key");
-    };
+    let pk = aricode_crypto::trust::public_key();
     let allow_downgrade = arg & updater_arg::ALLOW_DOWNGRADE != 0;
     let command = arg & !updater_arg::ALLOW_DOWNGRADE;
     match (command, allow_downgrade) {

@@ -807,7 +807,7 @@ fn update(fs: &mut FsClient, rest: &[u8]) {
     }
 }
 
-/// The installer writes the installed apps to `updater/installed`, which
+/// The installer writes the installed apps to the `[installed]` section of `updater/state`, which
 /// is how the updater learns them without the main file space (ADR 0029,
 /// decision 8). `false` (after saying why) if it failed.
 fn list_installed(fs: &mut FsClient) -> bool {

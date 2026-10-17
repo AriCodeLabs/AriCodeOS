@@ -87,10 +87,8 @@ fn load_slot(
 
 /// Tries to boot from the slots. `None` = boot from the ESP.
 pub fn load() -> Option<Loaded> {
-    let Some(pk) = aricode_crypto::trust::public_key() else {
-        warn!("slots: invalid development public key");
-        return None;
-    };
+    // The build's trust anchor (ADR 0029); an invalid key does not compile.
+    let pk = aricode_crypto::trust::public_key();
     let handles = boot::find_handles::<BlockIO>().ok()?;
     for handle in handles {
         // Non-exclusive open: an exclusive open disconnects the drivers using

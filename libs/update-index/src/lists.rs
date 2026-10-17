@@ -1,12 +1,16 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
-//! The small text files the updater and the installer exchange in the
-//! updater's directory (ADR 0029, decisions 4, 5 and 8):
+//! What the updater and the installer exchange, as sections of one file
+//! (`updater/state`, ADR 0029, decisions 4, 5 and 8):
 //!
 //! ```text
-//! installed   hello_ext 2                 written by the installer (LIST)
-//! plan        system 3 / app hello_ext 2  written by `update`, read by `upgrade`
-//! staged      pkg-1.aripkg hello_ext 2 <sha256>   written by `upgrade`, read by the installer
+//! [installed]                              written by the installer (LIST)
+//! hello_ext 2
+//! [plan]                                   written by `update`, read by `upgrade`
+//! system 3
+//! app hello_ext 2
+//! [staged]                                 written by `upgrade`, read by the installer
+//! pkg-1.aripkg hello_ext 2 <sha256>
 //! ```
 //!
 //! Parsers are strict: a damaged line is counted and never acted upon.
@@ -17,6 +21,53 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use aricode_crypto::unhex;
 use core::fmt::Write;
+
+pub const INSTALLED: &str = "installed";
+pub const PLAN: &str = "plan";
+pub const STAGED: &str = "staged";
+
+/// The body of section `name` (`[name]` up to the next header); `None` when
+/// the section is absent.
+pub fn section<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let header = alloc::format!("[{name}]\n");
+    let start = if text.starts_with(&header) {
+        header.len()
+    } else {
+        text.find(&alloc::format!("\n{header}"))? + header.len() + 1
+    };
+    let body = &text[start..];
+    let end = body
+        .match_indices("\n[")
+        .next()
+        .map_or(body.len(), |(i, _)| i + 1);
+    Some(&body[..end])
+}
+
+/// `text` with section `name` replaced by `body` (added at the end if it
+/// was absent); the other sections are kept as they are.
+pub fn with_section(text: &str, name: &str, body: &str) -> String {
+    let mut out = String::new();
+    let mut put = |n: &str, b: &str| {
+        let _ = writeln!(out, "[{n}]");
+        out.push_str(b);
+        if !b.is_empty() && !b.ends_with('\n') {
+            out.push('\n');
+        }
+    };
+    let mut replaced = false;
+    for n in [INSTALLED, PLAN, STAGED] {
+        if n == name {
+            put(n, body);
+            replaced = true;
+        } else if let Some(b) = section(text, n) {
+            put(n, b);
+        }
+    }
+    if !replaced {
+        put(name, body);
+    }
+    out
+}
 
 /// `name version` per line.
 pub fn encode_installed(apps: &[(String, u32)]) -> String {
@@ -151,6 +202,22 @@ pub fn parse_staged(text: &str) -> (Vec<StagedEntry<'_>>, usize) {
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[test]
+    fn sections_are_replaced_independently() {
+        let t = with_section("", PLAN, "system 3\n");
+        let t = with_section(&t, INSTALLED, "hello_ext 2\n");
+        assert_eq!(section(&t, PLAN), Some("system 3\n"));
+        assert_eq!(section(&t, INSTALLED), Some("hello_ext 2\n"));
+        assert_eq!(section(&t, STAGED), None);
+        let t = with_section(&t, PLAN, "");
+        assert_eq!(section(&t, PLAN), Some(""));
+        assert_eq!(section(&t, INSTALLED), Some("hello_ext 2\n"));
+        // A body cannot forge another section: lines are parsed per section.
+        let t = with_section(&t, STAGED, "pkg-1.aripkg a 1 00\n");
+        assert_eq!(section(&t, INSTALLED), Some("hello_ext 2\n"));
+        assert_eq!(t.matches("[staged]").count(), 1);
+    }
 
     #[test]
     fn installed_round_trip_and_rejections() {
