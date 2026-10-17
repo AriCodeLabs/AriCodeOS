@@ -10,8 +10,9 @@
 //! in hex; installed by `cargo xtask usb-image --authorized-key`, or
 //! created on first start), `authorized_keys` (OpenSSH format,
 //! `ssh-ed25519` lines; reread after every connection, or at most once a
-//! minute while the file service does not answer) and `random_seed`
-//! (entropy carried across boots).
+//! minute while the file service does not answer; a key removed during
+//! such an outage stays valid until the file service answers again) and
+//! `random_seed` (entropy carried across boots).
 //!
 //! Closed by default: without an `authorized_keys` file with at least one
 //! key, sshd does not listen at all.
@@ -162,15 +163,24 @@ fn read_file(fs: &mut FsClient, name: &str) -> Result<Vec<u8>, ReadError> {
 }
 
 /// The host key seed: read from AriFS, or created and saved on first start.
+/// A file that could not be read is never overwritten: the boot uses a
+/// key of its own and leaves the saved one alone (audit robustness-1, L4).
 fn host_key(fs: &mut FsClient, entropy: &mut Entropy) -> [u8; 32] {
-    if let Ok(text) = read_file(fs, HOST_KEY_FILE) {
-        let mut seed = [0u8; 32];
-        if aricode_crypto::unhex(core::str::from_utf8(&text).unwrap_or("").trim(), &mut seed)
-            .is_some()
-        {
-            return seed;
+    match read_file(fs, HOST_KEY_FILE) {
+        Ok(text) => {
+            let mut seed = [0u8; 32];
+            if aricode_crypto::unhex(core::str::from_utf8(&text).unwrap_or("").trim(), &mut seed)
+                .is_some()
+            {
+                return seed;
+            }
+            say(b"host key file is invalid; generating a new one");
         }
-        say(b"host key file is invalid; generating a new one");
+        Err(ReadError::Absent) => {}
+        Err(_) => {
+            say(b"host key file cannot be read: using a key for this boot only (the saved one is kept)");
+            return entropy.next();
+        }
     }
     let seed = entropy.next();
     let mut hex = [0u8; 65];
@@ -395,19 +405,18 @@ fn reread_keys(fs: &mut FsClient, refresh: &mut KeyRefresh, keys: &mut Vec<[u8; 
     if !refresh.due(now_ms()) {
         return;
     }
+    // Only a complete read (or "no such file") is an answer; a file service
+    // that does not answer or a read that breaks off keeps the last keys and
+    // is retried at most once a minute (audit robustness-1, L5).
     let result = authorized(fs);
-    let answered = result != Err(ReadError::Unavailable);
-    match result {
-        Ok(k) => *keys = k,
-        Err(ReadError::Incomplete) => {
-            say(b"cannot reread authorized_keys; keeping the last keys read")
-        }
-        Err(_) => {}
+    let answered = result.is_ok();
+    if let Ok(k) = result {
+        *keys = k;
     }
     let mut b = [0u8; 20];
     match refresh.record(now_ms(), answered) {
         Some(Change::Failing) => {
-            sys::print(b"sshd: file service not answering: keeping the last ");
+            sys::print(b"sshd: cannot reread authorized_keys (file service not answering or read incomplete): keeping the last ");
             sys::print(aricode_rt::fmt_u64(keys.len() as u64, &mut b));
             sys::print(b" key(s); rereading authorized_keys at most once a minute\n");
         }
@@ -479,10 +488,15 @@ fn main(_arg: u64) -> u64 {
         print_ip(peer);
         sys::print(b"\n");
         if keys.is_empty() {
-            // authorized_keys emptied while running: refuse everything.
-            say(b"authorized_keys is empty now: connection refused");
-            let _ = net.tcp_close(sock);
-            continue;
+            // authorized_keys emptied while running: reread first, so a key
+            // installed since counts (audit robustness-1, M1); refuse if
+            // there is still none.
+            reread_keys(&mut fs, &mut refresh, &mut keys);
+            if keys.is_empty() {
+                say(b"authorized_keys is empty now: connection refused");
+                let _ = net.tcp_close(sock);
+                continue;
+            }
         }
         let rng = entropy.next();
         serve(&mut net, sock, peer, seed, rng, keys.clone());

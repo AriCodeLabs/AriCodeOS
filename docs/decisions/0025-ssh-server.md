@@ -33,6 +33,11 @@ would open an unauthenticated shell on the user's network.
    (incident 0001 follow-up): while the file service does not answer, the
    last keys stay in use and the reread is tried at most once a minute,
    logged once; a file the service reports missing empties the keys.
+   Consequence: a key removed from `authorized_keys` during a file service
+   outage stays valid until the service answers again. With no keys left,
+   a new connection rereads the file before being refused, so a key
+   installed later counts at once. A host key file that cannot be read is
+   never overwritten: that boot uses a key of its own.
 4. **Session shells launched by init** (`aricode-proto::session`): sshd has
    no SPAWNER. For `shell`/`exec` it sends init a request with two fresh
    endpoints; init launches `arish` in session mode (`SHELL_SESSION`, and
