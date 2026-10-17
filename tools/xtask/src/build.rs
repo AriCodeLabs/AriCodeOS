@@ -38,6 +38,7 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("aricode-gfx", None),
     ("aricode-manifest", None),
     ("aricode-pkg", None),
+    ("aricode-update-index", None),
     ("aricode-wasm", None),
     ("aricode-crypto", None),
     ("aricode-ab", None),

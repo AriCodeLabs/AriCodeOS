@@ -410,6 +410,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aricode-update-index"
+version = "0.9.0"
+dependencies = [
+ "aricode-crypto",
+]
+
+[[package]]
 name = "aricode-usb-storage"
 version = "0.9.0"
 
