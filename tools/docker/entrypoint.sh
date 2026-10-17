@@ -16,7 +16,15 @@ if ! getent passwd "$uid" >/dev/null 2>&1; then
     cp /etc/group "$dir/group"
     echo "ari:x:$uid:$gid:AriCodeOS developer:${HOME:-/tmp}:/bin/sh" >> "$dir/passwd"
     getent group "$gid" >/dev/null 2>&1 || echo "ari:x:$gid:" >> "$dir/group"
+    # The library lives under the architecture's multiarch directory
+    # (x86_64-linux-gnu, aarch64-linux-gnu, ...): find it instead of
+    # assuming the host is x86-64.
+    lib=$(find /usr/lib -name libnss_wrapper.so -print -quit)
+    if [ -z "$lib" ]; then
+        echo "aricodeos-entrypoint: libnss_wrapper.so not found; uid $uid has no user name and the sshd host tests would fail" >&2
+        exit 1
+    fi
     export NSS_WRAPPER_PASSWD="$dir/passwd" NSS_WRAPPER_GROUP="$dir/group"
-    export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libnss_wrapper.so
+    export LD_PRELOAD="$lib"
 fi
 exec "$@"
