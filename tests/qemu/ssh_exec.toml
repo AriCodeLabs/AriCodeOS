@@ -14,7 +14,7 @@ timeout_secs = 200
 
 [host_ssh]
 marker = "sshd: listening on port 22"
-commands = ["ls", "cat hola.txt", "write remote.txt written over ssh", "cat remote.txt", "update check", "shutdown"]
+commands = ["ls", "cat hola.txt", "write remote.txt written over ssh", "cat remote.txt", "update", "shutdown"]
 idle_client = true
 
 [expect]
@@ -31,7 +31,7 @@ serial_contains = [
     "[host] ssh| Hola desde AriFS",
     "[host] ssh| write: 17 bytes to remote.txt",
     "[host] ssh| written over ssh",
-    "[host] ssh| updater: no update channel configured: update http://host:port/path/",
+    "[host] ssh| updater: no update sources: update add URL",
     "[host] ssh| update: updater exited with 21",
     "[host] ssh exit 0",
     "ARICODEOS_SHUTDOWN",

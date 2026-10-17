@@ -93,9 +93,10 @@ pub mod updater_arg {
     pub const UPGRADE: u64 = 2;
     /// Flag for `UPGRADE`: older versions may replace newer ones.
     pub const ALLOW_DOWNGRADE: u64 = 1 << 8;
-    /// Exit code of `UPGRADE` when it left verified packages in `pkgs/` for
-    /// the installer (0 means nothing was staged).
-    pub const EXIT_APPS_STAGED: u64 = 100;
+    /// Bit in the exit code of `UPGRADE`: verified packages were left in
+    /// `pkgs/` for the installer. The other bits are the failure code (0
+    /// when everything went well).
+    pub const EXIT_APPS_STAGED: u64 = 1 << 8;
 }
 
 /// Arguments of the `installer` program (flags).

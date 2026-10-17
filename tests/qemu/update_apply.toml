@@ -13,7 +13,7 @@ stdin = ["run updater", "shutdown"]
 [expect]
 exit = 33
 serial_contains = [
-    "AriInit: launch updater with manifest [system fs net block] memory 6144 KiB",
+    "AriInit: launch updater with manifest [system net block install] memory 6144 KiB",
     "updater: UPDATE image version 2 verified (",
     "updater: installed into slot B",
     "updater: state: active A, pending B (3 tries); reboot to try it",

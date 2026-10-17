@@ -1,7 +1,11 @@
 # System app (broker trust list): needs the block service to read UPDATE
-# and write the inactive slot and ARIBOOT, the network to download the
-# image from the update channel (ADR 0027) and its private directory for the
-# channel URL. The image is verified in a DMA buffer from its quota.
+# and write the inactive slot and ARIBOOT, the network to fetch the signed
+# indexes, images and packages of the update sources (ADR 0027, ADR 0029),
+# and the main file space (`install`) for its private directory
+# (`updater/`), the installed apps it compares (`apps/`), the packages it
+# stages for the installer (`pkgs/`) and the install history. The block
+# capability already reaches the raw AriFS partition, so `install` adds no
+# authority. The image is verified in a DMA buffer from its quota.
 name = updater
-caps = system, fs, net, block
+caps = system, net, block, install
 memory = 6M

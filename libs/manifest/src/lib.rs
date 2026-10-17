@@ -34,7 +34,7 @@ impl Caps {
     /// broker's trust list (`updater`).
     pub const BLOCK: Caps = Caps(1 << 8);
     /// Main fsd space for installing packages (ADR 0018): only for
-    /// `installer`.
+    /// `installer` and `updater` (which stages packages, ADR 0029).
     pub const INSTALL: Caps = Caps(1 << 9);
 
     pub const NONE: Caps = Caps(0);
@@ -57,8 +57,11 @@ impl Caps {
 
     /// System applications that may also ask for `block`.
     pub const TRUSTED_BLOCK: [&'static str; 1] = ["updater"];
-    /// System applications that may also ask for `install`.
-    pub const TRUSTED_INSTALL: [&'static str; 1] = ["installer"];
+    /// System applications that may also ask for `install`: the installer,
+    /// and the updater, which reads the installed apps and stages verified
+    /// packages in `pkgs/` (ADR 0029; it already holds `block`, so the
+    /// main space adds no authority).
+    pub const TRUSTED_INSTALL: [&'static str; 2] = ["installer", "updater"];
 
     /// Capabilities grantable to the application `name`.
     pub fn allowed_for(name: &str) -> Caps {
@@ -333,12 +336,16 @@ mod tests {
             .caps
             .difference(Caps::allowed_for("installer"))
             .is_empty());
+        assert!(install
+            .caps
+            .difference(Caps::allowed_for("updater"))
+            .is_empty());
         assert!(
             !install
                 .caps
-                .difference(Caps::allowed_for("updater"))
+                .difference(Caps::allowed_for("hello_app"))
                 .is_empty(),
-            "install only for installer"
+            "install only for installer and updater"
         );
         let forbidden = Manifest::parse("name = x\ncaps = fs, spawner").unwrap();
         let denied: Vec<&str> = forbidden
