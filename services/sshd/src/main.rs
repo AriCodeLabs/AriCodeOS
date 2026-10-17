@@ -27,7 +27,7 @@ use aricode_proto::net::Status;
 use aricode_proto::session;
 use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::net::{NetClient, NetError};
-use aricode_rt::sys::{self, abi, rights, Error, Handle};
+use aricode_rt::sys::{self, abi, Error, Handle};
 use aricode_ssh::keys_refresh::{Change, KeyRefresh};
 use aricode_ssh::{fingerprint, parse_authorized_keys, Event, Server};
 
@@ -194,8 +194,16 @@ fn host_key(fs: &mut FsClient, entropy: &mut Entropy) -> [u8; 32] {
     seed
 }
 
-/// Our ends of a session: we write what the client types to `input` and
-/// read the shell's output from `output`.
+/// Exit status reported to the client when the session shell died without
+/// ending the session (its output endpoint closed with no end-of-stream
+/// message): 128 + SIGSEGV, as POSIX shells report a command killed by a
+/// fault.
+const SHELL_DIED_STATUS: u32 = 139;
+
+/// Our ends of a session: we write what the client types to `input` (send
+/// side only) and read the shell's output from `output` (receive side
+/// only). Holding only one side of each (ADR 0030) is what lets a shell
+/// that dies show up as `PeerClosed` on `output` instead of a silent hang.
 struct Session {
     input: Handle,
     output: Handle,
@@ -209,22 +217,35 @@ impl Session {
     }
 }
 
-/// Asks init for a session shell of `kind`.
+/// Asks init for a session shell of `kind`. Every endpoint is a pair: the
+/// shell gets the receive side of `input` and the send side of `output`,
+/// sshd keeps the other two, and init's reply comes on a pair too.
 fn open_session(kind: session::Kind) -> Result<Session, Error> {
-    let input = sys::endpoint_create()?;
-    let output = sys::endpoint_create()?;
-    let reply = sys::endpoint_create()?;
-    let handles = [
-        sys::handle_duplicate(reply, rights::WRITE | rights::TRANSFER)?,
-        sys::handle_duplicate(input, rights::READ | rights::TRANSFER)?,
-        sys::handle_duplicate(output, rights::WRITE | rights::TRANSFER)?,
-    ];
+    let (in_r, input) = sys::endpoint_create_pair()?;
+    let Ok((output, out_w)) = sys::endpoint_create_pair() else {
+        let _ = sys::handle_close(in_r);
+        let _ = sys::handle_close(input);
+        return Err(Error::Limit);
+    };
+    let Ok((reply, reply_w)) = sys::endpoint_create_pair() else {
+        for h in [in_r, input, output, out_w] {
+            let _ = sys::handle_close(h);
+        }
+        return Err(Error::Limit);
+    };
+    let handles = [reply_w, in_r, out_w];
     let sent = sys::ipc_send(
         SESSIONS,
         &session::Request { kind }.encode(),
         &handles,
         2000,
     );
+    if sent.is_err() {
+        // Not transferred: still ours.
+        for h in handles {
+            let _ = sys::handle_close(h);
+        }
+    }
     let mut msg = [0u8; 8];
     let mut none = [Handle(0); 1];
     let ok = sent.is_ok()
@@ -349,18 +370,28 @@ fn serve(
             break;
         }
         // Shell output to the client; an empty message means it exited.
+        // The output endpoint closing without one (`PeerClosed`: sshd holds
+        // only its receive side) means the shell died: the session ends
+        // with `SHELL_DIED_STATUS` instead of hanging until the client
+        // disconnects.
         while let Some(s) = &session {
             let mut none = [Handle(0); 1];
-            match sys::ipc_receive(s.output, &mut msg, &mut none, 0) {
-                Ok((0, _)) => {
-                    server.exit(0, &mut out);
-                    if let Some(s) = session.take() {
-                        let _ = sys::handle_close(s.input);
-                        let _ = sys::handle_close(s.output);
-                    }
+            let status = match sys::ipc_receive(s.output, &mut msg, &mut none, 0) {
+                Ok((0, _)) => 0,
+                Ok((n, _)) => {
+                    server.send_data(&msg[..n], &mut out);
+                    continue;
                 }
-                Ok((n, _)) => server.send_data(&msg[..n], &mut out),
+                Err(Error::PeerClosed) => {
+                    say(b"session shell died without ending the session");
+                    SHELL_DIED_STATUS
+                }
                 Err(_) => break,
+            };
+            server.exit(status, &mut out);
+            if let Some(s) = session.take() {
+                let _ = sys::handle_close(s.input);
+                let _ = sys::handle_close(s.output);
             }
         }
         if !send(net, sock, &mut out) || server.is_closed() {

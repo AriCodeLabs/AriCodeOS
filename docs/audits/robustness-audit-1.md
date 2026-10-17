@@ -79,3 +79,22 @@ regression blocked the merge:
   and the device delivers events again. Not run here (QEMU is run
   centrally). `peer_client` case 1 now expects `ReplyLost` then
   `ServiceGone`.
+
+### Re-audit verdict and last items (2026-10-17)
+
+Verdict: safe to merge once the QEMU suite passes, after two small items:
+
+1. sshd kept both `READ` and `WRITE` on the session output endpoint, so a
+   crashed session shell was never seen as closed and the SSH session hung
+   until the client disconnected. **Resolved:** `open_session` creates the
+   input, output and reply endpoints with `endpoint_create_pair`; sshd keeps
+   only the send side of the input and the receive side of the output.
+   `PeerClosed` on the output without the end-of-stream message ends the
+   session with exit status 139 (128 + SIGSEGV) and a log line. New
+   scenario `ssh.shell_fault` (`shell_fault` lets the shell accept `fault`,
+   a deliberate crash, tests only per ADR 0007): the crashed session exits
+   with 139 and the next command is served.
+2. `ipc_send` also returns `Revoked` when an extra handle is revoked, and
+   `rpc` mapped it to `ServiceGone`. **Resolved:** `rpc::call_handles` maps
+   `Revoked` to `ServiceGone` only when `object_kind` on the service
+   endpoint itself reports `Revoked`; noted in ADR 0030.

@@ -145,6 +145,7 @@ name = "ari-shell"
 version = "0.9.0"
 dependencies = [
  "aricode-build",
+ "aricode-cmdline",
  "aricode-https",
  "aricode-lineedit",
  "aricode-net",

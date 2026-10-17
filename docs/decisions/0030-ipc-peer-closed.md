@@ -143,6 +143,17 @@ For a request/reply call (ADR 0012) this gives:
   again later". Scenario `services.input_restart` (`input_restart`): an
   input driver crashes holding a read; the client gets `ReplyLost` and the
   relaunched device delivers events again.
+- `ipc_send` also returns `Revoked` when one of the transferred handles is
+  revoked, not only the endpoint. `rpc::call` maps a `Revoked` send to
+  `ServiceGone` only after checking the service endpoint itself
+  (`object_kind` on it reports `Revoked`); otherwise the caller gets
+  `Revoked` as is. The check costs a syscall on that error path only.
+- A shell in an SSH session: sshd creates the session endpoints with
+  `endpoint_create_pair` and keeps only the send side of the input and the
+  receive side of the output, so a shell that dies shows up as
+  `PeerClosed` on the output and the session ends with exit status 139
+  (scenario `ssh.shell_fault`); the shell, holding only the receive side of
+  its input, sees `PeerClosed` when sshd goes.
 - Latent: fsd waits with `ipc_receive_any` on its main endpoint and the
   granted namespace endpoints, and exits on `Revoked`, which the call
   reports when any one of them is revoked. Nothing revokes a namespace

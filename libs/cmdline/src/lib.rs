@@ -85,6 +85,9 @@ pub mod keys {
     /// `input_restart`: init supervises an input driver that crashes holding
     /// a client's read and checks the client keeps the device (ADR 0030).
     pub const INPUT_RESTART: &str = "input_restart";
+    /// `shell_fault`: tests only; the shell accepts `fault`, which makes it
+    /// crash on purpose (a session shell that dies, ADR 0030).
+    pub const SHELL_FAULT: &str = "shell_fault";
     /// `smp=off`: do not start the application processors (real hardware).
     pub const SMP: &str = "smp";
     /// `iommu=off`: do not enable DMA translation (real hardware).
