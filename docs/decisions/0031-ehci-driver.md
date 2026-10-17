@@ -1,4 +1,4 @@
-# ADR 0029: User-space EHCI driver with USB 2.0 hubs
+# ADR 0031: User-space EHCI driver with USB 2.0 hubs
 
 - **Date:** 2026-10-17
 - **Status:** Accepted (written and host-tested; QEMU scenarios written,

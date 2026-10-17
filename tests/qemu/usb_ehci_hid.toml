@@ -1,4 +1,4 @@
-# ADR 0029: a USB keyboard and mouse on QEMU's EHCI (high speed, no
+# ADR 0031: a USB keyboard and mouse on QEMU's EHCI (high speed, no
 # companion controllers, no MSI). init launches usb_ehci for the EHCI; the
 # driver enumerates both devices on its root ports, polls their interrupt
 # endpoints through the periodic schedule and serves them as one input

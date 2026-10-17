@@ -615,7 +615,7 @@ pub mod pci_info {
     }
     /// xHCI programming interface.
     pub const XHCI_PROG_IF: u8 = 0x30;
-    /// EHCI programming interface (USB 2.0, ADR 0029).
+    /// EHCI programming interface (USB 2.0, ADR 0031).
     pub const EHCI_PROG_IF: u8 = 0x20;
 }
 

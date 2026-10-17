@@ -94,7 +94,7 @@ pub mod keys {
     /// after two idle seconds, as a transport failure on the CBW; with
     /// `:csw` it reads a CSW with no command outstanding instead, so the
     /// bulk IN endpoint really halts (STALL) and the halted-endpoint
-    /// recovery runs. The EHCI driver (ADR 0029) understands `N` and `idle`
+    /// recovery runs. The EHCI driver (ADR 0031) understands `N` and `idle`
     /// with the CBW failure only, followed by a real Reset Recovery.
     pub const USB_FAULT: &str = "usb_fault";
 }

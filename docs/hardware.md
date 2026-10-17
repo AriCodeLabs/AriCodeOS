@@ -12,7 +12,7 @@ never touched**; AriCodeOS boots from and writes only to its own USB stick.
 - A USB stick of at least 128 MiB that can be wiped completely.
 - Keyboard: the built-in one (PS/2 via i8042) serves as the kernel console.
   USB keyboards and mice (boot HID) are handled by `usbd` on top of the xHCI
-  and by `usb_ehci` on the EHCI ports (ADR 0029), and reach the shell
+  and by `usb_ehci` on the EHCI ports (ADR 0031), and reach the shell
   through the console bridge and the compositor with `gui`.
 - Without a serial port, the screen is the diagnostic channel: the kernel
   writes its console to the GOP framebuffer unless `gui` is set.
@@ -60,12 +60,12 @@ and standard memory types, ADR 0021). The machine: 2012 Intel (xHCI
 |---|---|
 | AriBoot: slots, GOP 800x600, kernel and initrd verified | Atheros AR9485 Wi-Fi (out of scope: ath9k, 802.11 and WPA2) |
 | Wired networking with `rtl_net` (ADR 0024): DHCP, `ping` to the router in 1 ms and `dns google.com` resolved (2026-10-10) | |
-| USB stick as a block service over USB (ADR 0023; "USB Disk 3.0", no `SYNCHRONIZE CACHE`), fsd, slot A confirmation and shell over the PS/2 keyboard (2026-10-10) | EHCI driver written (ADR 0029, 2026-10-17), not yet tried on the laptop |
+| USB stick as a block service over USB (ADR 0023; "USB Disk 3.0", no `SYNCHRONIZE CACHE`), fsd, slot A confirmation and shell over the PS/2 keyboard (2026-10-10) | EHCI driver written (ADR 0031, 2026-10-17), not yet tried on the laptop |
 | Kernel: memory, ACPI, APIC, PCI (17 functions), init and its tests, `ARICODEOS_KERNEL_READY` | Power: sleep states and battery |
 | PS/2 keyboard on the kernel console (backspace included) | |
 | xHCI with MSI (ADR 0022; the controller has no MSI-X), firmware handoff, ports routed, 8 ports, 16 scratchpads, input service ok | |
 
-## EHCI ports (ADR 0029)
+## EHCI ports (ADR 0031)
 
 The laptop's USB 2.0 ports are wired to the two EHCI controllers through
 Intel's rate matching hubs; the switchable ones can also be routed to the

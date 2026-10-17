@@ -1,7 +1,7 @@
-# Audit 4836023, finding 1, revised by ADR 0029: a USB controller that is
+# Audit 4836023, finding 1, revised by ADR 0031: a USB controller that is
 # not xHCI (EHCI, interface 0x20) must not be handed to the xHCI driver nor
 # leave an endpoint without a server that would block input_client. Since
-# ADR 0029 the EHCI gets its own driver, launched after the xHCI one: with
+# ADR 0031 the EHCI gets its own driver, launched after the xHCI one: with
 # no devices it serves an empty input device and the xHCI next to it keeps
 # working.
 name = "usb.hid_boot_with_ehci"

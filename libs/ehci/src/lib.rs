@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
-//! EHCI (ADR 0029): what the ring 3 driver needs to know about an Enhanced
+//! EHCI (ADR 0031): what the ring 3 driver needs to know about an Enhanced
 //! Host Controller Interface 1.0 controller and USB 2.0 hubs without
 //! touching hardware: register offsets and bits, the legacy support
 //! (firmware handoff) capability, queue heads and qTDs in their 32-bit and

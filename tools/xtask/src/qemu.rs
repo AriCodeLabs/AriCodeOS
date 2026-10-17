@@ -24,7 +24,7 @@ pub struct UsbOptions {
     /// instead of virtio-blk (ADR 0023).
     pub storage: bool,
     /// An EHCI with a USB keyboard and mouse (high speed) for the EHCI
-    /// driver (ADR 0029).
+    /// driver (ADR 0031).
     pub ehci_hid: bool,
     /// The test disk hangs off an EHCI as USB storage instead of virtio-blk.
     pub ehci_storage: bool,
@@ -128,7 +128,7 @@ fn base_command(
         }
     }
     if usb.legacy_controller || usb.ehci_hid || usb.ehci_storage {
-        // EHCI (class 0c.03, interface 0x20, ADR 0029); QEMU's is ICH4-like,
+        // EHCI (class 0c.03, interface 0x20, ADR 0031); QEMU's is ICH4-like,
         // with no companion controllers and no MSI.
         q.args(["-device", "usb-ehci,id=ehci"]);
         if usb.ehci_hid {

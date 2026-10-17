@@ -1,4 +1,4 @@
-# ADR 0028/0029: without `strict`, an injected transaction error on the CBW
+# ADR 0028/0031: without `strict`, an injected transaction error on the CBW
 # of the first block request after the boot settles (two idle seconds) is
 # printed and recorded; a CBW failure needs a Reset Recovery (BOT 5.3.4),
 # which the EHCI driver runs at once against the real device (class reset,

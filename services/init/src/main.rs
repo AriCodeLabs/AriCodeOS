@@ -1909,7 +1909,7 @@ fn main(arg: u64) -> u64 {
         }
     }
     // USB controllers (class 0c.03): the xHCI (interface 0x30) gets usbd
-    // and the EHCI (0x20) usb_ehci (ADR 0029). Each serves its HID
+    // and the EHCI (0x20) usb_ehci (ADR 0031). Each serves its HID
     // keyboards and mice as a single input device, published once it
     // responds, and a block endpoint for its USB storage (ADR 0023). The
     // xHCIs go first: on Intel 7 series usbd routes the shared ports to the
@@ -2010,7 +2010,7 @@ fn main(arg: u64) -> u64 {
         say(b"no input devices");
     }
     // 9b. No virtio-blk: the first USB storage a USB driver found is the
-    //     block service and fsd runs on top of it (ADR 0023, 0029).
+    //     block service and fsd runs on top of it (ADR 0023, 0031).
     if block_service.is_none() && usb_block_count > 0 {
         let found = usb_blocks[..usb_block_count].iter().find_map(|&ep| {
             match BlockClient::new(ep, HARDWARE, 1).and_then(|b| b.capacity()) {

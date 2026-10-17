@@ -1086,14 +1086,14 @@ services/usb-input             usbd: xHCI controller, enumeration, interrupt end
   event type, not by device.
 - Selection and publication (audit 4836023): `pci_info_ext` exposes the
   programming interface and init only hands `usb_input` the `0c.03` functions
-  with interface `0x30` (the EHCIs, `0x20`, get `usb_ehci`, ADR 0029); any input service is published once it
+  with interface `0x30` (the EHCIs, `0x20`, get `usb_ehci`, ADR 0031); any input service is published once it
   answers `Info` (`input_service_ready`), and `InputClient` bounds its
   waits so a dead service does not block the client. The device
   descriptor is first read as 8 bytes to set the EP0 packet size
   with `Evaluate Context`; FS/LS intervals are rounded
   down (3..=10).
 
-## USB 2.0 over EHCI (ADR 0029)
+## USB 2.0 over EHCI (ADR 0031)
 
 ```text
 libs/ehci                      EHCI registers, queue heads and qTDs (32/64-bit), legacy handoff, hub class (no hardware)

@@ -182,11 +182,11 @@ pub struct Scenario {
     #[serde(default)]
     pub usb_storage: bool,
     /// Also adds an EHCI with no devices: init launches the EHCI driver
-    /// for it next to the xHCI driver (ADR 0029).
+    /// for it next to the xHCI driver (ADR 0031).
     #[serde(default)]
     pub usb_legacy_controller: bool,
     /// An EHCI with a USB keyboard and mouse; QMP events then go to them
-    /// (the most recent handlers). ADR 0029.
+    /// (the most recent handlers). ADR 0031.
     #[serde(default)]
     pub usb_ehci_hid: bool,
     /// The test disk is attached to an EHCI as `usb-storage` and there is

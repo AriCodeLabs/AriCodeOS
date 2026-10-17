@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
-//! usb-ehci (ADR 0029): ring 3 driver for an EHCI 1.0 controller. Takes the
+//! usb-ehci (ADR 0031): ring 3 driver for an EHCI 1.0 controller. Takes the
 //! controller from the firmware (EHCI 5.1), resets and starts it (4.1),
 //! enumerates the devices on its root ports and behind USB 2.0 hubs (the
 //! rate matching hub Intel 6/7 series put behind each EHCI), and serves
