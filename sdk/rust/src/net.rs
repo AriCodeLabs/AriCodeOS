@@ -5,6 +5,11 @@
 use crate::{self as sys, rights, rpc, Error, Handle};
 use aricode_proto::net::{Info, Op, Reply, Request, Status, MAX_DATAGRAM};
 
+/// How long `tcp_send_all` waits in all for room in a full send buffer.
+pub const SEND_IDLE_TIMEOUT_MS: u32 = 5_000;
+/// Pause between two attempts to send into a full buffer.
+const SEND_POLL_MS: u32 = 10;
+
 pub struct NetClient {
     service: Handle,
     dma: Handle,
@@ -167,19 +172,32 @@ impl NetClient {
         self.call(req, true).map(|r| r.value as usize)
     }
 
-    /// Sends all of `data`, waiting when the buffer is full.
+    /// Sends all of `data`, waiting up to [`SEND_IDLE_TIMEOUT_MS`] for room
+    /// when the buffer is full.
     pub fn tcp_send_all(&mut self, sock: u16, data: &[u8]) -> Result<(), NetError> {
+        self.tcp_send_all_within(sock, data, SEND_IDLE_TIMEOUT_MS)
+    }
+
+    /// Sends all of `data`, waiting at most `timeout_ms` in all for room
+    /// when the buffer is full (`Status::Timeout` otherwise). A timeout of
+    /// `0` sends what fits now and gives up on the first full buffer.
+    pub fn tcp_send_all_within(
+        &mut self,
+        sock: u16,
+        data: &[u8],
+        timeout_ms: u32,
+    ) -> Result<(), NetError> {
         let mut done = 0;
-        let mut idle = 0;
+        let mut waited_ms = 0u32;
         while done < data.len() {
             let n = self.tcp_send(sock, &data[done..])?;
             done += n;
             if n == 0 {
-                idle += 1;
-                if idle > 500 {
+                if waited_ms >= timeout_ms {
                     return Err(NetError::Status(Status::Timeout));
                 }
-                sys::thread_sleep(10);
+                sys::thread_sleep(SEND_POLL_MS as u64);
+                waited_ms = waited_ms.saturating_add(SEND_POLL_MS);
             }
         }
         Ok(())

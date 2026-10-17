@@ -62,5 +62,9 @@ unrestricted. Test chains `purpose-ok`, `purpose-client` and
   A HelloRetryRequest (server insisting on another group) fails.
 - Only TLS 1.3: servers limited to TLS 1.2 cannot be reached.
 - Responses are limited by the shell's 8 KiB buffer; HTTP/1.1 only.
+- Since incident 0009 (ADR 0033) `get` and `get_with` take a `Budget` for
+  the whole download next to the per-operation timeout: the handshake,
+  every record exchange, send and receive get what is left of it, and
+  `HttpsError::Deadline(Phase)` says where the time ran out.
 - AES uses table lookups (not cache-timing hardened); public-key
   operations are verification only.

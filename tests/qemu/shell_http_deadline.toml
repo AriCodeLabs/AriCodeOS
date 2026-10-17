@@ -1,0 +1,32 @@
+# Incident 0009: a server that keeps the response "coming" with interim
+# responses and never sends a final one must not hold the client past its
+# budget. `/early-hints` sends a 103 every five seconds (each under the 8 s
+# per-operation timeout) and nothing else: the shell's 30 s budget cuts it
+# in the headers phase. `/early-hints-flood` sends twenty 103 at once: the
+# interim-response limit refuses it before the deadline.
+name = "shell.http_deadline"
+description = "http: interim responses forever end at the budget, a flood of them at the count limit (incident 0009)"
+level = "full"
+areas = ["shell", "network"]
+cmdline = "qemu_exit shell"
+timeout_secs = 150
+stdin = [
+    "http http://10.0.2.2:17010/early-hints-flood",
+    "http http://10.0.2.2:17010/early-hints",
+    "http http://10.0.2.2:17010/hola",
+    "shutdown",
+]
+
+[expect]
+exit = 33
+serial_contains = [
+    "ari> http http://10.0.2.2:17010/early-hints-flood",
+    "http: too many interim responses",
+    "ari> http http://10.0.2.2:17010/early-hints",
+    "http: deadline passed while waiting for the response headers",
+    "HTTP 200, 19 bytes",
+    "Hola desde el host",
+    "AriCodeOS: shutting down",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "flooded"]
