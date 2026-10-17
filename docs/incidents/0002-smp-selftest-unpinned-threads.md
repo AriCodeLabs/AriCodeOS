@@ -1,6 +1,7 @@
 # Incident 0002: `smp.selftest` panics "unpinned threads must pass through every CPU"
 
-- **Opened:** 2026-10-12. **Status:** open.
+- **Opened:** 2026-10-12. **Status:** open; self-test changed to wait
+  with a deadline and report the CPU (2026-10-17), pending reruns.
 - **Environment:** QEMU, 4 virtual CPUs (`cargo xtask test --all --cpus 4`),
   host with 16 cores under load from a concurrent build and another QEMU
   suite finishing.
@@ -57,7 +58,36 @@ a quiet host (load average 1.3) right afterwards: 5 passes. One failure in
    thread within the deadline.
 3. If H2: instrument the per-CPU run queues in the self-test output.
 
+## Change (2026-10-17, branch `fix/robustness-incidents`)
+
+Plan step 2, so that the next failure gives evidence instead of a bare
+assertion. The migration part of `smp_selftest`
+(`kernel/src/task/scheduler.rs`) no longer asserts after 500 yields per
+roamer: the roamers keep yielding (at least 500 rounds each) until every
+online CPU has run one and at least one roamer has changed CPU, or until
+`MIGRATION_DEADLINE_MS` = 10 s. The success line now says how long it
+took (`every CPU reached in N ms`). On expiry the test logs, for each
+CPU no roamer ran on, how much of the wait it spent idle (from the
+per-CPU idle TSC counter) and whether it is in its idle thread now, and
+then fails with the same assertion. How to read it:
+
+- idle for most of the 10 s while roamers were runnable: the scheduler
+  never handed that CPU an unpinned thread (H2, a real defect);
+- little idle time: the CPU was busy with something else or its virtual
+  CPU was descheduled by the host (H1).
+
+10 s is two orders of magnitude above the usual time on a quiet host;
+a CPU that never runs a roamer in that time fails the test either way.
+Not run in QEMU on this branch (the test ports were in use); the
+scenario `smp.selftest` now also expects `every CPU reached in`.
+
+Still load-sensitive in the same self-test (not part of this incident's
+failure, listed so it is not forgotten): step 1 asserts that the busy
+threads ran in parallel within 40 ticks.
+
 ## Open
 
 Not caused by the USB recovery branch; the merge of that branch is not
-blocked by this incident.
+blocked by this incident. To close: reruns of `smp.selftest` with 4 CPUs
+on a quiet and on a loaded host, recording the `every CPU reached in`
+times here; any expiry is analysed with the report above.

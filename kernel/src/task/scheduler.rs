@@ -679,34 +679,68 @@ pub fn smp_selftest() {
         "{cpus} busy threads in parallel took {elapsed} ticks"
     );
 
-    // 2. Migration: unpinned threads yielding in a loop pass through several CPUs.
+    // 2. Migration: unpinned threads yielding in a loop pass through every
+    // CPU and at least one changes CPU. Waited for with a deadline
+    // (incident 0002): on a loaded host a virtual CPU can be descheduled by
+    // the host for a while, so asserting after a fixed amount of work
+    // measured the host, not the kernel. The deadline is generous; only a
+    // CPU that never runs a roamer within it fails the test, after the
+    // report says which CPU it was and how much of the wait it spent idle.
+    const MIGRATION_DEADLINE_MS: u64 = 10_000;
+    const MIN_ROUNDS: u32 = 500;
     static MASKS: [AtomicU32; 2 * cpu::MAX_CPUS] = [const { AtomicU32::new(0) }; 2 * cpu::MAX_CPUS];
+    static ROAM_STOP: AtomicBool = AtomicBool::new(false);
     extern "C" fn roamer(i: usize) {
-        for _ in 0..500 {
+        let mut rounds = 0u32;
+        while rounds < MIN_ROUNDS || !ROAM_STOP.load(Ordering::Relaxed) {
             MASKS[i].fetch_or(1 << cpu::id(), Ordering::Relaxed);
+            rounds = rounds.saturating_add(1);
             yield_now();
         }
     }
+    let union = || {
+        MASKS[..2 * cpus]
+            .iter()
+            .fold(0u32, |m, x| m | x.load(Ordering::Relaxed))
+    };
+    let migrated = || {
+        MASKS[..2 * cpus]
+            .iter()
+            .filter(|m| m.load(Ordering::Relaxed).count_ones() >= 2)
+            .count()
+    };
+    let every_cpu = (1u32 << cpus) - 1;
+    let idle_before: Vec<u64> = cpu::online().map(|c| c.idle_cycles()).collect();
+    let roam_start = crate::time::uptime_ms();
     let roamers: Vec<Tid> = (0..2 * cpus)
         .map(|i| spawn("roamer", roamer, i).unwrap())
         .collect();
+    let roam_ms = loop {
+        let waited = crate::time::uptime_ms() - roam_start;
+        if union() == every_cpu && (cpus == 1 || migrated() > 0) {
+            break waited;
+        }
+        if waited >= MIGRATION_DEADLINE_MS {
+            report_cpus_without_roamers(union(), &idle_before, waited);
+            break waited;
+        }
+        sleep_ms(10);
+    };
+    ROAM_STOP.store(true, Ordering::Relaxed);
     while roamers.iter().any(|t| state(*t).is_some()) {
         yield_now();
     }
-    let union = MASKS[..2 * cpus]
-        .iter()
-        .fold(0u32, |m, x| m | x.load(Ordering::Relaxed));
-    let migrated = MASKS[..2 * cpus]
-        .iter()
-        .filter(|m| m.load(Ordering::Relaxed).count_ones() >= 2)
-        .count();
+    let migrated = migrated();
     assert_eq!(
-        union,
-        (1u32 << cpus) - 1,
-        "unpinned threads must pass through every CPU"
+        union(),
+        every_cpu,
+        "unpinned threads must pass through every CPU within {MIGRATION_DEADLINE_MS} ms"
     );
     if cpus > 1 {
-        assert!(migrated > 0, "no thread changed CPU: {MASKS:?}");
+        assert!(
+            migrated > 0,
+            "no thread changed CPU in {roam_ms} ms: {MASKS:?}"
+        );
     }
 
     // 3. TLB shootdown: another CPU has the translation in its TLB; the frame
@@ -792,7 +826,36 @@ pub fn smp_selftest() {
     );
 
     info!(
-        "smp selftest ok ({cpus} CPUs: busy {counts:?} in {elapsed} ticks, {migrated} of {} threads migrated, shootdown seen by CPU {reader_cpu} ({served} IPI), counter {total})",
+        "smp selftest ok ({cpus} CPUs: busy {counts:?} in {elapsed} ticks, {migrated} of {} threads migrated, every CPU reached in {roam_ms} ms, shootdown seen by CPU {reader_cpu} ({served} IPI), counter {total})",
         2 * cpus
     );
+}
+
+/// Incident 0002: the migration deadline expired. Logs, for each online CPU
+/// no roamer ran on, how much of the wait it spent idle (idle the whole
+/// time points at the scheduler never handing it unpinned threads; little
+/// idle time at the CPU being busy or descheduled by the host) and whether
+/// it is in its idle thread now.
+fn report_cpus_without_roamers(union: u32, idle_before: &[u64], waited_ms: u64) {
+    log::error!(
+        "smp selftest: after {waited_ms} ms unpinned threads ran only on CPU mask {union:#b}"
+    );
+    for (c, before) in cpu::online().zip(idle_before) {
+        if union & (1 << c.index()) != 0 {
+            continue;
+        }
+        let idle = c.idle_cycles().saturating_sub(*before);
+        match crate::time::tsc_cycles_to_ms(idle) {
+            Some(ms) => log::error!(
+                "smp selftest: CPU {} never ran an unpinned thread: idle {ms} of {waited_ms} ms, in its idle thread now: {}",
+                c.index(),
+                c.is_idle()
+            ),
+            None => log::error!(
+                "smp selftest: CPU {} never ran an unpinned thread: idle {idle} TSC cycles (uncalibrated), in its idle thread now: {}",
+                c.index(),
+                c.is_idle()
+            ),
+        }
+    }
 }
