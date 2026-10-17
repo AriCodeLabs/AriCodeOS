@@ -80,8 +80,8 @@ only with `selftest` on the command line.
   scenario says `selftest = false` (`Scenario::boot_cmdline`). Opting out:
   `init.no_selftest` and `init.no_selftest_usb` (new), `usb.image_boot`,
   `update.fs_nearly_full`, `update.fs_one_short`. The runner captures the
-  guest network with `filter-dump` and appends `[host] guest IPv4 frames
-  other than DHCP: N`; the no-selftest scenarios require 0, `init.boot`
+  guest network with `filter-dump` and appends `[host] guest frames
+  other than ARP and DHCP: N`; the no-selftest scenarios require 0, `init.boot`
   forbids 0.
 - `fill_arifs` no longer reserves an entry for `nuevo.txt`
   (`BOOT_CREATED_FILES` removed); a unit test keeps the nearly-full disks off
@@ -102,8 +102,6 @@ only with `selftest` on the command line.
   listed in the branch report must run before merging.
 - The keys `input_restart` and `shell_fault` named in the audit do not
   exist in the tree; `TEST_ONLY` lists the test keys that do.
-- `boot_slot` and `boot_pending` are added by AriBoot and should not be
-  written by hand either; `usb-image` does not refuse them yet.
 
 ## Audit (2026-10-17)
 
@@ -127,16 +125,15 @@ passes. Every finding is resolved on the same branch:
    `docs/hardware.md:62-66`.
 3. **Contact counter.** Replaced by a capture of the guest network: QEMU
    `filter-dump` on `net0` (`tools/xtask/src/qemu.rs:772-778`), the guest
-   MAC pinned (`:636`), and `guest_ipv4_frames` counting every IPv4 frame
-   the guest sent except DHCP (`:644`, test at `:1015`); the line
-   `[host] guest IPv4 frames other than DHCP: N` (`:916`). The responder
+   MAC pinned (`:636`), and a count of the frames the guest sent (refined
+   by re-audit L3 below). The responder
    no longer counts, so no thread state is read.
 4. **No scenario on the laptop path.** `tests/qemu/init_no_selftest_usb.toml`
    (USB stick, USB HID only, `selftest = false`).
 5. **`usb-image --cmdline` accepted test-only keys.**
-   `aricode_cmdline::keys::TEST_ONLY` and `CmdLine::test_only_key`
-   (`libs/cmdline/src/lib.rs:59`, `:116`, test at `:166`); refused in
-   `tools/xtask/src/image.rs:359` (test at `:891`).
+   `aricode_cmdline::keys::TEST_ONLY` and `CmdLine::first_of`
+   (`libs/cmdline/src/lib.rs:60`, `:134`, test at `:207`); refused in
+   `tools/xtask/src/image.rs:360` (test at `:897`).
 6. **`selftest=0` enabled selftest.** `CmdLine::has_flag`
    (`libs/cmdline/src/lib.rs:53`) in init
    (`services/init/src/main.rs:1809`) and xtask
@@ -154,3 +151,28 @@ the repository link (`tools/xtask/src/image.rs:318`, `:522`, test at
 `:905`); no `hola.txt`, no Spanish README, no WASM demo. The test disk
 keeps `DISK_FILES`. `usb.image_boot` expects 1 file.
 
+### Re-audit (2026-10-17)
+
+Safe to merge once QEMU passes; the four low findings are resolved:
+
+- **L1** sshd logs a failed `random_seed` save and marks it saved only on
+  success, so the next connection tries again
+  (`services/sshd/src/main.rs:79-90`, `:430`).
+- **L2** When sshd generates a host key on first start it saves the
+  next-boot seed before `entropy.next()` draws the key
+  (`services/sshd/src/main.rs:154`, `:164`, `:396`).
+- **L3** The capture counts every frame the guest sent, of any ethertype
+  (IPv4, IPv6, 802.1Q/802.1ad tags, others), except ARP and DHCP:
+  `guest_frames` and `is_arp_or_dhcp` (`tools/xtask/src/qemu.rs:645`,
+  `:679`), line `[host] guest frames other than ARP and DHCP: N` (`:932`);
+  the host test covers VLAN-tagged ARP, DHCP and UDP, IPv6, another
+  ethertype and a truncated IPv4 header (`:1031`). Scenarios and
+  `tests/README.md` use the new line.
+- **L4** Every key documented "Tests only" in `libs/cmdline` is in
+  `TEST_ONLY` and vice versa, checked by
+  `test_only_keys_match_their_documentation`
+  (`libs/cmdline/src/lib.rs:175`; the docs of `qemu_exit`, `test`,
+  `init_fail_late`, `restart_storm` and `service_hang` now say "Tests
+  only"). `usb-image` also refuses the loader-owned `boot_slot` and
+  `boot_pending` (`keys::LOADER_ONLY`, `libs/cmdline/src/lib.rs:145`;
+  `tools/xtask/src/image.rs:365`, test at `:897`).

@@ -4,7 +4,7 @@
 # usb_input drives. init runs the read-only health checks on the USB block
 # service and fsd, and none of the test clients: no nuevo.txt (the fresh
 # disk keeps its 4 files), no raw-area write on the stick, no input_client
-# reading the USB keyboard, no IPv4 frame besides DHCP.
+# reading the USB keyboard, no frame besides ARP and DHCP.
 name = "init.no_selftest_usb"
 description = "laptop path without selftest: USB stick and USB HID, health checks only, nothing written"
 level = "full"
@@ -34,7 +34,7 @@ serial_contains = [
     "hola.txt",
     "4 file(s)",
     "ARICODEOS_SHUTDOWN",
-    "[host] guest IPv4 frames other than DHCP: 0",
+    "[host] guest frames other than ARP and DHCP: 0",
 ]
 serial_absent = [
     "KERNEL PANIC",

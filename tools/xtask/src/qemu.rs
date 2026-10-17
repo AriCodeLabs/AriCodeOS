@@ -635,13 +635,14 @@ pub fn run_interactive(
 /// NIC, pinned so the network capture can tell the guest's frames apart).
 pub const GUEST_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
 
-/// IPv4 frames the guest sent in a pcap capture of its network (QEMU
-/// `filter-dump`), other than DHCP (UDP 68 -> 67); ARP is not IPv4. A boot
-/// without `selftest` must send none of them (incident 0005): every one is
-/// a contact with the test hosts or with something else. `None` if the
+/// Frames the guest sent in a pcap capture of its network (QEMU
+/// `filter-dump`), of any ethertype (IPv4, IPv6, VLAN-tagged or anything
+/// else), except ARP and DHCP (IPv4 UDP 68 -> 67). A boot without
+/// `selftest` must send none of them (incident 0005): every one is a
+/// contact with the test hosts or with something else. `None` if the
 /// capture is not a readable Ethernet pcap; a truncated last record (QEMU
 /// killed) ends the count.
-pub fn guest_ipv4_frames(pcap: &[u8], guest: [u8; 6]) -> Option<usize> {
+pub fn guest_frames(pcap: &[u8], guest: [u8; 6]) -> Option<usize> {
     let header = pcap.get(..24)?;
     let little = match header[..4] {
         [0xd4, 0xc3, 0xb2, 0xa1] | [0x4d, 0x3c, 0xb2, 0xa1] => true,
@@ -667,17 +668,32 @@ pub fn guest_ipv4_frames(pcap: &[u8], guest: [u8; 6]) -> Option<usize> {
             break;
         };
         rest = &rest[16 + len..];
-        if frame.len() < 34 || frame[6..12] != guest || frame[12..14] != [0x08, 0x00] {
-            continue;
-        }
-        let ihl = (frame[14] & 0x0F) as usize * 4;
-        let ports = frame.get(14 + ihl..14 + ihl + 4);
-        let dhcp = frame[23] == 17 && ports == Some(&[0, 68, 0, 67][..]);
-        if !dhcp {
+        if frame.get(6..12) == Some(&guest[..]) && !is_arp_or_dhcp(frame) {
             count += 1;
         }
     }
     Some(count)
+}
+
+/// ARP or DHCP (IPv4, UDP 68 -> 67), after any 802.1Q/802.1ad tags.
+fn is_arp_or_dhcp(frame: &[u8]) -> bool {
+    let mut at = 12;
+    while let Some(&[a, b]) = frame.get(at..at + 2) {
+        match [a, b] {
+            [0x81, 0x00] | [0x88, 0xA8] => at += 4,
+            [0x08, 0x06] => return true,
+            [0x08, 0x00] => {
+                let ip = &frame[at + 2..];
+                let Some(&first) = ip.first() else {
+                    return false;
+                };
+                let ihl = (first & 0x0F) as usize * 4;
+                return ip.get(9) == Some(&17) && ip.get(ihl..ihl + 4) == Some(&[0, 68, 0, 67][..]);
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 pub struct Capture {
@@ -756,7 +772,7 @@ pub fn run_headless(
     let _responder = Responder::start()?;
     let qmp_path = workdir.join("qmp.sock");
     let _ = std::fs::remove_file(&qmp_path);
-    // Every frame on the guest's network, for the count of guest IPv4
+    // Every frame on the guest's network, for the count of guest
     // frames appended to the capture.
     let pcap_path = workdir.join("net.pcap");
     let _ = std::fs::remove_file(&pcap_path);
@@ -910,11 +926,11 @@ pub fn run_headless(
     }
     let frames = std::fs::read(&pcap_path)
         .ok()
-        .and_then(|pcap| guest_ipv4_frames(&pcap, GUEST_MAC));
+        .and_then(|pcap| guest_frames(&pcap, GUEST_MAC));
     bytes.extend_from_slice(
         match frames {
-            Some(n) => format!("\n[host] guest IPv4 frames other than DHCP: {n}\n"),
-            None => String::from("\n[host] guest IPv4 frames: no readable capture\n"),
+            Some(n) => format!("\n[host] guest frames other than ARP and DHCP: {n}\n"),
+            None => String::from("\n[host] guest frames: no readable capture\n"),
         }
         .as_bytes(),
     );
@@ -1012,37 +1028,46 @@ mod tests {
     }
 
     #[test]
-    fn counts_guest_ipv4_frames_except_dhcp() {
-        use super::{guest_ipv4_frames, GUEST_MAC};
+    fn counts_guest_frames_except_arp_and_dhcp() {
+        use super::{guest_frames, GUEST_MAC};
         let slirp = [0x52, 0x55, 0x0a, 0x00, 0x02, 0x02];
         let ip = [0x08, 0x00];
+        let tagged = |kind: [u8; 2], payload: &[u8]| {
+            let mut p = vec![0x00, 0x05];
+            p.extend_from_slice(&kind);
+            p.extend_from_slice(payload);
+            frame(GUEST_MAC, [0x81, 0x00], &p)
+        };
         let frames = [
             frame(GUEST_MAC, ip, &ipv4(17, 68, 67)),  // DHCP: not counted
             frame(GUEST_MAC, [0x08, 0x06], &[0; 28]), // ARP: not counted
             frame(slirp, ip, &ipv4(17, 67, 68)),      // from slirp: not counted
+            tagged([0x08, 0x06], &[0; 28]),           // ARP in a VLAN: not counted
+            tagged(ip, &ipv4(17, 68, 67)),            // DHCP in a VLAN: not counted
             frame(GUEST_MAC, ip, &ipv4(17, 7, 17_007)), // UDP to the responder
             frame(GUEST_MAC, ip, &ipv4(1, 0, 0)),     // ICMP
             frame(GUEST_MAC, ip, &ipv4(6, 49_152, 17_010)), // TCP to the HTTP server
+            frame(GUEST_MAC, [0x86, 0xDD], &[0x60; 40]), // IPv6
+            tagged(ip, &ipv4(17, 7, 17_007)),         // UDP in a VLAN
+            frame(GUEST_MAC, [0x88, 0xCC], &[0; 20]), // LLDP: any other ethertype
+            frame(GUEST_MAC, ip, &[]),                // truncated IPv4 header
         ];
         for little in [true, false] {
+            assert_eq!(guest_frames(&pcap(little, &frames), GUEST_MAC), Some(7));
             assert_eq!(
-                guest_ipv4_frames(&pcap(little, &frames), GUEST_MAC),
-                Some(3)
-            );
-            assert_eq!(
-                guest_ipv4_frames(&pcap(little, &frames[..3]), GUEST_MAC),
+                guest_frames(&pcap(little, &frames[..5]), GUEST_MAC),
                 Some(0)
             );
         }
         // A truncated last record ends the count; garbage is unreadable.
         let mut cut = pcap(true, &frames);
         cut.truncate(cut.len() - 10);
-        assert_eq!(guest_ipv4_frames(&cut, GUEST_MAC), Some(2));
+        assert_eq!(guest_frames(&cut, GUEST_MAC), Some(6));
         assert_eq!(
-            guest_ipv4_frames(b"not a pcap at all, not at all", GUEST_MAC),
+            guest_frames(b"not a pcap at all, not at all", GUEST_MAC),
             None
         );
-        assert_eq!(guest_ipv4_frames(&[], GUEST_MAC), None);
+        assert_eq!(guest_frames(&[], GUEST_MAC), None);
     }
 
     #[test]

@@ -51,7 +51,7 @@ it (incident 0005).
    testing silently; a scenario opts out with `selftest = false`. Opting
    out: `init.no_selftest` (virtio, boots like a real machine and asserts
    that no test client line appears, `ls` shows the 4 files of a fresh disk
-   and the guest sent no IPv4 frame besides DHCP), `init.no_selftest_usb`
+   and the guest sent no frame besides ARP and DHCP), `init.no_selftest_usb`
    (the laptop path: USB stick and USB HID only, same assertions),
    `usb.image_boot` (the stick image as written) and the two
    nearly-full-AriFS update scenarios, whose free entries belong to the
@@ -60,9 +60,10 @@ it (incident 0005).
 4. **The runner records the guest's network traffic.** Every scenario boot
    captures the guest network with QEMU `filter-dump` (`net.pcap` in the
    scenario directory, the guest MAC pinned to 52:54:00:12:34:56) and the
-   capture ends with `[host] guest IPv4 frames other than DHCP: N`: every
-   IPv4 frame the guest sent except DHCP (ARP is not IPv4). This also
-   catches traffic the host responder never sees (ICMP, other hosts).
+   capture ends with `[host] guest frames other than ARP and DHCP: N`:
+   every frame the guest sent, of any ethertype (IPv4, IPv6, VLAN-tagged or
+   other), except ARP and DHCP. This also catches traffic the host
+   responder never sees (ICMP, IPv6, other hosts).
 5. **The stick carries no test or sample data.** `cargo xtask usb-image`
    writes its own file list into ARI0: an English `README` (what the stick
    is and the repository link), plus what `--authorized-key` and
@@ -71,13 +72,18 @@ it (incident 0005).
    `selftest` boot from such a stick stops at `fs_client`'s first check,
    before any write.
 6. **Test-only keys are refused for a real machine.**
-   `aricode_cmdline::keys::TEST_ONLY` lists `qemu_exit`, `test`,
-   `init_fail_late`, `restart_storm`, `service_hang`, `usb_fault` and
-   `selftest`; `cargo xtask usb-image --cmdline` refuses a line with any of
-   them.
-7. **No early write by sshd.** sshd rewrites `random_seed` on the first
-   accepted connection of a boot, before drawing that connection's
-   randomness, instead of at start: a boot nobody connects to writes
+   `aricode_cmdline::keys::TEST_ONLY` lists every key documented "Tests
+   only" (`qemu_exit`, `test`, `init_fail_late`, `restart_storm`,
+   `service_hang`, `selftest`, `usb_fault`; a unit test keeps the list and
+   the documentation in step), and `keys::LOADER_ONLY` the keys AriBoot
+   adds itself (`boot_slot`, `boot_pending`); `cargo xtask usb-image
+   --cmdline` refuses a line with any of them.
+7. **No early write by sshd.** sshd rewrites `random_seed` before it
+   draws randomness for something that lasts: when it generates a host key
+   on first start, and otherwise on the first accepted connection of a
+   boot, before drawing that connection's keys. A failed save is logged
+   and retried on the next connection. Not at start: a boot nobody
+   connects to writes
    nothing.
 
 ## Consequences

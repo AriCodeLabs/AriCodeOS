@@ -94,7 +94,7 @@ add_empty_segment_at_entry = true   # adds an empty RW PT_LOAD (memsz 0) at e_en
 [expect]
 exit = 33                       # 33 = success, 35 = failure reported by the system, 0 = reboot (-no-reboot)
 serial_contains = ["..."]
-serial_absent = ["..."]         # every capture ends with "[host] guest IPv4 frames other than DHCP: N", counted in the
+serial_absent = ["..."]         # every capture ends with "[host] guest frames other than ARP and DHCP: N", counted in the
                                 # QEMU filter-dump capture of the guest network (net.pcap in the scenario directory)
 ```
 

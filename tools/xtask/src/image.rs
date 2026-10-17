@@ -356,9 +356,15 @@ pub fn build_usb_image(
     authorized_key: Option<&Path>,
     update_source: Option<&str>,
 ) -> Result<PathBuf> {
-    if let Some(key) = aricode_cmdline::CmdLine::new(cmdline).test_only_key() {
+    let line = aricode_cmdline::CmdLine::new(cmdline);
+    if let Some(key) = line.first_of(aricode_cmdline::keys::TEST_ONLY) {
         return Err(format!(
             "--cmdline \"{cmdline}\": `{key}` is a test-only key (aricode_cmdline::keys::TEST_ONLY) and does not belong on a stick for a real machine"
+        ));
+    }
+    if let Some(key) = line.first_of(aricode_cmdline::keys::LOADER_ONLY) {
+        return Err(format!(
+            "--cmdline \"{cmdline}\": `{key}` is added by AriBoot when it boots a slot (aricode_cmdline::keys::LOADER_ONLY); do not write it"
         ));
     }
     let base = build_base_esp(release)?;
@@ -898,6 +904,10 @@ mod tests {
         ] {
             let err = build_usb_image(false, cmdline, None, None).unwrap_err();
             assert!(err.contains("test-only key"), "{cmdline}: {err}");
+        }
+        for cmdline in ["shell boot_slot=A", "shell boot_pending"] {
+            let err = build_usb_image(false, cmdline, None, None).unwrap_err();
+            assert!(err.contains("added by AriBoot"), "{cmdline}: {err}");
         }
     }
 

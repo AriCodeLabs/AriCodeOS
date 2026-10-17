@@ -79,14 +79,17 @@ QEMU test hosts (10.0.2.2). What the system itself may write at boot:
   mount`, `broken journal discarded at mount`);
 - sshd, only with `authorized_keys` installed: the host key the first time
   it starts if the stick has none (`usb-image --authorized-key` installs
-  one, so normally never), and `random_seed`, rewritten on the first
-  accepted SSH connection of each boot, not at boot.
+  one, so normally never; `random_seed` is saved just before), and
+  `random_seed`, rewritten on the first accepted SSH connection of each
+  boot, not at boot (a failed save says so and is retried on the next
+  connection).
 
 The test clients (`fs_client`, `blk_client`, `net_client`, `tcp_client`,
 `http_client`, `input_client`) run only with `selftest`, which belongs to
 the QEMU scenarios: `cargo xtask usb-image --cmdline` refuses it, like
 every other test-only key (`qemu_exit`, `test=`, `usb_fault`,
-`restart_storm`, `service_hang`, `init_fail_late`). If a stick's
+`restart_storm`, `service_hang`, `init_fail_late`) and the keys AriBoot
+adds itself (`boot_slot`, `boot_pending`). If a stick's
 `cmdline.txt` is edited by hand to carry it, the screen says `AriInit:
 selftest: running the test-only boot checks` and the boot stops at
 `fs_client exited with 2` before any write, because the stick has none of

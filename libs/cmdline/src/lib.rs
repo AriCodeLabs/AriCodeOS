@@ -54,12 +54,11 @@ impl<'a> CmdLine<'a> {
         self.entries().any(|(k, v)| k == key && v.is_none())
     }
 
-    /// First key of [`keys::TEST_ONLY`] on the line, if any: a command line
-    /// for a real machine (`cargo xtask usb-image`) must carry none.
-    pub fn test_only_key(&self) -> Option<&'a str> {
-        self.entries()
-            .map(|(k, _)| k)
-            .find(|k| keys::TEST_ONLY.contains(k))
+    /// First key on the line that belongs to `set` (with or without a
+    /// value), if any: e.g. [`keys::TEST_ONLY`] or [`keys::LOADER_ONLY`],
+    /// which a command line for a real machine must not carry.
+    pub fn first_of(&self, set: &[&str]) -> Option<&'a str> {
+        self.entries().map(|(k, _)| k).find(|k| set.contains(k))
     }
 
     /// Value of the last occurrence of `key=value`.
@@ -73,9 +72,10 @@ impl<'a> CmdLine<'a> {
 
 /// Recognised keys. Centralised so that bootloader and kernel agree.
 pub mod keys {
-    /// Exit QEMU with `isa-debug-exit` on completion (success) or failure (error).
+    /// Tests only: exit QEMU with `isa-debug-exit` on completion (success)
+    /// or failure (error).
     pub const QEMU_EXIT: &str = "qemu_exit";
-    /// Injected failure for tests: `test=panic`.
+    /// Tests only: an injected failure or kernel self-test, `test=panic`.
     pub const TEST: &str = "test";
     /// Maximum log level: `log=trace|debug|info|warn|error|off`.
     pub const LOG: &str = "log";
@@ -88,13 +88,17 @@ pub mod keys {
     /// `boot_slot=A|B`: AriBoot adds it when booting from a slot
     /// partition; `boot_pending` comes along if the slot awaits confirmation.
     pub const BOOT_SLOT: &str = "boot_slot";
+    /// Added by AriBoot with `boot_slot` (see there).
     pub const BOOT_PENDING: &str = "boot_pending";
-    /// `init_fail_late`: init fails after the services and before confirming.
+    /// Tests only: `init_fail_late`, init fails after the services and before
+    /// confirming.
     pub const INIT_FAIL_LATE: &str = "init_fail_late";
-    /// `restart_storm`: init subjects a test service to 100 restarts.
+    /// Tests only: `restart_storm`, init subjects a test service to 100
+    /// restarts.
     pub const RESTART_STORM: &str = "restart_storm";
-    /// `service_hang`: init launches a test service that never answers and
-    /// checks that the supervisor kills it when its probe expires.
+    /// Tests only: `service_hang`, init launches a test service that never
+    /// answers and checks that the supervisor kills it when its probe
+    /// expires.
     pub const SERVICE_HANG: &str = "service_hang";
     /// `smp=off`: do not start the application processors (real hardware).
     pub const SMP: &str = "smp";
@@ -111,17 +115,6 @@ pub mod keys {
     /// to every QEMU scenario unless the scenario says `selftest = false`.
     pub const SELFTEST: &str = "selftest";
 
-    /// Keys that only make sense in a QEMU test run: they exit QEMU, inject
-    /// failures or run test programs. `cargo xtask usb-image` refuses them.
-    pub const TEST_ONLY: &[&str] = &[
-        QEMU_EXIT,
-        TEST,
-        INIT_FAIL_LATE,
-        RESTART_STORM,
-        SERVICE_HANG,
-        USB_FAULT,
-        SELFTEST,
-    ];
     /// Tests only: `usb_fault=WHEN[:KIND]` injects one failure into the USB
     /// driver. `WHEN` is `N` (the N-th block request, or the N-th HID
     /// report for `hid`) or `idle` (the first one after two idle seconds).
@@ -134,6 +127,22 @@ pub mod keys {
     /// stopped and recovered from the idle loop, its report TRBs queued
     /// again).
     pub const USB_FAULT: &str = "usb_fault";
+
+    /// Every key documented "Tests only": they exit QEMU, inject failures or
+    /// run test programs. `cargo xtask usb-image` refuses them (a unit test
+    /// keeps this list and the documentation in step).
+    pub const TEST_ONLY: &[&str] = &[
+        QEMU_EXIT,
+        TEST,
+        INIT_FAIL_LATE,
+        RESTART_STORM,
+        SERVICE_HANG,
+        SELFTEST,
+        USB_FAULT,
+    ];
+
+    /// Keys AriBoot adds itself; `cargo xtask usb-image` refuses them too.
+    pub const LOADER_ONLY: &[&str] = &[BOOT_SLOT, BOOT_PENDING];
 }
 
 #[cfg(test)]
@@ -163,14 +172,50 @@ mod tests {
     }
 
     #[test]
+    fn test_only_keys_match_their_documentation() {
+        // Each `pub const NAME: &str = "key";` of `keys` with the doc
+        // comment right above it: "Tests only" there <=> in TEST_ONLY.
+        let source = include_str!("lib.rs");
+        let module = &source[source.find("pub mod keys {").unwrap()..];
+        let mut documented = false;
+        let mut checked = 0;
+        for line in module.lines().map(str::trim) {
+            if let Some(text) = line.strip_prefix("///") {
+                documented |= text.contains("Tests only");
+            } else if let Some(rest) = line.strip_prefix("pub const ") {
+                if let Some((_, value)) = rest.split_once(": &str = \"") {
+                    let key = value.trim_end_matches("\";");
+                    assert_eq!(
+                        documented,
+                        keys::TEST_ONLY.contains(&key),
+                        "`{key}`: documented \"Tests only\" = {documented}, TEST_ONLY disagrees"
+                    );
+                    checked += 1;
+                }
+                documented = false;
+            } else {
+                documented = false;
+            }
+        }
+        assert!(checked >= 16, "only {checked} keys parsed");
+        assert!(keys::LOADER_ONLY
+            .iter()
+            .all(|k| !keys::TEST_ONLY.contains(k)));
+    }
+
+    #[test]
     fn test_only_keys_are_found() {
-        let first = |s| CmdLine::new(s).test_only_key();
+        let first = |s| CmdLine::new(s).first_of(keys::TEST_ONLY);
         assert_eq!(first("shell kbd=es strict log=debug"), None);
         assert_eq!(first("shell selftest"), Some("selftest"));
         assert_eq!(first("qemu_exit shell"), Some("qemu_exit"));
         assert_eq!(first("shell test=panic"), Some("test"));
         assert_eq!(first("usb_fault=idle shell"), Some("usb_fault"));
         assert_eq!(first("selftest=0"), Some("selftest"));
+        let loader = |s| CmdLine::new(s).first_of(keys::LOADER_ONLY);
+        assert_eq!(loader("shell boot_slot=B"), Some("boot_slot"));
+        assert_eq!(loader("shell boot_pending"), Some("boot_pending"));
+        assert_eq!(loader("shell kbd=es"), None);
     }
 
     #[test]

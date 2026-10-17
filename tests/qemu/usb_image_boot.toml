@@ -4,7 +4,7 @@
 # The image is booted as written to a stick, without `selftest` (incident
 # 0005): only the read-only health checks run, nothing is written to AriFS
 # or to the raw area, the image carries no test files (its AriFS holds only
-# an English README) and the guest sends no IPv4 frame besides DHCP.
+# an English README) and the guest sends no frame besides ARP and DHCP.
 name = "usb.image_boot"
 description = "full boot from the USB image (FAT32 ESP on the GPT disk itself, slot A)"
 level = "smoke"
@@ -26,7 +26,7 @@ serial_contains = [
     "AriInit: file service answers: 1 files",
     "AriInit: boot services completed",
     "ARICODEOS_KERNEL_READY",
-    "[host] guest IPv4 frames other than DHCP: 0",
+    "[host] guest frames other than ARP and DHCP: 0",
 ]
 serial_absent = [
     "KERNEL PANIC",

@@ -58,9 +58,10 @@ would open an unauthenticated shell on the user's network.
 - **Entropy.** CPUs without `rdrand` gave the kernel generator little more
   than the cycle counter. Every device, keyboard and serial interrupt now
   stirs the cycle counter into a pool mixed into each read; sshd also
-  carries a seed across boots (`random_seed` in AriFS, replaced on the
-  first accepted connection of each boot, before its randomness is drawn;
-  a boot nobody connects to does not write it, incident 0005) and the host key for a USB image is generated on the build host
+  carries a seed across boots (`random_seed` in AriFS, replaced before
+  randomness is drawn for a new host key or for the first accepted
+  connection of each boot, retried on the next connection if the save
+  fails; a boot nobody connects to does not write it, incident 0005) and the host key for a USB image is generated on the build host
   from `/dev/urandom` (`build/ssh_host_ed25519_key`, fingerprint printed at
   build time so it can be checked against the first `ssh` prompt).
 - **Audit trail.** Every refused key is logged with the user name and the
