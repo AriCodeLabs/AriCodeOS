@@ -321,6 +321,14 @@ struct Endpoint {
     failures: u8,
     /// Failed transfers in this boot (`HID_FAULT_REPORTS`).
     faults: u32,
+    /// Another transfer failed while a fault was already pending: the
+    /// recovery attempt in progress (or the next one) must not take the
+    /// endpoint as recovered and re-queue reports on it; it is recovered
+    /// again from its state instead.
+    refault: bool,
+    /// Recovery attempts spent (`usb hid lost`): later failures, stray
+    /// ones included, are only counted and never re-arm a recovery.
+    given_up: bool,
 }
 
 impl Endpoint {
@@ -331,6 +339,9 @@ impl Endpoint {
     /// `HID_RETRY_MS` times the attempts already made.
     fn failed(&mut self, slot: u8, code: u8, ev: Trb, injected: bool, now: u64) {
         self.faults = self.faults.saturating_add(1);
+        if self.given_up {
+            return;
+        }
         if self.faults <= HID_FAULT_REPORTS {
             sys::print(b"usb-input: HID report on slot ");
             num(slot as u64);
@@ -362,15 +373,17 @@ impl Endpoint {
                 sys::print(b": further failures are counted, not printed\n");
             }
         }
-        if self.fault.is_none() {
-            self.fault = Some(HidFault {
-                code,
-                trb: ev.parameter,
-                injected,
-                clear_halt: false,
-                not_before: now + HID_RETRY_MS * self.failures as u64,
-            });
+        if self.fault.is_some() {
+            self.refault = true;
+            return;
         }
+        self.fault = Some(HidFault {
+            code,
+            trb: ev.parameter,
+            injected,
+            clear_halt: false,
+            not_before: now + HID_RETRY_MS * self.failures as u64,
+        });
     }
 }
 
@@ -715,18 +728,37 @@ struct Pending {
     buf: [(Event, u64); RING],
     head: usize,
     len: usize,
+    /// Events dropped because the queue was full (the client did not read
+    /// for `RING` events), and the total last printed.
+    dropped: u64,
+    dropped_reported: u64,
 }
 
 impl Pending {
+    /// Queues `ev`; when full the oldest event is dropped, never silently:
+    /// the first drop of the boot is printed and recorded (`usb hid evt
+    /// dropped`), and the running total is printed when the client next
+    /// takes events (`take`).
     fn push(&mut self, ev: Event, at: u64) {
         if self.len == RING {
             self.head = (self.head + 1) % RING;
             self.len -= 1;
+            self.dropped += 1;
+            if self.dropped == 1 {
+                say(b"input event queue full: the oldest events are dropped");
+                record("usb hid evt dropped", RING as u64);
+            }
         }
         self.buf[(self.head + self.len) % RING] = (ev, at);
         self.len += 1;
     }
     fn take(&mut self, out: &mut [WireEvent; MAX_EVENTS], times: &mut [u64; MAX_EVENTS]) -> usize {
+        if self.dropped > self.dropped_reported {
+            self.dropped_reported = self.dropped;
+            sys::print(b"usb-input: ");
+            num(self.dropped);
+            sys::print(b" input events dropped in this boot (queue full)\n");
+        }
         let n = self.len.min(MAX_EVENTS);
         for (slot, t) in out.iter_mut().zip(times.iter_mut()).take(n) {
             let (e, at) = self.buf[self.head];
@@ -871,6 +903,8 @@ impl Controller {
                 buf: [(Event::default(), 0); RING],
                 head: 0,
                 len: 0,
+                dropped: 0,
+                dropped_reported: 0,
             },
             disabling: None,
             spare_slot: None,
@@ -1053,9 +1087,8 @@ impl Controller {
     fn dispatch(&mut self, ev: Trb) {
         match ev.trb_type() {
             trb_type::TRANSFER_EVENT => {
-                if !self.handle_transfer_event(ev) {
+                if !self.handle_transfer_event(ev) && !self.stray_on_hid(ev) {
                     self.stray_transfer(ev);
-                    self.stray_on_hid(ev);
                 }
             }
             trb_type::PORT_STATUS_CHANGE => self.port_change(ev.port_id()),
@@ -1766,6 +1799,8 @@ impl Controller {
                 fault: None,
                 failures: 0,
                 faults: 0,
+                refault: false,
+                given_up: false,
             });
             match hid.protocol {
                 1 => self.keyboards += 1,
@@ -3563,7 +3598,13 @@ impl Controller {
             num(faults as u64);
             sys::print(b" failed transfers): no more reports from it in this boot\n");
             record("usb hid lost", dci as u64);
-            self.set_hid_fault(index, e, None);
+            if let Some(ep) = self.devices[index]
+                .as_mut()
+                .and_then(|d| d.endpoints[e].as_mut())
+            {
+                ep.fault = None;
+                ep.given_up = true;
+            }
             return;
         }
         if let Some(ep) = self.devices[index]
@@ -3571,6 +3612,9 @@ impl Controller {
             .and_then(|d| d.endpoints[e].as_mut())
         {
             ep.failures += 1;
+            // Failures seen before this attempt are covered by it: it reads
+            // the endpoint state afresh. Only those during it count.
+            ep.refault = false;
         }
         let mut fault = fault;
         if fault.injected {
@@ -3596,14 +3640,27 @@ impl Controller {
         if host_ok && fault.clear_halt && self.clear_feature_halt(index, address, step) {
             fault.clear_halt = false;
         }
-        if !host_ok || fault.clear_halt {
+        // Another transfer failed while this attempt ran (its commands and
+        // CLEAR_FEATURE wait for events): the endpoint may be Halted again,
+        // so it is not taken as recovered and nothing is queued on it; the
+        // next attempt recovers it from its state.
+        let refault = self.devices[index]
+            .as_ref()
+            .and_then(|d| d.endpoints[e].as_ref())
+            .is_some_and(|ep| ep.refault);
+        if !host_ok || fault.clear_halt || refault {
             sys::print(b"usb-input: HID endpoint dci ");
             num(dci as u64);
             sys::print(b" of slot ");
             num(slot as u64);
             sys::print(b": recovery attempt ");
             num(failures as u64 + 1);
-            sys::print(b" failed; tried again from the idle loop in ");
+            if refault {
+                sys::print(b" overtaken by another failed transfer");
+            } else {
+                sys::print(b" failed");
+            }
+            sys::print(b"; tried again from the idle loop in ");
             let wait = HID_RETRY_MS * (failures as u64 + 1);
             num(wait);
             sys::print(b" ms\n");
@@ -3624,13 +3681,15 @@ impl Controller {
 
     /// A stray Transfer Event (no report TRB matches it) with an error code
     /// on a HID endpoint: the endpoint may have halted on a TD the driver
-    /// no longer tracks, so it is marked for recovery like any failed
-    /// report (incident 0001 audit 5 L3; `stray_transfer` printed and
-    /// recorded it).
-    fn stray_on_hid(&mut self, ev: Trb) {
+    /// no longer tracks, so it is handled like any failed report (printed
+    /// and recorded once, as `usb hid err`, by `Endpoint::failed`, and
+    /// marked for recovery unless given up; incident 0001 audit 5 L3).
+    /// False when the event is not an error on a HID endpoint, for
+    /// `stray_transfer` to print and record.
+    fn stray_on_hid(&mut self, ev: Trb) -> bool {
         let code = ev.completion_code();
         if completion::is_success(code) || completion::is_stopped(code) {
-            return;
+            return false;
         }
         let now = self.clock.now();
         for dev in self.devices.iter_mut().flatten() {
@@ -3643,9 +3702,12 @@ impl Controller {
                 .flatten()
                 .find(|ep| ep.dci == ev.endpoint_id())
             {
+                sys::print(b"usb-input: stray transfer event on a HID endpoint\n");
                 ep.failed(dev.slot, code, ev, false, now);
+                return true;
             }
         }
+        false
     }
 
     fn set_hid_fault(&mut self, index: usize, e: usize, fault: Option<HidFault>) {
