@@ -1,3 +1,4 @@
+# SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 from pathlib import Path
 import subprocess,time,selectors,json
 base=Path('/var/tmp/aricode-probes-6ee19fb/qemu')

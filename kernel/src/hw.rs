@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Hardware objects for user-space drivers (Phase 16): interrupt lines,
 //! MMIO regions and DMA buffers. A driver only gets what its capability
 //! grants; the kernel lends it nothing else (section 27).

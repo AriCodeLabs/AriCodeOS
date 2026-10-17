@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Virtual memory manager (Phase 6): the kernel's own page tables.
 //!
 //! When activated they replace the loader's tables:

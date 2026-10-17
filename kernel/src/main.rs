@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! AriKernel: the AriCodeOS kernel.
 //!
 //! Status: 0.0.3. Receives `BootInfo`, validates the protocol, brings up the
@@ -80,6 +81,9 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     println!();
     println!("AriCodeOS booting...");
     println!("AriCodeOS Kernel {VERSION}");
+    println!(
+        "AriCodeOS by Edwin F. Veliz Jaramillo (lynxcraft), https://github.com/lynxcraft/aricodeos"
+    );
 
     let (level, level_error) = log_level_from(&cmdline);
     console::init_logger(level);

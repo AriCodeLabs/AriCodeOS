@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! IPv4 header (RFC 791) without options or fragmentation.
 
 use crate::{be16, checksum, Ipv4Addr};

@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! TLS 1.3 handshake messages (RFC 8446 section 4) as the client needs
 //! them: ClientHello out; ServerHello, EncryptedExtensions,
 //! CertificateRequest, Certificate, CertificateVerify, Finished,

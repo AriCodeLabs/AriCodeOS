@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Per-CPU state (Phase 32): own tables (GDT, TSS, #DF stack), running
 //! thread, quantum and the `syscall` scratch slot.
 //!

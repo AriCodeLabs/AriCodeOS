@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! User space (Phase 11): processes with their own address space,
 //! embedded test programs and syscall dispatch.
 

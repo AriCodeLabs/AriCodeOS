@@ -108,6 +108,7 @@ default-members = [
 version = "0.9.0"
 edition = "2021"
 license = "UNLICENSED"
+authors = ["Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors"]
 repository = "https://github.com/lynxcraft/aricodeos"
 
 # Profiles shared by the bootloader and the kernel.

@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! UDP (RFC 768) with mandatory checksum on transmit.
 
 use crate::ipv4::{pseudo_header_sum, PROTO_UDP};

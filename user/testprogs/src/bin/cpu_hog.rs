@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Burns CPU forever (stage 3, quotas and saturation): launched in the
 //! background with `spawn` to check that the rest of the system keeps making
 //! progress under the round-robin scheduler. Never exits; dies at shutdown.

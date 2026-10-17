@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Driver that crashes on its first start (arg = 0) and works on the second.
 #![no_std]
 #![no_main]

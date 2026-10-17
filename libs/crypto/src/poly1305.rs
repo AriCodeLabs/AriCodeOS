@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Poly1305 one-time authenticator (RFC 8439 section 2.5), with 26-bit
 //! limbs in the style of poly1305-donna. The key must never be reused: SSH
 //! derives a fresh one per packet from ChaCha20.

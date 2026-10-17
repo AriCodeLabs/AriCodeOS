@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Bitmap allocator of 4 KiB physical frames (Phase 5).
 //!
 //! One bit per frame, 1 = used. The bitmap storage is provided by the

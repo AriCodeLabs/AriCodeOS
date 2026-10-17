@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! inputd (Phase 25): ring 3 virtio-input driver. One process per
 //! device (keyboard, mouse). Receives the driver contract from init and,
 //! as an extra, `SYSTEM` (`READ`) for timeouts. Queues the device events

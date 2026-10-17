@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Arithmetic for the NIST prime curves P-256 and P-384 (FIPS 186-4,
 //! SEC 2): integers modulo an odd prime in Montgomery form with `N`
 //! 64-bit limbs, and points in Jacobian coordinates on

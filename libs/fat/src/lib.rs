@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Minimal FAT32 (Phase 34): builds the EFI partition of the USB image on the
 //! host (`Fat32Builder`) and reads it back (`Fat32`) to verify it. Only what
 //! a UEFI firmware requires: FAT32 BPB, FSInfo, two FAT copies, directories

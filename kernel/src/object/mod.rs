@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Kernel objects (Phase 12) with revocation (Phase 13). Applications only
 //! reach them through handles with rights (`libs/handles`); never through
 //! pointers or global identifiers.

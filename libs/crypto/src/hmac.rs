@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! HMAC (RFC 2104) over SHA-256 and SHA-384, as used by HKDF and the
 //! TLS 1.3 Finished messages. The message is given in parts so callers can
 //! authenticate concatenations without a buffer (this crate has no `alloc`).

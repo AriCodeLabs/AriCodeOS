@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! `fs_probe`: from another private directory it tries to read, write and
 //! close descriptors 0..16 without having opened anything. fsd must answer
 //! `BadFd` to all of them: descriptors belong to the endpoint that opened

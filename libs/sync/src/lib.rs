@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Kernel mutual exclusion primitives.
 //!
 //! [`IrqLock`] is a spinlock that also applies an [`IrqPolicy`] when taking

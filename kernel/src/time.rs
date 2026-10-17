@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Kernel clock: periodic APIC tick and monotonic time (Phase 8).
 
 use core::sync::atomic::{AtomicU64, Ordering};

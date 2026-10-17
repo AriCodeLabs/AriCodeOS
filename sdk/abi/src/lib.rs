@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! AriCodeOS syscall ABI (section 22 of the master document).
 //!
 //! x86-64 convention: number in `rax`, arguments in `rdi, rsi, rdx, r10, r8,

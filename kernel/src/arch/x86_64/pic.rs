@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Legacy 8259 PIC: remapped away from the exception vectors and fully
 //! masked. Interrupts arrive through the APIC.
 

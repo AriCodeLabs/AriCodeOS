@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Test level orchestration: unit (host) -> smoke/full (QEMU).
 
 use crate::scenario::{self, Level, Scenario};

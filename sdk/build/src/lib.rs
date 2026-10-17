@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! A user program's `build.rs` only has to call [`user_program`]: it links
 //! the binary with `sdk/rust/user.ld` (static ELF at `0x400000`) and relinks
 //! if the script changes.

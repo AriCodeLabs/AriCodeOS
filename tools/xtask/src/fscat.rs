@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! `cargo xtask fs-cat DISK [NAME]`: reads a file (or lists the files) from
 //! the ARI0 partition of a disk image or a USB stick dump, using the same
 //! `aricode-arifs` that fsd uses. It is the photo-free diagnostics channel

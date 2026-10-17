@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! AriInit (Phase 15): first user process. It receives from the kernel the
 //! `SPAWNER` handle (0x10004, `MANAGE`), the PCI root (0x10005, `READ|MANAGE`),
 //! a hardware capability (0x10006, `MANAGE`) to hand out DMA, the `SYSTEM`

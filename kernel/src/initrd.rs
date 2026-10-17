@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Initrd handed over by AriBoot (`BootInfo::initrd_*`), reachable through
 //! the physical map. Contains `init` and the test programs.
 

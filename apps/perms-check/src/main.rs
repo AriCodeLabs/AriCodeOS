@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! `perms_check`: regression for the SDK audit (finding 2). It receives three
 //! extra handles (`SYSTEM`, endpoint, `HARDWARE`), closes the first and then
 //! the middle one, and requires `permissions::granted` to keep listing the

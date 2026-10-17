@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! `installer` (stage 4, ADR 0018): trusted app that receives the main fsd
 //! space (`install` capability) and installs or updates the signed packages
 //! left in `pkgs/`: it verifies each one with the development key, compares

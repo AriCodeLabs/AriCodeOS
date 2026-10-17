@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Wait queue: blocks the current thread until a condition holds and someone
 //! calls `wake_all`/`wake_one`, with an optional deadline.
 //!

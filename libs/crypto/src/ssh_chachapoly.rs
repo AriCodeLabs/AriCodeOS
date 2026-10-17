@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! `chacha20-poly1305@openssh.com` (OpenSSH PROTOCOL.chacha20poly1305), the
 //! SSH packet cipher (ADR 0025). The 64-byte key is split in two ChaCha20
 //! keys: the second half encrypts the 4-byte packet length, the first half

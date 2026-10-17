@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Console bridge (stage 2, ADR 0013): forwards key presses from the
 //! user-space keyboards (virtio-input, USB HID) to the kernel console input
 //! ring, so the shell reads from them just like from COM1 or the PS/2

@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! File service client (`aricode-proto::fs`).
 
 use crate::{self as sys, rights, rpc, Error, Handle};

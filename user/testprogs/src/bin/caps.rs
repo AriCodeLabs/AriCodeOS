@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Capabilities (Phase 13): revocation and derivation. Success = 21; otherwise, the failing step.
 #![no_std]
 #![no_main]

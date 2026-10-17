@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 # Regenerates the test certificates of aricode-x509 with the host's OpenSSL.
 # Private keys stay in a temporary directory; only the DER certificates are
 # written next to this script. Dates are fixed so the tests can pick `now`.

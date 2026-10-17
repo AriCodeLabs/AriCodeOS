@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Real servers on the Internet with the embedded roots (`--ignored`: needs
 //! network). `cargo test -p aricode-tls --test internet -- --ignored`.
 

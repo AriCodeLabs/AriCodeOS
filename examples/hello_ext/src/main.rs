@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! `hello_ext`: an application built outside the AriCodeOS tree with the SDK
 //! by path, packaged and signed (`cargo xtask app-pack`) and installed on
 //! AriFS as `apps/hello_ext.aripkg` instead of in the initrd (stage 4, ADR

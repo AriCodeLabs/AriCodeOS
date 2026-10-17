@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Syscall entry through the `syscall` instruction (Phase 11).
 //!
 //! `syscall` does not switch stacks: the entry swaps GS (`swapgs`) to see

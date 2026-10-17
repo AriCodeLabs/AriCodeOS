@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Kernel console: always serial, framebuffer if present. Implements
 //! `log::Log` for the `log::{trace,debug,info,warn,error}!` macros.
 //!

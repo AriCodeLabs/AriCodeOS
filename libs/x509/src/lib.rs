@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! X.509 certificates for the TLS client: a DER parser for the subset of
 //! RFC 5280 the web PKI uses, signature verification on top of
 //! `aricode-crypto`, hostname matching (RFC 6125) and chain building up to

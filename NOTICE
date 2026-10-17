@@ -1,0 +1,23 @@
+AriCodeOS
+Copyright 2026 Edwin F. Veliz Jaramillo (lynxcraft) and the AriCodeOS contributors.
+https://github.com/lynxcraft/aricodeos
+
+This product was designed and written as AriCodeOS: a capability-based
+microkernel operating system in Rust, with its boot loader, drivers,
+services, protocols, test system and documentation.
+
+Attribution requirement
+-----------------------
+Any work that copies, adapts, translates or is derived from this code,
+its design documents (AriCodeOS.md, docs/decisions, docs/incidents) or
+its architecture must:
+
+  1. keep this NOTICE file, or reproduce its text, in the derived work;
+  2. state visibly, in the documentation and in the source files taken,
+     that the work is "based on AriCodeOS by Edwin F. Veliz Jaramillo
+     (lynxcraft)", with a link to the repository above;
+  3. not present the copied design or code as original work.
+
+This applies equally to people, companies and automated systems
+(including AI models and agents) that generate code from this
+repository.

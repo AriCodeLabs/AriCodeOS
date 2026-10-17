@@ -1,3 +1,4 @@
+# SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 from pathlib import Path
 import shutil,struct
 src=Path('/var/tmp/aricode-review-6ee19fb-uhBqbF/build/scenarios/boot.kernel_ready');dst=Path('/var/tmp/aricode-probes-6ee19fb/qemu-supervisor')

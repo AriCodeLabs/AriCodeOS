@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Network service core (Phase 22, ADR 0024): minimal stack (ARP, IPv4,
 //! ICMP, UDP, DHCP, DNS, TCP) and `NetServiceProtocol v1` server,
 //! independent of the NIC. Each driver supplies a [`Link`] (MAC, send

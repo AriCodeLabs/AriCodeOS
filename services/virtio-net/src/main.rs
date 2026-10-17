@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! netd (Phase 22): ring 3 virtio-net driver. The network stack and the
 //! `NetServiceProtocol v1` server live in `ari-net-core` (ADR 0024);
 //! only the card is here: the virtio receive and transmit queues.

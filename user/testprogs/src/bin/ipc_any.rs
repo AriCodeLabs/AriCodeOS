@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Test of `ipc_receive_any` (stage 5, ADR 0020): receive from the first of
 //! several endpoints that has a message, with a deadline; the returned index
 //! says which one; with no messages the deadline expires; a handle that is

@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Test TCP client (Phase 23): echo against the host server, two
 //! simultaneous connections, a refused connection and our own server that
 //! the host connects to via `hostfwd`. Handles: 0x10004 = netd, 0x10005 = HARDWARE.

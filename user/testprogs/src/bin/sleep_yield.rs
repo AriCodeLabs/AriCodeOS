@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! sleep, yield, get_tid and abi_version from ring 3; exits with 3 if everything checks out.
 #![no_std]
 #![no_main]

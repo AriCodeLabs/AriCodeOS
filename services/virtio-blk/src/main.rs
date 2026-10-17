@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Ring 3 virtio-blk driver (Phase 18) and block service (Phase 19).
 //!
 //! Receives from `init`, in this order, the service endpoint, the PCI

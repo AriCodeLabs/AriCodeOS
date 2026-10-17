@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! SSH-2 server as a state machine (ADR 0025): bytes from the client go in
 //! through [`Server::feed`], bytes for the client and [`Event`]s come out.
 //! No I/O and no threads, so it runs the same in the AriCodeOS `sshd`

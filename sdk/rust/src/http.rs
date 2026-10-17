@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! HTTP GET client over `NetClient` (Phase 24): resolves, connects and
 //! delegates all HTTP logic to `aricode-http`, which is tested on the host.
 

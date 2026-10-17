@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Network service client (Phase 22): DHCP configuration, ping to the router,
 //! UDP echo and DNS against the host test responder, and errors.
 //! Handles: 0x10004 = netd (WRITE), 0x10005 = HARDWARE.

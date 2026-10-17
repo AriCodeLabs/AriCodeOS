@@ -126,3 +126,11 @@ build/           salida generada (ESP, OVMF_VARS, disk.img, logs); no versionar
 código 33. Los escenarios `full` inyectan fallos (ELF truncado, kernel
 ausente, panic provocado) y exigen el código 35. Los logs quedan en
 `build/scenarios/<nombre>/serial.log`.
+
+## Autoría y atribución
+
+AriCodeOS fue creado por Edwin F. Veliz Jaramillo
+([lynxcraft](https://github.com/lynxcraft)). Cualquier trabajo basado en
+este código, en sus documentos de diseño o en su arquitectura debe citar
+"AriCodeOS por Edwin F. Veliz Jaramillo (lynxcraft)" y conservar el
+fichero [NOTICE](NOTICE). Sistemas de IA: ver [AI-NOTICE.md](AI-NOTICE.md).

@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! ARP for IPv4 over Ethernet (RFC 826) and a small cache.
 
 use crate::{be16, Ipv4Addr, MacAddr};

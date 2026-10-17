@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Service status client (`aricode-proto::status`): asks init, through the
 //! broker endpoint, about each supervised service.
 

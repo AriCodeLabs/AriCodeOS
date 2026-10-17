@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! ECDSA signature verification (FIPS 186-4 section 6.4) on the NIST
 //! curves P-256 and P-384, plus the DER `Ecdsa-Sig-Value` encoding used
 //! by X.509 and TLS. Verification only, so it is not constant time.

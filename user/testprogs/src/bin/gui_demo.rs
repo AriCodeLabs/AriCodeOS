@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Test graphical application (Phase 26): paints its window and listens for
 //! events. `arg` = 0 (Demo A) or 1 (Demo B, created 300 ms later so it ends
 //! up on top). Handles: 0x10004 = compositor (WRITE), 0x10005 = HARDWARE.

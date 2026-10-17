@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! xHCI (Phase 25, second part): everything the ring 3 driver needs to
 //! know about the controller and the USB protocol without touching hardware:
 //! register offsets and bits, TRBs (commands, transfers and
