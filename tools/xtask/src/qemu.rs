@@ -25,6 +25,14 @@ pub struct UsbOptions {
     /// The test disk hangs off the xHCI as USB storage (`usb-storage`)
     /// instead of virtio-blk (ADR 0023).
     pub storage: bool,
+    /// An EHCI with a USB keyboard and mouse (high speed) for the EHCI
+    /// driver (ADR 0031).
+    pub ehci_hid: bool,
+    /// The test disk hangs off an EHCI as USB storage instead of virtio-blk.
+    pub ehci_storage: bool,
+    /// An ICH9 EHCI with a UHCI companion and a full-speed keyboard: the
+    /// EHCI driver must hand the port over (EHCI 4.2.2).
+    pub ehci_companion_kbd: bool,
 }
 
 fn base_command(
@@ -52,7 +60,8 @@ fn base_command(
     // `iommu_platform=on` so their DMA goes through translation.
     q.args(["-device", "intel-iommu,aw-bits=48"]);
     // Test disk: modern virtio-blk (no legacy interface) for the user-space
-    // driver or, with `usb.storage`, a USB stick on the xHCI.
+    // driver or, with `usb.storage` / `usb.ehci_storage`, a USB stick on the
+    // xHCI / the EHCI.
     q.args([
         "-drive",
         &format!(
@@ -61,7 +70,7 @@ fn base_command(
             if disk_readonly { ",readonly=on" } else { "" }
         ),
     ]);
-    if !usb.storage {
+    if !usb.storage && !usb.ehci_storage {
         q.args([
             "-device",
             "virtio-blk-pci,drive=disk0,disable-legacy=on,disable-modern=off,iommu_platform=on",
@@ -128,9 +137,22 @@ fn base_command(
             q.args(["-device", "usb-storage,bus=xhci.0,drive=disk0"]);
         }
     }
-    if usb.legacy_controller {
-        // EHCI (class 0c.03, interface 0x20): not xHCI.
+    if usb.legacy_controller || usb.ehci_hid || usb.ehci_storage {
+        // EHCI (class 0c.03, interface 0x20, ADR 0031); QEMU's is ICH4-like,
+        // with no companion controllers and no MSI.
         q.args(["-device", "usb-ehci,id=ehci"]);
+        if usb.ehci_hid {
+            q.args(["-device", "usb-kbd,bus=ehci.0"]);
+            q.args(["-device", "usb-mouse,bus=ehci.0"]);
+        }
+        if usb.ehci_storage {
+            q.args(["-device", "usb-storage,bus=ehci.0,drive=disk0"]);
+        }
+    }
+    if usb.ehci_companion_kbd {
+        q.args(["-device", "ich9-usb-ehci1,id=ehcic"]);
+        q.args(["-device", "ich9-usb-uhci1,masterbus=ehcic.0,firstport=0"]);
+        q.args(["-device", "usb-kbd,bus=ehcic.0,usb_version=1"]);
     }
     q.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     q
@@ -603,7 +625,7 @@ pub fn run_interactive(
     let disk = build_dir().join("disk.img");
     let esp_drive = if usb_image {
         // As on a USB stick: the ESP inside the GPT disk, no `fat:`.
-        image::write_usb_image(&disk, &esp, &[])?;
+        image::write_usb_image(&disk, &esp, &[], aricode_gpt::TEST_DISK_GUID)?;
         None
     } else {
         image::write_test_disk(&disk, image::DiskVariant::Slots, &[])?;
@@ -692,7 +714,7 @@ pub fn run_headless(
     let disk = workdir.join("disk.img");
     let esp_drive = if disk_variant == image::DiskVariant::UsbImage {
         if !options.keep_disk {
-            image::write_usb_image(&disk, esp, &[])?;
+            image::write_usb_image(&disk, esp, &[], aricode_gpt::TEST_DISK_GUID)?;
         }
         None
     } else {

@@ -106,6 +106,8 @@ pub mod keys {
     /// report is treated as a transaction error: the interrupt endpoint is
     /// stopped and recovered from the idle loop, its report TRBs queued
     /// again).
+    /// The EHCI driver (ADR 0031) understands `N` and `idle` with `cbw`
+    /// (followed by a real Reset Recovery) and `csw`.
     pub const USB_FAULT: &str = "usb_fault";
 }
 

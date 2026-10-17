@@ -321,6 +321,9 @@ fn run_scenario(
                 hid_only_input: s.usb_hid_only_input,
                 legacy_controller: s.usb_legacy_controller,
                 storage: s.usb_storage,
+                ehci_hid: s.usb_ehci_hid,
+                ehci_storage: s.usb_ehci_storage,
+                ehci_companion_kbd: s.usb_ehci_companion_kbd,
             },
         };
         let cap = qemu::run_headless(

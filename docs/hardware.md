@@ -12,8 +12,8 @@ never touched**; AriCodeOS boots from and writes only to its own USB stick.
 - A USB stick of at least 128 MiB that can be wiped completely.
 - Keyboard: the built-in one (PS/2 via i8042) serves as the kernel console.
   USB keyboards and mice (boot HID) are handled by `usbd` on top of the xHCI
-  and reach the compositor with `gui`; the serial/PS/2 console shell does
-  not read them yet.
+  and by `usb_ehci` on the EHCI ports (ADR 0031), and reach the shell
+  through the console bridge and the compositor with `gui`.
 - Without a serial port, the screen is the diagnostic channel: the kernel
   writes its console to the GOP framebuffer unless `gui` is set.
 
@@ -60,10 +60,33 @@ and standard memory types, ADR 0021). The machine: 2012 Intel (xHCI
 |---|---|
 | AriBoot: slots, GOP 800x600, kernel and initrd verified | Atheros AR9485 Wi-Fi (out of scope: ath9k, 802.11 and WPA2) |
 | Wired networking with `rtl_net` (ADR 0024): DHCP, `ping` to the router in 1 ms and `dns google.com` resolved (2026-10-10) | |
-| USB stick as a block service over USB (ADR 0023; "USB Disk 3.0", no `SYNCHRONIZE CACHE`), fsd, slot A confirmation and shell over the PS/2 keyboard (2026-10-10) | EHCI has no driver (xHCI only) |
+| USB stick as a block service over USB (ADR 0023; "USB Disk 3.0", no `SYNCHRONIZE CACHE`), fsd, slot A confirmation and shell over the PS/2 keyboard (2026-10-10) | EHCI driver written (ADR 0031, 2026-10-17), not yet tried on the laptop |
 | Kernel: memory, ACPI, APIC, PCI (17 functions), init and its tests, `ARICODEOS_KERNEL_READY` | Power: sleep states and battery |
 | PS/2 keyboard on the kernel console (backspace included) | |
 | xHCI with MSI (ADR 0022; the controller has no MSI-X), firmware handoff, ports routed, 8 ports, 16 scratchpads, input service ok | |
+
+## EHCI ports (ADR 0031)
+
+The laptop's USB 2.0 ports are wired to the two EHCI controllers through
+Intel's rate matching hubs; the switchable ones can also be routed to the
+xHCI. usbd routes every port the firmware allows (`USB2PRM`) to the xHCI
+(trace `usb-input: Intel ports routed to the xHCI (USB2 m, USB3 m)`); the
+rest stay on an EHCI and are served by `usb_ehci`. Expected traces
+(illustrative values, not yet seen on the laptop):
+
+```text
+usb-ehci: EHCI ready (HCIVERSION 0100, 2 ports, 0 companion controllers, 64-bit addressing, polled)
+usb-ehci: port 1: device 8087:0024 class 9 bcdUSB 0200 speed high address 1
+usb-ehci: port 1: hub with 6 ports
+usb-ehci: port 1.2: device ... speed low address 2 (translator: hub 1 port 2)
+usb-ehci: port 1.2: HID keyboard (boot protocol, 8 bytes per report, endpoint 1, every 8 ms)
+```
+
+`port 1.2` is port 2 of the hub on root port 1. Devices of other classes
+(webcam, Bluetooth, card reader) are listed and left unconfigured. The EHCI
+functions have no MSI: the driver polls and needs no IRQ. If a stick on an
+EHCI port is the only one, it becomes the system disk (`AriInit: block
+service via USB`).
 
 ## Diagnostics without photos
 
@@ -101,7 +124,10 @@ system) or regenerate the image with `--cmdline`:
 | Shift+period types `>` instead of `:` | The keyboard is Spanish and the console uses the US layout: `kbd=es` on the cmdline (`cargo xtask usb-image --cmdline "shell kbd=es"`). Only affects the kernel's PS/2 keyboard; USB and virtio stay on US |
 | "usb-input: no BAR 0 or no IRQ among the capabilities" | The function has neither MSI nor MSI-X (the `pci: … claimed (…)` trace says so); INTx is not supported |
 | "usb-input: xHCI initialization failed: …" | The step that failed: capabilities, DMA memory (the buffer is sized with the scratchpads the controller requests), reset or start |
-| "usb-input: no USB storage" with the USB stick plugged in | The USB stick is not on the xHCI: check the `Intel ports routed to xHCI` trace; if it is missing, the port hangs off an EHCI without a driver (try another port; blue ones are usually xHCI) |
+| "usb-input: no USB storage" with the USB stick plugged in | The USB stick is not on the xHCI: check the `Intel ports routed to xHCI` trace; if it is missing or the port is not switchable, the stick hangs off an EHCI and `usb-ehci: port 1.N: USB storage ...` should appear instead (see "EHCI ports" below) |
+| "usb-ehci: port N: full-speed device on a root port without companion controllers" | A full- or low-speed device reached an EHCI root port directly; on Intel 6/7 series that should not happen (the rate matching hub sits there): note down the line and the `PORTSC` values of a `strict` dump |
+| "usb-ehci: ... transfer to address A endpoint E (... speed) failed: ..." | A failed USB transfer on the EHCI with its qTD token (ADR 0028); it is also in `diag` as `ehci ...`. Boot with `strict` to stop at the first one with a dump of the controller |
+| "usb-ehci: USB storage unusable until it is plugged in again" | The Bulk-Only Reset Recovery failed after a transfer failure; replug the stick and note down the lines before |
 | "usb-input: port N: …" with an INQUIRY, TEST UNIT READY or READ CAPACITY error | The USB stick does not respond to the bulk-only protocol; note down the line |
 | "AriInit: no ARI0 partition on the disk" | The USB stick does not carry the `cargo xtask usb-image` image (or something else was written over it) |
 | "process: the ELF does not fit in the user region" when launching a program | The binary was not linked into the user region (it lacks a `build.rs` with `aricode_build::user_program`); `cargo xtask build` now detects this before generating the image |

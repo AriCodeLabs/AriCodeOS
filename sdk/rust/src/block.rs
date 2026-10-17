@@ -38,6 +38,12 @@ impl BlockClient {
         })
     }
 
+    /// Points the client at another block service, keeping its DMA buffer
+    /// (init probing several USB disks with one buffer).
+    pub fn set_service(&mut self, service: Handle) {
+        self.service = service;
+    }
+
     /// Data buffer (`sectors * 512` bytes).
     pub fn buffer(&mut self) -> &mut [u8] {
         // SAFETY: DMA buffer mapped RW in this process, exclusive to the client.

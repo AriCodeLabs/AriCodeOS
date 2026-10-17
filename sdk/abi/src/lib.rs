@@ -64,6 +64,37 @@ pub mod init_arg {
     pub const FAIL_LATE: u64 = 32;
 }
 
+/// Bits of the `arg` init passes to a PCI driver (`start_driver`), above
+/// the BAR (bits 0..5) and IRQ (bit 15) bits.
+pub mod driver_arg {
+    /// The driver is relaunched after serving the system disk (ADR 0031):
+    /// bits 17..63 carry the first 47 bits of that disk's GPT disk GUID,
+    /// and the driver serves no other disk.
+    pub const EXPECTED_DISK: u64 = 1 << 16;
+    const DIGEST_BITS: u32 = 47;
+
+    /// The first 47 bits of a GPT disk GUID.
+    pub const fn digest(guid: &[u8; 16]) -> u64 {
+        u64::from_le_bytes([
+            guid[0], guid[1], guid[2], guid[3], guid[4], guid[5], guid[6], guid[7],
+        ]) & ((1 << DIGEST_BITS) - 1)
+    }
+
+    /// The bits that ask a relaunched driver for the disk `guid`.
+    pub const fn expected_disk(guid: &[u8; 16]) -> u64 {
+        EXPECTED_DISK | digest(guid) << 17
+    }
+
+    /// The expected disk digest in `arg`, if any.
+    pub const fn expected_digest(arg: u64) -> Option<u64> {
+        if arg & EXPECTED_DISK != 0 {
+            Some(arg >> 17)
+        } else {
+            None
+        }
+    }
+}
+
 /// Rights (bits) as seen by user space.
 pub mod rights {
     pub const READ: u32 = 1 << 0;
@@ -638,6 +669,8 @@ pub mod pci_info {
     }
     /// xHCI programming interface.
     pub const XHCI_PROG_IF: u8 = 0x30;
+    /// EHCI programming interface (USB 2.0, ADR 0031).
+    pub const EHCI_PROG_IF: u8 = 0x20;
 }
 
 /// Maximum DMA buffer size per call (section 52).
@@ -763,6 +796,21 @@ pub const fn user_range_ok(ptr: u64, len: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn expected_disk_round_trip() {
+        use super::driver_arg::*;
+        let guid = [0xFFu8; 16];
+        let arg = 0x3F | 1 << 15 | expected_disk(&guid);
+        assert_eq!(arg & 0x3F, 0x3F, "BAR bits untouched");
+        assert_ne!(arg & 1 << 15, 0, "IRQ bit untouched");
+        assert_eq!(expected_digest(arg), Some(digest(&guid)));
+        assert_eq!(digest(&guid), (1 << 47) - 1);
+        let mut other = guid;
+        other[0] = 0;
+        assert_ne!(expected_digest(arg), Some(digest(&other)));
+        assert_eq!(expected_digest(0x3F | 1 << 15), None);
+    }
+
     #[test]
     fn spawn_limits_pack() {
         use super::spawn_limits::*;
