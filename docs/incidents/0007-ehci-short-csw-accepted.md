@@ -99,10 +99,44 @@ The audit also found a pre-existing fault of the same family in the xHCI
 driver, the data-stage residual and `dCSWDataResidue` ignored: incident
 0010.
 
+## QEMU run (2026-10-18, branch at `494954c`)
+
+`cargo xtask test --level full --area usb,init`: 55 scenarios, 0 failed
+(`init.no_selftest_usb` 5.3 s again brings the USB stick up; the whole
+`usb` and `init` areas pass, `strict.ehci_halt`, `strict.usb_halt` and
+`strict.usb_hid_halt` included). A first run in the same worktree had 28
+scenarios fail at 0.0 s for an unrelated reason, the QMP socket path of a
+deep git worktree exceeding the 107 bytes of a UNIX socket address; xtask
+now falls back to a short path (`qmp_socket_path`).
+
+Evidence from the new scenarios' serial logs:
+
+```text
+usb.short_csw (xHCI, 22.7 s)
+usb-input: injected fault: the CSW read moved 8 bytes; the previous command's status stays in the buffer
+usb-input: CSW of 8 bytes, not 13 (BOT 5.2): invalid, no status for tag 45
+usb-input: reset recovery (BOT 5.3.4) pending: the class reset is sent when idle
+write: write error
+usb-input: reset recovery (BOT 5.3.4): Bulk-Only Mass Storage Reset
+usb-input: reset recovery done: transport ready
+write: 11 bytes to probe.txt
+fault reported by process 12: usb csw length (code 8)
+fault reported by process 12: usb inj w lba 34 (code 0)
+
+usb.ehci_short_csw (EHCI, 22.4 s)
+usb-ehci: injected fault: the CSW read moved 8 bytes; the previous command's status stays in the buffer
+usb-ehci: CSW of 8 bytes, not 13 (BOT 5.2): invalid, no status for tag 46
+usb-ehci: Reset Recovery (BOT 5.3.4): mass storage reset, both bulk halts cleared
+usb-ehci: Reset Recovery done; transport ready
+write: write error
+write: 11 bytes to probe.txt
+fault reported by process 12: usb csw length (code 8)
+fault reported by process 12: ehci reset recovery (code 0)
+```
+
 ## Open
 
-- The QEMU results of this branch are recorded below once run; the audit
-  of the second fix (failure protocol step 6) is pending.
+- The audit of the second fix (failure protocol step 6) is pending.
 - No strict-mode scenario for the short CSW exists; strict behaviour is
   the shared `ScsiFail::Csw` path exercised by the code, not by a test.
 - Physical device reproduction and actual data-loss measurement remain

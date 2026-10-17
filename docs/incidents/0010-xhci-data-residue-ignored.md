@@ -67,10 +67,33 @@ whole length as not transferred, does not override the first event.
   one for a complete transfer, and the decision is covered by the host
   test of `bytes_not_moved`.
 
+## QEMU run (2026-10-18, branch at `494954c`)
+
+`cargo xtask test --level full --area usb,init`: 55 scenarios, 0 failed
+(see incident 0007 for the whole run). The new scenarios:
+
+```text
+usb.short_data (xHCI, 20.8 s)
+usb-input: injected fault: the data stage is reported one sector (512 bytes) short
+usb-input: WRITE(10) lba 34: 512 bytes not transferred
+write: write error
+write: 11 bytes to probe.txt
+fault reported by process 12: usb short data (code 512)
+
+usb.ehci_short_data (EHCI, 22.4 s)
+usb-ehci: injected fault: the data stage is reported one sector (512 bytes) short
+usb-ehci: WRITE(10) lba 34: 512 bytes not transferred
+write: write error
+write: 11 bytes to probe.txt
+fault reported by process 12: usb short data (code 512)
+```
+
+No Reset Recovery line in either log: the transport stayed Ready and the
+second write went through.
+
 ## Open
 
-- QEMU results for this branch are recorded in incident 0007 once run; the
-  audit of the fix is pending.
+- The audit of the fix (failure protocol step 6) is pending.
 - No strict-mode scenario for the short data stage in either driver.
 - No real device has been seen returning a residue; the ADR 0023 note
   records the rule.
