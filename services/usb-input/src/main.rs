@@ -46,37 +46,46 @@ const MAX_DEVICES: usize = 4;
 const REPORTS_IN_FLIGHT: usize = 4;
 const RING: usize = 128;
 
-/// Timeouts of the Bulk-Only stages (ms). BOT 1.0 specifies none; Linux
-/// `usb-storage` works under the 30 s SCSI command timeout; the 5 s DATA
-/// timeout `develop` had never fired in incident 0001. Cheap sticks stall
-/// 100 ms to 3 s on writes and deliver the WRITE CSW only after accepting
-/// the data, so shorter values would manufacture failures (and the
-/// Bulk-Only reset that follows them).
+/// Timeouts of a SCSI command over Bulk-Only (ms). BOT 1.0 specifies no
+/// transport timeout; SCSI stacks bound a whole command instead (Linux
+/// `sd`: 30 s, `SD_TIMEOUT`). Incident 0001 measured why: the laptop's
+/// stick (Innostor IS918) accepts a WRITE's data and confirms it (CSW)
+/// only after up to seconds of flash housekeeping, more than 3 s on the
+/// laptop and 1.5 s under Linux on the host, with no error. So the DATA
+/// and CSW stages share one 30 s command window; the CBW, which the device
+/// takes before starting any work, keeps 1 s.
 const CBW_TIMEOUT_MS: u64 = 1000;
-const DATA_TIMEOUT_MS: u64 = 5000;
-const CSW_TIMEOUT_MS: u64 = 3000;
-/// Server budget per block request (ms), from the moment it is served.
-/// Transfers end `RECOVERY_RESERVE_MS` before the deadline: the transfer
-/// window is 9000 ms = CBW (1000) + DATA (5000) + CSW (3000) exactly, so
-/// every stage can use its full timeout. Recovery commands may use the
-/// reserve. Chain of waits: the block client waits
-/// `aricode_sys::block::REPLY_WAIT_MS` (35 s) > this budget (12 s) + the
-/// longest idle-loop maintenance step (`REENUMERATE_STEP_MS`, 6 s) + one
-/// queued request (12 s) = 30 s; the file client waits 45 s > 35 s. The
-/// chain assumes at most two concurrent block clients (one queued request).
-const REQUEST_BUDGET_MS: u64 = 12_000;
+const SCSI_COMMAND_TIMEOUT_MS: u64 = 30_000;
+/// Each stage may use the whole command window; `Budget::transfer` ends
+/// both at the window's end, so together they never exceed it.
+const DATA_TIMEOUT_MS: u64 = SCSI_COMMAND_TIMEOUT_MS;
+const CSW_TIMEOUT_MS: u64 = SCSI_COMMAND_TIMEOUT_MS;
+/// Transfer window of one block request: CBW + the command window.
+const TRANSFER_WINDOW_MS: u64 = CBW_TIMEOUT_MS + SCSI_COMMAND_TIMEOUT_MS;
+/// Server budget per block request (ms), from the moment it is served:
+/// the transfer window plus `RECOVERY_RESERVE_MS` for the recovery
+/// commands of a failed transfer (31 + 3 = 34 s). Chain of waits: the
+/// block client waits `aricode_sys::block::REPLY_WAIT_MS` (90 s) > this
+/// budget (34 s) + the longest idle-loop maintenance step
+/// (`REENUMERATE_STEP_MS`, 6 s) + one queued request (34 s) = 74 s; the
+/// file client waits 120 s > 90 s. The chain assumes at most two
+/// concurrent block clients (one queued request).
+const REQUEST_BUDGET_MS: u64 = TRANSFER_WINDOW_MS + RECOVERY_RESERVE_MS;
 /// What a failed transfer may need before the request returns: Reset or
 /// Stop Endpoint (500) + Set TR Dequeue (500) + CLEAR_FEATURE with its own
 /// EP0 recovery (2000) for the failed endpoint. Retiring a CSW re-read or
 /// a Disable Slot beyond that is refused or left pending, which the
 /// held-buffer bookkeeping (`Controller::held_buffer`) covers.
 const RECOVERY_RESERVE_MS: u64 = 3000;
-/// Least transfer window for one SCSI command: CBW + a 1 s DATA slice +
-/// CSW. The single retry after a recovery needs it (`RETRY_MIN_MS`), and
-/// a command issued inside a maintenance step gets a budget with at least
-/// this window or is refused up front (`command_budget`).
-const MIN_COMMAND_WINDOW_MS: u64 = CBW_TIMEOUT_MS + 1000 + CSW_TIMEOUT_MS;
-const RETRY_MIN_MS: u64 = MIN_COMMAND_WINDOW_MS;
+/// Least transfer window for a SCSI command issued inside a maintenance
+/// step (INQUIRY, TEST UNIT READY, READ CAPACITY during a re-enumeration):
+/// CBW + a 1 s DATA slice + 3 s for the CSW. These commands touch no flash
+/// and answer at once on a working device; a budget that cannot hold this
+/// window is refused up front (`command_budget`).
+const MIN_COMMAND_WINDOW_MS: u64 = CBW_TIMEOUT_MS + 1000 + 3000;
+/// The single retry after a recovery is a full READ/WRITE: it needs the
+/// whole transfer window, so it only happens after a fast failure.
+const RETRY_MIN_MS: u64 = TRANSFER_WINDOW_MS;
 const CONTROL_TIMEOUT_MS: u64 = 1000;
 const COMMAND_TIMEOUT_MS: u64 = 500;
 /// EP0 recovery after a failed control transfer (a Reset or Stop Endpoint

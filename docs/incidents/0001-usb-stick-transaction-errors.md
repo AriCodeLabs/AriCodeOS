@@ -510,9 +510,22 @@ remove the trigger.
 ## Fix (specification-based)
 
 The Bulk-Only Transport specifies no timeout; SCSI stacks use a
-per-command timeout of 30 s (Linux `sd`). READ/WRITE get a 30 s command
-timeout covering data and CSW (CBW 1 s), the request budget and the
-chain of client waits follow (block client and file client waits raised
-accordingly), and the strict-mode scenarios adapt their timeouts. A
-post-write quiet period is not needed: the device signals readiness by
-returning the CSW.
+per-command timeout of 30 s (Linux `sd`). Implemented (branch
+`fix/usb-scsi-command-timeout`): the DATA and CSW stages share one 30 s
+command window (`SCSI_COMMAND_TIMEOUT_MS`), the CBW keeps 1 s, so the
+transfer window is 31 s and the request budget 34 s with the 3 s
+recovery reserve. Chain of waits: block client 90 s > 34 + 6 + 34 = 74 s;
+file client 120 s. Commands issued inside a maintenance step
+(re-enumeration) keep a 5 s minimum window; the single retry after a
+recovery needs a full 31 s window. A post-write quiet period is not
+needed: the device signals readiness by returning the CSW.
+
+The numbers in item 3 above (12 s budget, 35 s / 45 s waits) describe the
+driver merged on 2026-10-12 and are superseded by these.
+
+Known limitation made visible by the longer waits: a client of a server
+that died with its request queued (scenario `filesystem.corrupt_detected`:
+fsd refuses a corrupt AriFS and exits) learns it only when its own wait
+expires (now 120 s for the file client, 90 s for the block client), not
+at once. The kernel has no "peer gone" notification on IPC endpoints;
+until it has one, the scenario's timeout is 200 s. Open item.

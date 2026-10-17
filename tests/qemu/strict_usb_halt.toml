@@ -11,7 +11,7 @@ usb_storage = true
 cmdline = "qemu_exit shell strict usb_fault=idle"
 # The shell's write waits for fsd (45 s), which waits for the halted
 # driver's block reply (35 s), before `diag` and `shutdown` run.
-timeout_secs = 150
+timeout_secs = 300
 stdin = ["repeat 10 ping 10.0.2.2", "write probe.txt after idle", "diag", "shutdown"]
 
 [expect]

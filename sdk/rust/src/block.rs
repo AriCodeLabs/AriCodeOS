@@ -5,14 +5,14 @@ use crate::{self as sys, rights, rpc, Error, Handle};
 use aricode_proto::block::{Op, Reply, Request, Status, MAX_SECTORS};
 
 /// Reply wait of a block request (ms). Chain of waits (incident 0001): the
-/// USB storage server spends at most `REQUEST_BUDGET_MS` = 12 s on one
-/// request, and a request may first queue behind one idle-loop
-/// maintenance step (`REENUMERATE_STEP_MS` = 6 s, a bounded
-/// re-enumeration, the longest step) and one other request:
-/// 12 + 6 + 12 = 30 s < 35 s, assuming at most two concurrent block
-/// clients (one queued request). The file client above waits longer still
-/// (`fs::REPLY_WAIT_MS`, 45 s).
-pub const REPLY_WAIT_MS: u64 = 35_000;
+/// USB storage server spends at most `REQUEST_BUDGET_MS` = 34 s on one
+/// request (a 30 s SCSI command window, as SCSI stacks use, plus the CBW
+/// and the recovery reserve), and a request may first queue behind one
+/// idle-loop maintenance step (`REENUMERATE_STEP_MS` = 6 s, the longest)
+/// and one other request: 34 + 6 + 34 = 74 s < 90 s, assuming at most two
+/// concurrent block clients (one queued request). The file client above
+/// waits longer still (`fs::REPLY_WAIT_MS`, 120 s).
+pub const REPLY_WAIT_MS: u64 = 90_000;
 
 pub struct BlockClient {
     service: Handle,
