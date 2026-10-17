@@ -8,7 +8,7 @@ level = "full"
 areas = ["filesystem", "storage", "init"]
 cmdline = "qemu_exit"
 disk = "fs-corrupt"
-timeout_secs = 60
+timeout_secs = 200
 
 [expect]
 exit = 33
