@@ -852,11 +852,13 @@ mod tests {
         assert_eq!(p.companions, 0);
         assert!(p.addressing_64);
         assert_eq!(p.eecp, 0x68);
-        // QEMU usb-ehci: 6 ports with power control, 32-bit.
-        let q = Params::decode(0x0000_0016, 0x0000_6880);
+        // QEMU usb-ehci: HCSPARAMS 0x06 (6 ports, no power switches, no
+        // companions), HCCPARAMS 0x80 (32-bit, no extended capabilities).
+        let q = Params::decode(0x0000_0006, 0x0000_0080);
+        assert_eq!(q.eecp, 0);
         assert_eq!(
             (q.ports, q.port_power_control, q.addressing_64),
-            (6, true, false)
+            (6, false, false)
         );
         let c = Params::decode(3 << 12 | 1 << 4 | 6, 0);
         assert_eq!(c.companions, 3);

@@ -21,6 +21,7 @@ aricode-xhci = { path = "../../libs/xhci" }
 aricode-usb-storage = { path = "../../libs/usb-storage" }
 aricode-rt = { path = "../../sdk/runtime" }
 aricode-cmdline = { path = "../../libs/cmdline" }
+aricode-gpt = { path = "../../libs/gpt" }
 
 [build-dependencies]
 aricode-build = { path = "../../sdk/build" }

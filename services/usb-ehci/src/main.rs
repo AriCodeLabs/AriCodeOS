@@ -35,7 +35,7 @@ use aricode_proto::block::{
 use aricode_proto::input::{Event as WireEvent, Op, Reply, Request, Status, MAX_EVENTS};
 use aricode_rt::sys::block::{map_client_buffer, REPLY_WAIT_MS};
 use aricode_rt::sys::virtio_pci::{extra_handle, polled_bar_handle, DmaRegion, Mmio, CFG, SERVICE};
-use aricode_rt::sys::{self, abi, Handle};
+use aricode_rt::sys::{self, abi, abi::driver_arg, Handle};
 use aricode_usb_storage::{
     after_transfer_failure, check_csw, fault, scsi, Cbw, Cdb, Csw, CswError, CswStatus, Next, Stage,
 };
@@ -77,22 +77,31 @@ const MIN_STAGE_MS: u64 = 1000;
 /// Hard bounds of the driver's units of work. Every transfer inside one
 /// (recovery, REQUEST SENSE, hub GetPortStatus, ClearTTBuffer included)
 /// is cut to its deadline, and one that cannot start in time is refused
-/// without touching the controller (`Fail::Refused`). A block request
-/// gets the CBW, the 30 s medium window and 5 s of recovery; recovery
-/// that does not fit is postponed (a Reset Recovery runs before the next
-/// CBW, BOT 5.3.4). A block client waits `REPLY_WAIT_MS` (90 s) from its
-/// send: the longest step that may be running (an enumeration, 15 s) plus
-/// two requests (one queued) fit: 15 + 36 + 36 = 87 s.
+/// without touching the controller (`Fail::Refused`); deadlines nest by
+/// their minimum (`with_deadline`). A block request gets the CBW, the 30 s
+/// medium window and 5 s of recovery; recovery that does not fit is
+/// postponed (a Reset Recovery runs before the next CBW, BOT 5.3.4). One
+/// main loop iteration's housekeeping (HID reports, port changes, the hub
+/// poll and at most one enumeration) shares one `HOUSEKEEPING_MS`
+/// deadline, and each iteration serves at most one block request. A block
+/// client waits `REPLY_WAIT_MS` (90 s) from its send; with at most two
+/// block clients (fsd and one of init's checks: one request queued behind
+/// the one in progress) its wait is bounded by housekeeping plus two
+/// requests: 15 + 36 + 36 = 87 s.
 const REQUEST_BUDGET_MS: u64 = CBW_TIMEOUT_MS + MEDIUM_WINDOW_MS + 5000;
-const ATTACH_STEP_MS: u64 = 15_000;
+const HOUSEKEEPING_MS: u64 = 15_000;
+const ATTACH_STEP_MS: u64 = HOUSEKEEPING_MS;
 const HUB_POLL_STEP_MS: u64 = 5000;
-const _: () = assert!(ATTACH_STEP_MS + 2 * REQUEST_BUDGET_MS < REPLY_WAIT_MS);
-const _: () = assert!(HUB_POLL_STEP_MS <= ATTACH_STEP_MS);
+const _: () = assert!(HOUSEKEEPING_MS + 2 * REQUEST_BUDGET_MS < REPLY_WAIT_MS);
+const _: () = assert!(HUB_POLL_STEP_MS <= HOUSEKEEPING_MS);
 /// The input service's Info waits for the boot enumeration at most this
-/// long (init's readiness probe gives a driver about 3 s), and the whole
-/// boot enumeration is bounded: ports still pending after it are
-/// enumerated later, as hot-plugged ones.
-const INFO_WAIT_MS: u64 = 2500;
+/// long from the process start. init's readiness probe (init
+/// `probe_ready`) gives a driver about 3 s from its launch; held Info
+/// requests are answered from inside any wait once this passes, so a slow
+/// enumeration step cannot push the answer past the probe. The whole boot
+/// enumeration is bounded: ports still pending after it are enumerated
+/// later, as hot-plugged ones.
+const INFO_WAIT_MS: u64 = 1500;
 const BOOT_ENUMERATION_MS: u64 = 30_000;
 /// Interrupt on Async Advance (EHCI 4.8.2): the controller sets it at its
 /// next pass over the async schedule, well within this bound.
@@ -331,13 +340,20 @@ struct Storage {
 }
 
 /// What the block service's clients were given: a device is served again
-/// after an unplug only if it is the same (capacity and INQUIRY names).
+/// after an unplug only if it is the same: capacity, INQUIRY names, the
+/// GPT disk GUID (LBA 1, UEFI 5.3.2) and the USB serial number string,
+/// the last two when the device has them.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Served {
     capacity: u64,
     vendor: [u8; 8],
     product: [u8; 16],
+    disk_guid: Option<[u8; 16]>,
+    serial: [u8; SERIAL_LEN],
 }
+
+/// Bytes of the serial number string descriptor kept for the identity.
+const SERIAL_LEN: usize = 64;
 
 /// How a transfer failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -594,6 +610,15 @@ struct Ehci {
     deadline: Option<u64>,
     /// The storage the block service has handed out (`Served`).
     served: Option<Served>,
+    /// After a restart, the system disk this driver served before (digest
+    /// of its GPT disk GUID, `driver_arg::EXPECTED_DISK`): no other disk
+    /// is served.
+    expected_disk: Option<u64>,
+    /// One sector for the GPT header.
+    sector_buf: (u64, u64),
+    /// Input Info requests held until the boot enumeration ends.
+    held_info: [Handle; abi::IPC_QUEUE_CAPACITY],
+    held_len: usize,
     /// When the driver started (boot enumeration bounds).
     started: u64,
     /// Input events waiting for the client.
@@ -603,7 +628,9 @@ struct Ehci {
 }
 
 impl Ehci {
-    fn open(mask: u64, clock: Clock, strict: bool) -> Result<Self, u64> {
+    /// `started`: when the process started (the Info and boot enumeration
+    /// bounds count from there).
+    fn open(mask: u64, clock: Clock, strict: bool, started: u64) -> Result<Self, u64> {
         let Some(bar) = polled_bar_handle(mask, 0) else {
             say(b"no BAR 0 among the capabilities");
             return Err(exit::MAP_BAR);
@@ -734,6 +761,7 @@ impl Ehci {
         for r in hid_reports.iter_mut() {
             *r = arena.alloc(64, 64).ok_or(exit::DMA)?;
         }
+        let sector_buf = arena.alloc(512, 64).ok_or(exit::DMA)?;
         let mut storage_bufs = [(0, 0); 3];
         for b in storage_bufs.iter_mut() {
             *b = arena.alloc(64, 64).ok_or(exit::DMA)?;
@@ -814,7 +842,11 @@ impl Ehci {
             in_sense: false,
             deadline: None,
             served: None,
-            started: now,
+            expected_disk: None,
+            sector_buf,
+            held_info: [Handle(0); abi::IPC_QUEUE_CAPACITY],
+            held_len: 0,
+            started,
             events: Pending {
                 buf: [(Event::default(), 0); RING],
                 head: 0,
@@ -852,9 +884,34 @@ impl Ehci {
         self.boot_done || self.now() >= self.started + INFO_WAIT_MS
     }
 
-    fn pause(&self, ms: u64) {
+    /// Holds an Info request until `info_ready` (answered at once if the
+    /// holding room is full).
+    fn hold_info(&mut self, reply_to: Handle) {
+        if self.info_ready() || self.held_len == self.held_info.len() {
+            answer_info(self, reply_to);
+        } else {
+            self.held_info[self.held_len] = reply_to;
+            self.held_len += 1;
+        }
+    }
+
+    /// Answers the held Info requests once they are due. Called between
+    /// steps and from inside every wait, so the answer never waits for a
+    /// step to end.
+    fn release_info(&mut self) {
+        if self.held_len == 0 || !self.info_ready() {
+            return;
+        }
+        for i in 0..self.held_len {
+            answer_info(self, self.held_info[i]);
+        }
+        self.held_len = 0;
+    }
+
+    fn pause(&mut self, ms: u64) {
         let end = self.now() + ms;
         while self.now() < end {
+            self.release_info();
             sys::thread_sleep(1);
         }
     }
@@ -1225,6 +1282,7 @@ impl Ehci {
                 self.async_link(p);
                 return Err(Fail::Timeout);
             }
+            self.release_info();
             if now - start < SPIN_MS {
                 sys::thread_yield();
             } else {
@@ -1760,8 +1818,10 @@ impl Ehci {
             DeviceDescriptor::LEN,
             "GET_DESCRIPTOR(device) failed",
         )?;
-        let desc = DeviceDescriptor::parse(&self.ctrl_data(DeviceDescriptor::LEN as usize))
-            .ok_or("invalid device descriptor")?;
+        let raw_desc = self.ctrl_data(DeviceDescriptor::LEN as usize);
+        let desc = DeviceDescriptor::parse(&raw_desc).ok_or("invalid device descriptor")?;
+        // iSerialNumber (USB 2.0 9.6.1), for the storage identity.
+        let serial_index = raw_desc[16];
         self.control_read(
             ep0,
             SetupPacket::get_descriptor(request::DESC_CONFIGURATION, 0, 9),
@@ -1830,7 +1890,7 @@ impl Ehci {
                 );
                 return Ok(());
             }
-            return self.configure_storage(index, value, iface);
+            return self.configure_storage(index, value, iface, serial_index);
         }
         self.print_parent(dev.parent);
         sys::print(b": no boot HID, hub or bulk-only storage interface; left unconfigured\n");
@@ -1980,8 +2040,26 @@ impl Ehci {
         index: usize,
         value: u8,
         iface: StorageInterface,
+        serial_index: u8,
     ) -> Result<(), &'static str> {
         let dev = self.devices[index].ok_or("device")?;
+        // The serial number string (USB 2.0 9.6.7, US English LANGID
+        // 0x0409) is part of the identity; a device without one, or that
+        // refuses it (a STALL, tolerated), is identified without it.
+        let mut serial = [0u8; SERIAL_LEN];
+        if serial_index != 0 {
+            let request = SetupPacket {
+                request_type: 0x80,
+                request: request::GET_DESCRIPTOR,
+                value: (request::DESC_STRING as u16) << 8 | serial_index as u16,
+                index: 0x0409,
+                length: SERIAL_LEN as u16,
+            };
+            if let Ok(n) = self.control(dev.ep0, request, Some(SERIAL_LEN as u16), true) {
+                let data = self.ctrl_data(n as usize);
+                serial[..n as usize].copy_from_slice(&data[..n as usize]);
+            }
+        }
         self.control(dev.ep0, SetupPacket::set_configuration(value), None, false)
             .map_err(|_| "SET_CONFIGURATION failed")?;
         let bulk = |endpoint: u8, max_packet: u16| QueueHead {
@@ -2030,10 +2108,14 @@ impl Ehci {
         });
         // The device was detached by the caller on failure, which frees
         // the bulk queue heads with the storage.
-        self.storage_init(dev.parent)
+        self.storage_init(dev.parent, serial)
     }
 
-    fn storage_init(&mut self, parent: Parent) -> Result<(), &'static str> {
+    fn storage_init(
+        &mut self,
+        parent: Parent,
+        serial: [u8; SERIAL_LEN],
+    ) -> Result<(), &'static str> {
         let (small_phys, small_virt) = self.storage.as_ref().ok_or("storage")?.small;
         // SAFETY: own 64-byte buffer in the driver's DMA memory.
         let small = || unsafe { core::slice::from_raw_parts(small_virt as *const u8, 64) };
@@ -2094,26 +2176,57 @@ impl Ehci {
             return Err("blocks other than 512 bytes: not supported");
         }
         let capacity = last_lba as u64 + 1;
+        // The GPT header (LBA 1) carries the disk GUID: the identity that
+        // survives a driver restart (init passes it back).
+        let (sector_phys, sector_virt) = self.sector_buf;
+        let shortfall = self
+            .scsi(
+                scsi::read10(1, 1),
+                Some((sector_phys, 512, true)),
+                MEDIUM_WINDOW_MS,
+                None,
+            )
+            .map_err(|e| self.scsi_failed(e, "READ(10) of the GPT header failed"))?;
+        // SAFETY: the driver's 512-byte sector buffer.
+        let sector = unsafe { core::slice::from_raw_parts(sector_virt as *const u8, 512) };
+        let disk_guid = if shortfall == 0 {
+            aricode_gpt::Header::parse(sector).ok().map(|h| h.disk_guid)
+        } else {
+            None
+        };
         let identity = Served {
             capacity,
             vendor: inq.vendor,
             product: inq.product,
+            disk_guid,
+            serial,
+        };
+        let expected_ok = match self.expected_disk {
+            None => true,
+            Some(d) => disk_guid.is_some_and(|g| driver_arg::digest(&g) == d),
         };
         match self.served {
-            None => self.served = Some(identity),
+            None if expected_ok => self.served = Some(identity),
             Some(served) if served == identity => {
                 self.print_parent(parent);
                 sys::print(b": the served storage device is back\n");
             }
-            Some(served) => {
+            other => {
                 // Another stick must never silently become the disk the
-                // clients were using: it is left unconfigured and the block
-                // service keeps answering Io until the served one returns.
+                // clients were using (nor, after a restart, the one init
+                // chose): it is left unconfigured and the block service
+                // keeps answering Io until the served one returns.
                 self.print_parent(parent);
                 sys::print(b": a different storage device (");
                 num(capacity);
-                sys::print(b" sectors, was ");
-                num(served.capacity);
+                sys::print(b" sectors");
+                match other {
+                    Some(served) => {
+                        sys::print(b", was ");
+                        num(served.capacity);
+                    }
+                    None => sys::print(b", not the system disk served before the restart"),
+                }
                 sys::print(b"): not served\n");
                 record("ehci other storage", capacity);
                 if let Some(st) = self.storage.take() {
@@ -2140,7 +2253,9 @@ impl Ehci {
     /// A SCSI command of the enumeration failed: with `strict` a transport
     /// or CSW failure halts the driver; the message is passed through.
     fn scsi_failed(&self, e: ScsiFail, why: &'static str) -> &'static str {
-        if matches!(e, ScsiFail::Transport(..) | ScsiFail::Csw) {
+        // Running out of the step's time is not a device failure.
+        let refused = matches!(e, ScsiFail::Transport(Fail::Refused, _));
+        if matches!(e, ScsiFail::Transport(..) | ScsiFail::Csw) && !refused {
             self.strict_halt(why.as_bytes());
         }
         why
@@ -2259,6 +2374,7 @@ impl Ehci {
         }
         let now = self.now();
         if now >= self.next_hub_poll {
+            self.release_info();
             self.with_deadline(HUB_POLL_STEP_MS, Self::poll_hubs);
             self.next_hub_poll = self.now() + HUB_POLL_MS;
         }
@@ -2268,6 +2384,7 @@ impl Ehci {
             .position(|e| e.is_some_and(|(_, at)| at <= now));
         if let Some(k) = due {
             if let Some((parent, _)) = self.pending[k].take() {
+                self.release_info();
                 self.with_deadline(ATTACH_STEP_MS, |c| c.attach(parent));
             }
         }
@@ -2310,6 +2427,8 @@ impl Ehci {
                     .and_then(|st| self.hub_clear_changes(h, port, &st).map(|_| st));
                 let st = match result {
                     Ok(st) => st,
+                    // The poll's time ran out: the next poll goes on.
+                    Err(_) if self.deadline.is_some_and(|d| self.now() >= d) => return,
                     Err(why) => {
                         self.print_parent(Parent::Hub(h, port));
                         sys::print(b": ");
@@ -3098,7 +3217,7 @@ fn serve_block(ctl: &mut Ehci, msg: &[u8], handles: &[Handle]) {
         // The served storage is absent (unplugged, or replaced by another
         // device that is not served): its clients get Io, never another
         // disk's data (audit ehci-1, H1).
-        Some(_) if capacity == 0 && ctl.served.is_some() => io,
+        Some(_) if capacity == 0 && (ctl.served.is_some() || ctl.expected_disk.is_some()) => io,
         Some(_) if capacity == 0 => invalid,
         Some(BlockRequest {
             op: BlockOp::Info, ..
@@ -3197,6 +3316,7 @@ fn device_name(ctl: &Ehci) -> &'static str {
 
 fn main(mask: u64) -> u64 {
     let clock = Clock(extra_handle(mask, 0));
+    let started = clock.now();
     let mut args = [0u8; 256];
     let (strict, fault_inject) = match sys::cmdline(clock.0, &mut args) {
         Some(text) => {
@@ -3208,7 +3328,7 @@ fn main(mask: u64) -> u64 {
         }
         None => (false, FaultInject::None),
     };
-    let mut ctl = match Ehci::open(mask, clock, strict) {
+    let mut ctl = match Ehci::open(mask, clock, strict, started) {
         Ok(c) => c,
         Err(exit::NOT_EHCI) => {
             say(b"the controller is not EHCI 1.0; skipping");
@@ -3227,6 +3347,10 @@ fn main(mask: u64) -> u64 {
         }
     };
     ctl.fault_inject = fault_inject;
+    ctl.expected_disk = driver_arg::expected_digest(mask);
+    if ctl.expected_disk.is_some() {
+        say(b"restarted: only the system disk served before is served again");
+    }
     if strict {
         say(b"strict mode: the first transfer failure halts the driver");
     }
@@ -3249,10 +3373,6 @@ fn main(mask: u64) -> u64 {
     // so its type is checked.
     let block_ep = extra_handle(mask, 1);
     let has_block = sys::object_kind(block_ep) == Ok(abi::kind::ENDPOINT);
-    // Info requests held until the boot enumeration is over (or
-    // `INFO_WAIT_MS` passed), so the device name is the final one.
-    let mut held = [Handle(0); abi::IPC_QUEUE_CAPACITY];
-    let mut held_len = 0;
     let mut waiting: Option<(Handle, u64)> = None;
     let mut msg = [0u8; 32];
     let mut handles = [Handle(0); abi::IPC_MAX_HANDLES];
@@ -3268,6 +3388,9 @@ fn main(mask: u64) -> u64 {
             &with_block[..1]
         };
         let mut timeout = POLL_MS;
+        // At most eight messages per iteration, and at most one block
+        // request: housekeeping runs between block requests (budget chain
+        // at `REQUEST_BUDGET_MS`).
         for _ in 0..8 {
             let (which, n, nh) =
                 match sys::ipc_receive_any(endpoints, &mut msg, &mut handles, timeout) {
@@ -3290,18 +3413,13 @@ fn main(mask: u64) -> u64 {
             }
             if which == 1 {
                 serve_block(&mut ctl, &msg[..n], &handles[..nh]);
-                continue;
+                break;
             }
             let reply_to = handles[0];
             match Request::decode(&msg[..n]) {
-                Some(Request { op: Op::Info, .. }) => {
-                    if ctl.info_ready() || held_len == held.len() {
-                        answer_info(&ctl, reply_to);
-                    } else {
-                        held[held_len] = reply_to;
-                        held_len += 1;
-                    }
-                }
+                // Held until the boot enumeration is over (or `INFO_WAIT_MS`
+                // passed), so the device name is the final one.
+                Some(Request { op: Op::Info, .. }) => ctl.hold_info(reply_to),
                 Some(Request {
                     op: Op::Read,
                     timeout_ms,
@@ -3318,7 +3436,13 @@ fn main(mask: u64) -> u64 {
                 None => answer(reply_to, Reply::status(Status::Invalid)),
             }
         }
-        ctl.poll_hids();
+        // One deadline for the whole housekeeping of this iteration; the
+        // hub poll and an enumeration inside it nest by their minimum.
+        ctl.with_deadline(HOUSEKEEPING_MS, |c| {
+            c.poll_hids();
+            c.service_ports();
+        });
+        ctl.release_info();
         if let Some((reply_to, deadline)) = waiting {
             if ctl.events.len > 0 {
                 let n = ctl.events.take(&mut events, &mut times);
@@ -3328,13 +3452,6 @@ fn main(mask: u64) -> u64 {
                 answer(reply_to, Reply::status(Status::Timeout));
                 waiting = None;
             }
-        }
-        ctl.service_ports();
-        if held_len > 0 && ctl.info_ready() {
-            for h in &held[..held_len] {
-                answer_info(&ctl, *h);
-            }
-            held_len = 0;
         }
     }
 }
