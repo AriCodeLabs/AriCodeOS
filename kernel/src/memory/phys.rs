@@ -1,15 +1,17 @@
-//! Acceso a memoria física a través del mapa lineal (`PHYS_MAP_BASE`).
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Physical memory access through the linear map (`PHYS_MAP_BASE`).
 //!
-//! AriBoot lo construye antes de saltar y el VMM del kernel lo reproduce en
-//! sus propias tablas, así que estas traducciones son válidas siempre.
+//! AriBoot builds it before jumping and the kernel VMM reproduces it in its
+//! own tables, so these translations are always valid.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
 static OFFSET: AtomicU64 = AtomicU64::new(0);
 static LIMIT: AtomicU64 = AtomicU64::new(0);
 
-/// Fija el desplazamiento y el límite del mapa lineal. Una sola vez.
-/// `extra_end` permite incluir regiones mapeadas fuera de la RAM (framebuffer).
+/// Sets the offset and limit of the linear map. Once only.
+/// `extra_end` allows including regions mapped outside RAM (framebuffer).
 pub fn init(offset: u64, limit: u64, extra_end: u64) {
     OFFSET.store(offset, Ordering::Relaxed);
     LIMIT.store(limit.max(extra_end), Ordering::Relaxed);
@@ -19,19 +21,19 @@ pub fn offset() -> u64 {
     OFFSET.load(Ordering::Relaxed)
 }
 
-/// Fin exclusivo de la memoria física cubierta por el mapa lineal.
+/// Exclusive end of the physical memory covered by the linear map.
 pub fn limit() -> u64 {
     LIMIT.load(Ordering::Relaxed)
 }
 
-/// Dirección virtual de la física `phys`.
+/// Virtual address of physical address `phys`.
 ///
 /// # Panics
-/// Si `phys` queda fuera del mapa lineal.
+/// If `phys` lies outside the linear map.
 pub fn phys_to_virt(phys: u64) -> u64 {
     assert!(
         phys < limit(),
-        "fisica {phys:#x} fuera del mapa lineal ({:#x})",
+        "physical {phys:#x} outside the linear map ({:#x})",
         limit()
     );
     phys + offset()

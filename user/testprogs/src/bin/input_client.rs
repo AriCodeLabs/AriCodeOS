@@ -1,7 +1,9 @@
-//! Cliente de entrada (Fase 25): identifica los dispositivos virtio-input,
-//! anuncia INPUT_READY y traduce lo que el host inyecta por QMP: una linea de
-//! teclado y movimiento y clic del raton. Handles: 0x10004.. = endpoints de
-//! los servicios de entrada (`arg` = cuantos).
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Input client (Phase 25): identifies the virtio-input devices, announces
+//! INPUT_READY and decodes what the host injects over QMP: a keyboard line
+//! plus mouse motion and a click. Handles: 0x10004.. = input service
+//! endpoints (`arg` = how many).
 #![no_std]
 #![no_main]
 
@@ -21,7 +23,7 @@ fn num_i32(v: i32) {
 fn main(count: u64) -> u64 {
     let count = (count as usize).min(4);
     if count == 0 {
-        sys::print(b"input_client: sin dispositivos de entrada\n");
+        sys::print(b"input_client: no input devices\n");
         return 0;
     }
     let mut clients: [Option<InputClient>; 4] = [None, None, None, None];
@@ -34,7 +36,7 @@ fn main(count: u64) -> u64 {
         let Ok(n) = c.name(&mut name) else {
             return 2;
         };
-        sys::print(b"input_client: dispositivo ");
+        sys::print(b"input_client: device ");
         let mut b = [0u8; 20];
         sys::print(aricode_rt::fmt_u64(i as u64, &mut b));
         sys::print(b": ");
@@ -73,13 +75,13 @@ fn main(count: u64) -> u64 {
                     code: e.code,
                     value: e.value,
                 };
-                // Por tipo de evento, no por dispositivo: un servicio puede
-                // reunir teclado y raton (USB HID) en un solo dispositivo.
+                // By event type, not by device: one service may combine
+                // keyboard and mouse (USB HID) in a single device.
                 let is_button = ev.kind == EV_KEY && ev.code >= 0x100;
                 if ev.kind == EV_KEY && !is_button && (Some(i) == keyboard || keyboard.is_none()) {
                     for &ch in kbd.feed(ev).as_slice() {
                         if ch == b'\n' {
-                            sys::print(b"input_client: teclado: ");
+                            sys::print(b"input_client: keyboard: ");
                             sys::print(&line[..line_len]);
                             sys::print(b"\n");
                             got_line = true;
@@ -96,9 +98,9 @@ fn main(count: u64) -> u64 {
                     }
                     moved = true;
                 } else if ev.kind == EV_KEY && ev.code == BTN_LEFT && ev.value == 1 {
-                    sys::print(b"input_client: raton: ");
+                    sys::print(b"input_client: mouse: ");
                     sys::print(describe(&ev).as_bytes());
-                    sys::print(b" pulsado\n");
+                    sys::print(b" pressed\n");
                     clicked = true;
                 }
             }
@@ -110,16 +112,16 @@ fn main(count: u64) -> u64 {
         }
     }
     if moved {
-        sys::print(b"input_client: raton: dx=");
+        sys::print(b"input_client: mouse: dx=");
         num_i32(dx);
         sys::print(b" dy=");
         num_i32(dy);
         sys::print(b"\n");
     }
     if !(got_line && moved && clicked) {
-        sys::print(b"input_client: sin mas eventos (nadie tecleo)\n");
+        sys::print(b"input_client: no more events (nobody typed)\n");
     }
-    sys::print(b"input_client: eventos de entrada por IPC ok\n");
+    sys::print(b"input_client: input events over IPC ok\n");
     0
 }
 

@@ -1,103 +1,100 @@
-# Perfil `aricode-wasm` v1
+# `aricode-wasm` profile v1
 
-Lo que un módulo WebAssembly puede contener y usar en AriCodeOS. Es un
-perfil propio y explícito (ADR 0019); **no es WASI** ni el Component Model:
-un módulo escrito para este perfil no asume nada de POSIX, y un módulo WASI
-no funciona aquí. Todo lo que no aparece en esta página no existe para el
-módulo.
+What a WebAssembly module may contain and use in AriCodeOS. It is a custom,
+explicit profile (ADR 0019); **it is not WASI** nor the Component Model:
+a module written for this profile assumes nothing from POSIX, and a WASI
+module does not work here. Anything not listed on this page does not exist
+for the module.
 
-## Formato binario
+## Binary format
 
-- Versión 1 del formato binario (`\0asm` + 1). Secciones: type, import,
-  function, table, memory, global, export, start, element, code, data y
-  custom (ignoradas).
-- Tipos de valor: `i32` e `i64`. `f32` y `f64` se rechazan (constantes,
-  operaciones, cargas, globales y conversiones): `Unsupported("coma
-  flotante")`.
-- Extensiones aceptadas sobre el MVP: `sign-ext` (`i32.extend8_s`,
+- Version 1 of the binary format (`\0asm` + 1). Sections: type, import,
+  function, table, memory, global, export, start, element, code, data and
+  custom (ignored).
+- Value types: `i32` and `i64`. `f32` and `f64` are rejected (constants,
+  operations, loads, globals and conversions): `Unsupported("floating
+  point")`.
+- Extensions accepted on top of the MVP: `sign-ext` (`i32.extend8_s`,
   `i32.extend16_s`, `i64.extend8_s`, `i64.extend16_s`, `i64.extend32_s`),
-  `bulk-memory` solo `memory.copy` y `memory.fill`, `select` con tipo
-  (`select t`), tipos de bloque por índice de tipo (parámetros y varios
-  resultados en bloques).
-- No hay SIMD, hilos, referencias (`ref.*`, tablas de `externref`),
-  excepciones, memorias múltiples, `memory.init`/`data.drop` ni
+  `bulk-memory` with only `memory.copy` and `memory.fill`, typed `select`
+  (`select t`), block types by type index (parameters and multiple
+  results in blocks).
+- No SIMD, threads, references (`ref.*`, `externref` tables),
+  exceptions, multiple memories, `memory.init`/`data.drop` or
   `table.*`.
-- Una tabla `funcref` como máximo (hasta 4096 entradas), segmentos de
-  elementos activos con desplazamiento `i32.const`.
-- Una memoria como máximo; sus páginas iniciales deben caber en la que da
-  el anfitrión (4 páginas, 256 KiB). `memory.grow` crece dentro de ese
-  buffer y devuelve -1 si no cabe.
-- Importaciones: solo funciones, y solo del módulo `aricode`.
-- Límites: 4096 locales por función, 1024 bloques anidados, módulo de
-  hasta 64 KiB (lo carga el runner), 64 llamadas anidadas, 16 Ki valores en
-  la pila y 50 M pasos por llamada exportada.
+- At most one `funcref` table (up to 4096 entries), active element
+  segments with an `i32.const` offset.
+- At most one memory; its initial pages must fit in the one the host
+  provides (4 pages, 256 KiB). `memory.grow` grows within that buffer and
+  returns -1 if it does not fit.
+- Imports: functions only, and only from the `aricode` module.
+- Limits: 4096 locals per function, 1024 nested blocks, modules of up to
+  64 KiB (loaded by the runner), 64 nested calls, 16 Ki values on the stack
+  and 50 M steps per exported call.
 
-## Validación
+## Validation
 
-`Module::parse` valida el módulo entero antes de devolverlo: índices de
-tipos, funciones, tabla, globales, exportaciones y `start`, y cada cuerpo
-con el algoritmo de tipado de la especificación (pila de operandos tipada,
-marcos de control, código inalcanzable polimórfico). Un módulo que no
-valida no se instancia: `Error::Invalid(motivo)`.
+`Module::parse` validates the whole module before returning it: indices of
+types, functions, table, globals, exports and `start`, and every body with
+the specification's typing algorithm (typed operand stack, control frames,
+polymorphic unreachable code). A module that does not validate is not
+instantiated: `Error::Invalid(reason)`.
 
-Para comprobar un módulo con herramientas externas antes de llevarlo al
-sistema:
+To check a module with external tools before bringing it into the system:
 
 ```bash
 wasm-tools validate --features=mvp,sign-ext,bulk-memory demo.wasm
 ```
 
-(`wasm-tools` no forma parte de las herramientas del repositorio; la
-comprobación de referencia es la del propio validador, `cargo test -p
-aricode-wasm`.)
+(`wasm-tools` is not part of the repository's tooling; the reference check
+is the validator itself, `cargo test -p aricode-wasm`.)
 
-## Cómo se produce un módulo
+## How a module is produced
 
-`rustc` para `wasm32-unknown-unknown` con `-C target-cpu=mvp -C
-target-feature=+sign-ext,+bulk-memory` y sin coma flotante en el código
-(`.cargo/config.toml`, `apps/wasm-demo`). Exportar `main(i64) -> i32`; el
-resultado es el código de salida del runner.
+`rustc` for `wasm32-unknown-unknown` with `-C target-cpu=mvp -C
+target-feature=+sign-ext,+bulk-memory` and no floating point in the code
+(`.cargo/config.toml`, `apps/wasm-demo`). Export `main(i64) -> i32`; the
+result is the runner's exit code.
 
-## Manifiesto del módulo
+## Module manifest
 
-Junto al módulo va `NOMBRE.manifest` (texto, `#` comenta):
+Next to the module goes `NAME.manifest` (text, `#` starts a comment):
 
 ```text
 caps = print, clock, files
 ```
 
-| Capacidad | Funciones que habilita |
+| Capability | Functions it enables |
 |---|---|
 | `print` | `print` |
 | `clock` | `uptime_ms` |
 | `files` | `file_read`, `file_write` |
 
-Una importación cuya capacidad no está concedida hace que el runner no
-ejecute el módulo (`importacion aricode.X no concedida por el manifiesto
-del modulo`, código 12). Sin manifiesto no se ejecuta (código 11).
+An import whose capability is not granted makes the runner refuse to run
+the module (`import aricode.X not granted by the module manifest`,
+code 12). Without a manifest it does not run (code 11).
 
 ## Capability API (`aricode`)
 
-| Función | Firma | Semántica |
+| Function | Signature | Semantics |
 |---|---|---|
-| `print` | `(ptr: i32, len: i32)` | Escribe `len` bytes de la memoria del módulo en la consola. Rango fuera de memoria: trap. |
-| `uptime_ms` | `() -> i64` | Milisegundos desde el arranque (0 si el runner no tiene `SYSTEM`). |
-| `file_write` | `(name: i32, name_len: i32, data: i32, len: i32) -> i32` | Crea o reemplaza entero (atómico y duradero, ADR 0014) un fichero del directorio privado del runner. Devuelve los bytes escritos o -1. Nombre de 1 a 32 bytes UTF-8 sin `/`; si no, trap. |
-| `file_read` | `(name: i32, name_len: i32, buf: i32, len: i32) -> i32` | Lee el fichero en `buf` (hasta `len`). Devuelve los bytes leídos o -1 si no existe. |
+| `print` | `(ptr: i32, len: i32)` | Writes `len` bytes of the module's memory to the console. Range outside memory: trap. |
+| `uptime_ms` | `() -> i64` | Milliseconds since boot (0 if the runner lacks `SYSTEM`). |
+| `file_write` | `(name: i32, name_len: i32, data: i32, len: i32) -> i32` | Creates or wholly replaces (atomic and durable, ADR 0014) a file in the runner's private directory. Returns the bytes written or -1. Name of 1 to 32 UTF-8 bytes without `/`; otherwise, trap. |
+| `file_read` | `(name: i32, name_len: i32, buf: i32, len: i32) -> i32` | Reads the file into `buf` (up to `len`). Returns the bytes read or -1 if it does not exist. |
 
-Las funciones que hablan con un servicio (`file_*`) heredan los plazos del
-SDK (ADR 0012): un servicio muerto produce -1, nunca una espera infinita.
-El contador de pasos del intérprete no cuenta el tiempo dentro de una
-importación.
+Functions that talk to a service (`file_*`) inherit the SDK timeouts
+(ADR 0012): a dead service yields -1, never an infinite wait. The
+interpreter's step counter does not count time spent inside an import.
 
-## Errores del runner
+## Runner errors
 
-| Código | Motivo |
+| Code | Reason |
 |---|---|
-| 3 | no hay `demo.wasm` |
-| 5 | módulo de más de 64 KiB |
-| 6 | módulo malformado, no soportado o inválido (se imprime el motivo) |
-| 7 | importación desconocida |
-| 11 | manifiesto ausente o inválido |
-| 12 | importación no concedida por el manifiesto |
-| 13 | trap, pasos agotados o pila agotada en ejecución |
+| 3 | no `demo.wasm` |
+| 5 | module larger than 64 KiB |
+| 6 | malformed, unsupported or invalid module (the reason is printed) |
+| 7 | unknown import |
+| 11 | missing or invalid manifest |
+| 12 | import not granted by the manifest |
+| 13 | trap, steps exhausted or stack exhausted during execution |

@@ -1,6 +1,6 @@
-# log=warn silencia INFO y DEBUG; los marcadores sin formato siguen saliendo.
+# log=warn silences INFO and DEBUG; unformatted markers are still printed.
 name = "console.log_level_warn"
-description = "log=warn oculta INFO y DEBUG"
+description = "log=warn hides INFO and DEBUG"
 level = "full"
 areas = ["console"]
 cmdline = "qemu_exit log=warn"

@@ -1,11 +1,13 @@
-//! Cambio de contexto x86-64 (System V): se guardan los registros que el
-//! llamador no espera ver modificados (rbx, rbp, r12..r15) y el puntero de
-//! pila; todo lo demás lo salva el compilador alrededor de la llamada.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! x86-64 context switch (System V): saves the registers the caller does
+//! not expect to change (rbx, rbp, r12..r15) and the stack pointer; the
+//! compiler saves everything else around the call.
 //!
-//! Un hilo nuevo arranca con una pila preparada por `initial_stack_frame`
-//! de modo que el primer `switch_context` hacia él "retorna" a
-//! `thread_start`, que suelta el lock del planificador, habilita
-//! interrupciones y llama a la entrada.
+//! A new thread starts with a stack prepared by `initial_stack_frame` so
+//! that the first `switch_context` into it "returns" to `thread_start`,
+//! which releases the scheduler lock, enables interrupts and calls the
+//! entry point.
 
 use core::arch::global_asm;
 
@@ -32,9 +34,9 @@ switch_context:
     ret
 
 .global thread_start
-// Primer "retorno" de un hilo nuevo: r12 = entrada, r13 = argumento. Antes
-// de habilitar interrupciones suelta el lock del planificador que dejo
-// tomado la CPU que conmuto hacia el.
+// First "return" of a new thread: r12 = entry, r13 = argument. Before
+// enabling interrupts it releases the scheduler lock left held by the CPU
+// that switched to it.
 thread_start:
     call thread_first_run
     mov rdi, r13
@@ -46,32 +48,32 @@ thread_start:
 );
 
 extern "C" {
-    /// Guarda el contexto actual en `*old_rsp` y salta al de `new_rsp`.
+    /// Saves the current context in `*old_rsp` and jumps to the one at `new_rsp`.
     pub fn switch_context(old_rsp: *mut u64, new_rsp: u64);
     fn thread_start();
 }
 
-/// Firma de la entrada de un hilo.
+/// Signature of a thread entry point.
 pub type ThreadEntry = extern "C" fn(arg: usize);
 
-/// Escribe en la cima de una pila nueva el marco que `switch_context`
-/// consumirá al entrar por primera vez. Devuelve el `rsp` a guardar.
+/// Writes at the top of a new stack the frame `switch_context` will consume
+/// on the first entry. Returns the `rsp` to save.
 ///
 /// # Safety
 ///
-/// `stack_top` debe ser el fin (exclusivo) de una pila mapeada y escribible
-/// con sitio para 8 palabras.
+/// `stack_top` must be the (exclusive) end of a mapped, writable stack with
+/// room for 8 words.
 pub unsafe fn initial_stack_frame(stack_top: u64, entry: ThreadEntry, arg: usize) -> u64 {
-    // Alineación: tras el `ret` a thread_start, rsp debe ser múltiplo de 16
-    // antes del `call r12` para que la entrada vea rsp ≡ 8 (mod 16), como
-    // exige el ABI. Se apilan 7 palabras: `ret` consume una y `switch_context`
-    // seis, así que la cima debe ser múltiplo de 16.
+    // Alignment: after the `ret` to thread_start, rsp must be a multiple of 16
+    // before `call r12` so the entry sees rsp = 8 (mod 16), as the ABI
+    // requires. 7 words are pushed: `ret` consumes one and `switch_context`
+    // six, so the top must be a multiple of 16.
     let mut sp = stack_top & !0xF;
     let mut push = |v: u64| {
         sp -= 8;
         (sp as *mut u64).write(v);
     };
-    push(thread_start as *const () as usize as u64); // dirección de retorno del `ret`
+    push(thread_start as *const () as usize as u64); // return address for `ret`
     push(0); // rbp
     push(0); // rbx
     push(entry as usize as u64); // r12

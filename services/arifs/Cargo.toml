@@ -3,7 +3,7 @@ name = "ari-fsd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Servicio de ficheros AriFS de AriCodeOS en espacio de usuario"
+description = "AriCodeOS user-space AriFS file service"
 publish = false
 
 [[bin]]

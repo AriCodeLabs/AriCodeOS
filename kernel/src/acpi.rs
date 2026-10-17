@@ -1,10 +1,12 @@
-//! Localización y parseo de las tablas ACPI estáticas a través del mapa
-//! físico (`libs/acpi`). Sin AML (sección 31).
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Locating and parsing the static ACPI tables through the physical map
+//! (`libs/acpi`). No AML (section 31).
 
 use crate::memory::phys;
 use crate::sync::IrqLock;
 use alloc::vec::Vec;
-use aricode_acpi::{root_entries, Dmar, Madt, McfgEntry, Rsdp, SdtHeader};
+use aricode_acpi::{root_entries, Dmar, Fadt, Madt, McfgEntry, Rsdp, SdtHeader};
 use boot_protocol::BootInfo;
 use log::{info, warn};
 
@@ -12,23 +14,27 @@ use log::{info, warn};
 pub struct AcpiInfo {
     pub madt: Madt,
     pub mcfg: Vec<McfgEntry>,
-    /// Unidades de remapeo DMA (VT-d), si la plataforma las declara.
+    /// DMA remapping units (VT-d), if the platform declares them.
     pub dmar: Option<Dmar>,
+    /// FADT fields for powering off, and the `\_S5_` sleep types found in
+    /// the DSDT (`None`: no ACPI power-off on this machine).
+    pub fadt: Option<Fadt>,
+    pub s5: Option<(u8, u8)>,
 }
 
 static ACPI: IrqLock<Option<AcpiInfo>> = IrqLock::new(None);
 
-/// Slice de `len` bytes en la física `phys`, si cae dentro del mapa lineal.
+/// Slice of `len` bytes at physical `phys`, if it lies within the linear map.
 fn phys_slice(addr: u64, len: usize) -> Option<&'static [u8]> {
     if addr == 0 || addr.checked_add(len as u64)? > phys::limit() {
         return None;
     }
-    // SAFETY: rango dentro del mapa físico lineal; las tablas ACPI son de
-    // solo lectura y viven en memoria que el kernel nunca libera.
+    // SAFETY: range within the linear physical map; the ACPI tables are
+    // read-only and live in memory the kernel never frees.
     Some(unsafe { core::slice::from_raw_parts(phys::phys_to_virt(addr) as *const u8, len) })
 }
 
-/// Tabla completa (cabecera + cuerpo) en `addr`.
+/// Whole table (header + body) at `addr`.
 fn table_at(addr: u64) -> Option<(&'static [u8], SdtHeader)> {
     let head = SdtHeader::parse(phys_slice(addr, SdtHeader::LEN)?).ok()?;
     let full = phys_slice(addr, head.length as usize)?;
@@ -37,26 +43,26 @@ fn table_at(addr: u64) -> Option<(&'static [u8], SdtHeader)> {
 
 pub fn init(info: &BootInfo) {
     let Some(rsdp_bytes) = phys_slice(info.rsdp_address, Rsdp::MAX_LEN) else {
-        warn!("acpi: sin RSDP");
+        warn!("acpi: no RSDP");
         return;
     };
     let rsdp = match Rsdp::parse(rsdp_bytes) {
         Ok(r) => r,
         Err(e) => {
-            warn!("acpi: RSDP invalido ({e:?})");
+            warn!("acpi: invalid RSDP ({e:?})");
             return;
         }
     };
     let (root, is_xsdt) = rsdp.root();
     let Some((root_table, _)) = table_at(root) else {
-        warn!("acpi: tabla raiz inaccesible en {root:#x}");
+        warn!("acpi: root table unreachable at {root:#x}");
         return;
     };
     let entries = match root_entries(root_table, is_xsdt) {
         Ok(e) => e,
         Err(e) => {
             warn!(
-                "acpi: {} invalida ({e:?})",
+                "acpi: invalid {} ({e:?})",
                 if is_xsdt { "XSDT" } else { "RSDT" }
             );
             return;
@@ -72,21 +78,41 @@ pub fn init(info: &BootInfo) {
         match &head.signature {
             b"APIC" => match Madt::parse(table) {
                 Ok(m) => acpi.madt = m,
-                Err(e) => warn!("acpi: MADT invalida ({e:?})"),
+                Err(e) => warn!("acpi: invalid MADT ({e:?})"),
             },
             b"MCFG" => match aricode_acpi::parse_mcfg(table) {
                 Ok(m) => acpi.mcfg = m,
-                Err(e) => warn!("acpi: MCFG invalida ({e:?})"),
+                Err(e) => warn!("acpi: invalid MCFG ({e:?})"),
             },
             b"DMAR" => match Dmar::parse(table) {
                 Ok(d) => acpi.dmar = Some(d),
-                Err(e) => warn!("acpi: DMAR invalida ({e:?})"),
+                Err(e) => warn!("acpi: invalid DMAR ({e:?})"),
             },
+            b"FACP" => match aricode_acpi::parse_fadt(table) {
+                Ok(f) => acpi.fadt = Some(f),
+                Err(e) => warn!("acpi: invalid FADT ({e:?})"),
+            },
+            b"SSDT" if acpi.s5.is_none() => acpi.s5 = aricode_acpi::find_s5(table),
             _ => {}
         }
     }
+    // \_S5_ normally lives in the DSDT, which only the FADT points to.
+    if let Some(f) = acpi.fadt {
+        if let Some((dsdt, _)) = table_at(f.dsdt) {
+            if let Some(s5) = aricode_acpi::find_s5(dsdt) {
+                acpi.s5 = Some(s5);
+            }
+        }
+        match acpi.s5 {
+            Some((a, b)) => info!(
+                "acpi: power-off through S5 (SLP_TYP {a}/{b}, PM1a {:#x}, PM1b {:#x})",
+                f.pm1a_cnt, f.pm1b_cnt
+            ),
+            None => warn!("acpi: no \\_S5_ package; shutdown will only halt the CPU"),
+        }
+    }
     info!(
-        "acpi: RSDP rev {} -> {} con {} tablas [{}]",
+        "acpi: RSDP rev {} -> {} with {} tables [{}]",
         rsdp.revision,
         if is_xsdt { "XSDT" } else { "RSDT" },
         names.len(),
@@ -110,13 +136,13 @@ pub fn init(info: &BootInfo) {
     );
     for e in &acpi.mcfg {
         info!(
-            "acpi: MCFG ecam @ {:#x} segmento {} buses {}..={}",
+            "acpi: MCFG ecam @ {:#x} segment {} buses {}..={}",
             e.base, e.segment, e.bus_start, e.bus_end
         );
     }
     if let Some(d) = &acpi.dmar {
         info!(
-            "acpi: DMAR {} bits, {} unidad(es) {:?}, {} region(es) reservadas",
+            "acpi: DMAR {} bits, {} unit(s) {:?}, {} reserved region(s)",
             d.host_address_width,
             d.units.len(),
             d.units
@@ -129,7 +155,7 @@ pub fn init(info: &BootInfo) {
     *ACPI.lock() = Some(acpi);
 }
 
-/// Acceso a la información ACPI (vacía si no se pudo leer).
+/// Access to the ACPI information (empty if it could not be read).
 pub fn with<R>(f: impl FnOnce(&AcpiInfo) -> R) -> R {
     static EMPTY: AcpiInfo = AcpiInfo {
         madt: Madt {
@@ -140,6 +166,8 @@ pub fn with<R>(f: impl FnOnce(&AcpiInfo) -> R) -> R {
         },
         mcfg: Vec::new(),
         dmar: None,
+        fadt: None,
+        s5: None,
     };
     let guard = ACPI.lock();
     f(guard.as_ref().unwrap_or(&EMPTY))

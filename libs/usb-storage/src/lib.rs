@@ -1,6 +1,8 @@
-//! Almacenamiento masivo USB (ADR 0023): el transporte bulk-only (BOT) y
-//! el subconjunto de comandos SCSI que necesita un servicio de bloques.
-//! Solo codifica y decodifica; las transferencias las hace el driver xHCI.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! USB mass storage (ADR 0023): the bulk-only transport (BOT) and the
+//! subset of SCSI commands a block service needs.
+//! Only encodes and decodes; the xHCI driver performs the transfers.
 
 #![no_std]
 
@@ -8,9 +10,9 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cbw {
     pub tag: u32,
-    /// Bytes de la fase de datos (0 si no hay).
+    /// Bytes in the data phase (0 if there is none).
     pub data_len: u32,
-    /// Datos del dispositivo al anfitrión.
+    /// Data from the device to the host.
     pub data_in: bool,
     pub lun: u8,
     pub cdb: Cdb,
@@ -37,7 +39,7 @@ impl Cbw {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Csw {
     pub tag: u32,
-    /// Bytes de la fase de datos que no se transfirieron.
+    /// Bytes of the data phase that were not transferred.
     pub residue: u32,
     pub status: CswStatus,
 }
@@ -45,17 +47,154 @@ pub struct Csw {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CswStatus {
     Passed,
-    /// El comando falló: `REQUEST SENSE` dice por qué.
+    /// The command failed: `REQUEST SENSE` says why.
     Failed,
-    /// Error de fase: hay que resetear el transporte.
+    /// Phase error: the transport must be reset.
     PhaseError,
+}
+
+/// Fault event names of the storage driver (`sys::event_record`, ADR
+/// 0028): at most `NAME_LEN` bytes, so an LBA prefix leaves room for the
+/// ten digits of a READ(10)/WRITE(10) address.
+pub mod fault {
+    pub const NAME_LEN: usize = 24;
+    /// Prefixes followed by the LBA in decimal.
+    pub const READ: &str = "usb r lba ";
+    pub const WRITE: &str = "usb w lba ";
+    pub const INJECTED_READ: &str = "usb inj r lba ";
+    pub const INJECTED_WRITE: &str = "usb inj w lba ";
+    pub const LBA_PREFIXES: [&str; 4] = [READ, WRITE, INJECTED_READ, INJECTED_WRITE];
+
+    /// `prefix` followed by `lba`; `None` if it does not fit `out`.
+    pub fn lba_name<'a>(prefix: &str, lba: u64, out: &'a mut [u8; NAME_LEN]) -> Option<&'a str> {
+        if prefix.len() > out.len() {
+            return None;
+        }
+        out[..prefix.len()].copy_from_slice(prefix.as_bytes());
+        let len = put_decimal(out, prefix.len(), lba)?;
+        core::str::from_utf8(&out[..len]).ok()
+    }
+
+    /// The device's own reason for a failed command (`REQUEST SENSE`):
+    /// `usb sense K A Q` with the key in decimal and ASC / ASCQ as two hex
+    /// digits, the SCSI convention (`usb sense 3 11 00`: unrecovered error).
+    pub fn sense_name<'a>(
+        sense: &super::scsi::Sense,
+        out: &'a mut [u8; NAME_LEN],
+    ) -> Option<&'a str> {
+        const PREFIX: &str = "usb sense ";
+        out[..PREFIX.len()].copy_from_slice(PREFIX.as_bytes());
+        let mut len = put_decimal(out, PREFIX.len(), sense.key as u64)?;
+        for byte in [sense.asc, sense.ascq] {
+            if len + 3 > out.len() {
+                return None;
+            }
+            out[len] = b' ';
+            out[len + 1] = HEX[(byte >> 4) as usize];
+            out[len + 2] = HEX[(byte & 0xF) as usize];
+            len += 3;
+        }
+        core::str::from_utf8(&out[..len]).ok()
+    }
+
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    /// Writes `v` in decimal at `out[pos..]`; the new length, or `None` if
+    /// it does not fit.
+    fn put_decimal(out: &mut [u8], pos: usize, v: u64) -> Option<usize> {
+        let mut digits = [0u8; 20];
+        let mut i = digits.len();
+        let mut v = v;
+        loop {
+            i -= 1;
+            digits[i] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        let d = &digits[i..];
+        let len = pos + d.len();
+        if len > out.len() {
+            return None;
+        }
+        out[pos..len].copy_from_slice(d);
+        Some(len)
+    }
+}
+
+/// Stage of a Bulk-Only command (BOT 5.3): the three transfers of the
+/// transport state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    Cbw,
+    Data,
+    Csw,
+}
+
+impl Stage {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Cbw => "CBW",
+            Self::Data => "DATA",
+            Self::Csw => "CSW",
+        }
+    }
+}
+
+/// What the host does once a transfer at some stage failed and the xHCI
+/// endpoint that reported it is back in service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Next {
+    /// Read the CSW once (BOT 6.7.2 and 6.7.3): a device that completed
+    /// the command delivers it and the transport is Ready again.
+    ReadCsw,
+    /// Reset Recovery (BOT 5.3.4) before any new CBW: whether the device
+    /// holds a command is unknown.
+    ResetRecovery,
+}
+
+/// BOT 5.3 and 6.7: after the CBW was sent the transport returns to Ready
+/// only through a CSW or a Reset Recovery, so a data or CSW failure is
+/// followed by one CSW read; a CBW that failed may or may not have reached
+/// the device (BOT 6.6.1 for a STALL), so only a Reset Recovery leaves it
+/// in a known state.
+pub fn after_transfer_failure(stage: Stage) -> Next {
+    match stage {
+        Stage::Cbw => Next::ResetRecovery,
+        Stage::Data | Stage::Csw => Next::ReadCsw,
+    }
+}
+
+/// Why a received CSW does not close the command (BOT 6.3): all of them
+/// require a Reset Recovery before the next CBW.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CswError {
+    /// Signature, length or status byte not valid (BOT 6.3.1).
+    Invalid,
+    /// A valid CSW for another command (dCSWTag, BOT 6.3.1 and 6.4).
+    TagMismatch(Csw),
+    /// bCSWStatus 2 (BOT 6.3.1 and 6.7, phase error).
+    PhaseError(Csw),
+}
+
+/// Checks the CSW received for the command with `tag`.
+pub fn check_csw(raw: &[u8], tag: u32) -> Result<Csw, CswError> {
+    let csw = Csw::parse(raw).ok_or(CswError::Invalid)?;
+    if csw.tag != tag {
+        return Err(CswError::TagMismatch(csw));
+    }
+    if csw.status == CswStatus::PhaseError {
+        return Err(CswError::PhaseError(csw));
+    }
+    Ok(csw)
 }
 
 impl Csw {
     pub const LEN: usize = 13;
     const SIGNATURE: [u8; 4] = *b"USBS";
 
-    /// `None` si la firma, la longitud o el estado no son válidos.
+    /// `None` if the signature, length or status are not valid.
     pub fn parse(b: &[u8]) -> Option<Self> {
         if b.len() < Self::LEN || b[..4] != Self::SIGNATURE {
             return None;
@@ -74,7 +213,7 @@ impl Csw {
     }
 }
 
-/// Command Descriptor Block SCSI (hasta 16 bytes).
+/// SCSI Command Descriptor Block (up to 16 bytes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cdb {
     pub bytes: [u8; 16],
@@ -92,7 +231,7 @@ impl Cdb {
     }
 }
 
-/// Comandos SCSI de bloque (SBC-3 / SPC-4) que usa el servicio de bloques.
+/// SCSI block commands (SBC-3 / SPC-4) used by the block service.
 pub mod scsi {
     use super::Cdb;
 
@@ -122,15 +261,15 @@ pub mod scsi {
         let n = blocks.to_be_bytes();
         Cdb::new(&[0x2A, 0, l[0], l[1], l[2], l[3], 0, n[0], n[1], 0])
     }
-    /// `SYNCHRONIZE CACHE(10)` de todo el medio: hace duraderas las escrituras.
+    /// `SYNCHRONIZE CACHE(10)` of the whole medium: makes writes durable.
     pub fn synchronize_cache10() -> Cdb {
         Cdb::new(&[0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0])
     }
 
-    /// Respuesta a `INQUIRY` (36 bytes): tipo de periférico y nombres.
+    /// `INQUIRY` response (36 bytes): peripheral type and names.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Inquiry {
-        /// 0 = acceso directo (disco); 5 = CD/DVD.
+        /// 0 = direct access (disk); 5 = CD/DVD.
         pub peripheral_type: u8,
         pub removable: bool,
         pub vendor: [u8; 8],
@@ -151,8 +290,8 @@ pub mod scsi {
         }
     }
 
-    /// Respuesta a `READ CAPACITY(10)`: último LBA y bytes por bloque.
-    /// `None` si el dispositivo no cabe en 32 bits (devuelve `u32::MAX`).
+    /// `READ CAPACITY(10)` response: last LBA and bytes per block.
+    /// `None` if the device does not fit in 32 bits (it returns `u32::MAX`).
     pub fn parse_read_capacity10(b: &[u8]) -> Option<(u32, u32)> {
         if b.len() < READ_CAPACITY_LEN as usize {
             return None;
@@ -162,7 +301,7 @@ pub mod scsi {
         (last_lba != u32::MAX && block_len != 0).then_some((last_lba, block_len))
     }
 
-    /// Datos de sentido fijos (`REQUEST SENSE`): clave, código y calificador.
+    /// Fixed-format sense data (`REQUEST SENSE`): key, code and qualifier.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Sense {
         pub key: u8,
@@ -171,18 +310,18 @@ pub mod scsi {
     }
 
     impl Sense {
-        /// Clave 6: el dispositivo acaba de encenderse o cambió el medio; se
-        /// reintenta el comando.
+        /// Key 6: the device has just powered on or the medium changed; the
+        /// command is retried.
         pub const UNIT_ATTENTION: u8 = 6;
-        /// Clave 2: no está listo (sin medio o arrancando).
+        /// Key 2: not ready (no medium or starting up).
         pub const NOT_READY: u8 = 2;
-        /// Clave 5: comando o campo no válidos para este dispositivo.
+        /// Key 5: command or field not valid for this device.
         pub const ILLEGAL_REQUEST: u8 = 5;
 
-        /// El dispositivo no implementa el comando (petición ilegal por
-        /// código de operación o campo inválidos): muchos pendrives
-        /// rechazan así `SYNCHRONIZE CACHE`, y entonces no hay caché que
-        /// vaciar.
+        /// The device does not implement the command (illegal request due
+        /// to an invalid operation code or field): many USB sticks reject
+        /// `SYNCHRONIZE CACHE` this way, and then there is no cache to
+        /// write back.
         pub fn command_unsupported(&self) -> bool {
             self.key == Self::ILLEGAL_REQUEST && matches!(self.asc, 0x20 | 0x24)
         }
@@ -243,6 +382,74 @@ mod tests {
     }
 
     #[test]
+    fn fault_names_fit_any_lba() {
+        let mut out = [0u8; fault::NAME_LEN];
+        for prefix in fault::LBA_PREFIXES {
+            let name = fault::lba_name(prefix, u32::MAX as u64, &mut out).expect("fits");
+            assert!(
+                name.starts_with(prefix) && name.ends_with("4294967295"),
+                "{name}"
+            );
+            assert!(name.len() <= fault::NAME_LEN);
+        }
+        assert_eq!(
+            fault::lba_name(fault::READ, 0, &mut out),
+            Some("usb r lba 0")
+        );
+        assert_eq!(
+            fault::lba_name(fault::INJECTED_WRITE, u64::MAX, &mut out),
+            None
+        );
+        // The device's reason: key decimal, ASC / ASCQ hex (SCSI convention).
+        let unrecovered = scsi::Sense {
+            key: 3,
+            asc: 0x11,
+            ascq: 0x00,
+        };
+        assert_eq!(
+            fault::sense_name(&unrecovered, &mut out),
+            Some("usb sense 3 11 00")
+        );
+        let worst = scsi::Sense {
+            key: 15,
+            asc: 0xff,
+            ascq: 0xff,
+        };
+        let name = fault::sense_name(&worst, &mut out).expect("fits");
+        assert_eq!(name, "usb sense 15 ff ff");
+        assert!(name.len() <= fault::NAME_LEN);
+    }
+
+    #[test]
+    fn transport_rules_after_a_failure() {
+        assert_eq!(after_transfer_failure(Stage::Cbw), Next::ResetRecovery);
+        assert_eq!(after_transfer_failure(Stage::Data), Next::ReadCsw);
+        assert_eq!(after_transfer_failure(Stage::Csw), Next::ReadCsw);
+        assert_eq!(Stage::Data.name(), "DATA");
+        let mut csw = [0u8; 13];
+        csw[..4].copy_from_slice(b"USBS");
+        csw[4..8].copy_from_slice(&7u32.to_le_bytes());
+        csw[8..12].copy_from_slice(&512u32.to_le_bytes());
+        assert_eq!(
+            check_csw(&csw, 7),
+            Ok(Csw {
+                tag: 7,
+                residue: 512,
+                status: CswStatus::Passed
+            })
+        );
+        assert!(matches!(
+            check_csw(&csw, 8),
+            Err(CswError::TagMismatch(Csw { tag: 7, .. }))
+        ));
+        csw[12] = 2;
+        assert!(matches!(check_csw(&csw, 7), Err(CswError::PhaseError(_))));
+        csw[0] = b'X';
+        assert_eq!(check_csw(&csw, 7), Err(CswError::Invalid));
+        assert_eq!(check_csw(&csw[..12], 7), Err(CswError::Invalid));
+    }
+
+    #[test]
     fn scsi_cdbs_and_replies() {
         assert_eq!(scsi::test_unit_ready().len, 6);
         assert_eq!(scsi::inquiry().bytes[4], 36);
@@ -282,7 +489,7 @@ mod tests {
         assert!(scsi::Sense::parse(&sense).unwrap().command_unsupported());
         sense[12] = 0x24;
         assert!(scsi::Sense::parse(&sense).unwrap().command_unsupported());
-        sense[12] = 0x21; // LBA fuera de rango: no es "no soportado"
+        sense[12] = 0x21; // LBA out of range: not "unsupported"
         assert!(!scsi::Sense::parse(&sense).unwrap().command_unsupported());
         sense[0] = 0x00;
         assert!(scsi::Sense::parse(&sense).is_none());

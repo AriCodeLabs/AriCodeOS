@@ -1,5 +1,7 @@
-//! Despacho de syscalls (ABI en `sdk/abi`). Los recursos se nombran por
-//! handles con derechos; el número de syscall solo elige la operación.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Syscall dispatch (ABI in `sdk/abi`). Resources are named by handles with
+//! rights; the syscall number only selects the operation.
 
 use super::process;
 use crate::arch::x86_64::syscall::SyscallFrame;
@@ -84,16 +86,17 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         nr::PROCESS_KILL => process_kill(h),
         nr::CONSOLE_READ => console_read(h, frame.rsi, frame.rdx, frame.r10),
         nr::CONSOLE_INJECT => console_inject(h, frame.rsi, frame.rdx),
+        nr::EVENT_RECORD => event_record(h, frame.rsi, frame.rdx),
         nr::SYSTEM_INFO => system_info(h, frame.rsi, frame.rdx, frame.r10),
         nr::SYSTEM_POWER => system_power(h, frame.rsi),
         nr::INITRD_READ => initrd_read(h, frame.rsi, frame.rdx, frame.r10, frame.r8),
         n => {
-            warn!("syscall desconocida {n} desde rip={:#x}", frame.user_rip);
+            warn!("unknown syscall {n} from rip={:#x}", frame.user_rip);
             Err(Error::NoSys)
         }
     };
-    // Una terminación pedida por otro proceso se ejecuta aquí, con la
-    // syscall ya cerrada y sin locks tomados (auditoría 6ee19fb, hallazgo 4).
+    // A termination requested by another process runs here, with the
+    // syscall already complete and no locks held (audit 6ee19fb, finding 4).
     if process::current_kill_requested() {
         process::kill_current(process::KILLED_BY_SUPERVISOR);
     }
@@ -134,9 +137,9 @@ fn console_read(handle: Handle, ptr: u64, len: u64, timeout_ms: u64) -> Result<u
     if !is_console || len == 0 || len > MAX {
         return Err(Error::Invalid);
     }
-    // Validar el destino antes de bloquear: un puntero inválido falla ya.
+    // Validate the destination before blocking: an invalid pointer fails right away.
     process::copy_to_user(ptr, &[])?;
-    // El prompt (línea sin terminar) debe verse antes de esperar la entrada.
+    // The prompt (unterminated line) must be visible before waiting for input.
     if let Some(pid) = process::current_pid() {
         process::console_flush(pid);
     }
@@ -149,8 +152,8 @@ fn console_read(handle: Handle, ptr: u64, len: u64, timeout_ms: u64) -> Result<u
     Ok(n as u64)
 }
 
-/// Texto de un teclado de usuario al anillo de la consola (`MANAGE` sobre un
-/// `Console`; ADR 0013). Devuelve los bytes que cupieron.
+/// Text from a user-space keyboard into the console ring (`MANAGE` on a
+/// `Console`; ADR 0013). Returns the bytes that fit.
 fn console_inject(handle: Handle, ptr: u64, len: u64) -> Result<u64, Error> {
     const MAX: u64 = 1024;
     let is_console = with_handles(|t| {
@@ -163,7 +166,7 @@ fn console_inject(handle: Handle, ptr: u64, len: u64) -> Result<u64, Error> {
     Ok(crate::console_input::inject(&bytes) as u64)
 }
 
-/// Copia un fichero del initrd al buffer del usuario (`READ` sobre el `SPAWNER`).
+/// Copies an initrd file into the user buffer (`READ` on the `SPAWNER`).
 fn initrd_read(h: Handle, name_ptr: u64, name_len: u64, buf: u64, len: u64) -> Result<u64, Error> {
     if name_len > 64 {
         return Err(Error::TooBig);
@@ -184,7 +187,7 @@ fn initrd_read(h: Handle, name_ptr: u64, name_len: u64, buf: u64, len: u64) -> R
     Ok(data.len() as u64)
 }
 
-/// Comprueba que `h` es el objeto `System` con `required`.
+/// Checks that `h` is the `System` object with `required`.
 fn system_object(h: Handle, required: Rights) -> Result<(), Error> {
     let ok =
         with_handles(|t| lookup(t, h, required).map(|o| matches!(o.kind, ObjectKind::System)))?;
@@ -201,6 +204,8 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
     let bytes: Vec<u8> = match kind {
         sysinfo::UPTIME => crate::time::uptime_ms().to_le_bytes().to_vec(),
         sysinfo::UPTIME_US => crate::time::uptime_us().to_le_bytes().to_vec(),
+        sysinfo::WALLCLOCK => crate::rtc::unix_now().to_le_bytes().to_vec(),
+        sysinfo::CMDLINE => crate::boot_args::get().into_bytes(),
         sysinfo::EVENTS => {
             let max = (len as usize) / sysinfo::EventEntry::LEN;
             crate::events::recent(max)
@@ -263,18 +268,18 @@ fn system_power(h: Handle, action: u64) -> Result<u64, Error> {
     let who = process::current_pid().map(|p| p.0).unwrap_or(0);
     match action {
         power::SHUTDOWN => {
-            crate::println!("AriCodeOS: apagando el sistema (pedido por el proceso {who})");
+            crate::println!("AriCodeOS: shutting down (requested by process {who})");
             crate::shutdown()
         }
         power::REBOOT => {
-            crate::println!("AriCodeOS: reiniciando (pedido por el proceso {who})");
+            crate::println!("AriCodeOS: rebooting (requested by process {who})");
             crate::arch::x86_64::power::reboot()
         }
         _ => Err(Error::Invalid),
     }
 }
 
-/// Endpoint de un handle con `required`, o `Invalid` si el objeto no es un endpoint.
+/// Endpoint behind a handle with `required`, or `Invalid` if the object is not an endpoint.
 fn endpoint_of(h: Handle, required: Rights) -> Result<ObjectRef, Error> {
     with_handles(|t| {
         let obj = lookup(t, h, required)?;
@@ -305,8 +310,8 @@ fn ipc_send(
         .iter()
         .map(|c| Handle(u32::from_le_bytes(*c)))
         .collect();
-    // Comprobar ahora que todos son transferibles (error temprano) y retirarlos
-    // solo cuando el endpoint confirme la plaza: un timeout no pierde nada.
+    // Check now that all are transferable (early error) and only remove them
+    // once the endpoint confirms the slot: a timeout loses nothing.
     with_handles(|t| {
         for uh in &user_handles {
             lookup(t, *uh, Rights::TRANSFER)?;
@@ -340,7 +345,7 @@ fn ipc_receive(
         return Err(Error::TooBig);
     }
     let obj = endpoint_of(ep, Rights::READ)?;
-    // Comprobar los buffers antes de consumir un mensaje.
+    // Check the buffers before consuming a message.
     process::copy_to_user(buf_ptr, &[])?;
     let ObjectKind::Endpoint(endpoint) = &obj.kind else {
         unreachable!()
@@ -348,7 +353,7 @@ fn ipc_receive(
     let msg = endpoint.receive(timeout_ms)?;
     let n = msg.data.len().min(buf_len as usize);
     process::copy_to_user(buf_ptr, &msg.data[..n])?;
-    // Insertar las capabilities recibidas; las que no quepan se descartan.
+    // Insert the received capabilities; those that do not fit are dropped.
     let received: Vec<u32> = with_handles(|t| {
         Ok(msg
             .handles
@@ -363,8 +368,8 @@ fn ipc_receive(
     Ok(n as u64 | ((received.len() as u64) << 32))
 }
 
-/// `ipc_receive_any` (ADR 0020): como `ipc_receive` sobre el primero de
-/// varios endpoints con mensaje; el índice va en los bits 48..63.
+/// `ipc_receive_any` (ADR 0020): like `ipc_receive` on the first of several
+/// endpoints that has a message; the index goes in bits 48..63.
 fn ipc_receive_any(
     handles_ptr: u64,
     count: u64,
@@ -380,7 +385,7 @@ fn ipc_receive_any(
         return Err(Error::TooBig);
     }
     let raw = process::copy_from_user(handles_ptr, count * 4)?;
-    // Todos validados antes de esperar; los Arc mantienen vivos los objetos.
+    // All validated before waiting; the Arcs keep the objects alive.
     let objs: Vec<ObjectRef> = raw
         .as_chunks::<4>()
         .0
@@ -430,10 +435,10 @@ fn process_spawn(
     spawn_from_bytes(name, elf, arg, handles_ptr, limits)
 }
 
-/// `process_spawn_from` (ADR 0017): como `process_spawn`, con el ELF en un
-/// buffer DMA del llamador (`spawn_from::Request` en su memoria). El buffer
-/// se lee por el mapa físico mientras se copian los segmentos; después el
-/// proceso nuevo no depende de él.
+/// `process_spawn_from` (ADR 0017): like `process_spawn`, with the ELF in a
+/// DMA buffer of the caller (`spawn_from::Request` in its memory). The
+/// buffer is read through the physical map while the segments are copied;
+/// afterwards the new process does not depend on it.
 fn process_spawn_from(
     spawner: Handle,
     req_ptr: u64,
@@ -457,9 +462,9 @@ fn process_spawn_from(
     if req.elf_len == 0 || end > len {
         return Err(Error::TooBig);
     }
-    // SAFETY: memoria física del buffer DMA, viva mientras `dma` (Arc) viva y
-    // accesible por el mapa lineal; solo se lee, con comprobación de límites
-    // en el analizador ELF.
+    // SAFETY: physical memory of the DMA buffer, alive while `dma` (Arc) lives
+    // and reachable through the linear map; only read, with bounds checks
+    // in the ELF parser.
     let elf = unsafe {
         core::slice::from_raw_parts(
             crate::memory::phys::phys_to_virt(phys + req.elf_offset as u64) as *const u8,
@@ -480,8 +485,8 @@ fn require_spawner(spawner: Handle) -> Result<(), Error> {
     }
 }
 
-/// Parte común de `process_spawn` y `process_spawn_from`: retira los handles
-/// transferidos, crea el proceso y devuelve su handle.
+/// Common part of `process_spawn` and `process_spawn_from`: removes the
+/// transferred handles, creates the process and returns its handle.
 fn spawn_from_bytes(
     name: &str,
     elf: &[u8],
@@ -501,7 +506,7 @@ fn spawn_from_bytes(
         .iter()
         .map(|c| Handle(u32::from_le_bytes(*c)))
         .collect();
-    // Validar todos antes de retirar ninguno.
+    // Validate all before removing any.
     let extra: Vec<(ObjectRef, Rights)> = with_handles(|t| {
         for uh in &user_handles {
             lookup(t, *uh, Rights::TRANSFER)?;
@@ -558,8 +563,8 @@ fn pci_claim(root: Handle, index: usize, out_ptr: u64) -> Result<u64, Error> {
     Ok(aricode_abi::PCI_CLAIM_HANDLES as u64)
 }
 
-/// `process_kill` (auditoría 6ee19fb, hallazgo 4): exige `MANAGE` sobre el
-/// proceso; lo marca para terminar y despierta a su hilo.
+/// `process_kill` (audit 6ee19fb, finding 4): requires `MANAGE` on the
+/// process; flags it for termination and wakes its thread.
 fn process_kill(h: Handle) -> Result<u64, Error> {
     let pid = with_handles(|t| match lookup(t, h, Rights::MANAGE)?.kind {
         ObjectKind::Process(p) => Ok(p),
@@ -621,8 +626,8 @@ fn mmio_map(h: Handle) -> Result<u64, Error> {
             },
         )?;
     let virt = process::map_foreign(phys, len, cacheable)?;
-    // IOMMU (Fase 33): mapear un dispositivo lo asigna al dominio del
-    // proceso; mapear un buffer DMA ajeno lo hace visible a sus dispositivos.
+    // IOMMU (Phase 33): mapping a device assigns it to the process's
+    // domain; mapping a foreign DMA buffer makes it visible to its devices.
     if let Some(pid) = process::current_pid() {
         let r = match source_id {
             Some(sid) => crate::iommu::attach(pid.0, sid),
@@ -637,6 +642,25 @@ fn mmio_map(h: Handle) -> Result<u64, Error> {
     Ok(virt)
 }
 
+/// `event_record(code, name_ptr, name_len)` (ADR 0028): a `Fault` event
+/// for the calling process. `h` carries the reason code (the first
+/// argument slot), `name` is at most `EVENT_NAME_LEN` bytes.
+fn event_record(code: Handle, name_ptr: u64, name_len: u64) -> Result<u64, Error> {
+    if name_len == 0 || name_len > aricode_abi::sysinfo::EVENT_NAME_LEN as u64 {
+        return Err(Error::Invalid);
+    }
+    let raw = process::copy_from_user(name_ptr, name_len)?;
+    let name = core::str::from_utf8(&raw).map_err(|_| Error::Invalid)?;
+    let pid = process::current_pid().map_or(0, |p| p.0);
+    crate::events::record(
+        aricode_abi::sysinfo::EventKind::Fault,
+        pid,
+        code.0 as u64,
+        name,
+    );
+    Ok(0)
+}
+
 fn dma_alloc(h: Handle, len: u64) -> Result<u64, Error> {
     let is_hw = with_handles(|t| {
         lookup(t, h, Rights::MANAGE).map(|o| matches!(o.kind, ObjectKind::Hardware))
@@ -647,8 +671,8 @@ fn dma_alloc(h: Handle, len: u64) -> Result<u64, Error> {
     if len == 0 || len > aricode_abi::DMA_MAX_LEN {
         return Err(Error::TooBig);
     }
-    // Cuota del proceso (fijada por quien lo lanzó): se cobra el tamaño
-    // redondeado a páginas, que es lo que se reserva.
+    // Process quota (set by its launcher): the size rounded up to pages is
+    // charged, since that is what gets allocated.
     if !process::charge_dma(len.next_multiple_of(4096)) {
         crate::events::record(
             aricode_abi::sysinfo::EventKind::DmaQuota,

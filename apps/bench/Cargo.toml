@@ -3,7 +3,7 @@ name = "ari-app-bench"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Medidas reproducibles de AriCodeOS desde ring 3: syscall, IPC y ficheros con percentiles"
+description = "Reproducible AriCodeOS measurements from ring 3: syscall, IPC and files with percentiles"
 publish = false
 
 [[bin]]

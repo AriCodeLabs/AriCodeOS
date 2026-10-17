@@ -1,9 +1,11 @@
-//! Arranque A/B (Fase 30): busca en los discos GPT la partición de estado
-//! `ARIBOOT` y los slots `SYSA`/`SYSB`, aplica la política de `aricode-ab`
-//! (intentos del slot pendiente, rollback), verifica la firma Ed25519 del
-//! manifiesto y los hashes de kernel e initrd, y devuelve la imagen elegida.
-//! Si no hay estado o ninguna imagen verifica, el llamador arranca desde la
-//! ESP como siempre (recuperación).
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! A/B boot (Phase 30): looks on the GPT disks for the `ARIBOOT` state
+//! partition and the `SYSA`/`SYSB` slots, applies the `aricode-ab` policy
+//! (pending slot attempts, rollback), verifies the manifest's Ed25519
+//! signature and the kernel and initrd hashes, and returns the chosen image.
+//! If there is no state or no image verifies, the caller boots from the ESP
+//! as usual (recovery).
 
 use alloc::vec::Vec;
 use aricode_ab::{choose, reject, unpersisted, BootState, Decision, Image, ImageError, Slot};
@@ -13,10 +15,10 @@ use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtoco
 use uefi::proto::media::block::BlockIO;
 
 const SECTOR: usize = 512;
-/// Clave pública que firma las imágenes (desarrollo; ver `keys/dev/README.md`).
+/// Public key that signs the images (development; see `keys/dev/README.md`).
 const PUBKEY_HEX: &str = include_str!("../../keys/dev/ed25519.pub");
 
-/// Imagen de sistema elegida y verificada.
+/// Chosen and verified system image.
 pub struct Loaded {
     pub kernel: Vec<u8>,
     pub initrd: Vec<u8>,
@@ -40,7 +42,7 @@ impl Disk {
         self.io.write_blocks(self.media_id, lba, data).is_ok() && self.io.flush_blocks().is_ok()
     }
 
-    /// Particiones GPT del disco, si lo es.
+    /// GPT partitions of the disk, if it is one.
     fn gpt(&mut self) -> Option<Vec<Partition>> {
         let sector = self.read(1, 1)?;
         let header = Header::parse(&sector).ok()?;
@@ -61,7 +63,7 @@ fn pubkey() -> Option<[u8; 32]> {
     Some(pk)
 }
 
-/// Lee y verifica la imagen de un slot. Devuelve kernel, initrd y versión.
+/// Reads and verifies a slot image. Returns kernel, initrd and version.
 fn load_slot(
     disk: &mut Disk,
     part: &Partition,
@@ -69,21 +71,21 @@ fn load_slot(
 ) -> Result<(Vec<u8>, Vec<u8>, u32), &'static str> {
     let header = disk
         .read(part.first_lba, 1)
-        .ok_or("no se pudo leer el slot")?;
-    let len = Image::container_len(&header).map_err(|_| "cabecera de slot invalida")? as usize;
+        .ok_or("could not read the slot")?;
+    let len = Image::container_len(&header).map_err(|_| "invalid slot header")? as usize;
     let sectors = len.div_ceil(SECTOR);
     if sectors as u64 + 1 > part.sectors() {
-        return Err("imagen mayor que la particion");
+        return Err("image larger than the partition");
     }
     let mut container = disk
         .read(part.first_lba + 1, sectors)
-        .ok_or("no se pudo leer la imagen")?;
+        .ok_or("could not read the image")?;
     container.truncate(len);
     let verified = Image::verify(&container, pk).map_err(|e| match e {
-        ImageError::BadSignature => "firma invalida",
-        ImageError::HashMismatch(_) => "hash de kernel o initrd no coincide",
-        ImageError::BadManifest => "manifiesto invalido",
-        _ => "imagen malformada",
+        ImageError::BadSignature => "invalid signature",
+        ImageError::HashMismatch(_) => "kernel or initrd hash mismatch",
+        ImageError::BadManifest => "invalid manifest",
+        _ => "malformed image",
     })?;
     Ok((
         verified.kernel.to_vec(),
@@ -92,19 +94,19 @@ fn load_slot(
     ))
 }
 
-/// Intenta arrancar desde los slots. `None` = arrancar desde la ESP.
+/// Tries to boot from the slots. `None` = boot from the ESP.
 pub fn load() -> Option<Loaded> {
     let Some(pk) = pubkey() else {
-        warn!("slots: clave publica de desarrollo invalida");
+        warn!("slots: invalid development public key");
         return None;
     };
     let handles = boot::find_handles::<BlockIO>().ok()?;
     for handle in handles {
-        // Apertura no exclusiva: una apertura exclusiva desconecta los drivers
-        // que usan el disco (el sistema de ficheros FAT de la ESP entre ellos)
-        // y despues no se puede leer la ESP.
-        // SAFETY: AriBoot es la unica aplicacion en ejecucion; solo lee
-        // sectores y escribe el sector de estado, que ningun otro driver usa.
+        // Non-exclusive open: an exclusive open disconnects the drivers using
+        // the disk (the ESP's FAT file system among them) and afterwards the
+        // ESP can no longer be read.
+        // SAFETY: AriBoot is the only running application; it only reads
+        // sectors and writes the state sector, which no other driver uses.
         let Ok(io) = (unsafe {
             boot::open_protocol::<BlockIO>(
                 OpenProtocolParams {
@@ -135,20 +137,17 @@ pub fn load() -> Option<Loaded> {
             .read(state_lba, 1)
             .and_then(|s| BootState::decode(&s))
             .unwrap_or_else(|| {
-                warn!("slots: estado de arranque invalido, se asume A activo");
+                warn!("slots: invalid boot state, assuming A active");
                 BootState::fresh(Slot::A)
             });
         match state.pending {
             Some((slot, tries)) => info!(
-                "slots: estado activo {}, pendiente {} ({} intentos)",
+                "slots: state active {}, pending {} ({} tries)",
                 state.active.name(),
                 slot.name(),
                 tries
             ),
-            None => info!(
-                "slots: estado activo {}, sin pendiente",
-                state.active.name()
-            ),
+            None => info!("slots: state active {}, no pending", state.active.name()),
         }
         let mut decision: Decision = choose(state);
         info!(
@@ -158,16 +157,16 @@ pub fn load() -> Option<Loaded> {
         );
         for attempt in 0..2 {
             let Some(part) = find(&parts, decision.slot.partition()) else {
-                warn!("slots: falta la particion {}", decision.slot.partition());
+                warn!("slots: missing partition {}", decision.slot.partition());
                 break;
             };
             match load_slot(&mut disk, part, &pk) {
                 Ok((kernel, initrd, version)) => {
                     if !disk.write(state_lba, &decision.state.encode()) {
-                        warn!("slots: no se pudo escribir el estado de arranque");
+                        warn!("slots: could not write the boot state");
                         if decision.pending && attempt == 0 {
-                            // Un pendiente sin intento contado podria arrancar
-                            // sin fin: se vuelve al activo, que no lo necesita.
+                            // A pending slot without a counted try could boot
+                            // forever: fall back to the active one, which needs none.
                             decision = unpersisted(state);
                             info!(
                                 "slots: {} -> slot {}",
@@ -178,11 +177,11 @@ pub fn load() -> Option<Loaded> {
                         }
                     }
                     info!(
-                        "slots: arrancando desde el slot {} (imagen version {}{})",
+                        "slots: booting from slot {} (image version {}{})",
                         decision.slot.name(),
                         version,
                         if decision.pending {
-                            ", pendiente de confirmacion"
+                            ", pending confirmation"
                         } else {
                             ""
                         }
@@ -195,7 +194,7 @@ pub fn load() -> Option<Loaded> {
                     });
                 }
                 Err(why) => {
-                    warn!("slots: slot {} rechazado: {why}", decision.slot.name());
+                    warn!("slots: slot {} rejected: {why}", decision.slot.name());
                     if attempt == 0 && decision.slot != state.active {
                         decision = reject(state);
                         info!(
@@ -209,9 +208,9 @@ pub fn load() -> Option<Loaded> {
                 }
             }
         }
-        warn!("slots: ninguna imagen valida; arranque desde la ESP");
+        warn!("slots: no valid image; booting from the ESP");
         return None;
     }
-    info!("slots: sin particion ARIBOOT, arranque desde la ESP");
+    info!("slots: no ARIBOOT partition, booting from the ESP");
     None
 }

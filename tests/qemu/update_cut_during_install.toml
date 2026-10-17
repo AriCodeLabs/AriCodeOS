@@ -1,10 +1,10 @@
-# Etapa 3 (estudio F): corte de energia durante la copia de la imagen al slot
-# inactivo. El runner mata QEMU al ver que el actualizador verifico la imagen
-# (la copia acaba de empezar). El estado de arranque se escribe solo al final,
-# asi que el siguiente arranque sigue en A sin pendiente; el actualizador se
-# repite entero y el tercer arranque prueba y confirma B.
+# Stage 3 (study F): power cut while the image is being copied to the inactive
+# slot. The runner kills QEMU when it sees the updater has verified the image
+# (the copy has just started). The boot state is only written at the end,
+# so the next boot stays on A with nothing pending; the updater runs
+# again in full and the third boot tries and confirms B.
 name = "update.cut_during_install"
-description = "corte durante la instalacion: A sigue activo, la actualizacion se repite y B se confirma"
+description = "power cut during installation: A stays active, the update is repeated and B is confirmed"
 level = "full"
 areas = ["update", "boot", "init", "shell"]
 timeout_secs = 120
@@ -12,11 +12,11 @@ timeout_secs = 120
 [[boots]]
 cmdline = "qemu_exit shell"
 stdin = ["run updater"]
-kill_on = "updater: imagen en UPDATE version 2 verificada ("
+kill_on = "updater: UPDATE image version 2 verified ("
 [boots.expect]
 killed = true
-serial_contains = ["updater: imagen en UPDATE version 2 verificada ("]
-serial_absent = ["KERNEL PANIC", "updater: instalada en el slot"]
+serial_contains = ["updater: UPDATE image version 2 verified ("]
+serial_absent = ["KERNEL PANIC", "updater: installed into slot"]
 
 [[boots]]
 cmdline = "qemu_exit shell"
@@ -24,11 +24,11 @@ stdin = ["run updater", "reboot"]
 [boots.expect]
 exit = 0
 serial_contains = [
-    "slots: estado activo A, sin pendiente",
-    "slots: arrancando desde el slot A (imagen version 1)",
-    "updater: instalada en el slot B",
-    "updater: estado: activo A, pendiente B (3 intentos); reinicia para probarlo",
-    "AriCodeOS: reiniciando",
+    "slots: state active A, no pending",
+    "slots: booting from slot A (image version 1)",
+    "updater: installed into slot B",
+    "updater: state: active A, pending B (3 tries); reboot to try it",
+    "AriCodeOS: rebooting",
 ]
 serial_absent = ["KERNEL PANIC", "no verifica", "boot_slot=B"]
 
@@ -37,8 +37,8 @@ cmdline = "qemu_exit"
 [boots.expect]
 exit = 33
 serial_contains = [
-    "slots: arrancando desde el slot B (imagen version 2, pendiente de confirmacion)",
-    "AriInit: arranque confirmado en el slot B",
+    "slots: booting from slot B (image version 2, pending confirmation)",
+    "AriInit: boot confirmed on slot B",
     "ARICODEOS_KERNEL_READY",
 ]
 serial_absent = ["KERNEL PANIC", "rechazado"]

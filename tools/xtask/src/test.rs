@@ -1,4 +1,6 @@
-//! Orquestación de niveles de test: unit (host) -> smoke/full (QEMU).
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Test level orchestration: unit (host) -> smoke/full (QEMU).
 
 use crate::scenario::{self, Level, Scenario};
 use crate::{build, image, qemu, Cli, Result};
@@ -25,7 +27,7 @@ pub fn run(cli: &Cli, release: bool) -> Result {
             v.parse::<u32>()
                 .ok()
                 .filter(|n| (1..=64).contains(n))
-                .ok_or_else(|| format!("--cpus {v}: se esperaba un numero de 1 a 64"))?,
+                .ok_or_else(|| format!("--cpus {v}: expected a number from 1 to 64"))?,
         ),
         None => None,
     };
@@ -52,20 +54,17 @@ pub fn run(cli: &Cli, release: bool) -> Result {
     }
 
     println!(
-        "[xtask] nivel {level:?}{}{}",
+        "[xtask] level {level:?}{}{}",
         if areas.is_empty() {
             String::new()
         } else {
             format!(", areas {}", areas.join(","))
         },
-        cpus_override.map_or(String::new(), |n| format!(
-            ", {n} CPUs en todos los escenarios"
-        ))
+        cpus_override.map_or(String::new(), |n| format!(", {n} CPUs in every scenario"))
     );
 
-    // Nivel unit: siempre, salvo que se filtre por área (una feature puede
-    // querer solo sus escenarios QEMU; los unit siguen siendo baratos y se
-    // ejecutan igual).
+    // Unit level: always, even when filtering by area (a feature may want
+    // only its QEMU scenarios; unit tests are still cheap and run anyway).
     println!("[xtask] unit tests (host)");
     build::unit_tests()?;
     if level == Level::Unit {
@@ -80,18 +79,18 @@ pub fn run(cli: &Cli, release: bool) -> Result {
         }
     }
     println!(
-        "[xtask] {} escenarios QEMU, {} fallidos",
+        "[xtask] {} QEMU scenarios, {} failed",
         selected.len(),
         failed.len()
     );
     if failed.is_empty() {
         Ok(())
     } else {
-        Err(format!("escenarios fallidos: {}", failed.join(", ")))
+        Err(format!("failed scenarios: {}", failed.join(", ")))
     }
 }
 
-/// Un arranque a ejecutar: el único del escenario o cada uno de `[[boots]]`.
+/// One boot to run: the scenario's only boot, or each one in `[[boots]]`.
 struct BootRun<'a> {
     cmdline: &'a str,
     stdin: &'a [String],
@@ -127,7 +126,7 @@ fn run_scenario(
     };
     let multi = !s.boots.is_empty();
     let disk_variant = image::DiskVariant::parse(&s.disk)
-        .ok_or_else(|| format!("{}: disk '{}' desconocido", s.name, s.disk))?;
+        .ok_or_else(|| format!("{}: unknown disk '{}'", s.name, s.disk))?;
     let mut installed: Vec<(String, Vec<u8>)> = Vec::new();
     for dir in &s.install {
         installed
@@ -137,22 +136,17 @@ fn run_scenario(
         let mut parts = spec.split(':');
         let (Some(dir), Some(version)) = (parts.next(), parts.next()) else {
             return Err(format!(
-                "{}: paquete '{spec}': DIR:VERSION[:corrupt]",
+                "{}: package '{spec}': DIR:VERSION[:corrupt]",
                 s.name
             ));
         };
         let version: u32 = version
             .parse()
-            .map_err(|_| format!("{}: paquete '{spec}': version invalida", s.name))?;
+            .map_err(|_| format!("{}: package '{spec}': invalid version", s.name))?;
         let corrupt = match parts.next() {
             None => false,
             Some("corrupt") => true,
-            Some(other) => {
-                return Err(format!(
-                    "{}: paquete '{spec}': '{other}' desconocido",
-                    s.name
-                ))
-            }
+            Some(other) => return Err(format!("{}: package '{spec}': unknown '{other}'", s.name)),
         };
         let app = build::build_external(std::path::Path::new(dir), version, release, corrupt)?;
         installed.push((
@@ -165,11 +159,51 @@ fn run_scenario(
             app.package,
         ));
     }
+    // SSH scenarios: a client key pair in the scenario directory, its
+    // public half installed as `authorized_keys`.
+    let ssh_key = match &s.host_ssh {
+        Some(_) => {
+            let dir = workdir.join("ssh");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let key = dir.join("id_ed25519");
+            let st = std::process::Command::new("ssh-keygen")
+                .args(["-q", "-t", "ed25519", "-N", "", "-C", "aricode-test", "-f"])
+                .arg(&key)
+                .status()
+                .map_err(|e| format!("{}: ssh-keygen: {e}", s.name))?;
+            if !st.success() {
+                return Err(format!("{}: ssh-keygen failed", s.name));
+            }
+            let public = std::fs::read(dir.join("id_ed25519.pub")).map_err(|e| e.to_string())?;
+            installed.push((String::from("authorized_keys"), public));
+            Some(key)
+        }
+        None => None,
+    };
+    if s.host_update {
+        image::publish_update_to(&image::test_update_dir(), release, 2)?;
+        installed.push((
+            String::from(image::UPDATE_URL_FILE),
+            format!(
+                "http://10.0.2.2:{}/update/\n",
+                aricode_proto::net::TEST_HTTP_PORT
+            )
+            .into_bytes(),
+        ));
+    }
+    let _https = if s.host_https {
+        let (servers, ca) = https_servers(&workdir.join("tls"))?;
+        installed.push((String::from("trusted_ca.der"), ca));
+        Some(servers)
+    } else {
+        None
+    };
     let mut problems = Vec::new();
     let mut elapsed = Duration::ZERO;
     let mut logs: Vec<(std::path::PathBuf, String)> = Vec::new();
     for (i, run) in runs.iter().enumerate() {
-        // Cada arranque tiene su ESP (su cmdline); el disco es el mismo.
+        // Each boot has its own ESP (its cmdline); the disk is shared.
         let esp_name = if multi {
             format!("{}.boot{}", s.name, i + 1)
         } else {
@@ -190,9 +224,19 @@ fn run_scenario(
             mouse_rel: h.mouse_rel,
             click: h.click.as_deref(),
         });
+        let ssh_probe = match (&s.host_ssh, &ssh_key) {
+            (Some(h), Some(key)) => Some(qemu::SshProbe {
+                marker: &h.marker,
+                commands: &h.commands,
+                key: key.clone(),
+                idle_client: h.idle_client,
+            }),
+            _ => None,
+        };
         let options = qemu::Headless {
             input,
             probe,
+            ssh_probe,
             input_probe,
             disk_variant,
             disk_readonly: s.disk_readonly,
@@ -221,7 +265,7 @@ fn run_scenario(
         let _ = std::fs::write(&log, &cap.serial);
         elapsed += cap.elapsed;
         let prefix = if multi {
-            format!("arranque {}: ", i + 1)
+            format!("boot {}: ", i + 1)
         } else {
             String::new()
         };
@@ -235,20 +279,20 @@ fn run_scenario(
             problems.push(format!(
                 "{prefix}{}",
                 if expect.killed {
-                    "QEMU no llego a matarse en kill_on"
+                    "QEMU was not killed on kill_on"
                 } else {
-                    "QEMU matado sin esperarlo"
+                    "QEMU killed unexpectedly"
                 }
             ));
         }
         for needle in &expect.serial_contains {
             if !cap.serial.contains(needle) {
-                problems.push(format!("{prefix}falta '{needle}'"));
+                problems.push(format!("{prefix}missing '{needle}'"));
             }
         }
         for needle in &expect.serial_absent {
             if cap.serial.contains(needle) {
-                problems.push(format!("{prefix}aparece '{needle}'"));
+                problems.push(format!("{prefix}unexpected '{needle}'"));
             }
         }
         if cap.timed_out {
@@ -256,7 +300,7 @@ fn run_scenario(
         }
         logs.push((log, cap.serial));
         if !problems.is_empty() {
-            // Los arranques siguientes dependen de este: no dicen nada nuevo.
+            // Later boots depend on this one: they would tell nothing new.
             break;
         }
     }
@@ -282,4 +326,162 @@ fn run_scenario(
         }
     }
     Ok(ok)
+}
+
+/// HTTPS servers for `host_https` scenarios, killed when dropped.
+struct HttpsServers(Vec<std::process::Child>);
+
+impl Drop for HttpsServers {
+    fn drop(&mut self) {
+        for c in &mut self.0 {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
+/// Generates a test CA, a leaf for `10.0.2.2` signed by it and a
+/// self-signed leaf, and starts one `openssl s_server -www` for each leaf.
+/// Returns the servers and the CA certificate (DER).
+fn https_servers(dir: &std::path::Path) -> Result<(HttpsServers, Vec<u8>)> {
+    use std::process::{Command, Stdio};
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let run = |args: &[&str]| -> Result {
+        let st = Command::new("openssl")
+            .args(args)
+            .current_dir(dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|e| format!("openssl: {e}"))?;
+        if st.success() {
+            Ok(())
+        } else {
+            Err(format!("openssl {} failed", args.join(" ")))
+        }
+    };
+    let ec = [
+        "-newkey",
+        "ec",
+        "-pkeyopt",
+        "ec_paramgen_curve:prime256v1",
+        "-nodes",
+    ];
+    run(&[
+        &["req", "-x509"],
+        &ec[..],
+        &[
+            "-keyout",
+            "ca.key",
+            "-out",
+            "ca.pem",
+            "-days",
+            "30",
+            "-subj",
+            "/CN=AriCodeOS test CA",
+            "-addext",
+            "basicConstraints=critical,CA:TRUE",
+            "-addext",
+            "keyUsage=critical,keyCertSign",
+        ],
+    ]
+    .concat())?;
+    run(&[
+        &["req"],
+        &ec[..],
+        &[
+            "-keyout",
+            "leaf.key",
+            "-out",
+            "leaf.csr",
+            "-subj",
+            "/CN=10.0.2.2",
+        ],
+    ]
+    .concat())?;
+    std::fs::write(
+        dir.join("leaf.ext"),
+        "subjectAltName=DNS:10.0.2.2\nbasicConstraints=CA:FALSE\n",
+    )
+    .map_err(|e| e.to_string())?;
+    run(&[
+        "x509",
+        "-req",
+        "-in",
+        "leaf.csr",
+        "-CA",
+        "ca.pem",
+        "-CAkey",
+        "ca.key",
+        "-CAcreateserial",
+        "-out",
+        "leaf.pem",
+        "-days",
+        "30",
+        "-extfile",
+        "leaf.ext",
+    ])?;
+    run(&[
+        &["req", "-x509"],
+        &ec[..],
+        &[
+            "-keyout",
+            "self.key",
+            "-out",
+            "self.pem",
+            "-days",
+            "30",
+            "-subj",
+            "/CN=10.0.2.2",
+            "-addext",
+            "subjectAltName=DNS:10.0.2.2",
+        ],
+    ]
+    .concat())?;
+    run(&["x509", "-in", "ca.pem", "-outform", "der", "-out", "ca.der"])?;
+    let ca = std::fs::read(dir.join("ca.der")).map_err(|e| e.to_string())?;
+    let mut servers = HttpsServers(Vec::new());
+    for (port, cert, key) in [
+        (aricode_proto::net::TEST_HTTPS_PORT, "leaf.pem", "leaf.key"),
+        (
+            aricode_proto::net::TEST_HTTPS_UNTRUSTED_PORT,
+            "self.pem",
+            "self.key",
+        ),
+    ] {
+        let child = Command::new("openssl")
+            .args([
+                "s_server", "-www", "-tls1_3", "-quiet", "-cert", cert, "-key", key, "-accept",
+            ])
+            .arg(format!("127.0.0.1:{port}"))
+            .current_dir(dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("openssl s_server: {e}"))?;
+        servers.0.push(child);
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    // Fail loudly if a server died or the port is held by a leftover
+    // process (a killed earlier run): the scenario would otherwise talk to
+    // a stale server with another CA and report a certificate error.
+    for (child, port) in servers.0.iter_mut().zip([
+        aricode_proto::net::TEST_HTTPS_PORT,
+        aricode_proto::net::TEST_HTTPS_UNTRUSTED_PORT,
+    ]) {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(format!(
+                "HTTPS test server on port {port} exited at start ({status}); is the port in use by a leftover openssl?"
+            ));
+        }
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)).is_err() {
+            return Err(format!(
+                "HTTPS test server on port {port} is not accepting connections"
+            ));
+        }
+    }
+    Ok((servers, ca))
 }

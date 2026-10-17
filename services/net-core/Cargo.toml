@@ -3,7 +3,7 @@ name = "ari-net-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Nucleo del servicio de red en ring 3: pila IPv4 minima y servidor NetServiceProtocol, independiente de la tarjeta"
+description = "Ring 3 network service core: minimal IPv4 stack and NetServiceProtocol server, NIC independent"
 
 [lib]
 test = false

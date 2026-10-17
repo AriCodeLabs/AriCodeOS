@@ -1,10 +1,12 @@
-//! Cola de espera: bloquea al hilo actual hasta que se cumpla una condición
-//! y alguien llame a `wake_all`/`wake_one`, con plazo opcional.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Wait queue: blocks the current thread until a condition holds and someone
+//! calls `wake_all`/`wake_one`, with an optional deadline.
 //!
-//! La comprobación de la condición, el encolado y el cambio de contexto
-//! ocurren con las interrupciones deshabilitadas, así que un `wake` desde un
-//! handler nunca cae entre "comprobar" y "dormir": encuentra al hilo ya
-//! dormido o bloqueado y lo despierta.
+//! Checking the condition, enqueueing and the context switch happen with
+//! interrupts disabled, so a `wake` from a handler never lands between
+//! "check" and "sleep": it finds the thread already asleep or blocked and
+//! wakes it.
 
 use super::scheduler;
 use crate::sync::IrqLock;
@@ -22,15 +24,15 @@ impl WaitQueue {
         }
     }
 
-    /// Bloquea hasta que `cond()` sea cierta. `cond` se evalúa bajo el lock.
+    /// Blocks until `cond()` is true. `cond` is evaluated under the lock.
     pub fn wait_until(&self, cond: impl FnMut() -> bool) {
         let timed_out = self.wait_until_deadline(cond, None);
         debug_assert!(!timed_out);
     }
 
-    /// Como `wait_until`, pero con plazo en ticks: devuelve `true` si el plazo
-    /// venció sin que la condición se cumpliera. Con `Some(deadline)` el hilo
-    /// duerme hasta ese tick y un `wake` anticipado lo despierta antes.
+    /// Like `wait_until`, but with a deadline in ticks: returns `true` if the
+    /// deadline expired without the condition holding. With `Some(deadline)`
+    /// the thread sleeps until that tick and an early `wake` wakes it sooner.
     pub fn wait_until_deadline(
         &self,
         mut cond: impl FnMut() -> bool,
@@ -40,24 +42,24 @@ impl WaitQueue {
         use aricode_sync::IrqPolicy;
         let me = scheduler::current_tid();
         loop {
-            // Interrupciones deshabilitadas desde la comprobación hasta el
-            // cambio de contexto: así un `wake` desde un handler de esta CPU
-            // solo puede llegar cuando el hilo ya está dormido o bloqueado.
-            // Un `wake` desde otra CPU en esa ventana queda pendiente en la
-            // política y convierte el bloqueo en cesión (Fase 32).
+            // Interrupts disabled from the check until the context switch: a
+            // `wake` from a handler on this CPU can then only arrive once the
+            // thread is asleep or blocked. A `wake` from another CPU in that
+            // window stays pending in the policy and turns the block into a
+            // yield (Phase 32).
             let irq = KernelIrq::save_and_disable();
             {
                 let mut w = self.waiters.lock();
-                // Si se vuelve a evaluar tras un despertar anticipado o un
-                // plazo, la anotación anterior ya no sirve: evita despertares
-                // espurios a quien luego espere en otra cola.
+                // When re-evaluating after an early wake-up or a deadline, the
+                // previous entry is stale: this avoids spurious wake-ups for
+                // whoever later waits on another queue.
                 w.retain(|t| *t != me);
                 if cond() {
                     KernelIrq::restore(irq);
                     return false;
                 }
-                // Un proceso al que pidieron terminar no vuelve a dormir: la
-                // espera vence y la syscall lo termina al salir.
+                // A process asked to terminate does not go back to sleep: the
+                // wait expires and the syscall terminates it on exit.
                 if crate::user::process::current_kill_requested() {
                     KernelIrq::restore(irq);
                     return true;
@@ -76,16 +78,16 @@ impl WaitQueue {
         }
     }
 
-    /// Despierta a todos los que esperan.
+    /// Wakes all waiters.
     pub fn wake_all(&self) {
         let waiters: VecDeque<Tid> = core::mem::take(&mut *self.waiters.lock());
         for tid in waiters {
-            // Si el hilo aún no llegó a bloquearse, reintentará por su cuenta.
+            // If the thread has not blocked yet, it will retry on its own.
             let _ = scheduler::wake(tid);
         }
     }
 
-    /// Despierta a uno (el más antiguo).
+    /// Wakes one (the oldest).
     pub fn wake_one(&self) {
         let tid = self.waiters.lock().pop_front();
         if let Some(t) = tid {

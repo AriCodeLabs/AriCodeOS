@@ -3,7 +3,7 @@ name = "aricode-arifs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "AriFS v0: sistema de archivos plano con tabla de ficheros de capacidad fija (no_std)"
+description = "AriFS v0: flat file system with a fixed-capacity file table (no_std)"
 
 [lib]
 path = "src/lib.rs"

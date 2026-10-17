@@ -1,19 +1,19 @@
-# ADR 0002: Arranque exclusivamente UEFI
+# ADR 0002: UEFI-only boot
 
-- **Fecha:** 2026-09-26
-- **Estado:** Aceptada
+- **Date:** 2026-09-26
+- **Status:** Accepted
 
-## Contexto
+## Context
 
-Todo el hardware objetivo (QEMU/OVMF y el portátil de pruebas) arranca por UEFI.
+All target hardware (QEMU/OVMF and the test laptop) boots through UEFI.
 
-## Decisión
+## Decision
 
-No se implementa BIOS legacy, MBR, real mode ni la transición 16 -> 32 -> 64
-bits. AriBoot es una aplicación UEFI (`BOOTX64.EFI`, PE32+).
+Legacy BIOS, MBR, real mode and the 16 -> 32 -> 64-bit transition are not
+implemented. AriBoot is a UEFI application (`BOOTX64.EFI`, PE32+).
 
-## Consecuencias
+## Consequences
 
-- Se parte de un entorno de 64 bits con paginación activa y GOP disponible.
-- El mapa de memoria, ACPI y el framebuffer se obtienen del firmware.
-- Hardware sin UEFI queda fuera del alcance.
+- We start from a 64-bit environment with paging enabled and GOP available.
+- The memory map, ACPI and the framebuffer are obtained from the firmware.
+- Hardware without UEFI is out of scope.

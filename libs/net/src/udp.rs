@@ -1,4 +1,6 @@
-//! UDP (RFC 768) con checksum obligatorio en emisión.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! UDP (RFC 768) with mandatory checksum on transmit.
 
 use crate::ipv4::{pseudo_header_sum, PROTO_UDP};
 use crate::{be16, checksum, Ipv4Addr};
@@ -12,7 +14,7 @@ pub struct Header {
 }
 
 impl Header {
-    /// Analiza y valida longitud y checksum (si no es 0). Devuelve la carga útil.
+    /// Parses and validates length and checksum (if not 0). Returns the payload.
     pub fn parse(src: Ipv4Addr, dst: Ipv4Addr, b: &[u8]) -> Option<(Header, &[u8])> {
         if b.len() < HEADER_LEN {
             return None;
@@ -39,7 +41,7 @@ impl Header {
         ))
     }
 
-    /// Escribe cabecera y carga útil con checksum sobre la pseudocabecera.
+    /// Writes header and payload with checksum over the pseudo-header.
     pub fn write(
         &self,
         src: Ipv4Addr,
@@ -87,9 +89,9 @@ mod tests {
         let (parsed, payload) = Header::parse(src, dst, &buf[..n]).unwrap();
         assert_eq!(parsed, h);
         assert_eq!(payload, b"hola");
-        // Otra direccion de destino invalida el checksum.
+        // Another destination address invalidates the checksum.
         assert!(Header::parse(src, Ipv4Addr::new(10, 0, 2, 3), &buf[..n]).is_none());
-        // Checksum 0 = ausente: se acepta.
+        // Checksum 0 = absent: accepted.
         buf[6..8].copy_from_slice(&[0, 0]);
         assert!(Header::parse(src, dst, &buf[..n]).is_some());
     }

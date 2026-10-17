@@ -1,255 +1,255 @@
-# Revisión de supervisión, persistencia, paquetes y WASM
+# Review of supervision, persistence, packages and WASM
 
-Fecha: 2026-09-29. Commit revisado: `6ee19fb`.
-Comparación: `4836023..6ee19fb`; árbol limpio al comenzar.
+Date: 2026-09-29. Reviewed commit: `6ee19fb`.
+Range: `4836023..6ee19fb`; clean tree at the start.
 
-Alcance: correcciones de USB/HID, versión 0.6.0 y etapas 1–4: supervisor,
-correlación IPC, puente de consola, AriFS v1, actualizaciones entre arranques,
-broker asíncrono, permisos por archivo, paquetes e instalador, validador WASM.
+Scope: USB/HID fixes, version 0.6.0 and stages 1–4: supervisor,
+IPC correlation, console bridge, AriFS v1, cross-boot updates,
+asynchronous broker, per-file permissions, packages and installer, WASM validator.
 
-**Siete hallazgos abiertos: dos P1 y cinco P2.** Hay reproducciones de host
-y QEMU. No se han aplicado correcciones al código de producción.
+**Seven open findings: two P1 and five P2.** There are host and QEMU
+reproductions. No fixes have been applied to production code.
 
-## Validación
+## Validation
 
-La batería oficial se ejecuta en una copia de `git archive 6ee19fb`, en
-`/var/tmp/aricode-review-6ee19fb-uhBqbF`, sobre disco, no en el tmpfs `/tmp`.
-Como había otra batería ejecutándose en el repositorio, los puertos de prueba
-17007–17010 se sustituyeron por 31007–31010 en constantes, URLs y expectativas
-de esa copia. No se cambiaron algoritmos ni escenarios para obtener resultados.
+The official suite runs in a copy from `git archive 6ee19fb`, at
+`/var/tmp/aricode-review-6ee19fb-uhBqbF`, on disk, not in the `/tmp` tmpfs.
+Because another suite was running in the repository, test ports
+17007–17010 were replaced with 31007–31010 in constants, URLs and expectations
+in that copy. No algorithms or scenarios were changed to obtain results.
 
-| Comprobación | Resultado |
+| Check | Result |
 | --- | --- |
-| `cargo xtask check` | Correcto |
-| Batería oficial de host | 231 correctas, 0 fallidas |
-| `cargo xtask test --all` | 100 escenarios: 96 correctos, 4 fallidos por expectativas de recuento (hallazgo 7); salida 1 |
-| Sondas adicionales de host | 7 aserciones de regresión fallidas: 3 de persistencia, 3 de validación WASM y 1 de ejecución de loops |
-| Referencia WASM con Node | Rechaza los tres módulos inválidos; el loop válido devuelve 0 |
-| QEMU: journal, abandono de reemplazo e importación WASM | Los tres defectos reproducidos; el sistema continúa y se apaga con código 33 |
-| QEMU: servicio que no responde al arrancar | Dos procesos siguen activos tras declararlos fallidos; las reclamaciones PCI posteriores fallan |
+| `cargo xtask check` | Pass |
+| Official host suite | 231 passed, 0 failed |
+| `cargo xtask test --all` | 100 scenarios: 96 passed, 4 failed on count expectations (finding 7); exit 1 |
+| Additional host probes | 7 failing regression assertions: 3 persistence, 3 WASM validation and 1 loop execution |
+| WASM reference with Node | Rejects the three invalid modules; the valid loop returns 0 |
+| QEMU: journal, abandoned replace and WASM import | All three defects reproduced; the system keeps running and shuts down with code 33 |
+| QEMU: service not responding at startup | Two processes remain alive after being declared failed; later PCI claims fail |
 
-Las sondas adicionales no forman parte de los 231 tests oficiales. Sus fallos
-son aserciones deliberadas del comportamiento esperado, no errores de compilación.
-Evidencias y reproducción: [6ee19fb-review](6ee19fb-review/README.md).
+The additional probes are not part of the 231 official tests. Their failures
+are deliberate assertions of the expected behaviour, not build errors.
+Evidence and reproduction: [6ee19fb-review](6ee19fb-review/README.md).
 
-## 1. [P1] El compromiso por trozos permite leer restos del journal de otra aplicación
+## 1. [P1] Chunked commit allows reading leftovers from another application's journal
 
-Código: [services/arifs/src/main.rs](../../services/arifs/src/main.rs),
-líneas 278–287 y 309–325;
-[libs/arifs/src/lib.rs](../../libs/arifs/src/lib.rs), `replace_chunk` y
-`commit_header`, líneas 479–539. Introducido por `9ce36fc`.
+Code: [services/arifs/src/main.rs](../../services/arifs/src/main.rs),
+lines 278–287 and 309–325;
+[libs/arifs/src/lib.rs](../../libs/arifs/src/lib.rs), `replace_chunk` and
+`commit_header`, lines 479–539. Introduced by `9ce36fc`.
 
-`Staging` solo guarda archivo y propietario. No registra qué bytes recibió la
-transacción. `ReplaceCommit` acepta una longitud mayor que los trozos enviados,
-y calcula el CRC de lo que haya en el journal global, incluidos restos de un
-reemplazo anterior. Limitar la longitud a 32 KiB no comprueba su procedencia.
+`Staging` only stores the file and the owner. It does not record which bytes the
+transaction received. `ReplaceCommit` accepts a length larger than the chunks sent,
+and computes the CRC over whatever is in the global journal, including leftovers from
+a previous replace. Capping the length at 32 KiB does not check where the bytes came from.
 
-En QEMU, `reviewa` y `reviewb` son aplicaciones distintas, con directorios
-privados y únicamente `caps = fs`. A reemplaza su archivo por una cadena sintética.
-B envía un trozo de un byte a su propio archivo y compromete 22 bytes. B lee:
+In QEMU, `reviewa` and `reviewb` are distinct applications, with private
+directories and only `caps = fs`. A replaces its file with a synthetic string.
+B sends a one-byte chunk to its own file and commits 22 bytes. B reads:
 
 ```text
 review: A wrote private fixture
 review: B read from its own file: XYNTHETIC_PRIVATE_DATA
 ```
 
-B no recibió un archivo compartido ni el endpoint raíz. Los permisos de archivo
-se respetan al abrir, pero los datos atraviesan el journal compartido.
+B received neither a shared file nor the root endpoint. File permissions
+are enforced on open, but the data crosses through the shared journal.
 
-Corrección propuesta: definir una transacción con longitud esperada y cobertura
-de todos los bytes, o exigir trozos consecutivos desde cero; rechazar el compromiso
-incompleto. Inicializar una transacción nueva sin reutilizar datos de otro dueño.
-Regresión: dos namespaces, reemplazo previo y compromiso con huecos o longitud
-excesiva; no debe aparecer ningún byte de la transacción anterior.
+Proposed fix: define a transaction with an expected length and coverage
+of every byte, or require consecutive chunks starting at zero; reject an incomplete
+commit. Initialise a new transaction without reusing another owner's data.
+Regression: two namespaces, a prior replace and a commit with gaps or excessive
+length; no byte from the previous transaction may appear.
 
-## 2. [P1] Faltan barreras antes de publicar metadatos dependientes de otras escrituras
+## 2. [P1] Missing barriers before publishing metadata that depends on other writes
 
-Código: [libs/arifs/src/lib.rs](../../libs/arifs/src/lib.rs), líneas 400–403
-y 451–458. La nueva persistencia y su contrato se incorporan en `61d141a`.
+Code: [libs/arifs/src/lib.rs](../../libs/arifs/src/lib.rs), lines 400–403
+and 451–458. The new persistence and its contract were added in `61d141a`.
 
-El contrato de `BlockDevice` permite reordenación de sectores hasta `flush`.
-`create_sized` escribe el superbloque y la entrada sin barrera intermedia; el
-comentario supone un orden duradero que la interfaz no garantiza. Si un corte
-conserva la entrada pero pierde el avance de `data_next`, el siguiente montaje
-acepta ambos metadatos con CRC válido y vuelve a asignar el mismo espacio.
+The `BlockDevice` contract allows sector reordering until `flush`.
+`create_sized` writes the superblock and the entry without an intermediate barrier; the
+comment assumes a durable ordering that the interface does not guarantee. If a power cut
+keeps the entry but loses the `data_next` advance, the next mount
+accepts both pieces of metadata with valid CRCs and allocates the same space again.
 
-Una sonda con caché de escritura, sectores atómicos y corte antes de `flush`
-produce `first_lba=70, second_lba=70`. Dos archivos diferentes quedan solapados.
-El mismo modelo aplicado a `write` conserva un tamaño de tres bytes sin conservar
-sus datos: tras reabrir se leen `[0, 0, 0]`, aunque se escribió `NEW`.
+A probe with a write cache, atomic sectors and a cut before `flush`
+produces `first_lba=70, second_lba=70`. Two different files end up overlapping.
+The same model applied to `write` keeps a three-byte size without keeping
+its data: after reopening, `[0, 0, 0]` is read, although `NEW` was written.
 
-Que una operación no sea todavía duradera permite perderla; no debe permitir
-que la recuperación monte archivos solapados. Las pruebas existentes de cortes
-en orden de escritura no cubren este caso de reordenación permitido por el contrato.
+An operation that is not yet durable may be lost; it must not allow
+recovery to mount overlapping files. The existing power-cut tests
+in write order do not cover this reordering case allowed by the contract.
 
-Corrección propuesta: persistir la reserva antes de publicar la entrada, y los
-datos antes de publicar un crecimiento, o incluir esas operaciones en una
-transacción recuperable. Comprobar también coherencia de rangos y asignación al
-montar. Regresión: modelo de disco con caché y persistencia selectiva de sectores,
-no solo un contador que interrumpa escrituras en su orden original.
+Proposed fix: persist the allocation before publishing the entry, and the
+data before publishing a size increase, or include those operations in a
+recoverable transaction. Also check range consistency and allocation at
+mount. Regression: a disk model with a cache and selective sector persistence,
+not just a counter that interrupts writes in their original order.
 
-## 3. [P2] Un cliente que termina a mitad del reemplazo deja ocupado el journal global
+## 3. [P2] A client that exits mid-replace leaves the global journal occupied
 
-Código: [services/arifs/src/main.rs](../../services/arifs/src/main.rs),
-líneas 267–285 y 309–324. Introducido por `9ce36fc`.
+Code: [services/arifs/src/main.rs](../../services/arifs/src/main.rs),
+lines 267–285 and 309–324. Introduced by `9ce36fc`.
 
-La reserva `srv.staging` solo se libera por cierre explícito del descriptor,
-compromiso o determinados errores. No tiene plazo ni un mecanismo asociado a la
-muerte del cliente. Los endpoints de namespace se conservan en fsd y se comparten
-entre lanzamientos, por lo que la salida del proceso no dispara esa limpieza.
+The `srv.staging` reservation is only released by an explicit descriptor close,
+a commit or certain errors. It has no timeout and no mechanism tied to the
+client's death. Namespace endpoints are kept in fsd and shared
+across launches, so process exit does not trigger that cleanup.
 
-Reproducción QEMU: A envía el primer trozo y termina sin cerrar; B intenta un
-reemplazo normal mediante `FsClient::replace`:
+QEMU reproduction: A sends the first chunk and exits without closing; B attempts a
+normal replace through `FsClient::replace`:
 
 ```text
 review: exiting after chunk without commit/close
-user: proceso 22 'reviewa' salio con codigo 0
+user: process 22 'reviewa' exited with code 0
 review: BUSY after other app exited
 ```
 
-Quedan afectados los reemplazos atómicos de otras aplicaciones, incluido el
-instalador. No se afirma que todas las lecturas o escrituras del sistema se bloqueen.
+Atomic replaces by other applications are affected, including the
+installer. This does not claim that all system reads or writes block.
 
-Corrección propuesta: identidad de transacción y cancelación/recuperación al
-perder al dueño, más un plazo acotado para una transacción abandonada. Rechazar
-commits de transacciones caducadas. Regresión: terminar al cliente entre dos
-trozos y comprobar que otro puede completar un reemplazo sin reiniciar fsd.
+Proposed fix: transaction identity and cancellation/recovery when the
+owner is lost, plus a bounded timeout for an abandoned transaction. Reject
+commits of expired transactions. Regression: kill the client between two
+chunks and check that another client can complete a replace without restarting fsd.
 
-## 4. [P2] El supervisor pierde el proceso vivo cuando vence su sonda de arranque
+## 4. [P2] The supervisor loses the live process when its startup probe times out
 
-Código: [services/init/src/main.rs](../../services/init/src/main.rs),
-líneas 530–542. Introducido por `4607e5d`.
+Code: [services/init/src/main.rs](../../services/init/src/main.rs),
+lines 530–542. Introduced by `4607e5d`.
 
-Cuando la sonda falla, `launch` llama a `announce_death(StartTimeout)`.
-Esta función extrae y cierra el handle del proceso, pero no lo termina ni espera
-su salida. `HANDLE_CLOSE` solo retira el handle: el proceso puede seguir ejecutándose
-y conservar sus dispositivos. El supervisor programa otra generación y pierde
-la referencia con la que vigilaba la anterior.
+When the probe fails, `launch` calls `announce_death(StartTimeout)`.
+This function takes and closes the process handle, but neither terminates it nor waits for
+it to exit. `HANDLE_CLOSE` only drops the handle: the process may keep running
+and keep its devices. The supervisor schedules another generation and loses
+the reference it used to watch the previous one.
 
-Reproducción QEMU con un fixture: sustituir el binario `virtio_input` del initrd
-por el `cpu_hog` existente, que no responde y no termina. No se modifica init ni
-el kernel. Tras vencer ambas sondas, aparecen `pci: ya reclamado` al reintentar;
-`services --detail` muestra servicios parados mientras `ps` muestra los PID 14
-y 15 de `virtio_input` todavía activos.
+QEMU reproduction with a fixture: replace the `virtio_input` binary in the initrd
+with the existing `cpu_hog`, which does not respond and does not exit. Neither init nor
+the kernel is modified. After both probes time out, `pci: already claimed` appears on retry;
+`services --detail` shows the services stopped while `ps` shows PIDs 14
+and 15 of `virtio_input` still alive.
 
-Corrección propuesta: distinguir «no responde» de «terminó». Conservar el handle
-hasta confirmar salida y limpieza; si se añade terminación desde el supervisor,
-esperar a que finalice antes de reclamar PCI. Si no se puede terminar, marcar el
-servicio como fallido vivo y no lanzar otra instancia como si se hubiera liberado.
-Regresión: arranque lento o permanentemente bloqueado con propiedad PCI retenida.
+Proposed fix: distinguish "not responding" from "exited". Keep the handle
+until exit and cleanup are confirmed; if termination from the supervisor is added,
+wait for it to finish before claiming PCI. If it cannot be terminated, mark the
+service as failed-but-alive and do not launch another instance as if it had been released.
+Regression: slow or permanently blocked startup with PCI ownership retained.
 
-## 5. [P2] El runner resuelve importaciones WASM sin comprobar sus firmas
+## 5. [P2] The runner resolves WASM imports without checking their signatures
 
-Código: [apps/wasm-runner/src/main.rs](../../apps/wasm-runner/src/main.rs),
-líneas 319–345 y 142–143. Nuevas importaciones de archivos en `6ee19fb`.
+Code: [apps/wasm-runner/src/main.rs](../../apps/wasm-runner/src/main.rs),
+lines 319–345 and 142–143. New file imports in `6ee19fb`.
 
-La resolución comprueba módulo, nombre y capability, pero no compara
-`imp.type_index` con la firma de la función anfitriona. El validador solo conoce
-la firma declarada por el módulo; no puede comprobar por sí solo la API de Rust.
-El anfitrión accede a `args[0..3]` suponiendo cuatro argumentos.
+Resolution checks module, name and capability, but does not compare
+`imp.type_index` with the host function's signature. The validator only knows
+the signature declared by the module; it cannot check the Rust API on its own.
+The host accesses `args[0..3]` assuming four arguments.
 
-Un módulo válido de 66 bytes importa `aricode.file_write` como `() -> i32` y lo
-invoca desde `main(i64) -> i32`. Pasa `Module::parse`, tiene `files` concedido y
-en QEMU termina con `panic en programa de usuario`, código 255. La firma real
-exige cuatro `i32`. Es un fallo del runner aislado, no un panic del kernel.
+A valid 66-byte module imports `aricode.file_write` as `() -> i32` and
+calls it from `main(i64) -> i32`. It passes `Module::parse`, has `files` granted and
+in QEMU ends with `panic in user program`, code 255. The real signature
+requires four `i32`. It is an isolated runner failure, not a kernel panic.
 
-Corrección propuesta: asociar parámetros y resultados a cada `Api`, compararlos
-al enlazar y rechazar la incompatibilidad antes de ejecutar `start`. Comprobar
-también la firma de `main`; mantener comprobaciones defensivas de longitud en
-el anfitrión. Regresión: imports con menos argumentos, tipos incorrectos y
-resultados incompatibles; deben producir un error controlado de enlace.
+Proposed fix: attach parameters and results to each `Api`, compare them
+at link time and reject the mismatch before running `start`. Also check
+the signature of `main`; keep defensive length checks in
+the host. Regression: imports with fewer arguments, wrong types and
+incompatible results; they must produce a controlled link error.
 
-## 6. [P2] La nueva validación deja pasar módulos estructuralmente inválidos
+## 6. [P2] The new validation lets structurally invalid modules through
 
-Código: [libs/wasm/src/validate.rs](../../libs/wasm/src/validate.rs),
-líneas 490–527, especialmente la comprobación de exportaciones en 510–514.
-Introducido como validación completa en `6ee19fb`.
+Code: [libs/wasm/src/validate.rs](../../libs/wasm/src/validate.rs),
+lines 490–527, especially the export check at 510–514.
+Introduced as full validation in `6ee19fb`.
 
-Se validan cuerpos y determinados índices, pero se aceptan estos tres módulos
-mínimos, conservados en las evidencias:
+Bodies and certain indices are validated, but these three minimal modules,
+kept in the evidence, are accepted:
 
-- `wrong-global.wasm`: global declarada `i32` inicializada mediante `i64.const`.
-- `missing-memory.wasm`: exportación de memoria 99 sin ninguna memoria definida.
-- `inverted-limits.wasm`: memoria con mínimo 2 y máximo 1.
+- `wrong-global.wasm`: global declared `i32` initialised with `i64.const`.
+- `missing-memory.wasm`: export of memory 99 with no memory defined.
+- `inverted-limits.wasm`: memory with minimum 2 and maximum 1.
 
-Las tres sondas que esperan rechazo fallan; `WebAssembly.validate` de Node devuelve
-`false` en las tres. El parser descarta parte de la información necesaria para
-revalidar inicializadores y el validador solo comprueba exportaciones de función.
-No basta con que la ejecución posterior pueda fallar: la nueva API afirma rechazar
-el módulo antes de instanciarlo.
+The three probes that expect rejection fail; Node's `WebAssembly.validate` returns
+`false` for all three. The parser discards part of the information needed to
+revalidate initialisers, and the validator only checks function exports.
+It is not enough that later execution may fail: the new API claims to reject
+the module before instantiating it.
 
-Corrección propuesta: conservar y validar tipos de expresiones constantes,
-límites y todos los espacios de índices; completar también las comprobaciones
-de estructura y del perfil anunciado. Regresión: corpus positivo/negativo
-contrastado con otro motor. La [especificación de validación de módulos](https://webassembly.github.io/spec/core/valid/modules.html)
-define estas obligaciones; las tres sondas usan características básicas, no
-extensiones fuera del perfil.
+Proposed fix: keep and validate constant expression types,
+limits and all index spaces; also complete the structural checks
+and those for the advertised profile. Regression: positive/negative corpus
+cross-checked against another engine. The [module validation specification](https://webassembly.github.io/spec/core/valid/modules.html)
+defines these obligations; the three probes use basic features, not
+extensions outside the profile.
 
-## 7. [P2] La imagen nueva deja desactualizadas expectativas de la batería obligatoria
+## 7. [P2] The new image leaves expectations in the mandatory suite out of date
 
-Código: [tools/xtask/src/image.rs](../../tools/xtask/src/image.rs), líneas
+Code: [tools/xtask/src/image.rs](../../tools/xtask/src/image.rs), lines
 650–653; [filesystem_read_write.toml](../../tests/qemu/filesystem_read_write.toml),
-línea 12, y [filesystem_replace_recovery.toml](../../tests/qemu/filesystem_replace_recovery.toml),
-línea 18; [shell_write_persists.toml](../../tests/qemu/shell_write_persists.toml),
-línea 28; [usb_image_boot.toml](../../tests/qemu/usb_image_boot.toml),
-línea 19. Regresión de `6ee19fb`.
+line 12, and [filesystem_replace_recovery.toml](../../tests/qemu/filesystem_replace_recovery.toml),
+line 18; [shell_write_persists.toml](../../tests/qemu/shell_write_persists.toml),
+line 28; [usb_image_boot.toml](../../tests/qemu/usb_image_boot.toml),
+line 19. Regression from `6ee19fb`.
 
-La imagen añade `wasm_runner/demo.manifest` junto al módulo, pasando de tres a
-cuatro archivos iniciales. Cuatro escenarios siguen usando
-los recuentos anteriores: tres al montar, o cinco tras crear archivos entre
-arranques, en vez de cuatro y seis. Fallan `filesystem.read_write`,
-`filesystem.replace_recovery`, `shell.write_persists` y `usb.image_boot`.
-Alcanzan sus operaciones y finalizan, pero las expectativas rompen
+The image adds `wasm_runner/demo.manifest` next to the module, going from three to
+four initial files. Four scenarios still use
+the old counts: three at mount, or five after creating files across
+boots, instead of four and six. `filesystem.read_write`,
+`filesystem.replace_recovery`, `shell.write_persists` and `usb.image_boot` fail.
+They reach their operations and finish, but the expectations break
 `cargo xtask test --all`.
 
-Corrección propuesta: actualizar los escenarios junto al fixture, o comprobar
-los archivos necesarios sin acoplar pruebas de persistencia al número de archivos
-WASM. Regresión: los escenarios afectados deben pasar con la imagen realmente construida.
+Proposed fix: update the scenarios together with the fixture, or check
+the required files without coupling persistence tests to the number of WASM
+files. Regression: the affected scenarios must pass with the image actually built.
 
-## Correcciones de la revisión anterior
+## Fixes from the previous review
 
-`fb60352` incorpora las cuatro correcciones de `4836023`: filtro PCI por interfaz
-xHCI, sonda antes de publicar entrada, intervalos FS/LS corregidos, capacidad para
-21 eventos HID y descriptor inicial de ocho bytes antes de ajustar EP0.
-Las pruebas de host de HID/intervalos y los escenarios QEMU `usb.hid`,
-`usb.hid_boot` y `usb.hid_boot_with_ehci` pasan en esta batería.
-El fallo de `usb.image_boot` es la expectativa de recuento del hallazgo 7,
-no una regresión de enumeración xHCI.
-El caso físico FS con EP0 de 64 bytes sigue sin verificarse en hardware.
+`fb60352` includes the four fixes from `4836023`: PCI filter by xHCI
+interface, probe before publishing the entry, corrected FS/LS intervals, capacity for
+21 HID events and an initial eight-byte descriptor before adjusting EP0.
+The HID/interval host tests and the QEMU scenarios `usb.hid`,
+`usb.hid_boot` and `usb.hid_boot_with_ehci` pass in this suite.
+The `usb.image_boot` failure is the count expectation from finding 7,
+not an xHCI enumeration regression.
+The physical FS case with a 64-byte EP0 remains unverified on hardware.
 
-## Observación adicional: loops WASM con parámetros
+## Additional observation: WASM loops with parameters
 
-La sonda `valid_loop_parameters_preserved_on_branch` valida un módulo cuyo loop
-recibe un `i32`, decrementa un contador y usa `br_if` para repetir. Node lo acepta
-y devuelve 0; AriCodeOS también lo valida, pero ejecutándolo devuelve
-`Trap("pila vacia")`. `Instance::branch` conserva cero valores al saltar a un loop
-en vez de sus parámetros, en [libs/wasm/src/lib.rs](../../libs/wasm/src/lib.rs),
-líneas 657–665. Esa lógica ya estaba en `4836023`; se registra fuera de los siete
-hallazgos nuevos, aunque afecta al perfil documentado ahora. Rechazar temporalmente
-esa forma o implementar sus parámetros de etiqueta evitaría anunciarla como soportada.
+The probe `valid_loop_parameters_preserved_on_branch` validates a module whose loop
+takes an `i32`, decrements a counter and uses `br_if` to repeat. Node accepts it
+and returns 0; AriCodeOS also validates it, but executing it returns
+`Trap("empty stack")`. `Instance::branch` keeps zero values when branching to a loop
+instead of its parameters, in [libs/wasm/src/lib.rs](../../libs/wasm/src/lib.rs),
+lines 657–665. That logic was already in `4836023`; it is recorded outside the seven
+new findings, although it affects the profile now documented. Temporarily rejecting
+that form or implementing its label parameters would avoid advertising it as supported.
 
-## Resolución (rama `fix/audit-6ee19fb`, 2026-09-30)
+## Resolution (branch `fix/audit-6ee19fb`, 2026-09-30)
 
-| # | Estado | Corrección | Regresión |
+| # | Status | Fix | Regression |
 |---|--------|------------|-----------|
-| 1 | Corregido | La librería lleva la transacción: un trozo en 0 la empieza, los siguientes deben ir seguidos y `replace_commit` solo acepta la longitud exacta escrita por esa transacción (`FsError::BadTransaction`, `Invalid` por IPC); fsd descarta la transacción ante cualquier error, cierre o cambio de dueño. | Host: `chunked_commit_only_covers_its_own_bytes` (compromiso de 22 bytes tras un trozo de 1 sobre restos ajenos, huecos, trozo sin empezar en 0, compromiso de otro fichero). QEMU: `fs_victim` reemplaza con `XYNTHETIC_PRIVATE_DATA` y `fs_probe` intenta el mismo compromiso incompleto: `Invalid`, sin restos (`sandbox.manifest`). |
-| 2 | Corregido | `create` hace `flush` entre el superbloque y la entrada; `write` hace `flush` de los datos antes de publicar un tamaño mayor; `open` rechaza (`Corrupt`) entradas fuera del área asignada, con tamaño mayor que la capacidad o solapadas aunque su CRC sea válido. | Host: `reordered_metadata_never_overlaps_files` con un disco que conserva solo un subconjunto de los sectores pendientes (tabla sola o superbloque solo): el siguiente fichero nunca reusa el espacio, un tamaño publicado siempre tiene sus datos, y una tabla solapada con CRC correcto no se monta. |
-| 3 | Corregido | La reserva del journal en fsd lleva el instante del último trozo (fsd recibe `SYSTEM` de init); pasados 2 s sin actividad, otro cliente la sustituye y la transacción abandonada se descarta. También se descarta al cerrar el descriptor o ante un error. | QEMU: `fs_victim` deja un trozo sin comprometer y sale; `fs_probe` obtiene `Busy` y, al caducar, completa su reemplazo sin reiniciar fsd (`sandbox.manifest`). |
-| 4 | Corregido | Nueva syscall `process_kill` (`MANAGE` sobre el proceso): marca la terminación y despierta al hilo, que termina al salir de la syscall en curso, al despertar de una espera (`wait_until_deadline` la observa) o en el siguiente tick si estaba en ring 3. El supervisor, al vencer la sonda, mata al proceso vivo y espera su recogida antes de anunciar la muerte; si no termina en 2 s, el servicio queda fallido sin relanzar. | QEMU: `services.start_timeout` (`service_hang`): un servicio que nunca responde se termina "por el supervisor" en cada generación y, agotado el presupuesto, no queda ningún proceso suyo vivo. |
-| 5 | Corregido | El runner asocia una firma a cada función del anfitrión y la compara con el tipo declarado por la importación antes de enlazar (`firma incompatible`, código 14); también exige `main(i64) -> i32` (código 15). Los accesos a `args` siguen siendo por índice sobre una firma ya comprobada. | QEMU: `wasm.bad_import` con el módulo de la auditoría (`file_write` como `() -> i32`): rechazado al enlazar, sin panic. |
-| 6 | Corregido | El analizador conserva el tipo de las expresiones constantes y los límites de la tabla; el validador exige que el inicializador de cada global tenga su tipo, que las exportaciones de tabla, memoria y global apunten a algo que existe, y que los límites de memoria y tabla sean coherentes (máximo ≥ mínimo, ≤ 65536 páginas); los desplazamientos de elementos y datos deben ser `i32.const`. | Host: `audit_fixtures_structural_validation_and_loop_params` con los tres módulos de la auditoría (`wrong-global`, `missing-memory`, `inverted-limits`), rechazados con su motivo. |
-| 7 | Corregido en `4c0de50` | Recuentos de ficheros de los cuatro escenarios actualizados a la imagen con `demo.manifest`. | Los cuatro escenarios pasan en la batería completa desde entonces. |
-| Obs. | Corregido | Las etiquetas guardan sus parámetros y un `br` a un `loop` conserva tantos valores como parámetros tiene el bloque (antes ninguno). | Host: el módulo `loop-params` de la auditoría devuelve 0, como en la referencia. |
+| 1 | Fixed | The library tracks the transaction: a chunk at 0 starts it, subsequent chunks must be contiguous and `replace_commit` only accepts the exact length written by that transaction (`FsError::BadTransaction`, `Invalid` over IPC); fsd discards the transaction on any error, close or change of owner. | Host: `chunked_commit_only_covers_its_own_bytes` (22-byte commit after a 1-byte chunk over another owner's leftovers, gaps, chunk not starting at 0, commit of another file). QEMU: `fs_victim` replaces with `XYNTHETIC_PRIVATE_DATA` and `fs_probe` attempts the same incomplete commit: `Invalid`, no leftovers (`sandbox.manifest`). |
+| 2 | Fixed | `create` does a `flush` between the superblock and the entry; `write` flushes the data before publishing a larger size; `open` rejects (`Corrupt`) entries outside the allocated area, with a size larger than their capacity or overlapping, even if their CRC is valid. | Host: `reordered_metadata_never_overlaps_files` with a disk that keeps only a subset of the pending sectors (table only or superblock only): the next file never reuses the space, a published size always has its data, and an overlapping table with a correct CRC is not mounted. |
+| 3 | Fixed | The journal reservation in fsd carries the time of the last chunk (fsd receives `SYSTEM` from init); after 2 s without activity, another client takes it over and the abandoned transaction is discarded. It is also discarded when the descriptor is closed or on an error. | QEMU: `fs_victim` leaves an uncommitted chunk and exits; `fs_probe` gets `Busy` and, once it expires, completes its replace without restarting fsd (`sandbox.manifest`). |
+| 4 | Fixed | New syscall `process_kill` (`MANAGE` on the process): marks termination and wakes the thread, which terminates on leaving the current syscall, on waking from a wait (`wait_until_deadline` observes it) or on the next tick if it was in ring 3. When the probe times out, the supervisor kills the live process and waits for it to be reaped before announcing the death; if it does not terminate within 2 s, the service is left failed without relaunching. | QEMU: `services.start_timeout` (`service_hang`): a service that never responds is terminated "by the supervisor" in each generation and, once the budget is exhausted, none of its processes remain alive. |
+| 5 | Fixed | The runner attaches a signature to each host function and compares it with the type declared by the import before linking (`incompatible signature`, code 14); it also requires `main(i64) -> i32` (code 15). Accesses to `args` are still by index over an already-checked signature. | QEMU: `wasm.bad_import` with the audit module (`file_write` as `() -> i32`): rejected at link time, no panic. |
+| 6 | Fixed | The parser keeps the type of constant expressions and the table limits; the validator requires each global's initialiser to have its type, table, memory and global exports to point to something that exists, and memory and table limits to be consistent (maximum ≥ minimum, ≤ 65536 pages); element and data offsets must be `i32.const`. | Host: `audit_fixtures_structural_validation_and_loop_params` with the three audit modules (`wrong-global`, `missing-memory`, `inverted-limits`), rejected with their reason. |
+| 7 | Fixed in `4c0de50` | File counts in the four scenarios updated for the image with `demo.manifest`. | The four scenarios have passed in the full suite since then. |
+| Obs. | Fixed | Labels store their parameters and a `br` to a `loop` keeps as many values as the block has parameters (previously none). | Host: the audit's `loop-params` module returns 0, as in the reference. |
 
-## Límites y resolución
+## Limits and resolution
 
-Estado de los siete hallazgos: **abiertos**. Este turno solo añade informe y
-evidencias. No se han cambiado las ramas, creado commits ni alterado las pruebas
-que otro proceso ejecutaba en el repositorio.
+Status of the seven findings: **open**. This turn only adds the report and
+evidence. No branches were changed, no commits created and the tests
+that another process was running in the repository were not altered.
 
-La revisión cubre el rango indicado, con mayor profundidad en persistencia,
-supervisión, paquetes y WASM. No certifica ausencia de otros defectos, hardware
-físico, toda la batería forzada a cuatro CPU ni resistencia a todos los fallos de
-almacenamiento. Los escenarios `kill_on` de actualizaciones cortan al observar un
-marcador anterior a las escrituras: no determinan por sí solos todos los puntos
-intermedios del journal ni la reordenación de sectores.
+The review covers the stated range, in greater depth on persistence,
+supervision, packages and WASM. It does not certify the absence of other defects, physical
+hardware, the full suite forced to four CPUs or resilience to every storage
+failure. The update `kill_on` scenarios cut power on seeing a
+marker before the writes: on their own they do not determine every intermediate
+point of the journal or sector reordering.

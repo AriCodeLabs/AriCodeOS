@@ -1,5 +1,7 @@
-//! Espacio de usuario (Fase 11): procesos con espacio de direcciones propio,
-//! programas de prueba embebidos y despacho de syscalls.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! User space (Phase 11): processes with their own address space,
+//! embedded test programs and syscall dispatch.
 
 pub mod process;
 pub mod programs;

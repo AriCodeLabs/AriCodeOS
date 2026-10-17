@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 #![no_std]
 #![no_main]
 use aricode_rt::sys::{self, fs::FsClient, kind, permissions};
@@ -15,7 +17,7 @@ fn main(_: u64) -> u64 {
     let fd = fs.create("secret.txt").unwrap();
     fs.write(fd, 0, b"VICTIM_SECRET").unwrap();
     sys::print(b"REVIEW_VICTIM_WROTE_PRIVATE_FILE\n");
-    // Terminar sin close: el descriptor no debe ser utilizable por otra app.
+    // Exit without close: the descriptor must not be usable by another app.
     0
 }
 aricode_rt::entry!(main);

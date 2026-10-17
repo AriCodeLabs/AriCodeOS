@@ -1,6 +1,8 @@
-//! Servidor que responde tarde a la primera peticion (etapa 1B): la primera
-//! la contesta con "late" tras 800 ms; las siguientes con "fresh" al
-//! instante. Handle 0x10004 = endpoint. Termina con "quit".
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Server that answers the first request late (stage 1B): the first one
+//! gets "late" after 800 ms; the rest get "fresh" immediately.
+//! Handle 0x10004 = endpoint. Exits on "quit".
 #![no_std]
 #![no_main]
 
@@ -29,8 +31,8 @@ fn main(_arg: u64) -> u64 {
         } else {
             b"fresh"
         };
-        // Una respuesta tardia puede encontrar el endpoint ya cerrado: el
-        // error no es del servidor.
+        // A late reply may find the endpoint already closed: that is not
+        // the server's error.
         let _ = sys::ipc_send(handles[0], reply, &[], 500);
         let _ = sys::handle_close(handles[0]);
     }

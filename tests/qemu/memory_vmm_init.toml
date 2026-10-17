@@ -1,5 +1,5 @@
 name = "memory.vmm_init"
-description = "tablas propias activas, W^X, pila con guard y memoria de arranque recuperada"
+description = "own page tables active, W^X, guarded stack and boot memory reclaimed"
 level = "smoke"
 areas = ["memory"]
 cmdline = "qemu_exit"
@@ -7,10 +7,10 @@ cmdline = "qemu_exit"
 [expect]
 exit = 33
 serial_contains = [
-    "vmm: tablas propias activas",
-    "W^X en la imagen",
-    "de memoria de arranque devueltos al PMM",
-    "KiB conservados para el kernel",
+    "vmm: own tables active",
+    "W^X on the image",
+    "boot memory returned to the PMM",
+    "KiB kept for the kernel",
     "ARICODEOS_KERNEL_READY",
 ]
 serial_absent = ["KERNEL PANIC", "EXCEPTION"]

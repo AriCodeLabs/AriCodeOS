@@ -1,7 +1,9 @@
-//! FAT32 mínimo (Fase 34): construye la partición EFI de la imagen USB en el
-//! host (`Fat32Builder`) y la lee de vuelta (`Fat32`) para verificarla. Solo
-//! lo que exige un firmware UEFI: BPB de FAT32, FSInfo, dos copias de la
-//! FAT, directorios con entradas 8.3 y nombres largos (VFAT), sin fechas.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Minimal FAT32 (Phase 34): builds the EFI partition of the USB image on the
+//! host (`Fat32Builder`) and reads it back (`Fat32`) to verify it. Only what
+//! a UEFI firmware requires: FAT32 BPB, FSInfo, two FAT copies, directories
+//! with 8.3 entries and long names (VFAT), no timestamps.
 
 #![no_std]
 
@@ -15,7 +17,7 @@ const RESERVED_SECTORS: u32 = 32;
 const FATS: u32 = 2;
 const ROOT_CLUSTER: u32 = 2;
 const EOC: u32 = 0x0FFF_FFFF;
-/// Por debajo de esto un firmware toma la partición por FAT16.
+/// Below this a firmware takes the partition for FAT16.
 const MIN_CLUSTERS: u32 = 65_525;
 const MAX_CLUSTERS: u32 = 0x0FFF_FFF5;
 const ENTRY: usize = 32;
@@ -37,7 +39,7 @@ pub enum FatError {
     Corrupt,
 }
 
-/// Nombre corto 8.3 en mayúsculas si `name` ya lo es (sin necesitar LFN).
+/// Uppercase 8.3 short name if `name` already is one (no LFN needed).
 fn short_exact(name: &str) -> Option<[u8; 11]> {
     let (stem, ext) = match name.rfind('.') {
         Some(i) => (&name[..i], &name[i + 1..]),
@@ -58,7 +60,7 @@ fn short_exact(name: &str) -> Option<[u8; 11]> {
     Some(out)
 }
 
-/// Nombre corto derivado (`ARICOD~1`) único entre `existing`.
+/// Derived short name (`ARICOD~1`) unique among `existing`.
 fn short_derived(name: &str, existing: &[[u8; 11]]) -> [u8; 11] {
     let (stem, ext) = match name.rfind('.') {
         Some(i) if i > 0 => (&name[..i], &name[i + 1..]),
@@ -93,7 +95,7 @@ fn lfn_checksum(short: &[u8; 11]) -> u8 {
     })
 }
 
-/// Entradas de directorio (LFN + corta) para `name`.
+/// Directory entries (LFN + short) for `name`.
 fn dir_entries(
     name: &str,
     short: [u8; 11],
@@ -135,7 +137,7 @@ fn dir_entries(
     out
 }
 
-/// Constructor de una partición FAT32 en memoria.
+/// Builder of an in-memory FAT32 partition.
 pub struct Fat32Builder {
     sectors_per_cluster: u32,
     total_sectors: u32,
@@ -147,12 +149,12 @@ pub struct Fat32Builder {
 }
 
 impl Fat32Builder {
-    /// Partición de `total_sectors` sectores de 512 bytes con clústeres de
-    /// `sectors_per_cluster` (potencia de dos, 1..=128).
+    /// Partition of `total_sectors` 512-byte sectors with clusters of
+    /// `sectors_per_cluster` (power of two, 1..=128).
     pub fn new(total_sectors: u32, sectors_per_cluster: u32) -> Result<Self, FatError> {
         assert!(
             sectors_per_cluster.is_power_of_two() && sectors_per_cluster <= 128,
-            "sectores por cluster invalidos"
+            "invalid sectors per cluster"
         );
         let spc = sectors_per_cluster;
         let mut fat_size = 0u32;
@@ -245,8 +247,8 @@ impl Fat32Builder {
         }
     }
 
-    /// Nombres cortos ya usados en el directorio y, si existe, la entrada
-    /// (atributos, clúster) del nombre buscado (comparación sin mayúsculas).
+    /// Short names already used in the directory and, if present, the entry
+    /// (attributes, cluster) of the looked-up name (case-insensitive comparison).
     fn scan_dir(&self, dir: u32, wanted: &str) -> (Vec<[u8; 11]>, Option<(u8, u32)>) {
         let mut shorts = Vec::new();
         let mut found = None;
@@ -290,11 +292,11 @@ impl Fat32Builder {
         (shorts, found)
     }
 
-    /// Añade entradas contiguas al directorio, extendiéndolo si hace falta.
+    /// Appends contiguous entries to the directory, extending it if needed.
     fn add_entries(&mut self, dir: u32, entries: &[[u8; ENTRY]]) -> Result<(), FatError> {
         let per_cluster = self.cluster_bytes() / ENTRY;
         let chain = self.chain(dir);
-        // Primer hueco libre: las entradas se escriben siempre al final.
+        // First free slot: entries are always written at the end.
         let mut used = 0usize;
         'outer: for (i, c) in chain.iter().enumerate() {
             let data = self.cluster_ref(*c);
@@ -351,7 +353,7 @@ impl Fat32Builder {
         Ok(dir_entries(name, short, lfn, attr, cluster, size))
     }
 
-    /// Clúster del subdirectorio `name` de `dir`, creándolo si no existe.
+    /// Cluster of subdirectory `name` of `dir`, creating it if missing.
     fn subdir(&mut self, dir: u32, name: &str) -> Result<u32, FatError> {
         if let (_, Some((attr, cluster))) = self.scan_dir(dir, name) {
             return if attr & ATTR_DIRECTORY != 0 {
@@ -378,7 +380,7 @@ impl Fat32Builder {
         Ok(cluster)
     }
 
-    /// Añade `data` como el fichero `path` (`a/b/c.txt`), creando directorios.
+    /// Adds `data` as file `path` (`a/b/c.txt`), creating directories.
     pub fn add_file(&mut self, path: &str, data: &[u8]) -> Result<(), FatError> {
         let mut parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
         let name = parts.pop().ok_or(FatError::BadName)?;
@@ -415,7 +417,7 @@ impl Fat32Builder {
         b[36..40].copy_from_slice(&self.fat_size.to_le_bytes());
         b[44..48].copy_from_slice(&ROOT_CLUSTER.to_le_bytes());
         b[48..50].copy_from_slice(&1u16.to_le_bytes()); // FSInfo
-        b[50..52].copy_from_slice(&6u16.to_le_bytes()); // copia del sector de arranque
+        b[50..52].copy_from_slice(&6u16.to_le_bytes()); // backup boot sector
         b[64] = 0x80;
         b[66] = 0x29;
         b[67..71].copy_from_slice(&0x4152_4943u32.to_le_bytes());
@@ -436,7 +438,7 @@ impl Fat32Builder {
         b
     }
 
-    /// Imagen completa de la partición.
+    /// Complete partition image.
     pub fn finish(self) -> Vec<u8> {
         let mut img = alloc::vec![0u8; self.total_sectors as usize * SECTOR];
         let boot = self.boot_sector();
@@ -469,7 +471,7 @@ fn short_to_string(short: &[u8; 11]) -> String {
     }
 }
 
-/// Entrada de directorio leída.
+/// Directory entry as read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirEntry {
     pub name: String,
@@ -479,7 +481,7 @@ pub struct DirEntry {
     pub size: u32,
 }
 
-/// Lector de una partición FAT32 en memoria.
+/// Reader of an in-memory FAT32 partition.
 pub struct Fat32<'a> {
     img: &'a [u8],
     sectors_per_cluster: u32,
@@ -557,7 +559,7 @@ impl<'a> Fat32<'a> {
         Ok(out)
     }
 
-    /// Entradas del directorio cuyo primer clúster es `cluster` (sin `.`/`..`).
+    /// Entries of the directory whose first cluster is `cluster` (without `.`/`..`).
     pub fn read_dir(&self, cluster: u32) -> Result<Vec<DirEntry>, FatError> {
         let data = self.read_chain(cluster)?;
         let mut out = Vec::new();
@@ -611,7 +613,7 @@ impl<'a> Fat32<'a> {
         self.read_dir(self.root)
     }
 
-    /// Contenido de `path` (`a/b/c.txt`, sin distinguir mayúsculas).
+    /// Contents of `path` (`a/b/c.txt`, case-insensitive).
     pub fn read_file(&self, path: &str) -> Result<Vec<u8>, FatError> {
         let mut dir = self.root;
         let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
@@ -659,12 +661,12 @@ mod tests {
         assert_eq!(Fat32Builder::new(1000, 1).err(), Some(FatError::TooSmall));
         assert!(
             Fat32Builder::new(131_072, 1).is_ok(),
-            "64 MiB con clusteres de 512"
+            "64 MiB with 512-byte clusters"
         );
         assert_eq!(
             Fat32Builder::new(65_600 * 8, 8).err(),
             Some(FatError::TooSmall),
-            "con 4 KiB no llega a 65525 clusteres"
+            "with 4 KiB it does not reach 65525 clusters"
         );
     }
 
@@ -689,7 +691,7 @@ mod tests {
         assert_eq!(
             &img[6 * 512..6 * 512 + 3],
             &[0xEB, 0x58, 0x90],
-            "copia del sector de arranque"
+            "backup boot sector"
         );
         assert_eq!(
             u32::from_le_bytes(img[512..516].try_into().unwrap()),
@@ -707,13 +709,13 @@ mod tests {
         assert_eq!(
             fs.read_file("efi/boot/bootx64.efi").unwrap(),
             efi,
-            "sin mayusculas"
+            "case-insensitive"
         );
         assert_eq!(fs.read_file("aricodeos/kernel.elf").unwrap(), kernel);
         assert_eq!(
             fs.read_file("ARICOD~1/KERNEL.ELF").unwrap(),
             kernel,
-            "nombre corto"
+            "short name"
         );
         assert_eq!(
             fs.read_file("aricodeos/cmdline.txt").unwrap(),
@@ -736,7 +738,7 @@ mod tests {
         assert_eq!(ari.short, "ARICOD~1");
         assert!(ari.attr & ATTR_DIRECTORY != 0);
         let efi_dir = root.iter().find(|e| e.name == "EFI").unwrap();
-        assert_eq!(efi_dir.short, "EFI", "8.3 exacto sin LFN");
+        assert_eq!(efi_dir.short, "EFI", "exact 8.3 without LFN");
     }
 
     #[test]
@@ -754,7 +756,7 @@ mod tests {
         assert_eq!(entries.len(), 100);
         let shorts: alloc::collections::BTreeSet<&str> =
             entries.iter().map(|e| e.short.as_str()).collect();
-        assert_eq!(shorts.len(), 100, "nombres cortos unicos");
+        assert_eq!(shorts.len(), 100, "unique short names");
         assert_eq!(
             fs.read_file("dir/fichero-con-nombre-largo-42.txt").unwrap(),
             [42u8; 700]
@@ -767,7 +769,7 @@ mod tests {
 
     #[test]
     fn lfn_checksum_matches_spec_example() {
-        // Nombre corto "ARICOD~1   ": suma conocida calculada con el algoritmo de Microsoft.
+        // Short name "ARICOD~1   ": known sum computed with Microsoft's algorithm.
         let s = *b"ARICOD~1   ";
         let expected = s.iter().fold(0u8, |sum, &c| {
             ((sum & 1) << 7).wrapping_add(sum >> 1).wrapping_add(c)

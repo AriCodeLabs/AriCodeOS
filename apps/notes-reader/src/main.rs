@@ -1,7 +1,9 @@
-//! `notes_reader`: recibe del broker un endpoint de fsd ligado a un solo
-//! fichero en modo lectura (`read_files` del manifiesto, ADR 0016). Lo lista,
-//! lo lee y comprueba que no puede crear, escribir, reemplazar ni hacer
-//! `flush`, y que no ve otros ficheros.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! `notes_reader`: receives from the broker an fsd endpoint bound to a single
+//! file in read mode (manifest `read_files`, ADR 0016). It lists it, reads it
+//! and checks that it cannot create, write, replace or `flush`, and that it
+//! does not see other files.
 #![no_std]
 #![no_main]
 
@@ -23,7 +25,7 @@ fn main(_arg: u64) -> u64 {
         }
     });
     let (Some(ep), Some(hw)) = (shared, hardware) else {
-        sys::print(b"notes_reader: sin fichero compartido\n");
+        sys::print(b"notes_reader: no shared file\n");
         return 1;
     };
     let Ok(mut fs) = FsClient::new(ep, hw) else {
@@ -31,11 +33,11 @@ fn main(_arg: u64) -> u64 {
     };
     let mut name = [0u8; 32];
     let Ok(Some((n, size))) = fs.list(0, &mut name) else {
-        sys::print(b"notes_reader: el listado esta vacio\n");
+        sys::print(b"notes_reader: listing is empty\n");
         return 3;
     };
     if fs.list(1, &mut name).is_ok_and(|e| e.is_some()) {
-        sys::print(b"notes_reader: veo mas de un fichero\n");
+        sys::print(b"notes_reader: I see more than one file\n");
         return 4;
     }
     let Ok(shown) = core::str::from_utf8(&name[..n]) else {
@@ -60,18 +62,18 @@ fn main(_arg: u64) -> u64 {
         || !denied(fs.replace(fd, b"x"))
         || !denied(fs.flush())
     {
-        sys::print(b"notes_reader: pude escribir en un fichero de solo lectura\n");
+        sys::print(b"notes_reader: I could write to a read-only file\n");
         return 8;
     }
     if !matches!(fs.open("README"), Err(FsError::Status(Status::NotFound))) {
-        sys::print(b"notes_reader: pude abrir un fichero no compartido\n");
+        sys::print(b"notes_reader: I could open a non-shared file\n");
         return 9;
     }
     if fs.close(fd).is_err() {
         return 10;
     }
     sys::print(
-        b"notes_reader: solo lectura respetada (Denied en create, write, replace y flush; README invisible)\n",
+        b"notes_reader: read-only enforced (Denied on create, write, replace and flush; README invisible)\n",
     );
     0
 }

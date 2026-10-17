@@ -1,8 +1,8 @@
-# Fase 25 (segunda parte): en el arranque normal init lanza usb_input para el
-# xHCI ademas de los drivers virtio-input, y el servicio de entrada queda
-# con tres dispositivos.
+# Phase 25 (part two): on a normal boot init launches usb_input for the
+# xHCI in addition to the virtio-input drivers, and the input service ends up
+# with three devices.
 name = "audit.usb_legacy"
-description = "arranque normal con xHCI: init lanza usb_input junto a los virtio-input"
+description = "normal boot with xHCI: init launches usb_input alongside the virtio-input drivers"
 level = "full"
 areas = ["audit_usb_legacy"]
 cmdline = "qemu_exit"

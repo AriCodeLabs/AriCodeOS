@@ -3,7 +3,7 @@ name = "ari-app-perms-check"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Comprueba la API de permisos del SDK: renunciar a un handle no oculta los demas"
+description = "Checks the SDK permissions API: dropping one handle does not hide the others"
 publish = false
 
 [[bin]]

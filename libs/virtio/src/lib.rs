@@ -1,13 +1,15 @@
-//! Virtio 1.x (sección 40). Todo lo que se puede probar en host: el layout de
-//! una virtqueue split sobre un buffer DMA, el descubrimiento de las
-//! estructuras virtio-pci modernas en el espacio de configuración y las
-//! peticiones de virtio-blk. Los accesos MMIO reales los hace el driver.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Virtio 1.x (section 40). Everything that can be tested on the host: the
+//! layout of a split virtqueue over a DMA buffer, discovery of the modern
+//! virtio-pci structures in the configuration space and the virtio-blk
+//! requests. The driver performs the real MMIO accesses.
 
 #![no_std]
 
 use core::sync::atomic::{fence, Ordering};
 
-/// Estados del dispositivo (registro `device_status`).
+/// Device states (`device_status` register).
 pub mod status {
     pub const ACKNOWLEDGE: u8 = 1;
     pub const DRIVER: u8 = 2;
@@ -17,14 +19,14 @@ pub mod status {
     pub const FAILED: u8 = 128;
 }
 
-/// Bit de característica obligatorio en virtio 1.x (palabra alta, bit 0).
+/// Feature bit mandatory in virtio 1.x (high word, bit 0).
 pub const FEATURE_VERSION_1: u64 = 1 << 32;
-/// El dispositivo accede a memoria a través del IOMMU de la plataforma: el
-/// driver debe aceptarla si se ofrece (en AriCodeOS IOVA = física, así que
-/// no cambia nada más).
+/// The device accesses memory through the platform IOMMU: the
+/// driver must accept it if offered (in AriCodeOS IOVA = physical, so
+/// nothing else changes).
 pub const FEATURE_ACCESS_PLATFORM: u64 = 1 << 33;
 
-/// Desplazamientos de la estructura `virtio_pci_common_cfg`.
+/// Offsets in the `virtio_pci_common_cfg` structure.
 pub mod common {
     pub const DEVICE_FEATURE_SELECT: u64 = 0x00;
     pub const DEVICE_FEATURE: u64 = 0x04;
@@ -44,7 +46,7 @@ pub mod common {
     pub const QUEUE_DEVICE: u64 = 0x30;
 }
 
-/// Tipos de estructura anunciados por las capabilities vendor de virtio-pci.
+/// Structure types announced by the virtio-pci vendor capabilities.
 pub mod cfg_type {
     pub const COMMON: u8 = 1;
     pub const NOTIFY: u8 = 2;
@@ -52,18 +54,18 @@ pub mod cfg_type {
     pub const DEVICE: u8 = 4;
 }
 
-/// Una estructura virtio localizada en un BAR.
+/// A virtio structure located in a BAR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PciStructure {
     pub cfg_type: u8,
     pub bar: u8,
     pub offset: u32,
     pub length: u32,
-    /// Solo para `NOTIFY`.
+    /// Only for `NOTIFY`.
     pub notify_off_multiplier: u32,
 }
 
-/// Localiza las estructuras virtio en un espacio de configuración PCI.
+/// Locates the virtio structures in a PCI configuration space.
 pub fn find_structures(cfg: &[u8]) -> [Option<PciStructure>; 5] {
     let mut out = [None; 5];
     for cap in aricode_pci::capabilities(cfg) {
@@ -91,7 +93,7 @@ pub fn find_structures(cfg: &[u8]) -> [Option<PciStructure>; 5] {
             length: u32_at(o + 12),
             notify_off_multiplier,
         };
-        // La primera capability de cada tipo es la que manda.
+        // The first capability of each type is the one that counts.
         if out[cfg_type as usize].is_none() {
             out[cfg_type as usize] = Some(s);
         }
@@ -99,7 +101,7 @@ pub fn find_structures(cfg: &[u8]) -> [Option<PciStructure>; 5] {
     out
 }
 
-/// Descriptor de una virtqueue split (16 bytes).
+/// Split virtqueue descriptor (16 bytes).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Descriptor {
@@ -112,9 +114,9 @@ pub struct Descriptor {
 pub const DESC_NEXT: u16 = 1;
 pub const DESC_WRITE: u16 = 2;
 
-/// Layout de una virtqueue split de `size` entradas en memoria contigua:
-/// tabla de descriptores, anillo del driver (avail) y anillo del dispositivo
-/// (used), cada uno alineado como exige la especificación.
+/// Layout of a split virtqueue of `size` entries in contiguous memory:
+/// descriptor table, driver ring (avail) and device ring
+/// (used), each aligned as the specification requires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueLayout {
     pub size: u16,
@@ -128,9 +130,9 @@ impl QueueLayout {
     pub fn new(size: u16) -> Self {
         let n = size as usize;
         let desc_offset = 0;
-        let avail_offset = 16 * n; // alineado a 2 (ya lo está)
+        let avail_offset = 16 * n; // aligned to 2 (already is)
         let avail_len = 6 + 2 * n;
-        let used_offset = (avail_offset + avail_len).next_multiple_of(4096); // alineado a 4 (usamos página)
+        let used_offset = (avail_offset + avail_len).next_multiple_of(4096); // aligned to 4 (we use a page)
         let used_len = 6 + 8 * n;
         let total_len = (used_offset + used_len).next_multiple_of(4096);
         Self {
@@ -143,8 +145,8 @@ impl QueueLayout {
     }
 }
 
-/// Una virtqueue split que vive en un buffer DMA mapeado en `virt` con
-/// dirección física `phys`. Un solo productor (el driver).
+/// A split virtqueue living in a DMA buffer mapped at `virt` with
+/// physical address `phys`. Single producer (the driver).
 pub struct Virtqueue {
     layout: QueueLayout,
     virt: *mut u8,
@@ -158,8 +160,8 @@ pub struct Virtqueue {
 impl Virtqueue {
     /// # Safety
     ///
-    /// `virt` debe apuntar a `layout.total_len` bytes escribibles, alineados a
-    /// página, que reflejan la física `phys`, exclusivos de esta cola.
+    /// `virt` must point to `layout.total_len` writable, page-aligned
+    /// bytes that mirror physical `phys`, exclusive to this queue.
     pub unsafe fn new(layout: QueueLayout, virt: *mut u8, phys: u64) -> Self {
         core::ptr::write_bytes(virt, 0, layout.total_len);
         let mut q = Self {
@@ -191,34 +193,34 @@ impl Virtqueue {
     }
 
     fn desc_mut(&mut self, i: u16) -> &mut Descriptor {
-        // SAFETY: dentro de la tabla de descriptores, por contrato de `new`.
+        // SAFETY: inside the descriptor table, per the contract of `new`.
         unsafe {
             &mut *(self.virt.add(self.layout.desc_offset + 16 * i as usize) as *mut Descriptor)
         }
     }
     fn desc(&self, i: u16) -> Descriptor {
-        // SAFETY: ídem.
+        // SAFETY: same as above.
         unsafe {
             (self.virt.add(self.layout.desc_offset + 16 * i as usize) as *const Descriptor)
                 .read_volatile()
         }
     }
     fn write_u16(&mut self, off: usize, v: u16) {
-        // SAFETY: dentro del buffer de la cola.
+        // SAFETY: inside the queue buffer.
         unsafe { (self.virt.add(off) as *mut u16).write_volatile(v) }
     }
     fn read_u16(&self, off: usize) -> u16 {
-        // SAFETY: ídem.
+        // SAFETY: same as above.
         unsafe { (self.virt.add(off) as *const u16).read_volatile() }
     }
     fn read_u32(&self, off: usize) -> u32 {
-        // SAFETY: ídem.
+        // SAFETY: same as above.
         unsafe { (self.virt.add(off) as *const u32).read_volatile() }
     }
 
-    /// Encadena buffers `(phys, len, escribible por el dispositivo)` y los
-    /// publica en el anillo avail. Devuelve el descriptor cabeza, o `None` si
-    /// no hay sitio.
+    /// Chains buffers `(phys, len, device-writable)` and publishes
+    /// them in the avail ring. Returns the head descriptor, or `None` if
+    /// there is no room.
     pub fn add(&mut self, buffers: &[(u64, u32, bool)]) -> Option<u16> {
         if buffers.is_empty() || (buffers.len() as u16) > self.num_free {
             return None;
@@ -248,8 +250,8 @@ impl Virtqueue {
         Some(head)
     }
 
-    /// Siguiente elemento consumido por el dispositivo: (cabeza, bytes escritos).
-    /// Devuelve los descriptores de la cadena a la lista libre.
+    /// Next element consumed by the device: (head, bytes written).
+    /// Returns the chain's descriptors to the free list.
     pub fn pop_used(&mut self) -> Option<(u16, u32)> {
         fence(Ordering::SeqCst);
         let used_idx = self.read_u16(self.layout.used_offset + 2);
@@ -261,7 +263,7 @@ impl Virtqueue {
         let head = self.read_u32(base) as u16;
         let len = self.read_u32(base + 4);
         self.last_used = self.last_used.wrapping_add(1);
-        // Devolver la cadena a la lista libre.
+        // Return the chain to the free list.
         let mut i = head;
         let mut count = 1;
         loop {
@@ -283,18 +285,18 @@ impl Virtqueue {
     }
 }
 
-/// Cabecera de petición virtio-blk (16 bytes) seguida de datos y un byte de estado.
+/// virtio-blk request header (16 bytes) followed by data and a status byte.
 pub mod blk {
     pub const T_IN: u32 = 0;
     pub const T_OUT: u32 = 1;
     pub const T_FLUSH: u32 = 4;
-    /// `VIRTIO_BLK_F_FLUSH`: el dispositivo atiende `T_FLUSH`.
+    /// `VIRTIO_BLK_F_FLUSH`: the device handles `T_FLUSH`.
     pub const F_FLUSH: u64 = 1 << 9;
     pub const STATUS_OK: u8 = 0;
     pub const STATUS_IOERR: u8 = 1;
     pub const STATUS_UNSUPP: u8 = 2;
     pub const SECTOR_SIZE: u64 = 512;
-    /// Desplazamiento de `capacity` (u64, sectores) en la configuración del dispositivo.
+    /// Offset of `capacity` (u64, sectors) in the device configuration.
     pub const CFG_CAPACITY: u64 = 0;
 
     #[repr(C)]
@@ -320,7 +322,7 @@ pub mod blk {
                 sector,
             }
         }
-        /// Hace duraderas las escrituras anteriores (sin datos).
+        /// Makes previous writes durable (no data).
         pub const fn flush() -> Self {
             Self {
                 kind: T_FLUSH,
@@ -387,7 +389,7 @@ mod tests {
             .unwrap();
         assert_eq!(head, 0);
         assert_eq!(q.num_free(), 1);
-        // Descriptores encadenados con flags correctos.
+        // Chained descriptors with correct flags.
         let d0 = q.desc(0);
         assert_eq!(
             (d0.addr, d0.len, d0.flags, d0.next),
@@ -400,19 +402,19 @@ mod tests {
         // avail: idx 1, ring[0] = 0
         assert_eq!(q.read_u16(l.avail_offset + 2), 1);
         assert_eq!(q.read_u16(l.avail_offset + 4), 0);
-        // Sin sitio para una cadena de 2.
+        // No room for a chain of 2.
         assert!(q.add(&[(0, 1, false), (0, 1, false)]).is_none());
         assert!(q.pop_used().is_none());
-        // El "dispositivo" consume: used.ring[0] = {id 0, len 513}, used.idx = 1
+        // The "device" consumes: used.ring[0] = {id 0, len 513}, used.idx = 1
         unsafe {
             (b.ptr.add(l.used_offset + 4) as *mut u32).write(0);
             (b.ptr.add(l.used_offset + 8) as *mut u32).write(513);
             (b.ptr.add(l.used_offset + 2) as *mut u16).write(1);
         }
         assert_eq!(q.pop_used(), Some((0, 513)));
-        assert_eq!(q.num_free(), 4, "la cadena vuelve a la lista libre");
+        assert_eq!(q.num_free(), 4, "the chain returns to the free list");
         assert!(q.pop_used().is_none());
-        // Se puede volver a usar la cola entera.
+        // The whole queue can be used again.
         assert!(q
             .add(&[(0, 1, false), (0, 1, false), (0, 1, false), (0, 1, false)])
             .is_some());
@@ -425,14 +427,14 @@ mod tests {
         cfg[0..2].copy_from_slice(&0x1AF4u16.to_le_bytes());
         cfg[6] |= 0x10;
         cfg[0x34] = 0x40;
-        // cap vendor: common en BAR4 offset 0 len 0x38
+        // vendor cap: common in BAR4 offset 0 len 0x38
         cfg[0x40] = 0x09;
         cfg[0x41] = 0x50;
         cfg[0x42] = 16;
         cfg[0x43] = cfg_type::COMMON;
         cfg[0x44] = 4;
         cfg[0x4C..0x50].copy_from_slice(&0x38u32.to_le_bytes());
-        // cap vendor: notify en BAR4 offset 0x3000, multiplier 4
+        // vendor cap: notify in BAR4 offset 0x3000, multiplier 4
         cfg[0x50] = 0x09;
         cfg[0x51] = 0x64;
         cfg[0x52] = 20;
@@ -441,7 +443,7 @@ mod tests {
         cfg[0x58..0x5C].copy_from_slice(&0x3000u32.to_le_bytes());
         cfg[0x5C..0x60].copy_from_slice(&0x1000u32.to_le_bytes());
         cfg[0x60..0x64].copy_from_slice(&4u32.to_le_bytes());
-        // cap MSI-X (no vendor) al final
+        // MSI-X cap (not vendor) at the end
         cfg[0x64] = 0x11;
         cfg[0x65] = 0;
         let s = find_structures(&cfg);

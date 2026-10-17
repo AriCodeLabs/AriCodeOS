@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! SHA-256 (FIPS 180-4).
 
 pub const DIGEST_LEN: usize = 32;
@@ -14,7 +16,7 @@ const K: [u32; 64] = [
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
-/// Estado incremental: `update` tantas veces como haga falta y `finish`.
+/// Incremental state: `update` as many times as needed, then `finish`.
 #[derive(Clone)]
 pub struct Sha256 {
     h: [u32; 8],
@@ -94,7 +96,7 @@ impl Sha256 {
                 self.buf_len = 0;
             }
             if data.is_empty() {
-                // Todo quedo en el buffer: no tocar buf_len con un resto vacio.
+                // Everything stayed in the buffer: do not touch buf_len with an empty remainder.
                 return;
             }
         }

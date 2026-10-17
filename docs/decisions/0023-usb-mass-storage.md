@@ -1,68 +1,78 @@
-# ADR 0023: Almacenamiento USB como servicio de bloques dentro de usbd
+# ADR 0023: USB storage as a block service inside usbd
 
-- **Fecha:** 2026-10-10
-- **Estado:** Aceptada
+- **Date:** 2026-10-10
+- **Status:** Accepted
 
-## Contexto
+## Context
 
-En el portátil de pruebas (Fase 34) el único disco que AriCodeOS puede usar
-es su propio pendrive, y el único driver de bloques era virtio-blk. Sin
-servicio de bloques no hay fsd, no se confirma el slot y init no lanza el
-shell: el sexto arranque físico terminaba en `ARICODEOS_KERNEL_READY` sin
-nada que hacer. Además, en los Intel 7 series los puertos USB nacen
-enrutados a los EHCI (sin driver) y el xHCI no veía ningún dispositivo.
+On the test laptop (Phase 34) the only disk AriCodeOS can use is its own
+USB stick, and the only block driver was virtio-blk. Without a block
+service there is no fsd, the slot is not confirmed and init does not
+launch the shell: the sixth physical boot ended at
+`ARICODEOS_KERNEL_READY` with nothing to do. In addition, on Intel 7
+series the USB ports start out routed to the EHCI controllers (which have
+no driver) and the xHCI saw no device at all.
 
-## Decisión
+## Decision
 
-1. **El driver xHCI (`usb-input`, "usbd") atiende también el almacenamiento
-   masivo.** Un controlador tiene un solo dueño, así que la clase de
-   almacenamiento vive en el mismo proceso que HID: enumera la primera
-   interfaz bulk-only (clase 8, subclase 6, protocolo 0x50), configura sus
-   endpoints masivos, identifica el dispositivo (`INQUIRY`), espera a que
-   esté listo (`TEST UNIT READY` con `REQUEST SENSE`) y lee la capacidad
-   (`READ CAPACITY(10)`; solo bloques de 512 bytes). Un dispositivo como
-   máximo.
-2. **Transporte y SCSI en una librería de anfitrión** (`aricode-usb-storage`:
-   CBW/CSW y los CDB `INQUIRY`, `TEST UNIT READY`, `REQUEST SENSE`, `READ
-   CAPACITY(10)`, `READ(10)`, `WRITE(10)`, `SYNCHRONIZE CACHE(10)`), con
-   tests. `aricode-xhci` añade endpoints masivos, TDs que no cruzan 64 KiB
-   (`bulk_trbs`) y los comandos de recuperación (Reset Endpoint, Set TR
-   Dequeue, `CLEAR_FEATURE(HALT)`) que BOT exige tras un STALL.
-3. **Segundo extra del contrato de driver: el endpoint de bloques.** init
-   pasa a cada xHCI, tras `SYSTEM`, un endpoint que usbd sirve con
+1. **The xHCI driver (`usb-input`, "usbd") also handles mass storage.** A
+   controller has a single owner, so the storage class lives in the same
+   process as HID: it enumerates the first bulk-only interface (class 8,
+   subclass 6, protocol 0x50), configures its bulk endpoints, identifies
+   the device (`INQUIRY`), waits until it is ready (`TEST UNIT READY` with
+   `REQUEST SENSE`) and reads the capacity (`READ CAPACITY(10)`; 512-byte
+   blocks only). At most one device.
+2. **Transport and SCSI in a host library** (`aricode-usb-storage`:
+   CBW/CSW and the `INQUIRY`, `TEST UNIT READY`, `REQUEST SENSE`, `READ
+   CAPACITY(10)`, `READ(10)`, `WRITE(10)`, `SYNCHRONIZE CACHE(10)` CDBs),
+   with tests. `aricode-xhci` adds bulk endpoints, TDs that do not cross
+   64 KiB (`bulk_trbs`) and the recovery commands (Reset Endpoint, Set TR
+   Dequeue, `CLEAR_FEATURE(HALT)`) that BOT requires after a STALL.
+3. **Second extra in the driver contract: the block endpoint.** init
+   passes each xHCI, after `SYSTEM`, an endpoint that usbd serves with
    `aricode-proto::block` (`Info`, `Read`, `Write`, `Flush` =
-   `SYNCHRONIZE CACHE`) junto a la entrada, con `ipc_receive_any`. Sin
-   dispositivo, `Info` responde `Invalid`. El extra es opcional: el driver
-   comprueba que el handle sea un endpoint (el banco de pruebas del kernel
-   no lo pasa).
-4. **Sin virtio-blk, init usa el bloque USB.** Tras lanzar los xHCI, si no
-   hay servicio de bloques pregunta la capacidad al primero; si responde,
-   es el servicio de bloques y sobre él va la misma pila (fsd en ARI0,
-   clientes de prueba, confirmación del slot) que con virtio-blk
-   (`start_storage_stack`).
-5. **Cesión del firmware y enrutado Intel.** Antes de tocar el controlador
-   usbd pide la propiedad por la capability USB Legacy Support y apaga sus
-   SMI; en los xHCI Intel escribe `XUSB2PR` y `USB3_PSSEN` con las máscaras
-   `USB2PRM`/`USB3PRM` (como Linux) para que los puertos compartidos pasen
-   de los EHCI al xHCI, y espera más antes de enumerar.
-6. **Escenario `usb.storage`** (`usb_storage = true`): el disco de pruebas
-   cuelga del xHCI de QEMU como `usb-storage` y no hay virtio-blk; fsd y el
-   shell van sobre usbd y un fichero escrito sobrevive a un reinicio.
+   `SYNCHRONIZE CACHE`) alongside input, with `ipc_receive_any`. With no
+   device, `Info` answers `Invalid`. The extra is optional: the driver
+   checks that the handle is an endpoint (the kernel test bench does not
+   pass it).
+4. **Without virtio-blk, init uses the USB block device.** After launching
+   the xHCIs, if there is no block service it asks the first one for its
+   capacity; if it answers, it becomes the block service and the same
+   stack runs on top of it (fsd on ARI0, test clients, slot confirmation)
+   as with virtio-blk (`start_storage_stack`).
+5. **Firmware handoff and Intel routing.** Before touching the controller,
+   usbd requests ownership through the USB Legacy Support capability and
+   disables its SMIs; on Intel xHCIs it writes `XUSB2PR` and `USB3_PSSEN`
+   with the `USB2PRM`/`USB3PRM` masks (as Linux does) so the shared ports
+   move from the EHCIs to the xHCI, and it waits longer before
+   enumerating.
+6. **Scenario `usb.storage`** (`usb_storage = true`): the test disk hangs
+   off QEMU's xHCI as `usb-storage` and there is no virtio-blk; fsd and the
+   shell run over usbd and a written file survives a reboot.
 
-## Consecuencias
+## Consequences
 
-- Un pendrive conectado al xHCI es el disco del sistema en el portátil: el
-  mismo pendrive del que arranca AriBoot. Escrituras solo ahí (sección 95).
-- Las peticiones de bloques van en serie con la entrada HID en el mismo
-  bucle; un teclado USB sigue respondiendo porque cada petición de bloques
-  dura milisegundos.
-- `READ(10)`/`WRITE(10)` limitan el disco a 2 TiB; los sectores de 4 KiB
-  nativos no se admiten.
-- Séptima foto del portátil: el pendrive se lee pero `fs_client` falla al
-  crear un fichero. Muchos pendrives rechazan `SYNCHRONIZE CACHE` como
-  petición ilegal (no tienen caché que vaciar): usbd lo detecta por el
-  sentido (`Sense::command_unsupported`), lo anuncia una vez y el flush
-  pasa a ser inmediato; los demás comandos rechazados se anuncian con su
-  sentido para diagnosticarlos desde una foto.
-- Si usbd muere, el supervisor lo relanza y fsd ve errores de E/S hasta
-  entonces; el endpoint de bloques es de init y sobrevive.
+- A USB stick attached to the xHCI is the system disk on the laptop: the
+  same stick AriBoot boots from. Writes go only there (section 95).
+- Block requests are serialized with HID input in the same loop; a USB
+  keyboard stays responsive because each block request takes
+  milliseconds.
+- `READ(10)`/`WRITE(10)` limit the disk to 2 TiB; native 4 KiB sectors are
+  not supported.
+- Seventh photo from the laptop: the stick is read but `fs_client` fails
+  when creating a file. Many USB sticks reject `SYNCHRONIZE CACHE` as an
+  illegal request (they have no cache to flush): usbd detects this from
+  the sense data (`Sense::command_unsupported`), reports it once and flush
+  becomes immediate; other rejected commands are reported with their sense
+  data so they can be diagnosed from a photo.
+- If usbd dies, the supervisor relaunches it and fsd sees I/O errors until
+  then; the block endpoint belongs to init and survives.
+
+## Note (2026-10-12, incident 0001)
+
+The transport error handling of the first version turned a single USB
+transaction error into timeouts and a dead device. The driver now
+recovers endpoints as xHCI 4.6.8-4.6.10 and 4.8.3 require, follows the
+Bulk-Only Transport rules for outstanding commands and Reset Recovery,
+re-enumerates a device that drops or resets, and bounds its work per
+request below the clients' waits. See `docs/incidents/0001-*`.

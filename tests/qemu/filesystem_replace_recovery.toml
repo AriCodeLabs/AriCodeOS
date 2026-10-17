@@ -1,9 +1,9 @@
-# Etapa 2 (ADR 0014): el disco de pruebas trae un reemplazo de `README`
-# comprometido en el journal de AriFS pero sin aplicar (lo que queda tras un
-# corte justo despues del compromiso). fsd lo rehace al montar y el shell lee
-# el contenido nuevo entero.
+# Stage 2 (ADR 0014): the test disk carries a replacement of `README`
+# committed to the AriFS journal but not applied (what is left after a
+# power cut right after the commit). fsd replays it at mount and the shell reads
+# the whole new content.
 name = "filesystem.replace_recovery"
-description = "AriFS rehace al montar un reemplazo atomico comprometido y cortado antes de aplicarse"
+description = "AriFS replays at mount an atomic replace that was committed and cut off before being applied"
 level = "full"
 areas = ["filesystem", "storage", "shell"]
 cmdline = "qemu_exit shell"
@@ -14,8 +14,8 @@ stdin = ["cat README", "shutdown"]
 [expect]
 exit = 33
 serial_contains = [
-    "fsd: reemplazo pendiente de 'README' rehecho al montar",
-    "fsd: AriFS montado, 4 ficheros",
+    "fsd: pending replace of 'README' redone at mount",
+    "fsd: AriFS mounted, 4 files",
     "AriCodeOS: recuperado tras un corte",
     "ARICODEOS_SHUTDOWN",
 ]

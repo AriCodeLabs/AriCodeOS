@@ -1,8 +1,10 @@
-//! Driver de prueba del IOMMU (Fase 33): recibe el virtio-blk con el contrato
-//! de `virtio_pci` (SERVICE = handle SYSTEM con READ), lee el sector 0 en su
-//! propio buffer DMA (traducido por la unidad) y despues pide al dispositivo
-//! escribir en una direccion fisica que no le pertenece: la peticion no debe
-//! completarse y la unidad debe haber registrado el fallo.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! IOMMU test driver (Phase 33): receives the virtio-blk with the
+//! `virtio_pci` contract (SERVICE = SYSTEM handle with READ), reads sector 0
+//! into its own DMA buffer (translated by the unit) and then asks the device
+//! to write to a physical address it does not own: the request must not
+//! complete and the unit must have recorded the fault.
 #![no_std]
 #![no_main]
 
@@ -11,7 +13,7 @@ use aricode_rt::sys::virtio_pci::{DmaRegion, Queue, Transport, IRQ, SERVICE};
 use aricode_rt::sys::{self, abi, Error};
 use aricode_virtio::blk;
 
-/// Memoria baja reservada: nunca es de este proceso ni de nadie.
+/// Reserved low memory: never belongs to this process or anyone else.
 const FOREIGN_PHYS: u64 = 0x1000;
 
 fn submit(
@@ -70,7 +72,7 @@ fn main(mask: u64) -> u64 {
         return 50;
     };
 
-    // 1. Lectura legitima: el sector 0 (MBR protector de la GPT) en el buffer propio.
+    // 1. Legitimate read: sector 0 (the GPT protective MBR) into our own buffer.
     let own_data = req.phys + 16;
     match submit(&transport, &mut queue, &mut req, own_data, 2000) {
         Ok(true) => {}
@@ -85,29 +87,29 @@ fn main(mask: u64) -> u64 {
         return 22;
     }
 
-    // 2. DMA a memoria ajena. Lo que el dispositivo cuente de la peticion
-    // (no completarla, error de E/S o incluso "exito", como hace QEMU al
-    // descartar la escritura) no prueba nada: la prueba es que la unidad
-    // registro el fallo y, del lado del kernel, que esa memoria no cambio.
+    // 2. DMA to foreign memory. Whatever the device reports about the request
+    // (not completing it, an I/O error or even "success", as QEMU does when
+    // it drops the write) proves nothing: the proof is that the unit recorded
+    // the fault and, on the kernel side, that the memory did not change.
     match submit(&transport, &mut queue, &mut req, FOREIGN_PHYS, 500) {
-        Ok(false) => sys::print(b"dma_rogue: la peticion ilegal no se completo\n"),
+        Ok(false) => sys::print(b"dma_rogue: the illegal request did not complete\n"),
         Ok(true) if req.slice_mut(528, 1)[0] != blk::STATUS_OK => {
-            sys::print(b"dma_rogue: el dispositivo informo de error de E/S\n")
+            sys::print(b"dma_rogue: the device reported an I/O error\n")
         }
-        Ok(true) => sys::print(b"dma_rogue: el dispositivo dio la peticion por completada\n"),
+        Ok(true) => sys::print(b"dma_rogue: the device reported the request as completed\n"),
         Err(e) => return e,
     }
     let Ok(after) = faults() else {
         return 50;
     };
     if after <= before {
-        sys::print(b"dma_rogue: la unidad no registro el fallo\n");
+        sys::print(b"dma_rogue: the unit did not record the fault\n");
         return 24;
     }
     let mut b = [0u8; 20];
-    sys::print(b"dma_rogue: lectura legitima ok, DMA a memoria ajena bloqueado (");
+    sys::print(b"dma_rogue: legitimate read ok, DMA to foreign memory blocked (");
     sys::print(fmt_u64(after - before, &mut b));
-    sys::print(b" fallo(s) registrados)\n");
+    sys::print(b" fault(s) recorded)\n");
     0
 }
 

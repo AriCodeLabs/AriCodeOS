@@ -1,1279 +1,1342 @@
-# Arquitectura
+# Architecture
 
-La referencia completa es el documento maestro [../AriCodeOS.md](../AriCodeOS.md).
-Este fichero resume lo implementado hasta ahora y dónde vive cada pieza.
+The full reference is the master document [../AriCodeOS.md](../AriCodeOS.md).
+This file summarizes what has been implemented so far and where each piece lives.
 
-## Estado: 0.9.0 (Fases 0 a 34 y etapas 1 a 5 posteriores al roadmap; primer arranque en hardware real con disco USB, consola y red; energía, Wi-Fi y EHCI pendientes)
+## Status: 0.9.0 (Phases 0 to 34 and post-roadmap stages 1 to 5; first boot on real hardware with USB disk, console and network; power management, Wi-Fi and EHCI pending)
 
 ```text
 OVMF (UEFI)
   -> EFI/BOOT/BOOTX64.EFI            AriBoot        boot/
-       GOP, ACPI RSDP, cmdline.txt, kernel.elf, initrd.img, tablas de
-       páginas (identidad + mapa físico lineal + kernel), BootInfo v4,
-       ExitBootServices, salto
+       GOP, ACPI RSDP, cmdline.txt, kernel.elf, initrd.img, page
+       tables (identity + linear physical map + kernel), BootInfo v4,
+       ExitBootServices, jump
   -> aricodeos/kernel.elf            AriKernel      kernel/
-       consola serie + framebuffer (fuente 8x16), logger con niveles,
-       informe de BootInfo, GDT/TSS/IDT propias con IST para #DF,
-       excepciones con volcado, PMM por bitmap, VMM con tablas propias
-       (W^X, mapa físico, pila con guard page), heap con crecimiento
-       bajo demanda, PIC enmascarado, LAPIC + timer 100 Hz, interrupciones
-       habilitadas, hilos del kernel, scheduler round robin preemptivo con
-       sueño y colas de espera, procesos en ring 3 con espacio propio,
-       syscalls, tablas de handles con derechos y revocación por objeto,
-       IPC por endpoints con transferencia de capabilities y timeouts,
-       initrd con init y programas de usuario, init lanza y supervisa
-       procesos con la capacidad SPAWNER, ACPI + I/O APIC, drivers en ring 3
-       con capabilities IRQ/MMIO/DMA, enumeración PCIe por ECAM, init reclama
-       el virtio-blk (BARs, MSI-X) y lanza su driver en ring 3 como servicio
-       de bloques por IPC (disco GPT), fsd monta AriFS v1 sobre él y sirve
-       ficheros por IPC; con `shell` en la cmdline init lanza arish, que lee
-       la consola serie y apaga o reinicia por `system_power`; netd
-       (virtio-net) obtiene IP por DHCP y sirve ping, UDP y DNS por IPC;
-       SMP: los APs de la MADT arrancan por INIT-SIPI y planifican sobre la
-       misma cola de listos con estado por CPU e IPI; IOMMU VT-d con un
-       dominio por driver (IOVA = física); ARICODEOS_KERNEL_READY
+       serial + framebuffer console (8x16 font), leveled logger,
+       BootInfo report, own GDT/TSS/IDT with IST for #DF,
+       exceptions with dump, bitmap PMM, VMM with its own tables
+       (W^X, physical map, stack with guard page), heap with on-demand
+       growth, masked PIC, LAPIC + 100 Hz timer, interrupts
+       enabled, kernel threads, preemptive round-robin scheduler with
+       sleep and wait queues, ring 3 processes with their own address space,
+       syscalls, handle tables with rights and per-object revocation,
+       endpoint IPC with capability transfer and timeouts,
+       initrd with init and user programs, init spawns and supervises
+       processes with the SPAWNER capability, ACPI + I/O APIC, ring 3 drivers
+       with IRQ/MMIO/DMA capabilities, PCIe enumeration via ECAM, init claims
+       the virtio-blk (BARs, MSI-X) and launches its ring 3 driver as an IPC
+       block service (GPT disk), fsd mounts AriFS v1 on it and serves
+       files over IPC; with `shell` on the cmdline init launches arish, which reads
+       the serial console and powers off or reboots via `system_power`; netd
+       (virtio-net) gets an IP via DHCP and serves ping, UDP and DNS over IPC;
+       SMP: the MADT's APs boot via INIT-SIPI and schedule from the
+       same ready queue with per-CPU state and IPIs; IOMMU VT-d with one
+       domain per driver (IOVA = physical); ARICODEOS_KERNEL_READY
 ```
 
 ## Crates
 
 ```text
-boot-protocol/       ABI BootInfo (v4): mapa UEFI, framebuffer, RSDP, kernel, pila, PML4 y tablas, BootInfo, cmdline, mapa físico, rangos conservados
-libs/elf/            aricode-elf: parser ELF64 mínimo (no_std, tests de host)
-libs/x86-paging/     aricode-x86-paging: tablas de 4 niveles genéricas en FrameAlloc/PhysMap (no_std, tests de host)
-libs/cmdline/        aricode-cmdline: `clave` / `clave=valor` sin alloc (no_std, tests de host)
-libs/fb-console/     aricode-fb-console: consola de texto sobre framebuffer 32 bpp, fuente Terminus 8x16 (OFL), tests de host
-libs/x86-cpu/        aricode-x86-cpu: descriptores GDT/TSS/IDT y tabla de excepciones (no_std, tests de host)
-libs/pmm/            aricode-pmm: allocator de frames por bitmap sobre almacenamiento externo (no_std, tests de host)
-libs/heap/           aricode-heap: heap first-fit con lista de libres, fusión y cabecera por asignación (no_std, tests de host)
-libs/sync/           aricode-sync: IrqLock/SpinLock con política de interrupciones enchufable, restaurada entre giros; force_unlock (no_std, tests de host)
-libs/fat/            aricode-fat: FAT32 mínimo con nombres largos para construir y leer la ESP de la imagen USB (no_std + alloc, tests de host)
-libs/xhci/           aricode-xhci: xHCI y USB: registros, TRB, anillos, contextos, ERST, SETUP y descriptores (no_std, tests de host)
-libs/usb-storage/    aricode-usb-storage: transporte bulk-only (CBW/CSW) y CDB SCSI de bloque, tests de host
-libs/rtl8169/        aricode-rtl8169: registros, descriptores y arranque de la familia r8169 sobre un trait Regs, tests de host
-libs/iommu/          aricode-iommu: Intel VT-d: registros, capacidades, entradas raíz/contexto, paginación de segundo nivel, registros de fallo (no_std, tests de host)
-libs/sched/          aricode-sched: política round robin sobre Tid con estados, sueño, bloqueo, salida, varias CPUs, afinidad y despertares pendientes (no_std + alloc, tests de host)
-libs/handles/        aricode-handles: tabla de handles con generación y derechos, duplicación solo reductora (no_std + alloc, tests de host)
-libs/initrd/         aricode-initrd: formato del initrd, lector sin copia (no_std) y escritor (feature `write`, xtask); tests de host
-libs/acpi/           aricode-acpi: RSDP, XSDT/RSDT, MADT (LAPIC, I/O APIC, overrides), MCFG; sin AML (no_std + alloc, tests de host)
-libs/pci/            aricode-pci: direccionamiento ECAM, cabecera de configuración, BARs, capabilities, clases (no_std + alloc, tests de host)
-libs/virtio/         aricode-virtio: virtqueue split sobre DMA, estructuras virtio-pci modernas, peticiones virtio-blk (no_std, tests de host)
-libs/gpt/            aricode-gpt: CRC32, cabecera y entradas GPT, escritor para el disco de pruebas (no_std, tests de host)
-libs/ab/             aricode-ab: estado de arranque A/B, imágenes de sistema firmadas y política de slots (no_std, tests de host)
-libs/crypto/         aricode-crypto: SHA-256, SHA-512, Ed25519 y ChaCha20 desde cero con vectores oficiales (no_std, tests de host)
-libs/wasm/           aricode-wasm: intérprete WebAssembly MVP con enteros, memoria acotada e importaciones (no_std + alloc, tests de host)
-libs/manifest/       aricode-manifest: manifiestos de aplicación (nombre, capacidades, memoria) (no_std, tests de host)
-libs/gfx/            aricode-gfx: lienzos 0x00RRGGBB, recorte, texto, cursor y escritorio de ventanas (no_std, tests de host)
-libs/input/          aricode-input: eventos evdev y teclado US (no_std, tests de host)
-libs/http/           aricode-http: GET, análisis de respuestas, Content-Length y chunked sin alloc (no_std, tests de host)
-libs/net/            aricode-net: Ethernet, ARP, IPv4, ICMP, UDP, TCP, cliente DHCP y DNS sin alloc (no_std, tests de host)
-libs/arifs/          aricode-arifs: AriFS v1, directorio plano con tabla de ficheros de capacidad fija, CRC32 y journal de reemplazo sobre `BlockDevice` (no_std, tests de host con cortes)
-libs/pkg/            aricode-pkg: paquetes de aplicación firmados (manifiesto con nombre, versión y hashes; firma Ed25519; ELF; manifiesto de aplicación)
-sdk/proto/           aricode-proto: protocolos IPC versionados de los servicios (bloques v1, ficheros v1, red v1, entrada v1, ventanas v1, lanzamiento v1) (no_std, tests de host)
-sdk/runtime/         aricode-rt: runtime de programas de usuario (`entry!`, heap de 256 KiB, panic, fmt); reexporta aricode-sys
-sdk/build/           aricode-build: `build.rs` de una línea que enlaza con `sdk/rust/user.ld`
-apps/updater/        updater: verifica la imagen de UPDATE y la instala en el slot inactivo (capacidad `block`)
-apps/wasm-demo/      wasm_demo.wasm: módulo portable compilado a wasm32 que solo usa la Capability API importada
-apps/wasm-runner/    wasm_runner: runtime WebAssembly como aplicación con manifiesto (lee el módulo de su directorio privado)
-apps/hello/          hello_app: aplicación de ejemplo del SDK (consola, permisos, tiempo)
-sdk/abi/             aricode-abi: números de syscall, errores, handles iniciales, derechos y tipos de objeto (no_std, tests de host)
-sdk/rust/            aricode-sys: wrappers de syscall (no_std, sin alloc), clientes de los servicios de bloques, ficheros y red, cliente HTTP GET, transporte virtio PCI para drivers, y `user.ld`, el linker script de todo programa de usuario
-user/testprogs/      programas de prueba de ring 3 (Rust y ensamblador) enlazados como ELF estáticos en 0x400000
-services/init/       AriInit: primer proceso; recibe SPAWNER y la raíz PCI, lanza/supervisa servicios y reclama dispositivos para sus drivers
-services/virtio-blk/ driver virtio-blk en ring 3 y servicio de bloques por IPC (interfaz moderna, cola 0 en DMA, MSI-X, GPT)
-services/virtio-net/ netd: driver virtio-net y pila de red (DHCP, ARP, ICMP, UDP, TCP, DNS) por IPC en ring 3
-services/net-core/   ari-net-core: pila IPv4 mínima y servidor NetServiceProtocol, independientes de la tarjeta (trait Link, ADR 0024)
-services/rtl-net/    driver Realtek r8169 (RTL8169/8168/8101) en ring 3 sobre ari-net-core; sin emulación en QEMU
-services/compositor/ compositor: dueño del framebuffer, ventanas, cursor y enrutado de entrada en ring 3
-services/virtio-input/ inputd: driver virtio-input (un proceso por teclado o ratón) y eventos por IPC en ring 3
-services/arifs/      fsd: servicio de ficheros AriFS en ring 3 sobre el servicio de bloques
-services/shell/      arish: shell interactivo en ring 3 (help, ps, mem, ls, cat, write, devices, services, uptime, cpus, diag, net, run, spawn, repeat, reboot, shutdown, exit; historial con las flechas)
-boot/                ariboot: integra lo anterior con la crate `uefi`
-kernel/              arikernel: serial, framebuffer (Surface MMIO), console (log::Log con IrqLock y try_lock),
+boot-protocol/       BootInfo ABI (v4): UEFI map, framebuffer, RSDP, kernel, stack, PML4 and tables, BootInfo, cmdline, physical map, preserved ranges
+libs/elf/            aricode-elf: minimal ELF64 parser (no_std, host tests)
+libs/x86-paging/     aricode-x86-paging: 4-level page tables generic over FrameAlloc/PhysMap (no_std, host tests)
+libs/cmdline/        aricode-cmdline: `key` / `key=value` without alloc (no_std, host tests)
+libs/fb-console/     aricode-fb-console: text console on a 32 bpp framebuffer, Terminus 8x16 font (OFL), host tests
+libs/x86-cpu/        aricode-x86-cpu: GDT/TSS/IDT descriptors and exception table (no_std, host tests)
+libs/pmm/            aricode-pmm: bitmap frame allocator over external storage (no_std, host tests)
+libs/heap/           aricode-heap: first-fit heap with free list, coalescing and per-allocation header (no_std, host tests)
+libs/sync/           aricode-sync: IrqLock/SpinLock with a pluggable interrupt policy, restored between spins; force_unlock (no_std, host tests)
+libs/fat/            aricode-fat: minimal FAT32 with long names to build and read the USB image's ESP (no_std + alloc, host tests)
+libs/xhci/           aricode-xhci: xHCI and USB: registers, TRBs, rings, contexts, ERST, SETUP and descriptors (no_std, host tests)
+libs/usb-storage/    aricode-usb-storage: bulk-only transport (CBW/CSW) and SCSI block CDBs, host tests
+libs/rtl8169/        aricode-rtl8169: registers, descriptors and bring-up for the r8169 family over a Regs trait, host tests
+libs/iommu/          aricode-iommu: Intel VT-d: registers, capabilities, root/context entries, second-level paging, fault registers (no_std, host tests)
+libs/sched/          aricode-sched: round-robin policy over Tid with states, sleep, blocking, exit, multiple CPUs, affinity and pending wakeups (no_std + alloc, host tests)
+libs/handles/        aricode-handles: handle table with generations and rights, reduce-only duplication (no_std + alloc, host tests)
+libs/initrd/         aricode-initrd: initrd format, zero-copy reader (no_std) and writer (feature `write`, xtask); host tests
+libs/acpi/           aricode-acpi: RSDP, XSDT/RSDT, MADT (LAPIC, I/O APIC, overrides), MCFG; no AML (no_std + alloc, host tests)
+libs/pci/            aricode-pci: ECAM addressing, configuration header, BARs, capabilities, classes (no_std + alloc, host tests)
+libs/virtio/         aricode-virtio: split virtqueue over DMA, modern virtio-pci structures, virtio-blk requests (no_std, host tests)
+libs/gpt/            aricode-gpt: CRC32, GPT header and entries, writer for the test disk (no_std, host tests)
+libs/ab/             aricode-ab: A/B boot state, signed system images and slot policy (no_std, host tests)
+libs/crypto/         aricode-crypto: SHA-256, SHA-512, Ed25519 and ChaCha20 from scratch with official vectors (no_std, host tests)
+libs/wasm/           aricode-wasm: WebAssembly MVP interpreter with integers, bounded memory and imports (no_std + alloc, host tests)
+libs/manifest/       aricode-manifest: application manifests (name, capabilities, memory) (no_std, host tests)
+libs/gfx/            aricode-gfx: 0x00RRGGBB canvases, clipping, text, cursor and window desktop (no_std, host tests)
+libs/input/          aricode-input: evdev events and US keyboard (no_std, host tests)
+libs/http/           aricode-http: GET, response parsing, Content-Length and chunked without alloc (no_std, host tests)
+libs/net/            aricode-net: Ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP client and DNS without alloc (no_std, host tests)
+libs/arifs/          aricode-arifs: AriFS v1, flat directory with a fixed-capacity file table, CRC32 and replacement journal over `BlockDevice` (no_std, host tests with power cuts)
+libs/pkg/            aricode-pkg: signed application packages (manifest with name, version and hashes; Ed25519 signature; ELF; application manifest)
+sdk/proto/           aricode-proto: versioned IPC protocols of the services (block v1, file v1, net v1, input v1, window v1, launch v1) (no_std, host tests)
+sdk/runtime/         aricode-rt: user program runtime (`entry!`, 256 KiB heap, panic, fmt); re-exports aricode-sys
+sdk/build/           aricode-build: one-line `build.rs` that links with `sdk/rust/user.ld`
+apps/updater/        updater: verifies the UPDATE image and installs it in the inactive slot (`block` capability)
+apps/wasm-demo/      wasm_demo.wasm: portable module compiled to wasm32 that only uses the imported Capability API
+apps/wasm-runner/    wasm_runner: WebAssembly runtime as an application with a manifest (reads the module from its private directory)
+apps/hello/          hello_app: SDK example application (console, permissions, time)
+sdk/abi/             aricode-abi: syscall numbers, errors, initial handles, rights and object types (no_std, host tests)
+sdk/rust/            aricode-sys: syscall wrappers (no_std, no alloc), clients for the block, file and net services, HTTP GET client, virtio PCI transport for drivers, and `user.ld`, the linker script for every user program
+user/testprogs/      ring 3 test programs (Rust and assembly) linked as static ELFs at 0x400000
+services/init/       AriInit: first process; receives SPAWNER and the PCI root, spawns/supervises services and claims devices for their drivers
+services/virtio-blk/ ring 3 virtio-blk driver and IPC block service (modern interface, queue 0 in DMA, MSI-X, GPT)
+services/virtio-net/ netd: virtio-net driver and network stack (DHCP, ARP, ICMP, UDP, TCP, DNS) over IPC in ring 3
+services/net-core/   ari-net-core: minimal IPv4 stack and NetServiceProtocol server, independent of the NIC (Link trait, ADR 0024)
+services/rtl-net/    ring 3 Realtek r8169 driver (RTL8169/8168/8101) on top of ari-net-core; no QEMU emulation
+services/compositor/ compositor: owns the framebuffer, windows, cursor and input routing in ring 3
+services/virtio-input/ inputd: virtio-input driver (one process per keyboard or mouse) and events over IPC in ring 3
+services/arifs/      fsd: AriFS file service in ring 3 on top of the block service
+services/shell/      arish: interactive ring 3 shell (help, ps, mem, ls, cat, write, devices, services, uptime, cpus, diag, net, run, spawn, repeat, reboot, shutdown, exit; history with the arrow keys)
+boot/                ariboot: integrates the above with the `uefi` crate
+kernel/              arikernel: serial, framebuffer (MMIO Surface), console (log::Log with IrqLock and try_lock),
                      arch/x86_64 {gdt, idt, interrupts (stubs.s), exceptions, port, pic, pit, apic, ioapic, msr, syscall, usermode},
-                     acpi (localización de tablas), pci (ECAM, enumeración, reclamación con sondeo de BARs y MSI-X),
-                     hw (IrqLine por GSI, MSI-X o MSI, Region, DmaBuffer, ventanas sin caché, registro de vectores, banco de pruebas),
-                     object (KernelObject revocable, tabla inicial), ipc (Endpoint, Message, benchmark), initrd,
-                     user/{process (cargador ELF, copy_from/to_user, espera de salida), programs (initrd), syscalls},
-                     memory/{phys, pmm, vmm, heap}, sync (política IRQ), time,
-                     task/{context (switch_context, thread_start), stack, thread, scheduler, wait}, informe, panic, salida QEMU
+                     acpi (table discovery), pci (ECAM, enumeration, claiming with BAR and MSI-X probing),
+                     hw (IrqLine by GSI, MSI-X or MSI, Region, DmaBuffer, uncached windows, vector registry, test bench),
+                     object (revocable KernelObject, initial table), ipc (Endpoint, Message, benchmark), initrd,
+                     user/{process (ELF loader, copy_from/to_user, exit wait), programs (initrd), syscalls},
+                     memory/{phys, pmm, vmm, heap}, sync (IRQ policy), time,
+                     task/{context (switch_context, thread_start), stack, thread, scheduler, wait}, report, panic, QEMU exit
 tools/xtask/         build, image, qemu, scenario, test, check
-tests/qemu/          escenarios QEMU declarativos (ver tests/README.md)
+tests/qemu/          declarative QEMU scenarios (see tests/README.md)
 ```
 
-Regla: la lógica que se pueda probar en host vive en `libs/*`; `boot/` y
-`kernel/` solo integran.
+Rule: logic that can be tested on the host lives in `libs/*`; `boot/` and
+`kernel/` only integrate.
 
-Invariantes de seguridad de memoria en el cargador (auditoría 2026-09-26,
+Memory-safety invariants in the loader (audit 2026-09-26,
 `docs/audits/`):
 
-- `aricode-elf` rechaza cualquier ELF cuyo rango virtual no sea representable,
-  con segmentos solapados o cuya entrada no esté en un segmento ejecutable, y
-  descarta los `PT_LOAD` vacíos para que no participen en el mapeo. Nada se
-  reserva ni se copia hasta que el ELF completo ha pasado la validación.
-- `aricode-x86-paging` es genérica en dos proveedores: `FrameAlloc` entrega
-  frames de 4 KiB (bump sobre páginas UEFI en el cargador, PMM en el kernel) y
-  `PhysMap` traduce física a puntero (identidad en el cargador, mapa lineal en
-  el kernel). `PhysMap` es un trait `unsafe`: quien lo implementa garantiza que
-  la traducción es válida para todo frame que el allocador pueda entregar. El
-  `Mapper` desreferencia las tablas que creó con su `FrameAlloc` y, tras
-  `share_kernel_half` (también `unsafe`), las tablas del kernel que copia por
-  referencia: el llamador garantiza que ese PML4 origen es válido y que sus
-  PDPT viven tanto como el espacio que los comparte (siempre, en el caso del
-  kernel).
+- `aricode-elf` rejects any ELF whose virtual range is not representable,
+  that has overlapping segments, or whose entry point is not in an executable
+  segment, and discards empty `PT_LOAD`s so they take no part in mapping. Nothing
+  is allocated or copied until the whole ELF has passed validation.
+- `aricode-x86-paging` is generic over two providers: `FrameAlloc` hands out
+  4 KiB frames (bump over UEFI pages in the loader, PMM in the kernel) and
+  `PhysMap` translates physical addresses to pointers (identity in the loader,
+  linear map in the kernel). `PhysMap` is an `unsafe` trait: the implementer guarantees
+  the translation is valid for every frame the allocator can hand out. The
+  `Mapper` dereferences the tables it created with its `FrameAlloc` and, after
+  `share_kernel_half` (also `unsafe`), the kernel tables it copies by
+  reference: the caller guarantees that the source PML4 is valid and that its
+  PDPTs live as long as the address space sharing them (always, in the
+  kernel's case).
 
-## Contrato AriBoot -> AriKernel
+## AriBoot -> AriKernel contract
 
-Definido en `boot-protocol/` (`BootInfo`, versión 4, ADR 0009 y 0021). Al entrar al kernel:
+Defined in `boot-protocol/` (`BootInfo`, version 4, ADR 0009 and 0021). On kernel entry:
 
-- interrupciones deshabilitadas;
-- CR3 apunta a tablas construidas por AriBoot: identidad con páginas de 2 MiB
-  (solo para el cargador), mapa físico lineal en `PHYS_MAP_BASE` (RW, NX)
-  para toda la memoria física no reservada (mínimo 4 GiB) más el framebuffer,
-  y el kernel en `0xFFFF_FFFF_8000_0000` con páginas de 4 KiB y permisos por
-  segmento ELF;
-- `rsp` en una pila de 64 KiB reservada por el loader, direccionada por el
-  mapa físico;
-- `rdi` = puntero a `BootInfo` a través del mapa físico; las direcciones que
-  contiene son físicas (`phys_map_offset` las traduce);
-- EFER.NXE activado;
-- si existía `\aricodeos\cmdline.txt`, su contenido está copiado en memoria
-  de kernel y referenciado por `cmdline_address/size`.
+- interrupts disabled;
+- CR3 points to tables built by AriBoot: identity with 2 MiB pages
+  (loader only), linear physical map at `PHYS_MAP_BASE` (RW, NX)
+  for all non-reserved physical memory (at least 4 GiB) plus the framebuffer,
+  and the kernel at `0xFFFF_FFFF_8000_0000` with 4 KiB pages and per-ELF-segment
+  permissions;
+- `rsp` on a 64 KiB stack allocated by the loader, addressed through the
+  physical map;
+- `rdi` = pointer to `BootInfo` through the physical map; the addresses it
+  contains are physical (`phys_map_offset` translates them);
+- EFER.NXE set;
+- if `\aricodeos\cmdline.txt` existed, its contents are copied into kernel
+  memory and referenced by `cmdline_address/size`.
 
-Toda la memoria que AriBoot reserva es `LOADER_DATA` (ADR 0021: con tipos
-propios algunos firmwares se cuelgan en `GetMemoryMap`). En el mapa es
-memoria de arranque (`Boot`); `BootInfo::kernel_ranges()` (imagen, pila
-inicial, página del `BootInfo`, initrd, cmdline) dice qué conserva el kernel
-y `page_tables_base/size` qué tablas recupera al activar las suyas.
+All memory AriBoot allocates is `LOADER_DATA` (ADR 0021: with custom
+types some firmwares hang in `GetMemoryMap`). In the map it is
+boot memory (`Boot`); `BootInfo::kernel_ranges()` (image, initial
+stack, `BootInfo` page, initrd, cmdline) says what the kernel keeps
+and `page_tables_base/size` which tables it reclaims when activating its own.
 
-## Consola y logging (Fase 3)
+## Console and logging (Phase 3)
 
-- `print!`/`println!` escriben texto sin formato en serie y framebuffer
-  (banner y marcadores como `ARICODEOS_KERNEL_READY`).
-- Las macros de la crate `log` (`trace!`..`error!`) pasan por `console::KernelLogger`,
-  que antepone `[LEVEL]` y escribe en ambas salidas. Nivel por defecto `info`;
-  `log=<nivel>` en la cmdline lo cambia y un valor inválido produce un `WARN`.
-- El panic handler escribe solo por serie (`serial_println!`): no toca estado
-  compartido, por si el panic ocurre a medio escribir en el framebuffer.
-- La consola de framebuffer mantiene una copia de las celdas y repinta al
-  hacer scroll; nunca lee de VRAM. Entiende el retroceso (`\x08`, el cursor
-  vuelve una celda) y pinta un cursor `_` que alterna un hilo del kernel
-  (`console::start_cursor_thread`, cada 500 ms, con `try_lock`). Ni el tick
-  (no se pinta desde handlers) ni el bucle idle: una llamada más en ese
-  bucle, que gira mucho, frenaba todo el sistema en QEMU un 25 %. Solo
-  parpadea con la consola quieta (sin escrituras desde el parpadeo
-  anterior); cualquier escritura lo oculta antes de pintar, así que las
-  celdas nunca contienen el cursor.
-- Disposiciones: `aricode_input::Layout` (`Us`, `Es`; la española con
-  `AltGr` para `@ # [ ] { } \ | ~` y sin las teclas no ASCII). `kbd=es` en
-  la cmdline la aplica al teclado PS/2 del kernel (escenario
-  `console.ps2_es`, con combinaciones `shift+dot` por QMP); el puente de
-  consola y el compositor siguen en US.
-- Las teclas de edición (flechas, inicio, fin, suprimir) llegan a la consola
-  como las secuencias de escape de un terminal serie (`ESC [ A`…, `ESC [ 3 ~`),
-  vengan del teclado PS/2 del kernel, del puente de consola o del compositor:
-  `aricode_input::Keyboard::feed` devuelve `KeyBytes` (hasta 4 bytes).
+- `print!`/`println!` write unformatted text to serial and framebuffer
+  (banner and markers such as `ARICODEOS_KERNEL_READY`).
+- The `log` crate macros (`trace!`..`error!`) go through `console::KernelLogger`,
+  which prepends `[LEVEL]` and writes to both outputs. Default level `info`;
+  `log=<level>` on the cmdline changes it and an invalid value produces a `WARN`.
+- The panic handler writes to serial only (`serial_println!`): it touches no
+  shared state, in case the panic happens midway through a framebuffer write.
+- The framebuffer console keeps a copy of the cells and repaints on
+  scroll; it never reads from VRAM. It understands backspace (`\x08`, the cursor
+  moves back one cell) and draws a `_` cursor toggled by a kernel thread
+  (`console::start_cursor_thread`, every 500 ms, with `try_lock`). Neither the tick
+  (nothing is painted from handlers) nor the idle loop: one more call in that
+  loop, which spins a lot, slowed the whole system in QEMU by 25 %. It only
+  blinks while the console is idle (no writes since the previous
+  blink); any write hides it before painting, so the
+  cells never contain the cursor.
+- Layouts: `aricode_input::Layout` (`Us`, `Es`; the Spanish one with
+  `AltGr` for `@ # [ ] { } \ | ~` and without the non-ASCII keys). `kbd=es` on
+  the cmdline applies it to the kernel's PS/2 keyboard (scenario
+  `console.ps2_es`, with `shift+dot` combinations via QMP); the console
+  bridge and the compositor remain on US.
+- Editing keys (arrows, home, end, delete) reach the console
+  as a serial terminal's escape sequences (`ESC [ A`…, `ESC [ 3 ~`),
+  whether they come from the kernel's PS/2 keyboard, the console bridge or the compositor:
+  `aricode_input::Keyboard::feed` returns `KeyBytes` (up to 4 bytes).
 
-## CPU (Fase 4)
+## CPU (Phase 4)
 
-- GDT propia con el layout que exigen `syscall`/`sysret`
-  (`aricode-x86-cpu::layout`, única referencia): nulo, código ring 0 (0x08),
-  datos ring 0 (0x10), datos usuario (0x18, selector 0x1B con RPL 3), código
-  usuario (0x20, selector 0x23), TSS (0x28, 16 bytes). Los descriptores se
-  codifican en `aricode-x86-cpu` (probados contra valores conocidos) y
-  `arch::x86_64::gdt` los carga, recarga CS con `retfq` y comprueba el layout.
-- TSS con IST1 apuntando a una pila de 16 KiB dedicada a #DF, de modo que un
-  double fault con la pila corrupta sigue produciendo diagnóstico.
-- IDT con los 256 vectores apuntando a stubs generados (ADR 0008). Vectores
-  con código de error y sin él se normalizan en el mismo `InterruptFrame`.
-- Excepciones: #BP avisa y continúa; una excepción con `CS.RPL = 3` termina
-  el proceso de usuario (ver Modo usuario); el resto vuelca registros, y para
-  #PF CR2, tipo de acceso, modo y causa, todo por serie, y termina en pánico.
-  Los vectores >= 32 se despachan al APIC (ver Interrupciones externas).
-- Fallos provocados por cmdline: `test=breakpoint|invalid_opcode|page_fault|double_fault`.
+- Own GDT with the layout required by `syscall`/`sysret`
+  (`aricode-x86-cpu::layout`, the single reference): null, ring 0 code (0x08),
+  ring 0 data (0x10), user data (0x18, selector 0x1B with RPL 3), user
+  code (0x20, selector 0x23), TSS (0x28, 16 bytes). The descriptors are
+  encoded in `aricode-x86-cpu` (tested against known values) and
+  `arch::x86_64::gdt` loads them, reloads CS with `retfq` and checks the layout.
+- TSS with IST1 pointing to a dedicated 16 KiB stack for #DF, so that a
+  double fault with a corrupted stack still produces diagnostics.
+- IDT with all 256 vectors pointing to generated stubs (ADR 0008). Vectors
+  with and without an error code are normalized into the same `InterruptFrame`.
+- Exceptions: #BP warns and continues; an exception with `CS.RPL = 3` terminates
+  the user process (see User mode); the rest dump registers, plus for
+  #PF CR2, access type, mode and cause, all over serial, and end in a panic.
+  Vectors >= 32 are dispatched to the APIC (see External interrupts).
+- Faults triggered via cmdline: `test=breakpoint|invalid_opcode|page_fault|double_fault`.
 
-## Memoria física (Fase 5)
+## Physical memory (Phase 5)
 
-- `memory::pmm::init` recorre el mapa UEFI: administra hasta el final de la
-  última región no reservada, coloca el bitmap (1 bit por frame de 4 KiB) en
-  la región libre más baja con sitio, libera las regiones `Free` y vuelve a
-  reservar el primer MiB (frame 0, trampolín SMP futuro) y el propio bitmap.
-- Las regiones `Boot` (datos del cargador y de boot services) quedan
-  reservadas en este punto; el VMM las devuelve al PMM al activar las tablas
-  propias (ver Memoria virtual).
-- `test=pmm` ejecuta la autoprueba sobre el bitmap real (unicidad, orden,
-  double free, contigüidad alineada) y exige que las estadísticas vuelvan al
-  estado inicial.
+- `memory::pmm::init` walks the UEFI map: it manages up to the end of the
+  last non-reserved region, places the bitmap (1 bit per 4 KiB frame) in
+  the lowest free region with room, frees the `Free` regions and
+  reserves again the first MiB (frame 0, future SMP trampoline) and the bitmap itself.
+- `Boot` regions (loader and boot services data) remain
+  reserved at this point; the VMM returns them to the PMM when activating its own
+  tables (see Virtual memory).
+- `test=pmm` runs the self-test on the real bitmap (uniqueness, ordering,
+  double free, aligned contiguity) and requires the statistics to return to the
+  initial state.
 
-## Memoria virtual (Fase 6)
+## Virtual memory (Phase 6)
 
-`memory::vmm::init` construye las tablas definitivas con frames del PMM y
-las activa; a partir de ahí la identidad del cargador deja de existir:
+`memory::vmm::init` builds the final tables with PMM frames and
+activates them; from then on the loader's identity map no longer exists:
 
 ```text
-0xFFFF_8000_0000_0000  mapa físico lineal, 2 MiB, RW NX G (RAM no reservada + framebuffer)
-0xFFFF_FFFF_7FFE_E000  guard page (sin mapear)
-0xFFFF_FFFF_7FFE_F000  pila del kernel, 64 KiB, RW NX G
-0xFFFF_FFFF_8000_0000  imagen: .text R-X, .rodata R--, .data/.bss RW- (todo G)
+0xFFFF_8000_0000_0000  linear physical map, 2 MiB, RW NX G (non-reserved RAM + framebuffer)
+0xFFFF_FFFF_7FFE_E000  guard page (unmapped)
+0xFFFF_FFFF_7FFE_F000  kernel stack, 64 KiB, RW NX G
+0xFFFF_FFFF_8000_0000  image: .text R-X, .rodata R--, .data/.bss RW- (all G)
 ```
 
-- Los límites de sección vienen de los símbolos del linker script; los de fin
-  se redondean a página (la sección siguiente empieza en la página siguiente).
-- Tras activar las tablas, `kernel_entry` cambia a la pila nueva y continúa
-  en `kernel_main`; la pila del cargador queda sin uso.
-- Las regiones `Boot` del mapa UEFI (cargador y boot services, ~42 MiB en
-  QEMU) se devuelven al PMM en ese momento.
-- Un desbordamiento de pila toca la guard page: #PF sin pila válida -> #DF
-  en la pila IST; el handler reconoce `rsp`/CR2 dentro de la guard y lo
-  anuncia como `STACK OVERFLOW`.
-- Fallos provocados: `test=vmm` (autoprueba), `write_rodata`, `exec_data`,
+- Section boundaries come from linker script symbols; end boundaries
+  are rounded up to a page (the next section starts on the next page).
+- After activating the tables, `kernel_entry` switches to the new stack and continues
+  in `kernel_main`; the loader's stack is left unused.
+- The UEFI map's `Boot` regions (loader and boot services, ~42 MiB in
+  QEMU) are returned to the PMM at that point.
+- A stack overflow touches the guard page: #PF without a valid stack -> #DF
+  on the IST stack; the handler recognizes `rsp`/CR2 inside the guard and
+  reports it as `STACK OVERFLOW`.
+- Triggered faults: `test=vmm` (self-test), `write_rodata`, `exec_data`,
   `stack_overflow`.
 
-## Heap del kernel (Fase 7)
+## Kernel heap (Phase 7)
 
 ```text
-0xFFFF_C000_0000_0000  heap, trozos de 1 MiB mapeados bajo demanda, máximo 64 MiB, RW NX G
+0xFFFF_C000_0000_0000  heap, 1 MiB chunks mapped on demand, 64 MiB maximum, RW NX G
 ```
 
-- `memory::heap` es el `#[global_allocator]`; la crate `alloc` (`Vec`, `Box`,
-  `String`, `format!`) está disponible en todo el kernel. `core::alloc` solo
-  aporta las interfaces `Layout` y `GlobalAlloc`.
-- Cuando una asignación no cabe, el allocator mapea otro trozo con frames del
-  PMM a través del VMM y reintenta; si se alcanza el máximo o no hay frames
-  devuelve nulo y `try_reserve` falla limpiamente (una asignación normal entra
-  en pánico por el `handle_alloc_error` por defecto). El crecimiento es
-  transaccional: un fallo a medias desmapea y devuelve lo ya tomado.
-- La aritmética de direcciones del allocator es comprobada: en la mitad alta
-  del espacio virtual un `Layout` válido de decenas de TiB desbordaría
-  `usize` (auditoría `docs/audits/2026-09-26-audit-9d8c7e5.md`).
-- `aricode-heap` guarda una cabecera de 16 bytes por asignación con el bloque
-  real: `dealloc` no depende del `Layout` y las alineaciones grandes no
-  pierden memoria. Los bloques libres se fusionan al liberar.
-- `test=heap` ejercita colecciones, crecimiento a más de 4 MiB, fallo
-  controlado y ausencia de fugas.
+- `memory::heap` is the `#[global_allocator]`; the `alloc` crate (`Vec`, `Box`,
+  `String`, `format!`) is available throughout the kernel. `core::alloc` only
+  provides the `Layout` and `GlobalAlloc` interfaces.
+- When an allocation does not fit, the allocator maps another chunk with PMM
+  frames through the VMM and retries; if the maximum is reached or there are no frames
+  it returns null and `try_reserve` fails cleanly (a normal allocation
+  panics via the default `handle_alloc_error`). Growth is
+  transactional: a partial failure unmaps and returns what was already taken.
+- The allocator's address arithmetic is checked: in the upper half
+  of the virtual address space a valid `Layout` of tens of TiB would overflow
+  `usize` (audit `docs/audits/2026-09-26-audit-9d8c7e5.md`).
+- `aricode-heap` stores a 16-byte header per allocation with the real
+  block: `dealloc` does not depend on the `Layout` and large alignments do not
+  waste memory. Free blocks are coalesced on release.
+- `test=heap` exercises collections, growth beyond 4 MiB, controlled
+  failure and absence of leaks.
 
-## Sincronización
+## Synchronization
 
-Todo el estado global (consola de framebuffer, PMM, VMM, heap, IDT,
-planificador, tabla de procesos, colas de espera) vive tras `sync::IrqLock`,
-que guarda `RFLAGS.IF`, ejecuta `cli` al tomar y restaura al soltar: una
-sección crítica no puede ser interrumpida ni reentrada por un handler. Entre
-giros de espera las interrupciones vuelven a su estado (Fase 32): una CPU que
-espera un lock de otra sigue atendiendo IPI. Un lock tomado durante muchos
-giros es reentrada (una CPU) o bloqueo mutuo, así que `lock` entra en pánico
-en vez de colgar. La consola usa `try_lock` y cae a solo serie si está tomada
-(una excepción dentro de la propia consola no bloquea el diagnóstico). El
-estado propio de cada CPU (GDT, TSS, hilo actual, quantum) no lleva lock:
-solo lo toca su CPU con interrupciones deshabilitadas (`cpu::Cpu`).
+All global state (framebuffer console, PMM, VMM, heap, IDT,
+scheduler, process table, wait queues) lives behind `sync::IrqLock`,
+which saves `RFLAGS.IF`, executes `cli` on acquire and restores on release: a
+critical section cannot be interrupted or re-entered by a handler. Between
+wait spins interrupts return to their previous state (Phase 32): a CPU
+waiting for a lock held by another keeps servicing IPIs. A lock held for many
+spins means re-entry (one CPU) or deadlock, so `lock` panics
+instead of hanging. The console uses `try_lock` and falls back to serial only if it is held
+(an exception inside the console itself does not block diagnostics). Each
+CPU's own state (GDT, TSS, current thread, quantum) takes no lock:
+only its CPU touches it, with interrupts disabled (`cpu::Cpu`).
 
-Anidamientos reales (un lock exterior se mantiene mientras se toma el
-interior); cualquier otro par se toma en secuencia, nunca anidado:
+Actual nestings (an outer lock is held while the inner one is
+acquired); any other pair is acquired in sequence, never nested:
 
 ```text
-VMM -> PMM            vmm::with mantiene el VMM y el Mapper pide frames al PMM (PmmFrames)
-heap.mapped -> VMM    grow mantiene el lock de crecimiento y mapea (y, por lo anterior, llega al PMM)
-heap.mapped -> PMM    grow pide y devuelve frames
-PROCESSES -> SCHED    process::wait consulta el estado del hilo con la tabla tomada
-WaitQueue.waiters     hoja: se suelta antes de bloquear o despertar
-heap.heap, console    hoja: nunca llaman a otro subsistema
+VMM -> PMM            vmm::with holds the VMM and the Mapper requests frames from the PMM (PmmFrames)
+heap.mapped -> VMM    grow holds the growth lock and maps (and, by the above, reaches the PMM)
+heap.mapped -> PMM    grow requests and returns frames
+PROCESSES -> SCHED    process::wait queries the thread state with the table held
+WaitQueue.waiters     leaf: released before blocking or waking
+heap.heap, console    leaf: never call another subsystem
 ```
 
-Prohibiciones que se derivan: nunca entrar al VMM con el PMM tomado (el
-mapper podría necesitar una tabla y reentrar en el PMM); nunca tomar la
-tabla de procesos desde dentro del planificador (`reap` suelta el
-planificador antes de liberar un espacio de usuario). El lock del
-planificador es la excepción al patrón guard: se mantiene tomado durante el
-cambio de contexto y lo suelta el hilo que reanuda con `force_unlock` (o
-`thread_first_run` en su primera ejecución), porque con varias CPUs el hilo
-saliente no puede quedar en la cola de listos antes de que su `rsp` esté
-guardado. `smp::flush_others` (TLB shootdown) exige interrupciones
-habilitadas y ningún lock tomado: espera a las demás CPUs y estas pueden
-estar esperando el mismo lock. El lock de
-crecimiento del heap (`mapped`) es distinto del lock del allocator (`heap`):
-una asignación toma el segundo, un crecimiento el primero y luego el
-segundo brevemente para añadir la región.
+Resulting prohibitions: never enter the VMM with the PMM held (the
+mapper might need a table and re-enter the PMM); never take the
+process table from inside the scheduler (`reap` releases the
+scheduler before freeing a user address space). The scheduler
+lock is the exception to the guard pattern: it stays held during the
+context switch and is released by the resuming thread with `force_unlock` (or
+`thread_first_run` on its first run), because with multiple CPUs the outgoing
+thread cannot be on the ready queue before its `rsp` has been
+saved. `smp::flush_others` (TLB shootdown) requires interrupts
+enabled and no lock held: it waits for the other CPUs, and they may
+be waiting for the same lock. The heap growth
+lock (`mapped`) is distinct from the allocator lock (`heap`):
+an allocation takes the latter, a growth takes the former and then the
+latter briefly to add the region.
 
-## Interrupciones externas y tiempo (Fase 8)
+## External interrupts and time (Phase 8)
 
-- El 8259 se remapea a 0x20/0x28 y se enmascara por completo; las
-  interrupciones llegan por el Local APIC, mapeado sin caché en
-  `0xFFFF_D000_0000_0000` y habilitado con vector espurio 0xFF.
-- El timer del LAPIC se calibra contra el canal 2 del PIT (10 ms) y se
-  programa periódico a `time::TICK_HZ` = 100 Hz en el vector 0x20; en QEMU
-  resultan ~62 700 ticks/ms con divisor 16.
-- `time` mantiene el contador de ticks y `uptime_ms`; `time::sleep_ms` delega
-  en el planificador (ver Scheduler preemptivo). `test=timer` verifica el
-  ritmo contra el PIT.
-- Los vectores >= 32 se despachan desde `exceptions::handle` a
-  `apic::handle_interrupt`, que envía EOI (salvo el espurio).
+- The 8259 is remapped to 0x20/0x28 and fully masked; interrupts
+  arrive through the Local APIC, mapped uncached at
+  `0xFFFF_D000_0000_0000` and enabled with spurious vector 0xFF.
+- The LAPIC timer is calibrated against PIT channel 2 (10 ms) and
+  programmed periodic at `time::TICK_HZ` = 100 Hz on vector 0x20; in QEMU
+  this yields ~62 700 ticks/ms with divisor 16.
+- `time` keeps the tick counter and `uptime_ms`; `time::sleep_ms` delegates
+  to the scheduler (see Preemptive scheduler). `test=timer` checks the
+  rate against the PIT.
+- Vectors >= 32 are dispatched from `exceptions::handle` to
+  `apic::handle_interrupt`, which sends EOI (except for the spurious one).
 
-## Hilos del kernel (Fase 9)
+## Kernel threads (Phase 9)
 
 ```text
-0xFFFF_E000_0000_0000  pilas de hilo: slot = tid, cada uno guard page (sin mapear) + 32 KiB RW NX G
+0xFFFF_E000_0000_0000  thread stacks: slot = tid, each a guard page (unmapped) + 32 KiB RW NX G
 ```
 
-- `aricode-sched::RoundRobin` decide quién sigue; el kernel guarda por hilo
-  su `saved_rsp` y su pila. El contexto de arranque se adopta como hilo
-  `main` (tid 0) y el idle (tid 1, `hlt` + `yield`) se elige cuando la cola
-  está vacía y nunca se encola.
-- `switch_context` (System V) guarda rbx, rbp, r12..r15 y rsp; un hilo nuevo
-  arranca por `thread_start` con r12 = entrada y r13 = argumento, habilita
-  interrupciones y al retornar entra en `exit`.
-- El lock del planificador se suelta antes del cambio de contexto, con las
-  interrupciones deshabilitadas: el hilo que reanuda nunca hereda un lock.
-- Los hilos terminados los recoge el siguiente hilo que reanuda tras un
-  cambio (`reap`): nunca se libera la pila en uso. Las guard pages de hilo
-  también se reconocen en el diagnóstico de `STACK OVERFLOW`.
-- `test=threads`: dos hilos alternan estrictamente con `yield` y 40 workers
-  terminan y devuelven sus pilas al PMM.
+- `aricode-sched::RoundRobin` decides who runs next; the kernel stores per thread
+  its `saved_rsp` and its stack. The boot context is adopted as thread
+  `main` (tid 0) and idle (tid 1, `hlt` + `yield`) is chosen when the queue
+  is empty and is never enqueued.
+- `switch_context` (System V) saves rbx, rbp, r12..r15 and rsp; a new thread
+  starts through `thread_start` with r12 = entry and r13 = argument, enables
+  interrupts and on return enters `exit`.
+- The scheduler lock is released before the context switch, with
+  interrupts disabled: the resuming thread never inherits a lock.
+- Finished threads are reaped by the next thread that resumes after a
+  switch (`reap`): the stack in use is never freed. Thread guard pages
+  are also recognized by the `STACK OVERFLOW` diagnostic.
+- `test=threads`: two threads strictly alternate with `yield` and 40 workers
+  finish and return their stacks to the PMM.
 
-## Scheduler preemptivo (Fase 10)
+## Preemptive scheduler (Phase 10)
 
-- El handler del timer, tras el EOI, llama a `scheduler::on_tick`: despierta
-  a los hilos cuyo tick ha llegado y, si el quantum (2 ticks = 20 ms) ha
-  expirado o alguien despertó, preempta con la misma ruta de cambio que
-  `yield`. El hilo preemptado queda con su marco de interrupción en su pila y
-  reanuda por el `iretq` del handler.
-- Ningún lock del kernel puede ser preemptado: todos deshabilitan
-  interrupciones. El lock del planificador se suelta antes del cambio.
-- `scheduler::sleep_ms` duerme sin consumir CPU; `time::sleep_ms` delega en él.
-- `task::wait::WaitQueue` implementa bloqueo con condición evaluada bajo su
-  lock y `wake_one`/`wake_all`; un despertar que llega antes de bloquearse no
-  se pierde porque `unblock` falla y el hilo reevalúa.
-- `test=sched`: tres hilos que nunca ceden reparten la CPU (mínimo >= mitad
-  del máximo), un hilo duerme 50 ms con una duración observada de 5 a 7 ticks
-  (50 a 70 ms en total), y dos consumidores se despiertan uno a uno y luego
-  todos.
+- The timer handler, after the EOI, calls `scheduler::on_tick`: it wakes
+  threads whose tick has arrived and, if the quantum (2 ticks = 20 ms) has
+  expired or someone woke up, preempts through the same switch path as
+  `yield`. The preempted thread keeps its interrupt frame on its stack and
+  resumes through the handler's `iretq`.
+- No kernel lock can be preempted: all of them disable
+  interrupts. The scheduler lock is released before the switch.
+- `scheduler::sleep_ms` sleeps without consuming CPU; `time::sleep_ms` delegates to it.
+- `task::wait::WaitQueue` implements blocking with a condition evaluated under its
+  lock and `wake_one`/`wake_all`; a wakeup that arrives before blocking is not
+  lost because `unblock` fails and the thread re-evaluates.
+- `test=sched`: three threads that never yield share the CPU (minimum >= half
+  of the maximum), a thread sleeps 50 ms with an observed duration of 5 to 7 ticks
+  (50 to 70 ms in total), and two consumers are woken one by one and then
+  all at once.
 
-## Modo usuario (Fase 11)
+## User mode (Phase 11)
 
-- GDT con el layout que exige `syscall`/`sysret` (`aricode-x86-cpu::layout`):
-  código y datos de kernel, datos y código de usuario (DPL 3), TSS. `STAR`,
-  `LSTAR` y `FMASK` se programan en `arch::x86_64::syscall::init`.
-- Cada proceso tiene su PML4: la mitad alta se copia del kernel (256 PDPT
-  reservados en el arranque y compartidos, de modo que los mapeos que el
-  kernel añada después, como ventanas MMIO, se ven en todos los espacios) y la baja contiene su código en `0x40_0000` (solo lectura y
-  ejecución) y su pila en `0x7F_C000..0x80_0000` (RW, NX). El bit USER se
-  propaga por toda la ruta de tablas.
-- El hilo principal del proceso es un hilo del kernel normal cuyo `cr3` es el
-  del proceso; arranca en ring 0, fija nada más y salta a ring 3 con `iretq`.
-  En cada cambio de contexto el planificador carga el CR3 del hilo siguiente
-  si difiere y fija su pila de kernel en `TSS.rsp0` y en la entrada `syscall`.
-- `syscall_entry` hace `swapgs`, guarda el `rsp` de usuario en el scratch de
-  la CPU (`gs:`), carga la pila de kernel del hilo, construye un
-  `SyscallFrame`, habilita interrupciones y despacha en Rust; antes de
-  `sysretq` las deshabilita y deshace el `swapgs`. Convención en `sdk/abi`: `rax`
-  número, `rdi rsi rdx r10 r8 r9` argumentos, resultado en `rax`, negativo
-  `-4095..=-1` = error. Syscalls actuales: `process_exit`, `console_write`,
+- GDT with the layout that `syscall`/`sysret` requires (`aricode-x86-cpu::layout`):
+  kernel code and data, user data and code (DPL 3), TSS. `STAR`,
+  `LSTAR` and `FMASK` are programmed in `arch::x86_64::syscall::init`.
+- Each process has its own PML4: the upper half is copied from the kernel (256 PDPTs
+  reserved at boot and shared, so mappings the
+  kernel adds later, such as MMIO windows, are visible in every address space) and the lower half holds its code at `0x40_0000` (read and
+  execute only) and its stack at `0x7F_C000..0x80_0000` (RW, NX). The USER bit is
+  propagated along the whole table path.
+- The process's main thread is an ordinary kernel thread whose `cr3` is the
+  process's; it starts in ring 0 and jumps straight to ring 3 with `iretq`.
+  On every context switch the scheduler loads the next thread's CR3
+  if it differs and sets its kernel stack in `TSS.rsp0` and in the `syscall` entry.
+- `syscall_entry` does `swapgs`, saves the user `rsp` in the
+  CPU scratch area (`gs:`), loads the thread's kernel stack, builds a
+  `SyscallFrame`, enables interrupts and dispatches in Rust; before
+  `sysretq` it disables them and undoes the `swapgs`. Convention in `sdk/abi`: `rax`
+  number, `rdi rsi rdx r10 r8 r9` arguments, result in `rax`, negative
+  `-4095..=-1` = error. Current syscalls: `process_exit`, `console_write`,
   `thread_yield`, `thread_sleep`, `thread_get_tid`, `abi_version`,
   `handle_close`, `handle_duplicate`, `object_kind`, `object_id`,
   `object_revoke`, `endpoint_create`, `ipc_send`, `ipc_receive`,
-  `process_spawn` (con transferencia de handles al hijo), `process_wait`,
+  `process_spawn` (with handle transfer to the child), `process_wait`,
   `irq_wait`, `mmio_map`, `region_len`, `dma_alloc`, `dma_phys`, `pci_count`,
   `pci_info`, `pci_claim`, `console_read`, `system_info`, `system_power`,
   `initrd_read`, `pci_info_ext`, `console_inject`, `process_spawn_from`,
-  `ipc_receive_any`, `process_kill` (`MANAGE` sobre el proceso: marca la
-  terminación y despierta a su hilo, que termina al salir de la syscall en
-  curso, al despertar de una espera o en el siguiente tick si estaba en
-  ring 3; `process_wait` devuelve `Killed`; auditoría 6ee19fb, 4).
-  Los servicios de bloques, ficheros y red no añaden syscalls: son IPC.
-- Los punteros de usuario se validan página a página contra las tablas del
-  proceso (`copy_from_user`): un puntero de kernel devuelve `Fault`, nunca se
-  desreferencia.
-- Una excepción con `CS.RPL = 3` no es un pánico: se diagnostica por serie y
-  el proceso termina (`Killed`). Al recoger el hilo se libera todo el
-  espacio de usuario, tablas incluidas.
-- Programas de prueba en `user/testprogs` (crate aparte): binarios en
-  ensamblador (`hello`, `kernel_read`, `kernel_write`, `privileged`,
-  `bad_syscall`, `bad_pointer`) y en Rust sobre `aricode-sys`
+  `ipc_receive_any`, `process_kill` (`MANAGE` on the process: marks it for
+  termination and wakes its thread, which exits on leaving the current
+  syscall, on waking from a wait, or on the next tick if it was in
+  ring 3; `process_wait` returns `Killed`; audit 6ee19fb, 4).
+  The block, file and network services add no syscalls: they are IPC.
+- User pointers are validated page by page against the process's
+  tables (`copy_from_user`): a kernel pointer returns `Fault` and is never
+  dereferenced.
+- An exception with `CS.RPL = 3` is not a panic: it is diagnosed over serial and
+  the process terminates (`Killed`). When the thread is reaped, the whole
+  user address space is freed, tables included.
+- Test programs in `user/testprogs` (a separate crate): binaries in
+  assembly (`hello`, `kernel_read`, `kernel_write`, `privileged`,
+  `bad_syscall`, `bad_pointer`) and in Rust on top of `aricode-sys`
   (`sleep_yield`, `handles`, `caps`, `ipc_server`, `ipc_client`). `cargo
-  xtask` los compila como ELF estáticos para `x86_64-unknown-none` con
-  `sdk/rust/user.ld` (0x400000, segmentos R-X, R--, RW-) y los empaqueta con
-  `init` en `aricodeos/initrd.img`. `process::spawn` los carga con
-  `aricode-elf` y mapea cada segmento con sus permisos. `_start` recibe en
-  `rdi` el argumento de quien creó el proceso. Se lanzan con
-  `test=user_<nombre>`.
+  xtask` builds them as static ELFs for `x86_64-unknown-none` with
+  `sdk/rust/user.ld` (0x400000, R-X, R--, RW- segments) and packs them with
+  `init` into `aricodeos/initrd.img`. `process::spawn` loads them with
+  `aricode-elf` and maps each segment with its permissions. `_start` receives in
+  `rdi` the argument from whoever created the process. They are launched with
+  `test=user_<name>`.
 
-## Objetos y handles (Fase 12, ADR 0010)
+## Objects and handles (Phase 12, ADR 0010)
 
-- `object::KernelObject` (`Thread`, `Process`, `Console`) se referencia con
-  `Arc` desde las tablas de handles; los procesos nunca ven punteros ni
-  identificadores globales con valor de acceso.
-- Cada proceso nace con tres handles: sí mismo (`MANAGE|READ|DUPLICATE`), su
-  hilo (`READ|WAIT|DUPLICATE`) y la consola (`WRITE|DUPLICATE`); límite de
-  256 handles por proceso.
-- `user.handles` comprueba desde ring 3: tipo de objeto, handle inventado
-  (`BadHandle`), duplicado sin derechos que no puede escribir (`Denied`),
-  escalada al duplicar (`Escalation`), handle cerrado (`BadHandle`) y uso de
-  un objeto del tipo equivocado.
+- `object::KernelObject` (`Thread`, `Process`, `Console`) is referenced via
+  `Arc` from the handle tables; processes never see pointers or
+  global identifiers that confer access.
+- Each process is born with three handles: itself (`MANAGE|READ|DUPLICATE`), its
+  thread (`READ|WAIT|DUPLICATE`) and the console (`WRITE|DUPLICATE`); limit of
+  256 handles per process.
+- `user.handles` checks from ring 3: object type, forged handle
+  (`BadHandle`), a duplicate without rights that cannot write (`Denied`),
+  escalation on duplicate (`Escalation`), closed handle (`BadHandle`) and use of
+  an object of the wrong type.
 
-## Capabilities (Fase 13)
+## Capabilities (Phase 13)
 
-- Revocación por objeto: `KernelObject` lleva un flag `revoked`; `object_revoke`
-  exige `MANAGE` y a partir de ahí todo handle a ese objeto, en cualquier
-  proceso, devuelve `Revoked` (salvo cerrarlo). No hace falta localizar los
-  handles: comparten el `Arc`.
-- Derivación: `handle_duplicate` solo reduce derechos (Fase 12); un
-  duplicado revocado no puede volver a duplicarse.
-- Transferencia: `HandleTable::take` retira un handle con `TRANSFER` para
-  moverlo a otra tabla conservando sus derechos; es la primitiva que usa el
-  IPC (Fase 14) para pasar capabilities entre procesos.
-- `capabilities.revoke` (programa Rust `caps`): derivar la consola, intentar
-  revocarla sin `MANAGE` (`Denied`), revocar el propio proceso e ver el
-  duplicado invalidado, cerrar el revocado y comprobar que la consola sigue
-  viva.
+- Per-object revocation: `KernelObject` carries a `revoked` flag; `object_revoke`
+  requires `MANAGE`, and from then on every handle to that object, in any
+  process, returns `Revoked` (except for closing it). There is no need to locate the
+  handles: they share the `Arc`.
+- Derivation: `handle_duplicate` only reduces rights (Phase 12); a
+  revoked duplicate cannot be duplicated again.
+- Transfer: `HandleTable::take` removes a handle with `TRANSFER` to
+  move it to another table keeping its rights; it is the primitive the
+  IPC (Phase 14) uses to pass capabilities between processes.
+- `capabilities.revoke` (Rust program `caps`): derive the console, try to
+  revoke it without `MANAGE` (`Denied`), revoke the process itself and see the
+  duplicate invalidated, close the revoked one and check that the console is still
+  alive.
 
-## IPC (Fase 14)
+## IPC (Phase 14)
 
-- `ipc::Endpoint` es un objeto del kernel: cola acotada (16 mensajes) de
-  `Message` (hasta 256 bytes y 4 capabilities), dos colas de espera (emisores
-  y receptores) y contador de envíos. `endpoint_create` da al creador
-  `READ|WRITE|DUPLICATE|TRANSFER|MANAGE`; el modelo cliente/servidor
-  habitual es: el cliente crea un endpoint de respuesta y envía en cada
-  mensaje un duplicado con `WRITE|TRANSFER`.
-- `ipc_send` exige `WRITE` sobre el endpoint y `TRANSFER` sobre cada handle;
-  los handles se retiran del emisor solo cuando la cola confirma la plaza
-  (`Endpoint::send_with` construye el mensaje dentro de la sección crítica),
-  así que un timeout no pierde capabilities. `ipc_receive` exige `READ`,
-  copia los datos y los handles recibidos al espacio del proceso
-  (`copy_to_user` valida USER y WRITABLE) y devuelve `len | (n << 32)`.
-- `ipc_receive_any` (syscall 31, ADR 0020) recibe del primero de hasta 16
-  endpoints con mensaje (todos con `READ`, validados antes de esperar) y
-  devuelve su índice en los bits 48..63; los receptores múltiples esperan
-  en una cola común que despierta cualquier envío. fsd espera así en su
-  endpoint principal y en los concedidos a la vez, sin sondeos de 10 ms.
-- Timeouts en ms: `0` no bloquea, `TIMEOUT_INFINITE` espera siempre. Las
-  esperas usan `WaitQueue::wait_until_deadline`: el hilo duerme con plazo y
-  un `wake` anticipado (`RoundRobin::wake` saca a un dormido de su lista) lo
-  despierta antes.
-- Tamaños y colas acotadas son la primera defensa frente al agotamiento de
-  recursos (sección 52); los mensajes que no caben producen `TooBig`.
-- `test=ipc` lanza `ipc_server` e `ipc_client` (programas Rust) con el mismo
-  endpoint del kernel (servidor con `READ|WRITE`, cliente solo `WRITE`):
-  1000 round trips con handle de respuesta transferido, más recepción sin
-  `READ` (`Denied`), timeout, cola llena, envío fallido sin perder el handle,
-  mensaje demasiado grande y handle sin `TRANSFER`. Mide el round trip con el
-  TSC: ~260 000 ciclos bajo QEMU TCG incluyendo la creación del cliente. El
-  número solo sirve como referencia relativa: TCG no es hardware.
+- `ipc::Endpoint` is a kernel object: a bounded queue (16 messages) of
+  `Message` (up to 256 bytes and 4 capabilities), two wait queues (senders
+  and receivers) and a send counter. `endpoint_create` gives the creator
+  `READ|WRITE|DUPLICATE|TRANSFER|MANAGE`; the usual client/server
+  model is: the client creates a reply endpoint and sends in each
+  message a duplicate with `WRITE|TRANSFER`.
+- `ipc_send` requires `WRITE` on the endpoint and `TRANSFER` on each handle;
+  handles are removed from the sender only once the queue confirms the slot
+  (`Endpoint::send_with` builds the message inside the critical section),
+  so a timeout loses no capabilities. `ipc_receive` requires `READ`,
+  copies the data and the received handles into the process's address space
+  (`copy_to_user` validates USER and WRITABLE) and returns `len | (n << 32)`.
+- `ipc_receive_any` (syscall 31, ADR 0020) receives from the first of up to 16
+  endpoints with a message (all with `READ`, validated before waiting) and
+  returns its index in bits 48..63; multi-endpoint receivers wait
+  on a shared queue that any send wakes. fsd waits this way on its
+  main endpoint and on the granted ones at once, without 10 ms polling.
+- Timeouts in ms: `0` does not block, `TIMEOUT_INFINITE` waits forever. The
+  waits use `WaitQueue::wait_until_deadline`: the thread sleeps with a deadline and
+  an early `wake` (`RoundRobin::wake` takes a sleeper off its list)
+  wakes it sooner.
+- Bounded sizes and queues are the first defence against resource
+  exhaustion (section 52); messages that do not fit yield `TooBig`.
+- `test=ipc` launches `ipc_server` and `ipc_client` (Rust programs) with the same
+  kernel endpoint (server with `READ|WRITE`, client `WRITE` only):
+  1000 round trips with a transferred reply handle, plus receive without
+  `READ` (`Denied`), timeout, full queue, failed send without losing the handle,
+  oversized message and handle without `TRANSFER`. It measures the round trip with the
+  TSC: ~260 000 cycles under QEMU TCG including client creation. The
+  number is only a relative reference: TCG is not hardware.
 
-## Initrd e init (Fase 15)
+## Initrd and init (Phase 15)
 
-- AriBoot carga `\aricodeos\initrd.img` en páginas que el kernel conserva y lo
-  entrega en `BootInfo::initrd_*`. Formato propio (`aricode-initrd`): magia,
-  número de entradas y, por fichero, nombre y datos alineados a 8 bytes; el
-  lector valida la imagen entera al abrirla y no copia nada.
-- `cargo xtask image` construye el initrd con `init` y todos los binarios de
-  `user/testprogs`; el kernel ya no embebe programas y se compila sin
-  variables de entorno.
-- Sin `test=` en la cmdline, `kernel_main` lanza `init` con un único handle
-  extra: el objeto `SPAWNER` con `MANAGE|DUPLICATE` (handle
-  `0x0001_0004`). `process_spawn` exige `MANAGE` sobre un `SPAWNER`, busca el
-  nombre en el initrd y devuelve un handle de proceso con
-  `READ|WAIT|MANAGE|DUPLICATE`; `process_wait` exige `WAIT`, bloquea en la
-  cola de salida del proceso (con plazo opcional) y devuelve el código o
-  `Killed`. Un proceso creado así solo tiene los tres handles iniciales.
-- `init.boot` (smoke): AriInit lanza `hello` (42), ve `kernel_read` morir
-  como `Killed`, comprueba que un duplicado del SPAWNER sin `MANAGE` no
-  puede crear procesos y que un nombre inexistente da `NotFound`.
+- AriBoot loads `\aricodeos\initrd.img` into pages the kernel keeps and
+  hands it over in `BootInfo::initrd_*`. Custom format (`aricode-initrd`): magic,
+  entry count and, per file, name and data aligned to 8 bytes; the
+  reader validates the whole image when opening it and copies nothing.
+- `cargo xtask image` builds the initrd with `init` and all the binaries in
+  `user/testprogs`; the kernel no longer embeds programs and is built without
+  environment variables.
+- Without `test=` on the cmdline, `kernel_main` launches `init` with a single
+  extra handle: the `SPAWNER` object with `MANAGE|DUPLICATE` (handle
+  `0x0001_0004`). `process_spawn` requires `MANAGE` on a `SPAWNER`, looks up the
+  name in the initrd and returns a process handle with
+  `READ|WAIT|MANAGE|DUPLICATE`; `process_wait` requires `WAIT`, blocks on the
+  process's exit queue (with an optional deadline) and returns the code or
+  `Killed`. A process created this way has only the three initial handles.
+- `init.boot` (smoke): AriInit launches `hello` (42), sees `kernel_read` die
+  as `Killed`, checks that a SPAWNER duplicate without `MANAGE` cannot
+  create processes and that a nonexistent name gives `NotFound`.
 
-## Drivers en espacio de usuario (Fase 16)
+## User-space drivers (Phase 16)
 
-- `acpi::init` localiza el RSDP de `BootInfo`, valida XSDT/RSDT y parsea
-  MADT y MCFG con `aricode-acpi` a través del mapa físico. `ioapic::init`
-  mapea el primer I/O APIC sin caché en `0xFFFF_D000_0000_1000` y enmascara
-  sus 24 entradas.
-- Un driver solo recibe lo que sus capabilities le dan (sección 27):
-  - `Irq`: GSI enrutada a un vector de dispositivo (`0x30..=0x3F`) con la
-    polaridad y disparo de la MADT. El handler acumula y despierta; las
-    líneas por nivel quedan enmascaradas hasta que `irq_wait` las atiende.
-    Al soltarse el último handle, la línea se enmascara y el vector se libera.
-  - `Mmio`: región física de dispositivo; `mmio_map` la mapea en el proceso
-    (`0x1000_0000` en adelante, sin caché) y la registra como memoria ajena,
-    que se desmapea sin liberar al destruir el espacio.
-  - `Dma`: frames contiguos puestos a cero (`dma_alloc`, máximo 1 MiB, exige
-    `MANAGE` sobre un objeto `Hardware`); `dma_phys` da la física para el
-    dispositivo y `mmio_map` la mapea con caché. Los frames vuelven al PMM al
-    soltarse el objeto.
-- `test=drivers`: `pit_driver` atiende cinco IRQ0 del PIT (canal 0 a 100 Hz)
-  y reserva, mapea y verifica un buffer DMA; `fb_driver` recibe el
-  framebuffer como región MMIO y pinta 64x64 píxeles; el kernel comprueba el
-  píxel (0,0). El reinicio de un driver caído lo hace AriInit en `init.boot`
-  (`crashy_driver` muere con arg 0 y arranca con arg 1).
-- Un proceso se inserta en la tabla antes de encolar su hilo
-  (`prepare_for_process` + `start_thread`): con `log=trace` la salida lenta
-  hacía que el hilo llegara a ejecutar antes de existir su proceso.
+- `acpi::init` locates the RSDP from `BootInfo`, validates XSDT/RSDT and parses
+  MADT and MCFG with `aricode-acpi` through the physical map. `ioapic::init`
+  maps the first I/O APIC uncached at `0xFFFF_D000_0000_1000` and masks
+  its 24 entries.
+- A driver only gets what its capabilities give it (section 27):
+  - `Irq`: a GSI routed to a device vector (`0x30..=0x3F`) with the
+    polarity and trigger mode from the MADT. The handler accumulates and wakes; level-triggered
+    lines stay masked until `irq_wait` services them.
+    When the last handle is dropped, the line is masked and the vector freed.
+  - `Mmio`: a physical device region; `mmio_map` maps it into the process
+    (`0x1000_0000` onwards, uncached) and records it as foreign memory,
+    which is unmapped without being freed when the address space is destroyed.
+  - `Dma`: zeroed contiguous frames (`dma_alloc`, at most 1 MiB, requires
+    `MANAGE` on a `Hardware` object); `dma_phys` gives the physical address for the
+    device and `mmio_map` maps it cached. The frames go back to the PMM when
+    the object is dropped.
+- `test=drivers`: `pit_driver` services five PIT IRQ0s (channel 0 at 100 Hz)
+  and allocates, maps and verifies a DMA buffer; `fb_driver` receives the
+  framebuffer as an MMIO region and paints 64x64 pixels; the kernel checks
+  pixel (0,0). Restarting a crashed driver is done by AriInit in `init.boot`
+  (`crashy_driver` dies with arg 0 and starts with arg 1).
+- A process is inserted into the table before its thread is queued
+  (`prepare_for_process` + `start_thread`): with `log=trace` the slow output
+  let the thread run before its process existed.
 
-## PCIe (Fase 17)
+## PCIe (Phase 17)
 
-- `pci::init` toma la primera entrada de la MCFG, mapea su ECAM sin caché en
-  `0xFFFF_D100_0000_0000` con páginas de 2 MiB (1 MiB por bus) y recorre los
-  buses desde el inicial siguiendo los puentes PCI-PCI. Cada función se lee
-  con accesos de 32 bits y se decodifica con `aricode-pci`: vendor y device,
-  clase, BARs (E/S, 32 y 64 bits, prefetchable) y lista de capabilities
+- `pci::init` takes the first MCFG entry, maps its ECAM uncached at
+  `0xFFFF_D100_0000_0000` with 2 MiB pages (1 MiB per bus) and walks the
+  buses from the starting one, following PCI-PCI bridges. Each function is read
+  with 32-bit accesses and decoded with `aricode-pci`: vendor and device,
+  class, BARs (I/O, 32- and 64-bit, prefetchable) and capability list
   (MSI, MSI-X, PCIe, PM).
-- En QEMU q35: host bridge, VGA, Ethernet e1000e (MSI/MSI-X), ISA bridge,
-  SATA AHCI (MSI) y SMBus. `pci.enumerate` (smoke) los exige.
-- La lista se devuelve al arranque; la programación de MSI/MSI-X y la
-  asignación de BARs a drivers llegan con virtio (Fase 18).
+- On QEMU q35: host bridge, VGA, e1000e Ethernet (MSI/MSI-X), ISA bridge,
+  SATA AHCI (MSI) and SMBus. `pci.enumerate` (smoke) requires them.
+- The list is returned at boot; MSI/MSI-X programming and
+  BAR assignment to drivers arrive with virtio (Phase 18).
 
-## Virtio-blk en espacio de usuario (Fase 18)
+## User-space virtio-blk (Phase 18)
 
-- La raíz PCI es un objeto que solo recibe `init` (`0x0001_0005`,
-  `READ|MANAGE`). `pci_count`/`pci_info` enumeran desde usuario; `pci_claim`
-  reclama una función: el kernel habilita memoria y bus master, deshabilita
-  INTx, sondea el tamaño de cada BAR de memoria, programa la entrada 0 de
-  MSI-X hacia un vector de dispositivo (tabla mapeada en una ventana sin
-  caché del kernel) o, si la función no tiene MSI-X, su capability MSI con
-  un solo mensaje (ADR 0022), y devuelve nueve handles: espacio de configuración
-  (MMIO), `Hardware`, IRQ y los seis BARs (0 si ausentes), todos con
+- The PCI root is an object that only `init` receives (`0x0001_0005`,
+  `READ|MANAGE`). `pci_count`/`pci_info` enumerate from user space; `pci_claim`
+  claims a function: the kernel enables memory and bus master, disables
+  INTx, probes the size of each memory BAR, programs MSI-X entry 0
+  to a device vector (table mapped in an uncached kernel
+  window) or, if the function has no MSI-X, its MSI capability with
+  a single message (ADR 0022), and returns nine handles: configuration space
+  (MMIO), `Hardware`, IRQ and the six BARs (0 if absent), all with
   `TRANSFER`.
-- `process_spawn` transfiere handles al hijo (aparecen desde
-  `0x0001_0004` en orden). `init` reclama `1af4:1042`, compacta los handles
-  presentes y pasa en `arg` una máscara (bit 15 IRQ, bits 0..5 BARs); el
-  driver reconstruye la posición de cada BAR con ella.
-- `services/virtio-blk`: lee el espacio de configuración por MMIO, localiza
-  las estructuras common/notify/device con `aricode-virtio`, negocia
-  `VERSION_1`, crea la cola 0 en un buffer DMA (`QueueLayout` +
-  `Virtqueue`), asigna el vector MSI-X 0 a la cola y ejecuta peticiones de
-  un sector (cabecera, datos, estado) esperando la IRQ con `irq_wait`. La
-  autoprueba lee sectores del disco de pruebas, escribe uno y lo relee.
-- El runner añade `virtio-blk-pci` moderno con `build/disk.img` (4 MiB, GPT
-  con la partición `ARI0` formateada como AriFS; desde el LBA 4096 cada
-  sector lleva `ARIDISK\0` y su número), regenerado en cada arranque.
-- Los programas de usuario tienen un heap estático de 256 KiB
-  (`aricode-heap` tras un spinlock) porque la librería PCI usa `alloc`.
+- `process_spawn` transfers handles to the child (they appear from
+  `0x0001_0004` in order). `init` claims `1af4:1042`, compacts the handles
+  present and passes a mask in `arg` (bit 15 IRQ, bits 0..5 BARs); the
+  driver reconstructs each BAR's position from it.
+- `services/virtio-blk`: reads the configuration space via MMIO, locates
+  the common/notify/device structures with `aricode-virtio`, negotiates
+  `VERSION_1`, creates queue 0 in a DMA buffer (`QueueLayout` +
+  `Virtqueue`), assigns MSI-X vector 0 to the queue and executes
+  single-sector requests (header, data, status), waiting for the IRQ with `irq_wait`. The
+  self-test reads sectors from the test disk, writes one and reads it back.
+- The runner adds a modern `virtio-blk-pci` with `build/disk.img` (4 MiB, GPT
+  with the `ARI0` partition formatted as AriFS; from LBA 4096 each
+  sector holds `ARIDISK\0` and its number), regenerated on every boot.
+- User programs have a 256 KiB static heap
+  (`aricode-heap` behind a spinlock) because the PCI library uses `alloc`.
 
-## Servicio de bloques (Fase 19)
+## Block service (Phase 19)
 
-- `init` crea el endpoint del servicio y se lo pasa al driver junto a las
-  capabilities del dispositivo; a los clientes les da un duplicado solo
-  `WRITE` y una capacidad de hardware para su buffer DMA (init la recibe del
-  kernel en `0x0001_0006`).
-- Protocolo `BlockServiceProtocol v1` (`sdk/proto::block`): petición de 16
-  bytes (`Info`, `Read`, `Write`, LBA, sectores) con dos handles, el endpoint
-  de respuesta y el buffer DMA del cliente; respuesta de 16 bytes con estado
-  y valor. El driver programa el descriptor de datos con la física del
-  buffer del cliente: cero copias. Hasta 16 sectores por petición; la cola
-  del endpoint es la cola de peticiones.
-- Al arrancar, el driver lee la GPT (`aricode-gpt`, CRC de cabecera y tabla)
-  y anuncia las particiones; el disco de pruebas de xtask lleva un MBR
-  protector, GPT con respaldo y una partición `ARI0` de tipo AriCodeOS.
-- `blk_client` (ring 3) prueba info, lectura de la partición, escritura y
-  relectura, LBA fuera de rango (`Invalid`) y petición sin buffer
-  (`BadHandles`). `storage.block_service` lo exige.
-- Los programas de usuario tienen la pila en 64 KiB y el kernel diagnostica
-  `USER STACK OVERFLOW` cuando un fallo toca su guard page (la tabla GPT de
-  16 KiB en la pila lo provocó; ahora va al heap del programa).
-- `WaitQueue::wait_until_deadline` mantiene las interrupciones deshabilitadas
-  desde la comprobación hasta el cambio de contexto: un `wake` desde un
-  handler MSI-X no puede llegar en la ventana entre soltar el lock y
-  dormirse (antes cada petición podía esperar hasta el plazo de 2 s).
+- `init` creates the service endpoint and passes it to the driver along with the
+  device capabilities; clients get a `WRITE`-only duplicate
+  and a hardware capability for their DMA buffer (init receives it from the
+  kernel at `0x0001_0006`).
+- `BlockServiceProtocol v1` protocol (`sdk/proto::block`): 16-byte request
+  (`Info`, `Read`, `Write`, LBA, sectors) with two handles, the reply
+  endpoint and the client's DMA buffer; 16-byte reply with status
+  and value. The driver programs the data descriptor with the physical address of the
+  client's buffer: zero copies. Up to 16 sectors per request; the endpoint
+  queue is the request queue.
+- At startup the driver reads the GPT (`aricode-gpt`, header and table CRC)
+  and announces the partitions; the xtask test disk carries a protective
+  MBR, a GPT with backup and an `ARI0` partition of type AriCodeOS.
+- `blk_client` (ring 3) tests info, partition read, write and
+  read-back, out-of-range LBA (`Invalid`) and a request without a buffer
+  (`BadHandles`). `storage.block_service` requires it.
+- User programs have a 64 KiB stack and the kernel diagnoses
+  `USER STACK OVERFLOW` when a fault hits its guard page (the 16 KiB GPT
+  table on the stack caused it; it now goes on the program's heap).
+- `WaitQueue::wait_until_deadline` keeps interrupts disabled
+  from the check until the context switch: a `wake` from an
+  MSI-X handler cannot land in the window between releasing the lock and
+  going to sleep (previously each request could wait up to the 2 s deadline).
 
-## Sistema de archivos (Fase 20)
+## File system (Phase 20)
 
-- AriFS v1 (`libs/arifs`, ADR 0014): LBA 0 superbloque (magia `ARIFS`,
-  sectores, siguiente LBA libre, CRC32), LBA 1..4 tabla de 32 entradas de
-  64 bytes (nombre, LBA inicial, capacidad, tamaño, CRC32 por entrada), LBA
-  5 cabecera del journal de reemplazo y 6..69 sus datos, datos desde el LBA
-  70 en bloques fijos de 64 sectores asignados de forma incremental. Sin
-  fragmentación ni borrado. `open` rechaza (`Corrupt`) metadatos cuyo CRC
-  no cuadra y rehace un reemplazo comprometido a medias; `write` escribe en
-  el sitio (sector entero viejo o nuevo tras un corte, tamaño después de
-  los datos, duradero tras `flush`); `replace` es atómico y duradero por el
-  journal (datos + CRC, `flush`, cabecera pendiente, `flush`, copia y
-  tamaño, `flush`, limpieza). Todo el acceso pasa por el trait
-  `BlockDevice` (con `flush`), así que la librería se prueba en host sobre
-  un `Vec`, incluido un corte en cada escritura del reemplazo con la caché
-  perdida o conservada, y xtask la usa para formatear la partición `ARI0`
-  del disco de pruebas con `hola.txt` y `README` (y fabricar los discos
-  `fs-pending-replace` y `fs-corrupt`).
-- `virtio-blk` negocia `VIRTIO_BLK_F_FLUSH` y atiende `Op::Flush` del
-  protocolo de bloques (`T_FLUSH`); sin la característica, `Flush` vuelve
-  sin hacer nada y el driver lo anuncia al arrancar.
-- `fsd` (`services/arifs`) recibe de init su endpoint (`READ|WRITE`), el
-  del servicio de bloques (`WRITE`), una capacidad de hardware y `SYSTEM`
-  (lectura, reloj para caducar reemplazos por trozos abandonados); `arg` es
-  el LBA de la partición. Implementa `BlockDevice` sobre `aricode-sys::block`
-  (lotes de hasta 8 sectores por petición: la librería agrupa los sectores
-  enteros de cada lectura, escritura, trozo del journal y aplicación, etapa
-  5) y atiende `FileServiceProtocol v1`
-  (`sdk/proto::fs`): peticiones y respuestas de 64 bytes con `List`,
+- AriFS v1 (`libs/arifs`, ADR 0014): LBA 0 superblock (magic `ARIFS`,
+  sectors, next free LBA, CRC32), LBA 1..4 table of 32 entries of
+  64 bytes (name, starting LBA, capacity, size, per-entry CRC32), LBA
+  5 replace journal header and 6..69 its data, data from LBA
+  70 in fixed 64-sector blocks allocated incrementally. No
+  fragmentation and no deletion. `open` rejects (`Corrupt`) metadata whose CRC
+  does not match and redoes a half-committed replace; `write` writes in
+  place (whole old or new sector after a power cut, size after
+  the data, durable after `flush`); `replace` is atomic and durable through the
+  journal (data + CRC, `flush`, pending header, `flush`, copy and
+  size, `flush`, cleanup). All access goes through the
+  `BlockDevice` trait (with `flush`), so the library is tested on the host over
+  a `Vec`, including a cut at every write of the replace with the cache
+  lost or kept, and xtask uses it to format the `ARI0` partition
+  of the test disk with `hola.txt` and `README` (and to build the
+  `fs-pending-replace` and `fs-corrupt` disks).
+- `virtio-blk` negotiates `VIRTIO_BLK_F_FLUSH` and handles `Op::Flush` of the
+  block protocol (`T_FLUSH`); without the feature, `Flush` returns
+  without doing anything and the driver announces this at startup.
+- `fsd` (`services/arifs`) receives from init its endpoint (`READ|WRITE`), the
+  block service's (`WRITE`), a hardware capability and `SYSTEM`
+  (read, a clock to expire replaces abandoned mid-chunk); `arg` is
+  the partition's LBA. It implements `BlockDevice` on top of `aricode-sys::block`
+  (batches of up to 8 sectors per request: the library groups the whole
+  sectors of each read, write, journal chunk and apply, stage
+  5) and serves `FileServiceProtocol v1`
+  (`sdk/proto::fs`): 64-byte requests and replies with `List`,
   `Open`, `Create`, `Read`, `Write`, `Close`, `Flush`, `Replace`
-  (reemplazo atómico de hasta `MAX_IO`) y `ReplaceChunk`/`ReplaceCommit`
-  (trozos al journal y compromiso: hasta 32 KiB con la misma garantía; un
-  solo reemplazo a medias por servicio, `Busy` para los demás, liberado por
-  el compromiso, un error o el cierre del descriptor; ADR 0018); los datos van por el buffer
-  DMA del cliente (hasta 4 KiB por petición), que fsd mapea una vez y
-  reutiliza por dirección física. Los descriptores son globales al servicio
-  (16 abiertos) hasta que haya identidad de cliente por capability.
-- `aricode-sys::fs::FsClient` encapsula endpoint de respuesta, buffer DMA
-  y llamadas; `fs_client` (ring 3) lista, lee `hola.txt`, crea y escribe
-  `nuevo.txt`, lo reemplaza de una vez, hace `flush`, relee y comprueba
-  `Exists`, `NotFound` y `BadFd`. `filesystem.read_write` lo exige (y el
-  `flush` negociado); `init.boot` exige el mensaje de éxito;
-  `filesystem.replace_recovery` rehace al montar un reemplazo cortado tras
-  el compromiso y `filesystem.corrupt_detected` rechaza una tabla alterada.
-- El área en bruto del disco de pruebas (LBA 4096 en adelante, patrón
-  `ARIDISK\0`+LBA) queda fuera del alcance máximo de AriFS (70 + 32 × 64
-  sectores) para que `blk_client` y `fsd` no se pisen.
+  (atomic replace of up to `MAX_IO`) and `ReplaceChunk`/`ReplaceCommit`
+  (chunks to the journal and commit: up to 32 KiB with the same guarantee; a
+  single in-progress replace per service, `Busy` for the rest, released by
+  the commit, an error or closing the descriptor; ADR 0018); data goes through the client's DMA
+  buffer (up to 4 KiB per request), which fsd maps once and
+  reuses by physical address. Descriptors are global to the service
+  (16 open) until there is per-capability client identity.
+- `aricode-sys::fs::FsClient` wraps the reply endpoint, the DMA buffer
+  and the calls; `fs_client` (ring 3) lists, reads `hola.txt`, creates and writes
+  `nuevo.txt`, replaces it in one go, does `flush`, reads back and checks
+  `Exists`, `NotFound` and `BadFd`. `filesystem.read_write` requires it (and the
+  negotiated `flush`); `init.boot` requires the success message;
+  `filesystem.replace_recovery` redoes on mount a replace cut after
+  the commit and `filesystem.corrupt_detected` rejects a tampered table.
+- The test disk's raw area (LBA 4096 onwards, pattern
+  `ARIDISK\0`+LBA) lies beyond AriFS's maximum reach (70 + 32 × 64
+  sectors) so that `blk_client` and `fsd` do not step on each other.
 
-## Shell y entrada de consola (Fase 21)
+## Shell and console input (Phase 21)
 
-- `console_input` (kernel): la IRQ ISA 4 de COM1 se enruta por el I/O APIC
-  al vector `0x40`, fuera del rango de dispositivos de usuario; el handler
-  vacía el FIFO en un anillo de 1 KiB y despierta una `WaitQueue`.
-  `console_read` (syscall 24) exige `READ` sobre un objeto `Console`,
-  valida el destino antes de bloquear y devuelve `Timeout` si vence el plazo.
-  Los bytes descartados por anillo lleno se cuentan para diagnóstico.
-- Teclados de usuario (etapa 2, ADR 0013): `console_inject` (syscall 29)
-  escribe texto en el mismo anillo y exige `MANAGE` sobre el `Console`;
-  solo init lo tiene (`0x10008` con `READ|MANAGE|DUPLICATE|TRANSFER`) y lo
-  delega al servicio `console_bridge`, que en modo `shell` sin compositor
-  recorre los servicios de entrada (virtio-input, USB HID) por turnos y
-  traduce las pulsaciones con `aricode_input::Keyboard`. Es un residente
-  supervisado más (`services --detail`); los escenarios `shell.usb_keyboard`
-  y `shell.virtio_keyboard` teclean una sesión por QMP.
-- Objeto `System` (kind 11): `system_info` (syscall 25, `READ`) responde
-  `UPTIME` (ms), `MEMORY` (frames utilizables y libres: el PMM distingue la
-  RAM entregada con `free_range` de los frames direccionables) y
-  `PROCESSES` (entradas de 32 bytes con pid, estado, código y nombre);
-  `system_power` (syscall 26, `MANAGE`) apaga (`ARICODEOS_SHUTDOWN` y
-  salida de QEMU con `qemu_exit`, `hlt` sin él) o reinicia (reset por el
-  8042 y triple fallo como respaldo). ABI v3.
-- Init recibe además `SYSTEM` (`0x10007`) y una entrada de consola
-  (`0x10008`, `READ`); el kernel le pasa en `arg` `init_arg::SHELL` si la
-  cmdline lleva `shell`. Tras los servicios de arranque lanza `shell` con
-  el endpoint de fsd (`WRITE`), hardware, `SYSTEM`, la entrada de consola
-  y la raíz PCI solo lectura, y `arg` = máscara de servicios activos; espera
-  su salida y la anota.
-- `arish` lee líneas con eco y retroceso, y despacha los comandos sin
-  `alloc` (formato con `fmt_u64`/`fmt_hex` de la biblioteca de programas
-  de usuario). `cat` lee por bloques de 1 KiB con `FsClient`. Las flechas
-  arriba y abajo (`ESC [ A` / `ESC [ B`) recorren un historial de las ocho
-  últimas líneas distintas, que se pueden editar antes de ejecutar; el resto
-  de secuencias de escape se descartan (escenario `shell.history`). `diag
-  NOM` captura la salida del informe (consola y buffer de 16 KiB) y la guarda
-  en AriFS; `cargo xtask fs-cat DISCO [NOMBRE]` la lee desde el anfitrión
-  (escenario `shell.diag_file`, test de `fscat` sobre el disco de pruebas).
-  El informe incluye `net`: `Op::Link` (14) del protocolo de red responde el
-  estado del enlace físico (`LINK_UP`/`LINK_DOWN`/`LINK_UNKNOWN`) aunque
-  DHCP no haya terminado, y el resumen de `services` nombra papeles
-  (bloques, red, entrada), no drivers.
-- El runner (`qemu::run_headless`) acepta `Input { prompt, lines }`: lee la
-  serie de forma incremental y envía la línea `k` cuando el prompt ha
-  aparecido `k + 1` veces, así los tests son deterministas sin esperas
-  fijas. `console.input` usa `CONSOLE_INPUT_READY` como prompt para probar
-  el kernel sin shell.
+- `console_input` (kernel): COM1's ISA IRQ 4 is routed through the I/O APIC
+  to vector `0x40`, outside the user device range; the handler
+  drains the FIFO into a 1 KiB ring and wakes a `WaitQueue`.
+  `console_read` (syscall 24) requires `READ` on a `Console` object,
+  validates the destination before blocking and returns `Timeout` if the deadline expires.
+  Bytes dropped because the ring is full are counted for diagnostics.
+- User-space keyboards (stage 2, ADR 0013): `console_inject` (syscall 29)
+  writes text into the same ring and requires `MANAGE` on the `Console`;
+  only init has it (`0x10008` with `READ|MANAGE|DUPLICATE|TRANSFER`) and
+  delegates it to the `console_bridge` service, which in `shell` mode without a compositor
+  polls the input services (virtio-input, USB HID) in turn and
+  translates keystrokes with `aricode_input::Keyboard`. It is one more supervised
+  resident (`services --detail`); the `shell.usb_keyboard`
+  and `shell.virtio_keyboard` scenarios type a session over QMP.
+- `System` object (kind 11): `system_info` (syscall 25, `READ`) answers
+  `UPTIME` (ms), `MEMORY` (usable and free frames: the PMM distinguishes the
+  RAM handed over with `free_range` from addressable frames) and
+  `PROCESSES` (32-byte entries with pid, state, code and name);
+  `system_power` (syscall 26, `MANAGE`) powers off (`ARICODEOS_SHUTDOWN` and
+  QEMU exit with `qemu_exit`, `hlt` without it) or reboots (reset via the
+  8042, with a triple fault as fallback). ABI v3.
+- Init also receives `SYSTEM` (`0x10007`) and a console input
+  (`0x10008`, `READ`); the kernel passes `init_arg::SHELL` in `arg` if the
+  cmdline contains `shell`. After the boot services it launches `shell` with
+  the fsd endpoint (`WRITE`), hardware, `SYSTEM`, the console input
+  and the read-only PCI root, and `arg` = mask of active services; it waits
+  for its exit and logs it.
+- `arish` reads lines with echo and backspace, and dispatches commands without
+  `alloc` (formatting with `fmt_u64`/`fmt_hex` from the user program
+  library). `cat` reads in 1 KiB blocks with `FsClient`. The up and down
+  arrows (`ESC [ A` / `ESC [ B`) walk a history of the last eight
+  distinct lines, which can be edited before running; all other
+  escape sequences are discarded (scenario `shell.history`). `diag
+  NAME` captures the report output (console and a 16 KiB buffer) and saves it
+  to AriFS; `cargo xtask fs-cat DISK [NAME]` reads it from the host
+  (scenario `shell.diag_file`, `fscat` test over the test disk).
+  The report includes `net`: `Op::Link` (14) of the network protocol reports the
+  physical link state (`LINK_UP`/`LINK_DOWN`/`LINK_UNKNOWN`) even if
+  DHCP has not finished, and the `services` summary names roles
+  (block, network, input), not drivers.
+- The runner (`qemu::run_headless`) accepts `Input { prompt, lines }`: it reads the
+  serial output incrementally and sends line `k` once the prompt has
+  appeared `k + 1` times, so tests are deterministic without fixed
+  sleeps. `console.input` uses `CONSOLE_INPUT_READY` as the prompt to test
+  the kernel without a shell.
 
-## Red (Fase 22)
+## Network (Phase 22)
 
-- `aricode-net` es una biblioteca de codificadores puros sobre buffers del
-  llamador (sin `alloc`): cada capa tiene `parse`/`write` con validación de
-  longitudes y checksums, y las máquinas de estado (caché ARP, cliente
-  DHCP) se prueban en host paso a paso. El servicio solo conecta la
-  biblioteca con el driver y con IPC.
-- `aricode-sys::virtio_pci` concentra el transporte virtio moderno
-  (estructuras PCI, negociación `VERSION_1 | deseadas`, colas en DMA con
-  el vector MSI-X 0, `DRIVER_OK`, `NEEDS_RESET`) y el contrato de handles
-  con init; tras los BARs vienen los extras del driver (`extra_handle`).
-  virtio-blk quedó reducido a su lógica de peticiones.
-- `netd` es de un solo hilo: en cada vuelta vacía la cola de recepción,
-  atiende hasta 8 peticiones IPC con timeout 0, vence plazos y espera la
-  IRQ hasta 10 ms. Las operaciones que esperan a la red (ping, `UdpRecv`,
-  `Dns`) guardan el endpoint de respuesta del cliente y contestan cuando
-  llega el paquete o vence el plazo; las tramas cuyo siguiente salto no
-  está en la caché ARP se aparcan hasta la respuesta ARP (1 s).
-- La red de QEMU es la de usuario (slirp): DHCP entrega 10.0.2.15,
-  router 10.0.2.2 (que responde a ICMP y redirige UDP al loopback del
-  host) y DNS 10.0.2.3. xtask arranca con cada QEMU un respondedor UDP en
-  `127.0.0.1:17007` que hace eco y contesta consultas DNS con `10.1.2.3`,
-  así `network.stack` y el shell no dependen de Internet. Al declarar un
-  `netdev`, QEMU deja de añadir la e1000 por defecto: el disco pasa a
-  `00:02.0` y la red a `00:03.0` (7 funciones).
+- `aricode-net` is a library of pure encoders over caller
+  buffers (no `alloc`): each layer has `parse`/`write` with length and
+  checksum validation, and the state machines (ARP cache, DHCP
+  client) are tested on the host step by step. The service only connects the
+  library to the driver and to IPC.
+- `aricode-sys::virtio_pci` concentrates the modern virtio transport
+  (PCI structures, `VERSION_1 | desired` negotiation, DMA queues with
+  MSI-X vector 0, `DRIVER_OK`, `NEEDS_RESET`) and the handle contract
+  with init; after the BARs come the driver's extras (`extra_handle`).
+  virtio-blk was reduced to its request logic.
+- `netd` is single-threaded: on each iteration it drains the receive queue,
+  serves up to 8 IPC requests with timeout 0, expires deadlines and waits for the
+  IRQ for up to 10 ms. Operations that wait on the network (ping, `UdpRecv`,
+  `Dns`) keep the client's reply endpoint and answer when
+  the packet arrives or the deadline expires; frames whose next hop is not
+  in the ARP cache are parked until the ARP reply (1 s).
+- QEMU's network is user-mode (slirp): DHCP hands out 10.0.2.15,
+  router 10.0.2.2 (which answers ICMP and redirects UDP to the host's
+  loopback) and DNS 10.0.2.3. xtask starts, with each QEMU, a UDP responder on
+  `127.0.0.1:17007` that echoes and answers DNS queries with `10.1.2.3`,
+  so `network.stack` and the shell do not depend on the Internet. When a
+  `netdev` is declared, QEMU stops adding the default e1000: the disk moves to
+  `00:02.0` and the network to `00:03.0` (7 functions).
 
-## TCP (Fase 23)
+## TCP (Phase 23)
 
-- `aricode-net::tcp::Connection` es una máquina de estados pura: `poll`
-  produce como mucho un segmento por llamada (retransmisión vencida, SYN,
-  datos nuevos dentro de la ventana del otro extremo, FIN, ACK puro) y
-  `on_segment` consume uno; el llamador transmite y cronometra. Buffers
-  fijos de 4 KiB por sentido, retransmisión desde `snd_una` con RTO
-  exponencial (500 ms a 8 s, 6 reintentos → `CloseReason::Timeout`),
-  TIME-WAIT de 2 s, RST recibido o `abort` → `CloseReason::Reset`. Los
-  tests de host conectan dos `Connection` por un cable que descarta
-  segmentos elegidos o al azar.
-- En `netd` cada socket TCP (`Box`, 8 KiB de buffers) vive en un slot de
-  la tabla; los segmentos se demultiplexan por cuádrupla y un SYN a un
-  puerto en escucha crea una conexión pasiva que `TcpAccept` entrega al
-  establecerse. `TcpConnect`/`TcpAccept`/`TcpRecv` quedan pendientes con
-  plazo; `TcpSend` encola lo que cabe y devuelve la cuenta (el cliente
-  reintenta con `tcp_send_all`). Un slot se libera cuando el usuario ha
-  cerrado y la conexión terminó.
-- QEMU redirige `127.0.0.1:17009` al puerto 7 del invitado (`hostfwd`) y
-  el respondedor de xtask escucha eco TCP en `127.0.0.1:17008`. Un
-  escenario puede declarar `[host_tcp] marker/payload`: al ver el marcador
-  en la serie, xtask se conecta al puerto redirigido, envía la carga y
-  añade a la captura una línea `[host] sonda TCP: ...` que `serial_contains`
-  puede exigir.
-- El heap estático de los programas de usuario pasa a 256 KiB (los
-  sockets TCP de netd no caben en la pila de 64 KiB).
+- `aricode-net::tcp::Connection` is a pure state machine: `poll`
+  produces at most one segment per call (expired retransmission, SYN,
+  new data within the peer's window, FIN, pure ACK) and
+  `on_segment` consumes one; the caller transmits and keeps time. Fixed
+  4 KiB buffers per direction, retransmission from `snd_una` with exponential
+  RTO (500 ms to 8 s, 6 retries → `CloseReason::Timeout`),
+  2 s TIME-WAIT, received RST or `abort` → `CloseReason::Reset`. The
+  host tests connect two `Connection`s through a wire that drops
+  chosen or random segments.
+- In `netd` each TCP socket (`Box`, 8 KiB of buffers) lives in a slot of
+  the table; segments are demultiplexed by 4-tuple and a SYN to a
+  listening port creates a passive connection that `TcpAccept` delivers once
+  established. `TcpConnect`/`TcpAccept`/`TcpRecv` stay pending with a
+  deadline; `TcpSend` queues what fits and returns the count (the client
+  retries with `tcp_send_all`). A slot is freed when the user has
+  closed and the connection has finished.
+- QEMU forwards `127.0.0.1:17009` to guest port 7 (`hostfwd`) and
+  the xtask responder listens for TCP echo on `127.0.0.1:17008`. A
+  scenario can declare `[host_tcp] marker/payload`: on seeing the marker
+  in the serial output, xtask connects to the forwarded port, sends the payload and
+  appends to the capture a `[host] TCP probe: ...` line that `serial_contains`
+  can require.
+- The user programs' static heap grows to 256 KiB (netd's TCP
+  sockets do not fit in the 64 KiB stack).
 
-## Cliente HTTP (Fase 24)
+## HTTP client (Phase 24)
 
-- `aricode-http` no toca la red: `fetch` hace toda la descarga sobre un
-  trait `Transport` (`send_all`, `recv` con `Ok(0)` = cierre limpio), así
-  que la crate se prueba en host con un transporte simulado y el SDK
-  (`aricode-sys::http::get`) solo resuelve, conecta y adapta `NetClient`.
-  `parse_response` recoge todas las cabeceras antes de decidir el framing
-  (`Transfer-Encoding: chunked` prevalece sobre `Content-Length`; otras
-  codificaciones o longitudes contradictorias son inválidas), las
-  respuestas 1xx se consumen antes de la final, `ChunkDecoder` es una
-  máquina de estados incremental (trozos mayores que el temporal, límites
-  de línea entre lecturas, tamaños validados sin aritmética sin comprobar)
-  y un cuerpo delimitado por cierre solo termina con `Ok(0)`: un reset del
-  transporte es error, nunca éxito parcial. El cuerpo va a un buffer del
-  llamador (4 KiB en el shell). El respondedor de xtask añade un servidor
-  HTTP de pruebas en `127.0.0.1:17010` con los casos de `network.http`.
-- Los identificadores no se recortan: `fs::Request::with_name` devuelve
-  `None` si el nombre no cabe y el nombre DNS viaja entero en el buffer DMA
-  del cliente (hasta 253 bytes) en vez de en el mensaje IPC.
+- `aricode-http` does not touch the network: `fetch` performs the whole download over a
+  `Transport` trait (`send_all`, `recv` with `Ok(0)` = clean close), so
+  the crate is tested on the host with a mock transport and the SDK
+  (`aricode-sys::http::get`) only resolves, connects and adapts `NetClient`.
+  `parse_response` collects all headers before deciding the framing
+  (`Transfer-Encoding: chunked` takes precedence over `Content-Length`; other
+  encodings or contradictory lengths are invalid),
+  1xx responses are consumed before the final one, `ChunkDecoder` is an
+  incremental state machine (chunks larger than the scratch buffer, line boundaries
+  across reads, sizes validated with no unchecked arithmetic)
+  and a close-delimited body only ends with `Ok(0)`: a transport
+  reset is an error, never a partial success. The body goes to a caller
+  buffer (4 KiB in the shell). The xtask responder adds a test HTTP
+  server on `127.0.0.1:17010` with the `network.http` cases.
+- Identifiers are not truncated: `fs::Request::with_name` returns
+  `None` if the name does not fit, and the DNS name travels whole in the client's DMA
+  buffer (up to 253 bytes) instead of in the IPC message.
 
-## Entrada (Fase 25)
+## Input (Phase 25)
 
-- virtio-input entrega eventos evdev (`type`, `code`, `value`, 8 bytes) por
-  su cola 0; `inputd` publica 64 buffers de 8 bytes en DMA, repone cada
-  uno al consumirlo y guarda los eventos en un anillo de 128 (los más
-  antiguos se descartan si nadie lee). El nombre del dispositivo se lee de
-  `virtio_input_config` (select `ID_NAME`). Init lanza un `inputd` por
-  cada función `1af4:1052` con su propio endpoint y `SYSTEM` como extra.
-- `InputServiceProtocol v1`: `Info` (nombre) y `Read(timeout)` con hasta
-  4 eventos por respuesta; una sola lectura pendiente por servicio
-  (`Busy` si hay otra). `aricode-input::Keyboard` traduce en el cliente,
-  no en el driver: el driver no decide la distribución de teclado.
-- QEMU lleva `virtio-keyboard-pci` y `virtio-mouse-pci` (funciones
-  `00:04.0` y `00:05.0`; nueve funciones PCI en total) y en las
-  ejecuciones headless expone QMP por socket Unix en el directorio del
-  escenario. `[host_input]` en un escenario hace que xtask, al ver el
-  marcador, envíe `input-send-event` (teclas por nombre qcode, movimiento
-  relativo y clic); sin `device`, porque QMP solo admite ahí pantallas y
-  los dispositivos virtio, registrados después del i8042, son los
-  manejadores activos. El resultado se anota como `[host] QMP: ...`.
-- Varios arranques sobre el mismo disco (`[[boots]]`, etapa 3): cada
-  arranque lleva su `cmdline`, sus líneas de consola, opcionalmente
-  `kill_on` (xtask mata QEMU al ver ese texto: un corte de energía) y su
-  `expect` (`killed = true` cuando se espera el corte). El disco de
-  pruebas se fabrica una vez y se conserva; cada arranque tiene su ESP y
-  su `serial-N.log`. Así se prueban `update.full_cycle` (instalar,
-  reiniciar, confirmar, arrancar de B), `update.cut_during_install`,
-  `update.rollback_keeps_data` y `shell.write_persists`.
+- virtio-input delivers evdev events (`type`, `code`, `value`, 8 bytes) through
+  its queue 0; `inputd` posts 64 8-byte buffers in DMA, replenishes each
+  one as it is consumed and stores the events in a 128-entry ring (the
+  oldest are dropped if nobody reads). The device name is read from
+  `virtio_input_config` (select `ID_NAME`). Init launches one `inputd` per
+  `1af4:1052` function with its own endpoint and `SYSTEM` as an extra.
+- `InputServiceProtocol v1`: `Info` (name) and `Read(timeout)` with up to
+  4 events per reply; a single pending read per service
+  (`Busy` if there is another). `aricode-input::Keyboard` translates in the client,
+  not in the driver: the driver does not decide the keyboard layout.
+- QEMU carries `virtio-keyboard-pci` and `virtio-mouse-pci` (functions
+  `00:04.0` and `00:05.0`; nine PCI functions in total) and in
+  headless runs exposes QMP over a Unix socket in the
+  scenario directory. `[host_input]` in a scenario makes xtask, on seeing the
+  marker, send `input-send-event` (keys by qcode name, relative
+  motion and click); without `device`, because QMP only accepts displays there and
+  the virtio devices, registered after the i8042, are the
+  active handlers. The result is logged as `[host] QMP: ...`.
+- Several boots on the same disk (`[[boots]]`, stage 3): each
+  boot has its own `cmdline`, its console lines, optionally
+  `kill_on` (xtask kills QEMU on seeing that text: a power cut) and its
+  `expect` (`killed = true` when the cut is expected). The test
+  disk is built once and kept; each boot has its own ESP and
+  its `serial-N.log`. This is how `update.full_cycle` (install,
+  reboot, confirm, boot from B), `update.cut_during_install`,
+  `update.rollback_keeps_data` and `shell.write_persists` are tested.
 
-## GUI básica (Fase 26)
+## Basic GUI (Phase 26)
 
-- Con `gui` en la cmdline el kernel no inicializa la consola de framebuffer
-  (solo serie) y `run_init` entrega a init un objeto `Mmio` con el
-  framebuffer GOP (`0x10009`, `READ|WRITE`); `system_info(FRAMEBUFFER)`
-  devuelve ancho, alto, stride, formato, tamaño y máscaras. Sin `gui` la
-  capability existe pero la pantalla la sigue usando el kernel.
-- `aricode-gfx` no reserva memoria: `Canvas` envuelve `&mut [u32]` con
-  stride y recorta todo (`fill_rect`, `blit`, `text`, `cursor`); `Desktop`
-  guarda hasta 8 ventanas con orden z, foco, puntero y colocación en
-  cascada, y `compose` pinta fondo, marcos (título activo/inactivo),
-  contenidos (vía callback del llamador) y cursor. Todo probado en host
-  sobre `Vec<u32>`, incluida la composición de dos ventanas solapadas.
-- El compositor compone en un buffer trasero DMA (la pantalla entera,
-  `DMA_MAX_LEN` sube a 8 MiB) y lo vuelca al framebuffer convirtiendo a RGB
-  si hace falta. Recompone solo cuando algo cambió (`Present`, puntero,
-  foco, ventanas) y anota por serie cada frame con una muestra de píxel por
-  ventana, que los escenarios exigen. Los eventos de los `inputd` llegan
-  con el instante en que cada servicio los recibió (`Reply::times`), y el
-  compositor los fusiona por ese instante antes de procesarlos: un clic
-  del ratón precede a la tecla que vino después aunque los dispositivos se
-  lean por turnos.
-- `WindowProtocol v1`: el cliente reserva el buffer de contenido con su
-  capacidad de hardware y lo transfiere en `Create` (el compositor lo mapea
-  una vez y lo lee en cada composición); `Present` marca la ventana sucia;
-  `Poll` espera con plazo un `Key`, `Click` o `Focus`; `Close` la quita.
-  El compositor traduce el teclado (`aricode-input::Keyboard`) y entrega
-  solo a la ventana con foco: la sonda de `gui.two_windows` comprueba que
-  la otra ventana no ve nada.
-- La sonda QMP de xtask envía ahora ratón, clic y teclas en ese orden con
-  100 ms entre fases.
+- With `gui` on the cmdline the kernel does not initialize the framebuffer console
+  (serial only) and `run_init` hands init an `Mmio` object with the
+  GOP framebuffer (`0x10009`, `READ|WRITE`); `system_info(FRAMEBUFFER)`
+  returns width, height, stride, format, size and masks. Without `gui` the
+  capability exists but the kernel keeps using the screen.
+- `aricode-gfx` allocates no memory: `Canvas` wraps `&mut [u32]` with
+  a stride and clips everything (`fill_rect`, `blit`, `text`, `cursor`); `Desktop`
+  holds up to 8 windows with z-order, focus, pointer and cascade
+  placement, and `compose` paints background, frames (active/inactive title),
+  contents (via a caller callback) and cursor. All tested on the host
+  over `Vec<u32>`, including composing two overlapping windows.
+- The compositor composes into a DMA back buffer (the whole screen;
+  `DMA_MAX_LEN` rises to 8 MiB) and blits it to the framebuffer, converting to RGB
+  if needed. It recomposes only when something changed (`Present`, pointer,
+  focus, windows) and logs each frame over serial with one pixel sample per
+  window, which the scenarios require. Events from the `inputd`s arrive
+  with the instant each service received them (`Reply::times`), and the
+  compositor merges them by that instant before processing them: a mouse
+  click precedes the key that came after it even though the devices are
+  read in turn.
+- `WindowProtocol v1`: the client allocates the content buffer with its
+  hardware capability and transfers it in `Create` (the compositor maps it
+  once and reads it on every composition); `Present` marks the window dirty;
+  `Poll` waits with a deadline for a `Key`, `Click` or `Focus`; `Close` removes it.
+  The compositor translates the keyboard (`aricode-input::Keyboard`) and delivers
+  only to the focused window: the `gui.two_windows` probe checks that
+  the other window sees nothing.
+- The xtask QMP probe now sends mouse, click and keys in that order with
+  100 ms between phases.
 
-## SDK de aplicaciones (Fase 27)
+## Application SDK (Phase 27)
 
-- El runtime de usuario (`_start`, heap estático, panic handler, `fmt_u64`
-  y `fmt_hex`) vive en `aricode-rt`; `user/testprogs` vuelve a ser solo
-  binarios de prueba y todos los servicios dependen del mismo runtime. Los
-  ocho `build.rs` duplicados se redujeron a `aricode_build::user_program()`,
-  que apunta al linker script del SDK desde su propio `CARGO_MANIFEST_DIR`.
-- `aricode-sys` gana `time` (reloj sobre `SYSTEM`) y `permissions`
-  (recorrer los handles recibidos saltando los huecos que deja renunciar a
-  uno, comprobar tipos, cerrar los que sobran).
-  `docs/sdk.md` describe el contrato completo de un programa.
-- El shell recibe un `SPAWNER` (init ahora puede transferir el suyo) y
-  ejecuta `run PROGRAMA [ARG]`: el hijo solo recibe la consola, su proceso,
-  su hilo y un `SYSTEM` de solo lectura. `hello_app` lo demuestra en
+- The user runtime (`_start`, static heap, panic handler, `fmt_u64`
+  and `fmt_hex`) lives in `aricode-rt`; `user/testprogs` is back to being only
+  test binaries and every service depends on the same runtime. The
+  eight duplicated `build.rs` files were reduced to `aricode_build::user_program()`,
+  which points at the SDK linker script from its own `CARGO_MANIFEST_DIR`.
+- `aricode-sys` gains `time` (clock over `SYSTEM`) and `permissions`
+  (walk the received handles skipping the gaps left by giving one up,
+  check types, close the extra ones).
+  `docs/sdk.md` describes a program's full contract.
+- The shell receives a `SPAWNER` (init can now transfer its own) and
+  runs `run PROGRAM [ARG]`: the child only receives the console, its process,
+  its thread and a read-only `SYSTEM`. `hello_app` demonstrates it in
   `shell.commands`.
 
-## Medidas (etapa 5)
+## Measurements (stage 5)
 
-- `apps/bench` mide desde ring 3 la latencia de una syscall, de una
-  llamada IPC completa a fsd y de `replace`/`read` de 4 KiB con percentiles
-  sobre el TSC calibrado contra `uptime_ms`; `docs/performance.md` fija el
-  método y guarda la referencia de cada versión. `perf.bench` exige que las
-  medidas se produzcan, no sus valores (dependen del host).
-- Reloj de microsegundos: `apic::init` mide el TSC contra el PIT junto al
-  timer y `time::uptime_us` lo convierte (supone TSC invariante y común a
-  las CPUs; sin calibración cae al tick de 10 ms); `sysinfo::UPTIME_US`.
-- Sucesos recientes del kernel (`events.rs`): anillo de 64 entradas con
-  procesos creados, salidos y matados (con el motivo), fallos de DMA del
-  IOMMU y cuotas de DMA agotadas, con su instante en µs; `sysinfo::EVENTS`
-  los publica a quien tenga `READ` sobre `SYSTEM` y `diag` los muestra
-  (`diag.events`). Sin contenido de mensajes ni de ficheros.
-- Reposo por CPU: el bucle idle acumula los ciclos de TSC pasados en `hlt`
-  (`Cpu::idle_cycles`) y `sysinfo::IDLE` los publica junto a los ciclos
-  desde el primer tick; `cpus` los muestra como porcentaje y `diag` reúne
-  `uptime`, `mem`, `cpus`, `ps` y `services --detail` en un informe.
+- `apps/bench` measures from ring 3 the latency of a syscall, of a full
+  IPC call to fsd and of a 4 KiB `replace`/`read`, with percentiles
+  over the TSC calibrated against `uptime_ms`; `docs/performance.md` fixes the
+  method and keeps each version's baseline. `perf.bench` requires that the
+  measurements are produced, not their values (they depend on the host).
+- Microsecond clock: `apic::init` measures the TSC against the PIT alongside the
+  timer and `time::uptime_us` converts it (assumes an invariant TSC shared by
+  all CPUs; without calibration it falls back to the 10 ms tick); `sysinfo::UPTIME_US`.
+- Recent kernel events (`events.rs`): 64-entry ring with
+  processes created, exited and killed (with the reason), IOMMU DMA faults
+  and exhausted DMA quotas, timestamped in µs; `sysinfo::EVENTS`
+  publishes them to whoever holds `READ` on `SYSTEM` and `diag` shows them
+  (`diag.events`). No message or file contents.
+- Per-CPU idle: the idle loop accumulates the TSC cycles spent in `hlt`
+  (`Cpu::idle_cycles`) and `sysinfo::IDLE` publishes them alongside the cycles
+  since the first tick; `cpus` shows them as a percentage and `diag` gathers
+  `uptime`, `mem`, `cpus`, `ps` and `services --detail` into one report.
 
-## Sandbox de aplicaciones (Fase 28)
+## Application sandbox (Phase 28)
 
-- `process_spawn` recibe en su sexto argumento el número de handles y la
-  cuota de memoria DMA del hijo (`spawn_limits::pack`); el proceso la guarda
-  (`dma_quota`, `dma_used`) y `dma_alloc` cobra el tamaño redondeado a
-  página, devolviendo `Limit` al excederla. La cuota es acumulativa: lo
-  reservado no se devuelve al liberar (los buffers DMA viven lo que el
-  proceso).
-- `initrd_read` (syscall 27) copia un fichero del initrd a quien tenga
-  `READ` sobre el `SPAWNER`; init lee `NOMBRE.manifest` y `aricode-manifest`
-  lo analiza (`name`, `caps`, `memory` en K/M, límite 8 MiB).
-- El broker es init: `Broker::serve_one` atiende `LaunchProtocol v1` en el
-  bucle que antes solo esperaba al shell. `launch` deniega manifiestos que
-  piden capacidades del sistema, pide a fsd un directorio privado (`Bind`)
-  cuando la aplicación quiere `fs`, duplica los endpoints de red,
-  compositor y entrada solo si se piden, añade `HARDWARE` solo cuando hay
-  buffers que reservar y lanza con la cuota del manifiesto; responde con el
-  código de salida o `Killed` cuando el programa termina, sin bloquear
-  init: `launch` deja el proceso en una de las `MAX_RUNNING` (4) ranuras y
-  `poll_launches` responde al recogerlo (ADR 0015). Sin ranura libre el
-  lanzamiento recibe `Limit`. Con `Request::DETACH` (`sys::launch::spawn`,
-  `spawn` en el shell) el broker responde `Started` al crear el proceso y
-  nadie espera su salida. Si el programa no está en el initrd, el broker
-  lo busca instalado en AriFS (`apps/NOMBRE.aripkg`, ADR 0017): copia el
-  paquete por fsd a un buffer DMA de preparación de 256 KiB reservado una
-  vez, lo verifica con `aricode-pkg` (firma Ed25519 del manifiesto del
-  paquete con la clave de desarrollo y SHA-256 del ELF y del manifiesto de
-  aplicación), aplica la política al manifiesto y lo lanza con
-  `process_spawn_from` (syscall 30: `MANAGE` sobre el `SPAWNER`, `READ`
-  sobre el buffer, desplazamiento y longitud del ELF; el kernel copia los
-  segmentos por el mapa físico y el buffer queda libre para el siguiente).
-  Desde el sistema, `installer` (capacidad `install`: el espacio principal
-  de fsd, solo para él) instala o actualiza `apps/NOMBRE.aripkg` desde
-  `pkgs/` con un único `replace` tras verificar y comparar versiones (ADR
-  0018). Si el kernel rechaza el `spawn` por cualquier
-  motivo, los duplicados preparados se cierran (el kernel solo los retira al
-  crear el proceso): antes cada nombre inexistente consumía una entrada de
-  la tabla de init. El shell recibe el endpoint del broker en
-  lugar del `SPAWNER`.
-- fsd mantiene hasta 8 espacios de nombres concedidos: cada `Bind` (solo
-  por el endpoint principal) crea o reutiliza un endpoint ligado a un
-  prefijo, y cada `Share` (ADR 0016) uno ligado a un único fichero en modo
-  lectura; el bucle lee el principal con 10 ms de espera y los concedidos
-  sin espera. Desde un privado, `Open`/`Create` califican el nombre como
-  `prefijo/nombre` (rechazando `/` en el nombre) y `List` filtra y recorta
-  el prefijo. Desde un fichero compartido, `List` muestra solo ese fichero,
-  `Open` solo lo abre a él, y `Create`, `Write`, `Replace`, `Flush`, `Bind`
-  y `Share` responden `Denied`. El broker pide un `Share` por cada nombre
-  de `read_files` del manifiesto y deniega el lanzamiento si el fichero no
-  existe (`sandbox.shared_file`).
+- `process_spawn` receives in its sixth argument the child's handle count and
+  DMA memory quota (`spawn_limits::pack`); the process stores it
+  (`dma_quota`, `dma_used`) and `dma_alloc` charges the size rounded up to a
+  page, returning `Limit` when it is exceeded. The quota is cumulative: what was
+  reserved is not returned on free (DMA buffers live as long as the
+  process).
+- `initrd_read` (syscall 27) copies an initrd file to whoever holds
+  `READ` on the `SPAWNER`; init reads `NAME.manifest` and `aricode-manifest`
+  parses it (`name`, `caps`, `memory` in K/M, 8 MiB limit).
+- The broker is init: `Broker::serve_one` serves `LaunchProtocol v1` in the
+  loop that previously only waited for the shell. `launch` denies manifests that
+  request system capabilities, asks fsd for a private directory (`Bind`)
+  when the application wants `fs`, duplicates the network,
+  compositor and input endpoints only if requested, adds `HARDWARE` only when there are
+  buffers to reserve and launches with the manifest's quota; it replies with the
+  exit code or `Killed` when the program ends, without blocking
+  init: `launch` leaves the process in one of the `MAX_RUNNING` (4) slots and
+  `poll_launches` replies when it reaps it (ADR 0015). With no free slot the
+  launch gets `Limit`. With `Request::DETACH` (`sys::launch::spawn`,
+  `spawn` in the shell) the broker replies `Started` when it creates the process and
+  nobody waits for its exit. If the program is not in the initrd, the broker
+  looks for it installed in AriFS (`apps/NAME.aripkg`, ADR 0017): it copies the
+  package through fsd into a 256 KiB DMA staging buffer reserved
+  once, verifies it with `aricode-pkg` (Ed25519 signature of the package
+  manifest with the development key and SHA-256 of the ELF and of the
+  application manifest), applies the policy to the manifest and launches it with
+  `process_spawn_from` (syscall 30: `MANAGE` on the `SPAWNER`, `READ`
+  on the buffer, ELF offset and length; the kernel copies the
+  segments through the physical map and the buffer is free for the next one).
+  From the system, `installer` (capability `install`: fsd's main
+  namespace, for it alone) installs or updates `apps/NAME.aripkg` from
+  `pkgs/` with a single `replace` after verifying and comparing versions (ADR
+  0018). If the kernel rejects the `spawn` for any
+  reason, the prepared duplicates are closed (the kernel only takes them when it
+  creates the process): previously every nonexistent name consumed an entry in
+  init's table. The shell receives the broker endpoint instead
+  of the `SPAWNER`.
+- fsd keeps up to 8 granted namespaces: each `Bind` (only
+  through the main endpoint) creates or reuses an endpoint bound to a
+  prefix, and each `Share` (ADR 0016) one bound to a single file in
+  read mode; the loop reads the main one with a 10 ms wait and the granted ones
+  without waiting. From a private one, `Open`/`Create` qualify the name as
+  `prefix/name` (rejecting `/` in the name) and `List` filters and strips
+  the prefix. From a shared file, `List` shows only that file,
+  `Open` only opens that file, and `Create`, `Write`, `Replace`, `Flush`, `Bind`
+  and `Share` reply `Denied`. The broker requests a `Share` for each name
+  in the manifest's `read_files` and denies the launch if the file does not
+  exist (`sandbox.shared_file`).
 
-- La consola serie del kernel serializa cada mensaje con un spinlock sin
-  deshabilitar interrupciones (`console::write_raw`): antes un `info!` del
-  kernel y un `console_write` de un proceso recién creado se mezclaban
-  carácter a carácter. Con interrupciones deshabilitadas solo se intenta el
-  lock, para que un handler nunca espere a un hilo que no puede correr.
+- The kernel serial console serializes each message with a spinlock without
+  disabling interrupts (`console::write_raw`): previously a kernel `info!`
+  and a `console_write` from a freshly created process were interleaved
+  character by character. With interrupts disabled the lock is only tried,
+  so that a handler never waits for a thread that cannot run.
 
-## Runtime WebAssembly (Fase 29)
+## WebAssembly runtime (Phase 29)
 
-- `aricode-wasm` analiza el binario una vez (`Module::parse`: tipos,
-  importaciones, funciones, tabla, memoria, globales, exportaciones,
-  elementos y datos) y ejecuta byte a byte con una pila de valores `u64` y
-  una de etiquetas. Los fines de bloque se localizan saltando inmediatos al
-  entrar en cada bloque; `br` recorta la pila a la altura de la etiqueta y
-  conserva la aridad; la etiqueta implícita de la función hace de `return`.
-  Límites: 64 llamadas anidadas, 16 K valores, 50 M pasos (`Fuel`). Toda
-  carga, almacenamiento, `memory.copy` y `memory.fill` se comprueba contra
-  el `&mut [u8]` que aporta el anfitrión; la coma flotante devuelve
-  `Unsupported`. Los tests de host usan un ensamblador mínimo de módulos
-  para cubrir aritmética, bucles, `if/else` con resultado, recursión,
-  `br_table`, globales, `call_indirect`, traps y límites.
-- `Module::parse` valida el módulo entero antes de devolverlo (ADR 0019:
-  tipado de cada función con pila de operandos y marcos de control, índices
-  de tipos, funciones, tabla, globales, exportaciones y `start`); lo que el
-  intérprete no ejecuta se rechaza ahí. El perfil aceptado está en
+- `aricode-wasm` parses the binary once (`Module::parse`: types,
+  imports, functions, table, memory, globals, exports,
+  elements and data) and executes byte by byte with a `u64` value stack and
+  a label stack. Block ends are located by skipping immediates on
+  entering each block; `br` trims the stack to the label's height and
+  keeps the arity; the function's implicit label acts as `return`.
+  Limits: 64 nested calls, 16 K values, 50 M steps (`Fuel`). Every
+  load, store, `memory.copy` and `memory.fill` is checked against
+  the `&mut [u8]` supplied by the host; floating point returns
+  `Unsupported`. The host tests use a minimal module assembler
+  to cover arithmetic, loops, `if/else` with a result, recursion,
+  `br_table`, globals, `call_indirect`, traps and limits.
+- `Module::parse` validates the whole module before returning it (ADR 0019:
+  typing of each function with an operand stack and control frames, indices
+  of types, functions, table, globals, exports and `start`); whatever the
+  interpreter does not execute is rejected there. The accepted profile is in
   `docs/wasm-profile.md`.
-- `wasm_runner` es una aplicación normal del broker: recibe `SYSTEM`, su
-  directorio privado y `HARDWARE`; lee `demo.wasm` (xtask lo compila con
-  `-C target-cpu=mvp -C target-feature=+sign-ext,+bulk-memory` y lo deja en
-  `build/`, y `write_test_disk` lo copia a `wasm_runner/demo.wasm`), resuelve
-  las importaciones por nombre (`aricode.print`, `aricode.uptime_ms`) y
-  reserva la memoria lineal como buffer DMA dentro de su cuota. El módulo no
-  tiene manera de nombrar nada que el runner no le haya importado.
-- Los ficheros de AriFS pasan a 32 KiB de capacidad para alojar módulos.
+- `wasm_runner` is a normal broker application: it receives `SYSTEM`, its
+  private directory and `HARDWARE`; it reads `demo.wasm` (xtask compiles it with
+  `-C target-cpu=mvp -C target-feature=+sign-ext,+bulk-memory` and leaves it in
+  `build/`, and `write_test_disk` copies it to `wasm_runner/demo.wasm`), resolves
+  imports by name (`aricode.print`, `aricode.uptime_ms`) and
+  reserves the linear memory as a DMA buffer within its quota. The module has
+  no way to name anything the runner has not imported for it.
+- AriFS files grow to 32 KiB capacity to hold modules.
 
-## Criptografía (Fase 31)
+## Cryptography (Phase 31)
 
-- `aricode-crypto` no tiene dependencias ni `alloc`. Los hashes son
-  incrementales (`update`/`finish`); Ed25519 usa cinco limbs de 51 bits para
-  GF(2^255-19), coordenadas extendidas (fórmulas de la RFC 8032 §5.1.4),
-  descompresión por raíz cuadrada con `(p-5)/8` y escalares módulo L por
-  división larga binaria (lenta pero simple: unas pocas firmas por
-  arranque). Verificación comprobada con los tres vectores de la RFC 8032
-  además de firmas y claves alteradas y `S` no canónico.
-- `kernel/src/random.rs`: `Rng` de ChaCha20 sembrado con SHA-256 de ocho
-  valores de `rdrand` (si CPUID.1:ECX.30) y 64 muestras del TSC más el
-  tick de arranque; cada `fill` mezcla otra muestra (`reseed`). `qemu64` no
-  expone `rdrand`, así que en los tests la fuente es el TSC y el kernel lo
-  dice. `system_info(RANDOM)` sirve hasta 256 bytes por llamada.
-- xtask gana `keygen`, `sign` y `verify` (semilla y clave pública en hex);
-  `keys/dev` guarda el par de desarrollo que firmará las imágenes de prueba.
+- `aricode-crypto` has no dependencies and no `alloc`. Hashes are
+  incremental (`update`/`finish`); Ed25519 uses five 51-bit limbs for
+  GF(2^255-19), extended coordinates (formulas from RFC 8032 §5.1.4),
+  decompression by square root with `(p-5)/8` and scalars modulo L by
+  binary long division (slow but simple: a few signatures per
+  boot). Verification checked against the three RFC 8032 vectors
+  plus tampered signatures and keys and non-canonical `S`.
+- `kernel/src/random.rs`: ChaCha20 `Rng` seeded with SHA-256 of eight
+  `rdrand` values (if CPUID.1:ECX.30) and 64 TSC samples plus the
+  boot tick; each `fill` mixes in another sample (`reseed`). `qemu64` does not
+  expose `rdrand`, so in the tests the source is the TSC and the kernel
+  says so. `system_info(RANDOM)` serves up to 256 bytes per call.
+- xtask gains `keygen`, `sign` and `verify` (seed and public key in hex);
+  `keys/dev` holds the development pair that will sign the test images.
 
-## Actualización A/B (Fase 30)
+## A/B update (Phase 30)
 
-- Disco de pruebas de 48 MiB: `ARI0` (AriFS), `SYSA`, `SYSB`, `UPDATE` (12
-  MiB cada una) y `ARIBOOT` (32 KiB). El escenario elige el estado inicial
-  con `disk = slots | esp-only | pending-b | b-exhausted | b-corrupt`;
-  los escenarios de fallos de la ESP usan `esp-only`.
-- `aricode-ab`: `BootState` (magia, activo, pendiente+intentos, contador,
-  CRC de SHA-256 truncado), `choose`/`reject`/`confirm`/`schedule` como
-  funciones puras, y `Image` (cabecera `ARISLOT` + contenedor con
-  manifiesto firmado). Todo probado en host, incluidas firma ajena, kernel
-  alterado y contenedor sin firma.
-- AriBoot (`boot/src/slots.rs`) abre los `BlockIo` de disco entero con
-  `GetProtocol` (una apertura exclusiva desconectaba el driver FAT de la
-  ESP), analiza la GPT con `aricode-gpt`, lee `ARIBOOT`, aplica `choose`,
-  lee y verifica la imagen del slot con la clave pública de `keys/dev`
-  embebida, escribe el estado (intento consumido) y entrega kernel e initrd
-  a `run`; si el pendiente falla, `reject` y el activo; si nada vale, ESP.
-  Añade `boot_slot=X [boot_pending]` a la cmdline.
-- init confirma el slot pendiente al final de los servicios de arranque:
-  localiza `ARIBOOT` leyendo la GPT por el servicio de bloques y escribe
-  `confirm(state, slot)`. `updater` hace el camino inverso con `schedule`.
-- xtask quita la información de depuración de kernel e initrd (`strip
-  --strip-debug` si existe): el initrd pasa de 4,8 MiB a 550 KiB y la
-  imagen de sistema cabe en el slot.
+- 48 MiB test disk: `ARI0` (AriFS), `SYSA`, `SYSB`, `UPDATE` (12
+  MiB each) and `ARIBOOT` (32 KiB). The scenario picks the initial state
+  with `disk = slots | esp-only | pending-b | b-exhausted | b-corrupt`;
+  the ESP failure scenarios use `esp-only`.
+- `aricode-ab`: `BootState` (magic, active, pending+attempts, counter,
+  truncated SHA-256 CRC), `choose`/`reject`/`confirm`/`schedule` as
+  pure functions, and `Image` (`ARISLOT` header + container with a
+  signed manifest). All tested on the host, including a foreign signature, a tampered
+  kernel and an unsigned container.
+- AriBoot (`boot/src/slots.rs`) opens the whole-disk `BlockIo` handles with
+  `GetProtocol` (an exclusive open disconnected the ESP's FAT
+  driver), parses the GPT with `aricode-gpt`, reads `ARIBOOT`, applies `choose`,
+  reads and verifies the slot image with the embedded `keys/dev` public
+  key, writes the state (attempt consumed) and hands kernel and initrd
+  to `run`; if the pending one fails, `reject` and the active one; if nothing is valid, ESP.
+  It adds `boot_slot=X [boot_pending]` to the cmdline.
+- init confirms the pending slot at the end of the boot services:
+  it locates `ARIBOOT` by reading the GPT through the block service and writes
+  `confirm(state, slot)`. `updater` does the reverse with `schedule`.
+- xtask strips debug info from kernel and initrd (`strip
+  --strip-debug` if available): the initrd goes from 4.8 MiB to 550 KiB and the
+  system image fits in the slot.
 
-- Correcciones de la auditoría `e9fdf38`: los descriptores de fsd
-  pertenecen al endpoint que los abrió; el broker cierra sus duplicados con
-  un guard en cualquier salida; init confirma el slot solo al final del
-  arranque (`init_fail_late` prueba el camino de error); AriBoot no arranca
-  un pendiente cuyo intento no pudo persistir (`unpersisted`); el intérprete
-  WASM acota memoria al tamaño actual, la inicializa a cero y ejecuta
-  `start`; `keygen` crea la semilla con modo 0600.
+- Fixes from audit `e9fdf38`: fsd descriptors
+  belong to the endpoint that opened them; the broker closes its duplicates with
+  a guard on every exit path; init confirms the slot only at the end of
+  boot (`init_fail_late` tests the error path); AriBoot does not boot
+  a pending slot whose attempt could not be persisted (`unpersisted`); the WASM
+  interpreter bounds memory to its current size, zero-initializes it and runs
+  `start`; `keygen` creates the seed with mode 0600.
 
-## SMP (Fase 32)
-
-```text
-kernel/src/cpu.rs              Cpu por procesador (GDT, TSS + pila #DF, hilo actual, quantum, scratch syscall), GS base
-kernel/src/arch/x86_64/smp.rs  trampolín 0x8000, tablas de arranque, INIT-SIPI, ap_entry, TLB shootdown, halt_others
-kernel/src/arch/x86_64/apic.rs ICR: send_ipi, broadcast_ipi, send_init, send_startup; vectores 0x21 RESCHED, 0x22 TLB_FLUSH, 0x23 HALT
-libs/sched                     cola compartida, current/idle por CPU, afinidad, despertares pendientes
-```
-
-- Arranque: tras `task::init` el BSP copia el trampolín a `0x8000` (memoria
-  baja reservada por el PMM y nunca devuelta al reclamar la de arranque),
-  construye tres frames de tablas (copia del PML4 del kernel + identidad de
-  2 MiB) y, por cada LAPIC de la MADT distinto del suyo, crea el hilo idle de
-  esa CPU (su pila es la del arranque del AP), escribe los parámetros
-  (PML4, rsp, `ap_entry`, índice) y envía INIT, 10 ms, SIPI, 1 ms, SIPI si
-  aún no está en línea, y espera hasta 500 ms. El AP recorre modo real ->
-  protegido -> largo (PAE, `EFER.LME|NXE`), salta a `ap_entry`, carga el CR3
-  del kernel y CR0/CR4 del BSP, instala su GDT/TSS, la IDT compartida,
-  `syscall`, `IA32_GS_BASE`, su LAPIC (timer con la cuenta calibrada por el
-  BSP), adopta su idle y habilita interrupciones. Las tablas de arranque se
-  liberan al terminar.
-- Por CPU: `Cpu` estático con `self_ptr` en `gs:[0]`; `cpu::current_tid()`
-  y `cpu::id()` son un solo acceso relativo a GS (atómico frente a
-  migraciones). `swapgs` en `syscall_entry`/`sysretq`, en
-  `interrupt_common` cuando `cs & 3 == 3` (a la entrada y a la salida) y en
-  `usermode::enter` (con `cli` antes). `TSS.rsp0` y el scratch de `syscall`
-  se fijan en cada cambio de contexto en la CPU que conmuta.
-- Planificación: solo el BSP llama a `time::tick` y `wake_due`; los APs solo
-  consumen quantum. Cuando un hilo pasa a listo (`spawn`, `wake`, dormidos
-  que despiertan) y otra CPU está en su idle se le envía `RESCHED`; el bucle
-  idle comprueba la cola con IF = 0 y duerme con `sti; hlt` (sin ventana). Un
-  hilo migra libremente salvo afinidad (`spawn_on`, `set_affinity`).
-- TLB: los slots de pila de hilo no se reutilizan y un proceso muerto ya no
-  tiene su CR3 en ninguna CPU (cada cambio a otro espacio recarga CR3), así
-  que las rutas normales de liberación siguen con `invlpg` local. Para
-  desmapeos de la mitad del kernel en uso por otras CPUs existe
-  `vmm::flush_page` (local + `TLB_FLUSH` con confirmación); el receptor
-  invalida la página o, con dirección 0, todo el TLB alternando `CR4.PGE`.
-- Pánico: `halt_others` envía `HALT` a las demás CPUs antes del volcado, que
-  indica la CPU; las excepciones fatales también.
-- `system_info(CPUS)` y `cpus` en arish. Pruebas: `test=smp` y escenarios
-  `smp.*`; `cargo xtask test --cpus N` como estrés de toda la suite.
-
-## IOMMU (Fase 33)
+## SMP (Phase 32)
 
 ```text
-libs/acpi                      DMAR: DRHD (ámbitos, INCLUDE_PCI_ALL), RMRR
-libs/iommu                     registros, Capability/ExtendedCapability, RootEntry, ContextEntry, SecondLevel (3/4 niveles), FaultRecord
-kernel/src/iommu.rs            unidades, dominios por proceso, attach/map_region/unmap_everywhere/release, interrupción de fallo (vector 0x24)
+kernel/src/cpu.rs              per-processor Cpu (GDT, TSS + #DF stack, current thread, quantum, syscall scratch), GS base
+kernel/src/arch/x86_64/smp.rs  0x8000 trampoline, boot tables, INIT-SIPI, ap_entry, TLB shootdown, halt_others
+kernel/src/arch/x86_64/apic.rs ICR: send_ipi, broadcast_ipi, send_init, send_startup; vectors 0x21 RESCHED, 0x22 TLB_FLUSH, 0x23 HALT
+libs/sched                     shared queue, per-CPU current/idle, affinity, pending wakeups
 ```
 
-- Arranque: tras enumerar PCI, `iommu::init` mapea los registros de cada
-  DRHD sin caché, elige los niveles de paginación (4 si SAGAW lo permite, si
-  no 3, el mínimo entre unidades), programa la tabla raíz (`RTADDR` +
-  `SRTP`), la interrupción de fallo (MSI al LAPIC del BSP, vector 0x24),
-  invalida contextos e IOTLB y activa la traducción (`TE`). Si la unidad no
-  es coherente con la caché (`ECAP.C = 0`, como en QEMU) cada entrada
-  escrita se `clflush`ea.
-- Dominios: uno por proceso, creado al primer `dma_alloc`, `mmio_map` de un
-  DMA o mapeo de un dispositivo; DID desde 1 con lista de libres. Las
-  tablas de segundo nivel mapean IOVA = física con R+W en páginas de 4 KiB.
-- Asignación: los objetos MMIO que `pci::claim` entrega (configuración y
-  BARs) llevan el `source_id` de la función; al mapear uno, el kernel escribe
-  la entrada de contexto de esa función (tabla de contexto del bus creada
-  bajo demanda) apuntando a las tablas del dominio del proceso, mapea sus
-  RMRR y hace una invalidación global en la unidad.
-- Liberación: `DmaBuffer::drop` retira la región de todos los dominios
-  antes de devolver los frames; `release_address_space` destruye el dominio
-  del proceso (entradas de contexto a no presente, invalidación, tablas al
+- Boot: after `task::init` the BSP copies the trampoline to `0x8000` (low
+  memory reserved by the PMM and never returned when boot memory is reclaimed),
+  builds three table frames (copy of the kernel PML4 + 2 MiB
+  identity map) and, for each MADT LAPIC other than its own, creates the idle thread of
+  that CPU (its stack is the AP's boot stack), writes the parameters
+  (PML4, rsp, `ap_entry`, index) and sends INIT, 10 ms, SIPI, 1 ms, SIPI if
+  it is not online yet, and waits up to 500 ms. The AP goes real mode ->
+  protected -> long (PAE, `EFER.LME|NXE`), jumps to `ap_entry`, loads the kernel
+  CR3 and the BSP's CR0/CR4, installs its GDT/TSS, the shared IDT,
+  `syscall`, `IA32_GS_BASE`, its LAPIC (timer with the count calibrated by the
+  BSP), adopts its idle thread and enables interrupts. The boot tables are
+  freed at the end.
+- Per CPU: static `Cpu` with `self_ptr` at `gs:[0]`; `cpu::current_tid()`
+  and `cpu::id()` are a single GS-relative access (atomic with respect to
+  migrations). `swapgs` in `syscall_entry`/`sysretq`, in
+  `interrupt_common` when `cs & 3 == 3` (on entry and on exit) and in
+  `usermode::enter` (with `cli` before). `TSS.rsp0` and the `syscall` scratch
+  are set on every context switch on the switching CPU.
+- Scheduling: only the BSP calls `time::tick` and `wake_due`; the APs only
+  consume quantum. When a thread becomes ready (`spawn`, `wake`, sleepers
+  waking up) and another CPU is in its idle loop it is sent `RESCHED`; the idle
+  loop checks the queue with IF = 0 and sleeps with `sti; hlt` (no window). A
+  thread migrates freely unless pinned (`spawn_on`, `set_affinity`).
+- TLB: thread stack slots are not reused and a dead process no longer
+  has its CR3 on any CPU (every switch to another address space reloads CR3), so
+  the normal freeing paths keep using local `invlpg`. For
+  unmappings in the kernel half in use by other CPUs there is
+  `vmm::flush_page` (local + `TLB_FLUSH` with acknowledgement); the receiver
+  invalidates the page or, with address 0, the whole TLB by toggling `CR4.PGE`.
+- Panic: `halt_others` sends `HALT` to the other CPUs before the dump, which
+  names the CPU; fatal exceptions do too.
+- `system_info(CPUS)` and `cpus` in arish. Tests: `test=smp` and `smp.*`
+  scenarios; `cargo xtask test --cpus N` as a stress run of the whole suite.
+
+## IOMMU (Phase 33)
+
+```text
+libs/acpi                      DMAR: DRHD (scopes, INCLUDE_PCI_ALL), RMRR
+libs/iommu                     registers, Capability/ExtendedCapability, RootEntry, ContextEntry, SecondLevel (3/4 levels), FaultRecord
+kernel/src/iommu.rs            units, per-process domains, attach/map_region/unmap_everywhere/release, fault interrupt (vector 0x24)
+```
+
+- Boot: after PCI enumeration, `iommu::init` maps each DRHD's registers
+  uncached, picks the paging levels (4 if SAGAW allows it, otherwise
+  3, the minimum across units), programs the root table (`RTADDR` +
+  `SRTP`), the fault interrupt (MSI to the BSP's LAPIC, vector 0x24),
+  invalidates contexts and IOTLB and enables translation (`TE`). If the unit is not
+  cache-coherent (`ECAP.C = 0`, as in QEMU) every entry
+  written is `clflush`ed.
+- Domains: one per process, created on the first `dma_alloc`, `mmio_map` of a
+  DMA object or device mapping; DIDs from 1 with a free list. The
+  second-level tables map IOVA = physical with R+W in 4 KiB pages.
+- Assignment: the MMIO objects that `pci::claim` hands out (configuration and
+  BARs) carry the function's `source_id`; when mapping one, the kernel writes
+  that function's context entry (the bus's context table created
+  on demand) pointing at the process domain's tables, maps its
+  RMRRs and performs a global invalidation on the unit.
+- Release: `DmaBuffer::drop` removes the region from every domain
+  before returning the frames; `release_address_space` destroys the process
+  domain (context entries set to not present, invalidation, tables back to the
   PMM).
-- Fallos: la unidad escribe los FRCD y dispara la MSI; el handler los
-  decodifica (`bus:dev.fn`, lectura/escritura, dirección, motivo), los
-  limpia y los cuenta; `system_info(IOMMU)` devuelve unidades, dominios y
-  fallos.
-- QEMU: `-device intel-iommu,aw-bits=48` antes de los dispositivos y
-  `iommu_platform=on` en cada virtio; el transporte acepta
-  `VIRTIO_F_ACCESS_PLATFORM` siempre que se ofrezca. Orden de locks:
-  `PROCESSES -> IOMMU -> PMM`; nunca al revés.
-- Pruebas: `test=iommu` (`dma_rogue`) y `iommu.enabled`; con
-  `--cpus 4` toda la suite corre traducida en SMP.
+- Faults: the unit writes the FRCDs and fires the MSI; the handler
+  decodes them (`bus:dev.fn`, read/write, address, reason), clears
+  and counts them; `system_info(IOMMU)` returns units, domains and
+  faults.
+- QEMU: `-device intel-iommu,aw-bits=48` before the devices and
+  `iommu_platform=on` on each virtio device; the transport accepts
+  `VIRTIO_F_ACCESS_PLATFORM` whenever it is offered. Lock order:
+  `PROCESSES -> IOMMU -> PMM`; never the reverse.
+- Tests: `test=iommu` (`dma_rogue`) and `iommu.enabled`; with
+  `--cpus 4` the whole suite runs translated under SMP.
 
-## USB HID sobre xHCI (Fase 25, segunda parte)
-
-```text
-libs/xhci                      estructuras xHCI/USB (sin hardware)
-libs/input                     HidBootKeyboard / HidBootMouse: informes de arranque -> eventos evdev
-services/usb-input             usbd: controlador xHCI, enumeración, endpoints de interrupción (servicio de entrada) y masivos (almacenamiento bulk-only como servicio de bloques, ADR 0023)
-```
-
-- init lanza `usb_input` por cada función PCI de clase `0c.03` con el contrato
-  de driver (servicio, cfg, hardware, IRQ MSI-X, BAR0) más `SYSTEM`. El driver
-  comprueba CAPLENGTH/HCIVERSION (los registros de capacidad se leen por
-  palabras de 32 bits: QEMU no atiende accesos de 16 bits) y, si no es un
-  xHCI, sale con 0 sin molestar.
-- Memoria: un buffer DMA de 64 KiB repartido con un asignador lineal
-  (DCBAA, scratchpads, anillo de comandos de 16 TRB, anillo de eventos de
-  32 TRB, ERST, contextos de dispositivo e input context, anillos de
-  transferencia de 16 TRB e informes). Con el IOMMU activo, todo ese buffer
-  es lo único que el controlador puede tocar.
-- Enumeración por puerto con dispositivo conectado: reset del puerto si no
-  está habilitado, `Enable Slot`, `Address Device` con EP0 al tamaño de
-  paquete por defecto de la velocidad, `GET_DESCRIPTOR` de dispositivo
-  (`Evaluate Context` si el tamaño de paquete real difiere) y de
-  configuración, `SET_CONFIGURATION`, por cada interfaz HID de arranque
-  `SET_PROTOCOL(0)` y `SET_IDLE(0)`, `Configure Endpoint` con el endpoint
-  de interrupción IN y cuatro `Normal` TRB en vuelo por endpoint.
-- Eventos: el anillo de eventos se consume con el bit de ciclo; los
-  `Transfer Event` se casan con el TRB por su dirección física, el informe
-  se decodifica (teclado: diferencias de modificadores y usages; ratón:
-  botones, dx/dy, rueda) y el TRB se vuelve a encolar. Los `Port Status
-  Change` solo limpian los bits de cambio.
-- Un único dispositivo de entrada para todo el controlador
-  (`USB HID Keyboard+Mouse`); `input_client` y el compositor enrutan por
-  tipo de evento, no por dispositivo.
-- Selección y publicación (auditoría 4836023): `pci_info_ext` expone la
-  interfaz de programación y init solo entrega a `usb_input` los `0c.03`
-  con interfaz `0x30`; cualquier servicio de entrada se publica cuando
-  responde a `Info` (`input_service_ready`), y `InputClient` acota sus
-  esperas para que un servicio muerto no bloquee al cliente. El descriptor
-  de dispositivo se lee primero en 8 bytes para fijar el tamaño de paquete
-  de EP0 con `Evaluate Context`; los intervalos FS/LS se redondean hacia
-  abajo (3..=10).
-
-## Supervisión de servicios (etapa 1, ADR 0011)
+## USB HID over xHCI (Phase 25, part two)
 
 ```text
-libs/supervisor                estados, generaciones, presupuesto de reinicios con espera creciente, plazo de arranque
-services/init                  Supervisor: Resident {kind, probe, endpoint, process, Service}; poll en el bucle del shell
-sdk/proto::status              estado por servicio (protocolo 7) en el endpoint del broker; sdk::status::service_status
+libs/xhci                      xHCI/USB structures (no hardware)
+libs/input                     HidBootKeyboard / HidBootMouse: boot reports -> evdev events
+services/usb-input             usbd: xHCI controller, enumeration, interrupt endpoints (input service) and bulk endpoints (bulk-only storage as a block service, ADR 0023)
 ```
 
-- init registra cada servicio residente (`virtio_blk`, `fsd`, `virtio_net`,
-  `virtio_input`, `usb_input`) con su forma de relanzarlo (`Kind`), su sonda
-  (`Probe`) y su política; `launch` crea el proceso, anota la generación y
-  espera a que sirva; `poll` (en cada vuelta del bucle del shell) detecta
-  muertes con `process_wait(0)`, aplica el presupuesto y relanza cuando toca,
-  reclamando de nuevo la función PCI si el driver anterior murió.
-- El endpoint del servicio pertenece a init y se entrega duplicado a cada
-  generación: los clientes no cambian de handle.
-- `restart_storm` (cmdline) reinicia 100 veces `crashy_service` con espera
-  de 1 a 8 ms, comprobando que fsd responde entre medias y que la memoria
-  libre vuelve al nivel anterior (`services.restart_storm`);
-  `shell.services_detail` cubre el estado consultable.
+- init launches `usb_input` for each PCI function of class `0c.03` with the driver
+  contract (service, cfg, hardware, MSI-X IRQ, BAR0) plus `SYSTEM`. The driver
+  checks CAPLENGTH/HCIVERSION (the capability registers are read as
+  32-bit words: QEMU does not handle 16-bit accesses) and, if it is not an
+  xHCI, exits with 0 without fuss.
+- Memory: one 64 KiB DMA buffer split with a linear allocator
+  (DCBAA, scratchpads, 16-TRB command ring, 32-TRB event
+  ring, ERST, device contexts and input context, 16-TRB transfer
+  rings and reports). With the IOMMU enabled, that buffer
+  is all the controller can touch.
+- Enumeration per port with a connected device: port reset if it is
+  not enabled, `Enable Slot`, `Address Device` with EP0 at the speed's default
+  packet size, device `GET_DESCRIPTOR`
+  (`Evaluate Context` if the actual packet size differs) and
+  configuration `GET_DESCRIPTOR`, `SET_CONFIGURATION`, for each HID boot interface
+  `SET_PROTOCOL(0)` and `SET_IDLE(0)`, `Configure Endpoint` with the interrupt IN
+  endpoint and four `Normal` TRBs in flight per endpoint.
+- Events: the event ring is consumed using the cycle bit;
+  `Transfer Event`s are matched to their TRB by physical address, the report
+  is decoded (keyboard: modifier and usage differences; mouse:
+  buttons, dx/dy, wheel) and the TRB is requeued. `Port Status
+  Change` events only clear the change bits.
+- A single input device for the whole controller
+  (`USB HID Keyboard+Mouse`); `input_client` and the compositor route by
+  event type, not by device.
+- Selection and publication (audit 4836023): `pci_info_ext` exposes the
+  programming interface and init only hands `usb_input` the `0c.03` functions
+  with interface `0x30`; any input service is published once it
+  answers `Info` (`input_service_ready`), and `InputClient` bounds its
+  waits so a dead service does not block the client. The device
+  descriptor is first read as 8 bytes to set the EP0 packet size
+  with `Evaluate Context`; FS/LS intervals are rounded
+  down (3..=10).
 
-## Plazos y correlación IPC (etapa 1B, ADR 0012)
+## Service supervision (stage 1, ADR 0011)
 
-- `aricode_sys::rpc::call`: un endpoint de respuesta por petición (creado y
-  cerrado en la llamada), envío y recepción con plazo, handles extra que se
-  consumen o se cierran si el envío falla. Lo usan todos los clientes del
-  SDK; `launch::run` es el único que espera la respuesta sin plazo (es la
-  salida del programa).
-- `test=ipc_late` (`ipc.late_reply`): `late_server` contesta la primera
-  petición 800 ms tarde; `late_client` vence a los 200 ms, pide otra y
-  recibe la suya, nunca la tardía, que muere en el endpoint ya cerrado.
+```text
+libs/supervisor                states, generations, restart budget with growing backoff, startup deadline
+services/init                  Supervisor: Resident {kind, probe, endpoint, process, Service}; poll in the shell loop
+sdk/proto::status              per-service status (protocol 7) on the broker endpoint; sdk::status::service_status
+```
 
-## Hardware real (Fase 34, preparación)
+- init registers each resident service (`virtio_blk`, `fsd`, `virtio_net`,
+  `virtio_input`, `usb_input`) with how to relaunch it (`Kind`), its probe
+  (`Probe`) and its policy; `launch` creates the process, records the generation and
+  waits until it serves; `poll` (on every turn of the shell loop) detects
+  deaths with `process_wait(0)`, applies the budget and relaunches when due,
+  reclaiming the PCI function again if the previous driver died.
+- The service endpoint belongs to init and is handed duplicated to each
+  generation: clients do not change handles.
+- `restart_storm` (cmdline) restarts `crashy_service` 100 times with a backoff
+  of 1 to 8 ms, checking that fsd responds in between and that free
+  memory returns to its previous level (`services.restart_storm`);
+  `shell.services_detail` covers the queryable status.
 
-- `console_input` también lee el teclado PS/2 del i8042: inicialización
-  (puertos deshabilitados, configuración con IRQ1 y traducción, autotest,
-  puerto 1, `0xF4`), IRQ1 en el vector 0x41 y decodificación con
-  `aricode_input::ScancodeSet1` + `Keyboard` al mismo anillo que COM1. Es la
-  consola de un portátil sin serie; los teclados de verdad siguen en ring 3.
-  Sin controlador (estado 0xFF) se informa y se sigue.
-- `smp=off` e `iommu=off` en la cmdline saltan `smp::start_aps` e
-  `iommu::init` con una traza; `test=console_ps2` prueba el teclado con
-  entrada QMP.
-- `iommu::init` crea dominios identidad (claves `u32::MAX - n`) para los
-  dispositivos con RMRR y para los controladores gráficos (RMRR +
-  framebuffer GOP) antes de activar `TE`, y solo después enciende la
-  traducción.
-- `cargo xtask usb-image`: `image::write_usb_image` construye la ESP con
-  `aricode-fat` (64 MiB, clústeres de 512 bytes, LFN) a partir del directorio
-  ESP del escenario, más ARI0, SYSA (imagen firmada), SYSB/UPDATE vacías y
-  ARIBOOT; `disk = "usb-image"` arranca un escenario desde esa imagen sin el
-  disco `fat:` de QEMU. Guía en `docs/hardware.md`.
-- Primer arranque en el portátil (2026-10-10): AriBoot abre el GOP sin
-  exclusividad (`OpenProtocolAttributes::GetProtocol`), igual que los
-  `BlockIO`; la apertura exclusiva desconectaba el driver de consola del
-  firmware y en hardware real las trazas se cortaban tras la línea de slots.
-  Para la ventana sin trazas entre `ExitBootServices` y la consola del
-  kernel, `FramebufferInfo::beacon` (`Beacon` en `boot-protocol`, que también
-  centraliza `encode` del formato de píxel) pinta cuadrados en la fila
-  superior: blanco antes de salir de boot services, verde antes del salto y
-  naranja en `kernel_entry`, y cian por cada paso del cargador tras la
-  cmdline; la consola los borra al acoplarse. Tabla de lectura en
+## IPC deadlines and correlation (stage 1B, ADR 0012)
+
+- `aricode_sys::rpc::call`: one reply endpoint per request (created and
+  closed within the call), send and receive with a deadline, extra handles that are
+  consumed or closed if the send fails. All SDK clients use it;
+  `launch::run` is the only one that waits for the reply without a deadline (it is the
+  program's exit).
+- `test=ipc_late` (`ipc.late_reply`): `late_server` answers the first
+  request 800 ms late; `late_client` times out at 200 ms, sends another and
+  receives its own reply, never the late one, which dies on the already closed endpoint.
+
+## Real hardware (Phase 34, preparation)
+
+- `console_input` also reads the i8042 PS/2 keyboard: initialization
+  (ports disabled, configuration with IRQ1 and translation, self-test,
+  port 1, `0xF4`), IRQ1 on vector 0x41 and decoding with
+  `aricode_input::ScancodeSet1` + `Keyboard` into the same ring as COM1. It is the
+  console of a laptop without serial; real keyboards stay in ring 3.
+  Without a controller (status 0xFF) it reports and carries on.
+- `smp=off` and `iommu=off` on the cmdline skip `smp::start_aps` and
+  `iommu::init` with a trace; `test=console_ps2` tests the keyboard with
+  QMP input.
+- `iommu::init` creates identity domains (keys `u32::MAX - n`) for
+  devices with RMRRs and for graphics controllers (RMRR +
+  GOP framebuffer) before enabling `TE`, and only then turns on
+  translation.
+- `cargo xtask usb-image`: `image::write_usb_image` builds the ESP with
+  `aricode-fat` (64 MiB, 512-byte clusters, LFN) from the scenario's ESP
+  directory, plus ARI0, SYSA (signed image), empty SYSB/UPDATE and
+  ARIBOOT; `disk = "usb-image"` boots a scenario from that image without QEMU's
+  `fat:` disk. Guide in `docs/hardware.md`.
+- First boot on the laptop (2026-10-10): AriBoot opens the GOP
+  non-exclusively (`OpenProtocolAttributes::GetProtocol`), like the
+  `BlockIO` handles; the exclusive open disconnected the firmware's console
+  driver and on real hardware the traces stopped after the slots line.
+  For the trace-less window between `ExitBootServices` and the kernel
+  console, `FramebufferInfo::beacon` (`Beacon` in `boot-protocol`, which also
+  centralizes pixel-format `encode`) paints squares in the top
+  row: white before exiting boot services, green before the jump and
+  orange in `kernel_entry`, and cyan for each loader step after the
+  cmdline; the console clears them when it attaches. Reading table in
   `docs/hardware.md`.
-- Segunda y tercera foto: el firmware se para en la primera `GetMemoryMap`,
-  justo tras reservar con un tipo de memoria propio. ADR 0021: AriBoot pasa a
-  `LOADER_DATA`, BootInfo v4 describe lo que el kernel conserva y
-  `boot/src/memmap.rs` lee el mapa con llamadas directas trazadas.
-- Cuarta foto (2026-10-10): **primer arranque completo en hardware**. El
-  kernel enumera 17 funciones PCI (ECAM en `0xf8000000`), no hay DMAR, init
-  pasa sus pruebas de arranque y termina en `ARICODEOS_KERNEL_READY`. Lo que
-  falta: el xHCI (`8086:1e31`) solo tiene MSI, no MSI-X, y el driver no
-  recibía IRQ (ADR 0022 lo resuelve); los EHCI no tienen driver; sin driver
-  de bloques para el pendrive no hay fsd y init no lanza el shell.
-- Quinta foto: `reclamado (MSI)` y el driver cae en la reserva DMA: el
-  controlador pide scratchpads (QEMU ninguno) y el buffer fijo de 64 KiB no
-  los cabía. `Params::dma_arena_bytes` lo dimensiona y el driver nombra el
-  paso que falla.
-- Séptima y octava foto: el pendrive se lee por USB, `fs_client` fallaba
-  en el flush (el pendrive rechaza `SYNCHRONIZE CACHE`; usbd lo tolera) y
-  después **shell interactivo en el portátil** con el teclado PS/2. El
-  retroceso pintaba `?`: la consola de framebuffer no entendía `\x08` y
-  ahora mueve el cursor una celda.
-- Sexta foto: xHCI listo (8 puertos, 32 slots, 16 scratchpads), servicio de
-  entrada ok, `ARICODEOS_KERNEL_READY`; ningún dispositivo en los puertos
-  porque en los Intel 7 series los puertos USB quedan en los EHCI hasta que
-  el sistema los enruta al xHCI (registros XUSB2PR/USB3_PSSEN). ADR 0023:
-  usbd enruta los puertos, pide la cesión al firmware y sirve el pendrive
-  como servicio de bloques; sin virtio-blk, init monta fsd sobre él
-  (escenario `usb.storage`).
-- Octava y novena foto: shell interactivo sobre el pendrive con teclado
-  PS/2, cursor e historial. Red: ADR 0024 saca la pila a `ari-net-core` y
-  añade `rtl-net` para la Realtek `10ec:8136`; sin virtio-net, init lo
-  lanza y omite los clientes de prueba del respondedor de QEMU.
-- Undécima foto: **red por cable en el portátil**: `net` muestra la
-  dirección por DHCP (192.168.1.24), `ping` al router responde en 1 ms y
-  `dns google.com` resuelve. Toda la pila (ARP, IPv4, ICMP, UDP, DHCP, DNS)
-  funciona sobre `rtl-net` a la primera.
-- Décima foto: `rtl_net` no arrancaba ("el ELF no cabe en la region de
-  usuario"): faltaba su `build.rs` y se enlazó en la dirección por defecto.
-  `cargo xtask build` comprueba ahora el punto de entrada de cada programa
-  del initrd, y `diag NOM` + `cargo xtask fs-cat` dan un canal de
-  diagnóstico sin fotos.
+- Second and third photos: the firmware stops at the first `GetMemoryMap`,
+  right after allocating with a custom memory type. ADR 0021: AriBoot switches to
+  `LOADER_DATA`, BootInfo v4 describes what the kernel keeps and
+  `boot/src/memmap.rs` reads the map with traced direct calls.
+- Fourth photo (2026-10-10): **first complete boot on hardware**. The
+  kernel enumerates 17 PCI functions (ECAM at `0xf8000000`), there is no DMAR, init
+  passes its boot tests and ends at `ARICODEOS_KERNEL_READY`. What
+  is missing: the xHCI (`8086:1e31`) only has MSI, not MSI-X, and the driver was not
+  receiving IRQs (ADR 0022 fixes it); the EHCIs have no driver; without a block
+  driver for the USB stick there is no fsd and init does not launch the shell.
+- Fifth photo: `claimed (MSI)` and the driver fails at the DMA allocation: the
+  controller asks for scratchpads (QEMU for none) and the fixed 64 KiB buffer could not
+  fit them. `Params::dma_arena_bytes` sizes it and the driver names the
+  failing step.
+- Seventh and eighth photos: the USB stick is read over USB, `fs_client` failed
+  on flush (the stick rejects `SYNCHRONIZE CACHE`; usbd tolerates it) and
+  then **interactive shell on the laptop** with the PS/2 keyboard.
+  Backspace printed `?`: the framebuffer console did not understand `\x08` and
+  now moves the cursor back one cell.
+- Sixth photo: xHCI ready (8 ports, 32 slots, 16 scratchpads), input
+  service ok, `ARICODEOS_KERNEL_READY`; no devices on the ports
+  because on Intel 7 series the USB ports stay on the EHCIs until
+  the system routes them to the xHCI (XUSB2PR/USB3_PSSEN registers). ADR 0023:
+  usbd routes the ports, requests the handoff from the firmware and serves the USB stick
+  as a block service; without virtio-blk, init mounts fsd on it
+  (scenario `usb.storage`).
+- Eighth and ninth photos: interactive shell on the USB stick with the PS/2
+  keyboard, cursor and history. Network: ADR 0024 moves the stack out to `ari-net-core` and
+  adds `rtl-net` for the Realtek `10ec:8136`; without virtio-net, init
+  launches it and skips the test clients for QEMU's responder.
+- Eleventh photo: **wired networking on the laptop**: `net` shows the
+  DHCP address (192.168.1.24), `ping` to the router answers in 1 ms and
+  `dns google.com` resolves. The whole stack (ARP, IPv4, ICMP, UDP, DHCP, DNS)
+  works on `rtl-net` on the first try.
+- Tenth photo: `rtl_net` did not start ("the ELF does not fit in the user
+  region"): its `build.rs` was missing and it was linked at the default address.
+  `cargo xtask build` now checks the entry point of every initrd
+  program, and `diag NAME` + `cargo xtask fs-cat` provide a diagnostic
+  channel without photos.
 
-## Pila de arranque y consola (auditoría 3eb4965)
+## Boot stack and console (audit 3eb4965)
 
-- El kernel arranca sobre la pila de 64 KiB de AriBoot hasta que `vmm::init`
-  crea la suya. Nada grande puede vivir en esa pila: la consola de
-  framebuffer (rejilla de 32 KiB) es un `static` construido con
-  `Console::empty()` (`const`) al que se acopla la pantalla con `attach`.
-  `check_boot_stack` mide lo usado justo antes de cambiar de pila y exige
-  16 KiB de margen; AriBoot y el kernel anuncian el SHA-256 del initrd para
-  detectar corrupciones entre ambos.
-- `wait_until` retira un proceso solo cuando `release_address_space` lo ha
-  marcado `reaped` (espacio y dominio DMA liberados); el IOMMU guarda un
-  propietario único por función PCI y `release` no toca contextos que ya
-  son de otro dominio.
+- The kernel runs on AriBoot's 64 KiB stack until `vmm::init`
+  creates its own. Nothing large can live on that stack: the framebuffer
+  console (32 KiB grid) is a `static` built with
+  `Console::empty()` (`const`) to which the screen is attached with `attach`.
+  `check_boot_stack` measures usage just before switching stacks and requires
+  16 KiB of headroom; AriBoot and the kernel announce the initrd's SHA-256 to
+  detect corruption between the two.
+- `wait_until` retires a process only once `release_address_space` has
+  marked it `reaped` (address space and DMA domain freed); the IOMMU keeps a
+  single owner per PCI function and `release` does not touch contexts that already
+  belong to another domain.
 
-## Deuda conocida
+## Known debt
 
-- No hay reinicio automático tras `updater` ni prueba de dos arranques
-  encadenados en un mismo QEMU; la actualización llega por xtask, no por red.
-- El generador del kernel solo tiene `rdrand` y TSC como fuentes.
-- El intérprete WASM no valida el módulo antes de ejecutar (confía en el
-  productor; todo se comprueba en ejecución) y no tiene coma flotante.
-- La política del broker es una constante; no hay cuotas de CPU ni de
-  handles por manifiesto y el heap de usuario sigue siendo estático.
-- La GUI no mueve ni redimensiona ventanas, repinta la pantalla completa
-  en cada frame y no tiene terminal gráfico; el shell sigue en la serie.
-- Sin xHCI/USB HID: solo dispositivos virtio-input; el shell sigue leyendo
-  de la consola serie.
-- HTTP sin TLS, sin redirecciones ni `keep-alive`; cuerpos limitados al
-  buffer del llamador.
-- `netd` no renueva la concesión DHCP ni fragmenta IPv4; un socket UDP
-  guarda un solo datagrama sin recoger; TCP reenvía desde `snd_una` sin
-  SACK ni estimación de RTT. Un cliente que envía a un servicio muerto se
-  queda bloqueado en la cola del endpoint (no hay aviso de cierre).
-- `arish` no tiene historial, edición de línea ni redirecciones; las
-  variables de entorno y el lanzamiento de programas llegan con el servicio
-  de procesos.
-- `fsd` no distingue clientes: cualquier proceso con su endpoint ve todos
-  los descriptores. La capability por fichero llega con la identidad de
-  cliente en IPC.
+- There is no automatic reboot after `updater` nor a test of two chained
+  boots in the same QEMU; updates arrive via xtask, not over the network.
+- The kernel generator only has `rdrand` and the TSC as sources.
+- The WASM interpreter does not validate the module before executing it (it trusts the
+  producer; everything is checked at run time) and has no floating point.
+- The broker policy is a constant; there are no CPU or handle quotas
+  per manifest and the user heap is still static.
+- The GUI does not move or resize windows, repaints the full screen
+  every frame and has no graphical terminal; the shell is still on serial.
+- No xHCI/USB HID: only virtio-input devices; the shell still reads
+  from the serial console.
+- HTTP without TLS, redirects or `keep-alive`; bodies limited to the
+  caller's buffer.
+- `netd` does not renew the DHCP lease or fragment IPv4; a UDP socket
+  holds a single unread datagram; TCP retransmits from `snd_una` without
+  SACK or RTT estimation. A client sending to a dead service stays
+  blocked on the endpoint queue (there is no close notification).
+- `arish` has no history, line editing or redirection; environment
+  variables and program launching arrive with the process
+  service.
+- `fsd` does not distinguish clients: any process with its endpoint sees all
+  descriptors. Per-file capabilities arrive with client identity
+  in IPC.
 
-- El servicio de bloques mapea cada buffer DMA de cliente una vez y lo
-  reutiliza por dirección física; no hay `mmio_unmap` ni caché de bloques.
-- El device manager (sección 29) vive dentro de `init`: enumera, reclama y
-  lanza drivers; separarlo en un servicio propio cuando haya más de uno.
-- El IOMMU invalida globalmente tras cada cambio y no remapea
-  interrupciones; sin variante AMD-Vi ni dominios compartidos entre
-  procesos.
-- `init` todavía no recibe endpoints de los servicios que lanza ni puede
-  pasarles capabilities al crearlos: llegará con el device manager (Fase 16).
-- Los benchmarks (sección 69) necesitan una máquina de referencia o KVM
-  para ser absolutos; bajo TCG solo comparan versiones entre sí.
-- Los mensajes IPC no llevan identidad del emisor: la dará un handle al
-  proceso remitente cuando haya política de identidad (sección 80).
-- Sin SMAP/SMEP: el kernel puede tocar memoria de usuario sin querer; los
-  accesos se limitan a `copy_from_user` validado. Activar SMEP/SMAP cuando la
-  CPU de referencia lo garantice.
-- Un proceso tiene un único hilo y su espacio es fijo (sin `mmap`): las
-  syscalls `memory_map`/`memory_unmap` y la creación de hilos desde usuario
-  son parte del conjunto previsto en la sección 22 y llegarán con el IPC
-  (Fase 14) y el runtime (Fase 27).
-- Sin prioridades ni balanceo de carga: round robin sobre una cola
-  compartida entre CPUs, con afinidad opcional. Las IRQ de dispositivo van
-  siempre al BSP.
-- Los slots de pila no se reutilizan (uno por tid); el espacio virtual
-  reservado permite ~2^31 hilos, así que no es un límite práctico aún.
-- El LAPIC también queda cubierto por el mapa físico lineal con caché WB;
-  solo se accede por la ventana sin caché, pero es un alias a resolver
-  cuando se reserve MMIO fuera del mapa lineal.
-- Sin I/O APIC ni MSI: ninguna IRQ de dispositivo todavía (Fase 17).
-- El heap nunca devuelve trozos al PMM ni compacta; el slab/size-class de la
-  sección 16 llegará cuando haya métricas que lo pidan. Las tablas intermedias
-  creadas durante un crecimiento fallido tampoco se devuelven (se reutilizan).
-- Las tablas del cargador se recuperan en `reclaim_boot_memory` (ADR 0021:
-  `page_tables_base/size` en `BootInfo`); las páginas de `kernel_ranges()`
-  se vuelven a reservar tras liberar la memoria de arranque.
-- La invalidación de TLB sigue siendo explícita en cada ruta que desmapea:
-  local (`invlpg`) donde ninguna otra CPU pudo usar la traducción (heap al
-  deshacer un crecimiento, pilas de hilo que no se reutilizan) y con
-  shootdown (`vmm::flush_page`) en la autoprueba del VMM y `test=smp`; no
-  hay un mecanismo genérico que decida solo.
-- El loader depende de la crate `uefi` (ver ADR 0006).
+- The block service maps each client DMA buffer once and
+  reuses it by physical address; there is no `mmio_unmap` or block cache.
+- The device manager (section 29) lives inside `init`: it enumerates, claims and
+  launches drivers; split it into its own service when there is more than one.
+- The IOMMU invalidates globally after every change and does not remap
+  interrupts; no AMD-Vi variant or domains shared between
+  processes.
+- `init` does not yet receive endpoints from the services it launches nor can it
+  pass them capabilities at creation: this will come with the device manager (Phase 16).
+- The benchmarks (section 69) need a reference machine or KVM
+  to be absolute; under TCG they only compare versions with each other.
+- IPC messages do not carry the sender's identity: a handle to the
+  sending process will provide it once there is an identity policy (section 80).
+- No SMAP/SMEP: the kernel can touch user memory by accident;
+  accesses are limited to validated `copy_from_user`. Enable SMEP/SMAP once the
+  reference CPU guarantees it.
+- A process has a single thread and its address space is fixed (no `mmap`): the
+  `memory_map`/`memory_unmap` syscalls and thread creation from user space
+  are part of the set planned in section 22 and will arrive with IPC
+  (Phase 14) and the runtime (Phase 27).
+- No priorities or load balancing: round robin over a queue
+  shared between CPUs, with optional affinity. Device IRQs always go
+  to the BSP.
+- Stack slots are not reused (one per tid); the reserved virtual
+  space allows ~2^31 threads, so it is not a practical limit yet.
+- The LAPIC is also covered by the linear physical map with WB caching;
+  it is only accessed through the uncached window, but it is an alias to resolve
+  when MMIO is reserved outside the linear map.
+- No I/O APIC or MSI: no device IRQs yet (Phase 17).
+- The heap never returns chunks to the PMM or compacts; the slab/size-class allocator of
+  section 16 will come when metrics call for it. Intermediate tables
+  created during a failed growth are not returned either (they are reused).
+- The loader's tables are recovered in `reclaim_boot_memory` (ADR 0021:
+  `page_tables_base/size` in `BootInfo`); the `kernel_ranges()` pages
+  are reserved again after freeing boot memory.
+- TLB invalidation is still explicit on every unmapping path:
+  local (`invlpg`) where no other CPU could have used the translation (heap when
+  undoing a growth, thread stacks that are not reused) and with
+  shootdown (`vmm::flush_page`) in the VMM self-test and `test=smp`; there is
+  no generic mechanism that decides on its own.
+- The loader depends on the `uefi` crate (see ADR 0006).
+
+## Power-off and line editing (2026-10-11)
+
+- `aricode_acpi::parse_fadt` and `find_s5` (a scan of the AML for the
+  `\_S5_` package, no interpreter) give the kernel the PM1 control blocks and
+  the S5 sleep types; `power::acpi_poweroff` enables ACPI mode through
+  `SMI_CMD` if needed and writes `SLP_TYP | SLP_EN`. `shutdown` uses it unless
+  `qemu_exit` is set (scenario `power.acpi_shutdown`).
+- `aricode-lineedit`: the shell's line editor (cursor movement, insert and
+  delete anywhere, Home/End, Ctrl-A/E/U, history), redrawing with plain text
+  and backspace only; the framebuffer console's backspace wraps to the
+  previous row (scenario `shell.line_editing`, host tests).
+
+## SSH (ADR 0025)
+
+- `aricode-crypto`: shared GF(2^255-19) field, X25519 (constant-time
+  ladder), Poly1305 and `chacha20-poly1305@openssh.com`.
+- `aricode-ssh`: SSH-2 server state machine (curve25519-sha256 with strict
+  KEX, ssh-ed25519, chacha20-poly1305, publickey auth, one session channel),
+  tested on the host against the OpenSSH client.
+- `services/sshd`: port 22 over the network service; host key and
+  `authorized_keys` in AriFS. For `shell`/`exec` it asks init (session
+  endpoint, `aricode-proto::session`) for an `arish` in session mode, whose
+  input and output are IPC endpoints instead of the console. The shell keeps
+  unconsumed input between lines (`Input`), so a command and the `exit` that
+  follows can arrive in one message.
+- Tests: `[host_ssh]` in scenarios (generated client key, `authorized_keys`
+  installed, host port 17022 forwarded to 22); `ssh.exec`.
+
+## HTTPS (ADR 0026)
+
+- `aricode-crypto`: SHA-384, HMAC, HKDF, ChaCha20-Poly1305 and AES-GCM,
+  big integers with RSA PKCS#1 v1.5/PSS verification, ECDSA P-256/P-384.
+- `aricode-x509`: DER, certificates, chain verification, host names, 17
+  embedded roots. `aricode-tls`: TLS 1.3 client state machine.
+- Kernel: CMOS real-time clock read at boot (`rtc.rs`, `sysinfo::WALLCLOCK`).
+- `sdk/https` (`aricode-https`): HTTP/HTTPS GET over the TCP service; the
+  shell's `http` uses it, with `trusted_ca.der` from AriFS as an optional
+  extra root. Scenario `net.https` (`host_https = true` starts the host's
+  `openssl s_server`).
+- init waits for sshd's `Ready` session message before starting the console
+  shell, so their console output never interleaves.
+
+## Network updates (ADR 0027)
+
+- Channel: `build/update/{manifest.txt, aricodeos-N.img}` from `cargo xtask
+  publish-update`, served by `serve-update` or any web server.
+- `apps/updater` (caps system, fs, net, block): channel manifest, version
+  comparison with the active slot, streaming download into `UPDATE`
+  (`aricode-https::get_with` over `aricode-http::fetch_with`), then the
+  Phase 30 verification and install. Shell `update [URL|check|apply]`.
+- Kernel `map_foreign` is idempotent per region; servers map client buffers
+  per request (`block::map_client_buffer`).
+- Scenario `update.network` (`host_update = true`, disk `update-empty`).
+
+## DHCP address probe (2026-10-12)
+
+After `DHCPACK` the network service probes the address with an ARP request
+(sender 0.0.0.0) for 600 ms before using it (RFC 2131 4.4.1). An answer from
+another MAC means the address is already in use on the LAN (a stale lease
+or a static host): the service sends `DHCPDECLINE`, logs the offending MAC
+and asks again ten seconds later. Found on the laptop, whose lease
+collided with a phone using a randomised MAC.

@@ -1,5 +1,5 @@
 name = "memory.nx_data_exec_faults"
-description = "test=exec_data -> #PF por fetch en pagina NX"
+description = "test=exec_data -> #PF on fetch from an NX page"
 level = "full"
 areas = ["memory", "interrupts"]
 cmdline = "qemu_exit test=exec_data"

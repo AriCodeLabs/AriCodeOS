@@ -1,0 +1,54 @@
+# Failure protocol (ADR 0028), incident 0001: the last resort end to end.
+# `usb_fault=idle:reenum` makes the driver give the endpoint up on the
+# first block request after two idle seconds, as it does when no command
+# puts an endpoint back: Disable Slot at once (xHCI 4.6.4), the request
+# answers Io, and the idle loop re-enumerates the device after a port reset
+# (Enable Slot, Address Device, descriptors, SET_CONFIGURATION, Configure
+# Endpoint, INQUIRY / TEST UNIT READY / READ CAPACITY) within its step. The
+# same medium comes back in service and the next write succeeds; `diag`
+# shows the attempt and its outcome.
+name = "usb.reenum"
+description = "usbd: a given-up endpoint disables the slot, re-enumerates the stick from the idle loop and serves again"
+level = "full"
+areas = ["usb", "storage", "diag"]
+usb_storage = true
+cmdline = "qemu_exit shell usb_fault=idle:reenum"
+timeout_secs = 90
+stdin = [
+    "repeat 10 ping 10.0.2.2",
+    "write probe.txt after idle",
+    "repeat 3 ping 10.0.2.2",
+    "write probe.txt second try",
+    "diag",
+    "shutdown",
+]
+
+[expect]
+exit = 33
+serial_contains = [
+    "usb-input: injected fault: the endpoint is given up",
+    "usb-input: Disable Slot slot ",
+    "write: write error",
+    "usb-input: re-enumerating the storage device on port ",
+    "after a port reset (attempt 1)",
+    "usb-input: storage device ",
+    "usb-input: USB storage on port ",
+    "usb-input: storage device back in service",
+    "write: 11 bytes to probe.txt",
+    "fault reported by process",
+    "usb inj w lba",
+    "usb ep lost",
+    "usb reenum",
+    "usb reenum ok",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "strict",
+    "given up until",
+    "re-enumeration failed",
+    "a different medium",
+    "usb cmd fail",
+    "usb cmd refused",
+    "usb cmd pending",
+]

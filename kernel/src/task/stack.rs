@@ -1,33 +1,35 @@
-//! Pilas de hilo: región virtual propia, frames del PMM y guard page sin
-//! mapear por debajo de cada pila.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Thread stacks: a dedicated virtual region, frames from the PMM and an
+//! unmapped guard page below each stack.
 
 use crate::memory::{pmm, vmm};
 use aricode_pmm::Frame;
 use aricode_x86_paging::{GLOBAL, NO_EXECUTE, PAGE_SIZE, WRITABLE};
 
-/// Región de pilas de hilo (entrada 448 del PML4).
+/// Thread stack region (PML4 entry 448).
 pub const STACKS_BASE: u64 = 0xFFFF_E000_0000_0000;
 pub const STACK_SIZE: u64 = 32 * 1024;
-const SLOT_SIZE: u64 = STACK_SIZE + PAGE_SIZE; // guard + pila
+const SLOT_SIZE: u64 = STACK_SIZE + PAGE_SIZE; // guard + stack
 
 pub struct KernelStack {
     slot: u32,
 }
 
 impl KernelStack {
-    /// Mapea la pila del slot `slot` (uno por hilo, nunca reutilizado dentro
-    /// de la misma sesión de arranque: el slot es el tid).
+    /// Maps the stack of slot `slot` (one per thread, never reused within the
+    /// same boot session: the slot is the tid).
     pub fn allocate(slot: u32) -> Result<Self, &'static str> {
         let s = Self { slot };
         let mut done = 0;
         for virt in (s.bottom()..s.top()).step_by(PAGE_SIZE as usize) {
             let Some(frame) = pmm::with(|p| p.allocate()) else {
                 s.unmap(done);
-                return Err("stack: sin frames");
+                return Err("stack: out of frames");
             };
             if vmm::with(|m| m.map_4k(virt, frame.addr(), WRITABLE | NO_EXECUTE | GLOBAL)).is_err()
             {
-                pmm::with(|p| p.free(frame)).expect("frame recien asignado");
+                pmm::with(|p| p.free(frame)).expect("freshly allocated frame");
                 s.unmap(done);
                 return Err("stack: map");
             }
@@ -51,19 +53,19 @@ impl KernelStack {
 
     fn unmap(&self, len: u64) {
         for virt in (self.bottom()..self.bottom() + len).step_by(PAGE_SIZE as usize) {
-            let phys = vmm::with(|m| m.unmap_4k(virt)).expect("pagina de pila mapeada");
-            // SAFETY: invalidación de una entrada que acabamos de retirar.
+            let phys = vmm::with(|m| m.unmap_4k(virt)).expect("mapped stack page");
+            // SAFETY: invalidation of an entry we just removed.
             unsafe {
                 core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags))
             };
-            pmm::with(|p| p.free(Frame::from_addr(phys))).expect("frame de pila");
+            pmm::with(|p| p.free(Frame::from_addr(phys))).expect("stack frame");
         }
     }
 }
 
 impl Drop for KernelStack {
-    /// Devuelve las páginas al PMM. Nunca debe soltarse la pila del hilo en
-    /// ejecución: el planificador solo libera hilos ya terminados desde otro.
+    /// Returns the pages to the PMM. The running thread's stack must never be
+    /// dropped: the scheduler only frees finished threads from another one.
     fn drop(&mut self) {
         self.unmap(STACK_SIZE);
     }

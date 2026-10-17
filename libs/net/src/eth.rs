@@ -1,11 +1,13 @@
-//! Tramas Ethernet II.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Ethernet II frames.
 
 use crate::{be16, MacAddr};
 
 pub const HEADER_LEN: usize = 14;
 pub const ETHERTYPE_IPV4: u16 = 0x0800;
 pub const ETHERTYPE_ARP: u16 = 0x0806;
-/// MTU habitual: carga útil máxima de una trama.
+/// Usual MTU: maximum payload of a frame.
 pub const MTU: usize = 1500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +36,7 @@ impl Header {
         ))
     }
 
-    /// Escribe la cabecera al principio de `out`.
+    /// Writes the header at the start of `out`.
     pub fn write(&self, out: &mut [u8]) -> Option<usize> {
         if out.len() < HEADER_LEN {
             return None;

@@ -3,7 +3,7 @@ name = "ari-app-installer"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Instalador de paquetes firmados de AriCodeOS: aplicacion de confianza que instala o actualiza apps/NOMBRE.aripkg desde pkgs/ con un reemplazo atomico"
+description = "AriCodeOS signed package installer: trusted app that installs or updates apps/NAME.aripkg from pkgs/ with an atomic replace"
 publish = false
 
 [[bin]]

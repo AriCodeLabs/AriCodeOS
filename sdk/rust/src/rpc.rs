@@ -1,16 +1,18 @@
-//! Llamada petición/respuesta sobre un endpoint de servicio (ADR 0012):
-//! cada petición lleva su propio endpoint de respuesta, que se cierra al
-//! terminar, y todas las esperas están acotadas. Una respuesta tardía llega
-//! a un endpoint cerrado y se pierde: nunca se atribuye a otra petición.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Request/reply call over a service endpoint (ADR 0012): each request
+//! carries its own reply endpoint, which is closed when done, and every wait
+//! is bounded. A late reply reaches a closed endpoint and is lost: it is
+//! never attributed to another request.
 
 use crate::{self as sys, rights, Error, Handle};
 
-/// Handles extra que puede llevar una petición además del de respuesta.
+/// Extra handles a request may carry besides the reply one.
 pub const MAX_EXTRA: usize = 3;
 
-/// Envía `request` con los handles `extra` (que se consumen: van al
-/// servidor o se cierran si el envío falla) y espera la respuesta en `out`.
-/// `send_wait_ms` acota la cola del servidor; `reply_wait_ms` la respuesta.
+/// Sends `request` with the `extra` handles (which are consumed: they go to
+/// the server or are closed if the send fails) and waits for the reply in
+/// `out`. `send_wait_ms` bounds the server queue; `reply_wait_ms` the reply.
 pub fn call(
     service: Handle,
     request: &[u8],
@@ -32,8 +34,8 @@ pub fn call(
     .map(|(len, _)| len)
 }
 
-/// Como `call`, recogiendo además los handles que traiga la respuesta en
-/// `handles_out`; devuelve `(bytes, handles)`.
+/// Like `call`, also collecting the handles the reply carries into
+/// `handles_out`; returns `(bytes, handles)`.
 pub fn call_handles(
     service: Handle,
     request: &[u8],
@@ -65,6 +67,8 @@ pub fn call_handles(
     result
 }
 
-/// Margen por encima del plazo que pide una petición: lo que se concede al
-/// servicio para contestar cuando está vivo.
+/// Slack on top of the deadline a request asks for: what the service is
+/// granted to answer when it is alive. Clients of services whose work is
+/// bounded by a device use their own, longer reply waits
+/// (`block::REPLY_WAIT_MS`, `fs::REPLY_WAIT_MS`).
 pub const GRACE_MS: u64 = 5000;

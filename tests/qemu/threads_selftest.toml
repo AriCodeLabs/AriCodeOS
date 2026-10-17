@@ -1,10 +1,10 @@
 name = "threads.selftest"
-description = "test=threads: dos hilos alternan ABABAB con yield; 40 workers terminan y se recogen"
+description = "test=threads: two threads alternate ABABAB with yield; 40 workers finish and are reaped"
 level = "full"
 areas = ["threads"]
 cmdline = "qemu_exit test=threads"
 
 [expect]
 exit = 33
-serial_contains = ["threads selftest ok (alternancia ", "40 workers terminados y recogidos", "ARICODEOS_KERNEL_READY"]
+serial_contains = ["threads selftest ok (alternation ", "40 workers finished and reaped", "ARICODEOS_KERNEL_READY"]
 serial_absent = ["KERNEL PANIC"]

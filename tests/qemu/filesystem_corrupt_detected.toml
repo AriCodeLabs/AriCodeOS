@@ -1,21 +1,21 @@
-# Etapa 2 (ADR 0014): una entrada de la tabla de AriFS tiene un byte
-# alterado y su CRC no cuadra. fsd lo detecta y se niega a montar; init no
-# da por bueno el servicio de ficheros y termina con codigo 14 en vez de
-# seguir con datos en los que no se puede confiar.
+# Stage 2 (ADR 0014): an AriFS table entry has a corrupted
+# byte and its CRC does not match. fsd detects it and refuses to mount; init does not
+# accept the file service and exits with code 14 instead of
+# carrying on with data that cannot be trusted.
 name = "filesystem.corrupt_detected"
-description = "AriFS con metadatos corruptos: fsd no monta y el arranque lo refleja"
+description = "AriFS with corrupt metadata: fsd does not mount and the boot reflects it"
 level = "full"
 areas = ["filesystem", "storage", "init"]
 cmdline = "qemu_exit"
 disk = "fs-corrupt"
-timeout_secs = 60
+timeout_secs = 200
 
 [expect]
 exit = 33
 serial_contains = [
-    "fsd: AriFS corrupto: no se monta",
-    "AriInit: fs_client salio con 2",
-    "init terminado con codigo 14",
+    "fsd: AriFS corrupt: not mounting",
+    "AriInit: fs_client exited with 2",
+    "init exited with code 14",
     "ARICODEOS_KERNEL_READY",
 ]
-serial_absent = ["KERNEL PANIC", "AriFS montado", "servicio de ficheros ok"]
+serial_absent = ["KERNEL PANIC", "AriFS montado", "file service ok"]

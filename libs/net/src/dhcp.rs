@@ -1,11 +1,13 @@
-//! Cliente DHCP (RFC 2131) mínimo: DISCOVER → OFFER → REQUEST → ACK.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Minimal DHCP client (RFC 2131): DISCOVER → OFFER → REQUEST → ACK.
 
 use crate::{be32, Ipv4Addr, MacAddr};
 
 pub const CLIENT_PORT: u16 = 68;
 pub const SERVER_PORT: u16 = 67;
 const MAGIC: [u8; 4] = [99, 130, 83, 99];
-/// Tamaño mínimo de un mensaje (cabecera fija + magia).
+/// Minimum size of a message (fixed header + magic).
 pub const FIXED_LEN: usize = 240;
 pub const MAX_LEN: usize = 576;
 
@@ -22,10 +24,11 @@ const OPT_END: u8 = 255;
 pub const DISCOVER: u8 = 1;
 pub const OFFER: u8 = 2;
 pub const REQUEST: u8 = 3;
+pub const DECLINE: u8 = 4;
 pub const ACK: u8 = 5;
 pub const NAK: u8 = 6;
 
-/// Configuración obtenida del servidor.
+/// Configuration obtained from the server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Config {
     pub address: Ipv4Addr,
@@ -36,7 +39,7 @@ pub struct Config {
     pub lease_secs: u32,
 }
 
-/// Mensaje recibido ya analizado.
+/// Received message, already parsed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Message {
     pub msg_type: u8,
@@ -132,7 +135,7 @@ fn write_message(
     put(OPT_PARAM_LIST, &[OPT_SUBNET, OPT_ROUTER, OPT_DNS]);
     out[i] = OPT_END;
     i += 1;
-    // Relleno hasta el mínimo BOOTP habitual (300 bytes).
+    // Padding up to the usual BOOTP minimum (300 bytes).
     let len = i.max(300);
     out[i..len].fill(0);
     Some(len)
@@ -143,11 +146,14 @@ pub enum State {
     Init,
     Selecting,
     Requesting,
+    /// Acknowledged; the caller probes the address with ARP (RFC 2131
+    /// 4.4.1) and then calls `address_free` or `address_in_use`.
+    Probing,
     Bound,
 }
 
-/// Máquina de estados del cliente. El llamador envía lo que `poll`/`on_message`
-/// devuelven en un UDP 68→67 de difusión (0.0.0.0 → 255.255.255.255).
+/// Client state machine. The caller sends whatever `poll`/`on_message`
+/// return in a broadcast UDP 68→67 datagram (0.0.0.0 → 255.255.255.255).
 pub struct Client {
     mac: MacAddr,
     xid: u32,
@@ -173,6 +179,37 @@ impl Client {
         self.state
     }
 
+    /// The acknowledged address while it is being probed.
+    pub fn probing(&self) -> Option<Ipv4Addr> {
+        (self.state == State::Probing)
+            .then(|| self.config.map(|c| c.address))
+            .flatten()
+    }
+
+    /// Nobody answered the probe: the lease is in use.
+    pub fn address_free(&mut self) {
+        if self.state == State::Probing {
+            self.state = State::Bound;
+        }
+    }
+
+    /// Another host answered the probe: `DHCPDECLINE` for the server (the
+    /// message to broadcast) and back to the start; the caller should wait
+    /// about ten seconds before polling again (RFC 2131 3.1.5).
+    pub fn address_in_use(&mut self, out: &mut [u8]) -> Option<usize> {
+        let cfg = self.config.take()?;
+        self.state = State::Init;
+        self.offer = None;
+        write_message(
+            self.xid,
+            self.mac,
+            DECLINE,
+            Some(cfg.address),
+            Some(cfg.server),
+            out,
+        )
+    }
+
     pub fn config(&self) -> Option<Config> {
         self.config
     }
@@ -181,8 +218,8 @@ impl Client {
         self.retries
     }
 
-    /// Mensaje que corresponde emitir ahora (al arrancar o al vencer un plazo
-    /// sin respuesta). `None` cuando ya está ligado.
+    /// Message due to be sent now (at startup or when a timeout expires
+    /// without a reply). `None` once bound.
     pub fn poll(&mut self, out: &mut [u8]) -> Option<usize> {
         match self.state {
             State::Init | State::Selecting => {
@@ -204,11 +241,11 @@ impl Client {
                     out,
                 )
             }
-            State::Bound => None,
+            State::Probing | State::Bound => None,
         }
     }
 
-    /// Procesa un mensaje recibido; devuelve la respuesta a emitir, si la hay.
+    /// Processes a received message; returns the reply to send, if any.
     pub fn on_message(&mut self, b: &[u8], out: &mut [u8]) -> Option<usize> {
         let m = Message::parse(b)?;
         if m.xid != self.xid {
@@ -233,7 +270,7 @@ impl Client {
                     cfg.server = self.offer.map(|o| o.config.server).unwrap_or_default();
                 }
                 self.config = Some(cfg);
-                self.state = State::Bound;
+                self.state = State::Probing;
                 None
             }
             (State::Requesting, NAK) => {
@@ -306,7 +343,7 @@ mod tests {
         assert_eq!(out[0], 1);
         assert_eq!(out[FIXED_LEN..FIXED_LEN + 3], [OPT_MSG_TYPE, 1, DISCOVER]);
         assert_eq!(c.state(), State::Selecting);
-        // Un OFFER con otro xid se ignora.
+        // An OFFER with another xid is ignored.
         assert!(c
             .on_message(
                 &server_message(1, OFFER, Ipv4Addr::new(10, 0, 2, 15)),
@@ -332,7 +369,12 @@ mod tests {
                 &mut out
             )
             .is_none());
+        assert_eq!(c.state(), State::Probing);
+        assert_eq!(c.probing(), Some(Ipv4Addr::new(10, 0, 2, 15)));
+        assert!(c.poll(&mut out).is_none(), "nothing to send while probing");
+        c.address_free();
         assert_eq!(c.state(), State::Bound);
+        assert_eq!(c.probing(), None);
         let cfg = c.config().unwrap();
         assert_eq!(cfg.address, Ipv4Addr::new(10, 0, 2, 15));
         assert_eq!(cfg.subnet_mask, Ipv4Addr::new(255, 255, 255, 0));
@@ -347,7 +389,7 @@ mod tests {
         let mut c = Client::new(MacAddr([1; 6]), 7);
         let mut out = [0u8; MAX_LEN];
         c.poll(&mut out).unwrap();
-        c.poll(&mut out).unwrap(); // sin respuesta: reintento
+        c.poll(&mut out).unwrap(); // no reply: retry
         assert_eq!(c.retries(), 1);
         c.on_message(
             &server_message(7, OFFER, Ipv4Addr::new(10, 0, 2, 15)),
@@ -355,8 +397,40 @@ mod tests {
         )
         .unwrap();
         let n = c.on_message(&server_message(7, NAK, Ipv4Addr::UNSPECIFIED), &mut out);
-        assert!(n.is_some(), "tras NAK vuelve a DISCOVER");
+        assert!(n.is_some(), "after NAK it goes back to DISCOVER");
         assert_eq!(c.state(), State::Selecting);
         assert!(Message::parse(&[0u8; 100]).is_none());
+    }
+
+    #[test]
+    fn address_in_use_is_declined() {
+        let mut c = Client::new(MacAddr([1; 6]), 9);
+        let mut out = [0u8; MAX_LEN];
+        c.poll(&mut out).unwrap();
+        c.on_message(
+            &server_message(9, OFFER, Ipv4Addr::new(10, 0, 2, 15)),
+            &mut out,
+        )
+        .unwrap();
+        c.on_message(
+            &server_message(9, ACK, Ipv4Addr::new(10, 0, 2, 15)),
+            &mut out,
+        );
+        assert_eq!(c.probing(), Some(Ipv4Addr::new(10, 0, 2, 15)));
+        let n = c.address_in_use(&mut out).unwrap();
+        assert!(n >= 300);
+        assert_eq!(out[FIXED_LEN..FIXED_LEN + 3], [OPT_MSG_TYPE, 1, DECLINE]);
+        assert!(
+            out[FIXED_LEN..n]
+                .windows(6)
+                .any(|w| w == [OPT_REQUESTED_IP, 4, 10, 0, 2, 15]),
+            "the declined address goes in the message"
+        );
+        assert_eq!(c.state(), State::Init);
+        assert!(c.config().is_none());
+        // Next poll starts over with DISCOVER.
+        let n = c.poll(&mut out).unwrap();
+        assert_eq!(out[FIXED_LEN..FIXED_LEN + 3], [OPT_MSG_TYPE, 1, DISCOVER]);
+        assert!(n >= 300);
     }
 }

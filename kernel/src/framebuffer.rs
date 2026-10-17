@@ -1,4 +1,6 @@
-//! Superficie MMIO sobre el framebuffer GOP para `aricode-fb-console`.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! MMIO surface over the GOP framebuffer for `aricode-fb-console`.
 
 use crate::sync::IrqLock;
 use aricode_fb_console::{Rgb, Surface};
@@ -6,13 +8,13 @@ use boot_protocol::{FramebufferInfo, PixelFormat};
 
 static INFO: IrqLock<Option<FramebufferInfo>> = IrqLock::new(None);
 
-/// Guarda la descripción del framebuffer GOP para `system_info`.
+/// Stores the GOP framebuffer description for `system_info`.
 pub fn set_info(info: FramebufferInfo) {
     *INFO.lock() = Some(info);
 }
 
-/// Descripción del framebuffer en el formato del ABI (`sysinfo::Framebuffer`),
-/// o `None` si no hay pantalla.
+/// Framebuffer description in the ABI format (`sysinfo::Framebuffer`), or
+/// `None` if there is no display.
 pub fn abi_info() -> Option<aricode_abi::sysinfo::Framebuffer> {
     use aricode_abi::sysinfo::{FB_FORMAT_BGR, FB_FORMAT_BITMASK, FB_FORMAT_RGB};
     let info = (*INFO.lock())?;
@@ -37,16 +39,16 @@ pub fn abi_info() -> Option<aricode_abi::sysinfo::Framebuffer> {
 
 pub struct MmioSurface {
     info: FramebufferInfo,
-    /// Dirección virtual del framebuffer (a través del mapa físico).
+    /// Virtual address of the framebuffer (through the physical map).
     base: *mut u32,
 }
 
-// SAFETY: `base` es un puntero a MMIO global que no pertenece a ningún hilo;
-// el acceso queda serializado por el lock de la consola.
+// SAFETY: `base` is a pointer to global MMIO owned by no thread; access is
+// serialized by the console lock.
 unsafe impl Send for MmioSurface {}
 
 impl MmioSurface {
-    /// `base` es la dirección virtual donde está mapeado `info.address`.
+    /// `base` is the virtual address where `info.address` is mapped.
     pub fn new(info: FramebufferInfo, base: u64) -> Option<Self> {
         if info.address == 0
             || info.pixel_format == PixelFormat::None
@@ -81,8 +83,8 @@ impl Surface for MmioSurface {
         if (idx + 1) * 4 > self.info.size as usize {
             return;
         }
-        // SAFETY: `base` es el framebuffer mapeado (AriBoot y luego el VMM lo
-        // cubren en el mapa físico); `idx` acotado por width/height/stride y `size`.
+        // SAFETY: `base` is the mapped framebuffer (AriBoot and then the VMM cover
+        // it in the physical map); `idx` is bounded by width/height/stride and `size`.
         unsafe { self.base.add(idx).write_volatile(self.encode(color)) };
     }
 }

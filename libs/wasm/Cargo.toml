@@ -3,7 +3,7 @@ name = "aricode-wasm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Intérprete WebAssembly MVP de AriCodeOS (enteros, memoria lineal, importaciones) sin std"
+description = "AriCodeOS WebAssembly MVP interpreter (integers, linear memory, imports) without std"
 
 [lib]
 path = "src/lib.rs"

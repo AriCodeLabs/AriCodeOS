@@ -1,27 +1,27 @@
-# ADR 0006: Uso de la crate `uefi` en AriBoot
+# ADR 0006: Using the `uefi` crate in AriBoot
 
-- **Fecha:** 2026-09-26
-- **Estado:** Aceptada
+- **Date:** 2026-09-26
+- **Status:** Accepted
 
-## Contexto
+## Context
 
-Escribir a mano las tablas y protocolos UEFI (boot services, GOP, SimpleFileSystem,
-LoadedImage, config tables) supone cientos de líneas de FFI `unsafe` que ya
-existen, auditadas, en la crate `uefi` (rust-osdev).
+Writing the UEFI tables and protocols by hand (boot services, GOP, SimpleFileSystem,
+LoadedImage, config tables) means hundreds of lines of `unsafe` FFI that already
+exist, audited, in the `uefi` crate (rust-osdev).
 
-## Decisión
+## Decision
 
-AriBoot depende de `uefi` 0.41 (features `alloc`, `global_allocator`,
-`panic_handler`, `logger`). El parser ELF, la construcción de tablas de páginas
-y el salto al kernel son código propio.
+AriBoot depends on `uefi` 0.41 (features `alloc`, `global_allocator`,
+`panic_handler`, `logger`). The ELF parser, the page table construction
+and the jump to the kernel are our own code.
 
-## Alternativas
+## Alternatives
 
-- FFI propio: más control, mucho más `unsafe` que auditar, sin beneficio para M0.
+- Our own FFI: more control, much more `unsafe` to audit, no benefit for M0.
 
-## Consecuencias
+## Consequences
 
-- El bootloader no forma parte del kernel: la dependencia no entra en el TCB
-  en ejecución (desaparece tras `ExitBootServices`).
-- Si en el futuro se quiere una cadena 100 % propia, sustituir la crate es un
-  cambio local a `boot/`.
+- The bootloader is not part of the kernel: the dependency does not enter the
+  runtime TCB (it disappears after `ExitBootServices`).
+- If a 100% in-house chain is wanted in the future, replacing the crate is a
+  change local to `boot/`.

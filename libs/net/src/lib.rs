@@ -1,8 +1,10 @@
-//! Pila de red mínima (Fase 22, sección 38). Codificadores y decodificadores
-//! sin `alloc` sobre buffers del llamador, más las pequeñas máquinas de
-//! estado que necesita un servicio de red en ring 3 (caché ARP, cliente
-//! DHCP). Toda la lógica es pura y se prueba en host; el servicio `netd`
-//! solo la conecta con el driver virtio-net y con IPC.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Minimal network stack (Phase 22, section 38). Encoders and decoders
+//! without `alloc` over caller-supplied buffers, plus the small state
+//! machines a ring 3 network service needs (ARP cache, DHCP
+//! client). All the logic is pure and tested on the host; the `netd` service
+//! only connects it to the virtio-net driver and to IPC.
 
 #![no_std]
 
@@ -45,11 +47,11 @@ impl Ipv4Addr {
     pub fn is_unspecified(&self) -> bool {
         *self == Self::UNSPECIFIED
     }
-    /// Misma subred que `other` bajo `mask`.
+    /// Same subnet as `other` under `mask`.
     pub fn same_subnet(&self, other: Ipv4Addr, mask: Ipv4Addr) -> bool {
         (self.to_u32() & mask.to_u32()) == (other.to_u32() & mask.to_u32())
     }
-    /// Analiza `a.b.c.d`.
+    /// Parses `a.b.c.d`.
     pub fn parse(s: &str) -> Option<Self> {
         let mut out = [0u8; 4];
         let mut parts = s.split('.');
@@ -62,7 +64,7 @@ impl Ipv4Addr {
         }
         parts.next().is_none().then_some(Self(out))
     }
-    /// Escribe `a.b.c.d` en `buf` y devuelve la porción usada.
+    /// Writes `a.b.c.d` into `buf` and returns the used portion.
     pub fn format<'a>(&self, buf: &'a mut [u8; 15]) -> &'a [u8] {
         let mut n = 0;
         for (i, b) in self.0.iter().enumerate() {
@@ -85,8 +87,8 @@ impl Ipv4Addr {
     }
 }
 
-/// Suma de comprobación de Internet (RFC 1071) sobre `data`, con `initial`
-/// ya acumulado (para la pseudocabecera).
+/// Internet checksum (RFC 1071) over `data`, with `initial`
+/// already accumulated (for the pseudo-header).
 pub fn checksum(initial: u32, data: &[u8]) -> u16 {
     let mut sum = initial;
     let (pairs, rest) = data.as_chunks::<2>();
@@ -134,7 +136,7 @@ mod tests {
 
     #[test]
     fn checksum_rfc1071_example() {
-        // Ejemplo clásico: cabecera IPv4 con checksum 0 debe dar 0xb861.
+        // Classic example: an IPv4 header with checksum 0 must yield 0xb861.
         let hdr = [
             0x45, 0x00, 0x00, 0x73, 0x00, 0x00, 0x40, 0x00, 0x40, 0x11, 0x00, 0x00, 0xc0, 0xa8,
             0x00, 0x01, 0xc0, 0xa8, 0x00, 0xc7,

@@ -3,7 +3,7 @@ name = "aricode-ab"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Actualización A/B de AriCodeOS: estado de arranque, imágenes de sistema firmadas y decisión de slot (no_std)"
+description = "AriCodeOS A/B update: boot state, signed system images and slot decision (no_std)"
 
 [lib]
 path = "src/lib.rs"

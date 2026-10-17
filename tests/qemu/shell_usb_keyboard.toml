@@ -1,11 +1,11 @@
-# Etapa 2 (ADR 0013): el shell lee de un teclado USB HID. init lanza el
-# puente de consola con los servicios de entrada (dos virtio y el USB); el host teclea por QMP (van
-# al teclado USB, el manejador mas reciente) "cpus" + Enter y "shutdown" +
-# Enter al ver que el puente sirve, y el shell los recibe por el anillo del
-# kernel como si vinieran de COM1. Con varias CPUs el prompt y el marcador del
-# puente pueden entrelazarse en la serie, asi que solo se exige la salida.
+# Stage 2 (ADR 0013): the shell reads from a USB HID keyboard. init launches the
+# console bridge with the input services (two virtio and the USB one); the host types over QMP (they go
+# to the USB keyboard, the most recent handler) "cpus" + Enter and "shutdown" +
+# Enter once it sees the bridge serving, and the shell receives them through the kernel
+# ring as if they came from COM1. With several CPUs the prompt and the bridge
+# marker may interleave on serial, so only the output is required.
 name = "shell.usb_keyboard"
-description = "arish con teclado USB HID: el puente de consola lleva las pulsaciones al anillo de entrada del kernel"
+description = "arish with a USB HID keyboard: the console bridge carries keystrokes to the kernel input ring"
 level = "full"
 areas = ["shell", "input", "usb", "console"]
 cmdline = "qemu_exit shell"
@@ -19,12 +19,12 @@ keys = ["c", "p", "u", "s", "ret", "s", "h", "u", "t", "d", "o", "w", "n", "ret"
 [expect]
 exit = 33
 serial_contains = [
-    "usb-input: dispositivo listo: USB HID Keyboard+Mouse",
-    "AriInit: puente de consola con 3 dispositivo(s) de entrada",
-    "arish: shell de AriCodeOS",
+    "usb-input: device ready: USB HID Keyboard+Mouse",
+    "AriInit: console bridge with 3 input device(s)",
+    "arish: AriCodeOS shell",
     "cpus: ",
     "ari> shutdown",
-    "[host] QMP: 28 eventos de entrada enviados",
+    "[host] QMP: 28 input events sent",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "init no responde", "console-bridge: la consola rechaza"]
+serial_absent = ["KERNEL PANIC", "init no responde", "console-bridge: console rejects input"]

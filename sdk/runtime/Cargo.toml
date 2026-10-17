@@ -3,7 +3,7 @@ name = "aricode-rt"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Runtime de los programas de usuario de AriCodeOS: entrada, heap, panic y utilidades de formato (no_std)"
+description = "Runtime for AriCodeOS user programs: entry point, heap, panic and formatting helpers (no_std)"
 
 [lib]
 path = "src/lib.rs"

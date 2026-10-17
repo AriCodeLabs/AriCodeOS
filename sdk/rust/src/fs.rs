@@ -1,7 +1,15 @@
-//! Cliente del servicio de ficheros (`aricode-proto::fs`).
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! File service client (`aricode-proto::fs`).
 
 use crate::{self as sys, rights, rpc, Error, Handle};
 use aricode_proto::fs::{Op, Reply, Request, Status, MAX_IO, MAX_REPLACE};
+
+/// Reply wait of a file request (ms): above the block client's
+/// (`block::REPLY_WAIT_MS`, 90 s) plus the file service's own work, so a
+/// slow disk is latency for the caller and never a reply the service
+/// delivers to nobody.
+pub const REPLY_WAIT_MS: u64 = 120_000;
 
 pub struct FsClient {
     service: Handle,
@@ -23,7 +31,7 @@ impl FsClient {
     }
 
     fn buffer(&mut self) -> &mut [u8] {
-        // SAFETY: buffer DMA de MAX_IO bytes mapeado RW, exclusivo del cliente.
+        // SAFETY: DMA buffer of MAX_IO bytes mapped RW, exclusive to the client.
         unsafe { core::slice::from_raw_parts_mut(self.buf as *mut u8, MAX_IO as usize) }
     }
 
@@ -42,7 +50,7 @@ impl FsClient {
             &req.encode(),
             &extra[..n],
             rpc::GRACE_MS,
-            rpc::GRACE_MS,
+            REPLY_WAIT_MS,
             &mut msg,
         )
         .map_err(FsError::Ipc)?;
@@ -53,7 +61,7 @@ impl FsClient {
         }
     }
 
-    /// Entrada `index` del directorio: (nombre, tamaño). `None` al final.
+    /// Directory entry `index`: (name, size). `None` at the end.
     pub fn list(
         &self,
         index: u32,
@@ -91,14 +99,14 @@ impl FsClient {
         self.call(req, false).map(|_| ())
     }
 
-    /// Solo para el broker: pide a fsd un endpoint ligado al directorio
-    /// privado `prefix` y devuelve el handle recibido (`WRITE`, transferible).
+    /// Broker only: asks fsd for an endpoint bound to the private directory
+    /// `prefix` and returns the received handle (`WRITE`, transferable).
     pub fn bind(&self, prefix: &str) -> Result<Handle, FsError> {
         self.grant(Op::Bind, prefix)
     }
 
-    /// Solo para el broker: pide a fsd un endpoint ligado al fichero `name`
-    /// en modo lectura (ADR 0016) y devuelve el handle recibido.
+    /// Broker only: asks fsd for an endpoint bound to the file `name` in
+    /// read-only mode (ADR 0016) and returns the received handle.
     pub fn share(&self, name: &str) -> Result<Handle, FsError> {
         self.grant(Op::Share, name)
     }
@@ -114,7 +122,7 @@ impl FsClient {
             &req.encode(),
             &[],
             rpc::GRACE_MS,
-            rpc::GRACE_MS,
+            REPLY_WAIT_MS,
             &mut msg,
             &mut handles,
         )
@@ -127,7 +135,7 @@ impl FsClient {
         }
     }
 
-    /// Lee hasta `out.len()` bytes (máximo `MAX_IO`) desde `offset`.
+    /// Reads up to `out.len()` bytes (at most `MAX_IO`) from `offset`.
     pub fn read(&mut self, fd: u32, offset: u32, out: &mut [u8]) -> Result<usize, FsError> {
         let len = out.len().min(MAX_IO as usize);
         let mut req = Request::new(Op::Read);
@@ -140,8 +148,8 @@ impl FsClient {
         Ok(n)
     }
 
-    /// Escribe `data` (máximo `MAX_IO`) en `offset`, en el sitio: tras un
-    /// corte cada sector tiene lo viejo o lo nuevo. Duradero tras `flush`.
+    /// Writes `data` (at most `MAX_IO`) at `offset`, in place: after a power
+    /// cut each sector holds either the old or the new data. Durable after `flush`.
     pub fn write(&mut self, fd: u32, offset: u32, data: &[u8]) -> Result<usize, FsError> {
         let len = data.len().min(MAX_IO as usize);
         self.buffer()[..len].copy_from_slice(&data[..len]);
@@ -152,10 +160,10 @@ impl FsClient {
         self.call(req, true).map(|r| r.value as usize)
     }
 
-    /// Sustituye el contenido entero del fichero por `data` (máximo
-    /// `MAX_REPLACE`) de forma atómica y duradera (ADR 0014): tras un corte el
-    /// fichero tiene el contenido anterior o el nuevo, nunca una mezcla. Por
-    /// encima de `MAX_IO` va por trozos al journal y un compromiso (ADR 0018).
+    /// Replaces the whole file content with `data` (at most `MAX_REPLACE`)
+    /// atomically and durably (ADR 0014): after a power cut the file holds the
+    /// previous content or the new one, never a mix. Above `MAX_IO` it goes in
+    /// chunks to the journal followed by a commit (ADR 0018).
     pub fn replace(&mut self, fd: u32, data: &[u8]) -> Result<usize, FsError> {
         if data.len() > MAX_REPLACE as usize {
             return Err(FsError::Status(Status::OutOfRange));
@@ -173,9 +181,9 @@ impl FsClient {
         self.replace_commit(fd, data.len() as u32)
     }
 
-    /// Un trozo (máximo `MAX_IO`) de un reemplazo por partes: el primero en
-    /// `offset` 0 y los demás seguidos, sin huecos; nada cambia hasta
-    /// `replace_commit`. `Busy` si otro cliente tiene un reemplazo a medias.
+    /// One chunk (at most `MAX_IO`) of a multi-part replace: the first at
+    /// `offset` 0 and the rest contiguous, without gaps; nothing changes until
+    /// `replace_commit`. `Busy` if another client has a replace in progress.
     pub fn replace_chunk(&mut self, fd: u32, offset: u32, chunk: &[u8]) -> Result<(), FsError> {
         if chunk.len() > MAX_IO as usize {
             return Err(FsError::Status(Status::OutOfRange));
@@ -188,8 +196,8 @@ impl FsClient {
         self.call(req, true).map(|_| ())
     }
 
-    /// Compromete los `len` bytes enviados con `replace_chunk` (exactamente
-    /// los de esta transacción; si no, `Invalid`) y los aplica de una vez.
+    /// Commits the `len` bytes sent with `replace_chunk` (exactly those of
+    /// this transaction; otherwise `Invalid`) and applies them at once.
     pub fn replace_commit(&mut self, fd: u32, len: u32) -> Result<usize, FsError> {
         let mut req = Request::new(Op::ReplaceCommit);
         req.fd = fd;
@@ -197,7 +205,7 @@ impl FsClient {
         self.call(req, false).map(|r| r.value as usize)
     }
 
-    /// Hace duraderas las escrituras anteriores (ADR 0014).
+    /// Makes previous writes durable (ADR 0014).
     pub fn flush(&self) -> Result<(), FsError> {
         self.call(Request::new(Op::Flush), false).map(|_| ())
     }

@@ -1,6 +1,8 @@
-//! Aplicación gráfica de prueba (Fase 26): pinta su ventana y escucha
-//! eventos. `arg` = 0 (Demo A) o 1 (Demo B, que se crea 300 ms después para
-//! quedar encima). Handles: 0x10004 = compositor (WRITE), 0x10005 = HARDWARE.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Test graphical application (Phase 26): paints its window and listens for
+//! events. `arg` = 0 (Demo A) or 1 (Demo B, created 300 ms later so it ends
+//! up on top). Handles: 0x10004 = compositor (WRITE), 0x10005 = HARDWARE.
 #![no_std]
 #![no_main]
 
@@ -30,16 +32,16 @@ fn main(index: u64) -> u64 {
         Ok(w) => w,
         Err(e) => {
             sys::print(name);
-            sys::print(b": no se pudo crear la ventana: ");
+            sys::print(b": could not create the window: ");
             match e {
                 WindowError::Ipc(err) => aricode_rt::print_error(b"ipc", err),
                 WindowError::Status(s) => {
                     let mut b = [0u8; 20];
-                    sys::print(b"estado ");
+                    sys::print(b"status ");
                     sys::print(aricode_rt::fmt_u64(s as u64, &mut b));
                     sys::print(b"\n");
                 }
-                WindowError::Invalid => sys::print(b"parametros invalidos\n"),
+                WindowError::Invalid => sys::print(b"invalid parameters\n"),
             }
             return 1;
         }
@@ -51,7 +53,7 @@ fn main(index: u64) -> u64 {
         c.fill_rect(&Rect::new(0, 298, 400, 2), rgb(255, 255, 255));
         c.fill_rect(&Rect::new(0, 0, 2, 300), rgb(255, 255, 255));
         c.fill_rect(&Rect::new(398, 0, 2, 300), rgb(255, 255, 255));
-        c.text(20, 20, "Ventana ", rgb(255, 255, 255), None);
+        c.text(20, 20, "Window  ", rgb(255, 255, 255), None);
         c.text(20 + 8 * 8, 20, title, rgb(255, 255, 0), None);
         c.text(20, 60, "AriCodeOS GUI", rgb(255, 255, 255), None);
     }
@@ -59,23 +61,23 @@ fn main(index: u64) -> u64 {
         return 2;
     }
     sys::print(name);
-    sys::print(b": ventana presentada\n");
+    sys::print(b": window presented\n");
     let mut got_key = false;
     let mut idle = 0;
     while !got_key && idle < 10 {
         match win.poll(300) {
             Ok(Some(Event::Key(ch))) => {
                 sys::print(name);
-                sys::print(b": tecla '");
+                sys::print(b": key '");
                 sys::print(&[ch]);
                 sys::print(b"'\n");
                 got_key = true;
             }
             Ok(Some(Event::Click { x, y, button })) => {
                 sys::print(name);
-                sys::print(b": clic boton ");
+                sys::print(b": click button ");
                 num_i32(button as i32);
-                sys::print(b" en (");
+                sys::print(b" at (");
                 num_i32(x);
                 sys::print(b",");
                 num_i32(y);
@@ -85,9 +87,9 @@ fn main(index: u64) -> u64 {
             Ok(Some(Event::Focus(f))) => {
                 sys::print(name);
                 sys::print(if f {
-                    b": foco ganado\n" as &[u8]
+                    b": focus gained\n" as &[u8]
                 } else {
-                    b": foco perdido\n"
+                    b": focus lost\n"
                 });
                 idle = 0;
             }
@@ -97,7 +99,7 @@ fn main(index: u64) -> u64 {
     }
     if !got_key {
         sys::print(name);
-        sys::print(b": sin teclas\n");
+        sys::print(b": no keys\n");
     }
     let _ = win.close();
     0

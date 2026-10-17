@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 use aricode_arifs::{AriFs, BlockDevice, FsError, SECTOR};
 use aricode_proto::fs::{Op, Reply, Request, Status, MAX_IO};
 #[derive(Clone, Copy)]
@@ -26,7 +28,7 @@ impl BlockDevice for PartitionDevice {
         Ok(())
     }
 }
-/// Descriptores abiertos: índice de fichero por fd (global al servicio).
+/// Open descriptors: file index per fd (global to the service).
 struct Fds([Option<usize>; 16]);
 
 impl Fds {
@@ -60,7 +62,7 @@ fn status_of(e: FsError) -> Status {
     }
 }
 
-/// Mapeos de buffers de clientes reutilizados por dirección física.
+/// Client buffer mappings, reused by physical address.
 struct ClientBuffers {
     entries: [(u64, u64, u64); 8], // (phys, virt, len)
     count: usize,
@@ -81,14 +83,14 @@ impl ClientBuffers {
                 v
             }
         };
-        // SAFETY: buffer del cliente mapeado RW en este proceso.
+        // SAFETY: client buffer mapped RW in this process.
         Some(unsafe { core::slice::from_raw_parts_mut(virt as *mut u8, len as usize) })
     }
 }
 
-/// Nombre completo en la tabla: `prefijo/nombre` dentro de un directorio
-/// privado, o el nombre tal cual desde el endpoint principal. `None` si no
-/// cabe o intenta salir del prefijo.
+/// Full name in the table: `prefix/name` inside a private directory, or the
+/// name as-is from the main endpoint. `None` if it does not fit or tries to
+/// escape the prefix.
 fn qualified<'a>(prefix: &str, name: &str, buf: &'a mut [u8; 64]) -> Option<&'a str> {
     if name.is_empty() || name.contains('/') {
         return None;
@@ -117,10 +119,10 @@ fn handle(
 ) -> Reply {
     let mut qbuf = [0u8; 64];
     match req.op {
-        Op::Bind => Reply::status(Status::Invalid), // se atiende fuera, solo en el endpoint principal
+        Op::Bind => Reply::status(Status::Invalid), // handled elsewhere, only on the main endpoint
         Op::List => {
-            // Desde un directorio privado solo se ven sus ficheros, sin prefijo;
-            // desde el principal, todos con su nombre completo.
+            // From a private directory only its own files are visible, without prefix;
+            // from the main endpoint, all of them with their full name.
             let mut visible = fs.entries().filter(|(_, e)| {
                 prefix.is_empty()
                     || e.name_str()

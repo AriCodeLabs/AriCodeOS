@@ -3,7 +3,7 @@ name = "ari-app-fs-probe"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Regresion de aislamiento de fsd: una app deja un descriptor abierto y otra intenta usarlo"
+description = "fsd isolation regression: one app leaves a descriptor open and another tries to use it"
 publish = false
 
 [[bin]]

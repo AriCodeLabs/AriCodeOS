@@ -1,10 +1,10 @@
 name = "user.bad_pointer"
-description = "console_write con puntero de kernel devuelve Fault sin tocar el kernel"
+description = "console_write with a kernel pointer returns Fault without touching the kernel"
 level = "full"
 areas = ["user"]
 cmdline = "qemu_exit test=user_bad_pointer"
 
 [expect]
 exit = 33
-serial_contains = ["salio con codigo 9", "ARICODEOS_KERNEL_READY"]
+serial_contains = ["exited with code 9", "ARICODEOS_KERNEL_READY"]
 serial_absent = ["KERNEL PANIC", "USER FAULT"]

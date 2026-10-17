@@ -1,9 +1,11 @@
-//! Consola del kernel: serie siempre, framebuffer si existe. Implementa
-//! `log::Log` para las macros `log::{trace,debug,info,warn,error}!`.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Kernel console: always serial, framebuffer if present. Implements
+//! `log::Log` for the `log::{trace,debug,info,warn,error}!` macros.
 //!
-//! La consola de framebuffer va tras un `IrqLock`. Si el lock está tomado
-//! (una excepción dentro de la propia consola), el texto sale solo por serie
-//! en vez de bloquear: perder una línea en pantalla es mejor que colgar.
+//! The framebuffer console sits behind an `IrqLock`. If the lock is held (an
+//! exception inside the console itself), the text goes out on serial only
+//! instead of blocking: losing a line on screen is better than hanging.
 
 use crate::framebuffer::MmioSurface;
 use crate::serial::Serial;
@@ -12,19 +14,19 @@ use aricode_fb_console::Console;
 use core::fmt::Write;
 use log::{Level, LevelFilter, Log, Metadata, Record};
 
-/// La rejilla de la consola (unas 32 KiB) vive aquí, nunca en la pila: al
-/// arrancar, el kernel corre sobre la pila de 64 KiB de AriBoot y construir
-/// la consola por valor la desbordaba (corrompía el initrd contiguo).
+/// The console grid (about 32 KiB) lives here, never on the stack: at boot
+/// the kernel runs on AriBoot's 64 KiB stack and building the console by
+/// value overflowed it (corrupting the adjacent initrd).
 static FB: IrqLock<Console<MmioSurface>> = IrqLock::new(Console::empty());
-/// Serializa cada mensaje completo por la serie: sin él, un `info!` del
-/// kernel y un `console_write` de otro hilo se mezclan carácter a carácter.
-/// No deshabilita interrupciones (la serie es lenta); con interrupciones
-/// deshabilitadas (handler o sección crítica) solo se intenta, para no
-/// esperar a un hilo que no puede correr.
+/// Serializes each whole message on serial: without it, a kernel `info!`
+/// and a `console_write` from another thread interleave character by
+/// character. It does not disable interrupts (serial is slow); with
+/// interrupts disabled (handler or critical section) it only tries, so as
+/// not to wait on a thread that cannot run.
 static SERIAL: aricode_sync::SpinLock<()> = aricode_sync::SpinLock::new(());
 static LOGGER: KernelLogger = KernelLogger;
 
-/// Activa la consola de framebuffer. Idempotente; ignora si no hay GOP.
+/// Enables the framebuffer console. Idempotent; does nothing without GOP.
 pub fn init_framebuffer(info: boot_protocol::FramebufferInfo) -> bool {
     let base = if info.address == 0 {
         0
@@ -40,17 +42,17 @@ pub fn init_framebuffer(info: boot_protocol::FramebufferInfo) -> bool {
     }
 }
 
-/// Instala el logger global con el nivel máximo indicado.
+/// Installs the global logger with the given maximum level.
 pub fn init_logger(level: LevelFilter) {
-    // set_logger solo falla si ya había uno: en ese caso mantener el existente.
+    // set_logger only fails if one was already set: keep the existing one then.
     let _ = log::set_logger(&LOGGER);
     log::set_max_level(level);
 }
 
-/// Lock de la serie para un mensaje. Con interrupciones habilitadas espera;
-/// con ellas deshabilitadas (handler, excepción, pánico) solo insiste un rato
-/// acotado: otra CPU lo suelta enseguida, pero la propia CPU (reentrada
-/// desde una excepción dentro de la consola) no lo haría nunca.
+/// Serial lock for one message. With interrupts enabled it waits; with them
+/// disabled (handler, exception, panic) it only retries for a bounded time:
+/// another CPU releases it quickly, but this same CPU (re-entry from an
+/// exception inside the console) never would.
 fn serial_guard() -> Option<aricode_sync::IrqGuard<'static, (), aricode_sync::NoIrq>> {
     if crate::sync::interrupts_enabled() {
         return Some(SERIAL.lock());
@@ -64,20 +66,20 @@ fn serial_guard() -> Option<aricode_sync::IrqGuard<'static, (), aricode_sync::No
     None
 }
 
-/// Solo serie, un mensaje completo bajo el lock (excepciones y pánico).
+/// Serial only, one whole message under the lock (exceptions and panic).
 pub fn write_serial(args: core::fmt::Arguments) {
     let _serial = serial_guard();
     let _ = Serial.write_fmt(args);
 }
 
-/// Hilo del kernel que alterna el cursor de la consola de framebuffer dos
-/// veces por segundo. Un hilo propio y no el tick ni el bucle idle: pintar
-/// desde un handler no procede, y una llamada más en el bucle idle (que gira
-/// mucho) frenaba todo el sistema en QEMU un 25 %. Si la consola está
-/// ocupada se salta el parpadeo; la consola solo parpadea si está quieta.
+/// Kernel thread that toggles the framebuffer console cursor twice per
+/// second. A dedicated thread rather than the tick or the idle loop:
+/// drawing from a handler is not appropriate, and one more call in the idle
+/// loop (which spins a lot) slowed the whole system down by 25% in QEMU. If
+/// the console is busy the blink is skipped; it only blinks when idle.
 pub fn start_cursor_thread() {
     if let Err(e) = crate::task::scheduler::spawn("cursor", cursor_thread, 0) {
-        log::warn!("console: sin hilo del cursor ({e})");
+        log::warn!("console: no cursor thread ({e})");
     }
 }
 
@@ -92,7 +94,7 @@ extern "C" fn cursor_thread(_arg: usize) {
     }
 }
 
-/// Escribe texto sin formato de log en todas las salidas (marcadores, banner).
+/// Writes text without log formatting to every output (markers, banner).
 pub fn write_raw(args: core::fmt::Arguments) {
     let _serial = serial_guard();
     let _ = Serial.write_fmt(args);

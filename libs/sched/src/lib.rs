@@ -1,17 +1,19 @@
-//! Política de planificación (Fases 9, 10 y 32): round robin sobre
-//! identificadores de hilo, con estados, sueño por tick, bloqueo, salida,
-//! varias CPUs y afinidad.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Scheduling policy (Phases 9, 10 and 32): round robin over thread
+//! identifiers, with states, tick-based sleep, blocking, exit,
+//! multiple CPUs and affinity.
 //!
-//! No sabe nada de pilas ni registros: el kernel le pregunta "¿quién sigue
-//! en esta CPU?" y hace el cambio de contexto. Así la política se prueba en
-//! host de forma determinista.
+//! It knows nothing about stacks or registers: the kernel asks it "who is next
+//! on this CPU?" and performs the context switch. This way the policy is tested
+//! deterministically on the host.
 //!
-//! Con varias CPUs hay una sola cola de listos compartida y, por CPU, un hilo
-//! en ejecución y un hilo idle propio (el idle nunca se encola). Un hilo con
-//! afinidad solo lo toma la CPU indicada. Un `wake` que llega mientras el
-//! hilo todavía está `Running` (otra CPU lo despierta entre "anotarse en la
-//! cola de espera" y "bloquearse") queda pendiente y convierte el siguiente
-//! bloqueo en una cesión: ningún despertar se pierde.
+//! With multiple CPUs there is a single shared ready queue and, per CPU, a running
+//! thread and its own idle thread (idle is never queued). A thread with
+//! affinity is only taken by the given CPU. A `wake` arriving while the
+//! thread is still `Running` (another CPU wakes it between "joining the
+//! wait queue" and "blocking") is kept pending and turns the next
+//! block into a yield: no wakeup is lost.
 
 #![no_std]
 
@@ -35,7 +37,7 @@ pub enum State {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchedError {
     UnknownThread,
-    /// La operación no es válida en el estado actual del hilo.
+    /// The operation is not valid in the thread's current state.
     WrongState,
     UnknownCpu,
 }
@@ -48,21 +50,21 @@ struct CpuSlot {
 pub struct RoundRobin {
     states: BTreeMap<Tid, State>,
     ready: VecDeque<Tid>,
-    /// (tick de despertar, hilo), sin orden particular.
+    /// (wakeup tick, thread), in no particular order.
     sleeping: Vec<(u64, Tid)>,
     cpus: Vec<CpuSlot>,
-    /// Hilo -> única CPU en la que puede ejecutar.
+    /// Thread -> the only CPU it may run on.
     affinity: BTreeMap<Tid, usize>,
-    /// Despertares recibidos por hilos que aún estaban `Running`.
+    /// Wakeups received by threads that were still `Running`.
     pending_wake: BTreeSet<Tid>,
     next_tid: u32,
 }
 
 impl RoundRobin {
-    /// `current` es el hilo que ya está ejecutando en la CPU 0 (el contexto de
-    /// arranque); `idle` es el que esa CPU elige cuando no hay nada listo.
-    /// Ambos quedan registrados: `current` como `Running`, `idle` como
-    /// `Ready` pero fuera de la cola (nunca se encola).
+    /// `current` is the thread already running on CPU 0 (the boot
+    /// context); `idle` is what that CPU picks when nothing is ready.
+    /// Both get registered: `current` as `Running`, `idle` as
+    /// `Ready` but outside the queue (it is never queued).
     pub fn new(current: Tid, idle: Tid) -> Self {
         let mut states = BTreeMap::new();
         states.insert(current, State::Running);
@@ -78,8 +80,8 @@ impl RoundRobin {
         }
     }
 
-    /// Registra la CPU `cpu` (la siguiente en orden) con su hilo idle, que
-    /// arranca ya en ejecución en ella.
+    /// Registers CPU `cpu` (the next one in order) with its idle thread, which
+    /// is already running on it.
     pub fn add_cpu(&mut self, cpu: usize, idle: Tid) -> Result<(), SchedError> {
         if cpu != self.cpus.len() {
             return Err(SchedError::UnknownCpu);
@@ -96,20 +98,20 @@ impl RoundRobin {
         self.cpus.len()
     }
 
-    /// Identificador nuevo, único durante la vida del planificador.
+    /// New identifier, unique for the lifetime of the scheduler.
     pub fn allocate_tid(&mut self) -> Tid {
         let t = Tid(self.next_tid);
         self.next_tid += 1;
         t
     }
 
-    /// Registra un hilo nuevo y lo pone al final de la cola.
+    /// Registers a new thread and puts it at the end of the queue.
     pub fn add(&mut self, tid: Tid) {
         self.states.insert(tid, State::Ready);
         self.ready.push_back(tid);
     }
 
-    /// Fija (o quita) la CPU en la que `tid` puede ejecutar.
+    /// Sets (or clears) the CPU `tid` may run on.
     pub fn set_affinity(&mut self, tid: Tid, cpu: Option<usize>) -> Result<(), SchedError> {
         if !self.states.contains_key(&tid) {
             return Err(SchedError::UnknownThread);
@@ -137,7 +139,7 @@ impl RoundRobin {
     pub fn idle(&self, cpu: usize) -> Tid {
         self.cpus[cpu].idle
     }
-    /// `true` si la CPU ejecuta su hilo idle.
+    /// `true` if the CPU is running its idle thread.
     pub fn is_idle(&self, cpu: usize) -> bool {
         self.cpus[cpu].current == self.cpus[cpu].idle
     }
@@ -155,23 +157,23 @@ impl RoundRobin {
         self.affinity.get(&tid).is_none_or(|c| *c == cpu)
     }
 
-    /// `true` si hay algún hilo listo que `cpu` pueda ejecutar.
+    /// `true` if there is some ready thread `cpu` can run.
     pub fn has_ready_for(&self, cpu: usize) -> bool {
         self.ready.iter().any(|t| self.eligible(*t, cpu))
     }
 
-    /// Saca de la cola el primer hilo que `cpu` pueda ejecutar.
+    /// Removes from the queue the first thread `cpu` can run.
     fn pop_ready_for(&mut self, cpu: usize) -> Option<Tid> {
         let pos = self.ready.iter().position(|t| self.eligible(*t, cpu))?;
         self.ready.remove(pos)
     }
 
-    /// Siguiente hilo a ejecutar en `cpu` tras dejar su hilo actual en
-    /// `state`. Devuelve `None` si no hay cambio (el mismo hilo sigue).
+    /// Next thread to run on `cpu` after leaving its current thread in
+    /// `state`. Returns `None` if nothing changes (the same thread continues).
     fn switch(&mut self, cpu: usize, current_state: State) -> Option<Tid> {
         let cur = self.cpus[cpu].current;
         let idle = self.cpus[cpu].idle;
-        // Un despertar pendiente convierte el bloqueo o el sueño en cesión.
+        // A pending wakeup turns the block or sleep into a yield.
         let current_state = match current_state {
             State::Blocked | State::Sleeping if self.pending_wake.remove(&cur) => {
                 self.sleeping.retain(|(_, t)| *t != cur);
@@ -193,22 +195,22 @@ impl RoundRobin {
         }
     }
 
-    /// El hilo actual de `cpu` cede la CPU (vuelve al final de la cola).
+    /// The current thread of `cpu` yields the CPU (goes back to the end of the queue).
     pub fn yield_current(&mut self, cpu: usize) -> Option<Tid> {
         self.switch(cpu, State::Ready)
     }
 
-    /// Preempción por fin de quantum: igual que `yield`, pero el idle no se encola.
+    /// Quantum-expiry preemption: same as `yield`, but idle is not queued.
     pub fn preempt(&mut self, cpu: usize) -> Option<Tid> {
         self.switch(cpu, State::Ready)
     }
 
-    /// El hilo actual de `cpu` se bloquea hasta que alguien lo despierte.
+    /// The current thread of `cpu` blocks until someone wakes it.
     pub fn block_current(&mut self, cpu: usize) -> Option<Tid> {
         self.switch(cpu, State::Blocked)
     }
 
-    /// Despierta un hilo bloqueado y lo encola.
+    /// Wakes a blocked thread and queues it.
     pub fn unblock(&mut self, tid: Tid) -> Result<(), SchedError> {
         match self.states.get(&tid) {
             None => Err(SchedError::UnknownThread),
@@ -221,11 +223,11 @@ impl RoundRobin {
         }
     }
 
-    /// Despierta un hilo bloqueado o dormido (antes de su plazo) y lo encola.
-    /// Sirve a las colas de espera con timeout: el hilo duerme con plazo y un
-    /// `wake` anticipado lo saca de la lista de dormidos. Si el hilo todavía
-    /// está `Running` (va a bloquearse en otra CPU), el despertar queda
-    /// pendiente y su próximo bloqueo no bloquea.
+    /// Wakes a blocked or sleeping thread (before its deadline) and queues it.
+    /// Serves wait queues with timeout: the thread sleeps with a deadline and an
+    /// early `wake` removes it from the sleep list. If the thread is still
+    /// `Running` (about to block on another CPU), the wakeup is kept
+    /// pending and its next block does not block.
     pub fn wake(&mut self, tid: Tid) -> Result<(), SchedError> {
         match self.states.get(&tid) {
             None => Err(SchedError::UnknownThread),
@@ -248,14 +250,14 @@ impl RoundRobin {
         }
     }
 
-    /// El hilo actual de `cpu` duerme hasta el tick `until`.
+    /// The current thread of `cpu` sleeps until tick `until`.
     pub fn sleep_current(&mut self, cpu: usize, until: u64) -> Option<Tid> {
         let cur = self.cpus[cpu].current;
         self.sleeping.push((until, cur));
         self.switch(cpu, State::Sleeping)
     }
 
-    /// Encola los hilos cuyo tick de despertar ha llegado. Devuelve cuántos.
+    /// Queues the threads whose wakeup tick has arrived. Returns how many.
     pub fn wake_due(&mut self, now: u64) -> usize {
         let mut woken = 0;
         let mut i = 0;
@@ -272,17 +274,17 @@ impl RoundRobin {
         woken
     }
 
-    /// El hilo actual de `cpu` termina. Devuelve el siguiente (siempre hay cambio).
+    /// The current thread of `cpu` exits. Returns the next one (there is always a switch).
     pub fn exit_current(&mut self, cpu: usize) -> Tid {
-        assert!(!self.is_idle(cpu), "el hilo idle no puede terminar");
+        assert!(!self.is_idle(cpu), "the idle thread cannot exit");
         let cur = self.cpus[cpu].current;
         self.pending_wake.remove(&cur);
         self.affinity.remove(&cur);
         self.switch(cpu, State::Terminated)
-            .expect("exit siempre cambia de hilo")
+            .expect("exit always switches threads")
     }
 
-    /// Retira del registro un hilo terminado (para liberar sus recursos).
+    /// Removes a terminated thread from the registry (to free its resources).
     pub fn reap(&mut self, tid: Tid) -> Result<(), SchedError> {
         match self.states.get(&tid) {
             None => Err(SchedError::UnknownThread),
@@ -294,7 +296,7 @@ impl RoundRobin {
         }
     }
 
-    /// Hilos terminados pendientes de `reap`.
+    /// Terminated threads awaiting `reap`.
     pub fn terminated(&self) -> impl Iterator<Item = Tid> + '_ {
         self.states
             .iter()
@@ -335,13 +337,17 @@ mod tests {
         assert_eq!(s.block_current(0), Some(IDLE));
         assert_eq!(s.current(0), IDLE);
         assert!(s.is_idle(0));
-        assert_eq!(s.yield_current(0), None, "idle sigue si no hay nadie");
+        assert_eq!(
+            s.yield_current(0),
+            None,
+            "idle continues if nobody else is there"
+        );
         assert_eq!(s.ready_len(), 0);
         s.unblock(MAIN).unwrap();
         assert!(s.has_ready_for(0));
         assert_eq!(s.yield_current(0), Some(MAIN));
         assert_eq!(s.state(IDLE), Some(State::Ready));
-        assert_eq!(s.ready_len(), 0, "idle no se encola al ceder");
+        assert_eq!(s.ready_len(), 0, "idle is not queued on yield");
     }
 
     #[test]
@@ -362,8 +368,8 @@ mod tests {
         let mut s = rr();
         let a = s.allocate_tid();
         s.add(a);
-        assert_eq!(s.sleep_current(0, 10), Some(a)); // MAIN duerme hasta 10
-        assert_eq!(s.sleep_current(0, 5), Some(IDLE)); // a duerme hasta 5
+        assert_eq!(s.sleep_current(0, 10), Some(a)); // MAIN sleeps until 10
+        assert_eq!(s.sleep_current(0, 5), Some(IDLE)); // a sleeps until 5
         assert_eq!(s.wake_due(4), 0);
         assert_eq!(s.wake_due(5), 1);
         assert_eq!(s.state(a), Some(State::Ready));
@@ -378,11 +384,15 @@ mod tests {
         let mut s = rr();
         let a = s.allocate_tid();
         s.add(a);
-        assert_eq!(s.sleep_current(0, 100), Some(a)); // MAIN duerme
-        assert_eq!(s.wake(MAIN), Ok(()), "dormido -> listo antes del plazo");
-        assert_eq!(s.wake_due(100), 0, "ya no esta en la lista de dormidos");
-        assert_eq!(s.wake(MAIN), Err(SchedError::WrongState), "ya listo");
-        assert_eq!(s.block_current(0), Some(MAIN)); // a se bloquea
+        assert_eq!(s.sleep_current(0, 100), Some(a)); // MAIN sleeps
+        assert_eq!(
+            s.wake(MAIN),
+            Ok(()),
+            "sleeping -> ready before the deadline"
+        );
+        assert_eq!(s.wake_due(100), 0, "no longer in the sleep list");
+        assert_eq!(s.wake(MAIN), Err(SchedError::WrongState), "already ready");
+        assert_eq!(s.block_current(0), Some(MAIN)); // a blocks
         assert_eq!(s.wake(a), Ok(()));
         assert_eq!(s.state(a), Some(State::Ready));
         assert_eq!(s.wake(Tid(77)), Err(SchedError::UnknownThread));
@@ -393,21 +403,21 @@ mod tests {
         let mut s = rr();
         let a = s.allocate_tid();
         s.add(a);
-        // MAIN sigue Running: el despertar queda pendiente...
+        // MAIN is still Running: the wakeup stays pending...
         assert_eq!(s.wake(MAIN), Ok(()));
-        // ...y su bloqueo se convierte en cesión: vuelve a la cola.
+        // ...and its block turns into a yield: back to the queue.
         assert_eq!(s.block_current(0), Some(a));
         assert_eq!(s.state(MAIN), Some(State::Ready));
         assert_eq!(s.yield_current(0), Some(MAIN));
-        // Consumido: el siguiente bloqueo sí bloquea.
+        // Consumed: the next block does block.
         assert_eq!(s.block_current(0), Some(a));
         assert_eq!(s.state(MAIN), Some(State::Blocked));
-        // Lo mismo con un sueño: no queda en la lista de dormidos.
+        // Same with a sleep: it does not stay in the sleep list.
         assert_eq!(s.wake(a), Ok(()));
         assert_eq!(
             s.sleep_current(0, 50),
             None,
-            "a cede pero es el unico listo"
+            "a yields but it is the only ready one"
         );
         assert_eq!(s.state(a), Some(State::Running));
         assert_eq!(s.wake_due(50), 0);
@@ -429,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "idle no puede terminar")]
+    #[should_panic(expected = "idle thread cannot exit")]
     fn idle_cannot_exit() {
         let mut s = rr();
         s.block_current(0);
@@ -440,7 +450,7 @@ mod tests {
     fn cpus_share_one_ready_queue_and_have_their_own_idle() {
         let mut s = rr();
         let idle1 = s.allocate_tid();
-        assert_eq!(s.add_cpu(2, idle1), Err(SchedError::UnknownCpu), "en orden");
+        assert_eq!(s.add_cpu(2, idle1), Err(SchedError::UnknownCpu), "in order");
         s.add_cpu(1, idle1).unwrap();
         assert_eq!(s.cpu_count(), 2);
         assert_eq!(s.current(1), idle1);
@@ -449,13 +459,13 @@ mod tests {
         let (a, b) = (s.allocate_tid(), s.allocate_tid());
         s.add(a);
         s.add(b);
-        // La CPU 1 toma el primero de la cola; la 0 el segundo.
+        // CPU 1 takes the first one in the queue; CPU 0 the second.
         assert_eq!(s.yield_current(1), Some(a));
         assert_eq!(s.state(idle1), Some(State::Ready));
         assert_eq!(s.ready_len(), 1);
         assert_eq!(s.yield_current(0), Some(b));
-        assert_eq!(s.ready_len(), 1, "main volvio a la cola");
-        // a termina en la CPU 1: sigue main; luego idle1 al quedarse sin nada.
+        assert_eq!(s.ready_len(), 1, "main went back to the queue");
+        // a exits on CPU 1: main follows; then idle1 once nothing is left.
         assert_eq!(s.exit_current(1), MAIN);
         assert_eq!(s.block_current(1), Some(idle1));
         assert_eq!(s.yield_current(1), None);
@@ -479,26 +489,22 @@ mod tests {
         );
         assert_eq!(s.affinity(a), Some(1));
         assert!(!s.has_ready_for(0) || s.ready_len() == 2);
-        // La CPU 0 salta a y toma b, aunque a fuera antes en la cola.
+        // CPU 0 skips a and takes b, even though a was earlier in the queue.
         assert_eq!(s.yield_current(0), Some(b));
         assert_eq!(s.yield_current(0), Some(MAIN));
         assert!(s.has_ready_for(1));
         assert_eq!(s.yield_current(1), Some(a));
-        // Sin afinidad, cualquiera vale.
+        // Without affinity, any CPU will do.
         s.set_affinity(a, None).unwrap();
         assert_eq!(s.affinity(a), None);
         assert_eq!(s.yield_current(1), Some(b));
         assert_eq!(s.yield_current(0), Some(a));
-        // Un hilo con afinidad a otra CPU no impide que esta se quede en idle.
+        // A thread with affinity to another CPU does not stop this one from idling.
         s.set_affinity(b, Some(0)).unwrap();
         assert_eq!(s.exit_current(0), MAIN);
-        // b cede en la CPU 1 y esta no puede volver a tomarlo: queda en idle.
+        // b yields on CPU 1 and it cannot take it again: it goes idle.
         assert_eq!(s.yield_current(1), Some(idle1));
-        assert_eq!(
-            s.state(b),
-            Some(State::Ready),
-            "b sigue esperando a la CPU 0"
-        );
+        assert_eq!(s.state(b), Some(State::Ready), "b keeps waiting for CPU 0");
         assert!(!s.has_ready_for(1));
         assert!(s.has_ready_for(0));
     }

@@ -1,8 +1,8 @@
-# Auditoria 4836023, hallazgo 1: un controlador USB que no es xHCI (EHCI,
-# interfaz 0x20) no debe entregarse al driver xHCI ni dejar un endpoint sin
-# servidor que bloquee a input_client; el xHCI de al lado sigue funcionando.
+# Audit 4836023, finding 1: a USB controller that is not xHCI (EHCI,
+# interface 0x20) must not be handed to the xHCI driver nor leave an endpoint without a
+# server that would block input_client; the xHCI next to it keeps working.
 name = "usb.hid_boot_with_ehci"
-description = "arranque con EHCI y xHCI: init salta el EHCI por su interfaz y la entrada USB sigue disponible"
+description = "boot with EHCI and xHCI: init skips the EHCI by its interface and USB input remains available"
 level = "full"
 areas = ["usb", "input", "init"]
 cmdline = "qemu_exit"
@@ -13,12 +13,12 @@ timeout_secs = 90
 [expect]
 exit = 33
 serial_contains = [
-    "sin driver (interfaz 0x20",
-    "usb-input: dispositivo listo: USB HID Keyboard+Mouse",
-    "AriInit: entrada usb_input lista",
-    "input_client: dispositivo 2: USB HID Keyboard+Mouse",
-    "AriInit: servicio de entrada ok",
-    "AriInit: servicios de arranque completados",
+    "has no driver (interface 0x20",
+    "usb-input: device ready: USB HID Keyboard+Mouse",
+    "AriInit: usb_input input ready",
+    "input_client: device 2: USB HID Keyboard+Mouse",
+    "AriInit: input service ok",
+    "AriInit: boot services completed",
     "ARICODEOS_KERNEL_READY",
 ]
-serial_absent = ["KERNEL PANIC", "fallo en la inicializacion del xHCI"]
+serial_absent = ["KERNEL PANIC", "xHCI initialization failed"]

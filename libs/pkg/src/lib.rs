@@ -1,17 +1,19 @@
-//! Paquetes de aplicación firmados (etapa 4, ADR 0017). Un paquete es un
-//! contenedor `aricode-initrd` con cuatro ficheros:
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Signed application packages (stage 4, ADR 0017). A package is an
+//! `aricode-initrd` container with four files:
 //!
 //! ```text
-//! manifest          name, version y SHA-256 de program y program.manifest
-//! manifest.sig      firma Ed25519 del manifiesto entero
-//! program           ELF estático de ring 3
-//! program.manifest  manifiesto de aplicación (`aricode-manifest`)
+//! manifest          name, version and SHA-256 of program and program.manifest
+//! manifest.sig      Ed25519 signature of the whole manifest
+//! program           static ring 3 ELF
+//! program.manifest  application manifest (`aricode-manifest`)
 //! ```
 //!
-//! El broker verifica el paquete al lanzar: firma con la clave pública de
-//! desarrollo y hashes de ambos ficheros. Un paquete instalado es un solo
-//! fichero de AriFS, así que instalarlo o actualizarlo es un `replace`
-//! atómico. Mismo esquema que las imágenes de sistema (`aricode-ab`).
+//! The broker verifies the package at launch: signature with the development
+//! public key and hashes of both files. An installed package is a single
+//! AriFS file, so installing or updating it is an atomic
+//! `replace`. Same scheme as the system images (`aricode-ab`).
 
 #![no_std]
 
@@ -22,7 +24,7 @@ use aricode_crypto::{ed25519, sha256, unhex};
 use aricode_initrd::Initrd;
 
 pub const MAX_NAME: usize = 32;
-/// Sufijo de los paquetes instalados: `apps/NOMBRE.aripkg`.
+/// Suffix of installed packages: `apps/NAME.aripkg`.
 pub const EXTENSION: &str = ".aripkg";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +36,7 @@ pub enum PkgError {
     HashMismatch(&'static str),
 }
 
-/// Manifiesto del paquete (lo que se firma).
+/// Package manifest (what gets signed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PkgManifest {
     pub name: [u8; MAX_NAME],
@@ -114,7 +116,7 @@ impl PkgManifest {
         })
     }
 
-    /// Texto canónico del manifiesto (lo que se firma).
+    /// Canonical manifest text (what gets signed).
     pub fn write<'a>(&self, out: &'a mut [u8; 256]) -> &'a str {
         let mut n = 0;
         let mut put = |s: &[u8], n: &mut usize| {
@@ -152,7 +154,7 @@ impl PkgManifest {
     }
 }
 
-/// Paquete verificado: referencias a los bytes dentro del contenedor.
+/// Verified package: references to the bytes inside the container.
 #[derive(Debug, Clone, Copy)]
 pub struct Verified<'a> {
     pub manifest: PkgManifest,
@@ -161,16 +163,16 @@ pub struct Verified<'a> {
 }
 
 impl<'a> Verified<'a> {
-    /// Desplazamiento del ELF dentro del contenedor (para lanzarlo desde el
-    /// mismo buffer sin copiarlo).
+    /// Offset of the ELF inside the container (to launch it from the
+    /// same buffer without copying it).
     pub fn program_offset(&self, container: &[u8]) -> usize {
         self.program.as_ptr() as usize - container.as_ptr() as usize
     }
 }
 
-/// Verifica un paquete: firma del manifiesto con `pubkey` y hashes del
-/// programa y de su manifiesto de aplicación. Solo devuelve datos si todo
-/// cuadra.
+/// Verifies a package: manifest signature with `pubkey` and hashes of the
+/// program and of its application manifest. Only returns data if everything
+/// matches.
 pub fn verify<'a>(container: &'a [u8], pubkey: &[u8; 32]) -> Result<Verified<'a>, PkgError> {
     let rd = Initrd::parse(container).map_err(|_| PkgError::BadContainer)?;
     let manifest_bytes = rd
@@ -206,8 +208,8 @@ pub fn verify<'a>(container: &'a [u8], pubkey: &[u8; 32]) -> Result<Verified<'a>
     })
 }
 
-/// Construye y firma un paquete (herramientas de host). Con `corrupt` la
-/// firma se altera para que no verifique.
+/// Builds and signs a package (host tools). With `corrupt` the
+/// signature is altered so that it does not verify.
 #[cfg(feature = "write")]
 pub fn build(
     name: &str,
@@ -243,7 +245,7 @@ mod tests {
     #[test]
     fn build_verify_round_trip() {
         let pk = ed25519::public_key(&SEED);
-        let elf = b"\x7fELF programa de mentira";
+        let elf = b"\x7fELF fake program";
         let app = b"name = demo\ncaps = system\n";
         let pkg = build("demo", 3, elf, app, &SEED, false).unwrap();
         let v = verify(&pkg, &pk).unwrap();
@@ -269,7 +271,7 @@ mod tests {
         let other = ed25519::public_key(&[9u8; 32]);
         let pkg = build("demo", 1, elf, app, &SEED, false).unwrap();
         assert_eq!(verify(&pkg, &other).err(), Some(PkgError::BadSignature));
-        // Programa cambiado tras firmar: el hash no cuadra.
+        // Program changed after signing: the hash does not match.
         let mut tampered = pkg.clone();
         let off = verify(&pkg, &pk).unwrap().program_offset(&pkg);
         tampered[off + 1] ^= 0xFF;
@@ -277,7 +279,7 @@ mod tests {
             verify(&tampered, &pk).err(),
             Some(PkgError::HashMismatch("program"))
         );
-        assert_eq!(verify(b"basura", &pk).err(), Some(PkgError::BadContainer));
-        assert!(build("con espacio", 1, elf, app, &SEED, false).is_none());
+        assert_eq!(verify(b"garbage", &pk).err(), Some(PkgError::BadContainer));
+        assert!(build("with space", 1, elf, app, &SEED, false).is_none());
     }
 }

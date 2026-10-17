@@ -1,6 +1,8 @@
-//! Cliente TCP de prueba (Fase 23): eco contra el servidor del host, dos
-//! conexiones simultáneas, conexión rechazada y un servidor propio al que se
-//! conecta el host por `hostfwd`. Handles: 0x10004 = netd, 0x10005 = HARDWARE.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Test TCP client (Phase 23): echo against the host server, two
+//! simultaneous connections, a refused connection and our own server that
+//! the host connects to via `hostfwd`. Handles: 0x10004 = netd, 0x10005 = HARDWARE.
 #![no_std]
 #![no_main]
 
@@ -18,7 +20,7 @@ fn print_ip(ip: [u8; 4]) {
     sys::print(aricode_net::Ipv4Addr(ip).format(&mut b));
 }
 
-/// Envía `msg` y espera exactamente su eco.
+/// Sends `msg` and waits for exactly its echo.
 fn echo(net: &mut NetClient, sock: u16, msg: &[u8]) -> bool {
     if net.tcp_send_all(sock, msg).is_err() {
         return false;
@@ -38,7 +40,7 @@ fn main(_arg: u64) -> u64 {
     let Ok(mut net) = NetClient::new(NETD, HW) else {
         return 1;
     };
-    // Esperar la configuracion DHCP.
+    // Wait for the DHCP configuration.
     for _ in 0..200 {
         match net.info() {
             Ok(_) => break,
@@ -46,7 +48,7 @@ fn main(_arg: u64) -> u64 {
             Err(_) => return 2,
         }
     }
-    // 1. Eco simple.
+    // 1. Simple echo.
     let sock = match net.tcp_connect(HOST, TEST_TCP_ECHO_PORT, 3000) {
         Ok(s) => s,
         Err(_) => return 3,
@@ -54,11 +56,11 @@ fn main(_arg: u64) -> u64 {
     if !echo(&mut net, sock, b"hola tcp desde AriCodeOS") {
         return 4;
     }
-    sys::print(b"tcp_client: eco TCP ok\n");
+    sys::print(b"tcp_client: TCP echo ok\n");
     if net.tcp_close(sock).is_err() {
         return 5;
     }
-    // 2. Dos conexiones simultaneas con datos distintos.
+    // 2. Two simultaneous connections with different data.
     let (Ok(a), Ok(b)) = (
         net.tcp_connect(HOST, TEST_TCP_ECHO_PORT, 3000),
         net.tcp_connect(HOST, TEST_TCP_ECHO_PORT, 3000),
@@ -73,15 +75,15 @@ fn main(_arg: u64) -> u64 {
     }
     let _ = net.tcp_close(a);
     let _ = net.tcp_close(b);
-    sys::print(b"tcp_client: dos conexiones simultaneas ok\n");
-    // 3. Puerto cerrado: el host responde RST.
+    sys::print(b"tcp_client: two simultaneous connections ok\n");
+    // 3. Closed port: the host answers RST.
     match net.tcp_connect(HOST, TEST_TCP_ECHO_PORT + 100, 3000) {
         Err(NetError::Status(Status::Reset)) => {
-            sys::print(b"tcp_client: conexion rechazada detectada\n")
+            sys::print(b"tcp_client: refused connection detected\n")
         }
         _ => return 8,
     }
-    // 4. Servidor propio: el host se conecta por hostfwd y esperamos su eco.
+    // 4. Our own server: the host connects via hostfwd and we echo its data.
     let Ok(listener) = net.tcp_listen(TEST_TCP_LISTEN_PORT) else {
         return 9;
     };
@@ -89,14 +91,14 @@ fn main(_arg: u64) -> u64 {
         return 10;
     }
     sys::print(b"TCP_LISTEN_READY\n");
-    // La sonda del host se conecta en cuanto ve el marcador; sin sonda no
-    // conviene retrasar el arranque mas de 1,5 s.
+    // The host probe connects as soon as it sees the marker; without a probe
+    // boot should not be delayed by more than 1.5 s.
     match net.tcp_accept(listener, 1500) {
         Ok((conn, from, port)) => {
             let mut buf = [0u8; 20];
-            sys::print(b"tcp_client: conexion entrante de ");
+            sys::print(b"tcp_client: incoming connection from ");
             print_ip(from);
-            sys::print(b" puerto ");
+            sys::print(b" port ");
             sys::print(fmt_u64(port as u64, &mut buf));
             sys::print(b"\n");
             let mut data = [0u8; 256];
@@ -105,23 +107,23 @@ fn main(_arg: u64) -> u64 {
                     if net.tcp_send_all(conn, &data[..n]).is_err() {
                         return 11;
                     }
-                    sys::print(b"tcp_client: eco al host de ");
+                    sys::print(b"tcp_client: echoed to the host ");
                     sys::print(fmt_u64(n as u64, &mut buf));
                     sys::print(b" bytes\n");
                 }
                 _ => return 12,
             }
-            // Esperar el cierre del host y cerrar.
+            // Wait for the host to close, then close.
             let _ = net.tcp_recv(conn, 2000, &mut data);
             let _ = net.tcp_close(conn);
         }
         Err(NetError::Status(Status::Timeout)) => {
-            sys::print(b"tcp_client: nadie se conecto al servidor\n")
+            sys::print(b"tcp_client: nobody connected to the server\n")
         }
         Err(_) => return 13,
     }
     let _ = net.tcp_close(listener);
-    sys::print(b"tcp_client: TCP por IPC ok\n");
+    sys::print(b"tcp_client: TCP over IPC ok\n");
     0
 }
 

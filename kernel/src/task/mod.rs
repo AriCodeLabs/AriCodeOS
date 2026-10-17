@@ -1,6 +1,8 @@
-//! Hilos del kernel (Fases 9 y 10): pilas con guard page, cambio de contexto,
-//! planificación round robin preemptiva, sueño y colas de espera sobre
-//! `aricode-sched`.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Kernel threads (Phases 9 and 10): stacks with a guard page, context
+//! switching, preemptive round-robin scheduling, sleep and wait queues on top
+//! of `aricode-sched`.
 
 pub mod context;
 pub mod scheduler;

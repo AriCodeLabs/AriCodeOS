@@ -1,5 +1,7 @@
-//! Servidor de ping-pong: recibe "ping" con un handle de respuesta, contesta
-//! "pong" por el y lo cierra; con "quit" termina. Handle 0x10004 = endpoint.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Ping-pong server: receives "ping" with a reply handle, answers "pong"
+//! through it and closes it; exits on "quit". Handle 0x10004 = endpoint.
 #![no_std]
 #![no_main]
 

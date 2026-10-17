@@ -1,7 +1,7 @@
-# Fase 31: el kernel siembra un generador ChaCha20 con rdrand o TSC y sirve
-# bytes aleatorios; dos lecturas seguidas son distintas y no nulas.
+# Phase 31: the kernel seeds a ChaCha20 generator from rdrand or the TSC and serves
+# random bytes; two consecutive reads are different and non-zero.
 name = "crypto.random"
-description = "generador aleatorio del kernel: semilla, fuente anunciada y lecturas distintas"
+description = "kernel random generator: seed, announced source and distinct reads"
 level = "full"
 areas = ["crypto"]
 cmdline = "qemu_exit test=random"
@@ -9,9 +9,9 @@ cmdline = "qemu_exit test=random"
 [expect]
 exit = 33
 serial_contains = [
-    "random: generador ChaCha20 sembrado con",
-    "random: fuente",
-    "ok, muestra",
+    "random: ChaCha20 generator seeded with",
+    "random: source",
+    "interrupt stirs, sample",
     "ARICODEOS_KERNEL_READY",
 ]
 serial_absent = ["KERNEL PANIC"]

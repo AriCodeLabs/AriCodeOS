@@ -1,4 +1,6 @@
-//! DNS (RFC 1035): consulta A y lectura de la primera respuesta A.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! DNS (RFC 1035): A query and reading of the first A answer.
 
 use crate::{be16, Ipv4Addr};
 
@@ -8,7 +10,7 @@ const TYPE_A: u16 = 1;
 const CLASS_IN: u16 = 1;
 pub const MAX_NAME: usize = 253;
 
-/// Escribe una consulta A recursiva para `name` (`a.b.c`, sin punto final).
+/// Writes a recursive A query for `name` (`a.b.c`, without a trailing dot).
 pub fn write_query(id: u16, name: &str, out: &mut [u8]) -> Option<usize> {
     if name.is_empty() || name.len() > MAX_NAME || out.len() < HEADER_LEN + name.len() + 2 + 4 {
         return None;
@@ -33,7 +35,7 @@ pub fn write_query(id: u16, name: &str, out: &mut [u8]) -> Option<usize> {
     Some(i + 4)
 }
 
-/// Salta un nombre (con o sin compresión) y devuelve la posición siguiente.
+/// Skips a name (with or without compression) and returns the next position.
 fn skip_name(b: &[u8], mut i: usize) -> Option<usize> {
     let mut hops = 0;
     loop {
@@ -52,16 +54,16 @@ fn skip_name(b: &[u8], mut i: usize) -> Option<usize> {
     }
 }
 
-/// Resultado de una respuesta.
+/// Result of a response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Answer {
-    /// Primera dirección A y su TTL.
+    /// First A address and its TTL.
     Address(Ipv4Addr, u32),
-    /// El servidor respondió con error (`rcode`) o sin registros A.
+    /// The server answered with an error (`rcode`) or without A records.
     NoAddress(u8),
 }
 
-/// Analiza una respuesta a la consulta `id`.
+/// Parses a response to query `id`.
 pub fn parse_response(id: u16, b: &[u8]) -> Option<Answer> {
     if b.len() < HEADER_LEN || be16(&b[0..2]) != id || b[2] & 0x80 == 0 {
         return None;
@@ -89,8 +91,8 @@ pub fn parse_response(id: u16, b: &[u8]) -> Option<Answer> {
     Some(Answer::NoAddress(rcode))
 }
 
-/// Construye una respuesta con un único registro A para la consulta `query`
-/// (útil para servidores de prueba). Devuelve la longitud.
+/// Builds a response with a single A record for query `query`
+/// (useful for test servers). Returns the length.
 pub fn write_answer(query: &[u8], address: Ipv4Addr, ttl: u32, out: &mut [u8]) -> Option<usize> {
     if query.len() < HEADER_LEN + 5 {
         return None;
@@ -106,7 +108,7 @@ pub fn write_answer(query: &[u8], address: Ipv4Addr, ttl: u32, out: &mut [u8]) -
     out[6..8].copy_from_slice(&1u16.to_be_bytes()); // ANCOUNT
     out[8..12].fill(0);
     let mut i = qend;
-    out[i..i + 2].copy_from_slice(&0xC00Cu16.to_be_bytes()); // puntero al nombre
+    out[i..i + 2].copy_from_slice(&0xC00Cu16.to_be_bytes()); // pointer to the name
     i += 2;
     out[i..i + 2].copy_from_slice(&TYPE_A.to_be_bytes());
     out[i + 2..i + 4].copy_from_slice(&CLASS_IN.to_be_bytes());
@@ -116,7 +118,7 @@ pub fn write_answer(query: &[u8], address: Ipv4Addr, ttl: u32, out: &mut [u8]) -
     Some(len)
 }
 
-/// Nombre preguntado en una consulta (para servidores de prueba y trazas).
+/// Name asked in a query (for test servers and traces).
 pub fn query_name<'a>(query: &[u8], out: &'a mut [u8; MAX_NAME]) -> Option<&'a str> {
     let mut i = HEADER_LEN;
     let mut n = 0;
@@ -158,12 +160,12 @@ mod tests {
             parse_response(0x1234, &a[..m]),
             Some(Answer::Address(Ipv4Addr::new(10, 1, 2, 3), 300))
         );
-        assert!(parse_response(0x1235, &a[..m]).is_none(), "otro id");
+        assert!(parse_response(0x1235, &a[..m]).is_none(), "another id");
         assert!(
             parse_response(0x1234, &q[..n]).is_none(),
-            "una consulta no es respuesta"
+            "a query is not a response"
         );
-        // NXDOMAIN sin respuestas.
+        // NXDOMAIN without answers.
         let mut nx = a;
         nx[3] = 0x83;
         nx[6..8].copy_from_slice(&[0, 0]);

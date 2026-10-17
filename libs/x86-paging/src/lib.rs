@@ -1,17 +1,19 @@
-//! Tablas de páginas x86-64 de 4 niveles, genéricas sobre cómo se obtienen
-//! frames y cómo se accede a ellos:
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! 4-level x86-64 page tables, generic over how frames are obtained and
+//! how they are accessed:
 //!
-//! - [`FrameAlloc`]: entrega frames físicos de 4 KiB (el cargador usa un
-//!   bump sobre páginas UEFI; el kernel, el PMM).
-//! - [`PhysMap`]: traduce una dirección física a un puntero utilizable (el
-//!   cargador usa identidad; el kernel, el mapa lineal en `PHYS_MAP_BASE`).
+//! - [`FrameAlloc`]: hands out 4 KiB physical frames (the loader uses a
+//!   bump over UEFI pages; the kernel, the PMM).
+//! - [`PhysMap`]: translates a physical address into a usable pointer (the
+//!   loader uses identity; the kernel, the linear map at `PHYS_MAP_BASE`).
 //!
-//! Seguridad de memoria: `Mapper` solo desreferencia tablas que él mismo ha
-//! creado con su `FrameAlloc`, a través de su `PhysMap`; no expone las tablas
-//! ni acepta punteros externos. La única operación `unsafe` para el llamador
-//! es construir un `FrameAlloc`/`PhysMap` que cumpla su contrato.
+//! Memory safety: `Mapper` only dereferences tables it created itself with
+//! its `FrameAlloc`, through its `PhysMap`; it does not expose the tables
+//! nor accept external pointers. The only `unsafe` operation for the caller
+//! is building a `FrameAlloc`/`PhysMap` that honours its contract.
 //!
-//! `no_std`; se prueba en host con frames del heap y traducción identidad.
+//! `no_std`; tested on the host with heap frames and identity translation.
 
 #![no_std]
 
@@ -28,50 +30,50 @@ pub const GLOBAL: u64 = 1 << 8;
 pub const NO_EXECUTE: u64 = 1 << 63;
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
-/// Flags que un llamador puede pedir para una hoja. Lo demás se descarta.
+/// Flags a caller may request for a leaf. Everything else is discarded.
 const LEAF_FLAG_MASK: u64 = WRITABLE | USER | WRITE_THROUGH | CACHE_DISABLE | GLOBAL | NO_EXECUTE;
 
-/// Fuente de frames físicos de 4 KiB. El contenido puede ser basura: el
-/// `Mapper` los pone a cero antes de usarlos como tabla.
+/// Source of 4 KiB physical frames. The contents may be garbage: the
+/// `Mapper` zeroes them before using them as a table.
 pub trait FrameAlloc {
     fn alloc_frame(&mut self) -> Option<u64>;
 }
 
-/// Traducción de dirección física a puntero accesible.
+/// Physical address to accessible pointer translation.
 ///
 /// # Safety
 ///
-/// `phys_to_virt(p)` debe devolver un puntero válido, alineado como `p`, a
-/// memoria que refleje exactamente la física `p` (identidad o mapa lineal
-/// activo) para todo frame que el `FrameAlloc` asociado pueda entregar.
+/// `phys_to_virt(p)` must return a valid pointer, aligned like `p`, to
+/// memory that mirrors exactly the physical `p` (identity or active linear
+/// map) for every frame the associated `FrameAlloc` can hand out.
 pub unsafe trait PhysMap {
     fn phys_to_virt(&self, phys: u64) -> *mut u8;
 }
 
-/// Traducción identidad (virtual == física). Válida mientras las tablas
-/// activas mapeen la memoria por identidad.
+/// Identity translation (virtual == physical). Valid while the active
+/// tables map memory by identity.
 pub struct IdentityMap;
 
-// SAFETY: por contrato del llamador, la memoria está identidad-mapeada.
+// SAFETY: by the caller's contract, memory is identity-mapped.
 unsafe impl PhysMap for IdentityMap {
     fn phys_to_virt(&self, phys: u64) -> *mut u8 {
         phys as *mut u8
     }
 }
 
-/// Traducción por desplazamiento constante (mapa lineal).
+/// Constant-offset translation (linear map).
 #[derive(Debug, Clone, Copy)]
 pub struct OffsetMap(pub u64);
 
-// SAFETY: por contrato del llamador, `[0, limite)` físico está mapeado en
-// `offset + p` en las tablas activas.
+// SAFETY: by the caller's contract, physical `[0, limit)` is mapped at
+// `offset + p` in the active tables.
 unsafe impl PhysMap for OffsetMap {
     fn phys_to_virt(&self, phys: u64) -> *mut u8 {
         (phys + self.0) as *mut u8
     }
 }
 
-/// Bump allocator sobre una región contigua de páginas ya reservadas.
+/// Bump allocator over a contiguous region of already reserved pages.
 pub struct BumpFrames {
     base: u64,
     next: u64,
@@ -81,10 +83,10 @@ pub struct BumpFrames {
 impl BumpFrames {
     /// # Safety
     ///
-    /// `base` alineado a 4 KiB, `pages * 4096` bytes válidos y de uso
-    /// exclusivo de este allocator mientras viva.
+    /// `base` aligned to 4 KiB, `pages * 4096` valid bytes for the exclusive
+    /// use of this allocator while it lives.
     pub unsafe fn new(base: u64, pages: usize) -> Self {
-        assert!(base.is_multiple_of(PAGE_SIZE), "base no alineada");
+        assert!(base.is_multiple_of(PAGE_SIZE), "base not aligned");
         let end = base
             .checked_add(pages as u64 * PAGE_SIZE)
             .expect("overflow");
@@ -113,13 +115,13 @@ impl FrameAlloc for BumpFrames {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MapError {
     OutOfFrames,
-    /// La dirección no está alineada al tamaño de página pedido.
+    /// The address is not aligned to the requested page size.
     Unaligned,
-    /// Ya existe una hoja en esa dirección.
+    /// A leaf already exists at that address.
     AlreadyMapped,
-    /// Un nivel intermedio es una página grande y no se puede descender.
+    /// An intermediate level is a huge page and cannot be descended.
     HugePageCollision,
-    /// `unmap`/`translate` sobre algo no mapeado.
+    /// `unmap`/`translate` on something not mapped.
     NotMapped,
 }
 
@@ -134,7 +136,7 @@ const fn index(virt: u64, shift: u32) -> usize {
 }
 
 impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
-    /// Crea una jerarquía vacía (PML4 a cero).
+    /// Creates an empty hierarchy (zeroed PML4).
     pub fn new(alloc: A, map: M) -> Result<Self, MapError> {
         let mut m = Self {
             root: 0,
@@ -145,7 +147,7 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
         Ok(m)
     }
 
-    /// Dirección física del PML4, lista para `cr3`.
+    /// Physical address of the PML4, ready for `cr3`.
     pub fn root_phys(&self) -> u64 {
         self.root
     }
@@ -156,26 +158,26 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
 
     fn alloc_table(&mut self) -> Result<u64, MapError> {
         let phys = self.alloc.alloc_frame().ok_or(MapError::OutOfFrames)?;
-        // SAFETY: frame recién entregado por nuestro allocator, accesible por
-        // contrato de `PhysMap`; lo ponemos a cero antes de usarlo.
+        // SAFETY: frame just handed out by our allocator, accessible by the
+        // `PhysMap` contract; we zero it before using it.
         unsafe { core::ptr::write_bytes(self.map.phys_to_virt(phys), 0, PAGE_SIZE as usize) };
         Ok(phys)
     }
 
     fn table(&self, phys: u64) -> &[u64; 512] {
-        // SAFETY: solo se llama con tablas creadas por `alloc_table` o la raíz;
-        // el `PhysMap` garantiza el puntero.
+        // SAFETY: only called with tables created by `alloc_table` or the root;
+        // the `PhysMap` guarantees the pointer.
         unsafe { &*(self.map.phys_to_virt(phys) as *const [u64; 512]) }
     }
 
     fn table_mut(&mut self, phys: u64) -> &mut [u64; 512] {
-        // SAFETY: ídem `table`; `&mut self` da la exclusividad.
+        // SAFETY: same as `table`; `&mut self` gives exclusivity.
         unsafe { &mut *(self.map.phys_to_virt(phys) as *mut [u64; 512]) }
     }
 
-    /// Tabla del nivel inferior en `table[idx]`. Con `create`, la crea si falta.
-    /// `user` añade el bit USER a la entrada intermedia (necesario en toda la
-    /// ruta para que una hoja de usuario sea accesible desde ring 3).
+    /// Lower-level table at `table[idx]`. With `create`, creates it if missing.
+    /// `user` adds the USER bit to the intermediate entry (needed along the
+    /// whole path for a user leaf to be accessible from ring 3).
     fn next_level(
         &mut self,
         table_phys: u64,
@@ -202,7 +204,7 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
         Ok(Some(entry & ADDR_MASK))
     }
 
-    /// Mapea una página de 4 KiB.
+    /// Maps a 4 KiB page.
     pub fn map_4k(&mut self, virt: u64, phys: u64, flags: u64) -> Result<(), MapError> {
         if !virt.is_multiple_of(PAGE_SIZE) || !phys.is_multiple_of(PAGE_SIZE) {
             return Err(MapError::Unaligned);
@@ -225,7 +227,7 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
         Ok(())
     }
 
-    /// Mapea una página de 2 MiB.
+    /// Maps a 2 MiB page.
     pub fn map_2m(&mut self, virt: u64, phys: u64, flags: u64) -> Result<(), MapError> {
         if !virt.is_multiple_of(HUGE_2M) || !phys.is_multiple_of(HUGE_2M) {
             return Err(MapError::Unaligned);
@@ -245,8 +247,8 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
         Ok(())
     }
 
-    /// Mapea `[virt, virt+len)` -> `[phys, phys+len)` con páginas de 2 MiB.
-    /// `len` se redondea hacia arriba a 2 MiB.
+    /// Maps `[virt, virt+len)` -> `[phys, phys+len)` with 2 MiB pages.
+    /// `len` is rounded up to 2 MiB.
     pub fn map_range_2m(
         &mut self,
         virt: u64,
@@ -263,7 +265,7 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
         Ok(())
     }
 
-    /// Mapea `[virt, virt+len)` -> `[phys, phys+len)` con páginas de 4 KiB.
+    /// Maps `[virt, virt+len)` -> `[phys, phys+len)` with 4 KiB pages.
     pub fn map_range_4k(
         &mut self,
         virt: u64,
@@ -280,8 +282,8 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
         Ok(())
     }
 
-    /// Deshace un `map_4k`. Devuelve la física que estaba mapeada. No libera
-    /// frames ni invalida el TLB: eso es cosa del llamador.
+    /// Undoes a `map_4k`. Returns the physical address that was mapped. Does not
+    /// free frames nor invalidate the TLB: that is up to the caller.
     pub fn unmap_4k(&mut self, virt: u64) -> Result<u64, MapError> {
         if !virt.is_multiple_of(PAGE_SIZE) {
             return Err(MapError::Unaligned);
@@ -304,7 +306,7 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
         Ok(phys)
     }
 
-    /// Física y flags de la hoja que cubre `virt` (4 KiB o 2 MiB).
+    /// Physical address and flags of the leaf covering `virt` (4 KiB or 2 MiB).
     pub fn translate(&self, virt: u64) -> Option<(u64, u64)> {
         let mut table = self.root;
         for shift in [39u32, 30] {
@@ -333,26 +335,26 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
     }
 }
 
-/// Entradas del PML4 que pertenecen al kernel (mitad alta).
+/// PML4 entries that belong to the kernel (upper half).
 pub const KERNEL_PML4_FIRST: usize = 256;
 
 impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
-    /// Copia las entradas 256..512 del PML4 `from_root` (la mitad del kernel)
-    /// en este mapper: los PDPT del kernel quedan compartidos.
+    /// Copies entries 256..512 of the `from_root` PML4 (the kernel half)
+    /// into this mapper: the kernel PDPTs become shared.
     ///
     /// # Safety
     ///
-    /// `from_root` debe ser un PML4 válido accesible a través de `self.map`.
+    /// `from_root` must be a valid PML4 accessible through `self.map`.
     pub unsafe fn share_kernel_half(&mut self, from_root: u64) {
         let src = &*(self.map.phys_to_virt(from_root) as *const [u64; 512]);
         let dst = self.table_mut(self.root);
         dst[KERNEL_PML4_FIRST..].copy_from_slice(&src[KERNEL_PML4_FIRST..]);
     }
 
-    /// Crea de antemano el PDPT de cada entrada de la mitad alta del PML4.
-    /// Así `share_kernel_half` comparte PDPTs y no entradas vacías: cualquier
-    /// mapeo que el kernel añada después queda visible en todos los espacios
-    /// de usuario sin tener que propagarlo.
+    /// Pre-creates the PDPT for every entry of the PML4 upper half.
+    /// This way `share_kernel_half` shares PDPTs and not empty entries: any
+    /// mapping the kernel adds later is visible in every user address space
+    /// without having to propagate it.
     pub fn preallocate_kernel_half(&mut self) -> Result<(), MapError> {
         for i in KERNEL_PML4_FIRST..512 {
             if self.table(self.root)[i] & PRESENT == 0 {
@@ -363,9 +365,9 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
         Ok(())
     }
 
-    /// Libera toda la mitad baja (usuario): hojas de 4 KiB y 2 MiB y tablas
-    /// intermedias, entregando cada frame a `free`. Las entradas del kernel
-    /// no se tocan. Al terminar, el PML4 sigue siendo válido y vacío por abajo.
+    /// Frees the whole lower (user) half: 4 KiB and 2 MiB leaves and
+    /// intermediate tables, handing each frame to `free`. Kernel entries are
+    /// left untouched. Afterwards the PML4 is still valid and empty below.
     pub fn free_user_half(&mut self, mut free: impl FnMut(u64)) {
         for i in 0..KERNEL_PML4_FIRST {
             let e = self.table(self.root)[i];
@@ -404,25 +406,25 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
         }
     }
 
-    /// Libera el PML4 (tras `free_user_half`) y consume el mapper.
+    /// Frees the PML4 (after `free_user_half`) and consumes the mapper.
     pub fn into_root_frame(self) -> u64 {
         self.root
     }
 }
 
-/// Páginas de tabla necesarias, con margen, para `windows` mapas de 2 MiB
-/// que cubran `limit` bytes cada uno más `kernel_pages` páginas de 4 KiB.
+/// Table pages needed, with margin, for `windows` 2 MiB maps each covering
+/// `limit` bytes plus `kernel_pages` 4 KiB pages.
 pub fn pool_size_for(limit: u64, windows: u64, kernel_pages: u64) -> usize {
     let gib = limit.div_ceil(1 << 30);
-    // PML4 + por ventana (PDPT + un PD por GiB) + PDPT/PD altos + PTs + margen
+    // PML4 + per window (PDPT + one PD per GiB) + upper PDPT/PD + PTs + margin
     (1 + windows * (1 + gib) + 2 + kernel_pages.div_ceil(512) + 8) as usize
 }
 
-/// Activa EFER.NXE para que el bit NX sea válido (OVMF suele hacerlo, no confiar).
+/// Enables EFER.NXE so the NX bit is valid (OVMF usually does it; do not rely on it).
 ///
 /// # Safety
 ///
-/// Debe ejecutarse en ring 0 sobre x86-64; modifica un MSR de la CPU actual.
+/// Must run in ring 0 on x86-64; modifies an MSR of the current CPU.
 #[cfg(target_arch = "x86_64")]
 pub unsafe fn enable_nxe() {
     const IA32_EFER: u32 = 0xC000_0080;
@@ -439,7 +441,7 @@ mod tests {
     use std::alloc::{alloc_zeroed, dealloc, Layout};
     use std::vec::Vec;
 
-    /// Frames del heap del host; su dirección hace de "física" (identidad).
+    /// Host heap frames; their address acts as the "physical" one (identity).
     struct HostFrames {
         live: Vec<*mut u8>,
         limit: usize,
@@ -488,7 +490,7 @@ mod tests {
         assert_eq!(
             flags,
             PRESENT | NO_EXECUTE | GLOBAL,
-            "sin bits de direccion ni HUGE"
+            "no address bits nor HUGE"
         );
         assert!(m.translate(virt + 0x1000).is_none());
         assert_eq!(m.map_4k(virt, 0x0020_0000, 0), Err(MapError::AlreadyMapped));
@@ -504,7 +506,7 @@ mod tests {
         assert_eq!(phys, 3 * HUGE_2M + 0x1234);
         assert!(flags & HUGE != 0 && flags & WRITABLE != 0);
         assert!(m.translate(4 * HUGE_2M).is_none());
-        // Bajar a 4K por debajo de una pagina grande no esta permitido.
+        // Descending to 4K below a huge page is not allowed.
         assert_eq!(
             m.map_4k(0x1000, 0x1000, 0),
             Err(MapError::HugePageCollision)
@@ -523,7 +525,7 @@ mod tests {
         assert_eq!(m.translate(0x4000).unwrap().0, 0x9000);
         assert_eq!(m.unmap_4k(0x5000), Err(MapError::NotMapped));
         assert_eq!(m.unmap_4k(0x9_0000_0000), Err(MapError::NotMapped));
-        // Volver a mapear tras unmap funciona.
+        // Mapping again after unmap works.
         m.map_4k(0x5000, 0xB000, 0).unwrap();
         assert_eq!(m.translate(0x5000).unwrap().0, 0xB000);
     }
@@ -534,12 +536,12 @@ mod tests {
         m.map_4k(0x40_0000, 0x10_0000, USER | WRITABLE).unwrap();
         let root = m.root_phys();
         let pml4e = unsafe { (*(root as *const [u64; 512]))[0] };
-        assert!(pml4e & USER != 0, "PML4E sin USER");
+        assert!(pml4e & USER != 0, "PML4E without USER");
         let pdpte = unsafe { (*((pml4e & ADDR_MASK) as *const [u64; 512]))[0] };
-        assert!(pdpte & USER != 0, "PDPTE sin USER");
+        assert!(pdpte & USER != 0, "PDPTE without USER");
         let (_, flags) = m.translate(0x40_0000).unwrap();
         assert!(flags & USER != 0);
-        // Un mapeo de kernel en el mismo PD no quita USER a la ruta.
+        // A kernel mapping in the same PD does not strip USER from the path.
         m.map_4k(0x40_1000, 0x10_1000, WRITABLE).unwrap();
         let pml4e2 = unsafe { (*(root as *const [u64; 512]))[0] };
         assert!(pml4e2 & USER != 0);
@@ -551,7 +553,7 @@ mod tests {
         kernel.preallocate_kernel_half().unwrap();
         let mut user = mapper(8);
         unsafe { user.share_kernel_half(kernel.root_phys()) };
-        // Un mapeo posterior en una region alta nueva se ve desde el espacio de usuario.
+        // A later mapping in a new upper region is visible from the user address space.
         kernel
             .map_4k(0xFFFF_D200_0000_0000, 0x30_0000, GLOBAL)
             .unwrap();
@@ -595,7 +597,7 @@ mod tests {
         assert_eq!(
             user.translate(0xFFFF_FFFF_8000_0000).map(|t| t.0),
             Some(0x20_0000),
-            "kernel intacto"
+            "kernel intact"
         );
         let root = user.into_root_frame();
         assert_ne!(root, 0);
@@ -621,7 +623,7 @@ mod tests {
 
     #[test]
     fn pool_size_covers_windows_and_kernel() {
-        // Identidad + mapa fisico de 4 GiB, kernel de 16 paginas: 1 + 2*(1+4) + 2 + 1 + 8
+        // Identity + 4 GiB physical map, 16-page kernel: 1 + 2*(1+4) + 2 + 1 + 8
         assert_eq!(pool_size_for(4 << 30, 2, 16), 22);
         assert!(pool_size_for(1 << 40, 1, 16) >= 1024 + 4);
     }

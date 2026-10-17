@@ -1,8 +1,10 @@
-//! `fs_victim`: escribe un secreto en su directorio privado y termina sin
-//! cerrar el descriptor (regresión de la auditoría e9fdf38, hallazgo 1).
-//! Además reemplaza su fichero con una cadena sintética y deja un reemplazo
-//! por trozos a medias al salir (auditoría 6ee19fb, hallazgos 1 y 3): nada
-//! de eso debe llegar a otra aplicación ni bloquear sus reemplazos.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! `fs_victim`: writes a secret into its private directory and exits without
+//! closing the descriptor (regression for audit e9fdf38, finding 1). It also
+//! replaces its file with a synthetic string and leaves a chunked replace
+//! half done on exit (audit 6ee19fb, findings 1 and 3): none of that may
+//! reach another app or block its replaces.
 #![no_std]
 #![no_main]
 
@@ -31,16 +33,16 @@ fn main(_arg: u64) -> u64 {
     if fs.write(fd, 0, b"VICTIM_SECRET").is_err() {
         return 4;
     }
-    // Un reemplazo atomico deja sus bytes en el journal compartido de fsd.
+    // An atomic replace leaves its bytes in fsd's shared journal.
     if fs.replace(fd, b"XYNTHETIC_PRIVATE_DATA").is_err() {
         return 5;
     }
-    // Y un reemplazo por trozos que nunca se compromete: el dueño se va.
+    // And a chunked replace that is never committed: the owner goes away.
     if fs.replace_chunk(fd, 0, b"abandonado").is_err() {
         return 6;
     }
-    // Sin `close`: el descriptor y la transaccion quedan vivos en fsd.
-    sys::print(b"fs_victim: secreto escrito, descriptor abierto al salir\n");
+    // No `close`: the descriptor and the transaction stay alive in fsd.
+    sys::print(b"fs_victim: secret written, descriptor left open on exit\n");
     0
 }
 

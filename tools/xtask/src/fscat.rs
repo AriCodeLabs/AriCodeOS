@@ -1,8 +1,10 @@
-//! `cargo xtask fs-cat DISCO [NOMBRE]`: lee un fichero (o lista los que
-//! hay) de la partición ARI0 de una imagen de disco o un volcado del
-//! pendrive, con la misma `aricode-arifs` que usa fsd. Es el canal de
-//! diagnóstico sin fotos de `docs/hardware.md`: el shell guarda `diag NOM`
-//! en AriFS y aquí se lee.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! `cargo xtask fs-cat DISK [NAME]`: reads a file (or lists the files) from
+//! the ARI0 partition of a disk image or a USB stick dump, using the same
+//! `aricode-arifs` that fsd uses. It is the photo-free diagnostics channel
+//! of `docs/hardware.md`: the shell saves `diag NAME` to AriFS and it is
+//! read here.
 
 use crate::Result;
 use aricode_arifs::{AriFs, BlockDevice, FsError};
@@ -10,7 +12,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-/// Disco de solo lectura sobre un fichero, con el primer LBA de la partición.
+/// Read-only disk backed by a file, with the partition's first LBA.
 struct FileDisk {
     file: File,
     base: u64,
@@ -31,34 +33,34 @@ impl BlockDevice for FileDisk {
     }
 }
 
-/// Primer LBA de la partición `name` en la GPT del disco.
+/// First LBA of partition `name` in the disk's GPT.
 fn partition_lba(file: &mut File, name: &str) -> Result<u64> {
     let mut sector = [0u8; 512];
     file.seek(SeekFrom::Start(512)).map_err(|e| e.to_string())?;
     file.read_exact(&mut sector).map_err(|e| e.to_string())?;
-    let header = aricode_gpt::Header::parse(&sector).map_err(|_| "sin cabecera GPT")?;
+    let header = aricode_gpt::Header::parse(&sector).map_err(|_| "no GPT header")?;
     let mut table = vec![0u8; header.entries_bytes().next_multiple_of(512)];
     file.seek(SeekFrom::Start(header.entries_lba * 512))
         .map_err(|e| e.to_string())?;
     file.read_exact(&mut table).map_err(|e| e.to_string())?;
     let mut parts = [None; 16];
     let n =
-        aricode_gpt::partitions(&header, &table, &mut parts).map_err(|_| "tabla GPT invalida")?;
+        aricode_gpt::partitions(&header, &table, &mut parts).map_err(|_| "invalid GPT table")?;
     parts[..n]
         .iter()
         .flatten()
         .find(|p| p.name_str() == name)
         .map(|p| p.first_lba)
-        .ok_or_else(|| format!("sin particion {name}"))
+        .ok_or_else(|| format!("no partition {name}"))
 }
 
-/// Contenido de `name` en ARI0, o la lista de ficheros (`nombre  bytes`) si
-/// `name` es `None`.
+/// Contents of `name` in ARI0, or the file listing (`name  bytes`) if
+/// `name` is `None`.
 pub fn read(disk: &Path, name: Option<&str>) -> Result<Vec<u8>> {
     let mut file = File::open(disk).map_err(|e| format!("{}: {e}", disk.display()))?;
     let base = partition_lba(&mut file, "ARI0")?;
     let mut fs = AriFs::open(FileDisk { file, base })
-        .map_err(|e| format!("AriFS en {}: {e:?}", disk.display()))?;
+        .map_err(|e| format!("AriFS on {}: {e:?}", disk.display()))?;
     let Some(name) = name else {
         let mut out = String::new();
         for (_, e) in fs.entries() {
@@ -66,7 +68,7 @@ pub fn read(disk: &Path, name: Option<&str>) -> Result<Vec<u8>> {
         }
         return Ok(out.into_bytes());
     };
-    let index = fs.find(name).ok_or_else(|| format!("{name}: no existe"))?;
+    let index = fs.find(name).ok_or_else(|| format!("{name}: not found"))?;
     let size = fs.entry(index).map(|e| e.size).unwrap_or(0) as usize;
     let mut data = vec![0u8; size];
     let mut got = 0;
@@ -108,7 +110,7 @@ mod tests {
         let listing = String::from_utf8(read(&disk, None).unwrap()).unwrap();
         assert!(listing.contains("hola.txt"));
         assert!(listing.contains("README"));
-        assert!(read(&disk, Some("no-existe")).is_err());
+        assert!(read(&disk, Some("missing")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

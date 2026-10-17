@@ -1,9 +1,11 @@
-//! Despacho de vectores: excepciones (0..31) con diagnóstico detallado
-//! (sección 17 del documento maestro) y pánico, salvo #BP, que es recuperable
-//! y sirve de prueba; el resto van al APIC.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Vector dispatch: exceptions (0..31) with a detailed dump (section 17 of
+//! the master document) and a panic, except #BP, which is recoverable and
+//! used for testing; everything else goes to the APIC.
 //!
-//! Todo el volcado va solo por serie (`serial_println!`): una excepción puede
-//! ocurrir con la consola de framebuffer a medio escribir.
+//! The whole dump goes to serial only (`serial_println!`): an exception may
+//! happen while the framebuffer console is half-way through a write.
 
 use super::interrupts::{read_cr2, InterruptFrame};
 use crate::serial_println;
@@ -13,7 +15,7 @@ pub fn handle(frame: &mut InterruptFrame) {
     let vector = frame.vector as u8;
     match vector {
         BREAKPOINT => {
-            log::warn!("#BP breakpoint en rip={:#x}, continuando", frame.rip);
+            log::warn!("#BP breakpoint at rip={:#x}, continuing", frame.rip);
         }
         0..=31 if frame.cs & 3 == 3 => user_fault(frame),
         0..=31 => fatal(frame),
@@ -21,8 +23,8 @@ pub fn handle(frame: &mut InterruptFrame) {
     }
 }
 
-/// Excepción en ring 3: se diagnostica por serie y se termina el proceso.
-/// El kernel sigue intacto: el marco está en la pila de kernel del hilo.
+/// Exception in ring 3: dumped on serial and the process is terminated.
+/// The kernel stays intact: the frame is on the thread's kernel stack.
 fn user_fault(frame: &InterruptFrame) -> ! {
     let vector = frame.vector as u8;
     let (mnemonic, name) = exception::name(vector);
@@ -34,12 +36,12 @@ fn user_fault(frame: &InterruptFrame) -> ! {
         frame.error_code
     );
     if crate::user::process::in_user_stack_guard(cr2) {
-        serial_println!("USER STACK OVERFLOW: la pila de usuario toco su guard page");
+        serial_println!("USER STACK OVERFLOW: the user stack hit its guard page");
     }
     let why = match vector {
-        PAGE_FAULT if crate::user::process::in_user_stack_guard(cr2) => "desbordamiento de pila",
-        PAGE_FAULT if frame.error_code & PF_WRITE != 0 => "#PF escritura",
-        PAGE_FAULT => "#PF lectura",
+        PAGE_FAULT if crate::user::process::in_user_stack_guard(cr2) => "stack overflow",
+        PAGE_FAULT if frame.error_code & PF_WRITE != 0 => "#PF write",
+        PAGE_FAULT => "#PF read",
         GENERAL_PROTECTION => "#GP",
         INVALID_OPCODE => "#UD",
         _ => mnemonic,
@@ -74,7 +76,7 @@ fn fatal(frame: &InterruptFrame) -> ! {
         || crate::task::scheduler::in_thread_stack_guard(cr2)
     {
         serial_println!(
-            "STACK OVERFLOW: la pila del kernel toco su guard page ({:#x}..{:#x})",
+            "STACK OVERFLOW: the kernel stack hit its guard page ({:#x}..{:#x})",
             crate::memory::vmm::KERNEL_STACK_GUARD,
             crate::memory::vmm::KERNEL_STACK_BOTTOM
         );
@@ -129,7 +131,7 @@ fn fatal(frame: &InterruptFrame) -> ! {
         frame.r15
     );
     panic!(
-        "excepcion {mnemonic} ({vector}) {name} en rip={:#x}",
+        "exception {mnemonic} ({vector}) {name} at rip={:#x}",
         frame.rip
     );
 }

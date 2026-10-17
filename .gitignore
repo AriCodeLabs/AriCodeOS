@@ -2,3 +2,6 @@
 /build
 *.fd
 !/docs/**
+
+# Agent worktrees (local only)
+/.claude/worktrees/

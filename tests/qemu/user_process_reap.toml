@@ -1,8 +1,8 @@
-# Auditoria 3eb4965, hallazgo 1: crear y esperar procesos repetidamente no
-# pierde memoria; `wait` retira el proceso solo cuando su espacio ya volvio
-# al PMM.
+# Audit 3eb4965, finding 1: repeatedly creating and waiting for processes does not
+# leak memory; `wait` retires the process only once its address space has gone back
+# to the PMM.
 name = "user.process_reap"
-description = "test=process_reap: 180 procesos creados y esperados sin perder frames (1 CPU)"
+description = "test=process_reap: 180 processes created and waited for without leaking frames (1 CPU)"
 level = "full"
 areas = ["user", "memory"]
 cmdline = "qemu_exit test=process_reap"
@@ -11,5 +11,5 @@ timeout_secs = 60
 
 [expect]
 exit = 33
-serial_contains = ["process reap selftest ok (180 procesos creados y esperados en 1 CPU(s)", "ARICODEOS_KERNEL_READY"]
+serial_contains = ["process reap selftest ok (180 processes created and waited for on 1 CPU(s)", "ARICODEOS_KERNEL_READY"]
 serial_absent = ["KERNEL PANIC", "frames perdidos"]

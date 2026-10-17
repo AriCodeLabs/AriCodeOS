@@ -1,19 +1,21 @@
-//! GDT y TSS por CPU (con pila dedicada para double fault). El layout de
-//! selectores es el mismo en todas las CPUs (`aricode_x86_cpu::layout`).
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Per-CPU GDT and TSS (with a dedicated double-fault stack). The selector
+//! layout is the same on every CPU (`aricode_x86_cpu::layout`).
 
 use crate::cpu::Cpu;
 use aricode_x86_cpu::{layout, Gdt, SegmentDescriptor, Selector, Tss, TssDescriptor};
 use core::arch::asm;
 
-/// Índice IST (1..=7) usado por #DF. IST1 = `Tss::ist[0]`.
+/// IST index (1..=7) used by #DF. IST1 = `Tss::ist[0]`.
 pub const DOUBLE_FAULT_IST: u8 = 1;
 const DOUBLE_FAULT_STACK_SIZE: usize = 16 * 1024;
 
 #[repr(C, align(16))]
 struct Stack([u8; DOUBLE_FAULT_STACK_SIZE]);
 
-/// Tablas que la CPU lee por su dirección: viven en el `Cpu` estático de
-/// cada una y no se mueven.
+/// Tables the CPU reads by address: they live in each CPU's static `Cpu`
+/// and never move.
 pub struct Tables {
     gdt: Gdt<8>,
     tss: Tss,
@@ -49,10 +51,10 @@ pub fn selectors() -> Selectors {
     }
 }
 
-/// Construye las tablas de `cpu` y las carga en la CPU que llama, que debe
-/// ser esa misma, con interrupciones deshabilitadas.
+/// Builds the tables of `cpu` and loads them on the calling CPU, which must
+/// be that same CPU, with interrupts disabled.
 pub fn init_for(cpu: &'static Cpu) {
-    // SAFETY: arranque de la propia CPU, sin interrupciones.
+    // SAFETY: startup of this very CPU, without interrupts.
     let t = unsafe { cpu.tables() };
     let stack_top = t.double_fault_stack.0.as_ptr() as u64 + DOUBLE_FAULT_STACK_SIZE as u64;
     t.tss.ist[(DOUBLE_FAULT_IST - 1) as usize] = stack_top;
@@ -68,26 +70,26 @@ pub fn init_for(cpu: &'static Cpu) {
     assert_eq!(user_data, sel.user_data);
     assert_eq!(user_code, sel.user_code);
     assert_eq!(tss, sel.tss);
-    // SAFETY: la GDT y el TSS son estáticos, ya construidos y nunca se mueven.
+    // SAFETY: the GDT and TSS are static, already built and never move.
     unsafe { load(t.gdt.pointer(), sel.code, sel.data, sel.tss) };
 }
 
-/// Pila que usará esta CPU al entrar en ring 0 desde ring 3 por interrupción
-/// o excepción (`TSS.rsp0`) y por `syscall`. Se actualiza en cada cambio de
-/// contexto, con interrupciones deshabilitadas.
+/// Stack this CPU will use when entering ring 0 from ring 3 through an
+/// interrupt or exception (`TSS.rsp0`) and through `syscall`. Updated on
+/// every context switch, with interrupts disabled.
 pub fn set_kernel_stack(top: u64) {
     let cpu = crate::cpu::current();
-    // SAFETY: llamado con IF = 0 desde la propia CPU (cambio de contexto).
+    // SAFETY: called with IF = 0 from this very CPU (context switch).
     unsafe { cpu.tables().tss.rsp[0] = top };
     cpu.set_kernel_rsp(top);
 }
 
-/// Carga la GDT y recarga todos los selectores de segmento y el TR.
+/// Loads the GDT and reloads all segment selectors and TR.
 ///
 /// # Safety
 ///
-/// `ptr` debe describir una GDT válida que contenga `code`, `data` y `tss`
-/// y que permanezca en memoria mientras la CPU la use.
+/// `ptr` must describe a valid GDT that contains `code`, `data` and `tss`
+/// and stays in memory while the CPU uses it.
 unsafe fn load(
     ptr: aricode_x86_cpu::DescriptorTablePointer,
     code: Selector,
@@ -95,7 +97,7 @@ unsafe fn load(
     tss: Selector,
 ) {
     asm!("lgdt [{}]", in(reg) &ptr, options(nostack, preserves_flags));
-    // CS solo se recarga con un far return.
+    // CS can only be reloaded with a far return.
     asm!(
         "push {code}",
         "lea {tmp}, [rip + 2f]",

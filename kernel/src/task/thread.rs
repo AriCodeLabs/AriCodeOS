@@ -1,4 +1,6 @@
-//! Bloque de control de un hilo del kernel.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Kernel thread control block.
 
 use super::context::{initial_stack_frame, ThreadEntry};
 use super::stack::KernelStack;
@@ -8,18 +10,18 @@ use aricode_sched::Tid;
 pub struct Thread {
     pub tid: Tid,
     pub name: String,
-    /// `None` para el contexto de arranque (usa la pila del kernel).
+    /// `None` for the boot context (uses the kernel stack).
     pub stack: Option<KernelStack>,
-    /// `rsp` guardado por `switch_context` cuando el hilo no está ejecutando.
+    /// `rsp` saved by `switch_context` while the thread is not running.
     pub saved_rsp: u64,
-    /// Proceso de usuario al que pertenece (`None` = hilo del kernel).
+    /// User process it belongs to (`None` = kernel thread).
     pub process: Option<u32>,
-    /// PML4 a cargar en CR3 al conmutar a este hilo.
+    /// PML4 to load into CR3 when switching to this thread.
     pub cr3: u64,
 }
 
 impl Thread {
-    /// Hilo que ya está ejecutando sobre una pila ajena (el de arranque).
+    /// Thread already running on a foreign stack (the boot thread).
     pub fn adopt_current(tid: Tid, name: &str, cr3: u64) -> Self {
         Self {
             tid,
@@ -31,8 +33,8 @@ impl Thread {
         }
     }
 
-    /// Hilo que ya ejecuta sobre `stack` sin haber pasado por
-    /// `switch_context`: el idle de un AP, que arranca directamente en ella.
+    /// Thread already running on `stack` without having gone through
+    /// `switch_context`: an AP's idle thread, which starts directly on it.
     pub fn adopt_on_stack(tid: Tid, name: &str, stack: KernelStack, cr3: u64) -> Self {
         Self {
             tid,
@@ -44,7 +46,7 @@ impl Thread {
         }
     }
 
-    /// Hilo nuevo con pila propia listo para su primer cambio de contexto.
+    /// New thread with its own stack, ready for its first context switch.
     pub fn new(
         tid: Tid,
         name: &str,
@@ -54,7 +56,7 @@ impl Thread {
         cr3: u64,
     ) -> Result<Self, &'static str> {
         let stack = KernelStack::allocate(tid.0)?;
-        // SAFETY: `stack.top()` es el fin de una pila recién mapeada RW.
+        // SAFETY: `stack.top()` is the end of a freshly mapped RW stack.
         let saved_rsp = unsafe { initial_stack_frame(stack.top(), entry, arg) };
         Ok(Self {
             tid,
@@ -66,7 +68,7 @@ impl Thread {
         })
     }
 
-    /// Cima de la pila de kernel de este hilo (TSS.rsp0 y entrada `syscall`).
+    /// Top of this thread's kernel stack (TSS.rsp0 and `syscall` entry).
     pub fn kernel_stack_top(&self) -> u64 {
         match &self.stack {
             Some(s) => s.top(),

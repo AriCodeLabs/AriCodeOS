@@ -1,9 +1,9 @@
-# Fase 30: el actualizador (aplicacion de confianza con capacidad block) lee la
-# imagen de UPDATE (version 2), la verifica, la copia al slot inactivo (B) y
-# deja B pendiente con 3 intentos. Un `updater` lanzado sin manifiesto de
-# confianza no recibiria el servicio de bloques.
+# Phase 30: the updater (a trusted application with the block capability) reads the
+# UPDATE image (version 2), verifies it, copies it to the inactive slot (B) and
+# leaves B pending with 3 attempts. An `updater` launched without a trusted
+# manifest would not get the block service.
 name = "update.apply"
-description = "updater: verificar UPDATE, instalar en el slot inactivo y programar el arranque"
+description = "updater: verify UPDATE, install into the inactive slot and schedule the boot"
 level = "full"
 areas = ["update", "sandbox", "shell"]
 cmdline = "qemu_exit shell"
@@ -13,11 +13,11 @@ stdin = ["run updater", "shutdown"]
 [expect]
 exit = 33
 serial_contains = [
-    "AriInit: lanzar updater con manifiesto [system block] memoria 6144 KiB",
-    "updater: imagen en UPDATE version 2 verificada (",
-    "updater: instalada en el slot B",
-    "updater: estado: activo A, pendiente B (3 intentos); reinicia para probarlo",
-    "run: updater termino con 0",
+    "AriInit: launch updater with manifest [system fs net block] memory 6144 KiB",
+    "updater: UPDATE image version 2 verified (",
+    "updater: installed into slot B",
+    "updater: state: active A, pending B (3 tries); reboot to try it",
+    "run: updater exited with 0",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "no verifica", "denegado"]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "no verifica", "denied"]

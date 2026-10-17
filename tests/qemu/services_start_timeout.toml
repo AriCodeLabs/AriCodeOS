@@ -1,9 +1,9 @@
-# Auditoria 6ee19fb, hallazgo 4: un servicio que arranca pero nunca responde
-# a su sonda. Al vencer, el supervisor lo termina (process_kill) y espera a
-# que el kernel lo recoja antes de relanzar; con el presupuesto agotado no
-# queda ningun proceso suyo vivo reteniendo recursos.
+# Audit 6ee19fb, finding 4: a service that starts but never answers
+# its probe. When it times out, the supervisor terminates it (process_kill) and waits for
+# the kernel to reap it before relaunching; once the budget is exhausted no
+# process of its own is left alive holding resources.
 name = "services.start_timeout"
-description = "supervisor: servicio que no responde, terminado por el supervisor al vencer la sonda; ningun proceso vivo"
+description = "supervisor: unresponsive service, terminated by the supervisor when the probe times out; no process left alive"
 level = "full"
 areas = ["services", "init", "user"]
 cmdline = "qemu_exit service_hang"
@@ -12,11 +12,11 @@ timeout_secs = 90
 [expect]
 exit = 33
 serial_contains = [
-    "hang_service: arrancado y sin intencion de responder",
-    "'hang_service' terminado por fallo: terminado por el supervisor",
-    "AriInit: servicio hang_service no llego a servir; reinicio en",
-    "AriInit: servicio hang_service no llego a servir; presupuesto de reinicios agotado: sistema degradado",
-    "AriInit: hang_service: 0 proceso(s) vivo(s) tras agotar el presupuesto",
+    "hang_service: started, with no intention of answering",
+    "'hang_service' killed: stopped by the supervisor",
+    "AriInit: service hang_service never became ready; restart in",
+    "AriInit: service hang_service never became ready; restart budget exhausted: system degraded",
+    "AriInit: hang_service: 0 process(es) alive after exhausting the budget",
     "ARICODEOS_KERNEL_READY",
 ]
-serial_absent = ["KERNEL PANIC", "no debia llegar a servir", "no llego a fallido", "no responde ni termina"]
+serial_absent = ["KERNEL PANIC", "no debia llegar a servir", "no llego a failed", "no responde ni termina"]

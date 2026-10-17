@@ -1,5 +1,5 @@
-/* Programa de usuario de AriCodeOS: ELF64 estatico en 0x400000, segmentos
- * separados y alineados a pagina para que el kernel aplique W^X. */
+/* AriCodeOS user program: static ELF64 at 0x400000, with separate,
+ * page-aligned segments so the kernel can enforce W^X. */
 ENTRY(_start)
 
 USER_BASE = 0x400000;

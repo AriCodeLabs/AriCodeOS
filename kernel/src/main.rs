@@ -1,9 +1,11 @@
-//! AriKernel: núcleo de AriCodeOS.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! AriKernel: the AriCodeOS kernel.
 //!
-//! Estado: 0.0.3. Recibe `BootInfo`, valida el protocolo, levanta la consola
-//! (serie + framebuffer) y el logger con niveles, describe el hardware,
-//! instala GDT/IDT, PMM, VMM (tablas propias, pila con guard) y heap, y
-//! anuncia `ARICODEOS_KERNEL_READY`.
+//! Status: 0.0.3. Receives `BootInfo`, validates the protocol, brings up the
+//! console (serial + framebuffer) and the leveled logger, describes the
+//! hardware, installs GDT/IDT, PMM, VMM (own tables, stack with guard) and
+//! heap, and announces `ARICODEOS_KERNEL_READY`.
 
 #![no_std]
 #![no_main]
@@ -12,6 +14,7 @@ extern crate alloc;
 
 mod acpi;
 mod arch;
+mod boot_args;
 mod console;
 mod console_input;
 mod cpu;
@@ -26,6 +29,7 @@ mod object;
 mod pci;
 mod qemu;
 mod random;
+mod rtc;
 mod serial;
 mod sync;
 mod task;
@@ -40,17 +44,17 @@ use log::{debug, info, trace, warn, LevelFilter};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Si es `true`, el kernel termina QEMU al acabar o al entrar en pánico.
-/// Se fija una vez desde la línea de comandos, antes de cualquier panic posible.
+/// If `true`, the kernel terminates QEMU when done or on panic.
+/// Set once from the command line, before any possible panic.
 static QEMU_EXIT: AtomicBool = AtomicBool::new(false);
 
-/// Punto de entrada. Ver `boot_protocol::KernelEntry` para el contrato.
+/// Entry point. See `boot_protocol::KernelEntry` for the contract.
 ///
 /// # Safety
 ///
-/// Solo debe invocarla AriBoot, una vez, con interrupciones deshabilitadas,
-/// paginación activa (identidad + kernel en `KERNEL_VIRT_BASE`), una pila
-/// válida en `rsp` y `boot_info` apuntando a un `BootInfo` identidad-mapeado.
+/// Must only be called by AriBoot, once, with interrupts disabled, paging
+/// enabled (identity + kernel at `KERNEL_VIRT_BASE`), a valid stack in `rsp`
+/// and `boot_info` pointing to an identity-mapped `BootInfo`.
 #[no_mangle]
 pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     serial::Serial.init();
@@ -58,36 +62,39 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     let fb_end = info.framebuffer.address + info.framebuffer.size;
     memory::phys::init(info.phys_map_offset, info.phys_map_limit, fb_end);
     if info.framebuffer.address != 0 {
-        // Baliza "el kernel ha arrancado" para hardware sin serie
-        // (docs/hardware.md); la consola la borra al iniciarse.
+        // "Kernel has started" beacon for hardware without serial
+        // (docs/hardware.md); the console clears it when it starts.
         let base = memory::phys::phys_to_virt(info.framebuffer.address) as *mut u8;
-        // SAFETY: AriBoot mapeó el framebuffer completo en el mapa físico.
+        // SAFETY: AriBoot mapped the whole framebuffer in the physical map.
         unsafe { info.framebuffer.beacon(base, Beacon::KERNEL_ENTRY) };
     }
     initrd::snapshot_digest(info);
 
-    // SAFETY: AriBoot copió la cmdline a memoria de kernel accesible por el mapa físico.
+    // SAFETY: AriBoot copied the cmdline to kernel memory reachable through the physical map.
     let cmdline = CmdLine::new(unsafe { info.cmdline() });
     QEMU_EXIT.store(cmdline.has(keys::QEMU_EXIT), Ordering::Relaxed);
 
     framebuffer::set_info(info.framebuffer);
-    // Con `gui` la pantalla es del compositor de usuario: el kernel solo
-    // escribe por serie.
+    // With `gui` the screen belongs to the user compositor: the kernel only
+    // writes to serial.
     let gui = cmdline.has(keys::GUI);
     let has_fb = !gui && console::init_framebuffer(info.framebuffer);
     println!();
     println!("AriCodeOS booting...");
     println!("AriCodeOS Kernel {VERSION}");
+    println!(
+        "AriCodeOS by Edwin F. Veliz Jaramillo (lynxcraft), https://github.com/lynxcraft/aricodeos"
+    );
 
     let (level, level_error) = log_level_from(&cmdline);
     console::init_logger(level);
     if let Some(bad) = level_error {
-        warn!("cmdline: log={bad} desconocido, se usa {level}");
+        warn!("cmdline: unknown log={bad}, using {level}");
     }
     if !cmdline.is_empty() {
         info!("cmdline: {}", cmdline.raw().trim());
     }
-    trace!("logger activo en nivel {level}");
+    trace!("logger active at level {level}");
 
     report_framebuffer(info, has_fb, gui);
     report_kernel(info);
@@ -96,7 +103,7 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     arch::x86_64::init();
     let sel = arch::x86_64::gdt::selectors();
     info!(
-        "cpu: GDT, TSS (IST para #DF) e IDT instaladas (cs={:#x} ds={:#x} tr={:#x})",
+        "cpu: GDT, TSS (IST for #DF) and IDT installed (cs={:#x} ds={:#x} tr={:#x})",
         sel.code.0, sel.data.0, sel.tss.0
     );
 
@@ -104,8 +111,8 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     let stack_top = memory::vmm::init(info);
     check_boot_stack(info);
 
-    // Continuar en la pila nueva (con guard page); la del cargador queda atrás.
-    // SAFETY: `stack_top` está mapeado RW por el VMM; `kernel_main` no retorna.
+    // Continue on the new stack (with a guard page); the loader's is left behind.
+    // SAFETY: `stack_top` is mapped RW by the VMM; `kernel_main` does not return.
     unsafe {
         core::arch::asm!(
             "mov rsp, {stack}",
@@ -119,59 +126,61 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     }
 }
 
-/// La pila de AriBoot es pequeña (64 KiB) y está pegada al initrd: si el
-/// arranque temprano la desborda, corrompe el initrd en silencio. Se mide
-/// lo usado justo antes de abandonarla y se exige margen; un exceso es un
-/// pánico con diagnóstico, no una corrupción.
+/// AriBoot's stack is small (64 KiB) and sits right next to the initrd: if
+/// early boot overflows it, it silently corrupts the initrd. Usage is
+/// measured just before leaving it and a margin is required; an excess is a
+/// panic with diagnostics, not a corruption.
 fn check_boot_stack(info: &BootInfo) {
     let rsp: u64;
-    // SAFETY: lectura del puntero de pila.
+    // SAFETY: read of the stack pointer.
     unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack)) };
     let top = memory::phys::phys_to_virt(info.kernel_stack_base + info.kernel_stack_size);
     let used = top.saturating_sub(rsp);
     const MARGIN: u64 = 16 * 1024;
     debug!(
-        "stack de arranque: {} KiB usados de {} KiB",
+        "boot stack: {} KiB used of {} KiB",
         used.div_ceil(1024),
         info.kernel_stack_size / 1024
     );
     assert!(
         used + MARGIN <= info.kernel_stack_size,
-        "la pila de arranque de {} KiB se queda sin margen: {} bytes usados",
+        "the {} KiB boot stack is out of margin: {} bytes used",
         info.kernel_stack_size / 1024,
         used
     );
 }
 
-/// Segunda etapa, ya sobre la pila definitiva y las tablas del kernel.
+/// Second stage, now on the final stack and the kernel's tables.
 extern "C" fn kernel_main(info: *const BootInfo) -> ! {
-    // SAFETY: mismo puntero validado en `kernel_entry`; página conservada
-    // accesible por el mapa físico.
+    // SAFETY: same pointer validated in `kernel_entry`; a kept page reachable
+    // through the physical map.
     let info = unsafe { &*info };
     let cmdline = CmdLine::new(unsafe { info.cmdline() });
-    debug!("kernel_main en pila {:#x}", memory::vmm::KERNEL_STACK_TOP);
+    debug!("kernel_main on stack {:#x}", memory::vmm::KERNEL_STACK_TOP);
     memory::heap::init();
+    boot_args::set(cmdline.raw());
 
     acpi::init(info);
     arch::x86_64::pic::disable();
     arch::x86_64::apic::init();
     arch::x86_64::ioapic::init();
-    // SAFETY: IDT, APIC y todo el estado global (tras IrqLock) están listos.
+    // SAFETY: IDT, APIC and all global state (behind IrqLock) are ready.
     unsafe { sync::enable_interrupts() };
-    info!("interrupciones habilitadas");
+    info!("interrupts enabled");
 
     task::init();
     console::start_cursor_thread();
     if cmdline.get(keys::SMP) == Some("off") {
-        info!("smp: desactivado por la linea de comandos (smp=off); 1 CPU");
+        info!("smp: disabled on the command line (smp=off); 1 CPU");
     } else {
         arch::x86_64::smp::start_aps(info);
     }
     random::init();
+    rtc::init();
     let layout = match cmdline.get(keys::KBD) {
         None => aricode_input::Layout::Us,
         Some(name) => aricode_input::Layout::parse(name).unwrap_or_else(|| {
-            warn!("cmdline: kbd={name} desconocido, se usa us");
+            warn!("cmdline: unknown kbd={name}, using us");
             aricode_input::Layout::Us
         }),
     };
@@ -179,7 +188,7 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     initrd::init(info);
     pci::init();
     if cmdline.get(keys::IOMMU) == Some("off") {
-        info!("iommu: desactivado por la linea de comandos (iommu=off); DMA sin traducir");
+        info!("iommu: disabled on the command line (iommu=off); untranslated DMA");
     } else {
         iommu::init(&info.framebuffer);
     }
@@ -218,41 +227,41 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     finish(qemu::ExitCode::Success)
 }
 
-/// `log=<trace|debug|info|warn|error|off>`; por defecto `info`.
-/// Devuelve también el valor rechazado, si lo hubo, para avisar tras el init.
+/// `log=<trace|debug|info|warn|error|off>`; `info` by default.
+/// Also returns the rejected value, if any, to warn about it after init.
 fn log_level_from(cmdline: &CmdLine) -> (LevelFilter, Option<&'static str>) {
     match cmdline.get(keys::LOG) {
         None => (LevelFilter::Info, None),
         Some(v) => match v.parse::<LevelFilter>() {
             Ok(l) => (l, None),
-            // El valor vive en la cmdline (memoria de kernel, 'static de facto).
+            // The value lives in the cmdline (kernel memory, effectively 'static).
             Err(_) => (LevelFilter::Info, Some(unsafe { extend_lifetime(v) })),
         },
     }
 }
 
-/// La cmdline está en memoria de kernel que nunca se libera; el `&str` es
-/// válido durante toda la ejecución.
+/// The cmdline is in kernel memory that is never freed; the `&str` is valid
+/// for the whole run.
 ///
 /// # Safety
 ///
-/// Solo para cadenas que apuntan a la cmdline entregada por AriBoot.
+/// Only for strings that point into the cmdline handed over by AriBoot.
 unsafe fn extend_lifetime(s: &str) -> &'static str {
     unsafe { &*(s as *const str) }
 }
 
-/// Comprueba magic y versión del protocolo; cualquier discrepancia es fatal.
+/// Checks the protocol magic and version; any mismatch is fatal.
 unsafe fn validate_boot_info(ptr: *const BootInfo) -> &'static BootInfo {
-    // SAFETY: AriBoot garantiza un puntero válido a una página identidad-mapeada.
+    // SAFETY: AriBoot guarantees a valid pointer to an identity-mapped page.
     let Some(info) = ptr.as_ref() else {
-        panic!("BootInfo nulo");
+        panic!("null BootInfo");
     };
     if info.magic != BOOT_PROTOCOL_MAGIC {
-        panic!("BootInfo: magic invalido {:#x}", info.magic);
+        panic!("BootInfo: invalid magic {:#x}", info.magic);
     }
     if info.version != BOOT_PROTOCOL_VERSION {
         panic!(
-            "BootInfo: version {} no soportada (esperada {})",
+            "BootInfo: unsupported version {} (expected {})",
             info.version, BOOT_PROTOCOL_VERSION
         );
     }
@@ -270,13 +279,13 @@ fn report_framebuffer(info: &BootInfo, has_fb: bool, gui: bool) {
             f.pixel_format,
             f.address,
             if gui {
-                " (reservado para el compositor)"
+                " (reserved for the compositor)"
             } else {
                 ""
             }
         );
     } else {
-        warn!("framebuffer: no disponible, solo serie");
+        warn!("framebuffer: not available, serial only");
     }
 }
 
@@ -300,13 +309,13 @@ fn report_memory(info: &BootInfo) {
     const NAMES: [&str; 6] = ["free", "boot", "firmware", "acpi", "mmio", "reserved"];
     let mut totals = [0u64; NAMES.len()];
     let mut count = 0u32;
-    // SAFETY: el mapa está en memoria de boot accesible por el mapa físico.
+    // SAFETY: the map is in boot memory reachable through the physical map.
     for d in unsafe { info.memory_regions() } {
         totals[d.kind() as usize] += d.size_bytes();
         count += 1;
     }
     info!(
-        "memory map: {count} regiones (desc {} bytes)",
+        "memory map: {count} regions (desc {} bytes)",
         info.memory_map.descriptor_size
     );
     for (name, total) in NAMES.iter().zip(totals) {
@@ -316,14 +325,14 @@ fn report_memory(info: &BootInfo) {
     }
 }
 
-/// Fallos provocados para los escenarios de test (`test=<nombre>`).
+/// Deliberate faults for the test scenarios (`test=<name>`).
 fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
     let Some(name) = cmdline.get(keys::TEST) else {
         return;
     };
-    info!("test provocado: {name}");
+    info!("requested test: {name}");
     match name {
-        "panic" => panic!("test=panic: fallo provocado"),
+        "panic" => panic!("test=panic: deliberate failure"),
         "pmm" => memory::pmm::selftest(),
         "vmm" => memory::vmm::selftest(),
         "heap" => memory::heap::selftest(),
@@ -342,67 +351,69 @@ fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
         "console_ps2" => console_input::ps2_selftest(),
         "process_reap" => user::process::reap_selftest(),
         other if other.starts_with("user_") => run_user_program(&other[5..]),
-        // W^X: escribir en .rodata -> #PF por protección.
+        // W^X: writing to .rodata -> protection #PF.
         "write_rodata" => {
             static RO: u64 = 7;
-            // SAFETY: fallo deliberado; la página es de solo lectura.
+            // SAFETY: deliberate fault; the page is read-only.
             unsafe { (&RO as *const u64 as *mut u64).write_volatile(1) };
-            unreachable!("la escritura en .rodata debia provocar #PF");
+            unreachable!("the write to .rodata should have raised #PF");
         }
-        // NX: ejecutar desde .data -> #PF por fetch.
+        // NX: executing from .data -> fetch #PF.
         "exec_data" => {
-            static mut CODE: [u8; 16] = [0xC3; 16]; // ret
-                                                    // SAFETY: fallo deliberado; la página es NX.
+            // 0xC3 = `ret`.
+            static mut CODE: [u8; 16] = [0xC3; 16];
+            // SAFETY: deliberate fault; the page is NX.
             let f: extern "C" fn() =
                 unsafe { core::mem::transmute(core::ptr::addr_of!(CODE) as *const u8) };
             f();
-            unreachable!("ejecutar .data debia provocar #PF");
+            unreachable!("executing .data should have raised #PF");
         }
-        // Desbordar la pila hasta la guard page -> #PF con pila inválida -> #DF en IST.
+        // Overflow the stack into the guard page -> #PF with an invalid stack -> #DF on IST.
         "stack_overflow" => {
             fn recurse(depth: u64) -> u64 {
                 let buf = [depth as u8; 512];
                 core::hint::black_box(&buf);
-                // Condición opaca: nunca se cumple, pero el compilador no puede
-                // demostrarlo ni convertir la recursión en un bucle.
+                // Opaque condition: never true, but the compiler can neither prove
+                // it nor turn the recursion into a loop.
                 if core::hint::black_box(depth) == u64::MAX {
                     return 0;
                 }
                 1 + recurse(depth + 1)
             }
             let _ = recurse(0);
-            unreachable!("la recursion debia agotar la pila");
+            unreachable!("the recursion should have exhausted the stack");
         }
-        // #BP es recuperable: el handler avisa y la ejecución continúa.
-        // SAFETY: instrucción de depuración; la IDT ya está instalada.
+        // #BP is recoverable: the handler warns and execution continues.
+        // SAFETY: debug instruction; the IDT is already installed.
         "breakpoint" => unsafe { core::arch::asm!("int3", options(nomem, nostack)) },
-        // SAFETY: ud2 provoca #UD de forma deliberada; termina en pánico.
+        // SAFETY: ud2 raises #UD deliberately; ends in a panic.
         "invalid_opcode" => unsafe { core::arch::asm!("ud2", options(nomem, nostack, noreturn)) },
-        // Escritura a una dirección canónica no mapeada -> #PF con CR2 legible.
+        // Write to an unmapped canonical address -> #PF with a readable CR2.
         "page_fault" => {
-            // SAFETY: fallo deliberado; nunca retorna.
+            // SAFETY: deliberate fault; never returns.
             unsafe { (0xFFFF_9000_0000_0000 as *mut u64).write_volatile(0xDEAD) };
-            unreachable!("la escritura debia provocar #PF");
+            unreachable!("the write should have raised #PF");
         }
-        // Pila apuntando a memoria no mapeada + int3: la CPU no puede empujar el
-        // marco de #BP (-> #PF) ni el de #PF (-> #DF); solo la pila IST salva el
-        // diagnóstico.
-        // SAFETY: fallo deliberado; nunca retorna.
+        // Stack pointing at unmapped memory + int3: the CPU can push neither the
+        // #BP frame (-> #PF) nor the #PF frame (-> #DF); only the IST stack
+        // saves the diagnostics.
+        // SAFETY: deliberate fault; never returns.
         "double_fault" => unsafe {
             core::arch::asm!("mov rsp, {0}", "int3", in(reg) 0xFFFF_9000_0000_0000u64, options(noreturn))
         },
-        other => warn!("test: '{other}' desconocido, ignorado"),
+        other => warn!("test: unknown '{other}', ignored"),
     }
 }
 
-/// Arranque normal: lanza `init` del initrd con la capacidad de crear
-/// procesos y espera a que termine.
-/// Lanza `init` con sus capacidades (`aricode_abi::handle::INIT_*`) y espera
-/// su fin. `arg` lleva los bits de `init_arg` (shell, gui, slot arrancado).
+/// Normal boot: launches `init` from the initrd with the capability to
+/// create processes and waits for it to finish.
+/// Launches `init` with its capabilities (`aricode_abi::handle::INIT_*`) and
+/// waits for it to end. `arg` carries the `init_arg` bits (shell, gui, booted
+/// slot).
 fn run_init(arg: u64, fb: boot_protocol::FramebufferInfo) {
     use aricode_handles::Rights;
     let Some(elf) = user::programs::by_name("init") else {
-        warn!("init: no hay 'init' en el initrd");
+        warn!("init: no 'init' in the initrd");
         return;
     };
     let spawner = object::KernelObject::new(object::ObjectKind::Spawner);
@@ -465,33 +476,39 @@ fn run_init(arg: u64, fb: boot_protocol::FramebufferInfo) {
         arg,
         0,
     )
-    .expect("crear init");
+    .expect("create init");
     let status = user::process::wait(pid);
     match status {
-        user::process::ExitStatus::Exited(code) => info!("init terminado con codigo {code}"),
-        user::process::ExitStatus::Killed(why) => warn!("init terminado por fallo: {why}"),
+        user::process::ExitStatus::Exited(code) => info!("init exited with code {code}"),
+        user::process::ExitStatus::Killed(why) => warn!("init killed: {why}"),
     }
 }
 
-/// Lanza un programa de usuario del initrd y espera su fin.
+/// Launches a user program from the initrd and waits for it to end.
 fn run_user_program(name: &str) {
     let Some(code) = user::programs::by_name(name) else {
-        warn!("test: programa de usuario '{name}' desconocido");
+        warn!("test: unknown user program '{name}'");
         return;
     };
-    let pid = user::process::spawn(name, code).expect("crear proceso");
+    let pid = user::process::spawn(name, code).expect("create process");
     let status = user::process::wait(pid);
-    info!("user: '{name}' terminado: {status:?}");
+    info!("user: '{name}' exited: {status:?}");
 }
 
-/// Apagado ordenado pedido desde usuario (`system_power`): con `qemu_exit`
-/// termina QEMU con éxito; en hardware real detiene la CPU.
+/// Orderly shutdown requested from user space (`system_power`): with
+/// `qemu_exit` it terminates QEMU successfully; otherwise it powers the
+/// machine off through ACPI S5 and, if the firmware does not cooperate,
+/// halts the CPU.
 pub fn shutdown() -> ! {
     println!("ARICODEOS_SHUTDOWN");
+    if !QEMU_EXIT.load(Ordering::Relaxed) {
+        arch::x86_64::power::acpi_poweroff();
+        println!("AriCodeOS: ACPI power-off had no effect; halting (it is safe to switch off)");
+    }
     finish(qemu::ExitCode::Success)
 }
 
-/// Fin de la ejecución: termina QEMU si se pidió, si no detiene la CPU.
+/// End of execution: terminates QEMU if requested, otherwise halts the CPU.
 fn finish(code: qemu::ExitCode) -> ! {
     if QEMU_EXIT.load(Ordering::Relaxed) {
         qemu::exit(code)
@@ -501,17 +518,17 @@ fn finish(code: qemu::ExitCode) -> ! {
 
 pub fn halt_loop() -> ! {
     loop {
-        // SAFETY: detiene la CPU hasta la siguiente interrupción (ninguna en M0).
+        // SAFETY: halts the CPU until the next interrupt (none in M0).
         unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
     }
 }
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    // Las demás CPUs se detienen para que el volcado no se mezcle con nada.
+    // The other CPUs are halted so the dump does not interleave with anything.
     arch::x86_64::smp::halt_others();
-    // Solo serie: el panic puede ocurrir con la consola de framebuffer a medio
-    // escribir y no debe tocar estado compartido.
+    // Serial only: the panic may happen while the framebuffer console is
+    // half-way through a write, and it must not touch shared state.
     serial_println!();
     serial_println!("============================");
     serial_println!("ARICODEOS KERNEL PANIC");

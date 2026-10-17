@@ -1,11 +1,11 @@
-# #BP es recuperable: el handler avisa y el kernel sigue hasta READY.
+# #BP is recoverable: the handler warns and the kernel continues to READY.
 name = "interrupts.breakpoint_returns"
-description = "test=breakpoint -> #BP manejado, la ejecucion continua"
+description = "test=breakpoint -> #BP handled, execution continues"
 level = "smoke"
 areas = ["interrupts"]
 cmdline = "qemu_exit test=breakpoint"
 
 [expect]
 exit = 33
-serial_contains = ["cpu: GDT, TSS (IST para #DF) e IDT instaladas", "[WARN ] #BP breakpoint en rip=0xffffffff8", "ARICODEOS_KERNEL_READY"]
+serial_contains = ["cpu: GDT, TSS (IST for #DF) and IDT installed", "[WARN ] #BP breakpoint at rip=0xffffffff8", "ARICODEOS_KERNEL_READY"]
 serial_absent = ["KERNEL PANIC", "EXCEPTION"]

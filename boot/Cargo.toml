@@ -3,7 +3,7 @@ name = "ariboot"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "AriBoot: cargador UEFI de AriCodeOS"
+description = "AriBoot: the AriCodeOS UEFI loader"
 
 [[bin]]
 name = "ariboot"

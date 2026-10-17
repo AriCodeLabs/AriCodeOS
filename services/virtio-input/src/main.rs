@@ -1,7 +1,9 @@
-//! inputd (Fase 25): driver virtio-input en ring 3. Un proceso por
-//! dispositivo (teclado, ratón). Recibe el contrato de driver de init y,
-//! como extra, `SYSTEM` (`READ`) para los plazos. Encola los eventos del
-//! dispositivo y los entrega por IPC (`InputServiceProtocol v1`).
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! inputd (Phase 25): ring 3 virtio-input driver. One process per
+//! device (keyboard, mouse). Receives the driver contract from init and,
+//! as an extra, `SYSTEM` (`READ`) for timeouts. Queues the device events
+//! and delivers them over IPC (`InputServiceProtocol v1`).
 #![no_std]
 #![no_main]
 
@@ -10,7 +12,7 @@ use aricode_proto::input::{Event as WireEvent, Op, Reply, Request, Status, MAX_E
 use aricode_rt::sys::virtio_pci::{extra_handle, DmaRegion, Queue, Transport, IRQ, SERVICE};
 use aricode_rt::sys::{self, abi, Handle};
 
-/// `virtio_input_config`: select, subsel, size y la carga en el offset 8.
+/// `virtio_input_config`: select, subsel, size and the payload at offset 8.
 const CFG_SELECT: u64 = 0;
 const CFG_SUBSEL: u64 = 1;
 const CFG_SIZE: u64 = 2;
@@ -37,7 +39,7 @@ struct Device {
 impl Device {
     fn setup(mask: u64) -> Result<Self, u64> {
         let transport = Transport::open(mask, 0).map_err(|e| e.code())?;
-        // Nombre del dispositivo.
+        // Device name.
         transport.device_cfg.w8(CFG_SELECT, CFG_ID_NAME);
         transport.device_cfg.w8(CFG_SUBSEL, 0);
         let size = transport.device_cfg.r8(CFG_SIZE) as usize;
@@ -46,7 +48,7 @@ impl Device {
         for (i, b) in name[..name_len].iter_mut().enumerate() {
             *b = transport.device_cfg.r8(CFG_PAYLOAD + i as u64);
         }
-        // `size` puede incluir el terminador o relleno.
+        // `size` may include the terminator or padding.
         while name_len > 0 && matches!(name[name_len - 1], 0 | b' ') {
             name_len -= 1;
         }
@@ -74,7 +76,7 @@ impl Device {
         core::str::from_utf8(&self.name[..self.name_len]).unwrap_or("?")
     }
 
-    /// Siguiente evento del dispositivo; repone la ranura.
+    /// Next device event; refills the slot.
     fn poll(&mut self) -> Option<Event> {
         let (head, len) = self.eventq.vq.pop_used()?;
         let off = 8 * head as u64;
@@ -104,7 +106,7 @@ impl Clock {
     }
 }
 
-/// Cola de eventos pendientes de entregar (los más antiguos se descartan).
+/// Queue of events pending delivery (the oldest are dropped).
 struct EventRing {
     buf: [(Event, u64); RING],
     head: usize,
@@ -149,12 +151,12 @@ fn main(mask: u64) -> u64 {
     let mut dev = match Device::setup(mask) {
         Ok(d) => d,
         Err(step) => {
-            say(b"fallo en la inicializacion");
+            say(b"initialization failed");
             return step;
         }
     };
     let clock = Clock(extra_handle(mask, 0));
-    sys::print(b"virtio-input: dispositivo listo: ");
+    sys::print(b"virtio-input: device ready: ");
     sys::print(dev.name_str().as_bytes());
     sys::print(b"\n");
     let mut ring = EventRing {
@@ -168,7 +170,7 @@ fn main(mask: u64) -> u64 {
     let mut handles = [Handle(0); 1];
     let mut events = [WireEvent::default(); MAX_EVENTS];
     let mut times = [0u64; MAX_EVENTS];
-    say(b"sirviendo peticiones");
+    say(b"serving requests");
     loop {
         let now = clock.now();
         while let Some(ev) = dev.poll() {

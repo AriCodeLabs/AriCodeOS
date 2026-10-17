@@ -1,12 +1,12 @@
-# Fase 13: derivacion con menos derechos, revocacion por objeto (invalida todos
-# sus handles, exige MANAGE) y aislamiento entre objetos. Exito = 21.
+# Phase 13: derivation with fewer rights, per-object revocation (invalidates all
+# of its handles, requires MANAGE) and isolation between objects. Success = 21.
 name = "capabilities.revoke"
-description = "programa Rust en ring 3: derivar, revocar (MANAGE), handle revocado en todos sus duplicados"
+description = "Rust program in ring 3: derive, revoke (MANAGE), handle revoked in all its duplicates"
 level = "full"
 areas = ["capabilities", "user"]
 cmdline = "qemu_exit test=user_caps"
 
 [expect]
 exit = 33
-serial_contains = ["escribo por el duplicado", "la consola sigue viva", "'caps' salio con codigo 21", "ARICODEOS_KERNEL_READY"]
+serial_contains = ["writing through the duplicate", "the console is still alive", "'caps' exited with code 21", "ARICODEOS_KERNEL_READY"]
 serial_absent = ["KERNEL PANIC", "USER FAULT"]

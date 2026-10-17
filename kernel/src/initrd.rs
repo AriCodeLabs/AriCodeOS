@@ -1,5 +1,7 @@
-//! Initrd entregado por AriBoot (`BootInfo::initrd_*`), accesible por el
-//! mapa físico. Contiene `init` y los programas de prueba.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Initrd handed over by AriBoot (`BootInfo::initrd_*`), reachable through
+//! the physical map. Contains `init` and the test programs.
 
 use crate::sync::IrqLock;
 use aricode_initrd::Initrd;
@@ -7,9 +9,10 @@ use boot_protocol::BootInfo;
 use log::{info, warn};
 
 static IMAGE: IrqLock<Option<&'static [u8]>> = IrqLock::new(None);
-/// Prefijo del SHA-256 del initrd tal como lo encuentra el kernel al entrar
-/// (antes de tocar memoria): si difiere del que anuncia AriBoot, la imagen
-/// se corrompió antes del kernel; si difiere del calculado en `init`, después.
+/// SHA-256 prefix of the initrd as the kernel finds it on entry (before
+/// touching memory): if it differs from the one AriBoot reports, the image
+/// was corrupted before the kernel; if it differs from the one computed in
+/// `init`, afterwards.
 static ENTRY_DIGEST: IrqLock<[u8; 4]> = IrqLock::new([0; 4]);
 
 fn digest_prefix(bytes: &[u8]) -> [u8; 4] {
@@ -19,12 +22,12 @@ fn digest_prefix(bytes: &[u8]) -> [u8; 4] {
 
 fn bytes_of(info: &BootInfo) -> &'static [u8] {
     let virt = crate::memory::phys::phys_to_virt(info.initrd_address);
-    // SAFETY: AriBoot copió la imagen a páginas que el kernel conserva
-    // (`BootInfo::kernel_ranges`); el mapa físico está activo.
+    // SAFETY: AriBoot copied the image to pages the kernel keeps
+    // (`BootInfo::kernel_ranges`); the physical map is active.
     unsafe { core::slice::from_raw_parts(virt as *const u8, info.initrd_size as usize) }
 }
 
-/// Toma la huella del initrd en `kernel_entry`, antes de PMM, VMM o heap.
+/// Takes the initrd fingerprint in `kernel_entry`, before PMM, VMM or heap.
 pub fn snapshot_digest(info: &BootInfo) {
     if info.initrd_size != 0 {
         *ENTRY_DIGEST.lock() = digest_prefix(bytes_of(info));
@@ -33,7 +36,7 @@ pub fn snapshot_digest(info: &BootInfo) {
 
 pub fn init(info: &BootInfo) {
     if info.initrd_size == 0 {
-        warn!("initrd: ausente");
+        warn!("initrd: missing");
         return;
     }
     let bytes = bytes_of(info);
@@ -42,7 +45,7 @@ pub fn init(info: &BootInfo) {
     match Initrd::parse(bytes) {
         Ok(rd) => {
             info!(
-                "initrd: {} ficheros, {} KiB @ {:#x}, sha256 {:02x}{:02x}{:02x}{:02x}",
+                "initrd: {} files, {} KiB @ {:#x}, sha256 {:02x}{:02x}{:02x}{:02x}",
                 rd.len(),
                 bytes.len() / 1024,
                 info.initrd_address,
@@ -54,13 +57,13 @@ pub fn init(info: &BootInfo) {
             *IMAGE.lock() = Some(bytes);
         }
         Err(e) => warn!(
-            "initrd: imagen invalida ({e:?}), se ignora; sha256 al entrar {:02x}{:02x}{:02x}{:02x}, ahora {:02x}{:02x}{:02x}{:02x}",
+            "initrd: invalid image ({e:?}), ignored; sha256 on entry {:02x}{:02x}{:02x}{:02x}, now {:02x}{:02x}{:02x}{:02x}",
             entry[0], entry[1], entry[2], entry[3], now[0], now[1], now[2], now[3]
         ),
     }
 }
 
-/// Contenido de un fichero del initrd por nombre.
+/// Contents of an initrd file by name.
 pub fn find(name: &str) -> Option<&'static [u8]> {
     let image = (*IMAGE.lock())?;
     Initrd::parse(image).ok()?.find(name)

@@ -1,7 +1,9 @@
-//! Eventos de entrada (Fase 25): el formato de virtio-input coincide con el
-//! de evdev de Linux (`type`, `code`, `value`), así que la misma librería
-//! servirá para USB HID cuando llegue. Incluye un teclado US mínimo que
-//! convierte pulsaciones en caracteres.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Input events (Phase 25): the virtio-input format matches Linux evdev
+//! (`type`, `code`, `value`), so the same library will serve USB HID when it
+//! arrives. Includes a minimal US keyboard that turns key presses into
+//! characters.
 
 #![no_std]
 
@@ -30,14 +32,14 @@ pub const KEY_BACKSLASH: u16 = 43;
 pub const KEY_COMMA: u16 = 51;
 pub const KEY_DOT: u16 = 52;
 pub const KEY_SLASH: u16 = 53;
-/// Tecla `<` de los teclados ISO (junto a la mayúscula izquierda).
+/// `<` key of ISO keyboards (next to the left shift).
 pub const KEY_102ND: u16 = 86;
 pub const KEY_LEFTSHIFT: u16 = 42;
 pub const KEY_RIGHTSHIFT: u16 = 54;
 pub const KEY_BACKSPACE: u16 = 14;
 pub const KEY_CAPSLOCK: u16 = 58;
 
-/// Un evento tal como lo entrega el dispositivo (8 bytes little endian).
+/// An event as delivered by the device (8 bytes, little endian).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Event {
     pub kind: u16,
@@ -75,7 +77,7 @@ impl Event {
     }
 }
 
-/// Disposición del teclado: US (QWERTY ANSI) o española (ISO, con `AltGr`).
+/// Keyboard layout: US (ANSI QWERTY) or Spanish (ISO, with `AltGr`).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {
     #[default]
@@ -84,7 +86,7 @@ pub enum Layout {
 }
 
 impl Layout {
-    /// Nombre de la cmdline (`kbd=es`).
+    /// Name used on the cmdline (`kbd=es`).
     pub fn parse(name: &str) -> Option<Self> {
         match name {
             "us" => Some(Self::Us),
@@ -94,8 +96,8 @@ impl Layout {
     }
 }
 
-/// Teclado: seguimiento de mayúsculas, `AltGr` y traducción de pulsaciones
-/// según la disposición.
+/// Keyboard: tracks shift state and `AltGr` and translates key presses
+/// according to the layout.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Keyboard {
     shift: bool,
@@ -104,8 +106,8 @@ pub struct Keyboard {
     layout: Layout,
 }
 
-/// Teclado español (ISO): códigos evdev 1..=86 (esc..`<`). Lo que no es
-/// ASCII (ñ, ç, acentos, º, ¡, ¿, ·) no produce nada.
+/// Spanish keyboard (ISO): evdev codes 1..=86 (esc..`<`). Anything that is
+/// not ASCII (ñ, ç, accents, º, ¡, ¿, ·) produces nothing.
 const ES_PLAIN: &[u8; 87] =
     b"\0\x1b1234567890'\0\x08\tqwertyuiop`+\n\0asdfghjkl\0\0\0\0\0zxcvbnm,.-\0*\0 \0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0<";
 const ES_SHIFTED: &[u8; 87] =
@@ -113,7 +115,7 @@ const ES_SHIFTED: &[u8; 87] =
 const ES_ALTGR: &[u8; 87] =
     b"\0\0|@#~\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0[]\0\0\0\0\0\0\0\0\0\0\0\0{\\\0}\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 
-/// Fila de códigos evdev 1..=57 (esc..espacio) sin y con mayúsculas.
+/// Row of evdev codes 1..=57 (esc..space) without and with shift.
 const PLAIN: &[u8; 58] =
     b"\0\x1b1234567890-=\x08\tqwertyuiop[]\n\0asdfghjkl;'`\0\\zxcvbnm,./\0*\0 ";
 const SHIFTED: &[u8; 58] =
@@ -141,8 +143,8 @@ impl Keyboard {
         self.layout
     }
 
-    /// Procesa un evento; devuelve los bytes que produce (ninguno, un
-    /// carácter o una secuencia de escape ANSI para las teclas de edición).
+    /// Processes an event; returns the bytes it produces (none, one
+    /// character or an ANSI escape sequence for the editing keys).
     pub fn feed(&mut self, ev: Event) -> KeyBytes {
         if ev.kind != EV_KEY {
             return KeyBytes::NONE;
@@ -165,10 +167,10 @@ impl Keyboard {
             _ => {}
         }
         if ev.value != 1 {
-            return KeyBytes::NONE; // solo pulsaciones (no repeticiones ni sueltas)
+            return KeyBytes::NONE; // presses only (no repeats nor releases)
         }
-        // Teclas de edición: las mismas secuencias que envía un terminal
-        // serie, para que el shell las trate igual vengan de donde vengan.
+        // Editing keys: the same sequences a serial terminal sends, so the
+        // shell handles them the same no matter where they come from.
         let escape: Option<&[u8]> = match ev.code {
             KEY_UP => Some(b"\x1b[A"),
             KEY_DOWN => Some(b"\x1b[B"),
@@ -209,8 +211,8 @@ impl Keyboard {
     }
 }
 
-/// Bytes que produce una pulsación: nada, un carácter o una secuencia de
-/// escape (hasta 4 bytes).
+/// Bytes produced by a key press: nothing, one character or an escape
+/// sequence (up to 4 bytes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyBytes {
     buf: [u8; 4],
@@ -249,27 +251,27 @@ impl KeyBytes {
     }
 }
 
-/// Nombre legible de un evento no textual (para trazas).
+/// Human-readable name of a non-text event (for traces).
 pub fn describe(ev: &Event) -> &'static str {
     match (ev.kind, ev.code) {
         (EV_SYN, _) => "syn",
         (EV_REL, REL_X) => "rel x",
         (EV_REL, REL_Y) => "rel y",
-        (EV_REL, REL_WHEEL) => "rueda",
+        (EV_REL, REL_WHEEL) => "wheel",
         (EV_REL, _) => "rel",
         (EV_ABS, _) => "abs",
-        (EV_KEY, BTN_LEFT) => "boton izquierdo",
-        (EV_KEY, BTN_RIGHT) => "boton derecho",
-        (EV_KEY, BTN_MIDDLE) => "boton central",
-        (EV_KEY, _) => "tecla",
+        (EV_KEY, BTN_LEFT) => "left button",
+        (EV_KEY, BTN_RIGHT) => "right button",
+        (EV_KEY, BTN_MIDDLE) => "middle button",
+        (EV_KEY, _) => "key",
         _ => "?",
     }
 }
 
-/// Decodificador de scancodes del conjunto 1 (teclado PS/2 con traducción
-/// del i8042) a eventos evdev: los códigos 0x01..=0x58 coinciden con los
-/// keycodes de Linux; el prefijo `E0` introduce las teclas extendidas y
-/// `E1` (Pausa) se descarta con sus dos bytes.
+/// Decoder of set 1 scancodes (PS/2 keyboard with i8042 translation) into
+/// evdev events: codes 0x01..=0x58 match the Linux keycodes; the `E0`
+/// prefix introduces the extended keys and `E1` (Pause) is discarded along
+/// with its two bytes.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ScancodeSet1 {
     extended: bool,
@@ -325,7 +327,7 @@ impl ScancodeSet1 {
         })
     }
 
-    /// Procesa un byte del teclado; devuelve el evento completo, si lo hay.
+    /// Processes a keyboard byte; returns the complete event, if any.
     pub fn feed(&mut self, byte: u8) -> Option<Event> {
         if self.skip > 0 {
             self.skip -= 1;
@@ -360,14 +362,14 @@ impl ScancodeSet1 {
     }
 }
 
-/// Eventos que puede producir un informe HID de arranque: 8 cambios de
-/// modificador, 6 sueltas, 6 pulsaciones y `EV_SYN` (21); se reservan 24.
+/// Events a boot HID report can produce: 8 modifier changes, 6 releases,
+/// 6 presses and `EV_SYN` (21); 24 are reserved.
 pub const MAX_REPORT_EVENTS: usize = 24;
 
-/// Teclado HID de arranque (USB): informe de 8 bytes (modificadores,
-/// reservado, hasta 6 usages pulsados). Traduce cada informe a eventos evdev
-/// comparándolo con el anterior. `out` tiene sitio para el peor caso, así
-/// que ningún cambio se pierde ni el estado avanza sin haberlo entregado.
+/// Boot HID keyboard (USB): 8-byte report (modifiers, reserved, up to 6
+/// pressed usages). Translates each report into evdev events by comparing it
+/// with the previous one. `out` has room for the worst case, so no change is
+/// lost and the state never advances without having delivered it.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct HidBootKeyboard {
     modifiers: u8,
@@ -380,7 +382,7 @@ pub const KEY_ESC: u16 = 1;
 pub const KEY_TAB: u16 = 15;
 pub const KEY_SPACE: u16 = 57;
 
-/// Keycode evdev de un usage de la página de teclado HID (0 si no se conoce).
+/// evdev keycode of an HID keyboard page usage (0 if unknown).
 pub fn hid_usage_to_key(usage: u8) -> u16 {
     const LETTERS: [u16; 26] = [
         30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50, 49, 24, 25, 16, 19, 31, 20, 22, 47, 17,
@@ -424,7 +426,7 @@ pub fn hid_usage_to_key(usage: u8) -> u16 {
     }
 }
 
-/// Keycodes de los ocho bits de modificadores del informe de arranque.
+/// Keycodes of the eight modifier bits of the boot report.
 const MODIFIER_KEYS: [u16; 8] = [
     KEY_LEFTCTRL,
     KEY_LEFTSHIFT,
@@ -444,8 +446,8 @@ impl HidBootKeyboard {
         }
     }
 
-    /// Procesa un informe y escribe en `out` los eventos (sueltas primero,
-    /// luego pulsaciones, y `EV_SYN` al final). Devuelve cuántos.
+    /// Processes a report and writes the events into `out` (releases first,
+    /// then presses, and `EV_SYN` last). Returns how many.
     pub fn feed(&mut self, report: &[u8], out: &mut [Event; MAX_REPORT_EVENTS]) -> usize {
         if report.len() < 8 {
             return 0;
@@ -453,7 +455,7 @@ impl HidBootKeyboard {
         let mods = report[0];
         let mut keys = [0u8; 6];
         keys.copy_from_slice(&report[2..8]);
-        // Un informe de error (0x01 en todas las posiciones) se ignora.
+        // An error report (0x01 in every position) is ignored.
         if keys.iter().all(|&k| k == 0x01) {
             return 0;
         }
@@ -520,7 +522,7 @@ impl HidBootKeyboard {
     }
 }
 
-/// Ratón HID de arranque: informe de 3 o 4 bytes (botones, dx, dy, rueda).
+/// Boot HID mouse: 3 or 4 byte report (buttons, dx, dy, wheel).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct HidBootMouse {
     buttons: u8,
@@ -626,7 +628,7 @@ mod tests {
         assert_eq!(Event::decode(&e.encode()), Some(e));
         assert!(Event::decode(&[0; 7]).is_none());
         assert_eq!(describe(&e), "rel y");
-        assert_eq!(describe(&key(BTN_LEFT, 1)), "boton izquierdo");
+        assert_eq!(describe(&key(BTN_LEFT, 1)), "left button");
     }
 
     #[test]
@@ -639,10 +641,10 @@ mod tests {
                 out[n] = c;
                 n += 1;
             }
-            assert!(k.feed(key(code, 0)).is_empty(), "soltar no produce nada");
+            assert!(k.feed(key(code, 0)).is_empty(), "release produces nothing");
         }
         assert_eq!(&out[..n], b"hola\n");
-        // Teclas de edición: secuencias ANSI; la repetición no produce nada.
+        // Editing keys: ANSI sequences; repeats produce nothing.
         assert_eq!(k.feed(key(KEY_UP, 1)).as_slice(), b"\x1b[A");
         assert_eq!(k.feed(key(KEY_DOWN, 1)).as_slice(), b"\x1b[B");
         assert_eq!(k.feed(key(KEY_LEFT, 1)).as_slice(), b"\x1b[D");
@@ -659,20 +661,20 @@ mod tests {
         k.feed(key(KEY_LEFTSHIFT, 0));
         assert_eq!(k.feed(key(2, 1)).as_slice(), b"1");
         assert!(k.feed(key(KEY_CAPSLOCK, 1)).is_empty());
-        assert_eq!(k.feed(key(30, 1)).as_slice(), b"A", "bloq mayus");
+        assert_eq!(k.feed(key(30, 1)).as_slice(), b"A", "caps lock");
         assert_eq!(
             k.feed(key(2, 1)).as_slice(),
             b"1",
-            "bloq mayus no afecta a digitos"
+            "caps lock does not affect digits"
         );
         k.feed(key(KEY_LEFTSHIFT, 1));
         assert_eq!(
             k.feed(key(30, 1)).as_slice(),
             b"a",
-            "shift invierte bloq mayus"
+            "shift inverts caps lock"
         );
-        assert!(k.feed(key(30, 2)).is_empty(), "repeticion ignorada");
-        assert!(k.feed(key(200, 1)).is_empty(), "codigo fuera de tabla");
+        assert!(k.feed(key(30, 2)).is_empty(), "repeat ignored");
+        assert!(k.feed(key(200, 1)).is_empty(), "code outside the table");
         assert!(k
             .feed(Event {
                 kind: EV_REL,
@@ -691,7 +693,7 @@ mod tests {
         let mut k = Keyboard::with_layout(Layout::Es);
         assert_eq!(Layout::parse("es"), Some(Layout::Es));
         assert_eq!(Layout::parse("fr"), None);
-        // `.` y, con mayúsculas, `:`; `7` y `/`; `-` y `_`; `<` y `>`.
+        // `.` and, with shift, `:`; `7` and `/`; `-` and `_`; `<` and `>`.
         assert_eq!(k.feed(key(KEY_DOT, 1)).as_slice(), b".");
         k.feed(key(KEY_LEFTSHIFT, 1));
         assert_eq!(k.feed(key(KEY_DOT, 1)).as_slice(), b":");
@@ -699,7 +701,7 @@ mod tests {
         assert_eq!(k.feed(key(KEY_SLASH, 1)).as_slice(), b"_");
         assert_eq!(k.feed(key(KEY_102ND, 1)).as_slice(), b">");
         assert_eq!(k.feed(key(3, 1)).as_slice(), b"\"");
-        assert!(k.feed(key(4, 1)).is_empty(), "shift+3 es · (no ASCII)");
+        assert!(k.feed(key(4, 1)).is_empty(), "shift+3 is · (not ASCII)");
         k.feed(key(KEY_LEFTSHIFT, 0));
         assert_eq!(k.feed(key(KEY_102ND, 1)).as_slice(), b"<");
         assert_eq!(k.feed(key(KEY_SLASH, 1)).as_slice(), b"-");
@@ -715,14 +717,14 @@ mod tests {
         assert_eq!(k.feed(key(KEY_GRAVE, 1)).as_slice(), b"\\");
         assert_eq!(k.feed(key(2, 1)).as_slice(), b"|");
         assert_eq!(k.feed(key(5, 1)).as_slice(), b"~");
-        assert!(k.feed(key(30, 1)).is_empty(), "AltGr+a no produce nada");
+        assert!(k.feed(key(30, 1)).is_empty(), "AltGr+a produces nothing");
         k.feed(key(KEY_RIGHTALT, 0));
         assert_eq!(k.feed(key(30, 1)).as_slice(), b"a");
-        // ñ, ç y la tecla º no son ASCII.
+        // ñ, ç and the º key are not ASCII.
         assert!(k.feed(key(KEY_SEMICOLON, 1)).is_empty());
         assert!(k.feed(key(KEY_BACKSLASH, 1)).is_empty());
         assert!(k.feed(key(KEY_GRAVE, 1)).is_empty());
-        // El teclado US no cambia.
+        // The US keyboard does not change.
         let mut us = Keyboard::new();
         us.feed(key(KEY_LEFTSHIFT, 1));
         assert_eq!(us.feed(key(KEY_DOT, 1)).as_slice(), b">");
@@ -733,7 +735,7 @@ mod tests {
     fn scancode_set1_to_evdev_and_ascii() {
         let mut d = ScancodeSet1::new();
         let mut k = Keyboard::new();
-        // 'h' 'o' 'l' 'a' Enter, con sus sueltas.
+        // 'h' 'o' 'l' 'a' Enter, with their releases.
         let mut out = [0u8; 8];
         let mut n = 0;
         for byte in [0x23u8, 0xA3, 0x18, 0x98, 0x26, 0xA6, 0x1E, 0x9E, 0x1C, 0x9C] {
@@ -745,7 +747,7 @@ mod tests {
             }
         }
         assert_eq!(&out[..n], b"hola\n");
-        // Shift izquierdo (0x2A) + 'a' = 'A'.
+        // Left shift (0x2A) + 'a' = 'A'.
         assert_eq!(
             d.feed(0x2A),
             Some(Event {
@@ -757,7 +759,7 @@ mod tests {
         k.feed(d.feed(0x2A).unwrap());
         assert_eq!(k.feed(d.feed(0x1E).unwrap()).as_slice(), b"A");
         k.feed(d.feed(0xAA).unwrap());
-        // Extendidas: E0 48 = flecha arriba; E0 53 = suprimir; E0 con codigo desconocido se ignora.
+        // Extended: E0 48 = up arrow; E0 53 = delete; E0 with an unknown code is ignored.
         assert_eq!(d.feed(0xE0), None);
         assert_eq!(
             d.feed(0x48),
@@ -778,7 +780,7 @@ mod tests {
         );
         assert_eq!(d.feed(0xE0), None);
         assert_eq!(d.feed(0x7F), None);
-        // Pausa (E1 1D 45) se descarta entera; lo siguiente se decodifica normal.
+        // Pause (E1 1D 45) is discarded entirely; what follows decodes normally.
         assert_eq!(d.feed(0xE1), None);
         assert_eq!(d.feed(0x1D), None);
         assert_eq!(d.feed(0x45), None);
@@ -790,7 +792,7 @@ mod tests {
                 value: 1
             })
         );
-        // Bytes fuera del conjunto (ACK 0xFA, 0x00) no producen nada.
+        // Bytes outside the set (ACK 0xFA, 0x00) produce nothing.
         assert_eq!(d.feed(0xFA), None);
         assert_eq!(d.feed(0x00), None);
     }
@@ -799,7 +801,7 @@ mod tests {
     fn hid_boot_keyboard_reports_to_events_and_text() {
         let mut kbd = HidBootKeyboard::new();
         let mut out = [Event::default(); MAX_REPORT_EVENTS];
-        // 'h' pulsada (usage 0x0B), luego 'h' suelta y 'o' pulsada, luego todo suelto.
+        // 'h' pressed (usage 0x0B), then 'h' released and 'o' pressed, then all released.
         let n = kbd.feed(&[0, 0, 0x0B, 0, 0, 0, 0, 0], &mut out);
         assert_eq!(n, 2);
         assert_eq!(
@@ -832,7 +834,7 @@ mod tests {
                 },
             ]
         );
-        // Shift izquierdo + 'a' => 'A' pasando por el teclado US.
+        // Left shift + 'a' => 'A' through the US keyboard.
         let mut text = Keyboard::new();
         let n = kbd.feed(&[0x02, 0, 0x04, 0, 0, 0, 0, 0], &mut out);
         let mut chars = [0u8; 4];
@@ -852,15 +854,15 @@ mod tests {
                 value: 1
             }
         );
-        // Informe vacio: sueltas de shift y de 'a' ('o' ya se solto al no
-        // venir en el informe anterior).
+        // Empty report: releases of shift and 'a' ('o' was already released by
+        // not being in the previous report).
         let n = kbd.feed(&[0; 8], &mut out);
         assert_eq!(n, 3);
         assert!(out[..2].iter().all(|e| e.kind == EV_KEY && e.value == 0));
-        // Sin cambios: nada. Informe de error (0x01 x6): nada.
+        // No changes: nothing. Error report (0x01 x6): nothing.
         assert_eq!(kbd.feed(&[0; 8], &mut out), 0);
         assert_eq!(kbd.feed(&[0, 0, 1, 1, 1, 1, 1, 1], &mut out), 0);
-        assert_eq!(kbd.feed(&[0; 7], &mut out), 0, "informe corto");
+        assert_eq!(kbd.feed(&[0; 7], &mut out), 0, "short report");
         assert_eq!(hid_usage_to_key(0x28), KEY_ENTER);
         assert_eq!(hid_usage_to_key(0x27), 11);
         assert_eq!(hid_usage_to_key(0x45), 88);
@@ -869,8 +871,8 @@ mod tests {
 
     #[test]
     fn hid_boot_keyboard_worst_case_transition_loses_nothing() {
-        // Auditoria 4836023, hallazgo 3: ocho modificadores y seis teclas
-        // cambian a la vez: 8 + 6 + 6 eventos de tecla mas EV_SYN.
+        // Audit 4836023, finding 3: eight modifiers and six keys change at
+        // once: 8 + 6 + 6 key events plus EV_SYN.
         let mut kbd = HidBootKeyboard::new();
         let mut out = [Event::default(); MAX_REPORT_EVENTS];
         let n = kbd.feed(&[0xFF, 0, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09], &mut out);
@@ -887,14 +889,14 @@ mod tests {
             .count();
         assert_eq!((releases, presses), (8 + 6, 6));
         assert_eq!(out[n - 1].kind, EV_SYN);
-        // Todas las pulsaciones nuevas estan: g h i j k l.
+        // All new presses are there: g h i j k l.
         for usage in 0x0A..=0x0F {
             let code = hid_usage_to_key(usage);
             assert!(out[..n]
                 .iter()
                 .any(|e| e.kind == EV_KEY && e.code == code && e.value == 1));
         }
-        // El mismo informe otra vez no produce nada; el informe vacio suelta las seis.
+        // The same report again produces nothing; the empty report releases all six.
         assert_eq!(
             kbd.feed(&[0x00, 0, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F], &mut out),
             0

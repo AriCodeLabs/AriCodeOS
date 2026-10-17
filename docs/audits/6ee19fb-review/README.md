@@ -1,72 +1,72 @@
-# Evidencias de la revisión de 6ee19fb
+# Evidence for the 6ee19fb review
 
-Commit: `6ee19fb2b5d64887d5d9ccba3215641727ef7fe9`. Fecha: 2026-09-29.
-Informe: [supervisión, persistencia, paquetes y WASM](../2026-09-29-services-persistence-packages-wasm-6ee19fb.md).
+Commit: `6ee19fb2b5d64887d5d9ccba3215641727ef7fe9`. Date: 2026-09-29.
+Report: [supervision, persistence, packages and WASM](../2026-09-29-services-persistence-packages-wasm-6ee19fb.md).
 
-## Archivos
+## Files
 
-| Archivo | Contenido |
+| File | Contents |
 | --- | --- |
-| `check.log` | `cargo xtask check` sobre la copia del commit. |
-| `tests.log` | Batería oficial completa; contiene también resultados de host. |
-| `host/src/lib.rs`, `host/Cargo.toml` | Siete sondas adicionales sobre las bibliotecas originales. |
-| `host-probes.log` | Resultado de las siete aserciones; fallan al exigir el comportamiento correcto. |
-| `reference.log`, `*.wasm` | Comparación con `WebAssembly.validate` y ejecución del loop en Node. |
-| `app/` | Aplicación de prueba que se empaqueta dos veces, como `reviewa` y `reviewb`, con `caps = fs`. |
-| `app-build.log`, `prepare.log`, `prepare.rs` | Construcción de la app y preparación de paquetes/disco. |
-| `journal-wasm-serial.log`, `journal-wasm-command.json` | Sesión QEMU: restos del journal, importación con firma incompatible y transacción abandonada. |
-| `supervisor-timeout-serial.log`, `supervisor-timeout-command.json` | Sesión QEMU: servicio que sigue vivo tras vencer su sonda. |
-| `run-qemu.py`, `prepare-supervisor.py`, `run-supervisor.py` | Harness y preparación de fixtures utilizados, con las rutas concretas de esta revisión. |
+| `check.log` | `cargo xtask check` on the commit copy. |
+| `tests.log` | Full official suite; also contains host results. |
+| `host/src/lib.rs`, `host/Cargo.toml` | Seven additional probes against the original libraries. |
+| `host-probes.log` | Output of the seven assertions; they fail because they require the correct behaviour. |
+| `reference.log`, `*.wasm` | Comparison with `WebAssembly.validate` and loop execution in Node. |
+| `app/` | Test application packaged twice, as `reviewa` and `reviewb`, with `caps = fs`. |
+| `app-build.log`, `prepare.log`, `prepare.rs` | App build and package/disk preparation. |
+| `journal-wasm-serial.log`, `journal-wasm-command.json` | QEMU session: journal leftovers, import with incompatible signature and abandoned transaction. |
+| `supervisor-timeout-serial.log`, `supervisor-timeout-command.json` | QEMU session: service still alive after its probe times out. |
+| `run-qemu.py`, `prepare-supervisor.py`, `run-supervisor.py` | Harness and fixture preparation used, with this review's concrete paths. |
 
-No se guardan imágenes de disco, binarios ELF ni directorios de compilación en
-el repositorio. Los módulos `.wasm` son fixtures mínimos, con datos sintéticos.
-Las sondas no modifican fuentes de producción.
+No disk images, ELF binaries or build directories are stored in
+the repository. The `.wasm` modules are minimal fixtures with synthetic data.
+The probes do not modify production sources.
 
-## Batería oficial aislada
+## Isolated official suite
 
-Se exportó el commit mediante `git archive` a
-`/var/tmp/aricode-review-6ee19fb-uhBqbF`. En archivos `.rs`, `.toml` y `.md`
-de `sdk`, `tests`, `tools`, `apps` y `user` se sustituyeron los números
-17007, 17008, 17009 y 17010 por 31007, 31008, 31009 y 31010, respectivamente.
-Esto incluye la URL HTTP y los textos esperados de red.
+The commit was exported with `git archive` to
+`/var/tmp/aricode-review-6ee19fb-uhBqbF`. In `.rs`, `.toml` and `.md` files
+under `sdk`, `tests`, `tools`, `apps` and `user`, the numbers
+17007, 17008, 17009 and 17010 were replaced with 31007, 31008, 31009 and 31010, respectively.
+This includes the HTTP URL and the expected network texts.
 
-Desde esa copia:
+From that copy:
 
 ```bash
 cargo xtask check > review-check.log 2>&1
 cargo xtask test --all > review-tests.log 2>&1
 ```
 
-La suite usa las CPUs declaradas por cada escenario; no se forzó toda la
-batería a cuatro CPU. Las pruebas concurrentes del árbol original no se
-interrumpieron y sus resultados no se mezclan con los de esta auditoría.
+The suite uses the CPUs declared by each scenario; the whole
+suite was not forced to four CPUs. The concurrent tests in the original tree were not
+interrupted and their results are not mixed with those of this audit.
 
-## Sondas de host
+## Host probes
 
-Desde una copia del repositorio en el commit revisado que incluya esta carpeta
-de evidencias:
+From a copy of the repository at the reviewed commit that includes this evidence
+folder:
 
 ```bash
 CARGO_TARGET_DIR=/var/tmp/aricode-review-host-target cargo test \
   --manifest-path docs/audits/6ee19fb-review/host/Cargo.toml -- --nocapture
 ```
 
-Resultado esperado en `6ee19fb`: siete tests fallidos (salida de Cargo 101).
-Se comprueba la conducta deseada, no se escribe un test que considere el defecto
-un éxito. Al ejecutar, Cargo puede crear `Cargo.lock` y los cuatro fixtures WASM
-en el directorio del proyecto de las sondas.
+Expected result on `6ee19fb`: seven failing tests (Cargo exit code 101).
+They check the desired behaviour; no test is written that treats the defect
+as a success. When run, Cargo may create `Cargo.lock` and the four WASM fixtures
+in the probe project directory.
 
-El disco simulado distingue sectores pendientes y persistidos. `flush` hace
-duraderas todas las escrituras anteriores. Un corte conserva solo los sectores
-de tabla pendientes y descarta los demás; conserva sectores completos, nunca
-sectores rotos. Es una ejecución permitida por el contrato de `BlockDevice` que
-no garantiza orden antes de `flush`.
+The simulated disk distinguishes pending and persisted sectors. `flush` makes
+all previous writes durable. A power cut keeps only the pending table
+sectors and discards the rest; it keeps whole sectors, never
+torn ones. This is an execution allowed by the `BlockDevice` contract, which
+does not guarantee ordering before `flush`.
 
-Las sondas originales se ejecutaron en `/var/tmp/aricode-probes-6ee19fb`, con
-dependencias por ruta a la copia de `6ee19fb`. Los manifiestos archivados usan
-rutas relativas al repositorio para facilitar su repetición.
+The original probes were run in `/var/tmp/aricode-probes-6ee19fb`, with
+path dependencies on the `6ee19fb` copy. The archived manifests use
+paths relative to the repository to make them easier to rerun.
 
-Comparación independiente, desde la raíz del repositorio:
+Independent comparison, from the repository root:
 
 ```bash
 node - <<'JS'
@@ -86,42 +86,42 @@ for (const file of ['wrong-global.wasm', 'missing-memory.wasm',
 JS
 ```
 
-Los tres primeros deben rechazarse; el loop devuelve 0. `wrong-import.wasm`
-es estructuralmente válido: su incompatibilidad se produce al enlazarlo contra
-la firma de `aricode.file_write`, no al validar su estructura independiente.
+The first three must be rejected; the loop returns 0. `wrong-import.wasm`
+is structurally valid: its incompatibility arises when linking it against
+the signature of `aricode.file_write`, not when validating its standalone structure.
 
-## Reproducciones QEMU
+## QEMU reproductions
 
-Los scripts conservan las rutas originales. Para otro directorio, sustituir
-`/var/tmp/aricode-review-6ee19fb-uhBqbF` y `/var/tmp/aricode-probes-6ee19fb`
-en scripts, manifiestos temporales y herramienta de preparación. Usar una copia
-aislada: `prepare.rs` modifica el disco que recibe y `prepare-supervisor.py`
-modifica el initrd y slots de su propia copia de prueba.
+The scripts keep the original paths. For another directory, replace
+`/var/tmp/aricode-review-6ee19fb-uhBqbF` and `/var/tmp/aricode-probes-6ee19fb`
+in the scripts, temporary manifests and preparation tool. Use an isolated
+copy: `prepare.rs` modifies the disk it is given and `prepare-supervisor.py`
+modifies the initrd and slots of its own test copy.
 
-Preparación de la primera sesión:
+Preparing the first session:
 
-1. Construir el commit y dejar que termine `boot.kernel_ready`. La revisión
-   tomó su `build/scenarios/boot.kernel_ready` como disco/ESP de partida.
-2. Compilar `app/` para `x86_64-unknown-none`, con el linker script del SDK:
+1. Build the commit and let `boot.kernel_ready` finish. The review
+   took its `build/scenarios/boot.kernel_ready` as the starting disk/ESP.
+2. Build `app/` for `x86_64-unknown-none`, with the SDK linker script:
    `RUSTFLAGS='-C relocation-model=static -C code-model=kernel' cargo build
    --manifest-path app/Cargo.toml --target x86_64-unknown-none --release`.
-   Usar `strip --strip-debug` para dejar `review_app.elf` en el directorio de sondas.
-3. Copiar el escenario a `qemu/`, escribir `qemu_exit shell` en
-   `qemu/esp/aricodeos/cmdline.txt` y restaurar `OVMF_VARS.fd` desde
+   Use `strip --strip-debug` to leave `review_app.elf` in the probe directory.
+3. Copy the scenario to `qemu/`, write `qemu_exit shell` to
+   `qemu/esp/aricodeos/cmdline.txt` and restore `OVMF_VARS.fd` from
    `/usr/share/OVMF/OVMF_VARS_4M.fd`.
-4. Compilar `prepare.rs` como binario de host con dependencias `aricode-arifs`,
-   `aricode-wasm`, `aricode-crypto` y `aricode-pkg` (feature `write`) por ruta
-   al commit. Ejecutarlo desde el directorio de sondas con `qemu/disk.img`.
-   Usa exclusivamente la clave de desarrollo del repositorio. Instala dos
-   paquetes de la app de prueba y sustituye `wasm_runner/demo.wasm` por el
-   módulo mínimo de importación incompatible.
-5. Ejecutar `run-qemu.py`. En esta revisión seguía viva la batería oficial,
-   cuyos respondedores de pruebas 31007/31008/31010 también atendieron las
-   autopruebas de red del invitado adicional. Fuera de ese contexto deben
-   mantenerse esos respondedores; de lo contrario init puede fallar antes
-   de llegar al shell. El invitado adicional no abre `hostfwd`.
+4. Build `prepare.rs` as a host binary with path dependencies `aricode-arifs`,
+   `aricode-wasm`, `aricode-crypto` and `aricode-pkg` (feature `write`) on
+   the commit. Run it from the probe directory with `qemu/disk.img`.
+   It uses only the repository's development key. It installs two
+   packages of the test app and replaces `wasm_runner/demo.wasm` with the
+   minimal incompatible-import module.
+5. Run `run-qemu.py`. During this review the official suite was still running,
+   and its test responders on 31007/31008/31010 also served the
+   network self-tests of the additional guest. Outside that context those
+   responders must be kept running; otherwise init may fail before
+   reaching the shell. The additional guest does not open `hostfwd`.
 
-La sesión envía, esperando cada prompt:
+The session sends, waiting for each prompt:
 
 ```text
 run reviewa 1
@@ -132,16 +132,16 @@ run reviewb 4
 shutdown
 ```
 
-Los dos primeros comandos reproducen el cruce de datos del journal. El tercero
-produce el panic del runner. Los dos siguientes prueban el journal ocupado
-después de morir el dueño de una transacción. QEMU termina con 33; ese código
-solo confirma el apagado normal del sistema, no el éxito de las propiedades
-que se están comprobando.
+The first two commands reproduce the journal data crossover. The third
+produces the runner panic. The next two test the occupied journal
+after the owner of a transaction dies. QEMU exits with 33; that code
+only confirms a normal system shutdown, not that the properties
+being checked hold.
 
-Para el supervisor, ejecutar `prepare-supervisor.py` y después
-`run-supervisor.py`, con los mismos respondedores activos. El fixture cambia
-solo `virtio_input` por el binario `cpu_hog` ya presente en el initrd. Invalida
-el estado A/B y la cabecera del slot A de su disco para usar la recuperación
-desde la ESP modificada. El kernel y el código del supervisor no se modifican.
-`services --detail`, `ps` y `shutdown` muestran el desacuerdo entre el estado
-del supervisor y los procesos vivos que conservan los dispositivos PCI.
+For the supervisor, run `prepare-supervisor.py` and then
+`run-supervisor.py`, with the same responders running. The fixture only replaces
+`virtio_input` with the `cpu_hog` binary already present in the initrd. It invalidates
+the A/B state and the slot A header on its disk so recovery is used
+from the modified ESP. The kernel and the supervisor code are not modified.
+`services --detail`, `ps` and `shutdown` show the mismatch between the supervisor's
+state and the live processes that keep the PCI devices.

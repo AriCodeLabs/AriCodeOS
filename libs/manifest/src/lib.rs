@@ -1,20 +1,22 @@
-//! Manifiesto de aplicación (Fase 28): un fichero `NOMBRE.manifest` en el
-//! initrd, junto al programa, con lo que la aplicación pide. El broker (init)
-//! lo lee, aplica su política y entrega solo esas capabilities.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Application manifest (Phase 28): a `NAME.manifest` file in the
+//! initrd, next to the program, stating what the application asks for. The broker (init)
+//! reads it, applies its policy and hands over only those capabilities.
 //!
 //! ```text
-//! # comentario
+//! # comment
 //! name = hello_app
 //! caps = system, fs
 //! memory = 128K
-//! read_files = hola.txt      # ficheros concretos de AriFS en modo lectura (ADR 0016)
+//! read_files = hola.txt      # specific AriFS files in read mode (ADR 0016)
 //! ```
 
 #![no_std]
 
 pub const MAX_NAME: usize = 32;
 
-/// Capacidades que una aplicación puede pedir.
+/// Capabilities an application can ask for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Caps(u32);
 
@@ -24,19 +26,19 @@ impl Caps {
     pub const NET: Caps = Caps(1 << 2);
     pub const WINDOW: Caps = Caps(1 << 3);
     pub const INPUT: Caps = Caps(1 << 4);
-    /// Reservadas al sistema: nunca se conceden a una aplicación.
+    /// Reserved for the system: never granted to an application.
     pub const SPAWNER: Caps = Caps(1 << 5);
     pub const PCI: Caps = Caps(1 << 6);
     pub const FRAMEBUFFER: Caps = Caps(1 << 7);
-    /// Acceso al servicio de bloques: solo para aplicaciones de sistema de la
-    /// lista de confianza del broker (`updater`).
+    /// Access to the block service: only for system applications on the
+    /// broker's trust list (`updater`).
     pub const BLOCK: Caps = Caps(1 << 8);
-    /// Espacio principal de fsd para instalar paquetes (ADR 0018): solo para
+    /// Main fsd space for installing packages (ADR 0018): only for
     /// `installer`.
     pub const INSTALL: Caps = Caps(1 << 9);
 
     pub const NONE: Caps = Caps(0);
-    /// Las que el broker concede a aplicaciones normales.
+    /// The ones the broker grants to normal applications.
     pub const APP_ALLOWED: Caps =
         Caps(Caps::SYSTEM.0 | Caps::FS.0 | Caps::NET.0 | Caps::WINDOW.0 | Caps::INPUT.0);
 
@@ -53,12 +55,12 @@ impl Caps {
         ("install", Caps::INSTALL),
     ];
 
-    /// Aplicaciones de sistema que además pueden pedir `block`.
+    /// System applications that may also ask for `block`.
     pub const TRUSTED_BLOCK: [&'static str; 1] = ["updater"];
-    /// Aplicaciones de sistema que además pueden pedir `install`.
+    /// System applications that may also ask for `install`.
     pub const TRUSTED_INSTALL: [&'static str; 1] = ["installer"];
 
-    /// Capacidades concedibles a la aplicación `name`.
+    /// Capabilities grantable to the application `name`.
     pub fn allowed_for(name: &str) -> Caps {
         let mut caps = Caps::APP_ALLOWED;
         if Self::TRUSTED_BLOCK.contains(&name) {
@@ -82,7 +84,7 @@ impl Caps {
     pub const fn union(self, other: Caps) -> Caps {
         Caps(self.0 | other.0)
     }
-    /// Las de `self` que no están en `allowed`.
+    /// The ones in `self` that are not in `allowed`.
     pub const fn difference(self, allowed: Caps) -> Caps {
         Caps(self.0 & !allowed.0)
     }
@@ -92,7 +94,7 @@ impl Caps {
     pub const fn bits(self) -> u32 {
         self.0
     }
-    /// Nombres de las capacidades presentes, en orden fijo.
+    /// Names of the capabilities present, in a fixed order.
     pub fn names(self) -> impl Iterator<Item = &'static str> {
         Self::NAMES
             .iter()
@@ -103,24 +105,24 @@ impl Caps {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManifestError {
-    /// Línea sin `clave = valor`.
+    /// Line without `key = value`.
     Syntax,
     UnknownKey,
     UnknownCap,
     BadName,
     BadMemory,
-    /// Falta `name`.
+    /// `name` is missing.
     MissingName,
-    /// Nombre de fichero inválido o más de `MAX_READ_FILES`.
+    /// Invalid file name or more than `MAX_READ_FILES`.
     BadFile,
 }
 
-/// Límite de memoria por defecto cuando el manifiesto no lo indica.
+/// Default memory limit when the manifest does not state one.
 pub const DEFAULT_MEMORY_KIB: u32 = 1024;
-/// Límite máximo que un manifiesto puede pedir (8 MiB, `DMA_MAX_LEN`).
+/// Maximum limit a manifest can ask for (8 MiB, `DMA_MAX_LEN`).
 pub const MAX_MEMORY_KIB: u32 = 8 * 1024;
 
-/// Ficheros compartidos en modo lectura que puede pedir un manifiesto.
+/// Files shared in read mode that a manifest can ask for.
 pub const MAX_READ_FILES: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,10 +130,10 @@ pub struct Manifest {
     pub name: [u8; MAX_NAME],
     pub name_len: u8,
     pub caps: Caps,
-    /// Memoria (buffers DMA) que puede reservar, en KiB.
+    /// Memory (DMA buffers) it can allocate, in KiB.
     pub memory_kib: u32,
-    /// Ficheros de AriFS (nombre completo) que recibe en modo lectura, en
-    /// el orden del manifiesto (ADR 0016).
+    /// AriFS files (full name) it receives in read mode, in
+    /// manifest order (ADR 0016).
     read_files: [[u8; MAX_NAME]; MAX_READ_FILES],
     read_files_len: [u8; MAX_READ_FILES],
     read_files_count: u8,
@@ -142,7 +144,7 @@ impl Manifest {
         core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("?")
     }
 
-    /// Ficheros de solo lectura pedidos, en orden.
+    /// Requested read-only files, in order.
     pub fn read_files(&self) -> impl Iterator<Item = &str> + Clone {
         self.read_files
             .iter()
@@ -211,7 +213,7 @@ impl Manifest {
     }
 }
 
-/// Nombre completo de AriFS: `[A-Za-z0-9._-/]`, sin empezar ni acabar en `/`.
+/// Full AriFS name: `[A-Za-z0-9._-/]`, not starting or ending with `/`.
 fn valid_file_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= MAX_NAME
@@ -223,7 +225,7 @@ fn valid_file_name(name: &str) -> bool {
         && !name.contains("//")
 }
 
-/// `64K`, `2M` o KiB sin sufijo; acotado a [`MAX_MEMORY_KIB`].
+/// `64K`, `2M` or KiB without a suffix; bounded by [`MAX_MEMORY_KIB`].
 fn parse_memory(v: &str) -> Option<u32> {
     let (num, mult) = match v.strip_suffix(['K', 'k']) {
         Some(n) => (n, 1u32),
@@ -245,10 +247,9 @@ mod tests {
 
     #[test]
     fn parses_full_manifest() {
-        let m = Manifest::parse(
-            "# app de ejemplo\nname = hello_app\ncaps = system, fs\nmemory = 128K\n",
-        )
-        .unwrap();
+        let m =
+            Manifest::parse("# sample app\nname = hello_app\ncaps = system, fs\nmemory = 128K\n")
+                .unwrap();
         assert_eq!(m.name_str(), "hello_app");
         assert!(m.caps.contains(Caps::SYSTEM) && m.caps.contains(Caps::FS));
         assert!(!m.caps.contains(Caps::NET));
@@ -298,7 +299,7 @@ mod tests {
             Err(ManifestError::MissingName)
         );
         assert_eq!(
-            Manifest::parse("name = x\ncolor = rojo"),
+            Manifest::parse("name = x\ncolor = red"),
             Err(ManifestError::UnknownKey)
         );
         assert_eq!(
@@ -306,7 +307,7 @@ mod tests {
             Err(ManifestError::UnknownCap)
         );
         assert_eq!(
-            Manifest::parse("name = con espacio"),
+            Manifest::parse("name = with space"),
             Err(ManifestError::BadName)
         );
         assert_eq!(
@@ -317,15 +318,15 @@ mod tests {
             Manifest::parse("name = x\nmemory = 9M"),
             Err(ManifestError::BadMemory)
         );
-        assert_eq!(Manifest::parse("sin igual"), Err(ManifestError::Syntax));
+        assert_eq!(Manifest::parse("no equals"), Err(ManifestError::Syntax));
         let block = Manifest::parse("name = updater\ncaps = system, block").unwrap();
         assert!(block
             .caps
             .difference(Caps::allowed_for("updater"))
             .is_empty());
         assert!(
-            !block.caps.difference(Caps::allowed_for("otra")).is_empty(),
-            "block solo para updater"
+            !block.caps.difference(Caps::allowed_for("other")).is_empty(),
+            "block only for updater"
         );
         let install = Manifest::parse("name = installer\ncaps = system, install").unwrap();
         assert!(install
@@ -337,7 +338,7 @@ mod tests {
                 .caps
                 .difference(Caps::allowed_for("updater"))
                 .is_empty(),
-            "install solo para installer"
+            "install only for installer"
         );
         let forbidden = Manifest::parse("name = x\ncaps = fs, spawner").unwrap();
         let denied: Vec<&str> = forbidden

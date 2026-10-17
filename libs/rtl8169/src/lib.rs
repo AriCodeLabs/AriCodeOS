@@ -1,12 +1,14 @@
-//! Tarjetas Realtek de la familia r8169 (RTL8169, 8168, 8101/8102/8136…):
-//! mapa de registros, descriptores de 16 bytes y secuencia de arranque, como
-//! las documenta el driver `r8169` de Linux. Sin E/S propia: el driver aporta
-//! los accesos a registros a través de [`Regs`], así que todo se prueba en el
-//! anfitrión con un registro simulado (ADR 0024).
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Realtek r8169 family NICs (RTL8169, 8168, 8101/8102/8136...):
+//! register map, 16-byte descriptors and bring-up sequence, as documented
+//! by the Linux `r8169` driver. No I/O of its own: the driver supplies
+//! register access through [`Regs`], so everything is tested on the
+//! host with a simulated register file (ADR 0024).
 
 #![no_std]
 
-/// Desplazamientos de registros (MMIO, primer BAR de memoria).
+/// Register offsets (MMIO, first memory BAR).
 pub mod reg {
     pub const MAC0: u64 = 0x00;
     pub const MAR0: u64 = 0x08;
@@ -30,17 +32,17 @@ pub mod reg {
     pub const EARLY_TX_THRESHOLD: u64 = 0xEC;
 }
 
-/// Bits de `CHIP_CMD`.
+/// `CHIP_CMD` bits.
 pub mod cmd {
     pub const RESET: u8 = 0x10;
     pub const RX_ENABLE: u8 = 0x08;
     pub const TX_ENABLE: u8 = 0x04;
 }
 
-/// `TX_POLL`: hay descriptores nuevos en la cola normal.
+/// `TX_POLL`: there are new descriptors in the normal queue.
 pub const TX_POLL_NPQ: u8 = 0x40;
 
-/// Bits de `INTR_STATUS`/`INTR_MASK`.
+/// `INTR_STATUS`/`INTR_MASK` bits.
 pub mod intr {
     pub const RX_OK: u16 = 0x0001;
     pub const RX_ERR: u16 = 0x0002;
@@ -51,7 +53,7 @@ pub mod intr {
     pub const RX_FIFO_OVER: u16 = 0x0040;
     pub const TX_DESC_UNAVAILABLE: u16 = 0x0080;
     pub const SYS_ERR: u16 = 0x8000;
-    /// Lo que el driver atiende.
+    /// What the driver handles.
     pub const ENABLED: u16 =
         RX_OK | RX_ERR | TX_OK | TX_ERR | RX_OVERFLOW | LINK_CHANGE | RX_FIFO_OVER | SYS_ERR;
 }
@@ -59,17 +61,17 @@ pub mod intr {
 pub const CFG9346_UNLOCK: u8 = 0xC0;
 pub const CFG9346_LOCK: u8 = 0x00;
 
-/// `RX_CONFIG`: sin umbral de FIFO, ráfagas DMA de 1024 bytes y aceptar
-/// difusión, multidifusión y la propia dirección.
+/// `RX_CONFIG`: no FIFO threshold, 1024-byte DMA bursts, and accept
+/// broadcast, multicast and our own address.
 pub const RX_CONFIG: u32 = (7 << 13) | (6 << 8) | 0x08 | 0x04 | 0x02;
-/// `TX_CONFIG`: ráfagas DMA de 1024 bytes y espacio entre tramas normal.
+/// `TX_CONFIG`: 1024-byte DMA bursts and normal interframe gap.
 pub const TX_CONFIG: u32 = (6 << 8) | (3 << 24);
-/// `CPLUS_CMD`: lecturas/escrituras PCI múltiples y suma de comprobación
-/// de recepción por hardware (no se usa, pero es lo que Linux activa).
+/// `CPLUS_CMD`: PCI multiple read/write and hardware receive
+/// checksum (unused, but it is what Linux enables).
 pub const CPLUS_CMD: u16 = (1 << 3) | (1 << 5);
 pub const EARLY_TX_THRESHOLD: u8 = 0x3F;
 
-/// Bits de `PHY_STATUS`.
+/// `PHY_STATUS` bits.
 pub mod phy {
     pub const FULL_DUPLEX: u8 = 0x01;
     pub const LINK: u8 = 0x02;
@@ -78,7 +80,7 @@ pub mod phy {
     pub const SPEED_1000: u8 = 0x10;
 }
 
-/// Estado del enlace a partir de `PHY_STATUS`.
+/// Link state derived from `PHY_STATUS`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinkState {
     pub up: bool,
@@ -102,7 +104,7 @@ pub fn link_state(phy_status: u8) -> LinkState {
     }
 }
 
-/// Descriptor de recepción o transmisión (16 bytes, little endian).
+/// Receive or transmit descriptor (16 bytes, little endian).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Desc {
     pub opts1: u32,
@@ -111,13 +113,13 @@ pub struct Desc {
 }
 
 pub mod desc {
-    /// La tarjeta es dueña del descriptor.
+    /// The card owns the descriptor.
     pub const OWN: u32 = 1 << 31;
-    /// Último del anillo: la tarjeta vuelve al primero.
+    /// Last in the ring: the card wraps back to the first one.
     pub const EOR: u32 = 1 << 30;
     pub const FIRST: u32 = 1 << 29;
     pub const LAST: u32 = 1 << 28;
-    /// Recepción con error (resumen).
+    /// Receive error (summary).
     pub const RX_ERROR: u32 = 1 << 21;
     pub const LEN_MASK: u32 = 0x3FFF;
 }
@@ -125,7 +127,7 @@ pub mod desc {
 impl Desc {
     pub const LEN: usize = 16;
 
-    /// Descriptor de recepción armado: buffer de `len` bytes para la tarjeta.
+    /// Armed receive descriptor: a `len`-byte buffer for the card.
     pub fn rx(buffer_phys: u64, len: u16, last: bool) -> Self {
         Self {
             opts1: desc::OWN | (len as u32 & desc::LEN_MASK) | if last { desc::EOR } else { 0 },
@@ -134,7 +136,7 @@ impl Desc {
         }
     }
 
-    /// Descriptor de transmisión de una trama completa de `len` bytes.
+    /// Transmit descriptor for a complete frame of `len` bytes.
     pub fn tx(buffer_phys: u64, len: u16, last: bool) -> Self {
         Self {
             opts1: desc::OWN
@@ -164,9 +166,9 @@ impl Desc {
     }
 }
 
-/// Trama recibida según `opts1` de un descriptor de recepción: `None` si la
-/// tarjeta aún es dueña, `Some(Err(()))` si llegó con error y `Some(Ok(n))`
-/// con los bytes útiles (sin el CRC de 4 bytes que la tarjeta añade).
+/// Received frame according to `opts1` of a receive descriptor: `None` if the
+/// card still owns it, `Some(Err(()))` if it arrived with an error and `Some(Ok(n))`
+/// with the useful bytes (without the 4-byte CRC the card appends).
 pub fn rx_frame(opts1: u32) -> Option<Result<usize, ()>> {
     if opts1 & desc::OWN != 0 {
         return None;
@@ -177,7 +179,7 @@ pub fn rx_frame(opts1: u32) -> Option<Result<usize, ()>> {
     Some(Ok(((opts1 & desc::LEN_MASK) as usize).saturating_sub(4)))
 }
 
-/// Acceso a los registros de la tarjeta (MMIO en el driver, memoria en los
+/// Access to the card registers (MMIO in the driver, memory in the
 /// tests).
 pub trait Regs {
     fn r8(&self, off: u64) -> u8;
@@ -188,7 +190,7 @@ pub trait Regs {
     fn w32(&self, off: u64, v: u32);
 }
 
-/// Dirección MAC que el firmware dejó en `MAC0..MAC5`.
+/// MAC address the firmware left in `MAC0..MAC5`.
 pub fn mac(regs: &impl Regs) -> [u8; 6] {
     let mut m = [0u8; 6];
     for (i, b) in m.iter_mut().enumerate() {
@@ -197,8 +199,8 @@ pub fn mac(regs: &impl Regs) -> [u8; 6] {
     m
 }
 
-/// Reinicio por software: pide el reset y espera a que la tarjeta lo
-/// complete (`attempts` lecturas, con la espera que ponga el llamador).
+/// Software reset: requests the reset and waits for the card to
+/// complete it (`attempts` reads, with whatever wait the caller provides).
 pub fn reset(regs: &impl Regs, attempts: u32, mut wait: impl FnMut()) -> bool {
     regs.w8(reg::CHIP_CMD, cmd::RESET);
     for _ in 0..attempts {
@@ -210,10 +212,10 @@ pub fn reset(regs: &impl Regs, attempts: u32, mut wait: impl FnMut()) -> bool {
     false
 }
 
-/// Secuencia de arranque (como `rtl_hw_start` en Linux): configuración
-/// desbloqueada, umbrales, modo C+, anillos de descriptores, configuración
-/// de recepción y transmisión, filtro de multidifusión abierto, motor en
-/// marcha e interrupciones habilitadas.
+/// Bring-up sequence (like `rtl_hw_start` in Linux): configuration
+/// unlocked, thresholds, C+ mode, descriptor rings, receive and
+/// transmit configuration, open multicast filter, engine running
+/// and interrupts enabled.
 pub fn start(regs: &impl Regs, rx_ring_phys: u64, tx_ring_phys: u64, rx_max_size: u16) {
     regs.w8(reg::CFG9346, CFG9346_UNLOCK);
     regs.w8(reg::EARLY_TX_THRESHOLD, EARLY_TX_THRESHOLD);
@@ -236,7 +238,7 @@ pub fn start(regs: &impl Regs, rx_ring_phys: u64, tx_ring_phys: u64, rx_max_size
     regs.w16(reg::INTR_MASK, intr::ENABLED);
 }
 
-/// Lee y reconoce las interrupciones pendientes.
+/// Reads and acknowledges pending interrupts.
 pub fn ack_interrupts(regs: &impl Regs) -> u16 {
     let status = regs.r16(reg::INTR_STATUS);
     if status != 0 {
@@ -250,7 +252,7 @@ mod tests {
     use super::*;
     use core::cell::RefCell;
 
-    /// Registros en memoria: el reset se "completa" en la primera lectura.
+    /// Registers in memory: the reset "completes" on the first read.
     struct Mock {
         mem: RefCell<[u8; 256]>,
         log: RefCell<std::vec::Vec<(u64, u32)>>,
@@ -307,11 +309,11 @@ mod tests {
         assert!(reset(&m, 10, || waits += 1));
         assert_eq!(
             waits, 1,
-            "el primer intento ve el reset pedido; el segundo, hecho"
+            "the first attempt sees the reset requested; the second, done"
         );
         start(&m, 0x1_0000_0100, 0x2000, 2048);
         let log = m.log.borrow();
-        // Desbloqueo antes de tocar la configuración y bloqueo después.
+        // Unlock before touching the configuration and lock afterwards.
         let unlock = log.iter().position(|e| *e == (reg::CFG9346, 0xC0)).unwrap();
         let lock = log.iter().position(|e| *e == (reg::CFG9346, 0x00)).unwrap();
         let rx_hi = log.iter().position(|e| *e == (reg::RX_DESC_HI, 1)).unwrap();
@@ -326,7 +328,7 @@ mod tests {
         assert!(log.contains(&(reg::CPLUS_CMD, 0x01 | CPLUS_CMD as u32)));
         assert!(log.contains(&(reg::RX_CONFIG, RX_CONFIG)));
         assert!(log.contains(&(reg::TX_CONFIG, TX_CONFIG)));
-        // El motor arranca después de bloquear y la máscara va al final.
+        // The engine starts after locking and the mask goes last.
         let run = log
             .iter()
             .position(|e| *e == (reg::CHIP_CMD, (cmd::RX_ENABLE | cmd::TX_ENABLE) as u32))
@@ -335,13 +337,13 @@ mod tests {
         assert_eq!(log.last(), Some(&(reg::INTR_MASK, intr::ENABLED as u32)));
         assert_eq!(m.r16(reg::MULTI_INTR), 0xF000);
         drop(log);
-        // Reconocer interrupciones las limpia.
+        // Acknowledging interrupts clears them.
         m.w16(reg::INTR_STATUS, intr::RX_OK | intr::LINK_CHANGE);
         assert_eq!(ack_interrupts(&m), intr::RX_OK | intr::LINK_CHANGE);
         assert_eq!(
             ack_interrupts(&m),
             intr::RX_OK | intr::LINK_CHANGE,
-            "el simulador no borra: el driver escribe los bits"
+            "the simulator does not clear: the driver writes the bits"
         );
     }
 

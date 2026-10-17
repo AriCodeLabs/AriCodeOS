@@ -1,18 +1,20 @@
-//! Driver virtio-blk (Fase 18) y servicio de bloques (Fase 19) en ring 3.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Ring 3 virtio-blk driver (Phase 18) and block service (Phase 19).
 //!
-//! Recibe de `init`, en este orden, el endpoint de servicio, el espacio de
-//! configuración PCI, la capacidad de hardware, la IRQ MSI-X y los BARs
-//! presentes (`arg` es la máscara de BARs). Inicializa el dispositivo por la
-//! interfaz moderna, crea la cola 0 en memoria DMA, lee la GPT y atiende por
-//! IPC (`aricode-proto::block`) peticiones de otros procesos, que aportan su
-//! propio buffer DMA: el dispositivo lee y escribe directamente en él.
+//! Receives from `init`, in this order, the service endpoint, the PCI
+//! configuration space, the hardware capability, the MSI-X IRQ and the BARs
+//! present (`arg` is the BAR mask). Initializes the device through the
+//! modern interface, creates queue 0 in DMA memory, reads the GPT and serves
+//! requests from other processes over IPC (`aricode-proto::block`); they supply
+//! their own DMA buffer: the device reads and writes it directly.
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
 use aricode_proto::block::{Op, Reply, Request, Status, MAX_SECTORS};
-use aricode_rt::sys::block::ClientBuffers;
+use aricode_rt::sys::block::map_client_buffer;
 use aricode_rt::sys::virtio_pci::{DmaRegion, Queue, Transport, IRQ, SERVICE};
 use aricode_rt::sys::{self, Error, Handle, TIMEOUT_INFINITE};
 use aricode_virtio::blk;
@@ -26,9 +28,9 @@ fn say(msg: &[u8]) {
 struct Device {
     transport: Transport,
     queue: Queue,
-    /// Buffer DMA propio: cabecera (16), un sector de datos (512) y estado (1).
+    /// Own DMA buffer: header (16), one data sector (512) and status (1).
     req: DmaRegion,
-    /// `VIRTIO_BLK_F_FLUSH` negociado: `T_FLUSH` hace duraderas las escrituras.
+    /// `VIRTIO_BLK_F_FLUSH` negotiated: `T_FLUSH` makes writes durable.
     flush: bool,
 }
 
@@ -51,9 +53,9 @@ impl Device {
         self.transport.device_cfg.r64(blk::CFG_CAPACITY)
     }
 
-    /// Una peticion sincrona: cabecera y estado en el buffer propio, datos en
-    /// `(data_phys, data_len)` si los hay (`T_FLUSH` no lleva); espera la
-    /// interrupcion MSI-X y comprueba el estado.
+    /// One synchronous request: header and status in the own buffer, data in
+    /// `(data_phys, data_len)` if any (`T_FLUSH` has none); waits for the
+    /// MSI-X interrupt and checks the status.
     fn request(
         &mut self,
         header: blk::RequestHeader,
@@ -93,7 +95,7 @@ impl Device {
         }
     }
 
-    /// Lee un sector en el buffer propio (para la GPT).
+    /// Reads one sector into the own buffer (for the GPT).
     fn read_own(&mut self, lba: u64) -> Result<&[u8], u64> {
         self.request(
             blk::RequestHeader::read(lba),
@@ -103,7 +105,7 @@ impl Device {
     }
 }
 
-/// Lee la GPT y anuncia las particiones.
+/// Reads the GPT and announces the partitions.
 fn report_partitions(dev: &mut Device) {
     let mut buf = [0u8; 20];
     let header = match dev
@@ -113,18 +115,18 @@ fn report_partitions(dev: &mut Device) {
     {
         Some(h) => h,
         None => {
-            say(b"sin GPT");
+            say(b"no GPT");
             return;
         }
     };
-    // La tabla (16 KiB) va al heap: la pila de usuario es pequeña.
+    // The table (16 KiB) goes on the heap: the user stack is small.
     let mut table = alloc::vec![0u8; 128 * aricode_gpt::ENTRY_LEN];
     let sectors = header.entries_bytes() / 512;
     for i in 0..sectors.min(32) {
         match dev.read_own(header.entries_lba + i as u64) {
             Ok(s) => table[i * 512..(i + 1) * 512].copy_from_slice(s),
             Err(_) => {
-                say(b"error leyendo la tabla GPT");
+                say(b"error reading the GPT table");
                 return;
             }
         }
@@ -132,9 +134,9 @@ fn report_partitions(dev: &mut Device) {
     let mut parts = [None; 8];
     match aricode_gpt::partitions(&header, &table, &mut parts) {
         Ok(n) => {
-            sys::print(b"virtio-blk: GPT con ");
+            sys::print(b"virtio-blk: GPT with ");
             sys::print(aricode_rt::fmt_u64(n as u64, &mut buf));
-            sys::print(b" particion(es)\n");
+            sys::print(b" partition(s)\n");
             for p in parts.iter().flatten() {
                 sys::print(b"virtio-blk:   ");
                 sys::print(p.name_str().as_bytes());
@@ -145,25 +147,24 @@ fn report_partitions(dev: &mut Device) {
                 sys::print(b"\n");
             }
         }
-        Err(_) => say(b"tabla GPT corrupta"),
+        Err(_) => say(b"corrupt GPT table"),
     }
 }
 
-/// Bucle de servicio: una peticion por mensaje, respuesta por el endpoint
-/// transferido en el mensaje.
+/// Service loop: one request per message, reply through the endpoint
+/// transferred in the message.
 fn serve(dev: &mut Device) -> ! {
     let capacity = dev.capacity();
-    let mut buffers = ClientBuffers::new();
     let mut msg = [0u8; 32];
     let mut handles = [Handle(0); 2];
-    say(b"sirviendo peticiones");
+    say(b"serving requests");
     loop {
         let Ok((n, nh)) = sys::ipc_receive(SERVICE, &mut msg, &mut handles, TIMEOUT_INFINITE)
         else {
             continue;
         };
         if nh == 0 {
-            continue; // sin endpoint de respuesta no hay a quien contestar
+            continue; // without a reply endpoint there is no one to answer
         }
         let reply_to = handles[0];
         let reply = match Request::decode(&msg[..n]) {
@@ -199,7 +200,7 @@ fn serve(dev: &mut Device) -> ! {
                         value: 0,
                     }
                 } else {
-                    match buffers.map(handles[1]) {
+                    match map_client_buffer(handles[1]) {
                         Some((phys, len)) if len >= count * 512 => {
                             let bytes = (count * 512) as u32;
                             let r = match op {
@@ -220,7 +221,7 @@ fn serve(dev: &mut Device) -> ! {
                                 },
                                 Err(_) => {
                                     if dev.transport.needs_reset() {
-                                        say(b"el dispositivo pide reset");
+                                        say(b"the device requests a reset");
                                     }
                                     Reply {
                                         status: Status::Io,
@@ -249,20 +250,20 @@ fn main(mask: u64) -> u64 {
     let mut dev = match setup(mask) {
         Ok(d) => d,
         Err(step) => {
-            say(b"fallo en la inicializacion");
+            say(b"initialization failed");
             return step;
         }
     };
     let mut buf = [0u8; 20];
-    say(b"dispositivo listo");
+    say(b"device ready");
     say(if dev.flush {
-        b"flush negociado (VIRTIO_BLK_F_FLUSH)"
+        b"flush negotiated (VIRTIO_BLK_F_FLUSH)"
     } else {
-        b"sin flush: el dispositivo no lo ofrece"
+        b"no flush: the device does not offer it"
     });
-    sys::print(b"virtio-blk: capacidad ");
+    sys::print(b"virtio-blk: capacity ");
     sys::print(aricode_rt::fmt_u64(dev.capacity(), &mut buf));
-    sys::print(b" sectores\n");
+    sys::print(b" sectors\n");
     report_partitions(&mut dev);
     serve(&mut dev)
 }

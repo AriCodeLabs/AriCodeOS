@@ -1,13 +1,13 @@
-# Revision de auditoria 2026-09-26, hallazgo 1: un PT_LOAD RW vacio y sin
-# alinear sobre la pagina de la entrada no debe alterar los permisos de .text.
-# Se ignora en la carga y el sistema arranca exactamente igual.
+# Audit review 2026-09-26, finding 1: an empty, unaligned RW PT_LOAD
+# on the entry point page must not change the permissions of .text.
+# It is ignored at load time and the system boots exactly the same.
 name = "boot.loader_ignores_empty_segment"
-description = "PT_LOAD vacio en e_entry -> se ignora, el kernel arranca"
+description = "empty PT_LOAD at e_entry -> ignored, the kernel boots"
 level = "full"
 areas = ["boot"]
 cmdline = "qemu_exit"
 
-# Sin slots: estos escenarios prueban el camino de la ESP.
+# No slots: these scenarios exercise the ESP path.
 disk = "esp-only"
 
 [inject]

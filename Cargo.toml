@@ -31,6 +31,10 @@ members = [
     "libs/fat",
     "libs/xhci",
     "libs/usb-storage",
+    "libs/lineedit",
+    "libs/ssh",
+    "libs/x509",
+    "libs/tls",
     "libs/rtl8169",
     "libs/supervisor",
     "sdk/abi",
@@ -48,11 +52,13 @@ members = [
     "apps/bench",
     "sdk/rust",
     "sdk/proto",
+    "sdk/https",
     "user/testprogs",
     "services/init",
     "services/virtio-blk",
     "services/net-core",
     "services/rtl-net",
+    "services/sshd",
     "services/virtio-net",
     "services/virtio-input",
     "services/usb-input",
@@ -65,7 +71,7 @@ members = [
     "tools/xtask",
 ]
 
-# Crates con tests unitarios de host (`cargo xtask test --level unit`).
+# Crates with host unit tests (`cargo xtask test --level unit`).
 default-members = [
     "boot-protocol",
     "libs/elf",
@@ -88,6 +94,8 @@ default-members = [
     "libs/fat",
     "libs/xhci",
     "libs/usb-storage",
+    "libs/lineedit",
+    "libs/ssh",
     "libs/rtl8169",
     "libs/supervisor",
     "sdk/abi",
@@ -97,13 +105,14 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
-license = "UNLICENSED"
+license = "Apache-2.0"
+authors = ["Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors"]
 repository = "https://github.com/lynxcraft/aricodeos"
 
-# Perfiles compartidos por bootloader y kernel.
-# panic = "abort": no hay unwinding en no_std.
+# Profiles shared by the bootloader and the kernel.
+# panic = "abort": there is no unwinding in no_std.
 [profile.dev]
 panic = "abort"
 opt-level = 1

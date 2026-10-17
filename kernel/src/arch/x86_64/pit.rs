@@ -1,5 +1,7 @@
-//! 8254 PIT, canal 2, como referencia de tiempo para calibrar el APIC.
-//! No genera interrupciones: se sondea la salida OUT2 por el puerto 0x61.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! 8254 PIT, channel 2, as a time reference to calibrate the APIC.
+//! It raises no interrupts: the OUT2 output is polled through port 0x61.
 
 use super::port::{inb, outb};
 
@@ -9,18 +11,18 @@ const PIT_CH2: u16 = 0x42;
 const PIT_CMD: u16 = 0x43;
 const SPEAKER_CTRL: u16 = 0x61;
 
-/// Espera activa de `ms` milisegundos (máximo 54) medida por el PIT.
+/// Busy-waits `ms` milliseconds (54 at most) as measured by the PIT.
 pub fn wait_ms(ms: u64) {
     let count = (PIT_HZ * ms / 1000).min(0xFFFF) as u16;
-    // SAFETY: programación del canal 2 y del gate del altavoz; sin sonido
-    // porque el bit 1 (speaker enable) queda a 0.
+    // SAFETY: programs channel 2 and the speaker gate; no sound because
+    // bit 1 (speaker enable) stays at 0.
     unsafe {
         let ctrl = inb(SPEAKER_CTRL) & !0x03;
-        outb(SPEAKER_CTRL, ctrl); // gate abajo
-        outb(PIT_CMD, 0xB0); // canal 2, lo/hi byte, modo 0 (cuenta única)
+        outb(SPEAKER_CTRL, ctrl); // gate low
+        outb(PIT_CMD, 0xB0); // channel 2, lo/hi byte, mode 0 (one-shot count)
         outb(PIT_CH2, count as u8);
         outb(PIT_CH2, (count >> 8) as u8);
-        outb(SPEAKER_CTRL, ctrl | 0x01); // gate arriba: empieza a contar
+        outb(SPEAKER_CTRL, ctrl | 0x01); // gate high: start counting
         while inb(SPEAKER_CTRL) & 0x20 == 0 {
             core::hint::spin_loop();
         }
@@ -28,11 +30,11 @@ pub fn wait_ms(ms: u64) {
     }
 }
 
-/// Canal 0 como generador periódico (IRQ0) a `hz`: fuente de interrupciones
-/// para probar drivers de usuario.
+/// Channel 0 as a periodic generator (IRQ0) at `hz`: an interrupt source for
+/// testing user drivers.
 pub fn start_periodic(hz: u64) {
     let divisor = (PIT_HZ / hz).clamp(1, 0xFFFF) as u16;
-    // SAFETY: canal 0, modo 2 (rate generator), lo/hi byte.
+    // SAFETY: channel 0, mode 2 (rate generator), lo/hi byte.
     unsafe {
         outb(PIT_CMD, 0x34);
         outb(PIT_CH0, divisor as u8);
@@ -40,9 +42,9 @@ pub fn start_periodic(hz: u64) {
     }
 }
 
-/// Detiene el canal 0 (modo 0 con cuenta única: tras un disparo, silencio).
+/// Stops channel 0 (mode 0 one-shot: silence after one firing).
 pub fn stop() {
-    // SAFETY: canal 0, modo 0, cuenta 1: una interrupción más como máximo.
+    // SAFETY: channel 0, mode 0, count 1: at most one more interrupt.
     unsafe {
         outb(PIT_CMD, 0x30);
         outb(PIT_CH0, 1);

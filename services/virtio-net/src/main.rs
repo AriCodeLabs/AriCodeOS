@@ -1,9 +1,11 @@
-//! netd (Fase 22): driver virtio-net en ring 3. La pila de red y el
-//! servidor de `NetServiceProtocol v1` viven en `ari-net-core` (ADR 0024);
-//! aquí solo está la tarjeta: colas virtio de recepción y transmisión.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! netd (Phase 22): ring 3 virtio-net driver. The network stack and the
+//! `NetServiceProtocol v1` server live in `ari-net-core` (ADR 0024);
+//! only the card is here: the virtio receive and transmit queues.
 //!
-//! Recibe de init el contrato de driver (`aricode_sys::virtio_pci`) y, como
-//! extra tras los BARs, el objeto `SYSTEM` (`READ`) para medir el tiempo.
+//! Receives the driver contract from init (`aricode_sys::virtio_pci`) and, as
+//! an extra after the BARs, the `SYSTEM` object (`READ`) to measure time.
 #![no_std]
 #![no_main]
 
@@ -12,9 +14,9 @@ use aricode_net::MacAddr;
 use aricode_rt::sys::virtio_pci::{extra_handle, DmaRegion, Queue, Transport};
 
 const NAME: &str = "virtio-net";
-/// VIRTIO_NET_F_MAC: el dispositivo tiene una MAC en su configuración.
+/// VIRTIO_NET_F_MAC: the device has a MAC in its configuration.
 const FEATURE_MAC: u64 = 1 << 5;
-/// Cabecera virtio-net (sin MRG_RXBUF pero con VERSION_1: 12 bytes).
+/// virtio-net header (no MRG_RXBUF but with VERSION_1: 12 bytes).
 const NET_HDR: u64 = 12;
 const SLOT: u64 = 2048;
 const RX_SLOTS: u16 = 16;
@@ -61,14 +63,14 @@ impl Nic {
         })
     }
 
-    /// Recoge los envíos completados para reutilizar sus ranuras.
+    /// Collects completed transmissions so their slots can be reused.
     fn reclaim_tx(&mut self) {
         while self.tx.vq.pop_used().is_some() {
             self.tx_inflight = self.tx_inflight.saturating_sub(1);
         }
     }
 
-    /// Transmite una trama Ethernet completa.
+    /// Transmits a complete Ethernet frame.
     fn send_frame(&mut self, frame: &[u8]) -> bool {
         self.reclaim_tx();
         let slots = self.tx.vq.size().min(TX_SLOTS);
@@ -97,7 +99,7 @@ impl Nic {
         ok
     }
 
-    /// Siguiente trama recibida (copiada a `out`); repone la ranura.
+    /// Next received frame (copied into `out`); refills the slot.
     fn recv_frame(&mut self, out: &mut [u8; MAX_FRAME]) -> Option<usize> {
         let (head, len) = self.rx.vq.pop_used()?;
         let off = SLOT * head as u64;
@@ -106,7 +108,7 @@ impl Nic {
             .min(MAX_FRAME);
         let src = self.rx_buf.slice_mut(off + NET_HDR, len as u64);
         out[..len].copy_from_slice(src);
-        // Reponer la misma ranura.
+        // Refill the same slot.
         let _ = self
             .rx
             .vq
@@ -126,7 +128,7 @@ impl Link for Nic {
         Nic::recv_frame(self, out)
     }
     fn link_up(&self) -> Option<bool> {
-        // Sin VIRTIO_NET_F_STATUS negociado el enlace virtual siempre esta.
+        // Without VIRTIO_NET_F_STATUS negotiated the virtual link is always up.
         Some(true)
     }
 }
@@ -135,7 +137,7 @@ fn main(mask: u64) -> u64 {
     let nic = match Nic::setup(mask) {
         Ok(n) => n,
         Err(step) => {
-            say(NAME, b"fallo en la inicializacion");
+            say(NAME, b"initialization failed");
             return step;
         }
     };

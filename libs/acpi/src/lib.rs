@@ -1,6 +1,8 @@
-//! Tablas ACPI estáticas (sección 31): sin AML. Todo trabaja sobre slices de
-//! bytes que el kernel obtiene del mapa físico, así que se prueba en host con
-//! tablas sintéticas.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Static ACPI tables (section 31): no AML. Everything works on byte slices
+//! the kernel gets from the physical map, so it is tested on the host with
+//! synthetic tables.
 
 #![no_std]
 
@@ -35,12 +37,12 @@ fn u64_at(d: &[u8], o: usize) -> u64 {
 pub struct Rsdp {
     pub revision: u8,
     pub rsdt_address: u32,
-    /// Solo en revisión >= 2.
+    /// Only in revision >= 2.
     pub xsdt_address: u64,
 }
 
 impl Rsdp {
-    /// Tamaño máximo que hay que leer para parsear cualquier revisión.
+    /// Maximum size to read in order to parse any revision.
     pub const MAX_LEN: usize = 36;
 
     pub fn parse(d: &[u8]) -> Result<Self, AcpiError> {
@@ -76,7 +78,7 @@ impl Rsdp {
         })
     }
 
-    /// Dirección de la tabla raíz preferida y si es XSDT (64 bits).
+    /// Address of the preferred root table and whether it is the XSDT (64 bits).
     pub fn root(&self) -> (u64, bool) {
         if self.revision >= 2 && self.xsdt_address != 0 {
             (self.xsdt_address, true)
@@ -86,7 +88,7 @@ impl Rsdp {
     }
 }
 
-/// Cabecera común de toda tabla (36 bytes).
+/// Header common to every table (36 bytes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SdtHeader {
     pub signature: [u8; 4],
@@ -97,7 +99,7 @@ pub struct SdtHeader {
 impl SdtHeader {
     pub const LEN: usize = 36;
 
-    /// Solo la cabecera; no comprueba el checksum (hace falta la tabla entera).
+    /// Header only; does not check the checksum (that needs the whole table).
     pub fn parse(d: &[u8]) -> Result<Self, AcpiError> {
         if d.len() < Self::LEN {
             return Err(AcpiError::Truncated);
@@ -118,7 +120,7 @@ impl SdtHeader {
     }
 }
 
-/// Comprueba que `table` es una tabla completa con `signature` y checksum válido.
+/// Checks that `table` is a complete table with `signature` and a valid checksum.
 pub fn validate_table(table: &[u8], signature: &[u8; 4]) -> Result<SdtHeader, AcpiError> {
     let h = SdtHeader::parse(table)?;
     if &h.signature != signature {
@@ -133,7 +135,7 @@ pub fn validate_table(table: &[u8], signature: &[u8; 4]) -> Result<SdtHeader, Ac
     Ok(h)
 }
 
-/// Direcciones de las tablas listadas por la XSDT (64 bits) o RSDT (32 bits).
+/// Addresses of the tables listed by the XSDT (64 bits) or RSDT (32 bits).
 pub fn root_entries(table: &[u8], is_xsdt: bool) -> Result<Vec<u64>, AcpiError> {
     let h = validate_table(table, if is_xsdt { b"XSDT" } else { b"RSDT" })?;
     let body = &table[SdtHeader::LEN..h.length as usize];
@@ -166,11 +168,11 @@ pub struct InterruptOverride {
 }
 
 impl InterruptOverride {
-    /// Polaridad activa en bajo según los flags MPS INTI.
+    /// Active-low polarity according to the MPS INTI flags.
     pub fn active_low(&self) -> bool {
         self.flags & 0b11 == 0b11
     }
-    /// Disparo por nivel según los flags MPS INTI.
+    /// Level-triggered according to the MPS INTI flags.
     pub fn level_triggered(&self) -> bool {
         (self.flags >> 2) & 0b11 == 0b11
     }
@@ -227,7 +229,7 @@ impl Madt {
         Ok(madt)
     }
 
-    /// GSI de una IRQ ISA, aplicando overrides (identidad si no hay).
+    /// GSI of an ISA IRQ, applying overrides (identity if there are none).
     pub fn isa_irq_to_gsi(&self, irq: u8) -> (u32, Option<InterruptOverride>) {
         match self.overrides.iter().find(|o| o.irq == irq) {
             Some(o) => (o.gsi, Some(*o)),
@@ -236,7 +238,7 @@ impl Madt {
     }
 }
 
-/// Entrada de la MCFG: una región ECAM.
+/// MCFG entry: one ECAM region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct McfgEntry {
     pub base: u64,
@@ -264,20 +266,20 @@ pub fn parse_mcfg(table: &[u8]) -> Result<Vec<McfgEntry>, AcpiError> {
         .collect())
 }
 
-/// Ámbito de dispositivo de la DMAR: un endpoint o puente PCI identificado
-/// por bus de partida y camino (dispositivo, función) por cada puente.
+/// DMAR device scope: a PCI endpoint or bridge identified by its start bus
+/// and a path (device, function) per bridge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceScope {
-    /// 1 endpoint, 2 puente, 3 I/O APIC, 4 HPET, 5 namespace ACPI.
+    /// 1 endpoint, 2 bridge, 3 I/O APIC, 4 HPET, 5 ACPI namespace.
     pub kind: u8,
     pub start_bus: u8,
     pub path: Vec<(u8, u8)>,
 }
 
 impl DeviceScope {
-    /// `true` si describe exactamente la función PCI dada (endpoint o puente
-    /// directamente en `start_bus`; los caminos con varios saltos no se
-    /// resuelven sin la topología de puentes).
+    /// `true` if it describes exactly the given PCI function (endpoint or bridge
+    /// directly on `start_bus`; multi-hop paths cannot be resolved without
+    /// the bridge topology).
     pub fn matches(&self, bus: u8, device: u8, function: u8) -> bool {
         matches!(self.kind, 1 | 2)
             && self.start_bus == bus
@@ -286,32 +288,32 @@ impl DeviceScope {
     }
 }
 
-/// Unidad de remapeo DMA (DRHD).
+/// DMA remapping unit (DRHD).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Drhd {
     pub register_base: u64,
     pub segment: u16,
-    /// Cubre todos los dispositivos del segmento no listados por otra unidad.
+    /// Covers every device of the segment not listed by another unit.
     pub include_all: bool,
     pub scopes: Vec<DeviceScope>,
 }
 
-/// Región de memoria reservada (RMRR): rango físico al que ciertos
-/// dispositivos siguen accediendo por DMA (firmware, USB heredado, gráficos)
-/// y que debe quedar mapeado identidad en su dominio.
+/// Reserved memory region (RMRR): physical range some devices keep
+/// accessing through DMA (firmware, legacy USB, graphics) and that must
+/// stay identity-mapped in their domain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rmrr {
     pub segment: u16,
     pub base: u64,
-    /// Inclusivo.
+    /// Inclusive.
     pub limit: u64,
     pub scopes: Vec<DeviceScope>,
 }
 
-/// Tabla DMAR (VT-d).
+/// DMAR table (VT-d).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Dmar {
-    /// Bits de dirección física que traducen las unidades.
+    /// Physical address bits translated by the units.
     pub host_address_width: u8,
     pub flags: u8,
     pub units: Vec<Drhd>,
@@ -383,8 +385,8 @@ impl Dmar {
         Ok(dmar)
     }
 
-    /// Índice de la unidad que traduce la función PCI dada: la que la lista
-    /// en su ámbito o, si ninguna, la que cubre todo el segmento.
+    /// Index of the unit translating the given PCI function: the one listing
+    /// it in its scope or, if none, the one covering the whole segment.
     pub fn unit_for(&self, segment: u16, bus: u8, device: u8, function: u8) -> Option<usize> {
         self.units
             .iter()
@@ -398,7 +400,7 @@ impl Dmar {
             })
     }
 
-    /// Regiones reservadas que aplican a la función PCI dada.
+    /// Reserved regions that apply to the given PCI function.
     pub fn reserved_for(
         &self,
         segment: u16,
@@ -412,12 +414,162 @@ impl Dmar {
     }
 }
 
+/// What the kernel needs from the FADT (`FACP`) to power off through S5.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Fadt {
+    /// Physical address of the DSDT (`X_DSDT` when present and non-zero).
+    pub dsdt: u64,
+    /// Port of the SMI command register (0 if the system is ACPI-only).
+    pub smi_cmd: u32,
+    /// Value written to `smi_cmd` to switch the firmware to ACPI mode.
+    pub acpi_enable: u8,
+    /// I/O ports of the PM1a/PM1b control blocks (0 if absent).
+    pub pm1a_cnt: u32,
+    pub pm1b_cnt: u32,
+}
+
+/// Parses the fields of the FADT used for S5 (ACPI 6.x, table 5.9).
+pub fn parse_fadt(table: &[u8]) -> Result<Fadt, AcpiError> {
+    let h = validate_table(table, b"FACP")?;
+    let len = (h.length as usize).min(table.len());
+    let u32_at = |o: usize| -> u32 {
+        if o + 4 <= len {
+            u32::from_le_bytes(table[o..o + 4].try_into().unwrap())
+        } else {
+            0
+        }
+    };
+    if len < 72 {
+        return Err(AcpiError::Truncated);
+    }
+    let mut dsdt = u32_at(40) as u64;
+    if len >= 148 {
+        let x = u64::from_le_bytes(table[140..148].try_into().unwrap());
+        if x != 0 {
+            dsdt = x;
+        }
+    }
+    Ok(Fadt {
+        dsdt,
+        smi_cmd: u32_at(48),
+        acpi_enable: table[52],
+        pm1a_cnt: u32_at(64),
+        pm1b_cnt: u32_at(68),
+    })
+}
+
+/// `SLP_TYPa`/`SLP_TYPb` of the `\_S5_` package in a DSDT (or SSDT), found
+/// by scanning the AML for `_S5_` followed by `PackageOp`, as small loaders
+/// do without an AML interpreter. Each value is a byte (`BytePrefix` 0x0A
+/// followed by the value) or the `ZeroOp`/`OneOp` constants.
+pub fn find_s5(aml: &[u8]) -> Option<(u8, u8)> {
+    let mut i = 0;
+    while i + 4 <= aml.len() {
+        if &aml[i..i + 4] != b"_S5_" {
+            i += 1;
+            continue;
+        }
+        // A name declaration: preceded by NameOp (0x08), optionally with a
+        // root (`\`) prefix in between.
+        let named =
+            (i >= 1 && aml[i - 1] == 0x08) || (i >= 2 && aml[i - 1] == b'\\' && aml[i - 2] == 0x08);
+        let mut j = i + 4;
+        if !named || aml.get(j) != Some(&0x12) {
+            i += 1;
+            continue;
+        }
+        j += 1;
+        // PkgLength: the top two bits of the first byte give the extra bytes.
+        let lead = *aml.get(j)?;
+        j += 1 + (lead >> 6) as usize;
+        j += 1; // NumElements
+        let value = |j: &mut usize| -> Option<u8> {
+            let b = *aml.get(*j)?;
+            *j += 1;
+            match b {
+                0x0A => {
+                    let v = *aml.get(*j)?;
+                    *j += 1;
+                    Some(v)
+                }
+                0x00 => Some(0),
+                0x01 => Some(1),
+                0xFF => Some(0xFF),
+                v if v < 0x08 => Some(v),
+                _ => None,
+            }
+        };
+        let a = value(&mut j)?;
+        let b = value(&mut j)?;
+        return Some((a & 7, b & 7));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::vec;
 
-    /// Fija el byte `at` para que `t[..len]` sume cero.
+    #[test]
+    fn fadt_fields_for_s5() {
+        let mut body = vec![0u8; 244 - 36];
+        let put = |b: &mut Vec<u8>, off: usize, v: &[u8]| {
+            b[off - 36..off - 36 + v.len()].copy_from_slice(v)
+        };
+        put(&mut body, 40, &0x7FE0_0000u32.to_le_bytes());
+        put(&mut body, 48, &0xB2u32.to_le_bytes());
+        put(&mut body, 52, &[0xA0]);
+        put(&mut body, 64, &0x604u32.to_le_bytes());
+        let f = parse_fadt(&table(b"FACP", &body)).unwrap();
+        assert_eq!(
+            f,
+            Fadt {
+                dsdt: 0x7FE0_0000,
+                smi_cmd: 0xB2,
+                acpi_enable: 0xA0,
+                pm1a_cnt: 0x604,
+                pm1b_cnt: 0
+            }
+        );
+        // X_DSDT wins when present.
+        put(&mut body, 140, &0x1_2345_0000u64.to_le_bytes());
+        assert_eq!(
+            parse_fadt(&table(b"FACP", &body)).unwrap().dsdt,
+            0x1_2345_0000
+        );
+        assert_eq!(
+            parse_fadt(&table(b"FACP", &body[..20])),
+            Err(AcpiError::Truncated)
+        );
+        assert!(parse_fadt(&table(b"APIC", &body)).is_err());
+    }
+
+    #[test]
+    fn s5_package_variants() {
+        // Name (_S5_, Package (4) { 0x05, 0x05, Zero, Zero }) with BytePrefix.
+        let aml = [
+            0x10, 0x08, b'_', b'S', b'5', b'_', 0x12, 0x0A, 0x04, 0x0A, 0x05, 0x0A, 0x05, 0x00,
+            0x00,
+        ];
+        assert_eq!(find_s5(&aml), Some((5, 5)));
+        // QEMU style: root prefix, Zero constants (SLP_TYP 0).
+        let aml = [
+            0x08, b'\\', b'_', b'S', b'5', b'_', 0x12, 0x06, 0x04, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(find_s5(&aml), Some((0, 0)));
+        // Bare small integers (some firmware) and a two-byte PkgLength.
+        let aml = [
+            0x08, b'_', b'S', b'5', b'_', 0x12, 0x40, 0x00, 0x04, 0x07, 0x07, 0x00, 0x00,
+        ];
+        assert_eq!(find_s5(&aml), Some((7, 7)));
+        // `_S5_` used as a reference, not a declaration, is skipped.
+        let aml = [0x70, b'_', b'S', b'5', b'_', 0x12, 0x06, 0x04, 0x0A, 0x05];
+        assert_eq!(find_s5(&aml), None);
+        assert_eq!(find_s5(b"no sleep states here"), None);
+    }
+
+    /// Sets byte `at` so that `t[..len]` sums to zero.
     fn with_checksum(mut t: Vec<u8>, at: usize, len: usize) -> Vec<u8> {
         t[at] = 0;
         let sum = t[..len].iter().fold(0u8, |a, b| a.wrapping_add(*b));
@@ -457,7 +609,7 @@ mod tests {
         v2[15] = 2;
         v2.extend_from_slice(&36u32.to_le_bytes());
         v2.extend_from_slice(&0xFFFF_0000u64.to_le_bytes());
-        v2.extend_from_slice(&[0, 0, 0, 0]); // ext checksum + reservado
+        v2.extend_from_slice(&[0, 0, 0, 0]); // ext checksum + reserved
         let v2 = with_checksum(v2, 8, 20);
         let v2 = with_checksum(v2, 32, 36);
         let r = Rsdp::parse(&v2).unwrap();
@@ -490,7 +642,7 @@ mod tests {
         let mut body = Vec::new();
         body.extend_from_slice(&0xFEE0_0000u32.to_le_bytes()); // lapic
         body.extend_from_slice(&1u32.to_le_bytes()); // flags
-                                                     // LAPIC id 0 habilitado, LAPIC id 1 deshabilitado
+                                                     // LAPIC id 0 enabled, LAPIC id 1 disabled
         body.extend_from_slice(&[0, 8, 0, 0, 1, 0, 0, 0]);
         body.extend_from_slice(&[0, 8, 1, 1, 0, 0, 0, 0]);
         // I/O APIC id 0 @ 0xFEC00000, gsi 0
@@ -505,7 +657,7 @@ mod tests {
         body.extend_from_slice(&[2, 10, 0, 9]);
         body.extend_from_slice(&9u32.to_le_bytes());
         body.extend_from_slice(&0x000Fu16.to_le_bytes());
-        // Entrada desconocida (tipo 9) que debe ignorarse
+        // Unknown entry (type 9) that must be ignored
         body.extend_from_slice(&[9, 4, 0, 0]);
         let m = Madt::parse(&table(b"APIC", &body)).unwrap();
         assert_eq!(m.lapic_address, 0xFEE0_0000);
@@ -532,7 +684,7 @@ mod tests {
 
     #[test]
     fn mcfg_entries() {
-        let mut body = vec![0u8; 8]; // reservado
+        let mut body = vec![0u8; 8]; // reserved
         body.extend_from_slice(&0xB000_0000u64.to_le_bytes());
         body.extend_from_slice(&0u16.to_le_bytes());
         body.extend_from_slice(&[0, 255]);
@@ -555,20 +707,20 @@ mod tests {
 
     #[test]
     fn dmar_units_reserved_regions_and_scopes() {
-        // Ámbito: endpoint en bus 0, dispositivo 2 función 0 (8 bytes).
+        // Scope: endpoint on bus 0, device 2 function 0 (8 bytes).
         let scope = |kind: u8, bus: u8, dev: u8, func: u8| vec![kind, 8, 0, 0, 0, bus, dev, func];
         let mut body = vec![39u8, 1]; // HAW - 1 = 39 -> 40 bits; flags
         body.extend_from_slice(&[0; 10]);
-        // DRHD dedicada a 00:02.0 en 0xfed91000.
+        // DRHD dedicated to 00:02.0 at 0xfed91000.
         let mut drhd0 = vec![0u8, 0, 0, 0, 0, 0, 0, 0];
         drhd0.extend_from_slice(&0xFED9_1000u64.to_le_bytes());
         drhd0.extend_from_slice(&scope(1, 0, 2, 0));
         let n0 = drhd0.len() as u16;
         drhd0[2..4].copy_from_slice(&n0.to_le_bytes());
-        // DRHD INCLUDE_PCI_ALL en 0xfed90000.
+        // DRHD INCLUDE_PCI_ALL at 0xfed90000.
         let mut drhd1 = vec![0u8, 0, 16, 0, 1, 0, 0, 0];
         drhd1.extend_from_slice(&0xFED9_0000u64.to_le_bytes());
-        // RMRR 0xdead0000..=0xdeadffff para 00:1d.0.
+        // RMRR 0xdead0000..=0xdeadffff for 00:1d.0.
         let mut rmrr = vec![1u8, 0, 0, 0, 0, 0, 0, 0];
         rmrr.extend_from_slice(&0xDEAD_0000u64.to_le_bytes());
         rmrr.extend_from_slice(&0xDEAD_FFFFu64.to_le_bytes());
@@ -587,19 +739,19 @@ mod tests {
         assert!(!d.units[0].include_all);
         assert_eq!(d.units[0].scopes[0].path, vec![(2, 0)]);
         assert!(d.units[1].include_all);
-        assert_eq!(d.unit_for(0, 0, 2, 0), Some(0), "ambito explicito");
+        assert_eq!(d.unit_for(0, 0, 2, 0), Some(0), "explicit scope");
         assert_eq!(d.unit_for(0, 0, 3, 0), Some(1), "INCLUDE_PCI_ALL");
-        assert_eq!(d.unit_for(1, 0, 3, 0), None, "otro segmento");
+        assert_eq!(d.unit_for(1, 0, 3, 0), None, "other segment");
         assert_eq!(d.reserved.len(), 1);
         assert_eq!(d.reserved[0].base, 0xDEAD_0000);
         assert_eq!(d.reserved[0].limit, 0xDEAD_FFFF);
         assert_eq!(d.reserved_for(0, 0, 0x1d, 0).count(), 1);
         assert_eq!(d.reserved_for(0, 0, 2, 0).count(), 0);
 
-        // Ámbito truncado: error, no lectura fuera de rango.
+        // Truncated scope: error, no out-of-bounds read.
         let mut bad_body = body.clone();
         let n = bad_body.len();
-        bad_body[n - 7] = 9; // longitud del ultimo scope > lo que queda
+        bad_body[n - 7] = 9; // length of the last scope > what is left
         let bad = table(b"DMAR", &bad_body);
         assert_eq!(Dmar::parse(&bad), Err(AcpiError::Truncated));
         assert_eq!(

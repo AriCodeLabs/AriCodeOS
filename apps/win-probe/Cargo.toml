@@ -3,7 +3,7 @@ name = "ari-app-win-probe"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Regresion del broker: aplicacion que pide window; sin GUI el broker la deniega tras conceder SYSTEM"
+description = "Broker regression: app that requests window; without a GUI the broker denies it after granting SYSTEM"
 publish = false
 
 [[bin]]

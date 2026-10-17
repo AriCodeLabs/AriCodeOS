@@ -1,23 +1,23 @@
-//! Planificador: tabla de hilos + política `aricode-sched` + cambio de contexto.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Scheduler: thread table + `aricode-sched` policy + context switching.
 //!
-//! Regla de bloqueo (Fase 32): el lock del planificador se toma para decidir
-//! y se mantiene tomado durante el cambio de contexto; lo suelta el hilo que
-//! reanuda (`force_unlock`), que no tiene el guard. Así ninguna otra CPU
-//! puede elegir al hilo saliente antes de que su `rsp` esté guardado. El
-//! cambio se hace con las interrupciones deshabilitadas; el hilo que reanuda
-//! restaura las suyas.
+//! Locking rule (Phase 32): the scheduler lock is taken to decide and stays
+//! held across the context switch; it is released by the resuming thread
+//! (`force_unlock`), which does not hold the guard. That way no other CPU
+//! can pick the outgoing thread before its `rsp` is saved. The switch
+//! happens with interrupts disabled; the resuming thread restores its own.
 //!
-//! Preempción (Fase 10): el handler del timer llama a `on_tick` tras el EOI.
-//! Un cambio de contexto desde el handler deja el estado del hilo en su
-//! propia pila (marco de interrupción + registros del trampolín); cuando
-//! vuelve a ser elegido, retorna por el handler y el `iretq` restaura sus
-//! flags. Todos los locks del kernel deshabilitan interrupciones, así que
-//! ninguna sección crítica puede ser preemptada.
+//! Preemption (Phase 10): the timer handler calls `on_tick` after the EOI.
+//! A context switch from the handler leaves the thread state on its own
+//! stack (interrupt frame + trampoline registers); when it is picked again,
+//! it returns through the handler and `iretq` restores its flags. Every
+//! kernel lock disables interrupts, so no critical section can be preempted.
 //!
-//! SMP (Fase 32): una cola de listos compartida; cada CPU tiene su hilo
-//! actual y su idle (`cpu::Cpu`). Solo el BSP cuenta el tiempo y despierta a
-//! los dormidos; cuando un hilo pasa a listo y otra CPU está en idle se le
-//! envía una IPI para que lo tome sin esperar a su siguiente tick.
+//! SMP (Phase 32): a shared ready queue; each CPU has its current thread and
+//! its idle thread (`cpu::Cpu`). Only the BSP keeps time and wakes sleepers;
+//! when a thread becomes ready and another CPU is idle, that CPU gets an IPI
+//! so it takes the thread without waiting for its next tick.
 
 use super::context::switch_context;
 use super::thread::Thread;
@@ -41,7 +41,7 @@ static SCHED: IrqLock<Option<Scheduler>> = IrqLock::new(None);
 static SWITCHES: AtomicU64 = AtomicU64::new(0);
 static PREEMPTIONS: AtomicU64 = AtomicU64::new(0);
 
-/// Quantum de CPU: 2 ticks = 20 ms a 100 Hz.
+/// CPU quantum: 2 ticks = 20 ms at 100 Hz.
 pub const QUANTUM_TICKS: u32 = 2;
 
 pub const MAIN_TID: Tid = Tid(0);
@@ -49,10 +49,10 @@ pub const IDLE_TID: Tid = Tid(1);
 
 fn with<R>(f: impl FnOnce(&mut Scheduler) -> R) -> R {
     let mut guard = SCHED.lock();
-    f(guard.as_mut().expect("scheduler no inicializado"))
+    f(guard.as_mut().expect("scheduler not initialized"))
 }
 
-/// Adopta el contexto de arranque como hilo `main` y crea el hilo idle del BSP.
+/// Adopts the boot context as the `main` thread and creates the BSP's idle thread.
 pub fn init() {
     let mut sched = Scheduler {
         policy: RoundRobin::new(MAIN_TID, IDLE_TID),
@@ -63,21 +63,21 @@ pub fn init() {
         MAIN_TID,
         Box::new(Thread::adopt_current(MAIN_TID, "main", kernel_cr3)),
     );
-    let idle = Thread::new(IDLE_TID, "idle", idle_entry, 0, None, kernel_cr3).expect("hilo idle");
+    let idle = Thread::new(IDLE_TID, "idle", idle_entry, 0, None, kernel_cr3).expect("idle thread");
     sched.threads.insert(IDLE_TID, Box::new(idle));
     *SCHED.lock() = Some(sched);
     let bsp = cpu::slot(0);
     bsp.set_idle_tid(IDLE_TID.0);
     bsp.set_current(MAIN_TID.0, QUANTUM_TICKS);
     info!(
-        "task: hilo main adoptado, idle creado (pilas de {} KiB con guard); scheduler round robin preemptivo, quantum {} ms",
+        "task: main thread adopted, idle created ({} KiB stacks with guard); preemptive round-robin scheduler, quantum {} ms",
         super::stack::STACK_SIZE / 1024,
         QUANTUM_TICKS as u64 * crate::time::MS_PER_TICK
     );
 }
 
-/// Crea el hilo idle de la CPU `idx` (Fase 32), que ese AP adopta como su
-/// hilo en ejecución: devuelve la cima de su pila para arrancarlo ahí.
+/// Creates the idle thread of CPU `idx` (Phase 32), which that AP adopts as
+/// its running thread: returns the top of its stack to start it there.
 pub fn create_idle_for_cpu(idx: usize) -> Result<u64, &'static str> {
     let kernel_cr3 = crate::memory::vmm::with(|m| m.root_phys());
     let tid = with(|s| s.policy.allocate_tid());
@@ -90,33 +90,33 @@ pub fn create_idle_for_cpu(idx: usize) -> Result<u64, &'static str> {
         s.threads.insert(tid, Box::new(thread));
         s.policy
             .add_cpu(idx, tid)
-            .map_err(|_| "scheduler: CPU fuera de orden")
+            .map_err(|_| "scheduler: CPU out of order")
     })?;
     cpu::slot(idx).set_idle_tid(tid.0);
     Ok(top)
 }
 
-/// El AP `idx` empieza a planificar: su idle es el hilo actual.
+/// AP `idx` starts scheduling: its idle thread is the current one.
 pub fn adopt_idle(idx: usize) {
     let c = cpu::slot(idx);
     let idle = Tid(c.idle_tid());
     let top = with(|s| {
         s.threads
             .get(&idle)
-            .expect("idle del AP")
+            .expect("AP idle thread")
             .kernel_stack_top()
     });
     c.set_current(idle.0, QUANTUM_TICKS);
     crate::arch::x86_64::gdt::set_kernel_stack(top);
 }
 
-/// Llamado desde el handler del timer (interrupciones deshabilitadas, EOI
-/// ya enviado). En el BSP despierta a los dormidos; en todas, preempta si el
-/// quantum expiró. Antes de `init` no hace nada.
+/// Called from the timer handler (interrupts disabled, EOI already sent). On
+/// the BSP it wakes sleepers; on every CPU it preempts if the quantum
+/// expired. Does nothing before `init`.
 pub fn on_tick(now: u64, bsp: bool, from_user: bool) {
-    // Un hilo de usuario que no hace syscalls (bucle infinito) solo pasa por
-    // aquí: si su proceso tiene una terminación pendiente, termina ya, igual
-    // que ante una excepción (auditoría 6ee19fb, hallazgo 4).
+    // A user thread that makes no syscalls (infinite loop) only passes
+    // through here: if its process has a pending termination, it ends now,
+    // just as on an exception (audit 6ee19fb, finding 4).
     if from_user && crate::user::process::current_kill_requested() {
         crate::user::process::kill_current(crate::user::process::KILLED_BY_SUPERVISOR);
     }
@@ -139,14 +139,14 @@ pub fn on_tick(now: u64, bsp: bool, from_user: bool) {
     }
 }
 
-/// Si otra CPU está en idle, la saca de `hlt` para que mire la cola.
+/// If another CPU is idle, takes it out of `hlt` so it checks the queue.
 fn kick_idle() {
     if let Some(c) = cpu::idle_other_than(cpu::id()) {
         apic::send_ipi(c.lapic_id(), apic::RESCHED_VECTOR);
     }
 }
 
-/// Duerme el hilo actual hasta el tick `until` (o cede si ya pasó).
+/// Puts the current thread to sleep until tick `until` (or yields if it has passed).
 pub fn sleep_until(until: u64) {
     if crate::time::ticks() >= until {
         yield_now();
@@ -155,29 +155,29 @@ pub fn sleep_until(until: u64) {
     switch_with(|p, c| p.sleep_current(c, until));
 }
 
-/// Duerme al menos `ms`. Un despertar anticipado (un `wake` espurio de una
-/// cola en la que este hilo esperó antes) vuelve a dormir hasta el plazo.
+/// Sleeps at least `ms`. An early wake-up (a spurious `wake` from a queue
+/// this thread waited on before) goes back to sleep until the deadline.
 pub fn sleep_ms(ms: u64) {
-    // Un tick más: el actual ya ha transcurrido en parte, y "al menos `ms`"
-    // se mide con el reloj de µs, no con el tick (etapa 5).
+    // One more tick: the current one has partly elapsed, and "at least `ms`"
+    // is measured with the microsecond clock, not the tick (stage 5).
     let until = crate::time::ticks() + ms.div_ceil(crate::time::MS_PER_TICK) + 1;
     loop {
         sleep_until(until);
-        // Un despertar anticipado por `process_kill` no vuelve a dormir: la
-        // syscall termina el proceso al salir (auditoría 6ee19fb, 4).
+        // An early wake-up from `process_kill` does not go back to sleep: the
+        // syscall terminates the process on exit (audit 6ee19fb, 4).
         if crate::time::ticks() >= until || crate::user::process::current_kill_requested() {
             return;
         }
     }
 }
 
-/// Bloquea el hilo actual hasta que alguien llame a `wake`.
+/// Blocks the current thread until someone calls `wake`.
 pub fn block_current() {
     switch_with(|p, c| p.block_current(c));
 }
 
-/// Despierta un hilo bloqueado o dormido antes de su plazo (o deja el
-/// despertar pendiente si aún está ejecutando en otra CPU).
+/// Wakes a blocked or sleeping thread before its deadline (or leaves the
+/// wake-up pending if it is still running on another CPU).
 pub fn wake(tid: Tid) -> Result<(), aricode_sched::SchedError> {
     let r = with(|s| s.policy.wake(tid));
     if r.is_ok() {
@@ -186,7 +186,7 @@ pub fn wake(tid: Tid) -> Result<(), aricode_sched::SchedError> {
     r
 }
 
-/// Fija la CPU en la que `tid` puede ejecutar (`None` = cualquiera).
+/// Sets the CPU `tid` may run on (`None` = any).
 pub fn set_affinity(tid: Tid, cpu: Option<usize>) -> Result<(), aricode_sched::SchedError> {
     with(|s| s.policy.set_affinity(tid, cpu))
 }
@@ -208,9 +208,9 @@ extern "C" fn idle_entry(_: usize) {
     idle_loop()
 }
 
-/// Bucle idle de una CPU: si hay algo listo para ella lo toma; si no,
-/// duerme. `sti; hlt` es atómico: una IPI o un tick que llegue justo antes
-/// de dormir despierta a la CPU igualmente.
+/// Idle loop of a CPU: if something is ready for it, it takes it; otherwise
+/// it sleeps. `sti; hlt` is atomic: an IPI or tick arriving just before
+/// sleeping still wakes the CPU.
 pub fn idle_loop() -> ! {
     loop {
         let irq = KernelIrq::save_and_disable();
@@ -219,13 +219,13 @@ pub fn idle_loop() -> ! {
             KernelIrq::restore(irq);
             yield_now();
         } else {
-            // SAFETY: rdtsc solo lee el contador de tiempo.
+            // SAFETY: rdtsc only reads the time stamp counter.
             let t0 = unsafe { core::arch::x86_64::_rdtsc() };
-            // SAFETY: habilitar interrupciones y esperar la siguiente.
+            // SAFETY: enable interrupts and wait for the next one.
             unsafe { core::arch::asm!("sti", "hlt", options(nomem, nostack)) };
-            // SAFETY: ídem.
+            // SAFETY: same as above.
             let t1 = unsafe { core::arch::x86_64::_rdtsc() };
-            // El hilo idle nunca migra: `current()` es su propia CPU.
+            // The idle thread never migrates: `current()` is its own CPU.
             cpu::current().add_idle_cycles(t1.wrapping_sub(t0));
         }
     }
@@ -235,7 +235,7 @@ pub fn current_tid() -> Tid {
     Tid(cpu::current_tid())
 }
 
-/// Crea un hilo del kernel listo para ejecutar.
+/// Creates a kernel thread ready to run.
 pub fn spawn(
     name: &str,
     entry: super::context::ThreadEntry,
@@ -245,7 +245,7 @@ pub fn spawn(
     spawn_thread(name, entry, arg, None, cr3, None)
 }
 
-/// Crea un hilo del kernel que solo ejecutará en la CPU `cpu`.
+/// Creates a kernel thread that will only run on CPU `cpu`.
 pub fn spawn_on(
     name: &str,
     entry: super::context::ThreadEntry,
@@ -256,10 +256,10 @@ pub fn spawn_on(
     spawn_thread(name, entry, arg, None, cr3, Some(cpu))
 }
 
-/// Prepara (sin encolar) el hilo principal de un proceso de usuario: arranca
-/// en `entry` (ring 0, con el espacio `cr3` activo) y de ahí salta a ring 3.
-/// El llamador registra el proceso y después llama a `start_thread`, de modo
-/// que el hilo nunca ejecuta antes de que su proceso exista.
+/// Prepares (without queueing) the main thread of a user process: it starts
+/// at `entry` (ring 0, with address space `cr3` active) and from there jumps
+/// to ring 3. The caller registers the process and then calls
+/// `start_thread`, so the thread never runs before its process exists.
 pub fn prepare_for_process(
     name: &str,
     entry: super::context::ThreadEntry,
@@ -278,7 +278,7 @@ pub fn prepare_for_process(
     )?))
 }
 
-/// Encola un hilo preparado con `prepare_for_process`.
+/// Queues a thread prepared with `prepare_for_process`.
 pub fn start_thread(thread: Box<Thread>) -> Tid {
     let tid = thread.tid;
     debug!("task: spawn {tid:?} '{}'", thread.name);
@@ -306,7 +306,7 @@ fn spawn_thread(
         if let Some(c) = affinity {
             s.policy
                 .set_affinity(tid, Some(c))
-                .map_err(|_| "scheduler: CPU desconocida")?;
+                .map_err(|_| "scheduler: unknown CPU")?;
         }
         Ok::<(), &'static str>(())
     })?;
@@ -315,26 +315,26 @@ fn spawn_thread(
     Ok(tid)
 }
 
-/// Proceso del hilo actual.
+/// Process of the current thread.
 pub fn current_process() -> Option<u32> {
     let me = current_tid();
     with(|s| s.threads.get(&me).and_then(|t| t.process))
 }
 
-/// Estado de un hilo, si existe.
+/// State of a thread, if it exists.
 pub fn state(tid: Tid) -> Option<State> {
     with(|s| s.policy.state(tid))
 }
 
-/// Cede la CPU al siguiente hilo listo.
+/// Yields the CPU to the next ready thread.
 pub fn yield_now() {
     switch_with(|p, c| p.yield_current(c));
 }
 
-/// Termina el hilo actual. Nunca retorna.
+/// Terminates the current thread. Never returns.
 pub fn exit() -> ! {
     switch_with(|p, c| Some(p.exit_current(c)));
-    unreachable!("un hilo terminado no reanuda");
+    unreachable!("a finished thread does not resume");
 }
 
 #[no_mangle]
@@ -342,27 +342,27 @@ extern "C" fn thread_exit_trampoline() -> ! {
     exit()
 }
 
-/// Primer código de un hilo nuevo (desde `thread_start`, IF = 0): suelta el
-/// lock del planificador que tomó la CPU que conmutó hacia él.
+/// First code of a new thread (from `thread_start`, IF = 0): releases the
+/// scheduler lock taken by the CPU that switched to it.
 #[no_mangle]
 extern "C" fn thread_first_run() {
-    // SAFETY: protocolo de cambio de contexto (ver cabecera del módulo).
+    // SAFETY: context switch protocol (see the module header).
     unsafe { SCHED.force_unlock() };
     reap();
 }
 
-/// Aplica `decide` a la política (para la CPU actual) y, si hay cambio,
-/// conmuta de contexto con el lock del planificador tomado.
+/// Applies `decide` to the policy (for the current CPU) and, if there is a
+/// change, switches context with the scheduler lock held.
 fn switch_with(decide: impl FnOnce(&mut RoundRobin, usize) -> Option<Tid>) {
     let irq = KernelIrq::save_and_disable();
     let c = cpu::current();
     let mut guard = SCHED.lock();
     let switch = {
-        let s = guard.as_mut().expect("scheduler no inicializado");
+        let s = guard.as_mut().expect("scheduler not initialized");
         let prev = s.policy.current(c.index());
         decide(&mut s.policy, c.index()).map(|next| {
-            let old = &mut s.threads.get_mut(&prev).expect("hilo actual").saved_rsp as *mut u64;
-            let nt = s.threads.get(&next).expect("hilo siguiente");
+            let old = &mut s.threads.get_mut(&prev).expect("current thread").saved_rsp as *mut u64;
+            let nt = s.threads.get(&next).expect("next thread");
             (next, old, nt.saved_rsp, nt.kernel_stack_top(), nt.cr3)
         })
     };
@@ -370,29 +370,29 @@ fn switch_with(decide: impl FnOnce(&mut RoundRobin, usize) -> Option<Tid>) {
         Some((next, old, new, kstack, cr3)) => {
             c.set_current(next.0, QUANTUM_TICKS);
             SWITCHES.fetch_add(1, Ordering::Relaxed);
-            // Entradas a ring 0 desde ring 3 del hilo siguiente: su pila de kernel.
+            // Ring 3 to ring 0 entries of the next thread: its kernel stack.
             crate::arch::x86_64::gdt::set_kernel_stack(kstack);
-            // Espacio de direcciones del hilo siguiente (la mitad del kernel es
-            // común, así que el cambio es seguro desde cualquier pila de kernel).
+            // Address space of the next thread (the kernel half is shared, so
+            // switching is safe from any kernel stack).
             let current_cr3: u64;
-            // SAFETY: lectura de CR3.
+            // SAFETY: read of CR3.
             unsafe {
                 core::arch::asm!("mov {}, cr3", out(reg) current_cr3, options(nomem, nostack))
             };
             if cr3 != current_cr3 {
-                // SAFETY: `cr3` es un PML4 construido por el VMM o por `process::spawn`.
+                // SAFETY: `cr3` is a PML4 built by the VMM or by `process::spawn`.
                 unsafe { core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack)) };
             }
-            // El lock sigue tomado durante el cambio: lo suelta el hilo que
-            // reanuda (aquí abajo, o `thread_first_run` si es su primera vez).
+            // The lock stays held during the switch: the resuming thread releases
+            // it (below, or `thread_first_run` if it is its first time).
             core::mem::forget(guard);
-            // SAFETY: `old` apunta al campo de un `Box<Thread>` que no se mueve ni
-            // se libera mientras el hilo exista; `new` fue guardado por un
-            // `switch_context` previo o preparado por `initial_stack_frame`.
+            // SAFETY: `old` points to a field of a `Box<Thread>` that neither moves nor
+            // is freed while the thread exists; `new` was saved by an earlier
+            // `switch_context` or prepared by `initial_stack_frame`.
             unsafe { switch_context(old, new) };
-            // SAFETY: quien conmutó hacia nosotros dejó el lock tomado.
+            // SAFETY: whoever switched to us left the lock held.
             unsafe { SCHED.force_unlock() };
-            // Al reanudar aquí, otro hilo puede haber terminado: liberar sus pilas.
+            // On resuming here, another thread may have finished: free its stacks.
             reap();
         }
         None => drop(guard),
@@ -400,8 +400,8 @@ fn switch_with(decide: impl FnOnce(&mut RoundRobin, usize) -> Option<Tid>) {
     KernelIrq::restore(irq);
 }
 
-/// Libera los hilos terminados. Corre siempre en un hilo distinto al que se
-/// libera, así que soltar su pila es seguro.
+/// Frees finished threads. Always runs on a thread other than the one being
+/// freed, so dropping its stack is safe.
 fn reap() {
     let zombies: Vec<Box<Thread>> = with(|s| {
         let dead: Vec<Tid> = s.policy.terminated().collect();
@@ -421,9 +421,9 @@ fn reap() {
     }
 }
 
-/// `true` si `addr` cae en la guard page de la pila de algún hilo. Se usa
-/// desde el handler de excepciones: `try_lock` para no bloquear si el fallo
-/// ocurrió dentro del propio planificador.
+/// `true` if `addr` falls in the guard page of some thread's stack. Used
+/// from the exception handler: `try_lock` so as not to block if the fault
+/// happened inside the scheduler itself.
 pub fn in_thread_stack_guard(addr: u64) -> bool {
     let Some(guard) = SCHED.try_lock() else {
         return false;
@@ -439,8 +439,8 @@ pub fn thread_count() -> usize {
     with(|s| s.policy.thread_count())
 }
 
-/// Autoprueba cooperativa (`test=threads`): dos hilos alternan estrictamente
-/// con `yield`, y un lote de hilos termina y libera sus pilas.
+/// Cooperative self-test (`test=threads`): two threads strictly alternate
+/// with `yield`, and a batch of threads finishes and frees its stacks.
 pub fn threads_selftest() {
     use crate::memory::pmm;
     use core::sync::atomic::{AtomicBool, AtomicU64};
@@ -448,8 +448,8 @@ pub fn threads_selftest() {
     static LOG: IrqLock<Vec<u8>> = IrqLock::new(Vec::new());
     static GO: AtomicBool = AtomicBool::new(false);
     extern "C" fn ping(arg: usize) {
-        // Nadie anota hasta que los dos hilos existen: si no, un tick entre
-        // los dos spawn deja a uno solo en la cola y rompe la alternancia.
+        // Nobody records until both threads exist: otherwise a tick between
+        // the two spawns leaves only one in the queue and breaks alternation.
         while !GO.load(Ordering::Acquire) {
             yield_now();
         }
@@ -458,9 +458,9 @@ pub fn threads_selftest() {
             yield_now();
         }
     }
-    assert_eq!(current_tid(), MAIN_TID, "la autoprueba corre en main");
-    // La alternancia estricta solo tiene sentido en una CPU: se fijan los
-    // tres hilos a la CPU 0.
+    assert_eq!(current_tid(), MAIN_TID, "the self-test runs on main");
+    // Strict alternation only makes sense on one CPU: the three threads are
+    // pinned to CPU 0.
     set_affinity(MAIN_TID, Some(0)).unwrap();
     let a = spawn_on("ping-a", ping, b'A' as usize, 0).unwrap();
     let b = spawn_on("ping-b", ping, b'B' as usize, 0).unwrap();
@@ -469,14 +469,14 @@ pub fn threads_selftest() {
         yield_now();
     }
     let log = LOG.lock().clone();
-    // Quien anota primero depende de en que punto del turno cayo el ultimo
-    // tick; lo que se exige es la alternancia estricta.
+    // Who records first depends on where in the turn the last tick landed;
+    // what is required is strict alternation.
     let alternates = log.len() == 6
         && log.windows(2).all(|w| w[0] != w[1])
         && log.iter().filter(|&&c| c == b'A').count() == 3;
     assert!(
         alternates,
-        "los dos hilos deben alternar: {:?}",
+        "the two threads must alternate: {:?}",
         core::str::from_utf8(&log)
     );
     set_affinity(MAIN_TID, None).unwrap();
@@ -496,43 +496,43 @@ pub fn threads_selftest() {
     while tids.iter().any(|t| state(*t).is_some()) {
         yield_now();
     }
-    // Los ultimos zombis los recoge el hilo que reanuda tras su salida, que
-    // puede estar en otra CPU: ceder un par de veces les da tiempo.
+    // The last zombies are reaped by the thread that resumes after their exit,
+    // which may be on another CPU: yielding a couple of times gives them time.
     for _ in 0..8 {
         sleep_ms(10);
     }
     assert_eq!(DONE.load(Ordering::Relaxed), N as u64);
     let free_after = pmm::stats().free_frames;
-    // Las pilas se devuelven; solo pueden quedar tablas de páginas nuevas.
+    // Stacks are returned; only new page tables may remain.
     assert!(
         free_before - free_after <= 8,
-        "frames no devueltos tras reap: {}",
+        "frames not returned after reap: {}",
         free_before - free_after
     );
-    // main, el hilo del cursor de la consola y un idle por CPU.
+    // main, the console cursor thread and one idle thread per CPU.
     let expected = 2 + cpu::online_count();
     assert_eq!(
         thread_count(),
         expected,
-        "solo main, el hilo del cursor y un idle por CPU"
+        "only main, the cursor thread and one idle per CPU"
     );
     assert_eq!(current_tid(), MAIN_TID);
     info!(
-        "threads selftest ok (alternancia {}, {N} workers terminados y recogidos, {} frames en tablas)",
+        "threads selftest ok (alternation {}, {N} workers finished and reaped, {} frames in tables)",
         core::str::from_utf8(&log).unwrap_or("?"),
         free_before - free_after
     );
 }
 
-/// Autoprueba preemptiva (`test=sched`): hilos que nunca ceden reparten la
-/// CPU, el sueño planificado respeta el tiempo, y bloqueo/despertar funcionan
-/// a través de una cola de espera.
+/// Preemptive self-test (`test=sched`): threads that never yield share the
+/// CPU, scheduled sleep respects time, and block/wake work through a wait
+/// queue.
 pub fn selftest() {
     use super::wait::WaitQueue;
     use core::sync::atomic::{AtomicBool, AtomicU64};
 
-    // 1. Equidad: tres hilos ocupados sin yield durante 300 ms, todos en la
-    // CPU 0 para que compitan de verdad por ella.
+    // 1. Fairness: three busy threads without yield for 300 ms, all on CPU 0
+    // so they truly compete for it.
     static STOP: AtomicBool = AtomicBool::new(false);
     static COUNTERS: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
     extern "C" fn busy(i: usize) {
@@ -553,16 +553,16 @@ pub fn selftest() {
     }
     let counts: Vec<u64> = COUNTERS.iter().map(|c| c.load(Ordering::Relaxed)).collect();
     let (min, max) = (*counts.iter().min().unwrap(), *counts.iter().max().unwrap());
-    assert!(min > 0, "un hilo ocupado no llego a ejecutar: {counts:?}");
-    assert!(min * 2 >= max, "reparto injusto: {counts:?}");
+    assert!(min > 0, "a busy thread never got to run: {counts:?}");
+    assert!(min * 2 >= max, "unfair share: {counts:?}");
     let switches = stats().switches - switches_before;
     assert!(
         switches >= 20,
-        "pocos cambios de contexto en 300 ms: {switches}"
+        "too few context switches in 300 ms: {switches}"
     );
     set_affinity(MAIN_TID, None).unwrap();
 
-    // 2. Sueño planificado: un hilo duerme 50 ms y anota cuando despierta.
+    // 2. Scheduled sleep: a thread sleeps 50 ms and records when it wakes.
     static WOKE_AT: AtomicU64 = AtomicU64::new(0);
     extern "C" fn sleeper(_: usize) {
         sleep_ms(50);
@@ -574,13 +574,10 @@ pub fn selftest() {
         yield_now();
     }
     let slept = WOKE_AT.load(Ordering::Relaxed) - t0;
-    assert!(
-        (5..=7).contains(&slept),
-        "sleep_ms(50) durmio {slept} ticks"
-    );
+    assert!((5..=7).contains(&slept), "sleep_ms(50) slept {slept} ticks");
 
-    // 3. Bloqueo y despertar por cola de espera: dos consumidores, `wake_one`
-    // libera exactamente uno y `wake_all` al resto.
+    // 3. Block and wake through a wait queue: two consumers, `wake_one`
+    // releases exactly one and `wake_all` the rest.
     static QUEUE: WaitQueue = WaitQueue::new();
     static READY_FLAG: AtomicU64 = AtomicU64::new(0);
     static CONSUMED: AtomicU64 = AtomicU64::new(0);
@@ -595,17 +592,17 @@ pub fn selftest() {
     assert_eq!(state(c1), Some(State::Blocked));
     assert_eq!(CONSUMED.load(Ordering::Relaxed), 0);
     READY_FLAG.store(0b01, Ordering::Relaxed);
-    QUEUE.wake_one(); // despierta a c0, que fue el primero en esperar
+    QUEUE.wake_one(); // wakes c0, which was the first to wait
     sleep_ms(30);
     assert_eq!(
         CONSUMED.load(Ordering::Relaxed),
         1,
-        "wake_one debe liberar solo a uno"
+        "wake_one must release only one"
     );
     assert_eq!(
         state(c1),
         Some(State::Blocked),
-        "el segundo sigue esperando"
+        "the second one is still waiting"
     );
     READY_FLAG.store(0b11, Ordering::Relaxed);
     QUEUE.wake_all();
@@ -616,15 +613,15 @@ pub fn selftest() {
 
     let st = stats();
     info!(
-        "sched selftest ok (busy {counts:?} en 300 ms, {switches} cambios, {} preempciones, sleep 50 ms -> {slept} ticks, wait_one/wake_all)",
+        "sched selftest ok (busy {counts:?} in 300 ms, {switches} switches, {} preemptions, sleep 50 ms -> {slept} ticks, wait_one/wake_all)",
         st.preemptions
     );
 }
 
-/// Autoprueba SMP (`test=smp`): todas las CPUs de la MADT en linea, hilos
-/// con afinidad que ejecutan a la vez en CPUs distintas, hilos sin afinidad
-/// que migran, TLB shootdown observado desde otra CPU y un contador bajo
-/// lock disputado por todas las CPUs.
+/// SMP self-test (`test=smp`): every MADT CPU online, pinned threads running
+/// simultaneously on different CPUs, unpinned threads that migrate, a TLB
+/// shootdown observed from another CPU and a counter under a lock contended
+/// by every CPU.
 pub fn smp_selftest() {
     use crate::memory::{phys, pmm, vmm};
     use aricode_x86_paging::{GLOBAL, NO_EXECUTE, WRITABLE};
@@ -632,10 +629,10 @@ pub fn smp_selftest() {
 
     let cpus = cpu::online_count();
     let listed = crate::acpi::with(|a| a.madt.lapic_ids.len()).clamp(1, cpu::MAX_CPUS);
-    assert_eq!(cpus, listed, "no todas las CPUs de la MADT estan en linea");
+    assert_eq!(cpus, listed, "not every MADT CPU is online");
     assert!(cpus <= cpu::MAX_CPUS);
 
-    // 1. Afinidad y paralelismo: un hilo ocupado por CPU durante 150 ms.
+    // 1. Affinity and parallelism: one busy thread per CPU for 150 ms.
     static STOP: AtomicBool = AtomicBool::new(false);
     static COUNTS: [AtomicU64; cpu::MAX_CPUS] = [const { AtomicU64::new(0) }; cpu::MAX_CPUS];
     static SEEN: [AtomicU32; cpu::MAX_CPUS] = [const { AtomicU32::new(u32::MAX) }; cpu::MAX_CPUS];
@@ -668,21 +665,21 @@ pub fn smp_selftest() {
         assert_eq!(
             SEEN[i].load(Ordering::Relaxed),
             i as u32,
-            "el hilo fijado a la CPU {i} corrio en otra"
+            "the thread pinned to CPU {i} ran on another"
         );
-        assert!(counts[i] > 0, "el hilo de la CPU {i} no ejecuto");
+        assert!(counts[i] > 0, "the thread of CPU {i} did not run");
     }
     let (min, max) = (*counts.iter().min().unwrap(), *counts.iter().max().unwrap());
     assert!(
         min * 4 >= max,
-        "las CPUs no trabajaron a la vez: {counts:?}"
+        "the CPUs did not work simultaneously: {counts:?}"
     );
     assert!(
         elapsed < 40,
-        "{cpus} hilos ocupados en paralelo tardaron {elapsed} ticks"
+        "{cpus} busy threads in parallel took {elapsed} ticks"
     );
 
-    // 2. Migración: hilos sin afinidad que ceden en bucle pasan por varias CPUs.
+    // 2. Migration: unpinned threads yielding in a loop pass through several CPUs.
     static MASKS: [AtomicU32; 2 * cpu::MAX_CPUS] = [const { AtomicU32::new(0) }; 2 * cpu::MAX_CPUS];
     extern "C" fn roamer(i: usize) {
         for _ in 0..500 {
@@ -706,27 +703,27 @@ pub fn smp_selftest() {
     assert_eq!(
         union,
         (1u32 << cpus) - 1,
-        "los hilos libres deben pasar por todas las CPUs"
+        "unpinned threads must pass through every CPU"
     );
     if cpus > 1 {
-        assert!(migrated > 0, "ningun hilo cambio de CPU: {MASKS:?}");
+        assert!(migrated > 0, "no thread changed CPU: {MASKS:?}");
     }
 
-    // 3. TLB shootdown: otra CPU tiene la traducción en su TLB; se cambia el
-    // frame y tras el shootdown ve el contenido nuevo.
+    // 3. TLB shootdown: another CPU has the translation in its TLB; the frame
+    // is changed and after the shootdown it sees the new contents.
     const VIRT: u64 = 0xFFFF_9000_0010_0000;
     static READY: AtomicBool = AtomicBool::new(false);
     static GO: AtomicBool = AtomicBool::new(false);
     static SEEN_VALUE: AtomicU64 = AtomicU64::new(0);
     extern "C" fn reader(_: usize) {
-        // SAFETY: la página está mapeada por la autoprueba mientras dura.
+        // SAFETY: the page is mapped by the self-test while it runs.
         let first = unsafe { (VIRT as *const u64).read_volatile() };
-        assert_eq!(first, 0x11, "primera lectura");
+        assert_eq!(first, 0x11, "first read");
         READY.store(true, Ordering::Release);
         while !GO.load(Ordering::Acquire) {
             core::hint::spin_loop();
         }
-        // SAFETY: ídem.
+        // SAFETY: same as above.
         SEEN_VALUE.store(
             unsafe { (VIRT as *const u64).read_volatile() },
             Ordering::Relaxed,
@@ -734,7 +731,7 @@ pub fn smp_selftest() {
     }
     let served_before = crate::arch::x86_64::smp::flushes_served();
     let (f1, f2) = pmm::with(|p| (p.allocate().unwrap(), p.allocate().unwrap()));
-    // SAFETY: frames recién asignados, accesibles por el mapa físico.
+    // SAFETY: freshly allocated frames, reachable through the physical map.
     unsafe {
         (phys::phys_to_virt(f1.addr()) as *mut u64).write_volatile(0x11);
         (phys::phys_to_virt(f2.addr()) as *mut u64).write_volatile(0x22);
@@ -759,10 +756,10 @@ pub fn smp_selftest() {
     assert_eq!(
         SEEN_VALUE.load(Ordering::Relaxed),
         0x22,
-        "la CPU {reader_cpu} siguio viendo la traduccion vieja"
+        "CPU {reader_cpu} still saw the old translation"
     );
     let served = crate::arch::x86_64::smp::flushes_served() - served_before;
-    assert_eq!(served, cpus - 1, "IPI de invalidacion atendidas");
+    assert_eq!(served, cpus - 1, "invalidation IPIs serviced");
     vmm::with(|m| m.unmap_4k(VIRT)).unwrap();
     vmm::flush_page(VIRT);
     pmm::with(|p| {
@@ -771,8 +768,8 @@ pub fn smp_selftest() {
     });
     set_affinity(MAIN_TID, None).unwrap();
 
-    // 4. Locks disputados: un contador bajo IrqLock incrementado desde todas
-    // las CPUs a la vez.
+    // 4. Contended locks: a counter under an IrqLock incremented from every
+    // CPU at once.
     static COUNTER: IrqLock<u64> = IrqLock::new(0);
     const PER_THREAD: u64 = 20_000;
     extern "C" fn incrementer(_: usize) {
@@ -791,11 +788,11 @@ pub fn smp_selftest() {
     assert_eq!(
         total,
         PER_THREAD * cpus as u64,
-        "incrementos perdidos bajo el lock"
+        "increments lost under the lock"
     );
 
     info!(
-        "smp selftest ok ({cpus} CPUs: ocupados {counts:?} en {elapsed} ticks, {migrated} de {} hilos migraron, shootdown visto por la CPU {reader_cpu} ({served} IPI), contador {total})",
+        "smp selftest ok ({cpus} CPUs: busy {counts:?} in {elapsed} ticks, {migrated} of {} threads migrated, shootdown seen by CPU {reader_cpu} ({served} IPI), counter {total})",
         2 * cpus
     );
 }

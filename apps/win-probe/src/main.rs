@@ -1,5 +1,7 @@
-//! `win_probe`: si llega a ejecutarse (arranque con `gui`), abre una ventana
-//! y sale. Su papel en los tests es que el broker lo deniegue sin GUI.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! `win_probe`: if it ever runs (boot with `gui`), it opens a window and
+//! exits. Its role in the tests is to be denied by the broker without a GUI.
 #![no_std]
 #![no_main]
 
@@ -18,11 +20,11 @@ fn main(_arg: u64) -> u64 {
     let (Some(comp), Some(hw)) = (comp, hw) else {
         return 1;
     };
-    match Window::create(comp, hw, 200, 100, "Sonda") {
+    match Window::create(comp, hw, 200, 100, "Probe") {
         Ok(w) => {
             let _ = w.present();
             let _ = w.close();
-            sys::print(b"win_probe: ventana creada y cerrada\n");
+            sys::print(b"win_probe: window created and closed\n");
             0
         }
         Err(_) => 2,

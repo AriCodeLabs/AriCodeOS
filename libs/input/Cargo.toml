@@ -3,7 +3,7 @@ name = "aricode-input"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Eventos de entrada (evdev/virtio-input) y teclado US de AriCodeOS (no_std)"
+description = "AriCodeOS input events (evdev/virtio-input) and US keyboard (no_std)"
 
 [lib]
 path = "src/lib.rs"

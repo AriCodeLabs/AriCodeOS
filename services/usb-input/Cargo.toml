@@ -3,7 +3,7 @@ name = "ari-usb-input"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Driver xHCI y teclado/raton USB HID (protocolo de arranque) con servicio de eventos de entrada, en espacio de usuario"
+description = "xHCI driver and USB HID keyboard/mouse (boot protocol) with an input event service, in user space"
 publish = false
 
 [[bin]]
@@ -19,6 +19,7 @@ aricode-input = { path = "../../libs/input" }
 aricode-xhci = { path = "../../libs/xhci" }
 aricode-usb-storage = { path = "../../libs/usb-storage" }
 aricode-rt = { path = "../../sdk/runtime" }
+aricode-cmdline = { path = "../../libs/cmdline" }
 
 [build-dependencies]
 aricode-build = { path = "../../sdk/build" }

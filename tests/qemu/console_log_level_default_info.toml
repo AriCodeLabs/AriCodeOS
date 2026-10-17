@@ -1,6 +1,6 @@
-# Sin log= en la cmdline el nivel es info: nada de DEBUG/TRACE en la serie.
+# Without log= on the cmdline the level is info: no DEBUG/TRACE on serial.
 name = "console.log_level_default_info"
-description = "nivel por defecto info: sin lineas DEBUG ni TRACE"
+description = "default level info: no DEBUG or TRACE lines"
 level = "full"
 areas = ["console"]
 cmdline = "qemu_exit"

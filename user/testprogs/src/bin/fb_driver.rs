@@ -1,5 +1,7 @@
-//! Driver de prueba: pinta el framebuffer a traves de una capability MMIO.
-//! Handle 0x10004 = region MMIO del framebuffer (READ|WRITE); arg = stride.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Test driver: paints the framebuffer through an MMIO capability.
+//! Handle 0x10004 = framebuffer MMIO region (READ|WRITE); arg = stride.
 #![no_std]
 #![no_main]
 
@@ -22,7 +24,7 @@ fn main(stride: u64) -> u64 {
             if (idx + 1) * 4 > len {
                 return 3;
             }
-            // SAFETY: dentro de la region mapeada, comprobado contra `len`.
+            // SAFETY: inside the mapped region, checked against `len`.
             unsafe { pixels.add(idx as usize).write_volatile(COLOR) };
         }
     }

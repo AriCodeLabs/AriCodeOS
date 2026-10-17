@@ -1,20 +1,22 @@
-//! IDT: los 256 vectores apuntan a los stubs generados; #DF usa la pila IST.
-//! Es única y la cargan todas las CPUs.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! IDT: all 256 vectors point to the generated stubs; #DF uses the IST stack.
+//! There is a single one, loaded by every CPU.
 
 use super::gdt::{self, DOUBLE_FAULT_IST};
 use crate::sync::IrqLock;
 use aricode_x86_cpu::{exception, Idt, IdtEntry};
 use core::arch::asm;
 
-// La CPU lee la IDT por su dirección; el lock solo serializa la construcción.
+// The CPU reads the IDT by address; the lock only serializes construction.
 static IDT: IrqLock<Idt> = IrqLock::new(Idt::new());
 
 extern "C" {
-    /// Tabla generada en `stubs.s`: dirección del stub de cada vector.
+    /// Table generated in `stubs.s`: address of each vector's stub.
     static interrupt_stub_table: [u64; 256];
 }
 
-/// Construye la IDT (una vez, en el BSP) y la carga.
+/// Builds the IDT (once, on the BSP) and loads it.
 pub fn init() {
     let cs = gdt::selectors().code;
     {
@@ -25,7 +27,7 @@ pub fn init() {
             } else {
                 0
             };
-            // SAFETY: la tabla de stubs es de solo lectura y está enlazada.
+            // SAFETY: the stub table is read-only and linked in.
             let handler = unsafe { interrupt_stub_table[vector as usize] };
             idt.set(vector, IdtEntry::interrupt_gate(handler, cs, ist, 0));
         }
@@ -33,9 +35,9 @@ pub fn init() {
     load();
 }
 
-/// Carga la IDT ya construida en la CPU que llama (los APs).
+/// Loads the already built IDT on the calling CPU (the APs).
 pub fn load() {
     let ptr = IDT.lock().pointer();
-    // SAFETY: la IDT es estática, construida en `init` y nunca se mueve.
+    // SAFETY: the IDT is static, built in `init` and never moves.
     unsafe { asm!("lidt [{}]", in(reg) &ptr, options(nostack, preserves_flags)) };
 }

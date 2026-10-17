@@ -1,0 +1,19 @@
+# `shutdown` without `qemu_exit`: the kernel powers the machine off through
+# ACPI S5 (FADT PM1a control block, SLP_TYP from the DSDT's \_S5_ package),
+# so QEMU exits on its own with code 0 instead of the debug-exit device.
+name = "power.acpi_shutdown"
+description = "shutdown powers the machine off through ACPI S5 (no qemu_exit)"
+level = "full"
+areas = ["hardware", "shell"]
+cmdline = "shell"
+timeout_secs = 60
+stdin = ["shutdown"]
+
+[expect]
+exit = 0
+serial_contains = [
+    "acpi: power-off through S5 (SLP_TYP",
+    "AriCodeOS: shutting down",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "ACPI power-off had no effect"]

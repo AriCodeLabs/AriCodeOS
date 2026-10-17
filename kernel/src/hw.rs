@@ -1,6 +1,8 @@
-//! Objetos de hardware para drivers en espacio de usuario (Fase 16): líneas
-//! de interrupción, regiones MMIO y buffers DMA. Un driver solo recibe lo
-//! que su capability le da; el kernel no le presta nada más (sección 27).
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Hardware objects for user-space drivers (Phase 16): interrupt lines,
+//! MMIO regions and DMA buffers. A driver only gets what its capability
+//! grants; the kernel lends it nothing else (section 27).
 
 use crate::arch::x86_64::{apic, ioapic};
 use crate::memory::pmm;
@@ -13,22 +15,21 @@ use aricode_pmm::{Frame, FRAME_SIZE};
 use core::sync::atomic::{AtomicU32, Ordering};
 use log::warn;
 
-/// Vectores reservados a dispositivos.
+/// Vectors reserved for devices.
 pub const DEVICE_VECTOR_FIRST: u8 = 0x30;
 pub const DEVICE_VECTOR_LAST: u8 = 0x3F;
 
-/// Origen de una línea: una GSI del I/O APIC, una entrada MSI-X (tabla
-/// mapeada por el kernel, índice de entrada) o una capability MSI (espacio
-/// de configuración de la función en el ECAM y desplazamiento de la
-/// capability; ADR 0022).
+/// Source of a line: an I/O APIC GSI, an MSI-X entry (table mapped by the
+/// kernel, entry index) or an MSI capability (the function's configuration
+/// space in the ECAM and the capability offset; ADR 0022).
 pub enum IrqSource {
     Gsi { gsi: u32, level: bool },
     Msix { table_virt: u64, entry: u32 },
     Msi { cfg_virt: u64, cap: u8 },
 }
 
-/// Una línea de interrupción enrutada a un vector. Al soltarse el último
-/// handle se enmascara y libera el vector.
+/// An interrupt line routed to a vector. When the last handle is dropped it
+/// is masked and the vector is freed.
 pub struct IrqLine {
     pub source: IrqSource,
     pub vector: u8,
@@ -37,8 +38,8 @@ pub struct IrqLine {
 }
 
 impl IrqLine {
-    /// Llamado desde el handler: acumula y despierta. Las líneas por nivel se
-    /// enmascaran hasta que el driver las atienda (`irq_wait`).
+    /// Called from the handler: accumulates and wakes up. Level-triggered lines
+    /// stay masked until the driver services them (`irq_wait`).
     pub fn fire(&self) {
         if let IrqSource::Gsi { gsi, level: true } = self.source {
             ioapic::set_masked(gsi, true);
@@ -47,7 +48,7 @@ impl IrqLine {
         self.waiters.wake_all();
     }
 
-    /// GSI si es una línea del I/O APIC (para `object_id`).
+    /// GSI if it is an I/O APIC line (for `object_id`).
     pub fn gsi(&self) -> u32 {
         match self.source {
             IrqSource::Gsi { gsi, .. } => gsi,
@@ -56,7 +57,7 @@ impl IrqLine {
         }
     }
 
-    /// Espera hasta que haya interrupciones acumuladas y las devuelve.
+    /// Waits until there are accumulated interrupts and returns them.
     pub fn wait(&self, deadline: Option<u64>) -> Option<u32> {
         let timed_out = self
             .waiters
@@ -87,13 +88,13 @@ impl Drop for IrqLine {
 
 const MSIX_MASKED: u32 = 1;
 
-/// Escribe una entrada de la tabla MSI-X (16 bytes: addr lo, addr hi, data, control).
+/// Writes an MSI-X table entry (16 bytes: addr lo, addr hi, data, control).
 fn msix_write(table_virt: u64, entry: u32, addr: u64, data: u32, control: u32) {
     let base = (table_virt + 16 * entry as u64) as *mut u32;
-    // SAFETY: la tabla se mapeó sin caché en `map_uc` y `entry` es una entrada
-    // válida del dispositivo reclamado.
+    // SAFETY: the table was mapped uncached in `map_uc` and `entry` is a valid
+    // entry of the claimed device.
     unsafe {
-        base.add(3).write_volatile(MSIX_MASKED); // enmascarar mientras se programa
+        base.add(3).write_volatile(MSIX_MASKED); // mask while programming
         base.write_volatile(addr as u32);
         base.add(1).write_volatile((addr >> 32) as u32);
         base.add(2).write_volatile(data);
@@ -101,8 +102,8 @@ fn msix_write(table_virt: u64, entry: u32, addr: u64, data: u32, control: u32) {
     }
 }
 
-/// Ventanas MMIO sin caché del kernel (tablas MSI-X y similares), asignadas
-/// de forma incremental y nunca liberadas: se usan mientras viva el dispositivo.
+/// Uncached kernel MMIO windows (MSI-X tables and the like), allocated
+/// incrementally and never freed: used for as long as the device lives.
 static UC_NEXT: IrqLock<u64> = IrqLock::new(0xFFFF_D200_0000_0000);
 
 pub(crate) fn map_uc(phys: u64, len: u64) -> Result<u64, &'static str> {
@@ -123,13 +124,13 @@ pub(crate) fn map_uc(phys: u64, len: u64) -> Result<u64, &'static str> {
             WRITABLE | NO_EXECUTE | GLOBAL | CACHE_DISABLE | WRITE_THROUGH,
         )
     })
-    .map_err(|_| "hw: mapear ventana sin cache")?;
+    .map_err(|_| "hw: map uncached window")?;
     *next += span;
     Ok(virt + offset)
 }
 
-/// Dirección de mensaje MSI/MSI-X hacia el LAPIC de arranque (sin
-/// redirección ni modo lógico).
+/// MSI/MSI-X message address targeting the boot LAPIC (no redirection,
+/// no logical mode).
 fn message_address() -> u64 {
     0xFEE0_0000 | ((apic::bsp_id() as u64) << 12)
 }
@@ -137,7 +138,7 @@ fn message_address() -> u64 {
 fn allocate_vector(vectors: &BTreeMap<u8, Weak<KernelObject>>) -> Result<u8, &'static str> {
     (DEVICE_VECTOR_FIRST..=DEVICE_VECTOR_LAST)
         .find(|v| !vectors.contains_key(v))
-        .ok_or("hw: sin vectores libres")
+        .ok_or("hw: no free vectors")
 }
 
 fn new_line(
@@ -155,8 +156,8 @@ fn new_line(
     obj
 }
 
-/// Crea el objeto IRQ de una entrada MSI-X: asigna vector y programa la
-/// entrada hacia el LAPIC de arranque.
+/// Creates the IRQ object for an MSI-X entry: allocates a vector and
+/// programs the entry towards the boot LAPIC.
 pub fn register_msix(table_phys: u64, entry: u32) -> Result<ObjectRef, &'static str> {
     let table_virt = map_uc(table_phys, 16 * (entry as u64 + 1))?;
     let mut vectors = VECTORS.lock();
@@ -169,9 +170,9 @@ pub fn register_msix(table_phys: u64, entry: u32) -> Result<ObjectRef, &'static 
     ))
 }
 
-/// Crea el objeto IRQ de una capability MSI (un solo mensaje): asigna vector,
-/// programa dirección y datos hacia el LAPIC de arranque y habilita MSI.
-/// Para funciones sin MSI-X (los controladores Intel de 2012, por ejemplo).
+/// Creates the IRQ object for an MSI capability (single message): allocates
+/// a vector, programs address and data towards the boot LAPIC and enables
+/// MSI. For functions without MSI-X (2012 Intel controllers, for example).
 pub fn register_msi(cfg_virt: u64, cap: u8) -> Result<ObjectRef, &'static str> {
     let mut vectors = VECTORS.lock();
     let vector = allocate_vector(&vectors)?;
@@ -183,10 +184,10 @@ pub fn register_msi(cfg_virt: u64, cap: u8) -> Result<ObjectRef, &'static str> {
     ))
 }
 
-/// Capability MSI (PCI 3.0, 6.8.1): control en +2 (bit 0 habilitar, bits
-/// 6:4 mensajes habilitados, bit 7 direcciones de 64 bits, bit 8 máscara por
-/// vector), dirección en +4 (y +8 la parte alta con 64 bits), datos en +8 o
-/// +0xC y máscara en +0xC o +0x10.
+/// MSI capability (PCI 3.0, 6.8.1): control at +2 (bit 0 enable, bits 6:4
+/// enabled messages, bit 7 64-bit addresses, bit 8 per-vector masking),
+/// address at +4 (and the high part at +8 with 64 bits), data at +8 or +0xC
+/// and mask at +0xC or +0x10.
 const MSI_ENABLE: u16 = 0x0001;
 const MSI_MULTIPLE_ENABLE: u16 = 0x0070;
 const MSI_64BIT: u16 = 0x0080;
@@ -194,11 +195,11 @@ const MSI_MASKABLE: u16 = 0x0100;
 
 fn msi_program(cfg_virt: u64, cap: u8, addr: u64, data: u16) {
     let base = cfg_virt + cap as u64;
-    // SAFETY: el ECAM está mapeado sin caché por `pci::init` y `cap` es la
-    // capability MSI de una función reclamada; accesos alineados.
+    // SAFETY: the ECAM is mapped uncached by `pci::init` and `cap` is the MSI
+    // capability of a claimed function; aligned accesses.
     unsafe {
         let ctrl = ((base + 2) as *const u16).read_volatile();
-        // Deshabilitado y con un solo mensaje mientras se programa.
+        // Disabled and with a single message while programming.
         ((base + 2) as *mut u16).write_volatile(ctrl & !(MSI_ENABLE | MSI_MULTIPLE_ENABLE));
         ((base + 4) as *mut u32).write_volatile(addr as u32);
         let data_off = if ctrl & MSI_64BIT != 0 {
@@ -217,7 +218,7 @@ fn msi_program(cfg_virt: u64, cap: u8, addr: u64, data: u16) {
 
 fn msi_enable(cfg_virt: u64, cap: u8, on: bool) {
     let ctrl_ptr = (cfg_virt + cap as u64 + 2) as *mut u16;
-    // SAFETY: ídem `msi_program`.
+    // SAFETY: same as `msi_program`.
     unsafe {
         let ctrl = ctrl_ptr.read_volatile() & !MSI_MULTIPLE_ENABLE;
         ctrl_ptr.write_volatile(if on {
@@ -228,18 +229,18 @@ fn msi_enable(cfg_virt: u64, cap: u8, on: bool) {
     }
 }
 
-/// Región MMIO de un dispositivo (física, sin caché) o un buffer DMA
-/// (RAM contigua, con caché).
+/// MMIO region of a device (physical, uncached) or a DMA buffer (contiguous
+/// RAM, cached).
 pub struct Region {
     pub phys: u64,
     pub len: u64,
     pub cacheable: bool,
-    /// Función PCI a la que pertenece (`bus << 8 | dev << 3 | fn`): mapearla
-    /// asigna el dispositivo al dominio IOMMU del proceso (Fase 33).
+    /// PCI function it belongs to (`bus << 8 | dev << 3 | fn`): mapping it
+    /// assigns the device to the process's IOMMU domain (Phase 33).
     pub source_id: Option<u16>,
 }
 
-/// Buffer DMA: frames contiguos que vuelven al PMM al soltarse el objeto.
+/// DMA buffer: contiguous frames that go back to the PMM when the object is dropped.
 pub struct DmaBuffer {
     pub region: Region,
     frames: usize,
@@ -247,22 +248,22 @@ pub struct DmaBuffer {
 
 impl Drop for DmaBuffer {
     fn drop(&mut self) {
-        // Antes de devolver los frames, ningún dispositivo debe poder
-        // seguir escribiendo en ellos.
+        // Before returning the frames, no device must be able to keep
+        // writing to them.
         crate::iommu::unmap_everywhere(self.region.phys, self.region.len);
         pmm::with(|p| p.free_contiguous(Frame::from_addr(self.region.phys), self.frames))
-            .expect("frames DMA");
+            .expect("DMA frames");
     }
 }
 
 static VECTORS: IrqLock<BTreeMap<u8, Weak<KernelObject>>> = IrqLock::new(BTreeMap::new());
 
-/// Crea el objeto IRQ de una GSI: asigna vector, enruta y registra.
+/// Creates the IRQ object for a GSI: allocates a vector, routes and registers it.
 pub fn register_irq(gsi: u32, level: bool, active_low: bool) -> Result<ObjectRef, &'static str> {
     let mut vectors = VECTORS.lock();
     let vector = (DEVICE_VECTOR_FIRST..=DEVICE_VECTOR_LAST)
         .find(|v| !vectors.contains_key(v))
-        .ok_or("hw: sin vectores libres")?;
+        .ok_or("hw: no free vectors")?;
     ioapic::route(gsi, vector, apic::bsp_id(), level, active_low)?;
     let obj = KernelObject::new(ObjectKind::Irq(IrqLine {
         source: IrqSource::Gsi { gsi, level },
@@ -274,25 +275,26 @@ pub fn register_irq(gsi: u32, level: bool, active_low: bool) -> Result<ObjectRef
     Ok(obj)
 }
 
-/// Entrada desde el APIC para los vectores de dispositivo.
+/// Entry from the APIC for device vectors.
 pub fn handle_device_irq(vector: u8) {
+    crate::random::stir();
     let line = VECTORS.lock().get(&vector).and_then(Weak::upgrade);
     match line.as_ref().map(|o| &o.kind) {
         Some(ObjectKind::Irq(l)) => l.fire(),
-        _ => warn!("irq: vector {vector:#x} sin linea registrada"),
+        _ => warn!("irq: vector {vector:#x} has no registered line"),
     }
 }
 
-/// Reserva un buffer DMA físicamente contiguo.
+/// Allocates a physically contiguous DMA buffer.
 pub fn dma_alloc(len: u64) -> Result<ObjectRef, &'static str> {
     if len == 0 || len > aricode_abi::DMA_MAX_LEN {
-        return Err("hw: tamano DMA invalido");
+        return Err("hw: invalid DMA size");
     }
     let frames = len.div_ceil(FRAME_SIZE) as usize;
     let first =
-        pmm::with(|p| p.allocate_contiguous(frames, 1)).ok_or("hw: sin memoria contigua")?;
-    // Poner a cero: un driver no debe ver datos de otro.
-    // SAFETY: frames recién asignados, accesibles por el mapa físico.
+        pmm::with(|p| p.allocate_contiguous(frames, 1)).ok_or("hw: no contiguous memory")?;
+    // Zero it: a driver must not see another driver's data.
+    // SAFETY: freshly allocated frames, reachable through the physical map.
     unsafe {
         core::ptr::write_bytes(
             crate::memory::phys::phys_to_virt(first.addr()) as *mut u8,
@@ -311,17 +313,17 @@ pub fn dma_alloc(len: u64) -> Result<ObjectRef, &'static str> {
     })))
 }
 
-/// Banco de pruebas del USB (`test=usb_hid`, Fase 25): el driver xHCI de
-/// ring 3 recibe el controlador (clase 0c.03) y un endpoint de servicio;
-/// `input_client` lee por IPC lo que el host inyecta por QMP en el teclado
-/// y el raton USB.
+/// USB test bench (`test=usb_hid`, Phase 25): the ring 3 xHCI driver
+/// receives the controller (class 0c.03) and a service endpoint;
+/// `input_client` reads over IPC what the host injects through QMP into the
+/// USB keyboard and mouse.
 pub fn usb_hid_selftest() {
     use crate::user::{process, programs};
     use alloc::vec;
     use aricode_handles::Rights;
 
-    let index = crate::pci::find_class(0x0C, 0x03).expect("controlador USB en el bus PCI");
-    let claimed = crate::pci::claim(index).expect("reclamar el xHCI");
+    let index = crate::pci::find_class(0x0C, 0x03).expect("USB controller on the PCI bus");
+    let claimed = crate::pci::claim(index).expect("claim the xHCI");
     let service = KernelObject::new(ObjectKind::Endpoint(crate::ipc::Endpoint::new()));
     let mut extra = vec![(
         service.clone(),
@@ -341,7 +343,7 @@ pub fn usb_hid_selftest() {
     extra.push((KernelObject::new(ObjectKind::System), Rights::READ));
     let driver = process::spawn_with_handles_and_arg(
         "usb_input",
-        programs::by_name("usb_input").expect("usb_input en el initrd"),
+        programs::by_name("usb_input").expect("usb_input in the initrd"),
         extra,
         mask,
         0,
@@ -362,18 +364,18 @@ pub fn usb_hid_selftest() {
         "input_client: {status:?}"
     );
     let _ = driver;
-    log::info!("usb hid selftest ok (xHCI y HID de arranque en ring 3, eventos por IPC)");
+    log::info!("usb hid selftest ok (xHCI and boot HID in ring 3, events over IPC)");
 }
 
-/// Banco de pruebas (`test=drivers`): IRQ0 del PIT, DMA y framebuffer como
-/// MMIO, todo atendido por drivers de usuario.
+/// Test bench (`test=drivers`): PIT IRQ0, DMA and the framebuffer as MMIO,
+/// all serviced by user drivers.
 pub fn selftest(info: &boot_protocol::BootInfo) {
     use crate::arch::x86_64::pit;
     use crate::user::{process, programs};
     use alloc::vec;
     use aricode_handles::Rights;
 
-    // 1. Un driver de usuario atiende IRQ0 (PIT a 100 Hz) y reserva DMA.
+    // 1. A user driver services IRQ0 (PIT at 100 Hz) and allocates DMA.
     let (gsi, ov) = crate::acpi::with(|a| a.madt.isa_irq_to_gsi(0));
     let (level, low) = ov
         .map(|o| (o.level_triggered(), o.active_low()))
@@ -391,9 +393,9 @@ pub fn selftest(info: &boot_protocol::BootInfo) {
     )
     .expect("pit_driver");
     let status = process::wait(pid);
-    // Silenciar la fuente antes de soltar la línea: primero se enmascara la
-    // GSI, luego se para el PIT y se deja un tick para que cualquier
-    // interrupción ya en vuelo llegue mientras la línea sigue registrada.
+    // Silence the source before dropping the line: first mask the GSI,
+    // then stop the PIT and leave a tick so any interrupt already in
+    // flight arrives while the line is still registered.
     ioapic::set_masked(gsi, true);
     pit::stop();
     crate::task::scheduler::sleep_ms(crate::time::MS_PER_TICK * 2);
@@ -409,10 +411,10 @@ pub fn selftest(info: &boot_protocol::BootInfo) {
     );
     assert!(
         VECTORS.lock().is_empty(),
-        "el vector debe liberarse al soltar la linea"
+        "the vector must be freed when the line is dropped"
     );
 
-    // 2. Un driver de usuario pinta el framebuffer a través de una capability MMIO.
+    // 2. A user driver paints the framebuffer through an MMIO capability.
     let fb = info.framebuffer;
     if fb.address != 0 {
         let region = KernelObject::new(ObjectKind::Mmio(Region {
@@ -435,13 +437,16 @@ pub fn selftest(info: &boot_protocol::BootInfo) {
             process::ExitStatus::Exited(0),
             "fb_driver: {status:?}"
         );
-        // SAFETY: framebuffer accesible por el mapa físico.
+        // SAFETY: framebuffer reachable through the physical map.
         let pixel = unsafe {
             (crate::memory::phys::phys_to_virt(fb.address) as *const u32).read_volatile()
         };
-        assert_eq!(pixel, 0x00FF_8800, "el driver debia pintar el pixel (0,0)");
+        assert_eq!(
+            pixel, 0x00FF_8800,
+            "the driver should have painted pixel (0,0)"
+        );
     }
     log::info!(
-        "drivers selftest ok (IRQ0 atendida en ring 3, {fired} pendientes al cerrar, DMA reservado y mapeado, framebuffer pintado desde ring 3)"
+        "drivers selftest ok (IRQ0 serviced in ring 3, {fired} pending at close, DMA allocated and mapped, framebuffer painted from ring 3)"
     );
 }

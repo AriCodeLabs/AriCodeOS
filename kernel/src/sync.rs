@@ -1,20 +1,22 @@
-//! Sincronización del kernel: `IrqLock` de `aricode-sync` con la política de
-//! interrupciones de x86-64 (guardar `RFLAGS.IF`, `cli`, y restaurar).
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Kernel synchronization: `IrqLock` from `aricode-sync` with the x86-64
+//! interrupt policy (save `RFLAGS.IF`, `cli`, and restore).
 //!
-//! Anidamientos permitidos (exterior -> interior), documentados en
-//! `docs/architecture.md`, sección Sincronización:
+//! Allowed nesting (outer -> inner), documented in `docs/architecture.md`,
+//! Synchronization section:
 //!
 //! ```text
-//! VMM -> PMM            el Mapper pide frames al PMM con el VMM tomado
-//! heap.mapped -> VMM    y por tanto heap.mapped -> PMM
-//! PROCESSES -> SCHED    process::wait consulta el planificador
-//! PROCESSES -> IOMMU    soltar un buffer DMA (tabla de handles) lo retira de los dominios
-//! IOMMU -> PMM          los dominios piden y devuelven frames de tablas
+//! VMM -> PMM            the Mapper requests frames from the PMM with the VMM held
+//! heap.mapped -> VMM    and therefore heap.mapped -> PMM
+//! PROCESSES -> SCHED    process::wait queries the scheduler
+//! PROCESSES -> IOMMU    dropping a DMA buffer (handle table) removes it from the domains
+//! IOMMU -> PMM          domains request and return page-table frames
 //! ```
 //!
-//! Nunca al revés: en particular, nunca entrar al VMM con el PMM tomado, y
-//! nunca tomar PROCESSES desde dentro del planificador. Los demás locks
-//! (heap.heap, console, colas de espera) son hoja.
+//! Never the other way round: in particular, never enter the VMM with the PMM
+//! held, and never take PROCESSES from inside the scheduler. The other locks
+//! (heap.heap, console, wait queues) are leaves.
 
 use aricode_sync::IrqPolicy;
 use core::arch::asm;
@@ -26,7 +28,7 @@ impl IrqPolicy for KernelIrq {
 
     fn save_and_disable() -> bool {
         let rflags: u64;
-        // SAFETY: leer RFLAGS y deshabilitar interrupciones no toca memoria.
+        // SAFETY: reading RFLAGS and disabling interrupts does not touch memory.
         unsafe {
             asm!("pushfq", "pop {}", "cli", out(reg) rflags, options(nomem, preserves_flags));
         }
@@ -35,7 +37,7 @@ impl IrqPolicy for KernelIrq {
 
     fn restore(was_enabled: bool) {
         if was_enabled {
-            // SAFETY: rehabilitar interrupciones que estaban habilitadas al entrar.
+            // SAFETY: re-enable interrupts that were enabled on entry.
             unsafe { asm!("sti", options(nomem, nostack)) };
         }
     }
@@ -43,19 +45,19 @@ impl IrqPolicy for KernelIrq {
 
 pub type IrqLock<T> = aricode_sync::IrqLock<T, KernelIrq>;
 
-/// `true` si las interrupciones están habilitadas en esta CPU.
+/// `true` if interrupts are enabled on this CPU.
 pub fn interrupts_enabled() -> bool {
     let rflags: u64;
-    // SAFETY: solo lee RFLAGS.
+    // SAFETY: only reads RFLAGS.
     unsafe { asm!("pushfq", "pop {}", out(reg) rflags, options(nomem, preserves_flags)) };
     rflags & (1 << 9) != 0
 }
 
-/// Habilita las interrupciones externas. Solo tras instalar IDT y APIC.
+/// Enables external interrupts. Only after installing the IDT and APIC.
 ///
 /// # Safety
 ///
-/// Todo handler alcanzable debe estar instalado y el estado global protegido.
+/// Every reachable handler must be installed and global state protected.
 pub unsafe fn enable_interrupts() {
     asm!("sti", options(nomem, nostack));
 }

@@ -1,5 +1,7 @@
-//! Cliente HTTP GET sobre `NetClient` (Fase 24): resuelve, conecta y delega
-//! toda la lógica HTTP en `aricode-http`, que se prueba en host.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! HTTP GET client over `NetClient` (Phase 24): resolves, connects and
+//! delegates all HTTP logic to `aricode-http`, which is tested on the host.
 
 use crate::net::{NetClient, NetError};
 pub use aricode_http::Fetched;
@@ -11,15 +13,16 @@ pub enum HttpError {
     Resolve(NetError),
     Connect(NetError),
     Io(NetError),
-    /// La respuesta no es HTTP, está truncada o su framing es inválido.
+    /// The response is not HTTP, is truncated or has invalid framing.
     Malformed,
-    /// Cabeceras o cuerpo no caben en el buffer del llamador.
+    /// The response headers do not fit (a body that does not fit is
+    /// truncated: see `Fetched::truncated`).
     TooBig,
-    /// Codificación o cambio de protocolo que no se soporta.
+    /// Unsupported encoding or protocol switch.
     Unsupported,
 }
 
-/// Conexión TCP de netd vista como transporte HTTP.
+/// netd TCP connection seen as an HTTP transport.
 struct Stream<'a> {
     net: &'a mut NetClient,
     sock: u16,
@@ -36,7 +39,7 @@ impl Transport for Stream<'_> {
     }
 }
 
-/// Descarga `url` (IP literal o nombre resuelto por netd) en `out`.
+/// Downloads `url` (literal IP or name resolved by netd) into `out`.
 pub fn get(
     net: &mut NetClient,
     url: &str,
@@ -44,6 +47,10 @@ pub fn get(
     timeout_ms: u32,
 ) -> Result<Fetched, HttpError> {
     let url = Url::parse(url).ok_or(HttpError::BadUrl)?;
+    // Plain HTTP only; `aricode-https` adds TLS (it needs `alloc`).
+    if url.secure {
+        return Err(HttpError::BadUrl);
+    }
     let addr = match aricode_net::Ipv4Addr::parse(url.host) {
         Some(ip) => ip.0,
         None => net
@@ -69,5 +76,7 @@ pub fn get(
         Error::Malformed => HttpError::Malformed,
         Error::TooBig => HttpError::TooBig,
         Error::Unsupported => HttpError::Unsupported,
+        // The buffer sink never aborts.
+        Error::Aborted => HttpError::Malformed,
     })
 }

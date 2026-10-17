@@ -1,16 +1,18 @@
-//! Primitivas de exclusión mutua del kernel.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Kernel mutual exclusion primitives.
 //!
-//! [`IrqLock`] es un spinlock que, además, aplica una [`IrqPolicy`] al tomar
-//! y soltar: el kernel la implementa con `cli`/restauración de `RFLAGS.IF`,
-//! de modo que una sección crítica nunca es interrumpida ni, por tanto,
-//! reentrada por un handler que quiera el mismo lock. Los tests de host usan
-//! la política nula [`NoIrq`].
+//! [`IrqLock`] is a spinlock that also applies an [`IrqPolicy`] when taking
+//! and releasing it: the kernel implements it with `cli`/restoring `RFLAGS.IF`,
+//! so a critical section is never interrupted and therefore never
+//! re-entered by a handler that wants the same lock. Host tests use
+//! the null policy [`NoIrq`].
 //!
-//! Mientras se espera, las interrupciones quedan como estaban al llamar: así
-//! una CPU que gira por un lock que tiene otra CPU sigue atendiendo IPIs
-//! (Fase 32) y ningún handler queda encerrado tras un lock ajeno. Un lock
-//! tomado durante muchísimos giros solo puede ser reentrada (una CPU) o un
-//! bloqueo mutuo entre CPUs: `lock` entra en pánico en vez de colgar.
+//! While waiting, interrupts stay as they were at the call: this way
+//! a CPU spinning on a lock held by another CPU keeps servicing IPIs
+//! (Phase 32) and no handler gets stuck behind someone else's lock. A lock
+//! held for a huge number of spins can only be re-entry (one CPU) or a
+//! deadlock between CPUs: `lock` panics instead of hanging.
 
 #![no_std]
 
@@ -19,16 +21,16 @@ use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// Qué hacer con las interrupciones alrededor de una sección crítica.
+/// What to do with interrupts around a critical section.
 pub trait IrqPolicy {
     type State: Copy;
-    /// Deshabilita interrupciones y devuelve el estado previo.
+    /// Disables interrupts and returns the previous state.
     fn save_and_disable() -> Self::State;
-    /// Restaura el estado devuelto por `save_and_disable`.
+    /// Restores the state returned by `save_and_disable`.
     fn restore(state: Self::State);
 }
 
-/// Política nula: un spinlock corriente.
+/// Null policy: a plain spinlock.
 pub struct NoIrq;
 
 impl IrqPolicy for NoIrq {
@@ -37,7 +39,7 @@ impl IrqPolicy for NoIrq {
     fn restore((): ()) {}
 }
 
-/// Giros antes de declarar un bloqueo mutuo.
+/// Spins before declaring a deadlock.
 const DEADLOCK_SPINS: u32 = 1 << 26;
 
 pub struct IrqLock<T, P: IrqPolicy = NoIrq> {
@@ -46,7 +48,7 @@ pub struct IrqLock<T, P: IrqPolicy = NoIrq> {
     _policy: PhantomData<P>,
 }
 
-// SAFETY: el acceso a `data` está serializado por `locked`.
+// SAFETY: access to `data` is serialised by `locked`.
 unsafe impl<T: Send, P: IrqPolicy> Sync for IrqLock<T, P> {}
 unsafe impl<T: Send, P: IrqPolicy> Send for IrqLock<T, P> {}
 
@@ -67,12 +69,12 @@ impl<T, P: IrqPolicy> IrqLock<T, P> {
             .is_ok()
     }
 
-    /// Toma el lock, esperando activamente si hace falta. Entre intentos la
-    /// política se deshace (las interrupciones vuelven a su estado) para que
-    /// la espera no encierre a los handlers de esta CPU.
+    /// Takes the lock, busy-waiting if needed. Between attempts the
+    /// policy is undone (interrupts return to their state) so that
+    /// waiting does not lock out this CPU's handlers.
     ///
     /// # Panics
-    /// Si tras muchos giros sigue tomado: reentrada o bloqueo mutuo.
+    /// If it is still held after many spins: re-entry or deadlock.
     pub fn lock(&self) -> IrqGuard<'_, T, P> {
         let mut spins = 0u32;
         loop {
@@ -83,26 +85,26 @@ impl<T, P: IrqPolicy> IrqLock<T, P> {
             P::restore(state);
             spins += 1;
             if spins == DEADLOCK_SPINS {
-                panic!("IrqLock: bloqueo mutuo (reentrada) en {:p}", self);
+                panic!("IrqLock: deadlock (re-entry) at {:p}", self);
             }
             core::hint::spin_loop();
         }
     }
 
-    /// Suelta el lock sin pasar por su guard ni tocar la política. Para el
-    /// protocolo de cambio de contexto: la CPU que conmuta deja el lock
-    /// tomado y lo suelta el hilo que reanuda, que no tiene el guard.
+    /// Releases the lock without going through its guard or touching the policy. For the
+    /// context switch protocol: the switching CPU leaves the lock
+    /// held and the resumed thread, which has no guard, releases it.
     ///
     /// # Safety
     ///
-    /// El lock debe estar tomado y su guard olvidado (`mem::forget`), y el
-    /// llamador debe restaurar por su cuenta el estado que la política guardó.
+    /// The lock must be held and its guard forgotten (`mem::forget`), and the
+    /// caller must restore by itself the state the policy saved.
     pub unsafe fn force_unlock(&self) {
         self.locked.store(false, Ordering::Release);
     }
 
-    /// Toma el lock solo si está libre. Deja las interrupciones como estaban
-    /// si no lo consigue.
+    /// Takes the lock only if it is free. Leaves interrupts as they were
+    /// if it fails.
     pub fn try_lock(&self) -> Option<IrqGuard<'_, T, P>> {
         let state = P::save_and_disable();
         if self.try_acquire() {
@@ -117,7 +119,7 @@ impl<T, P: IrqPolicy> IrqLock<T, P> {
         self.locked.load(Ordering::Relaxed)
     }
 
-    /// Acceso sin lock para cuando se tiene `&mut` al propio lock.
+    /// Lock-free access when holding `&mut` to the lock itself.
     pub fn get_mut(&mut self) -> &mut T {
         self.data.get_mut()
     }
@@ -131,14 +133,14 @@ pub struct IrqGuard<'a, T, P: IrqPolicy> {
 impl<T, P: IrqPolicy> Deref for IrqGuard<'_, T, P> {
     type Target = T;
     fn deref(&self) -> &T {
-        // SAFETY: el guard posee el lock.
+        // SAFETY: the guard owns the lock.
         unsafe { &*self.lock.data.get() }
     }
 }
 
 impl<T, P: IrqPolicy> DerefMut for IrqGuard<'_, T, P> {
     fn deref_mut(&mut self) -> &mut T {
-        // SAFETY: el guard posee el lock en exclusiva.
+        // SAFETY: the guard owns the lock exclusively.
         unsafe { &mut *self.lock.data.get() }
     }
 }
@@ -181,7 +183,7 @@ mod tests {
             let mut g = l.lock();
             *g += 1;
             assert!(l.is_locked());
-            assert!(l.try_lock().is_none(), "tomado: try_lock falla");
+            assert!(l.try_lock().is_none(), "held: try_lock fails");
         }
         assert!(!l.is_locked());
         assert_eq!(*l.lock(), 2);
@@ -196,7 +198,7 @@ mod tests {
         drop(g);
         let d = DISABLED.load(Ordering::SeqCst);
         let r = RESTORED.load(Ordering::SeqCst);
-        assert_eq!(d, r, "cada save_and_disable tiene su restore");
+        assert_eq!(d, r, "every save_and_disable has its restore");
         assert!(d >= 2);
     }
 
@@ -221,7 +223,7 @@ mod tests {
 
     #[test]
     fn forgotten_guard_is_released_by_force_unlock() {
-        // Contadores propios: `Counting` los comparte con otro test paralelo.
+        // Own counters: `Counting` shares them with another parallel test.
         static D: AtomicUsize = AtomicUsize::new(0);
         static R: AtomicUsize = AtomicUsize::new(0);
         struct Own;
@@ -240,20 +242,20 @@ mod tests {
         core::mem::forget(g);
         assert!(l.is_locked());
         assert!(l.try_lock().is_none());
-        // SAFETY: el guard fue olvidado arriba.
+        // SAFETY: the guard was forgotten above.
         unsafe { l.force_unlock() };
         assert!(!l.is_locked());
         assert_eq!(*l.lock(), 0);
-        // El lock olvidado deshabilito una vez sin restaurar; try_lock y el
-        // lock final si restauran lo suyo.
+        // The forgotten lock disabled once without restoring; try_lock and the
+        // final lock do restore theirs.
         assert_eq!(D.load(Ordering::SeqCst) - d0, 3);
         assert_eq!(R.load(Ordering::SeqCst) - r0, 2);
     }
 
     #[test]
     fn spinning_restores_policy_between_attempts() {
-        // Un lock tomado desde otro hilo: el que espera debe restaurar y
-        // volver a deshabilitar en cada giro (no quedarse "deshabilitado").
+        // A lock held by another thread: the waiter must restore and
+        // disable again on every spin (not stay "disabled").
         static ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
         struct Spy;
         impl IrqPolicy for Spy {
@@ -275,7 +277,10 @@ mod tests {
         drop(g);
         waiter.join().unwrap();
         assert_eq!(*l.lock(), 5);
-        assert!(ATTEMPTS.load(Ordering::SeqCst) >= 50, "un intento por giro");
+        assert!(
+            ATTEMPTS.load(Ordering::SeqCst) >= 50,
+            "one attempt per spin"
+        );
     }
 
     #[test]

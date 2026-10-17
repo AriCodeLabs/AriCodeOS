@@ -3,7 +3,7 @@ name = "ari-shell"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "arish: primer shell interactivo de AriCodeOS (ring 3)"
+description = "arish: first interactive AriCodeOS shell (ring 3)"
 publish = false
 
 [[bin]]
@@ -17,6 +17,10 @@ aricode-sys = { path = "../../sdk/rust" }
 aricode-rt = { path = "../../sdk/runtime" }
 aricode-net = { path = "../../libs/net" }
 aricode-proto = { path = "../../sdk/proto" }
+aricode-lineedit = { path = "../../libs/lineedit" }
+aricode-https = { path = "../../sdk/https" }
+aricode-tls = { path = "../../libs/tls" }
+aricode-x509 = { path = "../../libs/x509" }
 
 [build-dependencies]
 aricode-build = { path = "../../sdk/build" }

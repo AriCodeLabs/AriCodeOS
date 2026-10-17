@@ -1,113 +1,113 @@
 # AriCodeOS
 
-## Documento maestro de arquitectura, especificaciones técnicas y plan de desarrollo
+## Master document: architecture, technical specifications and development plan
 
-**Estado:** 0.9.0 (2026-10-10): las 35 fases, las etapas 1 a 4 posteriores al roadmap y la parte de la 5 sin hardware implementadas y validadas en QEMU; primer arranque en hardware real (Fase 34): pendrive como disco por USB, consola PS/2, red por cable; quedan energía, Wi-Fi y EHCI. Estado por capacidad en el README  
-**Versión del documento:** 0.2  
-**Nombre del sistema:** AriCodeOS  
-**Arquitectura inicial:** x86-64  
-**Modelo de arranque:** UEFI  
-**Lenguaje principal previsto:** Rust (`no_std`)  
-**Lenguajes auxiliares:** Assembly x86-64 y, solo cuando sea necesario, C  
-**Plataforma inicial de pruebas:** QEMU + OVMF sobre Debian 13  
-**Hardware real:** portátil antiguo dedicado a pruebas cuando el sistema alcance una fase suficientemente estable
-
----
-
-# 1. Visión
-
-AriCodeOS nace con la intención de crear un sistema operativo moderno desde cero, sin utilizar Linux, Windows, BSD u otro kernel como base de ejecución.
-
-El proyecto no pretende ser inicialmente un reemplazo general de Windows o Linux. Su primera meta es construir un núcleo moderno, pequeño, seguro, verificable y diseñado alrededor del hardware actual.
-
-Los principios fundamentales serán:
-
-- eliminar compatibilidad heredada que no aporte valor;
-- minimizar el código ejecutado con privilegios máximos;
-- aislar componentes y drivers;
-- utilizar seguridad por capacidades;
-- reducir clases completas de vulnerabilidades mediante memoria segura;
-- diseñar actualizaciones atómicas y recuperables;
-- asumir arquitectura de 64 bits desde el principio;
-- diseñar para CPU, GPU, NPU y aceleradores futuros;
-- mantener una arquitectura modular y testeable;
-- evitar dependencias arquitectónicas innecesarias de POSIX;
-- permitir compatibilidad con software antiguo mediante capas aisladas, no contaminando el kernel.
-
-La filosofía puede resumirse así:
-
-> AriCodeOS no intenta ser un Linux más pequeño. Intenta replantear qué debería ser un sistema operativo moderno.
+**Status:** 0.9.0 (2026-10-10): all 35 phases, post-roadmap stages 1 to 4 and the hardware-free part of stage 5 implemented and validated in QEMU; first boot on real hardware (Phase 34): USB stick as a disk over USB, PS/2 console, wired networking; power management, Wi-Fi and EHCI remain. Per-capability status in the README  
+**Document version:** 0.2  
+**System name:** AriCodeOS  
+**Initial architecture:** x86-64  
+**Boot model:** UEFI  
+**Planned main language:** Rust (`no_std`)  
+**Auxiliary languages:** x86-64 assembly and, only when necessary, C  
+**Initial test platform:** QEMU + OVMF on Debian 13  
+**Real hardware:** an old laptop dedicated to testing once the system reaches a sufficiently stable phase
 
 ---
 
-# 2. Objetivos principales
+# 1. Vision
 
-## 2.1 Objetivos funcionales
+AriCodeOS was born with the intention of building a modern operating system from scratch, without using Linux, Windows, BSD or any other kernel as its execution base.
 
-AriCodeOS deberá llegar progresivamente a proporcionar:
+The project does not initially aim to be a general replacement for Windows or Linux. Its first goal is to build a modern, small, secure, verifiable kernel designed around current hardware.
 
-1. Arranque UEFI nativo.
-2. Kernel propio de 64 bits.
-3. Gestión de memoria física y virtual.
-4. Interrupciones y temporizadores.
-5. Ejecución multitarea.
-6. Separación kernel / espacio de usuario.
-7. Procesos aislados.
-8. IPC seguro.
-9. Modelo de capacidades.
-10. Drivers ejecutados fuera del kernel siempre que sea posible.
-11. Almacenamiento persistente.
-12. Sistema de archivos.
-13. Red.
-14. Entrada de teclado y ratón.
-15. Sistema gráfico.
-16. Runtime de aplicaciones.
-17. Aplicaciones nativas.
-18. Aplicaciones portables mediante WebAssembly u otra tecnología equivalente.
-19. Actualización atómica A/B.
-20. Compatibilidad opcional con software Linux mediante aislamiento.
+The fundamental principles will be:
+
+- eliminate legacy compatibility that adds no value;
+- minimize the code that runs with maximum privileges;
+- isolate components and drivers;
+- use capability-based security;
+- eliminate whole classes of vulnerabilities through memory safety;
+- design atomic, recoverable updates;
+- assume a 64-bit architecture from the start;
+- design for CPUs, GPUs, NPUs and future accelerators;
+- keep a modular, testable architecture;
+- avoid unnecessary architectural dependencies on POSIX;
+- allow compatibility with old software through isolated layers, without contaminating the kernel.
+
+The philosophy can be summed up as:
+
+> AriCodeOS does not try to be a smaller Linux. It tries to rethink what a modern operating system should be.
 
 ---
 
-# 3. No objetivos iniciales
+# 2. Main objectives
 
-Durante las primeras versiones AriCodeOS NO intentará:
+## 2.1 Functional objectives
 
-- ejecutar software Windows directamente;
-- ejecutar software Linux directamente;
-- implementar POSIX completo;
-- soportar hardware de 16 o 32 bits;
-- soportar BIOS clásico;
-- soportar floppy, ISA, IDE antiguo u otros buses heredados;
-- competir con Linux en cantidad de drivers;
-- implementar una interfaz gráfica completa antes de estabilizar el kernel;
-- implementar decenas de arquitecturas CPU simultáneamente;
-- optimizar prematuramente componentes todavía inestables.
+AriCodeOS should progressively come to provide:
+
+1. Native UEFI boot.
+2. Its own 64-bit kernel.
+3. Physical and virtual memory management.
+4. Interrupts and timers.
+5. Multitasking execution.
+6. Kernel / user space separation.
+7. Isolated processes.
+8. Secure IPC.
+9. A capability model.
+10. Drivers running outside the kernel whenever possible.
+11. Persistent storage.
+12. A file system.
+13. Networking.
+14. Keyboard and mouse input.
+15. A graphics system.
+16. An application runtime.
+17. Native applications.
+18. Portable applications through WebAssembly or an equivalent technology.
+19. Atomic A/B updates.
+20. Optional compatibility with Linux software through isolation.
 
 ---
 
-# 4. Arquitectura inicial soportada
+# 3. Initial non-goals
+
+During the first versions AriCodeOS will NOT try to:
+
+- run Windows software directly;
+- run Linux software directly;
+- implement full POSIX;
+- support 16- or 32-bit hardware;
+- support classic BIOS;
+- support floppy, ISA, old IDE or other legacy buses;
+- compete with Linux on the number of drivers;
+- implement a complete graphical interface before the kernel is stable;
+- implement dozens of CPU architectures at once;
+- prematurely optimize components that are still unstable.
+
+---
+
+# 4. Initially supported architecture
 
 ## 4.1 CPU
 
-Primera arquitectura:
+First architecture:
 
 ```text
 x86-64 / AMD64
 ```
 
-Requisitos previstos:
+Expected requirements:
 
-- CPU de 64 bits;
-- paginación de 64 bits;
+- 64-bit CPU;
+- 64-bit paging;
 - NX bit;
-- SSE2 como mínimo;
+- SSE2 at minimum;
 - APIC;
 - UEFI;
-- ACPI preferentemente disponible;
-- soporte SMP en fases posteriores.
+- ACPI, preferably available;
+- SMP support in later phases.
 
-Arquitecturas futuras:
+Future architectures:
 
 ```text
 AriCodeOS
@@ -116,15 +116,15 @@ AriCodeOS
 └── riscv64
 ```
 
-No se implementarán ARM64 o RISC-V hasta que la separación entre código genérico y código dependiente de arquitectura esté consolidada.
+ARM64 or RISC-V will not be implemented until the separation between generic code and architecture-dependent code is consolidated.
 
 ---
 
-# 5. Arquitectura conceptual
+# 5. Conceptual architecture
 
 ```text
 +------------------------------------------------------+
-|                    Aplicaciones                      |
+|                    Applications                      |
 |       Native Apps | WASM Apps | Compatibility        |
 +---------------------------+--------------------------+
                             |
@@ -134,12 +134,12 @@ No se implementarán ARM64 o RISC-V hasta que la separación entre código gené
 +---------------------------+--------------------------+
                             |
 +---------------------------v--------------------------+
-|                 Servicios de usuario                 |
+|                    User services                     |
 | Storage | Network | Audio | GUI | Device Manager     |
 +---------------------------+--------------------------+
                             |
 +---------------------------v--------------------------+
-|             Drivers en espacio de usuario            |
+|                 User-space drivers                   |
 | NVMe | USB | HID | Network | Audio | GPU | etc.      |
 +---------------------------+--------------------------+
                             |
@@ -155,73 +155,73 @@ No se implementarán ARM64 o RISC-V hasta que la separación entre código gené
 
 ---
 
-# 6. Filosofía del kernel
+# 6. Kernel philosophy
 
-AriCodeOS utilizará inicialmente una filosofía de **microkernel pragmático**.
+AriCodeOS will initially follow a **pragmatic microkernel** philosophy.
 
-El kernel debe contener únicamente lo imprescindible para administrar recursos críticos.
+The kernel must contain only what is essential to manage critical resources.
 
-## 6.1 Responsabilidades del kernel
+## 6.1 Kernel responsibilities
 
-El kernel será responsable de:
+The kernel will be responsible for:
 
-- cambio de contexto;
-- planificación de CPU;
-- gestión de espacios de direcciones;
-- memoria virtual;
-- memoria física básica;
-- interrupciones;
-- temporizadores;
+- context switching;
+- CPU scheduling;
+- address space management;
+- virtual memory;
+- basic physical memory;
+- interrupts;
+- timers;
 - IPC;
 - capabilities;
-- syscalls mínimas;
-- sincronización fundamental;
-- control SMP;
-- primitivas necesarias para delegar hardware.
+- minimal syscalls;
+- fundamental synchronization;
+- SMP control;
+- the primitives needed to delegate hardware.
 
-## 6.2 Fuera del kernel
+## 6.2 Outside the kernel
 
-Siempre que sea técnicamente razonable deberán vivir en espacio de usuario:
+Whenever technically reasonable, the following must live in user space:
 
-- almacenamiento;
+- storage;
 - USB;
-- red;
+- networking;
 - audio;
 - input;
 - filesystem;
-- servicios del sistema;
-- compositor gráfico;
-- gestores de dispositivos;
-- demonios de compatibilidad.
+- system services;
+- graphical compositor;
+- device managers;
+- compatibility daemons.
 
-Objetivo:
+Goal:
 
 ```text
-fallo de driver != fallo del kernel
+driver failure != kernel failure
 ```
 
-Un driver podrá ser finalizado y reiniciado sin necesariamente provocar un kernel panic.
+A driver can be terminated and restarted without necessarily causing a kernel panic.
 
 ---
 
-# 7. Lenguajes
+# 7. Languages
 
 ## 7.1 Rust
 
-Lenguaje principal.
+Main language.
 
-Motivos:
+Reasons:
 
 - memory safety;
 - ownership;
-- ausencia de garbage collector obligatorio;
-- adecuado para código `no_std`;
-- abstracciones de coste cero;
-- sistema de tipos fuerte;
-- buen soporte para concurrencia segura;
-- reducción de use-after-free, double-free y muchos buffer overflows.
+- no mandatory garbage collector;
+- well suited to `no_std` code;
+- zero-cost abstractions;
+- strong type system;
+- good support for safe concurrency;
+- fewer use-after-free and double-free bugs and many fewer buffer overflows.
 
-El kernel se compilará inicialmente con:
+The kernel will initially be compiled with:
 
 ```text
 #![no_std]
@@ -230,147 +230,147 @@ El kernel se compilará inicialmente con:
 
 ## 7.2 Assembly
 
-Se utilizará únicamente donde sea necesario:
+It will be used only where necessary:
 
-- entrada inicial al kernel;
-- manipulación de registros especiales;
-- tablas de interrupciones;
+- initial kernel entry;
+- manipulation of special registers;
+- interrupt tables;
 - context switch;
 - syscalls;
-- instrucciones de CPU específicas;
-- arranque de CPUs secundarias;
-- operaciones imposibles o poco prácticas desde Rust seguro.
+- specific CPU instructions;
+- booting secondary CPUs;
+- operations that are impossible or impractical from safe Rust.
 
 ## 7.3 C
 
-No será lenguaje principal.
+It will not be a main language.
 
-Podrá admitirse de forma limitada para:
+It may be allowed in a limited way for:
 
-- integración con librerías externas auditadas;
-- prototipos específicos;
-- compatibilidad con alguna herramienta o driver experimental.
+- integration with audited external libraries;
+- specific prototypes;
+- compatibility with some experimental tool or driver.
 
-La política será evitar introducir C en el Trusted Computing Base si existe una alternativa razonable.
+The policy will be to avoid introducing C into the Trusted Computing Base if a reasonable alternative exists.
 
-## 7.4 Valoración: Rust frente a AriCode como lenguaje del kernel
+## 7.4 Assessment: Rust versus AriCode as the kernel language
 
-Existe un compilador propio, **AriCode** (`~/git-proyect/aricoderoot`), y era
-obligado valorar si el kernel debía escribirse con él en lugar de con Rust.
-La valoración se hizo el 2026-09-26 sobre el código real del compilador, no
-sobre la especificación.
+There is an in-house compiler, **AriCode** (`~/git-proyect/aricoderoot`), and it
+was necessary to assess whether the kernel should be written with it instead of Rust.
+The assessment was made on 2026-09-26 against the compiler's actual code, not
+against its specification.
 
-### Qué es AriCode hoy
+### What AriCode is today
 
-- Compilador AOT escrito en C (~30 400 líneas) que emite código máquina
-  x86-64 directamente desde el AST, sin IR, sin LLVM, sin ensamblador y sin
-  linker, con un escritor ELF propio.
-- Un único target: `x86_64-linux` (`aricode/aricode.toml`). No existen
-  `--target`, `--emit-asm` ni salida PE32+/objeto relocalizable.
-- Todo binario generado depende del ABI del kernel Linux: el prólogo fijo
-  reserva un arena con `mmap` en `0x200000000000` y termina con
-  `syscall exit(60)`. Hay ~111 puntos de emisión de syscalls (write, read,
+- An AOT compiler written in C (~30,400 lines) that emits x86-64 machine
+  code directly from the AST, with no IR, no LLVM, no assembler and no
+  linker, using its own ELF writer.
+- A single target: `x86_64-linux` (`aricode/aricode.toml`). There is no
+  `--target`, no `--emit-asm` and no PE32+/relocatable object output.
+- Every generated binary depends on the Linux kernel ABI: the fixed prologue
+  reserves an arena with `mmap` at `0x200000000000` and ends with
+  `syscall exit(60)`. There are ~111 syscall emission points (write, read,
   mmap, open, socket, epoll, clone, futex, wait4).
-- Sin GC ni ownership real: la memoria es un bump arena. Arrays y "structs"
-  son handles enteros opacos.
-- La especificación describe ownership/borrowing, `unsafe`, punteros crudos,
-  FFI `extern "C"` y traits, pero **nada de eso está implementado**: el lexer
-  no reconoce `unsafe`, `extern`, `asm` ni `Box`.
-- Sin punteros desreferenciables, sin acceso volatile, sin control de layout
-  (`repr(C)`), sin inline assembly, sin linker scripts, sin entry point ni
-  dirección de carga configurables (fijos en `0x400000 + 120`, un solo
-  `PT_LOAD` sin secciones ni símbolos).
-- Sin FFI en ninguna dirección: no puede llamar a C/Rust/asm ni ser enlazado
-  desde ellos, porque no produce ficheros objeto.
-- Madurez: v0.1.0, 216 commits de un único autor entre 2026-04-11 y
-  2026-06-28, sin CI, con binarios compilados en el repositorio y tests
-  cuyo recuento difiere entre documentos (23, 39+55, 85). Su foco actual es
-  inferencia LLM cuantizada (int8/int4) y criptografía.
+- No GC and no real ownership: memory is a bump arena. Arrays and "structs"
+  are opaque integer handles.
+- The specification describes ownership/borrowing, `unsafe`, raw pointers,
+  `extern "C"` FFI and traits, but **none of that is implemented**: the lexer
+  does not recognize `unsafe`, `extern`, `asm` or `Box`.
+- No dereferenceable pointers, no volatile access, no layout control
+  (`repr(C)`), no inline assembly, no linker scripts, no configurable entry
+  point or load address (fixed at `0x400000 + 120`, a single
+  `PT_LOAD` with no sections or symbols).
+- No FFI in either direction: it cannot call C/Rust/asm or be linked
+  from them, because it does not produce object files.
+- Maturity: v0.1.0, 216 commits by a single author between 2026-04-11 and
+  2026-06-28, no CI, compiled binaries committed to the repository and test
+  counts that differ between documents (23, 39+55, 85). Its current focus is
+  quantized LLM inference (int8/int4) and cryptography.
 
-### Comparativa para escribir un microkernel
+### Comparison for writing a microkernel
 
-| Requisito del kernel                         | Rust `no_std`                    | AriCode (estado actual)                    |
+| Kernel requirement                           | Rust `no_std`                    | AriCode (current state)                    |
 |----------------------------------------------|----------------------------------|--------------------------------------------|
-| Binario freestanding sin OS debajo           | Sí (`x86_64-unknown-none`)       | No: prólogo hace `mmap` y `exit` Linux     |
-| Aplicación UEFI (PE32+)                      | Sí (`x86_64-unknown-uefi`)       | No: solo ELF Linux                         |
-| Entry point / dirección de carga propios     | Sí (linker script, LLD)          | No: fijos en el escritor ELF               |
-| Punteros crudos, volatile, MMIO              | Sí (`*mut T`, `read_volatile`)   | No                                         |
-| Layout de estructuras controlado             | Sí (`repr(C)`, `repr(u8)`…)      | No                                         |
-| Inline assembly / instrucciones privilegiadas| Sí (`asm!`, `naked` fns)         | No (solo `rdtsc` como builtin)             |
-| Enlazado con ensamblador externo             | Sí (objetos ELF, LLD)            | No: no produce objetos ni símbolos         |
-| Memory safety en el TCB                      | Sí (ownership verificado)        | Parcial: solo bounds checks + arena        |
-| Concurrencia verificada (`Send`/`Sync`)      | Sí                               | No                                         |
-| Depuración con símbolos (GDB)                | Sí (DWARF)                       | No: sin tabla de símbolos                  |
-| Objetivo multi-arquitectura futuro           | Sí (aarch64, riscv64)            | No: solo x86-64                            |
-| Mantenimiento / ecosistema                   | Comunidad, `uefi`, `x86_64`…     | Una persona, 3 meses, sin CI               |
+| Freestanding binary with no OS underneath    | Yes (`x86_64-unknown-none`)      | No: the prologue does Linux `mmap`/`exit`  |
+| UEFI application (PE32+)                     | Yes (`x86_64-unknown-uefi`)      | No: Linux ELF only                         |
+| Custom entry point / load address            | Yes (linker script, LLD)         | No: fixed in the ELF writer                |
+| Raw pointers, volatile, MMIO                 | Yes (`*mut T`, `read_volatile`)  | No                                         |
+| Controlled struct layout                     | Yes (`repr(C)`, `repr(u8)`…)     | No                                         |
+| Inline assembly / privileged instructions    | Yes (`asm!`, `naked` fns)        | No (only `rdtsc` as a builtin)             |
+| Linking with external assembly               | Yes (ELF objects, LLD)           | No: produces no objects or symbols         |
+| Memory safety in the TCB                     | Yes (verified ownership)         | Partial: bounds checks + arena only        |
+| Verified concurrency (`Send`/`Sync`)         | Yes                              | No                                         |
+| Debugging with symbols (GDB)                 | Yes (DWARF)                      | No: no symbol table                        |
+| Future multi-architecture target             | Yes (aarch64, riscv64)           | No: x86-64 only                            |
+| Maintenance / ecosystem                      | Community, `uefi`, `x86_64`…     | One person, 3 months, no CI                |
 
-### Qué costaría hacer viable AriCode para el kernel
+### What it would take to make AriCode viable for the kernel
 
-Como mínimo habría que añadir al compilador: un modo freestanding sin
-syscalls ni arena; salida PE32+ o ELF relocalizable enlazable; punteros
-reales, volatile y control de layout; inline asm o builtins para
-`cli/sti/hlt/lgdt/lidt/CRn/MSR/in/out`; convenciones de llamada para
-interrupt frames; y FFI o ficheros objeto para convivir con asm/Rust. Todo
-ello sobre un backend sin IR donde cada builtin son bytes emitidos a mano.
-Es, en la práctica, escribir un compilador de sistemas nuevo antes de
-escribir el kernel.
+At a minimum the compiler would need: a freestanding mode with no
+syscalls and no arena; PE32+ or linkable relocatable ELF output; real
+pointers, volatile and layout control; inline asm or builtins for
+`cli/sti/hlt/lgdt/lidt/CRn/MSR/in/out`; calling conventions for
+interrupt frames; and FFI or object files to coexist with asm/Rust. All
+of it on top of an IR-less backend where every builtin is hand-emitted bytes.
+In practice, that means writing a new systems compiler before
+writing the kernel.
 
-### Decisión
+### Decision
 
 ```text
-Kernel, bootloader, drivers y servicios base -> Rust no_std
-AriCode                                       -> NO forma parte del TCB
+Kernel, bootloader, drivers and base services -> Rust no_std
+AriCode                                       -> NOT part of the TCB
 ```
 
-Razones:
+Reasons:
 
-1. El kernel necesita hoy las capacidades de la tabla; AriCode no las tiene
-   y no están en su hoja de ruta a corto plazo.
-2. Depender de AriCode acoplaría el calendario del SO al del compilador, y
-   ambos proyectos tienen un único desarrollador.
-3. Rust ofrece justamente las garantías que la sección 51 exige para el
-   TCB (memory safety verificada, `unsafe` acotado y auditable).
-4. Renunciar a AriCode en el kernel no lo excluye del sistema: su lugar
-   natural está encima del kernel, como se detalla en la sección 105.
+1. The kernel needs the capabilities in the table today; AriCode does not have them
+   and they are not on its short-term roadmap.
+2. Depending on AriCode would couple the OS schedule to the compiler's, and
+   both projects have a single developer.
+3. Rust offers exactly the guarantees that section 51 requires for the
+   TCB (verified memory safety, bounded and auditable `unsafe`).
+4. Giving up AriCode in the kernel does not exclude it from the system: its
+   natural place is above the kernel, as detailed in section 105.
 
-Esta decisión se registrará como `docs/decisions/0001-use-rust.md` y deberá
-revisarse si AriCode incorpora un backend freestanding y FFI reales.
+This decision will be recorded as `docs/decisions/0001-use-rust.md` and must be
+revisited if AriCode gains a real freestanding backend and FFI.
 
 ---
 
-# 8. Toolchain de desarrollo
+# 8. Development toolchain
 
-Sistema anfitrión inicial:
+Initial host system:
 
 ```text
 Debian 13 (trixie), x86-64
 ```
 
-Estado de la estación de desarrollo tras la instalación del 2026-09-26:
+State of the development workstation after the 2026-09-26 installation:
 
 ```text
-rustup 1.29.1          -> ~/.cargo/bin (PATH añadido en .bashrc y .profile)
-rustc 1.98.1 stable    -> vía rustup; el rustc 1.85 de Debian queda detrás en PATH
+rustup 1.29.1          -> ~/.cargo/bin (PATH added in .bashrc and .profile)
+rustc 1.98.1 stable    -> via rustup; Debian's rustc 1.85 stays behind it in PATH
 targets                -> x86_64-unknown-none, x86_64-unknown-uefi
-componentes            -> rust-src, llvm-tools, rustfmt, clippy
+components             -> rust-src, llvm-tools, rustfmt, clippy
 qemu-system-x86_64     -> 10.0.13 (Debian)
 OVMF                   -> /usr/share/OVMF/OVMF_CODE_4M.fd, OVMF_VARS_4M.fd
 lld                    -> 19.1.7
 gdb                    -> 16.3
-nasm, clang, git, make -> instalados
+nasm, clang, git, make -> installed
 ```
 
-Prueba de humo realizada: una aplicación UEFI mínima en Rust `no_std`
-(target `x86_64-unknown-uefi`, sin crates externas) arrancó en QEMU + OVMF,
-escribió por consola y terminó QEMU mediante `isa-debug-exit` con el código
-esperado. La cadena firmware -> PE32+ propio -> salida -> exit code para CI
-está validada.
+Smoke test performed: a minimal UEFI application in Rust `no_std`
+(target `x86_64-unknown-uefi`, no external crates) booted in QEMU + OVMF,
+wrote to the console and terminated QEMU through `isa-debug-exit` with the
+expected code. The chain firmware -> our own PE32+ -> output -> exit code for CI
+is validated.
 
-El `rustc` empaquetado por Debian no permite añadir targets ni usar
-`build-std`; por eso se usa rustup y la versión se fijará con
+The `rustc` packaged by Debian does not allow adding targets or using
+`build-std`; that is why rustup is used, and the version will be pinned with
 `rust-toolchain.toml`.
 
-Herramientas:
+Tools:
 
 ```text
 Rust
@@ -383,11 +383,11 @@ QEMU
 OVMF
 GDB
 Git
-Make o cargo xtask
-Python/Node solo para tooling externo si resulta útil
+Make or cargo xtask
+Python/Node only for external tooling if useful
 ```
 
-Paquetes en Debian 13:
+Packages on Debian 13:
 
 ```bash
 sudo apt install \
@@ -401,12 +401,12 @@ sudo apt install \
   make
 ```
 
-OVMF queda instalado en `/usr/share/OVMF/` (`OVMF_CODE_4M.fd` y
-`OVMF_VARS_4M.fd`). El runner de QEMU deberá copiar `OVMF_VARS` a un
-fichero de trabajo para no modificar el original.
+OVMF is installed in `/usr/share/OVMF/` (`OVMF_CODE_4M.fd` and
+`OVMF_VARS_4M.fd`). The QEMU runner must copy `OVMF_VARS` to a
+working file so as not to modify the original.
 
-Instalación de Rust mediante rustup (sin desinstalar el paquete Debian,
-pero asegurándose de que `~/.cargo/bin` precede a `/usr/bin` en `PATH`):
+Installing Rust through rustup (without uninstalling the Debian package,
+but making sure `~/.cargo/bin` comes before `/usr/bin` in `PATH`):
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -415,82 +415,82 @@ rustup target add x86_64-unknown-uefi
 rustup component add rust-src llvm-tools
 ```
 
-La configuración exacta del target puede evolucionar hacia targets JSON personalizados cuando necesitemos controlar ABI, red-zone, features CPU, modelo de código y linker con precisión.
+The exact target configuration may evolve towards custom JSON targets when we need precise control over the ABI, red zone, CPU features, code model and linker.
 
 ---
 
-# 9. Modelo de desarrollo
+# 9. Development model
 
-AriCodeOS se construirá primero dentro de QEMU.
+AriCodeOS will first be built inside QEMU.
 
 ```text
-Debian (estación de desarrollo)
+Debian (development workstation)
   |
   +-- toolchain
   |
-  +-- compila AriCodeOS
+  +-- builds AriCodeOS
   |
-  +-- genera imagen EFI
+  +-- generates EFI image
   |
   +-- QEMU + OVMF
           |
-          +-- arranca AriCodeOS
+          +-- boots AriCodeOS
 ```
 
-Linux (Debian) NO ejecutará AriCodeOS internamente.
+Linux (Debian) will NOT run AriCodeOS internally.
 
-Linux solamente será la estación de desarrollo que:
+Linux will only be the development workstation that:
 
-- edita código;
-- compila;
-- genera imágenes;
-- lanza QEMU;
-- ejecuta tests;
-- depura mediante GDB.
+- edits code;
+- compiles;
+- generates images;
+- launches QEMU;
+- runs tests;
+- debugs through GDB.
 
-Una vez QEMU deja el control al kernel:
+Once QEMU hands control to the kernel:
 
 ```text
-AriCodeOS se ejecuta directamente sobre el hardware virtual.
+AriCodeOS runs directly on the virtual hardware.
 ```
 
 ---
 
-# 10. Arranque
+# 10. Boot
 
-## 10.1 No utilizar BIOS legacy
+## 10.1 Do not use legacy BIOS
 
-AriCodeOS comenzará directamente con UEFI.
+AriCodeOS will start directly with UEFI.
 
-No se implementará:
+The following will not be implemented:
 
-- boot sector MBR tradicional;
-- real mode como mecanismo principal;
-- cargador BIOS heredado;
-- transición manual 16 -> 32 -> 64 bits como requisito inicial.
+- traditional MBR boot sector;
+- real mode as the main mechanism;
+- legacy BIOS loader;
+- manual 16 -> 32 -> 64-bit transition as an initial requirement.
 
-UEFI permite comenzar desde un entorno moderno de 64 bits.
+UEFI lets us start from a modern 64-bit environment.
 
 ---
 
-# 11. Bootloader propio
+# 11. Custom bootloader
 
-El objetivo final será controlar nuestro propio proceso de arranque.
+The final goal is to control our own boot process.
 
-Arquitectura prevista:
+Planned architecture:
 
 ```text
-Firmware UEFI
+UEFI firmware
     |
     v
 BOOTX64.EFI
     |
-    +-- obtiene GOP framebuffer
-    +-- obtiene ACPI RSDP
-    +-- obtiene memory map
-    +-- carga kernel ELF
-    +-- reserva memoria
-    +-- prepara BootInfo
+    +-- gets GOP framebuffer
+    +-- gets ACPI RSDP
+    +-- gets memory map
+    +-- loads kernel ELF
+    +-- reserves memory
+    +-- prepares BootInfo
     +-- ExitBootServices()
     |
     v
@@ -499,9 +499,9 @@ AriCodeOS Kernel
 
 ## 11.1 BootInfo
 
-El bootloader deberá entregar al kernel una estructura de información.
+The bootloader must hand the kernel an information structure.
 
-Ejemplo conceptual:
+Conceptual example:
 
 ```rust
 pub struct BootInfo {
@@ -515,33 +515,33 @@ pub struct BootInfo {
 }
 ```
 
-La estructura real deberá ser versionada y poseer ABI estable.
+The real structure must be versioned and have a stable ABI.
 
 ---
 
-# 12. Formato del kernel
+# 12. Kernel format
 
-Formato recomendado inicial:
+Recommended initial format:
 
 ```text
 ELF64
 ```
 
-Ventajas:
+Advantages:
 
-- estándar ampliamente documentado;
-- secciones claras;
-- symbols útiles para depuración;
+- widely documented standard;
+- clear sections;
+- symbols useful for debugging;
 - relocations;
-- compatibilidad con toolchains maduras.
+- compatibility with mature toolchains.
 
-Posteriormente puede existir un formato propio para aplicaciones sin necesidad de cambiar el formato interno del kernel.
+Later there may be a custom format for applications without needing to change the kernel's internal format.
 
 ---
 
-# 13. Entrada al kernel
+# 13. Kernel entry
 
-Ejemplo conceptual:
+Conceptual example:
 
 ```text
 UEFI bootloader
@@ -549,31 +549,31 @@ UEFI bootloader
       v
 kernel_entry(BootInfo*)
       |
-      +-- deshabilitar dependencias UEFI
-      +-- configurar CPU
-      +-- instalar GDT
-      +-- instalar IDT
-      +-- inicializar memoria
-      +-- inicializar consola temprana
-      +-- habilitar interrupciones
-      +-- iniciar scheduler
+      +-- disable UEFI dependencies
+      +-- configure CPU
+      +-- install GDT
+      +-- install IDT
+      +-- initialize memory
+      +-- initialize early console
+      +-- enable interrupts
+      +-- start scheduler
 ```
 
-Primer milestone real:
+First real milestone:
 
 ```text
 AriCodeOS booting...
 ```
 
-mostrado desde código ejecutándose después de `ExitBootServices()`.
+shown from code running after `ExitBootServices()`.
 
 ---
 
-# 14. Gestión de memoria física
+# 14. Physical memory management
 
-El bootloader entregará el mapa UEFI.
+The bootloader will hand over the UEFI map.
 
-AriCodeOS clasificará regiones:
+AriCodeOS will classify regions:
 
 ```text
 FREE
@@ -587,34 +587,34 @@ FRAMEBUFFER
 INITRD
 ```
 
-Primer allocator físico recomendado:
+Recommended first physical allocator:
 
 ```text
 bitmap page allocator
 ```
 
-Tamaño de página inicial:
+Initial page size:
 
 ```text
 4 KiB
 ```
 
-Posteriormente se admitirán:
+Later the following will be supported:
 
 ```text
 2 MiB huge pages
 1 GiB huge pages
 ```
 
-cuando sea útil.
+when useful.
 
 ---
 
-# 15. Memoria virtual
+# 15. Virtual memory
 
-Cada proceso tendrá su propio espacio virtual.
+Each process will have its own virtual space.
 
-Ejemplo conceptual:
+Conceptual example:
 
 ```text
 Virtual address space
@@ -634,26 +634,26 @@ Virtual address space
 0xFFFFFFFFFFFFFFFF
 ```
 
-La distribución exacta será definida cuando se implemente el VMM.
+The exact layout will be defined when the VMM is implemented.
 
-Protecciones obligatorias:
+Mandatory protections:
 
-- páginas R/W/X diferenciadas;
-- NX por defecto;
-- W^X cuando sea posible;
-- kernel no escribible desde user space;
-- user pages inaccesibles por defecto desde contextos incorrectos;
-- guard pages para stacks;
-- ASLR en fases posteriores.
+- distinct R/W/X pages;
+- NX by default;
+- W^X when possible;
+- kernel not writable from user space;
+- user pages inaccessible by default from the wrong contexts;
+- guard pages for stacks;
+- ASLR in later phases.
 
 ---
 
-# 16. Heap del kernel
+# 16. Kernel heap
 
-Evolución sugerida:
+Suggested evolution:
 
 ```text
-fase inicial: bump allocator
+initial phase: bump allocator
       |
       v
 linked-list allocator
@@ -662,22 +662,22 @@ linked-list allocator
 slab / size-class allocator
 ```
 
-El kernel no dependerá de un heap complejo durante las primeras etapas del arranque.
+The kernel will not depend on a complex heap during the first stages of boot.
 
 ---
 
-# 17. Interrupciones
+# 17. Interrupts
 
-En x86-64 se implementará:
+On x86-64 the following will be implemented:
 
 - GDT;
 - IDT;
-- excepciones CPU;
+- CPU exceptions;
 - Local APIC;
 - I/O APIC;
-- MSI/MSI-X posteriormente.
+- MSI/MSI-X later.
 
-Excepciones críticas:
+Critical exceptions:
 
 ```text
 #DE Divide Error
@@ -688,9 +688,9 @@ Excepciones críticas:
 #NMI
 ```
 
-Un page fault deberá mostrar información diagnóstica detallada durante desarrollo.
+A page fault must show detailed diagnostic information during development.
 
-Ejemplo:
+Example:
 
 ```text
 PANIC: PAGE FAULT
@@ -702,33 +702,33 @@ MODE: KERNEL
 
 ---
 
-# 18. Temporizador
+# 18. Timer
 
-Primera implementación:
+First implementation:
 
-- LAPIC timer o mecanismo adecuado disponible;
-- HPET puede utilizarse como referencia cuando sea necesario;
-- TSC puede emplearse para medición después de validar estabilidad.
+- LAPIC timer or a suitable available mechanism;
+- HPET can be used as a reference when necessary;
+- TSC can be used for measurement after validating its stability.
 
-El timer proporcionará la base para:
+The timer will provide the basis for:
 
 - scheduler;
 - timeouts;
 - sleep;
 - watchdogs;
-- estadísticas.
+- statistics.
 
 ---
 
 # 19. Scheduler
 
-Primer scheduler:
+First scheduler:
 
 ```text
-Round Robin preemptivo
+Preemptive Round Robin
 ```
 
-Más adelante:
+Later:
 
 ```text
 Priority scheduler
@@ -739,7 +739,7 @@ Energy-aware scheduling
 Heterogeneous compute scheduling
 ```
 
-Diseño futuro:
+Future design:
 
 ```text
 TASK
@@ -750,13 +750,13 @@ TASK
  +-- DSP / accelerator
 ```
 
-La meta a largo plazo es que AriCodeOS pueda administrar recursos heterogéneos y no solamente tiempo de CPU.
+The long-term goal is for AriCodeOS to manage heterogeneous resources and not just CPU time.
 
 ---
 
-# 20. Threads y procesos
+# 20. Threads and processes
 
-Entidades diferentes:
+Distinct entities:
 
 ```text
 Process
@@ -771,7 +771,7 @@ Process
 
 ## 20.1 Thread
 
-Contendrá como mínimo:
+It will contain at least:
 
 ```text
 ID
@@ -783,7 +783,7 @@ CPU affinity
 process owner
 ```
 
-Estados iniciales:
+Initial states:
 
 ```text
 READY
@@ -795,25 +795,25 @@ TERMINATED
 
 ---
 
-# 21. Cambio de contexto
+# 21. Context switching
 
-El context switch será una de las pocas zonas donde Assembly puede resultar necesario.
+The context switch will be one of the few areas where assembly may be necessary.
 
-Deberá preservar como mínimo los registros definidos por el ABI interno del kernel.
+It must preserve at least the registers defined by the kernel's internal ABI.
 
-El diseño deberá evitar guardar estado innecesario.
+The design must avoid saving unnecessary state.
 
-FPU/SIMD podrá utilizar lazy/eager context switching según resultados medidos y seguridad.
+FPU/SIMD may use lazy or eager context switching depending on measured results and security.
 
 ---
 
 # 22. Syscalls
 
-El ABI de syscall será propio.
+The syscall ABI will be our own.
 
-No es necesario copiar Linux.
+There is no need to copy Linux.
 
-Primer conjunto conceptual:
+First conceptual set:
 
 ```text
 process_exit
@@ -828,17 +828,17 @@ object_wait
 object_signal
 ```
 
-Debe mantenerse deliberadamente pequeño.
+It must be kept deliberately small.
 
-El kernel NO debería incluir cientos de syscalls especializadas si pueden modelarse mediante objetos y mensajes.
+The kernel should NOT include hundreds of specialized syscalls if they can be modeled through objects and messages.
 
 ---
 
 # 23. IPC
 
-El IPC será pieza central.
+IPC will be a central piece.
 
-Modelo deseado:
+Desired model:
 
 ```text
 client
@@ -851,26 +851,26 @@ endpoint
 server
 ```
 
-Propiedades:
+Properties:
 
-- mensajes pequeños rápidos;
-- transferencia opcional de páginas;
-- transferencia controlada de capabilities;
-- bloqueo o modo asíncrono;
+- fast small messages;
+- optional page transfer;
+- controlled transfer of capabilities;
+- blocking or asynchronous mode;
 - timeouts;
-- cancelación;
-- colas limitadas;
-- protección frente a resource exhaustion.
+- cancellation;
+- bounded queues;
+- protection against resource exhaustion.
 
-IPC deberá ser medido desde etapas tempranas porque es crítico para un microkernel.
+IPC must be measured from early stages because it is critical for a microkernel.
 
 ---
 
-# 24. Modelo de objetos del kernel
+# 24. Kernel object model
 
-Todo recurso crítico podrá representarse mediante un objeto kernel.
+Every critical resource can be represented by a kernel object.
 
-Ejemplos:
+Examples:
 
 ```text
 Process
@@ -884,21 +884,21 @@ SharedMemory
 Timer
 ```
 
-Las aplicaciones no manejarán pointers directos a objetos kernel.
+Applications will not handle direct pointers to kernel objects.
 
-Utilizarán handles/capabilities.
+They will use handles/capabilities.
 
 ---
 
-# 25. Seguridad basada en capabilities
+# 25. Capability-based security
 
-Principio:
+Principle:
 
-> Tener identidad no implica tener acceso.
+> Having an identity does not imply having access.
 
-Una aplicación únicamente puede utilizar un recurso si posee explícitamente una capability adecuada.
+An application can only use a resource if it explicitly holds a suitable capability.
 
-Ejemplo:
+Example:
 
 ```text
 PhotoApp
@@ -912,15 +912,15 @@ NO CAP_MIC
 NO CAP_RAW_DISK
 ```
 
-Una capability deberá poder codificar:
+A capability must be able to encode:
 
-- objeto;
-- derechos;
-- posibilidad de delegación;
-- restricciones;
+- object;
+- rights;
+- whether it can be delegated;
+- restrictions;
 - lifetime.
 
-Ejemplo conceptual:
+Conceptual example:
 
 ```text
 Capability {
@@ -932,13 +932,13 @@ Capability {
 
 ---
 
-# 26. Principio de mínimo privilegio
+# 26. Principle of least privilege
 
-Por defecto una aplicación comienza prácticamente sin privilegios.
+By default an application starts with practically no privileges.
 
 ```text
 APP
-├── RAM propia          YES
+├── own RAM             YES
 ├── CPU                 YES
 ├── network             NO
 ├── camera              NO
@@ -948,13 +948,13 @@ APP
 └── kernel memory       NEVER
 ```
 
-Los permisos se conceden mediante capacidades específicas.
+Permissions are granted through specific capabilities.
 
 ---
 
-# 27. Drivers en espacio de usuario
+# 27. User-space drivers
 
-Arquitectura deseada:
+Desired architecture:
 
 ```text
 Application
@@ -972,73 +972,73 @@ MMIO / IRQ capability
 Hardware
 ```
 
-Cada driver recibe únicamente:
+Each driver receives only:
 
-- región MMIO necesaria;
-- puerto I/O cuando corresponda;
-- IRQ correspondiente;
-- DMA buffers autorizados;
-- canal IPC hacia su servicio.
+- the MMIO region it needs;
+- an I/O port where applicable;
+- the corresponding IRQ;
+- authorized DMA buffers;
+- an IPC channel to its service.
 
-No debe recibir acceso universal al kernel.
+It must not receive universal access to the kernel.
 
 ---
 
-# 28. DMA e IOMMU
+# 28. DMA and IOMMU
 
-Cuando el hardware lo permita deberá utilizarse IOMMU.
+When the hardware allows it, the IOMMU must be used.
 
-Objetivo:
+Goal:
 
 ```text
 device DMA
    |
    v
-solo memoria autorizada
+authorized memory only
 ```
 
-Sin IOMMU un dispositivo con DMA puede potencialmente escribir en memoria arbitraria.
+Without an IOMMU a DMA-capable device can potentially write to arbitrary memory.
 
-Por ello el soporte VT-d/AMD-Vi/IOMMU será una característica de seguridad importante.
+That is why VT-d/AMD-Vi/IOMMU support will be an important security feature.
 
 ---
 
 # 29. Device Manager
 
-Servicio de usuario encargado de:
+User service in charge of:
 
-- enumerar dispositivos;
-- identificar drivers compatibles;
-- iniciar drivers;
-- asignar capabilities de hardware;
-- reiniciar drivers que fallen;
-- administrar hotplug.
+- enumerating devices;
+- identifying compatible drivers;
+- starting drivers;
+- assigning hardware capabilities;
+- restarting drivers that fail;
+- managing hotplug.
 
-No necesita residir dentro del kernel.
+It does not need to reside inside the kernel.
 
 ---
 
 # 30. PCI / PCI Express
 
-El primer bus de dispositivos importante será PCI/PCIe.
+The first important device bus will be PCI/PCIe.
 
-Tareas:
+Tasks:
 
-1. localizar ECAM mediante ACPI MCFG;
-2. enumerar buses;
-3. leer vendor/device IDs;
-4. interpretar BARs;
-5. detectar capabilities PCIe;
-6. asignar MMIO;
-7. configurar MSI/MSI-X.
+1. locate ECAM through ACPI MCFG;
+2. enumerate buses;
+3. read vendor/device IDs;
+4. interpret BARs;
+5. detect PCIe capabilities;
+6. assign MMIO;
+7. configure MSI/MSI-X.
 
 ---
 
 # 31. ACPI
 
-Se utilizará ACPI para descubrir aspectos esenciales del hardware moderno.
+ACPI will be used to discover essential aspects of modern hardware.
 
-Tablas relevantes:
+Relevant tables:
 
 ```text
 RSDP
@@ -1050,30 +1050,30 @@ HPET
 DMAR / IOMMU
 ```
 
-No se implementará AML completo inicialmente. `libs/acpi` parsea RSDP,
-XSDT/RSDT, MADT y MCFG (Fase 16); HPET y DMAR quedan para cuando se usen.
+Full AML will not be implemented initially. `libs/acpi` parses RSDP,
+XSDT/RSDT, MADT and MCFG (Phase 16); HPET and DMAR are left for when they are used.
 
-Podrá incorporarse un intérprete AML posteriormente si resulta necesario.
+An AML interpreter may be added later if necessary.
 
 ---
 
-# 32. Almacenamiento
+# 32. Storage
 
-Prioridad inicial:
+Initial priority:
 
 ```text
 NVMe
 ```
 
-Motivo:
+Reason:
 
-- estándar moderno;
-- ampliamente utilizado;
-- evita dedicar recursos iniciales a IDE/PATA histórico.
+- modern standard;
+- widely used;
+- avoids spending initial resources on historical IDE/PATA.
 
-SATA/AHCI puede añadirse después.
+SATA/AHCI can be added later.
 
-Orden previsto:
+Planned order:
 
 ```text
 RAM disk
@@ -1085,9 +1085,9 @@ RAM disk
 
 ---
 
-# 33. Abstracción de dispositivos de bloque
+# 33. Block device abstraction
 
-Interfaz conceptual:
+Conceptual interface:
 
 ```rust
 trait BlockDevice {
@@ -1097,43 +1097,43 @@ trait BlockDevice {
 }
 ```
 
-El filesystem nunca debería depender directamente de NVMe.
+The filesystem should never depend directly on NVMe.
 
 ---
 
-# 34. Sistema de archivos
+# 34. File system
 
-Para las primeras fases pueden utilizarse dos estrategias:
+Two strategies can be used for the first phases:
 
 ## 34.1 Initramfs
 
-Imagen incluida durante el boot con:
+Image included at boot with:
 
-- proceso init;
-- servicios básicos;
-- pruebas;
-- configuraciones.
+- init process;
+- basic services;
+- tests;
+- configuration.
 
-## 34.2 Filesystem persistente
+## 34.2 Persistent filesystem
 
-Primera versión puede ser deliberadamente simple.
+The first version can be deliberately simple.
 
-Más adelante AriCodeOS podrá diseñar un filesystem propio con:
+Later AriCodeOS may design its own filesystem with:
 
 - checksums;
 - snapshots;
 - copy-on-write;
-- metadata transaccional;
-- recuperación ante errores;
-- cifrado opcional.
+- transactional metadata;
+- error recovery;
+- optional encryption.
 
-No es prioritario inventar un filesystem avanzado antes de tener procesos, IPC y almacenamiento fiables.
+Inventing an advanced filesystem is not a priority before having reliable processes, IPC and storage.
 
 ---
 
-# 35. Sistema base inmutable
+# 35. Immutable base system
 
-Objetivo de seguridad:
+Security goal:
 
 ```text
 SYSTEM IMAGE -> READ ONLY
@@ -1141,13 +1141,13 @@ USER DATA    -> WRITABLE
 APP DATA     -> SANDBOXED
 ```
 
-El sistema base deberá poder verificarse criptográficamente.
+The base system must be cryptographically verifiable.
 
 ---
 
-# 36. Actualizaciones atómicas A/B
+# 36. Atomic A/B updates
 
-Diseño:
+Design:
 
 ```text
 SYSTEM_A
@@ -1155,55 +1155,55 @@ SYSTEM_B
 USER_DATA
 ```
 
-Ejemplo:
+Example:
 
 ```text
-actualmente activo: SYSTEM_A
-actualización -> escribir SYSTEM_B
-verificar firma
-reiniciar
+currently active: SYSTEM_A
+update -> write SYSTEM_B
+verify signature
+reboot
 boot SYSTEM_B
 ```
 
-Si el arranque falla:
+If boot fails:
 
 ```text
 rollback -> SYSTEM_A
 ```
 
-La actualización nunca debe modificar parcialmente el sistema actualmente en ejecución.
+An update must never partially modify the currently running system.
 
 ---
 
-# 37. Secure Boot propio
+# 37. Custom Secure Boot
 
-Cadena conceptual:
+Conceptual chain:
 
 ```text
 UEFI Secure Boot
       |
       v
-AriCode Bootloader firmado
+Signed AriCode Bootloader
       |
       v
-Kernel firmado
+Signed kernel
       |
       v
-System image firmada
+Signed system image
       |
       v
-Servicios firmados
+Signed services
 ```
 
-Durante desarrollo Secure Boot podrá permanecer desactivado.
+During development Secure Boot may remain disabled.
 
-Más adelante AriCodeOS podrá utilizar claves propias.
+Later AriCodeOS may use its own keys.
 
 ---
 
-# 38. Red
+# 38. Networking
 
-Secuencia prevista:
+Planned sequence:
 
 ```text
 NIC driver
@@ -1222,31 +1222,31 @@ TCP
    |
 DNS
    |
-TLS en user space
+TLS in user space
 ```
 
-La pila de red deberá vivir principalmente fuera del kernel.
+The network stack must live mainly outside the kernel.
 
 ---
 
-# 39. Primer driver de red
+# 39. First network driver
 
-En QEMU conviene utilizar inicialmente un dispositivo sencillo y bien documentado.
+In QEMU it is best to start with a simple, well-documented device.
 
-Opciones posibles durante desarrollo:
+Possible options during development:
 
 - virtio-net;
-- Intel e1000 como alternativa educativa.
+- Intel e1000 as an educational alternative.
 
-Para la arquitectura final se favorecerá virtio en entorno virtualizado y drivers nativos separados para hardware real.
+For the final architecture, virtio will be favored in virtualized environments, with separate native drivers for real hardware.
 
 ---
 
 # 40. Virtio
 
-Virtio será especialmente útil en QEMU.
+Virtio will be especially useful in QEMU.
 
-Drivers candidatos:
+Candidate drivers:
 
 ```text
 virtio-blk
@@ -1255,27 +1255,27 @@ virtio-gpu
 virtio-input
 ```
 
-Permite construir las capas del SO antes de enfrentarse a la variedad extrema del hardware real.
+It lets us build the OS layers before facing the extreme variety of real hardware.
 
 ---
 
-# 41. Entrada
+# 41. Input
 
-Fases iniciales:
+Initial phases:
 
 ```text
-UEFI console -> solo boot
-PS/2 emulado / virtio-input -> desarrollo
-USB HID -> hardware moderno
+UEFI console -> boot only
+emulated PS/2 / virtio-input -> development
+USB HID -> modern hardware
 ```
 
-A largo plazo el stack USB será imprescindible.
+In the long term the USB stack will be indispensable.
 
 ---
 
 # 42. USB
 
-Implementación futura por etapas:
+Future implementation in stages:
 
 ```text
 xHCI controller
@@ -1288,41 +1288,41 @@ Class drivers
 ├── HID
 ├── Mass Storage
 ├── Audio
-└── otros
+└── others
 ```
 
-No se implementarán inicialmente controladores USB antiguos EHCI/OHCI/UHCI salvo necesidad concreta.
+Old EHCI/OHCI/UHCI USB controllers will not be implemented initially unless there is a concrete need.
 
 ---
 
-# 43. Gráficos
+# 43. Graphics
 
-Primera salida gráfica:
+First graphical output:
 
 ```text
 UEFI GOP framebuffer
 ```
 
-Fases:
+Phases:
 
 ```text
-1. framebuffer directo
+1. direct framebuffer
 2. font renderer
 3. framebuffer console
 4. 2D primitives
 5. compositor
-6. ventanas
+6. windows
 7. input routing
 8. GPU acceleration
 ```
 
-El kernel no administrará ventanas.
+The kernel will not manage windows.
 
 ---
 
-# 44. Compositor gráfico
+# 44. Graphical compositor
 
-Proceso de usuario privilegiado mediante capabilities específicas.
+A user process privileged through specific capabilities.
 
 ```text
 Apps
@@ -1334,15 +1334,15 @@ Compositor
 GPU service / framebuffer
 ```
 
-Cada aplicación renderizará sobre superficies propias.
+Each application will render onto its own surfaces.
 
-El compositor decidirá qué región llega a pantalla.
+The compositor will decide which region reaches the screen.
 
 ---
 
 # 45. Audio
 
-El audio será un servicio de usuario.
+Audio will be a user service.
 
 ```text
 App
@@ -1357,15 +1357,15 @@ Audio Driver
 Hardware
 ```
 
-Permitirá mezclar varias aplicaciones sin entregar acceso directo al dispositivo.
+It will allow mixing several applications without handing out direct access to the device.
 
 ---
 
-# 46. Aplicaciones nativas
+# 46. Native applications
 
-Una aplicación AriCodeOS no recibirá acceso arbitrario al sistema.
+An AriCodeOS application will not receive arbitrary access to the system.
 
-Manifest conceptual:
+Conceptual manifest:
 
 ```toml
 name = "photos"
@@ -1379,15 +1379,15 @@ camera = false
 microphone = false
 ```
 
-Durante instalación o primer uso el sistema podrá solicitar autorización al usuario.
+During installation or first use the system may ask the user for authorization.
 
 ---
 
-# 47. Runtime portable / WebAssembly
+# 47. Portable runtime / WebAssembly
 
-Una posibilidad importante para AriCodeOS es soportar aplicaciones WASM.
+An important possibility for AriCodeOS is supporting WASM applications.
 
-Arquitectura:
+Architecture:
 
 ```text
 WASM Application
@@ -1402,23 +1402,23 @@ Capability API
 System services
 ```
 
-Beneficios:
+Benefits:
 
-- portabilidad;
-- sandbox natural;
-- menor dependencia de CPU;
-- API controlada;
-- distribución sencilla.
+- portability;
+- natural sandbox;
+- less CPU dependence;
+- controlled API;
+- simple distribution.
 
-El soporte WASM no sustituirá necesariamente a aplicaciones nativas.
+WASM support will not necessarily replace native applications.
 
 ---
 
-# 48. Compatibilidad Linux
+# 48. Linux compatibility
 
-No debe añadirse compatibilidad Linux dentro del microkernel principal.
+Linux compatibility must not be added inside the main microkernel.
 
-Modelo futuro:
+Future model:
 
 ```text
 AriCodeOS
@@ -1430,68 +1430,68 @@ AriCodeOS
             +-- container / VM / personality server
 ```
 
-Esto permite mantener limpio el diseño principal.
+This keeps the main design clean.
 
 ---
 
-# 49. Compatibilidad Windows
+# 49. Windows compatibility
 
-No será un objetivo inicial.
+It will not be an initial goal.
 
-En el futuro podría existir:
+In the future there could be:
 
 ```text
 Windows VM
 ```
 
-o una capa de compatibilidad aislada.
+or an isolated compatibility layer.
 
-No se pretende replicar Win32 dentro del kernel.
+There is no intention to replicate Win32 inside the kernel.
 
 ---
 
-# 50. Virtualización
+# 50. Virtualization
 
-Fase avanzada.
+Advanced phase.
 
-Posible uso de:
+Possible use of:
 
 - Intel VT-x;
 - AMD-V;
 - IOMMU;
 - hardware virtualization.
 
-AriCodeOS podría evolucionar hacia capacidad de ejecutar entornos de compatibilidad completos como VMs altamente integradas.
+AriCodeOS could evolve towards being able to run complete compatibility environments as highly integrated VMs.
 
 ---
 
-# 51. Seguridad
+# 51. Security
 
-Seguridad será característica de arquitectura, no añadido final.
+Security will be an architectural property, not a final add-on.
 
-Principios:
+Principles:
 
-1. mínimo código en ring 0;
+1. minimal code in ring 0;
 2. memory safety;
 3. capabilities;
-4. aislamiento de procesos;
-5. drivers fuera del kernel;
+4. process isolation;
+5. drivers outside the kernel;
 6. W^X;
 7. NX;
-8. ASLR futuro;
+8. future ASLR;
 9. IOMMU;
-10. system image firmada;
-11. updates A/B;
-12. sandbox de aplicaciones;
-13. límites de recursos;
-14. separación de secretos;
-15. auditoría.
+10. signed system image;
+11. A/B updates;
+12. application sandbox;
+13. resource limits;
+14. separation of secrets;
+15. auditing.
 
 ---
 
-# 52. Protección frente a agotamiento de recursos
+# 52. Protection against resource exhaustion
 
-Cada proceso deberá poder disponer de cuotas.
+Each process must be able to have quotas.
 
 ```text
 memory quota
@@ -1502,15 +1502,15 @@ open object limits
 shared memory limits
 ```
 
-Una aplicación no debe poder colapsar el sistema simplemente creando millones de objetos.
+An application must not be able to bring down the system simply by creating millions of objects.
 
 ---
 
-# 53. Panic del kernel
+# 53. Kernel panic
 
-Un kernel panic debe intentar preservar información diagnóstica.
+A kernel panic must try to preserve diagnostic information.
 
-Formato ejemplo:
+Example format:
 
 ```text
 ============================
@@ -1528,13 +1528,13 @@ Backtrace:
 ============================
 ```
 
-QEMU deberá poder enviar logs a puerto serie para facilitar tests automáticos.
+QEMU must be able to send logs to the serial port to ease automated tests.
 
 ---
 
 # 54. Logging
 
-Niveles:
+Levels:
 
 ```text
 TRACE
@@ -1545,15 +1545,15 @@ ERROR
 FATAL
 ```
 
-Destinos iniciales:
+Initial destinations:
 
 ```text
 serial
 framebuffer console
-QEMU debug port opcional
+optional QEMU debug port
 ```
 
-Más adelante:
+Later:
 
 ```text
 structured logging service
@@ -1563,96 +1563,96 @@ structured logging service
 
 # 55. Tests
 
-Los tests son parte estructural del proyecto y viven en el repositorio.
+Tests are a structural part of the project and live in the repository.
 
-Estructura implementada (ver `tests/README.md`):
+Implemented structure (see `tests/README.md`):
 
 ```text
-libs/*/src/lib.rs          #[cfg(test)]  unitarios de host (elf, x86-paging, cmdline)
-boot-protocol/src/lib.rs   #[cfg(test)]  clasificación de memoria, iterador, cmdline
-tools/xtask/src/*.rs       #[cfg(test)]  validez de los escenarios y utilidades
-tests/qemu/*.toml                        escenarios de integración en QEMU
+libs/*/src/lib.rs          #[cfg(test)]  host unit tests (elf, x86-paging, cmdline)
+boot-protocol/src/lib.rs   #[cfg(test)]  memory classification, iterator, cmdline
+tools/xtask/src/*.rs       #[cfg(test)]  scenario validity and utilities
+tests/qemu/*.toml                        QEMU integration scenarios
 ```
 
-Cada fase añade su área (`boot`, `panic`, `memory`, `paging`, `interrupts`,
+Each phase adds its area (`boot`, `panic`, `memory`, `paging`, `interrupts`,
 `scheduler`, `ipc`, `capabilities`, `drivers`, `filesystem`, `networking`,
-`security`) como nuevos escenarios TOML y nuevos tests unitarios, en la misma
-rama que el código.
+`security`) as new TOML scenarios and new unit tests, on the same
+branch as the code.
 
 ---
 
-# 56. Test runner en QEMU y niveles
+# 56. QEMU test runner and levels
 
 ```bash
-cargo xtask test                 # unit + smoke      (por defecto; mínimo hacia develop)
-cargo xtask test --level unit    # solo host, segundos
-cargo xtask test --all           # unit + full       (obligatorio hacia main)
-cargo xtask test --area boot     # solo los escenarios QEMU de un área
-cargo xtask test --list          # ver escenarios
+cargo xtask test                 # unit + smoke      (default; minimum towards develop)
+cargo xtask test --level unit    # host only, seconds
+cargo xtask test --all           # unit + full       (mandatory towards main)
+cargo xtask test --area boot     # only the QEMU scenarios of one area
+cargo xtask test --list          # list scenarios
 ```
 
-Salida:
+Output:
 
 ```text
-[xtask] nivel Full
+[xtask] level Full
 [xtask] unit tests (host)
 test result: ok. 18 passed
 [PASS] boot.kernel_panic_reports              1.6s
 [PASS] boot.kernel_ready                      1.6s
 [PASS] boot.loader_missing_kernel             1.5s
 [PASS] boot.loader_rejects_bad_elf            1.5s
-[xtask] 4 escenarios QEMU, 0 fallidos
+[xtask] 4 QEMU scenarios, 0 failed
 ```
 
-Un escenario declara cmdline, inyecciones de fallo en la ESP (kernel truncado,
-kernel ausente) y expectativas sobre la serie y el código de salida de QEMU
-(33 éxito, 35 fallo reportado). El comportamiento de test dentro del sistema se
-pide por cmdline (`qemu_exit`, `test=panic`), nunca por features de
-compilación (ADR 0007): un único binario sirve para todos los escenarios.
+A scenario declares the cmdline, fault injections in the ESP (truncated kernel,
+missing kernel) and expectations about the serial output and QEMU's exit code
+(33 success, 35 reported failure). Test behaviour inside the system is
+requested through the cmdline (`qemu_exit`, `test=panic`), never through build
+features (ADR 0007): a single binary serves every scenario.
 
-QEMU termina automáticamente con código de salida interpretable por CI.
+QEMU terminates automatically with an exit code CI can interpret.
 
 ---
 
-# 57. Tipos de tests
+# 57. Types of tests
 
 ## Unit tests
 
-Para algoritmos independientes del hardware.
+For hardware-independent algorithms.
 
 ## Kernel integration tests
 
-Arranque completo en QEMU.
+Full boot in QEMU.
 
 ## Fault injection tests
 
-Provocar deliberadamente:
+Deliberately trigger:
 
 - page fault;
 - invalid opcode;
 - driver crash;
 - IPC timeout;
-- memoria insuficiente.
+- out of memory.
 
 ## Security tests
 
-Comprobar que un proceso NO puede:
+Check that a process can NOT:
 
-- leer memoria de otro;
-- mapear kernel memory;
-- utilizar dispositivos sin capability;
-- falsificar handles;
-- escalar privilegios mediante IPC.
+- read another process's memory;
+- map kernel memory;
+- use devices without a capability;
+- forge handles;
+- escalate privileges through IPC.
 
 ## Hardware tests
 
-Ejecutados sobre el portátil de pruebas.
+Run on the test laptop.
 
 ---
 
 # 58. CI
 
-Pipeline futuro:
+Future pipeline:
 
 ```text
 commit
@@ -1669,13 +1669,13 @@ commit
   +-- artifact image
 ```
 
-Ningún commit que rompa el boot debería llegar a la rama principal.
+No commit that breaks boot should reach the main branch.
 
 ---
 
-# 59. Repositorio
+# 59. Repository
 
-Estructura propuesta:
+Proposed structure:
 
 ```text
 aricodeos/
@@ -1753,15 +1753,15 @@ aricodeos/
 └── scripts/
 ```
 
-`boot-protocol/` vive en la raíz del workspace y no dentro de `boot/`
-porque es la única crate compartida por bootloader y kernel: define el
-ABI de `BootInfo` y no debe depender de ninguno de los dos.
+`boot-protocol/` lives at the workspace root and not inside `boot/`
+because it is the only crate shared by bootloader and kernel: it defines the
+`BootInfo` ABI and must not depend on either of them.
 
 ---
 
-# 60. Arquitectura modular Rust
+# 60. Modular Rust architecture
 
-Workspace posible:
+Possible workspace:
 
 ```text
 aricodeos-boot-protocol
@@ -1775,80 +1775,80 @@ aricodeos-sdk
 aricodeos-test-framework
 ```
 
-Debe evitarse crear cientos de crates sin necesidad.
+Creating hundreds of crates without need must be avoided.
 
-La modularidad debe responder a límites arquitectónicos reales.
-
----
-
-# 61. Convenciones de código
-
-Principios:
-
-- `unsafe` excepcional;
-- documentar motivo de cada bloque `unsafe`;
-- encapsular operaciones inseguras detrás de interfaces seguras;
-- evitar estado global mutable;
-- evitar allocations ocultas en rutas críticas;
-- errores explícitos;
-- no ignorar `Result`;
-- no utilizar `unwrap()` en código crítico salvo invariantes demostrables;
-- tests para cada bug corregido;
-- documentar invariantes de concurrencia;
-- medir antes de optimizar.
+Modularity must respond to real architectural boundaries.
 
 ---
 
-# 62. Política de unsafe
+# 61. Code conventions
 
-Cada bloque deberá explicar:
+Principles:
+
+- `unsafe` is exceptional;
+- document the reason for every `unsafe` block;
+- encapsulate unsafe operations behind safe interfaces;
+- avoid mutable global state;
+- avoid hidden allocations in critical paths;
+- explicit errors;
+- do not ignore `Result`;
+- do not use `unwrap()` in critical code except for provable invariants;
+- a test for every fixed bug;
+- document concurrency invariants;
+- measure before optimizing.
+
+---
+
+# 62. Unsafe policy
+
+Every block must explain:
 
 ```text
 SAFETY:
-- precondición 1
-- precondición 2
-- por qué no existe aliasing inválido
-- lifetime garantizado
-- ownership del recurso
+- precondition 1
+- precondition 2
+- why there is no invalid aliasing
+- guaranteed lifetime
+- ownership of the resource
 ```
 
-Objetivo:
+Goal:
 
 ```text
-unsafe pequeño, localizado y auditable
+small, localized, auditable unsafe
 ```
 
 ---
 
 # 63. ADR: Architecture Decision Records
 
-Toda decisión importante deberá registrarse.
+Every important decision must be recorded.
 
-Ejemplo:
+Example:
 
 ```text
 docs/decisions/
-0001-use-rust.md            (incluye la valoración frente a AriCode, sección 7.4)
+0001-use-rust.md            (includes the assessment against AriCode, section 7.4)
 0002-use-uefi-only.md
 0003-microkernel.md
 0004-capability-security.md
 0005-user-space-drivers.md
 ```
 
-Cada ADR incluirá:
+Each ADR will include:
 
-- contexto;
-- decisión;
-- alternativas;
-- consecuencias;
-- fecha;
-- estado.
+- context;
+- decision;
+- alternatives;
+- consequences;
+- date;
+- status.
 
 ---
 
-# 64. Versionado
+# 64. Versioning
 
-Primer esquema:
+First scheme:
 
 ```text
 0.0.1 boot
@@ -1857,766 +1857,766 @@ Primer esquema:
 ...
 ```
 
-Antes de disponer de una API estable se utilizarán versiones `0.x`.
+Before having a stable API, `0.x` versions will be used.
 
-Una futura `1.0` debería significar como mínimo:
+A future `1.0` should mean at least:
 
-- boot estable;
-- procesos;
-- memoria;
+- stable boot;
+- processes;
+- memory;
 - IPC;
-- drivers esenciales;
-- almacenamiento;
-- red;
-- SDK básico;
-- actualización fiable;
-- documentación del ABI.
+- essential drivers;
+- storage;
+- networking;
+- basic SDK;
+- reliable updates;
+- ABI documentation.
 
 ---
 
-# 65. Roadmap completo
+# 65. Complete roadmap
 
 ---
 
-## FASE 0 — Preparación del proyecto
+## PHASE 0 — Project preparation
 
-### Objetivo
+### Goal
 
-Tener un entorno reproducible de desarrollo.
+Have a reproducible development environment.
 
-### Trabajo
+### Work
 
-- crear repositorio Git;
-- crear Rust workspace;
-- fijar toolchain Rust;
-- instalar QEMU;
-- instalar OVMF;
-- crear `cargo xtask` o equivalente;
-- crear estructura básica de documentación;
-- configurar `rustfmt`;
-- configurar `clippy`;
-- definir convenciones.
+- create the Git repository;
+- create the Rust workspace;
+- pin the Rust toolchain;
+- install QEMU;
+- install OVMF;
+- create `cargo xtask` or equivalent;
+- create the basic documentation structure;
+- configure `rustfmt`;
+- configure `clippy`;
+- define conventions.
 
-### Criterio de finalización
+### Completion criterion
 
 ```text
 cargo xtask build
 ```
 
-produce correctamente la estructura inicial del proyecto.
+correctly produces the initial project structure.
 
 ---
 
-# FASE 1 — UEFI Hello World
+# PHASE 1 — UEFI Hello World
 
-### Objetivo
+### Goal
 
-Ejecutar código propio como aplicación EFI.
+Run our own code as an EFI application.
 
-### Resultado esperado
+### Expected result
 
 ```text
 AriCodeOS UEFI loader
 ```
 
-visible en pantalla.
+visible on screen.
 
-### Criterio de finalización
+### Completion criterion
 
-QEMU + OVMF ejecuta `BOOTX64.EFI` generado por el proyecto.
+QEMU + OVMF runs the `BOOTX64.EFI` generated by the project.
 
 ---
 
-# FASE 2 — Bootloader + kernel ELF
+# PHASE 2 — Bootloader + ELF kernel
 
-### Objetivo
+### Goal
 
-Separar bootloader y kernel.
+Separate bootloader and kernel.
 
-### Trabajo
+### Work
 
-- cargar kernel ELF desde partición EFI;
-- parsear ELF64;
-- reservar segmentos;
-- construir BootInfo;
-- ejecutar `ExitBootServices()`;
-- saltar a entrypoint del kernel.
+- load the ELF kernel from the EFI partition;
+- parse ELF64;
+- reserve segments;
+- build BootInfo;
+- call `ExitBootServices()`;
+- jump to the kernel entry point.
 
-### Criterio
+### Criterion
 
-El kernel imprime:
+The kernel prints:
 
 ```text
 AriCodeOS Kernel 0.0.x
 ```
 
-sin utilizar servicios UEFI después de entrar.
+without using UEFI services after entry.
 
 ---
 
-# FASE 3 — Consola temprana
+# PHASE 3 — Early console
 
-**Estado: completada (2026-09-26).**
+**Status: completed (2026-09-26).**
 
-### Objetivo
+### Goal
 
-Logging fiable.
+Reliable logging.
 
-### Implementado
+### Implemented
 
 - serial logger (COM1);
-- framebuffer logger: `libs/fb-console` con fuente Terminus 8x16 (OFL 1.1),
-  rejilla de celdas y scroll sin leer VRAM;
-- macros: `print!/println!` (texto sin formato) y `log::{trace..error}!`
-  con niveles TRACE..ERROR vía `console::KernelLogger`; `log=<nivel>` en la
-  cmdline; FATAL equivale al panic;
-- panic handler solo por serie.
+- framebuffer logger: `libs/fb-console` with the Terminus 8x16 font (OFL 1.1),
+  a cell grid and scrolling without reading VRAM;
+- macros: `print!/println!` (unformatted text) and `log::{trace..error}!`
+  with levels TRACE..ERROR via `console::KernelLogger`; `log=<level>` on the
+  cmdline; FATAL is equivalent to a panic;
+- serial-only panic handler.
 
-### Criterio
+### Criterion
 
-Kernel panic legible y salida capturable por tests: escenarios
-`boot.kernel_panic_reports` y área `console` (cuatro escenarios de niveles).
-
----
-
-# FASE 4 — CPU foundation
-
-**Estado: completada (2026-09-26).**
-
-### Implementado
-
-- GDT propia (código/datos ring 0, TSS) codificada en `libs/x86-cpu`;
-- TSS con IST1 -> pila dedicada de 16 KiB para #DF;
-- IDT de 256 vectores sobre stubs generados en ensamblador (ADR 0008);
-- excepciones con volcado de registros, CR2/acceso/modo/causa para #PF,
-  #BP recuperable;
-- fallos provocados por cmdline: `test=breakpoint|invalid_opcode|page_fault|double_fault`.
-
-### Tests (área `interrupts`)
-
-- `interrupts.breakpoint_returns` (smoke): #BP manejado, el kernel llega a READY;
-- `interrupts.invalid_opcode_panics`: #UD con volcado y pánico;
-- `interrupts.page_fault_reports_cr2`: #PF con CR2, ACCESS WRITE, MODE KERNEL;
-- `interrupts.double_fault_uses_ist`: pila corrupta + int3 -> #DF atendido en IST.
-
-Además, 7 tests de host validan las codificaciones de descriptores, TSS e IDT
-contra valores conocidos.
+Readable kernel panic and output capturable by tests: scenario
+`boot.kernel_panic_reports` and the `console` area (four level scenarios).
 
 ---
 
-# FASE 5 — Physical Memory Manager
+# PHASE 4 — CPU foundation
 
-**Estado: completada (2026-09-26).**
+**Status: completed (2026-09-26).**
 
-### Implementado
+### Implemented
 
-- parser del mapa UEFI en `kernel/src/memory/pmm.rs`;
-- bitmap allocator en `libs/pmm` (sin `alloc`, almacenamiento aportado por
-  el llamador, `allocate`, `allocate_contiguous` alineado, `free` con
-  detección de double free y fuera de rango);
-- reservas: frame 0 y primer MiB, el propio bitmap;
-- estadísticas (`Stats`: total, libres, usados).
+- our own GDT (ring 0 code/data, TSS) encoded in `libs/x86-cpu`;
+- TSS with IST1 -> a dedicated 16 KiB stack for #DF;
+- 256-vector IDT over stubs generated in assembly (ADR 0008);
+- exceptions with register dumps, CR2/access/mode/cause for #PF,
+  recoverable #BP;
+- faults triggered from the cmdline: `test=breakpoint|invalid_opcode|page_fault|double_fault`.
+
+### Tests (`interrupts` area)
+
+- `interrupts.breakpoint_returns` (smoke): #BP handled, the kernel reaches READY;
+- `interrupts.invalid_opcode_panics`: #UD with dump and panic;
+- `interrupts.page_fault_reports_cr2`: #PF with CR2, ACCESS WRITE, MODE KERNEL;
+- `interrupts.double_fault_uses_ist`: corrupt stack + int3 -> #DF handled on the IST.
+
+In addition, 7 host tests validate the descriptor, TSS and IDT encodings
+against known values.
+
+---
+
+# PHASE 5 — Physical Memory Manager
+
+**Status: completed (2026-09-26).**
+
+### Implemented
+
+- UEFI map parser in `kernel/src/memory/pmm.rs`;
+- bitmap allocator in `libs/pmm` (no `alloc`, storage provided by
+  the caller, `allocate`, aligned `allocate_contiguous`, `free` with
+  double-free and out-of-range detection);
+- reservations: frame 0 and the first MiB, the bitmap itself;
+- statistics (`Stats`: total, free, used).
 
 ### Tests
 
-- host (7): liberación solo de frames completos, unicidad y orden, double
-  free, redondeo de reservas, contigüidad con huecos, agotamiento;
-- QEMU (área `memory`): `memory.pmm_init` (smoke) y `memory.pmm_selftest`
-  (`test=pmm`, 2048 frames sobre el bitmap real).
+- host (7): only whole frames are released, uniqueness and order, double
+  free, rounding of reservations, contiguity with holes, exhaustion;
+- QEMU (`memory` area): `memory.pmm_init` (smoke) and `memory.pmm_selftest`
+  (`test=pmm`, 2048 frames on the real bitmap).
 
 ---
 
-# FASE 6 — Virtual Memory Manager
+# PHASE 6 — Virtual Memory Manager
 
-**Estado: completada (2026-09-26).**
+**Status: completed (2026-09-26).**
 
-### Implementado
+### Implemented
 
-- `libs/x86-paging` genérica en `FrameAlloc` y `PhysMap`: `map_4k`,
-  `map_2m`, rangos, `unmap_4k`, `translate`, errores explícitos;
-- `kernel/memory/vmm`: tablas propias con frames del PMM, imagen con W^X por
-  secciones del linker, mapa físico lineal RW+NX, framebuffer, pila nueva
-  de 64 KiB con guard page, cambio de pila a `kernel_main`, recuperación de
-  la memoria de arranque;
-- protocolo v3: AriBoot construye el mapa físico lineal desde el principio
-  (ADR 0009), así que el cambio de tablas no invalida punteros;
-- detección de desbordamiento de pila en #DF.
+- `libs/x86-paging`, generic over `FrameAlloc` and `PhysMap`: `map_4k`,
+  `map_2m`, ranges, `unmap_4k`, `translate`, explicit errors;
+- `kernel/memory/vmm`: own tables with PMM frames, image with W^X per
+  linker section, linear RW+NX physical map, framebuffer, a new 64 KiB
+  stack with a guard page, stack switch to `kernel_main`, reclaiming of
+  boot memory;
+- protocol v3: AriBoot builds the linear physical map from the start
+  (ADR 0009), so switching tables does not invalidate pointers;
+- stack overflow detection in #DF.
 
 ### Tests
 
-- host (6 en `x86-paging`): traducción y enmascarado de flags, páginas
-  grandes y colisiones, unmap, agotamiento, `OffsetMap`/`BumpFrames`;
-- QEMU (área `memory`): `memory.vmm_init` (smoke), `memory.vmm_selftest`
-  (lectura/escritura válidas, sin identidad, map/unmap),
+- host (6 in `x86-paging`): translation and flag masking, large
+  pages and collisions, unmap, exhaustion, `OffsetMap`/`BumpFrames`;
+- QEMU (`memory` area): `memory.vmm_init` (smoke), `memory.vmm_selftest`
+  (valid reads/writes, no identity map, map/unmap),
   `memory.wx_rodata_write_faults` (write protection),
   `memory.nx_data_exec_faults` (NX fault), `memory.stack_guard_page`
-  (guard page); `interrupts.page_fault_reports_cr2` cubre el unmapped fault.
+  (guard page); `interrupts.page_fault_reports_cr2` covers the unmapped fault.
 
 ---
 
-# FASE 7 — Kernel allocator
+# PHASE 7 — Kernel allocator
 
-**Estado: completada (2026-09-26).**
+**Status: completed (2026-09-26).**
 
-### Implementado
+### Implemented
 
-- `libs/heap`: first-fit con lista de libres ordenada, fusión de vecinos y
-  cabecera por asignación (bump -> linked-list de la sección 16);
-- `kernel/memory/heap`: `#[global_allocator]` con región virtual reservada
-  de 64 MiB y crecimiento por trozos de 1 MiB con frames del PMM;
-- `alloc` disponible en el kernel.
+- `libs/heap`: first-fit with a sorted free list, neighbour coalescing and
+  a per-allocation header (bump -> linked-list from section 16);
+- `kernel/memory/heap`: `#[global_allocator]` with a reserved 64 MiB virtual
+  region growing in 1 MiB chunks with PMM frames;
+- `alloc` available in the kernel.
 
 ### Tests
 
-- host (5): reutilización y fusión, alineaciones grandes sin fugas,
-  agotamiento, 500 asignaciones en orden pseudoaleatorio sin solapes,
-  regiones múltiples y colas absorbidas;
-- QEMU: `memory.heap_init` (smoke) y `memory.heap_selftest` (`Vec`, `Box`,
-  `String`, `format!`, crecimiento, `try_reserve` fallando limpio, sin fugas).
+- host (5): reuse and coalescing, large alignments without leaks,
+  exhaustion, 500 allocations in pseudo-random order with no overlaps,
+  multiple regions and absorbed tails;
+- QEMU: `memory.heap_init` (smoke) and `memory.heap_selftest` (`Vec`, `Box`,
+  `String`, `format!`, growth, `try_reserve` failing cleanly, no leaks).
 
 ---
 
-# FASE 8 — APIC y timer
+# PHASE 8 — APIC and timer
 
-**Estado: completada (2026-09-26).**
+**Status: completed (2026-09-26).**
 
-### Implementado
+### Implemented
 
-- `libs/sync`: `IrqLock` con política de interrupciones; sustituye a la
-  celda de una sola CPU en todo el estado global del kernel;
-- PIC 8259 remapeado y enmascarado; Local APIC habilitado (vector espurio
-  0xFF) y mapeado sin caché;
-- timer del LAPIC calibrado con el PIT y periódico a 100 Hz (vector 0x20);
-- tick y reloj monótono (`time::{ticks, uptime_ms, sleep_ms}`);
-- interrupciones externas habilitadas al final del arranque.
+- `libs/sync`: `IrqLock` with an interrupt policy; replaces the
+  single-CPU cell in all of the kernel's global state;
+- 8259 PIC remapped and masked; Local APIC enabled (spurious vector
+  0xFF) and mapped uncached;
+- LAPIC timer calibrated with the PIT and periodic at 100 Hz (vector 0x20);
+- tick and monotonic clock (`time::{ticks, uptime_ms, sleep_ms}`);
+- external interrupts enabled at the end of boot.
 
-### Criterio
+### Criterion
 
-Interrupciones periódicas estables: `timer.init` (smoke) y `timer.selftest`
-(5 ticks en 50 ms medidos por el PIT, `sleep_ms` exacto, cero espurias).
-La ejecución prolongada se cubrirá con el scheduler (Fase 10).
+Stable periodic interrupts: `timer.init` (smoke) and `timer.selftest`
+(5 ticks in 50 ms measured by the PIT, exact `sleep_ms`, zero spurious).
+Long-running execution will be covered by the scheduler (Phase 10).
 
 ---
 
-# FASE 9 — Threads
+# PHASE 9 — Threads
 
-**Estado: completada (2026-09-26).**
+**Status: completed (2026-09-26).**
 
-### Implementado
+### Implemented
 
-- kernel threads (`kernel/src/task`), con el contexto de arranque adoptado
-  como hilo `main`;
-- pilas de 32 KiB con guard page en región propia, devueltas al PMM al
-  recoger el hilo;
-- context switch System V en ensamblador (`switch_context`, `thread_start`);
-- estados READY/RUNNING/BLOCKED/SLEEPING/TERMINATED en `libs/sched`
-  (política probada en host: 6 tests);
+- kernel threads (`kernel/src/task`), with the boot context adopted
+  as the `main` thread;
+- 32 KiB stacks with a guard page in their own region, returned to the PMM when
+  the thread is reaped;
+- System V context switch in assembly (`switch_context`, `thread_start`);
+- READY/RUNNING/BLOCKED/SLEEPING/TERMINATED states in `libs/sched`
+  (policy tested on host: 6 tests);
 - idle thread (`hlt` + `yield`).
 
-### Criterio
+### Criterion
 
-Dos threads alternan ejecución correctamente: `threads.selftest` exige la
-secuencia `ABABAB` con `yield` y que 40 workers terminen y sean recogidos sin
-perder frames.
-
----
-
-# FASE 10 — Scheduler
-
-**Estado: completada (2026-09-26).**
-
-### Primera versión
-
-Round Robin preemptivo con quantum de 20 ms sobre el tick del APIC, sueño
-planificado y colas de espera (`task::wait::WaitQueue`).
-
-### Tests (`scheduler.selftest`, área `scheduler`)
-
-- fairness básica: tres hilos ocupados sin `yield` reparten la CPU;
-- yield: cubierto por `threads.selftest`;
-- sleep: 50 ms medidos en ticks;
-- bloqueo y wakeup: `wake_one` libera a un consumidor y `wake_all` al resto.
+Two threads alternate execution correctly: `threads.selftest` requires the
+sequence `ABABAB` with `yield` and that 40 workers finish and are reaped without
+losing frames.
 
 ---
 
-# FASE 11 — User mode
+# PHASE 10 — Scheduler
 
-**Estado: completada (2026-09-26).**
+**Status: completed (2026-09-26).**
 
-### Objetivo
+### First version
 
-Ejecutar código en ring 3.
+Preemptive Round Robin with a 20 ms quantum on the APIC tick, scheduled
+sleep and wait queues (`task::wait::WaitQueue`).
 
-### Implementado
+### Tests (`scheduler.selftest`, `scheduler` area)
 
-- user address spaces: PML4 por proceso con la mitad del kernel compartida,
-  liberación completa al terminar (`libs/x86-paging::free_user_half`);
-- transición kernel/user: `iretq` a ring 3, GDT con segmentos DPL 3, TSS.rsp0
-  y CR3 por hilo en cada cambio de contexto;
-- syscall entry: instrucción `syscall`/`sysretq`, ABI propio en `sdk/abi`
-  (6 syscalls iniciales), validación de punteros de usuario;
-- protección de páginas: USER solo en la mitad baja, código RX, pila RW+NX.
-
-### Criterio crítico
-
-Un proceso user no puede leer ni escribir memoria kernel:
-`user.kernel_read_killed` y `user.kernel_write_killed` provocan #PF de
-protección en ring 3, el proceso termina y el kernel llega a READY. Además
-`user.privileged_killed` (#GP por `hlt`), `user.bad_pointer` (la syscall
-rechaza un puntero de kernel) y `user.bad_syscall` (número inexistente).
+- basic fairness: three busy threads without `yield` share the CPU;
+- yield: covered by `threads.selftest`;
+- sleep: 50 ms measured in ticks;
+- blocking and wakeup: `wake_one` releases one consumer and `wake_all` the rest.
 
 ---
 
-# FASE 12 — Kernel objects + handles
+# PHASE 11 — User mode
 
-**Estado: completada (2026-09-26), ADR 0010.**
+**Status: completed (2026-09-26).**
 
-### Implementado
+### Goal
 
-- object manager: `kernel/src/object` con `KernelObject` (`Thread`,
-  `Process`, `Console`) y tabla inicial por proceso;
-- handle tables: `libs/handles` con índice + generación, límite por proceso
-  (256), 4 tests de host;
-- lifetime: `Arc` por objeto; cerrar un handle invalida ese valor para siempre;
-- rights: `READ WRITE DUPLICATE TRANSFER WAIT SIGNAL MANAGE`; duplicar solo
-  reduce; cada syscall declara el derecho que exige.
+Run code in ring 3.
 
-### Resultado
+### Implemented
 
-Las syscalls dejan de depender de identificadores globales inseguros:
-`console_write` exige un handle de consola con `WRITE` (ABI v2), y
-`user.handles` verifica desde ring 3 los casos de handle inventado, cerrado,
-sin derechos, escalada y objeto equivocado.
+- user address spaces: a PML4 per process with the kernel half shared,
+  fully released on exit (`libs/x86-paging::free_user_half`);
+- kernel/user transition: `iretq` to ring 3, GDT with DPL 3 segments, TSS.rsp0
+  and CR3 per thread on every context switch;
+- syscall entry: `syscall`/`sysretq` instructions, our own ABI in `sdk/abi`
+  (6 initial syscalls), validation of user pointers;
+- page protection: USER only in the lower half, RX code, RW+NX stack.
+
+### Critical criterion
+
+A user process cannot read or write kernel memory:
+`user.kernel_read_killed` and `user.kernel_write_killed` trigger a
+protection #PF in ring 3, the process terminates and the kernel reaches READY. Also
+`user.privileged_killed` (#GP from `hlt`), `user.bad_pointer` (the syscall
+rejects a kernel pointer) and `user.bad_syscall` (nonexistent number).
 
 ---
 
-# FASE 13 — Capabilities
+# PHASE 12 — Kernel objects + handles
 
-**Estado: completada (2026-09-26).**
+**Status: completed (2026-09-26), ADR 0010.**
 
-### Implementado
+### Implemented
 
-- capabilities: handles con derechos sobre objetos compartidos por `Arc`
-  (Fase 12);
+- object manager: `kernel/src/object` with `KernelObject` (`Thread`,
+  `Process`, `Console`) and an initial table per process;
+- handle tables: `libs/handles` with index + generation, per-process limit
+  (256), 4 host tests;
+- lifetime: an `Arc` per object; closing a handle invalidates that value forever;
+- rights: `READ WRITE DUPLICATE TRANSFER WAIT SIGNAL MANAGE`; duplicating only
+  reduces; each syscall declares the right it requires.
+
+### Result
+
+Syscalls no longer depend on unsafe global identifiers:
+`console_write` requires a console handle with `WRITE` (ABI v2), and
+`user.handles` checks from ring 3 the cases of a forged handle, a closed one,
+one without rights, escalation and the wrong object.
+
+---
+
+# PHASE 13 — Capabilities
+
+**Status: completed (2026-09-26).**
+
+### Implemented
+
+- capabilities: handles with rights over objects shared via `Arc`
+  (Phase 12);
 - rights: `READ WRITE DUPLICATE TRANSFER WAIT SIGNAL MANAGE`;
-- transfer: `HandleTable::take` (exige `TRANSFER`), consumido por el IPC
-  de la Fase 14;
-- revoke/drop: `object_revoke` (exige `MANAGE`) invalida el objeto para
-  todos sus handles en todos los procesos; `handle_close` descarta uno;
-- derivation limitada: duplicar solo reduce derechos; un objeto revocado no
-  se duplica.
+- transfer: `HandleTable::take` (requires `TRANSFER`), consumed by the IPC
+  of Phase 14;
+- revoke/drop: `object_revoke` (requires `MANAGE`) invalidates the object for
+  all of its handles in all processes; `handle_close` discards one;
+- limited derivation: duplicating only reduces rights; a revoked object cannot
+  be duplicated.
 
-Además, infraestructura adelantada de la Fase 27: `sdk/rust` (`aricode-sys`)
-con los wrappers de syscall y `user/testprogs` con programas de ring 3 en
-Rust y ensamblador enlazados como ELF estáticos, cargados por el kernel con
+In addition, infrastructure brought forward from Phase 27: `sdk/rust` (`aricode-sys`)
+with the syscall wrappers and `user/testprogs` with ring 3 programs in
+Rust and assembly linked as static ELFs, loaded by the kernel with
 `aricode-elf`.
 
-### Test esencial
+### Essential test
 
-Un proceso sin capability no puede acceder al recurso aunque conozca su
-identificador: `user.handles` (los identificadores de `object_id` no dan
-acceso; un handle inventado o cerrado falla) y `capabilities.revoke`
-(revocar exige `MANAGE`; tras revocar, ningún duplicado da acceso).
+A process without a capability cannot access the resource even if it knows its
+identifier: `user.handles` (`object_id` identifiers do not grant
+access; a forged or closed handle fails) and `capabilities.revoke`
+(revoking requires `MANAGE`; after revoking, no duplicate grants access).
 
 ---
 
-# FASE 14 — IPC
+# PHASE 14 — IPC
 
-**Estado: completada (2026-09-26), salvo memoria compartida.**
+**Status: completed (2026-09-26), except shared memory.**
 
-### Implementado
+### Implemented
 
-- endpoints: objeto del kernel con cola acotada y colas de espera;
-- send / receive: `ipc_send` (`WRITE`) e `ipc_receive` (`READ`), mensajes de
-  hasta 256 bytes y 4 capabilities;
-- reply: por un endpoint de respuesta que el cliente transfiere en el mensaje;
-- timeout: en ms, `0` no bloquea, infinito espera; despertar anticipado;
-- capability transfer: `TRANSFER` obligatorio; se retira del emisor solo
-  cuando el mensaje entra en la cola;
-- shared memory: pendiente (llegará con `memory_map` y objetos de memoria,
-  sección 24).
+- endpoints: kernel object with a bounded queue and wait queues;
+- send / receive: `ipc_send` (`WRITE`) and `ipc_receive` (`READ`), messages of
+  up to 256 bytes and 4 capabilities;
+- reply: through a reply endpoint that the client transfers in the message;
+- timeout: in ms, `0` does not block, infinite waits; early wakeup;
+- capability transfer: `TRANSFER` mandatory; removed from the sender only
+  when the message enters the queue;
+- shared memory: pending (will come with `memory_map` and memory objects,
+  section 24).
 
 ### Benchmark
 
-`test=ipc` mide el round trip con el TSC: ~260 000 ciclos por round trip
-bajo QEMU TCG (incluye crear el proceso cliente). Es una referencia relativa
-hasta disponer de KVM o hardware (sección 69).
+`test=ipc` measures the round trip with the TSC: ~260,000 cycles per round trip
+under QEMU TCG (includes creating the client process). It is a relative reference
+until KVM or hardware is available (section 69).
 
 ---
 
-# FASE 15 — Init process
+# PHASE 15 — Init process
 
-**Estado: completada (2026-09-26).**
+**Status: completed (2026-09-26).**
 
-### Primer proceso user-space
+### First user-space process
 
-`services/init` (AriInit), cargado desde `aricodeos/initrd.img` (formato
-propio en `libs/initrd`, leído por AriBoot y entregado en `BootInfo`).
+`services/init` (AriInit), loaded from `aricodeos/initrd.img` (custom
+format in `libs/initrd`, read by AriBoot and handed over in `BootInfo`).
 
-Responsabilidades implementadas:
+Implemented responsibilities:
 
-- iniciar servicios: `process_spawn` con la capacidad `SPAWNER`, que solo
-  recibe init;
-- supervisar procesos: `process_wait` distingue salida normal de muerte por
-  fallo (`Killed`);
-- gestionar dependencias básicas: pendiente hasta que existan servicios
-  reales (Fase 16 en adelante).
+- start services: `process_spawn` with the `SPAWNER` capability, which only
+  init receives;
+- supervise processes: `process_wait` distinguishes a normal exit from death by
+  fault (`Killed`);
+- manage basic dependencies: pending until real services
+  exist (Phase 16 onwards).
 
-Verificado por `init.boot` (smoke): lanza `hello`, ve morir `kernel_read`,
-y comprueba que sin `MANAGE` no se pueden crear procesos.
+Verified by `init.boot` (smoke): it launches `hello`, sees `kernel_read` die,
+and checks that processes cannot be created without `MANAGE`.
 
 ---
 
-# FASE 16 — Driver framework
+# PHASE 16 — Driver framework
 
-**Estado: completada (2026-09-26).**
+**Status: completed (2026-09-26).**
 
-### Implementado
+### Implemented
 
 - driver API: syscalls `irq_wait`, `mmio_map`, `region_len`, `dma_alloc`,
-  `dma_phys` en `sdk/abi` y `aricode-sys`;
-- MMIO capability: objeto `Mmio` mapeado sin caché en el proceso;
-- IRQ capability: objeto `Irq` sobre GSI del I/O APIC (ACPI MADT, `libs/acpi`),
-  con enmascarado por nivel y liberación del vector;
-- DMA buffer API: objeto `Dma` de frames contiguos a cero, `MANAGE` sobre
-  `Hardware` para reservarlo;
-- process restart: AriInit reinicia `crashy_driver` tras verlo morir.
+  `dma_phys` in `sdk/abi` and `aricode-sys`;
+- MMIO capability: `Mmio` object mapped uncached into the process;
+- IRQ capability: `Irq` object over an I/O APIC GSI (ACPI MADT, `libs/acpi`),
+  with level-triggered masking and release of the vector;
+- DMA buffer API: `Dma` object of zeroed contiguous frames, `MANAGE` on
+  `Hardware` to reserve it;
+- process restart: AriInit restarts `crashy_driver` after seeing it die.
 
-### Criterio
+### Criterion
 
-Un driver puede fallar sin provocar panic del kernel: `init.boot` (driver
-muerto y reiniciado) y `drivers.user_irq_mmio_dma` (IRQ, DMA y MMIO desde
+A driver can fail without causing a kernel panic: `init.boot` (driver
+killed and restarted) and `drivers.user_irq_mmio_dma` (IRQ, DMA and MMIO from
 ring 3).
 
 ---
 
-# FASE 17 — PCIe enumeration
+# PHASE 17 — PCIe enumeration
 
-**Estado: completada (2026-09-26).**
+**Status: completed (2026-09-26).**
 
-### Implementado
+### Implemented
 
 - ACPI MCFG (`libs/acpi`);
-- ECAM mapeado sin caché, 1 MiB por bus;
-- enumerate: recorrido desde el bus inicial siguiendo puentes, funciones
-  múltiples;
-- BARs decodificados (E/S, memoria de 32/64 bits, prefetchable) y tamaño
-  por sondeo en la librería;
-- MSI inicial: detección de las capabilities MSI y MSI-X (la programación
-  llega con virtio, Fase 18).
+- ECAM mapped uncached, 1 MiB per bus;
+- enumerate: walk from the initial bus following bridges, multi-function
+  devices;
+- decoded BARs (I/O, 32/64-bit memory, prefetchable) and size
+  by probing in the library;
+- initial MSI: detection of the MSI and MSI-X capabilities (programming
+  comes with virtio, Phase 18).
 
-### Salida real en QEMU q35
+### Real output on QEMU q35
 
 ```text
-pci: 00:00.0 8086:29c0 clase 06.00 host bridge (0 BARs)
-pci: 00:01.0 1234:1111 clase 03.00 VGA/display (2 BARs)
-pci: 00:02.0 8086:10d3 clase 02.00 Ethernet (4 BARs, PM/MSI/PCIe/MSI-X)
-pci: 00:1f.0 8086:2918 clase 06.01 ISA bridge (0 BARs)
-pci: 00:1f.2 8086:2922 clase 01.06 SATA (AHCI) (2 BARs, MSI)
-pci: 00:1f.3 8086:2930 clase 0c.05 SMBus (1 BAR)
+pci: 00:00.0 8086:29c0 class 06.00 host bridge (0 BARs)
+pci: 00:01.0 1234:1111 class 03.00 VGA/display (2 BARs)
+pci: 00:02.0 8086:10d3 class 02.00 Ethernet (4 BARs, PM/MSI/PCIe/MSI-X)
+pci: 00:1f.0 8086:2918 class 06.01 ISA bridge (0 BARs)
+pci: 00:1f.2 8086:2922 class 01.06 SATA (AHCI) (2 BARs, MSI)
+pci: 00:1f.3 8086:2930 class 0c.05 SMBus (1 BAR)
 ```
 
 ---
 
-# FASE 18 — Virtio
+# PHASE 18 — Virtio
 
-**Estado: completada (2026-09-26): virtio-blk (Fase 18) y virtio-net (Fase 22) en ring 3 sobre un transporte PCI moderno común (`aricode-sys::virtio_pci`).**
+**Status: completed (2026-09-26): virtio-blk (Phase 18) and virtio-net (Phase 22) in ring 3 over a common modern PCI transport (`aricode-sys::virtio_pci`).**
 
-### Implementado
+### Implemented
 
-- virtio transport: `libs/virtio` (virtqueue split sobre DMA, descubrimiento
-  de estructuras virtio-pci modernas, negociación por `common_cfg`);
-- virtio-blk: `services/virtio-blk`, driver en ring 3 con capabilities
-  reclamadas por `init` (`pci_claim`: BARs sondeados y MSI-X programada por
-  el kernel), cola 0 en DMA, lectura y escritura verificadas
+- virtio transport: `libs/virtio` (split virtqueue over DMA, discovery
+  of modern virtio-pci structures, negotiation through `common_cfg`);
+- virtio-blk: `services/virtio-blk`, a ring 3 driver with capabilities
+  claimed by `init` (`pci_claim`: BARs probed and MSI-X programmed by
+  the kernel), queue 0 in DMA, reads and writes verified
   (`virtio.blk_rw`);
-- virtio-net: `services/virtio-net`, driver y pila de red en un mismo servicio (Fase 22).
+- virtio-net: `services/virtio-net`, driver and network stack in a single service (Phase 22).
 
-### Motivo
+### Reason
 
-Disponer rápidamente de almacenamiento y red en QEMU.
-
----
-
-# FASE 19 — Storage service
-
-**Estado: completada (2026-09-26), salvo la caché.**
-
-### Implementado
-
-- block service: el driver virtio-blk atiende `BlockServiceProtocol v1`
-  (`sdk/proto`) por IPC con acceso directo al buffer DMA del cliente;
-- async request queue: la cola acotada del endpoint;
-- cache inicial: pendiente (llegará con el filesystem cuando haya métricas);
-- partition parsing: GPT con CRC (`libs/gpt`), disco de pruebas con
-  partición AriCodeOS (`ARI0`).
+Get storage and networking quickly in QEMU.
 
 ---
 
-# FASE 20 — Filesystem básico
+# PHASE 19 — Storage service
 
-**Estado: completada (2026-09-26) con AriFS v0; formato v1 con CRC32,
-journal de reemplazo y `flush` desde la etapa 2 (2026-09-28, ADR 0014).**
+**Status: completed (2026-09-26), except the cache.**
 
-### Implementado
+### Implemented
 
-- AriFS v0 (`libs/arifs`, no_std, tests de host): superbloque, tabla plana
-  de 32 ficheros de capacidad fija (16 sectores), lectura y escritura por
-  desplazamiento, sin fragmentación ni journaling (deliberadamente simple,
-  sección 34.2). xtask formatea la partición `ARI0` del disco de pruebas
-  con ficheros de ejemplo;
-- servicio de ficheros `fsd` (`services/arifs`) en ring 3 sobre el servicio
-  de bloques: `FileServiceProtocol v1` (`sdk/proto::fs`) con `List`,
-  `Open`, `Create`, `Read`, `Write`, `Close` y, desde la etapa 2, `Flush` y
-  `Replace`; los datos viajan por el buffer DMA del cliente, no por el
-  mensaje;
-- clientes en el SDK (`aricode-sys::block`, `aricode-sys::fs`) y programa
-  de prueba `fs_client`; escenario `filesystem.read_write`;
-- permisos mediante capabilities: un proceso solo habla con `fsd` si init
-  le entrega un duplicado `WRITE` de su endpoint; `fsd` solo llega al disco
-  a través del endpoint del servicio de bloques.
-
-### Pendiente
-
-- directorios jerárquicos y paths (v0 es un directorio plano);
-- metadata (fechas, tipo) y borrado/redimensionado;
-- capabilities por fichero (hoy la capability es por servicio).
-
-### Criterio
-
-Proceso user-space puede abrir, leer y escribir un archivo mediante servicio IPC. **Cumplido.**
+- block service: the virtio-blk driver serves `BlockServiceProtocol v1`
+  (`sdk/proto`) over IPC with direct access to the client's DMA buffer;
+- async request queue: the endpoint's bounded queue;
+- initial cache: pending (will come with the filesystem once there are metrics);
+- partition parsing: GPT with CRC (`libs/gpt`), test disk with an
+  AriCodeOS partition (`ARI0`).
 
 ---
 
-# FASE 21 — Shell
+# PHASE 20 — Basic filesystem
 
-**Estado: completada (2026-09-26).**
+**Status: completed (2026-09-26) with AriFS v0; v1 format with CRC32,
+replacement journal and `flush` since stage 2 (2026-09-28, ADR 0014).**
 
-Primer shell AriCodeOS: `arish` (`services/shell`), un proceso de ring 3 que
-init lanza cuando la cmdline lleva `shell` (`cargo xtask run --cmdline shell`).
+### Implemented
 
-Comandos:
+- AriFS v0 (`libs/arifs`, no_std, host tests): superblock, flat table
+  of 32 fixed-capacity files (16 sectors), reads and writes by
+  offset, no fragmentation or journaling (deliberately simple,
+  section 34.2). xtask formats the `ARI0` partition of the test disk
+  with sample files;
+- file service `fsd` (`services/arifs`) in ring 3 on top of the block
+  service: `FileServiceProtocol v1` (`sdk/proto::fs`) with `List`,
+  `Open`, `Create`, `Read`, `Write`, `Close` and, since stage 2, `Flush` and
+  `Replace`; data travels through the client's DMA buffer, not in the
+  message;
+- clients in the SDK (`aricode-sys::block`, `aricode-sys::fs`) and test
+  program `fs_client`; scenario `filesystem.read_write`;
+- permissions through capabilities: a process can only talk to `fsd` if init
+  gives it a `WRITE` duplicate of its endpoint; `fsd` only reaches the disk
+  through the block service endpoint.
+
+### Pending
+
+- hierarchical directories and paths (v0 is a flat directory);
+- metadata (dates, type) and deletion/resizing;
+- per-file capabilities (today the capability is per service).
+
+### Criterion
+
+A user-space process can open, read and write a file through an IPC service. **Met.**
+
+---
+
+# PHASE 21 — Shell
+
+**Status: completed (2026-09-26).**
+
+First AriCodeOS shell: `arish` (`services/shell`), a ring 3 process that
+init launches when the cmdline contains `shell` (`cargo xtask run --cmdline shell`).
+
+Commands:
 
 ```text
-help      ps        mem       ls        cat NOM   write NOM TEXTO
+help      ps        mem       ls        cat NAME  write NAME TEXT
 run PROG  spawn PROG  repeat N CMD
 devices   services  uptime    cpus      diag      reboot    shutdown  exit
 ```
 
-### Implementado
+### Implemented
 
-- entrada de consola en el kernel: IRQ de COM1 (GSI 4, vector propio) con
-  anillo de 1 KiB y `console_read(console, buf, timeout)`; la consola sigue
-  siendo del kernel y el shell solo la lee a través de un handle `CONSOLE`
-  con `READ` que init le transfiere;
-- teclados de usuario (etapa 2, ADR 0013): `console_inject` (`MANAGE` sobre
-  la consola) y el servicio `console_bridge`, que init lanza supervisado en
-  modo `shell` sin GUI con los endpoints de virtio-input y USB HID; el shell
-  no cambia (`shell.usb_keyboard`, `shell.virtio_keyboard`);
-- objeto `SYSTEM` (kind 11): `system_info` (`READ`: uptime, memoria
-  utilizable/libre, lista de procesos) y `system_power` (`MANAGE`: apagar,
-  reiniciar). Init lo recibe y le pasa al shell un duplicado;
-- el shell ve solo lo que init le da: endpoint de fsd (`WRITE`), hardware
-  para su buffer DMA, `SYSTEM`, entrada de consola (`READ`) y la raíz PCI en
-  solo lectura para `devices`; `services` enseña la máscara de servicios que
-  init dejó activos y comprueba que fsd responde;
-- `shutdown` termina QEMU con `qemu_exit` (`ARICODEOS_SHUTDOWN`) o detiene la
-  CPU; `reboot` pulsa el reset del 8042 y, si no, fuerza un triple fallo;
-- el runner de escenarios acepta `stdin` (líneas) y `prompt`: envía cada
-  línea cuando la serie muestra el prompt. Escenarios `console.input`,
-  `shell.commands`, `shell.exit` y `shell.reboot`.
+- console input in the kernel: COM1 IRQ (GSI 4, its own vector) with
+  a 1 KiB ring and `console_read(console, buf, timeout)`; the console still
+  belongs to the kernel and the shell only reads it through a `CONSOLE` handle
+  with `READ` that init transfers to it;
+- user keyboards (stage 2, ADR 0013): `console_inject` (`MANAGE` on
+  the console) and the `console_bridge` service, which init launches supervised in
+  `shell` mode without GUI with the virtio-input and USB HID endpoints; the shell
+  does not change (`shell.usb_keyboard`, `shell.virtio_keyboard`);
+- `SYSTEM` object (kind 11): `system_info` (`READ`: uptime, usable/free
+  memory, process list) and `system_power` (`MANAGE`: power off,
+  reboot). Init receives it and passes a duplicate to the shell;
+- the shell only sees what init gives it: the fsd endpoint (`WRITE`), hardware
+  for its DMA buffer, `SYSTEM`, console input (`READ`) and the PCI root
+  read-only for `devices`; `services` shows the mask of services that
+  init left running and checks that fsd responds;
+- `shutdown` terminates QEMU with `qemu_exit` (`ARICODEOS_SHUTDOWN`) or halts the
+  CPU; `reboot` pulses the 8042 reset and, failing that, forces a triple fault;
+- the scenario runner accepts `stdin` (lines) and `prompt`: it sends each
+  line when the serial output shows the prompt. Scenarios `console.input`,
+  `shell.commands`, `shell.exit` and `shell.reboot`.
 
 ---
 
-# FASE 22 — Red
+# PHASE 22 — Networking
 
-**Estado: completada (2026-09-26).**
+**Status: completed (2026-09-26).**
 
-### Implementado
+### Implemented
 
-- `libs/net` (no_std, sin `alloc`, tests de host): Ethernet II, ARP con
-  caché, IPv4 (checksum, sin fragmentación), ICMP eco, UDP con checksum,
-  cliente DHCP (DISCOVER/OFFER/REQUEST/ACK/NAK con reintentos) y DNS
-  (consulta A, respuesta con compresión, y un constructor de respuestas para
-  servidores de prueba);
-- `netd` (`services/virtio-net`): driver virtio-net (colas rx/tx en DMA,
-  MSI-X, `VIRTIO_NET_F_MAC`) y pila de red en un único hilo de ring 3: DHCP
-  al arrancar, ARP con tramas aparcadas hasta resolver, respuesta a eco
-  ICMP, sockets UDP y resolución DNS. Atiende `NetServiceProtocol v1`
+- `libs/net` (no_std, no `alloc`, host tests): Ethernet II, ARP with
+  a cache, IPv4 (checksum, no fragmentation), ICMP echo, UDP with checksum,
+  DHCP client (DISCOVER/OFFER/REQUEST/ACK/NAK with retries) and DNS
+  (A query, response with compression, and a response builder for
+  test servers);
+- `netd` (`services/virtio-net`): virtio-net driver (rx/tx queues in DMA,
+  MSI-X, `VIRTIO_NET_F_MAC`) and network stack in a single ring 3 thread: DHCP
+  at boot, ARP with frames parked until resolved, replies to ICMP
+  echo, UDP sockets and DNS resolution. It serves `NetServiceProtocol v1`
   (`sdk/proto::net`): `Info`, `Ping`, `UdpBind`, `UdpSend`, `UdpRecv`,
-  `UdpClose`, `Dns`; los datagramas van por el buffer DMA del cliente y las
-  esperas (ping, recv, dns) quedan pendientes con plazo sin bloquear al
-  servicio;
-- contrato de driver ampliado: tras los BARs, init pasa extras propios de
-  cada driver (netd recibe `SYSTEM` con `READ` para medir el tiempo);
-- transporte virtio compartido (`aricode-sys::virtio_pci`): virtio-blk y
-  virtio-net ya no duplican la negociación ni la creación de colas;
-- cliente `aricode-sys::net`, programa `net_client`, comandos `net`,
-  `ping` y `dns` en el shell;
-- QEMU con red de usuario (slirp) y un respondedor UDP de pruebas en el
-  host (eco y DNS con registro A fijo) que arranca con cada ejecución.
+  `UdpClose`, `Dns`; datagrams go through the client's DMA buffer and
+  waits (ping, recv, dns) stay pending with a deadline without blocking the
+  service;
+- extended driver contract: after the BARs, init passes extras specific to
+  each driver (netd receives `SYSTEM` with `READ` to measure time);
+- shared virtio transport (`aricode-sys::virtio_pci`): virtio-blk and
+  virtio-net no longer duplicate negotiation or queue creation;
+- client `aricode-sys::net`, program `net_client`, shell commands `net`,
+  `ping` and `dns`;
+- QEMU with user networking (slirp) and a test UDP responder on the
+  host (echo and DNS with a fixed A record) that starts with every run.
 
-### Criterio
+### Criterion
 
-`ping` funciona dentro de QEMU (`ping 10.0.2.2` desde el shell responde 4 de
-4; `network.stack` lo exige por IPC). **Cumplido.**
+`ping` works inside QEMU (`ping 10.0.2.2` from the shell answers 4 out of
+4; `network.stack` requires it over IPC). **Met.**
 
 ---
 
-# FASE 23 — TCP
+# PHASE 23 — TCP
 
-**Estado: completada (2026-09-26).**
+**Status: completed (2026-09-26).**
 
-TCP vive en `netd` (servicio de usuario), con la máquina de estados en
-`libs/net::tcp` y sin `alloc`: conexión con buffers fijos de 4 KiB,
-apertura activa y pasiva, MSS 1400, retransmisión por temporizador
-exponencial (500 ms → 8 s, 6 reintentos), cierre ordenado con TIME-WAIT y
-RST. `NetServiceProtocol v1` añade `TcpConnect`, `TcpListen`, `TcpAccept`,
-`TcpSend`, `TcpRecv` y `TcpClose`; las esperas quedan pendientes con plazo.
+TCP lives in `netd` (user service), with the state machine in
+`libs/net::tcp` and no `alloc`: a connection with fixed 4 KiB buffers,
+active and passive open, MSS 1400, retransmission with an exponential
+timer (500 ms → 8 s, 6 retries), orderly close with TIME-WAIT and
+RST. `NetServiceProtocol v1` adds `TcpConnect`, `TcpListen`, `TcpAccept`,
+`TcpSend`, `TcpRecv` and `TcpClose`; waits stay pending with a deadline.
 
-Tests (todos en `libs/net`, sobre un cable simulado con pérdidas
-controladas, más `network.tcp` en QEMU contra un servidor de eco del host
-y una sonda que se conecta al invitado por `hostfwd`):
+Tests (all in `libs/net`, over a simulated wire with controlled
+losses, plus `network.tcp` in QEMU against an echo server on the host
+and a probe that connects to the guest through `hostfwd`):
 
 - handshake: `handshake_data_and_close`;
-- retransmisión: `retransmits_lost_syn_and_data`, `gives_up_after_too_many_retries`;
-- cierre: `handshake_data_and_close` (FIN en ambos sentidos, TIME-WAIT), `reset_closes_immediately`;
-- pérdida simulada: `random_loss_keeps_stream_in_order` (25 % de pérdidas, 10 000 bytes en orden);
-- múltiples conexiones: `multiple_independent_connections` y dos conexiones simultáneas en `network.tcp`.
+- retransmission: `retransmits_lost_syn_and_data`, `gives_up_after_too_many_retries`;
+- close: `handshake_data_and_close` (FIN in both directions, TIME-WAIT), `reset_closes_immediately`;
+- simulated loss: `random_loss_keeps_stream_in_order` (25% loss, 10,000 bytes in order);
+- multiple connections: `multiple_independent_connections` and two simultaneous connections in `network.tcp`.
 
-Pendiente: ventana deslizante con varios segmentos en vuelo retransmitidos
-individualmente (hoy se reenvía desde `snd_una`), opciones de escala de
-ventana y SACK, y estimación de RTT.
-
----
-
-# FASE 24 — HTTP client
-
-**Estado: completada (2026-09-26).**
-
-Primera aplicación de red real: `libs/http` (peticiones `GET`, análisis de
-la línea de estado y cabeceras, cuerpos por `Content-Length`, `chunked` o
-hasta el cierre; sin `alloc`, tests de host), `aricode-sys::http::get`
-sobre el cliente TCP de netd (resuelve nombres por DNS si el host no es una
-IP), el programa `http_client` y el comando `http URL` del shell. xtask
-sirve `/hola`, `/chunked` y 404 en `127.0.0.1:17010` para `network.http`.
-
-Objetivo `http GET -> respuesta recibida`: **cumplido** (200 con cuerpo,
-chunked, 404 y puerto cerrado detectado).
-
-TLS vendrá posteriormente (Fase 31, criptografía).
+Pending: a sliding window with several in-flight segments retransmitted
+individually (today it resends from `snd_una`), window scaling and SACK
+options, and RTT estimation.
 
 ---
 
-# FASE 25 — Input moderno
+# PHASE 24 — HTTP client
 
-**Estado: completada (virtio-input 2026-09-27; xHCI y USB HID 2026-09-28).**
+**Status: completed (2026-09-26).**
 
-### Implementado
+First real network application: `libs/http` (`GET` requests, parsing of
+the status line and headers, bodies by `Content-Length`, `chunked` or
+until close; no `alloc`, host tests), `aricode-sys::http::get`
+on top of netd's TCP client (resolves names via DNS if the host is not an
+IP), the `http_client` program and the shell's `http URL` command. xtask
+serves `/hola`, `/chunked` and 404 on `127.0.0.1:17010` for `network.http`.
 
-- `libs/input` (no_std, tests de host): eventos en formato evdev (el mismo
-  que usa virtio-input y que servirá para USB HID) y un teclado US con
-  mayúsculas y bloqueo de mayúsculas que convierte pulsaciones en
-  caracteres;
-- `inputd` (`services/virtio-input`): driver virtio-input en ring 3 sobre el
-  transporte virtio común, un proceso por dispositivo (init lanza uno por
-  cada función `1af4:1052`); lee el nombre del dispositivo de su
-  configuración, mantiene la cola de eventos y atiende
-  `InputServiceProtocol v1` (`sdk/proto::input`: `Info`, `Read` con plazo);
-- cliente `aricode-sys::input`, programa `input_client` y escenario
-  `input.virtio`: xtask inyecta por QMP (`input-send-event`) la línea
-  `hola` + Enter en el teclado virtio y un movimiento y clic en el ratón
-  virtio; el escenario exige la traducción exacta;
-- xHCI y USB HID (segunda parte): `libs/xhci` (no_std, tests de host) con
-  registros, TRB, anillos con bit de ciclo y enlace, contextos de slot y
-  endpoint de 32 o 64 bytes, ERST, paquetes SETUP y descriptores USB;
-  `usbd` (`services/usb-input`) en ring 3 recibe el controlador (clase
-  `0c.03`) con el contrato de driver, lo reinicia, programa DCBAA,
-  scratchpads, anillo de comandos y de eventos, enumera los puertos con
-  dispositivo (reset, Enable Slot, Address Device, descriptores,
-  `SET_CONFIGURATION`, `SET_PROTOCOL` de arranque, Configure Endpoint) y
-  sondea los endpoints de interrupción; los informes de arranque de teclado
-  y ratón se traducen a eventos evdev en `libs/input`
-  (`HidBootKeyboard`, `HidBootMouse`) y se sirven por
-  `InputServiceProtocol v1` como un único dispositivo
-  (`USB HID Keyboard+Mouse`); init lanza `usb_input` por cada controlador
-  USB y lo añade a los servicios de entrada;
-- escenarios `usb.hid` (`test=usb_hid`, QEMU con `qemu-xhci` + `usb-kbd` +
-  `usb-mouse` mediante `usb_hid = true`, eventos inyectados por QMP) y
-  `usb.hid_boot` (arranque normal con xHCI).
+Goal `http GET -> response received`: **met** (200 with body,
+chunked, 404 and closed port detected).
 
-### Pendiente
-
-- HID con descriptor de informe (protocolo de informe, teclados con teclas
-  multimedia, ratones con más botones), hubs USB, conexión y desconexión
-  en caliente (los Port Status Change se reconocen pero no se enumeran
-  puertos nuevos tras el arranque) y almacenamiento USB.
-- Que el shell pueda leer del teclado virtio o USB además de la consola
-  serie y PS/2 (el compositor ya los recibe en la GUI).
+TLS will come later (Phase 31, cryptography).
 
 ---
 
-# FASE 26 — GUI básica
+# PHASE 25 — Modern input
 
-**Estado: completada (2026-09-27).**
+**Status: completed (virtio-input 2026-09-27; xHCI and USB HID 2026-09-28).**
 
-### Implementado
+### Implemented
 
-- framebuffer abstraction: con `gui` en la cmdline el kernel no pinta en la
-  pantalla y entrega a init el framebuffer GOP como capability MMIO
-  (`INIT_FRAMEBUFFER`); `system_info(FRAMEBUFFER)` describe geometría y
-  formato. La consola de kernel queda en la serie;
-- surfaces: `libs/gfx` (no_std, sin alloc, tests de host): lienzos
-  `0x00RRGGBB` sobre buffers del llamador con recorte, rectángulos, texto
-  con la fuente de la consola, cursor y el modelo `Desktop` (ventanas en
-  cascada, orden z, foco, prueba de impacto, composición);
-- compositor (`services/compositor`): proceso de ring 3 dueño del
-  framebuffer; compone en un buffer trasero DMA y lo vuelca convirtiendo el
-  formato; lee los servicios de entrada, ordena sus eventos por instante de
-  llegada (inputd los sella) y enruta teclado y clics a la ventana con foco;
-- mouse pointer: flecha dibujada por el compositor, movida con los eventos
-  relativos del ratón virtio;
-- windows: `WindowProtocol v1` (`sdk/proto::window`): `Create` (el cliente
-  aporta el buffer de contenido como DMA), `Present`, `Poll`, `Close`;
-  cliente `aricode-sys::window::Window` con lienzo propio;
-- events: `Key` (carácter traducido), `Click` (coordenadas del contenido,
-  botón) y `Focus`, con espera pendiente por ventana.
+- `libs/input` (no_std, host tests): events in evdev format (the same
+  one virtio-input uses and that will serve for USB HID) and a US keyboard with
+  shift and caps lock that converts key presses into
+  characters;
+- `inputd` (`services/virtio-input`): ring 3 virtio-input driver on the
+  common virtio transport, one process per device (init launches one for
+  each `1af4:1052` function); it reads the device name from its
+  configuration, keeps the event queue and serves
+  `InputServiceProtocol v1` (`sdk/proto::input`: `Info`, `Read` with a deadline);
+- client `aricode-sys::input`, program `input_client` and scenario
+  `input.virtio`: xtask injects through QMP (`input-send-event`) the line
+  `hola` + Enter on the virtio keyboard and a movement and click on the virtio
+  mouse; the scenario requires the exact translation;
+- xHCI and USB HID (second part): `libs/xhci` (no_std, host tests) with
+  registers, TRBs, rings with cycle bit and link, 32- or 64-byte slot and
+  endpoint contexts, ERST, SETUP packets and USB descriptors;
+  `usbd` (`services/usb-input`) in ring 3 receives the controller (class
+  `0c.03`) through the driver contract, resets it, programs the DCBAA,
+  scratchpads, command and event rings, enumerates the ports with a
+  device (reset, Enable Slot, Address Device, descriptors,
+  `SET_CONFIGURATION`, boot `SET_PROTOCOL`, Configure Endpoint) and
+  polls the interrupt endpoints; keyboard and mouse boot reports
+  are translated into evdev events in `libs/input`
+  (`HidBootKeyboard`, `HidBootMouse`) and served through
+  `InputServiceProtocol v1` as a single device
+  (`USB HID Keyboard+Mouse`); init launches `usb_input` for each USB
+  controller and adds it to the input services;
+- scenarios `usb.hid` (`test=usb_hid`, QEMU with `qemu-xhci` + `usb-kbd` +
+  `usb-mouse` via `usb_hid = true`, events injected through QMP) and
+  `usb.hid_boot` (normal boot with xHCI).
 
-### Criterio
+### Pending
 
-Dos aplicaciones gráficas aisladas pueden dibujar simultáneamente:
-**cumplido**. `gui.two_windows` lanza `gui_demo A` y `gui_demo B` (procesos
-distintos con sus propios buffers), comprueba los píxeles de cada ventana en
-la composición, hace clic sobre B por QMP y teclea `h`: solo B recibe foco,
-clic y tecla; A nunca ve eventos ajenos.
-
-### Pendiente
-
-- mover y redimensionar ventanas, cerrar desde la barra de título;
-- composición por regiones dañadas (hoy se repinta la pantalla completa);
-- que el shell y la consola vivan en una ventana (terminal gráfico).
+- HID with report descriptors (report protocol, keyboards with multimedia
+  keys, mice with more buttons), USB hubs, hot plugging and unplugging
+  (Port Status Change events are acknowledged but new ports are not
+  enumerated after boot) and USB storage.
+- Let the shell read from the virtio or USB keyboard in addition to the serial
+  and PS/2 console (the compositor already receives them in the GUI).
 
 ---
 
-# FASE 27 — Application SDK
+# PHASE 26 — Basic GUI
 
-**Estado: completada (2026-09-27).** Ver `docs/sdk.md`.
+**Status: completed (2026-09-27).**
 
-SDK inicial Rust, en `sdk/`: `aricode-abi`, `aricode-sys` (syscalls y
-clientes de servicios), `aricode-proto` (protocolos), `aricode-rt` (runtime:
-`entry!`, heap, panic, formato) y `aricode-build` (enlace). El runtime dejó
-de vivir en los programas de prueba: servicios, aplicaciones y tests
-dependen de las mismas crates. `apps/hello` es la aplicación de ejemplo y el
-shell puede lanzar programas del initrd con `run` (recibe un `SPAWNER`).
+### Implemented
 
-APIs y dónde están:
+- framebuffer abstraction: with `gui` on the cmdline the kernel does not paint on the
+  screen and hands the GOP framebuffer to init as an MMIO capability
+  (`INIT_FRAMEBUFFER`); `system_info(FRAMEBUFFER)` describes geometry and
+  format. The kernel console stays on the serial port;
+- surfaces: `libs/gfx` (no_std, no alloc, host tests): `0x00RRGGBB`
+  canvases over caller buffers with clipping, rectangles, text
+  with the console font, cursor and the `Desktop` model (cascading
+  windows, z-order, focus, hit testing, composition);
+- compositor (`services/compositor`): ring 3 process that owns the
+  framebuffer; it composes into a DMA back buffer and blits it while converting the
+  format; it reads the input services, orders their events by arrival
+  time (inputd timestamps them) and routes keyboard and clicks to the focused window;
+- mouse pointer: an arrow drawn by the compositor, moved with the relative
+  events of the virtio mouse;
+- windows: `WindowProtocol v1` (`sdk/proto::window`): `Create` (the client
+  provides the content buffer as DMA), `Present`, `Poll`, `Close`;
+  client `aricode-sys::window::Window` with its own canvas;
+- events: `Key` (translated character), `Click` (content coordinates,
+  button) and `Focus`, with a pending wait per window.
+
+### Criterion
+
+Two isolated graphical applications can draw simultaneously:
+**met**. `gui.two_windows` launches `gui_demo A` and `gui_demo B` (separate
+processes with their own buffers), checks the pixels of each window in
+the composition, clicks on B through QMP and types `h`: only B receives focus,
+click and key; A never sees events meant for others.
+
+### Pending
+
+- moving and resizing windows, closing from the title bar;
+- damage-region composition (today the whole screen is repainted);
+- having the shell and console live in a window (graphical terminal).
+
+---
+
+# PHASE 27 — Application SDK
+
+**Status: completed (2026-09-27).** See `docs/sdk.md`.
+
+Initial Rust SDK, in `sdk/`: `aricode-abi`, `aricode-sys` (syscalls and
+service clients), `aricode-proto` (protocols), `aricode-rt` (runtime:
+`entry!`, heap, panic, formatting) and `aricode-build` (linking). The runtime no
+longer lives in the test programs: services, applications and tests
+depend on the same crates. `apps/hello` is the sample application and the
+shell can launch programs from the initrd with `run` (it receives a `SPAWNER`).
+
+APIs and where they are:
 
 ```text
 process      sys::process_spawn_with / process_wait / process_exit
 ipc          sys::endpoint_create / ipc_send / ipc_receive
 filesystem   sys::fs::FsClient
 network      sys::net::NetClient, sys::http::get
-window       sys::window::Window (lienzo aricode-gfx)
+window       sys::window::Window (aricode-gfx canvas)
 input        sys::input::InputClient, aricode-input::Keyboard
 time         sys::time::{uptime_ms, Clock, sleep_ms}
 permissions  sys::permissions::{granted, kind_name, is, drop_handle}
@@ -2624,343 +2624,343 @@ permissions  sys::permissions::{granted, kind_name, is, drop_handle}
 
 ---
 
-# FASE 28 — App sandbox
+# PHASE 28 — App sandbox
 
-**Estado: completada (2026-09-27).**
+**Status: completed (2026-09-27).**
 
-### Implementado
+### Implemented
 
-- manifests: `libs/manifest` (no_std, tests de host) analiza
-  `NOMBRE.manifest` (`name`, `caps`, `memory`); xtask lo empaqueta en el
-  initrd junto al programa y el kernel lo sirve a init con `initrd_read`
-  (`READ` sobre el `SPAWNER`);
-- capability broker: init atiende `LaunchProtocol v1` (`sdk/proto::launch`)
-  mientras vive el shell; el shell ya no tiene `SPAWNER`, solo un endpoint
-  al broker. Por cada lanzamiento el broker lee el manifiesto, deniega las
-  capacidades reservadas al sistema (`spawner`, `pci`, `framebuffer`) y
-  entrega en orden fijo solo lo pedido: `SYSTEM` de lectura, directorio
-  privado, red, compositor, entradas y, si hace falta, `HARDWARE`. Sin
-  manifiesto: consola y reloj;
-- permisos de usuario: la política vive en el broker (`Caps::APP_ALLOWED`);
-  `sys::permissions` deja a la aplicación ver lo que recibió;
-- directorio privado por app: `fs::Op::Bind` crea en fsd un endpoint ligado
-  a un prefijo (`app/`); desde él solo se listan, abren y crean ficheros
-  propios (AriFS admite `/` en los nombres). El mismo prefijo comparte
-  endpoint entre lanzamientos;
-- límites de recursos: cuota de memoria DMA por proceso, fijada por quien lo
-  crea (`spawn_limits` en `process_spawn`) y cobrada en `dma_alloc`
-  (`Error::Limit` al excederla).
+- manifests: `libs/manifest` (no_std, host tests) parses
+  `NAME.manifest` (`name`, `caps`, `memory`); xtask packs it into the
+  initrd next to the program and the kernel serves it to init with `initrd_read`
+  (`READ` on the `SPAWNER`);
+- capability broker: init serves `LaunchProtocol v1` (`sdk/proto::launch`)
+  while the shell is alive; the shell no longer has `SPAWNER`, only an endpoint
+  to the broker. For each launch the broker reads the manifest, denies the
+  capabilities reserved for the system (`spawner`, `pci`, `framebuffer`) and
+  hands over, in a fixed order, only what was requested: read-only `SYSTEM`, private
+  directory, network, compositor, inputs and, if needed, `HARDWARE`. Without
+  a manifest: console and clock;
+- user permissions: the policy lives in the broker (`Caps::APP_ALLOWED`);
+  `sys::permissions` lets the application see what it received;
+- per-app private directory: `fs::Op::Bind` creates in fsd an endpoint bound
+  to a prefix (`app/`); through it only the app's own files can be listed, opened
+  and created (AriFS allows `/` in names). The same prefix shares the
+  endpoint across launches;
+- resource limits: a per-process DMA memory quota, set by whoever
+  creates it (`spawn_limits` in `process_spawn`) and charged in `dma_alloc`
+  (`Error::Limit` when exceeded).
 
-`hello_app` (manifiesto `system, fs, 128K`) demuestra las cuatro cosas en
-`sandbox.manifest`: ve solo su fichero `notas`, no puede abrir `hola.txt` y
-una reserva de 256 KiB falla con `Limit`; un programa sin manifiesto recibe
-solo consola y reloj.
+`hello_app` (manifest `system, fs, 128K`) demonstrates all four things in
+`sandbox.manifest`: it only sees its `notas` file, it cannot open `hola.txt` and
+a 256 KiB reservation fails with `Limit`; a program without a manifest receives
+only console and clock.
 
-### Pendiente
+### Pending
 
-- cuota de CPU y de handles por manifiesto; cuota de memoria de heap (hoy el
-  heap es estático);
-- identidad de cliente en IPC (que fsd distinga procesos sin un endpoint por
-  cada uno);
-- un fichero de política editable por el usuario en AriFS en vez de la
-  constante del broker.
+- CPU and handle quotas per manifest; heap memory quota (today the
+  heap is static);
+- client identity in IPC (so fsd can tell processes apart without one endpoint
+  for each);
+- a user-editable policy file in AriFS instead of the
+  broker's constant.
 
 ---
 
-# FASE 29 — WASM runtime
+# PHASE 29 — WASM runtime
 
-**Estado: completada (2026-09-27).**
+**Status: completed (2026-09-27).**
 
-### Objetivo
+### Goal
 
-Ejecutar una aplicación portable y aislada. **Cumplido**: `apps/wasm-demo`
-se compila con `rustc` a `wasm32-unknown-unknown` (MVP + `sign-ext` +
-`bulk-memory`) y `wasm_runner`, una aplicación con manifiesto (`system, fs,
-512K`), lo carga de su directorio privado y lo ejecuta con `libs/wasm`, un
-intérprete propio `no_std` (control estructurado, locales y globales,
-memoria lineal con límites comprobados, llamadas directas e indirectas,
-importaciones; sin coma flotante ni SIMD, con tope de pasos y de
-profundidad). La memoria lineal del módulo es un buffer DMA del runner,
-acotado por la cuota del manifiesto. Escenario `wasm.demo`.
+Run a portable, isolated application. **Met**: `apps/wasm-demo`
+is compiled with `rustc` to `wasm32-unknown-unknown` (MVP + `sign-ext` +
+`bulk-memory`) and `wasm_runner`, an application with a manifest (`system, fs,
+512K`), loads it from its private directory and runs it with `libs/wasm`, our own
+`no_std` interpreter (structured control flow, locals and globals,
+bounds-checked linear memory, direct and indirect calls,
+imports; no floating point or SIMD, with step and depth
+limits). The module's linear memory is a DMA buffer of the runner,
+bounded by the manifest quota. Scenario `wasm.demo`.
 
 ### API
 
-No se expone POSIX: el módulo solo importa la Capability API bajo el módulo
-`aricode` (`print(ptr, len)`, `uptime_ms() -> i64`), resuelta por nombre
-por el anfitrión, que valida cada acceso a memoria. Todo lo que el anfitrión
-no importa no existe para el módulo.
+No POSIX is exposed: the module only imports the Capability API under the
+`aricode` module (`print(ptr, len)`, `uptime_ms() -> i64`), resolved by name
+by the host, which validates every memory access. Anything the host
+does not import does not exist for the module.
 
-### Etapa 4 (2026-09-29, ADR 0019)
+### Stage 4 (2026-09-29, ADR 0019)
 
-- validación completa del módulo antes de instanciarlo (`Error::Invalid`),
-  perfil `aricode-wasm` v1 documentado en `docs/wasm-profile.md` (no es
-  WASI), manifiesto por módulo (`demo.manifest`, `caps = print, clock,
-  files`) que acota las importaciones, y `file_read`/`file_write` sobre el
-  directorio privado del runner; escenarios `wasm.demo`, `wasm.restricted`
-  y `wasm.invalid`.
+- full validation of the module before instantiating it (`Error::Invalid`),
+  the `aricode-wasm` v1 profile documented in `docs/wasm-profile.md` (it is not
+  WASI), a per-module manifest (`demo.manifest`, `caps = print, clock,
+  files`) that bounds the imports, and `file_read`/`file_write` on the
+  runner's private directory; scenarios `wasm.demo`, `wasm.restricted`
+  and `wasm.invalid`.
 
-### Pendiente
+### Pending
 
-- más funciones de la Capability API (red y ventanas del propio runner);
-- coma flotante;
-- rendimiento: es un intérprete byte a byte sin precompilación.
+- more Capability API functions (networking and windows of the runner itself);
+- floating point;
+- performance: it is a byte-by-byte interpreter with no precompilation.
 
 ---
 
-# FASE 30 — Actualización A/B
+# PHASE 30 — A/B update
 
-**Estado: completada (2026-09-27).**
+**Status: completed (2026-09-27).**
 
-### Implementado
+### Implemented
 
-- system image: contenedor `aricode-initrd` con `manifest`, `manifest.sig`,
-  `kernel.elf` (sin depuración) e `initrd.img`, precedido en la partición
-  por una cabecera `ARISLOT` con su longitud; xtask lo construye y firma
-  con la clave de desarrollo (`image::system_image`);
-- manifest firmado: `version`, SHA-256 de kernel e initrd; firma Ed25519
-  del texto completo; `aricode-ab::Image::verify` solo devuelve los bytes
-  si firma y hashes cuadran;
-- slot A/B: particiones GPT `SYSA` y `SYSB` (12 MiB), `UPDATE` (imagen
-  descargada) y `ARIBOOT` (estado); AriBoot las localiza por `BlockIo`
-  (apertura no exclusiva), elige el slot, verifica y carga el kernel de la
-  imagen; si no hay `ARIBOOT` o nada verifica, arranca desde la ESP
-  (recuperación). El kernel recibe `boot_slot=A|B [boot_pending]` por la
-  cmdline e init lo ve en `init_arg`;
-- boot attempts counter: `BootState` (sector 0 de `ARIBOOT`, con CRC)
-  guarda activo, pendiente e intentos; AriBoot consume un intento antes de
-  saltar al kernel e init confirma el slot escribiendo el estado por el
-  servicio de bloques cuando los servicios de arranque funcionan;
-- rollback: pendiente sin intentos o con imagen rechazada → vuelve al
-  activo y borra el pendiente (`aricode-ab::{choose, reject}`).
+- system image: an `aricode-initrd` container with `manifest`, `manifest.sig`,
+  `kernel.elf` (stripped) and `initrd.img`, preceded in the partition
+  by an `ARISLOT` header with its length; xtask builds it and signs it
+  with the development key (`image::system_image`);
+- signed manifest: `version`, SHA-256 of kernel and initrd; Ed25519 signature
+  over the full text; `aricode-ab::Image::verify` only returns the bytes
+  if the signature and hashes match;
+- A/B slot: GPT partitions `SYSA` and `SYSB` (12 MiB), `UPDATE` (downloaded
+  image) and `ARIBOOT` (state); AriBoot finds them through `BlockIo`
+  (non-exclusive open), chooses the slot, verifies it and loads the kernel from the
+  image; if there is no `ARIBOOT` or nothing verifies, it boots from the ESP
+  (recovery). The kernel receives `boot_slot=A|B [boot_pending]` on the
+  cmdline and init sees it in `init_arg`;
+- boot attempts counter: `BootState` (sector 0 of `ARIBOOT`, with CRC)
+  stores active, pending and attempts; AriBoot consumes an attempt before
+  jumping to the kernel and init confirms the slot by writing the state through the
+  block service once the boot services are working;
+- rollback: pending with no attempts left or with a rejected image → go back to the
+  active one and clear the pending one (`aricode-ab::{choose, reject}`).
 
-El actualizador (`apps/updater`, aplicación de confianza con la capacidad
-`block`) lee `UPDATE`, verifica, copia al slot inactivo y programa tres
-intentos. Escenarios: `update.slot_a` (smoke), `update.pending_boot`,
+The updater (`apps/updater`, a trusted application with the `block`
+capability) reads `UPDATE`, verifies it, copies it to the inactive slot and schedules three
+attempts. Scenarios: `update.slot_a` (smoke), `update.pending_boot`,
 `update.rollback_exhausted`, `update.reject_bad_signature`,
-`update.esp_fallback` y `update.apply`, cada uno con su variante de disco.
+`update.esp_fallback` and `update.apply`, each with its own disk variant.
 
-### Pendiente
+### Pending
 
-- reinicio automático tras instalar y prueba de dos arranques encadenados
-  (hoy cada escenario parte de un disco preparado por xtask);
-- origen de la actualización por red (hoy la deja xtask en `UPDATE`);
-- clave de producción fuera del repositorio y rotación de claves.
+- automatic reboot after installing and a test of two chained boots
+  (today each scenario starts from a disk prepared by xtask);
+- update source over the network (today xtask leaves it in `UPDATE`);
+- production key outside the repository and key rotation.
 
 ---
 
-# FASE 31 — Criptografía y confianza
+# PHASE 31 — Cryptography and trust
 
-**Estado: completada (2026-09-27); la firma de imágenes se aplica en la Fase 30.**
+**Status: completed (2026-09-27); image signing is applied in Phase 30.**
 
-### Implementado
+### Implemented
 
-- `libs/crypto` (no_std, sin dependencias, tests con los vectores oficiales):
-  SHA-256 y SHA-512 (FIPS 180-4), Ed25519 (RFC 8032: campo GF(2^255-19) en
-  limbs de 51 bits, puntos extendidos, escalares módulo L) y ChaCha20
-  (RFC 7539). Ed25519 no es de tiempo constante: el sistema solo verifica;
-  firmar es cosa del host;
-- firma de imágenes: `cargo xtask sign` y `cargo xtask verify` sobre
-  ficheros; los manifiestos de actualización firmados llegan con la Fase 30;
-- hash verification: SHA-256 incremental para imágenes grandes;
-- key management: `cargo xtask keygen`; par de desarrollo versionado en
-  `keys/dev` (solo pruebas, ver su README) y regla de que la semilla de
-  producción nunca entra en el repositorio;
-- secure random: generador ChaCha20 en el kernel, servido por
+- `libs/crypto` (no_std, no dependencies, tests with the official vectors):
+  SHA-256 and SHA-512 (FIPS 180-4), Ed25519 (RFC 8032: field GF(2^255-19) in
+  51-bit limbs, extended points, scalars modulo L) and ChaCha20
+  (RFC 7539). Ed25519 is not constant-time: the system only verifies;
+  signing is the host's job;
+- image signing: `cargo xtask sign` and `cargo xtask verify` on
+  files; signed update manifests come with Phase 30;
+- hash verification: incremental SHA-256 for large images;
+- key management: `cargo xtask keygen`; a versioned development pair in
+  `keys/dev` (tests only, see its README) and the rule that the production
+  seed never enters the repository;
+- secure random: ChaCha20 generator in the kernel, served through
   `system_info(RANDOM)` (`sys::random`);
-- entropy sources: `rdrand` si la CPU lo tiene, y muestras del TSC y del
-  tiempo de arranque en cada semilla y en cada lectura; el kernel anuncia
-  qué fuente usa (`rdrand` o `TSC (sin rdrand: entropia limitada)`).
+- entropy sources: `rdrand` if the CPU has it, plus TSC and
+  boot-time samples on every seeding and every read; the kernel announces
+  which source it uses (`rdrand` or `TSC (no rdrand: limited entropy)`).
 
-### Pendiente
+### Pending
 
-- `rdseed` y fuentes externas (jitter de interrupciones, virtio-rng);
-- Ed25519 de tiempo constante si algún día el sistema firma.
+- `rdseed` and external sources (interrupt jitter, virtio-rng);
+- constant-time Ed25519 if the system ever signs.
 
 ---
 
-# FASE 32 — SMP
+# PHASE 32 — SMP
 
-**Estado: completada (2026-09-27).**
+**Status: completed (2026-09-27).**
 
-Aunque parte de SMP puede adelantarse, en esta etapa deberá consolidarse:
+Although part of SMP can be brought forward, at this stage the following must be consolidated:
 
 - AP discovery;
 - startup;
 - per-CPU state;
-- scheduler SMP;
+- SMP scheduler;
 - TLB shootdown;
 - locks;
 - CPU affinity.
 
-### Implementado
+### Implemented
 
-- AP discovery: los LAPIC habilitados de la MADT (`libs/acpi`); el BSP se
-  reconoce por su propio id y es el destino de todas las IRQ de dispositivo
-  (I/O APIC y MSI-X) y de la consola serie;
-- startup: trampolín en la página física `0x8000` (memoria baja reservada
-  por el PMM y comprobada en el mapa UEFI) que lleva al AP de modo real a
-  modo largo con unas tablas de arranque (identidad del primer MiB + mitad
-  del kernel) y salta a `ap_entry` sobre la pila de su hilo idle;
-  INIT-SIPI-SIPI por el ICR del LAPIC, espera de hasta 500 ms por CPU y
-  aviso si un AP no responde; cada AP carga el CR3 definitivo, copia CR0 y
-  CR4 del BSP, instala sus tablas, la IDT compartida, `syscall`, su LAPIC
-  (timer con la cuenta calibrada por el BSP) y entra en el bucle idle;
-- per-CPU state: `kernel/src/cpu.rs` con un `Cpu` estático por procesador
-  (GDT, TSS con pila de #DF, hilo actual, quantum, scratch de `syscall`)
-  al que apunta `IA32_GS_BASE`; `swapgs` en `syscall`, en el trampolín de
-  interrupciones cuando viene de ring 3 y al saltar a ring 3;
-- scheduler SMP: `aricode-sched` con una cola de listos compartida y, por
-  CPU, hilo actual e idle propio; el lock del planificador se mantiene
-  durante el cambio de contexto y lo suelta el hilo que reanuda
-  (`force_unlock`), de modo que ninguna CPU puede tomar un hilo antes de
-  que su `rsp` esté guardado; solo el BSP cuenta el tiempo y despierta a
-  los dormidos; una CPU en idle recibe una IPI (`RESCHED`) cuando un hilo
-  pasa a listo; un `wake` que llega a un hilo aún `Running` queda pendiente
-  y convierte su siguiente bloqueo en una cesión (sin despertares perdidos);
-- TLB shootdown: `vmm::flush_page` invalida en la CPU local y, por IPI
-  (`TLB_FLUSH`), en las demás en línea con confirmación; se exige llamarlo
-  con interrupciones habilitadas y sin locks; IPI `HALT` para detener las
-  demás CPUs en un pánico;
-- locks: `IrqLock` deshabilita interrupciones solo mientras tiene el lock y
-  las restaura entre giros (una CPU que espera sigue atendiendo IPI);
-  detección de bloqueo mutuo por giros como antes;
-- CPU affinity: `set_affinity` en la política y `spawn_on` en el kernel; un
-  hilo con afinidad solo lo toma su CPU (las demás lo saltan en la cola);
-- `system_info(CPUS)` y el comando `cpus` del shell; el volcado de
-  excepciones y de pánico indica la CPU;
-- pruebas: `test=smp` (todas las CPUs de la MADT en línea, hilos fijados
-  que ejecutan a la vez en CPUs distintas, hilos libres que migran,
-  shootdown observado desde otra CPU con el número exacto de IPI, contador
-  bajo lock disputado por todas las CPUs), escenarios `smp.boot`
+- AP discovery: the enabled LAPICs in the MADT (`libs/acpi`); the BSP is
+  recognized by its own id and is the destination of all device IRQs
+  (I/O APIC and MSI-X) and of the serial console;
+- startup: a trampoline at physical page `0x8000` (low memory reserved
+  by the PMM and checked in the UEFI map) that takes the AP from real mode to
+  long mode with boot tables (identity map of the first MiB + the kernel
+  half) and jumps to `ap_entry` on the stack of its idle thread;
+  INIT-SIPI-SIPI through the LAPIC ICR, a wait of up to 500 ms per CPU and
+  a warning if an AP does not respond; each AP loads the final CR3, copies CR0 and
+  CR4 from the BSP, installs its tables, the shared IDT, `syscall`, its LAPIC
+  (timer with the count calibrated by the BSP) and enters the idle loop;
+- per-CPU state: `kernel/src/cpu.rs` with a static `Cpu` per processor
+  (GDT, TSS with a #DF stack, current thread, quantum, `syscall` scratch)
+  pointed to by `IA32_GS_BASE`; `swapgs` in `syscall`, in the interrupt
+  trampoline when coming from ring 3 and when jumping to ring 3;
+- SMP scheduler: `aricode-sched` with a shared ready queue and, per
+  CPU, a current thread and its own idle; the scheduler lock is held
+  during the context switch and released by the resuming thread
+  (`force_unlock`), so that no CPU can take a thread before
+  its `rsp` has been saved; only the BSP keeps time and wakes up
+  sleepers; an idle CPU receives an IPI (`RESCHED`) when a thread
+  becomes ready; a `wake` that reaches a thread that is still `Running` stays pending
+  and turns its next block into a yield (no lost wakeups);
+- TLB shootdown: `vmm::flush_page` invalidates on the local CPU and, through an IPI
+  (`TLB_FLUSH`), on the other online CPUs with acknowledgement; it must be called
+  with interrupts enabled and no locks held; a `HALT` IPI stops the
+  other CPUs on a panic;
+- locks: `IrqLock` disables interrupts only while it holds the lock and
+  restores them between spins (a waiting CPU keeps servicing IPIs);
+  deadlock detection by spin count as before;
+- CPU affinity: `set_affinity` in the policy and `spawn_on` in the kernel; a
+  thread with affinity is only taken by its CPU (the others skip it in the queue);
+- `system_info(CPUS)` and the shell's `cpus` command; exception and panic
+  dumps show the CPU;
+- tests: `test=smp` (all MADT CPUs online, pinned threads
+  running at the same time on different CPUs, free threads migrating,
+  a shootdown observed from another CPU with the exact IPI count, a counter
+  under a lock contended by all CPUs), scenarios `smp.boot`
   (smoke, `-smp 4`), `smp.selftest`, `smp.single_cpu_selftest`,
-  `smp.shell_user`; los escenarios declaran `cpus = N` y
-  `cargo xtask test --cpus N` fuerza N procesadores en toda la suite.
+  `smp.shell_user`; scenarios declare `cpus = N` and
+  `cargo xtask test --cpus N` forces N processors across the whole suite.
 
-### Pendiente
+### Pending
 
-- Balanceo de carga explícito (solo hay cola compartida y afinidad
-  opcional), prioridades y `sched_yield`/afinidad desde usuario.
-- x2APIC y más de 16 CPUs; hot-plug.
-- Las IRQ de dispositivo siempre van al BSP; no hay reparto ni migración de
-  vectores.
-- El heap sigue con un lock global; no hay cachés por CPU.
+- Explicit load balancing (there is only a shared queue and optional
+  affinity), priorities and `sched_yield`/affinity from user space.
+- x2APIC and more than 16 CPUs; hot-plug.
+- Device IRQs always go to the BSP; there is no vector distribution or
+  migration.
+- The heap still uses a global lock; there are no per-CPU caches.
 
 ---
 
-# FASE 33 — IOMMU
+# PHASE 33 — IOMMU
 
-**Estado: completada (2026-09-27).**
+**Status: completed (2026-09-27).**
 
-### Implementar
+### To implement
 
-- VT-d o AMD equivalent;
+- VT-d or AMD equivalent;
 - device domains;
 - DMA mappings;
 - isolation.
 
-### Implementado
+### Implemented
 
-- VT-d: `libs/acpi` parsea la DMAR (unidades DRHD con sus ámbitos de
-  dispositivo e `INCLUDE_PCI_ALL`, regiones reservadas RMRR);
-  `libs/iommu` (no_std, tests de host) contiene registros y bits,
-  capacidades, entradas raíz y de contexto, paginación de segundo nivel de
-  3 o 4 niveles con hook `clflush` para unidades no coherentes, y
-  decodificación de registros de fallo; `kernel/src/iommu.rs` programa cada
-  unidad (tabla raíz, interrupción de fallo por MSI al BSP, invalidación
-  global de contextos e IOTLB, `TE`) antes de que arranque ningún driver;
-- device domains: un dominio por proceso, creado al primer uso; la función
-  PCI se asigna al dominio del proceso que mapea su espacio de
-  configuración o un BAR (`mmio_map` de una región con `source_id`); al
-  morir el proceso su entrada de contexto se retira, se invalida y sus
-  tablas vuelven al PMM;
-- DMA mappings: IOVA = dirección física, así los drivers no cambian;
-  `dma_alloc` mapea el buffer en el dominio de quien lo reserva y
-  `mmio_map` de un objeto DMA ajeno (buffers de clientes del servicio de
-  bloques) lo mapea en el dominio del servicio; al liberarse un buffer se
-  retira de todos los dominios antes de devolver sus frames; las RMRR de un
-  dispositivo se mapean identidad al asignarlo;
-- isolation: cualquier otro acceso del dispositivo falla en la unidad, que
-  lo registra; el kernel lo anuncia (`iommu: fallo DMA de bb:dd.f ...`),
-  lo cuenta y lo expone con `system_info(IOMMU)`; los virtio de QEMU llevan
-  `iommu_platform=on` y el transporte acepta `ACCESS_PLATFORM`;
-- pruebas: `test=iommu` con el driver de prueba `dma_rogue` (lectura
-  legítima traducida, escritura a memoria ajena bloqueada, fallo
-  registrado, memoria intacta, dominio liberado) y `iommu.enabled` (smoke:
-  toda la pila de servicios funciona traducida); sin DMAR todo sigue
-  funcionando sin traducción.
+- VT-d: `libs/acpi` parses the DMAR (DRHD units with their device
+  scopes and `INCLUDE_PCI_ALL`, RMRR reserved regions);
+  `libs/iommu` (no_std, host tests) contains registers and bits,
+  capabilities, root and context entries, second-level paging with
+  3 or 4 levels with a `clflush` hook for non-coherent units, and
+  decoding of fault records; `kernel/src/iommu.rs` programs each
+  unit (root table, fault interrupt via MSI to the BSP, global invalidation
+  of contexts and IOTLB, `TE`) before any driver starts;
+- device domains: one domain per process, created on first use; the PCI
+  function is assigned to the domain of the process that maps its
+  configuration space or a BAR (`mmio_map` of a region with `source_id`); when
+  the process dies its context entry is removed and invalidated, and its
+  tables return to the PMM;
+- DMA mappings: IOVA = physical address, so drivers do not change;
+  `dma_alloc` maps the buffer in the domain of whoever reserves it and
+  `mmio_map` of someone else's DMA object (client buffers of the block
+  service) maps it in the service's domain; when a buffer is released it is
+  removed from every domain before its frames are returned; a device's RMRRs
+  are identity-mapped when it is assigned;
+- isolation: any other access by the device fails in the unit, which
+  records it; the kernel announces it (`iommu: DMA fault from bb:dd.f ...`),
+  counts it and exposes it with `system_info(IOMMU)`; QEMU's virtio devices use
+  `iommu_platform=on` and the transport accepts `ACCESS_PLATFORM`;
+- tests: `test=iommu` with the test driver `dma_rogue` (a legitimate
+  translated read, a write to foreign memory blocked, the fault
+  recorded, memory intact, domain released) and `iommu.enabled` (smoke:
+  the whole service stack works translated); without a DMAR everything keeps
+  working without translation.
 
-### Pendiente
+### Pending
 
-- Interrupt remapping (las MSI pasan sin traducir) y la variante AMD-Vi.
-- Invalidación selectiva (por dominio o página) con cola de invalidación;
-  hoy se invalida globalmente tras cada cambio.
-- Un dominio por dispositivo o compartido entre procesos; hoy es por proceso.
-- Comprobación en hardware real (Fase 34): RMRR de gráficos y USB.
-
----
-
-# FASE 34 — Hardware real
-
-**Estado: preparación completada (2026-09-27); pendiente de la primera
-prueba en el portátil.** Ver `docs/hardware.md`.
-
-### Preparado sin hardware
-
-- `cargo xtask usb-image [--cmdline S]`: imagen GPT para pendrive con la ESP
-  en FAT32 propia (`libs/fat`, con nombres largos), AriFS, slot A firmado y
-  estado A/B; la misma imagen arranca en QEMU sin el disco FAT del emulador
-  (escenario `usb.image_boot`);
-- consola sin puerto serie: teclado PS/2 del i8042 como entrada de consola
-  del kernel (decodificador del conjunto 1 en `libs/input`, escenario
-  `console.ps2`) y salida por el framebuffer;
-- interruptores de depuración `smp=off` e `iommu=off` en la cmdline
-  (escenarios `smp.disabled`, `iommu.disabled`);
-- IOMMU en firmware real: los dispositivos con RMRR y los controladores
-  gráficos reciben un dominio identidad (RMRR + framebuffer) antes de
-  activar la traducción, para que la pantalla y el firmware sigan
-  funcionando;
-- guía de arranque, grabación y diagnóstico en `docs/hardware.md`.
-
-### Pendiente (necesita el portátil)
-
-- Arranque UEFI desde USB, RAM/ACPI/framebuffer, PCIe, IOMMU con RMRR reales.
-- Drivers de almacenamiento reales (AHCI/NVMe) y xHCI/USB HID (Fase 25).
-
-Aquí entra el portátil viejo.
-
-No hace falta formatearlo durante las primeras fases.
-
-Primero se utilizará QEMU.
-
-Cuando AriCodeOS sea capaz de:
-
-- arrancar UEFI;
-- mostrar logs;
-- gestionar memoria;
-- manejar excepciones;
-
-se crea un USB bootable.
-
-## Política inicial
-
-**No tocar el disco interno.**
-
-Arrancar AriCodeOS desde USB.
-
-Solo cuando el almacenamiento sea estable se planteará dedicar el portátil completamente al sistema.
+- Interrupt remapping (MSIs pass untranslated) and the AMD-Vi variant.
+- Selective invalidation (per domain or page) with an invalidation queue;
+  today a global invalidation follows every change.
+- One domain per device or shared between processes; today it is per process.
+- Verification on real hardware (Phase 34): graphics and USB RMRRs.
 
 ---
 
-# 66. Portátil de pruebas
+# PHASE 34 — Real hardware
 
-Información que deberá recopilarse antes de trabajar con hardware real:
+**Status: preparation completed (2026-09-27); first test on the laptop
+pending.** See `docs/hardware.md`.
+
+### Prepared without hardware
+
+- `cargo xtask usb-image [--cmdline S]`: GPT image for a USB stick with the ESP
+  in our own FAT32 (`libs/fat`, with long names), AriFS, signed slot A and
+  A/B state; the same image boots in QEMU without the emulator's FAT disk
+  (scenario `usb.image_boot`);
+- console without a serial port: i8042 PS/2 keyboard as the kernel's console
+  input (set 1 decoder in `libs/input`, scenario
+  `console.ps2`) and output through the framebuffer;
+- debugging switches `smp=off` and `iommu=off` on the cmdline
+  (scenarios `smp.disabled`, `iommu.disabled`);
+- IOMMU on real firmware: devices with RMRRs and graphics
+  controllers receive an identity domain (RMRR + framebuffer) before
+  translation is enabled, so that the screen and the firmware keep
+  working;
+- boot, flashing and diagnostics guide in `docs/hardware.md`.
+
+### Pending (needs the laptop)
+
+- UEFI boot from USB, RAM/ACPI/framebuffer, PCIe, IOMMU with real RMRRs.
+- Real storage drivers (AHCI/NVMe) and xHCI/USB HID (Phase 25).
+
+This is where the old laptop comes in.
+
+It does not need to be formatted during the first phases.
+
+QEMU will be used first.
+
+When AriCodeOS is able to:
+
+- boot via UEFI;
+- show logs;
+- manage memory;
+- handle exceptions;
+
+a bootable USB stick is created.
+
+## Initial policy
+
+**Do not touch the internal disk.**
+
+Boot AriCodeOS from USB.
+
+Only when storage is stable will dedicating the laptop entirely to the system be considered.
+
+---
+
+# 66. Test laptop
+
+Information to gather before working with real hardware:
 
 ```text
-CPU exacta
+exact CPU
 RAM
 GPU
 chipset
-controlador NVMe/SATA
+NVMe/SATA controller
 WiFi
 Ethernet
 USB controller
@@ -2970,7 +2970,7 @@ ACPI tables
 PCI device list
 ```
 
-Desde Linux pueden guardarse como documentación del hardware:
+From Linux these can be saved as hardware documentation:
 
 ```bash
 lscpu
@@ -2981,17 +2981,17 @@ lsblk
 sudo dmesg
 ```
 
-Así tendremos una especificación de nuestro primer hardware físico objetivo.
+That way we will have a specification of our first physical target hardware.
 
 ---
 
-# 67. Estrategia de hardware
+# 67. Hardware strategy
 
-No intentar soportar todo PC existente.
+Do not try to support every existing PC.
 
-Primero definir un **AriCodeOS Reference Machine**.
+First define an **AriCodeOS Reference Machine**.
 
-Ejemplo:
+Example:
 
 ```text
 Reference Platform 1
@@ -3006,15 +3006,15 @@ GOP framebuffer
 Intel/AMD CPU
 ```
 
-Si el portátil elegido cumple los requisitos, se convierte en nuestra primera plataforma real certificada.
+If the chosen laptop meets the requirements, it becomes our first certified real platform.
 
 ---
 
-# 68. Estrategia de compatibilidad
+# 68. Compatibility strategy
 
-Una regla arquitectónica importante:
+An important architectural rule:
 
-> La compatibilidad antigua debe vivir encima de AriCodeOS, nunca dentro de su núcleo.
+> Legacy compatibility must live on top of AriCodeOS, never inside its kernel.
 
 ```text
                  AriCodeOS
@@ -3027,17 +3027,17 @@ Una regla arquitectónica importante:
                               Linux
 ```
 
-Así podemos conservar un kernel moderno incluso cuando necesitemos ejecutar software antiguo.
+That way we can keep a modern kernel even when we need to run old software.
 
 ---
 
-# 69. Rendimiento
+# 69. Performance
 
-La arquitectura microkernel puede introducir IPC adicional.
+A microkernel architecture can introduce additional IPC.
 
-Por tanto, AriCodeOS no debe asumir que microkernel significa automáticamente más rápido.
+Therefore AriCodeOS must not assume that microkernel automatically means faster.
 
-Se medirá:
+The following will be measured:
 
 ```text
 syscall latency
@@ -3053,13 +3053,13 @@ boot time
 power consumption
 ```
 
-Las optimizaciones se harán con métricas reales.
+Optimizations will be made with real metrics.
 
 ---
 
-# 70. Benchmarks internos
+# 70. Internal benchmarks
 
-Repositorio futuro:
+Future repository:
 
 ```text
 bench/
@@ -3073,15 +3073,15 @@ bench/
 └── scheduler
 ```
 
-Cada cambio crítico podrá compararse frente a un baseline.
+Every critical change can be compared against a baseline.
 
 ---
 
-# 71. Observabilidad
+# 71. Observability
 
-AriCodeOS debe diseñarse para poder explicar qué está haciendo.
+AriCodeOS must be designed to be able to explain what it is doing.
 
-Herramientas futuras:
+Future tools:
 
 ```text
 process inspector
@@ -3094,21 +3094,21 @@ scheduler trace
 performance counters
 ```
 
-Esto será extremadamente importante durante el desarrollo.
+This will be extremely important during development.
 
 ---
 
 # 72. Debugging
 
-Primeras herramientas:
+First tools:
 
 - serial logs;
 - QEMU monitor;
 - GDB remote debugging;
-- symbols ELF;
+- ELF symbols;
 - panic backtraces.
 
-Configuración conceptual:
+Conceptual setup:
 
 ```text
 QEMU --gdb tcp::1234 --stop
@@ -3124,11 +3124,11 @@ kernel.elf symbols
 
 # 73. Crash dumps
 
-Fase posterior:
+Later phase:
 
-Cuando exista almacenamiento fiable, el sistema podrá guardar crash dumps.
+Once reliable storage exists, the system will be able to save crash dumps.
 
-Contenido:
+Contents:
 
 - kernel version;
 - CPU state;
@@ -3141,9 +3141,9 @@ Contenido:
 
 ---
 
-# 74. API y ABI
+# 74. API and ABI
 
-Deben distinguirse claramente:
+The following must be clearly distinguished:
 
 ```text
 Kernel internal API
@@ -3154,17 +3154,17 @@ Driver ABI
 Boot protocol
 ```
 
-No deben evolucionar todos al mismo ritmo.
+They do not all need to evolve at the same pace.
 
-Durante `0.x` pueden romper compatibilidad.
+During `0.x` they may break compatibility.
 
-Posteriormente se versionarán.
+Later they will be versioned.
 
 ---
 
-# 75. Protocolos IPC versionados
+# 75. Versioned IPC protocols
 
-Ejemplo:
+Example:
 
 ```text
 FileServiceProtocol v1
@@ -3172,47 +3172,47 @@ NetworkServiceProtocol v1
 WindowServiceProtocol v1
 ```
 
-Cada mensaje deberá incluir identificador/versionado cuando sea necesario.
+Each message must include an identifier/version when necessary.
 
 ---
 
-# 76. Boot protocol versionado
+# 76. Versioned boot protocol
 
-Ejemplo conceptual:
+Conceptual example:
 
 ```rust
 const BOOT_PROTOCOL_VERSION: u32 = 1;
 ```
 
-El kernel debe comprobar que entiende la versión entregada por el bootloader.
+The kernel must check that it understands the version handed over by the bootloader.
 
 ---
 
-# 77. Nombres internos sugeridos
+# 77. Suggested internal names
 
 ```text
 AriKernel      -> kernel
 AriBoot        -> bootloader
-AriInit        -> primer proceso
+AriInit        -> first process
 AriIPC         -> IPC
 AriCap         -> capabilities
 AriFS          -> filesystem service
 AriNet         -> network service
 AriGUI         -> compositor / GUI
-AriRuntime     -> runtime de aplicaciones
+AriRuntime     -> application runtime
 AriSDK         -> SDK
-AriPkg         -> futuro package manager
+AriPkg         -> future package manager
 ```
 
-No son obligatorios; sirven como convención inicial.
+They are not mandatory; they serve as an initial convention.
 
 ---
 
-# 78. Futuro package manager
+# 78. Future package manager
 
-No será una prioridad inicial.
+It will not be an initial priority.
 
-Modelo previsto:
+Planned model:
 
 ```text
 package
@@ -3223,17 +3223,17 @@ package
 └── version metadata
 ```
 
-Instalación transaccional.
+Transactional installation.
 
-Las apps no modificarán el sistema base.
+Apps will not modify the base system.
 
 ---
 
-# 79. Configuración
+# 79. Configuration
 
-Evitar un registro global monolítico.
+Avoid a monolithic global registry.
 
-Preferencia:
+Preference:
 
 ```text
 system configuration service
@@ -3241,107 +3241,107 @@ user configuration
 per-app configuration
 ```
 
-Formato humano cuando sea útil y representación binaria/versionada para protocolos internos.
+A human-readable format when useful, and a binary/versioned representation for internal protocols.
 
 ---
 
-# 80. Usuarios
+# 80. Users
 
-No es una prioridad del kernel inicial.
+It is not a priority of the initial kernel.
 
-Cuando se implemente identidad humana, deberá separarse de capabilities.
+When human identity is implemented, it must be kept separate from capabilities.
 
 ```text
-User identity != authority automática
+User identity != automatic authority
 ```
 
-La identidad puede participar en políticas, pero las capabilities determinan el acceso real a objetos.
+Identity can take part in policies, but capabilities determine actual access to objects.
 
 ---
 
-# 81. Seguridad de aplicaciones
+# 81. Application security
 
-Toda aplicación deberá considerarse potencialmente comprometible.
+Every application must be considered potentially compromisable.
 
-Objetivo:
+Goal:
 
 ```text
-Browser comprometido
+Compromised browser
        |
        X kernel
-       X otras apps
+       X other apps
        X raw disk
-       X microphone si no tiene permiso
+       X microphone without permission
        X arbitrary user files
 ```
 
-El sandbox debe impedir que un fallo de una aplicación se transforme automáticamente en compromiso total del sistema.
+The sandbox must prevent a failure in one application from automatically turning into a full system compromise.
 
 ---
 
-# 82. Seguridad de drivers
+# 82. Driver security
 
-Un driver se tratará igualmente como código potencialmente defectuoso.
+A driver will likewise be treated as potentially faulty code.
 
-Ejemplo:
+Example:
 
 ```text
 WiFi Driver crash
       |
-      +-- se registra fallo
-      +-- device manager revoca capabilities
-      +-- proceso termina
-      +-- driver reinicia
-      +-- conexiones se recuperan cuando sea posible
+      +-- the failure is logged
+      +-- device manager revokes capabilities
+      +-- process terminates
+      +-- driver restarts
+      +-- connections recover when possible
 ```
 
-No debe provocar corrupción de memoria kernel.
+It must not cause kernel memory corruption.
 
 ---
 
-# 83. Principios de diseño que NO deben romperse
+# 83. Design principles that must NOT be broken
 
-1. Kernel pequeño.
-2. Seguridad por defecto.
-3. Drivers aislados.
-4. Compatibilidad heredada fuera del kernel.
-5. APIs explícitas.
-6. No introducir legacy sin justificación.
-7. Test antes de integrar.
-8. Cada privilegio debe poder explicarse.
-9. Cada `unsafe` debe poder justificarse.
-10. Cada optimización importante debe poder medirse.
+1. Small kernel.
+2. Secure by default.
+3. Isolated drivers.
+4. Legacy compatibility outside the kernel.
+5. Explicit APIs.
+6. Do not introduce legacy without justification.
+7. Test before integrating.
+8. Every privilege must be explainable.
+9. Every `unsafe` must be justifiable.
+10. Every important optimization must be measurable.
 
 ---
 
-# 84. Política frente a legacy
+# 84. Legacy policy
 
-Antes de añadir una característica heredada preguntar:
+Before adding a legacy feature, ask:
 
 ```text
-¿la necesitamos realmente?
-¿qué hardware actual la utiliza?
-¿puede implementarse fuera del kernel?
-¿puede ser una capa opcional?
-¿incrementa el TCB?
-¿abre una nueva superficie de ataque?
+do we really need it?
+what current hardware uses it?
+can it be implemented outside the kernel?
+can it be an optional layer?
+does it increase the TCB?
+does it open a new attack surface?
 ```
 
-Por defecto:
+By default:
 
 ```text
 NO LEGACY
 ```
 
-hasta demostrar necesidad.
+until the need is demonstrated.
 
 ---
 
-# 85. Primer objetivo práctico
+# 85. First practical goal
 
 ## AriCodeOS 0.0.1
 
-Debe hacer solamente esto:
+It must do only this:
 
 ```text
 UEFI
@@ -3365,148 +3365,148 @@ framebuffer / serial
 "AriCodeOS booting..."
 ```
 
-Nada más.
+Nothing more.
 
-Ese milestone es importante porque demostrará que existe una cadena completamente propia desde firmware hasta kernel.
+That milestone is important because it will prove that there is a fully custom chain from firmware to kernel.
 
 ---
 
 # 86. AriCodeOS 0.0.2
 
-**Estado: completada (2026-09-26), tag `v0.0.2`.**
+**Status: completed (2026-09-26), tag `v0.0.2`.**
 
-Añadido:
+Added:
 
-- BootInfo v2 (con cmdline);
-- memory map clasificado;
-- logging con niveles (serie + framebuffer);
-- panic handler y excepciones con diagnóstico;
+- BootInfo v2 (with cmdline);
+- classified memory map;
+- logging with levels (serial + framebuffer);
+- panic handler and exceptions with diagnostics;
 - GDT/TSS;
-- IDT con IST para double fault.
+- IDT with IST for double fault.
 
-Incluye además la infraestructura de tests por niveles y las dos rondas de
-auditoría (`docs/audits/`).
+It also includes the leveled test infrastructure and the two audit
+rounds (`docs/audits/`).
 
 ---
 
 # 87. AriCodeOS 0.0.3
 
-**Estado: completada (2026-09-26), tag `v0.0.3`.**
+**Status: completed (2026-09-26), tag `v0.0.3`.**
 
-Añadido:
+Added:
 
 - physical memory allocator (bitmap, `libs/pmm`);
-- virtual memory (tablas propias, W^X, mapa físico lineal, guard page;
-  protocolo de arranque v3, ADR 0009);
-- kernel heap (`libs/heap`, crecimiento bajo demanda).
+- virtual memory (own tables, W^X, linear physical map, guard page;
+  boot protocol v3, ADR 0009);
+- kernel heap (`libs/heap`, on-demand growth).
 
 ---
 
 # 88. AriCodeOS 0.0.4
 
-**Estado: completada (2026-09-26), tag `v0.0.4`.**
+**Status: completed (2026-09-26), tag `v0.0.4`.**
 
-Añadido:
+Added:
 
-- `IrqLock` en todo el estado global (`libs/sync`);
-- APIC (PIC enmascarado, LAPIC, timer calibrado con PIT, 100 Hz);
-- threads (pilas con guard, context switch, idle);
-- scheduler round robin preemptivo, sueño y colas de espera (`libs/sched`).
+- `IrqLock` for all global state (`libs/sync`);
+- APIC (masked PIC, LAPIC, timer calibrated with the PIT, 100 Hz);
+- threads (stacks with guard, context switch, idle);
+- preemptive round robin scheduler, sleep and wait queues (`libs/sched`).
 
 ---
 
 # 89. AriCodeOS 0.0.5
 
-**Estado: completada (2026-09-26), tag `v0.0.5`.**
+**Status: completed (2026-09-26), tag `v0.0.5`.**
 
-Añadido:
+Added:
 
-- ring 3 (GDT con segmentos DPL 3, `iretq`, fallos de usuario no fatales);
-- syscalls (`syscall`/`sysretq`, ABI v2 en `sdk/abi`);
-- procesos (hilo principal, salida y muerte, liberación del espacio);
-- address spaces (PML4 por proceso con mitad del kernel compartida);
-- objetos y handles con derechos (Fase 12 adelantada, ADR 0010).
+- ring 3 (GDT with DPL 3 segments, `iretq`, non-fatal user faults);
+- syscalls (`syscall`/`sysretq`, ABI v2 in `sdk/abi`);
+- processes (main thread, exit and death, release of the address space);
+- address spaces (a PML4 per process with the kernel half shared);
+- objects and handles with rights (Phase 12 brought forward, ADR 0010).
 
 ---
 
 # 90. AriCodeOS 0.0.6
 
-**Estado: completada (2026-09-26), tag `v0.0.6`.**
+**Status: completed (2026-09-26), tag `v0.0.6`.**
 
-Añadido:
+Added:
 
-- kernel objects y handles (Fase 12, en 0.0.5);
-- capabilities con revocación y transferencia (Fase 13);
-- IPC por endpoints con timeouts y transferencia de capabilities (Fase 14);
-- SDK mínimo (`sdk/rust`) y programas de usuario en Rust (`user/testprogs`).
+- kernel objects and handles (Phase 12, in 0.0.5);
+- capabilities with revocation and transfer (Phase 13);
+- endpoint-based IPC with timeouts and capability transfer (Phase 14);
+- minimal SDK (`sdk/rust`) and user programs in Rust (`user/testprogs`).
 
-Esta versión marca el nacimiento real de la arquitectura microkernel: dos
-procesos en ring 3 se comunican por un endpoint sin que ninguno vea al otro
-más que a través de las capabilities que se le han concedido.
+This version marks the real birth of the microkernel architecture: two
+ring 3 processes communicate through an endpoint without either seeing the other
+except through the capabilities it has been granted.
 
 ---
 
 # 91. AriCodeOS 0.0.7
 
-**Estado: completada (2026-09-26), tag `v0.0.7`.**
+**Status: completed (2026-09-26), tag `v0.0.7`.**
 
-Añadido:
+Added:
 
-- init process (AriInit desde el initrd, capacidad SPAWNER, supervisión);
-- driver framework (capabilities IRQ, MMIO y DMA; drivers de prueba en ring 3);
-- device manager: la enumeración y el reparto de capabilities siguen en el
-  kernel (banco de pruebas); el servicio de usuario llega con virtio;
-- PCIe (ECAM por MCFG, enumeración, BARs, capabilities).
+- init process (AriInit from the initrd, SPAWNER capability, supervision);
+- driver framework (IRQ, MMIO and DMA capabilities; test drivers in ring 3);
+- device manager: enumeration and distribution of capabilities remain in the
+  kernel (test bench); the user service arrives with virtio;
+- PCIe (ECAM through MCFG, enumeration, BARs, capabilities).
 
 ---
 
 # 92. AriCodeOS 0.0.8
 
-**Estado: completada (2026-09-26), tag `v0.0.8`.**
+**Status: completed (2026-09-26), tag `v0.0.8`.**
 
-Añadido:
+Added:
 
-- virtio-blk (Fase 18): driver en ring 3 con capabilities PCI, MSI-X y DMA;
-- storage service (Fase 19): `BlockServiceProtocol v1` sobre disco GPT;
-- filesystem (Fase 20): AriFS v0 y el servicio `fsd` por IPC;
-- shell (Fase 21): `arish`, entrada de consola por IRQ, `system_info` y
+- virtio-blk (Phase 18): ring 3 driver with PCI, MSI-X and DMA capabilities;
+- storage service (Phase 19): `BlockServiceProtocol v1` over a GPT disk;
+- filesystem (Phase 20): AriFS v0 and the `fsd` service over IPC;
+- shell (Phase 21): `arish`, IRQ-driven console input, `system_info` and
   `system_power`.
 
-Con esta versión un usuario puede teclear en la consola serie, listar y leer
-ficheros de un disco virtio a través de dos servicios en ring 3 y apagar la
-máquina sin que ningún driver viva en el kernel.
+With this version a user can type on the serial console, list and read
+files on a virtio disk through two ring 3 services and power off the
+machine without any driver living in the kernel.
 
 ---
 
 # 93. AriCodeOS 0.0.9
 
-**Estado: completada (2026-09-26), tag `v0.0.9`.**
+**Status: completed (2026-09-26), tag `v0.0.9`.**
 
-Añadido:
+Added:
 
-- virtio-net (Fase 22): driver en ring 3 sobre el transporte virtio común;
-- IP (Fase 22): IPv4, ARP, ICMP, DHCP, DNS;
-- UDP (Fase 22);
-- TCP básico (Fase 23): conexiones activas y pasivas con retransmisión y
-  cierre ordenado, todo en `netd`.
+- virtio-net (Phase 22): ring 3 driver on the common virtio transport;
+- IP (Phase 22): IPv4, ARP, ICMP, DHCP, DNS;
+- UDP (Phase 22);
+- basic TCP (Phase 23): active and passive connections with retransmission and
+  orderly close, all in `netd`.
 
-Con esta versión el sistema obtiene dirección por DHCP, responde y hace
-ping, intercambia UDP y TCP con el host y resuelve nombres, sin que el
-kernel conozca ningún protocolo de red.
+With this version the system obtains an address through DHCP, answers and sends
+pings, exchanges UDP and TCP with the host and resolves names, without the
+kernel knowing any network protocol.
 
 ---
 
 # 94. AriCodeOS 0.1
 
-**Estado: completada (2026-09-26), tag `v0.1.0`; hotfix `v0.1.1`
-(2026-09-27) con las correcciones de la auditoría HTTP.** Fases 0 a 24: arranque
-UEFI, memoria, procesos en ring 3, scheduler, IPC y capabilities, drivers
-virtio en espacio de usuario, servicio de bloques, AriFS, shell, pila de
-red con TCP y cliente HTTP.
+**Status: completed (2026-09-26), tag `v0.1.0`; hotfix `v0.1.1`
+(2026-09-27) with the fixes from the HTTP audit.** Phases 0 to 24: UEFI
+boot, memory, ring 3 processes, scheduler, IPC and capabilities, user-space
+virtio drivers, block service, AriFS, shell, network
+stack with TCP and HTTP client.
 
-Primera versión experimental utilizable.
+First usable experimental version.
 
-Objetivo aproximado:
+Approximate goal:
 
 ```text
 boot
@@ -3521,323 +3521,377 @@ network
 basic drivers
 ```
 
-Todavía sin ser un sistema operativo de escritorio completo.
+Still not a complete desktop operating system.
 
 ## 94.1 AriCodeOS 0.2
 
-**Estado: completada (2026-09-27), tag `v0.2.0`.** Fases 25 a 27:
+**Status: completed (2026-09-27), tag `v0.2.0`.** Phases 25 to 27:
 
-- entrada moderna: virtio-input (teclado y ratón) con eventos sellados en el
-  tiempo y traducción de teclado en el cliente;
-- GUI básica: compositor en ring 3 dueño del framebuffer, ventanas con
-  buffer propio, cursor, foco y enrutado de entrada; dos aplicaciones
-  aisladas dibujan a la vez;
-- SDK de aplicaciones: runtime común (`aricode-rt`), `aricode-build`, APIs
-  de proceso, IPC, ficheros, red, ventanas, entrada, tiempo y permisos,
-  documentadas en `docs/sdk.md`; `apps/hello` y `run` en el shell.
+- modern input: virtio-input (keyboard and mouse) with timestamped events
+  and keyboard translation in the client;
+- basic GUI: a ring 3 compositor that owns the framebuffer, windows with their own
+  buffer, cursor, focus and input routing; two isolated
+  applications draw at the same time;
+- application SDK: common runtime (`aricode-rt`), `aricode-build`, APIs
+  for process, IPC, files, network, windows, input, time and permissions,
+  documented in `docs/sdk.md`; `apps/hello` and `run` in the shell.
 
 ## 94.2 AriCodeOS 0.3
 
-**Estado: completada (2026-09-27), tag `v0.3.0`; hotfix `v0.3.1` con las
-correcciones de la auditoría del SDK.** Fases 28 y 29:
+**Status: completed (2026-09-27), tag `v0.3.0`; hotfix `v0.3.1` with the
+fixes from the SDK audit.** Phases 28 and 29:
 
-- sandbox de aplicaciones: manifiestos, broker de capabilities en init,
-  directorio privado por aplicación en fsd y cuota de memoria DMA por
-  proceso; el shell lanza a través del broker y ya no puede crear procesos;
-- runtime WebAssembly: intérprete propio `no_std` y `wasm_runner`, una
-  aplicación con manifiesto que ejecuta módulos portables compilados con
-  `rustc` exponiendo solo la Capability API.
+- application sandbox: manifests, capability broker in init,
+  per-application private directory in fsd and a per-process DMA memory
+  quota; the shell launches through the broker and can no longer create processes;
+- WebAssembly runtime: our own `no_std` interpreter and `wasm_runner`, an
+  application with a manifest that runs portable modules compiled with
+  `rustc`, exposing only the Capability API.
 
 ## 94.3 AriCodeOS 0.4
 
-**Estado: completada (2026-09-27), tag `v0.4.0`; hotfix `v0.4.1` con las
-correcciones de la auditoría e9fdf38.** Fases 30 y 31:
+**Status: completed (2026-09-27), tag `v0.4.0`; hotfix `v0.4.1` with the
+fixes from audit e9fdf38.** Phases 30 and 31:
 
-- criptografía propia (SHA-256, SHA-512, Ed25519, ChaCha20), generador
-  aleatorio del kernel y herramientas de claves;
-- actualización A/B: imágenes de sistema firmadas en particiones de slot,
-  estado de arranque con intentos y rollback en AriBoot, confirmación por
-  init y actualizador con capacidad de bloques.
+- our own cryptography (SHA-256, SHA-512, Ed25519, ChaCha20), the kernel's
+  random generator and key tools;
+- A/B update: signed system images in slot partitions,
+  boot state with attempts and rollback in AriBoot, confirmation by
+  init and an updater with the block capability.
 
-Siguiente: 0.5 con SMP (Fase 32) e IOMMU (Fase 33).
+Next: 0.5 with SMP (Phase 32) and IOMMU (Phase 33).
 
 ## 94.4 AriCodeOS 0.5
 
-**Estado: completada (2026-09-27), tag `v0.5.0`; hotfix `v0.5.1` (2026-09-28)
-con las correcciones de la auditoría 3eb4965: recogida de procesos en SMP,
-propietario único por función PCI en el IOMMU y consola de framebuffer fuera
-de la pila de arranque.** Fases 32 y 33:
+**Status: completed (2026-09-27), tag `v0.5.0`; hotfix `v0.5.1` (2026-09-28)
+with the fixes from audit 3eb4965: process reaping under SMP,
+a single owner per PCI function in the IOMMU and the framebuffer console moved off
+the boot stack.** Phases 32 and 33:
 
-- SMP: arranque de los procesadores de aplicación por INIT-SIPI, estado
-  por CPU (`swapgs`), planificador con cola compartida, idle por CPU,
-  afinidad e IPI, TLB shootdown, consola serializada entre CPUs y
-  `cargo xtask test --cpus N` como estrés de toda la suite;
-- IOMMU: Intel VT-d con un dominio de traducción por driver (IOVA =
-  física), asignación del dispositivo al mapear su configuración o un BAR,
-  buffers DMA mapeados solo en los dominios que los usan, fallos
-  registrados y contados; toda la suite corre traducida.
+- SMP: booting the application processors via INIT-SIPI, per-CPU
+  state (`swapgs`), scheduler with a shared queue, per-CPU idle,
+  affinity and IPIs, TLB shootdown, console serialized between CPUs and
+  `cargo xtask test --cpus N` as a stress run of the whole suite;
+- IOMMU: Intel VT-d with one translation domain per driver (IOVA =
+  physical), device assignment when its configuration space or a BAR is mapped,
+  DMA buffers mapped only in the domains that use them, faults
+  recorded and counted; the whole suite runs translated.
 
-Siguiente: Fase 34 (hardware real) y la segunda parte de la Fase 25
+Next: Phase 34 (real hardware) and the second part of Phase 25
 (xHCI/USB HID).
 
 ---
 
 ## 94.5 AriCodeOS 0.6
 
-**Estado: completada (2026-09-28), tag `v0.6.0`.** Preparación de la Fase 34,
-segunda parte de la Fase 25 y las correcciones de las auditorías 3eb4965 y
+**Status: completed (2026-09-28), tag `v0.6.0`.** Preparation for Phase 34,
+the second part of Phase 25 and the fixes from audits 3eb4965 and
 4836023:
 
-- imagen para pendrive con ESP FAT32 propia (`cargo xtask usb-image`),
-  teclado PS/2 como consola, interruptores `smp=off` e `iommu=off`,
-  dominios identidad para los dispositivos del firmware y guía de hardware;
-- xHCI y teclado/ratón USB HID en ring 3 (`libs/xhci`, `usbd`), con
-  selección por interfaz de programación y publicación de servicios de
-  entrada solo cuando responden;
-- recogida de procesos segura en SMP, propietario único por función PCI en
-  el IOMMU, consola de framebuffer fuera de la pila de arranque y
-  comprobación de margen de esa pila.
+- USB stick image with our own FAT32 ESP (`cargo xtask usb-image`),
+  PS/2 keyboard as console, `smp=off` and `iommu=off` switches,
+  identity domains for firmware devices and a hardware guide;
+- xHCI and USB HID keyboard/mouse in ring 3 (`libs/xhci`, `usbd`), with
+  selection by programming interface and publication of input services
+  only once they respond;
+- SMP-safe process reaping, a single owner per PCI function in
+  the IOMMU, the framebuffer console moved off the boot stack and a
+  margin check on that stack.
 
-Siguiente: la secuencia posterior al roadmap propuesta en
+Next: the post-roadmap sequence proposed in
 `docs/audits/2026-09-28-referentes-capacidades-oportunidades.md`
-(recuperación observable, sesión útil con teclado USB y persistencia) y la
-primera prueba física de la Fase 34.
+(observable recovery, a useful session with a USB keyboard and persistence) and the
+first physical test of Phase 34.
 
 ---
 
 ## 94.6 AriCodeOS 0.7
 
-**Estado: completada (2026-09-29), tag `v0.7.0`.** Etapas 1 a 4 de la
-secuencia posterior al roadmap (sección 94.7), cada una con su ADR y sus
-escenarios:
+**Status: completed (2026-09-29), tag `v0.7.0`.** Stages 1 to 4 of the
+post-roadmap sequence (section 94.7), each with its ADR and its
+scenarios:
 
-- recuperación observable: supervisor de servicios con estado consultable
-  (ADR 0011) y llamadas IPC con endpoint de respuesta por petición y plazos
+- observable recovery: a service supervisor with queryable state
+  (ADR 0011) and IPC calls with a per-request reply endpoint and deadlines
   (ADR 0012);
-- sesión útil: teclados USB y virtio como consola del shell (ADR 0013),
-  AriFS v1 con CRC32, journal de reemplazo atómico y `flush` de extremo a
-  extremo (ADR 0014), `write` en el shell y escenarios de varios arranques
-  sobre el mismo disco con cortes de energía;
-- límites y actualización: broker asíncrono con `spawn` y límite de
-  programas en marcha (ADR 0015), ficheros compartidos de solo lectura por
-  manifiesto (ADR 0016), ciclo completo de actualización A/B entre arranques
-  con rollback que conserva los datos;
-- aplicaciones externas: paquetes firmados construidos fuera del árbol e
-  instalados en AriFS (ADR 0017), instalador de confianza con reemplazo
-  atómico por trozos (ADR 0018), validador WebAssembly y perfil
-  `aricode-wasm` v1 con manifiesto por módulo (ADR 0019).
+- useful session: USB and virtio keyboards as the shell console (ADR 0013),
+  AriFS v1 with CRC32, an atomic replacement journal and end-to-end
+  `flush` (ADR 0014), `write` in the shell and multi-boot scenarios
+  on the same disk with power cuts;
+- limits and updates: an asynchronous broker with `spawn` and a limit on
+  running programs (ADR 0015), read-only shared files per
+  manifest (ADR 0016), a full A/B update cycle across boots
+  with a rollback that preserves data;
+- external applications: signed packages built outside the tree and
+  installed in AriFS (ADR 0017), a trusted installer with atomic
+  chunked replacement (ADR 0018), a WebAssembly validator and the
+  `aricode-wasm` v1 profile with a per-module manifest (ADR 0019).
 
-Siguiente: la etapa 5 (rendimiento, energía y más dispositivos) y la
-primera prueba física de la Fase 34.
+Next: stage 5 (performance, power and more devices) and the
+first physical test of Phase 34.
 
 ---
 
 ## 94.7 AriCodeOS 0.8
 
-**Estado: completada (2026-09-30), tags `v0.8.0` y `v0.8.1`.** Etapa 5 sin
-hardware, y en 0.8.1 la auditoría `6ee19fb`
+**Status: completed (2026-09-30), tags `v0.8.0` and `v0.8.1`.** Stage 5 without
+hardware, and in 0.8.1 the `6ee19fb` audit
 (`docs/audits/2026-09-29-services-persistence-packages-wasm-6ee19fb.md`):
-compromisos por trozos acotados a su transacción, barreras antes de
-publicar metadatos, transacciones abandonadas con plazo, `process_kill`
-para servicios que no responden, firmas de importaciones y validación
-estructural WASM, y parámetros de `loop`.
+chunked commits bounded to their transaction, barriers before
+publishing metadata, abandoned transactions with a deadline, `process_kill`
+for services that do not respond, import signatures and WASM structural
+validation, and `loop` parameters.
 
-- medidas reproducibles desde ring 3 (`bench`: syscall, IPC y ficheros con
-  p50/p95/p99; `docs/performance.md` con el método y la referencia de cada
-  versión), reposo por CPU y el informe `diag`;
-- optimizaciones guiadas por esas medidas: `ipc_receive_any` (ADR 0020) y
-  fsd sin sondeos (la IPC a fsd pasa de 10 ms a 46 µs), lotes de sectores
-  en AriFS y fsd y un `flush` menos por reemplazo (lectura de 4 KiB cinco
-  veces más rápida, reemplazo cuatro veces);
-- diagnóstico consultable: reloj de microsegundos por TSC, sucesos
-  recientes del kernel con su instante y motivo (`sysinfo::EVENTS`,
-  `diag.events`), y `sleep_ms` que duerme al menos lo pedido.
+- reproducible measurements from ring 3 (`bench`: syscall, IPC and files with
+  p50/p95/p99; `docs/performance.md` with the method and the baseline for each
+  version), per-CPU idle and the `diag` report;
+- optimizations guided by those measurements: `ipc_receive_any` (ADR 0020) and
+  fsd without polling (IPC to fsd goes from 10 ms to 46 µs), sector batches
+  in AriFS and fsd and one `flush` fewer per replacement (4 KiB reads five
+  times faster, replacement four times);
+- queryable diagnostics: a microsecond clock based on the TSC, recent kernel
+  events with their timestamp and cause (`sysinfo::EVENTS`,
+  `diag.events`), and a `sleep_ms` that sleeps at least the requested time.
 
-Primera prueba física de la Fase 34 (2026-10-10, portátil con el pendrive
-grabado con `cargo xtask usb-image`): AriBoot arrancó, verificó el slot A y
-la pantalla se detuvo en la línea de slots. Causa: la apertura exclusiva del
-GOP desconectaba la consola del firmware, así que las trazas siguientes (y
-cualquier fallo posterior) quedaban a ciegas. Corrección en
-`fix/f34-first-boot-visibility`: GOP sin exclusividad, trazas `memoria:` y
-balizas de arranque (`Beacon`) que acotan un cuelgue aunque el firmware deje
-de pintar (`docs/hardware.md`). Con las trazas visibles, la segunda y
-tercera foto sitúan el cuelgue en la primera `GetMemoryMap`, justo después
-de reservar páginas con un tipo de memoria propio: ADR 0021, AriBoot reserva
-solo `LOADER_DATA`, BootInfo v4 lleva `kernel_ranges()` y las tablas del
-cargador, y el kernel vuelve a reservar lo suyo al recuperar la memoria de
-arranque. Con eso, cuarta foto: **primer arranque completo de AriCodeOS en
-hardware real** (kernel, PCI, init y `ARICODEOS_KERNEL_READY`). El xHCI del
-equipo solo tiene MSI: ADR 0022 añade MSI a `pci_claim` (escenario
-`shell.usb_keyboard_msi`). Sexta foto: xHCI listo pero sin dispositivos
-(los puertos de estos Intel nacen en los EHCI). ADR 0023: usbd enruta los
-puertos al xHCI, pide la cesión al firmware y sirve el pendrive como
-servicio de bloques (bulk-only, SCSI); sin virtio-blk, init monta fsd y el
-shell sobre él (escenario `usb.storage`, con escritura que sobrevive a un
-reinicio). Séptima foto: el pendrive se lee, pero rechaza `SYNCHRONIZE
-CACHE` (tolerado desde entonces). Octava foto (2026-10-10): **shell
-interactivo de AriCodeOS en el portátil**, con AriFS en el pendrive y el
-teclado PS/2; el retroceso en la consola de framebuffer se corrigió a
-continuación, junto con un cursor que parpadea en la consola de pantalla y el
-historial del shell con las flechas (las teclas de edición viajan como
-secuencias de escape de terminal desde cualquier teclado). La Fase 34 queda
-completada en lo esencial. Red: ADR 0024 saca la pila de red de virtio-net
-a `ari-net-core` (trait `Link`) y añade `rtl-net` para la Realtek del
-portátil, sin emulación en QEMU (librería probada en el anfitrión, driver
-en el portátil). Undécima foto: **red por cable funcionando en el portátil**
-(DHCP, ping al router, DNS). Faltan la energía, el Wi-Fi (ath9k y WPA2,
-fuera de alcance por ahora) y EHCI.
+First physical test of Phase 34 (2026-10-10, laptop with the USB stick
+flashed with `cargo xtask usb-image`): AriBoot started, verified slot A and
+the screen stopped at the slots line. Cause: opening the GOP exclusively
+disconnected the firmware console, so the following traces (and
+any later failure) were invisible. Fix in
+`fix/f34-first-boot-visibility`: non-exclusive GOP, `memory:` traces and
+boot beacons (`Beacon`) that narrow down a hang even if the firmware stops
+painting (`docs/hardware.md`). With the traces visible, the second and
+third photos place the hang in the first `GetMemoryMap`, right after
+reserving pages with a custom memory type: ADR 0021, AriBoot reserves
+only `LOADER_DATA`, BootInfo v4 carries `kernel_ranges()` and the loader's
+tables, and the kernel re-reserves its own ranges when reclaiming boot
+memory. With that, fourth photo: **first complete boot of AriCodeOS on
+real hardware** (kernel, PCI, init and `ARICODEOS_KERNEL_READY`). The machine's
+xHCI only has MSI: ADR 0022 adds MSI to `pci_claim` (scenario
+`shell.usb_keyboard_msi`). Sixth photo: xHCI ready but with no devices
+(the ports on these Intel machines start out on the EHCIs). ADR 0023: usbd routes the
+ports to the xHCI, requests the handoff from the firmware and serves the USB stick as a
+block service (bulk-only, SCSI); without virtio-blk, init mounts fsd and the
+shell on top of it (scenario `usb.storage`, with a write that survives a
+reboot). Seventh photo: the USB stick is read, but it rejects `SYNCHRONIZE
+CACHE` (tolerated since then). Eighth photo (2026-10-10): **interactive
+AriCodeOS shell on the laptop**, with AriFS on the USB stick and the
+PS/2 keyboard; backspace in the framebuffer console was fixed
+next, along with a blinking cursor on the screen console and
+shell history with the arrow keys (editing keys travel as
+terminal escape sequences from any keyboard). Phase 34 is essentially
+complete. Networking: ADR 0024 moves the network stack out of virtio-net
+into `ari-net-core` (`Link` trait) and adds `rtl-net` for the laptop's
+Realtek, with no emulation in QEMU (library tested on the host, driver
+on the laptop). Eleventh photo: **wired networking working on the laptop**
+(DHCP, ping to the router, DNS). Power management, Wi-Fi (ath9k and WPA2,
+out of scope for now) and EHCI remain.
 
-Siguiente: repetir la prueba física con la imagen corregida y, con el
-equipo de referencia, energía (estados de reposo, batería) y más dispositivos.
+Next: repeat the physical test with the fixed image and, with the
+reference machine, power management (sleep states, battery) and more devices.
 
 ---
 
-## 94.8 Después del roadmap: secuencia posterior
+## 94.8 After the roadmap: subsequent sequence
 
-Con las 35 fases implementadas, el desarrollo sigue la secuencia propuesta en
-`docs/audits/2026-09-28-referentes-capacidades-oportunidades.md`, cada
-etapa con sus ramas, ADR y escenarios:
+With all 35 phases implemented, development follows the sequence proposed in
+`docs/audits/2026-09-28-referentes-capacidades-oportunidades.md`, each
+stage with its branches, ADRs and scenarios:
 
-| Etapa | Estado | Contenido |
+| Stage | Status | Contents |
 |---|---|---|
-| 0. Consolidar | completada (0.6.0) | auditorías resueltas con evidencia; tabla única de estado por capacidad en el README |
-| 1. Recuperación observable | completada | supervisor de servicios (ADR 0011): estados, generaciones, reinicio con presupuesto y espera creciente, endpoint estable entre generaciones, publicación solo tras responder, `status` v1 y `services --detail`; plazos y correlación IPC (ADR 0012): endpoint de respuesta por petición, esperas acotadas, sin reintentos automáticos de escrituras (`ipc.late_reply`) |
-| 2. Sesión útil | completada | hecho: shell con teclados USB y virtio (puente de consola, ADR 0013, `shell.usb_keyboard`, `shell.virtio_keyboard`); persistencia de AriFS ante cortes (ADR 0014: CRC32, journal de reemplazo, `flush` de extremo a extremo, `filesystem.replace_recovery`, `filesystem.corrupt_detected`); equipo de referencia: el portátil de la Fase 34 (0.9.0) |
-| 3. Límites y actualización | completada | hecho: actualización entre arranques con el mismo disco y cortes (`[[boots]]`, `kill_on`: `update.full_cycle`, `update.cut_during_install`, `update.rollback_keeps_data`), `write` en el shell (`shell.write_persists`); cuotas y saturación (ADR 0015: broker asíncrono, `spawn`, límite de programas en marcha, `limits.hogs`); permisos por recurso (ADR 0016: `read_files` en el manifiesto, `Share` en fsd, `sandbox.shared_file`) |
-| 4. Aplicaciones externas | completada | hecho: aplicación construida fuera del árbol con el SDK por ruta, empaquetada y firmada (`cargo xtask app-pack`, `aricode-pkg`), instalada en AriFS como un solo fichero y lanzada por el broker tras verificarla (ADR 0017, `apps.external`); instalador de confianza y actualización transaccional desde `pkgs/` con reemplazo atómico por trozos (ADR 0018, `apps.update`, `apps.update_cut`); perfil `aricode-wasm` v1 con validador, manifiesto por módulo y ficheros (ADR 0019, `docs/wasm-profile.md`, `wasm.*`). Etapa completada; WASI queda fuera del perfil a propósito |
-| 5. Optimización y ampliación | en curso: hardware real alcanzado (0.9.0) | hecho: medidas reproducibles (`bench`: syscall, IPC y ficheros con p50/p95/p99, `docs/performance.md`), reposo por CPU (`sysinfo::IDLE`, `cpus`) e informe `diag` (`perf.bench`); primera optimización guiada por medidas: `ipc_receive_any` y fsd sin sondeos (ADR 0020, `ipc.receive_any`); lotes de sectores en AriFS y fsd y un `flush` menos por reemplazo (lectura de 4 KiB cinco veces más rápida, reemplazo cuatro veces); reloj de µs por TSC y sucesos recientes del kernel consultables desde `diag` (`diag.events`); en el portátil (0.9.0, ADR 0021 a 0024): arranque con tipos de memoria estándar, MSI, pendrive por USB como disco, teclado PS/2 con disposición española, cursor e historial, red Realtek por cable, `diag` a fichero y `fs-cat`; pendiente: energía (estados de reposo, batería), Wi-Fi, EHCI |
+| 0. Consolidate | completed (0.6.0) | audits resolved with evidence; a single per-capability status table in the README |
+| 1. Observable recovery | completed | service supervisor (ADR 0011): states, generations, restart with a budget and growing backoff, endpoint stable across generations, publication only after responding, `status` v1 and `services --detail`; IPC deadlines and correlation (ADR 0012): per-request reply endpoint, bounded waits, no automatic retries of writes (`ipc.late_reply`) |
+| 2. Useful session | completed | done: shell with USB and virtio keyboards (console bridge, ADR 0013, `shell.usb_keyboard`, `shell.virtio_keyboard`); AriFS persistence across power cuts (ADR 0014: CRC32, replacement journal, end-to-end `flush`, `filesystem.replace_recovery`, `filesystem.corrupt_detected`); reference machine: the Phase 34 laptop (0.9.0) |
+| 3. Limits and updates | completed | done: updates across boots with the same disk and cuts (`[[boots]]`, `kill_on`: `update.full_cycle`, `update.cut_during_install`, `update.rollback_keeps_data`), `write` in the shell (`shell.write_persists`); quotas and saturation (ADR 0015: asynchronous broker, `spawn`, limit on running programs, `limits.hogs`); per-resource permissions (ADR 0016: `read_files` in the manifest, `Share` in fsd, `sandbox.shared_file`) |
+| 4. External applications | completed | done: application built outside the tree with the SDK by path, packaged and signed (`cargo xtask app-pack`, `aricode-pkg`), installed in AriFS as a single file and launched by the broker after verifying it (ADR 0017, `apps.external`); trusted installer and transactional update from `pkgs/` with atomic chunked replacement (ADR 0018, `apps.update`, `apps.update_cut`); `aricode-wasm` v1 profile with validator, per-module manifest and files (ADR 0019, `docs/wasm-profile.md`, `wasm.*`). Stage completed; WASI is deliberately left out of the profile |
+| 5. Optimization and expansion | in progress: real hardware reached (0.9.0) | done: reproducible measurements (`bench`: syscall, IPC and files with p50/p95/p99, `docs/performance.md`), per-CPU idle (`sysinfo::IDLE`, `cpus`) and the `diag` report (`perf.bench`); first measurement-guided optimization: `ipc_receive_any` and fsd without polling (ADR 0020, `ipc.receive_any`); sector batches in AriFS and fsd and one `flush` fewer per replacement (4 KiB reads five times faster, replacement four times); a µs clock based on the TSC and recent kernel events queryable from `diag` (`diag.events`); on the laptop (0.9.0, ADR 0021 to 0024): boot with standard memory types, MSI, USB stick as a disk over USB, PS/2 keyboard with Spanish layout, cursor and history, wired Realtek networking, `diag` to a file and `fs-cat`; pending: power management (sleep states, battery), Wi-Fi, EHCI |
 
 ---
 
 ## 94.9 AriCodeOS 0.9
 
-**Estado: completada (2026-10-10), tag `v0.9.0`.** Primer arranque de
-AriCodeOS en hardware real (Fase 34, portátil Intel 7 series), en once
-fotos y cuatro ADR:
+**Status: completed (2026-10-10), tag `v0.9.0`.** First boot of
+AriCodeOS on real hardware (Phase 34, Intel 7 series laptop), in eleven
+photos and four ADRs:
 
-- AriBoot visible en firmware real (GOP sin exclusividad, balizas, trazas
-  del mapa de memoria) y tipos de memoria UEFI estándar con BootInfo v4
-  (ADR 0021): el firmware se colgaba en `GetMemoryMap` con tipos propios;
-- MSI además de MSI-X para los drivers de usuario (ADR 0022), buffer DMA del
-  xHCI dimensionado por los scratchpads, cesión del firmware y enrutado de
-  los puertos Intel al xHCI;
-- el pendrive como disco del sistema: almacenamiento USB bulk-only servido
-  por usbd como servicio de bloques, fsd y shell encima, `SYNCHRONIZE
-  CACHE` opcional (ADR 0023, `usb.storage`);
-- consola de pantalla con retroceso, cursor (hilo del kernel) e historial
-  del shell con las flechas (secuencias de escape desde cualquier teclado),
-  disposición española (`kbd=es`), `diag NOM` guardado en AriFS y
-  `cargo xtask fs-cat` para leerlo desde el anfitrión;
-- red por cable: pila de red compartida (`ari-net-core`) y driver Realtek
-  r8169 (ADR 0024); DHCP, ping y DNS funcionando en el portátil; estado del
-  enlace en el protocolo de red;
-- una comprobación del punto de entrada de cada programa del initrd al
-  construir, y el plazo de `smp.process_reap` ajustado a la carga del
-  anfitrión.
+- AriBoot visible on real firmware (non-exclusive GOP, beacons, memory map
+  traces) and standard UEFI memory types with BootInfo v4
+  (ADR 0021): the firmware hung in `GetMemoryMap` with custom types;
+- MSI in addition to MSI-X for user drivers (ADR 0022), the xHCI DMA buffer
+  sized by the scratchpads, firmware handoff and routing of
+  the Intel ports to the xHCI;
+- the USB stick as the system disk: bulk-only USB storage served
+  by usbd as a block service, fsd and the shell on top, optional `SYNCHRONIZE
+  CACHE` (ADR 0023, `usb.storage`);
+- screen console with backspace, cursor (a kernel thread) and shell
+  history with the arrow keys (escape sequences from any keyboard),
+  Spanish layout (`kbd=es`), `diag NAME` saved to AriFS and
+  `cargo xtask fs-cat` to read it from the host;
+- wired networking: shared network stack (`ari-net-core`) and Realtek
+  r8169 driver (ADR 0024); DHCP, ping and DNS working on the laptop; link
+  state in the network protocol;
+- a build-time check of the entry point of every initrd program, and the
+  `smp.process_reap` deadline adjusted to the host's
+  load.
 
-Siguiente: energía (estados de reposo, batería), más dispositivos del
-portátil (EHCI, Wi-Fi fuera de alcance por ahora) y seguir la etapa 5.
+Next: power management (sleep states, battery), more laptop devices
+(EHCI; Wi-Fi out of scope for now) and continuing stage 5.
+
+## 94.10 AriCodeOS 0.10
+
+**Status: completed (2026-10-17), tag `v0.10.0`.** The laptop became a
+machine you reach and update over the network, and the project adopted
+a failure protocol after its first hard hardware incident. Four ADRs,
+three incidents, licensed under Apache-2.0.
+
+- whole project in English (code, messages, documentation, tests); the
+  Spanish README is a translation;
+- full console line editing (cursor, insert and delete anywhere,
+  history) and ACPI power-off (FADT, `\_S5_`), verified on the laptop;
+- SSH server (ADR 0025): curve25519-sha256 with strict KEX, ssh-ed25519,
+  chacha20-poly1305@openssh.com, public-key login only, closed by
+  default without `authorized_keys`, session shells launched by init,
+  host key generated on the build host, refused keys logged, idle
+  clients dropped after 30 s; tested against the OpenSSH client;
+- HTTPS (ADR 0026): TLS 1.3 client with X.509 chain, host name, date
+  (CMOS real-time clock) and key-usage checks, 17 embedded roots, the
+  crypto it needs (SHA-384, HMAC, HKDF, AES-GCM, ChaCha20-Poly1305, RSA
+  and ECDSA verification); tested against RFC 8448 and `openssl
+  s_server`, and on real sites from the laptop;
+- an external audit of SSH and HTTPS (three findings, all fixed with
+  regression tests);
+- network updates (ADR 0027): `update` downloads a signed system image
+  from a channel over HTTP(S) into the A/B scheme, `cargo xtask
+  serve-update` publishes it; verified on the laptop, versions 2 to 5
+  installed and booted without the USB stick;
+- DHCP probes the offered address with ARP and declines it when another
+  host uses it;
+- failure protocol (ADR 0028, `docs/FAILURE-PROTOCOL.md`): failures are
+  never hidden, `strict` halts the failing component with a state dump
+  instead of looping, every anomaly is a fault event in `diag`, doubt
+  triggers independent studies before any change, every fix is audited;
+- incident 0001, the USB stick: three independent studies and four audit
+  rounds rebuilt the storage driver's error handling to the xHCI and
+  Bulk-Only Transport specifications (endpoint recovery at every stage,
+  no command while another is outstanding, timed-out transfers retired,
+  re-enumeration of a device that drops, bounded budgets below the
+  clients' waits, REQUEST SENSE after a failed command); measurements on
+  the laptop and under Linux then showed the cause: the stick confirms
+  some writes seconds after accepting them, so SCSI commands get the
+  30 s window SCSI stacks use; the network update that failed every
+  time now completes;
+- incident 0003: a test run had overwritten the real update channel;
+  the scenarios now use their own directory;
+- authorship and license: Apache-2.0, NOTICE with the attribution
+  requirement, SPDX headers in every source, AUTHORS, notices for AI
+  systems.
+
+Open: IPC peer-gone notification (a client of a dead server waits its
+full timeout), the `update`/`upgrade` protocol with sources, HID
+endpoint recovery, Reset Device for re-enumeration, EHCI, incident 0003
+reproduction, the SMP self-test under host load (incident 0002).
 
 ---
 
-# 95. Hardware real: momento correcto
+# 95. Real hardware: the right moment
 
-No es necesario formatear el portátil antiguo inicialmente.
+There is no need to format the old laptop initially.
 
-Orden recomendado:
+Recommended order:
 
 ```text
 1. QEMU
 2. QEMU + UEFI
 3. QEMU integration tests
-4. boot USB en portátil
-5. probar RAM / ACPI / framebuffer
-6. probar PCIe
-7. probar almacenamiento en modo read-only
-8. escribir sobre USB externo
-9. solo mucho después considerar disco interno
+4. USB boot on the laptop
+5. test RAM / ACPI / framebuffer
+6. test PCIe
+7. test storage in read-only mode
+8. write to an external USB drive
+9. only much later consider the internal disk
 ```
 
-Esto minimiza el riesgo de destruir datos o quedar bloqueado durante desarrollo.
+This minimizes the risk of destroying data or getting stuck during development.
 
 ---
 
-# 96. Estrategia de disco del portátil
+# 96. Laptop disk strategy
 
-Inicialmente:
+Initially:
 
 ```text
-Internal SSD/HDD: NO TOCAR
+Internal SSD/HDD: DO NOT TOUCH
 USB AriCodeOS:     BOOT
 ```
 
-Más adelante:
+Later:
 
 ```text
-USB SSD dedicado a AriCodeOS
+USB SSD dedicated to AriCodeOS
 ```
 
-Finalmente, si el proyecto madura:
+Finally, if the project matures:
 
 ```text
-portátil completamente dedicado
+fully dedicated laptop
 ```
 
 ---
 
-# 97. Seguridad del entorno de pruebas
+# 97. Test environment safety
 
-Antes de probar drivers de almacenamiento reales:
+Before testing real storage drivers:
 
-- hacer backup del portátil;
-- desconectar discos innecesarios si es posible;
-- utilizar un USB dedicado;
-- implementar modo read-only;
-- confirmar IDs de dispositivos;
-- añadir protecciones contra escritura accidental.
+- back up the laptop;
+- disconnect unnecessary disks if possible;
+- use a dedicated USB drive;
+- implement a read-only mode;
+- confirm device IDs;
+- add protections against accidental writes.
 
 ---
 
-# 98. Definition of Done por fase
+# 98. Definition of Done per phase
 
-Cada fase se considerará terminada únicamente si cumple:
+Each phase will be considered finished only if it meets:
 
 ```text
-[ ] implementación
-[ ] documentación
+[ ] implementation
+[ ] documentation
 [ ] tests
-[ ] sin warnings injustificados
-[ ] boot test automático
-[ ] código revisado
-[ ] arquitectura actualizada
-[ ] ADR si introduce decisión relevante
-[ ] commit/tag reproducible
+[ ] no unjustified warnings
+[ ] automated boot test
+[ ] code reviewed
+[ ] architecture updated
+[ ] ADR if it introduces a relevant decision
+[ ] reproducible commit/tag
 ```
 
 ---
 
-# 99. Gestión del proyecto
+# 99. Project management
 
-Modelo adoptado (git flow), detallado en `docs/WORKFLOW.md`:
+Adopted model (git flow), detailed in `docs/WORKFLOW.md`:
 
 ```text
-main        -> siempre arrancable; solo merges etiquetados desde develop u hotfix/*
-develop     -> integración; debe pasar cargo xtask test
-feature/*   -> desarrollo, parte y vuelve a develop
-fix/*       -> correcciones sobre develop
-hotfix/*    -> correcciones urgentes sobre main (vuelven también a develop)
-experiment/*-> prototipos que pueden romperse
+main        -> always bootable; only tagged merges from develop or hotfix/*
+develop     -> integration; must pass cargo xtask test
+feature/*   -> development, branches off and returns to develop
+fix/*       -> fixes on top of develop
+hotfix/*    -> urgent fixes on top of main (also merged back into develop)
+experiment/*-> prototypes that may break
 ```
 
-Ningún commit directo en `main` ni `develop`. Merges siempre con `--no-ff` y
-con `cargo xtask check` y `cargo xtask test` en verde. El primer commit
-(`v0.0.1`, M0) es la única excepción histórica.
+No direct commits to `main` or `develop`. Merges always with `--no-ff` and
+with `cargo xtask check` and `cargo xtask test` green. The first commit
+(`v0.0.1`, M0) is the only historical exception.
 
 ---
 
-# 100. Backlog de investigación
+# 100. Research backlog
 
-Temas a estudiar conforme avance el proyecto:
+Topics to study as the project progresses:
 
 - UEFI specification;
 - x86-64 System Programming;
@@ -3858,24 +3912,24 @@ Temas a estudiar conforme avance el proyecto:
 
 ---
 
-# 101. Riesgos técnicos
+# 101. Technical risks
 
 ## Drivers
 
-Es probablemente uno de los trabajos más grandes de cualquier SO.
+Probably one of the biggest jobs in any OS.
 
-Mitigación:
+Mitigation:
 
 ```text
-QEMU + virtio primero
-hardware objetivo limitado después
+QEMU + virtio first
+limited target hardware afterwards
 ```
 
 ## GPU
 
-Los drivers GPU modernos son extremadamente complejos.
+Modern GPU drivers are extremely complex.
 
-Mitigación inicial:
+Initial mitigation:
 
 ```text
 UEFI framebuffer
@@ -3884,55 +3938,55 @@ virtio-gpu
 
 ## WiFi
 
-Hardware y firmware propietarios pueden complicar soporte.
+Proprietary hardware and firmware can complicate support.
 
-Mitigación:
+Mitigation:
 
-- Ethernet primero;
-- adaptadores/documentación conocida;
-- dispositivos USB soportables posteriormente.
+- Ethernet first;
+- adapters with known documentation;
+- supportable USB devices later.
 
-## Compatibilidad
+## Compatibility
 
-No intentar resolverla durante el nacimiento del kernel.
+Do not try to solve it while the kernel is being born.
 
 ## Scope creep
 
-Evitar construir navegador, escritorio, paquete, IA, etc. antes de estabilizar fundamentos.
+Avoid building a browser, desktop, package system, AI, etc. before stabilizing the fundamentals.
 
 ---
 
-# 102. Métrica de éxito del proyecto
+# 102. Project success metric
 
-El éxito temprano NO será:
+Early success will NOT be:
 
-> ejecutar Chrome.
+> running Chrome.
 
-El éxito temprano será:
+Early success will be:
 
 ```text
-AriCodeOS arranca
-AriCodeOS controla su memoria
-AriCodeOS recupera fallos
-AriCodeOS ejecuta procesos aislados
-AriCodeOS puede negar accesos
-AriCodeOS reinicia drivers
-AriCodeOS puede testearse automáticamente
+AriCodeOS boots
+AriCodeOS controls its memory
+AriCodeOS recovers from failures
+AriCodeOS runs isolated processes
+AriCodeOS can deny access
+AriCodeOS restarts drivers
+AriCodeOS can be tested automatically
 ```
 
 ---
 
-# 103. Principio de independencia
+# 103. Independence principle
 
-El objetivo a largo plazo es llegar al punto donde AriCodeOS pueda desarrollar AriCodeOS.
+The long-term goal is to reach the point where AriCodeOS can develop AriCodeOS.
 
-Evolución:
+Evolution:
 
 ```text
-Debian (estación de desarrollo)
+Debian (development workstation)
   |
   v
-compila AriCodeOS
+builds AriCodeOS
 
 AriCodeOS
   |
@@ -3942,48 +3996,48 @@ runtime + toolchain
 AriCodeOS
   |
   v
-compila nueva versión de AriCodeOS
+builds a new version of AriCodeOS
 ```
 
-Ese momento representará un sistema **self-hosting**.
+That moment will represent a **self-hosting** system.
 
-No es un objetivo de las primeras fases.
+It is not a goal of the first phases.
 
 ---
 
-# 104. Self-hosting futuro
+# 104. Future self-hosting
 
-Para llegar a ello será necesario disponer de:
+To get there, the following will be needed:
 
-- filesystem estable;
+- stable filesystem;
 - terminal;
 - editor;
-- procesos;
-- memoria madura;
-- compilador/toolchain;
+- processes;
+- mature memory management;
+- compiler/toolchain;
 - linker;
 - build system;
-- git o alternativa;
-- almacenamiento fiable.
+- git or an alternative;
+- reliable storage.
 
-Podría comenzar con cross-compilación y posteriormente portar LLVM/Rust u otra toolchain.
+It could start with cross-compilation and later port LLVM/Rust or another toolchain.
 
 ---
 
-# 105. Relación con AriCode
+# 105. Relationship with AriCode
 
-El nombre AriCodeOS encaja naturalmente con el compilador AriCode existente,
-pero tras la valoración de la sección 7.4 la relación queda definida así:
+The name AriCodeOS fits naturally with the existing AriCode compiler,
+but after the assessment in section 7.4 the relationship is defined as follows:
 
 ```text
-AriCode NO participa en el kernel, el bootloader ni el TCB.
-AriCode es una carga de trabajo de usuario y, más adelante, un runtime.
+AriCode does NOT take part in the kernel, the bootloader or the TCB.
+AriCode is a user workload and, later on, a runtime.
 ```
 
-## 105.1 Camino corto: ejecutar binarios AriCode sin tocar el compilador
+## 105.1 Short path: run AriCode binaries without touching the compiler
 
-Los binarios que produce `aric` son ELF estáticos que solo usan un conjunto
-pequeño de syscalls Linux:
+The binaries produced by `aric` are static ELFs that only use a small set
+of Linux syscalls:
 
 ```text
 read  write  exit  mmap  open  close
@@ -3991,78 +4045,78 @@ socket  bind  listen  accept  epoll_*
 clone  futex  wait4
 ```
 
-Un *personality server* de compatibilidad Linux (sección 48), ejecutado en
-espacio de usuario sobre AriKernel, puede implementar ese subconjunto y
-cargar ELF estáticos en `0x400000`. Eso permitiría ejecutar los modelos
-`aricode_es100m` y el resto de programas AriCode sobre AriCodeOS sin
-modificar el compilador. Es la primera integración prevista y encaja con la
-regla de la sección 68: lo antiguo se ejecuta encima, nunca define el núcleo.
+A Linux compatibility *personality server* (section 48), running in
+user space on AriKernel, can implement that subset and
+load static ELFs at `0x400000`. That would allow running the
+`aricode_es100m` models and the rest of the AriCode programs on AriCodeOS without
+modifying the compiler. It is the first planned integration and fits the
+rule in section 68: old things run on top, they never define the kernel.
 
-## 105.2 Camino largo: target nativo AriCodeOS
+## 105.2 Long path: native AriCodeOS target
 
-Cuando el ABI de syscalls (sección 22) y el SDK (Fase 27) sean estables,
-podrá añadirse a `aric` un target `x86_64-aricodeos` que emita el formato
-de aplicación nativo y use la Capability API en lugar de syscalls Linux.
-Esto es trabajo del compilador AriCode, no del kernel, y no bloquea ninguna
-fase del roadmap.
+Once the syscall ABI (section 22) and the SDK (Phase 27) are stable,
+an `x86_64-aricodeos` target could be added to `aric` that emits the native
+application format and uses the Capability API instead of Linux syscalls.
+This is work for the AriCode compiler, not the kernel, and it does not block any
+phase of the roadmap.
 
-## 105.3 Lo que AriCode aporta al proyecto
+## 105.3 What AriCode brings to the project
 
-- Carga de trabajo real y exigente (inferencia int8/int4 multihilo, SHA-256,
-  secp256k1) para validar scheduler, memoria y la capa de compatibilidad.
-- Un caso de uso concreto para el diseño de scheduling heterogéneo
-  (sección 19) y para futuros aceleradores.
-- Una razón de peso para que la capa de compatibilidad Linux se diseñe
-  desde el principio con ELF estático y sin libc como primer objetivo.
+- A real, demanding workload (multithreaded int8/int4 inference, SHA-256,
+  secp256k1) to validate the scheduler, memory and the compatibility layer.
+- A concrete use case for the heterogeneous scheduling design
+  (section 19) and for future accelerators.
+- A strong reason for the Linux compatibility layer to be designed
+  from the start with static ELF and no libc as its first target.
 
-## 105.4 Requisitos que AriCode impone al roadmap
+## 105.4 Requirements AriCode places on the roadmap
 
-Ninguno antes de la Fase 15. A partir de ahí:
+None before Phase 15. From there on:
 
 ```text
-Fase 11  user mode          -> necesario para cargar ELF estático
-Fase 14  IPC                -> necesario para el personality server
-Fase 20  filesystem         -> open/read de los .ari compilados y pesos
-Fase 22  red                -> socket/epoll usados por aricode-net-http
-Fase 32  SMP                -> clone/futex de aricode-ml multihilo
+Phase 11  user mode         -> needed to load static ELF
+Phase 14  IPC               -> needed for the personality server
+Phase 20  filesystem        -> open/read of compiled .ari files and weights
+Phase 22  network           -> socket/epoll used by aricode-net-http
+Phase 32  SMP               -> clone/futex for multithreaded aricode-ml
 ```
 
-El kernel no dependerá de AriCode en ninguna fase.
+The kernel will not depend on AriCode in any phase.
 
 ---
 
-# 106. Posible filosofía AriCodeOS
+# 106. A possible AriCodeOS philosophy
 
-Una formulación posible:
+One possible formulation:
 
-> Hardware moderno, privilegios mínimos, componentes aislados y ninguna compatibilidad heredada sin una razón demostrable.
+> Modern hardware, minimal privileges, isolated components and no legacy compatibility without a demonstrable reason.
 
-Otra:
+Another:
 
-> Lo antiguo puede ejecutarse encima. Nunca debe definir el núcleo.
+> Old things may run on top. They must never define the kernel.
 
 ---
 
-# 107. Próximos pasos inmediatos
+# 107. Immediate next steps
 
-Orden recomendado para comenzar realmente:
+Recommended order to actually get started:
 
 ```text
-01. Crear repo aricodeos
-02. Crear workspace Rust
-03. Crear AriBoot UEFI
-04. Ejecutarlo en QEMU/OVMF
-05. Crear kernel ELF no_std
-06. Cargarlo desde AriBoot
+01. Create the aricodeos repo
+02. Create the Rust workspace
+03. Create AriBoot UEFI
+04. Run it in QEMU/OVMF
+05. Create the no_std ELF kernel
+06. Load it from AriBoot
 07. ExitBootServices
-08. Saltar al kernel
-09. Logger serial
+08. Jump to the kernel
+09. Serial logger
 10. Framebuffer console
 11. Panic handler
-12. Primer test automático de boot
+12. First automated boot test
 ```
 
-No implementar todavía:
+Do not implement yet:
 
 ```text
 network
@@ -4073,13 +4127,13 @@ WASM
 desktop
 ```
 
-hasta que el núcleo básico esté estabilizado.
+until the basic kernel is stable.
 
 ---
 
-# 108. Primer árbol de trabajo real
+# 108. First real working tree
 
-Para comenzar, el repositorio puede reducirse a:
+To begin with, the repository can be reduced to:
 
 ```text
 aricodeos/
@@ -4100,15 +4154,15 @@ aricodeos/
     └── architecture.md
 ```
 
-No necesitamos crear toda la estructura futura desde el primer día.
+We do not need to create the whole future structure from day one.
 
-Este árbol es el que existe en el repositorio desde M0, ampliado con
-`libs/{elf,x86-paging,x86-cpu,pmm,heap,sync,sched,handles,cmdline,fb-console}` y `sdk/abi` (lógica `no_std` con tests de host),
-`tests/qemu/` (escenarios) y `docs/decisions/0001..0007`.
+This tree is the one that has existed in the repository since M0, extended with
+`libs/{elf,x86-paging,x86-cpu,pmm,heap,sync,sched,handles,cmdline,fb-console}` and `sdk/abi` (`no_std` logic with host tests),
+`tests/qemu/` (scenarios) and `docs/decisions/0001..0007`.
 
 ---
 
-# 109. Primer test de aceptación
+# 109. First acceptance test
 
 ```text
 TEST: boot_kernel_001
@@ -4128,11 +4182,11 @@ And:
   QEMU exits with success status in test mode
 ```
 
-Este test debe convertirse en la piedra angular del CI.
+This test must become the cornerstone of CI.
 
 ---
 
-# 110. Resultado final de la arquitectura propuesta
+# 110. Final result of the proposed architecture
 
 ```text
                          APPLICATIONS
@@ -4175,25 +4229,25 @@ Este test debe convertirse en la piedra angular del CI.
 
 ---
 
-# 111. Conclusión
+# 111. Conclusion
 
-AriCodeOS debe comenzar pequeño.
+AriCodeOS must start small.
 
-No necesitamos un portátil formateado, una interfaz gráfica ni cientos de drivers para decir que existe un sistema operativo propio.
+We do not need a formatted laptop, a graphical interface or hundreds of drivers to say that our own operating system exists.
 
-La primera victoria será mucho más simple:
+The first victory will be much simpler:
 
 ```text
 UEFI
   -> AriBoot
   -> AriKernel
-  -> control total de CPU y memoria
+  -> full control of CPU and memory
   -> "AriCodeOS booting..."
 ```
 
-A partir de ahí cada nueva capacidad debe añadirse de forma controlada, aislada, documentada y testeada.
+From there, each new capability must be added in a controlled, isolated, documented and tested way.
 
-La arquitectura propuesta evita deliberadamente convertir AriCodeOS en una copia de los sistemas actuales. Toma estándares modernos de hardware donde son necesarios, pero mantiene como principios centrales:
+The proposed architecture deliberately avoids turning AriCodeOS into a copy of current systems. It adopts modern hardware standards where they are needed, but keeps as its central principles:
 
 ```text
 microkernel
@@ -4207,59 +4261,58 @@ legacy outside the kernel
 automated testing
 ```
 
-El portátil antiguo debe reservarse como **plataforma física de validación**, no como entorno principal de desarrollo. QEMU será la plataforma de desarrollo inicial porque permite depuración, automatización, snapshots y fallos controlados sin poner hardware o datos en riesgo.
+The old laptop must be reserved as a **physical validation platform**, not as the main development environment. QEMU will be the initial development platform because it allows debugging, automation, snapshots and controlled failures without putting hardware or data at risk.
 
-El objetivo a largo plazo es llegar a un sistema capaz de ejecutar aplicaciones modernas, aislar código potencialmente hostil, reiniciar componentes defectuosos y eventualmente compilar nuevas versiones de sí mismo.
+The long-term goal is to reach a system able to run modern applications, isolate potentially hostile code, restart faulty components and eventually compile new versions of itself.
 
 ---
 
-# 112. Próximo milestone oficial
+# 112. Next official milestone
 
 ## AriCodeOS Milestone M0 — First Boot
 
-**Objetivo:**
+**Goal:**
 
-Construir una imagen UEFI arrancable que cargue un kernel ELF propio y produzca:
+Build a bootable UEFI image that loads our own ELF kernel and produces:
 
 ```text
 AriCodeOS booting...
 ARICODEOS_KERNEL_READY
 ```
 
-por puerto serie y/o framebuffer.
+over the serial port and/or framebuffer.
 
-**Entregables (estado 2026-09-26):**
+**Deliverables (status 2026-09-26):**
 
 ```text
-[x] repositorio                (git inicializado; primer commit pendiente)
-[x] workspace Rust             Cargo.toml, rust-toolchain.toml 1.98.1
+[x] repository                 (git initialized; first commit pending)
+[x] Rust workspace             Cargo.toml, rust-toolchain.toml 1.98.1
 [x] AriBoot                    boot/  (crate ariboot, x86_64-unknown-uefi)
 [x] AriKernel                  kernel/ (crate arikernel, x86_64-unknown-none)
 [x] BootInfo v1                boot-protocol/
 [x] image builder              cargo xtask image  -> build/esp/
 [x] QEMU runner                cargo xtask run
 [x] serial logger              COM1 16550, macros print!/println!
-[x] framebuffer output         GOP, fondo + franjas de color
-[x] panic handler              serie + exit code 35 en modo test
+[x] framebuffer output         GOP, background + color stripes
+[x] panic handler              serial + exit code 35 in test mode
 [x] boot integration test      cargo xtask test  -> [PASS] boot.kernel_ready
-[x] README de compilación      README.md
+[x] build README               README.md
 ```
 
-Resultado del primer arranque en QEMU + OVMF (serie):
+Result of the first boot in QEMU + OVMF (serial):
 
 ```text
 AriCodeOS booting...
 AriCodeOS Kernel 0.0.1
 framebuffer: 1280x800 stride 1280 Bgr @ 0x80000000
 kernel: phys 0x1e7bc000 virt 0xffffffff80000000 size 16 KiB
-memory map: 117 regiones (desc 48 bytes)
+memory map: 117 regions (desc 48 bytes)
 ARICODEOS_KERNEL_READY
 [PASS] boot.kernel_ready  (qemu_exit=Some(33), 1.5s)
 ```
 
-**M0 completado.** AriCodeOS ha dejado de ser únicamente un diseño: existe una cadena propia firmware -> AriBoot -> AriKernel ejecutándose sobre una máquina x86-64 virtual.
+**M0 completed.** AriCodeOS is no longer just a design: there is a custom chain firmware -> AriBoot -> AriKernel running on a virtual x86-64 machine.
 
-Deuda técnica registrada en `docs/architecture.md`: identidad física RWX hasta el VMM (Fase 6), GDT/IDT del firmware hasta la Fase 4, sin consola de texto en framebuffer hasta la Fase 3.
+Technical debt recorded in `docs/architecture.md`: RWX physical identity map until the VMM (Phase 6), firmware GDT/IDT until Phase 4, no framebuffer text console until Phase 3.
 
-**Siguiente milestone:** 0.0.2 (sección 86): logging con niveles, GDT, IDT, excepciones y double fault stack.
-
+**Next milestone:** 0.0.2 (section 86): logging with levels, GDT, IDT, exceptions and double fault stack.

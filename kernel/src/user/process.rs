@@ -1,5 +1,7 @@
-//! Procesos: espacio de direcciones propio (mitad del kernel compartida),
-//! un hilo principal que entra en ring 3 y un estado de salida.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Processes: their own address space (kernel half shared), a main thread
+//! that enters ring 3 and an exit status.
 
 use crate::arch::x86_64::usermode;
 use crate::memory::{phys, pmm, vmm};
@@ -16,10 +18,10 @@ use log::{info, warn};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Pid(pub u32);
 
-/// Base mínima del código de usuario (los ELF se enlazan en 0x40_0000) y pila.
+/// Minimum base of user code (ELFs are linked at 0x40_0000) and stack.
 pub const USER_CODE_BASE: u64 = 0x40_0000;
 
-/// `true` si `addr` cae en la guard page bajo la pila de usuario.
+/// `true` if `addr` falls in the guard page below the user stack.
 pub fn in_user_stack_guard(addr: u64) -> bool {
     let bottom = USER_STACK_TOP - USER_STACK_SIZE;
     (bottom - PAGE_SIZE..bottom).contains(&addr)
@@ -30,50 +32,52 @@ pub const USER_STACK_SIZE: u64 = 64 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitStatus {
     Exited(u64),
-    /// Terminado por el kernel: excepción en ring 3.
+    /// Killed by the kernel: exception in ring 3.
     Killed(&'static str),
 }
 
 pub struct Process {
     pub name: String,
     pub handles: crate::object::Handles,
-    /// Argumento que recibe `_start` en `rdi`.
+    /// Argument `_start` receives in `rdi`.
     pub arg: u64,
-    /// Despierta a quien espera la salida.
+    /// Wakes whoever waits for the exit.
     pub exit_wait: alloc::sync::Arc<crate::task::wait::WaitQueue>,
-    /// Siguiente dirección libre para mapeos MMIO/DMA.
+    /// Next free address for MMIO/DMA mappings.
     mmio_next: u64,
-    /// Rangos virtuales que apuntan a memoria ajena al proceso (MMIO, DMA):
-    /// se desmapean sin liberar al destruir el espacio.
-    foreign: Vec<(u64, u64)>,
-    /// `None` una vez liberado el espacio de direcciones.
+    /// Virtual ranges pointing at memory not owned by the process (MMIO, DMA):
+    /// unmapped without freeing when the address space is destroyed.
+    /// Foreign (MMIO/DMA) mappings: virtual start, physical start, span.
+    foreign: Vec<(u64, u64, u64)>,
+    /// `None` once the address space has been freed.
     mapper: Option<Mapper<vmm::PmmFrames, OffsetMap>>,
     pub entry: u64,
     pub status: Option<ExitStatus>,
-    /// Límite de memoria DMA (bytes) que el proceso puede reservar en total;
-    /// 0 = sin límite. Lo fija quien lo crea (`spawn_limits`).
+    /// Limit of DMA memory (bytes) the process can allocate in total;
+    /// 0 = no limit. Set by its creator (`spawn_limits`).
     pub dma_quota: u64,
     pub dma_used: u64,
-    /// Salida de consola pendiente de una línea completa (Fase 32): con
-    /// varias CPUs, dos procesos que imprimen una línea en varios trozos se
-    /// mezclarían; el kernel emite cada línea entera.
+    /// Console output waiting for a complete line (Phase 32): with several
+    /// CPUs, two processes printing a line in several pieces would
+    /// interleave; the kernel emits each line whole.
     console_line: Vec<u8>,
-    /// El planificador ya recogió su hilo y liberó su espacio y su dominio
-    /// DMA: solo entonces `wait` puede retirar el proceso (auditoría
-    /// 3eb4965, hallazgo 1: con varias CPUs el estado del hilo no basta).
+    /// The scheduler has reaped its thread and freed its address space and
+    /// DMA domain: only then can `wait` remove the process (audit 3eb4965,
+    /// finding 1: with several CPUs the thread state is not enough).
     reaped: bool,
-    /// Hilo principal, para despertarlo si hay que terminarlo.
+    /// Main thread, to wake it if it has to be killed.
     main_tid: aricode_sched::Tid,
-    /// `process_kill` pendiente: el hilo termina al volver a ring 0 o al
-    /// despertar de una espera (auditoría 6ee19fb, hallazgo 4).
+    /// Pending `process_kill`: the thread terminates on returning to ring 0 or
+    /// on waking from a wait (audit 6ee19fb, finding 4).
     kill_requested: bool,
 }
 
-/// Motivo con el que termina un proceso al que otro pidió matar.
-pub const KILLED_BY_SUPERVISOR: &str = "terminado por el supervisor";
+/// Reason given when a process is killed at another's request.
+pub const KILLED_BY_SUPERVISOR: &str = "stopped by the supervisor";
 
-/// Pide terminar `pid` desde otro proceso: marca la petición y despierta a su
-/// hilo para que la vea. `false` si el proceso no existe o ya terminó.
+/// Requests termination of `pid` from another process: flags the request and
+/// wakes its thread so it sees it. `false` if the process does not exist or
+/// has already finished.
 pub fn request_kill(pid: Pid) -> bool {
     let tid = {
         let mut procs = PROCESSES.lock();
@@ -90,7 +94,7 @@ pub fn request_kill(pid: Pid) -> bool {
     true
 }
 
-/// El proceso del hilo actual tiene una terminación pendiente.
+/// The current thread's process has a pending termination.
 pub fn current_kill_requested() -> bool {
     let Some(pid) = current_pid() else {
         return false;
@@ -101,18 +105,18 @@ pub fn current_kill_requested() -> bool {
         .is_some_and(|p| p.kill_requested && p.status.is_none())
 }
 
-/// Tamaño a partir del cual una línea incompleta se emite tal cual.
+/// Size from which an incomplete line is emitted as is.
 const CONSOLE_LINE_MAX: usize = 1024;
 
 static PROCESSES: IrqLock<BTreeMap<Pid, Process>> = IrqLock::new(BTreeMap::new());
 static NEXT_PID: IrqLock<u32> = IrqLock::new(1);
 
-/// Crea un proceso a partir de un ELF64 estático de usuario.
+/// Creates a process from a static user ELF64.
 pub fn spawn(name: &str, elf_bytes: &[u8]) -> Result<Pid, &'static str> {
     spawn_with_handles(name, elf_bytes, Vec::new())
 }
 
-/// Capabilities extra y argumento de `_start`.
+/// Extra capabilities and the `_start` argument.
 pub fn spawn_with_handles_and_arg(
     name: &str,
     elf_bytes: &[u8],
@@ -123,11 +127,11 @@ pub fn spawn_with_handles_and_arg(
     spawn_full(name, elf_bytes, extra, arg, dma_quota)
 }
 
-/// Base de los mapeos MMIO/DMA de usuario.
+/// Base of user MMIO/DMA mappings.
 const USER_MMIO_BASE: u64 = 0x1000_0000;
 
-/// Como `spawn`, con capabilities adicionales insertadas tras las tres
-/// iniciales (la primera recibe el handle `0x0001_0004`, y así sucesivamente).
+/// Like `spawn`, with additional capabilities inserted after the initial
+/// three (the first one gets handle `0x0001_0004`, and so on).
 pub fn spawn_with_handles(
     name: &str,
     elf_bytes: &[u8],
@@ -143,10 +147,10 @@ fn spawn_full(
     arg: u64,
     dma_quota: u64,
 ) -> Result<Pid, &'static str> {
-    let elf = aricode_elf::Elf::parse(elf_bytes).map_err(|_| "process: ELF invalido")?;
+    let elf = aricode_elf::Elf::parse(elf_bytes).map_err(|_| "process: invalid ELF")?;
     let (lo, hi) = elf.virt_range();
     if lo < USER_CODE_BASE || hi > USER_STACK_TOP - USER_STACK_SIZE - PAGE_SIZE {
-        return Err("process: el ELF no cabe en la region de usuario");
+        return Err("process: the ELF does not fit in the user region");
     }
     let pid = {
         let mut n = NEXT_PID.lock();
@@ -157,7 +161,7 @@ fn spawn_full(
     let mut m =
         Mapper::new(vmm::PmmFrames, OffsetMap(phys::offset())).map_err(|_| "process: pml4")?;
     let kernel_root = vmm::with(|k| k.root_phys());
-    // SAFETY: el PML4 del kernel es válido y accesible por el mapa físico.
+    // SAFETY: the kernel PML4 is valid and reachable through the physical map.
     unsafe { m.share_kernel_half(kernel_root) };
 
     for seg in &elf.segments {
@@ -171,17 +175,17 @@ fn spawn_full(
         let (start, end) = seg.page_range();
         let bytes = elf.segment_bytes(seg);
         for page in (start..end).step_by(PAGE_SIZE as usize) {
-            let frame = pmm::with(|p| p.allocate()).ok_or("process: sin frames")?;
+            let frame = pmm::with(|p| p.allocate()).ok_or("process: out of frames")?;
             let dst = phys::phys_to_virt(frame.addr()) as *mut u8;
-            // SAFETY: frame recién asignado, accesible por el mapa físico.
+            // SAFETY: freshly allocated frame, reachable through the physical map.
             unsafe { core::ptr::write_bytes(dst, 0, PAGE_SIZE as usize) };
-            // Parte del contenido del fichero que cae en esta página.
+            // Part of the file contents that falls in this page.
             let file_start = seg.vaddr.max(page);
             let file_end = (seg.vaddr + seg.filesz).min(page + PAGE_SIZE);
             if file_start < file_end {
                 let src =
                     &bytes[(file_start - seg.vaddr) as usize..(file_end - seg.vaddr) as usize];
-                // SAFETY: destino dentro del frame; `src` dentro del segmento.
+                // SAFETY: destination within the frame; `src` within the segment.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         src.as_ptr(),
@@ -191,13 +195,13 @@ fn spawn_full(
                 };
             }
             m.map_4k(page, frame.addr(), flags)
-                .map_err(|_| "process: map segmento")?;
+                .map_err(|_| "process: map segment")?;
         }
     }
-    // Pila: RW, NX, con la página inferior sin mapear como guard.
+    // Stack: RW, NX, with the lowest page left unmapped as a guard.
     for virt in (USER_STACK_TOP - USER_STACK_SIZE..USER_STACK_TOP).step_by(PAGE_SIZE as usize) {
-        let frame = pmm::with(|p| p.allocate()).ok_or("process: sin frames")?;
-        // SAFETY: frame recién asignado.
+        let frame = pmm::with(|p| p.allocate()).ok_or("process: out of frames")?;
+        // SAFETY: freshly allocated frame.
         unsafe {
             core::ptr::write_bytes(
                 phys::phys_to_virt(frame.addr()) as *mut u8,
@@ -209,8 +213,8 @@ fn spawn_full(
             .map_err(|_| "process: map stack")?;
     }
 
-    // El hilo se prepara ahora y se encola solo cuando el proceso ya está en
-    // la tabla: su primer código consulta la entrada y el salto a ring 3.
+    // The thread is prepared now and only queued once the process is in the
+    // table: its first code looks up the entry point and the jump to ring 3.
     let thread = scheduler::prepare_for_process(
         name,
         user_thread_entry,
@@ -223,7 +227,7 @@ fn spawn_full(
     for (obj, rights) in extra {
         handles
             .insert(obj, rights)
-            .map_err(|_| "process: tabla de handles llena")?;
+            .map_err(|_| "process: handle table full")?;
     }
     PROCESSES.lock().insert(
         pid,
@@ -253,7 +257,7 @@ fn spawn_full(
         name,
     );
     info!(
-        "user: proceso {} '{name}' creado ({} segmentos, {} KiB, entrada {:#x}, hilo {tid:?})",
+        "user: process {} '{name}' created ({} segments, {} KiB, entry {:#x}, thread {tid:?})",
         pid.0,
         elf.segments.len(),
         (hi - lo) / 1024,
@@ -262,28 +266,28 @@ fn spawn_full(
     Ok(pid)
 }
 
-/// Primer código del hilo principal, ya con el espacio del proceso activo:
-/// fija la pila de kernel del hilo y salta a ring 3.
+/// First code of the main thread, with the process address space already
+/// active: sets the thread's kernel stack and jumps to ring 3.
 extern "C" fn user_thread_entry(pid: usize) {
     let pid = Pid(pid as u32);
     let (entry, arg) = {
         let procs = PROCESSES.lock();
-        let p = procs.get(&pid).expect("proceso");
+        let p = procs.get(&pid).expect("process");
         (p.entry, p.arg)
     };
-    // SAFETY: código y pila mapeados con USER en `spawn`; la pila de kernel
-    // la fijó el planificador al conmutar a este hilo.
+    // SAFETY: code and stack mapped USER in `spawn`; the kernel stack was set
+    // by the scheduler when switching to this thread.
     unsafe { usermode::enter(entry, USER_STACK_TOP, arg) }
 }
 
-/// Proceso del hilo actual, si es de usuario.
+/// Process of the current thread, if it is a user thread.
 pub fn current_pid() -> Option<Pid> {
     scheduler::current_process().map(Pid)
 }
 
-/// Acumula `text` en la línea pendiente del proceso actual y emite por la
-/// consola todo lo que ya forme líneas completas (o todo, si la línea
-/// pendiente supera `CONSOLE_LINE_MAX`).
+/// Appends `text` to the current process's pending line and emits to the
+/// console everything that already forms complete lines (or everything, if
+/// the pending line exceeds `CONSOLE_LINE_MAX`).
 pub fn console_write_current(text: &str) {
     let Some(pid) = current_pid() else {
         crate::print!("{text}");
@@ -313,8 +317,8 @@ pub fn console_write_current(text: &str) {
     }
 }
 
-/// Emite la línea incompleta pendiente de `pid` (prompt antes de leer la
-/// consola, salida del proceso).
+/// Emits the pending incomplete line of `pid` (prompt before reading the
+/// console, process exit).
 pub fn console_flush(pid: Pid) {
     let pending = PROCESSES
         .lock()
@@ -330,7 +334,7 @@ fn finish(pid: Pid, status: ExitStatus) -> ! {
     console_flush(pid);
     let (name, waiters) = {
         let mut procs = PROCESSES.lock();
-        let p = procs.get_mut(&pid).expect("proceso en la tabla");
+        let p = procs.get_mut(&pid).expect("process in the table");
         p.status = Some(status);
         (p.name.clone(), p.exit_wait.clone())
     };
@@ -343,7 +347,7 @@ fn finish(pid: Pid, status: ExitStatus) -> ! {
                 code,
                 &name,
             );
-            info!("user: proceso {} '{name}' salio con codigo {code}", pid.0)
+            info!("user: process {} '{name}' exited with code {code}", pid.0)
         }
         ExitStatus::Killed(why) => {
             crate::events::record(
@@ -352,30 +356,27 @@ fn finish(pid: Pid, status: ExitStatus) -> ! {
                 0,
                 why,
             );
-            warn!(
-                "user: proceso {} '{name}' terminado por fallo: {why}",
-                pid.0
-            )
+            warn!("user: process {} '{name}' killed: {why}", pid.0)
         }
     }
     scheduler::exit()
 }
 
-/// `process_exit` desde una syscall.
+/// `process_exit` from a syscall.
 pub fn exit_current(code: u64) -> ! {
-    let pid = current_pid().expect("exit desde un hilo de usuario");
+    let pid = current_pid().expect("exit from a user thread");
     finish(pid, ExitStatus::Exited(code))
 }
 
-/// Excepción en ring 3: termina el proceso, nunca el kernel.
+/// Exception in ring 3: kills the process, never the kernel.
 pub fn kill_current(why: &'static str) -> ! {
-    let pid = current_pid().expect("fallo de usuario en un hilo de usuario");
+    let pid = current_pid().expect("user fault on a user thread");
     finish(pid, ExitStatus::Killed(why))
 }
 
-/// Libera el espacio de direcciones y el dominio DMA de un proceso
-/// terminado y lo marca recogido, despertando a quien lo espera. Lo llama el
-/// planificador al recoger su hilo, siempre desde otro hilo y con otro CR3.
+/// Frees the address space and DMA domain of a finished process and marks
+/// it reaped, waking whoever waits for it. Called by the scheduler when
+/// reaping its thread, always from another thread and with another CR3.
 pub fn release_address_space(pid: u32) {
     let taken = PROCESSES.lock().get_mut(&Pid(pid)).and_then(|p| {
         p.mapper
@@ -383,9 +384,9 @@ pub fn release_address_space(pid: u32) {
             .map(|m| (m, core::mem::take(&mut p.foreign)))
     });
     if let Some((mut m, foreign)) = taken {
-        // Memoria ajena (MMIO, DMA): se desmapea sin liberar; sus dueños son
-        // el dispositivo o el objeto DMA.
-        for (virt, len) in foreign {
+        // Foreign memory (MMIO, DMA): unmapped without freeing; its owners
+        // are the device or the DMA object.
+        for (virt, _, len) in foreign {
             for page in (virt..virt + len).step_by(PAGE_SIZE as usize) {
                 let _ = m.unmap_4k(page);
             }
@@ -396,13 +397,13 @@ pub fn release_address_space(pid: u32) {
         let n = frames.len();
         pmm::with(|p| {
             for f in frames {
-                p.free(Frame::from_addr(f)).expect("frame del proceso");
+                p.free(Frame::from_addr(f)).expect("process frame");
             }
         });
-        log::debug!("user: espacio del proceso {pid} liberado ({n} frames)");
+        log::debug!("user: address space of process {pid} freed ({n} frames)");
     }
     crate::iommu::release(pid);
-    // Recogido del todo: ahora sí puede retirarse de la tabla.
+    // Fully reaped: now it can be removed from the table.
     let waiters = PROCESSES.lock().get_mut(&Pid(pid)).map(|p| {
         p.reaped = true;
         p.exit_wait.clone()
@@ -412,9 +413,9 @@ pub fn release_address_space(pid: u32) {
     }
 }
 
-/// Espera a que el proceso termine y esté recogido (espacio y dominio
-/// liberados), y devuelve su estado retirándolo de la tabla. `None` si vence
-/// el plazo o si otro `wait` lo retiró antes.
+/// Waits for the process to finish and be reaped (address space and domain
+/// freed), and returns its status, removing it from the table. `None` if the
+/// deadline expires or another `wait` removed it first.
 pub fn wait_until(pid: Pid, deadline: Option<u64>) -> Option<ExitStatus> {
     let waiters = PROCESSES.lock().get(&pid)?.exit_wait.clone();
     loop {
@@ -437,20 +438,20 @@ pub fn wait_until(pid: Pid, deadline: Option<u64>) -> Option<ExitStatus> {
     }
 }
 
-/// Espera sin plazo.
+/// Waits without a deadline.
 pub fn wait(pid: Pid) -> ExitStatus {
-    wait_until(pid, None).expect("sin plazo no hay timeout")
+    wait_until(pid, None).expect("no deadline means no timeout")
 }
 
-/// Autoprueba (`test=process_reap`, auditoría 3eb4965, hallazgo 1): crear y
-/// esperar procesos por lotes, en todas las CPUs, no pierde frames: `wait`
-/// no retira un proceso hasta que su espacio se ha devuelto al PMM.
+/// Self-test (`test=process_reap`, audit 3eb4965, finding 1): creating and
+/// waiting for processes in batches, on every CPU, loses no frames: `wait`
+/// does not remove a process until its address space is back in the PMM.
 pub fn reap_selftest() {
     use crate::memory::{heap, pmm};
     use crate::user::programs;
 
-    let code = programs::by_name("hello").expect("hello en el initrd");
-    // Calentamiento: lo que el heap vaya a crecer, que crezca antes de medir.
+    let code = programs::by_name("hello").expect("hello in the initrd");
+    // Warm-up: let the heap do whatever growing it will before measuring.
     for _ in 0..4 {
         let pid = spawn("hello", code).expect("spawn");
         assert_eq!(wait(pid), ExitStatus::Exited(42));
@@ -465,31 +466,30 @@ pub fn reap_selftest() {
             .collect();
         for pid in pids {
             assert_eq!(wait(pid), ExitStatus::Exited(42));
-            assert!(!exists(pid), "wait debe retirar el proceso {pid:?}");
+            assert!(!exists(pid), "wait must remove process {pid:?}");
         }
     }
     assert!(
         PROCESSES.lock().is_empty(),
-        "no debe quedar ningun proceso en la tabla"
+        "no process must remain in the table"
     );
     let heap_grown = (heap::mapped_bytes() - heap_before) / PAGE_SIZE;
     let free_after = pmm::stats().free_frames;
     let lost = free_before as i64 - free_after as i64 - heap_grown as i64;
     assert!(
         lost <= 8,
-        "frames perdidos tras {} procesos: {lost} (heap +{heap_grown} paginas)",
+        "frames lost after {} processes: {lost} (heap +{heap_grown} pages)",
         ROUNDS * BATCH
     );
     info!(
-        "process reap selftest ok ({} procesos creados y esperados en {} CPU(s), {lost} frames de diferencia, heap +{heap_grown} paginas)",
+        "process reap selftest ok ({} processes created and waited for on {} CPU(s), {lost} frames difference, heap +{heap_grown} pages)",
         ROUNDS * BATCH,
         crate::cpu::online_count()
     );
 }
 
-/// Nombre de un proceso vivo (para diagnóstico).
-/// Carga `len` bytes de DMA a la cuota del proceso actual; `false` si la
-/// excedería (la cuota es acumulativa: lo reservado no se devuelve).
+/// Charges `len` bytes of DMA to the current process's quota; `false` if it
+/// would exceed it (the quota is cumulative: allocations are not refunded).
 pub fn charge_dma(len: u64) -> bool {
     let Some(pid) = current_pid() else {
         return true;
@@ -505,7 +505,7 @@ pub fn charge_dma(len: u64) -> bool {
     true
 }
 
-/// Instantánea de la tabla de procesos para `system_info`.
+/// Snapshot of the process table for `system_info`.
 pub fn snapshot() -> Vec<aricode_abi::sysinfo::ProcessEntry> {
     use aricode_abi::sysinfo::{ProcessEntry, ProcessState};
     PROCESSES
@@ -528,8 +528,8 @@ pub fn exists(pid: Pid) -> bool {
     PROCESSES.lock().contains_key(&pid)
 }
 
-/// Comprueba que `[ptr, ptr+len)` está en espacio de usuario y mapeado con
-/// USER (y WRITABLE si `write`) en el proceso actual.
+/// Checks that `[ptr, ptr+len)` is in user space and mapped USER (and
+/// WRITABLE if `write`) in the current process.
 fn check_user_range(ptr: u64, len: u64, write: bool) -> Result<(), aricode_abi::Error> {
     if !aricode_abi::user_range_ok(ptr, len) {
         return Err(aricode_abi::Error::Fault);
@@ -556,33 +556,33 @@ fn check_user_range(ptr: u64, len: u64, write: bool) -> Result<(), aricode_abi::
     Ok(())
 }
 
-/// Copia `[ptr, ptr+len)` del espacio del proceso actual, comprobando que
-/// cada página está mapeada con USER. El espacio del proceso es el activo.
+/// Copies `[ptr, ptr+len)` from the current process's address space,
+/// checking that each page is mapped USER. The process space is the active one.
 pub fn copy_from_user(ptr: u64, len: u64) -> Result<Vec<u8>, aricode_abi::Error> {
     check_user_range(ptr, len, false)?;
-    // SAFETY: rango validado página a página en el espacio activo.
+    // SAFETY: range validated page by page in the active address space.
     let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
     Ok(bytes.to_vec())
 }
 
-/// Escribe `bytes` en `[ptr, ptr+len)` del proceso actual, comprobando que
-/// cada página está mapeada con USER y WRITABLE.
+/// Writes `bytes` to `[ptr, ptr+len)` of the current process, checking that
+/// each page is mapped USER and WRITABLE.
 pub fn copy_to_user(ptr: u64, bytes: &[u8]) -> Result<(), aricode_abi::Error> {
     check_user_range(ptr, bytes.len() as u64, true)?;
-    // SAFETY: rango validado como escribible en el espacio activo.
+    // SAFETY: range validated as writable in the active address space.
     unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len()) };
     Ok(())
 }
 
-/// Acceso a la tabla de handles del proceso actual.
+/// Access to the current process's handle table.
 pub fn with_current_handles<R>(f: impl FnOnce(&mut crate::object::Handles) -> R) -> Option<R> {
     let pid = current_pid()?;
     let mut procs = PROCESSES.lock();
     procs.get_mut(&pid).map(|p| f(&mut p.handles))
 }
 
-/// Mapea `[phys, phys+len)` en el proceso actual como memoria de dispositivo
-/// (sin caché) o buffer DMA (con caché). Devuelve la dirección virtual.
+/// Maps `[phys, phys+len)` into the current process as device memory
+/// (uncached) or a DMA buffer (cached). Returns the virtual address.
 pub fn map_foreign(phys: u64, len: u64, cacheable: bool) -> Result<u64, aricode_abi::Error> {
     use aricode_x86_paging::{CACHE_DISABLE, WRITE_THROUGH};
     let pid = current_pid().ok_or(aricode_abi::Error::Fault)?;
@@ -592,9 +592,14 @@ pub fn map_foreign(phys: u64, len: u64, cacheable: bool) -> Result<u64, aricode_
     let offset = phys & (PAGE_SIZE - 1);
     let start = phys - offset;
     let span = (offset + len).next_multiple_of(PAGE_SIZE);
+    // Mapping the same region again (a server mapping a client's buffer on
+    // every request) reuses the existing mapping instead of leaking one.
+    if let Some((virt, _, _)) = p.foreign.iter().find(|f| f.1 == start && f.2 == span) {
+        return Ok(virt + offset);
+    }
     let virt = p.mmio_next;
-    // La zona MMIO/DMA está por encima de la pila de usuario (8 MiB) y crece
-    // hacia arriba hasta el fin del espacio de usuario.
+    // The MMIO/DMA area is above the user stack (8 MiB) and grows upwards
+    // to the end of user space.
     if virt
         .checked_add(span)
         .is_none_or(|end| end > USER_SPACE_END)
@@ -608,6 +613,6 @@ pub fn map_foreign(phys: u64, len: u64, cacheable: bool) -> Result<u64, aricode_
     m.map_range_4k(virt, start, span, flags)
         .map_err(|_| aricode_abi::Error::Limit)?;
     p.mmio_next += span;
-    p.foreign.push((virt, span));
+    p.foreign.push((virt, start, span));
     Ok(virt + offset)
 }

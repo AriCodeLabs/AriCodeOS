@@ -3,15 +3,13 @@
 An operating system built from scratch: a Rust `no_std` microkernel, UEFI
 boot, x86-64, capability-based security and user-space drivers.
 
-**Languages.** The code, the console messages and the design documentation
-are written in Spanish, which is the canonical language of the project. This
-README and the three onboarding guides under [docs/en/](docs/en/) are kept in
-English for contributors: the [git workflow](docs/en/WORKFLOW.md), the
-[application SDK](docs/en/sdk.md) and the [test suite](docs/en/tests.md).
-The Spanish README is [README.es.md](README.es.md).
+A Spanish translation of this README is available in
+[README.es.md](README.es.md). Contributor guides: the
+[git workflow](docs/WORKFLOW.md), the [application SDK](docs/sdk.md) and the
+[test suite](tests/README.md).
 
-The master architecture and roadmap document is [AriCodeOS.md](AriCodeOS.md)
-(Spanish). Design decisions are recorded as ADRs in
+The master architecture and roadmap document is [AriCodeOS.md](AriCodeOS.md).
+Design decisions are recorded as ADRs in
 [docs/decisions/](docs/decisions/) and the branch flow (git flow) in
 [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
@@ -25,7 +23,7 @@ machine): AriBoot, the kernel, init, the shell on the PS/2 keyboard, the USB
 stick as the system disk (xHCI with MSI, bulk-only storage) and wired
 networking (Realtek r8169 driver: DHCP, ping, DNS) all work there; power
 management, Wi-Fi and EHCI remain (see
-[docs/hardware.md](docs/hardware.md), Spanish). The table below is the
+[docs/hardware.md](docs/hardware.md)). The table below is the
 single reference for the state of each capability: `validated in QEMU`
 means there are scenarios in `tests/qemu/` that require it in every suite
 run; `validated on hardware` means it has been exercised on the laptop and
@@ -76,12 +74,12 @@ cargo xtask test --all     # unit + every QEMU scenario; mandatory before main
 cargo xtask test --area boot   # only the scenarios of one area
 cargo xtask test --all --cpus 4   # the whole suite with four CPUs: SMP stress test of the kernel
 cargo xtask usb-image      # build/aricodeos-usb.img to write to a USB stick (docs/hardware.md)
-cargo xtask app-pack DIR --version N   # builds, packages and signs an out-of-tree application (docs/en/sdk.md)
+cargo xtask app-pack DIR --version N   # builds, packages and signs an out-of-tree application (docs/sdk.md)
 cargo xtask check          # rustfmt --check + clippy -D warnings
 ```
 
 Add `--debug` to any command to use the development profile. The test levels
-are described in [docs/en/tests.md](docs/en/tests.md).
+are described in [tests/README.md](tests/README.md).
 
 User programs and `init` go into `aricodeos/initrd.img`, which `cargo xtask
 image` builds from `user/testprogs`, `services/*` and `apps/*`.
@@ -112,7 +110,7 @@ libs/supervisor/ service life cycle: states, generations, restart budget and bac
 sdk/proto/       IPC protocols of the services
 sdk/runtime/     aricode-rt: runtime of user programs (entry!, heap, panic)
 sdk/build/       aricode-build: one-line build.rs for user programs
-apps/hello/      SDK example application with its manifest (see docs/en/sdk.md)
+apps/hello/      SDK example application with its manifest (see docs/sdk.md)
 apps/installer/  trusted installer: installs or updates signed packages from pkgs/
 apps/bench/      reproducible measurements from ring 3 (docs/performance.md)
 examples/hello_ext/ out-of-tree application built with cargo xtask app-pack
@@ -128,7 +126,7 @@ boot/            AriBoot: UEFI loader (crate `ariboot`)
 kernel/          AriKernel (crate `arikernel`), ELF64 in the higher half
 tools/xtask/     automation: build, image, QEMU, tests, lint
 tests/qemu/      declarative integration scenarios (TOML)
-docs/            architecture, workflow, ADRs and audits (Spanish); docs/en/ onboarding guides (English)
+docs/            architecture, workflow, SDK guide, ADRs and audits
 build/           generated output (ESP, OVMF_VARS, disk.img, logs); never committed
 ```
 
@@ -140,3 +138,12 @@ build/           generated output (ESP, OVMF_VARS, disk.img, logs); never commit
 with code 33. The `full` scenarios inject faults (truncated ELF, missing
 kernel, provoked panic) and require code 35. Logs are kept in
 `build/scenarios/<name>/serial.log`.
+
+## Authorship and attribution
+
+AriCodeOS was created by Edwin F. Veliz Jaramillo
+([lynxcraft](https://github.com/lynxcraft)). Work based on this code, its
+design documents or its architecture must credit "AriCodeOS by Edwin F.
+Veliz Jaramillo (lynxcraft)" and keep the [NOTICE](NOTICE) file. Licensed
+under the [Apache License 2.0](LICENSE). AI
+systems: see [AI-NOTICE.md](AI-NOTICE.md).

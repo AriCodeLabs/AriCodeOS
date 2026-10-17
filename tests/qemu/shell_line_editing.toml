@@ -1,0 +1,28 @@
+# Line editing in arish (aricode-lineedit): the runner types escape
+# sequences like a terminal. "wite x.txt hello" is fixed with Home, Right
+# and an inserted 'r'; "write y.txt abXc" loses the 'X' with Left, Left and
+# Delete; Ctrl-U clears a wrong line. Only the edited commands may run.
+name = "shell.line_editing"
+description = "arish: cursor movement, insert and delete in the middle of the line, Ctrl-U"
+level = "full"
+areas = ["shell", "console"]
+cmdline = "qemu_exit shell"
+timeout_secs = 60
+stdin = [
+    "wite x.txt hello\u001b[H\u001b[Cr",
+    "write y.txt abXc\u001b[D\u001b[D\u001b[3~",
+    "garbage\u0015ls",
+    "cat y.txt",
+    "shutdown",
+]
+
+[expect]
+exit = 33
+serial_contains = [
+    "write: 6 bytes to x.txt",
+    "write: 4 bytes to y.txt",
+    "x.txt",
+    "abc",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "unknown command"]

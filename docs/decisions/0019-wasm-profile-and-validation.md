@@ -1,61 +1,63 @@
-# ADR 0019: Perfil `aricode-wasm` v1: validación previa y manifiesto por módulo
+# ADR 0019: `aricode-wasm` v1 profile: up-front validation and per-module manifest
 
-- **Fecha:** 2026-09-29
-- **Estado:** Aceptada
+- **Date:** 2026-09-29
+- **Status:** Accepted
 
-## Contexto
+## Context
 
-El intérprete (Fase 29) confiaba en el productor del módulo: comprobaba
-límites en ejecución, pero un módulo mal tipado podía fallar a mitad de
-camino, y la Capability API la decidía el runner sin que el módulo
-declarase qué necesita. El estudio de 2026-09-28 (etapa 4, apartado H)
-pide un validador, un manifiesto por módulo con recursos concedidos
-separados de los privilegios del runner, ficheros y reloj, y un perfil
-explícito comprobable fuera del sistema, sin dar por soportado WASI.
+The interpreter (Phase 29) trusted the module's producer: it checked
+bounds at run time, but an ill-typed module could fail halfway through,
+and the Capability API was decided by the runner without the module
+declaring what it needs. The 2026-09-28 study (stage 4, section H) asks
+for a validator, a per-module manifest with granted resources kept
+separate from the runner's privileges, files and clock, and an explicit
+profile that can be checked outside the system, without claiming WASI
+support.
 
-## Decisión
+## Decision
 
-1. **Validación antes de instanciar.** `Module::parse` ejecuta el
-   algoritmo de tipado de la especificación sobre cada función (pila de
-   operandos tipada, marcos de control, código inalcanzable polimórfico) y
-   comprueba índices, tabla, globales, exportaciones y `start`. Lo que no
-   valida no se instancia (`Error::Invalid`); lo que el intérprete no
-   ejecuta (coma flotante, SIMD, otras extensiones) se rechaza aquí, no
-   con un trap a mitad de ejecución.
-2. **Perfil propio y explícito** (`docs/wasm-profile.md`): MVP con enteros,
-   `sign-ext`, `memory.copy`/`memory.fill`, `select t`, tipos de bloque por
-   índice; una tabla, una memoria, importaciones solo del módulo
-   `aricode`. No se afirma WASI: un módulo WASI no funciona y no se
-   pretende que lo haga.
-3. **Manifiesto por módulo** (`NOMBRE.manifest`, `caps = print, clock,
-   files`): el runner concede una importación solo si el manifiesto pide
-   la capacidad que la cubre; lo demás no existe para el módulo, aunque el
-   runner tenga el recurso. Los recursos del módulo son un subconjunto de
-   los del runner (su directorio privado, su reloj), nunca más.
-4. **Ficheros y reloj** en la Capability API: `file_write` (reemplazo
-   atómico en el directorio privado del runner) y `file_read`, con nombres
-   cortos sin `/`, más `uptime_ms` y `print`. Las llamadas que hablan con
-   un servicio heredan los plazos del SDK (ADR 0012).
+1. **Validation before instantiation.** `Module::parse` runs the
+   specification's typing algorithm over every function (typed operand
+   stack, control frames, polymorphic unreachable code) and checks
+   indices, table, globals, exports and `start`. What does not validate is
+   not instantiated (`Error::Invalid`); what the interpreter does not
+   execute (floating point, SIMD, other extensions) is rejected here, not
+   with a trap halfway through execution.
+2. **Own, explicit profile** (`docs/wasm-profile.md`): MVP with integers,
+   `sign-ext`, `memory.copy`/`memory.fill`, `select t`, block types by
+   index; one table, one memory, imports only from the `aricode` module.
+   WASI is not claimed: a WASI module does not work and is not meant to.
+3. **Per-module manifest** (`NAME.manifest`, `caps = print, clock,
+   files`): the runner grants an import only if the manifest asks for the
+   capability that covers it; everything else does not exist for the
+   module, even if the runner holds the resource. The module's resources
+   are a subset of the runner's (its private directory, its clock), never
+   more.
+4. **Files and clock** in the Capability API: `file_write` (atomic replace
+   in the runner's private directory) and `file_read`, with short names
+   without `/`, plus `uptime_ms` and `print`. Calls that talk to a service
+   inherit the SDK timeouts (ADR 0012).
 
-## Alternativas descartadas
+## Rejected alternatives
 
-- Integrar un runtime externo (wasmtime, wasmi): licencia, tamaño y
-  `no_std` no encajan hoy con un kernel y un SDK que caben en unos cientos
-  de KiB; el validador propio cubre el subconjunto que se ejecuta.
-- WASI preview 1 "mínimo": exige un modelo de descriptores y errno que el
-  sistema no tiene, y prometería compatibilidad que no se puede cumplir.
-- Manifiesto dentro del módulo (sección custom): más difícil de leer y de
-  cambiar sin recompilar; el fichero al lado es lo mismo que hacen las
-  aplicaciones nativas.
+- Integrating an external runtime (wasmtime, wasmi): license, size and
+  `no_std` do not fit today with a kernel and an SDK that fit in a few
+  hundred KiB; the in-house validator covers the subset that is executed.
+- A "minimal" WASI preview 1: requires a descriptor and errno model the
+  system does not have, and would promise compatibility that cannot be
+  delivered.
+- Manifest inside the module (custom section): harder to read and to
+  change without recompiling; a file alongside is the same thing native
+  applications do.
 
-## Consecuencias
+## Consequences
 
-- `wasm.demo` valida y ejecuta el módulo real de `rustc`, que escribe y
-  relee un fichero; `wasm.restricted` (manifiesto solo `print`) no ejecuta
-  por una importación no concedida; `wasm.invalid` rechaza un módulo mal
-  tipado con el motivo.
-- Los tests de host de `aricode-wasm` cubren pila vacía, tipos, valores
-  sobrantes, etiquetas, `if` sin `else` con resultados, índices fuera de
-  rango, opcodes desconocidos y código inalcanzable polimórfico.
-- Ampliar el perfil (coma flotante, más API) pasa por el validador y por
-  esta página; el perfil se versiona.
+- `wasm.demo` validates and runs the real module from `rustc`, which
+  writes and rereads a file; `wasm.restricted` (manifest with only
+  `print`) does not run because of an import that is not granted;
+  `wasm.invalid` rejects an ill-typed module and reports the reason.
+- The `aricode-wasm` host tests cover empty stack, types, leftover values,
+  labels, `if` without `else` with results, out-of-range indices, unknown
+  opcodes and polymorphic unreachable code.
+- Extending the profile (floating point, more API) goes through the
+  validator and this page; the profile is versioned.

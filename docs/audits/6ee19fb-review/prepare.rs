@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 use aricode_arifs::{AriFs,BlockDevice,FsError,SECTOR};
 struct Disk(Vec<u8>);
 impl BlockDevice for Disk {

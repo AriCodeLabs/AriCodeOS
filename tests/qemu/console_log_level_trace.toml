@@ -1,11 +1,11 @@
-# log=trace muestra todos los niveles, incluido el desglose del mapa de memoria.
+# log=trace shows every level, including the memory map breakdown.
 name = "console.log_level_trace"
-description = "log=trace: aparecen TRACE y DEBUG"
+description = "log=trace: TRACE and DEBUG appear"
 level = "full"
 areas = ["console"]
 cmdline = "qemu_exit log=trace"
 
 [expect]
 exit = 33
-serial_contains = ["[TRACE] logger activo en nivel TRACE", "[DEBUG]   free", "[DEBUG] stack:", "ARICODEOS_KERNEL_READY"]
+serial_contains = ["[TRACE] logger active at level TRACE", "[DEBUG]   free", "[DEBUG] stack:", "ARICODEOS_KERNEL_READY"]
 serial_absent = ["KERNEL PANIC"]

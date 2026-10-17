@@ -1,74 +1,74 @@
-# ADR 0017: Aplicaciones fuera del árbol, empaquetadas e instaladas en AriFS
+# ADR 0017: Out-of-tree applications, packaged and installed in AriFS
 
-- **Fecha:** 2026-09-29
-- **Estado:** Aceptada
+- **Date:** 2026-09-29
+- **Status:** Accepted
 
-## Contexto
+## Context
 
-Hasta ahora todo programa vivía en el initrd: añadir una aplicación exigía
-tocar el workspace y regenerar la imagen. La etapa 4 del plan (estudio de
-2026-09-28) pide que una aplicación desarrollada fuera del árbol se
-construya, se instale, se ejecute y se actualice, con identidad por editor
-y contenido, manifiesto firmado e instalación transaccional.
-`process_spawn` solo aceptaba nombres del initrd.
+Until now every program lived in the initrd: adding an application meant
+touching the workspace and regenerating the image. Stage 4 of the plan
+(2026-09-28 study) asks for an application developed out of tree to be
+built, installed, run and updated, with identity by publisher and
+content, a signed manifest and transactional installation.
+`process_spawn` only accepted initrd names.
 
-## Decisión
+## Decision
 
-1. **Paquete = un fichero firmado** (`aricode-pkg`): contenedor
-   `aricode-initrd` con `manifest` (nombre, versión, SHA-256 del programa
-   y de su manifiesto de aplicación), `manifest.sig` (Ed25519 sobre el
-   manifiesto, la clave de desarrollo como en las imágenes de sistema),
-   `program` (ELF) y `program.manifest`. Instalado es `apps/NOMBRE.aripkg`
-   en el espacio principal de fsd. El manifiesto de aplicación viaja dentro
-   del paquete y por tanto está firmado: un programa instalado no puede
-   pedir más que uno del initrd con el mismo manifiesto.
-2. **Un solo fichero, instalación atómica**: instalar o actualizar es un
-   `replace` de AriFS (ADR 0014); tras un corte hay la versión anterior o
-   la nueva, nunca una mezcla de programa y manifiesto.
-3. **El broker verifica al lanzar.** Si el programa no está en el initrd,
-   lee `apps/NOMBRE.aripkg` a un buffer DMA de preparación (256 KiB,
-   reservado una vez), verifica firma y hashes, aplica la misma política al
-   manifiesto de aplicación y crea el proceso con `process_spawn_from`
-   directamente desde el buffer (desplazamiento y longitud del ELF). Un
-   paquete que no verifica no se lanza (`Denied`, con el motivo en la
-   consola).
-4. **Nueva syscall `process_spawn_from` (30)**: como `process_spawn`, con el
-   ELF en un buffer DMA del llamador (`spawn_from::Request`: handle,
-   desplazamiento, longitud, nombre). Exige `MANAGE` sobre el `SPAWNER` y
-   `READ` sobre el buffer; el kernel copia los segmentos al crear el proceso
-   y el buffer puede reutilizarse después. El ELF se analiza con
-   comprobación de límites sobre memoria que el llamador podría estar
-   modificando: eso solo puede producir un proceso inválido del propio
-   llamador, nunca un fallo del kernel.
-5. **Construcción fuera del árbol**: `cargo xtask app-pack DIR [--version N]`
-   compila `DIR/Cargo.toml` (su propio workspace, SDK por ruta) desde la
-   raíz del repositorio, así que `rust-toolchain.toml` y `.cargo/config.toml`
-   se aplican igual que a los programas del initrd, fija `APP_VERSION` al
-   compilar, firma y deja `build/pkgs/NOMBRE-N.aripkg`. Un escenario declara
-   `install = ["DIR"]` y xtask lo instala en el disco de pruebas (AriFS
-   admite ficheros de capacidad múltiple de 64 sectores: `create_sized`).
+1. **Package = one signed file** (`aricode-pkg`): an `aricode-initrd`
+   container with `manifest` (name, version, SHA-256 of the program and of
+   its application manifest), `manifest.sig` (Ed25519 over the manifest,
+   with the development key as for system images), `program` (ELF) and
+   `program.manifest`. Once installed it is `apps/NAME.aripkg` in fsd's
+   main namespace. The application manifest travels inside the package and
+   is therefore signed: an installed program cannot ask for more than an
+   initrd program with the same manifest.
+2. **A single file, atomic installation**: installing or updating is an
+   AriFS `replace` (ADR 0014); after a cut there is either the previous or
+   the new version, never a mix of program and manifest.
+3. **The broker verifies at launch.** If the program is not in the initrd,
+   it reads `apps/NAME.aripkg` into a DMA staging buffer (256 KiB,
+   allocated once), verifies the signature and hashes, applies the same
+   policy to the application manifest and creates the process with
+   `process_spawn_from` directly from the buffer (offset and length of the
+   ELF). A package that fails verification is not launched (`Denied`, with
+   the reason on the console).
+4. **New syscall `process_spawn_from` (30)**: like `process_spawn`, with
+   the ELF in a DMA buffer of the caller (`spawn_from::Request`: handle,
+   offset, length, name). It requires `MANAGE` on the `SPAWNER` and `READ`
+   on the buffer; the kernel copies the segments when creating the process
+   and the buffer can be reused afterwards. The ELF is parsed with bounds
+   checking over memory the caller might be modifying: at worst that
+   produces an invalid process for the caller itself, never a kernel fault.
+5. **Out-of-tree build**: `cargo xtask app-pack DIR [--version N]` builds
+   `DIR/Cargo.toml` (its own workspace, SDK by path) from the repository
+   root, so `rust-toolchain.toml` and `.cargo/config.toml` apply just as
+   they do to initrd programs, sets `APP_VERSION` at build time, signs and
+   leaves `build/pkgs/NAME-N.aripkg`. A scenario declares
+   `install = ["DIR"]` and xtask installs it on the test disk (AriFS
+   supports files whose capacity is a multiple of 64 sectors:
+   `create_sized`).
 
-## Alternativas descartadas
+## Rejected alternatives
 
-- ELF y manifiesto sueltos en AriFS (`apps/NOMBRE` + `apps/NOMBRE.manifest`):
-  sin firma y con dos ficheros que actualizar, un corte podía dejar programa
-  nuevo con manifiesto viejo.
-- Verificar solo al instalar: quien escriba en AriFS podría sustituir el
-  programa después; verificar al lanzar hace que la autoridad dependa de la
-  clave, no del acceso al disco.
-- Mapear el ELF instalado directamente desde el disco o pasarlo por
-  `copy_from_user`: AriFS no ofrece páginas, y la copia grande ata el tamaño
-  al heap de init; el buffer DMA ya es memoria contigua accesible por el
-  mapa físico.
+- Loose ELF and manifest in AriFS (`apps/NAME` + `apps/NAME.manifest`):
+  unsigned and with two files to update, a cut could leave a new program
+  with an old manifest.
+- Verifying only at install time: anyone who can write to AriFS could
+  replace the program afterwards; verifying at launch makes authority
+  depend on the key, not on disk access.
+- Mapping the installed ELF directly from disk or passing it through
+  `copy_from_user`: AriFS does not provide pages, and the large copy ties
+  the size to init's heap; the DMA buffer is already contiguous memory
+  reachable through the physical map.
 
-## Consecuencias
+## Consequences
 
-- `apps.external`: `hello_ext` se construye desde `examples/hello_ext`, se
-  empaqueta con versión 1, se instala en el disco de pruebas y `run
-  hello_ext` lo lanza dos veces con su manifiesto.
-- El paquete instalado está acotado por el journal de AriFS (32 KiB) si se
-  quiere actualizar de forma atómica, y por el buffer de preparación (256
-  KiB) para lanzarse; los programas del SDK ocupan decenas de KiB.
-- La instalación y actualización desde dentro del sistema (un instalador
-  de confianza, paquetes de más de una versión, rechazo de firmas malas y
-  cortes durante la instalación) es la siguiente parte de la etapa.
+- `apps.external`: `hello_ext` is built from `examples/hello_ext`,
+  packaged with version 1, installed on the test disk, and `run
+  hello_ext` launches it twice with its manifest.
+- The installed package is bounded by the AriFS journal (32 KiB) if it is
+  to be updated atomically, and by the staging buffer (256 KiB) to be
+  launched; SDK programs take tens of KiB.
+- Installing and updating from inside the system (a trusted installer,
+  packages with more than one version, rejecting bad signatures and cuts
+  during installation) is the next part of the stage.

@@ -1,8 +1,10 @@
-//! Compositor (Fase 26): dueño del framebuffer en ring 3. Handles: 0x10004 =
-//! endpoint de servicio, 0x10005 = framebuffer (MMIO), 0x10006 = SYSTEM,
-//! 0x10007 = HARDWARE (buffer trasero), 0x10008.. = servicios de entrada
-//! (`arg` = cuántos). Compone en un buffer trasero y lo vuelca a la pantalla;
-//! enruta teclado y ratón a la ventana con foco.
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Compositor (Phase 26): owner of the framebuffer in ring 3. Handles: 0x10004 =
+//! service endpoint, 0x10005 = framebuffer (MMIO), 0x10006 = SYSTEM,
+//! 0x10007 = HARDWARE (back buffer), 0x10008.. = input services
+//! (`arg` = how many). Composes into a back buffer and flushes it to the screen;
+//! routes keyboard and mouse to the focused window.
 #![no_std]
 #![no_main]
 
@@ -41,7 +43,7 @@ fn now(system: Handle) -> u64 {
     }
 }
 
-/// Pantalla: descripción, mapeo del framebuffer y buffer trasero en RAM.
+/// Screen: description, framebuffer mapping and back buffer in RAM.
 struct Screen {
     info: abi::sysinfo::Framebuffer,
     fb: *mut u32,
@@ -57,7 +59,7 @@ impl Screen {
         let pixels = info.stride as u64 * info.height as u64;
         let dma = sys::dma_alloc(HW, pixels * 4).map_err(|_| 13u64)?;
         let virt = sys::mmio_map(dma).map_err(|_| 14u64)?;
-        // SAFETY: buffer DMA propio de `pixels` u32, mapeado RW; vive hasta salir.
+        // SAFETY: our own DMA buffer of `pixels` u32, mapped RW; lives until exit.
         let back = unsafe { core::slice::from_raw_parts_mut(virt as *mut u32, pixels as usize) };
         Ok(Self { info, fb, back })
     }
@@ -69,10 +71,10 @@ impl Screen {
             self.info.height,
             self.info.stride,
         )
-        .expect("buffer trasero")
+        .expect("back buffer")
     }
 
-    /// Vuelca el buffer trasero a la pantalla, convirtiendo el formato.
+    /// Flushes the back buffer to the screen, converting the pixel format.
     fn flip(&self) {
         let rgb = self.info.format == abi::sysinfo::FB_FORMAT_RGB;
         for (i, px) in self.back.iter().enumerate() {
@@ -81,13 +83,13 @@ impl Screen {
             } else {
                 *px
             };
-            // SAFETY: `i` < stride*height <= size/4, dentro del framebuffer mapeado.
+            // SAFETY: `i` < stride*height <= size/4, inside the mapped framebuffer.
             unsafe { self.fb.add(i).write_volatile(v) };
         }
     }
 }
 
-/// Contenido de una ventana: buffer del cliente mapeado y su cola de eventos.
+/// Window content: the mapped client buffer and its event queue.
 struct Content {
     id: u32,
     virt: u64,
@@ -188,7 +190,7 @@ impl Compositor {
             }
             return;
         }
-        // Cada byte de la tecla (las de edición son secuencias de escape).
+        // Each byte of the key (editing keys are escape sequences).
         for &ch in self.keyboard.feed(ev).as_slice() {
             if let Some(id) = self.desktop.focus {
                 self.deliver(id, Event::Key(ch));
@@ -234,7 +236,7 @@ impl Compositor {
                     count: 0,
                     pending: None,
                 });
-                sys::print(b"compositor: ventana ");
+                sys::print(b"compositor: window ");
                 num(id as u64);
                 sys::print(b" '");
                 sys::print(req.title_str().as_bytes());
@@ -292,7 +294,7 @@ impl Compositor {
         }
     }
 
-    /// Recompone el escritorio si algo cambió y lo anota por consola.
+    /// Recomposes the desktop if anything changed and logs it to the console.
     fn compose(&mut self) {
         if !self.dirty {
             return;
@@ -307,7 +309,7 @@ impl Compositor {
                 return;
             };
             let n = (c.width * c.height) as usize;
-            // SAFETY: buffer del cliente mapeado en `Create`, de `width*height*4` bytes.
+            // SAFETY: client buffer mapped in `Create`, `width*height*4` bytes long.
             let pixels = unsafe { core::slice::from_raw_parts_mut(c.virt as *mut u32, n) };
             if let Some(src) = Canvas::new(pixels, c.width, c.height, c.width) {
                 out.blit(&src, w.content.x, w.content.y);
@@ -318,21 +320,21 @@ impl Compositor {
         num(self.frames);
         sys::print(b", ");
         num(self.desktop.count() as u64);
-        sys::print(b" ventana(s), cursor (");
+        sys::print(b" window(s), cursor (");
         num(self.desktop.pointer.0 as u64);
         sys::print(b",");
         num(self.desktop.pointer.1 as u64);
         sys::print(b")\n");
-        // Muestras deterministas para los tests: un píxel cerca de la esquina
-        // superior izquierda del contenido de cada ventana.
+        // Deterministic samples for the tests: one pixel near the top-left
+        // corner of each window's content.
         let mut hex = [0u8; 16];
         let screen = self.screen.canvas();
         for w in self.desktop.iter() {
             let (sx, sy) = (w.content.x + 10, w.content.y + 10);
             if let Some(px) = screen.get(sx, sy) {
-                sys::print(b"compositor: ventana ");
+                sys::print(b"compositor: window ");
                 num(w.id as u64);
-                sys::print(b" muestra (");
+                sys::print(b" sample (");
                 num(sx as u64);
                 sys::print(b",");
                 num(sy as u64);
@@ -343,7 +345,7 @@ impl Compositor {
         }
         if !self.announced && self.desktop.count() >= 2 {
             self.announced = true;
-            say(b"escritorio listo con 2 ventanas");
+            say(b"desktop ready with 2 windows");
         }
     }
 }
@@ -352,11 +354,11 @@ fn main(inputs: u64) -> u64 {
     let screen = match Screen::open() {
         Ok(s) => s,
         Err(step) => {
-            say(b"sin framebuffer utilizable");
+            say(b"no usable framebuffer");
             return step;
         }
     };
-    sys::print(b"compositor: pantalla ");
+    sys::print(b"compositor: screen ");
     num(screen.info.width as u64);
     sys::print(b"x");
     num(screen.info.height as u64);
@@ -379,7 +381,7 @@ fn main(inputs: u64) -> u64 {
     let mut handles = [Handle(0); 2];
     let mut events = [aricode_proto::input::Event::default(); aricode_proto::input::MAX_EVENTS];
     let mut times = [0u64; aricode_proto::input::MAX_EVENTS];
-    say(b"sirviendo peticiones");
+    say(b"serving requests");
     loop {
         let t = now(SYSTEM);
         for _ in 0..8 {
@@ -395,13 +397,13 @@ fn main(inputs: u64) -> u64 {
                 Some(req) => comp.handle(req, reply_to, buf, t),
                 None => answer(reply_to, Reply::status(Status::Invalid)),
             }
-            // El buffer de contenido queda mapeado; el handle ya no hace falta.
+            // The content buffer stays mapped; the handle is no longer needed.
             if let Some(b) = buf {
                 let _ = sys::handle_close(b);
             }
         }
-        // Leer todos los dispositivos y procesar sus eventos en orden temporal
-        // (un clic del raton debe preceder a la tecla que vino despues).
+        // Read every device and process their events in time order
+        // (a mouse click must precede the key that came after it).
         let mut merged: [(u64, usize, aricode_input::Event);
             MAX_INPUTS * aricode_proto::input::MAX_EVENTS] =
             [(0, 0, aricode_input::Event::default());
