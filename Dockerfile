@@ -42,6 +42,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             --default-toolchain "$RUST_VERSION" \
             --component rust-src,llvm-tools,rustfmt,clippy \
             --target x86_64-unknown-none,x86_64-unknown-uefi,wasm32-unknown-unknown \
+    && mkdir -p "$CARGO_HOME/registry" \
     && chmod -R a+rwX "$RUSTUP_HOME" "$CARGO_HOME"
 
 # No ports are exposed and no keys are baked in: scenarios that need a
