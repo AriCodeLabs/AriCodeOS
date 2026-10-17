@@ -180,7 +180,7 @@ fn run_scenario(
         None => None,
     };
     if s.host_update {
-        image::publish_update(release, 2)?;
+        image::publish_update_to(&image::test_update_dir(), release, 2)?;
         installed.push((
             String::from(image::UPDATE_URL_FILE),
             format!(

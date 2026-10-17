@@ -281,8 +281,8 @@ fn http_serve(mut stream: std::net::TcpStream) {
     let response: Vec<u8> = match path {
         "/hola" => b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 19\r\nConnection: close\r\n\r\nHola desde el host\n".to_vec(),
         "/chunked" => b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nd\r\nprimer trozo,\r\ne\r\n segundo trozo\r\n0\r\n\r\n".to_vec(),
-        // The update channel published by `publish_update` (ADR 0027).
-        p if p.starts_with("/update/") => file_response(&image::update_dir(), &p["/update/".len()..]),
+        // The scenarios' update channel (ADR 0027), never the real one.
+        p if p.starts_with("/update/") => file_response(&image::test_update_dir(), &p["/update/".len()..]),
         _ => b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nno existe".to_vec(),
     };
     let _ = stream.write_all(&response);
