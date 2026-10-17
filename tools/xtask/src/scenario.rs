@@ -75,6 +75,13 @@ pub struct HostInput {
     pub keys: Vec<String>,
     pub mouse_rel: Option<(i32, i32)>,
     pub click: Option<String>,
+    /// Pause after each key event (ms). QEMU's usb-kbd queues at most 16
+    /// scancodes (`QUEUE_LENGTH`, hw/input/hid.c) and drops whole events
+    /// beyond that, while the guest drains it only at the interrupt
+    /// endpoint's polling rate: more than 8 keys typed at QMP speed lose
+    /// keystrokes on the USB keyboard.
+    #[serde(default)]
+    pub key_delay_ms: u64,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -170,9 +177,18 @@ pub struct Scenario {
     /// honoured (the scenario depends on that CPU count).
     pub cpus: Option<u32>,
     /// Adds an xHCI controller with a USB HID keyboard and mouse. QMP events
-    /// then go to the USB keyboard (the most recent handler).
+    /// go to the most recently activated input handler: the USB keyboard
+    /// only while no virtio-input driver has started (QEMU activates a
+    /// virtio keyboard when its guest driver sets DRIVER_OK, after the
+    /// usb-kbd activated itself at realize), so under `shell`, where init
+    /// starts the virtio-input drivers, they reach the virtio keyboard
+    /// unless `usb_hid_only_input` is set.
     #[serde(default)]
     pub usb_hid: bool,
+    /// No virtio keyboard and mouse: the USB HID devices are the only
+    /// input devices, so QMP input reaches them whatever the guest starts.
+    #[serde(default)]
+    pub usb_hid_only_input: bool,
     /// The `usb_hid` xHCI offers MSI only (no MSI-X), like 2012 Intel
     /// controllers: the kernel must program the MSI capability.
     #[serde(default)]

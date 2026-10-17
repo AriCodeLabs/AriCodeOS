@@ -5,12 +5,15 @@
 # restart the driver. The shell is driven over the serial console (the USB
 # keyboard is gone): `diag` lists the fault and `shutdown` ends the run.
 # The pings only keep the shell busy until the host has typed the key.
+# No virtio keyboard and mouse (`usb_hid_only_input`): otherwise QMP input
+# goes to the virtio keyboard, the most recently activated handler.
 name = "strict.usb_hid_halt"
 description = "strict: an injected HID transfer failure halts usbd with an endpoint dump, no restart, fault in diag"
 level = "full"
 areas = ["usb", "input", "init", "diag"]
 cmdline = "qemu_exit shell strict usb_fault=1:hid"
 usb_hid = true
+usb_hid_only_input = true
 timeout_secs = 120
 stdin = ["repeat 10 ping 10.0.2.2", "diag", "shutdown"]
 

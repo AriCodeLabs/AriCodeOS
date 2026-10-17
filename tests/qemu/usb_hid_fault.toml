@@ -5,19 +5,37 @@
 # the driver prints it, records a fault event, and from the idle loop stops
 # the endpoint for real (Stop Endpoint, xHCI 4.6.9; QEMU's usb-hid never
 # STALLs its interrupt IN endpoint, so the Halted branch cannot be produced
-# here), reads its state (Stopped), sends Set TR Dequeue (4.6.10) and
-# queues every report TRB again. The keys typed afterwards reach the shell:
-# `diag` lists the fault and `shutdown` ends the run.
+# here), reads its state and follows it: Stopped takes Set TR Dequeue
+# (4.6.10) and every report TRB is queued again; Running takes no command
+# and the retired TRBs are queued again. Both happen in QEMU: its xHCI
+# keeps an interrupt endpoint's kick timer armed across Stop Endpoint
+# (only a transfer in NAK retry cancels it, hw/usb/hcd-xhci.c) and the
+# timer sets the endpoint Running again without a doorbell, against 4.6.9,
+# so the state read after the stop depends on timing. The scenario checks
+# what holds for both: the stop succeeds, the recovery runs and ends with
+# the reports queued again, no command fails (a Set TR Dequeue raced by
+# the timer would end in Context State Error, `usb cmd fail`). The keys
+# typed afterwards reach the shell: `diag` lists the fault and `shutdown`
+# ends the run. The virtio keyboard
+# and mouse are left out (`usb_hid_only_input`): QEMU sends QMP input to
+# the most recently activated handler, which under `shell` is the virtio
+# keyboard (activated when its driver starts), so the keys would never
+# reach the USB keyboard. The keys are paced (`key_delay_ms`): QEMU's
+# usb-kbd holds at most 16 scancodes and drops events beyond that while the
+# driver drains it at the endpoint's polling rate (and not at all during
+# the recovery), so 30 events at QMP speed lose keystrokes.
 name = "usb.hid_fault"
 description = "usbd: a failed HID report is recorded, its interrupt endpoint recovered from the idle loop and typing continues"
 level = "full"
 areas = ["usb", "input", "diag"]
 cmdline = "qemu_exit shell usb_fault=1:hid"
 usb_hid = true
+usb_hid_only_input = true
 timeout_secs = 60
 
 [host_input]
 marker = "CONSOLE_BRIDGE_READY"
+key_delay_ms = 30
 keys = [
     "ret",
     "d", "i", "a", "g", "ret",
@@ -28,14 +46,13 @@ keys = [
 exit = 33
 serial_contains = [
     "usb-input: device ready: USB HID Keyboard+Mouse",
-    "AriInit: console bridge with 3 input device(s)",
+    "AriInit: console bridge with 1 input device(s)",
     "completion code 4 (USB Transaction Error), injected",
     "; recovered from the idle loop",
     "usb-input: Stop Endpoint slot ",
-    "(state 3 Stopped, dequeue ",
-    "): Set TR Dequeue",
-    "usb-input: Set TR Dequeue slot ",
+    "usb-input: recovering dci ",
     " recovered: reports queued again",
+    "usb-input: first report from slot ",
     "fault reported by process",
     "usb inj hid (code 4)",
     "ari> shutdown",
