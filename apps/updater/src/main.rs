@@ -56,7 +56,7 @@ const IMAGE_BUFFER: u64 = 4 * 1024 * 1024;
 const SECTOR: usize = 512;
 const CHUNK: u16 = 16;
 /// Wait for one network operation.
-const HTTP_TIMEOUT_MS: u64 = 15_000;
+const HTTP_TIMEOUT_MS: u32 = 15_000;
 /// Budget of a whole run: a source that trickles bytes cannot hold the
 /// updater forever (audit 1, M3).
 const RUN_DEADLINE_MS: u64 = 10 * 60 * 1000;
@@ -669,9 +669,9 @@ fn apply(allow_downgrade: bool, pk: &[u8; 32]) -> u64 {
 
 // ---------------------------------------------------------------- network
 
-fn http_error(e: aricode_https::HttpsError) -> &'static str {
+fn http_error(e: aricode_https::HttpsError) -> String {
     use aricode_https::HttpsError as E;
-    match e {
+    String::from(match e {
         E::BadUrl => "invalid URL",
         E::Resolve(_) => "cannot resolve the host",
         E::Connect(_) => "cannot connect",
@@ -681,39 +681,49 @@ fn http_error(e: aricode_https::HttpsError) -> &'static str {
         E::TooBig => "response headers too large",
         E::Unsupported => "unsupported HTTP response",
         E::Aborted => "aborted",
-    }
+        E::Deadline(phase) => return format!("deadline passed {}", phase.describe()),
+        E::TooManyInformational => "too many interim responses",
+        E::HeaderBytes => "response headers too large in all (interim responses included)",
+    })
 }
 
-/// Downloads `url` into `out`, never more than `out.len()` bytes and never
-/// past the run's deadline (audit 1, M3): the sink refuses both. Returns
-/// the bytes received.
+/// The run's budget as the HTTP client sees it: what is left until
+/// `DEADLINE`, asked before every network operation.
+fn run_budget() -> u32 {
+    remaining_ms().min(u32::MAX as u64) as u32
+}
+
+/// Downloads `url` into `out`, never more than `out.len()` bytes (the sink
+/// refuses more) and never past the run's deadline (audit 1, M3): the
+/// budget bounds the name resolution, the connection, the TLS handshake and
+/// every send and receive, headers and chunk framing included, so a server
+/// that keeps the response coming without ever delivering a body byte
+/// cannot hold the run (incident 0009). Returns the bytes received.
 fn fetch(net: &mut NetClient, url: &str, out: &mut [u8]) -> Result<usize, String> {
-    let left = remaining_ms();
-    if left == 0 {
-        return Err(String::from("run deadline passed"));
-    }
-    let (mut got, mut overflow, mut late) = (0usize, false, false);
+    let (mut got, mut overflow) = (0usize, false);
     let mut sink = |chunk: &[u8]| {
         if got + chunk.len() > out.len() {
             overflow = true;
-            return false;
-        }
-        if remaining_ms() == 0 {
-            late = true;
             return false;
         }
         out[got..got + chunk.len()].copy_from_slice(chunk);
         got += chunk.len();
         true
     };
-    let timeout = left.min(HTTP_TIMEOUT_MS) as u32;
-    let result = aricode_https::get_with(net, SYSTEM, &[], url, timeout, &mut sink);
+    let result = aricode_https::get_with(
+        net,
+        SYSTEM,
+        &[],
+        url,
+        HTTP_TIMEOUT_MS,
+        &run_budget,
+        &mut sink,
+    );
     match result {
         Ok(200) => Ok(got),
         Ok(status) => Err(format!("HTTP {status}")),
         Err(_) if overflow => Err(format!("larger than {} bytes", out.len())),
-        Err(_) if late => Err(String::from("run deadline passed")),
-        Err(e) => Err(String::from(http_error(e))),
+        Err(e) => Err(http_error(e)),
     }
 }
 

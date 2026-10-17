@@ -16,6 +16,13 @@ pub const MAX_HOST: usize = 253;
 /// accept by default and what fits the 64 KiB user stack next to the TLS
 /// state and the body buffer of the callers.
 pub const MAX_HEADERS: usize = 8192;
+/// Maximum number of informational (1xx) responses accepted before the
+/// final one. A server may send a `100 Continue` and a few `103 Early
+/// Hints`; a stream of them is a stall, not a response (incident 0009).
+pub const MAX_INFORMATIONAL: u32 = 8;
+/// Maximum header bytes of one fetch, discarded 1xx heads included; the
+/// final response alone may use [`MAX_HEADERS`] (incident 0009).
+pub const MAX_HEADER_BYTES: usize = 2 * MAX_HEADERS;
 /// Maximum length of a chunk size line (with extensions).
 const MAX_CHUNK_LINE: usize = 256;
 
@@ -25,6 +32,67 @@ pub trait Transport {
     fn send_all(&mut self, data: &[u8]) -> Result<(), Self::Error>;
     /// Reads up to `out.len()` bytes; `Ok(0)` is a clean close by the server.
     fn recv(&mut self, out: &mut [u8]) -> Result<usize, Self::Error>;
+}
+
+/// Time budget of a whole fetch (incident 0009). [`fetch_with`] asks it
+/// before every send and every receive and fails with [`Error::Deadline`]
+/// once it answers `0`, whatever the server sends: a stream of interim
+/// responses, header bytes one at a time or chunk trailers never reach
+/// the sink, so the sink cannot be the deadline. Transports that wait (the
+/// SDK's) bound each operation by the same budget, so the overshoot past
+/// the deadline is at most one operation's timeout.
+pub trait Budget {
+    /// Milliseconds left for the fetch; `0` once the deadline passed.
+    fn remaining_ms(&self) -> u32;
+}
+
+impl<F: Fn() -> u32> Budget for F {
+    fn remaining_ms(&self) -> u32 {
+        self()
+    }
+}
+
+/// No absolute deadline: only the transport's own per-operation timeouts
+/// bound the fetch. For a caller without a clock talking to a server it
+/// controls (the test HTTP client); anything that fetches from a server it
+/// does not control passes a real budget.
+pub struct Unbounded;
+
+impl Budget for Unbounded {
+    fn remaining_ms(&self) -> u32 {
+        u32::MAX
+    }
+}
+
+/// Phase of a GET in which the budget ran out ([`Error::Deadline`]).
+/// `Resolve`, `Connect` and `Handshake` precede the HTTP exchange and are
+/// reported by the SDK transports; [`fetch_with`] reports the others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    Resolve,
+    Connect,
+    Handshake,
+    /// Sending the request.
+    Request,
+    /// Waiting for the status line and headers (interim responses included).
+    Headers,
+    /// Body bytes, chunk framing and trailers.
+    Body,
+}
+
+impl Phase {
+    /// What was going on when the time ran out, for messages
+    /// (`"deadline passed " + describe()`).
+    pub fn describe(self) -> &'static str {
+        match self {
+            Phase::Resolve => "while resolving the host",
+            Phase::Connect => "while connecting",
+            Phase::Handshake => "in the TLS handshake",
+            Phase::Request => "while sending the request",
+            Phase::Headers => "while waiting for the response headers",
+            Phase::Body => "while receiving the body",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +107,14 @@ pub enum Error<E> {
     Unsupported,
     /// The caller's sink refused more body data (`fetch_with`).
     Aborted,
+    /// The caller's [`Budget`] ran out in this phase before the fetch
+    /// completed.
+    Deadline(Phase),
+    /// More than [`MAX_INFORMATIONAL`] interim responses.
+    TooManyInformational,
+    /// The headers of this fetch, discarded interim responses included,
+    /// exceed [`MAX_HEADER_BYTES`].
+    HeaderBytes,
 }
 
 /// Result of a GET: status code and body bytes written.
@@ -361,9 +437,11 @@ impl ChunkDecoder {
 /// 1xx responses are consumed; a transport error close is never
 /// taken for a complete download. A body larger than `out` is truncated
 /// (`Fetched::truncated`); `TooBig` is only for headers that do not fit.
+/// `budget` bounds the whole exchange (see [`Budget`]).
 pub fn fetch<T: Transport>(
     t: &mut T,
     url: &Url,
+    budget: &dyn Budget,
     out: &mut [u8],
 ) -> Result<Fetched, Error<T::Error>> {
     let mut body_len = 0;
@@ -376,7 +454,7 @@ pub fn fetch<T: Transport>(
         truncated |= n < chunk.len();
         true
     };
-    let status = fetch_with(t, url, &mut sink)?;
+    let status = fetch_with(t, url, budget, &mut sink)?;
     Ok(Fetched {
         status,
         body_len,
@@ -388,20 +466,28 @@ pub fn fetch<T: Transport>(
 /// (any size, in order); the sink returns `false` to abort (`Aborted`).
 /// Returns the status code. The connection is consumed to the end of the
 /// body so the caller can tell a complete download from a cut one.
+/// `budget` is consulted before every transport operation (`Deadline`);
+/// interim responses and header bytes are bounded as well
+/// (`TooManyInformational`, `HeaderBytes`), so no phase of the exchange
+/// depends on the server to end.
 pub fn fetch_with<T: Transport>(
     t: &mut T,
     url: &Url,
+    budget: &dyn Budget,
     sink: &mut dyn FnMut(&[u8]) -> bool,
 ) -> Result<u16, Error<T::Error>> {
     let mut host_buf = [0u8; MAX_HOST + 6];
     let host = url.host_header(&mut host_buf);
     let mut req = [0u8; MAX_HOST + 6 + 512];
     let n = write_get(host, url.path, &mut req).ok_or(Error::BadUrl)?;
-    t.send_all(&req[..n]).map_err(Error::Transport)?;
+    send(t, budget, &req[..n])?;
 
-    // Headers: accumulate up to the empty line; skip 1xx responses.
+    // Headers: accumulate up to the empty line; skip 1xx responses, counting
+    // them and the bytes they took.
     let mut head = [0u8; MAX_HEADERS];
     let mut have = 0;
+    let mut informational = 0u32;
+    let mut discarded = 0usize;
     let response = loop {
         match parse_response(&head[..have]) {
             Some(Err(())) => return Err(Error::Malformed),
@@ -409,6 +495,11 @@ pub fn fetch_with<T: Transport>(
                 if r.status == 101 {
                     return Err(Error::Unsupported);
                 }
+                informational += 1;
+                if informational > MAX_INFORMATIONAL {
+                    return Err(Error::TooManyInformational);
+                }
+                discarded += r.header_len;
                 head.copy_within(r.header_len..have, 0);
                 have -= r.header_len;
                 continue;
@@ -419,18 +510,55 @@ pub fn fetch_with<T: Transport>(
         if have == head.len() {
             return Err(Error::TooBig);
         }
-        match t.recv(&mut head[have..]).map_err(Error::Transport)? {
+        // Everything in `head` is header bytes of the current response (no
+        // empty line yet): the fetch needs more and has used its share.
+        if discarded + have >= MAX_HEADER_BYTES {
+            return Err(Error::HeaderBytes);
+        }
+        match recv(t, budget, Phase::Headers, &mut head[have..])? {
             0 => return Err(Error::Malformed),
             k => have += k,
         }
     };
     let rest = &head[response.header_len..have];
     match response.body {
-        BodyLength::Length(len) => read_length(t, rest, len, sink)?,
-        BodyLength::UntilClose => read_until_close(t, rest, sink)?,
-        BodyLength::Chunked => read_chunked(t, rest, sink)?,
+        BodyLength::Length(len) => read_length(t, budget, rest, len, sink)?,
+        BodyLength::UntilClose => read_until_close(t, budget, rest, sink)?,
+        BodyLength::Chunked => read_chunked(t, budget, rest, sink)?,
     }
     Ok(response.status)
+}
+
+/// `send_all` within the budget.
+fn send<T: Transport>(t: &mut T, budget: &dyn Budget, data: &[u8]) -> Result<(), Error<T::Error>> {
+    if budget.remaining_ms() == 0 {
+        return Err(Error::Deadline(Phase::Request));
+    }
+    t.send_all(data)
+        .map_err(|e| transport_error(budget, Phase::Request, e))
+}
+
+/// `recv` within the budget.
+fn recv<T: Transport>(
+    t: &mut T,
+    budget: &dyn Budget,
+    phase: Phase,
+    out: &mut [u8],
+) -> Result<usize, Error<T::Error>> {
+    if budget.remaining_ms() == 0 {
+        return Err(Error::Deadline(phase));
+    }
+    t.recv(out).map_err(|e| transport_error(budget, phase, e))
+}
+
+/// A transport failure once the budget is spent is the deadline: the
+/// transport was given at most the time that was left and ran out of it.
+fn transport_error<E>(budget: &dyn Budget, phase: Phase, e: E) -> Error<E> {
+    if budget.remaining_ms() == 0 {
+        Error::Deadline(phase)
+    } else {
+        Error::Transport(e)
+    }
 }
 
 fn deliver<E>(sink: &mut dyn FnMut(&[u8]) -> bool, data: &[u8]) -> Result<(), Error<E>> {
@@ -443,6 +571,7 @@ fn deliver<E>(sink: &mut dyn FnMut(&[u8]) -> bool, data: &[u8]) -> Result<(), Er
 
 fn read_length<T: Transport>(
     t: &mut T,
+    budget: &dyn Budget,
     rest: &[u8],
     len: usize,
     sink: &mut dyn FnMut(&[u8]) -> bool,
@@ -453,7 +582,7 @@ fn read_length<T: Transport>(
     let mut buf = [0u8; 1024];
     while got < len {
         let want = (len - got).min(buf.len());
-        match t.recv(&mut buf[..want]).map_err(Error::Transport)? {
+        match recv(t, budget, Phase::Body, &mut buf[..want])? {
             0 => return Err(Error::Malformed),
             k => {
                 deliver(sink, &buf[..k])?;
@@ -466,13 +595,14 @@ fn read_length<T: Transport>(
 
 fn read_until_close<T: Transport>(
     t: &mut T,
+    budget: &dyn Budget,
     rest: &[u8],
     sink: &mut dyn FnMut(&[u8]) -> bool,
 ) -> Result<(), Error<T::Error>> {
     deliver(sink, rest)?;
     let mut buf = [0u8; 1024];
     loop {
-        match t.recv(&mut buf).map_err(Error::Transport)? {
+        match recv(t, budget, Phase::Body, &mut buf)? {
             0 => return Ok(()),
             k => deliver(sink, &buf[..k])?,
         }
@@ -481,6 +611,7 @@ fn read_until_close<T: Transport>(
 
 fn read_chunked<T: Transport>(
     t: &mut T,
+    budget: &dyn Budget,
     rest: &[u8],
     sink: &mut dyn FnMut(&[u8]) -> bool,
 ) -> Result<(), Error<T::Error>> {
@@ -512,7 +643,7 @@ fn read_chunked<T: Transport>(
         if !pending.is_empty() || (used > 0 || written > 0) && raw_len > 0 {
             continue;
         }
-        match t.recv(&mut raw[raw_len..]).map_err(Error::Transport)? {
+        match recv(t, budget, Phase::Body, &mut raw[raw_len..])? {
             0 => return Err(Error::Malformed),
             k => raw_len += k,
         }
@@ -575,13 +706,13 @@ mod tests {
     fn get(parts: &[&[u8]], capacity: usize) -> Result<Fetched, Error<&'static str>> {
         let url = Url::parse("http://127.0.0.1/").unwrap();
         let mut out = vec![0u8; capacity];
-        fetch(&mut Mock::new(parts), &url, &mut out)
+        fetch(&mut Mock::new(parts), &url, &Unbounded, &mut out)
     }
 
     fn body(parts: &[&[u8]], capacity: usize) -> (Fetched, Vec<u8>) {
         let url = Url::parse("http://127.0.0.1/").unwrap();
         let mut out = vec![0u8; capacity];
-        let f = fetch(&mut Mock::new(parts), &url, &mut out).unwrap();
+        let f = fetch(&mut Mock::new(parts), &url, &Unbounded, &mut out).unwrap();
         out.truncate(f.body_len);
         (f, out)
     }
@@ -630,7 +761,7 @@ mod tests {
         let url_text = std::format!("http://{host}/");
         let url = Url::parse(&url_text).unwrap();
         let mut t = Mock::new(&[b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"]);
-        fetch(&mut t, &url, &mut [0u8; 16]).unwrap();
+        fetch(&mut t, &url, &Unbounded, &mut [0u8; 16]).unwrap();
         let sent = String::from_utf8(t.sent).unwrap();
         assert!(sent.contains(&std::format!("Host: {host}\r\n")), "{sent:?}");
     }
@@ -850,13 +981,13 @@ mod tests {
         let mut t = Mock::new(&[b"HTTP/1.0 200 OK\r\n\r\npartial"]);
         t.end = Err("reset");
         assert_eq!(
-            fetch(&mut t, &url, &mut [0u8; 128]),
+            fetch(&mut t, &url, &Unbounded, &mut [0u8; 128]),
             Err(Error::Transport("reset"))
         );
         let mut t = Mock::new(&[b"HTTP/1.0 200 OK\r\n\r\nexact"]);
         t.end = Err("reset");
         assert_eq!(
-            fetch(&mut t, &url, &mut [0u8; 5]),
+            fetch(&mut t, &url, &Unbounded, &mut [0u8; 5]),
             Err(Error::Transport("reset")),
             "also when probing with the destination full"
         );
@@ -928,7 +1059,7 @@ mod tests {
         let mut t = Mock::new(&[&raw]);
         let mut got = Vec::new();
         let url = Url::parse("h/").unwrap();
-        let status = fetch_with(&mut t, &url, &mut |c: &[u8]| {
+        let status = fetch_with(&mut t, &url, &Unbounded, &mut |c: &[u8]| {
             got.extend_from_slice(c);
             true
         })
@@ -938,11 +1069,252 @@ mod tests {
         // The sink aborts after the first piece.
         let mut t = Mock::new(&[&raw]);
         let mut pieces = 0;
-        let r = fetch_with(&mut t, &url, &mut |_: &[u8]| {
+        let r = fetch_with(&mut t, &url, &Unbounded, &mut |_: &[u8]| {
             pieces += 1;
             false
         });
         assert_eq!(r, Err(Error::Aborted));
         assert_eq!(pieces, 1);
+    }
+
+    // ------------------------------------------------- deadline (incident 0009)
+
+    use std::cell::Cell;
+
+    /// Simulated clock: a `Budget` over a deadline in simulated milliseconds.
+    struct Clock {
+        now: Cell<u64>,
+        deadline: u64,
+    }
+
+    impl Clock {
+        fn new(deadline: u64) -> Self {
+            Self {
+                now: Cell::new(0),
+                deadline,
+            }
+        }
+        fn advance(&self, ms: u64) {
+            self.now.set(self.now.get() + ms);
+        }
+        fn budget(&self) -> impl Fn() -> u32 + '_ {
+            move || self.deadline.saturating_sub(self.now.get()) as u32
+        }
+    }
+
+    /// Server that answers the n-th receive with `reply(n)`, taking
+    /// `step_ms` of simulated time per receive, and, like the SDK transport
+    /// bounded by the budget, times out instead of waiting past the deadline.
+    struct Slow<'a> {
+        clock: &'a Clock,
+        step_ms: u64,
+        receives: u32,
+        reply: &'a dyn Fn(u32) -> Vec<u8>,
+    }
+
+    impl Transport for Slow<'_> {
+        type Error = &'static str;
+        fn send_all(&mut self, _: &[u8]) -> Result<(), &'static str> {
+            Ok(())
+        }
+        fn recv(&mut self, out: &mut [u8]) -> Result<usize, &'static str> {
+            self.receives += 1;
+            let left = self.clock.deadline.saturating_sub(self.clock.now.get());
+            if self.step_ms > left {
+                self.clock.advance(left);
+                return Err("timeout");
+            }
+            self.clock.advance(self.step_ms);
+            let data = (self.reply)(self.receives);
+            let n = data.len().min(out.len());
+            out[..n].copy_from_slice(&data[..n]);
+            Ok(n)
+        }
+    }
+
+    const EARLY_HINTS: &[u8] = b"HTTP/1.1 103 Early Hints\r\nLink: </x>; rel=preload\r\n\r\n";
+    const FINAL_EMPTY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+
+    /// Runs a fetch against `Slow`, returning the result, the simulated time
+    /// at the end and how many times the sink was called.
+    fn slow_fetch(
+        clock: &Clock,
+        step_ms: u64,
+        reply: &dyn Fn(u32) -> Vec<u8>,
+    ) -> (Result<u16, Error<&'static str>>, u64, u32) {
+        let mut t = Slow {
+            clock,
+            step_ms,
+            receives: 0,
+            reply,
+        };
+        let mut calls = 0;
+        let budget = clock.budget();
+        let url = Url::parse("http://host/index").unwrap();
+        let r = fetch_with(&mut t, &url, &budget, &mut |_: &[u8]| {
+            calls += 1;
+            true
+        });
+        (r, clock.now.get(), calls)
+    }
+
+    /// The audit's probe: 700 `103 Early Hints`, one second each, then an
+    /// empty 200. The production parser used to finish after 701 simulated
+    /// seconds with the sink never called; the interim-response limit now
+    /// stops it after a few seconds.
+    #[test]
+    fn interim_response_flood_is_refused_long_before_the_deadline() {
+        let clock = Clock::new(600_000);
+        let reply = |n: u32| (if n <= 700 { EARLY_HINTS } else { FINAL_EMPTY }).to_vec();
+        let (r, elapsed, calls) = slow_fetch(&clock, 1000, &reply);
+        assert_eq!(r, Err(Error::TooManyInformational));
+        assert_eq!(elapsed, (MAX_INFORMATIONAL as u64 + 1) * 1000);
+        assert_eq!(calls, 0);
+    }
+
+    /// Interim responses spaced so that the count limit does not fire first:
+    /// the budget, asked before every receive, ends the fetch at the
+    /// deadline in the headers phase.
+    #[test]
+    fn slow_interim_responses_fail_at_the_deadline() {
+        let clock = Clock::new(600_000);
+        let reply = |_: u32| EARLY_HINTS.to_vec();
+        let (r, elapsed, calls) = slow_fetch(&clock, 100_000, &reply);
+        assert_eq!(r, Err(Error::Deadline(Phase::Headers)));
+        assert_eq!(elapsed, 600_000, "not a millisecond past the deadline");
+        assert_eq!(calls, 0);
+        // Six interim responses were read before the deadline: fewer than
+        // the count limit, so this really is the budget at work.
+        assert!(600_000 / 100_000 < MAX_INFORMATIONAL as u64);
+    }
+
+    /// A header dribbled one byte per receive never reaches the sink; the
+    /// deadline ends it.
+    #[test]
+    fn header_dribble_fails_at_the_deadline() {
+        let clock = Clock::new(10_000);
+        let head = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Slow: yes\r\n\r\nhello";
+        let reply = |n: u32| std::vec![head[(n as usize - 1) % head.len()]];
+        let (r, elapsed, calls) = slow_fetch(&clock, 1000, &reply);
+        assert_eq!(r, Err(Error::Deadline(Phase::Headers)));
+        assert_eq!(elapsed, 10_000);
+        assert_eq!(calls, 0);
+    }
+
+    /// Chunk framing without body bytes: after the last chunk the server
+    /// sends trailer lines forever. No body byte, no sink call; the budget
+    /// ends it in the body phase.
+    #[test]
+    fn endless_chunk_trailers_fail_at_the_deadline() {
+        let clock = Clock::new(30_000);
+        let reply = |n: u32| {
+            if n == 1 {
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n".to_vec()
+            } else {
+                std::format!("X-Trailer-{n}: still here\r\n").into_bytes()
+            }
+        };
+        let (r, elapsed, calls) = slow_fetch(&clock, 1000, &reply);
+        assert_eq!(r, Err(Error::Deadline(Phase::Body)));
+        assert_eq!(elapsed, 30_000);
+        assert_eq!(calls, 0);
+        // A chunk size line that never ends: the line limit refuses it
+        // before the deadline (framing, not time).
+        let clock = Clock::new(600_000);
+        let reply = |n: u32| {
+            if n == 1 {
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec()
+            } else {
+                b"1".to_vec()
+            }
+        };
+        let (r, _, calls) = slow_fetch(&clock, 1000, &reply);
+        assert_eq!((r, calls), (Err(Error::Malformed), 0));
+    }
+
+    /// A transport that times out once the budget is spent (the SDK gives it
+    /// the remaining time) reports the deadline, not a network fault.
+    #[test]
+    fn transport_timeout_past_the_deadline_is_the_deadline() {
+        let clock = Clock::new(5_000);
+        // Nothing ever arrives: the first receive would outlast the budget.
+        let reply = |_: u32| Vec::new();
+        let (r, elapsed, calls) = slow_fetch(&clock, 20_000, &reply);
+        assert_eq!(r, Err(Error::Deadline(Phase::Headers)));
+        assert_eq!((elapsed, calls), (5_000, 0));
+        // With time left, a transport error is still a transport error.
+        let clock = Clock::new(600_000);
+        let url = Url::parse("http://host/").unwrap();
+        let mut t = Mock::new(&[b"HTTP/1.0 200 OK\r\n\r\npartial"]);
+        t.end = Err("reset");
+        let budget = clock.budget();
+        assert_eq!(
+            fetch(&mut t, &url, &budget, &mut [0u8; 128]),
+            Err(Error::Transport("reset"))
+        );
+    }
+
+    #[test]
+    fn too_many_informational_responses() {
+        let mut parts: Vec<&[u8]> = std::vec![EARLY_HINTS; MAX_INFORMATIONAL as usize];
+        parts.push(FINAL_EMPTY);
+        assert_eq!(
+            get(&parts, 8),
+            Ok(Fetched {
+                status: 200,
+                body_len: 0,
+                truncated: false,
+            }),
+            "exactly the limit is accepted"
+        );
+        parts.insert(0, EARLY_HINTS);
+        assert_eq!(get(&parts, 8), Err(Error::TooManyInformational));
+    }
+
+    #[test]
+    fn cumulative_header_bytes_are_bounded() {
+        // Each interim response fits `MAX_HEADERS` on its own, and there are
+        // fewer than `MAX_INFORMATIONAL`, but together they exceed the fetch's
+        // header budget.
+        let mut big = b"HTTP/1.1 103 Early Hints\r\nLink: ".to_vec();
+        big.extend(vec![b'l'; 3 * 1024]);
+        big.extend(b"\r\n\r\n");
+        assert!(big.len() < MAX_HEADERS);
+        let count = MAX_HEADER_BYTES / big.len() + 1;
+        assert!(count < MAX_INFORMATIONAL as usize);
+        let mut parts: Vec<&[u8]> = std::vec![&big; count];
+        parts.push(FINAL_EMPTY);
+        assert_eq!(get(&parts, 8), Err(Error::HeaderBytes));
+        // Two of them plus a large final response stay within the limit.
+        let mut final_big = b"HTTP/1.1 200 OK\r\nX-Big: ".to_vec();
+        final_big.extend(vec![b'b'; 7 * 1024]);
+        final_big.extend(b"\r\nContent-Length: 2\r\n\r\nok");
+        let (f, out) = body(&[&big, &big, &final_big], 8);
+        assert_eq!((f.status, out.as_slice()), (200, &b"ok"[..]));
+    }
+
+    /// A normal fetch under budget: an interim response, headers and a body
+    /// over several receives, each taking time, succeeds untouched.
+    #[test]
+    fn fast_fetch_within_budget_succeeds() {
+        let clock = Clock::new(600_000);
+        let reply = |n: u32| match n {
+            1 => EARLY_HINTS.to_vec(),
+            2 => b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhello".to_vec(),
+            _ => b" wor".to_vec(),
+        };
+        let mut t = Slow {
+            clock: &clock,
+            step_ms: 2_000,
+            receives: 0,
+            reply: &reply,
+        };
+        let budget = clock.budget();
+        let url = Url::parse("http://host/index").unwrap();
+        let mut out = [0u8; 16];
+        let f = fetch(&mut t, &url, &budget, &mut out).unwrap();
+        assert_eq!((f.status, f.body_len, f.truncated), (200, 10, false));
+        assert_eq!(&out[..10], b"hello wor ");
+        assert_eq!(clock.now.get(), 4 * 2_000);
     }
 }

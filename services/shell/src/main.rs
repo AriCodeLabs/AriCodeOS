@@ -738,8 +738,21 @@ fn http_get(fs: &mut FsClient, client: &mut NetClient, arg: &[u8]) {
         }
         let _ = fs.close(fd);
     }
+    // The whole download is bounded, whatever the server does with its
+    // headers (incident 0009); a clock that cannot be read leaves no time.
+    let now = || sys::time::uptime_ms(SYSTEM).unwrap_or(u64::MAX);
+    let deadline = now().saturating_add(HTTP_BUDGET_MS);
+    let budget = || deadline.saturating_sub(now()).min(u32::MAX as u64) as u32;
     let mut body = [0u8; 8192];
-    match aricode_https::get(client, SYSTEM, &extra, url, &mut body, 8000) {
+    match aricode_https::get(
+        client,
+        SYSTEM,
+        &extra,
+        url,
+        &mut body,
+        HTTP_TIMEOUT_MS,
+        &budget,
+    ) {
         Ok(f) => {
             print(b"HTTP ");
             num(f.status as u64);
@@ -773,11 +786,25 @@ fn http_get(fs: &mut FsClient, client: &mut NetClient, arg: &[u8]) {
         }
         Err(HttpsError::TooBig) => print(b"http: response headers too large\n"),
         Err(HttpsError::Aborted) => print(b"http: download aborted\n"),
+        Err(HttpsError::Deadline(phase)) => {
+            print(b"http: deadline passed ");
+            print(phase.describe().as_bytes());
+            print(b"\n");
+        }
+        Err(HttpsError::TooManyInformational) => print(b"http: too many interim responses\n"),
+        Err(HttpsError::HeaderBytes) => {
+            print(b"http: response headers too large in all (interim responses included)\n")
+        }
     }
 }
 
 /// AriFS file with an extra trusted root certificate (DER) for `http`.
 const TRUSTED_CA: &str = "trusted_ca.der";
+/// Longest wait for one network operation of `http`.
+const HTTP_TIMEOUT_MS: u32 = 8_000;
+/// Budget of a whole `http`: room for a page over TLS on a slow link, and
+/// the bound a server that trickles headers runs into (incident 0009).
+const HTTP_BUDGET_MS: u64 = 30_000;
 
 /// Short explanation of a TLS failure.
 fn tls_error(e: aricode_tls::Error) -> &'static [u8] {

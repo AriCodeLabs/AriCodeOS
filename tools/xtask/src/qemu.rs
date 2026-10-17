@@ -301,9 +301,19 @@ pub struct Responder {
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
+/// One `103 Early Hints` of the `/early-hints` routes.
+const EARLY_HINTS: &[u8] = b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n";
+/// Pause between two interim responses of `/early-hints`: under the
+/// shell's per-operation timeout (8 s) and slow enough that its 30 s budget
+/// runs out before the interim-response limit (8) is reached.
+const EARLY_HINTS_PAUSE: Duration = Duration::from_secs(5);
+
 /// Test HTTP server: `/hola` (Content-Length), `/chunked`
 /// (Transfer-Encoding: chunked), `/big-headers` (5 KiB of headers, the
-/// size github.com sends) and 404 for everything else.
+/// size github.com sends), `/early-hints` (a `103` every five seconds and
+/// never a final response: the server of incident 0009, which the
+/// client's budget must cut), `/early-hints-flood` (twenty `103` at once,
+/// then a 200: the interim-response limit) and 404 for everything else.
 fn http_serve(mut stream: std::net::TcpStream) {
     use std::io::Write;
     let mut buf = [0u8; 2048];
@@ -319,9 +329,25 @@ fn http_serve(mut stream: std::net::TcpStream) {
     }
     let request = String::from_utf8_lossy(&buf[..have]);
     let path = request.split(' ').nth(1).unwrap_or("/");
+    if path == "/early-hints" {
+        // Until the client gives up and closes (the write then fails).
+        while stream
+            .write_all(EARLY_HINTS)
+            .and_then(|()| stream.flush())
+            .is_ok()
+        {
+            std::thread::sleep(EARLY_HINTS_PAUSE);
+        }
+        return;
+    }
     let response: Vec<u8> = match path {
         "/hola" => b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 19\r\nConnection: close\r\n\r\nHola desde el host\n".to_vec(),
         "/chunked" => b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nd\r\nprimer trozo,\r\ne\r\n segundo trozo\r\n0\r\n\r\n".to_vec(),
+        "/early-hints-flood" => {
+            let mut r = EARLY_HINTS.repeat(20);
+            r.extend(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nflooded\n");
+            r
+        }
         "/big-headers" => {
             let mut r = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n".to_vec();
             for i in 0..40 {

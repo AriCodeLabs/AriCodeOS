@@ -750,8 +750,12 @@ latter briefly to add the region.
   across reads, sizes validated with no unchecked arithmetic)
   and a close-delimited body only ends with `Ok(0)`: a transport
   reset is an error, never a partial success. The body goes to a caller
-  buffer (4 KiB in the shell). The xtask responder adds a test HTTP
-  server on `127.0.0.1:17010` with the `network.http` cases.
+  buffer (4 KiB in the shell). Every fetch carries a `Budget` for the
+  whole exchange, asked before each send and receive (`Deadline(Phase)`),
+  with at most 8 interim responses and 16 KiB of header bytes per fetch
+  (incident 0009, ADR 0033). The xtask responder adds a test HTTP
+  server on `127.0.0.1:17010` with the `network.http` cases and the
+  `/early-hints` routes of `shell.http_deadline`.
 - Identifiers are not truncated: `fs::Request::with_name` returns
   `None` if the name does not fit, and the DNS name travels whole in the client's DMA
   buffer (up to 253 bytes) instead of in the IPC message.
@@ -1365,7 +1369,8 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   publish-update`, served by `serve-update` or any web server.
 - `apps/updater` (then caps system, fs, net, block): channel manifest, version
   comparison with the active slot, streaming download into `UPDATE`
-  (`aricode-https::get_with` over `aricode-http::fetch_with`), then the
+  (`aricode-https::get_with` over `aricode-http::fetch_with`, with the
+  run's remaining time as the fetch budget, ADR 0033), then the
   Phase 30 verification and install. Shell `update [URL|check|apply]`.
 - Kernel `map_foreign` is idempotent per region; servers map client buffers
   per request (`block::map_client_buffer`).

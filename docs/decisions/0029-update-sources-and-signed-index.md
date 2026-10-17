@@ -55,7 +55,10 @@ it, no downgrades unless asked, and every install logged.
    with the project public key before parsing a single line of the index
    (`aricode_update_index::verify`). Both downloads are bounded (4 KiB and
    256 bytes: the HTTP sink refuses anything beyond) and the whole run has
-   a ten-minute deadline (`upd-deadline`). A refused index is a fault event
+   a ten-minute deadline (`upd-deadline`), carried as a budget into every
+   network operation of every download (resolve, connect, TLS handshake,
+   each send and receive, interim responses, headers and chunk framing
+   included) since incident 0009 (ADR 0033). A refused index is a fault event
    (`upd-index-refused`, ADR 0028), its source contributes nothing, and the
    index verified earlier for that source, if any, is kept (it is still
    authentic). Every entry keeps its own signature as well: the system image
