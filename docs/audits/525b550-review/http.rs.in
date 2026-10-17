@@ -1,0 +1,29 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+#[cfg(test)]
+mod http {
+    use aricode_http::{Transport, Url, fetch_with};
+    use std::cell::Cell;
+    struct Server<'a> { now: &'a Cell<u64>, receives: u32 }
+    impl Transport for Server<'_> {
+        type Error = ();
+        fn send_all(&mut self, _: &[u8]) -> Result<(), ()> { Ok(()) }
+        fn recv(&mut self, out: &mut [u8]) -> Result<usize, ()> {
+            self.receives += 1;
+            self.now.set(self.now.get() + 1000); // one second, below the 15 s operation timeout
+            let response: &[u8] = if self.receives <= 700 {
+                b"HTTP/1.1 103 Early Hints\r\n\r\n"
+            } else { b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" };
+            out[..response.len()].copy_from_slice(response); Ok(response.len())
+        }
+    }
+    #[test]
+    fn sink_deadline_must_bound_headers_too() {
+        let now = Cell::new(0); let mut calls = 0;
+        let mut transport = Server { now: &now, receives: 0 };
+        let mut sink = |_: &[u8]| { calls += 1; now.get() < 600000 };
+        let result = fetch_with(&mut transport, &Url::parse("http://host/index").unwrap(), &mut sink);
+        println!("HTTP: {result:?}, elapsed={}ms, deadline=600000ms, sink calls={calls}", now.get());
+        assert!(now.get() <= 600000, "the updater's sink-only deadline does not bound the request");
+    }
+}

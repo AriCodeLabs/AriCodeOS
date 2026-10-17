@@ -1,0 +1,34 @@
+   Compiling audit-525b550-probes v0.0.0 (/var/tmp/aricode-audit-525b550-probes)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running unittests src/lib.rs (/var/tmp/aricode-audit-525b550-probes/target/debug/deps/audit_525b550_probes-51343ac32fdbd409)
+
+running 3 tests
+EHCI: 8-byte CSW returned Ok(0), reset recoveries=0
+
+thread 'ehci::short_csw_must_not_acknowledge_a_write' (2532191) panicked at src/lib.rs:273:9:
+missing CSW residue/status must never acknowledge a write
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+installer: write accepted=true, state="[installed]\nhello_ext 1\n"
+test ehci::short_csw_must_not_acknowledge_a_write ... FAILED
+
+thread 'installer::transient_listing_failure_must_not_erase_plan' (2532193) panicked at src/lib.rs:124:9:
+assertion `left == right` failed: a failed listing must preserve existing state
+  left: [91, 105, 110, 115, 116, 97, 108, 108, 101, 100, 93, 10, 104, 101, 108, 108, 111, 95, 101, 120, 116, 32, 49, 10]
+ right: [91, 105, 110, 115, 116, 97, 108, 108, 101, 100, 93, 10, 104, 101, 108, 108, 111, 95, 101, 120, 116, 32, 49, 10, 91, 112, 108, 97, 110, 93, 10, 97, 112, 112, 32, 104, 101, 108, 108, 111, 95, 101, 120, 116, 32, 50, 10, 91, 115, 116, 97, 103, 101, 100, 93, 10]
+test installer::transient_listing_failure_must_not_erase_plan ... FAILED
+HTTP: Ok(200), elapsed=701000ms, deadline=600000ms, sink calls=0
+
+thread 'http::sink_deadline_must_bound_headers_too' (2532192) panicked at src/lib.rs:300:9:
+the updater's sink-only deadline does not bound the request
+test http::sink_deadline_must_bound_headers_too ... FAILED
+
+failures:
+
+failures:
+    ehci::short_csw_must_not_acknowledge_a_write
+    http::sink_deadline_must_bound_headers_too
+    installer::transient_listing_failure_must_not_erase_plan
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

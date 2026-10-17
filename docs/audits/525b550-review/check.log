@@ -1,0 +1,263 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.26
+   Compiling serde_core v1.0.229
+   Compiling serde v1.0.229
+   Compiling aricode-crypto v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/crypto)
+   Compiling hashbrown v0.17.1
+   Compiling equivalent v1.0.2
+   Compiling aricode-initrd v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/initrd)
+   Compiling toml_write v0.1.2
+   Compiling winnow v0.7.15
+   Compiling aricode-cmdline v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/cmdline)
+   Compiling aricode-proto v0.11.0 (/var/tmp/aricode-audit-525b550-1/sdk/proto)
+   Compiling aricode-gpt v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/gpt)
+   Compiling aricode-net v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/net)
+   Compiling aricode-http v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/http)
+   Compiling aricode-fat v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/fat)
+   Compiling aricode-arifs v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/arifs)
+   Compiling indexmap v2.14.2
+   Compiling syn v3.0.6
+   Compiling aricode-ssh v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/ssh)
+   Compiling aricode-pkg v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/pkg)
+   Compiling aricode-ab v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/ab)
+   Compiling aricode-update-index v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/update-index)
+   Compiling serde_derive v1.0.229
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling toml_edit v0.22.27
+   Compiling toml v0.8.23
+   Compiling xtask v0.11.0 (/var/tmp/aricode-audit-525b550-1/tools/xtask)
+    Finished `release` profile [optimized + debuginfo] target(s) in 18.68s
+     Running `target/release/xtask check`
+    Checking boot-protocol v0.11.0 (/var/tmp/aricode-audit-525b550-1/boot-protocol)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.16s
+    Checking aricode-elf v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/elf)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.15s
+    Checking aricode-x86-paging v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/x86-paging)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.12s
+    Checking aricode-cmdline v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/cmdline)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.11s
+    Checking aricode-fb-console v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/fb-console)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.13s
+    Checking aricode-x86-cpu v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/x86-cpu)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.12s
+    Checking aricode-pmm v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/pmm)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.15s
+    Checking aricode-heap v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/heap)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.09s
+    Checking aricode-sync v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/sync)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.09s
+    Checking aricode-sched v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/sched)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.12s
+    Checking aricode-abi v0.11.0 (/var/tmp/aricode-audit-525b550-1/sdk/abi)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.13s
+    Checking aricode-handles v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/handles)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.10s
+    Checking aricode-initrd v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/initrd)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.07s
+    Checking aricode-acpi v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/acpi)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.18s
+    Checking aricode-pci v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/pci)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.10s
+    Checking aricode-virtio v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/virtio)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.10s
+    Checking aricode-gpt v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/gpt)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.11s
+    Checking aricode-arifs v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/arifs)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.18s
+    Checking aricode-net v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/net)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.27s
+    Checking aricode-http v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/http)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.15s
+    Checking aricode-input v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/input)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.13s
+    Checking aricode-gfx v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/gfx)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.13s
+    Checking aricode-manifest v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/manifest)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.13s
+    Checking aricode-crypto v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/crypto)
+    Checking aricode-pkg v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/pkg)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 2.16s
+    Checking aricode-update-index v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/update-index)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.14s
+    Checking aricode-wasm v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/wasm)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.15s
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.01s
+    Checking aricode-ab v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/ab)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.06s
+    Checking aricode-proto v0.11.0 (/var/tmp/aricode-audit-525b550-1/sdk/proto)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.12s
+    Checking aricode-xhci v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/xhci)
+    Checking aricode-ehci v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/ehci)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.15s
+    Checking aricode-sys v0.11.0 (/var/tmp/aricode-audit-525b550-1/sdk/rust)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.13s
+    Checking aricode-build v0.11.0 (/var/tmp/aricode-audit-525b550-1/sdk/build)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.04s
+    Checking aricode-fb-console v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/fb-console)
+    Checking aricode-pci v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/pci)
+    Checking aricode-net v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/net)
+    Checking aricode-http v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/http)
+    Checking aricode-abi v0.11.0 (/var/tmp/aricode-audit-525b550-1/sdk/abi)
+    Checking aricode-proto v0.11.0 (/var/tmp/aricode-audit-525b550-1/sdk/proto)
+    Checking aricode-heap v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/heap)
+    Checking aricode-sync v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/sync)
+    Checking aricode-gfx v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/gfx)
+    Checking aricode-virtio v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/virtio)
+    Checking aricode-sys v0.11.0 (/var/tmp/aricode-audit-525b550-1/sdk/rust)
+    Checking aricode-rt v0.11.0 (/var/tmp/aricode-audit-525b550-1/sdk/runtime)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.54s
+   Compiling aricode-build v0.11.0 (/var/tmp/aricode-audit-525b550-1/sdk/build)
+   Compiling ari-app-hello v0.11.0 (/var/tmp/aricode-audit-525b550-1/apps/hello)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.12s
+   Compiling ari-app-perms-check v0.11.0 (/var/tmp/aricode-audit-525b550-1/apps/perms-check)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.09s
+    Checking aricode-crypto v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/crypto)
+    Checking aricode-initrd v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/initrd)
+   Compiling ari-app-updater v0.11.0 (/var/tmp/aricode-audit-525b550-1/apps/updater)
+    Checking aricode-gpt v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/gpt)
+    Checking aricode-x509 v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/x509)
+    Checking aricode-ab v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/ab)
+    Checking aricode-pkg v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/pkg)
+    Checking aricode-update-index v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/update-index)
+    Checking aricode-tls v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/tls)
+    Checking aricode-https v0.11.0 (/var/tmp/aricode-audit-525b550-1/sdk/https)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 1.96s
+   Compiling ari-app-fs-probe v0.11.0 (/var/tmp/aricode-audit-525b550-1/apps/fs-probe)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.09s
+   Compiling ari-app-win-probe v0.11.0 (/var/tmp/aricode-audit-525b550-1/apps/win-probe)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.09s
+   Compiling ari-app-wasm-runner v0.11.0 (/var/tmp/aricode-audit-525b550-1/apps/wasm-runner)
+    Checking aricode-wasm v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/wasm)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.21s
+   Compiling ari-app-notes-reader v0.11.0 (/var/tmp/aricode-audit-525b550-1/apps/notes-reader)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.09s
+   Compiling ari-app-installer v0.11.0 (/var/tmp/aricode-audit-525b550-1/apps/installer)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.15s
+   Compiling ari-app-bench v0.11.0 (/var/tmp/aricode-audit-525b550-1/apps/bench)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.10s
+    Checking wasm-demo v0.11.0 (/var/tmp/aricode-audit-525b550-1/apps/wasm-demo)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.05s
+   Compiling user-testprogs v0.11.0 (/var/tmp/aricode-audit-525b550-1/user/testprogs)
+    Checking aricode-input v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/input)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.46s
+   Compiling ariinit v0.11.0 (/var/tmp/aricode-audit-525b550-1/services/init)
+    Checking aricode-manifest v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/manifest)
+    Checking aricode-cmdline v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/cmdline)
+    Checking aricode-supervisor v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/supervisor)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.40s
+   Compiling ari-virtio-blk v0.11.0 (/var/tmp/aricode-audit-525b550-1/services/virtio-blk)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.11s
+   Compiling ari-virtio-net v0.11.0 (/var/tmp/aricode-audit-525b550-1/services/virtio-net)
+    Checking ari-net-core v0.11.0 (/var/tmp/aricode-audit-525b550-1/services/net-core)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.13s
+   Compiling ari-virtio-input v0.11.0 (/var/tmp/aricode-audit-525b550-1/services/virtio-input)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.10s
+   Compiling ari-usb-input v0.11.0 (/var/tmp/aricode-audit-525b550-1/services/usb-input)
+    Checking aricode-xhci v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/xhci)
+    Checking aricode-usb-storage v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/usb-storage)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.25s
+   Compiling ari-usb-ehci v0.11.0 (/var/tmp/aricode-audit-525b550-1/services/usb-ehci)
+    Checking aricode-ehci v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/ehci)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.23s
+   Compiling ari-console-bridge v0.11.0 (/var/tmp/aricode-audit-525b550-1/services/console-bridge)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.09s
+   Compiling ari-compositor v0.11.0 (/var/tmp/aricode-audit-525b550-1/services/compositor)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.11s
+   Compiling ari-fsd v0.11.0 (/var/tmp/aricode-audit-525b550-1/services/arifs)
+    Checking aricode-arifs v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/arifs)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.15s
+   Compiling ari-shell v0.11.0 (/var/tmp/aricode-audit-525b550-1/services/shell)
+    Checking aricode-lineedit v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/lineedit)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.15s
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.02s
+   Compiling ari-rtl-net v0.11.0 (/var/tmp/aricode-audit-525b550-1/services/rtl-net)
+    Checking aricode-rtl8169 v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/rtl8169)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.10s
+   Compiling ari-sshd v0.11.0 (/var/tmp/aricode-audit-525b550-1/services/sshd)
+    Checking aricode-ssh v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/ssh)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.16s
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.02s
+    Checking aricode-fat v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/fat)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.09s
+    Checking aricode-iommu v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/iommu)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.06s
+    Checking aricode-lineedit v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/lineedit)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.05s
+    Checking aricode-rtl8169 v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/rtl8169)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.05s
+    Checking aricode-ssh v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/ssh)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.10s
+    Checking aricode-supervisor v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/supervisor)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.05s
+    Checking aricode-x509 v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/x509)
+    Checking aricode-tls v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/tls)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.19s
+    Checking aricode-usb-storage v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/usb-storage)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.06s
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.01s
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.01s
+    Blocking waiting for file lock on package cache
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.26
+    Checking uguid v2.2.1
+    Checking bit_field v0.10.3
+    Checking bitflags v2.13.2
+    Checking log v0.4.34
+    Checking cfg-if v1.0.5
+    Checking aricode-initrd v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/initrd)
+    Checking aricode-crypto v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/crypto)
+    Checking aricode-cmdline v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/cmdline)
+    Checking aricode-gpt v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/gpt)
+    Checking aricode-x86-paging v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/x86-paging)
+    Checking aricode-elf v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/elf)
+    Checking boot-protocol v0.11.0 (/var/tmp/aricode-audit-525b550-1/boot-protocol)
+    Checking ucs2 v0.3.3
+    Checking uefi-raw v0.17.0
+   Compiling syn v3.0.6
+    Checking aricode-ab v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/ab)
+   Compiling ptr_meta_derive v0.3.2
+   Compiling uefi-macros v0.20.0
+    Checking ptr_meta v0.3.2
+    Checking uefi v0.41.0
+    Checking ariboot v0.11.0 (/var/tmp/aricode-audit-525b550-1/boot)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 3.07s
+    Checking aricode-x86-paging v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/x86-paging)
+   Compiling arikernel v0.11.0 (/var/tmp/aricode-audit-525b550-1/kernel)
+    Checking boot-protocol v0.11.0 (/var/tmp/aricode-audit-525b550-1/boot-protocol)
+    Checking aricode-handles v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/handles)
+    Checking aricode-sched v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/sched)
+    Checking aricode-acpi v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/acpi)
+    Checking aricode-elf v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/elf)
+    Checking aricode-x86-cpu v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/x86-cpu)
+    Checking log v0.4.34
+    Checking aricode-pmm v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/pmm)
+    Checking aricode-iommu v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/iommu)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.65s
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.26
+   Compiling serde_core v1.0.229
+   Compiling serde v1.0.229
+    Checking hashbrown v0.17.1
+    Checking equivalent v1.0.2
+    Checking toml_write v0.1.2
+    Checking aricode-initrd v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/initrd)
+    Checking winnow v0.7.15
+    Checking aricode-gpt v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/gpt)
+    Checking aricode-pkg v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/pkg)
+    Checking aricode-ab v0.11.0 (/var/tmp/aricode-audit-525b550-1/libs/ab)
+    Checking indexmap v2.14.2
+   Compiling syn v3.0.6
+   Compiling serde_derive v1.0.229
+    Checking toml_datetime v0.6.11
+    Checking serde_spanned v0.6.9
+    Checking toml_edit v0.22.27
+    Checking toml v0.8.23
+    Checking xtask v0.11.0 (/var/tmp/aricode-audit-525b550-1/tools/xtask)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 3.34s
