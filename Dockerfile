@@ -31,7 +31,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         qemu-system-x86 ovmf nasm clang lld binutils git make \
-        openssl openssh-client ca-certificates curl \
+        openssl openssh-client ca-certificates curl libnss-wrapper \
     && rm -rf /var/lib/apt/lists/*
 
 # The toolchain, components and targets from rust-toolchain.toml, plus the
@@ -49,6 +49,10 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 # server start it inside the container on localhost only.
 # The repository owner's uid is passed with --user so files written to the
 # mounted checkout (build/, target/) belong to the host user.
+# The entry point gives that uid a user name (nss_wrapper), which OpenSSH
+# needs in the sshd host tests.
+COPY tools/docker/entrypoint.sh /usr/local/bin/aricodeos-entrypoint
 WORKDIR /src
 ENV HOME=/tmp
+ENTRYPOINT ["/usr/local/bin/aricodeos-entrypoint"]
 CMD ["cargo", "xtask", "test"]

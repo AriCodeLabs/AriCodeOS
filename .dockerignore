@@ -1,4 +1,5 @@
-# The Dockerfile copies nothing from the checkout (it is mounted at run
-# time), so the build context stays empty.
+# The Dockerfile copies only its entry point from the checkout (the
+# repository is mounted at run time), so the build context stays tiny.
 *
 !Dockerfile
+!tools/docker/entrypoint.sh
