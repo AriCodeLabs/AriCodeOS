@@ -466,6 +466,13 @@ fn main(_arg: u64) -> u64 {
     loop {
         let (sock, peer, _) = match net.tcp_accept(listener, 60_000) {
             Ok(c) => c,
+            // The network service endpoint is closed for good (ADR 0030):
+            // every accept would fail at once; its supervisor decides
+            // what follows.
+            Err(NetError::Ipc(e)) if e.endpoint_gone() => {
+                say(b"network service gone; exiting");
+                return 4;
+            }
             Err(_) => continue,
         };
         sys::print(b"sshd: connection from ");

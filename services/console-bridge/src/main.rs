@@ -10,7 +10,7 @@
 
 use aricode_input::{Keyboard, EV_KEY};
 use aricode_proto::input::{Event, MAX_EVENTS};
-use aricode_rt::sys::input::InputClient;
+use aricode_rt::sys::input::{InputClient, InputError};
 use aricode_rt::sys::{self, Handle};
 
 const CONSOLE_IN: Handle = Handle(0x0001_0004);
@@ -52,11 +52,28 @@ fn main(count: u64) -> u64 {
     // No announcement of its own: init does it before launching the shell,
     // so nothing interleaves with the first prompt on the console (SMP).
     loop {
-        for (i, client) in clients.iter().take(count).enumerate() {
-            let Some(client) = client else { continue };
-            // No events (timeout), service busy or dead (the supervisor
-            // restarts it and the endpoint stays valid): nothing to translate.
-            let n = client.read(POLL_MS, &mut events, &mut times).unwrap_or(0);
+        if clients.iter().all(Option::is_none) {
+            say(b"every input device is gone; exiting");
+            return 4;
+        }
+        for (i, slot) in clients.iter_mut().take(count).enumerate() {
+            let Some(client) = slot else { continue };
+            // No events (timeout), service busy or dead while the supervisor
+            // restarts it (the endpoint stays valid): nothing to translate.
+            // An endpoint closed for good (the supervisor gave the device
+            // up, ADR 0030) answers at once forever: the device is dropped.
+            let n = match client.read(POLL_MS, &mut events, &mut times) {
+                Ok(n) => n,
+                Err(InputError::Ipc(e)) if e.endpoint_gone() => {
+                    sys::print(b"console-bridge: input device ");
+                    let mut b = [0u8; 20];
+                    sys::print(aricode_rt::fmt_u64(i as u64, &mut b));
+                    sys::print(b" is gone; dropping it\n");
+                    *slot = None;
+                    continue;
+                }
+                Err(_) => 0,
+            };
             let mut len = 0;
             for e in &events[..n] {
                 let ev = aricode_input::Event {

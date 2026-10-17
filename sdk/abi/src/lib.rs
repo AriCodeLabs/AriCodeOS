@@ -694,6 +694,13 @@ pub enum Error {
 }
 
 impl Error {
+    /// The endpoint can never deliver again (ADR 0030): its other side is
+    /// gone (`PeerClosed`) or it was revoked. Unlike `Timeout`, retrying is
+    /// pointless; a loop that polls such an endpoint must stop using it.
+    pub const fn endpoint_gone(self) -> bool {
+        matches!(self, Error::PeerClosed | Error::Revoked)
+    }
+
     pub const fn to_raw(self) -> i64 {
         -(self as i64)
     }
@@ -795,6 +802,8 @@ mod tests {
         assert_eq!(Error::from_raw(-99), None);
         assert_eq!(Error::PeerClosed.to_raw(), -13);
         assert_eq!(decode(-13), Err(Error::PeerClosed));
+        assert!(Error::PeerClosed.endpoint_gone() && Error::Revoked.endpoint_gone());
+        assert!(!Error::Timeout.endpoint_gone());
         assert_eq!(decode(-1), Err(Error::NoSys));
         assert_eq!(
             decode(-4096),

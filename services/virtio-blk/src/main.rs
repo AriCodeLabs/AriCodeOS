@@ -159,9 +159,15 @@ fn serve(dev: &mut Device) -> ! {
     let mut handles = [Handle(0); 2];
     say(b"serving requests");
     loop {
-        let Ok((n, nh)) = sys::ipc_receive(SERVICE, &mut msg, &mut handles, TIMEOUT_INFINITE)
-        else {
-            continue;
+        let (n, nh) = match sys::ipc_receive(SERVICE, &mut msg, &mut handles, TIMEOUT_INFINITE) {
+            Ok(r) => r,
+            // The service endpoint was closed or revoked (ADR 0030): nobody
+            // can send here again, so polling it would spin.
+            Err(e) if e.endpoint_gone() => {
+                say(b"service endpoint closed; exiting");
+                sys::process_exit(9);
+            }
+            Err(_) => continue,
         };
         if nh == 0 {
             continue; // without a reply endpoint there is no one to answer

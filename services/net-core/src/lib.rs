@@ -1150,8 +1150,15 @@ pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
             stack.on_frame(&frame[..n], now);
         }
         for _ in 0..8 {
-            let Ok((n, nh)) = sys::ipc_receive(SERVICE, &mut msg, &mut handles, 0) else {
-                break;
+            let (n, nh) = match sys::ipc_receive(SERVICE, &mut msg, &mut handles, 0) {
+                Ok(r) => r,
+                // The service endpoint was closed or revoked (ADR 0030): nobody
+                // can send here again, so polling it would spin.
+                Err(e) if e.endpoint_gone() => {
+                    say(name, b"service endpoint closed; exiting");
+                    sys::process_exit(9);
+                }
+                Err(_) => break,
             };
             if nh == 0 {
                 continue;

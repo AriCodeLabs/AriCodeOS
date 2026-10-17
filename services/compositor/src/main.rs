@@ -11,7 +11,7 @@
 use aricode_gfx::{Canvas, Desktop, Hit, Window};
 use aricode_input::{Keyboard, BTN_LEFT, EV_KEY, EV_REL, REL_X, REL_Y};
 use aricode_proto::window::{Event, Op, Reply, Request, Status, MAX_SIDE};
-use aricode_rt::sys::input::InputClient;
+use aricode_rt::sys::input::{InputClient, InputError};
 use aricode_rt::sys::{self, abi, Handle};
 use aricode_rt::{fmt_hex, fmt_u64};
 
@@ -385,8 +385,15 @@ fn main(inputs: u64) -> u64 {
     loop {
         let t = now(SYSTEM);
         for _ in 0..8 {
-            let Ok((n, nh)) = sys::ipc_receive(SERVICE, &mut msg, &mut handles, 0) else {
-                break;
+            let (n, nh) = match sys::ipc_receive(SERVICE, &mut msg, &mut handles, 0) {
+                Ok(r) => r,
+                // The service endpoint was closed or revoked (ADR 0030): nobody
+                // can send here again, so polling it would spin.
+                Err(e) if e.endpoint_gone() => {
+                    say(b"service endpoint closed; exiting");
+                    return 9;
+                }
+                Err(_) => break,
             };
             if nh == 0 {
                 continue;
@@ -409,9 +416,21 @@ fn main(inputs: u64) -> u64 {
             [(0, 0, aricode_input::Event::default());
                 MAX_INPUTS * aricode_proto::input::MAX_EVENTS];
         let mut merged_len = 0;
-        for (d, dev) in devices.iter().enumerate() {
-            let Some(dev) = dev else { continue };
-            if let Ok(n) = dev.read(1, &mut events, &mut times) {
+        for (d, slot) in devices.iter_mut().enumerate() {
+            let Some(dev) = slot else { continue };
+            let read = dev.read(1, &mut events, &mut times);
+            if let Err(InputError::Ipc(e)) = read {
+                if e.endpoint_gone() {
+                    // Closed for good (ADR 0030): it would answer at once
+                    // forever and the 1 ms read would no longer pace the loop.
+                    sys::print(b"compositor: input device ");
+                    let mut b = [0u8; 20];
+                    sys::print(aricode_rt::fmt_u64(d as u64, &mut b));
+                    sys::print(b" is gone; dropping it\n");
+                    *slot = None;
+                }
+            }
+            if let Ok(n) = read {
                 for (e, t) in events[..n].iter().zip(&times[..n]) {
                     merged[merged_len] = (
                         *t,
@@ -432,7 +451,7 @@ fn main(inputs: u64) -> u64 {
         }
         comp.expire(t);
         comp.compose();
-        if inputs == 0 {
+        if devices.iter().all(Option::is_none) {
             sys::thread_sleep(10);
         }
     }
