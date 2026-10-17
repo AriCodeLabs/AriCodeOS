@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! 2D graphics (Phase 26): 32 bpp `0x00RRGGBB` canvases over caller
 //! buffers, clipping, text with the console font, a cursor and the
 //! compositor desktop model (windows with z-order, focus and

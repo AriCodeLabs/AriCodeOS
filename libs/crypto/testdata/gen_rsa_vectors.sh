@@ -1,5 +1,6 @@
 #!/bin/sh
 # SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+# SPDX-License-Identifier: Apache-2.0
 # Generates rsa_vectors.txt (RSA verification vectors for src/rsa.rs) with
 # OpenSSL: sh gen_rsa_vectors.sh > rsa_vectors.txt (run in a temp dir; it
 # writes the keys to the current directory). One line per signature:

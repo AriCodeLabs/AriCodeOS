@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! The state machine against the real OpenSSH client (`ssh` on the host):
 //! key exchange, host key, cipher, public-key authentication, exec with
 //! exit status, an interactive session with a pty, and a refused key.

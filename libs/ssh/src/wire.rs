@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! SSH wire encoding (RFC 4251 section 5): bytes, uint32, booleans,
 //! strings, name-lists and mpints.
 

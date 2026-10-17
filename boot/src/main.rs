@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! AriBoot: the AriCodeOS UEFI loader.
 //!
 //! Sequence (section 11 of the master document):

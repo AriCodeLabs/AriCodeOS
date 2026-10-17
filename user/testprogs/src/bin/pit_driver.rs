@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Test driver: handles IRQ0 (PIT) from ring 3 and allocates a DMA buffer.
 //! Handles: 0x10004 = IRQ line (READ|WAIT), 0x10005 = HARDWARE (MANAGE).
 #![no_std]

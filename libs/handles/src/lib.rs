@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Handle table (Phase 12): applications do not hold pointers to kernel
 //! objects but opaque handles with rights.
 //!

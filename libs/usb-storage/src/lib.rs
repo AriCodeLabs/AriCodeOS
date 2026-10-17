@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! USB mass storage (ADR 0023): the bulk-only transport (BOT) and the
 //! subset of SCSI commands a block service needs.
 //! Only encodes and decodes; the xHCI driver performs the transfers.

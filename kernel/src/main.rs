@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! AriKernel: the AriCodeOS kernel.
 //!
 //! Status: 0.0.3. Receives `BootInfo`, validates the protocol, brings up the

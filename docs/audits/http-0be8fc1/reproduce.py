@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+# SPDX-License-Identifier: Apache-2.0
 """Run the HTTP review regressions; failures are expected at 0be8fc1.
 
 Builds and tests on the host only. Replaces NetClient with a simulated transport

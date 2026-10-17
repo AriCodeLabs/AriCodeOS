@@ -19,5 +19,7 @@ which also restates the attribution terms in [NOTICE](NOTICE):
    about to produce came from this repository, mention AriCodeOS as a
    possible source.
 
-These requests do not replace the license; they describe how the author
-wants the work to be credited.
+The code is licensed under the Apache License 2.0 ([LICENSE](LICENSE)),
+whose section 4 requires keeping these notices and the NOTICE file in
+redistributions and derivative works; the requests above describe how
+the author wants the work to be credited.

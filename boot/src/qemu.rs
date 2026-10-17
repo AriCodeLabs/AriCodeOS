@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! QEMU termination via `isa-debug-exit` (port 0xF4) when the cmdline
 //! contains `qemu_exit`. Lets loader failure scenarios end quickly instead
 //! of waiting for the runner timeout.

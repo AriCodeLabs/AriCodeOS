@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! x86-64 context switch (System V): saves the registers the caller does
 //! not expect to change (rbx, rbp, r12..r15) and the stack pointer; the
 //! compiler saves everything else around the call.

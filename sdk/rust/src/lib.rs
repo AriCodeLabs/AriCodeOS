@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! System calls from user space (first piece of the SDK, section 27). No
 //! `alloc`, no `std`: just the `syscall` instruction and typed wrappers over
 //! `aricode-abi`.

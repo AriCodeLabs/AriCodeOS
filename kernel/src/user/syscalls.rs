@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Syscall dispatch (ABI in `sdk/abi`). Resources are named by handles with
 //! rights; the syscall number only selects the operation.
 

@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! AriFS v1 (Phase 20 and stage 2, ADR 0014): a flat directory of up to 32
 //! fixed-capacity files, without fragmentation, with checksums on the
 //! metadata, an atomic replace journal and a `flush` contract.

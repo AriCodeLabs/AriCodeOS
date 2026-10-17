@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! `fs_victim`: writes a secret into its private directory and exits without
 //! closing the descriptor (regression for audit e9fdf38, finding 1). It also
 //! replaces its file with a synthetic string and leaves a chunked replace

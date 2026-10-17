@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Global physical allocator (Phase 5), built on `aricode-pmm` from the UEFI
 //! memory map in `BootInfo`.
 //!

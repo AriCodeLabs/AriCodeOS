@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! A/B update (Phase 30). Three pure pieces, tested on the host and used
 //! by AriBoot, init, the updater and xtask:
 //!

@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Request/reply call over a service endpoint (ADR 0012): each request
 //! carries its own reply endpoint, which is closed when done, and every wait
 //! is bounded. A late reply reaches a closed endpoint and is lost: it is

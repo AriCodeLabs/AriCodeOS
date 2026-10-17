@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Runtime for user programs (Phase 27): `_start`, heap, panic and
 //! formatting helpers without `alloc`. Every AriCodeOS program (services,
 //! applications and test programs) depends on this crate and on the

@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! AEAD ciphers of TLS 1.3: ChaCha20-Poly1305 (RFC 8439 section 2.8) and
 //! AES-GCM (NIST SP 800-38D) with 128- or 256-bit keys, both with 96-bit
 //! nonces and 16-byte tags. Data is encrypted or decrypted in place; `open`

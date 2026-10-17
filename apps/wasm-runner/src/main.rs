@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! `wasm_runner` (Phase 29 and stage 4, ADR 0019): runs `demo.wasm` from its
 //! private directory with `aricode-wasm`. The module sees no syscalls or
 //! POSIX: only the functions this host imports into it under `aricode`, and

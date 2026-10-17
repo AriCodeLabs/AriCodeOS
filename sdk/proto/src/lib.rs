@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Versioned IPC protocols of the services (section 75). Each message is a
 //! fixed-size block of bytes starting with a protocol identifier and
 //! version, so a service rejects what it does not understand.

@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! RSA signature verification (RFC 8017): RSASSA-PKCS1-v1_5 (certificates)
 //! and RSASSA-PSS with MGF1 and a salt as long as the hash (the TLS 1.3
 //! `rsa_pss_rsae_*` schemes). Keys and signatures are big-endian byte

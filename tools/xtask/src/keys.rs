@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Key management (Phase 31): generate Ed25519 key pairs, sign and verify
 //! files. The private key (32-byte seed, hex) never leaves the host; the
 //! system only carries public keys.

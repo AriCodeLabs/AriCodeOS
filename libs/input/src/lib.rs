@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Input events (Phase 25): the virtio-input format matches Linux evdev
 //! (`type`, `code`, `value`), so the same library will serve USB HID when it
 //! arrives. Includes a minimal US keyboard that turns key presses into

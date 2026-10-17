@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! `notes_reader`: receives from the broker an fsd endpoint bound to a single
 //! file in read mode (manifest `read_files`, ADR 0016). It lists it, reads it
 //! and checks that it cannot create, write, replace or `flush`, and that it

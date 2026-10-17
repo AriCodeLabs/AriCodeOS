@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Minimal TCP (RFC 793) without `alloc`: header, and a connection with fixed
 //! buffers, retransmission with an exponential timer and orderly close. The
 //! connection sends nothing on its own: `poll` produces at most one

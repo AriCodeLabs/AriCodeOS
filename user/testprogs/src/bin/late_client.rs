@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Client for the late-reply test (stage 1B): the first request times out
 //! before the server answers; the second must receive ITS reply ("fresh"),
 //! never the late reply to the first one.

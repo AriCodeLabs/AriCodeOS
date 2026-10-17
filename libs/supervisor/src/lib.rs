@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Service supervision (stage 1 of the post-roadmap plan):
 //! the common service lifecycle contract that `init` applies to every driver
 //! and resident service. The policy knows nothing about processes or IPC: it receives

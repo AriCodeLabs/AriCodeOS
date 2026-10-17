@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Block service client (Phase 19): info, read and write over IPC with its
 //! own DMA buffer. Handles: 0x10004 = service endpoint (WRITE), 0x10005 =
 //! HARDWARE (for the DMA buffer). Success = 0.

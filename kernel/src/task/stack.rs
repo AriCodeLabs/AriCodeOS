@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Thread stacks: a dedicated virtual region, frames from the PMM and an
 //! unmapped guard page below each stack.
 

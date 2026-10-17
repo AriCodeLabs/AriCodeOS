@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! A/B boot (Phase 30): looks on the GPT disks for the `ARIBOOT` state
 //! partition and the `SYSA`/`SYSB` slots, applies the `aricode-ab` policy
 //! (pending slot attempts, rollback), verifies the manifest's Ed25519

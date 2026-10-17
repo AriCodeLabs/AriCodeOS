@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! rtl-net (Phase 34, ADR 0024): ring 3 driver for the Realtek r8169
 //! family (RTL8169/8168/8101; the RTL8136 in the test laptop) on top of
 //! the shared network core (`ari-net-core`). Receives the driver contract

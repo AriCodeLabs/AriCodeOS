@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! x86-64: GDT/TSS, IDT, interrupt stubs and exception handling.
 
 pub mod apic;

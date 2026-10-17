@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Minimal ELF64 parser (x86-64, little endian, `ET_EXEC`) to load the
 //! kernel: header, `PT_LOAD` program headers and entry point.
 //!

@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Certificate parsing (RFC 5280, the subset the web PKI uses).
 
 use crate::der::{self, explicit, Reader, Tlv};

@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Realtek r8169 family NICs (RTL8169, 8168, 8101/8102/8136...):
 //! register map, 16-byte descriptors and bring-up sequence, as documented
 //! by the Linux `r8169` driver. No I/O of its own: the driver supplies

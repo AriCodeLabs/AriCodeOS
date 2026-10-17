@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Intel VT-d (Phase 33): what the kernel needs to isolate each driver's DMA
 //! in its own domain, without touching hardware: register offsets and bits,
 //! capability decoding, root and context table entries, second-level paging

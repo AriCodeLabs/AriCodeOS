@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Standard Base64 (RFC 4648), for `authorized_keys` and fingerprints.
 
 use alloc::vec::Vec;

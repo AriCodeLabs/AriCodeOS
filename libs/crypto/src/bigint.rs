@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Fixed-capacity unsigned big integers for RSA verification: modular
 //! exponentiation with Montgomery multiplication, no `alloc`. Moduli must be
 //! odd and at most [`MAX_BITS`] bits long. Not constant time: it only ever

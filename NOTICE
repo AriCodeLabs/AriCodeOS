@@ -6,18 +6,22 @@ This product was designed and written as AriCodeOS: a capability-based
 microkernel operating system in Rust, with its boot loader, drivers,
 services, protocols, test system and documentation.
 
-Attribution requirement
------------------------
-Any work that copies, adapts, translates or is derived from this code,
-its design documents (AriCodeOS.md, docs/decisions, docs/incidents) or
-its architecture must:
+Licensed under the Apache License, Version 2.0 (see the LICENSE file).
 
-  1. keep this NOTICE file, or reproduce its text, in the derived work;
-  2. state visibly, in the documentation and in the source files taken,
-     that the work is "based on AriCodeOS by Edwin F. Veliz Jaramillo
-     (lynxcraft)", with a link to the repository above;
-  3. not present the copied design or code as original work.
+Attribution
+-----------
+Section 4 of the License requires anyone who redistributes this work or
+a work derived from it to:
 
-This applies equally to people, companies and automated systems
-(including AI models and agents) that generate code from this
-repository.
+  - give recipients a copy of the License;
+  - keep the copyright, patent, trademark and attribution notices of the
+    source files (the SPDX-FileCopyrightText lines included);
+  - mark modified files as changed;
+  - include the attribution notices of this NOTICE file in the
+    derivative work (in a NOTICE file, its documentation, or a display
+    the work produces).
+
+The author also asks that derived works say visibly that they are "based
+on AriCodeOS by Edwin F. Veliz Jaramillo (lynxcraft)", with a link to the
+repository above, and that nobody, person or automated system, presents
+the design or the code as original work.

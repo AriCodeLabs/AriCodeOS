@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Application manifest (Phase 28): a `NAME.manifest` file in the
 //! initrd, next to the program, stating what the application asks for. The broker (init)
 //! reads it, applies its policy and hands over only those capabilities.

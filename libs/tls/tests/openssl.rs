@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! The state machine against the real OpenSSL server (`openssl s_server
 //! -tls1_3 -rev`, which echoes each line reversed): every cipher suite,
 //! ECDSA P-256/P-384, RSA-PSS and Ed25519 server certificates issued by a
