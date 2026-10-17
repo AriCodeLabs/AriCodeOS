@@ -104,8 +104,9 @@ one-file directory. `history::tests`: `appended` starts with the new line
 when the log is absent, appends when it is present, refuses a failed read,
 trims an overgrown log and refuses one far over the limit.
 
-`cargo xtask check`, `cargo test -p aricode-update-index` (33) and
-`cargo test -p xtask` (27) pass on the branch.
+`cargo xtask check`, `cargo test -p aricode-update-index` (36: 25
+existing, 8 `files`, 2 `history`, 1 `installed_path`) and `cargo test -p
+xtask` (27) pass on the branch.
 
 No QEMU-level regression was added: there is no file-service fault
 injection today (the test-only command-line keys are `test`, `shell_fault`,
@@ -116,6 +117,52 @@ The existing scenarios that exercise the changed paths
 been run on this branch yet: the fix is pending that run and the
 failure-protocol audit (step 6).
 
+## Audit of the branch (2026-10-18, third commit)
+
+An independent audit of the two commits found the mechanism closed and
+asked for these corrections, made in the third commit:
+
+- M1. In a `STAGED` run, `install_one` answered `Ok(false)` ("skipped") on
+  `Installed::Unknown`; the run then emptied `[staged]` and exited 0, so a
+  transient read failure consumed the staged download with a success
+  exit. It now returns `Err(code::INSTALLED_UNKNOWN)`: the run exits
+  nonzero, and `install_staged` keeps `[staged]` after any *failure*
+  (`inst-pkg-read`, `inst-installed-unknown`, `inst-open`, `inst-write`),
+  saying so; a *refusal* (tampered, unverified, downgrade, same version)
+  still consumes it.
+- M2. The updater's `installed_apps(fs).unwrap_or_default()` in `report`
+  and `upgrade` read an unreadable `[installed]` as "no apps installed":
+  `report` printed every offered app as not installed and saved an
+  app-less plan. `installed_apps` now takes the state text; `report` reads
+  the state once, and when that read failed it still reports the system,
+  says the apps are not compared, lists nothing as "not installed" and
+  saves no plan (the fault code is the exit code); `upgrade` reuses the
+  state it already read.
+- L1. `inst-state-unreadable` could fire three times in one `STAGED` run
+  (the read, the `[staged]` clear, the `[installed]` write each re-read
+  the file). Both programs now read the state once per run and pass the
+  text to `write_state_section`.
+- L2. `FsClient::open` refuses a name over 32 bytes client-side
+  (`Status::Invalid`), which the new code would have reported as
+  `inst-installed-unknown`, blaming the file service, for a package whose
+  name makes `apps/NAME.aripkg` too long. `aricode_update_index::
+  installed_path(name)` builds the path only for a valid app name (ADR
+  0029, decision 2: at most 20 bytes, `[A-Za-z0-9_-]`; the longest gives
+  exactly 32 bytes) and the installer refuses anything else as a package
+  (`inst-pkg-name`, code 7) before touching the installed copy. Host test
+  `installed_path_fits_arifs_or_is_refused`.
+- L3 (accepted, no code change): the installer's wiring of these decisions
+  to the real file client is checked by reading only; the decisions
+  themselves are host-tested over a mock. A QEMU regression needs a
+  file-service fault-injection mechanism (arifs, test-only command-line
+  key), which does not exist yet. Known gap.
+- L4 (pre-existing, not fixed here): arifs never reclaims the descriptors
+  of a client that died; see incident 0011
+  (`0011-arifs-descriptors-not-reclaimed.md`). With this fix a full table
+  is refused visibly instead of being read as "absent".
+
 ## Open
 
+- A file-service fault-injection mechanism for QEMU regressions (L3).
+- Incident 0011 (arifs descriptors).
 - No physical disk failure was induced in this audit.

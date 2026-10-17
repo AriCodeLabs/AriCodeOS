@@ -141,8 +141,16 @@ it, no downgrades unless asked, and every install logged.
    read keeps its old lines and the new one is only said: `inst-history-read`
    (installer, code 5), `upd-history-read` (updater, code 48),
    `sh-history-read` (shell, code 2); all three append through
-   `aricode_update_index::history::appended`. The updater's last output is
-   in `updater/last.log`, shown to remote sessions.
+   `aricode_update_index::history::appended`. The installer and the
+   updater read `updater/state` once per run and pass the text down, so an
+   unreadable state is one fault per run; a `STAGED` run that hit a
+   failure (as opposed to a refusal) keeps the `[staged]` list and exits
+   nonzero, and the updater compares no apps and saves no plan when the
+   state could not be read. A package whose name is not a valid app name
+   (decision 2, `aricode_update_index::installed_path`) is refused as a
+   package (`inst-pkg-name`, code 7), never reported as a file-service
+   failure. The updater's last output is in `updater/last.log`, shown to
+   remote sessions.
 
 8. **Capabilities (least privilege).** The updater keeps `system, fs,
    net, block`: its `fs` grant is its private directory `updater/`. It
@@ -228,7 +236,8 @@ There is no key rotation in the protocol yet (see below).
   service (absent, failed open, failed read, oversized, a failed listing,
   and the state rewrite keeping its other sections; incident 0008), the
   history append over the same mock (absent, failed read, an overgrown log
-  trimmed, an absurd one refused).
+  trimmed, an absurd one refused), the installed path (the longest valid
+  name fits AriFS exactly; longer or invalid names give no path).
   `xtask`: a published index verifies with the
   development key and a tampered one does not, serials only grow,
   publication leaves no staging directory, signing keys must be a pair

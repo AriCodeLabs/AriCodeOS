@@ -95,6 +95,21 @@ pub fn main_path(name: &str) -> alloc::string::String {
     alloc::format!("{UPDATER_DIR}/{name}")
 }
 
+/// Where the installer keeps app `name`: `apps/NAME.aripkg`. `None` when
+/// `name` is not a valid app name (decision 2: `[A-Za-z0-9_-]`, at most
+/// [`index::MAX_APP_NAME`] bytes): a longer name would make a path the
+/// file client refuses before asking the service, which the installer
+/// could only report as a failure of the service (incident 0008 audit).
+/// The path always fits an AriFS name ([`files::NAME_LEN`]).
+pub fn installed_path(name: &str) -> Option<alloc::string::String> {
+    if !index::valid_app_name(name) {
+        return None;
+    }
+    let path = alloc::format!("apps/{name}{}", aricode_pkg::EXTENSION);
+    debug_assert!(path.len() <= files::NAME_LEN);
+    Some(path)
+}
+
 /// Staged package number `slot` (0-based): `pkg-1.aripkg` ... The installer
 /// accepts no other name (ADR 0029, decision 5).
 pub fn staged_package_file(slot: usize) -> Option<&'static str> {
@@ -134,4 +149,29 @@ pub mod installer_arg {
     pub const STAGED: u64 = 2;
     /// Only write the installed apps to `[installed]` of `updater/state`.
     pub const LIST: u64 = 4;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The longest valid app name gives a path of exactly the AriFS name
+    /// length; one byte more, or a character the package rule refuses, is
+    /// not a path at all (never a file-service failure).
+    #[test]
+    fn installed_path_fits_arifs_or_is_refused() {
+        let longest = "a".repeat(index::MAX_APP_NAME);
+        let path = installed_path(&longest).expect("valid");
+        assert_eq!(path, alloc::format!("apps/{longest}.aripkg"));
+        assert_eq!(path.len(), files::NAME_LEN);
+        assert_eq!(
+            installed_path("hello_ext").as_deref(),
+            Some("apps/hello_ext.aripkg")
+        );
+        assert_eq!(installed_path(&"a".repeat(index::MAX_APP_NAME + 1)), None);
+        assert_eq!(installed_path(&"a".repeat(aricode_pkg::MAX_NAME)), None);
+        assert_eq!(installed_path(""), None);
+        assert_eq!(installed_path("../etc"), None);
+        assert_eq!(installed_path("a.b"), None);
+    }
 }

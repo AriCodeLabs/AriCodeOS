@@ -274,27 +274,26 @@ fn read_state(fs: &mut FsClient) -> Result<String, u64> {
     Ok(fixed)
 }
 
-/// Replaces one section of the exchange file; refused when it could not
-/// be read, so the other sections are never replaced by what a failed
-/// read did not return.
-fn write_state_section(fs: &mut FsClient, name: &str, body: &str) -> bool {
-    let Ok(state) = read_state(fs) else {
-        return false;
-    };
-    write_file(
-        fs,
-        &upd::main_path(upd::STATE_FILE),
-        lists::with_section(&state, name, body).as_bytes(),
-    )
+/// Replaces one section of the exchange file, whose text `state` was read
+/// once at the start of the run (`read_state`): the other sections are
+/// never replaced by what a failed read did not return. On success `state`
+/// becomes the text written, so a later section write builds on it.
+fn write_state_section(fs: &mut FsClient, state: &mut String, name: &str, body: &str) -> bool {
+    let text = lists::with_section(state, name, body);
+    let ok = write_file(fs, &upd::main_path(upd::STATE_FILE), text.as_bytes());
+    if ok {
+        *state = text;
+    }
+    ok
 }
 
 /// `LIST`, and after every install: the installed apps for the updater.
-fn write_installed(fs: &mut FsClient, pubkey: &[u8; 32]) -> u64 {
+fn write_installed(fs: &mut FsClient, state: &mut String, pubkey: &[u8; 32]) -> u64 {
     let apps = match installed_apps(fs, pubkey) {
         Ok(apps) => apps,
         Err(code) => return code,
     };
-    if write_state_section(fs, lists::INSTALLED, &lists::encode_installed(&apps)) {
+    if write_state_section(fs, state, lists::INSTALLED, &lists::encode_installed(&apps)) {
         0
     } else {
         fault(
@@ -324,7 +323,20 @@ fn install_one(
     };
     let app = verified.manifest.name_str();
     let version = verified.manifest.version;
-    let target = format!("apps/{app}{}", aricode_pkg::EXTENSION);
+    // ADR 0029, decision 2: a name over MAX_APP_NAME bytes makes a path the
+    // file client refuses before asking the service, which could only be
+    // reported as a failure of the service: refused here, as a package.
+    let Some(target) = upd::installed_path(app) else {
+        fault(
+            code::VERIFY,
+            "inst-pkg-name",
+            &format!(
+                "{source}: package name {app:?} is not a valid app name (at most {} bytes, [A-Za-z0-9_-]): refused",
+                upd::index::MAX_APP_NAME
+            ),
+        );
+        return Ok(false);
+    };
     let current = match installed(fs, &target, pubkey) {
         Installed::Missing => None,
         Installed::Valid(m) => Some(m.version),
@@ -341,13 +353,13 @@ fn install_one(
         Installed::Unknown(e) => {
             // ADR 0029, decision 5: what cannot be identified is not
             // replaced. A failed request is not a missing file (incident
-            // 0008); the package is skipped and can be installed again.
-            fault(
+            // 0008): this is a failure of the run (nonzero exit), not a
+            // refusal, and the package can be installed again.
+            return Err(fault(
                 code::INSTALLED_UNKNOWN,
                 "inst-installed-unknown",
                 &format!("{target} cannot be read ({e:?}): {app} version {version} refused (installed version unknown)"),
-            );
-            return Ok(false);
+            ));
         }
     };
     let change = compare(current, version);
@@ -441,19 +453,27 @@ fn install_pending(fs: &mut FsClient, pubkey: &[u8; 32]) -> u64 {
         }
     }
     say!("{done} package(s) installed, {skipped} skipped");
-    write_installed(fs, pubkey)
+    match read_state(fs) {
+        Ok(mut state) => write_installed(fs, &mut state, pubkey),
+        Err(code) => code,
+    }
 }
 
 /// `STAGED`: what the updater listed in the `[staged]` section of
 /// `updater/state`, nothing else.
 fn install_staged(fs: &mut FsClient, allow_downgrade: bool, pubkey: &[u8; 32]) -> u64 {
-    let state = match read_state(fs) {
+    let mut state = match read_state(fs) {
         Ok(s) => s,
         Err(code) => return code,
     };
     let text = lists::section(&state, lists::STAGED).unwrap_or_default();
     let (entries, rejected) = lists::parse_staged(&text);
     let mut result = 0;
+    // A refusal (tampered, unverified, downgrade, same version) consumes
+    // the list; a failure (a request the file service did not answer, a
+    // write error) keeps it, so what was staged stays visible and can be
+    // installed by the next run.
+    let mut failed = false;
     if rejected > 0 {
         result = fault(
             code::STAGE,
@@ -481,6 +501,7 @@ fn install_staged(fs: &mut FsClient, allow_downgrade: bool, pubkey: &[u8; 32]) -
                     "inst-pkg-read",
                     &format!("{path} cannot be read ({err:?}): refused"),
                 );
+                failed = true;
                 skipped += 1;
                 continue;
             }
@@ -502,13 +523,16 @@ fn install_staged(fs: &mut FsClient, allow_downgrade: bool, pubkey: &[u8; 32]) -
             Ok(false) => skipped += 1,
             Err(code) => {
                 result = code;
+                failed = true;
                 break;
             }
         }
     }
-    // Consumed: a later run (with or without --allow-downgrade) cannot
-    // install the same files again.
-    if !write_state_section(fs, lists::STAGED, "") {
+    if failed {
+        say!("staged list kept (a failure, not a refusal): run upgrade again");
+    } else if !write_state_section(fs, &mut state, lists::STAGED, "") {
+        // Consumed: a later run (with or without --allow-downgrade) cannot
+        // install the same files again.
         result = fault(
             code::WRITE,
             "inst-stage-clear",
@@ -516,7 +540,7 @@ fn install_staged(fs: &mut FsClient, allow_downgrade: bool, pubkey: &[u8; 32]) -
         );
     }
     say!("{done} package(s) installed, {skipped} skipped");
-    let listed = write_installed(fs, pubkey);
+    let listed = write_installed(fs, &mut state, pubkey);
     if result != 0 {
         result
     } else {
@@ -558,7 +582,10 @@ fn main(arg: u64) -> u64 {
         );
     }
     if list {
-        write_installed(&mut fs, &pubkey)
+        match read_state(&mut fs) {
+            Ok(mut state) => write_installed(&mut fs, &mut state, &pubkey),
+            Err(code) => code,
+        }
     } else if staged {
         install_staged(&mut fs, allow_downgrade, &pubkey)
     } else {

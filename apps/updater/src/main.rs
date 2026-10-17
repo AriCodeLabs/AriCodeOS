@@ -349,23 +349,23 @@ fn read_state(fs: &mut FsClient) -> Result<String, u64> {
     Ok(fixed)
 }
 
-/// Replaces one section of `state`; refused when it could not be read.
-fn write_state_section(fs: &mut FsClient, name: &str, body: &str) -> bool {
-    let Ok(state) = read_state(fs) else {
-        return false;
-    };
+/// Replaces one section of the exchange file, whose text `state` was read
+/// once at the start of the run (`read_state`): a run whose read failed
+/// never gets here, so the other sections are never replaced by what a
+/// failed read did not return.
+fn write_state_section(fs: &mut FsClient, state: &str, name: &str, body: &str) -> bool {
     write_file(
         fs,
         upd::STATE_FILE,
-        lists::with_section(&state, name, body).as_bytes(),
+        lists::with_section(state, name, body).as_bytes(),
     )
 }
 
-/// The installed apps, as the installer listed them just before this run.
-/// `None` (after a fault) when the list is missing or unreadable.
-fn installed_apps(fs: &mut FsClient) -> Option<Vec<(String, u32)>> {
-    let state = read_state(fs).ok()?;
-    let text = match lists::section(&state, lists::INSTALLED) {
+/// The installed apps, as the installer listed them just before this run,
+/// from the `state` text read once per run. `None` (after a fault) when
+/// the list is missing.
+fn installed_apps(state: &str) -> Option<Vec<(String, u32)>> {
+    let text = match lists::section(state, lists::INSTALLED) {
         Some(t) => t,
         None => {
             fault(
@@ -1001,6 +1001,10 @@ fn change_text(installed: Option<u32>, offered: u32) -> &'static str {
 /// nothing. Everything that differs is saved as the plan, the only thing
 /// `upgrade` may install (audit 1, H2).
 fn report(fs: &mut FsClient, sources: &Sources, pk: &[u8; 32]) -> u64 {
+    // Read once per run. Unreadable: the system is still reported, the
+    // apps are not compared (an unreadable list is not "none installed")
+    // and no plan is saved (incident 0008 audit, M2).
+    let state = read_state(fs);
     let raw = verified_stored(fs, sources, pk);
     let (slots, indexes) = parse_all(&raw, pk);
     let mut plan: Vec<PlanItem> = Vec::new();
@@ -1029,7 +1033,14 @@ fn report(fs: &mut FsClient, sources: &Sources, pk: &[u8; 32]) -> u64 {
         }
         None => say!("system: no source offers a system image"),
     }
-    let apps = installed_apps(fs).unwrap_or_default();
+    let apps = match &state {
+        Ok(state) => installed_apps(state).unwrap_or_default(),
+        Err(code) => {
+            result = *code;
+            say!("apps not compared: updater/state could not be read");
+            Vec::new()
+        }
+    };
     for (name, version) in &apps {
         match best_app(&indexes, name) {
             Some((i, a)) => {
@@ -1049,7 +1060,7 @@ fn report(fs: &mut FsClient, sources: &Sources, pk: &[u8; 32]) -> u64 {
         }
     }
     let mut listed: Vec<&str> = Vec::new();
-    for index in &indexes {
+    for index in indexes.iter().filter(|_| state.is_ok()) {
         for a in &index.apps {
             if !apps.iter().any(|(n, _)| n == a.name) && !listed.contains(&a.name) {
                 listed.push(a.name);
@@ -1061,8 +1072,10 @@ fn report(fs: &mut FsClient, sources: &Sources, pk: &[u8; 32]) -> u64 {
             }
         }
     }
-    if !write_state_section(fs, lists::PLAN, &lists::encode_plan(&plan)) {
-        result = fault(code::PLAN, "upd-plan-write", "cannot save the plan");
+    if let Ok(state) = &state {
+        if !write_state_section(fs, state, lists::PLAN, &lists::encode_plan(&plan)) {
+            result = fault(code::PLAN, "upd-plan-write", "cannot save the plan");
+        }
     }
     if indexes.is_empty() {
         say!("no verified index: nothing to compare");
@@ -1322,7 +1335,7 @@ fn upgrade(
         }
     }
     let mut app_jobs = Vec::new();
-    for (name, version) in installed_apps(fs).unwrap_or_default() {
+    for (name, version) in installed_apps(&state).unwrap_or_default() {
         let Some((i, entry)) = best_app(&indexes, &name) else {
             continue;
         };
@@ -1390,7 +1403,7 @@ fn upgrade(
             Err(code) => result = code,
         }
     }
-    if !write_state_section(fs, lists::STAGED, &lists::encode_staged(&staged)) {
+    if !write_state_section(fs, &state, lists::STAGED, &lists::encode_staged(&staged)) {
         return fault(
             code::FILE_WRITE,
             "upd-staged-write",

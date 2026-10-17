@@ -443,6 +443,7 @@ name = "aricode-update-index"
 version = "0.11.0"
 dependencies = [
  "aricode-crypto",
+ "aricode-pkg",
 ]
 
 [[package]]
