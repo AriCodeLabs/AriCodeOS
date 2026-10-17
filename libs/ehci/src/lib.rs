@@ -493,15 +493,19 @@ pub fn decode_token(t: u32) -> Outcome {
 
 /// Token to write into a queue head's overlay when it is given new qTDs or
 /// after a halt (EHCI 4.10.2): not active, not halted, the data toggle
-/// kept when the queue head carries it (`keep_toggle`) and the ping state.
-/// After `CLEAR_FEATURE(ENDPOINT_HALT)` the toggle restarts at DATA0
-/// (USB 2.0 9.4.5), so `keep_toggle` is false then.
-pub fn overlay_token(current: u32, keep_toggle: bool) -> u32 {
-    let keep = if keep_toggle {
-        token::DATA_TOGGLE | token::PING
-    } else {
-        token::PING
-    };
+/// kept when the queue head carries it (`keep_toggle`) and, at high speed,
+/// the ping state. At full and low speed bit 0 is the split transaction
+/// ERR bit of the last transfer (4.12.1.3) and is not carried over. After
+/// `CLEAR_FEATURE(ENDPOINT_HALT)` the toggle restarts at DATA0 (USB 2.0
+/// 9.4.5), so `keep_toggle` is false then.
+pub fn overlay_token(current: u32, keep_toggle: bool, speed: Speed) -> u32 {
+    let mut keep = 0;
+    if keep_toggle {
+        keep |= token::DATA_TOGGLE;
+    }
+    if speed == Speed::High {
+        keep |= token::PING;
+    }
     current & keep
 }
 
@@ -790,6 +794,28 @@ pub mod hub {
             length: 0,
         }
     }
+    /// Endpoint type of `ClearTTBuffer` (USB 2.0 9.6.6 bmAttributes).
+    pub const TT_CONTROL: u8 = 0;
+    pub const TT_BULK: u8 = 2;
+
+    /// `ClearTTBuffer` (11.24.2.3): after a full- or low-speed control or
+    /// bulk transfer through a translator was aborted (timeout or
+    /// transaction errors), the translator's buffer for that endpoint is
+    /// freed (11.17.5). wIndex is the TT port: 1, since the hub runs a
+    /// single translator (multi-TT hubs stay in their default setting).
+    pub fn clear_tt_buffer(address: u8, endpoint: u8, ep_type: u8, dir_in: bool) -> SetupPacket {
+        SetupPacket {
+            request_type: 0x23,
+            request: 8,
+            value: (endpoint as u16 & 0xF)
+                | (address as u16 & 0x7F) << 4
+                | (ep_type as u16 & 3) << 11
+                | (dir_in as u16) << 15,
+            index: 1,
+            length: 0,
+        }
+    }
+
     /// `ClearPortFeature` (11.24.2.2).
     pub fn clear_port_feature(port: u8, feature: u16) -> SetupPacket {
         SetupPacket {
@@ -1001,8 +1027,14 @@ mod tests {
         // The overlay keeps toggle and ping only, and drops the toggle
         // after a cleared halt.
         let t = token::DATA_TOGGLE | token::HALTED | token::PING | 7 << 16;
-        assert_eq!(overlay_token(t, true), token::DATA_TOGGLE | token::PING);
-        assert_eq!(overlay_token(t, false), token::PING);
+        assert_eq!(
+            overlay_token(t, true, Speed::High),
+            token::DATA_TOGGLE | token::PING
+        );
+        assert_eq!(overlay_token(t, false, Speed::High), token::PING);
+        // Full and low speed: bit 0 is the split ERR bit, never carried.
+        assert_eq!(overlay_token(t, true, Speed::Low), token::DATA_TOGGLE);
+        assert_eq!(overlay_token(t, false, Speed::Full), 0);
     }
 
     #[test]
@@ -1140,5 +1172,10 @@ mod tests {
         let r = hub::get_descriptor(hub::DESCRIPTOR_LEN).to_bytes();
         assert_eq!(r, [0xA0, 6, 0, 0x29, 0, 0, 11, 0]);
         assert_eq!(set_address(9).to_bytes(), [0, 5, 9, 0, 0, 0, 0, 0]);
+        // Bulk IN endpoint 1 of address 5: 1 | 5 << 4 | 2 << 11 | 1 << 15.
+        let r = hub::clear_tt_buffer(5, 1, hub::TT_BULK, true).to_bytes();
+        assert_eq!(r, [0x23, 8, 0x51, 0x90, 1, 0, 0, 0]);
+        let r = hub::clear_tt_buffer(3, 0, hub::TT_CONTROL, false).to_bytes();
+        assert_eq!(r, [0x23, 8, 0x30, 0x00, 1, 0, 0, 0]);
     }
 }

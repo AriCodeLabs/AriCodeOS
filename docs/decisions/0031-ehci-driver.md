@@ -97,7 +97,14 @@ Three facts shape the driver:
    resent. A failed Reset Recovery leaves the storage unusable until it is
    plugged in again; a HID endpoint that fails beyond a cleared STALL stops
    until then. A transfer error seen while the device's port reports it
-   unplugged is the disconnect, reported by the port change. A queue head
+   unplugged is the disconnect, reported by the port change, and neither
+   recovered nor halted on. A split control or bulk transfer aborted by a
+   timeout or transaction errors is followed by `ClearTTBuffer` on its
+   translator (USB 2.0 11.17.5, 11.24.2.3). A control reply shorter than
+   what is parsed is an error (no stale buffer bytes), and a READ/WRITE
+   whose CSW residue or data stage shows bytes not moved answers `Io`. A
+   storage device that answers "medium not present" (an empty card reader)
+   stays enumerated without a block service. A queue head
    the controller does not release is never reused, nor the client buffer
    it pointed to. A unit attention is retried once, only while the block
    client's 90 s wait still covers the worst case of the retry (64 s); the
@@ -105,7 +112,9 @@ Three facts shape the driver:
    touch no medium. With `strict` the first failure dumps USBCMD, USBSTS,
    FRINDEX, every PORTSC and every queue head with its qTD tokens before
    any recovery, and the driver exits with code 15; init restarts nothing.
-   A host system error (4.15.2.4) dumps and exits with code 16.
+   A host system error (4.15.2.4) dumps and exits with code 16. When its
+   service endpoint is closed or revoked (init gave the service up), the
+   driver exits instead of polling on.
 8. **Init.** For class `0c.03` init launches usbd for interface `0x30`
    first and then `usb_ehci` for interface `0x20`; other interfaces (UHCI,
    OHCI) still get "has no driver". Every USB driver gets a block endpoint;
@@ -146,6 +155,8 @@ Three facts shape the driver:
   by host tests of the layouts and wait for the laptop.
 - The xHCI driver keeps its own copies of the input event ring and the
   fault injection; sharing them is left for a later cleanup of both drivers.
+- A medium inserted later into a card reader is not noticed (no media
+  polling); the reader must be plugged in again.
 - QEMU scenarios (`usb.ehci_hid`, `usb.ehci_storage`, `usb.ehci_fault`,
   `strict.ehci_halt`, and the revised `usb.hid_boot_with_ehci`) were written
   with this ADR but not run when it was accepted.

@@ -383,6 +383,8 @@ enum ScsiFail {
     Failed,
     /// No usable storage (absent or its Reset Recovery failed).
     Broken,
+    /// The device was unplugged during the command.
+    Gone,
 }
 
 /// What the queue does after a short packet in a qTD (EHCI 4.10.2).
@@ -998,7 +1000,10 @@ impl Ehci {
         w32(qh + QueueHead::ALT_NEXT_QTD, link::TERMINATE);
         fence(Ordering::SeqCst);
         let t = r32(qh + QueueHead::TOKEN);
-        w32(qh + QueueHead::TOKEN, overlay_token(t, keep_toggle));
+        w32(
+            qh + QueueHead::TOKEN,
+            overlay_token(t, keep_toggle, self.pipes[p].desc.speed),
+        );
     }
 
     // ---- transfers ----
@@ -1013,6 +1018,14 @@ impl Ehci {
         let n = steps.len();
         if n == 0 || n > QTDS_PER_PIPE {
             return Err(Fail::Buffer);
+        }
+        if self.pipes[p].lost {
+            return Err(Fail::Lost);
+        }
+        // A late async advance from an unlink that timed out: QEMU stops
+        // walking the async schedule while the status bit stays set.
+        if self.op.r32(op::USBSTS) & op::STS_ASYNC_ADVANCE != 0 {
+            self.op.w32(op::USBSTS, op::STS_ASYNC_ADVANCE);
         }
         let qh = self.pipes[p].qh.1;
         w32(qh + QueueHead::NEXT_QTD, link::TERMINATE);
@@ -1060,7 +1073,10 @@ impl Ehci {
         }
         fence(Ordering::SeqCst);
         let t = r32(qh + QueueHead::TOKEN);
-        w32(qh + QueueHead::TOKEN, overlay_token(t, true));
+        w32(
+            qh + QueueHead::TOKEN,
+            overlay_token(t, true, self.pipes[p].desc.speed),
+        );
         fence(Ordering::SeqCst);
         w32(qh + QueueHead::NEXT_QTD, self.qtd_addr(p, 0).0 as u32);
         Ok(())
@@ -1182,6 +1198,10 @@ impl Ehci {
         match self.run(p, &steps[..n + 1], deadline) {
             Ok(moved) => Ok(moved.saturating_sub(8)),
             Err(fail) => {
+                if fail != Fail::Lost && self.unplugged(p) {
+                    self.overlay_idle(p, true);
+                    return Err(fail);
+                }
                 self.report_failure("ctrl", p, fail);
                 sys::print(b"usb-ehci:   request ");
                 for b in bytes {
@@ -1192,7 +1212,10 @@ impl Ehci {
                 if !(optional && fail.is_stall()) {
                     self.strict_halt(b"control transfer");
                 }
-                self.overlay_idle(p, true);
+                if fail != Fail::Lost {
+                    self.overlay_idle(p, true);
+                    self.clear_tt(p, fail, hub::TT_CONTROL, dir_in);
+                }
                 Err(fail)
             }
         }
@@ -1250,6 +1273,86 @@ impl Ehci {
         fail.print();
         sys::print(b"\n");
         record_parts(kind, fail.short(), fail.code());
+    }
+
+    /// An IN control request that must return at least `need` bytes: a
+    /// shorter reply would leave stale bytes of the control buffer behind.
+    fn control_read(
+        &mut self,
+        p: usize,
+        setup: SetupPacket,
+        need: u16,
+        what: &'static str,
+    ) -> Result<u32, &'static str> {
+        let moved = self
+            .control(p, setup, Some(setup.length), false)
+            .map_err(|_| what)?;
+        if moved < need as u32 {
+            sys::print(b"usb-ehci: ");
+            sys::print(what.as_bytes());
+            sys::print(b": ");
+            num(moved as u64);
+            sys::print(b" bytes, at least ");
+            num(need as u64);
+            sys::print(b" expected\n");
+            record("ehci short reply", moved as u64);
+            return Err("short reply to a control request");
+        }
+        Ok(moved)
+    }
+
+    /// The device that owns queue head `p`.
+    fn pipe_device(&self, p: usize) -> Option<usize> {
+        let a = self.pipes[p].desc.address;
+        self.devices
+            .iter()
+            .position(|d| d.is_some_and(|d| d.ep0 == p || (a != 0 && d.address == a)))
+    }
+
+    /// A transfer failed on a device whose port reports it unplugged: that
+    /// is the disconnect, which the port change reports, not a fault.
+    fn unplugged(&mut self, p: usize) -> bool {
+        let Some(d) = self.pipe_device(p).and_then(|i| self.devices[i]) else {
+            return false;
+        };
+        if self.port_connected(d.parent) {
+            return false;
+        }
+        self.print_parent(d.parent);
+        sys::print(b": transfer ended, the device is unplugged\n");
+        true
+    }
+
+    /// `ClearTTBuffer` (USB 2.0 11.17.5, 11.24.2.3) after a split control
+    /// or bulk transfer was aborted by a timeout or transaction errors, so
+    /// the translator does not keep the endpoint's buffer busy.
+    fn clear_tt(&mut self, p: usize, fail: Fail, ep_type: u8, dir_in: bool) {
+        let d = self.pipes[p].desc;
+        let Some(tt) = d.tt else {
+            return;
+        };
+        if !matches!(
+            fail,
+            Fail::Timeout | Fail::Error(TransferError::Transaction, _)
+        ) {
+            return;
+        }
+        let Some(hub_ep0) = self
+            .devices
+            .iter()
+            .flatten()
+            .find(|h| h.address == tt.hub)
+            .map(|h| h.ep0)
+        else {
+            return;
+        };
+        say(b"ClearTTBuffer on the translator (USB 2.0 11.24.2.3)");
+        let _ = self.control(
+            hub_ep0,
+            hub::clear_tt_buffer(d.address, d.endpoint, ep_type, dir_in),
+            None,
+            false,
+        );
     }
 
     fn ctrl_data(&self, len: usize) -> [u8; CONTROL_BUFFER as usize] {
@@ -1375,8 +1478,7 @@ impl Ehci {
 
     fn hub_port_status(&mut self, hub: usize, port: u8) -> Result<hub::PortStatus, &'static str> {
         let ep0 = self.devices[hub].ok_or("the hub is gone")?.ep0;
-        self.control(ep0, hub::get_port_status(port), Some(4), false)
-            .map_err(|_| "GetPortStatus failed")?;
+        self.control_read(ep0, hub::get_port_status(port), 4, "GetPortStatus failed")?;
         hub::PortStatus::parse(&self.ctrl_data(4)).ok_or("invalid port status")
     }
 
@@ -1471,9 +1573,6 @@ impl Ehci {
                 if !st.connected() {
                     return Ok(());
                 }
-                if hub_dev.depth > hub::MAX_DEPTH {
-                    return Err("too many hub tiers (USB 2.0 4.1.1)");
-                }
                 let speed = self.reset_hub_port(h, port)?;
                 let tt = match tt_for(hub_dev.speed, hub_dev.address, hub_dev.tt, port, speed) {
                     Ok(tt) => tt,
@@ -1530,13 +1629,12 @@ impl Ehci {
         let dev = self.devices[index].ok_or("device")?;
         let ep0 = dev.ep0;
         // bMaxPacketSize0 from the first 8 bytes, which any EP0 can carry.
-        self.control(
+        self.control_read(
             ep0,
             SetupPacket::get_descriptor(request::DESC_DEVICE, 0, 8),
-            Some(8),
-            false,
-        )
-        .map_err(|_| "GET_DESCRIPTOR(device, 8 bytes) failed")?;
+            8,
+            "GET_DESCRIPTOR(device, 8 bytes) failed",
+        )?;
         let head = self.ctrl_data(8);
         let max_packet0 = head[7] as u16;
         // USB 2.0 9.6.1: 8, 16, 32 or 64; 64 at high speed.
@@ -1559,32 +1657,35 @@ impl Ehci {
         if !self.update_qh(ep0, address, max_packet0) {
             return Err("EP0 queue head lost");
         }
-        self.control(
+        self.control_read(
             ep0,
             SetupPacket::get_descriptor(request::DESC_DEVICE, 0, DeviceDescriptor::LEN),
-            Some(DeviceDescriptor::LEN),
-            false,
-        )
-        .map_err(|_| "GET_DESCRIPTOR(device) failed")?;
+            DeviceDescriptor::LEN,
+            "GET_DESCRIPTOR(device) failed",
+        )?;
         let desc = DeviceDescriptor::parse(&self.ctrl_data(DeviceDescriptor::LEN as usize))
             .ok_or("invalid device descriptor")?;
-        self.control(
+        self.control_read(
             ep0,
             SetupPacket::get_descriptor(request::DESC_CONFIGURATION, 0, 9),
-            Some(9),
-            false,
-        )
-        .map_err(|_| "GET_DESCRIPTOR(config) failed")?;
+            9,
+            "GET_DESCRIPTOR(config) failed",
+        )?;
         let short = self.ctrl_data(9);
-        let total = u16::from_le_bytes([short[2], short[3]]).clamp(9, CONTROL_BUFFER);
-        let moved = self
-            .control(
-                ep0,
-                SetupPacket::get_descriptor(request::DESC_CONFIGURATION, 0, total),
-                Some(total),
-                false,
-            )
-            .map_err(|_| "GET_DESCRIPTOR(full config) failed")?;
+        let declared = u16::from_le_bytes([short[2], short[3]]);
+        let total = declared.clamp(9, CONTROL_BUFFER);
+        if declared > CONTROL_BUFFER {
+            self.print_parent(dev.parent);
+            sys::print(b": configuration descriptor of ");
+            num(declared as u64);
+            sys::print(b" bytes, only the first 512 are read\n");
+        }
+        let moved = self.control_read(
+            ep0,
+            SetupPacket::get_descriptor(request::DESC_CONFIGURATION, 0, total),
+            9,
+            "GET_DESCRIPTOR(full config) failed",
+        )?;
         let config = self.ctrl_data(moved as usize);
         let config = &config[..moved as usize];
 
@@ -1614,6 +1715,9 @@ impl Ehci {
             return Err("configuration descriptor too short");
         }
         if desc.class == hub::CLASS {
+            if dev.depth > hub::MAX_DEPTH {
+                return Err("a hub beyond the fifth tier (USB 2.0 4.1.1)");
+            }
             return self.configure_hub(index, config[5]);
         }
         let mut hids = [None; 4];
@@ -1648,13 +1752,12 @@ impl Ehci {
             false,
         )
         .map_err(|_| "SET_CONFIGURATION (hub) failed")?;
-        self.control(
+        self.control_read(
             dev.ep0,
             hub::get_descriptor(hub::DESCRIPTOR_LEN),
-            Some(hub::DESCRIPTOR_LEN),
-            false,
-        )
-        .map_err(|_| "GetHubDescriptor failed")?;
+            7,
+            "GetHubDescriptor failed",
+        )?;
         let desc = hub::Descriptor::parse(&self.ctrl_data(hub::DESCRIPTOR_LEN as usize))
             .ok_or("invalid hub descriptor")?;
         let ports = desc.ports.min(15);
@@ -1697,6 +1800,13 @@ impl Ehci {
                 2 => Decoder::Mouse(HidBootMouse::new()),
                 _ => continue,
             };
+            if hid.max_packet_size > 64 {
+                self.print_parent(dev.parent);
+                sys::print(b": HID interface with ");
+                num(hid.max_packet_size as u64);
+                sys::print(b"-byte packets not supported (boot reports fit 64)\n");
+                continue;
+            }
             self.control(
                 dev.ep0,
                 SetupPacket::hid_set_protocol(hid.interface, 0),
@@ -1741,7 +1851,7 @@ impl Ehci {
                 endpoint: hid.endpoint,
                 decoder,
                 report: self.hid_reports[h],
-                len: hid.max_packet_size.clamp(1, 64),
+                len: hid.max_packet_size.max(1),
                 seen: false,
                 stall_cleared: false,
                 stopped: false,
@@ -1843,9 +1953,22 @@ impl Ehci {
         let ready_until = self.now() + READY_WAIT_MS;
         loop {
             match self.scsi(scsi::test_unit_ready(), None, NO_MEDIUM_WINDOW_MS, false) {
-                Ok(()) => break,
+                Ok(_) => break,
                 Err(ScsiFail::Failed) => {
                     let sense = self.sense();
+                    // SPC-4: NOT READY with ASC 3Ah is "medium not
+                    // present", not a transient state (an empty card
+                    // reader). The device stays enumerated without a
+                    // block service; nothing is retried.
+                    if sense.is_some_and(|s| s.key == scsi::Sense::NOT_READY && s.asc == 0x3A) {
+                        self.print_parent(parent);
+                        sys::print(b": no medium; the storage interface is left unconfigured\n");
+                        if let Some(st) = self.storage.take() {
+                            self.pipe_free(st.bulk_in.pipe);
+                            self.pipe_free(st.bulk_out.pipe);
+                        }
+                        return Ok(());
+                    }
                     if !matches!(
                         sense.map(|s| s.key),
                         Some(scsi::Sense::UNIT_ATTENTION | scsi::Sense::NOT_READY)
@@ -2132,12 +2255,10 @@ impl Ehci {
                     // A device being unplugged fails its transfers before
                     // the port change is seen: that is the disconnect,
                     // which the port change reports, not a fault.
-                    if let Some(d) = self.devices[hid.device] {
-                        if !self.port_connected(d.parent) {
-                            hid.stopped = true;
-                            self.hids[h] = Some(hid);
-                            continue;
-                        }
+                    if self.unplugged(hid.pipe) {
+                        hid.stopped = true;
+                        self.hids[h] = Some(hid);
+                        continue;
                     }
                     self.report_failure("intr", hid.pipe, fail);
                     self.strict_halt(b"interrupt transfer");
@@ -2174,14 +2295,15 @@ impl Ehci {
     /// One SCSI command over the bulk-only transport: CBW, data (as
     /// `(physical, bytes, towards the host)`) and CSW (BOT 5.3). A failed
     /// transfer goes through `transfer_failure`; a CSW that does not close
-    /// the command asks for a Reset Recovery (BOT 6.3, 6.7).
+    /// the command asks for a Reset Recovery (BOT 6.3, 6.7). A passed
+    /// command returns the bytes it did not move.
     fn scsi(
         &mut self,
         cdb: Cdb,
         data: Option<(u64, u32, bool)>,
         window_ms: u64,
         inject: bool,
-    ) -> Result<(), ScsiFail> {
+    ) -> Result<u32, ScsiFail> {
         let (tag, cbw, csw, bulk_in, bulk_out) = {
             let st = self.storage.as_mut().ok_or(ScsiFail::Broken)?;
             if st.broken {
@@ -2209,10 +2331,14 @@ impl Ehci {
         if let Err(fail) = self.bulk(bulk_out, false, cbw.0, Cbw::LEN as u32, deadline) {
             return Err(self.transfer_failure(Stage::Cbw, false, fail, tag, window_end));
         }
+        let mut moved = 0;
         if let Some((phys, len, dir_in)) = data {
             let pipe = if dir_in { bulk_in } else { bulk_out };
-            if let Err(fail) = self.bulk(pipe, dir_in, phys, len, window_end) {
-                return Err(self.transfer_failure(Stage::Data, dir_in, fail, tag, window_end));
+            match self.bulk(pipe, dir_in, phys, len, window_end) {
+                Ok(n) => moved = n,
+                Err(fail) => {
+                    return Err(self.transfer_failure(Stage::Data, dir_in, fail, tag, window_end))
+                }
             }
         }
         if let Err(fail) = self.bulk(bulk_in, true, csw.0, Csw::LEN as u32, window_end) {
@@ -2221,10 +2347,13 @@ impl Ehci {
         // SAFETY: the CSW buffer in the driver's DMA memory.
         let raw = unsafe { (csw.1 as *const [u8; Csw::LEN]).read_volatile() };
         match check_csw(&raw, tag) {
+            // The bytes the command did not move: the CSW's residue (BOT
+            // 6.7) or what the data stage fell short of, whichever is more.
             Ok(Csw {
                 status: CswStatus::Passed,
+                residue,
                 ..
-            }) => Ok(()),
+            }) => Ok(residue.max(data.map_or(0, |d| d.1).saturating_sub(moved))),
             Ok(_) => Err(ScsiFail::Failed),
             Err(e) => {
                 report_csw_error(e, tag);
@@ -2263,6 +2392,10 @@ impl Ehci {
         }) else {
             return ScsiFail::Transport(fail, None);
         };
+        if fail != Fail::Lost && self.unplugged(pipe) {
+            self.overlay_idle(pipe, true);
+            return ScsiFail::Gone;
+        }
         sys::print(b"usb-ehci: ");
         sys::print(stage.name().as_bytes());
         sys::print(b" stage of tag ");
@@ -2279,6 +2412,7 @@ impl Ehci {
             return ScsiFail::Transport(fail, None);
         }
         self.overlay_idle(pipe, true);
+        self.clear_tt(pipe, fail, hub::TT_BULK, dir_in);
         if fail.is_stall() && !self.clear_bulk_halt(dir_in) {
             self.storage_broken();
             return ScsiFail::Transport(fail, None);
@@ -2316,6 +2450,7 @@ impl Ehci {
                             return ScsiFail::Transport(fail, None);
                         }
                         self.overlay_idle(bulk_in, true);
+                        self.clear_tt(bulk_in, f2, hub::TT_BULK, true);
                         if f2.is_stall() && !self.clear_bulk_halt(true) {
                             self.storage_broken();
                         } else {
@@ -2431,7 +2566,21 @@ impl Ehci {
             let injected = inject;
             let data = Some((phys, count as u32 * 512, !write));
             match self.scsi(cdb, data, MEDIUM_WINDOW_MS, inject) {
-                Ok(()) => return true,
+                Ok(0) => return true,
+                Ok(short) => {
+                    // Part of the sectors were not moved: the client's
+                    // buffer would hold stale bytes (BOT 6.7.2, 6.7.3).
+                    sys::print(b"usb-ehci: ");
+                    sys::print(name);
+                    sys::print(b" lba ");
+                    num(lba);
+                    sys::print(b": ");
+                    num(short as u64);
+                    sys::print(b" bytes not transferred\n");
+                    record("ehci short data", short as u64);
+                    self.strict_halt(name);
+                    return false;
+                }
                 Err(ScsiFail::Failed) => {
                     let sense = self.sense();
                     if let Some(sense) = sense {
@@ -2449,7 +2598,7 @@ impl Ehci {
                     self.report_error(name, lba, sense);
                     return false;
                 }
-                Err(ScsiFail::Broken) => {
+                Err(ScsiFail::Broken | ScsiFail::Gone) => {
                     self.report_error(name, lba, None);
                     return false;
                 }
@@ -2497,7 +2646,7 @@ impl Ehci {
             return self.storage.is_some();
         }
         match self.scsi(scsi::synchronize_cache10(), None, MEDIUM_WINDOW_MS, false) {
-            Ok(()) => true,
+            Ok(_) => true,
             Err(ScsiFail::Failed) => {
                 let sense = self.sense();
                 if let Some(sense) = sense {
@@ -2513,6 +2662,10 @@ impl Ehci {
                     self.report_error(b"SYNCHRONIZE CACHE", 0, sense);
                     false
                 }
+            }
+            Err(ScsiFail::Broken | ScsiFail::Gone) => {
+                self.report_error(b"SYNCHRONIZE CACHE", 0, None);
+                false
             }
             Err(fail) => {
                 if let ScsiFail::Transport(f, _) = fail {
@@ -2770,6 +2923,12 @@ fn serve_block(ctl: &mut Ehci, msg: &[u8], handles: &[Handle]) {
     let _ = sys::handle_close(reply_to);
 }
 
+/// Receive errors that mean the endpoint itself is gone (closed or revoked
+/// by init) rather than a bad message.
+fn endpoint_gone(e: sys::Error) -> bool {
+    matches!(e, sys::Error::BadHandle | sys::Error::Revoked)
+}
+
 fn answer(reply_to: Handle, reply: Reply) {
     let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
     let _ = sys::handle_close(reply_to);
@@ -2859,11 +3018,21 @@ fn main(mask: u64) -> u64 {
         };
         let mut timeout = POLL_MS;
         for _ in 0..8 {
-            let Ok((which, n, nh)) =
-                sys::ipc_receive_any(endpoints, &mut msg, &mut handles, timeout)
-            else {
-                break;
-            };
+            let (which, n, nh) =
+                match sys::ipc_receive_any(endpoints, &mut msg, &mut handles, timeout) {
+                    Ok(r) => r,
+                    Err(sys::Error::Timeout) => break,
+                    // The service endpoints are gone (init retired them):
+                    // nobody can be served any more, so the driver ends.
+                    Err(e) if endpoint_gone(e) => {
+                        aricode_rt::print_error(b"usb-ehci: service endpoint closed; exiting", e);
+                        return 0;
+                    }
+                    Err(e) => {
+                        aricode_rt::print_error(b"usb-ehci: receive", e);
+                        break;
+                    }
+                };
             timeout = 0;
             if nh == 0 {
                 continue;
