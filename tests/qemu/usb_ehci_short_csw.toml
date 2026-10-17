@@ -34,7 +34,7 @@ serial_contains = [
     "write: write error",
     "write: 11 bytes to probe.txt",
     "fault reported by process",
-    "ehci csw invalid (code 8)",
+    "usb csw length (code 8)",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_absent = [

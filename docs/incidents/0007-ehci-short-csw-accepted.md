@@ -62,11 +62,47 @@ path could likewise close a failed command on stale bytes.
   `tests/qemu/usb_ehci_short_csw.toml` (EHCI): the request answers Io, the
   fault is in `diag`, the Reset Recovery runs and the next write succeeds.
 
+## Audit of the fix (2026-10-18, commit `59bc075`)
+
+The independent audit of the first fix found a P0, confirmed by a QEMU
+run: `init.no_selftest_usb` failed, `usb-input: USB storage on port` never
+appeared. In the xHCI driver `Controller::bulk` returned `Ok(residual)`,
+the Transfer Event's TRB Transfer Length (xHCI 6.4.2.1: bytes **not**
+transferred), and the new `read_csw` handed that to `check_csw_transfer`
+as the count moved. Every complete 13-byte CSW became `Length(0)`, a
+Reset Recovery ran on the first INQUIRY and the storage never came up.
+The EHCI `bulk` sums the bytes moved over its retired qTDs, so that driver
+was right. The library test could not see it: the drivers are not
+host-tested and the residual-to-moved translation lived in the driver.
+
+Second fix (same branch):
+
+- `aricode_xhci::td_bytes_moved(lens, event_trb, residual)` (host-tested)
+  turns the first Success or Short Packet event of a TD into bytes moved:
+  the sum of the earlier TRBs' lengths plus the event TRB's length minus
+  its residual. The event's residual applies to its own TRB only; a short
+  packet in the middle of a split TD ends it, the later TRBs move nothing
+  and the last TRB's IOC event reports its whole length as not transferred,
+  so the first such event decides (Linux `sum_trb_lengths` does the same).
+  `Controller::bulk` now returns `Ok(bytes moved)` like the EHCI driver,
+  `Trb::transfer_length` reads the TRB field.
+- `CswError::Length(0)` had the event code 0, indistinguishable from
+  `Invalid` in `diag`: a wrong length is now its own event,
+  `usb csw length` with the bytes moved as the code, and the rest is
+  `usb csw invalid`; the names (`fault::CSW_LENGTH`, `fault::CSW_INVALID`)
+  and the console lines (`CswError::describe`, host-tested) are shared by
+  both drivers, which previously printed slightly different texts. The
+  EHCI driver drops its own `ehci csw invalid` name for the shared one, as
+  it already uses the shared `usb r|w lba` and `usb sense` names.
+
+The audit also found a pre-existing fault of the same family in the xHCI
+driver, the data-stage residual and `dCSWDataResidue` ignored: incident
+0010.
+
 ## Open
 
-- The two QEMU scenarios and the full USB suite have not been run yet on
-  this branch (another process owned the QEMU ports); the audit of the fix
-  (failure protocol step 6) is pending.
+- The QEMU results of this branch are recorded below once run; the audit
+  of the second fix (failure protocol step 6) is pending.
 - No strict-mode scenario for the short CSW exists; strict behaviour is
   the shared `ScsiFail::Csw` path exercised by the code, not by a test.
 - Physical device reproduction and actual data-loss measurement remain

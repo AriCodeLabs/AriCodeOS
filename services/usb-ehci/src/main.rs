@@ -38,7 +38,7 @@ use aricode_rt::sys::virtio_pci::{extra_handle, polled_bar_handle, DmaRegion, Mm
 use aricode_rt::sys::{self, abi, abi::driver_arg, Handle};
 use aricode_usb_storage::{
     after_transfer_failure, check_csw_transfer, fault, scsi, Cbw, Cdb, Csw, CswError, CswStatus,
-    Next, Stage,
+    Next, Stage, CSW_TEXT_LEN,
 };
 use aricode_xhci::{
     parse_configuration, parse_storage_interface, request, DeviceDescriptor, HidInterface,
@@ -3204,34 +3204,13 @@ impl Ehci {
 }
 
 /// `CSW` failures are printed with what was received (BOT 6.3) and
-/// recorded (`ehci csw invalid`; the code is the bytes moved for a wrong
-/// length, ADR 0028).
+/// recorded (`usb csw invalid`, or `usb csw length` with the bytes moved as
+/// the code, the names shared with usbd; ADR 0028).
 fn report_csw_error(e: CswError, tag: u32) {
-    record("ehci csw invalid", e.event_code());
-    match e {
-        CswError::Invalid => say(b"invalid CSW (signature or status)"),
-        CswError::Length(moved) => {
-            sys::print(b"usb-ehci: CSW of ");
-            num(moved as u64);
-            sys::print(b" bytes, not 13 (BOT 5.2): invalid, no status for tag ");
-            num(tag as u64);
-            sys::print(b"\n");
-        }
-        CswError::TagMismatch(csw) => {
-            sys::print(b"usb-ehci: CSW tag mismatch: expected ");
-            num(tag as u64);
-            sys::print(b", received ");
-            num(csw.tag as u64);
-            sys::print(b"\n");
-        }
-        CswError::PhaseError(csw) => {
-            sys::print(b"usb-ehci: CSW phase error, tag ");
-            num(csw.tag as u64);
-            sys::print(b" residue ");
-            num(csw.residue as u64);
-            sys::print(b"\n");
-        }
-    }
+    let (name, code) = e.event();
+    record(name, code);
+    let mut text = [0u8; CSW_TEXT_LEN];
+    say(e.describe(tag, &mut text).as_bytes());
 }
 
 /// Firmware handoff (EHCI 5.1, USBLEGSUP in configuration space): the OS

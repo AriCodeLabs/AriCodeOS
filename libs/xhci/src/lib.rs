@@ -735,6 +735,11 @@ impl Trb {
         t
     }
 
+    /// TRB Transfer Length of a Normal or Data Stage TRB (xHCI 6.4.1.1).
+    pub fn transfer_length(&self) -> u32 {
+        self.status & 0x1_FFFF
+    }
+
     pub fn to_bytes(&self) -> [u8; Self::LEN] {
         let mut b = [0u8; Self::LEN];
         b[..8].copy_from_slice(&self.parameter.to_le_bytes());
@@ -922,6 +927,23 @@ pub fn bulk_trbs(buffer_phys: u64, len: u32, max_packet: u16, out: &mut [Trb]) -
         out[i] = Trb::normal_part(p, l, remaining_packets, i + 1 < n);
     }
     Some(n)
+}
+
+/// Bytes a bulk TD moved, from the first Success or Short Packet event of
+/// its TRBs: `lens` are the TRBs' transfer lengths, `event_trb` the index
+/// of the TRB the event points at and `residual` its TRB Transfer Length
+/// field, which counts the bytes of that TRB alone that were not
+/// transferred (xHCI 4.11.5.2, 6.4.2.1): a residual is never the count
+/// moved (incident 0007, audit of the fix). A short packet in the middle of
+/// the TD ends it: the earlier TRBs moved everything, the later ones
+/// nothing, and the last TRB's own event (IOC) reports its whole length as
+/// not transferred, so the first event decides. Never more than the TD.
+pub fn td_bytes_moved(lens: &[u32], event_trb: usize, residual: u32) -> u32 {
+    let before: u32 = lens[..event_trb.min(lens.len())].iter().sum();
+    before
+        + lens
+            .get(event_trb)
+            .map_or(0, |len| len.saturating_sub(residual))
 }
 
 /// Device context index (DCI) of a USB endpoint.
@@ -1928,6 +1950,24 @@ mod tests {
         assert_ne!(out[0].control & TRB_IOC, 0);
         assert_eq!(bulk_trbs(0x1000, 0, 512, &mut out), None);
         assert_eq!(bulk_trbs(0x1_F000, 8192, 512, &mut out[..1]), None);
+        assert_eq!(out[0].transfer_length(), 31);
+    }
+
+    #[test]
+    fn td_bytes_moved_from_the_event_trb() {
+        // One TRB: requested minus residual. A complete 13-byte CSW has a
+        // residual of 0 and moved 13, not 0.
+        assert_eq!(td_bytes_moved(&[13], 0, 0), 13);
+        assert_eq!(td_bytes_moved(&[13], 0, 5), 8);
+        assert_eq!(td_bytes_moved(&[13], 0, 13), 0);
+        assert_eq!(td_bytes_moved(&[13], 0, 99), 0);
+        // Two TRBs (4096 + 4096): a short packet in the first one, nothing
+        // after it.
+        assert_eq!(td_bytes_moved(&[4096, 4096], 0, 1024), 3072);
+        // Short in the last one: the first moved everything.
+        assert_eq!(td_bytes_moved(&[4096, 4096], 1, 512), 4096 + 3584);
+        // The last TRB's event alone (nothing short before it): complete.
+        assert_eq!(td_bytes_moved(&[4096, 4096], 1, 0), 8192);
     }
 
     extern crate std;

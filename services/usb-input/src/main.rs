@@ -36,14 +36,14 @@ use aricode_rt::sys::virtio_pci::{bar_handle, extra_handle, DmaRegion, Mmio, CFG
 use aricode_rt::sys::{self, abi, Handle};
 use aricode_usb_storage::{
     after_transfer_failure, check_csw_transfer, fault, scsi, Cbw, Cdb, Csw, CswError, CswStatus,
-    Next, Stage,
+    Next, Stage, CSW_TEXT_LEN,
 };
 use aricode_xhci::{
     bulk_trbs, cap, completion, dci, endpoint_recovery, endpoint_status, ep_state, erst_entry, op,
     parse_storage_interface, rt, slot_reuse, slot_state, slot_status, soft_retry_applies, speed,
-    step_deadline, trb_type, write_input_context, Budget, DeviceDescriptor, EndpointContext,
-    EndpointRecovery, EventRing, HidInterface, Params, ProducerRing, SetupPacket, SlotContext,
-    SlotReuse, StorageInterface, Trb, MIN_START_MS,
+    step_deadline, td_bytes_moved, trb_type, write_input_context, Budget, DeviceDescriptor,
+    EndpointContext, EndpointRecovery, EventRing, HidInterface, Params, ProducerRing, SetupPacket,
+    SlotContext, SlotReuse, StorageInterface, Trb, MIN_START_MS,
 };
 
 const CMD_RING_TRBS: usize = 16;
@@ -2295,7 +2295,8 @@ impl Controller {
 
     /// Synchronous bulk transfer on the storage IN or OUT endpoint for
     /// `stage`, bounded by `timeout_ms` and the transfer window of
-    /// `budget`. `Ok(bytes not transferred)`, `Refused` when the window
+    /// `budget`. `Ok(bytes moved)` (`td_bytes_moved`: the events carry
+    /// residuals, never this count), `Refused` when the window
     /// is over (nothing touched), or the completion code of the failure
     /// (`completion::NO_EVENT` on timeout). Only events whose TRB pointer
     /// lies in this TD count; others are printed and ignored. Every failure
@@ -2349,7 +2350,7 @@ impl Controller {
             sys::print(b" refused: the request's transfer window is over\n");
             return Err(BulkFail::Refused);
         };
-        let (td, n) = {
+        let (td, lens, n) = {
             let ep = self
                 .bulk_mut(dir_in)
                 .ok_or(BulkFail::Failed(completion::NO_EVENT))?;
@@ -2357,30 +2358,39 @@ impl Controller {
             let n = bulk_trbs(phys, len, ep.max_packet, &mut trbs)
                 .ok_or(BulkFail::Failed(completion::NO_EVENT))?;
             let mut td = [0u64; 4];
-            for (slot, t) in td.iter_mut().zip(&trbs[..n]) {
+            let mut lens = [0u32; 4];
+            for ((slot, len), t) in td.iter_mut().zip(lens.iter_mut()).zip(&trbs[..n]) {
                 *slot = ep.ring.push(*t);
+                *len = t.transfer_length();
             }
-            (td, n)
+            (td, lens, n)
         };
         self.ring_doorbell(slot, dci as u32);
         let mut soft_retried = false;
+        // The bytes moved, decided by the first Success or Short Packet
+        // event of the TD (xHCI 4.11.5.2: a short packet in the middle ends
+        // the TD, and the last TRB's event then reports its whole length as
+        // not transferred); the last TRB's event closes the transfer.
+        let mut moved = None;
         loop {
             while let Some(ev) = self.next_event() {
                 if ev.trb_type() == trb_type::TRANSFER_EVENT
                     && ev.slot_id() == slot
                     && ev.endpoint_id() == dci
                 {
-                    if !td[..n].contains(&ev.parameter) {
+                    let Some(index) = td[..n].iter().position(|&t| t == ev.parameter) else {
                         self.stray_transfer(ev);
                         continue;
-                    }
+                    };
                     match ev.completion_code() {
-                        completion::SUCCESS | completion::SHORT_PACKET
-                            if ev.parameter == td[n - 1] =>
-                        {
-                            return Ok(ev.residual())
+                        completion::SUCCESS | completion::SHORT_PACKET => {
+                            let done = *moved.get_or_insert_with(|| {
+                                td_bytes_moved(&lens[..n], index, ev.residual())
+                            });
+                            if index == n - 1 {
+                                return Ok(done);
+                            }
                         }
-                        completion::SUCCESS | completion::SHORT_PACKET => continue,
                         code => {
                             fault.code = code;
                             fault.event = Some(ev);
@@ -2389,6 +2399,7 @@ impl Controller {
                                 && self.soft_retry(slot_index, slot, dci, code, budget.deadline)
                             {
                                 soft_retried = true;
+                                moved = None;
                                 self.ring_doorbell(slot, dci as u32);
                                 continue;
                             }
@@ -2632,38 +2643,13 @@ impl Controller {
     }
 
     /// `CSW` failures are printed with what was received (BOT 6.3) and
-    /// recorded (`usb csw invalid`; the code is the bytes moved for a wrong
-    /// length, ADR 0028).
+    /// recorded (`usb csw invalid`, or `usb csw length` with the bytes moved
+    /// as the code; ADR 0028).
     fn report_csw_error(&self, e: CswError, tag: u32) {
-        record("usb csw invalid", e.event_code());
-        match e {
-            CswError::Invalid => say(b"invalid CSW (signature or status)"),
-            CswError::Length(moved) => {
-                sys::print(b"usb-input: CSW of ");
-                num(moved as u64);
-                sys::print(b" bytes, not 13 (BOT 5.2): invalid, no status for tag ");
-                num(tag as u64);
-                sys::print(b"\n");
-            }
-            CswError::TagMismatch(csw) => {
-                sys::print(b"usb-input: CSW tag mismatch: expected ");
-                num(tag as u64);
-                sys::print(b", received ");
-                num(csw.tag as u64);
-                sys::print(b" with status ");
-                num(csw.status as u64);
-                sys::print(b" residue ");
-                num(csw.residue as u64);
-                sys::print(b"\n");
-            }
-            CswError::PhaseError(csw) => {
-                sys::print(b"usb-input: CSW phase error, tag ");
-                num(csw.tag as u64);
-                sys::print(b" residue ");
-                num(csw.residue as u64);
-                sys::print(b"\n");
-            }
-        }
+        let (name, code) = e.event();
+        record(name, code);
+        let mut text = [0u8; CSW_TEXT_LEN];
+        say(e.describe(tag, &mut text).as_bytes());
     }
 
     /// A bulk transfer at `stage` failed. A transfer refused for lack of

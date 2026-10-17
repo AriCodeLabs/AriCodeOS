@@ -64,6 +64,13 @@ pub mod fault {
     pub const INJECTED_READ: &str = "usb inj r lba ";
     pub const INJECTED_WRITE: &str = "usb inj w lba ";
     pub const LBA_PREFIXES: [&str; 4] = [READ, WRITE, INJECTED_READ, INJECTED_WRITE];
+    /// A CSW with a bad signature or status, for another command or with a
+    /// phase error (`CswError::event`), code 0.
+    pub const CSW_INVALID: &str = "usb csw invalid";
+    /// A CSW transfer that moved other than 13 bytes (incident 0007); the
+    /// code is the count moved, so it is its own event: `0` here is not
+    /// `CSW_INVALID`.
+    pub const CSW_LENGTH: &str = "usb csw length";
 
     /// `prefix` followed by `lba`; `None` if it does not fit `out`.
     pub fn lba_name<'a>(prefix: &str, lba: u64, out: &'a mut [u8; NAME_LEN]) -> Option<&'a str> {
@@ -101,7 +108,7 @@ pub mod fault {
 
     /// Writes `v` in decimal at `out[pos..]`; the new length, or `None` if
     /// it does not fit.
-    fn put_decimal(out: &mut [u8], pos: usize, v: u64) -> Option<usize> {
+    pub(crate) fn put_decimal(out: &mut [u8], pos: usize, v: u64) -> Option<usize> {
         let mut digits = [0u8; 20];
         let mut i = digits.len();
         let mut v = v;
@@ -185,13 +192,78 @@ pub enum CswError {
 }
 
 impl CswError {
-    /// The code of the fault event that records the error: the bytes the
-    /// transfer moved for a wrong length, 0 otherwise.
-    pub fn event_code(self) -> u64 {
+    /// The fault event that records the error (ADR 0028): `fault::CSW_LENGTH`
+    /// with the bytes moved as the code for a wrong length, its own event
+    /// so that a transfer that moved nothing is told apart from a bad
+    /// signature; `fault::CSW_INVALID` with code 0 otherwise.
+    pub fn event(self) -> (&'static str, u64) {
         match self {
-            Self::Length(moved) => moved as u64,
-            Self::Invalid | Self::TagMismatch(_) | Self::PhaseError(_) => 0,
+            Self::Length(moved) => (fault::CSW_LENGTH, moved as u64),
+            Self::Invalid | Self::TagMismatch(_) | Self::PhaseError(_) => (fault::CSW_INVALID, 0),
         }
+    }
+
+    /// The console line for the error on the command with `tag`, without
+    /// the driver's prefix, written into `out` (both drivers print the same
+    /// words).
+    pub fn describe(self, tag: u32, out: &mut [u8; CSW_TEXT_LEN]) -> &str {
+        let mut t = Text { out, len: 0 };
+        match self {
+            Self::Invalid => t.push("invalid CSW (signature or status)"),
+            Self::Length(moved) => {
+                t.push("CSW of ");
+                t.decimal(moved as u64);
+                t.push(" bytes, not 13 (BOT 5.2): invalid, no status for tag ");
+                t.decimal(tag as u64);
+            }
+            Self::TagMismatch(csw) => {
+                t.push("CSW tag mismatch: expected ");
+                t.decimal(tag as u64);
+                t.push(", received ");
+                t.decimal(csw.tag as u64);
+                t.push(" with status ");
+                t.decimal(csw.status as u64);
+                t.push(" residue ");
+                t.decimal(csw.residue as u64);
+            }
+            Self::PhaseError(csw) => {
+                t.push("CSW phase error, tag ");
+                t.decimal(csw.tag as u64);
+                t.push(" residue ");
+                t.decimal(csw.residue as u64);
+            }
+        }
+        t.finish()
+    }
+}
+
+/// Bytes `CswError::describe` needs: its longest line with every number at
+/// ten digits is 91 bytes.
+pub const CSW_TEXT_LEN: usize = 96;
+
+/// ASCII text built piecewise into a fixed buffer; a piece that does not
+/// fit is cut (`CSW_TEXT_LEN` leaves room for every line).
+struct Text<'a> {
+    out: &'a mut [u8],
+    len: usize,
+}
+
+impl<'a> Text<'a> {
+    fn push(&mut self, s: &str) {
+        let n = s.len().min(self.out.len() - self.len);
+        self.out[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
+        self.len += n;
+    }
+
+    fn decimal(&mut self, v: u64) {
+        if let Some(len) = fault::put_decimal(self.out, self.len, v) {
+            self.len = len;
+        }
+    }
+
+    fn finish(self) -> &'a str {
+        let out: &'a [u8] = self.out;
+        core::str::from_utf8(&out[..self.len]).unwrap_or("")
     }
 }
 
@@ -506,7 +578,10 @@ mod tests {
                     Err(CswError::Length(moved)),
                     "{moved} bytes over a previous status {previous_status}"
                 );
-                assert_eq!(CswError::Length(moved).event_code(), moved as u64);
+                assert_eq!(
+                    CswError::Length(moved).event(),
+                    (fault::CSW_LENGTH, moved as u64)
+                );
             }
             // The trap the count closes: once the first 8 bytes are
             // rewritten the buffer alone decodes as a status for tag 7.
@@ -547,12 +622,59 @@ mod tests {
             check_csw_transfer(Csw::LEN, &bad, 7),
             Err(CswError::Invalid)
         );
-        assert_eq!(CswError::Invalid.event_code(), 0);
+        assert_eq!(CswError::Invalid.event(), (fault::CSW_INVALID, 0));
+        // A CSW that moved nothing is not the same event as a bad signature.
+        assert_ne!(CswError::Length(0).event(), CswError::Invalid.event());
+        assert!(fault::CSW_LENGTH.len() <= fault::NAME_LEN);
+        assert!(fault::CSW_INVALID.len() <= fault::NAME_LEN);
         // 0xFF, the drivers' fill before every CSW read, is no status.
         assert_eq!(
             check_csw_transfer(Csw::LEN, &[0xFF; Csw::LEN], 7),
             Err(CswError::Invalid)
         );
+    }
+
+    #[test]
+    fn csw_error_lines() {
+        let mut out = [0u8; CSW_TEXT_LEN];
+        assert_eq!(
+            CswError::Invalid.describe(7, &mut out),
+            "invalid CSW (signature or status)"
+        );
+        assert_eq!(
+            CswError::Length(8).describe(7, &mut out),
+            "CSW of 8 bytes, not 13 (BOT 5.2): invalid, no status for tag 7"
+        );
+        let other = Csw {
+            tag: 6,
+            residue: 512,
+            status: CswStatus::Failed,
+        };
+        assert_eq!(
+            CswError::TagMismatch(other).describe(7, &mut out),
+            "CSW tag mismatch: expected 7, received 6 with status 1 residue 512"
+        );
+        let phase = Csw {
+            tag: 7,
+            residue: 0,
+            status: CswStatus::PhaseError,
+        };
+        assert_eq!(
+            CswError::PhaseError(phase).describe(7, &mut out),
+            "CSW phase error, tag 7 residue 0"
+        );
+        // The longest line fits whole.
+        let worst = Csw {
+            tag: u32::MAX,
+            residue: u32::MAX,
+            status: CswStatus::PhaseError,
+        };
+        let line = CswError::TagMismatch(worst).describe(u32::MAX, &mut out);
+        assert_eq!(
+            line,
+            "CSW tag mismatch: expected 4294967295, received 4294967295 with status 2 residue 4294967295"
+        );
+        assert!(line.len() <= CSW_TEXT_LEN);
     }
 
     #[test]

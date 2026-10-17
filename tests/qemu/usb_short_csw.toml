@@ -35,7 +35,7 @@ serial_contains = [
     "usb-input: reset recovery done: transport ready",
     "write: 11 bytes to probe.txt",
     "fault reported by process",
-    "usb csw invalid (code 8)",
+    "usb csw length (code 8)",
     "usb inj w lba",
     "ARICODEOS_SHUTDOWN",
 ]
