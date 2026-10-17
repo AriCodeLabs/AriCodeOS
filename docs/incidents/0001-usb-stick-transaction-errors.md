@@ -659,8 +659,11 @@ Open after this change:
   activated QEMU input handler under `shell`; `usb.hid_fault` and
   `strict.usb_hid_halt` now run without virtio input (`usb_hid_only_input`)
   and pace their keys (`key_delay_ms`, the usb-kbd queue holds 16
-  scancodes). `shell.usb_keyboard` and `shell.usb_keyboard_msi` have the
-  same routing and in fact type on the virtio keyboard; they still pass
-  but do not exercise USB typing. QEMU's xHCI also sets a stopped
+  scancodes). `shell.usb_keyboard` and `shell.usb_keyboard_msi` had the
+  same routing: until 2026-10-17 they passed typing on the virtio
+  keyboard and never exercised USB typing (no "first report" line in their
+  logs), a hidden failure of the test. They now run without virtio input,
+  pace their keys and require "usb-input: first report from slot " and
+  "console bridge with 1 input device(s)". QEMU's xHCI also sets a stopped
   interrupt endpoint Running again from its kick timer (against 4.6.9),
   so the HID recovery there reads Stopped or Running by timing.
