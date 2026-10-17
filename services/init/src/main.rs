@@ -1950,20 +1950,26 @@ fn main(arg: u64) -> u64 {
             let Ok(block_ep) = sys::endpoint_create() else {
                 return 21;
             };
-            let launched = sup
-                .register(
-                    name,
-                    Kind::Driver {
-                        pci_index: index,
-                        with_system: true,
-                        block: Some(block_ep),
-                    },
-                    Probe::Input,
-                    ep,
-                    true,
-                    Policy::DRIVER,
-                )
-                .is_some_and(|i| sup.launch(i));
+            // The endpoints go through the supervisor, which owns them
+            // from here on (restarts reuse them); only a driver that could
+            // not even be registered leaves them to be closed here.
+            let slot = sup.register(
+                name,
+                Kind::Driver {
+                    pci_index: index,
+                    with_system: true,
+                    block: Some(block_ep),
+                },
+                Probe::Input,
+                ep,
+                true,
+                Policy::DRIVER,
+            );
+            if slot.is_none() {
+                let _ = sys::handle_close(ep);
+                let _ = sys::handle_close(block_ep);
+            }
+            let launched = slot.is_some_and(|i| sup.launch(i));
             sys::print(b"AriInit: ");
             sys::print(name.as_bytes());
             if launched {
@@ -2009,14 +2015,21 @@ fn main(arg: u64) -> u64 {
     } else {
         say(b"no input devices");
     }
-    // 9b. No virtio-blk: the first USB storage a USB driver found is the
-    //     block service and fsd runs on top of it (ADR 0023, 0031).
+    // 9b. No virtio-blk: the first USB storage that carries the system's
+    //     ARI0 partition is the block service and fsd runs on top of it
+    //     (ADR 0023, 0031). A stick without ARI0 (any other USB disk) is
+    //     skipped; with none, the system goes on without storage.
     if block_service.is_none() && usb_block_count > 0 {
         let found = usb_blocks[..usb_block_count].iter().find_map(|&ep| {
-            match BlockClient::new(ep, HARDWARE, 1).and_then(|b| b.capacity()) {
-                Ok(capacity) if capacity > 0 => Some((ep, capacity)),
-                _ => None,
+            let mut blk = BlockClient::new(ep, HARDWARE, 16).ok()?;
+            let capacity = blk.capacity().ok().filter(|&c| c > 0)?;
+            if find_partition(&mut blk, "ARI0").is_none() {
+                sys::print(b"AriInit: USB storage of ");
+                sys::print(aricode_rt::fmt_u64(capacity, &mut [0u8; 20]));
+                sys::print(b" sectors without an ARI0 partition: not the system disk\n");
+                return None;
             }
+            Some((ep, capacity))
         });
         match found {
             Some((ep, capacity)) => {
@@ -2033,7 +2046,7 @@ fn main(arg: u64) -> u64 {
                     Err(code) => return code,
                 }
             }
-            None => say(b"no USB storage"),
+            None => say(b"no USB storage with an ARI0 partition"),
         }
     }
     // 10. Graphical interface: compositor with the framebuffer and the inputs,
