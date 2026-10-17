@@ -36,7 +36,10 @@ name = "area.name"              # unique; only [a-z0-9._-]; also the directory u
 description = "one line"
 level = "smoke" | "full"
 areas = ["boot", "memory"]      # to filter with --area
-cmdline = "qemu_exit ..."       # written to aricodeos/cmdline.txt
+cmdline = "qemu_exit ..."       # written to aricodeos/cmdline.txt, with " selftest" appended (below)
+selftest = true                 # default: init also runs its test clients (they write to the test disk and talk to
+                                # the test hosts at 10.0.2.2); false boots like a real machine, health checks only
+                                # (ADR 0032; init.no_selftest, usb.image_boot, update.fs_nearly_full, update.fs_one_short)
 timeout_secs = 30
 stdin = ["ls", "shutdown"]      # optional: lines the runner types on the serial console
 prompt = "ari> "                # each line is sent when the prompt appears once more (default "ari> ")
@@ -90,7 +93,8 @@ add_empty_segment_at_entry = true   # adds an empty RW PT_LOAD (memsz 0) at e_en
 [expect]
 exit = 33                       # 33 = success, 35 = failure reported by the system, 0 = reboot (-no-reboot)
 serial_contains = ["..."]
-serial_absent = ["..."]
+serial_absent = ["..."]         # every capture ends with "[host] test hosts: N contact(s)": datagrams and connections
+                                # the test hosts (UDP echo/DNS, TCP echo, HTTP) received during that boot
 ```
 
 A scenario with several boots on the same disk declares `[[boots]]` instead

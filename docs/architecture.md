@@ -561,7 +561,10 @@ latter briefly to add the region.
   MBR, a GPT with backup and an `ARI0` partition of type AriCodeOS.
 - `blk_client` (ring 3) tests info, partition read, write and
   read-back, out-of-range LBA (`Invalid`) and a request without a buffer
-  (`BadHandles`). `storage.block_service` requires it.
+  (`BadHandles`). `storage.block_service` requires it. Like the other
+  test clients it runs only with `selftest` on the command line (ADR
+  0032); every boot runs only init's read-only health check (Info and
+  the GPT read).
 - User programs have a 64 KiB stack and the kernel diagnoses
   `USER STACK OVERFLOW` when a fault hits its guard page (the 16 KiB GPT
   table on the stack caused it; it now goes on the program's heap).
@@ -610,7 +613,8 @@ latter briefly to add the region.
 - `aricode-sys::fs::FsClient` wraps the reply endpoint, the DMA buffer
   and the calls; `fs_client` (ring 3) lists, reads `hola.txt`, creates and writes
   `nuevo.txt`, replaces it in one go, does `flush`, reads back and checks
-  `Exists`, `NotFound` and `BadFd`. `filesystem.read_write` requires it (and the
+  `Exists`, `NotFound` and `BadFd`, only with `selftest` (ADR 0032; a
+  normal boot only lists). `filesystem.read_write` requires it (and the
   negotiated `flush`); `init.boot` requires the success message;
   `filesystem.replace_recovery` redoes on mount a replace cut after
   the commit and `filesystem.corrupt_detected` rejects a tampered table.

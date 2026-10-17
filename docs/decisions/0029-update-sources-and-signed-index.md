@@ -230,8 +230,9 @@ There is no key rotation in the protocol yet (see below).
   `state` (installer `LIST`), `indexes` and `last.log`; an `upgrade` adds
   `history.log` after a system install and one stage file per package:
   five free entries for the system and one app (`update.fs_nearly_full`;
-  the test system's own `fs_client` takes one more at boot for
-  `nuevo.txt`, which the first QEMU run of that scenario exposed).
+  the first QEMU run of that scenario exposed init's `fs_client` taking
+  one more at boot for `nuevo.txt`; since ADR 0032 that test client runs
+  only with `selftest`, and the nearly-full scenarios boot without it).
   `upgrade` decides everything first and reserves (creates empty) every
   entry it will need before the first irreversible step: if the table
   cannot hold them it refuses the whole upgrade (`upd-fs-full`,

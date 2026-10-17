@@ -33,8 +33,9 @@ realistic way for the laptop to use the stack that already exists.
 4. **init**: without virtio-net, the first Realtek Ethernet function
    (class 02.00) launches `rtl_net` on the same network endpoint. The test
    clients (`net_client`, `tcp_client`, `http_client`) are not run because
-   they talk to QEMU's responder; on the laptop the test is the shell's
-   `net`, `ping`, `dns` and `http`.
+   they talk to QEMU's responder, not even with `selftest` (ADR 0032); init
+   only reports the address DHCP gave (read-only health check). On the
+   laptop the test is the shell's `net`, `ping`, `dns` and `http`.
 5. **No QEMU scenario for rtl-net**: there is no emulation. Validation is
    the library on the host, the network scenarios over the shared core and
    the laptop photo (`docs/hardware.md`).
