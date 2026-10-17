@@ -1908,61 +1908,73 @@ fn main(arg: u64) -> u64 {
             say(b"virtio_input never became ready; dropped");
         }
     }
-    // USB controllers (class 0c.03): only xHCI (interface 0x30) has a
-    // driver; usbd enumerates HID keyboards and mice and serves them as a
-    // single input device, published once it responds.
-    let mut usb_block: Option<Handle> = None;
-    let mut next = 0;
-    while let Some(index) = find_pci_class_from(0x0C, 0x03, next) {
-        next = index + 1;
-        let prog_if = sys::pci_info_ext(PCI_ROOT, index)
-            .map(sys::abi::pci_info::prog_if)
-            .unwrap_or(0xFF);
-        if prog_if != sys::abi::pci_info::XHCI_PROG_IF {
+    // USB controllers (class 0c.03): the xHCI (interface 0x30) gets usbd
+    // and the EHCI (0x20) usb_ehci (ADR 0029). Each serves its HID
+    // keyboards and mice as a single input device, published once it
+    // responds, and a block endpoint for its USB storage (ADR 0023). The
+    // xHCIs go first: on Intel 7 series usbd routes the shared ports to the
+    // xHCI before the EHCI driver looks at the ports left to it.
+    use sys::abi::pci_info::{EHCI_PROG_IF, XHCI_PROG_IF};
+    let mut usb_blocks = [Handle(0); MAX_INPUTS];
+    let mut usb_block_count = 0;
+    for (wanted, name) in [(XHCI_PROG_IF, "usb_input"), (EHCI_PROG_IF, "usb_ehci")] {
+        let mut next = 0;
+        while let Some(index) = find_pci_class_from(0x0C, 0x03, next) {
+            next = index + 1;
+            let prog_if = sys::pci_info_ext(PCI_ROOT, index)
+                .map(sys::abi::pci_info::prog_if)
+                .unwrap_or(0xFF);
             let info = sys::pci_info(PCI_ROOT, index).unwrap_or(0);
-            sys::print(b"AriInit: USB controller ");
-            print_bdf(info);
-            sys::print(b" has no driver (interface 0x");
-            print_hex8(prog_if);
-            sys::print(b", xHCI only)\n");
-            continue;
-        }
-        if inputs == input_eps.len() {
-            break;
-        }
-        let Ok(ep) = sys::endpoint_create() else {
-            return 21;
-        };
-        // Each xHCI also gets a block endpoint, which it serves if it finds
-        // USB storage (ADR 0023); init uses the first one if there is no
-        // virtio-blk.
-        let Ok(block_ep) = sys::endpoint_create() else {
-            return 21;
-        };
-        let block = Some(block_ep);
-        let launched = sup
-            .register(
-                "usb_input",
-                Kind::Driver {
-                    pci_index: index,
-                    with_system: true,
-                    block,
-                },
-                Probe::Input,
-                ep,
-                true,
-                Policy::DRIVER,
-            )
-            .is_some_and(|i| sup.launch(i));
-        if launched {
-            say(b"usb_input input ready");
-            input_eps[inputs] = ep;
-            inputs += 1;
-            if usb_block.is_none() {
-                usb_block = block;
+            if prog_if != wanted {
+                if wanted == XHCI_PROG_IF && prog_if != EHCI_PROG_IF {
+                    sys::print(b"AriInit: USB controller ");
+                    print_bdf(info);
+                    sys::print(b" has no driver (interface 0x");
+                    print_hex8(prog_if);
+                    sys::print(b", xHCI and EHCI only)\n");
+                }
+                continue;
             }
-        } else {
-            say(b"usb_input never became ready; dropped");
+            if inputs == input_eps.len() {
+                sys::print(b"AriInit: USB controller ");
+                print_bdf(info);
+                sys::print(b" skipped: no input service slot left\n");
+                continue;
+            }
+            let Ok(ep) = sys::endpoint_create() else {
+                return 21;
+            };
+            // Each controller also gets a block endpoint, which its driver
+            // serves if it finds USB storage (ADR 0023); without virtio-blk
+            // init uses the first one that reports a capacity.
+            let Ok(block_ep) = sys::endpoint_create() else {
+                return 21;
+            };
+            let launched = sup
+                .register(
+                    name,
+                    Kind::Driver {
+                        pci_index: index,
+                        with_system: true,
+                        block: Some(block_ep),
+                    },
+                    Probe::Input,
+                    ep,
+                    true,
+                    Policy::DRIVER,
+                )
+                .is_some_and(|i| sup.launch(i));
+            sys::print(b"AriInit: ");
+            sys::print(name.as_bytes());
+            if launched {
+                sys::print(b" input ready\n");
+                input_eps[inputs] = ep;
+                inputs += 1;
+                usb_blocks[usb_block_count] = block_ep;
+                usb_block_count += 1;
+            } else {
+                sys::print(b" never became ready; dropped\n");
+            }
         }
     }
     if inputs > 0 {
@@ -1997,27 +2009,31 @@ fn main(arg: u64) -> u64 {
     } else {
         say(b"no input devices");
     }
-    // 9b. No virtio-blk: USB storage, if usbd found it, is the block service
-    //     and fsd runs on top of it (ADR 0023).
-    if block_service.is_none() {
-        if let Some(ep) = usb_block {
+    // 9b. No virtio-blk: the first USB storage a USB driver found is the
+    //     block service and fsd runs on top of it (ADR 0023, 0029).
+    if block_service.is_none() && usb_block_count > 0 {
+        let found = usb_blocks[..usb_block_count].iter().find_map(|&ep| {
             match BlockClient::new(ep, HARDWARE, 1).and_then(|b| b.capacity()) {
-                Ok(capacity) if capacity > 0 => {
-                    sys::print(b"AriInit: block service via USB (");
-                    sys::print(aricode_rt::fmt_u64(capacity, &mut buf));
-                    sys::print(b" sectors)\n");
-                    services |= SERVICE_BLOCK;
-                    block_service = Some(ep);
-                    match start_storage_stack(&mut sup, ep) {
-                        Ok(fs_ep) => {
-                            services |= SERVICE_FS;
-                            fs_service = Some(fs_ep);
-                        }
-                        Err(code) => return code,
-                    }
-                }
-                _ => say(b"no USB storage"),
+                Ok(capacity) if capacity > 0 => Some((ep, capacity)),
+                _ => None,
             }
+        });
+        match found {
+            Some((ep, capacity)) => {
+                sys::print(b"AriInit: block service via USB (");
+                sys::print(aricode_rt::fmt_u64(capacity, &mut buf));
+                sys::print(b" sectors)\n");
+                services |= SERVICE_BLOCK;
+                block_service = Some(ep);
+                match start_storage_stack(&mut sup, ep) {
+                    Ok(fs_ep) => {
+                        services |= SERVICE_FS;
+                        fs_service = Some(fs_ep);
+                    }
+                    Err(code) => return code,
+                }
+            }
+            None => say(b"no USB storage"),
         }
     }
     // 10. Graphical interface: compositor with the framebuffer and the inputs,
