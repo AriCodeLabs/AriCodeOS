@@ -34,6 +34,7 @@ dependencies = [
  "aricode-build",
  "aricode-crypto",
  "aricode-pkg",
+ "aricode-proto",
  "aricode-rt",
  "aricode-update-index",
 ]

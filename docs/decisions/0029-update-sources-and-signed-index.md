@@ -128,8 +128,18 @@ it, no downgrades unless asked, and every install logged.
    `upgrade` again), a repeated `[installed]` keeps its last copy (it is
    rewritten by the installer before every updater run). Line endings,
    blank lines and a missing final newline are formatting, not damage.
-   The updater's last output is in `updater/last.log`, shown to remote
-   sessions.
+   A request the file service does not answer is never read as an absent
+   file or an empty directory (incident 0008,
+   `aricode_update_index::files`): `updater/state` is then
+   `upd-state-unreadable` (updater, code 38) or `inst-state-unreadable`
+   (installer, code 12) and is not rewritten; an installed copy the
+   installer cannot read is `inst-installed-unknown` (code 14: the package
+   is refused and the installed list is not written); a directory it
+   cannot list is `inst-dir-list` (code 15: nothing is installed or
+   listed); a pending or staged package it cannot read is `inst-pkg-read`
+   (code 16, distinct from missing or tampered); a history it cannot read
+   is `inst-history-read` (code 5) and keeps its old lines. The updater's
+   last output is in `updater/last.log`, shown to remote sessions.
 
 8. **Capabilities (least privilege).** The updater keeps `system, fs,
    net, block`: its `fs` grant is its private directory `updater/`. It
@@ -211,7 +221,10 @@ There is no key rotation in the protocol yet (see below).
   version comparison and the downgrade rule, best offer across sources,
   source normalization, the source file and migration (including an
   invalid `update_url`), stored copies, the installed/plan/staged lists
-  (stage files only), history. `xtask`: a published index verifies with the
+  (stage files only), history, and optional-file reads over a mock file
+  service (absent, failed open, failed read, oversized, a failed listing,
+  and the state rewrite keeping its other sections; incident 0008).
+  `xtask`: a published index verifies with the
   development key and a tampered one does not, serials only grow,
   publication leaves no staging directory, signing keys must be a pair
   outside the repository, the post-build anchor check, the legacy
@@ -251,7 +264,9 @@ There is no key rotation in the protocol yet (see below).
   reported as its own fault. A `state` or
   `indexes` file that cannot be read (or is oversized) is a fault and is
   not rewritten in that run, so neither the exchanged lists nor the stored
-  serials are reset silently.
+  serials are reset silently; "cannot be read" includes a lost reply or a
+  timeout from the file service, which is never taken for a missing file
+  (incident 0008).
 - Limits: four sources, four staged packages per `upgrade`, a 4 KiB index,
   sixteen apps per index, 32 KiB packages, app names of 20 bytes, the
   4 MiB image buffer.

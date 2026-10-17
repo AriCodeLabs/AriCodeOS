@@ -26,13 +26,15 @@
 //! This crate is the policy shared by the updater, the installer, the shell
 //! and xtask: index format and verification ([`index`]), version and
 //! downgrade rules ([`policy`]), the source list ([`sources`]), the stored
-//! copy of a verified index ([`stored`]), the lists the updater and the
+//! copy of a verified index ([`stored`]), optional-file reads that never
+//! mistake a failure for absence ([`files`]), the lists the updater and the
 //! installer exchange ([`lists`]) and the install history ([`history`]).
 
 #![no_std]
 
 extern crate alloc;
 
+pub mod files;
 pub mod history;
 pub mod index;
 pub mod lists;
