@@ -3792,6 +3792,60 @@ full timeout), the `update`/`upgrade` protocol with sources, HID
 endpoint recovery, Reset Device for re-enumeration, EHCI, incident 0003
 reproduction, the SMP self-test under host load (incident 0002).
 
+## 94.11 AriCodeOS 0.11
+
+**Status: completed (2026-10-17), tag `v0.11.0`.** The first version
+signed with the project's release key, published on GitHub and as a
+Docker image, and the one that opened the project to other people. Four
+ADRs, three incidents closed, one opened.
+
+- update sources with a signed index (ADR 0029): `updater/sources`,
+  `index` + `index.sig` (Ed25519) with an anti-replay serial, `update`
+  and `upgrade` with a plan and a staged list, the installer in STAGED
+  and LIST modes with least privilege, `--signing-key DIR` for a
+  production key, a legacy manifest for the transition; verified on the
+  laptop, versions 2 to 6 installed over the network;
+- IPC peer closed (ADR 0030): a client of a dead server gets
+  `PeerClosed` at once instead of waiting its full timeout; endpoint
+  pairs, `endpoint_close`, init retires the endpoints of abandoned
+  services, sshd sessions end with status 139 when their shell dies;
+- EHCI driver (ADR 0031): USB 2.0 root ports, hubs, boot HID keyboards
+  and mice, bulk-only storage, the served disk identified by GPT GUID
+  and serial; both controllers of the laptop ready at every boot;
+- boot self-tests only on request (ADR 0032, incident 0005): the
+  test-only programs that wrote to the owner's disk and probed the test
+  hosts run only with `selftest`; read-only health checks stay;
+- HID endpoint recovery and Reset Device (incident 0001, F10/F14), the
+  SMP self-test under host load (incident 0002), the laptop link after a
+  network update reproduced on purpose and attributed to the test-built
+  image (incident 0003), duplicated sections in `updater/state` with
+  repair on read and fault events (incident 0006); incident 0004 (a DMA
+  mapping that outlives its buffer) opened and still open;
+- kernel base signature, a frozen SHA-512 value in the ABI that the
+  shell reports with `l1981`, checked by the ABI tests;
+- the HTTP client accepts 8 KiB of response headers (github.com sends
+  5.3 KiB);
+- Docker: a development and test image that runs the whole suite on any
+  machine, and a try image that boots the system in QEMU, published as
+  `ghcr.io/aricodelabs/aricodeos`;
+- the project opened: CONTRIBUTING, SECURITY, code of conduct, GitHub
+  templates (bug, proposal, hardware test report), the official
+  repository `AriCodeLabs/AriCodeOS` and the website `www.aricodeos.org`
+  in every notice;
+- release signing key: generated outside the repository, public half in
+  `keys/release/`; the ghcr image is signed with it and the laptop was
+  reinstalled from a stick built with it; 0.10.0 stays signed with the
+  development key and its release notes say so;
+- xtask: every workspace package linted, the `fscat` host test needs no
+  built kernel, scenarios with `usb_hid_only_input` and `key_delay_ms`
+  so USB keyboards are really exercised.
+
+Open: incident 0004; two xtask runs in the same checkout collide on the
+runner's fixed ports and the stripped-ELF directory; an Ethernet link
+drop seen once after two hours on the laptop (cable reseat restored it);
+EHCI hubs, split transactions and 64-bit addressing only verifiable on
+hardware.
+
 ---
 
 # 95. Real hardware: the right moment
