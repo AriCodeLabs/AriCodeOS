@@ -22,7 +22,7 @@ stdin = ["update", "upgrade", "reboot"]
 [boots.expect]
 exit = 0
 serial_contains = [
-    "AriInit: launch updater with manifest [system net block install] memory 6144 KiB",
+    "AriInit: launch updater with manifest [system fs net block] memory 6144 KiB",
     "updater: source 1 http://10.0.2.2:17010/update/: index verified (serial ",
     "updater: system: installed 1, source 1 offers 2: upgrade available",
     "updater: 1 upgrade(s) available: run upgrade",
@@ -33,11 +33,11 @@ serial_contains = [
     "updater: system 2 installed: reboot to apply",
     "AriCodeOS: rebooting",
 ]
-serial_absent = ["KERNEL PANIC", "update: updater exited with", "index refused", "upgrade: installer"]
+serial_absent = ["KERNEL PANIC", "update: updater exited with", "index refused", "update: installer exited"]
 
 [[boots]]
 cmdline = "qemu_exit shell"
-stdin = ["update", "cat updates.log", "shutdown"]
+stdin = ["update", "cat updater/history.log", "shutdown"]
 [boots.expect]
 exit = 33
 serial_contains = [

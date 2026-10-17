@@ -390,7 +390,7 @@ pub fn build_usb_image(
             .map_err(|e| format!("--update-source {input}: {e:?}"))?
             .to_string();
         extra.push((
-            String::from(aricode_update_index::SOURCES_FILE),
+            aricode_update_index::main_path(aricode_update_index::SOURCES_FILE),
             sources.to_text().into_bytes(),
         ));
         println!("[xtask] update source {url}");
@@ -518,11 +518,7 @@ pub fn system_image(version: u32, corrupt: bool) -> Result<Vec<u8>> {
     };
     let mut buf = [0u8; 192];
     let text = manifest.write(&mut buf).as_bytes().to_vec();
-    let seed: [u8; 32] = crate::keys::read_hex(
-        &crate::root()
-            .join(crate::keys::DEV_KEY_DIR)
-            .join(crate::keys::SEED_FILE),
-    )?;
+    let seed = crate::keys::signing_seed()?;
     let mut sig = aricode_crypto::ed25519::sign(&seed, &text);
     if corrupt {
         sig[5] ^= 0x40;
@@ -918,6 +914,13 @@ mod tests {
         let sig = fs::read(dir.join(aricode_update_index::SIGNATURE_FILE)).unwrap();
         let parsed = aricode_update_index::verify(&index, &sig, &dev_public_key()).unwrap();
         assert!(parsed.system.is_none() && parsed.apps.is_empty());
+        // Republishing never lowers the serial, whatever the clock says
+        // (audit 1, L3), and leaves no staging directories behind (L2).
+        let first = parsed.serial;
+        publish_update_to(&dir, true, &Channel::default()).unwrap();
+        let again = fs::read_to_string(dir.join(aricode_update_index::INDEX_FILE)).unwrap();
+        assert!(aricode_update_index::Index::parse(&again).unwrap().serial > first);
+        assert!(!tmp.path().join("source.new").exists() && !tmp.path().join("source.old").exists());
         assert!(
             parsed.serial > 1_700_000_000,
             "serial is the publication time"
@@ -977,34 +980,94 @@ pub struct Channel {
     pub system: Option<u32>,
     /// App packages: (directory of the external app, version).
     pub apps: Vec<(String, u32)>,
+    /// Also write the ADR 0027 `manifest.txt` next to the image, so machines
+    /// still running the single-channel updater can fetch this build (the
+    /// transition release, ADR 0029 decision 9).
+    pub legacy_manifest: bool,
     /// Alter the index after signing it (tests: the updater must refuse it).
     pub tamper_index: bool,
+    /// Alter the image after the index recorded its SHA-256 (tests: the
+    /// updater must refuse the download).
+    pub tamper_image: bool,
 }
 
-/// Index serial: seconds since the Unix epoch, so every publication is
-/// newer than the previous one (the updater refuses an older index from
-/// the same source, ADR 0029).
-fn index_serial() -> Result<u64> {
-    std::time::SystemTime::now()
+/// Index serial (audit 1, L3): the Unix time, but always above the serial
+/// of the publication being replaced, so a slow or wrong clock can never
+/// publish an index the machines refuse as stale. A serial pushed far into
+/// the future (a clock error) is recovered on each machine with `update
+/// remove N`, `update` (which forgets that source's stored copy) and
+/// `update add URL` (ADR 0029, decision 6).
+fn index_serial(previous: Option<u64>) -> Result<u64> {
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .map_err(|e| format!("system clock before 1970: {e}"))
+        .map_err(|e| format!("system clock before 1970: {e}"))?;
+    Ok(previous.map_or(now, |p| now.max(p + 1)))
 }
 
-/// `cargo xtask publish-update` (ADR 0027, ADR 0029): writes into `dir` the
-/// files of an update source: the signed system image `aricodeos-N.img`
+/// The serial of the index currently published in `dir`, if any.
+fn published_serial(dir: &Path) -> Option<u64> {
+    let text = fs::read_to_string(dir.join(aricode_update_index::INDEX_FILE)).ok()?;
+    aricode_update_index::Index::parse(&text)
+        .ok()
+        .map(|i| i.serial)
+}
+
+/// `index.sig` for `text`, signed with the selected key (hex line).
+fn sign_index(text: &str) -> Result<String> {
+    let seed = crate::keys::signing_seed()?;
+    let signature = aricode_crypto::ed25519::sign(&seed, text.as_bytes());
+    let mut hex = [0u8; 128];
+    Ok(format!("{}\n", aricode_crypto::hex(&signature, &mut hex)))
+}
+
+/// A stored copy (`updater/index-1`) of the index published in `dir`, for
+/// source `url`, re-signed with a serial ahead of the published one: the
+/// machine then sees the published index as stale (scenario
+/// `update.stale_index`).
+pub fn stored_copy_ahead(dir: &Path, url: &str) -> Result<Vec<u8>> {
+    let text = io(
+        fs::read_to_string(dir.join(aricode_update_index::INDEX_FILE)),
+        "read the published index",
+    )?;
+    let mut index =
+        aricode_update_index::Index::parse(&text).map_err(|e| format!("published index: {e:?}"))?;
+    index.serial += 1000;
+    let ahead = index.write();
+    let sig = sign_index(&ahead)?;
+    Ok(aricode_update_index::stored::encode(
+        url,
+        sig.as_bytes(),
+        ahead.as_bytes(),
+    ))
+}
+
+/// `cargo xtask publish-update` (ADR 0027, ADR 0029): publishes into `dir`
+/// one complete update source: the signed system image `aricodeos-N.img`
 /// (slot layout: ARISLOT header + container), the app packages
-/// `NAME-V.aripkg`, the `index` listing them (version, file, size, SHA-256)
-/// and `index.sig`, its Ed25519 signature with the development key
-/// (`keys/dev`; see ADR 0029 for the production key). The directory is
-/// emptied first so it holds exactly one publication.
+/// `NAME-V.aripkg`, the `index` listing them (version, file, size, SHA-256),
+/// `index.sig` (its Ed25519 signature with the selected key) and, for the
+/// transition release, the ADR 0027 `manifest.txt`. Everything is written
+/// into a sibling directory first and moved into place at the end (audit
+/// 1, L2), so a machine fetching meanwhile sees the old publication or the
+/// new one, never a mix of files.
 pub fn publish_update_to(dir: &Path, release: bool, channel: &Channel) -> Result<PathBuf> {
     use aricode_update_index::{AppEntry, Index, SystemEntry};
-    reject_symlink(dir)?;
-    if dir.exists() {
-        io(fs::remove_dir_all(dir), "empty the update directory")?;
+    let name = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("{}: not a directory name", dir.display()))?;
+    let staging = dir.with_file_name(format!("{name}.new"));
+    let old = dir.with_file_name(format!("{name}.old"));
+    for d in [dir, &staging, &old] {
+        reject_symlink(d)?;
     }
-    io(fs::create_dir_all(dir), "create the update directory")?;
+    for d in [&staging, &old] {
+        if d.exists() {
+            io(fs::remove_dir_all(d), "remove a leftover publication")?;
+        }
+    }
+    io(fs::create_dir_all(&staging), "create the update directory")?;
     let sha = aricode_crypto::sha256::sha256;
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
     if let Some(version) = channel.system {
@@ -1021,30 +1084,25 @@ pub fn publish_update_to(dir: &Path, release: bool, channel: &Channel) -> Result
         apps.push((app.name, app.version, file.clone()));
         files.push((file, app.package));
     }
-    let size = |name: &str| -> Result<u32> {
-        let data = &files
+    let data = |name: &str| -> &[u8] {
+        &files
             .iter()
             .find(|(n, _)| n == name)
             .expect("published file")
-            .1;
-        u32::try_from(data.len()).map_err(|_| format!("{name}: too large"))
+            .1
     };
-    let digest = |name: &str| {
-        sha(&files
-            .iter()
-            .find(|(n, _)| n == name)
-            .expect("published file")
-            .1)
+    let size = |name: &str| -> Result<u32> {
+        u32::try_from(data(name).len()).map_err(|_| format!("{name}: too large"))
     };
     let system_file = channel.system.map(|v| format!("aricodeos-{v}.img"));
     let index = Index {
-        serial: index_serial()?,
+        serial: index_serial(published_serial(dir))?,
         system: match (channel.system, &system_file) {
             (Some(version), Some(file)) => Some(SystemEntry {
                 version,
                 file,
                 size: size(file)?,
-                sha256: digest(file),
+                sha256: sha(data(file)),
             }),
             _ => None,
         },
@@ -1056,51 +1114,100 @@ pub fn publish_update_to(dir: &Path, release: bool, channel: &Channel) -> Result
                     version: *version,
                     file,
                     size: size(file)?,
-                    sha256: digest(file),
+                    sha256: sha(data(file)),
                 })
             })
             .collect::<Result<_>>()?,
     };
     let mut text = index.write();
-    // The index must parse back exactly as published.
+    // The index must parse back exactly as published (names, sizes, the
+    // 20-byte app name limit).
     if Index::parse(&text).as_ref() != Ok(&index) {
-        return Err(String::from("the published index does not parse back"));
+        return Err(String::from(
+            "the index does not parse back (an app name over 20 bytes?)",
+        ));
     }
-    let seed: [u8; 32] = crate::keys::read_hex(
-        &crate::root()
-            .join(crate::keys::DEV_KEY_DIR)
-            .join(crate::keys::SEED_FILE),
-    )?;
-    let signature = aricode_crypto::ed25519::sign(&seed, text.as_bytes());
+    let signature = sign_index(&text)?;
+    let legacy = match (&index.system, channel.legacy_manifest) {
+        (Some(s), true) => {
+            let mut hex = [0u8; 64];
+            Some(format!(
+                "version = {}\nimage = {}\nsize = {}\nsha256 = {}\n",
+                s.version,
+                s.file,
+                s.size,
+                aricode_crypto::hex(&s.sha256, &mut hex)
+            ))
+        }
+        _ => None,
+    };
+    let serial = index.serial;
+    drop(index);
     if channel.tamper_index {
-        let serial = format!("serial = {}\n", index.serial);
-        text = text.replace(&serial, &format!("serial = {}\n", index.serial + 1));
+        let line = format!("serial = {serial}\n");
+        text = text.replace(&line, &format!("serial = {}\n", serial + 1));
     }
-    let mut hex = [0u8; 128];
+    if channel.tamper_image {
+        let Some(file) = &system_file else {
+            return Err(String::from("tamper_image needs a system image"));
+        };
+        let image = &mut files
+            .iter_mut()
+            .find(|(n, _)| n == file)
+            .expect("published image")
+            .1;
+        let last = image.len() - 1;
+        image[last] ^= 0x01;
+    }
     for (name, data) in &files {
-        io(fs::write(dir.join(name), data), &format!("write {name}"))?;
+        io(
+            fs::write(staging.join(name), data),
+            &format!("write {name}"),
+        )?;
     }
     io(
-        fs::write(dir.join(aricode_update_index::INDEX_FILE), &text),
+        fs::write(staging.join(aricode_update_index::INDEX_FILE), &text),
         "write index",
     )?;
     io(
         fs::write(
-            dir.join(aricode_update_index::SIGNATURE_FILE),
-            format!("{}\n", aricode_crypto::hex(&signature, &mut hex)),
+            staging.join(aricode_update_index::SIGNATURE_FILE),
+            signature,
         ),
         "write index.sig",
     )?;
+    if let Some(manifest) = legacy {
+        io(
+            fs::write(staging.join("manifest.txt"), manifest),
+            "write manifest.txt",
+        )?;
+    }
+    if dir.exists() {
+        io(fs::rename(dir, &old), "move the previous publication aside")?;
+    }
+    io(fs::rename(&staging, dir), "move the publication into place")?;
+    if old.exists() {
+        io(fs::remove_dir_all(&old), "remove the previous publication")?;
+    }
     println!(
-        "[xtask] update source at {}: serial {}, {}, {} app(s){}",
+        "[xtask] update source at {}: serial {serial}, {}, {} app(s){}{}{}",
         dir.display(),
-        index.serial,
         channel
             .system
             .map_or(String::from("no system image"), |v| format!("system {v}")),
         apps.len(),
+        if channel.legacy_manifest && channel.system.is_some() {
+            ", plus manifest.txt for ADR 0027 updaters"
+        } else {
+            ""
+        },
         if channel.tamper_index {
             " (index TAMPERED after signing, for tests)"
+        } else {
+            ""
+        },
+        if channel.tamper_image {
+            " (image TAMPERED after indexing, for tests)"
         } else {
             ""
         }

@@ -10,8 +10,8 @@ use core::fmt::Write;
 
 /// Longest file name in an index entry.
 pub const MAX_FILE: usize = 64;
-/// Longest app name (the package name rule of `aricode-pkg`).
-pub const MAX_APP_NAME: usize = 32;
+/// Longest app name: `apps/NAME.aripkg` must fit AriFS's 32-byte names.
+pub const MAX_APP_NAME: usize = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexError {
@@ -75,7 +75,8 @@ pub fn valid_file(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-/// The package name rule (`aricode-pkg`): `[A-Za-z0-9_-]`, 1 to 32 bytes.
+/// The package name rule (`aricode-pkg`, `[A-Za-z0-9_-]`) with at most
+/// [`MAX_APP_NAME`] bytes, so the installed file name fits AriFS.
 pub fn valid_app_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= MAX_APP_NAME

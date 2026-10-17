@@ -72,7 +72,7 @@ libs/update-index/   aricode-update-index: update sources, signed index, rollbac
 sdk/proto/           aricode-proto: versioned IPC protocols of the services (block v1, file v1, net v1, input v1, window v1, launch v1) (no_std, host tests)
 sdk/runtime/         aricode-rt: user program runtime (`entry!`, 256 KiB heap, panic, fmt); re-exports aricode-sys
 sdk/build/           aricode-build: one-line `build.rs` that links with `sdk/rust/user.ld`
-apps/updater/        updater: signed indexes from the update sources, system image into the inactive slot, packages for the installer (`block`, `install`; ADR 0029)
+apps/updater/        updater: signed indexes from the update sources, system image into the inactive slot, packages staged for the installer (`fs`, `net`, `block`; ADR 0029)
 apps/wasm-demo/      wasm_demo.wasm: portable module compiled to wasm32 that only uses the imported Capability API
 apps/wasm-runner/    wasm_runner: WebAssembly runtime as an application with a manifest (reads the module from its private directory)
 apps/hello/          hello_app: SDK example application (console, permissions, time)
@@ -1339,23 +1339,35 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   index format and strict parser, Ed25519 verification before parsing,
   rollback serials, version comparison and the downgrade rule, best offer
   across sources, the source list (normalization, migration from
-  `update_url`), stored index copies, the `updates.log` history, and the
-  updater and installer argument constants.
-- `apps/updater` (caps system, net, block, install): `REFRESH` fetches and
-  verifies each source's `index`/`index.sig`, stores verified copies in
-  `updater/index-N` and reports; `UPGRADE` re-verifies them, downloads the
-  system image into its memory buffer, checks size, SHA-256, its signed
-  manifest and version, writes the inactive slot (header last) and
-  schedules it; packages are checked the same way and staged in
-  `pkgs/NAME.aripkg`. `APPLY` installs the `UPDATE` partition as before.
-- `apps/installer`: `ALLOW_DOWNGRADE` flag, history lines, fault events.
-- Shell: `update`, `update add|remove|sources|apply`, `upgrade
-  [--allow-downgrade]` (runs the installer when the updater staged packages).
-- xtask: `publish-update [--version N | --no-system] [--app DIR:VERSION]`,
-  `usb-image --update-source URL`, scenario table `[host_update]`.
+  `update_url`), stored index copies, the installed/plan/staged lists the
+  updater and the installer exchange, the history, and the argument
+  constants of both programs.
+- `apps/updater` (caps system, fs, net, block; no main file space):
+  `REFRESH` fetches and verifies each source's `index`/`index.sig`
+  (bounded, with a run deadline), stores verified copies in
+  `updater/index-N`, reports and saves the plan; `UPGRADE` re-verifies the
+  copies, installs only planned items: the system image (memory download,
+  size, SHA-256, signed manifest and version checked, slot header zeroed
+  first and written last) and packages staged as `updater/pkg-N.aripkg`
+  with `updater/staged`. `APPLY` installs the `UPDATE` partition under the
+  downgrade rule. Unknown installed system versions count as downgrades.
+- `apps/installer`: `LIST` writes `updater/installed`; `STAGED` installs
+  only the staged list (checked against it, then emptied);
+  `ALLOW_DOWNGRADE` only with `STAGED`; history lines and fault events.
+- `aricode_crypto::trust`: the build's public key (development by default,
+  `--signing-key DIR` through `ARICODE_SIGNING_PUB`) for AriBoot, init, the
+  installer and the updater.
+- Shell: `update`, `update add|remove|sources|apply [--allow-downgrade]`,
+  `upgrade [--allow-downgrade]` (installer `LIST` before the updater,
+  installer `STAGED` after it).
+- xtask: `publish-update [--version N | --no-system] [--app DIR:VERSION]
+  [--no-legacy-manifest] [--signing-key DIR]` (atomic, legacy
+  `manifest.txt` for the transition release), `usb-image --update-source
+  URL --signing-key DIR`, scenario table `[host_update]`.
 - Scenarios: `update.sources`, `update.migrate_legacy_url`,
-  `update.network`, `update.tampered_index`, `update.refuse_downgrade`,
-  `apps.upgrade_network`.
+  `update.network`, `update.tampered_index`, `update.tampered_image`,
+  `update.stale_index`, `update.refuse_downgrade`, `apps.upgrade_network`,
+  `apps.downgrade_refused`.
 
 ## DHCP address probe (2026-10-12)
 

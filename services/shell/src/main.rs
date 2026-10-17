@@ -238,7 +238,7 @@ fn trim(s: &[u8]) -> &[u8] {
 fn help() {
     print(
         b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  cpus      online processors and idle time per CPU\n  diag [NAME]  full report (uptime, mem, cpus, ps, services, net, devices); with NAME saves it to AriFS\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body (http:// or https://)\n  run PROG  run an initrd program and wait\n\
-  update    fetch and verify the signed index of every source and show what is new (installs nothing; ADR 0029)\n  update add URL|IP[:PORT]  register an update source\n  update remove N|URL  unregister a source\n  update sources  list the sources\n  update apply  install the image in the UPDATE partition\n  upgrade [--allow-downgrade]  install what the last `update` found (system into the inactive slot, then `reboot`; apps through the installer)\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
+  update    fetch and verify the signed index of every source and show what is new (installs nothing; ADR 0029)\n  update add URL|IP[:PORT]  register an update source\n  update remove N|URL  unregister a source\n  update sources  list the sources\n  update apply [--allow-downgrade]  install the image in the UPDATE partition\n  upgrade [--allow-downgrade]  install what the last `update` found (system into the inactive slot, then `reboot`; apps through the installer)\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
     );
 }
 
@@ -786,17 +786,57 @@ fn tls_error(e: aricode_tls::Error) -> &'static [u8] {
 /// installs the image already in the UPDATE partition (Phase 30).
 fn update(fs: &mut FsClient, rest: &[u8]) {
     let (sub, arg) = split(rest);
-    match (sub, arg.is_empty()) {
+    match (sub, arg) {
         (b"", _) => {
-            run_updater(fs, updater_arg::REFRESH);
+            if list_installed(fs) {
+                run_updater(fs, updater_arg::REFRESH);
+            }
         }
-        (b"apply", true) => {
+        (b"apply", b"") => {
             run_updater(fs, updater_arg::APPLY);
         }
-        (b"sources", true) => sources_list(fs),
-        (b"add", false) => source_add(fs, arg),
-        (b"remove", false) => source_remove(fs, arg),
-        _ => print(b"usage: update [add URL|IP[:PORT] | remove N|URL | sources | apply]\n"),
+        (b"apply", b"--allow-downgrade") => {
+            run_updater(fs, updater_arg::APPLY | updater_arg::ALLOW_DOWNGRADE);
+        }
+        (b"sources", b"") => sources_list(fs),
+        (b"add", a) if !a.is_empty() => source_add(fs, a),
+        (b"remove", a) if !a.is_empty() => source_remove(fs, a),
+        _ => print(
+            b"usage: update [add URL|IP[:PORT] | remove N|URL | sources | apply [--allow-downgrade]]\n",
+        ),
+    }
+}
+
+/// The installer writes the installed apps to `updater/installed`, which
+/// is how the updater learns them without the main file space (ADR 0029,
+/// decision 8). `false` (after saying why) if it failed.
+fn list_installed(fs: &mut FsClient) -> bool {
+    run_installer(fs, installer_arg::LIST) == Some(0)
+}
+
+/// Runs the installer with `flags`; its exit code, or `None` if it could
+/// not be launched. Failures are reported here.
+fn run_installer(fs: &mut FsClient, flags: u64) -> Option<u64> {
+    use aricode_rt::sys::launch;
+    let result = launch::run(BROKER, "installer", flags);
+    if session() && flags != installer_arg::LIST {
+        // The installer prints on the console; its installs are in the history.
+        print(b"install history:\n");
+        show_file(fs, &update_index::main_path(update_index::HISTORY_FILE));
+    }
+    match result {
+        Ok(0) => Some(0),
+        Ok(code) => {
+            print(b"update: installer exited with ");
+            num(code);
+            print(b"\n");
+            Some(code)
+        }
+        Err(e) => {
+            print(b"update: installer");
+            launch_failure(e);
+            None
+        }
     }
 }
 
@@ -812,6 +852,9 @@ fn upgrade(fs: &mut FsClient, rest: &[u8]) {
             return;
         }
     };
+    if !list_installed(fs) {
+        return;
+    }
     let mut arg = updater_arg::UPGRADE;
     if allow_downgrade {
         arg |= updater_arg::ALLOW_DOWNGRADE;
@@ -822,30 +865,13 @@ fn upgrade(fs: &mut FsClient, rest: &[u8]) {
     if code & updater_arg::EXIT_APPS_STAGED == 0 {
         return;
     }
-    use aricode_rt::sys::launch;
-    let flags = if allow_downgrade {
-        installer_arg::ALLOW_DOWNGRADE
-    } else {
-        0
-    };
-    let result = launch::run(BROKER, "installer", flags);
-    if session() {
-        // The installer prints on the console; its installs are in the history.
-        print(b"install history:\n");
-        show_file(fs, update_index::HISTORY_FILE);
+    // Only what the updater staged; the downgrade flag goes nowhere else
+    // (ADR 0029, decision 5).
+    let mut flags = installer_arg::STAGED;
+    if allow_downgrade {
+        flags |= installer_arg::ALLOW_DOWNGRADE;
     }
-    match result {
-        Ok(0) => {}
-        Ok(code) => {
-            print(b"upgrade: installer exited with ");
-            num(code);
-            print(b"\n");
-        }
-        Err(e) => {
-            print(b"upgrade: installer");
-            launch_failure(e);
-        }
-    }
+    run_installer(fs, flags);
 }
 
 /// Runs the updater with `arg` and reports a failure; the exit code, or
@@ -855,7 +881,7 @@ fn run_updater(fs: &mut FsClient, arg: u64) -> Option<u64> {
     let result = launch::run(BROKER, "updater", arg);
     if session() {
         // The updater printed on the console; show its log here.
-        show_file(fs, update_index::UPDATER_LOG_FILE);
+        show_file(fs, &update_index::main_path(update_index::UPDATER_LOG_FILE));
     }
     match result {
         Ok(code) => {
@@ -908,19 +934,28 @@ fn load_sources(fs: &mut FsClient) -> Option<update_index::Sources> {
         read_small(fs, name, 2048)
             .map(|d| d.map(|d| alloc::string::String::from_utf8_lossy(&d).into_owned()))
     };
-    let Ok(list) = text(fs, update_index::SOURCES_FILE) else {
+    let sources_path = update_index::main_path(update_index::SOURCES_FILE);
+    let Ok(list) = text(fs, &sources_path) else {
         print(b"update: cannot read the source list\n");
         return None;
     };
     if list.is_none() {
-        let legacy = text(fs, update_index::LEGACY_URL_FILE).ok().flatten();
-        if let Some(sources) = update_index::Sources::migrate(None, legacy.as_deref()) {
-            if save_file(fs, update_index::SOURCES_FILE, sources.to_text().as_bytes()).is_err() {
-                print(b"update: cannot save the migrated source list\n");
-                return None;
+        let legacy_path = update_index::main_path(update_index::LEGACY_URL_FILE);
+        let legacy = text(fs, &legacy_path).ok().flatten();
+        match update_index::Sources::migrate(None, legacy.as_deref()) {
+            update_index::Migration::Migrated(sources) => {
+                if save_file(fs, &sources_path, sources.to_text().as_bytes()).is_err() {
+                    print(b"update: cannot save the migrated source list\n");
+                    return None;
+                }
+                print(b"update: update_url migrated to the source list\n");
+                return Some(sources);
             }
-            print(b"update: update_url migrated to the source list\n");
-            return Some(sources);
+            update_index::Migration::InvalidLegacy(_) => {
+                print(b"update: updater/update_url is not a valid source: refused, not migrated\n");
+                let _ = sys::event_record(1, "sh-legacy-url-invalid");
+            }
+            update_index::Migration::NotNeeded => {}
         }
     }
     let (sources, rejected) = update_index::Sources::parse(list.as_deref().unwrap_or(""));
@@ -933,11 +968,13 @@ fn load_sources(fs: &mut FsClient) -> Option<update_index::Sources> {
 
 /// Saves the list and records the change in the install history.
 fn save_sources(fs: &mut FsClient, sources: &update_index::Sources, event: &str) -> bool {
-    if save_file(fs, update_index::SOURCES_FILE, sources.to_text().as_bytes()).is_err() {
+    let sources_path = update_index::main_path(update_index::SOURCES_FILE);
+    if save_file(fs, &sources_path, sources.to_text().as_bytes()).is_err() {
         print(b"update: cannot save the source list\n");
         return false;
     }
-    let existing = read_small(fs, update_index::HISTORY_FILE, update_index::HISTORY_MAX)
+    let history_path = update_index::main_path(update_index::HISTORY_FILE);
+    let existing = read_small(fs, &history_path, update_index::HISTORY_MAX)
         .ok()
         .flatten()
         .unwrap_or_default();
@@ -950,7 +987,7 @@ fn save_sources(fs: &mut FsClient, sources: &update_index::Sources, event: &str)
         }
     );
     let log = update_index::history::append(&existing, &line, update_index::HISTORY_MAX);
-    if save_file(fs, update_index::HISTORY_FILE, &log).is_err() {
+    if save_file(fs, &history_path, &log).is_err() {
         print(b"update: cannot write the install history\n");
     }
     true

@@ -1,8 +1,9 @@
 # App upgrade from a source (ADR 0029): hello_ext v1 is installed and the
 # source's signed index offers hello_ext v2 (no system image). `update`
 # reports it; `upgrade` downloads the package, checks it against the index
-# and its own signature, stages it in pkgs/ and runs the installer, which
-# verifies it again and replaces apps/hello_ext.aripkg atomically.
+# and its own signature, stages it in the updater's directory and runs the
+# installer on what was staged, which verifies it again and replaces
+# apps/hello_ext.aripkg atomically.
 name = "apps.upgrade_network"
 description = "upgrade: app package from a source, verified twice, installed through the installer"
 level = "full"
@@ -21,7 +22,7 @@ stdin = [
     "upgrade",
     "run hello_ext 2",
     "update",
-    "cat updates.log",
+    "cat updater/history.log",
     "shutdown",
 ]
 [boots.expect]
@@ -33,10 +34,10 @@ serial_contains = [
     "updater: system: no source offers a system image",
     "updater: app hello_ext: installed 1, source 1 offers 2: upgrade available",
     "updater: downloading hello_ext-2.aripkg (",
-    "updater: app hello_ext version 2 verified and staged in pkgs/hello_ext.aripkg",
+    "updater: app hello_ext version 2 verified and staged as updater/pkg-1.aripkg",
     "updater: 1 package(s) staged for the installer",
     "AriInit: launch installer with manifest [system install] memory 64 KiB",
-    "installer: installing hello_ext version 2 (from pkgs/hello_ext.aripkg)",
+    "installer: installing hello_ext version 2 (from updater/pkg-1.aripkg)",
     "installer: hello_ext 1 -> 2 installed (apps/hello_ext.aripkg)",
     "installer: 1 package(s) installed, 0 skipped",
     "hello_ext v2: hello from outside the tree (arg 2)",
@@ -44,4 +45,4 @@ serial_contains = [
     "app hello_ext 1 -> 2 installed (apps/hello_ext.aripkg)",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "update: updater exited with", "upgrade: installer", "index refused", "refused (downgrade)", "installed into slot"]
+serial_absent = ["KERNEL PANIC", "update: updater exited with", "update: installer exited", "index refused", "refused (downgrade)", "installed into slot"]

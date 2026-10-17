@@ -189,20 +189,30 @@ fn run_scenario(
                 .iter()
                 .map(|spec| crate::app_spec(spec).map_err(|e| format!("{}: {e}", s.name)))
                 .collect::<Result<_>>()?,
+            legacy_manifest: false,
             tamper_index: u.tamper_index,
+            tamper_image: u.tamper_image,
         };
         image::publish_update_to(&image::test_update_dir(), release, &channel)?;
         let url = format!(
             "http://10.0.2.2:{}/update/\n",
             aricode_proto::net::TEST_HTTP_PORT
         );
+        if u.stale_index {
+            installed.push((
+                aricode_update_index::main_path(
+                    aricode_update_index::stored_index_file(0).expect("slot 1"),
+                ),
+                image::stored_copy_ahead(&image::test_update_dir(), url.trim())?,
+            ));
+        }
         match u.source.as_str() {
             "sources" => installed.push((
-                String::from(aricode_update_index::SOURCES_FILE),
+                aricode_update_index::main_path(aricode_update_index::SOURCES_FILE),
                 url.into_bytes(),
             )),
             "legacy-url" => installed.push((
-                String::from(aricode_update_index::LEGACY_URL_FILE),
+                aricode_update_index::main_path(aricode_update_index::LEGACY_URL_FILE),
                 url.into_bytes(),
             )),
             "none" => {}

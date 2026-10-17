@@ -2,7 +2,7 @@
 # adds one from the shell in the IP:PORT/path form, the updater fetches and
 # verifies its index, and the source is removed again. Invalid, foreign
 # scheme and duplicate sources are refused; every change goes to the
-# install history (updates.log).
+# install history (updater/history.log).
 name = "update.sources"
 description = "update add/sources/remove: owner-registered sources, refusals, index fetched from the new source"
 level = "full"
@@ -24,7 +24,7 @@ stdin = [
     "update sources",
     "update",
     "update remove 1",
-    "cat updates.log",
+    "cat updater/history.log",
     "shutdown",
 ]
 [boots.expect]

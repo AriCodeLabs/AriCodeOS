@@ -79,6 +79,14 @@ pub struct HostUpdate {
     /// The index is altered after signing (the updater must refuse it).
     #[serde(default)]
     pub tamper_index: bool,
+    /// The image is altered after the index recorded its SHA-256 (the
+    /// updater must refuse the download).
+    #[serde(default)]
+    pub tamper_image: bool,
+    /// The machine already holds a verified copy of this source's index
+    /// with a higher serial (the published one must be refused as stale).
+    #[serde(default)]
+    pub stale_index: bool,
     /// How the machine knows the source: `sources` (registered in
     /// `updater/sources`), `legacy-url` (the ADR 0027 `updater/update_url`,
     /// to be migrated) or `none` (the scenario adds it from the shell).

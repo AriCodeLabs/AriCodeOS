@@ -26,8 +26,8 @@
 //! This crate is the policy shared by the updater, the installer, the shell
 //! and xtask: index format and verification ([`index`]), version and
 //! downgrade rules ([`policy`]), the source list ([`sources`]), the stored
-//! copy of a verified index ([`stored`]) and the install history
-//! ([`history`]).
+//! copy of a verified index ([`stored`]), the lists the updater and the
+//! installer exchange ([`lists`]) and the install history ([`history`]).
 
 #![no_std]
 
@@ -35,13 +35,14 @@ extern crate alloc;
 
 pub mod history;
 pub mod index;
+pub mod lists;
 pub mod policy;
 pub mod sources;
 pub mod stored;
 
 pub use index::{verify, AppEntry, Index, IndexError, SystemEntry};
 pub use policy::{best_app, best_system, check_fresh, compare, Change};
-pub use sources::{normalize_source, SourceError, Sources};
+pub use sources::{normalize_source, Migration, SourceError, Sources};
 
 /// Name of the index file inside a source.
 pub const INDEX_FILE: &str = "index";
@@ -59,26 +60,53 @@ pub const MAX_SOURCE_LEN: usize = 128;
 /// Index format this crate understands.
 pub const FORMAT: u32 = 1;
 
-/// The source list in AriFS (the updater's private directory; the shell
-/// edits it with `update add/remove`).
-pub const SOURCES_FILE: &str = "updater/sources";
+/// The updater's private directory (its `fs` grant). The names below are
+/// relative to it: the updater opens them as they are, the shell and the
+/// installer (main file space) through [`main_path`].
+pub const UPDATER_DIR: &str = "updater";
+/// The source list (the shell edits it with `update add/remove`).
+pub const SOURCES_FILE: &str = "sources";
 /// The single channel URL of ADR 0027; migrated into [`SOURCES_FILE`].
-pub const LEGACY_URL_FILE: &str = "updater/update_url";
-/// Install history shared by the updater and the installer (AriFS root).
-pub const HISTORY_FILE: &str = "updates.log";
+pub const LEGACY_URL_FILE: &str = "update_url";
+/// Install history: system installs (updater), app installs (installer),
+/// source changes (shell).
+pub const HISTORY_FILE: &str = "history.log";
 /// The history keeps its most recent lines within this size.
 pub const HISTORY_MAX: usize = 2048;
 /// Output of the updater's last run (shown to remote sessions).
-pub const UPDATER_LOG_FILE: &str = "updater/last.log";
+pub const UPDATER_LOG_FILE: &str = "last.log";
+/// Installed apps and versions, written by the installer before every
+/// updater run ([`lists::encode_installed`]).
+pub const INSTALLED_FILE: &str = "installed";
+/// What the last `update` reported as installable ([`lists::PlanItem`]);
+/// `upgrade` installs nothing outside it.
+pub const PLAN_FILE: &str = "plan";
+/// Packages the last `upgrade` staged for the installer
+/// ([`lists::StagedEntry`]); the installer empties it once consumed.
+pub const STAGED_FILE: &str = "staged";
+/// Most packages staged by one `upgrade` (each one is an AriFS file).
+pub const MAX_STAGED: usize = 4;
+
+/// `name` inside the updater's directory, as the main file space sees it.
+pub fn main_path(name: &str) -> alloc::string::String {
+    alloc::format!("{UPDATER_DIR}/{name}")
+}
 
 /// Stored, verified index of the source in position `slot` (0-based) of
-/// the list (`updater/index-1` ...).
+/// the list (`index-1` ...).
 pub fn stored_index_file(slot: usize) -> Option<&'static str> {
-    const FILES: [&str; MAX_SOURCES] = [
-        "updater/index-1",
-        "updater/index-2",
-        "updater/index-3",
-        "updater/index-4",
+    const FILES: [&str; MAX_SOURCES] = ["index-1", "index-2", "index-3", "index-4"];
+    FILES.get(slot).copied()
+}
+
+/// Staged package number `slot` (0-based): `pkg-1.aripkg` ... The installer
+/// accepts no other name (ADR 0029, decision 5).
+pub fn staged_package_file(slot: usize) -> Option<&'static str> {
+    const FILES: [&str; MAX_STAGED] = [
+        "pkg-1.aripkg",
+        "pkg-2.aripkg",
+        "pkg-3.aripkg",
+        "pkg-4.aripkg",
     ];
     FILES.get(slot).copied()
 }
@@ -91,16 +119,23 @@ pub mod updater_arg {
     pub const REFRESH: u64 = 1;
     /// Installs what the stored indexes offer over the installed versions.
     pub const UPGRADE: u64 = 2;
-    /// Flag for `UPGRADE`: older versions may replace newer ones.
+    /// Flag for `UPGRADE` and `APPLY`: older versions (or an unknown
+    /// installed version) may be replaced.
     pub const ALLOW_DOWNGRADE: u64 = 1 << 8;
-    /// Bit in the exit code of `UPGRADE`: verified packages were left in
-    /// `pkgs/` for the installer. The other bits are the failure code (0
-    /// when everything went well).
+    /// Bit in the exit code of `UPGRADE`: verified packages were staged in
+    /// the updater's directory for the installer. The other bits are the
+    /// failure code (0 when everything went well).
     pub const EXIT_APPS_STAGED: u64 = 1 << 8;
 }
 
-/// Arguments of the `installer` program (flags).
+/// Arguments of the `installer` program (flags). Without flags it installs
+/// the packages left in `pkgs/` (ADR 0018).
 pub mod installer_arg {
-    /// A package older than the installed one may replace it.
+    /// With `STAGED` only: a package older than the installed one may
+    /// replace it. Refused in any other mode.
     pub const ALLOW_DOWNGRADE: u64 = 1;
+    /// Install only what the updater listed in `updater/staged`.
+    pub const STAGED: u64 = 2;
+    /// Only write the installed apps to `updater/installed`.
+    pub const LIST: u64 = 4;
 }

@@ -198,10 +198,26 @@ It builds and signs the current system image (and the given app packages),
 writes the signed `index` and `index.sig` into `build/update/` and serves it
 on the LAN (any free port; the default 8080 is often taken). Bump
 `--version` on every publication: the laptop never reinstalls the version it
-runs and refuses an older one. On the laptop, console or SSH:
+runs and refuses an older one.
+
+**First time from a laptop running 0.9.0 (transition release).** Its
+updater still speaks ADR 0027 and only reads `manifest.txt`, which
+`publish-update` keeps writing next to the image for this release. On the
+laptop, once:
 
 ```text
-update add 192.168.1.16:8765         # first time: register the source
+update http://192.168.1.16:8765/     # the old command: fetches this build through manifest.txt
+reboot
+```
+
+After that reboot the laptop runs the new updater, which turns its saved
+`update_url` into the first source. Once every machine is past this step,
+publish with `--no-legacy-manifest`.
+
+**From then on**, console or SSH:
+
+```text
+update add 192.168.1.16:8765         # only if no source is registered yet
 update                               # verify the index, show what is new (installs nothing)
 upgrade                              # verify and install it; the system goes to the inactive slot
 reboot
@@ -209,8 +225,17 @@ reboot
 
 The loader boots the new slot; if it does not come up, three attempts later
 it returns to the previous one. `update sources` lists the sources, `update
-remove N` drops one, `cat updates.log` shows what was installed and
+remove N` drops one, `cat updater/history.log` shows what was installed and
 `upgrade --allow-downgrade` is the only way back to an older version. The
 source can also be baked into the stick with `cargo xtask usb-image
---update-source URL`; a stick made with the old `--update-url` is migrated
-on its first `update`.
+--update-source URL`.
+
+**Signing key.** Without `--signing-key DIR` everything is signed with the
+development key, whose seed is in the repository: anyone on the network
+could sign an update the laptop accepts, and xtask says so on every
+publication. For a laptop on an untrusted network, create a key outside the
+repository (`cargo xtask keygen /secure/dir`), write the stick with
+`cargo xtask usb-image --signing-key /secure/dir ...` and publish with the
+same `--signing-key` (ADR 0029, "The signing key"). A laptop installed with
+the development key does not accept the production key until it is
+reinstalled from such a stick.

@@ -1,6 +1,7 @@
 # ADR 0029: Update sources and the signed update index
 
-- **Date:** 2026-10-17
+- **Date:** 2026-10-17 (revised the same day after audit 1,
+  `docs/audits/update-sources-audit-1.md`)
 - **Status:** Accepted (extends ADR 0027, replaces its channel manifest and
   `update [URL|check]`)
 
@@ -21,13 +22,15 @@ it, no downgrades unless asked, and every install logged.
    lives in `updater/sources` (one normalized URL per line, at most four,
    `aricode-update-index::Sources`). Only holders of the main file space can
    write it: the shell (console, or an SSH session authenticated by
-   `authorized_keys`, ADR 0025) and the trusted updater and installer.
-   Applications get their own `fs` prefix and cannot reach it. A source
-   without a scheme is `http://`; other schemes, credentials, query strings
-   and fragments are refused; one spelling per source (ports without
-   leading zeros, trailing `/`), so duplicates are caught. Additions and
-   removals are written to the install history with where they came from.
-   A hand-damaged line is ignored and reported, never used.
+   `authorized_keys`, ADR 0025) and the installer; the updater reaches it
+   through its own private directory. Applications get their own `fs`
+   prefix and cannot reach it. A source without a scheme is `http://`;
+   scheme and host are lower-cased, the default port is dropped, other
+   schemes, credentials, query strings, fragments, `..`/`.` segments and
+   `//` in the path are refused: one spelling per source, so duplicates
+   are caught. Additions and removals are written to the install history
+   with where they came from. A hand-damaged line is ignored and reported
+   (fault event), never used.
 
 2. **The index.** Each source publishes `index` and `index.sig`:
 
@@ -39,17 +42,20 @@ it, no downgrades unless asked, and every install logged.
    app = hello_ext 2 hello_ext-2.aripkg 14472 <sha256>
    ```
 
-   At most one `system` and sixteen `app` entries (one per name); file names
-   are plain (`[A-Za-z0-9._-]`, no leading dot) so an entry can never point
-   outside its source; the parser is strict (unknown keys, extra fields and
-   repeated keys are errors) so two readers cannot disagree on what was
-   signed; at most 4 KiB. `index.sig` is the Ed25519 signature of the exact
-   bytes of `index`, in hex (the format of `cargo xtask sign`, so `cargo
-   xtask verify keys/dev/ed25519.pub index index.sig` checks it on a host).
+   At most one `system` and sixteen `app` entries (one per name, names of
+   at most 20 bytes so `apps/NAME.aripkg` fits AriFS's 32-byte names); file
+   names are plain (`[A-Za-z0-9._-]`, no leading dot) so an entry can never
+   point outside its source; the parser is strict (unknown keys, extra
+   fields and repeated keys are errors) so two readers cannot disagree on
+   what was signed; at most 4 KiB. `index.sig` is the Ed25519 signature of
+   the exact bytes of `index`, in hex (the format of `cargo xtask sign`, so
+   `cargo xtask verify KEY.pub index index.sig` checks it on a host).
 
 3. **Signatures before anything else.** The updater verifies `index.sig`
    with the project public key before parsing a single line of the index
-   (`aricode_update_index::verify`). A refused index is a fault event
+   (`aricode_update_index::verify`). Both downloads are bounded (4 KiB and
+   256 bytes: the HTTP sink refuses anything beyond) and the whole run has
+   a ten-minute deadline (`upd-deadline`). A refused index is a fault event
    (`upd-index-refused`, ADR 0028), its source contributes nothing, and the
    index verified earlier for that source, if any, is kept (it is still
    authentic). Every entry keeps its own signature as well: the system image
@@ -58,108 +64,156 @@ it, no downgrades unless asked, and every install logged.
    (size and SHA-256), then its own signature and hashes, and the version
    inside must equal the version in the index; only then is anything
    written. The image is downloaded into the updater's memory buffer, not
-   into the `UPDATE` partition, so no disk sector changes before the checks
-   pass. The installer and the broker verify a package again before
-   installing or launching it.
+   into the `UPDATE` partition. The installer and the broker verify a
+   package again before installing or launching it.
 
-4. **`update` stores, `upgrade` re-verifies.** `update` (updater argument
-   `REFRESH`) fetches every source's index, keeps the verified copies in
-   `updater/index-N` (source URL, signature, exact bytes) and reports, for
-   the system (version of the active slot, verified from disk) and for each
-   installed app (`apps/*.aripkg` that verify, what the installer and the
-   broker accept), the best offer and whether it is an upgrade. It installs
-   nothing. `upgrade` (argument `UPGRADE`) verifies the stored copies again
-   instead of trusting AriFS, takes for each item the newest version among
-   the sources (first source on ties), and installs: the system image into
-   the inactive slot through the Phase 30 path (header sector written last,
-   then the slot is scheduled with three tries; `reboot to apply`), and app
-   packages staged in `pkgs/NAME.aripkg`, after which the shell runs the
-   existing installer. `upgrade` only upgrades apps that are installed; new
-   apps are listed by `update` as available.
+4. **`update` reports and plans, `upgrade` follows the plan.** `update`
+   (updater argument `REFRESH`) first has the installer write the installed
+   apps to `updater/installed` (installer `LIST`), then fetches every
+   source's index, keeps the verified copies in `updater/index-N` (source
+   URL, signature, exact bytes), reports for the system (version of the
+   active slot, verified from disk) and for each installed app the best
+   offer, and saves everything that differs as `updater/plan`. It installs
+   nothing. `upgrade` (argument `UPGRADE`) verifies the stored copies
+   again instead of trusting AriFS and installs only items of the plan at
+   the version the plan names (`upd-not-reported` otherwise): the system
+   image into the inactive slot through the Phase 30 path (the old header
+   is zeroed and flushed first, the new header written last, then the slot
+   is scheduled with three tries; `reboot to apply`), and app packages
+   staged in the updater's directory as `pkg-1.aripkg`..`pkg-4.aripkg`
+   with `updater/staged` listing file, name, version and SHA-256. The shell
+   then runs the installer with `STAGED`, which installs exactly those
+   files after checking them against the list and their own signature, and
+   empties the list. `upgrade` only upgrades installed apps; new apps are
+   listed by `update` as available. The disk is only opened when a system
+   image is involved, so apps-only work needs no A/B partitions.
 
-5. **No downgrade by default.** An offered version older than the installed
-   one is refused (fault event `upd-downgrade-refused`, and the installer's
+5. **No downgrade by default.** An offered version older than the
+   installed one is refused (fault events `upd-downgrade-refused`,
    `inst-downgrade-refused`) unless the owner types
-   `upgrade --allow-downgrade`; an equal version is never reinstalled. A
-   validly signed old image or package may have known flaws: replaying it
-   must not roll the machine back. With the flag the installer accepts
-   older versions for every package then pending in `pkgs/`.
+   `upgrade --allow-downgrade` (or `update apply --allow-downgrade` for the
+   `UPDATE` partition); an equal version is never reinstalled. A system
+   whose installed version cannot be read or verified counts as a
+   downgrade (`upd-installed-unknown`): the machine never replaces what it
+   cannot identify without being told to. A validly signed old image or
+   package may have known flaws: replaying it must not roll the machine
+   back. The installer accepts `ALLOW_DOWNGRADE` only together with
+   `STAGED` (`inst-flags-refused` otherwise), so the flag never reaches
+   packages left in `pkgs/` by hand, and a staged list is consumed once.
 
 6. **Rollback protection for indexes.** `serial` grows with every
-   publication (`publish-update` uses the Unix time). An index older than
-   the verified one stored for the same source is refused
-   (`upd-index-stale`): a replayed old index cannot hide newer versions.
+   publication: `publish-update` uses the Unix time but never less than
+   the previous publication's serial plus one. An index older than the
+   verified one stored for the same source is refused (`upd-index-stale`):
+   a replayed old index cannot hide newer versions. A serial pushed far into
+   the future by a clock error is recovered on each machine with `update
+   remove N`, `update` (which drops the stored copies of sources no longer
+   listed) and `update add URL`.
 
-7. **Logging.** Successes go to `updates.log` in AriFS (system installs,
-   app installs, source changes; the last 2 KiB are kept,
-   `aricode_update_index::history`), shown by `cat updates.log`. Every
-   failure and refusal is said on the console and recorded as a fault event
-   with its code, listed by `diag` (ADR 0028). The updater's last output is
-   in `updater/last.log`, shown to remote sessions.
+7. **Logging.** Successes go to `updater/history.log` (system installs by
+   the updater, app installs by the installer, source changes by the
+   shell; the last 2 KiB are kept, `aricode_update_index::history`), shown
+   by `cat updater/history.log`. Every failure and refusal is said on the
+   console and recorded as a fault event with its code, listed by `diag`
+   (ADR 0028): missing partitions, memory, key, services, an invalid
+   `update_url`, a list changed since the last update, a source without a
+   verified index, an installed package failing verification (listed by
+   the installer, never replaced silently), and every download or
+   verification failure. The updater's last output is in
+   `updater/last.log`, shown to remote sessions.
 
-8. **Capabilities.** The updater's manifest becomes `system, net, block,
-   install`: the main file space replaces its private `fs` prefix so it can
-   read `apps/`, stage `pkgs/` and write the history. It already holds
-   `block`, which reaches the raw AriFS partition, so this adds no
-   authority. `install` stays limited to the broker's trust list
-   (`installer`, `updater`).
+8. **Capabilities (least privilege).** The updater keeps `system, fs,
+   net, block`: its `fs` grant is its private directory `updater/`. It
+   does not get the main file space: it parses network input, and `install`
+   would give it journaled writes to `authorized_keys`, the SSH host key,
+   `trusted_ca.der` and `apps/`. Installed versions reach it in
+   `updater/installed`; staged packages leave through `updater/staged`; the
+   installer (main space, `install`, trust list `installer` only) does the
+   installing. Follow-up: the raw `block` grant still reaches every
+   partition, ARI0 included; it should be limited to `UPDATE`, `ARIBOOT`
+   and the slot partitions by the block service.
 
-9. **Migration from ADR 0027.** When `updater/sources` does not exist and
-   `updater/update_url` holds a valid URL, it becomes the first source (the
-   updater and the shell both migrate, whichever runs first). Once a sources
-   file exists, even an empty one, `update_url` is ignored. `manifest.txt`
-   is no longer published or read; `update URL` and `update check` are
-   replaced by `update add URL` and `update`; `update apply` (install what
-   the `UPDATE` partition holds) remains. `cargo xtask usb-image
-   --update-source URL` writes `updater/sources`.
+9. **Migration from ADR 0027 (transition release).** When
+   `updater/sources` does not exist and `updater/update_url` holds a valid
+   URL, it becomes the first source (the updater and the shell both
+   migrate, whichever runs first); an invalid one is refused visibly
+   (`upd-legacy-url-invalid`). Once a sources file exists, even an empty
+   one, `update_url` is ignored. Machines still running the ADR 0027
+   updater only read `manifest.txt`: for this release `publish-update`
+   also writes it next to the image by default, so they can fetch this
+   build over the network with their `update`; after that they speak the
+   new protocol and `--no-legacy-manifest` drops it. `update URL` and
+   `update check` are replaced by `update add URL` and `update`;
+   `update apply` remains. `cargo xtask usb-image --update-source URL`
+   writes `updater/sources`.
 
 10. **Publishing.** `cargo xtask publish-update [--version N | --no-system]
-    [--app DIR:VERSION]...` writes one complete source into `build/update/`
-    (emptied first): image, packages, `index`, `index.sig`; `serve-update`
-    publishes and serves it. The scenarios publish into
-    `build/update-test/` only (incident 0003), described by a
-    `[host_update]` table (`system`, `apps`, `tamper_index`, `source`).
+    [--app DIR:VERSION]... [--no-legacy-manifest] [--signing-key DIR]`
+    builds one complete source in a sibling directory and moves it into
+    `build/update/` at the end, so a machine fetching meanwhile never sees
+    a mix of two publications; `serve-update` publishes and serves it. The
+    scenarios publish into `build/update-test/` only (incident 0003),
+    described by a `[host_update]` table (`system`, `apps`,
+    `tamper_index`, `tamper_image`, `stale_index`, `source`).
 
 ## The signing key
 
-Images, packages and indexes are signed with one Ed25519 key. Today it is
-the development pair in `keys/dev` (its seed is in the repository on
-purpose, so anyone can sign for a test machine). The public key is compiled
-into AriBoot, init (the broker), the installer and the updater. A
-production key replaces it like this:
+Images, packages and indexes are signed with one Ed25519 key, and the
+build embeds its public half in every verifier (AriBoot, init's broker, the
+installer, the updater) through `aricode_crypto::trust`.
 
-1. `cargo xtask keygen /secure/offline/dir` on a machine that never serves
-   updates; the seed never enters the repository or the build host.
-2. The release build uses that directory's `ed25519.pub` in place of
-   `keys/dev/ed25519.pub` (one file; every verifier includes it at build
-   time), and the machines are installed from that build.
-3. Images, packages and the index are signed with the offline seed; the
-   publishing host only receives signed files. `cargo xtask verify` checks
-   them before they are served.
+The development pair in `keys/dev` is the default. Its seed is in the
+repository on purpose, so anyone can sign images and packages that a
+dev-key build accepts: anyone on the LAN can then upgrade such a machine.
+xtask prints a warning whenever it signs with it. A production key is
+required before network upgrades on untrusted networks:
 
-Machines built with the development key keep accepting development
-signatures; there is no key rotation in the protocol yet (see below).
+1. `cargo xtask keygen /secure/offline/dir` on a machine that does not
+   serve updates. The seed never enters the repository: xtask refuses a
+   `--signing-key` directory inside it, and checks that seed and public key
+   are a pair.
+2. `cargo xtask usb-image --signing-key /secure/offline/dir` builds the
+   system with that public key embedded (`ARICODE_SIGNING_PUB`; cargo
+   rebuilds the verifiers when it changes) and signs slot A with it. The
+   machines are installed from that image.
+3. `cargo xtask publish-update --signing-key /secure/offline/dir ...` (or
+   `serve-update`) builds with the same key and signs the image, the
+   packages and the index. A machine built with one key refuses everything
+   signed with another.
+
+There is no key rotation in the protocol yet (see below).
 
 ## Consequences
 
 - Host unit tests (`libs/update-index`): index round trip, strict parsing,
-  signature verification and tampering, rollback serials, version
-  comparison and the downgrade rule, best offer across sources, source
-  normalization, the source file and migration, stored copies, history.
-  `xtask`: a published index verifies with the development key and a
-  tampered one does not.
+  app name length, signature verification and tampering, rollback serials,
+  version comparison and the downgrade rule, best offer across sources,
+  source normalization, the source file and migration (including an
+  invalid `update_url`), stored copies, the installed/plan/staged lists
+  (stage files only), history. `xtask`: a published index verifies with the
+  development key and a tampered one does not, serials only grow,
+  publication leaves no staging directory, signing keys must be a pair
+  outside the repository. `aricode-crypto`: the embedded key parses.
+- Installer memory: the 64 KiB quota is DMA only (the file client's 4 KiB
+  buffer); packages use the runtime's 256 KiB static heap, whose peak
+  during an install is under 80 KiB (one 32 KiB package, the installed copy
+  read for its version, the history and a list).
 - QEMU scenarios: `update.sources`, `update.migrate_legacy_url`,
   `update.network` (system upgrade and reboot into the new slot),
-  `update.tampered_index`, `update.refuse_downgrade`,
-  `apps.upgrade_network`; `ssh.exec` and `update.apply` follow the new
-  messages and manifest.
+  `update.tampered_index`, `update.tampered_image`, `update.stale_index`,
+  `update.refuse_downgrade`, `apps.upgrade_network`,
+  `apps.downgrade_refused`; `ssh.exec` and `update.apply` follow the new
+  messages.
 - The transport stays untrusted (ADR 0027, decision 2): HTTP is enough for
   integrity; HTTPS adds privacy and hides which versions a machine fetches.
-- Limits: four sources (each keeps one stored index in AriFS, whose table
-  holds 32 files), a 4 KiB index, sixteen apps per index, 32 KiB packages,
-  app names that fit `pkgs/NAME.aripkg` in 32 bytes, the 4 MiB image buffer.
-- Open: key rotation and revocation (a signed key list in the index),
+  The updater trusts only the embedded root certificates for HTTPS.
+- Limits: four sources and four staged packages per `upgrade` (each is an
+  AriFS file, and the AriFS table holds 32 entries in all: the updater's
+  directory can reach 16), a 4 KiB index, sixteen apps per index, 32 KiB
+  packages, app names of 20 bytes, the 4 MiB image buffer.
+- Open: key rotation and revocation (a signed key list in the index);
   freshness against a source that keeps serving one old index forever (an
-  expiry date needs a trusted clock), installing apps that are not yet
-  installed (`update install NAME`), removing staged packages from `pkgs/`
-  (AriFS has no delete yet).
+  expiry date needs a trusted clock); binding an index to the source that
+  serves it (a validly signed index can be served by any registered
+  source); installing apps that are not yet installed (`update install
+  NAME`); limiting the updater's raw `block` grant to its partitions.

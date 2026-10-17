@@ -27,9 +27,6 @@ use aricode_rt::sys::fs::FsClient;
 use aricode_rt::sys::{self, rights, Error, Handle, TIMEOUT_INFINITE};
 use aricode_supervisor::{Action, Exit, Policy, Service, State};
 
-/// Development public key used to sign packages (ADR 0017).
-const PUBKEY_HEX: &str = include_str!("../../../keys/dev/ed25519.pub");
-
 const SPAWNER: Handle = Handle(0x0001_0004);
 const PCI_ROOT: Handle = Handle(0x0001_0005);
 const HARDWARE: Handle = Handle(0x0001_0006);
@@ -1253,10 +1250,9 @@ impl Broker {
             }
         }
         let _ = fs.close(fd);
-        let mut pubkey = [0u8; 32];
-        if aricode_crypto::unhex(PUBKEY_HEX.trim(), &mut pubkey).is_none() {
+        let Some(pubkey) = aricode_crypto::trust::public_key() else {
             return Err(LaunchStatus::Failed);
-        }
+        };
         let package = &stage[..total];
         let verified = match aricode_pkg::verify(package, &pubkey) {
             Ok(v) => v,

@@ -124,7 +124,7 @@ the fifth (ADR 0015). The broker reads `NAME.manifest` from the initrd
 
 ```text
 name = hello_app
-caps = system, fs      # system | fs | net | window | input | block (updater only) | install (installer and updater only)
+caps = system, fs      # system | fs | net | window | input | block (updater only) | install (installer only)
 memory = 128K          # DMA buffer quota (K or M, at most 8M)
 read_files = hola.txt  # up to 4 AriFS files in read-only mode (ADR 0016)
 ```

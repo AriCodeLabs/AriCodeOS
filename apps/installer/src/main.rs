@@ -1,79 +1,92 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
-//! `installer` (stage 4, ADR 0018): trusted app that receives the main fsd
-//! space (`install` capability) and installs or updates the signed packages
-//! left in `pkgs/`: it verifies each one with the development key, compares
-//! its version with the one installed at `apps/NAME.aripkg` and, if newer,
-//! replaces it with a single atomic `replace`. A package that fails
-//! verification or is not newer is skipped, and the installer says so.
+//! `installer` (stage 4, ADR 0018, ADR 0029): trusted app that receives the
+//! main fsd space (`install` capability) and installs or updates signed
+//! packages: it verifies each one with the project key, compares its
+//! version with the one installed at `apps/NAME.aripkg` and replaces it
+//! with a single atomic `replace`.
 //!
-//! Argument (`aricode_update_index::installer_arg`): with `ALLOW_DOWNGRADE`
-//! (the shell's `upgrade --allow-downgrade`, ADR 0029) an older package may
-//! replace the installed one; never otherwise. Every install is appended
-//! to the history (`updates.log`); every refusal or failure is a fault
-//! event (ADR 0028).
+//! Argument (`aricode_update_index::installer_arg`):
+//!
+//! - no flag: the packages left in `pkgs/` (ADR 0018); never a downgrade.
+//! - `STAGED`: only the packages the updater listed in `updater/staged`,
+//!   from the fixed stage files of its directory, each checked against the
+//!   SHA-256, name and version listed there; the list is emptied once
+//!   consumed. `ALLOW_DOWNGRADE` (the shell's `upgrade --allow-downgrade`)
+//!   is accepted only together with `STAGED` (ADR 0029, decision 5).
+//! - `LIST`: only writes the installed apps to `updater/installed`, which
+//!   is how the updater learns them without the main file space.
+//!
+//! Every install goes to the history (`updater/history.log`); every refusal
+//! or failure is said and recorded as a fault event (ADR 0028).
+//!
+//! Memory: the DMA quota (64 KiB, manifest) only holds the file client's
+//! 4 KiB buffer; packages live on the 256 KiB static heap of the runtime.
+//! The peak is one package (at most 32 KiB) plus the installed copy read to
+//! compare versions (at most 32 KiB, freed before the write) plus the
+//! history (2 x 2 KiB) and a list (under 4 KiB): under 80 KiB.
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
 use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
+use aricode_crypto::sha256::sha256;
 use aricode_rt::sys::fs::FsClient;
 use aricode_rt::sys::{self, kind, permissions};
-use aricode_update_index::{self as upd, compare, installer_arg, Change};
+use aricode_update_index::{self as upd, compare, installer_arg, lists, Change};
 
-const PUBKEY_HEX: &str = include_str!("../../../keys/dev/ed25519.pub");
 /// An installed package is replaced in one go: the AriFS journal (32 KiB).
 const MAX_PACKAGE: u64 = 32 * 1024;
 const MAX_PENDING: usize = 8;
 
-fn say(msg: &[u8]) {
-    sys::print(b"installer: ");
-    sys::print(msg);
-    sys::print(b"\n");
+/// Exit and fault event codes (ADR 0028).
+mod code {
+    pub const NO_SPACE: u64 = 1;
+    pub const NO_CLIENT: u64 = 2;
+    pub const KEY: u64 = 3;
+    pub const OPEN: u64 = 4;
+    pub const WRITE: u64 = 5;
+    pub const BAD_FLAGS: u64 = 6;
+    pub const VERIFY: u64 = 7;
+    pub const DOWNGRADE: u64 = 8;
+    pub const INSTALLED_INVALID: u64 = 9;
+    pub const STAGE: u64 = 10;
+    pub const LIST: u64 = 11;
 }
 
-fn num(v: u64) {
-    let mut b = [0u8; 20];
-    sys::print(aricode_rt::fmt_u64(v, &mut b));
+macro_rules! say {
+    ($($arg:tt)*) => {
+        sys::print(format!("installer: {}\n", format_args!($($arg)*)).as_bytes())
+    };
 }
 
-/// Fault event codes (ADR 0028).
-const FAULT_VERIFY: u64 = 1;
-const FAULT_DOWNGRADE: u64 = 2;
-const FAULT_WRITE: u64 = 3;
+/// Says `msg` and records the fault event.
+fn fault(code: u64, event: &str, msg: &str) -> u64 {
+    say!("{msg}");
+    let _ = sys::event_record(code, event);
+    code
+}
 
-/// Appends a line to the install history (`updates.log`, ADR 0029).
-fn history(fs: &mut FsClient, line: &str) {
-    let mut existing = Vec::new();
-    if let Ok(fd) = fs.open(upd::HISTORY_FILE) {
-        let mut chunk = [0u8; 512];
-        while let Ok(n) = fs.read(fd, existing.len() as u32, &mut chunk) {
-            if n == 0 || existing.len() + n > upd::HISTORY_MAX {
-                break;
-            }
-            existing.extend_from_slice(&chunk[..n]);
+/// Size of `name` from the directory listing.
+fn file_size(fs: &FsClient, name: &str) -> Option<u64> {
+    let mut entry = [0u8; 32];
+    let mut i = 0;
+    while let Ok(Some((n, size))) = fs.list(i, &mut entry) {
+        if &entry[..n] == name.as_bytes() {
+            return Some(size);
         }
-        let _ = fs.close(fd);
+        i += 1;
     }
-    let log = upd::history::append(&existing, line, upd::HISTORY_MAX);
-    let written = fs
-        .open(upd::HISTORY_FILE)
-        .or_else(|_| fs.create(upd::HISTORY_FILE))
-        .map(|fd| {
-            let r = fs.replace(fd, &log);
-            let _ = fs.close(fd);
-            r
-        });
-    if !matches!(written, Ok(Ok(n)) if n == log.len()) {
-        let _ = sys::event_record(FAULT_WRITE, "inst-history-write");
-    }
+    None
 }
 
-/// Reads a whole file (up to `MAX_PACKAGE`) from the main space.
-fn read_all(fs: &mut FsClient, name: &str, size: u64) -> Option<Vec<u8>> {
-    if size == 0 || size > MAX_PACKAGE {
+/// Reads a whole file (up to `max` bytes) from the main space.
+fn read_all(fs: &mut FsClient, name: &str, max: u64) -> Option<Vec<u8>> {
+    let size = file_size(fs, name)?;
+    if size > max {
         return None;
     }
     let fd = fs.open(name).ok()?;
@@ -92,28 +105,292 @@ fn read_all(fs: &mut FsClient, name: &str, size: u64) -> Option<Vec<u8>> {
     Some(data)
 }
 
-/// Version of the installed package with that name; `None` if there is
-/// none or the existing one fails verification (it can be replaced).
-fn installed_version(fs: &mut FsClient, path: &str, pubkey: &[u8; 32]) -> Option<u32> {
-    let mut entry = [0u8; 32];
-    let mut i = 0;
-    let mut size = None;
-    while let Ok(Some((n, s))) = fs.list(i, &mut entry) {
-        if &entry[..n] == path.as_bytes() {
-            size = Some(s);
-            break;
-        }
-        i += 1;
+/// Replaces (or creates) a file atomically (ADR 0014).
+fn write_file(fs: &mut FsClient, name: &str, data: &[u8]) -> bool {
+    let Ok(fd) = fs.open(name).or_else(|_| fs.create(name)) else {
+        return false;
+    };
+    let ok = fs.replace(fd, data) == Ok(data.len());
+    let _ = fs.close(fd);
+    ok
+}
+
+/// Appends a line to the install history (ADR 0029, decision 7).
+fn history(fs: &mut FsClient, line: &str) {
+    let path = upd::main_path(upd::HISTORY_FILE);
+    let existing = read_all(fs, &path, upd::HISTORY_MAX as u64).unwrap_or_default();
+    let log = upd::history::append(&existing, line, upd::HISTORY_MAX);
+    if !write_file(fs, &path, &log) {
+        fault(
+            code::WRITE,
+            "inst-history-write",
+            "cannot write the install history",
+        );
     }
-    read_all(fs, path, size?).and_then(|bytes| {
+}
+
+/// What is installed under a name.
+enum Installed {
+    Missing,
+    Valid(u32),
+    /// Present but fails verification: the broker refuses to launch it.
+    Invalid,
+}
+
+fn installed(fs: &mut FsClient, path: &str, pubkey: &[u8; 32]) -> Installed {
+    if file_size(fs, path).is_none() {
+        return Installed::Missing;
+    }
+    match read_all(fs, path, MAX_PACKAGE).and_then(|bytes| {
         aricode_pkg::verify(&bytes, pubkey)
             .ok()
             .map(|v| v.manifest.version)
-    })
+    }) {
+        Some(v) => Installed::Valid(v),
+        None => Installed::Invalid,
+    }
+}
+
+/// Installed apps that verify; the others are reported, never listed.
+fn installed_apps(fs: &mut FsClient, pubkey: &[u8; 32]) -> Vec<(String, u32)> {
+    let mut paths = Vec::new();
+    let mut entry = [0u8; 32];
+    let mut i = 0;
+    while let Ok(Some((n, _))) = fs.list(i, &mut entry) {
+        i += 1;
+        if let Ok(name) = core::str::from_utf8(&entry[..n]) {
+            if name.starts_with("apps/") && name.ends_with(aricode_pkg::EXTENSION) {
+                paths.push(String::from(name));
+            }
+        }
+    }
+    let mut apps = Vec::new();
+    for path in paths {
+        match read_all(fs, &path, MAX_PACKAGE)
+            .as_deref()
+            .map(|bytes| aricode_pkg::verify(bytes, pubkey).map(|v| v.manifest))
+        {
+            Some(Ok(m)) => apps.push((String::from(m.name_str()), m.version)),
+            _ => {
+                fault(
+                    code::INSTALLED_INVALID,
+                    "inst-installed-invalid",
+                    &format!("{path} fails verification (it cannot be launched); not listed"),
+                );
+            }
+        }
+    }
+    apps
+}
+
+/// `LIST`, and after every install: the installed apps for the updater.
+fn write_installed(fs: &mut FsClient, pubkey: &[u8; 32]) -> u64 {
+    let apps = installed_apps(fs, pubkey);
+    if write_file(
+        fs,
+        &upd::main_path(upd::INSTALLED_FILE),
+        lists::encode_installed(&apps).as_bytes(),
+    ) {
+        0
+    } else {
+        fault(
+            code::LIST,
+            "inst-list-write",
+            "cannot write the installed list",
+        )
+    }
+}
+
+/// Installs one verified package (`bytes`, from `source`) unless the
+/// version rule refuses it. `Ok(true)` when installed.
+fn install_one(
+    fs: &mut FsClient,
+    bytes: &[u8],
+    source: &str,
+    allow_downgrade: bool,
+    pubkey: &[u8; 32],
+) -> Result<bool, u64> {
+    let Ok(verified) = aricode_pkg::verify(bytes, pubkey) else {
+        fault(
+            code::VERIFY,
+            "inst-pkg-verify",
+            &format!("{source} fails verification: skipped"),
+        );
+        return Ok(false);
+    };
+    let app = verified.manifest.name_str();
+    let version = verified.manifest.version;
+    let target = format!("apps/{app}{}", aricode_pkg::EXTENSION);
+    let current = match installed(fs, &target, pubkey) {
+        Installed::Missing => None,
+        Installed::Valid(v) => Some(v),
+        Installed::Invalid => {
+            // Never replaced silently (audit 1, M1): it is recorded, and the
+            // new, verified package takes its place.
+            fault(
+                code::INSTALLED_INVALID,
+                "inst-installed-invalid",
+                &format!("{target} fails verification; replacing it with version {version}"),
+            );
+            None
+        }
+    };
+    let change = compare(current, version);
+    if !change.permitted(allow_downgrade) {
+        if change == Change::Downgrade {
+            // ADR 0029, decision 5: no downgrade without the owner's
+            // explicit `upgrade --allow-downgrade`.
+            fault(
+                code::DOWNGRADE,
+                "inst-downgrade-refused",
+                &format!(
+                    "{app} version {version} is older than the installed {}: refused (downgrade)",
+                    current.unwrap_or(0)
+                ),
+            );
+        } else {
+            say!(
+                "{app} version {version} already installed (current {})",
+                current.unwrap_or(0)
+            );
+        }
+        return Ok(false);
+    }
+    say!("installing {app} version {version} (from {source})");
+    let Ok(fd) = fs.open(&target).or_else(|_| fs.create(&target)) else {
+        return Err(fault(
+            code::OPEN,
+            "inst-open",
+            "could not open or create the installed package",
+        ));
+    };
+    // A single atomic replace: after a power cut there is either the old
+    // version or the new one, never a mix.
+    let result = fs.replace(fd, bytes);
+    let _ = fs.close(fd);
+    if result != Ok(bytes.len()) {
+        return Err(fault(
+            code::WRITE,
+            "inst-write",
+            "error writing the installed package",
+        ));
+    }
+    let from = current.map_or(String::from("none"), |v| format!("{v}"));
+    history(
+        fs,
+        &format!("app {app} {from} -> {version} installed ({target})"),
+    );
+    say!("{app} {from} -> {version} installed ({target})");
+    Ok(true)
+}
+
+/// No flag: the packages in `pkgs/` (ADR 0018), in directory order.
+fn install_pending(fs: &mut FsClient, pubkey: &[u8; 32]) -> u64 {
+    let mut pending: Vec<String> = Vec::new();
+    let mut entry = [0u8; 32];
+    let mut i = 0;
+    while let Ok(Some((n, _))) = fs.list(i, &mut entry) {
+        i += 1;
+        let name = &entry[..n];
+        if name.starts_with(b"pkgs/") && name.ends_with(aricode_pkg::EXTENSION.as_bytes()) {
+            if pending.len() == MAX_PENDING {
+                say!("too many pending packages; handling the first ones");
+                break;
+            }
+            if let Ok(name) = core::str::from_utf8(name) {
+                pending.push(String::from(name));
+            }
+        }
+    }
+    if pending.is_empty() {
+        say!("nothing to install in pkgs/");
+        return 0;
+    }
+    let (mut done, mut skipped) = (0u64, 0u64);
+    for path in &pending {
+        let Some(bytes) = read_all(fs, path, MAX_PACKAGE) else {
+            say!("{path} cannot be read or is too large: skipped");
+            skipped += 1;
+            continue;
+        };
+        match install_one(fs, &bytes, path, false, pubkey) {
+            Ok(true) => done += 1,
+            Ok(false) => skipped += 1,
+            Err(code) => return code,
+        }
+    }
+    say!("{done} package(s) installed, {skipped} skipped");
+    write_installed(fs, pubkey)
+}
+
+/// `STAGED`: what the updater listed in `updater/staged`, nothing else.
+fn install_staged(fs: &mut FsClient, allow_downgrade: bool, pubkey: &[u8; 32]) -> u64 {
+    let list_path = upd::main_path(upd::STAGED_FILE);
+    let text = read_all(fs, &list_path, 4096)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    let (entries, rejected) = lists::parse_staged(&text);
+    let mut result = 0;
+    if rejected > 0 {
+        result = fault(
+            code::STAGE,
+            "inst-stage-path",
+            &format!("{rejected} staged entry(ies) name another file or are malformed: refused"),
+        );
+    }
+    let (mut done, mut skipped) = (0u64, 0u64);
+    for e in &entries {
+        let path = upd::main_path(e.file);
+        let checked = read_all(fs, &path, MAX_PACKAGE).filter(|b| sha256(b) == e.sha256);
+        let Some(bytes) = checked else {
+            result = fault(
+                code::STAGE,
+                "inst-stage-hash",
+                &format!("{path} missing or not what the updater staged: refused"),
+            );
+            skipped += 1;
+            continue;
+        };
+        match aricode_pkg::verify(&bytes, pubkey) {
+            Ok(v) if v.manifest.name_str() == e.name && v.manifest.version == e.version => {}
+            _ => {
+                result = fault(
+                    code::VERIFY,
+                    "inst-pkg-verify",
+                    &format!("{path} fails verification or differs from the staged list: refused"),
+                );
+                skipped += 1;
+                continue;
+            }
+        }
+        match install_one(fs, &bytes, &path, allow_downgrade, pubkey) {
+            Ok(true) => done += 1,
+            Ok(false) => skipped += 1,
+            Err(code) => {
+                result = code;
+                break;
+            }
+        }
+    }
+    // Consumed: a later run (with or without --allow-downgrade) cannot
+    // install the same files again.
+    if !write_file(fs, &list_path, b"") {
+        result = fault(
+            code::WRITE,
+            "inst-stage-clear",
+            "cannot empty the staged list",
+        );
+    }
+    say!("{done} package(s) installed, {skipped} skipped");
+    let listed = write_installed(fs, pubkey);
+    if result != 0 {
+        result
+    } else {
+        listed
+    }
 }
 
 fn main(arg: u64) -> u64 {
-    let allow_downgrade = arg & installer_arg::ALLOW_DOWNGRADE != 0;
     let (mut root, mut hardware) = (None, None);
     permissions::granted(|h, _| {
         if permissions::is(h, kind::ENDPOINT) {
@@ -123,140 +400,38 @@ fn main(arg: u64) -> u64 {
         }
     });
     let (Some(ep), Some(hw)) = (root, hardware) else {
-        say(b"need the main file space (install capability)");
-        return 1;
+        return fault(
+            code::NO_SPACE,
+            "inst-no-space",
+            "need the main file space (install capability)",
+        );
     };
     let Ok(mut fs) = FsClient::new(ep, hw) else {
-        return 2;
+        return fault(code::NO_CLIENT, "inst-no-client", "no file client");
     };
-    let mut pubkey = [0u8; 32];
-    if aricode_crypto::unhex(PUBKEY_HEX.trim(), &mut pubkey).is_none() {
-        return 3;
-    }
-    // Pending packages: `pkgs/*.aripkg`, in directory order.
-    let mut pending: [([u8; 32], usize, u64); MAX_PENDING] = [([0; 32], 0, 0); MAX_PENDING];
-    let mut count = 0;
-    let mut entry = [0u8; 32];
-    let mut i = 0;
-    while let Ok(Some((n, size))) = fs.list(i, &mut entry) {
-        i += 1;
-        let name = &entry[..n];
-        if name.starts_with(b"pkgs/") && name.ends_with(aricode_pkg::EXTENSION.as_bytes()) {
-            if count == MAX_PENDING {
-                say(b"too many pending packages; handling the first ones");
-                break;
-            }
-            pending[count] = (entry, n, size);
-            count += 1;
-        }
-    }
-    if count == 0 {
-        say(b"nothing to install in pkgs/");
-        return 0;
-    }
-    let (mut installed, mut ignored) = (0u64, 0u64);
-    for (name, n, size) in &pending[..count] {
-        let Ok(path) = core::str::from_utf8(&name[..*n]) else {
-            continue;
-        };
-        let Some(bytes) = read_all(&mut fs, path, *size) else {
-            sys::print(b"installer: ");
-            sys::print(path.as_bytes());
-            say(b" cannot be read or is too large: skipped");
-            ignored += 1;
-            continue;
-        };
-        let verified = match aricode_pkg::verify(&bytes, &pubkey) {
-            Ok(v) => v,
-            Err(_) => {
-                sys::print(b"installer: ");
-                sys::print(path.as_bytes());
-                sys::print(b" fails verification: skipped\n");
-                let _ = sys::event_record(FAULT_VERIFY, "inst-pkg-verify");
-                ignored += 1;
-                continue;
-            }
-        };
-        let app = verified.manifest.name_str();
-        let version = verified.manifest.version;
-        let mut target = [0u8; 48];
-        let prefix = b"apps/";
-        target[..prefix.len()].copy_from_slice(prefix);
-        target[prefix.len()..prefix.len() + app.len()].copy_from_slice(app.as_bytes());
-        let ext = aricode_pkg::EXTENSION.as_bytes();
-        let total = prefix.len() + app.len() + ext.len();
-        target[prefix.len() + app.len()..total].copy_from_slice(ext);
-        let Ok(target) = core::str::from_utf8(&target[..total]) else {
-            continue;
-        };
-        let current = installed_version(&mut fs, target, &pubkey);
-        let change = compare(current, version);
-        if !change.permitted(allow_downgrade) {
-            sys::print(b"installer: ");
-            sys::print(app.as_bytes());
-            sys::print(b" version ");
-            num(version as u64);
-            if change == Change::Downgrade {
-                // ADR 0029, decision 5: no downgrade without the owner's
-                // explicit `upgrade --allow-downgrade`.
-                sys::print(b" is older than the installed ");
-                num(current.unwrap_or(0) as u64);
-                sys::print(b": refused (downgrade)\n");
-                let _ = sys::event_record(FAULT_DOWNGRADE, "inst-downgrade-refused");
-            } else {
-                sys::print(b" already installed (current ");
-                num(current.unwrap_or(0) as u64);
-                sys::print(b")\n");
-            }
-            ignored += 1;
-            continue;
-        }
-        sys::print(b"installer: installing ");
-        sys::print(app.as_bytes());
-        sys::print(b" version ");
-        num(version as u64);
-        sys::print(b" (from ");
-        sys::print(path.as_bytes());
-        sys::print(b")\n");
-        let fd = match fs.open(target).or_else(|_| fs.create(target)) {
-            Ok(fd) => fd,
-            Err(_) => {
-                say(b"could not open or create the installed package");
-                let _ = sys::event_record(FAULT_WRITE, "inst-open");
-                return 4;
-            }
-        };
-        // A single atomic replace: after a power cut there is either the old
-        // version or the new one, never a mix.
-        let result = fs.replace(fd, &bytes);
-        let _ = fs.close(fd);
-        if result != Ok(bytes.len()) {
-            say(b"error writing the installed package");
-            let _ = sys::event_record(FAULT_WRITE, "inst-write");
-            return 5;
-        }
-        let from = current.map_or(alloc::string::String::from("none"), |v| format!("{v}"));
-        history(
-            &mut fs,
-            &format!("app {app} {from} -> {version} installed ({target})"),
+    let Some(pubkey) = aricode_crypto::trust::public_key() else {
+        return fault(code::KEY, "inst-key", "invalid embedded public key");
+    };
+    let allow_downgrade = arg & installer_arg::ALLOW_DOWNGRADE != 0;
+    let staged = arg & installer_arg::STAGED != 0;
+    let list = arg & installer_arg::LIST != 0;
+    let known = installer_arg::ALLOW_DOWNGRADE | installer_arg::STAGED | installer_arg::LIST;
+    if arg & !known != 0 || (allow_downgrade && !staged) || (list && arg != installer_arg::LIST) {
+        // ADR 0029, decision 5: a downgrade only for what the updater
+        // staged from a verified index, never for whatever is in pkgs/.
+        return fault(
+            code::BAD_FLAGS,
+            "inst-flags-refused",
+            &format!("argument {arg} refused (--allow-downgrade only applies to staged packages)"),
         );
-        sys::print(b"installer: ");
-        sys::print(app.as_bytes());
-        sys::print(b" ");
-        sys::print(from.as_bytes());
-        sys::print(b" -> ");
-        num(version as u64);
-        sys::print(b" installed (");
-        sys::print(target.as_bytes());
-        sys::print(b")\n");
-        installed += 1;
     }
-    sys::print(b"installer: ");
-    num(installed);
-    sys::print(b" package(s) installed, ");
-    num(ignored);
-    sys::print(b" skipped\n");
-    0
+    if list {
+        write_installed(&mut fs, &pubkey)
+    } else if staged {
+        install_staged(&mut fs, allow_downgrade, &pubkey)
+    } else {
+        install_pending(&mut fs, &pubkey)
+    }
 }
 
 aricode_rt::entry!(main);

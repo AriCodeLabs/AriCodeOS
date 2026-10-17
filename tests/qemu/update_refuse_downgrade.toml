@@ -21,7 +21,7 @@ exit = 0
 serial_contains = [
     "AriInit: boot confirmed on slot B",
     "updater: system: installed 2, source 1 offers 1: older than installed; upgrade refuses it without --allow-downgrade",
-    "updater: system: refused: version 1 is older than the installed 2 (upgrade --allow-downgrade to force)",
+    "updater: system: refused: version 1 is older than the installed 2 (--allow-downgrade to force)",
     "update: updater exited with 40",
     ": upd-downgrade-refused (code 40)",
     "updater: system: downgrading from 2 to 1 (--allow-downgrade)",

@@ -40,14 +40,18 @@ fn valid_path(path: &str) -> bool {
 
 /// Normalizes what the owner typed into a source URL: `http://` is assumed
 /// when no scheme is given (`10.0.0.5:8080`, `updates.example.org/os`),
-/// the port must be 1..=65535 and the URL always ends in `/`. Query strings,
-/// fragments, credentials and any other scheme are refused.
+/// scheme and host are lower-cased, the default port (80 for http, 443 for
+/// https) is dropped, other ports must be 1..=65535 without leading zeros,
+/// and the URL always ends in `/`: one spelling per source. Query strings,
+/// fragments, credentials, `..` segments, `//` in the path and any other
+/// scheme are refused.
 pub fn normalize_source(input: &str) -> Result<String, SourceError> {
     let input = input.trim();
-    let (scheme, rest) = if let Some(r) = input.strip_prefix("http://") {
-        ("http://", r)
-    } else if let Some(r) = input.strip_prefix("https://") {
-        ("https://", r)
+    let lower = input.to_ascii_lowercase();
+    let (scheme, rest) = if lower.starts_with("http://") {
+        ("http://", &input[7..])
+    } else if lower.starts_with("https://") {
+        ("https://", &input[8..])
     } else if input.contains("://") {
         return Err(SourceError::UnsupportedScheme);
     } else {
@@ -57,25 +61,34 @@ pub fn normalize_source(input: &str) -> Result<String, SourceError> {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, ""),
     };
-    let host = match authority.split_once(':') {
+    let (host, port) = match authority.split_once(':') {
         Some((host, port)) => {
-            // Digits only, no leading zero (one spelling per port), 1..=65535.
             let digits = !port.is_empty()
                 && !port.starts_with('0')
                 && port.bytes().all(|b| b.is_ascii_digit());
             if !digits || port.parse::<u16>().is_err() {
                 return Err(SourceError::Invalid);
             }
-            host
+            (host, Some(port))
         }
-        None => authority,
+        None => (authority, None),
     };
-    if !valid_host(host) || !valid_path(path) {
+    let default_port = if scheme == "http://" { "80" } else { "443" };
+    let port = port.filter(|p| *p != default_port);
+    if !valid_host(host)
+        || !valid_path(path)
+        || path.contains("//")
+        || path.split('/').any(|seg| seg == ".." || seg == ".")
+    {
         return Err(SourceError::Invalid);
     }
     let mut url = String::with_capacity(scheme.len() + rest.len() + 1);
     url.push_str(scheme);
-    url.push_str(authority);
+    url.push_str(&host.to_ascii_lowercase());
+    if let Some(p) = port {
+        url.push(':');
+        url.push_str(p);
+    }
     url.push_str(if path.is_empty() { "/" } else { path });
     if !url.ends_with('/') {
         url.push('/');
@@ -84,6 +97,17 @@ pub fn normalize_source(input: &str) -> Result<String, SourceError> {
         return Err(SourceError::TooLong);
     }
     Ok(url)
+}
+
+/// Outcome of [`Sources::migrate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Migration {
+    /// A sources file exists, or there is no `update_url`.
+    NotNeeded,
+    /// `update_url` became the first source; save it.
+    Migrated(Sources),
+    /// `update_url` is not a valid source: refused.
+    InvalidLegacy(SourceError),
 }
 
 /// The registered sources, in order.
@@ -128,17 +152,19 @@ impl Sources {
         out
     }
 
-    /// The source list after migrating ADR 0027: when there is no sources
-    /// file yet, a valid `update_url` becomes the first source. `None`
-    /// when nothing has to be migrated.
-    pub fn migrate(sources_file: Option<&str>, legacy_url: Option<&str>) -> Option<Self> {
-        if sources_file.is_some() {
-            return None;
+    /// Migration of ADR 0027: when there is no sources file yet, a valid
+    /// `update_url` becomes the first source. An invalid one is reported
+    /// ([`Migration::InvalidLegacy`]), never dropped silently.
+    pub fn migrate(sources_file: Option<&str>, legacy_url: Option<&str>) -> Migration {
+        let (None, Some(legacy)) = (sources_file, legacy_url) else {
+            return Migration::NotNeeded;
+        };
+        match normalize_source(legacy.trim()) {
+            Ok(url) => Migration::Migrated(Self {
+                list: alloc::vec![url],
+            }),
+            Err(e) => Migration::InvalidLegacy(e),
         }
-        let url = normalize_source(legacy_url?.trim()).ok()?;
-        Some(Self {
-            list: alloc::vec![url],
-        })
     }
 
     /// Registers a source; returns its normalized URL.
@@ -204,6 +230,13 @@ mod tests {
                 "https://updates.example.org/os/",
             ),
             ("updates.example.org", "http://updates.example.org/"),
+            (
+                "HTTP://Updates.Example.ORG/OS",
+                "http://updates.example.org/OS/",
+            ),
+            ("10.0.2.2:80/update", "http://10.0.2.2/update/"),
+            ("https://h:443/", "https://h/"),
+            ("https://h:80/", "https://h:80/"),
         ] {
             assert_eq!(normalize_source(input).as_deref(), Ok(want), "{input}");
         }
@@ -222,6 +255,11 @@ mod tests {
             ("host/a b", SourceError::Invalid),
             ("-host", SourceError::Invalid),
             ("http://host/#frag", SourceError::Invalid),
+            ("host/a/../b", SourceError::Invalid),
+            ("host/..", SourceError::Invalid),
+            ("host/./x", SourceError::Invalid),
+            ("host//x", SourceError::Invalid),
+            ("host/x//", SourceError::Invalid),
         ] {
             assert_eq!(normalize_source(input), Err(err), "{input}");
         }
@@ -280,14 +318,24 @@ mod tests {
 
     #[test]
     fn migration_from_single_channel_url() {
-        let migrated = Sources::migrate(None, Some("http://10.0.2.2:17010/update/\n")).unwrap();
+        let Migration::Migrated(migrated) =
+            Sources::migrate(None, Some("http://10.0.2.2:17010/update/\n"))
+        else {
+            panic!("not migrated");
+        };
         assert_eq!(
             migrated.iter().collect::<Vec<_>>(),
             ["http://10.0.2.2:17010/update/"]
         );
         // A sources file exists (even an empty one: the owner removed them all).
-        assert!(Sources::migrate(Some(""), Some("http://x/")).is_none());
-        assert!(Sources::migrate(None, None).is_none());
-        assert!(Sources::migrate(None, Some("ftp://x/")).is_none());
+        assert_eq!(
+            Sources::migrate(Some(""), Some("http://x/")),
+            Migration::NotNeeded
+        );
+        assert_eq!(Sources::migrate(None, None), Migration::NotNeeded);
+        assert_eq!(
+            Sources::migrate(None, Some("ftp://x/")),
+            Migration::InvalidLegacy(SourceError::UnsupportedScheme)
+        );
     }
 }

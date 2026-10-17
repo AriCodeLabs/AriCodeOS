@@ -74,6 +74,13 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
 pub fn cargo() -> Command {
     let mut c = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     c.current_dir(root());
+    // The verifiers embed the selected public key (`aricode_crypto::trust`);
+    // with the development key the variable is removed so a stray value in
+    // the environment cannot change what a build trusts.
+    match crate::keys::signing_public_hex() {
+        Some(key) => c.env(crate::keys::SIGNING_PUB_ENV, key),
+        None => c.env_remove(crate::keys::SIGNING_PUB_ENV),
+    };
     c
 }
 
@@ -307,11 +314,7 @@ pub fn build_external(
     let elf = crate::image::stripped_elf(&elf)?;
     let manifest =
         std::fs::read(&manifest_path).map_err(|e| format!("{}: {e}", manifest_path.display()))?;
-    let seed: [u8; 32] = crate::keys::read_hex(
-        &root()
-            .join(crate::keys::DEV_KEY_DIR)
-            .join(crate::keys::SEED_FILE),
-    )?;
+    let seed = crate::keys::signing_seed()?;
     let package = aricode_pkg::build(&name, version, &elf, &manifest, &seed, corrupt)
         .ok_or_else(|| format!("{name}: invalid package name"))?;
     Ok(ExternalApp {

@@ -4,22 +4,25 @@
 //!
 //! Argument (`aricode_update_index::updater_arg`):
 //!
-//! - `APPLY` (0): installs the image the `UPDATE` partition holds into the
-//!   inactive slot and marks it pending with three tries; AriBoot tries it
-//!   on the next boot and init confirms it if the system comes up.
+//! - `APPLY` (0, shell `update apply`): installs the image the `UPDATE`
+//!   partition holds into the inactive slot and marks it pending with three
+//!   tries, under the downgrade rule.
 //! - `REFRESH` (1, shell `update`): fetches `index` and `index.sig` from
 //!   every registered source, verifies them with the project key, stores
-//!   the verified copies and reports what is newer than what is installed.
-//!   Installs nothing.
+//!   the verified copies, reports what differs from what is installed and
+//!   writes that report as the plan. Installs nothing.
 //! - `UPGRADE` (2, shell `upgrade`): verifies the stored indexes again and
-//!   installs what they offer over the installed versions: the system image
-//!   into the inactive slot, app packages into `pkgs/` for the installer.
-//!   Each download is checked against the index (size, SHA-256) and against
-//!   its own signature before anything is written. Older versions only with
-//!   the `ALLOW_DOWNGRADE` flag.
+//!   installs what the plan lists: the system image into the inactive slot,
+//!   app packages staged in this directory for the installer. Every
+//!   download is checked against the index (size, SHA-256) and against its
+//!   own signature before anything is written.
+//! - `ALLOW_DOWNGRADE` (flag, with `APPLY` or `UPGRADE`): older versions, or
+//!   a system whose installed version cannot be read, may be replaced.
 //!
-//! Handles, in manifest order: SYSTEM, network, block service, the main
-//! file space (`install`), hardware.
+//! Handles, in manifest order: SYSTEM, files (the private directory
+//! `updater/`), network, block service, hardware. The main file space is
+//! not granted (audit 1, M2): installed apps arrive in `installed`, written
+//! by the installer, and staged packages leave through `staged`.
 #![no_std]
 #![no_main]
 
@@ -34,29 +37,34 @@ use aricode_rt::sys::block::BlockClient;
 use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::net::NetClient;
 use aricode_rt::sys::{self, Handle};
+use aricode_update_index::lists::{self, PlanItem, StagedEntry};
 use aricode_update_index::{
     self as upd, best_app, best_system, check_fresh, compare, stored, updater_arg, Change, Index,
-    Sources,
+    Migration, Sources,
 };
+use core::sync::atomic::{AtomicU64, Ordering};
 
 const SYSTEM: Handle = Handle(0x0001_0004);
-const NET: Handle = Handle(0x0001_0005);
-const BLOCK: Handle = Handle(0x0001_0006);
-const ROOT: Handle = Handle(0x0001_0007);
+const FS: Handle = Handle(0x0001_0005);
+const NET: Handle = Handle(0x0001_0006);
+const BLOCK: Handle = Handle(0x0001_0007);
 const HW: Handle = Handle(0x0001_0008);
 
-const PUBKEY_HEX: &str = include_str!("../../../keys/dev/ed25519.pub");
 /// DMA buffer where a whole slot image (header + container) is loaded and
 /// verified before it is written anywhere.
 const IMAGE_BUFFER: u64 = 4 * 1024 * 1024;
 const SECTOR: usize = 512;
 const CHUNK: u16 = 16;
-const HTTP_TIMEOUT_MS: u32 = 15_000;
+/// Wait for one network operation.
+const HTTP_TIMEOUT_MS: u64 = 15_000;
+/// Budget of a whole run: a source that trickles bytes cannot hold the
+/// updater forever (audit 1, M3).
+const RUN_DEADLINE_MS: u64 = 10 * 60 * 1000;
 /// Largest package: an installed package is replaced in one go (the AriFS
 /// journal, ADR 0018).
 const MAX_PACKAGE: usize = 32 * 1024;
-/// Longest AriFS name (`pkgs/NAME.aripkg` must fit).
-const MAX_FS_NAME: usize = 32;
+/// Largest `index.sig` (128 hex digits and a newline, with room).
+const MAX_SIGNATURE: usize = 256;
 
 /// Exit codes; failures are also fault events with the same code (ADR 0028).
 mod code {
@@ -80,13 +88,18 @@ mod code {
     pub const INDEX_STALE: u64 = 32;
     pub const NO_INDEX: u64 = 33;
     pub const INDEX_STORE: u64 = 34;
+    pub const INDEX_MISSING: u64 = 35;
+    pub const INSTALLED_LIST: u64 = 36;
+    pub const PLAN: u64 = 37;
     pub const DOWNGRADE_REFUSED: u64 = 40;
     pub const DOWNLOAD: u64 = 41;
     pub const DOWNLOAD_MISMATCH: u64 = 42;
     pub const IMAGE_REFUSED: u64 = 43;
     pub const PACKAGE_REFUSED: u64 = 44;
-    pub const STAGE_WRITE: u64 = 45;
+    pub const FILE_WRITE: u64 = 45;
+    pub const INSTALLED_UNKNOWN: u64 = 46;
     pub const BAD_ARGUMENT: u64 = 50;
+    pub const DEADLINE: u64 = 51;
 }
 
 /// Everything printed, kept for `last.log` (the shell shows it to a remote
@@ -119,6 +132,20 @@ fn fault(code: u64, event: &str, msg: &str) -> u64 {
     code
 }
 
+// ---------------------------------------------------------------- deadline
+
+/// End of the run's budget, in ms since boot.
+static DEADLINE: AtomicU64 = AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    sys::time::uptime_ms(SYSTEM).unwrap_or(u64::MAX)
+}
+
+/// Time left for this run (0 once the deadline passed).
+fn remaining_ms() -> u64 {
+    DEADLINE.load(Ordering::Relaxed).saturating_sub(now_ms())
+}
+
 // ---------------------------------------------------------------- files
 
 /// Reads a whole file of at most `max` bytes. `Ok(None)` if it does not
@@ -142,6 +169,10 @@ fn read_file(fs: &mut FsClient, name: &str, max: usize) -> Result<Option<Vec<u8>
     result
 }
 
+fn read_text(fs: &mut FsClient, name: &str, max: usize) -> Result<Option<String>, ()> {
+    read_file(fs, name, max).map(|d| d.map(|d| String::from_utf8_lossy(&d).into_owned()))
+}
+
 /// Replaces (or creates) a file atomically (ADR 0014).
 fn write_file(fs: &mut FsClient, name: &str, data: &[u8]) -> bool {
     let Ok(fd) = fs.open(name).or_else(|_| fs.create(name)) else {
@@ -152,7 +183,7 @@ fn write_file(fs: &mut FsClient, name: &str, data: &[u8]) -> bool {
     ok
 }
 
-/// One line in the install history (`updates.log`).
+/// One line in the install history (ADR 0029, decision 7).
 fn history(fs: &mut FsClient, line: &str) {
     let existing = read_file(fs, upd::HISTORY_FILE, upd::HISTORY_MAX)
         .ok()
@@ -160,33 +191,46 @@ fn history(fs: &mut FsClient, line: &str) {
         .unwrap_or_default();
     let log = upd::history::append(&existing, line, upd::HISTORY_MAX);
     if !write_file(fs, upd::HISTORY_FILE, &log) {
-        let _ = sys::event_record(code::STAGE_WRITE, "upd-history-write");
+        fault(
+            code::FILE_WRITE,
+            "upd-history-write",
+            "cannot write the install history",
+        );
     }
 }
 
 /// The registered sources, migrating `update_url` (ADR 0027) on the way.
 fn load_sources(fs: &mut FsClient) -> Result<Sources, u64> {
-    let read = |fs: &mut FsClient, name| match read_file(fs, name, 2048) {
-        Ok(data) => Ok(data.map(|d| String::from_utf8_lossy(&d).into_owned())),
-        Err(()) => Err(fault(
+    let unreadable = |_| {
+        fault(
             code::SOURCES_FILE,
             "upd-sources-read",
             "cannot read the source list",
-        )),
+        )
     };
-    let text = read(fs, upd::SOURCES_FILE)?;
+    let text = read_text(fs, upd::SOURCES_FILE, 2048).map_err(unreadable)?;
     if text.is_none() {
-        let legacy = read(fs, upd::LEGACY_URL_FILE)?;
-        if let Some(sources) = Sources::migrate(None, legacy.as_deref()) {
-            if !write_file(fs, upd::SOURCES_FILE, sources.to_text().as_bytes()) {
-                return Err(fault(
-                    code::SOURCES_FILE,
-                    "upd-sources-write",
-                    "cannot save the migrated source list",
-                ));
+        let legacy = read_text(fs, upd::LEGACY_URL_FILE, 2048).map_err(unreadable)?;
+        match Sources::migrate(None, legacy.as_deref()) {
+            Migration::Migrated(sources) => {
+                if !write_file(fs, upd::SOURCES_FILE, sources.to_text().as_bytes()) {
+                    return Err(fault(
+                        code::SOURCES_FILE,
+                        "upd-sources-write",
+                        "cannot save the migrated source list",
+                    ));
+                }
+                say!("update_url migrated to the source list (ADR 0029)");
+                return Ok(sources);
             }
-            say!("update_url migrated to the source list (ADR 0029)");
-            return Ok(sources);
+            Migration::InvalidLegacy(e) => {
+                fault(
+                    code::SOURCES_FILE,
+                    "upd-legacy-url-invalid",
+                    &format!("update_url is not a valid source ({e:?}): refused, not migrated"),
+                );
+            }
+            Migration::NotNeeded => {}
         }
     }
     let (sources, rejected) = Sources::parse(text.as_deref().unwrap_or(""));
@@ -198,6 +242,35 @@ fn load_sources(fs: &mut FsClient) -> Result<Sources, u64> {
         );
     }
     Ok(sources)
+}
+
+/// The installed apps, as the installer listed them just before this run.
+/// `None` (after a fault) when the list is missing or unreadable.
+fn installed_apps(fs: &mut FsClient) -> Option<Vec<(String, u32)>> {
+    let text = match read_text(fs, upd::INSTALLED_FILE, 4096) {
+        Ok(Some(t)) => t,
+        _ => {
+            fault(
+                code::INSTALLED_LIST,
+                "upd-installed-missing",
+                "no installed app list (the installer writes it before update and upgrade): apps not compared",
+            );
+            return None;
+        }
+    };
+    let (apps, rejected) = lists::parse_installed(&text);
+    if rejected > 0 {
+        fault(
+            code::INSTALLED_LIST,
+            "upd-installed-damaged",
+            &format!("{rejected} invalid line(s) in the installed app list ignored"),
+        );
+    }
+    Some(
+        apps.into_iter()
+            .map(|(n, v)| (String::from(n), v))
+            .collect(),
+    )
 }
 
 // ---------------------------------------------------------------- disk
@@ -224,7 +297,8 @@ fn find_partition(blk: &mut BlockClient, name: &str) -> Option<(u64, u64)> {
         .map(|p| (p.first_lba, p.last_lba))
 }
 
-/// The A/B layout of the boot disk and a buffer for one whole image.
+/// The A/B layout of the boot disk and a buffer for one whole image. Only
+/// opened when a system image is involved (audit 1, M5).
 struct Disk {
     blk: BlockClient,
     update: (u64, u64),
@@ -239,16 +313,25 @@ struct Disk {
 impl Disk {
     fn open() -> Result<Self, u64> {
         let Ok(mut blk) = BlockClient::new(BLOCK, HW, CHUNK) else {
-            say!("need the block service (block capability)");
-            return Err(code::NO_BLOCK);
+            return Err(fault(
+                code::NO_BLOCK,
+                "upd-no-block",
+                "need the block service (block capability)",
+            ));
         };
         let Some(update) = find_partition(&mut blk, PART_UPDATE) else {
-            say!("no UPDATE partition");
-            return Err(code::NO_UPDATE_PART);
+            return Err(fault(
+                code::NO_UPDATE_PART,
+                "upd-no-update-part",
+                "no UPDATE partition",
+            ));
         };
         let Some(state_part) = find_partition(&mut blk, PART_STATE) else {
-            say!("no ARIBOOT partition");
-            return Err(code::NO_STATE_PART);
+            return Err(fault(
+                code::NO_STATE_PART,
+                "upd-no-state-part",
+                "no ARIBOOT partition",
+            ));
         };
         if blk.read(state_part.0, 1).is_err() {
             return Err(fault(
@@ -263,15 +346,21 @@ impl Disk {
             find_partition(&mut blk, state.active.partition()),
             find_partition(&mut blk, target.partition()),
         ) else {
-            say!("no slot partitions");
-            return Err(code::NO_SLOTS);
+            return Err(fault(code::NO_SLOTS, "upd-no-slots", "no slot partitions"));
         };
         let Ok(dma) = sys::dma_alloc(HW, IMAGE_BUFFER) else {
-            say!("no memory for the image (quota)");
-            return Err(code::NO_MEMORY);
+            return Err(fault(
+                code::NO_MEMORY,
+                "upd-no-memory",
+                "no memory for the image (quota)",
+            ));
         };
         let Ok(virt) = sys::mmio_map(dma) else {
-            return Err(code::NO_MEMORY);
+            return Err(fault(
+                code::NO_MEMORY,
+                "upd-no-memory",
+                "cannot map the image buffer",
+            ));
         };
         // SAFETY: our own DMA buffer of IMAGE_BUFFER bytes, mapped RW, used
         // only through this exclusive reference for the life of the process.
@@ -315,15 +404,23 @@ impl Disk {
         Some((SECTOR + len, version))
     }
 
-    /// Version of the active slot's image, verified.
+    /// Version of the active slot's image, verified; `None` if it cannot be
+    /// read or does not verify (then the downgrade rule treats it as
+    /// unknown, ADR 0029, decision 5).
     fn active_version(&mut self, pk: &[u8; 32]) -> Option<u32> {
         let part = self.active_part;
         self.load(part, pk).map(|(_, v)| v)
     }
 
+    fn write(&mut self, lba: u64, sectors: u16) -> Result<(), u64> {
+        self.blk
+            .write(lba, sectors)
+            .map_err(|_| fault(code::SLOT_WRITE, "upd-slot-write", "error writing the slot"))
+    }
+
     /// Writes the verified image in the buffer (`total` bytes) into the
-    /// inactive slot, the header sector last, and schedules the slot as
-    /// pending with tries. The caller has verified the image.
+    /// inactive slot and schedules it as pending with tries. The caller has
+    /// verified the image.
     fn install(&mut self, total: usize) -> Result<(), u64> {
         let sectors = total.div_ceil(SECTOR) as u64;
         if sectors > self.slot_part.1 - self.slot_part.0 + 1 {
@@ -334,29 +431,34 @@ impl Disk {
             ));
         }
         self.image[total..sectors as usize * SECTOR].fill(0);
-        // Container first, header last: an interrupted copy leaves a slot
-        // without a valid header, which AriBoot never boots.
+        // The old header goes first (audit 1, L1): an interrupted copy then
+        // leaves a slot without a valid header, which AriBoot never boots,
+        // instead of an old header over a half-new container.
+        self.blk.buffer()[..SECTOR].fill(0);
+        self.write(self.slot_part.0, 1)?;
+        if self.blk.flush().is_err() {
+            return Err(fault(
+                code::SLOT_WRITE,
+                "upd-slot-write",
+                "error flushing the slot",
+            ));
+        }
         let mut done = 1u64;
         while done < sectors {
             let n = (sectors - done).min(CHUNK as u64) as u16;
             let o = done as usize * SECTOR;
             let bytes = n as usize * SECTOR;
             self.blk.buffer()[..bytes].copy_from_slice(&self.image[o..o + bytes]);
-            if self.blk.write(self.slot_part.0 + done, n).is_err() {
-                return Err(fault(
-                    code::SLOT_WRITE,
-                    "upd-slot-write",
-                    "error writing the slot",
-                ));
-            }
+            self.write(self.slot_part.0 + done, n)?;
             done += n as u64;
         }
         self.blk.buffer()[..SECTOR].copy_from_slice(&self.image[..SECTOR]);
-        if self.blk.write(self.slot_part.0, 1).is_err() || self.blk.flush().is_err() {
+        self.write(self.slot_part.0, 1)?;
+        if self.blk.flush().is_err() {
             return Err(fault(
                 code::SLOT_WRITE,
                 "upd-slot-write",
-                "error writing the slot",
+                "error flushing the slot",
             ));
         }
         say!("installed into slot {}", self.target.name());
@@ -390,12 +492,60 @@ impl Disk {
     }
 }
 
-/// `APPLY`: installs the image of the UPDATE partition (Phase 30).
-fn apply(pk: &[u8; 32]) -> u64 {
+// ---------------------------------------------------------------- policy
+
+/// The downgrade rule (ADR 0029, decision 5) for one item; `Ok(true)` when
+/// it must be installed. An unknown installed system version counts as a
+/// downgrade (audit 1, H1).
+fn decide(
+    what: &str,
+    installed: Option<u32>,
+    offered: u32,
+    allow_downgrade: bool,
+) -> Result<bool, u64> {
+    let Some(current) = installed else {
+        if allow_downgrade {
+            say!("{what}: installed version unknown; installing {offered} (--allow-downgrade)");
+            return Ok(true);
+        }
+        return Err(fault(
+            code::INSTALLED_UNKNOWN,
+            "upd-installed-unknown",
+            &format!(
+                "{what}: installed version unknown (unreadable or unverifiable): refused (--allow-downgrade to force)"
+            ),
+        ));
+    };
+    let change = compare(Some(current), offered);
+    if change.permitted(allow_downgrade) {
+        if change == Change::Downgrade {
+            say!("{what}: downgrading from {current} to {offered} (--allow-downgrade)");
+        }
+        return Ok(true);
+    }
+    match change {
+        Change::Downgrade => Err(fault(
+            code::DOWNGRADE_REFUSED,
+            "upd-downgrade-refused",
+            &format!(
+                "{what}: refused: version {offered} is older than the installed {current} (--allow-downgrade to force)"
+            ),
+        )),
+        _ => {
+            say!("{what}: version {offered} already installed");
+            Ok(false)
+        }
+    }
+}
+
+/// `APPLY`: installs the image of the UPDATE partition (Phase 30), under the
+/// downgrade rule (audit 1, M4).
+fn apply(allow_downgrade: bool, pk: &[u8; 32]) -> u64 {
     let mut disk = match Disk::open() {
         Ok(d) => d,
         Err(code) => return code,
     };
+    let installed = disk.active_version(pk);
     let update = disk.update;
     let Some((total, version)) = disk.load(update, pk) else {
         return fault(
@@ -408,8 +558,12 @@ fn apply(pk: &[u8; 32]) -> u64 {
         "UPDATE image version {version} verified ({} bytes)",
         total - SECTOR
     );
-    match disk.install(total) {
-        Ok(()) => 0,
+    match decide("system", installed, version, allow_downgrade) {
+        Ok(true) => match disk.install(total) {
+            Ok(()) => 0,
+            Err(code) => code,
+        },
+        Ok(false) => 0,
         Err(code) => code,
     }
 }
@@ -427,50 +581,76 @@ fn http_error(e: aricode_https::HttpsError) -> &'static str {
         E::Malformed => "invalid HTTP response",
         E::TooBig => "response headers too large",
         E::Unsupported => "unsupported HTTP response",
-        E::Aborted => "larger than announced",
+        E::Aborted => "aborted",
     }
 }
 
-/// Downloads `url` into `out`, which must be filled exactly: the index
-/// announced `out.len()` bytes. The sink refuses anything beyond.
-fn fetch_exact(net: &mut NetClient, url: &str, out: &mut [u8]) -> Result<(), String> {
-    let mut got = 0usize;
+/// Downloads `url` into `out`, never more than `out.len()` bytes and never
+/// past the run's deadline (audit 1, M3): the sink refuses both. Returns
+/// the bytes received.
+fn fetch(net: &mut NetClient, url: &str, out: &mut [u8]) -> Result<usize, String> {
+    let left = remaining_ms();
+    if left == 0 {
+        return Err(String::from("run deadline passed"));
+    }
+    let (mut got, mut overflow, mut late) = (0usize, false, false);
     let mut sink = |chunk: &[u8]| {
         if got + chunk.len() > out.len() {
+            overflow = true;
+            return false;
+        }
+        if remaining_ms() == 0 {
+            late = true;
             return false;
         }
         out[got..got + chunk.len()].copy_from_slice(chunk);
         got += chunk.len();
         true
     };
-    match aricode_https::get_with(net, SYSTEM, &[], url, HTTP_TIMEOUT_MS, &mut sink) {
-        Ok(200) if got == out.len() => Ok(()),
-        Ok(200) => Err(format!(
-            "{got} bytes received, the index announced {}",
-            out.len()
-        )),
+    let timeout = left.min(HTTP_TIMEOUT_MS) as u32;
+    let result = aricode_https::get_with(net, SYSTEM, &[], url, timeout, &mut sink);
+    match result {
+        Ok(200) => Ok(got),
         Ok(status) => Err(format!("HTTP {status}")),
+        Err(_) if overflow => Err(format!("larger than {} bytes", out.len())),
+        Err(_) if late => Err(String::from("run deadline passed")),
         Err(e) => Err(String::from(http_error(e))),
     }
 }
 
-/// Downloads a small file (index, signature) of at most `max` bytes.
+/// `fetch` of exactly `out.len()` bytes (what the index announced).
+fn fetch_exact(net: &mut NetClient, url: &str, out: &mut [u8]) -> Result<(), String> {
+    let want = out.len();
+    match fetch(net, url, out)? {
+        n if n == want => Ok(()),
+        n => Err(format!("{n} bytes received, the index announced {want}")),
+    }
+}
+
+/// `fetch` of a small file of at most `max` bytes.
 fn fetch_small(net: &mut NetClient, url: &str, max: usize) -> Result<Vec<u8>, String> {
     let mut buf = alloc::vec![0u8; max];
-    match aricode_https::get(net, SYSTEM, &[], url, &mut buf, HTTP_TIMEOUT_MS) {
-        Ok(f) if f.status == 200 && !f.truncated => {
-            buf.truncate(f.body_len);
-            Ok(buf)
-        }
-        Ok(f) if f.status == 200 => Err(format!("larger than {max} bytes")),
-        Ok(f) => Err(format!("HTTP {}", f.status)),
-        Err(e) => Err(String::from(http_error(e))),
+    let n = fetch(net, url, &mut buf)?;
+    buf.truncate(n);
+    Ok(buf)
+}
+
+/// The fault of a failed download: the deadline has its own event.
+fn download_fault(code: u64, event: &str, msg: String) -> u64 {
+    if remaining_ms() == 0 {
+        fault(
+            code::DEADLINE,
+            "upd-deadline",
+            &format!("{msg} (run deadline)"),
+        )
+    } else {
+        fault(code, event, &msg)
     }
 }
 
 // ---------------------------------------------------------------- indexes
 
-/// The stored indexes (`updater/index-N`), raw, one per slot.
+/// The stored indexes (`index-N`), raw, one per slot.
 fn read_stored(fs: &mut FsClient) -> Vec<Vec<u8>> {
     (0..upd::MAX_SOURCES)
         .map(|slot| {
@@ -481,15 +661,28 @@ fn read_stored(fs: &mut FsClient) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// The serial of the verified index stored for `url`, if any.
-fn stored_serial(stored_files: &[Vec<u8>], url: &str, pk: &[u8; 32]) -> Option<u64> {
-    stored_files
-        .iter()
-        .filter_map(|bytes| stored::decode(bytes))
+/// With no source left, `update` drops every stored copy: a source added
+/// again starts from its current serial (ADR 0029, decision 6).
+fn forget_stored(fs: &mut FsClient) {
+    for (slot, bytes) in read_stored(fs).iter().enumerate() {
+        let Some(name) = upd::stored_index_file(slot) else {
+            continue;
+        };
+        if !bytes.is_empty() && !write_file(fs, name, b"") {
+            fault(
+                code::INDEX_STORE,
+                "upd-index-store",
+                "cannot drop a stored index",
+            );
+        }
+    }
+}
+
+/// A stored file holding a verified index for `url`.
+fn verified_for<'a>(bytes: &'a [u8], url: &str, pk: &[u8; 32]) -> Option<Index<'a>> {
+    stored::decode(bytes)
         .filter(|s| s.source == url)
-        .filter_map(|s| upd::verify(s.index, s.signature, pk).ok())
-        .map(|index| index.serial)
-        .max()
+        .and_then(|s| upd::verify(s.index, s.signature, pk).ok())
 }
 
 /// `REFRESH`: fetch, verify and store every source's index, then report.
@@ -499,32 +692,32 @@ fn refresh(fs: &mut FsClient, net: &mut NetClient, sources: &Sources, pk: &[u8; 
     let mut result = 0;
     for (slot, url) in sources.iter().enumerate() {
         let n = slot + 1;
-        let known = stored_serial(&previous, url, pk);
-        // On any failure the index verified earlier for this source stays:
-        // it is still authentic, and dropping it would forget the serial
-        // that protects against a replayed older index.
+        // The newest verified copy already stored for this URL, wherever it is.
+        let earlier = previous
+            .iter()
+            .filter_map(|b| verified_for(b, url, pk).map(|i| (i.serial, b)))
+            .max_by_key(|(serial, _)| *serial);
+        // On any failure that copy stays: it is still authentic, and
+        // dropping it would forget the serial that protects against a
+        // replayed older index.
         let keep = |next: &mut Vec<Vec<u8>>| {
-            if let Some(old) = previous.iter().find(|b| {
-                stored::decode(b).is_some_and(|s| {
-                    s.source == url && upd::verify(s.index, s.signature, pk).is_ok()
-                })
-            }) {
-                next[slot] = old.clone();
-                say!("source {n}: keeping the index verified earlier");
+            if let Some((serial, bytes)) = earlier {
+                next[slot] = bytes.clone();
+                say!("source {n}: keeping the index verified earlier (serial {serial})");
             }
         };
         let fetched = fetch_small(net, &format!("{url}{}", upd::INDEX_FILE), upd::MAX_INDEX)
             .and_then(|index| {
-                fetch_small(net, &format!("{url}{}", upd::SIGNATURE_FILE), 256)
+                fetch_small(net, &format!("{url}{}", upd::SIGNATURE_FILE), MAX_SIGNATURE)
                     .map(|sig| (index, sig))
             });
         let (index_bytes, sig) = match fetched {
             Ok(v) => v,
             Err(e) => {
-                result = fault(
+                result = download_fault(
                     code::INDEX_FETCH,
                     "upd-index-fetch",
-                    &format!("source {n} {url}: cannot fetch the index: {e}"),
+                    format!("source {n} {url}: cannot fetch the index: {e}"),
                 );
                 keep(&mut next);
                 continue;
@@ -542,7 +735,7 @@ fn refresh(fs: &mut FsClient, net: &mut NetClient, sources: &Sources, pk: &[u8; 
                 continue;
             }
         };
-        if let Err(e) = check_fresh(known, index.serial) {
+        if let Err(e) = check_fresh(earlier.map(|(s, _)| s), index.serial) {
             result = fault(
                 code::INDEX_STALE,
                 "upd-index-stale",
@@ -588,19 +781,25 @@ fn refresh(fs: &mut FsClient, net: &mut NetClient, sources: &Sources, pk: &[u8; 
 }
 
 /// The stored indexes of the registered sources, verified again (ADR 0029,
-/// decision 4): (raw bytes per source, in list order).
+/// decision 4): (list position, raw bytes).
 fn verified_stored(fs: &mut FsClient, sources: &Sources, pk: &[u8; 32]) -> Vec<(usize, Vec<u8>)> {
     let files = read_stored(fs);
     let mut list = Vec::new();
     for (slot, url) in sources.iter().enumerate() {
+        let n = slot + 1;
         let Some(s) = files.get(slot).and_then(|b| stored::decode(b)) else {
-            say!("source {}: no verified index yet; run update", slot + 1);
+            fault(
+                code::INDEX_MISSING,
+                "upd-no-verified-index",
+                &format!("source {n}: no verified index yet; run update"),
+            );
             continue;
         };
         if s.source != url {
-            say!(
-                "source {}: the list changed since the last update; run update",
-                slot + 1
+            fault(
+                code::INDEX_MISSING,
+                "upd-list-changed",
+                &format!("source {n}: the list changed since the last update; run update"),
             );
             continue;
         }
@@ -608,10 +807,7 @@ fn verified_stored(fs: &mut FsClient, sources: &Sources, pk: &[u8; 32]) -> Vec<(
             fault(
                 code::INDEX_REFUSED,
                 "upd-stored-refused",
-                &format!(
-                    "source {}: stored index fails verification; ignored",
-                    slot + 1
-                ),
+                &format!("source {n}: stored index fails verification; ignored"),
             );
             continue;
         }
@@ -633,77 +829,64 @@ fn parse_all<'a>(raw: &'a [(usize, Vec<u8>)], pk: &[u8; 32]) -> (Vec<usize>, Vec
         .unzip()
 }
 
-/// Installed apps: `apps/NAME.aripkg` that verify (what the broker and the
-/// installer accept), as (name, version).
-fn installed_apps(fs: &mut FsClient, pk: &[u8; 32]) -> Vec<(String, u32)> {
-    let mut names = Vec::new();
-    let mut entry = [0u8; 32];
-    let mut i = 0;
-    while let Ok(Some((n, _))) = fs.list(i, &mut entry) {
-        i += 1;
-        if let Ok(name) = core::str::from_utf8(&entry[..n]) {
-            if name.starts_with("apps/") && name.ends_with(aricode_pkg::EXTENSION) {
-                names.push(String::from(name));
-            }
+fn change_text(installed: Option<u32>, offered: u32) -> &'static str {
+    match (installed, compare(installed, offered)) {
+        (None, _) => "installed version unknown; upgrade refuses it without --allow-downgrade",
+        (_, Change::Same) => "up to date",
+        (_, Change::Upgrade) => "upgrade available",
+        (_, Change::Downgrade) => {
+            "older than installed; upgrade refuses it without --allow-downgrade"
         }
-    }
-    let mut apps = Vec::new();
-    for path in names {
-        let Ok(Some(bytes)) = read_file(fs, &path, MAX_PACKAGE) else {
-            say!("{path}: cannot be read; not considered");
-            continue;
-        };
-        match aricode_pkg::verify(&bytes, pk) {
-            Ok(v) => apps.push((String::from(v.manifest.name_str()), v.manifest.version)),
-            Err(_) => say!("{path}: fails verification; not considered"),
-        }
-    }
-    apps
-}
-
-fn change_text(change: Change) -> &'static str {
-    match change {
-        Change::New => "new",
-        Change::Same => "up to date",
-        Change::Upgrade => "upgrade available",
-        Change::Downgrade => "older than installed; upgrade refuses it without --allow-downgrade",
+        (_, Change::New) => "new",
     }
 }
 
-/// What the stored indexes offer versus what is installed; installs nothing.
+/// What the stored indexes offer versus what is installed; installs
+/// nothing. Everything that differs is saved as the plan, the only thing
+/// `upgrade` may install (audit 1, H2).
 fn report(fs: &mut FsClient, sources: &Sources, pk: &[u8; 32]) -> u64 {
     let raw = verified_stored(fs, sources, pk);
     let (slots, indexes) = parse_all(&raw, pk);
-    let installed_system = match Disk::open() {
-        Ok(mut disk) => disk.active_version(pk),
-        Err(code) => return code,
-    };
+    let mut plan: Vec<PlanItem> = Vec::new();
     let mut available = 0;
+    let mut result = 0;
     match best_system(&indexes) {
         Some((i, s)) => {
-            let change = compare(installed_system, s.version);
-            available += usize::from(matches!(change, Change::Upgrade | Change::New));
+            let installed = match Disk::open() {
+                Ok(mut disk) => disk.active_version(pk),
+                Err(code) => {
+                    result = code;
+                    None
+                }
+            };
+            available += usize::from(compare(installed, s.version) == Change::Upgrade);
+            if installed != Some(s.version) {
+                plan.push(PlanItem::System(s.version));
+            }
             say!(
                 "system: installed {}, source {} offers {}: {}",
-                installed_system.map_or(String::from("unknown"), |v| format!("{v}")),
+                installed.map_or(String::from("unknown"), |v| format!("{v}")),
                 slots[i] + 1,
                 s.version,
-                change_text(change)
+                change_text(installed, s.version)
             );
         }
         None => say!("system: no source offers a system image"),
     }
-    let apps = installed_apps(fs, pk);
+    let apps = installed_apps(fs).unwrap_or_default();
     for (name, version) in &apps {
         match best_app(&indexes, name) {
             Some((i, a)) => {
                 let change = compare(Some(*version), a.version);
                 available += usize::from(change == Change::Upgrade);
+                if change != Change::Same {
+                    plan.push(PlanItem::App(a.name, a.version));
+                }
                 say!(
                     "app {name}: installed {version}, source {} offers {}: {}",
                     slots[i] + 1,
                     a.version,
-                    change_text(change)
+                    change_text(Some(*version), a.version)
                 );
             }
             None => say!("app {name}: installed {version}, no source offers it"),
@@ -722,6 +905,9 @@ fn report(fs: &mut FsClient, sources: &Sources, pk: &[u8; 32]) -> u64 {
             }
         }
     }
+    if !write_file(fs, upd::PLAN_FILE, lists::encode_plan(&plan).as_bytes()) {
+        result = fault(code::PLAN, "upd-plan-write", "cannot save the plan");
+    }
     if indexes.is_empty() {
         say!("no verified index: nothing to compare");
     } else if available == 0 {
@@ -729,44 +915,10 @@ fn report(fs: &mut FsClient, sources: &Sources, pk: &[u8; 32]) -> u64 {
     } else {
         say!("{available} upgrade(s) available: run upgrade");
     }
-    0
+    result
 }
 
 // ---------------------------------------------------------------- upgrade
-
-/// The downgrade rule (ADR 0029, decision 5) for one item; `Ok(true)` when
-/// it must be installed.
-fn decide(
-    what: &str,
-    installed: Option<u32>,
-    offered: u32,
-    allow_downgrade: bool,
-) -> Result<bool, u64> {
-    let change = compare(installed, offered);
-    if change.permitted(allow_downgrade) {
-        if change == Change::Downgrade {
-            say!(
-                "{what}: downgrading from {} to {offered} (--allow-downgrade)",
-                installed.unwrap_or(0)
-            );
-        }
-        return Ok(true);
-    }
-    match change {
-        Change::Downgrade => Err(fault(
-            code::DOWNGRADE_REFUSED,
-            "upd-downgrade-refused",
-            &format!(
-                "{what}: refused: version {offered} is older than the installed {} (upgrade --allow-downgrade to force)",
-                installed.unwrap_or(0)
-            ),
-        )),
-        _ => {
-            say!("{what}: version {offered} already installed");
-            Ok(false)
-        }
-    }
-}
 
 /// Downloads, checks and installs the system image `entry` from `url`.
 fn upgrade_system(
@@ -796,10 +948,10 @@ fn upgrade_system(
         &format!("{url}{}", entry.file),
         &mut disk.image[..size],
     ) {
-        return Err(fault(
+        return Err(download_fault(
             code::DOWNLOAD,
             "upd-image-download",
-            &format!("download failed: {e}"),
+            format!("download failed: {e}"),
         ));
     }
     if sha256(&disk.image[..size]) != entry.sha256 {
@@ -854,34 +1006,31 @@ fn upgrade_system(
     Ok(())
 }
 
-/// Downloads and checks the package `entry` and leaves it in
-/// `pkgs/NAME.aripkg` for the installer, which verifies it again.
-fn stage_app(
+/// Downloads and checks the package `entry` and writes it to the stage
+/// file `file` of this directory; the installer verifies it again.
+fn stage_app<'e>(
     fs: &mut FsClient,
     net: &mut NetClient,
     url: &str,
-    entry: &upd::AppEntry,
+    entry: &upd::AppEntry<'e>,
+    file: &'static str,
     pk: &[u8; 32],
-) -> Result<(), u64> {
-    let path = format!("pkgs/{}{}", entry.name, aricode_pkg::EXTENSION);
+) -> Result<StagedEntry<'e>, u64> {
     let size = entry.size as usize;
-    if size > MAX_PACKAGE || path.len() > MAX_FS_NAME {
+    if size > MAX_PACKAGE {
         return Err(fault(
             code::PACKAGE_REFUSED,
             "upd-pkg-size",
-            &format!(
-                "app {}: package too large or name too long; skipped",
-                entry.name
-            ),
+            &format!("app {}: package too large; skipped", entry.name),
         ));
     }
     say!("downloading {} ({size} bytes)", entry.file);
     let mut bytes = alloc::vec![0u8; size];
     if let Err(e) = fetch_exact(net, &format!("{url}{}", entry.file), &mut bytes) {
-        return Err(fault(
+        return Err(download_fault(
             code::DOWNLOAD,
             "upd-pkg-download",
-            &format!("app {}: download failed: {e}", entry.name),
+            format!("app {}: download failed: {e}", entry.name),
         ));
     }
     if sha256(&bytes) != entry.sha256 {
@@ -917,22 +1066,29 @@ fn stage_app(
             ))
         }
     }
-    if !write_file(fs, &path, &bytes) {
+    if !write_file(fs, file, &bytes) {
         return Err(fault(
-            code::STAGE_WRITE,
+            code::FILE_WRITE,
             "upd-pkg-stage",
-            &format!("cannot write {path}"),
+            &format!("cannot write {file}"),
         ));
     }
     say!(
-        "app {} version {} verified and staged in {path}",
+        "app {} version {} verified and staged as {}/{file}",
         entry.name,
-        entry.version
+        entry.version,
+        upd::UPDATER_DIR
     );
-    Ok(())
+    Ok(StagedEntry {
+        file,
+        name: entry.name,
+        version: entry.version,
+        sha256: entry.sha256,
+    })
 }
 
-/// `UPGRADE`: installs what the verified stored indexes offer.
+/// `UPGRADE`: installs what the plan lists, from the verified stored
+/// indexes.
 fn upgrade(
     fs: &mut FsClient,
     net: &mut NetClient,
@@ -940,6 +1096,24 @@ fn upgrade(
     allow_downgrade: bool,
     pk: &[u8; 32],
 ) -> u64 {
+    let plan_text = match read_text(fs, upd::PLAN_FILE, 4096) {
+        Ok(Some(t)) => t,
+        _ => {
+            return fault(
+                code::PLAN,
+                "upd-no-plan",
+                "nothing reported yet: run update first",
+            )
+        }
+    };
+    let (plan, rejected) = lists::parse_plan(&plan_text);
+    if rejected > 0 {
+        fault(
+            code::PLAN,
+            "upd-plan-damaged",
+            &format!("{rejected} invalid line(s) in the plan ignored"),
+        );
+    }
     let raw = verified_stored(fs, sources, pk);
     let (slots, indexes) = parse_all(&raw, pk);
     if indexes.is_empty() {
@@ -951,60 +1125,109 @@ fn upgrade(
     }
     let urls: Vec<&str> = sources.iter().collect();
     let mut result = 0;
-    let mut staged = 0;
-    let mut disk = match Disk::open() {
-        Ok(d) => d,
-        Err(code) => return code,
+    // Only what `update` reported, at the version it reported (audit 1, H2).
+    let not_reported = |what: &str, version: u32| {
+        fault(
+            code::PLAN,
+            "upd-not-reported",
+            &format!("{what} {version} was not reported by the last update: run update"),
+        )
     };
-    let installed = disk.active_version(pk);
     if let Some((i, entry)) = best_system(&indexes) {
-        let url = urls[slots[i]];
-        match decide("system", installed, entry.version, allow_downgrade) {
-            Ok(true) => {
-                if let Err(code) = upgrade_system(fs, net, &mut disk, url, entry, installed, pk) {
-                    result = code;
-                }
+        if !plan.contains(&PlanItem::System(entry.version)) {
+            if plan.iter().any(|p| matches!(p, PlanItem::System(_))) {
+                result = not_reported("system", entry.version);
             }
-            Ok(false) => {}
-            Err(code) => result = code,
+        } else {
+            match Disk::open() {
+                Ok(mut disk) => {
+                    let installed = disk.active_version(pk);
+                    match decide("system", installed, entry.version, allow_downgrade) {
+                        Ok(true) => {
+                            if let Err(code) = upgrade_system(
+                                fs,
+                                net,
+                                &mut disk,
+                                urls[slots[i]],
+                                entry,
+                                installed,
+                                pk,
+                            ) {
+                                result = code;
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(code) => result = code,
+                    }
+                }
+                Err(code) => result = code,
+            }
         }
     }
-    for (name, version) in installed_apps(fs, pk) {
+    let mut staged: Vec<StagedEntry> = Vec::new();
+    for (name, version) in installed_apps(fs).unwrap_or_default() {
         let Some((i, entry)) = best_app(&indexes, &name) else {
             continue;
         };
-        let url = urls[slots[i]];
+        if !plan.contains(&PlanItem::App(entry.name, entry.version)) {
+            if entry.version != version {
+                result = not_reported(&format!("app {name}"), entry.version);
+            }
+            continue;
+        }
         match decide(
             &format!("app {name}"),
             Some(version),
             entry.version,
             allow_downgrade,
         ) {
-            Ok(true) => match stage_app(fs, net, url, entry, pk) {
-                Ok(()) => staged += 1,
-                Err(code) => result = code,
-            },
-            Ok(false) => {}
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(code) => {
+                result = code;
+                continue;
+            }
+        }
+        let Some(file) = upd::staged_package_file(staged.len()) else {
+            say!(
+                "app {name}: more upgrades than stage slots ({}): run upgrade again",
+                upd::MAX_STAGED
+            );
+            break;
+        };
+        match stage_app(fs, net, urls[slots[i]], entry, file, pk) {
+            Ok(e) => staged.push(e),
             Err(code) => result = code,
         }
     }
-    if staged > 0 {
-        say!("{staged} package(s) staged for the installer");
-        result | updater_arg::EXIT_APPS_STAGED
-    } else {
+    if !write_file(
+        fs,
+        upd::STAGED_FILE,
+        lists::encode_staged(&staged).as_bytes(),
+    ) {
+        return fault(
+            code::FILE_WRITE,
+            "upd-staged-write",
+            "cannot write the staged list",
+        );
+    }
+    if staged.is_empty() {
         result
+    } else {
+        say!("{} package(s) staged for the installer", staged.len());
+        result | updater_arg::EXIT_APPS_STAGED
     }
 }
 
 fn run(arg: u64) -> u64 {
-    let mut pk = [0u8; 32];
-    if aricode_crypto::unhex(PUBKEY_HEX.trim(), &mut pk).is_none() {
-        return code::KEY;
-    }
+    DEADLINE.store(now_ms().saturating_add(RUN_DEADLINE_MS), Ordering::Relaxed);
+    let Some(pk) = aricode_crypto::trust::public_key() else {
+        return fault(code::KEY, "upd-key", "invalid embedded public key");
+    };
     let allow_downgrade = arg & updater_arg::ALLOW_DOWNGRADE != 0;
     let command = arg & !updater_arg::ALLOW_DOWNGRADE;
     match (command, allow_downgrade) {
-        (updater_arg::APPLY, false) => return apply(&pk),
+        (updater_arg::APPLY, _) => return apply(allow_downgrade, &pk),
         (updater_arg::REFRESH, false) | (updater_arg::UPGRADE, _) => {}
         _ => {
             return fault(
@@ -1014,15 +1237,21 @@ fn run(arg: u64) -> u64 {
             )
         }
     }
-    let (Ok(mut fs), Ok(mut net)) = (FsClient::new(ROOT, HW), NetClient::new(NET, HW)) else {
-        say!("need the file and network services");
-        return code::NO_SERVICES;
+    let (Ok(mut fs), Ok(mut net)) = (FsClient::new(FS, HW), NetClient::new(NET, HW)) else {
+        return fault(
+            code::NO_SERVICES,
+            "upd-no-services",
+            "need the file and network services",
+        );
     };
     let sources = match load_sources(&mut fs) {
         Ok(s) => s,
         Err(code) => return code,
     };
     if sources.is_empty() {
+        if command == updater_arg::REFRESH {
+            forget_stored(&mut fs);
+        }
         say!("no update sources: update add URL");
         return code::NO_SOURCES;
     }
@@ -1035,11 +1264,11 @@ fn run(arg: u64) -> u64 {
 
 fn main(arg: u64) -> u64 {
     let code = run(arg);
-    // The log for the shell (private directory); best effort.
-    if let Ok(mut fs) = FsClient::new(ROOT, HW) {
+    // The log for the shell (private directory).
+    if let Ok(mut fs) = FsClient::new(FS, HW) {
         let log = LOG.0.borrow();
         if !write_file(&mut fs, upd::UPDATER_LOG_FILE, &log) {
-            let _ = sys::event_record(code::STAGE_WRITE, "upd-log-write");
+            let _ = sys::event_record(code::FILE_WRITE, "upd-log-write");
         }
     }
     code

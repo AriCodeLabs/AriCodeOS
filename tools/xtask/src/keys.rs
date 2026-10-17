@@ -14,6 +14,80 @@ pub const PUB_FILE: &str = "ed25519.pub";
 /// Development key pair checked into the repo: for tests and QEMU only.
 pub const DEV_KEY_DIR: &str = "keys/dev";
 
+/// Environment variable through which a build embeds a non-development
+/// public key (`aricode_crypto::trust`).
+pub const SIGNING_PUB_ENV: &str = "ARICODE_SIGNING_PUB";
+
+/// The key pair selected with `--signing-key DIR` for this run; unset means
+/// the development pair.
+static SIGNING_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// `--signing-key DIR` (ADR 0029, "The signing key"): images, packages and
+/// indexes are signed with `DIR/ed25519.seed` and the build embeds
+/// `DIR/ed25519.pub`. The pair must match, and a production seed must live
+/// outside the repository. Without it, a loud warning: the development
+/// seed is public.
+pub fn select_signing_key(dir: Option<&Path>) -> Result {
+    let root = crate::root();
+    let dev = root.join(DEV_KEY_DIR);
+    let Some(dir) = dir else {
+        eprintln!(
+            "[xtask] WARNING: signing with the DEVELOPMENT key {DEV_KEY_DIR}, whose seed is public: \
+             anyone on the network can sign images and packages that this build accepts. \
+             Use --signing-key DIR (cargo xtask keygen DIR, kept outside the repository) \
+             before upgrading machines over an untrusted network."
+        );
+        return Ok(());
+    };
+    let dir = dir
+        .canonicalize()
+        .map_err(|e| format!("--signing-key {}: {e}", dir.display()))?;
+    if dir == dev.canonicalize().unwrap_or(dev) {
+        return select_signing_key(None);
+    }
+    if dir.starts_with(&root) {
+        return Err(format!(
+            "--signing-key {}: a signing seed must be kept outside the repository",
+            dir.display()
+        ));
+    }
+    let seed: [u8; 32] = read_hex(&dir.join(SEED_FILE))?;
+    let public: [u8; 32] = read_hex(&dir.join(PUB_FILE))?;
+    if ed25519::public_key(&seed) != public {
+        return Err(format!(
+            "--signing-key {}: {SEED_FILE} and {PUB_FILE} are not a pair",
+            dir.display()
+        ));
+    }
+    let mut buf = [0u8; 64];
+    println!(
+        "[xtask] signing key {} (public {})",
+        dir.display(),
+        hex(&public, &mut buf)
+    );
+    SIGNING_DIR
+        .set(dir)
+        .map_err(|_| String::from("--signing-key given twice"))
+}
+
+/// Seed of the selected signing key (the development one by default).
+pub fn signing_seed() -> Result<[u8; 32]> {
+    let dir = SIGNING_DIR
+        .get()
+        .cloned()
+        .unwrap_or_else(|| crate::root().join(DEV_KEY_DIR));
+    read_hex(&dir.join(SEED_FILE))
+}
+
+/// Public key (hex) a build must embed instead of the development one;
+/// `None` with the development key.
+pub fn signing_public_hex() -> Option<String> {
+    let dir = SIGNING_DIR.get()?;
+    fs::read_to_string(dir.join(PUB_FILE))
+        .ok()
+        .map(|t| t.trim().to_string())
+}
+
 fn os_random(out: &mut [u8]) -> Result {
     // `/dev/urandom` is endless: read exactly what is needed, never `fs::read`.
     use std::io::Read;
@@ -139,5 +213,23 @@ mod tests {
         fs::write(&file, b"tampered manifest").unwrap();
         assert!(verify(&dir.join(PUB_FILE), &file, None).is_err());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn signing_key_must_be_a_pair_outside_the_repository() {
+        // Audit 1 (production key): a seed inside the repository, or a seed
+        // and public key that do not match, are refused before anything
+        // is signed.
+        let err = select_signing_key(Some(&crate::root().join("keys"))).unwrap_err();
+        assert!(err.contains("outside the repository"), "{err}");
+        let tmp = crate::test_util::TempDir::new("signing-pair");
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        keygen(&a).unwrap();
+        keygen(&b).unwrap();
+        fs::copy(b.join(PUB_FILE), a.join(PUB_FILE)).unwrap();
+        let err = select_signing_key(Some(&a)).unwrap_err();
+        assert!(err.contains("not a pair"), "{err}");
+        assert!(signing_public_hex().is_none(), "nothing was selected");
     }
 }
