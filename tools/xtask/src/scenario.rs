@@ -67,6 +67,29 @@ pub struct HostSsh {
     pub idle_client: bool,
 }
 
+/// What the scenario's update source offers and how the machine knows it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostUpdate {
+    /// System image version offered; no system image when absent.
+    pub system: Option<u32>,
+    /// App packages offered: `DIR:VERSION`.
+    #[serde(default)]
+    pub apps: Vec<String>,
+    /// The index is altered after signing (the updater must refuse it).
+    #[serde(default)]
+    pub tamper_index: bool,
+    /// How the machine knows the source: `sources` (registered in
+    /// `updater/sources`), `legacy-url` (the ADR 0027 `updater/update_url`,
+    /// to be migrated) or `none` (the scenario adds it from the shell).
+    #[serde(default = "default_update_source")]
+    pub source: String,
+}
+
+fn default_update_source() -> String {
+    String::from("sources")
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostInput {
@@ -152,10 +175,9 @@ pub struct Scenario {
     /// `trusted_ca.der`, one self-signed and untrusted.
     #[serde(default)]
     pub host_https: bool,
-    /// Publishes a version-2 system image into `build/update/`, served by the
-    /// test HTTP server at `http://10.0.2.2:17010/update/` (ADR 0027).
-    #[serde(default)]
-    pub host_update: bool,
+    /// An update source published into `build/update-test/` and served by
+    /// the test HTTP server at `http://10.0.2.2:17010/update/` (ADR 0029).
+    pub host_update: Option<HostUpdate>,
     /// Initial state of the test disk (`image::DiskVariant`): `slots`
     /// (default), `update-empty`, `esp-only`, `pending-b`, `b-exhausted`, `b-corrupt`,
     /// `fs-pending-replace`, `fs-corrupt`, `wasm-restricted`, `wasm-invalid`,

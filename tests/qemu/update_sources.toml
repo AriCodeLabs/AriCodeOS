@@ -1,0 +1,48 @@
+# Update sources (ADR 0029): the machine starts with no source. The owner
+# adds one from the shell in the IP:PORT/path form, the updater fetches and
+# verifies its index, and the source is removed again. Invalid, foreign
+# scheme and duplicate sources are refused; every change goes to the
+# install history (updates.log).
+name = "update.sources"
+description = "update add/sources/remove: owner-registered sources, refusals, index fetched from the new source"
+level = "full"
+areas = ["update", "network", "shell"]
+timeout_secs = 120
+
+[host_update]
+system = 2
+source = "none"
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = [
+    "update",
+    "update add ftp://10.0.2.2/update/",
+    "update add 10.0.2.2:99999",
+    "update add 10.0.2.2:17010/update",
+    "update add http://10.0.2.2:17010/update/",
+    "update sources",
+    "update",
+    "update remove 1",
+    "cat updates.log",
+    "shutdown",
+]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "updater: no update sources: update add URL",
+    "update: updater exited with 21",
+    "update: only http:// and https:// sources are accepted",
+    "update: invalid source: use http[s]://host[:port]/path/ or IP[:PORT][/path]",
+    "update: source 1 added: http://10.0.2.2:17010/update/ (run update to fetch its index)",
+    "update: source already registered",
+    "update sources:",
+    "  1  http://10.0.2.2:17010/update/",
+    "updater: source 1 http://10.0.2.2:17010/update/: index verified (serial ",
+    "updater: system: installed 1, source 1 offers 2: upgrade available",
+    "update: source removed: http://10.0.2.2:17010/update/",
+    "source added: http://10.0.2.2:17010/update/ (from the console)",
+    "source removed: http://10.0.2.2:17010/update/ (from the console)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "installed into slot", "ftp://10.0.2.2/update/ (from"]

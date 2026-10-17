@@ -181,16 +181,38 @@ fn run_scenario(
         }
         None => None,
     };
-    if s.host_update {
-        image::publish_update_to(&image::test_update_dir(), release, 2)?;
-        installed.push((
-            String::from(image::UPDATE_URL_FILE),
-            format!(
-                "http://10.0.2.2:{}/update/\n",
-                aricode_proto::net::TEST_HTTP_PORT
-            )
-            .into_bytes(),
-        ));
+    if let Some(u) = &s.host_update {
+        let channel = image::Channel {
+            system: u.system,
+            apps: u
+                .apps
+                .iter()
+                .map(|spec| crate::app_spec(spec).map_err(|e| format!("{}: {e}", s.name)))
+                .collect::<Result<_>>()?,
+            tamper_index: u.tamper_index,
+        };
+        image::publish_update_to(&image::test_update_dir(), release, &channel)?;
+        let url = format!(
+            "http://10.0.2.2:{}/update/\n",
+            aricode_proto::net::TEST_HTTP_PORT
+        );
+        match u.source.as_str() {
+            "sources" => installed.push((
+                String::from(aricode_update_index::SOURCES_FILE),
+                url.into_bytes(),
+            )),
+            "legacy-url" => installed.push((
+                String::from(aricode_update_index::LEGACY_URL_FILE),
+                url.into_bytes(),
+            )),
+            "none" => {}
+            other => {
+                return Err(format!(
+                    "{}: host_update.source '{other}': sources, legacy-url or none",
+                    s.name
+                ))
+            }
+        }
     }
     let _https = if s.host_https {
         let (servers, ca) = https_servers(&workdir.join("tls"))?;

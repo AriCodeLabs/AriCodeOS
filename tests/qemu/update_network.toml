@@ -1,42 +1,51 @@
-# Network update (ADR 0027): the host publishes a version-2 image in
-# build/update/ (served at http://10.0.2.2:17010/update/), the channel URL is
-# in the updater's private directory and the UPDATE partition starts empty.
-# `update` downloads the image into UPDATE, verifies it, installs it into
-# slot B and schedules it; after `reboot`, AriBoot boots B and init confirms.
+# Network update from a source (ADR 0027, ADR 0029): the host publishes a
+# source in build/update-test/ (signed index, version-2 system image) served
+# at http://10.0.2.2:17010/update/, the source is registered in
+# updater/sources and the UPDATE partition starts empty, so the installed
+# image can only come from the network. `update` verifies the index and
+# reports; `upgrade` downloads the image into memory, checks it against the
+# index and its own signature, writes slot B and schedules it; after
+# `reboot`, AriBoot boots B, init confirms it and `update` says up to date.
 name = "update.network"
-description = "update: download the signed image from the channel, install it into the inactive slot, boot it"
+description = "update + upgrade: verified index, signed image into the inactive slot, reboot into it"
 level = "full"
 areas = ["update", "network", "shell", "boot"]
 disk = "update-empty"
-host_update = true
-timeout_secs = 150
+timeout_secs = 180
+
+[host_update]
+system = 2
 
 [[boots]]
 cmdline = "qemu_exit shell"
-stdin = ["update check", "update", "reboot"]
+stdin = ["update", "upgrade", "reboot"]
 [boots.expect]
 exit = 0
 serial_contains = [
-    "AriInit: launch updater with manifest [system fs net block] memory 6144 KiB",
-    "updater: installed version 1, channel offers version 2",
+    "AriInit: launch updater with manifest [system net block install] memory 6144 KiB",
+    "updater: source 1 http://10.0.2.2:17010/update/: index verified (serial ",
+    "updater: system: installed 1, source 1 offers 2: upgrade available",
+    "updater: 1 upgrade(s) available: run upgrade",
     "updater: downloading aricodeos-2.img (",
-    "updater: download complete and SHA-256 verified",
-    "updater: UPDATE image version 2 verified (",
+    "updater: system image version 2 verified (signature and SHA-256)",
     "updater: installed into slot B",
     "updater: state: active A, pending B (3 tries); reboot to try it",
+    "updater: system 2 installed: reboot to apply",
     "AriCodeOS: rebooting",
 ]
-serial_absent = ["KERNEL PANIC", "updater: UPDATE does not contain"]
+serial_absent = ["KERNEL PANIC", "update: updater exited with", "index refused", "upgrade: installer"]
 
 [[boots]]
 cmdline = "qemu_exit shell"
-stdin = ["update check", "shutdown"]
+stdin = ["update", "cat updates.log", "shutdown"]
 [boots.expect]
 exit = 33
 serial_contains = [
     "slots: booting from slot B (image version 2, pending confirmation)",
     "AriInit: boot confirmed on slot B",
-    "updater: installed version 2, channel offers version 2: up to date",
+    "updater: system: installed 2, source 1 offers 2: up to date",
+    "updater: everything is up to date",
+    "system 1 -> 2 installed into slot B from http://10.0.2.2:17010/update/ (pending until reboot)",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "rollback"]
+serial_absent = ["KERNEL PANIC", "rollback", "update: updater exited with", "index refused"]

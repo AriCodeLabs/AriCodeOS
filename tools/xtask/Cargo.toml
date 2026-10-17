@@ -19,3 +19,4 @@ aricode-crypto = { path = "../../libs/crypto" }
 aricode-ssh = { path = "../../libs/ssh" }
 aricode-ab = { path = "../../libs/ab" }
 aricode-pkg = { path = "../../libs/pkg", features = ["write"] }
+aricode-update-index = { path = "../../libs/update-index" }

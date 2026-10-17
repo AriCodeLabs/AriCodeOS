@@ -1,0 +1,37 @@
+# Tampered index (ADR 0029): the source's index was changed after it was
+# signed (its serial bumped). The updater refuses it before reading
+# anything in it, records a fault event, stores nothing, and `upgrade`
+# has no verified index to install from; slot B is never written.
+name = "update.tampered_index"
+description = "an index altered after signing is refused; nothing is stored or installed"
+level = "full"
+areas = ["update", "network", "shell", "crypto"]
+disk = "update-empty"
+timeout_secs = 120
+
+[host_update]
+system = 2
+tamper_index = true
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update", "upgrade", "diag", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "updater: source 1 http://10.0.2.2:17010/update/: index refused (BadSignature): signature or format invalid; nothing from it is used",
+    "update: updater exited with 31",
+    "updater: source 1: no verified index yet; run update",
+    "updater: no verified index: run update first",
+    "update: updater exited with 33",
+    ": upd-index-refused (code 31)",
+    ": upd-no-index (code 33)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "index verified",
+    "downloading aricodeos",
+    "installed into slot",
+    "pending B",
+]

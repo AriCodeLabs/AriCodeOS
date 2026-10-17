@@ -60,7 +60,11 @@ marker = "sshd: listening on port 22"   # on seeing the marker, each command run
 commands = ["ls", "shutdown"]   # host port 17022; output joins the log as "[host] ssh $ CMD", "[host] ssh| LINE", "[host] ssh exit N"
 idle_client = true              # a TCP client that never identifies itself holds port 22 first; sshd must drop it
 host_https = true               # two host HTTPS servers (openssl s_server -www) on 17443 (cert from a test CA installed as trusted_ca.der) and 17444 (self-signed)
-host_update = true              # publishes a version-2 system image in build/update/, served at http://10.0.2.2:17010/update/ (ADR 0027), and installs updater/update_url
+[host_update]                   # an update source (ADR 0029) published in build/update-test/ and served at http://10.0.2.2:17010/update/
+system = 2                      # system image version offered (omit: no system image)
+apps = ["examples/hello_ext:2"] # app packages offered (DIR:VERSION)
+tamper_index = true             # the index is altered after signing (the updater must refuse it)
+source = "sources"              # sources (installs updater/sources) | legacy-url (installs the ADR 0027 updater/update_url) | none
 usb_legacy_controller = true    # also adds an EHCI (class 0c.03 but not xHCI)
 install = ["examples/hello_ext"]  # external apps xtask builds, signs (version 1) and installs in AriFS as apps/NAME.aripkg
 packages = ["examples/hello_ext:2", "examples/hello_ext:3:corrupt"]  # pending packages in pkgs/ (DIR:VERSION[:corrupt]) for `run installer`

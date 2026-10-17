@@ -6,9 +6,9 @@
 //! cargo xtask build [--debug]                 builds AriBoot and AriKernel
 //! cargo xtask image [--debug]                 build + assembles build/esp/
 //! cargo xtask run   [--debug] [--cmdline S] [--cpus N] [--usb-image] [--usb-hid]   image + interactive QEMU
-//! cargo xtask usb-image [--cmdline S] [--authorized-key KEY.pub] [--update-url URL]  GPT image for a USB stick at build/aricodeos-usb.img
-//! cargo xtask publish-update [--version N]   signed system image + manifest in build/update/ (ADR 0027)
-//! cargo xtask serve-update [--version N] [--port P]  publish-update + HTTP server for `update` on the machines (default port 8080)
+//! cargo xtask usb-image [--cmdline S] [--authorized-key KEY.pub] [--update-source URL]  GPT image for a USB stick at build/aricodeos-usb.img
+//! cargo xtask publish-update [--version N | --no-system] [--app DIR:VERSION]...   update source in build/update/: signed image, packages, index + index.sig (ADR 0029)
+//! cargo xtask serve-update [publish-update options] [--port P]  publish-update + HTTP server for `update` on the machines (default port 8080)
 //! cargo xtask test  [opciones]                test levels (see tests/README.md)
 //! cargo xtask fs-cat DISK [NAME]             reads a file from ARI0 (or lists it) in an image or dump
 //!     --level unit|smoke|full                 default: unit + smoke
@@ -48,6 +48,14 @@ impl Cli {
         let i = self.args.iter().position(|a| a == name)?;
         self.args.get(i + 1).map(String::as_str)
     }
+    /// Every value of an option that may repeat (`--app A --app B`).
+    fn values(&self, name: &str) -> Vec<&str> {
+        self.args
+            .windows(2)
+            .filter(|w| w[0] == name)
+            .map(|w| w[1].as_str())
+            .collect()
+    }
     /// Positional argument `n` (1-based), ignoring `--x` options.
     fn positional(&self, n: usize) -> Option<&str> {
         self.args
@@ -78,20 +86,24 @@ fn main() -> ExitCode {
             cli.flag("--usb-image"),
             cli.flag("--usb-hid"),
         ),
-        "publish-update" => image::publish_update(release, version_flag(&cli)).map(|_| ()),
-        "serve-update" => image::publish_update(release, version_flag(&cli)).and_then(|dir| {
-            qemu::serve_update(
-                &dir,
-                cli.value("--port")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(8080),
-            )
-        }),
+        "publish-update" => channel_flags(&cli)
+            .and_then(|c| image::publish_update_to(&image::update_dir(), release, &c))
+            .map(|_| ()),
+        "serve-update" => channel_flags(&cli)
+            .and_then(|c| image::publish_update_to(&image::update_dir(), release, &c))
+            .and_then(|dir| {
+                qemu::serve_update(
+                    &dir,
+                    cli.value("--port")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(8080),
+                )
+            }),
         "usb-image" => image::build_usb_image(
             release,
             cli.value("--cmdline").unwrap_or("shell"),
             cli.value("--authorized-key").map(Path::new),
-            cli.value("--update-url"),
+            cli.value("--update-source"),
         )
             .map(|p| {
                 println!(
@@ -155,9 +167,37 @@ pub fn build_dir() -> PathBuf {
     root().join("build")
 }
 
-/// `--version N` (default 1).
-fn version_flag(cli: &Cli) -> u32 {
-    cli.value("--version")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1)
+/// `DIR:VERSION` of an external app (scenarios and `--app`).
+pub fn app_spec(spec: &str) -> Result<(String, u32)> {
+    let (dir, version) = spec
+        .rsplit_once(':')
+        .ok_or_else(|| format!("'{spec}': expected DIR:VERSION"))?;
+    let version = version
+        .parse()
+        .map_err(|_| format!("'{spec}': invalid version"))?;
+    Ok((dir.to_string(), version))
+}
+
+/// What `publish-update` publishes: `--version N` (default 1) or
+/// `--no-system`, and `--app DIR:VERSION` for each package.
+fn channel_flags(cli: &Cli) -> Result<image::Channel> {
+    let system = if cli.flag("--no-system") {
+        None
+    } else {
+        Some(
+            cli.value("--version")
+                .map(|v| v.parse().map_err(|_| format!("--version {v}: invalid")))
+                .transpose()?
+                .unwrap_or(1),
+        )
+    };
+    Ok(image::Channel {
+        system,
+        apps: cli
+            .values("--app")
+            .into_iter()
+            .map(app_spec)
+            .collect::<Result<_>>()?,
+        tamper_index: false,
+    })
 }

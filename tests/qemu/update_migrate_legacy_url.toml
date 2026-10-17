@@ -1,0 +1,27 @@
+# Migration from ADR 0027 (ADR 0029): the machine only has the old single
+# channel file updater/update_url. The first `update` turns it into the
+# first source and fetches its index; `update sources` then lists it.
+name = "update.migrate_legacy_url"
+description = "update_url of ADR 0027 becomes the first update source"
+level = "full"
+areas = ["update", "network", "shell"]
+timeout_secs = 120
+
+[host_update]
+system = 2
+source = "legacy-url"
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update", "update sources", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "updater: update_url migrated to the source list (ADR 0029)",
+    "updater: source 1 http://10.0.2.2:17010/update/: index verified (serial ",
+    "updater: system: installed 1, source 1 offers 2: upgrade available",
+    "update sources:",
+    "  1  http://10.0.2.2:17010/update/",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "update: updater exited with", "update: update_url migrated"]
