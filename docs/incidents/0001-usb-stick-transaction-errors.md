@@ -294,11 +294,9 @@ What the laptop dump should now show, per the decision table of study A:
   injects keys; `device_del` / `device_add` would need xtask support).
   Re-enumeration itself is exercised by `usb.reenum` through the injected
   give-up.
-- Audit 1 F10 (Reset Device instead of Disable Slot + fresh allocations)
-  and F14 (halted HID interrupt endpoints) remain open.
-- The DMA arena is linear: each re-enumeration leaves the old slot's
-  contexts and rings allocated (about 6 KiB), which bounds re-enumerations
-  to roughly ten per boot before "no DMA".
+- Audit 1 F10 and F14: addressed on `fix/usb-hid-and-reset-device`, see
+  "HID endpoint recovery and Reset Device" below; what remains open about
+  them is listed there.
 - A post-write quiet period is still not implemented: it is decided after
   the dump, as planned.
 
@@ -529,3 +527,96 @@ fsd refuses a corrupt AriFS and exits) learns it only when its own wait
 expires (now 120 s for the file client, 90 s for the block client), not
 at once. The kernel has no "peer gone" notification on IPC endpoints;
 until it has one, the scenario's timeout is 200 s. Open item.
+
+## HID endpoint recovery and Reset Device (2026-10-17, audit 1 F14 and F10)
+
+Branch `fix/usb-hid-and-reset-device`.
+
+**F14, HID interrupt endpoints.** `handle_transfer_event` used to decode
+every Transfer Event of a report TRB and queue it again whatever its
+completion code, so a STALL or a transaction error halted the interrupt
+endpoint (xHCI 4.10.2.1) and the keyboard or mouse went silent with no
+trace. Now:
+
+- Success and Short Packet (xHCI 4.10.1.1) are reports; a Stopped code is
+  the TD a Stop Endpoint of the recovery retired (4.6.9); any other code
+  is a failure. It is printed (slot, DCI, code and name, residual, TRB)
+  and recorded (`usb hid err`, code = completion code), the report TRB is
+  not queued again and the endpoint is marked for recovery.
+- The recovery runs from the idle loop (`maintain_hid`, one endpoint per
+  iteration, `MAINTENANCE_STEP_MS`), never inside the waits of other
+  commands or transfers. It follows the Endpoint Context state with the
+  same table as the storage path (`endpoint_recovery`, 4.8.3): Halted takes
+  Reset Endpoint with TSP = 0 (4.6.8), Set TR Dequeue (4.6.10) and
+  `CLEAR_FEATURE(ENDPOINT_HALT)` (USB 2.0 9.4.5: the halt feature is
+  mandatory on interrupt endpoints and resets the device's toggle with the
+  host's); Stopped takes Set TR Dequeue; Running needs no command. After a
+  Set TR Dequeue every report TRB is queued again
+  (`EndpointRecovery::abandons_ring`), otherwise only the retired ones.
+  Every command result is printed, every failure recorded.
+- Attempts are bounded: `HID_RECOVERY_ATTEMPTS` = 3 without a good report
+  in between, then the endpoint is given up loudly (`usb hid lost`). A
+  `CLEAR_FEATURE` that failed is sent again on the next attempt before any
+  report is queued.
+- `strict`: the first HID failure halts the driver with a dump (slot, DCI,
+  endpoint address, code, TRB, endpoint state and dequeue pointer, ring
+  position, reports on the ring, PORTSC and USBSTS) before any recovery.
+- Test knob: `usb_fault=N:hid` / `idle:hid` treats the N-th HID report
+  (or the first after two idle seconds) as a USB Transaction Error
+  (`usb inj hid`). The report did arrive, so the endpoint is Running: the
+  recovery first stops it for real (Stop Endpoint), so that it then works
+  from the state the controller wrote. Scenarios `usb.hid_fault` and
+  `strict.usb_hid_halt`.
+
+**F10, re-enumeration memory.** A re-enumeration used to issue Disable
+Slot, Enable Slot and allocate a new Output Device Context, EP0 ring,
+Input Context, descriptor buffer, both bulk rings and the CBW/CSW/sense
+buffers from the linear DMA arena (about 6 KiB each time). Now:
+
+- A device still on its port (no connect status change since its slot was
+  addressed, the slot not released by an earlier failure) is enumerated
+  again on its own slot: port reset when due, then Reset Device (xHCI
+  4.6.11) if the slot is Addressed or Configured, nothing if it is already
+  Default, Address Device (4.6.5) on the same Input Context with the EP0
+  ring emptied in place, the bulk rings emptied in place before Configure
+  Endpoint. Host tested: `slot_status`, `slot_reuse`, `Trb::reset_device`.
+- Disable Slot stays for a device that is gone, a new connection, the
+  given-up storage, an endpoint no command puts back (`give_up_endpoint`,
+  which must stop every TD on a client buffer at once) and any failure of
+  the in-place path (Reset Device or a later step); the next attempt then
+  takes a new slot.
+- Even then nothing is allocated again: the released slot memory is kept
+  as a spare and reused by the next Enable Slot once no Disable Slot is
+  outstanding (the controller owns none of it, 4.6.4; its Output Device
+  Context is zeroed first, 4.3.3), the storage's bulk rings and buffers go
+  to its next incarnation, and the descriptor buffer is allocated once.
+- Budgets unchanged: every step keeps its deadline (`REENUMERATE_STEP_MS`,
+  each command through `command_checked` / `step_deadline`), Reset Device
+  takes the place of Disable Slot + Enable Slot in the step.
+- Test knob: `usb_fault=idle:reset` treats the stick as not answering (as
+  when it rejects the class reset), so the in-place path runs in QEMU
+  (scenario `usb.reset_device`: no Disable Slot, no Enable Slot). The
+  given-up path (`usb.reenum`) still runs Disable Slot and a new slot,
+  now on the reused memory.
+
+Open after this change:
+
+- The three scenarios were written but not run on this branch (the QEMU
+  ports were in use); they must pass before merging.
+- QEMU cannot produce the Halted branch of the HID recovery: its usb-hid
+  never STALLs the interrupt IN endpoint and answers
+  `CLEAR_FEATURE(ENDPOINT_HALT)` with a STALL (hw/usb/desc.c implements no
+  endpoint features), and its xHCI never reports transaction errors. Reset
+  Endpoint TSP = 0 and the device-side clear on an interrupt endpoint are
+  exercised only on hardware; the bulk version of the same sequence runs
+  in `usb.fault_csw`.
+- Reset Device has only run against QEMU's xHCI, which accepts it in any
+  enabled slot state; the laptop's Panther Point (xHCI 1.0) follows 4.6.11
+  strictly (Context State Error outside Addressed/Configured, which the
+  driver avoids by reading the slot state first).
+- A given-up HID endpoint stays silent for the rest of the boot: HID
+  devices are not re-enumerated (only the storage is), not even after a
+  reconnection.
+- Reports that arrive while the driver waits inside a storage command are
+  decoded with no event queue (`dispatch(ev, None)`) and their key events
+  are dropped: pre-existing, separate from F14, not fixed here.
