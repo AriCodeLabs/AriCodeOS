@@ -29,7 +29,10 @@ would open an unauthenticated shell on the user's network.
    one connection at a time. The host key seed lives in AriFS
    (`ssh_host_ed25519_key`, created from the kernel RNG on first start; its
    fingerprint is logged); logins are checked against `authorized_keys`
-   (OpenSSH format), reread on every connection.
+   (OpenSSH format), reread on every connection. Since 2026-10-17
+   (incident 0001 follow-up): while the file service does not answer, the
+   last keys stay in use and the reread is tried at most once a minute,
+   logged once; a file the service reports missing empties the keys.
 4. **Session shells launched by init** (`aricode-proto::session`): sshd has
    no SPAWNER. For `shell`/`exec` it sends init a request with two fresh
    endpoints; init launches `arish` in session mode (`SHELL_SESSION`, and

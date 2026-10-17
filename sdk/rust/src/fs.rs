@@ -19,8 +19,24 @@ pub struct FsClient {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsError {
+    /// The request did not get an answer: `PeerClosed` when the file
+    /// service is gone (ADR 0030), `Revoked` when its supervisor retired
+    /// the endpoint, `Timeout` when it did not answer in time.
     Ipc(Error),
+    /// The file service answered with an error.
     Status(Status),
+}
+
+impl FsError {
+    /// The file service did not answer (gone, retired or too slow), as
+    /// opposed to answering with an error status: the caller learns
+    /// nothing about the file.
+    pub fn service_unavailable(&self) -> bool {
+        matches!(
+            self,
+            FsError::Ipc(Error::PeerClosed | Error::Revoked | Error::Timeout)
+        )
+    }
 }
 
 impl FsClient {

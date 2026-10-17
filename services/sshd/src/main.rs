@@ -9,7 +9,8 @@
 //! sessions (WRITE)]`. In AriFS: `ssh_host_ed25519_key` (the host key seed
 //! in hex; installed by `cargo xtask usb-image --authorized-key`, or
 //! created on first start), `authorized_keys` (OpenSSH format,
-//! `ssh-ed25519` lines; read on every connection) and `random_seed`
+//! `ssh-ed25519` lines; reread after every connection, or at most once a
+//! minute while the file service does not answer) and `random_seed`
 //! (entropy carried across boots).
 //!
 //! Closed by default: without an `authorized_keys` file with at least one
@@ -20,11 +21,13 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use aricode_proto::fs::Status as FsStatus;
 use aricode_proto::net::Status;
 use aricode_proto::session;
-use aricode_rt::sys::fs::FsClient;
+use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::net::{NetClient, NetError};
 use aricode_rt::sys::{self, abi, rights, Error, Handle};
+use aricode_ssh::keys_refresh::{Change, KeyRefresh};
 use aricode_ssh::{fingerprint, parse_authorized_keys, Event, Server};
 
 const NET: Handle = Handle(0x0001_0004);
@@ -59,7 +62,7 @@ struct Entropy {
 impl Entropy {
     fn load(fs: &mut FsClient) -> Self {
         let mut h = aricode_crypto::sha256::Sha256::new();
-        if let Some(saved) = read_file(fs, SEED_FILE) {
+        if let Ok(saved) = read_file(fs, SEED_FILE) {
             h.update(&saved);
         }
         let mut fresh = [0u8; 32];
@@ -114,35 +117,53 @@ fn write_file(fs: &mut FsClient, name: &str, data: &[u8]) -> bool {
         .is_some()
 }
 
-/// Whole file, or `None` if it does not exist or cannot be read. A read
-/// error (a USB stick that fails a transfer) is retried a few times before
-/// giving up: a truncated `authorized_keys` must never pass as empty.
-fn read_file(fs: &mut FsClient, name: &str) -> Option<Vec<u8>> {
-    let fd = fs.open(name).ok()?;
+/// Why a file could not be read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReadError {
+    /// The file service answered: there is no such file.
+    Absent,
+    /// The file service did not answer (gone, retired or too slow).
+    Unavailable,
+    /// It answered, but the content could not be read whole.
+    Incomplete,
+}
+
+/// Whole file. A read error the file service reports (a USB stick that
+/// fails a transfer) is retried a few times before giving up: a truncated
+/// `authorized_keys` must never pass as empty. A service that does not
+/// answer is not retried: each attempt would wait the file client's whole
+/// reply wait.
+fn read_file(fs: &mut FsClient, name: &str) -> Result<Vec<u8>, ReadError> {
+    let fd = fs.open(name).map_err(|e| match e {
+        FsError::Status(FsStatus::NotFound) => ReadError::Absent,
+        e if e.service_unavailable() => ReadError::Unavailable,
+        _ => ReadError::Incomplete,
+    })?;
     let mut data = Vec::new();
     let mut chunk = [0u8; 512];
     let mut errors = 0;
-    let complete = loop {
+    let result = loop {
         match fs.read(fd, data.len() as u32, &mut chunk) {
-            Ok(0) => break true,
+            Ok(0) => break Ok(()),
             Ok(n) => data.extend_from_slice(&chunk[..n]),
+            Err(e) if e.service_unavailable() => break Err(ReadError::Unavailable),
             Err(_) if errors < 3 => {
                 errors += 1;
                 sys::time::sleep_ms(200);
             }
-            Err(_) => break false,
+            Err(_) => break Err(ReadError::Incomplete),
         }
         if data.len() > 64 * 1024 {
-            break false;
+            break Err(ReadError::Incomplete);
         }
     };
     let _ = fs.close(fd);
-    complete.then_some(data)
+    result.map(|()| data)
 }
 
 /// The host key seed: read from AriFS, or created and saved on first start.
 fn host_key(fs: &mut FsClient, entropy: &mut Entropy) -> [u8; 32] {
-    if let Some(text) = read_file(fs, HOST_KEY_FILE) {
+    if let Ok(text) = read_file(fs, HOST_KEY_FILE) {
         let mut seed = [0u8; 32];
         if aricode_crypto::unhex(core::str::from_utf8(&text).unwrap_or("").trim(), &mut seed)
             .is_some()
@@ -354,9 +375,49 @@ fn ready() {
     );
 }
 
-/// Keys from `authorized_keys`; `None` if the file cannot be read.
-fn authorized(fs: &mut FsClient) -> Option<Vec<[u8; 32]>> {
-    read_file(fs, AUTHORIZED_KEYS).map(|t| parse_authorized_keys(&t))
+/// Keys from `authorized_keys`: none if the file does not exist (closed by
+/// default); an error if it could not be read.
+fn authorized(fs: &mut FsClient) -> Result<Vec<[u8; 32]>, ReadError> {
+    match read_file(fs, AUTHORIZED_KEYS) {
+        Ok(text) => Ok(parse_authorized_keys(&text)),
+        Err(ReadError::Absent) => Ok(Vec::new()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Rereads `authorized_keys` after a connection when `refresh` says it is
+/// due: a missing file empties the keys (connections are refused); a file
+/// service that does not answer keeps the last keys and is retried at most
+/// once a minute (incident 0001: each attempt would hold the next banner
+/// for the file client's whole wait), logged once when it starts failing
+/// and once when it answers again.
+fn reread_keys(fs: &mut FsClient, refresh: &mut KeyRefresh, keys: &mut Vec<[u8; 32]>) {
+    if !refresh.due(now_ms()) {
+        return;
+    }
+    let result = authorized(fs);
+    let answered = result != Err(ReadError::Unavailable);
+    match result {
+        Ok(k) => *keys = k,
+        Err(ReadError::Incomplete) => {
+            say(b"cannot reread authorized_keys; keeping the last keys read")
+        }
+        Err(_) => {}
+    }
+    let mut b = [0u8; 20];
+    match refresh.record(now_ms(), answered) {
+        Some(Change::Failing) => {
+            sys::print(b"sshd: file service not answering: keeping the last ");
+            sys::print(aricode_rt::fmt_u64(keys.len() as u64, &mut b));
+            sys::print(b" key(s); rereading authorized_keys at most once a minute\n");
+        }
+        Some(Change::Recovered) => {
+            sys::print(b"sshd: file service answers again: ");
+            sys::print(aricode_rt::fmt_u64(keys.len() as u64, &mut b));
+            sys::print(b" authorized key(s)\n");
+        }
+        None => {}
+    }
 }
 
 fn main(_arg: u64) -> u64 {
@@ -370,6 +431,7 @@ fn main(_arg: u64) -> u64 {
     };
     let mut entropy = Entropy::load(&mut fs);
     let mut keys = authorized(&mut fs).unwrap_or_default();
+    let mut refresh = KeyRefresh::new();
     let mut announced = false;
     if keys.is_empty() {
         say(b"no authorized_keys in AriFS: not listening (install a key with cargo xtask usb-image --authorized-key, or write authorized_keys ... from the console)");
@@ -421,11 +483,8 @@ fn main(_arg: u64) -> u64 {
         say(b"connection closed");
         // Reread between connections so a key added or removed from the
         // console counts, without delaying the next client's banner behind
-        // a slow disk; a read that fails keeps the last keys read.
-        match authorized(&mut fs) {
-            Some(k) => keys = k,
-            None => say(b"cannot reread authorized_keys; keeping the last keys read"),
-        }
+        // a file service that does not answer.
+        reread_keys(&mut fs, &mut refresh, &mut keys);
     }
 }
 

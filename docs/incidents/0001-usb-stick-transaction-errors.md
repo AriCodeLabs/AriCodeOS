@@ -547,3 +547,13 @@ until it has one, the scenario's timeout is 200 s. Open item.
   watches fsd while its test client runs and closes the endpoint once the
   restart budget is spent). Not run yet in QEMU on this branch: scenarios
   `ipc.peer_closed` (new) and `filesystem.corrupt_detected`.
+- **sshd and a failing file service** (observation of the strict run
+  above). sshd no longer rereads `authorized_keys` after every connection
+  while the file service does not answer: it keeps the last keys, retries
+  at most once a minute (`aricode_ssh::keys_refresh`, host tested) and
+  logs once when the service starts failing and once when it answers
+  again. A reread no longer retries a file service that does not answer
+  (each retry cost a whole reply wait). An `authorized_keys` that the
+  file service reports missing now empties the keys (connections are
+  refused) instead of keeping the old ones: only a service that does not
+  answer keeps them.
