@@ -106,6 +106,21 @@ runaway cap); `aricode_sys::http::get` now reports a netd timeout at the
 deadline as `Deadline(Resolve | Connect)` like `aricode-https`; the
 cumulative header-byte check refuses at `> MAX_HEADER_BYTES`, documented.
 
+## Second audit (2026-10-18, commit 76b88d3)
+
+Nothing serious. Confirmed: the silence counter's semantics (record bytes
+since the last byte of plaintext, reset by data, applied after the
+handshake only), the `Records` trait as a one-to-one delegation to
+`aricode_tls::Client`, and mutation runs (removing the budget checks makes
+the tests fail). Two small items, fixed in the final commit: the `>`
+boundary of `MAX_HEADER_BYTES` was not pinned (mutating it back to `>=`
+passed every test), so `cumulative_header_bytes_boundary` accepts exactly
+the limit and refuses one byte more, and the constant's comment states
+that the bound is soft by what the completing receive brings (at most
+`MAX_HEADERS` minus the final head already held, about 24 KiB in all);
+and `parser_alone_ends_a_stall_on_a_transport_that_never_times_out` says in
+its comment that it documents behaviour 0527af9 already had.
+
 ## Tests
 
 Host (`cargo test -p aricode-http`, simulated clock over the mock

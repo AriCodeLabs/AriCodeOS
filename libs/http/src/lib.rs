@@ -24,7 +24,10 @@ pub const MAX_INFORMATIONAL: u32 = 8;
 /// final response alone may use [`MAX_HEADERS`] (incident 0009). The
 /// fetch is refused when more than this has arrived and the final
 /// response is still incomplete, so one that completes within the next
-/// receive is accepted.
+/// receive is accepted: the bound is soft by what that receive can bring,
+/// at most `MAX_HEADERS` minus the bytes of the final response already
+/// held (about 24 KiB in all); the hard bound on work is `MAX_HEADERS` per
+/// response and `MAX_INFORMATIONAL` responses.
 pub const MAX_HEADER_BYTES: usize = 2 * MAX_HEADERS;
 /// Maximum length of a chunk size line (with extensions).
 const MAX_CHUNK_LINE: usize = 256;
@@ -1151,7 +1154,10 @@ mod tests {
     /// The parser alone ends a stall: with a transport that never times out
     /// (fixed per-operation timeout, data always queued: the pre-fix
     /// situation), the budget check before each receive stops a header
-    /// dribble at the deadline after a bounded number of receives.
+    /// dribble at the deadline after a bounded number of receives. The
+    /// first fix commit (0527af9) already behaved so; its other tests used a
+    /// transport that times out at the deadline itself and therefore proved
+    /// the error mapping rather than this. Added by the audit of that commit.
     #[test]
     fn parser_alone_ends_a_stall_on_a_transport_that_never_times_out() {
         let clock = Clock::new(10_000);
@@ -1310,6 +1316,44 @@ mod tests {
         );
         parts.insert(0, EARLY_HINTS);
         assert_eq!(get(&parts, 8), Err(Error::TooManyInformational));
+    }
+
+    /// An interim response of exactly `len` bytes.
+    fn interim_of(len: usize) -> Vec<u8> {
+        let (head, tail) = (b"HTTP/1.1 103 Early Hints\r\nLink: ", b"\r\n\r\n");
+        let mut r = head.to_vec();
+        r.extend(vec![b'l'; len - head.len() - tail.len()]);
+        r.extend(tail);
+        assert_eq!(r.len(), len);
+        r
+    }
+
+    /// The boundary of the cumulative limit, pinned: with exactly
+    /// `MAX_HEADER_BYTES` accumulated (two interim responses and the
+    /// incomplete head of the final one) the fetch goes on and the final
+    /// response, completed by the next receive, is accepted; one byte more
+    /// is refused before that receive.
+    #[test]
+    fn cumulative_header_bytes_boundary() {
+        let interim = interim_of(7_692);
+        let discarded = 2 * interim.len();
+        let completion: &[u8] = b"\r\nContent-Length: 2\r\n\r\nok";
+        let partial_head = |len: usize| {
+            let mut h = b"HTTP/1.1 200 OK\r\nX-Pad: ".to_vec();
+            h.extend(vec![b'p'; len - h.len()]);
+            h
+        };
+        // Exactly the limit when the check runs: accepted.
+        let exact = partial_head(MAX_HEADER_BYTES - discarded);
+        assert_eq!(discarded + exact.len(), MAX_HEADER_BYTES);
+        let (f, out) = body(&[&interim, &interim, &exact, completion], 8);
+        assert_eq!((f.status, out.as_slice()), (200, &b"ok"[..]));
+        // One byte more: refused.
+        let over = partial_head(MAX_HEADER_BYTES - discarded + 1);
+        assert_eq!(
+            get(&[&interim, &interim, &over, completion], 8),
+            Err(Error::HeaderBytes)
+        );
     }
 
     #[test]

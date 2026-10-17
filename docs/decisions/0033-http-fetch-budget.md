@@ -62,7 +62,8 @@ happens before any signature check.
   can forget the budget: there is no default.
 - Host tests (`aricode-http`): the audit's probe (700 × `103`), slow
   interim responses, a header dribble, endless chunk trailers, a transport
-  timeout at the deadline, both limits at their edges, a normal fetch
+  timeout at the deadline, both limits at their edges (the header-byte
+  boundary pinned at exactly the limit and one byte more), a normal fetch
   under budget, and the parser alone ending a stall on a transport that
   never times out. `aricode-https` (the TCP and TLS layers of the stream
   are behind private `Tcp` and `Records` traits so it runs on the host):
