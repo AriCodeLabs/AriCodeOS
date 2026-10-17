@@ -97,6 +97,18 @@ docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.1
 docker run --rm -it aricodeos
 ```
 
+## Clave de firma de las versiones
+
+Las imágenes y actualizaciones publicadas se firman con la clave de
+versiones del proyecto, cuya mitad pública está en [keys/release/](keys/release/):
+
+```text
+1d3e24f3c7c753a5bcb384041ace6481736decd86345eab71e2a6ff410ad446e
+```
+
+La clave de desarrollo de `keys/dev/` es solo para pruebas y QEMU: su
+semilla es pública. Véase `docs/hardware.md`, "Signing key".
+
 ## Uso
 
 ```bash

@@ -316,3 +316,6 @@ repository (`cargo xtask keygen /secure/dir`), write the stick with
 same `--signing-key` (ADR 0029, "The signing key"). A laptop installed with
 the development key does not accept the production key until it is
 reinstalled from such a stick.
+The project's release key (public half in `keys/release/`, fingerprint in
+its README) signs everything published since 2026-10-17; the laptop was
+reinstalled from a stick built with it the same day.
