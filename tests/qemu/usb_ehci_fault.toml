@@ -1,0 +1,42 @@
+# ADR 0028/0029: without `strict`, an injected transaction error on the CBW
+# of the first block request after the boot settles (two idle seconds) is
+# printed and recorded; a CBW failure needs a Reset Recovery (BOT 5.3.4),
+# which the EHCI driver runs at once against the real device (class reset,
+# both bulk halts cleared). The request answers Io without a retry (the
+# shell's first write fails) and the next write succeeds.
+name = "usb.ehci_fault"
+description = "EHCI driver: an injected CBW transaction error answers Io, a real Reset Recovery follows, fault in diag"
+level = "full"
+areas = ["usb", "storage", "diag"]
+usb_ehci_storage = true
+cmdline = "qemu_exit shell usb_fault=idle"
+timeout_secs = 120
+stdin = [
+    "repeat 10 ping 10.0.2.2",
+    "write probe.txt after idle",
+    "repeat 3 ping 10.0.2.2",
+    "write probe.txt second try",
+    "diag",
+    "shutdown",
+]
+
+[expect]
+exit = 33
+serial_contains = [
+    "usb-ehci: injected fault: transaction error reported on the CBW",
+    "usb-ehci: CBW stage of tag ",
+    "usb-ehci: bulk out transfer to address 1 endpoint ",
+    "failed: transaction error",
+    "usb-ehci: Reset Recovery (BOT 5.3.4): mass storage reset, both bulk halts cleared",
+    "usb-ehci: Reset Recovery done; transport ready",
+    "usb-ehci: WRITE(10) lba ",
+    "transport failure",
+    "write: write error",
+    "write: 11 bytes to probe.txt",
+    "fault reported by process",
+    "usb inj w lba",
+    "ehci reset recovery",
+    "(code 4)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "strict", "storage unusable", "queue head lost"]

@@ -1,0 +1,47 @@
+# ADR 0029: the test disk is a USB stick on QEMU's EHCI and there is no
+# virtio-blk. usb_ehci enumerates it as bulk-only mass storage (async
+# schedule), serves it with the block protocol once its boot enumeration is
+# done, init mounts fsd on top and the shell writes a file that survives a
+# reboot.
+name = "usb.ehci_storage"
+description = "EHCI driver: USB stick as block service, fsd and shell on top, durable write"
+level = "full"
+areas = ["usb", "storage", "filesystem", "init", "shell"]
+usb_ehci_storage = true
+timeout_secs = 120
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["ls", "write notas.txt hola ehci", "cat notas.txt", "reboot"]
+[boots.expect]
+exit = 0
+serial_contains = [
+    "AriInit: no virtio-blk",
+    "usb-ehci: EHCI ready (",
+    "usb-ehci: port 1: device 46f4:0001 class 0 bcdUSB ",
+    "speed high address 1",
+    "usb-ehci: port 1: USB storage QEMU QEMU HARDDISK, ",
+    "usb-ehci: device ready: EHCI HID (no devices)",
+    "AriInit: usb_ehci input ready",
+    "AriInit: block service via USB (",
+    "AriInit: file service ok",
+    "AriInit: block service ok",
+    "arish: AriCodeOS shell",
+    "hola.txt",
+    "write: 10 bytes to notas.txt",
+    "hola ehci",
+    "AriCodeOS: rebooting",
+]
+serial_absent = ["KERNEL PANIC", "write: error", "EHCI initialization failed", "transfer to address", "Reset Recovery"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["cat notas.txt", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "AriInit: block service via USB (",
+    "hola ehci",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "transfer to address"]

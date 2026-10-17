@@ -23,6 +23,11 @@ pub struct UsbOptions {
     /// The test disk hangs off the xHCI as USB storage (`usb-storage`)
     /// instead of virtio-blk (ADR 0023).
     pub storage: bool,
+    /// An EHCI with a USB keyboard and mouse (high speed) for the EHCI
+    /// driver (ADR 0029).
+    pub ehci_hid: bool,
+    /// The test disk hangs off an EHCI as USB storage instead of virtio-blk.
+    pub ehci_storage: bool,
 }
 
 fn base_command(
@@ -50,7 +55,8 @@ fn base_command(
     // `iommu_platform=on` so their DMA goes through translation.
     q.args(["-device", "intel-iommu,aw-bits=48"]);
     // Test disk: modern virtio-blk (no legacy interface) for the user-space
-    // driver or, with `usb.storage`, a USB stick on the xHCI.
+    // driver or, with `usb.storage` / `usb.ehci_storage`, a USB stick on the
+    // xHCI / the EHCI.
     q.args([
         "-drive",
         &format!(
@@ -59,7 +65,7 @@ fn base_command(
             if disk_readonly { ",readonly=on" } else { "" }
         ),
     ]);
-    if !usb.storage {
+    if !usb.storage && !usb.ehci_storage {
         q.args([
             "-device",
             "virtio-blk-pci,drive=disk0,disable-legacy=on,disable-modern=off,iommu_platform=on",
@@ -121,9 +127,17 @@ fn base_command(
             q.args(["-device", "usb-storage,bus=xhci.0,drive=disk0"]);
         }
     }
-    if usb.legacy_controller {
-        // EHCI (class 0c.03, interface 0x20): not xHCI.
+    if usb.legacy_controller || usb.ehci_hid || usb.ehci_storage {
+        // EHCI (class 0c.03, interface 0x20, ADR 0029); QEMU's is ICH4-like,
+        // with no companion controllers and no MSI.
         q.args(["-device", "usb-ehci,id=ehci"]);
+        if usb.ehci_hid {
+            q.args(["-device", "usb-kbd,bus=ehci.0"]);
+            q.args(["-device", "usb-mouse,bus=ehci.0"]);
+        }
+        if usb.ehci_storage {
+            q.args(["-device", "usb-storage,bus=ehci.0,drive=disk0"]);
+        }
     }
     q.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     q

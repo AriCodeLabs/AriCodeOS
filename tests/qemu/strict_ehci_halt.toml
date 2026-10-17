@@ -1,0 +1,33 @@
+# Failure protocol (ADR 0028) in the EHCI driver (ADR 0029): with `strict`,
+# the first transfer failure (here a transaction error injected on the CBW
+# of the first block request after two idle seconds) is recorded and halts
+# usb_ehci with a dump of the controller before any recovery; init does not
+# restart it. The system stays up: the shell works and `diag` lists the
+# fault.
+name = "strict.ehci_halt"
+description = "strict: an injected EHCI transfer failure halts usb_ehci with a dump, no recovery, no restart, fault in diag"
+level = "full"
+areas = ["usb", "storage", "init", "diag"]
+usb_ehci_storage = true
+cmdline = "qemu_exit shell strict usb_fault=idle"
+# The shell's write waits for fsd, which waits for the halted driver's
+# block reply, before `diag` and `shutdown` run.
+timeout_secs = 300
+stdin = ["repeat 10 ping 10.0.2.2", "write probe.txt after idle", "diag", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: strict mode: a failing service is not restarted",
+    "usb-ehci: strict mode: the first transfer failure halts the driver",
+    "usb-ehci: injected fault: transaction error reported on the CBW",
+    "usb-ehci: strict: halting on a transfer failure (WRITE(10))",
+    "  USBCMD ",
+    "  port 1 PORTSC ",
+    "AriInit: service usb_ehci exited; strict mode: not restarted (inspect with diag)",
+    "fault reported by process",
+    "usb inj w lba",
+    "(code 4)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "restart in", "Reset Recovery"]

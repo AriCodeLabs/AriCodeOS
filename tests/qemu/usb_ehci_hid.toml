@@ -1,0 +1,46 @@
+# ADR 0029: a USB keyboard and mouse on QEMU's EHCI (high speed, no
+# companion controllers, no MSI). init launches usb_ehci for the EHCI; the
+# driver enumerates both devices on its root ports, polls their interrupt
+# endpoints through the periodic schedule and serves them as one input
+# device. The host injects "hola" + Enter, a move and a click over QMP (the
+# USB devices are the most recent handlers) and input_client reads them.
+name = "usb.ehci_hid"
+description = "EHCI driver: USB HID keyboard and mouse (boot protocol) through the periodic schedule, events injected via QMP"
+level = "full"
+areas = ["usb", "input", "init", "drivers"]
+cmdline = "qemu_exit"
+usb_ehci_hid = true
+timeout_secs = 90
+
+[host_input]
+marker = "INPUT_READY"
+keys = ["h", "o", "l", "a", "ret"]
+mouse_rel = [10, -5]
+click = "left"
+
+[expect]
+exit = 33
+serial_contains = [
+    "usb-ehci: EHCI ready (",
+    "speed high address 1",
+    "usb-ehci: port 1: HID keyboard (boot protocol, 8 bytes per report",
+    "usb-ehci: port 2: HID mouse (boot protocol,",
+    "usb-ehci: device ready: EHCI HID Keyboard+Mouse",
+    "AriInit: usb_ehci input ready",
+    "input_client: device 2: EHCI HID Keyboard+Mouse",
+    "usb-ehci: first report from address ",
+    "input_client: keyboard: hola",
+    "input_client: mouse: left button pressed",
+    "input_client: mouse: dx=10 dy=-5",
+    "input_client: input events over IPC ok",
+    "AriInit: input service ok",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "USER FAULT",
+    "nobody typed",
+    "initialization failed",
+    "transfer to address",
+    "has no driver",
+]
