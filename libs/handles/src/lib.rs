@@ -182,11 +182,16 @@ impl<T> HandleTable<T> {
     }
 
     /// New handle to the same object with `rights`, which must be a subset of
-    /// the source's; the source needs `DUPLICATE`.
-    pub fn duplicate(&mut self, handle: Handle, rights: Rights) -> Result<Handle, HandleError>
-    where
-        T: Clone,
-    {
+    /// the source's; the source needs `DUPLICATE`. `make` builds the entry of
+    /// the new handle from the source's entry and the new rights (the kernel
+    /// accounts endpoint sides per capability, ADR 0030); it only runs once
+    /// the rights are checked.
+    pub fn duplicate(
+        &mut self,
+        handle: Handle,
+        rights: Rights,
+        make: impl FnOnce(&T, Rights) -> T,
+    ) -> Result<Handle, HandleError> {
         let (object, have) = self.get(handle)?;
         if !have.contains(Rights::DUPLICATE) {
             return Err(HandleError::Denied);
@@ -194,7 +199,7 @@ impl<T> HandleTable<T> {
         if !rights.is_valid() || !have.contains(rights) {
             return Err(HandleError::Escalation);
         }
-        let object = object.clone();
+        let object = make(object, rights);
         self.insert(object, rights)
     }
 }
@@ -247,20 +252,40 @@ mod tests {
                 Rights::READ.union(Rights::WRITE).union(Rights::DUPLICATE),
             )
             .unwrap();
-        let ro = t.duplicate(h, Rights::READ).unwrap();
+        let copy = |o: &u32, _: Rights| *o;
+        let ro = t.duplicate(h, Rights::READ, copy).unwrap();
         assert_eq!(t.get(ro).unwrap().1, Rights::READ);
-        assert_eq!(t.duplicate(h, Rights::MANAGE), Err(HandleError::Escalation));
         assert_eq!(
-            t.duplicate(ro, Rights::READ),
+            t.duplicate(h, Rights::MANAGE, copy),
+            Err(HandleError::Escalation)
+        );
+        assert_eq!(
+            t.duplicate(ro, Rights::READ, copy),
             Err(HandleError::Denied),
             "without DUPLICATE"
         );
         assert_eq!(
-            t.duplicate(h, Rights(0x8000_0000)),
+            t.duplicate(h, Rights(0x8000_0000), copy),
             Err(HandleError::Escalation),
             "invalid bits"
         );
         assert_eq!(t.insert(2, Rights(0x100)), Err(HandleError::Escalation));
+    }
+
+    #[test]
+    fn duplicate_builds_the_entry_from_the_new_rights() {
+        let mut t: HandleTable<(u32, Rights)> = HandleTable::new(8);
+        let all = Rights::READ.union(Rights::WRITE).union(Rights::DUPLICATE);
+        let h = t.insert((5, all), all).unwrap();
+        let w = t.duplicate(h, Rights::WRITE, |o, r| (o.0, r)).unwrap();
+        assert_eq!(t.get(w).unwrap(), (&(5, Rights::WRITE), Rights::WRITE));
+        let mut called = false;
+        let denied = t.duplicate(h, Rights::MANAGE, |o, r| {
+            called = true;
+            (o.0, r)
+        });
+        assert_eq!(denied, Err(HandleError::Escalation));
+        assert!(!called, "no entry is built for a refused duplicate");
     }
 
     #[test]

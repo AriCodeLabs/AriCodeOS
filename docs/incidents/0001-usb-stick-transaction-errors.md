@@ -667,3 +667,31 @@ Open after this change:
   "console bridge with 1 input device(s)". QEMU's xHCI also sets a stopped
   interrupt endpoint Running again from its kick timer (against 4.6.9),
   so the HID recovery there reads Stopped or Running by timing.
+
+## Follow-ups landed (2026-10-17, branch `fix/robustness-incidents`)
+
+- **Peer gone on IPC** ([ADR 0030](../decisions/0030-ipc-peer-closed.md)).
+  The kernel counts the `READ` and `WRITE` capabilities of every endpoint
+  and releases a process's handles when it is reaped. A client whose
+  request the server died holding, or whose request sat in the queue of
+  an endpoint that lost its last receiver, gets `Error::PeerClosed` at
+  once; so does a send to such an endpoint. init keeps the receive side of
+  supervised endpoints for the next generation, so it closes them
+  (`endpoint_close`) when it gives a service up: in `strict` mode a dead
+  `usb_input` now closes its block endpoint at once and fsd's block
+  requests fail immediately instead of after 90 s. The waits of the chain
+  above are unchanged: they only apply now to a server that is alive and
+  slow. `filesystem.corrupt_detected` is back to a 60 s timeout (init
+  watches fsd while its test client runs and closes the endpoint once the
+  restart budget is spent). Not run yet in QEMU on this branch: scenarios
+  `ipc.peer_closed` (new) and `filesystem.corrupt_detected`.
+- **sshd and a failing file service** (observation of the strict run
+  above). sshd no longer rereads `authorized_keys` after every connection
+  while the file service does not answer: it keeps the last keys, retries
+  at most once a minute (`aricode_ssh::keys_refresh`, host tested) and
+  logs once when the service starts failing and once when it answers
+  again. A reread no longer retries a file service that does not answer
+  (each retry cost a whole reply wait). An `authorized_keys` that the
+  file service reports missing now empties the keys (connections are
+  refused) instead of keeping the old ones: only a service that does not
+  answer keeps them.

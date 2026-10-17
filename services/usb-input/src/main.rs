@@ -4146,9 +4146,15 @@ fn main(mask: u64) -> u64 {
         ctl.maintain_hid();
         let now = ctl.clock.now();
         for _ in 0..8 {
-            let Ok((which, n, nh)) = sys::ipc_receive_any(endpoints, &mut msg, &mut handles, 0)
-            else {
-                break;
+            let (which, n, nh) = match sys::ipc_receive_any(endpoints, &mut msg, &mut handles, 0) {
+                Ok(r) => r,
+                // Both endpoints closed, or one revoked (ADR 0030): nothing
+                // will arrive again.
+                Err(e) if e.endpoint_gone() => {
+                    say(b"service endpoints closed; exiting");
+                    sys::process_exit(9);
+                }
+                Err(_) => break,
             };
             if nh == 0 {
                 continue;

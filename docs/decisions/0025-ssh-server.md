@@ -29,7 +29,19 @@ would open an unauthenticated shell on the user's network.
    one connection at a time. The host key seed lives in AriFS
    (`ssh_host_ed25519_key`, created from the kernel RNG on first start; its
    fingerprint is logged); logins are checked against `authorized_keys`
-   (OpenSSH format), reread on every connection.
+   (OpenSSH format), reread on every connection. Since 2026-10-17
+   (incident 0001 follow-up): while the file service does not answer, the
+   last keys stay in use and the reread is tried at most once a minute,
+   logged once; a file the service reports missing empties the keys.
+   Consequence: a key removed from `authorized_keys` during a file service
+   outage stays valid until the service answers again. With no keys left,
+   a new connection rereads the file before being refused, so a key
+   installed later counts at once. A host key file that cannot be read is
+   never overwritten: that boot uses a key of its own. Session endpoints
+   are pairs (ADR 0030): sshd holds only the send side of the input and
+   the receive side of the output, so a session shell that crashes ends
+   the SSH session with exit status 139 (`ssh.shell_fault`) instead of
+   leaving it open until the client disconnects.
 4. **Session shells launched by init** (`aricode-proto::session`): sshd has
    no SPAWNER. For `shell`/`exec` it sends init a request with two fresh
    endpoints; init launches `arish` in session mode (`SHELL_SESSION`, and

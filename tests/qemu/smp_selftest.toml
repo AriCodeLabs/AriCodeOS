@@ -14,6 +14,7 @@ serial_contains = [
     "smp: 4 CPUs online",
     "smp selftest ok (4 CPUs:",
     "shootdown seen by CPU 1 (3 IPI)",
+    "every CPU reached in",
     "counter 80000)",
     "ARICODEOS_KERNEL_READY",
 ]

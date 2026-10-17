@@ -67,6 +67,25 @@ fn session() -> bool {
     MODE.load(core::sync::atomic::Ordering::Relaxed) != 0
 }
 
+/// `fault` is accepted only when the boot command line asks for it
+/// (`shell_fault`, tests only; ADR 0007).
+fn fault_enabled() -> bool {
+    let mut buf = [0u8; 256];
+    sys::cmdline(SYSTEM, &mut buf)
+        .is_some_and(|c| aricode_cmdline::CmdLine::new(c).has(aricode_cmdline::keys::SHELL_FAULT))
+}
+
+/// Deliberate crash (`fault`, tests only): the shell dies by a page fault
+/// without ending its session, as a shell with a bug would.
+fn fault() -> ! {
+    print(b"arish: crashing on purpose (shell_fault)\n");
+    // SAFETY: deliberate fault; page 0 is never mapped and the address is
+    // hidden from the compiler so that it emits the read.
+    let bad = core::hint::black_box(0x40u64) as *const u64;
+    let v = unsafe { bad.read_volatile() };
+    sys::process_exit(v)
+}
+
 fn quiet() -> bool {
     MODE.load(core::sync::atomic::Ordering::Relaxed) == MODE_QUIET
 }
@@ -1375,6 +1394,7 @@ fn execute(
             aricode_rt::print_error(b"shutdown", sys::system_power(SYSTEM, abi::power::SHUTDOWN));
         }
         b"exit" => return true,
+        b"fault" if fault_enabled() => fault(),
         other => {
             print(b"unknown command: ");
             print(other);

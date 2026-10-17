@@ -16,6 +16,21 @@ pub enum InputError {
     Status(Status),
 }
 
+impl InputError {
+    /// The input service endpoint has nobody to receive any more
+    /// (`Error::ServiceGone`, ADR 0030): the device is gone for good.
+    pub fn service_gone(&self) -> bool {
+        *self == InputError::Ipc(Error::ServiceGone)
+    }
+
+    /// The driver dropped this request (it died, `Error::ReplyLost`): its
+    /// supervisor relaunches it on the same endpoint, so read again after a
+    /// short pause.
+    pub fn reply_lost(&self) -> bool {
+        *self == InputError::Ipc(Error::ReplyLost)
+    }
+}
+
 impl InputClient {
     pub fn new(service: Handle) -> Result<Self, Error> {
         Ok(Self { service })

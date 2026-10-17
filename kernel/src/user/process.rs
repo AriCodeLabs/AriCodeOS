@@ -5,6 +5,7 @@
 
 use crate::arch::x86_64::usermode;
 use crate::memory::{phys, pmm, vmm};
+use crate::object::Cap;
 use crate::sync::IrqLock;
 use crate::task::scheduler;
 use alloc::collections::BTreeMap;
@@ -116,7 +117,7 @@ pub fn spawn(name: &str, elf_bytes: &[u8]) -> Result<Pid, &'static str> {
     spawn_with_handles(name, elf_bytes, Vec::new())
 }
 
-/// Extra capabilities and the `_start` argument.
+/// Extra capabilities (objects the kernel grants) and the `_start` argument.
 pub fn spawn_with_handles_and_arg(
     name: &str,
     elf_bytes: &[u8],
@@ -124,7 +125,29 @@ pub fn spawn_with_handles_and_arg(
     arg: u64,
     dma_quota: u64,
 ) -> Result<Pid, &'static str> {
+    spawn_with_caps(name, elf_bytes, grants(extra), arg, dma_quota)
+}
+
+/// Like `spawn_with_handles_and_arg` with capabilities that already exist
+/// (taken from the parent's table): they move into the child as they are.
+pub fn spawn_with_caps(
+    name: &str,
+    elf_bytes: &[u8],
+    extra: Vec<(Cap, aricode_handles::Rights)>,
+    arg: u64,
+    dma_quota: u64,
+) -> Result<Pid, &'static str> {
     spawn_full(name, elf_bytes, extra, arg, dma_quota)
+}
+
+/// Capabilities for objects the kernel grants to a new process.
+fn grants(
+    extra: Vec<(crate::object::ObjectRef, aricode_handles::Rights)>,
+) -> Vec<(Cap, aricode_handles::Rights)> {
+    extra
+        .into_iter()
+        .map(|(obj, rights)| (Cap::new(obj, rights), rights))
+        .collect()
 }
 
 /// Base of user MMIO/DMA mappings.
@@ -137,13 +160,13 @@ pub fn spawn_with_handles(
     elf_bytes: &[u8],
     extra: Vec<(crate::object::ObjectRef, aricode_handles::Rights)>,
 ) -> Result<Pid, &'static str> {
-    spawn_full(name, elf_bytes, extra, 0, 0)
+    spawn_full(name, elf_bytes, grants(extra), 0, 0)
 }
 
 fn spawn_full(
     name: &str,
     elf_bytes: &[u8],
-    extra: Vec<(crate::object::ObjectRef, aricode_handles::Rights)>,
+    extra: Vec<(Cap, aricode_handles::Rights)>,
     arg: u64,
     dma_quota: u64,
 ) -> Result<Pid, &'static str> {
@@ -403,13 +426,55 @@ pub fn release_address_space(pid: u32) {
         log::debug!("user: address space of process {pid} freed ({n} frames)");
     }
     crate::iommu::release(pid);
-    // Fully reaped: now it can be removed from the table.
+    // The capabilities go now (not when a parent gets around to `wait`), so
+    // the endpoints this process served or was to answer on close at once
+    // (ADR 0030). They are dropped with no lock held and their endpoints
+    // settled before the process counts as reaped: whoever `wait`s for it
+    // finds its capabilities already released (audit robustness-1, M2).
+    let handles = PROCESSES
+        .lock()
+        .get_mut(&Pid(pid))
+        .map(|p| core::mem::replace(&mut p.handles, aricode_handles::HandleTable::new(0)));
+    if let Some(handles) = handles {
+        release_capabilities(pid, handles);
+    }
     let waiters = PROCESSES.lock().get_mut(&Pid(pid)).map(|p| {
         p.reaped = true;
         p.exit_wait.clone()
     });
     if let Some(w) = waiters {
         w.wake_all();
+    }
+}
+
+/// Drops a finished process's capabilities and settles the endpoints they
+/// close. Runs in `reap()`, with interrupts disabled like the address
+/// space release before it (audit robustness-1, M3). Bounded: at most
+/// `HANDLE_LIMIT` (256) capabilities, each O(1) except a DMA buffer (its
+/// frames back to the PMM) and an endpoint that closes (its queue: at most
+/// `IPC_QUEUE_CAPACITY` messages of `IPC_MAX_HANDLES` capabilities, which
+/// may close further endpoints in turn). Measured, and reported when it
+/// exceeds `SLOW_RELEASE_US`, so a slow case shows up in the log and in
+/// `diag` instead of as silent interrupt latency.
+fn release_capabilities(pid: u32, handles: crate::object::Handles) {
+    const SLOW_RELEASE_US: u64 = 1_000;
+    let count = handles.len();
+    let t0 = crate::time::uptime_us();
+    drop(handles);
+    crate::ipc::settle_closed();
+    let took = crate::time::uptime_us().saturating_sub(t0);
+    if took > SLOW_RELEASE_US {
+        warn!(
+            "user: releasing {count} capabilities of process {pid} took {took} us with interrupts off"
+        );
+        crate::events::record(
+            aricode_abi::sysinfo::EventKind::Fault,
+            pid,
+            took,
+            "slow capability release",
+        );
+    } else {
+        log::debug!("user: {count} capabilities of process {pid} released in {took} us");
     }
 }
 

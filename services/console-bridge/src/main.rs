@@ -20,6 +20,9 @@ const MAX_INPUTS: usize = 4;
 /// a single waiting reader), so the worst-case latency of a key press is
 /// this timeout times the number of remaining devices.
 const POLL_MS: u32 = 20;
+/// Pause before reading again from a driver that died holding the read
+/// (ADR 0030): its supervisor relaunches it on the same endpoint.
+const RETRY_MS: u64 = 50;
 
 fn say(msg: &[u8]) {
     sys::print(b"console-bridge: ");
@@ -51,12 +54,41 @@ fn main(count: u64) -> u64 {
     let mut text = [0u8; MAX_EVENTS * 4];
     // No announcement of its own: init does it before launching the shell,
     // so nothing interleaves with the first prompt on the console (SMP).
+    let mut parked = false;
     loop {
-        for (i, client) in clients.iter().take(count).enumerate() {
-            let Some(client) = client else { continue };
-            // No events (timeout), service busy or dead (the supervisor
-            // restarts it and the endpoint stays valid): nothing to translate.
-            let n = client.read(POLL_MS, &mut events, &mut times).unwrap_or(0);
+        if clients.iter().all(Option::is_none) {
+            // Every device was given up by the supervisor. Exiting would only
+            // make init relaunch the bridge to find the same: park quietly.
+            if !parked {
+                say(b"every input device is gone; idle");
+                parked = true;
+            }
+            sys::thread_sleep(60_000);
+            continue;
+        }
+        for (i, slot) in clients.iter_mut().take(count).enumerate() {
+            let Some(client) = slot else { continue };
+            // No events (timeout) or service busy: nothing to translate.
+            // The driver died holding the read (`ReplyLost`): its supervisor
+            // relaunches it on the same endpoint, so read again after a
+            // pause. Only an endpoint nobody can receive on (`ServiceGone`,
+            // the device given up, ADR 0030) drops the device.
+            let n = match client.read(POLL_MS, &mut events, &mut times) {
+                Ok(n) => n,
+                Err(e) if e.service_gone() => {
+                    sys::print(b"console-bridge: input device ");
+                    let mut b = [0u8; 20];
+                    sys::print(aricode_rt::fmt_u64(i as u64, &mut b));
+                    sys::print(b" is gone; dropping it\n");
+                    *slot = None;
+                    continue;
+                }
+                Err(e) if e.reply_lost() => {
+                    sys::thread_sleep(RETRY_MS);
+                    0
+                }
+                Err(_) => 0,
+            };
             let mut len = 0;
             for e in &events[..n] {
                 let ev = aricode_input::Event {

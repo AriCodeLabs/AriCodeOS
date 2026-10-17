@@ -1,0 +1,24 @@
+# Re-audit of robustness audit 1, N1 (ADR 0030): a driver that crashes while
+# a client has a read pending must not make the client drop the device. The
+# client gets ReplyLost (retry), not ServiceGone (given up); init relaunches
+# the driver on the same endpoint and the device delivers events again. This
+# is the case of console-bridge and a crashed keyboard driver on the laptop.
+name = "services.input_restart"
+description = "supervisor: input driver crashes holding a read; the client gets ReplyLost and the restarted device still delivers events"
+level = "full"
+areas = ["services", "init", "input", "ipc"]
+cmdline = "qemu_exit input_restart"
+timeout_secs = 90
+
+[expect]
+exit = 33
+serial_contains = [
+    "restart_input: crashing with a read pending",
+    "restart_input_client: driver died holding the read: ReplyLost",
+    "AriInit: service restart_input died from a fault; restart in",
+    "AriInit: service restart_input restarted (generation 2)",
+    "restart_input_client: the device delivers events after the driver restart",
+    "AriInit: input restart ok: the device survived its driver's crash",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "a crash must not read as ServiceGone", "device given up instead of restarted", "endpoints of restart_input closed"]

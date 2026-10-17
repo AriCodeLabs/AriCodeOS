@@ -88,30 +88,34 @@ fn find_pci_class_from(class: u8, subclass: u8, start: u64) -> Option<u64> {
 /// serving must not leave clients waiting. Returns `false` if the process
 /// ended or did not answer within a few seconds.
 fn probe_ready(service: Handle, driver: Handle, request: &[u8], accept: fn(&[u8]) -> bool) -> bool {
-    let Ok(reply) = sys::endpoint_create() else {
-        return false;
-    };
-    let mut ok = false;
     for _ in 0..12 {
         match sys::process_wait(driver, 0) {
             Err(Error::Timeout) => {}
-            _ => break, // exited (with a code or by a fault): it will not serve
+            _ => return false, // exited (with a code or by a fault): it will not serve
         }
-        let Ok(reply_w) = sys::handle_duplicate(reply, rights::WRITE | rights::TRANSFER) else {
-            break;
-        };
-        if sys::ipc_send(service, request, &[reply_w], 250).is_err() {
-            continue;
-        }
-        let mut msg = [0u8; 256];
-        let mut none: [Handle; 0] = [];
-        if let Ok((n, _)) = sys::ipc_receive(reply, &mut msg, &mut none, 250) {
-            ok = accept(&msg[..n]);
-            break;
+        if let Some(reply) = ask(service, request, 250, &mut [0u8; 256]) {
+            return accept(reply);
         }
     }
+    false
+}
+
+/// One request on a fresh reply pair (ADR 0030): init keeps only the
+/// receive side, so a service that dies holding the request answers
+/// `PeerClosed` at once instead of letting the wait expire. Returns the
+/// reply bytes, or `None` on any failure.
+fn ask<'a>(service: Handle, request: &[u8], wait_ms: u64, out: &'a mut [u8]) -> Option<&'a [u8]> {
+    let (reply, reply_w) = sys::endpoint_create_pair().ok()?;
+    let mut none: [Handle; 0] = [];
+    let got = match sys::ipc_send(service, request, &[reply_w], wait_ms) {
+        Ok(()) => sys::ipc_receive(reply, out, &mut none, wait_ms).ok(),
+        Err(_) => {
+            let _ = sys::handle_close(reply_w);
+            None
+        }
+    };
     let _ = sys::handle_close(reply);
-    ok
+    got.map(|(n, _)| &out[..n])
 }
 
 fn input_service_ready(service: Handle, driver: Handle) -> bool {
@@ -131,21 +135,7 @@ fn ping_service_ready(service: Handle, driver: Handle) -> bool {
 
 /// One short request to the test service ("ping" or "die") expecting "pong".
 fn ping_once(service: Handle, request: &[u8]) -> bool {
-    let Ok(reply) = sys::endpoint_create() else {
-        return false;
-    };
-    let mut ok = false;
-    if let Ok(reply_w) = sys::handle_duplicate(reply, rights::WRITE | rights::TRANSFER) {
-        if sys::ipc_send(service, request, &[reply_w], 500).is_ok() {
-            let mut msg = [0u8; 16];
-            let mut none: [Handle; 0] = [];
-            if let Ok((n, _)) = sys::ipc_receive(reply, &mut msg, &mut none, 500) {
-                ok = &msg[..n] == b"pong";
-            }
-        }
-    }
-    let _ = sys::handle_close(reply);
-    ok
+    ask(service, request, 500, &mut [0u8; 16]) == Some(b"pong".as_slice())
 }
 
 /// `bb:dd.f` of a `pci_info` value.
@@ -345,7 +335,10 @@ fn start_storage_stack(sup: &mut Supervisor, service: Handle) -> Result<Handle, 
         say(b"fsd did not start");
         return Err(13);
     }
-    match run_block_client("fs_client", fs_ep, 0) {
+    // fsd is watched while its test client runs: if it dies for good (a
+    // corrupt AriFS), the supervisor closes its endpoint and the client
+    // fails at once instead of waiting its full reply timeout.
+    match run_block_client_supervised("fs_client", fs_ep, 0, sup) {
         Ok(0) => say(b"file service ok"),
         Ok(code) => {
             sys::print(b"AriInit: fs_client exited with ");
@@ -489,6 +482,33 @@ struct Resident {
     endpoint: Handle,
     process: Option<Handle>,
     sup: Service,
+}
+
+impl Resident {
+    /// The service will not be relaunched: closes the endpoints it served
+    /// (ADR 0030). init keeps their receive side for the next generation,
+    /// so without this the kernel cannot tell that nobody will serve them
+    /// and every client would wait its full reply timeout; closed, queued
+    /// and future requests fail at once with `PeerClosed`.
+    fn retire_endpoints(&self) {
+        let block = match self.kind {
+            Kind::Driver { block, .. } => block,
+            _ => None,
+        };
+        let mut closed = false;
+        for ep in [Some(self.endpoint), block]
+            .into_iter()
+            .flatten()
+            .filter(|h| h.0 != 0)
+        {
+            closed |= sys::endpoint_close(ep).is_ok();
+        }
+        if closed {
+            sys::print(b"AriInit: endpoints of ");
+            sys::print(self.name.as_bytes());
+            sys::print(b" closed: their clients fail at once\n");
+        }
+    }
 }
 
 const MAX_RESIDENTS: usize = 10;
@@ -636,7 +656,7 @@ impl Supervisor {
             Err(e) => {
                 aricode_rt::print_error(b"AriInit: launch service", e);
                 let _ = r.sup.starting(now);
-                self.announce_death(i, now, Exit::Code(u64::MAX));
+                self.announce_death(i, now, Exit::Code(u64::MAX), true);
                 return false;
             }
         };
@@ -686,11 +706,15 @@ impl Supervisor {
             sys::print(b" neither responds nor exits: failed, not relaunching\n");
             r.sup.stop();
         }
-        self.announce_death(i, now_ms(), Exit::StartTimeout);
+        // A process that could not be killed may still be serving: its
+        // endpoints stay open (audit robustness-1, reviewer 1).
+        self.announce_death(i, now_ms(), Exit::StartTimeout, !stuck);
     }
 
-    /// Records the death of `i`, closes its process and announces the decision.
-    fn announce_death(&mut self, i: usize, now: u64, exit: Exit) {
+    /// Records the death of `i`, closes its process and announces the
+    /// decision. `gone`: the process no longer runs, so its endpoints may be
+    /// closed if it will not be relaunched.
+    fn announce_death(&mut self, i: usize, now: u64, exit: Exit, gone: bool) {
         let Some(r) = self.slots[i].as_mut() else {
             return;
         };
@@ -722,6 +746,9 @@ impl Supervisor {
                 });
             }
         }
+        if gone && !matches!(action, Action::Restart { .. }) {
+            r.retire_endpoints();
+        }
     }
 
     /// Watches the processes: deaths, start timeouts and restarts that are due.
@@ -741,9 +768,9 @@ impl Supervisor {
                             }
                         }
                     }
-                    Ok(code) => self.announce_death(i, now, Exit::Code(code)),
-                    Err(Error::Killed) => self.announce_death(i, now, Exit::Killed),
-                    Err(_) => self.announce_death(i, now, Exit::Code(u64::MAX)),
+                    Ok(code) => self.announce_death(i, now, Exit::Code(code), true),
+                    Err(Error::Killed) => self.announce_death(i, now, Exit::Killed, true),
+                    Err(_) => self.announce_death(i, now, Exit::Code(u64::MAX), true),
                 }
             } else if state == State::Stopped {
                 let start = self.slots[i]
@@ -845,6 +872,52 @@ fn service_hang(sup: &mut Supervisor) -> Result<(), u64> {
         return Err(54);
     }
     Ok(())
+}
+
+/// Input driver that crashes holding a read (`input_restart`, ADR 0030):
+/// its client must get `ReplyLost`, not `ServiceGone`, and once the
+/// supervisor relaunches the driver on the same endpoint the device must
+/// deliver events again (the case of console-bridge and a crashed
+/// keyboard driver).
+fn input_restart(sup: &mut Supervisor) -> Result<(), u64> {
+    let ep = sys::endpoint_create().map_err(|_| 60u64)?;
+    let policy = Policy {
+        max_restarts: 3,
+        backoff_initial_ms: 100,
+        backoff_max_ms: 400,
+        start_timeout_ms: 2000,
+        stable_ms: 60_000,
+    };
+    let i = sup
+        .register(
+            "restart_input",
+            Kind::Program { arg: 0 },
+            Probe::Input,
+            ep,
+            true,
+            policy,
+        )
+        .ok_or(60u64)?;
+    if !sup.launch(i) {
+        return Err(61);
+    }
+    match run_block_client_supervised("restart_input_client", ep, 0, sup) {
+        Ok(0) => {
+            say(b"input restart ok: the device survived its driver's crash");
+            Ok(())
+        }
+        Ok(code) => {
+            let mut b = [0u8; 20];
+            sys::print(b"AriInit: restart_input_client exited with ");
+            sys::print(aricode_rt::fmt_u64(code, &mut b));
+            sys::print(b"\n");
+            Err(62)
+        }
+        Err(e) => {
+            aricode_rt::print_error(b"AriInit: restart_input_client", e);
+            Err(62)
+        }
+    }
 }
 
 /// Induced restarts (`restart_storm`): a test service that dies after each
@@ -959,10 +1032,32 @@ const RAW_AREA_OFFSET: u64 = 4096 - 34;
 /// Launches a client of a service with its endpoint (WRITE only) and a
 /// hardware capability for its DMA buffer, and waits for it to exit.
 fn run_block_client(name: &str, service: Handle, arg: u64) -> Result<u64, Error> {
+    let child = spawn_block_client(name, service, arg)?;
+    let result = sys::process_wait(child, TIMEOUT_INFINITE);
+    let _ = sys::handle_close(child);
+    result
+}
+
+fn spawn_block_client(name: &str, service: Handle, arg: u64) -> Result<Handle, Error> {
     let ep = sys::handle_duplicate(service, rights::WRITE | rights::TRANSFER)?;
     let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
-    let child = sys::process_spawn_with(SPAWNER, name, arg, &[ep, hw])?;
-    let result = sys::process_wait(child, TIMEOUT_INFINITE);
+    sys::process_spawn_with(SPAWNER, name, arg, &[ep, hw])
+}
+
+/// Like `run_block_client`, polling the supervisor while the client runs.
+fn run_block_client_supervised(
+    name: &str,
+    service: Handle,
+    arg: u64,
+    sup: &mut Supervisor,
+) -> Result<u64, Error> {
+    let child = spawn_block_client(name, service, arg)?;
+    let result = loop {
+        match sys::process_wait(child, 100) {
+            Err(Error::Timeout) => sup.poll(),
+            other => break other,
+        }
+    };
     let _ = sys::handle_close(child);
     result
 }
@@ -1689,12 +1784,13 @@ fn run_gui(inputs: &[Handle]) -> Result<Handle, u64> {
 fn main(arg: u64) -> u64 {
     say(b"starting");
     let mut args = [0u8; 256];
-    if sys::cmdline(SYSTEM, &mut args)
-        .is_some_and(|c| aricode_cmdline::CmdLine::new(c).has(aricode_cmdline::keys::STRICT))
-    {
+    let cmdline = sys::cmdline(SYSTEM, &mut args).map(aricode_cmdline::CmdLine::new);
+    let flag = |key| cmdline.as_ref().is_some_and(|c| c.has(key));
+    if flag(aricode_cmdline::keys::STRICT) {
         STRICT.store(true, core::sync::atomic::Ordering::Relaxed);
         say(b"strict mode: a failing service is not restarted");
     }
+    let input_restart_test = flag(aricode_cmdline::keys::INPUT_RESTART);
     let mut fs_service = None;
     let mut block_service = None;
     let mut services = 0u64;
@@ -2050,6 +2146,13 @@ fn main(arg: u64) -> u64 {
     //      processes is left alive (audit 6ee19fb, finding 4).
     if arg & sys::abi::init_arg::SERVICE_HANG != 0 {
         if let Err(code) = service_hang(&mut sup) {
+            return code;
+        }
+    }
+    // 10d. Input driver that crashes holding a read (tests only,
+    //      `input_restart`, ADR 0030): the client keeps the device.
+    if input_restart_test {
+        if let Err(code) = input_restart(&mut sup) {
             return code;
         }
     }

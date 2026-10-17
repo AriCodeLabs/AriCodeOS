@@ -47,6 +47,14 @@ pub fn tsc_since_boot() -> u64 {
     rdtsc().wrapping_sub(BOOT_TSC.load(Ordering::Relaxed))
 }
 
+/// TSC cycles in milliseconds; `None` before calibration.
+pub fn tsc_cycles_to_ms(cycles: u64) -> Option<u64> {
+    match TSC_PER_MS.load(Ordering::Relaxed) {
+        0 => None,
+        per_ms => Some(cycles / per_ms),
+    }
+}
+
 pub fn ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
