@@ -114,12 +114,17 @@ Three facts shape the driver:
    **Deadlines.** Every unit of work has a hard deadline that cuts every
    transfer inside it (recovery, REQUEST SENSE, hub GetPortStatus and
    ClearTTBuffer included); a transfer that cannot start in time is refused
-   without touching the controller. A block request gets 36 s (CBW, the
-   30 s window, 5 s of recovery), an enumeration 15 s, a hub poll 5 s: a
-   block client waiting 90 s covers a running enumeration and two requests
-   (15 + 36 + 36 = 87 s, checked at compile time). A Reset Recovery that
-   does not fit is owed and runs before the next CBW (BOT 5.3.4). A unit
-   attention is retried once, only if a whole command window still fits.
+   without touching the controller; deadlines nest by their minimum. A
+   block request gets 36 s (CBW, the 30 s window, 5 s of recovery). One
+   main loop iteration's housekeeping (HID reports, port changes, a hub
+   poll of at most 5 s and at most one enumeration) shares one 15 s
+   deadline, and each iteration serves at most one block request. With at
+   most two block clients (one request queued behind the one in progress,
+   the assumption usbd makes too) a client's wait is bounded by
+   15 + 36 + 36 = 87 s < 90 s (checked at compile time). A Reset Recovery
+   that does not fit is owed and runs before the next CBW (BOT 5.3.4). A
+   unit attention is retried once, only if a whole command window still
+   fits.
    **Strict.** With `strict` the first failure (a timeout included, before
    its queue head is retired; an async advance or frame index that never
    comes; a short control reply) dumps USBCMD, USBSTS, FRINDEX, every
@@ -127,24 +132,37 @@ Three facts shape the driver:
    and the driver exits with code 15; init restarts nothing. A host
    system error (4.15.2.4) or any unexpected HCHalted dumps and exits with
    code 16. When its service endpoint is closed or revoked (init gave the
-   service up), the driver exits instead of polling on.
-   **Served identity.** The first storage device served (capacity and
-   INQUIRY vendor/product) is remembered. After it is unplugged the block
-   service answers `Io`, and a device that comes back is served again only
-   if it is the same; a different one is reported, recorded and left
-   unconfigured, so another stick never silently becomes the disk.
+   service up), the driver exits instead of polling on. Under `strict` a
+   transfer that times out on a device being unplugged halts the driver:
+   the timeout dump comes before the port can be asked (the controller
+   state must be the one the failure left).
+   **Served identity.** The first storage device served is remembered:
+   capacity, INQUIRY vendor/product, the GPT disk GUID (LBA 1, offset 56)
+   and the USB serial number string (when the device has them). After it
+   is unplugged the block service answers `Io`, and a device that comes
+   back is served again only if it is the same; a different one is
+   reported, recorded and left unconfigured, so another stick never
+   silently becomes the disk. A driver restart loses that memory, so init
+   passes it back: once it chose a USB system disk it relaunches that
+   driver with `driver_arg::EXPECTED_DISK` and the first 47 bits of the
+   disk GUID, and the restarted driver serves only a disk whose GUID
+   matches (answering `Io` meanwhile). usbd ignores those bits for now.
 8. **Init.** For class `0c.03` init launches usbd for interface `0x30`
    first and then `usb_ehci` for interface `0x20`; other interfaces (UHCI,
    OHCI) still get "has no driver". Every USB driver gets a block endpoint,
    registered with the supervisor together with the input endpoint;
    without virtio-blk the first USB block service whose GPT has the ARI0
-   partition becomes the system disk, and with none init goes on without
-   storage ("no USB storage with an ARI0 partition") instead of stopping.
+   partition becomes the system disk (one probing client and buffer for
+   all candidates; a GPT read error is logged apart from a missing ARI0),
+   and with none init goes on without storage ("no USB storage with an
+   ARI0 partition") instead of stopping.
    `usb_ehci` serves its block endpoint only after its boot enumeration
    (every port seen at start, including hub ports; at most 30 s), so
    init's capacity question waits for it, and holds the input service's
-   Info for at most 2.5 s (inside init's readiness probe) so the device
-   name is the final one.
+   Info for at most 1.5 s from its process start, answering it from inside
+   any wait once that passes, so init's readiness probe (about 3 s from
+   launch) is always answered and the device name is the final one when
+   the enumeration is quick.
 9. **Port routing is left alone.** The EHCI driver never touches `XUSB2PR`
    or `USB3_PSSEN` (they live in the xHCI's configuration space); usbd
    keeps routing the switchable ports to the xHCI. Because usbd runs first
