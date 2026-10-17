@@ -1,0 +1,8 @@
+# Context of tools/docker/try/Dockerfile (BuildKit reads this file instead
+# of the root .dockerignore): only the USB image, the license files and the
+# entry point.
+*
+!build/aricodeos-usb.img
+!LICENSE
+!NOTICE
+!tools/docker/try/run.sh
