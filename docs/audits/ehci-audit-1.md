@@ -43,3 +43,35 @@ scenarios are written but not run (test ports in use).
 | M6 | `usb_fault=N|idle:csw` reads a CSW with no command, a real bulk IN STALL (2495), scenario `usb.ehci_fault_csw`; scenario `usb.ehci_companion` with `usb-kbd,usb_version=1` behind an ICH9 EHCI + UHCI companion (QEMU's companion-less `usb-ehci` refuses a full-speed device at attach) |
 | M7 | Documented as a follow-up in ADR 0031 (Consequences, "Power"); not measured |
 | Lows | Late async-advance clear removed (QEMU's IAA handling does not need it; the unlink clears the status before every doorbell); under `strict` the state is dumped before a hub is asked about a port (1412); boot enumeration deadline (M5); an unplugged HID gets an empty report so held keys and buttons are released (2172); init closes the endpoints of a USB driver it could not register (`services/init/src/main.rs` 1968); registered ones stay with the supervisor so its endpoint retirement covers them |
+
+## Re-audit (after `1f8aa3f`)
+
+**Verdict:** not mergeable yet; two regressions from the fixes.
+
+H2, M1, M3, M4 and the lows are fixed; M7 is deferred and documented. H1
+is fixed for the ordinary case, with gaps (R3). M2's mechanism is correct
+but its budget chain is wrong (R1). The M5 fix introduced R2. The owed
+Reset Recovery is correct (BOT 5.3.4). The HCHalted exit 16 is fine,
+except that the identity is lost on restart. init's ARI0 selection is
+safe; on the laptop the xHCI stick wins first. `usb.ehci_companion` tests
+only the "reported" path (QEMU N_CC = 0, no UHCI driver).
+`usb.ehci_fault_csw` is consistent with QEMU usb-storage's STALL.
+
+| Id | Finding |
+|---|---|
+| R1 | Housekeeping deadlines add up instead of nesting (5 + 15 + 36 + 36 = 92 s > 90 s); the receive loop may serve up to 8 block requests in a row |
+| R2 | Held Info can miss init's readiness probe (~3 s from launch) |
+| R3 | Served identity too weak (no disk GUID / serial) and lost on a driver restart |
+| Minors | `scsi_failed` halts on `Refused`; `poll_hubs` marks a hub failed when its time runs out; strict halt on a timeout during unplug undocumented; init's ARI0 loop leaks a DMA buffer per candidate and conflates GPT read errors with "no ARI0"; `usb.ehci_companion` wording; QEMU HCSPARAMS/HCCPARAMS fixture comment |
+
+### Resolution
+
+Lines refer to `services/usb-ehci/src/main.rs` unless stated. Verified with
+`cargo xtask check`, host unit tests and `cargo xtask build`; QEMU not run.
+
+| Id | Fix |
+|---|---|
+| R1 | One `with_deadline(HOUSEKEEPING_MS)` (92) around `poll_hids` + `service_ports` per main loop iteration (3441); the hub poll (5 s) and an enumeration nest inside by their minimum; `const` assert `HOUSEKEEPING_MS + 2 * REQUEST_BUDGET_MS < REPLY_WAIT_MS` (95); at most one block request per iteration (3416); the at-most-two-clients assumption documented with the budget chain and in ADR 0031 |
+| R2 | `started` taken before `open()` (3319); `INFO_WAIT_MS` 1.5 s (104); held Info lives in the driver (`hold_info` 889, `release_info` 901) and is answered from inside every transfer wait (1285) and pause (914) and before every hub poll and enumeration (2377, 2387) once due |
+| R3 | `Served` (347) adds the GPT disk GUID read from LBA 1 (2192) and the iSerialNumber string (index at 1824, read in `configure_storage`); init records the chosen disk's GUID and relaunches that driver with `driver_arg::EXPECTED_DISK` + a 47-bit digest (`sdk/abi/src/lib.rs` 68, init `set_driver_arg` 584 / 2069, `start_driver` 202); a restarted driver serves only the matching disk (2206; `expected_digest` 3350) and answers `Io` meanwhile (3220) |
+| Minors | `scsi_failed` exempts `Transport(Refused)` (2257); `poll_hubs` stops for this poll when its time ran out instead of marking the hub failed (2431); strict halt on a timeout during unplug documented in ADR 0031; init probes all candidates with one `BlockClient` (`set_service`, `sdk/rust/src/block.rs` 43; init 2038) and logs a GPT read error separately (init 2047); `usb.ehci_companion` now expects the "reported" path and says QEMU reports N_CC = 0; QEMU fixture in `libs/ehci` uses the real 0x06 / 0x80 |
