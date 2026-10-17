@@ -7,11 +7,19 @@
 //!
 //! A server that is gone is reported at once (ADR 0030): the client keeps
 //! only the receive side of its reply endpoint and the send side travels
-//! with the request, so `Error::PeerClosed` comes back as soon as the
-//! service endpoint has no receiver left (on the send) or the request is
-//! dropped unanswered (on the reply wait: the server died holding it, or
-//! it was discarded from the queue of a server that is gone). The full
-//! reply wait is only spent on a server that is alive and slow.
+//! with the request. The two ways it ends mean different things:
+//!
+//! - `Error::ServiceGone`: the send was refused because the service
+//!   endpoint has no receiver left (or was revoked). Permanent: stop using
+//!   the endpoint.
+//! - `Error::ReplyLost`: the request was accepted and dropped unanswered
+//!   (the server died holding it, or it was discarded with a queue). Not
+//!   permanent: init keeps the receive side of a supervised endpoint and
+//!   relaunches the server on it, so the next request queues for the next
+//!   generation. Retry after a short pause; if the service is given up, the
+//!   retry gets `ServiceGone`.
+//!
+//! The full reply wait is only spent on a server that is alive and slow.
 
 use crate::{self as sys, Error, Handle};
 
@@ -67,8 +75,14 @@ pub fn call_handles(
                 let _ = sys::handle_close(*h);
             }
         }
-        sent?;
-        sys::ipc_receive(reply, out, handles_out, reply_wait_ms)
+        sent.map_err(|e| match e {
+            Error::PeerClosed | Error::Revoked => Error::ServiceGone,
+            e => e,
+        })?;
+        sys::ipc_receive(reply, out, handles_out, reply_wait_ms).map_err(|e| match e {
+            Error::PeerClosed => Error::ReplyLost,
+            e => e,
+        })
     })();
     let _ = sys::handle_close(reply);
     result

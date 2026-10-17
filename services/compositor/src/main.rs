@@ -11,7 +11,7 @@
 use aricode_gfx::{Canvas, Desktop, Hit, Window};
 use aricode_input::{Keyboard, BTN_LEFT, EV_KEY, EV_REL, REL_X, REL_Y};
 use aricode_proto::window::{Event, Op, Reply, Request, Status, MAX_SIDE};
-use aricode_rt::sys::input::{InputClient, InputError};
+use aricode_rt::sys::input::InputClient;
 use aricode_rt::sys::{self, abi, Handle};
 use aricode_rt::{fmt_hex, fmt_u64};
 
@@ -20,6 +20,9 @@ const FRAMEBUFFER: Handle = Handle(0x0001_0005);
 const SYSTEM: Handle = Handle(0x0001_0006);
 const HW: Handle = Handle(0x0001_0007);
 const FIRST_INPUT: u32 = 0x0001_0008;
+/// Pause before reading again from a driver that died holding the read
+/// (ADR 0030): its supervisor relaunches it on the same endpoint.
+const RETRY_MS: u64 = 50;
 const MAX_INPUTS: usize = 4;
 const MAX_WINDOWS: usize = aricode_gfx::MAX_WINDOWS;
 const QUEUE: usize = 8;
@@ -419,16 +422,20 @@ fn main(inputs: u64) -> u64 {
         for (d, slot) in devices.iter_mut().enumerate() {
             let Some(dev) = slot else { continue };
             let read = dev.read(1, &mut events, &mut times);
-            if let Err(InputError::Ipc(e)) = read {
-                if e.endpoint_gone() {
-                    // Closed for good (ADR 0030): it would answer at once
-                    // forever and the 1 ms read would no longer pace the loop.
+            match read {
+                // Given up for good (ADR 0030): it would answer at once
+                // forever and the 1 ms read would no longer pace the loop.
+                Err(e) if e.service_gone() => {
                     sys::print(b"compositor: input device ");
                     let mut b = [0u8; 20];
                     sys::print(aricode_rt::fmt_u64(d as u64, &mut b));
                     sys::print(b" is gone; dropping it\n");
                     *slot = None;
                 }
+                // The driver died holding the read: it is relaunched on the
+                // same endpoint; the next read waits for it.
+                Err(e) if e.reply_lost() => sys::thread_sleep(RETRY_MS),
+                _ => {}
             }
             if let Ok(n) = read {
                 for (e, t) in events[..n].iter().zip(&times[..n]) {

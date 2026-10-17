@@ -306,10 +306,13 @@ fn endpoint_create_pair(t: &mut crate::object::Handles) -> Result<u64, Error> {
     match insert(t, ep, send) {
         Ok(s) => {
             let packed = receive.0 as u64 | (s.0 as u64) << 32;
-            // The result must not read as an error code (-4095..=-1): that
-            // needs the low half >= 0xFFFF_F001, i.e. a handle index far
-            // above `HANDLE_LIMIT`; handles have the generation in their
-            // high 16 bits, so the value may well be negative as an i64.
+            // `dispatch` returns the value as an i64, and user space reads
+            // -4095..=-1 as an error. A handle is `generation << 16 |
+            // (index + 1)`, so the value is negative whenever the send
+            // handle's generation is >= 0x8000; it is in the error range
+            // only if the send handle is 0xFFFF_FFFF and the receive handle
+            // is >= 0xFFFF_F001, i.e. index + 1 >= 0xF001 in both, far above
+            // `HANDLE_LIMIT` (256). Asserted, not assumed.
             debug_assert!(aricode_abi::decode(packed as i64).is_ok());
             Ok(packed)
         }

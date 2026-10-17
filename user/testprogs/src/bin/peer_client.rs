@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
 //! Client of a server that dies (`test=ipc_peer`, ADR 0030): every wait
-//! here is 30 s, and every one must end at once with `PeerClosed` (the
+//! here is 30 s, and every one must end at once with `PeerClosed` (through
+//! `rpc`: `ReplyLost` or `ServiceGone`) (the
 //! kernel self-test bounds the whole case to a few seconds). Handles:
 //! 0x10004 = service endpoint (WRITE), 0x10005 = sync endpoint (WRITE).
 //! `arg` = case (see `peer_server`); case 4 runs alone, with its own
@@ -34,14 +35,15 @@ fn main(case: u64) -> u64 {
 }
 
 /// The server took the request and exited: the reply wait ends because the
-/// only send handle of the reply endpoint died with it; the next call is
-/// refused because the service endpoint has no receiver left.
+/// only send handle of the reply endpoint died with it (`rpc` reports
+/// `ReplyLost`: retryable); the next call is refused because the service
+/// endpoint has no receiver left (`ServiceGone`: permanent).
 fn died_holding_the_request() -> u64 {
     let mut out = [0u8; 16];
-    if rpc::call(EP, b"req", &[], WAIT_MS, WAIT_MS, &mut out) != Err(Error::PeerClosed) {
+    if rpc::call(EP, b"req", &[], WAIT_MS, WAIT_MS, &mut out) != Err(Error::ReplyLost) {
         return 21;
     }
-    if rpc::call(EP, b"again", &[], WAIT_MS, WAIT_MS, &mut out) != Err(Error::PeerClosed) {
+    if rpc::call(EP, b"again", &[], WAIT_MS, WAIT_MS, &mut out) != Err(Error::ServiceGone) {
         return 22;
     }
     0

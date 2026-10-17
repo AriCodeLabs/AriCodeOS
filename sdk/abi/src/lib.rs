@@ -692,12 +692,25 @@ pub enum Error {
     /// handle left (for a reply endpoint: the server dropped the request
     /// without answering, typically because it died).
     PeerClosed = 13,
+    /// SDK level, never returned by a syscall (`rpc::call`, ADR 0030): the
+    /// service endpoint refused the request because nobody can receive on
+    /// it any more (`PeerClosed` or `Revoked` on the send). Permanent: the
+    /// caller must stop using that endpoint.
+    ServiceGone = 14,
+    /// SDK level, never returned by a syscall (`rpc::call`, ADR 0030): the
+    /// request was accepted but dropped unanswered (the server died holding
+    /// it, or it was discarded with a queue). Not permanent: a supervised
+    /// service is relaunched on the same endpoint, so a later request may
+    /// be served; retry after a short pause.
+    ReplyLost = 15,
 }
 
 impl Error {
-    /// The endpoint can never deliver again (ADR 0030): its other side is
-    /// gone (`PeerClosed`) or it was revoked. Unlike `Timeout`, retrying is
-    /// pointless; a loop that polls such an endpoint must stop using it.
+    /// For a raw syscall on an endpoint the caller holds (a server
+    /// receiving on its own endpoint): the endpoint can never deliver again
+    /// (ADR 0030), its other side being gone (`PeerClosed`) or the endpoint
+    /// revoked. Retrying is pointless. Clients of `rpc::call` get the
+    /// finer `ServiceGone` (permanent) and `ReplyLost` (retry) instead.
     pub const fn endpoint_gone(self) -> bool {
         matches!(self, Error::PeerClosed | Error::Revoked)
     }
@@ -721,6 +734,8 @@ impl Error {
             11 => Some(Error::Killed),
             12 => Some(Error::NotFound),
             13 => Some(Error::PeerClosed),
+            14 => Some(Error::ServiceGone),
+            15 => Some(Error::ReplyLost),
             _ => None,
         }
     }
@@ -805,6 +820,9 @@ mod tests {
         assert_eq!(decode(-13), Err(Error::PeerClosed));
         assert!(Error::PeerClosed.endpoint_gone() && Error::Revoked.endpoint_gone());
         assert!(!Error::Timeout.endpoint_gone());
+        for e in [Error::ServiceGone, Error::ReplyLost] {
+            assert_eq!(Error::from_raw(e.to_raw()), Some(e));
+        }
         assert_eq!(decode(-1), Err(Error::NoSys));
         assert_eq!(
             decode(-4096),

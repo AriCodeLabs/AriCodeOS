@@ -104,7 +104,7 @@ For a request/reply call (ADR 0012) this gives:
   server costs the full reply wait. The long waits of incident 0001 stay.
 - The SDK clients pass the error through their types (`FsError::Ipc`,
   `NetError::Ipc`, the block client's `Error`); `FsError::service_unavailable`
-  groups `PeerClosed`, `Revoked` and `Timeout` for callers that only need
+  groups `ServiceGone`, `ReplyLost` and `Timeout` for callers that only need
   "no answer" (sshd, item 2 of the incident follow-ups).
 - A shell in an SSH session gets `PeerClosed` and ends when sshd dies (sshd
   held the only `WRITE` on the session input).
@@ -118,21 +118,46 @@ For a request/reply call (ADR 0012) this gives:
 - A closed side never reopens: an endpoint closed by `endpoint_close` or by
   losing its receive side cannot be served again; a supervisor that wants
   to serve again creates a new endpoint.
-- **`PeerClosed` and `Revoked` are permanent** (`Error::endpoint_gone`).
-  A client must stop retrying an endpoint that reported either: the error
-  comes back at once forever, so a polling loop that treats it like a
-  timeout spins. console-bridge and the compositor drop that input device
-  (logged once); fsd, virtio-blk, virtio-input, net-core and usb-input exit
-  when their service endpoints are closed; sshd exits when the network
-  service is gone. `Timeout` keeps meaning "try again later".
+- **Only the send side is permanent.** A send refused with `PeerClosed`
+  or `Revoked` means nobody can receive on that endpoint again; a receive
+  on one's own endpoint that reports them (`Error::endpoint_gone`) likewise.
+  A reply endpoint closing is different: the server dropped *this* request
+  (it died holding it), but init keeps the receive side of a supervised
+  endpoint and relaunches the server on it, so the next request may be
+  served. `rpc::call` therefore tells them apart with two SDK-level codes
+  that no syscall returns: `Error::ServiceGone` (send refused: stop using
+  the endpoint) and `Error::ReplyLost` (reply side closed: retry after a
+  short pause; if the service was given up, the retry gets
+  `ServiceGone`). They travel through the client error types
+  (`InputError::Ipc`, with `service_gone()`/`reply_lost()`; `NetError::Ipc`;
+  `FsError::Ipc`; the block client's `Error`). A client must stop retrying
+  only after `ServiceGone`: a polling loop that treats it like a timeout
+  spins. console-bridge and the compositor drop the input device on
+  `ServiceGone` (logged once) and read again after 50 ms on `ReplyLost`;
+  console-bridge parks, instead of exiting, when every device is gone
+  (exiting would only make init relaunch it to find the same). sshd exits
+  on `ServiceGone` from the network service and listens again after a
+  `ReplyLost` or a socket the relaunched driver no longer knows. fsd,
+  virtio-blk, virtio-input, net-core and usb-input exit when their own
+  service endpoints report `endpoint_gone`. `Timeout` keeps meaning "try
+  again later". Scenario `services.input_restart` (`input_restart`): an
+  input driver crashes holding a read; the client gets `ReplyLost` and the
+  relaunched device delivers events again.
+- Latent: fsd waits with `ipc_receive_any` on its main endpoint and the
+  granted namespace endpoints, and exits on `Revoked`, which the call
+  reports when any one of them is revoked. Nothing revokes a namespace
+  endpoint today; if something starts to, fsd must drop that endpoint
+  instead of exiting.
 - Kernel threads: a capability a kernel thread drops outside a syscall and
   outside `reap()` (self-tests) is settled at the next syscall or reap on
   any CPU.
-- `endpoint_create_pair` packs two 32-bit handles into the 64-bit result;
-  handles carry their generation in the high 16 bits, so the value can be
-  negative as an `i64`, but it never falls in the error range
-  (-4095..=-1), which would need a handle index far above `HANDLE_LIMIT`
-  (asserted in debug builds).
+- `endpoint_create_pair` packs two 32-bit handles into the 64-bit result
+  (`receive | send << 32`). A handle is `generation << 16 | (index + 1)`,
+  so the value is negative as an `i64` whenever the send handle's
+  generation is >= 0x8000; that is harmless, since only -4095..=-1 reads as
+  an error, which needs the send handle to be 0xFFFF_FFFF and the receive
+  handle >= 0xFFFF_F001: an index of at least 0xF000 in both, far above
+  `HANDLE_LIMIT` (256). Asserted in debug builds.
 - Releasing a reaped process's capabilities runs in `reap()` with
   interrupts disabled, like the address space release it follows. It is
   bounded (at most 256 capabilities; a closing endpoint discards at most 16
@@ -152,7 +177,8 @@ For a request/reply call (ADR 0012) this gives:
 
 ## Resolution of audit 1 (`docs/audits/robustness-audit-1.md`)
 
-- B1: services stop using an endpoint that is gone (consequence above).
+- B1: services stop using an endpoint that is gone (consequence above;
+  refined by the re-audit, N1: only the send side is permanent).
 - B2: history rebuilt so every commit builds; this ADR renumbered to 0030.
 - B3: the QEMU suite is run centrally.
 - M1, L4, L5: sshd (ADR 0025 note).

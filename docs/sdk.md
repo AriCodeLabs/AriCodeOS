@@ -163,13 +163,15 @@ Every call of the SDK clients (`block`, `fs`, `net`, `window`, `input`,
 - each request creates its own reply endpoint and closes it on return; a
   late reply is lost and is never attributed to another request;
 - send and receive have deadlines (the one requested plus `rpc::GRACE_MS`);
-  a service that is gone produces `Error::PeerClosed` at once (ADR 0030:
-  the reply endpoint comes from `endpoint_create_pair` and the client keeps
-  only its receive side, so a request the server dropped unanswered, or
-  died holding, ends the wait), and a service endpoint whose supervisor
-  gave it up refuses the send the same way. `Error::Timeout` remains for a
-  service that is alive and slow. `FsError::service_unavailable` groups
-  the three cases for callers that only need "no answer". Only
+  a server that is gone is reported at once (ADR 0030: the reply endpoint
+  comes from `endpoint_create_pair` and the client keeps only its receive
+  side). `Error::ServiceGone`: the send was refused, nobody can receive on
+  the service endpoint any more (permanent: stop using it).
+  `Error::ReplyLost`: the server dropped this request unanswered, usually
+  because it died; a supervised service is relaunched on the same endpoint,
+  so retry after a short pause. `Error::Timeout` remains for a service that
+  is alive and slow. `FsError::service_unavailable` groups the three cases
+  for callers that only need "no answer". Only
   `launch::run` waits without a deadline for the exit of the launched
   program;
 - an expired deadline does not undo the operation: its result is unknown.

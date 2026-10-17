@@ -455,7 +455,7 @@ fn main(_arg: u64) -> u64 {
     }
     let seed = host_key(&mut fs, &mut entropy);
     entropy.save_next(&mut fs);
-    let listener = match net.tcp_listen(PORT) {
+    let mut listener = match net.tcp_listen(PORT) {
         Ok(l) => l,
         Err(_) => {
             say(b"cannot listen on port 22");
@@ -475,12 +475,23 @@ fn main(_arg: u64) -> u64 {
     loop {
         let (sock, peer, _) = match net.tcp_accept(listener, 60_000) {
             Ok(c) => c,
-            // The network service endpoint is closed for good (ADR 0030):
-            // every accept would fail at once; its supervisor decides
-            // what follows.
-            Err(NetError::Ipc(e)) if e.endpoint_gone() => {
+            // Nobody can receive on the network service endpoint any more
+            // (ADR 0030): every accept would fail at once; its supervisor
+            // decides what follows.
+            Err(NetError::Ipc(Error::ServiceGone)) => {
                 say(b"network service gone; exiting");
                 return 4;
+            }
+            // The network driver died holding the accept, or was relaunched
+            // and no longer knows the socket: its sockets went with it.
+            // Listen again on the next generation after a pause.
+            Err(NetError::Ipc(Error::ReplyLost)) | Err(NetError::Status(Status::BadSock)) => {
+                sys::time::sleep_ms(500);
+                if let Ok(l) = net.tcp_listen(PORT) {
+                    listener = l;
+                    say(b"network service restarted: listening on port 22 again");
+                }
+                continue;
             }
             Err(_) => continue,
         };
