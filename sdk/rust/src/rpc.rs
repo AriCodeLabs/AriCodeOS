@@ -76,7 +76,13 @@ pub fn call_handles(
             }
         }
         sent.map_err(|e| match e {
-            Error::PeerClosed | Error::Revoked => Error::ServiceGone,
+            Error::PeerClosed => Error::ServiceGone,
+            // `Revoked` also comes back when one of the extra handles was
+            // revoked: only the service endpoint's own revocation means the
+            // service is gone (asked on this error path only).
+            Error::Revoked if sys::object_kind(service) == Err(Error::Revoked) => {
+                Error::ServiceGone
+            }
             e => e,
         })?;
         sys::ipc_receive(reply, out, handles_out, reply_wait_ms).map_err(|e| match e {
