@@ -916,6 +916,13 @@ fn ssh_host_key(path: &Path) -> Result<([u8; 32], Vec<u8>)> {
 pub const UPDATE_URL_FILE: &str = "updater/update_url";
 
 /// Channel directory with the published image (`publish_update`).
+/// Channel directory of the scenarios (`host_update`): separate from
+/// `update_dir()` so a test run can never replace what a real machine
+/// downloads (incident 0003).
+pub fn test_update_dir() -> PathBuf {
+    crate::build_dir().join("update-test")
+}
+
 pub fn update_dir() -> PathBuf {
     crate::build_dir().join("update")
 }
@@ -925,11 +932,16 @@ pub fn update_dir() -> PathBuf {
 /// and `manifest.txt` (version, file name, size, SHA-256) into
 /// `build/update/`, ready to be served over HTTP.
 pub fn publish_update(release: bool, version: u32) -> Result<PathBuf> {
+    publish_update_to(&update_dir(), release, version)
+}
+
+/// `publish_update` into `dir` (the scenarios use `test_update_dir()`).
+pub fn publish_update_to(dir: &Path, release: bool, version: u32) -> Result<PathBuf> {
     build_base_esp(release)?;
     let container = system_image(version, false)?;
     let mut image = aricode_ab::Image::header(container.len() as u32).to_vec();
     image.extend_from_slice(&container);
-    let dir = update_dir();
+    let dir = dir.to_path_buf();
     io(fs::create_dir_all(&dir), "create build/update")?;
     let name = format!("aricodeos-{version}.img");
     io(fs::write(dir.join(&name), &image), "write the update image")?;
