@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Ethernet II frames.
 
 use crate::{be16, MacAddr};

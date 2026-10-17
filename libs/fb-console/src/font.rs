@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! 8x16 console font, ASCII glyphs 32..=126.
 //!
 //! Extracted from `Lat15-Terminus16.psf` (Terminus Font, (c) 2010 Dimitar Toshkov

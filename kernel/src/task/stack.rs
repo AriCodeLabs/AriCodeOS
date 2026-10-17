@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Thread stacks: a dedicated virtual region, frames from the PMM and an
 //! unmapped guard page below each stack.
 

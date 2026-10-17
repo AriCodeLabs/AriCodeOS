@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 """Regenerates libs/fb-console/src/font.rs from an 8x16 PSF1 font (Terminus)."""
 import gzip, sys
 src = sys.argv[1] if len(sys.argv) > 1 else "/usr/share/consolefonts/Lat15-Terminus16.psf.gz"

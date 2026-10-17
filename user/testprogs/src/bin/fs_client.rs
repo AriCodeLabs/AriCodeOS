@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! File service client (Phase 20): lists, opens, reads, creates, writes,
 //! replaces, flushes and reads back over IPC. Handles: 0x10004 = fsd (WRITE), 0x10005 = HARDWARE.
 #![no_std]

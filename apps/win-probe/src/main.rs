@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! `win_probe`: if it ever runs (boot with `gui`), it opens a window and
 //! exits. Its role in the tests is to be denied by the broker without a GUI.
 #![no_std]

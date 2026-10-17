@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Signed application packages (stage 4, ADR 0017). A package is an
 //! `aricode-initrd` container with four files:
 //!

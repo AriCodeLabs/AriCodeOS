@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Test vectors from RFC 8448 section 3, "Simple 1-RTT Handshake"
 //! (TLS_AES_128_GCM_SHA256, RSA server certificate, no client auth).
 

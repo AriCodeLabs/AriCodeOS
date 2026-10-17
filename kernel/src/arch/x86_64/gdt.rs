@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Per-CPU GDT and TSS (with a dedicated double-fault stack). The selector
 //! layout is the same on every CPU (`aricode_x86_cpu::layout`).
 

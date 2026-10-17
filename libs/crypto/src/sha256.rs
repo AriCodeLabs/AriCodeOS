@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! SHA-256 (FIPS 180-4).
 
 pub const DIGEST_LEN: usize = 32;

@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Ping-pong server: receives "ping" with a reply handle, answers "pong"
 //! through it and closes it; exits on "quit". Handle 0x10004 = endpoint.
 #![no_std]

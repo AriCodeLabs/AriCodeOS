@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Scheduling policy (Phases 9, 10 and 32): round robin over thread
 //! identifiers, with states, tick-based sleep, blocking, exit,
 //! multiple CPUs and affinity.

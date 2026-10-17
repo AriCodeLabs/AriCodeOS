@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! IOMMU (Phase 33): Intel VT-d. Every process that uses hardware has its
 //! own translation domain in which only the DMA buffers it allocated
 //! (`dma_alloc`) or was handed and mapped (`mmio_map` of a DMA object) are

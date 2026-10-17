@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Minimal DER reader: single-byte tags, definite minimal lengths, and the
 //! few universal types certificates use.
 

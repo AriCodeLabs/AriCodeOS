@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Portable app (Phase 29 and stage 4): compiled to `wasm32-unknown-unknown`,
 //! it only knows the Capability API that the host (`wasm_runner`) imports
 //! into it under the `aricode` module, and only what its manifest

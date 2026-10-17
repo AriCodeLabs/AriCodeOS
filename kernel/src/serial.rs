@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Output on serial port COM1 (16550). The only reliable console in M0 and
 //! the one the QEMU test runner captures.
 

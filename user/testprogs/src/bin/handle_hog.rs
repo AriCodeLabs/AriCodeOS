@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Exhausts the process handle table (stage 3, quotas): creates endpoints
 //! until the kernel answers `Limit`, checks that the rejection is predictable
 //! (the table has 256 entries and four are already taken), frees them all and

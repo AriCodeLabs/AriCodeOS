@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Permissions: in AriCodeOS a program can only do what its handles allow.
 //! This module lets it inspect them: what kind of object is behind each one
 //! and which ones it received at startup.

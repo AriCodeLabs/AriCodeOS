@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 use aricode_xhci::{interrupt_interval, speed};
 #[test]
 fn full_speed_interval_stays_in_the_xhci_range() {

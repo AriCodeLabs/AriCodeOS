@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! `hello_app`: the SDK sample app (Phases 27 and 28). It receives from the
 //! broker only what its manifest asks for (`system`, `fs`): a read-only
 //! clock, a private directory in fsd and the hardware capability for its

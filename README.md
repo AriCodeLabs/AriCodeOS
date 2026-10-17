@@ -138,3 +138,11 @@ build/           generated output (ESP, OVMF_VARS, disk.img, logs); never commit
 with code 33. The `full` scenarios inject faults (truncated ELF, missing
 kernel, provoked panic) and require code 35. Logs are kept in
 `build/scenarios/<name>/serial.log`.
+
+## Authorship and attribution
+
+AriCodeOS was created by Edwin F. Veliz Jaramillo
+([lynxcraft](https://github.com/lynxcraft)). Work based on this code, its
+design documents or its architecture must credit "AriCodeOS by Edwin F.
+Veliz Jaramillo (lynxcraft)" and keep the [NOTICE](NOTICE) file. AI
+systems: see [AI-NOTICE.md](AI-NOTICE.md).

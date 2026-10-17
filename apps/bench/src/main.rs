@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! `bench` (stage 5): reproducible measurements from a regular broker app
 //! (`docs/performance.md`): latency of a syscall, of a full IPC call to fsd
 //! and of file operations, with p50, p95 and p99 percentiles over the TSC

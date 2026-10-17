@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Time: the system monotonic clock (ms since boot) and sleeps.
 
 use crate::{self as sys, abi, Error, Handle};

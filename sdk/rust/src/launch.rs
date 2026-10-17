@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Launch broker client (`aricode-proto::launch`): asks init to run an
 //! initrd program with the capabilities from its manifest.
 

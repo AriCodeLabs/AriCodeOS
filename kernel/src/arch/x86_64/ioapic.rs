@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! I/O APIC: routes global system interrupts (GSI) to LAPIC vectors.
 
 use crate::memory::vmm;

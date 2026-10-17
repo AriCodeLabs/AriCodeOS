@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Handles (Phase 12): each failing step returns its number; success = 11.
 #![no_std]
 #![no_main]

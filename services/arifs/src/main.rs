@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! fsd (Phase 20): AriFS file service in ring 3 on top of the block
 //! service. Handles: 0x10004 = own endpoint (READ|WRITE), 0x10005 =
 //! block service endpoint (WRITE), 0x10006 = HARDWARE (DMA),

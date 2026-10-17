@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! 4-level x86-64 page tables, generic over how frames are obtained and
 //! how they are accessed:
 //!

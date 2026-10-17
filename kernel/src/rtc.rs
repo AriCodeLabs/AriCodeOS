@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Wall clock from the CMOS real-time clock (HTTPS certificate dates). The
 //! RTC is read once at boot; afterwards the time is that reading plus the
 //! uptime. The RTC is assumed to hold UTC (QEMU does; a machine that keeps

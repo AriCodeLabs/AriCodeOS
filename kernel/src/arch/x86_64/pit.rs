@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! 8254 PIT, channel 2, as a time reference to calibrate the APIC.
 //! It raises no interrupts: the OUT2 output is polled through port 0x61.
 

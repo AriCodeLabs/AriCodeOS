@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Kernel command line: `key` or `key=value` separated by
 //! spaces. No `alloc`: iterates over the original `&str`.
 //!

@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! TLS 1.3 client (RFC 8446) as a state machine: bytes from the server go
 //! in through [`Client::feed`], bytes for the server and [`Event`]s come
 //! out. No I/O and no threads, so it runs the same in AriCodeOS and in host

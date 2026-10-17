@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Input client (Phase 25): identifies the virtio-input devices, announces
 //! INPUT_READY and decodes what the host injects over QMP: a keyboard line
 //! plus mouse motion and a click. Handles: 0x10004.. = input service

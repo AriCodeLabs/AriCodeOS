@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! WebAssembly interpreter (Phase 29): the integer MVP subset that `rustc`
 //! (`-C target-cpu=mvp`) and other compilers produce for `no_std` modules:
 //! structured control, locals and globals, linear memory with checked

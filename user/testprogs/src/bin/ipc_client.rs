@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Ping-pong client and IPC negative cases. Handle 0x10004 = server
 //! endpoint, WRITE only. Success = 0; otherwise, the failing step.
 #![no_std]

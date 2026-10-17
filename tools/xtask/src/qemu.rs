@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Launches QEMU + OVMF, interactively or capturing the serial output.
 
 use crate::image::{self, OVMF_CODE};

@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Virtio 1.x (section 40). Everything that can be tested on the host: the
 //! layout of a split virtqueue over a DMA buffer, discovery of the modern
 //! virtio-pci structures in the configuration space and the virtio-blk

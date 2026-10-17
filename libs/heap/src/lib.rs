@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Kernel heap (Phase 7): linked list of free blocks, first-fit,
 //! coalescing neighbours on free.
 //!

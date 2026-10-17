@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! SHA-512 (FIPS 180-4): used by Ed25519; and SHA-384, its truncated
 //! variant with a different initial state, used by TLS 1.3.
 

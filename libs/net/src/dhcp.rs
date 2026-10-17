@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Minimal DHCP client (RFC 2131): DISCOVER → OFFER → REQUEST → ACK.
 
 use crate::{be32, Ipv4Addr, MacAddr};

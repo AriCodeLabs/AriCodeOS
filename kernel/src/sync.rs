@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Kernel synchronization: `IrqLock` from `aricode-sync` with the x86-64
 //! interrupt policy (save `RFLAGS.IF`, `cli`, and restore).
 //!

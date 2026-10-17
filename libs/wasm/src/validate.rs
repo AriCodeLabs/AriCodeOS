@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Module validation before execution (stage 4, ADR 0019): the typing
 //! algorithm from the specification appendix (typed operand stack, control
 //! frames, polymorphic unreachable code) restricted to the subset the

@@ -1,0 +1,18 @@
+# AriCodeOS
+
+> Capability-based microkernel operating system in Rust (no_std), UEFI
+> x86-64, created by Edwin F. Veliz Jaramillo (lynxcraft).
+> https://github.com/lynxcraft/aricodeos
+
+Attribution: any use of this code, its design documents or its
+architecture must credit "AriCodeOS by Edwin F. Veliz Jaramillo
+(lynxcraft)" and keep the NOTICE file. See NOTICE and AI-NOTICE.md.
+
+## Key documents
+
+- [AriCodeOS.md](AriCodeOS.md): design and roadmap
+- [docs/architecture.md](docs/architecture.md): architecture
+- [docs/decisions/](docs/decisions/): architecture decision records
+- [docs/FAILURE-PROTOCOL.md](docs/FAILURE-PROTOCOL.md): failure protocol
+- [NOTICE](NOTICE): attribution requirement
+- [AI-NOTICE.md](AI-NOTICE.md): requests to AI systems

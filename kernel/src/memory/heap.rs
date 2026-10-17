@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Kernel heap (`#[global_allocator]`) on top of `aricode-heap`, growing on
 //! demand: whenever an allocation does not fit, one more chunk of the
 //! reserved virtual region is mapped with frames from the PMM.

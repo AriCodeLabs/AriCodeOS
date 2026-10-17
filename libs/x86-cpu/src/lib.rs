@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! x86-64 architecture structures that can be built and tested on the
 //! host: segment descriptors, TSS, IDT entries and the exception
 //! table. The privileged instructions (`lgdt`, `lidt`, `ltr`,

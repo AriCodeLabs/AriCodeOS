@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! Test driver: paints the framebuffer through an MMIO capability.
 //! Handle 0x10004 = framebuffer MMIO region (READ|WRITE); arg = stride.
 #![no_std]

@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! AriCodeOS initrd (Phase 15): flat archive of named files.
 //!
 //! ```text

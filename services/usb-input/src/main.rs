@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 //! usbd (Phase 25, second part; ADR 0023): ring 3 xHCI driver for
 //! USB HID keyboards and mice using the boot protocol, and for one
 //! mass storage device (bulk-only, SCSI). Receives the driver contract
