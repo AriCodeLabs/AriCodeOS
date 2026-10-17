@@ -22,6 +22,7 @@ use aricode_proto::launch::{
     Reply as LaunchReply, Request as LaunchRequest, Status as LaunchStatus,
 };
 use aricode_proto::status;
+use aricode_rt::sys::abi::driver_arg;
 use aricode_rt::sys::block::BlockClient;
 use aricode_rt::sys::fs::FsClient;
 use aricode_rt::sys::{self, rights, Error, Handle, TIMEOUT_INFINITE};
@@ -185,18 +186,20 @@ fn find_pci_from(vendor: u16, device: u16, start: u64) -> Option<u64> {
 /// Contract with the driver: it receives, in order, the service endpoint,
 /// the configuration space, the hardware capability, the IRQ (if any), only
 /// the BARs that are present and then `extras` (driver specific); `arg`
-/// carries a mask: bit 15 = IRQ present, bits 0..5 = BAR i present.
+/// carries a mask: bit 15 = IRQ present, bits 0..5 = BAR i present, plus
+/// `arg_extra` (`abi::driver_arg`).
 fn start_driver(
     name: &str,
     index: u64,
     service: Handle,
     extras: &[Handle],
+    arg_extra: u64,
 ) -> Result<Handle, Error> {
     let handles = sys::pci_claim(PCI_ROOT, index)?;
     let mut to_send = [Handle(0); 12];
     to_send[0] = sys::handle_duplicate(service, rights::READ | rights::WRITE | rights::TRANSFER)?;
     let mut n = 1;
-    let mut mask = 0u64;
+    let mut mask = arg_extra;
     for (i, h) in handles.iter().enumerate() {
         if h.0 == 0 {
             continue;
@@ -492,6 +495,8 @@ struct Resident {
     endpoint: Handle,
     process: Option<Handle>,
     sup: Service,
+    /// Extra driver argument bits for every (re)launch (`abi::driver_arg`).
+    driver_arg: u64,
 }
 
 const MAX_RESIDENTS: usize = 10;
@@ -551,6 +556,7 @@ impl Supervisor {
             endpoint,
             process: None,
             sup: Service::new(policy, optional),
+            driver_arg: 0,
         });
         self.count += 1;
         Some(i)
@@ -572,6 +578,13 @@ impl Supervisor {
 
     fn has_process(&self, i: usize) -> bool {
         self.slots[i].as_ref().is_some_and(|r| r.process.is_some())
+    }
+
+    /// Extra argument bits for the next launches of driver `i`.
+    fn set_driver_arg(&mut self, i: usize, bits: u64) {
+        if let Some(r) = self.slots[i].as_mut() {
+            r.driver_arg = bits;
+        }
     }
 
     /// Retires service `i`: it will not be relaunched even if it dies.
@@ -619,7 +632,7 @@ impl Supervisor {
                 if failed {
                     Err(Error::Limit)
                 } else {
-                    start_driver(r.name, pci_index, r.endpoint, &extras[..n])
+                    start_driver(r.name, pci_index, r.endpoint, &extras[..n], r.driver_arg)
                 }
             }
             Kind::Fs {
@@ -1916,6 +1929,7 @@ fn main(arg: u64) -> u64 {
     // xHCI before the EHCI driver looks at the ports left to it.
     use sys::abi::pci_info::{EHCI_PROG_IF, XHCI_PROG_IF};
     let mut usb_blocks = [Handle(0); MAX_INPUTS];
+    let mut usb_slots = [0usize; MAX_INPUTS];
     let mut usb_block_count = 0;
     for (wanted, name) in [(XHCI_PROG_IF, "usb_input"), (EHCI_PROG_IF, "usb_ehci")] {
         let mut next = 0;
@@ -1977,6 +1991,7 @@ fn main(arg: u64) -> u64 {
                 input_eps[inputs] = ep;
                 inputs += 1;
                 usb_blocks[usb_block_count] = block_ep;
+                usb_slots[usb_block_count] = slot.unwrap_or(0);
                 usb_block_count += 1;
             } else {
                 sys::print(b" never became ready; dropped\n");
@@ -2020,19 +2035,38 @@ fn main(arg: u64) -> u64 {
     //     (ADR 0023, 0031). A stick without ARI0 (any other USB disk) is
     //     skipped; with none, the system goes on without storage.
     if block_service.is_none() && usb_block_count > 0 {
-        let found = usb_blocks[..usb_block_count].iter().find_map(|&ep| {
-            let mut blk = BlockClient::new(ep, HARDWARE, 16).ok()?;
-            let capacity = blk.capacity().ok().filter(|&c| c > 0)?;
-            if find_partition(&mut blk, "ARI0").is_none() {
-                sys::print(b"AriInit: USB storage of ");
-                sys::print(aricode_rt::fmt_u64(capacity, &mut [0u8; 20]));
-                sys::print(b" sectors without an ARI0 partition: not the system disk\n");
-                return None;
-            }
-            Some((ep, capacity))
+        // One client (one DMA buffer) probes every candidate.
+        let mut probe = BlockClient::new(usb_blocks[0], HARDWARE, 16).ok();
+        let found = probe.as_mut().and_then(|blk| {
+            (0..usb_block_count).find_map(|k| {
+                blk.set_service(usb_blocks[k]);
+                let capacity = blk.capacity().ok().filter(|&c| c > 0)?;
+                let mut b = [0u8; 20];
+                let guid = match blk.read(1, 1) {
+                    Err(e) => {
+                        aricode_rt::print_error(b"AriInit: USB storage: GPT header read failed", e);
+                        return None;
+                    }
+                    Ok(_) => {
+                        aricode_gpt::Header::parse(&blk.buffer()[..512])
+                            .ok()?
+                            .disk_guid
+                    }
+                };
+                if find_partition(blk, "ARI0").is_none() {
+                    sys::print(b"AriInit: USB storage of ");
+                    sys::print(aricode_rt::fmt_u64(capacity, &mut b));
+                    sys::print(b" sectors without an ARI0 partition: not the system disk\n");
+                    return None;
+                }
+                Some((k, capacity, guid))
+            })
         });
         match found {
-            Some((ep, capacity)) => {
+            Some((k, capacity, guid)) => {
+                let ep = usb_blocks[k];
+                // A relaunched driver serves this disk only (ADR 0031).
+                sup.set_driver_arg(usb_slots[k], driver_arg::expected_disk(&guid));
                 sys::print(b"AriInit: block service via USB (");
                 sys::print(aricode_rt::fmt_u64(capacity, &mut buf));
                 sys::print(b" sectors)\n");
