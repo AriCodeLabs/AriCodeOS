@@ -1,6 +1,8 @@
 # Incident 0003: no Ethernet link after booting a network-updated slot
 
-- **Opened:** 2026-10-17. **Status:** open.
+- **Opened:** 2026-10-17. **Status:** H1 supported by a deliberate
+  reproduction (below); a separate link drop while running is being
+  watched.
 - **Hardware:** the reference laptop (Realtek 10ec:8136, `rtl_net`),
   same cable and router as minutes before.
 
@@ -62,3 +64,28 @@ the current build to the real channel, updating the laptop and
 rebooting into slot B. If the link comes up, the 2026-10-12 build is the
 suspect and its `rtl_net`/init are compared with the current ones; if it
 does not, the warm reboot path of `rtl_net` is investigated.
+
+## Deliberate reproduction (2026-10-17)
+
+Version 3 (develop 45a69ef) published from the development host to the
+real channel, downloaded by the laptop with `update` and `upgrade`
+(ADR 0029 sources, index verified) into slot A, then `reboot`: `booted
+from slot A (active)`, `link up`, DHCP 192.168.1.27, SSH working, both
+EHCI controllers ready. The same path again with version 4 (develop
+df602d1) into slot B: link up, SSH working. A network-updated slot boots
+with a working link when the image comes from the current build, so the
+link-less boots were tied to the test-built image of 2026-10-12 (H1) and
+not to the network update path or the warm reboot. What that image had
+that the current one has not remains unknown: the image was removed with
+the stale channel, so it cannot be compared any more.
+
+## Separate observation: link drop while running (2026-10-17)
+
+With version 3 running for about two hours (uptime 7257 s at the next
+command), the laptop stopped answering on the network. On screen, `net`
+showed `link down (cable?)` with the address still assigned. Reseating
+the cable at both ends brought the link up at once and SSH worked again
+with no reboot. No fault event was recorded. Whether the cable or the
+PHY link handling of `rtl_net` dropped the link is undecided: next time
+it happens, run `diag` before touching the cable and note whether the
+router port LED is lit.
