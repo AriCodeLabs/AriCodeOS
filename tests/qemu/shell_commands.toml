@@ -2,7 +2,7 @@
 # services; the runner types commands when it sees the prompt and ends with shutdown,
 # which the kernel turns into a clean QEMU exit.
 name = "shell.commands"
-description = "arish: help, uptime, mem, ps, ls, cat, devices, services, net, ping, dns, error and shutdown"
+description = "arish: help, uptime, mem, ps, ls, cat, devices, services, net, ping, dns, http (big headers too), error and shutdown"
 level = "full"
 areas = ["shell", "filesystem", "network", "init"]
 cmdline = "qemu_exit shell"
@@ -21,6 +21,7 @@ stdin = [
     "ping 10.0.2.2",
     "dns aricodeos.test",
     "http http://10.0.2.2:17010/hola",
+    "http http://10.0.2.2:17010/big-headers",
     "run hello_app 7",
     "run no-existe",
     "nada",
@@ -51,6 +52,8 @@ serial_contains = [
     "4 of 4 replies",
     "HTTP 200, 19 bytes",
     "Hola desde el host",
+    "HTTP 200, 15 bytes",
+    "big headers ok",
     "hello_app: hello from an SDK app (arg 7)",
     "hello_app: 6 handles",
     "hello_app: uptime ",

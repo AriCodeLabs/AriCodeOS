@@ -10,8 +10,12 @@
 
 /// Maximum length of a host name (RFC 1035).
 pub const MAX_HOST: usize = 253;
-/// Maximum number of response header bytes accepted.
-pub const MAX_HEADERS: usize = 2048;
+/// Maximum number of response header bytes accepted. Real sites send more
+/// than the 2 KiB this started with (github.com answered with 5.3 KiB on
+/// 2026-10-17, letsencrypt.org with 2.2 KiB); 8 KiB is what common servers
+/// accept by default and what fits the 64 KiB user stack next to the TLS
+/// state and the body buffer of the callers.
+pub const MAX_HEADERS: usize = 8192;
 /// Maximum length of a chunk size line (with extensions).
 const MAX_CHUNK_LINE: usize = 256;
 
@@ -880,6 +884,28 @@ mod tests {
             ),
             Err(Error::Unsupported)
         );
+    }
+
+    #[test]
+    fn large_real_world_headers_fit() {
+        // github.com-sized headers (5.3 KiB): a long content-security-policy,
+        // several set-cookie lines and the usual rest, then a short body.
+        let mut raw = b"HTTP/1.1 200 OK\r\nServer: GitHub.com\r\n".to_vec();
+        raw.extend(b"Content-Security-Policy: ");
+        raw.extend(vec![b'p'; 3200]);
+        raw.extend(b"\r\n");
+        for i in 0..6 {
+            raw.extend(std::format!("Set-Cookie: c{i}=").as_bytes());
+            raw.extend(vec![b'v'; 300]);
+            raw.extend(b"; Path=/; Secure; HttpOnly\r\n");
+        }
+        for i in 0..8 {
+            raw.extend(std::format!("X-Header-{i}: value\r\n").as_bytes());
+        }
+        raw.extend(b"Content-Length: 2\r\n\r\nok");
+        assert!(raw.len() > 5300 && raw.len() < MAX_HEADERS);
+        let (f, out) = body(&[&raw], 8);
+        assert_eq!((f.status, out.as_slice()), (200, &b"ok"[..]));
     }
 
     #[test]
