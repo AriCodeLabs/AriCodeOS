@@ -23,3 +23,6 @@ faults). A single binary of each component serves every scenario in
 - Scenarios are declared as data and validated with a unit test.
 - The cmdline becomes available as a general boot configuration mechanism
   for later phases (log level, safe mode...).
+- Test behaviour is off on a real machine unless its key is present. Since
+  ADR 0032 that includes init's test clients (`selftest`), which xtask adds
+  to every scenario by default.

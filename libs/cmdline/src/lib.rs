@@ -48,6 +48,19 @@ impl<'a> CmdLine<'a> {
         self.entries().any(|(k, _)| k == key)
     }
 
+    /// `true` only if `key` appears bare, without `=value`: a switch such as
+    /// `selftest` must not be turned on by `selftest=0`.
+    pub fn has_flag(&self, key: &str) -> bool {
+        self.entries().any(|(k, v)| k == key && v.is_none())
+    }
+
+    /// First key on the line that belongs to `set` (with or without a
+    /// value), if any: e.g. [`keys::TEST_ONLY`] or [`keys::LOADER_ONLY`],
+    /// which a command line for a real machine must not carry.
+    pub fn first_of(&self, set: &[&str]) -> Option<&'a str> {
+        self.entries().map(|(k, _)| k).find(|k| set.contains(k))
+    }
+
     /// Value of the last occurrence of `key=value`.
     pub fn get(&self, key: &str) -> Option<&'a str> {
         self.entries()
@@ -59,9 +72,10 @@ impl<'a> CmdLine<'a> {
 
 /// Recognised keys. Centralised so that bootloader and kernel agree.
 pub mod keys {
-    /// Exit QEMU with `isa-debug-exit` on completion (success) or failure (error).
+    /// Tests only: exit QEMU with `isa-debug-exit` on completion (success)
+    /// or failure (error).
     pub const QEMU_EXIT: &str = "qemu_exit";
-    /// Injected failure for tests: `test=panic`.
+    /// Tests only: an injected failure or kernel self-test, `test=panic`.
     pub const TEST: &str = "test";
     /// Maximum log level: `log=trace|debug|info|warn|error|off`.
     pub const LOG: &str = "log";
@@ -74,18 +88,23 @@ pub mod keys {
     /// `boot_slot=A|B`: AriBoot adds it when booting from a slot
     /// partition; `boot_pending` comes along if the slot awaits confirmation.
     pub const BOOT_SLOT: &str = "boot_slot";
+    /// Added by AriBoot with `boot_slot` (see there).
     pub const BOOT_PENDING: &str = "boot_pending";
-    /// `init_fail_late`: init fails after the services and before confirming.
+    /// Tests only: `init_fail_late`, init fails after the services and before
+    /// confirming.
     pub const INIT_FAIL_LATE: &str = "init_fail_late";
-    /// `restart_storm`: init subjects a test service to 100 restarts.
+    /// Tests only: `restart_storm`, init subjects a test service to 100
+    /// restarts.
     pub const RESTART_STORM: &str = "restart_storm";
-    /// `service_hang`: init launches a test service that never answers and
-    /// checks that the supervisor kills it when its probe expires.
+    /// Tests only: `service_hang`, init launches a test service that never
+    /// answers and checks that the supervisor kills it when its probe
+    /// expires.
     pub const SERVICE_HANG: &str = "service_hang";
-    /// `input_restart`: init supervises an input driver that crashes holding
-    /// a client's read and checks the client keeps the device (ADR 0030).
+    /// Tests only: `input_restart`, init supervises an input driver that
+    /// crashes holding a client's read and checks the client keeps the
+    /// device (ADR 0030).
     pub const INPUT_RESTART: &str = "input_restart";
-    /// `shell_fault`: tests only; the shell accepts `fault`, which makes it
+    /// Tests only: `shell_fault`, the shell accepts `fault`, which makes it
     /// crash on purpose (a session shell that dies, ADR 0030).
     pub const SHELL_FAULT: &str = "shell_fault";
     /// `smp=off`: do not start the application processors (real hardware).
@@ -95,6 +114,14 @@ pub mod keys {
     /// Failure protocol (ADR 0028): a component halts on its first
     /// unexpected failure and init restarts nothing.
     pub const STRICT: &str = "strict";
+    /// Tests only (incident 0005, ADR 0032): init also runs its test-only
+    /// boot checks, which write to the disk and AriFS and talk to the QEMU
+    /// test hosts at 10.0.2.2. Never set on a real machine: without it init
+    /// runs only the read-only health checks. Only the bare key counts
+    /// (`CmdLine::has_flag`): `selftest=0` does not enable it. xtask adds it
+    /// to every QEMU scenario unless the scenario says `selftest = false`.
+    pub const SELFTEST: &str = "selftest";
+
     /// Tests only: `usb_fault=WHEN[:KIND]` injects one failure into the USB
     /// driver. `WHEN` is `N` (the N-th block request, or the N-th HID
     /// report for `hid`) or `idle` (the first one after two idle seconds).
@@ -109,6 +136,24 @@ pub mod keys {
     /// The EHCI driver (ADR 0031) understands `N` and `idle` with `cbw`
     /// (followed by a real Reset Recovery) and `csw`.
     pub const USB_FAULT: &str = "usb_fault";
+
+    /// Every key documented "Tests only": they exit QEMU, inject failures or
+    /// run test programs. `cargo xtask usb-image` refuses them (a unit test
+    /// keeps this list and the documentation in step).
+    pub const TEST_ONLY: &[&str] = &[
+        QEMU_EXIT,
+        TEST,
+        INIT_FAIL_LATE,
+        RESTART_STORM,
+        SERVICE_HANG,
+        INPUT_RESTART,
+        SHELL_FAULT,
+        SELFTEST,
+        USB_FAULT,
+    ];
+
+    /// Keys AriBoot adds itself; `cargo xtask usb-image` refuses them too.
+    pub const LOADER_ONLY: &[&str] = &[BOOT_SLOT, BOOT_PENDING];
 }
 
 #[cfg(test)]
@@ -125,6 +170,67 @@ mod tests {
         assert_eq!(c.get("qemu_exit"), None);
         assert!(!c.has("missing"));
         assert!(!c.is_empty());
+    }
+
+    #[test]
+    fn selftest_is_a_bare_whole_key() {
+        assert!(CmdLine::new("shell selftest").has_flag(keys::SELFTEST));
+        assert!(!CmdLine::new("shell kbd=es").has_flag(keys::SELFTEST));
+        assert!(!CmdLine::new("shell selftests no_selftest").has_flag(keys::SELFTEST));
+        for off in ["selftest=0", "selftest=", "selftest=1"] {
+            assert!(!CmdLine::new(off).has_flag(keys::SELFTEST), "{off}");
+        }
+    }
+
+    #[test]
+    fn test_only_keys_match_their_documentation() {
+        // Each `pub const NAME: &str = "key";` of `keys` with the doc
+        // comment right above it: "Tests only" there <=> in TEST_ONLY.
+        let source = include_str!("lib.rs");
+        let module = &source[source.find("pub mod keys {").unwrap()..];
+        let mut documented = false;
+        let mut checked = 0;
+        for line in module.lines().map(str::trim) {
+            if let Some(text) = line.strip_prefix("///") {
+                // Case-insensitive: "tests only" in mid-sentence counts too.
+                documented |= text
+                    .as_bytes()
+                    .windows(10)
+                    .any(|w| w.eq_ignore_ascii_case(b"tests only"));
+            } else if let Some(rest) = line.strip_prefix("pub const ") {
+                if let Some((_, value)) = rest.split_once(": &str = \"") {
+                    let key = value.trim_end_matches("\";");
+                    assert_eq!(
+                        documented,
+                        keys::TEST_ONLY.contains(&key),
+                        "`{key}`: documented \"Tests only\" = {documented}, TEST_ONLY disagrees"
+                    );
+                    checked += 1;
+                }
+                documented = false;
+            } else {
+                documented = false;
+            }
+        }
+        assert!(checked >= 18, "only {checked} keys parsed");
+        assert!(keys::LOADER_ONLY
+            .iter()
+            .all(|k| !keys::TEST_ONLY.contains(k)));
+    }
+
+    #[test]
+    fn test_only_keys_are_found() {
+        let first = |s| CmdLine::new(s).first_of(keys::TEST_ONLY);
+        assert_eq!(first("shell kbd=es strict log=debug"), None);
+        assert_eq!(first("shell selftest"), Some("selftest"));
+        assert_eq!(first("qemu_exit shell"), Some("qemu_exit"));
+        assert_eq!(first("shell test=panic"), Some("test"));
+        assert_eq!(first("usb_fault=idle shell"), Some("usb_fault"));
+        assert_eq!(first("selftest=0"), Some("selftest"));
+        let loader = |s| CmdLine::new(s).first_of(keys::LOADER_ONLY);
+        assert_eq!(loader("shell boot_slot=B"), Some("boot_slot"));
+        assert_eq!(loader("shell boot_pending"), Some("boot_pending"));
+        assert_eq!(loader("shell kbd=es"), None);
     }
 
     #[test]

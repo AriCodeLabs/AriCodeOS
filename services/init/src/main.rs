@@ -9,9 +9,12 @@
 //! If `arg` carries `init_arg::SHELL`, it launches the shell at the end
 //! (Phase 21).
 //!
-//! In 0.0.8 its service list is a test one: it demonstrates launching,
-//! waiting, reacting to a process killed by a fault and mounting the block
-//! service.
+//! Every boot runs cheap checks that touch nothing outside the machine
+//! (launching, waiting, reacting to a process killed by a fault, the
+//! SPAWNER rights) and read-only health checks of the block, file and
+//! network services. The test clients that write to the disk and AriFS or
+//! talk to the QEMU test hosts run only with `selftest` on the command line
+//! (incident 0005, ADR 0032).
 #![no_std]
 #![no_main]
 
@@ -307,20 +310,37 @@ fn confirm_boot_slot(arg: u64, block_service: Handle) {
 
 /// On top of an already running block service: fsd on the ARI0 partition
 /// (found by GPT name: the test disk and the USB image place it at different
-/// LBAs), its test client and the block client. Returns the fsd endpoint or
-/// init's exit code.
-fn start_storage_stack(sup: &mut Supervisor, service: Handle) -> Result<Handle, u64> {
+/// LBAs). The read-only health checks always run: the block service answers
+/// Info and a read of the GPT, the file service answers a list. With
+/// `selftest` the test clients run too (`fs_client` creates and rewrites
+/// `nuevo.txt`, `blk_client` writes a sector of the raw area; incident
+/// 0005). Returns the fsd endpoint and the file client of the health check
+/// (init keeps using it: clients are not released), or init's exit code.
+fn start_storage_stack(
+    sup: &mut Supervisor,
+    service: Handle,
+    selftest: bool,
+) -> Result<(Handle, FsClient), u64> {
     let mut buf = [0u8; 20];
     let Ok(fs_ep) = sys::endpoint_create() else {
         return Err(12);
     };
-    let ari0 = BlockClient::new(service, HARDWARE, 16)
+    let disk = BlockClient::new(service, HARDWARE, 16)
         .ok()
-        .and_then(|mut blk| find_partition(&mut blk, "ARI0"));
+        .and_then(|mut blk| Some((blk.capacity().ok()?, find_partition(&mut blk, "ARI0"))));
+    let Some((capacity, ari0)) = disk else {
+        say(b"block service does not answer Info");
+        return Err(11);
+    };
     let Some((ari0_lba, _)) = ari0 else {
         say(b"no ARI0 partition on the disk");
         return Err(12);
     };
+    sys::print(b"AriInit: block service answers: ");
+    sys::print(aricode_rt::fmt_u64(capacity, &mut buf));
+    sys::print(b" sectors, GPT read, ARI0 at LBA ");
+    sys::print(aricode_rt::fmt_u64(ari0_lba, &mut buf));
+    sys::print(b"\n");
     let launched = sup
         .register(
             "fsd",
@@ -338,36 +358,179 @@ fn start_storage_stack(sup: &mut Supervisor, service: Handle) -> Result<Handle, 
         say(b"fsd did not start");
         return Err(13);
     }
-    // fsd is watched while its test client runs: if it dies for good (a
-    // corrupt AriFS), the supervisor closes its endpoint and the client
-    // fails at once instead of waiting its full reply timeout.
-    match run_block_client_supervised("fs_client", fs_ep, 0, sup) {
-        Ok(0) => say(b"file service ok"),
-        Ok(code) => {
-            sys::print(b"AriInit: fs_client exited with ");
-            sys::print(aricode_rt::fmt_u64(code, &mut buf));
-            sys::print(b"\n");
-            return Err(14);
-        }
-        Err(e) => {
-            aricode_rt::print_error(b"AriInit: fs_client", e);
-            return Err(14);
+    let Some(files) = count_files(fs_ep, sup) else {
+        say(b"file service does not answer a list");
+        return Err(14);
+    };
+    let Ok(fs) = FsClient::new(fs_ep, HARDWARE) else {
+        say(b"no buffer for the file service client");
+        return Err(14);
+    };
+    sys::print(b"AriInit: file service answers: ");
+    sys::print(aricode_rt::fmt_u64(files, &mut buf));
+    sys::print(b" files\n");
+    if selftest {
+        run_test_client(sup, "fs_client", fs_ep, 0, b"file service ok", 14)?;
+        run_test_client(
+            sup,
+            "blk_client",
+            service,
+            ari0_lba + RAW_AREA_OFFSET,
+            b"block service ok",
+            11,
+        )?;
+    }
+    Ok((fs_ep, fs))
+}
+
+/// Read-only health check of the file service: how many entries its root
+/// lists, or `None` if it does not answer. Each List request waits up to the
+/// file client's reply time (`fs::REPLY_WAIT_MS`, a slow stick may still be
+/// mounting) while the supervisor watches fsd: if fsd dies for good (a
+/// corrupt AriFS) its endpoint is retired and the request fails at once
+/// (ADR 0030). No DMA buffer: List carries none.
+fn count_files(fs_service: Handle, sup: &mut Supervisor) -> Option<u64> {
+    use aricode_proto::fs::{Op, Reply, Request, Status};
+    let mut files = 0u32;
+    loop {
+        let mut req = Request::new(Op::List);
+        req.fd = files;
+        let mut out = [0u8; Reply::LEN];
+        let reply = ask_supervised(
+            sup,
+            fs_service,
+            &req.encode(),
+            sys::fs::REPLY_WAIT_MS,
+            &mut out,
+        )
+        .and_then(Reply::decode)?;
+        match reply.status {
+            Status::Ok => files += 1,
+            Status::NotFound => return Some(files as u64),
+            _ => return None,
         }
     }
-    match run_block_client("blk_client", service, ari0_lba + RAW_AREA_OFFSET) {
-        Ok(0) => say(b"block service ok"),
-        Ok(code) => {
-            sys::print(b"AriInit: blk_client exited with ");
-            sys::print(aricode_rt::fmt_u64(code, &mut buf));
-            sys::print(b"\n");
-            return Err(11);
+}
+
+/// Like `ask`, but the reply wait (up to `wait_ms`) is cut into short
+/// receives with `Supervisor::poll` in between: a service that dies for
+/// good while holding or queueing the request has its endpoint retired and
+/// the wait ends at once with `PeerClosed`.
+fn ask_supervised<'a>(
+    sup: &mut Supervisor,
+    service: Handle,
+    request: &[u8],
+    wait_ms: u64,
+    out: &'a mut [u8],
+) -> Option<&'a [u8]> {
+    let (reply, reply_w) = sys::endpoint_create_pair().ok()?;
+    if sys::ipc_send(service, request, &[reply_w], 1000).is_err() {
+        let _ = sys::handle_close(reply_w);
+        let _ = sys::handle_close(reply);
+        return None;
+    }
+    let deadline = now_ms() + wait_ms;
+    let mut none: [Handle; 0] = [];
+    let got = loop {
+        match sys::ipc_receive(reply, out, &mut none, 100) {
+            Ok((n, _)) => break Some(n),
+            Err(Error::Timeout) if now_ms() < deadline => sup.poll(),
+            Err(_) => break None,
         }
-        Err(e) => {
-            aricode_rt::print_error(b"AriInit: blk_client", e);
-            return Err(11);
+    };
+    let _ = sys::handle_close(reply);
+    got.map(|n| &out[..n])
+}
+
+/// Read-only health check of the network service: the address it reports.
+/// It polls while DHCP is pending until `wait_ms` has passed (0: a single
+/// request). Each request is bounded by `NET_CALL_MS` for the send and as
+/// much for the reply, so the whole check takes at most `wait_ms + 2 *
+/// NET_CALL_MS`. It uses no DMA buffer (Info carries none) and its reply
+/// endpoint is closed by `rpc::call`. A machine with no cable or no DHCP
+/// server is not a boot failure, only reported.
+fn report_network_address(net_service: Handle, wait_ms: u64) {
+    use aricode_proto::net::{Info, Op, Reply, Request, Status};
+    let deadline = now_ms() + wait_ms;
+    let request = Request::new(Op::Info).encode();
+    loop {
+        let mut msg = [0u8; Reply::LEN];
+        let reply = sys::rpc::call(
+            net_service,
+            &request,
+            &[],
+            NET_CALL_MS,
+            NET_CALL_MS,
+            &mut msg,
+        )
+        .ok()
+        .and_then(|n| Reply::decode(&msg[..n]));
+        match reply.map(|r| (r.status, r)) {
+            Some((Status::Ok, r)) => {
+                let mut b = [0u8; 20];
+                sys::print(b"AriInit: network service has address ");
+                for (i, octet) in Info::decode(&r.data).address.iter().enumerate() {
+                    if i > 0 {
+                        sys::print(b".");
+                    }
+                    sys::print(aricode_rt::fmt_u64(*octet as u64, &mut b));
+                }
+                sys::print(b"\n");
+                return;
+            }
+            Some((Status::NoRoute, _)) if now_ms() + NET_POLL_MS < deadline => {
+                sys::thread_sleep(NET_POLL_MS)
+            }
+            Some((Status::NoRoute, _)) => {
+                return say(b"network service: no address yet (DHCP pending)")
+            }
+            _ => return say(b"network service does not answer Info"),
         }
     }
-    Ok(fs_ep)
+}
+
+/// Bound of each wait (send, reply) of a network health request.
+const NET_CALL_MS: u64 = 250;
+/// Pause between network health requests while DHCP is pending.
+const NET_POLL_MS: u64 = 20;
+/// How long the health check waits for DHCP on virtio-net, where QEMU's
+/// DHCP server answers in milliseconds. On Realtek it does not wait (0):
+/// the address is whatever DHCP has given by the time the USB devices are
+/// up, and the shell's `net` shows it later.
+const NET_WAIT_VIRTIO_MS: u64 = 2000;
+
+/// Runs a test client (`selftest` only) with `run_block_client_supervised`
+/// (the services it talks to are watched while it runs, ADR 0030) and
+/// announces `ok` if it exits with 0; otherwise `Err(code)` is init's exit
+/// code.
+fn run_test_client(
+    sup: &mut Supervisor,
+    name: &str,
+    service: Handle,
+    arg: u64,
+    ok: &[u8],
+    code: u64,
+) -> Result<(), u64> {
+    match run_block_client_supervised(name, service, arg, sup) {
+        Ok(0) => {
+            say(ok);
+            Ok(())
+        }
+        Ok(exit) => {
+            let mut buf = [0u8; 20];
+            sys::print(b"AriInit: ");
+            sys::print(name.as_bytes());
+            sys::print(b" exited with ");
+            sys::print(aricode_rt::fmt_u64(exit, &mut buf));
+            sys::print(b"\n");
+            Err(code)
+        }
+        Err(e) => {
+            sys::print(b"AriInit: ");
+            aricode_rt::print_error(name.as_bytes(), e);
+            Err(code)
+        }
+    }
 }
 
 /// Launches fsd with its endpoint (READ|WRITE), the block service endpoint
@@ -467,7 +630,8 @@ fn start_sshd(fs: Handle, net: Handle, sessions: Handle) -> Result<Handle, Error
 /// How to check that the service is already serving.
 #[derive(Clone, Copy)]
 enum Probe {
-    /// A test client checks it afterwards (block, files, network).
+    /// The health checks (and, with `selftest`, the test clients) check it
+    /// afterwards (block, files, network).
     None,
     /// `InputServiceProtocol::Info`.
     Input,
@@ -1038,26 +1202,21 @@ fn restart_storm(sup: &mut Supervisor, fs: &mut FsClient) -> Result<(), u64> {
     Ok(())
 }
 
-/// Offset of the raw area inside ARI0 (the test disk has it at LBA 4096
-/// with ARI0 at 34; the USB image, at the same offset).
+/// Offset of the raw area inside ARI0 that `blk_client` (`selftest` only)
+/// checks and writes: the test disk has it at LBA 4096 with ARI0 at 34,
+/// over virtio-blk or USB. The USB stick image has no raw-area pattern.
 const RAW_AREA_OFFSET: u64 = 4096 - 34;
 
 /// Launches a client of a service with its endpoint (WRITE only) and a
-/// hardware capability for its DMA buffer, and waits for it to exit.
-fn run_block_client(name: &str, service: Handle, arg: u64) -> Result<u64, Error> {
-    let child = spawn_block_client(name, service, arg)?;
-    let result = sys::process_wait(child, TIMEOUT_INFINITE);
-    let _ = sys::handle_close(child);
-    result
-}
-
+/// hardware capability for its DMA buffer.
 fn spawn_block_client(name: &str, service: Handle, arg: u64) -> Result<Handle, Error> {
     let ep = sys::handle_duplicate(service, rights::WRITE | rights::TRANSFER)?;
     let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
     sys::process_spawn_with(SPAWNER, name, arg, &[ep, hw])
 }
 
-/// Like `run_block_client`, polling the supervisor while the client runs.
+/// Launches a client with `spawn_block_client` and waits for it to exit,
+/// polling the supervisor meanwhile (ADR 0030).
 fn run_block_client_supervised(
     name: &str,
     service: Handle,
@@ -1274,17 +1433,16 @@ enum Launched {
 }
 
 impl Broker {
+    /// `fs`: the file client of the storage health check, reused;
+    /// `fs_service`: the fsd endpoint it talks to.
     fn new(
+        fs: Option<FsClient>,
         fs_service: Option<Handle>,
         block: Option<Handle>,
         net: Handle,
         compositor: Option<Handle>,
         inputs: &[Handle],
     ) -> Result<Self, Error> {
-        let fs = match fs_service {
-            Some(ep) => Some(FsClient::new(ep, HARDWARE)?),
-            None => None,
-        };
         let mut ins = [Handle(0); 4];
         let n = inputs.len().min(4);
         ins[..n].copy_from_slice(&inputs[..n]);
@@ -1797,14 +1955,21 @@ fn run_gui(inputs: &[Handle]) -> Result<Handle, u64> {
 fn main(arg: u64) -> u64 {
     say(b"starting");
     let mut args = [0u8; 256];
-    let cmdline = sys::cmdline(SYSTEM, &mut args).map(aricode_cmdline::CmdLine::new);
-    let flag = |key| cmdline.as_ref().is_some_and(|c| c.has(key));
-    if flag(aricode_cmdline::keys::STRICT) {
+    let cmdline = aricode_cmdline::CmdLine::new(sys::cmdline(SYSTEM, &mut args).unwrap_or(""));
+    if cmdline.has(aricode_cmdline::keys::STRICT) {
         STRICT.store(true, core::sync::atomic::Ordering::Relaxed);
         say(b"strict mode: a failing service is not restarted");
     }
-    let input_restart_test = flag(aricode_cmdline::keys::INPUT_RESTART);
+    // Incident 0005, ADR 0032: the checks that write to the disk and AriFS
+    // or talk to the QEMU test hosts run only when the command line asks.
+    let selftest = cmdline.has_flag(aricode_cmdline::keys::SELFTEST);
+    if selftest {
+        say(b"selftest: running the test-only boot checks (QEMU test environment)");
+    }
+    let input_restart_test = cmdline.has(aricode_cmdline::keys::INPUT_RESTART);
     let mut fs_service = None;
+    let mut fs_client = None;
+    let mut net_wait_ms = None;
     let mut block_service = None;
     let mut services = 0u64;
     let mut sup = Supervisor::new();
@@ -1848,7 +2013,8 @@ fn main(arg: u64) -> u64 {
         }
         Err(_) => return 8,
     }
-    // 7. Block service: resident virtio-blk driver + test client.
+    // 7. Block service: resident virtio-blk driver, health checks and, with
+    //    `selftest`, the test clients.
     match find_pci(0x1AF4, 0x1042) {
         Some(index) => {
             let Ok(service) = sys::endpoint_create() else {
@@ -1873,17 +2039,19 @@ fn main(arg: u64) -> u64 {
             }
             services |= SERVICE_BLOCK;
             block_service = Some(service);
-            match start_storage_stack(&mut sup, service) {
-                Ok(fs_ep) => {
+            match start_storage_stack(&mut sup, service, selftest) {
+                Ok((fs_ep, fs)) => {
                     services |= SERVICE_FS;
                     fs_service = Some(fs_ep);
+                    fs_client = Some(fs);
                 }
                 Err(code) => return code,
             }
         }
         None => say(b"no virtio-blk"),
     }
-    // 8. Network service: resident virtio-net driver + test client.
+    // 8. Network service: resident virtio-net driver, its address and, with
+    //    `selftest`, the test clients against the QEMU test hosts.
     let Ok(net_service) = sys::endpoint_create() else {
         return 16;
     };
@@ -1908,51 +2076,28 @@ fn main(arg: u64) -> u64 {
                 return 17;
             }
             services |= SERVICE_NET;
-            match run_block_client("net_client", net_service, 0) {
-                Ok(0) => say(b"network service ok"),
-                Ok(code) => {
-                    sys::print(b"AriInit: net_client exited with ");
-                    sys::print(aricode_rt::fmt_u64(code, &mut buf));
-                    sys::print(b"\n");
-                    return 18;
-                }
-                Err(e) => {
-                    aricode_rt::print_error(b"AriInit: net_client", e);
-                    return 18;
-                }
-            }
-            match run_block_client("tcp_client", net_service, 0) {
-                Ok(0) => say(b"TCP service ok"),
-                Ok(code) => {
-                    sys::print(b"AriInit: tcp_client exited with ");
-                    sys::print(aricode_rt::fmt_u64(code, &mut buf));
-                    sys::print(b"\n");
-                    return 19;
-                }
-                Err(e) => {
-                    aricode_rt::print_error(b"AriInit: tcp_client", e);
-                    return 19;
-                }
-            }
-            match run_block_client("http_client", net_service, 0) {
-                Ok(0) => say(b"HTTP client ok"),
-                Ok(code) => {
-                    sys::print(b"AriInit: http_client exited with ");
-                    sys::print(aricode_rt::fmt_u64(code, &mut buf));
-                    sys::print(b"\n");
-                    return 20;
-                }
-                Err(e) => {
-                    aricode_rt::print_error(b"AriInit: http_client", e);
-                    return 20;
+            net_wait_ms = Some(NET_WAIT_VIRTIO_MS);
+            if selftest {
+                // The QEMU test hosts at 10.0.2.2: UDP responder, TCP echo
+                // and HTTP server (incident 0005).
+                let clients: [(&str, &[u8], u64); 3] = [
+                    ("net_client", b"network service ok", 18),
+                    ("tcp_client", b"TCP service ok", 19),
+                    ("http_client", b"HTTP client ok", 20),
+                ];
+                for (name, ok, code) in clients {
+                    if let Err(code) = run_test_client(&mut sup, name, net_service, 0, ok, code) {
+                        return code;
+                    }
                 }
             }
         }
         None => match find_pci_vendor_class(0x10EC, 0x02, 0x00) {
             // Realtek r8169 (ADR 0024): the driver is launched and gets its
-            // address via DHCP; the test clients talk to the QEMU responder,
-            // which does not exist on real hardware, so they are not run. The
-            // shell's `net`, `ping`, `dns` and `http` serve as the test.
+            // address via DHCP; the test clients talk to the QEMU test hosts,
+            // which do not exist on real hardware, so they never run here,
+            // not even with `selftest`. The shell's `net`, `ping`, `dns` and
+            // `http` serve as the test.
             Some(index) => {
                 let launched = sup
                     .register(
@@ -1970,7 +2115,8 @@ fn main(arg: u64) -> u64 {
                     .is_some_and(|i| sup.launch(i));
                 if launched {
                     services |= SERVICE_NET;
-                    say(b"network service via Realtek (no test clients)");
+                    say(b"network service via Realtek");
+                    net_wait_ms = Some(0);
                 } else {
                     say(b"rtl_net did not start");
                 }
@@ -2090,32 +2236,42 @@ fn main(arg: u64) -> u64 {
     }
     if inputs > 0 {
         services |= SERVICE_INPUT;
-        let mut dups = [Handle(0); 4];
-        for (d, ep) in dups.iter_mut().zip(&input_eps[..inputs]) {
-            let Ok(h) = sys::handle_duplicate(*ep, rights::WRITE | rights::TRANSFER) else {
-                return 23;
-            };
-            *d = h;
-        }
-        let result =
-            sys::process_spawn_with(SPAWNER, "input_client", inputs as u64, &dups[..inputs])
-                .and_then(|child| {
-                    let r = sys::process_wait(child, TIMEOUT_INFINITE);
-                    let _ = sys::handle_close(child);
-                    r
-                });
-        match result {
-            Ok(0) => say(b"input service ok"),
-            Ok(code) => {
-                sys::print(b"AriInit: input_client exited with ");
-                sys::print(aricode_rt::fmt_u64(code, &mut buf));
-                sys::print(b"\n");
-                return 24;
+        // Every input service answered Info before it was published (its
+        // start probe): that is the health check. input_client decodes the
+        // keys and mouse events QEMU injects and would swallow whatever the
+        // owner types during its idle rounds: `selftest` only.
+        if selftest {
+            let mut dups = [Handle(0); 4];
+            for (d, ep) in dups.iter_mut().zip(&input_eps[..inputs]) {
+                let Ok(h) = sys::handle_duplicate(*ep, rights::WRITE | rights::TRANSFER) else {
+                    return 23;
+                };
+                *d = h;
             }
-            Err(e) => {
-                aricode_rt::print_error(b"AriInit: input_client", e);
-                return 24;
+            let result =
+                sys::process_spawn_with(SPAWNER, "input_client", inputs as u64, &dups[..inputs])
+                    .and_then(|child| {
+                        let r = sys::process_wait(child, TIMEOUT_INFINITE);
+                        let _ = sys::handle_close(child);
+                        r
+                    });
+            match result {
+                Ok(0) => say(b"input service ok"),
+                Ok(code) => {
+                    sys::print(b"AriInit: input_client exited with ");
+                    sys::print(aricode_rt::fmt_u64(code, &mut buf));
+                    sys::print(b"\n");
+                    return 24;
+                }
+                Err(e) => {
+                    aricode_rt::print_error(b"AriInit: input_client", e);
+                    return 24;
+                }
             }
+        } else {
+            sys::print(b"AriInit: ");
+            sys::print(aricode_rt::fmt_u64(inputs as u64, &mut buf));
+            sys::print(b" input device(s) ready\n");
         }
     } else {
         say(b"no input devices");
@@ -2162,16 +2318,22 @@ fn main(arg: u64) -> u64 {
                 sys::print(b" sectors)\n");
                 services |= SERVICE_BLOCK;
                 block_service = Some(ep);
-                match start_storage_stack(&mut sup, ep) {
-                    Ok(fs_ep) => {
+                match start_storage_stack(&mut sup, ep, selftest) {
+                    Ok((fs_ep, fs)) => {
                         services |= SERVICE_FS;
                         fs_service = Some(fs_ep);
+                        fs_client = Some(fs);
                     }
                     Err(code) => return code,
                 }
             }
             None => say(b"no USB storage with an ARI0 partition"),
         }
+    }
+    // 9c. Network health check, after the USB devices so that a machine
+    //     waiting for DHCP does not delay its stick and keyboard.
+    if let Some(wait_ms) = net_wait_ms {
+        report_network_address(net_service, wait_ms);
     }
     // 10. Graphical interface: compositor with the framebuffer and the inputs,
     //     and two applications drawing at the same time.
@@ -2194,13 +2356,10 @@ fn main(arg: u64) -> u64 {
     // 10b. Restart storm (tests only, `restart_storm`): 100 restarts of a
     //      test service under the supervisor without leaking resources.
     if arg & sys::abi::init_arg::RESTART_STORM != 0 {
-        let Some(fs_ep) = fs_service else {
+        let Some(fs) = fs_client.as_mut() else {
             return 40;
         };
-        let Ok(mut fs) = FsClient::new(fs_ep, HARDWARE) else {
-            return 40;
-        };
-        if let Err(code) = restart_storm(&mut sup, &mut fs) {
+        if let Err(code) = restart_storm(&mut sup, fs) {
             return code;
         }
     }
@@ -2240,6 +2399,7 @@ fn main(arg: u64) -> u64 {
             return 15;
         };
         let Ok(mut broker) = Broker::new(
+            fs_client,
             fs_service,
             block_service,
             net_service,

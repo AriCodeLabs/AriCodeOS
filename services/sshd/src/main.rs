@@ -75,14 +75,21 @@ impl Entropy {
     }
 
     /// Saves a successor for the next boot (never the state in use). Done
-    /// after the start-up reads: some USB sticks stop answering for a
-    /// moment right after a write.
-    fn save_next(&self, fs: &mut FsClient) {
+    /// before randomness is drawn for something that lasts (a new host key,
+    /// a connection's keys), not at start: a boot nobody connects to writes
+    /// nothing (incident 0005), and a boot that used its randomness never
+    /// leaves the same seed to the next one. A failed save is logged and
+    /// returns `false`, so the caller tries again next time.
+    fn save_next(&self, fs: &mut FsClient) -> bool {
         let next = self.derive(b"next boot");
         let mut hex = [0u8; 65];
         let n = aricode_crypto::hex(&next, &mut hex[..64]).len();
         hex[n] = b'\n';
-        write_file(fs, SEED_FILE, &hex[..n + 1]);
+        let saved = write_file(fs, SEED_FILE, &hex[..n + 1]);
+        if !saved {
+            say(b"could not save random_seed; trying again on the next connection");
+        }
+        saved
     }
 
     fn derive(&self, label: &[u8]) -> [u8; 32] {
@@ -165,7 +172,10 @@ fn read_file(fs: &mut FsClient, name: &str) -> Result<Vec<u8>, ReadError> {
 /// The host key seed: read from AriFS, or created and saved on first start.
 /// A file that could not be read is never overwritten: the boot uses a
 /// key of its own and leaves the saved one alone (audit robustness-1, L4).
-fn host_key(fs: &mut FsClient, entropy: &mut Entropy) -> [u8; 32] {
+/// Before drawing a key that will be saved, the next-boot seed is saved, so
+/// a boot that dies before saving the key never hands the same entropy to
+/// the next one; `seed_saved` records whether that save succeeded.
+fn host_key(fs: &mut FsClient, entropy: &mut Entropy, seed_saved: &mut bool) -> [u8; 32] {
     match read_file(fs, HOST_KEY_FILE) {
         Ok(text) => {
             let mut seed = [0u8; 32];
@@ -182,6 +192,7 @@ fn host_key(fs: &mut FsClient, entropy: &mut Entropy) -> [u8; 32] {
             return entropy.next();
         }
     }
+    *seed_saved = entropy.save_next(fs);
     let seed = entropy.next();
     let mut hex = [0u8; 65];
     let n = aricode_crypto::hex(&seed, &mut hex[..64]).len();
@@ -484,8 +495,8 @@ fn main(_arg: u64) -> u64 {
         }
         say(b"authorized_keys found");
     }
-    let seed = host_key(&mut fs, &mut entropy);
-    entropy.save_next(&mut fs);
+    let mut seed_saved = false;
+    let seed = host_key(&mut fs, &mut entropy, &mut seed_saved);
     let mut listener = match net.tcp_listen(PORT) {
         Ok(l) => l,
         Err(_) => {
@@ -539,6 +550,9 @@ fn main(_arg: u64) -> u64 {
                 let _ = net.tcp_close(sock);
                 continue;
             }
+        }
+        if !seed_saved {
+            seed_saved = entropy.save_next(&mut fs);
         }
         let rng = entropy.next();
         serve(&mut net, sock, peer, seed, rng, keys.clone());

@@ -28,7 +28,8 @@ sudo dd if=build/aricodeos-usb.img of=/dev/sdX bs=4M conv=fsync status=progress
 ```
 
 The image is a GPT disk with six partitions: `ESP` (FAT32 with AriBoot,
-kernel, initrd and `cmdline.txt`), `ARI0` (AriFS with sample files),
+kernel, initrd and `cmdline.txt`), `ARI0` (AriFS with only an English
+`README`, plus the files `--authorized-key` and `--update-source` add),
 `SYSA` (signed system image, slot A active), `SYSB` and `UPDATE` (empty)
 and `ARIBOOT` (A/B state). It is the same image that the
 `usb.image_boot` scenario boots in QEMU, so what gets written has already
@@ -49,6 +50,55 @@ booted once.
    `shutdown`. The file system is the ARI0 partition of the USB stick
    itself, served by usbd (ADR 0023).
 
+## What a normal boot does to the stick (incident 0005, ADR 0032)
+
+A boot without `selftest` on the cmdline, which is every boot of a
+`cargo xtask usb-image` stick, runs only checks that read:
+
+- `hello`, a process killed by a fault, the SPAWNER rights and a driver
+  restart (no disk, no network);
+- `AriInit: block service answers: N sectors, GPT read, ARI0 at LBA L`;
+- `AriInit: file service answers: N files` (a list of AriFS);
+- `AriInit: network service has address A`, or `network service: no
+  address yet (DHCP pending)`, which is not a failure. On the Realtek this
+  is a single request, made after the USB stick and keyboard are up, with
+  no wait (at most half a second if netd is slow to answer); `net` in the
+  shell shows the address later.
+
+If the block or file check fails, init stops before the shell: `block
+service does not answer Info` (exit code 11), `no ARI0 partition on the
+disk` (12), `fsd did not start` (13), `file service does not answer a
+list` (14).
+
+It creates no test file, writes no test sector and sends nothing to the
+QEMU test hosts (10.0.2.2). What the system itself may write at boot:
+
+- the A/B confirmation of a freshly installed slot (`ARIBOOT`);
+- fsd's journal recovery at mount, only after a power cut left a replace
+  pending or the journal broken (`fsd: pending replace ... redone at
+  mount`, `broken journal discarded at mount`);
+- sshd, only with `authorized_keys` installed: the host key the first time
+  it starts if the stick has none (`usb-image --authorized-key` installs
+  one, so normally never; `random_seed` is saved just before), and
+  `random_seed`, rewritten on the first accepted SSH connection of each
+  boot, not at boot (a failed save says so and is retried on the next
+  connection).
+
+The test clients (`fs_client`, `blk_client`, `net_client`, `tcp_client`,
+`http_client`, `input_client`) run only with `selftest`, which belongs to
+the QEMU scenarios: `cargo xtask usb-image --cmdline` refuses it, like
+every other test-only key (`qemu_exit`, `test=`, `usb_fault`,
+`restart_storm`, `service_hang`, `init_fail_late`, `input_restart`,
+`shell_fault`) and the keys AriBoot adds itself (`boot_slot`,
+`boot_pending`). If a stick's
+`cmdline.txt` is edited by hand to carry it, the screen says `AriInit:
+selftest: running the test-only boot checks` and the boot stops at
+`fs_client exited with 2` before any write, because the stick has none of
+the test disk's files. Sticks written before this change carry a
+`nuevo.txt`, the test disk's sample files and the `ARIDISK` pattern at the
+tail of ARI0; none of them is used any more, and AriFS has no delete yet,
+so rewriting the stick with a current image is the way to drop them.
+
 ## Status on the test laptop (2026-10-10)
 
 First complete boot achieved after two AriBoot fixes (non-exclusive GOP
@@ -61,7 +111,7 @@ and standard memory types, ADR 0021). The machine: 2012 Intel (xHCI
 | AriBoot: slots, GOP 800x600, kernel and initrd verified | Atheros AR9485 Wi-Fi (out of scope: ath9k, 802.11 and WPA2) |
 | Wired networking with `rtl_net` (ADR 0024): DHCP, `ping` to the router in 1 ms and `dns google.com` resolved (2026-10-10) | |
 | USB stick as a block service over USB (ADR 0023; "USB Disk 3.0", no `SYNCHRONIZE CACHE`), fsd, slot A confirmation and shell over the PS/2 keyboard (2026-10-10) | EHCI driver written (ADR 0031, 2026-10-17), not yet tried on the laptop |
-| Kernel: memory, ACPI, APIC, PCI (17 functions), init and its tests, `ARICODEOS_KERNEL_READY` | Power: sleep states and battery |
+| Kernel: memory, ACPI, APIC, PCI (17 functions), init and its checks, `ARICODEOS_KERNEL_READY` | Power: sleep states and battery |
 | PS/2 keyboard on the kernel console (backspace included) | |
 | xHCI with MSI (ADR 0022; the controller has no MSI-X), firmware handoff, ports routed, 8 ports, 16 scratchpads, input service ok | |
 
@@ -134,7 +184,8 @@ system) or regenerate the image with `--cmdline`:
 | "rtl-net: no link (cable unplugged?)" | The PHY sees no carrier: the cable, or the firmware did not leave autonegotiation done (rtl-net does not program the PHY yet) |
 | "rtl-net: initialization failed: …" | No memory BAR, no DMA, or the card does not complete the reset; note down the `pci: … 10ec:8136 claimed (…)` line |
 | `net` in the shell shows no address after a few seconds | DHCP gets no reply: check the link (`rtl-net: link at N Mb/s`) and that the network has a DHCP server |
-| "AriInit: fs_client exited with 6" or another code, preceded by "usb-input: WRITE(10) … rejected: sense k/asc/ascq" | The USB stick rejects writes; the sense (key/asc/ascq) says why (7/… = write-protected). A USB stick that does not support `SYNCHRONIZE CACHE` is reported and is not an error |
+| "AriInit: block service does not answer Info" or "AriInit: file service does not answer a list" | The storage stack did not come up (init stops, exit code 11 or 14); the `usb-input:` or `fsd:` lines just before say why |
+| `write`, `diag NAME` or the A/B confirmation fails, preceded by "usb-input: WRITE(10) … rejected: sense k/asc/ascq" | The USB stick rejects writes; the sense (key/asc/ascq) says why (7/… = write-protected). A normal boot writes no test data (ADR 0032), so this shows at the first real write. A USB stick that does not support `SYNCHRONIZE CACHE` is reported and is not an error |
 
 Note down (or photograph) the last lines before the failure: `EXCEPTION`,
 `KERNEL PANIC` and `iommu: DMA fault` carry the necessary information.

@@ -92,7 +92,7 @@ pub fn run(cli: &Cli, release: bool) -> Result {
 
 /// One boot to run: the scenario's only boot, or each one in `[[boots]]`.
 struct BootRun<'a> {
-    cmdline: &'a str,
+    cmdline: String,
     stdin: &'a [String],
     kill_on: Option<&'a str>,
     expect: &'a scenario::Expect,
@@ -108,7 +108,7 @@ fn run_scenario(
     let workdir = image::scenario_dir(&root, &s.name)?;
     let runs: Vec<BootRun> = if s.boots.is_empty() {
         vec![BootRun {
-            cmdline: &s.cmdline,
+            cmdline: s.boot_cmdline(&s.cmdline),
             stdin: &s.stdin,
             kill_on: None,
             expect: &s.expect,
@@ -117,7 +117,7 @@ fn run_scenario(
         s.boots
             .iter()
             .map(|b| BootRun {
-                cmdline: &b.cmdline,
+                cmdline: s.boot_cmdline(&b.cmdline),
                 stdin: &b.stdin,
                 kill_on: b.kill_on.as_deref(),
                 expect: &b.expect,
@@ -279,7 +279,7 @@ fn run_scenario(
         } else {
             s.name.clone()
         };
-        let esp = image::build_scenario_esp(base, &root, &esp_name, run.cmdline, &s.inject)?;
+        let esp = image::build_scenario_esp(base, &root, &esp_name, &run.cmdline, &s.inject)?;
         let input = qemu::Input {
             prompt: &s.prompt,
             lines: run.stdin,
