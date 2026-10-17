@@ -168,6 +168,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ari-usb-ehci"
+version = "0.9.0"
+dependencies = [
+ "aricode-build",
+ "aricode-cmdline",
+ "aricode-ehci",
+ "aricode-input",
+ "aricode-proto",
+ "aricode-rt",
+ "aricode-sys",
+ "aricode-usb-storage",
+ "aricode-xhci",
+]
+
+[[package]]
 name = "ari-usb-input"
 version = "0.9.0"
 dependencies = [
@@ -263,6 +278,13 @@ version = "0.9.0"
 [[package]]
 name = "aricode-crypto"
 version = "0.9.0"
+
+[[package]]
+name = "aricode-ehci"
+version = "0.9.0"
+dependencies = [
+ "aricode-xhci",
+]
 
 [[package]]
 name = "aricode-elf"
