@@ -5,7 +5,7 @@
 use crate::image::{self, OVMF_CODE};
 use crate::{build_dir, root, Result};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -802,7 +802,7 @@ pub fn run_headless(
         Some(esp)
     };
     let _responder = Responder::start()?;
-    let qmp_path = workdir.join("qmp.sock");
+    let qmp_path = qmp_socket_path(workdir);
     let _ = std::fs::remove_file(&qmp_path);
     // Every frame on the guest's network, for the count of guest
     // frames appended to the capture.
@@ -996,8 +996,53 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
+/// Longest UNIX socket path Linux and QEMU accept: `sun_path` holds 108
+/// bytes with the terminator.
+const SUN_PATH_MAX: usize = 107;
+
+/// Where the QMP socket of a scenario run in `workdir` goes: next to its
+/// logs, unless that path does not fit a socket address (a deep checkout,
+/// such as a git worktree under `.claude/worktrees/`: QEMU refuses it and
+/// the host cannot connect, so the scenario fails before or without its
+/// input events), in which case a short unique path in the system's
+/// temporary directory. Removed after the run either way.
+pub fn qmp_socket_path(workdir: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let local = workdir.join("qmp.sock");
+    if local.as_os_str().len() <= SUN_PATH_MAX {
+        return local;
+    }
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("aricode-qmp-{}-{n}.sock", std::process::id()))
+}
+
 #[cfg(test)]
 mod tests {
+    use super::qmp_socket_path;
+    use std::path::Path;
+
+    #[test]
+    fn qmp_socket_fits_a_unix_address() {
+        // Next to the logs when it fits.
+        let short = Path::new("/home/u/AriCodeOS/build/scenarios/usb.short_csw");
+        assert_eq!(short.join("qmp.sock"), qmp_socket_path(short));
+        // A deep worktree: 100 bytes of directory plus "/qmp.sock" is 109.
+        let deep = Path::new("/")
+            .join("d".repeat(99))
+            .join("usb.ehci_fault_csw");
+        assert!(deep.join("qmp.sock").as_os_str().len() > super::SUN_PATH_MAX);
+        let a = qmp_socket_path(&deep);
+        let b = qmp_socket_path(&deep);
+        assert!(
+            a.as_os_str().len() <= super::SUN_PATH_MAX,
+            "{}",
+            a.display()
+        );
+        assert!(a.starts_with(std::env::temp_dir()));
+        assert_ne!(a, b, "two runs must not share a socket");
+    }
+
     #[test]
     fn responder_echoes_and_answers_dns() {
         let mut out = [0u8; 512];
