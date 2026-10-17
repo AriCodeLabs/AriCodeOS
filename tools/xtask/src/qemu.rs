@@ -302,7 +302,8 @@ pub struct Responder {
 }
 
 /// Test HTTP server: `/hola` (Content-Length), `/chunked`
-/// (Transfer-Encoding: chunked) and 404 for everything else.
+/// (Transfer-Encoding: chunked), `/big-headers` (5 KiB of headers, the
+/// size github.com sends) and 404 for everything else.
 fn http_serve(mut stream: std::net::TcpStream) {
     use std::io::Write;
     let mut buf = [0u8; 2048];
@@ -321,6 +322,14 @@ fn http_serve(mut stream: std::net::TcpStream) {
     let response: Vec<u8> = match path {
         "/hola" => b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 19\r\nConnection: close\r\n\r\nHola desde el host\n".to_vec(),
         "/chunked" => b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nd\r\nprimer trozo,\r\ne\r\n segundo trozo\r\n0\r\n\r\n".to_vec(),
+        "/big-headers" => {
+            let mut r = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n".to_vec();
+            for i in 0..40 {
+                r.extend(format!("X-Filler-{i:02}: {}\r\n", "x".repeat(110)).as_bytes());
+            }
+            r.extend(b"Content-Length: 15\r\nConnection: close\r\n\r\nbig headers ok\n");
+            r
+        }
         // The scenarios' update channel (ADR 0027), never the real one.
         p if p.starts_with("/update/") => file_response(&image::test_update_dir(), &p["/update/".len()..]),
         _ => b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nno existe".to_vec(),
