@@ -3,7 +3,8 @@
 - **Date:** 2026-10-17
 - **Environment:** reference laptop, develop 45a69ef (ADR 0029 update
   sources), no installed apps.
-- **Status:** fixed in `fix/update-state-sections`.
+- **Status:** fixed in `fix/update-state-sections` (develop 7585877),
+  verified on the laptop 2026-10-17 (see "Verification on hardware").
 
 ## Observation
 
@@ -65,3 +66,18 @@ empty last section, which is why they did not show it.
   flagged.
 - QEMU scenario `update.state_rewrites` (no installed apps, `update`
   twice, `upgrade`, `update`): no "invalid line(s)" and no repair.
+
+## Verification on hardware (2026-10-17)
+
+Laptop running version 3 (without the fix), state file as above with two
+`[plan]` headers. `update` and `upgrade` to version 4 (develop df602d1,
+installed into slot B) still printed the "invalid line(s)" messages and
+left three `[plan]` headers: expected, the old updater was running. After
+the reboot into version 4:
+
+- `updater/state` reads `[installed]`, `[plan]`, `[staged]`, one header
+  each;
+- exactly one `inst-state-repaired` (code 13) event, from the installer's
+  LIST run before the first `update`; no `upd-` event, as the audit
+  predicted;
+- `update` reports installed 4, up to date, with no "invalid line(s)".
