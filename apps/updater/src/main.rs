@@ -93,6 +93,7 @@ mod code {
     pub const INSTALLED_LIST: u64 = 36;
     pub const PLAN: u64 = 37;
     pub const STATE_UNREADABLE: u64 = 38;
+    pub const FS_FULL: u64 = 39;
     pub const DOWNGRADE_REFUSED: u64 = 40;
     pub const DOWNLOAD: u64 = 41;
     pub const DOWNLOAD_MISMATCH: u64 = 42;
@@ -183,6 +184,32 @@ fn write_file(fs: &mut FsClient, name: &str, data: &[u8]) -> bool {
     let ok = fs.replace(fd, data) == Ok(data.len());
     let _ = fs.close(fd);
     ok
+}
+
+/// Makes sure every file in `names` exists, creating the missing ones
+/// empty, so later writes cannot fail for lack of an AriFS entry. `Err`
+/// with the number of files that could not be created.
+fn reserve(fs: &mut FsClient, names: &[&str]) -> Result<(), usize> {
+    let mut missing = 0;
+    for name in names {
+        match fs.open(name) {
+            Ok(fd) => {
+                let _ = fs.close(fd);
+            }
+            Err(FsError::Status(aricode_proto::fs::Status::NotFound)) => match fs.create(name) {
+                Ok(fd) => {
+                    let _ = fs.close(fd);
+                }
+                Err(_) => missing += 1,
+            },
+            Err(_) => missing += 1,
+        }
+    }
+    if missing == 0 {
+        Ok(())
+    } else {
+        Err(missing)
+    }
 }
 
 /// One line in the install history (ADR 0029, decision 7).
@@ -1203,6 +1230,8 @@ fn upgrade(
             &format!("{what} {version} was not reported by the last update: run update"),
         )
     };
+    // 1. Decide everything first: nothing is downloaded or written yet.
+    let mut system_job = None;
     if let Some((i, entry)) = best_system(&indexes) {
         if !plan.contains(&PlanItem::System(entry.version)) {
             if plan.iter().any(|p| matches!(p, PlanItem::System(_))) {
@@ -1223,19 +1252,7 @@ fn upgrade(
                 Ok(mut disk) => {
                     let installed = disk.active_version(pk);
                     match decide("system", installed, entry.version, allow_downgrade) {
-                        Ok(true) => {
-                            if let Err(code) = upgrade_system(
-                                fs,
-                                net,
-                                &mut disk,
-                                urls[slots[i]],
-                                entry,
-                                installed,
-                                pk,
-                            ) {
-                                result = code;
-                            }
-                        }
+                        Ok(true) => system_job = Some((disk, i, entry, installed)),
                         Ok(false) => {}
                         Err(code) => result = code,
                     }
@@ -1244,7 +1261,7 @@ fn upgrade(
             }
         }
     }
-    let mut staged: Vec<StagedEntry> = Vec::new();
+    let mut app_jobs = Vec::new();
     for (name, version) in installed_apps(fs).unwrap_or_default() {
         let Some((i, entry)) = best_app(&indexes, &name) else {
             continue;
@@ -1268,11 +1285,44 @@ fn upgrade(
                 continue;
             }
         }
-        let Some(file) = upd::staged_package_file(staged.len()) else {
+        if app_jobs.len() == upd::MAX_STAGED {
             say!(
                 "app {name}: more upgrades than stage slots ({}): run upgrade again",
                 upd::MAX_STAGED
             );
+            break;
+        }
+        app_jobs.push((i, entry));
+    }
+    // 2. Reserve every AriFS entry the installs will need (the history
+    //    after a system install, one stage file per package) before the
+    //    first irreversible step: a full table must refuse the whole
+    //    upgrade, never leave the system scheduled and an app not staged
+    //    (QEMU run of update.fs_nearly_full).
+    let mut needed: Vec<&str> = Vec::new();
+    if system_job.is_some() {
+        needed.push(upd::HISTORY_FILE);
+    }
+    needed.extend((0..app_jobs.len()).filter_map(upd::staged_package_file));
+    if let Err(missing) = reserve(fs, &needed) {
+        return fault(
+            code::FS_FULL,
+            "upd-fs-full",
+            &format!(
+                "AriFS has no room for {missing} more file(s) this upgrade needs: nothing installed"
+            ),
+        );
+    }
+    // 3. Install.
+    if let Some((mut disk, i, entry, installed)) = system_job {
+        if let Err(code) = upgrade_system(fs, net, &mut disk, urls[slots[i]], entry, installed, pk)
+        {
+            result = code;
+        }
+    }
+    let mut staged: Vec<StagedEntry> = Vec::new();
+    for (k, (i, entry)) in app_jobs.into_iter().enumerate() {
+        let Some(file) = upd::staged_package_file(k) else {
             break;
         };
         match stage_app(fs, net, urls[slots[i]], entry, file, pk) {

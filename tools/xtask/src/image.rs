@@ -431,6 +431,9 @@ pub enum DiskVariant {
     /// Normal slots and an AriFS table with only `FS_FREE_ENTRIES` free
     /// entries (filler files): what `update` and `upgrade` need must fit.
     FsNearlyFull,
+    /// Like `FsNearlyFull` with one entry less: `upgrade` must refuse
+    /// before installing anything.
+    FsOneShort,
     /// Normal slots and a committed but unapplied `README` replacement in the
     /// AriFS journal (power cut after commit): fsd replays it.
     FsPendingReplace,
@@ -459,6 +462,7 @@ impl DiskVariant {
             "a-corrupt" => Self::CorruptA,
             "pending-b-older-update" => Self::PendingBOlderUpdate,
             "fs-nearly-full" => Self::FsNearlyFull,
+            "fs-one-short" => Self::FsOneShort,
             "fs-pending-replace" => Self::FsPendingReplace,
             "fs-corrupt" => Self::FsCorrupt,
             "wasm-restricted" => Self::WasmRestricted,
@@ -627,6 +631,7 @@ pub fn write_test_disk(
             overwrite_arifs(&mut img, PART_ARI0, WASM_MODULE_FILE, BAD_IMPORT_WASM)?
         }
         DiskVariant::FsNearlyFull => fill_arifs(&mut img, PART_ARI0, FS_FREE_ENTRIES)?,
+        DiskVariant::FsOneShort => fill_arifs(&mut img, PART_ARI0, FS_FREE_ENTRIES - 1)?,
         DiskVariant::FsCorrupt => {
             // First byte of the name of the first entry in use.
             img[(PART_ARI0.0 + aricode_arifs::TABLE_LBA) as usize * 512] ^= 0x20;
@@ -671,6 +676,7 @@ pub fn write_test_disk(
             DiskVariant::Slots
             | DiskVariant::CorruptA
             | DiskVariant::FsNearlyFull
+            | DiskVariant::FsOneShort
             | DiskVariant::UpdateEmpty
             | DiskVariant::EspOnly
             | DiskVariant::UsbImage
@@ -712,14 +718,22 @@ fn install_files(img: &mut [u8], part: (u64, u64), files: &[(String, Vec<u8>)]) 
     fs.flush().map_err(|e| format!("arifs: {e:?}"))
 }
 
-/// Free AriFS entries left by `fs-nearly-full`: exactly what a first
-/// `update` and an `upgrade` of the system and one installed app create in
-/// the updater's directory (`state`, `indexes`, `last.log`, `history.log`,
-/// `pkg-1.aripkg`; re-audit R3, final re-audit L-c).
+/// Free AriFS entries left for the updater by `fs-nearly-full`: exactly
+/// what a first `update` and an `upgrade` of the system and one installed
+/// app create in the updater's directory (`state`, `indexes`, `last.log`,
+/// `history.log`, `pkg-1.aripkg`; re-audit R3, final re-audit L-c). The
+/// QEMU run of 2026-10-17 confirmed these five files in `ls`.
 pub const FS_FREE_ENTRIES: usize = 5;
 
+/// Files the system itself creates in AriFS on every boot, before the
+/// shell: init's `fs_client` self-test creates `nuevo.txt` when it is
+/// missing (`user/testprogs/src/bin/fs_client.rs`). The first QEMU run of
+/// `update.fs_nearly_full` failed because this entry was not counted: the
+/// table was full one file early and the stage file could not be created.
+const BOOT_CREATED_FILES: &[&str] = &["nuevo.txt"];
+
 /// Fills the AriFS table with empty `fill-NN` files until only `free`
-/// entries are left.
+/// entries are left once the boot has created its own files.
 fn fill_arifs(img: &mut [u8], part: (u64, u64), free: usize) -> Result {
     let mut fs = aricode_arifs::AriFs::open(VecDisk {
         data: img,
@@ -727,7 +741,11 @@ fn fill_arifs(img: &mut [u8], part: (u64, u64), free: usize) -> Result {
     })
     .map_err(|e| format!("arifs: {e:?}"))?;
     let used = fs.entries().count();
-    for i in 0..aricode_arifs::MAX_FILES.saturating_sub(used + free) {
+    let at_boot = BOOT_CREATED_FILES
+        .iter()
+        .filter(|name| fs.find(name).is_none())
+        .count();
+    for i in 0..aricode_arifs::MAX_FILES.saturating_sub(used + at_boot + free) {
         let name = format!("fill-{i:02}");
         fs.create(&name)
             .map_err(|e| format!("arifs {name}: {e:?}"))?;

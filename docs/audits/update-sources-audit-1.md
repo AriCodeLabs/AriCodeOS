@@ -89,3 +89,19 @@ Verdict: safe to merge once QEMU passes. Three low items, fixed:
 | L-a | Read errors silently reset state: `read_stored` and `read_state` treated an unreadable or oversized file as empty, and the next write dropped its content (stored serials included). | Updater: `read_state` (`apps/updater/src/main.rs` 253) returns an error after fault `upd-state-unreadable`, and `write_state_section` refuses to rewrite it; `read_stored` (709) records `upd-indexes-unreadable` and sets `INDEXES_UNREADABLE` (706), after which `write_stored` refuses to rewrite `indexes` for the rest of the run (735). Installer: `read_state` (`apps/installer/src/main.rs` 189) distinguishes a missing file from an unreadable one (`inst-state-unreadable`), `write_state_section` (207) refuses, and STAGED stops without touching the list (359). |
 | L-b | The UX branch opened the disk and recorded faults on machines without A/B partitions. | `Disk::probe` (updater 351, over `open_with(false)`, 357) returns `None` silently; the branch uses it (1210). |
 | L-c | `update.fs_nearly_full` did not cover an app upgrade. | Five free entries (`FS_FREE_ENTRIES`, `tools/xtask/src/image.rs` 719); the scenario installs hello_ext v1 and upgrades the system and hello_ext 2 through one stage file, ending with `32 file(s)`. |
+
+### QEMU follow-up (2026-10-17)
+
+`update.fs_nearly_full` failed in the first QEMU run (`updater: cannot
+write pkg-1.aripkg`, exit 45). Evidence from its `ls`: the updater had
+created exactly the four expected files (`state`, `indexes`, `last.log`,
+`history.log`), plus `nuevo.txt`, which init's `fs_client` self-test
+creates on every boot (`user/testprogs/src/bin/fs_client.rs`). The
+updater's count (five) was right; the disk variant forgot the boot-time
+entry. Fixed in the variant (`BOOT_CREATED_FILES`,
+`tools/xtask/src/image.rs` 733-744). Decision: `upgrade` now decides
+everything first and reserves every AriFS entry it will need before the
+first irreversible step (`reserve`, `apps/updater/src/main.rs` 192 and
+1297-1310, fault `upd-fs-full`), so a full table refuses the whole upgrade
+instead of scheduling the system and failing to stage an app; covered by
+the new scenario `update.fs_one_short`.

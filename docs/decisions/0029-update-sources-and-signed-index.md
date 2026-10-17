@@ -226,10 +226,19 @@ There is no key rotation in the protocol yet (see below).
 - AriFS table (32 entries in all, re-audit R3): the updater's directory
   uses `sources`, `indexes` (every stored copy), `state` (installed, plan
   and staged sections), `last.log`, `history.log` and up to four stage
-  files, plus `update_url` on migrated machines. A first `update` and a
-  system `upgrade` need four free entries, one more per staged package
-  (`update.fs_nearly_full` covers the system and one app with five); a
-  full table is a visible write fault, never a silent skip. A `state` or
+  files, plus `update_url` on migrated machines. A first `update` creates
+  `state` (installer `LIST`), `indexes` and `last.log`; an `upgrade` adds
+  `history.log` after a system install and one stage file per package:
+  five free entries for the system and one app (`update.fs_nearly_full`;
+  the test system's own `fs_client` takes one more at boot for
+  `nuevo.txt`, which the first QEMU run of that scenario exposed).
+  `upgrade` decides everything first and reserves (creates empty) every
+  entry it will need before the first irreversible step: if the table
+  cannot hold them it refuses the whole upgrade (`upd-fs-full`,
+  `update.fs_one_short`), so a full table never leaves the system
+  scheduled and an app not staged. A download or verification failure
+  after the system install can still leave apps unstaged; that is
+  reported as its own fault. A `state` or
   `indexes` file that cannot be read (or is oversized) is a fault and is
   not rewritten in that run, so neither the exchanged lists nor the stored
   serials are reset silently.
