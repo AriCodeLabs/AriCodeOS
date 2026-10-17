@@ -18,6 +18,8 @@ pub struct UsbOptions {
     pub hid: bool,
     /// That xHCI offers MSI only (no MSI-X).
     pub hid_msi: bool,
+    /// No virtio keyboard and mouse: QMP input reaches the USB HID devices.
+    pub hid_only_input: bool,
     /// An extra EHCI (class 0c.03, interface 0x20): not xHCI.
     pub legacy_controller: bool,
     /// The test disk hangs off the xHCI as USB storage (`usb-storage`)
@@ -96,14 +98,19 @@ fn base_command(
         "virtio-net-pci,netdev=net0,disable-legacy=on,disable-modern=off,iommu_platform=on",
     ]);
     // virtio keyboard and mouse with fixed ids: QMP injects events per device.
-    q.args([
-        "-device",
-        "virtio-keyboard-pci,id=kbd0,disable-legacy=on,disable-modern=off,iommu_platform=on",
-    ]);
-    q.args([
-        "-device",
-        "virtio-mouse-pci,id=mouse0,disable-legacy=on,disable-modern=off,iommu_platform=on",
-    ]);
+    // Left out when the USB HID devices must be the only input (QEMU sends
+    // QMP input to the most recently activated handler, and a virtio
+    // keyboard activates when its guest driver starts).
+    if !usb.hid_only_input {
+        q.args([
+            "-device",
+            "virtio-keyboard-pci,id=kbd0,disable-legacy=on,disable-modern=off,iommu_platform=on",
+        ]);
+        q.args([
+            "-device",
+            "virtio-mouse-pci,id=mouse0,disable-legacy=on,disable-modern=off,iommu_platform=on",
+        ]);
+    }
     if usb.hid || usb.storage {
         // xHCI (Phase 25, part two) with a USB HID keyboard and mouse and/or
         // the test disk as USB storage.
@@ -136,6 +143,8 @@ pub struct InputProbe<'a> {
     pub keys: &'a [String],
     pub mouse_rel: Option<(i32, i32)>,
     pub click: Option<&'a str>,
+    /// Pause after each key event (ms); none by default.
+    pub key_delay_ms: u64,
 }
 
 /// Minimal QMP client over a Unix socket: handshake and hand-written JSON
@@ -191,6 +200,7 @@ fn run_input_probe(
     keys: &[String],
     mouse_rel: Option<(i32, i32)>,
     click: Option<&str>,
+    key_delay: Duration,
 ) -> String {
     let mut qmp = match Qmp::connect(path) {
         Ok(q) => q,
@@ -237,6 +247,7 @@ fn run_input_probe(
                         r#"{{"type":"key","data":{{"down":true,"key":{{"type":"qcode","data":"{part}"}}}}}}"#
                     ),
                 )?;
+                std::thread::sleep(key_delay);
             }
             for part in parts.iter().rev() {
                 step(
@@ -245,6 +256,7 @@ fn run_input_probe(
                         r#"{{"type":"key","data":{{"down":false,"key":{{"type":"qcode","data":"{part}"}}}}}}"#
                     ),
                 )?;
+                std::thread::sleep(key_delay);
             }
         }
         Ok(())
@@ -803,8 +815,9 @@ pub fn run_headless(
                 let keys = p.keys.to_vec();
                 let rel = p.mouse_rel;
                 let click = p.click.map(String::from);
+                let delay = Duration::from_millis(p.key_delay_ms);
                 input_thread = Some(std::thread::spawn(move || {
-                    run_input_probe(&path, &keys, rel, click.as_deref())
+                    run_input_probe(&path, &keys, rel, click.as_deref(), delay)
                 }));
             }
             if input_thread.as_ref().is_some_and(|t| t.is_finished()) {

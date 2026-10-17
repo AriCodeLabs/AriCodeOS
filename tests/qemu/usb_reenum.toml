@@ -6,7 +6,9 @@
 # (Enable Slot, Address Device, descriptors, SET_CONFIGURATION, Configure
 # Endpoint, INQUIRY / TEST UNIT READY / READ CAPACITY) within its step. The
 # same medium comes back in service and the next write succeeds; `diag`
-# shows the attempt and its outcome.
+# shows the attempt and its outcome. The new slot reuses the memory of the
+# released one (only after its Disable Slot succeeded, xHCI 4.6.4), so the
+# arena does not grow (incident 0001 audit 5 M4).
 name = "usb.reenum"
 description = "usbd: a given-up endpoint disables the slot, re-enumerates the stick from the idle loop and serves again"
 level = "full"
@@ -34,6 +36,8 @@ serial_contains = [
     "usb-input: storage device ",
     "usb-input: USB storage on port ",
     "usb-input: storage device back in service",
+    "usb-input: reusing the DMA memory of a released slot",
+    "bytes used, 0 more than after the boot enumeration",
     "write: 11 bytes to probe.txt",
     "fault reported by process",
     "usb inj w lba",
@@ -48,6 +52,7 @@ serial_absent = [
     "given up until",
     "re-enumeration failed",
     "a different medium",
+    "slot memory abandoned",
     "usb cmd fail",
     "usb cmd refused",
     "usb cmd pending",

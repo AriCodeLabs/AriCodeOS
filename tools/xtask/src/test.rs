@@ -223,6 +223,7 @@ fn run_scenario(
             keys: &h.keys,
             mouse_rel: h.mouse_rel,
             click: h.click.as_deref(),
+            key_delay_ms: h.key_delay_ms,
         });
         let ssh_probe = match (&s.host_ssh, &ssh_key) {
             (Some(h), Some(key)) => Some(qemu::SshProbe {
@@ -247,6 +248,7 @@ fn run_scenario(
             usb: qemu::UsbOptions {
                 hid: s.usb_hid,
                 hid_msi: s.usb_hid_msi,
+                hid_only_input: s.usb_hid_only_input,
                 legacy_controller: s.usb_legacy_controller,
                 storage: s.usb_storage,
             },
