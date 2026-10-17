@@ -1,0 +1,47 @@
+# Incident 0007 (ADR 0028/0031): a CSW is exactly 13 bytes (BOT 5.2); a
+# reply of any other length is an invalid CSW that needs a Reset Recovery
+# (BOT 6.3, 5.3.4). `usb_fault=idle:short-csw` makes the CSW read of the
+# first block request after two idle seconds look as if the device moved
+# only the signature and the tag (8 bytes), with the previous command's
+# zero residue and Passed status still in the buffer: the exact reply the
+# release audit of 0.11.0 fed to `Ehci::scsi`, which then returned success.
+# The driver must reject the count before reading a field, record the
+# fault, run the Reset Recovery at once, answer Io, and serve the next
+# write.
+name = "usb.ehci_short_csw"
+description = "EHCI driver: an 8-byte CSW is invalid (BOT 5.2), never a success; Reset Recovery follows, the request answers Io and the next write succeeds"
+level = "full"
+areas = ["usb", "storage", "diag"]
+usb_ehci_storage = true
+cmdline = "qemu_exit shell usb_fault=idle:short-csw"
+timeout_secs = 120
+stdin = [
+    "repeat 10 ping 10.0.2.2",
+    "write probe.txt after idle",
+    "repeat 3 ping 10.0.2.2",
+    "write probe.txt second try",
+    "diag",
+    "shutdown",
+]
+
+[expect]
+exit = 33
+serial_contains = [
+    "usb-ehci: injected fault: the CSW read moved 8 bytes",
+    "usb-ehci: CSW of 8 bytes, not 13 (BOT 5.2): invalid, no status for tag ",
+    "usb-ehci: Reset Recovery (BOT 5.3.4): mass storage reset, both bulk halts cleared",
+    "usb-ehci: Reset Recovery done; transport ready",
+    "write: write error",
+    "write: 11 bytes to probe.txt",
+    "fault reported by process",
+    "usb csw length (code 8)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "strict",
+    "storage unusable",
+    "queue head lost",
+    "bytes not transferred",
+    "CSW received after the failure",
+]

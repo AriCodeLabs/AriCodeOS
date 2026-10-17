@@ -5,7 +5,7 @@
 use crate::image::{self, OVMF_CODE};
 use crate::{build_dir, root, Result};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -802,8 +802,7 @@ pub fn run_headless(
         Some(esp)
     };
     let _responder = Responder::start()?;
-    let qmp_path = workdir.join("qmp.sock");
-    let _ = std::fs::remove_file(&qmp_path);
+    let qmp = QmpSocket::new(workdir);
     // Every frame on the guest's network, for the count of guest
     // frames appended to the capture.
     let pcap_path = workdir.join("net.pcap");
@@ -827,7 +826,7 @@ pub fn run_headless(
     .args(["-display", "none", "-monitor", "none", "-serial", "stdio"])
     .args([
         "-qmp",
-        &format!("unix:{},server=on,wait=off", qmp_path.display()),
+        &format!("unix:{},server=on,wait=off", qmp.path().display()),
     ])
     .stdin(if input.lines.is_empty() {
         Stdio::null()
@@ -922,7 +921,7 @@ pub fn run_headless(
                 && input_result.is_none()
                 && count_occurrences(&captured.lock().expect("capture"), p.marker.as_bytes()) > 0
             {
-                let path = qmp_path.clone();
+                let path = qmp.path().to_path_buf();
                 let keys = p.keys.to_vec();
                 let rel = p.mouse_rel;
                 let click = p.click.map(String::from);
@@ -947,7 +946,7 @@ pub fn run_headless(
     if let Some(t) = ssh_thread.take() {
         ssh_result = t.join().ok();
     }
-    let _ = std::fs::remove_file(&qmp_path);
+    drop(qmp);
     reader.join().map_err(|_| "serial reader")?;
     let mut bytes = captured.lock().expect("capture").clone();
     for line in [probe_result, input_result, ssh_result]
@@ -996,8 +995,91 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
+/// Longest UNIX socket path Linux and QEMU accept: `sun_path` holds 108
+/// bytes with the terminator.
+const SUN_PATH_MAX: usize = 107;
+
+/// Where the QMP socket of a scenario run in `workdir` goes: next to its
+/// logs, unless that path does not fit a socket address (a deep checkout,
+/// such as a git worktree under `.claude/worktrees/`: QEMU refuses it and
+/// the host cannot connect, so the scenario fails before or without its
+/// input events), in which case a short unique path in the system's
+/// temporary directory. `QmpSocket` removes it after the run either way.
+pub fn qmp_socket_path(workdir: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let local = workdir.join("qmp.sock");
+    if local.as_os_str().len() <= SUN_PATH_MAX {
+        return local;
+    }
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("aricode-qmp-{}-{n}.sock", std::process::id()))
+}
+
+/// The QMP socket of one run: QEMU creates it at `path()`, the guard
+/// removes it when dropped, so every exit of the run (`?`, a panic)
+/// cleans up a fallback socket in the temporary directory too. Only a
+/// killed process leaves one behind.
+struct QmpSocket(PathBuf);
+
+impl QmpSocket {
+    fn new(workdir: &Path) -> Self {
+        let path = qmp_socket_path(workdir);
+        let _ = std::fs::remove_file(&path);
+        Self(path)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for QmpSocket {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{qmp_socket_path, QmpSocket};
+    use std::path::Path;
+
+    #[test]
+    fn qmp_socket_guard_removes_the_file() {
+        let deep = Path::new("/")
+            .join("d".repeat(99))
+            .join("usb.ehci_fault_csw");
+        let guard = QmpSocket::new(&deep);
+        let path = guard.path().to_path_buf();
+        assert!(path.starts_with(std::env::temp_dir()));
+        std::fs::write(&path, b"").expect("fallback socket path is writable");
+        assert!(path.exists());
+        drop(guard);
+        assert!(!path.exists(), "{} left behind", path.display());
+    }
+
+    #[test]
+    fn qmp_socket_fits_a_unix_address() {
+        // Next to the logs when it fits.
+        let short = Path::new("/home/u/AriCodeOS/build/scenarios/usb.short_csw");
+        assert_eq!(short.join("qmp.sock"), qmp_socket_path(short));
+        // A deep worktree: 100 bytes of directory plus "/qmp.sock" is 109.
+        let deep = Path::new("/")
+            .join("d".repeat(99))
+            .join("usb.ehci_fault_csw");
+        assert!(deep.join("qmp.sock").as_os_str().len() > super::SUN_PATH_MAX);
+        let a = qmp_socket_path(&deep);
+        let b = qmp_socket_path(&deep);
+        assert!(
+            a.as_os_str().len() <= super::SUN_PATH_MAX,
+            "{}",
+            a.display()
+        );
+        assert!(a.starts_with(std::env::temp_dir()));
+        assert_ne!(a, b, "two runs must not share a socket");
+    }
+
     #[test]
     fn responder_echoes_and_answers_dns() {
         let mut out = [0u8; 512];
