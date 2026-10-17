@@ -5,12 +5,13 @@
 # packages, Rust toolchain and QEMU/OVMF the reference host uses, so
 # `cargo xtask check` and `cargo xtask test --all` give the same result on
 # any machine that runs Docker. The repository is NOT copied into the image:
-# it is mounted at run time (see README.md, "Docker").
+# it is mounted at run time (see README.md, "Docker"). Build from the
+# repository root so the entry point next to this file is in the context.
 #
 # QEMU runs without KVM (xtask never asks for it), so the image works on
 # Linux, macOS and Windows hosts alike; a run is slower than on the host.
 #
-# Build:  docker build -t aricodeos-dev .
+# Build:  docker build -t aricodeos-dev -f tools/docker/Dockerfile .
 # Use:    docker run --rm -it -v "$PWD":/src -v aricodeos-cargo:/usr/local/cargo/registry \
 #             --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask test --all
 

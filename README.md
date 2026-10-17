@@ -63,14 +63,14 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 ### Docker
 
-The same environment without installing anything on the host: the
-`Dockerfile` builds an image with the Debian 13 packages above, the pinned
+The same environment without installing anything on the host:
+`tools/docker/Dockerfile` builds an image with the Debian 13 packages above, the pinned
 Rust toolchain and QEMU/OVMF. The checkout is mounted, not copied, so the
 tests run on the files you are editing. QEMU runs without KVM, so the image
 works on any machine with Docker (slower than on the host).
 
 ```bash
-docker build -t aricodeos-dev .
+docker build -t aricodeos-dev -f tools/docker/Dockerfile .
 docker run --rm -it -v "$PWD":/src -v aricodeos-cargo:/usr/local/cargo/registry \
     --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask check
 docker run --rm -it -v "$PWD":/src -v aricodeos-cargo:/usr/local/cargo/registry \

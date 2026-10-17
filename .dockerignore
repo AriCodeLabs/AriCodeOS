@@ -1,5 +1,5 @@
 # The Dockerfile copies only its entry point from the checkout (the
 # repository is mounted at run time), so the build context stays tiny.
 *
-!Dockerfile
+!tools/docker/Dockerfile
 !tools/docker/entrypoint.sh
