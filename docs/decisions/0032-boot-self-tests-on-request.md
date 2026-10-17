@@ -74,8 +74,9 @@ it (incident 0005).
 6. **Test-only keys are refused for a real machine.**
    `aricode_cmdline::keys::TEST_ONLY` lists every key documented "Tests
    only" (`qemu_exit`, `test`, `init_fail_late`, `restart_storm`,
-   `service_hang`, `selftest`, `usb_fault`; a unit test keeps the list and
-   the documentation in step), and `keys::LOADER_ONLY` the keys AriBoot
+   `service_hang`, `input_restart`, `shell_fault`, `selftest`,
+   `usb_fault`; a unit test keeps the list and the documentation in
+   step), and `keys::LOADER_ONLY` the keys AriBoot
    adds itself (`boot_slot`, `boot_pending`); `cargo xtask usb-image
    --cmdline` refuses a line with any of them.
 7. **No early write by sshd.** sshd rewrites `random_seed` before it

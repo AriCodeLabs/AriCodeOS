@@ -9,8 +9,10 @@
 //! sessions (WRITE)]`. In AriFS: `ssh_host_ed25519_key` (the host key seed
 //! in hex; installed by `cargo xtask usb-image --authorized-key`, or
 //! created on first start), `authorized_keys` (OpenSSH format,
-//! `ssh-ed25519` lines; read on every connection) and `random_seed`
-//! (entropy carried across boots).
+//! `ssh-ed25519` lines; reread after every connection, or at most once a
+//! minute while the file service does not answer; a key removed during
+//! such an outage stays valid until the file service answers again) and
+//! `random_seed` (entropy carried across boots).
 //!
 //! Closed by default: without an `authorized_keys` file with at least one
 //! key, sshd does not listen at all.
@@ -20,11 +22,13 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use aricode_proto::fs::Status as FsStatus;
 use aricode_proto::net::Status;
 use aricode_proto::session;
-use aricode_rt::sys::fs::FsClient;
+use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::net::{NetClient, NetError};
-use aricode_rt::sys::{self, abi, rights, Error, Handle};
+use aricode_rt::sys::{self, abi, Error, Handle};
+use aricode_ssh::keys_refresh::{Change, KeyRefresh};
 use aricode_ssh::{fingerprint, parse_authorized_keys, Event, Server};
 
 const NET: Handle = Handle(0x0001_0004);
@@ -59,7 +63,7 @@ struct Entropy {
 impl Entropy {
     fn load(fs: &mut FsClient) -> Self {
         let mut h = aricode_crypto::sha256::Sha256::new();
-        if let Some(saved) = read_file(fs, SEED_FILE) {
+        if let Ok(saved) = read_file(fs, SEED_FILE) {
             h.update(&saved);
         }
         let mut fresh = [0u8; 32];
@@ -121,45 +125,72 @@ fn write_file(fs: &mut FsClient, name: &str, data: &[u8]) -> bool {
         .is_some()
 }
 
-/// Whole file, or `None` if it does not exist or cannot be read. A read
-/// error (a USB stick that fails a transfer) is retried a few times before
-/// giving up: a truncated `authorized_keys` must never pass as empty.
-fn read_file(fs: &mut FsClient, name: &str) -> Option<Vec<u8>> {
-    let fd = fs.open(name).ok()?;
+/// Why a file could not be read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReadError {
+    /// The file service answered: there is no such file.
+    Absent,
+    /// The file service did not answer (gone, retired or too slow).
+    Unavailable,
+    /// It answered, but the content could not be read whole.
+    Incomplete,
+}
+
+/// Whole file. A read error the file service reports (a USB stick that
+/// fails a transfer) is retried a few times before giving up: a truncated
+/// `authorized_keys` must never pass as empty. A service that does not
+/// answer is not retried: each attempt would wait the file client's whole
+/// reply wait.
+fn read_file(fs: &mut FsClient, name: &str) -> Result<Vec<u8>, ReadError> {
+    let fd = fs.open(name).map_err(|e| match e {
+        FsError::Status(FsStatus::NotFound) => ReadError::Absent,
+        e if e.service_unavailable() => ReadError::Unavailable,
+        _ => ReadError::Incomplete,
+    })?;
     let mut data = Vec::new();
     let mut chunk = [0u8; 512];
     let mut errors = 0;
-    let complete = loop {
+    let result = loop {
         match fs.read(fd, data.len() as u32, &mut chunk) {
-            Ok(0) => break true,
+            Ok(0) => break Ok(()),
             Ok(n) => data.extend_from_slice(&chunk[..n]),
+            Err(e) if e.service_unavailable() => break Err(ReadError::Unavailable),
             Err(_) if errors < 3 => {
                 errors += 1;
                 sys::time::sleep_ms(200);
             }
-            Err(_) => break false,
+            Err(_) => break Err(ReadError::Incomplete),
         }
         if data.len() > 64 * 1024 {
-            break false;
+            break Err(ReadError::Incomplete);
         }
     };
     let _ = fs.close(fd);
-    complete.then_some(data)
+    result.map(|()| data)
 }
 
 /// The host key seed: read from AriFS, or created and saved on first start.
-/// Before drawing a new key the next-boot seed is saved, so a boot that
-/// dies before saving the key never hands the same entropy to the next
-/// one; `seed_saved` records whether that save succeeded.
+/// A file that could not be read is never overwritten: the boot uses a
+/// key of its own and leaves the saved one alone (audit robustness-1, L4).
+/// Before drawing a key that will be saved, the next-boot seed is saved, so
+/// a boot that dies before saving the key never hands the same entropy to
+/// the next one; `seed_saved` records whether that save succeeded.
 fn host_key(fs: &mut FsClient, entropy: &mut Entropy, seed_saved: &mut bool) -> [u8; 32] {
-    if let Some(text) = read_file(fs, HOST_KEY_FILE) {
-        let mut seed = [0u8; 32];
-        if aricode_crypto::unhex(core::str::from_utf8(&text).unwrap_or("").trim(), &mut seed)
-            .is_some()
-        {
-            return seed;
+    match read_file(fs, HOST_KEY_FILE) {
+        Ok(text) => {
+            let mut seed = [0u8; 32];
+            if aricode_crypto::unhex(core::str::from_utf8(&text).unwrap_or("").trim(), &mut seed)
+                .is_some()
+            {
+                return seed;
+            }
+            say(b"host key file is invalid; generating a new one");
         }
-        say(b"host key file is invalid; generating a new one");
+        Err(ReadError::Absent) => {}
+        Err(_) => {
+            say(b"host key file cannot be read: using a key for this boot only (the saved one is kept)");
+            return entropy.next();
+        }
     }
     *seed_saved = entropy.save_next(fs);
     let seed = entropy.next();
@@ -174,8 +205,16 @@ fn host_key(fs: &mut FsClient, entropy: &mut Entropy, seed_saved: &mut bool) -> 
     seed
 }
 
-/// Our ends of a session: we write what the client types to `input` and
-/// read the shell's output from `output`.
+/// Exit status reported to the client when the session shell died without
+/// ending the session (its output endpoint closed with no end-of-stream
+/// message): 128 + SIGSEGV, as POSIX shells report a command killed by a
+/// fault.
+const SHELL_DIED_STATUS: u32 = 139;
+
+/// Our ends of a session: we write what the client types to `input` (send
+/// side only) and read the shell's output from `output` (receive side
+/// only). Holding only one side of each (ADR 0030) is what lets a shell
+/// that dies show up as `PeerClosed` on `output` instead of a silent hang.
 struct Session {
     input: Handle,
     output: Handle,
@@ -189,22 +228,35 @@ impl Session {
     }
 }
 
-/// Asks init for a session shell of `kind`.
+/// Asks init for a session shell of `kind`. Every endpoint is a pair: the
+/// shell gets the receive side of `input` and the send side of `output`,
+/// sshd keeps the other two, and init's reply comes on a pair too.
 fn open_session(kind: session::Kind) -> Result<Session, Error> {
-    let input = sys::endpoint_create()?;
-    let output = sys::endpoint_create()?;
-    let reply = sys::endpoint_create()?;
-    let handles = [
-        sys::handle_duplicate(reply, rights::WRITE | rights::TRANSFER)?,
-        sys::handle_duplicate(input, rights::READ | rights::TRANSFER)?,
-        sys::handle_duplicate(output, rights::WRITE | rights::TRANSFER)?,
-    ];
+    let (in_r, input) = sys::endpoint_create_pair()?;
+    let Ok((output, out_w)) = sys::endpoint_create_pair() else {
+        let _ = sys::handle_close(in_r);
+        let _ = sys::handle_close(input);
+        return Err(Error::Limit);
+    };
+    let Ok((reply, reply_w)) = sys::endpoint_create_pair() else {
+        for h in [in_r, input, output, out_w] {
+            let _ = sys::handle_close(h);
+        }
+        return Err(Error::Limit);
+    };
+    let handles = [reply_w, in_r, out_w];
     let sent = sys::ipc_send(
         SESSIONS,
         &session::Request { kind }.encode(),
         &handles,
         2000,
     );
+    if sent.is_err() {
+        // Not transferred: still ours.
+        for h in handles {
+            let _ = sys::handle_close(h);
+        }
+    }
     let mut msg = [0u8; 8];
     let mut none = [Handle(0); 1];
     let ok = sent.is_ok()
@@ -329,18 +381,28 @@ fn serve(
             break;
         }
         // Shell output to the client; an empty message means it exited.
+        // The output endpoint closing without one (`PeerClosed`: sshd holds
+        // only its receive side) means the shell died: the session ends
+        // with `SHELL_DIED_STATUS` instead of hanging until the client
+        // disconnects.
         while let Some(s) = &session {
             let mut none = [Handle(0); 1];
-            match sys::ipc_receive(s.output, &mut msg, &mut none, 0) {
-                Ok((0, _)) => {
-                    server.exit(0, &mut out);
-                    if let Some(s) = session.take() {
-                        let _ = sys::handle_close(s.input);
-                        let _ = sys::handle_close(s.output);
-                    }
+            let status = match sys::ipc_receive(s.output, &mut msg, &mut none, 0) {
+                Ok((0, _)) => 0,
+                Ok((n, _)) => {
+                    server.send_data(&msg[..n], &mut out);
+                    continue;
                 }
-                Ok((n, _)) => server.send_data(&msg[..n], &mut out),
+                Err(Error::PeerClosed) => {
+                    say(b"session shell died without ending the session");
+                    SHELL_DIED_STATUS
+                }
                 Err(_) => break,
+            };
+            server.exit(status, &mut out);
+            if let Some(s) = session.take() {
+                let _ = sys::handle_close(s.input);
+                let _ = sys::handle_close(s.output);
             }
         }
         if !send(net, sock, &mut out) || server.is_closed() {
@@ -365,9 +427,48 @@ fn ready() {
     );
 }
 
-/// Keys from `authorized_keys`; `None` if the file cannot be read.
-fn authorized(fs: &mut FsClient) -> Option<Vec<[u8; 32]>> {
-    read_file(fs, AUTHORIZED_KEYS).map(|t| parse_authorized_keys(&t))
+/// Keys from `authorized_keys`: none if the file does not exist (closed by
+/// default); an error if it could not be read.
+fn authorized(fs: &mut FsClient) -> Result<Vec<[u8; 32]>, ReadError> {
+    match read_file(fs, AUTHORIZED_KEYS) {
+        Ok(text) => Ok(parse_authorized_keys(&text)),
+        Err(ReadError::Absent) => Ok(Vec::new()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Rereads `authorized_keys` after a connection when `refresh` says it is
+/// due: a missing file empties the keys (connections are refused); a file
+/// service that does not answer keeps the last keys and is retried at most
+/// once a minute (incident 0001: each attempt would hold the next banner
+/// for the file client's whole wait), logged once when it starts failing
+/// and once when it answers again.
+fn reread_keys(fs: &mut FsClient, refresh: &mut KeyRefresh, keys: &mut Vec<[u8; 32]>) {
+    if !refresh.due(now_ms()) {
+        return;
+    }
+    // Only a complete read (or "no such file") is an answer; a file service
+    // that does not answer or a read that breaks off keeps the last keys and
+    // is retried at most once a minute (audit robustness-1, L5).
+    let result = authorized(fs);
+    let answered = result.is_ok();
+    if let Ok(k) = result {
+        *keys = k;
+    }
+    let mut b = [0u8; 20];
+    match refresh.record(now_ms(), answered) {
+        Some(Change::Failing) => {
+            sys::print(b"sshd: cannot reread authorized_keys (file service not answering or read incomplete): keeping the last ");
+            sys::print(aricode_rt::fmt_u64(keys.len() as u64, &mut b));
+            sys::print(b" key(s); rereading authorized_keys at most once a minute\n");
+        }
+        Some(Change::Recovered) => {
+            sys::print(b"sshd: file service answers again: ");
+            sys::print(aricode_rt::fmt_u64(keys.len() as u64, &mut b));
+            sys::print(b" authorized key(s)\n");
+        }
+        None => {}
+    }
 }
 
 fn main(_arg: u64) -> u64 {
@@ -381,6 +482,7 @@ fn main(_arg: u64) -> u64 {
     };
     let mut entropy = Entropy::load(&mut fs);
     let mut keys = authorized(&mut fs).unwrap_or_default();
+    let mut refresh = KeyRefresh::new();
     let mut announced = false;
     if keys.is_empty() {
         say(b"no authorized_keys in AriFS: not listening (install a key with cargo xtask usb-image --authorized-key, or write authorized_keys ... from the console)");
@@ -395,7 +497,7 @@ fn main(_arg: u64) -> u64 {
     }
     let mut seed_saved = false;
     let seed = host_key(&mut fs, &mut entropy, &mut seed_saved);
-    let listener = match net.tcp_listen(PORT) {
+    let mut listener = match net.tcp_listen(PORT) {
         Ok(l) => l,
         Err(_) => {
             say(b"cannot listen on port 22");
@@ -415,16 +517,39 @@ fn main(_arg: u64) -> u64 {
     loop {
         let (sock, peer, _) = match net.tcp_accept(listener, 60_000) {
             Ok(c) => c,
+            // Nobody can receive on the network service endpoint any more
+            // (ADR 0030): every accept would fail at once; its supervisor
+            // decides what follows.
+            Err(NetError::Ipc(Error::ServiceGone)) => {
+                say(b"network service gone; exiting");
+                return 4;
+            }
+            // The network driver died holding the accept, or was relaunched
+            // and no longer knows the socket: its sockets went with it.
+            // Listen again on the next generation after a pause.
+            Err(NetError::Ipc(Error::ReplyLost)) | Err(NetError::Status(Status::BadSock)) => {
+                sys::time::sleep_ms(500);
+                if let Ok(l) = net.tcp_listen(PORT) {
+                    listener = l;
+                    say(b"network service restarted: listening on port 22 again");
+                }
+                continue;
+            }
             Err(_) => continue,
         };
         sys::print(b"sshd: connection from ");
         print_ip(peer);
         sys::print(b"\n");
         if keys.is_empty() {
-            // authorized_keys emptied while running: refuse everything.
-            say(b"authorized_keys is empty now: connection refused");
-            let _ = net.tcp_close(sock);
-            continue;
+            // authorized_keys emptied while running: reread first, so a key
+            // installed since counts (audit robustness-1, M1); refuse if
+            // there is still none.
+            reread_keys(&mut fs, &mut refresh, &mut keys);
+            if keys.is_empty() {
+                say(b"authorized_keys is empty now: connection refused");
+                let _ = net.tcp_close(sock);
+                continue;
+            }
         }
         if !seed_saved {
             seed_saved = entropy.save_next(&mut fs);
@@ -435,11 +560,8 @@ fn main(_arg: u64) -> u64 {
         say(b"connection closed");
         // Reread between connections so a key added or removed from the
         // console counts, without delaying the next client's banner behind
-        // a slow disk; a read that fails keeps the last keys read.
-        match authorized(&mut fs) {
-            Some(k) => keys = k,
-            None => say(b"cannot reread authorized_keys; keeping the last keys read"),
-        }
+        // a file service that does not answer.
+        reread_keys(&mut fs, &mut refresh, &mut keys);
     }
 }
 

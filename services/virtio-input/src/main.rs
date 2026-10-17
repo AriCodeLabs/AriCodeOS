@@ -177,8 +177,15 @@ fn main(mask: u64) -> u64 {
             ring.push(ev, now);
         }
         for _ in 0..8 {
-            let Ok((n, nh)) = sys::ipc_receive(SERVICE, &mut msg, &mut handles, 0) else {
-                break;
+            let (n, nh) = match sys::ipc_receive(SERVICE, &mut msg, &mut handles, 0) {
+                Ok(r) => r,
+                // The service endpoint was closed or revoked (ADR 0030): nobody
+                // can send here again, so polling it would spin.
+                Err(e) if e.endpoint_gone() => {
+                    say(b"service endpoint closed; exiting");
+                    sys::process_exit(9);
+                }
+                Err(_) => break,
             };
             if nh == 0 {
                 continue;

@@ -100,6 +100,13 @@ pub mod keys {
     /// answers and checks that the supervisor kills it when its probe
     /// expires.
     pub const SERVICE_HANG: &str = "service_hang";
+    /// Tests only: `input_restart`, init supervises an input driver that
+    /// crashes holding a client's read and checks the client keeps the
+    /// device (ADR 0030).
+    pub const INPUT_RESTART: &str = "input_restart";
+    /// Tests only: `shell_fault`, the shell accepts `fault`, which makes it
+    /// crash on purpose (a session shell that dies, ADR 0030).
+    pub const SHELL_FAULT: &str = "shell_fault";
     /// `smp=off`: do not start the application processors (real hardware).
     pub const SMP: &str = "smp";
     /// `iommu=off`: do not enable DMA translation (real hardware).
@@ -137,6 +144,8 @@ pub mod keys {
         INIT_FAIL_LATE,
         RESTART_STORM,
         SERVICE_HANG,
+        INPUT_RESTART,
+        SHELL_FAULT,
         SELFTEST,
         USB_FAULT,
     ];
@@ -181,7 +190,11 @@ mod tests {
         let mut checked = 0;
         for line in module.lines().map(str::trim) {
             if let Some(text) = line.strip_prefix("///") {
-                documented |= text.contains("Tests only");
+                // Case-insensitive: "tests only" in mid-sentence counts too.
+                documented |= text
+                    .as_bytes()
+                    .windows(10)
+                    .any(|w| w.eq_ignore_ascii_case(b"tests only"));
             } else if let Some(rest) = line.strip_prefix("pub const ") {
                 if let Some((_, value)) = rest.split_once(": &str = \"") {
                     let key = value.trim_end_matches("\";");
@@ -197,7 +210,7 @@ mod tests {
                 documented = false;
             }
         }
-        assert!(checked >= 16, "only {checked} keys parsed");
+        assert!(checked >= 18, "only {checked} keys parsed");
         assert!(keys::LOADER_ONLY
             .iter()
             .all(|k| !keys::TEST_ONLY.contains(k)));

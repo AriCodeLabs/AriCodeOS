@@ -127,6 +127,21 @@ pub fn endpoint_create() -> Result<Handle, Error> {
     call(nr::ENDPOINT_CREATE, 0, 0, 0, 0).map(|v| Handle(v as u32))
 }
 
+/// A new endpoint as `(receive, send)` handles (ADR 0030): the receive one
+/// has `READ|DUPLICATE|TRANSFER|MANAGE`, the send one
+/// `WRITE|DUPLICATE|TRANSFER`. Once every send handle is gone, receiving
+/// on an empty queue returns `Error::PeerClosed` at once.
+pub fn endpoint_create_pair() -> Result<(Handle, Handle), Error> {
+    call(nr::ENDPOINT_CREATE_PAIR, 0, 0, 0, 0).map(|v| (Handle(v as u32), Handle((v >> 32) as u32)))
+}
+
+/// Closes both sides of an endpoint for every holder (requires `MANAGE`,
+/// ADR 0030): its queue is discarded and its clients get
+/// `Error::PeerClosed` at once. The handles stay valid.
+pub fn endpoint_close(ep: Handle) -> Result<(), Error> {
+    call(nr::ENDPOINT_CLOSE, ep.0 as u64, 0, 0, 0).map(|_| ())
+}
+
 /// Sends `data` and transfers `handles` (they are removed from this process).
 pub fn ipc_send(ep: Handle, data: &[u8], handles: &[Handle], timeout_ms: u64) -> Result<(), Error> {
     call6(

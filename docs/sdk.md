@@ -104,7 +104,7 @@ received.
 | Area | How |
 |------|-----|
 | process | `sys::process_spawn_with(spawner, name, arg, handles)`, `sys::process_wait`, `sys::process_kill` (`MANAGE` on the process; afterwards `process_wait` returns `Killed`), `sys::process_exit`; needs a `SPAWNER` handle with `MANAGE` (init has it; the shell gets one for `run`) |
-| ipc | `sys::endpoint_create`, `sys::ipc_send`, `sys::ipc_receive` (256 bytes and up to 4 handles per message, with a deadline), `sys::ipc_receive_any` (the first of up to 16 endpoints with a message, with its index; ADR 0020); large data goes through shared DMA buffers |
+| ipc | `sys::endpoint_create`, `sys::endpoint_create_pair` and `sys::endpoint_close` (ADR 0030), `sys::ipc_send`, `sys::ipc_receive` (256 bytes and up to 4 handles per message, with a deadline), `sys::ipc_receive_any` (the first of up to 16 endpoints with a message, with its index; ADR 0020); large data goes through shared DMA buffers |
 | filesystem | `sys::fs::FsClient` over the `fsd` endpoint and a `HARDWARE` capability for its buffer: `list`, `open`, `create`, `read`, `write` (in place, durable after `flush`), `replace` (all-or-nothing and durable, up to 32 KiB: in chunks to the journal above 4 KiB), `flush`, `close` (ADR 0014, 0018) |
 | network | `sys::net::NetClient`: `info`, `link` (physical link state, even before DHCP), `ping`, UDP (`udp_bind/send/recv`), TCP (`tcp_connect/listen/accept/send/recv/close`), `resolve`; `sys::http::get` on top |
 | window | `sys::window::Window::create(compositor, hardware, w, h, title)`, `canvas()` (an `aricode-gfx` canvas), `present`, `poll` (`Key`, `Click`, `Focus`), `close` |
@@ -163,7 +163,15 @@ Every call of the SDK clients (`block`, `fs`, `net`, `window`, `input`,
 - each request creates its own reply endpoint and closes it on return; a
   late reply is lost and is never attributed to another request;
 - send and receive have deadlines (the one requested plus `rpc::GRACE_MS`);
-  a dead service produces `Error::Timeout`, not an infinite wait. Only
+  a server that is gone is reported at once (ADR 0030: the reply endpoint
+  comes from `endpoint_create_pair` and the client keeps only its receive
+  side). `Error::ServiceGone`: the send was refused, nobody can receive on
+  the service endpoint any more (permanent: stop using it).
+  `Error::ReplyLost`: the server dropped this request unanswered, usually
+  because it died; a supervised service is relaunched on the same endpoint,
+  so retry after a short pause. `Error::Timeout` remains for a service that
+  is alive and slow. `FsError::service_unavailable` groups the three cases
+  for callers that only need "no answer". Only
   `launch::run` waits without a deadline for the exit of the launched
   program;
 - an expired deadline does not undo the operation: its result is unknown.

@@ -1,0 +1,29 @@
+# Re-audit of robustness audit 1 (ADR 0030): sshd keeps only the receive
+# side of a session's output endpoint, so a session shell that crashes is
+# seen as PeerClosed and the session ends with exit status 139 instead of
+# hanging until the client disconnects. `shell_fault` (tests only) lets the
+# shell accept `fault`, a deliberate page fault. sshd keeps serving: the
+# next command runs in a fresh session shell.
+name = "ssh.shell_fault"
+description = "sshd: a session shell that crashes ends the SSH session with status 139; the next session works"
+level = "full"
+areas = ["ssh", "network", "shell"]
+cmdline = "qemu_exit shell shell_fault"
+timeout_secs = 200
+
+[host_ssh]
+marker = "sshd: listening on port 22"
+commands = ["fault", "ls", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "[host] ssh $ fault",
+    "[host] ssh| arish: crashing on purpose (shell_fault)",
+    "sshd: session shell died without ending the session",
+    "[host] ssh exit 139",
+    "[host] ssh $ ls",
+    "[host] ssh| hola.txt",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "connection dropped", "Permission denied", "sshd: refused key"]

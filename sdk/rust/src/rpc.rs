@@ -4,8 +4,24 @@
 //! carries its own reply endpoint, which is closed when done, and every wait
 //! is bounded. A late reply reaches a closed endpoint and is lost: it is
 //! never attributed to another request.
+//!
+//! A server that is gone is reported at once (ADR 0030): the client keeps
+//! only the receive side of its reply endpoint and the send side travels
+//! with the request. The two ways it ends mean different things:
+//!
+//! - `Error::ServiceGone`: the send was refused because the service
+//!   endpoint has no receiver left (or was revoked). Permanent: stop using
+//!   the endpoint.
+//! - `Error::ReplyLost`: the request was accepted and dropped unanswered
+//!   (the server died holding it, or it was discarded with a queue). Not
+//!   permanent: init keeps the receive side of a supervised endpoint and
+//!   relaunches the server on it, so the next request queues for the next
+//!   generation. Retry after a short pause; if the service is given up, the
+//!   retry gets `ServiceGone`.
+//!
+//! The full reply wait is only spent on a server that is alive and slow.
 
-use crate::{self as sys, rights, Error, Handle};
+use crate::{self as sys, Error, Handle};
 
 /// Extra handles a request may carry besides the reply one.
 pub const MAX_EXTRA: usize = 3;
@@ -48,9 +64,8 @@ pub fn call_handles(
     if extra.len() > MAX_EXTRA {
         return Err(Error::Invalid);
     }
-    let reply = sys::endpoint_create()?;
+    let (reply, reply_w) = sys::endpoint_create_pair()?;
     let result = (|| {
-        let reply_w = sys::handle_duplicate(reply, rights::WRITE | rights::TRANSFER)?;
         let mut handles = [Handle(0); MAX_EXTRA + 1];
         handles[0] = reply_w;
         handles[1..1 + extra.len()].copy_from_slice(extra);
@@ -60,8 +75,20 @@ pub fn call_handles(
                 let _ = sys::handle_close(*h);
             }
         }
-        sent?;
-        sys::ipc_receive(reply, out, handles_out, reply_wait_ms)
+        sent.map_err(|e| match e {
+            Error::PeerClosed => Error::ServiceGone,
+            // `Revoked` also comes back when one of the extra handles was
+            // revoked: only the service endpoint's own revocation means the
+            // service is gone (asked on this error path only).
+            Error::Revoked if sys::object_kind(service) == Err(Error::Revoked) => {
+                Error::ServiceGone
+            }
+            e => e,
+        })?;
+        sys::ipc_receive(reply, out, handles_out, reply_wait_ms).map_err(|e| match e {
+            Error::PeerClosed => Error::ReplyLost,
+            e => e,
+        })
     })();
     let _ = sys::handle_close(reply);
     result
