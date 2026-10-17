@@ -71,6 +71,9 @@ pub mod fault {
     /// code is the count moved, so it is its own event: `0` here is not
     /// `CSW_INVALID`.
     pub const CSW_LENGTH: &str = "usb csw length";
+    /// A passed READ or WRITE whose data stage or CSW residue shows bytes
+    /// not moved (`bytes_not_moved`); the code is the count (incident 0010).
+    pub const SHORT_DATA: &str = "usb short data";
 
     /// `prefix` followed by `lba`; `None` if it does not fit `out`.
     pub fn lba_name<'a>(prefix: &str, lba: u64, out: &'a mut [u8; NAME_LEN]) -> Option<&'a str> {
@@ -265,6 +268,17 @@ impl<'a> Text<'a> {
         let out: &'a [u8] = self.out;
         core::str::from_utf8(&out[..self.len]).unwrap_or("")
     }
+}
+
+/// Bytes of a passed command's data stage that were not moved: what
+/// `dCSWDataResidue` says (BOT 6.7.2, 6.7.3: the device's count) or what
+/// the host's data transfer fell short of (`data_len` requested, `moved`
+/// transferred), whichever is more. With any of them a READ would leave
+/// stale bytes in the client's buffer and a WRITE did not reach the medium
+/// whole, so the drivers answer such a command with an error, never with a
+/// success (incident 0010); 0 means complete.
+pub fn bytes_not_moved(residue: u32, data_len: u32, moved: u32) -> u32 {
+    residue.max(data_len.saturating_sub(moved))
 }
 
 /// Checks the CSW that the bulk IN transfer for the command with `tag`
@@ -675,6 +689,25 @@ mod tests {
             "CSW tag mismatch: expected 4294967295, received 4294967295 with status 2 residue 4294967295"
         );
         assert!(line.len() <= CSW_TEXT_LEN);
+    }
+
+    #[test]
+    fn data_residue_decision() {
+        // Incident 0010: a passed command is complete only when the device
+        // reports no residue and the host moved every byte it asked for.
+        assert_eq!(bytes_not_moved(0, 512, 512), 0);
+        assert_eq!(bytes_not_moved(0, 0, 0), 0);
+        // The host's data stage fell short (xHCI residual, EHCI qTD count).
+        assert_eq!(bytes_not_moved(0, 512, 0), 512);
+        assert_eq!(bytes_not_moved(0, 1024, 512), 512);
+        // The device's dCSWDataResidue, even when the host saw every byte.
+        assert_eq!(bytes_not_moved(512, 512, 512), 512);
+        // Whichever is more.
+        assert_eq!(bytes_not_moved(100, 1024, 512), 512);
+        assert_eq!(bytes_not_moved(1024, 1024, 512), 1024);
+        // Never negative when more arrived than asked for.
+        assert_eq!(bytes_not_moved(0, 512, 600), 0);
+        assert!(fault::SHORT_DATA.len() <= fault::NAME_LEN);
     }
 
     #[test]

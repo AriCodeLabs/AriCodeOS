@@ -37,8 +37,8 @@ use aricode_rt::sys::block::{map_client_buffer, REPLY_WAIT_MS};
 use aricode_rt::sys::virtio_pci::{extra_handle, polled_bar_handle, DmaRegion, Mmio, CFG, SERVICE};
 use aricode_rt::sys::{self, abi, abi::driver_arg, Handle};
 use aricode_usb_storage::{
-    after_transfer_failure, check_csw_transfer, fault, scsi, Cbw, Cdb, Csw, CswError, CswStatus,
-    Next, Stage, CSW_TEXT_LEN,
+    after_transfer_failure, bytes_not_moved, check_csw_transfer, fault, scsi, Cbw, Cdb, Csw,
+    CswError, CswStatus, Next, Stage, CSW_TEXT_LEN,
 };
 use aricode_xhci::{
     parse_configuration, parse_storage_interface, request, DeviceDescriptor, HidInterface,
@@ -519,10 +519,15 @@ enum Injection {
     /// command's residue and status still in the buffer: an invalid CSW
     /// (BOT 5.2, 6.3), followed by a real Reset Recovery (incident 0007).
     ShortCsw,
+    /// The data stage of a complete command is reported one sector (512
+    /// bytes) short of what was asked for: the command passed but did not
+    /// move everything, so the request answers Io, never a success, and
+    /// the transport stays ready (incident 0010).
+    ShortData,
 }
 
-/// Test fault injection (`usb_fault=N|idle[:cbw|:csw|:short-csw]`, ADR
-/// 0028).
+/// Test fault injection
+/// (`usb_fault=N|idle[:cbw|:csw|:short-csw|:short-data]`, ADR 0028).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FaultInject {
     None,
@@ -544,8 +549,9 @@ impl FaultInject {
             "cbw" => Injection::Cbw,
             "csw" => Injection::Csw,
             "short-csw" => Injection::ShortCsw,
+            "short-data" => Injection::ShortData,
             _ => {
-                say(b"usb_fault: the EHCI driver injects cbw, csw or short-csw only; ignored");
+                say(b"usb_fault: the EHCI driver injects cbw, csw, short-csw or short-data only; ignored");
                 return Self::None;
             }
         };
@@ -2671,8 +2677,8 @@ impl Ehci {
                     Err(fail) => self.transfer_failure(Stage::Csw, true, fail, tag, window_end),
                 });
             }
-            // Applied by `read_csw` at the CSW stage of this command.
-            Some(Injection::ShortCsw) | None => {}
+            // Applied at the data or CSW stage of this command.
+            Some(Injection::ShortCsw | Injection::ShortData) | None => {}
         }
         let deadline = self.now() + CBW_TIMEOUT_MS;
         if let Err(fail) = self.bulk(bulk_out, false, cbw.0, Cbw::LEN as u32, deadline) {
@@ -2686,6 +2692,12 @@ impl Ehci {
                 Err(fail) => {
                     return Err(self.transfer_failure(Stage::Data, dir_in, fail, tag, window_end))
                 }
+            }
+            if inject == Some(Injection::ShortData) {
+                // Test injection: the transport reports one sector less than
+                // the command asked for; the command itself passed.
+                say(b"injected fault: the data stage is reported one sector (512 bytes) short");
+                moved = moved.saturating_sub(512);
             }
         }
         let short_csw = inject == Some(Injection::ShortCsw);
@@ -2702,7 +2714,7 @@ impl Ehci {
                 status: CswStatus::Passed,
                 residue,
                 ..
-            }) => Ok(residue.max(data.map_or(0, |d| d.1).saturating_sub(moved))),
+            }) => Ok(bytes_not_moved(residue, data.map_or(0, |d| d.1), moved)),
             Ok(_) => Err(ScsiFail::Failed),
             Err(e) => {
                 // BOT 6.3: an invalid CSW (a wrong length included), one for
@@ -2993,7 +3005,7 @@ impl Ehci {
                     sys::print(b": ");
                     num(short as u64);
                     sys::print(b" bytes not transferred\n");
-                    record("ehci short data", short as u64);
+                    record(fault::SHORT_DATA, short as u64);
                     self.strict_halt(name);
                     return false;
                 }

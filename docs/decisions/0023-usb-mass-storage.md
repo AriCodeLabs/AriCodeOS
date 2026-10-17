@@ -28,7 +28,11 @@ no driver) and the xHCI saw no device at all.
    with tests. A CSW is exactly 13 bytes (BOT 5.2): the drivers check
    every CSW they read with `check_csw_transfer`, which rejects a transfer
    that moved any other count before reading a field, and fill the CSW
-   buffer with 0xFF before each read (incident 0007). `aricode-xhci` adds
+   buffer with 0xFF before each read (incident 0007). A READ or WRITE that
+   passed but did not move every byte (the host's data stage fell short,
+   `td_bytes_moved`, or `dCSWDataResidue` is not zero; `bytes_not_moved`)
+   answers `Io`, records `usb short data` and halts under `strict`, as in
+   the EHCI driver (incident 0010). `aricode-xhci` adds
    bulk endpoints, TDs that do not cross 64 KiB (`bulk_trbs`) and the
    recovery commands (Reset Endpoint, Set TR Dequeue, `CLEAR_FEATURE(HALT)`)
    that BOT requires after a STALL.

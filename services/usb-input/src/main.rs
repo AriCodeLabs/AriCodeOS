@@ -35,8 +35,8 @@ use aricode_rt::sys::block::map_client_buffer;
 use aricode_rt::sys::virtio_pci::{bar_handle, extra_handle, DmaRegion, Mmio, CFG, IRQ, SERVICE};
 use aricode_rt::sys::{self, abi, Handle};
 use aricode_usb_storage::{
-    after_transfer_failure, check_csw_transfer, fault, scsi, Cbw, Cdb, Csw, CswError, CswStatus,
-    Next, Stage, CSW_TEXT_LEN,
+    after_transfer_failure, bytes_not_moved, check_csw_transfer, fault, scsi, Cbw, Cdb, Csw,
+    CswError, CswStatus, Next, Stage, CSW_TEXT_LEN,
 };
 use aricode_xhci::{
     bulk_trbs, cap, completion, dci, endpoint_recovery, endpoint_status, ep_state, erst_entry, op,
@@ -624,6 +624,11 @@ enum Injection {
     /// command's residue and status still in the buffer: an invalid CSW
     /// (BOT 5.2, 6.3), followed by a real Reset Recovery (incident 0007).
     ShortCsw,
+    /// The data stage of a complete command is reported one sector (512
+    /// bytes) short of what was asked for: the command passed but did not
+    /// move everything, so the request answers Io, never a success, and
+    /// the transport stays Ready (incident 0010).
+    ShortData,
     /// The endpoint is given up as if no command put it back: Disable
     /// Slot and the whole re-enumeration run.
     Reenum,
@@ -670,7 +675,7 @@ struct TransferFault {
 struct Controller {
     /// `strict` boot flag: halt on the first transport failure.
     strict: bool,
-    /// `usb_fault=N|idle[:cbw|:csw|:short-csw|:reenum|:reset|:hid]`
+    /// `usb_fault=N|idle[:cbw|:csw|:short-csw|:short-data|:reenum|:reset|:hid]`
     /// (tests): an injected failure.
     fault_inject: FaultInject,
     /// The injected failure due in the current request, until it is used.
@@ -2005,7 +2010,7 @@ impl Controller {
                 .command_budget(deadline)
                 .ok_or("no time left for TEST UNIT READY")?;
             match self.scsi(scsi::test_unit_ready(), None, budget) {
-                Ok(()) => break,
+                Ok(_) => break,
                 Err(ScsiFail::Failed) => {
                     let sense = self.sense(budget);
                     if !matches!(
@@ -2505,13 +2510,14 @@ impl Controller {
     /// `budget`. No CBW goes out unless the transport is Ready (or being
     /// enumerated). Any failed transfer goes through `transfer_failure`; a
     /// CSW that does not close the command (BOT 6.3, 6.7) asks for a Reset
-    /// Recovery.
+    /// Recovery. A passed command returns the bytes it did not move
+    /// (`bytes_not_moved`; 0 when complete).
     fn scsi(
         &mut self,
         cdb: Cdb,
         data: Option<(u64, u32, bool)>,
         budget: Budget,
-    ) -> Result<(), ScsiFail> {
+    ) -> Result<u32, ScsiFail> {
         let (tag, cbw_phys, cbw_virt) = {
             let st = self.storage.as_mut().ok_or(ScsiFail::NotReady)?;
             if !matches!(st.transport, Transport::Ready | Transport::Enumerating) {
@@ -2580,9 +2586,20 @@ impl Controller {
         ) {
             return Err(self.transfer_failure(Stage::Cbw, false, fail, tag, budget));
         }
+        let mut moved = 0;
         if let Some((phys, len, dir_in)) = data {
-            if let Err(fail) = self.bulk(Stage::Data, dir_in, phys, len, DATA_TIMEOUT_MS, budget) {
-                return Err(self.transfer_failure(Stage::Data, dir_in, fail, tag, budget));
+            match self.bulk(Stage::Data, dir_in, phys, len, DATA_TIMEOUT_MS, budget) {
+                Ok(n) => moved = n,
+                Err(fail) => {
+                    return Err(self.transfer_failure(Stage::Data, dir_in, fail, tag, budget))
+                }
+            }
+            if self.inject_now == Some(Injection::ShortData) {
+                // Test injection: the transport reports one sector less than
+                // the command asked for; the command itself passed.
+                self.inject_now = None;
+                say(b"injected fault: the data stage is reported one sector (512 bytes) short");
+                moved = moved.saturating_sub(512);
             }
         }
         let (csw_moved, raw) = match self.read_csw(budget) {
@@ -2590,10 +2607,14 @@ impl Controller {
             Err(fail) => return Err(self.transfer_failure(Stage::Csw, true, fail, tag, budget)),
         };
         match check_csw_transfer(csw_moved, &raw, tag) {
+            // The bytes the command did not move: the CSW's residue (BOT
+            // 6.7) or what the data stage fell short of, whichever is more;
+            // the caller never takes either for a success (incident 0010).
             Ok(Csw {
                 status: CswStatus::Passed,
+                residue,
                 ..
-            }) => Ok(()),
+            }) => Ok(bytes_not_moved(residue, data.map_or(0, |d| d.1), moved)),
             Ok(_) => Err(ScsiFail::Failed),
             Err(e) => {
                 // BOT 6.3, 6.5 and 6.7: an invalid CSW (a wrong length
@@ -3286,7 +3307,7 @@ impl Controller {
         loop {
             let injected = self.inject_now.is_some();
             match self.scsi(cdb, Some((phys, count as u32 * 512, !write)), budget) {
-                Ok(()) => {
+                Ok(0) => {
                     if transport_failures > 0 {
                         say(b"transfer recovered");
                     }
@@ -3294,6 +3315,32 @@ impl Controller {
                         st.reenumerations = 0;
                     }
                     return true;
+                }
+                Ok(short) => {
+                    // Part of the sectors were not moved (BOT 6.7.2, 6.7.3):
+                    // a READ would hand the client stale bytes, a WRITE did
+                    // not reach the medium whole. Never a success (incident
+                    // 0010); the transport is Ready, nothing to recover.
+                    sys::print(b"usb-input: ");
+                    sys::print(name);
+                    sys::print(b" lba ");
+                    num(lba);
+                    sys::print(b": ");
+                    num(short as u64);
+                    sys::print(b" bytes not transferred\n");
+                    record(fault::SHORT_DATA, short as u64);
+                    if self.strict {
+                        self.halt(
+                            write,
+                            lba,
+                            count,
+                            completion::SUCCESS,
+                            transport_failures,
+                            None,
+                        );
+                    }
+                    self.report_error(name, lba, None);
+                    return false;
                 }
                 Err(ScsiFail::Failed) => {
                     let sense = self.sense(budget);
@@ -3377,7 +3424,7 @@ impl Controller {
         }
         let budget = Budget::new(self.clock.now(), REQUEST_BUDGET_MS, RECOVERY_RESERVE_MS);
         match self.scsi(scsi::synchronize_cache10(), None, budget) {
-            Ok(()) => true,
+            Ok(_) => true,
             Err(ScsiFail::Failed) => {
                 let sense = self.sense(budget);
                 if let Some(sense) = sense {
@@ -3993,9 +4040,9 @@ fn device_name(ctl: &Controller) -> &'static str {
 }
 
 /// Test fault injection (`usb_fault`, ADR 0028): `N` or `idle`, with an
-/// optional kind: `cbw` (the default), `csw`, `short-csw`, `reenum`,
-/// `reset` or `hid` (`Injection`). `hid` counts HID reports, the others
-/// block requests.
+/// optional kind: `cbw` (the default), `csw`, `short-csw`, `short-data`,
+/// `reenum`, `reset` or `hid` (`Injection`). `hid` counts HID reports, the
+/// others block requests.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FaultInject {
     None,
@@ -4017,6 +4064,7 @@ impl FaultInject {
             "cbw" => Injection::Cbw,
             "csw" => Injection::Csw,
             "short-csw" => Injection::ShortCsw,
+            "short-data" => Injection::ShortData,
             "reenum" => Injection::Reenum,
             "reset" => Injection::Reset,
             "hid" => Injection::Hid,

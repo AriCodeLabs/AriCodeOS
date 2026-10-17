@@ -1,0 +1,45 @@
+# Incident 0010 (ADR 0028/0031): a command that passed but did not move
+# every byte of its data stage (BOT 6.7.2, 6.7.3: the host's transfer fell
+# short or dCSWDataResidue is not zero) is never a success. The EHCI
+# driver had this rule from the start (ADR 0031 point 7); the scenario
+# keeps it. `usb_fault=idle:short-data` makes the data stage of the first
+# block request after two idle seconds look one sector (512 bytes) short
+# at the transport boundary: the request answers Io with the count, the
+# fault is recorded, no Reset Recovery runs (the CSW was valid) and the
+# next write succeeds.
+name = "usb.ehci_short_data"
+description = "EHCI driver: a data stage one sector short is never a success; the request answers Io with the count, fault in diag, no recovery, the next write succeeds"
+level = "full"
+areas = ["usb", "storage", "diag"]
+usb_ehci_storage = true
+cmdline = "qemu_exit shell usb_fault=idle:short-data"
+timeout_secs = 120
+stdin = [
+    "repeat 10 ping 10.0.2.2",
+    "write probe.txt after idle",
+    "repeat 3 ping 10.0.2.2",
+    "write probe.txt second try",
+    "diag",
+    "shutdown",
+]
+
+[expect]
+exit = 33
+serial_contains = [
+    "usb-ehci: injected fault: the data stage is reported one sector (512 bytes) short",
+    "usb-ehci: WRITE(10) lba ",
+    ": 512 bytes not transferred",
+    "write: write error",
+    "write: 11 bytes to probe.txt",
+    "fault reported by process",
+    "usb short data (code 512)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "strict",
+    "Reset Recovery",
+    "storage unusable",
+    "queue head lost",
+    "stage of tag",
+]
