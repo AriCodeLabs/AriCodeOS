@@ -1,5 +1,7 @@
 # AriCodeOS
 
+Website: https://www.aricodeos.org/ · Repository: https://github.com/AriCodeLabs/AriCodeOS
+
 An operating system built from scratch: a Rust `no_std` microkernel, UEFI
 boot, x86-64, capability-based security and user-space drivers.
 

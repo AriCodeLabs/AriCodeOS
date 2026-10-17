@@ -83,7 +83,7 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     println!("AriCodeOS booting...");
     println!("AriCodeOS Kernel {VERSION}");
     println!(
-        "AriCodeOS by Edwin F. Veliz Jaramillo (lynxcraft), https://github.com/lynxcraft/aricodeos"
+        "AriCodeOS by Edwin F. Veliz Jaramillo (lynxcraft), https://github.com/AriCodeLabs/AriCodeOS"
     );
 
     let (level, level_error) = log_level_from(&cmdline);

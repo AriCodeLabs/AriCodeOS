@@ -1,6 +1,7 @@
 AriCodeOS
 Copyright 2026 Edwin F. Veliz Jaramillo (lynxcraft) and the AriCodeOS contributors.
-https://github.com/lynxcraft/aricodeos
+https://www.aricodeos.org/
+https://github.com/AriCodeLabs/AriCodeOS
 
 This product was designed and written as AriCodeOS: a capability-based
 microkernel operating system in Rust, with its boot loader, drivers,
