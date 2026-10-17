@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Minimal network stack (Phase 22, section 38). Encoders and decoders
 //! without `alloc` over caller-supplied buffers, plus the small state
 //! machines a ring 3 network service needs (ARP cache, DHCP

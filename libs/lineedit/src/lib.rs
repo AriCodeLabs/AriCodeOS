@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Line editor for text consoles (the shell's `read_line`). It understands
 //! the keys a terminal sends (printable ASCII, backspace `0x08`/`0x7F`,
 //! Enter, Ctrl-A/E/U, and the escape sequences of the arrows, Home, End and

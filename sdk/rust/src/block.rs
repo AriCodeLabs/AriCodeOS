@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Block service client (`aricode-proto::block`) with its own DMA buffer:
 //! the client provides the memory and the device writes into it.
 

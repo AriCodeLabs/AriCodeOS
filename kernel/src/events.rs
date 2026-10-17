@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Recent kernel events (stage 5, queryable diagnostics): a bounded ring
 //! with what a problem report needs to know without reading the serial
 //! console: processes created and exited (with the reason if the kernel

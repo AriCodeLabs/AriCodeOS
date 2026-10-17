@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Wait queue: blocks the current thread until a condition holds and someone
 //! calls `wake_all`/`wake_one`, with an optional deadline.
 //!

@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! HKDF (RFC 5869) over SHA-256 and SHA-384: the TLS 1.3 key schedule.
 
 use crate::hmac::{hmac_sha256, hmac_sha384};

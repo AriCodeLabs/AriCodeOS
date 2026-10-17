@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Arithmetic in GF(2^255 - 19) with five 51-bit limbs, shared by Ed25519
 //! and X25519. Only multiplication by small constants and the swap used by
 //! the X25519 ladder are written to be constant time; inversion and

@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+# SPDX-License-Identifier: Apache-2.0
 from pathlib import Path
 import shutil, hashlib, subprocess, json
 root=Path.cwd(); out=root/'build/review-early-confirm'; out.mkdir(parents=True,exist_ok=True)

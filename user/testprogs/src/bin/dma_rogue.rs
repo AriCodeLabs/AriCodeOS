@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! IOMMU test driver (Phase 33): receives the virtio-blk with the
 //! `virtio_pci` contract (SERVICE = SYSTEM handle with READ), reads sector 0
 //! into its own DMA buffer (translated by the unit) and then asks the device

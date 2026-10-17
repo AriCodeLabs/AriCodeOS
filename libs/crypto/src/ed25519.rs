@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Ed25519 (RFC 8032) from scratch: GF(2^255-19) arithmetic with five 51-bit
 //! limbs, points in extended coordinates, scalars modulo L by long
 //! division. Meant to verify manifest signatures at boot; signing is the

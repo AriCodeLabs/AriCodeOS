@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! X25519 (RFC 7748): Diffie-Hellman on Curve25519 with the Montgomery
 //! ladder. The ladder swaps with [`Fe::cswap`] and never branches on the
 //! scalar, so the ephemeral secret does not leak through timing.

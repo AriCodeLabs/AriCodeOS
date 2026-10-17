@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! arish (Phase 21): interactive shell in ring 3. It only sees what init
 //! gives it: 0x10004 = fsd endpoint (WRITE), 0x10005 = HARDWARE (DMA buffer),
 //! 0x10006 = SYSTEM (READ|MANAGE), 0x10007 = console input (READ),

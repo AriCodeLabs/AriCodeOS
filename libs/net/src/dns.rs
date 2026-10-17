@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! DNS (RFC 1035): A query and reading of the first A answer.
 
 use crate::{be16, Ipv4Addr};

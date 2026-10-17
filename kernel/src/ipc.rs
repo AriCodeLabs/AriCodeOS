@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Endpoint IPC (Phase 14): bounded queues of small messages with handle
 //! transfer, blocking with timeout and wake-up through wait queues. The
 //! centerpiece of the microkernel (section 23).

@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! sshd (ADR 0025): the SSH server. It speaks the protocol with
 //! `aricode-ssh` over the TCP service and, for each `shell` or `exec`
 //! request, asks init for a session shell (it has no SPAWNER). One

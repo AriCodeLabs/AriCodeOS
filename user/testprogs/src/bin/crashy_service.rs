@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Test service for the supervisor (stage 1): answers "ping" with "pong" on
 //! endpoint 0x10004; on "die" it replies "pong" and then crashes. Used to
 //! trigger deterministic restarts and check that the endpoint, owned by init,

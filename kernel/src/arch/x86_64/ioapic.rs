@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! I/O APIC: routes global system interrupts (GSI) to LAPIC vectors.
 
 use crate::memory::vmm;

@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! MMIO surface over the GOP framebuffer for `aricode-fb-console`.
 
 use crate::sync::IrqLock;

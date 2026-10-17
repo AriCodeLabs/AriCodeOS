@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Locating and parsing the static ACPI tables through the physical map
 //! (`libs/acpi`). No AML (section 31).
 

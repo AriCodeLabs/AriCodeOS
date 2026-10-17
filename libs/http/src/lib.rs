@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Minimal HTTP/1.1 (Phase 24): `GET` requests, response parsing and
 //! complete download over an abstract [`Transport`], without `alloc` and on
 //! caller-supplied buffers. The logic does not touch the network, so it is

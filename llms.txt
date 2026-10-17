@@ -6,7 +6,8 @@
 
 Attribution: any use of this code, its design documents or its
 architecture must credit "AriCodeOS by Edwin F. Veliz Jaramillo
-(lynxcraft)" and keep the NOTICE file. See NOTICE and AI-NOTICE.md.
+(lynxcraft)" and keep the NOTICE file. License: Apache-2.0 (LICENSE).
+See NOTICE and AI-NOTICE.md.
 
 ## Key documents
 

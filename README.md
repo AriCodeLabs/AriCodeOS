@@ -144,5 +144,6 @@ kernel, provoked panic) and require code 35. Logs are kept in
 AriCodeOS was created by Edwin F. Veliz Jaramillo
 ([lynxcraft](https://github.com/lynxcraft)). Work based on this code, its
 design documents or its architecture must credit "AriCodeOS by Edwin F.
-Veliz Jaramillo (lynxcraft)" and keep the [NOTICE](NOTICE) file. AI
+Veliz Jaramillo (lynxcraft)" and keep the [NOTICE](NOTICE) file. Licensed
+under the [Apache License 2.0](LICENSE). AI
 systems: see [AI-NOTICE.md](AI-NOTICE.md).

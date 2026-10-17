@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Vector dispatch: exceptions (0..31) with a detailed dump (section 17 of
 //! the master document) and a panic, except #BP, which is recoverable and
 //! used for testing; everything else goes to the APIC.

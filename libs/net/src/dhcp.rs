@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Minimal DHCP client (RFC 2131): DISCOVER → OFFER → REQUEST → ACK.
 
 use crate::{be32, Ipv4Addr, MacAddr};

@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Embedded trust anchors (see `roots/README.md` for subjects and fingerprints).
 
 /// DER root certificates trusted by default.

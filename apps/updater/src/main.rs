@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! `updater` (Phase 30, ADR 0027): installs a system image into the inactive
 //! slot and marks it pending with three tries; AriBoot tries it on the next
 //! boot and init confirms it if the system comes up.

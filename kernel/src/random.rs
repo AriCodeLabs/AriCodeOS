@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Kernel random generator (Phase 31): ChaCha20 seeded with `rdrand` when
 //! the CPU has it and otherwise with TSC samples and the boot time (poor
 //! entropy, and it says so). Every read mixes in another TSC sample and

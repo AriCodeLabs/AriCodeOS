@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Compositor (Phase 26): owner of the framebuffer in ring 3. Handles: 0x10004 =
 //! service endpoint, 0x10005 = framebuffer (MMIO), 0x10006 = SYSTEM,
 //! 0x10007 = HARDWARE (back buffer), 0x10008.. = input services

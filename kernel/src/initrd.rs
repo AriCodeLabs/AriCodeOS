@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Initrd handed over by AriBoot (`BootInfo::initrd_*`), reachable through
 //! the physical map. Contains `init` and the test programs.
 

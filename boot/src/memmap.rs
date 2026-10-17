@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Snapshot of the UEFI memory map using direct boot services calls.
 //!
 //! `uefi::boot::memory_map` chains size query, allocation and read with

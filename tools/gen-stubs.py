@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+# SPDX-License-Identifier: Apache-2.0
 """Generates kernel/src/arch/x86_64/stubs.s: 256 interrupt stubs + table."""
 ERR = {8, 10, 11, 12, 13, 14, 17, 21, 29, 30}
 out = [

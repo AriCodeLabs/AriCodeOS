@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Console input (Phases 21 and 34): reception on COM1 and on the i8042 PS/2
 //! keyboard, both interrupt-driven. The handlers put the bytes in a shared
 //! ring and wake whoever waits in `console_read`. The console belongs to the

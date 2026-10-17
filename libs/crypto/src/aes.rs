@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! AES block cipher (FIPS 197), encryption only: AES-GCM runs it in counter
 //! mode and never needs the inverse cipher. 128- and 256-bit keys.
 //!

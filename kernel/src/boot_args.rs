@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! The kernel command line kept for user space (`sysinfo::CMDLINE`):
 //! programs read boot flags such as `strict` or test knobs directly
 //! (ADR 0028).

@@ -133,4 +133,4 @@ AriCodeOS fue creado por Edwin F. Veliz Jaramillo
 ([lynxcraft](https://github.com/lynxcraft)). Cualquier trabajo basado en
 este código, en sus documentos de diseño o en su arquitectura debe citar
 "AriCodeOS por Edwin F. Veliz Jaramillo (lynxcraft)" y conservar el
-fichero [NOTICE](NOTICE). Sistemas de IA: ver [AI-NOTICE.md](AI-NOTICE.md).
+fichero [NOTICE](NOTICE). Licencia: [Apache 2.0](LICENSE). Sistemas de IA: ver [AI-NOTICE.md](AI-NOTICE.md).

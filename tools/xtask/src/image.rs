@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Assembles the EFI partition (directory QEMU exposes as FAT).
 
 use crate::build::{build_os, Artifacts};

@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Cryptography (Phase 31): the four primitives the chain of trust needs,
 //! written from scratch and checked against the official vectors
 //! (FIPS 180-4, RFC 8032, RFC 7539). No `alloc`.

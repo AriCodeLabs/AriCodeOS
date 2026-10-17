@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! PCI Express (section 30): everything that can be computed and decoded without
 //! touching hardware. The kernel provides the configuration space reads.
 

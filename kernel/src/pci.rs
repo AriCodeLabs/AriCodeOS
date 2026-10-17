@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! PCIe enumeration through ECAM (Phase 17) and device claiming for user
 //! drivers (Phase 18): BAR probing, MSI-X and capability hand-over.
 

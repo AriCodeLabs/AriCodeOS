@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Physical memory access through the linear map (`PHYS_MAP_BASE`).
 //!
 //! AriBoot builds it before jumping and the kernel VMM reproduces it in its

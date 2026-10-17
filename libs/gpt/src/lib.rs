@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! GPT (UEFI 2.x, §5.3): reading of header and entries with CRC32
 //! verification, and writing for the xtask test disk.
 

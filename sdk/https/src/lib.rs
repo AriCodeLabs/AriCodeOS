@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! HTTP and HTTPS GET for AriCodeOS programs. `http://` goes straight over
 //! the TCP service; `https://` runs TLS 1.3 (`aricode-tls`) on top, with
 //! the certificate checked against the embedded roots

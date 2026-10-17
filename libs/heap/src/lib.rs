@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Kernel heap (Phase 7): linked list of free blocks, first-fit,
 //! coalescing neighbours on free.
 //!

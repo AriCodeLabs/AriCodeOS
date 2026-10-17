@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! TLS 1.3 key schedule (RFC 8446 section 7): HKDF-Expand-Label,
 //! Derive-Secret, the handshake and application traffic secrets, Finished
 //! keys and KeyUpdate. The transcript is passed as the concatenation of the

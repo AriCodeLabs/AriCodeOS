@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! Virtio transport over modern PCI for ring 3 drivers: locates the
 //! structures, negotiates features, creates queues in DMA memory and offers
 //! MMIO access. Shared by virtio-blk and virtio-net; each driver provides

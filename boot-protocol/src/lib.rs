@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
 //! AriCodeOS boot protocol: the ABI shared between AriBoot and AriKernel.
 //!
 //! This crate has no dependencies and contains no logic: only the `repr(C)`
