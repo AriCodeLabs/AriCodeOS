@@ -25,48 +25,76 @@ it (incident 0005).
    checks of the services it depends on: the block service answers Info and
    a read of the GPT (`block service answers: N sectors, GPT read, ARI0 at
    LBA L`), the file service answers a list (`file service answers: N
-   files`), the network service reports its address within 3 s (`network
-   service has address A`, or `no address yet (DHCP pending)`, which is not
-   a failure), and every input service answered Info in its start probe
-   (`N input device(s) ready`). A failed block or file health check stops
-   the boot with the codes the test clients used (11, 14).
+   files`), every input service answered Info in its start probe (`N input
+   device(s) ready`), and the network service reports its address
+   (`network service has address A`, or `no address yet (DHCP pending)`,
+   which is not a failure). The network check runs after the USB devices
+   (step 9c), so it never delays the stick or the keyboard; it sends plain
+   Info requests with no DMA buffer, each bounded to 250 ms for the send and
+   250 ms for the reply (not `rpc::GRACE_MS`, 5 s). On virtio-net it polls
+   for up to 2 s (QEMU's DHCP answers in milliseconds); on Realtek it makes
+   a single request and does not wait. The file client of the health check
+   is the one init keeps using (restart storm, broker): no client is
+   allocated and abandoned. A failed storage check stops the boot before
+   the shell: Info unanswered 11, no ARI0 12, fsd not started 13, list
+   unanswered 14.
 2. **Test-only checks behind `selftest`.** `fs_client`, `blk_client`,
    `net_client`, `tcp_client`, `http_client` and `input_client` run only
-   when the command line carries `selftest`
-   (`aricode_cmdline::keys::SELFTEST`, read by init through
-   `sysinfo::CMDLINE` like `strict`). On a Realtek network they never run,
-   with or without it (ADR 0024). The older test keys (`restart_storm`,
-   `service_hang`, `init_fail_late`) stay as they were.
+   when the command line carries the bare key `selftest`
+   (`aricode_cmdline::keys::SELFTEST`, `CmdLine::has_flag`: `selftest=0`
+   does not enable it), read by init through `sysinfo::CMDLINE` like
+   `strict`. On a Realtek network they never run, with or without it (ADR
+   0024). The older test keys (`restart_storm`, `service_hang`,
+   `init_fail_late`) stay as they were.
 3. **QEMU scenarios get `selftest` by default.** xtask appends it to the
    cmdline of every boot (`Scenario::boot_cmdline`), so no scenario stops
    testing silently; a scenario opts out with `selftest = false`. Opting
-   out: `init.no_selftest` (boots like a real machine and asserts that no
-   test client line appears, `ls` shows the 4 files of a fresh disk and
-   the runner's test hosts saw `0 contact(s)`), `usb.image_boot` (the stick
-   image as written) and the two nearly-full-AriFS update scenarios, whose
-   free entries belong to the updater. A unit test keeps the
-   `fs-nearly-full`/`fs-one-short` disks off `selftest`.
-4. **The runner counts contacts with the test hosts.** The host responder
-   (UDP echo/DNS, TCP echo, HTTP) counts every datagram and connection and
-   the capture ends with `[host] test hosts: N contact(s)`.
-5. **The stick image carries no test data.** `cargo xtask usb-image` no
-   longer writes the `ARIDISK` raw-area pattern (only `blk_client` uses
-   it); ARI0 holds only the sample files. `usb-image` never adds
-   `selftest`; a `selftest` boot from the stick stops at `blk_client`'s
-   pattern check, before its write.
+   out: `init.no_selftest` (virtio, boots like a real machine and asserts
+   that no test client line appears, `ls` shows the 4 files of a fresh disk
+   and the guest sent no IPv4 frame besides DHCP), `init.no_selftest_usb`
+   (the laptop path: USB stick and USB HID only, same assertions),
+   `usb.image_boot` (the stick image as written) and the two
+   nearly-full-AriFS update scenarios, whose free entries belong to the
+   updater. A unit test keeps the `fs-nearly-full`/`fs-one-short` disks off
+   `selftest`.
+4. **The runner records the guest's network traffic.** Every scenario boot
+   captures the guest network with QEMU `filter-dump` (`net.pcap` in the
+   scenario directory, the guest MAC pinned to 52:54:00:12:34:56) and the
+   capture ends with `[host] guest IPv4 frames other than DHCP: N`: every
+   IPv4 frame the guest sent except DHCP (ARP is not IPv4). This also
+   catches traffic the host responder never sees (ICMP, other hosts).
+5. **The stick carries no test or sample data.** `cargo xtask usb-image`
+   writes its own file list into ARI0: an English `README` (what the stick
+   is and the repository link), plus what `--authorized-key` and
+   `--update-source` install; no `hola.txt`, no test README, no WASM demo,
+   no `ARIDISK` raw-area pattern. The test disk keeps its files. A
+   `selftest` boot from such a stick stops at `fs_client`'s first check,
+   before any write.
+6. **Test-only keys are refused for a real machine.**
+   `aricode_cmdline::keys::TEST_ONLY` lists `qemu_exit`, `test`,
+   `init_fail_late`, `restart_storm`, `service_hang`, `usb_fault` and
+   `selftest`; `cargo xtask usb-image --cmdline` refuses a line with any of
+   them.
+7. **No early write by sshd.** sshd rewrites `random_seed` on the first
+   accepted connection of a boot, before drawing that connection's
+   randomness, instead of at start: a boot nobody connects to writes
+   nothing.
 
 ## Consequences
 
-- A normal boot (`shell kbd=es` on the laptop) writes nothing to the stick
-  except what the system itself needs (A/B slot confirmation, files the
-  owner or a service such as the updater writes), and contacts no test
-  host. The `input_client` idle rounds (about 1.6 s) are gone from it, and
-  keys typed early are no longer swallowed by a test program.
+- A normal boot (`shell kbd=es` on the laptop) writes no test data and
+  contacts no test host. What the system itself may still write at boot:
+  the A/B confirmation of a freshly installed slot, fsd's journal recovery
+  at mount after a power cut (a pending replace redone, a broken journal
+  cleared), and sshd's host key the first time it starts without one
+  (`usb-image --authorized-key` installs it). The `input_client` idle
+  rounds (about 1.6 s) are gone, and keys typed early are no longer
+  swallowed by a test program.
 - Boot health is still visible in the log and still stops the boot when the
   storage stack does not answer.
-- Every new boot-time test program goes behind `selftest`; a check may run
-  on every boot only if it is read-only and touches nothing outside the
-  machine.
+- Every new boot-time test program goes behind `selftest`, and every new
+  test key into `TEST_ONLY`; a check may run on every boot only if it is
+  read-only and touches nothing outside the machine.
 - The QEMU log of a `selftest` boot shows `AriInit: selftest: running the
   test-only boot checks`, so a real machine booted with it by mistake says
   so on screen.

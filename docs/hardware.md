@@ -28,8 +28,8 @@ sudo dd if=build/aricodeos-usb.img of=/dev/sdX bs=4M conv=fsync status=progress
 ```
 
 The image is a GPT disk with six partitions: `ESP` (FAT32 with AriBoot,
-kernel, initrd and `cmdline.txt`), `ARI0` (AriFS with the sample files
-`hola.txt`, `README` and the WASM demo pair, and nothing else),
+kernel, initrd and `cmdline.txt`), `ARI0` (AriFS with only an English
+`README`, plus the files `--authorized-key` and `--update-source` add),
 `SYSA` (signed system image, slot A active), `SYSB` and `UPDATE` (empty)
 and `ARIBOOT` (A/B state). It is the same image that the
 `usb.image_boot` scenario boots in QEMU, so what gets written has already
@@ -60,20 +60,40 @@ A boot without `selftest` on the cmdline, which is every boot of a
 - `AriInit: block service answers: N sectors, GPT read, ARI0 at LBA L`;
 - `AriInit: file service answers: N files` (a list of AriFS);
 - `AriInit: network service has address A`, or `network service: no
-  address yet (DHCP pending)` after 3 s, which is not a failure.
+  address yet (DHCP pending)`, which is not a failure. On the Realtek this
+  is a single request, made after the USB stick and keyboard are up, with
+  no wait (at most half a second if netd is slow to answer); `net` in the
+  shell shows the address later.
 
-It creates no file, writes no test sector and sends nothing to the QEMU
-test hosts (10.0.2.2). The only boot-time write is the A/B confirmation of
-a freshly installed slot. The test clients (`fs_client`, `blk_client`,
-`net_client`, `tcp_client`, `http_client`, `input_client`) run only with
-`selftest`, which belongs to the QEMU scenarios: never put it on a
-stick's cmdline. If it is there by mistake the screen says `AriInit:
-selftest: running the test-only boot checks`, and the boot stops at
-`blk_client exited with 6` because the stick has no test pattern; by then
-`fs_client` has already created `nuevo.txt`. Sticks written before this
-change carry a `nuevo.txt` from those boots and the `ARIDISK` pattern at
-the tail of ARI0; neither is used any more, and AriFS has no delete yet,
-so rewriting the stick with a current image is the way to drop the file.
+If the block or file check fails, init stops before the shell: `block
+service does not answer Info` (exit code 11), `no ARI0 partition on the
+disk` (12), `fsd did not start` (13), `file service does not answer a
+list` (14).
+
+It creates no test file, writes no test sector and sends nothing to the
+QEMU test hosts (10.0.2.2). What the system itself may write at boot:
+
+- the A/B confirmation of a freshly installed slot (`ARIBOOT`);
+- fsd's journal recovery at mount, only after a power cut left a replace
+  pending or the journal broken (`fsd: pending replace ... redone at
+  mount`, `broken journal discarded at mount`);
+- sshd, only with `authorized_keys` installed: the host key the first time
+  it starts if the stick has none (`usb-image --authorized-key` installs
+  one, so normally never), and `random_seed`, rewritten on the first
+  accepted SSH connection of each boot, not at boot.
+
+The test clients (`fs_client`, `blk_client`, `net_client`, `tcp_client`,
+`http_client`, `input_client`) run only with `selftest`, which belongs to
+the QEMU scenarios: `cargo xtask usb-image --cmdline` refuses it, like
+every other test-only key (`qemu_exit`, `test=`, `usb_fault`,
+`restart_storm`, `service_hang`, `init_fail_late`). If a stick's
+`cmdline.txt` is edited by hand to carry it, the screen says `AriInit:
+selftest: running the test-only boot checks` and the boot stops at
+`fs_client exited with 2` before any write, because the stick has none of
+the test disk's files. Sticks written before this change carry a
+`nuevo.txt`, the test disk's sample files and the `ARIDISK` pattern at the
+tail of ARI0; none of them is used any more, and AriFS has no delete yet,
+so rewriting the stick with a current image is the way to drop them.
 
 ## Status on the test laptop (2026-10-10)
 

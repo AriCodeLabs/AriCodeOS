@@ -1,7 +1,7 @@
 # Incident 0005: boot self-tests write to and probe the real machine
 
-- **Opened:** 2026-10-17. **Status:** fixed on `fix/boot-self-tests`, pending
-  the QEMU run of the listed scenarios and the independent audit.
+- **Opened:** 2026-10-17. **Status:** fixed and audited on `fix/boot-self-tests`, pending
+  the QEMU run of the listed scenarios.
 - **Found by:** the QEMU run of `update.fs_nearly_full` (feature/update-sources):
   a file `nuevo.txt` the scenario did not expect took the last free AriFS
   entry.
@@ -57,9 +57,9 @@ only with `selftest` on the command line.
 | SPAWNER without `MANAGE` is denied; unknown initrd name is `NotFound` | (a) | Capability checks on init's own handles; no process is created. |
 | `crashy_driver` crashes, then restarts | (a) | Process fault and restart, no device, no disk. |
 | PCI function count | (a) | Read of the kernel's PCI table. |
-| Block service: Info and the GPT read (`find_partition` for ARI0) | (a) | Read-only; init needs the GPT anyway to find ARI0. New line `block service answers: N sectors, GPT read, ARI0 at LBA L`; failure stops the boot (11, 12). |
+| Block service: Info and the GPT read (`find_partition` for ARI0) | (a) | Read-only; init needs the GPT anyway to find ARI0. New line `block service answers: N sectors, GPT read, ARI0 at LBA L`; failure stops the boot (Info 11, no ARI0 12; fsd not started 13). |
 | File service: list of the AriFS root | (a) | Read-only; replaces `fs_client` as the health check. New line `file service answers: N files`; failure stops the boot (14). |
-| Network service: address reported by Info | (a) | Read-only request to netd; DHCP is the system's own traffic, not test traffic. Waits at most 3 s and is not a failure (`no address yet (DHCP pending)`). Also on Realtek. |
+| Network service: address reported by Info | (a) | Read-only request to netd, no DMA buffer; DHCP is the system's own traffic, not test traffic. Runs after the USB devices; each request bounded to 250 + 250 ms; polls up to 2 s on virtio, a single request on Realtek. Not a failure (`no address yet (DHCP pending)`). |
 | Input services: Info in the supervisor start probe | (a) | Already part of publishing the service; init now prints `N input device(s) ready`. |
 | `fs_client` | (b) | Creates `nuevo.txt` (one of the 32 AriFS entries), writes, replaces and flushes it on every boot. |
 | `blk_client` | (b) | Writes a pattern sector at raw area + 100 on the system disk and needs the `ARIDISK` test pattern. |
@@ -72,21 +72,23 @@ only with `selftest` on the command line.
 
 ## Fix
 
-- `aricode_cmdline::keys::SELFTEST`; init reads it through
-  `sysinfo::CMDLINE` like `strict` and runs the (b) clients only with it.
-  The health checks of (a) run on every boot, also before the clients
-  when `selftest` is set.
+- `aricode_cmdline::keys::SELFTEST`, a bare key (`has_flag`); init reads
+  it through `sysinfo::CMDLINE` like `strict` and runs the (b) clients
+  only with it. The health checks of (a) run on every boot, also before
+  the clients when `selftest` is set.
 - xtask appends `selftest` to the cmdline of every scenario boot unless the
   scenario says `selftest = false` (`Scenario::boot_cmdline`). Opting out:
-  `init.no_selftest` (new), `usb.image_boot`, `update.fs_nearly_full`,
-  `update.fs_one_short`. The runner's responder counts datagrams and
-  connections to the test hosts and appends `[host] test hosts: N
-  contact(s)` to the capture; `init.no_selftest` requires 0, `init.boot`
+  `init.no_selftest` and `init.no_selftest_usb` (new), `usb.image_boot`,
+  `update.fs_nearly_full`, `update.fs_one_short`. The runner captures the
+  guest network with `filter-dump` and appends `[host] guest IPv4 frames
+  other than DHCP: N`; the no-selftest scenarios require 0, `init.boot`
   forbids 0.
 - `fill_arifs` no longer reserves an entry for `nuevo.txt`
   (`BOOT_CREATED_FILES` removed); a unit test keeps the nearly-full disks off
   `selftest`.
-- `cargo xtask usb-image` no longer writes the `ARIDISK` raw-area pattern.
+- `cargo xtask usb-image` writes only an English `README` into ARI0 (plus
+  what `--authorized-key`/`--update-source` add), no `ARIDISK` raw-area
+  pattern, and refuses test-only cmdline keys.
 - Scenarios adapted: `update.slot_a` and `update.pending_boot` (the loader's
   `cmdline:` line now shows `selftest`), `filesystem.corrupt_detected` (the
   file health check fails before `fs_client` would run).
@@ -98,8 +100,57 @@ only with `selftest` on the command line.
 - QEMU was not run on the branch (the test ports were in use by another
   process): `cargo xtask check` and the host tests pass; the scenarios
   listed in the branch report must run before merging.
-- The stick still carries the sample files `hola.txt` and `README` (whose
-  text says "disco de pruebas") and the WASM demo pair. They are sample
-  content the shell and the demos use, not written by any check; whether
-  an owner's stick should carry them is a separate decision.
-- Independent audit of the change (failure protocol, step 6).
+- The keys `input_restart` and `shell_fault` named in the audit do not
+  exist in the tree; `TEST_ONLY` lists the test keys that do.
+- `boot_slot` and `boot_pending` are added by AriBoot and should not be
+  written by hand either; `usb-image` does not refuse them yet.
+
+## Audit (2026-10-17)
+
+Independent audit of `fix/boot-self-tests`: safe to merge once QEMU
+passes. Every finding is resolved on the same branch:
+
+1. **Other boot-time writes were not documented; sshd wrote its seed on
+   every boot.** sshd now saves `random_seed` on the first accepted
+   connection, before drawing its randomness
+   (`services/sshd/src/main.rs:387`, `:419-422`, doc at `:73-76`; ADR 0025
+   updated). The host key creation (only without a key) and fsd's journal
+   recovery at mount (`libs/arifs/src/lib.rs:678-698`, only after a cut)
+   are documented in `docs/hardware.md:74-84` and ADR 0032
+   (Consequences).
+2. **The 3 s network wait.** The check now runs after the USB devices
+   (`services/init/src/main.rs:2126-2130`), sends Info with `rpc::call`
+   bounded to 250 ms send + 250 ms reply instead of `NetClient` and its
+   5 s `GRACE_MS` (`:410-451`), polls up to 2 s on virtio
+   (`:458`, `:1922`) and makes a single request on Realtek (`:1962`).
+   Wording fixed in ADR 0032 (item 1), this file and
+   `docs/hardware.md:62-66`.
+3. **Contact counter.** Replaced by a capture of the guest network: QEMU
+   `filter-dump` on `net0` (`tools/xtask/src/qemu.rs:772-778`), the guest
+   MAC pinned (`:636`), and `guest_ipv4_frames` counting every IPv4 frame
+   the guest sent except DHCP (`:644`, test at `:1015`); the line
+   `[host] guest IPv4 frames other than DHCP: N` (`:916`). The responder
+   no longer counts, so no thread state is read.
+4. **No scenario on the laptop path.** `tests/qemu/init_no_selftest_usb.toml`
+   (USB stick, USB HID only, `selftest = false`).
+5. **`usb-image --cmdline` accepted test-only keys.**
+   `aricode_cmdline::keys::TEST_ONLY` and `CmdLine::test_only_key`
+   (`libs/cmdline/src/lib.rs:59`, `:116`, test at `:166`); refused in
+   `tools/xtask/src/image.rs:359` (test at `:891`).
+6. **`selftest=0` enabled selftest.** `CmdLine::has_flag`
+   (`libs/cmdline/src/lib.rs:53`) in init
+   (`services/init/src/main.rs:1809`) and xtask
+   (`tools/xtask/src/scenario.rs:360`); test `selftest_is_a_bare_whole_key`.
+7. **Health checks left clients allocated.** The file client of the health
+   check is returned by `start_storage_stack` and reused by the restart
+   storm and the broker (`services/init/src/main.rs:326`, `:394`, `:2152`,
+   `:1282`, `:2188`); the network check uses no client and no DMA buffer.
+8. **Stop codes in the docs.** 11 Info, 12 no ARI0, 13 fsd, 14 list:
+   `docs/hardware.md:68-71`, ADR 0032 item 1, this file.
+
+Owner's stick files (decision taken by the owner, reversible):
+`write_usb_image` uses its own list `USB_FILES`, an English `README` with
+the repository link (`tools/xtask/src/image.rs:318`, `:522`, test at
+`:905`); no `hola.txt`, no Spanish README, no WASM demo. The test disk
+keeps `DISK_FILES`. `usb.image_boot` expects 1 file.
+
