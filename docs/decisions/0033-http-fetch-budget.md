@@ -29,11 +29,18 @@ happens before any signature check.
 2. **Transports derive each operation's timeout from it.** `aricode-https`
    `get`/`get_with` and `aricode-sys` `http::get` take the budget next to
    the per-operation `timeout_ms`; every resolve, connect, TLS record
-   exchange, send and receive waits `min(remaining, timeout_ms)`, the
-   handshake loop checks the budget between records, and the pre-HTTP
-   phases report `Deadline(Resolve | Connect | Handshake)`. Sends are
-   bounded as well (`NetClient::tcp_send_all_within`; `tcp_send_all` keeps
-   its five-second idle limit).
+   exchange, send and receive waits `min(remaining, timeout_ms)`, and the
+   pre-HTTP phases report `Deadline(Resolve | Connect | Handshake)`. A
+   timeout alone does not bound a TLS stream whose server keeps bytes
+   queued: records without application data (zero-length records, RFC
+   8446 §5.1, session tickets, key updates) make a receive return at once
+   with no plaintext. So both TLS loops, the handshake and the receive
+   loop after it, ask the budget between records, and the receive loop
+   refuses more than `MAX_SILENT_BYTES` (64 KiB, counted in bytes so a
+   large record arriving in small segments is not a stall) of such
+   records in a row (`EmptyRecords`). Sends are bounded as well
+   (`NetClient::tcp_send_all_within`; `tcp_send_all` keeps its five-second
+   idle limit).
 3. **Defence in depth in the parser.** At most `MAX_INFORMATIONAL` (8)
    interim responses per fetch (`TooManyInformational`) and at most
    `MAX_HEADER_BYTES` (16 KiB) of header bytes per fetch, discarded `1xx`
@@ -55,8 +62,14 @@ happens before any signature check.
   can forget the budget: there is no default.
 - Host tests (`aricode-http`): the audit's probe (700 × `103`), slow
   interim responses, a header dribble, endless chunk trailers, a transport
-  timeout at the deadline, both limits at their edges, and a normal fetch
-  under budget. `aricode-https`: the per-operation timeout derivation.
+  timeout at the deadline, both limits at their edges, a normal fetch
+  under budget, and the parser alone ending a stall on a transport that
+  never times out. `aricode-https` (the TCP and TLS layers of the stream
+  are behind private `Tcp` and `Records` traits so it runs on the host):
+  the per-operation timeout derivation, empty TLS records for ever ending
+  at the deadline, the silence limit, a handshake without progress, and
+  plaintext delivered.
+- The error enums also gain `EmptyRecords` (`aricode-https`).
 - QEMU scenario `shell.http_deadline` with the xtask routes
   `/early-hints` (one `103` every five seconds, never a final response) and
   `/early-hints-flood` (twenty at once); written with the fix, to be run

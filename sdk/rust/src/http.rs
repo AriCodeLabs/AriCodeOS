@@ -75,15 +75,21 @@ pub fn get(
         0 => Err(HttpError::Deadline(phase)),
         left => Ok(left.min(timeout_ms)),
     };
+    // A failure once the budget is spent is the deadline: the operation was
+    // given the time that was left.
+    let failed = |phase: Phase, e: HttpError| match budget.remaining_ms() {
+        0 => HttpError::Deadline(phase),
+        _ => e,
+    };
     let addr = match aricode_net::Ipv4Addr::parse(url.host) {
         Some(ip) => ip.0,
         None => net
             .resolve(url.host, None, op(Phase::Resolve)?)
-            .map_err(HttpError::Resolve)?,
+            .map_err(|e| failed(Phase::Resolve, HttpError::Resolve(e)))?,
     };
     let sock = net
         .tcp_connect(addr, url.port, op(Phase::Connect)?)
-        .map_err(HttpError::Connect)?;
+        .map_err(|e| failed(Phase::Connect, HttpError::Connect(e)))?;
     let result = aricode_http::fetch(
         &mut Stream {
             net,

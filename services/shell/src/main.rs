@@ -792,6 +792,9 @@ fn http_get(fs: &mut FsClient, client: &mut NetClient, arg: &[u8]) {
             print(b"\n");
         }
         Err(HttpsError::TooManyInformational) => print(b"http: too many interim responses\n"),
+        Err(HttpsError::EmptyRecords) => {
+            print(b"http: TLS: the server kept sending records without data\n")
+        }
         Err(HttpsError::HeaderBytes) => {
             print(b"http: response headers too large in all (interim responses included)\n")
         }

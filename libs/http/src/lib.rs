@@ -21,7 +21,10 @@ pub const MAX_HEADERS: usize = 8192;
 /// Hints`; a stream of them is a stall, not a response (incident 0009).
 pub const MAX_INFORMATIONAL: u32 = 8;
 /// Maximum header bytes of one fetch, discarded 1xx heads included; the
-/// final response alone may use [`MAX_HEADERS`] (incident 0009).
+/// final response alone may use [`MAX_HEADERS`] (incident 0009). The
+/// fetch is refused when more than this has arrived and the final
+/// response is still incomplete, so one that completes within the next
+/// receive is accepted.
 pub const MAX_HEADER_BYTES: usize = 2 * MAX_HEADERS;
 /// Maximum length of a chunk size line (with extensions).
 const MAX_CHUNK_LINE: usize = 256;
@@ -511,8 +514,8 @@ pub fn fetch_with<T: Transport>(
             return Err(Error::TooBig);
         }
         // Everything in `head` is header bytes of the current response (no
-        // empty line yet): the fetch needs more and has used its share.
-        if discarded + have >= MAX_HEADER_BYTES {
+        // empty line yet): the fetch needs more and has used up its share.
+        if discarded + have > MAX_HEADER_BYTES {
             return Err(Error::HeaderBytes);
         }
         match recv(t, budget, Phase::Headers, &mut head[have..])? {
@@ -1103,14 +1106,21 @@ mod tests {
     }
 
     /// Server that answers the n-th receive with `reply(n)`, taking
-    /// `step_ms` of simulated time per receive, and, like the SDK transport
-    /// bounded by the budget, times out instead of waiting past the deadline.
+    /// `step_ms` of simulated time per receive. Like the SDK transport
+    /// bounded by the budget, it times out instead of waiting past the
+    /// deadline, unless `fixed_timeout` makes it the pre-fix transport that
+    /// knows nothing of the budget and always delivers.
     struct Slow<'a> {
         clock: &'a Clock,
         step_ms: u64,
         receives: u32,
         reply: &'a dyn Fn(u32) -> Vec<u8>,
+        fixed_timeout: bool,
     }
+
+    /// Receives after which a `fixed_timeout` transport declares the fetch
+    /// a runaway (the test fails instead of looping).
+    const RUNAWAY: u32 = 10_000;
 
     impl Transport for Slow<'_> {
         type Error = &'static str;
@@ -1119,10 +1129,16 @@ mod tests {
         }
         fn recv(&mut self, out: &mut [u8]) -> Result<usize, &'static str> {
             self.receives += 1;
-            let left = self.clock.deadline.saturating_sub(self.clock.now.get());
-            if self.step_ms > left {
-                self.clock.advance(left);
-                return Err("timeout");
+            if self.fixed_timeout {
+                if self.receives > RUNAWAY {
+                    return Err("runaway");
+                }
+            } else {
+                let left = self.clock.deadline.saturating_sub(self.clock.now.get());
+                if self.step_ms > left {
+                    self.clock.advance(left);
+                    return Err("timeout");
+                }
             }
             self.clock.advance(self.step_ms);
             let data = (self.reply)(self.receives);
@@ -1130,6 +1146,30 @@ mod tests {
             out[..n].copy_from_slice(&data[..n]);
             Ok(n)
         }
+    }
+
+    /// The parser alone ends a stall: with a transport that never times out
+    /// (fixed per-operation timeout, data always queued: the pre-fix
+    /// situation), the budget check before each receive stops a header
+    /// dribble at the deadline after a bounded number of receives.
+    #[test]
+    fn parser_alone_ends_a_stall_on_a_transport_that_never_times_out() {
+        let clock = Clock::new(10_000);
+        let head = b"HTTP/1.1 200 OK\r\nX-Slow: yes\r\n";
+        let reply = |n: u32| std::vec![head[(n as usize - 1) % head.len()]];
+        let mut t = Slow {
+            clock: &clock,
+            step_ms: 1000,
+            receives: 0,
+            reply: &reply,
+            fixed_timeout: true,
+        };
+        let budget = clock.budget();
+        let url = Url::parse("http://host/index").unwrap();
+        let r = fetch_with(&mut t, &url, &budget, &mut |_: &[u8]| true);
+        assert_eq!(r, Err(Error::Deadline(Phase::Headers)));
+        assert_eq!(t.receives, 10, "one receive per second until the deadline");
+        assert_eq!(clock.now.get(), 10_000);
     }
 
     const EARLY_HINTS: &[u8] = b"HTTP/1.1 103 Early Hints\r\nLink: </x>; rel=preload\r\n\r\n";
@@ -1147,6 +1187,7 @@ mod tests {
             step_ms,
             receives: 0,
             reply,
+            fixed_timeout: false,
         };
         let mut calls = 0;
         let budget = clock.budget();
@@ -1308,6 +1349,7 @@ mod tests {
             step_ms: 2_000,
             receives: 0,
             reply: &reply,
+            fixed_timeout: false,
         };
         let budget = clock.budget();
         let url = Url::parse("http://host/index").unwrap();

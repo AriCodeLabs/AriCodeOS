@@ -684,6 +684,7 @@ fn http_error(e: aricode_https::HttpsError) -> String {
         E::Deadline(phase) => return format!("deadline passed {}", phase.describe()),
         E::TooManyInformational => "too many interim responses",
         E::HeaderBytes => "response headers too large in all (interim responses included)",
+        E::EmptyRecords => "TLS stall (records without data kept coming)",
     })
 }
 

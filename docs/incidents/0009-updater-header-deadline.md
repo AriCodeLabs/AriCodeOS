@@ -58,6 +58,10 @@ Branch `fix/updater-absolute-deadline` (ADR 0033 records the contract):
   loop checks the budget between records (`HttpsError::Deadline(Phase)`,
   phases `Resolve`, `Connect`, `Handshake`, `Request`, `Headers`, `Body`).
   Sends are bounded too (`NetClient::tcp_send_all_within`).
+- `sdk/https`, after the audit of the first fix commit (below): the
+  receive loop after the handshake also asks the budget between records
+  and refuses more than `MAX_SILENT_BYTES` (64 KiB) of records in a row
+  that carry no application data (`HttpsError::EmptyRecords`).
 - `sdk/rust` `http::get` takes the budget as well; the test client, which
   has no clock handle and talks to the host's test server only, passes
   `Unbounded` explicitly.
@@ -69,6 +73,38 @@ Branch `fix/updater-absolute-deadline` (ADR 0033 records the contract):
 - Shell `http`: 8 s per operation, 30 s for the whole command; new
   messages `http: deadline passed while …`, `http: too many interim
   responses`, `http: response headers too large in all`.
+
+## Audit of the fix (2026-10-18, commit 0527af9)
+
+An independent review of the first commit found one gap of the same
+class one layer lower: the TLS branch of `Stream::recv` looped over
+`pump()` until plaintext appeared without consulting the budget. `pump()`
+bounds each `tcp_recv` by `min(remaining, timeout_ms)`, but a server that
+keeps bytes queued never reaches that timeout, and records without
+application data are accepted silently: zero-length application-data
+records (RFC 8446 §5.1; `libs/tls/src/record.rs` accepts an empty
+plaintext, `libs/tls/src/lib.rs` pushes no event for it) and
+post-handshake `NewSessionTicket`. Once the budget was spent the timeout
+was `0`, which netd clamps to 1 ms but answers at once when data is queued,
+so a hostile source streaming empty records at one per 10 ms would have
+held `update` for ever after the handshake. The first commit's wording
+("every TLS record exchange bounded") was therefore overstated for that
+loop; corrected above and in ADR 0033.
+
+Second commit: the loop returns an error when the budget is spent
+(`fetch_with` names the phase) and counts the record bytes received since
+the last byte of plaintext, refusing more than `MAX_SILENT_BYTES` (64 KiB,
+in bytes rather than records so a large record arriving in small segments
+is not mistaken for a stall) with `EmptyRecords`. The TCP and TLS layers
+of the stream are behind the private `Tcp` and `Records` traits so the
+loop is tested on the host. Low findings fixed in the same commit: the
+`Slow` mock already refused to wait past the deadline, so the first
+tests proved the error mapping rather than the parser ending a stall
+(`parser_alone_ends_a_stall_on_a_transport_that_never_times_out` uses a
+transport with a fixed per-operation timeout, the pre-fix situation, and a
+runaway cap); `aricode_sys::http::get` now reports a netd timeout at the
+deadline as `Deadline(Resolve | Connect)` like `aricode-https`; the
+cumulative header-byte check refuses at `> MAX_HEADER_BYTES`, documented.
 
 ## Tests
 
@@ -93,9 +129,20 @@ transport, like the audit's probe):
 - `fast_fetch_within_budget_succeeds`: a normal fetch with one interim
   response and a body over several timed receives is untouched.
 
+- `parser_alone_ends_a_stall_on_a_transport_that_never_times_out`: with a
+  transport that always delivers (fixed per-operation timeout), the budget
+  check before each receive ends a header dribble at the deadline after
+  exactly ten receives.
+
 `cargo test -p aricode-https`: the per-operation timeout follows the
-budget (`operation_timeout_follows_the_budget`) and failures before the
-HTTP exchange become the deadline only once the budget is spent.
+budget (`operation_timeout_follows_the_budget`), failures before the HTTP
+exchange become the deadline only once the budget is spent, and over a
+simulated TLS stream with data always queued:
+`empty_records_forever_end_at_the_deadline` (one empty record per second,
+`Deadline(Headers)` at exactly 60 s, sink never called),
+`empty_records_in_bulk_are_refused_by_the_silence_limit` (`EmptyRecords`
+after 64 KiB, under a second), `handshake_without_progress_ends_at_the_deadline`
+(`Deadline(Handshake)`) and `plaintext_within_budget_is_delivered`.
 
 QEMU, written but **not yet run** (another process owned the QEMU ports
 when the fix was made): `shell.http_deadline`
