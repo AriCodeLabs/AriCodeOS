@@ -1,8 +1,11 @@
 # ADR 0031: User-space EHCI driver with USB 2.0 hubs
 
 - **Date:** 2026-10-17
-- **Status:** Accepted (written and host-tested; QEMU scenarios written,
-  not yet run; not yet exercised on the laptop). Hubs, split transactions
+- **Status:** Accepted (host-tested; QEMU: `usb.ehci_storage`,
+  `usb.ehci_fault`, `usb.ehci_fault_csw`, `strict.ehci_halt` and
+  `usb.hid_boot_with_ehci` pass on the integration of 2026-10-17,
+  `usb.ehci_hid` and `usb.ehci_companion` corrected afterwards; not yet
+  exercised on the laptop). Hubs, split transactions
   through a transaction translator, the 64-bit layouts and real endpoint
   halts on hardware are unverified until the laptop runs it; audit
   `docs/audits/ehci-audit-1.md` applied.
@@ -218,7 +221,12 @@ Three facts shape the driver:
   polling); the reader must be plugged in again.
 - QEMU scenarios (`usb.ehci_hid`, `usb.ehci_storage`, `usb.ehci_fault`,
   `usb.ehci_fault_csw` (a real bulk IN STALL), `usb.ehci_companion` (a
-  full-speed keyboard on an ICH9 EHCI with a UHCI companion: the handover,
-  or the "no companion" report if the emulated EHCI declares none),
+  full-speed keyboard on an ICH9 EHCI, which declares its UHCI companion,
+  N_CC = 1: the port is handed over with PORTSC.PO; the "no companion"
+  report is not exercised in QEMU),
   `strict.ehci_halt`, and the revised `usb.hid_boot_with_ehci`) were
-  written with this ADR but not run when it was accepted.
+  written with this ADR. In the first QEMU run `usb.ehci_hid` lost its
+  keys to the virtio keyboard (QEMU routes QMP input to the most recently
+  activated handler; incident 0001) and now runs without virtio input
+  (`usb_hid_only_input`) and with paced keys; `usb.ehci_companion` had
+  assumed N_CC = 0 and now expects the handover.

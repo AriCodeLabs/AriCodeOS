@@ -18,7 +18,8 @@ pub struct UsbOptions {
     pub hid: bool,
     /// That xHCI offers MSI only (no MSI-X).
     pub hid_msi: bool,
-    /// No virtio keyboard and mouse: QMP input reaches the USB HID devices.
+    /// No virtio keyboard and mouse: QMP input reaches the USB HID devices
+    /// (xHCI or EHCI).
     pub hid_only_input: bool,
     /// An extra EHCI (class 0c.03, interface 0x20): not xHCI.
     pub legacy_controller: bool,

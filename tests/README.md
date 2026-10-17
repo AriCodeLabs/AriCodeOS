@@ -54,6 +54,7 @@ disk = "slots"                  # disk: slots (default) | esp-only | pending-b |
 disk_readonly = false           # true: the test disk is presented read-only
 cpus = 4                        # processors (-smp N); undeclared: 1, or whatever `--cpus N` forces
 usb_hid = true                  # adds qemu-xhci with a USB keyboard and mouse (QMP events go to the USB devices)
+usb_hid_only_input = true       # no virtio keyboard/mouse, so QMP input reaches the USB HID devices (xHCI or EHCI)
 usb_hid_msi = true              # that xHCI offers MSI only, no MSI-X (like 2012 Intel controllers)
 usb_storage = true              # the test disk hangs off the xHCI as USB mass storage; there is no virtio-blk
 

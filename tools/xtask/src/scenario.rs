@@ -215,8 +215,9 @@ pub struct Scenario {
     /// unless `usb_hid_only_input` is set.
     #[serde(default)]
     pub usb_hid: bool,
-    /// No virtio keyboard and mouse: the USB HID devices are the only
-    /// input devices, so QMP input reaches them whatever the guest starts.
+    /// No virtio keyboard and mouse: the USB HID devices (`usb_hid` on the
+    /// xHCI or `usb_ehci_hid` on the EHCI) are the only input devices, so
+    /// QMP input reaches them whatever the guest starts.
     #[serde(default)]
     pub usb_hid_only_input: bool,
     /// The `usb_hid` xHCI offers MSI only (no MSI-X), like 2012 Intel

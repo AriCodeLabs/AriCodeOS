@@ -98,3 +98,22 @@ QEMU not run.
 | N2 | `libs/gpt`: `TEST_DISK_GUID` (176) and `write_disk_with_guid` (191, host test); `cargo xtask usb-image` writes a random version-4 disk GUID from `/dev/urandom` and prints it (`tools/xtask/src/image.rs` 416, 410); QEMU test images keep `TEST_DISK_GUID`. ADR 0031 says both, and that a restarted usbd ignores the expected-disk bits |
 | Identity reads | A short GPT header read fails the enumeration (`main.rs` 2208; a failed read already did through `scsi_failed`); a serial read that fails other than by a STALL fails it too (2069) |
 | Minor | A STALL's CLEAR_FEATURE is owed (`clear_owed`, 2563) and retried on the next poll when refused for lack of time (`clear_hid_halt` 2578); other failures still stop the HID |
+
+## QEMU results (integration of 2026-10-17)
+
+Full suite on `integ/ehci`: 145 scenarios, 143 pass, including
+`usb.ehci_storage`, `usb.ehci_fault`, `usb.ehci_fault_csw`,
+`strict.ehci_halt` and `usb.hid_boot_with_ehci`. Two scenario failures,
+both in the scenarios, not the driver:
+
+- `usb.ehci_hid`: the QMP keys reached the virtio keyboard (QEMU routes QMP
+  input to the most recently activated handler, the virtio keyboard once its
+  driver starts; incident 0001); the mouse events did reach the EHCI. Fixed:
+  `usb_hid_only_input` (now documented for the EHCI too), `key_delay_ms = 30`,
+  the keyboard's first report required (`first report from address 1`),
+  "USER FAULT" no longer forbidden (init's self-tests print it on every boot).
+- `usb.ehci_companion`: QEMU's ich9-usb-ehci1 declares its UHCI companion
+  (N_CC = 1) and the driver handed the full-speed device over, as it should;
+  the scenario had assumed N_CC = 0. It now expects the handover line (the
+  PORTSC.PO path) and the UHCI's "has no driver (interface 0x00" line; ADR
+  0031 wording corrected.
