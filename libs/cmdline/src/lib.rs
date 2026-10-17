@@ -128,13 +128,16 @@ pub mod keys {
     /// `KIND` is `cbw` (the default: a transaction error reported on the
     /// CBW), `csw` (a CSW read with no command outstanding, so the bulk IN
     /// endpoint really halts with a STALL and the halted-endpoint recovery
-    /// runs), `reenum` (the storage endpoint is given up: Disable Slot or
-    /// Reset Device and the whole re-enumeration run) or `hid` (a HID
-    /// report is treated as a transaction error: the interrupt endpoint is
-    /// stopped and recovered from the idle loop, its report TRBs queued
-    /// again).
+    /// runs), `short-csw` (the CSW read of the request is made to look as
+    /// if the device moved only 8 of the 13 bytes, the previous command's
+    /// status still in the buffer: an invalid CSW per BOT 5.2 and 6.3,
+    /// followed by a real Reset Recovery; incident 0007), `reenum` (the
+    /// storage endpoint is given up: Disable Slot or Reset Device and the
+    /// whole re-enumeration run) or `hid` (a HID report is treated as a
+    /// transaction error: the interrupt endpoint is stopped and recovered
+    /// from the idle loop, its report TRBs queued again).
     /// The EHCI driver (ADR 0031) understands `N` and `idle` with `cbw`
-    /// (followed by a real Reset Recovery) and `csw`.
+    /// (followed by a real Reset Recovery), `csw` and `short-csw`.
     pub const USB_FAULT: &str = "usb_fault";
 
     /// Every key documented "Tests only": they exit QEMU, inject failures or
@@ -226,6 +229,9 @@ mod tests {
         assert_eq!(first("qemu_exit shell"), Some("qemu_exit"));
         assert_eq!(first("shell test=panic"), Some("test"));
         assert_eq!(first("usb_fault=idle shell"), Some("usb_fault"));
+        assert_eq!(first("shell usb_fault=idle:csw"), Some("usb_fault"));
+        assert_eq!(first("shell usb_fault=idle:short-csw"), Some("usb_fault"));
+        assert_eq!(first("shell usb_fault=3:hid"), Some("usb_fault"));
         assert_eq!(first("selftest=0"), Some("selftest"));
         let loader = |s| CmdLine::new(s).first_of(keys::LOADER_ONLY);
         assert_eq!(loader("shell boot_slot=B"), Some("boot_slot"));

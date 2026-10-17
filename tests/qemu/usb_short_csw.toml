@@ -1,0 +1,52 @@
+# Incident 0007 (ADR 0028): a CSW is exactly 13 bytes (BOT 5.2); a reply of
+# any other length is an invalid CSW that needs a Reset Recovery (BOT 6.3,
+# 5.3.4). `usb_fault=idle:short-csw` makes the CSW read of the first block
+# request after two idle seconds look as if the device moved only the
+# signature and the tag (8 bytes), with the previous command's zero residue
+# and Passed status still in the buffer. Before the fix the driver decoded
+# the stale bytes and acknowledged the write with no status for it. The
+# driver must reject the count before reading a field, record the fault,
+# answer Io, run the Reset Recovery from the idle loop, and serve the next
+# write.
+name = "usb.short_csw"
+description = "usbd: an 8-byte CSW is invalid (BOT 5.2), never a success; the request answers Io, Reset Recovery follows and the next write succeeds"
+level = "full"
+areas = ["usb", "storage", "diag"]
+usb_storage = true
+cmdline = "qemu_exit shell usb_fault=idle:short-csw"
+timeout_secs = 90
+stdin = [
+    "repeat 10 ping 10.0.2.2",
+    "write probe.txt after idle",
+    "repeat 3 ping 10.0.2.2",
+    "write probe.txt second try",
+    "diag",
+    "shutdown",
+]
+
+[expect]
+exit = 33
+serial_contains = [
+    "usb-input: injected fault: the CSW read moved 8 bytes",
+    "usb-input: CSW of 8 bytes, not 13 (BOT 5.2): invalid, no status for tag ",
+    "usb-input: reset recovery (BOT 5.3.4) pending: the class reset is sent when idle",
+    "write: write error",
+    "usb-input: reset recovery (BOT 5.3.4): Bulk-Only Mass Storage Reset",
+    "usb-input: reset recovery done: transport ready",
+    "write: 11 bytes to probe.txt",
+    "fault reported by process",
+    "usb csw invalid (code 8)",
+    "usb inj w lba",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "strict",
+    "Stall Error",
+    "Context State Error",
+    "stray transfer event",
+    "no completion event",
+    "usb cmd fail",
+    "re-enumerating",
+    "transfer recovered",
+]

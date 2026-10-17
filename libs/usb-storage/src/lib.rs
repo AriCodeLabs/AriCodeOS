@@ -170,15 +170,47 @@ pub fn after_transfer_failure(stage: Stage) -> Next {
 /// require a Reset Recovery before the next CBW.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CswError {
-    /// Signature, length or status byte not valid (BOT 6.3.1).
+    /// Signature or status byte not valid, or fewer bytes than a CSW to
+    /// look at (BOT 6.3.1).
     Invalid,
+    /// The transfer moved this many bytes, not the 13 of a CSW (BOT 5.2,
+    /// 6.3.1). Where the device wrote nothing the buffer holds whatever the
+    /// previous command left, so no field is read: a status that did not
+    /// arrive is not a status (incident 0007).
+    Length(usize),
     /// A valid CSW for another command (dCSWTag, BOT 6.3.1 and 6.4).
     TagMismatch(Csw),
     /// bCSWStatus 2 (BOT 6.3.1 and 6.7, phase error).
     PhaseError(Csw),
 }
 
-/// Checks the CSW received for the command with `tag`.
+impl CswError {
+    /// The code of the fault event that records the error: the bytes the
+    /// transfer moved for a wrong length, 0 otherwise.
+    pub fn event_code(self) -> u64 {
+        match self {
+            Self::Length(moved) => moved as u64,
+            Self::Invalid | Self::TagMismatch(_) | Self::PhaseError(_) => 0,
+        }
+    }
+}
+
+/// Checks the CSW that the bulk IN transfer for the command with `tag`
+/// put in `raw`, having moved `moved` bytes. A CSW is exactly `Csw::LEN`
+/// bytes (BOT 5.2); a transfer that moved any other count is an invalid
+/// CSW before a byte of `raw` is looked at, so the residue and status a
+/// previous command left in the buffer never pass as this one's (incident
+/// 0007). The drivers check every CSW they read through this function.
+pub fn check_csw_transfer(moved: usize, raw: &[u8; Csw::LEN], tag: u32) -> Result<Csw, CswError> {
+    if moved != Csw::LEN {
+        return Err(CswError::Length(moved));
+    }
+    check_csw(raw, tag)
+}
+
+/// Checks the bytes of a CSW received for the command with `tag`; the
+/// caller has made sure they are bytes the device delivered
+/// (`check_csw_transfer`).
 pub fn check_csw(raw: &[u8], tag: u32) -> Result<Csw, CswError> {
     let csw = Csw::parse(raw).ok_or(CswError::Invalid)?;
     if csw.tag != tag {
@@ -447,6 +479,80 @@ mod tests {
         csw[0] = b'X';
         assert_eq!(check_csw(&csw, 7), Err(CswError::Invalid));
         assert_eq!(check_csw(&csw[..12], 7), Err(CswError::Invalid));
+    }
+
+    /// The CSW a device delivers: `tag`, `residue` and the status byte.
+    fn csw_bytes(tag: u32, residue: u32, status: u8) -> [u8; Csw::LEN] {
+        let mut b = [0u8; Csw::LEN];
+        b[..4].copy_from_slice(b"USBS");
+        b[4..8].copy_from_slice(&tag.to_le_bytes());
+        b[8..12].copy_from_slice(&residue.to_le_bytes());
+        b[12] = status;
+        b
+    }
+
+    #[test]
+    fn csw_transfer_must_move_exactly_thirteen_bytes() {
+        // Incident 0007: the buffer still holds the previous command's CSW
+        // (tag 6, Passed or Failed) and the device answers the command with
+        // tag 7 with the signature and the tag only (8 bytes), or less.
+        for previous_status in [0u8, 1] {
+            let mut buf = csw_bytes(6, 0, previous_status);
+            for moved in [0usize, 8, 12] {
+                let reply = csw_bytes(7, 0, 0);
+                buf[..moved].copy_from_slice(&reply[..moved]);
+                assert_eq!(
+                    check_csw_transfer(moved, &buf, 7),
+                    Err(CswError::Length(moved)),
+                    "{moved} bytes over a previous status {previous_status}"
+                );
+                assert_eq!(CswError::Length(moved).event_code(), moved as u64);
+            }
+            // The trap the count closes: once the first 8 bytes are
+            // rewritten the buffer alone decodes as a status for tag 7.
+            assert!(check_csw(&buf, 7).is_ok());
+            // More than a CSW is not a CSW either.
+            assert_eq!(
+                check_csw_transfer(Csw::LEN + 1, &buf, 7),
+                Err(CswError::Length(Csw::LEN + 1))
+            );
+        }
+        // A complete CSW is checked field by field, as before.
+        let passed = csw_bytes(7, 0, 0);
+        assert_eq!(
+            check_csw_transfer(Csw::LEN, &passed, 7),
+            Ok(Csw {
+                tag: 7,
+                residue: 0,
+                status: CswStatus::Passed
+            })
+        );
+        let failed = csw_bytes(7, 512, 1);
+        assert_eq!(
+            check_csw_transfer(Csw::LEN, &failed, 7).map(|c| c.status),
+            Ok(CswStatus::Failed)
+        );
+        assert!(matches!(
+            check_csw_transfer(Csw::LEN, &passed, 8),
+            Err(CswError::TagMismatch(Csw { tag: 7, .. }))
+        ));
+        let phase = csw_bytes(7, 0, 2);
+        assert!(matches!(
+            check_csw_transfer(Csw::LEN, &phase, 7),
+            Err(CswError::PhaseError(Csw { tag: 7, .. }))
+        ));
+        let mut bad = passed;
+        bad[0] = b'X';
+        assert_eq!(
+            check_csw_transfer(Csw::LEN, &bad, 7),
+            Err(CswError::Invalid)
+        );
+        assert_eq!(CswError::Invalid.event_code(), 0);
+        // 0xFF, the drivers' fill before every CSW read, is no status.
+        assert_eq!(
+            check_csw_transfer(Csw::LEN, &[0xFF; Csw::LEN], 7),
+            Err(CswError::Invalid)
+        );
     }
 
     #[test]

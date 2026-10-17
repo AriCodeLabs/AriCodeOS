@@ -100,7 +100,12 @@ Three facts shape the driver:
    storage then follows the Bulk-Only rules (BOT 5.3, 6.7: one CSW read
    after a DATA/CSW failure, Reset Recovery after a CBW failure or an
    invalid CSW, BOT 5.3.4) and the request answers `Io`: the command is not
-   resent. A failed Reset Recovery leaves the storage unusable until it is
+   resent. A CSW is exactly 13 bytes (BOT 5.2): a CSW transfer that moved
+   any other count is an invalid CSW before a field of it is read, in the
+   normal and the recovery path, and the CSW buffer is filled with 0xFF
+   before every read so a previous status never survives a short reply
+   (`check_csw_transfer`, incident 0007; the xHCI driver follows the same
+   rule). A failed Reset Recovery leaves the storage unusable until it is
    plugged in again; a HID endpoint that fails beyond a cleared STALL stops
    until then. A transfer error seen while the device's port reports it
    unplugged is the disconnect, reported by the port change, and neither

@@ -37,7 +37,8 @@ use aricode_rt::sys::block::{map_client_buffer, REPLY_WAIT_MS};
 use aricode_rt::sys::virtio_pci::{extra_handle, polled_bar_handle, DmaRegion, Mmio, CFG, SERVICE};
 use aricode_rt::sys::{self, abi, abi::driver_arg, Handle};
 use aricode_usb_storage::{
-    after_transfer_failure, check_csw, fault, scsi, Cbw, Cdb, Csw, CswError, CswStatus, Next, Stage,
+    after_transfer_failure, check_csw_transfer, fault, scsi, Cbw, Cdb, Csw, CswError, CswStatus,
+    Next, Stage,
 };
 use aricode_xhci::{
     parse_configuration, parse_storage_interface, request, DeviceDescriptor, HidInterface,
@@ -513,9 +514,15 @@ enum Injection {
     /// A CSW read with no command outstanding: the device STALLs its bulk
     /// IN pipe, a real halt that the recovery clears.
     Csw,
+    /// The CSW read of a complete command is made to look as if the device
+    /// moved only the signature and the tag (8 bytes), the previous
+    /// command's residue and status still in the buffer: an invalid CSW
+    /// (BOT 5.2, 6.3), followed by a real Reset Recovery (incident 0007).
+    ShortCsw,
 }
 
-/// Test fault injection (`usb_fault=N|idle[:cbw|:csw]`, ADR 0028).
+/// Test fault injection (`usb_fault=N|idle[:cbw|:csw|:short-csw]`, ADR
+/// 0028).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FaultInject {
     None,
@@ -536,8 +543,9 @@ impl FaultInject {
         let kind = match kind {
             "cbw" => Injection::Cbw,
             "csw" => Injection::Csw,
+            "short-csw" => Injection::ShortCsw,
             _ => {
-                say(b"usb_fault: the EHCI driver injects cbw or csw only; ignored");
+                say(b"usb_fault: the EHCI driver injects cbw, csw or short-csw only; ignored");
                 return Self::None;
             }
         };
@@ -2652,20 +2660,19 @@ impl Ehci {
                 // No CBW: the device has no command and answers the CSW read
                 // with a STALL (BOT 6.7.2 path on a real halt).
                 say(b"injected fault: reading a CSW with no command outstanding");
-                return Err(
-                    match self.bulk(bulk_in, true, csw.0, Csw::LEN as u32, window_end) {
-                        Ok(_) => {
-                            say(b"the device delivered a CSW for no command");
-                            if !self.strict {
-                                self.reset_recovery();
-                            }
-                            ScsiFail::Csw
+                return Err(match self.read_csw(bulk_in, csw, window_end, false) {
+                    Ok(_) => {
+                        say(b"the device delivered a CSW for no command");
+                        if !self.strict {
+                            self.reset_recovery();
                         }
-                        Err(fail) => self.transfer_failure(Stage::Csw, true, fail, tag, window_end),
-                    },
-                );
+                        ScsiFail::Csw
+                    }
+                    Err(fail) => self.transfer_failure(Stage::Csw, true, fail, tag, window_end),
+                });
             }
-            None => {}
+            // Applied by `read_csw` at the CSW stage of this command.
+            Some(Injection::ShortCsw) | None => {}
         }
         let deadline = self.now() + CBW_TIMEOUT_MS;
         if let Err(fail) = self.bulk(bulk_out, false, cbw.0, Cbw::LEN as u32, deadline) {
@@ -2681,12 +2688,14 @@ impl Ehci {
                 }
             }
         }
-        if let Err(fail) = self.bulk(bulk_in, true, csw.0, Csw::LEN as u32, window_end) {
-            return Err(self.transfer_failure(Stage::Csw, true, fail, tag, window_end));
-        }
-        // SAFETY: the CSW buffer in the driver's DMA memory.
-        let raw = unsafe { (csw.1 as *const [u8; Csw::LEN]).read_volatile() };
-        match check_csw(&raw, tag) {
+        let short_csw = inject == Some(Injection::ShortCsw);
+        let (csw_moved, raw) = match self.read_csw(bulk_in, csw, window_end, short_csw) {
+            Ok(read) => read,
+            Err(fail) => {
+                return Err(self.transfer_failure(Stage::Csw, true, fail, tag, window_end))
+            }
+        };
+        match check_csw_transfer(csw_moved, &raw, tag) {
             // The bytes the command did not move: the CSW's residue (BOT
             // 6.7) or what the data stage fell short of, whichever is more.
             Ok(Csw {
@@ -2696,14 +2705,44 @@ impl Ehci {
             }) => Ok(residue.max(data.map_or(0, |d| d.1).saturating_sub(moved))),
             Ok(_) => Err(ScsiFail::Failed),
             Err(e) => {
+                // BOT 6.3: an invalid CSW (a wrong length included), one for
+                // another command or a phase error need a Reset Recovery
+                // before any new CBW; with `strict` the caller halts first.
                 report_csw_error(e, tag);
-                record("ehci csw invalid", 0);
                 if !self.strict {
                     self.reset_recovery();
                 }
                 Err(ScsiFail::Csw)
             }
         }
+    }
+
+    /// Reads the CSW of the command in progress into the storage's CSW
+    /// buffer by `deadline`: the bytes the device moved and the buffer.
+    /// The buffer is filled with 0xFF first (no valid bCSWStatus), so a
+    /// previous command's status never survives a short reply; the caller
+    /// still rejects any count but 13 (`check_csw_transfer`, BOT 5.2,
+    /// incident 0007). `inject_short` (tests, `usb_fault=...:short-csw`):
+    /// the device is made to look as if it moved only the signature and the
+    /// tag, over the zero residue and Passed status of a previous command.
+    fn read_csw(
+        &mut self,
+        bulk_in: usize,
+        csw: (u64, u64),
+        deadline: u64,
+        inject_short: bool,
+    ) -> Result<(usize, [u8; Csw::LEN]), Fail> {
+        // SAFETY: the CSW buffer in the driver's DMA memory.
+        unsafe { (csw.1 as *mut [u8; Csw::LEN]).write_volatile([0xFF; Csw::LEN]) };
+        let moved = self.bulk(bulk_in, true, csw.0, Csw::LEN as u32, deadline)? as usize;
+        // SAFETY: as above, once the transfer completed.
+        let mut raw = unsafe { (csw.1 as *const [u8; Csw::LEN]).read_volatile() };
+        if inject_short {
+            say(b"injected fault: the CSW read moved 8 bytes; the previous command's status stays in the buffer");
+            raw[8..].fill(0);
+            return Ok((8, raw));
+        }
+        Ok((moved, raw))
     }
 
     /// A bulk transfer at `stage` failed: it is reported; a STALL is
@@ -2776,27 +2815,23 @@ impl Ehci {
             Next::ResetRecovery => self.reset_recovery(),
             Next::ReadCsw => {
                 let deadline = window_end.max(self.now() + MIN_STAGE_MS);
-                match self.bulk(bulk_in, true, csw.0, Csw::LEN as u32, deadline) {
-                    Ok(_) => {
-                        // SAFETY: the CSW buffer in the driver's DMA memory.
-                        let raw = unsafe { (csw.1 as *const [u8; Csw::LEN]).read_volatile() };
-                        match check_csw(&raw, tag) {
-                            Ok(c) => {
-                                sys::print(b"usb-ehci: CSW received after the failure: status ");
-                                num(c.status as u64);
-                                sys::print(b" residue ");
-                                num(c.residue as u64);
-                                sys::print(b"; transport ready\n");
-                                if c.status == CswStatus::Failed {
-                                    sense = self.sense();
-                                }
-                            }
-                            Err(e) => {
-                                report_csw_error(e, tag);
-                                self.reset_recovery();
+                match self.read_csw(bulk_in, csw, deadline, false) {
+                    Ok((moved, raw)) => match check_csw_transfer(moved, &raw, tag) {
+                        Ok(c) => {
+                            sys::print(b"usb-ehci: CSW received after the failure: status ");
+                            num(c.status as u64);
+                            sys::print(b" residue ");
+                            num(c.residue as u64);
+                            sys::print(b"; transport ready\n");
+                            if c.status == CswStatus::Failed {
+                                sense = self.sense();
                             }
                         }
-                    }
+                        Err(e) => {
+                            report_csw_error(e, tag);
+                            self.reset_recovery();
+                        }
+                    },
                     Err(f2) => {
                         self.report_failure("bulk in", bulk_in, f2);
                         match f2 {
@@ -3168,10 +3203,20 @@ impl Ehci {
     }
 }
 
-/// `CSW` failures are printed with what was received (BOT 6.3).
+/// `CSW` failures are printed with what was received (BOT 6.3) and
+/// recorded (`ehci csw invalid`; the code is the bytes moved for a wrong
+/// length, ADR 0028).
 fn report_csw_error(e: CswError, tag: u32) {
+    record("ehci csw invalid", e.event_code());
     match e {
-        CswError::Invalid => say(b"invalid CSW (signature, length or status)"),
+        CswError::Invalid => say(b"invalid CSW (signature or status)"),
+        CswError::Length(moved) => {
+            sys::print(b"usb-ehci: CSW of ");
+            num(moved as u64);
+            sys::print(b" bytes, not 13 (BOT 5.2): invalid, no status for tag ");
+            num(tag as u64);
+            sys::print(b"\n");
+        }
         CswError::TagMismatch(csw) => {
             sys::print(b"usb-ehci: CSW tag mismatch: expected ");
             num(tag as u64);
