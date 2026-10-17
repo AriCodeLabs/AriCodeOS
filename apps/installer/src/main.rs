@@ -52,9 +52,6 @@ const MAX_PACKAGE: usize = 32 * 1024;
 const MAX_PENDING: usize = 8;
 /// Largest `updater/state` read (the three sections stay well under it).
 const MAX_STATE: usize = 16 * 1024;
-/// The history is kept within `HISTORY_MAX` by every append; a file above
-/// this (four times that) was not written by this program and is a fault.
-const MAX_HISTORY_READ: usize = 4 * upd::HISTORY_MAX;
 
 /// Exit and fault event codes (ADR 0028).
 mod code {
@@ -163,8 +160,8 @@ fn write_file(fs: &mut FsClient, name: &str, data: &[u8]) -> bool {
 /// on the console, but the older lines are never replaced by one line.
 fn history(fs: &mut FsClient, line: &str) {
     let path = upd::main_path(upd::HISTORY_FILE);
-    let existing = match read_all(fs, &path, MAX_HISTORY_READ) {
-        Ok(existing) => existing.unwrap_or_default(),
+    let log = match upd::history::appended(&mut Main(fs), &path, line, upd::HISTORY_MAX) {
+        Ok(log) => log,
         Err(e) => {
             fault(
                 code::WRITE,
@@ -176,7 +173,6 @@ fn history(fs: &mut FsClient, line: &str) {
             return;
         }
     };
-    let log = upd::history::append(&existing, line, upd::HISTORY_MAX);
     if !write_file(fs, &path, &log) {
         fault(
             code::WRITE,

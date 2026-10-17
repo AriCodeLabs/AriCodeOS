@@ -37,6 +37,7 @@ use aricode_rt::sys::block::BlockClient;
 use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::net::NetClient;
 use aricode_rt::sys::{self, Handle};
+use aricode_update_index::files::{self, Files, ReadError};
 use aricode_update_index::lists::{self, PlanItem, StagedEntry};
 use aricode_update_index::{
     self as upd, best_app, best_system, check_fresh, compare, stored, updater_arg, Change, Index,
@@ -95,6 +96,9 @@ mod code {
     pub const STATE_UNREADABLE: u64 = 38;
     pub const FS_FULL: u64 = 39;
     pub const STATE_REPAIRED: u64 = 47;
+    /// The install history could not be read (incident 0008): it is not
+    /// rewritten, so a failed request never replaces it by one line.
+    pub const HISTORY_READ: u64 = 48;
     pub const DOWNGRADE_REFUSED: u64 = 40;
     pub const DOWNLOAD: u64 = 41;
     pub const DOWNLOAD_MISMATCH: u64 = 42;
@@ -152,29 +156,50 @@ fn remaining_ms() -> u64 {
 
 // ---------------------------------------------------------------- files
 
-/// Reads a whole file of at most `max` bytes. `Ok(None)` if it does not
-/// exist; any other failure is an error (never mistaken for "missing").
-fn read_file(fs: &mut FsClient, name: &str, max: usize) -> Result<Option<Vec<u8>>, ()> {
-    let fd = match fs.open(name) {
-        Ok(fd) => fd,
-        Err(FsError::Status(aricode_proto::fs::Status::NotFound)) => return Ok(None),
-        Err(_) => return Err(()),
-    };
-    let mut data = Vec::new();
-    let mut chunk = [0u8; 1024];
-    let result = loop {
-        match fs.read(fd, data.len() as u32, &mut chunk) {
-            Ok(0) => break Ok(Some(data)),
-            Ok(n) if data.len() + n <= max => data.extend_from_slice(&chunk[..n]),
-            Ok(_) | Err(_) => break Err(()),
+/// The updater's private directory as `files::Files`: only an explicit
+/// `NotFound` from the service means a file is absent; a lost reply, a
+/// timeout or any other status is an error (incident 0008).
+struct Private<'a>(&'a mut FsClient);
+
+impl Files for Private<'_> {
+    type Fd = u32;
+    type Error = FsError;
+
+    fn open(&mut self, name: &str) -> Result<Option<u32>, FsError> {
+        match self.0.open(name) {
+            Ok(fd) => Ok(Some(fd)),
+            Err(FsError::Status(aricode_proto::fs::Status::NotFound)) => Ok(None),
+            Err(e) => Err(e),
         }
-    };
-    let _ = fs.close(fd);
-    result
+    }
+
+    fn read(&mut self, fd: &u32, offset: u32, out: &mut [u8]) -> Result<usize, FsError> {
+        self.0.read(*fd, offset, out)
+    }
+
+    fn close(&mut self, fd: u32) {
+        let _ = self.0.close(fd);
+    }
+
+    fn list(
+        &mut self,
+        index: u32,
+        name_out: &mut [u8; files::NAME_LEN],
+    ) -> Result<Option<(usize, u64)>, FsError> {
+        self.0.list(index, name_out)
+    }
 }
 
-fn read_text(fs: &mut FsClient, name: &str, max: usize) -> Result<Option<String>, ()> {
-    read_file(fs, name, max).map(|d| d.map(|d| String::from_utf8_lossy(&d).into_owned()))
+type Read<T> = Result<Option<T>, ReadError<FsError>>;
+
+/// Reads a whole file of at most `max` bytes. `Ok(None)` if it does not
+/// exist; any other failure is an error (never mistaken for "missing").
+fn read_file(fs: &mut FsClient, name: &str, max: usize) -> Read<Vec<u8>> {
+    files::read_optional(&mut Private(fs), name, max)
+}
+
+fn read_text(fs: &mut FsClient, name: &str, max: usize) -> Read<String> {
+    files::read_text(&mut Private(fs), name, max)
 }
 
 /// Replaces (or creates) a file atomically (ADR 0014).
@@ -213,13 +238,26 @@ fn reserve(fs: &mut FsClient, names: &[&str]) -> Result<(), usize> {
     }
 }
 
-/// One line in the install history (ADR 0029, decision 7).
+/// One line in the install history (ADR 0029, decision 7). A history that
+/// cannot be read is not rewritten: the install happened and was said on
+/// the console, but the older lines are never replaced by one line
+/// (incident 0008).
 fn history(fs: &mut FsClient, line: &str) {
-    let existing = read_file(fs, upd::HISTORY_FILE, upd::HISTORY_MAX)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    let log = upd::history::append(&existing, line, upd::HISTORY_MAX);
+    let mut files = Private(fs);
+    let appended = upd::history::appended(&mut files, upd::HISTORY_FILE, line, upd::HISTORY_MAX);
+    let log = match appended {
+        Ok(log) => log,
+        Err(e) => {
+            fault(
+                code::HISTORY_READ,
+                "upd-history-read",
+                &format!(
+                    "cannot read the install history ({e:?}): not rewritten; unrecorded: {line}"
+                ),
+            );
+            return;
+        }
+    };
     if !write_file(fs, upd::HISTORY_FILE, &log) {
         fault(
             code::FILE_WRITE,
@@ -281,11 +319,11 @@ fn load_sources(fs: &mut FsClient) -> Result<Sources, u64> {
 fn read_state(fs: &mut FsClient) -> Result<String, u64> {
     let text = read_text(fs, upd::STATE_FILE, MAX_STATE)
         .map(Option::unwrap_or_default)
-        .map_err(|()| {
+        .map_err(|e| {
             fault(
                 code::STATE_UNREADABLE,
                 "upd-state-unreadable",
-                "updater/state cannot be read or is too large: not used, not rewritten",
+                &format!("updater/state cannot be read ({e:?}): not used, not rewritten"),
             )
         })?;
     // Structural damage (repeated or unknown sections) is repaired as
@@ -759,12 +797,12 @@ fn read_stored(fs: &mut FsClient) -> Vec<Vec<u8>> {
     let max = upd::MAX_SOURCES * (upd::MAX_INDEX + 1024);
     let bytes = match read_file(fs, upd::INDEXES_FILE, max) {
         Ok(b) => b.unwrap_or_default(),
-        Err(()) => {
+        Err(e) => {
             INDEXES_UNREADABLE.store(true, Ordering::Relaxed);
             fault(
                 code::INDEX_STORE,
                 "upd-indexes-unreadable",
-                "the stored indexes cannot be read or are too large: not used, not rewritten in this run",
+                &format!("the stored indexes cannot be read ({e:?}): not used, not rewritten in this run"),
             );
             Vec::new()
         }

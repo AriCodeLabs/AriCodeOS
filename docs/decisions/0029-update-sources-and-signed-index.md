@@ -137,9 +137,12 @@ it, no downgrades unless asked, and every install logged.
    is refused and the installed list is not written); a directory it
    cannot list is `inst-dir-list` (code 15: nothing is installed or
    listed); a pending or staged package it cannot read is `inst-pkg-read`
-   (code 16, distinct from missing or tampered); a history it cannot read
-   is `inst-history-read` (code 5) and keeps its old lines. The updater's
-   last output is in `updater/last.log`, shown to remote sessions.
+   (code 16, distinct from missing or tampered); a history that cannot be
+   read keeps its old lines and the new one is only said: `inst-history-read`
+   (installer, code 5), `upd-history-read` (updater, code 48),
+   `sh-history-read` (shell, code 2); all three append through
+   `aricode_update_index::history::appended`. The updater's last output is
+   in `updater/last.log`, shown to remote sessions.
 
 8. **Capabilities (least privilege).** The updater keeps `system, fs,
    net, block`: its `fs` grant is its private directory `updater/`. It
@@ -223,7 +226,9 @@ There is no key rotation in the protocol yet (see below).
   invalid `update_url`), stored copies, the installed/plan/staged lists
   (stage files only), history, and optional-file reads over a mock file
   service (absent, failed open, failed read, oversized, a failed listing,
-  and the state rewrite keeping its other sections; incident 0008).
+  and the state rewrite keeping its other sections; incident 0008), the
+  history append over the same mock (absent, failed read, an overgrown log
+  trimmed, an absurd one refused).
   `xtask`: a published index verifies with the
   development key and a tampered one does not, serials only grow,
   publication leaves no staging directory, signing keys must be a pair

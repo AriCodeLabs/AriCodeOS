@@ -70,7 +70,20 @@ Branch `fix/installer-state-read-error`.
   failed listing is the new fault `inst-dir-list` (code 15) and the run
   stops without writing anything.
 - `history`: a log that cannot be read is not rewritten
-  (`inst-history-read`, code 5, naming the unrecorded line).
+  (`inst-history-read`, code 5, naming the unrecorded line). The append
+  itself is `aricode_update_index::history::appended` (read through
+  `Files`, then `append`), shared by the three writers of the history.
+- Second commit, same class in the other two writers of
+  `updater/history.log`: the updater's `history()` read the log with
+  `.ok().flatten().unwrap_or_default()` (its `read_file` already separated
+  failure from absence, but the caller threw the distinction away), and the
+  shell's `update add/remove` did the same with `read_small`. Both now go
+  through `history::appended`: a failed read is `upd-history-read` (updater,
+  code 48) or `sh-history-read` (shell, code 2) and the file is not
+  rewritten. The updater's `read_file`/`read_text` are now thin wrappers
+  over `files::read_optional` (a `Private` newtype implements `Files`), so
+  `upd-state-unreadable` and `upd-indexes-unreadable` name the error; the
+  shell's `read_small` wraps the same function.
 - A pending or staged package whose read fails is `inst-pkg-read` (code
   16), distinct from missing, oversized or tampered (the
   `apps.staged_tampered` message is unchanged).
@@ -87,7 +100,9 @@ passes); the state read-modify-write keeps the plan and staged sections
 when the read succeeds, starts empty when the file is absent and gives
 nothing to write from when the read fails; a listing filters in directory
 order; a listing that fails after the first entry is an error, not a
-one-file directory.
+one-file directory. `history::tests`: `appended` starts with the new line
+when the log is absent, appends when it is present, refuses a failed read,
+trims an overgrown log and refuses one far over the limit.
 
 `cargo xtask check`, `cargo test -p aricode-update-index` (33) and
 `cargo test -p xtask` (27) pass on the branch.
@@ -103,8 +118,4 @@ failure-protocol audit (step 6).
 
 ## Open
 
-- The updater's `history` (`apps/updater/src/main.rs`) still reads the log
-  with `.ok().flatten().unwrap_or_default()`: its `read_file` already
-  separates failure from absence, but a failed read is then stored as an
-  empty history. Same class, different program; not changed here.
 - No physical disk failure was induced in this audit.
