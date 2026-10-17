@@ -102,7 +102,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("aricode-fscat-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let disk = dir.join("disk.img");
-        write_test_disk(&disk, DiskVariant::Slots, &[]).unwrap();
+        // Only ARI0 is read: the ESP-only variant needs no built kernel, so
+        // the test runs in a fresh checkout.
+        write_test_disk(&disk, DiskVariant::EspOnly, &[]).unwrap();
         assert_eq!(
             read(&disk, Some("hola.txt")).unwrap(),
             b"Hola desde AriFS\n"
