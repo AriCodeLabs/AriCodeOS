@@ -83,11 +83,12 @@ const MIN_STAGE_MS: u64 = 1000;
 /// postponed (a Reset Recovery runs before the next CBW, BOT 5.3.4). One
 /// main loop iteration's housekeeping (HID reports, port changes, the hub
 /// poll and at most one enumeration) shares one `HOUSEKEEPING_MS`
-/// deadline, and each iteration serves at most one block request. A block
-/// client waits `REPLY_WAIT_MS` (90 s) from its send; with at most two
-/// block clients (fsd and one of init's checks: one request queued behind
-/// the one in progress) its wait is bounded by housekeeping plus two
-/// requests: 15 + 36 + 36 = 87 s.
+/// deadline and runs between batches of requests; the requests of one
+/// batch are served back to back. A block client waits `REPLY_WAIT_MS`
+/// (90 s) from its send; with at most two block clients (fsd and one of
+/// init's checks: one request queued behind the one in progress) its wait
+/// is bounded by one housekeeping round plus two requests: 15 + 36 + 36 =
+/// 87 s.
 const REQUEST_BUDGET_MS: u64 = CBW_TIMEOUT_MS + MEDIUM_WINDOW_MS + 5000;
 const HOUSEKEEPING_MS: u64 = 15_000;
 const ATTACH_STEP_MS: u64 = HOUSEKEEPING_MS;
@@ -306,6 +307,9 @@ struct Hid {
     seen: bool,
     /// A STALL was cleared and no report has arrived since.
     stall_cleared: bool,
+    /// The CLEAR_FEATURE(ENDPOINT_HALT) for a STALL is still owed (it was
+    /// refused for lack of housekeeping time): retried on the next poll.
+    clear_owed: bool,
     /// Not polled any more (a failure that the specification does not
     /// recover); the device works again after it is plugged in again.
     stopped: bool,
@@ -2011,6 +2015,7 @@ impl Ehci {
                 len: hid.max_packet_size.max(1),
                 seen: false,
                 stall_cleared: false,
+                clear_owed: false,
                 stopped: false,
             });
             match decoder {
@@ -2055,9 +2060,17 @@ impl Ehci {
                 index: 0x0409,
                 length: SERIAL_LEN as u16,
             };
-            if let Ok(n) = self.control(dev.ep0, request, Some(SERIAL_LEN as u16), true) {
-                let data = self.ctrl_data(n as usize);
-                serial[..n as usize].copy_from_slice(&data[..n as usize]);
+            match self.control(dev.ep0, request, Some(SERIAL_LEN as u16), true) {
+                Ok(n) => {
+                    let data = self.ctrl_data(n as usize);
+                    serial[..n as usize].copy_from_slice(&data[..n as usize]);
+                }
+                // The device refuses the string: it has none to give.
+                Err(fail) if fail.is_stall() => {}
+                // Anything else (a timeout, no time left) says nothing about
+                // the identity: the enumeration fails and the next connect
+                // tries again, rather than taking it for another device.
+                Err(_) => return Err("serial number read failed"),
             }
         }
         self.control(dev.ep0, SetupPacket::set_configuration(value), None, false)
@@ -2189,11 +2202,13 @@ impl Ehci {
             .map_err(|e| self.scsi_failed(e, "READ(10) of the GPT header failed"))?;
         // SAFETY: the driver's 512-byte sector buffer.
         let sector = unsafe { core::slice::from_raw_parts(sector_virt as *const u8, 512) };
-        let disk_guid = if shortfall == 0 {
-            aricode_gpt::Header::parse(sector).ok().map(|h| h.disk_guid)
-        } else {
-            None
-        };
+        if shortfall != 0 {
+            // A partial read is a failed read, not a disk without a GPT:
+            // the enumeration fails and is retried on the next connect.
+            return Err("short read of the GPT header");
+        }
+        // No valid GPT header: a disk without one (the identity has no GUID).
+        let disk_guid = aricode_gpt::Header::parse(sector).ok().map(|h| h.disk_guid);
         let identity = Served {
             capacity,
             vendor: inq.vendor,
@@ -2497,6 +2512,10 @@ impl Ehci {
             if hid.stopped {
                 continue;
             }
+            if hid.clear_owed {
+                self.clear_hid_halt(h);
+                continue;
+            }
             let t = r32(self.qtd_addr(hid.pipe, 0).1 + 8);
             match decode_token(t) {
                 Outcome::Active => continue,
@@ -2540,29 +2559,47 @@ impl Ehci {
                     self.overlay_idle(hid.pipe, !fail.is_stall());
                     // USB 2.0 9.4.5: a halted endpoint is cleared with
                     // CLEAR_FEATURE(ENDPOINT_HALT), once per stall.
-                    let cleared = fail.is_stall()
-                        && !hid.stall_cleared
-                        && self.devices[hid.device].is_some_and(|d| {
-                            self.control(
-                                d.ep0,
-                                SetupPacket::clear_endpoint_halt(0x80 | hid.endpoint),
-                                None,
-                                false,
-                            )
-                            .is_ok()
-                        });
-                    if cleared {
-                        hid.stall_cleared = true;
+                    if fail.is_stall() && !hid.stall_cleared {
+                        hid.clear_owed = true;
                         self.hids[h] = Some(hid);
-                        self.arm(h);
+                        self.clear_hid_halt(h);
                     } else {
-                        hid.stopped = true;
-                        self.hids[h] = Some(hid);
-                        say(b"HID endpoint stopped until the device is plugged in again");
+                        self.stop_hid(h);
                     }
                 }
             }
         }
+    }
+
+    /// Sends the owed CLEAR_FEATURE(ENDPOINT_HALT) of HID `h` and rearms
+    /// it. Refused for lack of time, it stays owed for the next poll; any
+    /// other failure stops the endpoint until the device is plugged in
+    /// again.
+    fn clear_hid_halt(&mut self, h: usize) {
+        let Some(hid) = self.hids[h] else { return };
+        let Some(ep0) = self.devices[hid.device].map(|d| d.ep0) else {
+            return;
+        };
+        let request = SetupPacket::clear_endpoint_halt(0x80 | hid.endpoint);
+        match self.control(ep0, request, None, false) {
+            Ok(_) => {
+                if let Some(x) = self.hids[h].as_mut() {
+                    x.clear_owed = false;
+                    x.stall_cleared = true;
+                }
+                self.arm(h);
+            }
+            Err(Fail::Refused) => {}
+            Err(_) => self.stop_hid(h),
+        }
+    }
+
+    fn stop_hid(&mut self, h: usize) {
+        if let Some(x) = self.hids[h].as_mut() {
+            x.stopped = true;
+            x.clear_owed = false;
+        }
+        say(b"HID endpoint stopped until the device is plugged in again");
     }
 
     // ---- storage (Bulk-Only Transport) ----
@@ -3388,9 +3425,10 @@ fn main(mask: u64) -> u64 {
             &with_block[..1]
         };
         let mut timeout = POLL_MS;
-        // At most eight messages per iteration, and at most one block
-        // request: housekeeping runs between block requests (budget chain
-        // at `REQUEST_BUDGET_MS`).
+        // At most eight messages per iteration, served in one batch: a
+        // block request and the one queued behind it run back to back, and
+        // housekeeping (`HOUSEKEEPING_MS`) runs once per batch (budget
+        // chain at `REQUEST_BUDGET_MS`).
         for _ in 0..8 {
             let (which, n, nh) =
                 match sys::ipc_receive_any(endpoints, &mut msg, &mut handles, timeout) {
@@ -3413,7 +3451,7 @@ fn main(mask: u64) -> u64 {
             }
             if which == 1 {
                 serve_block(&mut ctl, &msg[..n], &handles[..nh]);
-                break;
+                continue;
             }
             let reply_to = handles[0];
             match Request::decode(&msg[..n]) {
