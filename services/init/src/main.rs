@@ -91,30 +91,34 @@ fn find_pci_class_from(class: u8, subclass: u8, start: u64) -> Option<u64> {
 /// serving must not leave clients waiting. Returns `false` if the process
 /// ended or did not answer within a few seconds.
 fn probe_ready(service: Handle, driver: Handle, request: &[u8], accept: fn(&[u8]) -> bool) -> bool {
-    let Ok(reply) = sys::endpoint_create() else {
-        return false;
-    };
-    let mut ok = false;
     for _ in 0..12 {
         match sys::process_wait(driver, 0) {
             Err(Error::Timeout) => {}
-            _ => break, // exited (with a code or by a fault): it will not serve
+            _ => return false, // exited (with a code or by a fault): it will not serve
         }
-        let Ok(reply_w) = sys::handle_duplicate(reply, rights::WRITE | rights::TRANSFER) else {
-            break;
-        };
-        if sys::ipc_send(service, request, &[reply_w], 250).is_err() {
-            continue;
-        }
-        let mut msg = [0u8; 256];
-        let mut none: [Handle; 0] = [];
-        if let Ok((n, _)) = sys::ipc_receive(reply, &mut msg, &mut none, 250) {
-            ok = accept(&msg[..n]);
-            break;
+        if let Some(reply) = ask(service, request, 250, &mut [0u8; 256]) {
+            return accept(reply);
         }
     }
+    false
+}
+
+/// One request on a fresh reply pair (ADR 0030): init keeps only the
+/// receive side, so a service that dies holding the request answers
+/// `PeerClosed` at once instead of letting the wait expire. Returns the
+/// reply bytes, or `None` on any failure.
+fn ask<'a>(service: Handle, request: &[u8], wait_ms: u64, out: &'a mut [u8]) -> Option<&'a [u8]> {
+    let (reply, reply_w) = sys::endpoint_create_pair().ok()?;
+    let mut none: [Handle; 0] = [];
+    let got = match sys::ipc_send(service, request, &[reply_w], wait_ms) {
+        Ok(()) => sys::ipc_receive(reply, out, &mut none, wait_ms).ok(),
+        Err(_) => {
+            let _ = sys::handle_close(reply_w);
+            None
+        }
+    };
     let _ = sys::handle_close(reply);
-    ok
+    got.map(|(n, _)| &out[..n])
 }
 
 fn input_service_ready(service: Handle, driver: Handle) -> bool {
@@ -134,21 +138,7 @@ fn ping_service_ready(service: Handle, driver: Handle) -> bool {
 
 /// One short request to the test service ("ping" or "die") expecting "pong".
 fn ping_once(service: Handle, request: &[u8]) -> bool {
-    let Ok(reply) = sys::endpoint_create() else {
-        return false;
-    };
-    let mut ok = false;
-    if let Ok(reply_w) = sys::handle_duplicate(reply, rights::WRITE | rights::TRANSFER) {
-        if sys::ipc_send(service, request, &[reply_w], 500).is_ok() {
-            let mut msg = [0u8; 16];
-            let mut none: [Handle; 0] = [];
-            if let Ok((n, _)) = sys::ipc_receive(reply, &mut msg, &mut none, 500) {
-                ok = &msg[..n] == b"pong";
-            }
-        }
-    }
-    let _ = sys::handle_close(reply);
-    ok
+    ask(service, request, 500, &mut [0u8; 16]) == Some(b"pong".as_slice())
 }
 
 /// `bb:dd.f` of a `pci_info` value.
@@ -669,7 +659,7 @@ impl Supervisor {
             Err(e) => {
                 aricode_rt::print_error(b"AriInit: launch service", e);
                 let _ = r.sup.starting(now);
-                self.announce_death(i, now, Exit::Code(u64::MAX));
+                self.announce_death(i, now, Exit::Code(u64::MAX), true);
                 return false;
             }
         };
@@ -719,11 +709,15 @@ impl Supervisor {
             sys::print(b" neither responds nor exits: failed, not relaunching\n");
             r.sup.stop();
         }
-        self.announce_death(i, now_ms(), Exit::StartTimeout);
+        // A process that could not be killed may still be serving: its
+        // endpoints stay open (audit robustness-1, reviewer 1).
+        self.announce_death(i, now_ms(), Exit::StartTimeout, !stuck);
     }
 
-    /// Records the death of `i`, closes its process and announces the decision.
-    fn announce_death(&mut self, i: usize, now: u64, exit: Exit) {
+    /// Records the death of `i`, closes its process and announces the
+    /// decision. `gone`: the process no longer runs, so its endpoints may be
+    /// closed if it will not be relaunched.
+    fn announce_death(&mut self, i: usize, now: u64, exit: Exit, gone: bool) {
         let Some(r) = self.slots[i].as_mut() else {
             return;
         };
@@ -755,7 +749,7 @@ impl Supervisor {
                 });
             }
         }
-        if !matches!(action, Action::Restart { .. }) {
+        if gone && !matches!(action, Action::Restart { .. }) {
             r.retire_endpoints();
         }
     }
@@ -777,9 +771,9 @@ impl Supervisor {
                             }
                         }
                     }
-                    Ok(code) => self.announce_death(i, now, Exit::Code(code)),
-                    Err(Error::Killed) => self.announce_death(i, now, Exit::Killed),
-                    Err(_) => self.announce_death(i, now, Exit::Code(u64::MAX)),
+                    Ok(code) => self.announce_death(i, now, Exit::Code(code), true),
+                    Err(Error::Killed) => self.announce_death(i, now, Exit::Killed, true),
+                    Err(_) => self.announce_death(i, now, Exit::Code(u64::MAX), true),
                 }
             } else if state == State::Stopped {
                 let start = self.slots[i]
