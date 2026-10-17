@@ -75,3 +75,26 @@ Lines refer to `services/usb-ehci/src/main.rs` unless stated. Verified with
 | R2 | `started` taken before `open()` (3319); `INFO_WAIT_MS` 1.5 s (104); held Info lives in the driver (`hold_info` 889, `release_info` 901) and is answered from inside every transfer wait (1285) and pause (914) and before every hub poll and enumeration (2377, 2387) once due |
 | R3 | `Served` (347) adds the GPT disk GUID read from LBA 1 (2192) and the iSerialNumber string (index at 1824, read in `configure_storage`); init records the chosen disk's GUID and relaunches that driver with `driver_arg::EXPECTED_DISK` + a 47-bit digest (`sdk/abi/src/lib.rs` 68, init `set_driver_arg` 584 / 2069, `start_driver` 202); a restarted driver serves only the matching disk (2206; `expected_digest` 3350) and answers `Io` meanwhile (3220) |
 | Minors | `scsi_failed` exempts `Transport(Refused)` (2257); `poll_hubs` stops for this poll when its time ran out instead of marking the hub failed (2431); strict halt on a timeout during unplug documented in ADR 0031; init probes all candidates with one `BlockClient` (`set_service`, `sdk/rust/src/block.rs` 43; init 2038) and logs a GPT read error separately (init 2047); `usb.ehci_companion` now expects the "reported" path and says QEMU reports N_CC = 0; QEMU fixture in `libs/ehci` uses the real 0x06 / 0x80 |
+
+## Third audit (after `689d7dd`)
+
+**Verdict:** one mandatory item left, plus recommended ones.
+
+| Id | Finding |
+|---|---|
+| N1 (mandatory) | `break` after `serve_block` puts housekeeping between a request and the one queued behind it: 15 + 36 + 15 + 36 = 102 s > 90 s. Restore `continue` (the 8-message cap bounds the batch) and fix the comment |
+| N2 | Every AriCodeOS image has the same GPT disk GUID (`[0xA5; 16]` in `libs/gpt`), so the restart identity cannot tell AriCodeOS sticks apart; the ADR must say so and that a restarted usbd ignores the expected-disk bits |
+| Identity reads | A failed GPT header read or a transient serial read failure must fail the enumeration (retried on the next connect), not yield a different identity |
+| Minor | A HID CLEAR_FEATURE refused for lack of housekeeping time must be retried later, not stop the HID until replug |
+
+### Resolution
+
+Verified with `cargo xtask check`, host unit tests and `cargo xtask build`;
+QEMU not run.
+
+| Id | Fix |
+|---|---|
+| N1 | `continue` restored after `serve_block` (`services/usb-ehci/src/main.rs` 3453); batch comment (3428) and budget comment at `REQUEST_BUDGET_MS` corrected: one housekeeping round plus two requests, 15 + 36 + 36 = 87 s |
+| N2 | `libs/gpt`: `TEST_DISK_GUID` (176) and `write_disk_with_guid` (191, host test); `cargo xtask usb-image` writes a random version-4 disk GUID from `/dev/urandom` and prints it (`tools/xtask/src/image.rs` 416, 410); QEMU test images keep `TEST_DISK_GUID`. ADR 0031 says both, and that a restarted usbd ignores the expected-disk bits |
+| Identity reads | A short GPT header read fails the enumeration (`main.rs` 2208; a failed read already did through `scsi_failed`); a serial read that fails other than by a STALL fails it too (2069) |
+| Minor | A STALL's CLEAR_FEATURE is owed (`clear_owed`, 2563) and retried on the next poll when refused for lack of time (`clear_hid_halt` 2578); other failures still stop the HID |
