@@ -94,6 +94,18 @@ docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.1
 docker run --rm -it aricodeos
 ```
 
+## Release signing key
+
+Published images and updates are signed with the project's release key,
+whose public half is in [keys/release/](keys/release/):
+
+```text
+1d3e24f3c7c753a5bcb384041ace6481736decd86345eab71e2a6ff410ad446e
+```
+
+The development key in `keys/dev/` is for tests and QEMU only: its seed
+is public. See `docs/hardware.md`, "Signing key".
+
 ## Usage
 
 ```bash
