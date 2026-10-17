@@ -1,0 +1,53 @@
+# Incident 0005 audit: the laptop path without `selftest`. No virtio-blk and
+# no virtio keyboard or mouse: the test disk is a USB stick and the USB HID
+# keyboard and mouse are the only input devices, both on the xHCI that
+# usb_input drives. init runs the read-only health checks on the USB block
+# service and fsd, and none of the test clients: no nuevo.txt (the fresh
+# disk keeps its 4 files), no raw-area write on the stick, no input_client
+# reading the USB keyboard, no IPv4 frame besides DHCP.
+name = "init.no_selftest_usb"
+description = "laptop path without selftest: USB stick and USB HID, health checks only, nothing written"
+level = "full"
+areas = ["init", "usb", "storage", "filesystem", "shell"]
+selftest = false
+usb_storage = true
+usb_hid = true
+usb_hid_only_input = true
+cmdline = "qemu_exit shell"
+stdin = ["ls", "shutdown"]
+timeout_secs = 90
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: no virtio-blk",
+    "usb-input: USB storage on port",
+    "usb-input: device ready: USB HID Keyboard+Mouse",
+    "AriInit: usb_input input ready",
+    "AriInit: 1 input device(s) ready",
+    "AriInit: block service via USB (",
+    "AriInit: block service answers: ",
+    ", GPT read, ARI0 at LBA 34",
+    "fsd: AriFS mounted, 4 files",
+    "AriInit: file service answers: 4 files",
+    "AriInit: boot services completed",
+    "hola.txt",
+    "4 file(s)",
+    "ARICODEOS_SHUTDOWN",
+    "[host] guest IPv4 frames other than DHCP: 0",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "AriInit: selftest",
+    "fs_client",
+    "blk_client",
+    "net_client",
+    "tcp_client",
+    "http_client",
+    "input_client",
+    "nuevo.txt",
+    "file service ok",
+    "block service ok",
+    "input service ok",
+    "write: error",
+]

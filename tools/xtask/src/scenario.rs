@@ -357,7 +357,7 @@ impl Scenario {
     /// declared `cmdline` plus `selftest` unless the scenario opts out.
     pub fn boot_cmdline(&self, cmdline: &str) -> String {
         let key = aricode_cmdline::keys::SELFTEST;
-        if self.selftest && !aricode_cmdline::CmdLine::new(cmdline).has(key) {
+        if self.selftest && !aricode_cmdline::CmdLine::new(cmdline).has_flag(key) {
             format!("{} {key}", cmdline.trim_end())
                 .trim_start()
                 .to_string()

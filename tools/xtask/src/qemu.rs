@@ -95,7 +95,10 @@ fn base_command(
     ]);
     q.args([
         "-device",
-        "virtio-net-pci,netdev=net0,disable-legacy=on,disable-modern=off,iommu_platform=on",
+        &format!(
+            "virtio-net-pci,netdev=net0,mac={},disable-legacy=on,disable-modern=off,iommu_platform=on",
+            GUEST_MAC.map(|b| format!("{b:02x}")).join(":")
+        ),
     ]);
     // virtio keyboard and mouse with fixed ids: QMP injects events per device.
     // Left out when the USB HID devices must be the only input (QEMU sends
@@ -269,12 +272,9 @@ fn run_input_probe(
 
 /// Test responder on the host loopback: over UDP it returns a fixed A record
 /// for DNS queries and echoes everything else; over TCP it echoes every
-/// connection. It lives as long as the returned value exists and counts
-/// every datagram and connection it receives: a boot without `selftest`
-/// must not contact the test hosts at all (incident 0005).
+/// connection. It lives as long as the returned value exists.
 pub struct Responder {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    contacts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
@@ -408,7 +408,7 @@ pub fn responder_reply(datagram: &[u8], out: &mut [u8]) -> usize {
 
 impl Responder {
     pub fn start() -> Result<Self> {
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
         let port = aricode_proto::net::TEST_RESPONDER_PORT;
         let socket = std::net::UdpSocket::bind(("127.0.0.1", port))
@@ -421,15 +421,12 @@ impl Responder {
             .map_err(|e| format!("TCP echo server on 127.0.0.1:{tcp_port}: {e}"))?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         let stop = Arc::new(AtomicBool::new(false));
-        let contacts = Arc::new(AtomicUsize::new(0));
         let flag = Arc::clone(&stop);
-        let udp_contacts = Arc::clone(&contacts);
         let udp = std::thread::spawn(move || {
             let mut buf = [0u8; 2048];
             let mut out = [0u8; 2048];
             while !flag.load(Ordering::Relaxed) {
                 if let Ok((n, from)) = socket.recv_from(&mut buf) {
-                    udp_contacts.fetch_add(1, Ordering::Relaxed);
                     let m = responder_reply(&buf[..n], &mut out);
                     let _ = socket.send_to(&out[..m], from);
                 }
@@ -441,29 +438,17 @@ impl Responder {
         http_listener
             .set_nonblocking(true)
             .map_err(|e| e.to_string())?;
-        let tcp = Self::accept_loop(Arc::clone(&stop), Arc::clone(&contacts), listener, tcp_echo);
-        let http = Self::accept_loop(
-            Arc::clone(&stop),
-            Arc::clone(&contacts),
-            http_listener,
-            http_serve,
-        );
+        let tcp = Self::accept_loop(Arc::clone(&stop), listener, tcp_echo);
+        let http = Self::accept_loop(Arc::clone(&stop), http_listener, http_serve);
         Ok(Self {
             stop,
-            contacts,
             threads: vec![udp, tcp, http],
         })
-    }
-
-    /// Datagrams and connections received so far.
-    pub fn contacts(&self) -> usize {
-        self.contacts.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Accepts connections until `stop` and serves each one on its own thread.
     fn accept_loop(
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-        contacts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         listener: std::net::TcpListener,
         serve: fn(std::net::TcpStream),
     ) -> std::thread::JoinHandle<()> {
@@ -471,7 +456,6 @@ impl Responder {
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, _)) => {
-                        contacts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let _ = stream.set_nonblocking(false);
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
                         std::thread::spawn(move || serve(stream));
@@ -647,6 +631,55 @@ pub fn run_interactive(
     Ok(())
 }
 
+/// MAC address of the guest's virtio-net (QEMU's default for the first
+/// NIC, pinned so the network capture can tell the guest's frames apart).
+pub const GUEST_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+
+/// IPv4 frames the guest sent in a pcap capture of its network (QEMU
+/// `filter-dump`), other than DHCP (UDP 68 -> 67); ARP is not IPv4. A boot
+/// without `selftest` must send none of them (incident 0005): every one is
+/// a contact with the test hosts or with something else. `None` if the
+/// capture is not a readable Ethernet pcap; a truncated last record (QEMU
+/// killed) ends the count.
+pub fn guest_ipv4_frames(pcap: &[u8], guest: [u8; 6]) -> Option<usize> {
+    let header = pcap.get(..24)?;
+    let little = match header[..4] {
+        [0xd4, 0xc3, 0xb2, 0xa1] | [0x4d, 0x3c, 0xb2, 0xa1] => true,
+        [0xa1, 0xb2, 0xc3, 0xd4] | [0xa1, 0xb2, 0x3c, 0x4d] => false,
+        _ => return None,
+    };
+    let u32_at = |b: &[u8]| {
+        let b: [u8; 4] = b.try_into().expect("4 bytes");
+        if little {
+            u32::from_le_bytes(b)
+        } else {
+            u32::from_be_bytes(b)
+        }
+    };
+    if u32_at(&header[20..24]) != 1 {
+        return None; // not Ethernet
+    }
+    let mut count = 0;
+    let mut rest = &pcap[24..];
+    while rest.len() >= 16 {
+        let len = u32_at(&rest[8..12]) as usize;
+        let Some(frame) = rest.get(16..16 + len) else {
+            break;
+        };
+        rest = &rest[16 + len..];
+        if frame.len() < 34 || frame[6..12] != guest || frame[12..14] != [0x08, 0x00] {
+            continue;
+        }
+        let ihl = (frame[14] & 0x0F) as usize * 4;
+        let ports = frame.get(14 + ihl..14 + ihl + 4);
+        let dhcp = frame[23] == 17 && ports == Some(&[0, 68, 0, 67][..]);
+        if !dhcp {
+            count += 1;
+        }
+    }
+    Some(count)
+}
+
 pub struct Capture {
     pub serial: String,
     pub exit_code: Option<i32>,
@@ -720,9 +753,13 @@ pub fn run_headless(
         }
         Some(esp)
     };
-    let responder = Responder::start()?;
+    let _responder = Responder::start()?;
     let qmp_path = workdir.join("qmp.sock");
     let _ = std::fs::remove_file(&qmp_path);
+    // Every frame on the guest's network, for the count of guest IPv4
+    // frames appended to the capture.
+    let pcap_path = workdir.join("net.pcap");
+    let _ = std::fs::remove_file(&pcap_path);
     let start = Instant::now();
     let mut child = base_command(
         esp_drive,
@@ -732,6 +769,13 @@ pub fn run_headless(
         options.cpus,
         options.usb,
     )
+    .args([
+        "-object",
+        &format!(
+            "filter-dump,id=netdump,netdev=net0,file={}",
+            pcap_path.display()
+        ),
+    ])
     .args(["-display", "none", "-monitor", "none", "-serial", "stdio"])
     .args([
         "-qmp",
@@ -864,8 +908,15 @@ pub fn run_headless(
     {
         bytes.extend_from_slice(format!("\n{line}\n").as_bytes());
     }
+    let frames = std::fs::read(&pcap_path)
+        .ok()
+        .and_then(|pcap| guest_ipv4_frames(&pcap, GUEST_MAC));
     bytes.extend_from_slice(
-        format!("\n[host] test hosts: {} contact(s)\n", responder.contacts()).as_bytes(),
+        match frames {
+            Some(n) => format!("\n[host] guest IPv4 frames other than DHCP: {n}\n"),
+            None => String::from("\n[host] guest IPv4 frames: no readable capture\n"),
+        }
+        .as_bytes(),
     );
     Ok(Capture {
         serial: strip_ansi(&String::from_utf8_lossy(&bytes)),
@@ -914,6 +965,84 @@ mod tests {
                 60
             ))
         );
+    }
+
+    /// Ethernet frame from `src` with ethertype `kind` and `payload`.
+    fn frame(src: [u8; 6], kind: [u8; 2], payload: &[u8]) -> Vec<u8> {
+        let mut f = vec![0xFF; 6];
+        f.extend_from_slice(&src);
+        f.extend_from_slice(&kind);
+        f.extend_from_slice(payload);
+        f
+    }
+
+    /// IPv4 header (20 bytes) with `proto`, then 4 bytes of ports and padding.
+    fn ipv4(proto: u8, sport: u16, dport: u16) -> Vec<u8> {
+        let mut p = vec![0x45, 0, 0, 40, 0, 0, 0, 0, 64, proto, 0, 0];
+        p.extend_from_slice(&[10, 0, 2, 15, 10, 0, 2, 2]);
+        p.extend_from_slice(&sport.to_be_bytes());
+        p.extend_from_slice(&dport.to_be_bytes());
+        p.extend_from_slice(&[0; 16]);
+        p
+    }
+
+    fn pcap(little: bool, frames: &[Vec<u8>]) -> Vec<u8> {
+        let w = |v: u32| {
+            if little {
+                v.to_le_bytes()
+            } else {
+                v.to_be_bytes()
+            }
+        };
+        let mut out = Vec::new();
+        // magic, version 2.4 (two u16 read here as one u32), zone, sigfigs,
+        // snaplen, link type 1 (Ethernet).
+        let version = if little { 0x0004_0002 } else { 0x0002_0004 };
+        for v in [0xa1b2_c3d4, version, 0, 0, 65_535, 1] {
+            out.extend_from_slice(&w(v));
+        }
+        for f in frames {
+            out.extend_from_slice(&w(0));
+            out.extend_from_slice(&w(0));
+            out.extend_from_slice(&w(f.len() as u32));
+            out.extend_from_slice(&w(f.len() as u32));
+            out.extend_from_slice(f);
+        }
+        out
+    }
+
+    #[test]
+    fn counts_guest_ipv4_frames_except_dhcp() {
+        use super::{guest_ipv4_frames, GUEST_MAC};
+        let slirp = [0x52, 0x55, 0x0a, 0x00, 0x02, 0x02];
+        let ip = [0x08, 0x00];
+        let frames = [
+            frame(GUEST_MAC, ip, &ipv4(17, 68, 67)),  // DHCP: not counted
+            frame(GUEST_MAC, [0x08, 0x06], &[0; 28]), // ARP: not counted
+            frame(slirp, ip, &ipv4(17, 67, 68)),      // from slirp: not counted
+            frame(GUEST_MAC, ip, &ipv4(17, 7, 17_007)), // UDP to the responder
+            frame(GUEST_MAC, ip, &ipv4(1, 0, 0)),     // ICMP
+            frame(GUEST_MAC, ip, &ipv4(6, 49_152, 17_010)), // TCP to the HTTP server
+        ];
+        for little in [true, false] {
+            assert_eq!(
+                guest_ipv4_frames(&pcap(little, &frames), GUEST_MAC),
+                Some(3)
+            );
+            assert_eq!(
+                guest_ipv4_frames(&pcap(little, &frames[..3]), GUEST_MAC),
+                Some(0)
+            );
+        }
+        // A truncated last record ends the count; garbage is unreadable.
+        let mut cut = pcap(true, &frames);
+        cut.truncate(cut.len() - 10);
+        assert_eq!(guest_ipv4_frames(&cut, GUEST_MAC), Some(2));
+        assert_eq!(
+            guest_ipv4_frames(b"not a pcap at all, not at all", GUEST_MAC),
+            None
+        );
+        assert_eq!(guest_ipv4_frames(&[], GUEST_MAC), None);
     }
 
     #[test]

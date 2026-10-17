@@ -3,7 +3,8 @@
 # boots slot A and the whole system comes up without the QEMU FAT disk.
 # The image is booted as written to a stick, without `selftest` (incident
 # 0005): only the read-only health checks run, nothing is written to AriFS
-# or to the raw area, and the image carries no test files.
+# or to the raw area, the image carries no test files (its AriFS holds only
+# an English README) and the guest sends no IPv4 frame besides DHCP.
 name = "usb.image_boot"
 description = "full boot from the USB image (FAT32 ESP on the GPT disk itself, slot A)"
 level = "smoke"
@@ -20,11 +21,12 @@ serial_contains = [
     "virtio-blk: GPT with 6 partition(s)",
     "ESP LBA 2048..133119",
     "SYSA LBA 139264..163839",
-    "fsd: AriFS mounted, 4 files",
+    "fsd: AriFS mounted, 1 files",
     "AriInit: block service answers: 213120 sectors, GPT read, ARI0 at LBA 133120",
-    "AriInit: file service answers: 4 files",
+    "AriInit: file service answers: 1 files",
     "AriInit: boot services completed",
     "ARICODEOS_KERNEL_READY",
+    "[host] guest IPv4 frames other than DHCP: 0",
 ]
 serial_absent = [
     "KERNEL PANIC",

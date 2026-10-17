@@ -321,12 +321,13 @@ fn confirm_boot_slot(arg: u64, block_service: Handle) {
 /// Info and a read of the GPT, the file service answers a list. With
 /// `selftest` the test clients run too (`fs_client` creates and rewrites
 /// `nuevo.txt`, `blk_client` writes a sector of the raw area; incident
-/// 0005). Returns the fsd endpoint or init's exit code.
+/// 0005). Returns the fsd endpoint and the file client of the health check
+/// (init keeps using it: clients are not released), or init's exit code.
 fn start_storage_stack(
     sup: &mut Supervisor,
     service: Handle,
     selftest: bool,
-) -> Result<Handle, u64> {
+) -> Result<(Handle, FsClient), u64> {
     let mut buf = [0u8; 20];
     let Ok(fs_ep) = sys::endpoint_create() else {
         return Err(12);
@@ -364,7 +365,11 @@ fn start_storage_stack(
         say(b"fsd did not start");
         return Err(13);
     }
-    let Some(files) = count_files(fs_ep) else {
+    let Ok(fs) = FsClient::new(fs_ep, HARDWARE) else {
+        say(b"no buffer for the file service client");
+        return Err(14);
+    };
+    let Some(files) = count_files(&fs) else {
         say(b"file service does not answer a list");
         return Err(14);
     };
@@ -381,13 +386,12 @@ fn start_storage_stack(
             11,
         )?;
     }
-    Ok(fs_ep)
+    Ok((fs_ep, fs))
 }
 
 /// Read-only health check of the file service: how many entries its root
 /// lists, or `None` if it does not answer.
-fn count_files(fs_service: Handle) -> Option<u64> {
-    let fs = FsClient::new(fs_service, HARDWARE).ok()?;
+fn count_files(fs: &FsClient) -> Option<u64> {
     let mut name = [0u8; 32];
     let mut files = 0;
     while fs.list(files, &mut name).ok()?.is_some() {
@@ -396,22 +400,34 @@ fn count_files(fs_service: Handle) -> Option<u64> {
     Some(files as u64)
 }
 
-/// Read-only health check of the network service: the address it reports
-/// once DHCP is done, waiting at most `NET_HEALTH_WAIT_MS`. A machine with
-/// no cable or no DHCP server is not a boot failure, only reported.
-fn report_network_address(net_service: Handle) {
-    use aricode_proto::net::Status;
-    use aricode_rt::sys::net::{NetClient, NetError};
-    let Ok(net) = NetClient::new(net_service, HARDWARE) else {
-        return say(b"network service: no buffer for the health check");
-    };
-    let deadline = now_ms() + NET_HEALTH_WAIT_MS;
+/// Read-only health check of the network service: the address it reports.
+/// It polls while DHCP is pending until `wait_ms` has passed (0: a single
+/// request). Each request is bounded by `NET_CALL_MS` for the send and as
+/// much for the reply, so the whole check takes at most `wait_ms + 2 *
+/// NET_CALL_MS`. It uses no DMA buffer (Info carries none) and its reply
+/// endpoint is closed by `rpc::call`. A machine with no cable or no DHCP
+/// server is not a boot failure, only reported.
+fn report_network_address(net_service: Handle, wait_ms: u64) {
+    use aricode_proto::net::{Info, Op, Reply, Request, Status};
+    let deadline = now_ms() + wait_ms;
+    let request = Request::new(Op::Info).encode();
     loop {
-        match net.info() {
-            Ok(info) => {
+        let mut msg = [0u8; Reply::LEN];
+        let reply = sys::rpc::call(
+            net_service,
+            &request,
+            &[],
+            NET_CALL_MS,
+            NET_CALL_MS,
+            &mut msg,
+        )
+        .ok()
+        .and_then(|n| Reply::decode(&msg[..n]));
+        match reply.map(|r| (r.status, r)) {
+            Some((Status::Ok, r)) => {
                 let mut b = [0u8; 20];
                 sys::print(b"AriInit: network service has address ");
-                for (i, octet) in info.address.iter().enumerate() {
+                for (i, octet) in Info::decode(&r.data).address.iter().enumerate() {
                     if i > 0 {
                         sys::print(b".");
                     }
@@ -420,17 +436,26 @@ fn report_network_address(net_service: Handle) {
                 sys::print(b"\n");
                 return;
             }
-            Err(NetError::Status(Status::NoRoute)) if now_ms() < deadline => sys::thread_sleep(20),
-            Err(NetError::Status(Status::NoRoute)) => {
+            Some((Status::NoRoute, _)) if now_ms() + NET_POLL_MS < deadline => {
+                sys::thread_sleep(NET_POLL_MS)
+            }
+            Some((Status::NoRoute, _)) => {
                 return say(b"network service: no address yet (DHCP pending)")
             }
-            Err(_) => return say(b"network service does not answer Info"),
+            _ => return say(b"network service does not answer Info"),
         }
     }
 }
 
-/// How long the network health check waits for DHCP.
-const NET_HEALTH_WAIT_MS: u64 = 3000;
+/// Bound of each wait (send, reply) of a network health request.
+const NET_CALL_MS: u64 = 250;
+/// Pause between network health requests while DHCP is pending.
+const NET_POLL_MS: u64 = 20;
+/// How long the health check waits for DHCP on virtio-net, where QEMU's
+/// DHCP server answers in milliseconds. On Realtek it does not wait (0):
+/// the address is whatever DHCP has given by the time the USB devices are
+/// up, and the shell's `net` shows it later.
+const NET_WAIT_VIRTIO_MS: u64 = 2000;
 
 /// Runs a test client (`selftest` only) with `run_block_client` and
 /// announces `ok` if it exits with 0; otherwise `Err(code)` is init's exit
@@ -1252,17 +1277,16 @@ enum Launched {
 }
 
 impl Broker {
+    /// `fs`: the file client of the storage health check, reused;
+    /// `fs_service`: the fsd endpoint it talks to.
     fn new(
+        fs: Option<FsClient>,
         fs_service: Option<Handle>,
         block: Option<Handle>,
         net: Handle,
         compositor: Option<Handle>,
         inputs: &[Handle],
     ) -> Result<Self, Error> {
-        let fs = match fs_service {
-            Some(ep) => Some(FsClient::new(ep, HARDWARE)?),
-            None => None,
-        };
         let mut ins = [Handle(0); 4];
         let n = inputs.len().min(4);
         ins[..n].copy_from_slice(&inputs[..n]);
@@ -1782,11 +1806,13 @@ fn main(arg: u64) -> u64 {
     }
     // Incident 0005, ADR 0032: the checks that write to the disk and AriFS
     // or talk to the QEMU test hosts run only when the command line asks.
-    let selftest = cmdline.has(aricode_cmdline::keys::SELFTEST);
+    let selftest = cmdline.has_flag(aricode_cmdline::keys::SELFTEST);
     if selftest {
         say(b"selftest: running the test-only boot checks (QEMU test environment)");
     }
     let mut fs_service = None;
+    let mut fs_client = None;
+    let mut net_wait_ms = None;
     let mut block_service = None;
     let mut services = 0u64;
     let mut sup = Supervisor::new();
@@ -1857,9 +1883,10 @@ fn main(arg: u64) -> u64 {
             services |= SERVICE_BLOCK;
             block_service = Some(service);
             match start_storage_stack(&mut sup, service, selftest) {
-                Ok(fs_ep) => {
+                Ok((fs_ep, fs)) => {
                     services |= SERVICE_FS;
                     fs_service = Some(fs_ep);
+                    fs_client = Some(fs);
                 }
                 Err(code) => return code,
             }
@@ -1892,7 +1919,7 @@ fn main(arg: u64) -> u64 {
                 return 17;
             }
             services |= SERVICE_NET;
-            report_network_address(net_service);
+            net_wait_ms = Some(NET_WAIT_VIRTIO_MS);
             if selftest {
                 // The QEMU test hosts at 10.0.2.2: UDP responder, TCP echo
                 // and HTTP server (incident 0005).
@@ -1932,7 +1959,7 @@ fn main(arg: u64) -> u64 {
                 if launched {
                     services |= SERVICE_NET;
                     say(b"network service via Realtek");
-                    report_network_address(net_service);
+                    net_wait_ms = Some(0);
                 } else {
                     say(b"rtl_net did not start");
                 }
@@ -2084,9 +2111,10 @@ fn main(arg: u64) -> u64 {
                     services |= SERVICE_BLOCK;
                     block_service = Some(ep);
                     match start_storage_stack(&mut sup, ep, selftest) {
-                        Ok(fs_ep) => {
+                        Ok((fs_ep, fs)) => {
                             services |= SERVICE_FS;
                             fs_service = Some(fs_ep);
+                            fs_client = Some(fs);
                         }
                         Err(code) => return code,
                     }
@@ -2094,6 +2122,11 @@ fn main(arg: u64) -> u64 {
                 _ => say(b"no USB storage"),
             }
         }
+    }
+    // 9c. Network health check, after the USB devices so that a machine
+    //     waiting for DHCP does not delay its stick and keyboard.
+    if let Some(wait_ms) = net_wait_ms {
+        report_network_address(net_service, wait_ms);
     }
     // 10. Graphical interface: compositor with the framebuffer and the inputs,
     //     and two applications drawing at the same time.
@@ -2116,13 +2149,10 @@ fn main(arg: u64) -> u64 {
     // 10b. Restart storm (tests only, `restart_storm`): 100 restarts of a
     //      test service under the supervisor without leaking resources.
     if arg & sys::abi::init_arg::RESTART_STORM != 0 {
-        let Some(fs_ep) = fs_service else {
+        let Some(fs) = fs_client.as_mut() else {
             return 40;
         };
-        let Ok(mut fs) = FsClient::new(fs_ep, HARDWARE) else {
-            return 40;
-        };
-        if let Err(code) = restart_storm(&mut sup, &mut fs) {
+        if let Err(code) = restart_storm(&mut sup, fs) {
             return code;
         }
     }
@@ -2155,6 +2185,7 @@ fn main(arg: u64) -> u64 {
             return 15;
         };
         let Ok(mut broker) = Broker::new(
+            fs_client,
             fs_service,
             block_service,
             net_service,

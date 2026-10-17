@@ -3,9 +3,9 @@
 # service answers Info and the GPT read, the file service lists, the
 # network service reports its address), but none of the test clients: no
 # nuevo.txt in AriFS (the fresh test disk keeps its 4 files), no write to
-# the raw area, no datagram or connection to the QEMU test hosts at
-# 10.0.2.2 (the runner's responder counts them) and no input_client reading
-# the keyboard.
+# the raw area, no IPv4 frame from the guest besides DHCP (the runner counts
+# them in its filter-dump capture), so nothing reaches the QEMU test hosts
+# at 10.0.2.2, and no input_client reading the keyboard.
 name = "init.no_selftest"
 description = "boot without selftest: health checks only, no test files, no contact with the test hosts"
 level = "smoke"
@@ -31,7 +31,7 @@ serial_contains = [
     "hola.txt",
     "4 file(s)",
     "ARICODEOS_SHUTDOWN",
-    "[host] test hosts: 0 contact(s)",
+    "[host] guest IPv4 frames other than DHCP: 0",
 ]
 serial_absent = [
     "KERNEL PANIC",

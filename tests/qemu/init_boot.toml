@@ -29,4 +29,4 @@ serial_contains = [
     "[INFO ] init exited with code 0",
     "ARICODEOS_KERNEL_READY",
 ]
-serial_absent = ["KERNEL PANIC", "init killed", "[host] test hosts: 0 contact(s)"]
+serial_absent = ["KERNEL PANIC", "init killed", "[host] guest IPv4 frames other than DHCP: 0"]

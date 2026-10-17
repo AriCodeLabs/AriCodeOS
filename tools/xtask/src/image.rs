@@ -244,7 +244,7 @@ pub const PART_ARIBOOT: (u64, u64) = (79872, 79935);
 ///
 /// ```text
 /// ESP      2048..133119     EFI/BOOT/BOOTX64.EFI, aricodeos/{kernel.elf,initrd.img,cmdline.txt}
-/// ARI0     133120..139263   AriFS with the sample files
+/// ARI0     133120..139263   AriFS with only `USB_FILES` (a README)
 /// SYSA     139264..163839   signed system image, slot A
 /// SYSB     163840..188415   slot B (empty)
 /// UPDATE   188416..212991   empty
@@ -315,7 +315,7 @@ pub fn write_usb_image(path: &Path, esp_dir: &Path, extra: &[(String, Vec<u8>)])
     let o = USB_PART_ESP.0 as usize * 512;
     let fat_img = fat.finish();
     img[o..o + fat_img.len()].copy_from_slice(&fat_img);
-    populate_arifs(&mut img, USB_PART_ARI0)?;
+    format_arifs(&mut img, USB_PART_ARI0, USB_FILES)?;
     if !extra.is_empty() {
         let mut fs = aricode_arifs::AriFs::open(VecDisk {
             data: &mut img,
@@ -330,10 +330,9 @@ pub fn write_usb_image(path: &Path, esp_dir: &Path, extra: &[(String, Vec<u8>)])
                 .map_err(|e| format!("arifs {name}: {e:?}"))?;
         }
     }
-    // No `ARIDISK` raw-area pattern: it exists only for `blk_client`, a
-    // `selftest` check that writes into it, and the stick is the owner's
-    // disk (incident 0005). A `selftest` boot from the stick stops at
-    // `blk_client`'s pattern check, before its write.
+    // No test data (incident 0005): neither the `ARIDISK` raw-area pattern
+    // nor the test disk's sample files. A `selftest` boot from the stick
+    // stops at `fs_client`'s first check (no `hola.txt`), before any write.
     write_slot(&mut img, USB_PART_SYSA, &system_image(1, false)?)?;
     let state = aricode_ab::BootState::fresh(aricode_ab::Slot::A);
     let o = USB_PART_ARIBOOT.0 as usize * 512;
@@ -357,6 +356,11 @@ pub fn build_usb_image(
     authorized_key: Option<&Path>,
     update_source: Option<&str>,
 ) -> Result<PathBuf> {
+    if let Some(key) = aricode_cmdline::CmdLine::new(cmdline).test_only_key() {
+        return Err(format!(
+            "--cmdline \"{cmdline}\": `{key}` is a test-only key (aricode_cmdline::keys::TEST_ONLY) and does not belong on a stick for a real machine"
+        ));
+    }
     let base = build_base_esp(release)?;
     let esp = build_scenario_esp(
         &base,
@@ -512,6 +516,14 @@ impl aricode_arifs::BlockDevice for VecDisk<'_> {
 /// reach (32 files x 64 sectors fit before it).
 pub const RAW_PATTERN_LBA: u64 = 4096;
 
+/// The only file of a stick's ARI0 besides what `usb-image` is asked to
+/// install (`authorized_keys`, host key, update source): the owner's disk
+/// carries no test or sample data (incident 0005).
+pub const USB_FILES: &[(&str, &[u8])] = &[(
+    "README",
+    b"AriCodeOS system stick: this AriFS partition holds your files.\nhttps://github.com/lynxcraft/aricodeos\n",
+)];
+
 /// Sample files of the test disk.
 pub const DISK_FILES: &[(&str, &[u8])] = &[
     ("hola.txt", b"Hola desde AriFS\n"),
@@ -612,7 +624,7 @@ pub fn write_test_disk(
         parts.push(("ARIBOOT", PART_ARIBOOT.0, PART_ARIBOOT.1, guid));
     }
     aricode_gpt::write_disk(&mut img, &parts).map_err(|e| format!("gpt: {e:?}"))?;
-    populate_arifs(&mut img, PART_ARI0)?;
+    populate_test_arifs(&mut img, PART_ARI0)?;
     install_files(&mut img, PART_ARI0, installed)?;
     match variant {
         DiskVariant::FsPendingReplace => stage_arifs_replace(&mut img, PART_ARI0)?,
@@ -760,8 +772,8 @@ fn stage_arifs_replace(img: &mut [u8], part: (u64, u64)) -> Result {
         .map_err(|e| format!("arifs README: {e:?}"))
 }
 
-/// Formats AriFS in `part` with the sample files and the WASM module.
-fn populate_arifs(img: &mut [u8], part: (u64, u64)) -> Result {
+/// Formats AriFS in `part` with `files`.
+fn format_arifs(img: &mut [u8], part: (u64, u64), files: &[(&str, &[u8])]) -> Result {
     let (first, last) = part;
     let sectors = last - first + 1;
     let mut fs = aricode_arifs::AriFs::format(
@@ -772,30 +784,28 @@ fn populate_arifs(img: &mut [u8], part: (u64, u64)) -> Result {
         sectors,
     )
     .map_err(|e| format!("arifs: {e:?}"))?;
-    for (name, content) in DISK_FILES {
+    for (name, content) in files {
         let i = fs
             .create(name)
             .map_err(|e| format!("arifs {name}: {e:?}"))?;
         fs.write(i, 0, content)
-            .map_err(|e| format!("arifs {name}: {e:?}"))?;
-    }
-    // Sample WebAssembly module and its manifest in `wasm_runner`'s private
-    // directory (`build_wasm_programs` produces it; without it, the runner
-    // reports and exits).
-    let demo = crate::build_dir().join("demo.wasm");
-    if let Ok(bytes) = fs::read(&demo) {
-        for (name, content) in [
-            (WASM_MODULE_FILE, bytes.as_slice()),
-            (WASM_MANIFEST_FILE, WASM_MANIFEST),
-        ] {
-            let i = fs
-                .create(name)
-                .map_err(|e| format!("arifs {name}: {e:?}"))?;
-            fs.write(i, 0, content)
-                .map_err(|e| format!("arifs {name} ({} bytes): {e:?}", content.len()))?;
-        }
+            .map_err(|e| format!("arifs {name} ({} bytes): {e:?}", content.len()))?;
     }
     Ok(())
+}
+
+/// Test disk: AriFS with the sample files and the sample WebAssembly module
+/// and its manifest in `wasm_runner`'s private directory
+/// (`build_wasm_programs` produces it; without it, the runner reports and
+/// exits).
+fn populate_test_arifs(img: &mut [u8], part: (u64, u64)) -> Result {
+    let demo = fs::read(crate::build_dir().join("demo.wasm")).ok();
+    let mut files = DISK_FILES.to_vec();
+    if let Some(bytes) = &demo {
+        files.push((WASM_MODULE_FILE, bytes));
+        files.push((WASM_MANIFEST_FILE, WASM_MANIFEST));
+    }
+    format_arifs(img, part, &files)
 }
 
 const WASM_MODULE_FILE: &str = "wasm_runner/demo.wasm";
@@ -875,6 +885,36 @@ mod tests {
         fs::write(base.join(BOOTX64), b"efi").unwrap();
         fs::write(base.join(KERNEL), b"elf").unwrap();
         base
+    }
+
+    #[test]
+    fn usb_image_refuses_test_only_keys() {
+        // Incident 0005 audit: checked before anything is built.
+        for cmdline in [
+            "shell selftest",
+            "qemu_exit shell",
+            "shell usb_fault=idle",
+            "test=panic",
+        ] {
+            let err = build_usb_image(false, cmdline, None, None).unwrap_err();
+            assert!(err.contains("test-only key"), "{cmdline}: {err}");
+        }
+    }
+
+    #[test]
+    fn stick_arifs_holds_only_the_readme() {
+        let sectors = USB_PART_ARI0.1 - USB_PART_ARI0.0 + 1;
+        let mut img = vec![0u8; sectors as usize * 512];
+        format_arifs(&mut img, (0, sectors - 1), USB_FILES).unwrap();
+        let fs = aricode_arifs::AriFs::open(VecDisk {
+            data: &mut img,
+            base: 0,
+        })
+        .unwrap();
+        let names: Vec<&str> = fs.entries().map(|(_, e)| e.name_str()).collect();
+        assert_eq!(names, ["README"]);
+        let readme = USB_FILES[0].1;
+        assert!(readme.is_ascii() && readme.ends_with(b"https://github.com/lynxcraft/aricodeos\n"));
     }
 
     #[test]

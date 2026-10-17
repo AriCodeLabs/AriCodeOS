@@ -48,6 +48,20 @@ impl<'a> CmdLine<'a> {
         self.entries().any(|(k, _)| k == key)
     }
 
+    /// `true` only if `key` appears bare, without `=value`: a switch such as
+    /// `selftest` must not be turned on by `selftest=0`.
+    pub fn has_flag(&self, key: &str) -> bool {
+        self.entries().any(|(k, v)| k == key && v.is_none())
+    }
+
+    /// First key of [`keys::TEST_ONLY`] on the line, if any: a command line
+    /// for a real machine (`cargo xtask usb-image`) must carry none.
+    pub fn test_only_key(&self) -> Option<&'a str> {
+        self.entries()
+            .map(|(k, _)| k)
+            .find(|k| keys::TEST_ONLY.contains(k))
+    }
+
     /// Value of the last occurrence of `key=value`.
     pub fn get(&self, key: &str) -> Option<&'a str> {
         self.entries()
@@ -92,9 +106,22 @@ pub mod keys {
     /// Tests only (incident 0005, ADR 0032): init also runs its test-only
     /// boot checks, which write to the disk and AriFS and talk to the QEMU
     /// test hosts at 10.0.2.2. Never set on a real machine: without it init
-    /// runs only the read-only health checks. xtask adds it to every QEMU
-    /// scenario unless the scenario says `selftest = false`.
+    /// runs only the read-only health checks. Only the bare key counts
+    /// (`CmdLine::has_flag`): `selftest=0` does not enable it. xtask adds it
+    /// to every QEMU scenario unless the scenario says `selftest = false`.
     pub const SELFTEST: &str = "selftest";
+
+    /// Keys that only make sense in a QEMU test run: they exit QEMU, inject
+    /// failures or run test programs. `cargo xtask usb-image` refuses them.
+    pub const TEST_ONLY: &[&str] = &[
+        QEMU_EXIT,
+        TEST,
+        INIT_FAIL_LATE,
+        RESTART_STORM,
+        SERVICE_HANG,
+        USB_FAULT,
+        SELFTEST,
+    ];
     /// Tests only: `usb_fault=WHEN[:KIND]` injects one failure into the USB
     /// driver. `WHEN` is `N` (the N-th block request, or the N-th HID
     /// report for `hid`) or `idle` (the first one after two idle seconds).
@@ -126,10 +153,24 @@ mod tests {
     }
 
     #[test]
-    fn selftest_is_a_whole_key() {
-        assert!(CmdLine::new("shell selftest").has(keys::SELFTEST));
-        assert!(!CmdLine::new("shell kbd=es").has(keys::SELFTEST));
-        assert!(!CmdLine::new("shell selftests no_selftest").has(keys::SELFTEST));
+    fn selftest_is_a_bare_whole_key() {
+        assert!(CmdLine::new("shell selftest").has_flag(keys::SELFTEST));
+        assert!(!CmdLine::new("shell kbd=es").has_flag(keys::SELFTEST));
+        assert!(!CmdLine::new("shell selftests no_selftest").has_flag(keys::SELFTEST));
+        for off in ["selftest=0", "selftest=", "selftest=1"] {
+            assert!(!CmdLine::new(off).has_flag(keys::SELFTEST), "{off}");
+        }
+    }
+
+    #[test]
+    fn test_only_keys_are_found() {
+        let first = |s| CmdLine::new(s).test_only_key();
+        assert_eq!(first("shell kbd=es strict log=debug"), None);
+        assert_eq!(first("shell selftest"), Some("selftest"));
+        assert_eq!(first("qemu_exit shell"), Some("qemu_exit"));
+        assert_eq!(first("shell test=panic"), Some("test"));
+        assert_eq!(first("usb_fault=idle shell"), Some("usb_fault"));
+        assert_eq!(first("selftest=0"), Some("selftest"));
     }
 
     #[test]
