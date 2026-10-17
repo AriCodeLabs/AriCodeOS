@@ -12,6 +12,7 @@ aricode-initrd = { path = "../../libs/initrd", features = ["write"] }
 aricode-gpt = { path = "../../libs/gpt", features = ["write"] }
 aricode-fat = { path = "../../libs/fat" }
 aricode-arifs = { path = "../../libs/arifs" }
+aricode-cmdline = { path = "../../libs/cmdline" }
 aricode-net = { path = "../../libs/net" }
 aricode-http = { path = "../../libs/http" }
 aricode-proto = { path = "../../sdk/proto" }

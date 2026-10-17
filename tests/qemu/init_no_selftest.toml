@@ -1,0 +1,53 @@
+# Incident 0005: a boot without `selftest` behaves like a real machine. init
+# runs the cheap process checks and the read-only health checks (the block
+# service answers Info and the GPT read, the file service lists, the
+# network service reports its address), but none of the test clients: no
+# nuevo.txt in AriFS (the fresh test disk keeps its 4 files), no write to
+# the raw area, no datagram or connection to the QEMU test hosts at
+# 10.0.2.2 (the runner's responder counts them) and no input_client reading
+# the keyboard.
+name = "init.no_selftest"
+description = "boot without selftest: health checks only, no test files, no contact with the test hosts"
+level = "smoke"
+areas = ["init", "storage", "filesystem", "network", "shell"]
+selftest = false
+cmdline = "qemu_exit shell"
+stdin = ["ls", "shutdown"]
+timeout_secs = 60
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: hello exited with 42",
+    "AriInit: kernel_read was killed by the kernel",
+    "AriInit: crashy_driver restarted successfully",
+    "AriInit: block service answers: ",
+    ", GPT read, ARI0 at LBA 34",
+    "fsd: AriFS mounted, 4 files",
+    "AriInit: file service answers: 4 files",
+    "AriInit: network service has address 10.0.2.15",
+    "AriInit: 2 input device(s) ready",
+    "AriInit: boot services completed",
+    "hola.txt",
+    "4 file(s)",
+    "ARICODEOS_SHUTDOWN",
+    "[host] test hosts: 0 contact(s)",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "AriInit: selftest",
+    "fs_client",
+    "blk_client",
+    "net_client",
+    "tcp_client",
+    "http_client",
+    "input_client",
+    "nuevo.txt",
+    "TCP_LISTEN_READY",
+    "file service ok",
+    "block service ok",
+    "network service ok",
+    "TCP service ok",
+    "HTTP client ok",
+    "input service ok",
+]

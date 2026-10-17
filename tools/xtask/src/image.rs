@@ -330,13 +330,10 @@ pub fn write_usb_image(path: &Path, esp_dir: &Path, extra: &[(String, Vec<u8>)])
                 .map_err(|e| format!("arifs {name}: {e:?}"))?;
         }
     }
-    // Raw area at the tail of ARI0, at the same offset as on the test disk
-    // (init passes it to blk_client).
-    for lba in USB_PART_ARI0.0 + RAW_PATTERN_OFFSET..=USB_PART_ARI0.1 {
-        let o = lba as usize * 512;
-        img[o..o + 8].copy_from_slice(b"ARIDISK\0");
-        img[o + 8..o + 16].copy_from_slice(&lba.to_le_bytes());
-    }
+    // No `ARIDISK` raw-area pattern: it exists only for `blk_client`, a
+    // `selftest` check that writes into it, and the stick is the owner's
+    // disk (incident 0005). A `selftest` boot from the stick stops at
+    // `blk_client`'s pattern check, before its write.
     write_slot(&mut img, USB_PART_SYSA, &system_image(1, false)?)?;
     let state = aricode_ab::BootState::fresh(aricode_ab::Slot::A);
     let o = USB_PART_ARIBOOT.0 as usize * 512;
@@ -514,8 +511,6 @@ impl aricode_arifs::BlockDevice for VecDisk<'_> {
 /// partition every sector holds `ARIDISK\0` and its LBA, out of AriFS's
 /// reach (32 files x 64 sectors fit before it).
 pub const RAW_PATTERN_LBA: u64 = 4096;
-/// Offset of the raw area inside ARI0 (the same on every disk).
-pub const RAW_PATTERN_OFFSET: u64 = RAW_PATTERN_LBA - PART_ARI0.0;
 
 /// Sample files of the test disk.
 pub const DISK_FILES: &[(&str, &[u8])] = &[
@@ -725,15 +720,11 @@ fn install_files(img: &mut [u8], part: (u64, u64), files: &[(String, Vec<u8>)]) 
 /// QEMU run of 2026-10-17 confirmed these five files in `ls`.
 pub const FS_FREE_ENTRIES: usize = 5;
 
-/// Files the system itself creates in AriFS on every boot, before the
-/// shell: init's `fs_client` self-test creates `nuevo.txt` when it is
-/// missing (`user/testprogs/src/bin/fs_client.rs`). The first QEMU run of
-/// `update.fs_nearly_full` failed because this entry was not counted: the
-/// table was full one file early and the stage file could not be created.
-const BOOT_CREATED_FILES: &[&str] = &["nuevo.txt"];
-
 /// Fills the AriFS table with empty `fill-NN` files until only `free`
-/// entries are left once the boot has created its own files.
+/// entries are left. Scenarios on these disks boot without `selftest`:
+/// its `fs_client` would take one more entry for `nuevo.txt` (incident
+/// 0005), which is what made the first QEMU run of `update.fs_nearly_full`
+/// fail.
 fn fill_arifs(img: &mut [u8], part: (u64, u64), free: usize) -> Result {
     let mut fs = aricode_arifs::AriFs::open(VecDisk {
         data: img,
@@ -741,11 +732,7 @@ fn fill_arifs(img: &mut [u8], part: (u64, u64), free: usize) -> Result {
     })
     .map_err(|e| format!("arifs: {e:?}"))?;
     let used = fs.entries().count();
-    let at_boot = BOOT_CREATED_FILES
-        .iter()
-        .filter(|name| fs.find(name).is_none())
-        .count();
-    for i in 0..aricode_arifs::MAX_FILES.saturating_sub(used + at_boot + free) {
+    for i in 0..aricode_arifs::MAX_FILES.saturating_sub(used + free) {
         let name = format!("fill-{i:02}");
         fs.create(&name)
             .map_err(|e| format!("arifs {name}: {e:?}"))?;

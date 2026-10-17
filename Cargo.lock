@@ -771,6 +771,7 @@ version = "0.10.0"
 dependencies = [
  "aricode-ab",
  "aricode-arifs",
+ "aricode-cmdline",
  "aricode-crypto",
  "aricode-fat",
  "aricode-gpt",

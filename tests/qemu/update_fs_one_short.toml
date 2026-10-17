@@ -3,12 +3,14 @@
 # fits (state, indexes, last.log); `upgrade` reserves the files it will
 # need (history.log, one stage file) before anything irreversible, cannot
 # create the stage file, and refuses the whole upgrade with a fault event:
-# the system is not scheduled and no app is staged.
+# the system is not scheduled and no app is staged. Without `selftest`, as
+# update.fs_nearly_full: no entry is taken at boot (incident 0005).
 name = "update.fs_one_short"
 description = "a full AriFS table refuses the whole upgrade before any install"
 level = "full"
 areas = ["update", "apps", "network", "shell", "filesystem"]
 disk = "fs-one-short"
+selftest = false
 install = ["examples/hello_ext"]
 timeout_secs = 180
 
@@ -36,4 +38,5 @@ serial_absent = [
     "installed into slot",
     "staged as",
     "installer: installing",
+    "nuevo.txt",
 ]

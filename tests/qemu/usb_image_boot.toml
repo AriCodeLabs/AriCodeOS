@@ -1,11 +1,15 @@
 # Phase 34: the USB stick image (GPT with its own FAT32 ESP + AriCodeOS
 # partitions) boots on its own: OVMF loads AriBoot from the disk ESP, AriBoot
 # boots slot A and the whole system comes up without the QEMU FAT disk.
+# The image is booted as written to a stick, without `selftest` (incident
+# 0005): only the read-only health checks run, nothing is written to AriFS
+# or to the raw area, and the image carries no test files.
 name = "usb.image_boot"
 description = "full boot from the USB image (FAT32 ESP on the GPT disk itself, slot A)"
 level = "smoke"
 areas = ["usb", "hardware", "boot", "update"]
 cmdline = "qemu_exit"
+selftest = false
 disk = "usb-image"
 timeout_secs = 90
 
@@ -17,7 +21,19 @@ serial_contains = [
     "ESP LBA 2048..133119",
     "SYSA LBA 139264..163839",
     "fsd: AriFS mounted, 4 files",
+    "AriInit: block service answers: 213120 sectors, GPT read, ARI0 at LBA 133120",
+    "AriInit: file service answers: 4 files",
     "AriInit: boot services completed",
     "ARICODEOS_KERNEL_READY",
 ]
-serial_absent = ["KERNEL PANIC", "booting from the ESP"]
+serial_absent = [
+    "KERNEL PANIC",
+    "booting from the ESP",
+    "AriInit: selftest",
+    "fs_client",
+    "blk_client",
+    "net_client",
+    "tcp_client",
+    "http_client",
+    "input_client",
+]

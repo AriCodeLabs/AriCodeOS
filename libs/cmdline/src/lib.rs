@@ -89,6 +89,12 @@ pub mod keys {
     /// Failure protocol (ADR 0028): a component halts on its first
     /// unexpected failure and init restarts nothing.
     pub const STRICT: &str = "strict";
+    /// Tests only (incident 0005, ADR 0032): init also runs its test-only
+    /// boot checks, which write to the disk and AriFS and talk to the QEMU
+    /// test hosts at 10.0.2.2. Never set on a real machine: without it init
+    /// runs only the read-only health checks. xtask adds it to every QEMU
+    /// scenario unless the scenario says `selftest = false`.
+    pub const SELFTEST: &str = "selftest";
     /// Tests only: `usb_fault=WHEN[:KIND]` injects one failure into the USB
     /// driver. `WHEN` is `N` (the N-th block request, or the N-th HID
     /// report for `hid`) or `idle` (the first one after two idle seconds).
@@ -117,6 +123,13 @@ mod tests {
         assert_eq!(c.get("qemu_exit"), None);
         assert!(!c.has("missing"));
         assert!(!c.is_empty());
+    }
+
+    #[test]
+    fn selftest_is_a_whole_key() {
+        assert!(CmdLine::new("shell selftest").has(keys::SELFTEST));
+        assert!(!CmdLine::new("shell kbd=es").has(keys::SELFTEST));
+        assert!(!CmdLine::new("shell selftests no_selftest").has(keys::SELFTEST));
     }
 
     #[test]

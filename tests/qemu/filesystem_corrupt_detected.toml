@@ -1,7 +1,8 @@
 # Stage 2 (ADR 0014): an AriFS table entry has a corrupted
-# byte and its CRC does not match. fsd detects it and refuses to mount; init does not
-# accept the file service and exits with code 14 instead of
-# carrying on with data that cannot be trusted.
+# byte and its CRC does not match. fsd detects it and refuses to mount; init's
+# read-only health check (a list) gets no answer, init does not accept the file
+# service and exits with code 14 instead of carrying on with data that cannot
+# be trusted (incident 0005: the health check runs before any test client).
 name = "filesystem.corrupt_detected"
 description = "AriFS with corrupt metadata: fsd does not mount and the boot reflects it"
 level = "full"
@@ -14,8 +15,8 @@ timeout_secs = 200
 exit = 33
 serial_contains = [
     "fsd: AriFS corrupt: not mounting",
-    "AriInit: fs_client exited with 2",
+    "AriInit: file service does not answer a list",
     "init exited with code 14",
     "ARICODEOS_KERNEL_READY",
 ]
-serial_absent = ["KERNEL PANIC", "AriFS montado", "file service ok"]
+serial_absent = ["KERNEL PANIC", "AriFS mounted", "file service ok", "file service answers", "fs_client"]

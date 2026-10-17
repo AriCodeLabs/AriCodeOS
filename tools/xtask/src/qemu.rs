@@ -269,9 +269,12 @@ fn run_input_probe(
 
 /// Test responder on the host loopback: over UDP it returns a fixed A record
 /// for DNS queries and echoes everything else; over TCP it echoes every
-/// connection. It lives as long as the returned value exists.
+/// connection. It lives as long as the returned value exists and counts
+/// every datagram and connection it receives: a boot without `selftest`
+/// must not contact the test hosts at all (incident 0005).
 pub struct Responder {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    contacts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
@@ -405,7 +408,7 @@ pub fn responder_reply(datagram: &[u8], out: &mut [u8]) -> usize {
 
 impl Responder {
     pub fn start() -> Result<Self> {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::sync::Arc;
         let port = aricode_proto::net::TEST_RESPONDER_PORT;
         let socket = std::net::UdpSocket::bind(("127.0.0.1", port))
@@ -418,12 +421,15 @@ impl Responder {
             .map_err(|e| format!("TCP echo server on 127.0.0.1:{tcp_port}: {e}"))?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         let stop = Arc::new(AtomicBool::new(false));
+        let contacts = Arc::new(AtomicUsize::new(0));
         let flag = Arc::clone(&stop);
+        let udp_contacts = Arc::clone(&contacts);
         let udp = std::thread::spawn(move || {
             let mut buf = [0u8; 2048];
             let mut out = [0u8; 2048];
             while !flag.load(Ordering::Relaxed) {
                 if let Ok((n, from)) = socket.recv_from(&mut buf) {
+                    udp_contacts.fetch_add(1, Ordering::Relaxed);
                     let m = responder_reply(&buf[..n], &mut out);
                     let _ = socket.send_to(&out[..m], from);
                 }
@@ -435,17 +441,29 @@ impl Responder {
         http_listener
             .set_nonblocking(true)
             .map_err(|e| e.to_string())?;
-        let tcp = Self::accept_loop(Arc::clone(&stop), listener, tcp_echo);
-        let http = Self::accept_loop(Arc::clone(&stop), http_listener, http_serve);
+        let tcp = Self::accept_loop(Arc::clone(&stop), Arc::clone(&contacts), listener, tcp_echo);
+        let http = Self::accept_loop(
+            Arc::clone(&stop),
+            Arc::clone(&contacts),
+            http_listener,
+            http_serve,
+        );
         Ok(Self {
             stop,
+            contacts,
             threads: vec![udp, tcp, http],
         })
+    }
+
+    /// Datagrams and connections received so far.
+    pub fn contacts(&self) -> usize {
+        self.contacts.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Accepts connections until `stop` and serves each one on its own thread.
     fn accept_loop(
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        contacts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         listener: std::net::TcpListener,
         serve: fn(std::net::TcpStream),
     ) -> std::thread::JoinHandle<()> {
@@ -453,6 +471,7 @@ impl Responder {
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        contacts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let _ = stream.set_nonblocking(false);
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
                         std::thread::spawn(move || serve(stream));
@@ -701,7 +720,7 @@ pub fn run_headless(
         }
         Some(esp)
     };
-    let _responder = Responder::start()?;
+    let responder = Responder::start()?;
     let qmp_path = workdir.join("qmp.sock");
     let _ = std::fs::remove_file(&qmp_path);
     let start = Instant::now();
@@ -845,6 +864,9 @@ pub fn run_headless(
     {
         bytes.extend_from_slice(format!("\n{line}\n").as_bytes());
     }
+    bytes.extend_from_slice(
+        format!("\n[host] test hosts: {} contact(s)\n", responder.contacts()).as_bytes(),
+    );
     Ok(Capture {
         serial: strip_ansi(&String::from_utf8_lossy(&bytes)),
         exit_code,

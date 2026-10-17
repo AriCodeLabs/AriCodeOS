@@ -168,6 +168,12 @@ pub struct Scenario {
     /// exit QEMU instead of staying in `hlt`.
     #[serde(default = "default_cmdline")]
     pub cmdline: String,
+    /// Adds `selftest` to the cmdline of every boot (default): init runs
+    /// its test-only boot checks, which write to the test disk and talk to
+    /// the QEMU test hosts (incident 0005, ADR 0032). `false` boots like a
+    /// real machine: only the read-only health checks.
+    #[serde(default = "default_selftest")]
+    pub selftest: bool,
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
     /// Lines the runner sends over the serial console, one each time the
@@ -284,6 +290,9 @@ pub fn validate_name(name: &str) -> Result<()> {
 fn default_cmdline() -> String {
     "qemu_exit".into()
 }
+fn default_selftest() -> bool {
+    true
+}
 fn default_timeout() -> u64 {
     30
 }
@@ -344,6 +353,19 @@ pub fn load_from(dir: &Path) -> Result<Vec<Scenario>> {
 }
 
 impl Scenario {
+    /// What a boot of this scenario writes to `aricodeos/cmdline.txt`: its
+    /// declared `cmdline` plus `selftest` unless the scenario opts out.
+    pub fn boot_cmdline(&self, cmdline: &str) -> String {
+        let key = aricode_cmdline::keys::SELFTEST;
+        if self.selftest && !aricode_cmdline::CmdLine::new(cmdline).has(key) {
+            format!("{} {key}", cmdline.trim_end())
+                .trim_start()
+                .to_string()
+        } else {
+            cmdline.to_string()
+        }
+    }
+
     /// CPUs the scenario boots with: the declared ones, or the value forced
     /// by `--cpus`, or 1.
     pub fn cpus(&self, forced: Option<u32>) -> u32 {
@@ -506,5 +528,41 @@ mod tests {
         assert!(!s.matches(Level::Full, &["memory".into()]));
         assert_eq!(s.cmdline, "qemu_exit");
         assert_eq!(s.timeout_secs, 30);
+    }
+
+    #[test]
+    fn selftest_is_added_unless_the_scenario_opts_out() {
+        let mut s = scenario("x", "full", "\"init\"");
+        assert!(s.selftest);
+        assert_eq!(
+            s.boot_cmdline("qemu_exit shell"),
+            "qemu_exit shell selftest"
+        );
+        assert_eq!(s.boot_cmdline("qemu_exit selftest"), "qemu_exit selftest");
+        assert_eq!(s.boot_cmdline(""), "selftest");
+        s.selftest = false;
+        assert_eq!(s.boot_cmdline("qemu_exit shell"), "qemu_exit shell");
+        let off: Scenario = toml::from_str(
+            "name = \"y\"\nlevel = \"full\"\nareas = [\"init\"]\nselftest = false\n[expect]\nexit = 33\n",
+        )
+        .unwrap();
+        assert!(!off.selftest);
+    }
+
+    #[test]
+    fn repo_has_a_scenario_without_selftest() {
+        // At least one scenario boots like a real machine (incident 0005).
+        assert!(load_all().expect("scenarios").iter().any(|s| !s.selftest));
+    }
+
+    #[test]
+    fn nearly_full_arifs_scenarios_boot_without_selftest() {
+        // `fill_arifs` leaves exactly the entries the updater needs; the
+        // selftest `fs_client` would take one for `nuevo.txt`.
+        for s in load_all().expect("scenarios") {
+            if matches!(s.disk.as_str(), "fs-nearly-full" | "fs-one-short") {
+                assert!(!s.selftest, "{}: needs selftest = false", s.name);
+            }
+        }
     }
 }
