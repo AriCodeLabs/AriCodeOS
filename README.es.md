@@ -75,14 +75,18 @@ equipo).
 
 ```bash
 docker build -t aricodeos-dev -f tools/docker/Dockerfile .
-docker run --rm -it -v "$PWD":/src -v aricodeos-cargo:/usr/local/cargo/registry \
+docker run --rm -it -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/cargo/registry \
     --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask check
-docker run --rm -it -v "$PWD":/src -v aricodeos-cargo:/usr/local/cargo/registry \
+docker run --rm -it -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/cargo/registry \
     --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask test --all
 ```
 
 `--user` mantiene `build/` y `target/` como tuyos; el volumen con nombre
-conserva las descargas de crates entre ejecuciones. La imagen no expone
+conserva las descargas de crates entre ejecuciones. El repositorio se monta
+en la misma ruta que tiene en el equipo (`-v "$PWD":"$PWD" -w "$PWD"`),
+porque los artefactos de `target/` llevan rutas absolutas (el script del
+enlazador del SDK, entre otros): con otra ruta, lo compilado en el equipo y
+reutilizado dentro del contenedor apunta a ficheros que allí no existen. La imagen no expone
 ningún puerto ni contiene claves. Un resultado de QEMU dentro de Docker es un
 resultado de QEMU: no sustituye a las comprobaciones en hardware de
 `docs/hardware.md`.
