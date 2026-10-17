@@ -60,6 +60,30 @@ there.
 6. Open the pull request against `develop`. Say what the change does, why,
    and how it was tested; link the issue, ADR or incident it relates to.
 
+## Other ways to contribute
+
+Code is not the only contribution the project needs.
+
+- **Test it on real hardware.** QEMU covers the logic; only real machines
+  show firmware, controller and device differences. Build the USB stick
+  image as [docs/hardware.md](docs/hardware.md) explains, boot a machine
+  you can wipe the stick for, and open a *Hardware test report* issue with
+  the template, whether it worked or not. Every tested machine is listed
+  in `docs/hardware.md`.
+- **Try it without a toolchain.** The Docker images in `tools/docker/`
+  (see "Docker" in the README) boot the system in QEMU on any machine and
+  run the full test suite; a failing scenario on your machine is worth an
+  issue with the log.
+- **Report what you find.** A bug report with the command line, the serial
+  log or a screen photo and the `diag` output is often the start of an
+  incident record and a fix.
+- **Ask and propose.** Design questions and proposals go to the issue
+  tracker with the *Feature or design proposal* template, or to the
+  repository's Discussions when they are enabled.
+- **Improve the documentation.** The README, `docs/` and the ADRs are
+  reviewed like code: a pull request that makes something clearer is
+  welcome, including the Spanish README.
+
 ## Failures are not hidden
 
 Anything that goes wrong, in your change or found while making it, follows
