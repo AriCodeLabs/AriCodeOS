@@ -146,7 +146,14 @@ Three facts shape the driver:
    passes it back: once it chose a USB system disk it relaunches that
    driver with `driver_arg::EXPECTED_DISK` and the first 47 bits of the
    disk GUID, and the restarted driver serves only a disk whose GUID
-   matches (answering `Io` meanwhile). usbd ignores those bits for now.
+   matches (answering `Io` meanwhile). The GUID is unique per stick:
+   `cargo xtask usb-image` writes a random disk GUID from OS entropy
+   (and prints it); only the test disks keep the fixed
+   `aricode_gpt::TEST_DISK_GUID`. A restarted usbd ignores the
+   expected-disk bits: only the EHCI driver enforces them so far. A
+   failed or short GPT header read, or a serial number read that fails
+   other than by a STALL, fails the enumeration (retried on the next
+   connect) instead of producing a different identity.
 8. **Init.** For class `0c.03` init launches usbd for interface `0x30`
    first and then `usb_ehci` for interface `0x20`; other interfaces (UHCI,
    OHCI) still get "has no driver". Every USB driver gets a block endpoint,

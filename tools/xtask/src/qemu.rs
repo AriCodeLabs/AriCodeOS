@@ -613,7 +613,7 @@ pub fn run_interactive(
     let disk = build_dir().join("disk.img");
     let esp_drive = if usb_image {
         // As on a USB stick: the ESP inside the GPT disk, no `fat:`.
-        image::write_usb_image(&disk, &esp, &[])?;
+        image::write_usb_image(&disk, &esp, &[], aricode_gpt::TEST_DISK_GUID)?;
         None
     } else {
         image::write_test_disk(&disk, image::DiskVariant::Slots, &[])?;
@@ -702,7 +702,7 @@ pub fn run_headless(
     let disk = workdir.join("disk.img");
     let esp_drive = if disk_variant == image::DiskVariant::UsbImage {
         if !options.keep_disk {
-            image::write_usb_image(&disk, esp, &[])?;
+            image::write_usb_image(&disk, esp, &[], aricode_gpt::TEST_DISK_GUID)?;
         }
         None
     } else {

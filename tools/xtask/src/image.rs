@@ -281,7 +281,13 @@ fn walk_files(dir: &Path, prefix: &str, out: &mut Vec<(String, PathBuf)>) -> Res
 /// Writes the full USB image to `path` with the contents of `esp_dir` as
 /// the EFI partition and slot A loaded with the system image.
 /// `extra`: additional files for the ARI0 partition (e.g. `authorized_keys`).
-pub fn write_usb_image(path: &Path, esp_dir: &Path, extra: &[(String, Vec<u8>)]) -> Result {
+/// `disk_guid`: the GPT disk GUID (random for real sticks, fixed for tests).
+pub fn write_usb_image(
+    path: &Path,
+    esp_dir: &Path,
+    extra: &[(String, Vec<u8>)],
+    disk_guid: [u8; 16],
+) -> Result {
     let esp_sectors = (USB_PART_ESP.1 - USB_PART_ESP.0 + 1) as u32;
     let mut fat =
         aricode_fat::Fat32Builder::new(esp_sectors, 1).map_err(|e| format!("fat: {e:?}"))?;
@@ -294,8 +300,9 @@ pub fn write_usb_image(path: &Path, esp_dir: &Path, extra: &[(String, Vec<u8>)])
     }
     let mut img = vec![0u8; USB_SECTORS as usize * 512];
     let guid = aricode_gpt::ARICODEOS_DATA_GUID;
-    aricode_gpt::write_disk(
+    aricode_gpt::write_disk_with_guid(
         &mut img,
+        disk_guid,
         &[
             ("ESP", USB_PART_ESP.0, USB_PART_ESP.1, ESP_TYPE_GUID),
             ("ARI0", USB_PART_ARI0.0, USB_PART_ARI0.1, guid),
@@ -395,9 +402,31 @@ pub fn build_usb_image(
         ));
         println!("[xtask] update channel {url}");
     }
+    // Every stick gets its own disk GUID from OS entropy: the storage
+    // drivers use it to tell AriCodeOS sticks apart (ADR 0031).
+    let disk_guid = random_disk_guid()?;
+    println!("[xtask] GPT disk GUID {}", hex_lower(&disk_guid));
     let out = crate::build_dir().join("aricodeos-usb.img");
-    write_usb_image(&out, &esp, &extra)?;
+    write_usb_image(&out, &esp, &extra, disk_guid)?;
     Ok(out)
+}
+
+/// A random GPT disk GUID (version 4 / RFC 4122 variant bits in GPT's
+/// mixed-endian layout) from `/dev/urandom`.
+fn random_disk_guid() -> Result<[u8; 16]> {
+    use std::io::Read;
+    let mut g = [0u8; 16];
+    io(
+        fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut g)),
+        "read /dev/urandom",
+    )?;
+    g[7] = (g[7] & 0x0F) | 0x40;
+    g[8] = (g[8] & 0x3F) | 0x80;
+    Ok(g)
+}
+
+fn hex_lower(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

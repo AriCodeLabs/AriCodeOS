@@ -170,12 +170,27 @@ pub const ARICODEOS_DATA_GUID: [u8; 16] = [
     0x41, 0x52, 0x49, 0x43, 0x4F, 0x44, 0x45, 0x4F, 0x53, 0x2D, 0x44, 0x41, 0x54, 0x41, 0x30, 0x31,
 ];
 
+/// Disk GUID of the test disks: fixed, so test images are reproducible.
+/// Images written for real sticks get a random one (`write_disk_with_guid`):
+/// the disk GUID tells two AriCodeOS sticks apart (ADR 0031).
+pub const TEST_DISK_GUID: [u8; 16] = [0xA5; 16];
+
 /// Writes a complete GPT disk (protective MBR, headers, table) with the
-/// given partitions over `disk` (a multiple of the sector size). Returns the
-/// usable LBAs `[first, last]`.
+/// given partitions over `disk` (a multiple of the sector size), with the
+/// test disk GUID. Returns the usable LBAs `[first, last]`.
 #[cfg(feature = "write")]
 pub fn write_disk(
     disk: &mut [u8],
+    parts: &[(&str, u64, u64, [u8; 16])],
+) -> Result<(u64, u64), GptError> {
+    write_disk_with_guid(disk, TEST_DISK_GUID, parts)
+}
+
+/// `write_disk` with the given disk GUID (UEFI 5.3.2, header offset 56).
+#[cfg(feature = "write")]
+pub fn write_disk_with_guid(
+    disk: &mut [u8],
+    disk_guid: [u8; 16],
     parts: &[(&str, u64, u64, [u8; 16])],
 ) -> Result<(u64, u64), GptError> {
     let sectors = (disk.len() / SECTOR) as u64;
@@ -220,7 +235,7 @@ pub fn write_disk(
         h[32..40].copy_from_slice(&backup.to_le_bytes());
         h[40..48].copy_from_slice(&first_usable.to_le_bytes());
         h[48..56].copy_from_slice(&last_usable.to_le_bytes());
-        h[56..72].copy_from_slice(&[0xA5; 16]);
+        h[56..72].copy_from_slice(&disk_guid);
         h[72..80].copy_from_slice(&entries_lba.to_le_bytes());
         h[80..84].copy_from_slice(&ENTRIES.to_le_bytes());
         h[84..88].copy_from_slice(&(ENTRY_LEN as u32).to_le_bytes());
@@ -270,9 +285,15 @@ mod tests {
         assert_eq!((p.first_lba, p.last_lba, p.sectors()), (40, 200, 161));
         assert_eq!(p.name_str(), "ARI");
         assert_eq!(p.type_guid, ARICODEOS_DATA_GUID);
+        assert_eq!(h.disk_guid, TEST_DISK_GUID);
         // The backup header is valid too.
         let b = Header::parse(&disk[255 * 512..]).unwrap();
         assert_eq!(b.current_lba, 255);
+        // A chosen disk GUID lands in both headers.
+        let guid = [7u8; 16];
+        write_disk_with_guid(&mut disk, guid, &[("ARI", 40, 200, ARICODEOS_DATA_GUID)]).unwrap();
+        assert_eq!(Header::parse(&disk[512..1024]).unwrap().disk_guid, guid);
+        assert_eq!(Header::parse(&disk[255 * 512..]).unwrap().disk_guid, guid);
         // Protective MBR.
         assert_eq!(disk[446 + 4], 0xEE);
         assert_eq!(&disk[510..512], &[0x55, 0xAA]);
