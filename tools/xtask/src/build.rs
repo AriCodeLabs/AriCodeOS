@@ -68,6 +68,20 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("ari-compositor", Some(KERNEL_TARGET)),
     ("ari-fsd", Some(KERNEL_TARGET)),
     ("ari-shell", Some(KERNEL_TARGET)),
+    ("ari-net-core", Some(KERNEL_TARGET)),
+    ("ari-rtl-net", Some(KERNEL_TARGET)),
+    ("ari-sshd", Some(KERNEL_TARGET)),
+    ("aricode-https", Some(KERNEL_TARGET)),
+    ("aricode-fat", None),
+    ("aricode-iommu", None),
+    ("aricode-lineedit", None),
+    ("aricode-rtl8169", None),
+    ("aricode-ssh", None),
+    ("aricode-supervisor", None),
+    ("aricode-tls", None),
+    ("aricode-usb-storage", None),
+    ("aricode-x509", None),
+    ("aricode-xhci", None),
     ("ariboot", Some(UEFI_TARGET)),
     ("arikernel", Some(KERNEL_TARGET)),
     ("xtask", None),
@@ -437,6 +451,36 @@ pub fn check() -> Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every workspace package is linted by `check` and, when it runs on the
+    /// host, unit-tested: a package missing from `PACKAGES` was silently
+    /// never linted (found 2026-10-17: 14 packages, sshd among them).
+    #[test]
+    fn every_workspace_package_is_listed() {
+        let read = |p: &std::path::Path| -> toml::Table {
+            std::fs::read_to_string(p)
+                .expect("read Cargo.toml")
+                .parse()
+                .expect("parse Cargo.toml")
+        };
+        let workspace = read(&root().join("Cargo.toml"));
+        let members = workspace["workspace"]["members"]
+            .as_array()
+            .expect("workspace members");
+        let mut missing = Vec::new();
+        for member in members {
+            let dir = member.as_str().expect("member path");
+            let manifest = read(&root().join(dir).join("Cargo.toml"));
+            let name = manifest["package"]["name"].as_str().expect("package name");
+            if name != "xtask" && !PACKAGES.iter().any(|(p, _)| *p == name) {
+                missing.push(name.to_string());
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "packages missing from PACKAGES: {missing:?}"
+        );
+    }
 
     #[test]
     fn user_elf_entry_must_be_in_user_region() {

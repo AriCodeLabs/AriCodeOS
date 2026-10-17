@@ -3325,9 +3325,9 @@ fn serve_block(ctl: &mut Ehci, msg: &[u8], handles: &[Handle]) {
 }
 
 /// Receive errors that mean the endpoint itself is gone (closed or revoked
-/// by init) rather than a bad message.
+/// by init, ADR 0030) rather than a bad message.
 fn endpoint_gone(e: sys::Error) -> bool {
-    matches!(e, sys::Error::BadHandle | sys::Error::Revoked)
+    e.endpoint_gone() || e == sys::Error::BadHandle
 }
 
 fn answer_info(ctl: &Ehci, reply_to: Handle) {
