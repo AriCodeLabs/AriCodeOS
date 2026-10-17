@@ -877,6 +877,52 @@ fn service_hang(sup: &mut Supervisor) -> Result<(), u64> {
     Ok(())
 }
 
+/// Input driver that crashes holding a read (`input_restart`, ADR 0030):
+/// its client must get `ReplyLost`, not `ServiceGone`, and once the
+/// supervisor relaunches the driver on the same endpoint the device must
+/// deliver events again (the case of console-bridge and a crashed
+/// keyboard driver).
+fn input_restart(sup: &mut Supervisor) -> Result<(), u64> {
+    let ep = sys::endpoint_create().map_err(|_| 60u64)?;
+    let policy = Policy {
+        max_restarts: 3,
+        backoff_initial_ms: 100,
+        backoff_max_ms: 400,
+        start_timeout_ms: 2000,
+        stable_ms: 60_000,
+    };
+    let i = sup
+        .register(
+            "restart_input",
+            Kind::Program { arg: 0 },
+            Probe::Input,
+            ep,
+            true,
+            policy,
+        )
+        .ok_or(60u64)?;
+    if !sup.launch(i) {
+        return Err(61);
+    }
+    match run_block_client_supervised("restart_input_client", ep, 0, sup) {
+        Ok(0) => {
+            say(b"input restart ok: the device survived its driver's crash");
+            Ok(())
+        }
+        Ok(code) => {
+            let mut b = [0u8; 20];
+            sys::print(b"AriInit: restart_input_client exited with ");
+            sys::print(aricode_rt::fmt_u64(code, &mut b));
+            sys::print(b"\n");
+            Err(62)
+        }
+        Err(e) => {
+            aricode_rt::print_error(b"AriInit: restart_input_client", e);
+            Err(62)
+        }
+    }
+}
+
 /// Induced restarts (`restart_storm`): a test service that dies after each
 /// request is restarted 100 times under the supervisor while fsd keeps
 /// serving; at the end free memory must match the initial amount.
@@ -1744,12 +1790,13 @@ fn run_gui(inputs: &[Handle]) -> Result<Handle, u64> {
 fn main(arg: u64) -> u64 {
     say(b"starting");
     let mut args = [0u8; 256];
-    if sys::cmdline(SYSTEM, &mut args)
-        .is_some_and(|c| aricode_cmdline::CmdLine::new(c).has(aricode_cmdline::keys::STRICT))
-    {
+    let cmdline = sys::cmdline(SYSTEM, &mut args).map(aricode_cmdline::CmdLine::new);
+    let flag = |key| cmdline.as_ref().is_some_and(|c| c.has(key));
+    if flag(aricode_cmdline::keys::STRICT) {
         STRICT.store(true, core::sync::atomic::Ordering::Relaxed);
         say(b"strict mode: a failing service is not restarted");
     }
+    let input_restart_test = flag(aricode_cmdline::keys::INPUT_RESTART);
     let mut fs_service = None;
     let mut block_service = None;
     let mut services = 0u64;
@@ -2105,6 +2152,13 @@ fn main(arg: u64) -> u64 {
     //      processes is left alive (audit 6ee19fb, finding 4).
     if arg & sys::abi::init_arg::SERVICE_HANG != 0 {
         if let Err(code) = service_hang(&mut sup) {
+            return code;
+        }
+    }
+    // 10d. Input driver that crashes holding a read (tests only,
+    //      `input_restart`, ADR 0030): the client keeps the device.
+    if input_restart_test {
+        if let Err(code) = input_restart(&mut sup) {
             return code;
         }
     }
