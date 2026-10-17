@@ -1,0 +1,56 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+#[cfg(test)]
+mod ehci {
+    use aricode_usb_storage::{scsi, Cbw, Csw, CswStatus, CswError, Cdb, Stage, check_csw};
+    use aricode_ehci::TransferError;
+    const CBW_TIMEOUT_MS: u64 = 1000;
+    #[derive(Debug)] enum Fail { Error(TransferError, u32) }
+    #[derive(Debug)] enum ScsiFail { Broken, Csw, Failed }
+    enum Injection { Cbw, Csw }
+    struct Bulk { pipe: usize }
+    struct Storage {
+        needs_reset: bool, broken: bool, tag: u32,
+        cbw: (u64, u64), csw: (u64, u64), bulk_in: Bulk, bulk_out: Bulk,
+    }
+    struct Ehci { storage: Option<Storage>, strict: bool, resets: usize }
+    fn say(_: &[u8]) {}
+    fn record(_: &str, _: u64) {}
+    fn report_csw_error(_: CswError, _: u32) {}
+    impl Ehci {
+        fn now(&self) -> u64 { 0 }
+        fn reset_recovery(&mut self) { self.resets += 1; }
+        fn transfer_failure(&mut self, _: Stage, _: bool, _: Fail, _: u32, _: u64) -> ScsiFail {
+            panic!("no transport error is injected")
+        }
+        // The data stage completes, but the CSW IN transfer supplies only
+        // signature and current tag: residue/status retain previous bytes.
+        fn bulk(&mut self, _: usize, input: bool, ptr: u64, len: u32, _: u64) -> Result<u32, Fail> {
+            if input && len == Csw::LEN as u32 {
+                let tag = self.storage.as_ref().unwrap().tag;
+                let raw = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, Csw::LEN) };
+                raw[..4].copy_from_slice(b"USBS"); raw[4..8].copy_from_slice(&tag.to_le_bytes());
+                return Ok(8);
+            }
+            Ok(len)
+        }
+        @@scsi@@
+    }
+    #[test]
+    fn short_csw_must_not_acknowledge_a_write() {
+        let mut cbw = [0u8; Cbw::LEN];
+        let mut csw = [0u8; Csw::LEN]; // previous status: passed, residue: zero
+        let mut data = [0u8; 512];
+        let mut ctl = Ehci {
+            storage: Some(Storage {
+                needs_reset: false, broken: false, tag: 40,
+                cbw: (cbw.as_mut_ptr() as u64, cbw.as_mut_ptr() as u64),
+                csw: (csw.as_mut_ptr() as u64, csw.as_mut_ptr() as u64),
+                bulk_in: Bulk { pipe: 1 }, bulk_out: Bulk { pipe: 2 },
+            }), strict: false, resets: 0,
+        };
+        let result = ctl.scsi(scsi::write10(7, 1), Some((data.as_mut_ptr() as u64, 512, false)), 30000, None);
+        println!("EHCI: 8-byte CSW returned {result:?}, reset recoveries={}", ctl.resets);
+        assert!(result.is_err(), "missing CSW residue/status must never acknowledge a write");
+    }
+}

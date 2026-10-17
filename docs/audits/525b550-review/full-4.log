@@ -1,0 +1,1990 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.26
+   Compiling serde_core v1.0.229
+   Compiling serde v1.0.229
+   Compiling aricode-crypto v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/crypto)
+   Compiling hashbrown v0.17.1
+   Compiling equivalent v1.0.2
+   Compiling toml_write v0.1.2
+   Compiling winnow v0.7.15
+   Compiling aricode-initrd v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/initrd)
+   Compiling aricode-net v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/net)
+   Compiling aricode-http v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/http)
+   Compiling aricode-proto v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/proto)
+   Compiling aricode-gpt v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/gpt)
+   Compiling aricode-arifs v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/arifs)
+   Compiling aricode-cmdline v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/cmdline)
+   Compiling aricode-fat v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/fat)
+   Compiling indexmap v2.14.2
+   Compiling syn v3.0.6
+   Compiling aricode-ab v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/ab)
+   Compiling aricode-update-index v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/update-index)
+   Compiling aricode-pkg v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/pkg)
+   Compiling aricode-ssh v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/ssh)
+   Compiling serde_derive v1.0.229
+   Compiling serde_spanned v0.6.9
+   Compiling toml_datetime v0.6.11
+   Compiling toml_edit v0.22.27
+   Compiling toml v0.8.23
+   Compiling xtask v0.11.0 (/var/tmp/aricode-audit-525b550-4/tools/xtask)
+    Finished `release` profile [optimized + debuginfo] target(s) in 18.74s
+     Running `target/release/xtask test --all --cpus 4`
+[xtask] level Full, 4 CPUs in every scenario
+[xtask] unit tests (host)
+   Compiling aricode-crypto v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/crypto)
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.26
+   Compiling serde_core v1.0.229
+   Compiling aricode-initrd v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/initrd)
+   Compiling aricode-fb-console v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/fb-console)
+   Compiling aricode-pci v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/pci)
+   Compiling serde v1.0.229
+   Compiling aricode-http v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/http)
+   Compiling aricode-net v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/net)
+   Compiling aricode-proto v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/proto)
+   Compiling aricode-xhci v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/xhci)
+   Compiling aricode-abi v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/abi)
+   Compiling aricode-x86-paging v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/x86-paging)
+   Compiling equivalent v1.0.2
+   Compiling aricode-gfx v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/gfx)
+   Compiling hashbrown v0.17.1
+   Compiling aricode-virtio v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/virtio)
+   Compiling winnow v0.7.15
+   Compiling toml_write v0.1.2
+   Compiling aricode-cmdline v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/cmdline)
+   Compiling aricode-fat v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/fat)
+   Compiling aricode-arifs v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/arifs)
+   Compiling aricode-gpt v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/gpt)
+   Compiling aricode-sys v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/rust)
+   Compiling aricode-ehci v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/ehci)
+   Compiling aricode-iommu v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/iommu)
+   Compiling aricode-usb-storage v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/usb-storage)
+   Compiling indexmap v2.14.2
+   Compiling aricode-heap v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/heap)
+   Compiling aricode-rtl8169 v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/rtl8169)
+   Compiling boot-protocol v0.11.0 (/var/tmp/aricode-audit-525b550-4/boot-protocol)
+   Compiling aricode-sync v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/sync)
+   Compiling aricode-manifest v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/manifest)
+   Compiling aricode-input v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/input)
+   Compiling aricode-handles v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/handles)
+   Compiling aricode-pmm v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/pmm)
+   Compiling syn v3.0.6
+   Compiling aricode-build v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/build)
+   Compiling aricode-lineedit v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/lineedit)
+   Compiling aricode-acpi v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/acpi)
+   Compiling aricode-x86-cpu v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/x86-cpu)
+   Compiling aricode-supervisor v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/supervisor)
+   Compiling aricode-sched v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/sched)
+   Compiling aricode-wasm v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/wasm)
+   Compiling aricode-elf v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/elf)
+   Compiling serde_derive v1.0.229
+   Compiling aricode-x509 v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/x509)
+   Compiling aricode-ssh v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/ssh)
+   Compiling aricode-pkg v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/pkg)
+   Compiling aricode-ab v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/ab)
+   Compiling aricode-update-index v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/update-index)
+   Compiling aricode-tls v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/tls)
+   Compiling serde_spanned v0.6.9
+   Compiling toml_datetime v0.6.11
+   Compiling toml_edit v0.22.27
+   Compiling toml v0.8.23
+   Compiling xtask v0.11.0 (/var/tmp/aricode-audit-525b550-4/tools/xtask)
+    Finished `test` profile [optimized + debuginfo] target(s) in 9.40s
+     Running unittests src/lib.rs (target/debug/deps/aricode_ab-001eeefb368b179d)
+
+running 4 tests
+test tests::boot_policy ... ok
+test tests::manifest_text_round_trip ... ok
+test tests::state_round_trip_and_crc ... ok
+test tests::image_verification ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_abi-a55d408c4c5cca40)
+
+running 9 tests
+test tests::errors_round_trip_and_decode ... ok
+test tests::expected_disk_round_trip ... ok
+test tests::framebuffer_info_round_trip ... ok
+test tests::kernel_base_signature_is_frozen ... ok
+test tests::pci_info_round_trip ... ok
+test tests::process_entry_round_trip ... ok
+test tests::receive_result_packs_len_and_handles ... ok
+test tests::spawn_limits_pack ... ok
+test tests::user_range_checks ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_acpi-2f3a66d270f3d12e)
+
+running 7 tests
+test tests::dmar_units_reserved_regions_and_scopes ... ok
+test tests::fadt_fields_for_s5 ... ok
+test tests::madt_entries_and_isa_override ... ok
+test tests::mcfg_entries ... ok
+test tests::rsdp_v1_and_v2 ... ok
+test tests::s5_package_variants ... ok
+test tests::xsdt_entries_and_validation ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_arifs-c4438369c77cd66a)
+
+running 13 tests
+test tests::batched_io_matches_sector_io_with_fewer_calls ... ok
+test tests::chunked_commit_only_covers_its_own_bytes ... ok
+test tests::crc32_known_vector ... ok
+test tests::format_create_write_read_and_reopen ... ok
+test tests::errors ... ok
+test tests::replace_is_visible_and_durable ... ok
+test tests::writes_across_sectors_and_append ... ok
+test tests::sized_files_hold_more_than_the_journal ... ok
+test tests::reordered_metadata_never_overlaps_files ... ok
+test tests::chunked_replace_is_atomic_too ... ok
+test tests::corruption_is_detected_and_torn_journal_discarded ... ok
+test tests::staged_replace_is_replayed_on_open ... ok
+test tests::replace_survives_a_cut_at_every_write ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_build-2ea75756b2365cd1)
+
+running 1 test
+test tests::linker_script_exists ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_cmdline-348074843e3876e0)
+
+running 6 tests
+test tests::empty_and_invalid_utf8 ... ok
+test tests::last_value_wins ... ok
+test tests::parses_flags_and_values ... ok
+test tests::selftest_is_a_bare_whole_key ... ok
+test tests::test_only_keys_are_found ... ok
+test tests::test_only_keys_match_their_documentation ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_crypto-8348176ff57af196)
+
+running 45 tests
+test aead::tests::gcm_aes128 ... ok
+test aead::tests::gcm_rejects_bad_key_length ... ok
+test aead::tests::gcm_aes256 ... ok
+test aes::tests::fips197_appendix_c ... ok
+test aead::tests::rfc8439_2_8_2 ... ok
+test aes::tests::rejects_other_key_sizes ... ok
+test aes::tests::sbox_spot_checks ... ok
+test bigint::tests::multi_limb_fermat ... ok
+test chacha20::tests::rfc7539_block_vector ... ok
+test bigint::tests::small_moduli_match_reference ... ok
+test chacha20::tests::rng_is_deterministic_and_reseed_changes_stream ... ok
+test ecdsa::tests::der_parsing ... ok
+test bigint::tests::rejects_bad_inputs ... ok
+test ed25519::tests::field_round_trip_and_inverse ... ok
+test ed25519::tests::scalar_reduction ... ok
+test hkdf::tests::rfc5869_a3_empty_salt_and_info ... ok
+test hkdf::tests::rfc5869_a1_sha256 ... ok
+test hmac::tests::rfc4231_vectors ... ok
+test hkdf::tests::sha384_against_openssl ... ok
+test p_curves::tests::modular_arithmetic_round_trips ... ok
+test poly1305::tests::rfc8439_vector ... ok
+test poly1305::tests::edge_cases_from_rfc8439_appendix ... ok
+test rsa::tests::oversized_modulus_is_rejected ... ok
+test sha256::tests::incremental_matches_one_shot ... ok
+test sha512::tests::fips_vectors ... ok
+test sha512::tests::sha384_fips_vectors ... ok
+test tests::hash_dispatch ... ok
+test ssh_chachapoly::tests::matches_an_independent_openssl_computation ... ok
+test tests::hex_round_trip_and_ct_eq ... ok
+test trust::tests::embedded_key_is_the_dev_key_by_default ... ok
+test trust::tests::const_decoder ... ok
+test x25519::tests::rfc7748_vectors ... ok
+test ecdsa::tests::tampered_signature_or_point_fails ... ok
+test p_curves::tests::generators_are_on_their_curves_and_have_order_n ... ok
+test x25519::tests::rfc7748_diffie_hellman ... ok
+test ecdsa::tests::wrong_digest_key_or_curve_fails ... ok
+test ed25519::tests::long_message_round_trip ... ok
+test ecdsa::tests::openssl_signatures_verify ... ok
+test ed25519::tests::scalar_products_with_large_limbs_do_not_overflow ... ok
+test sha256::tests::fips_vectors ... ok
+test ed25519::tests::rfc8032_test_vectors ... ok
+test rsa::tests::schemes_are_not_interchangeable ... ok
+test rsa::tests::openssl_signatures_verify ... ok
+test rsa::tests::tampering_is_rejected ... ok
+test x25519::tests::rfc7748_iterations ... ok
+
+test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_ehci-eb441fa30bf3f5af)
+
+running 10 tests
+test tests::completions_decode ... ok
+test tests::hub_descriptor_status_and_requests ... ok
+test tests::interrupt_schedules ... ok
+test tests::legacy_capability_walk_and_smi_off ... ok
+test tests::parameters_and_registers ... ok
+test tests::port_writes_never_echo_change_bits ... ok
+test tests::qtd_layout_and_pages ... ok
+test tests::queue_head_layout ... ok
+test tests::transaction_translators ... ok
+test tests::transfers_split_on_packet_boundaries ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_elf-b23fdde28c315cc0)
+
+running 10 tests
+test tests::empty_segments_are_dropped_and_cannot_clobber_text ... ok
+test tests::parses_entry_and_segments ... ok
+test tests::rejects_address_overflow ... ok
+test tests::rejects_bad_magic ... ok
+test tests::rejects_entry_outside_executable_segment ... ok
+test tests::rejects_no_segments ... ok
+test tests::rejects_overlapping_segments ... ok
+test tests::rejects_segment_with_filesz_beyond_data ... ok
+test tests::rejects_short_and_truncated ... ok
+test tests::rejects_wrong_class_or_machine ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_fat-90a36ead5acf1841)
+
+running 4 tests
+test tests::lfn_checksum_matches_spec_example ... ok
+test tests::size_limits ... ok
+test tests::esp_layout_round_trip ... ok
+test tests::many_long_names_extend_the_directory ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_fb_console-4a8d49e917223d40)
+
+running 10 tests
+test tests::backspace_moves_cursor_back_without_drawing ... ok
+test tests::cursor_blinks_without_touching_cells ... ok
+test tests::backspace_wraps_to_the_previous_row ... ok
+test tests::newline_wrap_and_tab ... ok
+test tests::non_ascii_becomes_question_mark ... ok
+test tests::renders_glyph_pixels_from_font ... ok
+test tests::scrolls_when_full ... ok
+test tests::grid_size_and_clear ... ok
+test tests::empty_console_is_const_and_attaches_in_place ... ok
+test tests::huge_surface_is_clamped_to_max_cells ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_gfx-081cd474f8b6e9eb)
+
+running 5 tests
+test tests::desktop_windows_focus_and_hit_test ... ok
+test tests::rect_math ... ok
+test tests::fill_blit_and_clip ... ok
+test tests::text_and_cursor_draw_something_inside_bounds ... ok
+test tests::compose_two_windows_and_cursor ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_gpt-9ac348dbe54ce164)
+
+running 3 tests
+test tests::crc32_known_vector ... ok
+test tests::corruption_is_detected ... ok
+test tests::write_then_read_back ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_handles-d25fb269f3d27467)
+
+running 6 tests
+test tests::duplicate_builds_the_entry_from_the_new_rights ... ok
+test tests::duplicate_only_reduces_rights ... ok
+test tests::forged_and_stale_handles_are_rejected ... ok
+test tests::insert_get_and_rights ... ok
+test tests::table_limit ... ok
+test tests::take_requires_transfer_and_moves_the_handle ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_heap-20d55388957d7fd5)
+
+running 6 tests
+test tests::alloc_free_reuse_and_coalesce ... ok
+test tests::multiple_regions_and_small_tail_absorbed ... ok
+test tests::out_of_memory_returns_none_and_keeps_state ... ok
+test tests::respects_large_alignment ... ok
+test tests::unrepresentable_requests_return_none_and_leave_list_intact ... ok
+test tests::many_small_allocations_in_random_order ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_http-80b0d47a3f2050d0)
+
+running 13 tests
+test tests::chunk_decoder_rejects_garbage_without_panicking ... ok
+test tests::chunk_decoder_streams_across_boundaries ... ok
+test tests::chunk_larger_than_scratch_fits_caller_buffer ... ok
+test tests::close_delimited_body_exactly_fits ... ok
+test tests::informational_responses_precede_the_final_one ... ok
+test tests::get_request_and_url ... ok
+test tests::long_hostname_is_kept_whole_in_host_header ... ok
+test tests::large_real_world_headers_fit ... ok
+test tests::nominal_length_response ... ok
+test tests::reset_is_not_successful_completion ... ok
+test tests::oversized_headers_and_non_http ... ok
+test tests::response_headers_and_framing_precedence ... ok
+test tests::streaming_fetch_delivers_everything_and_can_abort ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_initrd-fefe1b6b11eb7074)
+
+running 3 tests
+test tests::corrupt_images_are_rejected ... ok
+test tests::empty_image ... ok
+test tests::roundtrip_and_alignment ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_input-ebf838350d835d23)
+
+running 8 tests
+test tests::event_round_trip ... ok
+test tests::hid_boot_keyboard_reports_to_events_and_text ... ok
+test tests::hid_boot_keyboard_worst_case_transition_loses_nothing ... ok
+test tests::hid_boot_mouse_reports_to_events ... ok
+test tests::keyboard_translates_hola_enter ... ok
+test tests::scancode_set1_to_evdev_and_ascii ... ok
+test tests::shift_caps_and_repeats ... ok
+test tests::spanish_layout_shift_altgr_and_dead_keys ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_iommu-cb972c63d7774efd)
+
+running 5 tests
+test tests::capability_fields ... ok
+test tests::fault_record_decoding ... ok
+test tests::flush_hook_runs_for_every_written_entry ... ok
+test tests::root_and_context_entries ... ok
+test tests::second_level_map_translate_unmap_and_limits ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_lineedit-f81eee05434dc7b4)
+
+running 6 tests
+test tests::backspace_and_delete_in_the_middle ... ok
+test tests::edges_do_nothing ... ok
+test tests::history_then_edit ... ok
+test tests::move_left_and_insert_in_the_middle ... ok
+test tests::home_end_and_ctrl_keys ... ok
+test tests::typing_and_backspace ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_manifest-c4773fc266eed887)
+
+running 4 tests
+test tests::defaults_and_units ... ok
+test tests::parses_full_manifest ... ok
+test tests::read_files_in_order_and_bounded ... ok
+test tests::rejects_bad_input ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_net-babefc80bc943baf)
+
+running 19 tests
+test arp::tests::cache_replaces_oldest ... ok
+test arp::tests::request_reply_round_trip ... ok
+test dhcp::tests::full_handshake ... ok
+test dhcp::tests::address_in_use_is_declined ... ok
+test dhcp::tests::retries_and_nak ... ok
+test dns::tests::query_answer_round_trip ... ok
+test eth::tests::header_round_trip ... ok
+test icmp::tests::echo_round_trip ... ok
+test ipv4::tests::header_round_trip_and_validation ... ok
+test tcp::tests::handshake_data_and_close ... ok
+test tcp::tests::header_round_trip_and_bad_checksum ... ok
+test tcp::tests::multiple_independent_connections ... ok
+test tcp::tests::gives_up_after_too_many_retries ... ok
+test tests::checksum_rfc1071_example ... ok
+test tcp::tests::reset_closes_immediately ... ok
+test tcp::tests::retransmits_lost_syn_and_data ... ok
+test tcp::tests::random_loss_keeps_stream_in_order ... ok
+test udp::tests::udp_round_trip_with_checksum ... ok
+test tests::ipv4_parse_and_format ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_pci-3754efc5979ef88d)
+
+running 5 tests
+test tests::bar_decoding ... ok
+test tests::capability_list_walk_stops_on_loops ... ok
+test tests::ecam_offsets_and_display ... ok
+test tests::header_parse_and_absent_function ... ok
+test tests::input_controller_class_names ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_pkg-28379dab6ca0b382)
+
+running 2 tests
+test tests::build_verify_round_trip ... ok
+test tests::rejects_tampering ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_pmm-24df1d82cdcc3810)
+
+running 7 tests
+test tests::allocate_returns_lowest_and_unique_frames ... ok
+test tests::contiguous_allocation_respects_alignment_and_gaps ... ok
+test tests::free_and_double_free ... ok
+test tests::reserve_range_rounds_outward_and_hint_moves_back_on_free ... ok
+test tests::rejects_small_bitmap - should panic ... ok
+test tests::sizes_and_frame_helpers ... ok
+test tests::starts_fully_reserved_then_frees_whole_frames_only ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_proto-b76910b7feecf9f9)
+
+running 9 tests
+test session::tests::round_trip ... ok
+test status::tests::status_round_trip ... ok
+test tests::input_round_trip ... ok
+test tests::fs_request_and_reply_round_trip ... ok
+test tests::launch_round_trip ... ok
+test tests::net_request_reply_round_trip ... ok
+test tests::reply_round_trip ... ok
+test tests::request_round_trip_and_rejections ... ok
+test tests::window_round_trip ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_rtl8169-0c16fb1faf110692)
+
+running 2 tests
+test tests::descriptors_and_link ... ok
+test tests::mac_reset_and_start_sequence ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_sched-e885707ae1e7362f)
+
+running 10 tests
+test tests::affinity_restricts_which_cpu_takes_a_thread ... ok
+test tests::block_and_unblock ... ok
+test tests::cpus_share_one_ready_queue_and_have_their_own_idle ... ok
+test tests::exit_and_reap ... ok
+test tests::idle_runs_when_nothing_is_ready_and_is_never_queued ... ok
+test tests::idle_cannot_exit - should panic ... ok
+test tests::round_robin_order_is_fair_and_cyclic ... ok
+test tests::sleep_wakes_at_tick_in_queue_order ... ok
+test tests::wake_handles_blocked_and_sleeping ... ok
+test tests::wake_of_running_thread_is_kept_until_it_blocks ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_ssh-cda160cf12fb0172)
+
+running 8 tests
+test base64::tests::rfc4648_vectors ... ok
+test keys_refresh::tests::recovery_is_reported_once_and_restores_rereads ... ok
+test keys_refresh::tests::rereads_every_time_while_the_service_answers ... ok
+test keys_refresh::tests::while_failing_retries_at_most_once_a_minute_and_reports_once ... ok
+test tests::authorized_keys_parsing ... ok
+test wire::tests::encodings_round_trip ... ok
+test wire::tests::name_lists ... ok
+test tests::version_and_kexinit_are_sent_and_garbage_is_rejected ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/openssh.rs (target/debug/deps/openssh-eaecd9e08d644c0b)
+
+running 4 tests
+test unknown_key_is_refused ... ok
+test exec_with_an_authorized_key ... ok
+test large_output_is_delivered_whole ... ok
+test interactive_session_with_a_pty ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.81s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_supervisor-3b35c69da507865f)
+
+running 6 tests
+test tests::budget_exhaustion_fails_and_never_restarts ... ok
+test tests::degraded_and_ready_transitions ... ok
+test tests::hundred_restarts_with_capped_backoff ... ok
+test tests::stable_service_recovers_its_budget ... ok
+test tests::start_timeout_counts_as_death ... ok
+test tests::stopped_on_purpose_is_not_restarted ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_sync-92bcb38a1845749d)
+
+running 6 tests
+test tests::forgotten_guard_is_released_by_force_unlock ... ok
+test tests::get_mut_bypasses_lock ... ok
+test tests::lock_guard_and_try_lock ... ok
+test tests::policy_is_applied_symmetrically_even_on_failed_try_lock ... ok
+test tests::spinning_restores_policy_between_attempts ... ok
+test tests::mutual_exclusion_across_threads ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_sys-8c774c56a9343c94)
+
+running 1 test
+test virtio_pci::tests::handle_layout_with_and_without_irq ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_tls-ea3ef4b490fd61ff)
+
+running 13 tests
+test handshake::tests::certificate_and_small_messages ... ok
+test handshake::tests::client_hello_layout ... ok
+test handshake::tests::hello_retry_and_bad_server_hellos ... ok
+test handshake::tests::rfc8448_server_hello ... ok
+test keys::tests::sha384_schedule_matches_openssl ... ok
+test record::tests::padding_is_stripped_and_all_padding_rejected ... ok
+test keys::tests::rfc8448_simple_1rtt_key_schedule ... ok
+test record::tests::rfc8448_records ... ok
+test tests::server_alert_and_garbage ... ok
+test tests::rfc8448_handshake_data_and_close ... ok
+test tests::key_update_both_ways ... ok
+test tests::fragmented_coalesced_and_ccs ... ok
+test tests::tampering_and_untrusted_certificates ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/internet.rs (target/debug/deps/internet-186a88c804031985)
+
+running 1 test
+test well_known_sites ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/openssl.rs (target/debug/deps/openssl-12031b8c5ff08794)
+
+running 11 tests
+test aes_256_gcm_sha384_with_ecdsa_p256 ... ok
+test wildcard_name_matches ... ok
+test ed25519_certificate ... ok
+test chacha20_poly1305_with_ecdsa_p256 ... ok
+test ecdsa_p384_certificate ... ok
+test impostor_ca_with_the_same_name_is_rejected ... ok
+test certificate_request_is_answered_without_a_certificate ... ok
+test wrong_host_name_is_rejected ... ok
+test aes_128_gcm_with_ecdsa_p256 ... ok
+test untrusted_ca_is_rejected ... ok
+test rsa_pss_certificate ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_update_index-768aec12fee5669a)
+
+running 25 tests
+test history::tests::appends_and_drops_oldest_lines ... ok
+test index::tests::file_and_name_rules ... ok
+test index::tests::parser_is_strict ... ok
+test index::tests::write_parse_round_trip ... ok
+test lists::tests::damaged_files_are_recovered_and_flagged ... ok
+test lists::tests::formatting_is_not_damage ... ok
+test lists::tests::plan_round_trip_and_rejections ... ok
+test lists::tests::installed_round_trip_and_rejections ... ok
+test lists::tests::sections_are_replaced_independently ... ok
+test lists::tests::staged_accepts_only_the_stage_files ... ok
+test policy::tests::best_offer_across_sources ... ok
+test policy::tests::downgrade_rule ... ok
+test policy::tests::rollback_protection ... ok
+test policy::tests::version_comparison ... ok
+test sources::tests::add_remove_list ... ok
+test sources::tests::file_round_trip_skips_damaged_lines ... ok
+test sources::tests::migration_from_single_channel_url ... ok
+test sources::tests::normalization ... ok
+test stored::tests::all_slots_in_one_file ... ok
+test stored::tests::malformed_is_none ... ok
+test stored::tests::round_trip ... ok
+test index::tests::signed_but_malformed_is_still_refused ... ok
+test index::tests::verify_accepts_signed_index ... ok
+test index::tests::verify_refuses_tampering_and_other_keys ... ok
+test lists::tests::rewrites_stay_canonical ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_usb_storage-016016c29d5bc8f4)
+
+running 4 tests
+test tests::cbw_and_csw_round_trip ... ok
+test tests::fault_names_fit_any_lba ... ok
+test tests::scsi_cdbs_and_replies ... ok
+test tests::transport_rules_after_a_failure ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_virtio-cc13845d1f087c83)
+
+running 4 tests
+test tests::add_chain_and_pop_used_recycles_descriptors ... ok
+test tests::blk_request_header_bytes ... ok
+test tests::finds_virtio_pci_structures ... ok
+test tests::layout_alignment ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_wasm-4c1c6cecd2cfe51e)
+
+running 16 tests
+test tests::audit_fixtures_structural_validation_and_loop_params ... ok
+test tests::arithmetic_and_locals ... ok
+test tests::i64_and_conversions ... ok
+test tests::br_table_globals_and_indirect_calls ... ok
+test tests::bulk_memory_copy_and_fill ... ok
+test tests::if_else_block_results_and_select ... ok
+test tests::imports_reach_the_host ... ok
+test tests::loop_sums_with_br_if_and_locals ... ok
+test tests::memory_loads_stores_and_bounds ... ok
+test tests::rejects_bad_modules ... ok
+test tests::memory_is_bounded_by_current_pages_not_host_buffer ... ok
+test tests::validator_rejects_ill_typed_modules ... ok
+test tests::start_function_runs_before_exports ... ok
+test tests::memory_starts_and_grows_zeroed ... ok
+test tests::calls_recursion_and_return ... ok
+test tests::traps_and_limits ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_x509-3b6d55e7fd698d72)
+
+running 12 tests
+test der::tests::integers_and_booleans ... ok
+test der::tests::lengths ... ok
+test der::tests::times ... ok
+test tests::hostname_matching ... ok
+test tests::parses_ec_and_ed25519 ... ok
+test tests::parses_rsa_chain ... ok
+test tests::rejects_malformed_and_unsupported ... ok
+test tests::purpose_restrictions ... ok
+test tests::signature_dispatch ... ok
+test tests::chain_errors ... ok
+test tests::verifies_good_chains ... ok
+test tests::embedded_roots_parse_and_self_verify ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_x86_cpu-798a86877eb7a4b7)
+
+running 7 tests
+test tests::exception_table ... ok
+test tests::gdt_selectors_and_pointer ... ok
+test tests::gdt_overflow_panics - should panic ... ok
+test tests::idt_entry_splits_handler_address ... ok
+test tests::idt_table_pointer ... ok
+test tests::segment_descriptors_match_known_encodings ... ok
+test tests::tss_layout_and_descriptor ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_x86_paging-2ea66674fae3d421)
+
+running 9 tests
+test tests::map_2m_and_collisions ... ok
+test tests::map_4k_translates_and_masks_flags ... ok
+test tests::out_of_frames_is_reported ... ok
+test tests::pool_size_covers_windows_and_kernel ... ok
+test tests::share_kernel_half_and_free_user_half ... ok
+test tests::user_mappings_set_user_on_the_whole_path ... ok
+test tests::unmap_returns_phys_and_clears ... ok
+test tests::offset_map_and_bump_frames ... ok
+test tests::preallocated_kernel_half_makes_later_mappings_visible ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aricode_xhci-6dd9e85435a2bb47)
+
+running 12 tests
+test tests::budget_arithmetic ... ok
+test tests::bulk_td_never_crosses_64k ... ok
+test tests::contexts_and_input_context_layout ... ok
+test tests::descriptors ... ok
+test tests::endpoint_status_and_recovery_decisions ... ok
+test tests::event_ring_accepts_only_current_cycle ... ok
+test tests::params_and_speeds ... ok
+test tests::portsc_decoding ... ok
+test tests::producer_ring_cycles_and_links ... ok
+test tests::slot_state_and_reuse_decisions ... ok
+test tests::storage_interface_and_bulk_endpoints ... ok
+test tests::trb_encoding_and_decoding ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/boot_protocol-10cc55f1e019a01d)
+
+running 7 tests
+test tests::beacon_clips_to_screen_and_size ... ok
+test tests::classifies_uefi_memory_types ... ok
+test tests::cmdline_accessor ... ok
+test tests::encodes_pixels_by_format ... ok
+test tests::iterates_descriptors_with_firmware_stride ... ok
+test tests::beacon_paints_its_square_only ... ok
+test tests::kernel_ranges_cover_what_the_kernel_keeps ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/xtask-20f09d0ddc5f2a93)
+
+running 27 tests
+test build::tests::user_elf_entry_must_be_in_user_region ... ok
+test image::tests::empty_segment_injection_appends_a_load_header ... ok
+test image::tests::legacy_manifest_never_goes_below_the_published_version ... ok
+test image::tests::stick_arifs_holds_only_the_readme ... ok
+test image::tests::usb_image_refuses_test_only_keys ... ok
+test image::tests::symlinked_esp_is_rejected ... ok
+test image::tests::nominal_scenario_esp_is_built_inside_root ... ok
+test keys::tests::embedded_key_check_finds_the_anchor ... ok
+test image::tests::symlinked_scenario_dir_is_rejected_and_outside_data_survives ... ok
+test qemu::tests::counts_prompts ... ok
+test qemu::tests::counts_guest_frames_except_arp_and_dhcp ... ok
+test qemu::tests::strips_csi_sequences ... ok
+test qemu::tests::responder_echoes_and_answers_dns ... ok
+test scenario::tests::level_filter_is_inclusive ... ok
+test scenario::tests::empty_selection_is_an_error_for_qemu_levels ... ok
+test scenario::tests::load_rejects_invalid_names ... ok
+test scenario::tests::scenario_names_cannot_escape_scenarios_dir ... ok
+test scenario::tests::selftest_is_added_unless_the_scenario_opts_out ... ok
+test keys::tests::signing_key_must_be_a_pair_outside_the_repository ... ok
+test keys::tests::keygen_sign_verify_round_trip ... ok
+test image::tests::published_index_verifies_with_the_dev_key_and_tampering_is_caught ... ok
+test build::tests::every_workspace_package_is_listed ... ok
+test scenario::tests::repo_scenarios_are_valid_and_unique ... ok
+test scenario::tests::repo_scenarios_have_known_disk_variants ... ok
+test scenario::tests::repo_has_a_scenario_without_selftest ... ok
+test scenario::tests::nearly_full_arifs_scenarios_boot_without_selftest ... ok
+test fscat::tests::reads_files_from_the_test_disk ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+   Doc-tests aricode_ab
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_abi
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_acpi
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_arifs
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_build
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_cmdline
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_crypto
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_ehci
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_elf
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_fat
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_fb_console
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_gfx
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_gpt
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_handles
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_heap
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_http
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_initrd
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_input
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_iommu
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_lineedit
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_manifest
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_net
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_pci
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_pkg
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_pmm
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_proto
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_rtl8169
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_sched
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_ssh
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_supervisor
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_sync
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_sys
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_tls
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_update_index
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_usb_storage
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_virtio
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_wasm
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_x509
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_x86_cpu
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_x86_paging
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aricode_xhci
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests boot_protocol
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[xtask] build user-testprogs (x86_64-unknown-none)
+   Compiling aricode-pci v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/pci)
+   Compiling aricode-fb-console v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/fb-console)
+   Compiling aricode-build v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/build)
+   Compiling aricode-http v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/http)
+   Compiling aricode-abi v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/abi)
+   Compiling aricode-proto v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/proto)
+   Compiling aricode-net v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/net)
+   Compiling aricode-sync v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/sync)
+   Compiling aricode-heap v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/heap)
+   Compiling aricode-input v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/input)
+   Compiling user-testprogs v0.11.0 (/var/tmp/aricode-audit-525b550-4/user/testprogs)
+   Compiling aricode-gfx v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/gfx)
+   Compiling aricode-virtio v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/virtio)
+   Compiling aricode-sys v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/rust)
+   Compiling aricode-rt v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/runtime)
+    Finished `release` profile [optimized + debuginfo] target(s) in 1.39s
+[xtask] build ariinit (x86_64-unknown-none)
+   Compiling aricode-crypto v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/crypto)
+   Compiling aricode-initrd v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/initrd)
+   Compiling ariinit v0.11.0 (/var/tmp/aricode-audit-525b550-4/services/init)
+   Compiling aricode-gpt v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/gpt)
+   Compiling aricode-cmdline v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/cmdline)
+   Compiling aricode-manifest v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/manifest)
+   Compiling aricode-supervisor v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/supervisor)
+   Compiling aricode-pkg v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/pkg)
+   Compiling aricode-ab v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/ab)
+    Finished `release` profile [optimized + debuginfo] target(s) in 2.55s
+[xtask] build ari-virtio-blk (x86_64-unknown-none)
+   Compiling ari-virtio-blk v0.11.0 (/var/tmp/aricode-audit-525b550-4/services/virtio-blk)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.30s
+[xtask] build ari-virtio-net (x86_64-unknown-none)
+    Blocking waiting for file lock on package cache
+   Compiling ari-virtio-net v0.11.0 (/var/tmp/aricode-audit-525b550-4/services/virtio-net)
+   Compiling ari-net-core v0.11.0 (/var/tmp/aricode-audit-525b550-4/services/net-core)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.98s
+[xtask] build ari-rtl-net (x86_64-unknown-none)
+   Compiling aricode-rtl8169 v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/rtl8169)
+   Compiling ari-rtl-net v0.11.0 (/var/tmp/aricode-audit-525b550-4/services/rtl-net)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.84s
+[xtask] build ari-sshd (x86_64-unknown-none)
+   Compiling ari-sshd v0.11.0 (/var/tmp/aricode-audit-525b550-4/services/sshd)
+   Compiling aricode-ssh v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/ssh)
+    Finished `release` profile [optimized + debuginfo] target(s) in 1.06s
+[xtask] build ari-virtio-input (x86_64-unknown-none)
+   Compiling ari-virtio-input v0.11.0 (/var/tmp/aricode-audit-525b550-4/services/virtio-input)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.31s
+[xtask] build ari-usb-input (x86_64-unknown-none)
+   Compiling ari-usb-input v0.11.0 (/var/tmp/aricode-audit-525b550-4/services/usb-input)
+   Compiling aricode-xhci v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/xhci)
+   Compiling aricode-usb-storage v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/usb-storage)
+    Finished `release` profile [optimized + debuginfo] target(s) in 1.37s
+[xtask] build ari-usb-ehci (x86_64-unknown-none)
+   Compiling ari-usb-ehci v0.11.0 (/var/tmp/aricode-audit-525b550-4/services/usb-ehci)
+   Compiling aricode-ehci v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/ehci)
+    Finished `release` profile [optimized + debuginfo] target(s) in 1.19s
+[xtask] build ari-console-bridge (x86_64-unknown-none)
+   Compiling ari-console-bridge v0.11.0 (/var/tmp/aricode-audit-525b550-4/services/console-bridge)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.23s
+[xtask] build ari-compositor (x86_64-unknown-none)
+   Compiling ari-compositor v0.11.0 (/var/tmp/aricode-audit-525b550-4/services/compositor)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.46s
+[xtask] build ari-fsd (x86_64-unknown-none)
+   Compiling aricode-arifs v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/arifs)
+   Compiling ari-fsd v0.11.0 (/var/tmp/aricode-audit-525b550-4/services/arifs)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.55s
+[xtask] build ari-app-hello (x86_64-unknown-none)
+   Compiling ari-app-hello v0.11.0 (/var/tmp/aricode-audit-525b550-4/apps/hello)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.38s
+[xtask] build ari-app-perms-check (x86_64-unknown-none)
+   Compiling ari-app-perms-check v0.11.0 (/var/tmp/aricode-audit-525b550-4/apps/perms-check)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.46s
+[xtask] build ari-app-updater (x86_64-unknown-none)
+   Compiling aricode-x509 v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/x509)
+   Compiling ari-app-updater v0.11.0 (/var/tmp/aricode-audit-525b550-4/apps/updater)
+   Compiling aricode-update-index v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/update-index)
+   Compiling aricode-tls v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/tls)
+   Compiling aricode-https v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/https)
+    Finished `release` profile [optimized + debuginfo] target(s) in 5.22s
+[xtask] build ari-app-fs-probe (x86_64-unknown-none)
+   Compiling ari-app-fs-probe v0.11.0 (/var/tmp/aricode-audit-525b550-4/apps/fs-probe)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.47s
+[xtask] build ari-app-win-probe (x86_64-unknown-none)
+   Compiling ari-app-win-probe v0.11.0 (/var/tmp/aricode-audit-525b550-4/apps/win-probe)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.23s
+[xtask] build ari-app-wasm-runner (x86_64-unknown-none)
+   Compiling ari-app-wasm-runner v0.11.0 (/var/tmp/aricode-audit-525b550-4/apps/wasm-runner)
+   Compiling aricode-wasm v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/wasm)
+    Finished `release` profile [optimized + debuginfo] target(s) in 1.62s
+[xtask] build ari-app-notes-reader (x86_64-unknown-none)
+   Compiling ari-app-notes-reader v0.11.0 (/var/tmp/aricode-audit-525b550-4/apps/notes-reader)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.23s
+[xtask] build ari-app-installer (x86_64-unknown-none)
+   Compiling ari-app-installer v0.11.0 (/var/tmp/aricode-audit-525b550-4/apps/installer)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.67s
+[xtask] build ari-app-bench (x86_64-unknown-none)
+   Compiling ari-app-bench v0.11.0 (/var/tmp/aricode-audit-525b550-4/apps/bench)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.37s
+[xtask] build ari-shell (x86_64-unknown-none)
+   Compiling aricode-lineedit v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/lineedit)
+   Compiling ari-shell v0.11.0 (/var/tmp/aricode-audit-525b550-4/services/shell)
+    Finished `release` profile [optimized + debuginfo] target(s) in 2.76s
+[xtask] build wasm-demo (wasm32-unknown-unknown)
+   Compiling wasm-demo v0.11.0 (/var/tmp/aricode-audit-525b550-4/apps/wasm-demo)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.10s
+[xtask] build ariboot (x86_64-unknown-uefi)
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.26
+   Compiling bit_field v0.10.3
+   Compiling uguid v2.2.1
+   Compiling bitflags v2.13.2
+   Compiling aricode-initrd v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/initrd)
+   Compiling cfg-if v1.0.5
+   Compiling log v0.4.34
+   Compiling aricode-crypto v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/crypto)
+   Compiling aricode-x86-paging v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/x86-paging)
+   Compiling aricode-elf v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/elf)
+   Compiling aricode-cmdline v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/cmdline)
+   Compiling aricode-gpt v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/gpt)
+   Compiling boot-protocol v0.11.0 (/var/tmp/aricode-audit-525b550-4/boot-protocol)
+   Compiling ucs2 v0.3.3
+   Compiling uefi-raw v0.17.0
+   Compiling syn v3.0.6
+   Compiling aricode-ab v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/ab)
+   Compiling ptr_meta_derive v0.3.2
+   Compiling uefi-macros v0.20.0
+   Compiling ptr_meta v0.3.2
+   Compiling uefi v0.41.0
+   Compiling ariboot v0.11.0 (/var/tmp/aricode-audit-525b550-4/boot)
+    Finished `release` profile [optimized + debuginfo] target(s) in 5.39s
+[xtask] build arikernel (x86_64-unknown-none)
+   Compiling arikernel v0.11.0 (/var/tmp/aricode-audit-525b550-4/kernel)
+   Compiling aricode-x86-paging v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/x86-paging)
+   Compiling aricode-elf v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/elf)
+   Compiling aricode-sched v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/sched)
+   Compiling aricode-acpi v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/acpi)
+   Compiling log v0.4.34
+   Compiling aricode-handles v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/handles)
+   Compiling aricode-pmm v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/pmm)
+   Compiling aricode-x86-cpu v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/x86-cpu)
+   Compiling boot-protocol v0.11.0 (/var/tmp/aricode-audit-525b550-4/boot-protocol)
+   Compiling aricode-iommu v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/iommu)
+    Finished `release` profile [optimized + debuginfo] target(s) in 7.53s
+[xtask] ESP image at /var/tmp/aricode-audit-525b550-4/build/esp
+[xtask] external build hello_ext v1 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext, x86_64-unknown-none)
+   Compiling aricode-pci v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/pci)
+   Compiling aricode-fb-console v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/fb-console)
+   Compiling aricode-build v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/build)
+   Compiling aricode-abi v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/abi)
+   Compiling aricode-http v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/http)
+   Compiling aricode-net v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/net)
+   Compiling aricode-proto v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/proto)
+   Compiling aricode-heap v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/heap)
+   Compiling aricode-sync v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/sync)
+   Compiling hello-ext v0.1.0 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext)
+   Compiling aricode-gfx v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/gfx)
+   Compiling aricode-virtio v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/virtio)
+   Compiling aricode-sys v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/rust)
+   Compiling aricode-rt v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/runtime)
+    Finished `release` profile [optimized] target(s) in 0.45s
+[xtask] external build hello_ext v2 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext, x86_64-unknown-none)
+   Compiling aricode-pci v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/pci)
+   Compiling aricode-fb-console v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/fb-console)
+   Compiling aricode-abi v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/abi)
+   Compiling aricode-net v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/net)
+   Compiling aricode-http v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/http)
+   Compiling aricode-build v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/build)
+   Compiling aricode-proto v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/proto)
+   Compiling aricode-sync v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/sync)
+   Compiling aricode-heap v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/heap)
+   Compiling hello-ext v0.1.0 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext)
+   Compiling aricode-gfx v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/gfx)
+   Compiling aricode-virtio v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/virtio)
+   Compiling aricode-sys v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/rust)
+   Compiling aricode-rt v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/runtime)
+    Finished `release` profile [optimized] target(s) in 0.44s
+[xtask] external build hello_ext v1 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext, x86_64-unknown-none)
+    Finished `release` profile [optimized] target(s) in 0.00s
+[xtask] update source at /var/tmp/aricode-audit-525b550-4/build/update-test: serial 1792272255, no system image, 1 app(s)
+[PASS] apps.downgrade_allowed                15.3s  
+[xtask] external build hello_ext v1 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext, x86_64-unknown-none)
+    Finished `release` profile [optimized] target(s) in 0.01s
+[xtask] external build hello_ext v2 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext, x86_64-unknown-none)
+    Finished `release` profile [optimized] target(s) in 0.00s
+[xtask] external build hello_ext v1 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext, x86_64-unknown-none)
+    Finished `release` profile [optimized] target(s) in 0.00s
+[xtask] external build hello_ext v1 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext, x86_64-unknown-none)
+    Finished `release` profile [optimized] target(s) in 0.00s
+[xtask] update source at /var/tmp/aricode-audit-525b550-4/build/update-test: serial 1792272270, no system image, 1 app(s)
+[PASS] apps.downgrade_refused                20.4s  
+[xtask] external build hello_ext v1 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext, x86_64-unknown-none)
+    Finished `release` profile [optimized] target(s) in 0.01s
+[PASS] apps.external                         13.5s  
+[xtask] external build hello_ext v1 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext, x86_64-unknown-none)
+    Finished `release` profile [optimized] target(s) in 0.01s
+[xtask] external build hello_ext v2 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext, x86_64-unknown-none)
+    Finished `release` profile [optimized] target(s) in 0.00s
+[PASS] apps.staged_tampered                  16.5s  
+[xtask] external build hello_ext v1 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext, x86_64-unknown-none)
+    Finished `release` profile [optimized] target(s) in 0.00s
+[xtask] external build hello_ext v2 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext, x86_64-unknown-none)
+    Finished `release` profile [optimized] target(s) in 0.00s
+[xtask] external build hello_ext v3 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext, x86_64-unknown-none)
+   Compiling aricode-pci v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/pci)
+   Compiling aricode-fb-console v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/fb-console)
+   Compiling aricode-abi v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/abi)
+   Compiling aricode-net v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/net)
+   Compiling aricode-http v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/http)
+   Compiling aricode-proto v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/proto)
+   Compiling aricode-build v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/build)
+   Compiling aricode-sync v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/sync)
+   Compiling aricode-heap v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/heap)
+   Compiling hello-ext v0.1.0 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext)
+   Compiling aricode-gfx v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/gfx)
+   Compiling aricode-virtio v0.11.0 (/var/tmp/aricode-audit-525b550-4/libs/virtio)
+   Compiling aricode-sys v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/rust)
+   Compiling aricode-rt v0.11.0 (/var/tmp/aricode-audit-525b550-4/sdk/runtime)
+    Finished `release` profile [optimized] target(s) in 0.46s
+[PASS] apps.update                           27.6s  
+[xtask] external build hello_ext v1 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext, x86_64-unknown-none)
+    Finished `release` profile [optimized] target(s) in 0.01s
+[xtask] external build hello_ext v2 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext, x86_64-unknown-none)
+    Finished `release` profile [optimized] target(s) in 0.00s
+[PASS] apps.update_cut                       26.8s  
+[xtask] external build hello_ext v1 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext, x86_64-unknown-none)
+    Finished `release` profile [optimized] target(s) in 0.01s
+[xtask] external build hello_ext v2 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext, x86_64-unknown-none)
+    Finished `release` profile [optimized] target(s) in 0.00s
+[xtask] update source at /var/tmp/aricode-audit-525b550-4/build/update-test: serial 1792272376, no system image, 1 app(s)
+[PASS] apps.upgrade_network                  15.5s  
+[PASS] boot.kernel_panic_reports              2.1s  
+[PASS] boot.kernel_ready                     12.4s  
+[PASS] boot.loader_ignores_empty_segment     12.1s  
+[PASS] boot.loader_missing_kernel             1.6s  
+[PASS] boot.loader_rejects_bad_elf            2.2s  
+[PASS] boot.loader_rejects_bad_entry          1.7s  
+[PASS] capabilities.revoke                    2.1s  
+[PASS] console.input                          2.2s  
+[PASS] console.log_level_default_info        12.4s  
+[PASS] console.log_level_invalid_falls_back  12.5s  
+[PASS] console.log_level_trace               15.5s  
+[PASS] console.log_level_warn                 9.8s  
+[PASS] console.ps2                            2.2s  
+[PASS] console.ps2_es                         2.3s  
+[PASS] crypto.random                          2.1s  
+[PASS] diag.events                           16.0s  
+[PASS] drivers.acpi_ioapic                   12.5s  
+[PASS] drivers.user_irq_mmio_dma              2.1s  
+[PASS] filesystem.corrupt_detected            7.6s  
+[PASS] filesystem.read_write                 12.4s  
+[PASS] filesystem.replace_recovery           12.8s  
+[PASS] gui.two_windows                       12.6s  
+[PASS] init.boot                             12.4s  
+[PASS] init.no_selftest                       5.4s  
+[PASS] init.no_selftest_usb                   5.3s  
+[PASS] input.virtio                          10.0s  
+[PASS] interrupts.breakpoint_returns          2.1s  
+[PASS] interrupts.double_fault_uses_ist       2.0s  
+[PASS] interrupts.invalid_opcode_panics       2.1s  
+[PASS] interrupts.page_fault_reports_cr2      2.1s  
+[PASS] iommu.disabled                        12.4s  
+[PASS] iommu.enabled                         12.4s  
+qemu-system-x86_64: vtd_iova_to_slpte: detected slpte permission error (iova=0x1000, level=0x2, slpte=0x0, write=1, pasid=0xffffffff)
+qemu-system-x86_64: vtd_iommu_translate: detected translation failure (dev=00:02:00, iova=0x1000)
+qemu-system-x86_64: New fault is not recorded due to compression of faults
+[PASS] iommu.isolation                        2.3s  
+[PASS] ipc.late_reply                         3.8s  
+[PASS] ipc.peer_closed                        2.9s  
+[PASS] ipc.ping_pong                          2.3s  
+[PASS] ipc.receive_any                        2.1s  
+[PASS] limits.hogs                           18.9s  
+[PASS] memory.heap_init                      12.5s  
+[PASS] memory.heap_oom_recovers               2.1s  
+[PASS] memory.heap_selftest                   2.2s  
+[PASS] memory.nx_data_exec_faults             2.0s  
+[PASS] memory.pmm_init                       12.4s  
+[PASS] memory.pmm_selftest                    2.1s  
+[PASS] memory.stack_guard_page                2.2s  
+[PASS] memory.vmm_init                       12.5s  
+[PASS] memory.vmm_selftest                    2.0s  
+[PASS] memory.wx_rodata_write_faults          2.1s  
+[PASS] net.https                             16.6s  
+[PASS] network.http                          12.5s  
+[PASS] network.stack                         12.5s  
+[PASS] network.tcp                           10.9s  
+[PASS] pci.enumerate                         12.4s  
+[PASS] perf.bench                            16.8s  
+[PASS] power.acpi_shutdown                   12.8s  
+[PASS] sandbox.manifest                      53.6s  
+[PASS] sandbox.shared_file                   13.6s  
+[PASS] scheduler.init                        12.7s  
+[PASS] scheduler.selftest                     2.5s  
+[PASS] services.input_restart                12.9s  
+[PASS] services.restart_storm                28.3s  
+[PASS] services.start_timeout                18.9s  
+[PASS] shell.commands                        17.5s  
+[PASS] shell.diag_file                       15.6s  
+[PASS] shell.exit                            12.8s  
+[PASS] shell.history                         13.5s  
+[PASS] shell.line_editing                    13.4s  
+[PASS] shell.reboot                          12.7s  
+[PASS] shell.services_detail                 13.2s  
+[PASS] shell.usb_keyboard                    12.6s  
+[PASS] shell.usb_keyboard_msi                12.5s  
+[PASS] shell.virtio_keyboard                 13.2s  
+[PASS] shell.write_persists                  25.7s  
+[PASS] smp.boot                              12.5s  
+[PASS] smp.disabled                          12.6s  
+[PASS] smp.process_reap                      24.2s  
+[PASS] smp.selftest                           2.3s  
+[PASS] smp.shell_user                        24.7s  
+[PASS] smp.single_cpu_selftest                2.1s  
+[PASS] ssh.exec                              45.5s  
+[PASS] ssh.shell_fault                       13.8s  
+[PASS] storage.block_service                 12.4s  
+qemu-system-x86_64: vtd_iommu_translate: detected translation failure (dev=00:05:00, iova=0x572034)
+qemu-system-x86_64: New fault is not recorded due to compression of faults
+processing error - resetting ehci HC
+[PASS] strict.ehci_halt                      22.6s  
+[PASS] strict.usb_halt                       21.2s  
+[PASS] strict.usb_hid_halt                   17.0s  
+[PASS] threads.init                          12.4s  
+[PASS] threads.selftest                       2.2s  
+[PASS] timer.init                            12.4s  
+[PASS] timer.selftest                         2.1s  
+[PASS] update.apply                          13.3s  
+[PASS] update.apply_refuses_older            16.5s  
+[PASS] update.cut_during_install             39.0s  
+[PASS] update.esp_fallback                   12.2s  
+[xtask] external build hello_ext v1 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext, x86_64-unknown-none)
+    Finished `release` profile [optimized] target(s) in 0.01s
+[xtask] build user-testprogs (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ariinit (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-blk (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-net (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-rtl-net (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-sshd (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-input (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-usb-input (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-usb-ehci (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-console-bridge (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-compositor (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-fsd (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-hello (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-perms-check (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-updater (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-fs-probe (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-win-probe (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-wasm-runner (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-notes-reader (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-installer (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-bench (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-shell (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build wasm-demo (wasm32-unknown-unknown)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+[xtask] build ariboot (x86_64-unknown-uefi)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build arikernel (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] ESP image at /var/tmp/aricode-audit-525b550-4/build/esp
+[xtask] external build hello_ext v2 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext, x86_64-unknown-none)
+    Finished `release` profile [optimized] target(s) in 0.01s
+[xtask] update source at /var/tmp/aricode-audit-525b550-4/build/update-test: serial 1792273445, system 2, 1 app(s)
+[PASS] update.fs_nearly_full                 20.0s  
+[xtask] external build hello_ext v1 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext, x86_64-unknown-none)
+    Finished `release` profile [optimized] target(s) in 0.01s
+[xtask] build user-testprogs (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ariinit (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-blk (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-net (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-rtl-net (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-sshd (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-input (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+[xtask] build ari-usb-input (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-usb-ehci (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-console-bridge (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-compositor (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-fsd (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-hello (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-perms-check (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-updater (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-fs-probe (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-win-probe (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-wasm-runner (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-notes-reader (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-installer (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-bench (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-shell (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build wasm-demo (wasm32-unknown-unknown)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+[xtask] build ariboot (x86_64-unknown-uefi)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build arikernel (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] ESP image at /var/tmp/aricode-audit-525b550-4/build/esp
+[xtask] external build hello_ext v2 (/var/tmp/aricode-audit-525b550-4/examples/hello_ext, x86_64-unknown-none)
+    Finished `release` profile [optimized] target(s) in 0.00s
+[xtask] update source at /var/tmp/aricode-audit-525b550-4/build/update-test: serial 1792273465, system 2, 1 app(s)
+[PASS] update.fs_one_short                   17.0s  
+[PASS] update.full_cycle                     39.2s  
+[xtask] build user-testprogs (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ariinit (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-blk (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-net (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-rtl-net (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-sshd (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-input (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-usb-input (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-usb-ehci (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-console-bridge (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-compositor (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-fsd (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+[xtask] build ari-app-hello (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-perms-check (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-updater (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-fs-probe (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-win-probe (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-wasm-runner (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-notes-reader (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-installer (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-bench (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-shell (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build wasm-demo (wasm32-unknown-unknown)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+[xtask] build ariboot (x86_64-unknown-uefi)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build arikernel (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] ESP image at /var/tmp/aricode-audit-525b550-4/build/esp
+[xtask] update source at /var/tmp/aricode-audit-525b550-4/build/update-test: serial 1792273523, system 2, 0 app(s)
+[PASS] update.installed_unknown              38.7s  
+[xtask] build user-testprogs (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ariinit (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-blk (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-net (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-rtl-net (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-sshd (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-input (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-usb-input (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-usb-ehci (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-console-bridge (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-compositor (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-fsd (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-hello (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-perms-check (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-updater (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-fs-probe (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-win-probe (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-wasm-runner (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-notes-reader (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-installer (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-bench (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-shell (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build wasm-demo (wasm32-unknown-unknown)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+[xtask] build ariboot (x86_64-unknown-uefi)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build arikernel (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] ESP image at /var/tmp/aricode-audit-525b550-4/build/esp
+[xtask] update source at /var/tmp/aricode-audit-525b550-4/build/update-test: serial 1792273562, system 2, 0 app(s)
+[PASS] update.migrate_legacy_url             13.6s  
+[xtask] build user-testprogs (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ariinit (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-blk (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-net (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-rtl-net (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-sshd (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-input (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-usb-input (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-usb-ehci (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-console-bridge (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-compositor (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-fsd (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-hello (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-perms-check (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-updater (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-fs-probe (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-win-probe (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-wasm-runner (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-notes-reader (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-installer (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-bench (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-shell (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build wasm-demo (wasm32-unknown-unknown)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+[xtask] build ariboot (x86_64-unknown-uefi)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build arikernel (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] ESP image at /var/tmp/aricode-audit-525b550-4/build/esp
+[xtask] update source at /var/tmp/aricode-audit-525b550-4/build/update-test: serial 1792273577, system 2, 0 app(s)
+[PASS] update.network                        36.4s  
+[PASS] update.no_confirm_on_late_failure     12.4s  
+[PASS] update.pending_boot                   12.3s  
+[PASS] update.readonly_no_pending_boot        2.1s  
+[xtask] build user-testprogs (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ariinit (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-blk (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-net (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-rtl-net (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-sshd (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-input (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-usb-input (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-usb-ehci (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-console-bridge (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-compositor (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-fsd (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-hello (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-perms-check (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+[xtask] build ari-app-updater (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-fs-probe (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-win-probe (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-wasm-runner (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-notes-reader (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-installer (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-bench (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-shell (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build wasm-demo (wasm32-unknown-unknown)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+[xtask] build ariboot (x86_64-unknown-uefi)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build arikernel (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] ESP image at /var/tmp/aricode-audit-525b550-4/build/esp
+[xtask] update source at /var/tmp/aricode-audit-525b550-4/build/update-test: serial 1792273641, system 1, 0 app(s)
+[PASS] update.refuse_downgrade               39.4s  
+[PASS] update.reject_bad_signature           12.4s  
+[PASS] update.rollback_exhausted             12.4s  
+[PASS] update.rollback_keeps_data            63.8s  
+[PASS] update.slot_a                         12.5s  
+[xtask] build user-testprogs (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ariinit (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-blk (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-net (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-rtl-net (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-sshd (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-input (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-usb-input (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-usb-ehci (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-console-bridge (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-compositor (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-fsd (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-hello (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-perms-check (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-updater (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-fs-probe (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-win-probe (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-wasm-runner (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+[xtask] build ari-app-notes-reader (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+[xtask] build ari-app-installer (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-bench (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+[xtask] build ari-shell (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build wasm-demo (wasm32-unknown-unknown)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+[xtask] build ariboot (x86_64-unknown-uefi)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build arikernel (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] ESP image at /var/tmp/aricode-audit-525b550-4/build/esp
+[xtask] update source at /var/tmp/aricode-audit-525b550-4/build/update-test: serial 1792273784, system 2, 0 app(s)
+[PASS] update.sources                        14.4s  
+[xtask] build user-testprogs (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ariinit (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-blk (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-net (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-rtl-net (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-sshd (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-input (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-usb-input (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-usb-ehci (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-console-bridge (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-compositor (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-fsd (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-hello (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+[xtask] build ari-app-perms-check (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+[xtask] build ari-app-updater (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-fs-probe (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-win-probe (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-wasm-runner (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-notes-reader (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-installer (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-bench (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-shell (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build wasm-demo (wasm32-unknown-unknown)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+[xtask] build ariboot (x86_64-unknown-uefi)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build arikernel (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] ESP image at /var/tmp/aricode-audit-525b550-4/build/esp
+[xtask] update source at /var/tmp/aricode-audit-525b550-4/build/update-test: serial 1792273799, system 2, 0 app(s)
+[PASS] update.stale_index                    16.0s  
+[xtask] build user-testprogs (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ariinit (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-blk (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-net (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-rtl-net (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-sshd (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-input (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-usb-input (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-usb-ehci (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-console-bridge (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-compositor (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-fsd (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-hello (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-perms-check (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-updater (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-fs-probe (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-win-probe (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-wasm-runner (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-notes-reader (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-installer (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-bench (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-shell (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build wasm-demo (wasm32-unknown-unknown)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+[xtask] build ariboot (x86_64-unknown-uefi)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build arikernel (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] ESP image at /var/tmp/aricode-audit-525b550-4/build/esp
+[xtask] update source at /var/tmp/aricode-audit-525b550-4/build/update-test: serial 1792273816, system 2, 0 app(s)
+[PASS] update.state_rewrites                 24.3s  
+[xtask] build user-testprogs (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ariinit (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-blk (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-net (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-rtl-net (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-sshd (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-input (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-usb-input (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-usb-ehci (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-console-bridge (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-compositor (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-fsd (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-hello (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-perms-check (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-updater (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-fs-probe (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-win-probe (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-wasm-runner (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-notes-reader (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-installer (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-bench (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-shell (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build wasm-demo (wasm32-unknown-unknown)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+[xtask] build ariboot (x86_64-unknown-uefi)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build arikernel (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] ESP image at /var/tmp/aricode-audit-525b550-4/build/esp
+[xtask] update source at /var/tmp/aricode-audit-525b550-4/build/update-test: serial 1792273841, system 2, 0 app(s) (image TAMPERED after indexing, for tests)
+[PASS] update.tampered_image                 25.3s  
+[xtask] build user-testprogs (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ariinit (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-blk (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-net (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-rtl-net (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-sshd (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-virtio-input (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-usb-input (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-usb-ehci (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-console-bridge (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-compositor (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-fsd (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-hello (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-perms-check (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-updater (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-fs-probe (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-win-probe (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-wasm-runner (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+[xtask] build ari-app-notes-reader (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-installer (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-app-bench (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build ari-shell (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build wasm-demo (wasm32-unknown-unknown)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+[xtask] build ariboot (x86_64-unknown-uefi)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] build arikernel (x86_64-unknown-none)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+[xtask] ESP image at /var/tmp/aricode-audit-525b550-4/build/esp
+[xtask] update source at /var/tmp/aricode-audit-525b550-4/build/update-test: serial 1792273867, system 2, 0 app(s) (index TAMPERED after signing, for tests)
+[PASS] update.tampered_index                 16.5s  
+[PASS] usb.ehci_companion                    15.1s  
+[PASS] usb.ehci_fault                        23.0s  
+[PASS] usb.ehci_fault_csw                    23.3s  
+[PASS] usb.ehci_hid                          10.5s  
+[PASS] usb.ehci_storage                      34.1s  
+[PASS] usb.fault_csw                         23.0s  
+[PASS] usb.fault_retry                       22.2s  
+[PASS] usb.hid                                3.7s  
+[PASS] usb.hid_boot                          15.5s  
+[PASS] usb.hid_boot_with_ehci                17.5s  
+[PASS] usb.hid_fault                         14.5s  
+[xtask] USB image at /var/tmp/aricode-audit-525b550-4/build/scenarios/usb.image_boot/disk.img (104 MiB, 4 files in the ESP)
+[PASS] usb.image_boot                         4.3s  
+[PASS] usb.reenum                            21.9s  
+[PASS] usb.reset_device                      21.8s  
+[PASS] usb.storage                           31.5s  
+[PASS] user.bad_pointer                       2.1s  
+[PASS] user.bad_syscall                       2.1s  
+[PASS] user.handles                           2.1s  
+[PASS] user.hello                             2.1s  
+[PASS] user.kernel_read_killed                2.1s  
+[PASS] user.kernel_write_killed               2.1s  
+[PASS] user.privileged_killed                 2.1s  
+[PASS] user.process_reap                     37.8s  
+[PASS] user.sleep_yield                       2.1s  
+[PASS] virtio.blk_rw                         12.5s  
+[PASS] wasm.bad_import                       13.0s  
+[PASS] wasm.demo                             13.4s  
+[PASS] wasm.invalid                          13.1s  
+[PASS] wasm.restricted                       13.1s  
+[xtask] 148 QEMU scenarios, 0 failed
