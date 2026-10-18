@@ -1,7 +1,7 @@
 # Incident 0009: response headers bypass the updater run deadline
 
-- Opened: 2026-10-18. Status: **fixed in `fix/updater-absolute-deadline`,
-  pending QEMU run and audit** (2026-10-18).
+- Opened: 2026-10-18. Status: closed 2026-10-18, fixed in
+  `fix/updater-absolute-deadline` (merged into develop at 397430d; see Closure).
 - Reviewed commit: `525b550`; the run deadline is new in the update client.
 - Environment: production HTTP parser with a transport supplying 1xx replies.
 - Evidence: [release audit, finding 3](../audits/2026-10-18-release-0.11.0-525b550.md#3-p2-the-updaters-global-deadline-does-not-bound-response-headers),
@@ -174,3 +174,12 @@ while waiting for the response headers`) and `/early-hints-flood` (twenty
   the fix against this incident.
 - A real-time reproduction against an adversarial server over the network
   has not been performed; the simulated clock is the evidence.
+
+## Closure (2026-10-18)
+
+Merged into `develop` at 397430d together with the other two fixes of the
+0.11.0 audit. On the integrated tree: `cargo xtask check` green, full
+QEMU suite 153 scenarios with 0 failed with 1 CPU and again with 4 CPUs,
+including `shell.http_deadline`, `network.http`, `net.https` and every `update.*` scenario. Two rounds of independent audit of the fix (findings
+recorded above) with every item resolved. Hardware verification on the
+laptop is the next step and is tracked in the incident's open items.

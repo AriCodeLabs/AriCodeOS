@@ -1,7 +1,7 @@
 # Incident 0007: the USB storage drivers accept a short command-status wrapper
 
-- Opened: 2026-10-18. Status: fixed in `fix/usb-short-csw`, pending QEMU
-  run and audit.
+- Opened: 2026-10-18. Status: closed 2026-10-18, fixed in `fix/usb-short-csw`
+  (merged into develop at 397430d; see Closure).
 - Reviewed commit: `525b550`; introduced with the EHCI driver in 0.11.0
   (the xHCI driver has had the same omission since ADR 0023).
 - Environment: extracted production `Ehci::scsi`, simulated bulk transport.
@@ -144,3 +144,12 @@ fault reported by process 12: ehci reset recovery (code 0)
   the shared `ScsiFail::Csw` path exercised by the code, not by a test.
 - Physical device reproduction and actual data-loss measurement remain
   unperformed.
+
+## Closure (2026-10-18)
+
+Merged into `develop` at 397430d together with the other two fixes of the
+0.11.0 audit. On the integrated tree: `cargo xtask check` green, full
+QEMU suite 153 scenarios with 0 failed with 1 CPU and again with 4 CPUs,
+including `usb.short_csw`, `usb.ehci_short_csw` and `init.no_selftest_usb`. Two rounds of independent audit of the fix (findings
+recorded above) with every item resolved. Hardware verification on the
+laptop is the next step and is tracked in the incident's open items.
