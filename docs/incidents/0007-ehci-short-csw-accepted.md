@@ -153,3 +153,16 @@ QEMU suite 153 scenarios with 0 failed with 1 CPU and again with 4 CPUs,
 including `usb.short_csw`, `usb.ehci_short_csw` and `init.no_selftest_usb`. Two rounds of independent audit of the fix (findings
 recorded above) with every item resolved. Hardware verification on the
 laptop is the next step and is tracked in the incident's open items.
+
+## Hardware verification (2026-10-18)
+
+Reference laptop (xHCI 8086:1e31, the Innostor stick of incident 0001),
+upgraded over the network from version 6 to version 7 (develop e8f570b,
+production-signed index) and rebooted into the new slot: the installer
+reads the slot and reports version 7 installed; `write`, `cat` and `ls`
+on the stick work; `diag` records no fault event at all in the first
+minutes (not even the SYNCHRONIZE CACHE sense event earlier boots showed),
+so with the CSW length check and ISP on IN transfers only, a healthy
+stick produces no CSW-length, short-data or injected event. A one-off
+network refusal seen in the same session is incident 0012, unrelated to
+storage.
