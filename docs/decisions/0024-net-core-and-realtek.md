@@ -49,3 +49,23 @@ realistic way for the laptop to use the stack that already exists.
   retries.
 - No hardware checksum offload or VLAN; one frame per descriptor.
 - Wi-Fi is out of scope: it would require ath9k, 802.11 and WPA2.
+
+## Note (2026-10-18, incident 0012)
+
+A refusal by the service was invisible: the shell printed "network service
+rejected the request" for every status it did not know by name, and the
+core answered the status without recording anything. Since
+`fix/net-refusal-visibility` the core records a fault event per refusal
+kind (`net tcp table full`, `net arp defer full`, `net tx busy`, `net arp
+no reply`, `net ping table full`, `net dns table full`, `net udp table
+full`, `net wait pending`, `net bad request`, `net bad handles`), bounded
+to one event per kind per second by `aricode_net::faults::Meter`: the
+event name carries the kind and the count in that second (`net tcp table
+full x3`), the code the `net::Status` number the client got (5 busy, 1
+invalid, 4 bad handles), and refusals held back during a second are
+recorded when it ends. `NetError::describe` names every status for the
+user. The list and the format are in `docs/architecture.md` (TCP
+section); the regression is `network.refusal_visible`. The refusal of the
+incident itself (`Busy` or `Reset`, once after a boot on the laptop) is
+still open; the audit of the fix opened incidents 0013 (silent SYN drop
+and half-open hold) and 0014 (predictable ISN and ephemeral ports).

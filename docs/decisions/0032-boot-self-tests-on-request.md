@@ -70,7 +70,15 @@ it (incident 0005).
    `--update-source` install; no `hola.txt`, no test README, no WASM demo,
    no `ARIDISK` raw-area pattern. The test disk keeps its files. A
    `selftest` boot from such a stick stops at `fs_client`'s first check,
-   before any write.
+   before any write. The same rule covers the capabilities of the test
+   programs (2026-10-18, incident 0012): the initrd of the stick keeps the
+   test programs (they are part of the system image) but
+   `write_usb_image` removes the manifests from `user/testprogs/manifests/`
+   (`tcp_hog.manifest`, which asks for `net`), so `run tcp_hog` on a real
+   machine is launched without a manifest and gets no capability, while the
+   scenario initrds keep them. The split was chosen over documenting an
+   exception because a program that fills the TCP table is a denial of
+   service for everyone on the machine, and the stick must not offer it.
 6. **Test-only keys are refused for a real machine.**
    `aricode_cmdline::keys::TEST_ONLY` lists every key documented "Tests
    only" (`qemu_exit`, `test`, `init_fail_late`, `restart_storm`,

@@ -12,6 +12,7 @@ pub mod arp;
 pub mod dhcp;
 pub mod dns;
 pub mod eth;
+pub mod faults;
 pub mod icmp;
 pub mod ipv4;
 pub mod tcp;

@@ -120,7 +120,9 @@ from the shell or `sys::launch::run(broker, name, arg)`; `spawn` and
 `sys::launch::spawn` launch it in the background without waiting for its
 exit. The broker allows 4 running programs at a time and answers `Limit` to
 the fifth (ADR 0015). The broker reads `NAME.manifest` from the initrd
-(`apps/<app>/NAME.manifest`, packed by xtask):
+(`apps/<app>/NAME.manifest`, packed by xtask; a test program the shell
+launches with capabilities, such as `tcp_hog`, keeps its manifest in
+`user/testprogs/manifests/`):
 
 ```text
 name = hello_app

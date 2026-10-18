@@ -735,6 +735,34 @@ latter briefly to add the region.
   can require.
 - The user programs' static heap grows to 256 KiB (netd's TCP
   sockets do not fit in the 64 KiB stack).
+- Refusals are visible (incident 0012). netd records a fault event
+  (`sys::event_record`, ADR 0028) whenever it refuses a request or loses
+  a frame, named by cause: `net tcp table full` (`TcpConnect`/`TcpListen`
+  with the 8 slots taken, TIME-WAIT included), `net arp defer full` (the
+  4-slot parking table for frames awaiting ARP), `net tx busy` (the NIC
+  had no transmit slot; the frame is lost), `net arp no reply` (a parked
+  frame dropped after 1 s), `net ping table full`, `net dns table full`,
+  `net udp table full`, `net wait pending` (a second `recv`/`accept` on a
+  socket that already waits), `net bad request` (`Status::Invalid`) and
+  `net bad handles` (`Status::BadHandles`). `aricode_net::faults::Meter`
+  bounds the rate: at most one event per kind per second; the refusals
+  held back in between are counted and recorded when their second ends
+  (`drain_due` from `expire`). The event name is `<kind> x<count>` (count
+  in that second, shown up to 999; the longest kind, 19 bytes, plus
+  ` x999` fills the 24-byte name, checked at compile time) and the event
+  code is the `net::Status` number the client got, as every other
+  producer uses the code for a reason number: 5 = busy, 1 = invalid, 4 =
+  bad handles; a lost frame carries the status its sender would have got
+  (`fault reported by process N: net tcp table full x3 (code 5)` = three
+  refusals, answered Busy). The same text goes to the console
+  (`virtio-net: fault net tcp table full x3`). `BadSock`, `InUse`,
+  `NoRoute`, `NotFound`, `Timeout` and `Reset` describe the client's
+  socket or the network's answer, not a refusal, and are not recorded. On
+  the client side `NetError::describe` (`aricode-sys`) gives every status
+  its own line (`network service refused: busy (no free connection or
+  send slot)`, `connection refused or reset by the other end`, ...), which
+  the shell prints; scenario `network.refusal_visible` fills the table
+  with `tcp_hog` and checks the shell line and the `diag` event.
 
 ## HTTP client (Phase 24)
 
