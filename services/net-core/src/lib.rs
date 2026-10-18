@@ -33,6 +33,63 @@ const DHCP_PROBE_MS: u64 = 600;
 const DHCP_DECLINE_PAUSE_MS: u64 = 10_000;
 const ARP_WAIT_MS: u64 = 1000;
 
+/// Why netd refused a request or lost a frame (incident 0012). Each kind is
+/// a fault event in the kernel ring (`diag`: `fault reported by process N:
+/// NAME (code C)`, `C` = refusals of that kind since the previous event),
+/// recorded at most once per second per kind (`aricode_net::faults`).
+/// `BadSock`, `InUse`, `NoRoute`, `NotFound`, `Timeout` and `Reset` are not
+/// refusals: they describe the client's socket or the network's answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    /// `TcpConnect`/`TcpListen` with every TCP slot in use (`MAX_TCP`,
+    /// TIME-WAIT and unreaped connections included).
+    TcpTableFull = 0,
+    /// A frame for an unresolved next hop found the parking table full.
+    ArpDeferFull = 1,
+    /// The NIC had no free transmit slot; the frame was lost.
+    TxBusy = 2,
+    /// A parked frame was dropped: no ARP reply within `ARP_WAIT_MS`.
+    ArpNoReply = 3,
+    PingTableFull = 4,
+    DnsTableFull = 5,
+    UdpTableFull = 6,
+    /// A second `recv`/`accept` on a socket that already has one waiting.
+    WaitPending = 7,
+    /// Undecodable or out-of-range request (`Status::Invalid`).
+    BadRequest = 8,
+    /// Client buffer missing or not mappable (`Status::BadHandles`).
+    BadHandles = 9,
+}
+
+impl Refusal {
+    const COUNT: usize = 10;
+
+    /// Event name (at most `EVENT_NAME_LEN` = 24 bytes).
+    fn name(self) -> &'static str {
+        match self {
+            Refusal::TcpTableFull => "net tcp table full",
+            Refusal::ArpDeferFull => "net arp defer full",
+            Refusal::TxBusy => "net tx busy",
+            Refusal::ArpNoReply => "net arp no reply",
+            Refusal::PingTableFull => "net ping table full",
+            Refusal::DnsTableFull => "net dns table full",
+            Refusal::UdpTableFull => "net udp table full",
+            Refusal::WaitPending => "net wait pending",
+            Refusal::BadRequest => "net bad request",
+            Refusal::BadHandles => "net bad handles",
+        }
+    }
+
+    /// Status the client receives.
+    fn status(self) -> Status {
+        match self {
+            Refusal::BadRequest => Status::Invalid,
+            Refusal::BadHandles => Status::BadHandles,
+            _ => Status::Busy,
+        }
+    }
+}
+
 /// Link to the NIC: complete Ethernet frames, no headers of its own.
 pub trait Link {
     fn mac(&self) -> MacAddr;
@@ -195,6 +252,8 @@ pub struct Stack<L: Link> {
     /// Client buffer kept by a pending request (receives):
     /// the main loop does not close it after dispatching.
     retained: Option<Handle>,
+    /// Refusals recorded at most once per second per kind (incident 0012).
+    faults: aricode_net::faults::Meter<{ Refusal::COUNT }>,
 }
 
 fn new_socket(port: u16) -> Socket {
@@ -232,7 +291,32 @@ impl<L: Link> Stack<L> {
             },
             dns_port: 49153,
             retained: None,
+            faults: aricode_net::faults::Meter::new(),
         }
+    }
+
+    /// Accounts a refusal or a lost frame: a fault event in the kernel ring
+    /// and a console line, at most once per second per kind, with the count
+    /// of the ones held back since the previous record as the event code.
+    fn note(&mut self, what: Refusal, now: u64) {
+        let count = self.faults.report(what as usize, now);
+        if count == 0 {
+            return;
+        }
+        let _ = sys::event_record(count as u64, what.name());
+        let mut b = [0u8; 20];
+        sys::print(self.name.as_bytes());
+        sys::print(b": fault ");
+        sys::print(what.name().as_bytes());
+        sys::print(b" x");
+        sys::print(aricode_rt::fmt_u64(count as u64, &mut b));
+        sys::print(b"\n");
+    }
+
+    /// Refuses a request: records it and answers with the matching status.
+    fn refuse(&mut self, reply_to: Handle, what: Refusal, now: u64) {
+        self.note(what, now);
+        answer(reply_to, Reply::status(what.status()));
     }
 
     fn my_ip(&self) -> Ipv4Addr {
@@ -280,6 +364,8 @@ impl<L: Link> Stack<L> {
 
     /// Sends an IPv4 packet to `dst` with a `payload` of protocol `proto`.
     /// With no known MAC it parks the packet and sends an ARP request.
+    /// Every failure other than `NoRoute` is recorded (`note`) here, where
+    /// its cause is known; callers only pass the status on.
     fn send_ipv4(&mut self, dst: Ipv4Addr, proto: u8, payload: &[u8]) -> Result<(), Status> {
         let src = self.my_ip();
         let next_hop = self.next_hop(dst).ok_or(Status::NoRoute)?;
@@ -288,10 +374,14 @@ impl<L: Link> Stack<L> {
         let mut frame = [0u8; MAX_FRAME];
         let ip_hdr = ipv4::Header::new(src, dst, proto, id, payload.len() as u16);
         let mut n = eth::HEADER_LEN;
-        n += ip_hdr.write(&mut frame[n..]).ok_or(Status::Invalid)?;
-        if frame.len() < n + payload.len() {
+        let header = ip_hdr.write(&mut frame[n..]);
+        let fits = header.is_some_and(|h| frame.len() >= n + h + payload.len());
+        let Some(h) = header.filter(|_| fits) else {
+            let now = self.clock.now();
+            self.note(Refusal::BadRequest, now);
             return Err(Status::Invalid);
-        }
+        };
+        n += h;
         frame[n..n + payload.len()].copy_from_slice(payload);
         n += payload.len();
         let dst_mac = if dst == Ipv4Addr::BROADCAST {
@@ -310,21 +400,22 @@ impl<L: Link> Stack<L> {
                 if self.link.send_frame(&frame[..n]) {
                     Ok(())
                 } else {
+                    let now = self.clock.now();
+                    self.note(Refusal::TxBusy, now);
                     Err(Status::Busy)
                 }
             }
             None => {
-                let deadline = self.clock.now() + ARP_WAIT_MS;
-                let slot = self
-                    .deferred
-                    .iter_mut()
-                    .find(|d| d.is_none())
-                    .ok_or(Status::Busy)?;
+                let now = self.clock.now();
+                let Some(slot) = self.deferred.iter_mut().find(|d| d.is_none()) else {
+                    self.note(Refusal::ArpDeferFull, now);
+                    return Err(Status::Busy);
+                };
                 *slot = Some(Deferred {
                     next_hop,
                     len: n,
                     frame,
-                    deadline,
+                    deadline: now + ARP_WAIT_MS,
                 });
                 self.send_arp_request(next_hop);
                 Ok(())
@@ -345,9 +436,13 @@ impl<L: Link> Stack<L> {
         payload: &[u8],
     ) -> Result<(), Status> {
         let mut seg = [0u8; udp::HEADER_LEN + MAX_DATAGRAM as usize];
-        let n = udp::Header { src_port, dst_port }
-            .write(self.my_ip(), dst, payload, &mut seg)
-            .ok_or(Status::Invalid)?;
+        let Some(n) =
+            (udp::Header { src_port, dst_port }).write(self.my_ip(), dst, payload, &mut seg)
+        else {
+            let now = self.clock.now();
+            self.note(Refusal::BadRequest, now);
+            return Err(Status::Invalid);
+        };
         self.send_ipv4(dst, ipv4::PROTO_UDP, &seg[..n])
     }
 
@@ -469,6 +564,7 @@ impl<L: Link> Stack<L> {
     }
 
     fn flush_deferred(&mut self, ip: Ipv4Addr, mac: MacAddr) {
+        let mut lost = false;
         for slot in self.deferred.iter_mut() {
             if slot.as_ref().is_some_and(|d| d.next_hop == ip) {
                 let mut d = slot.take().unwrap();
@@ -478,8 +574,12 @@ impl<L: Link> Stack<L> {
                     ethertype: eth::ETHERTYPE_IPV4,
                 }
                 .write(&mut d.frame);
-                self.link.send_frame(&d.frame[..d.len]);
+                lost |= !self.link.send_frame(&d.frame[..d.len]);
             }
+        }
+        if lost {
+            let now = self.clock.now();
+            self.note(Refusal::TxBusy, now);
         }
     }
 
@@ -733,7 +833,7 @@ impl<L: Link> Stack<L> {
                     return answer(reply_to, Reply::status(Status::NoRoute));
                 }
                 let Some(slot) = self.tcp.iter().position(|s| s.is_none()) else {
-                    return answer(reply_to, Reply::status(Status::Busy));
+                    return self.refuse(reply_to, Refusal::TcpTableFull, now);
                 };
                 let port = self.tcp_next_port;
                 self.tcp_next_port = if port == u16::MAX {
@@ -749,7 +849,7 @@ impl<L: Link> Stack<L> {
             }
             Op::TcpListen => {
                 if req.port == 0 {
-                    return answer(reply_to, Reply::status(Status::Invalid));
+                    return self.refuse(reply_to, Refusal::BadRequest, now);
                 }
                 if self
                     .tcp
@@ -760,7 +860,7 @@ impl<L: Link> Stack<L> {
                     return answer(reply_to, Reply::status(Status::InUse));
                 }
                 let Some(slot) = self.tcp.iter().position(|s| s.is_none()) else {
-                    return answer(reply_to, Reply::status(Status::Busy));
+                    return self.refuse(reply_to, Refusal::TcpTableFull, now);
                 };
                 let mut conn = Connection::new(self.my_ip(), req.port, Ipv4Addr::UNSPECIFIED, 0);
                 conn.listen();
@@ -778,19 +878,19 @@ impl<L: Link> Stack<L> {
                     return answer(reply_to, Reply::status(Status::BadSock));
                 }
                 if listener.accept.is_some() {
-                    return answer(reply_to, Reply::status(Status::Busy));
+                    return self.refuse(reply_to, Refusal::WaitPending, now);
                 }
                 listener.accept = Some((reply_to, now + req.timeout_ms.max(1) as u64));
             }
             Op::TcpSend => {
                 let Some(buf) = buf else {
-                    return answer(reply_to, Reply::status(Status::BadHandles));
+                    return self.refuse(reply_to, Refusal::BadHandles, now);
                 };
                 let len = req.len.min(MAX_DATAGRAM) as usize;
                 let mut data = [0u8; MAX_DATAGRAM as usize];
                 match self.buffers.map(buf) {
                     Some(b) if b.len() >= len => data[..len].copy_from_slice(&b[..len]),
-                    _ => return answer(reply_to, Reply::status(Status::BadHandles)),
+                    _ => return self.refuse(reply_to, Refusal::BadHandles, now),
                 }
                 let Some(sock) = self.tcp.get_mut(req.sock as usize).and_then(|s| s.as_mut())
                 else {
@@ -807,21 +907,17 @@ impl<L: Link> Stack<L> {
             }
             Op::TcpRecv => {
                 let Some(buf) = buf else {
-                    return answer(reply_to, Reply::status(Status::BadHandles));
+                    return self.refuse(reply_to, Refusal::BadHandles, now);
                 };
                 let Some(sock) = self.tcp.get_mut(req.sock as usize).and_then(|s| s.as_mut())
                 else {
                     return answer(reply_to, Reply::status(Status::BadSock));
                 };
-                if sock.listening || sock.user_closed || sock.recv.is_some() {
-                    return answer(
-                        reply_to,
-                        Reply::status(if sock.recv.is_some() {
-                            Status::Busy
-                        } else {
-                            Status::BadSock
-                        }),
-                    );
+                if sock.listening || sock.user_closed {
+                    return answer(reply_to, Reply::status(Status::BadSock));
+                }
+                if sock.recv.is_some() {
+                    return self.refuse(reply_to, Refusal::WaitPending, now);
                 }
                 sock.recv = Some(PendingRecv {
                     reply_to,
@@ -854,7 +950,7 @@ impl<L: Link> Stack<L> {
                 }
                 answer(reply_to, Reply::ok(0));
             }
-            _ => answer(reply_to, Reply::status(Status::Invalid)),
+            _ => self.refuse(reply_to, Refusal::BadRequest, now),
         }
     }
 
@@ -899,10 +995,17 @@ impl<L: Link> Stack<L> {
                 answer(r.reply_to, Reply::status(Status::Timeout));
             }
         }
+        // A parked frame nobody answered ARP for is lost: its sender (TCP)
+        // retransmits or times out, and the loss stays visible in `diag`.
+        let mut dropped = false;
         for slot in self.deferred.iter_mut() {
             if slot.as_ref().is_some_and(|d| now >= d.deadline) {
                 *slot = None;
+                dropped = true;
             }
+        }
+        if dropped {
+            self.note(Refusal::ArpNoReply, now);
         }
     }
 
@@ -945,7 +1048,7 @@ impl<L: Link> Stack<L> {
             },
             Op::Ping => {
                 let Some(slot) = self.pings.iter().position(|p| p.is_none()) else {
-                    return answer(reply_to, Reply::status(Status::Busy));
+                    return self.refuse(reply_to, Refusal::PingTableFull, now);
                 };
                 let echo = icmp::Echo {
                     reply: false,
@@ -954,7 +1057,7 @@ impl<L: Link> Stack<L> {
                 };
                 let mut out = [0u8; 64];
                 let Some(n) = echo.write(b"AriCodeOS ping", &mut out) else {
-                    return answer(reply_to, Reply::status(Status::Invalid));
+                    return self.refuse(reply_to, Refusal::BadRequest, now);
                 };
                 match self.send_ipv4(addr, ipv4::PROTO_ICMP, &out[..n]) {
                     Ok(()) => {
@@ -970,22 +1073,18 @@ impl<L: Link> Stack<L> {
                 }
             }
             Op::UdpBind => {
-                if req.port == 0 || self.sockets.iter().flatten().any(|s| s.port == req.port) {
-                    return answer(
-                        reply_to,
-                        Reply::status(if req.port == 0 {
-                            Status::Invalid
-                        } else {
-                            Status::InUse
-                        }),
-                    );
+                if req.port == 0 {
+                    return self.refuse(reply_to, Refusal::BadRequest, now);
+                }
+                if self.sockets.iter().flatten().any(|s| s.port == req.port) {
+                    return answer(reply_to, Reply::status(Status::InUse));
                 }
                 match self.sockets.iter().position(|s| s.is_none()) {
                     Some(i) => {
                         self.sockets[i] = Some(new_socket(req.port));
                         answer(reply_to, Reply::ok(i as u64));
                     }
-                    None => answer(reply_to, Reply::status(Status::Busy)),
+                    None => self.refuse(reply_to, Refusal::UdpTableFull, now),
                 }
             }
             Op::UdpClose => match self.sockets.get_mut(req.sock as usize) {
@@ -1000,7 +1099,7 @@ impl<L: Link> Stack<L> {
             },
             Op::UdpSend => {
                 let Some(buf) = buf else {
-                    return answer(reply_to, Reply::status(Status::BadHandles));
+                    return self.refuse(reply_to, Refusal::BadHandles, now);
                 };
                 let Some(port) = self
                     .sockets
@@ -1014,7 +1113,7 @@ impl<L: Link> Stack<L> {
                 let mut data = [0u8; MAX_DATAGRAM as usize];
                 match self.buffers.map(buf) {
                     Some(b) if b.len() >= len => data[..len].copy_from_slice(&b[..len]),
-                    _ => return answer(reply_to, Reply::status(Status::BadHandles)),
+                    _ => return self.refuse(reply_to, Refusal::BadHandles, now),
                 }
                 match self.send_udp(port, addr, req.port, &data[..len]) {
                     Ok(()) => answer(reply_to, Reply::ok(len as u64)),
@@ -1023,7 +1122,7 @@ impl<L: Link> Stack<L> {
             }
             Op::UdpRecv => {
                 let Some(buf) = buf else {
-                    return answer(reply_to, Reply::status(Status::BadHandles));
+                    return self.refuse(reply_to, Refusal::BadHandles, now);
                 };
                 let Some(sock) = self
                     .sockets
@@ -1033,7 +1132,7 @@ impl<L: Link> Stack<L> {
                     return answer(reply_to, Reply::status(Status::BadSock));
                 };
                 if sock.recv.is_some() {
-                    return answer(reply_to, Reply::status(Status::Busy));
+                    return self.refuse(reply_to, Refusal::WaitPending, now);
                 }
                 let pending = PendingRecv {
                     reply_to,
@@ -1051,10 +1150,10 @@ impl<L: Link> Stack<L> {
             }
             Op::Dns => {
                 let Some(buf) = buf else {
-                    return answer(reply_to, Reply::status(Status::BadHandles));
+                    return self.refuse(reply_to, Refusal::BadHandles, now);
                 };
                 let Some(slot) = self.dns.iter().position(|d| d.is_none()) else {
-                    return answer(reply_to, Reply::status(Status::Busy));
+                    return self.refuse(reply_to, Refusal::DnsTableFull, now);
                 };
                 let (server, port) = if addr.is_unspecified() {
                     match self.config {
@@ -1067,21 +1166,21 @@ impl<L: Link> Stack<L> {
                 // The whole name travels in the client buffer (up to 253 bytes).
                 let len = req.len as usize;
                 if len == 0 || len > dns::MAX_NAME {
-                    return answer(reply_to, Reply::status(Status::Invalid));
+                    return self.refuse(reply_to, Refusal::BadRequest, now);
                 }
                 let mut name = [0u8; dns::MAX_NAME];
                 match self.buffers.map(buf) {
                     Some(b) if b.len() >= len => name[..len].copy_from_slice(&b[..len]),
-                    _ => return answer(reply_to, Reply::status(Status::BadHandles)),
+                    _ => return self.refuse(reply_to, Refusal::BadHandles, now),
                 }
                 let Ok(name_str) = core::str::from_utf8(&name[..len]) else {
-                    return answer(reply_to, Reply::status(Status::Invalid));
+                    return self.refuse(reply_to, Refusal::BadRequest, now);
                 };
                 let id = self.dns_id;
                 self.dns_id = self.dns_id.wrapping_add(1);
                 let mut q = [0u8; 320];
                 let Some(n) = dns::write_query(id, name_str, &mut q) else {
-                    return answer(reply_to, Reply::status(Status::Invalid));
+                    return self.refuse(reply_to, Refusal::BadRequest, now);
                 };
                 let src_port = self.dns_port;
                 match self.send_udp(src_port, server, port, &q[..n]) {
@@ -1167,7 +1266,7 @@ pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
             let buf = (nh >= 2).then_some(handles[1]);
             match Request::decode(&msg[..n]) {
                 Some(req) => stack.handle(req, reply_to, buf, now),
-                None => answer(reply_to, Reply::status(Status::Invalid)),
+                None => stack.refuse(reply_to, Refusal::BadRequest, now),
             }
             let retained = stack.retained.take();
             if let Some(b) = buf {

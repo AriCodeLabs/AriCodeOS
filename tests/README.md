@@ -25,6 +25,8 @@ libs/*/src/lib.rs        #[cfg(test)] unit tests of ELF, paging, cmdline, AriFS,
 boot-protocol/src/lib.rs #[cfg(test)] memory classification, iterator, cmdline
 tools/xtask/src/*.rs     #[cfg(test)] scenario validity, helpers
 tests/qemu/*.toml        integration scenarios in QEMU
+user/testprogs/src/bin/  test programs in the initrd; user/testprogs/manifests/ holds the manifest of
+                         those the shell launches with capabilities (`run tcp_hog`)
 ```
 
 ## Writing a QEMU scenario

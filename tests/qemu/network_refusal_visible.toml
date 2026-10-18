@@ -1,0 +1,39 @@
+# Incident 0012: a refusal by netd must be visible. `tcp_hog` (manifest
+# `caps = net`) opens connections to the host echo server until netd answers
+# Busy with its 8-slot TCP table full and prints the status the way the
+# shell does; it closes them on exit, which leaves them in TIME-WAIT (2 s),
+# so the shell's `http` typed at the next prompt is refused the same way
+# and must name the status instead of "rejected the request". netd records
+# the refusal as the fault event `net tcp table full` (at most once per
+# second per kind; the code counts the refusals since the previous event)
+# and `diag` lists it. No selftest: the boot clients would otherwise leave
+# connections of their own in the table.
+name = "network.refusal_visible"
+description = "netd refusals name their status in the shell and leave a fault event in diag"
+level = "full"
+areas = ["network", "shell", "diag"]
+selftest = false
+cmdline = "qemu_exit shell"
+timeout_secs = 90
+stdin = ["run tcp_hog", "http http://10.0.2.2:17010/hola", "diag", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: launch tcp_hog with manifest [net]",
+    "tcp_hog: 8 connections open; the next one: network service refused: busy (no free connection or send slot)",
+    "virtio-net: fault net tcp table full x1",
+    "run: tcp_hog exited with 0",
+    "http: could not connect: network service refused: busy (no free connection or send slot)",
+    "recent kernel events:",
+    "fault reported by process ",
+    ": net tcp table full (code ",
+    "=== end of diagnostics ===",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "network service rejected the request",
+    "tcp_hog: netd never refused",
+    "HTTP 200",
+]

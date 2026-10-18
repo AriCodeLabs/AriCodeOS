@@ -22,6 +22,35 @@ pub enum NetError {
     Status(Status),
 }
 
+impl NetError {
+    /// One line for the user, naming the status: a refusal by the network
+    /// service says which one ("network service refused: busy ...") instead
+    /// of a generic "rejected" (incident 0012). A protocol outcome
+    /// (timeout, no configuration, unknown name, reset) keeps its own
+    /// wording, since the service did not refuse anything.
+    pub fn describe(self) -> &'static str {
+        match self {
+            NetError::Ipc(_) => "network service not responding",
+            NetError::Status(s) => match s {
+                Status::Ok => "ok",
+                Status::Timeout => "no reply (timed out)",
+                Status::NoRoute => "no network configuration",
+                Status::NotFound => "unknown name",
+                Status::Reset => "connection refused or reset by the other end",
+                Status::Busy => "network service refused: busy (no free connection or send slot)",
+                Status::Invalid => "network service refused: invalid (malformed request)",
+                Status::BadHandles => {
+                    "network service refused: bad handles (client buffer missing or not accepted)"
+                }
+                Status::BadSock => {
+                    "network service refused: bad socket (unknown, closed or listening)"
+                }
+                Status::InUse => "network service refused: port in use",
+            },
+        }
+    }
+}
+
 /// Received datagram: sender and length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Datagram {
@@ -246,5 +275,75 @@ impl NetClient {
         }
         req.timeout_ms = timeout_ms;
         self.call(req, true).map(|r| r.addr())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL: [Status; 10] = [
+        Status::Ok,
+        Status::Invalid,
+        Status::Timeout,
+        Status::NoRoute,
+        Status::BadHandles,
+        Status::Busy,
+        Status::BadSock,
+        Status::InUse,
+        Status::NotFound,
+        Status::Reset,
+    ];
+
+    /// Every status has its own text and none hides behind a generic
+    /// "rejected the request" (incident 0012).
+    #[test]
+    fn every_status_is_named() {
+        for (i, a) in ALL.iter().enumerate() {
+            let text = NetError::Status(*a).describe();
+            assert!(
+                !text.is_empty() && !text.contains("rejected"),
+                "{a:?}: {text}"
+            );
+            for b in &ALL[i + 1..] {
+                assert_ne!(text, NetError::Status(*b).describe(), "{a:?} vs {b:?}");
+            }
+        }
+        assert_eq!(
+            NetError::Ipc(Error::Timeout).describe(),
+            "network service not responding"
+        );
+    }
+
+    /// Refusals by the service say so and name the status; protocol
+    /// outcomes do not claim a refusal.
+    #[test]
+    fn refusals_say_refused_and_name_the_status() {
+        for s in [
+            Status::Busy,
+            Status::Invalid,
+            Status::BadHandles,
+            Status::BadSock,
+            Status::InUse,
+        ] {
+            let text = NetError::Status(s).describe();
+            assert!(
+                text.starts_with("network service refused: "),
+                "{s:?}: {text}"
+            );
+        }
+        assert_eq!(
+            NetError::Status(Status::Busy).describe(),
+            "network service refused: busy (no free connection or send slot)"
+        );
+        for s in [
+            Status::Timeout,
+            Status::NoRoute,
+            Status::NotFound,
+            Status::Reset,
+        ] {
+            let text = NetError::Status(s).describe();
+            assert!(!text.starts_with("network service"), "{s:?}: {text}");
+        }
     }
 }

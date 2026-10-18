@@ -164,16 +164,21 @@ pub fn initrd_programs() -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// Application manifests (`apps/*/NAME.manifest`): they go into the initrd
+/// Application manifests (`apps/*/NAME.manifest`) and those of the test
+/// programs the shell launches through the broker
+/// (`user/testprogs/manifests/NAME.manifest`): they go into the initrd
 /// under their file name, next to the program they describe.
 pub fn initrd_manifests() -> Result<Vec<(String, PathBuf)>> {
     let apps = root().join("apps");
-    let mut out = Vec::new();
+    let mut dirs = vec![root().join("user/testprogs/manifests")];
     for entry in std::fs::read_dir(&apps).map_err(|e| format!("{}: {e}", apps.display()))? {
         let dir = entry.map_err(|e| e.to_string())?.path();
-        if !dir.is_dir() {
-            continue;
+        if dir.is_dir() {
+            dirs.push(dir);
         }
+    }
+    let mut out = Vec::new();
+    for dir in dirs {
         for f in std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
             let path = f.map_err(|e| e.to_string())?.path();
             if path.extension().is_some_and(|x| x == "manifest") {

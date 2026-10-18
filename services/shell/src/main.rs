@@ -617,18 +617,12 @@ fn print_ip(ip: [u8; 4]) {
     print(aricode_net::Ipv4Addr(ip).format(&mut b));
 }
 
+/// One line per network error, naming the status netd answered with
+/// (`NetError::describe`, incident 0012): a refusal is never reported as a
+/// generic "rejected the request".
 fn net_error(e: NetError) {
-    match e {
-        NetError::Status(abi_status) => {
-            print(match abi_status {
-                aricode_proto::net::Status::Timeout => b"no reply (timed out)\n" as &[u8],
-                aricode_proto::net::Status::NoRoute => b"no network configuration\n",
-                aricode_proto::net::Status::NotFound => b"unknown name\n",
-                _ => b"network service rejected the request\n",
-            });
-        }
-        NetError::Ipc(_) => print(b"network service not responding\n"),
-    }
+    print(e.describe().as_bytes());
+    print(b"\n");
 }
 
 fn net(client: &NetClient) {
