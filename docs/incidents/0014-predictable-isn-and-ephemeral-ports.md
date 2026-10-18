@@ -51,9 +51,11 @@ functions of public inputs:
 
 ## Rule
 
-The security rule of the project (set by the maintainer on 2026-10-11:
-services closed by default, no committed keys, refusals logged, **real
-entropy for secrets**; applied in ADR 0025 for the SSH keys): an ISN is a secret
+The security rule of the project ([CONTRIBUTING.md](../../CONTRIBUTING.md),
+"Security": services closed by default, no committed keys, refusals logged,
+**real entropy for secrets**; [SECURITY.md](../../SECURITY.md) counts "a
+secret derived from a predictable source" as a vulnerability; applied in
+ADR 0025 for the SSH keys): an ISN is a secret
 in the sense of RFC 6528 ("the ISN must be unpredictable to off-path
 attackers"); it must come from the kernel's entropy (`crypto.random`, the
 source sshd already uses for its keys), not from the clock or the peer.
