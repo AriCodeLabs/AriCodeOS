@@ -155,6 +155,17 @@ cargo xtask fs-cat build/usb-dump.img diag.txt   # uptime, memory, CPUs, process
 
 The 70 MiB cover the ARI0 partition of the USB image (LBA 133120 to 139263).
 
+### Entropy: does the laptop have `rdrand`?
+
+The kernel's boot line `random: ChaCha20 generator seeded with rdrand` or
+`random: ChaCha20 generator seeded with TSC (no rdrand: limited entropy)`
+is the only sign of it; `diag` does not repeat it, so read it on the
+serial console or a photo of the first boot. The laptop's PCH
+(`8086:1e31`, 7-series) pairs with Ivy Bridge (usually `rdrand`) or Sandy
+Bridge (none). It decides the quality of sshd's keys (ADR 0025) and of
+netd's TCP secret (ADR 0034); user space cannot query it (kernel
+follow-up in ADR 0034 §4). Not yet read on the laptop (2026-10-18).
+
 ## If something fails
 
 The cmdline switches isolate subsystems. Edit them in

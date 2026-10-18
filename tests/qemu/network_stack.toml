@@ -2,7 +2,11 @@
 # user network, answers ARP, pings the router, exchanges UDP and
 # resolves a name against the host test responder. Incident 0014 (ADR
 # 0034): at start netd reports that its TCP secret (ISNs and ephemeral
-# ports) came whole from the kernel's entropy, and never the degraded fault.
+# ports) came whole from the kernel generator, and never the degraded fault.
+# The kernel always answers `RANDOM` with the bytes asked and QEMU's CPU
+# has no rdrand (`random: ChaCha20 generator seeded with TSC`), so the line
+# means "whole secret from the generator", not "strong entropy", and the
+# degraded fault could only mean a refused syscall.
 name = "network.stack"
 description = "virtio-net + DHCP + ARP + ICMP + UDP + DNS over IPC; TCP secret from entropy"
 level = "full"

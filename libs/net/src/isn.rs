@@ -76,6 +76,30 @@ pub fn ephemeral_port(
     EPHEMERAL_FIRST + (offset.wrapping_add(count) % EPHEMERAL_COUNT) as u16
 }
 
+/// Ephemeral port for the next connection to `remote:remote_port` that is
+/// not `in_use` (RFC 6056 section 3.3.3 with its "port in use" check):
+/// walks [`ephemeral_port`] from `*count`, advancing the counter past every
+/// candidate tried, and gives up with `None` once the whole range has been
+/// offered. A caller with at most `n` ports in use gets an answer within
+/// `n + 1` candidates, since consecutive candidates are distinct.
+pub fn pick_ephemeral_port(
+    secret: &Secret,
+    local: Ipv4Addr,
+    remote: Ipv4Addr,
+    remote_port: u16,
+    count: &mut u32,
+    mut in_use: impl FnMut(u16) -> bool,
+) -> Option<u16> {
+    for _ in 0..EPHEMERAL_COUNT {
+        let port = ephemeral_port(secret, local, remote, remote_port, *count);
+        *count = count.wrapping_add(1);
+        if !in_use(port) {
+            return Some(port);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -167,6 +191,39 @@ mod tests {
             !starts.contains(&50000),
             "never the fixed start of incident 0014"
         );
+    }
+
+    /// The service's walk: with the eight slots of netd holding the first
+    /// eight candidates, the ninth is chosen and the counter moves past it;
+    /// nothing in use gives the first candidate; everything in use gives up.
+    #[test]
+    fn pick_skips_every_port_in_use_and_terminates() {
+        let s = secret(11);
+        let pick = |count: &mut u32, in_use: &dyn Fn(u16) -> bool| {
+            pick_ephemeral_port(&s, LOCAL, REMOTE, 443, count, in_use)
+        };
+        let held: BTreeSet<u16> = (0..8)
+            .map(|c| ephemeral_port(&s, LOCAL, REMOTE, 443, c))
+            .collect();
+        assert_eq!(held.len(), 8, "consecutive candidates are distinct");
+
+        let mut count = 0;
+        let port = pick(&mut count, &|p| held.contains(&p)).expect("a free port");
+        assert!(!held.contains(&port));
+        assert!((EPHEMERAL_FIRST..=EPHEMERAL_LAST).contains(&port));
+        assert_eq!(port, ephemeral_port(&s, LOCAL, REMOTE, 443, 8));
+        assert_eq!(count, 9, "the counter moved past the eight tried");
+
+        let mut count = 5;
+        assert_eq!(
+            pick(&mut count, &|_| false),
+            Some(ephemeral_port(&s, LOCAL, REMOTE, 443, 5))
+        );
+        assert_eq!(count, 6);
+
+        let mut count = 0;
+        assert_eq!(pick(&mut count, &|_| true), None, "whole range in use");
+        assert_eq!(count, EPHEMERAL_COUNT, "one pass over the range, no spin");
     }
 
     #[test]

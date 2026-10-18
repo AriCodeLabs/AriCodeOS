@@ -26,12 +26,15 @@ the sense of RFC 6528.
 
 1. **One secret per boot.** `Stack::new` draws `isn::SECRET_LEN` (32)
    bytes from the kernel generator (`sys::random`, `system_info(RANDOM)`)
-   with the `SYSTEM` (`READ`) handle the driver already holds for its
-   clock: no change to the handles init gives virtio-net or rtl-net. The
-   kernel generator is ChaCha20 seeded from `rdrand`, or from TSC samples
-   and the interrupt-timing pool on CPUs without it, the same source sshd
-   draws its per-connection randomness from (ADR 0025). The secret lives
-   only in netd's memory and is never written anywhere.
+   with the `SYSTEM` handle the driver already holds for its clock: init
+   duplicates it with `READ | TRANSFER` for every driver launched
+   `with_system` (`services/init/src/main.rs`), the kernel checks `READ`
+   for `system_info`, and `TRANSFER` only let init hand it over. No change
+   to the handles init gives virtio-net or rtl-net. The kernel generator is
+   ChaCha20 seeded from `rdrand`, or from TSC samples and the
+   interrupt-timing pool on CPUs without it, the same source sshd draws
+   its per-connection randomness from (ADR 0025). The secret lives only in
+   netd's memory and is never written anywhere.
 2. **ISN = M + F(local_ip, local_port, remote_ip, remote_port, secret)**
    (RFC 6528 section 3), in `aricode_net::isn::initial_seq`: `M` is the
    millisecond clock in 4 µs ticks (`now_ms * 250` mod 2^32) and `F` the
@@ -47,19 +50,35 @@ the sense of RFC 6528.
    `port = 49152 + ((F'(local_ip, remote_ip, remote_port, secret) + count)
    mod 16384)`, the IANA range, with a counter of connections opened this
    boot and a second tag byte for `F'`. Each destination gets its own walk
-   and every boot starts somewhere else; netd skips a candidate held by any
-   TCP slot, listeners and TIME-WAIT included (a slot stays until
-   `tcp_poll` frees it), by trying the next count. With 8 slots at most 8
-   ports are in use and 9 consecutive candidates are distinct, so the
-   search ends.
-4. **Degradation is loud.** If the kernel gives fewer than 32 bytes or
-   refuses the read, netd records the fault event `net tcp secret
-   degraded` (code = bytes obtained), prints `fault net tcp secret
-   degraded: too few random bytes, ISNs predictable` and fills the rest
-   from the clock, so that boot is as predictable as before and `diag`
-   says so; it never falls back silently. On a normal start it prints `tcp
-   secret from kernel entropy`, which scenario `network.stack` requires,
-   together with the absence of the degraded line.
+   and every boot starts somewhere else. `isn::pick_ephemeral_port` (pure,
+   host-tested) walks the candidates from the counter and skips the ones a
+   caller-supplied check marks in use; netd marks a port held by any TCP
+   slot, listeners and TIME-WAIT included (a slot stays until `tcp_poll`
+   frees it). With 8 slots at most 8 ports are in use and consecutive
+   candidates are distinct, so the answer comes within 9 candidates; the
+   function gives up with `None` after one pass over the range, which netd
+   answers as `Busy` (`net tcp table full`).
+4. **Degradation is loud, and what netd can see is limited.**
+   `system_info(RANDOM)` always answers with `min(len, 256)` bytes
+   (`kernel/src/user/syscalls.rs`), and the kernel exposes no readiness or
+   source state of its generator to user space, so the fault event `net
+   tcp secret degraded` (code = bytes obtained) and the console line
+   `fault net tcp secret degraded: too few random bytes, ISNs predictable`
+   fire only when the syscall itself is refused (a handle without `READ`,
+   or a kernel without the query), never for the quality of the entropy;
+   the rest of the secret is then filled from the clock, so that boot is
+   as predictable as before and `diag` says so. The only quality signal is
+   the kernel's own boot line `random: ChaCha20 generator seeded with
+   rdrand` or `... with TSC (no rdrand: limited entropy)`, which netd
+   cannot read. QEMU's default CPU has no `rdrand`: scenario
+   `network.stack`, which requires `tcp secret from kernel entropy` and
+   forbids the degraded line, passes with a TSC-seeded generator, and its
+   assertion means "the whole secret came from the kernel generator", not
+   "from strong entropy". Incident 0014's plan item 3 (wait for entropy,
+   `net isn no entropy`) is superseded: without a readiness state there is
+   nothing to wait for. Kernel follow-up: expose the generator's source
+   and seeding state to user space (a `system_info` kind), so netd and sshd
+   can wait or report instead of trusting blindly.
 5. **Host tests** (`libs/net`): the ISN differs across secrets for one
    tuple and across tuples for one secret (by more than 2^16, never a
    neighbour), grows by 250 per millisecond for one tuple and secret and
@@ -75,10 +94,14 @@ the sense of RFC 6528.
   no external crates). One HMAC-SHA-256 per connection attempt (four
   compressions) and one per candidate port; negligible next to the
   handshake.
-- The secret changes at every boot, so a connection of the previous boot
-  that the peer still holds sees a SYN with an unrelated ISN and port:
-  RFC 793 section 3.4 then applies as for any new connection, and the
-  collision of incident 0012 candidate 4 cannot recur by construction.
+- The secret changes at every boot. After a reboot the first port towards
+  a destination is uniform over the 16384 of the range, so a 4-tuple the
+  server still holds (`k` old connections to that destination) is reused
+  with probability about `k / 16384` per connection, and the new ISN is
+  then unrelated to the old one (lower about one time in two). The
+  collision of incident 0012 candidate 4 goes from certain (same port,
+  lower ISN) to improbable, not to impossible: a `Reset` right after a boot
+  is still possible and is not excluded a priori.
 - The ISN clock is 4 µs from a 1 ms source: within one millisecond the
   same tuple would get the same ISN. netd never opens two connections
   with the same 4-tuple (the port search skips ports in use), so this is
@@ -92,5 +115,8 @@ the sense of RFC 6528.
   kernel generator at netd's start (interrupt-timing pool plus TSC); sshd's
   persisted seed does not help netd, which has no file service. The
   kernel's generator, not each service, is where the entropy question is
-  answered (ADR 0025, "Entropy"); a deeper fix there (saving a seed across
-  boots at kernel level) is future work.
+  answered (ADR 0025, "Entropy"); a deeper fix there (exposing the
+  generator's source and seeding state to user space first, then saving a
+  seed across boots at kernel level) is future work. Whether the laptop has
+  `rdrand` is read from its `random: ... seeded with` boot line
+  (`docs/hardware.md`).

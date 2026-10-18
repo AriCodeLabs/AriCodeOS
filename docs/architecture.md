@@ -730,19 +730,25 @@ latter briefly to add the region.
 - Initial sequence numbers and ephemeral ports are secrets (ADR 0034,
   incident 0014). `netd` draws a 32-byte secret per boot from the kernel
   generator (`sys::random` through the `SYSTEM` handle it already holds as
-  its clock) and prints `tcp secret from kernel entropy`; if the kernel
-  gave fewer bytes it records the fault event `net tcp secret degraded`
-  (code = bytes obtained) and says so on the console instead of falling
-  back silently. `aricode_net::isn::initial_seq` gives every connection
+  its clock: `READ | TRANSFER` from init, `READ` is what the kernel checks)
+  and prints `tcp secret from kernel entropy`; if the syscall is refused it
+  records the fault event `net tcp secret degraded` (code = bytes
+  obtained) and says so on the console instead of falling back silently.
+  The kernel always answers `RANDOM` with the bytes asked and exposes no
+  entropy-quality state, so that fault cannot mean weak entropy; the
+  kernel's boot line `random: ChaCha20 generator seeded with rdrand` or
+  `... with TSC (no rdrand: limited entropy)` is the only quality signal
+  (QEMU's CPU is the latter). `aricode_net::isn::initial_seq` gives every connection
   `M + F(4-tuple, secret)` as RFC 6528 prescribes (`M` the ms clock in
   4 µs ticks, `F` the first 32 bits of HMAC-SHA-256): the active SYN and
   the passive SYN|ACK alike, through `Connection::connect(iss, now)` and
   `Connection::listen(iss)`; the connection never derives an ISN from the
   clock or the peer's number. `isn::ephemeral_port` walks the IANA range
   49152..65535 from a per-destination keyed offset plus a connection
-  counter (RFC 6056 section 3.3.3); `netd` skips a port held by any slot,
-  listeners and TIME-WAIT included. Host tests in `libs/net` pin each
-  property against the old formulas.
+  counter (RFC 6056 section 3.3.3) and `isn::pick_ephemeral_port` skips the
+  candidates the caller marks in use: `netd` marks a port held by any
+  slot, listeners and TIME-WAIT included. Host tests in `libs/net` pin
+  each property against the old formulas.
 - QEMU forwards `127.0.0.1:17009` to guest port 7 (`hostfwd`) and
   the xtask responder listens for TCP echo on `127.0.0.1:17008`. A
   scenario can declare `[host_tcp] marker/payload`: on seeing the marker

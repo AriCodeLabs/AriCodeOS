@@ -304,10 +304,13 @@ fn new_socket(port: u16) -> Socket {
 /// The per-boot TCP secret (ADR 0034): `isn::SECRET_LEN` bytes from the
 /// kernel generator (`rdrand`, or the TSC and the interrupt pool on CPUs
 /// without it; the same source sshd draws from), read with the `SYSTEM`
-/// handle the clock already holds. A short or failed read is not hidden:
-/// it records the fault event `TCP_SECRET_FAULT` (code = bytes obtained),
-/// says so on the console and fills the rest from the clock, so that boot's
-/// numbers are as predictable as before incident 0014 and `diag` shows it.
+/// handle the clock already holds (`READ | TRANSFER` from init; the kernel
+/// checks `READ`). The kernel answers with every byte asked whenever it
+/// answers and exposes no entropy-quality state, so the only failure this
+/// can see is a refused syscall, and that one is not hidden: it records the
+/// fault event `TCP_SECRET_FAULT` (code = bytes obtained), says so on the
+/// console and fills the rest from the clock, so that boot's numbers are as
+/// predictable as before incident 0014 and `diag` shows it.
 fn tcp_secret(clock: &Clock, name: &str) -> isn::Secret {
     let mut secret = [0u8; isn::SECRET_LEN];
     let got = sys::random(clock.0, &mut secret).unwrap_or(0);
@@ -409,27 +412,6 @@ impl<L: Link> Stack<L> {
             remote_port,
             now,
         )
-    }
-
-    /// Ephemeral port for a new connection to `remote:remote_port` (RFC
-    /// 6056 section 3.3.3, ADR 0034): the keyed per-destination walk, skipping
-    /// ports held by any slot, listeners and TIME-WAIT included (a slot stays
-    /// until `tcp_poll` frees it). `MAX_TCP + 1` consecutive candidates are
-    /// distinct and at most `MAX_TCP` ports are in use, so the loop ends.
-    fn ephemeral_port(&mut self, local: Ipv4Addr, remote: Ipv4Addr, remote_port: u16) -> u16 {
-        loop {
-            let count = self.tcp_port_count;
-            self.tcp_port_count = count.wrapping_add(1);
-            let port = isn::ephemeral_port(&self.tcp_secret, local, remote, remote_port, count);
-            if !self
-                .tcp
-                .iter()
-                .flatten()
-                .any(|s| s.conn.local_port() == port)
-            {
-                return port;
-            }
-        }
     }
 
     // ---------------- transmit ----------------
@@ -945,7 +927,22 @@ impl<L: Link> Stack<L> {
                     return self.refuse(reply_to, Refusal::TcpTableFull, now);
                 };
                 let local = self.my_ip();
-                let port = self.ephemeral_port(local, addr, req.port);
+                // RFC 6056 walk (ADR 0034) skipping ports held by any slot,
+                // listeners and TIME-WAIT included (a slot stays until
+                // `tcp_poll` frees it). With `MAX_TCP` slots the answer comes
+                // within `MAX_TCP + 1` candidates; `None` (range exhausted)
+                // is only reachable with more slots than ports.
+                let tcp = &self.tcp;
+                let Some(port) = isn::pick_ephemeral_port(
+                    &self.tcp_secret,
+                    local,
+                    addr,
+                    req.port,
+                    &mut self.tcp_port_count,
+                    |p| tcp.iter().flatten().any(|s| s.conn.local_port() == p),
+                ) else {
+                    return self.refuse(reply_to, Refusal::TcpTableFull, now);
+                };
                 let mut conn = Connection::new(local, port, addr, req.port);
                 conn.connect(self.initial_seq(local, port, addr, req.port, now), now);
                 let mut sock = Box::new(TcpSock::new(conn));
