@@ -191,8 +191,13 @@ any scenario, HTTPS and update downloads included.
 - The one-off itself: `Busy` or `Reset` is unknown. Next occurrence tells.
 - netd does not reclaim the sockets of a client that exits without
   closing them (as arifs with descriptors, incident 0011).
-- Ephemeral ports and ISNs restart from fixed values at every boot:
-  incident 0014 (security).
+- Ephemeral ports and ISNs restarted from fixed values at every boot:
+  incident 0014 (security), fixed by ADR 0034 (per-boot secret from the
+  kernel's entropy, RFC 6528 ISNs, RFC 6056 ports). Candidate 4 goes from
+  certain to improbable (about 1/16384 per connection towards a server
+  still holding one old connection, with the new ISN lower about one time
+  in two), not to impossible: a recurrence may still read `Reset`; `Busy`
+  points at candidates 1 or 5.
 - A SYN to a listener with no free slot is dropped silently and half-open
   connections hold their slot for about 31 s: incident 0013.
 - `tcp_poll` ignores send failures of TCP segments: the new `net tx busy`

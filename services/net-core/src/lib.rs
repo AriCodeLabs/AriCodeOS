@@ -13,7 +13,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 
 use aricode_net::tcp::{self, Connection};
-use aricode_net::{arp, dhcp, dns, eth, icmp, ipv4, udp, Ipv4Addr, MacAddr};
+use aricode_net::{arp, dhcp, dns, eth, icmp, ipv4, isn, udp, Ipv4Addr, MacAddr};
 use aricode_proto::net::{Info, Op, Reply, Request, Status, MAX_DATAGRAM};
 use aricode_rt::sys::virtio_pci::{IRQ, SERVICE};
 use aricode_rt::sys::{self, abi, Handle};
@@ -24,7 +24,10 @@ const MAX_PINGS: usize = 4;
 const MAX_SOCKETS: usize = 8;
 const MAX_DNS: usize = 4;
 const MAX_TCP: usize = 8;
-const TCP_EPHEMERAL_FIRST: u16 = 50000;
+/// Fault event when the kernel gave fewer than `isn::SECRET_LEN` random
+/// bytes for the TCP secret (ADR 0034); its code is the number obtained.
+const TCP_SECRET_FAULT: &str = "net tcp secret degraded";
+const _: () = assert!(TCP_SECRET_FAULT.len() <= abi::sysinfo::EVENT_NAME_LEN);
 const PING_ID: u16 = 0xA51C;
 const DHCP_RETRY_MS: u64 = 1000;
 /// Wait for an answer to the ARP probe of an acknowledged address.
@@ -273,7 +276,11 @@ pub struct Stack<L: Link> {
     dns: [Option<PendingDns>; MAX_DNS],
     /// On the heap: each socket carries 8 KiB of buffers and the stack is 64 KiB.
     tcp: [Option<Box<TcpSock>>; MAX_TCP],
-    tcp_next_port: u16,
+    /// Per-boot key of the initial sequence numbers and the ephemeral
+    /// ports (`aricode_net::isn`, ADR 0034), from the kernel's entropy.
+    tcp_secret: isn::Secret,
+    /// Connections opened so far: the RFC 6056 port counter.
+    tcp_port_count: u32,
     deferred: [Option<Deferred>; 4],
     buffers: ClientBuffers,
     /// Ephemeral UDP port for DNS queries.
@@ -294,6 +301,35 @@ fn new_socket(port: u16) -> Socket {
     }
 }
 
+/// The per-boot TCP secret (ADR 0034): `isn::SECRET_LEN` bytes from the
+/// kernel generator (`rdrand`, or the TSC and the interrupt pool on CPUs
+/// without it; the same source sshd draws from), read with the `SYSTEM`
+/// handle the clock already holds (`READ | TRANSFER` from init; the kernel
+/// checks `READ`). The kernel answers with every byte asked whenever it
+/// answers and exposes no entropy-quality state, so the only failure this
+/// can see is a refused syscall, and that one is not hidden: it records the
+/// fault event `TCP_SECRET_FAULT` (code = bytes obtained), says so on the
+/// console and fills the rest from the clock, so that boot's numbers are as
+/// predictable as before incident 0014 and `diag` shows it.
+fn tcp_secret(clock: &Clock, name: &str) -> isn::Secret {
+    let mut secret = [0u8; isn::SECRET_LEN];
+    let got = sys::random(clock.0, &mut secret).unwrap_or(0);
+    if got >= isn::SECRET_LEN {
+        say(name, b"tcp secret from kernel entropy");
+    } else {
+        let _ = sys::event_record(got as u64, TCP_SECRET_FAULT);
+        say(
+            name,
+            b"fault net tcp secret degraded: too few random bytes, ISNs predictable",
+        );
+        let clock_bytes = clock.now().to_le_bytes();
+        for (i, b) in secret[got..].iter_mut().enumerate() {
+            *b ^= clock_bytes[i % clock_bytes.len()];
+        }
+    }
+    secret
+}
+
 impl<L: Link> Stack<L> {
     pub fn new(link: L, clock: Clock, name: &'static str) -> Self {
         let xid = 0x4152_4900 | (link.mac().0[5] as u32);
@@ -301,6 +337,7 @@ impl<L: Link> Stack<L> {
             dhcp: dhcp::Client::new(link.mac(), xid),
             link,
             name,
+            tcp_secret: tcp_secret(&clock, name),
             clock,
             dhcp_next: 0,
             probe_deadline: 0,
@@ -312,7 +349,7 @@ impl<L: Link> Stack<L> {
             sockets: [const { None }; MAX_SOCKETS],
             dns: [const { None }; MAX_DNS],
             tcp: [const { None }; MAX_TCP],
-            tcp_next_port: TCP_EPHEMERAL_FIRST,
+            tcp_port_count: 0,
             deferred: [const { None }; 4],
             buffers: ClientBuffers {
                 entries: [(0, 0, 0); 8],
@@ -356,6 +393,25 @@ impl<L: Link> Stack<L> {
         self.config
             .map(|c| c.address)
             .unwrap_or(Ipv4Addr::UNSPECIFIED)
+    }
+
+    /// RFC 6528 initial sequence number of a connection (ADR 0034).
+    fn initial_seq(
+        &self,
+        local: Ipv4Addr,
+        local_port: u16,
+        remote: Ipv4Addr,
+        remote_port: u16,
+        now: u64,
+    ) -> u32 {
+        isn::initial_seq(
+            &self.tcp_secret,
+            local,
+            local_port,
+            remote,
+            remote_port,
+            now,
+        )
     }
 
     // ---------------- transmit ----------------
@@ -753,7 +809,7 @@ impl<L: Link> Stack<L> {
             return;
         };
         let mut conn = Connection::new(ih.dst, h.dst_port, ih.src, h.src_port);
-        conn.listen();
+        conn.listen(self.initial_seq(ih.dst, h.dst_port, ih.src, h.src_port, now));
         conn.on_segment(&h, payload, now);
         let mut sock = Box::new(TcpSock::new(conn));
         sock.accepted_from = Some(listener as u16);
@@ -870,14 +926,25 @@ impl<L: Link> Stack<L> {
                 let Some(slot) = self.tcp.iter().position(|s| s.is_none()) else {
                     return self.refuse(reply_to, Refusal::TcpTableFull, now);
                 };
-                let port = self.tcp_next_port;
-                self.tcp_next_port = if port == u16::MAX {
-                    TCP_EPHEMERAL_FIRST
-                } else {
-                    port + 1
+                let local = self.my_ip();
+                // RFC 6056 walk (ADR 0034) skipping ports held by any slot,
+                // listeners and TIME-WAIT included (a slot stays until
+                // `tcp_poll` frees it). With `MAX_TCP` slots the answer comes
+                // within `MAX_TCP + 1` candidates; `None` (range exhausted)
+                // is only reachable with more slots than ports.
+                let tcp = &self.tcp;
+                let Some(port) = isn::pick_ephemeral_port(
+                    &self.tcp_secret,
+                    local,
+                    addr,
+                    req.port,
+                    &mut self.tcp_port_count,
+                    |p| tcp.iter().flatten().any(|s| s.conn.local_port() == p),
+                ) else {
+                    return self.refuse(reply_to, Refusal::TcpTableFull, now);
                 };
-                let mut conn = Connection::new(self.my_ip(), port, addr, req.port);
-                conn.connect((now as u32).wrapping_mul(64).wrapping_add(slot as u32), now);
+                let mut conn = Connection::new(local, port, addr, req.port);
+                conn.connect(self.initial_seq(local, port, addr, req.port, now), now);
                 let mut sock = Box::new(TcpSock::new(conn));
                 sock.connect = Some((reply_to, now + req.timeout_ms.max(1) as u64));
                 self.tcp[slot] = Some(sock);
@@ -898,7 +965,9 @@ impl<L: Link> Stack<L> {
                     return self.refuse(reply_to, Refusal::TcpTableFull, now);
                 };
                 let mut conn = Connection::new(self.my_ip(), req.port, Ipv4Addr::UNSPECIFIED, 0);
-                conn.listen();
+                // A listener sends nothing itself: every SYN to it gets a
+                // connection of its own in `on_tcp`, with its own ISN.
+                conn.listen(0);
                 let mut sock = Box::new(TcpSock::new(conn));
                 sock.listening = true;
                 self.tcp[slot] = Some(sock);

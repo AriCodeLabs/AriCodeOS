@@ -3,8 +3,9 @@
 //! Minimal network stack (Phase 22, section 38). Encoders and decoders
 //! without `alloc` over caller-supplied buffers, plus the small state
 //! machines a ring 3 network service needs (ARP cache, DHCP
-//! client). All the logic is pure and tested on the host; the `netd` service
-//! only connects it to the virtio-net driver and to IPC.
+//! client, TCP and its secrets). All the logic is pure and tested on the
+//! host; the `netd` service only connects it to the virtio-net driver and
+//! to IPC.
 
 #![no_std]
 
@@ -15,6 +16,7 @@ pub mod eth;
 pub mod faults;
 pub mod icmp;
 pub mod ipv4;
+pub mod isn;
 pub mod tcp;
 pub mod udp;
 

@@ -365,6 +365,9 @@ version = "0.11.0"
 [[package]]
 name = "aricode-net"
 version = "0.11.0"
+dependencies = [
+ "aricode-crypto",
+]
 
 [[package]]
 name = "aricode-pci"

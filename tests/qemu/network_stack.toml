@@ -1,8 +1,14 @@
 # Phase 22: netd (virtio-net in ring 3) gets an address via DHCP from the QEMU
 # user network, answers ARP, pings the router, exchanges UDP and
-# resolves a name against the host test responder.
+# resolves a name against the host test responder. Incident 0014 (ADR
+# 0034): at start netd reports that its TCP secret (ISNs and ephemeral
+# ports) came whole from the kernel generator, and never the degraded fault.
+# The kernel always answers `RANDOM` with the bytes asked and QEMU's CPU
+# has no rdrand (`random: ChaCha20 generator seeded with TSC`), so the line
+# means "whole secret from the generator", not "strong entropy", and the
+# degraded fault could only mean a refused syscall.
 name = "network.stack"
-description = "virtio-net + DHCP + ARP + ICMP + UDP + DNS over IPC"
+description = "virtio-net + DHCP + ARP + ICMP + UDP + DNS over IPC; TCP secret from entropy"
 level = "full"
 areas = ["network", "virtio", "init"]
 cmdline = "qemu_exit"
@@ -12,6 +18,7 @@ timeout_secs = 60
 exit = 33
 serial_contains = [
     "virtio-net: device ready, MAC ",
+    "virtio-net: tcp secret from kernel entropy",
     "virtio-net: serving requests",
     "virtio-net: DHCP 10.0.2.15 mask 255.255.255.0 router 10.0.2.2 dns 10.0.2.3",
     "net_client: ip 10.0.2.15 router 10.0.2.2 dns 10.0.2.3",
@@ -23,4 +30,9 @@ serial_contains = [
     "AriInit: network service ok",
     "ARICODEOS_KERNEL_READY",
 ]
-serial_absent = ["KERNEL PANIC", "initialization failed", "USER STACK OVERFLOW"]
+serial_absent = [
+    "KERNEL PANIC",
+    "initialization failed",
+    "USER STACK OVERFLOW",
+    "net tcp secret degraded",
+]
