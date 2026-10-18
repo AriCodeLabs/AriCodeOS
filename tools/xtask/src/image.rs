@@ -198,6 +198,20 @@ fn build_initrd(user_bin: &Path) -> Result<Vec<u8>> {
     aricode_initrd::build(&files).map_err(|e| format!("initrd: {e:?}"))
 }
 
+/// The initrd without the files named in `names` (a missing name is not an
+/// error: the stick simply never had it).
+fn strip_initrd_files(initrd: &[u8], names: &[String]) -> Result<Vec<u8>> {
+    let parsed = aricode_initrd::Initrd::parse(initrd).map_err(|e| format!("initrd: {e:?}"))?;
+    let mut kept = Vec::new();
+    for entry in parsed.entries() {
+        let e = entry.map_err(|e| format!("initrd: {e:?}"))?;
+        if !names.iter().any(|n| n == e.name) {
+            kept.push((e.name, e.data));
+        }
+    }
+    aricode_initrd::build(&kept).map_err(|e| format!("initrd: {e:?}"))
+}
+
 fn write_esp(esp: &Path, a: &Artifacts, cmdline: Option<&str>) -> Result {
     let _ = fs::remove_dir_all(esp);
     for rel in [BOOTX64, KERNEL] {
@@ -300,7 +314,16 @@ pub fn write_usb_image(
     let mut files = Vec::new();
     walk_files(esp_dir, "", &mut files)?;
     for (rel, p) in &files {
-        let data = io(fs::read(p), "read ESP file")?;
+        let mut data = io(fs::read(p), "read ESP file")?;
+        if rel == INITRD {
+            // No test data on a stick (ADR 0032): without their manifests
+            // the test programs get no capability from the broker there.
+            let names: Vec<String> = crate::build::test_program_manifests()?
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect();
+            data = strip_initrd_files(&data, &names)?;
+        }
         fat.add_file(rel, &data)
             .map_err(|e| format!("fat {rel}: {e:?}"))?;
     }
@@ -938,6 +961,37 @@ mod tests {
             let err = build_usb_image(false, cmdline, None, None).unwrap_err();
             assert!(err.contains("added by AriBoot"), "{cmdline}: {err}");
         }
+    }
+
+    /// ADR 0032: the stick's initrd carries no test-program manifest, so
+    /// `run tcp_hog` on a real machine gets no capability; applications and
+    /// programs stay.
+    #[test]
+    fn stick_initrd_drops_test_program_manifests() {
+        let initrd = aricode_initrd::build(&[
+            ("init", b"elf".as_slice()),
+            ("tcp_hog", b"elf"),
+            ("tcp_hog.manifest", b"name = tcp_hog\ncaps = net\n"),
+            ("hello_app.manifest", b"name = hello_app\n"),
+        ])
+        .unwrap();
+        let names = vec![
+            String::from("tcp_hog.manifest"),
+            String::from("absent.manifest"),
+        ];
+        let stripped = strip_initrd_files(&initrd, &names).unwrap();
+        let parsed = aricode_initrd::Initrd::parse(&stripped).unwrap();
+        let kept: Vec<&str> = parsed.entries().map(|e| e.unwrap().name).collect();
+        assert_eq!(kept, ["init", "tcp_hog", "hello_app.manifest"]);
+        assert!(!test_program_manifest_names().unwrap().is_empty());
+        assert!(strip_initrd_files(b"junk", &names).is_err());
+    }
+
+    fn test_program_manifest_names() -> Result<Vec<String>> {
+        Ok(crate::build::test_program_manifests()?
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect())
     }
 
     #[test]

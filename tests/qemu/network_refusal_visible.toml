@@ -4,10 +4,10 @@
 # shell does; it closes them on exit, which leaves them in TIME-WAIT (2 s),
 # so the shell's `http` typed at the next prompt is refused the same way
 # and must name the status instead of "rejected the request". netd records
-# the refusal as the fault event `net tcp table full` (at most once per
-# second per kind; the code counts the refusals since the previous event)
-# and `diag` lists it. No selftest: the boot clients would otherwise leave
-# connections of their own in the table.
+# the refusal as the fault event `net tcp table full x1` (name = kind and
+# count in that second, code = the status number, 5 = busy; at most one
+# event per kind per second) and `diag` lists it. No selftest: the boot
+# clients would otherwise leave connections of their own in the table.
 name = "network.refusal_visible"
 description = "netd refusals name their status in the shell and leave a fault event in diag"
 level = "full"
@@ -27,7 +27,7 @@ serial_contains = [
     "http: could not connect: network service refused: busy (no free connection or send slot)",
     "recent kernel events:",
     "fault reported by process ",
-    ": net tcp table full (code ",
+    ": net tcp table full x1 (code 5)",
     "=== end of diagnostics ===",
     "ARICODEOS_SHUTDOWN",
 ]

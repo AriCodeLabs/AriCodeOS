@@ -59,9 +59,13 @@ core answered the status without recording anything. Since
 kind (`net tcp table full`, `net arp defer full`, `net tx busy`, `net arp
 no reply`, `net ping table full`, `net dns table full`, `net udp table
 full`, `net wait pending`, `net bad request`, `net bad handles`), bounded
-to one event per kind per second by `aricode_net::faults::Meter` with the
-held-back count as the event code, and `NetError::describe` names every
-status for the user. The list and the format are in
-`docs/architecture.md` (TCP section); the regression is
-`network.refusal_visible`. The refusal of the incident itself (`Busy` or
-`Reset`, once after a boot on the laptop) is still open.
+to one event per kind per second by `aricode_net::faults::Meter`: the
+event name carries the kind and the count in that second (`net tcp table
+full x3`), the code the `net::Status` number the client got (5 busy, 1
+invalid, 4 bad handles), and refusals held back during a second are
+recorded when it ends. `NetError::describe` names every status for the
+user. The list and the format are in `docs/architecture.md` (TCP
+section); the regression is `network.refusal_visible`. The refusal of the
+incident itself (`Busy` or `Reset`, once after a boot on the laptop) is
+still open; the audit of the fix opened incidents 0013 (silent SYN drop
+and half-open hold) and 0014 (predictable ISN and ephemeral ports).

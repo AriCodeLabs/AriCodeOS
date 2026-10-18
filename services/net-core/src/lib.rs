@@ -34,11 +34,13 @@ const DHCP_DECLINE_PAUSE_MS: u64 = 10_000;
 const ARP_WAIT_MS: u64 = 1000;
 
 /// Why netd refused a request or lost a frame (incident 0012). Each kind is
-/// a fault event in the kernel ring (`diag`: `fault reported by process N:
-/// NAME (code C)`, `C` = refusals of that kind since the previous event),
-/// recorded at most once per second per kind (`aricode_net::faults`).
-/// `BadSock`, `InUse`, `NoRoute`, `NotFound`, `Timeout` and `Reset` are not
-/// refusals: they describe the client's socket or the network's answer.
+/// a fault event in the kernel ring, recorded at most once per second per
+/// kind (`aricode_net::faults`): the name is `<kind> x<count>` (refusals of
+/// that kind in that second) and the code is the `net::Status` number the
+/// client got (`diag`: `fault reported by process N: net tcp table full x3
+/// (code 5)`). `BadSock`, `InUse`, `NoRoute`, `NotFound`, `Timeout` and
+/// `Reset` are not refusals: they describe the client's socket or the
+/// network's answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Refusal {
     /// `TcpConnect`/`TcpListen` with every TCP slot in use (`MAX_TCP`,
@@ -63,9 +65,25 @@ enum Refusal {
 
 impl Refusal {
     const COUNT: usize = 10;
+    const ALL: [Refusal; Self::COUNT] = [
+        Refusal::TcpTableFull,
+        Refusal::ArpDeferFull,
+        Refusal::TxBusy,
+        Refusal::ArpNoReply,
+        Refusal::PingTableFull,
+        Refusal::DnsTableFull,
+        Refusal::UdpTableFull,
+        Refusal::WaitPending,
+        Refusal::BadRequest,
+        Refusal::BadHandles,
+    ];
 
-    /// Event name (at most `EVENT_NAME_LEN` = 24 bytes).
-    fn name(self) -> &'static str {
+    fn from_index(i: usize) -> Option<Self> {
+        Self::ALL.get(i).copied()
+    }
+
+    /// Kind name; with `" x999"` appended it must fit an event name.
+    const fn name(self) -> &'static str {
         match self {
             Refusal::TcpTableFull => "net tcp table full",
             Refusal::ArpDeferFull => "net arp defer full",
@@ -80,7 +98,8 @@ impl Refusal {
         }
     }
 
-    /// Status the client receives.
+    /// Status the client receives (its number is the event code); a lost
+    /// frame carries the status its sender would have got.
     fn status(self) -> Status {
         match self {
             Refusal::BadRequest => Status::Invalid,
@@ -89,6 +108,16 @@ impl Refusal {
         }
     }
 }
+
+// Every kind name leaves room for " x999" in a kernel event name.
+const _: () = {
+    assert!(aricode_net::faults::LABEL_LEN == abi::sysinfo::EVENT_NAME_LEN);
+    let mut i = 0;
+    while i < Refusal::COUNT {
+        assert!(Refusal::ALL[i].name().len() + 5 <= aricode_net::faults::LABEL_LEN);
+        i += 1;
+    }
+};
 
 /// Link to the NIC: complete Ethernet frames, no headers of its own.
 pub trait Link {
@@ -295,21 +324,25 @@ impl<L: Link> Stack<L> {
         }
     }
 
-    /// Accounts a refusal or a lost frame: a fault event in the kernel ring
-    /// and a console line, at most once per second per kind, with the count
-    /// of the ones held back since the previous record as the event code.
+    /// Accounts a refusal or a lost frame: recorded at once if the kind was
+    /// quiet for a second, otherwise counted and recorded when the second
+    /// ends (`expire`).
     fn note(&mut self, what: Refusal, now: u64) {
         let count = self.faults.report(what as usize, now);
-        if count == 0 {
-            return;
+        if count > 0 {
+            self.record(what, count);
         }
-        let _ = sys::event_record(count as u64, what.name());
-        let mut b = [0u8; 20];
+    }
+
+    /// A fault event in the kernel ring (`<kind> x<count>`, code = status
+    /// number) and the same line on the console.
+    fn record(&self, what: Refusal, count: u32) {
+        let mut label = [0u8; aricode_net::faults::LABEL_LEN];
+        let name = aricode_net::faults::label(what.name(), count, &mut label);
+        let _ = sys::event_record(what.status() as u64, name);
         sys::print(self.name.as_bytes());
         sys::print(b": fault ");
-        sys::print(what.name().as_bytes());
-        sys::print(b" x");
-        sys::print(aricode_rt::fmt_u64(count as u64, &mut b));
+        sys::print(name.as_bytes());
         sys::print(b"\n");
     }
 
@@ -366,7 +399,13 @@ impl<L: Link> Stack<L> {
     /// With no known MAC it parks the packet and sends an ARP request.
     /// Every failure other than `NoRoute` is recorded (`note`) here, where
     /// its cause is known; callers only pass the status on.
-    fn send_ipv4(&mut self, dst: Ipv4Addr, proto: u8, payload: &[u8]) -> Result<(), Status> {
+    fn send_ipv4(
+        &mut self,
+        dst: Ipv4Addr,
+        proto: u8,
+        payload: &[u8],
+        now: u64,
+    ) -> Result<(), Status> {
         let src = self.my_ip();
         let next_hop = self.next_hop(dst).ok_or(Status::NoRoute)?;
         let id = self.ip_id;
@@ -377,7 +416,6 @@ impl<L: Link> Stack<L> {
         let header = ip_hdr.write(&mut frame[n..]);
         let fits = header.is_some_and(|h| frame.len() >= n + h + payload.len());
         let Some(h) = header.filter(|_| fits) else {
-            let now = self.clock.now();
             self.note(Refusal::BadRequest, now);
             return Err(Status::Invalid);
         };
@@ -400,13 +438,11 @@ impl<L: Link> Stack<L> {
                 if self.link.send_frame(&frame[..n]) {
                     Ok(())
                 } else {
-                    let now = self.clock.now();
                     self.note(Refusal::TxBusy, now);
                     Err(Status::Busy)
                 }
             }
             None => {
-                let now = self.clock.now();
                 let Some(slot) = self.deferred.iter_mut().find(|d| d.is_none()) else {
                     self.note(Refusal::ArpDeferFull, now);
                     return Err(Status::Busy);
@@ -434,16 +470,16 @@ impl<L: Link> Stack<L> {
         dst: Ipv4Addr,
         dst_port: u16,
         payload: &[u8],
+        now: u64,
     ) -> Result<(), Status> {
         let mut seg = [0u8; udp::HEADER_LEN + MAX_DATAGRAM as usize];
         let Some(n) =
             (udp::Header { src_port, dst_port }).write(self.my_ip(), dst, payload, &mut seg)
         else {
-            let now = self.clock.now();
             self.note(Refusal::BadRequest, now);
             return Err(Status::Invalid);
         };
-        self.send_ipv4(dst, ipv4::PROTO_UDP, &seg[..n])
+        self.send_ipv4(dst, ipv4::PROTO_UDP, &seg[..n], now)
     }
 
     /// Sends the appropriate DHCP message (broadcast from 0.0.0.0).
@@ -554,7 +590,7 @@ impl<L: Link> Stack<L> {
         }
         if !p.sender_ip.is_unspecified() {
             self.arp.insert(p.sender_ip, p.sender_mac);
-            self.flush_deferred(p.sender_ip, p.sender_mac);
+            self.flush_deferred(p.sender_ip, p.sender_mac, now);
         }
         if p.op == arp::OP_REQUEST && p.target_ip == self.my_ip() && !self.my_ip().is_unspecified()
         {
@@ -563,7 +599,7 @@ impl<L: Link> Stack<L> {
         }
     }
 
-    fn flush_deferred(&mut self, ip: Ipv4Addr, mac: MacAddr) {
+    fn flush_deferred(&mut self, ip: Ipv4Addr, mac: MacAddr, now: u64) {
         let mut lost = false;
         for slot in self.deferred.iter_mut() {
             if slot.as_ref().is_some_and(|d| d.next_hop == ip) {
@@ -578,7 +614,6 @@ impl<L: Link> Stack<L> {
             }
         }
         if lost {
-            let now = self.clock.now();
             self.note(Refusal::TxBusy, now);
         }
     }
@@ -612,7 +647,7 @@ impl<L: Link> Stack<L> {
             };
             let mut out = [0u8; icmp::HEADER_LEN + eth::MTU];
             if let Some(n) = reply.write(data, &mut out) {
-                let _ = self.send_ipv4(ih.src, ipv4::PROTO_ICMP, &out[..n]);
+                let _ = self.send_ipv4(ih.src, ipv4::PROTO_ICMP, &out[..n], now);
             }
             return;
         }
@@ -737,7 +772,7 @@ impl<L: Link> Stack<L> {
             let mut sock = self.tcp[i].take().unwrap();
             let (remote, _) = sock.conn.remote();
             while let Some(n) = sock.conn.poll(now, &mut seg) {
-                let _ = self.send_ipv4(remote, ipv4::PROTO_TCP, &seg[..n]);
+                let _ = self.send_ipv4(remote, ipv4::PROTO_TCP, &seg[..n], now);
                 if sock.conn.is_closed() {
                     break;
                 }
@@ -1007,6 +1042,13 @@ impl<L: Link> Stack<L> {
         if dropped {
             self.note(Refusal::ArpNoReply, now);
         }
+        // Refusals held back during a window are recorded when it ends, so
+        // a burst that stopped still shows its size (incident 0012 audit).
+        while let Some((kind, count)) = self.faults.drain_due(now) {
+            if let Some(what) = Refusal::from_index(kind) {
+                self.record(what, count);
+            }
+        }
     }
 
     // ---------------- IPC requests ----------------
@@ -1059,7 +1101,7 @@ impl<L: Link> Stack<L> {
                 let Some(n) = echo.write(b"AriCodeOS ping", &mut out) else {
                     return self.refuse(reply_to, Refusal::BadRequest, now);
                 };
-                match self.send_ipv4(addr, ipv4::PROTO_ICMP, &out[..n]) {
+                match self.send_ipv4(addr, ipv4::PROTO_ICMP, &out[..n], now) {
                     Ok(()) => {
                         self.pings[slot] = Some(PendingPing {
                             reply_to,
@@ -1115,7 +1157,7 @@ impl<L: Link> Stack<L> {
                     Some(b) if b.len() >= len => data[..len].copy_from_slice(&b[..len]),
                     _ => return self.refuse(reply_to, Refusal::BadHandles, now),
                 }
-                match self.send_udp(port, addr, req.port, &data[..len]) {
+                match self.send_udp(port, addr, req.port, &data[..len], now) {
                     Ok(()) => answer(reply_to, Reply::ok(len as u64)),
                     Err(s) => answer(reply_to, Reply::status(s)),
                 }
@@ -1183,7 +1225,7 @@ impl<L: Link> Stack<L> {
                     return self.refuse(reply_to, Refusal::BadRequest, now);
                 };
                 let src_port = self.dns_port;
-                match self.send_udp(src_port, server, port, &q[..n]) {
+                match self.send_udp(src_port, server, port, &q[..n], now) {
                     Ok(()) => {
                         self.dns[slot] = Some(PendingDns {
                             reply_to,

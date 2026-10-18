@@ -90,7 +90,19 @@ not reproduce it either.
    turns the RST into `Status::Reset`, which the shell printed as
    "rejected the request". Consistent with "once, right after boot, never
    again": the next attempt uses another port. Not provable from the
-   evidence kept.
+   evidence kept. Incident 0014 (`0014-predictable-isn-and-ephemeral-
+   ports.md`) treats the predictability itself as a security defect.
+5. **Half-open connections holding the table** (`Busy`, found by the audit
+   of the fix). Every unsolicited SYN to a listening port (22 on the
+   laptop, the SSH listener) creates a `SynReceived` socket that keeps its
+   slot while the SYN-ACK is retransmitted (about 31 s: RTO 0.5, 1, 2, 4,
+   8, 8, 8 s), and a SYN that finds no free slot is dropped silently, the
+   one refusal still unrecorded. Seven stray SYNs every 30 s (a scanner on
+   the LAN, the router probing, a client retrying) keep the 8-slot table
+   full for everyone, and the shell's `TcpConnect` gets `Busy`. The
+   laptop sits behind a home router, so unsolicited SYNs from the Internet
+   are unlikely, but SSH clients on the LAN retrying after the reboot are
+   not. Incident 0013 (`0013-syn-drop-silent-half-open-hold.md`).
 
 ## Plan
 
@@ -124,12 +136,17 @@ The root cause stays open until the refusal recurs with these diagnostics.
   reply`, `net ping table full`, `net dns table full`, `net udp table
   full`, `net wait pending`, `net bad request`, `net bad handles`. The
   rate is bounded by `aricode_net::faults::Meter` (host-tested): at most
-  one event per kind per second, the refusals held back in between are
-  counted and travel as the code of the next event of that kind (`fault
-  reported by process N: net tcp table full (code 3)` = three refusals).
-  The same line goes to the console (`virtio-net: fault net tcp table full
-  x3`). `BadSock`, `InUse`, `NoRoute`, `NotFound`, `Timeout` and `Reset`
-  are not refusals and are not recorded.
+  one event per kind per second; the refusals held back in between are
+  counted and recorded when their second ends (`drain_due`), so a burst
+  that stops still shows its size. The event name is `<kind> x<count>`
+  (count in that second, up to 999; the longest kind plus ` x999` fills
+  the 24-byte name, checked at compile time) and the code is the
+  `net::Status` number the client got (5 busy, 1 invalid, 4 bad handles),
+  since `diag` prints every producer's code as a reason number: `fault
+  reported by process N: net tcp table full x3 (code 5)` = three refusals
+  answered Busy. The same text goes to the console (`virtio-net: fault net
+  tcp table full x3`). `BadSock`, `InUse`, `NoRoute`, `NotFound`,
+  `Timeout` and `Reset` are not refusals and are not recorded.
 - Scenario `network.refusal_visible`: `run tcp_hog` (new test program with
   the manifest `caps = net`, `user/testprogs/manifests/`) opens
   connections to the host echo server until netd refuses the ninth, prints
@@ -152,9 +169,12 @@ http: could not connect: network service refused: busy (no free connection or se
 ```
 
 The shell's refusal came within the same second as the hog's, so the meter
-held it back (it would travel as `code 2` with the next `net tcp table
-full` event); the eight slots were indeed still taken by the hog's closed
-connections in TIME-WAIT.
+held it back and records it as `net tcp table full x1` when that second
+ends (with the first version of the fix it would have waited for the next
+refusal; the audit changed that); the eight slots were indeed still taken
+by the hog's closed connections in TIME-WAIT. The event line above shows
+the first version's format (`(code 1)` = count); the final one is `net tcp
+table full x1 (code 5)`.
 
 First yield of the new events, across the 58 scenarios of `--area
 network,shell`: every boot with `selftest` now shows one `virtio-net: fault
@@ -171,7 +191,12 @@ any scenario, HTTPS and update downloads included.
 - The one-off itself: `Busy` or `Reset` is unknown. Next occurrence tells.
 - netd does not reclaim the sockets of a client that exits without
   closing them (as arifs with descriptors, incident 0011).
-- Ephemeral ports and ISNs restart from fixed values at every boot.
+- Ephemeral ports and ISNs restart from fixed values at every boot:
+  incident 0014 (security).
+- A SYN to a listener with no free slot is dropped silently and half-open
+  connections hold their slot for about 31 s: incident 0013.
 - `tcp_poll` ignores send failures of TCP segments: the new `net tx busy`
   and `net arp defer full` events make them visible, but the segment is
   still only recovered by retransmission.
+- `run tcp_hog` on a stick launches without a manifest and does nothing
+  (ADR 0032 §5); the scenario initrds keep the manifest.

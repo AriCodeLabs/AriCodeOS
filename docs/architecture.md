@@ -745,10 +745,16 @@ latter briefly to add the region.
   `net udp table full`, `net wait pending` (a second `recv`/`accept` on a
   socket that already waits), `net bad request` (`Status::Invalid`) and
   `net bad handles` (`Status::BadHandles`). `aricode_net::faults::Meter`
-  bounds the rate: at most one event per kind per second, the refusals
-  held back in between are counted and travel as the code of the next
-  event of that kind (`fault reported by process N: net tcp table full
-  (code 3)` = three refusals); the same line goes to the console
+  bounds the rate: at most one event per kind per second; the refusals
+  held back in between are counted and recorded when their second ends
+  (`drain_due` from `expire`). The event name is `<kind> x<count>` (count
+  in that second, shown up to 999; the longest kind, 19 bytes, plus
+  ` x999` fills the 24-byte name, checked at compile time) and the event
+  code is the `net::Status` number the client got, as every other
+  producer uses the code for a reason number: 5 = busy, 1 = invalid, 4 =
+  bad handles; a lost frame carries the status its sender would have got
+  (`fault reported by process N: net tcp table full x3 (code 5)` = three
+  refusals, answered Busy). The same text goes to the console
   (`virtio-net: fault net tcp table full x3`). `BadSock`, `InUse`,
   `NoRoute`, `NotFound`, `Timeout` and `Reset` describe the client's
   socket or the network's answer, not a refusal, and are not recorded. On
