@@ -1,7 +1,7 @@
 # Incident 0008: installer loses state after a directory-list error
 
-- Opened: 2026-10-18. Status: fixed in `fix/installer-state-read-error`,
-  pending QEMU run and audit.
+- Opened: 2026-10-18. Status: closed 2026-10-18, fixed in
+  `fix/installer-state-read-error` (merged into develop at 397430d; see Closure).
 - Reviewed commit: `525b550`; concerns the new shared updater state.
 - Environment: extracted installer helpers with one failed list request.
 - Evidence: [release audit, finding 2](../audits/2026-10-18-release-0.11.0-525b550.md#2-p2-a-transient-directory-list-error-can-erase-updater-state),
@@ -201,3 +201,12 @@ asked for these corrections, made in the third commit:
 - A file-service fault-injection mechanism for QEMU regressions (L3).
 - Incident 0011 (arifs descriptors).
 - No physical disk failure was induced in this audit.
+
+## Closure (2026-10-18)
+
+Merged into `develop` at 397430d together with the other two fixes of the
+0.11.0 audit. On the integrated tree: `cargo xtask check` green, full
+QEMU suite 153 scenarios with 0 failed with 1 CPU and again with 4 CPUs,
+including every `update.*` and `apps.*` scenario. Two rounds of independent audit of the fix (findings
+recorded above) with every item resolved. Hardware verification on the
+laptop is the next step and is tracked in the incident's open items.

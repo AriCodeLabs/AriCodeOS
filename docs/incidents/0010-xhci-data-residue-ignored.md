@@ -2,8 +2,8 @@
 
 - Opened: 2026-10-18, found by the independent audit of `fix/usb-short-csw`
   (incident 0007), the same family: an acknowledgement the device did not
-  fully give. Status: fixed in `fix/usb-short-csw`, pending QEMU run and
-  audit.
+  fully give. Status: closed 2026-10-18, fixed in `fix/usb-short-csw`
+  (merged into develop at 397430d; see Closure).
 - Pre-existing: since the storage class joined usbd (ADR 0023, 0.10.0).
 - Environment: code reading against BOT 1.0 and xHCI 1.2; no device has
   been seen doing it.
@@ -123,3 +123,12 @@ second write went through.
 - No strict-mode scenario for the short data stage in either driver.
 - No real device has been seen returning a residue; the ADR 0023 note
   records the rule.
+
+## Closure (2026-10-18)
+
+Merged into `develop` at 397430d together with the other two fixes of the
+0.11.0 audit. On the integrated tree: `cargo xtask check` green, full
+QEMU suite 153 scenarios with 0 failed with 1 CPU and again with 4 CPUs,
+including `usb.short_data`, `usb.ehci_short_data`, `strict.usb_halt` and `strict.ehci_halt`. Two rounds of independent audit of the fix (findings
+recorded above) with every item resolved. Hardware verification on the
+laptop is the next step and is tracked in the incident's open items.
