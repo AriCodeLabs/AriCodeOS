@@ -3,7 +3,9 @@
 //! Minimal TCP (RFC 793) without `alloc`: header, and a connection with fixed
 //! buffers, retransmission with an exponential timer and orderly close. The
 //! connection sends nothing on its own: `poll` produces at most one
-//! segment per call and the caller transmits it.
+//! segment per call and the caller transmits it. Initial sequence numbers
+//! come from the caller ([`crate::isn`], RFC 6528): the connection never
+//! derives one from the clock or from the peer's number.
 
 use crate::ipv4::{pseudo_header_sum, PROTO_TCP};
 use crate::{be16, be32, checksum, Ipv4Addr};
@@ -283,8 +285,14 @@ impl Connection {
         self.arm_timer(now);
     }
 
-    /// Passive open: waits for a SYN.
-    pub fn listen(&mut self) {
+    /// Passive open: waits for a SYN and answers it with SYN|ACK carrying
+    /// `iss` as our initial sequence number (`isn::initial_seq` for this
+    /// connection's 4-tuple at the time of the SYN; RFC 6528 section 3, not
+    /// a function of the peer's number). A listener whose SYNs the caller
+    /// hands to connections of their own never sends it.
+    pub fn listen(&mut self, iss: u32) {
+        self.snd_una = iss;
+        self.snd_nxt = iss;
         self.state = State::Listen;
     }
 
@@ -517,9 +525,7 @@ impl Connection {
                 if h.flags & FLAG_SYN != 0 && h.flags & FLAG_ACK == 0 {
                     self.rcv_nxt = h.seq.wrapping_add(1);
                     self.snd_wnd = h.window;
-                    let iss = h.seq.wrapping_mul(2654435761).wrapping_add(0x4152_4900);
-                    self.snd_una = iss;
-                    self.snd_nxt = iss;
+                    // `snd_una`/`snd_nxt` hold the ISN given to `listen`.
                     self.state = State::SynReceived;
                     self.syn_pending = true;
                     self.retransmit_at = None;
@@ -614,12 +620,15 @@ impl Connection {
 mod tests {
     extern crate std;
     use super::*;
+    use crate::isn;
     use std::vec::Vec;
 
     const A: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 15);
     const B: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
+    const SECRET: isn::Secret = [0x5a; isn::SECRET_LEN];
 
-    /// Two endpoints and a wire with controlled losses.
+    /// Two endpoints and a wire with controlled losses. Each side starts at
+    /// the RFC 6528 ISN of its own 4-tuple, as the service does.
     struct Pair {
         a: Connection,
         b: Connection,
@@ -634,8 +643,8 @@ mod tests {
         fn new(drop: fn(usize) -> bool) -> Self {
             let mut a = Connection::new(A, 40000, B, 80);
             let mut b = Connection::new(B, 80, A, 40000);
-            b.listen();
-            a.connect(1000, 0);
+            b.listen(isn::initial_seq(&SECRET, B, 80, A, 40000, 0));
+            a.connect(isn::initial_seq(&SECRET, A, 40000, B, 80, 0), 0);
             Self {
                 a,
                 b,
@@ -783,6 +792,35 @@ mod tests {
             assert_eq!(p.b.recv(&mut out), 4);
             assert_eq!(out[..4], msg);
         }
+    }
+
+    /// Incident 0014: the SYN|ACK carries the ISN the caller chose for the
+    /// 4-tuple, whatever sequence number the peer put in its SYN.
+    #[test]
+    fn passive_isn_is_the_callers_not_a_function_of_the_peers_seq() {
+        let iss = isn::initial_seq(&SECRET, B, 80, A, 40000, 1234);
+        let mut buf = [0u8; MAX_SEGMENT];
+        let mut seen = Vec::new();
+        for peer_seq in [0u32, 1, 1000, 0x8000_0000, u32::MAX] {
+            let mut b = Connection::new(B, 80, A, 40000);
+            b.listen(iss);
+            let syn = Header {
+                src_port: 40000,
+                dst_port: 80,
+                seq: peer_seq,
+                ack: 0,
+                flags: FLAG_SYN,
+                window: 4096,
+            };
+            b.on_segment(&syn, &[], 1234);
+            let n = b.poll(1234, &mut buf).expect("SYN|ACK");
+            let (h, _) = Header::parse(B, A, &buf[..n]).unwrap();
+            assert_eq!(h.flags, FLAG_SYN | FLAG_ACK);
+            assert_eq!(h.ack, peer_seq.wrapping_add(1));
+            assert_eq!(h.seq, iss, "our ISN does not move with the peer's");
+            seen.push(h.seq);
+        }
+        assert!(seen.iter().all(|&s| s == iss));
     }
 
     #[test]

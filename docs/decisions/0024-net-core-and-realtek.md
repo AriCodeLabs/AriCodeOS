@@ -69,3 +69,16 @@ section); the regression is `network.refusal_visible`. The refusal of the
 incident itself (`Busy` or `Reset`, once after a boot on the laptop) is
 still open; the audit of the fix opened incidents 0013 (silent SYN drop
 and half-open hold) and 0014 (predictable ISN and ephemeral ports).
+
+## Note (2026-10-18, incident 0014)
+
+The core's TCP initial sequence numbers and ephemeral ports were
+predictable (`uptime * 64 + slot`, the peer's own number times a constant,
+ports from 50000 at every boot). ADR 0034 replaces them: a 32-byte secret
+per boot from the kernel's entropy (`sys::random` with the `SYSTEM` handle
+the drivers already hold as their clock; no handle change), RFC 6528 ISNs
+(`aricode_net::isn::initial_seq`, HMAC-SHA-256 over the 4-tuple plus a 4 µs
+clock) for active and passive opens alike, and RFC 6056 section 3.3.3
+ports in 49152..65535. The core prints `tcp secret from kernel entropy` at
+start and records the fault `net tcp secret degraded` if the kernel gave
+too few bytes; `network.stack` requires the former and forbids the latter.
