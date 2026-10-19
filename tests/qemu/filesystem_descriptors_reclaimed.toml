@@ -1,0 +1,46 @@
+# Incident 0011 (ADR 0036): a client that exits with descriptors open must
+# not block the file service for everybody else. `fd_leaker` (manifest
+# `caps = fs`) fills fsd's 16-slot table through its own session and exits
+# without closing; fsd, finding the table full at the shell's next `open`,
+# asks the kernel about its sessions, learns the leaker's send side is gone
+# (PeerClosed, ADR 0030), releases its descriptors and records the fault.
+# `cat` then reads, `update` runs the installer (an `install` session, which
+# opens `updater/state`) and reaches the updater, and `diag` shows the event
+# and the table back at 0/16.
+name = "filesystem.descriptors_reclaimed"
+description = "fsd releases the descriptors of a client that died holding them; the next open, the installer and diag work"
+level = "full"
+areas = ["filesystem", "apps", "diag", "shell"]
+cmdline = "qemu_exit shell"
+timeout_secs = 120
+stdin = ["run fd_leaker", "cat hola.txt", "update", "diag", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: launch fd_leaker with manifest [fs] memory 64 KiB",
+    "fsd: private directory 'fd_leaker'",
+    "fsd: fault fs fds full x1",
+    "fd_leaker: holding 16 descriptors, the next open was refused (NoSpace); exiting without closing any",
+    "run: fd_leaker exited with 0",
+    "fsd: client gone (dir 'fd_leaker'), 16 descriptor(s) left open: reclaimed",
+    "fsd: fault fs fds reclaimed x16",
+    "Hola desde AriFS",
+    "AriInit: launch installer with manifest [system install] memory 64 KiB",
+    "updater: no update sources: update add URL",
+    "files     fsd         active, responding",
+    "          descriptors 0/16 open, 16 reclaimed from dead clients",
+    ": fs fds full x1 (code 4)",
+    ": fs fds reclaimed x16 (code 0)",
+    "=== end of diagnostics ===",
+    "ARICODEOS_SHUTDOWN",
+]
+# The only refusal is the leaker's own 17th open (recorded once); the
+# shell's `cat` and the installer are never refused.
+serial_absent = [
+    "KERNEL PANIC",
+    "cat: ",
+    "inst-state-unreadable",
+    "inst-installed-unknown",
+    "update: installer",
+]

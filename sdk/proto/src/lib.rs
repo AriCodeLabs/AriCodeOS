@@ -167,6 +167,51 @@ pub mod fs {
         /// `fd`, `len`: commits and applies the previous chunks at once;
         /// `value` = bytes of the new content.
         ReplaceCommit = 12,
+        /// Main endpoint only (the broker, init): creates a session bound to
+        /// the main namespace (every file, full names) and transfers its
+        /// send side (`WRITE`) in the reply (ADR 0036). The holder sees what
+        /// the main endpoint sees except `Bind`, `Share` and `Attach`; its
+        /// descriptors are released when the kernel reports that nobody
+        /// holds the send side any more (its process died).
+        Attach = 13,
+        /// Main endpoint and main-namespace sessions: `fd` = owner slot
+        /// (0 = the main endpoint, then the sessions); reply: `value` =
+        /// [`OwnerDescriptors`] packed, name = the owner's label (`main`,
+        /// `root`, `dir NAME`, `file NAME`; empty for a free slot).
+        /// `NotFound` past the last slot; `Denied` from a private
+        /// directory or a shared file (ADR 0036).
+        Descriptors = 14,
+    }
+
+    /// Descriptor table usage as `Op::Descriptors` reports it for one
+    /// owner slot (ADR 0036): what that owner holds, what everybody holds,
+    /// the table's capacity and how many descriptors the service has
+    /// released from dead clients since it started. Four 16-bit counts in
+    /// `Reply::value`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct OwnerDescriptors {
+        pub owned: u16,
+        pub used: u16,
+        pub capacity: u16,
+        pub reclaimed: u16,
+    }
+
+    impl OwnerDescriptors {
+        pub fn encode(&self) -> u64 {
+            self.owned as u64
+                | (self.used as u64) << 16
+                | (self.capacity as u64) << 32
+                | (self.reclaimed as u64) << 48
+        }
+
+        pub fn decode(v: u64) -> Self {
+            Self {
+                owned: v as u16,
+                used: (v >> 16) as u16,
+                capacity: (v >> 32) as u16,
+                reclaimed: (v >> 48) as u16,
+            }
+        }
     }
 
     /// Request (64 bytes): header, arguments and name.
@@ -238,6 +283,8 @@ pub mod fs {
                 10 => Op::Share,
                 11 => Op::ReplaceChunk,
                 12 => Op::ReplaceCommit,
+                13 => Op::Attach,
+                14 => Op::Descriptors,
                 _ => return None,
             };
             let mut name = [0u8; MAX_NAME];
@@ -1443,6 +1490,30 @@ mod tests {
             Request::new(Op::Open).with_name(&exact).unwrap().name_str(),
             exact
         );
+    }
+
+    /// ADR 0036: the additive operations decode, and the descriptor usage
+    /// packs four counts without one overwriting another.
+    #[test]
+    fn fs_session_operations_and_descriptor_usage() {
+        use super::fs::*;
+        for op in [Op::Attach, Op::Descriptors] {
+            let mut r = Request::new(op);
+            r.fd = 7;
+            assert_eq!(Request::decode(&r.encode()), Some(r));
+        }
+        let usage = OwnerDescriptors {
+            owned: 3,
+            used: 16,
+            capacity: 16,
+            reclaimed: 65535,
+        };
+        assert_eq!(OwnerDescriptors::decode(usage.encode()), usage);
+        let reply = Reply::ok(usage.encode()).with_name("dir hello_ext");
+        let d = Reply::decode(&reply.encode()).unwrap();
+        assert_eq!(OwnerDescriptors::decode(d.value), usage);
+        assert_eq!(d.name_str(), "dir hello_ext");
+        assert_eq!(OwnerDescriptors::decode(0), OwnerDescriptors::default());
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! File service client (`aricode-proto::fs`).
 
 use crate::{self as sys, rights, rpc, Error, Handle};
-use aricode_proto::fs::{Op, Reply, Request, Status, MAX_IO, MAX_REPLACE};
+use aricode_proto::fs::{Op, OwnerDescriptors, Reply, Request, Status, MAX_IO, MAX_REPLACE};
 
 /// Reply wait of a file request (ms): above the block client's
 /// (`block::REPLY_WAIT_MS`, 90 s) plus the file service's own work, so a
@@ -127,6 +127,36 @@ impl FsClient {
     /// read-only mode (ADR 0016) and returns the received handle.
     pub fn share(&self, name: &str) -> Result<Handle, FsError> {
         self.grant(Op::Share, name)
+    }
+
+    /// Broker and init only: asks fsd for a session bound to the main
+    /// namespace (ADR 0036) and returns the received handle (`WRITE`,
+    /// transferable). The process that gets it sees every file, like the
+    /// main endpoint, and its descriptors are released when it dies.
+    pub fn attach(&self) -> Result<Handle, FsError> {
+        self.grant(Op::Attach, "")
+    }
+
+    /// Descriptor table usage of owner slot `index` (ADR 0036): the counts
+    /// and the owner's label in `name_out`. `None` past the last slot.
+    pub fn descriptors(
+        &self,
+        index: u32,
+        name_out: &mut [u8; 32],
+    ) -> Result<Option<(OwnerDescriptors, usize)>, FsError> {
+        let mut req = Request::new(Op::Descriptors);
+        req.fd = index;
+        match self.call(req, false) {
+            Ok(r) => {
+                name_out[..r.name_len as usize].copy_from_slice(&r.name[..r.name_len as usize]);
+                Ok(Some((
+                    OwnerDescriptors::decode(r.value),
+                    r.name_len as usize,
+                )))
+            }
+            Err(FsError::Status(Status::NotFound)) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     fn grant(&self, op: Op, name: &str) -> Result<Handle, FsError> {

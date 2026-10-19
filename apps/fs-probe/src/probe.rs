@@ -60,23 +60,30 @@ fn main(_arg: u64) -> u64 {
     sys::print(
         b"fs_probe: foreign descriptors inaccessible (BadFd on 16 x read, write and close)\n",
     );
-    // fs_victim left a replace half done: for a while the journal is busy
-    // (Busy); then it expires and this replace must go through.
-    let mut tries = 0;
-    let mut waited = false;
+    // fs_victim left a replace half done. fsd releases it when the kernel
+    // reports the victim gone (ADR 0036), asking at the latest when this
+    // replace finds the journal busy; were the owner alive but idle, the
+    // transaction would expire (STAGING_TIMEOUT_MS) instead. Either way
+    // nothing of the victim's blocks this app.
+    let mut tries = 0u64;
     loop {
         match fs.replace(own, b"reemplazo propio") {
             Ok(_) => break,
             Err(FsError::Status(Status::Busy)) if tries < 60 => {
-                waited = true;
                 tries += 1;
                 sys::thread_sleep(100);
             }
             Err(_) => return 9,
         }
     }
-    if waited {
-        sys::print(b"fs_probe: replace after an abandoned transaction ok\n");
+    sys::print(b"fs_probe: replace after an abandoned transaction ok (");
+    if tries == 0 {
+        sys::print(b"journal released with its owner)\n");
+    } else {
+        let mut buf = [0u8; 20];
+        sys::print(b"busy for ");
+        sys::print(aricode_rt::fmt_u64(tries * 100, &mut buf));
+        sys::print(b" ms first)\n");
     }
     // A one-byte chunk and a commit of 22: fsd must not fill the missing
     // bytes with what fs_victim left in the journal.

@@ -27,7 +27,7 @@ use aricode_proto::launch::{
 use aricode_proto::status;
 use aricode_rt::sys::abi::driver_arg;
 use aricode_rt::sys::block::BlockClient;
-use aricode_rt::sys::fs::FsClient;
+use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::{self, rights, Error, Handle, TIMEOUT_INFINITE};
 use aricode_supervisor::{Action, Exit, Policy, Service, State};
 
@@ -1234,12 +1234,11 @@ fn run_block_client_supervised(
     result
 }
 
-/// Launches the shell with the fsd endpoint (WRITE), hardware for its
+/// Launches the shell with its own fsd session (WRITE), hardware for its
 /// buffer, the system object (READ|MANAGE), the console input, the PCI root
 /// read-only, the netd endpoint (WRITE) and the launch broker for `run`;
 /// `arg` = active services. Waits for it to exit.
 fn run_shell(
-    fs_service: Handle,
     net_service: Handle,
     services: u64,
     broker: &mut Broker,
@@ -1247,14 +1246,8 @@ fn run_shell(
     mut sessions: Option<&mut Sessions>,
 ) -> Result<u64, Error> {
     let console_in = sys::handle_duplicate(CONSOLE_IN, rights::READ | rights::TRANSFER)?;
-    let child = spawn_shell(
-        fs_service,
-        net_service,
-        broker.endpoint,
-        console_in,
-        None,
-        services,
-    )?;
+    let fs = broker.fs.as_ref().ok_or(Error::NotFound)?;
+    let child = spawn_shell(fs, net_service, broker.endpoint, console_in, None, services)?;
     // Serve launch, status and session requests, and watch the resident
     // services, while the shell is alive.
     loop {
@@ -1268,27 +1261,48 @@ fn run_shell(
         sup.poll();
         broker.serve_one(20, sup);
         broker.poll_launches();
-        if let Some(s) = sessions.as_deref_mut() {
-            s.serve(fs_service, net_service, services, broker.endpoint);
+        if let (Some(s), Some(fs)) = (sessions.as_deref_mut(), broker.fs.as_ref()) {
+            s.serve(fs, net_service, services, broker.endpoint);
         }
     }
 }
 
-/// Launches `arish` with the file endpoint (WRITE), hardware for its
-/// buffer, the system (READ|MANAGE), its input (`input`, transferred: the
-/// console or a session endpoint), the read-only PCI root, the network
+/// A file session for a process init launches (ADR 0036): fsd binds a new
+/// endpoint to the main namespace and keeps its receive side, so the
+/// descriptors the process leaves open are released when it dies. A
+/// refusal is said on the console (an attach never fails silently).
+fn attach_file_session(fs: &FsClient) -> Result<Handle, Error> {
+    match fs.attach() {
+        Ok(h) => Ok(h),
+        Err(FsError::Ipc(e)) => {
+            aricode_rt::print_error(b"AriInit: file session", e);
+            Err(e)
+        }
+        Err(FsError::Status(status)) => {
+            sys::print(b"AriInit: file session refused by fsd (status ");
+            let mut b = [0u8; 20];
+            sys::print(aricode_rt::fmt_u64(status as u64, &mut b));
+            sys::print(b")\n");
+            Err(Error::Limit)
+        }
+    }
+}
+
+/// Launches `arish` with a file session of its own (WRITE), hardware for
+/// its buffer, the system (READ|MANAGE), its input (`input`, transferred:
+/// the console or a session endpoint), the read-only PCI root, the network
 /// endpoint (WRITE), the broker for `run`, and, in session mode, the
 /// session output endpoint (`output`, transferred). `arg` = active services
 /// plus the session bits.
 fn spawn_shell(
-    fs_service: Handle,
+    fs: &FsClient,
     net_service: Handle,
     broker: Handle,
     input: Handle,
     output: Option<Handle>,
     arg: u64,
 ) -> Result<Handle, Error> {
-    let fsd = sys::handle_duplicate(fs_service, rights::WRITE | rights::TRANSFER)?;
+    let fsd = attach_file_session(fs)?;
     let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
     // With DUPLICATE the shell can in turn pass a read-only SYSTEM to the
     // programs it launches with `run`.
@@ -1321,7 +1335,7 @@ struct Sessions {
 const MAX_SESSIONS: usize = 4;
 
 impl Sessions {
-    fn serve(&mut self, fs: Handle, net: Handle, services: u64, broker: Handle) {
+    fn serve(&mut self, fs: &FsClient, net: Handle, services: u64, broker: Handle) {
         use aricode_proto::session::{self, Kind as SessionKind};
         for c in self.children.iter_mut() {
             if let Some(h) = *c {
@@ -1383,8 +1397,6 @@ impl Sessions {
 struct Broker {
     endpoint: Handle,
     fs: Option<FsClient>,
-    /// Main fsd endpoint, for the `install` capability (ADR 0018).
-    fs_root: Option<Handle>,
     block: Option<Handle>,
     net: Handle,
     compositor: Option<Handle>,
@@ -1433,11 +1445,10 @@ enum Launched {
 }
 
 impl Broker {
-    /// `fs`: the file client of the storage health check, reused;
-    /// `fs_service`: the fsd endpoint it talks to.
+    /// `fs`: the file client of the storage health check, reused; it asks
+    /// fsd for the sessions of the programs the broker launches.
     fn new(
         fs: Option<FsClient>,
-        fs_service: Option<Handle>,
         block: Option<Handle>,
         net: Handle,
         compositor: Option<Handle>,
@@ -1449,7 +1460,6 @@ impl Broker {
         Ok(Self {
             endpoint: sys::endpoint_create()?,
             fs,
-            fs_root: fs_service,
             block,
             net,
             compositor,
@@ -1754,7 +1764,7 @@ impl Broker {
             };
             match fs.share(file) {
                 Ok(h) => granted.push(h),
-                Err(sys::fs::FsError::Status(aricode_proto::fs::Status::NotFound)) => {
+                Err(FsError::Status(aricode_proto::fs::Status::NotFound)) => {
                     sys::print(b"AriInit: denied, shared file does not exist: ");
                     sys::print(file.as_bytes());
                     sys::print(b"\n");
@@ -1791,11 +1801,13 @@ impl Broker {
             }
             needs_hw = true;
         }
+        // The main namespace (ADR 0018) as a session of its own (ADR 0036):
+        // the installer's descriptors die with it.
         if caps.contains(Caps::INSTALL) {
-            let Some(root) = self.fs_root else {
+            let Some(fs) = &self.fs else {
                 return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
             };
-            match sys::handle_duplicate(root, rights::WRITE | rights::TRANSFER) {
+            match attach_file_session(fs) {
                 Ok(h) => granted.push(h),
                 Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
@@ -2400,7 +2412,6 @@ fn main(arg: u64) -> u64 {
         };
         let Ok(mut broker) = Broker::new(
             fs_client,
-            fs_service,
             block_service,
             net_service,
             compositor,
@@ -2474,7 +2485,6 @@ fn main(arg: u64) -> u64 {
             }
         }
         match run_shell(
-            fs,
             net_service,
             services,
             &mut broker,

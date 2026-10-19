@@ -35,6 +35,8 @@
 
 #![no_std]
 
+pub mod descriptors;
+
 pub const SECTOR: usize = 512;
 const MAGIC: &[u8; 8] = b"ARIFS\x00\x00\x02";
 const JOURNAL_MAGIC: &[u8; 8] = b"ARIJRNL\x00";

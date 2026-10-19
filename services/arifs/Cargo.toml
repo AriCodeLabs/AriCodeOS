@@ -16,6 +16,7 @@ bench = false
 aricode-sys = { path = "../../sdk/rust" }
 aricode-proto = { path = "../../sdk/proto" }
 aricode-arifs = { path = "../../libs/arifs" }
+aricode-faults = { path = "../../libs/faults" }
 aricode-rt = { path = "../../sdk/runtime" }
 
 [build-dependencies]
