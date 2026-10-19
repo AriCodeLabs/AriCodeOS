@@ -50,7 +50,19 @@ and visible in `diag`.
    which would meet the same refusal. Towards a spoofed source the reset is
    one 40-byte segment per SYN of 40 to 60 bytes: no amplification and no
    state kept, the same reflection any closed port offers, so answering is
-   acceptable here. Linux drops silently by default when an accept queue
+   acceptable here. Two limits keep it that way: a reset is never sent for
+   a segment that carries RST itself (RFC 793 section 3.4, "except another
+   reset"; `on_tcp` ignores any RST before looking for a listener, which
+   also keeps a crafted SYN|RST from creating a child that would sit in
+   LISTEN forever), and never to a source that cannot be a host
+   (unspecified, multicast, limited or subnet broadcast: RFC 1122 section
+   3.2.1.3, `Ipv4Addr::is_invalid_source`), whose SYN is dropped. The reset
+   is also stateless on our side: it goes out only when the next hop's MAC
+   is already in the ARP cache. Resolving it would cost an ARP broadcast
+   and one of the four parking slots per spoofed on-subnet SYN, that is
+   `net arp defer full` for legitimate first contacts; a real peer whose
+   MAC is unknown retransmits its SYN after one RTO and is answered then.
+   Linux drops silently by default when an accept queue
    overflows (`tcp_abort_on_overflow = 0`) so that a client may get in on a
    retry; with 8 slots instead of thousands there is no later room to wait
    for, and a refusal the peer can see is the project's rule. A SYN to a
@@ -89,6 +101,10 @@ and visible in `diag`.
   time with a 30 s authentication deadline, so the queue drains at that
   rate anyway and the client's retry finds room sooner than it would have
   waited.
+- A child of a listener can only be half-open (`SynReceived`),
+  established (backlog) or finished: the hand-out loop of `tcp_poll` reaps
+  anything else, so the backlog cap counts live connections only even if a
+  future change let another state through.
 - A half-open connection costs a slot for 7.5 s instead of 31 s: a source
   that never completes the handshake needs about 4 SYNs per 7.5 s per
   slot to keep the backlog full, and even then takes 4 slots, not 7.

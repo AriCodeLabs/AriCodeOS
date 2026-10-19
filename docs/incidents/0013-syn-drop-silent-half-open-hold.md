@@ -91,6 +91,22 @@ so seven queued) and the shell's `http` was refused with `busy`.
 - `services/shell`: `net` (and `diag`, which prints it) ends with `tcp
   8 slots: 1 listen, 0 syn-rcvd, 0 syn-sent, 3 backlog, 1 established, 0
   closing, 0 time-wait, 3 free; 4 SYNs reset`.
+- Audit of the fix (2026-10-19), three corrections in `on_tcp`: a segment
+  carrying RST is ignored before any listener lookup (RFC 793 section 3.4
+  never answers a reset with a reset, and a crafted SYN|RST, nmap's
+  `--scanflags SYNRST`, would have created a child that stays in LISTEN,
+  arms no timer, counts towards the backlog and was never reaped: four of
+  them would have shut sshd out until reboot); a SYN from a source that
+  cannot be a host (unspecified, multicast, limited or subnet broadcast,
+  RFC 1122 section 3.2.1.3; `Ipv4Addr::is_invalid_source`) is dropped, not
+  reset; and the reset is stateless, sent only when the next hop's MAC is
+  already known, so a spoofed on-subnet flood cannot turn into ARP
+  broadcasts and `net arp defer full` for legitimate traffic. The hand-out
+  loop of `tcp_poll` now reaps any child of a listener that is neither
+  half-open, established nor finished (defence in depth behind the RST
+  check). The crafted flags cannot be sent through QEMU's user networking,
+  so the regression is the host test `listener_ignores_a_syn_carrying_rst`
+  and the code path, not a scenario.
 - `tools/xtask`: `[host_flood]` in a scenario opens N plain connections to
   the guest's forwarded port 22 or 7 on a marker, holds them until QEMU
   exits counting the ones the guest resets, and holds the console lines
@@ -98,9 +114,14 @@ so seven queued) and the shell's `http` was refused with `busy`.
 
 ## Tests
 
-- Host (`cargo xtask test --level unit`): the five `libs/net` tests above
-  plus `reset_for_follows_rfc_793_section_3_4` and
-  `answered_syn_ack_resets_the_retry_count`; `aricode-proto` round-trips
+- Host (`cargo xtask test --level unit`): six `libs/net` TCP tests
+  (`unanswered_syn_ack_gives_up_within_the_short_budget`,
+  `active_open_and_data_keep_the_full_schedule`,
+  `answered_syn_ack_resets_the_retry_count`,
+  `listen_backlog_leaves_half_the_table_to_active_opens`,
+  `reset_for_follows_rfc_793_section_3_4`,
+  `listener_ignores_a_syn_carrying_rst`) and
+  `invalid_sources_are_recognised`; `aricode-proto` round-trips
   `TcpStats`; xtask's flood probe against a local listener.
 - QEMU `network.listen_backlog` (full, areas network/diag/ssh): proves
   that with eight held connections to sshd the backlog stops at 4, the
@@ -145,6 +166,14 @@ tcp     8 slots: 1 listen, 0 syn-rcvd, 0 syn-sent, 4 backlog, 1 established, 0 c
   do; left for when it is observed.
 - The cap is per listener; a second listening service would let two
   backlogs take the whole table (ADR 0035).
+- No receive budget per round: the main loop drains every frame the NIC
+  holds (`while let Some(n) = stack.link.recv_frame(..)`) before serving
+  IPC, so a line-rate SYN flood starves the clients' requests, now at the
+  cost of a transmit attempt (the reset) per SYN too. Next step: a frame
+  budget per round (for example 32) so IPC and timeouts keep their turn.
+- A reset is not sent when the next hop's MAC is unknown (by design, see
+  above); a real first-contact peer learns of the refusal on its SYN
+  retransmission, after one RTO.
 - `TcpStats` counts a boot's refusals in `syn_dropped` but not per
   listener or per source; a capture is still needed to know who floods.
 - The laptop observation of incident 0012 is still unexplained; the new

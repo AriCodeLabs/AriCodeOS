@@ -58,7 +58,10 @@ pub const fn listen_backlog(table_slots: usize) -> usize {
 /// sequence number from the ACK field; otherwise it has sequence number
 /// zero and acknowledges the segment's sequence number plus its length,
 /// SYN and FIN counted, so the sender can match it. A reset is never sent
-/// for a reset; the caller checks `FLAG_RST` first.
+/// for a reset: the caller ignores any segment with `FLAG_RST` before it
+/// decides to answer (the service does so before looking for a listener;
+/// `on_segment` in LISTEN ignores it too, see
+/// `listener_ignores_a_syn_carrying_rst`).
 pub fn reset_for(h: &Header, payload_len: usize) -> Header {
     let (seq, ack, flags) = if h.flags & FLAG_ACK != 0 {
         (h.ack, 0, FLAG_RST)
@@ -883,11 +886,43 @@ mod tests {
     /// reset: the short budget never counts against data later.
     #[test]
     fn answered_syn_ack_resets_the_retry_count() {
-        // The first two SYN|ACKs (segments 2 and 3) are lost.
+        // Segments 2 and 3 are lost: the first SYN|ACK, then A's
+        // retransmitted SYN; the second SYN|ACK answers A's third SYN.
         let mut p = Pair::new(|n| n == 2 || n == 3);
         p.run(2000);
         assert!(p.a.is_established() && p.b.is_established());
         assert_eq!(p.b.retries(), 0);
+    }
+
+    /// Incident 0013 audit: a SYN that also carries RST (nmap's
+    /// `--scanflags SYNRST`) is a reset for a connection that does not
+    /// exist. A listener stays in LISTEN, arms no timer and emits nothing,
+    /// so a caller that created a connection for it would hold a slot
+    /// forever: the service drops such segments before creating anything.
+    #[test]
+    fn listener_ignores_a_syn_carrying_rst() {
+        let mut b = Connection::new(B, 22, A, 40000);
+        b.listen(isn::initial_seq(&SECRET, B, 22, A, 40000, 0));
+        let syn_rst = Header {
+            src_port: 40000,
+            dst_port: 22,
+            seq: 1000,
+            ack: 0,
+            flags: FLAG_SYN | FLAG_RST,
+            window: 4096,
+        };
+        b.on_segment(&syn_rst, &[], 0);
+        assert_eq!(b.state(), State::Listen);
+        assert!(!b.is_closed() && !b.is_established());
+        let mut buf = [0u8; MAX_SEGMENT];
+        for now in (0..FULL_SCHEDULE_MS).step_by(500) {
+            assert_eq!(b.poll(now, &mut buf), None, "nothing to send at {now}");
+        }
+        assert_eq!(
+            b.state(),
+            State::Listen,
+            "and it never leaves LISTEN on its own"
+        );
     }
 
     #[test]

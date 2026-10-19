@@ -468,22 +468,22 @@ impl<L: Link> Stack<L> {
         }
     }
 
-    /// Sends an IPv4 packet to `dst` with a `payload` of protocol `proto`.
-    /// With no known MAC it parks the packet and sends an ARP request.
-    /// Every failure other than `NoRoute` is recorded (`note`) here, where
-    /// its cause is known; callers only pass the status on.
-    fn send_ipv4(
+    /// Builds in `frame` the IPv4 packet to `dst` with a `payload` of
+    /// protocol `proto`, leaving the Ethernet header for the caller:
+    /// returns the frame length and the next hop. An oversized payload is
+    /// recorded here as `BadRequest`.
+    fn ipv4_frame(
         &mut self,
         dst: Ipv4Addr,
         proto: u8,
         payload: &[u8],
+        frame: &mut [u8; MAX_FRAME],
         now: u64,
-    ) -> Result<(), Status> {
+    ) -> Result<(usize, Ipv4Addr), Status> {
         let src = self.my_ip();
         let next_hop = self.next_hop(dst).ok_or(Status::NoRoute)?;
         let id = self.ip_id;
         self.ip_id = self.ip_id.wrapping_add(1);
-        let mut frame = [0u8; MAX_FRAME];
         let ip_hdr = ipv4::Header::new(src, dst, proto, id, payload.len() as u16);
         let mut n = eth::HEADER_LEN;
         let header = ip_hdr.write(&mut frame[n..]);
@@ -495,26 +495,52 @@ impl<L: Link> Stack<L> {
         n += h;
         frame[n..n + payload.len()].copy_from_slice(payload);
         n += payload.len();
+        Ok((n, next_hop))
+    }
+
+    /// Writes the Ethernet header for `mac` and transmits `frame[..n]`; a
+    /// full transmit ring loses the frame and is recorded as `TxBusy`.
+    fn transmit(
+        &mut self,
+        mac: MacAddr,
+        frame: &mut [u8; MAX_FRAME],
+        n: usize,
+        now: u64,
+    ) -> Result<(), Status> {
+        eth::Header {
+            dst: mac,
+            src: self.link.mac(),
+            ethertype: eth::ETHERTYPE_IPV4,
+        }
+        .write(frame);
+        if self.link.send_frame(&frame[..n]) {
+            Ok(())
+        } else {
+            self.note(Refusal::TxBusy, now);
+            Err(Status::Busy)
+        }
+    }
+
+    /// Sends an IPv4 packet to `dst` with a `payload` of protocol `proto`.
+    /// With no known MAC it parks the packet and sends an ARP request.
+    /// Every failure other than `NoRoute` is recorded (`note`) here, where
+    /// its cause is known; callers only pass the status on.
+    fn send_ipv4(
+        &mut self,
+        dst: Ipv4Addr,
+        proto: u8,
+        payload: &[u8],
+        now: u64,
+    ) -> Result<(), Status> {
+        let mut frame = [0u8; MAX_FRAME];
+        let (n, next_hop) = self.ipv4_frame(dst, proto, payload, &mut frame, now)?;
         let dst_mac = if dst == Ipv4Addr::BROADCAST {
             Some(MacAddr::BROADCAST)
         } else {
             self.arp.lookup(next_hop)
         };
         match dst_mac {
-            Some(mac) => {
-                eth::Header {
-                    dst: mac,
-                    src: self.link.mac(),
-                    ethertype: eth::ETHERTYPE_IPV4,
-                }
-                .write(&mut frame);
-                if self.link.send_frame(&frame[..n]) {
-                    Ok(())
-                } else {
-                    self.note(Refusal::TxBusy, now);
-                    Err(Status::Busy)
-                }
-            }
+            Some(mac) => self.transmit(mac, &mut frame, n, now),
             None => {
                 let Some(slot) = self.deferred.iter_mut().find(|d| d.is_none()) else {
                     self.note(Refusal::ArpDeferFull, now);
@@ -812,8 +838,23 @@ impl<L: Link> Stack<L> {
                 .on_segment(&h, payload, now);
             return;
         }
+        // A segment with RST for a connection that does not exist is never
+        // answered (RFC 793 section 3.4, "except another reset") and never
+        // opens one: a SYN|RST would leave a child in LISTEN that nothing
+        // completes or reaps (incident 0013 audit).
+        if h.flags & tcp::FLAG_RST != 0 {
+            return;
+        }
         // SYN to a listening port: new passive connection.
         if h.flags & tcp::FLAG_SYN == 0 || h.flags & tcp::FLAG_ACK != 0 {
+            return;
+        }
+        // RFC 1122 section 3.2.1.3: a SYN from a source that cannot be a
+        // host (unspecified, multicast, broadcast) is dropped, not reset.
+        let (local, mask) = self.config.map_or((ih.dst, Ipv4Addr::BROADCAST), |c| {
+            (c.address, c.subnet_mask)
+        });
+        if ih.src.is_invalid_source(local, mask) {
             return;
         }
         let Some(listener) = self.tcp.iter().position(|s| {
@@ -848,12 +889,28 @@ impl<L: Link> Stack<L> {
     }
 
     /// Reset answering a segment that belongs to no connection (RFC 793
-    /// section 3.4, `tcp::reset_for`). A failure to send it is recorded by
-    /// `send_ipv4`; the peer then retransmits and meets the same answer.
+    /// section 3.4, `tcp::reset_for`). Stateless and best effort: it goes
+    /// out only when the next hop's MAC is already known. A SYN from a
+    /// spoofed on-subnet source would otherwise cost an ARP request and one
+    /// of the four parking slots per SYN (`net arp defer full` for everyone
+    /// else); a real peer whose MAC is unknown retransmits its SYN and the
+    /// ARP exchange of the first answer resolves it meanwhile. The refusal
+    /// itself is recorded (`net syn dropped`) whether the reset went out or
+    /// not; a full transmit ring is recorded by `transmit`.
     fn send_tcp_reset(&mut self, ih: ipv4::Header, h: &tcp::Header, payload_len: usize, now: u64) {
         let mut seg = [0u8; tcp::HEADER_LEN];
-        if let Some(n) = tcp::reset_for(h, payload_len).write(ih.dst, ih.src, None, &[], &mut seg) {
-            let _ = self.send_ipv4(ih.src, ipv4::PROTO_TCP, &seg[..n], now);
+        let Some(len) = tcp::reset_for(h, payload_len).write(ih.dst, ih.src, None, &[], &mut seg)
+        else {
+            return;
+        };
+        let mut frame = [0u8; MAX_FRAME];
+        let Ok((n, next_hop)) =
+            self.ipv4_frame(ih.src, ipv4::PROTO_TCP, &seg[..len], &mut frame, now)
+        else {
+            return;
+        };
+        if let Some(mac) = self.arp.lookup(next_hop) {
+            let _ = self.transmit(mac, &mut frame, n, now);
         }
     }
 
@@ -883,7 +940,15 @@ impl<L: Link> Stack<L> {
                     }
                     tcp::State::Established | tcp::State::CloseWait => &mut t.established,
                     tcp::State::TimeWait => &mut t.time_wait,
-                    _ => &mut t.closing,
+                    // FIN sent or received, finished and not yet reaped, or a
+                    // child of a listener in a state none should be in (the
+                    // hand-out loop reaps it on this same poll).
+                    tcp::State::FinWait1
+                    | tcp::State::FinWait2
+                    | tcp::State::Closing
+                    | tcp::State::LastAck
+                    | tcp::State::Closed
+                    | tcp::State::Listen => &mut t.closing,
                 }
             };
             *count += 1;
@@ -959,7 +1024,12 @@ impl<L: Link> Stack<L> {
                 continue;
             };
             if !self.tcp[i].as_ref().unwrap().conn.is_established() {
-                if self.tcp[i].as_ref().unwrap().conn.is_closed() {
+                // Half-open children wait for their ACK or their budget.
+                // Anything else nobody accepted (finished, or a state no
+                // child of a listener can legitimately be in) is reaped,
+                // so the backlog cap counts only live connections (incident
+                // 0013 audit: defence in depth behind the RST check).
+                if self.tcp[i].as_ref().unwrap().conn.state() != tcp::State::SynReceived {
                     self.tcp[i] = None;
                 }
                 continue;
