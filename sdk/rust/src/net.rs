@@ -3,7 +3,7 @@
 //! Network service client (`aricode-proto::net`).
 
 use crate::{self as sys, rights, rpc, Error, Handle};
-use aricode_proto::net::{Info, Op, Reply, Request, Status, MAX_DATAGRAM};
+use aricode_proto::net::{Info, Op, Reply, Request, Status, TcpStats, MAX_DATAGRAM};
 
 /// How long `tcp_send_all` waits in all for room in a full send buffer.
 pub const SEND_IDLE_TIMEOUT_MS: u32 = 5_000;
@@ -108,6 +108,13 @@ impl NetClient {
     /// available even if DHCP has not finished.
     pub fn link(&self) -> Result<u64, NetError> {
         self.call(Request::new(Op::Link), false).map(|r| r.value)
+    }
+
+    /// The service's TCP table by state (`diag`, incident 0013), available
+    /// even if DHCP has not finished.
+    pub fn tcp_stats(&self) -> Result<TcpStats, NetError> {
+        self.call(Request::new(Op::TcpStats), false)
+            .map(|r| TcpStats::decode(&r.data))
     }
 
     /// ICMP echo; returns the RTT in ms.

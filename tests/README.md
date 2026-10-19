@@ -68,6 +68,12 @@ usb_storage = true              # the test disk hangs off the xHCI as USB mass s
 marker = "sshd: listening on port 22"   # on seeing the marker, each command runs with the host's ssh through
 commands = ["ls", "shutdown"]   # host port 17022; output joins the log as "[host] ssh $ CMD", "[host] ssh| LINE", "[host] ssh exit N"
 idle_client = true              # a TCP client that never identifies itself holds port 22 first; sshd must drop it
+[host_flood]                    # connection flood (incident 0013): on seeing marker, `connections` plain TCP connections to the
+marker = "sshd: listening on port 22"   # guest's `port` (22, default, or 7: the ports with a hostfwd) are opened, never written to and held
+port = 22                       # until QEMU exits; the console lines are typed only once they are open and watched for 2 s. QEMU
+connections = 8                 # completes the handshakes itself, so the guest sees established connections nobody accepts, not
+                                # half-open ones. Port 22 installs the scenario's SSH key so sshd listens. Result lines: "[host] flood:
+                                # N connections to guest port P opened", "[host] flood: K of N connections reset by the guest within 2000 ms"
 host_https = true               # two host HTTPS servers (openssl s_server -www) on 17443 (cert from a test CA installed as trusted_ca.der) and 17444 (self-signed)
 [host_update]                   # an update source (ADR 0029) published in build/update-test/ and served at http://10.0.2.2:17010/update/
 system = 2                      # system image version offered (omit: no system image)

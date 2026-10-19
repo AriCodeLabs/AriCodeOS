@@ -14,7 +14,7 @@ use alloc::boxed::Box;
 
 use aricode_net::tcp::{self, Connection};
 use aricode_net::{arp, dhcp, dns, eth, icmp, ipv4, isn, udp, Ipv4Addr, MacAddr};
-use aricode_proto::net::{Info, Op, Reply, Request, Status, MAX_DATAGRAM};
+use aricode_proto::net::{Info, Op, Reply, Request, Status, TcpStats, MAX_DATAGRAM};
 use aricode_rt::sys::virtio_pci::{IRQ, SERVICE};
 use aricode_rt::sys::{self, abi, Handle};
 
@@ -24,6 +24,13 @@ const MAX_PINGS: usize = 4;
 const MAX_SOCKETS: usize = 8;
 const MAX_DNS: usize = 4;
 const MAX_TCP: usize = 8;
+/// Connections one listener may hold before its owner accepts them, half-open
+/// included (incident 0013, ADR 0035): a SYN beyond it, or with no free
+/// slot, is answered with a reset and recorded as `net syn dropped`, so a
+/// burst of SYNs to port 22 leaves at least `MAX_TCP / 2 - 1` slots to
+/// active opens. The reasoning is with `tcp::listen_backlog`.
+const TCP_BACKLOG: usize = tcp::listen_backlog(MAX_TCP);
+const _: () = assert!(TCP_BACKLOG >= 1 && 1 + TCP_BACKLOG < MAX_TCP);
 /// Fault event when the kernel gave fewer than `isn::SECRET_LEN` random
 /// bytes for the TCP secret (ADR 0034); its code is the number obtained.
 const TCP_SECRET_FAULT: &str = "net tcp secret degraded";
@@ -64,10 +71,15 @@ enum Refusal {
     BadRequest = 8,
     /// Client buffer missing or not mappable (`Status::BadHandles`).
     BadHandles = 9,
+    /// A SYN to a listening port answered with a reset: no free TCP slot or
+    /// the listener's backlog at `TCP_BACKLOG` (incident 0013). The peer
+    /// is remote, so the status is the one a local client gets for a full
+    /// table (`Busy`).
+    SynDropped = 10,
 }
 
 impl Refusal {
-    const COUNT: usize = 10;
+    const COUNT: usize = 11;
     const ALL: [Refusal; Self::COUNT] = [
         Refusal::TcpTableFull,
         Refusal::ArpDeferFull,
@@ -79,6 +91,7 @@ impl Refusal {
         Refusal::WaitPending,
         Refusal::BadRequest,
         Refusal::BadHandles,
+        Refusal::SynDropped,
     ];
 
     fn from_index(i: usize) -> Option<Self> {
@@ -98,6 +111,7 @@ impl Refusal {
             Refusal::WaitPending => "net wait pending",
             Refusal::BadRequest => "net bad request",
             Refusal::BadHandles => "net bad handles",
+            Refusal::SynDropped => "net syn dropped",
         }
     }
 
@@ -281,6 +295,8 @@ pub struct Stack<L: Link> {
     tcp_secret: isn::Secret,
     /// Connections opened so far: the RFC 6056 port counter.
     tcp_port_count: u32,
+    /// SYNs to a listener answered with a reset since boot (`TcpStats`).
+    tcp_syn_dropped: u32,
     deferred: [Option<Deferred>; 4],
     buffers: ClientBuffers,
     /// Ephemeral UDP port for DNS queries.
@@ -350,6 +366,7 @@ impl<L: Link> Stack<L> {
             dns: [const { None }; MAX_DNS],
             tcp: [const { None }; MAX_TCP],
             tcp_port_count: 0,
+            tcp_syn_dropped: 0,
             deferred: [const { None }; 4],
             buffers: ClientBuffers {
                 entries: [(0, 0, 0); 8],
@@ -805,7 +822,21 @@ impl<L: Link> Stack<L> {
         }) else {
             return;
         };
-        let Some(slot) = self.tcp.iter().position(|s| s.is_none()) else {
+        // No free slot, or the listener already holds `TCP_BACKLOG`
+        // connections nobody accepted (half-open included): the SYN is
+        // refused with a reset so the peer stops retransmitting, and the
+        // refusal is recorded like every other (incident 0013, ADR 0035).
+        let backlog = self
+            .tcp
+            .iter()
+            .flatten()
+            .filter(|s| s.accepted_from == Some(listener as u16))
+            .count();
+        let free = self.tcp.iter().position(|s| s.is_none());
+        let Some(slot) = free.filter(|_| backlog < TCP_BACKLOG) else {
+            self.tcp_syn_dropped = self.tcp_syn_dropped.saturating_add(1);
+            self.note(Refusal::SynDropped, now);
+            self.send_tcp_reset(ih, &h, payload.len(), now);
             return;
         };
         let mut conn = Connection::new(ih.dst, h.dst_port, ih.src, h.src_port);
@@ -814,6 +845,50 @@ impl<L: Link> Stack<L> {
         let mut sock = Box::new(TcpSock::new(conn));
         sock.accepted_from = Some(listener as u16);
         self.tcp[slot] = Some(sock);
+    }
+
+    /// Reset answering a segment that belongs to no connection (RFC 793
+    /// section 3.4, `tcp::reset_for`). A failure to send it is recorded by
+    /// `send_ipv4`; the peer then retransmits and meets the same answer.
+    fn send_tcp_reset(&mut self, ih: ipv4::Header, h: &tcp::Header, payload_len: usize, now: u64) {
+        let mut seg = [0u8; tcp::HEADER_LEN];
+        if let Some(n) = tcp::reset_for(h, payload_len).write(ih.dst, ih.src, None, &[], &mut seg) {
+            let _ = self.send_ipv4(ih.src, ipv4::PROTO_TCP, &seg[..n], now);
+        }
+    }
+
+    /// The TCP table by state (`TcpStats`, incident 0013): every slot in
+    /// exactly one count.
+    fn tcp_stats(&self) -> TcpStats {
+        let mut t = TcpStats {
+            slots: MAX_TCP as u16,
+            syn_dropped: self.tcp_syn_dropped,
+            ..TcpStats::default()
+        };
+        for slot in self.tcp.iter() {
+            let Some(s) = slot else {
+                t.free += 1;
+                continue;
+            };
+            let count = if s.listening {
+                &mut t.listen
+            } else {
+                match s.conn.state() {
+                    tcp::State::SynReceived => &mut t.syn_received,
+                    tcp::State::SynSent => &mut t.syn_sent,
+                    tcp::State::Established | tcp::State::CloseWait
+                        if s.accepted_from.is_some() =>
+                    {
+                        &mut t.backlog
+                    }
+                    tcp::State::Established | tcp::State::CloseWait => &mut t.established,
+                    tcp::State::TimeWait => &mut t.time_wait,
+                    _ => &mut t.closing,
+                }
+            };
+            *count += 1;
+        }
+        t
     }
 
     /// Emits pending segments and resolves waits on every connection.
@@ -1049,6 +1124,16 @@ impl<L: Link> Stack<L> {
                 sock.user_closed = true;
                 if sock.listening {
                     self.tcp[req.sock as usize] = None;
+                    // Its backlog has no owner left: each connection nobody
+                    // accepted is reset on the next poll and its slot freed,
+                    // instead of lingering silently (incident 0013).
+                    for child in self.tcp.iter_mut().flatten() {
+                        if child.accepted_from == Some(req.sock) {
+                            child.accepted_from = None;
+                            child.user_closed = true;
+                            child.conn.abort();
+                        }
+                    }
                 } else {
                     sock.conn.close();
                 }
@@ -1141,6 +1226,11 @@ impl<L: Link> Stack<L> {
                     Some(true) => aricode_proto::net::LINK_UP,
                 };
                 answer(reply_to, Reply::ok(state));
+            }
+            Op::TcpStats => {
+                let mut r = Reply::ok(0);
+                r.data = self.tcp_stats().encode();
+                answer(reply_to, r);
             }
             Op::Info => match self.config {
                 Some(c) => {

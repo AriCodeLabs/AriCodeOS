@@ -1,0 +1,61 @@
+# Incident 0013 (ADR 0035): a listener's connections nobody accepted are
+# bounded, a SYN beyond the bound is answered with a reset and recorded, and
+# the table is readable in `diag`. The host opens eight plain TCP connections
+# to the guest's sshd (port 22) and holds them without a byte: QEMU's user
+# networking completes every handshake itself, so the guest sees established
+# connections, not half-open ones (a true SYN flood cannot be sent through
+# hostfwd; the SYN|ACK retry budget is pinned by the host tests of
+# libs/net). sshd serves one session at a time, so one connection is its
+# session and the rest queue as the listener's backlog, capped at 4 (half of
+# the 8 slots): with the listener and the session that is 6 slots at most,
+# and the SYNs beyond the cap (3 or 4, depending on whether sshd had taken
+# its session when they arrived) get a reset, recorded as `net syn dropped`
+# (code 5, the status a local client gets for a full table). Without the cap
+# all seven free slots would be held by the flood (about 31 s each if half
+# open) and the shell's `http` would be refused with `busy`. What the
+# scenario proves: with the flood in place the shell's active open still
+# succeeds, the drop is recorded on the console and in `diag`, and `diag`
+# shows the table by state. What it cannot prove: half-open connections
+# freeing themselves (host tests) and a flood from a spoofed source.
+name = "network.listen_backlog"
+description = "netd caps a listener's backlog, resets and records the SYNs beyond it, and diag shows the TCP table"
+level = "full"
+areas = ["network", "diag", "ssh"]
+cmdline = "qemu_exit shell"
+timeout_secs = 120
+# Typed once the flood's connections are open (host_flood holds the console).
+stdin = ["http http://10.0.2.2:17010/hola", "diag", "shutdown"]
+
+[host_flood]
+marker = "sshd: listening on port 22"
+port = 22
+connections = 8
+
+[expect]
+exit = 33
+serial_contains = [
+    "sshd: listening on port 22",
+    "[host] flood: 8 connections to guest port 22 opened",
+    "sshd: connection from 10.0.2.2",
+    "virtio-net: fault net syn dropped x1",
+    "HTTP 200, 19 bytes",
+    "Hola desde el host",
+    "tcp     8 slots: 1 listen, 0 syn-rcvd, 0 syn-sent, ",
+    " SYNs reset",
+    "recent kernel events:",
+    ": net syn dropped x1 (code 5)",
+    "=== end of diagnostics ===",
+    " of 8 connections reset by the guest within 2000 ms",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "http: could not connect",
+    "network service refused",
+    "net tcp table full",
+    "[host] flood: 0 of 8 connections reset",
+    "tcp     8 slots: 1 listen, 0 syn-rcvd, 0 syn-sent, 5 backlog",
+    "tcp     8 slots: 1 listen, 0 syn-rcvd, 0 syn-sent, 6 backlog",
+    "tcp     8 slots: 1 listen, 0 syn-rcvd, 0 syn-sent, 7 backlog",
+    "0 free; ",
+]

@@ -675,7 +675,8 @@ latter briefly to add the region.
   (scenario `shell.diag_file`, `fscat` test over the test disk).
   The report includes `net`: `Op::Link` (14) of the network protocol reports the
   physical link state (`LINK_UP`/`LINK_DOWN`/`LINK_UNKNOWN`) even if
-  DHCP has not finished, and the `services` summary names roles
+  DHCP has not finished, `Op::TcpStats` (15) the TCP table by state (one
+  `tcp` line, incident 0013), and the `services` summary names roles
   (block, network, input), not drivers.
 - The runner (`qemu::run_headless`) accepts `Input { prompt, lines }`: it reads the
   serial output incrementally and sends line `k` once the prompt has
@@ -716,10 +717,12 @@ latter briefly to add the region.
   new data within the peer's window, FIN, pure ACK) and
   `on_segment` consumes one; the caller transmits and keeps time. Fixed
   4 KiB buffers per direction, retransmission from `snd_una` with exponential
-  RTO (500 ms to 8 s, 6 retries → `CloseReason::Timeout`),
-  2 s TIME-WAIT, received RST or `abort` → `CloseReason::Reset`. The
-  host tests connect two `Connection`s through a wire that drops
-  chosen or random segments.
+  RTO (500 ms to 8 s, `MAX_RETRIES = 6` → `CloseReason::Timeout`, about
+  31 s; a passive connection's SYN|ACK has the short budget
+  `SYN_ACK_MAX_RETRIES = 3`, about 7.5 s, so a SYN nobody completes frees
+  its slot soon: ADR 0035), 2 s TIME-WAIT, received RST or `abort` →
+  `CloseReason::Reset`. The host tests connect two `Connection`s through a
+  wire that drops chosen or random segments and pin both schedules.
 - In `netd` each TCP socket (`Box`, 8 KiB of buffers) lives in a slot of
   the table; segments are demultiplexed by 4-tuple and a SYN to a
   listening port creates a passive connection that `TcpAccept` delivers once
@@ -727,6 +730,25 @@ latter briefly to add the region.
   deadline; `TcpSend` queues what fits and returns the count (the client
   retries with `tcp_send_all`). A slot is freed when the user has
   closed and the connection has finished.
+- Listeners are protected (incident 0013, ADR 0035). A listener holds at
+  most `tcp::listen_backlog(MAX_TCP) = 4` connections its owner has not
+  accepted yet, half-open and established alike, so a burst of SYNs to port
+  22 leaves at least three slots to active opens. A SYN that finds the
+  backlog at its cap or no free slot is answered with a reset
+  (`tcp::reset_for`, RFC 793 section 3.4: sequence 0, acknowledging the
+  SYN) and recorded as the refusal `net syn dropped` (code 5), so the peer
+  stops retransmitting and `diag` shows it; a SYN to a port nobody listens
+  on is still ignored silently (closed by default). Closing a listener
+  resets and frees the connections of its backlog. `Op::TcpStats` returns
+  the table by state and `net` (so `diag`) prints it in one line, `tcp
+  8 slots: 1 listen, 0 syn-rcvd, 0 syn-sent, 3 backlog, 1 established, 0
+  closing, 0 time-wait, 3 free; 4 SYNs reset`: `backlog` are established
+  connections nobody accepted, `syn-rcvd` the half-open ones (both count
+  towards the cap), `SYNs reset` the refusals since boot. Scenario
+  `network.listen_backlog` holds eight connections from the host against
+  sshd (QEMU completes the handshakes, so they are backlog, not half-open)
+  while the shell's `http` succeeds and `diag` shows the refusal and the
+  table.
 - Initial sequence numbers and ephemeral ports are secrets (ADR 0034,
   incident 0014). `netd` draws a 32-byte secret per boot from the kernel
   generator (`sys::random` through the `SYSTEM` handle it already holds as
@@ -765,8 +787,10 @@ latter briefly to add the region.
   had no transmit slot; the frame is lost), `net arp no reply` (a parked
   frame dropped after 1 s), `net ping table full`, `net dns table full`,
   `net udp table full`, `net wait pending` (a second `recv`/`accept` on a
-  socket that already waits), `net bad request` (`Status::Invalid`) and
-  `net bad handles` (`Status::BadHandles`). `aricode_net::faults::Meter`
+  socket that already waits), `net bad request` (`Status::Invalid`), `net
+  bad handles` (`Status::BadHandles`) and `net syn dropped` (a SYN to a
+  listener refused with a reset: no free slot or the listener's backlog at
+  its cap, ADR 0035). `aricode_net::faults::Meter`
   bounds the rate: at most one event per kind per second; the refusals
   held back in between are counted and recorded when their second ends
   (`drain_due` from `expire`). The event name is `<kind> x<count>` (count

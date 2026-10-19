@@ -569,6 +569,116 @@ fn run_tcp_probe(payload: &str) -> String {
     }
 }
 
+/// Host connection flood (incident 0013): on seeing `marker` the runner
+/// opens `connections` plain TCP connections to the host port forwarded to
+/// the guest's `port`, never sends a byte on them, counts the ones the
+/// guest resets within [`FLOOD_SETTLE`] and holds the rest until QEMU
+/// exits (their closing at exit is QEMU's and is not counted). QEMU's
+/// user networking completes the TCP handshake with the guest itself, so
+/// from the guest's view these are established connections nobody accepts
+/// (its listener's backlog), never half-open ones: a true SYN flood cannot
+/// be sent through `hostfwd`. The scenario's console lines are typed only
+/// once the connections are open and settled, so the guest commands run
+/// with the table in that state.
+pub struct FloodProbe<'a> {
+    pub marker: &'a str,
+    /// Guest port: 22 or `TEST_TCP_LISTEN_PORT`, the two with a `hostfwd`.
+    pub port: u16,
+    pub connections: usize,
+}
+
+/// How long the flood watches its fresh connections for a reset by the
+/// guest before releasing the console: the guest answers a refused SYN at
+/// once and user networking relays the reset within milliseconds.
+const FLOOD_SETTLE: Duration = Duration::from_secs(2);
+
+/// Host port that `hostfwd` forwards to `guest_port` (see `base_command`).
+pub fn forwarded_port(guest_port: u16) -> Option<u16> {
+    use aricode_proto::net::{TEST_SSH_FORWARD_PORT, TEST_TCP_FORWARD_PORT, TEST_TCP_LISTEN_PORT};
+    match guest_port {
+        22 => Some(TEST_SSH_FORWARD_PORT),
+        TEST_TCP_LISTEN_PORT => Some(TEST_TCP_FORWARD_PORT),
+        _ => None,
+    }
+}
+
+/// The flood towards the guest's `guest_port` through its `hostfwd`.
+fn run_flood_probe(
+    guest_port: u16,
+    connections: usize,
+    ready: &std::sync::atomic::AtomicBool,
+    stop: &std::sync::atomic::AtomicBool,
+) -> String {
+    let Some(host_port) = forwarded_port(guest_port) else {
+        ready.store(true, std::sync::atomic::Ordering::SeqCst);
+        return format!("[host] flood: guest port {guest_port} has no hostfwd");
+    };
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], host_port));
+    hold_connections(addr, guest_port, connections, FLOOD_SETTLE, ready, stop)
+}
+
+/// Opens `connections` to `addr`, reads each one for `settle` to count the
+/// ones the peer closes or resets, raises `ready`, then holds the rest
+/// until `stop`. The result is one block of `[host] flood` lines.
+fn hold_connections(
+    addr: std::net::SocketAddr,
+    guest_port: u16,
+    connections: usize,
+    settle: Duration,
+    ready: &std::sync::atomic::AtomicBool,
+    stop: &std::sync::atomic::AtomicBool,
+) -> String {
+    use std::sync::atomic::Ordering;
+    let mut lines = Vec::new();
+    let mut streams: Vec<Option<std::net::TcpStream>> = Vec::new();
+    for _ in 0..connections {
+        match std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
+            Ok(s) => {
+                let _ = s.set_nonblocking(true);
+                streams.push(Some(s));
+            }
+            Err(e) => {
+                lines.push(format!(
+                    "[host] flood: connection refused by the host ({e})"
+                ));
+                break;
+            }
+        }
+    }
+    let opened = streams.len();
+    lines.push(format!(
+        "[host] flood: {opened} connections to guest port {guest_port} opened"
+    ));
+    let mut closed = 0;
+    let mut buf = [0u8; 256];
+    let settle_end = Instant::now() + settle;
+    while Instant::now() < settle_end {
+        for slot in streams.iter_mut() {
+            let Some(s) = slot else { continue };
+            match s.read(&mut buf) {
+                // Data (a banner from the accepting service) keeps it open.
+                Ok(n) if n > 0 => {}
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Ok(_) | Err(_) => {
+                    closed += 1;
+                    *slot = None;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    lines.push(format!(
+        "[host] flood: {closed} of {opened} connections reset by the guest within {} ms",
+        settle.as_millis()
+    ));
+    ready.store(true, Ordering::SeqCst);
+    while !stop.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    drop(streams);
+    lines.join("\n")
+}
+
 /// SSH probe: commands run with the host's `ssh` and the scenario's key.
 pub struct SshProbe<'a> {
     pub marker: &'a str,
@@ -787,6 +897,7 @@ pub struct Headless<'a> {
     pub input: Input<'a>,
     pub probe: Option<TcpProbe<'a>>,
     pub ssh_probe: Option<SshProbe<'a>>,
+    pub flood: Option<FloodProbe<'a>>,
     pub input_probe: Option<InputProbe<'a>>,
     pub disk_variant: image::DiskVariant,
     pub disk_readonly: bool,
@@ -883,6 +994,11 @@ pub fn run_headless(
     let mut ssh_result: Option<String> = None;
     let mut ssh_thread: Option<std::thread::JoinHandle<String>> = None;
     let mut input_thread: Option<std::thread::JoinHandle<String>> = None;
+    // The flood holds its connections until QEMU is gone (`flood_stop`);
+    // the console lines wait for `flood_ready`.
+    let flood_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flood_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut flood_thread: Option<std::thread::JoinHandle<String>> = None;
     let mut timed_out = false;
     let mut killed = false;
     let exit_code = loop {
@@ -903,7 +1019,9 @@ pub fn run_headless(
                 break None;
             }
         }
-        if sent < input.lines.len() {
+        let input_held =
+            options.flood.is_some() && !flood_ready.load(std::sync::atomic::Ordering::SeqCst);
+        if sent < input.lines.len() && !input_held {
             let prompts =
                 count_occurrences(&captured.lock().expect("capture"), input.prompt.as_bytes());
             if prompts > sent {
@@ -942,6 +1060,17 @@ pub fn run_headless(
                 ssh_result = ssh_thread.take().and_then(|t| t.join().ok());
             }
         }
+        if let Some(f) = options.flood.as_ref() {
+            if flood_thread.is_none()
+                && count_occurrences(&captured.lock().expect("capture"), f.marker.as_bytes()) > 0
+            {
+                let (port, n) = (f.port, f.connections);
+                let (ready, stop) = (Arc::clone(&flood_ready), Arc::clone(&flood_stop));
+                flood_thread = Some(std::thread::spawn(move || {
+                    run_flood_probe(port, n, &ready, &stop)
+                }));
+            }
+        }
         if let Some(p) = input_probe {
             if input_thread.is_none()
                 && input_result.is_none()
@@ -972,10 +1101,20 @@ pub fn run_headless(
     if let Some(t) = ssh_thread.take() {
         ssh_result = t.join().ok();
     }
+    flood_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let flood_result = match flood_thread.take() {
+        Some(t) => t.join().ok(),
+        None => options.flood.as_ref().map(|f| {
+            format!(
+                "[host] flood: marker '{}' never seen; no connections opened",
+                f.marker
+            )
+        }),
+    };
     drop(qmp);
     reader.join().map_err(|_| "serial reader")?;
     let mut bytes = captured.lock().expect("capture").clone();
-    for line in [probe_result, input_result, ssh_result]
+    for line in [probe_result, input_result, ssh_result, flood_result]
         .into_iter()
         .flatten()
     {
@@ -1104,6 +1243,75 @@ mod tests {
         );
         assert!(a.starts_with(std::env::temp_dir()));
         assert_ne!(a, b, "two runs must not share a socket");
+    }
+
+    /// The flood reaches the guest only through the two `hostfwd` rules of
+    /// `base_command`; any other guest port is refused at once, not probed.
+    #[test]
+    fn flood_knows_the_forwarded_ports_only() {
+        use aricode_proto::net::{
+            TEST_SSH_FORWARD_PORT, TEST_TCP_FORWARD_PORT, TEST_TCP_LISTEN_PORT,
+        };
+        assert_eq!(super::forwarded_port(22), Some(TEST_SSH_FORWARD_PORT));
+        assert_eq!(
+            super::forwarded_port(TEST_TCP_LISTEN_PORT),
+            Some(TEST_TCP_FORWARD_PORT)
+        );
+        assert_eq!(super::forwarded_port(80), None);
+        let ready = std::sync::atomic::AtomicBool::new(false);
+        let stop = std::sync::atomic::AtomicBool::new(true);
+        let out = super::run_flood_probe(80, 3, &ready, &stop);
+        assert_eq!(out, "[host] flood: guest port 80 has no hostfwd");
+        assert!(
+            ready.load(std::sync::atomic::Ordering::SeqCst),
+            "the console is released"
+        );
+    }
+
+    /// Against a local listener standing in for the guest: the flood opens
+    /// its connections, counts the one the peer closes during the settle
+    /// window, releases the console (`ready`) and holds the rest until
+    /// `stop`; the peer closing them afterwards is not counted.
+    #[test]
+    fn flood_counts_resets_within_the_settle_window_only() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ready = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (r, s) = (Arc::clone(&ready), Arc::clone(&stop));
+        let flood = std::thread::spawn(move || {
+            super::hold_connections(addr, 22, 3, Duration::from_millis(300), &r, &s)
+        });
+        let mut kept = Vec::new();
+        for (i, conn) in listener.incoming().take(3).enumerate() {
+            let conn = conn.unwrap();
+            if i == 1 {
+                drop(conn); // the "guest" resets this one
+            } else {
+                kept.push(conn);
+            }
+        }
+        let start = std::time::Instant::now();
+        while !ready.load(Ordering::SeqCst) {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "ready never raised"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // The peer closes the rest while they are held: not a reset.
+        drop(kept);
+        std::thread::sleep(Duration::from_millis(100));
+        stop.store(true, Ordering::SeqCst);
+        let out = flood.join().unwrap();
+        assert_eq!(
+            out,
+            "[host] flood: 3 connections to guest port 22 opened\n\
+             [host] flood: 1 of 3 connections reset by the guest within 300 ms"
+        );
     }
 
     #[test]

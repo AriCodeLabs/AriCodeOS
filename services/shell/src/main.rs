@@ -657,6 +657,45 @@ fn net(client: &NetClient) {
         }
         Err(e) => net_error(e),
     }
+    tcp_table(client);
+}
+
+/// One line with the service's TCP table by state (incident 0013), so a
+/// full table can be read in `diag` without a capture: `tcp     8 slots: 1
+/// listen, 0 syn-rcvd, 0 syn-sent, 3 backlog, 1 established, 0 closing, 0
+/// time-wait, 3 free; 4 SYNs reset`. The backlog (established, nobody
+/// accepted yet) and syn-rcvd (half-open) connections are the ones a
+/// listener holds, capped per listener; "SYNs reset" counts the SYNs
+/// refused since boot (`net syn dropped` events).
+fn tcp_table(client: &NetClient) {
+    print(b"tcp     ");
+    let t = match client.tcp_stats() {
+        Ok(t) => t,
+        Err(e) => return net_error(e),
+    };
+    num(t.slots as u64);
+    print(b" slots: ");
+    let counts: [(u16, &[u8]); 8] = [
+        (t.listen, b"listen"),
+        (t.syn_received, b"syn-rcvd"),
+        (t.syn_sent, b"syn-sent"),
+        (t.backlog, b"backlog"),
+        (t.established, b"established"),
+        (t.closing, b"closing"),
+        (t.time_wait, b"time-wait"),
+        (t.free, b"free"),
+    ];
+    for (i, (n, label)) in counts.iter().enumerate() {
+        if i > 0 {
+            print(b", ");
+        }
+        num(*n as u64);
+        print(b" ");
+        print(label);
+    }
+    print(b"; ");
+    num(t.syn_dropped as u64);
+    print(b" SYNs reset\n");
 }
 
 fn ping(client: &NetClient, arg: &[u8]) {

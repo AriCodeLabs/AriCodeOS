@@ -85,3 +85,18 @@ prints `tcp secret from kernel entropy` at start and records the fault
 answers with the bytes asked and exposes no entropy-quality state, so that
 is the only failure the core can see); `network.stack` requires the former
 and forbids the latter.
+
+## Note (2026-10-19, incident 0013)
+
+A SYN to a listener with no free TCP slot was the one refusal the core
+still dropped silently, and every SYN to a listening port held a slot for
+the full data retransmission schedule (about 31 s) with no bound per
+listener, so a handful of stray SYNs kept the 8-slot table full for every
+active open. ADR 0035 bounds a listener's backlog to `MAX_TCP / 2`
+connections nobody accepted (half-open included), answers the SYN beyond
+it or without a free slot with a reset (RFC 793 section 3.4) recorded as
+`net syn dropped` (code 5), gives the SYN|ACK a budget of 3
+retransmissions (about 7.5 s), resets the backlog of a listener that
+closes, and adds `Op::TcpStats` so `net` and `diag` show the table by
+state. Regression: `network.listen_backlog` and the host tests of
+`libs/net`.

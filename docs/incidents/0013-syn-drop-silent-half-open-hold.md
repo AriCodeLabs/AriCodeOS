@@ -1,6 +1,8 @@
 # Incident 0013: silent SYN drop and half-open connections holding the TCP table
 
-- Opened: 2026-10-18. Status: open, found by reading (not reproduced).
+- Opened: 2026-10-18. Status: fixed 2026-10-19 (ADR 0035,
+  `fix/tcp-syn-drop-and-half-open`); found by reading, mechanism confirmed
+  by host tests and reproduced in part under QEMU (below).
 - Found by: the independent audit of `fix/net-refusal-visibility`
   (incident 0012), while checking that every refusal of netd is recorded.
 - Code: `services/net-core/src/lib.rs`, `on_tcp` (a SYN to a listening
@@ -46,7 +48,110 @@ of the laptop's LAN exists. The scenario `network.tcp` exercises a single
 accepted connection and the host probe; no scenario sends SYNs that are
 never completed or more SYNs than slots.
 
-## Plan
+## Mechanism (confirmed)
+
+Host tests of `libs/net` reproduce both halves on the pure state machine
+before the fix (written first, failing on the old constants):
+
+- `unanswered_syn_ack_gives_up_within_the_short_budget`: a `Connection`
+  in `Listen` that receives a SYN and never an ACK stayed `SynReceived`
+  until the data schedule ran out, 31.5 s (0.5 + 1 + 2 + 4 + 8 + 8 + 8 s),
+  holding its slot all that time. The hold is the schedule, not a leak.
+- `on_tcp` had three silent exits for a SYN: no listener (unchanged, the
+  port is closed by default), no free slot and, implicitly, no bound at
+  all on how many connections one listener could create. With sshd
+  listening, seven SYNs filled the seven other slots and the eighth and
+  every later one left without a trace; a `TcpConnect` meanwhile got
+  `Busy` (`net tcp table full`), which named the table but not who held
+  it.
+
+Under QEMU a half-open flood cannot be sent: user networking (`hostfwd`)
+completes every handshake itself. What can be reproduced is the other
+holder of a listener's slots, established connections nobody accepts:
+eight plain connections from the host to sshd's port, held without a
+byte. Before the fix they took every free slot (sshd serves one at a time,
+so seven queued) and the shell's `http` was refused with `busy`.
+
+## Fix (ADR 0035)
+
+- `libs/net/src/tcp.rs`: `SYN_ACK_MAX_RETRIES = 3` for `SynReceived`
+  (0.5, 1, 2 s and a last 4 s wait: about 7.5 s, then `Timeout` and the
+  slot is free); `MAX_RETRIES = 6` unchanged for active opens and data
+  (pinned by `active_open_and_data_keep_the_full_schedule`);
+  `listen_backlog(slots) = slots / 2`; `reset_for` (RFC 793 section 3.4).
+- `services/net-core`: a SYN to a listener whose backlog (connections with
+  `accepted_from` set, half-open or established) is at
+  `TCP_BACKLOG = 4`, or with no free slot, is answered with the reset and
+  recorded as `Refusal::SynDropped` (`net syn dropped x<count>`, code 5,
+  through incident 0012's meter); closing a listener resets and frees its
+  backlog instead of orphaning it; `Op::TcpStats` returns the table by
+  state and the SYNs reset since boot.
+- `sdk/proto`, `sdk/rust`: `Op::TcpStats`, `TcpStats`,
+  `NetClient::tcp_stats`.
+- `services/shell`: `net` (and `diag`, which prints it) ends with `tcp
+  8 slots: 1 listen, 0 syn-rcvd, 0 syn-sent, 3 backlog, 1 established, 0
+  closing, 0 time-wait, 3 free; 4 SYNs reset`.
+- `tools/xtask`: `[host_flood]` in a scenario opens N plain connections to
+  the guest's forwarded port 22 or 7 on a marker, holds them until QEMU
+  exits counting the ones the guest resets, and holds the console lines
+  until they are open (`tests/README.md`).
+
+## Tests
+
+- Host (`cargo xtask test --level unit`): the five `libs/net` tests above
+  plus `reset_for_follows_rfc_793_section_3_4` and
+  `answered_syn_ack_resets_the_retry_count`; `aricode-proto` round-trips
+  `TcpStats`; xtask's flood probe against a local listener.
+- QEMU `network.listen_backlog` (full, areas network/diag/ssh): proves
+  that with eight held connections to sshd the backlog stops at 4, the
+  SYNs beyond it are reset and recorded (`virtio-net: fault net syn
+  dropped x1`, `diag`: `net syn dropped x1 (code 5)`), the shell's `http`
+  succeeds meanwhile (`HTTP 200`), `diag` shows the table with the
+  listener and never `0 free`, and the host sees its surplus connections
+  reset within two seconds of opening them. It does not prove the half-open budget (host tests do) nor
+  behaviour towards a spoofed source (a reset of 40 bytes per SYN, no
+  state: ADR 0035 argues it, nothing measures it).
+
+Evidence from the scenario (QEMU, `build/scenarios/network.listen_backlog/
+serial.log`, 2026-10-19): the eight connections arrived while sshd already
+held its accept, so one became sshd's session, four filled the backlog and
+three were reset; the first refusal was recorded at once and the two held
+back by the meter when their second ended.
+
+```text
+sshd: connection from 10.0.2.2
+ari> virtio-net: fault net syn dropped x1
+HTTP 200, 19 bytes
+Hola desde el host
+virtio-net: fault net syn dropped x2
+tcp     8 slots: 1 listen, 0 syn-rcvd, 0 syn-sent, 4 backlog, 1 established, 0 closing, 0 time-wait, 2 free; 3 SYNs reset
+  [11.851 s] fault reported by process 10: net syn dropped x1 (code 5)
+  [12.875 s] fault reported by process 10: net syn dropped x2 (code 5)
+[host] flood: 8 connections to guest port 22 opened
+[host] flood: 3 of 8 connections reset by the guest within 2000 ms
+```
+
+`ssh.exec` (an idle client plus the real one, both within the cap) and
+`ssh.shell_fault` are unchanged and green with the cap in place.
+
+## Open
+
+- A flood from a spoofed or unreachable source still costs a slot for
+  7.5 s per SYN admitted: about four SYNs every 7.5 s keep one listener's
+  backlog full, which costs the attacker nothing and the machine 4 of its
+  8 slots. Active opens keep working; the owner's own SSH login does not
+  while it lasts. SYN cookies (RFC 4987) would remove the slot cost but
+  need the connection to be created on the ACK, which this stack does not
+  do; left for when it is observed.
+- The cap is per listener; a second listening service would let two
+  backlogs take the whole table (ADR 0035).
+- `TcpStats` counts a boot's refusals in `syn_dropped` but not per
+  listener or per source; a capture is still needed to know who floods.
+- The laptop observation of incident 0012 is still unexplained; the new
+  `diag` line will say, on the next `Busy`, whether a backlog held the
+  table.
+
+## Plan (as written on 2026-10-18)
 
 1. Record the drop: a `net syn dropped` kind in `Refusal` (status `Busy`,
    the status the peer would have got if it were local), so `diag` shows
