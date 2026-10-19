@@ -47,3 +47,12 @@ the permission down is not enough to make it effective.
 - Writing to a shared file, sharing whole directories and a file picker
   for granting at session time are later stages; the mechanism (`Share`
   with a per-endpoint restriction) is the same.
+
+## Note (ADR 0036, 2026-10-19)
+
+A `Bind` or `Share` endpoint is no longer shared by every launch of the
+same name: each grant is a session of its own, of which fsd keeps only the
+receive side, so that the kernel can report the client gone and fsd release
+its descriptors (incident 0011). The restriction each kind enforces is
+unchanged; a third kind, `Attach`, gives the whole namespace to the
+`install` holder and the shells.

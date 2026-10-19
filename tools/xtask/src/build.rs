@@ -33,6 +33,7 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("aricode-gpt", None),
     ("aricode-arifs", None),
     ("aricode-net", None),
+    ("aricode-faults", None),
     ("aricode-http", None),
     ("aricode-input", None),
     ("aricode-gfx", None),

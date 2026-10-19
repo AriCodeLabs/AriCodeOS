@@ -1299,6 +1299,7 @@ fn services(mask: u64, fs: &FsClient) {
         } else {
             b"active, not responding\n"
         });
+        descriptors(fs);
     }
     print(b"network   service     ");
     print(if mask & SERVICE_NET != 0 {
@@ -1318,6 +1319,55 @@ fn services(mask: u64, fs: &FsClient) {
     } else {
         b"absent (start with `gui`)\n"
     });
+}
+
+/// fsd's descriptor table (ADR 0036): `descriptors 3/16 open, 16
+/// reclaimed from dead clients: main 1, root 2`, one entry per owner
+/// (the main endpoint and each client session) holding a descriptor.
+fn descriptors(fs: &FsClient) {
+    let mut name = [0u8; 32];
+    let mut slot = 0u32;
+    let mut first = true;
+    let mut listed = 0;
+    loop {
+        match fs.descriptors(slot, &mut name) {
+            Ok(Some((usage, n))) => {
+                if first {
+                    print(b"          descriptors ");
+                    num(usage.used as u64);
+                    print(b"/");
+                    num(usage.capacity as u64);
+                    print(b" open, ");
+                    num(usage.reclaimed as u64);
+                    print(b" reclaimed from dead clients");
+                    if usage.used > 0 {
+                        print(b":");
+                    }
+                    first = false;
+                }
+                if usage.owned > 0 {
+                    print(if listed == 0 { b" ".as_slice() } else { b", " });
+                    print(&name[..n]);
+                    print(b" ");
+                    num(usage.owned as u64);
+                    listed += 1;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => {
+                print(if first {
+                    b"          descriptors: no answer\n"
+                } else {
+                    b" ...\n"
+                });
+                return;
+            }
+        }
+        slot += 1;
+    }
+    if !first {
+        print(b"\n");
+    }
 }
 
 /// `services --detail`: what init knows about each supervised service.

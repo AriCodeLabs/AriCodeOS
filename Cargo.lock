@@ -117,6 +117,7 @@ version = "0.11.0"
 dependencies = [
  "aricode-arifs",
  "aricode-build",
+ "aricode-faults",
  "aricode-proto",
  "aricode-rt",
  "aricode-sys",
@@ -126,6 +127,7 @@ dependencies = [
 name = "ari-net-core"
 version = "0.11.0"
 dependencies = [
+ "aricode-faults",
  "aricode-net",
  "aricode-proto",
  "aricode-rt",
@@ -299,6 +301,10 @@ version = "0.11.0"
 
 [[package]]
 name = "aricode-fat"
+version = "0.11.0"
+
+[[package]]
+name = "aricode-faults"
 version = "0.11.0"
 
 [[package]]

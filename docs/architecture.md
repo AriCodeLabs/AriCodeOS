@@ -66,6 +66,7 @@ libs/gfx/            aricode-gfx: 0x00RRGGBB canvases, clipping, text, cursor an
 libs/input/          aricode-input: evdev events and US keyboard (no_std, host tests)
 libs/http/           aricode-http: GET, response parsing, Content-Length and chunked without alloc (no_std, host tests)
 libs/net/            aricode-net: Ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP client and DNS without alloc (no_std, host tests)
+libs/faults/         aricode-faults: bounded fault reporting, one kernel event per kind per second with the count (netd, fsd; no_std, host tests)
 libs/arifs/          aricode-arifs: AriFS v1, flat directory with a fixed-capacity file table, CRC32 and replacement journal over `BlockDevice` (no_std, host tests with power cuts)
 libs/pkg/            aricode-pkg: signed application packages (manifest with name, version and hashes; Ed25519 signature; ELF; application manifest)
 libs/update-index/   aricode-update-index: update sources, signed index, rollback serials, version and downgrade rules (ADR 0029)
@@ -621,8 +622,10 @@ latter briefly to add the region.
   single in-progress replace per service, `Busy` for the rest, released by
   the commit, an error or closing the descriptor; ADR 0018); data goes through the client's DMA
   buffer (up to 4 KiB per request), which fsd maps once and
-  reuses by physical address. Descriptors are global to the service
-  (16 open) until there is per-capability client identity.
+  reuses by physical address. The 16 open descriptors
+  (`aricode_arifs::descriptors`, host-tested) belong to the endpoint that
+  opened them; a client that dies holding some has them released when
+  the kernel reports its session gone (ADR 0036, below).
 - `aricode-sys::fs::FsClient` wraps the reply endpoint, the DMA buffer
   and the calls; `fs_client` (ring 3) lists, reads `hola.txt`, creates and writes
   `nuevo.txt`, replaces it in one go, does `flush`, reads back and checks
@@ -661,7 +664,7 @@ latter briefly to add the region.
 - Init also receives `SYSTEM` (`0x10007`) and a console input
   (`0x10008`, `READ`); the kernel passes `init_arg::SHELL` in `arg` if the
   cmdline contains `shell`. After the boot services it launches `shell` with
-  the fsd endpoint (`WRITE`), hardware, `SYSTEM`, the console input
+  a file session of its own (`Attach`, ADR 0036), hardware, `SYSTEM`, the console input
   and the read-only PCI root, and `arg` = mask of active services; it waits
   for its exit and logs it.
 - `arish` reads lines with echo and backspace, and dispatches commands without
@@ -790,7 +793,7 @@ latter briefly to add the region.
   socket that already waits), `net bad request` (`Status::Invalid`), `net
   bad handles` (`Status::BadHandles`) and `net syn dropped` (a SYN to a
   listener refused with a reset: no free slot or the listener's backlog at
-  its cap, ADR 0035). `aricode_net::faults::Meter`
+  its cap, ADR 0035). `aricode_faults::Meter` (`libs/faults`, shared with fsd)
   bounds the rate: at most one event per kind per second; the refusals
   held back in between are counted and recorded when their second ends
   (`drain_due` from `expire`). The event name is `<kind> x<count>` (count
@@ -970,11 +973,22 @@ latter briefly to add the region.
   creates the process): previously every nonexistent name consumed an entry in
   init's table. The shell receives the broker endpoint instead
   of the `SPAWNER`.
-- fsd keeps up to 8 granted namespaces: each `Bind` (only
-  through the main endpoint) creates or reuses an endpoint bound to a
-  prefix, and each `Share` (ADR 0016) one bound to a single file in
-  read mode; the loop reads the main one with a 10 ms wait and the granted ones
-  without waiting. From a private one, `Open`/`Create` qualify the name as
+- fsd serves up to 15 *sessions* besides its main endpoint (ADR 0036):
+  each `Bind` (only through the main endpoint) creates an endpoint bound
+  to a prefix, each `Share` (ADR 0016) one bound to a single file in read
+  mode, and each `Attach` one bound to the whole namespace (the `install`
+  capability and the shells, instead of a duplicate of the main endpoint).
+  A session is one endpoint pair per grant (never shared between launches)
+  of which fsd keeps only the receive side, so the kernel reports its client
+  gone (ADR 0030) and fsd, probing each session with a zero-timeout receive
+  once a second and whenever a table is full, retires it: descriptors and
+  replace in progress released, `fs fds reclaimed xN` recorded when it left
+  any open (meter `aricode_faults`, shared with netd; `fs fds full` and `fs
+  sessions full` record the refusals). `Op::Descriptors` reports the table
+  per owner and `diag` prints it under `files` (`descriptors 3/16 open, 16
+  reclaimed from dead clients: main 1, root 2`); scenario
+  `filesystem.descriptors_reclaimed` (`run fd_leaker`, incident 0011).
+  From a private one, `Open`/`Create` qualify the name as
   `prefix/name` (rejecting `/` in the name) and `List` filters and strips
   the prefix. From a shared file, `List` shows only that file,
   `Open` only opens that file, and `Create`, `Write`, `Replace`, `Flush`, `Bind`
@@ -1349,9 +1363,9 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
 - `arish` has no history, line editing or redirection; environment
   variables and program launching arrive with the process
   service.
-- `fsd` does not distinguish clients: any process with its endpoint sees all
-  descriptors. Per-file capabilities arrive with client identity
-  in IPC.
+- `fsd` identifies a client by the endpoint its requests arrive on (its
+  session, ADR 0036); processes that share the main endpoint (init, sshd)
+  are one owner, and their descriptors are released only by `Close`.
 
 - The block service maps each client DMA buffer once and
   reuses it by physical address; there is no `mmio_unmap` or block cache.

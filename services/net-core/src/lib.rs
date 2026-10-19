@@ -45,7 +45,7 @@ const ARP_WAIT_MS: u64 = 1000;
 
 /// Why netd refused a request or lost a frame (incident 0012). Each kind is
 /// a fault event in the kernel ring, recorded at most once per second per
-/// kind (`aricode_net::faults`): the name is `<kind> x<count>` (refusals of
+/// kind (`aricode_faults`): the name is `<kind> x<count>` (refusals of
 /// that kind in that second) and the code is the `net::Status` number the
 /// client got (`diag`: `fault reported by process N: net tcp table full x3
 /// (code 5)`). `BadSock`, `InUse`, `NoRoute`, `NotFound`, `Timeout` and
@@ -128,10 +128,10 @@ impl Refusal {
 
 // Every kind name leaves room for " x999" in a kernel event name.
 const _: () = {
-    assert!(aricode_net::faults::LABEL_LEN == abi::sysinfo::EVENT_NAME_LEN);
+    assert!(aricode_faults::LABEL_LEN == abi::sysinfo::EVENT_NAME_LEN);
     let mut i = 0;
     while i < Refusal::COUNT {
-        assert!(Refusal::ALL[i].name().len() + 5 <= aricode_net::faults::LABEL_LEN);
+        assert!(Refusal::ALL[i].name().len() + 5 <= aricode_faults::LABEL_LEN);
         i += 1;
     }
 };
@@ -305,7 +305,7 @@ pub struct Stack<L: Link> {
     /// the main loop does not close it after dispatching.
     retained: Option<Handle>,
     /// Refusals recorded at most once per second per kind (incident 0012).
-    faults: aricode_net::faults::Meter<{ Refusal::COUNT }>,
+    faults: aricode_faults::Meter<{ Refusal::COUNT }>,
 }
 
 fn new_socket(port: u16) -> Socket {
@@ -374,7 +374,7 @@ impl<L: Link> Stack<L> {
             },
             dns_port: 49153,
             retained: None,
-            faults: aricode_net::faults::Meter::new(),
+            faults: aricode_faults::Meter::new(),
         }
     }
 
@@ -391,8 +391,8 @@ impl<L: Link> Stack<L> {
     /// A fault event in the kernel ring (`<kind> x<count>`, code = status
     /// number) and the same line on the console.
     fn record(&self, what: Refusal, count: u32) {
-        let mut label = [0u8; aricode_net::faults::LABEL_LEN];
-        let name = aricode_net::faults::label(what.name(), count, &mut label);
+        let mut label = [0u8; aricode_faults::LABEL_LEN];
+        let name = aricode_faults::label(what.name(), count, &mut label);
         let _ = sys::event_record(what.status() as u64, name);
         sys::print(self.name.as_bytes());
         sys::print(b": fault ");

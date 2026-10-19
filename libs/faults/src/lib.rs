@@ -1,12 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
 //! Bounded fault reporting (ADR 0028, incident 0012). A service that
-//! refuses requests records every kind of refusal in the kernel event ring,
-//! but at most once per [`WINDOW_MS`] per kind: the ring holds 64 entries
-//! and a client in a loop would otherwise push every other event out of
-//! it. What is not recorded is counted and recorded when the window ends
-//! ([`Meter::drain_due`]), so no refusal disappears from the tally and a
-//! burst followed by silence still shows its size.
+//! refuses requests, or cleans up after a client, records every kind of
+//! fault in the kernel event ring, but at most once per [`WINDOW_MS`] per
+//! kind: the ring holds 64 entries and a client in a loop would otherwise
+//! push every other event out of it. What is not recorded is counted and
+//! recorded when the window ends ([`Meter::drain_due`]), so no fault
+//! disappears from the tally and a burst followed by silence still shows
+//! its size. Shared by netd (`services/net-core`) and fsd (`services/arifs`).
+
+#![no_std]
 
 /// Length of the window during which a kind is recorded once.
 pub const WINDOW_MS: u64 = 1000;
@@ -46,15 +49,23 @@ impl<const N: usize> Meter<N> {
     /// [`WINDOW_MS`] ago and this one only joins the count. An index beyond
     /// `N` is counted nowhere and always reported.
     pub fn report(&mut self, kind: usize, now_ms: u64) -> u32 {
+        self.report_many(kind, now_ms, 1)
+    }
+
+    /// Accounts `count` faults of `kind` that happened together (the
+    /// descriptors of one dead client, ADR 0036) with the same rule as
+    /// [`Meter::report`]: all of them are recorded now, with whatever was
+    /// held back, or all of them join the count.
+    pub fn report_many(&mut self, kind: usize, now_ms: u64, count: u32) -> u32 {
         let Some(end) = self.window_end.get_mut(kind) else {
-            return 1;
+            return count;
         };
         if now_ms < *end {
-            self.pending[kind] = self.pending[kind].saturating_add(1);
+            self.pending[kind] = self.pending[kind].saturating_add(count);
             return 0;
         }
         *end = now_ms.saturating_add(WINDOW_MS);
-        let n = self.pending[kind].saturating_add(1);
+        let n = self.pending[kind].saturating_add(count);
         self.pending[kind] = 0;
         n
     }
@@ -199,6 +210,22 @@ mod tests {
         assert_eq!(m.report(0, 0), 0);
         assert_eq!(m.drain_due(0), None);
         assert_eq!(m.drain_due(WINDOW_MS), Some((0, 2)));
+    }
+
+    /// A batch is one record carrying its whole size, never one now and
+    /// the rest a second later.
+    #[test]
+    fn a_batch_is_recorded_whole() {
+        let mut m = Meter::<1>::new();
+        assert_eq!(m.report_many(0, 0, 16), 16);
+        assert_eq!(m.report_many(0, 10, 3), 0);
+        assert_eq!(m.report(0, 20), 0);
+        assert_eq!(m.drain_due(WINDOW_MS), Some((0, 4)));
+        assert_eq!(
+            m.report_many(9, 0, 5),
+            5,
+            "an unknown kind is reported as is"
+        );
     }
 
     #[test]

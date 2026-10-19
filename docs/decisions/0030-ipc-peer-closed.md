@@ -159,6 +159,12 @@ For a request/reply call (ADR 0012) this gives:
   reports when any one of them is revoked. Nothing revokes a namespace
   endpoint today; if something starts to, fsd must drop that endpoint
   instead of exiting.
+- Used as a liveness probe (ADR 0036, incident 0011): fsd creates each
+  client session with `endpoint_create_pair`, keeps only the receive side
+  and asks `ipc_receive(ep, 0)` whether the client lives: `PeerClosed`
+  once every send handle is gone and the queue is empty, `Timeout`
+  otherwise. This relies on items 2, 4 and 5 as written; `ipc_receive_any`
+  keeps its contract (one closed endpoint among live ones stays empty).
 - Kernel threads: a capability a kernel thread drops outside a syscall and
   outside `reap()` (self-tests) is settled at the next syscall or reap on
   any CPU.
