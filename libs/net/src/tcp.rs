@@ -25,8 +25,61 @@ pub const RECV_BUF: usize = 4096;
 pub const MAX_SEGMENT: usize = HEADER_LEN + 4 + MSS;
 const INITIAL_RTO_MS: u64 = 500;
 const MAX_RTO_MS: u64 = 8000;
-const MAX_RETRIES: u8 = 6;
+/// Retransmissions of a SYN, data or FIN before the connection gives up
+/// (`CloseReason::Timeout`): with the RTO doubling from 500 ms to 8 s the
+/// schedule is 0.5, 1, 2, 4, 8, 8, 8 s, about 31 s in all.
+pub const MAX_RETRIES: u8 = 6;
+/// Retransmissions of the SYN|ACK of a passive connection before it gives
+/// up (incident 0013, ADR 0035): 0.5, 1, 2 s and a last wait of 4 s, about
+/// 7.5 s in all. A SYN whose sender never answers the SYN|ACK (unreachable,
+/// spoofed, or a scanner) must not hold one of the service's few slots for
+/// the full `MAX_RETRIES` schedule (31 s); three retransmissions still
+/// cover a lost SYN|ACK and a slow LAN peer. Linux keeps five
+/// (`tcp_synack_retries`, about 63 s) with a table of thousands of slots.
+pub const SYN_ACK_MAX_RETRIES: u8 = 3;
 const TIME_WAIT_MS: u64 = 2000;
+
+/// Connections a listener may hold before its owner accepts them, half-open
+/// (`SynReceived`) and established alike, for a table of `table_slots`
+/// (incident 0013, ADR 0035). Half of the table: a burst of SYNs to one
+/// port can never take every slot, so active opens (the shell, the updater,
+/// an SSH client of the owner) always find at least `table_slots / 2 - 1`
+/// slots free of that listener's children (one slot is the listener). A
+/// SYN beyond it is answered with a reset ([`reset_for`]) and recorded by
+/// the service.
+pub const fn listen_backlog(table_slots: usize) -> usize {
+    table_slots / 2
+}
+
+/// Reset answering a segment of `payload_len` bytes for which no
+/// connection exists (RFC 793 section 3.4, "if the connection does not
+/// exist (CLOSED) then a reset is sent in response to any incoming segment
+/// except another reset"): with an ACK in the segment the reset takes its
+/// sequence number from the ACK field; otherwise it has sequence number
+/// zero and acknowledges the segment's sequence number plus its length,
+/// SYN and FIN counted, so the sender can match it. A reset is never sent
+/// for a reset: the caller ignores any segment with `FLAG_RST` before it
+/// decides to answer (the service does so before looking for a listener;
+/// `on_segment` in LISTEN ignores it too, see
+/// `listener_ignores_a_syn_carrying_rst`).
+pub fn reset_for(h: &Header, payload_len: usize) -> Header {
+    let (seq, ack, flags) = if h.flags & FLAG_ACK != 0 {
+        (h.ack, 0, FLAG_RST)
+    } else {
+        let len = payload_len as u32
+            + u32::from(h.flags & FLAG_SYN != 0)
+            + u32::from(h.flags & FLAG_FIN != 0);
+        (0, h.seq.wrapping_add(len), FLAG_RST | FLAG_ACK)
+    };
+    Header {
+        src_port: h.dst_port,
+        dst_port: h.src_port,
+        seq,
+        ack,
+        flags,
+        window: 0,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
@@ -401,11 +454,18 @@ impl Connection {
             self.finish(CloseReason::Graceful);
             return None;
         }
-        // Timer-driven retransmission.
+        // Timer-driven retransmission. A SYN|ACK nobody answers has the
+        // short budget: the slot must not wait 31 s for a peer that never
+        // was (incident 0013).
         if let Some(at) = self.retransmit_at {
             if now >= at {
                 self.retries += 1;
-                if self.retries > MAX_RETRIES {
+                let budget = if self.state == State::SynReceived {
+                    SYN_ACK_MAX_RETRIES
+                } else {
+                    MAX_RETRIES
+                };
+                if self.retries > budget {
                     self.finish(CloseReason::Timeout);
                     return None;
                 }
@@ -747,6 +807,173 @@ mod tests {
         assert_eq!(p.a.state(), State::Closed);
         assert_eq!(p.a.close_reason(), Some(CloseReason::Timeout));
         assert!(p.a.retries() > MAX_RETRIES);
+    }
+
+    /// Time at which a connection whose segments are all lost gives up:
+    /// the RTO schedule 0.5, 1, 2, 4, 8, 8, 8 s puts it at 31.5 s for an
+    /// active open or data (ADR 0035 leaves it unchanged).
+    const FULL_SCHEDULE_MS: u64 = 500 + 1000 + 2000 + 4000 + 8000 + 8000 + 8000;
+
+    /// Incident 0013: a passive connection whose SYN|ACK is never answered
+    /// frees itself after `SYN_ACK_MAX_RETRIES` retransmissions (0.5, 1, 2 s
+    /// and a last 4 s wait: 7.5 s), not after the 31 s data schedule.
+    #[test]
+    fn unanswered_syn_ack_gives_up_within_the_short_budget() {
+        let mut b = Connection::new(B, 80, A, 40000);
+        b.listen(isn::initial_seq(&SECRET, B, 80, A, 40000, 0));
+        let syn = Header {
+            src_port: 40000,
+            dst_port: 80,
+            seq: 1000,
+            ack: 0,
+            flags: FLAG_SYN,
+            window: 4096,
+        };
+        b.on_segment(&syn, &[], 0);
+        assert_eq!(b.state(), State::SynReceived);
+        let mut buf = [0u8; MAX_SEGMENT];
+        let mut sent = 0;
+        let mut now = 0;
+        let closed_at = loop {
+            while b.poll(now, &mut buf).is_some() {
+                sent += 1;
+            }
+            if b.is_closed() {
+                break now;
+            }
+            now += 10;
+            assert!(
+                now <= FULL_SCHEDULE_MS,
+                "still holding its slot at {now} ms"
+            );
+        };
+        assert_eq!(b.close_reason(), Some(CloseReason::Timeout));
+        assert_eq!(
+            sent,
+            1 + SYN_ACK_MAX_RETRIES as usize,
+            "SYN|ACK and its retransmissions"
+        );
+        let budget: u64 = 500 + 1000 + 2000 + 4000;
+        assert!(
+            (budget..budget + 20).contains(&closed_at),
+            "gave up at {closed_at} ms, expected about {budget}"
+        );
+    }
+
+    /// The short budget is for the SYN|ACK only: an active open keeps the
+    /// full schedule (its caller has a deadline of its own) and so does
+    /// data on an established connection.
+    #[test]
+    fn active_open_and_data_keep_the_full_schedule() {
+        let mut p = Pair::new(|_| true);
+        p.run(FULL_SCHEDULE_MS - 100);
+        assert_eq!(p.a.state(), State::SynSent, "still trying before 31.5 s");
+        p.run(200);
+        assert_eq!(p.a.close_reason(), Some(CloseReason::Timeout));
+
+        let mut p = Pair::new(|_| false);
+        p.run(10);
+        assert!(p.a.is_established() && p.b.is_established());
+        p.drop = |_| true;
+        assert_eq!(p.a.send(b"lost"), 4);
+        p.run(FULL_SCHEDULE_MS - 100);
+        assert!(p.a.is_established(), "still retransmitting before 31.5 s");
+        p.run(200);
+        assert_eq!(p.a.close_reason(), Some(CloseReason::Timeout));
+    }
+
+    /// A SYN|ACK that is answered leaves `SynReceived` with the counters
+    /// reset: the short budget never counts against data later.
+    #[test]
+    fn answered_syn_ack_resets_the_retry_count() {
+        // Segments 2 and 3 are lost: the first SYN|ACK, then A's
+        // retransmitted SYN; the second SYN|ACK answers A's third SYN.
+        let mut p = Pair::new(|n| n == 2 || n == 3);
+        p.run(2000);
+        assert!(p.a.is_established() && p.b.is_established());
+        assert_eq!(p.b.retries(), 0);
+    }
+
+    /// Incident 0013 audit: a SYN that also carries RST (nmap's
+    /// `--scanflags SYNRST`) is a reset for a connection that does not
+    /// exist. A listener stays in LISTEN, arms no timer and emits nothing,
+    /// so a caller that created a connection for it would hold a slot
+    /// forever: the service drops such segments before creating anything.
+    #[test]
+    fn listener_ignores_a_syn_carrying_rst() {
+        let mut b = Connection::new(B, 22, A, 40000);
+        b.listen(isn::initial_seq(&SECRET, B, 22, A, 40000, 0));
+        let syn_rst = Header {
+            src_port: 40000,
+            dst_port: 22,
+            seq: 1000,
+            ack: 0,
+            flags: FLAG_SYN | FLAG_RST,
+            window: 4096,
+        };
+        b.on_segment(&syn_rst, &[], 0);
+        assert_eq!(b.state(), State::Listen);
+        assert!(!b.is_closed() && !b.is_established());
+        let mut buf = [0u8; MAX_SEGMENT];
+        for now in (0..FULL_SCHEDULE_MS).step_by(500) {
+            assert_eq!(b.poll(now, &mut buf), None, "nothing to send at {now}");
+        }
+        assert_eq!(
+            b.state(),
+            State::Listen,
+            "and it never leaves LISTEN on its own"
+        );
+    }
+
+    #[test]
+    fn listen_backlog_leaves_half_the_table_to_active_opens() {
+        assert_eq!(listen_backlog(8), 4);
+        assert_eq!(listen_backlog(2), 1);
+        for slots in 2..64 {
+            // Listener plus its backlog never exceed half the table plus one.
+            assert!(1 + listen_backlog(slots) <= slots / 2 + 1);
+        }
+    }
+
+    /// RFC 793 section 3.4: the reset to a SYN acknowledges the SYN (seq +
+    /// 1), the one to a segment with ACK takes the ACK as its sequence
+    /// number, and the ports are swapped.
+    #[test]
+    fn reset_for_follows_rfc_793_section_3_4() {
+        let syn = Header {
+            src_port: 40000,
+            dst_port: 22,
+            seq: 0xdead_beef,
+            ack: 0,
+            flags: FLAG_SYN,
+            window: 65535,
+        };
+        let r = reset_for(&syn, 0);
+        assert_eq!((r.src_port, r.dst_port), (22, 40000));
+        assert_eq!(r.flags, FLAG_RST | FLAG_ACK);
+        assert_eq!(r.seq, 0);
+        assert_eq!(r.ack, 0xdead_bef0);
+        assert_eq!(r.window, 0);
+        // Data and FIN count towards the acknowledged length; wrapping.
+        let fin = Header {
+            flags: FLAG_FIN,
+            seq: u32::MAX - 2,
+            ..syn
+        };
+        assert_eq!(reset_for(&fin, 5).ack, 3);
+        // With an ACK the reset carries it as its sequence number.
+        let ack = Header {
+            flags: FLAG_ACK | FLAG_PSH,
+            ack: 777,
+            ..syn
+        };
+        let r = reset_for(&ack, 10);
+        assert_eq!((r.seq, r.ack, r.flags), (777, 0, FLAG_RST));
+        // The reset is a valid segment on the wire.
+        let mut buf = [0u8; 64];
+        let n = r.write(B, A, None, &[], &mut buf).unwrap();
+        let (parsed, _) = Header::parse(B, A, &buf[..n]).unwrap();
+        assert_eq!(parsed, r);
     }
 
     #[test]

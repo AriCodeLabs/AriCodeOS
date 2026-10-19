@@ -419,6 +419,9 @@ pub mod net {
         /// Physical link state: `value` = [`LINK_UNKNOWN`], [`LINK_DOWN`]
         /// or [`LINK_UP`]. Works without DHCP configuration.
         Link = 14,
+        /// TCP table by state: `Reply::data` = [`TcpStats`] (incident 0013).
+        /// Works without DHCP configuration.
+        TcpStats = 15,
     }
 
     /// Request (64 bytes). DNS names do not travel in the message: they go through
@@ -482,6 +485,7 @@ pub mod net {
                 12 => Op::TcpRecv,
                 13 => Op::TcpClose,
                 14 => Op::Link,
+                15 => Op::TcpStats,
                 _ => return None,
             };
             let mut addr = [0u8; 4];
@@ -607,6 +611,78 @@ pub mod net {
         pub router: [u8; 4],
         pub dns: [u8; 4],
         pub mac: [u8; 6],
+    }
+
+    /// The service's TCP table by state, as carried in `Reply::data` of
+    /// `TcpStats` (incident 0013, ADR 0035): what `diag` shows so a full
+    /// table can be read on the machine. Every slot is in exactly one of the
+    /// counts; `slots` is their sum.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct TcpStats {
+        /// Size of the table.
+        pub slots: u16,
+        /// Listening ports.
+        pub listen: u16,
+        /// Passive connections whose SYN|ACK is not yet acknowledged
+        /// (half-open; they count towards their listener's backlog).
+        pub syn_received: u16,
+        /// Active opens whose SYN is not yet answered.
+        pub syn_sent: u16,
+        /// Established connections nobody has accepted yet (the listener's
+        /// backlog, with `syn_received`).
+        pub backlog: u16,
+        /// Established connections in use (accepted or actively opened).
+        pub established: u16,
+        /// Closing: FIN sent or received, and finished connections not yet
+        /// reaped.
+        pub closing: u16,
+        /// TIME-WAIT.
+        pub time_wait: u16,
+        /// Free slots.
+        pub free: u16,
+        /// SYNs to a listener answered with a reset since boot: no free
+        /// slot or the listener's backlog at its cap.
+        pub syn_dropped: u32,
+    }
+
+    impl TcpStats {
+        pub fn encode(&self) -> [u8; 24] {
+            let mut d = [0u8; 24];
+            for (i, v) in [
+                self.slots,
+                self.listen,
+                self.syn_received,
+                self.syn_sent,
+                self.backlog,
+                self.established,
+                self.closing,
+                self.time_wait,
+                self.free,
+            ]
+            .iter()
+            .enumerate()
+            {
+                d[2 * i..2 * i + 2].copy_from_slice(&v.to_le_bytes());
+            }
+            d[18..22].copy_from_slice(&self.syn_dropped.to_le_bytes());
+            d
+        }
+
+        pub fn decode(d: &[u8; 24]) -> Self {
+            let u = |i: usize| u16::from_le_bytes([d[2 * i], d[2 * i + 1]]);
+            Self {
+                slots: u(0),
+                listen: u(1),
+                syn_received: u(2),
+                syn_sent: u(3),
+                backlog: u(4),
+                established: u(5),
+                closing: u(6),
+                time_wait: u(7),
+                free: u(8),
+                syn_dropped: u32::from_le_bytes([d[18], d[19], d[20], d[21]]),
+            }
+        }
     }
 
     impl Info {
@@ -1300,6 +1376,22 @@ mod tests {
         assert_eq!(Info::decode(&info.encode()), info);
         let link = Request::new(Op::Link);
         assert_eq!(Request::decode(&link.encode()).unwrap().op, Op::Link);
+        let stats = Request::new(Op::TcpStats);
+        assert_eq!(Request::decode(&stats.encode()).unwrap().op, Op::TcpStats);
+        let table = TcpStats {
+            slots: 8,
+            listen: 1,
+            syn_received: 2,
+            syn_sent: 1,
+            backlog: 1,
+            established: 1,
+            closing: 1,
+            time_wait: 1,
+            free: 0,
+            syn_dropped: 70_000,
+        };
+        assert_eq!(TcpStats::decode(&table.encode()), table);
+        assert_eq!(TcpStats::decode(&[0; 24]), TcpStats::default());
         let mut bad = r.encode();
         bad[2] = 99;
         assert!(Request::decode(&bad).is_none());

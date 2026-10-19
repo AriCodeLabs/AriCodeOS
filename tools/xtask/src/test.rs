@@ -198,10 +198,12 @@ fn run_scenario(
             lists::with_section("", lists::STAGED, &body).into_bytes(),
         ));
     }
-    // SSH scenarios: a client key pair in the scenario directory, its
-    // public half installed as `authorized_keys`.
-    let ssh_key = match &s.host_ssh {
-        Some(_) => {
+    // SSH scenarios (and a flood of port 22, which needs sshd listening): a
+    // client key pair in the scenario directory, its public half installed
+    // as `authorized_keys`.
+    let needs_ssh_key = s.host_ssh.is_some() || s.host_flood.as_ref().is_some_and(|f| f.port == 22);
+    let ssh_key = match needs_ssh_key {
+        true => {
             let dir = workdir.join("ssh");
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -218,7 +220,7 @@ fn run_scenario(
             installed.push((String::from("authorized_keys"), public));
             Some(key)
         }
-        None => None,
+        false => None,
     };
     if let Some(u) = &s.host_update {
         let channel = image::Channel {
@@ -304,10 +306,16 @@ fn run_scenario(
             }),
             _ => None,
         };
+        let flood = s.host_flood.as_ref().map(|f| qemu::FloodProbe {
+            marker: &f.marker,
+            port: f.port,
+            connections: f.connections,
+        });
         let options = qemu::Headless {
             input,
             probe,
             ssh_probe,
+            flood,
             input_probe,
             disk_variant,
             disk_readonly: s.disk_readonly,
