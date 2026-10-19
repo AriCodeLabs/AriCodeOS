@@ -1302,18 +1302,33 @@ fn spawn_shell(
     output: Option<Handle>,
     arg: u64,
 ) -> Result<Handle, Error> {
-    let fsd = attach_file_session(fs)?;
+    // Every handle, `input` and `output` included, is closed by the guard
+    // if anything below fails (the kernel takes them only when it creates
+    // the process). The fsd session comes last: a failed duplicate must not
+    // cost one of fsd's session slots, which init never gives back.
+    let mut granted = Granted::new();
+    granted.push(input);
+    if let Some(out) = output {
+        granted.push(out);
+    }
     let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
+    granted.push(hw);
     // With DUPLICATE the shell can in turn pass a read-only SYSTEM to the
     // programs it launches with `run`.
     let system = sys::handle_duplicate(
         SYSTEM,
         rights::READ | rights::MANAGE | rights::DUPLICATE | rights::TRANSFER,
     )?;
+    granted.push(system);
     let pci = sys::handle_duplicate(PCI_ROOT, rights::READ | rights::TRANSFER)?;
+    granted.push(pci);
     let netd = sys::handle_duplicate(net_service, rights::WRITE | rights::TRANSFER)?;
+    granted.push(netd);
     // The shell does not get the SPAWNER: it asks the broker (init) to launch.
     let launch = sys::handle_duplicate(broker, rights::WRITE | rights::TRANSFER)?;
+    granted.push(launch);
+    let fsd = attach_file_session(fs)?;
+    granted.push(fsd);
     let mut handles = [fsd, hw, system, input, pci, netd, launch, Handle(0)];
     let n = match output {
         Some(out) => {
@@ -1322,7 +1337,9 @@ fn spawn_shell(
         }
         None => 7,
     };
-    sys::process_spawn_with(SPAWNER, "shell", arg, &handles[..n])
+    let child = sys::process_spawn_with(SPAWNER, "shell", arg, &handles[..n])?;
+    granted.take();
+    Ok(child)
 }
 
 /// Session shells for sshd (ADR 0025): requests arrive on `endpoint`;
@@ -1366,6 +1383,7 @@ impl Sessions {
                     0
                 };
                 let arg = services | session::SHELL_SESSION | quiet;
+                // `spawn_shell` closes `input` and `output` if it fails.
                 match spawn_shell(fs, net, broker, input, Some(output), arg) {
                     Ok(child) => {
                         self.children[slot] = Some(child);

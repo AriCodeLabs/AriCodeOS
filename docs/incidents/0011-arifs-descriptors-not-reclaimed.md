@@ -131,6 +131,33 @@ the leaker exited, not at the periodic sweep.
   `update.*`, `shell.*`, `diag.*`, `ssh.*`, `ipc.*`, `sandbox.*` green with
   the change (sessions per launch, `install` and shells through `Attach`).
 
+## Audit of `81ffa2c`
+
+Independent review (isolation, probe semantics against `kernel/src/ipc.rs`
+and `task/wait.rs`, ADR 0014 atomicity of abandoned replaces, bounds,
+wiring): nothing serious; four follow-ups, fixed in the next commit on the
+branch:
+
+- M1: ADR 0036 §6 understated the session demand (a launch takes one
+  `Bind` plus one `Share` per `read_files` entry; worst case 26 against 15
+  slots). The ADR now states the arithmetic and that the broker does not
+  budget sessions: a full table is a visible `Failed` launch with `fs
+  sessions full`.
+- M2: `sandbox.manifest` asserted only the prefix of `fs_probe`'s line
+  after the message became unconditional; it now asserts `(journal
+  released with its owner)` in full. `STAGING_TIMEOUT_MS` (a live but idle
+  owner) is no longer exercised by any scenario; noted in the ADR.
+- L1: `spawn_shell` attached the fsd session first and returned on a later
+  duplicate failure without closing it (one of fsd's 15 slots lost for the
+  boot, since init never exits); it now prepares every handle behind the
+  broker's `Granted` guard, attaches last, and closes `input`/`output` too
+  on failure.
+- L3: fsd's probe treated every non-gone error as a live client; an
+  unexpected error (`BadHandle`, `Invalid`) is now said once on the console
+  and the session kept (ADR 0028: nothing fails silently).
+- I1: fsd's event names are checked at compile time to fit the kernel's
+  24-byte name with ` x999`, as netd's are.
+
 ## Open
 
 - Descriptors opened on the main endpoint itself (init, sshd) are released

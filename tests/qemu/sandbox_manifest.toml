@@ -50,7 +50,7 @@ serial_contains = [
     "hello_app: hello from an SDK app (arg 9)",
     "fs_victim: secret written, descriptor left open on exit",
     "fs_probe: foreign descriptors inaccessible (BadFd on 16 x read, write and close)",
-    "fs_probe: replace after an abandoned transaction ok",
+    "fs_probe: replace after an abandoned transaction ok (journal released with its owner)",
     "fs_probe: journal does not leak foreign data (incomplete commit rejected)",
     "run: fs_probe exited with 0",
     "run: win_probe: denied by the broker",

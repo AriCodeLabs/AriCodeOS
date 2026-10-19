@@ -246,9 +246,17 @@ enum Fault {
     SessionsFull = 2,
 }
 
+// Every event name plus ` x999` fits the kernel's name (incident 0012).
+const _: () = {
+    assert!(aricode_faults::LABEL_LEN == sys::abi::sysinfo::EVENT_NAME_LEN);
+    assert!(Fault::Reclaimed.name().len() + 5 <= aricode_faults::LABEL_LEN);
+    assert!(Fault::FdsFull.name().len() + 5 <= aricode_faults::LABEL_LEN);
+    assert!(Fault::SessionsFull.name().len() + 5 <= aricode_faults::LABEL_LEN);
+};
+
 impl Fault {
     const COUNT: usize = 3;
-    fn name(self) -> &'static str {
+    const fn name(self) -> &'static str {
         match self {
             Fault::Reclaimed => "fs fds reclaimed",
             Fault::FdsFull => "fs fds full",
@@ -276,6 +284,9 @@ struct Service {
     /// Descriptors released from dead clients since fsd started.
     reclaimed: u64,
     last_sweep_ms: u64,
+    /// An unexpected probe error was already said (once is enough to be
+    /// seen; the session is kept and probed again).
+    probe_error_said: bool,
 }
 
 impl Service {
@@ -351,7 +362,17 @@ impl Service {
                 self.retire(i, now);
                 false
             }
-            Err(_) => true,
+            // `Timeout` is the live answer. Anything else (a bad handle, an
+            // invalid buffer) is a defect, not a dead client: said once,
+            // never silent (ADR 0028), and the session stays.
+            Err(sys::Error::Timeout) => true,
+            Err(e) => {
+                if !self.probe_error_said {
+                    self.probe_error_said = true;
+                    aricode_rt::print_error(b"fsd: session probe", e);
+                }
+                true
+            }
         }
     }
 
@@ -752,6 +773,7 @@ fn main(partition_lba: u64) -> u64 {
         faults: Meter::new(),
         reclaimed: 0,
         last_sweep_ms: 0,
+        probe_error_said: false,
     };
     let mut msg = [0u8; Request::LEN];
     say(b"serving requests");

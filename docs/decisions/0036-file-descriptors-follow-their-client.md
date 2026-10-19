@@ -104,9 +104,18 @@ incident and shown in `diag`.
    refused by fsd (status N)`) and the launch fails rather than falling
    back to the shared endpoint. Up to `IPC_MAX_ANY - 1 = 15` sessions at
    once (they are served together with the main endpoint by one
-   `ipc_receive_any`); the broker's `MAX_RUNNING = 4` plus `MAX_SESSIONS =
-   4` shells keep that bound in practice, and a full table is a visible
-   `Failed` launch with its event.
+   `ipc_receive_any`). That is not a guaranteed budget: a launch takes one
+   `Bind` plus one `Share` per `read_files` entry (`MAX_READ_FILES = 4`),
+   so the worst case is `MAX_RUNNING = 4` programs × 5 + the console shell
+   + `MAX_SESSIONS = 4` SSH shells + an installer among the four = 26.
+   The broker does not budget sessions per launch (it would have to know
+   fsd's free count, which changes as clients die); a grant that finds the
+   table full sweeps first and, if it is still full, the launch fails
+   visibly (`Failed` to the shell, `fs sessions full` in `diag`). The
+   programs shipped today ask for at most one `read_files` entry, so the
+   table holds the four running programs and the five shells with room to
+   spare; a wider `IPC_MAX_ANY` is an ABI change left for when a real
+   workload needs it.
 7. **`diag` shows the table** (`Op::Descriptors`, 14, main endpoint and
    `Attach` sessions only; `Denied` from a private directory or a shared
    file): `descriptors 3/16 open, 16 reclaimed from dead clients: main 1,
@@ -161,8 +170,12 @@ incident and shown in `diag`.
   launch.
 - `sandbox.manifest`: `fs_victim`'s half-done chunked replace is now
   released with its session, so `fs_probe`'s replace goes through at once
-  (`journal released with its owner`) instead of after the 2 s staging
-  timeout, which stays for an owner that is alive but idle.
+  (`journal released with its owner`, asserted in full) instead of after
+  the 2 s staging timeout. That timeout stays for an owner that is alive
+  but idle (and for the main endpoint, which is never retired), but no
+  scenario exercises it any more; `Staging::abandoned` is two lines in fsd
+  and a host test would need it factored out, which is not worth doing for
+  a path only a stuck live client reaches.
 - Protocol additions are additive (`Op` 13 and 14; `VERSION` stays 1); an
   old server answers them `Invalid`.
 - Not covered: descriptors opened on the main endpoint itself (init, sshd)
