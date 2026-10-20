@@ -46,10 +46,13 @@ pub struct Process {
     pub exit_wait: alloc::sync::Arc<crate::task::wait::WaitQueue>,
     /// Next free address for MMIO/DMA mappings.
     mmio_next: u64,
-    /// Virtual ranges pointing at memory not owned by the process (MMIO, DMA):
-    /// unmapped without freeing when the address space is destroyed.
-    /// Foreign (MMIO/DMA) mappings: virtual start, physical start, span.
-    foreign: Vec<(u64, u64, u64)>,
+    /// Virtual ranges pointing at memory not owned by the process (MMIO,
+    /// DMA): unmapped without freeing when the address space is destroyed
+    /// or on `mmio_unmap`.
+    foreign: Vec<Foreign>,
+    /// Bytes of DMA buffers mapped right now (each mapping keeps its buffer
+    /// alive, ADR 0038); bounded by `dma_quota` when there is one.
+    dma_mapped: u64,
     /// `None` once the address space has been freed.
     mapper: Option<Mapper<vmm::PmmFrames, OffsetMap>>,
     pub entry: u64,
@@ -71,6 +74,17 @@ pub struct Process {
     /// Pending `process_kill`: the thread terminates on returning to ring 0 or
     /// on waking from a wait (audit 6ee19fb, finding 4).
     kill_requested: bool,
+}
+
+/// A foreign mapping. A DMA buffer's mapping holds a reference to the
+/// buffer, so its frames cannot go back to the PMM while any process still
+/// maps them, whoever closed which handle (incident 0004, ADR 0038). Device
+/// memory (MMIO) needs none: its frames never belong to the PMM.
+struct Foreign {
+    virt: u64,
+    phys: u64,
+    span: u64,
+    dma: Option<crate::object::ObjectRef>,
 }
 
 /// Reason given when a process is killed at another's request.
@@ -261,6 +275,7 @@ fn spawn_full(
             exit_wait: alloc::sync::Arc::new(crate::task::wait::WaitQueue::new()),
             mmio_next: USER_MMIO_BASE,
             foreign: Vec::new(),
+            dma_mapped: 0,
             mapper: Some(m),
             entry: elf.entry,
             status: None,
@@ -400,17 +415,35 @@ pub fn kill_current(why: &'static str) -> ! {
 /// Frees the address space and DMA domain of a finished process and marks
 /// it reaped, waking whoever waits for it. Called by the scheduler when
 /// reaping its thread, always from another thread and with another CR3.
+///
+/// Order (incident 0004): the devices this process drove stop bus
+/// mastering first; only then do its mappings, its DMA domain and its
+/// capabilities go, freeing memory a device could otherwise still write;
+/// a device left unclaimed is reset last.
 pub fn release_address_space(pid: u32) {
+    // The capabilities are taken out now, before anything is freed, so the
+    // devices they claim can be stopped first; they are dropped below.
+    let handles = PROCESSES
+        .lock()
+        .get_mut(&Pid(pid))
+        .map(|p| core::mem::replace(&mut p.handles, aricode_handles::HandleTable::new(0)));
+    let stopped = handles
+        .as_ref()
+        .map(|h| crate::pci::stop_claims_of(pid, h))
+        .unwrap_or_default();
     let taken = PROCESSES.lock().get_mut(&Pid(pid)).and_then(|p| {
+        p.dma_mapped = 0;
         p.mapper
             .take()
             .map(|m| (m, core::mem::take(&mut p.foreign)))
     });
     if let Some((mut m, foreign)) = taken {
         // Foreign memory (MMIO, DMA): unmapped without freeing; its owners
-        // are the device or the DMA object.
-        for (virt, _, len) in foreign {
-            for page in (virt..virt + len).step_by(PAGE_SIZE as usize) {
+        // are the device or the DMA object. A DMA buffer whose last
+        // reference was this mapping is freed when the entry is dropped,
+        // once the page tables no longer point at it.
+        for f in &foreign {
+            for page in (f.virt..f.virt + f.span).step_by(PAGE_SIZE as usize) {
                 let _ = m.unmap_4k(page);
             }
         }
@@ -424,6 +457,9 @@ pub fn release_address_space(pid: u32) {
             }
         });
         log::debug!("user: address space of process {pid} freed ({n} frames)");
+        for f in foreign {
+            report_last_reference(pid, &f);
+        }
     }
     crate::iommu::release(pid);
     // The capabilities go now (not when a parent gets around to `wait`), so
@@ -431,19 +467,32 @@ pub fn release_address_space(pid: u32) {
     // (ADR 0030). They are dropped with no lock held and their endpoints
     // settled before the process counts as reaped: whoever `wait`s for it
     // finds its capabilities already released (audit robustness-1, M2).
-    let handles = PROCESSES
-        .lock()
-        .get_mut(&Pid(pid))
-        .map(|p| core::mem::replace(&mut p.handles, aricode_handles::HandleTable::new(0)));
     if let Some(handles) = handles {
         release_capabilities(pid, handles);
     }
+    crate::pci::reset_released(&stopped);
     let waiters = PROCESSES.lock().get_mut(&Pid(pid)).map(|p| {
         p.reaped = true;
         p.exit_wait.clone()
     });
     if let Some(w) = waiters {
         w.wake_all();
+    }
+}
+
+/// A foreign mapping that is about to be dropped and was the last
+/// reference to its DMA buffer: the buffer outlived every handle to it
+/// because this process kept it mapped (ADR 0038). Logged once per
+/// mapping, so it is bounded by the mappings a process can have.
+fn report_last_reference(pid: u32, f: &Foreign) {
+    if let Some(obj) = &f.dma {
+        if alloc::sync::Arc::strong_count(obj) == 1 {
+            info!(
+                "user: process {pid} dropped the last mapping of a DMA buffer it had no handle to ({} KiB at {:#x}): its frames return to the PMM now",
+                f.span / 1024,
+                f.phys
+            );
+        }
     }
 }
 
@@ -564,8 +613,8 @@ fn foreign_pages(pid: Pid) -> Vec<u64> {
         return Vec::new();
     };
     let mut pages = Vec::new();
-    for &(virt, _, span) in &p.foreign {
-        for page in (virt..virt + span).step_by(PAGE_SIZE as usize) {
+    for f in &p.foreign {
+        for page in (f.virt..f.virt + f.span).step_by(PAGE_SIZE as usize) {
             if let Some((phys, _)) = m.translate(page) {
                 pages.push(phys & !(PAGE_SIZE - 1));
             }
@@ -574,30 +623,121 @@ fn foreign_pages(pid: Pid) -> Vec<u64> {
     pages
 }
 
-/// Word `dma_holder` writes once it has mapped the buffer and closed its
-/// handle (must match `MAGIC` in `user/testprogs/src/bin/dma_holder.rs`).
+/// Words `dma_holder` and the self-test exchange through the buffer (must
+/// match `user/testprogs/src/bin/dma_holder.rs`): the first once it has
+/// mapped the buffer and closed its handle, the second to ask it to unmap.
 const DMA_HOLDER_MAGIC: u64 = 0xD3A0_11FE_71E0_0004;
+const DMA_HOLDER_UNMAP: u64 = 0x0A3A_9000_0000_0038;
 
-/// Self-test (`test=dma_lifetime`, incident 0004): a server keeps a CPU
-/// mapping of a client's DMA buffer after closing its handle (as the
-/// compositor does with window buffers); when the client drops the buffer
-/// too, no frame the server still maps may be free in the PMM. Once the
-/// server is gone, the frames must be back in the PMM.
+/// Self-test (`test=dma_lifetime`, incident 0004, ADR 0038): a server keeps
+/// a CPU mapping of a client's DMA buffer after closing its handle (as the
+/// compositor does with window buffers). When the client drops the buffer
+/// too, no frame the server still maps may be free in the PMM; the frames
+/// return once the mapping goes, whether the server is reaped or unmaps
+/// the buffer itself. With a quota, the DMA a process keeps mapped is
+/// bounded by it.
 pub fn dma_lifetime_selftest() {
+    const LEN: u64 = 16 * 1024;
+    let frames_free = |phys: u64| {
+        pmm::with(|p| {
+            (0..LEN / PAGE_SIZE).all(|i| p.is_free(Frame::from_addr(phys + i * PAGE_SIZE)))
+        })
+    };
+
+    // 1. The mapping outlives every handle; reaping the server frees it.
+    let (pid, phys) = dma_holder_with_mapping(LEN, 0);
+    if let Err(free) = check_foreign_frames_allocated(pid, phys) {
+        panic!(
+            "dma lifetime: process {} still maps {free} DMA frame(s) the PMM considers free (incident 0004)",
+            pid.0
+        );
+    }
+    assert!(request_kill(pid), "dma_holder must still exist");
+    assert_eq!(wait(pid), ExitStatus::Killed(KILLED_BY_SUPERVISOR));
+    assert!(
+        frames_free(phys),
+        "dma lifetime: the frames must return to the PMM once the server is reaped"
+    );
+
+    // 2. The server unmaps the buffer itself (`mmio_unmap`): the frames
+    //    return at once, with the server still alive.
+    let (pid, phys) = dma_holder_with_mapping(LEN, 1);
+    if let Err(free) = check_foreign_frames_allocated(pid, phys) {
+        panic!(
+            "dma lifetime: process {} still maps {free} DMA frame(s) the PMM considers free (incident 0004)",
+            pid.0
+        );
+    }
+    // SAFETY: the frames are alive (the server maps them) and reachable
+    // through the physical map.
+    unsafe {
+        (phys::phys_to_virt(phys) as *mut u64)
+            .add(1)
+            .write_volatile(DMA_HOLDER_UNMAP)
+    };
+    let mut waited_ms = 0;
+    while !frames_free(phys) {
+        assert!(
+            waited_ms < 10_000 && !exited(pid),
+            "dma lifetime: mmio_unmap must free the buffer ({:?})",
+            PROCESSES.lock().get(&pid).and_then(|p| p.status)
+        );
+        scheduler::sleep_ms(10);
+        waited_ms += 10;
+    }
+    assert!(
+        foreign_pages(pid).is_empty(),
+        "dma lifetime: the unmapped range must be gone from the page tables"
+    );
+    assert!(
+        request_kill(pid),
+        "dma_holder must still exist after unmapping"
+    );
+    assert_eq!(wait(pid), ExitStatus::Killed(KILLED_BY_SUPERVISOR));
+
+    // 3. A process with a 4 KiB quota cannot keep a 16 KiB buffer mapped.
+    let dma = crate::hw::dma_alloc(LEN).expect("DMA buffer");
+    let pid = spawn_with_handles_and_arg(
+        "dma_holder",
+        crate::user::programs::by_name("dma_holder").expect("dma_holder in the initrd"),
+        alloc::vec![(
+            dma,
+            aricode_handles::Rights::READ.union(aricode_handles::Rights::WRITE)
+        )],
+        0,
+        4096,
+    )
+    .expect("dma_holder");
+    assert_eq!(
+        wait(pid),
+        ExitStatus::Exited(1),
+        "dma lifetime: mmio_map beyond the quota must be refused"
+    );
+    info!(
+        "dma lifetime selftest ok ({} frames kept by a mapping after the last handle, freed on reap and on mmio_unmap; mapping beyond the quota refused)",
+        LEN / PAGE_SIZE
+    );
+}
+
+/// Starts `dma_holder` with a new buffer of `len` bytes and argument
+/// `arg`, waits until it has mapped the buffer and closed its handle, and
+/// drops the kernel's reference (the client's last handle). Returns the
+/// server and the buffer's physical address.
+fn dma_holder_with_mapping(len: u64, arg: u64) -> (Pid, u64) {
     use crate::object::ObjectKind;
-    use crate::user::programs;
     use aricode_handles::Rights;
 
-    const LEN: u64 = 16 * 1024;
-    let dma = crate::hw::dma_alloc(LEN).expect("DMA buffer");
+    let dma = crate::hw::dma_alloc(len).expect("DMA buffer");
     let phys = match &dma.kind {
         ObjectKind::Dma(d) => d.region.phys,
         _ => unreachable!(),
     };
-    let pid = spawn_with_handles(
+    let pid = spawn_with_handles_and_arg(
         "dma_holder",
-        programs::by_name("dma_holder").expect("dma_holder in the initrd"),
+        crate::user::programs::by_name("dma_holder").expect("dma_holder in the initrd"),
         alloc::vec![(dma.clone(), Rights::READ.union(Rights::WRITE))],
+        arg,
+        0,
     )
     .expect("dma_holder");
     let word = phys::phys_to_virt(phys) as *const u64;
@@ -613,8 +753,14 @@ pub fn dma_lifetime_selftest() {
         scheduler::sleep_ms(10);
         waited_ms += 10;
     }
-    // The client's last handle goes: only the server's mapping remains.
     drop(dma);
+    (pid, phys)
+}
+
+/// The debug check of incident 0004: every frame `pid` maps through its
+/// foreign entries must still be allocated in the PMM, and the buffer at
+/// `phys` must be among them. `Err` holds how many are free.
+fn check_foreign_frames_allocated(pid: Pid, phys: u64) -> Result<(), usize> {
     let pages = foreign_pages(pid);
     assert!(
         pages.contains(&phys),
@@ -626,26 +772,11 @@ pub fn dma_lifetime_selftest() {
             .filter(|&&a| p.is_free(Frame::from_addr(a)))
             .count()
     });
-    if free != 0 {
-        panic!(
-            "dma lifetime: process {} still maps {free} of {} DMA frame(s) the PMM considers free (incident 0004)",
-            pid.0,
-            pages.len()
-        );
+    if free == 0 {
+        Ok(())
+    } else {
+        Err(free)
     }
-    assert!(request_kill(pid), "dma_holder must still exist");
-    assert_eq!(wait(pid), ExitStatus::Killed(KILLED_BY_SUPERVISOR));
-    let back = pmm::with(|p| {
-        (0..LEN / PAGE_SIZE).all(|i| p.is_free(Frame::from_addr(phys + i * PAGE_SIZE)))
-    });
-    assert!(
-        back,
-        "dma lifetime: the frames must return to the PMM once the last mapping is gone"
-    );
-    info!(
-        "dma lifetime selftest ok ({} frame(s) kept by the mapping after the last handle, freed when the server was reaped)",
-        pages.len()
-    );
 }
 
 fn exited(pid: Pid) -> bool {
@@ -749,20 +880,40 @@ pub fn with_current_handles<R>(f: impl FnOnce(&mut crate::object::Handles) -> R)
 }
 
 /// Maps `[phys, phys+len)` into the current process as device memory
-/// (uncached) or a DMA buffer (cached). Returns the virtual address.
-pub fn map_foreign(phys: u64, len: u64, cacheable: bool) -> Result<u64, aricode_abi::Error> {
+/// (uncached) or a DMA buffer (cached). Returns the virtual address. A DMA
+/// buffer's mapping keeps `dma` (the buffer) alive until it is unmapped
+/// (ADR 0038).
+pub fn map_foreign(
+    phys: u64,
+    len: u64,
+    cacheable: bool,
+    dma: Option<crate::object::ObjectRef>,
+) -> Result<u64, aricode_abi::Error> {
     use aricode_x86_paging::{CACHE_DISABLE, WRITE_THROUGH};
     let pid = current_pid().ok_or(aricode_abi::Error::Fault)?;
     let mut procs = PROCESSES.lock();
     let p = procs.get_mut(&pid).ok_or(aricode_abi::Error::Fault)?;
-    let m = p.mapper.as_mut().ok_or(aricode_abi::Error::Fault)?;
     let offset = phys & (PAGE_SIZE - 1);
     let start = phys - offset;
     let span = (offset + len).next_multiple_of(PAGE_SIZE);
     // Mapping the same region again (a server mapping a client's buffer on
-    // every request) reuses the existing mapping instead of leaking one.
-    if let Some((virt, _, _)) = p.foreign.iter().find(|f| f.1 == start && f.2 == span) {
-        return Ok(virt + offset);
+    // every request) reuses the existing mapping instead of leaking one. A
+    // mapped DMA buffer cannot be freed, so the same physical range is
+    // still the same buffer.
+    if let Some(f) = p.foreign.iter().find(|f| f.phys == start && f.span == span) {
+        return Ok(f.virt + offset);
+    }
+    // The buffers a process keeps mapped stay allocated on its account:
+    // with a quota, no more than the quota (ADR 0038).
+    if dma.is_some() && p.dma_quota != 0 && p.dma_mapped.saturating_add(span) > p.dma_quota {
+        drop(procs);
+        crate::events::record(
+            aricode_abi::sysinfo::EventKind::DmaQuota,
+            pid.0,
+            span,
+            "mmio_map",
+        );
+        return Err(aricode_abi::Error::Limit);
     }
     let virt = p.mmio_next;
     // The MMIO/DMA area is above the user stack (8 MiB) and grows upwards
@@ -777,9 +928,47 @@ pub fn map_foreign(phys: u64, len: u64, cacheable: bool) -> Result<u64, aricode_
     if !cacheable {
         flags |= CACHE_DISABLE | WRITE_THROUGH;
     }
+    let m = p.mapper.as_mut().ok_or(aricode_abi::Error::Fault)?;
     m.map_range_4k(virt, start, span, flags)
         .map_err(|_| aricode_abi::Error::Limit)?;
     p.mmio_next += span;
-    p.foreign.push((virt, start, span));
+    if dma.is_some() {
+        p.dma_mapped += span;
+    }
+    p.foreign.push(Foreign {
+        virt,
+        phys: start,
+        span,
+        dma,
+    });
     Ok(virt + offset)
+}
+
+/// `mmio_unmap`: removes the current process's foreign mapping that
+/// `virt` (an address `mmio_map` returned) starts, invalidates it on every
+/// CPU and only then drops its reference to the buffer, which may free it.
+pub fn unmap_foreign(virt: u64) -> Result<(), aricode_abi::Error> {
+    let pid = current_pid().ok_or(aricode_abi::Error::Fault)?;
+    let f = {
+        let mut procs = PROCESSES.lock();
+        let p = procs.get_mut(&pid).ok_or(aricode_abi::Error::Fault)?;
+        let start = virt & !(PAGE_SIZE - 1);
+        let i = p
+            .foreign
+            .iter()
+            .position(|f| f.virt == start)
+            .ok_or(aricode_abi::Error::Invalid)?;
+        let m = p.mapper.as_mut().ok_or(aricode_abi::Error::Fault)?;
+        let f = p.foreign.swap_remove(i);
+        for page in (f.virt..f.virt + f.span).step_by(PAGE_SIZE as usize) {
+            let _ = m.unmap_4k(page);
+        }
+        if f.dma.is_some() {
+            p.dma_mapped -= f.span;
+        }
+        f
+    };
+    vmm::flush_user_range(f.virt, f.span);
+    report_last_reference(pid.0, &f);
+    Ok(())
 }

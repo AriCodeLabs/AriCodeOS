@@ -3996,7 +3996,8 @@ fn serve_block(ctl: &mut Controller, msg: &[u8], handles: &[Handle]) {
                 invalid
             } else {
                 match map_client_buffer(handles[1]) {
-                    Some((phys, len)) if len >= count as u64 * 512 => {
+                    Some(buf) if buf.len >= count as u64 * 512 => {
+                        let phys = buf.phys;
                         if ctl.block_io(op == BlockOp::Write, lba, count, phys, handles[1]) {
                             BlockReply {
                                 status: BlockStatus::Ok,

@@ -56,6 +56,7 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         nr::ENDPOINT_CLOSE => endpoint_close(h),
         nr::IRQ_WAIT => irq_wait(h, frame.rsi),
         nr::MMIO_MAP => mmio_map(h),
+        nr::MMIO_UNMAP => process::unmap_foreign(frame.rdi).map(|()| 0),
         nr::REGION_LEN => with_handles(|t| match lookup(t, h, Rights::READ)?.kind {
             ObjectKind::Mmio(ref r) => Ok(r.len),
             ObjectKind::Dma(ref d) => Ok(d.region.len),
@@ -689,17 +690,23 @@ fn irq_wait(h: Handle, timeout_ms: u64) -> Result<u64, Error> {
 }
 
 fn mmio_map(h: Handle) -> Result<u64, Error> {
-    let (phys, len, cacheable, source_id, is_dma) =
-        with_handles(
-            |t| match lookup(t, h, Rights::READ.union(Rights::WRITE))?.kind {
-                ObjectKind::Mmio(ref r) => Ok((r.phys, r.len, r.cacheable, r.source_id, false)),
-                ObjectKind::Dma(ref d) => {
-                    Ok((d.region.phys, d.region.len, d.region.cacheable, None, true))
-                }
-                _ => Err(Error::Invalid),
-            },
-        )?;
-    let virt = process::map_foreign(phys, len, cacheable)?;
+    let (phys, len, cacheable, source_id, dma) = with_handles(|t| {
+        let o = lookup(t, h, Rights::READ.union(Rights::WRITE))?;
+        match o.kind {
+            ObjectKind::Mmio(ref r) => Ok((r.phys, r.len, r.cacheable, r.source_id, None)),
+            // The mapping holds the buffer (ADR 0038).
+            ObjectKind::Dma(ref d) => Ok((
+                d.region.phys,
+                d.region.len,
+                d.region.cacheable,
+                None,
+                Some(o.clone()),
+            )),
+            _ => Err(Error::Invalid),
+        }
+    })?;
+    let is_dma = dma.is_some();
+    let virt = process::map_foreign(phys, len, cacheable, dma)?;
     // IOMMU (Phase 33): mapping a device assigns it to the process's
     // domain; mapping a foreign DMA buffer makes it visible to its devices.
     if let Some(pid) = process::current_pid() {

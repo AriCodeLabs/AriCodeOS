@@ -1,0 +1,26 @@
+# Incident 0004, H2: a driver that dies holding a claimed PCI function and a
+# DMA buffer (kept only by its mapping) must leave the device without bus
+# mastering before the buffer's frames go back to the PMM; a function that
+# advertises FLR is reset, and both are claimed again with their header
+# (the supervisor's restart path).
+name = "drivers.pci_reap"
+description = "test=pci_reap: bus mastering cleared and FLR on driver reap, the function claimed again"
+level = "full"
+areas = ["drivers", "memory"]
+cmdline = "qemu_exit test=pci_reap"
+flr_device = true
+timeout_secs = 40
+
+[expect]
+exit = 33
+serial_contains = [
+    "FLR)",
+    "driver (process 1) gone: bus mastering cleared before its memory is freed",
+    "driver (process 2) gone: bus mastering cleared before its memory is freed",
+    "function level reset started (its driver is gone)",
+    "header restored after the function level reset",
+    "claimed again (the previous driver died)",
+    "pci reap selftest ok (",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC"]

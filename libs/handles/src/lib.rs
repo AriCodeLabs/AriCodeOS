@@ -142,6 +142,14 @@ impl<T> HandleTable<T> {
         }
     }
 
+    /// Live entries with their rights, in index order.
+    pub fn iter(&self) -> impl Iterator<Item = (&T, Rights)> {
+        self.slots
+            .iter()
+            .flatten()
+            .map(|slot| (&slot.object, slot.rights))
+    }
+
     /// Object and rights of a valid handle.
     pub fn get(&self, handle: Handle) -> Result<(&T, Rights), HandleError> {
         let slot = self.slot(handle)?;
@@ -241,6 +249,17 @@ mod tests {
         assert_ne!(h2, h);
         assert_eq!(t.get(h), Err(HandleError::BadHandle));
         assert_eq!(t.get(h2).unwrap().0, &8);
+    }
+
+    #[test]
+    fn iter_lists_live_entries_only() {
+        let mut t: HandleTable<u32> = HandleTable::new(8);
+        let a = t.insert(1, Rights::READ).unwrap();
+        t.insert(2, Rights::WRITE).unwrap();
+        t.insert(3, Rights::READ).unwrap();
+        t.remove(a).unwrap();
+        let live: Vec<(u32, Rights)> = t.iter().map(|(o, r)| (*o, r)).collect();
+        assert_eq!(live, [(2, Rights::WRITE), (3, Rights::READ)]);
     }
 
     #[test]

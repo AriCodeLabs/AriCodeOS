@@ -225,9 +225,11 @@ impl Compositor {
                     return answer(reply_to, Reply::status(Status::BadHandles));
                 };
                 let Some(slot) = self.contents.iter().position(|c| c.is_none()) else {
+                    self.unmap_unused(virt);
                     return answer(reply_to, Reply::status(Status::Busy));
                 };
                 let Some(id) = self.desktop.create(req.width, req.height, req.title_str()) else {
+                    self.unmap_unused(virt);
                     return answer(reply_to, Reply::status(Status::Busy));
                 };
                 self.contents[slot] = Some(Content {
@@ -278,13 +280,28 @@ impl Compositor {
                 else {
                     return answer(reply_to, Reply::status(Status::BadWindow));
                 };
-                if let Some((h, _)) = self.contents[slot].take().and_then(|c| c.pending) {
+                let Some(closed) = self.contents[slot].take() else {
+                    return answer(reply_to, Reply::status(Status::BadWindow));
+                };
+                if let Some((h, _)) = closed.pending {
                     answer(h, Reply::status(Status::BadWindow));
                 }
+                self.unmap_unused(closed.virt);
                 self.desktop.remove(req.window);
                 self.dirty = true;
                 answer(reply_to, Reply::ok(0));
             }
+        }
+    }
+
+    /// Unmaps a content buffer no window shows any more. The mapping is
+    /// what keeps a client's buffer allocated once its handle is closed
+    /// (ADR 0038), so it goes with the last window on it; a client may
+    /// have created several windows on one buffer (the kernel then returns
+    /// the same mapping), and those keep it.
+    fn unmap_unused(&self, virt: u64) {
+        if !self.contents.iter().flatten().any(|c| c.virt == virt) {
+            let _ = sys::mmio_unmap(virt);
         }
     }
 
@@ -407,7 +424,8 @@ fn main(inputs: u64) -> u64 {
                 Some(req) => comp.handle(req, reply_to, buf, t),
                 None => answer(reply_to, Reply::status(Status::Invalid)),
             }
-            // The content buffer stays mapped; the handle is no longer needed.
+            // The content buffer stays mapped (the mapping keeps it allocated
+            // until the window closes, ADR 0038); the handle is not needed.
             if let Some(b) = buf {
                 let _ = sys::handle_close(b);
             }

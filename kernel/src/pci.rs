@@ -8,7 +8,10 @@ use crate::object::{KernelObject, ObjectKind, ObjectRef};
 use crate::sync::IrqLock;
 use alloc::vec::Vec;
 use aricode_handles::Rights;
-use aricode_pci::{bars, cap_name, capabilities, Address, Bar, Header, CAP_MSI, CAP_MSIX};
+use aricode_pci::{
+    bars, cap_name, capabilities, flr_method, Address, Bar, Flr, Header, CAP_MSI, CAP_MSIX,
+    COMMAND_BUS_MASTER, FLR_RESTORED_DWORDS, FLR_WAIT_MS,
+};
 use aricode_x86_paging::{CACHE_DISABLE, GLOBAL, NO_EXECUTE, WRITABLE, WRITE_THROUGH};
 use log::{info, warn};
 
@@ -31,6 +34,19 @@ pub struct PciDevice {
     /// dies and its handles go away, init can claim it again to restart it
     /// (stage 1: service recovery).
     pub claimed: Option<alloc::sync::Weak<KernelObject>>,
+    /// Function Level Reset the function advertises, if any.
+    pub flr: Option<Flr>,
+    /// FLR started when its last driver went away (incident 0004, H2): the
+    /// next claim waits it out and restores the header first.
+    pub reset: Option<PendingReset>,
+}
+
+/// An FLR in progress: when it started and the header dwords it clears
+/// (`aricode_pci::FLR_RESTORED_DWORDS`), saved just before.
+#[derive(Debug, Clone)]
+pub struct PendingReset {
+    started_ms: u64,
+    saved: [u32; FLR_RESTORED_DWORDS.len()],
 }
 
 impl PciDevice {
@@ -61,6 +77,11 @@ fn read_u32(ecam: &Ecam, addr: Address, off: u64) -> u32 {
 fn write_u32(ecam: &Ecam, addr: Address, off: u64, v: u32) {
     // SAFETY: same as `read_u32`; device configuration write.
     unsafe { (config_ptr(ecam, addr, off) as *mut u32).write_volatile(v) }
+}
+
+fn read_u16(ecam: &Ecam, addr: Address, off: u64) -> u16 {
+    // SAFETY: same as `read_u32`; aligned 16-bit access.
+    unsafe { (config_ptr(ecam, addr, off) as *const u16).read_volatile() }
 }
 
 fn write_u16(ecam: &Ecam, addr: Address, off: u64, v: u16) {
@@ -149,17 +170,22 @@ pub fn init() {
                     msix_cap: caps.iter().find(|c| c.id == CAP_MSIX).map(|c| c.offset),
                     msi_cap: caps.iter().find(|c| c.id == CAP_MSI).map(|c| c.offset),
                     claimed: None,
+                    flr: flr_method(&cfg),
+                    reset: None,
                 });
             }
         }
     }
     for d in &found {
-        let caps: Vec<&str> = d
+        let mut caps: Vec<&str> = d
             .capability_ids
             .iter()
             .map(|&id| cap_name(id))
             .filter(|n| *n != "?")
             .collect();
+        if d.flr.is_some() {
+            caps.push("FLR");
+        }
         info!(
             "pci: {} {:04x}:{:04x} class {:02x}.{:02x} {} ({} BAR{}{})",
             d.address,
@@ -271,6 +297,7 @@ pub struct Claimed {
 /// probes the BARs, programs MSI-X (entry 0) or, without MSI-X, MSI
 /// (ADR 0022) and builds the capabilities.
 pub fn claim(index: usize) -> Result<Claimed, &'static str> {
+    finish_reset(index)?;
     let ecam_guard = ECAM.lock();
     let ecam = ecam_guard.as_ref().ok_or("pci: no ECAM")?;
     let mut devs = DEVICES.lock();
@@ -381,4 +408,207 @@ pub fn claim(index: usize) -> Result<Claimed, &'static str> {
         irq_kind.map_or("", |_| ")")
     );
     Ok(Claimed { handles })
+}
+
+fn now_ms() -> u64 {
+    crate::time::uptime_us() / 1000
+}
+
+/// First half of a driver's death (incident 0004, H2), before anything it
+/// owned is freed: every function whose claim ends with `handles` (the
+/// configuration object handed out by `claim` is held only there) stops
+/// bus mastering, so the device can no longer read or write memory once
+/// the dead driver's DMA buffers go back to the PMM. Without an IOMMU
+/// nothing else stops it. Returns the functions stopped, for
+/// `reset_released`. Runs in `reap()` with interrupts disabled: one
+/// configuration write per function, no waiting.
+pub fn stop_claims_of(pid: u32, handles: &crate::object::Handles) -> Vec<usize> {
+    let ecam_guard = ECAM.lock();
+    let Some(ecam) = ecam_guard.as_ref() else {
+        return Vec::new();
+    };
+    let devs = DEVICES.lock();
+    let mut stopped = Vec::new();
+    for (cap, _) in handles.iter() {
+        let obj = cap.object();
+        if !matches!(&obj.kind, ObjectKind::Mmio(r) if r.source_id.is_some()) {
+            continue;
+        }
+        let Some(index) = devs.iter().position(|d| {
+            d.claimed
+                .as_ref()
+                .is_some_and(|w| core::ptr::eq(w.as_ptr(), alloc::sync::Arc::as_ptr(obj)))
+        }) else {
+            continue;
+        };
+        let held_here = handles
+            .iter()
+            .filter(|(c, _)| alloc::sync::Arc::ptr_eq(c.object(), obj))
+            .count();
+        if alloc::sync::Arc::strong_count(obj) != held_here || stopped.contains(&index) {
+            // Someone else still holds the claim: the device is theirs.
+            continue;
+        }
+        let addr = devs[index].address;
+        let cmd = read_u16(ecam, addr, 0x04);
+        write_u16(ecam, addr, 0x04, cmd & !COMMAND_BUS_MASTER);
+        let after = read_u16(ecam, addr, 0x04);
+        info!(
+            "pci: {addr} driver (process {pid}) gone: bus mastering cleared before its memory is freed (command {cmd:#06x} -> {after:#06x})"
+        );
+        stopped.push(index);
+    }
+    stopped
+}
+
+/// Second half, once the dead driver's capabilities are released: a
+/// function stopped by `stop_claims_of` that nobody has claimed since and
+/// that advertises FLR is reset, so the next driver finds it in its
+/// power-on state. Only the reset is started here (interrupts are
+/// disabled); the next `claim` waits out `FLR_WAIT_MS` and restores the
+/// header. Pending transactions are not waited for: bus mastering is
+/// already off.
+pub fn reset_released(stopped: &[usize]) {
+    let ecam_guard = ECAM.lock();
+    let Some(ecam) = ecam_guard.as_ref() else {
+        return;
+    };
+    let mut devs = DEVICES.lock();
+    for &index in stopped {
+        let Some(d) = devs.get_mut(index) else {
+            continue;
+        };
+        let Some(flr) = d.flr else { continue };
+        if d.is_claimed() || d.reset.is_some() {
+            continue;
+        }
+        let addr = d.address;
+        let mut saved = [0u32; FLR_RESTORED_DWORDS.len()];
+        for (slot, &off) in saved.iter_mut().zip(FLR_RESTORED_DWORDS.iter()) {
+            *slot = read_u32(ecam, addr, off as u64);
+        }
+        let reg = flr.control() as u64;
+        write_u16(ecam, addr, reg, flr.initiate(read_u16(ecam, addr, reg)));
+        d.reset = Some(PendingReset {
+            started_ms: now_ms(),
+            saved,
+        });
+        info!("pci: {addr} function level reset started (its driver is gone)");
+    }
+}
+
+/// Before a function is claimed again: waits until an FLR started by
+/// `reset_released` has had `FLR_WAIT_MS`, sleeping without locks, then
+/// restores the header dwords the reset cleared.
+fn finish_reset(index: usize) -> Result<(), &'static str> {
+    loop {
+        let wait = {
+            let devs = DEVICES.lock();
+            let d = devs.get(index).ok_or("pci: index out of range")?;
+            match &d.reset {
+                None => return Ok(()),
+                Some(r) => (r.started_ms + FLR_WAIT_MS).saturating_sub(now_ms()),
+            }
+        };
+        if wait == 0 {
+            break;
+        }
+        crate::task::scheduler::sleep_ms(wait);
+    }
+    let ecam_guard = ECAM.lock();
+    let ecam = ecam_guard.as_ref().ok_or("pci: no ECAM")?;
+    let mut devs = DEVICES.lock();
+    let d = devs.get_mut(index).ok_or("pci: index out of range")?;
+    if let Some(r) = d.reset.take() {
+        for (&off, value) in FLR_RESTORED_DWORDS.iter().zip(r.saved) {
+            write_u32(ecam, d.address, off as u64, value);
+        }
+        info!(
+            "pci: {} header restored after the function level reset",
+            d.address
+        );
+    }
+    Ok(())
+}
+
+/// Command register and the header dwords an FLR clears, of function
+/// `index` (`test=pci_reap`).
+fn command_and_header(index: usize) -> (u16, [u32; FLR_RESTORED_DWORDS.len()]) {
+    let ecam_guard = ECAM.lock();
+    let ecam = ecam_guard.as_ref().expect("ECAM");
+    let addr = DEVICES.lock()[index].address;
+    let mut header = [0u32; FLR_RESTORED_DWORDS.len()];
+    for (slot, &off) in header.iter_mut().zip(FLR_RESTORED_DWORDS.iter()) {
+        *slot = read_u32(ecam, addr, off as u64);
+    }
+    (read_u16(ecam, addr, 0x04), header)
+}
+
+/// Self-test (`test=pci_reap`, incident 0004, H2): a driver dies holding a
+/// claimed function and a DMA buffer it keeps only through its mapping.
+/// The function must lose bus mastering when the driver is reaped, be
+/// reset if it advertises FLR, and be claimable again with its header
+/// intact (the supervisor's restart path). Runs on the virtio-blk and on
+/// the first function that advertises FLR (the scenario adds one).
+pub fn reap_selftest() {
+    use crate::user::{process, programs};
+    use aricode_pci::COMMAND_BUS_MASTER;
+
+    let blk = find_class(0x01, 0x00).expect("virtio-blk on the PCI bus");
+    let flr = DEVICES
+        .lock()
+        .iter()
+        .position(|d| d.flr.is_some() && !d.is_claimed())
+        .expect("a function that advertises FLR (scenario device)");
+    for index in [blk, flr] {
+        let claimed = claim(index).expect("claim");
+        let (cmd, header) = command_and_header(index);
+        assert!(cmd & COMMAND_BUS_MASTER != 0, "claim enables bus mastering");
+        let [cfg, hw, ..] = claimed.handles;
+        let pid = process::spawn_with_handles(
+            "pci_reaped",
+            programs::by_name("pci_reaped").expect("pci_reaped in the initrd"),
+            alloc::vec![cfg.expect("configuration"), hw.expect("hardware")],
+        )
+        .expect("pci_reaped");
+        let status = process::wait(pid);
+        assert!(
+            matches!(status, process::ExitStatus::Killed(_)),
+            "pci_reaped must die by its fault: {status:?}"
+        );
+        let (cmd, _) = command_and_header(index);
+        let (claimed_now, reset) = {
+            let devs = DEVICES.lock();
+            (devs[index].is_claimed(), devs[index].reset.is_some())
+        };
+        assert!(
+            !claimed_now,
+            "the function is free once its driver is reaped"
+        );
+        assert!(
+            cmd & COMMAND_BUS_MASTER == 0,
+            "bus mastering must be off once the driver is reaped (command {cmd:#06x})"
+        );
+        assert_eq!(
+            reset,
+            index == flr,
+            "an FLR is started exactly for the function that advertises it"
+        );
+        let again = claim(index).expect("claim again after the driver died");
+        let (cmd, header_again) = command_and_header(index);
+        assert!(
+            cmd & COMMAND_BUS_MASTER != 0,
+            "the new claim enables bus mastering"
+        );
+        assert_eq!(header_again, header, "the header is restored after the FLR");
+        // Unclaimed again for whoever boots next (init's drivers).
+        drop(again);
+    }
+    let addr = |i: usize| DEVICES.lock()[i].address;
+    info!(
+        "pci reap selftest ok ({} and {}: bus mastering cleared on driver reap, {} reset with FLR, both claimed again with their header)",
+        addr(blk),
+        addr(flr),
+        addr(flr)
+    );
 }

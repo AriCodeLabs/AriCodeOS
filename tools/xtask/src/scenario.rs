@@ -277,6 +277,11 @@ pub struct Scenario {
     /// runs without a network service.
     #[serde(default)]
     pub no_nic: bool,
+    /// Adds a PCI function that advertises Function Level Reset (an
+    /// unused Intel 82576 `igb` NIC with no backend) for `test=pci_reap`
+    /// (incident 0004).
+    #[serde(default)]
+    pub flr_device: bool,
     #[serde(default)]
     pub inject: Inject,
     /// What is expected from the single boot (without `[[boots]]`).

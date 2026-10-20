@@ -134,13 +134,10 @@ impl BlockClient {
     }
 }
 
-/// Physical address and length of a client's `dma` buffer, mapped into this
-/// server (and its devices' IOMMU domain) for the request. Mapping again is
-/// idempotent in the kernel, and the IOMMU entry is restored if the buffer
-/// was freed and a new client got the same physical pages.
-pub fn map_client_buffer(dma: Handle) -> Option<(u64, u64)> {
-    let phys = sys::dma_phys(dma).ok()?;
-    let len = sys::region_len(dma).ok()?;
-    sys::mmio_map(dma).ok()?;
-    Some((phys, len))
+/// A client's `dma` buffer mapped into this server (and its devices'
+/// IOMMU domain) for one request; the CPU mapping goes when the result is
+/// dropped, so a buffer whose client is gone is not kept allocated by this
+/// server (ADR 0038). The IOMMU entry stays until the buffer is freed.
+pub fn map_client_buffer(dma: Handle) -> Option<crate::client_buffer::MappedBuffer> {
+    crate::client_buffer::MappedBuffer::map(dma)
 }

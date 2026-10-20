@@ -207,7 +207,8 @@ fn serve(dev: &mut Device) -> ! {
                     }
                 } else {
                     match map_client_buffer(handles[1]) {
-                        Some((phys, len)) if len >= count * 512 => {
+                        Some(buf) if buf.len >= count * 512 => {
+                            let phys = buf.phys;
                             let bytes = (count * 512) as u32;
                             let r = match op {
                                 Op::Read => dev.request(
