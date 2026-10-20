@@ -1,0 +1,4 @@
+# Incident 0012: fills netd's TCP table from the shell (`run tcp_hog`).
+name = tcp_hog
+caps = net
+memory = 64K

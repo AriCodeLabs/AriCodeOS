@@ -33,6 +33,7 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("aricode-gpt", None),
     ("aricode-arifs", None),
     ("aricode-net", None),
+    ("aricode-faults", None),
     ("aricode-http", None),
     ("aricode-input", None),
     ("aricode-gfx", None),
@@ -164,24 +165,40 @@ pub fn initrd_programs() -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// Application manifests (`apps/*/NAME.manifest`): they go into the initrd
-/// under their file name, next to the program they describe.
+/// `NAME.manifest` files of `dir`, by file name.
+fn manifests_in(dir: &std::path::Path) -> Result<Vec<(String, PathBuf)>> {
+    let mut out = Vec::new();
+    for f in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+        let path = f.map_err(|e| e.to_string())?.path();
+        if path.extension().is_some_and(|x| x == "manifest") {
+            out.push((
+                path.file_name().unwrap().to_string_lossy().into_owned(),
+                path,
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// Manifests of the test programs the shell launches through the broker
+/// with capabilities (`user/testprogs/manifests/NAME.manifest`). They go
+/// into the scenario initrds only: a stick for a real machine carries no
+/// test data (ADR 0032), and without its manifest a test program gets no
+/// capability there (`write_usb_image` removes them).
+pub fn test_program_manifests() -> Result<Vec<(String, PathBuf)>> {
+    manifests_in(&root().join("user/testprogs/manifests"))
+}
+
+/// Application manifests (`apps/*/NAME.manifest`) and those of the test
+/// programs: they go into the initrd under their file name, next to the
+/// program they describe.
 pub fn initrd_manifests() -> Result<Vec<(String, PathBuf)>> {
     let apps = root().join("apps");
-    let mut out = Vec::new();
+    let mut out = test_program_manifests()?;
     for entry in std::fs::read_dir(&apps).map_err(|e| format!("{}: {e}", apps.display()))? {
         let dir = entry.map_err(|e| e.to_string())?.path();
-        if !dir.is_dir() {
-            continue;
-        }
-        for f in std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
-            let path = f.map_err(|e| e.to_string())?.path();
-            if path.extension().is_some_and(|x| x == "manifest") {
-                out.push((
-                    path.file_name().unwrap().to_string_lossy().into_owned(),
-                    path,
-                ));
-            }
+        if dir.is_dir() {
+            out.extend(manifests_in(&dir)?);
         }
     }
     out.sort();

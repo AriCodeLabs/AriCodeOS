@@ -1,0 +1,4 @@
+# Incident 0016: leaves netd sockets open on exit (`run sock_leaker`).
+name = sock_leaker
+caps = net
+memory = 64K

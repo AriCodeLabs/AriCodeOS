@@ -1,0 +1,4 @@
+# Incident 0011: leaves fsd descriptors open on exit (`run fd_leaker`).
+name = fd_leaker
+caps = fs
+memory = 64K

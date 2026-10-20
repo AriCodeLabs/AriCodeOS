@@ -66,6 +66,7 @@ libs/gfx/            aricode-gfx: 0x00RRGGBB canvases, clipping, text, cursor an
 libs/input/          aricode-input: evdev events and US keyboard (no_std, host tests)
 libs/http/           aricode-http: GET, response parsing, Content-Length and chunked without alloc (no_std, host tests)
 libs/net/            aricode-net: Ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP client and DNS without alloc (no_std, host tests)
+libs/faults/         aricode-faults: bounded fault reporting, one kernel event per kind per second with the count (netd, fsd; no_std, host tests)
 libs/arifs/          aricode-arifs: AriFS v1, flat directory with a fixed-capacity file table, CRC32 and replacement journal over `BlockDevice` (no_std, host tests with power cuts)
 libs/pkg/            aricode-pkg: signed application packages (manifest with name, version and hashes; Ed25519 signature; ELF; application manifest)
 libs/update-index/   aricode-update-index: update sources, signed index, rollback serials, version and downgrade rules (ADR 0029)
@@ -621,8 +622,10 @@ latter briefly to add the region.
   single in-progress replace per service, `Busy` for the rest, released by
   the commit, an error or closing the descriptor; ADR 0018); data goes through the client's DMA
   buffer (up to 4 KiB per request), which fsd maps once and
-  reuses by physical address. Descriptors are global to the service
-  (16 open) until there is per-capability client identity.
+  reuses by physical address. The 16 open descriptors
+  (`aricode_arifs::descriptors`, host-tested) belong to the endpoint that
+  opened them; a client that dies holding some has them released when
+  the kernel reports its session gone (ADR 0036, below).
 - `aricode-sys::fs::FsClient` wraps the reply endpoint, the DMA buffer
   and the calls; `fs_client` (ring 3) lists, reads `hola.txt`, creates and writes
   `nuevo.txt`, replaces it in one go, does `flush`, reads back and checks
@@ -661,7 +664,7 @@ latter briefly to add the region.
 - Init also receives `SYSTEM` (`0x10007`) and a console input
   (`0x10008`, `READ`); the kernel passes `init_arg::SHELL` in `arg` if the
   cmdline contains `shell`. After the boot services it launches `shell` with
-  the fsd endpoint (`WRITE`), hardware, `SYSTEM`, the console input
+  a file session of its own (`Attach`, ADR 0036), hardware, `SYSTEM`, the console input
   and the read-only PCI root, and `arg` = mask of active services; it waits
   for its exit and logs it.
 - `arish` reads lines with echo and backspace, and dispatches commands without
@@ -675,7 +678,8 @@ latter briefly to add the region.
   (scenario `shell.diag_file`, `fscat` test over the test disk).
   The report includes `net`: `Op::Link` (14) of the network protocol reports the
   physical link state (`LINK_UP`/`LINK_DOWN`/`LINK_UNKNOWN`) even if
-  DHCP has not finished, and the `services` summary names roles
+  DHCP has not finished, `Op::TcpStats` (15) the TCP table by state (one
+  `tcp` line, incident 0013), and the `services` summary names roles
   (block, network, input), not drivers.
 - The runner (`qemu::run_headless`) accepts `Input { prompt, lines }`: it reads the
   serial output incrementally and sends line `k` once the prompt has
@@ -695,9 +699,22 @@ latter briefly to add the region.
   MSI-X vector 0, `DRIVER_OK`, `NEEDS_RESET`) and the handle contract
   with init; after the BARs come the driver's extras (`extra_handle`).
   virtio-blk was reduced to its request logic.
-- `netd` is single-threaded: on each iteration it drains the receive queue,
-  serves up to 8 IPC requests with timeout 0, expires deadlines and waits for the
-  IRQ for up to 10 ms. Operations that wait on the network (ping, `UdpRecv`,
+- `netd` is single-threaded: on each iteration it receives up to
+  `aricode_net::rx::FRAMES_PER_ROUND = 32` frames (incident 0013: a flood
+  cannot hold the round; frames left in the ring are recorded as `net rx
+  budget hit` and the next round follows at once), serves up to 8 IPC
+  requests with timeout 0 (from its main endpoint and every client session
+  together, `ipc_receive_any`; the endpoint list is rebuilt inside the
+  round when a request granted or retired a session), expires deadlines and
+  waits for the IRQ for up to 10 ms. Every receive descriptor counts toward
+  the 32, an errored one included (rtl-net reports it as length 0). With
+  frames left over netd neither waits nor yields, so under a sustained
+  flood it runs at 100% of a CPU and fairness towards other processes
+  rests on the scheduler's 20 ms quantum; its own clients still get the 8
+  requests and the timers every round. A yield was rejected because the
+  16-slot receive ring would drop frames meanwhile. On real hardware a
+  flood also shows `net tx busy` (8-slot transmit ring; the resets to
+  SYNs beyond a listener's cap are best effort, incident 0013). Operations that wait on the network (ping, `UdpRecv`,
   `Dns`) keep the client's reply endpoint and answer when
   the packet arrives or the deadline expires; frames whose next hop is not
   in the ARP cache are parked until the ARP reply (1 s).
@@ -716,10 +733,12 @@ latter briefly to add the region.
   new data within the peer's window, FIN, pure ACK) and
   `on_segment` consumes one; the caller transmits and keeps time. Fixed
   4 KiB buffers per direction, retransmission from `snd_una` with exponential
-  RTO (500 ms to 8 s, 6 retries → `CloseReason::Timeout`),
-  2 s TIME-WAIT, received RST or `abort` → `CloseReason::Reset`. The
-  host tests connect two `Connection`s through a wire that drops
-  chosen or random segments.
+  RTO (500 ms to 8 s, `MAX_RETRIES = 6` → `CloseReason::Timeout`, about
+  31 s; a passive connection's SYN|ACK has the short budget
+  `SYN_ACK_MAX_RETRIES = 3`, about 7.5 s, so a SYN nobody completes frees
+  its slot soon: ADR 0035), 2 s TIME-WAIT, received RST or `abort` →
+  `CloseReason::Reset`. The host tests connect two `Connection`s through a
+  wire that drops chosen or random segments and pin both schedules.
 - In `netd` each TCP socket (`Box`, 8 KiB of buffers) lives in a slot of
   the table; segments are demultiplexed by 4-tuple and a SYN to a
   listening port creates a passive connection that `TcpAccept` delivers once
@@ -727,6 +746,47 @@ latter briefly to add the region.
   deadline; `TcpSend` queues what fits and returns the count (the client
   retries with `tcp_send_all`). A slot is freed when the user has
   closed and the connection has finished.
+- Listeners are protected (incident 0013, ADR 0035). A listener holds at
+  most `tcp::listen_backlog(MAX_TCP) = 4` connections its owner has not
+  accepted yet, half-open and established alike, so a burst of SYNs to port
+  22 leaves at least three slots to active opens. A SYN that finds the
+  backlog at its cap or no free slot is answered with a reset
+  (`tcp::reset_for`, RFC 793 section 3.4: sequence 0, acknowledging the
+  SYN) and recorded as the refusal `net syn dropped` (code 5), so the peer
+  stops retransmitting and `diag` shows it; a SYN to a port nobody listens
+  on is still ignored silently (closed by default). Closing a listener
+  resets and frees the connections of its backlog. `Op::TcpStats` returns
+  the table by state and `net` (so `diag`) prints it in one line, `tcp
+  8 slots: 1 listen, 0 syn-rcvd, 0 syn-sent, 3 backlog, 1 established, 0
+  closing, 0 time-wait, 3 free; 4 SYNs reset`: `backlog` are established
+  connections nobody accepted, `syn-rcvd` the half-open ones (both count
+  towards the cap), `SYNs reset` the refusals since boot. Scenario
+  `network.listen_backlog` holds eight connections from the host against
+  sshd (QEMU completes the handshakes, so they are backlog, not half-open)
+  while the shell's `http` succeeds and `diag` shows the refusal and the
+  table.
+- Initial sequence numbers and ephemeral ports are secrets (ADR 0034,
+  incident 0014). `netd` draws a 32-byte secret per boot from the kernel
+  generator (`sys::random` through the `SYSTEM` handle it already holds as
+  its clock: `READ | TRANSFER` from init, `READ` is what the kernel checks)
+  and prints `tcp secret from kernel entropy`; if the syscall is refused it
+  records the fault event `net tcp secret degraded` (code = bytes
+  obtained) and says so on the console instead of falling back silently.
+  The kernel always answers `RANDOM` with the bytes asked and exposes no
+  entropy-quality state, so that fault cannot mean weak entropy; the
+  kernel's boot line `random: ChaCha20 generator seeded with rdrand` or
+  `... with TSC (no rdrand: limited entropy)` is the only quality signal
+  (QEMU's CPU is the latter). `aricode_net::isn::initial_seq` gives every connection
+  `M + F(4-tuple, secret)` as RFC 6528 prescribes (`M` the ms clock in
+  4 µs ticks, `F` the first 32 bits of HMAC-SHA-256): the active SYN and
+  the passive SYN|ACK alike, through `Connection::connect(iss, now)` and
+  `Connection::listen(iss)`; the connection never derives an ISN from the
+  clock or the peer's number. `isn::ephemeral_port` walks the IANA range
+  49152..65535 from a per-destination keyed offset plus a connection
+  counter (RFC 6056 section 3.3.3) and `isn::pick_ephemeral_port` skips the
+  candidates the caller marks in use: `netd` marks a port held by any
+  slot, listeners and TIME-WAIT included. Host tests in `libs/net` pin
+  each property against the old formulas.
 - QEMU forwards `127.0.0.1:17009` to guest port 7 (`hostfwd`) and
   the xtask responder listens for TCP echo on `127.0.0.1:17008`. A
   scenario can declare `[host_tcp] marker/payload`: on seeing the marker
@@ -735,6 +795,40 @@ latter briefly to add the region.
   can require.
 - The user programs' static heap grows to 256 KiB (netd's TCP
   sockets do not fit in the 64 KiB stack).
+- Refusals are visible (incident 0012). netd records a fault event
+  (`sys::event_record`, ADR 0028) whenever it refuses a request or loses
+  a frame, named by cause: `net tcp table full` (`TcpConnect`/`TcpListen`
+  with the 8 slots taken, TIME-WAIT included), `net arp defer full` (the
+  4-slot parking table for frames awaiting ARP), `net tx busy` (the NIC
+  had no transmit slot; the frame is lost), `net arp no reply` (a parked
+  frame dropped after 1 s), `net ping table full`, `net dns table full`,
+  `net udp table full`, `net wait pending` (a second `recv`/`accept` on a
+  socket that already waits), `net bad request` (`Status::Invalid`), `net
+  bad handles` (`Status::BadHandles`), `net syn dropped` (a SYN to a
+  listener refused with a reset: no free slot or the listener's backlog at
+  its cap, ADR 0035), `net sessions full` (an `Attach` with every session
+  slot taken), `net session create` (an `Attach` whose endpoint pair the
+  kernel could not create), `net socks reclaimed` (sockets closed on behalf of a dead
+  client, code 0, ADR 0037) and `net rx budget hit` (a round of reception
+  that spent its 32 frames with more in the ring, code 0). `aricode_faults::Meter` (`libs/faults`, shared with fsd)
+  bounds the rate: at most one event per kind per second; the refusals
+  held back in between are counted and recorded when their second ends
+  (`drain_due` from `expire`). The event name is `<kind> x<count>` (count
+  in that second, shown up to 999; the longest kind, 19 bytes, plus
+  ` x999` fills the 24-byte name, checked at compile time) and the event
+  code is the `net::Status` number the client got, as every other
+  producer uses the code for a reason number: 5 = busy, 1 = invalid, 4 =
+  bad handles; a lost frame carries the status its sender would have got
+  (`fault reported by process N: net tcp table full x3 (code 5)` = three
+  refusals, answered Busy). The same text goes to the console
+  (`virtio-net: fault net tcp table full x3`). `BadSock`, `InUse`,
+  `NoRoute`, `NotFound`, `Timeout` and `Reset` describe the client's
+  socket or the network's answer, not a refusal, and are not recorded. On
+  the client side `NetError::describe` (`aricode-sys`) gives every status
+  its own line (`network service refused: busy (no free connection or
+  send slot)`, `connection refused or reset by the other end`, ...), which
+  the shell prints; scenario `network.refusal_visible` fills the table
+  with `tcp_hog` and checks the shell line and the `diag` event.
 
 ## HTTP client (Phase 24)
 
@@ -750,8 +844,12 @@ latter briefly to add the region.
   across reads, sizes validated with no unchecked arithmetic)
   and a close-delimited body only ends with `Ok(0)`: a transport
   reset is an error, never a partial success. The body goes to a caller
-  buffer (4 KiB in the shell). The xtask responder adds a test HTTP
-  server on `127.0.0.1:17010` with the `network.http` cases.
+  buffer (4 KiB in the shell). Every fetch carries a `Budget` for the
+  whole exchange, asked before each send and receive (`Deadline(Phase)`),
+  with at most 8 interim responses and 16 KiB of header bytes per fetch
+  (incident 0009, ADR 0033). The xtask responder adds a test HTTP
+  server on `127.0.0.1:17010` with the `network.http` cases and the
+  `/early-hints` routes of `shell.http_deadline`.
 - Identifiers are not truncated: `fs::Request::with_name` returns
   `None` if the name does not fit, and the DNS name travels whole in the client's DMA
   buffer (up to 253 bytes) instead of in the IPC message.
@@ -892,11 +990,35 @@ latter briefly to add the region.
   creates the process): previously every nonexistent name consumed an entry in
   init's table. The shell receives the broker endpoint instead
   of the `SPAWNER`.
-- fsd keeps up to 8 granted namespaces: each `Bind` (only
-  through the main endpoint) creates or reuses an endpoint bound to a
-  prefix, and each `Share` (ADR 0016) one bound to a single file in
-  read mode; the loop reads the main one with a 10 ms wait and the granted ones
-  without waiting. From a private one, `Open`/`Create` qualify the name as
+- fsd serves up to 15 *sessions* besides its main endpoint (ADR 0036):
+  each `Bind` (only through the main endpoint) creates an endpoint bound
+  to a prefix, each `Share` (ADR 0016) one bound to a single file in read
+  mode, and each `Attach` one bound to the whole namespace (the `install`
+  capability and the shells, instead of a duplicate of the main endpoint).
+  A session is one endpoint pair per grant (never shared between launches)
+  of which fsd keeps only the receive side, so the kernel reports its client
+  gone (ADR 0030) and fsd, probing each session with a zero-timeout receive
+  once a second and whenever a table is full, retires it: descriptors and
+  replace in progress released, `fs fds reclaimed xN` recorded when it left
+  any open (meter `aricode_faults`, shared with netd; `fs fds full`, `fs
+  sessions full` and `fs session create` (the kernel could not create the
+  session's endpoint pair) record the refusals). `Op::Descriptors` reports the table
+  per owner and `diag` prints it under `files` (`descriptors 3/16 open, 16
+  reclaimed from dead clients: main 1, root 2`); scenario
+  `filesystem.descriptors_reclaimed` (`run fd_leaker`, incident 0011).
+- netd serves sessions the same way (ADR 0037, incident 0016): init asks
+  `Op::Attach` (16) with the process name as label for the console and SSH
+  shells, each sshd generation and every launch with `caps = net`; every
+  TCP, UDP, ping and DNS entry belongs to the session that created it
+  (`aricode_net::owners::Owned`, host-tested), a request only reaches its
+  own sockets (`BadSock` otherwise), and a retired session has its live
+  connections reset, its listener freed with its backlog and its waits
+  dropped, with `net socks reclaimed xN` recorded. The sweep runs once a
+  second, whenever a table is full and before answering `InUse` for a port
+  another owner holds. `Op::Sockets` (17) reports the tables per owner and
+  `net`/`diag` print `sockets 3 in use: sshd 2, shell 1; 16 reclaimed from
+  dead clients`; scenario `network.sockets_reclaimed` (`run sock_leaker`).
+  From a private one, `Open`/`Create` qualify the name as
   `prefix/name` (rejecting `/` in the name) and `List` filters and strips
   the prefix. From a shared file, `List` shows only that file,
   `Open` only opens that file, and `Create`, `Write`, `Replace`, `Flush`, `Bind`
@@ -1271,9 +1393,11 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
 - `arish` has no history, line editing or redirection; environment
   variables and program launching arrive with the process
   service.
-- `fsd` does not distinguish clients: any process with its endpoint sees all
-  descriptors. Per-file capabilities arrive with client identity
-  in IPC.
+- `fsd` identifies a client by the endpoint its requests arrive on (its
+  session, ADR 0036); processes that share the main endpoint (init, sshd)
+  are one owner, and their descriptors are released only by `Close`. netd
+  does the same (ADR 0037): init and the boot test clients share its main
+  endpoint, and a session dies with the netd generation that created it.
 
 - The block service maps each client DMA buffer once and
   reuses it by physical address; there is no `mmio_unmap` or block cache.
@@ -1365,7 +1489,8 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   publish-update`, served by `serve-update` or any web server.
 - `apps/updater` (then caps system, fs, net, block): channel manifest, version
   comparison with the active slot, streaming download into `UPDATE`
-  (`aricode-https::get_with` over `aricode-http::fetch_with`), then the
+  (`aricode-https::get_with` over `aricode-http::fetch_with`, with the
+  run's remaining time as the fetch budget, ADR 0033), then the
   Phase 30 verification and install. Shell `update [URL|check|apply]`.
 - Kernel `map_foreign` is idempotent per region; servers map client buffers
   per request (`block::map_client_buffer`).

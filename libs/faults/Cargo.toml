@@ -1,0 +1,11 @@
+[package]
+name = "aricode-faults"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AriCodeOS bounded fault reporting: a per-kind meter that records at most one kernel event per second and keeps the count (no_std, host tests)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

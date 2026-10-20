@@ -61,6 +61,7 @@ to one IPC request (4 KiB), smaller than a package.
 - An installed package cannot exceed 32 KiB (the journal); SDK programs
   take half of that. Enlarging the journal or chaining several is the
   option when needed.
-- An installer that dies with a replace in progress leaves the journal
-  busy until fsd restarts; with a single trusted installer this is
-  acceptable and noted.
+- An installer that dies with a replace in progress used to leave the
+  journal busy until fsd restarts. Since ADR 0036 the installer runs on a
+  session of its own and fsd abandons the replace, with its descriptors,
+  when the kernel reports the session's client gone (incident 0011).

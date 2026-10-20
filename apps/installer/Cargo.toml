@@ -17,6 +17,7 @@ aricode-rt = { path = "../../sdk/runtime" }
 aricode-pkg = { path = "../../libs/pkg" }
 aricode-crypto = { path = "../../libs/crypto" }
 aricode-update-index = { path = "../../libs/update-index" }
+aricode-proto = { path = "../../sdk/proto" }
 
 [build-dependencies]
 aricode-build = { path = "../../sdk/build" }

@@ -25,6 +25,8 @@ libs/*/src/lib.rs        #[cfg(test)] unit tests of ELF, paging, cmdline, AriFS,
 boot-protocol/src/lib.rs #[cfg(test)] memory classification, iterator, cmdline
 tools/xtask/src/*.rs     #[cfg(test)] scenario validity, helpers
 tests/qemu/*.toml        integration scenarios in QEMU
+user/testprogs/src/bin/  test programs in the initrd; user/testprogs/manifests/ holds the manifest of
+                         those the shell launches with capabilities (`run tcp_hog`, `run sock_leaker`)
 ```
 
 ## Writing a QEMU scenario
@@ -61,12 +63,18 @@ usb_hid = true                  # adds qemu-xhci with a USB keyboard and mouse (
 usb_hid_only_input = true       # no virtio keyboard/mouse, so QMP input reaches the USB HID devices (xHCI or EHCI)
 usb_hid_msi = true              # that xHCI offers MSI only, no MSI-X (like 2012 Intel controllers)
 usb_storage = true              # the test disk hangs off the xHCI as USB mass storage; there is no virtio-blk
+host_https = true               # two host HTTPS servers (openssl s_server -www) on 17443 (cert from a test CA installed as trusted_ca.der) and 17444 (self-signed)
 
 [host_ssh]                      # SSH from the host (ADR 0025): a client key is generated and installed as authorized_keys;
 marker = "sshd: listening on port 22"   # on seeing the marker, each command runs with the host's ssh through
 commands = ["ls", "shutdown"]   # host port 17022; output joins the log as "[host] ssh $ CMD", "[host] ssh| LINE", "[host] ssh exit N"
 idle_client = true              # a TCP client that never identifies itself holds port 22 first; sshd must drop it
-host_https = true               # two host HTTPS servers (openssl s_server -www) on 17443 (cert from a test CA installed as trusted_ca.der) and 17444 (self-signed)
+[host_flood]                    # connection flood (incident 0013): on seeing marker, `connections` plain TCP connections to the
+marker = "sshd: listening on port 22"   # guest's `port` (22, default, or 7: the ports with a hostfwd) are opened, never written to and held
+port = 22                       # until QEMU exits; the console lines are typed only once they are open and watched for 2 s. QEMU
+connections = 8                 # completes the handshakes itself, so the guest sees established connections nobody accepts, not
+                                # half-open ones. Port 22 installs the scenario's SSH key so sshd listens. Result lines: "[host] flood:
+                                # N connections to guest port P opened", "[host] flood: K of N connections reset by the guest within 2000 ms"
 [host_update]                   # an update source (ADR 0029) published in build/update-test/ and served at http://10.0.2.2:17010/update/
 system = 2                      # system image version offered (omit: no system image)
 apps = ["examples/hello_ext:2"] # app packages offered (DIR:VERSION)
@@ -78,6 +86,7 @@ usb_legacy_controller = true    # also adds an EHCI with no devices (the EHCI dr
 usb_ehci_hid = true             # an EHCI with a USB keyboard and mouse (high speed) for usb_ehci (ADR 0031)
 usb_ehci_storage = true         # the test disk hangs off the EHCI as USB mass storage; there is no virtio-blk
 usb_ehci_companion_kbd = true   # an ICH9 EHCI with a UHCI companion and a full-speed USB keyboard (port handover)
+no_nic = true                   # no network card: init runs without a network service (the capture still ends with the frame count)
 install = ["examples/hello_ext"]  # external apps xtask builds, signs (version 1) and installs in AriFS as apps/NAME.aripkg
 packages = ["examples/hello_ext:2", "examples/hello_ext:3:corrupt"]  # pending packages in pkgs/ (DIR:VERSION[:corrupt]) for `run installer`
 staged = ["examples/hello_ext:2:wrong-hash"]  # packages already staged for `run installer 2` (DIR:VERSION[:wrong-hash])

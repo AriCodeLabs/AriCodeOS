@@ -3846,6 +3846,40 @@ drop seen once after two hours on the laptop (cable reseat restored it);
 EHCI hubs, split transactions and 64-bit addressing only verifiable on
 hardware.
 
+## 94.12 AriCodeOS 0.12
+
+**Status: completed (2026-10-20), tag `v0.12.0`.** The version that went
+through an external release audit and the failure protocol end to end:
+every finding fixed on its own branch with regressions, audited twice by
+independent reviewers, verified on the laptop. Five ADRs (0033-0037),
+ten incidents closed.
+
+- release audit of 0.11.0 resolved: USB storage drivers reject a CSW that
+  did not move exactly 13 bytes and the xHCI driver honours the data
+  residue (incidents 0007, 0010); the installer never reads a failed file
+  request as an absent file (0008); the updater carries an absolute
+  budget through DNS, connect, TLS and every receive (0009, ADR 0033);
+- network: refusals named in the shell and recorded as fault events
+  (0012); TCP initial sequence numbers and ephemeral ports derived from a
+  per-boot secret, RFC 6528 and RFC 6056 (0014, ADR 0034); SYN drops
+  recorded and answered with a stateless reset, half-open connections
+  capped per listener with a short SYN-ACK budget, TCP table by state in
+  `diag` (0013, ADR 0035); every netd client has its own session and its
+  sockets are reclaimed when it dies, no client can touch another's
+  socket (0016, ADR 0037); a bounded number of frames per loop round;
+- file service: every client has its own session and its descriptors and
+  abandoned replace are released when it dies (0011, ADR 0036);
+- scheduler self-test no longer assumes the wait-queue order on SMP
+  (0015);
+- HTTP client accepts 8 KiB of response headers; Docker images fixed for
+  ARM and for the same-path checkout mount;
+- verified on the laptop with version 8 over a production-signed index:
+  storage, network, HTTPS, the new `diag` lines, no fault event at boot.
+
+Open: incident 0004 (a DMA mapping that outlives its buffer); the kernel
+does not expose its generator's seeding state; EHCI hubs, split
+transactions and 64-bit addressing only verifiable on hardware.
+
 ---
 
 # 95. Real hardware: the right moment

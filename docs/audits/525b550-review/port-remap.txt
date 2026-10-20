@@ -1,0 +1,20 @@
+{'17007': '31007', '17008': '31008', '17009': '31009', '17010': '31010', '17022': '31022', '17443': '31443', '17444': '31444'}
+sdk/proto/src/lib.rs
+tools/xtask/src/scenario.rs
+tests/qemu/net_https.toml
+tests/qemu/apps_upgrade_network.toml
+tests/qemu/update_sources.toml
+tests/qemu/update_fs_one_short.toml
+tests/qemu/update_network.toml
+tests/qemu/update_tampered_index.toml
+tests/qemu/update_tampered_image.toml
+tests/qemu/update_fs_nearly_full.toml
+tests/qemu/update_stale_index.toml
+tests/qemu/shell_commands.toml
+tests/qemu/network_stack.toml
+tests/qemu/update_migrate_legacy_url.toml
+user/testprogs/src/bin/http_client.rs
+libs/net/src/udp.rs
+libs/http/src/lib.rs
+libs/update-index/src/sources.rs
+libs/update-index/src/stored.rs

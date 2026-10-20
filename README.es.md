@@ -16,7 +16,7 @@ El documento maestro de arquitectura y roadmap es [AriCodeOS.md](AriCodeOS.md).
 Las decisiones de diseño se registran en [docs/decisions/](docs/decisions/) y el
 flujo de ramas (git flow) en [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-**Estado:** 0.11.0 (2026-10-17). Las 35 fases del roadmap (0 a 34) están
+**Estado:** 0.12.0 (2026-10-20). Las 35 fases del roadmap (0 a 34) están
 implementadas y probadas en QEMU, y las etapas 1 a 4 de la secuencia
 posterior al roadmap (recuperación observable, sesión útil, límites y
 actualización, aplicaciones externas) también, más la parte de la etapa 5
@@ -75,14 +75,18 @@ equipo).
 
 ```bash
 docker build -t aricodeos-dev -f tools/docker/Dockerfile .
-docker run --rm -it -v "$PWD":/src -v aricodeos-cargo:/usr/local/cargo/registry \
+docker run --rm -it -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/cargo/registry \
     --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask check
-docker run --rm -it -v "$PWD":/src -v aricodeos-cargo:/usr/local/cargo/registry \
+docker run --rm -it -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/cargo/registry \
     --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask test --all
 ```
 
 `--user` mantiene `build/` y `target/` como tuyos; el volumen con nombre
-conserva las descargas de crates entre ejecuciones. La imagen no expone
+conserva las descargas de crates entre ejecuciones. El repositorio se monta
+en la misma ruta que tiene en el equipo (`-v "$PWD":"$PWD" -w "$PWD"`),
+porque los artefactos de `target/` llevan rutas absolutas (el script del
+enlazador del SDK, entre otros): con otra ruta, lo compilado en el equipo y
+reutilizado dentro del contenedor apunta a ficheros que allí no existen. La imagen no expone
 ningún puerto ni contiene claves. Un resultado de QEMU dentro de Docker es un
 resultado de QEMU: no sustituye a las comprobaciones en hardware de
 `docs/hardware.md`.
@@ -93,7 +97,7 @@ en tu terminal (se sale con Ctrl-A X):
 
 ```bash
 cargo xtask usb-image
-docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.11.0 .
+docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.12.0 .
 docker run --rm -it aricodeos
 ```
 

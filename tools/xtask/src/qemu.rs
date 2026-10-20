@@ -5,7 +5,7 @@
 use crate::image::{self, OVMF_CODE};
 use crate::{build_dir, root, Result};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -43,6 +43,7 @@ fn base_command(
     disk_readonly: bool,
     cpus: u32,
     usb: UsbOptions,
+    nic: bool,
 ) -> Command {
     let mut q = Command::new("qemu-system-x86_64");
     q.current_dir(root());
@@ -103,13 +104,17 @@ fn base_command(
             aricode_proto::net::TEST_SSH_FORWARD_PORT
         ),
     ]);
-    q.args([
-        "-device",
-        &format!(
-            "virtio-net-pci,netdev=net0,mac={},disable-legacy=on,disable-modern=off,iommu_platform=on",
-            GUEST_MAC.map(|b| format!("{b:02x}")).join(":")
-        ),
-    ]);
+    // Without `nic` the netdev stays (the capture filter hangs off it) but
+    // the guest sees no network card: init runs without a network service.
+    if nic {
+        q.args([
+            "-device",
+            &format!(
+                "virtio-net-pci,netdev=net0,mac={},disable-legacy=on,disable-modern=off,iommu_platform=on",
+                GUEST_MAC.map(|b| format!("{b:02x}")).join(":")
+            ),
+        ]);
+    }
     // virtio keyboard and mouse with fixed ids: QMP injects events per device.
     // Left out when the USB HID devices must be the only input (QEMU sends
     // QMP input to the most recently activated handler, and a virtio
@@ -301,9 +306,19 @@ pub struct Responder {
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
+/// One `103 Early Hints` of the `/early-hints` routes.
+const EARLY_HINTS: &[u8] = b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n";
+/// Pause between two interim responses of `/early-hints`: under the
+/// shell's per-operation timeout (8 s) and slow enough that its 30 s budget
+/// runs out before the interim-response limit (8) is reached.
+const EARLY_HINTS_PAUSE: Duration = Duration::from_secs(5);
+
 /// Test HTTP server: `/hola` (Content-Length), `/chunked`
 /// (Transfer-Encoding: chunked), `/big-headers` (5 KiB of headers, the
-/// size github.com sends) and 404 for everything else.
+/// size github.com sends), `/early-hints` (a `103` every five seconds and
+/// never a final response: the server of incident 0009, which the
+/// client's budget must cut), `/early-hints-flood` (twenty `103` at once,
+/// then a 200: the interim-response limit) and 404 for everything else.
 fn http_serve(mut stream: std::net::TcpStream) {
     use std::io::Write;
     let mut buf = [0u8; 2048];
@@ -319,9 +334,25 @@ fn http_serve(mut stream: std::net::TcpStream) {
     }
     let request = String::from_utf8_lossy(&buf[..have]);
     let path = request.split(' ').nth(1).unwrap_or("/");
+    if path == "/early-hints" {
+        // Until the client gives up and closes (the write then fails).
+        while stream
+            .write_all(EARLY_HINTS)
+            .and_then(|()| stream.flush())
+            .is_ok()
+        {
+            std::thread::sleep(EARLY_HINTS_PAUSE);
+        }
+        return;
+    }
     let response: Vec<u8> = match path {
         "/hola" => b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 19\r\nConnection: close\r\n\r\nHola desde el host\n".to_vec(),
         "/chunked" => b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nd\r\nprimer trozo,\r\ne\r\n segundo trozo\r\n0\r\n\r\n".to_vec(),
+        "/early-hints-flood" => {
+            let mut r = EARLY_HINTS.repeat(20);
+            r.extend(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nflooded\n");
+            r
+        }
         "/big-headers" => {
             let mut r = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n".to_vec();
             for i in 0..40 {
@@ -543,6 +574,116 @@ fn run_tcp_probe(payload: &str) -> String {
     }
 }
 
+/// Host connection flood (incident 0013): on seeing `marker` the runner
+/// opens `connections` plain TCP connections to the host port forwarded to
+/// the guest's `port`, never sends a byte on them, counts the ones the
+/// guest resets within [`FLOOD_SETTLE`] and holds the rest until QEMU
+/// exits (their closing at exit is QEMU's and is not counted). QEMU's
+/// user networking completes the TCP handshake with the guest itself, so
+/// from the guest's view these are established connections nobody accepts
+/// (its listener's backlog), never half-open ones: a true SYN flood cannot
+/// be sent through `hostfwd`. The scenario's console lines are typed only
+/// once the connections are open and settled, so the guest commands run
+/// with the table in that state.
+pub struct FloodProbe<'a> {
+    pub marker: &'a str,
+    /// Guest port: 22 or `TEST_TCP_LISTEN_PORT`, the two with a `hostfwd`.
+    pub port: u16,
+    pub connections: usize,
+}
+
+/// How long the flood watches its fresh connections for a reset by the
+/// guest before releasing the console: the guest answers a refused SYN at
+/// once and user networking relays the reset within milliseconds.
+const FLOOD_SETTLE: Duration = Duration::from_secs(2);
+
+/// Host port that `hostfwd` forwards to `guest_port` (see `base_command`).
+pub fn forwarded_port(guest_port: u16) -> Option<u16> {
+    use aricode_proto::net::{TEST_SSH_FORWARD_PORT, TEST_TCP_FORWARD_PORT, TEST_TCP_LISTEN_PORT};
+    match guest_port {
+        22 => Some(TEST_SSH_FORWARD_PORT),
+        TEST_TCP_LISTEN_PORT => Some(TEST_TCP_FORWARD_PORT),
+        _ => None,
+    }
+}
+
+/// The flood towards the guest's `guest_port` through its `hostfwd`.
+fn run_flood_probe(
+    guest_port: u16,
+    connections: usize,
+    ready: &std::sync::atomic::AtomicBool,
+    stop: &std::sync::atomic::AtomicBool,
+) -> String {
+    let Some(host_port) = forwarded_port(guest_port) else {
+        ready.store(true, std::sync::atomic::Ordering::SeqCst);
+        return format!("[host] flood: guest port {guest_port} has no hostfwd");
+    };
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], host_port));
+    hold_connections(addr, guest_port, connections, FLOOD_SETTLE, ready, stop)
+}
+
+/// Opens `connections` to `addr`, reads each one for `settle` to count the
+/// ones the peer closes or resets, raises `ready`, then holds the rest
+/// until `stop`. The result is one block of `[host] flood` lines.
+fn hold_connections(
+    addr: std::net::SocketAddr,
+    guest_port: u16,
+    connections: usize,
+    settle: Duration,
+    ready: &std::sync::atomic::AtomicBool,
+    stop: &std::sync::atomic::AtomicBool,
+) -> String {
+    use std::sync::atomic::Ordering;
+    let mut lines = Vec::new();
+    let mut streams: Vec<Option<std::net::TcpStream>> = Vec::new();
+    for _ in 0..connections {
+        match std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
+            Ok(s) => {
+                let _ = s.set_nonblocking(true);
+                streams.push(Some(s));
+            }
+            Err(e) => {
+                lines.push(format!(
+                    "[host] flood: connection refused by the host ({e})"
+                ));
+                break;
+            }
+        }
+    }
+    let opened = streams.len();
+    lines.push(format!(
+        "[host] flood: {opened} connections to guest port {guest_port} opened"
+    ));
+    let mut closed = 0;
+    let mut buf = [0u8; 256];
+    let settle_end = Instant::now() + settle;
+    while Instant::now() < settle_end {
+        for slot in streams.iter_mut() {
+            let Some(s) = slot else { continue };
+            match s.read(&mut buf) {
+                // Data (a banner from the accepting service) keeps it open.
+                Ok(n) if n > 0 => {}
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Ok(_) | Err(_) => {
+                    closed += 1;
+                    *slot = None;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    lines.push(format!(
+        "[host] flood: {closed} of {opened} connections reset by the guest within {} ms",
+        settle.as_millis()
+    ));
+    ready.store(true, Ordering::SeqCst);
+    while !stop.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    drop(streams);
+    lines.join("\n")
+}
+
 /// SSH probe: commands run with the host's `ssh` and the scenario's key.
 pub struct SshProbe<'a> {
     pub marker: &'a str,
@@ -649,7 +790,7 @@ pub fn run_interactive(
         hid: usb_hid,
         ..UsbOptions::default()
     };
-    let mut q = base_command(esp_drive, &vars, &disk, false, cpus, usb);
+    let mut q = base_command(esp_drive, &vars, &disk, false, cpus, usb, true);
     if cmdline.split_whitespace().any(|w| w == "gui") {
         // With `gui` the screen must be visible: QEMU window and serial in the terminal.
         println!("[xtask] QEMU with display (serial in the terminal; quit: close the window)");
@@ -761,6 +902,7 @@ pub struct Headless<'a> {
     pub input: Input<'a>,
     pub probe: Option<TcpProbe<'a>>,
     pub ssh_probe: Option<SshProbe<'a>>,
+    pub flood: Option<FloodProbe<'a>>,
     pub input_probe: Option<InputProbe<'a>>,
     pub disk_variant: image::DiskVariant,
     pub disk_readonly: bool,
@@ -773,6 +915,8 @@ pub struct Headless<'a> {
     pub installed: &'a [(String, Vec<u8>)],
     pub cpus: u32,
     pub usb: UsbOptions,
+    /// The virtio-net card is present (every scenario but `no_nic` ones).
+    pub nic: bool,
 }
 
 pub fn run_headless(
@@ -802,8 +946,7 @@ pub fn run_headless(
         Some(esp)
     };
     let _responder = Responder::start()?;
-    let qmp_path = workdir.join("qmp.sock");
-    let _ = std::fs::remove_file(&qmp_path);
+    let qmp = QmpSocket::new(workdir);
     // Every frame on the guest's network, for the count of guest
     // frames appended to the capture.
     let pcap_path = workdir.join("net.pcap");
@@ -816,6 +959,7 @@ pub fn run_headless(
         disk_readonly,
         options.cpus,
         options.usb,
+        options.nic,
     )
     .args([
         "-object",
@@ -827,7 +971,7 @@ pub fn run_headless(
     .args(["-display", "none", "-monitor", "none", "-serial", "stdio"])
     .args([
         "-qmp",
-        &format!("unix:{},server=on,wait=off", qmp_path.display()),
+        &format!("unix:{},server=on,wait=off", qmp.path().display()),
     ])
     .stdin(if input.lines.is_empty() {
         Stdio::null()
@@ -858,6 +1002,11 @@ pub fn run_headless(
     let mut ssh_result: Option<String> = None;
     let mut ssh_thread: Option<std::thread::JoinHandle<String>> = None;
     let mut input_thread: Option<std::thread::JoinHandle<String>> = None;
+    // The flood holds its connections until QEMU is gone (`flood_stop`);
+    // the console lines wait for `flood_ready`.
+    let flood_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flood_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut flood_thread: Option<std::thread::JoinHandle<String>> = None;
     let mut timed_out = false;
     let mut killed = false;
     let exit_code = loop {
@@ -878,7 +1027,9 @@ pub fn run_headless(
                 break None;
             }
         }
-        if sent < input.lines.len() {
+        let input_held =
+            options.flood.is_some() && !flood_ready.load(std::sync::atomic::Ordering::SeqCst);
+        if sent < input.lines.len() && !input_held {
             let prompts =
                 count_occurrences(&captured.lock().expect("capture"), input.prompt.as_bytes());
             if prompts > sent {
@@ -917,12 +1068,23 @@ pub fn run_headless(
                 ssh_result = ssh_thread.take().and_then(|t| t.join().ok());
             }
         }
+        if let Some(f) = options.flood.as_ref() {
+            if flood_thread.is_none()
+                && count_occurrences(&captured.lock().expect("capture"), f.marker.as_bytes()) > 0
+            {
+                let (port, n) = (f.port, f.connections);
+                let (ready, stop) = (Arc::clone(&flood_ready), Arc::clone(&flood_stop));
+                flood_thread = Some(std::thread::spawn(move || {
+                    run_flood_probe(port, n, &ready, &stop)
+                }));
+            }
+        }
         if let Some(p) = input_probe {
             if input_thread.is_none()
                 && input_result.is_none()
                 && count_occurrences(&captured.lock().expect("capture"), p.marker.as_bytes()) > 0
             {
-                let path = qmp_path.clone();
+                let path = qmp.path().to_path_buf();
                 let keys = p.keys.to_vec();
                 let rel = p.mouse_rel;
                 let click = p.click.map(String::from);
@@ -947,10 +1109,20 @@ pub fn run_headless(
     if let Some(t) = ssh_thread.take() {
         ssh_result = t.join().ok();
     }
-    let _ = std::fs::remove_file(&qmp_path);
+    flood_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let flood_result = match flood_thread.take() {
+        Some(t) => t.join().ok(),
+        None => options.flood.as_ref().map(|f| {
+            format!(
+                "[host] flood: marker '{}' never seen; no connections opened",
+                f.marker
+            )
+        }),
+    };
+    drop(qmp);
     reader.join().map_err(|_| "serial reader")?;
     let mut bytes = captured.lock().expect("capture").clone();
-    for line in [probe_result, input_result, ssh_result]
+    for line in [probe_result, input_result, ssh_result, flood_result]
         .into_iter()
         .flatten()
     {
@@ -996,8 +1168,160 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
+/// Longest UNIX socket path Linux and QEMU accept: `sun_path` holds 108
+/// bytes with the terminator.
+const SUN_PATH_MAX: usize = 107;
+
+/// Where the QMP socket of a scenario run in `workdir` goes: next to its
+/// logs, unless that path does not fit a socket address (a deep checkout,
+/// such as a git worktree under `.claude/worktrees/`: QEMU refuses it and
+/// the host cannot connect, so the scenario fails before or without its
+/// input events), in which case a short unique path in the system's
+/// temporary directory. `QmpSocket` removes it after the run either way.
+pub fn qmp_socket_path(workdir: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let local = workdir.join("qmp.sock");
+    if local.as_os_str().len() <= SUN_PATH_MAX {
+        return local;
+    }
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("aricode-qmp-{}-{n}.sock", std::process::id()))
+}
+
+/// The QMP socket of one run: QEMU creates it at `path()`, the guard
+/// removes it when dropped, so every exit of the run (`?`, a panic)
+/// cleans up a fallback socket in the temporary directory too. Only a
+/// killed process leaves one behind.
+struct QmpSocket(PathBuf);
+
+impl QmpSocket {
+    fn new(workdir: &Path) -> Self {
+        let path = qmp_socket_path(workdir);
+        let _ = std::fs::remove_file(&path);
+        Self(path)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for QmpSocket {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{qmp_socket_path, QmpSocket};
+    use std::path::Path;
+
+    #[test]
+    fn qmp_socket_guard_removes_the_file() {
+        let deep = Path::new("/")
+            .join("d".repeat(99))
+            .join("usb.ehci_fault_csw");
+        let guard = QmpSocket::new(&deep);
+        let path = guard.path().to_path_buf();
+        assert!(path.starts_with(std::env::temp_dir()));
+        std::fs::write(&path, b"").expect("fallback socket path is writable");
+        assert!(path.exists());
+        drop(guard);
+        assert!(!path.exists(), "{} left behind", path.display());
+    }
+
+    #[test]
+    fn qmp_socket_fits_a_unix_address() {
+        // Next to the logs when it fits.
+        let short = Path::new("/home/u/AriCodeOS/build/scenarios/usb.short_csw");
+        assert_eq!(short.join("qmp.sock"), qmp_socket_path(short));
+        // A deep worktree: 100 bytes of directory plus "/qmp.sock" is 109.
+        let deep = Path::new("/")
+            .join("d".repeat(99))
+            .join("usb.ehci_fault_csw");
+        assert!(deep.join("qmp.sock").as_os_str().len() > super::SUN_PATH_MAX);
+        let a = qmp_socket_path(&deep);
+        let b = qmp_socket_path(&deep);
+        assert!(
+            a.as_os_str().len() <= super::SUN_PATH_MAX,
+            "{}",
+            a.display()
+        );
+        assert!(a.starts_with(std::env::temp_dir()));
+        assert_ne!(a, b, "two runs must not share a socket");
+    }
+
+    /// The flood reaches the guest only through the two `hostfwd` rules of
+    /// `base_command`; any other guest port is refused at once, not probed.
+    #[test]
+    fn flood_knows_the_forwarded_ports_only() {
+        use aricode_proto::net::{
+            TEST_SSH_FORWARD_PORT, TEST_TCP_FORWARD_PORT, TEST_TCP_LISTEN_PORT,
+        };
+        assert_eq!(super::forwarded_port(22), Some(TEST_SSH_FORWARD_PORT));
+        assert_eq!(
+            super::forwarded_port(TEST_TCP_LISTEN_PORT),
+            Some(TEST_TCP_FORWARD_PORT)
+        );
+        assert_eq!(super::forwarded_port(80), None);
+        let ready = std::sync::atomic::AtomicBool::new(false);
+        let stop = std::sync::atomic::AtomicBool::new(true);
+        let out = super::run_flood_probe(80, 3, &ready, &stop);
+        assert_eq!(out, "[host] flood: guest port 80 has no hostfwd");
+        assert!(
+            ready.load(std::sync::atomic::Ordering::SeqCst),
+            "the console is released"
+        );
+    }
+
+    /// Against a local listener standing in for the guest: the flood opens
+    /// its connections, counts the one the peer closes during the settle
+    /// window, releases the console (`ready`) and holds the rest until
+    /// `stop`; the peer closing them afterwards is not counted.
+    #[test]
+    fn flood_counts_resets_within_the_settle_window_only() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ready = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (r, s) = (Arc::clone(&ready), Arc::clone(&stop));
+        let flood = std::thread::spawn(move || {
+            super::hold_connections(addr, 22, 3, Duration::from_millis(300), &r, &s)
+        });
+        let mut kept = Vec::new();
+        for (i, conn) in listener.incoming().take(3).enumerate() {
+            let conn = conn.unwrap();
+            if i == 1 {
+                drop(conn); // the "guest" resets this one
+            } else {
+                kept.push(conn);
+            }
+        }
+        let start = std::time::Instant::now();
+        while !ready.load(Ordering::SeqCst) {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "ready never raised"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // The peer closes the rest while they are held: not a reset.
+        drop(kept);
+        std::thread::sleep(Duration::from_millis(100));
+        stop.store(true, Ordering::SeqCst);
+        let out = flood.join().unwrap();
+        assert_eq!(
+            out,
+            "[host] flood: 3 connections to guest port 22 opened\n\
+             [host] flood: 1 of 3 connections reset by the guest within 300 ms"
+        );
+    }
+
     #[test]
     fn responder_echoes_and_answers_dns() {
         let mut out = [0u8; 512];

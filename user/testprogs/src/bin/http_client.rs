@@ -28,8 +28,16 @@ fn main(_arg: u64) -> u64 {
     }
     let mut body = [0u8; 4096];
     let mut buf = [0u8; 20];
+    // No absolute budget: this program has no SYSTEM handle (no clock) and
+    // talks to the host's test server only; the per-operation timeouts bound it.
     // 1. Body with Content-Length.
-    match http::get(&mut net, "http://10.0.2.2:17010/hola", &mut body, 5000) {
+    match http::get(
+        &mut net,
+        "http://10.0.2.2:17010/hola",
+        &mut body,
+        5000,
+        &http::Unbounded,
+    ) {
         Ok(f) if f.status == 200 && &body[..f.body_len] == b"Hola desde el host\n" => {
             sys::print(b"http_client: GET /hola -> 200, ");
             sys::print(fmt_u64(f.body_len as u64, &mut buf));
@@ -39,23 +47,48 @@ fn main(_arg: u64) -> u64 {
         _ => return 3,
     }
     // 2. Chunked body.
-    match http::get(&mut net, "10.0.2.2:17010/chunked", &mut body, 5000) {
+    match http::get(
+        &mut net,
+        "10.0.2.2:17010/chunked",
+        &mut body,
+        5000,
+        &http::Unbounded,
+    ) {
         Ok(f) if f.status == 200 && &body[..f.body_len] == b"primer trozo, segundo trozo" => {
             sys::print(b"http_client: GET /chunked -> 200 (chunked) ok\n");
         }
         _ => return 4,
     }
     // 3. 404.
-    match http::get(&mut net, "http://10.0.2.2:17010/no-existe", &mut body, 5000) {
+    match http::get(
+        &mut net,
+        "http://10.0.2.2:17010/no-existe",
+        &mut body,
+        5000,
+        &http::Unbounded,
+    ) {
         Ok(f) if f.status == 404 => sys::print(b"http_client: GET /no-existe -> 404\n"),
         _ => return 5,
     }
     // 4. Closed port: connection error.
-    match http::get(&mut net, "http://10.0.2.2:17011/", &mut body, 3000) {
+    match http::get(
+        &mut net,
+        "http://10.0.2.2:17011/",
+        &mut body,
+        3000,
+        &http::Unbounded,
+    ) {
         Err(HttpError::Connect(_)) => sys::print(b"http_client: closed port detected\n"),
         _ => return 6,
     }
-    if http::get(&mut net, "https://10.0.2.2/", &mut body, 1000) != Err(HttpError::BadUrl) {
+    if http::get(
+        &mut net,
+        "https://10.0.2.2/",
+        &mut body,
+        1000,
+        &http::Unbounded,
+    ) != Err(HttpError::BadUrl)
+    {
         return 7;
     }
     let _ = TEST_HTTP_PORT;

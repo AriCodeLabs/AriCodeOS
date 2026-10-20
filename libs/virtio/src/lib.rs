@@ -250,12 +250,18 @@ impl Virtqueue {
         Some(head)
     }
 
+    /// Whether the device has returned a buffer not yet popped: the next
+    /// `pop_used` would answer `Some`. Lets a driver know that frames are
+    /// waiting without taking one (`Link::rx_pending`, incident 0013).
+    pub fn has_used(&self) -> bool {
+        fence(Ordering::SeqCst);
+        self.read_u16(self.layout.used_offset + 2) != self.last_used
+    }
+
     /// Next element consumed by the device: (head, bytes written).
     /// Returns the chain's descriptors to the free list.
     pub fn pop_used(&mut self) -> Option<(u16, u32)> {
-        fence(Ordering::SeqCst);
-        let used_idx = self.read_u16(self.layout.used_offset + 2);
-        if used_idx == self.last_used {
+        if !self.has_used() {
             return None;
         }
         let slot = self.last_used % self.layout.size;
@@ -404,6 +410,7 @@ mod tests {
         assert_eq!(q.read_u16(l.avail_offset + 4), 0);
         // No room for a chain of 2.
         assert!(q.add(&[(0, 1, false), (0, 1, false)]).is_none());
+        assert!(!q.has_used());
         assert!(q.pop_used().is_none());
         // The "device" consumes: used.ring[0] = {id 0, len 513}, used.idx = 1
         unsafe {
@@ -411,8 +418,10 @@ mod tests {
             (b.ptr.add(l.used_offset + 8) as *mut u32).write(513);
             (b.ptr.add(l.used_offset + 2) as *mut u16).write(1);
         }
+        assert!(q.has_used(), "a used entry is visible before it is popped");
         assert_eq!(q.pop_used(), Some((0, 513)));
         assert_eq!(q.num_free(), 4, "the chain returns to the free list");
+        assert!(!q.has_used());
         assert!(q.pop_used().is_none());
         // The whole queue can be used again.
         assert!(q

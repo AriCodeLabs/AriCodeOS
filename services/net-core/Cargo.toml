@@ -13,4 +13,5 @@ bench = false
 aricode-sys = { path = "../../sdk/rust" }
 aricode-proto = { path = "../../sdk/proto" }
 aricode-net = { path = "../../libs/net" }
+aricode-faults = { path = "../../libs/faults" }
 aricode-rt = { path = "../../sdk/runtime" }

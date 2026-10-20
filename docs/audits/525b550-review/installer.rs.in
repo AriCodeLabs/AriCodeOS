@@ -1,0 +1,46 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+#[cfg(test)]
+mod installer {
+    use aricode_update_index::{self as upd, lists};
+    use std::cell::Cell;
+    mod code { pub const STATE: u64 = 12; pub const STATE_REPAIRED: u64 = 13; }
+    fn fault(code: u64, _: &str, _: &str) -> u64 { code }
+
+    // Existing state; first directory lookup fails transiently, subsequent
+    // operations succeed. This models ReplyLost/Timeout during fsd recovery.
+    struct FsClient { bytes: Vec<u8>, fail_list_once: Cell<bool> }
+    impl FsClient {
+        fn list(&self, i: u32, out: &mut [u8]) -> Result<Option<(usize, u64)>, ()> {
+            if self.fail_list_once.replace(false) { return Err(()); }
+            if i != 0 { return Ok(None); }
+            let name = b"updater/state";
+            out[..name.len()].copy_from_slice(name);
+            Ok(Some((name.len(), self.bytes.len() as u64)))
+        }
+        fn open(&self, _: &str) -> Result<u32, ()> { Ok(1) }
+        fn create(&self, _: &str) -> Result<u32, ()> { panic!("existing file") }
+        fn close(&self, _: u32) -> Result<(), ()> { Ok(()) }
+        fn read(&self, _: u32, offset: u32, out: &mut [u8]) -> Result<usize, ()> {
+            let rest = &self.bytes[offset as usize..];
+            let n = rest.len().min(out.len()); out[..n].copy_from_slice(&rest[..n]); Ok(n)
+        }
+        fn replace(&mut self, _: u32, bytes: &[u8]) -> Result<usize, ()> {
+            self.bytes = bytes.to_vec(); Ok(bytes.len())
+        }
+    }
+    @@file_size@@
+    @@read_all@@
+    @@write_file@@
+    @@read_state@@
+    @@write_state_section@@
+
+    #[test]
+    fn transient_listing_failure_must_not_erase_plan() {
+        let original = b"[installed]\nhello_ext 1\n[plan]\napp hello_ext 2\n[staged]\n";
+        let mut fs = FsClient { bytes: original.to_vec(), fail_list_once: Cell::new(true) };
+        let written = write_state_section(&mut fs, lists::INSTALLED, "hello_ext 1\n");
+        println!("installer: write accepted={written}, state={:?}", String::from_utf8_lossy(&fs.bytes));
+        assert_eq!(fs.bytes, original, "a failed listing must preserve existing state");
+    }
+}

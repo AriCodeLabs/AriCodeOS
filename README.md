@@ -16,7 +16,7 @@ Design decisions are recorded as ADRs in
 [docs/decisions/](docs/decisions/) and the branch flow (git flow) in
 [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-**Status:** 0.11.0 (2026-10-17). All 35 roadmap phases (0 to 34) are
+**Status:** 0.12.0 (2026-10-20). All 35 roadmap phases (0 to 34) are
 implemented and tested in QEMU, as are stages 1 to 4 of the post-roadmap
 sequence (observable recovery, a useful session, limits and updates,
 external applications) and the part of stage 5 that needs no hardware
@@ -73,14 +73,18 @@ works on any machine with Docker (slower than on the host).
 
 ```bash
 docker build -t aricodeos-dev -f tools/docker/Dockerfile .
-docker run --rm -it -v "$PWD":/src -v aricodeos-cargo:/usr/local/cargo/registry \
+docker run --rm -it -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/cargo/registry \
     --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask check
-docker run --rm -it -v "$PWD":/src -v aricodeos-cargo:/usr/local/cargo/registry \
+docker run --rm -it -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/cargo/registry \
     --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask test --all
 ```
 
 `--user` keeps `build/` and `target/` owned by you; the named volume keeps
-the crate downloads between runs. The image exposes no port and holds no
+the crate downloads between runs. The checkout is mounted at the same path
+it has on the host (`-v "$PWD":"$PWD" -w "$PWD"`), because artifacts in
+`target/` embed absolute paths (the SDK's linker script, for one): with a
+different path, host-built artifacts reused inside the container point
+at files that do not exist there. The image exposes no port and holds no
 key. A QEMU result inside Docker is a QEMU result: it does not replace the
 hardware checks of `docs/hardware.md`.
 
@@ -90,7 +94,7 @@ shell on your terminal (quit with Ctrl-A X):
 
 ```bash
 cargo xtask usb-image
-docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.11.0 .
+docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.12.0 .
 docker run --rm -it aricodeos
 ```
 

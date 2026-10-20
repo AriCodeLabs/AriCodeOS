@@ -12,8 +12,10 @@
 # Linux, macOS and Windows hosts alike; a run is slower than on the host.
 #
 # Build:  docker build -t aricodeos-dev -f tools/docker/Dockerfile .
-# Use:    docker run --rm -it -v "$PWD":/src -v aricodeos-cargo:/usr/local/cargo/registry \
+# Use:    docker run --rm -it -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/cargo/registry \
 #             --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask test --all
+# The checkout is mounted at its host path: artifacts in target/ embed
+# absolute paths, so host and container must see the same ones.
 
 FROM debian:trixie-slim
 
@@ -53,6 +55,8 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 # The entry point gives that uid a user name (nss_wrapper), which OpenSSH
 # needs in the sshd host tests.
 COPY tools/docker/entrypoint.sh /usr/local/bin/aricodeos-entrypoint
+# Default working directory when the checkout is mounted elsewhere; the
+# documented command overrides it with -w to the host path.
 WORKDIR /src
 ENV HOME=/tmp
 ENTRYPOINT ["/usr/local/bin/aricodeos-entrypoint"]

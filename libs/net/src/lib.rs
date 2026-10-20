@@ -3,8 +3,9 @@
 //! Minimal network stack (Phase 22, section 38). Encoders and decoders
 //! without `alloc` over caller-supplied buffers, plus the small state
 //! machines a ring 3 network service needs (ARP cache, DHCP
-//! client). All the logic is pure and tested on the host; the `netd` service
-//! only connects it to the virtio-net driver and to IPC.
+//! client, TCP and its secrets). All the logic is pure and tested on the
+//! host; the `netd` service only connects it to the virtio-net driver and
+//! to IPC.
 
 #![no_std]
 
@@ -14,6 +15,9 @@ pub mod dns;
 pub mod eth;
 pub mod icmp;
 pub mod ipv4;
+pub mod isn;
+pub mod owners;
+pub mod rx;
 pub mod tcp;
 pub mod udp;
 
@@ -46,6 +50,24 @@ impl Ipv4Addr {
     }
     pub fn is_unspecified(&self) -> bool {
         *self == Self::UNSPECIFIED
+    }
+    /// Class D, 224.0.0.0/4.
+    pub fn is_multicast(&self) -> bool {
+        self.0[0] & 0xF0 == 0xE0
+    }
+    /// Directed broadcast of the subnet this address is in under `mask`.
+    pub fn subnet_broadcast(&self, mask: Ipv4Addr) -> Ipv4Addr {
+        Self::from_u32(self.to_u32() | !mask.to_u32())
+    }
+    /// An address that cannot be the source of a connection (RFC 1122
+    /// section 3.2.1.3): unspecified, multicast, the limited broadcast or
+    /// the broadcast of the subnet `local` is in under `mask`. A SYN from
+    /// one is dropped, never answered.
+    pub fn is_invalid_source(&self, local: Ipv4Addr, mask: Ipv4Addr) -> bool {
+        self.is_unspecified()
+            || self.is_multicast()
+            || *self == Self::BROADCAST
+            || *self == local.subnet_broadcast(mask)
     }
     /// Same subnet as `other` under `mask`.
     pub fn same_subnet(&self, other: Ipv4Addr, mask: Ipv4Addr) -> bool {
@@ -146,5 +168,38 @@ mod tests {
         with[10..12].copy_from_slice(&0xb861u16.to_be_bytes());
         assert_eq!(checksum(0, &with), 0);
         assert_eq!(checksum(0, &[0x01]), !0x0100u16);
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::Ipv4Addr;
+
+    /// Incident 0013 audit: sources that cannot be a host (RFC 1122 section
+    /// 3.2.1.3) are told apart from any unicast address, the local one
+    /// included.
+    #[test]
+    fn invalid_sources_are_recognised() {
+        let local = Ipv4Addr::new(10, 0, 2, 15);
+        let mask = Ipv4Addr::new(255, 255, 255, 0);
+        assert_eq!(local.subnet_broadcast(mask), Ipv4Addr::new(10, 0, 2, 255));
+        for bad in [
+            Ipv4Addr::UNSPECIFIED,
+            Ipv4Addr::BROADCAST,
+            Ipv4Addr::new(10, 0, 2, 255),
+            Ipv4Addr::new(224, 0, 0, 1),
+            Ipv4Addr::new(239, 255, 255, 250),
+        ] {
+            assert!(bad.is_invalid_source(local, mask), "{bad:?}");
+        }
+        for ok in [
+            Ipv4Addr::new(10, 0, 2, 2),
+            Ipv4Addr::new(10, 0, 3, 255),
+            Ipv4Addr::new(223, 255, 255, 255),
+            Ipv4Addr::new(240, 0, 0, 1),
+            local,
+        ] {
+            assert!(!ok.is_invalid_source(local, mask), "{ok:?}");
+        }
     }
 }

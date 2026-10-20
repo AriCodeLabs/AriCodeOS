@@ -67,6 +67,26 @@ pub struct HostSsh {
     pub idle_client: bool,
 }
 
+/// Connection flood from the host (incident 0013): on seeing `marker` the
+/// runner opens `connections` plain TCP connections to the guest's `port`
+/// through its `hostfwd`, sends nothing and holds them until QEMU exits;
+/// the console lines are typed only once they are open. QEMU completes the
+/// handshake itself, so the guest sees established connections nobody
+/// accepts (a listener's backlog), not half-open ones. Port 22 installs the
+/// scenario's SSH key so sshd listens.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostFlood {
+    pub marker: String,
+    #[serde(default = "default_flood_port")]
+    pub port: u16,
+    pub connections: usize,
+}
+
+fn default_flood_port() -> u16 {
+    22
+}
+
 /// What the scenario's update source offers and how the machine knows it.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -191,6 +211,9 @@ pub struct Scenario {
     pub host_input: Option<HostInput>,
     #[serde(default)]
     pub host_ssh: Option<HostSsh>,
+    /// Plain TCP connections held open against a guest listener (incident
+    /// 0013), with the console lines typed once they are in place.
+    pub host_flood: Option<HostFlood>,
     /// HTTPS servers on the host (`openssl s_server -www`): one with a
     /// certificate for `10.0.2.2` from a test CA installed in AriFS as
     /// `trusted_ca.der`, one self-signed and untrusted.
@@ -250,6 +273,10 @@ pub struct Scenario {
     /// the EHCI driver hands the port to the companion (ADR 0031).
     #[serde(default)]
     pub usb_ehci_companion_kbd: bool,
+    /// No network card: init finds neither virtio-net nor a Realtek and
+    /// runs without a network service.
+    #[serde(default)]
+    pub no_nic: bool,
     #[serde(default)]
     pub inject: Inject,
     /// What is expected from the single boot (without `[[boots]]`).

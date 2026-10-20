@@ -13,7 +13,7 @@ use ari_net_core::{run, say, Clock, Link, MAX_FRAME};
 use aricode_net::MacAddr;
 use aricode_rt::sys;
 use aricode_rt::sys::virtio_pci::{bar_handle, extra_handle, DmaRegion, Mmio, IRQ};
-use aricode_rtl8169::{ack_interrupts, link_state, reg, rx_frame, Desc, Regs, TX_POLL_NPQ};
+use aricode_rtl8169::{ack_interrupts, link_state, reg, rx_take, Desc, Regs, TX_POLL_NPQ};
 
 const NAME: &str = "rtl-net";
 const RX_SLOTS: usize = 16;
@@ -182,31 +182,30 @@ impl Link for Nic {
         Some(link_state(self.regs.r8(reg::PHY_STATUS)).up)
     }
 
+    /// One descriptor per call, an errored one included (as length 0,
+    /// which the stack ignores): every descriptor counts toward the
+    /// round's budget, so CRC errors cannot turn a call back into a drain
+    /// of the ring (incident 0013).
     fn recv_frame(&mut self, out: &mut [u8; MAX_FRAME]) -> Option<usize> {
         let _ = ack_interrupts(&self.regs);
-        loop {
-            let i = self.rx_next;
-            let d = self.read_desc(RX_RING_OFF, i);
-            let got = rx_frame(d.opts1)?;
+        let i = self.rx_next;
+        let len = rx_take(self.read_desc(RX_RING_OFF, i).opts1, MAX_FRAME)?;
+        if len > 0 {
             let off = BUFFERS_OFF + SLOT * i as u64;
-            let len = match got {
-                Ok(n) => n.min(MAX_FRAME),
-                Err(()) => 0,
-            };
-            if len > 0 {
-                out[..len].copy_from_slice(self.dma.slice_mut(off, len as u64));
-            }
-            // Hand the descriptor back to the card and advance.
-            self.write_desc(
-                RX_RING_OFF,
-                i,
-                Desc::rx(self.rx_buffer_phys(i), SLOT as u16, i + 1 == RX_SLOTS),
-            );
-            self.rx_next = (i + 1) % RX_SLOTS;
-            if len > 0 {
-                return Some(len);
-            }
+            out[..len].copy_from_slice(self.dma.slice_mut(off, len as u64));
         }
+        // Hand the descriptor back to the card and advance.
+        self.write_desc(
+            RX_RING_OFF,
+            i,
+            Desc::rx(self.rx_buffer_phys(i), SLOT as u16, i + 1 == RX_SLOTS),
+        );
+        self.rx_next = (i + 1) % RX_SLOTS;
+        Some(len)
+    }
+    fn rx_pending(&self) -> bool {
+        // Whatever the next call would take, an errored descriptor too.
+        rx_take(self.read_desc(RX_RING_OFF, self.rx_next).opts1, MAX_FRAME).is_some()
     }
 }
 

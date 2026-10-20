@@ -580,12 +580,16 @@ pub fn selftest() {
     assert!((5..=7).contains(&slept), "sleep_ms(50) slept {slept} ticks");
 
     // 3. Block and wake through a wait queue: two consumers, `wake_one`
-    // releases exactly one and `wake_all` the rest.
+    // releases exactly one and `wake_all` the rest. The condition is made
+    // true for both before `wake_one`: with several CPUs the consumers
+    // block in either order, so the one `wake_one` pops is not known
+    // (incident 0015); what is asserted is that exactly one runs and the
+    // other stays blocked, whichever they are.
     static QUEUE: WaitQueue = WaitQueue::new();
     static READY_FLAG: AtomicU64 = AtomicU64::new(0);
     static CONSUMED: AtomicU64 = AtomicU64::new(0);
-    extern "C" fn consumer(i: usize) {
-        QUEUE.wait_until(|| READY_FLAG.load(Ordering::Relaxed) & (1 << i) != 0);
+    extern "C" fn consumer(_: usize) {
+        QUEUE.wait_until(|| READY_FLAG.load(Ordering::Relaxed) != 0);
         CONSUMED.fetch_add(1, Ordering::Relaxed);
     }
     let c0 = spawn("consumer-0", consumer, 0).unwrap();
@@ -594,20 +598,19 @@ pub fn selftest() {
     assert_eq!(state(c0), Some(State::Blocked));
     assert_eq!(state(c1), Some(State::Blocked));
     assert_eq!(CONSUMED.load(Ordering::Relaxed), 0);
-    READY_FLAG.store(0b01, Ordering::Relaxed);
-    QUEUE.wake_one(); // wakes c0, which was the first to wait
+    READY_FLAG.store(1, Ordering::Relaxed);
+    QUEUE.wake_one(); // whichever consumer blocked first
     sleep_ms(30);
     assert_eq!(
         CONSUMED.load(Ordering::Relaxed),
         1,
         "wake_one must release only one"
     );
-    assert_eq!(
-        state(c1),
-        Some(State::Blocked),
-        "the second one is still waiting"
-    );
-    READY_FLAG.store(0b11, Ordering::Relaxed);
+    let still_blocked = [state(c0), state(c1)]
+        .iter()
+        .filter(|s| **s == Some(State::Blocked))
+        .count();
+    assert_eq!(still_blocked, 1, "the other consumer is still waiting");
     QUEUE.wake_all();
     while state(c0).is_some() || state(c1).is_some() {
         yield_now();

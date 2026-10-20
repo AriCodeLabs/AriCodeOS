@@ -617,28 +617,40 @@ fn print_ip(ip: [u8; 4]) {
     print(aricode_net::Ipv4Addr(ip).format(&mut b));
 }
 
+/// One line per network error, naming the status netd answered with
+/// (`NetError::describe`, incident 0012): a refusal is never reported as a
+/// generic "rejected the request".
 fn net_error(e: NetError) {
-    match e {
-        NetError::Status(abi_status) => {
-            print(match abi_status {
-                aricode_proto::net::Status::Timeout => b"no reply (timed out)\n" as &[u8],
-                aricode_proto::net::Status::NoRoute => b"no network configuration\n",
-                aricode_proto::net::Status::NotFound => b"unknown name\n",
-                _ => b"network service rejected the request\n",
-            });
-        }
-        NetError::Ipc(_) => print(b"network service not responding\n"),
+    if session_gone(e) {
+        print(SESSION_GONE);
+        return;
     }
+    print(e.describe().as_bytes());
+    print(b"\n");
 }
+
+/// The shell's network session is a session of the netd generation that
+/// created it (ADR 0037): when netd dies and the supervisor relaunches it,
+/// the send is refused (`ServiceGone`, ADR 0030), not merely unanswered
+/// (`ReplyLost`, which a retry may cure). Only a new shell gets a session
+/// from the new generation.
+fn session_gone(e: NetError) -> bool {
+    e == NetError::Ipc(sys::Error::ServiceGone)
+}
+
+const SESSION_GONE: &[u8] =
+    b"network service was restarted: this shell's session ended; restart the shell ('exit')\n";
 
 fn net(client: &NetClient) {
     print(b"link    ");
-    print(match client.link() {
-        Ok(LINK_UP) => b"up\n",
-        Ok(LINK_DOWN) => b"down (cable?)\n",
-        Ok(_) => b"unknown\n",
-        Err(_) => b"no reply from network service\n",
-    });
+    match client.link() {
+        Ok(LINK_UP) => print(b"up\n"),
+        Ok(LINK_DOWN) => print(b"down (cable?)\n"),
+        Ok(_) => print(b"unknown\n"),
+        // Every other line would say the same.
+        Err(e) if session_gone(e) => return print(SESSION_GONE),
+        Err(_) => print(b"no reply from network service\n"),
+    }
     match client.info() {
         Err(NetError::Status(NetStatus::NoRoute)) => {
             print(b"ip      no address (DHCP pending)\n");
@@ -663,6 +675,90 @@ fn net(client: &NetClient) {
         }
         Err(e) => net_error(e),
     }
+    tcp_table(client);
+}
+
+/// One line with the service's TCP table by state (incident 0013), so a
+/// full table can be read in `diag` without a capture: `tcp     8 slots: 1
+/// listen, 0 syn-rcvd, 0 syn-sent, 3 backlog, 1 established, 0 closing, 0
+/// time-wait, 3 free; 4 SYNs reset`. The backlog (established, nobody
+/// accepted yet) and syn-rcvd (half-open) connections are the ones a
+/// listener holds, capped per listener; "SYNs reset" counts the SYNs
+/// refused since boot (`net syn dropped` events).
+fn tcp_table(client: &NetClient) {
+    print(b"tcp     ");
+    let t = match client.tcp_stats() {
+        Ok(t) => t,
+        Err(e) => return net_error(e),
+    };
+    num(t.slots as u64);
+    print(b" slots: ");
+    let counts: [(u16, &[u8]); 8] = [
+        (t.listen, b"listen"),
+        (t.syn_received, b"syn-rcvd"),
+        (t.syn_sent, b"syn-sent"),
+        (t.backlog, b"backlog"),
+        (t.established, b"established"),
+        (t.closing, b"closing"),
+        (t.time_wait, b"time-wait"),
+        (t.free, b"free"),
+    ];
+    for (i, (n, label)) in counts.iter().enumerate() {
+        if i > 0 {
+            print(b", ");
+        }
+        num(*n as u64);
+        print(b" ");
+        print(label);
+    }
+    print(b"; ");
+    num(t.syn_dropped as u64);
+    print(b" SYNs reset\n");
+    sockets(client);
+}
+
+/// One line with the service's socket tables per owner (ADR 0037):
+/// `sockets 3 in use: sshd 2, shell 1; 16 reclaimed from dead clients`.
+/// Every socket and wait (TCP, UDP, ping, DNS) counts for the client
+/// session that created it (`main` is init); a connection whose client
+/// closed it and then died is in use but nobody's until TIME-WAIT ends.
+/// "reclaimed" counts the sockets netd closed on behalf of dead clients
+/// since it started (`net socks reclaimed` events).
+fn sockets(client: &NetClient) {
+    print(b"sockets ");
+    let mut label = [0u8; aricode_proto::net::MAX_LABEL];
+    let mut slot = 0u16;
+    let mut first = true;
+    let mut listed = 0;
+    let mut reclaimed = 0;
+    loop {
+        match client.sockets(slot, &mut label) {
+            Ok(Some((usage, n))) => {
+                if first {
+                    num(usage.used as u64);
+                    print(b" in use");
+                    if usage.used > 0 {
+                        print(b":");
+                    }
+                    reclaimed = usage.reclaimed;
+                    first = false;
+                }
+                if usage.owned > 0 {
+                    print(if listed == 0 { b" ".as_slice() } else { b", " });
+                    print(&label[..n]);
+                    print(b" ");
+                    num(usage.owned as u64);
+                    listed += 1;
+                }
+            }
+            Ok(None) => break,
+            Err(e) => return net_error(e),
+        }
+        slot += 1;
+    }
+    print(b"; ");
+    num(reclaimed as u64);
+    print(b" reclaimed from dead clients\n");
 }
 
 fn ping(client: &NetClient, arg: &[u8]) {
@@ -686,6 +782,7 @@ fn ping(client: &NetClient, arg: &[u8]) {
                 num(rtt);
                 print(b" ms\n");
             }
+            Err(e) if session_gone(e) => return print(SESSION_GONE),
             Err(e) => {
                 print(b"seq=");
                 num(seq as u64);
@@ -738,8 +835,21 @@ fn http_get(fs: &mut FsClient, client: &mut NetClient, arg: &[u8]) {
         }
         let _ = fs.close(fd);
     }
+    // The whole download is bounded, whatever the server does with its
+    // headers (incident 0009); a clock that cannot be read leaves no time.
+    let now = || sys::time::uptime_ms(SYSTEM).unwrap_or(u64::MAX);
+    let deadline = now().saturating_add(HTTP_BUDGET_MS);
+    let budget = || deadline.saturating_sub(now()).min(u32::MAX as u64) as u32;
     let mut body = [0u8; 8192];
-    match aricode_https::get(client, SYSTEM, &extra, url, &mut body, 8000) {
+    match aricode_https::get(
+        client,
+        SYSTEM,
+        &extra,
+        url,
+        &mut body,
+        HTTP_TIMEOUT_MS,
+        &budget,
+    ) {
         Ok(f) => {
             print(b"HTTP ");
             num(f.status as u64);
@@ -773,11 +883,28 @@ fn http_get(fs: &mut FsClient, client: &mut NetClient, arg: &[u8]) {
         }
         Err(HttpsError::TooBig) => print(b"http: response headers too large\n"),
         Err(HttpsError::Aborted) => print(b"http: download aborted\n"),
+        Err(HttpsError::Deadline(phase)) => {
+            print(b"http: deadline passed ");
+            print(phase.describe().as_bytes());
+            print(b"\n");
+        }
+        Err(HttpsError::TooManyInformational) => print(b"http: too many interim responses\n"),
+        Err(HttpsError::EmptyRecords) => {
+            print(b"http: TLS: the server kept sending records without data\n")
+        }
+        Err(HttpsError::HeaderBytes) => {
+            print(b"http: response headers too large in all (interim responses included)\n")
+        }
     }
 }
 
 /// AriFS file with an extra trusted root certificate (DER) for `http`.
 const TRUSTED_CA: &str = "trusted_ca.der";
+/// Longest wait for one network operation of `http`.
+const HTTP_TIMEOUT_MS: u32 = 8_000;
+/// Budget of a whole `http`: room for a page over TLS on a slow link, and
+/// the bound a server that trickles headers runs into (incident 0009).
+const HTTP_BUDGET_MS: u64 = 30_000;
 
 /// Short explanation of a TLS failure.
 fn tls_error(e: aricode_tls::Error) -> &'static [u8] {
@@ -921,29 +1048,48 @@ fn run_updater(fs: &mut FsClient, arg: u64) -> Option<u64> {
 }
 
 /// Reads a whole small file: `Ok(None)` if it does not exist.
+/// The main file space as `update_index::files::Files`: only an explicit
+/// `NotFound` means a file is absent; any other failure is an error, never
+/// mistaken for "missing" (incident 0008).
+struct MainFiles<'a>(&'a mut FsClient);
+
+impl update_index::files::Files for MainFiles<'_> {
+    type Fd = u32;
+    type Error = aricode_rt::sys::fs::FsError;
+
+    fn open(&mut self, name: &str) -> Result<Option<u32>, Self::Error> {
+        use aricode_proto::fs::Status;
+        use aricode_rt::sys::fs::FsError;
+        match self.0.open(name) {
+            Ok(fd) => Ok(Some(fd)),
+            Err(FsError::Status(Status::NotFound)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn read(&mut self, fd: &u32, offset: u32, out: &mut [u8]) -> Result<usize, Self::Error> {
+        self.0.read(*fd, offset, out)
+    }
+
+    fn close(&mut self, fd: u32) {
+        let _ = self.0.close(fd);
+    }
+
+    fn list(
+        &mut self,
+        index: u32,
+        name_out: &mut [u8; update_index::files::NAME_LEN],
+    ) -> Result<Option<(usize, u64)>, Self::Error> {
+        self.0.list(index, name_out)
+    }
+}
+
 fn read_small(
     fs: &mut FsClient,
     name: &str,
     max: usize,
 ) -> Result<Option<alloc::vec::Vec<u8>>, ()> {
-    use aricode_proto::fs::Status;
-    use aricode_rt::sys::fs::FsError;
-    let fd = match fs.open(name) {
-        Ok(fd) => fd,
-        Err(FsError::Status(Status::NotFound)) => return Ok(None),
-        Err(_) => return Err(()),
-    };
-    let mut data = alloc::vec::Vec::new();
-    let mut chunk = [0u8; 512];
-    let result = loop {
-        match fs.read(fd, data.len() as u32, &mut chunk) {
-            Ok(0) => break Ok(Some(data)),
-            Ok(n) if data.len() + n <= max => data.extend_from_slice(&chunk[..n]),
-            _ => break Err(()),
-        }
-    };
-    let _ = fs.close(fd);
-    result
+    update_index::files::read_optional(&mut MainFiles(fs), name, max).map_err(|_| ())
 }
 
 /// The source list, migrating `update_url` (ADR 0027) when there is no
@@ -993,10 +1139,6 @@ fn save_sources(fs: &mut FsClient, sources: &update_index::Sources, event: &str)
         return false;
     }
     let history_path = update_index::main_path(update_index::HISTORY_FILE);
-    let existing = read_small(fs, &history_path, update_index::HISTORY_MAX)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
     let line = alloc::format!(
         "{event} (from {})",
         if session() {
@@ -1005,7 +1147,22 @@ fn save_sources(fs: &mut FsClient, sources: &update_index::Sources, event: &str)
             "the console"
         }
     );
-    let log = update_index::history::append(&existing, &line, update_index::HISTORY_MAX);
+    // A history that cannot be read is not rewritten (incident 0008): the
+    // source change is done and was said, but the older lines are never
+    // replaced by this one.
+    let log = match update_index::history::appended(
+        &mut MainFiles(fs),
+        &history_path,
+        &line,
+        update_index::HISTORY_MAX,
+    ) {
+        Ok(log) => log,
+        Err(_) => {
+            print(b"update: cannot read the install history: not rewritten\n");
+            let _ = sys::event_record(2, "sh-history-read");
+            return true;
+        }
+    };
     if save_file(fs, &history_path, &log).is_err() {
         print(b"update: cannot write the install history\n");
     }
@@ -1206,6 +1363,7 @@ fn services(mask: u64, fs: &FsClient) {
         } else {
             b"active, not responding\n"
         });
+        descriptors(fs);
     }
     print(b"network   service     ");
     print(if mask & SERVICE_NET != 0 {
@@ -1225,6 +1383,55 @@ fn services(mask: u64, fs: &FsClient) {
     } else {
         b"absent (start with `gui`)\n"
     });
+}
+
+/// fsd's descriptor table (ADR 0036): `descriptors 3/16 open, 16
+/// reclaimed from dead clients: main 1, root 2`, one entry per owner
+/// (the main endpoint and each client session) holding a descriptor.
+fn descriptors(fs: &FsClient) {
+    let mut name = [0u8; 32];
+    let mut slot = 0u32;
+    let mut first = true;
+    let mut listed = 0;
+    loop {
+        match fs.descriptors(slot, &mut name) {
+            Ok(Some((usage, n))) => {
+                if first {
+                    print(b"          descriptors ");
+                    num(usage.used as u64);
+                    print(b"/");
+                    num(usage.capacity as u64);
+                    print(b" open, ");
+                    num(usage.reclaimed as u64);
+                    print(b" reclaimed from dead clients");
+                    if usage.used > 0 {
+                        print(b":");
+                    }
+                    first = false;
+                }
+                if usage.owned > 0 {
+                    print(if listed == 0 { b" ".as_slice() } else { b", " });
+                    print(&name[..n]);
+                    print(b" ");
+                    num(usage.owned as u64);
+                    listed += 1;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => {
+                print(if first {
+                    b"          descriptors: no answer\n"
+                } else {
+                    b" ...\n"
+                });
+                return;
+            }
+        }
+        slot += 1;
+    }
+    if !first {
+        print(b"\n");
+    }
 }
 
 /// `services --detail`: what init knows about each supervised service.
@@ -1360,6 +1567,11 @@ fn execute(
         b"uptime" => uptime(),
         b"cpus" => cpus(),
         b"diag" => diag(fs, net_client, mask, rest),
+        // Without a network service the shell's net handle is a
+        // placeholder that reaches nobody (init, `spawn_shell`).
+        b"net" | b"ping" | b"dns" | b"http" if mask & SERVICE_NET == 0 => {
+            print(b"no network service\n");
+        }
         b"net" => net(net_client),
         b"ping" => ping(net_client, rest),
         b"dns" => dns(net_client, rest),
