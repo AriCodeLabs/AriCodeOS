@@ -119,3 +119,19 @@ and visible in `diag`.
   scenario proves the backlog cap, the reset and the visibility with
   established connections nobody accepts, and cannot send half-open ones:
   that part rests on the host tests.
+
+## Note (2026-10-20, incident 0013 follow-up)
+
+The receive loop is bounded too. A round of the service used to drain the
+receive ring until empty before serving IPC, so a line-rate flood (each SYN
+now costing a reset) could hold the round for as long as frames came and
+the clients' requests and the timers never got their turn. A round now
+receives at most `aricode_net::rx::FRAMES_PER_ROUND = 32` frames (two
+16-slot rings' worth: under half a millisecond of a gigabit link, about
+4 ms of the laptop's 100 Mbit/s Realtek), then serves `IPC_REQUESTS_PER_ROUND
+= 8` requests and the timers; when frames were left in the ring
+(`Link::rx_pending`) it records `net rx budget hit xN` (code 0, bounded by
+the meter) and starts the next round without waiting for the interrupt.
+What a client waits under a flood is one round, not the flood. The budget
+decision is `rx::receive_round` (`libs/net`, host-tested); the constants and
+their reasoning sit together in `services/net-core` and `libs/net/src/rx.rs`.

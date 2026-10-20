@@ -699,10 +699,13 @@ latter briefly to add the region.
   MSI-X vector 0, `DRIVER_OK`, `NEEDS_RESET`) and the handle contract
   with init; after the BARs come the driver's extras (`extra_handle`).
   virtio-blk was reduced to its request logic.
-- `netd` is single-threaded: on each iteration it drains the receive queue,
-  serves up to 8 IPC requests with timeout 0 (from its main endpoint and
-  every client session together, `ipc_receive_any`), expires deadlines and
-  waits for the IRQ for up to 10 ms. Operations that wait on the network (ping, `UdpRecv`,
+- `netd` is single-threaded: on each iteration it receives up to
+  `aricode_net::rx::FRAMES_PER_ROUND = 32` frames (incident 0013: a flood
+  cannot hold the round; frames left in the ring are recorded as `net rx
+  budget hit` and the next round follows at once), serves up to 8 IPC
+  requests with timeout 0 (from its main endpoint and every client session
+  together, `ipc_receive_any`), expires deadlines and waits for the IRQ for
+  up to 10 ms. Operations that wait on the network (ping, `UdpRecv`,
   `Dns`) keep the client's reply endpoint and answer when
   the packet arrives or the deadline expires; frames whose next hop is not
   in the ARP cache are parked until the ARP reply (1 s).
@@ -795,8 +798,9 @@ latter briefly to add the region.
   bad handles` (`Status::BadHandles`), `net syn dropped` (a SYN to a
   listener refused with a reset: no free slot or the listener's backlog at
   its cap, ADR 0035), `net sessions full` (an `Attach` with every session
-  slot taken) and `net socks reclaimed` (sockets closed on behalf of a dead
-  client, code 0, ADR 0037). `aricode_faults::Meter` (`libs/faults`, shared with fsd)
+  slot taken), `net socks reclaimed` (sockets closed on behalf of a dead
+  client, code 0, ADR 0037) and `net rx budget hit` (a round of reception
+  that spent its 32 frames with more in the ring, code 0). `aricode_faults::Meter` (`libs/faults`, shared with fsd)
   bounds the rate: at most one event per kind per second; the refusals
   held back in between are counted and recorded when their second ends
   (`drain_due` from `expire`). The event name is `<kind> x<count>` (count

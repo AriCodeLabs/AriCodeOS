@@ -208,6 +208,10 @@ impl Link for Nic {
             }
         }
     }
+    fn rx_pending(&self) -> bool {
+        // The next descriptor is ours again once the card filled it.
+        rx_frame(self.read_desc(RX_RING_OFF, self.rx_next).opts1).is_some()
+    }
 }
 
 fn main(mask: u64) -> u64 {
