@@ -1,7 +1,8 @@
 # Incident 0011: arifs descriptors are never reclaimed when a client dies
 
-- Opened: 2026-10-18. Status: fixed 2026-10-19 (`fix/arifs-descriptor-reclaim`,
-  ADR 0036), reproduced in QEMU before the fix.
+- Opened: 2026-10-18. Status: closed 2026-10-20, fixed in
+  `fix/arifs-descriptor-reclaim` (ADR 0036; merged into develop at 73fd8b1,
+  see Closure), reproduced in QEMU before the fix.
 - Found by: the independent audit of `fix/installer-state-read-error`
   (incident 0008), while reviewing what a full descriptor table means for
   the installer.
@@ -168,3 +169,13 @@ branch:
 - netd has the same shape of problem with sockets (incident 0012, open
   item); the same mechanism (per-client sessions and a liveness probe)
   applies.
+
+## Closure (2026-10-20)
+
+Merged into `develop` at 73fd8b1 after an independent audit (nothing
+serious; four follow-ups applied in b7222fc) and the full QEMU suite on
+the merged tree: 156 scenarios with 0 failed with 1 CPU and again with
+4 CPUs, `filesystem.descriptors_reclaimed` and the tightened
+`sandbox.manifest` included. The one red run on the way (the scheduler
+self-test's own ordering race) became incident 0015, fixed and closed in
+the same merge.
