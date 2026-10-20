@@ -1,6 +1,6 @@
 # Incident 0015: the scheduler self-test assumed the wait-queue order
 
-- Opened: 2026-10-20. Status: fixed in `fix/sched-selftest-wake-order`
+- Opened: 2026-10-20. Status: closed 2026-10-20, fixed in `fix/sched-selftest-wake-order`
   (see Fix); pending the reruns listed under Tests.
 - Seen: `cargo xtask test --all --cpus 4` on `fix/arifs-descriptor-reclaim`
   b7222fc (a user-space change; the kernel is develop 743c85b's), scenario
@@ -50,3 +50,9 @@ waiter and `wake_all` the rest.
 
 - Incident 0002 (`smp.selftest`) stays as it is; its self-test was
   already changed to wait with a deadline.
+
+## Closure (2026-10-20)
+
+Merged into `develop`; 10 of 10 reruns of `scheduler.selftest` with 4 CPUs
+after the change, then the full suite green with 1 and 4 CPUs on the merged
+`develop` (see the merge commit).
