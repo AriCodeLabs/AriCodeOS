@@ -179,6 +179,18 @@ pub fn rx_frame(opts1: u32) -> Option<Result<usize, ()>> {
     Some(Ok(((opts1 & desc::LEN_MASK) as usize).saturating_sub(4)))
 }
 
+/// What one receive call takes from the ring for a descriptor with
+/// `opts1`: `None` while the card owns it (nothing consumed); otherwise the
+/// descriptor is consumed and the answer is the bytes to copy, capped at
+/// `max`, with 0 for a frame that arrived with an error (or with nothing
+/// past the CRC). Exactly one descriptor per call, errors included, so a
+/// stream of bad frames is bounded by the caller's per-round budget like
+/// any other (incident 0013), and "is there more?" is the same question as
+/// "would the next call take something?".
+pub fn rx_take(opts1: u32, max: usize) -> Option<usize> {
+    rx_frame(opts1).map(|got| got.map_or(0, |n| n.min(max)))
+}
+
 /// Access to the card registers (MMIO in the driver, memory in the
 /// tests).
 pub trait Regs {
@@ -347,6 +359,29 @@ mod tests {
         );
     }
 
+    /// A burst of errored frames costs one call per descriptor, never a
+    /// drain of the ring inside one call (incident 0013 audit follow-up).
+    #[test]
+    fn errored_descriptors_are_taken_one_per_call() {
+        let ring = [
+            desc::RX_ERROR | 100,
+            desc::RX_ERROR | 100,
+            desc::RX_ERROR | 100,
+            64 + 4,
+            desc::OWN,
+        ];
+        let mut next = 0;
+        let mut calls = std::vec::Vec::new();
+        while let Some(n) = rx_take(ring[next], 1514) {
+            // "Pending" before the call agrees with what the call took.
+            assert!(rx_take(ring[next], 1514).is_some());
+            calls.push(n);
+            next += 1;
+        }
+        assert_eq!(calls, [0, 0, 0, 64]);
+        assert_eq!(next, 4, "stops at the descriptor the card owns");
+    }
+
     #[test]
     fn descriptors_and_link() {
         let d = Desc::rx(0x3000, 2048, true);
@@ -359,6 +394,10 @@ mod tests {
         assert_eq!(rx_frame(desc::RX_ERROR | 100), Some(Err(())));
         assert_eq!(rx_frame(64 + 4), Some(Ok(64)));
         assert_eq!(rx_frame(2), Some(Ok(0)));
+        assert_eq!(rx_take(desc::OWN | 100, 1514), None);
+        assert_eq!(rx_take(desc::RX_ERROR | 100, 1514), Some(0));
+        assert_eq!(rx_take(64 + 4, 1514), Some(64));
+        assert_eq!(rx_take(2000 + 4, 1514), Some(1514));
         assert_eq!(
             link_state(phy::LINK | phy::SPEED_100 | phy::FULL_DUPLEX),
             LinkState {

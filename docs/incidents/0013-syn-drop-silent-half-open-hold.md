@@ -191,6 +191,33 @@ tcp     8 slots: 1 listen, 0 syn-rcvd, 0 syn-sent, 4 backlog, 1 established, 0 c
   `diag` line will say, on the next `Busy`, whether a backlog held the
   table.
 
+## Audit follow-ups (2026-10-20)
+
+Two independent audits of the RX budget found nothing serious; the low
+items were fixed on `fix/netd-audit-followups`:
+
+- **Errored descriptors outside the budget.** rtl-net's `recv_frame`
+  consumed every descriptor flagged `RX_ERROR` in an inner loop before
+  returning a good frame, so a stream of CRC-error frames turned one call
+  back into a drain of the ring, and `rx_pending` answered `true` for an
+  errored next descriptor that the next call would skip (a spurious `net
+  rx budget hit` and an empty round). The driver now takes exactly one
+  descriptor per call, an errored one returned as length 0 and ignored by
+  the stack, so every descriptor counts toward the 32 and `rx_pending`
+  asks what the next call would take (`aricode_rtl8169::rx_take`, host
+  test `errored_descriptors_are_taken_one_per_call`). virtio-net already
+  took one used buffer per call.
+- **CPU under a flood stated plainly** (ADR 0035 note, architecture.md):
+  with frames left over netd neither waits nor yields, so a sustained flood
+  keeps it at 100% of a CPU and fairness towards other processes rests on
+  the scheduler's 20 ms quantum; its clients still get the IPC budget and
+  the timers every round. A yield was rejected because the 16-slot ring
+  would drop frames meanwhile.
+- **Resets are best effort under a flood.** The 8-slot TX ring fills, so
+  on real hardware `net tx busy xN` accompanies `net rx budget hit xN`; the
+  ADR 0035 note no longer says each SYN costs a reset, only a reset
+  attempt.
+
 ## Plan (as written on 2026-10-18)
 
 1. Record the drop: a `net syn dropped` kind in `Refusal` (status `Busy`,

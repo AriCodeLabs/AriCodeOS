@@ -621,18 +621,36 @@ fn print_ip(ip: [u8; 4]) {
 /// (`NetError::describe`, incident 0012): a refusal is never reported as a
 /// generic "rejected the request".
 fn net_error(e: NetError) {
+    if session_gone(e) {
+        print(SESSION_GONE);
+        return;
+    }
     print(e.describe().as_bytes());
     print(b"\n");
 }
 
+/// The shell's network session is a session of the netd generation that
+/// created it (ADR 0037): when netd dies and the supervisor relaunches it,
+/// the send is refused (`ServiceGone`, ADR 0030), not merely unanswered
+/// (`ReplyLost`, which a retry may cure). Only a new shell gets a session
+/// from the new generation.
+fn session_gone(e: NetError) -> bool {
+    e == NetError::Ipc(sys::Error::ServiceGone)
+}
+
+const SESSION_GONE: &[u8] =
+    b"network service was restarted: this shell's session ended; restart the shell ('exit')\n";
+
 fn net(client: &NetClient) {
     print(b"link    ");
-    print(match client.link() {
-        Ok(LINK_UP) => b"up\n",
-        Ok(LINK_DOWN) => b"down (cable?)\n",
-        Ok(_) => b"unknown\n",
-        Err(_) => b"no reply from network service\n",
-    });
+    match client.link() {
+        Ok(LINK_UP) => print(b"up\n"),
+        Ok(LINK_DOWN) => print(b"down (cable?)\n"),
+        Ok(_) => print(b"unknown\n"),
+        // Every other line would say the same.
+        Err(e) if session_gone(e) => return print(SESSION_GONE),
+        Err(_) => print(b"no reply from network service\n"),
+    }
     match client.info() {
         Err(NetError::Status(NetStatus::NoRoute)) => {
             print(b"ip      no address (DHCP pending)\n");
@@ -764,6 +782,7 @@ fn ping(client: &NetClient, arg: &[u8]) {
                 num(rtt);
                 print(b" ms\n");
             }
+            Err(e) if session_gone(e) => return print(SESSION_GONE),
             Err(e) => {
                 print(b"seq=");
                 num(seq as u64);
@@ -1548,6 +1567,11 @@ fn execute(
         b"uptime" => uptime(),
         b"cpus" => cpus(),
         b"diag" => diag(fs, net_client, mask, rest),
+        // Without a network service the shell's net handle is a
+        // placeholder that reaches nobody (init, `spawn_shell`).
+        b"net" | b"ping" | b"dns" | b"http" if mask & SERVICE_NET == 0 => {
+            print(b"no network service\n");
+        }
         b"net" => net(net_client),
         b"ping" => ping(net_client, rest),
         b"dns" => dns(net_client, rest),

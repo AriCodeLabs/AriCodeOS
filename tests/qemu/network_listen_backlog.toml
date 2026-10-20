@@ -15,8 +15,12 @@
 # open) and the shell's `http` would be refused with `busy`. What the
 # scenario proves: with the flood in place the shell's active open still
 # succeeds, the drop is recorded on the console and in `diag`, and `diag`
-# shows the table by state. What it cannot prove: half-open connections
-# freeing themselves (host tests) and a flood from a spoofed source.
+# shows the table by state; the socket table per owner (ADR 0037) puts
+# every socket on sshd: 6 (listener, its session, 4 backlog) or 5 when sshd
+# had not accepted its session before the cap was reached (one more SYN
+# reset, one connection fewer); nothing reclaimed. What it cannot prove:
+# half-open connections freeing themselves (host tests) and a flood from a
+# spoofed source.
 name = "network.listen_backlog"
 description = "netd caps a listener's backlog, resets and records the SYNs beyond it, and diag shows the TCP table"
 level = "full"
@@ -42,6 +46,8 @@ serial_contains = [
     "Hola desde el host",
     "tcp     8 slots: 1 listen, 0 syn-rcvd, 0 syn-sent, ",
     " SYNs reset",
+    " in use: sshd ",
+    "; 0 reclaimed from dead clients",
     "recent kernel events:",
     ": net syn dropped x1 (code 5)",
     "=== end of diagnostics ===",
@@ -58,4 +64,6 @@ serial_absent = [
     "tcp     8 slots: 1 listen, 0 syn-rcvd, 0 syn-sent, 6 backlog",
     "tcp     8 slots: 1 listen, 0 syn-rcvd, 0 syn-sent, 7 backlog",
     "0 free; ",
+    "sockets 7 in use",
+    "sockets 8 in use",
 ]

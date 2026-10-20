@@ -333,6 +333,7 @@ fn run_scenario(
                 ehci_storage: s.usb_ehci_storage,
                 ehci_companion_kbd: s.usb_ehci_companion_kbd,
             },
+            nic: !s.no_nic,
         };
         let cap = qemu::run_headless(
             &esp,
