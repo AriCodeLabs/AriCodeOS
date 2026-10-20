@@ -371,7 +371,7 @@ latter briefly to add the region.
   `handle_close`, `handle_duplicate`, `object_kind`, `object_id`,
   `object_revoke`, `endpoint_create`, `ipc_send`, `ipc_receive`,
   `process_spawn` (with handle transfer to the child), `process_wait`,
-  `irq_wait`, `mmio_map`, `region_len`, `dma_alloc`, `dma_phys`, `pci_count`,
+  `irq_wait`, `mmio_map`, `mmio_unmap` (ADR 0038), `region_len`, `dma_alloc`, `dma_phys`, `pci_count`,
   `pci_info`, `pci_claim`, `console_read`, `system_info`, `system_power`,
   `initrd_read`, `pci_info_ext`, `console_inject`, `process_spawn_from`,
   `ipc_receive_any`, `endpoint_create_pair`, `endpoint_close` (ADR 0030),
@@ -504,11 +504,35 @@ latter briefly to add the region.
     When the last handle is dropped, the line is masked and the vector freed.
   - `Mmio`: a physical device region; `mmio_map` maps it into the process
     (`0x1000_0000` onwards, uncached) and records it as foreign memory,
-    which is unmapped without being freed when the address space is destroyed.
+    which is unmapped without being freed when the address space is
+    destroyed or on `mmio_unmap`.
   - `Dma`: zeroed contiguous frames (`dma_alloc`, at most 1 MiB, requires
     `MANAGE` on a `Hardware` object); `dma_phys` gives the physical address for the
     device and `mmio_map` maps it cached. The frames go back to the PMM when
-    the object is dropped.
+    the last reference goes, and a mapping is a reference (ADR 0038,
+    incident 0004): a server that keeps a client's buffer mapped after
+    closing its handle keeps the frames allocated, so no page table ever
+    points at freed frames. `mmio_unmap(virt)` drops a mapping: entries
+    cleared, the range invalidated on every CPU (`vmm::flush_user_range`),
+    then the reference dropped. Mapping the same range again returns the
+    existing mapping. With a memory quota, the DMA bytes a process keeps
+    mapped count against it. Servers bound what they keep: the
+    compositor unmaps a window buffer with its last window, block servers
+    map a client buffer per request (`client_buffer::MappedBuffer`), arifs
+    and net-core cache 8 mappings and unmap the oldest
+    (`client_buffer::ClientBuffers`). Dropping the last mapping of a buffer
+    with no handle left is logged (`dropped the last mapping of a DMA
+    buffer it had no handle to`). `test=dma_lifetime` checks it.
+  - Driver death (ADR 0038): when a process is reaped, every PCI function
+    whose claim it held alone stops bus mastering (command bit 2) before
+    its mappings, IOMMU domain and capabilities (its DMA buffers) are
+    freed; afterwards a function that advertises FLR (PCIe Device
+    Capabilities or the Advanced Features capability) is reset, and the
+    next `pci_claim` waits out the 100 ms and restores the BARs before
+    claiming (the supervisor's restart path). Both are logged
+    (`bus mastering cleared before its memory is freed`, `function level
+    reset started`). `test=pci_reap` checks it with an `igb` that
+    advertises FLR.
 - `test=drivers`: `pit_driver` services five PIT IRQ0s (channel 0 at 100 Hz)
   and allocates, maps and verifies a DMA buffer; `fb_driver` receives the
   framebuffer as an MMIO region and paints 64x64 pixels; the kernel checks
@@ -525,7 +549,8 @@ latter briefly to add the region.
   buses from the starting one, following PCI-PCI bridges. Each function is read
   with 32-bit accesses and decoded with `aricode-pci`: vendor and device,
   class, BARs (I/O, 32- and 64-bit, prefetchable) and capability list
-  (MSI, MSI-X, PCIe, PM).
+  (MSI, MSI-X, PCIe, PM, AF); the boot line adds `FLR` for a function that
+  can be reset on its own (used when its driver dies, ADR 0038).
 - On QEMU q35: host bridge, VGA, e1000e Ethernet (MSI/MSI-X), ISA bridge,
   SATA AHCI (MSI) and SMBus. `pci.enumerate` (smoke) requires them.
 - The list is returned at boot; MSI/MSI-X programming and
@@ -958,7 +983,9 @@ latter briefly to add the region.
   (`dma_quota`, `dma_used`) and `dma_alloc` charges the size rounded up to a
   page, returning `Limit` when it is exceeded. The quota is cumulative: what was
   reserved is not returned on free (DMA buffers live as long as the
-  process).
+  process). The DMA a process keeps mapped (its own buffers and those of
+  clients) is also bounded by the quota: `mmio_map` beyond it returns
+  `Limit` (ADR 0038).
 - `initrd_read` (syscall 27) copies an initrd file to whoever holds
   `READ` on the `SPAWNER`; init reads `NAME.manifest` and `aricode-manifest`
   parses it (`name`, `caps`, `memory` in K/M, 8 MiB limit).

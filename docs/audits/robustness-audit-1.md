@@ -40,6 +40,9 @@ Recorded per finding in the commits that follow this file on the branch;
 see the section "Resolution of audit 1" in ADR 0030 and the incident
 files. B3 is run centrally by the coordinator (QEMU ports in use).
 M4 is pre-existing and tracked as incident 0004, not fixed in this branch.
+It was reproduced and fixed later on branch `fix/dma-mapping-lifetime`
+(incident 0004, ADR 0038: a mapping keeps its DMA buffer alive,
+`mmio_unmap`, bus mastering cleared and FLR on driver reap).
 
 ## Re-audit (2026-10-17)
 

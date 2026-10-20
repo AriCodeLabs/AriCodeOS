@@ -6,7 +6,7 @@ only do what its handles allow. The SDK is a set of crates under `sdk/`:
 | Crate | What it provides |
 |-------|------------------|
 | `aricode-abi` (`sdk/abi`) | syscall numbers, errors, object kinds, rights, initial handles |
-| `aricode-sys` (`sdk/rust`) | syscall wrappers and service clients: `fs`, `net`, `http`, `input`, `window`, `block`, `time`, `permissions`, `virtio_pci` |
+| `aricode-sys` (`sdk/rust`) | syscall wrappers and service clients: `fs`, `net`, `http`, `input`, `window`, `block`, `time`, `permissions`, `virtio_pci`; `client_buffer` for servers that map client DMA buffers (a mapping keeps the buffer alive until `mmio_unmap`, ADR 0038) |
 | `aricode-proto` (`sdk/proto`) | the versioned IPC protocols of every service |
 | `aricode-rt` (`sdk/runtime`) | `entry!`, a 256 KiB heap, panic handler and formatting helpers; re-exports `aricode-sys` as `sys` |
 | `aricode-build` (`sdk/build`) | one-line `build.rs` that links with `sdk/rust/user.ld` |

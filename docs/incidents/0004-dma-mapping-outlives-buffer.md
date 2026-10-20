@@ -1,7 +1,9 @@
 # Incident 0004: a CPU mapping of a DMA buffer outlives the buffer
 
-- **Opened:** 2026-10-17. **Status:** open (H1 reproduced 2026-10-20 on
-  branch `fix/dma-mapping-lifetime`).
+- **Opened:** 2026-10-17. **Status:** fixed on branch
+  `fix/dma-mapping-lifetime` (H1 reproduced 2026-10-20, fix and H2 in the
+  same branch; ADR 0038), pending audit and merge. FLR not yet exercised on
+  the reference laptop.
 - **Found by:** robustness audit 1 (`docs/audits/robustness-audit-1.md`,
   finding M4), while reviewing branch `fix/robustness-incidents`. The
   defect predates that branch; the branch does not change it and does not
@@ -110,6 +112,91 @@ another process's DMA buffer) gets memory that `dma_holder` can read and
 write. The mechanism described above is confirmed. The scenario is
 expected to fail until the fix that follows it on the same branch.
 
+## Normal operation (H1 confirmed)
+
+After the fix, the full suite shows the case outside the self-test: in
+`smp.shell_user`, `fsd` (arifs) drops the last mapping of 4 KiB buffers of
+`hello_app` runs that had already exited when its client buffer cache
+evicts them (`user: process 7 dropped the last mapping of a DMA buffer it
+had no handle to (4 KiB at 0x4a7000)`, 15 times). Before the fix those
+frames were back in the PMM from the moment each `hello_app` exited while
+fsd still mapped them; and arifs mapped past its 8 cached entries without
+recording them. H1 happens in normal operation, not only in the test.
+
+## Study and decision
+
+The options (mapping holds the buffer; revocation with a TLB shootdown on
+drop; both) were compared in ADR 0038. Chosen: **a foreign mapping of a DMA
+buffer holds a reference to it**, plus an explicit `mmio_unmap` so servers
+release what they no longer need. Revocation was rejected: the last
+reference is often dropped in `reap()` with interrupts disabled, where the
+shootdown cannot run, it needs a reverse map, and it would let a client
+make its server fault by closing a handle mid-request. The study was done
+by one agent reading the kernel, SDK and services (not three independent
+reviews as `docs/FAILURE-PROTOCOL.md` asks); the reproduction confirms the
+mechanism and the audit step remains.
+
+## Fix (commit 6acfd28)
+
+- `kernel/src/user/process.rs`: `Process::foreign` entries carry the
+  buffer's `ObjectRef`; reaping unmaps the entries and only then drops the
+  references; `unmap_foreign` (syscall `mmio_unmap`, 36, ABI 5) clears the
+  entries, invalidates the range on every CPU (`vmm::flush_user_range`)
+  and then drops the reference; `Process::dma_mapped` bounds the DMA a
+  process keeps mapped by its quota (`Limit` and a `DmaQuota` event).
+- Services: the compositor unmaps a window buffer with its last window;
+  virtio-blk, usb-input and usb-ehci map a client buffer for one request
+  (`client_buffer::MappedBuffer`); arifs and net-core share
+  `client_buffer::ClientBuffers<8>`, which unmaps the oldest mapping.
+- H2, `kernel/src/pci.rs` and `release_address_space`: before anything of
+  a dead process is freed, every PCI function whose claim it held alone
+  clears bus mastering (`stop_claims_of`); after its memory and
+  capabilities are released, an unclaimed function that advertises FLR
+  (PCIe or Advanced Features capability, `aricode_pci::flr_method`) is
+  reset (`reset_released`); the next claim waits out 100 ms and restores
+  the BARs (`finish_reset`). Logged on both steps.
+- Visibility: `dropped the last mapping of a DMA buffer it had no handle
+  to` (once per mapping), `bus mastering cleared before its memory is
+  freed`, `function level reset started`, `header restored after the
+  function level reset`.
+
+## Tests
+
+- `memory.dma_lifetime` (`test=dma_lifetime`): fails on `c6559a8` (log
+  above), passes on `6acfd28`: the frames stay allocated while mapped
+  after the last handle, return when the server is reaped and when it
+  calls `mmio_unmap` while alive, and `mmio_map` beyond a 4 KiB quota is
+  refused.
+- `drivers.pci_reap` (`test=pci_reap`, new scenario option `flr_device`
+  adds an unused `igb`, which advertises FLR): a driver dies by a fault
+  holding a claimed function and a DMA buffer kept only by its mapping.
+  The log shows the order, bus mastering first and the frames after:
+
+  ```text
+  [WARN ] user: process 2 'pci_reaped' killed: #PF read
+  [INFO ] pci: 00:04.0 driver (process 2) gone: bus mastering cleared before its memory is freed (command 0x0407 -> 0x0403)
+  [INFO ] user: process 2 dropped the last mapping of a DMA buffer it had no handle to (16 KiB at 0x377000): its frames return to the PMM now
+  [INFO ] pci: 00:04.0 function level reset started (its driver is gone)
+  [INFO ] pci: 00:04.0 header restored after the function level reset
+  [INFO ] pci: 00:04.0 8086:10c9 claimed again (the previous driver died) (MSI-X entry 0)
+  ```
+
+  The virtio-blk (no FLR) is checked the same way, and both functions are
+  claimed again with the same BARs.
+- Host tests: `aricode-pci` (FLR detection, restored header dwords),
+  `aricode-handles` (`iter`), `aricode-sys` (`ClientBuffers` bound and
+  eviction).
+- `cargo xtask check` clean; `cargo xtask test --all`: 160 QEMU scenarios,
+  0 failed (bus mastering is now also cleared in `iommu.isolation`,
+  `strict.usb_halt`, `strict.usb_hid_halt` and `strict.ehci_halt`, where a
+  driver exits); `cargo xtask test --all --cpus 4`: 160 QEMU scenarios, 0 failed.
+
 ## Open
 
-The fix (H1) and H2.
+- FLR on the reference laptop's functions runs only when a driver dies and
+  is restarted; watch the first such restart there (the log lines above,
+  then the driver's own start).
+- Pending transactions are not waited for before the FLR (bus mastering
+  is already off and `reap()` must stay bounded).
+- The audit step of the failure protocol (a review agent against this
+  incident) before merging.
