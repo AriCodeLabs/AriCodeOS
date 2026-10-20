@@ -166,11 +166,22 @@ tcp     8 slots: 1 listen, 0 syn-rcvd, 0 syn-sent, 4 backlog, 1 established, 0 c
   do; left for when it is observed.
 - The cap is per listener; a second listening service would let two
   backlogs take the whole table (ADR 0035).
-- No receive budget per round: the main loop drains every frame the NIC
-  holds (`while let Some(n) = stack.link.recv_frame(..)`) before serving
-  IPC, so a line-rate SYN flood starves the clients' requests, now at the
-  cost of a transmit attempt (the reset) per SYN too. Next step: a frame
-  budget per round (for example 32) so IPC and timeouts keep their turn.
+- Receive budget per round: fixed 2026-10-20 in `fix/net-rx-budget`
+  (ADR 0035, note). The main loop used to drain every frame the NIC held
+  (`while let Some(n) = stack.link.recv_frame(..)`) before serving IPC, so
+  a line-rate SYN flood starved the clients' requests, at the cost of a
+  transmit attempt (the reset) per SYN too. A round now receives at most
+  `aricode_net::rx::FRAMES_PER_ROUND = 32` frames (`libs/net/src/rx.rs`,
+  host-tested: the budget stops a flood and reports the frames left, a
+  quiet ring is drained silently), then serves its eight IPC requests and
+  the timers, and starts the next round at once (no interrupt wait) when
+  frames were left, recording `net rx budget hit xN` (code 0) through the
+  meter. `Link::rx_pending` (virtio: `Virtqueue::has_used`; rtl: the next
+  descriptor's `OWN` bit) says whether frames were left without taking
+  one. What a client waits under a flood is bounded to one round. No
+  scenario can send a flood through QEMU's user networking; the budget
+  decision is host-tested and `network.*`, `net.https` and `update.*`
+  keep their timings.
 - A reset is not sent when the next hop's MAC is unknown (by design, see
   above); a real first-contact peer learns of the refusal on its SYN
   retransmission, after one RTO.

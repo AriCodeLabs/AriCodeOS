@@ -21,6 +21,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 
 use aricode_net::owners::{Owned, Owner};
+use aricode_net::rx;
 use aricode_net::tcp::{self, Connection};
 use aricode_net::{arp, dhcp, dns, eth, icmp, ipv4, isn, udp, Ipv4Addr, MacAddr};
 use aricode_proto::net::{
@@ -53,6 +54,14 @@ const MAX_SESSIONS: usize = abi::IPC_MAX_ANY - 1;
 const SWEEP_MS: u64 = 1_000;
 /// The main endpoint as an owner: init, which never exits.
 const MAIN: Owner = 0;
+/// IPC requests served per round, between two rounds of reception, so a
+/// client in a loop cannot keep frames from being received. Its twin is
+/// `rx::FRAMES_PER_ROUND` (`libs/net`, incident 0013): a round receives at
+/// most 32 frames, then serves these requests and the timers, and follows
+/// at once (no interrupt wait) when frames were left in the ring, which is
+/// recorded as `net rx budget hit`. Together they bound what a client waits
+/// under a flood to one round, instead of the flood's duration.
+const IPC_REQUESTS_PER_ROUND: usize = 8;
 /// Fault event when the kernel gave fewer than `isn::SECRET_LEN` random
 /// bytes for the TCP secret (ADR 0034); its code is the number obtained.
 const TCP_SECRET_FAULT: &str = "net tcp secret degraded";
@@ -106,10 +115,15 @@ enum Fault {
     /// without closing (incident 0016): the count is the number of sockets.
     /// Nobody was refused (code 0).
     Reclaimed = 12,
+    /// A round of reception spent `rx::FRAMES_PER_ROUND` frames with more
+    /// in the ring (incident 0013): the clients' requests took their turn
+    /// and reception went on at once. Nobody was refused (code 0); the
+    /// count is the number of such rounds in that second.
+    RxBudget = 13,
 }
 
 impl Fault {
-    const COUNT: usize = 13;
+    const COUNT: usize = 14;
     const ALL: [Fault; Self::COUNT] = [
         Fault::TcpTableFull,
         Fault::ArpDeferFull,
@@ -124,6 +138,7 @@ impl Fault {
         Fault::SynDropped,
         Fault::SessionsFull,
         Fault::Reclaimed,
+        Fault::RxBudget,
     ];
 
     fn from_index(i: usize) -> Option<Self> {
@@ -148,6 +163,7 @@ impl Fault {
             // "sockets" would not leave room for the count in the kernel's
             // 24-byte event name.
             Fault::Reclaimed => "net socks reclaimed",
+            Fault::RxBudget => "net rx budget hit",
         }
     }
 
@@ -158,7 +174,7 @@ impl Fault {
         match self {
             Fault::BadRequest => Status::Invalid,
             Fault::BadHandles => Status::BadHandles,
-            Fault::Reclaimed => Status::Ok,
+            Fault::Reclaimed | Fault::RxBudget => Status::Ok,
             _ => Status::Busy,
         }
     }
@@ -182,6 +198,9 @@ pub trait Link {
     fn send_frame(&mut self, frame: &[u8]) -> bool;
     /// Next received frame copied into `out`, or `None` if there is none.
     fn recv_frame(&mut self, out: &mut [u8; MAX_FRAME]) -> Option<usize>;
+    /// Whether the ring holds a frame `recv_frame` would return, without
+    /// taking it: what a round that spent its budget leaves behind.
+    fn rx_pending(&self) -> bool;
     /// Physical link up, down or unknown (`None`).
     fn link_up(&self) -> Option<bool>;
 }
@@ -1903,9 +1922,10 @@ fn answer_with(reply_to: Handle, reply: Reply, handle: Handle) {
     let _ = sys::handle_close(reply_to);
 }
 
-/// Announces the MAC and serves requests forever: frame reception,
-/// up to eight IPC requests per round (from the main endpoint and every
-/// session together), timeouts and waiting for the IRQ.
+/// Announces the MAC and serves requests forever: frame reception (up to
+/// `rx::FRAMES_PER_ROUND` frames), up to `IPC_REQUESTS_PER_ROUND` IPC
+/// requests (from the main endpoint and every session together), timeouts
+/// and waiting for the IRQ unless frames were left in the ring.
 pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
     let mut hex = [0u8; 16];
     sys::print(name.as_bytes());
@@ -1925,8 +1945,18 @@ pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
     loop {
         let now = stack.clock.now();
         stack.dhcp_step(now);
-        while let Some(n) = stack.link.recv_frame(&mut frame) {
-            stack.on_frame(&frame[..n], now);
+        // Reception is bounded per round (incident 0013): a flood cannot
+        // keep the requests and the timers below from their turn.
+        let round = rx::receive_round(
+            rx::FRAMES_PER_ROUND,
+            &mut stack,
+            &mut frame,
+            |s, f| s.link.recv_frame(f),
+            |s, f, n| s.on_frame(&f[..n], now),
+            |s| s.link.rx_pending(),
+        );
+        if round.left_over {
+            stack.note(Fault::RxBudget, now);
         }
         // Once a second the kernel is asked about every client (ADR 0037).
         if now.saturating_sub(stack.last_sweep) >= SWEEP_MS {
@@ -1951,7 +1981,7 @@ pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
                 count += 1;
             }
         }
-        for _ in 0..8 {
+        for _ in 0..IPC_REQUESTS_PER_ROUND {
             let (which, n, nh) =
                 match sys::ipc_receive_any(&eps[..count], &mut msg, &mut handles, 0) {
                     Ok(r) => r,
@@ -1971,6 +2001,10 @@ pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
         stack.expire(now);
         stack.tcp_expire(now);
         stack.tcp_poll(now);
-        let _ = sys::irq_wait(IRQ, 10);
+        // Frames left behind are received by the next round at once; a
+        // quiet ring waits for the interrupt (or 10 ms, for the timers).
+        if !round.left_over {
+            let _ = sys::irq_wait(IRQ, 10);
+        }
     }
 }

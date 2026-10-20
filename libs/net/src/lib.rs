@@ -17,6 +17,7 @@ pub mod icmp;
 pub mod ipv4;
 pub mod isn;
 pub mod owners;
+pub mod rx;
 pub mod tcp;
 pub mod udp;
 
