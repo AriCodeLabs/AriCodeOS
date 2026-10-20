@@ -1,7 +1,7 @@
 # Incident 0004: a CPU mapping of a DMA buffer outlives the buffer
 
-- **Opened:** 2026-10-17. **Status:** open (found by review, not yet
-  reproduced).
+- **Opened:** 2026-10-17. **Status:** open (H1 reproduced 2026-10-20 on
+  branch `fix/dma-mapping-lifetime`).
 - **Found by:** robustness audit 1 (`docs/audits/robustness-audit-1.md`,
   finding M4), while reviewing branch `fix/robustness-incidents`. The
   defect predates that branch; the branch does not change it and does not
@@ -70,6 +70,46 @@
 4. **Regression.** The reproduction above becomes a scenario that fails
    before the fix and passes after.
 
+## Reproduction (2026-10-20)
+
+H1 is reproduced by the kernel self-test `test=dma_lifetime` (scenario
+`memory.dma_lifetime`, `tests/qemu/memory_dma_lifetime.toml`) with the test
+program `dma_holder`:
+
+1. The kernel allocates a 16 KiB DMA buffer (the "client") and hands a
+   `READ|WRITE` handle to `dma_holder` (the "server").
+2. `dma_holder` maps it (`mmio_map`), closes its handle and writes a magic
+   word into it, exactly like the compositor with a window buffer; then it
+   sleeps with the mapping in place.
+3. The kernel sees the magic word through the physical map and drops its
+   own reference: the client's last handle is gone.
+4. The debug check reads the server's page tables back through
+   `Process::foreign` and asks the PMM bitmap about every mapped frame.
+
+Run on the code of `develop` at `f1cc426` (release 0.12.0) plus the test
+alone, `cargo xtask test --level full --area memory`, 1 CPU, QEMU q35 with
+the emulated IOMMU (`build/scenarios/memory.dma_lifetime/serial.log`):
+
+```text
+[INFO ] requested test: dma_lifetime
+[INFO ] user: process 1 'dma_holder' created (1 segments, 4 KiB, entry 0x400000, thread Tid(3))
+============================
+ARICODEOS KERNEL PANIC
+============================
+Where: kernel/src/user/process.rs:630:9
+Reason: dma lifetime: process 1 still maps 4 of 4 DMA frame(s) the PMM considers free (incident 0004)
+CPU: 0
+============================
+[xtask] 13 QEMU scenarios, 1 failed
+xtask: failed scenarios: memory.dma_lifetime
+```
+
+All four frames of the buffer are free in the PMM while the server still
+maps them writable: any later allocation (a page table, the kernel heap,
+another process's DMA buffer) gets memory that `dma_holder` can read and
+write. The mechanism described above is confirmed. The scenario is
+expected to fail until the fix that follows it on the same branch.
+
 ## Open
 
-Everything: no reproduction yet. Not fixed in `fix/robustness-incidents`.
+The fix (H1) and H2.

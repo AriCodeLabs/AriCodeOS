@@ -553,6 +553,108 @@ pub fn reap_selftest() {
     );
 }
 
+/// Physical pages a process maps through its foreign (MMIO/DMA) entries,
+/// read back from its page tables (`test=dma_lifetime`).
+fn foreign_pages(pid: Pid) -> Vec<u64> {
+    let procs = PROCESSES.lock();
+    let Some(p) = procs.get(&pid) else {
+        return Vec::new();
+    };
+    let Some(m) = p.mapper.as_ref() else {
+        return Vec::new();
+    };
+    let mut pages = Vec::new();
+    for &(virt, _, span) in &p.foreign {
+        for page in (virt..virt + span).step_by(PAGE_SIZE as usize) {
+            if let Some((phys, _)) = m.translate(page) {
+                pages.push(phys & !(PAGE_SIZE - 1));
+            }
+        }
+    }
+    pages
+}
+
+/// Word `dma_holder` writes once it has mapped the buffer and closed its
+/// handle (must match `MAGIC` in `user/testprogs/src/bin/dma_holder.rs`).
+const DMA_HOLDER_MAGIC: u64 = 0xD3A0_11FE_71E0_0004;
+
+/// Self-test (`test=dma_lifetime`, incident 0004): a server keeps a CPU
+/// mapping of a client's DMA buffer after closing its handle (as the
+/// compositor does with window buffers); when the client drops the buffer
+/// too, no frame the server still maps may be free in the PMM. Once the
+/// server is gone, the frames must be back in the PMM.
+pub fn dma_lifetime_selftest() {
+    use crate::object::ObjectKind;
+    use crate::user::programs;
+    use aricode_handles::Rights;
+
+    const LEN: u64 = 16 * 1024;
+    let dma = crate::hw::dma_alloc(LEN).expect("DMA buffer");
+    let phys = match &dma.kind {
+        ObjectKind::Dma(d) => d.region.phys,
+        _ => unreachable!(),
+    };
+    let pid = spawn_with_handles(
+        "dma_holder",
+        programs::by_name("dma_holder").expect("dma_holder in the initrd"),
+        alloc::vec![(dma.clone(), Rights::READ.union(Rights::WRITE))],
+    )
+    .expect("dma_holder");
+    let word = phys::phys_to_virt(phys) as *const u64;
+    let mut waited_ms = 0;
+    // SAFETY: the buffer is alive (the kernel holds a reference) and
+    // reachable through the physical map.
+    while unsafe { word.read_volatile() } != DMA_HOLDER_MAGIC {
+        assert!(
+            waited_ms < 10_000 && !exited(pid),
+            "dma lifetime: dma_holder did not map the buffer ({:?})",
+            PROCESSES.lock().get(&pid).and_then(|p| p.status)
+        );
+        scheduler::sleep_ms(10);
+        waited_ms += 10;
+    }
+    // The client's last handle goes: only the server's mapping remains.
+    drop(dma);
+    let pages = foreign_pages(pid);
+    assert!(
+        pages.contains(&phys),
+        "dma lifetime: the server must still map the buffer"
+    );
+    let free = pmm::with(|p| {
+        pages
+            .iter()
+            .filter(|&&a| p.is_free(Frame::from_addr(a)))
+            .count()
+    });
+    if free != 0 {
+        panic!(
+            "dma lifetime: process {} still maps {free} of {} DMA frame(s) the PMM considers free (incident 0004)",
+            pid.0,
+            pages.len()
+        );
+    }
+    assert!(request_kill(pid), "dma_holder must still exist");
+    assert_eq!(wait(pid), ExitStatus::Killed(KILLED_BY_SUPERVISOR));
+    let back = pmm::with(|p| {
+        (0..LEN / PAGE_SIZE).all(|i| p.is_free(Frame::from_addr(phys + i * PAGE_SIZE)))
+    });
+    assert!(
+        back,
+        "dma lifetime: the frames must return to the PMM once the last mapping is gone"
+    );
+    info!(
+        "dma lifetime selftest ok ({} frame(s) kept by the mapping after the last handle, freed when the server was reaped)",
+        pages.len()
+    );
+}
+
+fn exited(pid: Pid) -> bool {
+    PROCESSES
+        .lock()
+        .get(&pid)
+        .is_none_or(|p| p.status.is_some())
+}
+
 /// Charges `len` bytes of DMA to the current process's quota; `false` if it
 /// would exceed it (the quota is cumulative: allocations are not refunded).
 pub fn charge_dma(len: u64) -> bool {
