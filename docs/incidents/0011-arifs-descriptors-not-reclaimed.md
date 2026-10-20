@@ -166,9 +166,9 @@ branch:
   restart budget and closes what it opens, so a crash mid-read costs at
   most one descriptor per restart. Not worth a lease, which could not tell
   a leaked descriptor from a live one (ADR 0036, options).
-- netd has the same shape of problem with sockets (incident 0012, open
-  item); the same mechanism (per-client sessions and a liveness probe)
-  applies.
+- netd had the same shape of problem with sockets (incident 0012, open
+  item): incident 0016, fixed with the same mechanism (per-client sessions
+  and a liveness probe, ADR 0037).
 
 ## Closure (2026-10-20)
 

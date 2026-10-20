@@ -696,6 +696,51 @@ fn tcp_table(client: &NetClient) {
     print(b"; ");
     num(t.syn_dropped as u64);
     print(b" SYNs reset\n");
+    sockets(client);
+}
+
+/// One line with the service's socket tables per owner (ADR 0037):
+/// `sockets 3 in use: sshd 2, shell 1; 16 reclaimed from dead clients`.
+/// Every socket and wait (TCP, UDP, ping, DNS) counts for the client
+/// session that created it (`main` is init); a connection whose client
+/// closed it and then died is in use but nobody's until TIME-WAIT ends.
+/// "reclaimed" counts the sockets netd closed on behalf of dead clients
+/// since it started (`net socks reclaimed` events).
+fn sockets(client: &NetClient) {
+    print(b"sockets ");
+    let mut label = [0u8; aricode_proto::net::MAX_LABEL];
+    let mut slot = 0u16;
+    let mut first = true;
+    let mut listed = 0;
+    let mut reclaimed = 0;
+    loop {
+        match client.sockets(slot, &mut label) {
+            Ok(Some((usage, n))) => {
+                if first {
+                    num(usage.used as u64);
+                    print(b" in use");
+                    if usage.used > 0 {
+                        print(b":");
+                    }
+                    reclaimed = usage.reclaimed;
+                    first = false;
+                }
+                if usage.owned > 0 {
+                    print(if listed == 0 { b" ".as_slice() } else { b", " });
+                    print(&label[..n]);
+                    print(b" ");
+                    num(usage.owned as u64);
+                    listed += 1;
+                }
+            }
+            Ok(None) => break,
+            Err(e) => return net_error(e),
+        }
+        slot += 1;
+    }
+    print(b"; ");
+    num(reclaimed as u64);
+    print(b" reclaimed from dead clients\n");
 }
 
 fn ping(client: &NetClient, arg: &[u8]) {

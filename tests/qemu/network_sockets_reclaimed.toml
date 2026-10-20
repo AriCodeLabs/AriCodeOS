@@ -1,0 +1,48 @@
+# Incident 0016 (ADR 0037): a client that exits with sockets open must not
+# block the network service for everybody else. `sock_leaker` (manifest
+# `caps = net`) fills netd's 8-slot UDP table and its 8-slot TCP table
+# through its own session (the ninth of each is refused and recorded) and
+# exits without closing; netd, finding the TCP table full at the shell's
+# `http`, asks the kernel about its sessions, learns the leaker's send side
+# is gone (PeerClosed, ADR 0030), resets its connections, frees its sockets
+# and records the fault. `http` then connects, and `diag` shows the events
+# and the socket line with the reclaim. No selftest: the boot clients would
+# otherwise leave connections of their own in the table.
+name = "network.sockets_reclaimed"
+description = "netd closes the sockets of a client that died holding them; the next connection and diag work"
+level = "full"
+areas = ["network", "apps", "diag", "shell"]
+selftest = false
+cmdline = "qemu_exit shell"
+timeout_secs = 90
+stdin = ["run sock_leaker", "http http://10.0.2.2:17010/hola", "diag", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: launch sock_leaker with manifest [net] memory 64 KiB",
+    "virtio-net: fault net udp table full x1",
+    "virtio-net: fault net tcp table full x1",
+    "sock_leaker: holding 8 udp sockets and 8 tcp connections; the next of each was refused (busy); exiting without closing any",
+    "run: sock_leaker exited with 0",
+    "virtio-net: client gone ('sock_leaker'), 16 socket(s) left open: reclaimed",
+    "virtio-net: fault net socks reclaimed x16",
+    "HTTP 200, 19 bytes",
+    "Hola desde el host",
+    "tcp     8 slots: ",
+    "; 16 reclaimed from dead clients",
+    "recent kernel events:",
+    ": net udp table full x1 (code 5)",
+    ": net tcp table full x1 (code 5)",
+    ": net socks reclaimed x16 (code 0)",
+    "=== end of diagnostics ===",
+    "ARICODEOS_SHUTDOWN",
+]
+# The only refusals are the leaker's own ninth bind and ninth connect; the
+# shell's connection is never refused.
+serial_absent = [
+    "KERNEL PANIC",
+    "http: could not connect",
+    "network service refused",
+    "sock_leaker: holding 8 udp sockets and 8 tcp connections; the next of each was not refused",
+]

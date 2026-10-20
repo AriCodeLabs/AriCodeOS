@@ -430,6 +430,9 @@ pub mod net {
     /// scenario's test CA, and an untrusted self-signed one.
     pub const TEST_HTTPS_PORT: u16 = 17443;
     pub const TEST_HTTPS_UNTRUSTED_PORT: u16 = 17444;
+    /// Longest label of a client session (`Op::Attach`): the bound the
+    /// kernel gives process names, which is what the label is.
+    pub const MAX_LABEL: usize = 24;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Op {
@@ -469,10 +472,22 @@ pub mod net {
         /// TCP table by state: `Reply::data` = [`TcpStats`] (incident 0013).
         /// Works without DHCP configuration.
         TcpStats = 15,
+        /// Main endpoint only (init, the broker): a session for one client
+        /// labelled `Request::label` (ADR 0037). The reply carries the send
+        /// side of a new endpoint; the sockets opened through it belong to
+        /// that client and are released when the kernel reports it gone.
+        /// `Invalid` from a session, `Busy` when every session slot is taken.
+        Attach = 16,
+        /// Socket table usage of owner slot `sock` (0 = main endpoint,
+        /// `1..` = sessions): `Reply::value` = [`OwnerSockets`] packed,
+        /// `Reply::label` = the owner's label (empty for a free slot).
+        /// `NotFound` past the last slot. Works without DHCP configuration.
+        Sockets = 17,
     }
 
     /// Request (64 bytes). DNS names do not travel in the message: they go through
-    /// the client buffer, without an artificial limit.
+    /// the client buffer, without an artificial limit. The label of an
+    /// `Attach` does (bytes 20..45): it is a process name, bounded like one.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Request {
         pub op: Op,
@@ -482,6 +497,8 @@ pub mod net {
         pub addr: [u8; 4],
         pub timeout_ms: u32,
         pub id: u16,
+        pub label: [u8; MAX_LABEL],
+        pub label_len: u8,
     }
 
     impl Request {
@@ -496,7 +513,24 @@ pub mod net {
                 addr: [0; 4],
                 timeout_ms: 0,
                 id: 0,
+                label: [0; MAX_LABEL],
+                label_len: 0,
             }
+        }
+
+        /// With the client label of an `Attach`; `None` if it does not fit
+        /// (a label is never cut here: the caller decides what to send).
+        pub fn with_label(mut self, label: &str) -> Option<Self> {
+            if label.len() > MAX_LABEL {
+                return None;
+            }
+            self.label[..label.len()].copy_from_slice(label.as_bytes());
+            self.label_len = label.len() as u8;
+            Some(self)
+        }
+
+        pub fn label_str(&self) -> &str {
+            core::str::from_utf8(&self.label[..self.label_len as usize]).unwrap_or("")
         }
 
         pub fn encode(&self) -> [u8; Self::LEN] {
@@ -510,6 +544,8 @@ pub mod net {
             b[10..14].copy_from_slice(&self.addr);
             b[14..18].copy_from_slice(&self.timeout_ms.to_le_bytes());
             b[18..20].copy_from_slice(&self.id.to_le_bytes());
+            b[20..20 + MAX_LABEL].copy_from_slice(&self.label);
+            b[20 + MAX_LABEL] = self.label_len;
             b
         }
 
@@ -533,10 +569,18 @@ pub mod net {
                 13 => Op::TcpClose,
                 14 => Op::Link,
                 15 => Op::TcpStats,
+                16 => Op::Attach,
+                17 => Op::Sockets,
                 _ => return None,
             };
             let mut addr = [0u8; 4];
             addr.copy_from_slice(&b[10..14]);
+            let mut label = [0u8; MAX_LABEL];
+            label.copy_from_slice(&b[20..20 + MAX_LABEL]);
+            let label_len = b[20 + MAX_LABEL];
+            if label_len as usize > MAX_LABEL {
+                return None;
+            }
             Some(Self {
                 op,
                 sock: u16::from_le_bytes(b[4..6].try_into().ok()?),
@@ -545,6 +589,8 @@ pub mod net {
                 addr,
                 timeout_ms: u32::from_le_bytes(b[14..18].try_into().ok()?),
                 id: u16::from_le_bytes(b[18..20].try_into().ok()?),
+                label,
+                label_len,
             })
         }
     }
@@ -609,6 +655,19 @@ pub mod net {
             let mut a = [0u8; 4];
             a.copy_from_slice(&self.data[..4]);
             a
+        }
+
+        /// An owner's label (`Op::Sockets`): in `data`, its length in `port`.
+        pub fn with_label(mut self, label: &str) -> Self {
+            let n = label.len().min(self.data.len());
+            self.data[..n].copy_from_slice(&label.as_bytes()[..n]);
+            self.port = n as u16;
+            self
+        }
+
+        pub fn label_str(&self) -> &str {
+            let n = (self.port as usize).min(self.data.len());
+            core::str::from_utf8(&self.data[..n]).unwrap_or("")
         }
 
         pub fn encode(&self) -> [u8; Self::LEN] {
@@ -728,6 +787,37 @@ pub mod net {
                 time_wait: u(7),
                 free: u(8),
                 syn_dropped: u32::from_le_bytes([d[18], d[19], d[20], d[21]]),
+            }
+        }
+    }
+
+    /// Socket table usage as `Op::Sockets` reports it for one owner slot
+    /// (ADR 0037): the sockets and waits (TCP, UDP, ping, DNS together)
+    /// that owner holds, what everybody holds, how many the service has
+    /// released from dead clients since it started and how many client
+    /// sessions are live. Four 16-bit counts in `Reply::value`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct OwnerSockets {
+        pub owned: u16,
+        pub used: u16,
+        pub reclaimed: u16,
+        pub sessions: u16,
+    }
+
+    impl OwnerSockets {
+        pub fn encode(&self) -> u64 {
+            self.owned as u64
+                | (self.used as u64) << 16
+                | (self.reclaimed as u64) << 32
+                | (self.sessions as u64) << 48
+        }
+
+        pub fn decode(v: u64) -> Self {
+            Self {
+                owned: v as u16,
+                used: (v >> 16) as u16,
+                reclaimed: (v >> 32) as u16,
+                sessions: (v >> 48) as u16,
             }
         }
     }
@@ -1439,6 +1529,37 @@ mod tests {
         };
         assert_eq!(TcpStats::decode(&table.encode()), table);
         assert_eq!(TcpStats::decode(&[0; 24]), TcpStats::default());
+        // ADR 0037: a session for a labelled client and the table per owner.
+        let attach = Request::new(Op::Attach).with_label("sock_leaker").unwrap();
+        let d = Request::decode(&attach.encode()).unwrap();
+        assert_eq!(d, attach);
+        assert_eq!(d.label_str(), "sock_leaker");
+        assert_eq!(
+            Request::new(Op::Attach).with_label("a name longer than the process name bound"),
+            None
+        );
+        let mut bad_label = attach.encode();
+        bad_label[20 + MAX_LABEL] = MAX_LABEL as u8 + 1;
+        assert!(Request::decode(&bad_label).is_none());
+        assert_eq!(
+            Request::decode(&Request::new(Op::Sockets).encode())
+                .unwrap()
+                .op,
+            Op::Sockets
+        );
+        let usage = OwnerSockets {
+            owned: 3,
+            used: 16,
+            reclaimed: 65535,
+            sessions: 15,
+        };
+        assert_eq!(OwnerSockets::decode(usage.encode()), usage);
+        assert_eq!(OwnerSockets::decode(0), OwnerSockets::default());
+        let labelled = Reply::ok(usage.encode()).with_label("shell");
+        let back = Reply::decode(&labelled.encode()).unwrap();
+        assert_eq!(OwnerSockets::decode(back.value), usage);
+        assert_eq!(back.label_str(), "shell");
+        assert_eq!(Reply::ok(0).label_str(), "");
         let mut bad = r.encode();
         bad[2] = 99;
         assert!(Request::decode(&bad).is_none());

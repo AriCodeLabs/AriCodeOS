@@ -700,8 +700,9 @@ latter briefly to add the region.
   with init; after the BARs come the driver's extras (`extra_handle`).
   virtio-blk was reduced to its request logic.
 - `netd` is single-threaded: on each iteration it drains the receive queue,
-  serves up to 8 IPC requests with timeout 0, expires deadlines and waits for the
-  IRQ for up to 10 ms. Operations that wait on the network (ping, `UdpRecv`,
+  serves up to 8 IPC requests with timeout 0 (from its main endpoint and
+  every client session together, `ipc_receive_any`), expires deadlines and
+  waits for the IRQ for up to 10 ms. Operations that wait on the network (ping, `UdpRecv`,
   `Dns`) keep the client's reply endpoint and answer when
   the packet arrives or the deadline expires; frames whose next hop is not
   in the ARP cache are parked until the ARP reply (1 s).
@@ -791,9 +792,11 @@ latter briefly to add the region.
   frame dropped after 1 s), `net ping table full`, `net dns table full`,
   `net udp table full`, `net wait pending` (a second `recv`/`accept` on a
   socket that already waits), `net bad request` (`Status::Invalid`), `net
-  bad handles` (`Status::BadHandles`) and `net syn dropped` (a SYN to a
+  bad handles` (`Status::BadHandles`), `net syn dropped` (a SYN to a
   listener refused with a reset: no free slot or the listener's backlog at
-  its cap, ADR 0035). `aricode_faults::Meter` (`libs/faults`, shared with fsd)
+  its cap, ADR 0035), `net sessions full` (an `Attach` with every session
+  slot taken) and `net socks reclaimed` (sockets closed on behalf of a dead
+  client, code 0, ADR 0037). `aricode_faults::Meter` (`libs/faults`, shared with fsd)
   bounds the rate: at most one event per kind per second; the refusals
   held back in between are counted and recorded when their second ends
   (`drain_due` from `expire`). The event name is `<kind> x<count>` (count
@@ -988,6 +991,18 @@ latter briefly to add the region.
   per owner and `diag` prints it under `files` (`descriptors 3/16 open, 16
   reclaimed from dead clients: main 1, root 2`); scenario
   `filesystem.descriptors_reclaimed` (`run fd_leaker`, incident 0011).
+- netd serves sessions the same way (ADR 0037, incident 0016): init asks
+  `Op::Attach` (16) with the process name as label for the console and SSH
+  shells, each sshd generation and every launch with `caps = net`; every
+  TCP, UDP, ping and DNS entry belongs to the session that created it
+  (`aricode_net::owners::Owned`, host-tested), a request only reaches its
+  own sockets (`BadSock` otherwise), and a retired session has its live
+  connections reset, its listener freed with its backlog and its waits
+  dropped, with `net socks reclaimed xN` recorded. The sweep runs once a
+  second, whenever a table is full and before answering `InUse` for a port
+  another owner holds. `Op::Sockets` (17) reports the tables per owner and
+  `net`/`diag` print `sockets 3 in use: sshd 2, shell 1; 16 reclaimed from
+  dead clients`; scenario `network.sockets_reclaimed` (`run sock_leaker`).
   From a private one, `Open`/`Create` qualify the name as
   `prefix/name` (rejecting `/` in the name) and `List` filters and strips
   the prefix. From a shared file, `List` shows only that file,
@@ -1365,7 +1380,9 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   service.
 - `fsd` identifies a client by the endpoint its requests arrive on (its
   session, ADR 0036); processes that share the main endpoint (init, sshd)
-  are one owner, and their descriptors are released only by `Close`.
+  are one owner, and their descriptors are released only by `Close`. netd
+  does the same (ADR 0037): init and the boot test clients share its main
+  endpoint, and a session dies with the netd generation that created it.
 
 - The block service maps each client DMA buffer once and
   reuses it by physical address; there is no `mmio_unmap` or block cache.

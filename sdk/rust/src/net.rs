@@ -3,7 +3,9 @@
 //! Network service client (`aricode-proto::net`).
 
 use crate::{self as sys, rights, rpc, Error, Handle};
-use aricode_proto::net::{Info, Op, Reply, Request, Status, TcpStats, MAX_DATAGRAM};
+use aricode_proto::net::{
+    Info, Op, OwnerSockets, Reply, Request, Status, TcpStats, MAX_DATAGRAM, MAX_LABEL,
+};
 
 /// How long `tcp_send_all` waits in all for room in a full send buffer.
 pub const SEND_IDLE_TIMEOUT_MS: u32 = 5_000;
@@ -47,6 +49,45 @@ impl NetError {
                 }
                 Status::InUse => "network service refused: port in use",
             },
+        }
+    }
+}
+
+/// Init and the broker only: asks the network service, through its main
+/// endpoint, for a session for the client called `label` (ADR 0037) and
+/// returns the received handle (`WRITE`, transferable). The sockets the
+/// process opens through it are released when it dies. A label longer than
+/// `MAX_LABEL` is cut at a character boundary, as the kernel cuts process
+/// names. No buffer is needed, so no `NetClient` is.
+pub fn attach(service: Handle, label: &str) -> Result<Handle, NetError> {
+    let mut cut = label.len().min(MAX_LABEL);
+    while !label.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let req = Request::new(Op::Attach)
+        .with_label(&label[..cut])
+        .ok_or(NetError::Status(Status::Invalid))?;
+    let mut msg = [0u8; Reply::LEN];
+    let mut handles = [Handle(0); 1];
+    let (len, nh) = rpc::call_handles(
+        service,
+        &req.encode(),
+        &[],
+        rpc::GRACE_MS,
+        rpc::GRACE_MS,
+        &mut msg,
+        &mut handles,
+    )
+    .map_err(NetError::Ipc)?;
+    let reply = Reply::decode(&msg[..len]).ok_or(NetError::Ipc(Error::Invalid))?;
+    match (reply.status, nh) {
+        (Status::Ok, 1) => Ok(handles[0]),
+        (Status::Ok, _) => Err(NetError::Ipc(Error::Invalid)),
+        (s, _) => {
+            for h in &handles[..nh] {
+                let _ = sys::handle_close(*h);
+            }
+            Err(NetError::Status(s))
         }
     }
 }
@@ -115,6 +156,26 @@ impl NetClient {
     pub fn tcp_stats(&self) -> Result<TcpStats, NetError> {
         self.call(Request::new(Op::TcpStats), false)
             .map(|r| TcpStats::decode(&r.data))
+    }
+
+    /// Socket table usage of owner slot `index` (ADR 0037): the counts and
+    /// the owner's label in `label_out`. `None` past the last slot.
+    pub fn sockets(
+        &self,
+        index: u16,
+        label_out: &mut [u8; MAX_LABEL],
+    ) -> Result<Option<(OwnerSockets, usize)>, NetError> {
+        let mut req = Request::new(Op::Sockets);
+        req.sock = index;
+        match self.call(req, false) {
+            Ok(r) => {
+                let label = r.label_str();
+                label_out[..label.len()].copy_from_slice(label.as_bytes());
+                Ok(Some((OwnerSockets::decode(r.value), label.len())))
+            }
+            Err(NetError::Status(Status::NotFound)) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// ICMP echo; returns the RTT in ms.

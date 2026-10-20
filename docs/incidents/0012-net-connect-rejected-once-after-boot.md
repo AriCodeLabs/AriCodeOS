@@ -189,8 +189,10 @@ any scenario, HTTPS and update downloads included.
 ## Open
 
 - The one-off itself: `Busy` or `Reset` is unknown. Next occurrence tells.
-- netd does not reclaim the sockets of a client that exits without
-  closing them (as arifs with descriptors, incident 0011).
+- netd did not reclaim the sockets of a client that exits without
+  closing them (as arifs with descriptors, incident 0011): incident 0016,
+  fixed by ADR 0037 (per-client sessions; `net socks reclaimed` events and
+  the `sockets` line of `diag`). Candidate 1 can now be read on the machine.
 - Ephemeral ports and ISNs restarted from fixed values at every boot:
   incident 0014 (security), fixed by ADR 0034 (per-boot secret from the
   kernel's entropy, RFC 6528 ISNs, RFC 6056 ports). Candidate 4 goes from
