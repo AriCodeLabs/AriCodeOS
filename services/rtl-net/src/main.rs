@@ -12,7 +12,7 @@
 use ari_net_core::{run, say, Clock, Link, MAX_FRAME};
 use aricode_net::MacAddr;
 use aricode_rt::sys;
-use aricode_rt::sys::virtio_pci::{bar_handle, extra_handle, DmaRegion, Mmio, IRQ};
+use aricode_rt::sys::virtio_pci::{bar_handle, extra_handle, DmaRegion, Mmio, CFG, IRQ};
 use aricode_rtl8169::{ack_interrupts, link_state, reg, rx_take, Desc, Regs, TX_POLL_NPQ};
 
 const NAME: &str = "rtl-net";
@@ -97,6 +97,9 @@ impl Nic {
         }) {
             return Err(exit::RESET);
         }
+        // The chip is reset (receiver and transmitter off, rings
+        // forgotten): only now may it reach memory (ADR 0038).
+        sys::pci::enable_bus_master(CFG).map_err(|_| exit::RESET)?;
         let mac = MacAddr(aricode_rtl8169::mac(&regs));
         let nic = Self {
             regs,

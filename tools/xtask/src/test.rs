@@ -380,6 +380,12 @@ fn run_scenario(
                 problems.push(format!("{prefix}unexpected '{needle}'"));
             }
         }
+        if let Some(i) = scenario::first_out_of_order(&cap.serial, &expect.serial_order) {
+            problems.push(format!(
+                "{prefix}'{}' not found after the texts before it in serial_order",
+                expect.serial_order[i]
+            ));
+        }
         if cap.timed_out {
             problems.push(format!("{prefix}timeout {}s", s.timeout_secs));
         }

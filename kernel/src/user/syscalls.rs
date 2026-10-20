@@ -705,21 +705,29 @@ fn mmio_map(h: Handle) -> Result<u64, Error> {
             _ => Err(Error::Invalid),
         }
     })?;
-    let is_dma = dma.is_some();
-    let virt = process::map_foreign(phys, len, cacheable, dma)?;
+    // The buffer stays referenced here until the IOMMU has it, whatever
+    // happens to the handle meanwhile (ADR 0038).
+    let held = dma.clone();
+    let (virt, created) = process::map_foreign(phys, len, cacheable, dma)?;
     // IOMMU (Phase 33): mapping a device assigns it to the process's
     // domain; mapping a foreign DMA buffer makes it visible to its devices.
     if let Some(pid) = process::current_pid() {
         let r = match source_id {
             Some(sid) => crate::iommu::attach(pid.0, sid),
-            None if is_dma => crate::iommu::map_region(pid.0, phys, len),
+            None if held.is_some() => crate::iommu::map_region(pid.0, phys, len),
             None => Ok(()),
         };
         if let Err(e) = r {
             warn!("mmio_map: {e}");
+            // The caller never learns the address: a mapping made by this
+            // call goes again (with its reference and quota charge).
+            if created {
+                let _ = process::unmap_foreign(virt);
+            }
             return Err(Error::Limit);
         }
     }
+    drop(held);
     Ok(virt)
 }
 

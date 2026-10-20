@@ -257,9 +257,13 @@ mod tests {
         let a = t.insert(1, Rights::READ).unwrap();
         t.insert(2, Rights::WRITE).unwrap();
         t.insert(3, Rights::READ).unwrap();
+        t.insert(4, Rights::MANAGE).unwrap();
         t.remove(a).unwrap();
         let live: Vec<(u32, Rights)> = t.iter().map(|(o, r)| (*o, r)).collect();
-        assert_eq!(live, [(2, Rights::WRITE), (3, Rights::READ)]);
+        assert_eq!(
+            live,
+            [(2, Rights::WRITE), (3, Rights::READ), (4, Rights::MANAGE)]
+        );
     }
 
     #[test]

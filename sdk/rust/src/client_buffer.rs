@@ -2,36 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Client DMA buffers mapped into a server (ADR 0038). A mapping keeps the
 //! buffer allocated even after every handle to it is closed, so a server
-//! must not keep mappings it no longer needs: either one request at a time
-//! ([`MappedBuffer`], unmapped on drop) or a bounded cache
-//! ([`ClientBuffers`], the oldest mapping is unmapped to make room).
+//! must not keep mappings it no longer needs: [`ClientBuffers`] keeps at
+//! most `N` and unmaps the oldest to make room. The kernel reuses the
+//! addresses of an unmapped range, so a cache that misses often costs a
+//! map and an unmap per request, not page tables.
 
 use crate::{self as sys, Handle};
-
-/// A client buffer mapped for one request; unmapped when dropped. Do not
-/// map the same buffer through a [`ClientBuffers`] in the same process:
-/// the kernel returns the same mapping and this would remove it.
-pub struct MappedBuffer {
-    pub phys: u64,
-    pub len: u64,
-    virt: u64,
-}
-
-impl MappedBuffer {
-    /// Maps `dma` into this server (and its devices' IOMMU domain).
-    pub fn map(dma: Handle) -> Option<Self> {
-        let phys = sys::dma_phys(dma).ok()?;
-        let len = sys::region_len(dma).ok()?;
-        let virt = sys::mmio_map(dma).ok()?;
-        Some(Self { phys, len, virt })
-    }
-}
-
-impl Drop for MappedBuffer {
-    fn drop(&mut self) {
-        let _ = sys::mmio_unmap(self.virt);
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Entry {
@@ -66,22 +42,31 @@ impl<const N: usize> ClientBuffers<N> {
 
     /// The bytes of `dma`, mapped now or by an earlier request.
     pub fn map(&mut self, dma: Handle) -> Option<&mut [u8]> {
-        let phys = sys::dma_phys(dma).ok()?;
-        let len = sys::region_len(dma).ok()?;
-        let entry = match self.find(phys) {
-            Some(e) => e,
-            None => {
-                let virt = sys::mmio_map(dma).ok()?;
-                let e = Entry { phys, virt, len };
-                self.insert(e, |old| {
-                    let _ = sys::mmio_unmap(old.virt);
-                });
-                e
-            }
-        };
+        let entry = self.entry(dma)?;
         // SAFETY: client buffer mapped RW in this process until `insert`
         // evicts it, which needs `&mut self` (so not while this lives).
         Some(unsafe { core::slice::from_raw_parts_mut(entry.virt as *mut u8, entry.len as usize) })
+    }
+
+    /// Physical address and length of `dma`, mapped into this server (and
+    /// so into its devices' IOMMU domain): for drivers that hand the buffer
+    /// to a device and never touch it themselves.
+    pub fn device_view(&mut self, dma: Handle) -> Option<(u64, u64)> {
+        self.entry(dma).map(|e| (e.phys, e.len))
+    }
+
+    fn entry(&mut self, dma: Handle) -> Option<Entry> {
+        let phys = sys::dma_phys(dma).ok()?;
+        let len = sys::region_len(dma).ok()?;
+        if let Some(e) = self.find(phys) {
+            return Some(e);
+        }
+        let virt = sys::mmio_map(dma).ok()?;
+        let e = Entry { phys, virt, len };
+        self.insert(e, |old| {
+            let _ = sys::mmio_unmap(old.virt);
+        });
+        Some(e)
     }
 
     fn find(&self, phys: u64) -> Option<Entry> {

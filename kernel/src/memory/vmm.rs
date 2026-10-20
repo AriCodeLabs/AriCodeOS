@@ -195,15 +195,18 @@ pub fn flush_page(virt: u64) {
 }
 
 /// Invalidates the user pages `[virt, virt+len)` of the current address
-/// space on this CPU and, with one whole-TLB IPI, on the others, before
-/// the frames they pointed at may be reused (ADR 0038). Must be called with
-/// interrupts enabled and no locks held.
-pub fn flush_user_range(virt: u64, len: u64) {
+/// space on this CPU, before the frames they pointed at may be reused
+/// (ADR 0038). Enough for a process's own pages because a process has one
+/// thread, which is running here: every other CPU that ran it has since
+/// loaded another CR3 (the scheduler switches to a thread of another
+/// address space, or to the kernel's, whenever it leaves this one), and a
+/// CR3 load drops the non-global entries. When processes get more than
+/// one thread this must become a shootdown to the CPUs running them.
+pub fn flush_own_user_range(virt: u64, len: u64) {
     for page in (virt..virt + len).step_by(PAGE_SIZE as usize) {
         // SAFETY: invalidation of a TLB entry; no memory effects.
         unsafe { core::arch::asm!("invlpg [{}]", in(reg) page, options(nostack, preserves_flags)) };
     }
-    crate::arch::x86_64::smp::flush_others(None);
 }
 
 /// `true` if `addr` falls in the kernel stack guard page.

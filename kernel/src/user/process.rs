@@ -44,8 +44,10 @@ pub struct Process {
     pub arg: u64,
     /// Wakes whoever waits for the exit.
     pub exit_wait: alloc::sync::Arc<crate::task::wait::WaitQueue>,
-    /// Next free address for MMIO/DMA mappings.
-    mmio_next: u64,
+    /// Addresses for MMIO/DMA mappings (`0x1000_0000` up to the end of user
+    /// space); ranges given back by `mmio_unmap` are reused, so repeated
+    /// map/unmap cycles keep using the same page tables (ADR 0038).
+    mmio_ranges: aricode_vranges::VirtRanges,
     /// Virtual ranges pointing at memory not owned by the process (MMIO,
     /// DMA): unmapped without freeing when the address space is destroyed
     /// or on `mmio_unmap`.
@@ -273,7 +275,7 @@ fn spawn_full(
             handles,
             arg,
             exit_wait: alloc::sync::Arc::new(crate::task::wait::WaitQueue::new()),
-            mmio_next: USER_MMIO_BASE,
+            mmio_ranges: aricode_vranges::VirtRanges::new(USER_MMIO_BASE, USER_SPACE_END),
             foreign: Vec::new(),
             dma_mapped: 0,
             mapper: Some(m),
@@ -437,6 +439,9 @@ pub fn release_address_space(pid: u32) {
             .take()
             .map(|m| (m, core::mem::take(&mut p.foreign)))
     });
+    if stopped.quarantine {
+        quarantine_dma(pid, handles.as_ref(), taken.as_ref().map(|t| &t.1[..]));
+    }
     if let Some((mut m, foreign)) = taken {
         // Foreign memory (MMIO, DMA): unmapped without freeing; its owners
         // are the device or the DMA object. A DMA buffer whose last
@@ -470,7 +475,7 @@ pub fn release_address_space(pid: u32) {
     if let Some(handles) = handles {
         release_capabilities(pid, handles);
     }
-    crate::pci::reset_released(&stopped);
+    crate::pci::reset_released(pid, &stopped.functions);
     let waiters = PROCESSES.lock().get_mut(&Pid(pid)).map(|p| {
         p.reaped = true;
         p.exit_wait.clone()
@@ -478,6 +483,31 @@ pub fn release_address_space(pid: u32) {
     if let Some(w) = waiters {
         w.wake_all();
     }
+}
+
+/// A device of dying process `pid` did not stop mastering the bus: every
+/// DMA buffer the process holds or maps is kept for good instead of going
+/// back to the PMM (incident 0004), and reported.
+fn quarantine_dma(pid: u32, handles: Option<&crate::object::Handles>, foreign: Option<&[Foreign]>) {
+    use crate::object::ObjectKind;
+    let mut held: Vec<crate::object::ObjectRef> = Vec::new();
+    let caps = handles
+        .into_iter()
+        .flat_map(|h| h.iter().map(|(c, _)| c.object()));
+    let mapped = foreign.into_iter().flatten().filter_map(|f| f.dma.as_ref());
+    for obj in caps.chain(mapped) {
+        if matches!(obj.kind, ObjectKind::Dma(_))
+            && !held.iter().any(|o| alloc::sync::Arc::ptr_eq(o, obj))
+        {
+            held.push(obj.clone());
+        }
+    }
+    let count = held.len();
+    let bytes: u64 = held.into_iter().map(crate::hw::quarantine).sum();
+    warn!(
+        "user: process {pid}: {count} DMA buffer(s), {} KiB, quarantined (never reused): a device it drove still masters the bus",
+        bytes / 1024
+    );
 }
 
 /// A foreign mapping that is about to be dropped and was the last
@@ -689,6 +719,11 @@ pub fn dma_lifetime_selftest() {
         foreign_pages(pid).is_empty(),
         "dma lifetime: the unmapped range must be gone from the page tables"
     );
+    assert_eq!(
+        PROCESSES.lock().get(&pid).map(|p| p.mmio_ranges.top()),
+        Some(USER_MMIO_BASE),
+        "dma lifetime: the unmapped addresses are given back for reuse"
+    );
     assert!(
         request_kill(pid),
         "dma_holder must still exist after unmapping"
@@ -880,15 +915,16 @@ pub fn with_current_handles<R>(f: impl FnOnce(&mut crate::object::Handles) -> R)
 }
 
 /// Maps `[phys, phys+len)` into the current process as device memory
-/// (uncached) or a DMA buffer (cached). Returns the virtual address. A DMA
-/// buffer's mapping keeps `dma` (the buffer) alive until it is unmapped
-/// (ADR 0038).
+/// (uncached) or a DMA buffer (cached). Returns the virtual address and
+/// whether this call created the mapping (`false`: it already existed). A
+/// DMA buffer's mapping keeps `dma` (the buffer) alive until it is
+/// unmapped (ADR 0038).
 pub fn map_foreign(
     phys: u64,
     len: u64,
     cacheable: bool,
     dma: Option<crate::object::ObjectRef>,
-) -> Result<u64, aricode_abi::Error> {
+) -> Result<(u64, bool), aricode_abi::Error> {
     use aricode_x86_paging::{CACHE_DISABLE, WRITE_THROUGH};
     let pid = current_pid().ok_or(aricode_abi::Error::Fault)?;
     let mut procs = PROCESSES.lock();
@@ -901,7 +937,7 @@ pub fn map_foreign(
     // mapped DMA buffer cannot be freed, so the same physical range is
     // still the same buffer.
     if let Some(f) = p.foreign.iter().find(|f| f.phys == start && f.span == span) {
-        return Ok(f.virt + offset);
+        return Ok((f.virt + offset, false));
     }
     // The buffers a process keeps mapped stay allocated on its account:
     // with a quota, no more than the quota (ADR 0038).
@@ -915,23 +951,23 @@ pub fn map_foreign(
         );
         return Err(aricode_abi::Error::Limit);
     }
-    let virt = p.mmio_next;
-    // The MMIO/DMA area is above the user stack (8 MiB) and grows upwards
-    // to the end of user space.
-    if virt
-        .checked_add(span)
-        .is_none_or(|end| end > USER_SPACE_END)
-    {
-        return Err(aricode_abi::Error::Limit);
-    }
+    // The MMIO/DMA area is above the user stack (8 MiB) and reaches the
+    // end of user space.
+    let virt = p.mmio_ranges.alloc(span).ok_or(aricode_abi::Error::Limit)?;
     let mut flags = USER | WRITABLE | NO_EXECUTE;
     if !cacheable {
         flags |= CACHE_DISABLE | WRITE_THROUGH;
     }
-    let m = p.mapper.as_mut().ok_or(aricode_abi::Error::Fault)?;
-    m.map_range_4k(virt, start, span, flags)
-        .map_err(|_| aricode_abi::Error::Limit)?;
-    p.mmio_next += span;
+    let Some(m) = p.mapper.as_mut() else {
+        p.mmio_ranges.free(virt, span);
+        return Err(aricode_abi::Error::Fault);
+    };
+    // All or nothing: a failure (no frame for a page table) leaves no page
+    // of the range mapped.
+    if m.map_range_4k(virt, start, span, flags).is_err() {
+        p.mmio_ranges.free(virt, span);
+        return Err(aricode_abi::Error::Limit);
+    }
     if dma.is_some() {
         p.dma_mapped += span;
     }
@@ -941,12 +977,13 @@ pub fn map_foreign(
         span,
         dma,
     });
-    Ok(virt + offset)
+    Ok((virt + offset, true))
 }
 
 /// `mmio_unmap`: removes the current process's foreign mapping that
-/// `virt` (an address `mmio_map` returned) starts, invalidates it on every
-/// CPU and only then drops its reference to the buffer, which may free it.
+/// `virt` (an address `mmio_map` returned) starts, invalidates it and only
+/// then gives the addresses back and drops its reference to the buffer,
+/// which may free it.
 pub fn unmap_foreign(virt: u64) -> Result<(), aricode_abi::Error> {
     let pid = current_pid().ok_or(aricode_abi::Error::Fault)?;
     let f = {
@@ -968,7 +1005,11 @@ pub fn unmap_foreign(virt: u64) -> Result<(), aricode_abi::Error> {
         }
         f
     };
-    vmm::flush_user_range(f.virt, f.span);
+    vmm::flush_own_user_range(f.virt, f.span);
+    // Only now can the addresses be handed out again.
+    if let Some(p) = PROCESSES.lock().get_mut(&pid) {
+        p.mmio_ranges.free(f.virt, f.span);
+    }
     report_last_reference(pid.0, &f);
     Ok(())
 }

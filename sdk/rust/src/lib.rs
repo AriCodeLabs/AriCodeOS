@@ -13,6 +13,7 @@ pub mod http;
 pub mod input;
 pub mod launch;
 pub mod net;
+pub mod pci;
 pub mod permissions;
 pub mod rpc;
 pub mod status;

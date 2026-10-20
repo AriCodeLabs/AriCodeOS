@@ -218,6 +218,35 @@ impl Flr {
             Flr::AdvancedFeatures { .. } => 1,
         }
     }
+
+    /// Configuration byte and bit that say the function still has
+    /// transactions pending, which an FLR would cut short: Transactions
+    /// Pending in Device Status (PCIe 7.5.3.5, bit 5 of +0x0A) or TP in AF
+    /// Status (+5, bit 0).
+    pub const fn transactions_pending(self) -> (u16, u8) {
+        match self {
+            Flr::Pcie { cap } => (cap as u16 + 0x0A, 1 << 5),
+            Flr::AdvancedFeatures { cap } => (cap as u16 + 5, 1),
+        }
+    }
+}
+
+/// PCI Express control registers an FLR resets that the kernel saves and
+/// restores (16-bit, offsets from the PCIe capability): Device Control
+/// (+8), and Device Control 2 (+0x28) from capability version 2 on. `caps`
+/// is the PCIe Capabilities register (+2).
+pub fn pcie_saved_controls(caps: u16) -> &'static [u16] {
+    if caps & 0xF >= 2 {
+        &[0x08, 0x28]
+    } else {
+        &[0x08]
+    }
+}
+
+/// Device Control value to write back after an FLR: the saved one without
+/// Initiate Function Level Reset (bit 15).
+pub const fn device_control_after_flr(saved: u16) -> u16 {
+    saved & !(1 << 15)
 }
 
 /// Milliseconds software waits after starting an FLR before it touches the
@@ -225,11 +254,38 @@ impl Flr {
 /// figure).
 pub const FLR_WAIT_MS: u64 = 100;
 
-/// Type 0 header dwords an FLR clears that the kernel restores before a new
-/// driver claims the function: cache line size / latency timer (0x0C), the
-/// six BARs (0x10-0x24) and interrupt line / pin (0x3C). The command
-/// register is written by the claim itself.
-pub const FLR_RESTORED_DWORDS: [u8; 8] = [0x0C, 0x10, 0x14, 0x18, 0x1C, 0x20, 0x24, 0x3C];
+/// Type 0 header an FLR clears that the kernel puts back, as read at
+/// boot (the firmware's assignment, not whatever a dead driver left): the
+/// six BARs (dwords 0x10-0x24) and the cache line size, latency timer and
+/// interrupt line bytes (0x0C, 0x0D, 0x3C). Not the command register (the
+/// claim writes it) nor BIST (0x0F: writing it may start a self-test).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SavedHeader {
+    pub bars: [u32; 6],
+    pub bytes: [u8; 3],
+}
+
+impl SavedHeader {
+    pub const BAR_OFFSETS: [u8; 6] = [0x10, 0x14, 0x18, 0x1C, 0x20, 0x24];
+    pub const BYTE_OFFSETS: [u8; 3] = [0x0C, 0x0D, 0x3C];
+
+    /// From a function's configuration bytes (at least 0x40).
+    pub fn from_config(cfg: &[u8]) -> Option<Self> {
+        if cfg.len() < 0x40 {
+            return None;
+        }
+        let mut bars = [0u32; 6];
+        for (slot, &off) in bars.iter_mut().zip(Self::BAR_OFFSETS.iter()) {
+            let o = off as usize;
+            *slot = u32::from_le_bytes([cfg[o], cfg[o + 1], cfg[o + 2], cfg[o + 3]]);
+        }
+        let mut bytes = [0u8; 3];
+        for (slot, &off) in bytes.iter_mut().zip(Self::BYTE_OFFSETS.iter()) {
+            *slot = cfg[off as usize];
+        }
+        Some(Self { bars, bytes })
+    }
+}
 
 /// FLR support advertised in a function's 256 configuration bytes: the PCI
 /// Express capability first, the Advanced Features one otherwise.
@@ -438,7 +494,9 @@ mod tests {
         c[0x91] = 0;
         // Neither advertises FLR.
         assert_eq!(flr_method(&c), None);
-        // AF: capabilities byte at +3, bit 1.
+        // AF: capabilities byte at +3; TP (bit 0) alone is not FLR (bit 1).
+        c[0x93] = 0b01;
+        assert_eq!(flr_method(&c), None);
         c[0x93] = 0b11;
         assert_eq!(flr_method(&c), Some(Flr::AdvancedFeatures { cap: 0x90 }));
         // PCIe Device Capabilities bit 28 wins over AF.
@@ -455,11 +513,42 @@ mod tests {
     }
 
     #[test]
-    fn flr_restores_the_bars_but_not_the_command() {
-        assert!(!FLR_RESTORED_DWORDS.contains(&0x04));
-        for bar in 0..6u8 {
-            assert!(FLR_RESTORED_DWORDS.contains(&(0x10 + 4 * bar)));
+    fn flr_restores_the_boot_header_but_not_command_or_bist() {
+        let mut c = config(0x8086, 0x10C9, 0x02, 0x00, 0);
+        c[0x04] = 0x07;
+        c[0x0C] = 0x10;
+        c[0x0D] = 0x20;
+        c[0x0F] = 0x80; // BIST capable
+        c[0x10..0x14].copy_from_slice(&0xFEB0_0000u32.to_le_bytes());
+        c[0x24..0x28].copy_from_slice(&0xC001u32.to_le_bytes());
+        c[0x3C] = 11;
+        c[0x3D] = 1;
+        let h = SavedHeader::from_config(&c).unwrap();
+        assert_eq!(h.bars, [0xFEB0_0000, 0, 0, 0, 0, 0xC001]);
+        assert_eq!(h.bytes, [0x10, 0x20, 11]);
+        let touched: Vec<u8> = SavedHeader::BAR_OFFSETS
+            .iter()
+            .flat_map(|&o| o..o + 4)
+            .chain(SavedHeader::BYTE_OFFSETS)
+            .collect();
+        for never in [0x04u8, 0x05, 0x06, 0x0E, 0x0F, 0x3D] {
+            assert!(!touched.contains(&never), "{never:#x}");
         }
-        assert!(FLR_RESTORED_DWORDS.iter().all(|o| o % 4 == 0 && *o < 0x40));
+        assert_eq!(SavedHeader::from_config(&c[..0x3F]), None);
+    }
+
+    #[test]
+    fn pcie_controls_and_pending_transactions() {
+        assert_eq!(pcie_saved_controls(0x0001), &[0x08]);
+        assert_eq!(pcie_saved_controls(0x0042), &[0x08, 0x28]);
+        assert_eq!(device_control_after_flr(0xA810), 0x2810);
+        assert_eq!(
+            Flr::Pcie { cap: 0x70 }.transactions_pending(),
+            (0x7A, 1 << 5)
+        );
+        assert_eq!(
+            Flr::AdvancedFeatures { cap: 0x90 }.transactions_pending(),
+            (0x95, 1)
+        );
     }
 }

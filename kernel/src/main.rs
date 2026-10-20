@@ -187,6 +187,10 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     console_input::init(layout);
     initrd::init(info);
     pci::init();
+    if cmdline.get(keys::PCI_FLR) == Some("off") {
+        pci::set_flr_enabled(false);
+        info!("pci: function level resets disabled on the command line (pci.flr=off)");
+    }
     if cmdline.get(keys::IOMMU) == Some("off") {
         info!("iommu: disabled on the command line (iommu=off); untranslated DMA");
     } else {
@@ -429,6 +433,7 @@ fn run_init(arg: u64, fb: boot_protocol::FramebufferInfo) {
         len: fb.size,
         cacheable: false,
         source_id: None,
+        claim: None,
     }));
     let pid = user::process::spawn_with_handles_and_arg(
         "init",

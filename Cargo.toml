@@ -12,6 +12,7 @@ members = [
     "libs/sync",
     "libs/sched",
     "libs/handles",
+    "libs/vranges",
     "libs/initrd",
     "libs/acpi",
     "libs/pci",

@@ -134,10 +134,14 @@ impl BlockClient {
     }
 }
 
-/// A client's `dma` buffer mapped into this server (and its devices'
-/// IOMMU domain) for one request; the CPU mapping goes when the result is
-/// dropped, so a buffer whose client is gone is not kept allocated by this
-/// server (ADR 0038). The IOMMU entry stays until the buffer is freed.
-pub fn map_client_buffer(dma: Handle) -> Option<crate::client_buffer::MappedBuffer> {
-    crate::client_buffer::MappedBuffer::map(dma)
+/// Mappings of client buffers a block server keeps for its devices (ADR
+/// 0038): the server only needs the buffer in its IOMMU domain, and at most
+/// this many dead clients' buffers stay allocated because of it.
+pub type ClientBuffers = crate::client_buffer::ClientBuffers<8>;
+
+/// Physical address and length of a client's `dma` buffer, mapped into
+/// this server and its devices' IOMMU domain (the IOMMU entry stays until
+/// the buffer is freed).
+pub fn map_client_buffer(buffers: &mut ClientBuffers, dma: Handle) -> Option<(u64, u64)> {
+    buffers.device_view(dma)
 }
