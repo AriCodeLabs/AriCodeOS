@@ -120,10 +120,14 @@ enum Fault {
     /// and reception went on at once. Nobody was refused (code 0); the
     /// count is the number of such rounds in that second.
     RxBudget = 13,
+    /// `Attach` refused because the kernel could not create the session's
+    /// endpoint pair (out of handles or memory), not because the table is
+    /// full.
+    SessionCreate = 14,
 }
 
 impl Fault {
-    const COUNT: usize = 14;
+    const COUNT: usize = 15;
     const ALL: [Fault; Self::COUNT] = [
         Fault::TcpTableFull,
         Fault::ArpDeferFull,
@@ -139,6 +143,7 @@ impl Fault {
         Fault::SessionsFull,
         Fault::Reclaimed,
         Fault::RxBudget,
+        Fault::SessionCreate,
     ];
 
     fn from_index(i: usize) -> Option<Self> {
@@ -164,6 +169,7 @@ impl Fault {
             // 24-byte event name.
             Fault::Reclaimed => "net socks reclaimed",
             Fault::RxBudget => "net rx budget hit",
+            Fault::SessionCreate => "net session create",
         }
     }
 
@@ -197,6 +203,8 @@ pub trait Link {
     /// Transmits a frame; `false` if there is no free slot (the caller loses it).
     fn send_frame(&mut self, frame: &[u8]) -> bool;
     /// Next received frame copied into `out`, or `None` if there is none.
+    /// `Some(0)` is a receive slot consumed without a usable frame (an
+    /// errored one): it counts toward the round's budget and is ignored.
     fn recv_frame(&mut self, out: &mut [u8; MAX_FRAME]) -> Option<usize>;
     /// Whether the ring holds a frame `recv_frame` would return, without
     /// taking it: what a round that spent its budget leaves behind.
@@ -408,6 +416,9 @@ pub struct Stack<L: Link> {
     /// An unexpected probe error was already said (once is enough to be
     /// seen; the session is kept and probed again).
     probe_error_said: bool,
+    /// Bumped whenever a session is granted or retired, so the request
+    /// round of `run` knows its endpoint list is stale.
+    generation: u32,
 }
 
 fn new_socket(port: u16) -> Socket {
@@ -482,6 +493,7 @@ impl<L: Link> Stack<L> {
             reclaimed: 0,
             last_sweep: 0,
             probe_error_said: false,
+            generation: 0,
         }
     }
 
@@ -546,6 +558,27 @@ impl<L: Link> Stack<L> {
 
     // ---------------- sessions (ADR 0037) ----------------
 
+    /// The endpoints served by one `ipc_receive_any` (the main one first,
+    /// then every session) and the owner each one stands for; returns how
+    /// many were written.
+    fn endpoints(
+        &self,
+        eps: &mut [Handle; abi::IPC_MAX_ANY],
+        owners: &mut [Owner; abi::IPC_MAX_ANY],
+    ) -> usize {
+        eps[0] = SERVICE;
+        owners[0] = MAIN;
+        let mut count = 1;
+        for (i, s) in self.sessions.iter().enumerate() {
+            if let Some(s) = s {
+                eps[count] = s.ep;
+                owners[count] = i + 1;
+                count += 1;
+            }
+        }
+        count
+    }
+
     fn session(&self, owner: Owner) -> Option<Session> {
         owner
             .checked_sub(1)
@@ -566,7 +599,7 @@ impl<L: Link> Stack<L> {
                 free(&self.sessions).ok_or(Fault::SessionsFull)?
             }
         };
-        let (receive, send) = sys::endpoint_create_pair().map_err(|_| Fault::SessionsFull)?;
+        let (receive, send) = sys::endpoint_create_pair().map_err(|_| Fault::SessionCreate)?;
         let mut l = [0u8; MAX_LABEL];
         l[..label.len()].copy_from_slice(label.as_bytes());
         self.sessions[slot] = Some(Session {
@@ -574,6 +607,7 @@ impl<L: Link> Stack<L> {
             label: l,
             len: label.len() as u8,
         });
+        self.generation = self.generation.wrapping_add(1);
         Ok(send)
     }
 
@@ -665,6 +699,7 @@ impl<L: Link> Stack<L> {
             return;
         };
         let _ = sys::handle_close(s.ep);
+        self.generation = self.generation.wrapping_add(1);
         let mut n = 0;
         n += self.pings.reclaim(owner, |_, p| {
             let _ = sys::handle_close(p.reply_to);
@@ -1970,18 +2005,22 @@ pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
         }
         // The main endpoint and every session at once (ADR 0020): the index
         // tells which one the request arrived on, and so who owns what it
-        // creates.
+        // creates. A request served inside the round can change the
+        // session table: an `Attach` grants one, a sweep or probe retires a
+        // dead client and closes its receive handle. The list is rebuilt
+        // before the next receive whenever that happened, so a closed
+        // handle is never passed back to the kernel (it would answer
+        // `BadHandle` and end the round early) and a session granted
+        // mid-round is polled in the same round.
         let mut eps = [SERVICE; abi::IPC_MAX_ANY];
         let mut owners = [MAIN; abi::IPC_MAX_ANY];
-        let mut count = 1;
-        for (i, s) in stack.sessions.iter().enumerate() {
-            if let Some(s) = s {
-                eps[count] = s.ep;
-                owners[count] = i + 1;
-                count += 1;
-            }
-        }
+        let mut count = 0;
+        let mut built = None;
         for _ in 0..IPC_REQUESTS_PER_ROUND {
+            if built != Some(stack.generation) {
+                count = stack.endpoints(&mut eps, &mut owners);
+                built = Some(stack.generation);
+            }
             let (which, n, nh) =
                 match sys::ipc_receive_any(&eps[..count], &mut msg, &mut handles, 0) {
                     Ok(r) => r,

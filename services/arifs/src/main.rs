@@ -244,6 +244,9 @@ enum Fault {
     FdsFull = 1,
     /// `Bind`/`Share`/`Attach` refused: every session slot taken.
     SessionsFull = 2,
+    /// `Bind`/`Share`/`Attach` refused because the kernel could not create
+    /// the session's endpoint pair (out of handles or memory).
+    SessionCreate = 3,
 }
 
 // Every event name plus ` x999` fits the kernel's name (incident 0012).
@@ -252,21 +255,23 @@ const _: () = {
     assert!(Fault::Reclaimed.name().len() + 5 <= aricode_faults::LABEL_LEN);
     assert!(Fault::FdsFull.name().len() + 5 <= aricode_faults::LABEL_LEN);
     assert!(Fault::SessionsFull.name().len() + 5 <= aricode_faults::LABEL_LEN);
+    assert!(Fault::SessionCreate.name().len() + 5 <= aricode_faults::LABEL_LEN);
 };
 
 impl Fault {
-    const COUNT: usize = 3;
+    const COUNT: usize = 4;
     const fn name(self) -> &'static str {
         match self {
             Fault::Reclaimed => "fs fds reclaimed",
             Fault::FdsFull => "fs fds full",
             Fault::SessionsFull => "fs sessions full",
+            Fault::SessionCreate => "fs session create",
         }
     }
     fn code(self) -> u64 {
         match self {
             Fault::Reclaimed => Status::Ok as u64,
-            Fault::FdsFull | Fault::SessionsFull => Status::NoSpace as u64,
+            Fault::FdsFull | Fault::SessionsFull | Fault::SessionCreate => Status::NoSpace as u64,
         }
     }
 }
@@ -309,7 +314,8 @@ impl Service {
             let kind = match kind {
                 0 => Fault::Reclaimed,
                 1 => Fault::FdsFull,
-                _ => Fault::SessionsFull,
+                2 => Fault::SessionsFull,
+                _ => Fault::SessionCreate,
             };
             self.record(kind, count);
         }
@@ -702,7 +708,10 @@ impl Service {
                 }
             }
         };
-        let (receive, send) = sys::endpoint_create_pair().map_err(|_| Status::NoSpace)?;
+        let Ok((receive, send)) = sys::endpoint_create_pair() else {
+            self.fault(Fault::SessionCreate, 1, now_ms());
+            return Err(Status::NoSpace);
+        };
         let mut n = [0u8; 32];
         n[..name.len()].copy_from_slice(name.as_bytes());
         self.sessions[slot] = Some(Session {

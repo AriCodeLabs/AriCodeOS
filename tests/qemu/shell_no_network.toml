@@ -1,0 +1,40 @@
+# Netd audit follow-up (ADR 0037): without a network card init runs no
+# network service, and the shell gets a placeholder in its net slot that
+# reaches nobody instead of a duplicate of init's main endpoint (where every
+# `net` used to queue a request, with its reply endpoint, that init never
+# drained). The shell's network commands say there is no network service at
+# once; `diag` leaves the network section out.
+name = "shell.no_network"
+description = "without a network card the shell's net, ping, dns and http say there is no network service"
+level = "full"
+areas = ["shell", "network", "diag"]
+cmdline = "qemu_exit shell"
+timeout_secs = 60
+no_nic = true
+stdin = [
+    "services",
+    "net",
+    "ping 10.0.2.2",
+    "dns aricodeos.test",
+    "http http://10.0.2.2:17010/hola",
+    "diag",
+    "shutdown",
+]
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: no virtio-net or Realtek",
+    "network   service     absent",
+    "no network service",
+    "=== end of diagnostics ===",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "network service not responding",
+    "no reply from network service",
+    "link    ",
+    "tcp     8 slots",
+    "seq=1",
+]

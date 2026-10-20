@@ -110,6 +110,31 @@ exited, not at the periodic sweep.
   `update.*`, `diag.*`, `apps.*` green with the change (sessions for the
   shells, sshd and every `caps = net` launch).
 
+## Audit follow-ups (2026-10-20)
+
+Two independent audits of ADR 0037 found nothing serious; the low items
+were fixed on `fix/netd-audit-followups` (details in ADR 0037, "Audit
+follow-ups"):
+
+- `run` rebuilds the `ipc_receive_any` endpoint list inside a round when a
+  request granted or retired a session (a retired session's closed handle
+  used to end the round with `BadHandle`; a new session waited a round).
+- Without a network card the shell no longer gets a duplicate of init's
+  undrained main endpoint: its slot holds a placeholder that reaches nobody
+  and `net`, `ping`, `dns` and `http` print `no network service`
+  (scenario `shell.no_network`, scenario option `no_nic`).
+- `network.listen_backlog` asserts the socket line; the ADR said `sockets
+  5`, the serial log showed `sockets 6 in use: sshd 6` (listener, session,
+  4 backlog; 5 is possible when sshd had not accepted yet).
+- `net session create` / `fs session create` for a failed
+  `endpoint_create_pair`, apart from `sessions full`.
+- ADR 0037 records that a retired SYN-SENT connection's RST|ACK (ack 0)
+  is harmless and that these resets use the ARP-deferred path, unlike
+  incident 0013's stateless ones.
+- `Request::decode` rejects a label that is not valid UTF-8.
+- A shell whose netd session died with a netd restart (`ServiceGone`) says
+  that the network service was restarted and the shell must be restarted.
+
 ## Open
 
 - Sockets opened on the main endpoint (init's health check, the boot test
@@ -117,6 +142,7 @@ exited, not at the periodic sweep.
   watch and close what they open (ADR 0037 §6).
 - A session dies with the netd generation that created it; a client of a
   relaunched netd sees `ServiceGone` instead of reaching the new generation
-  (ADR 0037, consequences). No scenario restarts netd today.
+  (ADR 0037, consequences); the shell now says so and asks to be
+  restarted. No scenario restarts netd today.
 - The event name is `net socks reclaimed`: `sockets` would not leave room
   for the count in the kernel's 24-byte event name.

@@ -43,6 +43,7 @@ fn base_command(
     disk_readonly: bool,
     cpus: u32,
     usb: UsbOptions,
+    nic: bool,
 ) -> Command {
     let mut q = Command::new("qemu-system-x86_64");
     q.current_dir(root());
@@ -103,13 +104,17 @@ fn base_command(
             aricode_proto::net::TEST_SSH_FORWARD_PORT
         ),
     ]);
-    q.args([
-        "-device",
-        &format!(
-            "virtio-net-pci,netdev=net0,mac={},disable-legacy=on,disable-modern=off,iommu_platform=on",
-            GUEST_MAC.map(|b| format!("{b:02x}")).join(":")
-        ),
-    ]);
+    // Without `nic` the netdev stays (the capture filter hangs off it) but
+    // the guest sees no network card: init runs without a network service.
+    if nic {
+        q.args([
+            "-device",
+            &format!(
+                "virtio-net-pci,netdev=net0,mac={},disable-legacy=on,disable-modern=off,iommu_platform=on",
+                GUEST_MAC.map(|b| format!("{b:02x}")).join(":")
+            ),
+        ]);
+    }
     // virtio keyboard and mouse with fixed ids: QMP injects events per device.
     // Left out when the USB HID devices must be the only input (QEMU sends
     // QMP input to the most recently activated handler, and a virtio
@@ -785,7 +790,7 @@ pub fn run_interactive(
         hid: usb_hid,
         ..UsbOptions::default()
     };
-    let mut q = base_command(esp_drive, &vars, &disk, false, cpus, usb);
+    let mut q = base_command(esp_drive, &vars, &disk, false, cpus, usb, true);
     if cmdline.split_whitespace().any(|w| w == "gui") {
         // With `gui` the screen must be visible: QEMU window and serial in the terminal.
         println!("[xtask] QEMU with display (serial in the terminal; quit: close the window)");
@@ -910,6 +915,8 @@ pub struct Headless<'a> {
     pub installed: &'a [(String, Vec<u8>)],
     pub cpus: u32,
     pub usb: UsbOptions,
+    /// The virtio-net card is present (every scenario but `no_nic` ones).
+    pub nic: bool,
 }
 
 pub fn run_headless(
@@ -952,6 +959,7 @@ pub fn run_headless(
         disk_readonly,
         options.cpus,
         options.usb,
+        options.nic,
     )
     .args([
         "-object",

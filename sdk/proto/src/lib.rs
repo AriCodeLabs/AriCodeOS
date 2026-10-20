@@ -578,7 +578,11 @@ pub mod net {
             let mut label = [0u8; MAX_LABEL];
             label.copy_from_slice(&b[20..20 + MAX_LABEL]);
             let label_len = b[20 + MAX_LABEL];
-            if label_len as usize > MAX_LABEL {
+            // A label is a process name: valid UTF-8 or the request is
+            // invalid (not silently read as an empty name).
+            if label_len as usize > MAX_LABEL
+                || core::str::from_utf8(&label[..label_len as usize]).is_err()
+            {
                 return None;
             }
             Some(Self {
@@ -1541,6 +1545,13 @@ mod tests {
         let mut bad_label = attach.encode();
         bad_label[20 + MAX_LABEL] = MAX_LABEL as u8 + 1;
         assert!(Request::decode(&bad_label).is_none());
+        let mut not_utf8 = attach.encode();
+        not_utf8[20] = 0xff;
+        assert!(Request::decode(&not_utf8).is_none());
+        // Bytes past the length are not part of the label.
+        let mut tail = Request::new(Op::Attach).with_label("sh").unwrap().encode();
+        tail[22] = 0xff;
+        assert_eq!(Request::decode(&tail).unwrap().label_str(), "sh");
         assert_eq!(
             Request::decode(&Request::new(Op::Sockets).encode())
                 .unwrap()

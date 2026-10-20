@@ -123,8 +123,8 @@ and visible in `diag`.
 ## Note (2026-10-20, incident 0013 follow-up)
 
 The receive loop is bounded too. A round of the service used to drain the
-receive ring until empty before serving IPC, so a line-rate flood (each SYN
-now costing a reset) could hold the round for as long as frames came and
+receive ring until empty before serving IPC, so a line-rate flood (with a
+reset attempted for every SYN beyond the cap) could hold the round for as long as frames came and
 the clients' requests and the timers never got their turn. A round now
 receives at most `aricode_net::rx::FRAMES_PER_ROUND = 32` frames (two
 16-slot rings' worth: under half a millisecond of a gigabit link, about
@@ -135,3 +135,28 @@ the meter) and starts the next round without waiting for the interrupt.
 What a client waits under a flood is one round, not the flood. The budget
 decision is `rx::receive_round` (`libs/net`, host-tested); the constants and
 their reasoning sit together in `services/net-core` and `libs/net/src/rx.rs`.
+
+What the budget does not do (audit follow-up, 2026-10-20):
+
+- **No yield under a flood.** With frames left over netd neither waits for
+  the interrupt nor yields: the next round starts at once. Under a
+  sustained flood netd therefore runs at 100% of a CPU, and fairness
+  towards other processes rests on the scheduler's 20 ms quantum (2 ticks
+  at 100 Hz) preempting it. Inside netd the clients still get their eight
+  IPC requests and the timers run every round, so what they wait is one
+  round. A yield (or a short wait) between rounds was rejected: the
+  receive rings have 16 slots, and every millisecond netd is off the CPU
+  under a flood is frames the card drops, legitimate ones included.
+- **Every descriptor counts.** The budget counts receive descriptors, not
+  good frames: rtl-net hands back one descriptor per call, an errored one
+  (CRC, runt) as a frame of length 0 that the stack ignores, so a stream of
+  bad frames is bounded like any other, and `rx_pending` asks the same
+  question the next call would answer (`aricode_rtl8169::rx_take`,
+  host-tested). virtio-net never reports errored frames.
+- **Resets are best effort.** A reset is attempted for every SYN beyond the
+  cap, but the transmit ring is small (8 slots on the Realtek) and, as in
+  incident 0013, a reset that finds it full is dropped and counted. Under a
+  flood on real hardware expect `net tx busy xN` next to `net rx budget hit
+  xN` and `net syn dropped xN`: a SYN does not cost a reset each, only a
+  reset attempt, and the peer that did not get one retransmits its SYN or
+  gives up; nothing is held either way.

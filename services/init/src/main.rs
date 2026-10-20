@@ -1358,12 +1358,19 @@ fn spawn_shell(
     // The shell does not get the SPAWNER: it asks the broker (init) to launch.
     let launch = sys::handle_duplicate(broker, rights::WRITE | rights::TRANSFER)?;
     granted.push(launch);
-    // Without a network service nobody would answer the attach: the shell
-    // gets a plain duplicate, as before, and its `net` reports no reply.
+    // Without a network service nobody would answer the attach, and a
+    // duplicate of the main endpoint would let every `net` queue a request
+    // (with its reply endpoint) that init never drains. The shell sees
+    // that SERVICE_NET is off and does not use the handle; its slot is
+    // positional, so it gets the send side of a pair whose receive side is
+    // closed here: a placeholder that reaches nobody (a send fails at once
+    // with `PeerClosed`).
     let netd = if arg & SERVICE_NET != 0 {
         attach_net_session(net_service, "shell")?
     } else {
-        sys::handle_duplicate(net_service, rights::WRITE | rights::TRANSFER)?
+        let (dead, placeholder) = sys::endpoint_create_pair()?;
+        let _ = sys::handle_close(dead);
+        placeholder
     };
     granted.push(netd);
     let fsd = attach_file_session(fs)?;

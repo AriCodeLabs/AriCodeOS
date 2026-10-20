@@ -273,6 +273,10 @@ pub struct Scenario {
     /// the EHCI driver hands the port to the companion (ADR 0031).
     #[serde(default)]
     pub usb_ehci_companion_kbd: bool,
+    /// No network card: init finds neither virtio-net nor a Realtek and
+    /// runs without a network service.
+    #[serde(default)]
+    pub no_nic: bool,
     #[serde(default)]
     pub inject: Inject,
     /// What is expected from the single boot (without `[[boots]]`).

@@ -704,8 +704,17 @@ latter briefly to add the region.
   cannot hold the round; frames left in the ring are recorded as `net rx
   budget hit` and the next round follows at once), serves up to 8 IPC
   requests with timeout 0 (from its main endpoint and every client session
-  together, `ipc_receive_any`), expires deadlines and waits for the IRQ for
-  up to 10 ms. Operations that wait on the network (ping, `UdpRecv`,
+  together, `ipc_receive_any`; the endpoint list is rebuilt inside the
+  round when a request granted or retired a session), expires deadlines and
+  waits for the IRQ for up to 10 ms. Every receive descriptor counts toward
+  the 32, an errored one included (rtl-net reports it as length 0). With
+  frames left over netd neither waits nor yields, so under a sustained
+  flood it runs at 100% of a CPU and fairness towards other processes
+  rests on the scheduler's 20 ms quantum; its own clients still get the 8
+  requests and the timers every round. A yield was rejected because the
+  16-slot receive ring would drop frames meanwhile. On real hardware a
+  flood also shows `net tx busy` (8-slot transmit ring; the resets to
+  SYNs beyond a listener's cap are best effort, incident 0013). Operations that wait on the network (ping, `UdpRecv`,
   `Dns`) keep the client's reply endpoint and answer when
   the packet arrives or the deadline expires; frames whose next hop is not
   in the ARP cache are parked until the ARP reply (1 s).
@@ -798,7 +807,8 @@ latter briefly to add the region.
   bad handles` (`Status::BadHandles`), `net syn dropped` (a SYN to a
   listener refused with a reset: no free slot or the listener's backlog at
   its cap, ADR 0035), `net sessions full` (an `Attach` with every session
-  slot taken), `net socks reclaimed` (sockets closed on behalf of a dead
+  slot taken), `net session create` (an `Attach` whose endpoint pair the
+  kernel could not create), `net socks reclaimed` (sockets closed on behalf of a dead
   client, code 0, ADR 0037) and `net rx budget hit` (a round of reception
   that spent its 32 frames with more in the ring, code 0). `aricode_faults::Meter` (`libs/faults`, shared with fsd)
   bounds the rate: at most one event per kind per second; the refusals
@@ -990,8 +1000,9 @@ latter briefly to add the region.
   gone (ADR 0030) and fsd, probing each session with a zero-timeout receive
   once a second and whenever a table is full, retires it: descriptors and
   replace in progress released, `fs fds reclaimed xN` recorded when it left
-  any open (meter `aricode_faults`, shared with netd; `fs fds full` and `fs
-  sessions full` record the refusals). `Op::Descriptors` reports the table
+  any open (meter `aricode_faults`, shared with netd; `fs fds full`, `fs
+  sessions full` and `fs session create` (the kernel could not create the
+  session's endpoint pair) record the refusals). `Op::Descriptors` reports the table
   per owner and `diag` prints it under `files` (`descriptors 3/16 open, 16
   reclaimed from dead clients: main 1, root 2`); scenario
   `filesystem.descriptors_reclaimed` (`run fd_leaker`, incident 0011).

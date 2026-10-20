@@ -86,6 +86,7 @@ usb_legacy_controller = true    # also adds an EHCI with no devices (the EHCI dr
 usb_ehci_hid = true             # an EHCI with a USB keyboard and mouse (high speed) for usb_ehci (ADR 0031)
 usb_ehci_storage = true         # the test disk hangs off the EHCI as USB mass storage; there is no virtio-blk
 usb_ehci_companion_kbd = true   # an ICH9 EHCI with a UHCI companion and a full-speed USB keyboard (port handover)
+no_nic = true                   # no network card: init runs without a network service (the capture still ends with the frame count)
 install = ["examples/hello_ext"]  # external apps xtask builds, signs (version 1) and installs in AriFS as apps/NAME.aripkg
 packages = ["examples/hello_ext:2", "examples/hello_ext:3:corrupt"]  # pending packages in pkgs/ (DIR:VERSION[:corrupt]) for `run installer`
 staged = ["examples/hello_ext:2:wrong-hash"]  # packages already staged for `run installer 2` (DIR:VERSION[:wrong-hash])
