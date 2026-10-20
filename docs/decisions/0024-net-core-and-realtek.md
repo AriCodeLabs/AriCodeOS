@@ -100,3 +100,13 @@ retransmissions (about 7.5 s), resets the backlog of a listener that
 closes, and adds `Op::TcpStats` so `net` and `diag` show the table by
 state. Regression: `network.listen_backlog` and the host tests of
 `libs/net`.
+
+## Note (2026-10-20, incident 0016)
+
+The core serves one *session* endpoint per client besides its main one
+(ADR 0037, the design of ADR 0036 applied to sockets): every TCP, UDP, ping
+and DNS entry belongs to the session that created it (`aricode_net::owners`),
+a request only reaches its own sockets, and the sockets of a client the
+kernel reports gone (ADR 0030) are closed with `net socks reclaimed xN`
+recorded. `Op::Attach` (16) creates a session, `Op::Sockets` (17) reports
+the tables per owner for `diag`.

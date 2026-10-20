@@ -613,18 +613,28 @@ fn start_console_bridge(inputs: &[Handle]) -> Result<Handle, Error> {
     result
 }
 
-/// Launches sshd with `[net (WRITE), fs (WRITE), hardware, SYSTEM (READ),
-/// sessions (WRITE)]`. It gets no SPAWNER: shells are launched by init.
+/// Launches sshd with `[net session (WRITE), fs (WRITE), hardware, SYSTEM
+/// (READ), sessions (WRITE)]`. It gets no SPAWNER: shells are launched by
+/// init. Every generation gets a network session of its own (ADR 0037), so
+/// the listener of one that died is closed instead of holding port 22.
 fn start_sshd(fs: Handle, net: Handle, sessions: Handle) -> Result<Handle, Error> {
     let w = rights::WRITE | rights::TRANSFER;
-    let handles = [
-        sys::handle_duplicate(net, w)?,
-        sys::handle_duplicate(fs, w)?,
-        sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?,
-        sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER)?,
-        sys::handle_duplicate(sessions, w)?,
-    ];
-    sys::process_spawn_with(SPAWNER, "sshd", 0, &handles)
+    // The guard closes every handle made so far if a later step fails (the
+    // kernel takes them only when it creates the process).
+    let mut granted = Granted::new();
+    let fsd = sys::handle_duplicate(fs, w)?;
+    granted.push(fsd);
+    let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
+    granted.push(hw);
+    let system = sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER)?;
+    granted.push(system);
+    let shells = sys::handle_duplicate(sessions, w)?;
+    granted.push(shells);
+    let netd = attach_net_session(net, "sshd")?;
+    granted.push(netd);
+    let child = sys::process_spawn_with(SPAWNER, "sshd", 0, &[netd, fsd, hw, system, shells])?;
+    granted.take();
+    Ok(child)
 }
 
 /// How to check that the service is already serving.
@@ -1288,12 +1298,34 @@ fn attach_file_session(fs: &FsClient) -> Result<Handle, Error> {
     }
 }
 
+/// A network session for a process init launches (ADR 0037): netd binds a
+/// new endpoint to the client called `label` and keeps its receive side, so
+/// the sockets the process leaves open are closed when it dies. A refusal
+/// is said on the console (an attach never fails silently).
+fn attach_net_session(net_service: Handle, label: &str) -> Result<Handle, Error> {
+    use aricode_rt::sys::net::NetError;
+    match aricode_rt::sys::net::attach(net_service, label) {
+        Ok(h) => Ok(h),
+        Err(NetError::Ipc(e)) => {
+            aricode_rt::print_error(b"AriInit: network session", e);
+            Err(e)
+        }
+        Err(NetError::Status(status)) => {
+            sys::print(b"AriInit: network session refused by netd (status ");
+            let mut b = [0u8; 20];
+            sys::print(aricode_rt::fmt_u64(status as u64, &mut b));
+            sys::print(b")\n");
+            Err(Error::Limit)
+        }
+    }
+}
+
 /// Launches `arish` with a file session of its own (WRITE), hardware for
 /// its buffer, the system (READ|MANAGE), its input (`input`, transferred:
-/// the console or a session endpoint), the read-only PCI root, the network
-/// endpoint (WRITE), the broker for `run`, and, in session mode, the
-/// session output endpoint (`output`, transferred). `arg` = active services
-/// plus the session bits.
+/// the console or a session endpoint), the read-only PCI root, a network
+/// session of its own (WRITE), the broker for `run`, and, in session mode,
+/// the session output endpoint (`output`, transferred). `arg` = active
+/// services plus the session bits.
 fn spawn_shell(
     fs: &FsClient,
     net_service: Handle,
@@ -1304,8 +1336,9 @@ fn spawn_shell(
 ) -> Result<Handle, Error> {
     // Every handle, `input` and `output` included, is closed by the guard
     // if anything below fails (the kernel takes them only when it creates
-    // the process). The fsd session comes last: a failed duplicate must not
-    // cost one of fsd's session slots, which init never gives back.
+    // the process). The fsd and netd sessions come last: a failed duplicate
+    // must not cost a session slot until the services notice the closed
+    // handle (netd within a second; fsd keeps it, since init never exits).
     let mut granted = Granted::new();
     granted.push(input);
     if let Some(out) = output {
@@ -1322,11 +1355,17 @@ fn spawn_shell(
     granted.push(system);
     let pci = sys::handle_duplicate(PCI_ROOT, rights::READ | rights::TRANSFER)?;
     granted.push(pci);
-    let netd = sys::handle_duplicate(net_service, rights::WRITE | rights::TRANSFER)?;
-    granted.push(netd);
     // The shell does not get the SPAWNER: it asks the broker (init) to launch.
     let launch = sys::handle_duplicate(broker, rights::WRITE | rights::TRANSFER)?;
     granted.push(launch);
+    // Without a network service nobody would answer the attach: the shell
+    // gets a plain duplicate, as before, and its `net` reports no reply.
+    let netd = if arg & SERVICE_NET != 0 {
+        attach_net_session(net_service, "shell")?
+    } else {
+        sys::handle_duplicate(net_service, rights::WRITE | rights::TRANSFER)?
+    };
+    granted.push(netd);
     let fsd = attach_file_session(fs)?;
     granted.push(fsd);
     let mut handles = [fsd, hw, system, input, pci, netd, launch, Handle(0)];
@@ -1416,7 +1455,8 @@ struct Broker {
     endpoint: Handle,
     fs: Option<FsClient>,
     block: Option<Handle>,
-    net: Handle,
+    /// The network service's main endpoint, when a driver serves it.
+    net: Option<Handle>,
     compositor: Option<Handle>,
     inputs: [Handle; 4],
     input_count: usize,
@@ -1468,7 +1508,7 @@ impl Broker {
     fn new(
         fs: Option<FsClient>,
         block: Option<Handle>,
-        net: Handle,
+        net: Option<Handle>,
         compositor: Option<Handle>,
         inputs: &[Handle],
     ) -> Result<Self, Error> {
@@ -1792,8 +1832,14 @@ impl Broker {
             }
             needs_hw = true;
         }
+        // A network session of its own (ADR 0037): the sockets the program
+        // leaves open die with it. Without a network service there is
+        // nobody to ask, and the launch is denied like any absent service.
         if caps.contains(Caps::NET) {
-            match sys::handle_duplicate(self.net, rights::WRITE | rights::TRANSFER) {
+            let Some(net) = self.net else {
+                return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
+            };
+            match attach_net_session(net, name) {
                 Ok(h) => granted.push(h),
                 Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
@@ -2431,7 +2477,7 @@ fn main(arg: u64) -> u64 {
         let Ok(mut broker) = Broker::new(
             fs_client,
             block_service,
-            net_service,
+            (services & SERVICE_NET != 0).then_some(net_service),
             compositor,
             &input_eps[..inputs],
         ) else {
