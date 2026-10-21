@@ -2,8 +2,8 @@
 
 - **Opened:** 2026-10-17. **Status:** fixed on branch
   `fix/dma-mapping-lifetime` (H1 reproduced 2026-10-20, fix and H2 in the
-  same branch; ADR 0038), pending audit and merge. FLR not yet exercised on
-  the reference laptop.
+  same branch; ADR 0038), audited twice (2026-10-21) and the findings
+  fixed; pending merge. Not yet exercised on the reference laptop.
 - **Found by:** robustness audit 1 (`docs/audits/robustness-audit-1.md`,
   finding M4), while reviewing branch `fix/robustness-incidents`. The
   defect predates that branch; the branch does not change it and does not
@@ -141,12 +141,14 @@ mechanism and the audit step remains.
 - `kernel/src/user/process.rs`: `Process::foreign` entries carry the
   buffer's `ObjectRef`; reaping unmaps the entries and only then drops the
   references; `unmap_foreign` (syscall `mmio_unmap`, 36, ABI 5) clears the
-  entries, invalidates the range on every CPU (`vmm::flush_user_range`)
-  and then drops the reference; `Process::dma_mapped` bounds the DMA a
+  entries, invalidates the range on every CPU (`vmm::flush_user_range`;
+  revised after the audit: own CPU only, see "Audit") and then drops the
+  reference; `Process::dma_mapped` bounds the DMA a
   process keeps mapped by its quota (`Limit` and a `DmaQuota` event).
 - Services: the compositor unmaps a window buffer with its last window;
   virtio-blk, usb-input and usb-ehci map a client buffer for one request
-  (`client_buffer::MappedBuffer`); arifs and net-core share
+  (`client_buffer::MappedBuffer`; replaced by the cache after the
+  audit); arifs and net-core share
   `client_buffer::ClientBuffers<8>`, which unmaps the oldest mapping.
 - H2, `kernel/src/pci.rs` and `release_address_space`: before anything of
   a dead process is freed, every PCI function whose claim it held alone
@@ -191,12 +193,72 @@ mechanism and the audit step remains.
   `strict.usb_halt`, `strict.usb_hid_halt` and `strict.ehci_halt`, where a
   driver exits); `cargo xtask test --all --cpus 4`: 160 QEMU scenarios, 0 failed.
 
+## Audit (2026-10-21)
+
+Two independent audits of `537759f` verified the ordering, the lock order,
+the TLB handling and the FLR detection, and found two highs, which are
+fixed in commit `ec2f89f` (details and the full list in ADR 0038,
+"Audit"):
+
+- **H1, high: unbounded page-table growth.** `mmio_next` only grew and
+  `unmap_4k` never frees tables: every map/unmap cycle (the block servers
+  mapped per request) took new addresses and kept one page-table frame per
+  2 MiB crossed, about 8 MiB per million block requests in drivers
+  without a quota; an application cycling 9+ buffers through fsd made its
+  cache miss every time, with a whole-TLB IPI per miss. Fix: the mapping
+  area reuses freed ranges (`aricode_vranges::VirtRanges`, host test with a
+  million cycles that never move the top; `test=dma_lifetime` checks the
+  range comes back), block servers use the bounded cache, `mmio_unmap`
+  invalidates only its own CPU (a process has one thread; the argument is
+  in ADR 0038). ADR 0038's "bounded" claims now say what is bounded
+  (pinned frames) and what is bounded differently (page tables: by the
+  ranges mapped at once).
+- **H1, medium:** a `map_range_4k` that failed half-way left untracked
+  leaves on the DMA frames (use after free, a double free at reap, a range
+  stuck `AlreadyMapped`). Now all or nothing (host test).
+- **H1, low:** an IOMMU failure in `mmio_map` kept a mapping the caller
+  never learnt; the buffer was not held until the IOMMU had it. Fixed.
+- **H2, high: the next claim re-enabled bus mastering on a device that was
+  never reset.** Without FLR (the laptop's Realtek and Intel xHCI), the
+  device keeps its receiver and ring addresses; frames reused during the
+  supervisor's backoff would be written as soon as `claim` turned bus
+  mastering on. QEMU hides it (virtio clears DRIVER_OK on its own). Fix:
+  `claim` leaves bus mastering off and each driver turns it on with
+  `sys::pci::enable_bus_master` after resetting its device.
+- **H2, medium:** claim versus a new FLR (re-checked under the lock);
+  silent skips in `stop_claims_of` (warnings, fault events, quarantine of
+  the dead driver's DMA buffers when bus mastering stays on); a claim
+  dropped outside a reap (`ClaimToken`); FLR without checking pending
+  transactions, readiness or the PCIe Device Control registers (added,
+  with the `pci.flr=off` switch for the laptop).
+- **H2, low:** BARs restored from the dead driver's state and BIST written
+  (now the boot-time header); test gaps closed (AF TP alone is not FLR,
+  a stronger `iter` test, and `serial_order` in `drivers.pci_reap` checks
+  that bus mastering is cleared before the dead driver's frames are
+  freed). `drivers.pci_reap` still proves the kernel's bookkeeping and
+  ordering, not a device that keeps writing (QEMU does not emulate one).
+
+Results after the fix: `cargo xtask check` clean, host tests green,
+`cargo xtask test --all` 160 QEMU scenarios, 0 failed; `cargo xtask test --all --cpus 4`
+160 QEMU scenarios, 0 failed.
+
 ## Open
 
 - FLR on the reference laptop's functions runs only when a driver dies and
-  is restarted; watch the first such restart there (the log lines above,
-  then the driver's own start).
-- Pending transactions are not waited for before the FLR (bus mastering
-  is already off and `reap()` must stay bounded).
-- The audit step of the failure protocol (a review agent against this
-  incident) before merging.
+  is restarted (its Realtek and Intel xHCI advertise none); watch the first
+  such restart there (the log lines above, then the driver's own start);
+  `pci.flr=off` turns FLR off.
+- Pending transactions are waited for only 1 ms before the FLR (`reap()`
+  runs with interrupts off); a function still busy is not reset (fault
+  event), and its next driver starts from its own reset with bus
+  mastering off.
+- The block servers still need a CPU mapping only to get the IOMMU entry;
+  an IOMMU-only mapping call would avoid it.
+- Out of scope, found by the audit: virtio-blk closes the client's buffer
+  handle after a request that failed or timed out, while the device may
+  still own the buffer. Its cache mapping keeps the buffer alive for now,
+  but an eviction could free it under a device that never completed.
+  usb-input and usb-ehci keep such a buffer (`held_buffer`,
+  `buffer_unsafe`); virtio-blk should do the same, or reset the device.
+- The drivers' new bus-mastering order (claim leaves it off, the driver
+  enables it after its reset) has run only in QEMU.
