@@ -4,53 +4,53 @@ version = 4
 
 [[package]]
 name = "aricode-abi"
-version = "0.12.0"
+version = "0.13.0"
 
 [[package]]
 name = "aricode-build"
-version = "0.12.0"
+version = "0.13.0"
 
 [[package]]
 name = "aricode-crypto"
-version = "0.12.0"
+version = "0.13.0"
 
 [[package]]
 name = "aricode-fb-console"
-version = "0.12.0"
+version = "0.13.0"
 
 [[package]]
 name = "aricode-gfx"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "aricode-fb-console",
 ]
 
 [[package]]
 name = "aricode-heap"
-version = "0.12.0"
+version = "0.13.0"
 
 [[package]]
 name = "aricode-http"
-version = "0.12.0"
+version = "0.13.0"
 
 [[package]]
 name = "aricode-net"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "aricode-crypto",
 ]
 
 [[package]]
 name = "aricode-pci"
-version = "0.12.0"
+version = "0.13.0"
 
 [[package]]
 name = "aricode-proto"
-version = "0.12.0"
+version = "0.13.0"
 
 [[package]]
 name = "aricode-rt"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "aricode-heap",
  "aricode-sync",
@@ -59,11 +59,11 @@ dependencies = [
 
 [[package]]
 name = "aricode-sync"
-version = "0.12.0"
+version = "0.13.0"
 
 [[package]]
 name = "aricode-sys"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "aricode-abi",
  "aricode-gfx",
@@ -75,7 +75,7 @@ dependencies = [
 
 [[package]]
 name = "aricode-virtio"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "aricode-pci",
 ]
