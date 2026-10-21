@@ -7,11 +7,13 @@
 #![no_std]
 
 pub mod block;
+pub mod client_buffer;
 pub mod fs;
 pub mod http;
 pub mod input;
 pub mod launch;
 pub mod net;
+pub mod pci;
 pub mod permissions;
 pub mod rpc;
 pub mod status;
@@ -301,6 +303,13 @@ pub fn irq_wait(irq: Handle, timeout_ms: u64) -> Result<u64, Error> {
 /// Maps an MMIO or DMA region into the process; returns its virtual address.
 pub fn mmio_map(region: Handle) -> Result<u64, Error> {
     call(nr::MMIO_MAP, region.0 as u64, 0, 0, 0)
+}
+
+/// Removes a mapping `mmio_map` returned. A DMA buffer stays allocated
+/// while it is mapped, even with every handle closed (ADR 0038): a server
+/// that keeps a client's buffer mapped past the request releases it here.
+pub fn mmio_unmap(virt: u64) -> Result<(), Error> {
+    call(nr::MMIO_UNMAP, virt, 0, 0, 0).map(|_| ())
 }
 
 pub fn region_len(region: Handle) -> Result<u64, Error> {

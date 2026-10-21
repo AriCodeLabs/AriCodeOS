@@ -117,7 +117,8 @@ Three facts shape the driver:
    storage device that answers "medium not present" (an empty card reader)
    stays enumerated without a block service. A queue head
    the controller does not release is never reused, nor the client buffer
-   it pointed to. The SCSI windows are 30 s for medium commands and 5 s for
+   it pointed to (kept for good and recorded, `ehci buf for good`;
+   incident 0017). The SCSI windows are 30 s for medium commands and 5 s for
    commands that touch no medium.
    **Deadlines.** Every unit of work has a hard deadline that cuts every
    transfer inside it (recovery, REQUEST SENSE, hub GetPortStatus and

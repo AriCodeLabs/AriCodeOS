@@ -276,7 +276,18 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
         let len = len.checked_add(PAGE_SIZE - 1).ok_or(MapError::Unaligned)? & !(PAGE_SIZE - 1);
         let mut off = 0;
         while off < len {
-            self.map_4k(virt + off, phys + off, flags)?;
+            if let Err(e) = self.map_4k(virt + off, phys + off, flags) {
+                // All or nothing (incident 0004): a half-mapped range would
+                // leave leaves the caller does not know about (pointing at
+                // frames it does not own). The pages this call mapped go
+                // again; tables it created stay, empty.
+                let mut back = 0;
+                while back < off {
+                    let _ = self.unmap_4k(virt + back);
+                    back += PAGE_SIZE;
+                }
+                return Err(e);
+            }
             off += PAGE_SIZE;
         }
         Ok(())
@@ -513,6 +524,30 @@ mod tests {
         );
         assert_eq!(m.map_2m(0, 0, 0), Err(MapError::AlreadyMapped));
         assert_eq!(m.map_2m(0x1000, 0, 0), Err(MapError::Unaligned));
+    }
+
+    #[test]
+    fn a_failed_range_leaves_nothing_mapped() {
+        // PML4 + PDPT + PD + one PT: the first 2 MiB fit, the page past it
+        // needs a second PT that the allocator cannot give.
+        let mut m = mapper(4);
+        let virt = 0x20_0000 - 2 * PAGE_SIZE;
+        assert_eq!(
+            m.map_range_4k(virt, 0x0050_0000, 4 * PAGE_SIZE, WRITABLE),
+            Err(MapError::OutOfFrames)
+        );
+        for i in 0..4 {
+            assert!(m.translate(virt + i * PAGE_SIZE).is_none(), "page {i}");
+        }
+        // An occupied page in the middle refuses the whole range and
+        // keeps the page that was there before.
+        m.map_4k(0x5000, 0x0060_0000, WRITABLE).unwrap();
+        assert_eq!(
+            m.map_range_4k(0x3000, 0x0070_0000, 4 * PAGE_SIZE, WRITABLE),
+            Err(MapError::AlreadyMapped)
+        );
+        assert!(m.translate(0x3000).is_none() && m.translate(0x4000).is_none());
+        assert_eq!(m.translate(0x5000).map(|t| t.0), Some(0x0060_0000));
     }
 
     #[test]

@@ -36,6 +36,15 @@ pub struct UsbOptions {
     pub ehci_companion_kbd: bool,
 }
 
+/// Network cards of the machine.
+#[derive(Clone, Copy)]
+struct Nics {
+    /// The virtio-net card on the user network.
+    virtio_net: bool,
+    /// An unused igb, for the function that advertises FLR.
+    igb_flr: bool,
+}
+
 fn base_command(
     esp: Option<&Path>,
     vars: &Path,
@@ -43,7 +52,7 @@ fn base_command(
     disk_readonly: bool,
     cpus: u32,
     usb: UsbOptions,
-    nic: bool,
+    nics: Nics,
 ) -> Command {
     let mut q = Command::new("qemu-system-x86_64");
     q.current_dir(root());
@@ -106,7 +115,7 @@ fn base_command(
     ]);
     // Without `nic` the netdev stays (the capture filter hangs off it) but
     // the guest sees no network card: init runs without a network service.
-    if nic {
+    if nics.virtio_net {
         q.args([
             "-device",
             &format!(
@@ -114,6 +123,12 @@ fn base_command(
                 GUEST_MAC.map(|b| format!("{b:02x}")).join(":")
             ),
         ]);
+    }
+    // A function that advertises FLR and that no driver claims (incident
+    // 0004): QEMU's igb has the PCI Express capability with FLR. No
+    // netdev: it is never used as a network card.
+    if nics.igb_flr {
+        q.args(["-device", "igb"]);
     }
     // virtio keyboard and mouse with fixed ids: QMP injects events per device.
     // Left out when the USB HID devices must be the only input (QEMU sends
@@ -790,7 +805,18 @@ pub fn run_interactive(
         hid: usb_hid,
         ..UsbOptions::default()
     };
-    let mut q = base_command(esp_drive, &vars, &disk, false, cpus, usb, true);
+    let mut q = base_command(
+        esp_drive,
+        &vars,
+        &disk,
+        false,
+        cpus,
+        usb,
+        Nics {
+            virtio_net: true,
+            igb_flr: false,
+        },
+    );
     if cmdline.split_whitespace().any(|w| w == "gui") {
         // With `gui` the screen must be visible: QEMU window and serial in the terminal.
         println!("[xtask] QEMU with display (serial in the terminal; quit: close the window)");
@@ -917,6 +943,8 @@ pub struct Headless<'a> {
     pub usb: UsbOptions,
     /// The virtio-net card is present (every scenario but `no_nic` ones).
     pub nic: bool,
+    /// An unused function that advertises FLR (`flr_device`).
+    pub flr_device: bool,
 }
 
 pub fn run_headless(
@@ -959,7 +987,10 @@ pub fn run_headless(
         disk_readonly,
         options.cpus,
         options.usb,
-        options.nic,
+        Nics {
+            virtio_net: options.nic,
+            igb_flr: options.flr_device,
+        },
     )
     .args([
         "-object",

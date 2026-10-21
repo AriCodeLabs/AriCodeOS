@@ -87,7 +87,7 @@ QEMU test hosts (10.0.2.2). What the system itself may write at boot:
 The test clients (`fs_client`, `blk_client`, `net_client`, `tcp_client`,
 `http_client`, `input_client`) run only with `selftest`, which belongs to
 the QEMU scenarios: `cargo xtask usb-image --cmdline` refuses it, like
-every other test-only key (`qemu_exit`, `test=`, `usb_fault`,
+every other test-only key (`qemu_exit`, `test=`, `usb_fault`, `blk_fault`,
 `restart_storm`, `service_hang`, `init_fail_late`, `input_restart`,
 `shell_fault`) and the keys AriBoot adds itself (`boot_slot`,
 `boot_pending`). If a stick's

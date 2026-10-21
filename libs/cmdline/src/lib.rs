@@ -111,6 +111,10 @@ pub mod keys {
     pub const SMP: &str = "smp";
     /// `iommu=off`: do not enable DMA translation (real hardware).
     pub const IOMMU: &str = "iommu";
+    /// `pci.flr=off`: never reset a PCI function (FLR) when its driver
+    /// dies; bus mastering is still turned off (recovery knob for real
+    /// hardware, ADR 0038).
+    pub const PCI_FLR: &str = "pci.flr";
     /// Failure protocol (ADR 0028): a component halts on its first
     /// unexpected failure and init restarts nothing.
     pub const STRICT: &str = "strict";
@@ -136,13 +140,23 @@ pub mod keys {
     /// command passed: the request answers Io with the bytes not
     /// transferred, no recovery is needed; incident 0010), `reenum` (the
     /// storage endpoint is given up: Disable Slot or Reset Device and the
-    /// whole re-enumeration run) or `hid` (a HID report is treated as a
+    /// whole re-enumeration run), `unreleased` (like `reenum`, but the
+    /// Disable Slot completion is read as Context State Error: the slot
+    /// was not released, so the request's buffer must be kept; incident
+    /// 0017) or `hid` (a HID report is treated as a
     /// transaction error: the interrupt endpoint is stopped and recovered
     /// from the idle loop, its report TRBs queued again).
     /// The EHCI driver (ADR 0031) understands `N` and `idle` with `cbw`
     /// (followed by a real Reset Recovery), `csw`, `short-csw` and
     /// `short-data`.
     pub const USB_FAULT: &str = "usb_fault";
+    /// Tests only: `blk_fault=LBA` makes the virtio-blk driver leave the
+    /// device unnotified of the first client request that covers `LBA` (a
+    /// lost doorbell): the request times out for real while its descriptor
+    /// chain stays in the ring, and the device completes it on the next
+    /// notification; init then runs the `blk_late` test client on that
+    /// LBA (incident 0017).
+    pub const BLK_FAULT: &str = "blk_fault";
 
     /// Every key documented "Tests only": they exit QEMU, inject failures or
     /// run test programs. `cargo xtask usb-image` refuses them (a unit test
@@ -157,6 +171,7 @@ pub mod keys {
         SHELL_FAULT,
         SELFTEST,
         USB_FAULT,
+        BLK_FAULT,
     ];
 
     /// Keys AriBoot adds itself; `cargo xtask usb-image` refuses them too.
@@ -237,6 +252,7 @@ mod tests {
         assert_eq!(first("shell usb_fault=idle:short-csw"), Some("usb_fault"));
         assert_eq!(first("shell usb_fault=idle:short-data"), Some("usb_fault"));
         assert_eq!(first("shell usb_fault=3:hid"), Some("usb_fault"));
+        assert_eq!(first("shell blk_fault=4300"), Some("blk_fault"));
         assert_eq!(first("selftest=0"), Some("selftest"));
         let loader = |s| CmdLine::new(s).first_of(keys::LOADER_ONLY);
         assert_eq!(loader("shell boot_slot=B"), Some("boot_slot"));

@@ -39,6 +39,7 @@ OVMF (UEFI)
 ```text
 boot-protocol/       BootInfo ABI (v4): UEFI map, framebuffer, RSDP, kernel, stack, PML4 and tables, BootInfo, cmdline, physical map, preserved ranges
 libs/elf/            aricode-elf: minimal ELF64 parser (no_std, host tests)
+libs/vranges/        aricode-vranges: virtual address ranges with reuse of freed ones (mmio_map area, ADR 0038; no_std + alloc, host tests)
 libs/x86-paging/     aricode-x86-paging: 4-level page tables generic over FrameAlloc/PhysMap (no_std, host tests)
 libs/cmdline/        aricode-cmdline: `key` / `key=value` without alloc (no_std, host tests)
 libs/fb-console/     aricode-fb-console: text console on a 32 bpp framebuffer, Terminus 8x16 font (OFL), host tests
@@ -371,7 +372,7 @@ latter briefly to add the region.
   `handle_close`, `handle_duplicate`, `object_kind`, `object_id`,
   `object_revoke`, `endpoint_create`, `ipc_send`, `ipc_receive`,
   `process_spawn` (with handle transfer to the child), `process_wait`,
-  `irq_wait`, `mmio_map`, `region_len`, `dma_alloc`, `dma_phys`, `pci_count`,
+  `irq_wait`, `mmio_map`, `mmio_unmap` (ADR 0038), `region_len`, `dma_alloc`, `dma_phys`, `pci_count`,
   `pci_info`, `pci_claim`, `console_read`, `system_info`, `system_power`,
   `initrd_read`, `pci_info_ext`, `console_inject`, `process_spawn_from`,
   `ipc_receive_any`, `endpoint_create_pair`, `endpoint_close` (ADR 0030),
@@ -504,11 +505,54 @@ latter briefly to add the region.
     When the last handle is dropped, the line is masked and the vector freed.
   - `Mmio`: a physical device region; `mmio_map` maps it into the process
     (`0x1000_0000` onwards, uncached) and records it as foreign memory,
-    which is unmapped without being freed when the address space is destroyed.
-  - `Dma`: zeroed contiguous frames (`dma_alloc`, at most 1 MiB, requires
-    `MANAGE` on a `Hardware` object); `dma_phys` gives the physical address for the
-    device and `mmio_map` maps it cached. The frames go back to the PMM when
-    the object is dropped.
+    which is unmapped without being freed when the address space is
+    destroyed or on `mmio_unmap`. The addresses come from a per-process
+    `aricode_vranges::VirtRanges`: ranges given back by `mmio_unmap` are
+    reused, so map/unmap cycles keep using the same page tables (what the
+    tables cost is bounded by the most ranges mapped at once). A mapping is
+    all or nothing (`map_range_4k` rolls back a range it could not finish).
+  - `Dma`: zeroed contiguous frames (`dma_alloc`, at most `DMA_MAX_LEN`,
+    8 MiB, requires `MANAGE` on a `Hardware` object); `dma_phys` gives the
+    physical address for the device and `mmio_map` maps it cached. The
+    frames go back to the PMM when the last reference goes, and a mapping
+    is a reference (ADR 0038, incident 0004): a server that keeps a
+    client's buffer mapped after closing its handle keeps the frames
+    allocated, so no page table ever points at freed frames.
+    `mmio_unmap(virt)` drops a mapping: entries cleared, the range
+    invalidated (`vmm::flush_own_user_range`; a process has one thread),
+    then the addresses given back and the reference dropped. Mapping the
+    same range again returns the existing mapping. With a memory quota, the
+    DMA bytes a process keeps mapped count against it. Servers bound what
+    they keep: the compositor unmaps a window buffer with its last window;
+    the block servers, arifs and net-core cache 8 mappings and unmap the
+    oldest (`client_buffer::ClientBuffers`; block servers only need the
+    IOMMU entry). Dropping the last mapping of a buffer with no handle left
+    is logged (`dropped the last mapping of a DMA buffer it had no handle
+    to`). `test=dma_lifetime` checks it. A driver that gave a client
+    buffer to a device keeps the buffer's handle (`client_buffer::
+    DeviceOwned`) until the device cannot reach it: the request completed
+    or was retired, the device was reset, or the slot was released; kept
+    for good when nothing will say so (incident 0017, note in ADR 0038).
+  - Bus mastering and driver death (ADR 0038): `pci_claim` leaves bus
+    mastering off; a driver turns it on with `sys::pci::enable_bus_master`
+    after resetting its device (virtio transports, rtl-net, the xHCI and
+    EHCI drivers), so a device a dead driver left running cannot write to
+    memory reused since. When a process is reaped, every PCI function whose
+    claim it held alone stops bus mastering before its mappings, IOMMU
+    domain and capabilities (its DMA buffers) are freed; a function that
+    still reads back as bus master gets the dead driver's DMA buffers
+    quarantined for good. The claim itself (`pci::ClaimToken` in the
+    configuration object) stops bus mastering whenever it is dropped,
+    whoever held it. After the reap a function that advertises FLR (PCIe
+    Device Capabilities or the Advanced Features capability) is reset
+    unless it has transactions pending or `pci.flr=off` is on the command
+    line; the next `pci_claim` waits out the 100 ms and until the function
+    answers, then restores the boot-time BARs, cache line, latency and
+    interrupt line and the PCIe Device Control registers. All of it is
+    logged; anomalies are fault events (`claim held elsewhere`, `bus master
+    stuck on`, `flr skipped: tx pending`, `flr: function not ready`).
+    `test=pci_reap` checks the order and the bookkeeping with an `igb` that
+    advertises FLR.
 - `test=drivers`: `pit_driver` services five PIT IRQ0s (channel 0 at 100 Hz)
   and allocates, maps and verifies a DMA buffer; `fb_driver` receives the
   framebuffer as an MMIO region and paints 64x64 pixels; the kernel checks
@@ -525,7 +569,8 @@ latter briefly to add the region.
   buses from the starting one, following PCI-PCI bridges. Each function is read
   with 32-bit accesses and decoded with `aricode-pci`: vendor and device,
   class, BARs (I/O, 32- and 64-bit, prefetchable) and capability list
-  (MSI, MSI-X, PCIe, PM).
+  (MSI, MSI-X, PCIe, PM, AF); the boot line adds `FLR` for a function that
+  can be reset on its own (used when its driver dies, ADR 0038).
 - On QEMU q35: host bridge, VGA, e1000e Ethernet (MSI/MSI-X), ISA bridge,
   SATA AHCI (MSI) and SMBus. `pci.enumerate` (smoke) requires them.
 - The list is returned at boot; MSI/MSI-X programming and
@@ -573,6 +618,20 @@ latter briefly to add the region.
 - At startup the driver reads the GPT (`aricode-gpt`, header and table CRC)
   and announces the partitions; the xtask test disk carries a protective
   MBR, a GPT with backup and an `ARI0` partition of type AriCodeOS.
+- A request the device does not complete (a 2 s timeout with the
+  descriptors still in the ring, an unexpected used entry, or
+  `DEVICE_NEEDS_RESET`) answers `Io`; the driver keeps the client's buffer
+  handle, resets the device (bounded, virtio 1.2 2.4), negotiates the same
+  features, creates queue 0 again on its memory, and only then releases
+  the buffer (`blk buf kept`, `blk reset`, `blk buf released`). Three
+  resets in a row without a completed request, or a reset that fails, make
+  it exit (`blk given up`; the reap clears bus mastering first, ADR 0038)
+  for the supervisor to restart; with `strict` the first failed request
+  halts it instead, before any reset. It receives `SYSTEM` (its command
+  line) only when the command line has `strict` or the test-only
+  `blk_fault=LBA`, which drops the doorbell of the first request on
+  `LBA`; init then runs `blk_late` (`storage.late_completion`, incident
+  0017).
 - `blk_client` (ring 3) tests info, partition read, write and
   read-back, out-of-range LBA (`Invalid`) and a request without a buffer
   (`BadHandles`). `storage.block_service` requires it. Like the other
@@ -621,8 +680,8 @@ latter briefly to add the region.
   (chunks to the journal and commit: up to 32 KiB with the same guarantee; a
   single in-progress replace per service, `Busy` for the rest, released by
   the commit, an error or closing the descriptor; ADR 0018); data goes through the client's DMA
-  buffer (up to 4 KiB per request), which fsd maps once and
-  reuses by physical address. The 16 open descriptors
+  buffer (up to 4 KiB per request), which fsd keeps mapped in a cache of 8
+  by physical address, unmapping the oldest (ADR 0038). The 16 open descriptors
   (`aricode_arifs::descriptors`, host-tested) belong to the endpoint that
   opened them; a client that dies holding some has them released when
   the kernel reports its session gone (ADR 0036, below).
@@ -958,7 +1017,9 @@ latter briefly to add the region.
   (`dma_quota`, `dma_used`) and `dma_alloc` charges the size rounded up to a
   page, returning `Limit` when it is exceeded. The quota is cumulative: what was
   reserved is not returned on free (DMA buffers live as long as the
-  process).
+  process). The DMA a process keeps mapped (its own buffers and those of
+  clients) is also bounded by the quota: `mmio_map` beyond it returns
+  `Limit` (ADR 0038).
 - `initrd_read` (syscall 27) copies an initrd file to whoever holds
   `READ` on the `SPAWNER`; init reads `NAME.manifest` and `aricode-manifest`
   parses it (`name`, `caps`, `memory` in K/M, 8 MiB limit).
@@ -1399,8 +1460,9 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   does the same (ADR 0037): init and the boot test clients share its main
   endpoint, and a session dies with the netd generation that created it.
 
-- The block service maps each client DMA buffer once and
-  reuses it by physical address; there is no `mmio_unmap` or block cache.
+- The block services keep the last 8 client DMA buffers mapped, by
+  physical address, only for their IOMMU entry (ADR 0038); there is no
+  IOMMU-only mapping call yet, so each one also costs a CPU mapping.
 - The device manager (section 29) lives inside `init`: it enumerates, claims and
   launches drivers; split it into its own service when there is more than one.
 - The IOMMU invalidates globally after every change and does not remap

@@ -187,6 +187,10 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     console_input::init(layout);
     initrd::init(info);
     pci::init();
+    if cmdline.get(keys::PCI_FLR) == Some("off") {
+        pci::set_flr_enabled(false);
+        info!("pci: function level resets disabled on the command line (pci.flr=off)");
+    }
     if cmdline.get(keys::IOMMU) == Some("off") {
         info!("iommu: disabled on the command line (iommu=off); untranslated DMA");
     } else {
@@ -351,6 +355,8 @@ fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
         "console_input" => console_input::selftest(),
         "console_ps2" => console_input::ps2_selftest(),
         "process_reap" => user::process::reap_selftest(),
+        "dma_lifetime" => user::process::dma_lifetime_selftest(),
+        "pci_reap" => pci::reap_selftest(),
         other if other.starts_with("user_") => run_user_program(&other[5..]),
         // W^X: writing to .rodata -> protection #PF.
         "write_rodata" => {
@@ -427,6 +433,7 @@ fn run_init(arg: u64, fb: boot_protocol::FramebufferInfo) {
         len: fb.size,
         cacheable: false,
         source_id: None,
+        claim: None,
     }));
     let pid = user::process::spawn_with_handles_and_arg(
         "init",

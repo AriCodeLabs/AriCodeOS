@@ -314,12 +314,15 @@ fn confirm_boot_slot(arg: u64, block_service: Handle) {
 /// Info and a read of the GPT, the file service answers a list. With
 /// `selftest` the test clients run too (`fs_client` creates and rewrites
 /// `nuevo.txt`, `blk_client` writes a sector of the raw area; incident
-/// 0005). Returns the fsd endpoint and the file client of the health check
-/// (init keeps using it: clients are not released), or init's exit code.
+/// 0005), and `blk_late` on the LBA of `blk_fault` when the command line
+/// has it (incident 0017). Returns the fsd endpoint and the file client of
+/// the health check (init keeps using it: clients are not released), or
+/// init's exit code.
 fn start_storage_stack(
     sup: &mut Supervisor,
     service: Handle,
     selftest: bool,
+    blk_fault: Option<u64>,
 ) -> Result<(Handle, FsClient), u64> {
     let mut buf = [0u8; 20];
     let Ok(fs_ep) = sys::endpoint_create() else {
@@ -379,6 +382,16 @@ fn start_storage_stack(
             b"block service ok",
             11,
         )?;
+        if let Some(lba) = blk_fault {
+            run_test_client(
+                sup,
+                "blk_late",
+                service,
+                lba,
+                b"late completion test ok",
+                11,
+            )?;
+        }
     }
     Ok((fs_ep, fs))
 }
@@ -2050,6 +2063,9 @@ fn main(arg: u64) -> u64 {
         say(b"selftest: running the test-only boot checks (QEMU test environment)");
     }
     let input_restart_test = cmdline.has(aricode_cmdline::keys::INPUT_RESTART);
+    let blk_fault = cmdline
+        .get(aricode_cmdline::keys::BLK_FAULT)
+        .and_then(|v| v.parse().ok());
     let mut fs_service = None;
     let mut fs_client = None;
     let mut net_wait_ms = None;
@@ -2108,7 +2124,10 @@ fn main(arg: u64) -> u64 {
                     "virtio_blk",
                     Kind::Driver {
                         pci_index: index,
-                        with_system: false,
+                        // `SYSTEM` only to read `blk_fault` (tests) or
+                        // `strict` from the command line: least privilege.
+                        with_system: blk_fault.is_some()
+                            || cmdline.has(aricode_cmdline::keys::STRICT),
                         block: None,
                     },
                     Probe::None,
@@ -2122,7 +2141,7 @@ fn main(arg: u64) -> u64 {
             }
             services |= SERVICE_BLOCK;
             block_service = Some(service);
-            match start_storage_stack(&mut sup, service, selftest) {
+            match start_storage_stack(&mut sup, service, selftest, blk_fault) {
                 Ok((fs_ep, fs)) => {
                     services |= SERVICE_FS;
                     fs_service = Some(fs_ep);
@@ -2401,7 +2420,8 @@ fn main(arg: u64) -> u64 {
                 sys::print(b" sectors)\n");
                 services |= SERVICE_BLOCK;
                 block_service = Some(ep);
-                match start_storage_stack(&mut sup, ep, selftest) {
+                // `blk_fault` belongs to the virtio-blk driver only.
+                match start_storage_stack(&mut sup, ep, selftest, None) {
                     Ok((fs_ep, fs)) => {
                         services |= SERVICE_FS;
                         fs_service = Some(fs_ep);

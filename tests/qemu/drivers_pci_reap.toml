@@ -1,0 +1,36 @@
+# Incident 0004, H2: a driver that turns bus mastering on and dies holding a
+# claimed PCI function and a DMA buffer (kept only by its mapping) must
+# leave the device without bus mastering before the buffer's frames go back
+# to the PMM (serial_order); a function that advertises FLR is reset, and
+# both are claimed again with their boot-time header and bus mastering off
+# (the supervisor's restart path: the new driver turns it on after its own
+# reset). This checks the kernel's bookkeeping and the command register; a
+# device that keeps writing after its driver died is not something QEMU
+# emulates.
+name = "drivers.pci_reap"
+description = "test=pci_reap: bus mastering cleared before the dead driver's memory is freed, FLR, claimed again with bus mastering off"
+level = "full"
+areas = ["drivers", "memory"]
+cmdline = "qemu_exit test=pci_reap"
+flr_device = true
+timeout_secs = 40
+
+[expect]
+exit = 33
+serial_contains = [
+    "FLR)",
+    "function level reset started (its driver is gone)",
+    "header restored after the function level reset",
+    "claimed again (the previous driver died)",
+    "pci reap selftest ok (",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_order = [
+    "driver (process 1) gone: bus mastering cleared before its memory is freed (command 0x0407 -> 0x0403)",
+    "user: process 1 dropped the last mapping of a DMA buffer",
+    "driver (process 2) gone: bus mastering cleared before its memory is freed (command 0x0407 -> 0x0403)",
+    "user: process 2 dropped the last mapping of a DMA buffer",
+    "function level reset started (its driver is gone)",
+    "header restored after the function level reset",
+]
+serial_absent = ["KERNEL PANIC", "quarantined", "held elsewhere", "flr skipped", "not answer"]

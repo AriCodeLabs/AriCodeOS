@@ -12,12 +12,14 @@
 //! the handles [`handle::SELF_PROCESS`], [`handle::MAIN_THREAD`] and
 //! [`handle::CONSOLE`].
 //!
-//! During `0.x` the ABI may change (section 74). Current version: 4
-//! (ADR 0030: `Error::PeerClosed`, `endpoint_create_pair`, `endpoint_close`).
+//! During `0.x` the ABI may change (section 74). Current version: 5
+//! (ADR 0038: `mmio_unmap`; a mapping keeps its DMA buffer alive). Version
+//! 4 added `Error::PeerClosed`, `endpoint_create_pair` and `endpoint_close`
+//! (ADR 0030).
 
 #![no_std]
 
-pub const ABI_VERSION: u32 = 4;
+pub const ABI_VERSION: u32 = 5;
 
 /// Kernel base signature (SHA-512), required to check and verify the origin
 /// and authorship of an AriCodeOS build. It is part of the fixed ABI: it is
@@ -207,8 +209,17 @@ pub mod nr {
     /// `irq_wait(irq, timeout_ms) -> accumulated interrupts`; requires `WAIT`.
     pub const IRQ_WAIT: u64 = 16;
     /// `mmio_map(region) -> virtual address`; requires `READ|WRITE` on an
-    /// MMIO or DMA object. Each call creates a new mapping.
+    /// MMIO or DMA object. Mapping a region the process already maps
+    /// returns the existing mapping. A DMA buffer stays allocated while any
+    /// process maps it, even after every handle to it is closed (ADR 0038);
+    /// with a memory quota, the DMA bytes a process keeps mapped count
+    /// against it (`Limit` beyond).
     pub const MMIO_MAP: u64 = 17;
+    /// `mmio_unmap(virt)`: removes the mapping `mmio_map` returned at
+    /// `virt` (`Invalid` if there is none); a DMA buffer nobody else holds
+    /// is freed (ADR 0038). Servers that keep client buffers mapped after
+    /// closing their handles release them with this.
+    pub const MMIO_UNMAP: u64 = 36;
     /// `region_len(region) -> bytes`; requires `READ`.
     pub const REGION_LEN: u64 = 18;
     /// `dma_alloc(hardware, len) -> DMA handle`; requires `MANAGE` on a

@@ -51,9 +51,10 @@ impl BlockClient {
     }
 
     /// One request: the send waits `rpc::GRACE_MS` for the server queue,
-    /// the reply `REPLY_WAIT_MS`. The USB storage server releases the
-    /// buffer handle only after every transfer on it completed, was
-    /// retired, or its slot was disabled; with a reply wait above the
+    /// the reply `REPLY_WAIT_MS`. The block servers release the buffer
+    /// handle only once the device cannot reach the buffer (every transfer
+    /// on it completed or was retired, its slot was released, or the device
+    /// was reset) and keep it otherwise (incident 0017); with a reply wait above the
     /// server's worst case a slow disk shows up here as latency, never as
     /// a client that gave up while the device still owned its buffer.
     fn call(&self, req: Request, with_buffer: bool) -> Result<Reply, Error> {
@@ -134,13 +135,14 @@ impl BlockClient {
     }
 }
 
-/// Physical address and length of a client's `dma` buffer, mapped into this
-/// server (and its devices' IOMMU domain) for the request. Mapping again is
-/// idempotent in the kernel, and the IOMMU entry is restored if the buffer
-/// was freed and a new client got the same physical pages.
-pub fn map_client_buffer(dma: Handle) -> Option<(u64, u64)> {
-    let phys = sys::dma_phys(dma).ok()?;
-    let len = sys::region_len(dma).ok()?;
-    sys::mmio_map(dma).ok()?;
-    Some((phys, len))
+/// Mappings of client buffers a block server keeps for its devices (ADR
+/// 0038): the server only needs the buffer in its IOMMU domain, and at most
+/// this many dead clients' buffers stay allocated because of it.
+pub type ClientBuffers = crate::client_buffer::ClientBuffers<8>;
+
+/// Physical address and length of a client's `dma` buffer, mapped into
+/// this server and its devices' IOMMU domain (the IOMMU entry stays until
+/// the buffer is freed).
+pub fn map_client_buffer(buffers: &mut ClientBuffers, dma: Handle) -> Option<(u64, u64)> {
+    buffers.device_view(dma)
 }

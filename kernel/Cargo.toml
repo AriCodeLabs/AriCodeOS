@@ -23,6 +23,7 @@ aricode-sync = { path = "../libs/sync" }
 aricode-sched = { path = "../libs/sched" }
 aricode-abi = { path = "../sdk/abi" }
 aricode-handles = { path = "../libs/handles" }
+aricode-vranges = { path = "../libs/vranges" }
 aricode-elf = { path = "../libs/elf" }
 aricode-initrd = { path = "../libs/initrd" }
 aricode-acpi = { path = "../libs/acpi" }

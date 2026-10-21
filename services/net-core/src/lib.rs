@@ -28,7 +28,11 @@ use aricode_proto::net::{
     Info, Op, OwnerSockets, Reply, Request, Status, TcpStats, MAX_DATAGRAM, MAX_LABEL,
 };
 use aricode_rt::sys::virtio_pci::{IRQ, SERVICE};
-use aricode_rt::sys::{self, abi, Handle};
+use aricode_rt::sys::{self, abi, client_buffer, Handle};
+
+/// Client buffer mappings kept across requests (ADR 0038: bounded, the
+/// oldest is unmapped to make room).
+type ClientBuffers = client_buffer::ClientBuffers<8>;
 
 pub const MAX_FRAME: usize = eth::HEADER_LEN + eth::MTU;
 
@@ -321,32 +325,6 @@ struct Deferred {
     deadline: u64,
 }
 
-/// Client buffer mappings by physical address.
-struct ClientBuffers {
-    entries: [(u64, u64, u64); 8],
-    count: usize,
-}
-
-impl ClientBuffers {
-    fn map(&mut self, dma: Handle) -> Option<&mut [u8]> {
-        let phys = sys::dma_phys(dma).ok()?;
-        let len = sys::region_len(dma).ok()?;
-        let virt = match self.entries[..self.count].iter().find(|e| e.0 == phys) {
-            Some(e) => e.1,
-            None => {
-                let v = sys::mmio_map(dma).ok()?;
-                if self.count < self.entries.len() {
-                    self.entries[self.count] = (phys, v, len);
-                    self.count += 1;
-                }
-                v
-            }
-        };
-        // SAFETY: client buffer mapped RW in this process.
-        Some(unsafe { core::slice::from_raw_parts_mut(virt as *mut u8, len as usize) })
-    }
-}
-
 /// A client's session (ADR 0037): the receive side of its endpoint and the
 /// label init gave it (the process name).
 #[derive(Clone, Copy)]
@@ -481,10 +459,7 @@ impl<L: Link> Stack<L> {
             tcp_port_count: 0,
             tcp_syn_dropped: 0,
             deferred: [const { None }; 4],
-            buffers: ClientBuffers {
-                entries: [(0, 0, 0); 8],
-                count: 0,
-            },
+            buffers: ClientBuffers::new(),
             dns_port: 49153,
             retained: None,
             faults: aricode_faults::Meter::new(),

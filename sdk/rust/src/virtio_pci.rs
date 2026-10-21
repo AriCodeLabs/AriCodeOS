@@ -135,7 +135,17 @@ pub enum SetupError {
     QueueMissing,
     QueueDma,
     MsixRejected,
+    /// `DEVICE_STATUS` did not read 0 within `RESET_POLLS` polls of a reset.
+    ResetTimeout,
 }
+
+/// Bound of a device reset: `RESET_POLLS` reads of `DEVICE_STATUS`,
+/// `RESET_POLL_MS` apart. A sleep lasts from 10 to 20 ms with the kernel's
+/// 100 Hz tick (`thread_sleep` rounds up to whole ticks plus one), so the
+/// wait is at least 1 s and at most about 2 s. No clock is needed: not
+/// every virtio driver has `SYSTEM`.
+const RESET_POLLS: u32 = 100;
+const RESET_POLL_MS: u64 = 10;
 
 impl SetupError {
     /// Stable exit code for the scenarios.
@@ -156,6 +166,10 @@ pub struct Transport {
 pub struct Queue {
     pub vq: Virtqueue,
     notify_addr: u64,
+    index: u16,
+    /// The queue's own DMA memory, reused when it is created again after a
+    /// device reset (`Transport::restart_queue`).
+    region: DmaRegion,
 }
 
 impl Queue {
@@ -194,10 +208,44 @@ impl Transport {
         let common = Mmio(bar_virt(common_s.bar)? + common_s.offset as u64);
         let notify = Mmio(bar_virt(notify_s.bar)? + notify_s.offset as u64);
         let device_cfg = Mmio(bar_virt(device_s.bar)? + device_s.offset as u64);
+        let mut transport = Self {
+            common,
+            notify,
+            device_cfg,
+            notify_multiplier: notify_s.notify_off_multiplier as u64,
+            features: 0,
+        };
+        transport.reset()?;
+        // Reset: only now may the device reach memory (ADR 0038).
+        crate::pci::enable_bus_master(CFG).map_err(|_| SetupError::MapConfig)?;
+        transport.negotiate(wanted)?;
+        Ok(transport)
+    }
 
-        // Negotiation (virtio 1.x, section 3.1.1).
-        common.w8(common::DEVICE_STATUS, 0);
-        while common.r8(common::DEVICE_STATUS) != 0 {}
+    /// Device reset (virtio 1.2, 2.4 and 4.1.4.3.1): writes 0 to
+    /// `DEVICE_STATUS` and waits, bounded (1 to about 2 s, `RESET_POLLS`),
+    /// until the device presents 0,
+    /// which it does once the reset is done. The device is then back in
+    /// its initial state with its queues disabled, and sends nothing until
+    /// `DRIVER_OK` (2.4.1): buffers it was given are the driver's again
+    /// (Linux frees virtqueue memory on the same basis,
+    /// `virtio_reset_device` before deleting the queues). Incident 0017.
+    pub fn reset(&self) -> Result<(), SetupError> {
+        self.common.w8(common::DEVICE_STATUS, 0);
+        for _ in 0..RESET_POLLS {
+            if self.common.r8(common::DEVICE_STATUS) == 0 {
+                return Ok(());
+            }
+            sys::thread_sleep(RESET_POLL_MS);
+        }
+        Err(SetupError::ResetTimeout)
+    }
+
+    /// Feature negotiation after a reset (virtio 1.x, 3.1.1): offers
+    /// `VERSION_1 | wanted & offered` and leaves the device in
+    /// `FEATURES_OK`.
+    pub fn negotiate(&mut self, wanted: u64) -> Result<(), SetupError> {
+        let common = self.common;
         common.w8(common::DEVICE_STATUS, status::ACKNOWLEDGE);
         common.w8(common::DEVICE_STATUS, status::ACKNOWLEDGE | status::DRIVER);
         common.w32(common::DEVICE_FEATURE_SELECT, 0);
@@ -222,13 +270,8 @@ impl Transport {
             return Err(SetupError::FeaturesRejected);
         }
         common.w16(common::MSIX_CONFIG, 0xFFFF);
-        Ok(Self {
-            common,
-            notify,
-            device_cfg,
-            notify_multiplier: notify_s.notify_off_multiplier as u64,
-            features,
-        })
+        self.features = features;
+        Ok(())
     }
 
     /// Creates queue `index` (up to `max_size` entries) in DMA memory and
@@ -242,9 +285,41 @@ impl Transport {
         }
         let layout = QueueLayout::new(size);
         let region = DmaRegion::alloc(layout.total_len as u64).map_err(|_| SetupError::QueueDma)?;
-        // SAFETY: zeroed, page-aligned DMA buffer, exclusive to the queue.
+        // SAFETY: page-aligned DMA buffer, exclusive to the queue (`new`
+        // zeroes it).
         let vq = unsafe { Virtqueue::new(layout, region.virt as *mut u8, region.phys) };
-        c.w16(common::QUEUE_SIZE, size);
+        let notify_addr = self.program_queue(index, &vq)?;
+        Ok(Queue {
+            vq,
+            notify_addr,
+            index,
+            region,
+        })
+    }
+
+    /// Creates `queue` again on its own memory, empty, after a `reset`
+    /// (which made the device forget it): every descriptor is the
+    /// driver's again.
+    pub fn restart_queue(&self, queue: &mut Queue) -> Result<(), SetupError> {
+        let layout = QueueLayout::new(queue.vq.size());
+        self.common.w16(common::QUEUE_SELECT, queue.index);
+        if self.common.r16(common::QUEUE_SIZE) < layout.size {
+            return Err(SetupError::QueueMissing);
+        }
+        // SAFETY: the queue's own page-aligned DMA buffer; the device was
+        // reset, so nothing else uses it (`new` zeroes it).
+        queue.vq =
+            unsafe { Virtqueue::new(layout, queue.region.virt as *mut u8, queue.region.phys) };
+        queue.notify_addr = self.program_queue(queue.index, &queue.vq)?;
+        Ok(())
+    }
+
+    /// Gives queue `index` its size, ring addresses and MSI-X vector 0 and
+    /// enables it; returns its notification offset.
+    fn program_queue(&self, index: u16, vq: &Virtqueue) -> Result<u64, SetupError> {
+        let c = &self.common;
+        c.w16(common::QUEUE_SELECT, index);
+        c.w16(common::QUEUE_SIZE, vq.size());
         c.w64(common::QUEUE_DESC, vq.desc_phys());
         c.w64(common::QUEUE_DRIVER, vq.avail_phys());
         c.w64(common::QUEUE_DEVICE, vq.used_phys());
@@ -254,7 +329,7 @@ impl Transport {
         }
         let notify_addr = c.r16(common::QUEUE_NOTIFY_OFF) as u64 * self.notify_multiplier;
         c.w16(common::QUEUE_ENABLE, 1);
-        Ok(Queue { vq, notify_addr })
+        Ok(notify_addr)
     }
 
     /// Sets `DRIVER_OK`: the device starts operating.

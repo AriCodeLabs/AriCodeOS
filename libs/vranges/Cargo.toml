@@ -1,0 +1,11 @@
+[package]
+name = "aricode-vranges"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Virtual address range allocator that reuses freed ranges (no_std + alloc)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
