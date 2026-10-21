@@ -84,3 +84,14 @@ recovers endpoints as xHCI 4.6.8-4.6.10 and 4.8.3 require, follows the
 Bulk-Only Transport rules for outstanding commands and Reset Recovery,
 re-enumerates a device that drops or resets, and bounds its work per
 request below the clients' waits. See `docs/incidents/0001-*`.
+
+## Note (2026-10-21, incident 0017)
+
+The block request's client buffer is released only when the controller
+cannot reach it. When no command retires a TD on it, usbd disables the
+slot and keeps the buffer until the Disable Slot completes: released if
+the slot was released (Success or Slot Not Enabled, xHCI 4.6.4), kept for
+good otherwise, like the slot's own memory, since usbd does not reset the
+controller after boot. Before, the buffer was released on any completion
+code. `usb.unreleased_slot` (`usb_fault=idle:unreleased`) covers it; the
+events are `usb buf kept`, `usb buf released` and `usb buf for good`.

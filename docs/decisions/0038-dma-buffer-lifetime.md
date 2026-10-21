@@ -2,7 +2,8 @@
 
 - **Date:** 2026-10-20
 - **Status:** Accepted, revised after two audits on 2026-10-21 (see
-  "Audit"; incident 0004, robustness audit 1 finding M4;
+  "Audit"; note on device-owned buffers, incident 0017; incident 0004,
+  robustness audit 1 finding M4;
   amends ADR 0005 and the Phase 16, 28 and 33 notes in
   `docs/architecture.md`)
 
@@ -248,3 +249,30 @@ the TLB handling and the FLR detection, and found:
   command register and the order of events; QEMU's devices do not keep
   writing after their driver dies, so the hazard itself is not emulated.
 
+
+## Note (2026-10-21, incident 0017): buffers a device may still own
+
+This ADR makes a server's CPU mapping hold a client's buffer, and lets the
+block servers' cache drop mappings on its own schedule. A mapping
+therefore does not say anything about the device: a driver that gives a
+client buffer to a device keeps the buffer's **handle** until the device
+cannot reach it any more, whatever the cache does. A handle is enough: it
+holds the `DmaBuffer`, so the frames and the IOMMU entries stay (item 5,
+"IOMMU"). The contract, shared through `client_buffer::DeviceOwned`:
+
+- the handle is closed only once every request on the buffer completed or
+  was retired by the device, or the device (or its queue) was reset, or
+  the slot it was used on was confirmed released;
+- when nothing will ever say so (an xHCI Disable Slot that did not release
+  the slot, an EHCI queue head the controller never released; neither
+  driver resets its controller after boot) it is kept for good;
+- keeping, releasing and keeping for good are printed and recorded
+  (`blk buf kept`/`blk buf released`, `usb buf kept`/`usb buf released`/
+  `usb buf for good`, `ehci buf for good`).
+
+virtio-blk resets its device after any request the device did not
+complete and releases the kept buffer after the reset; after three resets
+in a row, or a reset that fails, it exits, and the reap order above (bus
+mastering cleared before anything the driver held is freed) covers the
+buffer it still kept. `storage.late_completion` reproduces the late write
+into a reused frame without the fix (incident 0017).

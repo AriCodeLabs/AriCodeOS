@@ -528,7 +528,11 @@ latter briefly to add the region.
     oldest (`client_buffer::ClientBuffers`; block servers only need the
     IOMMU entry). Dropping the last mapping of a buffer with no handle left
     is logged (`dropped the last mapping of a DMA buffer it had no handle
-    to`). `test=dma_lifetime` checks it.
+    to`). `test=dma_lifetime` checks it. A driver that gave a client
+    buffer to a device keeps the buffer's handle (`client_buffer::
+    DeviceOwned`) until the device cannot reach it: the request completed
+    or was retired, the device was reset, or the slot was released; kept
+    for good when nothing will say so (incident 0017, note in ADR 0038).
   - Bus mastering and driver death (ADR 0038): `pci_claim` leaves bus
     mastering off; a driver turns it on with `sys::pci::enable_bus_master`
     after resetting its device (virtio transports, rtl-net, the xHCI and
@@ -614,6 +618,18 @@ latter briefly to add the region.
 - At startup the driver reads the GPT (`aricode-gpt`, header and table CRC)
   and announces the partitions; the xtask test disk carries a protective
   MBR, a GPT with backup and an `ARI0` partition of type AriCodeOS.
+- A request the device does not complete (a 2 s timeout with the
+  descriptors still in the ring, an unexpected used entry, or
+  `DEVICE_NEEDS_RESET`) answers `Io`; the driver keeps the client's buffer
+  handle, resets the device (bounded, virtio 1.2 2.4), negotiates the same
+  features, creates queue 0 again on its memory, and only then releases
+  the buffer (`blk buf kept`, `blk reset`, `blk buf released`). Three
+  resets in a row without a completed request, or a reset that fails, make
+  it exit (`blk given up`; the reap clears bus mastering first, ADR 0038)
+  for the supervisor to restart. It receives `SYSTEM` for its command
+  line: the test-only `blk_fault=LBA` drops the doorbell of the first
+  request on `LBA`, and init then runs `blk_late`
+  (`storage.late_completion`, incident 0017).
 - `blk_client` (ring 3) tests info, partition read, write and
   read-back, out-of-range LBA (`Invalid`) and a request without a buffer
   (`BadHandles`). `storage.block_service` requires it. Like the other
