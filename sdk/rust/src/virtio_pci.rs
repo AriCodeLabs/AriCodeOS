@@ -135,12 +135,17 @@ pub enum SetupError {
     QueueMissing,
     QueueDma,
     MsixRejected,
-    /// `DEVICE_STATUS` did not read 0 within `RESET_WAIT_MS` of a reset.
+    /// `DEVICE_STATUS` did not read 0 within `RESET_POLLS` polls of a reset.
     ResetTimeout,
 }
 
-/// Bound of a device reset: polls of `DEVICE_STATUS`, one per millisecond.
-const RESET_WAIT_MS: u32 = 1000;
+/// Bound of a device reset: `RESET_POLLS` reads of `DEVICE_STATUS`,
+/// `RESET_POLL_MS` apart. A sleep lasts from 10 to 20 ms with the kernel's
+/// 100 Hz tick (`thread_sleep` rounds up to whole ticks plus one), so the
+/// wait is at least 1 s and at most about 2 s. No clock is needed: not
+/// every virtio driver has `SYSTEM`.
+const RESET_POLLS: u32 = 100;
+const RESET_POLL_MS: u64 = 10;
 
 impl SetupError {
     /// Stable exit code for the scenarios.
@@ -218,7 +223,8 @@ impl Transport {
     }
 
     /// Device reset (virtio 1.2, 2.4 and 4.1.4.3.1): writes 0 to
-    /// `DEVICE_STATUS` and waits, bounded, until the device presents 0,
+    /// `DEVICE_STATUS` and waits, bounded (1 to about 2 s, `RESET_POLLS`),
+    /// until the device presents 0,
     /// which it does once the reset is done. The device is then back in
     /// its initial state with its queues disabled, and sends nothing until
     /// `DRIVER_OK` (2.4.1): buffers it was given are the driver's again
@@ -226,11 +232,11 @@ impl Transport {
     /// `virtio_reset_device` before deleting the queues). Incident 0017.
     pub fn reset(&self) -> Result<(), SetupError> {
         self.common.w8(common::DEVICE_STATUS, 0);
-        for _ in 0..RESET_WAIT_MS {
+        for _ in 0..RESET_POLLS {
             if self.common.r8(common::DEVICE_STATUS) == 0 {
                 return Ok(());
             }
-            sys::thread_sleep(1);
+            sys::thread_sleep(RESET_POLL_MS);
         }
         Err(SetupError::ResetTimeout)
     }

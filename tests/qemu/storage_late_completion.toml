@@ -28,12 +28,25 @@ serial_contains = [
     "virtio-blk: injected fault: the device is not notified of this request (blk_fault)",
     "virtio-blk: client buffer kept until the device is reset: its request did not complete",
     "virtio-blk: resetting the device: a request did not complete",
+    "virtio-blk: device reset done: queue 0 created again, DRIVER_OK set",
     "virtio-blk: client buffer released: the device was reset",
     "blk_late: the request timed out (Io), as injected",
     "blk_late: buffer A closed and pushed out of the server's mapping cache",
     "blk_late: no late write reached reused memory; the next request succeeded",
     "AriInit: late completion test ok",
     "ARICODEOS_KERNEL_READY",
+]
+# Kept, then the reset done, and only then released; the frame goes back
+# to the PMM after that (the cache eviction), never before the reset.
+# (blk_late's own lines are left out: with several CPUs it prints its
+# reply while the driver is still resetting.)
+serial_order = [
+    "virtio-blk: client buffer kept until the device is reset: its request did not complete",
+    "virtio-blk: resetting the device: a request did not complete",
+    "virtio-blk: device reset done: queue 0 created again, DRIVER_OK set",
+    "virtio-blk: client buffer released: the device was reset",
+    "dropped the last mapping of a DMA buffer it had no handle to (4 KiB at",
+    "blk_late: buffer A closed and pushed out of the server's mapping cache",
 ]
 serial_absent = [
     "KERNEL PANIC",

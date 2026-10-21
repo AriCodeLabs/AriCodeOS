@@ -1,8 +1,9 @@
 # Incident 0017: a buffer the device may still own is released after a failed request
 
 - Opened: 2026-10-21. Status: reproduced (commit `6b7fbc9`) and fixed on
-  branch `fix/device-owned-buffers` (commit `09609a4`); pending audit and
-  merge. Not yet exercised on the reference laptop.
+  branch `fix/device-owned-buffers` (commit `09609a4`); audited
+  (2026-10-21, nothing serious; follow-ups in "Audit"); pending merge. Not
+  yet exercised on the reference laptop.
 - Found by: the second independent audit of `fix/dma-mapping-lifetime`
   (incident 0004), finding M1. Predates that branch; the branch delays it
   (bounded client-buffer cache) but does not fix it.
@@ -51,7 +52,8 @@ Two test-only injections (`aricode_cmdline::keys::TEST_ONLY`, refused by
   4. send a valid read: the device is notified and processes the ring;
   5. fail with exit 20 if any fresh buffer changed, 21 if the valid read
      failed.
-  virtio-blk got `SYSTEM` (init's `with_system`) to read its command line.
+  virtio-blk got `SYSTEM` (init's `with_system`) to read its command line
+  (since the audit only when `blk_fault` or `strict` is on it).
 - `usb_fault=...:unreleased`: like `reenum` (the storage endpoint is given
   up, Disable Slot, re-enumeration), with the Disable Slot completion read
   as Context State Error, a code after which the controller may still own
@@ -151,7 +153,8 @@ mechanism; the audit step remains. Points settled:
   device cannot reach them, `abandon` and `keep_for_good` keep them for
   good (never closed, counted). Host tests.
 - `sdk/rust/src/virtio_pci.rs`: the reset is a bounded `Transport::reset`
-  (1 s, `SetupError::ResetTimeout`; it was an unbounded spin), the
+  (`SetupError::ResetTimeout`; it was an unbounded spin; 100 polls 10 ms
+  apart since the audit, 1 to about 2 s with the 100 Hz tick), the
   negotiation is `Transport::negotiate`, and `Transport::restart_queue`
   creates a queue again, empty, on its own memory after a reset.
 - virtio-blk: after each request the driver asks the ring whether the
@@ -209,9 +212,10 @@ marks the storage unusable on the first lost queue head.
   longer knows the chain. With the IOMMU on, the second boot shows no DMA
   fault.
 - `usb.unreleased_slot` (new): fails on `6b7fbc9` (`client buffer released
-  although its slot was not released`), passes on `09609a4` with `client
-  buffer kept for good: its slot was not released` and `usb buf for good`
-  in `diag`; the stick is re-enumerated and the next write succeeds.
+  although its slot was not released`, a message of the debug check that
+  the fix removed), passes on `09609a4` with `client buffer kept for good:
+  its slot was not released` and `usb buf for good` in `diag`; the stick
+  is re-enumerated and the next write succeeds.
 - Host tests: `aricode-sys` (`DeviceOwned`: held until released,
   abandoned handles never closed, overflow kept for good), `aricode-virtio`
   (`in_flight` over a chain's life), `aricode-cmdline` (`blk_fault` is
@@ -232,6 +236,56 @@ marks the storage unusable on the first lost queue head.
   the client's whole buffer, still charged to the client that allocated
   it (ADR 0038, "Who pays"). A controller reset (HCRST, HCRESET) after
   boot would let them go; neither driver has one.
+- Long run: each buffer kept for good is one handle in the driver's
+  table (`HANDLE_LIMIT`, 256) as well as pinned memory. In usb-input
+  that is at most one per failed Disable Slot, so about plug cycles x
+  `REENUMERATE_ATTEMPTS`; in usb-ehci one per lost queue head, so one
+  per plug cycle.
+- `strict` in virtio-blk (below) has no QEMU scenario yet.
 - Not yet run on the reference laptop.
-- The study was done by one agent; the audit (`docs/FAILURE-PROTOCOL.md`,
-  step 6) is pending.
+- The study was done by one agent; the audit below was independent.
+
+## Audit (2026-10-21, commit `24d4a77`)
+
+An independent audit verified that the handle pins the frames and the
+IOMMU entry, the reset-then-release order, stop-before-free on the
+give-up path, the gating of `blk_fault` and that `BufferFate` covers every
+path. Nothing serious; the follow-ups, in the commit after `24d4a77`:
+
+- **Tests did not tell "keep until reset" from "release, then reset".**
+  Moving the release before the reset, or closing the handle in
+  `settle_client_buffer`, still passed (`serial_contains` is unordered).
+  `storage.late_completion` now has a `serial_order`: kept, resetting,
+  `device reset done` (new, printed once the device is back), released,
+  then the frame's return to the PMM (blk_late's own lines are left out:
+  with several CPUs it prints its reply while the driver resets).
+  `DeviceOwned` takes its close function at construction, so the host
+  tests check that `release` closes every held handle and that the
+  overflow, `abandon` and `keep_for_good` never close one.
+  `usb.unreleased_slot` asserted the absence of a message no code prints
+  any more; it now checks the order (the Disable Slot's verdict, then the
+  buffer kept for good, then the write error).
+- **The reset bound was 10 to 20 s, not 1 s**: `thread_sleep(1)` sleeps at
+  least one tick plus one. Now 100 polls of `thread_sleep(10)` (1 to
+  about 2 s); a device that reads 0 at once (QEMU) costs no sleep, so the
+  virtio-net and virtio-input boots are unchanged.
+- **Least privilege**: virtio-blk got `SYSTEM` on every boot for a
+  test-only key. init now passes it only when the command line has
+  `blk_fault` or `strict`; without it `sys::cmdline` returns `None`.
+- **`strict` was ignored by virtio-blk** (FAILURE-PROTOCOL rule 3). With
+  `strict` the first failed request halts the driver (`strict: halting on
+  a failed request`, with the error code, the descriptors in flight and
+  the device status; `blk strict halt`; exit 52), before any reset and
+  with the client's handle still open: the reap clears bus mastering
+  before anything is freed and init restarts nothing.
+- **usb-input released `owned` on any slot's completion.** `Hold` now
+  carries the slot, and the kept buffers remember theirs (`owned_slot`):
+  only that slot's Disable Slot releases them or keeps them for good; a
+  request whose slot differs from the one already held is kept for good.
+  Unreachable today (one Disable Slot at a time), cheap hardening.
+- **A request without data** (Flush, or one refused before the device)
+  that carried a handle had it kept needlessly when the device owned
+  something; such a handle is always closed now.
+
+After the follow-ups: host tests green and `cargo xtask check` clean; the
+QEMU suite is run by the coordinator on that commit.

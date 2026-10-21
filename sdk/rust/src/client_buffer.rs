@@ -126,6 +126,9 @@ pub struct DeviceOwned<const N: usize> {
     held: [Option<Handle>; N],
     /// Buffers kept for good since the driver started (never closed).
     for_good: u32,
+    /// Closes a handle: `handle_close`, or a recorder in the host tests
+    /// (the only way a handle leaves this type).
+    close: fn(Handle),
 }
 
 impl<const N: usize> Default for DeviceOwned<N> {
@@ -134,11 +137,20 @@ impl<const N: usize> Default for DeviceOwned<N> {
     }
 }
 
+fn close_handle(h: Handle) {
+    let _ = sys::handle_close(h);
+}
+
 impl<const N: usize> DeviceOwned<N> {
     pub const fn new() -> Self {
+        Self::with_close(close_handle)
+    }
+
+    const fn with_close(close: fn(Handle)) -> Self {
         Self {
             held: [None; N],
             for_good: 0,
+            close,
         }
     }
 
@@ -167,15 +179,9 @@ impl<const N: usize> DeviceOwned<N> {
     /// The device can no longer reach any held buffer: closes their
     /// handles. Returns how many were released.
     pub fn release(&mut self) -> usize {
-        self.release_with(|h| {
-            let _ = sys::handle_close(h);
-        })
-    }
-
-    fn release_with(&mut self, mut close: impl FnMut(Handle)) -> usize {
         let mut n = 0;
         for h in self.held.iter_mut().filter_map(Option::take) {
-            close(h);
+            (self.close)(h);
             n += 1;
         }
         n
@@ -205,31 +211,41 @@ impl<const N: usize> DeviceOwned<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    /// Handles closed by `release` in `device_owned_releases_what_it_holds`
+    /// (one static per test: the tests run in parallel).
+    static RELEASED: [AtomicU32; 3] = [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)];
+    static RELEASED_COUNT: AtomicU32 = AtomicU32::new(0);
+
+    fn record_release(h: Handle) {
+        let i = RELEASED_COUNT.fetch_add(1, Ordering::SeqCst) as usize;
+        RELEASED[i].store(h.0, Ordering::SeqCst);
+    }
+
+    fn never_close(h: Handle) {
+        panic!("handle {} closed although the device may own it", h.0);
+    }
 
     #[test]
-    fn device_owned_holds_until_released() {
-        let mut o: DeviceOwned<2> = DeviceOwned::new();
+    fn device_owned_releases_what_it_holds() {
+        let mut o: DeviceOwned<2> = DeviceOwned::with_close(record_release);
         assert_eq!(o.keep(Handle(7)), Kept::Held);
         assert_eq!(o.keep(Handle(9)), Kept::Held);
         assert_eq!(o.held().count(), 2);
-        let mut closed = [Handle(0); 2];
-        let mut n = 0;
-        assert_eq!(
-            o.release_with(|h| {
-                closed[n] = h;
-                n += 1;
-            }),
-            2
-        );
-        assert_eq!(closed, [Handle(7), Handle(9)]);
+        assert_eq!(o.release(), 2);
+        assert_eq!(RELEASED_COUNT.load(Ordering::SeqCst), 2);
+        assert_eq!(RELEASED[0].load(Ordering::SeqCst), 7);
+        assert_eq!(RELEASED[1].load(Ordering::SeqCst), 9);
         assert_eq!(o.held().count(), 0);
-        assert_eq!(o.release_with(|_| panic!("nothing is held")), 0);
+        assert_eq!(o.release(), 0, "nothing is held any more");
+        assert_eq!(RELEASED_COUNT.load(Ordering::SeqCst), 2);
         assert_eq!(o.kept_for_good(), 0);
     }
 
     #[test]
-    fn device_owned_abandons_without_closing_and_overflows_for_good() {
-        let mut o: DeviceOwned<1> = DeviceOwned::new();
+    fn device_owned_never_closes_what_it_keeps_for_good() {
+        let mut o: DeviceOwned<1> = DeviceOwned::with_close(never_close);
         assert_eq!(o.keep(Handle(3)), Kept::Held);
         // No room: the second is kept for good at once, never closed.
         assert_eq!(o.keep(Handle(4)), Kept::ForGood);
@@ -237,8 +253,8 @@ mod tests {
         assert_eq!(o.abandon(), 1);
         assert_eq!(o.kept_for_good(), 2);
         assert_eq!(o.held().count(), 0);
-        // An abandoned handle is never handed to `close` later.
-        assert_eq!(o.release_with(|_| panic!("abandoned handles stay open")), 0);
+        // An abandoned handle is never closed later either.
+        assert_eq!(o.release(), 0);
         assert_eq!(o.keep(Handle(5)), Kept::Held, "the slot is free again");
         o.keep_for_good(Handle(6));
         assert_eq!(o.kept_for_good(), 3);

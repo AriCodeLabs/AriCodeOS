@@ -38,9 +38,17 @@ serial_contains = [
     "usb buf for good",
     "ARICODEOS_SHUTDOWN",
 ]
+# The Disable Slot's verdict comes first, the buffer is kept for good, and
+# only then is the request answered.
+serial_order = [
+    "usb-input: slot memory abandoned: Disable Slot did not release the slot",
+    "usb-input: client buffer kept for good: its slot was not released",
+    "write: write error",
+]
+# Messages of a release (the pre-fix one and the current one): none may
+# appear for a slot that was not released.
 serial_absent = [
     "KERNEL PANIC",
-    "released although its slot was not released",
     "releasing the client buffer it could still write",
     "the client buffer kept for it is released",
 ]

@@ -2124,7 +2124,10 @@ fn main(arg: u64) -> u64 {
                     "virtio_blk",
                     Kind::Driver {
                         pci_index: index,
-                        with_system: true,
+                        // `SYSTEM` only to read `blk_fault` (tests) or
+                        // `strict` from the command line: least privilege.
+                        with_system: blk_fault.is_some()
+                            || cmdline.has(aricode_cmdline::keys::STRICT),
                         block: None,
                     },
                     Probe::None,

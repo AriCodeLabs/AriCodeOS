@@ -664,9 +664,9 @@ enum BufferFate {
     /// Every TD on it completed or was retired, or its slot was released:
     /// the handle is closed.
     Release,
-    /// A TD on it could not be retired and its slot's Disable Slot has not
-    /// completed: kept (`Controller::owned`) until it does.
-    Hold,
+    /// A TD on it could not be retired and the Disable Slot of this slot
+    /// has not completed: kept (`Controller::owned`) until it does.
+    Hold(u8),
     /// The Disable Slot completed without releasing the slot (xHCI 4.6.4):
     /// the controller may own the buffer for good, and with no controller
     /// reset after boot nothing will say otherwise. Never closed.
@@ -733,6 +733,8 @@ struct Controller {
     /// released the slot, kept for good otherwise (incident 0017). Kept
     /// here, not in `Storage`, so that a re-enumeration does not lose them.
     owned: DeviceOwned<2>,
+    /// The slot whose Disable Slot decides the fate of `owned`.
+    owned_slot: Option<u8>,
     /// `usb_fault=...:unreleased` (tests): the next Disable Slot
     /// completion is read as Context State Error.
     disable_unreleased: bool,
@@ -946,6 +948,7 @@ impl Controller {
             pending_disable: None,
             slot_to_disable: None,
             owned: DeviceOwned::new(),
+            owned_slot: None,
             disable_unreleased: false,
             client_buffers: ClientBuffers::new(),
             last_request_ms: 0,
@@ -1189,8 +1192,10 @@ impl Controller {
     /// abandoned (incident 0001 audit 5 M1).
     fn slot_disabled(&mut self, slot: u8, code: u8) {
         let released = completion::disable_slot_released(code);
-        self.settle_owned(released, code);
-        if self.request_buffer == BufferFate::Hold {
+        if self.owned_slot == Some(slot) {
+            self.settle_owned(released, code);
+        }
+        if self.request_buffer == BufferFate::Hold(slot) {
             self.request_buffer = if released {
                 BufferFate::Release
             } else {
@@ -1216,10 +1221,11 @@ impl Controller {
         self.spare_slot = Some(mem);
     }
 
-    /// The outstanding Disable Slot completed (`released` or not, with
+    /// The Disable Slot of `owned_slot` completed (`released` or not, with
     /// `code`) or was superseded: the client buffers kept for its TDs are
     /// released, or kept for good (printed and recorded either way).
     fn settle_owned(&mut self, released: bool, code: u8) {
+        self.owned_slot = None;
         if released {
             let n = self.owned.release();
             if n > 0 {
@@ -1243,12 +1249,21 @@ impl Controller {
             BufferFate::Release => {
                 let _ = sys::handle_close(buffer);
             }
-            BufferFate::Hold => {
+            BufferFate::Hold(slot) if self.owned_slot.is_none_or(|s| s == slot) => {
                 match self.owned.keep(buffer) {
-                    Kept::Held => say(b"client buffer kept until its slot is disabled: a TD on it could not be retired"),
+                    Kept::Held => {
+                        self.owned_slot = Some(slot);
+                        say(b"client buffer kept until its slot is disabled: a TD on it could not be retired")
+                    }
                     Kept::ForGood => say(b"client buffer kept for good: no room to track it until its slot is disabled"),
                 }
-                record("usb buf kept", 0);
+                record("usb buf kept", slot as u64);
+            }
+            BufferFate::Hold(slot) => {
+                // Buffers of another slot wait for their own Disable Slot.
+                self.owned.keep_for_good(buffer);
+                say(b"client buffer kept for good: buffers of another slot are still held");
+                record("usb buf for good", slot as u64);
             }
             BufferFate::ForGood => {
                 self.owned.keep_for_good(buffer);
@@ -1298,7 +1313,12 @@ impl Controller {
                     completion::NO_EVENT,
                 );
                 // Nothing will confirm that slot released either.
-                self.settle_owned(false, completion::NO_EVENT);
+                if self.owned_slot == Some(other) {
+                    self.settle_owned(false, completion::NO_EVENT);
+                }
+                if self.request_buffer == BufferFate::Hold(other) {
+                    self.request_buffer = BufferFate::ForGood;
+                }
             }
         }
         let trb = Trb::disable_slot(slot);
@@ -2884,15 +2904,21 @@ impl Controller {
         if self.transport() == Some(Transport::Enumerating) {
             return;
         }
-        let before = self.request_buffer;
-        self.request_buffer = BufferFate::Hold;
-        if self.disable_storage_slot(deadline).is_none()
-            && self.pending_disable.is_none()
-            && self.slot_to_disable.is_none()
-        {
-            // The slot was disabled earlier and that completion decided.
-            self.request_buffer = before;
+        // The slot the request's TDs are on: the storage device's, or the
+        // one whose Disable Slot is already outstanding. With neither, the
+        // slot was disabled earlier and that completion decided.
+        let slot = self
+            .storage
+            .as_ref()
+            .and_then(|st| st.device)
+            .and_then(|d| self.devices[d].as_ref())
+            .map(|dev| dev.slot)
+            .or(self.pending_disable.map(|(_, s)| s))
+            .or(self.slot_to_disable);
+        if let Some(slot) = slot {
+            self.request_buffer = BufferFate::Hold(slot);
         }
+        self.disable_storage_slot(deadline);
         let now = self.clock.now();
         if let Some(st) = self.storage.as_mut() {
             if st.transport != Transport::Gone {

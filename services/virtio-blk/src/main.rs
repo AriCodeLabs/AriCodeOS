@@ -4,7 +4,8 @@
 //!
 //! Receives from `init`, in this order, the service endpoint, the PCI
 //! configuration space, the hardware capability, the MSI-X IRQ, the BARs
-//! present (`arg` is the BAR mask) and `SYSTEM` (read: the command line). Initializes the device through the
+//! present (`arg` is the BAR mask) and, only when the command line has
+//! `strict` or the test-only `blk_fault`, `SYSTEM` (read: the command line). Initializes the device through the
 //! modern interface, creates queue 0 in DMA memory, reads the GPT and serves
 //! requests from other processes over IPC (`aricode-proto::block`); they supply
 //! their own DMA buffer: the device reads and writes it directly.
@@ -17,6 +18,8 @@
 //! `MAX_RESETS` resets with no request completed in between, or a reset
 //! that fails, the driver exits: the kernel clears bus mastering before it
 //! frees what the driver held (ADR 0038) and the supervisor restarts it.
+//! With `strict` (ADR 0028) the first failed request halts the driver
+//! instead, with the device and the kept buffer as the failure left them.
 #![no_std]
 #![no_main]
 
@@ -39,6 +42,8 @@ const MAX_RESETS: u32 = 3;
 const EXIT_GIVEN_UP: u64 = 50;
 /// Exit code when the features change across a reset.
 const EXIT_FEATURES_CHANGED: u64 = 51;
+/// Exit code of a `strict` halt.
+const EXIT_STRICT: u64 = 52;
 
 fn say(msg: &[u8]) {
     sys::print(b"virtio-blk: ");
@@ -63,6 +68,8 @@ struct Device {
     fault_lba: Option<u64>,
     /// The request being issued is the injected one: no notification.
     lose_notify: bool,
+    /// `strict` (ADR 0028): the first failed request halts the driver.
+    strict: bool,
     /// Client buffers of requests the device did not complete, kept until
     /// it is reset (incident 0017). One at most: the device is reset right
     /// after such a request is answered.
@@ -84,6 +91,7 @@ fn setup(mask: u64) -> Result<Device, u64> {
         flush,
         fault_lba: None,
         lose_notify: false,
+        strict: false,
         owned: DeviceOwned::new(),
         resets: 0,
     })
@@ -97,8 +105,46 @@ impl Device {
     /// One synchronous request: header and status in the own buffer, data in
     /// `(data_phys, data_len)` if any (`T_FLUSH` has none); waits for the
     /// MSI-X interrupt and checks the status. On a failure the device may
-    /// still own the request's buffers (`device_owns_buffers`).
+    /// still own the request's buffers (`device_owns_buffers`); with
+    /// `strict` the driver halts there.
     fn request(
+        &mut self,
+        header: blk::RequestHeader,
+        data: Option<(u64, u32, bool)>,
+    ) -> Result<(), u64> {
+        let result = self.issue(header, data);
+        if let (Err(code), true) = (result, self.strict) {
+            self.halt(code);
+        }
+        result
+    }
+
+    /// `strict`: prints the failure and the state it left and exits,
+    /// without resetting the device and with every buffer it may own kept
+    /// (the client's handle is still open); the kernel clears bus mastering
+    /// before anything is freed (ADR 0038) and init restarts nothing.
+    fn halt(&self, code: u64) -> ! {
+        let mut buf = [0u8; 20];
+        sys::print(b"virtio-blk: strict: halting on a failed request (code ");
+        sys::print(aricode_rt::fmt_u64(code, &mut buf));
+        sys::print(b"); descriptors in flight ");
+        sys::print(aricode_rt::fmt_u64(
+            self.queue.vq.in_flight() as u64,
+            &mut buf,
+        ));
+        sys::print(b", device status ");
+        sys::print(aricode_rt::fmt_u64(
+            self.transport
+                .common
+                .r8(aricode_virtio::common::DEVICE_STATUS) as u64,
+            &mut buf,
+        ));
+        sys::print(b"\n");
+        record("blk strict halt", code);
+        sys::process_exit(EXIT_STRICT)
+    }
+
+    fn issue(
         &mut self,
         header: blk::RequestHeader,
         data: Option<(u64, u32, bool)>,
@@ -151,11 +197,13 @@ impl Device {
     }
 
     /// Hands back the handle of the client buffer of the request just
-    /// served: closed when the device owns nothing, otherwise kept until
-    /// the device is reset (`recover`), so that the buffer cannot be freed
-    /// and reused under a device that may still write into it.
-    fn settle_client_buffer(&mut self, buffer: Handle, lba: u64) {
-        if !self.device_owns_buffers() {
+    /// served: closed when the device owns nothing or was never given it
+    /// (`given` false: a request without data, or one refused before the
+    /// device), otherwise kept until the device is reset (`recover`), so
+    /// that the buffer cannot be freed and reused under a device that may
+    /// still write into it.
+    fn settle_client_buffer(&mut self, buffer: Handle, given: bool, lba: u64) {
+        if !given || !self.device_owns_buffers() {
             let _ = sys::handle_close(buffer);
             return;
         }
@@ -180,6 +228,7 @@ impl Device {
         if let Err(code) = self.restart() {
             self.give_up(b"the device does not come back from its reset", code);
         }
+        say(b"device reset done: queue 0 created again, DRIVER_OK set");
         let released = self.owned.release();
         if released > 0 {
             say(b"client buffer released: the device was reset");
@@ -303,6 +352,8 @@ fn serve(dev: &mut Device) -> ! {
             continue; // without a reply endpoint there is no one to answer
         }
         let reply_to = handles[0];
+        // Whether the request's buffer was handed to the device.
+        let mut given = false;
         let reply = match Request::decode(&msg[..n]) {
             None => Reply {
                 status: Status::Invalid,
@@ -340,6 +391,7 @@ fn serve(dev: &mut Device) -> ! {
                     match map_client_buffer(&mut buffers, handles[1]) {
                         Some((phys, len)) if len >= count * 512 => {
                             let bytes = (count * 512) as u32;
+                            given = true;
                             if dev
                                 .fault_lba
                                 .is_some_and(|f| (lba..lba + count).contains(&f))
@@ -378,7 +430,7 @@ fn serve(dev: &mut Device) -> ! {
             }
         };
         if nh >= 2 {
-            dev.settle_client_buffer(handles[1], lba_served);
+            dev.settle_client_buffer(handles[1], given, lba_served);
         }
         let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
         let _ = sys::handle_close(reply_to);
@@ -404,6 +456,10 @@ fn main(mask: u64) -> u64 {
         dev.fault_lba = c
             .get(aricode_cmdline::keys::BLK_FAULT)
             .and_then(|v| v.parse().ok());
+        dev.strict = c.has(aricode_cmdline::keys::STRICT);
+        if dev.strict {
+            say(b"strict mode: the first failed request halts the driver");
+        }
         if dev.fault_lba.is_some() {
             say(b"blk_fault: the first request on the given LBA will not be notified");
         }

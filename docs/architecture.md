@@ -626,10 +626,12 @@ latter briefly to add the region.
   the buffer (`blk buf kept`, `blk reset`, `blk buf released`). Three
   resets in a row without a completed request, or a reset that fails, make
   it exit (`blk given up`; the reap clears bus mastering first, ADR 0038)
-  for the supervisor to restart. It receives `SYSTEM` for its command
-  line: the test-only `blk_fault=LBA` drops the doorbell of the first
-  request on `LBA`, and init then runs `blk_late`
-  (`storage.late_completion`, incident 0017).
+  for the supervisor to restart; with `strict` the first failed request
+  halts it instead, before any reset. It receives `SYSTEM` (its command
+  line) only when the command line has `strict` or the test-only
+  `blk_fault=LBA`, which drops the doorbell of the first request on
+  `LBA`; init then runs `blk_late` (`storage.late_completion`, incident
+  0017).
 - `blk_client` (ring 3) tests info, partition read, write and
   read-back, out-of-range LBA (`Invalid`) and a request without a buffer
   (`BadHandles`). `storage.block_service` requires it. Like the other
