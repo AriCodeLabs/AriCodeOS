@@ -32,6 +32,7 @@ use aricode_proto::block::{
 };
 use aricode_proto::input::{Event as WireEvent, Op, Reply, Request, Status, MAX_EVENTS};
 use aricode_rt::sys::block::{map_client_buffer, ClientBuffers};
+use aricode_rt::sys::client_buffer::{DeviceOwned, Kept};
 use aricode_rt::sys::virtio_pci::{bar_handle, extra_handle, DmaRegion, Mmio, CFG, IRQ, SERVICE};
 use aricode_rt::sys::{self, abi, Handle};
 use aricode_usb_storage::{
@@ -84,7 +85,7 @@ const REQUEST_BUDGET_MS: u64 = TRANSFER_WINDOW_MS + RECOVERY_RESERVE_MS;
 /// Stop Endpoint (500) + Set TR Dequeue (500) + CLEAR_FEATURE with its own
 /// EP0 recovery (2000) for the failed endpoint. Retiring a CSW re-read or
 /// a Disable Slot beyond that is refused or left pending, which the
-/// held-buffer bookkeeping (`Controller::held_buffer`) covers.
+/// kept-buffer bookkeeping (`Controller::request_buffer`, `Controller::owned`) covers.
 const RECOVERY_RESERVE_MS: u64 = 3000;
 /// Least transfer window for a SCSI command issued inside a maintenance
 /// step (INQUIRY, TEST UNIT READY, READ CAPACITY during a re-enumeration):
@@ -642,6 +643,10 @@ enum Injection {
     /// The endpoint is given up as if no command put it back: Disable
     /// Slot and the whole re-enumeration run.
     Reenum,
+    /// Like `Reenum`, but the Disable Slot completion is read as Context
+    /// State Error (xHCI 6.4.5): a slot the controller did not release, so
+    /// it may still own the request's buffer (incident 0017).
+    Unreleased,
     /// The device is treated as not answering any more: the request
     /// answers Io and the idle loop resets the port and enumerates the
     /// device again on its slot (Reset Device, xHCI 4.6.11).
@@ -650,6 +655,22 @@ enum Injection {
     /// the idle loop stops the interrupt endpoint (a real Stopped state)
     /// and recovers it.
     Hid,
+}
+
+/// What happens to the client buffer of the block request being served
+/// once it is answered (incident 0017).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BufferFate {
+    /// Every TD on it completed or was retired, or its slot was released:
+    /// the handle is closed.
+    Release,
+    /// A TD on it could not be retired and the Disable Slot of this slot
+    /// has not completed: kept (`Controller::owned`) until it does.
+    Hold(u8),
+    /// The Disable Slot completed without releasing the slot (xHCI 4.6.4):
+    /// the controller may own the buffer for good, and with no controller
+    /// reset after boot nothing will say otherwise. Never closed.
+    ForGood,
 }
 
 /// Outcome of a command TRB.
@@ -693,23 +714,30 @@ struct TransferFault {
 struct Controller {
     /// `strict` boot flag: halt on the first transport failure.
     strict: bool,
-    /// `usb_fault=N|idle[:cbw|:csw|:short-csw|:short-data|:reenum|:reset|:hid]`
+    /// `usb_fault=N|idle[:cbw|:csw|:short-csw|:short-data|:reenum|:unreleased|:reset|:hid]`
     /// (tests): an injected failure.
     fault_inject: FaultInject,
     /// The injected failure due in the current request, until it is used.
     inject_now: Option<Injection>,
-    /// A TD could not be retired and its slot is not disabled yet: the
-    /// controller may still own a client buffer (`held_buffer`). Kept here,
-    /// not in `Storage`, so that a re-enumeration does not lose it.
-    retire_failed: bool,
+    /// What happens to the client buffer of the block request being
+    /// served (incident 0017).
+    request_buffer: BufferFate,
     /// Disable Slot command TRB issued without a completion yet, and the
     /// slot it disables.
     pending_disable: Option<(u64, u8)>,
     /// A slot whose Disable Slot was refused for lack of time: the idle
     /// loop issues it before anything else.
     slot_to_disable: Option<u8>,
-    /// Client buffer handle kept until a Disable Slot completes.
-    held_buffer: Option<Handle>,
+    /// Client buffers of earlier requests whose TD could not be retired,
+    /// kept until the outstanding Disable Slot completes: released when it
+    /// released the slot, kept for good otherwise (incident 0017). Kept
+    /// here, not in `Storage`, so that a re-enumeration does not lose them.
+    owned: DeviceOwned<2>,
+    /// The slot whose Disable Slot decides the fate of `owned`.
+    owned_slot: Option<u8>,
+    /// `usb_fault=...:unreleased` (tests): the next Disable Slot
+    /// completion is read as Context State Error.
+    disable_unreleased: bool,
     /// Client buffers mapped for the controller's IOMMU domain (ADR 0038).
     client_buffers: ClientBuffers,
     /// Last block request and last HID report (ms), for `usb_fault=idle`.
@@ -916,10 +944,12 @@ impl Controller {
             strict: false,
             fault_inject: FaultInject::None,
             inject_now: None,
-            retire_failed: false,
+            request_buffer: BufferFate::Release,
             pending_disable: None,
             slot_to_disable: None,
-            held_buffer: None,
+            owned: DeviceOwned::new(),
+            owned_slot: None,
+            disable_unreleased: false,
             client_buffers: ClientBuffers::new(),
             last_request_ms: 0,
             last_report_ms: 0,
@@ -1152,18 +1182,25 @@ impl Controller {
 
     /// The Disable Slot of `slot` completed with `code` (xHCI 4.6.4: on
     /// Success the controller owns none of the slot's TDs, contexts or
-    /// rings any more). The client buffer held for it is released on any
-    /// completion: nothing more can be done for it (the caller recorded a
-    /// code other than Success). The slot's memory becomes the spare and
-    /// its DCBAA entry is cleared only when the slot was released (Success
-    /// or Slot Not Enabled, `completion::disable_slot_released`; Linux
-    /// frees the virt device likewise only then); otherwise the controller
-    /// may still use it and it is abandoned (incident 0001 audit 5 M1).
+    /// rings any more). The slot was released only on Success or Slot Not
+    /// Enabled (`completion::disable_slot_released`; Linux frees the virt
+    /// device likewise only then). Client buffers kept for its TDs are
+    /// released then, and kept for good otherwise (incident 0017; the
+    /// caller recorded a code other than Success). The slot's memory
+    /// becomes the spare and its DCBAA entry is cleared only when the slot
+    /// was released; otherwise the controller may still use it and it is
+    /// abandoned (incident 0001 audit 5 M1).
     fn slot_disabled(&mut self, slot: u8, code: u8) {
-        self.retire_failed = false;
-        if let Some(buffer) = self.held_buffer.take() {
-            say(b"slot disabled: releasing the client buffer it could still write");
-            let _ = sys::handle_close(buffer);
+        let released = completion::disable_slot_released(code);
+        if self.owned_slot == Some(slot) {
+            self.settle_owned(released, code);
+        }
+        if self.request_buffer == BufferFate::Hold(slot) {
+            self.request_buffer = if released {
+                BufferFate::Release
+            } else {
+                BufferFate::ForGood
+            };
         }
         let mem = match self.disabling.take() {
             Some((s, mem)) if s == slot => mem,
@@ -1172,7 +1209,7 @@ impl Controller {
                 return;
             }
         };
-        if !completion::disable_slot_released(code) {
+        if !released {
             self.abandon_slot_memory(b"Disable Slot did not release the slot", code);
             return;
         }
@@ -1182,6 +1219,58 @@ impl Controller {
             return;
         }
         self.spare_slot = Some(mem);
+    }
+
+    /// The Disable Slot of `owned_slot` completed (`released` or not, with
+    /// `code`) or was superseded: the client buffers kept for its TDs are
+    /// released, or kept for good (printed and recorded either way).
+    fn settle_owned(&mut self, released: bool, code: u8) {
+        self.owned_slot = None;
+        if released {
+            let n = self.owned.release();
+            if n > 0 {
+                say(b"slot released: the client buffer kept for it is released (xHCI 4.6.4)");
+                record("usb buf released", n as u64);
+            }
+        } else {
+            let n = self.owned.abandon();
+            if n > 0 {
+                say(b"slot not released: the client buffer kept for it is kept for good");
+                record("usb buf for good", code as u64);
+            }
+        }
+    }
+
+    /// Hands back the handle of the client buffer of the block request
+    /// just answered, as `request_buffer` says (incident 0017): closed,
+    /// kept until the slot's Disable Slot completes, or kept for good.
+    fn settle_request_buffer(&mut self, buffer: Handle) {
+        match core::mem::replace(&mut self.request_buffer, BufferFate::Release) {
+            BufferFate::Release => {
+                let _ = sys::handle_close(buffer);
+            }
+            BufferFate::Hold(slot) if self.owned_slot.is_none_or(|s| s == slot) => {
+                match self.owned.keep(buffer) {
+                    Kept::Held => {
+                        self.owned_slot = Some(slot);
+                        say(b"client buffer kept until its slot is disabled: a TD on it could not be retired")
+                    }
+                    Kept::ForGood => say(b"client buffer kept for good: no room to track it until its slot is disabled"),
+                }
+                record("usb buf kept", slot as u64);
+            }
+            BufferFate::Hold(slot) => {
+                // Buffers of another slot wait for their own Disable Slot.
+                self.owned.keep_for_good(buffer);
+                say(b"client buffer kept for good: buffers of another slot are still held");
+                record("usb buf for good", slot as u64);
+            }
+            BufferFate::ForGood => {
+                self.owned.keep_for_good(buffer);
+                say(b"client buffer kept for good: its slot was not released");
+                record("usb buf for good", 0);
+            }
+        }
     }
 
     /// Slot memory that is never reused: printed with what stays
@@ -1209,10 +1298,10 @@ impl Controller {
 
     /// Disable Slot (xHCI 4.6.4) for `slot`, bounded by `deadline`, with
     /// the slot's memory `mem` (`None` when it was handed over before, for
-    /// a retried command): a completion releases the held buffer and
-    /// decides the memory's fate (`slot_disabled`); a pending one is
-    /// matched later in `dispatch`; a refused one is retried by the idle
-    /// loop first thing.
+    /// a retried command): a completion decides the fate of the client
+    /// buffers kept for the slot and of its memory (`slot_disabled`); a
+    /// pending one is matched later in `dispatch`; a refused one is retried
+    /// by the idle loop first thing.
     fn issue_disable_slot(&mut self, slot: u8, mem: Option<SlotMemory>, deadline: u64) -> Issued {
         if let Some(mem) = mem {
             if let Some((other, _)) = self.disabling.replace((slot, mem)) {
@@ -1223,13 +1312,25 @@ impl Controller {
                     b"another Disable Slot is outstanding",
                     completion::NO_EVENT,
                 );
+                // Nothing will confirm that slot released either.
+                if self.owned_slot == Some(other) {
+                    self.settle_owned(false, completion::NO_EVENT);
+                }
+                if self.request_buffer == BufferFate::Hold(other) {
+                    self.request_buffer = BufferFate::ForGood;
+                }
             }
         }
         let trb = Trb::disable_slot(slot);
-        let issued = match step_deadline(self.clock.now(), deadline, COMMAND_TIMEOUT_MS) {
+        let mut issued = match step_deadline(self.clock.now(), deadline, COMMAND_TIMEOUT_MS) {
             Some(deadline) => self.command_on(trb, deadline, None),
             None => Issued::Refused,
         };
+        let unreleased = core::mem::take(&mut self.disable_unreleased);
+        if let (Issued::Done(_, s), true) = (issued, unreleased) {
+            say(b"injected fault: the Disable Slot completion is read as Context State Error");
+            issued = Issued::Done(completion::CONTEXT_STATE_ERROR, s);
+        }
         self.report_command(b"Disable Slot", trb, issued);
         match issued {
             Issued::Done(code, _) => self.slot_disabled(slot, code),
@@ -2556,11 +2657,12 @@ impl Controller {
             st.tag = st.tag.wrapping_add(1);
             (st.tag, st.cbw.0, st.cbw.1)
         };
-        if self.inject_now == Some(Injection::Reenum) {
+        if let Some(kind @ (Injection::Reenum | Injection::Unreleased)) = self.inject_now {
             // Test injection: the endpoint is given up as after a failed
             // retire; Disable Slot and the re-enumeration from the idle
             // loop follow (the request answers Io).
             self.inject_now = None;
+            self.disable_unreleased = kind == Injection::Unreleased;
             say(b"injected fault: the endpoint is given up");
             self.give_up_endpoint(budget.deadline);
             return Err(ScsiFail::Transport(completion::NO_EVENT, None));
@@ -2791,9 +2893,10 @@ impl Controller {
     /// No command puts the endpoint back. Outside an enumeration (whose
     /// failure releases the slot itself) Disable Slot (xHCI 4.6.4) stops
     /// every transfer of the device at once, so a TD the controller still
-    /// owns can never write into a client buffer released after this; if the
-    /// command does not complete at once the buffer is held until it does
-    /// (`retire_failed`). The
+    /// owns can never write into a client buffer released after a Disable
+    /// Slot that released the slot. Until its completion says so the
+    /// request's buffer is kept (`request_buffer`), and for good if the
+    /// slot was not released (incident 0017). The
     /// device is then enumerated again after a port reset (the last resort).
     fn give_up_endpoint(&mut self, deadline: u64) {
         say(b"endpoint not recoverable by commands: disabling the slot, port reset and re-enumeration");
@@ -2801,9 +2904,21 @@ impl Controller {
         if self.transport() == Some(Transport::Enumerating) {
             return;
         }
-        if let Some(Issued::Pending(_) | Issued::Refused) = self.disable_storage_slot(deadline) {
-            self.retire_failed = true;
+        // The slot the request's TDs are on: the storage device's, or the
+        // one whose Disable Slot is already outstanding. With neither, the
+        // slot was disabled earlier and that completion decided.
+        let slot = self
+            .storage
+            .as_ref()
+            .and_then(|st| st.device)
+            .and_then(|d| self.devices[d].as_ref())
+            .map(|dev| dev.slot)
+            .or(self.pending_disable.map(|(_, s)| s))
+            .or(self.slot_to_disable);
+        if let Some(slot) = slot {
+            self.request_buffer = BufferFate::Hold(slot);
         }
+        self.disable_storage_slot(deadline);
         let now = self.clock.now();
         if let Some(st) = self.storage.as_mut() {
             if st.transport != Transport::Gone {
@@ -3317,9 +3432,9 @@ impl Controller {
     /// recorded, its endpoint recovered, and the command retried once only
     /// if the transport is still Ready (the CSW closed the failed command)
     /// with transfer window left; nothing is ever resent blindly (BOT 5.3).
-    /// If a TD could not be retired the buffer is held until the slot is
-    /// disabled (`serve_block` does not close it).
-    fn block_io(&mut self, write: bool, lba: u64, count: u16, phys: u64, buffer: Handle) -> bool {
+    /// If a TD could not be retired the buffer is kept until the slot is
+    /// disabled (`request_buffer`, settled by `serve_block`).
+    fn block_io(&mut self, write: bool, lba: u64, count: u16, phys: u64) -> bool {
         let Ok(lba32) = u32::try_from(lba) else {
             return false;
         };
@@ -3437,9 +3552,6 @@ impl Controller {
                     {
                         say(b"retrying once after the recovery");
                         continue;
-                    }
-                    if self.retire_failed {
-                        self.held_buffer = Some(buffer);
                     }
                     self.report_error(name, lba, None);
                     return false;
@@ -3965,6 +4077,7 @@ fn intel_route_ports(cfg: &Mmio) -> bool {
 /// One block protocol request on the USB storage.
 fn serve_block(ctl: &mut Controller, msg: &[u8], handles: &[Handle]) {
     let reply_to = handles[0];
+    ctl.request_buffer = BufferFate::Release;
     let capacity = ctl.storage.as_ref().map_or(0, |s| s.capacity);
     let invalid = BlockReply {
         status: BlockStatus::Invalid,
@@ -4005,7 +4118,7 @@ fn serve_block(ctl: &mut Controller, msg: &[u8], handles: &[Handle]) {
             } else {
                 match map_client_buffer(&mut ctl.client_buffers, handles[1]) {
                     Some((phys, len)) if len >= count as u64 * 512 => {
-                        if ctl.block_io(op == BlockOp::Write, lba, count, phys, handles[1]) {
+                        if ctl.block_io(op == BlockOp::Write, lba, count, phys) {
                             BlockReply {
                                 status: BlockStatus::Ok,
                                 value: count as u64,
@@ -4025,12 +4138,11 @@ fn serve_block(ctl: &mut Controller, msg: &[u8], handles: &[Handle]) {
             }
         }
     };
-    // The buffer is released only now: every TD on it has completed, been
-    // retired with Stop Endpoint and Set TR Dequeue, or its slot disabled.
-    // A buffer the controller may still own stays held until the slot is
-    // disabled (`Controller::held_buffer`).
-    if handles.len() >= 2 && ctl.held_buffer != Some(handles[1]) {
-        let _ = sys::handle_close(handles[1]);
+    // The buffer is released only now, and only if every TD on it has
+    // completed, been retired with Stop Endpoint and Set TR Dequeue, or its
+    // slot released; otherwise it is kept (incident 0017).
+    if handles.len() >= 2 {
+        ctl.settle_request_buffer(handles[1]);
     }
     if sys::ipc_send(reply_to, &reply.encode(), &[], 0).is_err() {
         // The client gave up waiting (its endpoint is closed): the work was
@@ -4078,7 +4190,7 @@ fn device_name(ctl: &Controller) -> &'static str {
 
 /// Test fault injection (`usb_fault`, ADR 0028): `N` or `idle`, with an
 /// optional kind: `cbw` (the default), `csw`, `short-csw`, `short-data`,
-/// `reenum`, `reset` or `hid` (`Injection`). `hid` counts HID reports, the
+/// `reenum`, `unreleased`, `reset` or `hid` (`Injection`). `hid` counts HID reports, the
 /// others block requests.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FaultInject {
@@ -4103,6 +4215,7 @@ impl FaultInject {
             "short-csw" => Injection::ShortCsw,
             "short-data" => Injection::ShortData,
             "reenum" => Injection::Reenum,
+            "unreleased" => Injection::Unreleased,
             "reset" => Injection::Reset,
             "hid" => Injection::Hid,
             _ => return Self::None,

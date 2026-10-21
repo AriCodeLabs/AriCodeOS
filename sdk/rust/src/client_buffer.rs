@@ -6,6 +6,11 @@
 //! most `N` and unmaps the oldest to make room. The kernel reuses the
 //! addresses of an unmapped range, so a cache that misses often costs a
 //! map and an unmap per request, not page tables.
+//!
+//! A driver that hands a client buffer to a device and cannot retire the
+//! request (a timeout with the descriptors still in the ring, a transfer
+//! whose slot was not released) keeps the buffer's handle in
+//! [`DeviceOwned`] until the device can no longer reach it (incident 0017).
 
 use crate::{self as sys, Handle};
 
@@ -98,9 +103,165 @@ impl<const N: usize> ClientBuffers<N> {
     }
 }
 
+/// What [`DeviceOwned::keep`] did with a buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kept {
+    /// Held until [`DeviceOwned::release`] or [`DeviceOwned::abandon`].
+    Held,
+    /// Every slot was taken: kept for good at once (its handle is never
+    /// closed), as after [`DeviceOwned::abandon`].
+    ForGood,
+}
+
+/// Client buffers a device may still own (incident 0017): requests the
+/// driver could not retire from the device. Without an IOMMU the device
+/// may write into such a buffer at any time, so its handle stays open:
+/// a handle keeps the DMA buffer allocated whatever the client does and
+/// whatever the mapping cache evicts (ADR 0038), and its IOMMU entry, if
+/// any, lives as long as the buffer. The driver releases the buffers once
+/// the device cannot reach them any more (the device or its queue was
+/// reset, the slot was confirmed released) or keeps them for good when it
+/// never can know. At most `N` are held; more are kept for good at once.
+pub struct DeviceOwned<const N: usize> {
+    held: [Option<Handle>; N],
+    /// Buffers kept for good since the driver started (never closed).
+    for_good: u32,
+    /// Closes a handle: `handle_close`, or a recorder in the host tests
+    /// (the only way a handle leaves this type).
+    close: fn(Handle),
+}
+
+impl<const N: usize> Default for DeviceOwned<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn close_handle(h: Handle) {
+    let _ = sys::handle_close(h);
+}
+
+impl<const N: usize> DeviceOwned<N> {
+    pub const fn new() -> Self {
+        Self::with_close(close_handle)
+    }
+
+    const fn with_close(close: fn(Handle)) -> Self {
+        Self {
+            held: [None; N],
+            for_good: 0,
+            close,
+        }
+    }
+
+    /// Takes over `dma`, the handle of a buffer the device may own: the
+    /// caller must not close it any more.
+    pub fn keep(&mut self, dma: Handle) -> Kept {
+        match self.held.iter_mut().find(|h| h.is_none()) {
+            Some(slot) => {
+                *slot = Some(dma);
+                Kept::Held
+            }
+            None => {
+                self.keep_for_good(dma);
+                Kept::ForGood
+            }
+        }
+    }
+
+    /// Takes over `dma` for good: the device may own it and nothing will
+    /// ever say otherwise, so its handle is never closed.
+    pub fn keep_for_good(&mut self, dma: Handle) {
+        let _ = dma;
+        self.for_good = self.for_good.saturating_add(1);
+    }
+
+    /// The device can no longer reach any held buffer: closes their
+    /// handles. Returns how many were released.
+    pub fn release(&mut self) -> usize {
+        let mut n = 0;
+        for h in self.held.iter_mut().filter_map(Option::take) {
+            (self.close)(h);
+            n += 1;
+        }
+        n
+    }
+
+    /// The device may keep the held buffers for good (nothing will tell
+    /// the driver otherwise): they are forgotten without closing their
+    /// handles, so their memory is never reused. Returns how many.
+    pub fn abandon(&mut self) -> usize {
+        let n = self.held().count();
+        self.held = [None; N];
+        self.for_good = self.for_good.saturating_add(n as u32);
+        n
+    }
+
+    /// The handles held now.
+    pub fn held(&self) -> impl Iterator<Item = Handle> + '_ {
+        self.held.iter().flatten().copied()
+    }
+
+    /// Buffers kept for good since the driver started.
+    pub fn kept_for_good(&self) -> u32 {
+        self.for_good
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    /// Handles closed by `release` in `device_owned_releases_what_it_holds`
+    /// (one static per test: the tests run in parallel).
+    static RELEASED: [AtomicU32; 3] = [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)];
+    static RELEASED_COUNT: AtomicU32 = AtomicU32::new(0);
+
+    fn record_release(h: Handle) {
+        let i = RELEASED_COUNT.fetch_add(1, Ordering::SeqCst) as usize;
+        RELEASED[i].store(h.0, Ordering::SeqCst);
+    }
+
+    fn never_close(h: Handle) {
+        panic!("handle {} closed although the device may own it", h.0);
+    }
+
+    #[test]
+    fn device_owned_releases_what_it_holds() {
+        let mut o: DeviceOwned<2> = DeviceOwned::with_close(record_release);
+        assert_eq!(o.keep(Handle(7)), Kept::Held);
+        assert_eq!(o.keep(Handle(9)), Kept::Held);
+        assert_eq!(o.held().count(), 2);
+        assert_eq!(o.release(), 2);
+        assert_eq!(RELEASED_COUNT.load(Ordering::SeqCst), 2);
+        assert_eq!(RELEASED[0].load(Ordering::SeqCst), 7);
+        assert_eq!(RELEASED[1].load(Ordering::SeqCst), 9);
+        assert_eq!(o.held().count(), 0);
+        assert_eq!(o.release(), 0, "nothing is held any more");
+        assert_eq!(RELEASED_COUNT.load(Ordering::SeqCst), 2);
+        assert_eq!(o.kept_for_good(), 0);
+    }
+
+    #[test]
+    fn device_owned_never_closes_what_it_keeps_for_good() {
+        let mut o: DeviceOwned<1> = DeviceOwned::with_close(never_close);
+        assert_eq!(o.keep(Handle(3)), Kept::Held);
+        // No room: the second is kept for good at once, never closed.
+        assert_eq!(o.keep(Handle(4)), Kept::ForGood);
+        assert_eq!(o.kept_for_good(), 1);
+        assert_eq!(o.abandon(), 1);
+        assert_eq!(o.kept_for_good(), 2);
+        assert_eq!(o.held().count(), 0);
+        // An abandoned handle is never closed later either.
+        assert_eq!(o.release(), 0);
+        assert_eq!(o.keep(Handle(5)), Kept::Held, "the slot is free again");
+        o.keep_for_good(Handle(6));
+        assert_eq!(o.kept_for_good(), 3);
+        let mut held = o.held();
+        assert_eq!(held.next(), Some(Handle(5)), "held ones stay held");
+        assert_eq!(held.next(), None);
+    }
 
     fn entry(n: u64) -> Entry {
         Entry {

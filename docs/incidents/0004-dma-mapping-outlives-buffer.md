@@ -279,7 +279,9 @@ order, the FLR checks and the `serial_order` check. Full suite on c6df9a9:
 Left open by that audit:
 
 - a buffer released after a failed request while the device may still
-  own it (virtio-blk timeout, xHCI Disable Slot): incident 0017;
+  own it (virtio-blk timeout, xHCI Disable Slot): incident 0017, fixed on
+  `fix/device-owned-buffers` (reproduced first; drivers keep the handle
+  until the device is reset or the slot released);
 - the firmware USB handoff now runs with bus mastering off (usb-input,
   usb-ehci): watch the first boot on the laptop's Intel xHCI for a Host
   System Error or a handoff timeout;

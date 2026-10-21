@@ -18,6 +18,7 @@ aricode-virtio = { path = "../../libs/virtio" }
 aricode-proto = { path = "../../sdk/proto" }
 aricode-gpt = { path = "../../libs/gpt" }
 aricode-rt = { path = "../../sdk/runtime" }
+aricode-cmdline = { path = "../../libs/cmdline" }
 
 [build-dependencies]
 aricode-build = { path = "../../sdk/build" }

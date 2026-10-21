@@ -210,6 +210,7 @@ name = "ari-virtio-blk"
 version = "0.12.0"
 dependencies = [
  "aricode-build",
+ "aricode-cmdline",
  "aricode-gpt",
  "aricode-proto",
  "aricode-rt",

@@ -289,6 +289,16 @@ impl Virtqueue {
     pub fn num_free(&self) -> u16 {
         self.num_free
     }
+
+    /// Descriptors the device still owns: published in the available ring
+    /// and not returned through the used ring (virtio 1.2, 2.7, split
+    /// virtqueues). Every buffer they point at may still be read or written
+    /// by the device; without an IOMMU its
+    /// memory must not be released until they come back or the device is
+    /// reset (incident 0017).
+    pub fn in_flight(&self) -> u16 {
+        self.layout.size - self.num_free
+    }
 }
 
 /// virtio-blk request header (16 bytes) followed by data and a status byte.
@@ -395,6 +405,7 @@ mod tests {
             .unwrap();
         assert_eq!(head, 0);
         assert_eq!(q.num_free(), 1);
+        assert_eq!(q.in_flight(), 3, "the device owns the whole chain");
         // Chained descriptors with correct flags.
         let d0 = q.desc(0);
         assert_eq!(
@@ -421,6 +432,7 @@ mod tests {
         assert!(q.has_used(), "a used entry is visible before it is popped");
         assert_eq!(q.pop_used(), Some((0, 513)));
         assert_eq!(q.num_free(), 4, "the chain returns to the free list");
+        assert_eq!(q.in_flight(), 0);
         assert!(!q.has_used());
         assert!(q.pop_used().is_none());
         // The whole queue can be used again.
