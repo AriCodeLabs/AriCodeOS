@@ -289,3 +289,17 @@ Left open by that audit:
   stuck device keeps being restarted;
 - the readiness poll after FLR treats any vendor id but 0xFFFF as ready
   (CRS visibility would read 0x0001).
+
+## Hardware verification (2026-10-21)
+
+Reference laptop (no IOMMU; Realtek 10ec:8136, Intel xHCI 8086:1e31,
+two EHCI), upgraded over the network from version 8 to version 9
+(develop 5c1a05f, production-signed index) and rebooted into the new
+slot. Every driver now enables bus mastering itself after its device
+reset: `usb_input` (xHCI) and both `usb_ehci` came up ready, so the
+firmware USB handoff with bus mastering off (the second audit's watch
+item) did not produce a Host System Error or a handoff timeout on this
+machine; the stick (on the xHCI) reads and writes; `rtl_net` has link and
+an address; HTTPS works; `diag` records no fault event, no quarantine and
+no "claim held elsewhere". The driver-death path (bus mastering cleared
+at reap, restart) was not exercised on the laptop: no driver died.
