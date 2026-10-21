@@ -3359,10 +3359,14 @@ fn serve_block(ctl: &mut Ehci, msg: &[u8], handles: &[Handle]) {
         }
     };
     // A buffer the controller may still own (a queue head it never
-    // released) is kept for good, so its memory is never reused.
+    // released) is kept for good, so its memory is never reused: there is
+    // no controller reset after boot that would hand it back (incident
+    // 0017). The storage is unusable from then on until it is plugged in
+    // again (`storage_broken`), so this happens once per lost queue head.
     if handles.len() >= 2 {
         if ctl.buffer_unsafe {
-            say(b"client buffer kept: the controller may still own it");
+            say(b"client buffer kept for good: the controller may still own it");
+            record("ehci buf for good", 0);
             ctl.buffer_unsafe = false;
         } else {
             let _ = sys::handle_close(handles[1]);

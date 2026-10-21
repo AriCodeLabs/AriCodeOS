@@ -51,9 +51,10 @@ impl BlockClient {
     }
 
     /// One request: the send waits `rpc::GRACE_MS` for the server queue,
-    /// the reply `REPLY_WAIT_MS`. The USB storage server releases the
-    /// buffer handle only after every transfer on it completed, was
-    /// retired, or its slot was disabled; with a reply wait above the
+    /// the reply `REPLY_WAIT_MS`. The block servers release the buffer
+    /// handle only once the device cannot reach the buffer (every transfer
+    /// on it completed or was retired, its slot was released, or the device
+    /// was reset) and keep it otherwise (incident 0017); with a reply wait above the
     /// server's worst case a slow disk shows up here as latency, never as
     /// a client that gave up while the device still owned its buffer.
     fn call(&self, req: Request, with_buffer: bool) -> Result<Reply, Error> {

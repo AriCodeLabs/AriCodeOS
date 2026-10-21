@@ -8,6 +8,15 @@
 //! modern interface, creates queue 0 in DMA memory, reads the GPT and serves
 //! requests from other processes over IPC (`aricode-proto::block`); they supply
 //! their own DMA buffer: the device reads and writes it directly.
+//!
+//! A request the device does not complete (a timeout with its descriptors
+//! still in the ring, an unexpected used entry, a device that asks for a
+//! reset) leaves the device owning the client's buffer: the driver keeps
+//! the buffer's handle, answers `Io`, resets the device and creates the
+//! queue again, and only then releases the buffer (incident 0017). After
+//! `MAX_RESETS` resets with no request completed in between, or a reset
+//! that fails, the driver exits: the kernel clears bus mastering before it
+//! frees what the driver held (ADR 0038) and the supervisor restarts it.
 #![no_std]
 #![no_main]
 
@@ -15,14 +24,31 @@ extern crate alloc;
 
 use aricode_proto::block::{Op, Reply, Request, Status, MAX_SECTORS};
 use aricode_rt::sys::block::{map_client_buffer, ClientBuffers};
+use aricode_rt::sys::client_buffer::{DeviceOwned, Kept};
 use aricode_rt::sys::virtio_pci::{extra_handle, DmaRegion, Queue, Transport, IRQ, SERVICE};
 use aricode_rt::sys::{self, Error, Handle, TIMEOUT_INFINITE};
 use aricode_virtio::blk;
+
+/// How long a request may take before the device is considered not to
+/// complete it (ms).
+const REQUEST_TIMEOUT_MS: u64 = 2000;
+/// Device resets in a row, with no request completed in between, after
+/// which the device is given up (bounded recovery, ADR 0028).
+const MAX_RESETS: u32 = 3;
+/// Exit code when the device is given up after `MAX_RESETS` resets.
+const EXIT_GIVEN_UP: u64 = 50;
+/// Exit code when the features change across a reset.
+const EXIT_FEATURES_CHANGED: u64 = 51;
 
 fn say(msg: &[u8]) {
     sys::print(b"virtio-blk: ");
     sys::print(msg);
     sys::print(b"\n");
+}
+
+/// A fault event in the kernel ring (ADR 0028; `diag` lists it).
+fn record(name: &str, code: u64) {
+    let _ = sys::event_record(code, name);
 }
 
 struct Device {
@@ -37,6 +63,12 @@ struct Device {
     fault_lba: Option<u64>,
     /// The request being issued is the injected one: no notification.
     lose_notify: bool,
+    /// Client buffers of requests the device did not complete, kept until
+    /// it is reset (incident 0017). One at most: the device is reset right
+    /// after such a request is answered.
+    owned: DeviceOwned<1>,
+    /// Device resets since the last request the device completed.
+    resets: u32,
 }
 
 fn setup(mask: u64) -> Result<Device, u64> {
@@ -52,6 +84,8 @@ fn setup(mask: u64) -> Result<Device, u64> {
         flush,
         fault_lba: None,
         lose_notify: false,
+        owned: DeviceOwned::new(),
+        resets: 0,
     })
 }
 
@@ -62,7 +96,8 @@ impl Device {
 
     /// One synchronous request: header and status in the own buffer, data in
     /// `(data_phys, data_len)` if any (`T_FLUSH` has none); waits for the
-    /// MSI-X interrupt and checks the status.
+    /// MSI-X interrupt and checks the status. On a failure the device may
+    /// still own the request's buffers (`device_owns_buffers`).
     fn request(
         &mut self,
         header: blk::RequestHeader,
@@ -92,9 +127,10 @@ impl Device {
                 if done != head {
                     return Err(41);
                 }
+                self.resets = 0;
                 break;
             }
-            match sys::irq_wait(IRQ, 2000) {
+            match sys::irq_wait(IRQ, REQUEST_TIMEOUT_MS) {
                 Ok(_) => {}
                 Err(Error::Timeout) => return Err(42),
                 Err(_) => return Err(43),
@@ -104,6 +140,86 @@ impl Device {
             blk::STATUS_OK => Ok(()),
             _ => Err(44),
         }
+    }
+
+    /// The device may still read or write a buffer it was given: a request
+    /// it did not complete left descriptors in the ring, or it asks to be
+    /// reset (`DEVICE_NEEDS_RESET`, virtio 1.2, 2.1.2), after which it
+    /// completes nothing.
+    fn device_owns_buffers(&self) -> bool {
+        self.queue.vq.in_flight() > 0 || self.transport.needs_reset()
+    }
+
+    /// Hands back the handle of the client buffer of the request just
+    /// served: closed when the device owns nothing, otherwise kept until
+    /// the device is reset (`recover`), so that the buffer cannot be freed
+    /// and reused under a device that may still write into it.
+    fn settle_client_buffer(&mut self, buffer: Handle, lba: u64) {
+        if !self.device_owns_buffers() {
+            let _ = sys::handle_close(buffer);
+            return;
+        }
+        match self.owned.keep(buffer) {
+            Kept::Held => {
+                say(b"client buffer kept until the device is reset: its request did not complete")
+            }
+            Kept::ForGood => say(b"client buffer kept for good: no room to track it"),
+        }
+        record("blk buf kept", lba);
+    }
+
+    /// After a request the device did not complete: resets the device
+    /// (virtio 1.2, 2.4), negotiates the same features, creates the queue
+    /// again on its memory and sets `DRIVER_OK`; then the client buffers
+    /// kept for that request are released. Exits when the reset fails, when
+    /// the features change, or after `MAX_RESETS` resets in a row.
+    fn recover(&mut self) {
+        self.resets += 1;
+        say(b"resetting the device: a request did not complete");
+        record("blk reset", self.resets as u64);
+        if let Err(code) = self.restart() {
+            self.give_up(b"the device does not come back from its reset", code);
+        }
+        let released = self.owned.release();
+        if released > 0 {
+            say(b"client buffer released: the device was reset");
+            record("blk buf released", released as u64);
+        }
+        if self.resets >= MAX_RESETS {
+            self.give_up(
+                b"no request completed across the last resets",
+                EXIT_GIVEN_UP,
+            );
+        }
+    }
+
+    fn restart(&mut self) -> Result<(), u64> {
+        let before = self.transport.features;
+        self.transport.reset().map_err(|e| e.code())?;
+        self.transport
+            .negotiate(blk::F_FLUSH)
+            .map_err(|e| e.code())?;
+        // The capacity and `flush` were read with these features.
+        if self.transport.features != before {
+            return Err(EXIT_FEATURES_CHANGED);
+        }
+        self.transport
+            .restart_queue(&mut self.queue)
+            .map_err(|e| e.code())?;
+        self.transport.driver_ok();
+        Ok(())
+    }
+
+    /// Bounded recovery exhausted: exits. The kernel clears the device's
+    /// bus mastering before it frees anything this driver held, kept
+    /// client buffers included (ADR 0038), and the supervisor restarts the
+    /// driver, which starts with its own reset.
+    fn give_up(&self, why: &[u8], code: u64) -> ! {
+        sys::print(b"virtio-blk: device given up: ");
+        sys::print(why);
+        sys::print(b"; exiting\n");
+        record("blk given up", code);
+        sys::process_exit(code)
     }
 
     /// Reads one sector into the own buffer (for the GPT).
@@ -167,6 +283,8 @@ fn report_partitions(dev: &mut Device) {
 fn serve(dev: &mut Device) -> ! {
     let capacity = dev.capacity();
     let mut msg = [0u8; 32];
+    // LBA of the request being served, for the fault events.
+    let mut lba_served = 0;
     let mut handles = [Handle(0); 2];
     let mut buffers = ClientBuffers::new();
     say(b"serving requests");
@@ -206,6 +324,7 @@ fn serve(dev: &mut Device) -> ! {
                 }
             }
             Some(Request { op, count, lba }) => {
+                lba_served = lba;
                 let count = count.min(MAX_SECTORS) as u64;
                 if nh < 2 {
                     Reply {
@@ -244,15 +363,10 @@ fn serve(dev: &mut Device) -> ! {
                                     status: Status::Ok,
                                     value: count,
                                 },
-                                Err(_) => {
-                                    if dev.transport.needs_reset() {
-                                        say(b"the device requests a reset");
-                                    }
-                                    Reply {
-                                        status: Status::Io,
-                                        value: 0,
-                                    }
-                                }
+                                Err(_) => Reply {
+                                    status: Status::Io,
+                                    value: 0,
+                                },
                             }
                         }
                         _ => Reply {
@@ -264,19 +378,15 @@ fn serve(dev: &mut Device) -> ! {
             }
         };
         if nh >= 2 {
-            let owned = dev.queue.vq.in_flight();
-            if owned > 0 {
-                // Debug check (incident 0017): the descriptor chain of a
-                // request that did not complete still points at the buffer.
-                sys::print(b"virtio-blk: client buffer released while the device still owns ");
-                sys::print(aricode_rt::fmt_u64(owned as u64, &mut [0u8; 20]));
-                sys::print(b" descriptor(s) (incident 0017)\n");
-                let _ = sys::event_record(owned as u64, "blk buf freed owned");
-            }
-            let _ = sys::handle_close(handles[1]);
+            dev.settle_client_buffer(handles[1], lba_served);
         }
         let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
         let _ = sys::handle_close(reply_to);
+        // The client has its answer; the device is reset before the next
+        // request, and only then is a kept buffer released.
+        if dev.device_owns_buffers() {
+            dev.recover();
+        }
     }
 }
 
@@ -309,6 +419,9 @@ fn main(mask: u64) -> u64 {
     sys::print(aricode_rt::fmt_u64(dev.capacity(), &mut buf));
     sys::print(b" sectors\n");
     report_partitions(&mut dev);
+    if dev.device_owns_buffers() {
+        dev.recover();
+    }
     serve(&mut dev)
 }
 

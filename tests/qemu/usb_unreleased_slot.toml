@@ -29,15 +29,18 @@ serial_contains = [
     "usb-input: injected fault: the endpoint is given up",
     "usb-input: injected fault: the Disable Slot completion is read as Context State Error",
     "usb-input: slot memory abandoned: Disable Slot did not release the slot",
+    "usb-input: client buffer kept for good: its slot was not released",
     "write: write error",
     "usb-input: storage device back in service",
     "write: 11 bytes to probe.txt",
     "usb ep lost",
     "usb slot mem abandoned",
+    "usb buf for good",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_absent = [
     "KERNEL PANIC",
     "released although its slot was not released",
     "releasing the client buffer it could still write",
+    "the client buffer kept for it is released",
 ]
