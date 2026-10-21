@@ -3880,6 +3880,38 @@ Open: incident 0004 (a DMA mapping that outlives its buffer); the kernel
 does not expose its generator's seeding state; EHCI hubs, split
 transactions and 64-bit addressing only verifiable on hardware.
 
+## 94.13 AriCodeOS 0.13
+
+**Status: completed (2026-10-22), tag `v0.13.0`.** The version that
+closed the last high-priority defect: DMA memory across protection
+domains. Each fix reproduced before it was changed, audited by
+independent reviewers (three rounds for incident 0004), verified on the
+laptop. One ADR (0038), two incidents closed.
+
+- DMA buffer lifetime (incident 0004, ADR 0038): a mapping of a DMA
+  buffer keeps the buffer alive, so its frames never return to the PMM
+  while any process maps them; new `mmio_unmap` syscall (ABI 5); mapped
+  DMA bytes count against the mapping process's quota; quota-less system
+  services bounded by an 8-entry buffer cache; freed address ranges
+  reused (`libs/vranges`) and partial mappings rolled back;
+- driver death: bus mastering is cleared before the dead driver's frames
+  are freed, a claim leaves it off until the new driver has reset its
+  device, the claim token clears it when dropped, FLR where advertised
+  (with Transactions Pending, readiness and `pci.flr=off`), quarantine if
+  a device will not stop;
+- buffers a device may still own (incident 0017): virtio-blk keeps the
+  buffer of a failed request until it has reset the device and recreated
+  the queue, and honours `strict`; the USB drivers release such a buffer
+  only when the controller confirms the slot was released;
+- verified on the laptop with versions 9 and 10 over a production-signed
+  index: every driver enables bus mastering itself after its reset, the
+  firmware USB handoff works with bus mastering off, no fault event.
+
+Open: the kernel does not expose its generator's seeding state; EHCI
+hubs, split transactions and 64-bit addressing only verifiable on
+hardware; the driver-death path has not run on the laptop (no driver
+died there).
+
 ---
 
 # 95. Real hardware: the right moment
