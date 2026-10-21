@@ -262,3 +262,30 @@ Results after the fix: `cargo xtask check` clean, host tests green,
   `buffer_unsafe`); virtio-blk should do the same, or reset the device.
 - The drivers' new bus-mastering order (claim leaves it off, the driver
   enables it after its reset) has run only in QEMU.
+
+## Second audit (2026-10-21, commit c6df9a9)
+
+An independent re-audit of the follow-up commits found nothing serious:
+both previous high findings and their medium and low findings are fixed.
+It verified the local-only TLB invalidation in `mmio_unmap` against the
+scheduler (one thread per process, CR3 reloaded on every switch to
+another address space, no PCID, no global user pages, migration inside
+the syscall covered), the `VirtRanges` allocator (random model test,
+mutations caught), that every claimant enables bus mastering after its
+device reset and before programming DMA, the `ClaimToken` race and lock
+order, the FLR checks and the `serial_order` check. Full suite on c6df9a9:
+160 scenarios with 0 failed with 1 CPU and with 4 CPUs.
+
+Left open by that audit:
+
+- a buffer released after a failed request while the device may still
+  own it (virtio-blk timeout, xHCI Disable Slot): incident 0017;
+- the firmware USB handoff now runs with bus mastering off (usb-input,
+  usb-ehci): watch the first boot on the laptop's Intel xHCI for a Host
+  System Error or a handoff timeout;
+- a claim transferred to another process skips the stop and the
+  quarantine at reap (no driver does it);
+- quarantine is bounded per incident, not overall, if a driver with a
+  stuck device keeps being restarted;
+- the readiness poll after FLR treats any vendor id but 0xFFFF as ready
+  (CRS visibility would read 0x0001).
