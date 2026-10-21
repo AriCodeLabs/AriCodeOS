@@ -1,0 +1,35 @@
+# Incident 0017: without an IOMMU a driver must not release a client
+# buffer the device may still own. `blk_fault=4300` makes virtio-blk leave
+# the device unnotified of the first request on LBA 4300 (a lost doorbell):
+# the request times out for real and its descriptor chain stays in the
+# ring. `blk_late` then closes that buffer, pushes it out of the server's
+# mapping cache, allocates fresh buffers (which get its frames if they were
+# freed) and sends a valid request, which makes the device process whatever
+# is still in its ring. No fresh buffer may receive disk data, and the
+# valid request must succeed. `iommu=off` gives the device untranslated
+# DMA, as on the reference laptop (with the IOMMU on, the late write is an
+# IOMMU fault instead).
+name = "storage.late_completion"
+description = "virtio-blk: a timed-out request's buffer is kept until the device is reset, so a late completion never lands in reused memory"
+level = "full"
+areas = ["storage", "virtio", "drivers"]
+cmdline = "qemu_exit iommu=off blk_fault=4300"
+timeout_secs = 60
+
+[expect]
+exit = 33
+serial_contains = [
+    "virtio-blk: injected fault: the device is not notified of this request (blk_fault)",
+    "blk_late: the request timed out (Io), as injected",
+    "blk_late: buffer A closed and pushed out of the server's mapping cache",
+    "blk_late: no late write reached reused memory; the next request succeeded",
+    "AriInit: late completion test ok",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "released while the device still owns",
+    "late device write",
+    "the ring still held the old chain",
+    "DMA fault",
+]

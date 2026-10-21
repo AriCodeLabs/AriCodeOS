@@ -642,6 +642,10 @@ enum Injection {
     /// The endpoint is given up as if no command put it back: Disable
     /// Slot and the whole re-enumeration run.
     Reenum,
+    /// Like `Reenum`, but the Disable Slot completion is read as Context
+    /// State Error (xHCI 6.4.5): a slot the controller did not release, so
+    /// it may still own the request's buffer (incident 0017).
+    Unreleased,
     /// The device is treated as not answering any more: the request
     /// answers Io and the idle loop resets the port and enumerates the
     /// device again on its slot (Reset Device, xHCI 4.6.11).
@@ -693,7 +697,7 @@ struct TransferFault {
 struct Controller {
     /// `strict` boot flag: halt on the first transport failure.
     strict: bool,
-    /// `usb_fault=N|idle[:cbw|:csw|:short-csw|:short-data|:reenum|:reset|:hid]`
+    /// `usb_fault=N|idle[:cbw|:csw|:short-csw|:short-data|:reenum|:unreleased|:reset|:hid]`
     /// (tests): an injected failure.
     fault_inject: FaultInject,
     /// The injected failure due in the current request, until it is used.
@@ -710,6 +714,12 @@ struct Controller {
     slot_to_disable: Option<u8>,
     /// Client buffer handle kept until a Disable Slot completes.
     held_buffer: Option<Handle>,
+    /// `usb_fault=...:unreleased` (tests): the next Disable Slot
+    /// completion is read as Context State Error.
+    disable_unreleased: bool,
+    /// A Disable Slot completed without releasing its slot since the last
+    /// block reply (debug check, incident 0017).
+    slot_unreleased: bool,
     /// Client buffers mapped for the controller's IOMMU domain (ADR 0038).
     client_buffers: ClientBuffers,
     /// Last block request and last HID report (ms), for `usb_fault=idle`.
@@ -920,6 +930,8 @@ impl Controller {
             pending_disable: None,
             slot_to_disable: None,
             held_buffer: None,
+            disable_unreleased: false,
+            slot_unreleased: false,
             client_buffers: ClientBuffers::new(),
             last_request_ms: 0,
             last_report_ms: 0,
@@ -1173,6 +1185,7 @@ impl Controller {
             }
         };
         if !completion::disable_slot_released(code) {
+            self.slot_unreleased = true;
             self.abandon_slot_memory(b"Disable Slot did not release the slot", code);
             return;
         }
@@ -1226,10 +1239,16 @@ impl Controller {
             }
         }
         let trb = Trb::disable_slot(slot);
-        let issued = match step_deadline(self.clock.now(), deadline, COMMAND_TIMEOUT_MS) {
+        let mut issued = match step_deadline(self.clock.now(), deadline, COMMAND_TIMEOUT_MS) {
             Some(deadline) => self.command_on(trb, deadline, None),
             None => Issued::Refused,
         };
+        if let Issued::Done(_, s) = issued {
+            if core::mem::take(&mut self.disable_unreleased) {
+                say(b"injected fault: the Disable Slot completion is read as Context State Error");
+                issued = Issued::Done(completion::CONTEXT_STATE_ERROR, s);
+            }
+        }
         self.report_command(b"Disable Slot", trb, issued);
         match issued {
             Issued::Done(code, _) => self.slot_disabled(slot, code),
@@ -2556,11 +2575,12 @@ impl Controller {
             st.tag = st.tag.wrapping_add(1);
             (st.tag, st.cbw.0, st.cbw.1)
         };
-        if self.inject_now == Some(Injection::Reenum) {
+        if let Some(kind @ (Injection::Reenum | Injection::Unreleased)) = self.inject_now {
             // Test injection: the endpoint is given up as after a failed
             // retire; Disable Slot and the re-enumeration from the idle
             // loop follow (the request answers Io).
             self.inject_now = None;
+            self.disable_unreleased = kind == Injection::Unreleased;
             say(b"injected fault: the endpoint is given up");
             self.give_up_endpoint(budget.deadline);
             return Err(ScsiFail::Transport(completion::NO_EVENT, None));
@@ -4030,6 +4050,12 @@ fn serve_block(ctl: &mut Controller, msg: &[u8], handles: &[Handle]) {
     // A buffer the controller may still own stays held until the slot is
     // disabled (`Controller::held_buffer`).
     if handles.len() >= 2 && ctl.held_buffer != Some(handles[1]) {
+        if core::mem::take(&mut ctl.slot_unreleased) {
+            // Debug check (incident 0017): the slot the request ran on was
+            // not released, so the controller may still own this buffer.
+            say(b"client buffer released although its slot was not released (incident 0017)");
+            record("usb buf freed owned", 0);
+        }
         let _ = sys::handle_close(handles[1]);
     }
     if sys::ipc_send(reply_to, &reply.encode(), &[], 0).is_err() {
@@ -4078,7 +4104,7 @@ fn device_name(ctl: &Controller) -> &'static str {
 
 /// Test fault injection (`usb_fault`, ADR 0028): `N` or `idle`, with an
 /// optional kind: `cbw` (the default), `csw`, `short-csw`, `short-data`,
-/// `reenum`, `reset` or `hid` (`Injection`). `hid` counts HID reports, the
+/// `reenum`, `unreleased`, `reset` or `hid` (`Injection`). `hid` counts HID reports, the
 /// others block requests.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FaultInject {
@@ -4103,6 +4129,7 @@ impl FaultInject {
             "short-csw" => Injection::ShortCsw,
             "short-data" => Injection::ShortData,
             "reenum" => Injection::Reenum,
+            "unreleased" => Injection::Unreleased,
             "reset" => Injection::Reset,
             "hid" => Injection::Hid,
             _ => return Self::None,

@@ -3,8 +3,8 @@
 //! Ring 3 virtio-blk driver (Phase 18) and block service (Phase 19).
 //!
 //! Receives from `init`, in this order, the service endpoint, the PCI
-//! configuration space, the hardware capability, the MSI-X IRQ and the BARs
-//! present (`arg` is the BAR mask). Initializes the device through the
+//! configuration space, the hardware capability, the MSI-X IRQ, the BARs
+//! present (`arg` is the BAR mask) and `SYSTEM` (read: the command line). Initializes the device through the
 //! modern interface, creates queue 0 in DMA memory, reads the GPT and serves
 //! requests from other processes over IPC (`aricode-proto::block`); they supply
 //! their own DMA buffer: the device reads and writes it directly.
@@ -15,7 +15,7 @@ extern crate alloc;
 
 use aricode_proto::block::{Op, Reply, Request, Status, MAX_SECTORS};
 use aricode_rt::sys::block::{map_client_buffer, ClientBuffers};
-use aricode_rt::sys::virtio_pci::{DmaRegion, Queue, Transport, IRQ, SERVICE};
+use aricode_rt::sys::virtio_pci::{extra_handle, DmaRegion, Queue, Transport, IRQ, SERVICE};
 use aricode_rt::sys::{self, Error, Handle, TIMEOUT_INFINITE};
 use aricode_virtio::blk;
 
@@ -32,6 +32,11 @@ struct Device {
     req: DmaRegion,
     /// `VIRTIO_BLK_F_FLUSH` negotiated: `T_FLUSH` makes writes durable.
     flush: bool,
+    /// `blk_fault=LBA` (tests): the first client request that covers it
+    /// is not notified to the device (a lost doorbell).
+    fault_lba: Option<u64>,
+    /// The request being issued is the injected one: no notification.
+    lose_notify: bool,
 }
 
 fn setup(mask: u64) -> Result<Device, u64> {
@@ -45,6 +50,8 @@ fn setup(mask: u64) -> Result<Device, u64> {
         queue,
         req,
         flush,
+        fault_lba: None,
+        lose_notify: false,
     })
 }
 
@@ -75,7 +82,11 @@ impl Device {
             None => self.queue.vq.add(&[(self.req.phys, 16, false), status]),
         }
         .ok_or(40u64)?;
-        self.queue.notify(&self.transport);
+        if core::mem::take(&mut self.lose_notify) {
+            say(b"injected fault: the device is not notified of this request (blk_fault)");
+        } else {
+            self.queue.notify(&self.transport);
+        }
         loop {
             if let Some((done, _)) = self.queue.vq.pop_used() {
                 if done != head {
@@ -210,6 +221,13 @@ fn serve(dev: &mut Device) -> ! {
                     match map_client_buffer(&mut buffers, handles[1]) {
                         Some((phys, len)) if len >= count * 512 => {
                             let bytes = (count * 512) as u32;
+                            if dev
+                                .fault_lba
+                                .is_some_and(|f| (lba..lba + count).contains(&f))
+                            {
+                                dev.fault_lba = None;
+                                dev.lose_notify = true;
+                            }
                             let r = match op {
                                 Op::Read => dev.request(
                                     blk::RequestHeader::read(lba),
@@ -246,6 +264,15 @@ fn serve(dev: &mut Device) -> ! {
             }
         };
         if nh >= 2 {
+            let owned = dev.queue.vq.in_flight();
+            if owned > 0 {
+                // Debug check (incident 0017): the descriptor chain of a
+                // request that did not complete still points at the buffer.
+                sys::print(b"virtio-blk: client buffer released while the device still owns ");
+                sys::print(aricode_rt::fmt_u64(owned as u64, &mut [0u8; 20]));
+                sys::print(b" descriptor(s) (incident 0017)\n");
+                let _ = sys::event_record(owned as u64, "blk buf freed owned");
+            }
             let _ = sys::handle_close(handles[1]);
         }
         let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
@@ -261,6 +288,16 @@ fn main(mask: u64) -> u64 {
             return step;
         }
     };
+    let mut args = [0u8; 256];
+    if let Some(text) = sys::cmdline(extra_handle(mask, 0), &mut args) {
+        let c = aricode_cmdline::CmdLine::new(text);
+        dev.fault_lba = c
+            .get(aricode_cmdline::keys::BLK_FAULT)
+            .and_then(|v| v.parse().ok());
+        if dev.fault_lba.is_some() {
+            say(b"blk_fault: the first request on the given LBA will not be notified");
+        }
+    }
     let mut buf = [0u8; 20];
     say(b"device ready");
     say(if dev.flush {
