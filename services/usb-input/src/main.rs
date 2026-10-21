@@ -31,7 +31,7 @@ use aricode_proto::block::{
     Op as BlockOp, Reply as BlockReply, Request as BlockRequest, Status as BlockStatus, MAX_SECTORS,
 };
 use aricode_proto::input::{Event as WireEvent, Op, Reply, Request, Status, MAX_EVENTS};
-use aricode_rt::sys::block::map_client_buffer;
+use aricode_rt::sys::block::{map_client_buffer, ClientBuffers};
 use aricode_rt::sys::virtio_pci::{bar_handle, extra_handle, DmaRegion, Mmio, CFG, IRQ, SERVICE};
 use aricode_rt::sys::{self, abi, Handle};
 use aricode_usb_storage::{
@@ -710,6 +710,8 @@ struct Controller {
     slot_to_disable: Option<u8>,
     /// Client buffer handle kept until a Disable Slot completes.
     held_buffer: Option<Handle>,
+    /// Client buffers mapped for the controller's IOMMU domain (ADR 0038).
+    client_buffers: ClientBuffers,
     /// Last block request and last HID report (ms), for `usb_fault=idle`.
     last_request_ms: u64,
     last_report_ms: u64,
@@ -866,6 +868,11 @@ impl Controller {
         wait_bits(&op, op::USBCMD, op::CMD_RESET, false, &clock, 500).ok_or(exit::RESET_TIMEOUT)?;
         wait_bits(&op, op::USBSTS, op::STS_NOT_READY, false, &clock, 500)
             .ok_or(exit::RESET_TIMEOUT)?;
+        // Reset done: only now may the controller reach memory (ADR 0038).
+        sys::pci::enable_bus_master(CFG).map_err(|_| {
+            say(b"could not enable bus mastering");
+            exit::MAP_BAR
+        })?;
 
         // Structures: DCBAA, scratchpads, command ring, event ring and ERST.
         let slots = params.max_slots as u64;
@@ -913,6 +920,7 @@ impl Controller {
             pending_disable: None,
             slot_to_disable: None,
             held_buffer: None,
+            client_buffers: ClientBuffers::new(),
             last_request_ms: 0,
             last_report_ms: 0,
             op,
@@ -3995,7 +4003,7 @@ fn serve_block(ctl: &mut Controller, msg: &[u8], handles: &[Handle]) {
             {
                 invalid
             } else {
-                match map_client_buffer(handles[1]) {
+                match map_client_buffer(&mut ctl.client_buffers, handles[1]) {
                     Some((phys, len)) if len >= count as u64 * 512 => {
                         if ctl.block_io(op == BlockOp::Write, lba, count, phys, handles[1]) {
                             BlockReply {

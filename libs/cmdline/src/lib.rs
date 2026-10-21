@@ -111,6 +111,10 @@ pub mod keys {
     pub const SMP: &str = "smp";
     /// `iommu=off`: do not enable DMA translation (real hardware).
     pub const IOMMU: &str = "iommu";
+    /// `pci.flr=off`: never reset a PCI function (FLR) when its driver
+    /// dies; bus mastering is still turned off (recovery knob for real
+    /// hardware, ADR 0038).
+    pub const PCI_FLR: &str = "pci.flr";
     /// Failure protocol (ADR 0028): a component halts on its first
     /// unexpected failure and init restarts nothing.
     pub const STRICT: &str = "strict";

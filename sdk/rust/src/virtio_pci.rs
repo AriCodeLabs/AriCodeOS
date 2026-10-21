@@ -198,6 +198,8 @@ impl Transport {
         // Negotiation (virtio 1.x, section 3.1.1).
         common.w8(common::DEVICE_STATUS, 0);
         while common.r8(common::DEVICE_STATUS) != 0 {}
+        // Reset: only now may the device reach memory (ADR 0038).
+        crate::pci::enable_bus_master(CFG).map_err(|_| SetupError::MapConfig)?;
         common.w8(common::DEVICE_STATUS, status::ACKNOWLEDGE);
         common.w8(common::DEVICE_STATUS, status::ACKNOWLEDGE | status::DRIVER);
         common.w32(common::DEVICE_FEATURE_SELECT, 0);

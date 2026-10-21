@@ -147,6 +147,10 @@ pub struct Expect {
     pub serial_contains: Vec<String>,
     #[serde(default)]
     pub serial_absent: Vec<String>,
+    /// Texts that must appear in this order (each one after the end of the
+    /// previous one's first match from there on).
+    #[serde(default)]
+    pub serial_order: Vec<String>,
     /// The runner had to kill QEMU on seeing `kill_on` (power cut).
     #[serde(default)]
     pub killed: bool,
@@ -157,8 +161,22 @@ impl Expect {
         self.exit.is_none()
             && self.serial_contains.is_empty()
             && self.serial_absent.is_empty()
+            && self.serial_order.is_empty()
             && !self.killed
     }
+}
+
+/// Index in `order` of the first text not found after the previous one in
+/// `serial` (`Expect::serial_order`), or `None` if they all appear in order.
+pub fn first_out_of_order(serial: &str, order: &[String]) -> Option<usize> {
+    let mut from = 0;
+    for (i, needle) in order.iter().enumerate() {
+        match serial[from..].find(needle.as_str()) {
+            Some(at) => from += at + needle.len(),
+            None => return Some(i),
+        }
+    }
+    None
 }
 
 /// One boot of a multi-boot scenario (`[[boots]]`): the test disk is kept
@@ -277,6 +295,11 @@ pub struct Scenario {
     /// runs without a network service.
     #[serde(default)]
     pub no_nic: bool,
+    /// Adds a PCI function that advertises Function Level Reset (an
+    /// unused Intel 82576 `igb` NIC with no backend) for `test=pci_reap`
+    /// (incident 0004).
+    #[serde(default)]
+    pub flr_device: bool,
     #[serde(default)]
     pub inject: Inject,
     /// What is expected from the single boot (without `[[boots]]`).
@@ -457,6 +480,25 @@ pub fn select<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serial_order_checks_the_sequence() {
+        let order = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let log = "a stop\nb free\nc stop\n";
+        assert_eq!(first_out_of_order(log, &order(&["stop", "free"])), None);
+        assert_eq!(
+            first_out_of_order(log, &order(&["free", "stop"])),
+            None,
+            "the second stop"
+        );
+        assert_eq!(first_out_of_order(log, &order(&["free", "free"])), Some(1));
+        assert_eq!(
+            first_out_of_order(log, &order(&["c stop", "b free"])),
+            Some(1)
+        );
+        assert_eq!(first_out_of_order(log, &order(&["missing"])), Some(0));
+        assert_eq!(first_out_of_order(log, &[]), None);
+    }
 
     #[test]
     fn repo_scenarios_have_known_disk_variants() {

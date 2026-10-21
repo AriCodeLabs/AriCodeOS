@@ -1,0 +1,17 @@
+# Incident 0004: a server that keeps a CPU mapping of a client's DMA buffer
+# after closing its handle (the compositor with window buffers) must keep
+# the frames alive: when the client drops the buffer, no frame the server
+# maps may be free in the PMM; they return once the server is reaped or
+# unmaps the buffer (mmio_unmap, ADR 0038), and a quota bounds what a
+# process keeps mapped.
+name = "memory.dma_lifetime"
+description = "test=dma_lifetime: a CPU mapping of a DMA buffer keeps its frames until the mapping is gone"
+level = "full"
+areas = ["memory", "user", "drivers"]
+cmdline = "qemu_exit test=dma_lifetime"
+timeout_secs = 40
+
+[expect]
+exit = 33
+serial_contains = ["dma lifetime selftest ok (4 frames kept by a mapping after the last handle, freed on reap and on mmio_unmap; mapping beyond the quota refused)", "dropped the last mapping of a DMA buffer it had no handle to (16 KiB at", "ARICODEOS_KERNEL_READY"]
+serial_absent = ["KERNEL PANIC", "PMM considers free"]

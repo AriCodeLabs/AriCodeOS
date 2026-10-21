@@ -33,7 +33,7 @@ use aricode_proto::block::{
     Op as BlockOp, Reply as BlockReply, Request as BlockRequest, Status as BlockStatus, MAX_SECTORS,
 };
 use aricode_proto::input::{Event as WireEvent, Op, Reply, Request, Status, MAX_EVENTS};
-use aricode_rt::sys::block::{map_client_buffer, REPLY_WAIT_MS};
+use aricode_rt::sys::block::{map_client_buffer, ClientBuffers, REPLY_WAIT_MS};
 use aricode_rt::sys::virtio_pci::{extra_handle, polled_bar_handle, DmaRegion, Mmio, CFG, SERVICE};
 use aricode_rt::sys::{self, abi, abi::driver_arg, Handle};
 use aricode_usb_storage::{
@@ -632,6 +632,8 @@ struct Ehci {
     /// A block request's buffer may still be owned by the controller
     /// (a lost queue head): it is never released.
     buffer_unsafe: bool,
+    /// Client buffers mapped for the controller's IOMMU domain (ADR 0038).
+    client_buffers: ClientBuffers,
     /// REQUEST SENSE in progress: a failure inside it asks for no more sense.
     in_sense: bool,
     /// Deadline of the unit of work in progress (`with_deadline`).
@@ -727,6 +729,11 @@ impl Ehci {
         ) {
             return Err(exit::RESET_TIMEOUT);
         }
+        // Reset done: only now may the controller reach memory (ADR 0038).
+        sys::pci::enable_bus_master(CFG).map_err(|_| {
+            say(b"could not enable bus mastering");
+            exit::MAP_BAR
+        })?;
 
         // Schedules: a frame list with every entry empty and the async
         // schedule's head, a queue head that is never executed (H set, its
@@ -867,6 +874,7 @@ impl Ehci {
             next_hub_poll: now + HUB_POLL_MS,
             boot_done: false,
             buffer_unsafe: false,
+            client_buffers: ClientBuffers::new(),
             in_sense: false,
             deadline: None,
             served: None,
@@ -3331,7 +3339,7 @@ fn serve_block(ctl: &mut Ehci, msg: &[u8], handles: &[Handle]) {
             {
                 invalid
             } else {
-                match map_client_buffer(handles[1]) {
+                match map_client_buffer(&mut ctl.client_buffers, handles[1]) {
                     Some((phys, len)) if len >= count as u64 * 512 => {
                         if ctl.block_io(op == BlockOp::Write, lba, count, phys) {
                             BlockReply {

@@ -26,6 +26,7 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("aricode-sched", None),
     ("aricode-abi", None),
     ("aricode-handles", None),
+    ("aricode-vranges", None),
     ("aricode-initrd", None),
     ("aricode-acpi", None),
     ("aricode-pci", None),

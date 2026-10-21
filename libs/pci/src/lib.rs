@@ -180,6 +180,132 @@ pub const CAP_MSI: u8 = 0x05;
 pub const CAP_MSIX: u8 = 0x11;
 pub const CAP_PCIE: u8 = 0x10;
 pub const CAP_VENDOR: u8 = 0x09;
+/// Advanced Features capability (PCI Advanced Capabilities ECN): FLR for
+/// conventional PCI functions.
+pub const CAP_AF: u8 = 0x13;
+
+/// Command register (offset 0x04) bits.
+pub const COMMAND_MEMORY: u16 = 1 << 1;
+pub const COMMAND_BUS_MASTER: u16 = 1 << 2;
+pub const COMMAND_INTX_DISABLE: u16 = 1 << 10;
+
+/// How a function can be reset on its own (Function Level Reset).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flr {
+    /// PCI Express capability at this offset: Device Capabilities (+4)
+    /// bit 28 advertises FLR, Device Control (+8) bit 15 starts it (PCIe
+    /// Base Specification, 7.5.3.3 and 7.5.3.4).
+    Pcie { cap: u8 },
+    /// Advanced Features capability at this offset: AF Capabilities (+3)
+    /// bit 1 advertises FLR, AF Control (+4) bit 0 starts it.
+    AdvancedFeatures { cap: u8 },
+}
+
+impl Flr {
+    /// Configuration offset of the 16-bit register that starts the reset.
+    pub const fn control(self) -> u16 {
+        match self {
+            Flr::Pcie { cap } => cap as u16 + 8,
+            Flr::AdvancedFeatures { cap } => cap as u16 + 4,
+        }
+    }
+
+    /// Value to write to `control()` to start the reset, given what it
+    /// holds now (`current`).
+    pub const fn initiate(self, current: u16) -> u16 {
+        match self {
+            Flr::Pcie { .. } => current | 1 << 15,
+            Flr::AdvancedFeatures { .. } => 1,
+        }
+    }
+
+    /// Configuration byte and bit that say the function still has
+    /// transactions pending, which an FLR would cut short: Transactions
+    /// Pending in Device Status (PCIe 7.5.3.5, bit 5 of +0x0A) or TP in AF
+    /// Status (+5, bit 0).
+    pub const fn transactions_pending(self) -> (u16, u8) {
+        match self {
+            Flr::Pcie { cap } => (cap as u16 + 0x0A, 1 << 5),
+            Flr::AdvancedFeatures { cap } => (cap as u16 + 5, 1),
+        }
+    }
+}
+
+/// PCI Express control registers an FLR resets that the kernel saves and
+/// restores (16-bit, offsets from the PCIe capability): Device Control
+/// (+8), and Device Control 2 (+0x28) from capability version 2 on. `caps`
+/// is the PCIe Capabilities register (+2).
+pub fn pcie_saved_controls(caps: u16) -> &'static [u16] {
+    if caps & 0xF >= 2 {
+        &[0x08, 0x28]
+    } else {
+        &[0x08]
+    }
+}
+
+/// Device Control value to write back after an FLR: the saved one without
+/// Initiate Function Level Reset (bit 15).
+pub const fn device_control_after_flr(saved: u16) -> u16 {
+    saved & !(1 << 15)
+}
+
+/// Milliseconds software waits after starting an FLR before it touches the
+/// function again (PCIe Base Specification 6.6.2; the AF ECN uses the same
+/// figure).
+pub const FLR_WAIT_MS: u64 = 100;
+
+/// Type 0 header an FLR clears that the kernel puts back, as read at
+/// boot (the firmware's assignment, not whatever a dead driver left): the
+/// six BARs (dwords 0x10-0x24) and the cache line size, latency timer and
+/// interrupt line bytes (0x0C, 0x0D, 0x3C). Not the command register (the
+/// claim writes it) nor BIST (0x0F: writing it may start a self-test).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SavedHeader {
+    pub bars: [u32; 6],
+    pub bytes: [u8; 3],
+}
+
+impl SavedHeader {
+    pub const BAR_OFFSETS: [u8; 6] = [0x10, 0x14, 0x18, 0x1C, 0x20, 0x24];
+    pub const BYTE_OFFSETS: [u8; 3] = [0x0C, 0x0D, 0x3C];
+
+    /// From a function's configuration bytes (at least 0x40).
+    pub fn from_config(cfg: &[u8]) -> Option<Self> {
+        if cfg.len() < 0x40 {
+            return None;
+        }
+        let mut bars = [0u32; 6];
+        for (slot, &off) in bars.iter_mut().zip(Self::BAR_OFFSETS.iter()) {
+            let o = off as usize;
+            *slot = u32::from_le_bytes([cfg[o], cfg[o + 1], cfg[o + 2], cfg[o + 3]]);
+        }
+        let mut bytes = [0u8; 3];
+        for (slot, &off) in bytes.iter_mut().zip(Self::BYTE_OFFSETS.iter()) {
+            *slot = cfg[off as usize];
+        }
+        Some(Self { bars, bytes })
+    }
+}
+
+/// FLR support advertised in a function's 256 configuration bytes: the PCI
+/// Express capability first, the Advanced Features one otherwise.
+pub fn flr_method(cfg: &[u8]) -> Option<Flr> {
+    let caps = capabilities(cfg);
+    let dword = |off: usize| {
+        cfg.get(off..off + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    let pcie = caps.iter().find(|c| c.id == CAP_PCIE).and_then(|c| {
+        let devcap = dword(c.offset as usize + 4)?;
+        (devcap & 1 << 28 != 0).then_some(Flr::Pcie { cap: c.offset })
+    });
+    pcie.or_else(|| {
+        caps.iter().find(|c| c.id == CAP_AF).and_then(|c| {
+            let af_cap = *cfg.get(c.offset as usize + 3)?;
+            (af_cap & 1 << 1 != 0).then_some(Flr::AdvancedFeatures { cap: c.offset })
+        })
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capability {
@@ -215,6 +341,7 @@ pub fn cap_name(id: u8) -> &'static str {
         CAP_MSIX => "MSI-X",
         CAP_PCIE => "PCIe",
         CAP_VENDOR => "vendor",
+        CAP_AF => "AF",
         0x01 => "PM",
         _ => "?",
     }
@@ -353,5 +480,75 @@ mod tests {
         assert_eq!(capabilities(&c).len(), 2);
         c[6] &= !0x10;
         assert!(capabilities(&c).is_empty());
+    }
+    #[test]
+    fn flr_is_found_in_the_pcie_or_af_capability() {
+        let mut c = config(0x8086, 0x1E31, 0x0C, 0x03, 0);
+        c[6] |= 0x10;
+        c[0x34] = 0x50;
+        c[0x50] = CAP_MSI;
+        c[0x51] = 0x70;
+        c[0x70] = CAP_PCIE;
+        c[0x71] = 0x90;
+        c[0x90] = CAP_AF;
+        c[0x91] = 0;
+        // Neither advertises FLR.
+        assert_eq!(flr_method(&c), None);
+        // AF: capabilities byte at +3; TP (bit 0) alone is not FLR (bit 1).
+        c[0x93] = 0b01;
+        assert_eq!(flr_method(&c), None);
+        c[0x93] = 0b11;
+        assert_eq!(flr_method(&c), Some(Flr::AdvancedFeatures { cap: 0x90 }));
+        // PCIe Device Capabilities bit 28 wins over AF.
+        c[0x74..0x78].copy_from_slice(&(1u32 << 28).to_le_bytes());
+        assert_eq!(flr_method(&c), Some(Flr::Pcie { cap: 0x70 }));
+        // Initiate: Device Control bit 15, keeping the other bits; AF Control bit 0.
+        let pcie = Flr::Pcie { cap: 0x70 };
+        assert_eq!((pcie.control(), pcie.initiate(0x2810)), (0x78, 0xA810));
+        let af = Flr::AdvancedFeatures { cap: 0x90 };
+        assert_eq!((af.control(), af.initiate(0)), (0x94, 1));
+        // A truncated configuration never panics.
+        assert_eq!(flr_method(&c[..0x75]), None);
+        assert_eq!(cap_name(CAP_AF), "AF");
+    }
+
+    #[test]
+    fn flr_restores_the_boot_header_but_not_command_or_bist() {
+        let mut c = config(0x8086, 0x10C9, 0x02, 0x00, 0);
+        c[0x04] = 0x07;
+        c[0x0C] = 0x10;
+        c[0x0D] = 0x20;
+        c[0x0F] = 0x80; // BIST capable
+        c[0x10..0x14].copy_from_slice(&0xFEB0_0000u32.to_le_bytes());
+        c[0x24..0x28].copy_from_slice(&0xC001u32.to_le_bytes());
+        c[0x3C] = 11;
+        c[0x3D] = 1;
+        let h = SavedHeader::from_config(&c).unwrap();
+        assert_eq!(h.bars, [0xFEB0_0000, 0, 0, 0, 0, 0xC001]);
+        assert_eq!(h.bytes, [0x10, 0x20, 11]);
+        let touched: Vec<u8> = SavedHeader::BAR_OFFSETS
+            .iter()
+            .flat_map(|&o| o..o + 4)
+            .chain(SavedHeader::BYTE_OFFSETS)
+            .collect();
+        for never in [0x04u8, 0x05, 0x06, 0x0E, 0x0F, 0x3D] {
+            assert!(!touched.contains(&never), "{never:#x}");
+        }
+        assert_eq!(SavedHeader::from_config(&c[..0x3F]), None);
+    }
+
+    #[test]
+    fn pcie_controls_and_pending_transactions() {
+        assert_eq!(pcie_saved_controls(0x0001), &[0x08]);
+        assert_eq!(pcie_saved_controls(0x0042), &[0x08, 0x28]);
+        assert_eq!(device_control_after_flr(0xA810), 0x2810);
+        assert_eq!(
+            Flr::Pcie { cap: 0x70 }.transactions_pending(),
+            (0x7A, 1 << 5)
+        );
+        assert_eq!(
+            Flr::AdvancedFeatures { cap: 0x90 }.transactions_pending(),
+            (0x95, 1)
+        );
     }
 }

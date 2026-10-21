@@ -238,6 +238,9 @@ pub struct Region {
     /// PCI function it belongs to (`bus << 8 | dev << 3 | fn`): mapping it
     /// assigns the device to the process's IOMMU domain (Phase 33).
     pub source_id: Option<u16>,
+    /// The claim, on the configuration space `pci::claim` hands out: its
+    /// drop stops the device's bus mastering.
+    pub claim: Option<crate::pci::ClaimToken>,
 }
 
 /// DMA buffer: contiguous frames that go back to the PMM when the object is dropped.
@@ -257,6 +260,21 @@ impl Drop for DmaBuffer {
 }
 
 static VECTORS: IrqLock<BTreeMap<u8, Weak<KernelObject>>> = IrqLock::new(BTreeMap::new());
+
+/// DMA buffers whose memory must never be reused: their driver died with
+/// a device that did not stop mastering the bus (incident 0004). Kept for
+/// good, deliberately; each one was reported when it got here.
+static QUARANTINE: IrqLock<alloc::vec::Vec<ObjectRef>> = IrqLock::new(alloc::vec::Vec::new());
+
+/// Keeps `dma` (a DMA buffer) alive forever. Returns its size.
+pub fn quarantine(dma: ObjectRef) -> u64 {
+    let len = match &dma.kind {
+        ObjectKind::Dma(d) => d.region.len,
+        _ => return 0,
+    };
+    QUARANTINE.lock().push(dma);
+    len
+}
 
 /// Creates the IRQ object for a GSI: allocates a vector, routes and registers it.
 pub fn register_irq(gsi: u32, level: bool, active_low: bool) -> Result<ObjectRef, &'static str> {
@@ -308,6 +326,7 @@ pub fn dma_alloc(len: u64) -> Result<ObjectRef, &'static str> {
             len: frames as u64 * FRAME_SIZE,
             cacheable: true,
             source_id: None,
+            claim: None,
         },
         frames,
     })))
@@ -422,6 +441,7 @@ pub fn selftest(info: &boot_protocol::BootInfo) {
             len: fb.size,
             cacheable: false,
             source_id: None,
+            claim: None,
         }));
         let pid = process::spawn_with_handles_and_arg(
             "fb_driver",

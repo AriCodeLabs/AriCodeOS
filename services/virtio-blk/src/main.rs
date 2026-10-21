@@ -14,7 +14,7 @@
 extern crate alloc;
 
 use aricode_proto::block::{Op, Reply, Request, Status, MAX_SECTORS};
-use aricode_rt::sys::block::map_client_buffer;
+use aricode_rt::sys::block::{map_client_buffer, ClientBuffers};
 use aricode_rt::sys::virtio_pci::{DmaRegion, Queue, Transport, IRQ, SERVICE};
 use aricode_rt::sys::{self, Error, Handle, TIMEOUT_INFINITE};
 use aricode_virtio::blk;
@@ -157,6 +157,7 @@ fn serve(dev: &mut Device) -> ! {
     let capacity = dev.capacity();
     let mut msg = [0u8; 32];
     let mut handles = [Handle(0); 2];
+    let mut buffers = ClientBuffers::new();
     say(b"serving requests");
     loop {
         let (n, nh) = match sys::ipc_receive(SERVICE, &mut msg, &mut handles, TIMEOUT_INFINITE) {
@@ -206,7 +207,7 @@ fn serve(dev: &mut Device) -> ! {
                         value: 0,
                     }
                 } else {
-                    match map_client_buffer(handles[1]) {
+                    match map_client_buffer(&mut buffers, handles[1]) {
                         Some((phys, len)) if len >= count * 512 => {
                             let bytes = (count * 512) as u32;
                             let r = match op {

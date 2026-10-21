@@ -21,7 +21,11 @@ use aricode_arifs::descriptors::{Descriptors, MAX_OPEN};
 use aricode_arifs::{AriFs, BlockDevice, FsError, Recovery, SECTOR};
 use aricode_faults::Meter;
 use aricode_proto::fs::{Op, OwnerDescriptors, Reply, Request, Status, MAX_IO};
-use aricode_rt::sys::{self, block::BlockClient, Handle};
+use aricode_rt::sys::{self, block::BlockClient, client_buffer, Handle};
+
+/// Client buffer mappings kept across requests (ADR 0038: bounded, the
+/// oldest is unmapped to make room).
+type ClientBuffers = client_buffer::ClientBuffers<8>;
 
 const SERVICE: Handle = Handle(0x0001_0004);
 const BLOCK: Handle = Handle(0x0001_0005);
@@ -90,32 +94,6 @@ fn status_of(e: FsError) -> Status {
         FsError::NoSpace => Status::NoSpace,
         FsError::BadName | FsError::BadTransaction => Status::Invalid,
         FsError::OutOfRange => Status::OutOfRange,
-    }
-}
-
-/// Client buffer mappings, reused by physical address.
-struct ClientBuffers {
-    entries: [(u64, u64, u64); 8], // (phys, virt, len)
-    count: usize,
-}
-
-impl ClientBuffers {
-    fn map(&mut self, dma: Handle) -> Option<&mut [u8]> {
-        let phys = sys::dma_phys(dma).ok()?;
-        let len = sys::region_len(dma).ok()?;
-        let virt = match self.entries[..self.count].iter().find(|e| e.0 == phys) {
-            Some(e) => e.1,
-            None => {
-                let v = sys::mmio_map(dma).ok()?;
-                if self.count < self.entries.len() {
-                    self.entries[self.count] = (phys, v, len);
-                    self.count += 1;
-                }
-                v
-            }
-        };
-        // SAFETY: client buffer mapped RW in this process.
-        Some(unsafe { core::slice::from_raw_parts_mut(virt as *mut u8, len as usize) })
     }
 }
 
@@ -772,10 +750,7 @@ fn main(partition_lba: u64) -> u64 {
     let mut srv = Service {
         fs,
         fds: Descriptors::new(),
-        buffers: ClientBuffers {
-            entries: [(0, 0, 0); 8],
-            count: 0,
-        },
+        buffers: ClientBuffers::new(),
         staging: None,
         sessions: [None; MAX_SESSIONS],
         pending: [const { None }; MAX_SESSIONS],
