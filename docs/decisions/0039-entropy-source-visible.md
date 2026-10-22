@@ -31,9 +31,17 @@ still unknown (`docs/hardware.md`).
    (the seed's, up to 8, and one per read since), the cycle-counter
    samples mixed in (64 in the seed, one per read) and the interrupts whose
    timing reached the generator through the pool (counted up to the last
-   read). The source is `Rdrand` only if `rdrand` actually returned data
-   for the seed: a CPU that advertises it and never delivers is reported as
-   `TscInterrupts` (and its boot line says `rdrand returned no data`).
+   read). The source is `Rdrand` only if `rdrand` returned plausible data
+   for the seed: each of the 8 values is retried up to 10 times while CF =
+   0 (Intel's DRNG guide), and the values are counted only if at least two
+   distinct ones remain after discarding all-zero and all-one bits, as
+   Linux's `x86_init_rdrand` does (some AMD parts return all ones with CF
+   set after resume). A CPU that advertises `rdrand` and never delivers,
+   or delivers a constant, is reported as `TscInterrupts` with 0 hardware
+   samples, its boot line says `rdrand returned no data` or `rdrand values
+   rejected: constant or all-0/all-1 bits`, and later reads stop mixing its
+   output in; what it returned for the seed is still hashed in, since it
+   can only add.
    There is no `Rdseed` value: the kernel does not use `rdseed`, and an ABI
    value nothing produces would be dead code; adding it is additive.
 2. **A new additive `system_info` kind, `RANDOM_SOURCE` (12)**, returns
@@ -41,6 +49,10 @@ still unknown (`docs/hardware.md`).
    bytes 8..32 three little-endian `u64`; bytes 1..8 zero). It needs `READ`
    on a `SYSTEM` handle, like every `system_info` kind. It holds only the
    source and counters: no seed, pool word, key or output is ever exposed.
+   The struct only grows by appending fields after byte 32; `decode`
+   accepts a longer reply and `sys::random_source` passes a 64-byte buffer,
+   so a later kernel with a longer struct still answers an older reader
+   (a change to the first 32 bytes would need a new kind).
    `sys::random_source(system)` (`sdk/rust`) wraps it and answers `None`
    when the kernel refuses the query or names a source the build does not
    know; callers that draw secrets treat `None` as weak. Host tests: the
@@ -70,9 +82,10 @@ still unknown (`docs/hardware.md`).
    ... and no random_seed from an earlier boot: the new host key is weak
    (cargo xtask usb-image --authorized-key installs one made on the build
    host)`. It does not refuse to start, which would lock the owner out;
-   the key still mixes everything there is, the persisted seed included,
-   as before. With a carried seed nothing is reported: every earlier boot
-   added to it.
+   the key is drawn as before from the kernel generator and sshd's own
+   state, which in exactly this case hold nothing from an earlier boot.
+   With a carried seed nothing is reported: every earlier boot added to
+   it, and it is mixed in as before.
 5. **The owner reads it in `diag`.** The shell's `diag` prints one line
    after the CPUs: `entropy  rdrand`, or `entropy  TSC + interrupts (N
    samples, M events): weak` (`entropy  unknown (...): weak` when the
@@ -81,7 +94,11 @@ still unknown (`docs/hardware.md`).
 6. **Tests.** `crypto.random` (qemu64) and `crypto.random_rdrand` run the
    kernel self-test on both paths, which now also checks the account
    (source, 67 TSC samples after three reads, the stir count, hardware
-   samples present exactly on the `rdrand` path). `network.stack` and
+   samples present exactly on the `rdrand` path) and the `rdrand`
+   plausibility rule (all ones, a constant once all-0/all-1 values are
+   dropped, and no values are rejected; two distinct values pass). No QEMU
+   CPU model returns a broken `rdrand`, so the rejected boot line itself is
+   not exercised in a scenario. `network.stack` and
    `ssh.entropy_weak` assert the weak lines, the `net tcp secret weak x1
    (code 2)` and `ssh entropy weak (code 2)` events and the `diag` line over
    SSH; `ssh.exec` asserts the sshd line. A new scenario option
@@ -104,7 +121,17 @@ still unknown (`docs/hardware.md`).
   still no criterion.
 - Whether the laptop has `rdrand` is now read from `diag` (over SSH or
   `diag NAME` + `cargo xtask fs-cat`), not from a photo of the boot.
+- The counters are a small activity side channel: `tsc_samples - 64` is
+  the number of `RANDOM` reads system-wide since boot (every process's, sshd's
+  connections included), and `interrupt_events` the number of device,
+  keyboard and serial interrupts; `diag` publishes both. They are not
+  coarsened because they tell a `SYSTEM` `READ` holder little it cannot
+  already read: `IDLE` exposes `tsc_since_boot` and per-CPU idle cycles,
+  `EVENTS` and `PROCESSES` the processes and their faults. No program
+  without `READ` on `SYSTEM` can query them.
 - While wiring netd, a local copy of the 22 KiB `Stack` inside
   `Stack::new` (inlined into `run`) overflowed the driver's 64 KiB stack in
   QEMU; `Stack::new` builds the stack in place and reports the source
-  before it. The remaining margin of that stack is not measured.
+  before it. The audit of this branch measured what is left of that stack
+  (about 12 KiB in release builds, none in dev builds): incident 0018,
+  fixed on its own branch.

@@ -29,6 +29,9 @@ static RNG: IrqLock<Option<Generator>> = IrqLock::new(None);
 
 /// `rdrand` values drawn for the seed.
 const SEED_RDRAND: usize = 8;
+/// Tries per `rdrand` value: CF = 0 means the DRNG had nothing ready, and
+/// Intel's DRNG software guide recommends retrying up to 10 times.
+const RDRAND_RETRIES: usize = 10;
 /// Cycle-counter samples hashed into the seed.
 const SEED_TSC: u64 = 64;
 
@@ -73,58 +76,104 @@ fn rdrand() -> Option<u64> {
     (ok != 0).then_some(v)
 }
 
+/// `rdrand` with the recommended retries.
+fn rdrand_retry() -> Option<u64> {
+    (0..RDRAND_RETRIES).find_map(|_| rdrand())
+}
+
+/// What the seed made of `rdrand` (for the boot line).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RdrandSeed {
+    /// CPUID does not advertise it.
+    Absent,
+    /// Advertised, but no value came back.
+    NoData,
+    /// Values came back but look broken: fewer than two distinct values
+    /// other than all-zero and all-one bits (the AMD parts that return
+    /// all ones with CF set after resume; Linux `x86_init_rdrand` rejects
+    /// the same way). They are still hashed in, but not counted.
+    Rejected,
+    /// Accepted.
+    Used,
+}
+
+/// Values worth counting as hardware entropy: not all-zero or all-one
+/// bits, and at least two distinct ones; otherwise none.
+fn plausible_rdrand(values: &[u64]) -> usize {
+    let mut good = values.iter().filter(|&&v| v != 0 && v != u64::MAX);
+    let Some(&first) = good.clone().next() else {
+        return 0;
+    };
+    if good.clone().all(|&v| v == first) {
+        return 0;
+    }
+    good.by_ref().count()
+}
+
 /// 32-byte seed: hash of several samples from the best available source,
-/// and the account of it. The source is `Rdrand` only if `rdrand` actually
-/// returned data: a CPU that advertises it and never delivers is seeded
-/// from the TSC alone and reported as such.
-fn seed() -> ([u8; 32], RandomSource) {
+/// and the account of it. The source is `Rdrand` only if `rdrand` returned
+/// plausible data (`plausible_rdrand`): a CPU that advertises it and never
+/// delivers, or delivers a constant, is seeded from the TSC alone as far
+/// as the account goes, and reported as such.
+fn seed() -> ([u8; 32], RandomSource, RdrandSeed) {
     let mut h = Sha256::new();
-    let mut hardware = 0;
+    let mut values = [0u64; SEED_RDRAND];
+    let mut got = 0;
     if has_rdrand() {
         for _ in 0..SEED_RDRAND {
-            if let Some(v) = rdrand() {
+            if let Some(v) = rdrand_retry() {
                 h.update(&v.to_le_bytes());
-                hardware += 1;
+                values[got] = v;
+                got += 1;
             }
         }
     }
+    let hardware = plausible_rdrand(&values[..got]);
+    let verdict = match (has_rdrand(), got, hardware) {
+        (false, _, _) => RdrandSeed::Absent,
+        (true, 0, _) => RdrandSeed::NoData,
+        (true, _, 0) => RdrandSeed::Rejected,
+        _ => RdrandSeed::Used,
+    };
     // The TSC is always mixed in: jitter between samples and the boot instant.
     for _ in 0..SEED_TSC {
         h.update(&rdtsc().to_le_bytes());
     }
     h.update(&crate::time::ticks().to_le_bytes());
     let mixed = RandomSource {
-        source: if hardware > 0 {
+        source: if verdict == RdrandSeed::Used {
             EntropySource::Rdrand
         } else {
             EntropySource::TscInterrupts
         },
-        hardware_samples: hardware,
+        hardware_samples: hardware as u64,
         tsc_samples: SEED_TSC,
         interrupt_events: 0,
     };
-    (h.finish(), mixed)
+    (h.finish(), mixed, verdict)
 }
 
-fn seeded() -> Generator {
-    let (s, mixed) = seed();
-    Generator {
+fn seeded() -> (Generator, RdrandSeed) {
+    let (s, mixed, verdict) = seed();
+    let generator = Generator {
         rng: Rng::new(s),
         mixed,
-    }
+    };
+    (generator, verdict)
 }
 
 pub fn init() -> EntropySource {
-    let generator = seeded();
+    let (generator, verdict) = seeded();
     let source = generator.mixed.source;
     *RNG.lock() = Some(generator);
     info!(
         "random: ChaCha20 generator seeded with {}",
-        match source {
-            EntropySource::Rdrand => "rdrand",
-            EntropySource::TscInterrupts if has_rdrand() =>
-                "TSC (rdrand returned no data: limited entropy)",
-            EntropySource::TscInterrupts => "TSC (no rdrand: limited entropy)",
+        match verdict {
+            RdrandSeed::Used => "rdrand",
+            RdrandSeed::Absent => "TSC (no rdrand: limited entropy)",
+            RdrandSeed::NoData => "TSC (rdrand returned no data: limited entropy)",
+            RdrandSeed::Rejected =>
+                "TSC (rdrand values rejected: constant or all-0/all-1 bits; limited entropy)",
         }
     );
     source
@@ -134,18 +183,19 @@ pub fn init() -> EntropySource {
 /// (`system_info(RANDOM_SOURCE)`). Seeds it first if nothing did yet, as
 /// `fill` does.
 pub fn source() -> RandomSource {
-    RNG.lock().get_or_insert_with(seeded).mixed
+    RNG.lock().get_or_insert_with(|| seeded().0).mixed
 }
 
 /// Fills `out` with random bytes; mixes in a fresh sample first.
 pub fn fill(out: &mut [u8]) {
     let mut guard = RNG.lock();
-    let g = guard.get_or_insert_with(seeded);
-    // Fresh material: cycle counter, `rdrand` if any, and the interrupt pool.
+    let g = guard.get_or_insert_with(|| seeded().0);
+    // Fresh material: cycle counter, `rdrand` if the seed trusted it, and
+    // the interrupt pool.
     let mut h = Sha256::new();
     h.update(&rdtsc().to_le_bytes());
     g.mixed.tsc_samples += 1;
-    if has_rdrand() {
+    if g.mixed.source.is_hardware() {
         if let Some(v) = rdrand() {
             h.update(&v.to_le_bytes());
             g.mixed.hardware_samples += 1;
@@ -177,8 +227,20 @@ pub fn selftest() {
     fill(&mut c);
     assert_ne!(b, c, "random: stir did not change the output");
     assert_eq!(stirs(), before + 1, "random: stir count");
+    // Implausible `rdrand` output is not counted as hardware entropy.
+    assert_eq!(plausible_rdrand(&[]), 0);
+    assert_eq!(plausible_rdrand(&[u64::MAX; 8]), 0, "random: all ones");
+    assert_eq!(
+        plausible_rdrand(&[0, u64::MAX, 0, 7, 7]),
+        0,
+        "random: constant"
+    );
+    assert_eq!(plausible_rdrand(&[0, 5, 9, u64::MAX]), 2);
     // The account: the seed's samples plus one TSC sample per read, the
     // stirs counted up to the last read, and the source `init` announced.
+    // Like the stir count above, the event count assumes no device
+    // interrupt stirred between `stir()` and the last read (none is
+    // expected this early in a `test=random` boot).
     let mixed = self::source();
     assert_eq!(mixed.source, source, "random: source account");
     assert_eq!(mixed.tsc_samples, SEED_TSC + 3, "random: TSC sample count");

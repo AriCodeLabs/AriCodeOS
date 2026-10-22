@@ -1138,8 +1138,9 @@ latter briefly to add the region.
   says so. `system_info(RANDOM)` serves up to 256 bytes per call.
 - Entropy source (ADR 0039): next to the generator, under its lock, the
   kernel keeps a `sysinfo::RandomSource` account: the seed's source
-  (`Rdrand` = 1 only if `rdrand` returned data, else `TscInterrupts` =
-  2), the `rdrand` values and TSC samples mixed in so far and the
+  (`Rdrand` = 1 only if `rdrand` returned plausible data: retried while
+  CF = 0, at least two distinct values other than all-0/all-1 bits; else
+  `TscInterrupts` = 2), the `rdrand` values and TSC samples mixed in so far and the
   interrupt stirs counted up to the last read. `system_info(RANDOM_SOURCE)`
   (kind 12, 32 bytes) returns it, never any state; `sys::random_source`
   wraps it. netd records `net tcp secret weak` and sshd `ssh entropy weak`

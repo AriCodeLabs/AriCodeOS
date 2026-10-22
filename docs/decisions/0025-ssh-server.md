@@ -84,8 +84,9 @@ would open an unauthenticated shell on the user's network.
   interrupts, 0 when unknown) and says on the console that the new host
   key is weak and that `cargo xtask usb-image --authorized-key` installs
   one made on the build host. It does not refuse to start, which would
-  lock the owner out, and the key still mixes the persisted seed and the
-  kernel generator as before. `diag` shows the source in its `entropy`
+  lock the owner out; the key is drawn as before, from the kernel
+  generator and sshd's own state, with no earlier boot's seed behind it in
+  exactly this case (with one, it is mixed in and nothing is reported). `diag` shows the source in its `entropy`
   line (`ssh.entropy_weak`, `crypto.entropy_rdrand`).
 - **Audit trail.** Every refused key is logged with the user name and the
   peer address; after ten failures the connection is dropped.

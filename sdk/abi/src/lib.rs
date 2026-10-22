@@ -393,7 +393,9 @@ pub mod sysinfo {
     /// One [`RandomSource`] (32 bytes): what seeded the kernel generator
     /// that `RANDOM` reads, and how much has been mixed into it since
     /// (ADR 0039). Only the source and counters: never generator state,
-    /// seed or pool material.
+    /// seed or pool material. Later fields are only appended after
+    /// [`RandomSource::LEN`]: readers pass a larger buffer and decode the
+    /// first `LEN` bytes.
     pub const RANDOM_SOURCE: u64 = 12;
 
     /// What seeded the kernel generator. The number is the code of the
