@@ -422,18 +422,27 @@ pub fn app_pack(dir: &Path, version: u32, release: bool) -> Result {
 
 /// Builds the sample WebAssembly modules and leaves `demo.wasm` in `build/`,
 /// from where `write_test_disk` copies it into the runner's private directory.
-pub fn build_wasm_programs(release: bool) -> Result {
-    println!("[xtask] build wasm-demo ({WASM_TARGET})");
+/// Always in the release profile, a dev build of the OS included: the module
+/// is data for the runner, and its dev build (636,854 bytes against 12,050,
+/// found 2026-10-23 while reproducing incident 0018 on a dev build) does not
+/// fit the test disk's ARI0, so `cargo xtask test --debug` failed before any
+/// scenario.
+pub fn build_wasm_programs() -> Result {
+    println!("[xtask] build wasm-demo ({WASM_TARGET}, release)");
     let mut c = cargo();
-    c.args(["build", "-p", "wasm-demo", "--target", WASM_TARGET]);
-    if release {
-        c.arg("--release");
-    }
+    c.args([
+        "build",
+        "-p",
+        "wasm-demo",
+        "--target",
+        WASM_TARGET,
+        "--release",
+    ]);
     run(c)?;
     let src = root()
         .join("target")
         .join(WASM_TARGET)
-        .join(profile_dir(release))
+        .join(profile_dir(true))
         .join("wasm_demo.wasm");
     let dst = crate::build_dir().join("demo.wasm");
     std::fs::create_dir_all(crate::build_dir()).map_err(|e| e.to_string())?;
@@ -445,7 +454,7 @@ pub fn build_wasm_programs(release: bool) -> Result {
 /// scenario: test behaviour is controlled through the cmdline.
 pub fn build_os(release: bool) -> Result<Artifacts> {
     let user_bin = build_user_programs(release)?;
-    build_wasm_programs(release)?;
+    build_wasm_programs()?;
     for (pkg, target) in [("ariboot", UEFI_TARGET), ("arikernel", KERNEL_TARGET)] {
         println!("[xtask] build {pkg} ({target})");
         let mut c = cargo();
