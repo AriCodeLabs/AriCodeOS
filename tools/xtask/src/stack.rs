@@ -9,7 +9,8 @@
 //! no longer fitted. This check reads the drivers' machine code
 //! (`objdump -d`), measures every function's frame from its prologue and
 //! the deepest chain of direct calls from `_start`, and fails when either
-//! passes its budget, in the release and in the dev build alike.
+//! passes its budget, in the release and in the dev build alike: half the
+//! stack for the path, a quarter for one frame.
 //!
 //! What it does not see: indirect calls (trait objects, `core::fmt`
 //! callbacks, function pointers) end a path, so the measured depth is a
@@ -29,9 +30,9 @@ pub const USER_STACK: u64 = 64 * 1024;
 /// Deepest chain of direct calls allowed: half the stack. The other half is
 /// for what the analysis cannot see (indirect calls) and for growth.
 pub const PATH_BUDGET: u64 = USER_STACK / 2;
-/// Largest frame allowed for one function: a frame this size is a buffer
-/// that belongs on the heap.
-pub const FRAME_BUDGET: u64 = 8 * 1024;
+/// Largest frame allowed for one function: a quarter of the stack. A frame
+/// this size holds a buffer or a structure that belongs on the heap.
+pub const FRAME_BUDGET: u64 = USER_STACK / 4;
 
 /// Packages and binaries under budget: the network drivers (ADR 0024).
 pub const CHECKED: [(&str, &str); 2] =

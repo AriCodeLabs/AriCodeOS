@@ -288,7 +288,9 @@ struct Socket {
     recv: Option<PendingRecv>,
     /// Last uncollected datagram (sender, port, data).
     queued: Option<(Ipv4Addr, u16, usize)>,
-    data: [u8; MAX_DATAGRAM as usize],
+    /// `MAX_DATAGRAM` bytes on the heap (incident 0018): eight of them
+    /// inline were 12 KiB of the `Stack`.
+    data: Box<[u8]>,
 }
 
 /// TCP socket: one connection (or a listening port) and its waits.
@@ -305,16 +307,24 @@ struct TcpSock {
 }
 
 impl TcpSock {
-    fn new(conn: Connection) -> Self {
-        Self {
-            conn,
+    /// A socket for a connection between these endpoints, on the heap.
+    /// Out of line (incident 0018): a `Connection` carries 8 KiB of
+    /// buffers, and the copies of it an unoptimized build makes on the way
+    /// into the `Box` stay in this frame instead of in the frame of every
+    /// request or frame handler that opens a connection.
+    #[inline(never)]
+    fn boxed(local: Ipv4Addr, local_port: u16, remote: Ipv4Addr, remote_port: u16) -> Box<Self> {
+        // One expression: the `Box` is allocated first and the socket
+        // written into it.
+        Box::new(Self {
+            conn: Connection::new(local, local_port, remote, remote_port),
             listening: false,
             accepted_from: None,
             connect: None,
             accept: None,
             recv: None,
             user_closed: false,
-        }
+        })
     }
 }
 
@@ -324,13 +334,36 @@ struct PendingDns {
     deadline: u64,
 }
 
-/// Frame waiting for ARP resolution.
-struct Deferred {
+/// Frames parked at once waiting for ARP resolution.
+const PARKING_SLOTS: usize = 4;
+
+/// A parking slot for a frame waiting for ARP resolution. Its buffer is
+/// allocated once, on the heap (incident 0018), and reused.
+struct Parking {
+    frame: Box<[u8]>,
+    waiting: Option<Parked>,
+}
+
+/// The frame in a parking slot: its next hop, length and deadline.
+#[derive(Clone, Copy)]
+struct Parked {
     next_hop: Ipv4Addr,
     len: usize,
-    frame: [u8; MAX_FRAME],
     deadline: u64,
 }
+
+/// A zeroed buffer allocated on the heap directly, never built on the
+/// stack first (incident 0018).
+fn heap_buffer(len: usize) -> Box<[u8]> {
+    alloc::vec![0u8; len].into_boxed_slice()
+}
+
+/// Largest `Stack` allowed (incident 0018; 4,680 bytes over virtio-net
+/// when it was set). It lives in a `Box`, but an unoptimized build may copy
+/// it through the stack on the way there, so even two copies must fit the
+/// frame budget of `cargo xtask stack-check` (16 KiB): buffers go on the
+/// heap.
+const STACK_STRUCT_MAX: usize = 8 * 1024;
 
 /// A client's session (ADR 0037): the receive side of its endpoint and the
 /// label init gave it (the process name).
@@ -386,7 +419,7 @@ pub struct Stack<L: Link> {
     tcp_port_count: u32,
     /// SYNs to a listener answered with a reset since boot (`TcpStats`).
     tcp_syn_dropped: u32,
-    deferred: [Option<Deferred>; 4],
+    deferred: [Parking; PARKING_SLOTS],
     buffers: ClientBuffers,
     /// Ephemeral UDP port for DNS queries.
     dns_port: u16,
@@ -414,7 +447,7 @@ fn new_socket(port: u16) -> Socket {
         port,
         recv: None,
         queued: None,
-        data: [0; MAX_DATAGRAM as usize],
+        data: heap_buffer(MAX_DATAGRAM as usize),
     }
 }
 
@@ -511,15 +544,25 @@ fn report_secret_source(
 }
 
 impl<L: Link> Stack<L> {
-    pub fn new(link: L, clock: Clock, name: &'static str) -> Self {
+    /// Evaluated by `new`: a `Stack` over `STACK_STRUCT_MAX` does not build.
+    const SIZE_OK: () = assert!(
+        core::mem::size_of::<Self>() <= STACK_STRUCT_MAX,
+        "the network Stack outgrew STACK_STRUCT_MAX: move its buffers to the heap (incident 0018)"
+    );
+
+    /// The stack, on the heap (incident 0018): neither `run`'s frame nor an
+    /// inlining decision of the compiler holds it. Out of line, so the
+    /// copy an unoptimized build may make on the way into the `Box` is in
+    /// this frame, popped before the service loop starts.
+    #[inline(never)]
+    pub fn new(link: L, clock: Clock, name: &'static str) -> Box<Self> {
+        let () = Self::SIZE_OK;
         let xid = 0x4152_4900 | (link.mac().0[5] as u32);
         let (secret, whole) = tcp_secret(&clock, name);
         let secret_source = sys::random_source(clock.0);
         let mut faults = aricode_faults::Meter::new();
         report_secret_source(name, secret_source, whole, &mut faults, clock.now());
-        // Built in place: a local copy of the whole stack would not fit the
-        // driver's 64 KiB stack next to its caller's.
-        Self {
+        Box::new(Self {
             dhcp: dhcp::Client::new(link.mac(), xid),
             link,
             name,
@@ -538,7 +581,10 @@ impl<L: Link> Stack<L> {
             tcp: Owned::new(),
             tcp_port_count: 0,
             tcp_syn_dropped: 0,
-            deferred: [const { None }; 4],
+            deferred: core::array::from_fn(|_| Parking {
+                frame: heap_buffer(MAX_FRAME),
+                waiting: None,
+            }),
             buffers: ClientBuffers::new(),
             dns_port: 49153,
             retained: None,
@@ -549,7 +595,7 @@ impl<L: Link> Stack<L> {
             last_sweep: 0,
             probe_error_said: false,
             generation: 0,
-        }
+        })
     }
 
     /// Accounts a refusal or a lost frame: recorded at once if the kind was
@@ -950,14 +996,14 @@ impl<L: Link> Stack<L> {
         match dst_mac {
             Some(mac) => self.transmit(mac, &mut frame, n, now),
             None => {
-                let Some(slot) = self.deferred.iter_mut().find(|d| d.is_none()) else {
+                let Some(slot) = self.deferred.iter_mut().find(|d| d.waiting.is_none()) else {
                     self.note(Fault::ArpDeferFull, now);
                     return Err(Status::Busy);
                 };
-                *slot = Some(Deferred {
+                slot.frame[..n].copy_from_slice(&frame[..n]);
+                slot.waiting = Some(Parked {
                     next_hop,
                     len: n,
-                    frame,
                     deadline: now + ARP_WAIT_MS,
                 });
                 self.send_arp_request(next_hop);
@@ -1108,17 +1154,19 @@ impl<L: Link> Stack<L> {
 
     fn flush_deferred(&mut self, ip: Ipv4Addr, mac: MacAddr, now: u64) {
         let mut lost = false;
+        let src = self.link.mac();
         for slot in self.deferred.iter_mut() {
-            if slot.as_ref().is_some_and(|d| d.next_hop == ip) {
-                let mut d = slot.take().unwrap();
-                eth::Header {
-                    dst: mac,
-                    src: self.link.mac(),
-                    ethertype: eth::ETHERTYPE_IPV4,
-                }
-                .write(&mut d.frame);
-                lost |= !self.link.send_frame(&d.frame[..d.len]);
+            let Some(parked) = slot.waiting.filter(|p| p.next_hop == ip) else {
+                continue;
+            };
+            slot.waiting = None;
+            eth::Header {
+                dst: mac,
+                src,
+                ethertype: eth::ETHERTYPE_IPV4,
             }
+            .write(&mut slot.frame);
+            lost |= !self.link.send_frame(&slot.frame[..parked.len]);
         }
         if lost {
             self.note(Fault::TxBusy, now);
@@ -1282,10 +1330,10 @@ impl<L: Link> Stack<L> {
             self.send_tcp_reset(ih, &h, payload.len(), now);
             return;
         }
-        let mut conn = Connection::new(ih.dst, h.dst_port, ih.src, h.src_port);
-        conn.listen(self.initial_seq(ih.dst, h.dst_port, ih.src, h.src_port, now));
-        conn.on_segment(&h, payload, now);
-        let mut sock = Box::new(TcpSock::new(conn));
+        let mut sock = TcpSock::boxed(ih.dst, h.dst_port, ih.src, h.src_port);
+        sock.conn
+            .listen(self.initial_seq(ih.dst, h.dst_port, ih.src, h.src_port, now));
+        sock.conn.on_segment(&h, payload, now);
         sock.accepted_from = Some(listener as u16);
         // The child belongs to the listener's client, who will accept it.
         self.tcp.insert(owner, sock);
@@ -1520,9 +1568,9 @@ impl<L: Link> Stack<L> {
                 ) else {
                     return self.refuse(reply_to, Fault::TcpTableFull, now);
                 };
-                let mut conn = Connection::new(local, port, addr, req.port);
-                conn.connect(self.initial_seq(local, port, addr, req.port, now), now);
-                let mut sock = Box::new(TcpSock::new(conn));
+                let mut sock = TcpSock::boxed(local, port, addr, req.port);
+                sock.conn
+                    .connect(self.initial_seq(local, port, addr, req.port, now), now);
                 sock.connect = Some((reply_to, now + req.timeout_ms.max(1) as u64));
                 self.tcp.insert(owner, sock);
             }
@@ -1550,11 +1598,10 @@ impl<L: Link> Stack<L> {
                 if !self.tcp_room(owner, reply_to, now) {
                     return;
                 }
-                let mut conn = Connection::new(self.my_ip(), req.port, Ipv4Addr::UNSPECIFIED, 0);
+                let mut sock = TcpSock::boxed(self.my_ip(), req.port, Ipv4Addr::UNSPECIFIED, 0);
                 // A listener sends nothing itself: every SYN to it gets a
                 // connection of its own in `on_tcp`, with its own ISN.
-                conn.listen(0);
-                let mut sock = Box::new(TcpSock::new(conn));
+                sock.conn.listen(0);
                 sock.listening = true;
                 let slot = self.tcp.insert(owner, sock).unwrap_or(MAX_TCP);
                 answer(reply_to, Reply::ok(slot as u64));
@@ -1693,8 +1740,8 @@ impl<L: Link> Stack<L> {
         // retransmits or times out, and the loss stays visible in `diag`.
         let mut dropped = false;
         for slot in self.deferred.iter_mut() {
-            if slot.as_ref().is_some_and(|d| now >= d.deadline) {
-                *slot = None;
+            if slot.waiting.is_some_and(|p| now >= p.deadline) {
+                slot.waiting = None;
                 dropped = true;
             }
         }
@@ -1905,8 +1952,7 @@ impl<L: Link> Stack<L> {
                     deadline: now + req.timeout_ms.max(1) as u64,
                 };
                 if let Some((from, port, len)) = sock.queued.take() {
-                    let data = sock.data;
-                    deliver_recv(&mut self.buffers, pending, from, port, &data[..len]);
+                    deliver_recv(&mut self.buffers, pending, from, port, &sock.data[..len]);
                 } else {
                     sock.recv = Some(pending);
                     self.retained = Some(buf); // closed on delivery or on timeout
@@ -2022,7 +2068,12 @@ pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
     }
     sys::print(b"\n");
     let mut stack = Stack::new(link, clock, name);
-    let mut frame = [0u8; MAX_FRAME];
+    let stack = &mut *stack;
+    // The receive buffer on the heap too (incident 0018).
+    let mut frame: Box<[u8; MAX_FRAME]> = match heap_buffer(MAX_FRAME).try_into() {
+        Ok(f) => f,
+        Err(_) => unreachable!("heap_buffer(MAX_FRAME) has MAX_FRAME bytes"),
+    };
     let mut msg = [0u8; Request::LEN];
     let mut handles = [Handle(0); abi::IPC_MAX_HANDLES];
     say(name, b"serving requests");
@@ -2033,8 +2084,8 @@ pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
         // keep the requests and the timers below from their turn.
         let round = rx::receive_round(
             rx::FRAMES_PER_ROUND,
-            &mut stack,
-            &mut frame,
+            stack,
+            &mut *frame,
             |s, f| s.link.recv_frame(f),
             |s, f, n| s.on_frame(&f[..n], now),
             |s| s.link.rx_pending(),
