@@ -167,6 +167,16 @@ when sshd generated a host key with no `random_seed` from an earlier boot,
 among the recent ones. The kernel's boot line `random: ChaCha20 generator
 seeded with rdrand` or `... with TSC (no rdrand: limited entropy)` remains. The laptop's PCH (`8086:1e31`,
 7-series) pairs with Ivy Bridge (usually `rdrand`) or Sandy Bridge (none).
+
+**Read on the reference laptop (2026-10-23, version 11):** `entropy  TSC +
+interrupts (72 samples, 1737 events): weak`. The laptop's kernel generator
+gets no hardware entropy (a Sandy Bridge CPU without `rdrand`, or values
+rejected as implausible: the boot line on screen tells which). Consequences:
+the SSH host key on its stick was made on the build host
+(`usb-image --authorized-key`), so it is not affected; netd's TCP secret
+(ADR 0034) and any key generated on the machine rest on TSC and interrupt
+timing only, which makes a kernel seed saved across boots (open in ADR 0034
+and incident 0014) worth doing for this machine.
 It decides the quality of sshd's keys (ADR 0025) and of netd's TCP secret
 (ADR 0034). Not yet read on the laptop (2026-10-22).
 
