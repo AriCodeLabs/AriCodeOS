@@ -214,6 +214,12 @@ pub struct Scenario {
     pub selftest: bool,
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
+    /// Runs with no other scenario at the same time (`--jobs`, ADR 0040):
+    /// for a scenario whose host-side timing depends on the guest keeping
+    /// up in wall-clock time, which other runs on the host slow down. The
+    /// scenario file says why.
+    #[serde(default)]
+    pub serial: bool,
     /// Lines the runner sends over the serial console, one each time the
     /// output shows `prompt` (the first one at the first prompt).
     #[serde(default)]
@@ -234,11 +240,13 @@ pub struct Scenario {
     pub host_flood: Option<HostFlood>,
     /// HTTPS servers on the host (`openssl s_server -www`): one with a
     /// certificate for `10.0.2.2` from a test CA installed in AriFS as
-    /// `trusted_ca.der`, one self-signed and untrusted.
+    /// `trusted_ca.der`, one self-signed and untrusted, on ports chosen per
+    /// run: [`HTTPS_PORT`] and [`HTTPS_UNTRUSTED_PORT`].
     #[serde(default)]
     pub host_https: bool,
-    /// An update source published into `build/update-test/` and served by
-    /// the test HTTP server at `http://10.0.2.2:17010/update/` (ADR 0029).
+    /// An update source (ADR 0029) published into the scenario's directory
+    /// and served by its own HTTP server at
+    /// `http://10.0.2.2:{update_port}/update/` ([`UPDATE_PORT`]).
     pub host_update: Option<HostUpdate>,
     /// Initial state of the test disk (`image::DiskVariant`): `slots`
     /// (default), `update-empty`, `esp-only`, `pending-b`, `b-exhausted`, `b-corrupt`,
@@ -336,6 +344,43 @@ pub struct Scenario {
     pub file: PathBuf,
 }
 
+/// Placeholders for ports chosen per run (ADR 0040). The guest reaches a
+/// host port P at 10.0.2.2:P, so a scenario whose host server runs on a
+/// port picked at run time writes the port as a placeholder in its console
+/// lines, `kill_on` and expectations, and the runner fills it in. Each one
+/// needs the field that starts its server.
+pub const UPDATE_PORT: &str = "{update_port}";
+pub const HTTPS_PORT: &str = "{https_port}";
+pub const HTTPS_UNTRUSTED_PORT: &str = "{https_untrusted_port}";
+
+/// `text` with each placeholder of `values` replaced by its port.
+pub fn fill(text: &str, values: &[(&str, u16)]) -> String {
+    values
+        .iter()
+        .fold(text.to_string(), |t, (k, v)| t.replace(k, &v.to_string()))
+}
+
+impl Expect {
+    /// The expectations with the run's ports filled in ([`fill`]).
+    pub fn filled(&self, values: &[(&str, u16)]) -> Self {
+        let all = |v: &[String]| v.iter().map(|t| fill(t, values)).collect();
+        Self {
+            exit: self.exit,
+            serial_contains: all(&self.serial_contains),
+            serial_absent: all(&self.serial_absent),
+            serial_order: all(&self.serial_order),
+            killed: self.killed,
+        }
+    }
+
+    fn texts(&self) -> impl Iterator<Item = &String> {
+        self.serial_contains
+            .iter()
+            .chain(&self.serial_absent)
+            .chain(&self.serial_order)
+    }
+}
+
 /// A scenario name is also a directory name under `build/scenarios/`:
 /// only `[a-z0-9._-]`, not starting with `.`, no `..`.
 pub fn validate_name(name: &str) -> Result<()> {
@@ -412,6 +457,8 @@ pub fn load_from(dir: &Path) -> Result<Vec<Scenario>> {
                     path.display()
                 ));
             }
+            s.check_placeholders()
+                .map_err(|e| format!("{}: {e}", path.display()))?;
             s.file = path;
             out.push(s);
         }
@@ -421,6 +468,35 @@ pub fn load_from(dir: &Path) -> Result<Vec<Scenario>> {
 }
 
 impl Scenario {
+    /// Every text the runner fills placeholders in: console lines,
+    /// `kill_on` and expectations, of the scenario and of its boots.
+    fn texts(&self) -> impl Iterator<Item = &String> {
+        self.stdin
+            .iter()
+            .chain(self.expect.texts())
+            .chain(self.boots.iter().flat_map(|b| {
+                b.stdin
+                    .iter()
+                    .chain(b.kill_on.iter())
+                    .chain(b.expect.texts())
+            }))
+    }
+
+    /// A placeholder without the server that gives it a port would reach
+    /// the guest as literal text: refused at load time.
+    fn check_placeholders(&self) -> Result<()> {
+        for (placeholder, provided, field) in [
+            (UPDATE_PORT, self.host_update.is_some(), "[host_update]"),
+            (HTTPS_PORT, self.host_https, "host_https = true"),
+            (HTTPS_UNTRUSTED_PORT, self.host_https, "host_https = true"),
+        ] {
+            if !provided && self.texts().any(|t| t.contains(placeholder)) {
+                return Err(format!("{placeholder} needs {field}"));
+            }
+        }
+        Ok(())
+    }
+
     /// What a boot of this scenario writes to `aricodeos/cmdline.txt`: its
     /// declared `cmdline` plus `selftest` unless the scenario opts out.
     pub fn boot_cmdline(&self, cmdline: &str) -> String {
@@ -634,6 +710,60 @@ mod tests {
         )
         .unwrap();
         assert!(!off.selftest);
+    }
+
+    #[test]
+    fn placeholders_are_filled_and_need_their_server() {
+        let values = [(UPDATE_PORT, 40123), (HTTPS_PORT, 40124)];
+        assert_eq!(
+            fill(
+                "http://10.0.2.2:{update_port}/update/ {https_port} {x}",
+                &values
+            ),
+            "http://10.0.2.2:40123/update/ 40124 {x}"
+        );
+        let parse = |extra: &str| -> Result<Scenario> {
+            let tmp = crate::test_util::TempDir::new("placeholders");
+            std::fs::write(
+                tmp.path().join("s.toml"),
+                format!("name = \"x\"\nlevel = \"full\"\nareas = [\"update\"]\n{extra}"),
+            )
+            .unwrap();
+            load_from(tmp.path()).map(|mut v| v.remove(0))
+        };
+        let err =
+            parse("stdin = [\"update add 10.0.2.2:{update_port}/update/\"]\n[expect]\nexit = 33\n")
+                .unwrap_err();
+        assert!(err.contains("{update_port} needs [host_update]"), "{err}");
+        let err =
+            parse("[[boots]]\nkill_on = \"{https_untrusted_port}\"\n[boots.expect]\nexit = 0\n")
+                .unwrap_err();
+        assert!(err.contains("needs host_https = true"), "{err}");
+        let s = parse(
+            "[host_update]\nsource = \"none\"\n[expect]\nserial_contains = [\"from http://10.0.2.2:{update_port}/update/\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            s.expect.filled(&values).serial_contains,
+            ["from http://10.0.2.2:40123/update/"]
+        );
+    }
+
+    /// The fixed test HTTP server has no update channel and the HTTPS
+    /// servers have no fixed ports: a scenario reaching them through a
+    /// literal port would talk to nothing (or to another run).
+    #[test]
+    fn repo_scenarios_reach_per_run_servers_through_placeholders() {
+        let http = aricode_proto::net::TEST_HTTP_PORT;
+        for s in load_all().expect("scenarios") {
+            for t in s.texts() {
+                assert!(
+                    !t.contains(&format!(":{http}/update")),
+                    "{}: '{t}' must use {UPDATE_PORT}",
+                    s.name
+                );
+            }
+        }
     }
 
     #[test]

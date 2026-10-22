@@ -46,13 +46,43 @@ struct Cpu {
     rdrand: bool,
 }
 
-/// Network cards of the machine.
+/// Network cards of the machine and the host ports forwarded into it.
 #[derive(Clone, Copy)]
 struct Nics {
     /// The virtio-net card on the user network.
     virtio_net: bool,
     /// An unused igb, for the function that advertises FLR.
     igb_flr: bool,
+    /// The user network's `hostfwd` ports.
+    forwards: Forwards,
+}
+
+/// Host ports QEMU forwards (`hostfwd`) into the guest: chosen per
+/// scenario run (`ports::PortLease`), fixed for `cargo xtask run`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Forwards {
+    /// Host port forwarded to the guest's `TEST_TCP_LISTEN_PORT`.
+    pub tcp: u16,
+    /// Host port forwarded to the guest's SSH port 22.
+    pub ssh: u16,
+}
+
+impl Forwards {
+    /// `cargo xtask run`: fixed, so `ssh -p 17022 ari@127.0.0.1` reaches
+    /// the interactive machine.
+    pub const INTERACTIVE: Self = Self {
+        tcp: 17009,
+        ssh: 17022,
+    };
+
+    /// Host port forwarded to `guest_port`, if it has one.
+    pub fn host_port(&self, guest_port: u16) -> Option<u16> {
+        match guest_port {
+            22 => Some(self.ssh),
+            aricode_proto::net::TEST_TCP_LISTEN_PORT => Some(self.tcp),
+            _ => None,
+        }
+    }
 }
 
 fn base_command(
@@ -116,15 +146,15 @@ fn base_command(
         ]);
     }
     // User networking (slirp): DHCP at 10.0.2.2, DNS at 10.0.2.3; the virtual
-    // host 10.0.2.2 forwards UDP/TCP to the host loopback, where the test
-    // responder listens.
+    // host 10.0.2.2 forwards UDP/TCP to the same port of the host loopback,
+    // where the test responder listens.
     q.args([
         "-netdev",
         &format!(
             "user,id=net0,hostfwd=tcp:127.0.0.1:{}-:{},hostfwd=tcp:127.0.0.1:{}-:22",
-            aricode_proto::net::TEST_TCP_FORWARD_PORT,
+            nics.forwards.tcp,
             aricode_proto::net::TEST_TCP_LISTEN_PORT,
-            aricode_proto::net::TEST_SSH_FORWARD_PORT
+            nics.forwards.ssh
         ),
     ]);
     // Without `nic` the netdev stays (the capture filter hangs off it) but
@@ -327,10 +357,20 @@ fn run_input_probe(
     }
 }
 
-/// Test responder on the host loopback: over UDP it returns a fixed A record
-/// for DNS queries and echoes everything else; over TCP it echoes every
-/// connection. It lives as long as the returned value exists.
+/// Test responder on the host loopback, at the ports the guest's test
+/// programs have compiled in (`aricode_proto::net::TEST_*`): over UDP it
+/// returns a fixed A record for DNS queries and echoes everything else;
+/// over TCP it echoes every connection; the test HTTP server serves
+/// [`http_serve`]'s routes. Those ports cannot be chosen per run (see
+/// `ports`), so one responder serves every scenario of a suite, and a
+/// second suite in the same network namespace is refused at start. It
+/// lives as long as the returned value exists.
 pub struct Responder {
+    _servers: Servers,
+}
+
+/// Server threads on the host loopback, stopped and joined when dropped.
+struct Servers {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     threads: Vec<std::thread::JoinHandle<()>>,
 }
@@ -347,8 +387,10 @@ const EARLY_HINTS_PAUSE: Duration = Duration::from_secs(5);
 /// size github.com sends), `/early-hints` (a `103` every five seconds and
 /// never a final response: the server of incident 0009, which the
 /// client's budget must cut), `/early-hints-flood` (twenty `103` at once,
-/// then a 200: the interim-response limit) and 404 for everything else.
-fn http_serve(mut stream: std::net::TcpStream) {
+/// then a 200: the interim-response limit), `/update/NAME` from `update`
+/// (a scenario's own update source; 404 without one) and 404 for
+/// everything else.
+fn http_serve(mut stream: std::net::TcpStream, update: Option<&Path>) {
     use std::io::Write;
     let mut buf = [0u8; 2048];
     let mut have = 0;
@@ -390,8 +432,10 @@ fn http_serve(mut stream: std::net::TcpStream) {
             r.extend(b"Content-Length: 15\r\nConnection: close\r\n\r\nbig headers ok\n");
             r
         }
-        // The scenarios' update channel (ADR 0027), never the real one.
-        p if p.starts_with("/update/") => file_response(&image::test_update_dir(), &p["/update/".len()..]),
+        // The scenario's update channel (ADR 0027), never the real one.
+        p if p.starts_with("/update/") && update.is_some() => {
+            file_response(update.expect("checked"), &p["/update/".len()..])
+        }
         _ => b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nno existe".to_vec(),
     };
     let _ = stream.write_all(&response);
@@ -498,20 +542,31 @@ pub fn responder_reply(datagram: &[u8], out: &mut [u8]) -> usize {
     n
 }
 
+/// The bind error of a fixed test port, naming the likely holder.
+fn fixed_port_error(what: &str, port: u16, e: std::io::Error) -> String {
+    format!(
+        "{what} on 127.0.0.1:{port}: {e}; the guest's test programs have this port compiled in, \
+         so one test suite runs per network namespace: is another suite running here? \
+         Run this one in Docker (README.md, \"Docker\") or wait for the other"
+    )
+}
+
 impl Responder {
     pub fn start() -> Result<Self> {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
         let port = aricode_proto::net::TEST_RESPONDER_PORT;
         let socket = std::net::UdpSocket::bind(("127.0.0.1", port))
-            .map_err(|e| format!("UDP responder on 127.0.0.1:{port}: {e}"))?;
+            .map_err(|e| fixed_port_error("UDP responder", port, e))?;
         socket
             .set_read_timeout(Some(Duration::from_millis(100)))
             .map_err(|e| e.to_string())?;
         let tcp_port = aricode_proto::net::TEST_TCP_ECHO_PORT;
         let listener = std::net::TcpListener::bind(("127.0.0.1", tcp_port))
-            .map_err(|e| format!("TCP echo server on 127.0.0.1:{tcp_port}: {e}"))?;
-        listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+            .map_err(|e| fixed_port_error("TCP echo server", tcp_port, e))?;
+        let http_port = aricode_proto::net::TEST_HTTP_PORT;
+        let http_listener = std::net::TcpListener::bind(("127.0.0.1", http_port))
+            .map_err(|e| fixed_port_error("test HTTP server", http_port, e))?;
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let udp = std::thread::spawn(move || {
@@ -524,42 +579,78 @@ impl Responder {
                 }
             }
         });
-        let http_port = aricode_proto::net::TEST_HTTP_PORT;
-        let http_listener = std::net::TcpListener::bind(("127.0.0.1", http_port))
-            .map_err(|e| format!("test HTTP server on 127.0.0.1:{http_port}: {e}"))?;
-        http_listener
-            .set_nonblocking(true)
-            .map_err(|e| e.to_string())?;
-        let tcp = Self::accept_loop(Arc::clone(&stop), listener, tcp_echo);
-        let http = Self::accept_loop(Arc::clone(&stop), http_listener, http_serve);
+        let tcp = accept_loop(Arc::clone(&stop), listener, Arc::new(tcp_echo))?;
+        let http = accept_loop(
+            Arc::clone(&stop),
+            http_listener,
+            Arc::new(|s| http_serve(s, None)),
+        )?;
         Ok(Self {
-            stop,
-            threads: vec![udp, tcp, http],
-        })
-    }
-
-    /// Accepts connections until `stop` and serves each one on its own thread.
-    fn accept_loop(
-        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-        listener: std::net::TcpListener,
-        serve: fn(std::net::TcpStream),
-    ) -> std::thread::JoinHandle<()> {
-        std::thread::spawn(move || {
-            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((stream, _)) => {
-                        let _ = stream.set_nonblocking(false);
-                        let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-                        std::thread::spawn(move || serve(stream));
-                    }
-                    Err(_) => std::thread::sleep(Duration::from_millis(20)),
-                }
-            }
+            _servers: Servers {
+                stop,
+                threads: vec![udp, tcp, http],
+            },
         })
     }
 }
 
-impl Drop for Responder {
+/// A scenario's own test HTTP server (`host_update`): [`http_serve`]'s
+/// routes plus `/update/` from the scenario's channel directory, on a port
+/// the kernel picks, so concurrent scenarios each serve their own channel.
+pub struct UpdateServer {
+    port: u16,
+    _servers: Servers,
+}
+
+impl UpdateServer {
+    pub fn start(channel: &Path) -> Result<Self> {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .map_err(|e| format!("update server on 127.0.0.1:0: {e}"))?;
+        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let channel = channel.to_path_buf();
+        let thread = accept_loop(
+            std::sync::Arc::clone(&stop),
+            listener,
+            std::sync::Arc::new(move |s| http_serve(s, Some(&channel))),
+        )?;
+        Ok(Self {
+            port,
+            _servers: Servers {
+                stop,
+                threads: vec![thread],
+            },
+        })
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+}
+
+/// Accepts connections until `stop` and serves each one on its own thread.
+fn accept_loop(
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    listener: std::net::TcpListener,
+    serve: std::sync::Arc<dyn Fn(std::net::TcpStream) + Send + Sync>,
+) -> Result<std::thread::JoinHandle<()>> {
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    Ok(std::thread::spawn(move || {
+        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                    let serve = std::sync::Arc::clone(&serve);
+                    std::thread::spawn(move || serve(stream));
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+    }))
+}
+
+impl Drop for Servers {
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         for t in self.threads.drain(..) {
@@ -576,9 +667,8 @@ pub struct TcpProbe<'a> {
     pub payload: &'a str,
 }
 
-fn run_tcp_probe(payload: &str) -> String {
+fn run_tcp_probe(port: u16, payload: &str) -> String {
     use std::io::Write;
-    let port = aricode_proto::net::TEST_TCP_FORWARD_PORT;
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = match std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
         Ok(s) => s,
@@ -616,7 +706,8 @@ fn run_tcp_probe(payload: &str) -> String {
 /// with the table in that state.
 pub struct FloodProbe<'a> {
     pub marker: &'a str,
-    /// Guest port: 22 or `TEST_TCP_LISTEN_PORT`, the two with a `hostfwd`.
+    /// Guest port: 22 or `TEST_TCP_LISTEN_PORT`, the two with a `hostfwd`
+    /// ([`Forwards`]).
     pub port: u16,
     pub connections: usize,
 }
@@ -626,24 +717,15 @@ pub struct FloodProbe<'a> {
 /// once and user networking relays the reset within milliseconds.
 const FLOOD_SETTLE: Duration = Duration::from_secs(2);
 
-/// Host port that `hostfwd` forwards to `guest_port` (see `base_command`).
-pub fn forwarded_port(guest_port: u16) -> Option<u16> {
-    use aricode_proto::net::{TEST_SSH_FORWARD_PORT, TEST_TCP_FORWARD_PORT, TEST_TCP_LISTEN_PORT};
-    match guest_port {
-        22 => Some(TEST_SSH_FORWARD_PORT),
-        TEST_TCP_LISTEN_PORT => Some(TEST_TCP_FORWARD_PORT),
-        _ => None,
-    }
-}
-
 /// The flood towards the guest's `guest_port` through its `hostfwd`.
 fn run_flood_probe(
+    forwards: Forwards,
     guest_port: u16,
     connections: usize,
     ready: &std::sync::atomic::AtomicBool,
     stop: &std::sync::atomic::AtomicBool,
 ) -> String {
-    let Some(host_port) = forwarded_port(guest_port) else {
+    let Some(host_port) = forwards.host_port(guest_port) else {
         ready.store(true, std::sync::atomic::Ordering::SeqCst);
         return format!("[host] flood: guest port {guest_port} has no hostfwd");
     };
@@ -723,13 +805,12 @@ pub struct SshProbe<'a> {
 
 /// Runs each command over SSH; the result is one block of `[host] ssh`
 /// lines: the command, every output line and the exit status.
-fn run_ssh_probe(commands: &[String], key: &Path, idle_client: bool) -> String {
+fn run_ssh_probe(port: u16, commands: &[String], key: &Path, idle_client: bool) -> String {
     let mut lines = Vec::new();
     // An idle client that holds a connection without identifying itself;
     // kept open for the whole probe (sshd must drop it on its own).
     let idle = idle_client.then(|| {
-        let addr =
-            std::net::SocketAddr::from(([127, 0, 0, 1], aricode_proto::net::TEST_SSH_FORWARD_PORT));
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
         match std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
             Ok(s) => {
                 lines.push(String::from("[host] ssh idle client connected"));
@@ -762,7 +843,7 @@ fn run_ssh_probe(commands: &[String], key: &Path, idle_client: bool) -> String {
             // Only the scenario's key: the agent's keys would be refused first.
             .args(["-o", "IdentitiesOnly=yes", "-i"])
             .arg(key)
-            .args(["-p", &aricode_proto::net::TEST_SSH_FORWARD_PORT.to_string()])
+            .args(["-p", &port.to_string()])
             .arg("ari@127.0.0.1")
             .arg(cmd)
             .stdin(Stdio::null())
@@ -808,7 +889,10 @@ pub fn run_interactive(
     let disk = build_dir().join("disk.img");
     let esp_drive = if usb_image {
         // As on a USB stick: the ESP inside the GPT disk, no `fat:`.
-        image::write_usb_image(&disk, &esp, &[], aricode_gpt::TEST_DISK_GUID)?;
+        println!(
+            "{}",
+            image::write_usb_image(&disk, &esp, &[], aricode_gpt::TEST_DISK_GUID)?
+        );
         None
     } else {
         image::write_test_disk(&disk, image::DiskVariant::Slots, &[])?;
@@ -832,7 +916,13 @@ pub fn run_interactive(
         Nics {
             virtio_net: true,
             igb_flr: false,
+            forwards: Forwards::INTERACTIVE,
         },
+    );
+    println!(
+        "[xtask] host 127.0.0.1:{} -> guest port 22 (ssh -p {} ari@127.0.0.1)",
+        Forwards::INTERACTIVE.ssh,
+        Forwards::INTERACTIVE.ssh
     );
     if cmdline.split_whitespace().any(|w| w == "gui") {
         // With `gui` the screen must be visible: QEMU window and serial in the terminal.
@@ -938,8 +1028,6 @@ fn count_occurrences(haystack: &[u8], needle: &[u8]) -> usize {
         .count()
 }
 
-/// Boots headless, captures the serial output, feeds `input` and waits up to
-/// `timeout`.
 /// Everything a scenario asks of the runner besides the ESP and the timeout.
 pub struct Headless<'a> {
     pub input: Input<'a>,
@@ -964,11 +1052,17 @@ pub struct Headless<'a> {
     pub nic: bool,
     /// An unused function that advertises FLR (`flr_device`).
     pub flr_device: bool,
+    /// This run's `hostfwd` ports.
+    pub forwards: Forwards,
 }
 
+/// Boots headless, captures the serial output, feeds `input` and waits up to
+/// `timeout`. QEMU's own messages (stderr) go to `stderr_log`. The fixed
+/// test hosts (`Responder`) must be running: the suite starts them once.
 pub fn run_headless(
     esp: &Path,
     workdir: &Path,
+    stderr_log: &Path,
     timeout: Duration,
     options: &Headless,
 ) -> Result<Capture> {
@@ -992,8 +1086,9 @@ pub fn run_headless(
         }
         Some(esp)
     };
-    let _responder = Responder::start()?;
     let qmp = QmpSocket::new(workdir);
+    let stderr =
+        std::fs::File::create(stderr_log).map_err(|e| format!("{}: {e}", stderr_log.display()))?;
     // Every frame on the guest's network, for the count of guest
     // frames appended to the capture.
     let pcap_path = workdir.join("net.pcap");
@@ -1012,6 +1107,7 @@ pub fn run_headless(
         Nics {
             virtio_net: options.nic,
             igb_flr: options.flr_device,
+            forwards: options.forwards,
         },
     )
     .args([
@@ -1032,7 +1128,7 @@ pub fn run_headless(
         Stdio::piped()
     })
     .stdout(Stdio::piped())
-    .stderr(Stdio::inherit())
+    .stderr(stderr)
     .spawn()
     .map_err(|e| format!("qemu: {e}"))?;
     let mut stdout = child.stdout.take().expect("stdout piped");
@@ -1099,7 +1195,8 @@ pub fn run_headless(
                 && count_occurrences(&captured.lock().expect("capture"), p.marker.as_bytes()) > 0
             {
                 let payload = p.payload.to_string();
-                probe_thread = Some(std::thread::spawn(move || run_tcp_probe(&payload)));
+                let port = options.forwards.tcp;
+                probe_thread = Some(std::thread::spawn(move || run_tcp_probe(port, &payload)));
             }
             if probe_thread.as_ref().is_some_and(|t| t.is_finished()) {
                 probe_result = probe_thread.take().and_then(|t| t.join().ok());
@@ -1113,8 +1210,9 @@ pub fn run_headless(
                 let commands = p.commands.to_vec();
                 let key = p.key.clone();
                 let idle = p.idle_client;
+                let port = options.forwards.ssh;
                 ssh_thread = Some(std::thread::spawn(move || {
-                    run_ssh_probe(&commands, &key, idle)
+                    run_ssh_probe(port, &commands, &key, idle)
                 }));
             }
             if ssh_thread.as_ref().is_some_and(|t| t.is_finished()) {
@@ -1127,8 +1225,9 @@ pub fn run_headless(
             {
                 let (port, n) = (f.port, f.connections);
                 let (ready, stop) = (Arc::clone(&flood_ready), Arc::clone(&flood_stop));
+                let forwards = options.forwards;
                 flood_thread = Some(std::thread::spawn(move || {
-                    run_flood_probe(port, n, &ready, &stop)
+                    run_flood_probe(forwards, port, n, &ready, &stop)
                 }));
             }
         }
@@ -1310,18 +1409,17 @@ mod tests {
     /// `base_command`; any other guest port is refused at once, not probed.
     #[test]
     fn flood_knows_the_forwarded_ports_only() {
-        use aricode_proto::net::{
-            TEST_SSH_FORWARD_PORT, TEST_TCP_FORWARD_PORT, TEST_TCP_LISTEN_PORT,
+        use aricode_proto::net::TEST_TCP_LISTEN_PORT;
+        let forwards = super::Forwards {
+            tcp: 40001,
+            ssh: 40002,
         };
-        assert_eq!(super::forwarded_port(22), Some(TEST_SSH_FORWARD_PORT));
-        assert_eq!(
-            super::forwarded_port(TEST_TCP_LISTEN_PORT),
-            Some(TEST_TCP_FORWARD_PORT)
-        );
-        assert_eq!(super::forwarded_port(80), None);
+        assert_eq!(forwards.host_port(22), Some(40002));
+        assert_eq!(forwards.host_port(TEST_TCP_LISTEN_PORT), Some(40001));
+        assert_eq!(forwards.host_port(80), None);
         let ready = std::sync::atomic::AtomicBool::new(false);
         let stop = std::sync::atomic::AtomicBool::new(true);
-        let out = super::run_flood_probe(80, 3, &ready, &stop);
+        let out = super::run_flood_probe(forwards, 80, 3, &ready, &stop);
         assert_eq!(out, "[host] flood: guest port 80 has no hostfwd");
         assert!(
             ready.load(std::sync::atomic::Ordering::SeqCst),
@@ -1390,6 +1488,66 @@ mod tests {
                 60
             ))
         );
+    }
+
+    /// The hostfwd rules carry the run's ports, never fixed ones.
+    #[test]
+    fn netdev_forwards_the_runs_ports() {
+        let q = super::base_command(
+            None,
+            Path::new("vars.fd"),
+            Path::new("disk.img"),
+            false,
+            super::Cpu {
+                count: 1,
+                rdrand: false,
+            },
+            super::UsbOptions::default(),
+            super::Nics {
+                virtio_net: true,
+                igb_flr: false,
+                forwards: super::Forwards {
+                    tcp: 40001,
+                    ssh: 40002,
+                },
+            },
+        );
+        let args: Vec<String> = q
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let netdev = &args[args.iter().position(|a| a == "-netdev").unwrap() + 1];
+        assert_eq!(
+            netdev,
+            "user,id=net0,hostfwd=tcp:127.0.0.1:40001-:7,hostfwd=tcp:127.0.0.1:40002-:22"
+        );
+    }
+
+    /// A scenario's update server serves its own channel; the fixed one
+    /// (no channel) answers 404 under `/update/`.
+    #[test]
+    fn update_server_serves_its_own_channel() {
+        use std::io::{Read, Write};
+        let tmp = crate::test_util::TempDir::new("update-server");
+        std::fs::write(tmp.path().join("index"), b"serial = 7\n").unwrap();
+        let get = |port: u16, path: &str| {
+            let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            write!(c, "GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+            let mut out = String::new();
+            c.read_to_string(&mut out).unwrap();
+            out
+        };
+        let a = super::UpdateServer::start(tmp.path()).unwrap();
+        let b = super::UpdateServer::start(&tmp.path().join("missing")).unwrap();
+        assert_ne!(a.port(), b.port());
+        let r = get(a.port(), "/update/index");
+        assert!(
+            r.starts_with("HTTP/1.1 200 OK") && r.ends_with("serial = 7\n"),
+            "{r}"
+        );
+        assert!(get(b.port(), "/update/index").starts_with("HTTP/1.1 404"));
+        assert!(get(a.port(), "/hola").ends_with("Hola desde el host\n"));
+        assert!(get(a.port(), "/update/../index").starts_with("HTTP/1.1 404"));
     }
 
     /// Ethernet frame from `src` with ethertype `kind` and `payload`.

@@ -49,14 +49,35 @@ git checkout develop
 ## Test levels per branch
 
 The tests live in the repository ([tests/README.md](../tests/README.md)) and have three levels
-so that each phase runs the fastest check that still gives coverage:
+so that each change runs the fastest check that still gives coverage. The
+full suite is for `main`; small changes do not wait for it:
 
 ```text
-on a feature/* or fix/*    cargo xtask test --level unit           (seconds, on every commit)
-                           cargo xtask test --area <areas of the phase>   (only its QEMU scenarios)
-before merging into develop cargo xtask check && cargo xtask test   (unit + smoke)
-before merging into main   cargo xtask check && cargo xtask test --all   (unit + full)
+each commit on feature/* or fix/*     cargo xtask check && cargo xtask test --level unit      (minutes)
+  same branch, touching running code  cargo xtask test --all --area <areas touched>           (minutes)
+before merging into develop           cargo xtask check && cargo xtask test   (unit + smoke)  (~5 min)
+before merging into main (release)    cargo xtask check && cargo xtask test --all
+                                      and cargo xtask test --all --cpus 4                     (~12 min both)
 ```
+
+The QEMU scenarios run several at a time (`--jobs N`, by default from the
+CPUs and memory; ADR 0040), which brought the two full passes from about
+an hour to the time above on the reference host (16 CPUs). Run the full
+suite on a branch only when it changes the kernel's scheduling/SMP, memory
+or the test runner itself, or when a scenario of another area could
+plausibly break, and say why. Never run the same suite twice for the same
+commit, and never rerun a red suite into green: explain the failure first
+(failure protocol, ADR 0028).
+
+The full suite on `develop` runs continuously in the CI container
+(`tools/docker/ci/`, README.md "Docker"); a failure there becomes an
+incident. One suite runs at a time on a machine, the CI container's
+included (stop it first), and test containers get `--cpus 10 --memory 12g
+--memory-swap 12g` on the reference host so it keeps room and stays cool
+(the runner's default `--jobs` follows those limits). Ports alone would
+allow more: only three test ports are fixed (compiled into the guest's test
+programs), one set per network namespace, and a Docker container is its
+own namespace.
 
 The full suite can run on any machine with Docker, without installing the
 toolchain: see "Docker" in [README.md](../README.md). The result counts the

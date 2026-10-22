@@ -24,6 +24,11 @@
 # usb-kbd holds at most 16 scancodes and drops events beyond that while the
 # driver drains it at the endpoint's polling rate (and not at all during
 # the recovery), so 30 events at QMP speed lose keystrokes.
+# It runs alone (`serial`, ADR 0040, incident 0019): the pacing is wall
+# clock while the guest's draining is guest progress, and with other QEMU
+# runs on the host the guest falls behind (`--cpus 4 --jobs 8`: "ari> shut",
+# the rest of "shutdown" dropped by the full usb-kbd queue while `diag`
+# printed).
 name = "usb.hid_fault"
 description = "usbd: a failed HID report is recorded, its interrupt endpoint recovered from the idle loop and typing continues"
 level = "full"
@@ -32,6 +37,7 @@ cmdline = "qemu_exit shell usb_fault=1:hid"
 usb_hid = true
 usb_hid_only_input = true
 timeout_secs = 60
+serial = true
 
 [host_input]
 marker = "CONSOLE_BRIDGE_READY"

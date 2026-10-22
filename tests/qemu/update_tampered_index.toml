@@ -19,7 +19,7 @@ stdin = ["update", "upgrade", "diag", "shutdown"]
 [boots.expect]
 exit = 33
 serial_contains = [
-    "updater: source 1 http://10.0.2.2:17010/update/: index refused (BadSignature): signature or format invalid; nothing from it is used",
+    "updater: source 1 http://10.0.2.2:{update_port}/update/: index refused (BadSignature): signature or format invalid; nothing from it is used",
     "update: updater exited with 31",
     "updater: source 1: no verified index yet; run update",
     "updater: no verified index: run update first",

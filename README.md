@@ -75,7 +75,8 @@ works on any machine with Docker (slower than on the host).
 docker build -t aricodeos-dev -f tools/docker/Dockerfile .
 docker run --rm -it -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/cargo/registry \
     --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask check
-docker run --rm -it -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/cargo/registry \
+docker run --rm -it --cpus 10 --memory 12g --memory-swap 12g \
+    -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/cargo/registry \
     --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask test --all
 ```
 
@@ -87,6 +88,47 @@ different path, host-built artifacts reused inside the container point
 at files that do not exist there. The image exposes no port and holds no
 key. A QEMU result inside Docker is a QEMU result: it does not replace the
 hardware checks of `docs/hardware.md`.
+
+The QEMU scenarios run several at a time (`--jobs N`; by default one per
+CPU the container may use, two thirds of that with `--cpus` above 1, at
+most 10 and 6, and 1 GiB of its memory per run; see `tests/README.md`,
+"Parallel runs"). Give test containers `--cpus 10 --memory 12g
+--memory-swap 12g` on the reference host (16 CPUs) so the machine keeps
+room and stays cool, and run one suite at a time. Each container has its
+own network namespace, so a suite in a container never collides on ports
+with one on the host or in another container (ADR 0040).
+
+#### Continuous tests
+
+`tools/docker/ci/Dockerfile` adds to that image a script that keeps its
+own clone of the public repository in a named volume (never your
+checkout), and on each new commit of a branch (default `develop`) runs
+`cargo xtask check`, `cargo xtask test --all` and `--all --cpus 4`, then
+writes a dated report (pass/fail per scenario, the logs of the failed ones)
+to a mounted directory. It fetches over https and holds no credentials.
+
+```bash
+docker build -t aricodeos-dev -f tools/docker/Dockerfile .
+docker build -t aricodeos-ci -f tools/docker/ci/Dockerfile .
+mkdir -p ~/aricodeos-ci-reports
+docker run -d --name aricodeos-ci --restart unless-stopped \
+    --cpus 10 --memory 12g --memory-swap 12g --cpu-shares 512 \
+    -v aricodeos-ci-work:/work -v aricodeos-ci-cargo:/usr/local/cargo/registry \
+    -v ~/aricodeos-ci-reports:/reports --user "$(id -u):$(id -g)" \
+    aricodeos-ci --loop
+docker logs -f aricodeos-ci                # progress; reports in ~/aricodeos-ci-reports/latest/
+```
+
+`--loop` polls the branch every 5 minutes (`--interval S`) and rests 10
+minutes after each run (`--pause S`); without it the container tests the
+current head once and exits non-zero on a failure. `--branch B` tests
+another branch and `--jobs N` overrides the concurrency. The suites run one
+after another, at nice 10, and `--cpus`, `--memory` and `--cpu-shares` keep
+the container from taking the machine: the runner sizes its jobs from them
+(10 CPUs give 10 jobs, 6 for the `--cpus 4` pass), so development goes on
+beside it. Stop it (`docker stop aricodeos-ci`) before running another
+suite on the same machine. A failure in its report is an incident
+(`docs/WORKFLOW.md`).
 
 To try the system without building it, `tools/docker/try/Dockerfile` packs
 the USB stick image into an image that boots it in QEMU with the `ari>`

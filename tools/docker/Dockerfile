@@ -12,8 +12,10 @@
 # Linux, macOS and Windows hosts alike; a run is slower than on the host.
 #
 # Build:  docker build -t aricodeos-dev -f tools/docker/Dockerfile .
-# Use:    docker run --rm -it -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/cargo/registry \
+# Use:    docker run --rm -it --cpus 10 --memory 12g --memory-swap 12g \
+#             -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/cargo/registry \
 #             --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask test --all
+# (the limits leave the reference host room; the runner sizes --jobs from them)
 # The checkout is mounted at its host path: artifacts in target/ embed
 # absolute paths, so host and container must see the same ones.
 

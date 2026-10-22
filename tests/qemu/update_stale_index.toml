@@ -18,7 +18,7 @@ stdin = ["update", "diag", "shutdown"]
 [boots.expect]
 exit = 33
 serial_contains = [
-    "updater: source 1 http://10.0.2.2:17010/update/: index refused (Stale {",
+    "updater: source 1 http://10.0.2.2:{update_port}/update/: index refused (Stale {",
     "older than the one already verified",
     "updater: source 1: keeping the index verified earlier (serial ",
     "updater: system: installed 1, source 1 offers 2: upgrade available",

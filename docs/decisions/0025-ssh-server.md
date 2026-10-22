@@ -50,7 +50,8 @@ would open an unauthenticated shell on the user's network.
    empty message is end of stream in either direction. With a pty, sshd
    turns `\n` into `\r\n`.
 5. **Images and tests**: `cargo xtask usb-image --authorized-key KEY.pub`
-   installs a public key; QEMU forwards host port 17022 to the guest's 22,
+   installs a public key; QEMU forwards a host port to the guest's 22 (17022
+   for `cargo xtask run`, one chosen per run in the scenarios since ADR 0040),
    and scenario key `[host_ssh]` generates a client key, installs it, and
    runs commands with the host's `ssh` (`ssh.exec`: ls, cat, write and
    shutdown over SSH).

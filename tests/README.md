@@ -14,6 +14,7 @@ All tests live in the repository and run with `cargo xtask test`.
 cargo xtask test                    # unit + smoke (default)
 cargo xtask test --level unit       # host only
 cargo xtask test --all              # everything: mandatory towards main
+cargo xtask test --all --jobs 8     # 8 QEMU scenarios at a time (see "Parallel runs")
 cargo xtask test --area boot        # QEMU scenarios of one area (with --all to include the full ones)
 cargo xtask test --list             # list scenarios and which ones the filter selects
 ```
@@ -47,7 +48,7 @@ timeout_secs = 30
 stdin = ["ls", "shutdown"]      # optional: lines the runner types on the serial console
 prompt = "ari> "                # each line is sent when the prompt appears once more (default "ari> ")
 
-[host_tcp]                      # optional: TCP probe from the host into the guest (hostfwd 127.0.0.1:17009 -> :7)
+[host_tcp]                      # optional: TCP probe from the host into the guest (hostfwd 127.0.0.1:<port of the run> -> :7)
 marker = "TCP_LISTEN_READY"     # when seen on the serial, xtask connects and sends payload
 payload = "hello from the host" # the echo is recorded in the capture as "[host] TCP probe: ..."
 
@@ -58,6 +59,7 @@ disk = "slots"                  # disk: slots (default) | esp-only | pending-b |
                                 #       | a-corrupt (slot A fails verification: ESP boot, installed version unknown)
                                 #       | pending-b-older-update (B v2 pending, UPDATE holds v1) | fs-nearly-full (5 entries free for the updater) | fs-one-short (4)
 disk_readonly = false           # true: the test disk is presented read-only
+serial = true                   # runs with no other scenario at once (--jobs); say why in the file (tests/README.md, "Parallel runs")
 cpus = 4                        # processors (-smp N); undeclared: 1, or whatever `--cpus N` forces
 cpu_rdrand = true               # -cpu qemu64,+rdrand (TCG implements it): the kernel generator is seeded from rdrand (ADR 0039);
                                 # default qemu64 has none, so every other scenario runs the weak TSC + interrupts path
@@ -65,11 +67,12 @@ usb_hid = true                  # adds qemu-xhci with a USB keyboard and mouse (
 usb_hid_only_input = true       # no virtio keyboard/mouse, so QMP input reaches the USB HID devices (xHCI or EHCI)
 usb_hid_msi = true              # that xHCI offers MSI only, no MSI-X (like 2012 Intel controllers)
 usb_storage = true              # the test disk hangs off the xHCI as USB mass storage; there is no virtio-blk
-host_https = true               # two host HTTPS servers (openssl s_server -www) on 17443 (cert from a test CA installed as trusted_ca.der) and 17444 (self-signed)
+host_https = true               # two host HTTPS servers (openssl s_server -www) on ports chosen per run, written {https_port} (cert from a
+                                # test CA installed as trusted_ca.der) and {https_untrusted_port} (self-signed) in stdin, kill_on and expect
 
 [host_ssh]                      # SSH from the host (ADR 0025): a client key is generated and installed as authorized_keys;
 marker = "sshd: listening on port 22"   # on seeing the marker, each command runs with the host's ssh through
-commands = ["ls", "shutdown"]   # host port 17022; output joins the log as "[host] ssh $ CMD", "[host] ssh| LINE", "[host] ssh exit N"
+commands = ["ls", "shutdown"]   # host port of the run forwarded to 22; output joins the log as "[host] ssh $ CMD", "[host] ssh| LINE", "[host] ssh exit N"
 idle_client = true              # a TCP client that never identifies itself holds port 22 first; sshd must drop it
 [host_flood]                    # connection flood (incident 0013): on seeing marker, `connections` plain TCP connections to the
 marker = "sshd: listening on port 22"   # guest's `port` (22, default, or 7: the ports with a hostfwd) are opened, never written to and held
@@ -77,7 +80,8 @@ port = 22                       # until QEMU exits; the console lines are typed 
 connections = 8                 # completes the handshakes itself, so the guest sees established connections nobody accepts, not
                                 # half-open ones. Port 22 installs the scenario's SSH key so sshd listens. Result lines: "[host] flood:
                                 # N connections to guest port P opened", "[host] flood: K of N connections reset by the guest within 2000 ms"
-[host_update]                   # an update source (ADR 0029) published in build/update-test/ and served at http://10.0.2.2:17010/update/
+[host_update]                   # an update source (ADR 0029) published in build/scenarios/<name>/update/ and served by the scenario's own HTTP
+                                # server at http://10.0.2.2:{update_port}/update/ (write the URL that way in stdin, kill_on and expect)
 system = 2                      # system image version offered (omit: no system image)
 apps = ["examples/hello_ext:2"] # app packages offered (DIR:VERSION)
 tamper_index = true             # the index is altered after signing (the updater must refuse it)
@@ -168,8 +172,65 @@ ring 0 entry paths. Self-tests with single-CPU scheduling expectations
 (`scheduler.selftest`, `threads.selftest`) pin their threads to CPU 0 so they
 hold with any `--cpus`.
 
+## Parallel runs
+
+`cargo xtask test --jobs N` runs N QEMU scenarios at a time (ADR 0040).
+Without `--jobs` the runner takes one run per CPU it may use, at most 10,
+and two thirds of that with `--cpus` above 1, at most 6 (each such guest
+keeps several host threads busy under TCG); never more runs than the
+available memory holds at 1 GiB each (`MemAvailable`, or the container's
+`--memory` limit, which also caps an explicit `--jobs`). `--jobs 1` runs
+them one after another in listed order as before. On the reference host
+(16 CPUs) test containers get `--cpus 10 --memory 12g --memory-swap 12g`
+(README.md, "Docker"), which gives 10 and 6 jobs, and one suite runs at a
+time. With several jobs the scenarios that run alone go first, then the
+longest (the time of their previous run, kept in
+`build/scenarios/<name>/elapsed`), but the output is the same whatever
+finished first: each scenario's block (its PASS/FAIL line, the log of a
+failure, QEMU's own messages) is printed in listed order, then the wall
+clock and the usual summary line and exit code.
+
+What keeps concurrent runs apart:
+
+- **Work directory**: each scenario writes only under
+  `build/scenarios/<name>/` (disk, ESP, OVMF variables, logs, QMP socket,
+  TLS and SSH keys, and its update source in `update/`). The base ESP and
+  the external packages are built once before the scenarios start.
+- **Host ports chosen per run**: QEMU's two `hostfwd` ports (the
+  `[host_tcp]` probe, `[host_ssh]` and `[host_flood]`), the HTTPS servers
+  of `host_https` and the HTTP server of `[host_update]`. The guest reaches
+  a host port P at 10.0.2.2:P, so scenarios write those ports as
+  `{https_port}`, `{https_untrusted_port}` and `{update_port}` and the
+  runner fills them in; a placeholder without its server is refused when
+  the scenarios load.
+- **Fixed ports, shared by the suite**: the UDP responder (17007), the TCP
+  echo server (17008) and the test HTTP server (17010) are compiled into the
+  guest's test programs (`aricode_proto::net::TEST_*`), and QEMU's user
+  network cannot remap them (`guestfwd` refuses the virtual host 10.0.2.2,
+  and has no UDP). They are stateless, so one set serves every scenario of
+  the suite; it is taken before anything is built, and a second suite in
+  the same network namespace stops at once with a message saying so. Run
+  concurrent suites in separate containers (README.md, "Docker"): each has
+  its own network namespace.
+
+`serial = true` makes a scenario run with nothing else at the same time.
+Only `usb.hid_fault` has it: its keys are paced in wall-clock time while the
+guest drains QEMU's 16-scancode usb-kbd queue at its own pace, and with
+other QEMU runs on the host it fell behind and lost keystrokes (incident
+0019). A scenario that turns out to depend on timing under load is a bug to
+fix or, when the dependency is the test's own, to mark `serial` with the
+reason in its file, never a retry.
+
+## Continuous runs (Docker)
+
+`tools/docker/ci/` holds a container that tests a branch (default
+`develop`) on every new commit, in its own clone inside a named volume,
+and writes dated reports to a mounted directory (README.md, "Docker"). A
+failure there is an incident (docs/WORKFLOW.md).
+
 ## Logs
 
-Every scenario leaves its serial output in `build/scenarios/<name>/serial.log`.
+Every scenario leaves its serial output in `build/scenarios/<name>/serial.log`
+(QEMU's own messages in `qemu-stderr.log`).
 The runner refuses to work if that directory or its `esp` are symbolic links
 or if the canonical path escapes `build/scenarios/`.
