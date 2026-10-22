@@ -196,3 +196,11 @@ it held a `SYSTEM` handle with the right to.
 - The ISN clock has 1 ms resolution scaled to 4 µs ticks; two SYNs to one
   listener within the same millisecond from the same peer port share an
   ISN, which creates one connection, not two.
+
+## Laptop entropy (2026-10-23)
+
+With ADR 0039 the reference laptop reports `entropy  TSC + interrupts: weak`
+(no usable `rdrand`). The ISN secret there is drawn from a TSC- and
+interrupt-seeded generator; it is still per boot and keyed, but its
+unpredictability is bounded by that seed. A kernel seed persisted across
+boots is the next step for this machine.
