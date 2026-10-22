@@ -114,7 +114,7 @@ run_once() {
     mkdir -p "$dir" || return 1
     failed_steps=0
     started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    t0=$(date +%s)
+    run_start=$(date +%s)
     log "testing $branch at $short ($(git -C "$src" log -1 --format=%s "$sha"))"
     set -- ${jobs:+--jobs "$jobs"}
     step check cargo xtask check
@@ -129,7 +129,7 @@ run_once() {
         collect test-4cpus
         tests="test-1cpu test-4cpus"
     fi
-    t=$(( $(date +%s) - t0 ))
+    total=$(( $(date +%s) - run_start ))
     if [ $failed_steps -eq 0 ]; then verdict=PASS; else verdict=FAIL; fi
     {
         echo "AriCodeOS continuous run: $verdict"
@@ -138,7 +138,7 @@ run_once() {
         echo "subject  $(git -C "$src" log -1 --format=%s "$sha")"
         echo "repo     $repo"
         echo "started  $started"
-        echo "took     $((t / 60))m$((t % 60))s"
+        echo "took     $((total / 60))m$((total % 60))s"
         echo "jobs     ${jobs:-default (cargo xtask test picks from CPUs and memory)}"
         echo
         echo "Steps:"
@@ -154,7 +154,7 @@ run_once() {
         [ ! -d "$dir/failed" ] || { echo; echo "Logs of failed scenarios: failed/<step>/<scenario>/"; }
     } >"$dir/summary.txt"
     printf '%s %s %s %s %dm%02ds %s\n' "$started" "$branch" "$short" "$verdict" \
-        $((t / 60)) $((t % 60)) "$(basename "$dir")" >>"$reports/index.txt"
+        $((total / 60)) $((total % 60)) "$(basename "$dir")" >>"$reports/index.txt"
     ln -sfn "$(basename "$dir")" "$reports/latest"
     echo "$sha" >"$last"
     log "$verdict: $dir/summary.txt"
