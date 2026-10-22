@@ -21,6 +21,7 @@
 //!                                             --cpus > 1, capped by memory; 1 = one after another)
 //!     --list                                  lists the scenarios and exits
 //! cargo xtask check                           fmt --check + clippy -D warnings
+//! cargo xtask stack-check                     stack budget of the network drivers, release and dev (incident 0018)
 //! cargo xtask app-pack DIR [--version N] [--debug]   builds, packs and signs an external app (DIR/Cargo.toml + NAME.manifest) into build/pkgs/
 //! cargo xtask keygen [DIR]                    Ed25519 key pair (default keys/dev)
 //! cargo xtask sign SEED FILE                  writes FILE.sig
@@ -35,6 +36,7 @@ mod parallel;
 mod ports;
 mod qemu;
 mod scenario;
+mod stack;
 mod test;
 #[cfg(test)]
 mod test_util;
@@ -121,6 +123,7 @@ fn main() -> ExitCode {
             }),
         "test" => test::run(&cli, release),
         "check" => build::check(),
+        "stack-check" => stack::check(),
         "app-pack" => match cli.positional(1) {
             Some(dir) => build::app_pack(
                 Path::new(dir),
@@ -149,7 +152,7 @@ fn main() -> ExitCode {
             _ => Err(String::from("usage: xtask verify PUB FILE [SIG]")),
         },
         _ => {
-            eprintln!("usage: cargo xtask <build|image|run|test|check|usb-image|fs-cat|app-pack|keygen|sign|verify> [--debug] (see tools/xtask/src/main.rs)");
+            eprintln!("usage: cargo xtask <build|image|run|test|check|stack-check|usb-image|fs-cat|app-pack|keygen|sign|verify> [--debug] (see tools/xtask/src/main.rs)");
             return ExitCode::from(2);
         }
     };

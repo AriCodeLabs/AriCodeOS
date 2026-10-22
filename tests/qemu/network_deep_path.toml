@@ -1,0 +1,53 @@
+# Incident 0018: the network driver's deepest direct call path must fit its
+# 64 KiB user stack. `tcp_orphan` (manifest `caps = net`) fills netd's 8-slot
+# TCP table with 7 connections to the host echo server and one toward
+# 10.0.2.77, an address on the subnet QEMU answers no ARP for (its SYN waits
+# parked for a MAC), has its ninth connect refused after a sweep, and exits
+# without closing anything. The shell's `http`, typed at the next prompt and
+# well inside the 1 s sweep period that refusal restarted, finds the table
+# full: netd sweeps from inside the request (`serve` -> `tcp_room` ->
+# `sweep` -> `probe`), finds the orphan gone, resets its connections, and the
+# reset toward 10.0.2.77 is parked and announced with an ARP request
+# (`send_ipv4` -> `send_arp_request` -> `send_eth` -> the NIC), the deepest
+# chain `cargo xtask stack-check` measures. Before the fix a dev build
+# (`cargo xtask test --debug`) killed virtio-net here with `USER STACK
+# OVERFLOW`; the release build had about 12 KiB left, indirect calls not
+# counted. The order (`http` typed, then the reclaim) shows the reclaim ran
+# inside the request and not in the periodic sweep; `net arp defer full`
+# absent shows the reset got a parking slot, so the ARP request went out.
+# No selftest: the boot clients would otherwise hold connections of their
+# own in the table.
+name = "network.deep_path"
+description = "netd survives its deepest call path: a full TCP table swept inside a request, a dead client's reset toward an address without ARP"
+level = "full"
+areas = ["network", "apps"]
+selftest = false
+cmdline = "qemu_exit shell"
+timeout_secs = 90
+stdin = ["run tcp_orphan", "http http://10.0.2.2:17010/hola", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: launch tcp_orphan with manifest [net] memory 64 KiB",
+    "virtio-net: fault net tcp table full x1",
+    "tcp_orphan: 8 connections held, one toward an address without ARP; exiting without closing",
+    "run: tcp_orphan exited with 0",
+    "virtio-net: client gone ('tcp_orphan'), 8 socket(s) left open: reclaimed",
+    "HTTP 200, 19 bytes",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_order = [
+    "run: tcp_orphan exited with 0",
+    "ari> http http://10.0.2.2:17010/hola",
+    "virtio-net: client gone ('tcp_orphan'), 8 socket(s) left open: reclaimed",
+    "HTTP 200, 19 bytes",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "USER STACK OVERFLOW",
+    "killed: stack overflow",
+    "net arp defer full",
+    "http: could not connect",
+    "tcp_orphan: the ninth connection was not refused",
+]
