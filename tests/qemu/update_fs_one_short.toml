@@ -24,7 +24,7 @@ stdin = ["update", "upgrade", "diag", "ls", "shutdown"]
 [boots.expect]
 exit = 33
 serial_contains = [
-    "updater: source 1 http://10.0.2.2:17010/update/: index verified (serial ",
+    "updater: source 1 http://10.0.2.2:{update_port}/update/: index verified (serial ",
     "updater: 2 upgrade(s) available: run upgrade",
     "updater: AriFS has no room for 1 more file(s) this upgrade needs: nothing installed",
     "update: updater exited with 39",

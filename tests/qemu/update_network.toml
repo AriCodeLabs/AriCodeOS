@@ -1,6 +1,6 @@
 # Network update from a source (ADR 0027, ADR 0029): the host publishes a
-# source in build/update-test/ (signed index, version-2 system image) served
-# at http://10.0.2.2:17010/update/, the source is registered in
+# source in the scenario directory (signed index, version-2 system image) served
+# by its own server at http://10.0.2.2:{update_port}/update/, registered in
 # updater/sources and the UPDATE partition starts empty, so the installed
 # image can only come from the network. `update` verifies the index and
 # reports; `upgrade` downloads the image into memory, checks it against the
@@ -23,7 +23,7 @@ stdin = ["update", "upgrade", "reboot"]
 exit = 0
 serial_contains = [
     "AriInit: launch updater with manifest [system fs net block] memory 6144 KiB",
-    "updater: source 1 http://10.0.2.2:17010/update/: index verified (serial ",
+    "updater: source 1 http://10.0.2.2:{update_port}/update/: index verified (serial ",
     "updater: system: installed 1, source 1 offers 2: upgrade available",
     "updater: 1 upgrade(s) available: run upgrade",
     "updater: downloading aricodeos-2.img (",
@@ -45,7 +45,7 @@ serial_contains = [
     "AriInit: boot confirmed on slot B",
     "updater: system: installed 2, source 1 offers 2: up to date",
     "updater: everything is up to date",
-    "system 1 -> 2 installed into slot B from http://10.0.2.2:17010/update/ (pending until reboot)",
+    "system 1 -> 2 installed into slot B from http://10.0.2.2:{update_port}/update/ (pending until reboot)",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_absent = ["KERNEL PANIC", "rollback", "update: updater exited with", "index refused"]

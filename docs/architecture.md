@@ -847,7 +847,7 @@ latter briefly to add the region.
   candidates the caller marks in use: `netd` marks a port held by any
   slot, listeners and TIME-WAIT included. Host tests in `libs/net` pin
   each property against the old formulas.
-- QEMU forwards `127.0.0.1:17009` to guest port 7 (`hostfwd`) and
+- QEMU forwards a host port chosen per run (ADR 0040) to guest port 7 (`hostfwd`) and
   the xtask responder listens for TCP echo on `127.0.0.1:17008`. A
   scenario can declare `[host_tcp] marker/payload`: on seeing the marker
   in the serial output, xtask connects to the forwarded port, sends the payload and
@@ -1544,7 +1544,7 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   unconsumed input between lines (`Input`), so a command and the `exit` that
   follows can arrive in one message.
 - Tests: `[host_ssh]` in scenarios (generated client key, `authorized_keys`
-  installed, host port 17022 forwarded to 22); `ssh.exec`.
+  installed, a host port chosen per run forwarded to 22, ADR 0040); `ssh.exec`.
 
 ## HTTPS (ADR 0026)
 

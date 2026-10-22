@@ -277,6 +277,7 @@ pub fn check_user_elf(name: &str, elf: &[u8]) -> Result {
 }
 
 /// Program built out of tree and packaged (ADR 0017).
+#[derive(Clone)]
 pub struct ExternalApp {
     pub name: String,
     pub version: u32,
@@ -300,18 +301,48 @@ impl ExternalApp {
 /// signs the package with the development key. `dir` holds a single
 /// `NAME.manifest`, which gives the binary name. With `corrupt`, the
 /// signature does not verify (tests).
+///
+/// Each (app, version, profile, corrupt) is built once per process and
+/// then served from memory: the test runner builds every package its
+/// scenarios need before they run concurrently (ADR 0040), so a scenario
+/// never starts cargo and its output never interleaves with theirs.
 pub fn build_external(
     dir: &Path,
     version: u32,
     release: bool,
     corrupt: bool,
 ) -> Result<ExternalApp> {
+    type Key = (PathBuf, u32, bool, bool);
+    static BUILT: std::sync::Mutex<Vec<(Key, ExternalApp)>> = std::sync::Mutex::new(Vec::new());
     let dir = if dir.is_absolute() {
         dir.to_path_buf()
     } else {
         root().join(dir)
     };
-    let mut manifests = std::fs::read_dir(&dir)
+    let key = (dir.clone(), version, release, corrupt);
+    if let Some((_, app)) = BUILT
+        .lock()
+        .expect("built packages")
+        .iter()
+        .find(|(k, _)| *k == key)
+    {
+        return Ok(app.clone());
+    }
+    let app = build_external_now(&dir, version, release, corrupt)?;
+    BUILT
+        .lock()
+        .expect("built packages")
+        .push((key, app.clone()));
+    Ok(app)
+}
+
+fn build_external_now(
+    dir: &Path,
+    version: u32,
+    release: bool,
+    corrupt: bool,
+) -> Result<ExternalApp> {
+    let mut manifests = std::fs::read_dir(dir)
         .map_err(|e| format!("{}: {e}", dir.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "manifest"));

@@ -77,7 +77,8 @@ equipo).
 docker build -t aricodeos-dev -f tools/docker/Dockerfile .
 docker run --rm -it -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/cargo/registry \
     --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask check
-docker run --rm -it -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/cargo/registry \
+docker run --rm -it --cpus 10 --memory 12g --memory-swap 12g \
+    -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/cargo/registry \
     --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask test --all
 ```
 
@@ -90,6 +91,49 @@ reutilizado dentro del contenedor apunta a ficheros que allí no existen. La ima
 ningún puerto ni contiene claves. Un resultado de QEMU dentro de Docker es un
 resultado de QEMU: no sustituye a las comprobaciones en hardware de
 `docs/hardware.md`.
+
+Los escenarios de QEMU corren varios a la vez (`--jobs N`; por defecto uno
+por CPU que el contenedor puede usar, dos tercios de eso con `--cpus`
+mayor que 1, como mucho 10 y 6, y 1 GiB de su memoria por ejecución; ver
+`tests/README.md`, "Parallel runs"). Da a los contenedores de pruebas
+`--cpus 10 --memory 12g --memory-swap 12g` en el equipo de referencia (16
+CPU) para que la máquina conserve margen y no se caliente, y ejecuta una
+sola suite a la vez. Cada contenedor tiene su propio espacio de red, así
+que una suite en un contenedor nunca choca en puertos con otra en el
+equipo o en otro contenedor (ADR 0040).
+
+#### Pruebas continuas
+
+`tools/docker/ci/Dockerfile` añade a esa imagen un script que mantiene su
+propio clon del repositorio público en un volumen con nombre (nunca tu
+copia de trabajo) y, con cada commit nuevo de una rama (por defecto
+`develop`), ejecuta `cargo xtask check`, `cargo xtask test --all` y
+`--all --cpus 4`, y escribe un informe fechado (aprobado/fallido por
+escenario, los logs de los fallidos) en un directorio montado. Descarga por
+https y no contiene credenciales.
+
+```bash
+docker build -t aricodeos-dev -f tools/docker/Dockerfile .
+docker build -t aricodeos-ci -f tools/docker/ci/Dockerfile .
+mkdir -p ~/aricodeos-ci-reports
+docker run -d --name aricodeos-ci --restart unless-stopped \
+    --cpus 10 --memory 12g --memory-swap 12g --cpu-shares 512 \
+    -v aricodeos-ci-work:/work -v aricodeos-ci-cargo:/usr/local/cargo/registry \
+    -v ~/aricodeos-ci-reports:/reports --user "$(id -u):$(id -g)" \
+    aricodeos-ci --loop
+docker logs -f aricodeos-ci                # progreso; informes en ~/aricodeos-ci-reports/latest/
+```
+
+`--loop` consulta la rama cada 5 minutos (`--interval S`) y descansa 10
+minutos tras cada ejecución (`--pause S`); sin él, el contenedor prueba la
+cabeza actual una vez y termina con error si algo falla. `--branch B`
+prueba otra rama y `--jobs N` fija la concurrencia. Las suites corren una
+tras otra, con nice 10, y `--cpus`, `--memory` y `--cpu-shares` evitan que
+el contenedor se quede con la máquina: el runner calcula sus trabajos a
+partir de ellos (10 CPU dan 10 trabajos, 6 en la pasada `--cpus 4`), así
+que el desarrollo sigue a su lado. Detenlo (`docker stop aricodeos-ci`)
+antes de ejecutar otra suite en la misma máquina. Un fallo en su informe es
+un incidente (`docs/WORKFLOW.md`).
 
 Para probar el sistema sin compilarlo, `tools/docker/try/Dockerfile` mete la
 imagen del pendrive en una imagen que la arranca en QEMU con el shell `ari>`

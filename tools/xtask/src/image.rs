@@ -302,12 +302,13 @@ fn walk_files(dir: &Path, prefix: &str, out: &mut Vec<(String, PathBuf)>) -> Res
 /// the EFI partition and slot A loaded with the system image.
 /// `extra`: additional files for the ARI0 partition (e.g. `authorized_keys`).
 /// `disk_guid`: the GPT disk GUID (random for real sticks, fixed for tests).
+/// Returns a one-line summary for the caller to print.
 pub fn write_usb_image(
     path: &Path,
     esp_dir: &Path,
     extra: &[(String, Vec<u8>)],
     disk_guid: [u8; 16],
-) -> Result {
+) -> Result<String> {
     let esp_sectors = (USB_PART_ESP.1 - USB_PART_ESP.0 + 1) as u32;
     let mut fat =
         aricode_fat::Fat32Builder::new(esp_sectors, 1).map_err(|e| format!("fat: {e:?}"))?;
@@ -368,13 +369,12 @@ pub fn write_usb_image(
     let o = USB_PART_ARIBOOT.0 as usize * 512;
     img[o..o + 512].copy_from_slice(&state.encode());
     io(fs::write(path, &img), "write USB image")?;
-    println!(
+    Ok(format!(
         "[xtask] USB image at {} ({} MiB, {} files in the ESP)",
         path.display(),
         img.len() >> 20,
         files.len()
-    );
-    Ok(())
+    ))
 }
 
 /// `cargo xtask usb-image [--cmdline S]`: image ready to `dd` onto a USB stick.
@@ -443,7 +443,7 @@ pub fn build_usb_image(
     let disk_guid = random_disk_guid()?;
     println!("[xtask] GPT disk GUID {}", hex_lower(&disk_guid));
     let out = crate::build_dir().join("aricodeos-usb.img");
-    write_usb_image(&out, &esp, &extra, disk_guid)?;
+    println!("{}", write_usb_image(&out, &esp, &extra, disk_guid)?);
     Ok(out)
 }
 
@@ -631,20 +631,31 @@ pub fn system_image(version: u32, corrupt: bool) -> Result<Vec<u8>> {
 
 /// ELF without debug sections (the kernel and the initrd only need the
 /// `PT_LOAD` segments; with debug info the kernel exceeds 5 MiB). Without
-/// `strip`, the file is used as is.
+/// `strip`, the file is used as is. Each call strips into its own file
+/// (removed after reading): concurrent scenario runs strip the same
+/// kernel at once (ADR 0040).
 pub fn stripped_elf(path: &Path) -> Result<Vec<u8>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
     let dir = crate::build_dir().join("stripped");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let out = dir.join(path.file_name().unwrap_or_default());
+    let out = dir.join(format!(
+        "{}.{}.{}",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
     let status = std::process::Command::new("strip")
         .args(["--strip-debug", "-o"])
         .arg(&out)
         .arg(path)
         .status();
-    match status {
+    let data = match status {
         Ok(st) if st.success() => io(fs::read(&out), "read stripped ELF"),
         _ => io(fs::read(path), &format!("read {}", path.display())),
-    }
+    };
+    let _ = fs::remove_file(&out);
+    data
 }
 
 /// Writes header + container at the start of a partition.
@@ -1188,13 +1199,6 @@ fn ssh_host_key(path: &Path) -> Result<([u8; 32], Vec<u8>)> {
     Ok((seed, text.into_bytes()))
 }
 
-/// Channel directory of the scenarios (`host_update`): separate from
-/// `update_dir()` so a test run can never replace what a real machine
-/// downloads (incident 0003).
-pub fn test_update_dir() -> PathBuf {
-    crate::build_dir().join("update-test")
-}
-
 /// Channel directory that `serve-update` publishes for real machines.
 pub fn update_dir() -> PathBuf {
     crate::build_dir().join("update")
@@ -1309,6 +1313,20 @@ pub fn stored_copy_ahead(dir: &Path, url: &str) -> Result<Vec<u8>> {
 /// 1, L2), so a machine fetching meanwhile sees the old publication or the
 /// new one, never a mix of files.
 pub fn publish_update_to(dir: &Path, release: bool, channel: &Channel) -> Result<PathBuf> {
+    if channel.system.is_some() {
+        build_base_esp(release)?;
+    }
+    println!("{}", publish_channel(dir, release, channel)?);
+    Ok(dir.to_path_buf())
+}
+
+/// [`publish_update_to`] once the base ESP is built (its system image
+/// comes from `build/esp/`): the test runner builds it once before its
+/// scenarios run concurrently, and each scenario publishes its own channel
+/// in its directory (ADR 0040), separate from `update_dir()` so a test
+/// run can never replace what a real machine downloads (incident 0003).
+/// Returns the one-line summary for the caller to print.
+pub fn publish_channel(dir: &Path, release: bool, channel: &Channel) -> Result<String> {
     use aricode_update_index::{AppEntry, Index, SystemEntry};
     let name = dir
         .file_name()
@@ -1329,7 +1347,6 @@ pub fn publish_update_to(dir: &Path, release: bool, channel: &Channel) -> Result
     let sha = aricode_crypto::sha256::sha256;
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
     if let Some(version) = channel.system {
-        build_base_esp(release)?;
         let container = system_image(version, false)?;
         let mut image = aricode_ab::Image::header(container.len() as u32).to_vec();
         image.extend_from_slice(&container);
@@ -1447,7 +1464,7 @@ pub fn publish_update_to(dir: &Path, release: bool, channel: &Channel) -> Result
     if old.exists() {
         io(fs::remove_dir_all(&old), "remove the previous publication")?;
     }
-    println!(
+    Ok(format!(
         "[xtask] update source at {}: serial {serial}, {}, {} app(s){}{}{}",
         dir.display(),
         channel
@@ -1469,6 +1486,5 @@ pub fn publish_update_to(dir: &Path, release: bool, channel: &Channel) -> Result
         } else {
             ""
         }
-    );
-    Ok(dir.to_path_buf())
+    ))
 }

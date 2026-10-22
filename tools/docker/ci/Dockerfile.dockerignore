@@ -1,0 +1,5 @@
+# Context of tools/docker/ci/Dockerfile (BuildKit reads this file instead
+# of the root .dockerignore): only the CI script; the repository itself is
+# cloned at run time into the container's volume.
+*
+!tools/docker/ci/ci.sh
