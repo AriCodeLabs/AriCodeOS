@@ -1,0 +1,35 @@
+PORT COLLISION: update server took leased port 36201 after 1 allocations; forward bind: Address already in use (os error 98)
+[aricodeos-ci 2026-10-23T01:00:00Z] testing develop at 2943a1e (audit fixture)
+[aricodeos-ci 2026-10-23T01:00:00Z] check: cargo xtask check
+[aricodeos-ci 2026-10-23T01:00:00Z] check: FAIL in 0m0s
+[aricodeos-ci 2026-10-23T01:00:00Z] test: cargo xtask test
+[aricodeos-ci 2026-10-23T01:00:00Z] test: FAIL in 0m0s
+[aricodeos-ci 2026-10-23T01:00:00Z] FAIL: /tmp/ari-audit-2943a1e-i4plmp_p/reports/2026-10-23T0100Z-develop-2943a1e/summary.txt
+[aricodeos-ci 2026-10-23T01:00:00Z] testing develop at 2943a1e (audit fixture)
+[aricodeos-ci 2026-10-23T01:00:00Z] check: cargo xtask check
+[aricodeos-ci 2026-10-23T01:00:00Z] check: PASS in 0m0s
+[aricodeos-ci 2026-10-23T01:00:00Z] test: cargo xtask test
+[aricodeos-ci 2026-10-23T01:00:00Z] test: PASS in 0m0s
+[aricodeos-ci 2026-10-23T01:00:00Z] PASS: /tmp/ari-audit-2943a1e-i4plmp_p/reports/2026-10-23T0100Z-develop-2943a1e/summary.txt
+CI REUSE: first exit=1, second exit=0, same directory=yes
+Index entries: 2
+Accumulated step entries: 4
+AriCodeOS continuous run: PASS
+branch   develop
+commit   2943a1e
+subject  audit fixture
+repo     mock-repository
+started  2026-10-23T01:00:00Z
+took     0m0s
+jobs     default (cargo xtask test picks from CPUs and memory)
+
+Steps:
+check        FAIL  0m00s  cargo xtask check
+test         FAIL  0m00s  cargo xtask test
+check        PASS  0m00s  cargo xtask check
+test         PASS  0m00s  cargo xtask test
+
+test: 1 passed, 0 failed
+[PASS] probe.passed 0.0s ok
+
+Logs of failed scenarios: failed/<step>/<scenario>/
