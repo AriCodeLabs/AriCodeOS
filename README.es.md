@@ -55,7 +55,7 @@ hardware`, que se ha ejercitado en el portátil y la evidencia está en
 ## Requisitos (Debian 13)
 
 ```bash
-sudo apt install qemu-system-x86 ovmf nasm clang lld gdb git make
+sudo apt install qemu-system-x86 ovmf nasm clang lld binutils gdb git make
 rustup target add wasm32-unknown-unknown   # modulos WebAssembly de ejemplo (apps/wasm-demo)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```

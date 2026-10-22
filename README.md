@@ -55,7 +55,7 @@ the evidence is recorded in `docs/hardware.md`.
 ## Requirements (Debian 13)
 
 ```bash
-sudo apt install qemu-system-x86 ovmf nasm clang lld gdb git make
+sudo apt install qemu-system-x86 ovmf nasm clang lld binutils gdb git make
 rustup target add wasm32-unknown-unknown   # example WebAssembly modules (apps/wasm-demo)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```

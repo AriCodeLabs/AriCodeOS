@@ -27,8 +27,33 @@ boot-protocol/src/lib.rs #[cfg(test)] memory classification, iterator, cmdline
 tools/xtask/src/*.rs     #[cfg(test)] scenario validity, helpers
 tests/qemu/*.toml        integration scenarios in QEMU
 user/testprogs/src/bin/  test programs in the initrd; user/testprogs/manifests/ holds the manifest of
-                         those the shell launches with capabilities (`run tcp_hog`, `run sock_leaker`)
+                         those the shell launches with capabilities (`run tcp_hog`, `run sock_leaker`,
+                         `run tcp_orphan`)
 ```
+
+## Stack budget of the network drivers
+
+`cargo xtask check` ends with `cargo xtask stack-check` (incident 0018),
+which can also run alone. It builds `ari-virtio-net` and `ari-rtl-net` in
+the release and the dev profile, disassembles each binary with binutils'
+`objdump`, measures every function's frame from its prologue (return
+address, pushes, `rsp` adjustment, stack probes) and the deepest chain of
+direct calls from `_start`, and fails when, in any of the four binaries:
+
+- the deepest direct path is over **32 KiB**, half the 64 KiB user stack
+  (`USER_STACK_SIZE` in `kernel/src/user/process.rs`; a unit test fails if
+  that constant changes), or
+- one frame is over **16 KiB**, a quarter of the stack.
+
+Indirect calls (trait objects, `core::fmt` callbacks) end a path, so the
+measured depth is a lower bound: the other half of the stack is for them
+and for growth. On failure it prints the deepest path and the largest
+frames, function by function. The parser and the budgets are tested on the
+host (`tools/xtask/src/stack.rs`). The run-time counterpart is scenario
+`network.deep_path`, which drives the deepest path (a full TCP table swept
+inside a request, a dead client's reset toward an address without ARP);
+with `cargo xtask test --debug --all --area network` it runs on a dev
+build, where the margin is smallest.
 
 ## Writing a QEMU scenario
 

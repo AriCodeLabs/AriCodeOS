@@ -17,6 +17,7 @@
 //! lower bound of the real one. That is why the path budget is half the
 //! stack and not all of it.
 //!
+//! Part of `cargo xtask check`; alone as `cargo xtask stack-check`.
 //! Started from the audit's `frames.py` and `depth.py` (incident 0018).
 
 use crate::{build, root, Result};

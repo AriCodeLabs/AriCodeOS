@@ -494,7 +494,8 @@ pub fn check() -> Result {
         c.args(["--", "-D", "warnings"]);
         run(c)?;
     }
-    Ok(())
+    // The network drivers' stack budget (incident 0018).
+    crate::stack::check()
 }
 
 #[cfg(test)]
