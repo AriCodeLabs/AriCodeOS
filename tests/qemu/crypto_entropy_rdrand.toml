@@ -1,0 +1,39 @@
+# ADR 0039, hardware path: on a CPU with rdrand the kernel generator is
+# seeded from it, netd says its TCP secret came from kernel entropy
+# (rdrand) and records no weak event, sshd generates its first host key
+# without the `ssh entropy weak` fault, and the owner reads `entropy
+# rdrand` in `diag` over SSH. The weak path (qemu64, no rdrand) is covered
+# by `network.stack` and `ssh.exec`.
+name = "crypto.entropy_rdrand"
+description = "rdrand-seeded generator: netd and sshd report a strong source, diag over SSH shows entropy rdrand"
+level = "full"
+areas = ["crypto", "ssh", "network", "diag"]
+cmdline = "qemu_exit shell"
+cpu_rdrand = true
+timeout_secs = 200
+
+[host_ssh]
+marker = "sshd: listening on port 22"
+commands = ["diag", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "random: ChaCha20 generator seeded with rdrand",
+    "virtio-net: tcp secret from kernel entropy (rdrand)",
+    "sshd: new host key generated and saved",
+    "sshd: user 'ari' authenticated from 10.0.2.2",
+    "[host] ssh $ diag",
+    "[host] ssh| entropy  rdrand",
+    "[host] ssh| === end of diagnostics ===",
+    "[host] ssh exit 0",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "limited entropy",
+    "net tcp secret weak",
+    "net tcp secret degraded",
+    "ssh entropy weak",
+    ": weak",
+]

@@ -120,7 +120,8 @@ it held a `SYSTEM` handle with the right to.
   can only mean a refused syscall (handle or kernel), never weak entropy;
   the only quality signal is the kernel's own boot line `random: ChaCha20
   generator seeded with rdrand` / `... with TSC (no rdrand: limited
-  entropy)`, which netd cannot read (ADR 0034 §4).
+  entropy)`, which netd cannot read (ADR 0034 §4). Since 2026-10-22 netd
+  reads the generator's source (ADR 0039; see "Open").
 - **ISN** = `M + F(tuple, secret)` as RFC 6528 section 3: `M` the ms
   clock in 4 µs ticks, `F` the first 32 bits of HMAC-SHA-256
   (`aricode_crypto::hmac`) over a tag byte and the 4-tuple. Active opens
@@ -182,13 +183,16 @@ it held a `SYSTEM` handle with the right to.
   right after a boot therefore remains possible; a recurrence is read
   from the shell line and `diag` (`Busy` points at candidates 1 or 5),
   not excluded a priori.
-- On a CPU without `rdrand` the secret is as good as the kernel generator
-  at netd's start (TSC samples and the interrupt pool), and netd cannot
-  tell which case it is in. Kernel follow-up: expose the generator's
-  source and seeding state to user space, then save a kernel seed across
-  boots as sshd does for itself (ADR 0034). Whether the laptop has
-  `rdrand` is read from its `random: ... seeded with` boot line
-  (`docs/hardware.md`).
+- Done 2026-10-22 (ADR 0039): netd could not tell whether the kernel
+  generator had `rdrand` behind it; now it can. The kernel reports what seeded its
+  generator (`system_info(RANDOM_SOURCE)`); netd records `net tcp secret
+  weak x1` (code 2) and says so when it is not a hardware source, sshd
+  records `ssh entropy weak` before drawing a host key with no carried
+  seed, and `diag` prints `entropy  rdrand` or `entropy  TSC + interrupts
+  (N samples, M events): weak`, which is where the laptop's answer is read
+  (`docs/hardware.md`). Still open: on such a CPU the secret is only as
+  good as the TSC samples and the interrupt pool at netd's start; saving
+  a kernel seed across boots, as sshd does for itself, is future work.
 - The ISN clock has 1 ms resolution scaled to 4 µs ticks; two SYNs to one
   listener within the same millisecond from the same peer port share an
   ISN, which creates one connection, not two.

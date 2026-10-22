@@ -150,21 +150,25 @@ ari> shutdown
 # on the host, with the USB stick attached as /dev/sdX
 sudo dd if=/dev/sdX of=build/usb-dump.img bs=1M count=70 status=none
 cargo xtask fs-cat build/usb-dump.img            # lists the files in ARI0
-cargo xtask fs-cat build/usb-dump.img diag.txt   # uptime, memory, CPUs, processes, services, PCI and events
+cargo xtask fs-cat build/usb-dump.img diag.txt   # uptime, memory, CPUs, entropy, processes, services, PCI and events
 ```
 
 The 70 MiB cover the ARI0 partition of the USB image (LBA 133120 to 139263).
 
 ### Entropy: does the laptop have `rdrand`?
 
-The kernel's boot line `random: ChaCha20 generator seeded with rdrand` or
-`random: ChaCha20 generator seeded with TSC (no rdrand: limited entropy)`
-is the only sign of it; `diag` does not repeat it, so read it on the
-serial console or a photo of the first boot. The laptop's PCH
-(`8086:1e31`, 7-series) pairs with Ivy Bridge (usually `rdrand`) or Sandy
-Bridge (none). It decides the quality of sshd's keys (ADR 0025) and of
-netd's TCP secret (ADR 0034); user space cannot query it (kernel
-follow-up in ADR 0034 §4). Not yet read on the laptop (2026-10-18).
+Read it from `diag` (on the console, over SSH, or saved with `diag NAME`
+and read on the host with `cargo xtask fs-cat`): its `entropy` line says
+`entropy  rdrand` when the kernel generator was seeded from `rdrand`, or
+`entropy  TSC + interrupts (N samples, M events): weak` when the CPU has
+none (ADR 0039). The fault events `net tcp secret weak x1 (code 2)` and,
+when sshd generated a host key with no `random_seed` from an earlier boot,
+`ssh entropy weak (code 2)` say the same in the event list while they are
+among the recent ones. The kernel's boot line `random: ChaCha20 generator
+seeded with rdrand` or `... with TSC (no rdrand: limited entropy)` remains. The laptop's PCH (`8086:1e31`,
+7-series) pairs with Ivy Bridge (usually `rdrand`) or Sandy Bridge (none).
+It decides the quality of sshd's keys (ADR 0025) and of netd's TCP secret
+(ADR 0034). Not yet read on the laptop (2026-10-22).
 
 ## If something fails
 

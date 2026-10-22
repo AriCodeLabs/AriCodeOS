@@ -84,7 +84,10 @@ prints `tcp secret from kernel entropy` at start and records the fault
 `net tcp secret degraded` if the syscall is refused (the kernel always
 answers with the bytes asked and exposes no entropy-quality state, so that
 is the only failure the core can see); `network.stack` requires the former
-and forbids the latter.
+and forbids the latter. Since 2026-10-22 (ADR 0039) the core also reads
+what seeded the generator: it prints `tcp secret from kernel entropy
+(rdrand)`, or `tcp secret weak: ...` with the fault `net tcp secret weak`
+on CPUs without `rdrand`, which is what `network.stack` now requires.
 
 ## Note (2026-10-19, incident 0013)
 

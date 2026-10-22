@@ -43,8 +43,9 @@ there are no sleep states to save anything.
 
 ## Report
 
-`diag` gathers `uptime`, `mem`, `cpus`, `ps` and `services --detail` into a
-single block: it is what you ask from someone reporting a problem.
+`diag` gathers `uptime`, `mem`, `cpus`, the `entropy` line (ADR 0039), `ps`
+and `services --detail` into a single block: it is what you ask from
+someone reporting a problem.
 
 ## Baseline (0.7, QEMU 10 TCG, 1 CPU, `-cpu qemu64`)
 

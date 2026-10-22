@@ -253,6 +253,11 @@ pub struct Scenario {
     /// `cargo xtask test --cpus N` overrides it; an explicit value is always
     /// honoured (the scenario depends on that CPU count).
     pub cpus: Option<u32>,
+    /// The CPU model exposes `rdrand` (`-cpu qemu64,+rdrand`; TCG
+    /// implements it from the host's randomness), so the kernel generator
+    /// is seeded from a hardware source (ADR 0039). Off, `qemu64` has none.
+    #[serde(default)]
+    pub cpu_rdrand: bool,
     /// Adds an xHCI controller with a USB HID keyboard and mouse. QMP events
     /// go to the most recently activated input handler: the USB keyboard
     /// only while no virtio-input driver has started (QEMU activates a

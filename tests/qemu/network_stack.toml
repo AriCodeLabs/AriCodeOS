@@ -1,14 +1,15 @@
 # Phase 22: netd (virtio-net in ring 3) gets an address via DHCP from the QEMU
 # user network, answers ARP, pings the router, exchanges UDP and
 # resolves a name against the host test responder. Incident 0014 (ADR
-# 0034): at start netd reports that its TCP secret (ISNs and ephemeral
-# ports) came whole from the kernel generator, and never the degraded fault.
-# The kernel always answers `RANDOM` with the bytes asked and QEMU's CPU
-# has no rdrand (`random: ChaCha20 generator seeded with TSC`), so the line
-# means "whole secret from the generator", not "strong entropy", and the
-# degraded fault could only mean a refused syscall.
+# 0034): netd draws its TCP secret (ISNs and ephemeral ports) whole from the
+# kernel generator and never reports the degraded fault (a refused syscall).
+# ADR 0039: it also asks the kernel what seeded that generator. QEMU's
+# `qemu64` CPU has no rdrand, so the generator is seeded from the TSC and
+# interrupt timing only: netd says the secret is weak, with the counters,
+# and records `net tcp secret weak x1` with code 2 (`TscInterrupts`)
+# through its fault meter. The hardware path is `crypto.entropy_rdrand`.
 name = "network.stack"
-description = "virtio-net + DHCP + ARP + ICMP + UDP + DNS over IPC; TCP secret from entropy"
+description = "virtio-net + DHCP + ARP + ICMP + UDP + DNS over IPC; TCP secret from the kernel generator, reported weak without rdrand"
 level = "full"
 areas = ["network", "virtio", "init"]
 cmdline = "qemu_exit"
@@ -18,7 +19,11 @@ timeout_secs = 60
 exit = 33
 serial_contains = [
     "virtio-net: device ready, MAC ",
-    "virtio-net: tcp secret from kernel entropy",
+    "random: ChaCha20 generator seeded with TSC (no rdrand: limited entropy)",
+    "virtio-net: tcp secret weak: kernel generator seeded from TSC + interrupts (",
+    " samples, ",
+    " events), no hardware source: ISNs and ports guessable with effort",
+    "virtio-net: fault net tcp secret weak x1",
     "virtio-net: serving requests",
     "virtio-net: DHCP 10.0.2.15 mask 255.255.255.0 router 10.0.2.2 dns 10.0.2.3",
     "net_client: ip 10.0.2.15 router 10.0.2.2 dns 10.0.2.3",
@@ -35,4 +40,11 @@ serial_absent = [
     "initialization failed",
     "USER STACK OVERFLOW",
     "net tcp secret degraded",
+    "tcp secret from kernel entropy",
+    "the kernel does not report what seeded its generator",
+]
+serial_order = [
+    "virtio-net: tcp secret weak: kernel generator seeded from TSC + interrupts (",
+    "virtio-net: fault net tcp secret weak x1",
+    "virtio-net: serving requests",
 ]

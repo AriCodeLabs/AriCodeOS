@@ -1,0 +1,48 @@
+# ADR 0039, weak path: QEMU's `qemu64` has no rdrand, so the kernel
+# generator is seeded from the TSC and interrupt timing only. On a fresh
+# disk sshd has no `random_seed` from an earlier boot when it generates its
+# first host key: it records `ssh entropy weak` (code 2, `TscInterrupts`),
+# says so, and still starts (refusing would lock the owner out). netd
+# records `net tcp secret weak x1` (code 2). The owner reads both events and
+# the `entropy` line in `diag` over SSH. The hardware path is
+# `crypto.entropy_rdrand`.
+name = "ssh.entropy_weak"
+description = "no rdrand: sshd and netd record weak entropy, sshd still serves, diag over SSH shows the entropy line and both events"
+level = "full"
+areas = ["ssh", "network", "diag", "crypto"]
+cmdline = "qemu_exit shell"
+timeout_secs = 200
+
+[host_ssh]
+marker = "sshd: listening on port 22"
+commands = ["diag", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "random: ChaCha20 generator seeded with TSC (no rdrand: limited entropy)",
+    "virtio-net: fault net tcp secret weak x1",
+    "sshd: fault ssh entropy weak: kernel generator seeded from TSC + interrupts (",
+    " and no random_seed from an earlier boot: the new host key is weak",
+    "sshd: new host key generated and saved",
+    "sshd: user 'ari' authenticated from 10.0.2.2",
+    "[host] ssh $ diag",
+    "[host] ssh| entropy  TSC + interrupts (",
+    " events): weak",
+    ": net tcp secret weak x1 (code 2)",
+    ": ssh entropy weak (code 2)",
+    "[host] ssh| === end of diagnostics ===",
+    "[host] ssh exit 0",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_order = [
+    "sshd: fault ssh entropy weak: ",
+    "sshd: new host key generated and saved",
+    "sshd: listening on port 22",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "tcp secret from kernel entropy",
+    "the kernel does not report",
+    "Permission denied",
+]

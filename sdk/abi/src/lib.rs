@@ -390,6 +390,128 @@ pub mod sysinfo {
     /// The kernel command line as given by the loader (UTF-8 bytes): any
     /// program can read boot flags such as `strict` (ADR 0028).
     pub const CMDLINE: u64 = 11;
+    /// One [`RandomSource`] (32 bytes): what seeded the kernel generator
+    /// that `RANDOM` reads, and how much has been mixed into it since
+    /// (ADR 0039). Only the source and counters: never generator state,
+    /// seed or pool material. Later fields are only appended after
+    /// [`RandomSource::LEN`]: readers pass a larger buffer and decode the
+    /// first `LEN` bytes.
+    pub const RANDOM_SOURCE: u64 = 12;
+
+    /// What seeded the kernel generator. The number is the code of the
+    /// `net tcp secret weak` and `ssh entropy weak` fault events.
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum EntropySource {
+        /// The CPU's `rdrand` returned data for the seed (CPUID.1:ECX.30).
+        Rdrand = 1,
+        /// No hardware source: cycle-counter samples and the timing of
+        /// device, keyboard and serial interrupts only. Weak: an observer
+        /// who knows the boot timing can narrow the generator's state.
+        TscInterrupts = 2,
+    }
+
+    impl EntropySource {
+        pub fn from_u8(v: u8) -> Option<Self> {
+            match v {
+                1 => Some(Self::Rdrand),
+                2 => Some(Self::TscInterrupts),
+                _ => None,
+            }
+        }
+
+        /// A hardware random source seeded the generator.
+        pub fn is_hardware(self) -> bool {
+            matches!(self, Self::Rdrand)
+        }
+
+        /// Short name for console and `diag` lines.
+        pub fn label(self) -> &'static str {
+            match self {
+                Self::Rdrand => "rdrand",
+                Self::TscInterrupts => "TSC + interrupts",
+            }
+        }
+    }
+
+    /// Reply of `RANDOM_SOURCE` (32 bytes): the seed's source and the
+    /// inputs mixed into the generator since it was seeded, seed included.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct RandomSource {
+        pub source: EntropySource,
+        /// `rdrand` values mixed in (the seed's and one per read since).
+        pub hardware_samples: u64,
+        /// Cycle-counter samples mixed in (64 in the seed, one per read).
+        pub tsc_samples: u64,
+        /// Interrupts whose timing reached the generator through the pool
+        /// (counted up to the last read).
+        pub interrupt_events: u64,
+    }
+
+    impl RandomSource {
+        pub const LEN: usize = 32;
+        /// Room for the longest [`RandomSource::summary`].
+        pub const SUMMARY_MAX: usize = 80;
+
+        /// `rdrand`, or `TSC + interrupts (N samples, M events)`: the
+        /// wording netd, sshd and `diag` share.
+        pub fn summary<'a>(&self, buf: &'a mut [u8; Self::SUMMARY_MAX]) -> &'a str {
+            struct Cursor<'b> {
+                buf: &'b mut [u8],
+                len: usize,
+            }
+            impl core::fmt::Write for Cursor<'_> {
+                fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                    let end = self.len + s.len();
+                    self.buf
+                        .get_mut(self.len..end)
+                        .ok_or(core::fmt::Error)?
+                        .copy_from_slice(s.as_bytes());
+                    self.len = end;
+                    Ok(())
+                }
+            }
+            let mut c = Cursor { buf, len: 0 };
+            let _ = if self.source.is_hardware() {
+                core::fmt::Write::write_str(&mut c, self.source.label())
+            } else {
+                core::fmt::write(
+                    &mut c,
+                    format_args!(
+                        "{} ({} samples, {} events)",
+                        self.source.label(),
+                        self.tsc_samples,
+                        self.interrupt_events
+                    ),
+                )
+            };
+            let len = c.len;
+            // Only whole `&str`s were copied in.
+            core::str::from_utf8(&c.buf[..len]).unwrap_or("")
+        }
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[0] = self.source as u8;
+            b[8..16].copy_from_slice(&self.hardware_samples.to_le_bytes());
+            b[16..24].copy_from_slice(&self.tsc_samples.to_le_bytes());
+            b[24..32].copy_from_slice(&self.interrupt_events.to_le_bytes());
+            b
+        }
+
+        /// `None` for a short reply or a source this build does not know.
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN {
+                return None;
+            }
+            Some(Self {
+                source: EntropySource::from_u8(b[0])?,
+                hardware_samples: u64::from_le_bytes(b[8..16].try_into().ok()?),
+                tsc_samples: u64::from_le_bytes(b[16..24].try_into().ok()?),
+                interrupt_events: u64::from_le_bytes(b[24..32].try_into().ok()?),
+            })
+        }
+    }
 
     /// Event class of the kernel ring.
     #[repr(u8)]
@@ -869,6 +991,52 @@ mod tests {
         };
         assert_eq!(Framebuffer::decode(&f.encode()), Some(f));
         assert!(Framebuffer::decode(&[0u8; 10]).is_none());
+    }
+
+    #[test]
+    fn random_source_round_trip() {
+        use super::sysinfo::*;
+        let r = RandomSource {
+            source: EntropySource::TscInterrupts,
+            hardware_samples: 0,
+            tsc_samples: 64 + 7,
+            interrupt_events: 1234,
+        };
+        let b = r.encode();
+        assert_eq!(b.len(), RandomSource::LEN);
+        assert_eq!(b[0], 2, "the source number is the fault code");
+        assert!(b[1..8].iter().all(|&x| x == 0), "reserved bytes are zero");
+        assert_eq!(RandomSource::decode(&b), Some(r));
+        let hw = RandomSource {
+            source: EntropySource::Rdrand,
+            hardware_samples: 9,
+            tsc_samples: 65,
+            interrupt_events: u64::MAX,
+        };
+        assert_eq!(RandomSource::decode(&hw.encode()), Some(hw));
+        assert!(hw.source.is_hardware() && !r.source.is_hardware());
+        assert_eq!(hw.source.label(), "rdrand");
+        assert_eq!(r.source.label(), "TSC + interrupts");
+        let mut text = [0u8; RandomSource::SUMMARY_MAX];
+        assert_eq!(
+            r.summary(&mut text),
+            "TSC + interrupts (71 samples, 1234 events)"
+        );
+        assert_eq!(hw.summary(&mut text), "rdrand");
+        let widest = RandomSource {
+            tsc_samples: u64::MAX,
+            interrupt_events: u64::MAX,
+            ..r
+        };
+        assert!(widest
+            .summary(&mut text)
+            .ends_with("18446744073709551615 events)"));
+        assert!(RandomSource::decode(&b[..31]).is_none());
+        for unknown in [0u8, 3, 0xFF] {
+            let mut bad = b;
+            bad[0] = unknown;
+            assert!(RandomSource::decode(&bad).is_none(), "source {unknown}");
+        }
     }
 
     #[test]

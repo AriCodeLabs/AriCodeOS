@@ -59,6 +59,8 @@ disk = "slots"                  # disk: slots (default) | esp-only | pending-b |
                                 #       | pending-b-older-update (B v2 pending, UPDATE holds v1) | fs-nearly-full (5 entries free for the updater) | fs-one-short (4)
 disk_readonly = false           # true: the test disk is presented read-only
 cpus = 4                        # processors (-smp N); undeclared: 1, or whatever `--cpus N` forces
+cpu_rdrand = true               # -cpu qemu64,+rdrand (TCG implements it): the kernel generator is seeded from rdrand (ADR 0039);
+                                # default qemu64 has none, so every other scenario runs the weak TSC + interrupts path
 usb_hid = true                  # adds qemu-xhci with a USB keyboard and mouse (QMP events go to the USB devices)
 usb_hid_only_input = true       # no virtio keyboard/mouse, so QMP input reaches the USB HID devices (xHCI or EHCI)
 usb_hid_msi = true              # that xHCI offers MSI only, no MSI-X (like 2012 Intel controllers)

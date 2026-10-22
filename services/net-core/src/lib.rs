@@ -128,10 +128,15 @@ enum Fault {
     /// endpoint pair (out of handles or memory), not because the table is
     /// full.
     SessionCreate = 14,
+    /// At start: the kernel generator the TCP secret came from was not
+    /// seeded from a hardware source, or does not say what seeded it (ADR
+    /// 0034 §4, ADR 0039). Nobody was refused; the code is the
+    /// `EntropySource` number, 0 when unknown.
+    TcpSecretWeak = 15,
 }
 
 impl Fault {
-    const COUNT: usize = 15;
+    const COUNT: usize = 16;
     const ALL: [Fault; Self::COUNT] = [
         Fault::TcpTableFull,
         Fault::ArpDeferFull,
@@ -148,6 +153,7 @@ impl Fault {
         Fault::Reclaimed,
         Fault::RxBudget,
         Fault::SessionCreate,
+        Fault::TcpSecretWeak,
     ];
 
     fn from_index(i: usize) -> Option<Self> {
@@ -174,6 +180,7 @@ impl Fault {
             Fault::Reclaimed => "net socks reclaimed",
             Fault::RxBudget => "net rx budget hit",
             Fault::SessionCreate => "net session create",
+            Fault::TcpSecretWeak => "net tcp secret weak",
         }
     }
 
@@ -184,7 +191,7 @@ impl Fault {
         match self {
             Fault::BadRequest => Status::Invalid,
             Fault::BadHandles => Status::BadHandles,
-            Fault::Reclaimed | Fault::RxBudget => Status::Ok,
+            Fault::Reclaimed | Fault::RxBudget | Fault::TcpSecretWeak => Status::Ok,
             _ => Status::Busy,
         }
     }
@@ -372,6 +379,9 @@ pub struct Stack<L: Link> {
     /// Per-boot key of the initial sequence numbers and the ephemeral
     /// ports (`aricode_net::isn`, ADR 0034), from the kernel's entropy.
     tcp_secret: isn::Secret,
+    /// What seeded the kernel generator the secret came from, read once at
+    /// start (ADR 0039); `None` if the kernel does not say.
+    tcp_secret_source: Option<abi::sysinfo::RandomSource>,
     /// Connections opened so far: the RFC 6056 port counter.
     tcp_port_count: u32,
     /// SYNs to a listener answered with a reset since boot (`TcpStats`).
@@ -413,17 +423,16 @@ fn new_socket(port: u16) -> Socket {
 /// without it; the same source sshd draws from), read with the `SYSTEM`
 /// handle the clock already holds (`READ | TRANSFER` from init; the kernel
 /// checks `READ`). The kernel answers with every byte asked whenever it
-/// answers and exposes no entropy-quality state, so the only failure this
-/// can see is a refused syscall, and that one is not hidden: it records the
-/// fault event `TCP_SECRET_FAULT` (code = bytes obtained), says so on the
-/// console and fills the rest from the clock, so that boot's numbers are as
-/// predictable as before incident 0014 and `diag` shows it.
-fn tcp_secret(clock: &Clock, name: &str) -> isn::Secret {
+/// answers, so the only failure seen here is a refused syscall, and that
+/// one is not hidden: it records the fault event `TCP_SECRET_FAULT` (code
+/// = bytes obtained), says so on the console and fills the rest from the
+/// clock, so that boot's numbers are as predictable as before incident
+/// 0014 and `diag` shows it. The quality of the bytes is judged apart, by
+/// what seeded the generator (`report_secret_source`).
+fn tcp_secret(clock: &Clock, name: &str) -> (isn::Secret, bool) {
     let mut secret = [0u8; isn::SECRET_LEN];
     let got = sys::random(clock.0, &mut secret).unwrap_or(0);
-    if got >= isn::SECRET_LEN {
-        say(name, b"tcp secret from kernel entropy");
-    } else {
+    if got < isn::SECRET_LEN {
         let _ = sys::event_record(got as u64, TCP_SECRET_FAULT);
         say(
             name,
@@ -434,17 +443,88 @@ fn tcp_secret(clock: &Clock, name: &str) -> isn::Secret {
             *b ^= clock_bytes[i % clock_bytes.len()];
         }
     }
-    secret
+    (secret, got >= isn::SECRET_LEN)
+}
+
+/// A fault event in the kernel ring (`<kind> x<count>`, code = status
+/// number, or for `TcpSecretWeak` the `EntropySource` number of
+/// `secret_source`, 0 when unknown) and the same line on the console.
+fn record_fault(
+    name: &str,
+    what: Fault,
+    count: u32,
+    secret_source: Option<abi::sysinfo::RandomSource>,
+) {
+    let mut label = [0u8; aricode_faults::LABEL_LEN];
+    let label = aricode_faults::label(what.name(), count, &mut label);
+    let code = match what {
+        Fault::TcpSecretWeak => secret_source.map_or(0, |r| r.source as u64),
+        _ => what.status() as u64,
+    };
+    let _ = sys::event_record(code, label);
+    sys::print(name.as_bytes());
+    sys::print(b": fault ");
+    sys::print(label.as_bytes());
+    sys::print(b"\n");
+}
+
+/// Says what the TCP secret is worth (ADR 0034 §4, ADR 0039): from a
+/// generator seeded by a hardware source, or a weak one (cycle counter and
+/// interrupt timing only, or a kernel that does not say), which is
+/// recorded as `Fault::TcpSecretWeak` through the fault meter and said on
+/// the console. The service runs either way: refusing would leave the
+/// machine without a network, and the owner reads the verdict in `diag`.
+/// `whole`: every byte came from the generator (otherwise the degraded
+/// fault was already said, and the strong line would be untrue).
+fn report_secret_source(
+    name: &str,
+    source: Option<abi::sysinfo::RandomSource>,
+    whole: bool,
+    faults: &mut aricode_faults::Meter<{ Fault::COUNT }>,
+    now: u64,
+) {
+    let mut text = [0u8; abi::sysinfo::RandomSource::SUMMARY_MAX];
+    let line = match source {
+        Some(r) if r.source.is_hardware() && !whole => None,
+        Some(r) if r.source.is_hardware() => Some(alloc::format!(
+            "{name}: tcp secret from kernel entropy ({})\n",
+            r.summary(&mut text)
+        )),
+        Some(r) => Some(alloc::format!(
+            "{name}: tcp secret weak: kernel generator seeded from {}, no hardware source: ISNs and ports guessable with effort\n",
+            r.summary(&mut text)
+        )),
+        None => Some(alloc::format!(
+            "{name}: tcp secret weak: the kernel does not report what seeded its generator\n"
+        )),
+    };
+    // One write, so the line is never split by another program's output.
+    if let Some(line) = line {
+        sys::print(line.as_bytes());
+    }
+    if !source.is_some_and(|r| r.source.is_hardware()) {
+        let due = faults.report(Fault::TcpSecretWeak as usize, now);
+        if due > 0 {
+            record_fault(name, Fault::TcpSecretWeak, due, source);
+        }
+    }
 }
 
 impl<L: Link> Stack<L> {
     pub fn new(link: L, clock: Clock, name: &'static str) -> Self {
         let xid = 0x4152_4900 | (link.mac().0[5] as u32);
+        let (secret, whole) = tcp_secret(&clock, name);
+        let secret_source = sys::random_source(clock.0);
+        let mut faults = aricode_faults::Meter::new();
+        report_secret_source(name, secret_source, whole, &mut faults, clock.now());
+        // Built in place: a local copy of the whole stack would not fit the
+        // driver's 64 KiB stack next to its caller's.
         Self {
             dhcp: dhcp::Client::new(link.mac(), xid),
             link,
             name,
-            tcp_secret: tcp_secret(&clock, name),
+            tcp_secret: secret,
+            tcp_secret_source: secret_source,
             clock,
             dhcp_next: 0,
             probe_deadline: 0,
@@ -462,7 +542,7 @@ impl<L: Link> Stack<L> {
             buffers: ClientBuffers::new(),
             dns_port: 49153,
             retained: None,
-            faults: aricode_faults::Meter::new(),
+            faults,
             sessions: [None; MAX_SESSIONS],
             pending: [const { None }; MAX_SESSIONS],
             reclaimed: 0,
@@ -488,16 +568,10 @@ impl<L: Link> Stack<L> {
         }
     }
 
-    /// A fault event in the kernel ring (`<kind> x<count>`, code = status
-    /// number) and the same line on the console.
+    /// A fault event in the kernel ring and the same line on the console
+    /// (`record_fault`).
     fn record(&self, what: Fault, count: u32) {
-        let mut label = [0u8; aricode_faults::LABEL_LEN];
-        let name = aricode_faults::label(what.name(), count, &mut label);
-        let _ = sys::event_record(what.status() as u64, name);
-        sys::print(self.name.as_bytes());
-        sys::print(b": fault ");
-        sys::print(name.as_bytes());
-        sys::print(b"\n");
+        record_fault(self.name, what, count, self.tcp_secret_source);
     }
 
     /// Refuses a request: records it and answers with the matching status.
