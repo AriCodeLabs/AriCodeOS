@@ -423,6 +423,17 @@ pub fn random(system: Handle, buf: &mut [u8]) -> Result<usize, Error> {
     system_info(system, abi::sysinfo::RANDOM, &mut buf[..n])
 }
 
+/// How the kernel generator behind [`random`] was seeded and what has been
+/// mixed into it since (`sysinfo::RANDOM_SOURCE`, ADR 0039), with a
+/// `SYSTEM` handle (`READ`). `None` if the kernel refuses the query or
+/// answers with a source this build does not know: callers that draw
+/// secrets treat that as weak.
+pub fn random_source(system: Handle) -> Option<abi::sysinfo::RandomSource> {
+    let mut b = [0u8; abi::sysinfo::RandomSource::LEN];
+    let n = system_info(system, abi::sysinfo::RANDOM_SOURCE, &mut b).ok()?;
+    abi::sysinfo::RandomSource::decode(&b[..n])
+}
+
 /// Powers off or reboots (`abi::power`). Only returns if the kernel rejects the action.
 pub fn system_power(system: Handle, action: u64) -> Error {
     match abi::decode(raw_syscall(

@@ -827,15 +827,16 @@ latter briefly to add the region.
 - Initial sequence numbers and ephemeral ports are secrets (ADR 0034,
   incident 0014). `netd` draws a 32-byte secret per boot from the kernel
   generator (`sys::random` through the `SYSTEM` handle it already holds as
-  its clock: `READ | TRANSFER` from init, `READ` is what the kernel checks)
-  and prints `tcp secret from kernel entropy`; if the syscall is refused it
-  records the fault event `net tcp secret degraded` (code = bytes
-  obtained) and says so on the console instead of falling back silently.
-  The kernel always answers `RANDOM` with the bytes asked and exposes no
-  entropy-quality state, so that fault cannot mean weak entropy; the
-  kernel's boot line `random: ChaCha20 generator seeded with rdrand` or
-  `... with TSC (no rdrand: limited entropy)` is the only quality signal
-  (QEMU's CPU is the latter). `aricode_net::isn::initial_seq` gives every connection
+  its clock: `READ | TRANSFER` from init, `READ` is what the kernel
+  checks); if the syscall is refused it records the fault event `net tcp secret
+  degraded` (code = bytes obtained) and says so on the console instead of
+  falling back silently. The kernel always answers `RANDOM` with the bytes
+  asked, so that fault cannot mean weak entropy; the quality is read
+  apart from `system_info(RANDOM_SOURCE)` (ADR 0039): `tcp secret from
+  kernel entropy (rdrand)`, or `tcp secret weak: kernel generator seeded
+  from TSC + interrupts (N samples, M events) ...` with the fault event
+  `net tcp secret weak x1` (code 2) on CPUs without `rdrand` (QEMU's
+  `qemu64`). `aricode_net::isn::initial_seq` gives every connection
   `M + F(4-tuple, secret)` as RFC 6528 prescribes (`M` the ms clock in
   4 µs ticks, `F` the first 32 bits of HMAC-SHA-256): the active SYN and
   the passive SYN|ACK alike, through `Connection::connect(iss, now)` and
@@ -1135,6 +1136,19 @@ latter briefly to add the region.
   boot tick; each `fill` mixes in another sample (`reseed`). `qemu64` does not
   expose `rdrand`, so in the tests the source is the TSC and the kernel
   says so. `system_info(RANDOM)` serves up to 256 bytes per call.
+- Entropy source (ADR 0039): next to the generator, under its lock, the
+  kernel keeps a `sysinfo::RandomSource` account: the seed's source
+  (`Rdrand` = 1 only if `rdrand` returned data, else `TscInterrupts` =
+  2), the `rdrand` values and TSC samples mixed in so far and the
+  interrupt stirs counted up to the last read. `system_info(RANDOM_SOURCE)`
+  (kind 12, 32 bytes) returns it, never any state; `sys::random_source`
+  wraps it. netd records `net tcp secret weak` and sshd `ssh entropy weak`
+  (before drawing a host key with no carried `random_seed`) when the
+  source is not a hardware one, code = the source number; neither refuses
+  to run. `diag` prints `entropy  rdrand` or `entropy  TSC + interrupts (N
+  samples, M events): weak`. The scenario option `cpu_rdrand` boots
+  `-cpu qemu64,+rdrand` (TCG implements it) for the hardware path
+  (`crypto.random_rdrand`, `crypto.entropy_rdrand`).
 - xtask gains `keygen`, `sign` and `verify` (seed and public key in hex);
   `keys/dev` holds the development pair that will sign the test images.
 

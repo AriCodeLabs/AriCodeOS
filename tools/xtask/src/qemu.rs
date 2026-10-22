@@ -36,6 +36,16 @@ pub struct UsbOptions {
     pub ehci_companion_kbd: bool,
 }
 
+/// Processors of the machine.
+#[derive(Clone, Copy)]
+struct Cpu {
+    /// `-smp N` (at least 1).
+    count: u32,
+    /// `-cpu qemu64,+rdrand` instead of `qemu64` (TCG implements `rdrand`
+    /// from the host's randomness; ADR 0039).
+    rdrand: bool,
+}
+
 /// Network cards of the machine.
 #[derive(Clone, Copy)]
 struct Nics {
@@ -50,7 +60,7 @@ fn base_command(
     vars: &Path,
     disk: &Path,
     disk_readonly: bool,
-    cpus: u32,
+    cpu: Cpu,
     usb: UsbOptions,
     nics: Nics,
 ) -> Command {
@@ -60,9 +70,13 @@ fn base_command(
         "-machine",
         "q35",
         "-cpu",
-        "qemu64",
+        if cpu.rdrand {
+            "qemu64,+rdrand"
+        } else {
+            "qemu64"
+        },
         "-smp",
-        &cpus.max(1).to_string(),
+        &cpu.count.max(1).to_string(),
         "-m",
         "512M",
         "-no-reboot",
@@ -810,7 +824,10 @@ pub fn run_interactive(
         &vars,
         &disk,
         false,
-        cpus,
+        Cpu {
+            count: cpus,
+            rdrand: false,
+        },
         usb,
         Nics {
             virtio_net: true,
@@ -940,6 +957,8 @@ pub struct Headless<'a> {
     /// Files that go into the test disk's AriFS (installed packages).
     pub installed: &'a [(String, Vec<u8>)],
     pub cpus: u32,
+    /// `-cpu qemu64,+rdrand` instead of `qemu64` (scenario `cpu_rdrand`).
+    pub cpu_rdrand: bool,
     pub usb: UsbOptions,
     /// The virtio-net card is present (every scenario but `no_nic` ones).
     pub nic: bool,
@@ -985,7 +1004,10 @@ pub fn run_headless(
         &vars,
         &disk,
         disk_readonly,
-        options.cpus,
+        Cpu {
+            count: options.cpus,
+            rdrand: options.cpu_rdrand,
+        },
         options.usb,
         Nics {
             virtio_net: options.nic,

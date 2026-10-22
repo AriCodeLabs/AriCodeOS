@@ -256,7 +256,7 @@ fn trim(s: &[u8]) -> &[u8] {
 
 fn help() {
     print(
-        b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  cpus      online processors and idle time per CPU\n  diag [NAME]  full report (uptime, mem, cpus, ps, services, net, devices); with NAME saves it to AriFS\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body (http:// or https://)\n  run PROG  run an initrd program and wait\n\
+        b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  cpus      online processors and idle time per CPU\n  diag [NAME]  full report (uptime, mem, cpus, entropy, ps, services, net, devices); with NAME saves it to AriFS\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body (http:// or https://)\n  run PROG  run an initrd program and wait\n\
   update    fetch and verify the signed index of every source and show what is new (installs nothing; ADR 0029)\n  update add URL|IP[:PORT]  register an update source\n  update remove N|URL  unregister a source\n  update sources  list the sources\n  update apply [--allow-downgrade]  install the image in the UPDATE partition\n  upgrade [--allow-downgrade]  install what the last `update` found (system into the inactive slot, then `reboot`; apps through the installer)\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
     );
 }
@@ -362,6 +362,22 @@ fn cpus() {
     }
 }
 
+/// What seeded the kernel generator (`sysinfo::RANDOM_SOURCE`, ADR 0039),
+/// in one line: `entropy  rdrand`, or `entropy  TSC + interrupts (N
+/// samples, M events): weak`. It decides the quality of sshd's host key
+/// and netd's TCP secret, so the owner can read it over SSH.
+fn entropy() {
+    let mut text = [0u8; abi::sysinfo::RandomSource::SUMMARY_MAX];
+    let line = match sys::random_source(SYSTEM) {
+        Some(r) if r.source.is_hardware() => alloc::format!("entropy  {}\n", r.summary(&mut text)),
+        Some(r) => alloc::format!("entropy  {}: weak\n", r.summary(&mut text)),
+        None => {
+            alloc::string::String::from("entropy  unknown (the kernel does not report it): weak\n")
+        }
+    };
+    print(line.as_bytes());
+}
+
 /// `diag`: full report in one block, to attach when describing a problem
 /// (docs/performance.md). With a name it is also saved to AriFS, to read it
 /// from the host (`cargo xtask fs-cat`, docs/hardware.md).
@@ -377,6 +393,7 @@ fn diag(fs: &mut FsClient, net_client: &NetClient, mask: u64, rest: &[u8]) {
     uptime();
     mem();
     cpus();
+    entropy();
     ps();
     services(mask, fs);
     services_detail();

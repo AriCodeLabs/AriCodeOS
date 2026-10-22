@@ -45,6 +45,11 @@ const AUTH_DEADLINE_MS: u64 = 30_000;
 const HOST_KEY_FILE: &str = "ssh_host_ed25519_key";
 const AUTHORIZED_KEYS: &str = "authorized_keys";
 const SEED_FILE: &str = "random_seed";
+/// Fault event when a host key is drawn from a weak kernel generator with
+/// no `random_seed` carried from an earlier boot (ADR 0025, ADR 0039); its
+/// code is the `EntropySource` number, 0 when the kernel does not say.
+const ENTROPY_WEAK_FAULT: &str = "ssh entropy weak";
+const _: () = assert!(ENTROPY_WEAK_FAULT.len() <= abi::sysinfo::EVENT_NAME_LEN);
 
 fn say(msg: &[u8]) {
     sys::print(b"sshd: ");
@@ -58,20 +63,56 @@ fn say(msg: &[u8]) {
 struct Entropy {
     state: [u8; 32],
     counter: u64,
+    /// A non-empty `random_seed` from an earlier boot was read and mixed in.
+    carried: bool,
 }
 
 impl Entropy {
     fn load(fs: &mut FsClient) -> Self {
         let mut h = aricode_crypto::sha256::Sha256::new();
-        if let Ok(saved) = read_file(fs, SEED_FILE) {
-            h.update(&saved);
+        let saved = read_file(fs, SEED_FILE);
+        if let Ok(saved) = &saved {
+            h.update(saved);
         }
         let mut fresh = [0u8; 32];
         let _ = sys::random(SYSTEM, &mut fresh);
         h.update(&fresh);
         h.update(&sys::time::uptime_us(SYSTEM).unwrap_or(0).to_le_bytes());
         let state = h.finish();
-        Self { state, counter: 0 }
+        Self {
+            state,
+            counter: 0,
+            carried: saved.is_ok_and(|s| !s.is_empty()),
+        }
+    }
+
+    /// Before a host key is drawn: if the kernel generator was not seeded
+    /// from a hardware source (or does not say) and no seed came from an
+    /// earlier boot, the key is only as good as this boot's cycle counter
+    /// and interrupt timing. That is recorded (`ENTROPY_WEAK_FAULT`) and
+    /// said, not refused: refusing would lock the owner out, and the key
+    /// still mixes everything there is. With a carried seed the boots
+    /// before this one add to it, so nothing is reported.
+    fn check_for_host_key(&self) {
+        let source = sys::random_source(SYSTEM);
+        if self.carried || source.is_some_and(|r| r.source.is_hardware()) {
+            return;
+        }
+        let _ = sys::event_record(source.map_or(0, |r| r.source as u64), ENTROPY_WEAK_FAULT);
+        let mut text = [0u8; abi::sysinfo::RandomSource::SUMMARY_MAX];
+        let why = match source {
+            Some(r) => alloc::format!("kernel generator seeded from {}", r.summary(&mut text)),
+            None => {
+                alloc::string::String::from("the kernel does not report what seeded its generator")
+            }
+        };
+        // One write, so the line is never split by another program's output.
+        sys::print(
+            alloc::format!(
+                "sshd: fault ssh entropy weak: {why} and no random_seed from an earlier boot: the new host key is weak (cargo xtask usb-image --authorized-key installs one made on the build host)\n"
+            )
+            .as_bytes(),
+        );
     }
 
     /// Saves a successor for the next boot (never the state in use). Done
@@ -189,9 +230,11 @@ fn host_key(fs: &mut FsClient, entropy: &mut Entropy, seed_saved: &mut bool) -> 
         Err(ReadError::Absent) => {}
         Err(_) => {
             say(b"host key file cannot be read: using a key for this boot only (the saved one is kept)");
+            entropy.check_for_host_key();
             return entropy.next();
         }
     }
+    entropy.check_for_host_key();
     *seed_saved = entropy.save_next(fs);
     let seed = entropy.next();
     let mut hex = [0u8; 65];

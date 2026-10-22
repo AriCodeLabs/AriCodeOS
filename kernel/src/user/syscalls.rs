@@ -249,6 +249,7 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
             crate::random::fill(&mut v);
             v
         }
+        sysinfo::RANDOM_SOURCE => crate::random::source().encode().to_vec(),
         sysinfo::FRAMEBUFFER => match crate::framebuffer::abi_info() {
             Some(fb) => fb.encode().to_vec(),
             None => return Err(Error::NotFound),

@@ -20,6 +20,7 @@ idle_client = true
 [expect]
 exit = 33
 serial_contains = [
+    "sshd: fault ssh entropy weak: kernel generator seeded from TSC + interrupts (",
     "sshd: new host key generated and saved",
     "[host] ssh idle client connected",
     "sshd: authentication timeout from 10.0.2.2",
