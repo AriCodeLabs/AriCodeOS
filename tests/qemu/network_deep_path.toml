@@ -15,16 +15,19 @@
 # counted. The order (`http` typed, then the reclaim) shows the reclaim ran
 # inside the request and not in the periodic sweep; `net arp defer full`
 # absent shows the reset got a parking slot, so the ARP request went out.
-# No selftest: the boot clients would otherwise hold connections of their
-# own in the table.
+# `diag` then lists the user stack high-water marks (`sysinfo::STACKS`, from
+# the Accessed bits of the stack pages): virtio-net's line is there, with
+# whatever its deepest path touched, indirect calls included. No selftest:
+# the boot clients would otherwise hold connections of their own in the
+# table.
 name = "network.deep_path"
 description = "netd survives its deepest call path: a full TCP table swept inside a request, a dead client's reset toward an address without ARP"
 level = "full"
-areas = ["network", "apps"]
+areas = ["network", "apps", "diag"]
 selftest = false
 cmdline = "qemu_exit shell"
 timeout_secs = 90
-stdin = ["run tcp_orphan", "http http://10.0.2.2:17010/hola", "shutdown"]
+stdin = ["run tcp_orphan", "http http://10.0.2.2:17010/hola", "diag", "shutdown"]
 
 [expect]
 exit = 33
@@ -35,6 +38,9 @@ serial_contains = [
     "run: tcp_orphan exited with 0",
     "virtio-net: client gone ('tcp_orphan'), 8 socket(s) left open: reclaimed",
     "HTTP 200, 19 bytes",
+    "user stacks (touched of size, page granular):",
+    " of 64 KiB  virtio_net",
+    "=== end of diagnostics ===",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_order = [

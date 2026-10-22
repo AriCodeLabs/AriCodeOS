@@ -25,6 +25,9 @@ pub const WRITABLE: u64 = 1 << 1;
 pub const USER: u64 = 1 << 2;
 pub const WRITE_THROUGH: u64 = 1 << 3;
 pub const CACHE_DISABLE: u64 = 1 << 4;
+/// Set by the CPU on the first access through the entry; never cleared by
+/// the kernel (the user stack high-water mark, incident 0018, reads it).
+pub const ACCESSED: u64 = 1 << 5;
 pub const HUGE: u64 = 1 << 7;
 pub const GLOBAL: u64 = 1 << 8;
 pub const NO_EXECUTE: u64 = 1 << 63;

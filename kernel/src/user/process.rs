@@ -13,7 +13,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use aricode_abi::USER_SPACE_END;
 use aricode_pmm::Frame;
-use aricode_x86_paging::{Mapper, OffsetMap, NO_EXECUTE, PAGE_SIZE, USER, WRITABLE};
+use aricode_x86_paging::{Mapper, OffsetMap, ACCESSED, NO_EXECUTE, PAGE_SIZE, USER, WRITABLE};
 use log::{info, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -853,6 +853,43 @@ pub fn snapshot() -> Vec<aricode_abi::sysinfo::ProcessEntry> {
                 Some(ExitStatus::Killed(_)) => (ProcessState::Killed, 0),
             };
             ProcessEntry::new(pid.0, state, code, &p.name)
+        })
+        .collect()
+}
+
+/// Bytes of the user stack the process behind `m` has touched: from the
+/// top down to the lowest stack page whose Accessed bit the CPU has set
+/// (incident 0018). `spawn` zeroes the pages through the kernel's own
+/// mapping, so only accesses through the process's mapping set the bit
+/// (its own, and the kernel's copies to and from its buffers), and nothing
+/// clears it: a high-water mark since the process started, page granular.
+/// The stack probes compilers emit for large frames touch every page they
+/// pass, so a deep call is seen even if it wrote little.
+fn stack_touched(m: &Mapper<vmm::PmmFrames, OffsetMap>) -> u64 {
+    (USER_STACK_TOP - USER_STACK_SIZE..USER_STACK_TOP)
+        .step_by(PAGE_SIZE as usize)
+        .find(|&page| {
+            m.translate(page)
+                .is_some_and(|(_, flags)| flags & ACCESSED != 0)
+        })
+        .map_or(0, |page| USER_STACK_TOP - page)
+}
+
+/// User stack use of every process that still has its address space
+/// (`sysinfo::STACKS`, incident 0018).
+pub fn stack_snapshot() -> Vec<aricode_abi::sysinfo::StackEntry> {
+    use aricode_abi::sysinfo::StackEntry;
+    PROCESSES
+        .lock()
+        .iter()
+        .filter_map(|(pid, p)| {
+            let m = p.mapper.as_ref()?;
+            Some(StackEntry::new(
+                pid.0,
+                USER_STACK_SIZE as u32,
+                stack_touched(m) as u32,
+                &p.name,
+            ))
         })
         .collect()
 }
