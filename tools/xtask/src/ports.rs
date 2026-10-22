@@ -61,6 +61,29 @@ impl PortLease {
     pub fn ports(&self) -> &[u16] {
         &self.0
     }
+
+    /// A listener this process binds itself (the scenario's update server),
+    /// on a free port that is registered as a lease under the same lock as
+    /// [`PortLease::take`], so it can never be a port another scenario has
+    /// leased for QEMU or HTTPS but not bound yet (audit of 2943a1e,
+    /// finding 1). The lease lives as long as the returned value.
+    pub fn listener() -> Result<(TcpListener, Self)> {
+        // Listeners on ports that were already leased stay open until a
+        // good one is found, so the kernel does not hand them out again.
+        let mut rejected = Vec::new();
+        for _ in 0..ATTEMPTS {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .map_err(|e| format!("bind 127.0.0.1:0: {e}"))?;
+            let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+            if LEASED.lock().expect("port leases").insert(port) {
+                return Ok((listener, Self(vec![port])));
+            }
+            rejected.push(listener);
+        }
+        Err(format!(
+            "no unleased free host port after {ATTEMPTS} attempts"
+        ))
+    }
 }
 
 impl Drop for PortLease {
@@ -97,6 +120,25 @@ mod tests {
             b.ports().iter().all(|p| leased.contains(p)),
             "b still holds"
         );
+    }
+
+    #[test]
+    fn listeners_never_take_a_leased_port() {
+        // Many reserved-but-unbound ports (as QEMU's hostfwd ports are
+        // between `take` and QEMU's start), then many listeners: none may
+        // land on a reserved one, and each holds its own lease.
+        let reserved = PortLease::take(64).unwrap();
+        let listeners: Vec<_> = (0..64).map(|_| PortLease::listener().unwrap()).collect();
+        let leased = LEASED.lock().unwrap();
+        for (l, lease) in &listeners {
+            let p = l.local_addr().unwrap().port();
+            assert_eq!(lease.ports(), [p]);
+            assert!(
+                !reserved.ports().contains(&p),
+                "listener took leased port {p}"
+            );
+            assert!(leased.contains(&p));
+        }
     }
 
     #[test]
