@@ -600,13 +600,15 @@ impl Responder {
 pub struct UpdateServer {
     port: u16,
     _servers: Servers,
+    /// Keeps the port out of every other lease while the server runs.
+    _lease: crate::ports::PortLease,
 }
 
 impl UpdateServer {
     pub fn start(channel: &Path) -> Result<Self> {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
-            .map_err(|e| format!("update server on 127.0.0.1:0: {e}"))?;
-        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+        let (listener, lease) =
+            crate::ports::PortLease::listener().map_err(|e| format!("update server: {e}"))?;
+        let port = lease.ports()[0];
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let channel = channel.to_path_buf();
         let thread = accept_loop(
@@ -620,6 +622,7 @@ impl UpdateServer {
                 stop,
                 threads: vec![thread],
             },
+            _lease: lease,
         })
     }
 

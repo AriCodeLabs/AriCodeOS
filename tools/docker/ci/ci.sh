@@ -110,8 +110,11 @@ run_once() {
     # directories (their last run times order the next run) stay.
     git -C "$src" clean -ffdxq -e /target -e /build
     short=$(git -C "$src" rev-parse --short "$sha")
-    dir=$reports/$(date -u +%Y-%m-%dT%H%MZ)-$slug-$short
-    mkdir -p "$dir" || return 1
+    # A fresh directory per invocation, created atomically: two runs of the
+    # same commit within one minute must not share (and overwrite) one
+    # (audit of 2943a1e, finding 2).
+    dir=$(mktemp -d "$reports/$(date -u +%Y-%m-%dT%H%MZ)-$slug-$short-XXXXXX") || return 1
+    chmod 755 "$dir"
     failed_steps=0
     started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     run_start=$(date +%s)
