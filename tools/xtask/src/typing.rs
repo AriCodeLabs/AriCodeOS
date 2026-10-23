@@ -446,10 +446,12 @@ mod tests {
             .expect("sleep");
         let pid = child.id();
         let signal = |sig: &str| {
-            let ok = std::process::Command::new("kill")
-                .args([sig, &pid.to_string()])
+            // The shell's builtin: the development image has no
+            // /bin/kill (procps).
+            let ok = std::process::Command::new("sh")
+                .args(["-c", &format!("kill {sig} {pid}")])
                 .status()
-                .expect("kill")
+                .expect("sh")
                 .success();
             assert!(ok, "kill {sig}");
         };
