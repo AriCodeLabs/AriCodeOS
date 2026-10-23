@@ -1,0 +1,19 @@
+# Incident 0020: the idle accounting control of `scheduler.idle_accounting`
+# with 4 CPUs, run on CPU 0 (the BSP: its timer handler wakes sleepers and
+# switches to them on the idle stack) and on CPU 3, main waiting on the other.
+name = "smp.idle_accounting"
+description = "test=idle with -smp 4: a 500 ms busy interval on CPU 0 and on CPU 3 is excluded from their idle time and the aggregate"
+level = "full"
+areas = ["smp", "scheduler", "perf", "idle"]
+cmdline = "qemu_exit test=idle"
+cpus = 4
+timeout_secs = 60
+
+[expect]
+exit = 33
+serial_contains = [
+    "smp: 4 CPUs online",
+    "idle selftest ok (4 CPUs: busy interval excluded from idle on CPUs [0, 3] and from the aggregate",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC"]

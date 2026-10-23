@@ -210,7 +210,10 @@ extern "C" fn idle_entry(_: usize) {
 
 /// Idle loop of a CPU: if something is ready for it, it takes it; otherwise
 /// it sleeps. `sti; hlt` is atomic: an IPI or tick arriving just before
-/// sleeping still wakes the CPU.
+/// sleeping still wakes the CPU. Idle time is not measured here but at the
+/// switches to and from this thread (`Cpu::set_current`, incident 0020): a
+/// handler taken from `hlt` may switch to another thread before returning,
+/// and that thread's time is not idle.
 pub fn idle_loop() -> ! {
     loop {
         let irq = KernelIrq::save_and_disable();
@@ -219,15 +222,29 @@ pub fn idle_loop() -> ! {
             KernelIrq::restore(irq);
             yield_now();
         } else {
-            // SAFETY: rdtsc only reads the time stamp counter.
-            let t0 = unsafe { core::arch::x86_64::_rdtsc() };
             // SAFETY: enable interrupts and wait for the next one.
             unsafe { core::arch::asm!("sti", "hlt", options(nomem, nostack)) };
-            // SAFETY: same as above.
-            let t1 = unsafe { core::arch::x86_64::_rdtsc() };
-            // The idle thread never migrates: `current()` is its own CPU.
-            cpu::current().add_idle_cycles(t1.wrapping_sub(t0));
         }
+    }
+}
+
+/// Idle counters at one instant (`sysinfo::IDLE`): TSC cycles since boot
+/// and each online CPU's idle cycles, all up to one TSC reading taken with
+/// every CPU's idle clock locked (`cpu::idle_clocks_at_one_instant`). No
+/// stretch can end after that reading, so each CPU's idle is at most the
+/// elapsed cycles, and the difference of two samples is exactly the idle
+/// time between their readings.
+pub struct IdleSample {
+    pub elapsed: u64,
+    pub idle: Vec<u64>,
+}
+
+pub fn idle_sample() -> IdleSample {
+    let mut clocks = Vec::with_capacity(cpu::MAX_CPUS);
+    let now = cpu::idle_clocks_at_one_instant(&mut clocks);
+    IdleSample {
+        elapsed: crate::time::tsc_since_boot_at(now),
+        idle: clocks.iter().map(|c| c.total(now)).collect(),
     }
 }
 
@@ -872,4 +889,148 @@ fn report_cpus_without_roamers(union: u32, idle_before: &[u64], waited_ms: u64) 
             ),
         }
     }
+}
+
+/// Idle accounting self-test (`test=idle`, incident 0020; the control of
+/// the performance audit of 731c398, finding A). It runs the control on
+/// CPU 0, whose timer handler wakes sleepers and switches to them on the
+/// idle thread's stack, and, with more CPUs, on the last one; with more
+/// CPUs it also checks that interrupts serviced by an idle CPU count as
+/// idle.
+pub fn idle_selftest() {
+    let cpus = cpu::online_count();
+    let mut targets = alloc::vec![0];
+    if cpus > 1 {
+        targets.push(cpus - 1);
+    }
+    let slept: Vec<u64> = targets.iter().map(|&t| idle_control(t, cpus)).collect();
+    if cpus > 1 {
+        idle_interrupts_check(cpus - 1);
+    }
+    info!(
+        "idle selftest ok ({cpus} CPUs: busy interval excluded from idle on CPUs {targets:?} and from the aggregate, sleep counted as idle: {slept:?} ms)"
+    );
+}
+
+/// Interrupt service on an idle CPU is idle time (`aricode_sched::idle`):
+/// during a window of ten 10 ms sleeps of main (about 200 ms) CPU `target`,
+/// with nothing to run, takes its timer ticks and ten RESCHED IPIs, each
+/// serviced on its idle thread. What it proves: servicing those interrupts
+/// accounts no switch on that CPU, so its idle stretch stays open through
+/// the window and its idle time grows by the whole window. A window in
+/// which the stretch changed (another thread briefly ran there) is retried;
+/// if interrupts ended the stretch, every window would change and the check
+/// fails. Each end reads the clock and the TSC together
+/// (`Cpu::idle_clock_now`), so an open stretch always started before `t0`.
+fn idle_interrupts_check(target: usize) {
+    const ATTEMPTS: u32 = 10;
+    let c = cpu::slot(target);
+    for attempt in 1..=ATTEMPTS {
+        let (before, t0) = c.idle_clock_now();
+        for _ in 0..10 {
+            apic::send_ipi(c.lapic_id(), apic::RESCHED_VECTOR);
+            sleep_ms(10);
+        }
+        let (after, t1) = c.idle_clock_now();
+        if before.idle_since().is_some() && before.idle_since() == after.idle_since() {
+            let grown = after.total(t1) - before.total(t0);
+            assert_eq!(
+                grown,
+                t1 - t0,
+                "CPU {target}: interrupts serviced while idle were not counted as idle"
+            );
+            info!(
+                "idle selftest: CPU {target} idle through a {} ms window with timer ticks and 10 RESCHED IPIs: idle grew by the whole window (attempt {attempt})",
+                crate::time::tsc_cycles_to_ms(grown).unwrap_or(0)
+            );
+            return;
+        }
+    }
+    panic!("idle selftest: CPU {target} left its idle thread in each of {ATTEMPTS} windows");
+}
+
+/// One control run: a thread pinned to `target` first sleeps, so the CPU
+/// idles and the thread is then switched in from its idle thread; it stays
+/// runnable for 500 ms and sleeps 200 ms, sampling the raw counters before
+/// and after. The busy interval cannot be idle time on its CPU: idle there
+/// is at most `elapsed - busy`, and the aggregate at most `cpus * elapsed -
+/// busy`. The 200 ms sleep must count as idle. Returns the idle
+/// milliseconds of `target`.
+fn idle_control(target: usize, cpus: usize) -> u64 {
+    const BUSY_MS: u64 = 500;
+    const SLEEP_MS: u64 = 200;
+    static BUSY_CYCLES: AtomicU64 = AtomicU64::new(0);
+    static SAMPLES: IrqLock<Option<(IdleSample, IdleSample)>> = IrqLock::new(None);
+    use crate::time::rdtsc;
+    extern "C" fn control(_: usize) {
+        sleep_ms(50);
+        let before = idle_sample();
+        let start = rdtsc();
+        while crate::time::tsc_cycles_to_ms(rdtsc().wrapping_sub(start)).expect("TSC calibrated")
+            < BUSY_MS
+        {
+            core::hint::spin_loop();
+        }
+        BUSY_CYCLES.store(rdtsc().wrapping_sub(start), Ordering::Relaxed);
+        sleep_ms(SLEEP_MS);
+        let after = idle_sample();
+        *SAMPLES.lock() = Some((before, after));
+    }
+
+    // main waits on another CPU when there is one, waking every 100 ms.
+    let main_cpu = if target == 0 { cpus - 1 } else { 0 };
+    set_affinity(MAIN_TID, Some(main_cpu)).unwrap();
+    let t = spawn_on("idle-control", control, 0, target).unwrap();
+    while state(t).is_some() {
+        sleep_ms(100);
+    }
+    set_affinity(MAIN_TID, None).unwrap();
+
+    let (before, after) = SAMPLES.lock().take().expect("control samples");
+    let busy = BUSY_CYCLES.load(Ordering::Relaxed);
+    let elapsed = after.elapsed - before.elapsed;
+    let idle: Vec<u64> = after
+        .idle
+        .iter()
+        .zip(&before.idle)
+        .map(|(a, b)| a.wrapping_sub(*b))
+        .collect();
+    let permille = |x: u64| x.saturating_mul(1000) / elapsed.max(1);
+    let ms = |x: u64| crate::time::tsc_cycles_to_ms(x).unwrap_or(0);
+    let others: Vec<u64> = idle.iter().map(|d| permille(*d)).collect();
+    let on_target = idle[target];
+    let aggregate: u64 = idle.iter().sum();
+    info!(
+        "idle selftest: control on CPU {target}: elapsed {elapsed} cycles ({} ms), busy {busy} cycles ({} ms), idle {on_target} cycles ({} ms, {} permille; at most {} permille possible); aggregate {aggregate} of {} cycles; idle permille per CPU {others:?}",
+        ms(elapsed),
+        ms(busy),
+        ms(on_target),
+        permille(on_target),
+        permille(elapsed.saturating_sub(busy)),
+        elapsed * cpus as u64
+    );
+    // Slack for where the samples fall relative to the switches: 1 %.
+    let slack = elapsed / 100;
+    assert!(
+        on_target + busy <= elapsed + slack,
+        "CPU {target} counted its busy interval as idle: idle {} ms + busy {} ms > elapsed {} ms",
+        ms(on_target),
+        ms(busy),
+        ms(elapsed)
+    );
+    assert!(
+        aggregate + busy <= (elapsed + slack) * cpus as u64,
+        "aggregate idle includes the busy interval: {} ms + busy {} ms > {cpus} x {} ms",
+        ms(aggregate),
+        ms(busy),
+        ms(elapsed)
+    );
+    // The sleep is idle time on the control's CPU (other threads may briefly
+    // run there).
+    assert!(
+        ms(on_target) >= SLEEP_MS * 3 / 4,
+        "CPU {target} idled only {} ms of a {SLEEP_MS} ms sleep",
+        ms(on_target)
+    );
+    ms(on_target)
 }

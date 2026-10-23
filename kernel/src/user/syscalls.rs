@@ -223,10 +223,11 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
         }
         sysinfo::CPUS => (crate::cpu::online_count() as u64).to_le_bytes().to_vec(),
         sysinfo::IDLE => {
-            let mut v = crate::time::tsc_since_boot().to_le_bytes().to_vec();
-            v.extend_from_slice(&(crate::cpu::online_count() as u64).to_le_bytes());
-            for c in crate::cpu::online() {
-                v.extend_from_slice(&c.idle_cycles().to_le_bytes());
+            let sample = crate::task::scheduler::idle_sample();
+            let mut v = sample.elapsed.to_le_bytes().to_vec();
+            v.extend_from_slice(&(sample.idle.len() as u64).to_le_bytes());
+            for idle in sample.idle {
+                v.extend_from_slice(&idle.to_le_bytes());
             }
             v
         }

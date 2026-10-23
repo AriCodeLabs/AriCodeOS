@@ -1,0 +1,19 @@
+# Incident 0020 (performance audit of 731c398, finding A): a thread pinned
+# to the CPU stays runnable for 500 ms and then sleeps 200 ms; its busy
+# interval must not be counted as idle time, and the sleep must be. One CPU:
+# the control shares it with main and the idle thread.
+name = "scheduler.idle_accounting"
+description = "test=idle: a 500 ms busy interval is excluded from idle time and a 200 ms sleep is counted (1 CPU)"
+level = "full"
+areas = ["scheduler", "perf", "idle"]
+cmdline = "qemu_exit test=idle"
+cpus = 1
+timeout_secs = 40
+
+[expect]
+exit = 33
+serial_contains = [
+    "idle selftest ok (1 CPUs: busy interval excluded from idle on CPUs [0] and from the aggregate",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC"]

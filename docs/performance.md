@@ -35,11 +35,39 @@ clock (200 ms; 10 ms granularity, error under 5 %).
 
 ## Per-CPU idle
 
-Besides the online CPUs, `cpus` shows the percentage of cycles each one has
-spent in `hlt` since boot (`sysinfo::IDLE`): with the system quiet it
-should be high; a CPU at 0 % while idle has a thread that does not sleep
-(`ps` shows it). This is the basis for power measurements: without `hlt`
-there are no sleep states to save anything.
+Besides the online CPUs, `cpus` shows the percentage of cycles since boot
+during which each CPU had nothing to run (`sysinfo::IDLE`): with the
+system quiet it should be high; a CPU at 0 % while idle has a thread that
+does not sleep (`ps` shows it).
+
+What idle means (since incident 0020): the time the CPU's idle thread is
+its running thread. The scheduler opens an idle stretch when it switches
+to the idle thread and closes it when it switches away, wherever that
+switch happens, including inside a timer handler taken from `hlt`. So:
+
+- another thread's time is never idle, even when that thread was switched
+  in by an interrupt that woke the CPU from `hlt`;
+- interrupt handlers that run on the idle thread and return to it without
+  a switch count as idle (they are short: a tick, an IPI, a device IRQ);
+- the kernel samples the elapsed cycles and every CPU's idle cycles at
+  one TSC reading, the current idle stretch included, taken with every
+  CPU's idle clock locked (each switch reads its own TSC under its CPU's
+  lock), so no stretch in a sample ends after that reading: a CPU's idle
+  never exceeds the elapsed time and two samples measure exactly the idle
+  time between them. `cpus` does not clamp the value: above 100 % would
+  be a defect to report.
+
+Before 0.14.0 (incident 0020) the idle loop measured each `sti; hlt` and
+added it when `hlt` returned, so a thread switched in by the handler that
+ended the `hlt` had its whole run counted as idle: the audit of 731c398
+saw 105 % on one CPU, and `test=idle` 1000 permille where at most 285 were
+possible. Idle figures recorded before the fix (the 81-82 % below
+included) are not comparable.
+
+Idle time is not a power measurement: it says how often the CPU had
+nothing to run, not how deep it slept or what it drew. Without `hlt`
+there are no sleep states to save anything, but energy claims need
+hardware measurements.
 
 ## Report
 

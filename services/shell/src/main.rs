@@ -376,7 +376,9 @@ fn cpus() {
     print(b"cpus: ");
     num(u64::from_le_bytes(buf));
     print(b" online\n");
-    // Idle per CPU: cycles spent in `hlt` versus elapsed cycles.
+    // Idle per CPU: cycles with the CPU's idle thread running versus
+    // elapsed cycles, sampled at one instant by the kernel (incident 0020).
+    // Not clamped: a value above 100 % is an accounting defect to report.
     let mut idle = [0u8; 8 * (2 + 16)];
     let Ok(n) = sys::system_info(SYSTEM, abi::sysinfo::IDLE, &mut idle) else {
         return;
@@ -387,7 +389,7 @@ fn cpus() {
     };
     let (elapsed, cpus) = (u64::from_le_bytes(*elapsed), u64::from_le_bytes(*cpus));
     for (i, cycles) in words.iter().skip(2).take(cpus as usize).enumerate() {
-        let cycles = u64::from_le_bytes(*cycles).min(elapsed);
+        let cycles = u64::from_le_bytes(*cycles);
         print(b"cpu ");
         num(i as u64);
         print(b": ");
