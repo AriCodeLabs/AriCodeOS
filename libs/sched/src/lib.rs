@@ -183,21 +183,21 @@ impl RoundRobin {
     /// than `me`, accepted by `online` and not yet claimed, that may run it
     /// (its own CPU if pinned). So a batch of wakeups wakes as many idle
     /// CPUs as can take a thread, and a pinned thread wakes its CPU, not
-    /// one that cannot run it (incident 0023).
-    pub fn idle_cpus_to_wake(&self, me: usize, online: impl Fn(usize) -> bool) -> Vec<usize> {
-        let idle: Vec<usize> = (0..self.cpus.len())
+    /// one that cannot run it (incident 0023). Returned as a bit mask (bit
+    /// `c` for CPU `c`; CPUs from 64 on are never chosen), so the timer
+    /// interrupt that calls it allocates nothing.
+    pub fn idle_cpus_to_wake(&self, me: usize, online: impl Fn(usize) -> bool) -> u64 {
+        let idle = (0..self.cpus.len().min(64))
             .filter(|&c| c != me && self.is_idle(c) && online(c))
-            .collect();
-        let mut chosen = Vec::new();
+            .fold(0u64, |m, c| m | 1 << c);
+        let mut chosen = 0u64;
         for &t in &self.ready {
-            if chosen.len() == idle.len() {
+            let free = idle & !chosen;
+            if free == 0 {
                 break;
             }
-            let free = idle
-                .iter()
-                .find(|&&c| !chosen.contains(&c) && self.eligible(t, c));
-            if let Some(&c) = free {
-                chosen.push(c);
+            if let Some(c) = (0..64).find(|&c| free & 1 << c != 0 && self.eligible(t, c)) {
+                chosen |= 1 << c;
             }
         }
         chosen
@@ -587,6 +587,11 @@ mod tests {
         s
     }
 
+    /// The CPUs of an `idle_cpus_to_wake` mask, in order.
+    fn cpus_of(mask: u64) -> Vec<usize> {
+        (0..64).filter(|c| mask & 1 << c != 0).collect()
+    }
+
     #[test]
     fn a_pinned_thread_wakes_its_own_idle_cpu() {
         let mut s = four_cpus();
@@ -594,12 +599,12 @@ mod tests {
         s.add(t);
         s.set_affinity(t, Some(3)).unwrap();
         // CPU 0 runs main; 1, 2 and 3 are idle. Only 3 can run t.
-        assert_eq!(s.idle_cpus_to_wake(0, |_| true), [3]);
+        assert_eq!(cpus_of(s.idle_cpus_to_wake(0, |_| true)), [3]);
         // Not online yet: nobody to wake.
-        assert!(s.idle_cpus_to_wake(0, |c| c != 3).is_empty());
+        assert!(cpus_of(s.idle_cpus_to_wake(0, |c| c != 3)).is_empty());
         // Pinned to the CPU doing the wakeup (busy): no IPI helps.
         s.set_affinity(t, Some(0)).unwrap();
-        assert!(s.idle_cpus_to_wake(0, |_| true).is_empty());
+        assert!(cpus_of(s.idle_cpus_to_wake(0, |_| true)).is_empty());
     }
 
     #[test]
@@ -607,9 +612,13 @@ mod tests {
         let mut s = four_cpus();
         let (a, b) = (s.allocate_tid(), s.allocate_tid());
         s.add(a);
-        assert_eq!(s.idle_cpus_to_wake(0, |_| true), [1], "one thread, one CPU");
+        assert_eq!(
+            cpus_of(s.idle_cpus_to_wake(0, |_| true)),
+            [1],
+            "one thread, one CPU"
+        );
         s.add(b);
-        assert_eq!(s.idle_cpus_to_wake(0, |_| true), [1, 2]);
+        assert_eq!(cpus_of(s.idle_cpus_to_wake(0, |_| true)), [1, 2]);
         // A thread pinned to an already claimed CPU claims nothing more;
         // the next unpinned one claims the last idle CPU.
         let p = s.allocate_tid();
@@ -617,11 +626,11 @@ mod tests {
         s.set_affinity(p, Some(1)).unwrap();
         let c = s.allocate_tid();
         s.add(c);
-        assert_eq!(s.idle_cpus_to_wake(0, |_| true), [1, 2, 3]);
+        assert_eq!(cpus_of(s.idle_cpus_to_wake(0, |_| true)), [1, 2, 3]);
         // Never more than the idle CPUs, and never the caller's.
-        assert_eq!(s.idle_cpus_to_wake(2, |_| true), [1, 3]);
+        assert_eq!(cpus_of(s.idle_cpus_to_wake(2, |_| true)), [1, 3]);
         // A busy CPU is not woken.
         assert_eq!(s.yield_current(1), Some(a));
-        assert_eq!(s.idle_cpus_to_wake(0, |_| true), [2, 3]);
+        assert_eq!(cpus_of(s.idle_cpus_to_wake(0, |_| true)), [2, 3]);
     }
 }

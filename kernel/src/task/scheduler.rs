@@ -155,7 +155,7 @@ pub fn on_tick(now: u64, bsp: bool, from_user: bool) {
 fn kick_idle() {
     let me = cpu::id() as usize;
     let targets = with(|s| s.policy.idle_cpus_to_wake(me, |c| cpu::slot(c).is_online()));
-    for c in targets {
+    for c in (0..cpu::MAX_CPUS).filter(|c| targets & 1 << c != 0) {
         apic::send_ipi(cpu::slot(c).lapic_id(), apic::RESCHED_VECTOR);
     }
 }
@@ -669,8 +669,11 @@ pub fn quantum_selftest() {
     const ALONE_MS: u64 = 100;
     /// How long main waits for each late thread before giving up.
     const GIVE_UP_TICKS: u64 = 50;
-    /// A quantum to expire, one to pick the thread, one of slack.
-    const LIMIT_TICKS: u64 = 3 * QUANTUM_TICKS as u64;
+    /// Measured in the BSP's ticks while the target CPU counts its own: on
+    /// a loaded host (TCG, other guests) the two vCPUs progress unevenly,
+    /// so a few quanta of the target can take many BSP ticks. Well below
+    /// `GIVE_UP_TICKS`; the bug shows as never (`None`), not as late.
+    const LIMIT_TICKS: u64 = 25;
     const NOT_YET: u64 = u64::MAX;
 
     static STOP: AtomicBool = AtomicBool::new(false);

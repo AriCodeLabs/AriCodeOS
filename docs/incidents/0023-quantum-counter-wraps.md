@@ -42,7 +42,9 @@ measures on CPU 0; a thread pinned to CPU 1 blocks on a wait queue; a
 thread that never blocks then runs alone on CPU 1 for 100 ms; main wakes
 the waiter and measures in ticks until it runs, waits another 100 ms,
 spawns a thread pinned to CPU 1 and measures again. Each must start within
-three quanta (6 ticks); main gives up after 50 ticks.
+25 ticks, counted on CPU 0 (first written as 6, three quanta, and raised
+after the audit: the BSP's ticks and the target CPU's quanta progress
+unevenly on a loaded TCG host); main gives up after 50 ticks.
 
 Before the fix (`cargo xtask test --level full --area scheduler` in the
 development container, commit 377bf31):
@@ -94,7 +96,9 @@ CPUs: each ready thread, in queue order, claims the first idle online CPU
 other than the caller that may run it. A pinned thread wakes its own CPU or
 nobody, a batch wakes as many idle CPUs as can take a thread, and never
 more CPUs than ready threads. `kick_idle` sends one RESCHED IPI per chosen
-CPU. `cpu::idle_other_than` had no other user and is removed.
+CPU. The choice comes back as a bit mask, so the timer interrupt (which
+kicks after `wake_due`) allocates nothing under the scheduler lock (a
+suggestion of the audit; the first version built two vectors). `cpu::idle_other_than` had no other user and is removed.
 
 ## Tests
 

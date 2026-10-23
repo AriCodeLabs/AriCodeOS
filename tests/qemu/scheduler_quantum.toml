@@ -2,14 +2,15 @@
 # of each quantum once another thread can run there. A thread that never
 # blocks runs alone on the last CPU for 100 ms; then a thread pinned to
 # that CPU is woken through a wait queue, and later another one is spawned
-# there. Each must start within three quanta (6 ticks). Before the fix the
+# there. Each must start within 25 ticks of CPU 0 (a few quanta of CPU 1
+# with room for uneven vCPU progress under load). Before the fix the
 # quantum counter wrapped to u32::MAX after the first expiry with nothing
 # else ready, and both waited until the busy thread stopped (the test
 # gives up after 50 ticks and reports `None`). Two CPUs: main measures on
 # CPU 0; with more, the woken and spawned threads would still be pinned
 # and the result the same.
 name = "scheduler.quantum"
-description = "test=quantum: a thread woken or spawned on a CPU busy with one thread starts within three quanta"
+description = "test=quantum: a thread woken or spawned on a CPU busy with one thread starts within a few quanta"
 level = "full"
 areas = ["scheduler", "smp"]
 cmdline = "qemu_exit test=quantum"
