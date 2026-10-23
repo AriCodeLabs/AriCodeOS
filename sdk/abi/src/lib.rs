@@ -12,14 +12,15 @@
 //! the handles [`handle::SELF_PROCESS`], [`handle::MAIN_THREAD`] and
 //! [`handle::CONSOLE`].
 //!
-//! During `0.x` the ABI may change (section 74). Current version: 5
-//! (ADR 0038: `mmio_unmap`; a mapping keeps its DMA buffer alive). Version
-//! 4 added `Error::PeerClosed`, `endpoint_create_pair` and `endpoint_close`
-//! (ADR 0030).
+//! During `0.x` the ABI may change (section 74). Current version: 6
+//! (ADR 0044: `ipc_receive_any` also waits on interrupt lines). Version 5
+//! added `mmio_unmap` (ADR 0038: a mapping keeps its DMA buffer alive);
+//! version 4 `Error::PeerClosed`, `endpoint_create_pair` and
+//! `endpoint_close` (ADR 0030).
 
 #![no_std]
 
-pub const ABI_VERSION: u32 = 5;
+pub const ABI_VERSION: u32 = 6;
 
 /// Kernel base signature (SHA-512), required to check and verify the origin
 /// and authorship of an AriCodeOS build. It is part of the fixed ABI: it is
@@ -207,6 +208,8 @@ pub mod nr {
     /// A process terminated by the kernel returns `Error::Killed`.
     pub const PROCESS_WAIT: u64 = 15;
     /// `irq_wait(irq, timeout_ms) -> accumulated interrupts`; requires `WAIT`.
+    /// A service that also serves IPC waits for both at once with
+    /// `IPC_RECEIVE_ANY` (ADR 0044).
     pub const IRQ_WAIT: u64 = 16;
     /// `mmio_map(region) -> virtual address`; requires `READ|WRITE` on an
     /// MMIO or DMA object. Mapping a region the process already maps
@@ -269,6 +272,16 @@ pub mod nr {
     /// `IPC_MAX_ANY` endpoints (`READ` on all) that has a message; `out_ptr`
     /// holds `IPC_MAX_HANDLES` handles (ADR 0020). [`Error::PeerClosed`]
     /// only when every endpoint is empty and has lost its send side.
+    ///
+    /// Since ABI 6 (ADR 0044) the set may also hold up to
+    /// [`IPC_MAX_ANY_IRQS`] interrupt lines (`WAIT` on each): the call
+    /// returns as soon as the first member in list order is ready, an
+    /// endpoint with a message or a line that fired since its interrupts
+    /// were last taken (they are taken, as `irq_wait` does, and the result
+    /// is `count | RECEIVE_ANY_IRQ | index << 48`; see
+    /// [`receive_any::decode`]). A line never closes; `PeerClosed` still
+    /// means that every endpoint in the set is empty and has lost its send
+    /// side (a set of lines only never reports it).
     pub const IPC_RECEIVE_ANY: u64 = 31;
     /// `process_kill(process)`: requires `MANAGE` on the process. Terminates it
     /// as if it had faulted (`Killed`, reason "terminated by the
@@ -964,12 +977,63 @@ pub const IPC_MAX_HANDLES: usize = 4;
 pub const IPC_QUEUE_CAPACITY: usize = 16;
 /// Endpoints per `ipc_receive_any` call.
 pub const IPC_MAX_ANY: usize = 16;
+/// Interrupt lines per `ipc_receive_any` call, besides its endpoints
+/// (ADR 0044): a driver's line or two, with room to spare.
+pub const IPC_MAX_ANY_IRQS: usize = 4;
+/// Bit of an `ipc_receive_any` result that marks an interrupt line.
+pub const RECEIVE_ANY_IRQ: u64 = 1 << 47;
 /// Timeout meaning "wait indefinitely".
 pub const TIMEOUT_INFINITE: u64 = u64::MAX;
 
 /// Splits the result of `ipc_receive`.
 pub const fn receive_result(raw: u64) -> (usize, usize) {
     ((raw & 0xFFFF_FFFF) as usize, (raw >> 32) as usize)
+}
+
+/// The result of `ipc_receive_any` (ADR 0020, ADR 0044): which member of
+/// the set was ready and what it gave. The index sits in bits 48..63 for
+/// both kinds; bit 47 tells them apart.
+pub mod receive_any {
+    use super::RECEIVE_ANY_IRQ;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Ready {
+        /// A message on member `index`: its length and the handles received.
+        Message {
+            index: usize,
+            len: usize,
+            handles: usize,
+        },
+        /// Interrupt line `index` fired `count` times since its interrupts
+        /// were last taken.
+        Irq { index: usize, count: u32 },
+    }
+
+    /// Result for a message (the kernel's side).
+    pub const fn message(index: usize, len: usize, handles: usize) -> u64 {
+        (len as u64 & 0xFFFF_FFFF) | (handles as u64 & 0x7FFF) << 32 | (index as u64) << 48
+    }
+
+    /// Result for an interrupt line (the kernel's side).
+    pub const fn irq(index: usize, count: u32) -> u64 {
+        count as u64 | RECEIVE_ANY_IRQ | (index as u64) << 48
+    }
+
+    pub const fn decode(raw: u64) -> Ready {
+        let index = (raw >> 48) as usize;
+        if raw & RECEIVE_ANY_IRQ != 0 {
+            Ready::Irq {
+                index,
+                count: raw as u32,
+            }
+        } else {
+            Ready::Message {
+                index,
+                len: (raw & 0xFFFF_FFFF) as usize,
+                handles: ((raw >> 32) & 0x7FFF) as usize,
+            }
+        }
+    }
 }
 
 /// Errors returned by the kernel (negated in `rax`).
@@ -1360,6 +1424,49 @@ mod tests {
     fn receive_result_packs_len_and_handles() {
         assert_eq!(receive_result(4 | (2 << 32)), (4, 2));
         assert_eq!(receive_result(0), (0, 0));
+    }
+
+    #[test]
+    fn receive_any_results_round_trip() {
+        use receive_any::{decode, irq, message, Ready};
+        let last = IPC_MAX_ANY + IPC_MAX_ANY_IRQS - 1;
+        assert_eq!(
+            decode(message(3, IPC_MAX_DATA, IPC_MAX_HANDLES)),
+            Ready::Message {
+                index: 3,
+                len: IPC_MAX_DATA,
+                handles: IPC_MAX_HANDLES
+            }
+        );
+        // An empty message on member 0 is not an interrupt.
+        assert_eq!(
+            decode(message(0, 0, 0)),
+            Ready::Message {
+                index: 0,
+                len: 0,
+                handles: 0
+            }
+        );
+        assert_eq!(
+            decode(irq(last, 1)),
+            Ready::Irq {
+                index: last,
+                count: 1
+            }
+        );
+        assert_eq!(
+            decode(irq(0, u32::MAX)),
+            Ready::Irq {
+                index: 0,
+                count: u32::MAX
+            }
+        );
+        // The pre-ABI 6 layout of a message is unchanged.
+        let raw = 7 | (2u64 << 32) | (5u64 << 48);
+        assert_eq!(raw, message(5, 7, 2));
+        // Never negative: an error is `-4095..=-1` in the same register.
+        assert!((irq(last, u32::MAX) as i64) > 0);
+        assert!((message(last, IPC_MAX_DATA, IPC_MAX_HANDLES) as i64) > 0);
     }
 
     #[test]

@@ -19,6 +19,7 @@ pub mod rpc;
 pub mod status;
 pub mod time;
 pub mod virtio_pci;
+pub mod wait;
 pub mod window;
 
 pub use aricode_abi::{self as abi, handle, kind, rights, Error, TIMEOUT_INFINITE};
@@ -180,27 +181,47 @@ pub fn ipc_receive(
 
 /// Receives from the first of `endpoints` (up to `IPC_MAX_ANY`, all with
 /// `READ`) that has a message; `handles_out` holds `IPC_MAX_HANDLES`. Returns
-/// (endpoint index, bytes, handles) (ADR 0020).
+/// (endpoint index, bytes, handles) (ADR 0020). For endpoints only: a set
+/// that also holds interrupt lines is waited on with [`wait_any`].
 pub fn ipc_receive_any(
     endpoints: &[Handle],
     buf: &mut [u8],
     handles_out: &mut [Handle; abi::IPC_MAX_HANDLES],
     timeout_ms: u64,
 ) -> Result<(usize, usize, usize), Error> {
+    match wait_any(endpoints, buf, handles_out, timeout_ms)? {
+        abi::receive_any::Ready::Message {
+            index,
+            len,
+            handles,
+        } => Ok((index, len, handles)),
+        // Only if the caller listed a line: nothing was received.
+        abi::receive_any::Ready::Irq { index, .. } => Ok((index, 0, 0)),
+    }
+}
+
+/// Waits for the first member of `members` (in order) that is ready: an
+/// endpoint with a message (`READ`, up to `IPC_MAX_ANY`) or an interrupt
+/// line that fired since its interrupts were last taken (`WAIT`, up to
+/// `IPC_MAX_ANY_IRQS`), up to `timeout_ms` (ADR 0044). A message lands in
+/// `buf` and `handles_out`; a line's interrupts are taken and counted, as
+/// `irq_wait` does. Service loops use it through [`wait::end_of_round`].
+pub fn wait_any(
+    members: &[Handle],
+    buf: &mut [u8],
+    handles_out: &mut [Handle; abi::IPC_MAX_HANDLES],
+    timeout_ms: u64,
+) -> Result<abi::receive_any::Ready, Error> {
     let raw = call6(
         nr::IPC_RECEIVE_ANY,
-        endpoints.as_ptr() as u64,
-        endpoints.len() as u64,
+        members.as_ptr() as u64,
+        members.len() as u64,
         buf.as_mut_ptr() as u64,
         buf.len() as u64,
         handles_out.as_mut_ptr() as u64,
         timeout_ms,
     )?;
-    Ok((
-        (raw >> 48) as usize,
-        (raw & 0xFFFF_FFFF) as usize,
-        ((raw >> 32) & 0xFFFF) as usize,
-    ))
+    Ok(abi::receive_any::decode(raw))
 }
 
 /// Creates a process from the initrd (requires `MANAGE` on the `SPAWNER`).

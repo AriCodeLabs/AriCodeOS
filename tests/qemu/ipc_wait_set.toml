@@ -1,0 +1,24 @@
+# ADR 0044 (performance audit of 731c398, finding B): one wait over
+# endpoints and an interrupt line. An interrupt latched before the wait
+# returns at once; list order decides between a message and an interrupt;
+# the deadline holds; another thread's interrupt or message ends a blocked
+# wait; 200 interrupts fired around the moment the waiter blocks are all
+# reported (no lost wakeup); PeerClosed keeps its meaning with a line in
+# the set; no registration is left behind. One CPU: the helper only runs
+# when the waiter blocks or is preempted.
+name = "ipc.wait_set"
+description = "test=wait_set: receive_any over endpoints and an IRQ line (latch, order, deadline, wakeups, no lost wakeup, PeerClosed)"
+level = "full"
+areas = ["ipc", "drivers"]
+cmdline = "qemu_exit test=wait_set"
+cpus = 1
+timeout_secs = 60
+
+[expect]
+exit = 33
+serial_contains = [
+    "wait set selftest ok (latched interrupt at once, list order between a message and an interrupt",
+    "interrupts around the block on 1 CPUs without a lost wakeup",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC"]

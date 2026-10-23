@@ -78,6 +78,24 @@ impl WaitQueue {
         }
     }
 
+    /// Registers `me` once (dropping a stale entry first).
+    fn register(&self, me: Tid) {
+        let mut w = self.waiters.lock();
+        w.retain(|t| *t != me);
+        w.push_back(me);
+    }
+
+    /// Removes `me` if it is still registered.
+    fn unregister(&self, me: Tid) {
+        self.waiters.lock().retain(|t| *t != me);
+    }
+
+    /// `tid` is registered (for the self-tests: a finished wait leaves no
+    /// entry behind, ADR 0044).
+    pub fn contains(&self, tid: Tid) -> bool {
+        self.waiters.lock().contains(&tid)
+    }
+
     /// Wakes all waiters.
     pub fn wake_all(&self) {
         let waiters: VecDeque<Tid> = core::mem::take(&mut *self.waiters.lock());
@@ -94,6 +112,70 @@ impl WaitQueue {
             let _ = scheduler::wake(t);
         }
     }
+}
+
+/// Like `WaitQueue::wait_until_deadline`, but woken by a `wake` on any of
+/// `queues` (ADR 0044: one wait for the endpoints and the interrupt lines
+/// of a service). Returns `true` if the deadline expired (or the process
+/// is being terminated) without the condition holding.
+///
+/// The thread registers on every queue before it evaluates `cond`, and
+/// `cond` runs outside the queues' locks (holding several at once would
+/// need an order between them). No wakeup is lost: a waker changes the
+/// state and then takes the queue's lock to wake its waiters. If it takes
+/// that lock after this thread registered, it finds the thread there; if
+/// before, its change happened before the registration (the lock orders
+/// both) and `cond` sees it. A wake that arrives between the check and the
+/// block turns the block into a yield, as in the single-queue wait. On
+/// return the thread is removed from every queue, so no stale entry wakes
+/// it later from a wait on another object.
+pub fn wait_any_until_deadline(
+    queues: &[&WaitQueue],
+    mut cond: impl FnMut() -> bool,
+    deadline: Option<u64>,
+) -> bool {
+    use crate::sync::KernelIrq;
+    use aricode_sync::IrqPolicy;
+    // Something is ready already, or nothing may be waited for (a poll
+    // with timeout 0, a process being terminated): no registration needed.
+    if cond() {
+        return false;
+    }
+    if deadline.is_some_and(|d| crate::time::ticks() >= d)
+        || crate::user::process::current_kill_requested()
+    {
+        return true;
+    }
+    let me = scheduler::current_tid();
+    let timed_out = loop {
+        // Interrupts disabled from the registration until the context
+        // switch, as in `wait_until_deadline`: a handler on this CPU (an
+        // interrupt line firing) can only wake the thread once it is
+        // asleep or blocked.
+        let irq = KernelIrq::save_and_disable();
+        for q in queues {
+            q.register(me);
+        }
+        if cond() {
+            KernelIrq::restore(irq);
+            break false;
+        }
+        if deadline.is_some_and(|d| crate::time::ticks() >= d)
+            || crate::user::process::current_kill_requested()
+        {
+            KernelIrq::restore(irq);
+            break true;
+        }
+        match deadline {
+            Some(d) => scheduler::sleep_until(d),
+            None => scheduler::block_current(),
+        }
+        KernelIrq::restore(irq);
+    };
+    for q in queues {
+        q.unregister(me);
+    }
+    timed_out
 }
 
 impl Default for WaitQueue {

@@ -454,8 +454,27 @@ fn ipc_receive(
     Ok(n as u64 | ((received.len() as u64) << 32))
 }
 
-/// `ipc_receive_any` (ADR 0020): like `ipc_receive` on the first of several
-/// endpoints that has a message; the index goes in bits 48..63.
+/// A member of an `ipc_receive_any` set (ADR 0044): an interrupt line the
+/// caller may wait on (`WAIT`), or else an endpoint it may receive from,
+/// checked as `ipc_receive` checks it (`READ`, then `Invalid` for any other
+/// object), so the errors of an endpoint-only set are those of ABI 5.
+fn wait_member_of(h: Handle) -> Result<ObjectRef, Error> {
+    let is_irq = with_handles(|t| {
+        Ok(matches!(
+            lookup(t, h, Rights::NONE)?.kind,
+            ObjectKind::Irq(_)
+        ))
+    })?;
+    if is_irq {
+        with_handles(|t| lookup(t, h, Rights::WAIT).cloned())
+    } else {
+        endpoint_of(h, Rights::READ)
+    }
+}
+
+/// `ipc_receive_any` (ADR 0020, ADR 0044): like `ipc_receive` on the first
+/// of several endpoints that has a message, or the interrupts of the first
+/// line in the set that fired; the index goes in bits 48..63.
 fn ipc_receive_any(
     handles_ptr: u64,
     count: u64,
@@ -464,7 +483,9 @@ fn ipc_receive_any(
     out_ptr: u64,
     timeout_ms: u64,
 ) -> Result<u64, Error> {
-    if count == 0 || count as usize > aricode_abi::IPC_MAX_ANY {
+    use crate::ipc::{Member, Ready};
+    use aricode_abi::{receive_any, IPC_MAX_ANY, IPC_MAX_ANY_IRQS};
+    if count == 0 || count as usize > IPC_MAX_ANY + IPC_MAX_ANY_IRQS {
         return Err(Error::Invalid);
     }
     if buf_len as usize > IPC_MAX_DATA {
@@ -476,17 +497,28 @@ fn ipc_receive_any(
         .as_chunks::<4>()
         .0
         .iter()
-        .map(|c| endpoint_of(Handle(u32::from_le_bytes(*c)), Rights::READ))
+        .map(|c| wait_member_of(Handle(u32::from_le_bytes(*c))))
         .collect::<Result<_, _>>()?;
-    process::copy_to_user(buf_ptr, &[])?;
-    let endpoints: Vec<&crate::ipc::Endpoint> = objs
+    let members: Vec<Member> = objs
         .iter()
         .map(|o| match &o.kind {
-            ObjectKind::Endpoint(e) => e,
+            ObjectKind::Endpoint(e) => Member::Endpoint(e),
+            ObjectKind::Irq(l) => Member::Irq(l),
             _ => unreachable!(),
         })
         .collect();
-    let (index, msg) = crate::ipc::receive_any(&endpoints, timeout_ms)?;
+    let irqs = members
+        .iter()
+        .filter(|m| matches!(m, Member::Irq(_)))
+        .count();
+    if irqs > IPC_MAX_ANY_IRQS || members.len() - irqs > IPC_MAX_ANY {
+        return Err(Error::Invalid);
+    }
+    process::copy_to_user(buf_ptr, &[])?;
+    let (index, msg) = match crate::ipc::receive_any(&members, timeout_ms)? {
+        (index, Ready::Irq(n)) => return Ok(receive_any::irq(index, n)),
+        (index, Ready::Message(msg)) => (index, msg),
+    };
     let n = msg.data.len().min(buf_len as usize);
     process::copy_to_user(buf_ptr, &msg.data[..n])?;
     let received: Vec<u32> = with_handles(|t| {
@@ -500,7 +532,7 @@ fn ipc_receive_any(
     })?;
     let raw: Vec<u8> = received.iter().flat_map(|h| h.to_le_bytes()).collect();
     process::copy_to_user(out_ptr, &raw)?;
-    Ok(n as u64 | ((received.len() as u64) << 32) | ((index as u64) << 48))
+    Ok(receive_any::message(index, n, received.len()))
 }
 
 fn process_spawn(
