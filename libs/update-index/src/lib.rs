@@ -47,14 +47,16 @@ pub mod policy;
 pub mod run;
 pub mod sources;
 pub mod stored;
+pub mod trust;
 
 pub use aricode_ab::{Channel, Keys};
 pub use index::{verify, verify_channel, AppEntry, Index, IndexError, SystemEntry};
 pub use policy::{
-    best_app, best_system, check_fresh, compare, compare_system, decide_system, Change, Refusal,
-    SystemChange, SystemDecision,
+    best_app, best_system, check_fresh, compare, compare_system, decide_system, raise_floor,
+    Change, Refusal, SystemChange, SystemDecision, SystemId, SystemRules,
 };
 pub use sources::{normalize_source, Migration, Source, SourceError, Sources};
+pub use trust::{image_matches_offer, trusted_keys};
 
 /// Name of the index file inside a source.
 pub const INDEX_FILE: &str = "index";

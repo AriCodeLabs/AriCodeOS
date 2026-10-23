@@ -128,6 +128,13 @@ pub struct HostUpdate {
     /// channel is closed by default.
     #[serde(default)]
     pub dev_source: bool,
+    /// The development source's index offers a stable image under its
+    /// build number (the updater must refuse to install it).
+    #[serde(default)]
+    pub dev_stable_image: bool,
+    /// The machine starts with this stable floor in `updater/state` (the
+    /// newest stable release it ran, ADR 0045 audit M1).
+    pub stable_floor: Option<u32>,
 }
 
 fn default_update_source() -> String {

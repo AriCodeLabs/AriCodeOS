@@ -397,6 +397,7 @@ fn run_scenario(
                     system: Some(build),
                     commit: Some(u.dev_commit.clone()),
                     sign_as: u.dev_wrong_key.then_some(aricode_ab::Channel::Stable),
+                    stable_image: u.dev_stable_image,
                     ..image::Publication::default()
                 };
                 let dev_dir = workdir.join(qemu::DEV_SOURCE_DIR);
@@ -421,6 +422,24 @@ fn run_scenario(
                 }
                 _ => String::new(),
             };
+            if let Some(floor) = u.stable_floor {
+                let state = aricode_update_index::main_path(aricode_update_index::STATE_FILE);
+                if installed.iter().any(|(name, _)| *name == state) {
+                    return Err(format!(
+                        "{}: host_update.stable_floor and staged packages both write updater/state",
+                        s.name
+                    ));
+                }
+                installed.push((
+                    state,
+                    aricode_update_index::lists::with_section(
+                        "",
+                        aricode_update_index::lists::FLOOR,
+                        &aricode_update_index::lists::encode_floor(floor),
+                    )
+                    .into_bytes(),
+                ));
+            }
             if u.stale_index {
                 let ahead = image::stored_copy_ahead(&dir, url.trim())?;
                 installed.push((

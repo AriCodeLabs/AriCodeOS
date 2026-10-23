@@ -40,7 +40,7 @@ serial_contains = [
     "AriInit: boot confirmed on slot B",
     "updater: slot A holds system 1, verified",
     "updater: state: active B, pending A (3 tries); reboot to try it",
-    "updater: rollback: system 1 in slot A scheduled in place of dev build 5 (commit 0123abc) (pending until reboot)",
+    "updater: rollback: system 1 in slot A scheduled in place of dev build 5 (commit 0123abc): a channel switch from dev to stable (pending until reboot)",
     "updater: reboot to boot system 1",
     "updater: rollback refused: slot A is already pending; reboot to try it (or let it roll back)",
     "update: updater exited with 55",
@@ -59,7 +59,7 @@ serial_contains = [
     "slots: booting from slot A (image version 1, pending confirmation)",
     "AriInit: boot confirmed on slot A",
     "system   version 1, slot A",
-    "rollback: system 1 in slot A scheduled in place of dev build 5 (commit 0123abc) (pending until reboot)",
+    "rollback: system 1 in slot A scheduled in place of dev build 5 (commit 0123abc): a channel switch from dev to stable (pending until reboot)",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_absent = ["KERNEL PANIC"]

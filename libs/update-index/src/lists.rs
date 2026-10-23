@@ -15,6 +15,8 @@
 //! system dev 7
 //! [staged]                                 written by `upgrade`, read by the installer
 //! pkg-1.aripkg hello_ext 2 <sha256>
+//! [floor]                                  the newest stable release this machine ran
+//! stable 12                                (ADR 0045; written by the updater and usb-image)
 //! ```
 //!
 //! Parsers are strict: a damaged line is counted and never acted upon.
@@ -30,8 +32,9 @@ use core::fmt::Write;
 pub const INSTALLED: &str = "installed";
 pub const PLAN: &str = "plan";
 pub const STAGED: &str = "staged";
+pub const FLOOR: &str = "floor";
 
-const SECTIONS: [&str; 3] = [INSTALLED, PLAN, STAGED];
+const SECTIONS: [&str; 4] = [INSTALLED, PLAN, STAGED, FLOOR];
 
 /// The state file parsed line by line. A line `[name]` with a known name
 /// starts that section; every other non-blank line belongs to the section
@@ -54,7 +57,7 @@ const SECTIONS: [&str; 3] = [INSTALLED, PLAN, STAGED];
 /// Any of these sets `damaged`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct State {
-    bodies: [Option<String>; 3],
+    bodies: [Option<String>; 4],
     damaged: bool,
 }
 
@@ -65,7 +68,7 @@ fn header(line: &str) -> Option<&str> {
 impl State {
     fn parse(text: &str) -> Self {
         let mut state = Self::default();
-        let mut repeated = [false; 3];
+        let mut repeated = [false; 4];
         let mut current: Option<usize> = None;
         for line in text.lines().map(|l| l.trim_end_matches('\r')) {
             if line.trim().is_empty() {
@@ -244,6 +247,32 @@ pub fn parse_plan(text: &str) -> (Plan<'_>, usize) {
     (plan, rejected)
 }
 
+/// The `[floor]` body: the newest stable release this machine ran (audit
+/// of ADR 0045, M1).
+pub fn encode_floor(version: u32) -> String {
+    alloc::format!("stable {version}\n")
+}
+
+/// A `[floor]` body that is not exactly one `stable N` line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DamagedFloor;
+
+/// The stable floor in a `[floor]` body; [`DamagedFloor`] when damaged
+/// (the caller reports it and keeps no floor rather than guess one).
+pub fn parse_floor(text: &str) -> Result<Option<u32>, DamagedFloor> {
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    let Some(line) = lines.next() else {
+        return Ok(None);
+    };
+    match (
+        line.split_whitespace().collect::<Vec<_>>().as_slice(),
+        lines.next(),
+    ) {
+        (["stable", v], None) => v.parse().map(Some).map_err(|_| DamagedFloor),
+        _ => Err(DamagedFloor),
+    }
+}
+
 /// One package staged by the updater.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StagedEntry<'a> {
@@ -348,7 +377,7 @@ mod tests {
         for seq in 0..6usize.pow(4) {
             let mut text = String::new();
             let mut n = seq;
-            let mut last = [None, None, None];
+            let mut last = [None, None, None, None];
             for _ in 0..4 {
                 let (name, body) = bodies[n % 6];
                 n /= 6;
@@ -437,6 +466,26 @@ mod tests {
         );
         let (list, rejected) = parse_installed("a 1\na 2\nbad/name 1\nc x\nd 1 extra\n");
         assert_eq!((list, rejected), (vec![("a", 1)], 4));
+    }
+
+    #[test]
+    fn stable_floor_round_trip() {
+        assert_eq!(parse_floor(&encode_floor(12)), Ok(Some(12)));
+        assert_eq!(parse_floor(""), Ok(None));
+        for bad in [
+            "stable x\n",
+            "stable 1\nstable 2\n",
+            "dev 3\n",
+            "stable 1 2\n",
+        ] {
+            assert_eq!(parse_floor(bad), Err(DamagedFloor), "{bad}");
+        }
+        // The floor is a section of its own, kept by every other rewrite.
+        let t = with_section("", FLOOR, &encode_floor(12));
+        let t = with_section(&t, PLAN, "system 3\n");
+        let t = with_section(&t, STAGED, "");
+        assert_eq!(section(&t, FLOOR).as_deref(), Some("stable 12\n"));
+        assert!(!needs_repair(&t));
     }
 
     #[test]

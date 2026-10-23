@@ -373,7 +373,11 @@ pub fn write_usb_image(
     // No test data (incident 0005): neither the `ARIDISK` raw-area pattern
     // nor the test disk's sample files. A `selftest` boot from the stick
     // stops at `fs_client`'s first check (no `hola.txt`), before any write.
-    write_slot(&mut img, USB_PART_SYSA, &system_image(1, false)?)?;
+    write_slot(
+        &mut img,
+        USB_PART_SYSA,
+        &system_image(USB_SYSTEM_VERSION, false)?,
+    )?;
     init_ariboot(
         &mut img,
         USB_PART_ARIBOOT,
@@ -386,6 +390,19 @@ pub fn write_usb_image(
         img.len() >> 20,
         files.len()
     ))
+}
+
+/// The system version in slot A of a stick.
+pub const USB_SYSTEM_VERSION: u32 = 1;
+
+/// `updater/state` of a stick with update sources: the stable floor at the
+/// stick's own release (audit of ADR 0045, M1).
+fn stick_state() -> String {
+    aricode_update_index::lists::with_section(
+        "",
+        aricode_update_index::lists::FLOOR,
+        &aricode_update_index::lists::encode_floor(USB_SYSTEM_VERSION),
+    )
 }
 
 /// `cargo xtask usb-image [--cmdline S]`: image ready to `dd` onto a USB stick.
@@ -463,6 +480,12 @@ pub fn build_usb_image(
         extra.push((
             aricode_update_index::main_path(aricode_update_index::SOURCES_FILE),
             sources.to_text().into_bytes(),
+        ));
+        // The stable floor starts at the stick's own release (audit of
+        // ADR 0045, M1): no switch back to stable goes below it.
+        extra.push((
+            aricode_update_index::main_path(aricode_update_index::STATE_FILE),
+            stick_state().into_bytes(),
         ));
     }
     // Every stick gets its own disk GUID from OS entropy: the storage
@@ -1288,10 +1311,10 @@ mod tests {
         // last publication of the directory or its counter, never typed.
         let tmp = TempDir::new("dev-builds");
         let dir = tmp.path().join("update-dev");
-        assert_eq!(next_build(&dir, None), Ok(1), "a first publication");
+        assert_eq!(next_build(&dir, None, None), Ok(1), "a first publication");
         fs::write(build_counter(&dir), "6\n").unwrap();
         assert_eq!(
-            next_build(&dir, None),
+            next_build(&dir, None, None),
             Ok(7),
             "the counter survives a removed directory"
         );
@@ -1303,9 +1326,9 @@ mod tests {
             format!("format = 1\nserial = 5\nchannel = dev\ncommit = 0123abc\nsystem = 9 a.img 1 {sha}\n"),
         )
         .unwrap();
-        assert_eq!(next_build(&dir, None), Ok(10));
-        assert_eq!(next_build(&dir, Some(12)), Ok(12));
-        let err = next_build(&dir, Some(9)).unwrap_err();
+        assert_eq!(next_build(&dir, None, None), Ok(10));
+        assert_eq!(next_build(&dir, Some(12), None), Ok(12));
+        let err = next_build(&dir, Some(9), None).unwrap_err();
         assert!(err.contains("only grow"), "{err}");
         // A stable index in the directory says nothing about build numbers.
         fs::write(
@@ -1313,16 +1336,34 @@ mod tests {
             format!("format = 1\nserial = 5\nsystem = 40 a.img 1 {sha}\n"),
         )
         .unwrap();
-        assert_eq!(next_build(&dir, None), Ok(7));
+        assert_eq!(next_build(&dir, None, None), Ok(7));
         assert_eq!(
             build_counter(&dir),
             tmp.path().join("update-dev.last-build")
         );
+        // The host's counter (audit M2): another checkout published 20, so
+        // this one goes on from there, never reusing a number.
+        let host = tmp.path().join("host-dev-build");
+        fs::write(&host, "20\n").unwrap();
+        assert_eq!(next_build(&dir, None, Some(&host)), Ok(21));
+        assert!(next_build(&dir, Some(20), Some(&host)).is_err());
         // A scenario's source starts afresh on every run.
         forget_test_dev_source(&dir).unwrap();
         assert!(!dir.exists() && !build_counter(&dir).exists());
-        assert_eq!(next_build(&dir, Some(5)), Ok(5));
+        assert_eq!(next_build(&dir, Some(5), None), Ok(5));
         forget_test_dev_source(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_stick_starts_its_stable_floor_at_its_release() {
+        let state = stick_state();
+        let body = aricode_update_index::lists::section(&state, aricode_update_index::lists::FLOOR)
+            .unwrap();
+        assert_eq!(
+            aricode_update_index::lists::parse_floor(&body),
+            Ok(Some(USB_SYSTEM_VERSION))
+        );
+        assert!(!aricode_update_index::lists::needs_repair(&state));
     }
 
     #[test]
@@ -1461,6 +1502,10 @@ pub struct Publication {
     /// Tests only: sign with the other channel's key (the updater must
     /// refuse it).
     pub sign_as: Option<aricode_ab::Channel>,
+    /// Tests only: the development index offers a stable image (signed
+    /// with the release key) under its build number; the updater must
+    /// refuse to install it.
+    pub stable_image: bool,
     /// App packages: (directory of the external app, version).
     pub apps: Vec<(String, u32)>,
     /// Also write the ADR 0027 `manifest.txt` next to the image, so machines
@@ -1526,12 +1571,56 @@ fn check_legacy_manifest(dir: &Path, channel: &Publication) -> Result {
     }
 }
 
+/// The host's development build counter (audit of ADR 0045, M2): one per
+/// host, shared by every checkout and worktree, outside any `build/`, and
+/// locked while a publication numbers and publishes its build, so two
+/// checkouts never publish the same number.
+struct HostCounter {
+    path: PathBuf,
+    _lock: fs::File,
+}
+
+impl HostCounter {
+    /// `~/.cache/aricodeos/dev-build`, locked (waits for another
+    /// publication of this host).
+    fn lock() -> Result<Self> {
+        let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
+        let dir = PathBuf::from(home).join(".cache").join("aricodeos");
+        io(fs::create_dir_all(&dir), "create ~/.cache/aricodeos")?;
+        let lock_path = dir.join("dev-build.lock");
+        let lock = io(
+            fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&lock_path),
+            "open the development build lock",
+        )?;
+        if lock.try_lock().is_err() {
+            println!("[xtask] waiting for another development publication on this host");
+            io(lock.lock(), "lock the development build counter")?;
+        }
+        Ok(Self {
+            path: dir.join("dev-build"),
+            _lock: lock,
+        })
+    }
+}
+
+/// The last number written in a counter file.
+fn read_counter(path: &Path) -> Option<u32> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|t| t.trim().parse::<u32>().ok())
+}
+
 /// The build number a development publication in `dir` gets (ADR 0045):
-/// one above the last one published there, as its index or the counter
-/// beside the directory (`DIR.last-build`, which survives a removed
-/// directory) says, whichever is higher; `wanted` (tests) must be above it
-/// too. Build numbers only grow, so machines never see one go back.
-fn next_build(dir: &Path, wanted: Option<u32>) -> Result<u32> {
+/// one above the last one published there or anywhere on this host, as the
+/// directory's index, the counter beside it (`DIR.last-build`) and the
+/// host's counter (`host`, audit M2) say, whichever is highest; `wanted`
+/// (tests) must be above it too. Build numbers only grow, so machines
+/// never see one go back or one number name two commits.
+fn next_build(dir: &Path, wanted: Option<u32>, host: Option<&Path>) -> Result<u32> {
     let published = fs::read_to_string(dir.join(aricode_update_index::INDEX_FILE))
         .ok()
         .and_then(|t| {
@@ -1540,10 +1629,9 @@ fn next_build(dir: &Path, wanted: Option<u32>) -> Result<u32> {
                 .filter(|i| i.channel == aricode_ab::Channel::Dev)
                 .and_then(|i| i.system.map(|s| s.version))
         });
-    let counted = fs::read_to_string(build_counter(dir))
-        .ok()
-        .and_then(|t| t.trim().parse::<u32>().ok());
-    let last = published.max(counted).unwrap_or(0);
+    let counted = read_counter(&build_counter(dir));
+    let hosted = host.and_then(read_counter);
+    let last = published.max(counted).max(hosted).unwrap_or(0);
     let next = last
         .checked_add(1)
         .ok_or("development build numbers exhausted")?;
@@ -1685,14 +1773,23 @@ pub fn publish_channel(dir: &Path, release: bool, channel: &Publication) -> Resu
             "a development source offers one system image only (no apps, no manifest.txt)",
         ));
     }
-    // A development build: the next build number and this checkout's
-    // commit unless a test names them (ADR 0045, decision 2).
+    // A development build: the next build number of this host and this
+    // checkout's commit unless a test names them (ADR 0045, decision 2;
+    // audit M2). The host's counter stays locked until the build is out.
+    let host = match (dev, channel.system) {
+        (true, None) => Some(HostCounter::lock()?),
+        _ => None,
+    };
     let (system, commit) = if dev {
         let commit = match &channel.commit {
             Some(c) => c.clone(),
             None => head_commit()?,
         };
-        (Some(next_build(dir, channel.system)?), Some(commit))
+        let host_path = host.as_ref().map(|h| h.path.as_path());
+        (
+            Some(next_build(dir, channel.system, host_path)?),
+            Some(commit),
+        )
     } else {
         (channel.system, None)
     };
@@ -1720,11 +1817,14 @@ pub fn publish_channel(dir: &Path, release: bool, channel: &Publication) -> Resu
         Channel::Dev => format!("aricodeos-dev-{version}.img"),
     };
     if let Some(version) = system {
-        let spec = SystemSpec {
-            version,
-            channel: channel.channel,
-            commit: commit.as_deref(),
-            sign_as,
+        let spec = match channel.stable_image {
+            true => SystemSpec::stable(version),
+            false => SystemSpec {
+                version,
+                channel: channel.channel,
+                commit: commit.as_deref(),
+                sign_as,
+            },
         };
         let container = system_image_for(&spec, false)?;
         let mut image = aricode_ab::Image::header(container.len() as u32).to_vec();
@@ -1850,6 +1950,12 @@ pub fn publish_channel(dir: &Path, release: bool, channel: &Publication) -> Resu
             fs::write(build_counter(dir), format!("{build}\n")),
             "write the development build counter",
         )?;
+        if let Some(h) = &host {
+            io(
+                fs::write(&h.path, format!("{build}\n")),
+                "write the host's development build counter",
+            )?;
+        }
     }
     Ok(format!(
         "[xtask] update source at {}: serial {serial}, {}, {} app(s){}{}{}",

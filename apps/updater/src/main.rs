@@ -54,7 +54,7 @@ use aricode_update_index::lists::{self, PlanItem, StagedEntry};
 use aricode_update_index::{
     self as upd, best_app, best_system, check_fresh, compare, compare_system, decide_system,
     stored, updater_arg, Change, Channel, Index, Keys, Migration, Refusal, Sources, SystemChange,
-    SystemDecision,
+    SystemDecision, SystemId, SystemRules,
 };
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -133,6 +133,11 @@ mod code {
     /// The development channel asked for on a machine that does not trust
     /// it (no development source, or its loader or updater lacks the key).
     pub const DEV_NOT_TRUSTED: u64 = 56;
+    /// A development build number seen again with another commit (audit of
+    /// ADR 0045, M2): refused, never taken for the installed build.
+    pub const BUILD_CONFLICT: u64 = 57;
+    /// The stable floor in `state` is damaged (audit of ADR 0045, M1).
+    pub const FLOOR: u64 = 58;
 }
 
 /// Everything printed, kept for `last.log` (the shell shows it to a remote
@@ -675,11 +680,6 @@ fn manifest_ident(m: &Manifest) -> String {
     ident(m.channel, m.version, m.commit.as_ref().map(|c| c.as_str()))
 }
 
-/// The installed system as the policy compares it.
-fn installed_key(m: &Option<Manifest>) -> Option<(Channel, u32)> {
-    m.as_ref().map(|m| (m.channel, m.version))
-}
-
 /// The downgrade rule (ADR 0029, decision 5) for one app; `Ok(true)` when
 /// it must be installed.
 fn decide(
@@ -723,22 +723,71 @@ fn decide(
     }
 }
 
-/// The system install rule (ADR 0029 decision 5, ADR 0045 decision 2):
-/// `Ok(true)` when the offered image must be installed. An unknown
-/// installed version counts as a downgrade (audit 1, H1); an image of the
-/// other channel is installed only when the owner named the channel
-/// (`explicit`), whatever the numbers, and the switch is recorded.
+fn installed_id(m: &Manifest) -> SystemId<'_> {
+    SystemId {
+        channel: m.channel,
+        version: m.version,
+        commit: m.commit.as_ref().map(|c| c.as_str()),
+    }
+}
+
+/// The stable floor (audit of ADR 0045, M1): the newest stable release
+/// this machine ran, kept in the `[floor]` section of `state` (seeded by
+/// `usb-image`), raised to the active system when that is a newer stable
+/// release, and saved. `state` is updated in place, so the sections this
+/// run writes later keep it.
+fn stable_floor(
+    fs: &mut FsClient,
+    state: &mut String,
+    installed: &Option<Manifest>,
+) -> Option<u32> {
+    let body = lists::section(state, lists::FLOOR).unwrap_or_default();
+    let floor = lists::parse_floor(&body).unwrap_or_else(|_| {
+        fault(
+            code::FLOOR,
+            "upd-floor-damaged",
+            "the stable floor in updater/state is damaged: ignored (the running stable release sets it again)",
+        );
+        None
+    });
+    let raised = upd::raise_floor(floor, installed.as_ref().map(installed_id));
+    if let (true, Some(version)) = (raised != floor, raised) {
+        let next = lists::with_section(state, lists::FLOOR, &lists::encode_floor(version));
+        if write_file(fs, upd::STATE_FILE, next.as_bytes()) {
+            *state = next;
+        } else {
+            fault(
+                code::FILE_WRITE,
+                "upd-floor-write",
+                "cannot save the stable floor",
+            );
+        }
+    }
+    raised
+}
+
+/// The system install rule (ADR 0029 decision 5, ADR 0045 decision 2,
+/// `decide_system`): `Ok(true)` when the offered image must be installed.
+/// A switch is said here and recorded once installed (`upgrade_system`).
 fn decide_system_install(
     installed: &Option<Manifest>,
-    offered: (Channel, u32),
-    offered_ident: &str,
-    allow_downgrade: bool,
-    explicit: bool,
+    offered: SystemId,
+    rules: SystemRules,
 ) -> Result<bool, u64> {
-    let change = compare_system(installed_key(installed), offered);
+    let change = compare_system(installed.as_ref().map(installed_id), offered);
     let current = installed.as_ref().map(manifest_ident).unwrap_or_default();
-    match decide_system(change, allow_downgrade, explicit) {
+    let offered_ident = ident(offered.channel, offered.version, offered.commit);
+    match decide_system(change, offered, rules) {
         SystemDecision::Install => {
+            let below_floor = rules
+                .stable_floor
+                .is_some_and(|f| offered.channel == Channel::Stable && offered.version < f);
+            if below_floor && change != SystemChange::Within(Change::Downgrade) {
+                say!(
+                    "system: downgrading below the stable floor {} to {offered_ident} (--allow-downgrade)",
+                    rules.stable_floor.unwrap_or(0)
+                );
+            }
             match change {
                 SystemChange::Unknown => say!(
                     "system: installed version unknown; installing {offered_ident} (--allow-downgrade)"
@@ -746,14 +795,13 @@ fn decide_system_install(
                 SystemChange::Within(Change::Downgrade) => say!(
                     "system: downgrading from {current} to {offered_ident} (--allow-downgrade)"
                 ),
-                // Recorded as an event once installed (`upgrade_system`).
                 SystemChange::Switch { from, to } => say!(
                     "system: switching from the {} channel ({current}) to the {} channel ({offered_ident}), as asked with --channel {}",
                     from.name(),
                     to.name(),
                     to.name()
                 ),
-                SystemChange::Within(_) => {}
+                SystemChange::Within(_) | SystemChange::Conflict => {}
             }
             Ok(true)
         }
@@ -773,13 +821,35 @@ fn decide_system_install(
                 "system: refused: version {offered_ident} is older than the installed {current} (--allow-downgrade to force)"
             ),
         )),
+        SystemDecision::Refused(Refusal::BelowStableFloor(floor)) => Err(fault(
+            code::DOWNGRADE_REFUSED,
+            "upd-downgrade-refused",
+            &format!(
+                "system: refused: a downgrade: stable {offered_ident} is older than stable {floor}, the newest release this machine ran (--allow-downgrade to force)"
+            ),
+        )),
+        SystemDecision::Refused(Refusal::SwitchNotExplicit) if !rules.explicit_channel => {
+            Err(fault(
+                code::CHANNEL_SWITCH_REFUSED,
+                "upd-channel-switch-refused",
+                &format!(
+                    "system: refused: {offered_ident} belongs to the {} channel and {} is installed; the channel only changes when asked: upgrade --channel {}",
+                    offered.channel.name(),
+                    if current.is_empty() { "an unknown system" } else { &current },
+                    offered.channel.name()
+                ),
+            ))
+        }
         SystemDecision::Refused(Refusal::SwitchNotExplicit) => Err(fault(
             code::CHANNEL_SWITCH_REFUSED,
             "upd-channel-switch-refused",
+            &format!("system: refused: {offered_ident} belongs to another channel"),
+        )),
+        SystemDecision::Refused(Refusal::Conflict) => Err(fault(
+            code::BUILD_CONFLICT,
+            "upd-build-conflict",
             &format!(
-                "system: refused: {offered_ident} belongs to the {} channel and {current} is installed; the channel only changes when asked: upgrade --channel {}",
-                offered.0.name(),
-                offered.0.name()
+                "system: refused: {offered_ident} reuses the number of the installed {current} with another commit; publish again for a new build number"
             ),
         )),
     }
@@ -807,8 +877,13 @@ fn apply(allow_downgrade: bool, keys: &Keys) -> u64 {
         "UPDATE image version {offered} verified ({} bytes)",
         total - SECTOR
     );
-    let key = (manifest.channel, manifest.version);
-    match decide_system_install(&installed, key, &offered, allow_downgrade, false) {
+    // Never a channel change (audit of ADR 0045, L4): no named channel.
+    let rules = SystemRules {
+        allow_downgrade,
+        explicit_channel: false,
+        stable_floor: None,
+    };
+    match decide_system_install(&installed, installed_id(&manifest), rules) {
         Ok(true) => match disk.install(total) {
             Ok(()) => 0,
             Err(code) => code,
@@ -840,9 +915,10 @@ fn rollback(fs: Option<&mut FsClient>, keys: &Keys) -> u64 {
             ),
         );
     }
-    let current = disk
-        .active_system(keys)
-        .map_or(String::from("unknown"), |m| manifest_ident(&m));
+    let active = disk.active_system(keys);
+    let current = active
+        .as_ref()
+        .map_or(String::from("unknown"), manifest_ident);
     let target = disk.slot_part;
     let Some((_, manifest)) = disk.load(target, keys) else {
         return fault(
@@ -859,11 +935,26 @@ fn rollback(fs: Option<&mut FsClient>, keys: &Keys) -> u64 {
         "slot {} holds system {previous}, verified",
         disk.target.name()
     );
+    // What the rollback does, named (audit of ADR 0045, L3): it may leave
+    // the channel or go back to an older release or build. The slot holds
+    // the system before the last install, or, after an install the loader
+    // rejected or rolled back, that failed image.
+    let kind = match &active {
+        Some(a) if a.channel != manifest.channel => format!(
+            ": a channel switch from {} to {}",
+            a.channel.name(),
+            manifest.channel.name()
+        ),
+        Some(a) if manifest.version < a.version => String::from(": a downgrade"),
+        Some(a) if manifest.version == a.version => String::from(": the same version"),
+        Some(_) => String::from(": a newer system (the last install did not stay)"),
+        None => String::new(),
+    };
     if let Err(code) = disk.schedule_target() {
         return code;
     }
     let line = format!(
-        "rollback: system {previous} in slot {} scheduled in place of {current} (pending until reboot)",
+        "rollback: system {previous} in slot {} scheduled in place of {current}{kind} (pending until reboot)",
         disk.target.name()
     );
     fault(code::ROLLBACK, "upd-rollback", &line);
@@ -1248,6 +1339,9 @@ fn system_change_text(change: SystemChange) -> String {
             from.name(),
             to.name()
         ),
+        SystemChange::Conflict => String::from(
+            "the installed build number with another commit (published twice?); upgrade refuses it: publish again",
+        ),
     }
 }
 
@@ -1267,7 +1361,7 @@ fn report(fs: &mut FsClient, sources: &Sources, keys: &Keys, channel: Channel) -
     // Read once per run. Unreadable: the system is still reported, the
     // apps are not compared (an unreadable list is not "none installed")
     // and no plan is saved (incident 0008 audit, M2).
-    let state = read_state(fs);
+    let mut state = read_state(fs);
     let raw = verified_stored(fs, sources, keys, channel);
     let (slots, indexes) = parse_all(&raw, keys, channel);
     let mut plan: Vec<PlanItem> = Vec::new();
@@ -1282,21 +1376,41 @@ fn report(fs: &mut FsClient, sources: &Sources, keys: &Keys, channel: Channel) -
                     None
                 }
             };
-            let offered = (channel, s.version);
-            let change = compare_system(installed_key(&installed), offered);
-            available += usize::from(change == SystemChange::Within(Change::Upgrade));
-            switches += usize::from(matches!(change, SystemChange::Switch { .. }));
-            if installed_key(&installed) != Some(offered) {
+            let floor = match &mut state {
+                Ok(text) => stable_floor(fs, text, &installed),
+                Err(_) => None,
+            };
+            let offered = SystemId {
+                channel,
+                version: s.version,
+                commit: indexes[i].commit,
+            };
+            let change = compare_system(installed.as_ref().map(installed_id), offered);
+            // Below the floor but not below the installed release (that is
+            // a plain downgrade, named as such).
+            let below_floor = channel == Channel::Stable
+                && floor.is_some_and(|f| s.version < f)
+                && change != SystemChange::Within(Change::Downgrade);
+            available +=
+                usize::from(change == SystemChange::Within(Change::Upgrade) && !below_floor);
+            switches += usize::from(matches!(change, SystemChange::Switch { .. }) && !below_floor);
+            if installed.as_ref().map(installed_id) != Some(offered) {
                 plan.push(PlanItem::System(channel, s.version));
             }
+            let text = match (change, floor) {
+                (SystemChange::Within(Change::Same), _) => system_change_text(change),
+                (_, Some(f)) if below_floor => format!(
+                    "older than stable {f}, the newest release this machine ran; upgrade refuses it without --allow-downgrade"
+                ),
+                _ => system_change_text(change),
+            };
             say!(
-                "system: installed {}, source {} offers {}: {}",
+                "system: installed {}, source {} offers {}: {text}",
                 installed
                     .as_ref()
                     .map_or(String::from("unknown"), manifest_ident),
                 slots[i] + 1,
                 ident(channel, s.version, indexes[i].commit),
-                system_change_text(change)
             );
         }
         None => say!("system: no source offers a system image"),
@@ -1444,10 +1558,7 @@ fn upgrade_system(
         .map(|v| v.manifest);
     let offered = ident(offer.channel, entry.version, offer.commit);
     match manifest {
-        Some(m)
-            if m.channel == offer.channel
-                && m.version == entry.version
-                && m.commit.as_ref().map(|c| c.as_str()) == offer.commit => {}
+        Some(m) if upd::image_matches_offer(&m, offer.channel, entry.version, offer.commit) => {}
         Some(m) => {
             return Err(fault(
                 code::IMAGE_REFUSED,
@@ -1597,7 +1708,7 @@ fn upgrade(
     allow_downgrade: bool,
     explicit: bool,
 ) -> u64 {
-    let state = match read_state(fs) {
+    let mut state = match read_state(fs) {
         Ok(s) => s,
         Err(code) => return code,
     };
@@ -1657,8 +1768,12 @@ fn upgrade(
     // 1. Decide everything first: nothing is downloaded or written yet.
     let mut system_job = None;
     if let Some((i, entry)) = best_system(&indexes) {
-        let offered = ident(channel, entry.version, indexes[i].commit);
-        let what = format!("system {offered}");
+        let offered = SystemId {
+            channel,
+            version: entry.version,
+            commit: indexes[i].commit,
+        };
+        let what = format!("system {}", ident(channel, entry.version, offered.commit));
         if !plan
             .items
             .contains(&PlanItem::System(channel, entry.version))
@@ -1671,13 +1786,12 @@ fn upgrade(
                 // channel's: say so instead of staying silent (re-audit,
                 // UX). Machines without the A/B layout are skipped silently.
                 if let Some(installed) = disk.active_system(keys) {
-                    let change = compare_system(
-                        Some((installed.channel, installed.version)),
-                        (channel, entry.version),
-                    );
+                    let change = compare_system(Some(installed_id(&installed)), offered);
                     if matches!(
                         change,
-                        SystemChange::Within(Change::Upgrade) | SystemChange::Switch { .. }
+                        SystemChange::Within(Change::Upgrade)
+                            | SystemChange::Switch { .. }
+                            | SystemChange::Conflict
                     ) {
                         result = not_reported(&what);
                     }
@@ -1687,14 +1801,12 @@ fn upgrade(
             match Disk::open() {
                 Ok(mut disk) => {
                     let installed = disk.active_system(keys);
-                    let key = (channel, entry.version);
-                    match decide_system_install(
-                        &installed,
-                        key,
-                        &offered,
+                    let rules = SystemRules {
                         allow_downgrade,
-                        explicit,
-                    ) {
+                        explicit_channel: explicit,
+                        stable_floor: stable_floor(fs, &mut state, &installed),
+                    };
+                    match decide_system_install(&installed, offered, rules) {
                         Ok(true) => {
                             let offer = SystemOffer {
                                 url: urls[slots[i]],
@@ -1824,11 +1936,12 @@ fn loader_trusts_dev() -> bool {
 /// trusts it too, so nothing of that channel is accepted that AriBoot
 /// would refuse.
 fn run_keys() -> Keys {
-    let dev = aricode_crypto::trust::dev_channel_key().filter(|_| loader_trusts_dev());
-    Keys {
-        stable: aricode_crypto::trust::public_key(),
-        dev,
-    }
+    let compiled = aricode_crypto::trust::dev_channel_key();
+    upd::trusted_keys(
+        aricode_crypto::trust::public_key(),
+        compiled,
+        compiled.is_some() && loader_trusts_dev(),
+    )
 }
 
 /// Why the development channel is closed on this machine, said and
