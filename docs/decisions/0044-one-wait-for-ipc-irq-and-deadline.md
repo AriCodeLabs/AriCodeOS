@@ -191,3 +191,17 @@ margin.
   requests were served at once), and `test=drivers` checked a pixel the
   kernel console repainted on its next scroll (one more boot line put
   the 4-CPU run there; the self-test now lends the screen to the driver).
+
+## Hardware verification (2026-10-23)
+
+Reference laptop (Realtek 10ec:8136 NIC, Intel xHCI 8086:1e31, two EHCI),
+upgraded over the network from version 1 to version 12 (develop 18ad9be,
+production-signed index) and rebooted: `rtl_net`, `usb_input` (xHCI, with
+the end-of-poll `ERDP | EHB` write) and both `usb_ehci` ready; the stick
+on the xHCI reads and writes after the reboot, network and HTTPS work,
+`diag` shows no new fault event (only the known SYNCHRONIZE CACHE sense
+event), so the xHCI keeps delivering interrupts without the old 10 ms
+poll. `bench` ran to completion (exit 0) but prints to the machine's
+screen, not to an SSH session, so its hardware latency figures were not
+captured remotely: programs started with `run` from an SSH shell write to
+the physical console (a follow-up item).
