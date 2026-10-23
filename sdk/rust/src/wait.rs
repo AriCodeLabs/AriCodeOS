@@ -88,7 +88,9 @@ pub enum Woken {
     /// the next round does what is due.
     Round,
     /// A message on member `index`, already in the caller's buffers: it was
-    /// taken from its queue and must be served.
+    /// taken from its queue and must be served. It may have arrived long
+    /// after the `now` the wait was computed from: a deadline it sets
+    /// counts from the clock read again, or it would expire early.
     Message {
         index: usize,
         len: usize,

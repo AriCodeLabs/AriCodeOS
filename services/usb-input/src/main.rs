@@ -4528,6 +4528,9 @@ fn main(mask: u64) -> u64 {
                     events: &mut events,
                     times: &mut times,
                 };
+                // At the time it arrived: a read's deadline counts from
+                // now, not from before the wait.
+                let now = ctl.clock.now();
                 reply.serve(&mut ctl, index, &msg[..len], &handles[..nh], now);
             }
             Ok(Woken::Irq { .. } | Woken::Round) => {}

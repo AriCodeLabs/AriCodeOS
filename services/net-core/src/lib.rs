@@ -2254,14 +2254,17 @@ pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
             &mut msg,
             &mut handles,
         ) {
-            // Taken from its queue by the wait: served now, and the next
-            // round emits what it produced.
+            // Taken from its queue by the wait: served now, at the time it
+            // arrived (the wait may have slept long: the deadlines the
+            // request sets count from now, not from before the wait), and
+            // the next round emits what it produced.
             Ok(Woken::Message {
                 index,
                 len,
                 handles: nh,
             }) => {
                 if nh > 0 {
+                    let now = stack.clock.now();
                     stack.serve(owners[index], &msg[..len], &handles[..nh], now);
                 }
             }
