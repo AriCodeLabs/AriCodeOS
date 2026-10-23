@@ -22,7 +22,6 @@
 pub mod seed;
 
 use aricode_crypto::{ed25519, sha256, unhex};
-use aricode_initrd::Initrd;
 
 pub const STATE_MAGIC: &[u8; 8] = b"ARIBOOT\0";
 pub const IMAGE_MAGIC: &[u8; 8] = b"ARISLOT\0";
@@ -254,6 +253,8 @@ pub enum ImageError {
     /// Signed by one channel's key but naming the other channel (ADR 0045):
     /// a key signs only its own channel.
     ChannelMismatch,
+    /// The reader of a streaming verification failed (incident 0021).
+    Unreadable,
 }
 
 /// The update channel of a system image or a source (ADR 0045): `Stable`
@@ -502,6 +503,23 @@ pub struct Verified<'a> {
     pub initrd: &'a [u8],
 }
 
+/// A container verified piece by piece: its manifest and where kernel and
+/// initrd lie in it.
+#[derive(Debug, Clone, Copy)]
+pub struct StreamVerified {
+    pub manifest: Manifest,
+    pub kernel: aricode_initrd::Span,
+    pub initrd: aricode_initrd::Span,
+}
+
+/// Largest manifest a verification reads: four times the canonical
+/// [`MANIFEST_MAX`]; the signature covers the whole manifest, so it is
+/// read whole.
+pub const MANIFEST_READ_MAX: usize = 4 * MANIFEST_MAX;
+
+/// Bytes hashed per read of a streaming verification.
+const HASH_PIECE: usize = 4096;
+
 pub struct Image;
 
 impl Image {
@@ -536,24 +554,65 @@ impl Image {
     /// matches; nothing in the manifest is read before its signature
     /// verified.
     pub fn verify_with<'a>(container: &'a [u8], keys: &Keys) -> Result<Verified<'a>, ImageError> {
-        let rd = Initrd::parse(container).map_err(|_| ImageError::BadContainer)?;
-        let manifest_bytes = rd
-            .find("manifest")
-            .ok_or(ImageError::MissingFile("manifest"))?;
-        let sig = rd
-            .find("manifest.sig")
-            .ok_or(ImageError::MissingFile("manifest.sig"))?;
-        let kernel = rd
-            .find("kernel.elf")
-            .ok_or(ImageError::MissingFile("kernel.elf"))?;
-        let initrd = rd
-            .find("initrd.img")
-            .ok_or(ImageError::MissingFile("initrd.img"))?;
-        if sig.len() != ed25519::SIGNATURE_LEN {
+        let v = Self::verify_streaming(
+            container.len(),
+            |offset, buf| {
+                buf.copy_from_slice(&container[offset..offset + buf.len()]);
+                Ok(())
+            },
+            keys,
+        )?;
+        let at = |(offset, len): aricode_initrd::Span| &container[offset..offset + len];
+        Ok(Verified {
+            manifest: v.manifest,
+            kernel: at(v.kernel),
+            initrd: at(v.initrd),
+        })
+    }
+
+    /// [`verify_with`](Self::verify_with) for a container of
+    /// `container_len` bytes read piece by piece through `read(offset,
+    /// buf)` (fills `buf` from `offset`), so an image need not fit in memory
+    /// to be verified (incident 0021). The same checks in the same order;
+    /// `verify_with` is this over a slice. A manifest over
+    /// [`MANIFEST_READ_MAX`] bytes is `BadManifest`; a failed read,
+    /// `Unreadable`.
+    pub fn verify_streaming(
+        container_len: usize,
+        mut read: impl FnMut(usize, &mut [u8]) -> Result<(), ()>,
+        keys: &Keys,
+    ) -> Result<StreamVerified, ImageError> {
+        // A failed read is told apart from a malformed container.
+        let mut unreadable = false;
+        let mut fetch = |offset: usize, buf: &mut [u8]| {
+            read(offset, buf).map_err(|()| {
+                unreadable = true;
+                aricode_initrd::InitrdError::Truncated
+            })
+        };
+        let names = ["manifest", "manifest.sig", "kernel.elf", "initrd.img"];
+        let spans = aricode_initrd::locate(container_len, &mut fetch, names);
+        let [manifest, sig, kernel, initrd] = match spans {
+            Ok(s) => s,
+            Err(_) if unreadable => return Err(ImageError::Unreadable),
+            Err(_) => return Err(ImageError::BadContainer),
+        };
+        let manifest = manifest.ok_or(ImageError::MissingFile("manifest"))?;
+        let sig = sig.ok_or(ImageError::MissingFile("manifest.sig"))?;
+        let kernel = kernel.ok_or(ImageError::MissingFile("kernel.elf"))?;
+        let initrd = initrd.ok_or(ImageError::MissingFile("initrd.img"))?;
+        if sig.1 != ed25519::SIGNATURE_LEN {
             return Err(ImageError::BadSignature);
         }
+        if manifest.1 > MANIFEST_READ_MAX {
+            return Err(ImageError::BadManifest);
+        }
         let mut signature = [0u8; 64];
-        signature.copy_from_slice(sig);
+        fetch(sig.0, &mut signature).map_err(|_| ImageError::Unreadable)?;
+        let mut manifest_buf = [0u8; MANIFEST_READ_MAX];
+        let manifest_bytes = &mut manifest_buf[..manifest.1];
+        fetch(manifest.0, manifest_bytes).map_err(|_| ImageError::Unreadable)?;
+        let manifest_bytes = &*manifest_bytes;
         let signed_by = [Channel::Stable, Channel::Dev]
             .into_iter()
             .find(|&c| {
@@ -562,18 +621,30 @@ impl Image {
             })
             .ok_or(ImageError::BadSignature)?;
         let text = core::str::from_utf8(manifest_bytes).map_err(|_| ImageError::BadManifest)?;
-        let manifest = Manifest::parse(text).ok_or(ImageError::BadManifest)?;
-        if manifest.channel != signed_by {
+        let parsed = Manifest::parse(text).ok_or(ImageError::BadManifest)?;
+        if parsed.channel != signed_by {
             return Err(ImageError::ChannelMismatch);
         }
-        if sha256::sha256(kernel) != manifest.kernel_sha256 {
+        let mut digest = |(offset, len): aricode_initrd::Span| {
+            let mut h = sha256::Sha256::new();
+            let mut piece = [0u8; HASH_PIECE];
+            let mut done = 0;
+            while done < len {
+                let n = (len - done).min(HASH_PIECE);
+                fetch(offset + done, &mut piece[..n]).map_err(|_| ImageError::Unreadable)?;
+                h.update(&piece[..n]);
+                done += n;
+            }
+            Ok(h.finish())
+        };
+        if digest(kernel)? != parsed.kernel_sha256 {
             return Err(ImageError::HashMismatch("kernel.elf"));
         }
-        if sha256::sha256(initrd) != manifest.initrd_sha256 {
+        if digest(initrd)? != parsed.initrd_sha256 {
             return Err(ImageError::HashMismatch("initrd.img"));
         }
-        Ok(Verified {
-            manifest,
+        Ok(StreamVerified {
+            manifest: parsed,
             kernel,
             initrd,
         })
@@ -846,6 +917,49 @@ mod tests {
         assert_eq!(
             Image::verify(&unsigned, &pk).err(),
             Some(ImageError::MissingFile("manifest.sig"))
+        );
+        // Read piece by piece: the same verdicts, and a failing reader is
+        // reported as such.
+        let read_from = |img: &[u8]| {
+            let img = img.to_vec();
+            move |offset: usize, buf: &mut [u8]| {
+                buf.copy_from_slice(&img[offset..offset + buf.len()]);
+                Ok(())
+            }
+        };
+        let keys = Keys::stable_only(pk);
+        let v = Image::verify_streaming(img.len(), read_from(&img), &keys).unwrap();
+        assert_eq!(v.manifest.version, 7);
+        assert_eq!(&img[v.kernel.0..v.kernel.0 + v.kernel.1], kernel.as_slice());
+        assert_eq!(
+            Image::verify_streaming(tampered.len(), read_from(&tampered), &keys).err(),
+            Some(ImageError::HashMismatch("kernel.elf"))
+        );
+        let mut reads = 0;
+        let failing = |offset: usize, buf: &mut [u8]| {
+            reads += 1;
+            if reads > 3 {
+                return Err(());
+            }
+            buf.copy_from_slice(&img[offset..offset + buf.len()]);
+            Ok(())
+        };
+        assert_eq!(
+            Image::verify_streaming(img.len(), failing, &keys).err(),
+            Some(ImageError::Unreadable)
+        );
+        // A manifest larger than any the builder writes is refused unread.
+        let big = "x".repeat(MANIFEST_READ_MAX + 1);
+        let oversized = aricode_initrd::build(&[
+            ("manifest", big.as_bytes()),
+            ("manifest.sig", &[0u8; 64][..]),
+            ("kernel.elf", &b"k"[..]),
+            ("initrd.img", &b"i"[..]),
+        ])
+        .unwrap();
+        assert_eq!(
+            Image::verify(&oversized, &pk).err(),
+            Some(ImageError::BadManifest)
         );
         // Slot header.
         let h = Image::header(img.len() as u32);

@@ -1,0 +1,39 @@
+# Incident 0021: images larger than the updater's memory. Slot A and UPDATE
+# hold versions 1 and 2 padded with a 7 MiB entry (disk `large-a`; the
+# signature covers only the manifest, so they verify), more than the 6 MiB
+# download buffer and within the 12 MiB slot. The updater verifies the
+# active image piece by piece (`installed 1`, never "unknown"), `update
+# apply` copies UPDATE into slot B and verifies the copy there before its
+# header, and AriBoot boots the large image from B.
+name = "update.large_image"
+description = "an image larger than the updater's memory verifies in place, installs with apply and boots"
+level = "full"
+areas = ["update", "boot", "shell"]
+disk = "large-a"
+timeout_secs = 180
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update apply", "reboot"]
+[boots.expect]
+exit = 0
+serial_contains = [
+    "updater: UPDATE image version 2 verified (",
+    "updater: installed into slot B",
+    "updater: state: active A, pending B (3 tries); reboot to try it",
+    "AriCodeOS: rebooting",
+]
+serial_absent = ["KERNEL PANIC", "update: updater exited with", "installed version unknown", "upd-active-image", "the image in the active slot"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update rollback", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "slots: booting from slot B (image version 2, pending confirmation)",
+    "AriInit: boot confirmed on slot B",
+    "updater: slot A holds system 1, verified",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "update: updater exited with", "the image in the active slot"]

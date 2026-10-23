@@ -43,7 +43,7 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use aricode_ab::{schedule, BootState, Image, Manifest, Slot, PART_STATE, PART_UPDATE};
+use aricode_ab::{schedule, BootState, Image, ImageError, Manifest, Slot, PART_STATE, PART_UPDATE};
 use aricode_crypto::sha256::sha256;
 use aricode_rt::sys::block::BlockClient;
 use aricode_rt::sys::fs::{FsClient, FsError};
@@ -64,9 +64,10 @@ const NET: Handle = Handle(0x0001_0006);
 const BLOCK: Handle = Handle(0x0001_0007);
 const HW: Handle = Handle(0x0001_0008);
 
-/// DMA buffer where a whole slot image (header + container) is loaded and
-/// verified before it is written anywhere.
-const IMAGE_BUFFER: u64 = 4 * 1024 * 1024;
+/// DMA buffer where a downloaded image (header + container) is held and
+/// verified before it is written anywhere (ADR 0029, decision 3). Images
+/// already on the disk are verified piece by piece instead (incident 0021).
+const IMAGE_BUFFER: u64 = upd::IMAGE_DOWNLOAD_MAX as u64;
 const SECTOR: usize = 512;
 const CHUNK: u16 = 16;
 /// Wait for one network operation.
@@ -138,6 +139,10 @@ mod code {
     pub const BUILD_CONFLICT: u64 = 57;
     /// The stable floor in `state` is damaged (audit of ADR 0045, M1).
     pub const FLOOR: u64 = 58;
+    /// The active slot's image could not be read or verified: said with
+    /// the reason, so "installed version unknown" is never unexplained
+    /// (incident 0021).
+    pub const ACTIVE_IMAGE: u64 = 59;
 }
 
 /// Everything printed, kept in `last.log` as the record of the last run
@@ -445,8 +450,51 @@ fn find_partition(blk: &mut BlockClient, name: &str) -> Option<(u64, u64)> {
         .map(|p| (p.first_lba, p.last_lba))
 }
 
-/// The A/B layout of the boot disk and a buffer for one whole image. Only
-/// opened when a system image is involved (audit 1, M5).
+/// Why a slot holds no image this updater accepts (incident 0021: an image
+/// too large for memory once read as one that does not verify).
+enum LoadError {
+    /// No valid slot header: the slot is empty, was being written, or its
+    /// header is damaged.
+    NoImage,
+    /// The header announces more sectors than the partition holds.
+    TooLarge { sectors: u64, room: u64 },
+    /// The disk could not be read.
+    Unreadable,
+    /// The container does not verify.
+    Invalid(ImageError),
+}
+
+impl LoadError {
+    fn describe(&self) -> String {
+        match self {
+            LoadError::NoImage => {
+                String::from("no valid slot header (empty slot or damaged header)")
+            }
+            LoadError::TooLarge { sectors, room } => format!(
+                "the header announces {sectors} sectors, more than the {room} of the partition"
+            ),
+            LoadError::Unreadable => String::from("cannot be read from the disk"),
+            LoadError::Invalid(e) => format!("does not verify ({})", image_error(e)),
+        }
+    }
+}
+
+/// What a failed image verification means, for messages.
+fn image_error(e: &ImageError) -> &'static str {
+    match e {
+        ImageError::BadHeader => "invalid slot header",
+        ImageError::BadContainer => "malformed container",
+        ImageError::MissingFile(_) => "a file is missing from the container",
+        ImageError::BadManifest => "invalid manifest",
+        ImageError::BadSignature => "signature invalid or by a key this machine does not trust",
+        ImageError::HashMismatch(_) => "kernel or initrd hash mismatch",
+        ImageError::ChannelMismatch => "the manifest names another channel than its key",
+        ImageError::Unreadable => "a read failed",
+    }
+}
+
+/// The A/B layout of the boot disk and a buffer for one downloaded image.
+/// Only opened when a system image is involved (audit 1, M5).
 struct Disk {
     blk: BlockClient,
     update: (u64, u64),
@@ -455,7 +503,9 @@ struct Disk {
     active_part: (u64, u64),
     target: Slot,
     slot_part: (u64, u64),
-    image: &'static mut [u8],
+    /// The download buffer, allocated when a download first needs it: the
+    /// DMA quota is spent once per process, and only `upgrade` downloads.
+    image: Option<&'static mut [u8]>,
 }
 
 impl Disk {
@@ -515,24 +565,6 @@ impl Disk {
         ) else {
             return Err(fault(code::NO_SLOTS, "upd-no-slots", "no slot partitions"));
         };
-        let Ok(dma) = sys::dma_alloc(HW, IMAGE_BUFFER) else {
-            return Err(fault(
-                code::NO_MEMORY,
-                "upd-no-memory",
-                "no memory for the image (quota)",
-            ));
-        };
-        let Ok(virt) = sys::mmio_map(dma) else {
-            return Err(fault(
-                code::NO_MEMORY,
-                "upd-no-memory",
-                "cannot map the image buffer",
-            ));
-        };
-        // SAFETY: our own DMA buffer of IMAGE_BUFFER bytes, mapped RW, used
-        // only through this exclusive reference for the life of the process.
-        let image =
-            unsafe { core::slice::from_raw_parts_mut(virt as *mut u8, IMAGE_BUFFER as usize) };
         Ok(Self {
             blk,
             update,
@@ -541,41 +573,112 @@ impl Disk {
             active_part,
             target,
             slot_part,
-            image,
+            image: None,
         })
     }
 
-    /// Loads the slot image of `part` (header + container) into the buffer
-    /// and verifies it with `keys`: (total bytes, manifest). `None` if there
-    /// is no image or it does not verify.
-    fn load(&mut self, part: (u64, u64), keys: &Keys) -> Option<(usize, Manifest)> {
-        self.blk.read(part.0, 1).ok()?;
-        let len = Image::container_len(&self.blk.buffer()[..SECTOR]).ok()? as usize;
+    /// The download buffer (`IMAGE_BUFFER` bytes), allocated on first use.
+    fn download_buffer(&mut self) -> Result<&mut [u8], u64> {
+        if self.image.is_none() {
+            let Ok(dma) = sys::dma_alloc(HW, IMAGE_BUFFER) else {
+                return Err(fault(
+                    code::NO_MEMORY,
+                    "upd-no-memory",
+                    "no memory for the image (quota)",
+                ));
+            };
+            let Ok(virt) = sys::mmio_map(dma) else {
+                return Err(fault(
+                    code::NO_MEMORY,
+                    "upd-no-memory",
+                    "cannot map the image buffer",
+                ));
+            };
+            // SAFETY: our own DMA buffer of IMAGE_BUFFER bytes, mapped RW,
+            // used only through this exclusive reference for the life of the
+            // process.
+            self.image = Some(unsafe {
+                core::slice::from_raw_parts_mut(virt as *mut u8, IMAGE_BUFFER as usize)
+            });
+        }
+        Ok(self.image.as_deref_mut().expect("allocated above"))
+    }
+
+    /// Verifies the container of `len` bytes that starts one sector after
+    /// `first` (the slot header's sector) piece by piece, through the block
+    /// client's buffer, so its size is bounded by the partition and not by
+    /// memory (incident 0021).
+    fn verify_container(
+        &mut self,
+        first: u64,
+        len: usize,
+        keys: &Keys,
+    ) -> Result<Manifest, ImageError> {
+        let blk = &mut self.blk;
+        let sectors = len.div_ceil(SECTOR) as u64;
+        // The chunk of container sectors now in the client's buffer.
+        let mut cached: Option<u64> = None;
+        let read = |offset: usize, buf: &mut [u8]| {
+            let mut done = 0;
+            while done < buf.len() {
+                let pos = offset + done;
+                let chunk = (pos / SECTOR) as u64 / CHUNK as u64 * CHUNK as u64;
+                if cached != Some(chunk) {
+                    let n = (sectors - chunk).min(CHUNK as u64) as u16;
+                    blk.read(first + 1 + chunk, n).map_err(|_| ())?;
+                    cached = Some(chunk);
+                }
+                let at = pos - chunk as usize * SECTOR;
+                let n = (CHUNK as usize * SECTOR - at).min(buf.len() - done);
+                buf[done..done + n].copy_from_slice(&blk.buffer()[at..at + n]);
+                done += n;
+            }
+            Ok(())
+        };
+        Image::verify_streaming(len, read, keys).map(|v| v.manifest)
+    }
+
+    /// Verifies the slot image of `part` (header + container) with `keys`
+    /// without loading it: (total bytes, manifest), or why not.
+    fn load(&mut self, part: (u64, u64), keys: &Keys) -> Result<(usize, Manifest), LoadError> {
+        self.blk
+            .read(part.0, 1)
+            .map_err(|_| LoadError::Unreadable)?;
+        let len = Image::container_len(&self.blk.buffer()[..SECTOR])
+            .map_err(|_| LoadError::NoImage)? as usize;
         let sectors = (SECTOR + len).div_ceil(SECTOR) as u64;
-        if sectors as usize * SECTOR > self.image.len() || sectors > part.1 - part.0 + 1 {
-            return None;
+        let room = part.1 - part.0 + 1;
+        if sectors > room {
+            return Err(LoadError::TooLarge { sectors, room });
         }
-        let mut done = 0u64;
-        while done < sectors {
-            let n = (sectors - done).min(CHUNK as u64) as u16;
-            self.blk.read(part.0 + done, n).ok()?;
-            let o = done as usize * SECTOR;
-            let bytes = n as usize * SECTOR;
-            self.image[o..o + bytes].copy_from_slice(&self.blk.buffer()[..bytes]);
-            done += n as u64;
+        match self.verify_container(part.0, len, keys) {
+            Ok(manifest) => Ok((SECTOR + len, manifest)),
+            Err(ImageError::Unreadable) => Err(LoadError::Unreadable),
+            Err(e) => Err(LoadError::Invalid(e)),
         }
-        let manifest = Image::verify_with(&self.image[SECTOR..SECTOR + len], keys)
-            .ok()?
-            .manifest;
-        Some((SECTOR + len, manifest))
     }
 
     /// The active slot's manifest (version, channel, commit), verified;
-    /// `None` if it cannot be read or does not verify (then the downgrade
-    /// rule treats it as unknown, ADR 0029, decision 5).
+    /// `None`, with the reason said and recorded, if it cannot be read or
+    /// does not verify (then the downgrade rule treats it as unknown, ADR
+    /// 0029, decision 5).
     fn active_system(&mut self, keys: &Keys) -> Option<Manifest> {
         let part = self.active_part;
-        self.load(part, keys).map(|(_, m)| m)
+        match self.load(part, keys) {
+            Ok((_, m)) => Some(m),
+            Err(e) => {
+                fault(
+                    code::ACTIVE_IMAGE,
+                    "upd-active-image",
+                    &format!(
+                        "the image in the active slot {}: {}",
+                        self.state.active.name(),
+                        e.describe()
+                    ),
+                );
+                None
+            }
+        }
     }
 
     fn write(&mut self, lba: u64, sectors: u16) -> Result<(), u64> {
@@ -584,10 +687,11 @@ impl Disk {
             .map_err(|_| fault(code::SLOT_WRITE, "upd-slot-write", "error writing the slot"))
     }
 
-    /// Writes the verified image in the buffer (`total` bytes) into the
-    /// inactive slot and schedules it as pending with tries. The caller has
-    /// verified the image.
-    fn install(&mut self, total: usize) -> Result<(), u64> {
+    /// Checks that `total` bytes fit the inactive slot and clears its
+    /// header first (audit 1, L1): an interrupted copy then leaves a slot
+    /// without a valid header, which AriBoot never boots, instead of an old
+    /// header over a half-new container. Returns the image's sectors.
+    fn begin_install(&mut self, total: usize) -> Result<u64, u64> {
         let sectors = total.div_ceil(SECTOR) as u64;
         if sectors > self.slot_part.1 - self.slot_part.0 + 1 {
             return Err(fault(
@@ -596,39 +700,117 @@ impl Disk {
                 "image does not fit the slot",
             ));
         }
-        self.image[total..sectors as usize * SECTOR].fill(0);
-        // The old header goes first (audit 1, L1): an interrupted copy then
-        // leaves a slot without a valid header, which AriBoot never boots,
-        // instead of an old header over a half-new container.
         self.blk.buffer()[..SECTOR].fill(0);
         self.write(self.slot_part.0, 1)?;
-        if self.blk.flush().is_err() {
-            return Err(fault(
+        self.flush_slot()?;
+        Ok(sectors)
+    }
+
+    /// Writes the header last, then schedules the slot.
+    fn finish_install(&mut self, header: &[u8; SECTOR]) -> Result<(), u64> {
+        self.blk.buffer()[..SECTOR].copy_from_slice(header);
+        self.write(self.slot_part.0, 1)?;
+        self.flush_slot()?;
+        say!("installed into slot {}", self.target.name());
+        self.schedule_target()
+    }
+
+    fn flush_slot(&mut self) -> Result<(), u64> {
+        self.blk.flush().map_err(|_| {
+            fault(
                 code::SLOT_WRITE,
                 "upd-slot-write",
                 "error flushing the slot",
-            ));
-        }
+            )
+        })
+    }
+
+    /// Writes the verified image in the download buffer (`total` bytes,
+    /// verified as `expected`) into the inactive slot, checks the copy there
+    /// and schedules it as pending with tries.
+    fn install(&mut self, total: usize, expected: &Manifest, keys: &Keys) -> Result<(), u64> {
+        let sectors = self.begin_install(total)?;
+        let image = self.image.take().expect("the image was downloaded");
+        image[total..sectors as usize * SECTOR].fill(0);
         let mut done = 1u64;
-        while done < sectors {
+        let mut written = Ok(());
+        while done < sectors && written.is_ok() {
             let n = (sectors - done).min(CHUNK as u64) as u16;
             let o = done as usize * SECTOR;
             let bytes = n as usize * SECTOR;
-            self.blk.buffer()[..bytes].copy_from_slice(&self.image[o..o + bytes]);
+            self.blk.buffer()[..bytes].copy_from_slice(&image[o..o + bytes]);
+            written = self.write(self.slot_part.0 + done, n);
+            done += n as u64;
+        }
+        let mut header = [0u8; SECTOR];
+        header.copy_from_slice(&image[..SECTOR]);
+        self.image = Some(image);
+        written?;
+        self.flush_slot()?;
+        self.check_copy(total, expected, keys)?;
+        self.finish_install(&header)
+    }
+
+    /// Verifies the container just written to the inactive slot, before its
+    /// header: the copy must be the image verified before it was written
+    /// (audit of incident 0021, L2 and L4).
+    fn check_copy(&mut self, total: usize, expected: &Manifest, keys: &Keys) -> Result<(), u64> {
+        let refused = |event: &str, why: String| {
+            Err(fault(
+                code::SLOT_WRITE,
+                event,
+                &format!("the copy in slot {why}; not scheduled"),
+            ))
+        };
+        let slot = self.target.name();
+        match self.verify_container(self.slot_part.0, total - SECTOR, keys) {
+            Ok(m) if m == *expected => Ok(()),
+            Ok(m) => refused(
+                "upd-slot-differs",
+                format!(
+                    "{slot} is {}, not the {} verified before the copy",
+                    m.describe(),
+                    expected.describe()
+                ),
+            ),
+            Err(ImageError::Unreadable) => {
+                refused("upd-slot-read", format!("{slot} cannot be read back"))
+            }
+            Err(e) => refused(
+                "upd-slot-verify",
+                format!("{slot} does not verify ({})", image_error(&e)),
+            ),
+        }
+    }
+
+    /// Copies the image of `total` bytes verified in `UPDATE` (as
+    /// `expected`) into the inactive slot, verifies the copy in the slot
+    /// itself before writing its header, and schedules it: what boots is
+    /// what was verified, without holding the image in memory (incident
+    /// 0021).
+    fn install_from_update(
+        &mut self,
+        total: usize,
+        expected: &Manifest,
+        keys: &Keys,
+    ) -> Result<(), u64> {
+        let sectors = self.begin_install(total)?;
+        let mut done = 1u64;
+        while done < sectors {
+            let n = (sectors - done).min(CHUNK as u64) as u16;
+            if self.blk.read(self.update.0 + done, n).is_err() {
+                return Err(fault(
+                    code::UPDATE_INVALID,
+                    "upd-update-read",
+                    "cannot read UPDATE while copying it; not installing",
+                ));
+            }
             self.write(self.slot_part.0 + done, n)?;
             done += n as u64;
         }
-        self.blk.buffer()[..SECTOR].copy_from_slice(&self.image[..SECTOR]);
-        self.write(self.slot_part.0, 1)?;
-        if self.blk.flush().is_err() {
-            return Err(fault(
-                code::SLOT_WRITE,
-                "upd-slot-write",
-                "error flushing the slot",
-            ));
-        }
-        say!("installed into slot {}", self.target.name());
-        self.schedule_target()
+        self.flush_slot()?;
+        self.check_copy(total, expected, keys)?;
+        self.finish_install(&Image::header((total - SECTOR) as u32))
     }
 
     /// Marks the inactive slot pending with tries and reads the state back.
@@ -880,12 +1062,18 @@ fn apply(allow_downgrade: bool, keys: &Keys) -> u64 {
     };
     let stable_floor = stable_floor(&mut fs, &mut state, &installed);
     let update = disk.update;
-    let Some((total, manifest)) = disk.load(update, keys) else {
-        return fault(
-            code::UPDATE_INVALID,
-            "upd-update-invalid",
-            "UPDATE does not contain a valid system image (missing, too large, or signature or hashes fail); not installing",
-        );
+    let (total, manifest) = match disk.load(update, keys) {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            return fault(
+                code::UPDATE_INVALID,
+                "upd-update-invalid",
+                &format!(
+                    "UPDATE holds no valid system image: {}; not installing",
+                    e.describe()
+                ),
+            )
+        }
     };
     let offered = manifest_ident(&manifest);
     say!(
@@ -900,7 +1088,7 @@ fn apply(allow_downgrade: bool, keys: &Keys) -> u64 {
         stable_floor,
     };
     match decide_system_install(&installed, installed_id(&manifest), rules) {
-        Ok(true) => match disk.install(total) {
+        Ok(true) => match disk.install_from_update(total, &manifest, keys) {
             Ok(()) => 0,
             Err(code) => code,
         },
@@ -936,15 +1124,19 @@ fn rollback(fs: Option<&mut FsClient>, keys: &Keys) -> u64 {
         .as_ref()
         .map_or(String::from("unknown"), manifest_ident);
     let target = disk.slot_part;
-    let Some((_, manifest)) = disk.load(target, keys) else {
-        return fault(
-            code::ROLLBACK_REFUSED,
-            "upd-rollback-none",
-            &format!(
-                "rollback refused: slot {} holds no image this machine can boot (missing, or signature or hashes fail)",
-                disk.target.name()
-            ),
-        );
+    let manifest = match disk.load(target, keys) {
+        Ok((_, m)) => m,
+        Err(e) => {
+            return fault(
+                code::ROLLBACK_REFUSED,
+                "upd-rollback-none",
+                &format!(
+                    "rollback refused: slot {} holds no image this machine can boot: {}",
+                    disk.target.name(),
+                    e.describe()
+                ),
+            )
+        }
     };
     let previous = manifest_ident(&manifest);
     say!(
@@ -1534,30 +1726,32 @@ fn upgrade_system(
 ) -> Result<(), u64> {
     let (url, entry) = (offer.url, offer.entry);
     let size = entry.size as usize;
-    if size <= SECTOR || size > disk.image.len() {
+    if size <= SECTOR || size > IMAGE_BUFFER as usize {
+        let why = if size <= SECTOR {
+            String::from("too small to hold an image")
+        } else {
+            format!(
+                "more than the {} this updater can download and verify in memory",
+                upd::IMAGE_DOWNLOAD_MAX
+            )
+        };
         return Err(fault(
             code::IMAGE_REFUSED,
             "upd-image-size",
-            &format!(
-                "system image {}: {size} bytes does not fit the image buffer",
-                entry.file
-            ),
+            &format!("system image {}: {size} bytes, {why}", entry.file),
         ));
     }
+    let image = disk.download_buffer()?;
     say!("downloading {} ({size} bytes)", entry.file);
     // Into memory only: nothing touches the disk until every check passed.
-    if let Err(e) = fetch_exact(
-        net,
-        &format!("{url}{}", entry.file),
-        &mut disk.image[..size],
-    ) {
+    if let Err(e) = fetch_exact(net, &format!("{url}{}", entry.file), &mut image[..size]) {
         return Err(download_fault(
             code::DOWNLOAD,
             "upd-image-download",
             format!("download failed: {e}"),
         ));
     }
-    if sha256(&disk.image[..size]) != entry.sha256 {
+    if sha256(&image[..size]) != entry.sha256 {
         return Err(fault(
             code::DOWNLOAD_MISMATCH,
             "upd-image-sha256",
@@ -1567,14 +1761,14 @@ fn upgrade_system(
     // Its own signature, verified again as AriBoot will (Phase 30): the
     // index authenticates the file, the manifest authenticates the content,
     // and the key that signed the manifest is the channel's (ADR 0045).
-    let manifest = Image::container_len(&disk.image[..SECTOR])
+    let manifest = Image::container_len(&image[..SECTOR])
         .ok()
         .filter(|&len| SECTOR + len as usize == size)
-        .and_then(|_| Image::verify_with(&disk.image[SECTOR..size], keys).ok())
+        .and_then(|_| Image::verify_with(&image[SECTOR..size], keys).ok())
         .map(|v| v.manifest);
     let offered = ident(offer.channel, entry.version, offer.commit);
-    match manifest {
-        Some(m) if upd::image_matches_offer(&m, offer.channel, entry.version, offer.commit) => {}
+    let verified = match manifest {
+        Some(m) if upd::image_matches_offer(&m, offer.channel, entry.version, offer.commit) => m,
         Some(m) => {
             return Err(fault(
                 code::IMAGE_REFUSED,
@@ -1592,14 +1786,14 @@ fn upgrade_system(
                 "system image signature or hashes invalid; not installing",
             ))
         }
-    }
+    };
     let described = aricode_ab::Describe {
         channel: offer.channel,
         version: entry.version,
         commit: offer.commit.and_then(aricode_ab::Commit::parse),
     };
     say!("system image {described} verified (signature and SHA-256)");
-    disk.install(size)?;
+    disk.install(size, &verified, keys)?;
     let switched = installed.as_ref().filter(|m| m.channel != offer.channel);
     history(
         fs,

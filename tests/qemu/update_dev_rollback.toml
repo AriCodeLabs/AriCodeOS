@@ -23,7 +23,7 @@ stdin = ["update rollback", "update --channel dev", "upgrade --channel dev", "re
 exit = 0
 serial_contains = [
     # Slot B is still empty: nothing to roll back to.
-    "updater: rollback refused: slot B holds no image this machine can boot (missing, or signature or hashes fail)",
+    "updater: rollback refused: slot B holds no image this machine can boot: no valid slot header (empty slot or damaged header)",
     "update: updater exited with 55",
     "updater: system dev build 5 (commit 0123abc) installed: reboot to apply",
     "AriCodeOS: rebooting",

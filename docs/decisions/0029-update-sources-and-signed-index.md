@@ -69,7 +69,9 @@ it, no downgrades unless asked, and every install logged.
    (size and SHA-256), then its own signature and hashes, and the version
    inside must equal the version in the index; only then is anything
    written. The image is downloaded into the updater's memory buffer, not
-   into the `UPDATE` partition. The installer and the broker verify a
+   into the `UPDATE` partition (6 MiB, `IMAGE_DOWNLOAD_MAX`, since incident
+   0021; images already on the disk are verified piece by piece, up to
+   the slot size). The installer and the broker verify a
    package again before installing or launching it.
 
 4. **`update` reports and plans, `upgrade` follows the plan.** `update`
@@ -297,7 +299,8 @@ a machine installed with `usb-image --dev-source`.
   (incident 0008).
 - Limits: four sources, four staged packages per `upgrade`, a 4 KiB index,
   sixteen apps per index, 32 KiB packages, app names of 20 bytes, the
-  4 MiB image buffer.
+  6 MiB download buffer (4 MiB before incident 0021; `publish-update`
+  refuses a larger image and warns past three quarters of it).
 - Open: key rotation and revocation (a signed key list in the index);
   freshness against a source that keeps serving one old index forever (an
   expiry date needs a trusted clock); binding an index to the source that

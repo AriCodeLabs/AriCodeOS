@@ -1,6 +1,8 @@
 # Incident 0021: a system image larger than the updater's buffer reads as "installed version unknown"
 
-- Opened: 2026-10-23. Status: open, documented only; no fix yet.
+- Opened: 2026-10-23. Status: fixed on `fix/update-image-size`
+  (2026-10-24) for images on the disk; downloads keep a memory limit, now
+  6 MiB, by ADR 0029's rule (see Fix and Open).
 - Found by: the dev-build runs of incident 0018 (`cargo xtask test --debug
   --all --area network` on `fix/net-stack-headroom`), confirmed by the
   independent audit of that branch.
@@ -50,12 +52,63 @@ wrong. How an offered image over the limit is treated was not examined.
   real machines: every machine would report its installed version as
   unknown and refuse upgrades unless forced.
 
+## Reproduction (2026-10-24)
+
+`cargo xtask test --debug --all --area update` on develop 50e8ce6: 25 of
+37 scenarios failed, every one through the same path (the debug image is
+now 4,546,680 bytes; the release image 3,052,168).
+
+## Fix
+
+- One verification path that reads a container piece by piece:
+  `aricode_initrd::locate` walks the archive through a reader with exactly
+  the checks of `Initrd::parse` (a property test compares spans and exact
+  errors on 6000 damaged archives whose names put 2-, 3- and 4-byte
+  characters across `locate`'s 64-byte name pieces), and
+  `Image::verify_streaming` verifies the manifest's signature and hashes
+  kernel and initrd in 4 KiB pieces. `Image::verify_with`, which AriBoot
+  uses, is now that function over a slice, so loader and updater share
+  the code.
+- The updater verifies images on the disk (active slot, rollback target,
+  `UPDATE`) through the block client's buffer: their size is bounded by
+  the partition, not by memory. `update apply` copies `UPDATE` into the
+  inactive slot sector by sector, and both `apply` and `upgrade` verify
+  the copy in the slot before writing its header, naming the check that
+  failed, so what boots is what was verified.
+- An installed version that cannot be read is never unexplained: the
+  reason (empty slot, header larger than the partition, unreadable, or
+  which check failed) is said and recorded (`upd-active-image`, code 59).
+- Downloads stay in memory (ADR 0029, decision 3). The buffer is
+  allocated only when `upgrade` downloads (the DMA quota is cumulative),
+  and is now 6 MiB (`IMAGE_DOWNLOAD_MAX`, shared with xtask) within the
+  updater's 8 MiB, the manifest maximum. An offered image over it is
+  refused naming both sizes; `publish-update` refuses to publish one and
+  warns past three quarters.
+- Tests: the reproduction above goes from 25 failures to 7, every one of
+  them an app package over 32 KiB (a separate limit: incident 0026), none
+  a system image; `update.large_image` boots, applies
+  and rolls back 7 MiB images (disk `large-a`, padded past the download
+  buffer); host tests for the walker, the streaming verifier (failing
+  reader, oversized manifest) and the publish guard.
+
+## Audit (2026-10-24)
+
+Independent audit of the fix: no high or medium findings. Its low findings
+are applied: the property test now reaches the UTF-8 carry and compares
+errors (a mutation of the carry fails it), a failed check of the copy says
+why (read, different image, or which check), `upgrade` checks its copy
+too, the message for an image too small to be one, checked sums in
+`locate`, and "no valid slot header" instead of "empty slot". Noted, not
+changed: the signature covers only the manifest, so a container may carry
+extra entries (the `large-a` padding relies on it); kernel and initrd are
+still bound by their hashes.
+
 ## Open
 
-- Choose a fix: a buffer sized from the slot partition, a streaming
-  verification of the installed image, or at least a distinct
-  status and message for "installed image larger than the updater can
-  load", recorded as a fault event.
-- A test that fails before the fix: a scenario or host test with an image
-  just over the buffer, and a guard (xtask) that fails when the release
-  image passes a set fraction of `IMAGE_BUFFER`.
+- Downloads larger than 6 MiB need the owner's decision, since each way
+  changes a rule: stage the download in `UPDATE` and install it with the
+  copy-and-verify path above (ADR 0029 chose memory so that nothing is
+  written before verification), write it straight into the inactive slot
+  (a failed download would cost the rollback image), or raise the
+  manifest memory maximum for system apps. Today the release image is
+  48% of the limit.
