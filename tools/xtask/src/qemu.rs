@@ -420,8 +420,11 @@ const EARLY_HINTS_PAUSE: Duration = Duration::from_secs(5);
 /// never a final response: the server of incident 0009, which the
 /// client's budget must cut), `/early-hints-flood` (twenty `103` at once,
 /// then a 200: the interim-response limit), `/update/NAME` from `update`
-/// (a scenario's own update source; 404 without one) and 404 for
-/// everything else.
+/// (a scenario's own update source; 404 without one), the redirects of
+/// ADR 0048 (`/moved/NAME` answers 302 to `/hop/NAME` with a 9,243-byte
+/// header line as github.com sends, `/hop/NAME` answers 307 to the
+/// relative `../update/NAME`; `/redirect-loop` redirects to itself and
+/// `/to-ftp` to an `ftp://` URL) and 404 for everything else.
 fn http_serve(mut stream: std::net::TcpStream, update: Option<&Path>) {
     use std::io::Write;
     let mut buf = [0u8; 2048];
@@ -464,6 +467,19 @@ fn http_serve(mut stream: std::net::TcpStream, update: Option<&Path>) {
             r.extend(b"Content-Length: 15\r\nConnection: close\r\n\r\nbig headers ok\n");
             r
         }
+        // A source reached through two redirects, GitHub's shape (ADR 0048).
+        p if p.starts_with("/moved/") => redirect(
+            "302 Found",
+            &format!("/hop/{}", &p["/moved/".len()..]),
+            9243,
+        ),
+        p if p.starts_with("/hop/") => redirect(
+            "307 Temporary Redirect",
+            &format!("../update/{}", &p["/hop/".len()..]),
+            0,
+        ),
+        "/redirect-loop" => redirect("302 Found", "/redirect-loop", 0),
+        "/to-ftp" => redirect("301 Moved Permanently", "ftp://10.0.2.2/index", 0),
         // The scenario's update channel (ADR 0027), never the real one.
         p if p.starts_with("/update/") && update.is_some() => {
             file_response(update.expect("checked"), &p["/update/".len()..])
@@ -477,6 +493,24 @@ fn http_serve(mut stream: std::net::TcpStream, update: Option<&Path>) {
     };
     let _ = stream.write_all(&response);
     let _ = stream.flush();
+}
+
+/// A redirect to `location` with a body that must not reach the client's
+/// sink and, when `filler` is not zero, one header line of that many bytes.
+fn redirect(status: &str, location: &str, filler: usize) -> Vec<u8> {
+    let mut r = format!("HTTP/1.1 {status}\r\n").into_bytes();
+    if filler > 0 {
+        r.extend(b"Content-Security-Policy: ");
+        r.extend(std::iter::repeat_n(b'p', filler));
+        r.extend(b"\r\n");
+    }
+    r.extend(
+        format!(
+            "Location: {location}\r\nContent-Length: 16\r\nConnection: close\r\n\r\nredirect body!!\n"
+        )
+        .as_bytes(),
+    );
+    r
 }
 
 /// A scenario's development source: this directory beside its `update/`.

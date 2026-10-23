@@ -1682,7 +1682,11 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
 - `sdk/https` (`aricode-https`): HTTP/HTTPS GET over the TCP service; the
   shell's `http` uses it, with `trusted_ca.der` from AriFS as an optional
   extra root. Scenario `net.https` (`host_https = true` starts the host's
-  `openssl s_server`).
+  `openssl s_server`). Since ADR 0048 it follows up to five redirects
+  (301/302/303/307/308), each on a new connection within the same budget,
+  never from `https://` to `http://`, and holds 16 KiB of response headers
+  on the heap (`MAX_HEADERS_LARGE`; github.com sends 10.6 KiB); scenario
+  `update.redirected_source`.
 - init waits for sshd's `Ready` session message before starting the console
   shell, so their console output never interleaves.
 
