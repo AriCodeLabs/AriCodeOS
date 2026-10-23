@@ -4062,6 +4062,14 @@ impl Controller {
         while let Some(ev) = self.next_event() {
             self.dispatch(ev);
         }
+        // Clear Event Handler Busy even when no event was consumed here
+        // (xHCI 4.17.2, 5.5.2.3.3; Linux's xhci_irq does the same): the
+        // event whose interrupt woke this round may have been taken by an
+        // earlier one (a request's own wait, or a round started by IPC)
+        // before the controller set EHB for it, and while EHB stays 1 the
+        // controller sends no more interrupts. The loop no longer polls
+        // every 10 ms to heal that (ADR 0044).
+        self.runtime.w64(rt::ERDP, self.events.dequeue_pointer());
     }
 }
 
@@ -4477,7 +4485,6 @@ fn main(mask: u64) -> u64 {
         ctl.poll();
         ctl.maintain_storage();
         ctl.maintain_hid();
-        let now = ctl.clock.now();
         let mut requests_left = true;
         for _ in 0..REQUESTS_PER_ROUND {
             let (which, n, nh) = match sys::ipc_receive_any(endpoints, &mut msg, &mut handles, 0) {
@@ -4498,8 +4505,12 @@ fn main(mask: u64) -> u64 {
                 events: &mut events,
                 times: &mut times,
             };
+            // The clock per request: a block request before this one may
+            // have taken seconds, and a read's deadline counts from now.
+            let now = ctl.clock.now();
             reply.serve(&mut ctl, which, &msg[..n], &handles[..nh], now);
         }
+        let now = ctl.clock.now();
         if let Some((reply_to, deadline)) = waiting {
             if ctl.pending.len > 0 {
                 let n = ctl.pending.take(&mut events, &mut times);
@@ -4510,7 +4521,6 @@ fn main(mask: u64) -> u64 {
                 waiting = None;
             }
         }
-        let now = ctl.clock.now();
         let mut next = Deadline::NONE;
         next.include_opt(waiting.map(|(_, deadline)| deadline));
         next.include_opt(
