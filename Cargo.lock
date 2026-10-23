@@ -93,6 +93,7 @@ name = "ari-compositor"
 version = "0.13.0"
 dependencies = [
  "aricode-build",
+ "aricode-cmdline",
  "aricode-gfx",
  "aricode-input",
  "aricode-proto",

@@ -1,0 +1,27 @@
+# Performance audit of 731c398, finding C: in ordinary use the compositor
+# prints nothing per frame (COM1 busy-waits at 115200 baud). Without
+# `gui_trace` the two demo windows open, present and close with no frame
+# lines or pixel samples on the serial; no input is sent, so each demo
+# times out waiting for keys.
+name = "gui.frames_untraced"
+description = "without gui_trace the compositor composes frames silently"
+level = "full"
+areas = ["gui"]
+cmdline = "qemu_exit gui"
+timeout_secs = 120
+
+[expect]
+exit = 33
+serial_contains = [
+    "compositor: screen 1280x800",
+    "compositor: window 1 'Demo A' 400x300",
+    "compositor: window 2 'Demo B' 400x300",
+    "gui_demo A: window presented",
+    "gui_demo B: window presented",
+    "compositor: desktop ready with 2 windows",
+    "gui_demo A: no keys",
+    "gui_demo B: no keys",
+    "AriInit: gui ok (2 applications)",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "compositor: frame", " sample (", "gui_trace"]
