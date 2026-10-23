@@ -1027,20 +1027,20 @@ fn update(fs: &mut FsClient, rest: &[u8]) {
     match (sub, arg) {
         (b"" | b"--channel", _) => match channel_options(rest, false) {
             Some(flags) => {
-                if list_installed(fs) {
-                    run_updater(fs, updater_arg::REFRESH | flags);
+                if list_installed() {
+                    run_updater(updater_arg::REFRESH | flags);
                 }
             }
             None => update_usage(),
         },
         (b"apply", b"") => {
-            run_updater(fs, updater_arg::APPLY);
+            run_updater(updater_arg::APPLY);
         }
         (b"apply", b"--allow-downgrade") => {
-            run_updater(fs, updater_arg::APPLY | updater_arg::ALLOW_DOWNGRADE);
+            run_updater(updater_arg::APPLY | updater_arg::ALLOW_DOWNGRADE);
         }
         (b"rollback", b"") => {
-            run_updater(fs, updater_arg::ROLLBACK);
+            run_updater(updater_arg::ROLLBACK);
         }
         (b"sources", b"") => sources_list(fs),
         (b"add", a) if !a.is_empty() => source_add(fs, a),
@@ -1086,21 +1086,14 @@ fn channel_options(rest: &[u8], allow_downgrade: bool) -> Option<u64> {
 /// The installer writes the installed apps to the `[installed]` section of `updater/state`, which
 /// is how the updater learns them without the main file space (ADR 0029,
 /// decision 8). `false` (after saying why) if it failed.
-fn list_installed(fs: &mut FsClient) -> bool {
-    run_installer(fs, installer_arg::LIST) == Some(0)
+fn list_installed() -> bool {
+    run_installer(installer_arg::LIST) == Some(0)
 }
 
 /// Runs the installer with `flags`; its exit code, or `None` if it could
 /// not be launched. Failures are reported here.
-fn run_installer(fs: &mut FsClient, flags: u64) -> Option<u64> {
-    use aricode_rt::sys::launch;
-    let result = launch::run(BROKER, "installer", flags);
-    if session() && flags != installer_arg::LIST {
-        // The installer prints on the console; its installs are in the history.
-        print(b"install history:\n");
-        show_file(fs, &update_index::main_path(update_index::HISTORY_FILE));
-    }
-    match result {
+fn run_installer(flags: u64) -> Option<u64> {
+    match launch_run("installer", flags) {
         Ok(0) => Some(0),
         Ok(code) => {
             print(b"update: installer exited with ");
@@ -1121,16 +1114,16 @@ fn run_installer(fs: &mut FsClient, flags: u64) -> Option<u64> {
 /// indexes; the installer then installs the staged packages, with the same
 /// downgrade rule. Only `--channel` moves the system to the other channel
 /// (ADR 0045).
-fn upgrade(fs: &mut FsClient, rest: &[u8]) {
+fn upgrade(rest: &[u8]) {
     let Some(flags) = channel_options(rest, true) else {
         print(b"usage: upgrade [--channel stable|dev] [--allow-downgrade]\n");
         return;
     };
     let allow_downgrade = flags & updater_arg::ALLOW_DOWNGRADE != 0;
-    if !list_installed(fs) {
+    if !list_installed() {
         return;
     }
-    let Some(code) = run_updater(fs, updater_arg::UPGRADE | flags) else {
+    let Some(code) = run_updater(updater_arg::UPGRADE | flags) else {
         return;
     };
     if code & updater_arg::EXIT_APPS_STAGED == 0 {
@@ -1142,19 +1135,13 @@ fn upgrade(fs: &mut FsClient, rest: &[u8]) {
     if allow_downgrade {
         flags |= installer_arg::ALLOW_DOWNGRADE;
     }
-    run_installer(fs, flags);
+    run_installer(flags);
 }
 
 /// Runs the updater with `arg` and reports a failure; the exit code, or
 /// `None` if it could not be launched.
-fn run_updater(fs: &mut FsClient, arg: u64) -> Option<u64> {
-    use aricode_rt::sys::launch;
-    let result = launch::run(BROKER, "updater", arg);
-    if session() {
-        // The updater printed on the console; show its log here.
-        show_file(fs, &update_index::main_path(update_index::UPDATER_LOG_FILE));
-    }
-    match result {
+fn run_updater(arg: u64) -> Option<u64> {
+    match launch_run("updater", arg) {
         Ok(code) => {
             let failure = code & !updater_arg::EXIT_APPS_STAGED;
             if failure != 0 {
@@ -1388,21 +1375,17 @@ fn source_remove(fs: &mut FsClient, arg: &[u8]) {
     }
 }
 
-/// Prints a file, if it exists (no message otherwise).
-fn show_file(fs: &mut FsClient, name: &str) {
-    let Ok(fd) = fs.open(name) else {
-        return;
-    };
-    let mut buf = [0u8; 512];
-    let mut offset = 0u32;
-    while let Ok(n) = fs.read(fd, offset, &mut buf) {
-        if n == 0 {
-            break;
-        }
-        print(&buf[..n]);
-        offset += n as u32;
+/// Runs `name` through the broker and waits for it. In a session its
+/// console is the session's output (ADR 0047), so what it prints reaches
+/// the remote user instead of the machine's screen.
+fn launch_run(name: &str, arg: u64) -> Result<u64, aricode_rt::sys::launch::LaunchError> {
+    use aricode_rt::sys::launch::{self, LaunchError};
+    if !session() {
+        return launch::run(BROKER, name, arg);
     }
-    let _ = fs.close(fd);
+    let console = sys::handle_duplicate(SESSION_OUT, abi::rights::WRITE | abi::rights::TRANSFER)
+        .map_err(LaunchError::Ipc)?;
+    launch::run_with_console(BROKER, name, arg, console)
 }
 
 /// Explains why the broker did not run a program (after the program name).
@@ -1425,7 +1408,6 @@ fn launch_failure(e: aricode_rt::sys::launch::LaunchError) {
 /// Asks the broker (init) to run an initrd program with the capabilities
 /// of its manifest and waits for it to exit.
 fn run(arg: &[u8]) {
-    use aricode_rt::sys::launch;
     let Ok(name) = core::str::from_utf8(arg) else {
         print(b"run: invalid name\n");
         return;
@@ -1440,7 +1422,7 @@ fn run(arg: &[u8]) {
     };
     // The result is printed in one piece at the end: while the program runs,
     // its output and the broker's interleave with ours.
-    let result = launch::run(BROKER, prog, num_arg);
+    let result = launch_run(prog, num_arg);
     print(b"run: ");
     print(prog.as_bytes());
     match result {
@@ -1724,7 +1706,7 @@ fn execute(
         b"http" => http_get(fs, net_client, rest),
         b"run" => run(rest),
         b"update" => update(fs, rest),
-        b"upgrade" => upgrade(fs, rest),
+        b"upgrade" => upgrade(rest),
         b"spawn" => spawn(rest),
         b"repeat" => {
             let (count, inner) = split(rest);

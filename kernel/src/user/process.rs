@@ -141,19 +141,22 @@ pub fn spawn_with_handles_and_arg(
     arg: u64,
     dma_quota: u64,
 ) -> Result<Pid, &'static str> {
-    spawn_with_caps(name, elf_bytes, grants(extra), arg, dma_quota)
+    spawn_with_caps(name, elf_bytes, None, grants(extra), arg, dma_quota)
 }
 
 /// Like `spawn_with_handles_and_arg` with capabilities that already exist
 /// (taken from the parent's table): they move into the child as they are.
+/// `session_console`, an endpoint capability with `WRITE`, becomes the
+/// child's console (ADR 0047).
 pub fn spawn_with_caps(
     name: &str,
     elf_bytes: &[u8],
+    session_console: Option<Cap>,
     extra: Vec<(Cap, aricode_handles::Rights)>,
     arg: u64,
     dma_quota: u64,
 ) -> Result<Pid, &'static str> {
-    spawn_full(name, elf_bytes, extra, arg, dma_quota)
+    spawn_full(name, elf_bytes, session_console, extra, arg, dma_quota)
 }
 
 /// Capabilities for objects the kernel grants to a new process.
@@ -176,12 +179,13 @@ pub fn spawn_with_handles(
     elf_bytes: &[u8],
     extra: Vec<(crate::object::ObjectRef, aricode_handles::Rights)>,
 ) -> Result<Pid, &'static str> {
-    spawn_full(name, elf_bytes, grants(extra), 0, 0)
+    spawn_full(name, elf_bytes, None, grants(extra), 0, 0)
 }
 
 fn spawn_full(
     name: &str,
     elf_bytes: &[u8],
+    session_console: Option<Cap>,
     extra: Vec<(Cap, aricode_handles::Rights)>,
     arg: u64,
     dma_quota: u64,
@@ -262,7 +266,7 @@ fn spawn_full(
         m.root_phys(),
     )?;
     let tid = thread.tid;
-    let mut handles = crate::object::initial_table(pid, tid);
+    let mut handles = crate::object::initial_table(pid, tid, session_console);
     for (obj, rights) in extra {
         handles
             .insert(obj, rights)

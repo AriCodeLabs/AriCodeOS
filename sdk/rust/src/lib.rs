@@ -237,17 +237,30 @@ pub fn process_spawn_with(
     arg: u64,
     handles: &[Handle],
 ) -> Result<Handle, Error> {
-    process_spawn_limited(spawner, name, arg, handles, 0)
+    process_spawn_limited(spawner, name, arg, handles, 0, false)
+}
+
+/// `spawn_limits` for `handles`, `memory_kib` and `console_first`.
+fn spawn_limits(handles: &[Handle], memory_kib: u32, console_first: bool) -> u64 {
+    let flag = if console_first {
+        abi::spawn_limits::CONSOLE_FIRST
+    } else {
+        0
+    };
+    abi::spawn_limits::pack(handles.len(), memory_kib) | flag
 }
 
 /// Like `process_spawn_with`, setting the child's DMA memory quota in KiB
-/// (0 = unlimited).
+/// (0 = unlimited). With `console_first`, `handles[0]` (an endpoint with
+/// `WRITE`) becomes the child's console instead of the kernel console and
+/// the rest start at `0x0001_0004` (ADR 0047).
 pub fn process_spawn_limited(
     spawner: Handle,
     name: &str,
     arg: u64,
     handles: &[Handle],
     memory_kib: u32,
+    console_first: bool,
 ) -> Result<Handle, Error> {
     call6(
         nr::PROCESS_SPAWN,
@@ -256,14 +269,14 @@ pub fn process_spawn_limited(
         name.len() as u64,
         arg,
         handles.as_ptr() as u64,
-        abi::spawn_limits::pack(handles.len(), memory_kib),
+        spawn_limits(handles, memory_kib, console_first),
     )
     .map(|h| Handle(h as u32))
 }
 
 /// Creates a process from an ELF held in the caller's DMA buffer `elf`
 /// (`elf_len` bytes from `elf_offset`) (ADR 0017); requires `MANAGE` on the
-/// `SPAWNER` and `READ` on the buffer. Handles and quota as in
+/// `SPAWNER` and `READ` on the buffer. Handles, quota and console as in
 /// `process_spawn_limited`.
 #[allow(clippy::too_many_arguments)]
 pub fn process_spawn_from(
@@ -275,6 +288,7 @@ pub fn process_spawn_from(
     arg: u64,
     handles: &[Handle],
     memory_kib: u32,
+    console_first: bool,
 ) -> Result<Handle, Error> {
     let req = abi::spawn_from::Request::new(elf.0, elf_offset, elf_len, name)
         .ok_or(Error::Invalid)?
@@ -285,7 +299,7 @@ pub fn process_spawn_from(
         req.as_ptr() as u64,
         arg,
         handles.as_ptr() as u64,
-        abi::spawn_limits::pack(handles.len(), memory_kib),
+        spawn_limits(handles, memory_kib, console_first),
         0,
     )
     .map(|h| Handle(h as u32))

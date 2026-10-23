@@ -155,7 +155,8 @@ it, no downgrades unless asked, and every install logged.
    (decision 2, `aricode_update_index::installed_path`) is refused as a
    package (`inst-pkg-name`, code 7), never reported as a file-service
    failure. The updater's last output is in `updater/last.log`, shown to
-   remote sessions.
+   remote sessions (since ADR 0047 the updater writes to the session
+   itself and `last.log` remains the record of its last run).
 
 8. **Capabilities (least privilege).** The updater keeps `system, fs,
    net, block`: its `fs` grant is its private directory `updater/`. It

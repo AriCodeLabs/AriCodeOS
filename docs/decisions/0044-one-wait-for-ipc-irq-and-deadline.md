@@ -204,4 +204,5 @@ event), so the xHCI keeps delivering interrupts without the old 10 ms
 poll. `bench` ran to completion (exit 0) but prints to the machine's
 screen, not to an SSH session, so its hardware latency figures were not
 captured remotely: programs started with `run` from an SSH shell write to
-the physical console (a follow-up item).
+the physical console (a follow-up item, done in ADR 0047: they now write
+to the session).

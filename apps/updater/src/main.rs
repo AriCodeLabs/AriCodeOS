@@ -140,8 +140,8 @@ mod code {
     pub const FLOOR: u64 = 58;
 }
 
-/// Everything printed, kept for `last.log` (the shell shows it to a remote
-/// session, whose user cannot see the console).
+/// Everything printed, kept in `last.log` as the record of the last run
+/// (read later with `cat`, or with `fs-cat` from a disk dump).
 struct Log(core::cell::RefCell<Vec<u8>>);
 // SAFETY: the updater is single-threaded.
 unsafe impl Sync for Log {}
@@ -2058,7 +2058,7 @@ fn run(arg: u64) -> u64 {
 
 fn main(arg: u64) -> u64 {
     let code = run(arg);
-    // The log for the shell (private directory).
+    // The record of this run (private directory).
     if let Ok(mut fs) = FsClient::new(FS, HW) {
         let log = LOG.0.borrow();
         if !write_file(&mut fs, upd::UPDATER_LOG_FILE, &log) {

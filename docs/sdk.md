@@ -110,14 +110,16 @@ received.
 | network | `sys::net::NetClient`: `info`, `link` (physical link state, even before DHCP), `ping`, UDP (`udp_bind/send/recv`), TCP (`tcp_connect/listen/accept/send/recv/close`), `resolve`; `sockets` reports the tables per owner, and `sys::net::attach` (init and the broker only) creates the per-client session whose sockets die with their process (ADR 0037); `sys::http::get` on top (per-operation timeout plus a `Budget` for the whole download, ADR 0033) |
 | window | `sys::window::Window::create(compositor, hardware, w, h, title)`, `canvas()` (an `aricode-gfx` canvas), `present`, `poll` (`Key`, `Click`, `Focus`), `close` |
 | input | `sys::input::InputClient` over an `inputd`: evdev events with timestamps; `aricode-input::Keyboard` translates them |
-| console | `sys::console_write` (`WRITE`), `sys::console_read` (`READ`, with a deadline); `sys::console_inject` requires `MANAGE` and is only used by init's console bridge (ADR 0013) |
+| console | `sys::console_write` (`WRITE`), `sys::console_read` (`READ`, with a deadline); `sys::console_inject` requires `MANAGE` and is only used by init's console bridge (ADR 0013). A program run from an SSH session has a session console (ADR 0047): `console_write` and `sys::print` reach the session unchanged |
 | time | `sys::time::uptime_ms(system)`, `sys::time::uptime_us(system)` (calibrated TSC), `sys::time::Clock`, `sys::time::sleep_ms` |
 | permissions | `sys::permissions::{granted, kind_name, is, drop_handle}` |
 
 ## Manifest and launch (Phase 28)
 
 An application is launched through the broker (init) with `run NAME [ARG]`
-from the shell or `sys::launch::run(broker, name, arg)`; `spawn` and
+from the shell or `sys::launch::run(broker, name, arg)`
+(`sys::launch::run_with_console(broker, name, arg, console)` gives it the
+send side of an endpoint as its console, ADR 0047); `spawn` and
 `sys::launch::spawn` launch it in the background without waiting for its
 exit. The broker allows 4 running programs at a time and answers `Limit` to
 the fifth (ADR 0015). The broker reads `NAME.manifest` from the initrd

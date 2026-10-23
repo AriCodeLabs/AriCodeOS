@@ -1,6 +1,8 @@
 # Stage 5 (queryable diagnostics): the kernel keeps recent events
 # (processes created and exited, faults) in a ring that `diag` shows
 # with their timestamp; a process killed by the kernel appears with the reason.
+# The PIDs follow the boot's launches: init's selftest checks (console_probe
+# since ADR 0047 included) come first.
 name = "diag.events"
 description = "diag shows recent kernel events: exited processes and killed ones with the reason"
 level = "full"
@@ -15,9 +17,9 @@ serial_contains = [
     "run: hello_app exited with 0",
     "run: kernel_read: was killed by the kernel",
     "recent kernel events:",
-    "s] process 20 'hello_app' created",
-    "s] process 20 'hello_app' exited with code 0",
-    "s] process 21 killed by fault: #PF read",
+    "s] process 21 'hello_app' created",
+    "s] process 21 'hello_app' exited with code 0",
+    "s] process 22 killed by fault: #PF read",
     "=== end of diagnostics ===",
     "ARICODEOS_SHUTDOWN",
 ]
