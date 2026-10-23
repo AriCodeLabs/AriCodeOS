@@ -206,33 +206,36 @@ pub fn initrd_manifests() -> Result<Vec<(String, PathBuf)>> {
     Ok(out)
 }
 
+/// Packages of the initrd programs (`initrd_programs`).
+pub const USER_PACKAGES: &[&str] = &[
+    "user-testprogs",
+    "ariinit",
+    "ari-virtio-blk",
+    "ari-virtio-net",
+    "ari-rtl-net",
+    "ari-sshd",
+    "ari-virtio-input",
+    "ari-usb-input",
+    "ari-usb-ehci",
+    "ari-console-bridge",
+    "ari-compositor",
+    "ari-fsd",
+    "ari-app-hello",
+    "ari-app-perms-check",
+    "ari-app-updater",
+    "ari-app-fs-probe",
+    "ari-app-win-probe",
+    "ari-app-wasm-runner",
+    "ari-app-notes-reader",
+    "ari-app-installer",
+    "ari-app-bench",
+    "ari-shell",
+];
+
 /// Builds `init` and the user programs (static ELFs at 0x400000) and
 /// returns the directory with the binaries.
 pub fn build_user_programs(release: bool) -> Result<PathBuf> {
-    for pkg in [
-        "user-testprogs",
-        "ariinit",
-        "ari-virtio-blk",
-        "ari-virtio-net",
-        "ari-rtl-net",
-        "ari-sshd",
-        "ari-virtio-input",
-        "ari-usb-input",
-        "ari-usb-ehci",
-        "ari-console-bridge",
-        "ari-compositor",
-        "ari-fsd",
-        "ari-app-hello",
-        "ari-app-perms-check",
-        "ari-app-updater",
-        "ari-app-fs-probe",
-        "ari-app-win-probe",
-        "ari-app-wasm-runner",
-        "ari-app-notes-reader",
-        "ari-app-installer",
-        "ari-app-bench",
-        "ari-shell",
-    ] {
+    for pkg in USER_PACKAGES {
         println!("[xtask] build {pkg} ({KERNEL_TARGET})");
         let mut c = cargo();
         c.args(["build", "-p", pkg, "--target", KERNEL_TARGET]);
@@ -503,7 +506,7 @@ pub fn check() -> Result {
         c.args(["--", "-D", "warnings"]);
         run(c)?;
     }
-    // The network drivers' stack budget (incident 0018).
+    // Every initrd program's stack budget (incident 0018).
     crate::stack::check()
 }
 

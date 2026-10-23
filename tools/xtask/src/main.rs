@@ -21,7 +21,7 @@
 //!                                             --cpus > 1, capped by memory; 1 = one after another)
 //!     --list                                  lists the scenarios and exits
 //! cargo xtask check                           fmt --check + clippy -D warnings + stack-check
-//! cargo xtask stack-check                     stack budget of the network drivers, release and dev (incident 0018)
+//! cargo xtask stack-check                     stack budget of every initrd program, release and dev (incident 0018)
 //! cargo xtask app-pack DIR [--version N] [--debug]   builds, packs and signs an external app (DIR/Cargo.toml + NAME.manifest) into build/pkgs/
 //! cargo xtask keygen [DIR]                    Ed25519 key pair (default keys/dev)
 //! cargo xtask sign SEED FILE                  writes FILE.sig

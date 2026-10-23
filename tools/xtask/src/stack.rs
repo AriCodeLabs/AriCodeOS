@@ -1,21 +1,32 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
-//! Static stack budget of the network drivers (incident 0018).
+//! Static stack budget of every initrd program (incident 0018).
 //!
 //! Every user process runs on a fixed 64 KiB stack with a guard page below
-//! it (`kernel/src/user/process.rs`); a driver that crosses it is killed
-//! with `USER STACK OVERFLOW`. The network drivers carry the whole stack of
-//! `ari-net-core`, whose frames grew until the deepest path of a dev build
-//! no longer fitted. This check reads the drivers' machine code
-//! (`objdump -d`), measures every function's frame from its prologue and
-//! the deepest chain of direct calls from `_start`, and fails when either
-//! passes its budget, in the release and in the dev build alike: half the
-//! stack for the path, a quarter for one frame.
+//! it (`kernel/src/user/process.rs`); a program that crosses it is killed
+//! with `USER STACK OVERFLOW`. The network drivers' frames grew until a dev
+//! build died on its first DHCP offer. This check reads the machine code of
+//! every initrd program (`objdump -d`), measures every function's frame
+//! from its prologue and the deepest chain of direct calls from `_start`,
+//! and fails when either passes the program's budget, in the release and in
+//! the dev build alike: by default half the stack for the path and a
+//! quarter for one frame. A program allowed more is listed in
+//! [`EXCEPTIONS`] with the reason and the incident that tracks it.
 //!
-//! What it does not see: indirect calls (trait objects, `core::fmt`
-//! callbacks, function pointers) end a path, so the measured depth is a
-//! lower bound of the real one. That is why the path budget is half the
-//! stack and not all of it.
+//! The measured depth is a lower bound of the real one; what it does not
+//! count:
+//! - indirect calls (trait objects, `core::fmt` callbacks, function
+//!   pointers): a path ends there;
+//! - recursion, direct or mutual: a call back into a function already on
+//!   the chain is cut (direct recursion is reported);
+//! - `rsp` adjustments after a function's first call (dynamic `alloca`,
+//!   stack arguments pushed later) and stack realignment (`and $-N,%rsp`),
+//!   which add up to `N - 8` bytes.
+//!
+//! That is why the path budget is half the stack and not all of it. Direct
+//! calls, unconditional tail calls (`jmp`) and conditional ones (`jcc` to
+//! another function) are followed. Functions are keyed by address, so two
+//! functions with the same demangled name are both measured.
 //!
 //! Part of `cargo xtask check`; alone as `cargo xtask stack-check`.
 //! Started from the audit's `frames.py` and `depth.py` (incident 0018).
@@ -28,70 +39,99 @@ use std::process::Command;
 /// The user stack of every process: `USER_STACK_SIZE` in
 /// `kernel/src/user/process.rs` (a unit test keeps them equal).
 pub const USER_STACK: u64 = 64 * 1024;
-/// Deepest chain of direct calls allowed: half the stack. The other half is
-/// for what the analysis cannot see (indirect calls) and for growth.
-pub const PATH_BUDGET: u64 = USER_STACK / 2;
-/// Largest frame allowed for one function: a quarter of the stack. A frame
-/// this size holds a buffer or a structure that belongs on the heap.
-pub const FRAME_BUDGET: u64 = USER_STACK / 4;
 
-/// Packages and binaries under budget: the network drivers (ADR 0024).
-pub const CHECKED: [(&str, &str); 2] =
-    [("ari-virtio-net", "virtio_net"), ("ari-rtl-net", "rtl_net")];
+/// Stack allowed to one program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    /// Deepest chain of direct calls.
+    pub path: u64,
+    /// Largest frame of one function.
+    pub frame: u64,
+}
+
+/// Every program's budget unless [`EXCEPTIONS`] says otherwise: half the
+/// stack for the path (the other half is for what the analysis cannot see
+/// and for growth) and a quarter for one frame (a frame that size holds a
+/// buffer or a structure that belongs on the heap).
+pub const DEFAULT_BUDGET: Budget = Budget {
+    path: USER_STACK / 2,
+    frame: USER_STACK / 4,
+};
+
+/// Programs allowed more than [`DEFAULT_BUDGET`]: (binary, budget, reason
+/// and tracking incident). Empty: every offender found when the check was
+/// extended was fixed instead (incident 0018).
+pub const EXCEPTIONS: &[(&str, Budget, &str)] = &[];
+
+/// Budget of the initrd program `bin`.
+pub fn budget(bin: &str) -> Budget {
+    EXCEPTIONS
+        .iter()
+        .find(|(b, _, _)| *b == bin)
+        .map_or(DEFAULT_BUDGET, |(_, budget, _)| *budget)
+}
 
 /// One function of the disassembly.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Function {
+    pub name: String,
     /// Bytes it takes on the stack: the return address its caller pushed,
     /// its pushes and its `rsp` adjustment (stack probes included).
     pub frame: u64,
-    /// Functions it calls or tail-calls directly, itself excluded.
-    pub calls: BTreeSet<String>,
+    /// Start addresses of the functions it calls or tail-calls directly,
+    /// itself excluded.
+    pub calls: BTreeSet<u64>,
     /// It calls itself directly (recursion, never followed).
     pub recursive: bool,
+    /// Address of its last instruction.
+    pub end: u64,
 }
 
-/// Every function of `objdump -d --no-show-raw-insn -C` output, by name.
-pub fn parse(disasm: &str) -> BTreeMap<String, Function> {
-    let mut funcs = BTreeMap::new();
-    let mut current: Option<(String, Function)> = None;
+/// Functions by start address.
+pub type Functions = BTreeMap<u64, Function>;
+
+/// Every function of `objdump -d --no-show-raw-insn -C` output.
+pub fn parse(disasm: &str) -> Functions {
+    let mut funcs = Functions::new();
+    // Branch targets as written (any address, function start or not).
+    let mut targets: Vec<(u64, u64, bool)> = Vec::new();
+    let mut current: Option<u64> = None;
     // Prologue state of the current function.
     let mut in_prologue = true;
     let mut rsp_in_r11 = false;
     let mut probe_loop = false;
     for line in disasm.lines() {
-        if let Some(name) = header(line) {
-            if let Some((n, f)) = current.take() {
-                funcs.insert(n, f);
-            }
-            current = Some((
-                name.to_string(),
+        if let Some((addr, name)) = header(line) {
+            funcs.insert(
+                addr,
                 Function {
+                    name: name.to_string(),
                     frame: 8,
+                    end: addr,
                     ..Function::default()
                 },
-            ));
+            );
+            current = Some(addr);
             in_prologue = true;
             rsp_in_r11 = false;
             probe_loop = false;
             continue;
         }
-        let Some((name, func)) = current.as_mut() else {
+        let Some(start) = current else {
             continue;
         };
-        let Some((mnemonic, operands)) = instruction(line) else {
+        let Some((at, mnemonic, operands)) = instruction(line) else {
             continue;
         };
-        if mnemonic == "call" || mnemonic == "jmp" {
+        let func = funcs.get_mut(&start).expect("current function");
+        func.end = func.end.max(at);
+        let is_call = mnemonic == "call";
+        if is_call || mnemonic.starts_with('j') {
             if let Some(target) = direct_target(operands) {
-                if target != name.as_str() {
-                    func.calls.insert(target.to_string());
-                } else if mnemonic == "call" {
-                    func.recursive = true;
-                }
+                targets.push((start, target, is_call));
             }
         }
-        if mnemonic == "call" {
+        if is_call {
             // The frame is complete before the first call.
             in_prologue = false;
         }
@@ -124,27 +164,45 @@ pub fn parse(disasm: &str) -> BTreeMap<String, Function> {
             _ => {}
         }
     }
-    if let Some((n, f)) = current {
-        funcs.insert(n, f);
+    // A target belongs to the function that contains it (start at or below
+    // it, last instruction at or above); a branch inside the same function
+    // is a loop, not a call, and one outside every function is ignored.
+    for (from, target, is_call) in targets {
+        let Some((&to, _)) = funcs
+            .range(..=target)
+            .next_back()
+            .filter(|(_, f)| f.end >= target)
+        else {
+            continue;
+        };
+        if to != from {
+            funcs.get_mut(&from).expect("caller").calls.insert(to);
+        } else if is_call && target == from {
+            funcs.get_mut(&from).expect("caller").recursive = true;
+        }
     }
     funcs
 }
 
-/// `0000000000400010 <name>:` -> `name`.
-fn header(line: &str) -> Option<&str> {
+/// `0000000000400010 <name>:` -> `(0x400010, "name")`.
+fn header(line: &str) -> Option<(u64, &str)> {
     let (addr, rest) = line.split_once(' ')?;
-    if addr.is_empty() || !addr.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    rest.strip_prefix('<')?.strip_suffix(">:")
+    let addr = hex(addr)?;
+    Some((addr, rest.strip_prefix('<')?.strip_suffix(">:")?))
 }
 
-/// `  400010:\tpush   %rbp` -> `("push", "%rbp")`.
-fn instruction(line: &str) -> Option<(&str, &str)> {
-    let (addr, text) = line.split_once(":\t")?;
-    if !addr.trim().bytes().all(|b| b.is_ascii_hexdigit()) {
+/// A non-empty hexadecimal number without prefix.
+fn hex(s: &str) -> Option<u64> {
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
+    u64::from_str_radix(s, 16).ok()
+}
+
+/// `  400010:\tpush   %rbp` -> `(0x400010, "push", "%rbp")`.
+fn instruction(line: &str) -> Option<(u64, &str, &str)> {
+    let (addr, text) = line.split_once(":\t")?;
+    let addr = hex(addr.trim())?;
     let text = text.trim();
     // Prefixes (`bnd jmp`, `notrack call`, `rep stos`) go before the mnemonic.
     let mut words = text.split_whitespace();
@@ -158,20 +216,15 @@ fn instruction(line: &str) -> Option<(&str, &str)> {
         rest = rest[mnemonic.len()..].trim_start();
     }
     let mnemonic = mnemonic.trim_end_matches('q');
-    Some((mnemonic, rest))
+    Some((addr, mnemonic, rest))
 }
 
-/// `400100 <name+0x14>` -> `name`; `None` for an indirect target (`*%rax`).
-fn direct_target(operands: &str) -> Option<&str> {
+/// `400100 <name+0x14>` -> `0x400100`; `None` for an indirect target
+/// (`*%rax`).
+fn direct_target(operands: &str) -> Option<u64> {
     let (addr, sym) = operands.split_once(' ')?;
-    if !addr.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    let sym = sym.strip_prefix('<')?.strip_suffix('>')?;
-    Some(match sym.rfind("+0x") {
-        Some(i) if sym[i + 3..].bytes().all(|b| b.is_ascii_hexdigit()) => &sym[..i],
-        _ => sym,
-    })
+    sym.starts_with('<').then_some(())?;
+    hex(addr)
 }
 
 /// `$0x1000,%rsp` -> `(0x1000, "%rsp")`.
@@ -190,95 +243,137 @@ pub struct CallPath {
     pub steps: Vec<(String, u64)>,
 }
 
-/// Deepest direct-call chain from `root`. A call back into a function
-/// already on the chain (recursion) is not followed: its depth would be
-/// unbounded statically, and none of the checked binaries recurse on the
-/// paths that matter (`recursive` lists them for the report).
-pub fn deepest(funcs: &BTreeMap<String, Function>, root: &str) -> Option<CallPath> {
-    fn walk<'a>(
-        funcs: &'a BTreeMap<String, Function>,
-        name: &'a str,
-        on_chain: &mut Vec<&'a str>,
-        memo: &mut BTreeMap<&'a str, CallPath>,
+/// Start address of the function called `name` (the first, if several).
+pub fn find(funcs: &Functions, name: &str) -> Option<u64> {
+    funcs.iter().find(|(_, f)| f.name == name).map(|(&a, _)| a)
+}
+
+/// Deepest direct-call chain from the function at `root`. A call back into
+/// a function already on the chain (recursion, direct or mutual) is not
+/// followed: its depth is unbounded statically.
+pub fn deepest(funcs: &Functions, root: u64) -> Option<CallPath> {
+    fn walk(
+        funcs: &Functions,
+        addr: u64,
+        on_chain: &mut Vec<u64>,
+        memo: &mut BTreeMap<u64, CallPath>,
     ) -> CallPath {
-        if let Some(p) = memo.get(name) {
+        if let Some(p) = memo.get(&addr) {
             return p.clone();
         }
-        let func = &funcs[name];
-        on_chain.push(name);
+        let func = &funcs[&addr];
+        on_chain.push(addr);
         let mut best: Option<CallPath> = None;
         for callee in &func.calls {
-            if !funcs.contains_key(callee) || on_chain.contains(&callee.as_str()) {
+            if !funcs.contains_key(callee) || on_chain.contains(callee) {
                 continue;
             }
-            let p = walk(funcs, callee, on_chain, memo);
+            let p = walk(funcs, *callee, on_chain, memo);
             if best.as_ref().is_none_or(|b| p.total > b.total) {
                 best = Some(p);
             }
         }
         on_chain.pop();
-        let mut steps = vec![(name.to_string(), func.frame)];
+        let mut steps = vec![(func.name.clone(), func.frame)];
         let mut total = func.frame;
         if let Some(b) = best {
             total += b.total;
             steps.extend(b.steps);
         }
         let path = CallPath { total, steps };
-        memo.insert(name, path.clone());
+        memo.insert(addr, path.clone());
         path
     }
-    funcs.contains_key(root).then(|| {
+    funcs.contains_key(&root).then(|| {
         let mut memo = BTreeMap::new();
         walk(funcs, root, &mut Vec::new(), &mut memo)
     })
 }
 
 /// Functions that call themselves directly (reported, never followed).
-pub fn recursive(funcs: &BTreeMap<String, Function>) -> Vec<&str> {
+pub fn recursive(funcs: &Functions) -> Vec<&str> {
     funcs
-        .iter()
-        .filter(|(_, f)| f.recursive)
-        .map(|(n, _)| n.as_str())
+        .values()
+        .filter(|f| f.recursive)
+        .map(|f| f.name.as_str())
         .collect()
 }
 
 /// The `n` largest frames, largest first.
-pub fn largest(funcs: &BTreeMap<String, Function>, n: usize) -> Vec<(&str, u64)> {
-    let mut v: Vec<(&str, u64)> = funcs.iter().map(|(k, f)| (k.as_str(), f.frame)).collect();
+pub fn largest(funcs: &Functions, n: usize) -> Vec<(&str, u64)> {
+    let mut v: Vec<(&str, u64)> = funcs.values().map(|f| (f.name.as_str(), f.frame)).collect();
     v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
     v.truncate(n);
     v
 }
 
-/// Verdict for one binary: the report lines and whether it is in budget.
-pub fn judge(label: &str, funcs: &BTreeMap<String, Function>) -> (String, bool) {
-    let mut out = String::new();
-    let Some(path) = deepest(funcs, "_start") else {
-        return (
-            format!("[xtask] stack {label}: no _start in the disassembly\n"),
-            false,
-        );
-    };
-    let top = largest(funcs, 5);
-    let (big_name, big) = top.first().copied().unwrap_or(("-", 0));
-    let ok = path.total <= PATH_BUDGET && big <= FRAME_BUDGET;
-    out.push_str(&format!(
-        "[xtask] stack {label}: deepest direct path {} of {PATH_BUDGET} bytes allowed ({USER_STACK} stack, {} left); largest frame {big} of {FRAME_BUDGET} ({big_name}){}\n",
-        path.total,
-        USER_STACK.saturating_sub(path.total),
-        if ok { "" } else { ": OVER BUDGET" },
-    ));
-    if !ok {
-        out.push_str("    deepest path:\n");
-        for (name, frame) in &path.steps {
-            out.push_str(&format!("      {frame:>6} {name}\n"));
-        }
-        out.push_str("    largest frames:\n");
-        for (name, frame) in &top {
-            out.push_str(&format!("      {frame:>6} {name}\n"));
-        }
+/// Measurement of one binary against its budget.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verdict {
+    pub label: String,
+    pub budget: Budget,
+    pub path: CallPath,
+    pub largest: Vec<(String, u64)>,
+    /// Functions that call themselves (not followed).
+    pub recursive: Vec<String>,
+}
+
+impl Verdict {
+    pub fn ok(&self) -> bool {
+        self.path.total <= self.budget.path && self.largest_frame() <= self.budget.frame
     }
-    (out, ok)
+
+    fn largest_frame(&self) -> u64 {
+        self.largest.first().map_or(0, |(_, f)| *f)
+    }
+
+    /// One line; with the deepest path and the largest frames when over
+    /// budget.
+    pub fn report(&self) -> String {
+        let (big_name, big) = self
+            .largest
+            .first()
+            .map_or(("-", 0), |(n, f)| (n.as_str(), *f));
+        let mut out = format!(
+            "[xtask] stack {}: deepest direct path {} of {} bytes allowed ({USER_STACK} stack, {} left); largest frame {big} of {} ({big_name}){}\n",
+            self.label,
+            self.path.total,
+            self.budget.path,
+            USER_STACK.saturating_sub(self.path.total),
+            self.budget.frame,
+            if self.ok() { "" } else { ": OVER BUDGET" },
+        );
+        if !self.ok() {
+            out.push_str("    deepest path:\n");
+            for (name, frame) in &self.path.steps {
+                out.push_str(&format!("      {frame:>6} {name}\n"));
+            }
+            out.push_str("    largest frames:\n");
+            for (name, frame) in &self.largest {
+                out.push_str(&format!("      {frame:>6} {name}\n"));
+            }
+            for name in &self.recursive {
+                out.push_str(&format!("    note: {name} calls itself (not followed)\n"));
+            }
+        }
+        out
+    }
+}
+
+/// Measures one binary's functions against `budget`.
+pub fn judge(label: &str, funcs: &Functions, budget: Budget) -> Result<Verdict> {
+    let root = find(funcs, "_start").ok_or_else(|| format!("{label}: no _start"))?;
+    let path = deepest(funcs, root).expect("root exists");
+    Ok(Verdict {
+        label: label.to_string(),
+        budget,
+        path,
+        largest: largest(funcs, 5)
+            .into_iter()
+            .map(|(n, f)| (n.to_string(), f))
+            .collect(),
+        recursive: recursive(funcs).into_iter().map(String::from).collect(),
+    })
 }
 
 /// Disassembles `elf` with binutils' `objdump`.
@@ -298,22 +393,35 @@ pub fn disassemble(elf: &Path) -> Result<String> {
     String::from_utf8(out.stdout).map_err(|e| format!("objdump output: {e}"))
 }
 
-/// Builds the checked drivers in the release and the dev profile and
-/// judges each binary.
+/// Binaries always reported, in budget or not: the network drivers of the
+/// incident.
+const ALWAYS_REPORTED: [&str; 2] = ["virtio_net", "rtl_net"];
+
+/// Builds every initrd program in the release and the dev profile and
+/// judges each binary. Prints the network drivers, the three binaries
+/// closest to their path budget and every one over budget.
 pub fn check() -> Result {
-    let mut failed = Vec::new();
+    let programs = build::initrd_programs()?;
+    for (bin, _, _) in EXCEPTIONS {
+        if !programs.iter().any(|p| p == bin) {
+            return Err(format!(
+                "stack::EXCEPTIONS lists '{bin}', which is not an initrd program"
+            ));
+        }
+    }
+    let mut verdicts = Vec::new();
     for release in [true, false] {
         let profile = if release { "release" } else { "debug" };
         let mut c = build::cargo();
         c.args(["build", "--target", build::KERNEL_TARGET]);
-        for (pkg, _) in CHECKED {
+        for pkg in build::USER_PACKAGES {
             c.args(["-p", pkg]);
         }
         if release {
             c.arg("--release");
         }
         build::run(c)?;
-        for (_, bin) in CHECKED {
+        for bin in &programs {
             let elf = root()
                 .join("target")
                 .join(build::KERNEL_TARGET)
@@ -321,16 +429,35 @@ pub fn check() -> Result {
                 .join(bin);
             let funcs = parse(&disassemble(&elf)?);
             let label = format!("{bin} ({})", if release { "release" } else { "dev" });
-            let (report, ok) = judge(&label, &funcs);
-            print!("{report}");
-            for r in recursive(&funcs) {
-                println!("    note: {r} calls itself (not followed)");
-            }
-            if !ok {
-                failed.push(label);
-            }
+            verdicts.push((bin.clone(), judge(&label, &funcs, budget(bin))?));
         }
     }
+    let mut closest: Vec<&Verdict> = verdicts.iter().map(|(_, v)| v).collect();
+    closest.sort_by(|a, b| (b.path.total * a.budget.path).cmp(&(a.path.total * b.budget.path)));
+    let mut shown = BTreeSet::new();
+    for (bin, v) in &verdicts {
+        if ALWAYS_REPORTED.contains(&bin.as_str()) || !v.ok() {
+            shown.insert(v.label.clone());
+        }
+    }
+    for v in closest.iter().take(3) {
+        shown.insert(v.label.clone());
+    }
+    for (_, v) in &verdicts {
+        if shown.contains(&v.label) {
+            print!("{}", v.report());
+        }
+    }
+    let failed: Vec<&str> = verdicts
+        .iter()
+        .filter(|(_, v)| !v.ok())
+        .map(|(_, v)| v.label.as_str())
+        .collect();
+    println!(
+        "[xtask] stack: {} binaries measured, {} over budget",
+        verdicts.len(),
+        failed.len()
+    );
     if failed.is_empty() {
         Ok(())
     } else {
@@ -383,7 +510,8 @@ Disassembly of section .text:
 
 0000000000400200 <leaf>:
   400200:\tadd    $0xffffffffffffff80,%rsp
-  400204:\tret
+  400204:\tje     4003f7 <dup+0x7>
+  400206:\tret
 
 0000000000400300 <tail>:
   400300:\tpush   %rbx
@@ -391,38 +519,68 @@ Disassembly of section .text:
   400306:\tcall   400999 <outside>
   40030b:\tpop    %rbx
   40030c:\tret
+
+0000000000400380 <dup>:
+  400380:\tsub    $0x10,%rsp
+  400384:\tret
+
+00000000004003f0 <dup>:
+  4003f0:\tsub    $0x2000,%rsp
+  4003f7:\tret
 ";
+
+    fn at<'a>(f: &'a Functions, name: &str) -> &'a Function {
+        &f[&find(f, name).unwrap()]
+    }
 
     #[test]
     fn frames_count_pushes_probes_and_negative_adds() {
         let f = parse(SAMPLE);
-        assert_eq!(f["_start"].frame, 8 + 8);
+        assert_eq!(at(&f, "_start").frame, 8 + 8);
         // Return address, two pushes, the probed 0xa000 and the rest; the
         // `sub` after the first call is not prologue.
-        assert_eq!(f["big::run<x::Nic>"].frame, 8 + 16 + 0xa000 + 0xf98);
+        assert_eq!(at(&f, "big::run<x::Nic>").frame, 8 + 16 + 0xa000 + 0xf98);
         // Unrolled probes: every page counts.
-        assert_eq!(f["<s::Stack<x::Nic>>::serve"].frame, 8 + 8 + 0x2200);
-        assert_eq!(f["leaf"].frame, 8 + 128);
-        assert_eq!(f["tail"].frame, 16);
+        assert_eq!(at(&f, "<s::Stack<x::Nic>>::serve").frame, 8 + 8 + 0x2200);
+        assert_eq!(at(&f, "leaf").frame, 8 + 128);
+        assert_eq!(at(&f, "tail").frame, 16);
+    }
+
+    #[test]
+    fn functions_with_the_same_name_are_both_kept() {
+        let f = parse(SAMPLE);
+        let dups: Vec<u64> = f
+            .values()
+            .filter(|x| x.name == "dup")
+            .map(|x| x.frame)
+            .collect();
+        assert_eq!(dups, [8 + 0x10, 8 + 0x2000]);
+        // The conditional tail call into the second `dup` (at an offset)
+        // reaches that one, not the first.
+        assert_eq!(
+            at(&f, "leaf").calls.iter().copied().collect::<Vec<_>>(),
+            [0x4003f0]
+        );
     }
 
     #[test]
     fn calls_are_direct_and_tail_calls_count() {
         let f = parse(SAMPLE);
-        let run = &f["big::run<x::Nic>"];
-        assert!(run.calls.contains("<s::Stack<x::Nic>>::serve"));
-        assert!(run.calls.contains("leaf"));
+        let run = at(&f, "big::run<x::Nic>");
+        let serve = find(&f, "<s::Stack<x::Nic>>::serve").unwrap();
+        assert!(run.calls.contains(&serve));
+        assert!(run.calls.contains(&find(&f, "leaf").unwrap()));
         // The probe loop's backward jump is not a call; `call *%rax` is
         // indirect and not followed.
         assert_eq!(run.calls.len(), 2);
-        assert!(f["<s::Stack<x::Nic>>::serve"].calls.contains("tail"));
+        assert!(f[&serve].calls.contains(&find(&f, "tail").unwrap()));
         assert_eq!(recursive(&f), vec!["tail"]);
     }
 
     #[test]
     fn deepest_path_follows_the_heaviest_chain() {
         let f = parse(SAMPLE);
-        let p = deepest(&f, "_start").unwrap();
+        let p = deepest(&f, find(&f, "_start").unwrap()).unwrap();
         let names: Vec<&str> = p.steps.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(
             names,
@@ -434,24 +592,63 @@ Disassembly of section .text:
             ]
         );
         assert_eq!(p.total, 16 + (24 + 0xa000 + 0xf98) + (16 + 0x2200) + 16);
-        assert!(deepest(&f, "missing").is_none());
+        assert!(deepest(&f, 0x1234).is_none());
+    }
+
+    #[test]
+    fn mutual_recursion_is_cut() {
+        let text = "\
+0000000000400000 <_start>:
+  400000:\tcall   400010 <a>
+0000000000400010 <a>:
+  400010:\tsub    $0x100,%rsp
+  400017:\tcall   400020 <b>
+0000000000400020 <b>:
+  400020:\tsub    $0x200,%rsp
+  400027:\tcall   400010 <a>
+";
+        let f = parse(text);
+        let p = deepest(&f, find(&f, "_start").unwrap()).unwrap();
+        assert_eq!(p.total, 8 + (8 + 0x100) + (8 + 0x200));
     }
 
     #[test]
     fn judge_fails_over_either_budget() {
         let f = parse(SAMPLE);
-        let (report, ok) = judge("x (release)", &f);
-        assert!(!ok);
-        assert!(report.contains("OVER BUDGET"));
-        assert!(report.contains("big::run<x::Nic>"));
+        let v = judge("x (release)", &f, DEFAULT_BUDGET).unwrap();
+        assert!(!v.ok());
+        assert!(v.report().contains("OVER BUDGET"));
+        assert!(v.report().contains("big::run<x::Nic>"));
+        assert!(v.report().contains("note: tail calls itself"));
         let mut small = f.clone();
-        small.get_mut("big::run<x::Nic>").unwrap().frame = 4096;
-        small.get_mut("<s::Stack<x::Nic>>::serve").unwrap().frame = 4096;
-        let (report, ok) = judge("x (release)", &small);
-        assert!(ok, "{report}");
+        for name in ["big::run<x::Nic>", "<s::Stack<x::Nic>>::serve"] {
+            small.get_mut(&find(&f, name).unwrap()).unwrap().frame = 4096;
+        }
+        let v = judge("x (release)", &small, DEFAULT_BUDGET).unwrap();
+        assert!(v.ok(), "{}", v.report());
         // One frame over its budget fails even with a short path.
-        small.get_mut("leaf").unwrap().frame = FRAME_BUDGET + 8;
-        assert!(!judge("x", &small).1);
+        small.get_mut(&find(&f, "leaf").unwrap()).unwrap().frame = DEFAULT_BUDGET.frame + 8;
+        assert!(!judge("x", &small, DEFAULT_BUDGET).unwrap().ok());
+        // A larger budget lets it through.
+        let wide = Budget {
+            path: USER_STACK,
+            frame: USER_STACK,
+        };
+        assert!(judge("x", &small, wide).unwrap().ok());
+        assert!(judge("x", &Functions::new(), wide).is_err());
+    }
+
+    #[test]
+    fn exceptions_carry_a_reason_and_an_incident() {
+        for (bin, b, why) in EXCEPTIONS {
+            assert!(why.contains("incident"), "{bin}: no tracking incident");
+            assert!(
+                b.path > DEFAULT_BUDGET.path || b.frame > DEFAULT_BUDGET.frame,
+                "{bin}: an exception must allow more than the default"
+            );
+            assert!(b.path < USER_STACK, "{bin}: budget over the stack");
+        }
+        assert_eq!(budget("virtio_net"), DEFAULT_BUDGET);
     }
 
     #[test]
