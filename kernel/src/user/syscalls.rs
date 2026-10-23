@@ -135,10 +135,12 @@ fn console_write(handle: Handle, ptr: u64, len: u64) -> Result<u64, Error> {
     let bytes = process::copy_from_user(ptr, len)?;
     let text = core::str::from_utf8(&bytes).map_err(|_| Error::Invalid)?;
     match &console.kind {
-        ObjectKind::SessionConsole(output) => session_console_write(output, text.as_bytes())?,
-        _ => process::console_write_current(text),
+        ObjectKind::SessionConsole(output) => session_console_write(output, text.as_bytes()),
+        _ => {
+            process::console_write_current(text);
+            Ok(len)
+        }
     }
-    Ok(len)
 }
 
 /// How long a session console write waits for room in the session's queue,
@@ -147,8 +149,10 @@ const SESSION_CONSOLE_WAIT_MS: u64 = 2000;
 
 /// Text for a session console goes to its endpoint in messages of at most
 /// `IPC_MAX_DATA` bytes and never as an empty message, which the session
-/// reader takes as the end of the session (ADR 0047).
-fn session_console_write(output: &Cap, text: &[u8]) -> Result<(), Error> {
+/// reader takes as the end of the session (ADR 0047). Returns the bytes
+/// sent: fewer than `text` when a later message could not be (audit of ADR
+/// 0047, L2), an error only when none was.
+fn session_console_write(output: &Cap, text: &[u8]) -> Result<u64, Error> {
     let endpoint = output.object();
     if endpoint.is_revoked() {
         return Err(Error::Revoked);
@@ -157,15 +161,21 @@ fn session_console_write(output: &Cap, text: &[u8]) -> Result<(), Error> {
         // `spawn_from_bytes` only wraps endpoints.
         return Err(Error::Invalid);
     };
+    let mut sent = 0;
     for chunk in text.chunks(IPC_MAX_DATA) {
-        endpoint.send_with(SESSION_CONSOLE_WAIT_MS, || {
+        let result = endpoint.send_with(SESSION_CONSOLE_WAIT_MS, || {
             Ok(Message {
                 data: chunk.to_vec(),
                 handles: Vec::new(),
             })
-        })?;
+        });
+        match result {
+            Ok(()) => sent += chunk.len() as u64,
+            Err(e) if sent == 0 => return Err(e),
+            Err(_) => break,
+        }
     }
-    Ok(())
+    Ok(sent)
 }
 
 fn console_read(handle: Handle, ptr: u64, len: u64, timeout_ms: u64) -> Result<u64, Error> {
@@ -681,7 +691,12 @@ fn spawn_from_bytes(
             .map(|uh| t.take(*uh).map_err(abi_error))
             .collect()
     })?;
-    let session_console = console_first.then(|| extra.remove(0).0);
+    // Only the send side is kept (audit of ADR 0047, L1): a handle that also
+    // reads would otherwise hold the receive side open for the child's life.
+    let session_console = console_first.then(|| {
+        let (taken, _) = extra.remove(0);
+        Cap::new(taken.object().clone(), Rights::WRITE)
+    });
     let pid = match process::spawn_with_caps(name, elf, session_console, extra, arg, dma_quota) {
         Ok(pid) => pid,
         Err(e) => {

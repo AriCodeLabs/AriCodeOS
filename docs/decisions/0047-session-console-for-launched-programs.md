@@ -38,13 +38,17 @@ Constraints:
    `console_write` on it validates the text exactly as on the kernel
    console (at most 4096 bytes, UTF-8) and sends it to the endpoint as one
    or more messages of at most `IPC_MAX_DATA` bytes, waiting up to 2 s per
-   message for queue space (backpressure, as the shell's own writes);
-   it returns `PeerClosed` once the session is gone and `Timeout` if the
-   reader stalls, and a zero-length write sends nothing. `console_read`
-   and `console_inject` refuse it (`Invalid`), and `ipc_send` refuses it
-   because it is not an endpoint: the only operation is writing non-empty
-   text. The wrapped capability keeps the endpoint's send side open
-   (ADR 0030) while any handle to the session console lives.
+   message for queue space (backpressure, as the shell's own writes). It
+   returns the bytes sent: all of them, fewer when a later message could
+   not be sent, or an error when none was (`PeerClosed` once the session
+   is gone, `Revoked` if the endpoint was revoked, `Timeout` if the reader
+   stalls); a zero-length write sends nothing. `console_read` and
+   `console_inject` refuse it (`Denied`: it has neither `READ` nor
+   `MANAGE`), and `ipc_send` refuses it (`Invalid`) because it is not an
+   endpoint: the only operation is writing non-empty text. The wrapper
+   holds a capability to the endpoint's send side only, made at spawn
+   from the handle given, which keeps that side open (ADR 0030) while any
+   handle to the session console lives.
 
 2. **Spawn places it at the console slot.** `spawn_limits` gains a flag,
    `CONSOLE_FIRST` (bit 63). With it, the first transferred handle must be
@@ -90,9 +94,19 @@ Constraints:
   the shell is killed meanwhile, sshd sees the session end when the
   program exits rather than at once.
 - A reader that stalls slows a writing program by up to 2 s per message
-  instead of losing its output; a closed session makes writes fail fast,
-  and `sys::print` ignores the error as it always did.
-- Kernel and IPC change: audited before merging (test levels skill).
+  before that message is lost; a closed session makes writes fail fast,
+  and `sys::print` ignores the error as it always did. The backpressure
+  is real because sshd stops taking session messages while it holds
+  64 KiB the client's window has not accepted, and takes at most 16 per
+  pass; typed input it sends without waiting, from a buffer of 64 KiB
+  (audit, M1 and L4).
+- A launched program's text reaches the remote terminal as written,
+  control sequences included, as `cat` of a file always did: what a
+  program prints is trusted as much as the program the owner ran.
+- Kernel and IPC change: audited before merging (test levels skill). The
+  audit (no high findings) also had the broker refuse a launch whose
+  handles would overflow its list instead of starting the program
+  without the last one (L3).
 
 ## Tests
 

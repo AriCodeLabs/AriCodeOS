@@ -5,7 +5,7 @@
 # pair and never the kernel console, and CONSOLE_FIRST refuses a handle that
 # is not an endpoint.
 name = "init.boot"
-description = "normal boot: init launches hello, sees kernel_read die and checks the SPAWNER capability"
+description = "normal boot: init launches hello, sees kernel_read die, checks the SPAWNER capability and a session console"
 level = "smoke"
 areas = ["init", "user"]
 cmdline = "qemu_exit"

@@ -425,11 +425,13 @@ latter briefly to add the region.
 
 ## Objects and handles (Phase 12, ADR 0010)
 
-- `object::KernelObject` (`Thread`, `Process`, `Console`) is referenced via
+- `object::KernelObject` (`Thread`, `Process`, `Console`, and since ADR
+  0047 `SessionConsole`, a console that writes to an endpoint) is referenced via
   `Arc` from the handle tables; processes never see pointers or
   global identifiers that confer access.
 - Each process is born with three handles: itself (`MANAGE|READ|DUPLICATE`), its
-  thread (`READ|WAIT|DUPLICATE`) and the console (`WRITE|DUPLICATE`); limit of
+  thread (`READ|WAIT|DUPLICATE`) and the console (`WRITE|DUPLICATE`; a
+  session console when the spawner asked with `CONSOLE_FIRST`); limit of
   256 handles per process.
 - `user.handles` checks from ring 3: object type, forged handle
   (`BadHandle`), a duplicate without rights that cannot write (`Denied`),

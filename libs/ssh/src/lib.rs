@@ -330,6 +330,11 @@ impl Server {
         self.flush_channel(out);
     }
 
+    /// Bytes given to `send_data` that still wait for the client's window.
+    pub fn pending_len(&self) -> usize {
+        self.channel.as_ref().map_or(0, |ch| ch.pending.len())
+    }
+
     /// Ends the session: exit status, EOF and close, once every byte given
     /// to `send_data` has gone out (the rest waits for the client's window).
     pub fn exit(&mut self, code: u32, out: &mut Vec<u8>) {

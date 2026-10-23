@@ -2,15 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Session console (ADR 0047): run from an SSH shell, or by init with an
 //! endpoint as its console, it checks from inside that its console is a
-//! console and offers nothing else, then writes two lines. Each failing
-//! step returns its number; success = 0. The checks hold on the kernel
-//! console too, so the same program serves both.
+//! console and offers nothing else, then writes two lines and, with
+//! `arg` = N, N numbered lines of 100 bytes (sshd's flow control, audit of
+//! ADR 0047, M1). Each failing step returns its number; success = 0. The
+//! checks hold on the kernel console too, so the same program serves both.
 #![no_std]
 #![no_main]
 
 use aricode_rt::sys::{self, kind, rights, Error, Handle};
 
-fn main(_arg: u64) -> u64 {
+fn main(arg: u64) -> u64 {
     if sys::object_kind(Handle::CONSOLE) != Ok(kind::CONSOLE) {
         return 1;
     }
@@ -31,6 +32,16 @@ fn main(_arg: u64) -> u64 {
     }
     sys::print(b"console probe: checks passed\n");
     sys::print(b"console probe: still writing after an empty write\n");
+    let mut line = [b'.'; 100];
+    line[99] = b'\n';
+    for n in 1..=arg {
+        let mut digits = [0u8; 20];
+        let number = aricode_rt::fmt_u64(n, &mut digits);
+        line[..14].copy_from_slice(b"console probe ");
+        line[14..14 + number.len()].copy_from_slice(number);
+        line[14 + number.len()] = b' ';
+        sys::print(&line);
+    }
     0
 }
 

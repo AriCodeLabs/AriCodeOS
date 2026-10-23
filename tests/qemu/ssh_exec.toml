@@ -7,7 +7,8 @@
 # then serves the real client. `run console_probe` checks ADR 0047: a
 # program run from a session writes to the session (its lines arrive with
 # the `[host] ssh|` prefix and never alone on the machine's console), and an
-# empty write does not end the session.
+# empty write does not end the session; `run console_probe 3000` sends
+# 300 KB through sshd's flow control and the last line arrives whole.
 name = "ssh.exec"
 description = "sshd: public-key login from the host's OpenSSH client, commands in session shells, shutdown over SSH"
 level = "full"
@@ -17,7 +18,7 @@ timeout_secs = 200
 
 [host_ssh]
 marker = "sshd: listening on port 22"
-commands = ["ls", "cat hola.txt", "write remote.txt written over ssh", "cat remote.txt", "update", "run console_probe", "shutdown"]
+commands = ["ls", "cat hola.txt", "write remote.txt written over ssh", "cat remote.txt", "update", "run console_probe", "run console_probe 3000", "shutdown"]
 idle_client = true
 
 [expect]
@@ -40,6 +41,7 @@ serial_contains = [
     "[host] ssh| console probe: checks passed",
     "[host] ssh| console probe: still writing after an empty write",
     "[host] ssh| run: console_probe exited with 0",
+    "[host] ssh| console probe 3000 ......",
     "[host] ssh exit 0",
     "ARICODEOS_SHUTDOWN",
 ]

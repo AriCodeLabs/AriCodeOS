@@ -70,6 +70,10 @@ fn session_console_check() -> bool {
         return false;
     };
     let spawned = sys::process_spawn_limited(SPAWNER, "console_probe", 0, &[console], 0, true);
+    if spawned.is_err() {
+        // Refused before the kernel took it (BadHandle, ignored, if taken).
+        let _ = sys::handle_close(console);
+    }
     let exit = spawned.and_then(|child| {
         let code = sys::process_wait(child, TIMEOUT_INFINITE);
         let _ = sys::handle_close(child);
@@ -2138,6 +2142,12 @@ impl Broker {
                 Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
         }
+        if granted.overflowed {
+            sys::print(b"AriInit: denied, ");
+            sys::print(name.as_bytes());
+            sys::print(b" would need more handles than a launch carries\n");
+            return Launched::Reply(LaunchReply::status(LaunchStatus::Failed));
+        }
         // The kernel only takes the handles if it gets to create the process;
         // on any failure the guard closes them on exit (closing one already
         // taken returns BadHandle, which is ignored).
@@ -2186,18 +2196,22 @@ impl Broker {
 }
 
 /// Handles prepared for a launch: they are closed on drop unless `take` has
-/// handed them to the kernel.
+/// handed them to the kernel. As many as a spawn transfers; one more is
+/// closed and marks the list `overflowed`, which refuses the launch
+/// instead of starting the program without it (audit of ADR 0047, L3).
 struct Granted {
-    handles: [Handle; 12],
+    handles: [Handle; sys::abi::IPC_MAX_HANDLES * 4],
     count: usize,
+    overflowed: bool,
     transferred: bool,
 }
 
 impl Granted {
     fn new() -> Self {
         Self {
-            handles: [Handle(0); 12],
+            handles: [Handle(0); sys::abi::IPC_MAX_HANDLES * 4],
             count: 0,
+            overflowed: false,
             transferred: false,
         }
     }
@@ -2206,6 +2220,7 @@ impl Granted {
             self.handles[self.count] = h;
             self.count += 1;
         } else {
+            self.overflowed = true;
             let _ = sys::handle_close(h);
         }
     }

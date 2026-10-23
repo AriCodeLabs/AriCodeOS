@@ -253,6 +253,18 @@ fn host_key(fs: &mut FsClient, entropy: &mut Entropy, seed_saved: &mut bool) -> 
     seed
 }
 
+/// Output held for a client whose window is closed: past this sshd stops
+/// taking the session's messages, so the programs writing them wait in the
+/// kernel queue instead of growing sshd's memory (audit of ADR 0047, M1).
+const OUTPUT_PENDING_MAX: usize = 64 * 1024;
+/// Session messages taken per pass, so the client's input and window
+/// adjusts are read in between.
+const OUTPUT_BURST: usize = 16;
+/// Typed input the shell has not taken yet (it reads none while a program
+/// runs); sent without waiting, so output keeps flowing meanwhile (audit
+/// of ADR 0047, L4). Input past this is dropped and said.
+const INPUT_BACKLOG_MAX: usize = 64 * 1024;
+
 /// Exit status reported to the client when the session shell died without
 /// ending the session (its output endpoint closed with no end-of-stream
 /// message): 128 + SIGSEGV, as POSIX shells report a command killed by a
@@ -319,6 +331,27 @@ fn open_session(kind: session::Kind) -> Result<Session, Error> {
     Ok(Session { input, output })
 }
 
+/// Queues `data` for the shell's input; `false` if it did not fit.
+fn queue_input(backlog: &mut Vec<u8>, data: &[u8]) -> bool {
+    if backlog.len() + data.len() > INPUT_BACKLOG_MAX {
+        return false;
+    }
+    backlog.extend_from_slice(data);
+    true
+}
+
+/// Sends what the shell's input queue takes now, without waiting.
+fn pump_input(s: &Session, backlog: &mut Vec<u8>) {
+    let mut sent = 0;
+    for chunk in backlog.chunks(abi::IPC_MAX_DATA) {
+        if sys::ipc_send(s.input, chunk, &[], 0).is_err() {
+            break;
+        }
+        sent += chunk.len();
+    }
+    backlog.drain(..sent);
+}
+
 fn send(net: &mut NetClient, sock: u16, out: &mut Vec<u8>) -> bool {
     let ok = out.is_empty() || net.tcp_send_all(sock, out).is_ok();
     out.clear();
@@ -344,8 +377,12 @@ fn serve(
     let mut buf = [0u8; 1400];
     let mut msg = [0u8; abi::IPC_MAX_DATA];
     let mut events = Vec::new();
+    let mut input = Vec::new();
+    // More session output was waiting when the last pass stopped taking it.
+    let mut more_output = false;
     'conn: loop {
-        match net.tcp_recv(sock, 20, &mut buf) {
+        let wait_ms = if more_output { 1 } else { 20 };
+        match net.tcp_recv(sock, wait_ms, &mut buf) {
             Ok(0) => break,
             Ok(n) => {
                 events.clear();
@@ -377,10 +414,13 @@ fn serve(
                         Event::Exec { command, .. } => match open_session(session::Kind::Exec) {
                             Ok(s) => {
                                 // The quiet shell runs the command, then `exit`.
-                                for part in [command.as_slice(), b"\nexit\n"] {
-                                    for chunk in part.chunks(abi::IPC_MAX_DATA) {
-                                        let _ = sys::ipc_send(s.input, chunk, &[], 2000);
-                                    }
+                                input.clear();
+                                if !queue_input(&mut input, &command)
+                                    || !queue_input(&mut input, b"\nexit\n")
+                                {
+                                    say(b"exec command too long: dropped");
+                                    input.clear();
+                                    let _ = queue_input(&mut input, b"exit\n");
                                 }
                                 session = Some(s);
                             }
@@ -390,10 +430,8 @@ fn serve(
                             }
                         },
                         Event::Data(d) => {
-                            if let Some(s) = &session {
-                                for chunk in d.chunks(abi::IPC_MAX_DATA) {
-                                    let _ = sys::ipc_send(s.input, chunk, &[], 2000);
-                                }
+                            if session.is_some() && !queue_input(&mut input, &d) {
+                                say(b"session input dropped: the shell is not reading it");
                             }
                         }
                         Event::Eof => {}
@@ -428,17 +466,28 @@ fn serve(
             send(net, sock, &mut out);
             break;
         }
+        if let Some(s) = &session {
+            pump_input(s, &mut input);
+        }
         // Shell output to the client; an empty message means it exited.
         // The output endpoint closing without one (`PeerClosed`: sshd holds
         // only its receive side) means the shell died: the session ends
         // with `SHELL_DIED_STATUS` instead of hanging until the client
-        // disconnects.
+        // disconnects. At most `OUTPUT_BURST` messages per pass, and none
+        // while the client's window holds `OUTPUT_PENDING_MAX` back.
+        let mut taken = 0;
+        more_output = false;
         while let Some(s) = &session {
+            if taken == OUTPUT_BURST || server.pending_len() >= OUTPUT_PENDING_MAX {
+                more_output = server.pending_len() < OUTPUT_PENDING_MAX;
+                break;
+            }
             let mut none = [Handle(0); 1];
             let status = match sys::ipc_receive(s.output, &mut msg, &mut none, 0) {
                 Ok((0, _)) => 0,
                 Ok((n, _)) => {
                     server.send_data(&msg[..n], &mut out);
+                    taken += 1;
                     continue;
                 }
                 Err(Error::PeerClosed) => {
@@ -448,6 +497,7 @@ fn serve(
                 Err(_) => break,
             };
             server.exit(status, &mut out);
+            input.clear();
             if let Some(s) = session.take() {
                 let _ = sys::handle_close(s.input);
                 let _ = sys::handle_close(s.output);
