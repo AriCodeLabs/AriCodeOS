@@ -5,6 +5,10 @@
   [URL|check]`, downloads into `UPDATE`) is replaced by ADR 0029 (sources,
   signed index, `update`/`upgrade`, downloads verified in memory). The
   transport rule (decision 2) and the kernel fix (decision 6) stand.
+  Consequence "downgrades are allowed when the channel version differs"
+  no longer holds: ADR 0029 refuses them, and ADR 0045 adds a separate
+  development channel whose builds reach a machine only when its owner
+  opted in and names the channel.
 
 ## Context
 

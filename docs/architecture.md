@@ -1700,6 +1700,30 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   `update.stale_index`, `update.refuse_downgrade`, `apps.upgrade_network`,
   `apps.downgrade_refused`.
 
+## Development update channel (ADR 0045)
+
+- Two channels, two keys: the release key signs `stable`, the development
+  channel's key (`keys/dev-channel/`, seed outside the repository) signs
+  builds of `develop` or a branch. `aricode_ab::Image::verify_with` and
+  `aricode_update_index::verify_channel` bind the key to the channel the
+  manifest or the index names.
+- `aricode_crypto::trust::dev_channel_key` (`ARICODE_DEV_CHANNEL_PUB`):
+  in every updater; in AriBoot only with `usb-image --dev-source` (and in
+  test builds); never in init or the installer. AriBoot writes
+  `BootState::loader_dev_channel` on every boot; the updater trusts the
+  channel only with that flag and a `dev URL` line in `updater/sources`.
+- The development manifest and index add `channel = dev` and
+  `commit = HEX`; the version is the build number, assigned by
+  `cargo xtask publish-update --channel dev` (counter beside
+  `build/update-dev/`). AriBoot passes `boot_version`, `boot_channel` and
+  `boot_commit`; `diag` prints the running system.
+- Shell: `update [--channel stable|dev]`, `update add [--channel dev] URL`,
+  `upgrade [--channel stable|dev] [--allow-downgrade]` (only `--channel`
+  moves the system to the other channel), `update rollback` (updater
+  `ROLLBACK`: schedules the inactive slot's verified image, no network).
+- Scenarios: `update.dev_channel`, `update.dev_wrong_key`,
+  `update.dev_rollback`.
+
 ## DHCP address probe (2026-10-12)
 
 After `DHCPACK` the network service probes the address with an ARP request
