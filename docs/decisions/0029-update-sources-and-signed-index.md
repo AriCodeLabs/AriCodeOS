@@ -298,7 +298,9 @@ a machine installed with `usb-image --dev-source`.
   timeout from the file service, which is never taken for a missing file
   (incident 0008).
 - Limits: four sources, four staged packages per `upgrade`, a 4 KiB index,
-  sixteen apps per index, 32 KiB packages, app names of 20 bytes, the
+  sixteen apps per index, 32 KiB packages (`aricode_pkg::PACKAGE_MAX`,
+  shared with the broker and xtask since incident 0026), app names of 20
+  bytes, the
   6 MiB download buffer (4 MiB before incident 0021; `publish-update`
   refuses a larger image and warns past three quarters of it).
 - Open: key rotation and revocation (a signed key list in the index);

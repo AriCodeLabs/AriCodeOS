@@ -393,6 +393,7 @@ fn build_external_now(
     let seed = crate::keys::signing_seed()?;
     let package = aricode_pkg::build(&name, version, &elf, &manifest, &seed, corrupt)
         .ok_or_else(|| format!("{name}: invalid package name"))?;
+    check_package_size(&name, package.len())?;
     // Post-build check (re-audit, R1): a package meant to be valid must
     // verify with the key the build embeds.
     if !corrupt && aricode_pkg::verify(&package, &crate::keys::expected_public_key()?).is_err() {
@@ -405,6 +406,18 @@ fn build_external_now(
         version,
         package,
     })
+}
+
+/// A package the machines cannot install is never produced (incident
+/// 0026): one AriFS replace writes at most `PACKAGE_MAX` bytes.
+fn check_package_size(name: &str, len: usize) -> Result {
+    let max = aricode_pkg::PACKAGE_MAX;
+    if len > max {
+        return Err(format!(
+            "{name}: package of {len} bytes, larger than the {max} a machine can install (PACKAGE_MAX, AriFS atomic replace; incident 0026)"
+        ));
+    }
+    Ok(())
 }
 
 /// `cargo xtask app-pack DIR [--version N]`: produces `build/pkgs/NAME-N.aripkg`.
@@ -523,6 +536,13 @@ pub fn check() -> Result {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn packages_machines_cannot_install_are_not_built() {
+        let max = aricode_pkg::PACKAGE_MAX;
+        assert!(super::check_package_size("app", max).is_ok());
+        assert!(super::check_package_size("app", max + 1).is_err());
+    }
+
     use super::*;
 
     /// Every workspace package is linted by `check` and, when it runs on the

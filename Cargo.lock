@@ -387,6 +387,7 @@ version = "0.13.0"
 dependencies = [
  "aricode-crypto",
  "aricode-initrd",
+ "aricode-proto",
 ]
 
 [[package]]

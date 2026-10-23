@@ -1,0 +1,24 @@
+# Incident 0026: one package limit for the whole system, what one AriFS
+# replace writes (PACKAGE_MAX = 32768). Only the host can put a larger file
+# in AriFS (disk `oversized-package`: apps/big.aripkg, 33792 bytes): the
+# broker refuses to launch it naming both sizes, and the installer leaves
+# it out of the installed list saying it is too large, not that it fails
+# verification.
+name = "apps.oversized_package"
+description = "a package over the system's limit is refused by the broker and reported as too large by the installer"
+level = "full"
+areas = ["apps", "update", "sandbox", "shell"]
+disk = "oversized-package"
+cmdline = "qemu_exit shell"
+timeout_secs = 120
+stdin = ["run big", "update", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: refused, package apps/big.aripkg is 33792 bytes; packages hold 1 to 32768 (what AriFS installs)",
+    "run: big: the broker could not launch it",
+    "installer: apps/big.aripkg is larger than the 32768 bytes a package holds (it cannot be launched or upgraded); not listed",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "big.aripkg fails verification", "launch big from AriFS"]

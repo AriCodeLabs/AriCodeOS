@@ -561,6 +561,10 @@ pub enum DiskVariant {
     /// buffer (`LARGE_IMAGE_PAD`): they verify piece by piece, and `update
     /// apply` copies without loading them (incident 0021).
     LargeA,
+    /// AriFS holds `apps/big.aripkg`, larger than `PACKAGE_MAX` (only the
+    /// host can write one): the broker and the installer must say so
+    /// (incident 0026).
+    OversizedPackage,
 }
 
 /// Padding of the `large-a` images: past `IMAGE_DOWNLOAD_MAX`, within the
@@ -601,6 +605,7 @@ impl DiskVariant {
             "wasm-bad-import" => Self::WasmBadImport,
             "usb-image" => Self::UsbImage,
             "large-a" => Self::LargeA,
+            "oversized-package" => Self::OversizedPackage,
             _ => return None,
         })
     }
@@ -850,6 +855,14 @@ pub fn write_test_disk(
         }
         DiskVariant::FsNearlyFull => fill_arifs(&mut img, PART_ARI0, FS_FREE_ENTRIES)?,
         DiskVariant::FsOneShort => fill_arifs(&mut img, PART_ARI0, FS_FREE_ENTRIES - 1)?,
+        DiskVariant::OversizedPackage => install_files(
+            &mut img,
+            PART_ARI0,
+            &[(
+                String::from("apps/big.aripkg"),
+                vec![0xAB; aricode_pkg::PACKAGE_MAX + 1024],
+            )],
+        )?,
         DiskVariant::FsCorrupt => {
             // First byte of the name of the first entry in use.
             img[(PART_ARI0.0 + aricode_arifs::TABLE_LBA) as usize * 512] ^= 0x20;
@@ -908,7 +921,8 @@ pub fn write_test_disk(
             | DiskVariant::WasmRestricted
             | DiskVariant::WasmInvalid
             | DiskVariant::WasmBadImport
-            | DiskVariant::LargeA => {}
+            | DiskVariant::LargeA
+            | DiskVariant::OversizedPackage => {}
         }
         init_ariboot(&mut img, PART_ARIBOOT, state);
     }

@@ -68,7 +68,10 @@ content, a signed manifest and transactional installation.
   hello_ext` launches it twice with its manifest.
 - The installed package is bounded by the AriFS journal (32 KiB) if it is
   to be updated atomically, and by the staging buffer (256 KiB) to be
-  launched; SDK programs take tens of KiB.
+  launched; SDK programs take tens of KiB. (Incident 0026: the two bounds
+  let a package run that nothing could update; since then one limit,
+  `aricode_pkg::PACKAGE_MAX` = the journal, holds for launching, staging,
+  installing and building.)
 - Installing and updating from inside the system (a trusted installer,
   packages with more than one version, rejecting bad signatures and cuts
   during installation) is the next part of the stage.
