@@ -5,7 +5,10 @@
 # exits QEMU as soon as the last event (Enter released) arrives, so QMP's
 # reply to that event can be lost with the process ("[host] QMP: failed
 # after 9 events (Connection reset by peer)", incident 0019) and the host's
-# tally is not asserted.
+# tally is not asserted. The test echoes each byte and the host types each
+# key after the echo of the previous one (`echo_prompt`, incident 0022):
+# QEMU's i8042 queues 16 bytes and drops the rest when the guest falls
+# behind.
 name = "console.ps2"
 description = "PS/2 keyboard (i8042) as console input: one line via IRQ1"
 level = "full"
@@ -15,6 +18,7 @@ timeout_secs = 40
 
 [host_input]
 marker = "CONSOLE_PS2_READY"
+echo_prompt = "CONSOLE_PS2_READY"
 keys = ["h", "o", "l", "a", "ret"]
 
 [expect]

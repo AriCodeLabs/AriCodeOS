@@ -14,8 +14,11 @@
 # Build:  docker build -t aricodeos-dev -f tools/docker/Dockerfile .
 # Use:    docker run --rm -it --cpus 10 --memory 12g --memory-swap 12g \
 #             -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/cargo/registry \
+#             -v "$HOME/.cache/aricodeos-lock":/run/aricodeos-lock \
 #             --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask test --all
-# (the limits leave the reference host room; the runner sizes --jobs from them)
+# (the limits leave the reference host room; the runner sizes --jobs from them;
+# the lock directory makes suites on the host and in every container run one
+# at a time, and a QEMU suite refuses to start without it, ADR 0040)
 # The checkout is mounted at its host path: artifacts in target/ embed
 # absolute paths, so host and container must see the same ones.
 
@@ -61,5 +64,8 @@ COPY tools/docker/entrypoint.sh /usr/local/bin/aricodeos-entrypoint
 # documented command overrides it with -w to the host path.
 WORKDIR /src
 ENV HOME=/tmp
+# The host's suite lock (tools/xtask/src/suite_lock.rs): one QEMU suite at a
+# time on the machine. Mount the host's $HOME/.cache/aricodeos-lock here.
+ENV ARICODEOS_SUITE_LOCK=/run/aricodeos-lock/suite.lock
 ENTRYPOINT ["/usr/local/bin/aricodeos-entrypoint"]
 CMD ["cargo", "xtask", "test"]

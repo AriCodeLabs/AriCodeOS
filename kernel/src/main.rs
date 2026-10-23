@@ -345,6 +345,7 @@ fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
         "threads" => task::scheduler::threads_selftest(),
         "sched" => task::scheduler::selftest(),
         "smp" => task::scheduler::smp_selftest(),
+        "quantum" => task::scheduler::quantum_selftest(),
         "idle" => task::scheduler::idle_selftest(),
         "iommu" => iommu::selftest(),
         "ipc" => ipc::selftest(),

@@ -1,7 +1,8 @@
 # Failure protocol (ADR 0028), incident 0001, audit 1 F14: a failed transfer
 # on a HID interrupt endpoint is recorded and recovered instead of leaving
-# the keyboard dead. `usb_fault=1:hid` treats the first HID report (the
-# Enter press typed first, harmless if lost) as a USB Transaction Error:
+# the keyboard dead. `usb_fault=1:hid` treats the first HID report (a
+# Shift press typed first: no character, harmless if lost) as a USB
+# Transaction Error:
 # the driver prints it, records a fault event, and from the idle loop stops
 # the endpoint for real (Stop Endpoint, xHCI 4.6.9; QEMU's usb-hid never
 # STALLs its interrupt IN endpoint, so the Halted branch cannot be produced
@@ -20,15 +21,18 @@
 # and mouse are left out (`usb_hid_only_input`): QEMU sends QMP input to
 # the most recently activated handler, which under `shell` is the virtio
 # keyboard (activated when its driver starts), so the keys would never
-# reach the USB keyboard. The keys are paced (`key_delay_ms`): QEMU's
-# usb-kbd holds at most 16 scancodes and drops events beyond that while the
-# driver drains it at the endpoint's polling rate (and not at all during
-# the recovery), so 30 events at QMP speed lose keystrokes.
-# It runs alone (`serial`, ADR 0040, incident 0019): the pacing is wall
-# clock while the guest's draining is guest progress, and with other QEMU
-# runs on the host the guest falls behind (`--cpus 4 --jobs 8`: "ari> shut",
-# the rest of "shutdown" dropped by the full usb-kbd queue while `diag`
-# printed).
+# reach the USB keyboard. QEMU's usb-kbd holds at most 16 scancodes and
+# drops events beyond that while the driver drains it at the endpoint's
+# polling rate (and not at all during the recovery), so the keys are typed
+# one at a time: each line after the shell's prompt and each key after the
+# shell's echo of the previous one (`echo_prompt`, incident 0022), with
+# `key_delay_ms` as a minimum. The Shift press goes out unwaited (no
+# echo), before the shell runs. Incident 0019 ran this scenario alone
+# (`serial`) because the keys were paced on the wall clock and a guest
+# slowed down by other QEMU runs fell behind ("ari> shut"); the CI run of
+# develop 484da4c lost a key that way even alone, with another container
+# loading the host ("ari> shutown"). Waiting for the echo removes the
+# dependence on host load, so it runs with the others again.
 name = "usb.hid_fault"
 description = "usbd: a failed HID report is recorded, its interrupt endpoint recovered from the idle loop and typing continues"
 level = "full"
@@ -37,13 +41,13 @@ cmdline = "qemu_exit shell usb_fault=1:hid"
 usb_hid = true
 usb_hid_only_input = true
 timeout_secs = 60
-serial = true
 
 [host_input]
 marker = "CONSOLE_BRIDGE_READY"
 key_delay_ms = 30
+echo_prompt = "ari> "
 keys = [
-    "ret",
+    "shift",
     "d", "i", "a", "g", "ret",
     "s", "h", "u", "t", "d", "o", "w", "n", "ret",
 ]

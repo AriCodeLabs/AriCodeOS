@@ -1,6 +1,9 @@
 # Phase 34: Spanish keyboard (`kbd=es`) on the PS/2 console. The host types
 # "hola", shift+period (`:` in the Spanish layout, `>` in the US one) and
-# shift+7 (`/`) over QMP; the kernel receives "hola:/".
+# shift+7 (`/`) over QMP; the kernel receives "hola:/". The 18 scancodes
+# exceed the i8042's 16-byte queue, so the host waits for the test's echo
+# of each letter (`echo_prompt`, incident 0022); the two shifted keys,
+# whose character depends on the layout, are only paced.
 name = "console.ps2_es"
 description = "PS/2 keyboard with Spanish layout: shift+period is ':' and shift+7 is '/'"
 level = "full"
@@ -10,6 +13,7 @@ timeout_secs = 40
 
 [host_input]
 marker = "CONSOLE_PS2_READY"
+echo_prompt = "CONSOLE_PS2_READY"
 keys = ["h", "o", "l", "a", "shift+dot", "shift+7", "ret"]
 
 [expect]

@@ -126,13 +126,45 @@ pub struct HostInput {
     pub keys: Vec<String>,
     pub mouse_rel: Option<(i32, i32)>,
     pub click: Option<String>,
-    /// Pause after each key event (ms). QEMU's usb-kbd queues at most 16
-    /// scancodes (`QUEUE_LENGTH`, hw/input/hid.c) and drops whole events
-    /// beyond that, while the guest drains it only at the interrupt
+    /// Minimum pause after each key event (ms). QEMU's usb-kbd queues at
+    /// most 16 scancodes (`QUEUE_LENGTH`, hw/input/hid.c) and drops whole
+    /// events beyond that, while the guest drains it only at the interrupt
     /// endpoint's polling rate: more than 8 keys typed at QMP speed lose
-    /// keystrokes on the USB keyboard.
+    /// keystrokes on the USB keyboard. A wall-clock pause alone does not
+    /// hold when the guest falls behind (incident 0022): see `echo_prompt`.
     #[serde(default)]
     pub key_delay_ms: u64,
+    /// The guest prints this text before reading each line and echoes
+    /// every typed character on serial (the shell: `ari> `). The runner
+    /// then waits for it before the first key of each line and for each
+    /// key's echo before sending the next (`typing`, incident 0022), so
+    /// at most one key is queued in the device whatever the host load.
+    pub echo_prompt: Option<String>,
+}
+
+/// Key codes QEMU's keyboards queue: usb-kbd (`QUEUE_LENGTH`,
+/// hw/input/hid.c) and the i8042 (`PS2_QUEUE_SIZE`, hw/input/ps2.c).
+const DEVICE_QUEUE: usize = 16;
+
+impl HostInput {
+    /// Incident 0022: the keys typed between two waits for the guest
+    /// (`typing::plan` with `echo_prompt`, all of them without it) must fit
+    /// in a device queue, counted in PS/2 bytes; a wall-clock delay does
+    /// not drain the queue when the guest falls behind.
+    fn check_queue(&self) -> std::result::Result<(), String> {
+        use crate::typing::{longest_unwaited_run, plan, Step};
+        let steps = match self.echo_prompt {
+            Some(_) => plan(&self.keys),
+            None => self.keys.iter().map(|k| Step::Key(k)).collect(),
+        };
+        let run = longest_unwaited_run(&steps);
+        if run > DEVICE_QUEUE {
+            return Err(format!(
+                "[host_input] types {run} key codes without waiting for the guest, more than the {DEVICE_QUEUE} QEMU's keyboards queue: set echo_prompt (incident 0022)"
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -459,6 +491,10 @@ pub fn load_from(dir: &Path) -> Result<Vec<Scenario>> {
             }
             s.check_placeholders()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
+            if let Some(h) = &s.host_input {
+                h.check_queue()
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+            }
             s.file = path;
             out.push(s);
         }
@@ -607,6 +643,22 @@ mod tests {
         for s in &all {
             assert!(!s.areas.is_empty(), "{}: no areas", s.name);
         }
+    }
+
+    /// Incident 0022: a scenario that would leave more key codes queued in
+    /// a device than QEMU's keyboards hold is refused at load (the repo's
+    /// scenarios all load: `repo_scenarios_are_valid_and_unique`).
+    #[test]
+    fn typing_more_than_a_device_queue_without_echo_waits_is_refused() {
+        let input = |extra: &str| -> HostInput {
+            toml::from_str(&format!(
+                "marker = \"M\"\nkeys = [\"s\", \"h\", \"u\", \"t\", \"d\", \"o\", \"w\", \"n\", \"ret\"]\n{extra}"
+            ))
+            .unwrap()
+        };
+        let err = input("").check_queue().unwrap_err();
+        assert!(err.contains("types 18 key codes"), "{err}");
+        input("echo_prompt = \"ari> \"").check_queue().unwrap();
     }
 
     fn scenario(name: &str, level: &str, areas: &str) -> Scenario {

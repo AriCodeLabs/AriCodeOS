@@ -16,8 +16,11 @@
 //!
 //! SMP (Phase 32): a shared ready queue; each CPU has its current thread and
 //! its idle thread (`cpu::Cpu`). Only the BSP keeps time and wakes sleepers;
-//! when a thread becomes ready and another CPU is idle, that CPU gets an IPI
-//! so it takes the thread without waiting for its next tick.
+//! when a thread becomes ready and another CPU that may run it is idle, that
+//! CPU gets an IPI so it takes the thread without waiting for its next tick.
+//! A busy CPU gives the thread its turn at the end of the running thread's
+//! quantum, which expires every quantum even when nothing else was ready
+//! (incident 0023).
 
 use super::context::switch_context;
 use super::thread::Thread;
@@ -132,17 +135,28 @@ pub fn on_tick(now: u64, bsp: bool, from_user: bool) {
     if woke > 0 {
         kick_idle();
     }
-    let expired = cpu::current().quantum_tick();
+    let expired = cpu::current().quantum_tick(QUANTUM_TICKS);
     if expired || woke > 0 {
-        PREEMPTIONS.fetch_add(1, Ordering::Relaxed);
-        switch_with(|p, c| p.preempt(c));
+        // Counted only when another thread takes the CPU: a lone thread
+        // now gets an expiry every quantum (incident 0023).
+        switch_with(|p, c| {
+            let next = p.preempt(c);
+            if next.is_some() {
+                PREEMPTIONS.fetch_add(1, Ordering::Relaxed);
+            }
+            next
+        });
     }
 }
 
-/// If another CPU is idle, takes it out of `hlt` so it checks the queue.
+/// Takes out of `hlt` the idle CPUs that can run the ready threads, one per
+/// thread (`RoundRobin::idle_cpus_to_wake`, incident 0023): a pinned thread
+/// wakes its own CPU, a batch of wakeups as many CPUs as it can use.
 fn kick_idle() {
-    if let Some(c) = cpu::idle_other_than(cpu::id()) {
-        apic::send_ipi(c.lapic_id(), apic::RESCHED_VECTOR);
+    let me = cpu::id() as usize;
+    let targets = with(|s| s.policy.idle_cpus_to_wake(me, |c| cpu::slot(c).is_online()));
+    for c in (0..cpu::MAX_CPUS).filter(|c| targets & 1 << c != 0) {
+        apic::send_ipi(cpu::slot(c).lapic_id(), apic::RESCHED_VECTOR);
     }
 }
 
@@ -639,6 +653,103 @@ pub fn selftest() {
         "sched selftest ok (busy {counts:?} in 300 ms, {switches} switches, {} preemptions, sleep 50 ms -> {slept} ticks, wait_one/wake_all)",
         st.preemptions
     );
+}
+
+/// Quantum self-test (`test=quantum`, incident 0023): a thread that never
+/// blocks runs alone on a CPU for many quanta, then a thread pinned to that
+/// CPU is woken and another one is spawned there; each must start within a
+/// few quanta, which only quantum expiry can give them (no IPI targets a
+/// busy CPU, and only the BSP preempts on waking sleepers). Needs two CPUs:
+/// main waits and measures on CPU 0, the test runs on the last one.
+pub fn quantum_selftest() {
+    use super::wait::WaitQueue;
+    use core::sync::atomic::AtomicBool;
+
+    /// Long enough for any quantum counter to expire many times.
+    const ALONE_MS: u64 = 100;
+    /// How long main waits for each late thread before giving up.
+    const GIVE_UP_TICKS: u64 = 50;
+    /// Measured in the BSP's ticks while the target CPU counts its own: on
+    /// a loaded host (TCG, other guests) the two vCPUs progress unevenly,
+    /// so a few quanta of the target can take many BSP ticks. Well below
+    /// `GIVE_UP_TICKS`; the bug shows as never (`None`), not as late.
+    const LIMIT_TICKS: u64 = 25;
+    const NOT_YET: u64 = u64::MAX;
+
+    static STOP: AtomicBool = AtomicBool::new(false);
+    static BUSY_RUNNING: AtomicBool = AtomicBool::new(false);
+    static WOKEN: AtomicBool = AtomicBool::new(false);
+    static QUEUE: WaitQueue = WaitQueue::new();
+    static WAITER_RAN_AT: AtomicU64 = AtomicU64::new(NOT_YET);
+    static SPAWNED_RAN_AT: AtomicU64 = AtomicU64::new(NOT_YET);
+    extern "C" fn busy(_: usize) {
+        BUSY_RUNNING.store(true, Ordering::Release);
+        while !STOP.load(Ordering::Relaxed) {
+            core::hint::spin_loop();
+        }
+    }
+    extern "C" fn waiter(_: usize) {
+        QUEUE.wait_until(|| WOKEN.load(Ordering::Relaxed));
+        WAITER_RAN_AT.store(crate::time::ticks(), Ordering::Release);
+    }
+    extern "C" fn spawned(_: usize) {
+        SPAWNED_RAN_AT.store(crate::time::ticks(), Ordering::Release);
+    }
+    /// Ticks from `since` until `ran_at` is set, or `None` after the wait.
+    fn latency(since: u64, ran_at: &AtomicU64) -> Option<u64> {
+        loop {
+            let at = ran_at.load(Ordering::Acquire);
+            if at != NOT_YET {
+                return Some(at.saturating_sub(since));
+            }
+            if crate::time::ticks() - since > GIVE_UP_TICKS {
+                return None;
+            }
+            sleep_ms(crate::time::MS_PER_TICK);
+        }
+    }
+
+    let cpus = cpu::online_count();
+    assert!(cpus >= 2, "test=quantum needs two CPUs, {cpus} online");
+    let target = cpus - 1;
+    set_affinity(MAIN_TID, Some(0)).unwrap();
+
+    // The waiter blocks first, while the target CPU is free.
+    let w = spawn_on("q-waiter", waiter, 0, target).unwrap();
+    while state(w) != Some(State::Blocked) {
+        sleep_ms(10);
+    }
+    // Then the busy thread has the CPU to itself.
+    let b = spawn_on("q-busy", busy, 0, target).unwrap();
+    while !BUSY_RUNNING.load(Ordering::Acquire) {
+        sleep_ms(10);
+    }
+    sleep_ms(ALONE_MS);
+    WOKEN.store(true, Ordering::Relaxed);
+    let woken_at = crate::time::ticks();
+    QUEUE.wake_one();
+    let wake = latency(woken_at, &WAITER_RAN_AT);
+
+    sleep_ms(ALONE_MS);
+    let spawned_at = crate::time::ticks();
+    let s = spawn_on("q-spawned", spawned, 0, target).unwrap();
+    let spawn = latency(spawned_at, &SPAWNED_RAN_AT);
+
+    STOP.store(true, Ordering::Relaxed);
+    while [w, b, s].iter().any(|t| state(*t).is_some()) {
+        sleep_ms(10);
+    }
+    set_affinity(MAIN_TID, None).unwrap();
+    info!(
+        "quantum selftest: CPU {target} busy alone for {ALONE_MS} ms, then a woken thread started after {wake:?} ticks and a spawned one after {spawn:?} ticks (limit {LIMIT_TICKS}, gave up after {GIVE_UP_TICKS})"
+    );
+    for (what, l) in [("woken", wake), ("spawned", spawn)] {
+        assert!(
+            l.is_some_and(|t| t <= LIMIT_TICKS),
+            "a {what} thread pinned to busy CPU {target} waited {l:?} ticks (limit {LIMIT_TICKS}): its quantum no longer expires"
+        );
+    }
+    info!("quantum selftest ok (woken after {wake:?}, spawned after {spawn:?} ticks)");
 }
 
 /// SMP self-test (`test=smp`): every MADT CPU online, pinned threads running

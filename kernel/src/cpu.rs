@@ -153,9 +153,15 @@ impl Cpu {
         self.idle_running
             .store(tid == self.idle_tid(), Ordering::Relaxed);
     }
-    /// Takes one tick off the quantum; `true` if it expired.
-    pub fn quantum_tick(&self) -> bool {
-        self.quantum_left.fetch_sub(1, Ordering::Relaxed) <= 1
+    /// Takes one tick off the quantum; `true` if it expired, and then the
+    /// quantum starts again at `quantum` even if no switch follows
+    /// (`aricode_sched::quantum_tick`, incident 0023). Only from this CPU
+    /// with IF = 0 (the timer handler), so load and store do not race.
+    pub fn quantum_tick(&self, quantum: u32) -> bool {
+        let left = self.quantum_left.load(Ordering::Relaxed);
+        let (left, expired) = aricode_sched::quantum_tick(left, quantum);
+        self.quantum_left.store(left, Ordering::Relaxed);
+        expired
     }
     /// Kernel stack of the current thread for `syscall` (owning CPU only).
     pub fn set_kernel_rsp(&self, top: u64) {
@@ -274,9 +280,4 @@ pub fn idle_clocks_at_one_instant(out: &mut alloc::vec::Vec<IdleClock>) -> u64 {
         }
     }
     lock_from(&mut online(), out)
-}
-
-/// Some CPU other than `me` that is in its idle thread (to wake it up).
-pub fn idle_other_than(me: u32) -> Option<&'static Cpu> {
-    online().find(|c| c.index != me && c.is_idle())
 }

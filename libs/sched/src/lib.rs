@@ -44,6 +44,20 @@ pub enum SchedError {
     UnknownCpu,
 }
 
+/// One timer tick of a CPU's quantum: `left` is what the running thread
+/// still has; returns what it has after the tick and whether the quantum
+/// expired. On expiry the quantum starts again at once, whether or not the
+/// scheduler then switches threads (incident 0023): a thread alone on its
+/// CPU keeps getting an expiry every `quantum` ticks, so a thread that
+/// becomes ready for that CPU later waits one quantum at most. Saturating:
+/// a counter at zero cannot wrap.
+pub fn quantum_tick(left: u32, quantum: u32) -> (u32, bool) {
+    match left.saturating_sub(1) {
+        0 => (quantum.max(1), true),
+        n => (n, false),
+    }
+}
+
 struct CpuSlot {
     current: Tid,
     idle: Tid,
@@ -162,6 +176,31 @@ impl RoundRobin {
     /// `true` if there is some ready thread `cpu` can run.
     pub fn has_ready_for(&self, cpu: usize) -> bool {
         self.ready.iter().any(|t| self.eligible(*t, cpu))
+    }
+
+    /// Idle CPUs to wake (IPI) for the ready queue, seen from CPU `me`:
+    /// each ready thread, in queue order, claims the first idle CPU other
+    /// than `me`, accepted by `online` and not yet claimed, that may run it
+    /// (its own CPU if pinned). So a batch of wakeups wakes as many idle
+    /// CPUs as can take a thread, and a pinned thread wakes its CPU, not
+    /// one that cannot run it (incident 0023). Returned as a bit mask (bit
+    /// `c` for CPU `c`; CPUs from 64 on are never chosen), so the timer
+    /// interrupt that calls it allocates nothing.
+    pub fn idle_cpus_to_wake(&self, me: usize, online: impl Fn(usize) -> bool) -> u64 {
+        let idle = (0..self.cpus.len().min(64))
+            .filter(|&c| c != me && self.is_idle(c) && online(c))
+            .fold(0u64, |m, c| m | 1 << c);
+        let mut chosen = 0u64;
+        for &t in &self.ready {
+            let free = idle & !chosen;
+            if free == 0 {
+                break;
+            }
+            if let Some(c) = (0..64).find(|&c| free & 1 << c != 0 && self.eligible(t, c)) {
+                chosen |= 1 << c;
+            }
+        }
+        chosen
     }
 
     /// Removes from the queue the first thread `cpu` can run.
@@ -509,5 +548,89 @@ mod tests {
         assert_eq!(s.state(b), Some(State::Ready), "b keeps waiting for CPU 0");
         assert!(!s.has_ready_for(1));
         assert!(s.has_ready_for(0));
+    }
+
+    /// Incident 0023: the old `fetch_sub(1) <= 1` expired at 1 -> 0 and,
+    /// with nothing else ready (no switch, no reset), wrapped to u32::MAX
+    /// on the next tick and never expired again.
+    #[test]
+    fn a_lone_thread_keeps_getting_quantum_expiries() {
+        const Q: u32 = 2;
+        let mut left = Q;
+        let mut expiries = 0;
+        for tick in 1..=1000u32 {
+            let (next, expired) = quantum_tick(left, Q);
+            assert!(next >= 1 && next <= Q, "tick {tick}: left {next}");
+            if expired {
+                expiries += 1;
+                assert_eq!(tick % Q, 0, "expiry every {Q} ticks");
+            }
+            // Nothing else is ready: the scheduler does not switch, so
+            // nobody resets the counter but `quantum_tick` itself.
+            left = next;
+        }
+        assert_eq!(expiries, 1000 / Q);
+        // A counter at zero (never set) expires and restarts, no wrap.
+        assert_eq!(quantum_tick(0, Q), (Q, true));
+        assert_eq!(quantum_tick(1, Q), (Q, true));
+        assert_eq!(quantum_tick(Q, Q), (Q - 1, false));
+        // A zero quantum still restarts at one tick.
+        assert_eq!(quantum_tick(0, 0), (1, true));
+    }
+
+    fn four_cpus() -> RoundRobin {
+        let mut s = rr();
+        for cpu in 1..4 {
+            let idle = s.allocate_tid();
+            s.add_cpu(cpu, idle).unwrap();
+        }
+        s
+    }
+
+    /// The CPUs of an `idle_cpus_to_wake` mask, in order.
+    fn cpus_of(mask: u64) -> Vec<usize> {
+        (0..64).filter(|c| mask & 1 << c != 0).collect()
+    }
+
+    #[test]
+    fn a_pinned_thread_wakes_its_own_idle_cpu() {
+        let mut s = four_cpus();
+        let t = s.allocate_tid();
+        s.add(t);
+        s.set_affinity(t, Some(3)).unwrap();
+        // CPU 0 runs main; 1, 2 and 3 are idle. Only 3 can run t.
+        assert_eq!(cpus_of(s.idle_cpus_to_wake(0, |_| true)), [3]);
+        // Not online yet: nobody to wake.
+        assert!(cpus_of(s.idle_cpus_to_wake(0, |c| c != 3)).is_empty());
+        // Pinned to the CPU doing the wakeup (busy): no IPI helps.
+        s.set_affinity(t, Some(0)).unwrap();
+        assert!(cpus_of(s.idle_cpus_to_wake(0, |_| true)).is_empty());
+    }
+
+    #[test]
+    fn a_batch_of_wakeups_wakes_one_idle_cpu_per_thread() {
+        let mut s = four_cpus();
+        let (a, b) = (s.allocate_tid(), s.allocate_tid());
+        s.add(a);
+        assert_eq!(
+            cpus_of(s.idle_cpus_to_wake(0, |_| true)),
+            [1],
+            "one thread, one CPU"
+        );
+        s.add(b);
+        assert_eq!(cpus_of(s.idle_cpus_to_wake(0, |_| true)), [1, 2]);
+        // A thread pinned to an already claimed CPU claims nothing more;
+        // the next unpinned one claims the last idle CPU.
+        let p = s.allocate_tid();
+        s.add(p);
+        s.set_affinity(p, Some(1)).unwrap();
+        let c = s.allocate_tid();
+        s.add(c);
+        assert_eq!(cpus_of(s.idle_cpus_to_wake(0, |_| true)), [1, 2, 3]);
+        // Never more than the idle CPUs, and never the caller's.
+        assert_eq!(cpus_of(s.idle_cpus_to_wake(2, |_| true)), [1, 3]);
+        // A busy CPU is not woken.
+        assert_eq!(s.yield_current(1), Some(a));
+        assert_eq!(cpus_of(s.idle_cpus_to_wake(0, |_| true)), [2, 3]);
     }
 }

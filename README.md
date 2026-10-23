@@ -77,6 +77,7 @@ docker run --rm -it -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/car
     --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask check
 docker run --rm -it --cpus 10 --memory 12g --memory-swap 12g \
     -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/cargo/registry \
+    -v "$HOME/.cache/aricodeos-lock":/run/aricodeos-lock \
     --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask test --all
 ```
 
@@ -94,7 +95,15 @@ CPU the container may use, two thirds of that with `--cpus` above 1, at
 most 10 and 6, and 1 GiB of its memory per run; see `tests/README.md`,
 "Parallel runs"). Give test containers `--cpus 10 --memory 12g
 --memory-swap 12g` on the reference host (16 CPUs) so the machine keeps
-room and stays cool, and run one suite at a time. Each container has its
+room and stays cool. One QEMU suite runs at a time on the whole machine:
+`cargo xtask test` takes an exclusive lock on
+`$HOME/.cache/aricodeos-lock/suite.lock` before its first scenario and a
+second suite waits, printing who holds it (`[xtask] waiting for another
+QEMU suite on this host (lock ...; holder: pid, host, checkout, HEAD,
+start, suite)`). Containers share it through the
+`-v "$HOME/.cache/aricodeos-lock":/run/aricodeos-lock` mount above; inside a
+container without it a QEMU suite refuses to start, since its lock would
+guard nothing. Unit tests and `check` take no lock. Each container has its
 own network namespace, so a suite in a container never collides on ports
 with one on the host or in another container (ADR 0040).
 
@@ -114,8 +123,8 @@ mkdir -p ~/aricodeos-ci-reports
 docker run -d --name aricodeos-ci --restart unless-stopped \
     --cpus 10 --memory 12g --memory-swap 12g --cpu-shares 512 \
     -v aricodeos-ci-work:/work -v aricodeos-ci-cargo:/usr/local/cargo/registry \
-    -v ~/aricodeos-ci-reports:/reports --user "$(id -u):$(id -g)" \
-    aricodeos-ci --loop
+    -v ~/aricodeos-ci-reports:/reports -v "$HOME/.cache/aricodeos-lock":/run/aricodeos-lock \
+    --user "$(id -u):$(id -g)" aricodeos-ci --loop
 docker logs -f aricodeos-ci                # progress; reports in ~/aricodeos-ci-reports/latest/
 ```
 
@@ -126,9 +135,11 @@ another branch and `--jobs N` overrides the concurrency. The suites run one
 after another, at nice 10, and `--cpus`, `--memory` and `--cpu-shares` keep
 the container from taking the machine: the runner sizes its jobs from them
 (10 CPUs give 10 jobs, 6 for the `--cpus 4` pass), so development goes on
-beside it. Stop it (`docker stop aricodeos-ci`) before running another
-suite on the same machine. A failure in its report is an incident
-(`docs/WORKFLOW.md`).
+beside it. Its two test passes run holding the suite lock (taken before
+the first, released after the second): a suite started meanwhile on the
+host or in another container waits for them, and the CI waits for it, so
+nobody has to stop the container by hand. A failure in its report is an
+incident (`docs/WORKFLOW.md`).
 
 To try the system without building it, `tools/docker/try/Dockerfile` packs
 the USB stick image into an image that boots it in QEMU with the `ari>`

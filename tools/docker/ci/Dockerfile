@@ -18,8 +18,12 @@
 #   docker run -d --name aricodeos-ci --restart unless-stopped \
 #       --cpus 10 --memory 12g --memory-swap 12g --cpu-shares 512 \
 #       -v aricodeos-ci-work:/work -v aricodeos-ci-cargo:/usr/local/cargo/registry \
-#       -v "$HOME/aricodeos-ci-reports":/reports --user "$(id -u):$(id -g)" \
+#       -v "$HOME/aricodeos-ci-reports":/reports \
+#       -v "$HOME/.cache/aricodeos-lock":/run/aricodeos-lock --user "$(id -u):$(id -g)" \
 #       aricodeos-ci --loop
+#
+# The lock directory is the host's suite lock (ADR 0040): the test passes
+# wait while another suite runs on the machine and fail without the mount.
 
 ARG DEV_IMAGE=aricodeos-dev
 FROM ${DEV_IMAGE}

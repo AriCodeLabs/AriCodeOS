@@ -4,7 +4,7 @@
 //! scenarios run `--jobs N` at a time (ADR 0040).
 
 use crate::scenario::{self, Level, Scenario};
-use crate::{build, image, parallel, ports, qemu, Cli, Result};
+use crate::{build, image, parallel, ports, qemu, suite_lock, Cli, Result};
 use std::fmt::Write as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -75,12 +75,26 @@ pub fn run(cli: &Cli, release: bool) -> Result {
         cpus_override.map_or(String::new(), |n| format!(", {n} CPUs in every scenario"))
     );
 
-    // The test hosts the guest's test programs have compiled in: one set
-    // for the whole suite, taken before anything is built so a second
-    // suite in this network namespace stops at once (ADR 0040).
-    let _responder = match level {
-        Level::Unit => None,
-        _ => Some(qemu::Responder::start()?),
+    // One QEMU suite at a time on the whole host, containers included
+    // (`suite_lock`): waits here for another suite to finish. Then the
+    // test hosts the guest's test programs have compiled in: one set for
+    // the whole suite, taken before anything is built so a second suite in
+    // this network namespace stops at once (ADR 0040).
+    let (_suite_lock, _responder) = match level {
+        Level::Unit => (None, None),
+        _ => {
+            let suite = format!(
+                "cargo xtask test, level {level:?}{}{}",
+                if areas.is_empty() {
+                    String::new()
+                } else {
+                    format!(", areas {}", areas.join(","))
+                },
+                cpus_override.map_or(String::new(), |n| format!(", --cpus {n}"))
+            );
+            let lock = suite_lock::acquire(&suite)?;
+            (Some(lock), Some(qemu::Responder::start()?))
+        }
     };
 
     // Unit level: always, even when filtering by area (a feature may want
@@ -461,6 +475,7 @@ fn run_scenario(
             mouse_rel: h.mouse_rel,
             click: h.click.as_deref(),
             key_delay_ms: h.key_delay_ms,
+            echo_prompt: h.echo_prompt.as_deref(),
         });
         let ssh_probe = match (&s.host_ssh, &ssh_key) {
             (Some(h), Some(key)) => Some(qemu::SshProbe {
