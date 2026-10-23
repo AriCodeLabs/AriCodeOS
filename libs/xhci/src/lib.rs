@@ -892,6 +892,26 @@ impl EventRing {
         Some(trb)
     }
 
+    /// Takes the TRB at the dequeue slot if the controller has written it
+    /// for this lap, reading its last dword (the one with the cycle bit,
+    /// `control`) first and the whole TRB (`trb`) only once that dword
+    /// says so. Reading the whole TRB at once can return the new cycle bit
+    /// with the parameter of the event the slot held one lap earlier: the
+    /// controller writes the 16 bytes while the driver reads them (QEMU's
+    /// device thread next to an emulated CPU that loads 16 bytes as two
+    /// halves), and the real event is then lost behind a stale one. The
+    /// caller's two reads must keep their order (volatile loads on x86).
+    pub fn take(
+        &mut self,
+        control: impl FnOnce() -> u32,
+        trb: impl FnOnce() -> Trb,
+    ) -> Option<Trb> {
+        if (control() & TRB_CYCLE != 0) != self.cycle {
+            return None;
+        }
+        self.accept(trb())
+    }
+
     /// Value to write to ERDP after processing: current pointer with EHB.
     pub fn dequeue_pointer(&self) -> u64 {
         (self.phys + (self.dequeue * Trb::LEN) as u64) | rt::ERDP_EHB
@@ -1772,6 +1792,30 @@ mod tests {
         assert_eq!(op::PORTSC_DEVICE_LOST & op::PORTSC_PEC, 0);
         // A short buffer truncates instead of panicking.
         assert_eq!(op::describe_portsc(v, &mut buf[..5]), "CCS=0");
+    }
+
+    /// The TRB is read only after its cycle dword says the controller
+    /// wrote it, so a slot still holding last lap's event is never read
+    /// whole, and an event is taken exactly once.
+    #[test]
+    fn event_ring_reads_the_cycle_dword_first() {
+        let mut e = EventRing::new(0x2000, 4);
+        let stale_control = 0u32;
+        let fresh = Trb {
+            parameter: 0x5c7140,
+            control: TRB_CYCLE | trb_type::TRANSFER_EVENT << 10,
+            ..Default::default()
+        };
+        // Not written yet: the rest of the slot is not even read.
+        assert_eq!(
+            e.take(|| stale_control, || panic!("read before its cycle bit")),
+            None
+        );
+        assert_eq!(e.dequeue, 0);
+        // Written: taken once, with what the slot holds after the check.
+        assert_eq!(e.take(|| fresh.control, || fresh), Some(fresh));
+        assert_eq!(e.dequeue, 1);
+        assert_eq!(e.take(|| stale_control, || fresh), None);
     }
 
     #[test]

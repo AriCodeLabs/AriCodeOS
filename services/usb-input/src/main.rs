@@ -1042,8 +1042,15 @@ impl Controller {
 
     /// Next event in the ring, if any; updates ERDP.
     fn next_event(&mut self) -> Option<Trb> {
-        let trb = read_trb(self.events_virt + (self.events.dequeue * Trb::LEN) as u64);
-        let ev = self.events.accept(trb)?;
+        let slot = self.events_virt + (self.events.dequeue * Trb::LEN) as u64;
+        // The cycle dword first, the whole TRB after it (`EventRing::take`):
+        // two volatile loads, which x86 keeps in order.
+        let ev = self.events.take(
+            // SAFETY: the last dword of an event ring slot, inside the
+            // driver's DMA arena (as for `read_trb`).
+            || u32::from_le(unsafe { ((slot + 12) as *const u32).read_volatile() }),
+            || read_trb(slot),
+        )?;
         self.runtime.w64(rt::ERDP, self.events.dequeue_pointer());
         Some(ev)
     }
