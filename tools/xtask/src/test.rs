@@ -453,6 +453,9 @@ fn run_scenario(
     let mut qemu_lines = Vec::new();
     let mut elapsed = Duration::ZERO;
     let mut logs: Vec<(std::path::PathBuf, String)> = Vec::new();
+    // The kernel seed the shared disk held before each boot (ADR 0043): a
+    // fresh disk holds none.
+    let mut seed_before = None;
     for (i, run) in runs.iter().enumerate() {
         // Each boot has its own ESP (its cmdline); the disk is shared.
         let esp_name = if multi {
@@ -579,6 +582,18 @@ fn run_scenario(
         }
         if cap.timed_out {
             problems.push(format!("{prefix}timeout {}s", s.timeout_secs));
+        }
+        if expect.seed_store.is_some() || multi {
+            let seed_after = std::fs::read(workdir.join("disk.img"))
+                .ok()
+                .and_then(|img| image::seed_record(&img));
+            if let Some(why) = expect
+                .seed_store
+                .and_then(|want| want.check(seed_before.as_ref(), seed_after.as_ref()))
+            {
+                problems.push(format!("{prefix}{why}"));
+            }
+            seed_before = seed_after;
         }
         logs.push((log, cap.serial));
         if !problems.is_empty() {

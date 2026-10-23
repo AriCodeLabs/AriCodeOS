@@ -167,6 +167,49 @@ impl HostInput {
     }
 }
 
+/// The kernel seed store in the test disk's `ARIBOOT` after a boot (ADR
+/// 0043), as the runner reads it from the disk image (`image::seed_record`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SeedStore {
+    /// No intact seed copy.
+    Absent,
+    /// An intact seed different from the one the disk held before this
+    /// boot (a fresh disk holds none).
+    Changed,
+}
+
+impl SeedStore {
+    /// `None` if `after` (the record after the boot) matches, given
+    /// `before` (the record before it); otherwise what went wrong. The
+    /// seed itself is never part of the message.
+    pub fn check(
+        self,
+        before: Option<&aricode_ab::seed::Record>,
+        after: Option<&aricode_ab::seed::Record>,
+    ) -> Option<String> {
+        match (self, after) {
+            (Self::Absent, None) => None,
+            (Self::Absent, Some(r)) => Some(format!(
+                "seed_store: the disk holds a seed (generation {}), expected none",
+                r.generation
+            )),
+            (Self::Changed, None) => Some(String::from(
+                "seed_store: the disk holds no seed after the boot",
+            )),
+            (Self::Changed, Some(r)) if before == Some(r) => Some(format!(
+                "seed_store: the seed did not change in this boot (generation {})",
+                r.generation
+            )),
+            (Self::Changed, Some(r)) if before.is_some_and(|b| b.seed == r.seed) => Some(format!(
+                "seed_store: the same seed under a new generation ({})",
+                r.generation
+            )),
+            (Self::Changed, Some(_)) => None,
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Expect {
@@ -186,6 +229,8 @@ pub struct Expect {
     /// The runner had to kill QEMU on seeing `kill_on` (power cut).
     #[serde(default)]
     pub killed: bool,
+    /// The kernel seed store after this boot (ADR 0043).
+    pub seed_store: Option<SeedStore>,
 }
 
 impl Expect {
@@ -195,6 +240,7 @@ impl Expect {
             && self.serial_absent.is_empty()
             && self.serial_order.is_empty()
             && !self.killed
+            && self.seed_store.is_none()
     }
 }
 
@@ -402,6 +448,7 @@ impl Expect {
             serial_absent: all(&self.serial_absent),
             serial_order: all(&self.serial_order),
             killed: self.killed,
+            seed_store: self.seed_store,
         }
     }
 
@@ -615,6 +662,34 @@ mod tests {
         );
         assert_eq!(first_out_of_order(log, &order(&["missing"])), Some(0));
         assert_eq!(first_out_of_order(log, &[]), None);
+    }
+
+    #[test]
+    fn seed_store_check() {
+        use aricode_ab::seed::Record;
+        let a = Record {
+            generation: 1,
+            seed: [1; 32],
+        };
+        let b = Record {
+            generation: 2,
+            seed: [2; 32],
+        };
+        let same_seed = Record { generation: 3, ..a };
+        assert_eq!(SeedStore::Absent.check(None, None), None);
+        assert!(SeedStore::Absent.check(None, Some(&a)).is_some());
+        assert_eq!(SeedStore::Changed.check(None, Some(&a)), None);
+        assert_eq!(SeedStore::Changed.check(Some(&a), Some(&b)), None);
+        assert!(SeedStore::Changed.check(Some(&a), None).is_some());
+        assert!(SeedStore::Changed.check(Some(&a), Some(&a)).is_some());
+        let err = SeedStore::Changed
+            .check(Some(&a), Some(&same_seed))
+            .unwrap();
+        assert!(err.contains("same seed"), "{err}");
+        let e: Expect = toml::from_str("seed_store = \"changed\"\n").unwrap();
+        assert_eq!(e.seed_store, Some(SeedStore::Changed));
+        assert!(!e.is_empty());
+        assert!(toml::from_str::<Expect>("seed_store = \"kept\"\n").is_err());
     }
 
     #[test]

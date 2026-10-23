@@ -398,15 +398,21 @@ fn cpus() {
     }
 }
 
-/// What seeded the kernel generator (`sysinfo::RANDOM_SOURCE`, ADR 0039),
-/// in one line: `entropy  rdrand`, or `entropy  TSC + interrupts (N
-/// samples, M events): weak`. It decides the quality of sshd's host key
-/// and netd's TCP secret, so the owner can read it over SSH.
+/// What seeded the kernel generator (`sysinfo::RANDOM_SOURCE`, ADR 0039,
+/// ADR 0043), in one line: `entropy  rdrand`,
+/// `entropy  TSC + interrupts + carried seed`, or
+/// `entropy  TSC + interrupts (N samples, M events): weak, no carried
+/// seed (first boot)`. It decides the quality of sshd's host key and
+/// netd's TCP secret, so the owner can read it over SSH.
 fn entropy() {
     let mut text = [0u8; abi::sysinfo::RandomSource::SUMMARY_MAX];
     let line = match sys::random_source(SYSTEM) {
-        Some(r) if r.source.is_hardware() => alloc::format!("entropy  {}\n", r.summary(&mut text)),
-        Some(r) => alloc::format!("entropy  {}: weak\n", r.summary(&mut text)),
+        Some(r) if r.is_strong() => alloc::format!("entropy  {}\n", r.summary(&mut text)),
+        Some(r) => alloc::format!(
+            "entropy  {}: weak, {}\n",
+            r.summary(&mut text),
+            r.carried.reason()
+        ),
         None => {
             alloc::string::String::from("entropy  unknown (the kernel does not report it): weak\n")
         }

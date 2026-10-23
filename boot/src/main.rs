@@ -5,6 +5,9 @@
 //! Sequence (section 11 of the master document):
 //!   GOP framebuffer -> ACPI RSDP -> load kernel.elf -> reserve memory ->
 //!   page tables -> BootInfo -> ExitBootServices -> jump to the kernel.
+//!
+//! Before that, on the disk with the `ARIBOOT` partition: the carried
+//! kernel seed (its successor written first, ADR 0043) and the A/B slot.
 
 #![no_std]
 #![no_main]
@@ -13,6 +16,7 @@ extern crate alloc;
 
 mod memmap;
 mod qemu;
+mod seed;
 mod slots;
 
 use alloc::vec::Vec;
@@ -55,8 +59,9 @@ fn main() -> Status {
     let qemu_exit = CmdLine::from_bytes(&cmdline_bytes).has(keys::QEMU_EXIT);
 
     // A/B boot: if there is a valid slot image, the kernel learns from the
-    // cmdline where it booted from (and whether it must confirm it).
-    let loaded = slots::load();
+    // cmdline where it booted from (and whether it must confirm it). The
+    // same disk carries the kernel seed (ADR 0043).
+    let slots::Found { loaded, seed } = slots::load();
     if let Some(l) = &loaded {
         cmdline_bytes.extend_from_slice(b" boot_slot=");
         cmdline_bytes.extend_from_slice(l.slot.name().as_bytes());
@@ -65,7 +70,7 @@ fn main() -> Status {
         }
     }
 
-    match run(&cmdline_bytes, loaded) {
+    match run(&cmdline_bytes, loaded, seed) {
         Ok(never) => match never {},
         Err(e) => {
             error!("AriBoot: unrecoverable failure: {e}");
@@ -81,6 +86,7 @@ fn main() -> Status {
 fn run(
     cmdline_bytes: &[u8],
     loaded: Option<slots::Loaded>,
+    seed: seed::Carried,
 ) -> Result<core::convert::Infallible, &'static str> {
     // 1. GOP framebuffer (optional: without GOP we continue with serial only).
     let framebuffer = framebuffer_info();
@@ -279,7 +285,13 @@ fn run(
         cmdline_size,
         phys_map_offset: PHYS_MAP_BASE,
         phys_map_limit: phys_limit,
+        carried_seed: seed.seed,
+        carried_seed_status: seed.status,
+        _reserved: 0,
     };
+    // The kernel's share now lives only in `boot_info` (wiped below once
+    // it is in its page) and, after the jump, in the kernel.
+    drop(seed);
 
     info!("ExitBootServices -> AriKernel");
     // Beacons for hardware without serial (docs/hardware.md): white before
@@ -306,6 +318,8 @@ fn run(
     let boot_info_ptr = boot_info_page.as_ptr() as *mut BootInfo;
     // SAFETY: our own page, aligned, identity-mapped in the new tables.
     unsafe { boot_info_ptr.write(boot_info) };
+    // This stack becomes free memory for the kernel: no seed left on it.
+    aricode_crypto::wipe(&mut boot_info.carried_seed);
 
     // 10. Jump. The stack and BootInfo are handed over through the physical
     // map so the kernel never depends on the identity map. rsp = top - 8 to

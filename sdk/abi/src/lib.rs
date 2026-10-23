@@ -393,12 +393,14 @@ pub mod sysinfo {
     /// The kernel command line as given by the loader (UTF-8 bytes): any
     /// program can read boot flags such as `strict` (ADR 0028).
     pub const CMDLINE: u64 = 11;
-    /// One [`RandomSource`] (32 bytes): what seeded the kernel generator
-    /// that `RANDOM` reads, and how much has been mixed into it since
-    /// (ADR 0039). Only the source and counters: never generator state,
-    /// seed or pool material. Later fields are only appended after
-    /// [`RandomSource::LEN`]: readers pass a larger buffer and decode the
-    /// first `LEN` bytes.
+    /// One [`RandomSource`] (40 bytes): what seeded the kernel generator
+    /// that `RANDOM` reads, how much has been mixed into it since (ADR
+    /// 0039) and whether a seed carried from the previous boot was mixed
+    /// in (ADR 0043). Only the source, counters and that status: never
+    /// generator state, seed or pool material. Later fields are only
+    /// appended after [`RandomSource::LEN`]: readers pass a larger buffer
+    /// and decode the first `LEN` bytes (a kernel before ADR 0043 answers
+    /// [`RandomSource::LEN_V1`]).
     pub const RANDOM_SOURCE: u64 = 12;
     /// As many [`StackEntry`] as fit in the buffer, one per live process:
     /// how much of its user stack it has touched since it started
@@ -442,8 +444,54 @@ pub mod sysinfo {
         }
     }
 
-    /// Reply of `RANDOM_SOURCE` (32 bytes): the seed's source and the
-    /// inputs mixed into the generator since it was seeded, seed included.
+    /// Whether a kernel seed carried from the previous boot was mixed into
+    /// the generator (ADR 0043), and if not, why. The number is byte 32 of
+    /// [`RandomSource`], the `BootInfo::carried_seed_status` AriBoot
+    /// handed over and the code of the `random seed ...` fault events.
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum CarriedSeed {
+        /// No seed store (no `ARIBOOT` partition), an older loader, or an
+        /// older kernel that does not report it.
+        NoStore = 0,
+        /// Mixed in: the previous boot's seed, never used before.
+        Mixed = 1,
+        /// The store is blank: the first boot of this disk.
+        Missing = 2,
+        /// The store holds no intact copy or could not be read.
+        Unreadable = 3,
+        /// A seed was found but AriBoot could not write its successor, so
+        /// it was not used (the next boot would find it again).
+        NotSaved = 4,
+    }
+
+    impl CarriedSeed {
+        /// Unknown values read as `NoStore`: nothing was mixed in.
+        pub fn from_u8(v: u8) -> Self {
+            match v {
+                1 => Self::Mixed,
+                2 => Self::Missing,
+                3 => Self::Unreadable,
+                4 => Self::NotSaved,
+                _ => Self::NoStore,
+            }
+        }
+
+        /// What happened to the carried seed, for console and `diag` lines.
+        pub fn reason(self) -> &'static str {
+            match self {
+                Self::Mixed => "carried seed mixed in",
+                Self::NoStore => "no seed store on the boot disk",
+                Self::Missing => "no carried seed (first boot)",
+                Self::Unreadable => "carried seed unreadable",
+                Self::NotSaved => "carried seed not used: the loader could not save its successor",
+            }
+        }
+    }
+
+    /// Reply of `RANDOM_SOURCE` (40 bytes): the seed's source, the inputs
+    /// mixed into the generator since it was seeded, seed included, and the
+    /// carried seed's status.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct RandomSource {
         pub source: EntropySource,
@@ -454,15 +502,28 @@ pub mod sysinfo {
         /// Interrupts whose timing reached the generator through the pool
         /// (counted up to the last read).
         pub interrupt_events: u64,
+        /// The seed carried from the previous boot (ADR 0043).
+        pub carried: CarriedSeed,
     }
 
     impl RandomSource {
-        pub const LEN: usize = 32;
+        pub const LEN: usize = 40;
+        /// Reply of a kernel before ADR 0043 (no `carried` byte).
+        pub const LEN_V1: usize = 32;
         /// Room for the longest [`RandomSource::summary`].
         pub const SUMMARY_MAX: usize = 80;
 
-        /// `rdrand`, or `TSC + interrupts (N samples, M events)`: the
-        /// wording netd, sshd and `diag` share.
+        /// Secrets drawn now are not weak: a hardware source seeded the
+        /// generator, or a seed carried from the previous boot was mixed
+        /// in (ADR 0043: it holds what every earlier boot gathered and is
+        /// never used twice).
+        pub fn is_strong(&self) -> bool {
+            self.source.is_hardware() || self.carried == CarriedSeed::Mixed
+        }
+
+        /// `rdrand`, `rdrand + carried seed`, `TSC + interrupts + carried
+        /// seed`, or `TSC + interrupts (N samples, M events)` when weak:
+        /// the wording netd, sshd and `diag` share.
         pub fn summary<'a>(&self, buf: &'a mut [u8; Self::SUMMARY_MAX]) -> &'a str {
             struct Cursor<'b> {
                 buf: &'b mut [u8],
@@ -480,8 +541,14 @@ pub mod sysinfo {
                 }
             }
             let mut c = Cursor { buf, len: 0 };
-            let _ = if self.source.is_hardware() {
-                core::fmt::Write::write_str(&mut c, self.source.label())
+            let _ = if self.is_strong() {
+                core::fmt::Write::write_str(&mut c, self.source.label()).and_then(|()| {
+                    if self.carried == CarriedSeed::Mixed {
+                        core::fmt::Write::write_str(&mut c, " + carried seed")
+                    } else {
+                        Ok(())
+                    }
+                })
             } else {
                 core::fmt::write(
                     &mut c,
@@ -504,12 +571,15 @@ pub mod sysinfo {
             b[8..16].copy_from_slice(&self.hardware_samples.to_le_bytes());
             b[16..24].copy_from_slice(&self.tsc_samples.to_le_bytes());
             b[24..32].copy_from_slice(&self.interrupt_events.to_le_bytes());
+            b[32] = self.carried as u8;
             b
         }
 
-        /// `None` for a short reply or a source this build does not know.
+        /// `None` for a reply shorter than [`Self::LEN_V1`] or a source
+        /// this build does not know. A `LEN_V1` reply (an older kernel)
+        /// has no carried seed.
         pub fn decode(b: &[u8]) -> Option<Self> {
-            if b.len() < Self::LEN {
+            if b.len() < Self::LEN_V1 {
                 return None;
             }
             Some(Self {
@@ -517,6 +587,9 @@ pub mod sysinfo {
                 hardware_samples: u64::from_le_bytes(b[8..16].try_into().ok()?),
                 tsc_samples: u64::from_le_bytes(b[16..24].try_into().ok()?),
                 interrupt_events: u64::from_le_bytes(b[24..32].try_into().ok()?),
+                carried: b
+                    .get(32)
+                    .map_or(CarriedSeed::NoStore, |&v| CarriedSeed::from_u8(v)),
             })
         }
     }
@@ -1069,17 +1142,21 @@ mod tests {
             hardware_samples: 0,
             tsc_samples: 64 + 7,
             interrupt_events: 1234,
+            carried: CarriedSeed::Missing,
         };
         let b = r.encode();
         assert_eq!(b.len(), RandomSource::LEN);
         assert_eq!(b[0], 2, "the source number is the fault code");
         assert!(b[1..8].iter().all(|&x| x == 0), "reserved bytes are zero");
+        assert_eq!(b[32], 2, "the carried status is the fault code");
+        assert!(b[33..].iter().all(|&x| x == 0), "reserved bytes are zero");
         assert_eq!(RandomSource::decode(&b), Some(r));
         let hw = RandomSource {
             source: EntropySource::Rdrand,
             hardware_samples: 9,
             tsc_samples: 65,
             interrupt_events: u64::MAX,
+            carried: CarriedSeed::NoStore,
         };
         assert_eq!(RandomSource::decode(&hw.encode()), Some(hw));
         assert!(hw.source.is_hardware() && !r.source.is_hardware());
@@ -1100,10 +1177,80 @@ mod tests {
             .summary(&mut text)
             .ends_with("18446744073709551615 events)"));
         assert!(RandomSource::decode(&b[..31]).is_none());
+        // An older kernel's 32-byte reply: no carried seed.
+        assert_eq!(
+            RandomSource::decode(&b[..RandomSource::LEN_V1]),
+            Some(RandomSource {
+                carried: CarriedSeed::NoStore,
+                ..r
+            })
+        );
+        // A later kernel's longer reply still decodes.
+        let mut longer = [0u8; 2 * RandomSource::LEN];
+        longer[..RandomSource::LEN].copy_from_slice(&b);
+        assert_eq!(RandomSource::decode(&longer), Some(r));
         for unknown in [0u8, 3, 0xFF] {
             let mut bad = b;
             bad[0] = unknown;
             assert!(RandomSource::decode(&bad).is_none(), "source {unknown}");
+        }
+    }
+
+    #[test]
+    fn carried_seed_counts_as_strong() {
+        use super::sysinfo::*;
+        let weak = RandomSource {
+            source: EntropySource::TscInterrupts,
+            hardware_samples: 0,
+            tsc_samples: 67,
+            interrupt_events: 12,
+            carried: CarriedSeed::Missing,
+        };
+        assert!(!weak.is_strong());
+        let mut text = [0u8; RandomSource::SUMMARY_MAX];
+        assert_eq!(
+            weak.summary(&mut text),
+            "TSC + interrupts (67 samples, 12 events)"
+        );
+        let carried = RandomSource {
+            carried: CarriedSeed::Mixed,
+            ..weak
+        };
+        assert!(carried.is_strong());
+        assert_eq!(
+            carried.summary(&mut text),
+            "TSC + interrupts + carried seed"
+        );
+        let both = RandomSource {
+            source: EntropySource::Rdrand,
+            hardware_samples: 8,
+            ..carried
+        };
+        assert!(both.is_strong());
+        assert_eq!(both.summary(&mut text), "rdrand + carried seed");
+        for (v, c) in [
+            (0, CarriedSeed::NoStore),
+            (1, CarriedSeed::Mixed),
+            (2, CarriedSeed::Missing),
+            (3, CarriedSeed::Unreadable),
+            (4, CarriedSeed::NotSaved),
+            (5, CarriedSeed::NoStore),
+            (0xFF, CarriedSeed::NoStore),
+        ] {
+            assert_eq!(CarriedSeed::from_u8(v), c, "{v}");
+            if v < 5 {
+                assert_eq!(c as u8, v);
+            }
+        }
+        // Only `Mixed` makes a TSC-seeded generator strong.
+        for c in [
+            CarriedSeed::NoStore,
+            CarriedSeed::Missing,
+            CarriedSeed::Unreadable,
+            CarriedSeed::NotSaved,
+        ] {
+            assert!(!RandomSource { carried: c, ..weak }.is_strong());
+            assert!(!c.reason().is_empty());
         }
     }
 
