@@ -6,11 +6,15 @@
 //! cargo xtask build [--debug]                 builds AriBoot and AriKernel
 //! cargo xtask image [--debug]                 build + assembles build/esp/
 //! cargo xtask run   [--debug] [--cmdline S] [--cpus N] [--usb-image] [--usb-hid]   image + interactive QEMU
-//! cargo xtask usb-image [--cmdline S] [--authorized-key KEY.pub] [--update-source URL] [--signing-key DIR]  GPT image for a USB stick at build/aricodeos-usb.img
+//! cargo xtask usb-image [--cmdline S] [--authorized-key KEY.pub] [--update-source URL] [--dev-source URL] [--signing-key DIR]  GPT image for a USB stick at build/aricodeos-usb.img
+//!                                             (--dev-source: the machine opts in to the development channel, ADR 0045)
 //! cargo xtask publish-update [--version N | --no-system] [--app DIR:VERSION]... [--no-legacy-manifest] [--signing-key DIR]
 //!                                             update source in build/update/: signed image, packages, index + index.sig, ADR 0027 manifest.txt (ADR 0029)
-//! cargo xtask serve-update [publish-update options] [--port P]  publish-update + HTTP server for `update` on the machines (default port 8080)
-//!     --signing-key DIR                       sign with DIR/ed25519.seed and build with DIR/ed25519.pub (default keys/dev, with a warning)
+//! cargo xtask publish-update --channel dev [--signing-key DIR]
+//!                                             development build in build/update-dev/: the next build number and this checkout's commit (ADR 0045)
+//! cargo xtask serve-update [publish-update options] [--port P]  publish-update + HTTP server for `update` on the machines (default port 8080, 8081 for --channel dev)
+//!     --signing-key DIR                       sign with DIR/ed25519.seed and build with DIR/ed25519.pub (default keys/dev, with a warning;
+//!                                             --channel dev: the development channel's key, e.g. ~/.config/aricodeos/dev-signing-key)
 //! cargo xtask test  [opciones]                test levels (see tests/README.md)
 //! cargo xtask fs-cat DISK [NAME]             reads a file from ARI0 (or lists it) in an image or dump
 //!     --level unit|smoke|full                 default: unit + smoke
@@ -96,26 +100,28 @@ fn main() -> ExitCode {
             cli.flag("--usb-image"),
             cli.flag("--usb-hid"),
         ),
-        "publish-update" => signing_key(&cli)
-            .and_then(|()| channel_flags(&cli))
-            .and_then(|c| image::publish_update_to(&image::update_dir(), release, &c))
+        "publish-update" => publication(&cli)
+            .and_then(|p| image::publish_update_to(&image::update_dir_for(p.channel), release, &p))
             .map(|_| ()),
-        "serve-update" => signing_key(&cli)
-            .and_then(|()| channel_flags(&cli))
-            .and_then(|c| image::publish_update_to(&image::update_dir(), release, &c))
-            .and_then(|dir| {
-                qemu::serve_update(
-                    &dir,
-                    cli.value("--port")
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(8080),
-                )
-            }),
+        "serve-update" => publication(&cli).and_then(|p| {
+            let dir = image::publish_update_to(&image::update_dir_for(p.channel), release, &p)?;
+            let default_port = match p.channel {
+                aricode_ab::Channel::Stable => 8080,
+                aricode_ab::Channel::Dev => 8081,
+            };
+            qemu::serve_update(
+                &dir,
+                cli.value("--port")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(default_port),
+            )
+        }),
         "usb-image" => signing_key(&cli).and_then(|()| image::build_usb_image(
             release,
             cli.value("--cmdline").unwrap_or("shell"),
             cli.value("--authorized-key").map(Path::new),
             cli.value("--update-source"),
+            cli.value("--dev-source"),
         ))
             .map(|p| {
                 println!(
@@ -191,9 +197,40 @@ pub fn app_spec(spec: &str) -> Result<(String, u32)> {
     Ok((dir.to_string(), version))
 }
 
+/// `--channel stable|dev` (default stable), the key that signs it, and
+/// what it publishes (ADR 0045).
+fn publication(cli: &Cli) -> Result<image::Publication> {
+    let channel = match cli.value("--channel") {
+        None if cli.flag("--channel") => return Err(String::from("--channel: stable or dev")),
+        None => aricode_ab::Channel::Stable,
+        Some(c) => {
+            aricode_ab::Channel::parse(c).ok_or_else(|| format!("--channel {c}: stable or dev"))?
+        }
+    };
+    keys::select_keys(cli.value("--signing-key").map(Path::new), channel)?;
+    match channel {
+        aricode_ab::Channel::Stable => channel_flags(cli),
+        aricode_ab::Channel::Dev => {
+            // The build number is the source's own (one above the last
+            // published), never typed: no hand-picked versions.
+            for flag in ["--version", "--no-system", "--app", "--no-legacy-manifest"] {
+                if cli.flag(flag) {
+                    return Err(format!(
+                        "--channel dev: {flag} does not apply (a development source offers one system image, numbered automatically)"
+                    ));
+                }
+            }
+            Ok(image::Publication {
+                channel,
+                ..image::Publication::default()
+            })
+        }
+    }
+}
+
 /// What `publish-update` publishes: `--version N` (default 1) or
 /// `--no-system`, and `--app DIR:VERSION` for each package.
-fn channel_flags(cli: &Cli) -> Result<image::Channel> {
+fn channel_flags(cli: &Cli) -> Result<image::Publication> {
     let system = if cli.flag("--no-system") {
         None
     } else {
@@ -204,7 +241,7 @@ fn channel_flags(cli: &Cli) -> Result<image::Channel> {
                 .unwrap_or(1),
         )
     };
-    Ok(image::Channel {
+    Ok(image::Publication {
         system,
         apps: cli
             .values("--app")
@@ -212,8 +249,7 @@ fn channel_flags(cli: &Cli) -> Result<image::Channel> {
             .map(app_spec)
             .collect::<Result<_>>()?,
         legacy_manifest: !cli.flag("--no-legacy-manifest"),
-        tamper_index: false,
-        tamper_image: false,
+        ..image::Publication::default()
     })
 }
 

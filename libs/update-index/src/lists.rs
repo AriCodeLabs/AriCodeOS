@@ -9,6 +9,10 @@
 //! [plan]                                   written by `update`, read by `upgrade`
 //! system 3
 //! app hello_ext 2
+//!
+//! [plan]                                   `update --channel dev` (ADR 0045)
+//! channel dev
+//! system dev 7
 //! [staged]                                 written by `upgrade`, read by the installer
 //! pkg-1.aripkg hello_ext 2 <sha256>
 //! ```
@@ -19,6 +23,7 @@ use crate::index::valid_app_name;
 use crate::{staged_package_file, MAX_STAGED};
 use alloc::string::String;
 use alloc::vec::Vec;
+use aricode_ab::Channel;
 use aricode_crypto::unhex;
 use core::fmt::Write;
 
@@ -178,43 +183,65 @@ pub fn parse_installed(text: &str) -> (Vec<(&str, u32)>, usize) {
     (apps, rejected)
 }
 
-/// One item `update` reported as installable.
+/// One item `update` reported as installable: a system image of a channel
+/// (its version, or build number for `Dev`), or an app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanItem<'a> {
-    System(u32),
+    System(Channel, u32),
     App(&'a str, u32),
 }
 
-pub fn encode_plan(items: &[PlanItem]) -> String {
+/// What the last `update` reported, for the channel it ran for (ADR 0045):
+/// `upgrade --channel C` follows only a plan made for `C`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Plan<'a> {
+    pub channel: Channel,
+    pub items: Vec<PlanItem<'a>>,
+}
+
+/// A stable plan is written as before ADR 0045 (no `channel` line).
+pub fn encode_plan(channel: Channel, items: &[PlanItem]) -> String {
     let mut out = String::new();
+    if channel == Channel::Dev {
+        let _ = writeln!(out, "channel dev");
+    }
     for item in items {
         let _ = match item {
-            PlanItem::System(v) => writeln!(out, "system {v}"),
+            PlanItem::System(Channel::Stable, v) => writeln!(out, "system {v}"),
+            PlanItem::System(Channel::Dev, v) => writeln!(out, "system dev {v}"),
             PlanItem::App(name, v) => writeln!(out, "app {name} {v}"),
         };
     }
     out
 }
 
-/// The plan; rejected lines are counted.
-pub fn parse_plan(text: &str) -> (Vec<PlanItem<'_>>, usize) {
-    let mut items = Vec::new();
+/// The plan; rejected lines are counted. A plan without a `channel` line is
+/// a stable one; a second `channel` line is rejected (the first stands).
+pub fn parse_plan(text: &str) -> (Plan<'_>, usize) {
+    let mut plan = Plan::default();
+    let mut channel_seen = false;
     let mut rejected = 0;
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let f: Vec<&str> = line.split_whitespace().collect();
         let item = match f.as_slice() {
-            ["system", v] => v.parse().ok().map(PlanItem::System),
+            ["channel", "dev"] if !channel_seen => {
+                channel_seen = true;
+                plan.channel = Channel::Dev;
+                continue;
+            }
+            ["system", v] => v.parse().ok().map(|v| PlanItem::System(Channel::Stable, v)),
+            ["system", "dev", v] => v.parse().ok().map(|v| PlanItem::System(Channel::Dev, v)),
             ["app", name, v] if valid_app_name(name) => {
                 v.parse().ok().map(|v| PlanItem::App(name, v))
             }
             _ => None,
         };
         match item {
-            Some(i) => items.push(i),
+            Some(i) => plan.items.push(i),
             None => rejected += 1,
         }
     }
-    (items, rejected)
+    (plan, rejected)
 }
 
 /// One package staged by the updater.
@@ -414,10 +441,33 @@ mod tests {
 
     #[test]
     fn plan_round_trip_and_rejections() {
-        let items = [PlanItem::System(3), PlanItem::App("hello_ext", 2)];
-        let text = encode_plan(&items);
-        assert_eq!(parse_plan(&text), (items.to_vec(), 0));
+        let items = [
+            PlanItem::System(Channel::Stable, 3),
+            PlanItem::App("hello_ext", 2),
+        ];
+        let text = encode_plan(Channel::Stable, &items);
+        assert_eq!(text, "system 3\napp hello_ext 2\n", "as before ADR 0045");
+        let plan = Plan {
+            channel: Channel::Stable,
+            items: items.to_vec(),
+        };
+        assert_eq!(parse_plan(&text), (plan, 0));
         assert_eq!(parse_plan("system x\napp ../x 1\nother 1\n").1, 3);
+        // A development plan (ADR 0045).
+        let dev = [PlanItem::System(Channel::Dev, 7)];
+        let text = encode_plan(Channel::Dev, &dev);
+        assert_eq!(text, "channel dev\nsystem dev 7\n");
+        let plan = Plan {
+            channel: Channel::Dev,
+            items: dev.to_vec(),
+        };
+        assert_eq!(parse_plan(&text), (plan, 0));
+        let (odd, rejected) =
+            parse_plan("channel dev\nchannel stable\nchannel dev\nsystem beta 3\nsystem dev x\n");
+        assert_eq!(
+            (odd.channel, odd.items.len(), rejected),
+            (Channel::Dev, 0, 4)
+        );
     }
 
     #[test]

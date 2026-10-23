@@ -55,8 +55,12 @@ fn main() -> Status {
 
     // The cmdline is optional; it is copied into kernel memory so that it
     // survives ExitBootServices and AriKernel can see it.
-    let mut cmdline_bytes = read_file(cstr16!("\\aricodeos\\cmdline.txt")).unwrap_or_default();
-    let qemu_exit = CmdLine::from_bytes(&cmdline_bytes).has(keys::QEMU_EXIT);
+    let esp_cmdline = read_file(cstr16!("\\aricodeos\\cmdline.txt")).unwrap_or_default();
+    let qemu_exit = CmdLine::from_bytes(&esp_cmdline).has(keys::QEMU_EXIT);
+    // The keys that describe the booted slot and image are AriBoot's alone
+    // (ADR 0045): any copy in cmdline.txt is dropped, so the system never
+    // reads an identity the loader did not verify.
+    let mut cmdline_bytes = without_loader_keys(&esp_cmdline);
 
     // A/B boot: if there is a valid slot image, the kernel learns from the
     // cmdline where it booted from (and whether it must confirm it). The
@@ -67,6 +71,19 @@ fn main() -> Status {
         cmdline_bytes.extend_from_slice(l.slot.name().as_bytes());
         if l.pending {
             cmdline_bytes.extend_from_slice(b" boot_pending");
+        }
+        let m = &l.manifest;
+        let identity = alloc::format!(
+            " {}={} {}={}",
+            keys::BOOT_VERSION,
+            m.version,
+            keys::BOOT_CHANNEL,
+            m.channel.name()
+        );
+        cmdline_bytes.extend_from_slice(identity.as_bytes());
+        if let Some(commit) = &m.commit {
+            let commit = alloc::format!(" {}={}", keys::BOOT_COMMIT, commit.as_str());
+            cmdline_bytes.extend_from_slice(commit.as_bytes());
         }
     }
 
@@ -413,6 +430,23 @@ fn read_file(path: &CStr16) -> uefi::Result<Vec<u8>> {
     }
     buf.truncate(read);
     Ok(buf)
+}
+
+/// `cmdline.txt` without the keys only AriBoot may set
+/// ([`keys::LOADER_ONLY`]); a copy found there is said and dropped.
+fn without_loader_keys(raw: &[u8]) -> Vec<u8> {
+    let line = CmdLine::from_bytes(raw);
+    if let Some(key) = line.first_of(keys::LOADER_ONLY) {
+        warn!("cmdline: `{key}` is set by AriBoot only; dropped from cmdline.txt");
+    }
+    let mut out = Vec::with_capacity(raw.len());
+    for token in line.tokens_without(keys::LOADER_ONLY) {
+        if !out.is_empty() {
+            out.push(b' ');
+        }
+        out.extend_from_slice(token.as_bytes());
+    }
+    out
 }
 
 fn framebuffer_info() -> FramebufferInfo {

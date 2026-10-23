@@ -370,7 +370,7 @@ fn run_scenario(
     // a channel (ADR 0040).
     let _update_server = match &s.host_update {
         Some(u) => {
-            let channel = image::Channel {
+            let channel = image::Publication {
                 system: u.system,
                 apps: u
                     .apps
@@ -380,6 +380,7 @@ fn run_scenario(
                 legacy_manifest: false,
                 tamper_index: u.tamper_index,
                 tamper_image: u.tamper_image,
+                ..image::Publication::default()
             };
             let dir = workdir.join("update");
             writeln!(
@@ -388,9 +389,36 @@ fn run_scenario(
                 image::publish_channel(&dir, release, &channel)?
             )
             .expect("String");
+            // The development source beside it (ADR 0045), served at /dev/
+            // by the same server.
+            if let Some(build) = u.dev_build {
+                let dev = image::Publication {
+                    channel: aricode_ab::Channel::Dev,
+                    system: Some(build),
+                    commit: Some(u.dev_commit.clone()),
+                    sign_as: u.dev_wrong_key.then_some(aricode_ab::Channel::Stable),
+                    ..image::Publication::default()
+                };
+                writeln!(
+                    report,
+                    "{}",
+                    image::publish_channel(&workdir.join(qemu::DEV_SOURCE_DIR), release, &dev)?
+                )
+                .expect("String");
+            }
             let server = qemu::UpdateServer::start(&dir)?;
             values.push((scenario::UPDATE_PORT, server.port()));
             let url = format!("http://10.0.2.2:{}/update/\n", server.port());
+            let dev_line = match (u.dev_build, u.dev_source) {
+                (Some(_), true) => format!("dev http://10.0.2.2:{}/dev/\n", server.port()),
+                (None, true) => {
+                    return Err(format!(
+                        "{}: host_update.dev_source needs dev_build",
+                        s.name
+                    ))
+                }
+                _ => String::new(),
+            };
             if u.stale_index {
                 let ahead = image::stored_copy_ahead(&dir, url.trim())?;
                 installed.push((
@@ -401,7 +429,11 @@ fn run_scenario(
             match u.source.as_str() {
                 "sources" => installed.push((
                     aricode_update_index::main_path(aricode_update_index::SOURCES_FILE),
-                    url.into_bytes(),
+                    format!("{url}{dev_line}").into_bytes(),
+                )),
+                "none" if !dev_line.is_empty() => installed.push((
+                    aricode_update_index::main_path(aricode_update_index::SOURCES_FILE),
+                    dev_line.into_bytes(),
                 )),
                 "legacy-url" => installed.push((
                     aricode_update_index::main_path(aricode_update_index::LEGACY_URL_FILE),

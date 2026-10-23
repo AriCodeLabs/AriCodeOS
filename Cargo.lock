@@ -452,6 +452,7 @@ dependencies = [
 name = "aricode-update-index"
 version = "0.13.0"
 dependencies = [
+ "aricode-ab",
  "aricode-crypto",
  "aricode-pkg",
 ]

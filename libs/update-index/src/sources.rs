@@ -1,11 +1,24 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
 //! The owner's source list (`updater/sources`): one normalized URL per
-//! line, in preference order.
+//! line, in preference order. A development source (ADR 0045) is the same
+//! line after `dev `:
+//!
+//! ```text
+//! http://192.168.1.10:8080/
+//! dev http://192.168.1.10:8081/
+//! ```
+//!
+//! A line without a prefix is a stable source, as every source was before
+//! ADR 0045; there is no `stable ` prefix (one spelling per line).
 
 use crate::{MAX_SOURCES, MAX_SOURCE_LEN};
 use alloc::string::String;
 use alloc::vec::Vec;
+use aricode_ab::Channel;
+
+/// Prefix of a development source's line.
+const DEV_PREFIX: &str = "dev ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceError {
@@ -110,16 +123,24 @@ pub enum Migration {
     InvalidLegacy(SourceError),
 }
 
+/// One registered source: its channel and normalized URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Source {
+    pub channel: Channel,
+    pub url: String,
+}
+
 /// The registered sources, in order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Sources {
-    list: Vec<String>,
+    list: Vec<Source>,
 }
 
 impl Sources {
     /// Parses the sources file. Lines that do not normalize to themselves
     /// (edited by hand, corrupted) are skipped and counted, so a damaged
-    /// file never adds a source the owner did not type.
+    /// file never adds a source the owner did not type. A line is `URL`
+    /// (stable) or `dev URL` (development channel, ADR 0045).
     pub fn parse(text: &str) -> (Self, usize) {
         let mut sources = Self::default();
         let mut rejected = 0;
@@ -128,13 +149,17 @@ impl Sources {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            match normalize_source(line) {
+            let (channel, spelled) = match line.strip_prefix(DEV_PREFIX) {
+                Some(url) => (Channel::Dev, url),
+                None => (Channel::Stable, line),
+            };
+            match normalize_source(spelled) {
                 Ok(url)
-                    if url == line
+                    if url == spelled
                         && sources.list.len() < MAX_SOURCES
-                        && !sources.list.contains(&url) =>
+                        && !sources.contains(&url) =>
                 {
-                    sources.list.push(url)
+                    sources.list.push(Source { channel, url })
                 }
                 _ => rejected += 1,
             }
@@ -145,8 +170,11 @@ impl Sources {
     /// The file content.
     pub fn to_text(&self) -> String {
         let mut out = String::new();
-        for url in &self.list {
-            out.push_str(url);
+        for s in &self.list {
+            if s.channel == Channel::Dev {
+                out.push_str(DEV_PREFIX);
+            }
+            out.push_str(&s.url);
             out.push('\n');
         }
         out
@@ -161,23 +189,33 @@ impl Sources {
         };
         match normalize_source(legacy.trim()) {
             Ok(url) => Migration::Migrated(Self {
-                list: alloc::vec![url],
+                list: alloc::vec![Source {
+                    channel: Channel::Stable,
+                    url,
+                }],
             }),
             Err(e) => Migration::InvalidLegacy(e),
         }
     }
 
-    /// Registers a source; returns its normalized URL.
+    /// Registers a stable source; returns its normalized URL.
     pub fn add(&mut self, input: &str) -> Result<&str, SourceError> {
+        self.add_to(input, Channel::Stable)
+    }
+
+    /// Registers a source of `channel`; returns its normalized URL. A URL
+    /// belongs to one channel only: registering it again, in either
+    /// channel, is a duplicate.
+    pub fn add_to(&mut self, input: &str, channel: Channel) -> Result<&str, SourceError> {
         let url = normalize_source(input)?;
-        if self.list.contains(&url) {
+        if self.contains(&url) {
             return Err(SourceError::Duplicate);
         }
         if self.list.len() == MAX_SOURCES {
             return Err(SourceError::Full);
         }
-        self.list.push(url);
-        Ok(self.list.last().map(String::as_str).unwrap_or(""))
+        self.list.push(Source { channel, url });
+        Ok(self.list.last().map(|s| s.url.as_str()).unwrap_or(""))
     }
 
     /// Removes a source given by its number in `update sources` (1-based)
@@ -189,15 +227,32 @@ impl Sources {
             Ok(_) => None,
             Err(_) => normalize_source(spec)
                 .ok()
-                .and_then(|url| self.list.iter().position(|s| *s == url)),
+                .and_then(|url| self.list.iter().position(|s| s.url == url)),
         };
         position
-            .map(|i| self.list.remove(i))
+            .map(|i| self.list.remove(i).url)
             .ok_or(SourceError::NotFound)
     }
 
+    /// Every source's URL, in order (positions are the numbers `update
+    /// sources` shows and the slots of the stored indexes).
     pub fn iter(&self) -> impl Iterator<Item = &str> {
-        self.list.iter().map(String::as_str)
+        self.list.iter().map(|s| s.url.as_str())
+    }
+
+    /// Every source with its channel, in order.
+    pub fn entries(&self) -> impl Iterator<Item = &Source> {
+        self.list.iter()
+    }
+
+    /// The channel of the source at `position` (0-based).
+    pub fn channel(&self, position: usize) -> Option<Channel> {
+        self.list.get(position).map(|s| s.channel)
+    }
+
+    /// Whether any source of `channel` is registered.
+    pub fn has_channel(&self, channel: Channel) -> bool {
+        self.list.iter().any(|s| s.channel == channel)
     }
 
     pub fn len(&self) -> usize {
@@ -209,7 +264,7 @@ impl Sources {
     }
 
     pub fn contains(&self, url: &str) -> bool {
-        self.list.iter().any(|s| s == url)
+        self.list.iter().any(|s| s.url == url)
     }
 }
 
@@ -314,6 +369,43 @@ mod tests {
         // Bad scheme, a spelling that is not the normalized form and a
         // duplicate: three rejected lines, the good ones kept.
         assert_eq!(Sources::parse(&damaged), (s, 3));
+    }
+
+    #[test]
+    fn development_sources_are_marked_and_kept_apart() {
+        // ADR 0045: a development source is opt-in, one line `dev URL`.
+        let mut s = Sources::default();
+        s.add("10.0.2.2:8080").unwrap();
+        assert_eq!(
+            s.add_to("10.0.2.2:8081/dev", Channel::Dev),
+            Ok("http://10.0.2.2:8081/dev/")
+        );
+        assert_eq!(
+            s.add_to("http://10.0.2.2:8080/", Channel::Dev),
+            Err(SourceError::Duplicate),
+            "one URL, one channel"
+        );
+        let text = s.to_text();
+        assert_eq!(
+            text,
+            "http://10.0.2.2:8080/\ndev http://10.0.2.2:8081/dev/\n"
+        );
+        assert_eq!(Sources::parse(&text), (s.clone(), 0));
+        assert_eq!(s.channel(0), Some(Channel::Stable));
+        assert_eq!(s.channel(1), Some(Channel::Dev));
+        assert_eq!(s.channel(2), None);
+        assert!(s.has_channel(Channel::Dev));
+        let urls: Vec<&str> = s.iter().collect();
+        assert_eq!(urls, ["http://10.0.2.2:8080/", "http://10.0.2.2:8081/dev/"]);
+        // Damaged development lines are refused like any other.
+        let damaged = "dev\ndev ftp://x/\ndev http://not-normalized\nstable http://a/\ndev  http://a/\nDEV http://a/\n";
+        assert_eq!(Sources::parse(damaged), (Sources::default(), 6));
+        // Without a development line there is no development source: the
+        // channel is closed by default.
+        let (stable_only, _) = Sources::parse("http://a/\n");
+        assert!(!stable_only.has_channel(Channel::Dev));
+        assert_eq!(s.remove("2").as_deref(), Ok("http://10.0.2.2:8081/dev/"));
+        assert!(!s.has_channel(Channel::Dev));
     }
 
     #[test]

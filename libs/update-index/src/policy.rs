@@ -4,6 +4,7 @@
 //! several sources and rollback protection for indexes.
 
 use crate::index::{AppEntry, Index, IndexError, SystemEntry};
+use aricode_ab::Channel;
 
 /// What installing an offered version would do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +40,75 @@ impl Change {
             Change::Same => false,
             Change::Downgrade => allow_downgrade,
         }
+    }
+}
+
+/// What installing an offered system image would do, channels included
+/// (ADR 0045).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemChange {
+    /// Same channel: the ADR 0029 rules ([`Change`]).
+    Within(Change),
+    /// The installed version cannot be read or verified.
+    Unknown,
+    /// The offered image belongs to the other channel.
+    Switch { from: Channel, to: Channel },
+}
+
+/// Compares the installed system (channel and version, if known) with an
+/// offered one.
+pub fn compare_system(installed: Option<(Channel, u32)>, offered: (Channel, u32)) -> SystemChange {
+    match installed {
+        None => SystemChange::Unknown,
+        Some((channel, version)) if channel == offered.0 => {
+            SystemChange::Within(compare(Some(version), offered.1))
+        }
+        Some((from, _)) => SystemChange::Switch {
+            from,
+            to: offered.0,
+        },
+    }
+}
+
+/// Why a system install is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// Older than the installed one, same channel (anti-replay).
+    Downgrade,
+    /// The installed version is unknown (ADR 0029, audit 1 H1).
+    Unknown,
+    /// Another channel, and the owner did not name it (`--channel`).
+    SwitchNotExplicit,
+}
+
+/// The outcome of [`decide_system`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemDecision {
+    Install,
+    /// The same version of the same channel is installed.
+    AlreadyInstalled,
+    Refused(Refusal),
+}
+
+/// The install rule for a system image (ADR 0029 decision 5, ADR 0045
+/// decision 2): within a channel, no downgrade without `--allow-downgrade`
+/// and never a reinstall; across channels, only when the owner named the
+/// channel (`upgrade --channel stable|dev`), whatever the numbers say,
+/// since a build number and a release version are not comparable; an
+/// unknown installed version only with `--allow-downgrade`.
+pub fn decide_system(
+    change: SystemChange,
+    allow_downgrade: bool,
+    explicit_channel: bool,
+) -> SystemDecision {
+    match change {
+        SystemChange::Within(Change::Same) => SystemDecision::AlreadyInstalled,
+        SystemChange::Within(c) if c.permitted(allow_downgrade) => SystemDecision::Install,
+        SystemChange::Within(_) => SystemDecision::Refused(Refusal::Downgrade),
+        SystemChange::Unknown if allow_downgrade => SystemDecision::Install,
+        SystemChange::Unknown => SystemDecision::Refused(Refusal::Unknown),
+        SystemChange::Switch { .. } if explicit_channel => SystemDecision::Install,
+        SystemChange::Switch { .. } => SystemDecision::Refused(Refusal::SwitchNotExplicit),
     }
 }
 
@@ -114,9 +184,86 @@ mod tests {
         assert!(Change::Downgrade.permitted(true));
     }
 
+    #[test]
+    fn channel_switches_need_the_owner() {
+        use Channel::{Dev, Stable};
+        // Same channel: the ADR 0029 rules, anti-replay unchanged.
+        assert_eq!(
+            compare_system(Some((Dev, 7)), (Dev, 8)),
+            SystemChange::Within(Change::Upgrade)
+        );
+        assert_eq!(
+            compare_system(Some((Dev, 7)), (Dev, 6)),
+            SystemChange::Within(Change::Downgrade)
+        );
+        assert_eq!(
+            compare_system(Some((Stable, 12)), (Stable, 12)),
+            SystemChange::Within(Change::Same)
+        );
+        assert_eq!(compare_system(None, (Dev, 1)), SystemChange::Unknown);
+        let back = compare_system(Some((Dev, 7)), (Stable, 2));
+        assert_eq!(
+            back,
+            SystemChange::Switch {
+                from: Dev,
+                to: Stable
+            }
+        );
+        let to_dev = compare_system(Some((Stable, 12)), (Dev, 1));
+        assert_eq!(
+            to_dev,
+            SystemChange::Switch {
+                from: Stable,
+                to: Dev
+            }
+        );
+        // Within a channel, `--channel` changes nothing.
+        for explicit in [false, true] {
+            let older = SystemChange::Within(Change::Downgrade);
+            assert_eq!(
+                decide_system(older, false, explicit),
+                SystemDecision::Refused(Refusal::Downgrade)
+            );
+            assert_eq!(
+                decide_system(older, true, explicit),
+                SystemDecision::Install
+            );
+            let newer = SystemChange::Within(Change::Upgrade);
+            assert_eq!(
+                decide_system(newer, false, explicit),
+                SystemDecision::Install
+            );
+            let same = SystemChange::Within(Change::Same);
+            assert_eq!(
+                decide_system(same, true, explicit),
+                SystemDecision::AlreadyInstalled
+            );
+            assert_eq!(
+                decide_system(SystemChange::Unknown, false, explicit),
+                SystemDecision::Refused(Refusal::Unknown)
+            );
+        }
+        // Across channels: only when named, even when the stable release is
+        // numerically lower than the development build, and never through
+        // --allow-downgrade alone.
+        for switch in [back, to_dev] {
+            assert_eq!(decide_system(switch, false, true), SystemDecision::Install);
+            assert_eq!(
+                decide_system(switch, false, false),
+                SystemDecision::Refused(Refusal::SwitchNotExplicit)
+            );
+            assert_eq!(
+                decide_system(switch, true, false),
+                SystemDecision::Refused(Refusal::SwitchNotExplicit)
+            );
+        }
+    }
+
     fn index(serial: u64, system: Option<u32>, apps: &[(&'static str, u32)]) -> Index<'static> {
         Index {
             serial,
+            channel: Channel::Stable,
+            commit: None,
             system: system.map(|version| SystemEntry {
                 version,
                 file: "s.img",

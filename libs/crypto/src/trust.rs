@@ -13,6 +13,15 @@
 //! key lives in [`TRUST_ANCHOR`] behind a fixed tag, and verifiers read it
 //! with a volatile load, so its bytes are always present in the binary and
 //! xtask checks after every build that they are the selected key.
+//!
+//! A second, optional anchor is the development channel's key (ADR 0045):
+//! `ARICODE_DEV_CHANNEL_PUB`, set by xtask for the updater of every build
+//! and for AriBoot only on a machine that opted in (`usb-image
+//! --dev-source`). Development builds are signed with it; the release key
+//! never signs them and it never signs a release, so the key that verifies
+//! an image or an index also tells its channel. Without the variable
+//! [`dev_channel_key`] is `None` and nothing of the development channel
+//! verifies.
 
 /// The public key as hex (64 digits, surrounding whitespace allowed).
 const PUBLIC_KEY_HEX: &str = match option_env!("ARICODE_SIGNING_PUB") {
@@ -35,12 +44,73 @@ pub static TRUST_ANCHOR: Anchor = Anchor {
     key: decode(PUBLIC_KEY_HEX),
 };
 
+/// The development channel's public key as hex, when this build trusts
+/// that channel at all.
+const DEV_CHANNEL_HEX: Option<&str> = option_env!("ARICODE_DEV_CHANNEL_PUB");
+
+/// Marker before the development channel's key in a binary that carries it.
+pub const DEV_ANCHOR_TAG: [u8; 16] = *b"ARICODE-DEVCHKEY";
+
+/// The development channel's anchor; its key is all zeros (and never read)
+/// when the build does not trust the channel.
+pub static DEV_CHANNEL_ANCHOR: Anchor = Anchor {
+    tag: DEV_ANCHOR_TAG,
+    key: match DEV_CHANNEL_HEX {
+        Some(hex) => decode(hex),
+        None => [0; 32],
+    },
+};
+
+/// The public keys whose seeds are in the repository (`keys/dev`): the test
+/// key and the test development-channel key. Anyone can sign with them.
+pub const PUBLIC_SEED_KEYS: [[u8; 32]; 2] = [
+    decode(include_str!("../../../keys/dev/ed25519.pub")),
+    decode(include_str!("../../../keys/dev/dev-channel/ed25519.pub")),
+];
+
+const fn same(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    let mut i = 0;
+    while i < 32 {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Compile-time rules of the two anchors (ADR 0045, decision 3): the
+/// development channel's key is never the release key (the key tells the
+/// channel), and a build that trusts a real release key never trusts a key
+/// whose seed is public for its development channel.
+const _: () = {
+    if let Some(hex) = DEV_CHANNEL_HEX {
+        let dev = decode(hex);
+        assert!(
+            !same(&dev, &TRUST_ANCHOR.key),
+            "ARICODE_DEV_CHANNEL_PUB equals the release key: the channels need two keys"
+        );
+        if option_env!("ARICODE_SIGNING_PUB").is_some() {
+            let mut i = 0;
+            while i < PUBLIC_SEED_KEYS.len() {
+                assert!(
+                    !same(&dev, &PUBLIC_SEED_KEYS[i]),
+                    "a build with a real signing key cannot trust a public test key for the dev channel"
+                );
+                i += 1;
+            }
+        }
+    }
+};
+
 const fn digit(c: u8) -> u8 {
     match c {
         b'0'..=b'9' => c - b'0',
         b'a'..=b'f' => c - b'a' + 10,
         b'A'..=b'F' => c - b'A' + 10,
-        _ => panic!("ARICODE_SIGNING_PUB / keys/dev/ed25519.pub: not hex"),
+        _ => panic!(
+            "trust anchor (ARICODE_SIGNING_PUB, ARICODE_DEV_CHANNEL_PUB or keys/dev): not hex"
+        ),
     }
 }
 
@@ -62,7 +132,7 @@ const fn decode(text: &str) -> [u8; 32] {
     }
     assert!(
         end - start == 64,
-        "ARICODE_SIGNING_PUB / keys/dev/ed25519.pub: expected 64 hex digits"
+        "trust anchor (ARICODE_SIGNING_PUB, ARICODE_DEV_CHANNEL_PUB or keys/dev): expected 64 hex digits"
     );
     let mut key = [0u8; 32];
     let mut i = 0;
@@ -78,6 +148,16 @@ pub fn public_key() -> [u8; 32] {
     // SAFETY: a valid, aligned, immutable static; the volatile read only
     // keeps the compiler from folding the key away from the binary.
     unsafe { core::ptr::read_volatile(&TRUST_ANCHOR.key) }
+}
+
+/// The development channel's public key, read from [`DEV_CHANNEL_ANCHOR`];
+/// `None` when this build does not trust that channel.
+pub fn dev_channel_key() -> Option<[u8; 32]> {
+    match DEV_CHANNEL_HEX {
+        // SAFETY: as in `public_key`.
+        Some(_) => Some(unsafe { core::ptr::read_volatile(&DEV_CHANNEL_ANCHOR.key) }),
+        None => None,
+    }
 }
 
 #[cfg(test)]
@@ -97,6 +177,21 @@ mod tests {
             assert_eq!(public_key(), dev);
         }
         assert_eq!(TRUST_ANCHOR.tag, ANCHOR_TAG);
+    }
+
+    #[test]
+    fn dev_channel_anchor_follows_the_variable() {
+        assert_eq!(DEV_CHANNEL_ANCHOR.tag, DEV_ANCHOR_TAG);
+        match option_env!("ARICODE_DEV_CHANNEL_PUB") {
+            Some(hex) => {
+                let key = dev_channel_key().expect("set");
+                assert_eq!(key, decode(hex));
+                assert_ne!(key, public_key(), "two channels, two keys");
+            }
+            None => assert_eq!(dev_channel_key(), None),
+        }
+        // The two test keys whose seeds are public are different keys.
+        assert!(!same(&PUBLIC_SEED_KEYS[0], &PUBLIC_SEED_KEYS[1]));
     }
 
     #[test]

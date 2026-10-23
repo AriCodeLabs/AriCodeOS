@@ -257,7 +257,7 @@ fn trim(s: &[u8]) -> &[u8] {
 fn help() {
     print(
         b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  cpus      online processors and idle time per CPU\n  diag [NAME]  full report (uptime, mem, cpus, entropy, ps, stacks, services, net, devices); with NAME saves it to AriFS\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body (http:// or https://)\n  run PROG  run an initrd program and wait\n\
-  update    fetch and verify the signed index of every source and show what is new (installs nothing; ADR 0029)\n  update add URL|IP[:PORT]  register an update source\n  update remove N|URL  unregister a source\n  update sources  list the sources\n  update apply [--allow-downgrade]  install the image in the UPDATE partition\n  upgrade [--allow-downgrade]  install what the last `update` found (system into the inactive slot, then `reboot`; apps through the installer)\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
+  update [--channel stable|dev]  fetch and verify the signed index of every source of the channel (stable by default) and show what is new (installs nothing; ADR 0029, ADR 0045)\n  update add [--channel dev] URL|IP[:PORT]  register an update source (stable unless --channel dev)\n  update remove N|URL  unregister a source\n  update sources  list the sources\n  update apply [--allow-downgrade]  install the image in the UPDATE partition\n  update rollback  boot the system in the other slot next (no network; then `reboot`)\n  upgrade [--channel stable|dev] [--allow-downgrade]  install what the last `update` found (system into the inactive slot, then `reboot`; apps through the installer); only --channel moves the system to another channel\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
     );
 }
 
@@ -420,6 +420,26 @@ fn entropy() {
     print(line.as_bytes());
 }
 
+/// What is running, as AriBoot verified it and wrote it on the command
+/// line (ADR 0045): `system   version 12, slot B`,
+/// `system   dev build 7 (commit 0123abc), slot A`, or the ESP fallback.
+fn system() {
+    use aricode_cmdline::{keys, CmdLine};
+    let mut buf = [0u8; 512];
+    let line = CmdLine::new(sys::cmdline(SYSTEM, &mut buf).unwrap_or(""));
+    let text = match (line.get(keys::BOOT_SLOT), line.get(keys::BOOT_VERSION)) {
+        (Some(slot), Some(version)) => match line.get(keys::BOOT_CHANNEL) {
+            Some("dev") => alloc::format!(
+                "system   dev build {version} (commit {}), slot {slot}\n",
+                line.get(keys::BOOT_COMMIT).unwrap_or("unknown")
+            ),
+            _ => alloc::format!("system   version {version}, slot {slot}\n"),
+        },
+        _ => alloc::string::String::from("system   booted from the ESP (no verified slot image)\n"),
+    };
+    print(text.as_bytes());
+}
+
 /// `diag`: full report in one block, to attach when describing a problem
 /// (docs/performance.md). With a name it is also saved to AriFS, to read it
 /// from the host (`cargo xtask fs-cat`, docs/hardware.md).
@@ -432,6 +452,7 @@ fn diag(fs: &mut FsClient, net_client: &NetClient, mask: u64, rest: &[u8]) {
         });
     }
     print(b"=== AriCodeOS diagnostics ===\n");
+    system();
     uptime();
     mem();
     cpus();
@@ -991,31 +1012,71 @@ fn tls_error(e: aricode_tls::Error) -> &'static [u8] {
 }
 
 /// `update ...` (ADR 0029): without arguments runs the updater to fetch
-/// and verify every source's index and report; `add`, `remove` and
-/// `sources` edit the source list, which only the owner can reach (this
-/// shell, on the console or in an authenticated SSH session); `apply`
-/// installs the image already in the UPDATE partition (Phase 30).
+/// and verify every source's index and report (`--channel dev`: the
+/// development sources, ADR 0045); `add`, `remove` and `sources` edit the
+/// source list, which only the owner can reach (this shell, on the console
+/// or in an authenticated SSH session); `apply` installs the image already
+/// in the UPDATE partition (Phase 30); `rollback` boots the other slot's
+/// system next, without the network (ADR 0045).
 fn update(fs: &mut FsClient, rest: &[u8]) {
     let (sub, arg) = split(rest);
     match (sub, arg) {
-        (b"", _) => {
-            if list_installed(fs) {
-                run_updater(fs, updater_arg::REFRESH);
+        (b"" | b"--channel", _) => match channel_options(rest, false) {
+            Some(flags) => {
+                if list_installed(fs) {
+                    run_updater(fs, updater_arg::REFRESH | flags);
+                }
             }
-        }
+            None => update_usage(),
+        },
         (b"apply", b"") => {
             run_updater(fs, updater_arg::APPLY);
         }
         (b"apply", b"--allow-downgrade") => {
             run_updater(fs, updater_arg::APPLY | updater_arg::ALLOW_DOWNGRADE);
         }
+        (b"rollback", b"") => {
+            run_updater(fs, updater_arg::ROLLBACK);
+        }
         (b"sources", b"") => sources_list(fs),
         (b"add", a) if !a.is_empty() => source_add(fs, a),
         (b"remove", a) if !a.is_empty() => source_remove(fs, a),
-        _ => print(
-            b"usage: update [add URL|IP[:PORT] | remove N|URL | sources | apply [--allow-downgrade]]\n",
-        ),
+        _ => update_usage(),
     }
+}
+
+fn update_usage() {
+    print(
+        b"usage: update [--channel stable|dev | add [--channel dev] URL|IP[:PORT] | remove N|URL | sources | apply [--allow-downgrade] | rollback]\n",
+    );
+}
+
+/// `--channel stable|dev` and, when `allow_downgrade`, `--allow-downgrade`,
+/// each at most once and in any order, as updater flags (ADR 0045: naming
+/// the channel is what lets `upgrade` move the system to it). `None` on
+/// anything else.
+fn channel_options(rest: &[u8], allow_downgrade: bool) -> Option<u64> {
+    let mut flags = 0;
+    let mut words = rest.split(|&b| b == b' ').filter(|w| !w.is_empty());
+    while let Some(word) = words.next() {
+        match word {
+            b"--allow-downgrade"
+                if allow_downgrade && flags & updater_arg::ALLOW_DOWNGRADE == 0 =>
+            {
+                flags |= updater_arg::ALLOW_DOWNGRADE
+            }
+            b"--channel" if flags & updater_arg::CHANNEL_EXPLICIT == 0 => {
+                flags |= updater_arg::CHANNEL_EXPLICIT;
+                match words.next()? {
+                    b"dev" => flags |= updater_arg::CHANNEL_DEV,
+                    b"stable" => {}
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(flags)
 }
 
 /// The installer writes the installed apps to the `[installed]` section of `updater/state`, which
@@ -1051,26 +1112,21 @@ fn run_installer(fs: &mut FsClient, flags: u64) -> Option<u64> {
     }
 }
 
-/// `upgrade [--allow-downgrade]`: the updater installs the system image and
-/// stages app packages from the verified indexes; the installer then
-/// installs the staged packages, with the same downgrade rule.
+/// `upgrade [--channel stable|dev] [--allow-downgrade]`: the updater
+/// installs the system image and stages app packages from the verified
+/// indexes; the installer then installs the staged packages, with the same
+/// downgrade rule. Only `--channel` moves the system to the other channel
+/// (ADR 0045).
 fn upgrade(fs: &mut FsClient, rest: &[u8]) {
-    let allow_downgrade = match rest {
-        b"" => false,
-        b"--allow-downgrade" => true,
-        _ => {
-            print(b"usage: upgrade [--allow-downgrade]\n");
-            return;
-        }
+    let Some(flags) = channel_options(rest, true) else {
+        print(b"usage: upgrade [--channel stable|dev] [--allow-downgrade]\n");
+        return;
     };
+    let allow_downgrade = flags & updater_arg::ALLOW_DOWNGRADE != 0;
     if !list_installed(fs) {
         return;
     }
-    let mut arg = updater_arg::UPGRADE;
-    if allow_downgrade {
-        arg |= updater_arg::ALLOW_DOWNGRADE;
-    }
-    let Some(code) = run_updater(fs, arg) else {
+    let Some(code) = run_updater(fs, updater_arg::UPGRADE | flags) else {
         return;
     };
     if code & updater_arg::EXIT_APPS_STAGED == 0 {
@@ -1243,11 +1299,14 @@ fn sources_list(fs: &mut FsClient) {
         return;
     }
     print(b"update sources:\n");
-    for (i, url) in sources.iter().enumerate() {
+    for (i, source) in sources.entries().enumerate() {
         print(b"  ");
         num(i as u64 + 1);
         print(b"  ");
-        print(url.as_bytes());
+        print(source.url.as_bytes());
+        if source.channel == update_index::Channel::Dev {
+            print(b"  (dev)");
+        }
         print(b"\n");
     }
 }
@@ -1267,7 +1326,17 @@ fn source_error(e: update_index::SourceError) {
     });
 }
 
+/// `update add [--channel dev] URL`: a development source is the owner's
+/// explicit opt-in to that channel on this machine (ADR 0045).
 fn source_add(fs: &mut FsClient, arg: &[u8]) {
+    let (channel, arg) = match split(arg) {
+        (b"--channel", rest) => match split(rest) {
+            (b"dev", url) if !url.is_empty() => (update_index::Channel::Dev, url),
+            (b"stable", url) if !url.is_empty() => (update_index::Channel::Stable, url),
+            _ => return update_usage(),
+        },
+        _ => (update_index::Channel::Stable, arg),
+    };
     let Ok(input) = core::str::from_utf8(arg) else {
         source_error(update_index::SourceError::Invalid);
         return;
@@ -1275,16 +1344,24 @@ fn source_add(fs: &mut FsClient, arg: &[u8]) {
     let Some(mut sources) = load_sources(fs) else {
         return;
     };
-    let url = match sources.add(input) {
+    let url = match sources.add_to(input, channel) {
         Ok(url) => alloc::string::String::from(url),
         Err(e) => return source_error(e),
     };
-    if save_sources(fs, &sources, &alloc::format!("source added: {url}")) {
-        print(b"update: source ");
+    let (kind, fetch) = match channel {
+        update_index::Channel::Dev => ("dev source", "update --channel dev"),
+        update_index::Channel::Stable => ("source", "update"),
+    };
+    if save_sources(fs, &sources, &alloc::format!("{kind} added: {url}")) {
+        print(b"update: ");
+        print(kind.as_bytes());
+        print(b" ");
         num(sources.len() as u64);
         print(b" added: ");
         print(url.as_bytes());
-        print(b" (run update to fetch its index)\n");
+        print(b" (run ");
+        print(fetch.as_bytes());
+        print(b" to fetch its index)\n");
     }
 }
 
