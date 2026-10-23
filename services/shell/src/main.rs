@@ -70,9 +70,9 @@ fn session() -> bool {
 /// `fault` is accepted only when the boot command line asks for it
 /// (`shell_fault`, tests only; ADR 0007).
 fn fault_enabled() -> bool {
-    let mut buf = [0u8; 256];
+    let mut buf = [0u8; sys::CMDLINE_MAX];
     sys::cmdline(SYSTEM, &mut buf)
-        .is_some_and(|c| aricode_cmdline::CmdLine::new(c).has(aricode_cmdline::keys::SHELL_FAULT))
+        .is_ok_and(|c| aricode_cmdline::CmdLine::new(c).has(aricode_cmdline::keys::SHELL_FAULT))
 }
 
 /// Deliberate crash (`fault`, tests only): the shell dies by a page fault
@@ -425,8 +425,12 @@ fn entropy() {
 /// `system   dev build 7 (commit 0123abc), slot A`, or the ESP fallback.
 fn system() {
     use aricode_cmdline::{keys, CmdLine};
-    let mut buf = [0u8; 512];
-    let line = CmdLine::new(sys::cmdline(SYSTEM, &mut buf).unwrap_or(""));
+    let mut buf = [0u8; sys::CMDLINE_MAX];
+    let Ok(text) = sys::cmdline(SYSTEM, &mut buf) else {
+        print(b"system   unknown (the command line cannot be read)\n");
+        return;
+    };
+    let line = CmdLine::new(text);
     let text = match (line.get(keys::BOOT_SLOT), line.get(keys::BOOT_VERSION)) {
         (Some(slot), Some(version)) => match line.get(keys::BOOT_CHANNEL) {
             Some("dev") => alloc::format!(
