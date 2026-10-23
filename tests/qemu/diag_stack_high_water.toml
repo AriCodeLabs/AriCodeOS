@@ -1,0 +1,27 @@
+# Incident 0018: the user stack high-water mark (`system_info(STACKS)`, the
+# Accessed bits of the stack pages) must report a depth a program knows it
+# reached. `stack_probe` nests two 12 KiB frames, then reads its own entry:
+# at least 24 KiB and less than the whole 64 KiB stack. A scan from the top
+# instead of the bottom, of another bit or of another range gives one page,
+# nothing or everything (the scan itself is tested on the host in
+# libs/x86-paging). `diag` then lists the marks of every process.
+name = "diag.stack_high_water"
+description = "the kernel's user stack high-water mark reports the depth a program reached"
+level = "full"
+areas = ["diag", "memory", "shell"]
+selftest = false
+cmdline = "qemu_exit shell"
+timeout_secs = 60
+stdin = ["run stack_probe", "diag", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "stack_probe: touched ",
+    " of 65536 bytes after two 12 KiB frames: ok",
+    "run: stack_probe exited with 0",
+    "user stacks (touched of size, page granular):",
+    " of 64 KiB  shell",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "12 KiB frames: WRONG", "stack_probe: no "]

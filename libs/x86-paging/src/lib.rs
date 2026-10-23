@@ -434,6 +434,20 @@ pub fn pool_size_for(limit: u64, windows: u64, kernel_pages: u64) -> usize {
     (1 + windows * (1 + gib) + 2 + kernel_pages.div_ceil(512) + 8) as usize
 }
 
+/// Bytes of the stack `[bottom, top)` touched so far: from `top` down to
+/// the lowest page whose entry has [`ACCESSED`] set (incident 0018), 0 when
+/// none has. `flags(page)` gives the flags of a page's entry, `None` when it
+/// is not mapped. Page granular, and a high-water mark: pages above the
+/// lowest accessed one count whether or not their own bit is set (a stack
+/// probe or a large frame may skip writing them), and nothing below
+/// `bottom` counts. `bottom` and `top` are page aligned.
+pub fn stack_touched(bottom: u64, top: u64, flags: impl Fn(u64) -> Option<u64>) -> u64 {
+    (bottom..top)
+        .step_by(PAGE_SIZE as usize)
+        .find(|&page| flags(page).is_some_and(|f| f & ACCESSED != 0))
+        .map_or(0, |page| top - page)
+}
+
 /// Enables EFER.NXE so the NX bit is valid (OVMF usually does it; do not rely on it).
 ///
 /// # Safety
@@ -452,6 +466,84 @@ pub unsafe fn enable_nxe() {
 mod tests {
     extern crate std;
     use super::*;
+
+    /// The user stack of the kernel (`USER_STACK_TOP`, 64 KiB below it).
+    const TOP: u64 = 0x80_0000;
+    const BOTTOM: u64 = TOP - 16 * PAGE_SIZE;
+
+    /// Flags of a 16-page stack where the pages in `accessed` (indexes from
+    /// the bottom) have `ACCESSED` and the others `other`.
+    fn stack(accessed: &[u64], other: u64) -> impl Fn(u64) -> Option<u64> + '_ {
+        move |page| {
+            let i = (page - BOTTOM) / PAGE_SIZE;
+            assert!(page % PAGE_SIZE == 0 && (BOTTOM..TOP).contains(&page));
+            Some(
+                PRESENT
+                    | USER
+                    | WRITABLE
+                    | other
+                    | if accessed.contains(&i) { ACCESSED } else { 0 },
+            )
+        }
+    }
+
+    #[test]
+    fn stack_touched_is_the_lowest_accessed_page() {
+        assert_eq!(stack_touched(BOTTOM, TOP, stack(&[], 0)), 0);
+        assert_eq!(stack_touched(BOTTOM, TOP, stack(&[15], 0)), PAGE_SIZE);
+        // The lowest page decides, not the highest nor a contiguous run:
+        // a large frame may leave the pages it skipped without the bit.
+        assert_eq!(
+            stack_touched(BOTTOM, TOP, stack(&[15, 9], 0)),
+            7 * PAGE_SIZE
+        );
+        assert_eq!(
+            stack_touched(BOTTOM, TOP, stack(&[12, 15, 4], 0)),
+            12 * PAGE_SIZE
+        );
+        assert_eq!(
+            stack_touched(BOTTOM, TOP, stack(&[0, 15], 0)),
+            16 * PAGE_SIZE
+        );
+    }
+
+    #[test]
+    fn stack_touched_reads_only_the_accessed_bit() {
+        // Dirty (bit 6), and every other bit, are not the Accessed bit.
+        let every_other_flag = 0xFFF & !ACCESSED;
+        assert_eq!(stack_touched(BOTTOM, TOP, stack(&[], every_other_flag)), 0);
+        // Unmapped pages are skipped.
+        let gap = |page: u64| {
+            (page != BOTTOM).then_some(if page == BOTTOM + PAGE_SIZE {
+                ACCESSED
+            } else {
+                0
+            })
+        };
+        assert_eq!(stack_touched(BOTTOM, TOP, gap), 15 * PAGE_SIZE);
+    }
+
+    #[test]
+    fn stack_touched_stays_in_its_range() {
+        // An accessed page just below `bottom` (the guard) or at `top`
+        // is outside the stack and never asked about.
+        let outside = |page: u64| {
+            assert!((BOTTOM..TOP).contains(&page), "asked about {page:#x}");
+            Some(0)
+        };
+        assert_eq!(stack_touched(BOTTOM, TOP, outside), 0);
+        // Every page of the range is asked about, bottom first.
+        let asked = core::cell::RefCell::new(std::vec::Vec::new());
+        let record = |page: u64| {
+            asked.borrow_mut().push(page);
+            None
+        };
+        assert_eq!(stack_touched(BOTTOM, TOP, record), 0);
+        let asked = asked.into_inner();
+        assert_eq!(asked.len(), 16);
+        assert_eq!(asked[0], BOTTOM);
+        assert_eq!(asked[15], TOP - PAGE_SIZE);
+    }
     use std::alloc::{alloc_zeroed, dealloc, Layout};
     use std::vec::Vec;
 

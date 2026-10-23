@@ -35,7 +35,7 @@ user/testprogs/src/bin/  test programs in the initrd; user/testprogs/manifests/ 
 
 `cargo xtask check` ends with `cargo xtask stack-check` (incident 0018),
 which can also run alone. It builds every initrd program (services,
-applications, test programs: 62 binaries) in the release and the dev
+applications, test programs: 63 binaries) in the release and the dev
 profile, disassembles each with binutils' `objdump`, measures every
 function's frame from its prologue (return address, pushes, `rsp`
 adjustment, stack probes) and the deepest chain of direct calls from

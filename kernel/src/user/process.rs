@@ -13,7 +13,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use aricode_abi::USER_SPACE_END;
 use aricode_pmm::Frame;
-use aricode_x86_paging::{Mapper, OffsetMap, ACCESSED, NO_EXECUTE, PAGE_SIZE, USER, WRITABLE};
+use aricode_x86_paging::{Mapper, OffsetMap, NO_EXECUTE, PAGE_SIZE, USER, WRITABLE};
 use log::{info, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -865,14 +865,11 @@ pub fn snapshot() -> Vec<aricode_abi::sysinfo::ProcessEntry> {
 /// clears it: a high-water mark since the process started, page granular.
 /// The stack probes compilers emit for large frames touch every page they
 /// pass, so a deep call is seen even if it wrote little.
+/// The scan is `aricode_x86_paging::stack_touched`, tested on the host.
 fn stack_touched(m: &Mapper<vmm::PmmFrames, OffsetMap>) -> u64 {
-    (USER_STACK_TOP - USER_STACK_SIZE..USER_STACK_TOP)
-        .step_by(PAGE_SIZE as usize)
-        .find(|&page| {
-            m.translate(page)
-                .is_some_and(|(_, flags)| flags & ACCESSED != 0)
-        })
-        .map_or(0, |page| USER_STACK_TOP - page)
+    aricode_x86_paging::stack_touched(USER_STACK_TOP - USER_STACK_SIZE, USER_STACK_TOP, |page| {
+        m.translate(page).map(|(_, flags)| flags)
+    })
 }
 
 /// User stack use of every process that still has its address space
