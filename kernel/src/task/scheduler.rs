@@ -873,3 +873,122 @@ fn report_cpus_without_roamers(union: u32, idle_before: &[u64], waited_ms: u64) 
         }
     }
 }
+
+/// Raw idle counters at one instant: TSC cycles since boot and each online
+/// CPU's idle cycles (what `sysinfo::IDLE` publishes).
+struct IdleSample {
+    elapsed: u64,
+    idle: Vec<u64>,
+}
+
+fn idle_sample() -> IdleSample {
+    IdleSample {
+        elapsed: crate::time::tsc_since_boot(),
+        idle: cpu::online().map(|c| c.idle_cycles()).collect(),
+    }
+}
+
+/// Idle accounting self-test (`test=idle`, incident 0020; the control of
+/// the performance audit of 731c398, finding A). It runs the control on
+/// CPU 0, whose timer handler wakes sleepers and switches to them on the
+/// idle thread's stack, and, with more CPUs, on the last one.
+pub fn idle_selftest() {
+    let cpus = cpu::online_count();
+    let mut targets = alloc::vec![0];
+    if cpus > 1 {
+        targets.push(cpus - 1);
+    }
+    let slept: Vec<u64> = targets.iter().map(|&t| idle_control(t, cpus)).collect();
+    info!(
+        "idle selftest ok ({cpus} CPUs: busy interval excluded from idle on CPUs {targets:?} and from the aggregate, sleep counted as idle: {slept:?} ms)"
+    );
+}
+
+/// One control run: a thread pinned to `target` first sleeps, so the CPU
+/// idles and the thread is then switched in from its idle thread; it stays
+/// runnable for 500 ms and sleeps 200 ms, sampling the raw counters before
+/// and after. The busy interval cannot be idle time on its CPU: idle there
+/// is at most `elapsed - busy`, and the aggregate at most `cpus * elapsed -
+/// busy`. The 200 ms sleep must count as idle. Returns the idle
+/// milliseconds of `target`.
+fn idle_control(target: usize, cpus: usize) -> u64 {
+    const BUSY_MS: u64 = 500;
+    const SLEEP_MS: u64 = 200;
+    static BUSY_CYCLES: AtomicU64 = AtomicU64::new(0);
+    static SAMPLES: IrqLock<Option<(IdleSample, IdleSample)>> = IrqLock::new(None);
+    fn rdtsc() -> u64 {
+        // SAFETY: rdtsc only reads the time stamp counter.
+        unsafe { core::arch::x86_64::_rdtsc() }
+    }
+    extern "C" fn control(_: usize) {
+        sleep_ms(50);
+        let before = idle_sample();
+        let start = rdtsc();
+        while crate::time::tsc_cycles_to_ms(rdtsc().wrapping_sub(start)).expect("TSC calibrated")
+            < BUSY_MS
+        {
+            core::hint::spin_loop();
+        }
+        BUSY_CYCLES.store(rdtsc().wrapping_sub(start), Ordering::Relaxed);
+        sleep_ms(SLEEP_MS);
+        let after = idle_sample();
+        *SAMPLES.lock() = Some((before, after));
+    }
+
+    // main waits on another CPU when there is one, waking every 100 ms.
+    let main_cpu = if target == 0 { cpus - 1 } else { 0 };
+    set_affinity(MAIN_TID, Some(main_cpu)).unwrap();
+    let t = spawn_on("idle-control", control, 0, target).unwrap();
+    while state(t).is_some() {
+        sleep_ms(100);
+    }
+    set_affinity(MAIN_TID, None).unwrap();
+
+    let (before, after) = SAMPLES.lock().take().expect("control samples");
+    let busy = BUSY_CYCLES.load(Ordering::Relaxed);
+    let elapsed = after.elapsed - before.elapsed;
+    let idle: Vec<u64> = after
+        .idle
+        .iter()
+        .zip(&before.idle)
+        .map(|(a, b)| a.wrapping_sub(*b))
+        .collect();
+    let permille = |x: u64| x.saturating_mul(1000) / elapsed.max(1);
+    let ms = |x: u64| crate::time::tsc_cycles_to_ms(x).unwrap_or(0);
+    let others: Vec<u64> = idle.iter().map(|d| permille(*d)).collect();
+    let on_target = idle[target];
+    let aggregate: u64 = idle.iter().sum();
+    info!(
+        "idle selftest: control on CPU {target}: elapsed {elapsed} cycles ({} ms), busy {busy} cycles ({} ms), idle {on_target} cycles ({} ms, {} permille; at most {} permille possible); aggregate {aggregate} of {} cycles; idle permille per CPU {others:?}",
+        ms(elapsed),
+        ms(busy),
+        ms(on_target),
+        permille(on_target),
+        permille(elapsed.saturating_sub(busy)),
+        elapsed * cpus as u64
+    );
+    // Slack for where the samples fall relative to the switches: 1 %.
+    let slack = elapsed / 100;
+    assert!(
+        on_target + busy <= elapsed + slack,
+        "CPU {target} counted its busy interval as idle: idle {} ms + busy {} ms > elapsed {} ms",
+        ms(on_target),
+        ms(busy),
+        ms(elapsed)
+    );
+    assert!(
+        aggregate + busy <= (elapsed + slack) * cpus as u64,
+        "aggregate idle includes the busy interval: {} ms + busy {} ms > {cpus} x {} ms",
+        ms(aggregate),
+        ms(busy),
+        ms(elapsed)
+    );
+    // The sleep is idle time on the control's CPU (other threads may briefly
+    // run there).
+    assert!(
+        ms(on_target) >= SLEEP_MS * 3 / 4,
+        "CPU {target} idled only {} ms of a {SLEEP_MS} ms sleep",
+        ms(on_target)
+    );
+    ms(on_target)
+}
