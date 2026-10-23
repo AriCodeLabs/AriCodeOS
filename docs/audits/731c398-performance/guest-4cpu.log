@@ -1,0 +1,245 @@
+BdsDxe: failed to load Boot0001 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x2,0x0): Not Found
+BdsDxe: loading Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
+BdsDxe: starting Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
+[ INFO]: boot/src/main.rs@047: AriBoot 0.13.0 (AriCodeOS UEFI loader)
+[ INFO]: boot/src/slots.rs@139: slots: state active A, no pending
+[ INFO]: boot/src/slots.rs@142: slots: active slot -> slot A
+[ INFO]: boot/src/slots.rs@168: slots: booting from slot A (image version 1)
+[ INFO]: boot/src/main.rs@088: GOP: 1280x800 stride 1280 Bgr @ 0x80000000
+[ INFO]: boot/src/main.rs@102: ACPI RSDP: 0x1f77e014
+[ INFO]: boot/src/main.rs@113: kernel.elf: 846728 bytes
+[ INFO]: boot/src/main.rs@151: kernel: 764 KiB at phys 0x1ddeb000, entry 0xffffffff80056180
+[ INFO]: boot/src/main.rs@360: initrd.img: 2036 KiB at phys 0x1dbed000, sha256 a3964284
+[ INFO]: boot/src/main.rs@166: cmdline: qemu_exit shell boot_slot=A
+[ INFO]: boot/src/memmap.rs@042: memory: GetMemoryMap (size)
+[ INFO]: boot/src/memmap.rs@054: memory: GetMemoryMap -> BUFFER_TOO_SMALL, 5952 bytes, descriptor size 48 (version 1)
+[ INFO]: boot/src/memmap.rs@076: memory: GetMemoryMap(6336) -> SUCCESS, 5616 bytes
+[ INFO]: boot/src/main.rs@191: memory: 117 UEFI regions, physical limit 4096 MiB
+[ INFO]: boot/src/main.rs@249: paging: identity and physical map, 14 of 22 tables used
+[ INFO]: boot/src/main.rs@284: ExitBootServices -> AriKernel
+
+AriCodeOS booting...
+AriCodeOS Kernel 0.13.0
+AriCodeOS by Edwin F. Veliz Jaramillo (lynxcraft), https://github.com/AriCodeLabs/AriCodeOS
+[INFO ] cmdline: qemu_exit shell boot_slot=A
+[INFO ] framebuffer: 1280x800 stride 1280 Bgr @ 0x80000000
+[INFO ] kernel: phys 0x1ddeb000 virt 0xffffffff80000000 size 764 KiB
+[INFO ] acpi rsdp: 0x1f77e014
+[INFO ] memory map: 117 regions (desc 48 bytes)
+[INFO ] cpu: GDT, TSS (IST for #DF) and IDT installed (cs=0x8 ds=0x10 tr=0x28)
+[INFO ] pmm: 458 MiB free of 4096 MiB addressable, bitmap 128 KiB @ 0x100000
+[INFO ] vmm: own tables active (pml4 0x120000), W^X on the image, stack 0xffffffff7ffef000..0xffffffff7ffff000 with guard 0xffffffff7ffee000
+[INFO ] vmm: 43 MiB of boot memory returned to the PMM (2876 KiB kept for the kernel, 501 MiB free)
+[INFO ] heap: 1024 KiB at 0xffffc00000000000, grows in 1024 KiB chunks up to 64 MiB
+[INFO ] acpi: power-off through S5 (SLP_TYP 0/0, PM1a 0x604, PM1b 0x0)
+[INFO ] acpi: RSDP rev 2 -> XSDT with 7 tables [FACP APIC HPET MCFG DMAR WAET BGRT]
+[INFO ] acpi: MADT lapic @ 0xfee00000, 4 cpu(s), 1 ioapic(s) [(0, 4273995776, 0)], overrides [(0, 2, 0), (5, 5, 13), (9, 9, 13), (10, 10, 13), (11, 11, 13)]
+[INFO ] acpi: MCFG ecam @ 0xe0000000 segment 0 buses 0..=255
+[INFO ] acpi: DMAR 48 bits, 1 unit(s) [(4275634176, false)], 0 reserved region(s)
+[INFO ] apic: lapic id 0 version 0x14 @ 0xfee00000; timer 62711 ticks/ms (div 16), tick 100 Hz (count 627110)
+[INFO ] ioapic: id 0 @ 0xfec00000, 24 entries, gsi base 0, all masked
+[INFO ] interrupts enabled
+[INFO ] task: main thread adopted, idle created (32 KiB stacks with guard); preemptive round-robin scheduler, quantum 20 ms
+[INFO ] smp: 4 CPUs online (3 of 3 APs started), lapic ids [0, 1, 2, 3]
+[INFO ] random: ChaCha20 generator seeded with TSC (no rdrand: limited entropy)
+[INFO ] rtc: 2026-10-23 00:01:20 UTC (unix 1792713680)
+[INFO ] console: input on COM1 (GSI 4, vector 0x40)
+[INFO ] console: PS/2 keyboard (GSI 1, vector 0x41, layout us)
+[INFO ] initrd: 74 files, 2036 KiB @ 0x1dbed000, sha256 a3964284
+[INFO ] pci: 00:00.0 8086:29c0 class 06.00 host bridge (0 BARs)
+[INFO ] pci: 00:01.0 1234:1111 class 03.00 VGA/display (2 BARs)
+[INFO ] pci: 00:02.0 1af4:1042 class 01.00 storage (2 BARs, MSI-X/vendor/vendor/vendor/vendor/vendor)
+[INFO ] pci: 00:03.0 1af4:1041 class 02.00 Ethernet (2 BARs, MSI-X/vendor/vendor/vendor/vendor/vendor)
+[INFO ] pci: 00:04.0 1af4:1052 class 09.00 keyboard (2 BARs, MSI-X/vendor/vendor/vendor/vendor/vendor)
+[INFO ] pci: 00:05.0 1af4:1052 class 09.02 mouse (2 BARs, MSI-X/vendor/vendor/vendor/vendor/vendor)
+[INFO ] pci: 00:1f.0 8086:2918 class 06.01 ISA bridge (0 BARs)
+[INFO ] pci: 00:1f.2 8086:2922 class 01.06 SATA (AHCI) (2 BARs, MSI)
+[INFO ] pci: 00:1f.3 8086:2930 class 0c.05 SMBus (1 BAR)
+[INFO ] pci: 9 functions in segment 0 (ECAM @ 0xe0000000)
+[INFO ] iommu: 00:01.0 in identity domain 1 (firmware)
+[INFO ] iommu: unit 0 @ 0xfed90000 version 1.0: 48 guest address bits, 4 levels, 65536 domains, 1 fault register(s), not coherent (clflush); translation active
+[INFO ] iommu: 1 active unit(s), 0 reserved region(s) (RMRR), identity domain for 1 firmware device(s) ["00:01.0"]; one domain per process with IOVA = physical
+[INFO ] user: process 1 'init' created (3 segments, 352 KiB, entry 0x400000, thread Tid(6))
+AriInit: starting
+[INFO ] user: process 2 'hello' created (1 segments, 4 KiB, entry 0x400000, thread Tid(7))
+hello from ring 3
+[INFO ] user: process 2 'hello' exited with code 42
+AriInit: hello exited with 42
+[INFO ] user: process 3 'kernel_read' created (1 segments, 4 KiB, entry 0x400000, thread Tid(8))
+USER FAULT #PF (14) Page Fault: rip=0x400007 rsp=0x800000 err=0x5 cr2=0xffffffff80000000
+[WARN ] user: process 3 'kernel_read' killed: #PF read
+AriInit: kernel_read was killed by the kernel
+[INFO ] user: process 4 'crashy_driver' created (1 segments, 4 KiB, entry 0x400000, thread Tid(9))
+USER FAULT #PF (14) Page Fault: rip=0x400015 rsp=0x7ffff8 err=0x4 cr2=0x40
+[WARN ] user: process 4 'crashy_driver' killed: #PF read
+AriInit: crashy_driver crashed, restarting
+[INFO ] user: process 5 'crashy_driver' created (1 segments, 4 KiB, entry 0x400000, thread Tid(10))
+[INFO ] user: process 5 'crashy_driver' exited with code 0
+AriInit: crashy_driver restarted successfully
+AriInit: 9 PCI functions
+[INFO ] pci: 00:02.0 1af4:1042 claimed (MSI-X entry 0)
+[INFO ] user: process 6 'virtio_blk' created (3 segments, 288 KiB, entry 0x400000, thread Tid(11))
+[INFO ] iommu: 00:02.0 assigned to domain 2 (process 6)
+virtio-blk: device ready
+virtio-blk: flush negotiated (VIRTIO_BLK_F_FLUSH)
+virtio-blk: capacity 98304 sectors
+virtio-blk: GPT with 5 partition(s)
+virtio-blk:   ARI0 LBA 34..6143
+virtio-blk:   SYSA LBA 6144..30719
+virtio-blk:   SYSB LBA 30720..55295
+virtio-blk:   UPDATE LBA 55296..79871
+virtio-blk:   ARIBOOT LBA 79872..79935
+virtio-blk: serving requests
+AriInit: block service answers: 98304 sectors, GPT read, ARI0 at LBA 34
+[INFO ] user: process 7 'fsd' created (3 segments, 40 KiB, entry 0x400000, thread Tid(12))
+fsd: AriFS mounted, 4 files
+fsd: serving requests
+AriInit: file service answers: 4 files
+[INFO ] pci: 00:03.0 1af4:1041 claimed (MSI-X entry 0)
+[INFO ] user: process 8 'virtio_net' created (3 segments, 344 KiB, entry 0x400000, thread Tid(13))
+[INFO ] iommu: 00:03.0 assigned to domain 5 (process 8)
+virtio-net: device ready, MAC 52:54:00:12:34:56
+[INFO ] pci: 00:04.0 1af4:1052 claimed (MSI-X entry 0)
+[INFO ] iommu: 00:04.0 assigned to domain 6 (process 9)
+[INFO ] user: process 9 'virtio_input' created (3 segments, 280 KiB, entry 0x400000, thread Tid(14))
+virtio-net: tcp secret weak: kernel generator seeded from TSC + interrupts (65 samples, 43 events), no hardware source: ISNs and ports guessable with effort
+virtio-input: device ready: QEMU Virtio Keyboard
+virtio-net: fault net tcp secret weak x1
+virtio-input: serving requests
+virtio-net: serving requests
+[INFO ] pci: 00:05.0 1af4:1052 claimed (MSI-X entry 0)
+[INFO ] iommu: 00:05.0 assigned to domain 7 (process 10)
+[INFO ] user: process 10 'virtio_input' created (3 segments, 280 KiB, entry 0x400000, thread Tid(15))
+virtio-input: device ready: QEMU Virtio Mouse
+virtio-input: serving requests
+AriInit: 2 input device(s) ready
+virtio-net: DHCP 10.0.2.15 mask 255.255.255.0 router 10.0.2.2 dns 10.0.2.3
+AriInit: network service has address 10.0.2.15
+AriInit: booted from slot A (active)
+AriInit: boot services completed
+[INFO ] user: process 11 'console_bridge' created (3 segments, 12 KiB, entry 0x400000, thread Tid(16))
+AriInit: console bridge with 2 input device(s)
+CONSOLE_BRIDGE_READY
+[INFO ] user: process 12 'sshd' created (3 segments, 352 KiB, entry 0x400000, thread Tid(17))
+sshd: no authorized_keys in AriFS: not listening (install a key with cargo xtask usb-image --authorized-key, or write authorized_keys ... from the console)
+[INFO ] user: process 13 'shell' created (3 segments, 568 KiB, entry 0x400000, thread Tid(18))
+arish: AriCodeOS shell (type help for help)
+ari> run bench
+AriInit: launch bench with manifest [system fs net] memory 64 KiB
+fsd: private directory 'bench'
+[INFO ] user: process 14 'bench' created (3 segments, 284 KiB, entry 0x400000, thread Tid(19))
+bench: calibration 3812190 TSC cycles per ms
+bench: syscall thread_get_tid (10000): p50 328 ns p95 338 ns p99 628 ns
+bench: ipc fsd list (1000): p50 62 us p95 123 us p99 133 us
+bench: replace 4 KiB (100): p50 2972 us p95 3345 us p99 3590 us
+bench: read 4 KiB (100): p50 199 us p95 241 us p99 304 us
+bench: ipc net info (200): p50 9998 us p95 10110 us p99 10276 us
+audit: quiet CPU 0 idle permille 997
+audit: quiet CPU 1 idle permille 989
+audit: quiet CPU 2 idle permille 998
+audit: quiet CPU 3 idle permille 1000
+audit: busy/sleep elapsed cycles 2706450100 busy cycles 1906123550
+audit: busy/sleep CPU 0 idle permille 985 idle cycles 2666226986
+audit: busy/sleep CPU 1 idle permille 292 idle cycles 792670500
+audit: busy/sleep CPU 2 idle permille 986 idle cycles 2669856670
+audit: busy/sleep CPU 3 idle permille 999 idle cycles 2704277107
+bench: done
+[INFO ] user: process 14 'bench' exited with code 0
+run: bench exited with 0
+ari> run bench
+AriInit: launch bench with manifest [system fs net] memory 64 KiB
+fsd: private directory 'bench'
+[INFO ] user: process 15 'bench' created (3 segments, 284 KiB, entry 0x400000, thread Tid(20))
+bench: calibration 3812288 TSC cycles per ms
+bench: syscall thread_get_tid (10000): p50 368 ns p95 408 ns p99 458 ns
+bench: ipc fsd list (1000): p50 64 us p95 82 us p99 114 us
+bench: replace 4 KiB (100): p50 2899 us p95 3149 us p99 3341 us
+bench: read 4 KiB (100): p50 202 us p95 223 us p99 289 us
+bench: ipc net info (200): p50 10001 us p95 10094 us p99 10280 us
+audit: quiet CPU 0 idle permille 998
+audit: quiet CPU 1 idle permille 991
+audit: quiet CPU 2 idle permille 997
+audit: quiet CPU 3 idle permille 999
+audit: busy/sleep elapsed cycles 2683795790 busy cycles 1906214368
+audit: busy/sleep CPU 0 idle permille 992 idle cycles 2664843252
+audit: busy/sleep CPU 1 idle permille 286 idle cycles 769961662
+audit: busy/sleep CPU 2 idle permille 987 idle cycles 2648956364
+audit: busy/sleep CPU 3 idle permille 1007 idle cycles 2703934688
+bench: done
+[INFO ] user: process 15 'bench' exited with code 0
+run: bench exited with 0
+ari> diag
+=== AriCodeOS diagnostics ===
+uptime: 22.42 s
+usable physical memory: 505 MiB total, 496 MiB free, 9 MiB in use (129450 4 KiB frames)
+cpus: 4 online
+cpu 0: 88% idle
+cpu 1: 81% idle
+cpu 2: 95% idle
+cpu 3: 99% idle
+entropy  TSC + interrupts (66 samples, 47 events): weak
+PID  STATE       NAME
+1    running     init
+6    running     virtio_blk
+7    running     fsd
+8    running     virtio_net
+9    running     virtio_input
+10   running     virtio_input
+11   running     console_bridge
+12   running     sshd
+13   running     shell
+block     service     active
+files     fsd         active, responding
+          descriptors 0/16 open, 0 reclaimed from dead clients
+network   service     active
+input     service     active
+graphics  compositor  absent (start with `gui`)
+SERVICE          STATE        GEN  RESTARTS   LAST EXIT         READY FOR
+virtio_blk       ready        1    0          -                 for 22 s
+fsd              ready        1    0          -                 for 22 s
+virtio_net       ready        1    0          -                 for 22 s  (optional)
+virtio_input     ready        1    0          -                 for 21 s  (optional)
+virtio_input     ready        1    0          -                 for 21 s  (optional)
+console_bridge   ready        1    0          -                 for 21 s  (optional)
+sshd             ready        1    0          -                 for 20 s  (optional)
+link    up
+ip      10.0.2.15
+mask    255.255.255.0
+router  10.0.2.2
+dns     10.0.2.3
+mac     52:54:00:12:34:56
+tcp     8 slots: 0 listen, 0 syn-rcvd, 0 syn-sent, 0 backlog, 0 established, 0 closing, 0 time-wait, 8 free; 0 SYNs reset
+sockets 0 in use; 0 reclaimed from dead clients
+00:00.0  8086:29c0  class 06.00
+00:01.0  1234:1111  class 03.00
+00:02.0  1af4:1042  class 01.00
+00:03.0  1af4:1041  class 02.00
+00:04.0  1af4:1052  class 09.00
+00:05.0  1af4:1052  class 09.02
+00:1f.0  8086:2918  class 06.01
+00:1f.2  8086:2922  class 01.06
+00:1f.3  8086:2930  class 0c.05
+9 PCI function(s)
+recent kernel events:
+  [0.242 s] process 4 killed by fault: #PF read
+  [0.338 s] process 5 'crashy_driver' created
+  [0.339 s] process 5 'crashy_driver' exited with code 0
+  [0.547 s] process 6 'virtio_blk' created
+  [1.019 s] process 7 'fsd' created
+  [1.237 s] process 8 'virtio_net' created
+  [1.336 s] process 9 'virtio_input' created
+  [1.530 s] fault reported by process 8: net tcp secret weak x1 (code 2)
+  [1.727 s] process 10 'virtio_input' created
+  [2.503 s] process 11 'console_bridge' created
+  [2.620 s] process 12 'sshd' created
+  [2.711 s] process 13 'shell' created
+  [2.950 s] process 14 'bench' created
+  [13.072 s] process 14 'bench' exited with code 0
+  [13.363 s] process 15 'bench' created
+  [22.257 s] process 15 'bench' exited with code 0
+=== end of diagnostics ===
+ari> shutdown
+AriCodeOS: shutting down (requested by process 13)
+ARICODEOS_SHUTDOWN
+
+[host] guest frames other than ARP and DHCP: 0

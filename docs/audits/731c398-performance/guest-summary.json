@@ -1,0 +1,254 @@
+{
+  "1cpu": [
+    {
+      "metrics": {
+        "syscall thread_get_tid": {
+          "samples": 10000,
+          "unit": "ns",
+          "p50": 309,
+          "p95": 329,
+          "p99": 339
+        },
+        "ipc fsd list": {
+          "samples": 1000,
+          "unit": "us",
+          "p50": 58,
+          "p95": 64,
+          "p99": 78
+        },
+        "replace 4 KiB": {
+          "samples": 100,
+          "unit": "us",
+          "p50": 2764,
+          "p95": 2917,
+          "p99": 3065
+        },
+        "read 4 KiB": {
+          "samples": 100,
+          "unit": "us",
+          "p50": 174,
+          "p95": 210,
+          "p99": 303
+        },
+        "ipc net info": {
+          "samples": 200,
+          "unit": "us",
+          "p50": 10009,
+          "p95": 10152,
+          "p99": 10219
+        }
+      },
+      "quiet_idle_permille": [
+        1007
+      ],
+      "control_idle": [
+        {
+          "cpu": 0,
+          "permille": 1055,
+          "cycles": 2821635546
+        }
+      ],
+      "control_elapsed_cycles": 2674487386,
+      "control_busy_cycles": 1905641252,
+      "control_idle_upper_bound_per_cpu_average_percent": 28.74742045988472,
+      "control_reported_idle_average_percent": 105.50192013506097
+    },
+    {
+      "metrics": {
+        "syscall thread_get_tid": {
+          "samples": 10000,
+          "unit": "ns",
+          "p50": 309,
+          "p95": 319,
+          "p99": 438
+        },
+        "ipc fsd list": {
+          "samples": 1000,
+          "unit": "us",
+          "p50": 58,
+          "p95": 65,
+          "p99": 78
+        },
+        "replace 4 KiB": {
+          "samples": 100,
+          "unit": "us",
+          "p50": 2187,
+          "p95": 2323,
+          "p99": 2352
+        },
+        "read 4 KiB": {
+          "samples": 100,
+          "unit": "us",
+          "p50": 172,
+          "p95": 186,
+          "p99": 285
+        },
+        "ipc net info": {
+          "samples": 200,
+          "unit": "us",
+          "p50": 10002,
+          "p95": 10155,
+          "p99": 10347
+        }
+      },
+      "quiet_idle_permille": [
+        1007
+      ],
+      "control_idle": [
+        {
+          "cpu": 0,
+          "permille": 1052,
+          "cycles": 2822019004
+        }
+      ],
+      "control_elapsed_cycles": 2681794254,
+      "control_busy_cycles": 1905633120,
+      "control_idle_upper_bound_per_cpu_average_percent": 28.94185983292065,
+      "control_reported_idle_average_percent": 105.22876614381768
+    }
+  ],
+  "4cpu": [
+    {
+      "metrics": {
+        "syscall thread_get_tid": {
+          "samples": 10000,
+          "unit": "ns",
+          "p50": 328,
+          "p95": 338,
+          "p99": 628
+        },
+        "ipc fsd list": {
+          "samples": 1000,
+          "unit": "us",
+          "p50": 62,
+          "p95": 123,
+          "p99": 133
+        },
+        "replace 4 KiB": {
+          "samples": 100,
+          "unit": "us",
+          "p50": 2972,
+          "p95": 3345,
+          "p99": 3590
+        },
+        "read 4 KiB": {
+          "samples": 100,
+          "unit": "us",
+          "p50": 199,
+          "p95": 241,
+          "p99": 304
+        },
+        "ipc net info": {
+          "samples": 200,
+          "unit": "us",
+          "p50": 9998,
+          "p95": 10110,
+          "p99": 10276
+        }
+      },
+      "quiet_idle_permille": [
+        997,
+        989,
+        998,
+        1000
+      ],
+      "control_idle": [
+        {
+          "cpu": 0,
+          "permille": 985,
+          "cycles": 2666226986
+        },
+        {
+          "cpu": 1,
+          "permille": 292,
+          "cycles": 792670500
+        },
+        {
+          "cpu": 2,
+          "permille": 986,
+          "cycles": 2669856670
+        },
+        {
+          "cpu": 3,
+          "permille": 999,
+          "cycles": 2704277107
+        }
+      ],
+      "control_elapsed_cycles": 2706450100,
+      "control_busy_cycles": 1906123550,
+      "control_idle_upper_bound_per_cpu_average_percent": 82.39277023803247,
+      "control_reported_idle_average_percent": 81.59240828973718
+    },
+    {
+      "metrics": {
+        "syscall thread_get_tid": {
+          "samples": 10000,
+          "unit": "ns",
+          "p50": 368,
+          "p95": 408,
+          "p99": 458
+        },
+        "ipc fsd list": {
+          "samples": 1000,
+          "unit": "us",
+          "p50": 64,
+          "p95": 82,
+          "p99": 114
+        },
+        "replace 4 KiB": {
+          "samples": 100,
+          "unit": "us",
+          "p50": 2899,
+          "p95": 3149,
+          "p99": 3341
+        },
+        "read 4 KiB": {
+          "samples": 100,
+          "unit": "us",
+          "p50": 202,
+          "p95": 223,
+          "p99": 289
+        },
+        "ipc net info": {
+          "samples": 200,
+          "unit": "us",
+          "p50": 10001,
+          "p95": 10094,
+          "p99": 10280
+        }
+      },
+      "quiet_idle_permille": [
+        998,
+        991,
+        997,
+        999
+      ],
+      "control_idle": [
+        {
+          "cpu": 0,
+          "permille": 992,
+          "cycles": 2664843252
+        },
+        {
+          "cpu": 1,
+          "permille": 286,
+          "cycles": 769961662
+        },
+        {
+          "cpu": 2,
+          "permille": 987,
+          "cycles": 2648956364
+        },
+        {
+          "cpu": 3,
+          "permille": 1007,
+          "cycles": 2703934688
+        }
+      ],
+      "control_elapsed_cycles": 2683795790,
+      "control_busy_cycles": 1906214368,
+      "control_idle_upper_bound_per_cpu_average_percent": 82.24329907008313,
+      "control_reported_idle_average_percent": 81.85883589526013
+    }
+  ]
+}

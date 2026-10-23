@@ -1,0 +1,14 @@
+name = "perf.audit4"
+description = "Audit-only warm syscall, fs, net metadata RPC and quiet idle interval"
+level = "full"
+areas = ["auditperf"]
+cmdline = "qemu_exit shell"
+selftest = false
+cpus = 4
+serial = true
+timeout_secs = 180
+stdin = ["run bench", "run bench", "diag", "shutdown"]
+[expect]
+exit = 33
+serial_contains = ["bench: ipc net info (200):", "audit: quiet CPU 0 idle permille", "bench: done", "ARICODEOS_SHUTDOWN"]
+serial_absent = ["KERNEL PANIC", "panic in user program", "USER STACK OVERFLOW"]

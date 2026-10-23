@@ -1,0 +1,3 @@
+aligned_read_4KiB: Counts { reads: 1, writes: 0, read_bytes: 4096, write_bytes: 0, flushes: 0 }
+unaligned_read_4KiB: Counts { reads: 3, writes: 0, read_bytes: 4608, write_bytes: 0, flushes: 0 }
+atomic_replace_4KiB: Counts { reads: 3, writes: 5, read_bytes: 8704, write_bytes: 9728, flushes: 3 }
