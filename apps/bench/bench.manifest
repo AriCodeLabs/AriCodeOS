@@ -1,4 +1,5 @@
-# Benchmarks: system clock and a private directory for the file ones.
+# Benchmarks: system clock, a private directory for the file ones and a
+# network session for the metadata call to the network service.
 name = bench
-caps = system, fs
+caps = system, fs, net
 memory = 64K
