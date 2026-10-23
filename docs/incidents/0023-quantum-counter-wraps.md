@@ -104,4 +104,6 @@ CPU. `cpu::idle_other_than` had no other user and is removed.
   `a_pinned_thread_wakes_its_own_idle_cpu`,
   `a_batch_of_wakeups_wakes_one_idle_cpu_per_thread`.
 - QEMU: `scheduler.quantum` (above); areas `scheduler` and `smp`; the full
-  suite, since this changes scheduling on every CPU (see the branch report).
+  suite, since this changes scheduling on every CPU: `--all` 170 of 170
+  and `--all --cpus 4` 170 of 170 in the development container, branch
+  rebased on `develop` adc43a0.

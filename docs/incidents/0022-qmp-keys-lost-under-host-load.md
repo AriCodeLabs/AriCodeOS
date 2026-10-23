@@ -112,5 +112,11 @@ Enter that the fault consumes by design.
   forward-only cursor, previous command output not taken for an echo,
   waits on a growing capture, bounded wait naming the lost key, stop on
   QEMU exit) and the scenario rule above.
-- QEMU: areas `usb`, `shell`, `console` (and the full suite once, see the
-  branch's report).
+- QEMU, development container (`--cpus 10 --memory 12g`), branch rebased
+  on `develop` adc43a0: `cargo xtask test --all --area
+  usb,shell,console,scheduler,smp,input` 100 of 100; full suite `--all`
+  170 of 170 and `--all --cpus 4` 170 of 170, `usb.hid_fault` running in
+  parallel with the others. The `--cpus 4` pass overlapped the start of
+  a CI container run on the same host, so `usb.hid_fault` passed with the
+  host loaded beyond the documented limits. Thermal guard: maximum 87 °C,
+  no guest paused.
