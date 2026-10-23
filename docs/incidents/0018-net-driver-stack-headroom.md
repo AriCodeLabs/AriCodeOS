@@ -92,9 +92,13 @@ from bringing the second copy back.
    table full, sweeps inside the request (`serve` -> `tcp_room` -> `sweep`
    -> `probe` -> `retire` -> `reset_and_drop`), and the reset toward
    10.0.2.77 is parked and announced with an ARP request (`send_ipv4` ->
-   `send_arp_request` -> `send_eth` -> the NIC). The order (`http` typed,
-   then `client gone`) shows the reclaim ran in the request; `net arp
-   defer full` absent shows the reset got a parking slot. On the dev build
+   `send_arp_request` -> `send_eth` -> the NIC). netd names the sweep
+   that found the orphan gone (since 95fee49): `reclaimed (sweep for a full
+   tcp table)` is the one inside the request, and the scenario requires it
+   and forbids `reclaimed (periodic sweep)`; `net arp defer full` absent
+   shows the reset got a parking slot. The scenario runs alone (`serial`):
+   the request must reach netd within the 1 s before the next periodic
+   sweep, in wall-clock time. On the dev build
    of ce29f02 it failed with the overflow above, before reaching the deep
    path; it was not run on the release build of the old code (the static
    margin there was about 12 KiB, indirect calls not counted).
@@ -130,8 +134,11 @@ on the driver's 64 KiB stack:
 - `TcpSock::boxed`, out of line, builds every TCP socket: the
   `Connection` temporary of a dev build is in that one leaf frame (8,320
   bytes), not in `serve` or `on_frame`.
-- `Stack` is now 4,680 bytes over virtio-net. Heap use grows by the same
-  buffers (about 18 KiB plus 8 KiB per TCP socket, as before) in the
+- `Stack` is now 4,680 bytes over virtio-net. Heap use grows by what
+  left the stack: the `Stack` itself, the four parking frames (6,056
+  bytes) and the receive buffer (1,514) from the start, plus 1,472 bytes
+  per bound UDP socket: about 24 KiB with all 8 UDP sockets bound, on top
+  of the 8 KiB per TCP socket that were already on the heap, in the
   256 KiB arena.
 
 After the fix (`cargo xtask stack-check`):
@@ -183,11 +190,9 @@ The release deepest path is now the audit's path itself (`serve` 2,128 ->
   `ssh.*`, `net.https`, `crypto.entropy_rdrand` and `shell.commands`. The
   13 that fail are the update scenarios (`update.*`, `apps.downgrade_*`,
   `apps.upgrade_network`), for a reason unrelated to the stack: a dev
-  system image is 4,369,040 bytes and the updater's image buffer is 4 MiB
-  (`IMAGE_BUFFER`), so it cannot load the installed image and reports
-  `installed version unknown`. In `network.deep_path` the order holds
-  (`ari> http ...`, then `client gone ('tcp_orphan'), 8 socket(s) left
-  open: reclaimed`, then `HTTP 200`), the parked reset later expires as
+  system image does not fit the updater's 4 MiB image buffer (incident
+  0021). In `network.deep_path` the reclaim came after the orphan's exit
+  and before `HTTP 200`, the parked reset later expires as
   `net arp no reply`, and `diag` shows virtio-net at 16 of 64 KiB touched,
   against 15,408 bytes measured statically.
 - Release build, the full suite (`cargo xtask test --all --jobs 10`, run
@@ -197,19 +202,70 @@ The release deepest path is now the audit's path itself (`serve` 2,128 ->
 - Host temperature during the runs: 85 °C at most, the thermal guard never
   paused a guest.
 
+## Audit follow-ups (2026-10-23)
+
+The independent audit of b1cea10 found nothing critical and re-measured
+the numbers above exactly. Its follow-ups, each a commit:
+
+- **M1, every initrd program under budget (ec6305d, 5548917).** The check
+  covered only the two network drivers, but in release builds the shell
+  (39,448-byte path, 19,424-byte frame in `http_get`: every HTTPS download
+  runs the certificate checks, `x509::verify_chain` -> `rsa::verify_pss` ->
+  `bigint::Modulus::pow`, below that frame, and the shell is every SSH
+  session), usb-input (23,240 / 20,000, `main`), usb-ehci (20,104 /
+  17,296, `main`), fsd (20,392 / 14,288) and the updater (28,408 / 10,576)
+  were near or over it. Fixed rather than excepted: the shell's 8 KiB body
+  buffer and the download's 8 KiB header buffer are on the heap
+  (`aricode_http::fetch_with_head`, the header buffer given by
+  `aricode_https`), and both USB drivers' `open` return the controller in a
+  `Box`. Now, release / dev: shell 23,112 / 21,104, updater 20,248 /
+  18,960, usb-input 4,168 / 6,464, usb-ehci 4,664 / 6,640, fsd 20,392 /
+  25,216. `stack-check` measures all 63 initrd programs (126 binaries),
+  with per-binary budgets (32 KiB / 16 KiB by default; exceptions only in
+  `stack::EXCEPTIONS` with a reason and a tracking incident, none today).
+- **L3 (5548917).** Functions are keyed by address (three demangled names
+  repeat in a dev virtio-net, and the last one used to overwrite the
+  others), a branch target resolves to the function containing it,
+  conditional tail calls are followed, and the module and
+  `tests/README.md` list what the lower bound leaves out.
+- **M2 (ed95188).** The high-water scan is
+  `aricode_x86_paging::stack_touched`, a pure function with host tests
+  (lowest accessed page, Accessed bit only, range); scenario
+  `diag.stack_high_water` runs `stack_probe`, which nests two 12 KiB frames
+  and requires its own entry to be at least 24 KiB and less than the whole
+  stack.
+- **L1 (95fee49).** The reclaim line names its sweep, and
+  `network.deep_path` asserts the one inside the request (above).
+- **L7 (3d7e1cf).** A fixed byte vector pins the `StackEntry` layout and
+  its zero padding.
+- **L2, L5, L8 (this documentation).** The updater buffer is incident
+  0021; ADR 0039 and `docs/architecture.md` record what `STACKS` exposes;
+  the heap estimate above is corrected.
+
+Tests of the follow-ups (inside the dev container, same limits):
+`cargo xtask check` (126 binaries in budget) and the unit level (523 host
+tests, with the new ones of `stack.rs`, `stack_touched` and
+`stack_entry_wire_layout`) after every commit; `cargo xtask test --all
+--area network,ssh,diag,shell,usb,tls --jobs 10` on 3d7e1cf: 87 scenarios,
+0 failed, 3m39s. `stack_probe: touched 28672 of 65536 bytes after two 12
+KiB frames: ok`; `network.deep_path` and `network.sockets_reclaimed` both
+reclaimed by the `sweep for a full tcp table`; virtio-net 12 of 64 KiB.
+Host temperature at most 85 °C, no guest paused. The full suite was not
+rerun: the kernel change since the full run is the move of the scan into
+`aricode_x86_paging` (same logic, now tested on the host), and the dev
+network run was not repeated (the netd change since is the reclaim line).
+
 ## Open
 
-- `stack::CHECKED` covers the two network drivers only. A survey of the
-  dev builds with the same method (2026-10-23, after the fix) puts other
-  programs near or over the 32 KiB budget: `shell` 37,376 bytes (`http_get`
-  -> `aricode_http::fetch_with` over TLS), `updater` 27,056, `fsd` 25,216,
-  `usb_input` 24,784, `usb_ehci` 23,136; `init` 11,088, `sshd` 7,328.
-  Adding them to the check needs their own budgets or fixes; not done here.
+- The frame budget is 16 KiB because a dev build copies the 8 KiB TCP
+  socket through `TcpSock::boxed`'s frame; building it in place (it would
+  need an in-place constructor for `aricode_net::tcp::Connection`) would
+  let the budget go back to 8 KiB. Not done.
+- `fsd` is the program closest to its budget in a dev build (25,216 of
+  32,768 bytes, `main`'s frame 10,176); it passes.
 - The static analysis does not follow indirect calls; the high-water mark
   in `diag` is the run-time measurement that covers them, but nothing
   fails automatically on it yet.
-- Dev builds cannot run the update scenarios: the dev system image
-  (4,369,040 bytes) does not fit the updater's 4 MiB image buffer, so the
-  installed version reads as unknown. Not related to this incident; seen
-  for the first time because `cargo xtask test --debug` had not run since
-  the WebAssembly demo outgrew the test disk.
+- `STACKS` gives any holder of `READ` on `SYSTEM` every process's stack
+  depth, page granular: a weak side channel, recorded in ADR 0039 and
+  `docs/architecture.md` and kept.

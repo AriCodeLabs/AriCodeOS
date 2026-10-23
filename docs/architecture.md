@@ -651,7 +651,12 @@ latter briefly to add the region.
   kernel finds the lowest stack page whose Accessed bit the CPU set
   (`spawn` zeroes the pages through the kernel's own mapping and nothing
   clears the bit), page granular, indirect calls included; `diag` lists
-  it as `user stacks (touched of size, page granular)`.
+  it as `user stacks (touched of size, page granular)`. Like `PROCESSES`,
+  it is readable by any holder of `READ` on `SYSTEM`, and the depth of
+  another process is a weak side channel on what it is doing (ADR 0039,
+  note of 2026-10-23); there is no address randomization for it to
+  defeat. The static check covers every initrd program with per-binary
+  budgets (`stack::EXCEPTIONS`, empty).
 - `WaitQueue::wait_until_deadline` keeps interrupts disabled
   from the check until the context switch: a `wake` from an
   MSI-X handler cannot land in the window between releasing the lock and

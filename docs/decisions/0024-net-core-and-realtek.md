@@ -130,5 +130,7 @@ line: 11,752 bytes (release) and 15,408 (dev) for virtio-net. `cargo xtask
 check` now fails if the deepest direct path of either driver passes half
 the stack or one frame a quarter (`stack-check`, `tests/README.md`);
 `diag` shows each process's stack high-water mark from the kernel
-(`sysinfo::STACKS`); `network.deep_path` drives the path at run time. A new
-driver (`Link`) is measured by adding it to `stack::CHECKED`.
+(`sysinfo::STACKS`); `network.deep_path` drives the path at run time and
+checks that the reclaim ran inside the request (`reclaimed (sweep for a
+full tcp table)`). Every initrd program is measured, a new driver
+included.
