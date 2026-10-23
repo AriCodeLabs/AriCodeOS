@@ -468,11 +468,19 @@ fn http_serve(mut stream: std::net::TcpStream, update: Option<&Path>) {
         p if p.starts_with("/update/") && update.is_some() => {
             file_response(update.expect("checked"), &p["/update/".len()..])
         }
+        // Its development source beside it (ADR 0045).
+        p if p.starts_with("/dev/") && update.is_some() => file_response(
+            &update.expect("checked").with_file_name(DEV_SOURCE_DIR),
+            &p["/dev/".len()..],
+        ),
         _ => b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nno existe".to_vec(),
     };
     let _ = stream.write_all(&response);
     let _ = stream.flush();
 }
+
+/// A scenario's development source: this directory beside its `update/`.
+pub const DEV_SOURCE_DIR: &str = "dev";
 
 /// `200` with the file `name` of `dir` (plain names only), or `404`.
 pub fn file_response(dir: &Path, name: &str) -> Vec<u8> {

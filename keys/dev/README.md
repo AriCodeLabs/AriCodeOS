@@ -10,3 +10,9 @@ is never versioned; `--signing-key DIR` on `usb-image`, `publish-update` and
 
 - `ed25519.seed`: private seed (32 bytes, hex). Do not use outside tests.
 - `ed25519.pub`: public key (32 bytes, hex).
+- `dev-channel/`: the test pair of the development update channel (ADR
+  0045), seed public as well. Test builds sign the stable channel with the
+  pair above and the development channel with this one; a build with a
+  real `--signing-key` never trusts either of them (`aricode_crypto::trust`
+  refuses to compile, xtask refuses to select them), and its development
+  channel is `keys/dev-channel/`.

@@ -3,57 +3,187 @@
 //! Key management (Phase 31): generate Ed25519 key pairs, sign and verify
 //! files. The private key (32-byte seed, hex) never leaves the host; the
 //! system only carries public keys.
+//!
+//! Two channels, two keys (ADR 0045): the release key signs the stable
+//! channel (releases, packages, their indexes) and the development
+//! channel's key signs development builds and their indexes. A run signs
+//! one channel; every build embeds the release key and the development
+//! channel's public key (the updater always, AriBoot only on a machine
+//! that opted in).
 
 use crate::Result;
+use aricode_ab::{Channel, Keys};
 use aricode_crypto::{ed25519, hex, unhex};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const SEED_FILE: &str = "ed25519.seed";
 pub const PUB_FILE: &str = "ed25519.pub";
 /// Development key pair checked into the repo: for tests and QEMU only.
 pub const DEV_KEY_DIR: &str = "keys/dev";
+/// The development channel's test pair, checked into the repo next to the
+/// test key: for tests and QEMU only (its seed is public too).
+pub const TEST_DEV_CHANNEL_DIR: &str = "keys/dev/dev-channel";
+/// The public half of the development channel's real key (ADR 0045); its
+/// seed lives outside the repository (`~/.config/aricodeos/dev-signing-key`).
+pub const DEV_CHANNEL_PUB: &str = "keys/dev-channel/ed25519.pub";
+/// The public half of the release key (ADR 0029, `keys/release`).
+pub const RELEASE_PUB: &str = "keys/release/ed25519.pub";
 
 /// Environment variable through which a build embeds a non-development
 /// public key (`aricode_crypto::trust`).
 pub const SIGNING_PUB_ENV: &str = "ARICODE_SIGNING_PUB";
+/// Environment variable through which a build embeds the development
+/// channel's public key (`aricode_crypto::trust::dev_channel_key`).
+pub const DEV_CHANNEL_PUB_ENV: &str = "ARICODE_DEV_CHANNEL_PUB";
 
-/// The key pair selected with `--signing-key DIR` for this run, with its
-/// public key verified against the seed at selection time and kept here:
-/// it is never read again, so a later read error can never fall back to the
-/// development key (re-audit, R1). Unset means the development pair.
+/// The keys of this run, verified at selection time and kept here: they
+/// are never read again, so a later read error can never fall back to the
+/// development key (re-audit, R1).
+#[derive(Clone)]
 struct Selected {
-    dir: std::path::PathBuf,
-    public: [u8; 32],
-    public_hex: String,
+    /// The channel this run signs.
+    channel: Channel,
+    /// Directory of the seed that signs it.
+    signer: PathBuf,
+    /// The release key every build embeds.
+    stable: [u8; 32],
+    /// The development channel's key every updater embeds.
+    dev: [u8; 32],
+    /// Test keys (public seeds, `keys/dev`): the build embeds them without
+    /// `ARICODE_SIGNING_PUB`.
+    test: bool,
 }
 
 static SELECTED: std::sync::OnceLock<Selected> = std::sync::OnceLock::new();
 
-/// `--signing-key DIR` (ADR 0029, "The signing key"): images, packages and
-/// indexes are signed with `DIR/ed25519.seed` and the build embeds
-/// `DIR/ed25519.pub`. The pair must match, and a production seed must live
-/// outside the repository. Without it, a loud warning: the development
-/// seed is public.
-pub fn select_signing_key(dir: Option<&Path>) -> Result {
-    let root = crate::root();
-    let dev = root.join(DEV_KEY_DIR);
-    let Some(dir) = dir else {
-        eprintln!(
-            "[xtask] WARNING: signing with the DEVELOPMENT key {DEV_KEY_DIR}, whose seed is public: \
-             anyone on the network can sign images and packages that this build accepts. \
-             Use --signing-key DIR (cargo xtask keygen DIR, kept outside the repository) \
-             before upgrading machines over an untrusted network."
-        );
-        return Ok(());
-    };
-    let dir = dir
-        .canonicalize()
-        .map_err(|e| format!("--signing-key {}: {e}", dir.display()))?;
-    if dir == dev.canonicalize().unwrap_or(dev) {
-        return select_signing_key(None);
+/// AriBoot trusts the development channel (`usb-image --dev-source`).
+static LOADER_DEV: AtomicBool = AtomicBool::new(false);
+
+fn root_path(rel: &str) -> PathBuf {
+    crate::root().join(rel)
+}
+
+/// The test keys of `channel`: `keys/dev` signs the stable channel,
+/// `keys/dev/dev-channel` the development one.
+fn test_selection(channel: Channel) -> Result<Selected> {
+    let signer = root_path(match channel {
+        Channel::Stable => DEV_KEY_DIR,
+        Channel::Dev => TEST_DEV_CHANNEL_DIR,
+    });
+    Ok(Selected {
+        channel,
+        signer,
+        stable: read_hex(&root_path(DEV_KEY_DIR).join(PUB_FILE))?,
+        dev: read_hex(&root_path(TEST_DEV_CHANNEL_DIR).join(PUB_FILE))?,
+        test: true,
+    })
+}
+
+/// The selection of this run: the one made, or the test keys of the
+/// stable channel.
+fn current() -> Result<Selected> {
+    match SELECTED.get() {
+        Some(s) => Ok(s.clone()),
+        None => test_selection(Channel::Stable),
     }
-    if dir.starts_with(&root) {
+}
+
+/// The public keys whose seeds are in the repository.
+fn public_seed_keys() -> Result<[[u8; 32]; 2]> {
+    Ok([
+        read_hex(&root_path(DEV_KEY_DIR).join(PUB_FILE))?,
+        read_hex(&root_path(TEST_DEV_CHANNEL_DIR).join(PUB_FILE))?,
+    ])
+}
+
+/// The rules for a real key pair of `channel` (ADR 0045, decision 3):
+/// `public` is the pair's public key, `dev_channel` the committed public
+/// half of the development channel's key, `release` the committed release
+/// key, `public_seeds` the keys whose seeds are in the repository. Returns
+/// the (stable, dev) keys the build embeds.
+fn real_keys(
+    channel: Channel,
+    public: [u8; 32],
+    dev_channel: [u8; 32],
+    release: [u8; 32],
+    public_seeds: &[[u8; 32]],
+) -> Result<([u8; 32], [u8; 32])> {
+    if public_seeds.contains(&public) {
+        return Err(String::from(
+            "a test key whose seed is in the repository: sign without --signing-key for tests",
+        ));
+    }
+    if public_seeds.contains(&dev_channel) || dev_channel == release {
+        return Err(format!(
+            "{DEV_CHANNEL_PUB} must be the development channel's own key (not a test key, not the release key)"
+        ));
+    }
+    // A development build embeds the committed release key as its stable
+    // anchor: it must never be a key whose seed is public (audit L6).
+    if channel == Channel::Dev && public_seeds.contains(&release) {
+        return Err(format!(
+            "{RELEASE_PUB} is a test key whose seed is in the repository"
+        ));
+    }
+    match channel {
+        Channel::Stable if public == dev_channel => Err(format!(
+            "this is the development channel's key ({DEV_CHANNEL_PUB}): it signs --channel dev only"
+        )),
+        Channel::Stable => Ok((public, dev_channel)),
+        Channel::Dev if public != dev_channel => Err(format!(
+            "not the development channel's key: its public half must be {DEV_CHANNEL_PUB}"
+        )),
+        Channel::Dev => Ok((release, dev_channel)),
+    }
+}
+
+/// `--signing-key DIR` for the stable channel (ADR 0029, "The signing
+/// key").
+pub fn select_signing_key(dir: Option<&Path>) -> Result {
+    select_keys(dir, Channel::Stable)
+}
+
+/// `--signing-key DIR` with `--channel` (ADR 0029, ADR 0045): this run
+/// signs `channel` with `DIR/ed25519.seed`. The pair must match, and a
+/// real seed must live outside the repository. Without a directory the
+/// test keys sign, with a loud warning: their seeds are public.
+pub fn select_keys(dir: Option<&Path>, channel: Channel) -> Result {
+    let test_dir = root_path(match channel {
+        Channel::Stable => DEV_KEY_DIR,
+        Channel::Dev => TEST_DEV_CHANNEL_DIR,
+    });
+    let is_test = match dir {
+        None => true,
+        Some(d) => {
+            d.canonicalize()
+                .map_err(|e| format!("--signing-key {}: {e}", d.display()))?
+                == test_dir.canonicalize().unwrap_or_else(|_| test_dir.clone())
+        }
+    };
+    if is_test {
+        eprintln!(
+            "[xtask] WARNING: signing the {} channel with the TEST key {}, whose seed is public: \
+             anyone on the network can sign what this build accepts. \
+             Use --signing-key DIR (cargo xtask keygen DIR, kept outside the repository) \
+             before upgrading machines over an untrusted network.",
+            channel.name(),
+            test_dir
+                .strip_prefix(crate::root())
+                .unwrap_or(&test_dir)
+                .display()
+        );
+        if channel == Channel::Stable {
+            return Ok(());
+        }
+        return set(test_selection(channel)?);
+    }
+    let dir = dir
+        .expect("not a test selection")
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    if dir.starts_with(crate::root()) {
         return Err(format!(
             "--signing-key {}: a signing seed must be kept outside the repository",
             dir.display()
@@ -67,43 +197,111 @@ pub fn select_signing_key(dir: Option<&Path>) -> Result {
             dir.display()
         ));
     }
-    let mut buf = [0u8; 64];
-    let public_hex = hex(&public, &mut buf).to_string();
+    let (stable, dev) = real_keys(
+        channel,
+        public,
+        read_hex(&root_path(DEV_CHANNEL_PUB))?,
+        read_hex(&root_path(RELEASE_PUB))?,
+        &public_seed_keys()?,
+    )
+    .map_err(|e| format!("--signing-key {}: {e}", dir.display()))?;
     println!(
-        "[xtask] signing key {} (public {public_hex})",
-        dir.display()
+        "[xtask] signing the {} channel with {} (public {})",
+        channel.name(),
+        dir.display(),
+        hex_string(&public)
     );
+    set(Selected {
+        channel,
+        signer: dir,
+        stable,
+        dev,
+        test: false,
+    })
+}
+
+fn set(selected: Selected) -> Result {
     SELECTED
-        .set(Selected {
-            dir,
-            public,
-            public_hex,
-        })
+        .set(selected)
         .map_err(|_| String::from("--signing-key given twice"))
 }
 
-/// Seed of the selected signing key (the development one by default).
+fn hex_string(key: &[u8; 32]) -> String {
+    let mut buf = [0u8; 64];
+    hex(key, &mut buf).to_string()
+}
+
+/// Seed of the stable channel's signing key (the test one by default).
 pub fn signing_seed() -> Result<[u8; 32]> {
-    let dir = SELECTED
-        .get()
-        .map(|s| s.dir.clone())
-        .unwrap_or_else(|| crate::root().join(DEV_KEY_DIR));
+    signing_seed_for(Channel::Stable)
+}
+
+/// Seed that signs `channel` in this run: a run with a real key signs only
+/// that key's channel; the test keys sign both.
+pub fn signing_seed_for(channel: Channel) -> Result<[u8; 32]> {
+    let s = current()?;
+    let dir = if s.test {
+        test_selection(channel)?.signer
+    } else if channel == s.channel {
+        s.signer
+    } else {
+        return Err(format!(
+            "this run holds the {} channel's key only; the {} channel is signed by another run",
+            s.channel.name(),
+            channel.name()
+        ));
+    };
     read_hex(&dir.join(SEED_FILE))
 }
 
-/// Public key (hex) a build must embed instead of the development one, as
-/// verified at selection; `None` only when no key was selected.
-pub fn signing_public_hex() -> Option<&'static str> {
-    SELECTED.get().map(|s| s.public_hex.as_str())
+/// Public key (hex) a build must embed instead of the test one, as
+/// verified at selection; `None` with the test keys.
+pub fn signing_public_hex() -> Option<String> {
+    SELECTED
+        .get()
+        .filter(|s| !s.test)
+        .map(|s| hex_string(&s.stable))
 }
 
-/// The public key the build must embed and every signature must verify
-/// with: the selected one, or the development one (whose file must read).
+/// The development channel's public key (hex) the build embeds.
+pub fn dev_channel_public_hex() -> Result<String> {
+    Ok(hex_string(&current()?.dev))
+}
+
+/// The release key the build must embed and every stable signature must
+/// verify with: the selected one, or the test one (whose file must read).
 pub fn expected_public_key() -> Result<[u8; 32]> {
-    match SELECTED.get() {
-        Some(s) => Ok(s.public),
-        None => read_hex(&crate::root().join(DEV_KEY_DIR).join(PUB_FILE)),
-    }
+    Ok(current()?.stable)
+}
+
+/// Both keys of the build, as a verifier that trusts both holds them.
+pub fn expected_keys() -> Result<Keys> {
+    let s = current()?;
+    Ok(Keys {
+        stable: s.stable,
+        dev: Some(s.dev),
+    })
+}
+
+/// `usb-image --dev-source`: AriBoot of this image trusts the development
+/// channel (ADR 0045, decision 3).
+pub fn set_loader_dev_channel() {
+    LOADER_DEV.store(true, Ordering::Relaxed);
+}
+
+/// Whether AriBoot of this build trusts the development channel: on a
+/// stick that opted in, and in test builds (whose keys are public anyway),
+/// so one build serves every scenario.
+pub fn loader_trusts_dev() -> bool {
+    LOADER_DEV.load(Ordering::Relaxed) || current().is_ok_and(|s| s.test)
+}
+
+/// The keys found after `tag` in `data`.
+fn anchors<'a>(data: &'a [u8], tag: &[u8; 16]) -> Vec<&'a [u8]> {
+    data.windows(tag.len() + 32)
+        .filter(|w| w[..tag.len()] == *tag)
+        .map(|w| &w[tag.len()..])
+        .collect()
 }
 
 /// Post-build check (re-audit, R1): `binary` must carry the trust anchor
@@ -112,17 +310,38 @@ pub fn expected_public_key() -> Result<[u8; 32]> {
 pub fn check_embedded_key(binary: &Path) -> Result {
     let data = fs::read(binary).map_err(|e| format!("{}: {e}", binary.display()))?;
     let want = expected_public_key()?;
-    let tag = aricode_crypto::trust::ANCHOR_TAG;
-    let found: Vec<&[u8]> = data
-        .windows(tag.len() + 32)
-        .filter(|w| w[..tag.len()] == tag)
-        .map(|w| &w[tag.len()..])
-        .collect();
-    match found.as_slice() {
+    match anchors(&data, &aricode_crypto::trust::ANCHOR_TAG).as_slice() {
         [key] if *key == want => Ok(()),
         [] => Err(format!("{}: no trust anchor found", binary.display())),
         _ => Err(format!(
             "{}: embeds a different public key than the one selected for signing",
+            binary.display()
+        )),
+    }
+}
+
+/// Post-build check of the development channel's anchor (ADR 0045):
+/// `binary` carries it with the expected key when `trusted`, and carries
+/// no usable one otherwise (absent, or the all-zero placeholder of a
+/// build without the key), so least privilege is checked, not assumed.
+pub fn check_dev_anchor(binary: &Path, trusted: bool) -> Result {
+    let data = fs::read(binary).map_err(|e| format!("{}: {e}", binary.display()))?;
+    let want = current()?.dev;
+    let found = anchors(&data, &aricode_crypto::trust::DEV_ANCHOR_TAG);
+    let usable: Vec<&&[u8]> = found.iter().filter(|k| k.iter().any(|&b| b != 0)).collect();
+    match (trusted, usable.as_slice()) {
+        (true, [key]) if **key == want => Ok(()),
+        (true, []) => Err(format!(
+            "{}: does not carry the development channel's key",
+            binary.display()
+        )),
+        (true, _) => Err(format!(
+            "{}: carries another development channel key than the selected one",
+            binary.display()
+        )),
+        (false, []) => Ok(()),
+        (false, _) => Err(format!(
+            "{}: carries the development channel's key but must not trust that channel",
             binary.display()
         )),
     }
@@ -174,7 +393,17 @@ fn write_secret(path: &Path, bytes: &[u8]) -> Result {
 
 /// `xtask keygen DIR`: creates `DIR/ed25519.seed` and `DIR/ed25519.pub`.
 pub fn keygen(dir: &Path) -> Result {
-    fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    // Directories created here are the owner's only (0700): they hold a seed.
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
     let seed_path = dir.join(SEED_FILE);
     if seed_path.exists() {
         return Err(format!(
@@ -271,6 +500,104 @@ mod tests {
         let err = select_signing_key(Some(&a)).unwrap_err();
         assert!(err.contains("not a pair"), "{err}");
         assert!(signing_public_hex().is_none(), "nothing was selected");
+    }
+
+    #[test]
+    fn each_channel_signs_with_its_own_real_key() {
+        // ADR 0045, decision 3: the release key never signs the development
+        // channel, the development key never the stable one, and keys whose
+        // seed is public are never a real channel's key.
+        let (release, dev, other) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+        let seeds = [[8u8; 32], [9u8; 32]];
+        assert_eq!(
+            real_keys(Channel::Stable, release, dev, release, &seeds),
+            Ok((release, dev))
+        );
+        // Another stable key (the owner's own) works the same way.
+        assert_eq!(
+            real_keys(Channel::Stable, other, dev, release, &seeds),
+            Ok((other, dev))
+        );
+        assert_eq!(
+            real_keys(Channel::Dev, dev, dev, release, &seeds),
+            Ok((release, dev)),
+            "a development build embeds the release key for the way back"
+        );
+        let err = real_keys(Channel::Stable, dev, dev, release, &seeds).unwrap_err();
+        assert!(err.contains("--channel dev only"), "{err}");
+        let err = real_keys(Channel::Dev, release, dev, release, &seeds).unwrap_err();
+        assert!(err.contains("not the development channel's key"), "{err}");
+        let err = real_keys(Channel::Dev, other, dev, release, &seeds).unwrap_err();
+        assert!(err.contains("not the development channel's key"), "{err}");
+        for channel in [Channel::Stable, Channel::Dev] {
+            let err = real_keys(channel, seeds[0], dev, release, &seeds).unwrap_err();
+            assert!(err.contains("test key"), "{err}");
+            let err = real_keys(channel, dev, seeds[1], release, &seeds).unwrap_err();
+            assert!(err.contains("own key"), "{err}");
+            let err = real_keys(channel, dev, release, release, &seeds).unwrap_err();
+            assert!(err.contains("own key"), "{err}");
+        }
+        // The committed release key a development build embeds is never a
+        // test key either.
+        let err = real_keys(Channel::Dev, dev, dev, seeds[0], &seeds).unwrap_err();
+        assert!(err.contains(RELEASE_PUB), "{err}");
+    }
+
+    #[test]
+    fn committed_keys_follow_the_rules() {
+        // The committed public halves: the development channel's key is
+        // neither the release key nor a test key, and the test keys differ.
+        let dev = read_hex::<32>(&root_path(DEV_CHANNEL_PUB)).unwrap();
+        let release = read_hex::<32>(&root_path(RELEASE_PUB)).unwrap();
+        let seeds = public_seed_keys().unwrap();
+        assert_eq!(
+            real_keys(Channel::Dev, dev, dev, release, &seeds),
+            Ok((release, dev))
+        );
+        assert_ne!(seeds[0], seeds[1]);
+        // The test pair of the development channel is a pair.
+        let dir = root_path(TEST_DEV_CHANNEL_DIR);
+        let seed = read_hex::<32>(&dir.join(SEED_FILE)).unwrap();
+        assert_eq!(ed25519::public_key(&seed), seeds[1]);
+        // Without a selection the test keys sign both channels.
+        assert!(signing_seed_for(Channel::Dev).is_ok());
+        assert_eq!(expected_keys().unwrap().dev, Some(seeds[1]));
+    }
+
+    #[test]
+    fn dev_anchor_check_enforces_least_privilege() {
+        let tmp = crate::test_util::TempDir::new("dev-anchor");
+        let dev = expected_keys().unwrap().dev.unwrap();
+        let file = |name: &str, key: Option<[u8; 32]>| {
+            let mut bin = b"junk".to_vec();
+            if let Some(k) = key {
+                bin.extend_from_slice(&aricode_crypto::trust::DEV_ANCHOR_TAG);
+                bin.extend_from_slice(&k);
+            }
+            bin.extend_from_slice(b"more");
+            let path = tmp.path().join(name);
+            fs::write(&path, &bin).unwrap();
+            path
+        };
+        let with = file("with", Some(dev));
+        let zero = file("zero", Some([0; 32]));
+        let none = file("none", None);
+        let other = file("other", Some([7; 32]));
+        check_dev_anchor(&with, true).unwrap();
+        check_dev_anchor(&none, false).unwrap();
+        check_dev_anchor(&zero, false).unwrap();
+        assert!(check_dev_anchor(&with, false)
+            .unwrap_err()
+            .contains("must not trust"));
+        assert!(check_dev_anchor(&none, true)
+            .unwrap_err()
+            .contains("does not carry"));
+        assert!(check_dev_anchor(&zero, true)
+            .unwrap_err()
+            .contains("does not carry"));
+        assert!(check_dev_anchor(&other, true)
+            .unwrap_err()
+            .contains("another development channel key"));
     }
 
     #[test]

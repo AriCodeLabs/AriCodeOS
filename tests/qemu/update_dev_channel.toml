@@ -1,0 +1,104 @@
+# Development update channel (ADR 0045): the machine has a stable source
+# (system 2) and no development source, so `update --channel dev` is
+# refused: the channel is closed until the owner opens it. The owner adds
+# the development source (build 5, commit 0123abc, signed with the
+# development channel's test key), reports it and upgrades with
+# `--channel dev`; the switch is said and recorded. After `reboot`,
+# AriBoot boots the development build, `diag` names it, a plain `upgrade`
+# refuses to leave the channel implicitly, and `upgrade --channel stable`
+# installs stable 2 although it is numerically below build 5. The third
+# boot runs stable 2, and `update --channel dev` only reports the offer.
+name = "update.dev_channel"
+description = "dev channel: closed by default, opt-in source, upgrade --channel dev, diag shows the build, explicit switch back to a lower stable"
+level = "full"
+areas = ["update", "network", "shell", "boot", "diag"]
+disk = "update-empty"
+timeout_secs = 300
+
+[host_update]
+system = 2
+dev_build = 5
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = [
+    "update --channel dev",
+    "update add --channel dev 10.0.2.2:{update_port}/dev/",
+    "update sources",
+    "update --channel dev",
+    "upgrade",
+    "upgrade --channel dev",
+    "diag",
+    "reboot",
+]
+[boots.expect]
+exit = 0
+serial_contains = [
+    "updater: no development source: the dev channel is closed on this machine (update add --channel dev URL opens it)",
+    "update: updater exited with 21",
+    "update: dev source 2 added: http://10.0.2.2:{update_port}/dev/ (run update --channel dev to fetch its index)",
+    "  1  http://10.0.2.2:{update_port}/update/",
+    "  2  http://10.0.2.2:{update_port}/dev/  (dev)",
+    "updater: source 2 http://10.0.2.2:{update_port}/dev/: index verified (serial ",
+    ", dev build 5 (commit 0123abc), 0 app(s))",
+    "updater: system: installed 1, source 2 offers dev build 5 (commit 0123abc): the dev channel, this system is on the stable channel: upgrade --channel dev switches to it",
+    "updater: the dev channel offers another system: upgrade --channel dev switches to it",
+    "updater: the last update reported the dev channel, not the stable channel: run update first",
+    "updater: system: switching from the stable channel (1) to the dev channel (dev build 5 (commit 0123abc)), as asked with --channel dev",
+    "updater: downloading aricodeos-dev-5.img (",
+    "updater: system image dev build 5 (commit 0123abc) verified (signature and SHA-256)",
+    "updater: installed into slot B",
+    "updater: system: channel switched from stable to dev (pending until reboot)",
+    "updater: system dev build 5 (commit 0123abc) installed: reboot to apply",
+    "system   version 1, slot A",
+    ": upd-no-dev-source (code 21)",
+    ": upd-channel-switch (code 52)",
+    "AriCodeOS: rebooting",
+]
+serial_absent = ["KERNEL PANIC", "index refused", "update: installer exited"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = [
+    "diag",
+    "update",
+    "upgrade",
+    "upgrade --channel stable",
+    "cat updater/history.log",
+    "reboot",
+]
+[boots.expect]
+exit = 0
+serial_contains = [
+    "slots: booting from slot B (image dev build 5 (commit 0123abc), pending confirmation)",
+    "AriInit: boot confirmed on slot B",
+    "system   dev build 5 (commit 0123abc), slot B",
+    "updater: system: installed dev build 5 (commit 0123abc), source 1 offers 2: the stable channel, this system is on the dev channel: upgrade --channel stable switches to it",
+    "updater: system: refused: 2 belongs to the stable channel and dev build 5 (commit 0123abc) is installed; the channel only changes when asked: upgrade --channel stable",
+    "update: updater exited with 53",
+    "updater: system: switching from the dev channel (dev build 5 (commit 0123abc)) to the stable channel (2), as asked with --channel stable",
+    "updater: system image version 2 verified (signature and SHA-256)",
+    "updater: installed into slot A",
+    "updater: system: channel switched from dev to stable (pending until reboot)",
+    "updater: system 2 installed: reboot to apply",
+    "dev source added: http://10.0.2.2:{update_port}/dev/ (from the console)",
+    "system 1 -> dev build 5 (commit 0123abc) installed into slot B from http://10.0.2.2:{update_port}/dev/ (pending until reboot)",
+    "system dev build 5 (commit 0123abc) -> 2 installed into slot A from http://10.0.2.2:{update_port}/update/ (pending until reboot), channel switch asked with --channel",
+    "AriCodeOS: rebooting",
+]
+serial_absent = ["KERNEL PANIC", "rollback", "index refused"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["diag", "update", "update --channel dev", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "slots: booting from slot A (image version 2, pending confirmation)",
+    "AriInit: boot confirmed on slot A",
+    "system   version 2, slot A",
+    "updater: system: installed 2, source 1 offers 2: up to date",
+    "updater: system: installed 2, source 2 offers dev build 5 (commit 0123abc): the dev channel, this system is on the stable channel: upgrade --channel dev switches to it",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "rollback", "installed into slot"]

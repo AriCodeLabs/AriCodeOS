@@ -61,6 +61,18 @@ impl<'a> CmdLine<'a> {
         self.entries().map(|(k, _)| k).find(|k| set.contains(k))
     }
 
+    /// The line's tokens (`key` or `key=value`) whose key is not in `set`,
+    /// in order: AriBoot drops [`keys::LOADER_ONLY`] from `cmdline.txt`
+    /// with it before adding its own.
+    pub fn tokens_without<'s>(&self, set: &'s [&'s str]) -> impl Iterator<Item = &'a str> + 's
+    where
+        'a: 's,
+    {
+        self.raw
+            .split_whitespace()
+            .filter(move |tok| !set.contains(&tok.split('=').next().unwrap_or(tok)))
+    }
+
     /// Value of the last occurrence of `key=value`.
     pub fn get(&self, key: &str) -> Option<&'a str> {
         self.entries()
@@ -90,6 +102,15 @@ pub mod keys {
     pub const BOOT_SLOT: &str = "boot_slot";
     /// Added by AriBoot with `boot_slot` (see there).
     pub const BOOT_PENDING: &str = "boot_pending";
+    /// `boot_version=N`: added by AriBoot with `boot_slot`, the version (or
+    /// development build number) in the booted image's signed manifest.
+    pub const BOOT_VERSION: &str = "boot_version";
+    /// `boot_channel=stable|dev`: added by AriBoot with `boot_slot`, the
+    /// channel of the booted image (ADR 0045).
+    pub const BOOT_CHANNEL: &str = "boot_channel";
+    /// `boot_commit=HEX`: added by AriBoot with `boot_slot` for a
+    /// development build, the commit it was built from (ADR 0045).
+    pub const BOOT_COMMIT: &str = "boot_commit";
     /// Tests only: `init_fail_late`, init fails after the services and before
     /// confirming.
     pub const INIT_FAIL_LATE: &str = "init_fail_late";
@@ -181,7 +202,15 @@ pub mod keys {
     ];
 
     /// Keys AriBoot adds itself; `cargo xtask usb-image` refuses them too.
-    pub const LOADER_ONLY: &[&str] = &[BOOT_SLOT, BOOT_PENDING];
+    /// AriBoot drops them from `cmdline.txt` before adding its own, so what
+    /// the system reads about its slot and image always comes from AriBoot.
+    pub const LOADER_ONLY: &[&str] = &[
+        BOOT_SLOT,
+        BOOT_PENDING,
+        BOOT_VERSION,
+        BOOT_CHANNEL,
+        BOOT_COMMIT,
+    ];
 }
 
 #[cfg(test)]
@@ -264,7 +293,24 @@ mod tests {
         let loader = |s| CmdLine::new(s).first_of(keys::LOADER_ONLY);
         assert_eq!(loader("shell boot_slot=B"), Some("boot_slot"));
         assert_eq!(loader("shell boot_pending"), Some("boot_pending"));
+        assert_eq!(loader("shell boot_channel=dev"), Some("boot_channel"));
+        assert_eq!(loader("boot_commit=0123abc"), Some("boot_commit"));
+        assert_eq!(loader("boot_version=7 shell"), Some("boot_version"));
         assert_eq!(loader("shell kbd=es"), None);
+    }
+
+    #[test]
+    fn loader_keys_are_dropped_and_the_rest_kept_in_order() {
+        let line = CmdLine::new("  shell boot_slot=A kbd=es boot_channel=dev boot_pending strict ");
+        let kept: [&str; 3] = {
+            let mut it = line.tokens_without(keys::LOADER_ONLY);
+            [it.next().unwrap(), it.next().unwrap(), it.next().unwrap()]
+        };
+        assert_eq!(kept, ["shell", "kbd=es", "strict"]);
+        assert_eq!(line.tokens_without(keys::LOADER_ONLY).count(), 3);
+        // A key that only starts like a loader key is not one.
+        let line = CmdLine::new("boot_slots=x boot_commitment");
+        assert_eq!(line.tokens_without(keys::LOADER_ONLY).count(), 2);
     }
 
     #[test]

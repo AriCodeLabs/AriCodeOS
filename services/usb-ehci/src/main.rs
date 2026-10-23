@@ -3418,16 +3418,20 @@ fn device_name(ctl: &Ehci) -> &'static str {
 fn main(mask: u64) -> u64 {
     let clock = Clock(extra_handle(mask, 0));
     let started = clock.now();
-    let mut args = [0u8; 256];
+    let mut args = [0u8; sys::CMDLINE_MAX];
     let (strict, fault_inject) = match sys::cmdline(clock.0, &mut args) {
-        Some(text) => {
+        Ok(text) => {
             let c = aricode_cmdline::CmdLine::new(text);
             (
                 c.has(aricode_cmdline::keys::STRICT),
                 FaultInject::parse(c.get(aricode_cmdline::keys::USB_FAULT)),
             )
         }
-        None => (false, FaultInject::None),
+        Err(_) => {
+            say(b"cannot read the command line (too long or not text): boot flags ignored");
+            record("ehci cmdline unreadable", sys::CMDLINE_MAX as u64);
+            (false, FaultInject::None)
+        }
     };
     let mut ctl = match Ehci::open(mask, clock, strict, started) {
         Ok(c) => c,

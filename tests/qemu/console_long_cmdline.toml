@@ -1,0 +1,21 @@
+# A long boot command line (audit of ADR 0045, L5): AriBoot appends the
+# slot and image keys to `cmdline.txt`, and every reader used to take a
+# line over 256 bytes for an empty one, silently dropping `strict` and the
+# test knobs. With ~560 bytes of padding before `strict`, init still sees
+# it, and `diag` still names the booted image.
+name = "console.long_cmdline"
+description = "a command line over 512 bytes keeps strict and the loader keys (1 KiB readers, TooBig is an error)"
+level = "full"
+areas = ["console", "init", "diag"]
+cmdline = "qemu_exit shell pad00=xxxxxxxxxxxxxxxxxxxx pad01=xxxxxxxxxxxxxxxxxxxx pad02=xxxxxxxxxxxxxxxxxxxx pad03=xxxxxxxxxxxxxxxxxxxx pad04=xxxxxxxxxxxxxxxxxxxx pad05=xxxxxxxxxxxxxxxxxxxx pad06=xxxxxxxxxxxxxxxxxxxx pad07=xxxxxxxxxxxxxxxxxxxx pad08=xxxxxxxxxxxxxxxxxxxx pad09=xxxxxxxxxxxxxxxxxxxx pad10=xxxxxxxxxxxxxxxxxxxx pad11=xxxxxxxxxxxxxxxxxxxx pad12=xxxxxxxxxxxxxxxxxxxx pad13=xxxxxxxxxxxxxxxxxxxx pad14=xxxxxxxxxxxxxxxxxxxx pad15=xxxxxxxxxxxxxxxxxxxx pad16=xxxxxxxxxxxxxxxxxxxx pad17=xxxxxxxxxxxxxxxxxxxx pad18=xxxxxxxxxxxxxxxxxxxx pad19=xxxxxxxxxxxxxxxxxxxx strict"
+timeout_secs = 120
+stdin = ["diag", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: strict mode: a failing service is not restarted",
+    "system   version 1, slot A",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "cannot read the command line", "cmdline unreadable"]

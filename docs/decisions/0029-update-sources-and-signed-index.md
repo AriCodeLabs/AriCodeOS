@@ -3,7 +3,9 @@
 - **Date:** 2026-10-17 (revised the same day after audit 1,
   `docs/audits/update-sources-audit-1.md`)
 - **Status:** Accepted (extends ADR 0027, replaces its channel manifest and
-  `update [URL|check]`)
+  `update [URL|check]`); extended by ADR 0045 (the development channel:
+  `dev` sources, `channel`/`commit` in the index and the system manifest,
+  a second key, `--channel` and `update rollback`)
 
 ## Context
 
@@ -227,6 +229,14 @@ build. The key is decoded at compile time, so an invalid
 `ARICODE_SIGNING_PUB` does not build.
 
 There is no key rotation in the protocol yet (see below).
+
+Since ADR 0045 there is a second key, the development channel's
+(`keys/dev-channel/`, seed in `~/.config/aricodeos/dev-signing-key`): it
+signs development builds and their indexes only, the key above never
+signs them, and every rule of this section applies to it the same way
+(`--signing-key DIR --channel dev`). The updater of every build carries its
+public half, inert unless the machine's loader trusts the channel; AriBoot carries it only on
+a machine installed with `usb-image --dev-source`.
 
 ## Consequences
 

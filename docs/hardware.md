@@ -366,3 +366,72 @@ reinstalled from such a stick.
 The project's release key (public half in `keys/release/`, fingerprint in
 its README) signs everything published since 2026-10-17; the laptop was
 reinstalled from a stick built with it the same day.
+
+## Development builds in minutes (ADR 0045)
+
+To try a branch on the laptop (a driver, typically) before it reaches
+`main`, publish it to the **development channel**. It has its own key, its
+own source and its own build numbers, assigned by xtask: nothing to pick
+by hand, and nothing a stable machine will ever accept.
+
+**Once: open the channel on the laptop.** Its loader must trust the
+development key, which only a stick written with `--dev-source` gives
+(the stick from 2026-10-17 does not):
+
+```bash
+cargo xtask usb-image --signing-key ~/.config/aricodeos/signing-key \
+    --update-source http://192.168.1.16:8080/ --dev-source http://192.168.1.16:8081/ \
+    [--authorized-key ~/.ssh/id_ed25519.pub]
+```
+
+Write it and boot the laptop from it as in "Build and write the image".
+`update sources` then shows the development source with `(dev)`. On a
+laptop already installed from such a stick, `update add --channel dev
+192.168.1.16:8081` adds one (`update remove N` drops an old one); without
+`--dev-source` the channel stays closed and `update --channel dev` says
+why.
+
+**Every iteration: one command on the host**, from the branch's checkout:
+
+```bash
+cargo xtask serve-update --channel dev --signing-key ~/.config/aricodeos/dev-signing-key
+```
+
+It builds the checkout, numbers it (one above the last development build
+this host published from any checkout or worktree: the counter is
+`~/.cache/aricodeos/dev-build`, locked while a build is published),
+records its commit (`-dirty` if tracked
+files have uncommitted changes), signs image and index with the
+development key into `build/update-dev/` and serves it on port 8081 (the
+stable source keeps 8080; `--port P` changes it). Stop it with Ctrl-C and
+run it again for the next build. On the laptop, console or SSH:
+
+```text
+update --channel dev       # verify the development index, show the build it offers
+upgrade --channel dev      # install it into the inactive slot (the first time: switch to the dev channel)
+reboot
+diag                       # "system   dev build 7 (commit 0123abc456ef), slot B"
+```
+
+`update` and `upgrade` without `--channel` keep working on the stable
+source and never move the laptop off the development channel: they say
+that `upgrade --channel stable` does.
+
+**Back to stable**, with the network: `update`, then `upgrade --channel
+stable` installs the newest stable release even if its number is below the
+build's; the switch is recorded in `cat updater/history.log` and as an
+event in `diag`. **Without the network** (a build that boots but broke
+it): `update rollback` schedules the system still in the other slot,
+verified and with three tries, and says what it is (another channel, an
+older release); `reboot` boots it and it stays once it comes up. That slot
+holds the system before the last install, unless the last install never
+stayed (the loader rejected it or ran out of tries): then it holds that
+failed image, and rolling back retries it. A build that does not boot at
+all is undone by the loader alone after three attempts.
+
+The laptop never takes the same build number with another commit (two
+checkouts that published the same number before the host counter): it
+refuses it and asks for a new publication. Going back to stable never
+goes below the newest stable release the laptop ran (the stable floor in
+`updater/state`, seeded by the stick): an older one is a downgrade,
+installed only with `--allow-downgrade`.

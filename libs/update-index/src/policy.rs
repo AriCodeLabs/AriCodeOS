@@ -4,6 +4,7 @@
 //! several sources and rollback protection for indexes.
 
 use crate::index::{AppEntry, Index, IndexError, SystemEntry};
+use aricode_ab::Channel;
 
 /// What installing an offered version would do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +40,141 @@ impl Change {
             Change::Same => false,
             Change::Downgrade => allow_downgrade,
         }
+    }
+}
+
+/// A system image as the install rules see it: its channel, version (the
+/// build number for `Dev`) and, for a development build, its commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SystemId<'a> {
+    pub channel: Channel,
+    pub version: u32,
+    pub commit: Option<&'a str>,
+}
+
+/// What installing an offered system image would do, channels included
+/// (ADR 0045).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemChange {
+    /// Same channel: the ADR 0029 rules ([`Change`]).
+    Within(Change),
+    /// The installed version cannot be read or verified.
+    Unknown,
+    /// The offered image belongs to the other channel.
+    Switch { from: Channel, to: Channel },
+    /// Same channel and number but another commit: a development build
+    /// number published twice (two checkouts, a lost counter). Never taken
+    /// for the installed build, never installed over it silently.
+    Conflict,
+}
+
+/// Compares the installed system (if known) with an offered one.
+pub fn compare_system(installed: Option<SystemId>, offered: SystemId) -> SystemChange {
+    match installed {
+        None => SystemChange::Unknown,
+        Some(i) if i.channel != offered.channel => SystemChange::Switch {
+            from: i.channel,
+            to: offered.channel,
+        },
+        Some(i) if i.version == offered.version && i.commit != offered.commit => {
+            SystemChange::Conflict
+        }
+        Some(i) => SystemChange::Within(compare(Some(i.version), offered.version)),
+    }
+}
+
+/// Why a system install is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// Older than the installed one, same channel (anti-replay).
+    Downgrade,
+    /// A stable release older than the newest stable release this machine
+    /// ran (the stable floor, audit of ADR 0045 M1): a downgrade, even when
+    /// it arrives as a channel switch.
+    BelowStableFloor(u32),
+    /// The installed version is unknown (ADR 0029, audit 1 H1).
+    Unknown,
+    /// Another channel, and the owner did not name it (`--channel`), or the
+    /// command never changes the channel (`update apply`).
+    SwitchNotExplicit,
+    /// [`SystemChange::Conflict`].
+    Conflict,
+}
+
+/// The outcome of [`decide_system`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemDecision {
+    Install,
+    /// The same build of the same channel is installed.
+    AlreadyInstalled,
+    Refused(Refusal),
+}
+
+/// What the owner allowed for one install.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SystemRules {
+    /// `--allow-downgrade`.
+    pub allow_downgrade: bool,
+    /// `--channel` named the offered image's channel (`upgrade`); `false`
+    /// for `update apply`, which never changes the channel.
+    pub explicit_channel: bool,
+    /// The newest stable release this machine ran, if known.
+    pub stable_floor: Option<u32>,
+}
+
+/// The install rule for a system image (ADR 0029 decision 5, ADR 0045
+/// decision 2): within a channel, no downgrade without `--allow-downgrade`
+/// and never a reinstall; across channels, only when the owner named the
+/// channel, whatever the numbers say, since a build number and a release
+/// version are not comparable; never a stable release below the stable
+/// floor without `--allow-downgrade`, switch or not; an unknown installed
+/// version only with `--allow-downgrade`, and then, without a named
+/// channel, only a stable image; a build number seen with another commit
+/// never.
+pub fn decide_system(
+    change: SystemChange,
+    offered: SystemId,
+    rules: SystemRules,
+) -> SystemDecision {
+    use SystemDecision::{AlreadyInstalled, Install, Refused};
+    match change {
+        SystemChange::Within(Change::Same) => return AlreadyInstalled,
+        SystemChange::Conflict => return Refused(Refusal::Conflict),
+        // Older than the installed one: that is the reason to give, the
+        // floor would only repeat it.
+        SystemChange::Within(c) if !c.permitted(rules.allow_downgrade) => {
+            return Refused(Refusal::Downgrade)
+        }
+        _ => {}
+    }
+    if let Some(floor) = rules.stable_floor {
+        if offered.channel == Channel::Stable && offered.version < floor && !rules.allow_downgrade {
+            return Refused(Refusal::BelowStableFloor(floor));
+        }
+    }
+    match change {
+        SystemChange::Within(c) if c.permitted(rules.allow_downgrade) => Install,
+        SystemChange::Within(_) => Refused(Refusal::Downgrade),
+        SystemChange::Unknown if !rules.allow_downgrade => Refused(Refusal::Unknown),
+        SystemChange::Unknown if rules.explicit_channel || offered.channel == Channel::Stable => {
+            Install
+        }
+        SystemChange::Unknown => Refused(Refusal::SwitchNotExplicit),
+        SystemChange::Switch { .. } if rules.explicit_channel => Install,
+        SystemChange::Switch { .. } => Refused(Refusal::SwitchNotExplicit),
+        SystemChange::Conflict => Refused(Refusal::Conflict),
+    }
+}
+
+/// The new stable floor once the active system is `installed`: the newest
+/// stable release this machine ran never goes down (a rollback or a switch
+/// to the development channel keeps it).
+pub fn raise_floor(floor: Option<u32>, installed: Option<SystemId>) -> Option<u32> {
+    match installed {
+        Some(i) if i.channel == Channel::Stable => {
+            Some(floor.map_or(i.version, |f| f.max(i.version)))
+        }
+        _ => floor,
     }
 }
 
@@ -114,9 +250,273 @@ mod tests {
         assert!(Change::Downgrade.permitted(true));
     }
 
+    fn id(channel: Channel, version: u32, commit: Option<&'static str>) -> SystemId<'static> {
+        SystemId {
+            channel,
+            version,
+            commit,
+        }
+    }
+
+    const UPGRADE: SystemRules = SystemRules {
+        allow_downgrade: false,
+        explicit_channel: false,
+        stable_floor: None,
+    };
+
+    #[test]
+    fn channel_switches_need_the_owner() {
+        use Channel::{Dev, Stable};
+        let dev7 = id(Dev, 7, Some("0123abc"));
+        let stable12 = id(Stable, 12, None);
+        // Same channel: the ADR 0029 rules, anti-replay unchanged.
+        assert_eq!(
+            compare_system(Some(dev7), id(Dev, 8, Some("4567def"))),
+            SystemChange::Within(Change::Upgrade)
+        );
+        assert_eq!(
+            compare_system(Some(dev7), id(Dev, 6, Some("4567def"))),
+            SystemChange::Within(Change::Downgrade)
+        );
+        assert_eq!(
+            compare_system(Some(stable12), stable12),
+            SystemChange::Within(Change::Same)
+        );
+        assert_eq!(
+            compare_system(Some(dev7), dev7),
+            SystemChange::Within(Change::Same)
+        );
+        assert_eq!(compare_system(None, dev7), SystemChange::Unknown);
+        let back = compare_system(Some(dev7), id(Stable, 2, None));
+        assert_eq!(
+            back,
+            SystemChange::Switch {
+                from: Dev,
+                to: Stable
+            }
+        );
+        let to_dev = compare_system(Some(stable12), id(Dev, 1, Some("0123abc")));
+        assert_eq!(
+            to_dev,
+            SystemChange::Switch {
+                from: Stable,
+                to: Dev
+            }
+        );
+        for explicit in [false, true] {
+            let rules = |allow_downgrade| SystemRules {
+                allow_downgrade,
+                explicit_channel: explicit,
+                stable_floor: None,
+            };
+            let offered = id(Dev, 6, Some("0123abc"));
+            let older = SystemChange::Within(Change::Downgrade);
+            assert_eq!(
+                decide_system(older, offered, rules(false)),
+                SystemDecision::Refused(Refusal::Downgrade)
+            );
+            assert_eq!(
+                decide_system(older, offered, rules(true)),
+                SystemDecision::Install
+            );
+            let newer = SystemChange::Within(Change::Upgrade);
+            assert_eq!(
+                decide_system(newer, offered, rules(false)),
+                SystemDecision::Install
+            );
+            let same = SystemChange::Within(Change::Same);
+            assert_eq!(
+                decide_system(same, offered, rules(true)),
+                SystemDecision::AlreadyInstalled
+            );
+            assert_eq!(
+                decide_system(SystemChange::Unknown, stable12, rules(false)),
+                SystemDecision::Refused(Refusal::Unknown)
+            );
+        }
+        // Across channels: only when named, even when the stable release is
+        // numerically lower than the development build, and never through
+        // --allow-downgrade alone.
+        for (switch, offered) in [
+            (back, id(Stable, 2, None)),
+            (to_dev, id(Dev, 1, Some("0123abc"))),
+        ] {
+            let named = SystemRules {
+                explicit_channel: true,
+                ..UPGRADE
+            };
+            assert_eq!(
+                decide_system(switch, offered, named),
+                SystemDecision::Install
+            );
+            assert_eq!(
+                decide_system(switch, offered, UPGRADE),
+                SystemDecision::Refused(Refusal::SwitchNotExplicit)
+            );
+            let forced = SystemRules {
+                allow_downgrade: true,
+                ..UPGRADE
+            };
+            assert_eq!(
+                decide_system(switch, offered, forced),
+                SystemDecision::Refused(Refusal::SwitchNotExplicit)
+            );
+        }
+    }
+
+    #[test]
+    fn a_switch_back_never_goes_below_the_stable_floor() {
+        // Audit of ADR 0045, M1: a machine that ran stable 12, then
+        // development builds, is offered an old validly signed stable 5.
+        use Channel::{Dev, Stable};
+        let floor = raise_floor(None, Some(id(Stable, 12, None)));
+        assert_eq!(floor, Some(12));
+        let floor = raise_floor(floor, Some(id(Dev, 7, Some("0123abc"))));
+        assert_eq!(floor, Some(12), "a development build keeps the floor");
+        let floor = raise_floor(floor, Some(id(Stable, 9, None)));
+        assert_eq!(floor, Some(12), "a rollback keeps the floor");
+        let named = SystemRules {
+            explicit_channel: true,
+            stable_floor: floor,
+            ..UPGRADE
+        };
+        let installed = id(Dev, 7, Some("0123abc"));
+        for (version, want) in [
+            (5, SystemDecision::Refused(Refusal::BelowStableFloor(12))),
+            (12, SystemDecision::Install),
+            (13, SystemDecision::Install),
+        ] {
+            let offered = id(Stable, version, None);
+            let change = compare_system(Some(installed), offered);
+            assert_eq!(
+                decide_system(change, offered, named),
+                want,
+                "stable {version}"
+            );
+        }
+        // --allow-downgrade is the owner's way below it, named a downgrade.
+        let forced = SystemRules {
+            allow_downgrade: true,
+            ..named
+        };
+        let old = id(Stable, 5, None);
+        assert_eq!(
+            decide_system(compare_system(Some(installed), old), old, forced),
+            SystemDecision::Install
+        );
+        // Within the stable channel too: after a rollback to 9, stable 10 is
+        // still below the floor.
+        let rolled_back = id(Stable, 9, None);
+        let ten = id(Stable, 10, None);
+        assert_eq!(
+            decide_system(compare_system(Some(rolled_back), ten), ten, named),
+            SystemDecision::Refused(Refusal::BelowStableFloor(12))
+        );
+        // Older than the installed release as well: named a plain downgrade.
+        let twelve = id(Stable, 12, None);
+        assert_eq!(
+            decide_system(compare_system(Some(twelve), ten), ten, named),
+            SystemDecision::Refused(Refusal::Downgrade)
+        );
+        // The floor says nothing about development builds.
+        let dev = id(Dev, 1, Some("0123abc"));
+        assert_eq!(
+            decide_system(compare_system(Some(id(Stable, 12, None)), dev), dev, named),
+            SystemDecision::Install
+        );
+    }
+
+    #[test]
+    fn a_build_number_with_another_commit_is_refused() {
+        // Audit of ADR 0045, M2: two checkouts published build 5.
+        let installed = id(Channel::Dev, 5, Some("0123abc"));
+        let other = id(Channel::Dev, 5, Some("4567def"));
+        let change = compare_system(Some(installed), other);
+        assert_eq!(change, SystemChange::Conflict);
+        for allow_downgrade in [false, true] {
+            let rules = SystemRules {
+                allow_downgrade,
+                explicit_channel: true,
+                stable_floor: None,
+            };
+            assert_eq!(
+                decide_system(change, other, rules),
+                SystemDecision::Refused(Refusal::Conflict)
+            );
+        }
+    }
+
+    #[test]
+    fn apply_never_changes_the_channel() {
+        // Audit of ADR 0045, L4: `update apply` passes no channel; with an
+        // unknown installed version and --allow-downgrade it takes a
+        // stable image only.
+        let apply = SystemRules {
+            allow_downgrade: true,
+            explicit_channel: false,
+            stable_floor: None,
+        };
+        let dev = id(Channel::Dev, 5, Some("0123abc"));
+        assert_eq!(
+            decide_system(SystemChange::Unknown, dev, apply),
+            SystemDecision::Refused(Refusal::SwitchNotExplicit)
+        );
+        let stable = id(Channel::Stable, 3, None);
+        assert_eq!(
+            decide_system(SystemChange::Unknown, stable, apply),
+            SystemDecision::Install
+        );
+        let switch = compare_system(Some(id(Channel::Stable, 2, None)), dev);
+        assert_eq!(
+            decide_system(switch, dev, apply),
+            SystemDecision::Refused(Refusal::SwitchNotExplicit)
+        );
+    }
+
+    #[test]
+    fn apply_never_goes_below_the_stable_floor() {
+        // `update apply` keeps the floor (no open downgrade path): stable 2
+        // in UPDATE, stable 1 running, stable 3 once ran.
+        let apply = SystemRules {
+            allow_downgrade: false,
+            explicit_channel: false,
+            stable_floor: Some(3),
+        };
+        let running = id(Channel::Stable, 1, None);
+        let two = id(Channel::Stable, 2, None);
+        let change = compare_system(Some(running), two);
+        assert_eq!(change, SystemChange::Within(Change::Upgrade));
+        assert_eq!(
+            decide_system(change, two, apply),
+            SystemDecision::Refused(Refusal::BelowStableFloor(3))
+        );
+        let forced = SystemRules {
+            allow_downgrade: true,
+            ..apply
+        };
+        assert_eq!(decide_system(change, two, forced), SystemDecision::Install);
+        // Older than the running release too: the plain downgrade reason.
+        let older = compare_system(
+            Some(id(Channel::Stable, 2, None)),
+            id(Channel::Stable, 1, None),
+        );
+        assert_eq!(
+            decide_system(older, id(Channel::Stable, 1, None), apply),
+            SystemDecision::Refused(Refusal::Downgrade)
+        );
+        // At or above the floor: installed as before.
+        let four = id(Channel::Stable, 4, None);
+        assert_eq!(
+            decide_system(compare_system(Some(running), four), four, apply),
+            SystemDecision::Install
+        );
+    }
+
     fn index(serial: u64, system: Option<u32>, apps: &[(&'static str, u32)]) -> Index<'static> {
         Index {
             serial,
+            channel: Channel::Stable,
+            commit: None,
             system: system.map(|version| SystemEntry {
                 version,
                 file: "s.img",

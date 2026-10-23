@@ -94,10 +94,16 @@ pub fn cargo() -> Command {
     c.current_dir(root());
     // The verifiers embed the selected public key (`aricode_crypto::trust`);
     // with the development key the variable is removed so a stray value in
-    // the environment cannot change what a build trusts.
+    // the environment cannot change what a build trusts. The development
+    // channel's public key is always set by xtask, never inherited (ADR
+    // 0045); AriBoot's build removes it unless the machine opted in.
     match crate::keys::signing_public_hex() {
         Some(key) => c.env(crate::keys::SIGNING_PUB_ENV, key),
         None => c.env_remove(crate::keys::SIGNING_PUB_ENV),
+    };
+    match crate::keys::dev_channel_public_hex() {
+        Ok(key) => c.env(crate::keys::DEV_CHANNEL_PUB_ENV, key),
+        Err(_) => c.env_remove(crate::keys::DEV_CHANNEL_PUB_ENV),
     };
     c
 }
@@ -464,6 +470,11 @@ pub fn build_os(release: bool) -> Result<Artifacts> {
         c.args(["build", "-p", pkg, "--target", target]);
         if release {
             c.arg("--release");
+        }
+        if pkg == "ariboot" && !crate::keys::loader_trusts_dev() {
+            // Least privilege (ADR 0045): only a machine that opted in has
+            // a loader that boots development builds.
+            c.env_remove(crate::keys::DEV_CHANNEL_PUB_ENV);
         }
         run(c)?;
     }

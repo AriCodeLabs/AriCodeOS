@@ -10,7 +10,9 @@
 
 use crate::seed::{self, Carried};
 use alloc::vec::Vec;
-use aricode_ab::{choose, reject, unpersisted, BootState, Decision, Image, ImageError, Slot};
+use aricode_ab::{
+    choose, reject, unpersisted, BootState, Decision, Image, ImageError, Keys, Manifest, Slot,
+};
 use aricode_gpt::{partitions, Header, Partition};
 use log::{info, warn};
 use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol};
@@ -23,6 +25,8 @@ pub struct Loaded {
     pub initrd: Vec<u8>,
     pub slot: Slot,
     pub pending: bool,
+    /// The verified manifest: version, channel and commit of the image.
+    pub manifest: Manifest,
 }
 
 /// What the disk with `ARIBOOT` gave: the slot image to boot, if any, and
@@ -64,12 +68,12 @@ fn find<'a>(parts: &'a [Partition], name: &str) -> Option<&'a Partition> {
     parts.iter().find(|p| p.name_str() == name)
 }
 
-/// Reads and verifies a slot image. Returns kernel, initrd and version.
+/// Reads and verifies a slot image. Returns kernel, initrd and manifest.
 fn load_slot(
     disk: &mut Disk,
     part: &Partition,
-    pk: &[u8; 32],
-) -> Result<(Vec<u8>, Vec<u8>, u32), &'static str> {
+    keys: &Keys,
+) -> Result<(Vec<u8>, Vec<u8>, Manifest), &'static str> {
     let header = disk
         .read(part.first_lba, 1)
         .ok_or("could not read the slot")?;
@@ -82,8 +86,11 @@ fn load_slot(
         .read(part.first_lba + 1, sectors)
         .ok_or("could not read the image")?;
     container.truncate(len);
-    let verified = Image::verify(&container, pk).map_err(|e| match e {
-        ImageError::BadSignature => "invalid signature",
+    let verified = Image::verify_with(&container, keys).map_err(|e| match e {
+        ImageError::BadSignature => {
+            "invalid signature (or signed by a key this loader does not trust)"
+        }
+        ImageError::ChannelMismatch => "the manifest names another channel than its key",
         ImageError::HashMismatch(_) => "kernel or initrd hash mismatch",
         ImageError::BadManifest => "invalid manifest",
         _ => "malformed image",
@@ -91,7 +98,7 @@ fn load_slot(
     Ok((
         verified.kernel.to_vec(),
         verified.initrd.to_vec(),
-        verified.manifest.version,
+        verified.manifest,
     ))
 }
 
@@ -150,15 +157,23 @@ pub fn load() -> Found {
 
 /// The slot policy on the disk whose boot state is at `state_lba`.
 fn choose_slot(disk: &mut Disk, parts: &[Partition], state_lba: u64) -> Option<Loaded> {
-    // The build's trust anchor (ADR 0029); an invalid key does not compile.
-    let pk = aricode_crypto::trust::public_key();
-    let state = disk
+    // The build's trust anchors (ADR 0029, ADR 0045): the release key and,
+    // only on a machine that opted in (`usb-image --dev-source`), the
+    // development channel's key. An invalid key does not compile.
+    let keys = Keys {
+        stable: aricode_crypto::trust::public_key(),
+        dev: aricode_crypto::trust::dev_channel_key(),
+    };
+    let mut state = disk
         .read(state_lba, 1)
         .and_then(|s| BootState::decode(&s))
         .unwrap_or_else(|| {
             warn!("slots: invalid boot state, assuming A active");
             BootState::fresh(Slot::A)
         });
+    // Every state this loader writes says whether it trusts the development
+    // channel, so the updater never installs a build it would refuse.
+    state.loader_dev_channel = keys.dev.is_some();
     match state.pending {
         Some((slot, tries)) => info!(
             "slots: state active {}, pending {} ({} tries)",
@@ -179,8 +194,8 @@ fn choose_slot(disk: &mut Disk, parts: &[Partition], state_lba: u64) -> Option<L
             warn!("slots: missing partition {}", decision.slot.partition());
             break;
         };
-        match load_slot(disk, part, &pk) {
-            Ok((kernel, initrd, version)) => {
+        match load_slot(disk, part, &keys) {
+            Ok((kernel, initrd, manifest)) => {
                 if !disk.write(state_lba, &decision.state.encode()) {
                     warn!("slots: could not write the boot state");
                     if decision.pending && attempt == 0 {
@@ -196,9 +211,9 @@ fn choose_slot(disk: &mut Disk, parts: &[Partition], state_lba: u64) -> Option<L
                     }
                 }
                 info!(
-                    "slots: booting from slot {} (image version {}{})",
+                    "slots: booting from slot {} (image {}{})",
                     decision.slot.name(),
-                    version,
+                    manifest.describe(),
                     if decision.pending {
                         ", pending confirmation"
                     } else {
@@ -210,6 +225,7 @@ fn choose_slot(disk: &mut Disk, parts: &[Partition], state_lba: u64) -> Option<L
                     initrd,
                     slot: decision.slot,
                     pending: decision.pending,
+                    manifest,
                 });
             }
             Err(why) => {

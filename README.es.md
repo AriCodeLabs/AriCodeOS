@@ -183,6 +183,7 @@ cargo xtask test --all     # unit + todos los escenarios QEMU; obligatorio antes
 cargo xtask test --area boot   # solo los escenarios de un área
 cargo xtask test --all --cpus 4   # toda la suite con cuatro CPUs: estrés del kernel SMP
 cargo xtask usb-image      # build/aricodeos-usb.img para grabar en un pendrive (docs/hardware.md)
+cargo xtask serve-update --channel dev --signing-key DIR   # una rama en el portátil en minutos (ADR 0045, docs/hardware.md)
 cargo xtask check          # rustfmt --check + clippy -D warnings
 ```
 

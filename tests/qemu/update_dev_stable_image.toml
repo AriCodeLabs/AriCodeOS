@@ -1,0 +1,35 @@
+# A development index, validly signed with the development channel's key,
+# that offers a stable image (signed with the release key) under its build
+# number (audit of ADR 0045, L8): the image verifies on its own, but its
+# manifest names the stable channel and no commit while the index promised
+# development build 5 (commit 0123abc), so the updater refuses it before
+# writing anything; the channel does not change.
+name = "update.dev_stable_image"
+description = "a dev index pointing at a stable image is refused at install; nothing written, no switch"
+level = "full"
+areas = ["update", "network", "shell", "crypto"]
+disk = "update-empty"
+timeout_secs = 150
+
+[host_update]
+source = "none"
+dev_build = 5
+dev_source = true
+dev_stable_image = true
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update --channel dev", "upgrade --channel dev", "diag", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "updater: source 1 http://10.0.2.2:{update_port}/dev/: index verified (serial ",
+    ", dev build 5 (commit 0123abc), 0 app(s))",
+    "updater: downloading aricodeos-dev-5.img (",
+    "updater: system image says version 5, the index says dev build 5 (commit 0123abc); not installing",
+    "update: updater exited with 43",
+    ": upd-image-version (code 43)",
+    "system   version 1, slot A",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "installed into slot", "channel switched", "pending B"]

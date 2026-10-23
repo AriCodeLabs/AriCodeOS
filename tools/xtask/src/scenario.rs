@@ -112,10 +112,37 @@ pub struct HostUpdate {
     /// to be migrated) or `none` (the scenario adds it from the shell).
     #[serde(default = "default_update_source")]
     pub source: String,
+    /// A development source (ADR 0045) offering this build number,
+    /// published into the scenario's `dev/` directory and served at
+    /// `http://10.0.2.2:{update_port}/dev/`.
+    pub dev_build: Option<u32>,
+    /// The commit that development build names.
+    #[serde(default = "default_dev_commit")]
+    pub dev_commit: String,
+    /// The development source is signed with the stable key (the updater
+    /// must refuse it).
+    #[serde(default)]
+    pub dev_wrong_key: bool,
+    /// The development source is registered in `updater/sources` (`dev
+    /// URL`); without it the scenario adds it from the shell, as the
+    /// channel is closed by default.
+    #[serde(default)]
+    pub dev_source: bool,
+    /// The development source's index offers a stable image under its
+    /// build number (the updater must refuse to install it).
+    #[serde(default)]
+    pub dev_stable_image: bool,
+    /// The machine starts with this stable floor in `updater/state` (the
+    /// newest stable release it ran, ADR 0045 audit M1).
+    pub stable_floor: Option<u32>,
 }
 
 fn default_update_source() -> String {
     String::from("sources")
+}
+
+fn default_dev_commit() -> String {
+    String::from("0123abc")
 }
 
 #[derive(Debug, Deserialize)]

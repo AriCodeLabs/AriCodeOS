@@ -23,6 +23,10 @@
 //! publication; an index older than the one already stored for the same
 //! source is refused (rollback protection).
 //!
+//! Sources and indexes belong to a channel (ADR 0045): `stable` (releases,
+//! signed with the release key) or `dev` (development builds, signed with
+//! the development channel's key, opt-in per machine).
+//!
 //! This crate is the policy shared by the updater, the installer, the shell
 //! and xtask: index format and verification ([`index`]), version and
 //! downgrade rules ([`policy`]), the source list ([`sources`]), the stored
@@ -43,10 +47,16 @@ pub mod policy;
 pub mod run;
 pub mod sources;
 pub mod stored;
+pub mod trust;
 
-pub use index::{verify, AppEntry, Index, IndexError, SystemEntry};
-pub use policy::{best_app, best_system, check_fresh, compare, Change};
-pub use sources::{normalize_source, Migration, SourceError, Sources};
+pub use aricode_ab::{Channel, Keys};
+pub use index::{verify, verify_channel, AppEntry, Index, IndexError, SystemEntry};
+pub use policy::{
+    best_app, best_system, check_fresh, compare, compare_system, decide_system, raise_floor,
+    Change, Refusal, SystemChange, SystemDecision, SystemId, SystemRules,
+};
+pub use sources::{normalize_source, Migration, Source, SourceError, Sources};
+pub use trust::{image_matches_offer, trusted_keys};
 
 /// Name of the index file inside a source.
 pub const INDEX_FILE: &str = "index";
@@ -132,9 +142,30 @@ pub mod updater_arg {
     pub const REFRESH: u64 = 1;
     /// Installs what the stored indexes offer over the installed versions.
     pub const UPGRADE: u64 = 2;
+    /// Schedules the image of the inactive slot to boot next, from the
+    /// console, with no network (shell `update rollback`, ADR 0045).
+    pub const ROLLBACK: u64 = 3;
     /// Flag for `UPGRADE` and `APPLY`: older versions (or an unknown
     /// installed version) may be replaced.
     pub const ALLOW_DOWNGRADE: u64 = 1 << 8;
+    /// Flag for `REFRESH` and `UPGRADE`: act on the development channel's
+    /// sources instead of the stable ones (ADR 0045).
+    pub const CHANNEL_DEV: u64 = 1 << 9;
+    /// Flag for `REFRESH` and `UPGRADE`: the owner named the channel
+    /// (`--channel`); only then may `UPGRADE` move the system to the other
+    /// channel.
+    pub const CHANNEL_EXPLICIT: u64 = 1 << 10;
+    /// Every flag bit.
+    pub const FLAGS: u64 = ALLOW_DOWNGRADE | CHANNEL_DEV | CHANNEL_EXPLICIT;
+
+    /// The channel `arg` acts on.
+    pub fn channel(arg: u64) -> aricode_ab::Channel {
+        if arg & CHANNEL_DEV != 0 {
+            aricode_ab::Channel::Dev
+        } else {
+            aricode_ab::Channel::Stable
+        }
+    }
     /// Bit in the exit code of `UPGRADE`: verified packages were staged in
     /// the updater's directory for the installer. The other bits are the
     /// failure code (0 when everything went well).

@@ -178,6 +178,7 @@ cargo xtask test --all     # unit + every QEMU scenario; mandatory before main
 cargo xtask test --area boot   # only the scenarios of one area
 cargo xtask test --all --cpus 4   # the whole suite with four CPUs: SMP stress test of the kernel
 cargo xtask usb-image      # build/aricodeos-usb.img to write to a USB stick (docs/hardware.md)
+cargo xtask serve-update --channel dev --signing-key DIR   # a branch build for the laptop in minutes (ADR 0045, docs/hardware.md)
 cargo xtask app-pack DIR --version N   # builds, packages and signs an out-of-tree application (docs/sdk.md)
 cargo xtask check          # rustfmt --check + clippy -D warnings
 ```

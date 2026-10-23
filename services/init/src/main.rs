@@ -2202,8 +2202,16 @@ fn run_gui(inputs: &[Handle]) -> Result<Handle, u64> {
 
 fn main(arg: u64) -> u64 {
     say(b"starting");
-    let mut args = [0u8; 256];
-    let cmdline = aricode_cmdline::CmdLine::new(sys::cmdline(SYSTEM, &mut args).unwrap_or(""));
+    let mut args = [0u8; sys::CMDLINE_MAX];
+    let cmdline = aricode_cmdline::CmdLine::new(match sys::cmdline(SYSTEM, &mut args) {
+        Ok(text) => text,
+        Err(_) => {
+            // Said and recorded: boot flags such as `strict` are then off.
+            say(b"cannot read the command line (too long or not text): boot flags ignored");
+            let _ = sys::event_record(sys::CMDLINE_MAX as u64, "cmdline unreadable");
+            ""
+        }
+    });
     if cmdline.has(aricode_cmdline::keys::STRICT) {
         STRICT.store(true, core::sync::atomic::Ordering::Relaxed);
         say(b"strict mode: a failing service is not restarted");

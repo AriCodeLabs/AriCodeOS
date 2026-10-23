@@ -418,10 +418,17 @@ pub fn event_record(code: u64, name: &str) -> Result<(), Error> {
     .map(|_| ())
 }
 
-/// The kernel command line into `buf` (`sysinfo::CMDLINE`), as text.
-pub fn cmdline(system: Handle, buf: &mut [u8]) -> Option<&str> {
-    let n = system_info(system, abi::sysinfo::CMDLINE, buf).ok()?;
-    core::str::from_utf8(&buf[..n]).ok()
+/// Room for the kernel command line: AriBoot adds the slot and image keys
+/// (ADR 0045) to whatever `cmdline.txt` holds.
+pub const CMDLINE_MAX: usize = 1024;
+
+/// The kernel command line into `buf` (`sysinfo::CMDLINE`), as text. A line
+/// that does not fit (`TooBig`), is not UTF-8 (`Invalid`) or cannot be read
+/// is an error, never an empty line: a caller that took it for empty would
+/// silently drop `strict` and the test knobs (audit of ADR 0045, L5).
+pub fn cmdline(system: Handle, buf: &mut [u8; CMDLINE_MAX]) -> Result<&str, Error> {
+    let n = system_info(system, abi::sysinfo::CMDLINE, buf)?;
+    core::str::from_utf8(&buf[..n]).map_err(|_| Error::Invalid)
 }
 
 pub fn system_info(system: Handle, kind: u64, buf: &mut [u8]) -> Result<usize, Error> {

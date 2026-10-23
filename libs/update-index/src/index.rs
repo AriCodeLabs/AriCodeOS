@@ -5,6 +5,7 @@
 use crate::{FORMAT, MAX_APPS, MAX_INDEX};
 use alloc::string::String;
 use alloc::vec::Vec;
+use aricode_ab::{Channel, Commit, Keys};
 use aricode_crypto::{ed25519, unhex};
 use core::fmt::Write;
 
@@ -35,6 +36,15 @@ pub enum IndexError {
     TooManyApps,
     /// Older than the index already stored for this source.
     Stale { stored: u64, offered: u64 },
+    /// The channel rules of ADR 0045: a development index names its commit,
+    /// offers one system image and no apps; a stable one names no commit.
+    ChannelRules,
+    /// Signed with the key of the source's channel, but naming the other
+    /// channel (ADR 0045).
+    ChannelMismatch,
+    /// A development source, and this machine does not trust the
+    /// development channel (its loader or its updater lacks the key).
+    ChannelNotTrusted,
 }
 
 /// The system image a source offers (slot layout: header + container).
@@ -57,9 +67,22 @@ pub struct AppEntry<'a> {
 }
 
 /// A parsed index. Only [`verify`] should produce one from downloaded bytes.
+///
+/// A development index (ADR 0045) adds two lines after `serial` and offers
+/// exactly one system image, whose version is the build number:
+///
+/// ```text
+/// channel = dev
+/// commit = 0123abc
+/// system = 7 aricodeos-dev-7.img 2454712 <sha256>
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Index<'a> {
     pub serial: u64,
+    /// `Stable` when the index has no `channel` line (one spelling).
+    pub channel: Channel,
+    /// The commit of a development build (`Commit` rules); `None` for stable.
+    pub commit: Option<&'a str>,
     pub system: Option<SystemEntry<'a>>,
     pub apps: Vec<AppEntry<'a>>,
 }
@@ -109,6 +132,7 @@ impl<'a> Index<'a> {
             return Err(IndexError::TooLarge);
         }
         let (mut format, mut serial, mut system) = (None, None, None);
+        let (mut channel, mut commit) = (None, None);
         let mut apps: Vec<AppEntry<'a>> = Vec::new();
         for (i, raw) in text.lines().enumerate() {
             let n = i + 1;
@@ -130,6 +154,23 @@ impl<'a> Index<'a> {
                         return Err(IndexError::Duplicate(n));
                     }
                     serial = Some(value.parse::<u64>().map_err(|_| IndexError::Line(n))?);
+                }
+                "channel" => {
+                    if channel.is_some() {
+                        return Err(IndexError::Duplicate(n));
+                    }
+                    // Only `dev`: a stable index has no channel line.
+                    if value != Channel::Dev.name() {
+                        return Err(IndexError::Line(n));
+                    }
+                    channel = Some(Channel::Dev);
+                }
+                "commit" => {
+                    if commit.is_some() {
+                        return Err(IndexError::Duplicate(n));
+                    }
+                    Commit::parse(value).ok_or(IndexError::Line(n))?;
+                    commit = Some(value);
                 }
                 "system" => {
                     if system.is_some() {
@@ -172,8 +213,17 @@ impl<'a> Index<'a> {
         if format != Some(FORMAT) {
             return Err(IndexError::UnsupportedFormat);
         }
+        let channel = channel.unwrap_or(Channel::Stable);
+        let dev_ok = commit.is_some() && system.is_some() && apps.is_empty();
+        match channel {
+            Channel::Dev if !dev_ok => return Err(IndexError::ChannelRules),
+            Channel::Stable if commit.is_some() => return Err(IndexError::ChannelRules),
+            _ => {}
+        }
         Ok(Self {
             serial: serial.ok_or(IndexError::MissingSerial)?,
+            channel,
+            commit,
             system,
             apps,
         })
@@ -186,6 +236,12 @@ impl<'a> Index<'a> {
         let _ = writeln!(out, "# AriCodeOS update index (ADR 0029)");
         let _ = writeln!(out, "format = {FORMAT}");
         let _ = writeln!(out, "serial = {}", self.serial);
+        if self.channel == Channel::Dev {
+            let _ = writeln!(out, "channel = {}", Channel::Dev.name());
+        }
+        if let Some(commit) = self.commit {
+            let _ = writeln!(out, "commit = {commit}");
+        }
         if let Some(s) = &self.system {
             let _ = writeln!(
                 out,
@@ -244,6 +300,26 @@ pub fn verify<'a>(
     Index::parse(text)
 }
 
+/// [`verify`] for a source of `channel` (ADR 0045): the signature must be
+/// by that channel's key, and the index must name that channel. A stable
+/// source only accepts the release key, a development source only the
+/// development channel's key, and only on a machine that trusts it.
+pub fn verify_channel<'a>(
+    index: &'a [u8],
+    signature: &[u8],
+    keys: &Keys,
+    channel: Channel,
+) -> Result<Index<'a>, IndexError> {
+    let key = keys
+        .for_channel(channel)
+        .ok_or(IndexError::ChannelNotTrusted)?;
+    let parsed = verify(index, signature, key)?;
+    if parsed.channel != channel {
+        return Err(IndexError::ChannelMismatch);
+    }
+    Ok(parsed)
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -255,6 +331,8 @@ mod tests {
     fn sample() -> Index<'static> {
         Index {
             serial: 1_760_659_200,
+            channel: Channel::Stable,
+            commit: None,
             system: Some(SystemEntry {
                 version: 3,
                 file: "aricodeos-3.img",
@@ -285,10 +363,144 @@ mod tests {
         assert_eq!(Index::parse(&text), Ok(index));
         let empty = Index {
             serial: 7,
+            channel: Channel::Stable,
+            commit: None,
             system: None,
             apps: Vec::new(),
         };
         assert_eq!(Index::parse(&empty.write()), Ok(empty));
+    }
+
+    fn dev_sample() -> Index<'static> {
+        Index {
+            serial: 1_760_659_300,
+            channel: Channel::Dev,
+            commit: Some("0123abc"),
+            system: Some(SystemEntry {
+                version: 7,
+                file: "aricodeos-dev-7.img",
+                size: 2_412_544,
+                sha256: [0xCD; 32],
+            }),
+            apps: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn dev_index_round_trip_and_rules() {
+        let dev = dev_sample();
+        let text = dev.write();
+        assert!(
+            text.contains("\nserial = 1760659300\nchannel = dev\ncommit = 0123abc\nsystem = 7 ")
+        );
+        assert_eq!(Index::parse(&text), Ok(dev));
+        // A stable index is written exactly as before ADR 0045.
+        assert!(!sample().write().contains("channel"));
+        let sha = "00".repeat(32);
+        let head = "format = 1\nserial = 1\n";
+        let system = std::format!("system = 7 a.img 10 {sha}\n");
+        let cases: [(std::string::String, IndexError); 8] = [
+            // Development index without its commit, without a system image,
+            // or with apps.
+            (
+                std::format!("{head}channel = dev\n{system}"),
+                IndexError::ChannelRules,
+            ),
+            (
+                std::format!("{head}channel = dev\ncommit = 0123abc\n"),
+                IndexError::ChannelRules,
+            ),
+            (
+                std::format!(
+                    "{head}channel = dev\ncommit = 0123abc\n{system}app = x 1 x.aripkg 1 {sha}\n"
+                ),
+                IndexError::ChannelRules,
+            ),
+            // A stable index never names a commit.
+            (
+                std::format!("{head}commit = 0123abc\n{system}"),
+                IndexError::ChannelRules,
+            ),
+            // One spelling: no `channel = stable`, no other channel.
+            (
+                std::format!("{head}channel = stable\n{system}"),
+                IndexError::Line(3),
+            ),
+            (
+                std::format!("{head}channel = beta\n{system}"),
+                IndexError::Line(3),
+            ),
+            (
+                std::format!("{head}channel = dev\ncommit = XYZ\n{system}"),
+                IndexError::Line(4),
+            ),
+            (
+                std::format!("{head}channel = dev\nchannel = dev\ncommit = 0123abc\n{system}"),
+                IndexError::Duplicate(4),
+            ),
+        ];
+        for (text, err) in cases {
+            assert_eq!(Index::parse(&text), Err(err), "{text}");
+        }
+    }
+
+    #[test]
+    fn each_channel_accepts_only_its_own_key() {
+        // ADR 0045, decision 3.
+        const DEV_SEED: [u8; 32] = [5u8; 32];
+        let keys = Keys {
+            stable: ed25519::public_key(&SEED),
+            dev: Some(ed25519::public_key(&DEV_SEED)),
+        };
+        let sign_with = |seed: &[u8; 32], text: &str| {
+            let sig = ed25519::sign(seed, text.as_bytes());
+            let mut hex = [0u8; 128];
+            std::format!("{}\n", aricode_crypto::hex(&sig, &mut hex))
+        };
+        let stable = sample().write();
+        let dev = dev_sample().write();
+        let ok = |text: &str, sig: &str, channel| {
+            verify_channel(text.as_bytes(), sig.as_bytes(), &keys, channel)
+                .map(|i| (i.channel, i.serial))
+        };
+        assert_eq!(
+            ok(&stable, &signed(&stable), Channel::Stable),
+            Ok((Channel::Stable, 1_760_659_200))
+        );
+        assert_eq!(
+            ok(&dev, &sign_with(&DEV_SEED, &dev), Channel::Dev),
+            Ok((Channel::Dev, 1_760_659_300))
+        );
+        // A development index signed with the release key, on either source.
+        assert_eq!(
+            ok(&dev, &signed(&dev), Channel::Dev),
+            Err(IndexError::BadSignature)
+        );
+        assert_eq!(
+            ok(&dev, &signed(&dev), Channel::Stable),
+            Err(IndexError::ChannelMismatch)
+        );
+        // A stable index signed with the development key, on either source.
+        let by_dev = sign_with(&DEV_SEED, &stable);
+        assert_eq!(
+            ok(&stable, &by_dev, Channel::Stable),
+            Err(IndexError::BadSignature)
+        );
+        assert_eq!(
+            ok(&stable, &by_dev, Channel::Dev),
+            Err(IndexError::ChannelMismatch)
+        );
+        // The development channel on a machine that does not trust it.
+        let stable_only = Keys::stable_only(keys.stable);
+        assert_eq!(
+            verify_channel(
+                dev.as_bytes(),
+                sign_with(&DEV_SEED, &dev).as_bytes(),
+                &stable_only,
+                Channel::Dev
+            ),
+            Err(IndexError::ChannelNotTrusted)
+        );
     }
 
     #[test]

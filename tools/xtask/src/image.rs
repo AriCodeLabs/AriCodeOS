@@ -34,6 +34,15 @@ pub fn build_base_esp(release: bool) -> Result<PathBuf> {
     for verifier in ["init", "installer", "updater"] {
         crate::keys::check_embedded_key(&a.user_bin.join(verifier))?;
     }
+    // The development channel's key (ADR 0045): the updater always carries
+    // it (it is inert without a development source and a loader that trusts
+    // it), AriBoot only on a machine that opted in, and the package
+    // verifiers never (that channel carries no apps).
+    crate::keys::check_dev_anchor(&a.user_bin.join("updater"), true)?;
+    crate::keys::check_dev_anchor(&a.ariboot, crate::keys::loader_trusts_dev())?;
+    for verifier in ["init", "installer"] {
+        crate::keys::check_dev_anchor(&a.user_bin.join(verifier), false)?;
+    }
     let esp = build_dir().join("esp");
     write_esp(&esp, &a, None)?;
     println!("[xtask] ESP image at {}", esp.display());
@@ -364,7 +373,11 @@ pub fn write_usb_image(
     // No test data (incident 0005): neither the `ARIDISK` raw-area pattern
     // nor the test disk's sample files. A `selftest` boot from the stick
     // stops at `fs_client`'s first check (no `hola.txt`), before any write.
-    write_slot(&mut img, USB_PART_SYSA, &system_image(1, false)?)?;
+    write_slot(
+        &mut img,
+        USB_PART_SYSA,
+        &system_image(USB_SYSTEM_VERSION, false)?,
+    )?;
     init_ariboot(
         &mut img,
         USB_PART_ARIBOOT,
@@ -379,14 +392,31 @@ pub fn write_usb_image(
     ))
 }
 
+/// The system version in slot A of a stick.
+pub const USB_SYSTEM_VERSION: u32 = 1;
+
+/// `updater/state` of a stick with update sources: the stable floor at the
+/// stick's own release (audit of ADR 0045, M1).
+fn stick_state() -> String {
+    aricode_update_index::lists::with_section(
+        "",
+        aricode_update_index::lists::FLOOR,
+        &aricode_update_index::lists::encode_floor(USB_SYSTEM_VERSION),
+    )
+}
+
 /// `cargo xtask usb-image [--cmdline S]`: image ready to `dd` onto a USB stick.
 /// `authorized_key`: an OpenSSH public key file installed in ARI0 as
 /// `authorized_keys`, so the machine accepts SSH logins with that key.
+/// `dev_source`: the machine opts in to the development channel (ADR
+/// 0045): its AriBoot trusts that channel's key and `updater/sources` gets
+/// the source as `dev URL`. Without it the stick has neither.
 pub fn build_usb_image(
     release: bool,
     cmdline: &str,
     authorized_key: Option<&Path>,
     update_source: Option<&str>,
+    dev_source: Option<&str>,
 ) -> Result<PathBuf> {
     let line = aricode_cmdline::CmdLine::new(cmdline);
     if let Some(key) = line.first_of(aricode_cmdline::keys::TEST_ONLY) {
@@ -398,6 +428,24 @@ pub fn build_usb_image(
         return Err(format!(
             "--cmdline \"{cmdline}\": `{key}` is added by AriBoot when it boots a slot (aricode_cmdline::keys::LOADER_ONLY); do not write it"
         ));
+    }
+    // The source list first: an invalid source fails before any build.
+    let mut sources = aricode_update_index::Sources::default();
+    if let Some(input) = update_source {
+        let url = sources
+            .add(input)
+            .map_err(|e| format!("--update-source {input}: {e:?}"))?;
+        println!("[xtask] update source {url}");
+    }
+    if let Some(input) = dev_source {
+        let url = sources
+            .add_to(input, aricode_ab::Channel::Dev)
+            .map_err(|e| format!("--dev-source {input}: {e:?}"))?;
+        println!(
+            "[xtask] development source {url}: this machine opts in to the dev channel (its loader trusts {})",
+            crate::keys::DEV_CHANNEL_PUB
+        );
+        crate::keys::set_loader_dev_channel();
     }
     let base = build_base_esp(release)?;
     let esp = build_scenario_esp(
@@ -428,17 +476,17 @@ pub fn build_usb_image(
             aricode_ssh::fingerprint(&aricode_crypto::ed25519::public_key(&seed))
         );
     }
-    if let Some(input) = update_source {
-        let mut sources = aricode_update_index::Sources::default();
-        let url = sources
-            .add(input)
-            .map_err(|e| format!("--update-source {input}: {e:?}"))?
-            .to_string();
+    if !sources.is_empty() {
         extra.push((
             aricode_update_index::main_path(aricode_update_index::SOURCES_FILE),
             sources.to_text().into_bytes(),
         ));
-        println!("[xtask] update source {url}");
+        // The stable floor starts at the stick's own release (audit of
+        // ADR 0045, M1): no switch back to stable goes below it.
+        extra.push((
+            aricode_update_index::main_path(aricode_update_index::STATE_FILE),
+            stick_state().into_bytes(),
+        ));
     }
     // Every stick gets its own disk GUID from OS entropy: the storage
     // drivers use it to tell AriCodeOS sticks apart (ADR 0031).
@@ -590,24 +638,72 @@ pub const DISK_FILES: &[(&str, &[u8])] = &[
     ("README", b"AriCodeOS: disco de pruebas con AriFS v1.\n"),
 ];
 
-/// System image signed with the development key: a container with the
-/// manifest (version and hashes), signature, kernel and initrd of the base
-/// ESP. With `corrupt`, the signature is altered so the loader rejects it.
+/// What a system image says it is (ADR 0045).
+#[derive(Debug, Clone, Copy)]
+pub struct SystemSpec<'a> {
+    /// The release version, or the development build number.
+    pub version: u32,
+    pub channel: aricode_ab::Channel,
+    /// The commit of a development build.
+    pub commit: Option<&'a str>,
+    /// The channel whose key signs it: its own, except in tests that need
+    /// a build signed with the wrong key.
+    pub sign_as: aricode_ab::Channel,
+}
+
+impl SystemSpec<'_> {
+    pub fn stable(version: u32) -> Self {
+        Self {
+            version,
+            channel: aricode_ab::Channel::Stable,
+            commit: None,
+            sign_as: aricode_ab::Channel::Stable,
+        }
+    }
+}
+
+/// A stable system image signed with the selected key: a container with
+/// the manifest (version and hashes), signature, kernel and initrd of the
+/// base ESP. With `corrupt`, the signature is altered so the loader
+/// rejects it.
 pub fn system_image(version: u32, corrupt: bool) -> Result<Vec<u8>> {
+    system_image_for(&SystemSpec::stable(version), corrupt)
+}
+
+/// [`system_image`] of any channel (ADR 0045): a development build's
+/// manifest names its channel and commit and is signed with the
+/// development channel's key.
+pub fn system_image_for(spec: &SystemSpec, corrupt: bool) -> Result<Vec<u8>> {
     let esp = crate::build_dir().join("esp");
     let kernel = stripped_elf(&esp.join(KERNEL))?;
     let initrd = io(
         fs::read(esp.join(INITRD)),
         "read initrd.img from the base ESP",
     )?;
-    let manifest = aricode_ab::Manifest {
-        version,
-        kernel_sha256: aricode_crypto::sha256::sha256(&kernel),
-        initrd_sha256: aricode_crypto::sha256::sha256(&initrd),
+    let commit = match spec.commit {
+        Some(c) => Some(
+            aricode_ab::Commit::parse(c)
+                .ok_or_else(|| format!("commit '{c}': not 7-40 hex digits"))?,
+        ),
+        None => None,
     };
-    let mut buf = [0u8; 192];
+    let manifest = aricode_ab::Manifest {
+        channel: spec.channel,
+        commit,
+        ..aricode_ab::Manifest::stable(
+            spec.version,
+            aricode_crypto::sha256::sha256(&kernel),
+            aricode_crypto::sha256::sha256(&initrd),
+        )
+    };
+    let mut buf = [0u8; aricode_ab::MANIFEST_MAX];
     let text = manifest.write(&mut buf).as_bytes().to_vec();
-    let seed = crate::keys::signing_seed()?;
+    if aricode_ab::Manifest::parse(core::str::from_utf8(&text).unwrap_or("")) != Some(manifest) {
+        return Err(String::from(
+            "the system manifest does not parse back (a development build needs its commit)",
+        ));
+    }
+    let seed = crate::keys::signing_seed_for(spec.sign_as)?;
     let mut sig = aricode_crypto::ed25519::sign(&seed, &text);
     if corrupt {
         sig[5] ^= 0x40;
@@ -620,12 +716,14 @@ pub fn system_image(version: u32, corrupt: bool) -> Result<Vec<u8>> {
     ])
     .map_err(|e| format!("system image: {e:?}"))?;
     // Post-build check (re-audit, R1): a valid image must verify with the
-    // key the build embeds.
+    // key the build embeds for its channel (ADR 0045).
+    let check = aricode_ab::Image::verify_with(&container, &crate::keys::expected_keys()?);
     if !corrupt
-        && aricode_ab::Image::verify(&container, &crate::keys::expected_public_key()?).is_err()
+        && spec.sign_as == spec.channel
+        && !check.is_ok_and(|v| v.manifest.channel == spec.channel)
     {
         return Err(String::from(
-            "system image does not verify with the embedded public key",
+            "system image does not verify with the embedded public key of its channel",
         ));
     }
     Ok(container)
@@ -1042,11 +1140,15 @@ mod tests {
             "shell usb_fault=idle",
             "test=panic",
         ] {
-            let err = build_usb_image(false, cmdline, None, None).unwrap_err();
+            let err = build_usb_image(false, cmdline, None, None, None).unwrap_err();
             assert!(err.contains("test-only key"), "{cmdline}: {err}");
         }
-        for cmdline in ["shell boot_slot=A", "shell boot_pending"] {
-            let err = build_usb_image(false, cmdline, None, None).unwrap_err();
+        for cmdline in [
+            "shell boot_slot=A",
+            "shell boot_pending",
+            "shell boot_channel=dev",
+        ] {
+            let err = build_usb_image(false, cmdline, None, None, None).unwrap_err();
             assert!(err.contains("added by AriBoot"), "{cmdline}: {err}");
         }
     }
@@ -1183,24 +1285,121 @@ mod tests {
         let dir = tmp.path().join("source");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("manifest.txt"), "version = 3\nimage = a.img\n").unwrap();
-        let older = Channel {
+        let older = Publication {
             system: Some(2),
             legacy_manifest: true,
-            ..Channel::default()
+            ..Publication::default()
         };
         let err = check_legacy_manifest(&dir, &older).unwrap_err();
         assert!(err.contains("below the published 3"), "{err}");
-        let without = Channel {
+        let without = Publication {
             legacy_manifest: false,
             ..older
         };
         assert!(check_legacy_manifest(&dir, &without).is_ok());
-        let newer = Channel {
+        let newer = Publication {
             system: Some(4),
             legacy_manifest: true,
-            ..Channel::default()
+            ..Publication::default()
         };
         assert!(check_legacy_manifest(&dir, &newer).is_ok());
+    }
+
+    #[test]
+    fn development_build_numbers_only_grow() {
+        // ADR 0045, decision 2: the number is assigned here, one above the
+        // last publication of the directory or its counter, never typed.
+        let tmp = TempDir::new("dev-builds");
+        let dir = tmp.path().join("update-dev");
+        assert_eq!(next_build(&dir, None, None), Ok(1), "a first publication");
+        fs::write(build_counter(&dir), "6\n").unwrap();
+        assert_eq!(
+            next_build(&dir, None, None),
+            Ok(7),
+            "the counter survives a removed directory"
+        );
+        // The published index wins when it is higher.
+        fs::create_dir_all(&dir).unwrap();
+        let sha = "00".repeat(32);
+        fs::write(
+            dir.join(aricode_update_index::INDEX_FILE),
+            format!("format = 1\nserial = 5\nchannel = dev\ncommit = 0123abc\nsystem = 9 a.img 1 {sha}\n"),
+        )
+        .unwrap();
+        assert_eq!(next_build(&dir, None, None), Ok(10));
+        assert_eq!(next_build(&dir, Some(12), None), Ok(12));
+        let err = next_build(&dir, Some(9), None).unwrap_err();
+        assert!(err.contains("only grow"), "{err}");
+        // A stable index in the directory says nothing about build numbers.
+        fs::write(
+            dir.join(aricode_update_index::INDEX_FILE),
+            format!("format = 1\nserial = 5\nsystem = 40 a.img 1 {sha}\n"),
+        )
+        .unwrap();
+        assert_eq!(next_build(&dir, None, None), Ok(7));
+        assert_eq!(
+            build_counter(&dir),
+            tmp.path().join("update-dev.last-build")
+        );
+        // The host's counter (audit M2): another checkout published 20, so
+        // this one goes on from there, never reusing a number.
+        let host = tmp.path().join("host-dev-build");
+        fs::write(&host, "20\n").unwrap();
+        assert_eq!(next_build(&dir, None, Some(&host)), Ok(21));
+        assert!(next_build(&dir, Some(20), Some(&host)).is_err());
+        // A scenario's source starts afresh on every run.
+        forget_test_dev_source(&dir).unwrap();
+        assert!(!dir.exists() && !build_counter(&dir).exists());
+        assert_eq!(next_build(&dir, Some(5), None), Ok(5));
+        forget_test_dev_source(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_stick_starts_its_stable_floor_at_its_release() {
+        let state = stick_state();
+        let body = aricode_update_index::lists::section(&state, aricode_update_index::lists::FLOOR)
+            .unwrap();
+        assert_eq!(
+            aricode_update_index::lists::parse_floor(&body),
+            Ok(Some(USB_SYSTEM_VERSION))
+        );
+        assert!(!aricode_update_index::lists::needs_repair(&state));
+    }
+
+    #[test]
+    fn development_sources_offer_one_system_image_only() {
+        let tmp = TempDir::new("dev-only-system");
+        for p in [
+            Publication {
+                channel: aricode_ab::Channel::Dev,
+                apps: vec![(String::from("examples/hello_ext"), 1)],
+                ..Publication::default()
+            },
+            Publication {
+                channel: aricode_ab::Channel::Dev,
+                legacy_manifest: true,
+                ..Publication::default()
+            },
+        ] {
+            let err = publish_channel(&tmp.path().join("dev"), true, &p).unwrap_err();
+            assert!(err.contains("one system image only"), "{err}");
+        }
+    }
+
+    #[test]
+    fn commit_text_is_what_the_manifest_accepts() {
+        assert_eq!(
+            commit_text("0123456789ab", false).as_deref(),
+            Ok("0123456789ab")
+        );
+        assert_eq!(
+            commit_text("0123456789ab", true).as_deref(),
+            Ok("0123456789ab-dirty")
+        );
+        // Whatever git printed, only a commit the manifest accepts is used.
+        assert!(commit_text("", false).is_err());
+        assert!(commit_text("fatal: not a git repository", false).is_err());
+        assert!(commit_text("0123ABC", false).is_err());
     }
 
     fn dev_public_key() -> [u8; 32] {
@@ -1220,7 +1419,7 @@ mod tests {
         let dir = tmp.path().join("source");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("stale.img"), b"left from an older publication").unwrap();
-        publish_update_to(&dir, true, &Channel::default()).unwrap();
+        publish_update_to(&dir, true, &Publication::default()).unwrap();
         assert!(
             !dir.join("stale.img").exists(),
             "one publication per directory"
@@ -1232,7 +1431,7 @@ mod tests {
         // Republishing never lowers the serial, whatever the clock says
         // (audit 1, L3), and leaves no staging directories behind (L2).
         let first = parsed.serial;
-        publish_update_to(&dir, true, &Channel::default()).unwrap();
+        publish_update_to(&dir, true, &Publication::default()).unwrap();
         let again = fs::read_to_string(dir.join(aricode_update_index::INDEX_FILE)).unwrap();
         assert!(aricode_update_index::Index::parse(&again).unwrap().serial > first);
         assert!(!tmp.path().join("source.new").exists() && !tmp.path().join("source.old").exists());
@@ -1241,9 +1440,9 @@ mod tests {
             "serial is the publication time"
         );
 
-        let tampered = Channel {
+        let tampered = Publication {
             tamper_index: true,
-            ..Channel::default()
+            ..Publication::default()
         };
         publish_update_to(&dir, true, &tampered).unwrap();
         let index = fs::read(dir.join(aricode_update_index::INDEX_FILE)).unwrap();
@@ -1276,16 +1475,37 @@ fn ssh_host_key(path: &Path) -> Result<([u8; 32], Vec<u8>)> {
     Ok((seed, text.into_bytes()))
 }
 
-/// Channel directory that `serve-update` publishes for real machines.
-pub fn update_dir() -> PathBuf {
-    crate::build_dir().join("update")
+/// The source directory that `serve-update` publishes for real machines,
+/// per channel (ADR 0045): `build/update/` for the
+/// stable channel, `build/update-dev/` for the development one, so both
+/// can be served side by side.
+pub fn update_dir_for(channel: aricode_ab::Channel) -> PathBuf {
+    crate::build_dir().join(match channel {
+        aricode_ab::Channel::Stable => "update",
+        aricode_ab::Channel::Dev => "update-dev",
+    })
 }
 
-/// What a published source offers (ADR 0029).
+/// What a published source offers (ADR 0029, ADR 0045).
 #[derive(Debug, Default)]
-pub struct Channel {
-    /// System image version; `None` publishes no system image.
+pub struct Publication {
+    /// The source's channel: a development source offers one system image
+    /// (a development build) and no apps.
+    pub channel: aricode_ab::Channel,
+    /// System image version; `None` publishes no system image. For the
+    /// development channel it is the build number, and `None` means the
+    /// next one (`publish-update --channel dev` never takes a number).
     pub system: Option<u32>,
+    /// The commit of a development build; `None` is this checkout's `HEAD`
+    /// (`-dirty` with uncommitted changes).
+    pub commit: Option<String>,
+    /// Tests only: sign with the other channel's key (the updater must
+    /// refuse it).
+    pub sign_as: Option<aricode_ab::Channel>,
+    /// Tests only: the development index offers a stable image (signed
+    /// with the release key) under its build number; the updater must
+    /// refuse to install it.
+    pub stable_image: bool,
     /// App packages: (directory of the external app, version).
     pub apps: Vec<(String, u32)>,
     /// Also write the ADR 0027 `manifest.txt` next to the image, so machines
@@ -1338,7 +1558,7 @@ fn published_system_version(dir: &Path) -> Option<u32> {
 /// Re-audit, R4: an ADR 0027 updater installs any version that differs
 /// from the one it runs, older ones included. `manifest.txt` is therefore
 /// never published for a version below the one already published.
-fn check_legacy_manifest(dir: &Path, channel: &Channel) -> Result {
+fn check_legacy_manifest(dir: &Path, channel: &Publication) -> Result {
     let (true, Some(version)) = (channel.legacy_manifest, channel.system) else {
         return Ok(());
     };
@@ -1351,9 +1571,150 @@ fn check_legacy_manifest(dir: &Path, channel: &Channel) -> Result {
     }
 }
 
-/// `index.sig` for `text`, signed with the selected key (hex line).
-fn sign_index(text: &str) -> Result<String> {
-    let seed = crate::keys::signing_seed()?;
+/// The host's development build counter (audit of ADR 0045, M2): one per
+/// host, shared by every checkout and worktree, outside any `build/`, and
+/// locked while a publication numbers and publishes its build, so two
+/// checkouts never publish the same number.
+struct HostCounter {
+    path: PathBuf,
+    _lock: fs::File,
+}
+
+impl HostCounter {
+    /// `~/.cache/aricodeos/dev-build`, locked (waits for another
+    /// publication of this host).
+    fn lock() -> Result<Self> {
+        let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
+        let dir = PathBuf::from(home).join(".cache").join("aricodeos");
+        io(fs::create_dir_all(&dir), "create ~/.cache/aricodeos")?;
+        let lock_path = dir.join("dev-build.lock");
+        let lock = io(
+            fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&lock_path),
+            "open the development build lock",
+        )?;
+        if lock.try_lock().is_err() {
+            println!("[xtask] waiting for another development publication on this host");
+            io(lock.lock(), "lock the development build counter")?;
+        }
+        Ok(Self {
+            path: dir.join("dev-build"),
+            _lock: lock,
+        })
+    }
+}
+
+/// The last number written in a counter file.
+fn read_counter(path: &Path) -> Option<u32> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|t| t.trim().parse::<u32>().ok())
+}
+
+/// The build number a development publication in `dir` gets (ADR 0045):
+/// one above the last one published there or anywhere on this host, as the
+/// directory's index, the counter beside it (`DIR.last-build`) and the
+/// host's counter (`host`, audit M2) say, whichever is highest; `wanted`
+/// (tests) must be above it too. Build numbers only grow, so machines
+/// never see one go back or one number name two commits.
+fn next_build(dir: &Path, wanted: Option<u32>, host: Option<&Path>) -> Result<u32> {
+    let published = fs::read_to_string(dir.join(aricode_update_index::INDEX_FILE))
+        .ok()
+        .and_then(|t| {
+            aricode_update_index::Index::parse(&t)
+                .ok()
+                .filter(|i| i.channel == aricode_ab::Channel::Dev)
+                .and_then(|i| i.system.map(|s| s.version))
+        });
+    let counted = read_counter(&build_counter(dir));
+    let hosted = host.and_then(read_counter);
+    let last = published.max(counted).max(hosted).unwrap_or(0);
+    let next = last
+        .checked_add(1)
+        .ok_or("development build numbers exhausted")?;
+    match wanted {
+        Some(n) if n <= last => Err(format!(
+            "development build {n} is not above the last one published here ({last}): build numbers only grow"
+        )),
+        Some(n) => Ok(n),
+        None => Ok(next),
+    }
+}
+
+/// The counter of development builds beside the source directory.
+fn build_counter(dir: &Path) -> PathBuf {
+    let name = dir.file_name().unwrap_or_default().to_string_lossy();
+    dir.with_file_name(format!("{name}.last-build"))
+}
+
+/// Removes a scenario's development source and its build counter: every
+/// test run starts from a fresh source, whose build numbers the scenario
+/// names (a real source's counter is never removed by xtask).
+pub fn forget_test_dev_source(dir: &Path) -> Result {
+    reject_symlink(dir)?;
+    if dir.exists() {
+        io(
+            fs::remove_dir_all(dir),
+            "remove the previous development source",
+        )?;
+    }
+    match fs::remove_file(build_counter(dir)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(format!("remove the development build counter: {e}"))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// This checkout's commit for a development build: 12 hex digits of `HEAD`,
+/// `-dirty` when tracked files have uncommitted changes.
+fn head_commit() -> Result<String> {
+    let git = |args: &[&str]| -> Result<String> {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(crate::root())
+            .args(args)
+            .output()
+            .map_err(|e| format!("git: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "git {}: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let head = git(&["rev-parse", "--short=12", "HEAD"])?;
+    let dirty = !git(&["status", "--porcelain", "--untracked-files=no"])?.is_empty();
+    if dirty {
+        eprintln!(
+            "[xtask] WARNING: uncommitted changes: the development build is recorded as {head}-dirty"
+        );
+    }
+    commit_text(&head, dirty)
+}
+
+/// The commit text a development build records: `head`, `-dirty` when the
+/// tree had uncommitted changes; refused unless the manifest accepts it.
+fn commit_text(head: &str, dirty: bool) -> Result<String> {
+    let text = if dirty {
+        format!("{head}-dirty")
+    } else {
+        head.to_string()
+    };
+    match aricode_ab::Commit::parse(&text) {
+        Some(_) => Ok(text),
+        None => Err(format!("'{text}' is not a commit (7-40 hex digits)")),
+    }
+}
+
+/// `index.sig` for `text`, signed with `channel`'s key (hex line).
+fn sign_index(text: &str, channel: aricode_ab::Channel) -> Result<String> {
+    let seed = crate::keys::signing_seed_for(channel)?;
     let signature = aricode_crypto::ed25519::sign(&seed, text.as_bytes());
     let mut hex = [0u8; 128];
     Ok(format!("{}\n", aricode_crypto::hex(&signature, &mut hex)))
@@ -1372,7 +1733,7 @@ pub fn stored_copy_ahead(dir: &Path, url: &str) -> Result<Vec<u8>> {
         aricode_update_index::Index::parse(&text).map_err(|e| format!("published index: {e:?}"))?;
     index.serial += 1000;
     let ahead = index.write();
-    let sig = sign_index(&ahead)?;
+    let sig = sign_index(&ahead, index.channel)?;
     Ok(aricode_update_index::stored::encode(
         url,
         sig.as_bytes(),
@@ -1389,8 +1750,8 @@ pub fn stored_copy_ahead(dir: &Path, url: &str) -> Result<Vec<u8>> {
 /// into a sibling directory first and moved into place at the end (audit
 /// 1, L2), so a machine fetching meanwhile sees the old publication or the
 /// new one, never a mix of files.
-pub fn publish_update_to(dir: &Path, release: bool, channel: &Channel) -> Result<PathBuf> {
-    if channel.system.is_some() {
+pub fn publish_update_to(dir: &Path, release: bool, channel: &Publication) -> Result<PathBuf> {
+    if channel.system.is_some() || channel.channel == aricode_ab::Channel::Dev {
         build_base_esp(release)?;
     }
     println!("{}", publish_channel(dir, release, channel)?);
@@ -1400,11 +1761,39 @@ pub fn publish_update_to(dir: &Path, release: bool, channel: &Channel) -> Result
 /// [`publish_update_to`] once the base ESP is built (its system image
 /// comes from `build/esp/`): the test runner builds it once before its
 /// scenarios run concurrently, and each scenario publishes its own channel
-/// in its directory (ADR 0040), separate from `update_dir()` so a test
+/// in its directory (ADR 0040), separate from `update_dir_for()` so a test
 /// run can never replace what a real machine downloads (incident 0003).
 /// Returns the one-line summary for the caller to print.
-pub fn publish_channel(dir: &Path, release: bool, channel: &Channel) -> Result<String> {
+pub fn publish_channel(dir: &Path, release: bool, channel: &Publication) -> Result<String> {
+    use aricode_ab::Channel;
     use aricode_update_index::{AppEntry, Index, SystemEntry};
+    let dev = channel.channel == Channel::Dev;
+    if dev && (!channel.apps.is_empty() || channel.legacy_manifest || channel.tamper_image) {
+        return Err(String::from(
+            "a development source offers one system image only (no apps, no manifest.txt)",
+        ));
+    }
+    // A development build: the next build number of this host and this
+    // checkout's commit unless a test names them (ADR 0045, decision 2;
+    // audit M2). The host's counter stays locked until the build is out.
+    let host = match (dev, channel.system) {
+        (true, None) => Some(HostCounter::lock()?),
+        _ => None,
+    };
+    let (system, commit) = if dev {
+        let commit = match &channel.commit {
+            Some(c) => c.clone(),
+            None => head_commit()?,
+        };
+        let host_path = host.as_ref().map(|h| h.path.as_path());
+        (
+            Some(next_build(dir, channel.system, host_path)?),
+            Some(commit),
+        )
+    } else {
+        (channel.system, None)
+    };
+    let sign_as = channel.sign_as.unwrap_or(channel.channel);
     let name = dir
         .file_name()
         .and_then(|n| n.to_str())
@@ -1423,11 +1812,24 @@ pub fn publish_channel(dir: &Path, release: bool, channel: &Channel) -> Result<S
     io(fs::create_dir_all(&staging), "create the update directory")?;
     let sha = aricode_crypto::sha256::sha256;
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-    if let Some(version) = channel.system {
-        let container = system_image(version, false)?;
+    let image_file = |version: u32| match channel.channel {
+        Channel::Stable => format!("aricodeos-{version}.img"),
+        Channel::Dev => format!("aricodeos-dev-{version}.img"),
+    };
+    if let Some(version) = system {
+        let spec = match channel.stable_image {
+            true => SystemSpec::stable(version),
+            false => SystemSpec {
+                version,
+                channel: channel.channel,
+                commit: commit.as_deref(),
+                sign_as,
+            },
+        };
+        let container = system_image_for(&spec, false)?;
         let mut image = aricode_ab::Image::header(container.len() as u32).to_vec();
         image.extend_from_slice(&container);
-        files.push((format!("aricodeos-{version}.img"), image));
+        files.push((image_file(version), image));
     }
     let mut apps = Vec::new();
     for (app_dir, version) in &channel.apps {
@@ -1446,10 +1848,12 @@ pub fn publish_channel(dir: &Path, release: bool, channel: &Channel) -> Result<S
     let size = |name: &str| -> Result<u32> {
         u32::try_from(data(name).len()).map_err(|_| format!("{name}: too large"))
     };
-    let system_file = channel.system.map(|v| format!("aricodeos-{v}.img"));
+    let system_file = system.map(image_file);
     let index = Index {
         serial: index_serial(published_serial(dir))?,
-        system: match (channel.system, &system_file) {
+        channel: channel.channel,
+        commit: commit.as_deref(),
+        system: match (system, &system_file) {
             (Some(version), Some(file)) => Some(SystemEntry {
                 version,
                 file,
@@ -1479,7 +1883,7 @@ pub fn publish_channel(dir: &Path, release: bool, channel: &Channel) -> Result<S
             "the index does not parse back (an app name over 20 bytes?)",
         ));
     }
-    let signature = sign_index(&text)?;
+    let signature = sign_index(&text, sign_as)?;
     let legacy = match (&index.system, channel.legacy_manifest) {
         (Some(s), true) => {
             let mut hex = [0u8; 64];
@@ -1541,12 +1945,26 @@ pub fn publish_channel(dir: &Path, release: bool, channel: &Channel) -> Result<S
     if old.exists() {
         io(fs::remove_dir_all(&old), "remove the previous publication")?;
     }
+    if let (true, Some(build)) = (dev, system) {
+        io(
+            fs::write(build_counter(dir), format!("{build}\n")),
+            "write the development build counter",
+        )?;
+        if let Some(h) = &host {
+            io(
+                fs::write(&h.path, format!("{build}\n")),
+                "write the host's development build counter",
+            )?;
+        }
+    }
     Ok(format!(
         "[xtask] update source at {}: serial {serial}, {}, {} app(s){}{}{}",
         dir.display(),
-        channel
-            .system
-            .map_or(String::from("no system image"), |v| format!("system {v}")),
+        match (system, &commit) {
+            (Some(b), Some(c)) => format!("dev build {b} (commit {c})"),
+            (Some(v), None) => format!("system {v}"),
+            (None, _) => String::from("no system image"),
+        },
         apps.len(),
         if channel.legacy_manifest && channel.system.is_some() {
             ", plus manifest.txt for ADR 0027 updaters"

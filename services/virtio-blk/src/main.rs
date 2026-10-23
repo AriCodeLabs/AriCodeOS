@@ -450,8 +450,13 @@ fn main(mask: u64) -> u64 {
             return step;
         }
     };
-    let mut args = [0u8; 256];
-    if let Some(text) = sys::cmdline(extra_handle(mask, 0), &mut args) {
+    let mut args = [0u8; sys::CMDLINE_MAX];
+    let line = sys::cmdline(extra_handle(mask, 0), &mut args);
+    if line.is_err() {
+        say(b"cannot read the command line (too long or not text): boot flags ignored");
+        record("blk cmdline unreadable", sys::CMDLINE_MAX as u64);
+    }
+    if let Ok(text) = line {
         let c = aricode_cmdline::CmdLine::new(text);
         dev.fault_lba = c
             .get(aricode_cmdline::keys::BLK_FAULT)
