@@ -113,3 +113,22 @@ a request only reaches its own sockets, and the sockets of a client the
 kernel reports gone (ADR 0030) are closed with `net socks reclaimed xN`
 recorded. `Op::Attach` (16) creates a session, `Op::Sockets` (17) reports
 the tables per owner for `diag`.
+
+## Note (2026-10-23, incident 0018)
+
+The core's frames had grown into the driver's 64 KiB user stack: `run`
+held the whole 22 KiB `Stack` (44,952-byte frame, release), `serve` and
+`on_frame` held the temporaries of every new TCP socket (25 KiB each in a
+dev build), and the deepest direct path (a full TCP table swept inside a
+request, a dead client's reset toward an address with no ARP entry) took
+53,368 bytes of 65,536 in release and 69,680 in dev, where the driver
+died on its first DHCP offer (`run` -> `on_frame` -> `broadcast_dhcp`). Since `fix/net-stack-headroom` `Stack::new`
+returns the stack in a `Box` (out of line, struct under 8 KiB by a const
+assertion), the UDP buffers, the ARP parking frames and the receive buffer
+live on the heap, and a TCP socket is built by `TcpSock::boxed`, out of
+line: 11,752 bytes (release) and 15,408 (dev) for virtio-net. `cargo xtask
+check` now fails if the deepest direct path of either driver passes half
+the stack or one frame a quarter (`stack-check`, `tests/README.md`);
+`diag` shows each process's stack high-water mark from the kernel
+(`sysinfo::STACKS`); `network.deep_path` drives the path at run time. A new
+driver (`Link`) is measured by adding it to `stack::CHECKED`.

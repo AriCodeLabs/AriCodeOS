@@ -1,7 +1,7 @@
 # Incident 0018: the network driver's user stack has little headroom
 
-- Opened: 2026-10-22. Status: open, measured; no fix yet (planned on its
-  own branch).
+- Opened: 2026-10-22. Status: fixed on `fix/net-stack-headroom`
+  (2026-10-23); open items at the end.
 - Found by: the independent audit of `feature/entropy-source-visible`
   (ADR 0039), after a first version of that branch overflowed the stack
   (below). Predates the branch: the deep path and the frame sizes come
@@ -24,9 +24,9 @@ USER STACK OVERFLOW: the user stack hit its guard page
 [WARN ] user: process 10 'virtio_net' killed: stack overflow
 ```
 
-The branch now builds the `Stack` in place (`Self { .. }` as the tail
-expression), and every scenario passes. That is an optimizer outcome, not
-a guarantee: nothing in the language or the build keeps a future change
+The branch then built the `Stack` in place (`Self { .. }` as the tail
+expression), and every scenario passed. That was an optimizer outcome, not
+a guarantee: nothing in the language or the build kept a future change
 from bringing the second copy back.
 
 ## Measurement (audit, objdump of the release and dev builds)
@@ -40,30 +40,176 @@ from bringing the second copy back.
   real margin is smaller. rtl-net: 52,200 bytes.
 - Dev builds (`cargo xtask build --debug` is supported): the same path is
   69,664 bytes for virtio-net and 68,624 bytes for rtl-net, over 64 KiB.
-  A dev build's netd dies with `USER STACK OVERFLOW` when the TCP table is
-  full and the sweep resets a dead client's connection toward an address
-  with no ARP entry (the path above). Not reproduced in a scenario yet;
-  the measurement is static.
-- There is no stack high-water mark: neither the driver nor the kernel can
-  tell how close a process came to its guard page.
+- There was no stack high-water mark: neither the driver nor the kernel
+  could tell how close a process came to its guard page.
 
-## Plan
+## Reproduction (2026-10-23, commit ce29f02)
 
-1. Move `Stack` off the stack: a `static` (one per driver process) or a
-   `Box` allocated in `run`, so the frame of `run` drops by about 22 KiB
-   and no inlining decision can double it.
-2. An xtask check of frame sizes and of the deepest direct-call path per
-   service binary, from `objdump` of the built ELF, failing above a budget
-   (the audit's `frames.py` and `depth.py` are the starting point; they go
-   into `tools/` with the fix, not before).
-3. A kernel stack high-water mark per process from the Accessed bits of
-   the user stack's page table entries, shown in `diag` / `ps`, so the
-   margin is measured at run time too.
-4. A scenario that drives the deep path (full TCP table, dead client,
-   destination without an ARP entry) under a dev build.
+1. **Static, automated.** `cargo xtask stack-check` (new,
+   `tools/xtask/src/stack.rs`, a Rust port of the audit's `frames.py` and
+   `depth.py` with host tests) builds both drivers in the release and the
+   dev profile, measures every frame from its prologue (return address,
+   pushes, `rsp` adjustment, stack probes) and the deepest chain of direct
+   calls from `_start`, and fails above half the stack for the chain. On
+   the code of 0.13.0 it failed all four binaries:
+
+   | binary | deepest direct path | largest frame |
+   |---|---|---|
+   | virtio-net, release | 53,368 | 44,952 `run` |
+   | rtl-net, release | 52,216 | 44,736 `run` |
+   | virtio-net, dev | 69,680 | 38,064 `run` (`serve` 25,232, `on_frame` 25,200) |
+   | rtl-net, dev | 68,640 | 37,808 `run` |
+
+   (16 bytes more than the audit's numbers: the return address of
+   `_start` is counted.)
+
+2. **At run time, dev build.** `cargo xtask test --debug --all --area
+   network` (inside the dev container, `--jobs 6`) on ce29f02: 29 of 30
+   scenarios failed, the only pass being `shell.no_network`. It is worse
+   than the audit's reading: a dev build of 0.13.0 has no network at all.
+   virtio-net dies on the first DHCP offer it receives, 70 times across the
+   run (each restart dies the same way until init's budget is spent):
+
+   ```text
+   virtio-net: serving requests
+   USER FAULT #PF (14) Page Fault: rip=0x4030c9 rsp=0x7efc08 err=0x6 cr2=0x7efc00
+   USER STACK OVERFLOW: the user stack hit its guard page
+   [WARN ] user: process 16 'virtio_net' killed: stack overflow
+   AriInit: service virtio_net died from a fault; restart budget exhausted: system degraded
+   ```
+
+   `addr2line` puts `rip` in `Stack::broadcast_dhcp`: `run` (38,064) ->
+   `on_frame` (25,200, `on_udp` inlined) -> `broadcast_dhcp` (2,192) is
+   66,560 bytes with `_start` and `main`. The table-full path the audit
+   named was never reached. Logs: the run's `build/scenarios/*/serial.log`.
+
+3. **The deep path at run time.** Scenario `network.deep_path` and test
+   program `tcp_orphan`: the orphan fills the 8-slot TCP table with 7
+   connections to the host echo server and one toward 10.0.2.77 (on the
+   subnet, no ARP answer from QEMU, so its SYN stays parked), has its ninth
+   connect refused after a sweep (which restarts the 1 s sweep period) and
+   exits without closing. The shell's `http` at the next prompt finds the
+   table full, sweeps inside the request (`serve` -> `tcp_room` -> `sweep`
+   -> `probe` -> `retire` -> `reset_and_drop`), and the reset toward
+   10.0.2.77 is parked and announced with an ARP request (`send_ipv4` ->
+   `send_arp_request` -> `send_eth` -> the NIC). The order (`http` typed,
+   then `client gone`) shows the reclaim ran in the request; `net arp
+   defer full` absent shows the reset got a parking slot. On the dev build
+   of ce29f02 it failed with the overflow above, before reaching the deep
+   path; it was not run on the release build of the old code (the static
+   margin there was about 12 KiB, indirect calls not counted).
+
+## Mechanism
+
+Every byte of the network stack's state and of its scratch buffers lived
+on the driver's 64 KiB stack:
+
+- `run` held the `Stack` (22,312 bytes: 8 UDP sockets with a 1,472-byte
+  buffer each, 4 ARP parking frames of 1,514 bytes, the session tables)
+  plus the receive buffer, and whether `Stack::new` added a second copy
+  was the inliner's choice.
+- Every new TCP socket was built as `Box::new(TcpSock::new(conn))` inside
+  `on_tcp`, `TcpConnect` and `TcpListen`: the 8 KiB `Connection` (two
+  4 KiB rings) and the `TcpSock` around it were temporaries in the frames
+  of `on_frame` and `serve`, several times over in a dev build (opt-level
+  1 keeps one stack slot per temporary): 25 KiB each.
+- The two big frames sit on top of each other on every path that receives
+  a frame or serves a request, so the remaining few KiB were all the
+  deeper calls had.
+
+## Fix (commit 65828be)
+
+- `Stack::new` returns the stack in a `Box`, is `#[inline(never)]`, and a
+  const assertion (`STACK_STRUCT_MAX`, 8 KiB) makes a larger `Stack` a
+  build error, so even the copy an unoptimized build makes on the way into
+  the `Box` stays small and is popped before the service loop.
+- Heap instead of stack: the UDP socket buffers (`heap_buffer`, allocated
+  as a zeroed `Vec`, never built on the stack), the four ARP parking frames
+  (allocated once in `Stack::new` and reused: parking copies the frame in,
+  no allocation on the send path) and the receive buffer of `run`.
+- `TcpSock::boxed`, out of line, builds every TCP socket: the
+  `Connection` temporary of a dev build is in that one leaf frame (8,320
+  bytes), not in `serve` or `on_frame`.
+- `Stack` is now 4,680 bytes over virtio-net. Heap use grows by the same
+  buffers (about 18 KiB plus 8 KiB per TCP socket, as before) in the
+  256 KiB arena.
+
+After the fix (`cargo xtask stack-check`):
+
+| binary | deepest direct path | was | largest frame |
+|---|---|---|---|
+| virtio-net, release | 11,752 | 53,368 | 3,456 `run` |
+| rtl-net, release | 10,872 | 52,216 | 3,456 `run` |
+| virtio-net, dev | 15,408 | 69,680 | 8,320 `TcpSock::boxed` |
+| rtl-net, dev | 14,736 | 68,640 | 8,320 `TcpSock::boxed` |
+
+The release deepest path is now the audit's path itself (`serve` 2,128 ->
+`tcp_room` -> `sweep` -> `probe` 1,648 -> `send_ipv4` 1,616 ->
+`send_arp_request` 1,568): 18% of the stack, 23% in a dev build.
+
+## Guards
+
+- **Build (commit 0341eb1).** `cargo xtask check` ends with
+  `stack-check`: it fails if, in any of the four binaries, the deepest
+  direct path passes 32 KiB (half the stack) or one frame passes 16 KiB (a
+  quarter). The frame budget was first 8 KiB (commit ce29f02); it became a
+  quarter of the stack when the fix showed that the one frame between 8 and
+  16 KiB, `TcpSock::boxed` in the dev build, is the socket itself, not a
+  buffer. A unit test fails if the kernel's `USER_STACK_SIZE` changes
+  without the budgets. Budgets and limits: `tests/README.md`.
+- **Run time (commit a048158).** `system_info(STACKS)` gives each live
+  process's stack high-water mark: the kernel finds the lowest page of the
+  user stack whose Accessed bit the CPU set. `spawn` zeroes the stack pages
+  through the kernel's own mapping, and nothing clears the bit, so only the
+  process's accesses (and the kernel's copies to and from its buffers)
+  count, page granular; the stack probes of large frames make a deep call
+  visible even if it wrote little. Unlike the static check it includes
+  indirect calls. `diag` lists it (`user stacks (touched of size, page
+  granular)`), and `network.deep_path` requires virtio-net's line.
+- Also found while reproducing (commit c2395ba): `cargo xtask test
+  --debug` could not run at all, because the dev build of the WebAssembly
+  demo (636,854 bytes against 12,050) does not fit the test disk's ARI0
+  and `write_test_disk` stopped with `OutOfRange`. The demo is now always
+  built in release.
+
+## Tests (2026-10-23, inside the dev container, `--cpus 10 --memory 12g`)
+
+- `cargo xtask check` (fmt, clippy, stack-check) and `cargo xtask test
+  --level unit` (517 host tests, among them the parser and budget tests of
+  `stack.rs` and `stack_entry_round_trip`) green after every commit.
+- Dev build, `cargo xtask test --debug --all --area network --jobs 6` on
+  c2395ba: no `USER STACK OVERFLOW` in any of the 30 scenarios (70 before);
+  17 pass, among them every `network.*` (`network.deep_path` included),
+  `ssh.*`, `net.https`, `crypto.entropy_rdrand` and `shell.commands`. The
+  13 that fail are the update scenarios (`update.*`, `apps.downgrade_*`,
+  `apps.upgrade_network`), for a reason unrelated to the stack: a dev
+  system image is 4,369,040 bytes and the updater's image buffer is 4 MiB
+  (`IMAGE_BUFFER`), so it cannot load the installed image and reports
+  `installed version unknown`. In `network.deep_path` the order holds
+  (`ari> http ...`, then `client gone ('tcp_orphan'), 8 socket(s) left
+  open: reclaimed`, then `HTTP 200`), the parked reset later expires as
+  `net arp no reply`, and `diag` shows virtio-net at 16 of 64 KiB touched,
+  against 15,408 bytes measured statically.
+- Release build, the full suite (`cargo xtask test --all --jobs 10`, run
+  once because the branch touches the kernel's page-table reading): 166
+  scenarios, 0 failed, 4m51s. `diag` in `network.deep_path`: virtio-net
+  12 of 64 KiB (static 11,752 bytes), fsd 16, shell 24.
+- Host temperature during the runs: 85 °C at most, the thermal guard never
+  paused a guest.
 
 ## Open
 
-- Everything above; the 0.13.0 release builds are not known to overflow,
-  but their margin (about 12 KiB, indirect calls not counted) is not a
-  bound.
+- `stack::CHECKED` covers the two network drivers only. A survey of the
+  dev builds with the same method (2026-10-23, after the fix) puts other
+  programs near or over the 32 KiB budget: `shell` 37,376 bytes (`http_get`
+  -> `aricode_http::fetch_with` over TLS), `updater` 27,056, `fsd` 25,216,
+  `usb_input` 24,784, `usb_ehci` 23,136; `init` 11,088, `sshd` 7,328.
+  Adding them to the check needs their own budgets or fixes; not done here.
+- The static analysis does not follow indirect calls; the high-water mark
+  in `diag` is the run-time measurement that covers them, but nothing
+  fails automatically on it yet.
+- Dev builds cannot run the update scenarios: the dev system image
+  (4,369,040 bytes) does not fit the updater's 4 MiB image buffer, so the
+  installed version reads as unknown. Not related to this incident; seen
+  for the first time because `cargo xtask test --debug` had not run since
+  the WebAssembly demo outgrew the test disk.
