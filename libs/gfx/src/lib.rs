@@ -3,7 +3,9 @@
 //! 2D graphics (Phase 26): 32 bpp `0x00RRGGBB` canvases over caller
 //! buffers, clipping, text with the console font, a cursor and the
 //! compositor desktop model (windows with z-order, focus and
-//! hit testing). No `alloc`: everything is tested on the host over `Vec<u32>`.
+//! hit testing), plus the damage tracking that lets the compositor
+//! recompose and flush only what changed ([`Scene`], [`Damage`]). No
+//! `alloc`: everything is tested on the host over `Vec<u32>`.
 
 #![no_std]
 
@@ -51,14 +53,37 @@ impl Rect {
             Rect::new(x, y, (r - x) as u32, (b - y) as u32)
         }
     }
+    pub fn intersects(&self, o: &Rect) -> bool {
+        !self.intersect(o).is_empty()
+    }
+    /// Smallest rectangle holding both (an empty one adds nothing).
+    pub fn union(&self, o: &Rect) -> Rect {
+        if self.is_empty() {
+            return *o;
+        }
+        if o.is_empty() {
+            return *self;
+        }
+        let x = self.x.min(o.x);
+        let y = self.y.min(o.y);
+        let r = self.right().max(o.right());
+        let b = self.bottom().max(o.bottom());
+        Rect::new(x, y, (r - x) as u32, (b - y) as u32)
+    }
+    pub fn area(&self) -> u64 {
+        self.w as u64 * self.h as u64
+    }
 }
 
-/// Canvas over a borrowed buffer: `stride` pixels per row.
+/// Canvas over a borrowed buffer: `stride` pixels per row. Drawing is
+/// clipped to the canvas and to its clip rectangle (the whole canvas
+/// unless narrowed with [`Canvas::clipped`]); reading is not.
 pub struct Canvas<'a> {
     pub pixels: &'a mut [u32],
     pub width: u32,
     pub height: u32,
     pub stride: u32,
+    clip: Rect,
 }
 
 impl<'a> Canvas<'a> {
@@ -72,11 +97,28 @@ impl<'a> Canvas<'a> {
             width,
             height,
             stride,
+            clip: Rect::new(0, 0, width, height),
         })
     }
 
     pub fn bounds(&self) -> Rect {
         Rect::new(0, 0, self.width, self.height)
+    }
+
+    /// The area drawing may touch.
+    pub fn clip(&self) -> Rect {
+        self.clip
+    }
+
+    /// The same pixels, drawing only inside `r` and the current clip.
+    pub fn clipped(&mut self, r: &Rect) -> Canvas<'_> {
+        Canvas {
+            pixels: &mut *self.pixels,
+            width: self.width,
+            height: self.height,
+            stride: self.stride,
+            clip: self.clip.intersect(r),
+        }
     }
 
     pub fn get(&self, x: i32, y: i32) -> Option<Color> {
@@ -86,13 +128,14 @@ impl<'a> Canvas<'a> {
         Some(self.pixels[y as usize * self.stride as usize + x as usize])
     }
 
+    /// Fills the clip rectangle.
     pub fn fill(&mut self, color: Color) {
-        let b = self.bounds();
-        self.fill_rect(&b, color);
+        let c = self.clip;
+        self.fill_rect(&c, color);
     }
 
     pub fn fill_rect(&mut self, r: &Rect, color: Color) {
-        let r = r.intersect(&self.bounds());
+        let r = r.intersect(&self.clip);
         for y in r.y..r.bottom() {
             let row = y as usize * self.stride as usize;
             self.pixels[row + r.x as usize..row + r.right() as usize].fill(color);
@@ -101,7 +144,7 @@ impl<'a> Canvas<'a> {
 
     /// Copies `src` with its top-left corner at `(x, y)`, clipping.
     pub fn blit(&mut self, src: &Canvas, x: i32, y: i32) {
-        let dst_rect = Rect::new(x, y, src.width, src.height).intersect(&self.bounds());
+        let dst_rect = Rect::new(x, y, src.width, src.height).intersect(&self.clip);
         for dy in 0..dst_rect.h as i32 {
             let sy = (dst_rect.y + dy - y) as usize;
             let sx = (dst_rect.x - x) as usize;
@@ -122,11 +165,15 @@ impl<'a> Canvas<'a> {
                 &GLYPHS[(b'?' - FIRST_CHAR) as usize]
             };
             let gx = x + (i * GLYPH_WIDTH) as i32;
+            let cell = Rect::new(gx, y, GLYPH_WIDTH as u32, glyph.len() as u32);
+            if !cell.intersects(&self.clip) {
+                continue;
+            }
             for (row, bits) in glyph.iter().enumerate() {
                 for col in 0..GLYPH_WIDTH {
                     let on = bits & (0x80 >> col) != 0;
                     let (px, py) = (gx + col as i32, y + row as i32);
-                    if !self.bounds().contains(px, py) {
+                    if !self.clip.contains(px, py) {
                         continue;
                     }
                     if on {
@@ -149,7 +196,7 @@ impl<'a> Canvas<'a> {
                     _ => continue,
                 };
                 let (px, py) = (x + col as i32, y + row as i32);
-                if self.bounds().contains(px, py) {
+                if self.clip.contains(px, py) {
                     self.pixels[py as usize * self.stride as usize + px as usize] = color;
                 }
             }
@@ -159,6 +206,11 @@ impl<'a> Canvas<'a> {
 
 pub const CURSOR_W: u32 = 12;
 pub const CURSOR_H: u32 = 19;
+
+/// The pixels [`Canvas::cursor`] may paint for a cursor at `(x, y)`.
+pub const fn cursor_rect(x: i32, y: i32) -> Rect {
+    Rect::new(x, y, CURSOR_W, CURSOR_H)
+}
 const CURSOR: [&str; CURSOR_H as usize] = [
     "#           ",
     "##          ",
@@ -349,24 +401,236 @@ impl Desktop {
         );
     }
 
+    /// Moves the content of `id` to `(x, y)`, keeping the top-left corner
+    /// of its frame on screen. `false` if there is no such window.
+    pub fn move_window(&mut self, id: u32, x: i32, y: i32) -> bool {
+        let Some(w) = self.windows.iter_mut().flatten().find(|w| w.id == id) else {
+            return false;
+        };
+        let (left, top) = (BORDER as i32, (TITLE_H + BORDER) as i32);
+        w.content.x = x.clamp(left, (self.screen.w as i32 - 1 + left).max(left));
+        w.content.y = y.clamp(top, (self.screen.h as i32 - 1 + top).max(top));
+        true
+    }
+
+    /// What the composition depends on, besides the window contents.
+    pub fn scene(&self) -> Scene {
+        let mut windows = [None; MAX_WINDOWS];
+        for (slot, w) in windows.iter_mut().zip(self.iter()) {
+            *slot = Some(*w);
+        }
+        Scene {
+            windows,
+            count: self.count,
+            focus: self.focus,
+            pointer: self.pointer,
+        }
+    }
+
     /// Paints the whole desktop into `out`: background, frames, contents and the
     /// cursor. `draw_content(window, canvas)` paints the content of each
-    /// window (usually a `blit` of its buffer at `content.x/y`).
-    pub fn compose(&self, out: &mut Canvas, mut draw_content: impl FnMut(&Window, &mut Canvas)) {
+    /// window (usually a `blit` of its buffer at `content.x/y`); its canvas
+    /// is clipped to the content rectangle.
+    pub fn compose(&self, out: &mut Canvas, draw_content: impl FnMut(&Window, &mut Canvas)) {
+        let all = out.bounds();
+        self.compose_region(out, &all, draw_content);
+    }
+
+    /// Like [`Desktop::compose`], but repaints only the pixels inside
+    /// `region`: the rest of `out` is left as it was, so composing each
+    /// rectangle of a [`Damage`] over the previous frame gives the same
+    /// pixels as composing the whole screen. Each window draws only inside
+    /// its frame (title text included) and the cursor only inside
+    /// [`cursor_rect`], which is what [`Scene::damage`] relies on.
+    pub fn compose_region(
+        &self,
+        out: &mut Canvas,
+        region: &Rect,
+        mut draw_content: impl FnMut(&Window, &mut Canvas),
+    ) {
+        let mut out = out.clipped(region);
+        let clip = out.clip();
+        if clip.is_empty() {
+            return;
+        }
         out.fill(DESKTOP_BG);
         for w in self.iter() {
             let frame = w.frame();
+            if !frame.intersects(&clip) {
+                continue;
+            }
             let title = if self.focus == Some(w.id) {
                 TITLE_ACTIVE
             } else {
                 TITLE_INACTIVE
             };
             out.fill_rect(&frame, title);
-            out.text(frame.x + 6, frame.y + 2, w.title_str(), TITLE_TEXT, None);
+            out.clipped(&frame)
+                .text(frame.x + 6, frame.y + 2, w.title_str(), TITLE_TEXT, None);
             out.fill_rect(&w.content, rgb(0, 0, 0));
-            draw_content(w, out);
+            draw_content(w, &mut out.clipped(&w.content));
         }
         out.cursor(self.pointer.0, self.pointer.1);
+    }
+}
+
+/// Snapshot of what a composed frame depends on apart from the window
+/// contents: the windows (geometry and title) from back to front, the
+/// focus and the pointer. The compositor keeps the scene it last put on
+/// screen and diffs the current one against it ([`Scene::damage`]), so no
+/// change to the desktop can be forgotten.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Scene {
+    windows: [Option<Window>; MAX_WINDOWS],
+    count: usize,
+    focus: Option<u32>,
+    pointer: (i32, i32),
+}
+
+impl Scene {
+    fn iter(&self) -> impl Iterator<Item = &Window> + '_ {
+        self.windows[..self.count].iter().flatten()
+    }
+
+    fn position(&self, id: u32) -> Option<usize> {
+        self.iter().position(|w| w.id == id)
+    }
+
+    /// Adds to `damage` every screen area whose composed pixels may differ
+    /// between `self` and `newer`: both cursor positions if the pointer
+    /// moved; the old and new frame of a window that appeared, went away,
+    /// moved, was retitled or gained or lost the focus; and, for two windows
+    /// whose stacking order swapped, the area where they overlap. Content
+    /// changes are not part of a scene: the compositor adds the content
+    /// rectangle of a window its client presented.
+    pub fn damage(&self, newer: &Scene, damage: &mut Damage) {
+        if self.pointer != newer.pointer {
+            damage.add(&cursor_rect(self.pointer.0, self.pointer.1));
+            damage.add(&cursor_rect(newer.pointer.0, newer.pointer.1));
+        }
+        let focused = |s: &Scene, id: u32| s.focus == Some(id);
+        for old in self.iter() {
+            match newer.iter().find(|w| w.id == old.id) {
+                None => damage.add(&old.frame()),
+                Some(new) => {
+                    if new != old || focused(self, old.id) != focused(newer, old.id) {
+                        damage.add(&old.frame());
+                        damage.add(&new.frame());
+                    }
+                }
+            }
+        }
+        for new in newer.iter() {
+            if self.position(new.id).is_none() {
+                damage.add(&new.frame());
+            }
+        }
+        for (i, a) in self.iter().enumerate() {
+            for b in self.iter().skip(i + 1) {
+                let (Some(na), Some(nb)) = (newer.position(a.id), newer.position(b.id)) else {
+                    continue;
+                };
+                if na > nb {
+                    damage.add(&a.frame().intersect(&b.frame()));
+                    let (wa, wb) = (newer.windows[na], newer.windows[nb]);
+                    if let (Some(wa), Some(wb)) = (wa, wb) {
+                        damage.add(&wa.frame().intersect(&wb.frame()));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// How many rectangles a [`Damage`] keeps before merging the closest ones.
+pub const MAX_DAMAGE: usize = 8;
+
+/// Damaged rectangles covering more than this fraction of the screen
+/// (numerator, denominator) become the whole screen.
+pub const FULL_SCREEN_FRACTION: (u64, u64) = (1, 2);
+
+/// The screen areas to recompose and flush: at most [`MAX_DAMAGE`]
+/// disjoint rectangles inside the screen. A rectangle that overlaps one
+/// already kept is merged with it (their bounding box); when the set is
+/// full, the new one is merged with the rectangle whose bounding box grows
+/// least; past [`FULL_SCREEN_FRACTION`] of the screen the set becomes the
+/// whole screen. Merging only ever adds pixels, so the set always covers
+/// everything added since the last [`Damage::clear`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Damage {
+    screen: Rect,
+    rects: [Rect; MAX_DAMAGE],
+    count: usize,
+}
+
+impl Damage {
+    pub const fn new(screen: Rect) -> Self {
+        Self {
+            screen,
+            rects: [Rect::new(0, 0, 0, 0); MAX_DAMAGE],
+            count: 0,
+        }
+    }
+
+    /// The whole screen damaged (the first frame).
+    pub const fn full(screen: Rect) -> Self {
+        let mut d = Self::new(screen);
+        d.rects[0] = screen;
+        d.count = 1;
+        d
+    }
+
+    pub fn rects(&self) -> &[Rect] {
+        &self.rects[..self.count]
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Pixels covered (the rectangles are disjoint).
+    pub fn pixels(&self) -> u64 {
+        self.rects().iter().map(Rect::area).sum()
+    }
+
+    pub fn clear(&mut self) {
+        self.count = 0;
+    }
+
+    fn remove(&mut self, i: usize) {
+        self.rects.copy_within(i + 1..self.count, i);
+        self.count -= 1;
+    }
+
+    pub fn add(&mut self, r: &Rect) {
+        let mut r = r.intersect(&self.screen);
+        if r.is_empty() || self.rects() == [self.screen] {
+            return;
+        }
+        loop {
+            if let Some(i) = self.rects().iter().position(|o| o.intersects(&r)) {
+                r = r.union(&self.rects[i]);
+                self.remove(i);
+            } else if self.count == MAX_DAMAGE {
+                let grows = |o: &Rect| r.union(o).area() - o.area();
+                let mut best = 0;
+                for i in 1..self.count {
+                    if grows(&self.rects[i]) < grows(&self.rects[best]) {
+                        best = i;
+                    }
+                }
+                r = r.union(&self.rects[best]);
+                self.remove(best);
+            } else {
+                break;
+            }
+        }
+        self.rects[self.count] = r;
+        self.count += 1;
+        let (num, den) = FULL_SCREEN_FRACTION;
+        if self.pixels() * den > self.screen.area() * num {
+            *self = Self::full(self.screen);
+        }
     }
 }
 
@@ -569,5 +833,403 @@ mod tests {
         );
         assert_eq!(screen.get(300, 230), Some(DESKTOP_BG));
         assert_eq!(screen.get(5, 5), Some(rgb(0, 0, 0)), "cursor tip");
+    }
+
+    #[test]
+    fn rect_union_and_area() {
+        let a = Rect::new(0, 0, 10, 10);
+        let b = Rect::new(5, 20, 10, 10);
+        assert_eq!(a.union(&b), Rect::new(0, 0, 15, 30));
+        assert_eq!(a.union(&Rect::new(50, 50, 0, 3)), a, "empty adds nothing");
+        assert_eq!(Rect::new(9, 9, 0, 0).union(&b), b);
+        assert_eq!(b.area(), 100);
+        assert!(a.intersects(&Rect::new(9, 9, 5, 5)));
+        assert!(
+            !a.intersects(&Rect::new(10, 0, 5, 5)),
+            "touching is not overlapping"
+        );
+    }
+
+    #[test]
+    fn a_clipped_canvas_draws_only_inside_its_clip() {
+        let mut buf = Vec::new();
+        let mut c = canvas(&mut buf, 40, 30);
+        c.fill(1);
+        let clip = Rect::new(10, 5, 12, 9);
+        {
+            let mut v = c.clipped(&clip);
+            assert_eq!(v.clip(), clip);
+            assert_eq!(
+                v.clipped(&Rect::new(0, 0, 15, 8)).clip(),
+                Rect::new(10, 5, 5, 3)
+            );
+            v.fill(2);
+            v.fill_rect(&Rect::new(0, 0, 40, 30), 3);
+            v.text(8, 4, "Clip", 4, Some(5));
+            v.cursor(20, 12);
+            let mut sbuf = vec![6; 30 * 30];
+            let src = Canvas::new(&mut sbuf, 30, 30, 30).unwrap();
+            v.blit(&src, 15, 0);
+            assert_eq!(v.get(0, 0), Some(1), "reading is not clipped");
+        }
+        for y in 0..30 {
+            for x in 0..40 {
+                if !clip.contains(x, y) {
+                    assert_eq!(c.get(x, y), Some(1), "({x},{y}) outside the clip");
+                }
+            }
+        }
+        assert_eq!(c.get(16, 6), Some(6), "blit inside the clip");
+    }
+
+    /// Every pixel of `r` is covered by some rectangle of `d`.
+    fn covers(d: &Damage, r: &Rect) -> bool {
+        let r = r.intersect(&d.screen);
+        (r.y..r.bottom())
+            .all(|y| (r.x..r.right()).all(|x| d.rects().iter().any(|o| o.contains(x, y))))
+    }
+
+    fn assert_disjoint(d: &Damage) {
+        for (i, a) in d.rects().iter().enumerate() {
+            assert!(
+                !a.is_empty() && d.screen.intersect(a) == *a,
+                "{a:?} inside the screen"
+            );
+            for b in &d.rects()[i + 1..] {
+                assert!(!a.intersects(b), "{a:?} and {b:?} overlap");
+            }
+        }
+    }
+
+    #[test]
+    fn damage_merges_overlaps_and_stays_bounded() {
+        let screen = Rect::new(0, 0, 1000, 1000);
+        let mut d = Damage::new(screen);
+        assert!(d.is_empty());
+        d.add(&Rect::new(10, 10, 12, 19));
+        d.add(&Rect::new(11, 10, 12, 19));
+        assert_eq!(
+            d.rects(),
+            [Rect::new(10, 10, 13, 19)],
+            "two cursor positions merge"
+        );
+        d.add(&Rect::new(12, 12, 2, 2));
+        assert_eq!(d.rects().len(), 1, "a contained rectangle adds nothing");
+        d.add(&Rect::new(-5, 990, 20, 20));
+        assert_eq!(
+            d.rects()[1],
+            Rect::new(0, 990, 15, 10),
+            "clipped to the screen"
+        );
+        d.add(&Rect::new(2000, 0, 5, 5));
+        assert_eq!(d.rects().len(), 2, "off-screen adds nothing");
+        // Many small scattered rectangles: never more than MAX_DAMAGE.
+        let mut added = vec![Rect::new(10, 10, 13, 19), Rect::new(0, 990, 15, 10)];
+        for i in 0..40 {
+            let r = Rect::new(100 + (i * 97) % 290, 100 + (i * 53) % 290, 5, 5);
+            d.add(&r);
+            added.push(r);
+            assert!(d.rects().len() <= MAX_DAMAGE);
+            assert_disjoint(&d);
+        }
+        assert!(
+            added.iter().all(|r| covers(&d, r)),
+            "merging never drops pixels"
+        );
+        assert!(d.pixels() < screen.area() / 2);
+        // Past the threshold: the whole screen, and it stays so.
+        d.add(&Rect::new(0, 0, 1000, 600));
+        assert_eq!(d.rects(), [screen]);
+        d.add(&Rect::new(1, 1, 1, 1));
+        assert_eq!(d.rects(), [screen]);
+        d.clear();
+        assert!(d.is_empty() && d.pixels() == 0);
+        assert_eq!(Damage::full(screen).rects(), [screen]);
+    }
+
+    /// Small deterministic generator for the randomized tests.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u32 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 32) as u32
+        }
+        fn below(&mut self, n: u32) -> u32 {
+            self.next() % n.max(1)
+        }
+        fn range(&mut self, lo: i32, hi: i32) -> i32 {
+            lo + self.below((hi - lo) as u32 + 1) as i32
+        }
+    }
+
+    /// The compositor's job over host buffers: the desktop, one content
+    /// buffer per window, the scene on screen, the pending damage, the
+    /// back buffer and the framebuffer it flushes to.
+    struct Model {
+        desktop: Desktop,
+        contents: Vec<(u32, Vec<u32>)>,
+        shown: Scene,
+        damage: Damage,
+        back: Vec<u32>,
+        fb: Vec<u32>,
+        w: u32,
+        h: u32,
+    }
+
+    impl Model {
+        fn new(w: u32, h: u32) -> Self {
+            let desktop = Desktop::new(w, h);
+            let mut m = Self {
+                shown: desktop.scene(),
+                damage: Damage::full(desktop.screen),
+                desktop,
+                contents: Vec::new(),
+                back: vec![0xdead; (w * h) as usize],
+                fb: vec![0xbeef; (w * h) as usize],
+                w,
+                h,
+            };
+            m.frame();
+            m
+        }
+
+        fn draw(&self, out: &mut Canvas, region: &Rect) {
+            self.desktop.compose_region(out, region, |win, out| {
+                let (_, buf) = self.contents.iter().find(|(id, _)| *id == win.id).unwrap();
+                let mut buf = buf.clone();
+                let src =
+                    Canvas::new(&mut buf, win.content.w, win.content.h, win.content.w).unwrap();
+                out.blit(&src, win.content.x, win.content.y);
+            });
+        }
+
+        fn present(&mut self, id: u32) {
+            let content = self.desktop.get(id).unwrap().content;
+            self.damage.add(&content);
+        }
+
+        /// One composed frame, as the compositor does it; returns the
+        /// pixels flushed.
+        fn frame(&mut self) -> u64 {
+            let scene = self.desktop.scene();
+            self.shown.damage(&scene, &mut self.damage);
+            self.shown = scene;
+            let damage = self.damage;
+            self.damage.clear();
+            let mut back = core::mem::take(&mut self.back);
+            {
+                let mut out = Canvas::new(&mut back, self.w, self.h, self.w).unwrap();
+                for r in damage.rects() {
+                    self.draw(&mut out, r);
+                }
+            }
+            for r in damage.rects() {
+                for y in r.y..r.bottom() {
+                    let row = (y as u32 * self.w) as usize;
+                    let span = row + r.x as usize..row + r.right() as usize;
+                    self.fb[span.clone()].copy_from_slice(&back[span]);
+                }
+            }
+            self.back = back;
+            damage.pixels()
+        }
+
+        fn full(&self) -> Vec<u32> {
+            let mut buf = vec![0; (self.w * self.h) as usize];
+            let mut out = Canvas::new(&mut buf, self.w, self.h, self.w).unwrap();
+            let all = out.bounds();
+            self.draw(&mut out, &all);
+            buf
+        }
+
+        fn create(&mut self, w: u32, h: u32, title: &str, color: Color) -> u32 {
+            let id = self.desktop.create(w, h, title).unwrap();
+            self.contents.push((id, vec![color; (w * h) as usize]));
+            id
+        }
+
+        fn random_step(&mut self, rng: &mut Rng) {
+            let ids: Vec<u32> = self.desktop.iter().map(|w| w.id).collect();
+            let pick = |rng: &mut Rng| ids[rng.below(ids.len() as u32) as usize];
+            match rng.below(10) {
+                0 if self.desktop.count() < MAX_WINDOWS => {
+                    let title = &"A long window title that is cut"[..rng.below(32) as usize];
+                    let (w, h) = (rng.range(1, 160) as u32, rng.range(1, 120) as u32);
+                    let color = rng.next() & 0xff_ffff;
+                    self.create(w, h, title, color);
+                }
+                1 if !ids.is_empty() => {
+                    let id = pick(rng);
+                    self.desktop.remove(id);
+                    self.contents.retain(|(c, _)| *c != id);
+                }
+                2 if !ids.is_empty() => self.desktop.raise(pick(rng)),
+                3 if !ids.is_empty() => {
+                    let id = pick(rng);
+                    let x = rng.range(-50, self.w as i32 + 50);
+                    let y = rng.range(-50, self.h as i32 + 50);
+                    self.desktop.move_window(id, x, y);
+                }
+                4 | 5 => {
+                    let s = if rng.below(4) == 0 { 400 } else { 3 };
+                    self.desktop
+                        .move_pointer(rng.range(-s, s), rng.range(-s, s));
+                }
+                6 | 7 if !ids.is_empty() => {
+                    let id = pick(rng);
+                    let win = *self.desktop.get(id).unwrap();
+                    let (_, buf) = self.contents.iter_mut().find(|(c, _)| *c == id).unwrap();
+                    let mut c =
+                        Canvas::new(buf, win.content.w, win.content.h, win.content.w).unwrap();
+                    let r = Rect::new(
+                        rng.range(-5, win.content.w as i32),
+                        rng.range(-5, win.content.h as i32),
+                        rng.below(80),
+                        rng.below(60),
+                    );
+                    c.fill_rect(&r, rng.next() & 0xff_ffff);
+                    self.present(id);
+                }
+                8 => self.desktop.focus = None,
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn composing_only_the_damage_matches_full_composition() {
+        for seed in 1..=24u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let (w, h) = (rng.range(64, 360) as u32, rng.range(48, 260) as u32);
+            let mut m = Model::new(w, h);
+            assert!(
+                m.back == m.full() && m.fb == m.back,
+                "first frame, seed {seed}"
+            );
+            for step in 0..300 {
+                // Several events per frame, as when updates are coalesced.
+                for _ in 0..rng.range(1, 4) {
+                    m.random_step(&mut rng);
+                }
+                let before = m.fb.clone();
+                let flushed = m.frame();
+                let full = m.full();
+                assert!(
+                    m.back == full,
+                    "back buffer differs, seed {seed} step {step}"
+                );
+                assert!(m.fb == full, "framebuffer differs, seed {seed} step {step}");
+                let changed = before.iter().zip(&full).filter(|(a, b)| a != b).count() as u64;
+                assert!(flushed >= changed, "seed {seed} step {step}");
+            }
+        }
+    }
+
+    #[test]
+    fn compose_region_leaves_the_rest_untouched() {
+        let mut d = Desktop::new(200, 150);
+        d.create(150, 100, "Wide title over the edge").unwrap();
+        d.pointer = (60, 70);
+        let mut buf = vec![7; 200 * 150];
+        let mut out = Canvas::new(&mut buf, 200, 150, 200).unwrap();
+        let region = Rect::new(50, 55, 30, 20);
+        d.compose_region(&mut out, &region, |_, c| c.fill(0x123456));
+        for y in 0..150 {
+            for x in 0..200 {
+                assert_eq!(region.contains(x, y), out.get(x, y) != Some(7), "({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn window_drawing_stays_inside_its_frame() {
+        // A narrow window with a long title: the title is cut at the frame.
+        let mut d = Desktop::new(200, 100);
+        let id = d.create(10, 10, "A very long title").unwrap();
+        let frame = d.get(id).unwrap().frame();
+        d.pointer = (190, 90);
+        let mut buf = Vec::new();
+        let mut out = canvas(&mut buf, 200, 100);
+        d.compose(&mut out, |_, c| c.fill(0xffffff));
+        for y in 0..100 {
+            for x in 0..200 {
+                if !frame.contains(x, y) && !cursor_rect(190, 90).contains(x, y) {
+                    assert_eq!(out.get(x, y), Some(DESKTOP_BG), "({x},{y})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn move_window_keeps_the_frame_corner_on_screen() {
+        let mut d = Desktop::new(300, 200);
+        let id = d.create(100, 50, "M").unwrap();
+        assert!(d.move_window(id, 120, 90));
+        assert_eq!(d.get(id).unwrap().content, Rect::new(120, 90, 100, 50));
+        d.move_window(id, -500, -500);
+        assert_eq!(
+            (d.get(id).unwrap().frame().x, d.get(id).unwrap().frame().y),
+            (0, 0)
+        );
+        d.move_window(id, 5000, 5000);
+        assert_eq!(
+            (d.get(id).unwrap().frame().x, d.get(id).unwrap().frame().y),
+            (299, 199)
+        );
+        assert!(!d.move_window(id + 1, 0, 0));
+    }
+
+    /// Figures for the performance audit of 731c398, finding C: pixels and
+    /// bytes flushed per frame for one event each, against the full-screen
+    /// flip they replace (4 bytes per pixel).
+    /// `cargo test -p aricode-gfx flushed -- --nocapture` prints them.
+    #[test]
+    fn flushed_pixels_per_event() {
+        for (w, h) in [(1024u32, 768u32), (1920, 1080)] {
+            let full = w as u64 * h as u64;
+            // Empty desktop, the pointer moves one pixel (the audit's probe).
+            let mut m = Model::new(w, h);
+            let before = m.fb.clone();
+            m.desktop.move_pointer(1, 0);
+            let pointer = m.frame();
+            let changed = before.iter().zip(&m.fb).filter(|(a, b)| a != b).count();
+            assert_eq!(m.fb, m.full());
+            assert_eq!(changed, 80, "pixels that really change");
+            assert_eq!(
+                pointer,
+                ((CURSOR_W + 1) * CURSOR_H) as u64,
+                "the two cursor positions"
+            );
+            assert!(
+                pointer < 1000 && pointer * 1000 < full,
+                "bounded cursor region"
+            );
+            // Two 400x300 windows; the top one presents new content.
+            let a = m.create(400, 300, "Demo A", rgb(0xc0, 0x40, 0x40));
+            let b = m.create(400, 300, "Demo B", rgb(0x40, 0x80, 0xc0));
+            m.desktop.raise(b);
+            m.frame();
+            m.present(b);
+            let update = m.frame();
+            assert_eq!(update, 400 * 300);
+            // The bottom window moves 10 pixels right and down.
+            let c = m.desktop.get(a).unwrap().content;
+            m.desktop.move_window(a, c.x + 10, c.y + 10);
+            let moved = m.frame();
+            let frame = m.desktop.get(a).unwrap().frame();
+            assert_eq!(moved, (frame.w as u64 + 10) * (frame.h as u64 + 10));
+            assert_eq!(m.fb, m.full());
+            std::println!(
+                "desktop={w}x{h} full_flip={full} px / {} B; pointer_1px={pointer} px / {} B \
+                 ({changed} px change); window_update_400x300={update} px / {} B; \
+                 window_move_10px={moved} px / {} B",
+                full * 4,
+                pointer * 4,
+                update * 4,
+                moved * 4
+            );
+        }
     }
 }

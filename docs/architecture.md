@@ -1023,23 +1023,39 @@ latter briefly to add the region.
   returns width, height, stride, format, size and masks. Without `gui` the
   capability exists but the kernel keeps using the screen.
 - `aricode-gfx` allocates no memory: `Canvas` wraps `&mut [u32]` with
-  a stride and clips everything (`fill_rect`, `blit`, `text`, `cursor`); `Desktop`
+  a stride and clips everything (`fill_rect`, `blit`, `text`, `cursor`) to
+  the canvas and to a clip rectangle (`Canvas::clipped`); `Desktop`
   holds up to 8 windows with z-order, focus, pointer and cascade
   placement, and `compose` paints background, frames (active/inactive title),
-  contents (via a caller callback) and cursor. All tested on the host
-  over `Vec<u32>`, including composing two overlapping windows.
+  contents (via a caller callback) and cursor; `compose_region` repaints
+  only one rectangle over the previous frame, each window drawing only
+  inside its frame and the cursor inside `cursor_rect`. `Scene` snapshots
+  what a frame depends on besides window contents and `Scene::damage`
+  diffs two of them into a `Damage`: at most 8 disjoint rectangles,
+  merged when they overlap or overflow, the whole screen past half of it
+  (ADR 0046). All tested on the host over `Vec<u32>`, including composing
+  two overlapping windows and random event sequences composed both by
+  damage and whole, compared pixel for pixel.
 - The compositor composes into a DMA back buffer (the whole screen;
-  `DMA_MAX_LEN` rises to 8 MiB) and blits it to the framebuffer, converting to RGB
-  if needed. It recomposes only when something changed (`Present`, pointer,
-  focus, windows) and logs each frame over serial with one pixel sample per
-  window, which the scenarios require. Events from the `inputd`s arrive
+  `DMA_MAX_LEN` rises to 8 MiB) and flushes it to the framebuffer, converting
+  to RGB if needed, only where something changed (ADR 0046): each frame
+  diffs the scene on screen against the current one (pointer, focus,
+  windows opened, closed, raised or moved), adds the content of windows
+  whose client sent `Present`, recomposes those rectangles and writes only
+  them, at most once per 16 ms; changes that arrive sooner join the next
+  frame, so an event waits at most one frame. A one-pixel pointer move
+  flushes 247 pixels instead of the whole screen. With the test-only key
+  `gui_trace` it logs each frame over serial (pixels and rectangles
+  flushed) with one pixel sample per window, which the scenarios require;
+  without it a frame prints nothing. Events from the `inputd`s arrive
   with the instant each service received them (`Reply::times`), and the
   compositor merges them by that instant before processing them: a mouse
   click precedes the key that came after it even though the devices are
   read in turn.
 - `WindowProtocol v1`: the client allocates the content buffer with its
   hardware capability and transfers it in `Create` (the compositor maps it
-  once and reads it on every composition); `Present` marks the window dirty;
+  once and reads it whenever its content is recomposed); `Present` damages
+  the window's content, and only presented pixels are guaranteed on screen;
   `Poll` waits with a deadline for a `Key`, `Click` or `Focus`; `Close` removes it.
   The compositor translates the keyboard (`aricode-input::Keyboard`) and delivers
   only to the focused window: the `gui.two_windows` probe checks that
@@ -1547,8 +1563,9 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   producer; everything is checked at run time) and has no floating point.
 - The broker policy is a constant; there are no CPU or handle quotas
   per manifest and the user heap is still static.
-- The GUI does not move or resize windows, repaints the full screen
-  every frame and has no graphical terminal; the shell is still on serial.
+- The GUI does not move or resize windows (the model can move them,
+  ADR 0046, but nothing asks it to) and has no graphical terminal; the
+  shell is still on serial.
 - No xHCI/USB HID: only virtio-input devices; the shell still reads
   from the serial console.
 - HTTP without TLS, redirects or `keep-alive`; bodies limited to the

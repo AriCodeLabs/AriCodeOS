@@ -157,6 +157,11 @@ pub mod keys {
     /// notification; init then runs the `blk_late` test client on that
     /// LBA (incident 0017).
     pub const BLK_FAULT: &str = "blk_fault";
+    /// Tests only: `gui_trace`, the compositor logs every frame it puts on
+    /// screen over serial (frame number, windows, cursor, pixels flushed)
+    /// with one pixel sample per window, which the GUI scenarios check.
+    /// Without it a frame prints nothing: the serial port busy-waits.
+    pub const GUI_TRACE: &str = "gui_trace";
 
     /// Every key documented "Tests only": they exit QEMU, inject failures or
     /// run test programs. `cargo xtask usb-image` refuses them (a unit test
@@ -172,6 +177,7 @@ pub mod keys {
         SELFTEST,
         USB_FAULT,
         BLK_FAULT,
+        GUI_TRACE,
     ];
 
     /// Keys AriBoot adds itself; `cargo xtask usb-image` refuses them too.
@@ -253,6 +259,7 @@ mod tests {
         assert_eq!(first("shell usb_fault=idle:short-data"), Some("usb_fault"));
         assert_eq!(first("shell usb_fault=3:hid"), Some("usb_fault"));
         assert_eq!(first("shell blk_fault=4300"), Some("blk_fault"));
+        assert_eq!(first("gui gui_trace"), Some("gui_trace"));
         assert_eq!(first("selftest=0"), Some("selftest"));
         let loader = |s| CmdLine::new(s).first_of(keys::LOADER_ONLY);
         assert_eq!(loader("shell boot_slot=B"), Some("boot_slot"));
