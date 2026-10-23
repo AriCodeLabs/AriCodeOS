@@ -285,7 +285,7 @@ fn run(
         cmdline_size,
         phys_map_offset: PHYS_MAP_BASE,
         phys_map_limit: phys_limit,
-        carried_seed: seed.seed,
+        carried_seed: boot_protocol::SeedBytes(seed.seed),
         carried_seed_status: seed.status,
         _reserved: 0,
     };
@@ -319,7 +319,7 @@ fn run(
     // SAFETY: our own page, aligned, identity-mapped in the new tables.
     unsafe { boot_info_ptr.write(boot_info) };
     // This stack becomes free memory for the kernel: no seed left on it.
-    aricode_crypto::wipe(&mut boot_info.carried_seed);
+    aricode_crypto::wipe(&mut boot_info.carried_seed.0);
 
     // 10. Jump. The stack and BootInfo are handed over through the physical
     // map so the kernel never depends on the identity map. rsp = top - 8 to

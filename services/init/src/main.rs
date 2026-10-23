@@ -360,7 +360,8 @@ impl SeedStore {
                 ok[i] = true;
             }
         }
-        let current = pick([
+        aricode_crypto::wipe(&mut self.blk.buffer()[..512]);
+        let mut current = pick([
             ok[0].then_some(&copies[0][..]),
             ok[1].then_some(&copies[1][..]),
         ]);
@@ -368,6 +369,9 @@ impl SeedStore {
             aricode_crypto::wipe(copy);
         }
         let p = plan(&current);
+        if let aricode_ab::seed::Stored::Found { record, .. } = &mut current {
+            aricode_crypto::wipe(&mut record.seed);
+        }
         let mut seed = [0u8; 32];
         if sys::random(SYSTEM, &mut seed) != Ok(seed.len()) {
             aricode_crypto::wipe(&mut seed);
@@ -385,7 +389,10 @@ impl SeedStore {
         aricode_crypto::wipe(&mut seed);
         self.blk.buffer()[..512].copy_from_slice(&sector);
         aricode_crypto::wipe(&mut sector);
-        let written = self.blk.write(self.first + COPIES[p.write], 1).is_ok();
+        // Flushed before the old copy is blanked, so a device that
+        // reorders writes cannot lose both.
+        let written =
+            self.blk.write(self.first + COPIES[p.write], 1).is_ok() && self.blk.flush().is_ok();
         // The DMA buffer held the new seed: blank it whatever happened,
         // and blank the old copy with it.
         aricode_crypto::wipe(&mut self.blk.buffer()[..512]);
@@ -396,7 +403,7 @@ impl SeedStore {
                 b"could not write the random seed to ARIBOOT",
             );
         }
-        if self.blk.write(self.first + COPIES[p.blank], 1).is_err() {
+        if self.blk.write(self.first + COPIES[p.blank], 1).is_err() || self.blk.flush().is_err() {
             say(b"could not blank the old random seed copy (the new one is newer)");
         }
         let mut buf = [0u8; 20];
@@ -2579,9 +2586,10 @@ fn main(arg: u64) -> u64 {
         }
     }
     // 9b'. Carried kernel seed (ADR 0043): AriBoot already handed the
-    //      kernel its share and wrote a successor; as soon as the system
-    //      disk answers, that successor is replaced with output of the
-    //      kernel generator, and again once the boot services ran.
+    //      kernel its share and wrote a successor; once the system disk is
+    //      known (virtio-blk or USB, so after the network driver started)
+    //      that successor is replaced with output of the kernel generator,
+    //      and again once the boot services ran.
     report_carried_seed();
     let mut seed_store = block_service.and_then(SeedStore::open);
     if let Some(store) = seed_store.as_mut() {

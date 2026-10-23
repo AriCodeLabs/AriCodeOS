@@ -1,6 +1,8 @@
 # Audit e9fdf38, finding 4: if AriBoot cannot persist the attempt for the
 # pending slot (read-only disk), it does not boot that slot, which could
-# repeat forever, but the active one instead.
+# repeat forever, but the active one instead. ADR 0043: the seed store is
+# blank (images ship none) and the loader writes no first seed, so the
+# read-only disk still holds none afterwards and the kernel says why.
 name = "update.readonly_no_pending_boot"
 description = "unable to save the attempt, AriBoot boots the active slot"
 level = "full"
@@ -11,11 +13,14 @@ disk_readonly = true
 
 [expect]
 exit = 33
+seed_store = "absent"
 serial_contains = [
     "slots: state active A, pending B (3 tries)",
     "slots: could not write the boot state",
     "slots: pending try not persisted: booting active -> slot A",
     "slots: booting from slot A (image version 1)",
+    "seed: the seed store is blank (first boot): no carried seed",
+    "random: no carried seed: the seed store is blank (first boot)",
     "ARICODEOS_KERNEL_READY",
 ]
 serial_absent = ["KERNEL PANIC", "boot_slot=B"]

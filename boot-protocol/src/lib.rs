@@ -108,11 +108,23 @@ pub struct BootInfo {
     /// two boots. All zero unless `carried_seed_status` is
     /// [`carried_seed::CARRIED`]. The kernel copies it and zeroes it here
     /// before anything else runs. Appended in protocol version 4: a kernel
-    /// reads it only when `size` covers it ([`BootInfo::has_carried_seed`]).
-    pub carried_seed: [u8; 32],
+    /// reads it only when `size` covers it ([`BootInfo::CARRIED_SEED_END`]).
+    pub carried_seed: SeedBytes,
     /// One of the [`carried_seed`] values.
     pub carried_seed_status: u32,
     pub _reserved: u32,
+}
+
+/// The carried seed's bytes in `BootInfo`: a `Debug` of `BootInfo` must
+/// never print them.
+#[repr(transparent)]
+#[derive(Clone, Copy, Default)]
+pub struct SeedBytes(pub [u8; 32]);
+
+impl core::fmt::Debug for SeedBytes {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("SeedBytes(..)")
+    }
 }
 
 /// `BootInfo::carried_seed_status`: what AriBoot found in the seed store.
@@ -139,11 +151,9 @@ impl BootInfo {
         phys + self.phys_map_offset
     }
 
-    /// `size` covers `carried_seed` and its status: the loader knows the
-    /// field (an older one hands a shorter `BootInfo`).
-    pub const fn has_carried_seed(&self) -> bool {
-        self.size as usize >= core::mem::offset_of!(BootInfo, _reserved)
-    }
+    /// Smallest `size` that covers `carried_seed` and its status: a loader
+    /// that knows the field (an older one hands a shorter `BootInfo`).
+    pub const CARRIED_SEED_END: usize = core::mem::offset_of!(BootInfo, _reserved);
 
     /// Command line as `&str` (empty if missing or not UTF-8).
     ///
@@ -623,11 +633,18 @@ mod tests {
         // loader's `size` stops before it.
         let old_end = core::mem::offset_of!(BootInfo, phys_map_limit) + 8;
         assert_eq!(core::mem::offset_of!(BootInfo, carried_seed), old_end);
-        info.size = old_end as u32;
-        assert!(!info.has_carried_seed());
-        info.size = core::mem::size_of::<BootInfo>() as u32;
-        assert!(info.has_carried_seed());
+        assert!(old_end < BootInfo::CARRIED_SEED_END);
+        assert!(BootInfo::CARRIED_SEED_END <= core::mem::size_of::<BootInfo>());
+        assert_eq!(
+            BootInfo::CARRIED_SEED_END,
+            core::mem::offset_of!(BootInfo, carried_seed_status) + 4
+        );
         assert!(core::mem::size_of::<BootInfo>() <= 4096, "one page");
+        // `Debug` never shows the seed.
+        info.carried_seed = SeedBytes([0xAB; 32]);
+        let text = std::format!("{info:?}");
+        assert!(text.contains("SeedBytes(..)"), "{text}");
+        assert!(!text.contains("171"), "{text}");
     }
 
     #[test]

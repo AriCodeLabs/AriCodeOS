@@ -111,7 +111,8 @@ pub fn load() -> Found {
         // the disk (the ESP's FAT file system among them) and afterwards the
         // ESP can no longer be read.
         // SAFETY: AriBoot is the only running application; it only reads
-        // sectors and writes the state sector, which no other driver uses.
+        // sectors and writes sectors 0 to 2 of `ARIBOOT` (boot state and
+        // carried seed, ADR 0043), which no other driver uses.
         let Ok(io) = (unsafe {
             boot::open_protocol::<BlockIO>(
                 OpenProtocolParams {

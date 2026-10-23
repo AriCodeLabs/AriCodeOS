@@ -480,11 +480,14 @@ fn save_file(fs: &mut FsClient, name: &str, data: &[u8]) -> Result<usize, ()> {
     r
 }
 
-/// Recent kernel events (`sysinfo::EVENTS`): one line per event with its
-/// timestamp.
+/// Recent kernel events (`sysinfo::EVENTS`): the last 32 (half the
+/// kernel ring), one line per event with its timestamp. 32 and not 16
+/// (ADR 0043): a boot's fault events (netd's TCP secret at its start,
+/// init's carried seed, sshd's entropy) must still be among them when the
+/// owner runs `diag` after the boot.
 fn events() {
     use abi::sysinfo::{EventEntry, EventKind};
-    let mut buf = [0u8; EventEntry::LEN * 16];
+    let mut buf = [0u8; EventEntry::LEN * 32];
     let Ok(n) = sys::system_info(SYSTEM, abi::sysinfo::EVENTS, &mut buf) else {
         print(b"diag: no access to events\n");
         return;

@@ -45,6 +45,18 @@ struct Carried {
     status: CarriedSeed,
 }
 
+// The loader's status numbers are the ABI's (`CarriedSeed`).
+const _: () = {
+    use boot_protocol::carried_seed as c;
+    assert!(c::NO_STORE == CarriedSeed::NoStore as u32);
+    assert!(c::CARRIED == CarriedSeed::Mixed as u32);
+    assert!(c::MISSING == CarriedSeed::Missing as u32);
+    assert!(c::UNREADABLE == CarriedSeed::Unreadable as u32);
+    assert!(c::NOT_SAVED == CarriedSeed::NotSaved as u32);
+};
+
+/// Taken inside `RNG` by the seed: nesting `RNG -> CARRIED`, never the
+/// other way round (`CARRIED` is a leaf).
 static CARRIED: IrqLock<Carried> = IrqLock::new(Carried {
     seed: None,
     status: CarriedSeed::NoStore,
@@ -80,15 +92,21 @@ pub unsafe fn take_carried(info: *mut BootInfo) {
     // exclusively ours; fields are read and written through the raw
     // pointer, without creating a reference.
     unsafe {
+        if info.is_null() || !info.is_aligned() {
+            return;
+        }
         if (*info).magic != BOOT_PROTOCOL_MAGIC || (*info).version != BOOT_PROTOCOL_VERSION {
             return;
         }
-        if ((*info).size as usize) < core::mem::offset_of!(BootInfo, _reserved) {
+        if ((*info).size as usize) < BootInfo::CARRIED_SEED_END {
             return;
         }
         let status = CarriedSeed::from_u8(u8::try_from((*info).carried_seed_status).unwrap_or(0));
-        let mut seed = (*info).carried_seed;
-        core::ptr::write_volatile(core::ptr::addr_of_mut!((*info).carried_seed), [0u8; 32]);
+        let mut seed = (*info).carried_seed.0;
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!((*info).carried_seed),
+            boot_protocol::SeedBytes([0u8; 32]),
+        );
         let mut c = CARRIED.lock();
         c.status = status;
         if status == CarriedSeed::Mixed {
@@ -202,15 +220,24 @@ fn seed() -> ([u8; 32], RandomSource, RdrandSeed) {
     h.update(&crate::time::ticks().to_le_bytes());
     let carried = {
         let mut c = CARRIED.lock();
-        match c.seed.take() {
-            Some(mut s) => {
-                h.update(&s);
-                aricode_crypto::wipe(&mut s);
-                CarriedSeed::Mixed
+        // Hashed and wiped where it lies: a `take` would move the bytes out
+        // and leave them behind in the static.
+        let mixed_now = match c.seed.as_mut() {
+            Some(s) => {
+                h.update(s);
+                aricode_crypto::wipe(s);
+                true
             }
+            None => false,
+        };
+        c.seed = None;
+        if mixed_now {
+            CarriedSeed::Mixed
+        } else if c.status == CarriedSeed::Mixed {
             // Mixed into an earlier generator of this boot: not into this one.
-            None if c.status == CarriedSeed::Mixed => CarriedSeed::NoStore,
-            None => c.status,
+            CarriedSeed::NoStore
+        } else {
+            c.status
         }
     };
     let mixed = RandomSource {
@@ -347,7 +374,8 @@ pub fn selftest() {
         source.is_hardware(),
         "random: hardware sample count"
     );
-    // The carried seed was hashed in once and is gone from memory.
+    // The carried seed was hashed in once and is not kept (its bytes were
+    // wiped in place before the slot was emptied).
     assert!(CARRIED.lock().seed.is_none(), "random: carried seed kept");
     let mut hex = [0u8; 64];
     crate::println!(

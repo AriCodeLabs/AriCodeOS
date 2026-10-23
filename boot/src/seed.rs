@@ -3,8 +3,9 @@
 //! Kernel seed carried across boots (ADR 0043): reads the seed from
 //! sectors 1 and 2 of the `ARIBOOT` partition, writes its successor to the
 //! other copy and blanks the old one, and only if the successor reached
-//! the disk hands the kernel its share in `BootInfo`. A seed whose
-//! successor could not be written is not used: the next boot would find it
+//! the disk and the old copy is blank hands the kernel its share in
+//! `BootInfo`. A seed whose successor could not be written, or whose old
+//! copy could not be blanked, is not used: a later boot could find it
 //! again. The loader writes no first seed (it has nothing better than the
 //! cycle counter): init writes one from the kernel generator.
 
@@ -80,7 +81,7 @@ pub fn carry(disk: &mut Disk, first_lba: u64, sectors: u64) -> Carried {
     for i in 3..NOISE_SAMPLES {
         stamp(&mut noise, i);
     }
-    let (kernel, mut next) = split(&current.seed, &noise);
+    let (mut kernel, mut next) = split(&current.seed, &noise);
     aricode_crypto::wipe(&mut current.seed);
     let mut sector = Record {
         generation: p.generation,
@@ -90,25 +91,31 @@ pub fn carry(disk: &mut Disk, first_lba: u64, sectors: u64) -> Carried {
     aricode_crypto::wipe(&mut next);
     let saved = disk.write(first_lba + COPIES[p.write], &sector);
     aricode_crypto::wipe(&mut sector);
-    let mut carried = Carried {
-        status: carried_seed::CARRIED,
-        seed: kernel,
-    };
     if !saved {
+        aricode_crypto::wipe(&mut kernel);
         warn!(
             "seed: could not save the successor of the carried seed (generation {}): not used, the next boot would find it again",
             current.generation
         );
-        aricode_crypto::wipe(&mut carried.seed);
-        carried.status = carried_seed::NOT_SAVED;
-        return carried;
+        return Carried::none(carried_seed::NOT_SAVED);
     }
-    // The successor is on the disk with a higher generation: the old copy
-    // is blanked so a later damaged successor can never bring it back. A
-    // failed blank leaves it, still older than the successor.
+    // The old copy is blanked before the share is handed over: a seed the
+    // kernel used never stays on the disk, so no later failure (an
+    // unreadable successor, a generation tie) can bring it back. A failed
+    // blank withholds the share like a failed successor.
     if !disk.write(first_lba + COPIES[p.blank], &[0u8; aricode_ab::SECTOR]) {
-        warn!("seed: could not blank the old seed copy (the successor is newer)");
+        aricode_crypto::wipe(&mut kernel);
+        warn!(
+            "seed: could not blank the old seed copy (generation {}): not used, a later boot could find it again",
+            current.generation
+        );
+        return Carried::none(carried_seed::NOT_SAVED);
     }
+    let carried = Carried {
+        status: carried_seed::CARRIED,
+        seed: kernel,
+    };
+    aricode_crypto::wipe(&mut kernel);
     info!(
         "seed: carried seed of generation {} taken, successor of generation {} saved",
         current.generation, p.generation
