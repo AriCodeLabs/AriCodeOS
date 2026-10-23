@@ -16,8 +16,11 @@
 //!
 //! SMP (Phase 32): a shared ready queue; each CPU has its current thread and
 //! its idle thread (`cpu::Cpu`). Only the BSP keeps time and wakes sleepers;
-//! when a thread becomes ready and another CPU is idle, that CPU gets an IPI
-//! so it takes the thread without waiting for its next tick.
+//! when a thread becomes ready and another CPU that may run it is idle, that
+//! CPU gets an IPI so it takes the thread without waiting for its next tick.
+//! A busy CPU gives the thread its turn at the end of the running thread's
+//! quantum, which expires every quantum even when nothing else was ready
+//! (incident 0023).
 
 use super::context::switch_context;
 use super::thread::Thread;
@@ -132,17 +135,28 @@ pub fn on_tick(now: u64, bsp: bool, from_user: bool) {
     if woke > 0 {
         kick_idle();
     }
-    let expired = cpu::current().quantum_tick();
+    let expired = cpu::current().quantum_tick(QUANTUM_TICKS);
     if expired || woke > 0 {
-        PREEMPTIONS.fetch_add(1, Ordering::Relaxed);
-        switch_with(|p, c| p.preempt(c));
+        // Counted only when another thread takes the CPU: a lone thread
+        // now gets an expiry every quantum (incident 0023).
+        switch_with(|p, c| {
+            let next = p.preempt(c);
+            if next.is_some() {
+                PREEMPTIONS.fetch_add(1, Ordering::Relaxed);
+            }
+            next
+        });
     }
 }
 
-/// If another CPU is idle, takes it out of `hlt` so it checks the queue.
+/// Takes out of `hlt` the idle CPUs that can run the ready threads, one per
+/// thread (`RoundRobin::idle_cpus_to_wake`, incident 0023): a pinned thread
+/// wakes its own CPU, a batch of wakeups as many CPUs as it can use.
 fn kick_idle() {
-    if let Some(c) = cpu::idle_other_than(cpu::id()) {
-        apic::send_ipi(c.lapic_id(), apic::RESCHED_VECTOR);
+    let me = cpu::id() as usize;
+    let targets = with(|s| s.policy.idle_cpus_to_wake(me, |c| cpu::slot(c).is_online()));
+    for c in targets {
+        apic::send_ipi(cpu::slot(c).lapic_id(), apic::RESCHED_VECTOR);
     }
 }
 
