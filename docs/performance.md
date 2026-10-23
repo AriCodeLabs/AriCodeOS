@@ -150,3 +150,27 @@ change on the former loops), after is `00a310f`.
   and 9 ms from run to run on both builds (the same build measured 2 743
   and 8 759 µs an hour apart): no comparison is made from it.
 
+## Display flush (ADR 0045), 0.14.0 development
+
+Performance audit of 731c398, finding C: every change wrote the whole
+back buffer to the framebuffer. Deterministic pixel counts from the
+`aricode-gfx` host test `flushed_pixels_per_event` (`cargo test -p
+aricode-gfx flushed -- --nocapture` prints them), which also compares the
+result with a whole-screen composition; 4 bytes per pixel.
+
+| Event | Before | After |
+|---|---:|---:|
+| Pointer moves 1 px, 1024x768 | 786,432 px / 3,145,728 B | 247 px / 988 B |
+| Pointer moves 1 px, 1920x1080 | 2,073,600 px / 8,294,400 B | 247 px / 988 B |
+| A 400x300 window presents | whole screen | 120,000 px / 480,000 B |
+| A 400x300 window moves 10 px | whole screen | 138,276 px / 553,104 B |
+
+- In the guest, `gui.two_windows` (1280x800) logs every frame with
+  `gui_trace`: 1,024,000 pixels for the first one, 130,896 for a window
+  opening, 120,000 for a `Present`, 456 for a 20-pixel pointer move; each
+  of those frames wrote 1,024,000 before.
+- Frames are coalesced to one per 16 ms at most, and print nothing
+  without the test-only key `gui_trace`.
+- These are pixels written, not frame rates: composition time, frame
+  latency and the cost of a write to a real framebuffer were not measured.
+
