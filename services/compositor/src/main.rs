@@ -428,9 +428,16 @@ fn main(inputs: u64) -> u64 {
     for (i, slot) in devices.iter_mut().take(inputs).enumerate() {
         *slot = InputClient::new(Handle(FIRST_INPUT + i as u32)).ok();
     }
-    let mut args = [0u8; 256];
-    let trace = sys::cmdline(SYSTEM, &mut args)
-        .is_some_and(|text| CmdLine::new(text).has_flag(keys::GUI_TRACE));
+    let mut args = [0u8; sys::CMDLINE_MAX];
+    let trace = match sys::cmdline(SYSTEM, &mut args) {
+        Ok(text) => CmdLine::new(text).has_flag(keys::GUI_TRACE),
+        // A line that does not fit or is not text is reported, not read as
+        // empty (ADR 0045, L5): the trace stays off.
+        Err(_) => {
+            say(b"cannot read the command line (too long or not text): gui_trace off");
+            false
+        }
+    };
     if trace {
         say(b"gui_trace: logging every frame");
     }
