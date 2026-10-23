@@ -453,7 +453,8 @@ fn find_partition(blk: &mut BlockClient, name: &str) -> Option<(u64, u64)> {
 /// Why a slot holds no image this updater accepts (incident 0021: an image
 /// too large for memory once read as one that does not verify).
 enum LoadError {
-    /// No slot header: the slot is empty or was being written.
+    /// No valid slot header: the slot is empty, was being written, or its
+    /// header is damaged.
     NoImage,
     /// The header announces more sectors than the partition holds.
     TooLarge { sectors: u64, room: u64 },
@@ -466,7 +467,9 @@ enum LoadError {
 impl LoadError {
     fn describe(&self) -> String {
         match self {
-            LoadError::NoImage => String::from("no image (empty slot)"),
+            LoadError::NoImage => {
+                String::from("no valid slot header (empty slot or damaged header)")
+            }
             LoadError::TooLarge { sectors, room } => format!(
                 "the header announces {sectors} sectors, more than the {room} of the partition"
             ),
@@ -722,10 +725,10 @@ impl Disk {
         })
     }
 
-    /// Writes the verified image in the download buffer (`total` bytes)
-    /// into the inactive slot and schedules it as pending with tries. The
-    /// caller has verified the image.
-    fn install(&mut self, total: usize) -> Result<(), u64> {
+    /// Writes the verified image in the download buffer (`total` bytes,
+    /// verified as `expected`) into the inactive slot, checks the copy there
+    /// and schedules it as pending with tries.
+    fn install(&mut self, total: usize, expected: &Manifest, keys: &Keys) -> Result<(), u64> {
         let sectors = self.begin_install(total)?;
         let image = self.image.take().expect("the image was downloaded");
         image[total..sectors as usize * SECTOR].fill(0);
@@ -743,7 +746,41 @@ impl Disk {
         header.copy_from_slice(&image[..SECTOR]);
         self.image = Some(image);
         written?;
+        self.flush_slot()?;
+        self.check_copy(total, expected, keys)?;
         self.finish_install(&header)
+    }
+
+    /// Verifies the container just written to the inactive slot, before its
+    /// header: the copy must be the image verified before it was written
+    /// (audit of incident 0021, L2 and L4).
+    fn check_copy(&mut self, total: usize, expected: &Manifest, keys: &Keys) -> Result<(), u64> {
+        let refused = |event: &str, why: String| {
+            Err(fault(
+                code::SLOT_WRITE,
+                event,
+                &format!("the copy in slot {why}; not scheduled"),
+            ))
+        };
+        let slot = self.target.name();
+        match self.verify_container(self.slot_part.0, total - SECTOR, keys) {
+            Ok(m) if m == *expected => Ok(()),
+            Ok(m) => refused(
+                "upd-slot-differs",
+                format!(
+                    "{slot} is {}, not the {} verified before the copy",
+                    m.describe(),
+                    expected.describe()
+                ),
+            ),
+            Err(ImageError::Unreadable) => {
+                refused("upd-slot-read", format!("{slot} cannot be read back"))
+            }
+            Err(e) => refused(
+                "upd-slot-verify",
+                format!("{slot} does not verify ({})", image_error(&e)),
+            ),
+        }
     }
 
     /// Copies the image of `total` bytes verified in `UPDATE` (as
@@ -772,18 +809,8 @@ impl Disk {
             done += n as u64;
         }
         self.flush_slot()?;
-        let len = total - SECTOR;
-        match self.verify_container(self.slot_part.0, len, keys) {
-            Ok(m) if m == *expected => {}
-            _ => {
-                return Err(fault(
-                    code::SLOT_WRITE,
-                    "upd-slot-verify",
-                    "the copy in the slot does not verify; not scheduled",
-                ))
-            }
-        }
-        self.finish_install(&Image::header(len as u32))
+        self.check_copy(total, expected, keys)?;
+        self.finish_install(&Image::header((total - SECTOR) as u32))
     }
 
     /// Marks the inactive slot pending with tries and reads the state back.
@@ -1700,14 +1727,18 @@ fn upgrade_system(
     let (url, entry) = (offer.url, offer.entry);
     let size = entry.size as usize;
     if size <= SECTOR || size > IMAGE_BUFFER as usize {
+        let why = if size <= SECTOR {
+            String::from("too small to hold an image")
+        } else {
+            format!(
+                "more than the {} this updater can download and verify in memory",
+                upd::IMAGE_DOWNLOAD_MAX
+            )
+        };
         return Err(fault(
             code::IMAGE_REFUSED,
             "upd-image-size",
-            &format!(
-                "system image {}: {size} bytes, more than the {} this updater can download and verify in memory",
-                entry.file,
-                upd::IMAGE_DOWNLOAD_MAX
-            ),
+            &format!("system image {}: {size} bytes, {why}", entry.file),
         ));
     }
     let image = disk.download_buffer()?;
@@ -1736,8 +1767,8 @@ fn upgrade_system(
         .and_then(|_| Image::verify_with(&image[SECTOR..size], keys).ok())
         .map(|v| v.manifest);
     let offered = ident(offer.channel, entry.version, offer.commit);
-    match manifest {
-        Some(m) if upd::image_matches_offer(&m, offer.channel, entry.version, offer.commit) => {}
+    let verified = match manifest {
+        Some(m) if upd::image_matches_offer(&m, offer.channel, entry.version, offer.commit) => m,
         Some(m) => {
             return Err(fault(
                 code::IMAGE_REFUSED,
@@ -1755,14 +1786,14 @@ fn upgrade_system(
                 "system image signature or hashes invalid; not installing",
             ))
         }
-    }
+    };
     let described = aricode_ab::Describe {
         channel: offer.channel,
         version: entry.version,
         commit: offer.commit.and_then(aricode_ab::Commit::parse),
     };
     say!("system image {described} verified (signature and SHA-256)");
-    disk.install(size)?;
+    disk.install(size, &verified, keys)?;
     let switched = installed.as_ref().filter(|m| m.channel != offer.channel);
     history(
         fs,

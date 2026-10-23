@@ -161,7 +161,7 @@ pub fn locate<const N: usize>(
         let name_start = offset + 2;
         // The checks in `Entries::read_entry`'s order: the name's bytes,
         // then UTF-8, then empty or with '/', then the data length and data.
-        if name_start + name_len > len {
+        if name_start.checked_add(name_len).is_none_or(|end| end > len) {
             return Err(InitrdError::Truncated);
         }
         let mut same = [false; N];
@@ -198,8 +198,10 @@ pub fn locate<const N: usize>(
         let mut word = [0u8; 4];
         fetch(p, &mut word)?;
         let data_len = u32::from_le_bytes(word) as usize;
+        // Every position is below `len`, so these sums fit; checked anyway,
+        // since the walker reads untrusted data (audit, I1).
         let start = align_up(p + 4);
-        if start + data_len > len {
+        if start.checked_add(data_len).is_none_or(|end| end > len) {
             return Err(InitrdError::Truncated);
         }
         for (slot, s) in found.iter_mut().zip(same) {
@@ -281,29 +283,28 @@ mod tests {
         assert!(Initrd::parse(b"ARI").is_err());
     }
 
-    /// `locate` over `img` read in pieces of at most `piece` bytes.
+    /// `locate` over `img` in memory.
     fn locate_in<const N: usize>(
         img: &[u8],
-        piece: usize,
         wanted: [&str; N],
     ) -> Result<[Option<Span>; N], InitrdError> {
         locate(
             img.len(),
             |offset, buf| {
-                for (i, chunk) in buf.chunks_mut(piece).enumerate() {
-                    let o = offset + i * piece;
-                    chunk.copy_from_slice(&img[o..o + chunk.len()]);
-                }
+                buf.copy_from_slice(&img[offset..offset + buf.len()]);
                 Ok(())
             },
             wanted,
         )
     }
 
-    /// What `parse` + `find` say about `img`, as spans.
-    fn parsed<const N: usize>(img: &[u8], wanted: [&str; N]) -> Option<[Option<Span>; N]> {
-        let rd = Initrd::parse(img).ok()?;
-        Some(wanted.map(|w| {
+    /// What `parse` + `find` say about `img`, as spans, or `parse`'s error.
+    fn parsed<const N: usize>(
+        img: &[u8],
+        wanted: [&str; N],
+    ) -> Result<[Option<Span>; N], InitrdError> {
+        let rd = Initrd::parse(img)?;
+        Ok(wanted.map(|w| {
             rd.find(w)
                 .map(|d| (d.as_ptr() as usize - img.as_ptr() as usize, d.len()))
         }))
@@ -312,17 +313,31 @@ mod tests {
     #[cfg(feature = "write")]
     #[test]
     fn locate_agrees_with_parse_on_damaged_archives() {
+        use std::format;
         use std::vec::Vec;
-        const WANTED: [&str; 4] = ["a", "ñandú", "dup", "nope"];
+        // `locate` reads names in pieces of 64 bytes: these names put a 2-,
+        // 3- and 4-byte character across that boundary (audit, L1).
+        let two = format!("{}ñ", "x".repeat(63));
+        let three = format!("{}€", "x".repeat(62));
+        let four = format!("{}𝄞", "x".repeat(61));
         let long = "x".repeat(130);
+        let wanted = ["a", "ñandú", "dup", "nope", &two, &three, &four];
         let base = build(&[
             ("a", b"12345"),
             ("ñandú", b"0123456789abcdef0"),
             ("dup", b"first"),
             (&long, b""),
+            (&two, b"2"),
+            (&three, b"3"),
+            (&four, b"4"),
             ("dup", b"second"),
         ])
         .unwrap();
+        // A character split at byte 64 by an invalid continuation.
+        let mut split = build(&[(&two, b"")]).unwrap();
+        split[8 + 2 + 64] = b'x';
+        assert_eq!(locate_in(&split, wanted), parsed(&split, wanted));
+        assert_eq!(locate_in(&split, wanted).err(), Some(InitrdError::BadName));
         // A deterministic generator: damage one to three bytes, or cut.
         let mut seed = 0x2021_u64;
         let mut next = || {
@@ -342,23 +357,20 @@ mod tests {
                     img[i] = next() as u8;
                 }
             }
-            let expected = parsed(&img, WANTED);
-            for piece in [1, 3, 64, 4096] {
-                assert_eq!(
-                    locate_in(&img, piece, WANTED).ok(),
-                    expected,
-                    "round {round}, pieces of {piece}"
-                );
-            }
-            accepted += expected.is_some() as u32;
+            let expected = parsed(&img, wanted);
+            assert_eq!(locate_in(&img, wanted), expected, "round {round}");
+            accepted += expected.is_ok() as u32;
         }
         assert!(
             accepted > 100,
             "too few damaged archives still valid: {accepted}"
         );
-        let spans = locate_in(&base, 5, WANTED).unwrap();
+        let spans = locate_in(&base, wanted).unwrap();
         assert_eq!(spans[2].map(|(o, l)| &base[o..o + l]), Some(&b"first"[..]));
         assert_eq!(spans[3], None);
+        for (i, data) in [(4, b"2"), (5, b"3"), (6, b"4")] {
+            assert_eq!(spans[i].map(|(o, l)| &base[o..o + l]), Some(&data[..]));
+        }
     }
 
     #[test]
