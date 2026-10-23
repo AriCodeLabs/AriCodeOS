@@ -263,6 +263,158 @@ fn report_boot_state(block_service: Handle) {
     }
 }
 
+/// Fault events about the carried kernel seed (ADR 0043); the code is the
+/// `CarriedSeed` number.
+const SEED_MISSING_FAULT: &str = "random seed missing";
+const SEED_UNREADABLE_FAULT: &str = "random seed unreadable";
+const SEED_NOT_SAVED_FAULT: &str = "random seed not saved";
+const _: () = assert!(SEED_NOT_SAVED_FAULT.len() <= sys::abi::sysinfo::EVENT_NAME_LEN);
+const _: () = assert!(SEED_UNREADABLE_FAULT.len() <= sys::abi::sysinfo::EVENT_NAME_LEN);
+
+fn seed_fault(name: &str, code: sys::abi::sysinfo::CarriedSeed, why: &[u8]) {
+    let _ = sys::event_record(code as u64, name);
+    sys::print(b"AriInit: fault ");
+    sys::print(name.as_bytes());
+    sys::print(b": ");
+    sys::print(why);
+    sys::print(b"\n");
+}
+
+/// Says whether the kernel generator got the seed carried from the
+/// previous boot (ADR 0043) and records a fault event when it did not:
+/// missing (the first boot of a disk, or no `ARIBOOT` to keep one),
+/// unreadable, or not used because AriBoot could not save its successor.
+/// Neither the seed nor anything derived from it is ever printed.
+fn report_carried_seed() {
+    use sys::abi::sysinfo::CarriedSeed;
+    let Some(source) = sys::random_source(SYSTEM) else {
+        return say(b"the kernel does not report its random source");
+    };
+    match source.carried {
+        CarriedSeed::Mixed => say(b"kernel generator has the seed carried from the previous boot"),
+        CarriedSeed::Missing => seed_fault(
+            SEED_MISSING_FAULT,
+            source.carried,
+            b"no seed from an earlier boot (first boot of this disk): the kernel generator starts without one",
+        ),
+        CarriedSeed::NoStore => seed_fault(
+            SEED_MISSING_FAULT,
+            source.carried,
+            b"no seed store on the boot disk (no ARIBOOT partition): every boot starts without a carried seed",
+        ),
+        CarriedSeed::Unreadable => seed_fault(
+            SEED_UNREADABLE_FAULT,
+            source.carried,
+            b"the seed store in ARIBOOT holds no intact copy: the kernel generator starts without one",
+        ),
+        CarriedSeed::NotSaved => seed_fault(
+            SEED_NOT_SAVED_FAULT,
+            source.carried,
+            b"AriBoot could not write the successor of the carried seed, so it was not used",
+        ),
+    }
+}
+
+/// The seed store (ADR 0043): sectors 1 and 2 of `ARIBOOT` on the system
+/// disk, with one block client kept for both refreshes of a boot.
+struct SeedStore {
+    blk: BlockClient,
+    first: u64,
+}
+
+impl SeedStore {
+    /// `None` (and says why) without a block client or an `ARIBOOT`
+    /// partition: then nothing is carried to the next boot either.
+    fn open(block_service: Handle) -> Option<Self> {
+        let Ok(mut blk) = BlockClient::new(block_service, HARDWARE, 16) else {
+            say(b"could not open the block service for the random seed");
+            return None;
+        };
+        let Some((first, last)) = find_partition(&mut blk, aricode_ab::PART_STATE) else {
+            say(b"no ARIBOOT partition: no random seed is carried to the next boot");
+            return None;
+        };
+        if last < first + aricode_ab::seed::COPIES[1] {
+            say(b"ARIBOOT has no room for the random seed");
+            return None;
+        }
+        Some(Self { blk, first })
+    }
+
+    /// Replaces the stored seed with fresh output of the kernel generator,
+    /// which by now holds the carried seed (if any), this boot's cycle
+    /// counter and its interrupt timing: the next boot starts from all of
+    /// it. Written to the copy not in use with the next generation, then
+    /// the old copy is blanked (`aricode_ab::seed::plan`), so a power cut
+    /// at any point leaves an intact copy. `when` names the moment for the
+    /// console line. A failure is a `random seed not saved` fault: the
+    /// next boot then gets whatever AriBoot or the previous refresh left.
+    fn refresh(&mut self, when: &[u8]) {
+        use aricode_ab::seed::{pick, plan, Record, COPIES};
+        use sys::abi::sysinfo::CarriedSeed;
+        let mut copies = [[0u8; 512]; 2];
+        let mut ok = [false; 2];
+        for (i, copy) in copies.iter_mut().enumerate() {
+            if self.blk.read(self.first + COPIES[i], 1).is_ok() {
+                copy.copy_from_slice(&self.blk.buffer()[..512]);
+                ok[i] = true;
+            }
+        }
+        aricode_crypto::wipe(&mut self.blk.buffer()[..512]);
+        let mut current = pick([
+            ok[0].then_some(&copies[0][..]),
+            ok[1].then_some(&copies[1][..]),
+        ]);
+        for copy in copies.iter_mut() {
+            aricode_crypto::wipe(copy);
+        }
+        let p = plan(&current);
+        if let aricode_ab::seed::Stored::Found { record, .. } = &mut current {
+            aricode_crypto::wipe(&mut record.seed);
+        }
+        let mut seed = [0u8; 32];
+        if sys::random(SYSTEM, &mut seed) != Ok(seed.len()) {
+            aricode_crypto::wipe(&mut seed);
+            return seed_fault(
+                SEED_NOT_SAVED_FAULT,
+                CarriedSeed::NotSaved,
+                b"the kernel generator did not answer",
+            );
+        }
+        let mut sector = Record {
+            generation: p.generation,
+            seed,
+        }
+        .encode();
+        aricode_crypto::wipe(&mut seed);
+        self.blk.buffer()[..512].copy_from_slice(&sector);
+        aricode_crypto::wipe(&mut sector);
+        // Flushed before the old copy is blanked, so a device that
+        // reorders writes cannot lose both.
+        let written =
+            self.blk.write(self.first + COPIES[p.write], 1).is_ok() && self.blk.flush().is_ok();
+        // The DMA buffer held the new seed: blank it whatever happened,
+        // and blank the old copy with it.
+        aricode_crypto::wipe(&mut self.blk.buffer()[..512]);
+        if !written {
+            return seed_fault(
+                SEED_NOT_SAVED_FAULT,
+                CarriedSeed::NotSaved,
+                b"could not write the random seed to ARIBOOT",
+            );
+        }
+        if self.blk.write(self.first + COPIES[p.blank], 1).is_err() || self.blk.flush().is_err() {
+            say(b"could not blank the old random seed copy (the new one is newer)");
+        }
+        let mut buf = [0u8; 20];
+        sys::print(b"AriInit: random seed saved for the next boot (");
+        sys::print(when);
+        sys::print(b", generation ");
+        sys::print(aricode_rt::fmt_u64(p.generation, &mut buf));
+        sys::print(b")\n");
+    }
+}
+
 /// A/B boot: if the kernel booted from a pending slot, mark it active in
 /// `ARIBOOT` now that all boot services work.
 fn confirm_boot_slot(arg: u64, block_service: Handle) {
@@ -2433,6 +2585,16 @@ fn main(arg: u64) -> u64 {
             None => say(b"no USB storage with an ARI0 partition"),
         }
     }
+    // 9b'. Carried kernel seed (ADR 0043): AriBoot already handed the
+    //      kernel its share and wrote a successor; once the system disk is
+    //      known (virtio-blk or USB, so after the network driver started)
+    //      that successor is replaced with output of the kernel generator,
+    //      and again once the boot services ran.
+    report_carried_seed();
+    let mut seed_store = block_service.and_then(SeedStore::open);
+    if let Some(store) = seed_store.as_mut() {
+        store.refresh(b"early");
+    }
     // 9c. Network health check, after the USB devices so that a machine
     //     waiting for DHCP does not delay its stick and keyboard.
     if let Some(wait_ms) = net_wait_ms {
@@ -2496,6 +2658,11 @@ fn main(arg: u64) -> u64 {
         None => say(b"no block service: boot not confirmed"),
     }
     say(b"boot services completed");
+    // The second refresh, with the interrupts of the whole boot (network,
+    // USB, disk) in the generator.
+    if let Some(store) = seed_store.as_mut() {
+        store.refresh(b"after the boot services");
+    }
     if arg & sys::abi::init_arg::SHELL != 0 {
         let Some(fs) = fs_service else {
             say(b"no file service, not launching the shell");

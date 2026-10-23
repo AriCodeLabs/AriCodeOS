@@ -58,6 +58,11 @@ static QEMU_EXIT: AtomicBool = AtomicBool::new(false);
 #[no_mangle]
 pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     serial::Serial.init();
+    // First of all, before a reference to `BootInfo` exists: copy the
+    // carried seed out of it and zero it there (ADR 0043).
+    // SAFETY: AriBoot's `BootInfo`, in its own writable page, not yet
+    // accessed by anything else.
+    unsafe { random::take_carried(boot_info.cast_mut()) };
     let info = validate_boot_info(boot_info);
     let fb_end = info.framebuffer.address + info.framebuffer.size;
     memory::phys::init(info.phys_map_offset, info.phys_map_limit, fb_end);

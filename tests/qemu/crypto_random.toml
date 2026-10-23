@@ -14,7 +14,7 @@ exit = 33
 serial_contains = [
     "random: ChaCha20 generator seeded with TSC (no rdrand: limited entropy)",
     "random: source tsc ok, ",
-    " interrupt stirs, 67 TSC samples, sample ",
+    " interrupt stirs, 67 TSC samples, no carried seed (first boot), sample ",
     "ARICODEOS_KERNEL_READY",
 ]
 serial_absent = ["KERNEL PANIC"]

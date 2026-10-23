@@ -87,21 +87,26 @@ impl Entropy {
     }
 
     /// Before a host key is drawn: if the kernel generator was not seeded
-    /// from a hardware source (or does not say) and no seed came from an
-    /// earlier boot, the key is only as good as this boot's cycle counter
-    /// and interrupt timing. That is recorded (`ENTROPY_WEAK_FAULT`) and
+    /// from a hardware source and got no kernel seed carried from the
+    /// previous boot (ADR 0043), or does not say, and no `random_seed` of
+    /// sshd's own came from an earlier boot, the key is only as good as
+    /// this boot's cycle counter and interrupt timing. That is recorded (`ENTROPY_WEAK_FAULT`) and
     /// said, not refused: refusing would lock the owner out, and the key
     /// still mixes everything there is. With a carried seed the boots
     /// before this one add to it, so nothing is reported.
     fn check_for_host_key(&self) {
         let source = sys::random_source(SYSTEM);
-        if self.carried || source.is_some_and(|r| r.source.is_hardware()) {
+        if self.carried || source.is_some_and(|r| r.is_strong()) {
             return;
         }
         let _ = sys::event_record(source.map_or(0, |r| r.source as u64), ENTROPY_WEAK_FAULT);
         let mut text = [0u8; abi::sysinfo::RandomSource::SUMMARY_MAX];
         let why = match source {
-            Some(r) => alloc::format!("kernel generator seeded from {}", r.summary(&mut text)),
+            Some(r) => alloc::format!(
+                "kernel generator seeded from {}, {}",
+                r.summary(&mut text),
+                r.carried.reason()
+            ),
             None => {
                 alloc::string::String::from("the kernel does not report what seeded its generator")
             }

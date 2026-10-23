@@ -398,15 +398,21 @@ fn cpus() {
     }
 }
 
-/// What seeded the kernel generator (`sysinfo::RANDOM_SOURCE`, ADR 0039),
-/// in one line: `entropy  rdrand`, or `entropy  TSC + interrupts (N
-/// samples, M events): weak`. It decides the quality of sshd's host key
-/// and netd's TCP secret, so the owner can read it over SSH.
+/// What seeded the kernel generator (`sysinfo::RANDOM_SOURCE`, ADR 0039,
+/// ADR 0043), in one line: `entropy  rdrand`,
+/// `entropy  TSC + interrupts + carried seed`, or
+/// `entropy  TSC + interrupts (N samples, M events): weak, no carried
+/// seed (first boot)`. It decides the quality of sshd's host key and
+/// netd's TCP secret, so the owner can read it over SSH.
 fn entropy() {
     let mut text = [0u8; abi::sysinfo::RandomSource::SUMMARY_MAX];
     let line = match sys::random_source(SYSTEM) {
-        Some(r) if r.source.is_hardware() => alloc::format!("entropy  {}\n", r.summary(&mut text)),
-        Some(r) => alloc::format!("entropy  {}: weak\n", r.summary(&mut text)),
+        Some(r) if r.is_strong() => alloc::format!("entropy  {}\n", r.summary(&mut text)),
+        Some(r) => alloc::format!(
+            "entropy  {}: weak, {}\n",
+            r.summary(&mut text),
+            r.carried.reason()
+        ),
         None => {
             alloc::string::String::from("entropy  unknown (the kernel does not report it): weak\n")
         }
@@ -474,11 +480,14 @@ fn save_file(fs: &mut FsClient, name: &str, data: &[u8]) -> Result<usize, ()> {
     r
 }
 
-/// Recent kernel events (`sysinfo::EVENTS`): one line per event with its
-/// timestamp.
+/// Recent kernel events (`sysinfo::EVENTS`): the last 32 (half the
+/// kernel ring), one line per event with its timestamp. 32 and not 16
+/// (ADR 0043): a boot's fault events (netd's TCP secret at its start,
+/// init's carried seed, sshd's entropy) must still be among them when the
+/// owner runs `diag` after the boot.
 fn events() {
     use abi::sysinfo::{EventEntry, EventKind};
-    let mut buf = [0u8; EventEntry::LEN * 16];
+    let mut buf = [0u8; EventEntry::LEN * 32];
     let Ok(n) = sys::system_info(SYSTEM, abi::sysinfo::EVENTS, &mut buf) else {
         print(b"diag: no access to events\n");
         return;

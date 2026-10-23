@@ -83,6 +83,16 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+/// Zeroes a buffer that held secret material (a seed, a key), with writes
+/// the compiler cannot drop as dead stores.
+pub fn wipe(buf: &mut [u8]) {
+    for b in buf.iter_mut() {
+        // SAFETY: a valid, exclusive `&mut u8`.
+        unsafe { core::ptr::write_volatile(b, 0) };
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
 /// Writes `bytes` as lowercase hexadecimal into `out` (2 characters per byte).
 pub fn hex<'a>(bytes: &[u8], out: &'a mut [u8]) -> &'a str {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -112,6 +122,13 @@ pub fn unhex(text: &str, out: &mut [u8]) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wipe_zeroes_everything() {
+        let mut buf = [0xFFu8; 40];
+        wipe(&mut buf);
+        assert!(buf.iter().all(|&b| b == 0));
+    }
 
     #[test]
     fn hex_round_trip_and_ct_eq() {

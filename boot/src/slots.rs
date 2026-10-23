@@ -5,8 +5,10 @@
 //! (pending slot attempts, rollback), verifies the manifest's Ed25519
 //! signature and the kernel and initrd hashes, and returns the chosen image.
 //! If there is no state or no image verifies, the caller boots from the ESP
-//! as usual (recovery).
+//! as usual (recovery). On the same disk it takes the kernel seed carried
+//! from the previous boot (`seed`, ADR 0043), whichever slot boots.
 
+use crate::seed::{self, Carried};
 use alloc::vec::Vec;
 use aricode_ab::{choose, reject, unpersisted, BootState, Decision, Image, ImageError, Slot};
 use aricode_gpt::{partitions, Header, Partition};
@@ -23,19 +25,27 @@ pub struct Loaded {
     pub pending: bool,
 }
 
-struct Disk {
+/// What the disk with `ARIBOOT` gave: the slot image to boot, if any, and
+/// the carried seed for `BootInfo`.
+pub struct Found {
+    pub loaded: Option<Loaded>,
+    pub seed: Carried,
+}
+
+pub struct Disk {
     io: ScopedProtocol<BlockIO>,
     media_id: u32,
 }
 
 impl Disk {
-    fn read(&mut self, lba: u64, sectors: usize) -> Option<Vec<u8>> {
+    pub fn read(&mut self, lba: u64, sectors: usize) -> Option<Vec<u8>> {
         let mut buf = alloc::vec![0u8; sectors * SECTOR];
         self.io.read_blocks(self.media_id, lba, &mut buf).ok()?;
         Some(buf)
     }
 
-    fn write(&mut self, lba: u64, data: &[u8; SECTOR]) -> bool {
+    /// Writes one sector and flushes it to the medium.
+    pub fn write(&mut self, lba: u64, data: &[u8; SECTOR]) -> bool {
         self.io.write_blocks(self.media_id, lba, data).is_ok() && self.io.flush_blocks().is_ok()
     }
 
@@ -85,17 +95,24 @@ fn load_slot(
     ))
 }
 
-/// Tries to boot from the slots. `None` = boot from the ESP.
-pub fn load() -> Option<Loaded> {
-    // The build's trust anchor (ADR 0029); an invalid key does not compile.
-    let pk = aricode_crypto::trust::public_key();
-    let handles = boot::find_handles::<BlockIO>().ok()?;
+/// Looks for the disk with `ARIBOOT`: takes its carried seed and tries to
+/// boot from its slots (`loaded: None` = boot from the ESP).
+pub fn load() -> Found {
+    let none = || Found {
+        loaded: None,
+        seed: Carried::none(boot_protocol::carried_seed::NO_STORE),
+    };
+    let Ok(handles) = boot::find_handles::<BlockIO>() else {
+        info!("slots: no block devices, booting from the ESP");
+        return none();
+    };
     for handle in handles {
         // Non-exclusive open: an exclusive open disconnects the drivers using
         // the disk (the ESP's FAT file system among them) and afterwards the
         // ESP can no longer be read.
         // SAFETY: AriBoot is the only running application; it only reads
-        // sectors and writes the state sector, which no other driver uses.
+        // sectors and writes sectors 0 to 2 of `ARIBOOT` (boot state and
+        // carried seed, ADR 0043), which no other driver uses.
         let Ok(io) = (unsafe {
             boot::open_protocol::<BlockIO>(
                 OpenProtocolParams {
@@ -121,71 +138,55 @@ pub fn load() -> Option<Loaded> {
         let Some(state_part) = find(&parts, aricode_ab::PART_STATE) else {
             continue;
         };
-        let state_lba = state_part.first_lba;
-        let state = disk
-            .read(state_lba, 1)
-            .and_then(|s| BootState::decode(&s))
-            .unwrap_or_else(|| {
-                warn!("slots: invalid boot state, assuming A active");
-                BootState::fresh(Slot::A)
-            });
-        match state.pending {
-            Some((slot, tries)) => info!(
-                "slots: state active {}, pending {} ({} tries)",
-                state.active.name(),
-                slot.name(),
-                tries
-            ),
-            None => info!("slots: state active {}, no pending", state.active.name()),
-        }
-        let mut decision: Decision = choose(state);
-        info!(
-            "slots: {} -> slot {}",
-            decision.reason,
-            decision.slot.name()
-        );
-        for attempt in 0..2 {
-            let Some(part) = find(&parts, decision.slot.partition()) else {
-                warn!("slots: missing partition {}", decision.slot.partition());
-                break;
-            };
-            match load_slot(&mut disk, part, &pk) {
-                Ok((kernel, initrd, version)) => {
-                    if !disk.write(state_lba, &decision.state.encode()) {
-                        warn!("slots: could not write the boot state");
-                        if decision.pending && attempt == 0 {
-                            // A pending slot without a counted try could boot
-                            // forever: fall back to the active one, which needs none.
-                            decision = unpersisted(state);
-                            info!(
-                                "slots: {} -> slot {}",
-                                decision.reason,
-                                decision.slot.name()
-                            );
-                            continue;
-                        }
-                    }
-                    info!(
-                        "slots: booting from slot {} (image version {}{})",
-                        decision.slot.name(),
-                        version,
-                        if decision.pending {
-                            ", pending confirmation"
-                        } else {
-                            ""
-                        }
-                    );
-                    return Some(Loaded {
-                        kernel,
-                        initrd,
-                        slot: decision.slot,
-                        pending: decision.pending,
-                    });
-                }
-                Err(why) => {
-                    warn!("slots: slot {} rejected: {why}", decision.slot.name());
-                    if attempt == 0 && decision.slot != state.active {
-                        decision = reject(state);
+        // The seed first: its successor is on the disk before any image is
+        // read, and whatever happens to the slots the kernel gets it.
+        let seed = seed::carry(&mut disk, state_part.first_lba, state_part.sectors());
+        let loaded = choose_slot(&mut disk, &parts, state_part.first_lba);
+        return Found { loaded, seed };
+    }
+    info!("slots: no ARIBOOT partition, booting from the ESP");
+    none()
+}
+
+/// The slot policy on the disk whose boot state is at `state_lba`.
+fn choose_slot(disk: &mut Disk, parts: &[Partition], state_lba: u64) -> Option<Loaded> {
+    // The build's trust anchor (ADR 0029); an invalid key does not compile.
+    let pk = aricode_crypto::trust::public_key();
+    let state = disk
+        .read(state_lba, 1)
+        .and_then(|s| BootState::decode(&s))
+        .unwrap_or_else(|| {
+            warn!("slots: invalid boot state, assuming A active");
+            BootState::fresh(Slot::A)
+        });
+    match state.pending {
+        Some((slot, tries)) => info!(
+            "slots: state active {}, pending {} ({} tries)",
+            state.active.name(),
+            slot.name(),
+            tries
+        ),
+        None => info!("slots: state active {}, no pending", state.active.name()),
+    }
+    let mut decision: Decision = choose(state);
+    info!(
+        "slots: {} -> slot {}",
+        decision.reason,
+        decision.slot.name()
+    );
+    for attempt in 0..2 {
+        let Some(part) = find(parts, decision.slot.partition()) else {
+            warn!("slots: missing partition {}", decision.slot.partition());
+            break;
+        };
+        match load_slot(disk, part, &pk) {
+            Ok((kernel, initrd, version)) => {
+                if !disk.write(state_lba, &decision.state.encode()) {
+                    warn!("slots: could not write the boot state");
+                    if decision.pending && attempt == 0 {
+                        // A pending slot without a counted try could boot
+                        // forever: fall back to the active one, which needs none.
+                        decision = unpersisted(state);
                         info!(
                             "slots: {} -> slot {}",
                             decision.reason,
@@ -193,13 +194,39 @@ pub fn load() -> Option<Loaded> {
                         );
                         continue;
                     }
-                    break;
                 }
+                info!(
+                    "slots: booting from slot {} (image version {}{})",
+                    decision.slot.name(),
+                    version,
+                    if decision.pending {
+                        ", pending confirmation"
+                    } else {
+                        ""
+                    }
+                );
+                return Some(Loaded {
+                    kernel,
+                    initrd,
+                    slot: decision.slot,
+                    pending: decision.pending,
+                });
+            }
+            Err(why) => {
+                warn!("slots: slot {} rejected: {why}", decision.slot.name());
+                if attempt == 0 && decision.slot != state.active {
+                    decision = reject(state);
+                    info!(
+                        "slots: {} -> slot {}",
+                        decision.reason,
+                        decision.slot.name()
+                    );
+                    continue;
+                }
+                break;
             }
         }
-        warn!("slots: no valid image; booting from the ESP");
-        return None;
     }
-    info!("slots: no ARIBOOT partition, booting from the ESP");
+    warn!("slots: no valid image; booting from the ESP");
     None
 }

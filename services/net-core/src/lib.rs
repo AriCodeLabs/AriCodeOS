@@ -532,8 +532,9 @@ fn record_fault(
     sys::print(b"\n");
 }
 
-/// Says what the TCP secret is worth (ADR 0034 §4, ADR 0039): from a
-/// generator seeded by a hardware source, or a weak one (cycle counter and
+/// Says what the TCP secret is worth (ADR 0034 §4, ADR 0039, ADR 0043):
+/// from a generator seeded by a hardware source or holding the seed
+/// carried from the previous boot, or a weak one (cycle counter and
 /// interrupt timing only, or a kernel that does not say), which is
 /// recorded as `Fault::TcpSecretWeak` through the fault meter and said on
 /// the console. The service runs either way: refusing would leave the
@@ -549,14 +550,15 @@ fn report_secret_source(
 ) {
     let mut text = [0u8; abi::sysinfo::RandomSource::SUMMARY_MAX];
     let line = match source {
-        Some(r) if r.source.is_hardware() && !whole => None,
-        Some(r) if r.source.is_hardware() => Some(alloc::format!(
+        Some(r) if r.is_strong() && !whole => None,
+        Some(r) if r.is_strong() => Some(alloc::format!(
             "{name}: tcp secret from kernel entropy ({})\n",
             r.summary(&mut text)
         )),
         Some(r) => Some(alloc::format!(
-            "{name}: tcp secret weak: kernel generator seeded from {}, no hardware source: ISNs and ports guessable with effort\n",
-            r.summary(&mut text)
+            "{name}: tcp secret weak: kernel generator seeded from {}, no hardware source, {}: ISNs and ports guessable with effort\n",
+            r.summary(&mut text),
+            r.carried.reason()
         )),
         None => Some(alloc::format!(
             "{name}: tcp secret weak: the kernel does not report what seeded its generator\n"
@@ -566,7 +568,7 @@ fn report_secret_source(
     if let Some(line) = line {
         sys::print(line.as_bytes());
     }
-    if !source.is_some_and(|r| r.source.is_hardware()) {
+    if !source.is_some_and(|r| r.is_strong()) {
         let due = faults.report(Fault::TcpSecretWeak as usize, now);
         if due > 0 {
             record_fault(name, Fault::TcpSecretWeak, due, source);

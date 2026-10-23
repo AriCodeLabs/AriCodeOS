@@ -89,6 +89,12 @@ would open an unauthenticated shell on the user's network.
   generator and sshd's own state, with no earlier boot's seed behind it in
   exactly this case (with one, it is mixed in and nothing is reported). `diag` shows the source in its `entropy`
   line (`ssh.entropy_weak`, `crypto.entropy_rdrand`).
+  Since ADR 0043 the kernel generator itself carries a seed across boots
+  (AriBoot hands it over from the `ARIBOOT` partition): a generator with
+  it mixed in counts as strong, so `ssh entropy weak` is recorded only
+  when neither that nor sshd's own `random_seed` came from an earlier
+  boot, and the weak line names why (`no carried seed (first boot)`).
+  sshd keeps its `random_seed`: it also serves a disk without `ARIBOOT`.
 - **Audit trail.** Every refused key is logged with the user name and the
   peer address; after ten failures the connection is dropped.
 - **No monopoly by idle clients** (audit of 8910d1f, finding 2). A

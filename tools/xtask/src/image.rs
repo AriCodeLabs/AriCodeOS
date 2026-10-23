@@ -365,9 +365,11 @@ pub fn write_usb_image(
     // nor the test disk's sample files. A `selftest` boot from the stick
     // stops at `fs_client`'s first check (no `hola.txt`), before any write.
     write_slot(&mut img, USB_PART_SYSA, &system_image(1, false)?)?;
-    let state = aricode_ab::BootState::fresh(aricode_ab::Slot::A);
-    let o = USB_PART_ARIBOOT.0 as usize * 512;
-    img[o..o + 512].copy_from_slice(&state.encode());
+    init_ariboot(
+        &mut img,
+        USB_PART_ARIBOOT,
+        aricode_ab::BootState::fresh(aricode_ab::Slot::A),
+    );
     io(fs::write(path, &img), "write USB image")?;
     Ok(format!(
         "[xtask] USB image at {} ({} MiB, {} files in the ESP)",
@@ -762,10 +764,46 @@ pub fn write_test_disk(
             | DiskVariant::WasmInvalid
             | DiskVariant::WasmBadImport => {}
         }
-        let o = PART_ARIBOOT.0 as usize * 512;
-        img[o..o + 512].copy_from_slice(&state.encode());
+        init_ariboot(&mut img, PART_ARIBOOT, state);
     }
     io(fs::write(path, img), "write test disk")
+}
+
+/// `ARIBOOT` of a new image: the boot state in sector 0 and no kernel seed
+/// (ADR 0043): every machine, and every test disk, starts with none, so no
+/// two machines flashed from one image share a seed. The first boot is
+/// weak and says so; init writes the first seed.
+fn init_ariboot(img: &mut [u8], part: (u64, u64), state: aricode_ab::BootState) {
+    let o = part.0 as usize * 512;
+    img[o..o + 512].copy_from_slice(&state.encode());
+    for copy in aricode_ab::seed::COPIES {
+        let o = (part.0 + copy) as usize * 512;
+        img[o..o + 512].fill(0);
+    }
+}
+
+/// The kernel seed record a disk image holds in its `ARIBOOT` partition
+/// (ADR 0043), found through its GPT: `None` when there is no partition or
+/// no intact copy. For the scenario check `seed_store`; never printed.
+pub fn seed_record(img: &[u8]) -> Option<aricode_ab::seed::Record> {
+    use aricode_ab::seed::{pick, Stored, COPIES};
+    let header = aricode_gpt::Header::parse(img.get(512..1024)?).ok()?;
+    let at = header.entries_lba as usize * 512;
+    let table = img.get(at..at + header.entries_bytes())?;
+    let mut parts = [None; 16];
+    let n = aricode_gpt::partitions(&header, table, &mut parts).ok()?;
+    let part = parts[..n]
+        .iter()
+        .flatten()
+        .find(|p| p.name_str() == aricode_ab::PART_STATE)?;
+    let sector = |copy: u64| {
+        let o = (part.first_lba + copy) as usize * 512;
+        img.get(o..o + 512)
+    };
+    match pick([sector(COPIES[0]), sector(COPIES[1])]) {
+        Stored::Found { record, .. } => Some(record),
+        Stored::Missing | Stored::Unreadable => None,
+    }
 }
 
 /// Adds files of any size to AriFS (installed packages, ADR 0017):
@@ -954,6 +992,45 @@ mod tests {
         fs::write(base.join(BOOTX64), b"efi").unwrap();
         fs::write(base.join(KERNEL), b"elf").unwrap();
         base
+    }
+
+    /// ADR 0043: an image ships no kernel seed, whatever the bytes there
+    /// were; `seed_record` finds one only once a boot wrote it.
+    #[test]
+    fn images_ship_no_seed_and_the_store_is_found_by_name() {
+        let mut img = vec![0xEEu8; 4096 * 512];
+        let part = (3000, 3063);
+        aricode_gpt::write_disk(
+            &mut img,
+            &[("ARIBOOT", part.0, part.1, aricode_gpt::ARICODEOS_DATA_GUID)],
+        )
+        .unwrap();
+        init_ariboot(
+            &mut img,
+            part,
+            aricode_ab::BootState::fresh(aricode_ab::Slot::A),
+        );
+        assert_eq!(seed_record(&img), None);
+        for copy in aricode_ab::seed::COPIES {
+            let o = (part.0 + copy) as usize * 512;
+            assert!(img[o..o + 512].iter().all(|&b| b == 0), "copy {copy}");
+        }
+        let record = aricode_ab::seed::Record {
+            generation: 3,
+            seed: [9; 32],
+        };
+        let o = (part.0 + aricode_ab::seed::COPIES[1]) as usize * 512;
+        img[o..o + 512].copy_from_slice(&record.encode());
+        assert_eq!(seed_record(&img), Some(record));
+        // No ARIBOOT partition, or no GPT at all: no seed.
+        let mut other = vec![0u8; 4096 * 512];
+        aricode_gpt::write_disk(
+            &mut other,
+            &[("ARI0", 34, 2047, aricode_gpt::ARICODEOS_DATA_GUID)],
+        )
+        .unwrap();
+        assert_eq!(seed_record(&other), None);
+        assert_eq!(seed_record(&[0u8; 1024]), None);
     }
 
     #[test]

@@ -14,8 +14,12 @@
 //!   while it has tries left; if they run out or its image does not
 //!   verify, boot falls back to the active one (rollback); the booted system
 //!   confirms and the pending slot becomes active.
+//! - [`seed`]: the kernel seed carried across boots in sectors 1 and 2 of
+//!   `ARIBOOT` (ADR 0043).
 
 #![no_std]
+
+pub mod seed;
 
 use aricode_crypto::{ed25519, sha256, unhex};
 use aricode_initrd::Initrd;

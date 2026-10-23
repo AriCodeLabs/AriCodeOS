@@ -147,3 +147,18 @@ weak side channel on what it was doing (an HTTPS certificate check is
 deeper than a plain download, for example). There is no address
 randomization for it to defeat: every process has the same stack
 addresses. It stays under `READ`, like `PROCESSES`, `IDLE` and `EVENTS`.
+
+## Note (2026-10-23, ADR 0043)
+
+The kernel seed carried across boots that "Consequences" left as future
+work is ADR 0043. `RandomSource` grew as §2 allows: byte 32 is the
+`CarriedSeed` status (bytes 33..40 zero), `RANDOM_SOURCE` answers 40
+bytes, and a 32-byte reply from an older kernel still decodes (as
+`NoStore`). The verdict of §3 to §5 is now `RandomSource::is_strong`: a
+hardware source or a carried seed mixed in. netd prints `tcp secret from
+kernel entropy (TSC + interrupts + carried seed)` without the weak event,
+sshd records no `ssh entropy weak`, and `diag` prints `entropy  TSC +
+interrupts + carried seed`; the weak lines now name why no carried seed
+was mixed in (`entropy  TSC + interrupts (N samples, M events): weak, no
+carried seed (first boot)`). The verdict is still about what seeded the
+generator, not a measure of it.

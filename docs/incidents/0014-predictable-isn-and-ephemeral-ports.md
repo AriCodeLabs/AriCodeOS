@@ -190,9 +190,14 @@ it held a `SYSTEM` handle with the right to.
   records `ssh entropy weak` before drawing a host key with no carried
   seed, and `diag` prints `entropy  rdrand` or `entropy  TSC + interrupts
   (N samples, M events): weak`, which is where the laptop's answer is read
-  (`docs/hardware.md`). Still open: on such a CPU the secret is only as
-  good as the TSC samples and the interrupt pool at netd's start; saving
-  a kernel seed across boots, as sshd does for itself, is future work.
+  (`docs/hardware.md`). Done 2026-10-23 (ADR 0043): on such a CPU the
+  secret was only as good as the TSC samples and the interrupt pool at
+  netd's start; now AriBoot carries a kernel seed across boots in the
+  `ARIBOOT` partition (its successor written before the jump, so no seed
+  serves two boots) and the kernel mixes it in before any process runs.
+  netd's secret then comes from `TSC + interrupts + carried seed`; only
+  the first boot of a disk, which ships none, is weak and says so
+  (`random seed missing`, `crypto.carried_seed`).
 - The ISN clock has 1 ms resolution scaled to 4 µs ticks; two SYNs to one
   listener within the same millisecond from the same peer port share an
   ISN, which creates one connection, not two.
@@ -203,4 +208,5 @@ With ADR 0039 the reference laptop reports `entropy  TSC + interrupts: weak`
 (no usable `rdrand`). The ISN secret there is drawn from a TSC- and
 interrupt-seeded generator; it is still per boot and keyed, but its
 unpredictability is bounded by that seed. A kernel seed persisted across
-boots is the next step for this machine.
+boots is the next step for this machine: done the same day in ADR 0043,
+to be read on the laptop (`docs/hardware.md`, "Entropy").

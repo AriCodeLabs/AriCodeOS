@@ -276,6 +276,7 @@ VMM -> PMM            vmm::with holds the VMM and the Mapper requests frames fro
 heap.mapped -> VMM    grow holds the growth lock and maps (and, by the above, reaches the PMM)
 heap.mapped -> PMM    grow requests and returns frames
 PROCESSES -> SCHED    process::wait queries the thread state with the table held
+random.RNG -> CARRIED the seed hashes in the carried kernel seed (ADR 0043); CARRIED is a leaf
 WaitQueue.waiters     leaf: released before blocking or waking
 heap.heap, console    leaf: never call another subsystem
 ```
@@ -1202,13 +1203,26 @@ latter briefly to add the region.
   samples, M events): weak`. The scenario option `cpu_rdrand` boots
   `-cpu qemu64,+rdrand` (TCG implements it) for the hardware path
   (`crypto.random_rdrand`, `crypto.entropy_rdrand`).
+- Carried seed (ADR 0043): AriBoot reads a 32-byte seed from sectors 1
+  and 2 of `ARIBOOT` (two copies with a generation, `aricode_ab::seed`),
+  writes its successor to the other copy and blanks the old one, and only
+  then hands the kernel its share (HMAC of the seed) in
+  `BootInfo::carried_seed`. The kernel copies it out at entry, zeroes it
+  in `BootInfo` and hashes it into the seed; `RandomSource` (40 bytes now)
+  reports the status in byte 32 (`CarriedSeed`), and a carried seed counts
+  as strong for netd, sshd and `diag` (`entropy  TSC + interrupts +
+  carried seed`). init records `random seed missing`/`unreadable`/`not
+  saved` and replaces the stored seed with `RANDOM` output early in the
+  boot and after the boot services; images ship none
+  (`crypto.carried_seed`).
 - xtask gains `keygen`, `sign` and `verify` (seed and public key in hex);
   `keys/dev` holds the development pair that will sign the test images.
 
 ## A/B update (Phase 30)
 
 - 48 MiB test disk: `ARI0` (AriFS), `SYSA`, `SYSB`, `UPDATE` (12
-  MiB each) and `ARIBOOT` (32 KiB). The scenario picks the initial state
+  MiB each) and `ARIBOOT` (32 KiB: sector 0 the boot state, sectors 1
+  and 2 the carried kernel seed of ADR 0043). The scenario picks the initial state
   with `disk = slots | esp-only | pending-b | b-exhausted | b-corrupt`;
   the ESP failure scenarios use `esp-only`.
 - `aricode-ab`: `BootState` (magic, active, pending+attempts, counter,

@@ -22,7 +22,7 @@ serial_contains = [
     "random: ChaCha20 generator seeded with TSC (no rdrand: limited entropy)",
     "virtio-net: tcp secret weak: kernel generator seeded from TSC + interrupts (",
     " samples, ",
-    " events), no hardware source: ISNs and ports guessable with effort",
+    " events), no hardware source, no carried seed (first boot): ISNs and ports guessable with effort",
     "virtio-net: fault net tcp secret weak x1",
     "virtio-net: serving requests",
     "virtio-net: DHCP 10.0.2.15 mask 255.255.255.0 router 10.0.2.2 dns 10.0.2.3",

@@ -101,6 +101,48 @@ pub struct BootInfo {
     pub phys_map_offset: u64,
     /// End (exclusive) of the physical memory covered by the linear map.
     pub phys_map_limit: u64,
+
+    /// Kernel seed carried from the previous boot (ADR 0043): the kernel's
+    /// share of the seed AriBoot read from the `ARIBOOT` partition, handed
+    /// over only after its successor reached the disk, so no seed serves
+    /// two boots. All zero unless `carried_seed_status` is
+    /// [`carried_seed::CARRIED`]. The kernel copies it and zeroes it here
+    /// before anything else runs. Appended in protocol version 4: a kernel
+    /// reads it only when `size` covers it ([`BootInfo::CARRIED_SEED_END`]).
+    pub carried_seed: SeedBytes,
+    /// One of the [`carried_seed`] values.
+    pub carried_seed_status: u32,
+    pub _reserved: u32,
+}
+
+/// The carried seed's bytes in `BootInfo`: a `Debug` of `BootInfo` must
+/// never print them.
+#[repr(transparent)]
+#[derive(Clone, Copy, Default)]
+pub struct SeedBytes(pub [u8; 32]);
+
+impl core::fmt::Debug for SeedBytes {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("SeedBytes(..)")
+    }
+}
+
+/// `BootInfo::carried_seed_status`: what AriBoot found in the seed store.
+/// The numbers are those of `aricode_abi::sysinfo::CarriedSeed`.
+pub mod carried_seed {
+    /// No `ARIBOOT` partition on any disk (or a loader that predates the
+    /// field): there is nowhere to keep a seed.
+    pub const NO_STORE: u32 = 0;
+    /// A seed was read, its successor written, and the kernel's share is
+    /// in `carried_seed`.
+    pub const CARRIED: u32 = 1;
+    /// The store is blank: the first boot of an image, which ships none.
+    pub const MISSING: u32 = 2;
+    /// The store holds no intact copy, or could not be read.
+    pub const UNREADABLE: u32 = 3;
+    /// A seed was read but its successor could not be written: it is not
+    /// handed over, since the next boot would find it again.
+    pub const NOT_SAVED: u32 = 4;
 }
 
 impl BootInfo {
@@ -108,6 +150,10 @@ impl BootInfo {
     pub const fn phys_to_virt(&self, phys: u64) -> u64 {
         phys + self.phys_map_offset
     }
+
+    /// Smallest `size` that covers `carried_seed` and its status: a loader
+    /// that knows the field (an older one hands a shorter `BootInfo`).
+    pub const CARRIED_SEED_END: usize = core::mem::offset_of!(BootInfo, _reserved);
 
     /// Command line as `&str` (empty if missing or not UTF-8).
     ///
@@ -578,6 +624,27 @@ mod tests {
         assert_eq!(r[4], (0x22_0000, 0x22_0011));
         // The loader's tables are reclaimed: they are not among the kept ranges.
         assert!(r.iter().all(|&(s, _)| s != info.page_tables_base));
+    }
+
+    #[test]
+    fn carried_seed_is_appended_and_gated_by_size() {
+        let mut info = unsafe { core::mem::zeroed::<BootInfo>() };
+        // Appended after the last field of the older layout, so an older
+        // loader's `size` stops before it.
+        let old_end = core::mem::offset_of!(BootInfo, phys_map_limit) + 8;
+        assert_eq!(core::mem::offset_of!(BootInfo, carried_seed), old_end);
+        assert!(old_end < BootInfo::CARRIED_SEED_END);
+        assert!(BootInfo::CARRIED_SEED_END <= core::mem::size_of::<BootInfo>());
+        assert_eq!(
+            BootInfo::CARRIED_SEED_END,
+            core::mem::offset_of!(BootInfo, carried_seed_status) + 4
+        );
+        assert!(core::mem::size_of::<BootInfo>() <= 4096, "one page");
+        // `Debug` never shows the seed.
+        info.carried_seed = SeedBytes([0xAB; 32]);
+        let text = std::format!("{info:?}");
+        assert!(text.contains("SeedBytes(..)"), "{text}");
+        assert!(!text.contains("171"), "{text}");
     }
 
     #[test]
