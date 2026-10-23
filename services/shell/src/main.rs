@@ -892,7 +892,9 @@ fn http_get(fs: &mut FsClient, client: &mut NetClient, arg: &[u8]) {
     let now = || sys::time::uptime_ms(SYSTEM).unwrap_or(u64::MAX);
     let deadline = now().saturating_add(HTTP_BUDGET_MS);
     let budget = || deadline.saturating_sub(now()).min(u32::MAX as u64) as u32;
-    let mut body = [0u8; 8192];
+    // On the heap (incident 0018): on the stack it was 8 KiB of the frame
+    // under every certificate check of an HTTPS download.
+    let mut body = alloc::vec![0u8; 8192];
     match aricode_https::get(
         client,
         SYSTEM,
