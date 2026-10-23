@@ -473,6 +473,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn apply_never_goes_below_the_stable_floor() {
+        // `update apply` keeps the floor (no open downgrade path): stable 2
+        // in UPDATE, stable 1 running, stable 3 once ran.
+        let apply = SystemRules {
+            allow_downgrade: false,
+            explicit_channel: false,
+            stable_floor: Some(3),
+        };
+        let running = id(Channel::Stable, 1, None);
+        let two = id(Channel::Stable, 2, None);
+        let change = compare_system(Some(running), two);
+        assert_eq!(change, SystemChange::Within(Change::Upgrade));
+        assert_eq!(
+            decide_system(change, two, apply),
+            SystemDecision::Refused(Refusal::BelowStableFloor(3))
+        );
+        let forced = SystemRules {
+            allow_downgrade: true,
+            ..apply
+        };
+        assert_eq!(decide_system(change, two, forced), SystemDecision::Install);
+        // Older than the running release too: the plain downgrade reason.
+        let older = compare_system(
+            Some(id(Channel::Stable, 2, None)),
+            id(Channel::Stable, 1, None),
+        );
+        assert_eq!(
+            decide_system(older, id(Channel::Stable, 1, None), apply),
+            SystemDecision::Refused(Refusal::Downgrade)
+        );
+        // At or above the floor: installed as before.
+        let four = id(Channel::Stable, 4, None);
+        assert_eq!(
+            decide_system(compare_system(Some(running), four), four, apply),
+            SystemDecision::Install
+        );
+    }
+
     fn index(serial: u64, system: Option<u32>, apps: &[(&'static str, u32)]) -> Index<'static> {
         Index {
             serial,

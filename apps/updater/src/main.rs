@@ -856,14 +856,29 @@ fn decide_system_install(
 }
 
 /// `APPLY`: installs the image of the UPDATE partition (Phase 30), under the
-/// downgrade rule (audit 1, M4). It never changes the channel (that takes
-/// `upgrade --channel`).
+/// downgrade rule (audit 1, M4) and the stable floor (ADR 0045). It never
+/// changes the channel (that takes `upgrade --channel`).
 fn apply(allow_downgrade: bool, keys: &Keys) -> u64 {
     let mut disk = match Disk::open() {
         Ok(d) => d,
         Err(code) => return code,
     };
     let installed = disk.active_system(keys);
+    // The stable floor holds here too (no open downgrade path): without
+    // the file service or a readable `state` the floor is unknown, and
+    // nothing is installed.
+    let Ok(mut fs) = FsClient::new(FS, HW) else {
+        return fault(
+            code::NO_SERVICES,
+            "upd-no-services",
+            "need the file service (the stable floor is in updater/state)",
+        );
+    };
+    let mut state = match read_state(&mut fs) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let stable_floor = stable_floor(&mut fs, &mut state, &installed);
     let update = disk.update;
     let Some((total, manifest)) = disk.load(update, keys) else {
         return fault(
@@ -877,11 +892,12 @@ fn apply(allow_downgrade: bool, keys: &Keys) -> u64 {
         "UPDATE image version {offered} verified ({} bytes)",
         total - SECTOR
     );
-    // Never a channel change (audit of ADR 0045, L4): no named channel.
+    // Never a channel change (audit of ADR 0045, L4): no named channel;
+    // never below the stable floor without --allow-downgrade.
     let rules = SystemRules {
         allow_downgrade,
         explicit_channel: false,
-        stable_floor: None,
+        stable_floor,
     };
     match decide_system_install(&installed, installed_id(&manifest), rules) {
         Ok(true) => match disk.install(total) {

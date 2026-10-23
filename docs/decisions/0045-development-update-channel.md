@@ -88,8 +88,8 @@ without being asked, doors are closed by default, refusals are logged.
      `updater/state` (raised whenever the active system is a newer stable
      release, never lowered, seeded by `usb-image` from the stick's
      release). A stable release below it is a downgrade, switch or not,
-     refused without `--allow-downgrade` (`upd-downgrade-refused`, audit
-     M1): a first, unauthenticated fetch of an old validly signed stable
+     refused without `--allow-downgrade` by `upgrade` and `update apply`
+     alike (`upd-downgrade-refused`, audit M1): a first, unauthenticated fetch of an old validly signed stable
      index cannot roll a development machine back past what it ran. It is
      said and recorded once installed (`upd-channel-switch`, code 52),
      and the history line names both systems.
@@ -234,7 +234,8 @@ without being asked, doors are closed by default, refusals are logged.
 - Audit follow-up (2026-10-23): the rules above are pure functions of
   `aricode-update-index` with host tests (`decide_system`, `raise_floor`,
   `trusted_keys`, `image_matches_offer`); scenarios
-  `update.stable_floor` and `update.dev_stable_image` (a development
+  `update.stable_floor`, `update.apply_stable_floor` and
+  `update.dev_stable_image` (a development
   index pointing at a stable image is refused at install) join the list
   above. The boot command line readers take 1 KiB and report a line that
   does not fit (`console.long_cmdline`), since AriBoot's keys lengthen
