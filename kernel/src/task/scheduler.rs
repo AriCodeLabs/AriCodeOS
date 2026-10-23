@@ -641,6 +641,100 @@ pub fn selftest() {
     );
 }
 
+/// Quantum self-test (`test=quantum`, incident 0023): a thread that never
+/// blocks runs alone on a CPU for many quanta, then a thread pinned to that
+/// CPU is woken and another one is spawned there; each must start within a
+/// few quanta, which only quantum expiry can give them (no IPI targets a
+/// busy CPU, and only the BSP preempts on waking sleepers). Needs two CPUs:
+/// main waits and measures on CPU 0, the test runs on the last one.
+pub fn quantum_selftest() {
+    use super::wait::WaitQueue;
+    use core::sync::atomic::AtomicBool;
+
+    /// Long enough for any quantum counter to expire many times.
+    const ALONE_MS: u64 = 100;
+    /// How long main waits for each late thread before giving up.
+    const GIVE_UP_TICKS: u64 = 50;
+    /// A quantum to expire, one to pick the thread, one of slack.
+    const LIMIT_TICKS: u64 = 3 * QUANTUM_TICKS as u64;
+    const NOT_YET: u64 = u64::MAX;
+
+    static STOP: AtomicBool = AtomicBool::new(false);
+    static BUSY_RUNNING: AtomicBool = AtomicBool::new(false);
+    static WOKEN: AtomicBool = AtomicBool::new(false);
+    static QUEUE: WaitQueue = WaitQueue::new();
+    static WAITER_RAN_AT: AtomicU64 = AtomicU64::new(NOT_YET);
+    static SPAWNED_RAN_AT: AtomicU64 = AtomicU64::new(NOT_YET);
+    extern "C" fn busy(_: usize) {
+        BUSY_RUNNING.store(true, Ordering::Release);
+        while !STOP.load(Ordering::Relaxed) {
+            core::hint::spin_loop();
+        }
+    }
+    extern "C" fn waiter(_: usize) {
+        QUEUE.wait_until(|| WOKEN.load(Ordering::Relaxed));
+        WAITER_RAN_AT.store(crate::time::ticks(), Ordering::Release);
+    }
+    extern "C" fn spawned(_: usize) {
+        SPAWNED_RAN_AT.store(crate::time::ticks(), Ordering::Release);
+    }
+    /// Ticks from `since` until `ran_at` is set, or `None` after the wait.
+    fn latency(since: u64, ran_at: &AtomicU64) -> Option<u64> {
+        loop {
+            let at = ran_at.load(Ordering::Acquire);
+            if at != NOT_YET {
+                return Some(at.saturating_sub(since));
+            }
+            if crate::time::ticks() - since > GIVE_UP_TICKS {
+                return None;
+            }
+            sleep_ms(crate::time::MS_PER_TICK);
+        }
+    }
+
+    let cpus = cpu::online_count();
+    assert!(cpus >= 2, "test=quantum needs two CPUs, {cpus} online");
+    let target = cpus - 1;
+    set_affinity(MAIN_TID, Some(0)).unwrap();
+
+    // The waiter blocks first, while the target CPU is free.
+    let w = spawn_on("q-waiter", waiter, 0, target).unwrap();
+    while state(w) != Some(State::Blocked) {
+        sleep_ms(10);
+    }
+    // Then the busy thread has the CPU to itself.
+    let b = spawn_on("q-busy", busy, 0, target).unwrap();
+    while !BUSY_RUNNING.load(Ordering::Acquire) {
+        sleep_ms(10);
+    }
+    sleep_ms(ALONE_MS);
+    WOKEN.store(true, Ordering::Relaxed);
+    let woken_at = crate::time::ticks();
+    QUEUE.wake_one();
+    let wake = latency(woken_at, &WAITER_RAN_AT);
+
+    sleep_ms(ALONE_MS);
+    let spawned_at = crate::time::ticks();
+    let s = spawn_on("q-spawned", spawned, 0, target).unwrap();
+    let spawn = latency(spawned_at, &SPAWNED_RAN_AT);
+
+    STOP.store(true, Ordering::Relaxed);
+    while [w, b, s].iter().any(|t| state(*t).is_some()) {
+        sleep_ms(10);
+    }
+    set_affinity(MAIN_TID, None).unwrap();
+    info!(
+        "quantum selftest: CPU {target} busy alone for {ALONE_MS} ms, then a woken thread started after {wake:?} ticks and a spawned one after {spawn:?} ticks (limit {LIMIT_TICKS}, gave up after {GIVE_UP_TICKS})"
+    );
+    for (what, l) in [("woken", wake), ("spawned", spawn)] {
+        assert!(
+            l.is_some_and(|t| t <= LIMIT_TICKS),
+            "a {what} thread pinned to busy CPU {target} waited {l:?} ticks (limit {LIMIT_TICKS}): its quantum no longer expires"
+        );
+    }
+    info!("quantum selftest ok (woken after {wake:?}, spawned after {spawn:?} ticks)");
+}
+
 /// SMP self-test (`test=smp`): every MADT CPU online, pinned threads running
 /// simultaneously on different CPUs, unpinned threads that migrate, a TLB
 /// shootdown observed from another CPU and a counter under a lock contended
