@@ -145,6 +145,10 @@ marker = "INPUT_READY"
 keys = ["h", "o", "l", "a", "ret"]   # QEMU qcode names, press and release on kbd0; "shift+dot" holds the modifiers while the key is pressed
 mouse_rel = [10, -5]            # relative movement on mouse0
 click = "left"                  # button pressed and released; result in "[host] QMP: ..."
+key_delay_ms = 30               # minimum pause after each key event (default 0)
+echo_prompt = "ari> "           # the guest prints this before each line and echoes typed characters: each line waits for it and each
+                                # key for its echo (10 s at most, then "[host] QMP: failed after N events (no echo of 'd' ...)").
+                                # Required above 16 key events, the queue of QEMU's usb-kbd and i8042 (incident 0022)
 
 [inject]                        # optional: provoked faults in the ESP
 truncate_kernel = 3000          # truncates kernel.elf to N bytes
@@ -255,12 +259,13 @@ What keeps concurrent runs apart:
   its own network namespace.
 
 `serial = true` makes a scenario run with nothing else at the same time.
-Only `usb.hid_fault` has it: its keys are paced in wall-clock time while the
-guest drains QEMU's 16-scancode usb-kbd queue at its own pace, and with
-other QEMU runs on the host it fell behind and lost keystrokes (incident
-0019). A scenario that turns out to depend on timing under load is a bug to
-fix or, when the dependency is the test's own, to mark `serial` with the
-reason in its file, never a retry.
+`network.deep_path` has it (the reason is in its file). `usb.hid_fault` had
+it while its keys were paced in wall-clock time (incident 0019), and still
+lost a keystroke running alone on a loaded host; the runner now types each
+key after the guest's echo of the previous one (`echo_prompt`, incident
+0022), which does not depend on host load. A scenario that turns out to
+depend on timing under load is a bug to fix or, when the dependency is the
+test's own, to mark `serial` with the reason in its file, never a retry.
 
 ## Continuous runs (Docker)
 

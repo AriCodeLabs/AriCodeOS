@@ -69,3 +69,11 @@ had sent all 30 events (`[host] QMP: 30 input events sent`).
   the guest keeps running after their last event (more checks, the input
   service report), so QMP's reply is not racing an exit there; they passed
   in every parallel run.
+
+## Later (incident 0022)
+
+Running `usb.hid_fault` alone was not enough: the CI run of `develop`
+484da4c lost a key in it ("ari> shutown") with the scenario alone in its
+suite and other work on the host. Incident 0022 implements the follow-up
+above in the runner (typing waits for the prompt and each key's echo,
+`echo_prompt`) and removes `serial = true` from the scenario.

@@ -461,6 +461,7 @@ fn run_scenario(
             mouse_rel: h.mouse_rel,
             click: h.click.as_deref(),
             key_delay_ms: h.key_delay_ms,
+            echo_prompt: h.echo_prompt.as_deref(),
         });
         let ssh_probe = match (&s.host_ssh, &ssh_key) {
             (Some(h), Some(key)) => Some(qemu::SshProbe {

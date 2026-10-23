@@ -126,13 +126,20 @@ pub struct HostInput {
     pub keys: Vec<String>,
     pub mouse_rel: Option<(i32, i32)>,
     pub click: Option<String>,
-    /// Pause after each key event (ms). QEMU's usb-kbd queues at most 16
-    /// scancodes (`QUEUE_LENGTH`, hw/input/hid.c) and drops whole events
-    /// beyond that, while the guest drains it only at the interrupt
+    /// Minimum pause after each key event (ms). QEMU's usb-kbd queues at
+    /// most 16 scancodes (`QUEUE_LENGTH`, hw/input/hid.c) and drops whole
+    /// events beyond that, while the guest drains it only at the interrupt
     /// endpoint's polling rate: more than 8 keys typed at QMP speed lose
-    /// keystrokes on the USB keyboard.
+    /// keystrokes on the USB keyboard. A wall-clock pause alone does not
+    /// hold when the guest falls behind (incident 0022): see `echo_prompt`.
     #[serde(default)]
     pub key_delay_ms: u64,
+    /// The guest prints this text before reading each line and echoes
+    /// every typed character on serial (the shell: `ari> `). The runner
+    /// then waits for it before the first key of each line and for each
+    /// key's echo before sending the next (`typing`, incident 0022), so
+    /// at most one key is queued in the device whatever the host load.
+    pub echo_prompt: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -606,6 +613,23 @@ mod tests {
         );
         for s in &all {
             assert!(!s.areas.is_empty(), "{}: no areas", s.name);
+        }
+    }
+
+    /// Incident 0022: more key events than QEMU's keyboards queue (16 in
+    /// usb-kbd and the i8042) can only be typed safely by waiting for the
+    /// guest's echo; a wall-clock delay overflows the queue under host load.
+    #[test]
+    fn repo_scenarios_typing_more_than_a_device_queue_wait_for_echoes() {
+        const DEVICE_QUEUE: usize = 16;
+        for s in load_all().expect("tests/qemu/*.toml must parse") {
+            let Some(h) = &s.host_input else { continue };
+            let events: usize = h.keys.iter().map(|k| 2 * k.split('+').count()).sum();
+            assert!(
+                events <= DEVICE_QUEUE || h.echo_prompt.is_some(),
+                "{}: {events} key events without echo_prompt",
+                s.name
+            );
         }
     }
 

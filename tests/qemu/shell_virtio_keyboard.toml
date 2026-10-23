@@ -1,7 +1,10 @@
 # Stage 2 (ADR 0013): the shell reads from the virtio-input keyboard. init launches the
 # console bridge with the two virtio_input services (keyboard and mouse); the
 # host types over QMP "cpus" + Enter and "shutdown" + Enter once it sees the
-# bridge serving, and the shell runs them.
+# bridge serving, and the shell runs them. Each key waits for the shell's
+# echo of the previous one (`echo_prompt`, incident 0022): virtio-input
+# drops events when the guest has no buffer posted, so typing on a fixed
+# rhythm can lose keys when the guest falls behind.
 name = "shell.virtio_keyboard"
 description = "arish with a virtio-input keyboard: the console bridge polls keyboard and mouse and only translates keys"
 level = "full"
@@ -11,6 +14,7 @@ timeout_secs = 60
 
 [host_input]
 marker = "CONSOLE_BRIDGE_READY"
+echo_prompt = "ari> "
 keys = ["c", "p", "u", "s", "ret", "s", "h", "u", "t", "d", "o", "w", "n", "ret"]
 mouse_rel = [3, 4]
 click = "left"

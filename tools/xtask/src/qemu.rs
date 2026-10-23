@@ -233,8 +233,20 @@ pub struct InputProbe<'a> {
     pub keys: &'a [String],
     pub mouse_rel: Option<(i32, i32)>,
     pub click: Option<&'a str>,
-    /// Pause after each key event (ms); none by default.
+    /// Minimum pause after each key event (ms); none by default.
     pub key_delay_ms: u64,
+    /// The guest prints this before reading each line and echoes every
+    /// typed character: each line waits for it and each key for its echo
+    /// before the next one goes out (`typing`, incident 0022).
+    pub echo_prompt: Option<&'a str>,
+}
+
+/// What typing with echo waits needs: the prompt, the serial capture to
+/// watch, and the flag that QEMU has exited.
+struct EchoWait {
+    prompt: String,
+    capture: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Minimal QMP client over a Unix socket: handshake and hand-written JSON
@@ -291,7 +303,9 @@ fn run_input_probe(
     mouse_rel: Option<(i32, i32)>,
     click: Option<&str>,
     key_delay: Duration,
+    echo: Option<EchoWait>,
 ) -> String {
+    use crate::typing::{self, Step};
     let mut qmp = match Qmp::connect(path) {
         Ok(q) => q,
         Err(e) => return format!("[host] QMP: no connection ({e})"),
@@ -326,27 +340,43 @@ fn run_input_probe(
             }
         }
         std::thread::sleep(Duration::from_millis(100));
-        // "a" presses and releases; "shift+dot" presses the modifiers, then the
-        // key, and releases them in reverse order.
-        for key in keys {
-            let parts: Vec<&str> = key.split('+').collect();
-            for part in &parts {
-                step(
-                    &mut qmp,
-                    format!(
-                        r#"{{"type":"key","data":{{"down":true,"key":{{"type":"qcode","data":"{part}"}}}}}}"#
-                    ),
+        // Without an echo to follow, every key is only paced by the delay.
+        let steps = match echo {
+            Some(_) => typing::plan(keys),
+            None => keys.iter().map(|k| Step::Key(k)).collect(),
+        };
+        let mut cursor = typing::Cursor::default();
+        for s in steps {
+            let needle = match s {
+                Step::Key(key) => {
+                    // "a" presses and releases; "shift+dot" presses the
+                    // modifiers, then the key, and releases them in reverse
+                    // order.
+                    let parts: Vec<&str> = key.split('+').collect();
+                    let presses = parts.iter().map(|p| (p, true));
+                    let releases = parts.iter().rev().map(|p| (p, false));
+                    for (part, down) in presses.chain(releases) {
+                        step(
+                            &mut qmp,
+                            format!(
+                                r#"{{"type":"key","data":{{"down":{down},"key":{{"type":"qcode","data":"{part}"}}}}}}"#
+                            ),
+                        )?;
+                        std::thread::sleep(key_delay);
+                    }
+                    continue;
+                }
+                Step::Prompt => echo.as_ref().map(|e| e.prompt.as_bytes().to_vec()),
+                Step::Echo(c) => Some(vec![c]),
+            };
+            if let (Some(e), Some(needle)) = (echo.as_ref(), needle) {
+                typing::wait_past(
+                    &mut cursor,
+                    &e.capture,
+                    &needle,
+                    typing::ECHO_TIMEOUT,
+                    &e.stop,
                 )?;
-                std::thread::sleep(key_delay);
-            }
-            for part in parts.iter().rev() {
-                step(
-                    &mut qmp,
-                    format!(
-                        r#"{{"type":"key","data":{{"down":false,"key":{{"type":"qcode","data":"{part}"}}}}}}"#
-                    ),
-                )?;
-                std::thread::sleep(key_delay);
             }
         }
         Ok(())
@@ -1158,6 +1188,8 @@ pub fn run_headless(
     // the console lines wait for `flood_ready`.
     let flood_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flood_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Typing that waits for echoes stops waiting once QEMU is gone.
+    let qemu_gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut flood_thread: Option<std::thread::JoinHandle<String>> = None;
     let mut timed_out = false;
     let mut killed = false;
@@ -1244,8 +1276,13 @@ pub fn run_headless(
                 let rel = p.mouse_rel;
                 let click = p.click.map(String::from);
                 let delay = Duration::from_millis(p.key_delay_ms);
+                let echo = p.echo_prompt.map(|prompt| EchoWait {
+                    prompt: prompt.to_string(),
+                    capture: Arc::clone(&captured),
+                    stop: Arc::clone(&qemu_gone),
+                });
                 input_thread = Some(std::thread::spawn(move || {
-                    run_input_probe(&path, &keys, rel, click.as_deref(), delay)
+                    run_input_probe(&path, &keys, rel, click.as_deref(), delay, echo)
                 }));
             }
             if input_thread.as_ref().is_some_and(|t| t.is_finished()) {
@@ -1255,6 +1292,7 @@ pub fn run_headless(
         std::thread::sleep(Duration::from_millis(20));
     };
     drop(stdin);
+    qemu_gone.store(true, std::sync::atomic::Ordering::SeqCst);
     if let Some(t) = probe_thread.take() {
         probe_result = t.join().ok();
     }

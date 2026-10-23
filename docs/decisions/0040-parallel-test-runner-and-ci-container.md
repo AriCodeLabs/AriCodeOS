@@ -89,8 +89,9 @@ contents) and failed with a misleading error.
    which shared `build/update-test/` and the HTTP server, no longer share
    anything and run concurrently. Only timing can still couple runs: a
    scenario whose host side assumes the guest keeps up in wall-clock time
-   is marked `serial = true` with the reason in its file. One is:
-   `usb.hid_fault` (incident 0019).
+   is marked `serial = true` with the reason in its file. One was:
+   `usb.hid_fault` (incident 0019), until the runner typed by the guest's
+   echo instead of the clock (incident 0022).
 
 5. **A CI container for `develop`.** `tools/docker/ci/` adds to the
    development image a script that keeps its own clone of the public

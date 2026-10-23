@@ -40,6 +40,7 @@ mod stack;
 mod test;
 #[cfg(test)]
 mod test_util;
+mod typing;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
