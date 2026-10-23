@@ -19,6 +19,8 @@
 
 extern crate alloc;
 
+pub mod idle;
+
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
 

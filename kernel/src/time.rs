@@ -37,14 +37,21 @@ pub fn uptime_us() -> u64 {
     }
 }
 
-fn rdtsc() -> u64 {
+/// The time stamp counter now.
+pub fn rdtsc() -> u64 {
     // SAFETY: rdtsc only reads the time stamp counter.
     unsafe { core::arch::x86_64::_rdtsc() }
 }
 
 /// TSC cycles since the first tick (for per-CPU idle time, stage 5).
 pub fn tsc_since_boot() -> u64 {
-    rdtsc().wrapping_sub(BOOT_TSC.load(Ordering::Relaxed))
+    tsc_since_boot_at(rdtsc())
+}
+
+/// TSC cycles from the first tick to TSC `tsc` (a sample of several
+/// counters taken at one instant, `sysinfo::IDLE`).
+pub fn tsc_since_boot_at(tsc: u64) -> u64 {
+    tsc.wrapping_sub(BOOT_TSC.load(Ordering::Relaxed))
 }
 
 /// TSC cycles in milliseconds; `None` before calibration.

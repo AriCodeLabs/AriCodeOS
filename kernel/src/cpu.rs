@@ -12,6 +12,8 @@
 
 use crate::arch::x86_64::gdt::Tables;
 use crate::arch::x86_64::msr;
+use crate::sync::IrqLock;
+use aricode_sched::idle::IdleClock;
 use core::arch::asm;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -56,8 +58,9 @@ pub struct Cpu {
     idle_running: AtomicBool,
     idle_tid: AtomicU32,
     tables: PerCpuCell<Tables>,
-    /// TSC cycles spent in `hlt` (stage 5, `sysinfo::IDLE`).
-    idle_cycles: AtomicU64,
+    /// TSC cycles with the idle thread running (`sysinfo::IDLE`, incident
+    /// 0020): written by this CPU in `set_current`, read by any CPU.
+    idle: IrqLock<IdleClock>,
 }
 
 pub const OFF_SELF: usize = 0;
@@ -88,15 +91,22 @@ impl Cpu {
             idle_running: AtomicBool::new(false),
             idle_tid: AtomicU32::new(u32::MAX),
             tables: PerCpuCell::new(Tables::new()),
-            idle_cycles: AtomicU64::new(0),
+            idle: IrqLock::new(IdleClock::new()),
         }
     }
 
-    pub fn idle_cycles(&self) -> u64 {
-        self.idle_cycles.load(Ordering::Relaxed)
+    /// TSC cycles this CPU's idle thread has been its running thread up to
+    /// TSC `now`, the current idle stretch included (`IdleClock`).
+    pub fn idle_cycles_at(&self, now: u64) -> u64 {
+        self.idle.lock().total(now)
     }
-    pub fn add_idle_cycles(&self, cycles: u64) {
-        self.idle_cycles.fetch_add(cycles, Ordering::Relaxed);
+    /// Same, up to this moment.
+    pub fn idle_cycles(&self) -> u64 {
+        self.idle_cycles_at(crate::time::rdtsc())
+    }
+    /// This CPU's idle clock as it is now (closed stretches and the open one).
+    pub fn idle_clock(&self) -> IdleClock {
+        *self.idle.lock()
     }
 
     pub fn index(&self) -> usize {
@@ -125,7 +135,15 @@ impl Cpu {
         self.idle_running.load(Ordering::Relaxed)
     }
     /// Thread that starts running on this CPU (only from it, with IF = 0).
+    /// Idle time is accounted here, at the switch (incident 0020): leaving
+    /// the idle thread closes the idle stretch, entering it opens one.
     pub fn set_current(&self, tid: u32, quantum: u32) {
+        let from_idle = self.idle_running.load(Ordering::Relaxed);
+        let to_idle = tid == self.idle_tid();
+        if from_idle || to_idle {
+            let now = crate::time::rdtsc();
+            self.idle.lock().switch(from_idle, to_idle, now);
+        }
         self.current.store(tid, Ordering::Relaxed);
         self.quantum_left.store(quantum, Ordering::Relaxed);
         self.idle_running

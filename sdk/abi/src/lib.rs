@@ -376,7 +376,10 @@ pub mod sysinfo {
     /// faults (Phase 33).
     pub const IOMMU: u64 = 6;
     /// Per-CPU idle time (stage 5): `u64` TSC cycles since boot, `u64`
-    /// online CPUs and, for each one, `u64` cycles spent in `hlt`.
+    /// online CPUs and, for each one, `u64` cycles its idle thread has been
+    /// its running thread (interrupts serviced meanwhile included; another
+    /// thread's time never), all sampled at the same TSC instant, so each
+    /// is at most the first value (incident 0020).
     pub const IDLE: u64 = 7;
     /// Recent kernel events (stage 5): [`EventEntry`] entries from oldest
     /// to newest, as many as fit in the buffer.
