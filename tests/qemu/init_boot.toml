@@ -1,6 +1,9 @@
 # Phase 15: without test= the kernel launches init from the initrd with the SPAWNER capability.
 # init launches services, sees a fault as Killed and checks that without MANAGE
-# processes cannot be created.
+# processes cannot be created. With selftest it also gives console_probe the
+# send side of a pair as its console (ADR 0047): the probe's lines reach the
+# pair and never the kernel console, and CONSOLE_FIRST refuses a handle that
+# is not an endpoint.
 name = "init.boot"
 description = "normal boot: init launches hello, sees kernel_read die and checks the SPAWNER capability"
 level = "smoke"
@@ -17,6 +20,7 @@ serial_contains = [
     "AriInit: kernel_read was killed by the kernel",
     "AriInit: crashy_driver crashed, restarting",
     "AriInit: crashy_driver restarted successfully",
+    "AriInit: session console: console_probe wrote to its endpoint; non-endpoint consoles refused",
     "AriInit: 9 PCI functions",
     "virtio-blk: device ready",
     "AriInit: file service ok",
@@ -29,4 +33,4 @@ serial_contains = [
     "[INFO ] init exited with code 0",
     "ARICODEOS_KERNEL_READY",
 ]
-serial_absent = ["KERNEL PANIC", "init killed", "[host] guest frames other than ARP and DHCP: 0"]
+serial_absent = ["KERNEL PANIC", "init killed", "console probe:", "[host] guest frames other than ARP and DHCP: 0"]

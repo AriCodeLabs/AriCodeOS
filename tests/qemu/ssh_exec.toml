@@ -4,7 +4,10 @@
 # quiet session shell launched by init; the last one powers the machine off
 # from the remote session. An idle TCP client connects first and never
 # identifies itself: sshd drops it after its authentication deadline and
-# then serves the real client.
+# then serves the real client. `run console_probe` checks ADR 0047: a
+# program run from a session writes to the session (its lines arrive with
+# the `[host] ssh|` prefix and never alone on the machine's console), and an
+# empty write does not end the session.
 name = "ssh.exec"
 description = "sshd: public-key login from the host's OpenSSH client, commands in session shells, shutdown over SSH"
 level = "full"
@@ -14,7 +17,7 @@ timeout_secs = 200
 
 [host_ssh]
 marker = "sshd: listening on port 22"
-commands = ["ls", "cat hola.txt", "write remote.txt written over ssh", "cat remote.txt", "update", "shutdown"]
+commands = ["ls", "cat hola.txt", "write remote.txt written over ssh", "cat remote.txt", "update", "run console_probe", "shutdown"]
 idle_client = true
 
 [expect]
@@ -34,7 +37,10 @@ serial_contains = [
     "[host] ssh| written over ssh",
     "[host] ssh| updater: no update sources: update add URL",
     "[host] ssh| update: updater exited with 21",
+    "[host] ssh| console probe: checks passed",
+    "[host] ssh| console probe: still writing after an empty write",
+    "[host] ssh| run: console_probe exited with 0",
     "[host] ssh exit 0",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "connection dropped", "Permission denied", "sshd: refused key"]
+serial_absent = ["KERNEL PANIC", "connection dropped", "Permission denied", "sshd: refused key", "\nconsole probe:", "\nupdater: no update sources"]

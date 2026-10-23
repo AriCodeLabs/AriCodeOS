@@ -61,10 +61,19 @@ pub fn call_handles(
     out: &mut [u8],
     handles_out: &mut [Handle],
 ) -> Result<(usize, usize), Error> {
+    let give_up = |e: Error| {
+        for h in extra {
+            let _ = sys::handle_close(*h);
+        }
+        Err(e)
+    };
     if extra.len() > MAX_EXTRA {
-        return Err(Error::Invalid);
+        return give_up(Error::Invalid);
     }
-    let (reply, reply_w) = sys::endpoint_create_pair()?;
+    let (reply, reply_w) = match sys::endpoint_create_pair() {
+        Ok(pair) => pair,
+        Err(e) => return give_up(e),
+    };
     let result = (|| {
         let mut handles = [Handle(0); MAX_EXTRA + 1];
         handles[0] = reply_w;

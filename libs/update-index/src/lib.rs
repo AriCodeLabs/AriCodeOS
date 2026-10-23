@@ -87,7 +87,8 @@ pub const LEGACY_URL_FILE: &str = "update_url";
 pub const HISTORY_FILE: &str = "history.log";
 /// The history keeps its most recent lines within this size.
 pub const HISTORY_MAX: usize = 2048;
-/// Output of the updater's last run (shown to remote sessions).
+/// Output of the updater's last run, kept for later reading (`cat`, or
+/// `fs-cat` on a dump of the disk).
 pub const UPDATER_LOG_FILE: &str = "last.log";
 /// The exchange between the updater and the installer, one file with three
 /// sections ([`lists::section`]) so the AriFS table (32 entries in all) is

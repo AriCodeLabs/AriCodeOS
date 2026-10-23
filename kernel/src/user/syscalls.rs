@@ -122,10 +122,11 @@ fn with_handles<R>(
 
 fn console_write(handle: Handle, ptr: u64, len: u64) -> Result<u64, Error> {
     const MAX: u64 = 4096;
-    let is_console = with_handles(|t| {
-        lookup(t, handle, Rights::WRITE).map(|o| matches!(o.kind, ObjectKind::Console))
-    })?;
-    if !is_console {
+    let console = with_handles(|t| lookup(t, handle, Rights::WRITE).cloned())?;
+    if !matches!(
+        console.kind,
+        ObjectKind::Console | ObjectKind::SessionConsole(_)
+    ) {
         return Err(Error::Invalid);
     }
     if len > MAX {
@@ -133,8 +134,38 @@ fn console_write(handle: Handle, ptr: u64, len: u64) -> Result<u64, Error> {
     }
     let bytes = process::copy_from_user(ptr, len)?;
     let text = core::str::from_utf8(&bytes).map_err(|_| Error::Invalid)?;
-    process::console_write_current(text);
+    match &console.kind {
+        ObjectKind::SessionConsole(output) => session_console_write(output, text.as_bytes())?,
+        _ => process::console_write_current(text),
+    }
     Ok(len)
+}
+
+/// How long a session console write waits for room in the session's queue,
+/// per message (the session shell's own writes wait as long).
+const SESSION_CONSOLE_WAIT_MS: u64 = 2000;
+
+/// Text for a session console goes to its endpoint in messages of at most
+/// `IPC_MAX_DATA` bytes and never as an empty message, which the session
+/// reader takes as the end of the session (ADR 0047).
+fn session_console_write(output: &Cap, text: &[u8]) -> Result<(), Error> {
+    let endpoint = output.object();
+    if endpoint.is_revoked() {
+        return Err(Error::Revoked);
+    }
+    let ObjectKind::Endpoint(endpoint) = &endpoint.kind else {
+        // `spawn_from_bytes` only wraps endpoints.
+        return Err(Error::Invalid);
+    };
+    for chunk in text.chunks(IPC_MAX_DATA) {
+        endpoint.send_with(SESSION_CONSOLE_WAIT_MS, || {
+            Ok(Message {
+                data: chunk.to_vec(),
+                handles: Vec::new(),
+            })
+        })?;
+    }
+    Ok(())
 }
 
 fn console_read(handle: Handle, ptr: u64, len: u64, timeout_ms: u64) -> Result<u64, Error> {
@@ -616,8 +647,12 @@ fn spawn_from_bytes(
 ) -> Result<u64, Error> {
     let handles_len = aricode_abi::spawn_limits::handles(limits) as u64;
     let dma_quota = aricode_abi::spawn_limits::memory_kib(limits) as u64 * 1024;
+    let console_first = aricode_abi::spawn_limits::console_first(limits);
     if handles_len as usize > IPC_MAX_HANDLES * 4 {
         return Err(Error::TooBig);
+    }
+    if console_first && handles_len == 0 {
+        return Err(Error::Invalid);
     }
     let raw_handles = process::copy_from_user(handles_ptr, handles_len * 4)?;
     let user_handles: Vec<Handle> = raw_handles
@@ -628,16 +663,26 @@ fn spawn_from_bytes(
         .collect();
     // Validate all before removing any.
     distinct(&user_handles)?;
-    let extra: Vec<(Cap, Rights)> = with_handles(|t| {
+    let mut extra: Vec<(Cap, Rights)> = with_handles(|t| {
         for uh in &user_handles {
             lookup(t, *uh, Rights::TRANSFER)?;
+        }
+        // A session console wraps an endpoint (`Invalid` otherwise) that it
+        // can write to (`Denied` for a side without `WRITE`) (ADR 0047).
+        if console_first {
+            let first = lookup(t, user_handles[0], Rights::TRANSFER)?;
+            if !matches!(first.kind, ObjectKind::Endpoint(_)) {
+                return Err(Error::Invalid);
+            }
+            lookup(t, user_handles[0], Rights::WRITE)?;
         }
         user_handles
             .iter()
             .map(|uh| t.take(*uh).map_err(abi_error))
             .collect()
     })?;
-    let pid = match process::spawn_with_caps(name, elf, extra, arg, dma_quota) {
+    let session_console = console_first.then(|| extra.remove(0).0);
+    let pid = match process::spawn_with_caps(name, elf, session_console, extra, arg, dma_quota) {
         Ok(pid) => pid,
         Err(e) => {
             warn!("process_spawn '{name}': {e}");

@@ -48,6 +48,7 @@ later step of the same session (reboots, `update`, `upgrade --channel dev`,
 - If it recurs, read `diag` before anything else on the same boot: the
   kernel event list shows whether a `shell` process was created for the
   command, which separates "never reached the shell" from "output lost".
-- Related follow-up already open: programs run from an SSH shell write on
-  the physical console (ADR 0044); a shell that took its console from the
-  wrong place would look exactly like this.
+- Related: programs run from an SSH shell wrote on the physical console
+  (ADR 0044 follow-up), so output going to the wrong place looked like
+  this. ADR 0047 (2026-10-23) sends their output to the session; a
+  recurrence after it is not that.

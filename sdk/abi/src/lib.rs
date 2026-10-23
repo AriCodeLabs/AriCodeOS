@@ -12,15 +12,17 @@
 //! the handles [`handle::SELF_PROCESS`], [`handle::MAIN_THREAD`] and
 //! [`handle::CONSOLE`].
 //!
-//! During `0.x` the ABI may change (section 74). Current version: 6
-//! (ADR 0044: `ipc_receive_any` also waits on interrupt lines). Version 5
+//! During `0.x` the ABI may change (section 74). Current version: 7
+//! (ADR 0047: `spawn_limits::CONSOLE_FIRST` gives the child a session
+//! console). Version 6 (ADR 0044): `ipc_receive_any` also waits on
+//! interrupt lines. Version 5
 //! added `mmio_unmap` (ADR 0038: a mapping keeps its DMA buffer alive);
 //! version 4 `Error::PeerClosed`, `endpoint_create_pair` and
 //! `endpoint_close` (ADR 0030).
 
 #![no_std]
 
-pub const ABI_VERSION: u32 = 6;
+pub const ABI_VERSION: u32 = 7;
 
 /// Kernel base signature (SHA-512), required to check and verify the origin
 /// and authorship of an AriCodeOS build. It is part of the fixed ABI: it is
@@ -355,9 +357,15 @@ pub mod spawn_from {
     }
 }
 
-/// Sixth argument of `process_spawn`: number of handles (bits 0..7) and
-/// DMA memory limit of the child in KiB (bits 8..). 0 KiB = unlimited.
+/// Sixth argument of `process_spawn`: number of handles (bits 0..7), DMA
+/// memory limit of the child in KiB (bits 8..39; 0 KiB = unlimited) and
+/// [`CONSOLE_FIRST`](spawn_limits::CONSOLE_FIRST) (bit 63).
 pub mod spawn_limits {
+    /// The first handle, an endpoint with `WRITE`, becomes the child's
+    /// console at [`handle::CONSOLE`](super::handle::CONSOLE) as a session
+    /// console (ADR 0047); the rest start at `0x0001_0004`.
+    pub const CONSOLE_FIRST: u64 = 1 << 63;
+
     pub const fn pack(handles: usize, memory_kib: u32) -> u64 {
         (handles as u64 & 0xFF) | (memory_kib as u64) << 8
     }
@@ -366,6 +374,9 @@ pub mod spawn_limits {
     }
     pub const fn memory_kib(raw: u64) -> u32 {
         (raw >> 8) as u32
+    }
+    pub const fn console_first(raw: u64) -> bool {
+        raw & CONSOLE_FIRST != 0
     }
 }
 
@@ -1141,6 +1152,16 @@ pub const fn user_range_ok(ptr: u64, len: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn spawn_limits_keep_the_console_flag_apart() {
+        use super::spawn_limits::*;
+        let raw = pack(3, u32::MAX) | CONSOLE_FIRST;
+        assert_eq!(handles(raw), 3);
+        assert_eq!(memory_kib(raw), u32::MAX);
+        assert!(console_first(raw));
+        assert!(!console_first(pack(0xFF, u32::MAX)));
+    }
+
     #[test]
     fn kernel_base_signature_is_frozen() {
         let sig = super::KERNEL_BASE_SIGNATURE;

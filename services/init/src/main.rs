@@ -59,6 +59,64 @@ fn run(name: &str, arg: u64) -> Result<u64, Error> {
     result
 }
 
+/// Boot check of ADR 0047 (`selftest`): `console_probe` spawned with the
+/// send side of a new pair as its console writes its lines to the receive
+/// side, not to the kernel console; `CONSOLE_FIRST` with a handle that is
+/// not an endpoint (`Invalid`), with an endpoint side it cannot write to
+/// (`Denied`) or with no handle (`Invalid`) is refused and takes nothing.
+fn session_console_check() -> bool {
+    let Ok((output, console)) = sys::endpoint_create_pair() else {
+        say(b"session console: cannot create the pair");
+        return false;
+    };
+    let spawned = sys::process_spawn_limited(SPAWNER, "console_probe", 0, &[console], 0, true);
+    let exit = spawned.and_then(|child| {
+        let code = sys::process_wait(child, TIMEOUT_INFINITE);
+        let _ = sys::handle_close(child);
+        code
+    });
+    let mut text = [0u8; 256];
+    let mut len = 0;
+    let mut none = [Handle(0); 1];
+    while let Ok((n, _)) = sys::ipc_receive(output, &mut text[len..], &mut none, 0) {
+        len += n;
+        if n == 0 || len == text.len() {
+            break;
+        }
+    }
+    let received = core::str::from_utf8(&text[..len]).unwrap_or("");
+    if exit != Ok(0) || !received.contains("console probe: checks passed\n") {
+        let _ = sys::handle_close(output);
+        say(b"session console: console_probe did not write its lines to its endpoint");
+        return false;
+    }
+    // The receive side has no WRITE: refused, and still ours afterwards.
+    let receive_side = sys::process_spawn_limited(SPAWNER, "hello", 0, &[output], 0, true);
+    let kept_output = sys::object_kind(output) == Ok(sys::kind::ENDPOINT);
+    let _ = sys::handle_close(output);
+    if receive_side != Err(Error::Denied) || !kept_output {
+        say(b"session console: CONSOLE_FIRST accepted an endpoint side without WRITE");
+        return false;
+    }
+    let Ok(system) = sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER) else {
+        say(b"session console: cannot duplicate SYSTEM");
+        return false;
+    };
+    let not_endpoint = sys::process_spawn_limited(SPAWNER, "hello", 0, &[system], 0, true);
+    let kept_system = sys::object_kind(system) == Ok(sys::kind::SYSTEM);
+    let _ = sys::handle_close(system);
+    if not_endpoint != Err(Error::Invalid) || !kept_system {
+        say(b"session console: CONSOLE_FIRST accepted a handle that is not an endpoint");
+        return false;
+    }
+    if sys::process_spawn_limited(SPAWNER, "hello", 0, &[], 0, true) != Err(Error::Invalid) {
+        say(b"session console: CONSOLE_FIRST accepted a spawn without handles");
+        return false;
+    }
+    say(b"session console: console_probe wrote to its endpoint; non-endpoint consoles refused");
+    true
+}
+
 /// Finds the first PCI function with `vendor:device` and returns its index.
 fn find_pci(vendor: u16, device: u16) -> Option<u64> {
     find_pci_from(vendor, device, 0)
@@ -1807,7 +1865,7 @@ impl Broker {
     /// Serves at most one request (waits up to `timeout_ms`).
     fn serve_one(&mut self, timeout_ms: u64, sup: &Supervisor) {
         let mut msg = [0u8; LaunchRequest::LEN];
-        let mut handles = [Handle(0); 1];
+        let mut handles = [Handle(0); 2];
         let Ok((n, nh)) = sys::ipc_receive(self.endpoint, &mut msg, &mut handles, timeout_ms)
         else {
             return;
@@ -1816,31 +1874,43 @@ impl Broker {
             return;
         }
         let reply_to = handles[0];
+        // A launch's console (ADR 0047); closed on every refusal below.
+        let console = (nh == 2).then_some(handles[1]);
+        let refuse = |status| {
+            if let Some(c) = console {
+                let _ = sys::handle_close(c);
+            }
+            let reply = LaunchReply::status(status);
+            let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
+            let _ = sys::handle_close(reply_to);
+        };
         // The same endpoint serves two protocols: launches (6) and service
         // status (7); the first byte tells them apart.
         if let Some(req) = status::Request::decode(&msg[..n]) {
+            if let Some(c) = console {
+                let _ = sys::handle_close(c);
+            }
             let reply = sup.status(req.index);
             let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
             let _ = sys::handle_close(reply_to);
             return;
         }
         let Some(req) = LaunchRequest::decode(&msg[..n]) else {
-            let reply = LaunchReply::status(LaunchStatus::Invalid);
-            let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
-            let _ = sys::handle_close(reply_to);
-            return;
+            return refuse(LaunchStatus::Invalid);
         };
+        // A console comes only with the flag that announces it, and never
+        // for a detached program, which may outlive the session.
+        if req.has_console() != console.is_some() || (req.has_console() && req.is_detached()) {
+            return refuse(LaunchStatus::Invalid);
+        }
         // The slot is reserved before launching: no slot, no process.
         let Some(slot) = self.running.iter().position(Option::is_none) else {
             sys::print(b"AriInit: ");
             sys::print(req.name_str().as_bytes());
             sys::print(b": running program limit reached\n");
-            let reply = LaunchReply::status(LaunchStatus::Limit);
-            let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
-            let _ = sys::handle_close(reply_to);
-            return;
+            return refuse(LaunchStatus::Limit);
         };
-        match self.launch(req.name_str(), req.arg) {
+        match self.launch(req.name_str(), req.arg, console) {
             Launched::Reply(reply) => {
                 let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
                 let _ = sys::handle_close(reply_to);
@@ -1866,8 +1936,18 @@ impl Broker {
     /// Reads the manifest (`NAME.manifest` in the initrd, or the one in the
     /// package `apps/NAME.aripkg` in AriFS if the program is installed,
     /// ADR 0017), applies the policy and launches the program; its exit is
-    /// collected by `poll_launches`.
-    fn launch(&mut self, name: &str, arg: u64) -> Launched {
+    /// collected by `poll_launches`. `console`, if any, becomes the
+    /// program's console (ADR 0047) and is closed if the launch fails.
+    fn launch(&mut self, name: &str, arg: u64, console: Option<Handle>) -> Launched {
+        // The prepared duplicates close themselves if any error path returns
+        // before transferring them (`Granted::take` hands them to the
+        // kernel). Previously, a denial after granting SYSTEM leaked one table
+        // entry per attempt. The console goes first: the kernel takes it as
+        // the first handle.
+        let mut granted = Granted::new();
+        if let Some(c) = console {
+            granted.push(c);
+        }
         let mut path = [0u8; 48];
         let Some(path) = join(name, ".manifest", &mut path) else {
             return Launched::Reply(LaunchReply::status(LaunchStatus::Invalid));
@@ -1964,11 +2044,6 @@ impl Broker {
             sys::print(b"\n");
             return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
         }
-        // The prepared duplicates close themselves if any error path returns
-        // before transferring them (`Granted::take` hands them to the
-        // kernel). Previously, a denial after granting SYSTEM leaked one table
-        // entry per attempt.
-        let mut granted = Granted::new();
         let mut needs_hw = false;
         if caps.contains(Caps::SYSTEM) {
             match sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER) {
@@ -2067,9 +2142,14 @@ impl Broker {
         // on any failure the guard closes them on exit (closing one already
         // taken returns BadHandle, which is ignored).
         let spawned = match source {
-            Source::Initrd => {
-                sys::process_spawn_limited(SPAWNER, name, arg, granted.handles(), memory_kib)
-            }
+            Source::Initrd => sys::process_spawn_limited(
+                SPAWNER,
+                name,
+                arg,
+                granted.handles(),
+                memory_kib,
+                console.is_some(),
+            ),
             Source::Installed {
                 elf_offset,
                 elf_len,
@@ -2085,6 +2165,7 @@ impl Broker {
                     arg,
                     granted.handles(),
                     memory_kib,
+                    console.is_some(),
                 )
             }
         };
@@ -2261,6 +2342,10 @@ fn main(arg: u64) -> u64 {
     match run("crashy_driver", 1) {
         Ok(0) => say(b"crashy_driver restarted successfully"),
         _ => return 7,
+    }
+    // 5b. A program's console can be an endpoint (ADR 0047).
+    if selftest && !session_console_check() {
+        return 47;
     }
     // 6. PCI devices as seen from user space.
     let mut buf = [0u8; 20];

@@ -1107,8 +1107,10 @@ latter briefly to add the region.
 
 ## Application sandbox (Phase 28)
 
-- `process_spawn` receives in its sixth argument the child's handle count and
-  DMA memory quota (`spawn_limits::pack`); the process stores it
+- `process_spawn` receives in its sixth argument the child's handle count,
+  DMA memory quota (`spawn_limits::pack`) and, since ABI 7, the
+  `CONSOLE_FIRST` flag (the first handle becomes a session console, ADR
+  0047); the process stores the quota
   (`dma_quota`, `dma_used`) and `dma_alloc` charges the size rounded up to a
   page, returning `Limit` when it is exceeded. The quota is cumulative: what was
   reserved is not returned on free (DMA buffers live as long as the
@@ -1651,6 +1653,18 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   input and output are IPC endpoints instead of the console. The shell keeps
   unconsumed input between lines (`Input`), so a command and the `exit` that
   follows can arrive in one message.
+- Programs the session shell waits for (`run`, the updater, the installer)
+  get the session as their console (ADR 0047): the shell sends a duplicate
+  of its output endpoint's send side with the launch request (flag
+  `CONSOLE`), the broker passes it with `spawn_limits::CONSOLE_FIRST`, and
+  the kernel puts a *session console* at the child's `0x0001_0003`. It
+  reports `CONSOLE`; `console_write` sends the text to the endpoint in
+  messages of at most `IPC_MAX_DATA` bytes (never an empty one, which sshd
+  reads as the end of the session), waiting up to 2 s for room per message;
+  `ipc_send`, `console_read` and `console_inject` refuse it and it cannot be
+  transferred. Detached launches and the console shell keep the kernel
+  console. Scenarios: `init.boot` (selftest check with a pair), `ssh.exec`
+  (`run console_probe`).
 - Tests: `[host_ssh]` in scenarios (generated client key, `authorized_keys`
   installed, a host port chosen per run forwarded to 22, ADR 0040); `ssh.exec`.
 
