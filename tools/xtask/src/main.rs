@@ -37,6 +37,7 @@ mod ports;
 mod qemu;
 mod scenario;
 mod stack;
+mod suite_lock;
 mod test;
 #[cfg(test)]
 mod test_util;

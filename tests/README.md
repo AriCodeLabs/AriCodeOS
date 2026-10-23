@@ -228,8 +228,7 @@ available memory holds at 1 GiB each (`MemAvailable`, or the container's
 `--memory` limit, which also caps an explicit `--jobs`). `--jobs 1` runs
 them one after another in listed order as before. On the reference host
 (16 CPUs) test containers get `--cpus 10 --memory 12g --memory-swap 12g`
-(README.md, "Docker"), which gives 10 and 6 jobs, and one suite runs at a
-time. With several jobs the scenarios that run alone go first, then the
+(README.md, "Docker"), which gives 10 and 6 jobs. With several jobs the scenarios that run alone go first, then the
 longest (the time of their previous run, kept in
 `build/scenarios/<name>/elapsed`), but the output is the same whatever
 finished first: each scenario's block (its PASS/FAIL line, the log of a
@@ -255,9 +254,27 @@ What keeps concurrent runs apart:
   network cannot remap them (`guestfwd` refuses the virtual host 10.0.2.2,
   and has no UDP). They are stateless, so one set serves every scenario of
   the suite; it is taken before anything is built, and a second suite in
-  the same network namespace stops at once with a message saying so. Run
-  concurrent suites in separate containers (README.md, "Docker"): each has
-  its own network namespace.
+  the same network namespace (which the suite lock below already holds
+  back) would stop at once with a message saying so.
+
+**One suite at a time on the host.** Before its first scenario, `cargo
+xtask test` (any level but `unit`) takes an exclusive `flock` on
+`ARICODEOS_SUITE_LOCK`, by default `$HOME/.cache/aricodeos-lock/suite.lock`
+(`tools/xtask/src/suite_lock.rs`), and holds it until it exits. A second
+suite, on the host or in any container, waits and prints the holder:
+
+```text
+[xtask] waiting for another QEMU suite on this host (lock /home/u/.cache/aricodeos-lock/suite.lock; holder: pid 4242; host 3f2c1a9b (container); checkout /home/u/AriCodeOS; head 1a2b3c4; started 2026-10-23T02:00:00Z; suite cargo xtask test, level Full, --cpus 4)
+```
+
+Containers mount the host's directory at `/run/aricodeos-lock` (the
+development image sets `ARICODEOS_SUITE_LOCK` there; README.md, "Docker").
+Inside a container without that mount a QEMU suite refuses to start: its
+lock would be private to the container and exclude nothing. The CI
+container takes the same lock with `flock` before its first test pass and
+releases it after the last one, and its passes skip taking it again
+(`ARICODEOS_SUITE_LOCK_HELD`). The lock is the kernel's: it goes away with
+the process that held it, however it ended.
 
 `serial = true` makes a scenario run with nothing else at the same time.
 `network.deep_path` has it (the reason is in its file). `usb.hid_fault` had

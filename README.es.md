@@ -79,6 +79,7 @@ docker run --rm -it -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/car
     --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask check
 docker run --rm -it --cpus 10 --memory 12g --memory-swap 12g \
     -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/cargo/registry \
+    -v "$HOME/.cache/aricodeos-lock":/run/aricodeos-lock \
     --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask test --all
 ```
 
@@ -97,9 +98,17 @@ por CPU que el contenedor puede usar, dos tercios de eso con `--cpus`
 mayor que 1, como mucho 10 y 6, y 1 GiB de su memoria por ejecución; ver
 `tests/README.md`, "Parallel runs"). Da a los contenedores de pruebas
 `--cpus 10 --memory 12g --memory-swap 12g` en el equipo de referencia (16
-CPU) para que la máquina conserve margen y no se caliente, y ejecuta una
-sola suite a la vez. Cada contenedor tiene su propio espacio de red, así
-que una suite en un contenedor nunca choca en puertos con otra en el
+CPU) para que la máquina conserve margen y no se caliente. En toda la
+máquina corre una sola suite de QEMU a la vez: `cargo xtask test` toma un
+cerrojo exclusivo sobre `$HOME/.cache/aricodeos-lock/suite.lock` antes de su
+primer escenario y una segunda suite espera, diciendo quién lo tiene
+(`[xtask] waiting for another QEMU suite on this host (lock ...; holder:
+pid, equipo, checkout, HEAD, inicio, suite)`). Los contenedores lo comparten
+con el montaje `-v "$HOME/.cache/aricodeos-lock":/run/aricodeos-lock` de
+arriba; dentro de un contenedor sin él, una suite de QEMU se niega a
+empezar, porque su cerrojo no protegería nada. Las pruebas unitarias y
+`check` no toman cerrojo. Cada contenedor tiene su propio espacio de red,
+así que una suite en un contenedor nunca choca en puertos con otra en el
 equipo o en otro contenedor (ADR 0040).
 
 #### Pruebas continuas
@@ -119,8 +128,8 @@ mkdir -p ~/aricodeos-ci-reports
 docker run -d --name aricodeos-ci --restart unless-stopped \
     --cpus 10 --memory 12g --memory-swap 12g --cpu-shares 512 \
     -v aricodeos-ci-work:/work -v aricodeos-ci-cargo:/usr/local/cargo/registry \
-    -v ~/aricodeos-ci-reports:/reports --user "$(id -u):$(id -g)" \
-    aricodeos-ci --loop
+    -v ~/aricodeos-ci-reports:/reports -v "$HOME/.cache/aricodeos-lock":/run/aricodeos-lock \
+    --user "$(id -u):$(id -g)" aricodeos-ci --loop
 docker logs -f aricodeos-ci                # progreso; informes en ~/aricodeos-ci-reports/latest/
 ```
 
@@ -131,9 +140,11 @@ prueba otra rama y `--jobs N` fija la concurrencia. Las suites corren una
 tras otra, con nice 10, y `--cpus`, `--memory` y `--cpu-shares` evitan que
 el contenedor se quede con la máquina: el runner calcula sus trabajos a
 partir de ellos (10 CPU dan 10 trabajos, 6 en la pasada `--cpus 4`), así
-que el desarrollo sigue a su lado. Detenlo (`docker stop aricodeos-ci`)
-antes de ejecutar otra suite en la misma máquina. Un fallo en su informe es
-un incidente (`docs/WORKFLOW.md`).
+que el desarrollo sigue a su lado. Sus dos pasadas de pruebas corren con el
+cerrojo de suites tomado (antes de la primera, suelto tras la segunda): una
+suite iniciada entretanto en el equipo o en otro contenedor las espera, y la
+CI la espera a ella, así que nadie tiene que detener el contenedor a mano.
+Un fallo en su informe es un incidente (`docs/WORKFLOW.md`).
 
 Para probar el sistema sin compilarlo, `tools/docker/try/Dockerfile` mete la
 imagen del pendrive en una imagen que la arranca en QEMU con el shell `ari>`

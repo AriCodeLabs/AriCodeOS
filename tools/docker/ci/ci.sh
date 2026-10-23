@@ -21,6 +21,14 @@
 # first. --quick runs `check` and the default test level only: it is for
 # trying the container itself.
 #
+# One QEMU suite at a time on the whole host (ADR 0040): the test passes
+# run holding the host's suite lock (ARICODEOS_SUITE_LOCK, the host's
+# $HOME/.cache/aricodeos-lock mounted at /run/aricodeos-lock), taken with
+# flock before the first pass and released after the last one is
+# collected, so no other suite runs between them; the passes inherit it
+# (ARICODEOS_SUITE_LOCK_HELD). Without the mount the run fails instead of
+# testing beside another suite.
+#
 # The repository is public and fetched over https: no credentials.
 set -u
 
@@ -43,7 +51,7 @@ while [ $# -gt 0 ]; do
         --pause) pause=$2; shift 2 ;;
         --loop) loop=true; shift ;;
         --quick) quick=true; shift ;;
-        -h|--help) sed -n '5,26p' "$0"; exit 0 ;;
+        -h|--help) sed -n '5,32p' "$0"; exit 0 ;;
         *) echo "aricodeos-ci: unknown option $1 (see --help)" >&2; exit 2 ;;
     esac
 done
@@ -65,6 +73,34 @@ log() {
     echo "[aricodeos-ci $(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
 }
 
+lock=${ARICODEOS_SUITE_LOCK:-/run/aricodeos-lock/suite.lock}
+
+# Takes the host's suite lock on descriptor 9, waiting (and saying for
+# whom) while another suite holds it, and writes this run as the holder.
+# Fails when the lock's directory is not a mount point: a lock private to
+# this container would exclude nothing.
+lock_suites() {
+    lockdir=$(dirname "$lock")
+    if ! awk -v d="$lockdir" '$5 == d { found = 1 } END { exit !found }' /proc/self/mountinfo; then
+        log "suite lock: $lockdir is not mounted from the host (-v \"\$HOME/.cache/aricodeos-lock\":/run/aricodeos-lock, README.md \"Docker\"); not testing"
+        return 1
+    fi
+    exec 9>>"$lock" || return 1
+    if ! flock -n 9; then
+        log "waiting for another QEMU suite on this host (lock $lock; holder: $(tr '\n' ';' <"$lock" | sed 's/;$//; s/;/; /g'))"
+        flock 9 || return 1
+    fi
+    printf 'pid %s\nhost %s (container)\ncheckout %s\nhead %s\nstarted %s\nsuite aricodeos-ci, %s\n' \
+        $$ "$(cat /proc/sys/kernel/hostname)" "$src" "$short" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "$1" >"$lock"
+    export ARICODEOS_SUITE_LOCK_HELD="aricodeos-ci pid $$"
+}
+
+unlock_suites() {
+    unset ARICODEOS_SUITE_LOCK_HELD
+    exec 9>&-
+}
+
 # Clones on first use, then fetches the branch; prints the head commit.
 fetch() {
     if [ ! -d "$src/.git" ]; then
@@ -83,7 +119,8 @@ step() {
     shift
     log "$name: $*"
     t0=$(date +%s)
-    (cd "$src" && nice -n 10 "$@") >"$dir/$name.log" 2>&1
+    # The lock's descriptor stays with this script, not with QEMU.
+    (cd "$src" && nice -n 10 "$@" 9>&-) >"$dir/$name.log" 2>&1
     status=$?
     t=$(( $(date +%s) - t0 ))
     if [ $status -eq 0 ]; then result=PASS; else result=FAIL; failed_steps=$((failed_steps + 1)); fi
@@ -122,15 +159,26 @@ run_once() {
     set -- ${jobs:+--jobs "$jobs"}
     step check cargo xtask check
     if $quick; then
-        step test cargo xtask test "$@"
-        collect test
         tests="test"
+        suite="default level"
     else
-        step test-1cpu cargo xtask test --all "$@"
-        collect test-1cpu
-        step test-4cpus cargo xtask test --all --cpus 4 "$@"
-        collect test-4cpus
         tests="test-1cpu test-4cpus"
+        suite="test --all and --all --cpus 4"
+    fi
+    if lock_suites "$suite"; then
+        if $quick; then
+            step test cargo xtask test "$@"
+            collect test
+        else
+            step test-1cpu cargo xtask test --all "$@"
+            collect test-1cpu
+            step test-4cpus cargo xtask test --all --cpus 4 "$@"
+            collect test-4cpus
+        fi
+        unlock_suites
+    else
+        printf '%-12s %s  %s\n' lock FAIL "host suite lock unavailable (container log)" >>"$dir/steps.txt"
+        failed_steps=$((failed_steps + 1))
     fi
     total=$(( $(date +%s) - run_start ))
     if [ $failed_steps -eq 0 ]; then verdict=PASS; else verdict=FAIL; fi

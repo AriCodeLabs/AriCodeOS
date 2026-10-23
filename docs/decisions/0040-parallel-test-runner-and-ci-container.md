@@ -61,7 +61,7 @@ contents) and failed with a misleading error.
    that with `--cpus` above 1, at most 6 (each such guest keeps several
    host threads busy under TCG): the owner's limits for the reference host
    (2026-10-23), which also runs test containers with `--cpus 10 --memory
-   12g --memory-swap 12g` and one suite at a time. Never more runs than the
+   12g --memory-swap 12g` and one suite at a time (point 6). Never more runs than the
    available memory holds at 1 GiB each (`MemAvailable`, or a cgroup's
    `memory.max` minus what it uses beyond reclaimable page cache), an
    explicit `--jobs` included; measured QEMU resident sets stayed near
@@ -107,6 +107,24 @@ contents) and failed with a misleading error.
    runner sizes its jobs from those limits, so development continues
    beside it. A failure in its report is an incident.
 
+6. **One suite at a time on the host, enforced** (added 2026-10-23,
+   incident 0022 follow-up). Running two suites at once was a rule for
+   people and agents (`docker stop aricodeos-ci` first), and it was broken
+   twice in one day by agents that could not stop the CI container.
+   `cargo xtask test` at any QEMU level now takes an exclusive `flock` on
+   `ARICODEOS_SUITE_LOCK` (default `$HOME/.cache/aricodeos-lock/suite.lock`,
+   `tools/xtask/src/suite_lock.rs`) before the test hosts start, writes
+   who holds it (pid, host or container id, checkout, HEAD, start time,
+   suite) and keeps it until it exits; a second suite waits and prints that
+   holder. Containers mount the host directory at `/run/aricodeos-lock`
+   (the development image points `ARICODEOS_SUITE_LOCK` there); a QEMU
+   suite inside a container without the mount refuses to start, because
+   its lock would be private (fail closed). The CI script holds the lock
+   with `flock` from before its first test pass until its last report is
+   collected, and its passes inherit it (`ARICODEOS_SUITE_LOCK_HELD`), so
+   nothing slips in between the two passes. `flock` is released by the
+   kernel when its holder ends, so a crashed suite leaves nothing to clean.
+
 ## Results
 
 Reference host (16 CPUs, 32 GiB), inside the development image limited to
@@ -136,6 +154,8 @@ marked `serial`).
   placeholder; a new fixed port is only acceptable for something a guest
   test program has compiled in.
 - One suite per network namespace remains, for the three compiled-in
-  ports; Docker containers are separate namespaces.
+  ports; Docker containers are separate namespaces. One suite per host is
+  enforced by the suite lock (point 6): containers must mount its
+  directory to run QEMU scenarios.
 - A scenario that depends on timing under load would now show it; it is a
   bug to fix (or a reason recorded here to run it alone), never a retry.
