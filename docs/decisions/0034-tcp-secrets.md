@@ -82,7 +82,9 @@ the sense of RFC 6528.
    Incident 0014's plan item 3 (wait for entropy, `net isn no entropy`)
    stays superseded: the kernel reports a source, not a readiness state,
    so there is still nothing to wait for. Saving a kernel seed across
-   boots remains future work.
+   boots, future work when this was written, is ADR 0043: with a carried
+   seed mixed in netd prints `tcp secret from kernel entropy (TSC +
+   interrupts + carried seed)` and records no weak event.
 5. **Host tests** (`libs/net`): the ISN differs across secrets for one
    tuple and across tuples for one secret (by more than 2^16, never a
    neighbour), grows by 250 per millisecond for one tuple and secret and
@@ -120,6 +122,8 @@ the sense of RFC 6528.
   persisted seed does not help netd, which has no file service. The
   kernel's generator, not each service, is where the entropy question is
   answered (ADR 0025, "Entropy"). Its source is visible since ADR 0039
-  (`net tcp secret weak` when it is not a hardware one); saving a seed
-  across boots at kernel level is future work. Whether the laptop has
+  (`net tcp secret weak` when it is not a hardware one). Since ADR 0043
+  AriBoot hands the kernel a seed carried from the previous boot before
+  any process runs, so netd's secret also holds what earlier boots
+  gathered; only the first boot of a disk is weak. Whether the laptop has
   `rdrand` is read from the `entropy` line of `diag` (`docs/hardware.md`).

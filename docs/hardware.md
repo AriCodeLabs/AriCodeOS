@@ -177,6 +177,20 @@ the SSH host key on its stick was made on the build host
 (ADR 0034) and any key generated on the machine rest on TSC and interrupt
 timing only, which makes a kernel seed saved across boots (open in ADR 0034
 and incident 0014) worth doing for this machine.
+
+**Carried seed (ADR 0043).** AriBoot now carries a kernel seed across
+boots in sectors 1 and 2 of the stick's `ARIBOOT` partition. A freshly
+flashed stick ships none, so its first boot still reads `entropy  TSC +
+interrupts (N samples, M events): weak, no carried seed (first boot)` with
+`random seed missing (code 2)` among the events, and init writes the first
+seed (`AriInit: random seed saved for the next boot (early, generation
+1)`, then generation 2 after the boot services). From the second boot on
+`diag` should read `entropy  TSC + interrupts + carried seed`, with no
+`net tcp secret weak`; AriBoot's screen line is `seed: carried seed of
+generation N taken, successor of generation N+1 saved`. Not yet read on the
+laptop. `random seed not saved (code 4)` means AriBoot could not write the
+stick (the seed was then not used); `random seed unreadable (code 3)` a
+damaged store, which init rewrites.
 It decides the quality of sshd's keys (ADR 0025) and of netd's TCP secret
 (ADR 0034). Not yet read on the laptop (2026-10-22).
 

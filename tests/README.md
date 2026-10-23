@@ -163,6 +163,9 @@ serial_contains = ["..."]
 serial_absent = ["..."]         # every capture ends with "[host] guest frames other than ARP and DHCP: N", counted in the
                                 # QEMU filter-dump capture of the guest network (net.pcap in the scenario directory)
 serial_order = ["...", "..."]   # these texts appear in this order (each after the previous one's match)
+seed_store = "changed"          # optional: the kernel seed in the test disk's ARIBOOT after the boot (ADR 0043):
+                                # `absent` (no intact copy) or `changed` (one that differs from the disk's before
+                                # this boot; a fresh disk holds none). The runner reads it from disk.img and never prints it
 ```
 
 A scenario with several boots on the same disk declares `[[boots]]` instead
