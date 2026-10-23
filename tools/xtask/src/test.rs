@@ -106,7 +106,7 @@ pub fn run(cli: &Cli, release: bool) -> Result {
     }
 
     let base = image::build_base_esp(release)?;
-    prebuild_packages(&selected, release)?;
+    prebuild_packages(&selected)?;
     let jobs = jobs(jobs_requested, cpus_override, selected.len());
     let order = schedule(&selected, jobs);
     println!(
@@ -120,7 +120,7 @@ pub fn run(cli: &Cli, release: bool) -> Result {
         &order,
         jobs,
         |i| selected[i].serial,
-        |i| run_scenario(&base, selected[i], cpus_override, release),
+        |i| run_scenario(&base, selected[i], cpus_override),
         |i, outcome| {
             print!("{}", outcome.report);
             let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -206,7 +206,7 @@ const ELAPSED_FILE: &str = "elapsed";
 /// Builds every external package the selected scenarios install, stage or
 /// publish before they run concurrently: `build_external` keeps them, so
 /// no scenario starts cargo and the build output stays in one place.
-fn prebuild_packages(selected: &[&Scenario], release: bool) -> Result {
+fn prebuild_packages(selected: &[&Scenario]) -> Result {
     for s in selected {
         let mut wanted: Vec<(String, u32, bool)> =
             s.install.iter().map(|d| (d.clone(), 1, false)).collect();
@@ -226,7 +226,7 @@ fn prebuild_packages(selected: &[&Scenario], release: bool) -> Result {
             wanted.push((dir, version, false));
         }
         for (dir, version, corrupt) in wanted {
-            build::build_external(Path::new(&dir), version, release, corrupt)?;
+            build::build_external(Path::new(&dir), version, build::PACKAGES_RELEASE, corrupt)?;
         }
     }
     Ok(())
@@ -254,7 +254,6 @@ fn run_scenario(
     base: &std::path::Path,
     s: &Scenario,
     cpus_override: Option<u32>,
-    release: bool,
 ) -> Result<Outcome> {
     let mut report = String::new();
     let root = image::scenarios_root();
@@ -272,8 +271,10 @@ fn run_scenario(
         .ok_or_else(|| format!("{}: unknown disk '{}'", s.name, s.disk))?;
     let mut installed: Vec<(String, Vec<u8>)> = Vec::new();
     for dir in &s.install {
-        installed
-            .push(build::build_external(std::path::Path::new(dir), 1, release, false)?.installed());
+        installed.push(
+            build::build_external(std::path::Path::new(dir), 1, build::PACKAGES_RELEASE, false)?
+                .installed(),
+        );
     }
     for spec in &s.packages {
         let mut parts = spec.split(':');
@@ -291,7 +292,12 @@ fn run_scenario(
             Some("corrupt") => true,
             Some(other) => return Err(format!("{}: package '{spec}': unknown '{other}'", s.name)),
         };
-        let app = build::build_external(std::path::Path::new(dir), version, release, corrupt)?;
+        let app = build::build_external(
+            std::path::Path::new(dir),
+            version,
+            build::PACKAGES_RELEASE,
+            corrupt,
+        )?;
         installed.push((
             format!(
                 "pkgs/{}-{}{}",
@@ -313,7 +319,12 @@ fn run_scenario(
                 None => (spec.as_str(), false),
             };
             let (dir, version) = crate::app_spec(base).map_err(|e| format!("{}: {e}", s.name))?;
-            let app = build::build_external(std::path::Path::new(&dir), version, release, false)?;
+            let app = build::build_external(
+                std::path::Path::new(&dir),
+                version,
+                build::PACKAGES_RELEASE,
+                false,
+            )?;
             packages.push((app, wrong_hash));
         }
         let mut entries = Vec::new();
@@ -383,12 +394,7 @@ fn run_scenario(
                 ..image::Publication::default()
             };
             let dir = workdir.join("update");
-            writeln!(
-                report,
-                "{}",
-                image::publish_channel(&dir, release, &channel)?
-            )
-            .expect("String");
+            writeln!(report, "{}", image::publish_channel(&dir, &channel)?).expect("String");
             // The development source beside it (ADR 0045), served at /dev/
             // by the same server.
             if let Some(build) = u.dev_build {
@@ -402,12 +408,7 @@ fn run_scenario(
                 };
                 let dev_dir = workdir.join(qemu::DEV_SOURCE_DIR);
                 image::forget_test_dev_source(&dev_dir)?;
-                writeln!(
-                    report,
-                    "{}",
-                    image::publish_channel(&dev_dir, release, &dev)?
-                )
-                .expect("String");
+                writeln!(report, "{}", image::publish_channel(&dev_dir, &dev)?).expect("String");
             }
             let server = qemu::UpdateServer::start(&dir)?;
             values.push((scenario::UPDATE_PORT, server.port()));

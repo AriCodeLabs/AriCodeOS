@@ -461,7 +461,7 @@ fn install_pending(fs: &mut FsClient, pubkey: &[u8; 32]) -> u64 {
             }
             Err(ReadError::TooLarge) => {
                 fault(
-                    code::PKG_READ,
+                    code::VERIFY,
                     "inst-pkg-size",
                     &format!(
                         "{path} is larger than the {MAX_PACKAGE} bytes a package holds: skipped"

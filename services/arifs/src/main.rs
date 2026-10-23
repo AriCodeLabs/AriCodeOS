@@ -27,6 +27,14 @@ use aricode_rt::sys::{self, block::BlockClient, client_buffer, Handle};
 /// oldest is unmapped to make room).
 type ClientBuffers = client_buffer::ClientBuffers<8>;
 
+// The protocol's atomic replace is the AriFS journal, and the package limit
+// of the whole system follows it (incident 0026): they never drift apart.
+const _: () = assert!(
+    aricode_proto::fs::MAX_REPLACE as usize == aricode_arifs::JOURNAL_CAPACITY_BYTES
+        && aricode_arifs::JOURNAL_CAPACITY_BYTES
+            == aricode_arifs::FILE_CAPACITY_SECTORS as usize * SECTOR
+);
+
 const SERVICE: Handle = Handle(0x0001_0004);
 const BLOCK: Handle = Handle(0x0001_0005);
 const HW: Handle = Handle(0x0001_0006);

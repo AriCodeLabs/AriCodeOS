@@ -65,12 +65,20 @@ odd one out: it launched packages the system could never manage.
   `inst-installed-size`, `inst-pkg-size`, `inst-stage-size`), the updater
   (`upd-pkg-size` with the size). "Fails verification" now means only
   that.
-- xtask refuses to build a package over the limit (`app-pack`,
-  `publish-update`, scenario installs), so the debug app scenarios now
-  stop at build time saying why instead of failing on the machine.
+- xtask refuses to build a package over the limit. Packages that ship
+  as data (scenario installs, update sources) are always built in the
+  release profile, as the WebAssembly demo: a dev build of `hello_ext`
+  does not fit, and refusing it stopped `cargo xtask test --debug` before
+  any scenario (audit, M1). Only `app-pack --debug` builds a dev package,
+  and its refusal says the release profile may fit.
+- fsd asserts at compile time that `MAX_REPLACE` equals the AriFS journal
+  and file capacity, so the limit cannot drift from what AriFS writes.
 - Tests: `apps.oversized_package` (a 33,792-byte `apps/big.aripkg` put on
   the disk by the host: refused by the broker, reported as too large by
-  the installer); host test of the build guard.
+  the installer); host test of the build guard. An independent audit
+  found no high findings; its medium (above) and lows (the refusal code
+  of an oversized pending package, the compile-time assertion, ADR 0017's
+  text, the hint) are applied.
 
 ## Open
 

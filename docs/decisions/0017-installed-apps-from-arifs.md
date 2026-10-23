@@ -27,7 +27,7 @@ content, a signed manifest and transactional installation.
    the new version, never a mix of program and manifest.
 3. **The broker verifies at launch.** If the program is not in the initrd,
    it reads `apps/NAME.aripkg` into a DMA staging buffer (256 KiB,
-   allocated once), verifies the signature and hashes, applies the same
+   allocated once; `PACKAGE_MAX`, 32 KiB, since incident 0026), verifies the signature and hashes, applies the same
    policy to the application manifest and creates the process with
    `process_spawn_from` directly from the buffer (offset and length of the
    ELF). A package that fails verification is not launched (`Denied`, with

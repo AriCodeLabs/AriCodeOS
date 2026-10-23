@@ -1465,7 +1465,7 @@ mod tests {
                 ..Publication::default()
             },
         ] {
-            let err = publish_channel(&tmp.path().join("dev"), true, &p).unwrap_err();
+            let err = publish_channel(&tmp.path().join("dev"), &p).unwrap_err();
             assert!(err.contains("one system image only"), "{err}");
         }
     }
@@ -1838,7 +1838,7 @@ pub fn publish_update_to(dir: &Path, release: bool, channel: &Publication) -> Re
     if channel.system.is_some() || channel.channel == aricode_ab::Channel::Dev {
         build_base_esp(release)?;
     }
-    println!("{}", publish_channel(dir, release, channel)?);
+    println!("{}", publish_channel(dir, channel)?);
     Ok(dir.to_path_buf())
 }
 
@@ -1848,7 +1848,7 @@ pub fn publish_update_to(dir: &Path, release: bool, channel: &Publication) -> Re
 /// in its directory (ADR 0040), separate from `update_dir_for()` so a test
 /// run can never replace what a real machine downloads (incident 0003).
 /// Returns the one-line summary for the caller to print.
-pub fn publish_channel(dir: &Path, release: bool, channel: &Publication) -> Result<String> {
+pub fn publish_channel(dir: &Path, channel: &Publication) -> Result<String> {
     use aricode_ab::Channel;
     use aricode_update_index::{AppEntry, Index, SystemEntry};
     let dev = channel.channel == Channel::Dev;
@@ -1918,7 +1918,12 @@ pub fn publish_channel(dir: &Path, release: bool, channel: &Publication) -> Resu
     }
     let mut apps = Vec::new();
     for (app_dir, version) in &channel.apps {
-        let app = crate::build::build_external(Path::new(app_dir), *version, release, false)?;
+        let app = crate::build::build_external(
+            Path::new(app_dir),
+            *version,
+            crate::build::PACKAGES_RELEASE,
+            false,
+        )?;
         let file = format!("{}-{}{}", app.name, app.version, aricode_pkg::EXTENSION);
         apps.push((app.name, app.version, file.clone()));
         files.push((file, app.package));
