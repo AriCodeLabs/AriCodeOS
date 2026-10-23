@@ -3,6 +3,11 @@
 - **Date:** 2026-10-23
 - **Status:** Proposed (draft, recorded so the question is not lost). The
   licence choice belongs to the owner; nothing changes until he decides.
+  On 2026-10-23 the owner approved the direction of the "Trusted vendors"
+  section: three levels (official, trusted vendor, unofficial) and
+  delegated public-key signing with vendor certificates and revocation,
+  instead of a secret shared between AriCodeLabs and the vendor. The
+  details (open questions below) are still to be designed.
 
 ## Context
 
