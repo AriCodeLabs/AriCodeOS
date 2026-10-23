@@ -2,8 +2,9 @@
 
 - Opened: 2026-10-23. Status: reproduced (commit `1566335`) and fixed
   (commit `f09a914`) on branch `fix/idle-accounting`; area scenarios
-  green on 1 and 4 CPUs; full suite in "Tests". Pending: independent
-  audit (kernel scheduler change) and merge.
+  green on 1 and 4 CPUs; full suite green (167 scenarios, `--all` and
+  `--all --cpus 4`). Pending: independent audit (kernel scheduler change)
+  and merge.
 - Found by: the performance audit of `731c398`
   (`docs/audits/2026-10-23-performance-731c398.md`, finding A), which
   reviewed the raw counters of its control workload (evidence in
@@ -159,6 +160,13 @@ idle selftest: CPU 3 idle through a 197 ms window with timer ticks and 10 RESCHE
 - Areas `perf`, `diag`, `scheduler`, `smp` (34 scenarios, `--jobs 6`, 1
   CPU pass): all passed. `perf.bench`'s `cpus` now reads 51-52 % idle on
   one CPU right after the benchmark; `smp.shell_user` 72-98 % per CPU.
+
+- Full suite, run because the change is in the scheduler (test-levels
+  rule), in the `aricodeos-dev` container (`--cpus 10 --memory 12g
+  --memory-swap 12g`, `--jobs 6`), one pass after the other with no other
+  suite running: `cargo xtask test --all` 167 of 167 passed (QEMU wall
+  clock 6m43s) and `cargo xtask test --all --cpus 4` 167 of 167 passed
+  (6m45s). Host maximum Tctl 85 °C, guard never paused a guest.
 
 ## Other observations (not this incident's fix)
 
