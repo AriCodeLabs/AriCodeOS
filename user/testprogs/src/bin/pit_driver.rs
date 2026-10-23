@@ -61,8 +61,10 @@ fn main(_arg: u64) -> u64 {
 /// The line and an endpoint in one wait (ADR 0044): the PIT's interrupt
 /// (100 Hz) ends a wait whose endpoint stays empty; a queued message wins
 /// when its endpoint is listed first; and the call checks its members
-/// before waiting: a line without `WAIT`, an object that is neither an
-/// endpoint nor a line, and more lines than `IPC_MAX_ANY_IRQS`.
+/// before waiting: a line without `WAIT` (`Denied`), an object that is
+/// neither an endpoint nor a line (the process itself, held with `READ`,
+/// so it is the kind that is refused: `Invalid`) and more lines than
+/// `IPC_MAX_ANY_IRQS` (`Invalid`).
 fn wait_set() -> u64 {
     let Ok(ep) = sys::endpoint_create() else {
         return 20;
@@ -90,7 +92,9 @@ fn wait_set() -> u64 {
     if sys::wait_any(&[ep, no_wait], &mut buf, &mut handles, 2000) != Err(Error::Denied) {
         return 25;
     }
-    if sys::wait_any(&[ep, HW], &mut buf, &mut handles, 2000) != Err(Error::Invalid) {
+    if sys::wait_any(&[ep, Handle::SELF_PROCESS], &mut buf, &mut handles, 2000)
+        != Err(Error::Invalid)
+    {
         return 26;
     }
     let too_many = [IRQ; abi::IPC_MAX_ANY_IRQS + 1];
