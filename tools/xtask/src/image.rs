@@ -561,6 +561,10 @@ pub enum DiskVariant {
     /// buffer (`LARGE_IMAGE_PAD`): they verify piece by piece, and `update
     /// apply` copies without loading them (incident 0021).
     LargeA,
+    /// AriFS holds `apps/big.aripkg`, larger than `PACKAGE_MAX` (only the
+    /// host can write one): the broker and the installer must say so
+    /// (incident 0026).
+    OversizedPackage,
 }
 
 /// Padding of the `large-a` images: past `IMAGE_DOWNLOAD_MAX`, within the
@@ -601,6 +605,7 @@ impl DiskVariant {
             "wasm-bad-import" => Self::WasmBadImport,
             "usb-image" => Self::UsbImage,
             "large-a" => Self::LargeA,
+            "oversized-package" => Self::OversizedPackage,
             _ => return None,
         })
     }
@@ -850,6 +855,14 @@ pub fn write_test_disk(
         }
         DiskVariant::FsNearlyFull => fill_arifs(&mut img, PART_ARI0, FS_FREE_ENTRIES)?,
         DiskVariant::FsOneShort => fill_arifs(&mut img, PART_ARI0, FS_FREE_ENTRIES - 1)?,
+        DiskVariant::OversizedPackage => install_files(
+            &mut img,
+            PART_ARI0,
+            &[(
+                String::from("apps/big.aripkg"),
+                vec![0xAB; aricode_pkg::PACKAGE_MAX + 1024],
+            )],
+        )?,
         DiskVariant::FsCorrupt => {
             // First byte of the name of the first entry in use.
             img[(PART_ARI0.0 + aricode_arifs::TABLE_LBA) as usize * 512] ^= 0x20;
@@ -908,7 +921,8 @@ pub fn write_test_disk(
             | DiskVariant::WasmRestricted
             | DiskVariant::WasmInvalid
             | DiskVariant::WasmBadImport
-            | DiskVariant::LargeA => {}
+            | DiskVariant::LargeA
+            | DiskVariant::OversizedPackage => {}
         }
         init_ariboot(&mut img, PART_ARIBOOT, state);
     }
@@ -1451,7 +1465,7 @@ mod tests {
                 ..Publication::default()
             },
         ] {
-            let err = publish_channel(&tmp.path().join("dev"), true, &p).unwrap_err();
+            let err = publish_channel(&tmp.path().join("dev"), &p).unwrap_err();
             assert!(err.contains("one system image only"), "{err}");
         }
     }
@@ -1824,7 +1838,7 @@ pub fn publish_update_to(dir: &Path, release: bool, channel: &Publication) -> Re
     if channel.system.is_some() || channel.channel == aricode_ab::Channel::Dev {
         build_base_esp(release)?;
     }
-    println!("{}", publish_channel(dir, release, channel)?);
+    println!("{}", publish_channel(dir, channel)?);
     Ok(dir.to_path_buf())
 }
 
@@ -1834,7 +1848,7 @@ pub fn publish_update_to(dir: &Path, release: bool, channel: &Publication) -> Re
 /// in its directory (ADR 0040), separate from `update_dir_for()` so a test
 /// run can never replace what a real machine downloads (incident 0003).
 /// Returns the one-line summary for the caller to print.
-pub fn publish_channel(dir: &Path, release: bool, channel: &Publication) -> Result<String> {
+pub fn publish_channel(dir: &Path, channel: &Publication) -> Result<String> {
     use aricode_ab::Channel;
     use aricode_update_index::{AppEntry, Index, SystemEntry};
     let dev = channel.channel == Channel::Dev;
@@ -1904,7 +1918,12 @@ pub fn publish_channel(dir: &Path, release: bool, channel: &Publication) -> Resu
     }
     let mut apps = Vec::new();
     for (app_dir, version) in &channel.apps {
-        let app = crate::build::build_external(Path::new(app_dir), *version, release, false)?;
+        let app = crate::build::build_external(
+            Path::new(app_dir),
+            *version,
+            crate::build::PACKAGES_RELEASE,
+            false,
+        )?;
         let file = format!("{}-{}{}", app.name, app.version, aricode_pkg::EXTENSION);
         apps.push((app.name, app.version, file.clone()));
         files.push((file, app.package));

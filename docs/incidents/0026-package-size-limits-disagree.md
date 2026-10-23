@@ -1,6 +1,7 @@
 # Incident 0026: the broker and the installer disagree on how large a package can be
 
-- Opened: 2026-10-24. Status: open, documented only.
+- Opened: 2026-10-24. Status: fixed on `fix/package-size-limit`
+  (2026-10-24); larger packages need larger AriFS files (see Open).
 - Found by: the debug-build reproduction of incident 0021 (`cargo xtask
   test --debug --all --area update` on `fix/update-image-size`), after the
   system image cases passed: the 7 scenarios still failing all involve an
@@ -42,10 +43,47 @@ verification failure.
   integrity instead of its size.
 - Debug builds cannot run the app update scenarios.
 
+## Why 32 KiB and not 256
+
+Two facts fix the size. An AriFS file has a fixed capacity of 64 sectors
+(32 KiB) and an atomic replace goes through the journal, which holds one
+file's capacity (`MAX_REPLACE`): on a machine nothing larger can be
+installed or upgraded; only the host's image builder creates larger files.
+And the installer and the updater hold packages on the static 256 KiB
+heap, the installer two at once (the new one and the installed one), so
+256 KiB packages could not fit there anyway. The broker's 256 KiB was the
+odd one out: it launched packages the system could never manage.
+
+## Fix
+
+- `aricode_pkg::PACKAGE_MAX` = `aricode_proto::fs::MAX_REPLACE`: the
+  broker's staging buffer, the installer's and the updater's limits and
+  xtask's package build use it, so they cannot drift apart.
+- A package over it is said to be too large, with both sizes, everywhere:
+  the broker (`AriInit: refused, package ... is N bytes; packages hold 1
+  to 32768`), the installer (installed, in `pkgs/` or staged:
+  `inst-installed-size`, `inst-pkg-size`, `inst-stage-size`), the updater
+  (`upd-pkg-size` with the size). "Fails verification" now means only
+  that.
+- xtask refuses to build a package over the limit. Packages that ship
+  as data (scenario installs, update sources) are always built in the
+  release profile, as the WebAssembly demo: a dev build of `hello_ext`
+  does not fit, and refusing it stopped `cargo xtask test --debug` before
+  any scenario (audit, M1). Only `app-pack --debug` builds a dev package,
+  and its refusal says the release profile may fit.
+- fsd asserts at compile time that `MAX_REPLACE` equals the AriFS journal
+  and file capacity, so the limit cannot drift from what AriFS writes.
+- Tests: `apps.oversized_package` (a 33,792-byte `apps/big.aripkg` put on
+  the disk by the host: refused by the broker, reported as too large by
+  the installer); host test of the build guard. An independent audit
+  found no high findings; its medium (above) and lows (the refusal code
+  of an oversized pending package, the compile-time assertion, ADR 0017's
+  text, the hint) are applied.
+
 ## Open
 
-- One package limit shared by broker, installer and updater (a constant
-  in a shared library, as `IMAGE_DOWNLOAD_MAX`), sized against the
-  installer's and updater's memory, and a distinct "package larger than
-  N" status and message.
-- A guard in `app-pack` / `publish-update` for packages over that limit.
+- Apps larger than 32 KiB (any real one in a debug build; a release app
+  with TLS would pass it too) need AriFS files larger than one journal,
+  either a larger journal and file capacity or an install that is atomic
+  across several journal transactions (ADR 0018). That is AriFS design
+  work for the owner's roadmap, not part of this fix.

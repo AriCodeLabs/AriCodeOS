@@ -76,8 +76,8 @@ const HTTP_TIMEOUT_MS: u32 = 15_000;
 /// updater forever (audit 1, M3).
 const RUN_DEADLINE_MS: u64 = 10 * 60 * 1000;
 /// Largest package: an installed package is replaced in one go (the AriFS
-/// journal, ADR 0018).
-const MAX_PACKAGE: usize = 32 * 1024;
+/// journal, ADR 0018), the limit the whole system shares (incident 0026).
+const MAX_PACKAGE: usize = aricode_pkg::PACKAGE_MAX;
 /// Largest exchange file with the installer (`state`).
 const MAX_STATE: usize = 16 * 1024;
 /// Largest `index.sig` (128 hex digits and a newline, with room).
@@ -1840,7 +1840,10 @@ fn stage_app<'e>(
         return Err(fault(
             code::PACKAGE_REFUSED,
             "upd-pkg-size",
-            &format!("app {}: package too large; skipped", entry.name),
+            &format!(
+                "app {}: package of {size} bytes, larger than the {MAX_PACKAGE} a package holds; skipped",
+                entry.name
+            ),
         ));
     }
     say!("downloading {} ({size} bytes)", entry.file);

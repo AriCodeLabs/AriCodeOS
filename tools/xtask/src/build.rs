@@ -315,6 +315,13 @@ impl ExternalApp {
 /// then served from memory: the test runner builds every package its
 /// scenarios need before they run concurrently (ADR 0040), so a scenario
 /// never starts cargo and its output never interleaves with theirs.
+/// Packages that ship as data (scenario installs, update sources) are built
+/// in the release profile whatever the OS build, as the WebAssembly demo:
+/// a dev build of `hello_ext` (75,408 bytes) is larger than any machine can
+/// install (`PACKAGE_MAX`, incident 0026). Only `app-pack --debug` builds
+/// one in the dev profile, and is refused if it does not fit.
+pub const PACKAGES_RELEASE: bool = true;
+
 pub fn build_external(
     dir: &Path,
     version: u32,
@@ -393,6 +400,7 @@ fn build_external_now(
     let seed = crate::keys::signing_seed()?;
     let package = aricode_pkg::build(&name, version, &elf, &manifest, &seed, corrupt)
         .ok_or_else(|| format!("{name}: invalid package name"))?;
+    check_package_size(&name, package.len(), release)?;
     // Post-build check (re-audit, R1): a package meant to be valid must
     // verify with the key the build embeds.
     if !corrupt && aricode_pkg::verify(&package, &crate::keys::expected_public_key()?).is_err() {
@@ -405,6 +413,23 @@ fn build_external_now(
         version,
         package,
     })
+}
+
+/// A package the machines cannot install is never produced (incident
+/// 0026): one AriFS replace writes at most `PACKAGE_MAX` bytes.
+fn check_package_size(name: &str, len: usize, release: bool) -> Result {
+    let max = aricode_pkg::PACKAGE_MAX;
+    if len > max {
+        let hint = if release {
+            ""
+        } else {
+            "; dev builds are larger, the release profile may fit"
+        };
+        return Err(format!(
+            "{name}: package of {len} bytes, larger than the {max} a machine can install (PACKAGE_MAX, AriFS atomic replace; incident 0026){hint}"
+        ));
+    }
+    Ok(())
 }
 
 /// `cargo xtask app-pack DIR [--version N]`: produces `build/pkgs/NAME-N.aripkg`.
@@ -523,6 +548,15 @@ pub fn check() -> Result {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn packages_machines_cannot_install_are_not_built() {
+        let max = aricode_pkg::PACKAGE_MAX;
+        assert!(super::check_package_size("app", max, true).is_ok());
+        assert!(super::check_package_size("app", max + 1, true).is_err());
+        let dev = super::check_package_size("app", max + 1, false).unwrap_err();
+        assert!(dev.contains("release profile"), "{dev}");
+    }
+
     use super::*;
 
     /// Every workspace package is linted by `check` and, when it runs on the

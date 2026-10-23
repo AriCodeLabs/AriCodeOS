@@ -1135,8 +1135,10 @@ latter briefly to add the region.
   `spawn` in the shell) the broker replies `Started` when it creates the process and
   nobody waits for its exit. If the program is not in the initrd, the broker
   looks for it installed in AriFS (`apps/NAME.aripkg`, ADR 0017): it copies the
-  package through fsd into a 256 KiB DMA staging buffer reserved
-  once, verifies it with `aricode-pkg` (Ed25519 signature of the package
+  package through fsd into a DMA staging buffer of `PACKAGE_MAX` (32 KiB,
+  what one AriFS replace writes, shared with the installer and the
+  updater since incident 0026; a larger file is refused naming both sizes)
+  reserved once, verifies it with `aricode-pkg` (Ed25519 signature of the package
   manifest with the development key and SHA-256 of the ELF and of the
   application manifest), applies the policy to the manifest and launches it with
   `process_spawn_from` (syscall 30: `MANAGE` on the `SPAWNER`, `READ`

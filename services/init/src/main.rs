@@ -1702,8 +1702,9 @@ struct Broker {
     stage: Option<(Handle, u64)>,
 }
 
-/// Size of the staging buffer: an installed package cannot exceed it.
-const STAGE_LEN: u64 = 256 * 1024;
+/// Size of the staging buffer: the package limit every part of the system
+/// shares (incident 0026).
+const STAGE_LEN: u64 = aricode_pkg::PACKAGE_MAX as u64;
 
 /// Where the launched program comes from.
 #[derive(Clone, Copy)]
@@ -1790,7 +1791,14 @@ impl Broker {
             return Err(LaunchStatus::NotFound);
         };
         if size == 0 || size > STAGE_LEN {
-            sys::print(b"AriInit: installed package too large\n");
+            let mut b = [0u8; 20];
+            sys::print(b"AriInit: refused, package ");
+            sys::print(pkg_path.as_bytes());
+            sys::print(b" is ");
+            sys::print(aricode_rt::fmt_u64(size, &mut b));
+            sys::print(b" bytes; packages hold 1 to ");
+            sys::print(aricode_rt::fmt_u64(STAGE_LEN, &mut b));
+            sys::print(b" (what AriFS installs)\n");
             return Err(LaunchStatus::Failed);
         }
         let virt = match self.stage {

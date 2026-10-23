@@ -23,6 +23,12 @@ extern crate std;
 use aricode_crypto::{ed25519, sha256, unhex};
 use aricode_initrd::Initrd;
 
+/// Largest package the system handles (incident 0026): what one atomic
+/// AriFS replace can write (`MAX_REPLACE`, the journal of ADR 0018), so
+/// the most the installer can install. The broker launches, and the
+/// updater downloads and stages, nothing larger.
+pub const PACKAGE_MAX: usize = aricode_proto::fs::MAX_REPLACE as usize;
+
 pub const MAX_NAME: usize = 32;
 /// Suffix of installed packages: `apps/NAME.aripkg`.
 pub const EXTENSION: &str = ".aripkg";
