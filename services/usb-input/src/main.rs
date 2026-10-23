@@ -38,6 +38,7 @@ use aricode_proto::input::{Event as WireEvent, Op, Reply, Request, Status, MAX_E
 use aricode_rt::sys::block::{map_client_buffer, ClientBuffers};
 use aricode_rt::sys::client_buffer::{DeviceOwned, Kept};
 use aricode_rt::sys::virtio_pci::{bar_handle, extra_handle, DmaRegion, Mmio, CFG, IRQ, SERVICE};
+use aricode_rt::sys::wait::{self, Deadline, Woken};
 use aricode_rt::sys::{self, abi, Handle};
 use aricode_usb_storage::{
     after_transfer_failure, bytes_not_moved, check_csw_transfer, fault, scsi, Cbw, Cdb, Csw,
@@ -108,6 +109,20 @@ const EP0_RECOVERY_MS: u64 = 2 * COMMAND_TIMEOUT_MS;
 /// Hard bound of one idle-loop maintenance step: the class reset, or a
 /// GET_STATUS poll plus the halt clearing.
 const MAINTENANCE_STEP_MS: u64 = 3000;
+/// Shortest wait between two idle-loop maintenance steps (ADR 0044). A
+/// step that is due may be unable to progress until the controller
+/// completes a command (a re-enumeration postponed behind an outstanding
+/// Disable Slot, a Disable Slot refused for lack of time): it is retried
+/// at this pace, the one the loop had before it waited for deadlines,
+/// instead of in a busy loop.
+const MAINTENANCE_PACE_MS: u64 = 10;
+/// Requests served per round, from both endpoints together, between two
+/// looks at the event ring; a budget used up makes the next round follow
+/// at once (ADR 0044).
+const REQUESTS_PER_ROUND: usize = 8;
+/// Exit code when the end-of-round wait fails for a reason other than the
+/// service endpoints being gone: looping on it would spin (ADR 0044).
+const EXIT_WAIT_FAILED: u64 = 10;
 /// Hard bound of a re-enumeration step (the longest): a port reset (500)
 /// and the TEST UNIT READY wait (`REENUMERATE_READY_WAIT_MS`, 500) leave
 /// `MIN_COMMAND_WINDOW_MS` for the last SCSI command; the step is aborted
@@ -3779,6 +3794,36 @@ impl Controller {
     /// are bounded by `HID_RECOVERY_ATTEMPTS` without a good report in
     /// between; then the endpoint is given up loudly. Every command result
     /// is printed and a failure recorded (`command_checked`).
+    /// When the idle-loop maintenance next has a step to take (ADR 0044):
+    /// a refused Disable Slot or a due class reset at once, the next
+    /// GET_STATUS poll after a reset, a re-enumeration's `not_before`, and
+    /// each faulted HID endpoint's `not_before` (at once in strict mode,
+    /// which halts on it). `None` with nothing to recover, so the loop
+    /// sleeps until a request or an event.
+    fn next_maintenance(&self) -> Option<u64> {
+        let mut next = Deadline::NONE;
+        if self.slot_to_disable.is_some() {
+            next.include(0);
+        }
+        match self.transport() {
+            Some(Transport::ResetPending) => next.include(0),
+            Some(Transport::ResetSent { next_poll, .. }) => next.include(next_poll),
+            Some(Transport::Reenumerate { not_before, .. }) => next.include(not_before),
+            Some(Transport::Ready | Transport::Enumerating | Transport::Gone) | None => {}
+        }
+        for ep in self
+            .devices
+            .iter()
+            .flatten()
+            .flat_map(|d| d.endpoints.iter().flatten())
+        {
+            if let Some(f) = ep.fault {
+                next.include(if self.strict { 0 } else { f.not_before });
+            }
+        }
+        next.get()
+    }
+
     fn maintain_hid(&mut self) {
         let now = self.clock.now();
         let Some((index, e, fault)) = self.devices.iter().enumerate().find_map(|(i, d)| {
@@ -4188,6 +4233,58 @@ fn answer(reply_to: Handle, reply: Reply) {
     let _ = sys::handle_close(reply_to);
 }
 
+/// The input service's side of the loop: the one read waiting for events
+/// and the buffers its replies are built in.
+struct Replies<'a> {
+    waiting: &'a mut Option<(Handle, u64)>,
+    events: &'a mut [WireEvent; MAX_EVENTS],
+    times: &'a mut [u64; MAX_EVENTS],
+}
+
+impl Replies<'_> {
+    /// Serves one request that arrived on endpoint `which` (0: the input
+    /// service, 1: the block service).
+    fn serve(
+        &mut self,
+        ctl: &mut Controller,
+        which: usize,
+        msg: &[u8],
+        handles: &[Handle],
+        now: u64,
+    ) {
+        if handles.is_empty() {
+            return;
+        }
+        if which == 1 {
+            serve_block(ctl, msg, handles);
+            return;
+        }
+        let reply_to = handles[0];
+        match Request::decode(msg) {
+            Some(Request { op: Op::Info, .. }) => {
+                let reply = Reply::status(Status::Ok)
+                    .with_name(device_name(ctl))
+                    .unwrap_or(Reply::status(Status::Ok));
+                answer(reply_to, reply);
+            }
+            Some(Request {
+                op: Op::Read,
+                timeout_ms,
+            }) => {
+                if ctl.pending.len > 0 {
+                    let n = ctl.pending.take(self.events, self.times);
+                    answer(reply_to, Reply::events(&self.events[..n], &self.times[..n]));
+                } else if self.waiting.is_some() {
+                    answer(reply_to, Reply::status(Status::Busy));
+                } else {
+                    *self.waiting = Some((reply_to, now + timeout_ms.max(1) as u64));
+                }
+            }
+            None => answer(reply_to, Reply::status(Status::Invalid)),
+        }
+    }
+}
+
 fn device_name(ctl: &Controller) -> &'static str {
     match (ctl.keyboards > 0, ctl.mice > 0) {
         (true, true) => "USB HID Keyboard+Mouse",
@@ -4361,13 +4458,21 @@ fn main(mask: u64) -> u64 {
     let mut handles = [Handle(0); abi::IPC_MAX_HANDLES];
     let mut events = [WireEvent::default(); MAX_EVENTS];
     let mut times = [0u64; MAX_EVENTS];
+    // One wait for a request on either endpoint, an event (the
+    // controller's interrupt) or the next deadline (ADR 0044).
+    let mut members = wait::Members::new();
+    for ep in endpoints {
+        members.push(*ep);
+    }
+    members.push(IRQ);
     say(b"serving requests");
     loop {
         ctl.poll();
         ctl.maintain_storage();
         ctl.maintain_hid();
         let now = ctl.clock.now();
-        for _ in 0..8 {
+        let mut requests_left = true;
+        for _ in 0..REQUESTS_PER_ROUND {
             let (which, n, nh) = match sys::ipc_receive_any(endpoints, &mut msg, &mut handles, 0) {
                 Ok(r) => r,
                 // Both endpoints closed, or one revoked (ADR 0030): nothing
@@ -4376,38 +4481,17 @@ fn main(mask: u64) -> u64 {
                     say(b"service endpoints closed; exiting");
                     sys::process_exit(9);
                 }
-                Err(_) => break,
+                Err(_) => {
+                    requests_left = false;
+                    break;
+                }
             };
-            if nh == 0 {
-                continue;
-            }
-            if which == 1 {
-                serve_block(&mut ctl, &msg[..n], &handles[..nh]);
-                continue;
-            }
-            let reply_to = handles[0];
-            match Request::decode(&msg[..n]) {
-                Some(Request { op: Op::Info, .. }) => {
-                    let reply = Reply::status(Status::Ok)
-                        .with_name(device_name(&ctl))
-                        .unwrap_or(Reply::status(Status::Ok));
-                    answer(reply_to, reply);
-                }
-                Some(Request {
-                    op: Op::Read,
-                    timeout_ms,
-                }) => {
-                    if ctl.pending.len > 0 {
-                        let n = ctl.pending.take(&mut events, &mut times);
-                        answer(reply_to, Reply::events(&events[..n], &times[..n]));
-                    } else if waiting.is_some() {
-                        answer(reply_to, Reply::status(Status::Busy));
-                    } else {
-                        waiting = Some((reply_to, now + timeout_ms.max(1) as u64));
-                    }
-                }
-                None => answer(reply_to, Reply::status(Status::Invalid)),
-            }
+            let mut reply = Replies {
+                waiting: &mut waiting,
+                events: &mut events,
+                times: &mut times,
+            };
+            reply.serve(&mut ctl, which, &msg[..n], &handles[..nh], now);
         }
         if let Some((reply_to, deadline)) = waiting {
             if ctl.pending.len > 0 {
@@ -4419,7 +4503,43 @@ fn main(mask: u64) -> u64 {
                 waiting = None;
             }
         }
-        let _ = sys::irq_wait(IRQ, 10);
+        let now = ctl.clock.now();
+        let mut next = Deadline::NONE;
+        next.include_opt(waiting.map(|(_, deadline)| deadline));
+        next.include_opt(
+            ctl.next_maintenance()
+                .map(|due| due.max(now + MAINTENANCE_PACE_MS)),
+        );
+        match wait::end_of_round(
+            members.as_slice(),
+            now,
+            requests_left,
+            next,
+            &mut msg,
+            &mut handles,
+        ) {
+            Ok(Woken::Message {
+                index,
+                len,
+                handles: nh,
+            }) => {
+                let mut reply = Replies {
+                    waiting: &mut waiting,
+                    events: &mut events,
+                    times: &mut times,
+                };
+                reply.serve(&mut ctl, index, &msg[..len], &handles[..nh], now);
+            }
+            Ok(Woken::Irq { .. } | Woken::Round) => {}
+            Err(e) if e.endpoint_gone() => {
+                say(b"service endpoints closed; exiting");
+                sys::process_exit(9);
+            }
+            Err(e) => {
+                aricode_rt::print_error(b"usb-input: end-of-round wait", e);
+                sys::process_exit(EXIT_WAIT_FAILED);
+            }
+        }
     }
 }
 

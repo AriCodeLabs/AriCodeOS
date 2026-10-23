@@ -674,6 +674,19 @@ impl Connection {
         self.time_wait_until = now + TIME_WAIT_MS;
         self.retransmit_at = None;
     }
+
+    /// The next time `poll` has timed work to do (ADR 0044): a
+    /// retransmission or the end of TIME-WAIT. `None` when only a segment
+    /// or a call from the user can change anything, so a service may sleep
+    /// until then; work that is due at once (a first SYN, new data, an ACK)
+    /// is what `poll` emits in the same round and needs no timer.
+    pub fn next_timer(&self) -> Option<u64> {
+        match self.state {
+            State::Closed => None,
+            State::TimeWait => Some(self.time_wait_until),
+            _ => self.retransmit_at,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -798,6 +811,69 @@ mod tests {
         p.run(INITIAL_RTO_MS + 20);
         assert_eq!(p.b.recv(&mut out), 5);
         assert_eq!(&out[..5], b"datos");
+    }
+
+    /// Like `Pair::run`, but time jumps from one timer to the next
+    /// (`next_timer`, ADR 0044) instead of advancing 10 ms at a time, as
+    /// a service that sleeps until its next deadline drives it. Stops at
+    /// `end` or when neither side has a timer left.
+    fn run_on_timers(p: &mut Pair, end: u64) {
+        loop {
+            while p.step() {}
+            let next = match (p.a.next_timer(), p.b.next_timer()) {
+                (Some(x), Some(y)) => x.min(y),
+                (x, y) => match x.or(y) {
+                    Some(t) => t,
+                    None => return,
+                },
+            };
+            assert!(
+                next > p.now,
+                "a timer at {next} ms is already due at {}",
+                p.now
+            );
+            if next > end {
+                return;
+            }
+            p.now = next;
+        }
+    }
+
+    /// Sleeping until `next_timer` loses nothing: the lost SYN and data
+    /// are retransmitted, TIME-WAIT ends, and an unanswered connection
+    /// gives up exactly at the end of its schedule.
+    #[test]
+    fn timers_alone_drive_retransmission_time_wait_and_give_up() {
+        let mut p = Pair::new(|n| n == 1 || n == 5);
+        run_on_timers(&mut p, INITIAL_RTO_MS);
+        assert_eq!(
+            p.a.state(),
+            State::Established,
+            "SYN retransmitted at its timer"
+        );
+        p.a.send(b"datos");
+        let end = p.now + 2 * INITIAL_RTO_MS;
+        run_on_timers(&mut p, end);
+        let mut out = [0u8; 16];
+        assert_eq!(p.b.recv(&mut out), 5, "data retransmitted at its timer");
+        assert_eq!(p.a.next_timer(), None, "everything acknowledged: no timer");
+        assert_eq!(p.b.next_timer(), None);
+        p.a.close();
+        while p.step() {}
+        p.b.close();
+        while p.step() {}
+        assert_eq!(p.a.state(), State::TimeWait);
+        assert_eq!(p.a.next_timer(), Some(p.now + TIME_WAIT_MS));
+        run_on_timers(&mut p, u64::MAX);
+        assert!(p.a.is_closed() && p.a.next_timer().is_none());
+
+        let mut p = Pair::new(|_| true);
+        run_on_timers(&mut p, u64::MAX);
+        assert_eq!(p.a.close_reason(), Some(CloseReason::Timeout));
+        assert_eq!(
+            p.now, FULL_SCHEDULE_MS,
+            "gave up at the end of its schedule"
+        );
     }
 
     #[test]
