@@ -1,14 +1,18 @@
-# Stage 5 (measurements): `bench` measures syscalls, IPC to fsd and files with
-# percentiles; `cpus` shows per-CPU idle time and `diag` gathers a report.
-# Values are not compared here (they depend on the host and on TCG): what is required is that
-# the measurements are produced and that the system is not saturated when idle.
+# Stage 5 (measurements): `bench` measures syscalls, IPC to fsd, files and a
+# metadata call to the network service with percentiles, and the idle time
+# of every CPU over a quiet interval; `cpus` shows per-CPU idle time and
+# `diag` gathers a report. `bench` runs twice and the second run is the one
+# to read (docs/performance.md: the first pays for the program's pages).
+# Values are not compared here (they depend on the host and on TCG): what is
+# required is that the measurements are produced and that the system is not
+# saturated when idle. `--cpus 4` gives the SMP figures of the same build.
 name = "perf.bench"
-description = "bench: syscall, IPC and file percentiles; per-CPU idle; diag report"
+description = "bench twice: syscall, IPC, file and network-info percentiles; quiet idle; per-CPU idle; diag report"
 level = "full"
-areas = ["perf", "shell", "sandbox"]
+areas = ["perf", "shell", "sandbox", "network"]
 cmdline = "qemu_exit shell"
-timeout_secs = 180
-stdin = ["run bench", "cpus", "diag", "shutdown"]
+timeout_secs = 240
+stdin = ["run bench", "run bench", "cpus", "diag", "shutdown"]
 
 [expect]
 exit = 33
@@ -18,6 +22,8 @@ serial_contains = [
     "bench: ipc fsd list (1000): p50 ",
     "bench: replace 4 KiB (100): p50 ",
     "bench: read 4 KiB (100): p50 ",
+    "bench: ipc net info (200): p50 ",
+    "bench: quiet idle (2000 ms): cpu 0 ",
     "bench: done",
     "run: bench exited with 0",
     "% idle",
@@ -26,4 +32,4 @@ serial_contains = [
     "=== end of diagnostics ===",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "bench: no se pudo calibrar"]
+serial_absent = ["KERNEL PANIC", "bench: could not calibrate", "bench: need system"]

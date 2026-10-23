@@ -93,6 +93,25 @@ impl<S: Surface> Console<S> {
         self.surface.is_some()
     }
 
+    /// Lends the screen out: the console keeps its text but draws nothing
+    /// until `reattach`, so whoever holds the screen meanwhile (a user
+    /// driver under test) is not painted over by a scroll.
+    pub fn detach(&mut self) -> Option<S> {
+        self.cursor_drawn = None;
+        self.surface.take()
+    }
+
+    /// Takes a lent screen back and draws the text kept meanwhile (lines
+    /// written while detached included) over whatever the borrower left.
+    pub fn reattach(&mut self, surface: S) {
+        self.surface = Some(surface);
+        for row in 0..self.rows {
+            for col in 0..self.cols {
+                self.draw_cell(col, row);
+            }
+        }
+    }
+
     /// Creates the console with a screen and clears it (host tests: the grid
     /// goes through the stack, which is large there).
     pub fn new(surface: S) -> Self {
@@ -445,6 +464,29 @@ mod tests {
         write!(c, "ñ\u{1F600}").unwrap();
         assert_eq!(c.cell(0, 0), b'?');
         assert_eq!(c.cell(1, 0), b'?');
+    }
+
+    /// A detached console keeps its text and draws nothing; reattaching
+    /// draws all of it again over what the borrower painted.
+    #[test]
+    fn detached_console_leaves_the_screen_alone_until_reattached() {
+        let mut c = C::new(Mem::new(640, 480));
+        c.write_str("antes\n").unwrap();
+        let mut screen = c.detach().expect("attached");
+        assert!(!c.is_attached());
+        let painted = Rgb(0xFF, 0x88, 0x00);
+        screen.fill_rows(0, 480, painted);
+        // Enough lines to scroll: nothing reaches the borrowed screen.
+        for _ in 0..40 {
+            c.write_str("durante\n").unwrap();
+        }
+        assert_eq!(screen.at(0, 0), painted);
+        assert_eq!(screen.at(639, 479), painted);
+        c.reattach(screen);
+        assert!(c.is_attached());
+        let s = c.surface().unwrap();
+        assert_eq!(s.at(639, 479), C::DEFAULT_BG, "kept cells drawn again");
+        assert_eq!(c.cell(0, 0), b'd', "the lines written meanwhile are kept");
     }
 
     #[test]

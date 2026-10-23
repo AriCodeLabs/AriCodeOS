@@ -19,6 +19,7 @@ pub mod isn;
 pub mod owners;
 pub mod rx;
 pub mod tcp;
+pub mod timers;
 pub mod udp;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]

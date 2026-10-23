@@ -356,6 +356,7 @@ fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
         "ipc" => ipc::selftest(),
         "ipc_late" => ipc::late_reply_selftest(),
         "ipc_peer" => ipc::peer_closed_selftest(),
+        "wait_set" => ipc::wait_set_selftest(),
         "drivers" => hw::selftest(info),
         "usb_hid" => hw::usb_hid_selftest(),
         "random" => random::selftest(),

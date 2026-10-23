@@ -23,11 +23,13 @@ use alloc::boxed::Box;
 use aricode_net::owners::{Owned, Owner};
 use aricode_net::rx;
 use aricode_net::tcp::{self, Connection};
+use aricode_net::timers;
 use aricode_net::{arp, dhcp, dns, eth, icmp, ipv4, isn, udp, Ipv4Addr, MacAddr};
 use aricode_proto::net::{
     Info, Op, OwnerSockets, Reply, Request, Status, TcpStats, MAX_DATAGRAM, MAX_LABEL,
 };
 use aricode_rt::sys::virtio_pci::{IRQ, SERVICE};
+use aricode_rt::sys::wait::{self, Deadline, Woken};
 use aricode_rt::sys::{self, abi, client_buffer, Handle};
 
 /// Client buffer mappings kept across requests (ADR 0038: bounded, the
@@ -62,10 +64,15 @@ const MAIN: Owner = 0;
 /// client in a loop cannot keep frames from being received. Its twin is
 /// `rx::FRAMES_PER_ROUND` (`libs/net`, incident 0013): a round receives at
 /// most 32 frames, then serves these requests and the timers, and follows
-/// at once (no interrupt wait) when frames were left in the ring, which is
-/// recorded as `net rx budget hit`. Together they bound what a client waits
-/// under a flood to one round, instead of the flood's duration.
+/// at once (no wait) when frames were left in the ring, which is recorded
+/// as `net rx budget hit`, or when these requests used up the budget.
+/// Together they bound what a client waits under a flood to one round,
+/// instead of the flood's duration (ADR 0035, ADR 0044).
 const IPC_REQUESTS_PER_ROUND: usize = 8;
+/// Exit code when the end-of-round wait fails for a reason other than its
+/// endpoints being gone: the service's own handles are wrong, and looping
+/// on the error would spin (ADR 0044).
+const EXIT_WAIT_FAILED: u64 = 10;
 /// Fault event when the kernel gave fewer than `isn::SECRET_LEN` random
 /// bytes for the TCP secret (ADR 0034); its code is the number obtained.
 const TCP_SECRET_FAULT: &str = "net tcp secret degraded";
@@ -705,6 +712,53 @@ impl<L: Link> Stack<L> {
             }
         }
         count
+    }
+
+    /// A sweep took a request while checking on its client, still to be
+    /// served: the loop must not sleep on it.
+    fn has_pending(&self) -> bool {
+        self.pending.iter().any(Option::is_some)
+    }
+
+    /// The earliest time something in the stack is due (ADR 0044): the
+    /// loop sleeps until then unless a frame, a request or the NIC's
+    /// interrupt comes first. Every deadline the round's timer work acts
+    /// on is here: the periodic sweep, DHCP (its retry or the ARP probe of
+    /// an acknowledged address), pings, DNS queries, UDP and TCP receives,
+    /// accepts and connects, TCP retransmissions and TIME-WAIT, frames
+    /// parked for ARP and faults held back by their one-second window.
+    fn next_deadline(&self) -> Deadline {
+        let waits = self
+            .pings
+            .iter()
+            .map(|(_, _, p)| p.deadline)
+            .chain(self.dns.iter().map(|(_, _, p)| p.deadline))
+            .chain(
+                self.sockets
+                    .iter()
+                    .filter_map(|(_, _, s)| s.recv.as_ref().map(|r| r.deadline)),
+            )
+            .chain(self.tcp.iter().flat_map(|(_, _, s)| {
+                [
+                    s.connect.map(|(_, d)| d),
+                    s.accept.map(|(_, d)| d),
+                    s.recv.as_ref().map(|r| r.deadline),
+                ]
+                .into_iter()
+                .flatten()
+            }))
+            .chain(
+                self.deferred
+                    .iter()
+                    .filter_map(|slot| slot.waiting.map(|p| p.deadline)),
+            );
+        Deadline::at(timers::next_deadline(
+            self.last_sweep + SWEEP_MS,
+            timers::dhcp_due(self.dhcp.state(), self.probe_deadline, self.dhcp_next),
+            waits,
+            self.tcp.iter().map(|(_, _, s)| &s.conn),
+            self.faults.next_due(),
+        ))
     }
 
     fn session(&self, owner: Owner) -> Option<Session> {
@@ -2089,8 +2143,10 @@ fn answer_with(reply_to: Handle, reply: Reply, handle: Handle) {
 
 /// Announces the MAC and serves requests forever: frame reception (up to
 /// `rx::FRAMES_PER_ROUND` frames), up to `IPC_REQUESTS_PER_ROUND` IPC
-/// requests (from the main endpoint and every session together), timeouts
-/// and waiting for the IRQ unless frames were left in the ring.
+/// requests (from the main endpoint and every session together) and the
+/// timers make a round; then one wait (ADR 0044) on every endpoint and the
+/// NIC's interrupt until the stack's next deadline, skipped when the round
+/// left frames, requests or swept requests behind.
 pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
     let mut hex = [0u8; 16];
     sys::print(name.as_bytes());
@@ -2111,6 +2167,19 @@ pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
     };
     let mut msg = [0u8; Request::LEN];
     let mut handles = [Handle(0); abi::IPC_MAX_HANDLES];
+    // The main endpoint and every session at once (ADR 0020): the index
+    // tells which one a request arrived on, and so who owns what it
+    // creates. A request can change the session table: an `Attach` grants
+    // one, a sweep or probe retires a dead client and closes its receive
+    // handle. The list is rebuilt before every receive or wait that follows
+    // such a change, so a closed handle is never passed back to the kernel
+    // (it would answer `BadHandle`) and a session granted mid-round is
+    // served in the same round.
+    let mut eps = [SERVICE; abi::IPC_MAX_ANY];
+    let mut owners = [MAIN; abi::IPC_MAX_ANY];
+    let mut count = 0;
+    let mut built = None;
+    let mut members = wait::Members::new();
     say(name, b"serving requests");
     loop {
         let now = stack.clock.now();
@@ -2138,19 +2207,9 @@ pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
                 stack.serve(p.owner, &p.msg[..p.n], &p.handles[..p.nh], now);
             }
         }
-        // The main endpoint and every session at once (ADR 0020): the index
-        // tells which one the request arrived on, and so who owns what it
-        // creates. A request served inside the round can change the
-        // session table: an `Attach` grants one, a sweep or probe retires a
-        // dead client and closes its receive handle. The list is rebuilt
-        // before the next receive whenever that happened, so a closed
-        // handle is never passed back to the kernel (it would answer
-        // `BadHandle` and end the round early) and a session granted
-        // mid-round is polled in the same round.
-        let mut eps = [SERVICE; abi::IPC_MAX_ANY];
-        let mut owners = [MAIN; abi::IPC_MAX_ANY];
-        let mut count = 0;
-        let mut built = None;
+        // Requests already queued, without waiting. A budget used up may
+        // have left more in the queues: the round then follows at once.
+        let mut requests_left = true;
         for _ in 0..IPC_REQUESTS_PER_ROUND {
             if built != Some(stack.generation) {
                 count = stack.endpoints(&mut eps, &mut owners);
@@ -2165,7 +2224,10 @@ pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
                         say(name, b"service endpoint closed; exiting");
                         sys::process_exit(9);
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        requests_left = false;
+                        break;
+                    }
                 };
             if nh == 0 {
                 continue;
@@ -2175,10 +2237,52 @@ pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
         stack.expire(now);
         stack.tcp_expire(now);
         stack.tcp_poll(now);
-        // Frames left behind are received by the next round at once; a
-        // quiet ring waits for the interrupt (or 10 ms, for the timers).
-        if !round.left_over {
-            let _ = sys::irq_wait(IRQ, 10);
+        // One wait for whichever comes first: a request on any endpoint, a
+        // frame (the NIC's interrupt, latched by the kernel if it fired
+        // during the round) or the next deadline (ADR 0044).
+        if built != Some(stack.generation) {
+            count = stack.endpoints(&mut eps, &mut owners);
+            built = Some(stack.generation);
+        }
+        members.clear();
+        for ep in &eps[..count] {
+            members.push(*ep);
+        }
+        members.push(IRQ);
+        let work_left = round.left_over || requests_left || stack.has_pending();
+        let next = stack.next_deadline();
+        let now = stack.clock.now();
+        match wait::end_of_round(
+            members.as_slice(),
+            now,
+            work_left,
+            next,
+            &mut msg,
+            &mut handles,
+        ) {
+            // Taken from its queue by the wait: served now, at the time it
+            // arrived (the wait may have slept long: the deadlines the
+            // request sets count from now, not from before the wait), and
+            // the next round emits what it produced.
+            Ok(Woken::Message {
+                index,
+                len,
+                handles: nh,
+            }) => {
+                if nh > 0 {
+                    let now = stack.clock.now();
+                    stack.serve(owners[index], &msg[..len], &handles[..nh], now);
+                }
+            }
+            Ok(Woken::Irq { .. } | Woken::Round) => {}
+            Err(e) if e.endpoint_gone() => {
+                say(name, b"service endpoint closed; exiting");
+                sys::process_exit(9);
+            }
+            Err(e) => {
+                aricode_rt::print_error(b"net: end-of-round wait", e);
+                sys::process_exit(EXIT_WAIT_FAILED);
+            }
         }
     }
 }

@@ -4,12 +4,13 @@
 //! transfer, blocking with timeout and wake-up through wait queues. The
 //! centerpiece of the microkernel (section 23).
 
+use crate::hw::IrqLine;
 use crate::object::{Cap, ObjectKind, ObjectRef};
 use crate::sync::IrqLock;
 use crate::task::wait::WaitQueue;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
-use aricode_abi::{Error, IPC_QUEUE_CAPACITY, TIMEOUT_INFINITE};
+use aricode_abi::{Error, IPC_MAX_ANY_IRQS, IPC_QUEUE_CAPACITY, TIMEOUT_INFINITE};
 use aricode_handles::Rights;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
@@ -114,7 +115,6 @@ impl Endpoint {
         }
         self.senders.wake_all();
         self.receivers.wake_all();
-        ANY_RECEIVERS.wake_all();
     }
 
     fn deadline(timeout_ms: u64) -> Option<u64> {
@@ -162,10 +162,10 @@ impl Endpoint {
             q.push_back(build()?);
             drop(q);
             self.sent.fetch_add(1, Ordering::Relaxed);
+            // The oldest waiter, whether it waits on this endpoint alone or
+            // on a set that holds it (ADR 0044: `receive_any` registers on
+            // the queue of every endpoint in its set).
             self.receivers.wake_one();
-            // Receivers on several endpoints (ADR 0020) wait on a shared queue
-            // and re-check their own endpoints.
-            ANY_RECEIVERS.wake_all();
             return Ok(());
         }
     }
@@ -207,24 +207,94 @@ impl Endpoint {
     }
 }
 
-/// Wait queue for `receive_any`: woken by any send.
-static ANY_RECEIVERS: WaitQueue = WaitQueue::new();
+/// A member of the set `receive_any` waits on (ADR 0044).
+pub enum Member<'a> {
+    Endpoint(&'a Endpoint),
+    Irq(&'a IrqLine),
+}
 
-/// Receives from the first (in order) of `endpoints` that has a message;
-/// returns its index. Waits up to `timeout_ms` (ADR 0020). `PeerClosed`
-/// only when every endpoint is empty and has lost its send side: one closed
-/// endpoint among live ones is just one that stays empty.
-pub fn receive_any(endpoints: &[&Endpoint], timeout_ms: u64) -> Result<(usize, Message), Error> {
+impl Member<'_> {
+    fn is_ready(&self) -> bool {
+        match self {
+            Member::Endpoint(e) => e.has_message(),
+            Member::Irq(l) => l.is_pending(),
+        }
+    }
+
+    /// Takes what made the member ready, if it still is.
+    fn take(&self) -> Option<Ready> {
+        match self {
+            Member::Endpoint(e) => e.try_receive().map(Ready::Message),
+            Member::Irq(l) => l.take_pending().map(Ready::Irq),
+        }
+    }
+}
+
+/// What `receive_any` took from the member that was ready.
+pub enum Ready {
+    Message(Message),
+    /// Interrupts accumulated on the line since they were last taken.
+    Irq(u32),
+}
+
+/// Members of one `receive_any` set at most: its endpoints and lines.
+const MAX_MEMBERS: usize = aricode_abi::IPC_MAX_ANY + IPC_MAX_ANY_IRQS;
+
+/// Waits until the first member of `members` (in order) is ready — an
+/// endpoint with a message (ADR 0020) or an interrupt line that fired
+/// (ADR 0044) — and returns its index and what it gave: the oldest message,
+/// or the interrupts accumulated on the line (taken, as `irq_wait` does).
+/// Waits up to `timeout_ms`. `PeerClosed` only when no member is ready and
+/// every endpoint is empty and has lost its send side: one closed endpoint
+/// among live ones is just one that stays empty, and a line never closes
+/// but serves nobody once its service's endpoints are gone. At most
+/// `IPC_MAX_ANY + IPC_MAX_ANY_IRQS` members (`Invalid` beyond).
+///
+/// The thread waits on the receive queue of each endpoint in the set and
+/// on each line's own queue: a send wakes the oldest waiter of its own
+/// endpoint only, an interrupt the waiters of its own line, never the
+/// other services in the system (finding E of the performance audit of
+/// 731c398). A line's count is a latch: an interrupt that fired before the
+/// wait leaves it ready, so the wait returns at once.
+///
+/// A send's `wake_one` may pick this thread while it is already awake (for
+/// another member, or for another message of the same endpoint), and the
+/// thread takes only one message: that wakeup would be lost for the
+/// endpoint's other waiters. So once the thread has left every queue and
+/// taken its member, it passes a wakeup on (`wake_one`) for every endpoint
+/// of the set that still holds a message. With no other waiter it wakes
+/// nobody; a spurious wakeup only makes a waiter check again.
+pub fn receive_any(members: &[Member], timeout_ms: u64) -> Result<(usize, Ready), Error> {
     let deadline = Endpoint::deadline(timeout_ms);
+    if members.len() > MAX_MEMBERS {
+        return Err(Error::Invalid);
+    }
+    let mut queues: [&WaitQueue; MAX_MEMBERS] = [&NO_QUEUE; MAX_MEMBERS];
+    for (q, m) in queues.iter_mut().zip(members) {
+        *q = match m {
+            Member::Endpoint(e) => &e.receivers,
+            Member::Irq(l) => l.waiters(),
+        };
+    }
+    let queues = &queues[..members.len()];
+    let has_endpoints = members.iter().any(|m| matches!(m, Member::Endpoint(_)));
+    let all_closed = || {
+        has_endpoints
+            && members.iter().all(|m| match m {
+                Member::Endpoint(e) => e.drained_and_closed(),
+                Member::Irq(_) => true,
+            })
+    };
     loop {
-        let all_closed = || endpoints.iter().all(|e| e.drained_and_closed());
-        let timed_out = ANY_RECEIVERS.wait_until_deadline(
-            || all_closed() || endpoints.iter().any(|e| e.has_message()),
+        let timed_out = crate::task::wait::wait_any_until_deadline(
+            queues,
+            || all_closed() || members.iter().any(Member::is_ready),
             deadline,
         );
-        for (i, e) in endpoints.iter().enumerate() {
-            if let Some(msg) = e.try_receive() {
-                return Ok((i, msg));
+        for (i, m) in members.iter().enumerate() {
+            if let Some(ready) = m.take() {
+                pass_wakeups_on(members);
+                return Ok((i, ready));
             }
         }
         if all_closed() {
@@ -233,8 +303,327 @@ pub fn receive_any(endpoints: &[&Endpoint], timeout_ms: u64) -> Result<(usize, M
         if timed_out {
             return Err(Error::Timeout);
         }
-        // Another receiver took the message: wait again.
+        // Another receiver took the message or the interrupts: wait again.
     }
+}
+
+/// See `receive_any`: wakes the next waiter of every endpoint in the set
+/// that still holds a message, the one just received from included (two
+/// sends may have woken this thread for it, and it took one message).
+fn pass_wakeups_on(members: &[Member]) {
+    for m in members {
+        if let Member::Endpoint(e) = m {
+            if e.has_message() {
+                e.receivers.wake_one();
+            }
+        }
+    }
+}
+
+/// Filler of `receive_any`'s queue array past its members; never waited on.
+static NO_QUEUE: WaitQueue = WaitQueue::new();
+
+/// The self-test's endpoint and line, for its helper threads.
+static SELFTEST_OBJECTS: IrqLock<Option<(ObjectRef, ObjectRef)>> = IrqLock::new(None);
+/// Round the stress helper may fire for (0: none yet).
+static SELFTEST_ARMED: AtomicUsize = AtomicUsize::new(0);
+/// The second endpoint of the hand-on case (6) of `wait_set_selftest`.
+static SELFTEST_SECOND: IrqLock<Option<ObjectRef>> = IrqLock::new(None);
+/// What the single receiver of case 6 got: its byte (`u64::MAX` for no
+/// message, 0 until it returns) and how long it waited.
+static SELFTEST_SINGLE_GOT: AtomicU64 = AtomicU64::new(0);
+static SELFTEST_SINGLE_MS: AtomicU64 = AtomicU64::new(0);
+
+fn endpoint_of_object(obj: &ObjectRef) -> &Endpoint {
+    match &obj.kind {
+        ObjectKind::Endpoint(e) => e,
+        _ => unreachable!(),
+    }
+}
+
+/// Helper of `wait_set_selftest`, case 6: after 20 ms (so the self-test
+/// registered on the first endpoint before it), waits on that endpoint
+/// alone, as a second receiver of it.
+extern "C" fn selftest_single_receiver(_: usize) {
+    crate::task::scheduler::sleep_ms(20);
+    let (ep, _) = selftest_objects();
+    let t0 = crate::time::uptime_ms();
+    let got = match endpoint_of_object(&ep).receive(5_000) {
+        Ok(m) => m.data.first().map_or(u64::MAX, |b| *b as u64),
+        Err(_) => u64::MAX,
+    };
+    SELFTEST_SINGLE_MS.store(crate::time::uptime_ms() - t0, Ordering::Release);
+    SELFTEST_SINGLE_GOT.store(got, Ordering::Release);
+}
+
+/// Helper of `wait_set_selftest`, case 6: after 60 ms, sends to the
+/// second endpoint and then to the first, back to back.
+extern "C" fn selftest_sender(_: usize) {
+    crate::task::scheduler::sleep_ms(60);
+    let (ep, _) = selftest_objects();
+    let second = SELFTEST_SECOND.lock().clone().expect("second endpoint");
+    for (obj, byte) in [(&second, 21u8), (&ep, 22u8)] {
+        let _ = endpoint_of_object(obj).send_with(0, || {
+            Ok(Message {
+                data: alloc::vec![byte],
+                handles: Vec::new(),
+            })
+        });
+    }
+}
+
+fn selftest_objects() -> (ObjectRef, ObjectRef) {
+    SELFTEST_OBJECTS
+        .lock()
+        .clone()
+        .expect("the self-test publishes its objects first")
+}
+
+/// Helper of `wait_set_selftest`: after 30 ms, fires the line (`action`
+/// 1) or sends a message (otherwise), while the self-test is blocked.
+extern "C" fn selftest_later(action: usize) {
+    crate::task::scheduler::sleep_ms(30);
+    let (ep, line) = selftest_objects();
+    match (&ep.kind, &line.kind, action) {
+        (_, ObjectKind::Irq(l), 1) => l.fire(),
+        (ObjectKind::Endpoint(e), _, _) => {
+            let _ = e.send_with(0, || {
+                Ok(Message {
+                    data: alloc::vec![9],
+                    handles: Vec::new(),
+                })
+            });
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// Helper of `wait_set_selftest`: fires the line once per round, as soon
+/// as the self-test arms it and after a delay that varies with the round,
+/// so the interrupt lands before, during and after the waiter's block.
+extern "C" fn selftest_firer(rounds: usize) {
+    let (_, line) = selftest_objects();
+    let ObjectKind::Irq(l) = &line.kind else {
+        unreachable!()
+    };
+    for round in 1..=rounds {
+        while SELFTEST_ARMED.load(Ordering::Acquire) < round {
+            crate::task::scheduler::yield_now();
+        }
+        for _ in 0..(round % 16) * 64 {
+            core::hint::spin_loop();
+        }
+        l.fire();
+    }
+}
+
+/// Wait-set self-test (`test=wait_set`, ADR 0044): `receive_any` over
+/// endpoints and an interrupt line. Interrupts latched before the wait
+/// return at once with their count; the first ready member in list order
+/// wins, whichever its kind; the deadline holds when nothing comes; a wait
+/// blocked on the set wakes for an interrupt or a message from another
+/// thread; no wakeup is lost when the line fires around the moment the
+/// waiter blocks (from another CPU when there is one); a send's wakeup
+/// that picked the set's waiter while it was awake for another member is
+/// passed on to the endpoint's other receiver; `PeerClosed` keeps its
+/// meaning with a line in the set; and a finished wait leaves no
+/// registration behind on any queue.
+pub fn wait_set_selftest() {
+    use crate::object::KernelObject;
+    use crate::task::scheduler;
+    use crate::time::{ticks, uptime_ms, MS_PER_TICK};
+
+    const STRESS_ROUNDS: usize = 200;
+    let ep_obj = KernelObject::new(ObjectKind::Endpoint(Endpoint::new()));
+    let line_obj = crate::hw::quiet_line_for_selftest();
+    *SELFTEST_OBJECTS.lock() = Some((ep_obj.clone(), line_obj.clone()));
+    let (ObjectKind::Endpoint(ep), ObjectKind::Irq(line)) = (&ep_obj.kind, &line_obj.kind) else {
+        unreachable!()
+    };
+    let set = [Member::Endpoint(ep), Member::Irq(line)];
+    let send = |byte: u8| {
+        ep.send_with(0, || {
+            Ok(Message {
+                data: alloc::vec![byte],
+                handles: Vec::new(),
+            })
+        })
+        .expect("room in the queue")
+    };
+    let describe = |r: &Result<(usize, Ready), Error>| match r {
+        Ok((i, Ready::Irq(n))) => alloc::format!("member {i}: {n} interrupts"),
+        Ok((i, Ready::Message(m))) => alloc::format!("member {i}: message {:?}", m.data),
+        Err(e) => alloc::format!("{e:?}"),
+    };
+    let me = scheduler::current_tid();
+    let registered = || ep.receivers.contains(me) || line.waiters().contains(me);
+
+    // 1. Latched before the wait: at once, with the count, and taken.
+    line.fire();
+    line.fire();
+    let t0 = ticks();
+    let r = receive_any(&set, 5_000);
+    assert!(
+        matches!(r, Ok((1, Ready::Irq(2)))),
+        "latched interrupts: {}",
+        describe(&r)
+    );
+    assert!(ticks() - t0 <= 1, "a latched interrupt must not wait");
+    assert!(!line.is_pending(), "the wait takes what it reports");
+
+    // 2. Both ready: list order decides, and the other one stays ready.
+    send(7);
+    line.fire();
+    let (a, b, c) = (
+        receive_any(&set, 0),
+        receive_any(&set, 0),
+        receive_any(&set, 0),
+    );
+    assert!(
+        matches!(&a, Ok((0, Ready::Message(m))) if m.data == [7])
+            && matches!(b, Ok((1, Ready::Irq(1))))
+            && matches!(c, Err(Error::Timeout)),
+        "endpoint listed first: {}, {}, {}",
+        describe(&a),
+        describe(&b),
+        describe(&c)
+    );
+    let reversed = [Member::Irq(line), Member::Endpoint(ep)];
+    send(8);
+    line.fire();
+    let (a, b) = (receive_any(&reversed, 0), receive_any(&reversed, 0));
+    assert!(
+        matches!(a, Ok((0, Ready::Irq(1))))
+            && matches!(&b, Ok((1, Ready::Message(m))) if m.data == [8]),
+        "line listed first: {}, {}",
+        describe(&a),
+        describe(&b)
+    );
+
+    // 3. Nothing comes: the deadline holds, neither early nor stuck.
+    let t0 = uptime_ms();
+    let r = receive_any(&set, 50);
+    let waited = uptime_ms() - t0;
+    assert!(
+        matches!(r, Err(Error::Timeout)),
+        "nothing ready: {}",
+        describe(&r)
+    );
+    assert!(
+        waited + MS_PER_TICK >= 50 && waited < 1_000,
+        "a 50 ms deadline took {waited} ms"
+    );
+    assert!(!registered(), "a timed-out wait left a registration");
+
+    // 4. Blocked on the set: another thread's interrupt or message wakes
+    // it long before its deadline.
+    let mut woken_ms = [0u64; 2];
+    for (action, woken) in [1usize, 2].into_iter().zip(woken_ms.iter_mut()) {
+        let t0 = uptime_ms();
+        let helper = scheduler::spawn("wait_set_later", selftest_later, action).expect("helper");
+        let r = receive_any(&set, 5_000);
+        *woken = uptime_ms() - t0;
+        let expected = match (&r, action) {
+            (Ok((1, Ready::Irq(1))), 1) => true,
+            (Ok((0, Ready::Message(m))), 2) => m.data == [9],
+            _ => false,
+        };
+        assert!(
+            expected && *woken < 2_000,
+            "woken by action {action} after {} ms: {}",
+            *woken,
+            describe(&r)
+        );
+        assert!(!registered(), "a woken wait left a registration");
+        while scheduler::state(helper).is_some() {
+            scheduler::yield_now();
+        }
+    }
+
+    // 5. No lost wakeup: every round's interrupt ends a wait whose
+    // deadline is far away, wherever it lands relative to the block.
+    let cpus = crate::cpu::online_count();
+    let firer = if cpus > 1 {
+        scheduler::spawn_on("wait_set_firer", selftest_firer, STRESS_ROUNDS, 1)
+    } else {
+        scheduler::spawn("wait_set_firer", selftest_firer, STRESS_ROUNDS)
+    }
+    .expect("firer");
+    let only_line = [Member::Irq(line)];
+    let t0 = uptime_ms();
+    let mut interrupts = 0;
+    for round in 1..=STRESS_ROUNDS {
+        SELFTEST_ARMED.store(round, Ordering::Release);
+        match receive_any(&only_line, 5_000) {
+            Ok((0, Ready::Irq(n))) => interrupts += n as usize,
+            r => panic!("round {round}: {}", describe(&r)),
+        }
+        // A later round's interrupt never arrives early: the helper waits
+        // for each arming, so each wait sees exactly its own.
+    }
+    let stress_ms = uptime_ms() - t0;
+    while scheduler::state(firer).is_some() {
+        scheduler::yield_now();
+    }
+    assert_eq!(interrupts, STRESS_ROUNDS, "every interrupt reported once");
+    assert!(!line.is_pending() && !registered());
+
+    // 6. Hand-on: the self-test waits on [second, first] and registered on
+    // the first before a single receiver of it did; the sender then sends
+    // to the second and to the first back to back. The first's `wake_one`
+    // may pick the self-test, already awake for the second (one CPU: it
+    // always does); the self-test takes the second (list order) and must
+    // pass the first's wakeup on, or the single receiver would wait for
+    // its 5 s deadline with a message queued.
+    let second_obj = KernelObject::new(ObjectKind::Endpoint(Endpoint::new()));
+    *SELFTEST_SECOND.lock() = Some(second_obj.clone());
+    let second = endpoint_of_object(&second_obj);
+    SELFTEST_SINGLE_GOT.store(0, Ordering::Release);
+    let single = scheduler::spawn("wait_set_single", selftest_single_receiver, 0).expect("single");
+    let sender = scheduler::spawn("wait_set_sender", selftest_sender, 0).expect("sender");
+    let r = receive_any(&[Member::Endpoint(second), Member::Endpoint(ep)], 5_000);
+    assert!(
+        matches!(&r, Ok((0, Ready::Message(m))) if m.data == [21]),
+        "hand-on, the set: {}",
+        describe(&r)
+    );
+    while scheduler::state(single).is_some() || scheduler::state(sender).is_some() {
+        scheduler::yield_now();
+    }
+    let single_got = SELFTEST_SINGLE_GOT.load(Ordering::Acquire);
+    let single_ms = SELFTEST_SINGLE_MS.load(Ordering::Acquire);
+    assert!(
+        single_got == 22 && single_ms < 1_000,
+        "hand-on: the single receiver got {single_got} after {single_ms} ms (22 well before its 5000 ms deadline expected)"
+    );
+    assert!(!ep.has_message() && !second.has_message() && !registered());
+    *SELFTEST_SECOND.lock() = None;
+
+    // 7. PeerClosed: a set whose endpoints are all gone still reports a
+    // pending interrupt first, then PeerClosed; a set of lines alone only
+    // ever times out.
+    if ep.shut_down() {
+        ep.settle();
+    }
+    line.fire();
+    let (a, b) = (receive_any(&set, 1_000), receive_any(&set, 1_000));
+    let c = receive_any(&only_line, 20);
+    assert!(
+        matches!(a, Ok((1, Ready::Irq(1))))
+            && matches!(b, Err(Error::PeerClosed))
+            && matches!(c, Err(Error::Timeout)),
+        "closed endpoint: {}, {}, {}",
+        describe(&a),
+        describe(&b),
+        describe(&c)
+    );
+    assert!(!registered());
+    *SELFTEST_OBJECTS.lock() = None;
+    log::info!(
+        "wait set selftest ok (latched interrupt at once, list order between a message and an interrupt, 50 ms deadline in {waited} ms, woken by an interrupt in {} ms and by a message in {} ms, {STRESS_ROUNDS} interrupts around the block on {cpus} CPUs without a lost wakeup in {stress_ms} ms, a wakeup taken for another member passed on to a single receiver in {single_ms} ms, PeerClosed with a line in the set)",
+        woken_ms[0],
+        woken_ms[1]
+    );
 }
 
 /// Endpoints with a side closed since the last `settle_closed`.

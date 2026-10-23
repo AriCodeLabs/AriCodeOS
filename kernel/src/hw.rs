@@ -57,19 +57,46 @@ impl IrqLine {
         }
     }
 
-    /// Waits until there are accumulated interrupts and returns them.
-    pub fn wait(&self, deadline: Option<u64>) -> Option<u32> {
-        let timed_out = self
-            .waiters
-            .wait_until_deadline(|| self.pending.load(Ordering::Acquire) > 0, deadline);
-        if timed_out {
-            return None;
-        }
+    /// Interrupts have accumulated since they were last taken. The count
+    /// is a latch: an interrupt that fires while nobody waits stays here
+    /// until a wait takes it.
+    pub fn is_pending(&self) -> bool {
+        self.pending.load(Ordering::Acquire) > 0
+    }
+
+    /// The queue `fire` wakes (for a wait on several objects, ADR 0044).
+    pub fn waiters(&self) -> &WaitQueue {
+        &self.waiters
+    }
+
+    /// Takes the accumulated interrupts and unmasks a level-triggered line,
+    /// which `fire` left masked until the driver serviced it.
+    fn take(&self) -> u32 {
         let n = self.pending.swap(0, Ordering::AcqRel);
         if let IrqSource::Gsi { gsi, level: true } = self.source {
             ioapic::set_masked(gsi, false);
         }
-        Some(n)
+        n
+    }
+
+    /// Takes the accumulated interrupts without waiting; `None` if there
+    /// are none (or another waiter took them first).
+    pub fn take_pending(&self) -> Option<u32> {
+        if !self.is_pending() {
+            return None;
+        }
+        Some(self.take()).filter(|n| *n > 0)
+    }
+
+    /// Waits until there are accumulated interrupts and returns them.
+    pub fn wait(&self, deadline: Option<u64>) -> Option<u32> {
+        let timed_out = self
+            .waiters
+            .wait_until_deadline(|| self.is_pending(), deadline);
+        if timed_out {
+            return None;
+        }
+        Some(self.take())
     }
 }
 
@@ -293,6 +320,22 @@ pub fn register_irq(gsi: u32, level: bool, active_low: bool) -> Result<ObjectRef
     Ok(obj)
 }
 
+/// An interrupt line that no device raises, for the wait-set self-test
+/// (`test=wait_set`, ADR 0044): the PIT's GSI is routed to a free vector
+/// and masked at once, so only `IrqLine::fire` called by the test makes it
+/// pending, exactly as the handler does. Edge-triggered, so taking its
+/// interrupts never unmasks it. A real IRQ0 that slipped in before the mask
+/// is drained here.
+pub fn quiet_line_for_selftest() -> ObjectRef {
+    let (gsi, _) = crate::acpi::with(|a| a.madt.isa_irq_to_gsi(0));
+    let obj = register_irq(gsi, false, false).expect("a free device vector");
+    ioapic::set_masked(gsi, true);
+    if let ObjectKind::Irq(l) = &obj.kind {
+        let _ = l.take_pending();
+    }
+    obj
+}
+
 /// Entry from the APIC for device vectors.
 pub fn handle_device_irq(vector: u8) {
     crate::random::stir();
@@ -406,7 +449,10 @@ pub fn selftest(info: &boot_protocol::BootInfo) {
         "pit_driver",
         programs::by_name("pit_driver").expect("pit_driver"),
         vec![
-            (irq.clone(), Rights::READ.union(Rights::WAIT)),
+            (
+                irq.clone(),
+                Rights::READ.union(Rights::WAIT).union(Rights::DUPLICATE),
+            ),
             (hardware, Rights::MANAGE),
         ],
     )
@@ -434,7 +480,11 @@ pub fn selftest(info: &boot_protocol::BootInfo) {
     );
 
     // 2. A user driver paints the framebuffer through an MMIO capability.
+    // The screen is the driver's until the check: the kernel console would
+    // repaint pixel (0,0) on its next scroll, which any log line (the
+    // driver's exit) can cause once the screen is full of boot lines.
     let fb = info.framebuffer;
+    let lent = crate::console::lend_framebuffer();
     if fb.address != 0 {
         let region = KernelObject::new(ObjectKind::Mmio(Region {
             phys: fb.address,
@@ -452,15 +502,20 @@ pub fn selftest(info: &boot_protocol::BootInfo) {
         )
         .expect("fb_driver");
         let status = process::wait(pid);
+        // SAFETY: framebuffer reachable through the physical map.
+        let pixel = unsafe {
+            (crate::memory::phys::phys_to_virt(fb.address) as *const u32).read_volatile()
+        };
+        // Back to the console before any assertion, so a failure shows on
+        // the screen too.
+        if let Some(surface) = lent {
+            crate::console::take_back_framebuffer(surface);
+        }
         assert_eq!(
             status,
             process::ExitStatus::Exited(0),
             "fb_driver: {status:?}"
         );
-        // SAFETY: framebuffer reachable through the physical map.
-        let pixel = unsafe {
-            (crate::memory::phys::phys_to_virt(fb.address) as *const u32).read_volatile()
-        };
         assert_eq!(
             pixel, 0x00FF_8800,
             "the driver should have painted pixel (0,0)"

@@ -160,3 +160,15 @@ What the budget does not do (audit follow-up, 2026-10-20):
   xN` and `net syn dropped xN`: a SYN does not cost a reset each, only a
   reset attempt, and the peer that did not get one retransmits its SYN or
   gives up; nothing is held either way.
+
+## Note (2026-10-23, ADR 0044)
+
+The round keeps both budgets and their meaning; what changed is its end.
+"Starts the next round without waiting for the interrupt" now reads:
+without waiting at all. The round is followed at once when frames were
+left in the ring (`net rx budget hit`, as before), when the eight requests
+used up the IPC budget (requests may still be queued; before, they slept
+until the next interrupt or 10 ms) or when a sweep took requests still to
+be served. Otherwise the round ends with one wait on every endpoint, the
+NIC's line and the stack's next deadline. Under a flood nothing changes:
+the ring is never empty, so there is no wait.
