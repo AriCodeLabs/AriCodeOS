@@ -57,6 +57,44 @@ not the publication of modified sources or of separately written drivers.
    - Any change of licence updates LICENSE, NOTICE, the SPDX headers,
      AUTHORS.md, AI-NOTICE.md, llms.txt and the READMEs together.
 
+## Trusted vendors (owner's note, 2026-10-23, to be thought through)
+
+Besides **official** drivers (built and signed by the project) and
+**unofficial** ones (anything else, shown as such), add a third level:
+drivers from a **trusted vendor**, built by the vendor under its own
+responsibility but recognised by the system.
+
+- **How a vendor joins:** a request process in a repository controlled by
+  AriCodeLabs (for example an `AriCodeLabs/vendors` repository): the
+  vendor applies, identifies itself, accepts the policy (option 4 above:
+  tests, capability manifest, behaviour on failure), and the project
+  decides.
+- **How trust is expressed:** not a shared secret between AriCodeLabs and
+  the vendor (a shared secret can leak from either side and cannot tell
+  who signed). Instead, delegation with public keys: the vendor keeps its
+  own private signing key; AriCodeLabs signs a **vendor certificate**
+  (vendor name, its public key, what it may sign — e.g. drivers for its
+  own PCI vendor id only —, validity dates) with the release key or a
+  dedicated vendor-root key. The system ships the project's public key
+  only; a vendor driver is accepted as "trusted vendor" when its package
+  signature verifies with a vendor key whose certificate verifies with the
+  project key and covers that driver.
+- **Revocation:** a signed revocation list published with the update
+  index (ADR 0029), so a compromised or misbehaving vendor can be
+  withdrawn without reinstalling machines.
+- **What the owner sees:** `diag`/`services` show official, trusted vendor
+  (with the vendor's name) or unofficial for every driver; installing an
+  unofficial driver needs explicit confirmation.
+- **Limits:** a vendor-signed driver still runs with only the capabilities
+  its manifest declares (ADR 0016) and under the IOMMU/DMA rules (ADR
+  0038); trust affects whether it is installed and how it is labelled, not
+  what it may touch.
+
+Open questions: a separate vendor-root key or the release key; certificate
+format (reuse the x509 code or a minimal Ed25519 record); how vendors are
+audited; whether trusted-vendor drivers may be closed source under the
+chosen licence.
+
 ## Recommendation (to be confirmed)
 
 Adopt 1 to 4 regardless of the licence: they are governance and cost
