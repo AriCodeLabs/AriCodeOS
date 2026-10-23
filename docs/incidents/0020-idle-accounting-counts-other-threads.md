@@ -110,16 +110,27 @@ loop:
   starts; `total(now)` includes the open stretch.
 - `Cpu::set_current` (kernel/src/cpu.rs), which every switch already
   calls on the switching CPU with interrupts disabled (`switch_with`,
-  `adopt_idle`), reads the TSC and updates the CPU's clock when the
-  thread leaving or entering is the idle thread. The clock sits behind a
-  per-CPU `IrqLock` so any CPU can read it consistently (`sysinfo::IDLE`,
-  the smp self-test's report). Lock order: scheduler lock, then the idle
-  clock; readers take only the clock.
+  `adopt_idle`), updates the CPU's clock when the thread leaving or
+  entering is the idle thread, reading the TSC under the clock's lock.
+  The clock sits behind a per-CPU `IrqLock` so any CPU can read it
+  consistently (`sysinfo::IDLE`, the smp self-test's report). The idle
+  lock is a leaf: a switch takes it under the scheduler lock and takes
+  nothing else; readers take only idle locks.
 - `idle_loop` no longer reads the TSC.
-- `scheduler::idle_sample` reads one TSC value and computes the elapsed
-  cycles and every CPU's idle cycles at it; `sysinfo::IDLE` uses it. Every
-  idle stretch starts after `time::calibrate_tsc` (the APIC is set up
-  before the scheduler), so each CPU's idle is at most the elapsed cycles.
+- `scheduler::idle_sample` (`sysinfo::IDLE`) locks every online CPU's
+  idle clock in CPU order (`cpu::idle_clocks_at_one_instant`, nested and
+  released in reverse), reads the TSC once with all of them held, and
+  computes the elapsed cycles and every CPU's idle cycles at that value.
+  Since each switch reads its TSC under its own CPU's lock, no stretch in
+  the sample ended or started after that value: the sample is one
+  instant. Every idle stretch starts after `time::calibrate_tsc` (the APIC
+  is set up before the scheduler), so each CPU's idle is at most the
+  elapsed cycles, and two samples differ by exactly the idle time between
+  their TSC values (TSC shared by all CPUs, as the clock already assumes).
+  The audit of the fix found the first version read the TSC before
+  locking each clock with interrupts enabled, so a switch in between could
+  put time after `now` into a closed total; fixed in the follow-up
+  commit.
 - The shell's `cpus` no longer clamps the idle cycles to the elapsed ones.
 
 Definition (documented in `libs/sched/src/idle.rs`, `docs/performance.md`
@@ -177,11 +188,14 @@ idle selftest: CPU 3 idle through a 197 ms window with timer ticks and 10 RESCHE
   for about 4 x 10^9 ticks. A thread then made ready with `wake` or
   `spawn` on that CPU (not a sleeper waking on the BSP, which preempts
   regardless) waits until the running thread blocks or yields, unless
-  another CPU takes it. To be recorded and studied as its own incident.
+  another CPU takes it. Confirmed and handled on another branch as
+  incident 0023; not fixed here.
 - `kick_idle` sends RESCHED to the first idle CPU other than the caller,
-  even when the thread made ready is pinned to another CPU: the pinned
-  thread waits for its CPU's next tick (up to 10 ms). A latency cost, not
-  a correctness defect.
+  even when the thread made ready is pinned to another CPU. If that CPU
+  is idle, the pinned thread waits for its next tick (up to 10 ms), when
+  the idle loop sees it. If that CPU runs a thread whose quantum counter
+  has wrapped (incident 0023), nothing preempts it and the wait is
+  unbounded until that thread blocks or yields.
 - The shell's `cpus` clamped each CPU's idle cycles to the elapsed cycles
   (`.min(elapsed)`), which hid exactly this overcount on screen.
 
@@ -191,7 +205,7 @@ idle selftest: CPU 3 idle through a 197 ms window with timer ticks and 10 RESCHE
 - Not exercised on the reference laptop; real hardware changes nothing in
   the mechanism, but `cpus` there has only been read with the old
   accounting.
-- The quantum counter wrap above needs its own incident.
+- The quantum counter wrap above: incident 0023, on another branch.
 - Idle figures recorded before the fix (docs/performance.md's 81-82 %, the
   audit's tables) are not comparable with new ones; a new warm baseline
   belongs with the next `perf.bench` run of a release.

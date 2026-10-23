@@ -355,9 +355,12 @@ latter briefly to add the region.
   therefore ends the stretch at that switch: the woken thread's time is
   never idle. Interrupts serviced on the idle thread that return to it
   without switching count as idle. The idle loop itself measures nothing.
-  `scheduler::idle_sample` reads the elapsed cycles and every CPU's idle
-  cycles, the open stretch included, at one TSC instant (`sysinfo::IDLE`),
-  so each CPU's idle is at most the elapsed cycles.
+  The TSC of a switch is read under the CPU's idle lock (a leaf lock).
+  `scheduler::idle_sample` (`sysinfo::IDLE`) locks every CPU's idle clock
+  in CPU order, reads the TSC once and computes the elapsed cycles and
+  every CPU's idle cycles, the open stretch included, at that reading: no
+  stretch can end after it, so each CPU's idle is at most the elapsed
+  cycles and two samples differ by exactly the idle time between them.
 - `test=idle`: the control of the performance audit of 731c398 (finding
   A). A thread pinned to CPU 0 and, with more CPUs, to the last one stays
   runnable 500 ms and sleeps 200 ms: its busy interval is excluded from

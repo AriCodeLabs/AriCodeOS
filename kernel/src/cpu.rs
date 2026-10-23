@@ -95,18 +95,19 @@ impl Cpu {
         }
     }
 
-    /// TSC cycles this CPU's idle thread has been its running thread up to
-    /// TSC `now`, the current idle stretch included (`IdleClock`).
-    pub fn idle_cycles_at(&self, now: u64) -> u64 {
-        self.idle.lock().total(now)
-    }
-    /// Same, up to this moment.
+    /// TSC cycles this CPU's idle thread has been its running thread, the
+    /// current idle stretch included (`IdleClock`), up to now.
     pub fn idle_cycles(&self) -> u64 {
-        self.idle_cycles_at(crate::time::rdtsc())
+        let (clock, now) = self.idle_clock_now();
+        clock.total(now)
     }
-    /// This CPU's idle clock as it is now (closed stretches and the open one).
-    pub fn idle_clock(&self) -> IdleClock {
-        *self.idle.lock()
+    /// This CPU's idle clock (closed stretches and the open one) and the
+    /// TSC, read together under its lock: no switch of this CPU is
+    /// accounted between the two, and every stretch in the clock started
+    /// and ended before the TSC value.
+    pub fn idle_clock_now(&self) -> (IdleClock, u64) {
+        let clock = self.idle.lock();
+        (*clock, crate::time::rdtsc())
     }
 
     pub fn index(&self) -> usize {
@@ -141,8 +142,11 @@ impl Cpu {
         let from_idle = self.idle_running.load(Ordering::Relaxed);
         let to_idle = tid == self.idle_tid();
         if from_idle || to_idle {
-            let now = crate::time::rdtsc();
-            self.idle.lock().switch(from_idle, to_idle, now);
+            // The TSC is read under the lock, so a reader holding it sees
+            // either the clock before this switch or after it, with its
+            // timestamp earlier than anything the reader reads next.
+            let mut clock = self.idle.lock();
+            clock.switch(from_idle, to_idle, crate::time::rdtsc());
         }
         self.current.store(tid, Ordering::Relaxed);
         self.quantum_left.store(quantum, Ordering::Relaxed);
@@ -244,6 +248,32 @@ pub fn online() -> impl Iterator<Item = &'static Cpu> {
 
 pub fn online_count() -> usize {
     online().count()
+}
+
+/// Every online CPU's idle clock, in CPU order, appended to `out`, and the
+/// TSC read once with all those clocks locked (`sysinfo::IDLE`, incident
+/// 0020). Every switch accounts under its own CPU's lock with the TSC read
+/// inside it, so no CPU can close or open a stretch between the clocks and
+/// the TSC value: the result is one instant. Locks are taken in CPU order
+/// and released in reverse (properly nested, so each restores the
+/// interrupt state it saw); a switch takes only its own lock, so this
+/// cannot deadlock. `out` should have room for `MAX_CPUS` clocks so
+/// nothing is allocated with the locks held.
+pub fn idle_clocks_at_one_instant(out: &mut alloc::vec::Vec<IdleClock>) -> u64 {
+    fn lock_from(
+        cpus: &mut dyn Iterator<Item = &'static Cpu>,
+        out: &mut alloc::vec::Vec<IdleClock>,
+    ) -> u64 {
+        match cpus.next() {
+            Some(c) => {
+                let clock = c.idle.lock();
+                out.push(*clock);
+                lock_from(cpus, out)
+            }
+            None => crate::time::rdtsc(),
+        }
+    }
+    lock_from(&mut online(), out)
 }
 
 /// Some CPU other than `me` that is in its idle thread (to wake it up).

@@ -113,6 +113,18 @@ mod tests {
     }
 
     #[test]
+    fn an_open_restarts_the_stretch() {
+        // An open without a close (the thread leaving was not the idle
+        // thread) starts the stretch at the new switch: the time since the
+        // stale start was not idle.
+        let mut c = IdleClock::new();
+        c.switch(false, true, 100);
+        c.switch(false, true, 300);
+        assert_eq!(c.idle_since(), Some(300));
+        assert_eq!(c.total(400), 100);
+    }
+
+    #[test]
     fn idle_to_idle_keeps_the_count() {
         let mut c = IdleClock::new();
         c.switch(false, true, 0);

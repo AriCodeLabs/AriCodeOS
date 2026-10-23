@@ -49,13 +49,15 @@ switch happens, including inside a timer handler taken from `hlt`. So:
   in by an interrupt that woke the CPU from `hlt`;
 - interrupt handlers that run on the idle thread and return to it without
   a switch count as idle (they are short: a tick, an IPI, a device IRQ);
-- the kernel samples the elapsed cycles and every CPU's idle cycles at the
-  same TSC instant, the current idle stretch included, so a CPU's idle
+- the kernel samples the elapsed cycles and every CPU's idle cycles at
+  one TSC reading, the current idle stretch included, taken with every
+  CPU's idle clock locked (each switch reads its own TSC under its CPU's
+  lock), so no stretch in a sample ends after that reading: a CPU's idle
   never exceeds the elapsed time and two samples measure exactly the idle
   time between them. `cpus` does not clamp the value: above 100 % would
   be a defect to report.
 
-Until 0.13.0 (incident 0020) the idle loop measured each `sti; hlt` and
+Before 0.14.0 (incident 0020) the idle loop measured each `sti; hlt` and
 added it when `hlt` returned, so a thread switched in by the handler that
 ended the `hlt` had its whole run counted as idle: the audit of 731c398
 saw 105 % on one CPU, and `test=idle` 1000 permille where at most 285 were

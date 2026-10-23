@@ -229,18 +229,22 @@ pub fn idle_loop() -> ! {
 }
 
 /// Idle counters at one instant (`sysinfo::IDLE`): TSC cycles since boot
-/// and each online CPU's idle cycles, all up to the same TSC reading, so
-/// each CPU's idle is at most the elapsed cycles.
+/// and each online CPU's idle cycles, all up to one TSC reading taken with
+/// every CPU's idle clock locked (`cpu::idle_clocks_at_one_instant`). No
+/// stretch can end after that reading, so each CPU's idle is at most the
+/// elapsed cycles, and the difference of two samples is exactly the idle
+/// time between their readings.
 pub struct IdleSample {
     pub elapsed: u64,
     pub idle: Vec<u64>,
 }
 
 pub fn idle_sample() -> IdleSample {
-    let now = crate::time::rdtsc();
+    let mut clocks = Vec::with_capacity(cpu::MAX_CPUS);
+    let now = cpu::idle_clocks_at_one_instant(&mut clocks);
     IdleSample {
         elapsed: crate::time::tsc_since_boot_at(now),
-        idle: cpu::online().map(|c| c.idle_cycles_at(now)).collect(),
+        idle: clocks.iter().map(|c| c.total(now)).collect(),
     }
 }
 
@@ -911,21 +915,23 @@ pub fn idle_selftest() {
 /// Interrupt service on an idle CPU is idle time (`aricode_sched::idle`):
 /// during a window of ten 10 ms sleeps of main (about 200 ms) CPU `target`,
 /// with nothing to run, takes its timer ticks and ten RESCHED IPIs, each
-/// serviced on its idle thread. If
-/// its idle stretch is the same at both ends (no switch: another thread
-/// may briefly run there, then the window is retried), its idle time grows
-/// by exactly the window.
+/// serviced on its idle thread. What it proves: servicing those interrupts
+/// accounts no switch on that CPU, so its idle stretch stays open through
+/// the window and its idle time grows by the whole window. A window in
+/// which the stretch changed (another thread briefly ran there) is retried;
+/// if interrupts ended the stretch, every window would change and the check
+/// fails. Each end reads the clock and the TSC together
+/// (`Cpu::idle_clock_now`), so an open stretch always started before `t0`.
 fn idle_interrupts_check(target: usize) {
-    use crate::time::rdtsc;
     const ATTEMPTS: u32 = 10;
     let c = cpu::slot(target);
     for attempt in 1..=ATTEMPTS {
-        let (t0, before) = (rdtsc(), c.idle_clock());
+        let (before, t0) = c.idle_clock_now();
         for _ in 0..10 {
             apic::send_ipi(c.lapic_id(), apic::RESCHED_VECTOR);
             sleep_ms(10);
         }
-        let (t1, after) = (rdtsc(), c.idle_clock());
+        let (after, t1) = c.idle_clock_now();
         if before.idle_since().is_some() && before.idle_since() == after.idle_since() {
             let grown = after.total(t1) - before.total(t0);
             assert_eq!(
