@@ -398,7 +398,9 @@ cargo xtask serve-update --channel dev --signing-key ~/.config/aricodeos/dev-sig
 ```
 
 It builds the checkout, numbers it (one above the last development build
-published from this machine), records its commit (`-dirty` if tracked
+this host published from any checkout or worktree: the counter is
+`~/.cache/aricodeos/dev-build`, locked while a build is published),
+records its commit (`-dirty` if tracked
 files have uncommitted changes), signs image and index with the
 development key into `build/update-dev/` and serves it on port 8081 (the
 stable source keeps 8080; `--port P` changes it). Stop it with Ctrl-C and
@@ -419,11 +421,17 @@ that `upgrade --channel stable` does.
 stable` installs the newest stable release even if its number is below the
 build's; the switch is recorded in `cat updater/history.log` and as an
 event in `diag`. **Without the network** (a build that boots but broke
-it): `update rollback` schedules the system still in the other slot, the
-one before the last install, verified and with three tries; `reboot`
-boots it and it stays once it comes up. A build that does not boot at all
-is undone by the loader alone after three attempts.
+it): `update rollback` schedules the system still in the other slot,
+verified and with three tries, and says what it is (another channel, an
+older release); `reboot` boots it and it stays once it comes up. That slot
+holds the system before the last install, unless the last install never
+stayed (the loader rejected it or ran out of tries): then it holds that
+failed image, and rolling back retries it. A build that does not boot at
+all is undone by the loader alone after three attempts.
 
-If `build/` was removed, the build counter starts again at 1 and the
-laptop refuses the lower number: `upgrade --channel dev --allow-downgrade`
-once.
+The laptop never takes the same build number with another commit (two
+checkouts that published the same number before the host counter): it
+refuses it and asks for a new publication. Going back to stable never
+goes below the newest stable release the laptop ran (the stable floor in
+`updater/state`, seeded by the stick): an older one is a downgrade,
+installed only with `--allow-downgrade`.

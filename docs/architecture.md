@@ -1710,8 +1710,9 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
 - `aricode_crypto::trust::dev_channel_key` (`ARICODE_DEV_CHANNEL_PUB`):
   in every updater; in AriBoot only with `usb-image --dev-source` (and in
   test builds); never in init or the installer. AriBoot writes
-  `BootState::loader_dev_channel` on every boot; the updater trusts the
-  channel only with that flag and a `dev URL` line in `updater/sources`.
+  `BootState::loader_dev_channel` on every boot; the updater uses the
+  development key only with that flag (`trusted_keys`), and fetches
+  development indexes only from `dev URL` lines in `updater/sources`.
 - The development manifest and index add `channel = dev` and
   `commit = HEX`; the version is the build number, assigned by
   `cargo xtask publish-update --channel dev` (counter beside
@@ -1721,8 +1722,13 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   `upgrade [--channel stable|dev] [--allow-downgrade]` (only `--channel`
   moves the system to the other channel), `update rollback` (updater
   `ROLLBACK`: schedules the inactive slot's verified image, no network).
+- The stable floor (`[floor]` of `updater/state`): the newest stable
+  release the machine ran; a stable release below it is a downgrade,
+  channel switch or not. A development build number seen with another
+  commit is refused. xtask numbers development builds per host
+  (`~/.cache/aricodeos/dev-build`, locked).
 - Scenarios: `update.dev_channel`, `update.dev_wrong_key`,
-  `update.dev_rollback`.
+  `update.dev_rollback`, `update.dev_stable_image`, `update.stable_floor`.
 
 ## DHCP address probe (2026-10-12)
 

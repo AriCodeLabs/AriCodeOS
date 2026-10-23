@@ -235,7 +235,7 @@ Since ADR 0045 there is a second key, the development channel's
 signs development builds and their indexes only, the key above never
 signs them, and every rule of this section applies to it the same way
 (`--signing-key DIR --channel dev`). The updater of every build carries its
-public half, inert unless the machine opted in; AriBoot carries it only on
+public half, inert unless the machine's loader trusts the channel; AriBoot carries it only on
 a machine installed with `usb-image --dev-source`.
 
 ## Consequences

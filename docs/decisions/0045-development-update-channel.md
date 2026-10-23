@@ -40,9 +40,11 @@ without being asked, doors are closed by default, refusals are logged.
 2. **Build numbers, commits and switches.**
    - `cargo xtask publish-update --channel dev` (and `serve-update
      --channel dev`) publishes into `build/update-dev/` and numbers the
-     build itself: one above the last build published there, as the
-     directory's index or the counter beside it (`update-dev.last-build`,
-     which survives a removed directory) says. `--version`, `--no-system`
+     build itself: one above the last build published from this host, by
+     any checkout or worktree, as the host counter
+     (`~/.cache/aricodeos/dev-build`, locked for the whole publication),
+     the directory's index and the counter beside it
+     (`update-dev.last-build`) say, whichever is highest (audit M2). `--version`, `--no-system`
      and `--app` are refused with `--channel dev`; a test that names a
      number must still go above the last one. It records the checkout's
      commit (`git rev-parse --short=12 HEAD`, `-dirty` with uncommitted
@@ -81,11 +83,25 @@ without being asked, doors are closed by default, refusals are logged.
      channels** the rule is the owner's word: an image of the other
      channel is installed only by `upgrade --channel C` naming that
      channel, whatever the numbers say (stable 2 replaces development
-     build 5). It is said and recorded (`upd-channel-switch`, code 52),
-     and the history line names both systems. A plain `upgrade` on a
+     build 5), but never below the **stable floor**: the newest stable
+     release this machine ran, kept in the `[floor]` section of
+     `updater/state` (raised whenever the active system is a newer stable
+     release, never lowered, seeded by `usb-image` from the stick's
+     release). A stable release below it is a downgrade, switch or not,
+     refused without `--allow-downgrade` (`upd-downgrade-refused`, audit
+     M1): a first, unauthenticated fetch of an old validly signed stable
+     index cannot roll a development machine back past what it ran. It is
+     said and recorded once installed (`upd-channel-switch`, code 52),
+     and the history line names both systems.
+   - A development build number seen again with another commit (the same
+     number published twice) is never taken for the installed build nor
+     installed over it: refused (`upd-build-conflict`, code 57) until a
+     new publication gives it a new number. A plain `upgrade` on a
      development build never leaves the channel: it is refused and
      recorded (`upd-channel-switch-refused`, code 53). `update apply`
-     never changes the channel either.
+     never changes the channel either: an image of the other channel is
+     refused, and with an unknown installed version (`--allow-downgrade`)
+     it takes a stable image only (audit L4).
    - The plan records the channel it was made for (`channel dev`, then
      `system dev 7`; a stable plan is written as before): `upgrade
      --channel C` follows only a plan of `C` (`upd-plan-channel`
@@ -109,10 +125,13 @@ without being asked, doors are closed by default, refusals are logged.
      anyway). AriBoot writes on every boot whether it trusts the channel
      (`BootState::loader_dev_channel`, byte 16 of the boot state; a loader
      before this ADR leaves it zero). The updater of every build carries
-     the public key, inert: it uses it only when the machine has a
-     development source **and** its loader says it trusts the channel, so
-     it never accepts an index or installs a build the loader would
-     refuse. The flag is advisory, not a trust root: forging it only makes
+     the public key, inert unless the machine's loader says it trusts
+     the channel: only then is the key part of the run's keys
+     (`aricode_update_index::trusted_keys`), used to verify the installed
+     system and development indexes and images. Development indexes are
+     only fetched from development sources, and a `--channel dev` run
+     without one is refused, so the updater never accepts an index or
+     installs a build the loader would refuse. The flag is advisory, not a trust root: forging it only makes
      the updater install an image AriBoot then rejects (and rolls back
      from). init's broker and the installer never carry it: the channel
      has no apps. xtask checks all of this after every build (`check_dev_anchor`).
@@ -134,7 +153,12 @@ without being asked, doors are closed by default, refusals are logged.
      `keys/release` as the stable anchor, so a development build can go
      back to stable; `--signing-key DIR` for the stable channel refuses
      the development key and any test key; without `--signing-key` the
-     test pairs sign both channels, with a warning. The public test key
+     test pairs sign both channels, with a warning, and naming the test
+     directories themselves (`--signing-key keys/dev`, or
+     `keys/dev/dev-channel` with `--channel dev`) is the same test mode,
+     with the same warning. The committed release key a development build
+     embeds must not be a test key, and `aricode_crypto::trust` refuses to
+     compile a real `ARICODE_SIGNING_PUB` equal to either test key. The public test key
      `keys/dev` is therefore never accepted by any non-test channel.
 
 4. **Safety.** A development build that does not boot is reverted by the
@@ -145,6 +169,12 @@ without being asked, doors are closed by default, refusals are logged.
    the inactive slot (the system before the last install) with the keys
    this machine's loader trusts and schedules it with three tries, as an
    install would; after `reboot` init confirms it and it becomes active.
+   It says what it boots: another channel, or an older release (a
+   downgrade, below the stable floor too: this is the owner's local,
+   explicit way back, audit L3). That slot holds the system before the
+   last install, unless that install never stayed (the loader rejected
+   it or ran out of tries): it then holds the failed image, and rolling
+   back retries it.
    No network, no download; it writes only the boot state, the history
    and its own log. Refused and recorded when that slot holds no bootable
    image (`upd-rollback-none`) or an install is already pending
@@ -183,10 +213,10 @@ without being asked, doors are closed by default, refusals are logged.
   build's AriBoot trusts the test pair, one build serving every
   scenario). The refusal path is short (`run_keys`, `dev_not_trusted`)
   and the anchors are checked after every build.
-- Removing `build/` also removes the build counter: the next
-  development build is numbered 1 again and a machine on a higher build
-  refuses it as a downgrade until the owner types `upgrade --channel dev
-  --allow-downgrade` once (or publishes until the number is above).
+- Removing `~/.cache/aricodeos/dev-build` and every `build/update-dev`
+  restarts the numbering: a machine on a higher build refuses the lower
+  number as a downgrade until the owner types `upgrade --channel dev
+  --allow-downgrade` once.
 - The laptop installed before this ADR has an AriBoot without the
   development key: it joins the channel once, from a stick written with
   `cargo xtask usb-image --signing-key ~/.config/aricodeos/signing-key
@@ -198,7 +228,16 @@ without being asked, doors are closed by default, refusals are logged.
   and source lines are written exactly as before.
 - New fault codes of the updater: 52 `upd-channel-switch` (a switch the
   owner asked for), 53 `upd-channel-switch-refused`, 54 `upd-rollback`,
-  55 `upd-rollback-none`/`upd-rollback-pending`, 56 `upd-dev-not-trusted`;
-  `upd-no-dev-source` uses 21 and `upd-plan-channel` 37.
+  55 `upd-rollback-none`/`upd-rollback-pending`, 56 `upd-dev-not-trusted`,
+  57 `upd-build-conflict`, 58 `upd-floor-damaged`; `upd-no-dev-source`
+  uses 21, `upd-plan-channel` 37, a stable release below the floor 40.
+- Audit follow-up (2026-10-23): the rules above are pure functions of
+  `aricode-update-index` with host tests (`decide_system`, `raise_floor`,
+  `trusted_keys`, `image_matches_offer`); scenarios
+  `update.stable_floor` and `update.dev_stable_image` (a development
+  index pointing at a stable image is refused at install) join the list
+  above. The boot command line readers take 1 KiB and report a line that
+  does not fit (`console.long_cmdline`), since AriBoot's keys lengthen
+  it.
 - Open, besides phase 2: key rotation and revocation remain open for
   both keys (ADR 0029).
