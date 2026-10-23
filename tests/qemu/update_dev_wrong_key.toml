@@ -1,0 +1,42 @@
+# A development source whose index and image are signed with the release
+# (stable) key instead of the development channel's key (ADR 0045,
+# decision 3): the updater refuses the index before reading anything in
+# it, records the refusal, stores nothing, and `upgrade --channel dev`
+# has no verified index to install from; no slot is written.
+name = "update.dev_wrong_key"
+description = "a dev index signed with the release key is refused and logged; nothing is installed"
+level = "full"
+areas = ["update", "network", "shell", "crypto"]
+disk = "update-empty"
+timeout_secs = 120
+
+[host_update]
+source = "none"
+dev_build = 5
+dev_wrong_key = true
+dev_source = true
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update --channel dev", "upgrade --channel dev", "diag", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "updater: source 1 http://10.0.2.2:{update_port}/dev/: index refused (BadSignature): signature or format invalid, or not signed with the development channel's key; nothing from it is used",
+    "update: updater exited with 31",
+    "updater: source 1: no verified index yet; run update",
+    "updater: no verified index: run update --channel dev first",
+    "update: updater exited with 33",
+    ": upd-index-refused (code 31)",
+    ": upd-no-index (code 33)",
+    "system   version 1, slot A",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "index verified",
+    "downloading aricodeos",
+    "installed into slot",
+    "pending B",
+    "switching from",
+]

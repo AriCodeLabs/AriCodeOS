@@ -746,18 +746,13 @@ fn decide_system_install(
                 SystemChange::Within(Change::Downgrade) => say!(
                     "system: downgrading from {current} to {offered_ident} (--allow-downgrade)"
                 ),
-                SystemChange::Switch { from, to } => {
-                    fault(
-                        code::CHANNEL_SWITCH,
-                        "upd-channel-switch",
-                        &format!(
-                            "system: switching from the {} channel ({current}) to the {} channel ({offered_ident}), as asked with --channel {}",
-                            from.name(),
-                            to.name(),
-                            to.name()
-                        ),
-                    );
-                }
+                // Recorded as an event once installed (`upgrade_system`).
+                SystemChange::Switch { from, to } => say!(
+                    "system: switching from the {} channel ({current}) to the {} channel ({offered_ident}), as asked with --channel {}",
+                    from.name(),
+                    to.name(),
+                    to.name()
+                ),
                 SystemChange::Within(_) => {}
             }
             Ok(true)
@@ -1478,14 +1473,33 @@ fn upgrade_system(
     };
     say!("system image {described} verified (signature and SHA-256)");
     disk.install(size)?;
+    let switched = installed.as_ref().filter(|m| m.channel != offer.channel);
     history(
         fs,
         &format!(
-            "system {} -> {offered} installed into slot {} from {url} (pending until reboot)",
+            "system {} -> {offered} installed into slot {} from {url} (pending until reboot){}",
             installed.as_ref().map_or(String::from("?"), manifest_ident),
-            disk.target.name()
+            disk.target.name(),
+            if switched.is_some() {
+                ", channel switch asked with --channel"
+            } else {
+                ""
+            }
         ),
     );
+    if let Some(from) = switched {
+        // The owner's explicit switch, recorded where `diag` shows it
+        // (ADR 0045, decision 2).
+        fault(
+            code::CHANNEL_SWITCH,
+            "upd-channel-switch",
+            &format!(
+                "system: channel switched from {} to {} (pending until reboot)",
+                from.channel.name(),
+                offer.channel.name()
+            ),
+        );
+    }
     say!("system {offered} installed: reboot to apply");
     Ok(())
 }

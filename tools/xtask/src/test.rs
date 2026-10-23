@@ -399,10 +399,12 @@ fn run_scenario(
                     sign_as: u.dev_wrong_key.then_some(aricode_ab::Channel::Stable),
                     ..image::Publication::default()
                 };
+                let dev_dir = workdir.join(qemu::DEV_SOURCE_DIR);
+                image::forget_test_dev_source(&dev_dir)?;
                 writeln!(
                     report,
                     "{}",
-                    image::publish_channel(&workdir.join(qemu::DEV_SOURCE_DIR), release, &dev)?
+                    image::publish_channel(&dev_dir, release, &dev)?
                 )
                 .expect("String");
             }

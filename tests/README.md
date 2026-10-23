@@ -129,6 +129,11 @@ tamper_index = true             # the index is altered after signing (the update
 tamper_image = true             # the image is altered after the index recorded its SHA-256
 stale_index = true              # the machine already holds a verified copy with a higher serial
 source = "sources"              # sources (installs updater/sources) | legacy-url (installs the ADR 0027 updater/update_url) | none
+dev_build = 5                   # also a development source (ADR 0045) offering build 5, published in build/scenarios/<name>/dev/ and
+                                # served at http://10.0.2.2:{update_port}/dev/, signed with the development channel's test key
+dev_commit = "0123abc"          # the commit that build names (default 0123abc)
+dev_wrong_key = true            # the development source is signed with the stable test key (the updater must refuse it)
+dev_source = true               # register it in updater/sources as `dev URL` (default: not registered, the channel is closed)
 usb_legacy_controller = true    # also adds an EHCI with no devices (the EHCI driver runs next to usbd)
 usb_ehci_hid = true             # an EHCI with a USB keyboard and mouse (high speed) for usb_ehci (ADR 0031)
 usb_ehci_storage = true         # the test disk hangs off the EHCI as USB mass storage; there is no virtio-blk

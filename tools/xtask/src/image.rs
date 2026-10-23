@@ -1318,6 +1318,11 @@ mod tests {
             build_counter(&dir),
             tmp.path().join("update-dev.last-build")
         );
+        // A scenario's source starts afresh on every run.
+        forget_test_dev_source(&dir).unwrap();
+        assert!(!dir.exists() && !build_counter(&dir).exists());
+        assert_eq!(next_build(&dir, Some(5)), Ok(5));
+        forget_test_dev_source(&dir).unwrap();
     }
 
     #[test]
@@ -1341,10 +1346,19 @@ mod tests {
     }
 
     #[test]
-    fn head_commit_is_a_valid_commit() {
-        let commit = head_commit().unwrap();
-        assert!(aricode_ab::Commit::parse(&commit).is_some(), "{commit}");
-        assert!(commit.trim_end_matches("-dirty").len() == 12, "{commit}");
+    fn commit_text_is_what_the_manifest_accepts() {
+        assert_eq!(
+            commit_text("0123456789ab", false).as_deref(),
+            Ok("0123456789ab")
+        );
+        assert_eq!(
+            commit_text("0123456789ab", true).as_deref(),
+            Ok("0123456789ab-dirty")
+        );
+        // Whatever git printed, only a commit the manifest accepts is used.
+        assert!(commit_text("", false).is_err());
+        assert!(commit_text("fatal: not a git repository", false).is_err());
+        assert!(commit_text("0123ABC", false).is_err());
     }
 
     fn dev_public_key() -> [u8; 32] {
@@ -1548,6 +1562,25 @@ fn build_counter(dir: &Path) -> PathBuf {
     dir.with_file_name(format!("{name}.last-build"))
 }
 
+/// Removes a scenario's development source and its build counter: every
+/// test run starts from a fresh source, whose build numbers the scenario
+/// names (a real source's counter is never removed by xtask).
+pub fn forget_test_dev_source(dir: &Path) -> Result {
+    reject_symlink(dir)?;
+    if dir.exists() {
+        io(
+            fs::remove_dir_all(dir),
+            "remove the previous development source",
+        )?;
+    }
+    match fs::remove_file(build_counter(dir)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(format!("remove the development build counter: {e}"))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// This checkout's commit for a development build: 12 hex digits of `HEAD`,
 /// `-dirty` when tracked files have uncommitted changes.
 fn head_commit() -> Result<String> {
@@ -1567,12 +1600,28 @@ fn head_commit() -> Result<String> {
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
-    let mut commit = git(&["rev-parse", "--short=12", "HEAD"])?;
-    if !git(&["status", "--porcelain", "--untracked-files=no"])?.is_empty() {
-        eprintln!("[xtask] WARNING: uncommitted changes: the development build is recorded as {commit}-dirty");
-        commit.push_str("-dirty");
+    let head = git(&["rev-parse", "--short=12", "HEAD"])?;
+    let dirty = !git(&["status", "--porcelain", "--untracked-files=no"])?.is_empty();
+    if dirty {
+        eprintln!(
+            "[xtask] WARNING: uncommitted changes: the development build is recorded as {head}-dirty"
+        );
     }
-    Ok(commit)
+    commit_text(&head, dirty)
+}
+
+/// The commit text a development build records: `head`, `-dirty` when the
+/// tree had uncommitted changes; refused unless the manifest accepts it.
+fn commit_text(head: &str, dirty: bool) -> Result<String> {
+    let text = if dirty {
+        format!("{head}-dirty")
+    } else {
+        head.to_string()
+    };
+    match aricode_ab::Commit::parse(&text) {
+        Some(_) => Ok(text),
+        None => Err(format!("'{text}' is not a commit (7-40 hex digits)")),
+    }
 }
 
 /// `index.sig` for `text`, signed with `channel`'s key (hex line).
