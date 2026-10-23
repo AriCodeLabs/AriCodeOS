@@ -1,0 +1,21 @@
+0000000000400010 <ari_net_core::run::<virtio_net::Nic>>:
+  400010:	55                   	push   %rbp
+  400011:	41 57                	push   %r15
+  400013:	41 56                	push   %r14
+  400015:	41 55                	push   %r13
+  400017:	41 54                	push   %r12
+  400019:	53                   	push   %rbx
+  40001a:	49 89 e3             	mov    %rsp,%r11
+  40001d:	49 81 eb 00 a0 00 00 	sub    $0xa000,%r11
+  400024:	48 81 ec 00 10 00 00 	sub    $0x1000,%rsp
+  40002b:	48 c7 04 24 00 00 00 	movq   $0x0,(%rsp)
+  400032:	00 
+  400033:	4c 39 dc             	cmp    %r11,%rsp
+  400036:	75 ec                	jne    400024 <ari_net_core::run::<virtio_net::Nic>+0x14>
+  400038:	48 81 ec 98 0f 00 00 	sub    $0xf98,%rsp
+  40003f:	89 74 24 30          	mov    %esi,0x30(%rsp)
+  400043:	49 89 ff             	mov    %rdi,%r15
+  400046:	48 c7 44 24 50 00 00 	movq   $0x0,0x50(%rsp)
+  40004d:	00 00 
+  40004f:	48 c7 44 24 48 00 00 	movq   $0x0,0x48(%rsp)
+  400056:	00 00 

@@ -1,0 +1,7 @@
+    Checking aricode-fb-console v0.13.0 (/home/serverbig/AriCodeOS-perf-731c398/libs/fb-console)
+    Checking aricode-initrd v0.13.0 (/home/serverbig/AriCodeOS-perf-731c398/libs/initrd)
+    Checking aricode-gfx v0.13.0 (/home/serverbig/AriCodeOS-perf-731c398/libs/gfx)
+    Checking aricode-sched v0.13.0 (/home/serverbig/AriCodeOS-perf-731c398/libs/sched)
+    Checking aricode-arifs v0.13.0 (/home/serverbig/AriCodeOS-perf-731c398/libs/arifs)
+    Checking aricode-performance-audit v0.1.0 (/home/serverbig/AriCodeOS-perf-731c398/docs/audits/731c398-performance/host)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.36s
