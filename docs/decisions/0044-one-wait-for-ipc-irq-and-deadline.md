@@ -185,3 +185,9 @@ margin.
   service endpoint, a change of its own. The EHCI driver polls its
   controller (`POLL_MS`) and keeps its loop. Device interrupts arrive on
   the boot CPU, as before.
+- Found by this change's suites and fixed in the same branch: usb-input
+  read an xHCI event whole before its cycle bit and could take a stale
+  event for a new one (incident 0024; exposed with 4 vCPUs once block
+  requests were served at once), and `test=drivers` checked a pixel the
+  kernel console repainted on its next scroll (one more boot line put
+  the 4-CPU run there; the self-test now lends the screen to the driver).
