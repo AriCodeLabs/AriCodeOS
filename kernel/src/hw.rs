@@ -480,7 +480,11 @@ pub fn selftest(info: &boot_protocol::BootInfo) {
     );
 
     // 2. A user driver paints the framebuffer through an MMIO capability.
+    // The screen is the driver's until the check: the kernel console would
+    // repaint pixel (0,0) on its next scroll, which any log line (the
+    // driver's exit) can cause once the screen is full of boot lines.
     let fb = info.framebuffer;
+    let lent = crate::console::lend_framebuffer();
     if fb.address != 0 {
         let region = KernelObject::new(ObjectKind::Mmio(Region {
             phys: fb.address,
@@ -507,6 +511,9 @@ pub fn selftest(info: &boot_protocol::BootInfo) {
         let pixel = unsafe {
             (crate::memory::phys::phys_to_virt(fb.address) as *const u32).read_volatile()
         };
+        if let Some(surface) = lent {
+            crate::console::take_back_framebuffer(surface);
+        }
         assert_eq!(
             pixel, 0x00FF_8800,
             "the driver should have painted pixel (0,0)"
