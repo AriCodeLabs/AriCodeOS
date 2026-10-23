@@ -147,8 +147,9 @@ mouse_rel = [10, -5]            # relative movement on mouse0
 click = "left"                  # button pressed and released; result in "[host] QMP: ..."
 key_delay_ms = 30               # minimum pause after each key event (default 0)
 echo_prompt = "ari> "           # the guest prints this before each line and echoes typed characters: each line waits for it and each
-                                # key for its echo (10 s at most, then "[host] QMP: failed after N events (no echo of 'd' ...)").
-                                # Required above 16 key events, the queue of QEMU's usb-kbd and i8042 (incident 0022)
+                                # key but the last for its echo (10 s of QEMU running at most, a thermal pause not counted, then
+                                # "[host] QMP: failed after N events (no echo of 'd' ...)"). Required when more than 16 key codes
+                                # (PS/2 bytes) would go out between two waits: QEMU's usb-kbd and i8042 queue 16 (incident 0022)
 
 [inject]                        # optional: provoked faults in the ESP
 truncate_kernel = 3000          # truncates kernel.elf to N bytes

@@ -242,11 +242,13 @@ pub struct InputProbe<'a> {
 }
 
 /// What typing with echo waits needs: the prompt, the serial capture to
-/// watch, and the flag that QEMU has exited.
+/// watch, the flag that QEMU has exited and QEMU's pid (a stopped QEMU,
+/// paused by the thermal guard, does not use up the wait).
 struct EchoWait {
     prompt: String,
     capture: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    gone: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    qemu_pid: u32,
 }
 
 /// Minimal QMP client over a Unix socket: handshake and hand-written JSON
@@ -370,13 +372,13 @@ fn run_input_probe(
                 Step::Echo(c) => Some(vec![c]),
             };
             if let (Some(e), Some(needle)) = (echo.as_ref(), needle) {
-                typing::wait_past(
-                    &mut cursor,
-                    &e.capture,
-                    &needle,
-                    typing::ECHO_TIMEOUT,
-                    &e.stop,
-                )?;
+                let stopped = || typing::process_stopped(e.qemu_pid);
+                let guest = typing::Guest {
+                    capture: &e.capture,
+                    gone: &e.gone,
+                    stopped: &stopped,
+                };
+                typing::wait_past(&mut cursor, &guest, &needle, typing::ECHO_TIMEOUT)?;
             }
         }
         Ok(())
@@ -1279,7 +1281,8 @@ pub fn run_headless(
                 let echo = p.echo_prompt.map(|prompt| EchoWait {
                     prompt: prompt.to_string(),
                     capture: Arc::clone(&captured),
-                    stop: Arc::clone(&qemu_gone),
+                    gone: Arc::clone(&qemu_gone),
+                    qemu_pid: child.id(),
                 });
                 input_thread = Some(std::thread::spawn(move || {
                     run_input_probe(&path, &keys, rel, click.as_deref(), delay, echo)

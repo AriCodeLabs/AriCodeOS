@@ -70,15 +70,24 @@ whether the machine keeps up.
   each key's echo on serial before sending the next one, so at most one
   key is queued in the device whatever the host load. `key_delay_ms`
   remains, as a minimum pause only. Each wait is bounded (10 s,
-  `ECHO_TIMEOUT`) and stops at once when QEMU exits; on a timeout the
-  runner stops typing and says which key had no echo (`[host] QMP: failed
-  after N events (no echo of 'd' within 10 s)`), so a lost key names
-  itself instead of producing a wrong command.
+  `ECHO_TIMEOUT`, counted only while QEMU runs: a thermal-guard pause,
+  SIGSTOP, state `T` in `/proc/<pid>/stat`, is not counted) and stops at
+  once when QEMU exits, so the scenario's own timeout bounds it too; on a
+  timeout the runner stops typing and says which key had no echo
+  (`[host] QMP: failed after N events (no echo of 'd' within 10 s of QEMU
+  running; check /home/serverbig/aricode-thermal.log)`), so a lost key
+  names itself instead of producing a wrong command.
+- No echo wait after the last key: nothing follows it to protect, and the
+  guest may end QEMU on it (Enter on `shutdown`) before its echo reaches
+  the capture, which would turn a passing run into `failed after N
+  events` in the scenarios that assert the host's event count.
 - Matching: a cursor in the serial capture that only moves forward. The
   prompt step keeps the previous command's output (`diag` contains every
-  letter) from passing for an echo; between the prompt and the echo, other
-  output can at worst let one key go early, never block, because the
-  earliest occurrence is taken.
+  letter) from passing for an echo. Other output printed after the prompt
+  (a driver's log line) can satisfy echo waits too, at worst every wait of
+  that line, whose keys then go out paced only by the minimum delay; the
+  next line's prompt stops it there. It never makes typing late, because
+  the earliest occurrence is taken.
 - Keys whose echo is not known without the guest's layout or that print
   nothing (`shift+dot`, `shift`) are paced only; letters, digits, space and
   Enter are waited for.
@@ -95,9 +104,12 @@ whether the machine keeps up.
   wall-clock pacing, and with echo waits the number of keys in the usb-kbd
   queue no longer depends on how fast the guest runs, so other guests on
   the host cannot make it overflow.
-- A host test (`repo_scenarios_typing_more_than_a_device_queue_wait_for_echoes`)
-  requires `echo_prompt` from every scenario that types more than 16 key
-  events.
+- Loading a scenario computes the longest run of keys it types between
+  two waits (`typing::plan`, in PS/2 bytes: two per key part, four for the
+  E0-prefixed keys) and refuses the scenario when that exceeds the 16-code
+  device queue (`HostInput::check_queue`, host test
+  `typing_more_than_a_device_queue_without_echo_waits_is_refused`; every
+  repo scenario loads).
 
 Not changed: `usb.hid`, `usb.ehci_hid`, `input.virtio` and
 `gui.two_windows` type at most 10 key events, which fit in every device
@@ -108,10 +120,13 @@ Enter that the fault consumes by design.
 
 ## Tests
 
-- Host: `typing::tests` (echo mapping, plan with prompt and echo steps,
-  forward-only cursor, previous command output not taken for an echo,
-  waits on a growing capture, bounded wait naming the lost key, stop on
-  QEMU exit) and the scenario rule above.
+- Host: `typing::tests` (echo mapping, plan with prompt and echo steps
+  and no final echo, unwaited runs in PS/2 bytes, forward-only cursor,
+  previous command output not taken for an echo, log output after the
+  prompt capped at one line, waits on a growing capture, bounded wait
+  naming the lost key, stop on QEMU exit, time with QEMU stopped not
+  counted, a SIGSTOPped process seen as stopped) and the scenario rule
+  above.
 - QEMU, development container (`--cpus 10 --memory 12g`), branch rebased
   on `develop` adc43a0: `cargo xtask test --all --area
   usb,shell,console,scheduler,smp,input` 100 of 100; full suite `--all`

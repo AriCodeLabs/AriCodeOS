@@ -142,6 +142,31 @@ pub struct HostInput {
     pub echo_prompt: Option<String>,
 }
 
+/// Key codes QEMU's keyboards queue: usb-kbd (`QUEUE_LENGTH`,
+/// hw/input/hid.c) and the i8042 (`PS2_QUEUE_SIZE`, hw/input/ps2.c).
+const DEVICE_QUEUE: usize = 16;
+
+impl HostInput {
+    /// Incident 0022: the keys typed between two waits for the guest
+    /// (`typing::plan` with `echo_prompt`, all of them without it) must fit
+    /// in a device queue, counted in PS/2 bytes; a wall-clock delay does
+    /// not drain the queue when the guest falls behind.
+    fn check_queue(&self) -> std::result::Result<(), String> {
+        use crate::typing::{longest_unwaited_run, plan, Step};
+        let steps = match self.echo_prompt {
+            Some(_) => plan(&self.keys),
+            None => self.keys.iter().map(|k| Step::Key(k)).collect(),
+        };
+        let run = longest_unwaited_run(&steps);
+        if run > DEVICE_QUEUE {
+            return Err(format!(
+                "[host_input] types {run} key codes without waiting for the guest, more than the {DEVICE_QUEUE} QEMU's keyboards queue: set echo_prompt (incident 0022)"
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Expect {
@@ -466,6 +491,10 @@ pub fn load_from(dir: &Path) -> Result<Vec<Scenario>> {
             }
             s.check_placeholders()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
+            if let Some(h) = &s.host_input {
+                h.check_queue()
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+            }
             s.file = path;
             out.push(s);
         }
@@ -616,21 +645,20 @@ mod tests {
         }
     }
 
-    /// Incident 0022: more key events than QEMU's keyboards queue (16 in
-    /// usb-kbd and the i8042) can only be typed safely by waiting for the
-    /// guest's echo; a wall-clock delay overflows the queue under host load.
+    /// Incident 0022: a scenario that would leave more key codes queued in
+    /// a device than QEMU's keyboards hold is refused at load (the repo's
+    /// scenarios all load: `repo_scenarios_are_valid_and_unique`).
     #[test]
-    fn repo_scenarios_typing_more_than_a_device_queue_wait_for_echoes() {
-        const DEVICE_QUEUE: usize = 16;
-        for s in load_all().expect("tests/qemu/*.toml must parse") {
-            let Some(h) = &s.host_input else { continue };
-            let events: usize = h.keys.iter().map(|k| 2 * k.split('+').count()).sum();
-            assert!(
-                events <= DEVICE_QUEUE || h.echo_prompt.is_some(),
-                "{}: {events} key events without echo_prompt",
-                s.name
-            );
-        }
+    fn typing_more_than_a_device_queue_without_echo_waits_is_refused() {
+        let input = |extra: &str| -> HostInput {
+            toml::from_str(&format!(
+                "marker = \"M\"\nkeys = [\"s\", \"h\", \"u\", \"t\", \"d\", \"o\", \"w\", \"n\", \"ret\"]\n{extra}"
+            ))
+            .unwrap()
+        };
+        let err = input("").check_queue().unwrap_err();
+        assert!(err.contains("types 18 key codes"), "{err}");
+        input("echo_prompt = \"ari> \"").check_queue().unwrap();
     }
 
     fn scenario(name: &str, level: &str, areas: &str) -> Scenario {
