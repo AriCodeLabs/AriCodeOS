@@ -380,6 +380,37 @@ impl Session {
     }
 }
 
+/// Why the service asks the kernel about its clients. Said with every
+/// reclaim, so the log tells a sweep made inside a request from the
+/// periodic one (incident 0018: the deep path is the former).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Why {
+    /// Once every `SWEEP_MS`, from the service loop.
+    Periodic,
+    /// Inside a request that found its table full.
+    SessionsFull,
+    TcpFull,
+    PingFull,
+    UdpFull,
+    DnsFull,
+    /// Inside a `TcpListen` or `UdpBind` whose port another client holds.
+    PortHeld,
+}
+
+impl Why {
+    fn text(self) -> &'static str {
+        match self {
+            Why::Periodic => "periodic sweep",
+            Why::SessionsFull => "sweep for a full session table",
+            Why::TcpFull => "sweep for a full tcp table",
+            Why::PingFull => "sweep for a full ping table",
+            Why::UdpFull => "sweep for a full udp table",
+            Why::DnsFull => "sweep for a full dns table",
+            Why::PortHeld => "check of a held port",
+        }
+    }
+}
+
 /// A request a sweep took from a session while asking the kernel whether
 /// its client was alive; served before the next wait.
 struct Pending {
@@ -690,7 +721,7 @@ impl<L: Link> Stack<L> {
             Some(slot) => slot,
             None => {
                 // Full: the sessions of dead clients go first.
-                self.sweep(now);
+                self.sweep(now, Why::SessionsFull);
                 free(&self.sessions).ok_or(Fault::SessionsFull)?
             }
         };
@@ -711,10 +742,10 @@ impl<L: Link> Stack<L> {
     /// send handle is left and the queue is empty (ADR 0030). A request
     /// found waiting is kept for the main loop; a session with one kept is
     /// alive and not asked.
-    fn sweep(&mut self, now: u64) {
+    fn sweep(&mut self, now: u64, why: Why) {
         self.last_sweep = now;
         for i in 0..MAX_SESSIONS {
-            self.probe(i, now);
+            self.probe(i, now, why);
         }
     }
 
@@ -722,7 +753,7 @@ impl<L: Link> Stack<L> {
     /// endpoint is never retired). `true` while it lives.
     fn probe_owner(&mut self, owner: Owner, now: u64) -> bool {
         match owner.checked_sub(1) {
-            Some(i) if i < MAX_SESSIONS => self.probe(i, now),
+            Some(i) if i < MAX_SESSIONS => self.probe(i, now, Why::PortHeld),
             _ => true,
         }
     }
@@ -742,7 +773,7 @@ impl<L: Link> Stack<L> {
 
     /// Asks the kernel whether the client of session `i` is still there
     /// and retires the session if not. `true` while the session lives.
-    fn probe(&mut self, i: usize, now: u64) -> bool {
+    fn probe(&mut self, i: usize, now: u64, why: Why) -> bool {
         let Some(s) = self.sessions[i] else {
             return false;
         };
@@ -764,7 +795,7 @@ impl<L: Link> Stack<L> {
                 true
             }
             Err(e) if e.endpoint_gone() => {
-                self.retire(i, now);
+                self.retire(i, now, why);
                 false
             }
             // `Timeout` is the live answer. Anything else (a bad handle, an
@@ -788,7 +819,7 @@ impl<L: Link> Stack<L> {
     /// what it left open as a fault of that client (incident 0016). A
     /// connection the client had already closed is nobody's now and
     /// finishes by itself (TIME-WAIT, the last ACK).
-    fn retire(&mut self, i: usize, now: u64) {
+    fn retire(&mut self, i: usize, now: u64, why: Why) {
         let owner = i + 1;
         let Some(s) = self.sessions[i].take() else {
             return;
@@ -830,7 +861,9 @@ impl<L: Link> Stack<L> {
         sys::print(s.label_str().as_bytes());
         sys::print(b"'), ");
         sys::print(aricode_rt::fmt_u64(n as u64, &mut buf));
-        sys::print(b" socket(s) left open: reclaimed\n");
+        sys::print(b" socket(s) left open: reclaimed (");
+        sys::print(why.text().as_bytes());
+        sys::print(b")\n");
         self.note_many(Fault::Reclaimed, n as u32, now);
     }
 
@@ -1522,7 +1555,7 @@ impl<L: Link> Stack<L> {
         if !self.tcp.is_full() {
             return true;
         }
-        self.sweep(now);
+        self.sweep(now, Why::TcpFull);
         if !self.still_there(owner, reply_to) {
             return false;
         }
@@ -1843,7 +1876,7 @@ impl<L: Link> Stack<L> {
             },
             Op::Ping => {
                 if self.pings.is_full() {
-                    self.sweep(now);
+                    self.sweep(now, Why::PingFull);
                     if !self.still_there(owner, reply_to) {
                         return;
                     }
@@ -1897,7 +1930,7 @@ impl<L: Link> Stack<L> {
                     }
                 }
                 if self.sockets.is_full() {
-                    self.sweep(now);
+                    self.sweep(now, Why::UdpFull);
                     if !self.still_there(owner, reply_to) {
                         return;
                     }
@@ -1963,7 +1996,7 @@ impl<L: Link> Stack<L> {
                     return self.refuse(reply_to, Fault::BadHandles, now);
                 };
                 if self.dns.is_full() {
-                    self.sweep(now);
+                    self.sweep(now, Why::DnsFull);
                     if !self.still_there(owner, reply_to) {
                         return;
                     }
@@ -2095,7 +2128,7 @@ pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
         }
         // Once a second the kernel is asked about every client (ADR 0037).
         if now.saturating_sub(stack.last_sweep) >= SWEEP_MS {
-            stack.sweep(now);
+            stack.sweep(now, Why::Periodic);
         }
         // Requests a sweep took while checking on the clients.
         while let Some(i) = stack.pending.iter().position(Option::is_some) {

@@ -12,9 +12,15 @@
 # chain `cargo xtask stack-check` measures. Before the fix a dev build
 # (`cargo xtask test --debug`) killed virtio-net here with `USER STACK
 # OVERFLOW`; the release build had about 12 KiB left, indirect calls not
-# counted. The order (`http` typed, then the reclaim) shows the reclaim ran
-# inside the request and not in the periodic sweep; `net arp defer full`
-# absent shows the reset got a parking slot, so the ARP request went out.
+# counted. netd names the sweep that found the orphan gone: `reclaimed
+# (sweep for a full tcp table)` is the one inside the request, the deep
+# path (`periodic sweep` would be the shallow one, from the service loop);
+# `net arp defer full` absent shows the reset got a parking slot, so the
+# ARP request went out. Serial (ADR 0040, incident 0019): the shell's
+# request must reach netd within the 1 s the orphan's refused connect
+# leaves before the next periodic sweep, and other guests running at the
+# same time slow this one in wall-clock time, which is the time netd
+# counts.
 # `diag` then lists the user stack high-water marks (`sysinfo::STACKS`, from
 # the Accessed bits of the stack pages): virtio-net's line is there, with
 # whatever its deepest path touched, indirect calls included. No selftest:
@@ -27,6 +33,7 @@ areas = ["network", "apps", "diag"]
 selftest = false
 cmdline = "qemu_exit shell"
 timeout_secs = 90
+serial = true
 stdin = ["run tcp_orphan", "http http://10.0.2.2:17010/hola", "diag", "shutdown"]
 
 [expect]
@@ -36,7 +43,7 @@ serial_contains = [
     "virtio-net: fault net tcp table full x1",
     "tcp_orphan: 8 connections held, one toward an address without ARP; exiting without closing",
     "run: tcp_orphan exited with 0",
-    "virtio-net: client gone ('tcp_orphan'), 8 socket(s) left open: reclaimed",
+    "virtio-net: client gone ('tcp_orphan'), 8 socket(s) left open: reclaimed (sweep for a full tcp table)",
     "HTTP 200, 19 bytes",
     "user stacks (touched of size, page granular):",
     " of 64 KiB  virtio_net",
@@ -45,7 +52,6 @@ serial_contains = [
 ]
 serial_order = [
     "run: tcp_orphan exited with 0",
-    "ari> http http://10.0.2.2:17010/hola",
     "virtio-net: client gone ('tcp_orphan'), 8 socket(s) left open: reclaimed",
     "HTTP 200, 19 bytes",
 ]
@@ -54,6 +60,7 @@ serial_absent = [
     "USER STACK OVERFLOW",
     "killed: stack overflow",
     "net arp defer full",
+    "reclaimed (periodic sweep)",
     "http: could not connect",
     "tcp_orphan: the ninth connection was not refused",
 ]
