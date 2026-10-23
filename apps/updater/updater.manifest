@@ -3,7 +3,8 @@
 # indexes, images and packages of the update sources (ADR 0027, ADR 0029),
 # and its private directory (`updater/`: sources, verified indexes, plan,
 # installed list, staged packages, history). It does not get the main file
-# space (audit 1, M2). The image is verified in a DMA buffer from its quota.
+# space (audit 1, M2). A downloaded image is verified in a DMA buffer from
+# its quota (6 MiB, `IMAGE_DOWNLOAD_MAX`; incident 0021).
 name = updater
 caps = system, fs, net, block
-memory = 6M
+memory = 8M

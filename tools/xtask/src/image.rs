@@ -557,6 +557,28 @@ pub enum DiskVariant {
     WasmBadImport,
     /// USB stick image: the ESP lives inside the disk (no `fat:` in QEMU).
     UsbImage,
+    /// Slot A and UPDATE hold images padded past the updater's download
+    /// buffer (`LARGE_IMAGE_PAD`): they verify piece by piece, and `update
+    /// apply` copies without loading them (incident 0021).
+    LargeA,
+}
+
+/// Padding of the `large-a` images: past `IMAGE_DOWNLOAD_MAX`, within the
+/// 12 MiB slot.
+const LARGE_IMAGE_PAD: usize = 7 * 1024 * 1024;
+
+/// `container` with one more entry, `padding`, of `pad` zero bytes: the
+/// signature covers only the manifest, so the image still verifies.
+fn padded(container: &[u8], pad: usize) -> Result<Vec<u8>> {
+    let rd = aricode_initrd::Initrd::parse(container).map_err(|e| format!("pad: {e:?}"))?;
+    let zeros = vec![0u8; pad];
+    let mut files: Vec<(&str, &[u8])> = rd
+        .entries()
+        .map(|e| e.map(|e| (e.name, e.data)))
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| format!("pad: {e:?}"))?;
+    files.push(("padding", &zeros));
+    aricode_initrd::build(&files).map_err(|e| format!("pad: {e:?}"))
 }
 
 impl DiskVariant {
@@ -578,6 +600,7 @@ impl DiskVariant {
             "wasm-invalid" => Self::WasmInvalid,
             "wasm-bad-import" => Self::WasmBadImport,
             "usb-image" => Self::UsbImage,
+            "large-a" => Self::LargeA,
             _ => return None,
         })
     }
@@ -729,6 +752,25 @@ pub fn system_image_for(spec: &SystemSpec, corrupt: bool) -> Result<Vec<u8>> {
     Ok(container)
 }
 
+/// An image updaters cannot download is never published (incident 0021);
+/// past three quarters of the limit it is published with a warning, so the
+/// growth is seen before it bites.
+fn check_download_size(len: usize) -> Result {
+    let max = aricode_update_index::IMAGE_DOWNLOAD_MAX;
+    if len > max {
+        return Err(format!(
+            "system image of {len} bytes: updaters download at most {max} (IMAGE_DOWNLOAD_MAX, incident 0021); not published"
+        ));
+    }
+    if len > max / 4 * 3 {
+        eprintln!(
+            "[xtask] warning: the system image ({len} bytes) is {}% of the {max} bytes updaters can download (incident 0021)",
+            len * 100 / max
+        );
+    }
+    Ok(())
+}
+
 /// ELF without debug sections (the kernel and the initrd only need the
 /// `PT_LOAD` segments; with debug info the kernel exceeds 5 MiB). Without
 /// `strip`, the file is used as is. Each call strips into its own file
@@ -822,8 +864,13 @@ pub fn write_test_disk(
     }
     if variant != DiskVariant::EspOnly {
         use aricode_ab::{schedule, BootState, Slot};
-        let v1 = system_image(1, false)?;
-        let v2 = system_image(2, false)?;
+        let (v1, v2) = match variant {
+            DiskVariant::LargeA => (
+                padded(&system_image(1, false)?, LARGE_IMAGE_PAD)?,
+                padded(&system_image(2, false)?, LARGE_IMAGE_PAD)?,
+            ),
+            _ => (system_image(1, false)?, system_image(2, false)?),
+        };
         if variant == DiskVariant::CorruptA {
             write_slot(&mut img, PART_SYSA, &system_image(1, true)?)?;
         } else {
@@ -860,7 +907,8 @@ pub fn write_test_disk(
             | DiskVariant::FsCorrupt
             | DiskVariant::WasmRestricted
             | DiskVariant::WasmInvalid
-            | DiskVariant::WasmBadImport => {}
+            | DiskVariant::WasmBadImport
+            | DiskVariant::LargeA => {}
         }
         init_ariboot(&mut img, PART_ARIBOOT, state);
     }
@@ -1082,6 +1130,28 @@ mod tests {
     use super::*;
     use crate::test_util::TempDir;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn images_updaters_cannot_download_are_not_published() {
+        let max = aricode_update_index::IMAGE_DOWNLOAD_MAX;
+        assert!(check_download_size(max).is_ok());
+        assert!(check_download_size(max / 4 * 3 + 1).is_ok());
+        assert!(check_download_size(max + 1).is_err());
+    }
+
+    #[test]
+    fn padding_keeps_the_entries_and_adds_one() {
+        let container =
+            aricode_initrd::build(&[("manifest", &b"m"[..]), ("kernel.elf", &b"k"[..])]).unwrap();
+        let big = padded(&container, 1000).unwrap();
+        let rd = aricode_initrd::Initrd::parse(&big).unwrap();
+        assert_eq!(rd.find("manifest"), Some(&b"m"[..]));
+        assert_eq!(rd.find("padding").map(<[u8]>::len), Some(1000));
+        // Padded past the download buffer, the image still fits the slot.
+        let slot = (PART_SYSA.1 - PART_SYSA.0) as usize * 512;
+        assert!(LARGE_IMAGE_PAD > aricode_update_index::IMAGE_DOWNLOAD_MAX);
+        assert!(LARGE_IMAGE_PAD + 4 * 1024 * 1024 < slot);
+    }
 
     fn fake_base(tmp: &TempDir) -> PathBuf {
         let base = tmp.path().join("base");
@@ -1829,6 +1899,7 @@ pub fn publish_channel(dir: &Path, release: bool, channel: &Publication) -> Resu
         let container = system_image_for(&spec, false)?;
         let mut image = aricode_ab::Image::header(container.len() as u32).to_vec();
         image.extend_from_slice(&container);
+        check_download_size(image.len())?;
         files.push((image_file(version), image));
     }
     let mut apps = Vec::new();
