@@ -178,6 +178,14 @@ the SSH host key on its stick was made on the build host
 timing only, which makes a kernel seed saved across boots (open in ADR 0034
 and incident 0014) worth doing for this machine.
 
+**Carried seed on the laptop (2026-10-23, develop 577fa52, stick
+reflashed, ADR 0043):** first boot of the fresh stick: `entropy  TSC +
+interrupts (70 samples, 223 events): weak, no carried seed (first boot)`,
+with `net tcp secret weak x1 (code 2)` and `random seed missing (code 2)`
+in diag, as designed. After a reboot over SSH: `entropy  TSC + interrupts +
+carried seed`, no weak event, network up. From the second boot on, this
+machine's generator starts from the seed of the previous boot.
+
 **Carried seed (ADR 0043).** AriBoot now carries a kernel seed across
 boots in sectors 1 and 2 of the stick's `ARIBOOT` partition. A freshly
 flashed stick ships none, so its first boot still reads `entropy  TSC +
