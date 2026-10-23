@@ -150,7 +150,7 @@ change on the former loops), after is `00a310f`.
   and 9 ms from run to run on both builds (the same build measured 2 743
   and 8 759 µs an hour apart): no comparison is made from it.
 
-## Display flush (ADR 0045), 0.14.0 development
+## Display flush (ADR 0046), 0.14.0 development
 
 Performance audit of 731c398, finding C: every change wrote the whole
 back buffer to the framebuffer. Deterministic pixel counts from the

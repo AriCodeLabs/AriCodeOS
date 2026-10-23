@@ -107,7 +107,7 @@ impl Window {
     }
 
     /// Asks the compositor to repaint the content: what was painted since
-    /// the last `present` reaches the screen with its next frame (ADR 0045).
+    /// the last `present` reaches the screen with its next frame (ADR 0046).
     pub fn present(&self) -> Result<(), WindowError> {
         self.call(self.request(Op::Present), false).map(|_| ())
     }

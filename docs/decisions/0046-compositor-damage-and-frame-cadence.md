@@ -1,4 +1,4 @@
-# ADR 0045: The compositor flushes damage at a frame cadence
+# ADR 0046: The compositor flushes damage at a frame cadence
 
 - **Date:** 2026-10-23
 - **Status:** Accepted (performance audit of 731c398, finding C and

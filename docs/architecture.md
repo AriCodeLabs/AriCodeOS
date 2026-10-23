@@ -1033,12 +1033,12 @@ latter briefly to add the region.
   what a frame depends on besides window contents and `Scene::damage`
   diffs two of them into a `Damage`: at most 8 disjoint rectangles,
   merged when they overlap or overflow, the whole screen past half of it
-  (ADR 0045). All tested on the host over `Vec<u32>`, including composing
+  (ADR 0046). All tested on the host over `Vec<u32>`, including composing
   two overlapping windows and random event sequences composed both by
   damage and whole, compared pixel for pixel.
 - The compositor composes into a DMA back buffer (the whole screen;
   `DMA_MAX_LEN` rises to 8 MiB) and flushes it to the framebuffer, converting
-  to RGB if needed, only where something changed (ADR 0045): each frame
+  to RGB if needed, only where something changed (ADR 0046): each frame
   diffs the scene on screen against the current one (pointer, focus,
   windows opened, closed, raised or moved), adds the content of windows
   whose client sent `Present`, recomposes those rectangles and writes only
@@ -1564,7 +1564,7 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
 - The broker policy is a constant; there are no CPU or handle quotas
   per manifest and the user heap is still static.
 - The GUI does not move or resize windows (the model can move them,
-  ADR 0045, but nothing asks it to) and has no graphical terminal; the
+  ADR 0046, but nothing asks it to) and has no graphical terminal; the
   shell is still on serial.
 - No xHCI/USB HID: only virtio-input devices; the shell still reads
   from the serial console.
