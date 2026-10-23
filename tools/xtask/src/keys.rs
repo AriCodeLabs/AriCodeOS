@@ -120,6 +120,13 @@ fn real_keys(
             "{DEV_CHANNEL_PUB} must be the development channel's own key (not a test key, not the release key)"
         ));
     }
+    // A development build embeds the committed release key as its stable
+    // anchor: it must never be a key whose seed is public (audit L6).
+    if channel == Channel::Dev && public_seeds.contains(&release) {
+        return Err(format!(
+            "{RELEASE_PUB} is a test key whose seed is in the repository"
+        ));
+    }
     match channel {
         Channel::Stable if public == dev_channel => Err(format!(
             "this is the development channel's key ({DEV_CHANNEL_PUB}): it signs --channel dev only"
@@ -530,6 +537,10 @@ mod tests {
             let err = real_keys(channel, dev, release, release, &seeds).unwrap_err();
             assert!(err.contains("own key"), "{err}");
         }
+        // The committed release key a development build embeds is never a
+        // test key either.
+        let err = real_keys(Channel::Dev, dev, dev, seeds[0], &seeds).unwrap_err();
+        assert!(err.contains(RELEASE_PUB), "{err}");
     }
 
     #[test]

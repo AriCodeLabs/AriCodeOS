@@ -79,11 +79,24 @@ const fn same(a: &[u8; 32], b: &[u8; 32]) -> bool {
     true
 }
 
-/// Compile-time rules of the two anchors (ADR 0045, decision 3): the
-/// development channel's key is never the release key (the key tells the
-/// channel), and a build that trusts a real release key never trusts a key
-/// whose seed is public for its development channel.
+/// Compile-time rules of the two anchors (ADR 0045, decision 3): a real
+/// `ARICODE_SIGNING_PUB` is never a test key, the development channel's key
+/// is never the release key (the key tells the channel), and a build that
+/// trusts a real release key never trusts a key whose seed is public for
+/// its development channel.
 const _: () = {
+    // xtask removes ARICODE_SIGNING_PUB for the test keys: set, it is a real
+    // key, never one whose seed is public (audit of ADR 0045, L6).
+    if option_env!("ARICODE_SIGNING_PUB").is_some() {
+        let mut i = 0;
+        while i < PUBLIC_SEED_KEYS.len() {
+            assert!(
+                !same(&TRUST_ANCHOR.key, &PUBLIC_SEED_KEYS[i]),
+                "ARICODE_SIGNING_PUB is a test key whose seed is in the repository"
+            );
+            i += 1;
+        }
+    }
     if let Some(hex) = DEV_CHANNEL_HEX {
         let dev = decode(hex);
         assert!(
