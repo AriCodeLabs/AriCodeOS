@@ -1142,6 +1142,30 @@ mod tests {
         assert!(StackEntry::decode(&bad[..39]).is_none());
     }
 
+    /// The wire layout, byte by byte: pid, size and touched little-endian,
+    /// the name length, three zero padding bytes, the name zero-filled.
+    #[test]
+    fn stack_entry_wire_layout() {
+        use super::sysinfo::*;
+        let mut wire = [0u8; StackEntry::LEN];
+        wire[..4].copy_from_slice(&[0x04, 0x03, 0x02, 0x01]);
+        wire[4..8].copy_from_slice(&[0x00, 0x00, 0x01, 0x00]);
+        wire[8..12].copy_from_slice(&[0x00, 0x30, 0x00, 0x00]);
+        wire[12] = 3;
+        wire[16..19].copy_from_slice(b"net");
+        let e = StackEntry::new(0x0102_0304, 65_536, 12_288, "net");
+        assert_eq!(e.encode(), wire);
+        assert_eq!(e.encode()[13..16], [0, 0, 0], "padding is zero");
+        assert_eq!(e.encode()[19..], [0; 21], "the name is zero-filled");
+        let d = StackEntry::decode(&wire).unwrap();
+        assert_eq!((d.pid, d.size, d.touched), (0x0102_0304, 65_536, 12_288));
+        assert_eq!(d.name_str(), "net");
+        // Padding a later version fills does not change what is read.
+        let mut later = wire;
+        later[13..16].copy_from_slice(&[0xAA; 3]);
+        assert_eq!(StackEntry::decode(&later), Some(d));
+    }
+
     use super::*;
 
     #[test]
