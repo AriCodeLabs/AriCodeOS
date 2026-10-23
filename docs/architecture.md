@@ -344,6 +344,10 @@ latter briefly to add the region.
 - `task::wait::WaitQueue` implements blocking with a condition evaluated under its
   lock and `wake_one`/`wake_all`; a wakeup that arrives before blocking is not
   lost because `unblock` fails and the thread re-evaluates.
+  `wait_any_until_deadline` waits on several queues (ADR 0044): the thread
+  registers on all of them before evaluating the condition, outside their
+  locks, so no lock is nested and a waker that takes a queue's lock after
+  the change always finds it; it leaves every queue on return.
 - `test=sched`: three threads that never yield share the CPU (minimum >= half
   of the maximum), a thread sleeps 50 ms with an observed duration of 5 to 7 ticks
   (50 to 70 ms in total), and two consumers are woken one by one and then
@@ -476,9 +480,19 @@ latter briefly to add the region.
   (`copy_to_user` validates USER and WRITABLE) and returns `len | (n << 32)`.
 - `ipc_receive_any` (syscall 31, ADR 0020) receives from the first of up to 16
   endpoints with a message (all with `READ`, validated before waiting) and
-  returns its index in bits 48..63; multi-endpoint receivers wait
-  on a shared queue that any send wakes. fsd waits this way on its
+  returns its index in bits 48..63. fsd waits this way on its
   main endpoint and on the granted ones at once, without 10 ms polling.
+  Since ABI 6 (ADR 0044) the set may also hold up to 4 interrupt lines
+  (`WAIT`): the first ready member in list order wins, and a line's
+  accumulated interrupts are taken as `irq_wait` takes them (result
+  `count | 1 << 47 | index << 48`). The waiter registers on the receive
+  queue of each endpoint and on each line's queue before checking, and
+  leaves them all on return (`wait::wait_any_until_deadline`): a send wakes
+  only its endpoint's oldest waiter, and a set's waiter that took another
+  member passes that wakeup on. The line's count is a latch, so an
+  interrupt that fired before the wait returns it at once. netd,
+  virtio-input and usb-input end each round this way, with the timeout of
+  their next deadline (`sdk/rust/src/wait.rs`).
 - Timeouts in ms: `0` does not block, `TIMEOUT_INFINITE` waits forever. The
   waits use `WaitQueue::wait_until_deadline`: the thread sleeps with a deadline and
   an early `wake` (`RoundRobin::wake` takes a sleeper off its list)
@@ -522,7 +536,8 @@ latter briefly to add the region.
 - A driver only gets what its capabilities give it (section 27):
   - `Irq`: a GSI routed to a device vector (`0x30..=0x3F`) with the
     polarity and trigger mode from the MADT. The handler accumulates and wakes; level-triggered
-    lines stay masked until `irq_wait` services them.
+    lines stay masked until `irq_wait` (or an `ipc_receive_any` that lists
+    the line, ADR 0044) services them.
     When the last handle is dropped, the line is masked and the vector freed.
   - `Mmio`: a physical device region; `mmio_map` maps it into the process
     (`0x1000_0000` onwards, uncached) and records it as foreign memory,
@@ -802,7 +817,11 @@ latter briefly to add the region.
   requests with timeout 0 (from its main endpoint and every client session
   together, `ipc_receive_any`; the endpoint list is rebuilt inside the
   round when a request granted or retired a session), expires deadlines and
-  waits for the IRQ for up to 10 ms. Every receive descriptor counts toward
+  then waits once on every endpoint and the NIC's interrupt line until the
+  stack's next deadline (ADR 0044: `ipc_receive_any` with the line in the
+  set, through the SDK's `wait::end_of_round`); the wait is skipped when
+  frames or requests were left over or a sweep took requests, and a request
+  that ends it is served at once. Every receive descriptor counts toward
   the 32, an errored one included (rtl-net reports it as length 0). With
   frames left over netd neither waits nor yields, so under a sustained
   flood it runs at 100% of a CPU and fairness towards other processes
@@ -973,6 +992,12 @@ latter briefly to add the region.
   4 events per reply; a single pending read per service
   (`Busy` if there is another). `aricode-input::Keyboard` translates in the client,
   not in the driver: the driver does not decide the keyboard layout.
+- `inputd` and usbd collect the device's events, serve up to 8 requests
+  and then wait once on their endpoints and the device's interrupt line
+  until the pending read's deadline (ADR 0044); usbd's deadline also
+  covers its recovery steps, retried at least 10 ms apart while one waits
+  for a command completion. An idle input driver sleeps until a request
+  or an event instead of waking every 10 ms.
 - QEMU carries `virtio-keyboard-pci` and `virtio-mouse-pci` (functions
   `00:04.0` and `00:05.0`; nine PCI functions in total) and in
   headless runs exposes QMP over a Unix socket in the

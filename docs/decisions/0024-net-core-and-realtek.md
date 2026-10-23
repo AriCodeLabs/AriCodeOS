@@ -134,3 +134,18 @@ the stack or one frame a quarter (`stack-check`, `tests/README.md`);
 checks that the reclaim ran inside the request (`reclaimed (sweep for a
 full tcp table)`). Every initrd program is measured, a new driver
 included.
+
+## Note (2026-10-23, ADR 0044)
+
+`run` no longer ends its round with `irq_wait(IRQ, 10)`. It waits once on
+every endpoint (main and sessions) and the NIC's interrupt line
+(`ipc_receive_any` with the line in the set, through the SDK's
+`wait::end_of_round`), with the timeout of the stack's next deadline
+(`Stack::next_deadline`: sweep, DHCP, pings, DNS, socket waits, TCP
+timers, parked frames, held faults), and skips the wait when the round
+left work. A request that arrived after the round's poll used to wait for
+the next interrupt or for the 10 ms (network info p50 10 ms, performance
+audit of 731c398, finding B); an idle netd woke 100 times a second and now
+wakes once (the sweep). The `Link` trait is unchanged: a driver's
+`recv_frame` still acknowledges its device, and the kernel latches the
+interrupt that fires meanwhile.

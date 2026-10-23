@@ -14,14 +14,16 @@ ari> run bench
 ari> cpus
 ```
 
-Or the `perf.bench` scenario (`cargo xtask test --all --area perf`), whose
-`serial.log` keeps the numbers. Run `run bench` twice and keep the second
-result: the first one pays for the program's pages and the buffers.
+Or the `perf.bench` scenario (`cargo xtask test --all --area perf --jobs
+1`; `--cpus 4` for the SMP figures), whose `serial.log` keeps the numbers.
+It runs `bench` twice; keep the second result: the first one pays for the
+program's pages and the buffers. With other guests running at the same
+time (`--jobs` above 1) the figures are not comparable.
 
 ## What `bench` measures
 
-`apps/bench` is an ordinary broker application (`system`, `fs`, 64 KiB):
-it sees nothing that any other application cannot see.
+`apps/bench` is an ordinary broker application (`system`, `fs`, `net`,
+64 KiB): it sees nothing that any other application cannot see.
 
 | Measurement | What it includes | Samples |
 |---|---|---|
@@ -29,6 +31,8 @@ it sees nothing that any other application cannot see.
 | `ipc fsd list` | full `rpc::call`: create reply endpoint, send, wait, receive, close; the fsd loop (10 ms wait on the main endpoint, no wait on granted ones) | 1 000 |
 | `replace 4 KiB` | atomic replace: journal, two `flush` to virtio-blk, copy and cleanup | 100 |
 | `read 4 KiB` | one read over IPC with a copy through the client's DMA buffer | 100 |
+| `ipc net info` | full `rpc::call` to netd's session for `NetClient::info`: no frame leaves the machine, so it measures how soon netd sees a request (ADR 0044) | 200 |
+| `quiet idle` | per-CPU and overall idle permille over a quiet 2 s sleep of `bench` (`sysinfo::IDLE`, exact since incident 0020): what the system's own wakeups leave | 1 interval |
 
 Percentiles p50, p95 and p99 over the TSC, calibrated against the system
 clock (200 ms; 10 ms granularity, error under 5 %).
@@ -112,3 +116,37 @@ CPU idle after booting with shell: 81-82 %.
 What remains of the cost of `replace` is the fsync: reducing it requires
 fewer commits (batching replacements) or storage with a battery-backed
 write cache, not more code.
+
+## One wait for IPC, IRQ and deadline (ADR 0044), 0.14.0 development
+
+Performance audit of 731c398, finding B: netd polled its endpoints and
+then slept in `irq_wait(IRQ, 10)`, so a request that arrived after the poll
+waited for the next interrupt or for the 10 ms. Same build of everything
+else; QEMU 10 TCG, `-cpu qemu64`, `perf.bench` alone (`--jobs 1`), second
+run of `bench`, p50 / p95 / p99. Before is `f150092` (the bench of this
+change on the former loops), after is `00a310f`.
+
+| Measurement | 1 CPU before | 1 CPU after | 4 CPUs before | 4 CPUs after |
+|---|---|---|---|---|
+| ipc net info (µs) | 10 001 / 10 121 / 10 244 | 71 / 79 / 89 | 9 999 / 10 073 / 10 104 | 74 / 84 / 106 |
+| ipc fsd list (µs) | 58 / 64 / 69 | 62 / 66 / 78 | 80 / 92 / 116 | 69 / 108 / 116 |
+| read 4 KiB (µs) | 167 / 189 / 288 | 180 / 188 / 204 | 214 / 248 / 304 | 198 / 219 / 234 |
+| quiet idle (permille) | 986 | 989 | 992 (cpu 0: 990) | 997 (cpu 0: 993) |
+
+- The 10 ms plateau is gone: 140 times less on one CPU, 135 on four. A
+  second pair of runs gave the same (before 10 012 / 10 132 / 10 246, after
+  69 / 75 / 108 on one CPU).
+- Idle wakeups went down, not up: an idle netd wakes once a second (its
+  client sweep) instead of a hundred times, and an idle input driver only
+  for a request or an event. The quiet interval is idle 3 to 5 permille
+  more; what remains is mostly each CPU's 100 Hz tick.
+- `ipc fsd list` costs about 4 µs more on one CPU: fsd's wait now registers
+  on the queue of each of its endpoints (main and sessions) instead of one
+  global queue, and checks them again when it returns. That global queue
+  was the price of the first version (ADR 0044, "Measured on the way"):
+  every send woke every service waiting on a set, which made `diag` take
+  9.7 s instead of 4.0 s in `usb.hid_fault` and fsd's list 74 µs.
+- `replace 4 KiB` is dominated by the host's fsync and moved between 2.7
+  and 9 ms from run to run on both builds (the same build measured 2 743
+  and 8 759 µs an hour apart): no comparison is made from it.
+

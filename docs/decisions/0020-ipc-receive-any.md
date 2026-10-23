@@ -47,3 +47,14 @@ optimization.
 - `docs/performance.md` records the latency of `ipc fsd list` before and
   after: from milliseconds (dominated by the 10 ms wait) to tens of
   microseconds under TCG.
+
+## Note (2026-10-23, ADR 0044)
+
+Point 3's "services that combine IRQ and IPC keep their loop" is over: since
+ABI 6 the set may also hold up to four interrupt lines (`WAIT`), and netd,
+virtio-input and usb-input wait on their endpoints and their line at once,
+until their next deadline. The shared queue of point 2 is gone: with
+those services waiting on sets, every send woke all of them. A set's
+waiter now registers on each endpoint's own queue (the alternative point
+2 deferred, finding E of the performance audit of 731c398) and passes on
+a wakeup it took for an endpoint it did not receive from.
