@@ -347,6 +347,23 @@ latter briefly to add the region.
   of the maximum), a thread sleeps 50 ms with an observed duration of 5 to 7 ticks
   (50 to 70 ms in total), and two consumers are woken one by one and then
   all at once.
+- Idle time (incident 0020): a CPU is idle while its idle thread is its
+  running thread. `Cpu::set_current`, called at every switch, closes the
+  idle stretch when the idle thread stops running and opens one when it
+  starts (`aricode_sched::idle::IdleClock`, host-tested). A switch made
+  inside a handler taken from `hlt` (the BSP's `on_tick` waking a sleeper)
+  therefore ends the stretch at that switch: the woken thread's time is
+  never idle. Interrupts serviced on the idle thread that return to it
+  without switching count as idle. The idle loop itself measures nothing.
+  `scheduler::idle_sample` reads the elapsed cycles and every CPU's idle
+  cycles, the open stretch included, at one TSC instant (`sysinfo::IDLE`),
+  so each CPU's idle is at most the elapsed cycles.
+- `test=idle`: the control of the performance audit of 731c398 (finding
+  A). A thread pinned to CPU 0 and, with more CPUs, to the last one stays
+  runnable 500 ms and sleeps 200 ms: its busy interval is excluded from
+  idle on its CPU and from the aggregate, and the sleep counts. With more
+  CPUs, an idle CPU taking timer ticks and RESCHED IPIs counts the whole
+  window as idle (`scheduler.idle_accounting`, `smp.idle_accounting`).
 
 ## User mode (Phase 11)
 
@@ -1006,9 +1023,11 @@ latter briefly to add the region.
   and exhausted DMA quotas, timestamped in µs; `sysinfo::EVENTS`
   publishes them to whoever holds `READ` on `SYSTEM` and `diag` shows them
   (`diag.events`). No message or file contents.
-- Per-CPU idle: the idle loop accumulates the TSC cycles spent in `hlt`
-  (`Cpu::idle_cycles`) and `sysinfo::IDLE` publishes them alongside the cycles
-  since the first tick; `cpus` shows them as a percentage and `diag` gathers
+- Per-CPU idle: the scheduler accounts the TSC cycles each CPU's idle
+  thread is its running thread, at the context switches (incident 0020,
+  "Preemptive scheduler" above), and `sysinfo::IDLE` publishes them
+  alongside the cycles since the first tick, all sampled at one instant;
+  `cpus` shows them as a percentage (not clamped) and `diag` gathers
   `uptime`, `mem`, `cpus`, `ps` and `services --detail` into one report.
 
 ## Application sandbox (Phase 28)
@@ -1226,8 +1245,8 @@ libs/sched                     shared queue, per-CPU current/idle, affinity, pen
   invalidates the page or, with address 0, the whole TLB by toggling `CR4.PGE`.
 - Panic: `halt_others` sends `HALT` to the other CPUs before the dump, which
   names the CPU; fatal exceptions do too.
-- `system_info(CPUS)` and `cpus` in arish. Tests: `test=smp` and `smp.*`
-  scenarios; `cargo xtask test --cpus N` as a stress run of the whole suite.
+- `system_info(CPUS)` and `cpus` in arish. Tests: `test=smp`, `test=idle`
+  and `smp.*` scenarios; `cargo xtask test --cpus N` as a stress run of the whole suite.
 
 ## IOMMU (Phase 33)
 
