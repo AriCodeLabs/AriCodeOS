@@ -459,17 +459,19 @@ fn ipc_receive(
 /// checked as `ipc_receive` checks it (`READ`, then `Invalid` for any other
 /// object), so the errors of an endpoint-only set are those of ABI 5.
 fn wait_member_of(h: Handle) -> Result<ObjectRef, Error> {
-    let is_irq = with_handles(|t| {
-        Ok(matches!(
-            lookup(t, h, Rights::NONE)?.kind,
-            ObjectKind::Irq(_)
-        ))
-    })?;
-    if is_irq {
-        with_handles(|t| lookup(t, h, Rights::WAIT).cloned())
-    } else {
-        endpoint_of(h, Rights::READ)
-    }
+    // One look at the table: the kind and the rights of the same entry,
+    // even if another thread of the process closes and reuses the handle.
+    with_handles(|t| {
+        let required = match lookup(t, h, Rights::NONE)?.kind {
+            ObjectKind::Irq(_) => Rights::WAIT,
+            _ => Rights::READ,
+        };
+        let obj = lookup(t, h, required)?;
+        match obj.kind {
+            ObjectKind::Irq(_) | ObjectKind::Endpoint(_) => Ok(obj.clone()),
+            _ => Err(Error::Invalid),
+        }
+    })
 }
 
 /// `ipc_receive_any` (ADR 0020, ADR 0044): like `ipc_receive` on the first

@@ -502,18 +502,20 @@ pub fn selftest(info: &boot_protocol::BootInfo) {
         )
         .expect("fb_driver");
         let status = process::wait(pid);
+        // SAFETY: framebuffer reachable through the physical map.
+        let pixel = unsafe {
+            (crate::memory::phys::phys_to_virt(fb.address) as *const u32).read_volatile()
+        };
+        // Back to the console before any assertion, so a failure shows on
+        // the screen too.
+        if let Some(surface) = lent {
+            crate::console::take_back_framebuffer(surface);
+        }
         assert_eq!(
             status,
             process::ExitStatus::Exited(0),
             "fb_driver: {status:?}"
         );
-        // SAFETY: framebuffer reachable through the physical map.
-        let pixel = unsafe {
-            (crate::memory::phys::phys_to_virt(fb.address) as *const u32).read_volatile()
-        };
-        if let Some(surface) = lent {
-            crate::console::take_back_framebuffer(surface);
-        }
         assert_eq!(
             pixel, 0x00FF_8800,
             "the driver should have painted pixel (0,0)"

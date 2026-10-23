@@ -257,12 +257,13 @@ const MAX_MEMBERS: usize = aricode_abi::IPC_MAX_ANY + IPC_MAX_ANY_IRQS;
 /// 731c398). A line's count is a latch: an interrupt that fired before the
 /// wait leaves it ready, so the wait returns at once.
 ///
-/// A send's `wake_one` may pick this thread while it is already awake for
-/// another member, and the thread then takes that other member: the
-/// wakeup meant for the endpoint would be lost for its other waiters. So
-/// once the thread has left every queue and taken its member, it passes
-/// the wakeup on (`wake_one`) for every other endpoint of the set that
-/// still holds a message.
+/// A send's `wake_one` may pick this thread while it is already awake (for
+/// another member, or for another message of the same endpoint), and the
+/// thread takes only one message: that wakeup would be lost for the
+/// endpoint's other waiters. So once the thread has left every queue and
+/// taken its member, it passes a wakeup on (`wake_one`) for every endpoint
+/// of the set that still holds a message. With no other waiter it wakes
+/// nobody; a spurious wakeup only makes a waiter check again.
 pub fn receive_any(members: &[Member], timeout_ms: u64) -> Result<(usize, Ready), Error> {
     let deadline = Endpoint::deadline(timeout_ms);
     if members.len() > MAX_MEMBERS {
@@ -292,7 +293,7 @@ pub fn receive_any(members: &[Member], timeout_ms: u64) -> Result<(usize, Ready)
         );
         for (i, m) in members.iter().enumerate() {
             if let Some(ready) = m.take() {
-                pass_wakeups_on(members, i);
+                pass_wakeups_on(members);
                 return Ok((i, ready));
             }
         }
@@ -306,12 +307,13 @@ pub fn receive_any(members: &[Member], timeout_ms: u64) -> Result<(usize, Ready)
     }
 }
 
-/// See `receive_any`: wakes the next waiter of every endpoint in the set,
-/// other than member `taken`, that still holds a message.
-fn pass_wakeups_on(members: &[Member], taken: usize) {
-    for (i, m) in members.iter().enumerate() {
+/// See `receive_any`: wakes the next waiter of every endpoint in the set
+/// that still holds a message, the one just received from included (two
+/// sends may have woken this thread for it, and it took one message).
+fn pass_wakeups_on(members: &[Member]) {
+    for m in members {
         if let Member::Endpoint(e) = m {
-            if i != taken && e.has_message() {
+            if e.has_message() {
                 e.receivers.wake_one();
             }
         }

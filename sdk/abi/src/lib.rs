@@ -1429,7 +1429,28 @@ mod tests {
     #[test]
     fn receive_any_results_round_trip() {
         use receive_any::{decode, irq, message, Ready};
+        // ABI 6: the bit is part of the contract, above the handle count
+        // (bits 32..47) of any message and below the index (48..63).
+        assert_eq!(RECEIVE_ANY_IRQ, 1 << 47);
         let last = IPC_MAX_ANY + IPC_MAX_ANY_IRQS - 1;
+        for index in 0..=last {
+            for handles in 0..=IPC_MAX_HANDLES {
+                for len in [0, 1, IPC_MAX_DATA] {
+                    assert_eq!(
+                        decode(message(index, len, handles)),
+                        Ready::Message {
+                            index,
+                            len,
+                            handles
+                        },
+                        "message on member {index}, {len} bytes, {handles} handles"
+                    );
+                }
+            }
+            for count in [1, 2, u32::MAX] {
+                assert_eq!(decode(irq(index, count)), Ready::Irq { index, count });
+            }
+        }
         assert_eq!(
             decode(message(3, IPC_MAX_DATA, IPC_MAX_HANDLES)),
             Ready::Message {

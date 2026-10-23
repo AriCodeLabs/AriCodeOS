@@ -28,7 +28,7 @@ time (`--jobs` above 1) the figures are not comparable.
 | Measurement | What it includes | Samples |
 |---|---|---|
 | `syscall thread_get_tid` | entry and exit via `syscall`, no work | 10 000 |
-| `ipc fsd list` | full `rpc::call`: create reply endpoint, send, wait, receive, close; the fsd loop (10 ms wait on the main endpoint, no wait on granted ones) | 1 000 |
+| `ipc fsd list` | full `rpc::call`: create reply endpoint, send, wait, receive, close; fsd waits on its main endpoint and every session at once (ADR 0020, ADR 0044) | 1 000 |
 | `replace 4 KiB` | atomic replace: journal, two `flush` to virtio-blk, copy and cleanup | 100 |
 | `read 4 KiB` | one read over IPC with a copy through the client's DMA buffer | 100 |
 | `ipc net info` | full `rpc::call` to netd's session for `NetClient::info`: no frame leaves the machine, so it measures how soon netd sees a request (ADR 0044) | 200 |

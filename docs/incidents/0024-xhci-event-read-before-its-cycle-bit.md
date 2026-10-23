@@ -1,7 +1,6 @@
 # Incident 0024: an xHCI event read whole before its cycle bit
 
-- Opened: 2026-10-23. Status: fixed on `feature/service-wait-set` (the
-  number is provisional: renumber if another branch took 0024 first).
+- Opened: 2026-10-23. Status: fixed on `feature/service-wait-set`.
 - Found by: `cargo xtask test --all --cpus 4` of `feature/service-wait-set`
   (ADR 0044), scenario `usb.storage`, boot 1; the previous `--cpus 4` run
   of the same driver code and every 1-CPU run passed.

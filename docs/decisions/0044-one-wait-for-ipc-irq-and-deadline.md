@@ -59,12 +59,12 @@ service loops instead of repeated in each.
    waker changes the state and then takes the queue's lock to wake it; if
    it takes the lock after the registration it finds the waiter there, and
    if before, its change is visible to the check (the lock orders both). A
-   send's `wake_one` can pick a set's waiter that is already awake for
-   another member; the waiter then takes that other member and the wakeup
-   would be lost for the endpoint's other receivers, so once the waiter has
-   left every queue and taken its member it passes a wakeup on
-   (`wake_one`) for every other endpoint of its set that still holds a
-   message. A line's count is a latch (`IrqLine::pending`): an interrupt
+   send's `wake_one` can pick a set's waiter that is already awake (for
+   another member, or for another message); the waiter takes one message
+   and the wakeup would be lost for the endpoint's other receivers, so
+   once the waiter has left every queue and taken its member it passes a
+   wakeup on (`wake_one`) for every endpoint of its set that still holds a
+   message, the one it received from included. A line's count is a latch (`IrqLine::pending`): an interrupt
    that fired while nobody waited, during the service's round, leaves the
    line ready and the next wait returns at once. A wake between the check
    and the block turns the block into a yield, as for one queue. The

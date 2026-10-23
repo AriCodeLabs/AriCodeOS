@@ -23,6 +23,7 @@ use alloc::boxed::Box;
 use aricode_net::owners::{Owned, Owner};
 use aricode_net::rx;
 use aricode_net::tcp::{self, Connection};
+use aricode_net::timers;
 use aricode_net::{arp, dhcp, dns, eth, icmp, ipv4, isn, udp, Ipv4Addr, MacAddr};
 use aricode_proto::net::{
     Info, Op, OwnerSockets, Reply, Request, Status, TcpStats, MAX_DATAGRAM, MAX_LABEL,
@@ -727,32 +728,37 @@ impl<L: Link> Stack<L> {
     /// accepts and connects, TCP retransmissions and TIME-WAIT, frames
     /// parked for ARP and faults held back by their one-second window.
     fn next_deadline(&self) -> Deadline {
-        let mut next = Deadline::at(self.last_sweep + SWEEP_MS);
-        match self.dhcp.state() {
-            dhcp::State::Bound => {}
-            dhcp::State::Probing => next.include(self.probe_deadline),
-            _ => next.include(self.dhcp_next),
-        }
-        for (_, _, p) in self.pings.iter() {
-            next.include(p.deadline);
-        }
-        for (_, _, p) in self.dns.iter() {
-            next.include(p.deadline);
-        }
-        for (_, _, sock) in self.sockets.iter() {
-            next.include_opt(sock.recv.as_ref().map(|r| r.deadline));
-        }
-        for (_, _, sock) in self.tcp.iter() {
-            next.include_opt(sock.conn.next_timer());
-            next.include_opt(sock.connect.map(|(_, d)| d));
-            next.include_opt(sock.accept.map(|(_, d)| d));
-            next.include_opt(sock.recv.as_ref().map(|r| r.deadline));
-        }
-        for slot in &self.deferred {
-            next.include_opt(slot.waiting.map(|p| p.deadline));
-        }
-        next.include_opt(self.faults.next_due());
-        next
+        let waits = self
+            .pings
+            .iter()
+            .map(|(_, _, p)| p.deadline)
+            .chain(self.dns.iter().map(|(_, _, p)| p.deadline))
+            .chain(
+                self.sockets
+                    .iter()
+                    .filter_map(|(_, _, s)| s.recv.as_ref().map(|r| r.deadline)),
+            )
+            .chain(self.tcp.iter().flat_map(|(_, _, s)| {
+                [
+                    s.connect.map(|(_, d)| d),
+                    s.accept.map(|(_, d)| d),
+                    s.recv.as_ref().map(|r| r.deadline),
+                ]
+                .into_iter()
+                .flatten()
+            }))
+            .chain(
+                self.deferred
+                    .iter()
+                    .filter_map(|slot| slot.waiting.map(|p| p.deadline)),
+            );
+        Deadline::at(timers::next_deadline(
+            self.last_sweep + SWEEP_MS,
+            timers::dhcp_due(self.dhcp.state(), self.probe_deadline, self.dhcp_next),
+            waits,
+            self.tcp.iter().map(|(_, _, s)| &s.conn),
+            self.faults.next_due(),
+        ))
     }
 
     fn session(&self, owner: Owner) -> Option<Session> {
