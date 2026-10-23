@@ -27,8 +27,49 @@ boot-protocol/src/lib.rs #[cfg(test)] memory classification, iterator, cmdline
 tools/xtask/src/*.rs     #[cfg(test)] scenario validity, helpers
 tests/qemu/*.toml        integration scenarios in QEMU
 user/testprogs/src/bin/  test programs in the initrd; user/testprogs/manifests/ holds the manifest of
-                         those the shell launches with capabilities (`run tcp_hog`, `run sock_leaker`)
+                         those the shell launches with capabilities (`run tcp_hog`, `run sock_leaker`,
+                         `run tcp_orphan`)
 ```
+
+## Stack budget of every initrd program
+
+`cargo xtask check` ends with `cargo xtask stack-check` (incident 0018),
+which can also run alone. It builds every initrd program (services,
+applications, test programs: 63 binaries) in the release and the dev
+profile, disassembles each with binutils' `objdump`, measures every
+function's frame from its prologue (return address, pushes, `rsp`
+adjustment, stack probes) and the deepest chain of direct calls from
+`_start` (calls, unconditional and conditional tail calls), and fails
+when, in any binary:
+
+- the deepest direct path is over its path budget, by default **32 KiB**,
+  half the 64 KiB user stack (`USER_STACK_SIZE` in
+  `kernel/src/user/process.rs`; a unit test fails if that constant
+  changes), or
+- one frame is over its frame budget, by default **16 KiB**, a quarter of
+  the stack.
+
+A program allowed more goes in `stack::EXCEPTIONS` with its budget, the
+reason and the incident that tracks it (a unit test requires the
+incident); the table is empty: every offender found so far was fixed. The
+report shows the network drivers, the three binaries closest to their
+budget and every one over it, with the deepest path and the largest frames
+function by function.
+
+The measured depth is a lower bound. Not counted: indirect calls (trait
+objects, `core::fmt` callbacks, function pointers end a path), recursion
+(direct or mutual: the call back into the chain is cut; direct recursion
+is noted), `rsp` adjustments after a function's first call and stack
+realignment (`and $-N,%rsp`). The other half of the stack is for those and
+for growth. Functions are keyed by address, so two with the same demangled
+name are both measured. The parser and the budgets are tested on the host
+(`tools/xtask/src/stack.rs`).
+
+The run-time counterpart is the kernel's high-water mark (`diag`, `user
+stacks`), and scenario `network.deep_path` drives netd's deepest path (a
+full TCP table swept inside a request, a dead client's reset toward an
+address without ARP); with `cargo xtask test --debug --all --area network`
+it runs on a dev build, where the margin is smallest.
 
 ## Writing a QEMU scenario
 

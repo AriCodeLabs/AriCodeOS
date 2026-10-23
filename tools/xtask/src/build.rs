@@ -206,33 +206,36 @@ pub fn initrd_manifests() -> Result<Vec<(String, PathBuf)>> {
     Ok(out)
 }
 
+/// Packages of the initrd programs (`initrd_programs`).
+pub const USER_PACKAGES: &[&str] = &[
+    "user-testprogs",
+    "ariinit",
+    "ari-virtio-blk",
+    "ari-virtio-net",
+    "ari-rtl-net",
+    "ari-sshd",
+    "ari-virtio-input",
+    "ari-usb-input",
+    "ari-usb-ehci",
+    "ari-console-bridge",
+    "ari-compositor",
+    "ari-fsd",
+    "ari-app-hello",
+    "ari-app-perms-check",
+    "ari-app-updater",
+    "ari-app-fs-probe",
+    "ari-app-win-probe",
+    "ari-app-wasm-runner",
+    "ari-app-notes-reader",
+    "ari-app-installer",
+    "ari-app-bench",
+    "ari-shell",
+];
+
 /// Builds `init` and the user programs (static ELFs at 0x400000) and
 /// returns the directory with the binaries.
 pub fn build_user_programs(release: bool) -> Result<PathBuf> {
-    for pkg in [
-        "user-testprogs",
-        "ariinit",
-        "ari-virtio-blk",
-        "ari-virtio-net",
-        "ari-rtl-net",
-        "ari-sshd",
-        "ari-virtio-input",
-        "ari-usb-input",
-        "ari-usb-ehci",
-        "ari-console-bridge",
-        "ari-compositor",
-        "ari-fsd",
-        "ari-app-hello",
-        "ari-app-perms-check",
-        "ari-app-updater",
-        "ari-app-fs-probe",
-        "ari-app-win-probe",
-        "ari-app-wasm-runner",
-        "ari-app-notes-reader",
-        "ari-app-installer",
-        "ari-app-bench",
-        "ari-shell",
-    ] {
+    for pkg in USER_PACKAGES {
         println!("[xtask] build {pkg} ({KERNEL_TARGET})");
         let mut c = cargo();
         c.args(["build", "-p", pkg, "--target", KERNEL_TARGET]);
@@ -422,18 +425,27 @@ pub fn app_pack(dir: &Path, version: u32, release: bool) -> Result {
 
 /// Builds the sample WebAssembly modules and leaves `demo.wasm` in `build/`,
 /// from where `write_test_disk` copies it into the runner's private directory.
-pub fn build_wasm_programs(release: bool) -> Result {
-    println!("[xtask] build wasm-demo ({WASM_TARGET})");
+/// Always in the release profile, a dev build of the OS included: the module
+/// is data for the runner, and its dev build (636,854 bytes against 12,050,
+/// found 2026-10-23 while reproducing incident 0018 on a dev build) does not
+/// fit the test disk's ARI0, so `cargo xtask test --debug` failed before any
+/// scenario.
+pub fn build_wasm_programs() -> Result {
+    println!("[xtask] build wasm-demo ({WASM_TARGET}, release)");
     let mut c = cargo();
-    c.args(["build", "-p", "wasm-demo", "--target", WASM_TARGET]);
-    if release {
-        c.arg("--release");
-    }
+    c.args([
+        "build",
+        "-p",
+        "wasm-demo",
+        "--target",
+        WASM_TARGET,
+        "--release",
+    ]);
     run(c)?;
     let src = root()
         .join("target")
         .join(WASM_TARGET)
-        .join(profile_dir(release))
+        .join(profile_dir(true))
         .join("wasm_demo.wasm");
     let dst = crate::build_dir().join("demo.wasm");
     std::fs::create_dir_all(crate::build_dir()).map_err(|e| e.to_string())?;
@@ -445,7 +457,7 @@ pub fn build_wasm_programs(release: bool) -> Result {
 /// scenario: test behaviour is controlled through the cmdline.
 pub fn build_os(release: bool) -> Result<Artifacts> {
     let user_bin = build_user_programs(release)?;
-    build_wasm_programs(release)?;
+    build_wasm_programs()?;
     for (pkg, target) in [("ariboot", UEFI_TARGET), ("arikernel", KERNEL_TARGET)] {
         println!("[xtask] build {pkg} ({target})");
         let mut c = cargo();
@@ -494,7 +506,8 @@ pub fn check() -> Result {
         c.args(["--", "-D", "warnings"]);
         run(c)?;
     }
-    Ok(())
+    // Every initrd program's stack budget (incident 0018).
+    crate::stack::check()
 }
 
 #[cfg(test)]

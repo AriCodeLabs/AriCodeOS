@@ -26,6 +26,10 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::boxed::Box;
+
 use aricode_input::{Event, HidBootKeyboard, HidBootMouse, MAX_REPORT_EVENTS};
 use aricode_proto::block::{
     Op as BlockOp, Reply as BlockReply, Request as BlockRequest, Status as BlockStatus, MAX_SECTORS,
@@ -846,7 +850,12 @@ mod exit {
 }
 
 impl Controller {
-    fn open(mask: u64, clock: Clock) -> Result<Self, u64> {
+    /// The controller on the heap (incident 0018): built in `main`'s frame
+    /// it took 20 KiB of the 64 KiB stack. Out of line, so the copy an
+    /// unoptimized build may make on the way into the `Box` is popped
+    /// before the service loop.
+    #[inline(never)]
+    fn open(mask: u64, clock: Clock) -> Result<Box<Self>, u64> {
         let Some(bar) = bar_handle(mask, 0) else {
             say(b"no BAR 0 or no IRQ among the capabilities");
             return Err(exit::MAP_BAR);
@@ -940,7 +949,7 @@ impl Controller {
         wait_bits(&op, op::USBSTS, op::STS_HALTED, false, &clock, 200)
             .ok_or(exit::START_TIMEOUT)?;
 
-        Ok(Self {
+        Ok(Box::new(Self {
             strict: false,
             fault_inject: FaultInject::None,
             inject_now: None,
@@ -981,7 +990,7 @@ impl Controller {
             keyboards: 0,
             mice: 0,
             ports_switched,
-        })
+        }))
     }
 
     fn portsc(&self, port: u8) -> u32 {

@@ -19,6 +19,7 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 pub use aricode_http::{Budget, Fetched, Phase, Unbounded};
 use aricode_http::{Error, Transport, Url};
@@ -398,7 +399,18 @@ fn fetch<T: Tcp, R: Records>(
     budget: &dyn Budget,
     sink: &mut dyn FnMut(&[u8]) -> bool,
 ) -> Result<u16, HttpsError> {
-    aricode_http::fetch_with(stream, url, budget, sink).map_err(|e| match e {
+    // The 8 KiB header buffer on the heap: on the stack it sat in the
+    // frame of every caller's download, next to the TLS certificate
+    // checks (incident 0018).
+    let mut head: Box<[u8; aricode_http::MAX_HEADERS]> =
+        match alloc::vec![0u8; aricode_http::MAX_HEADERS]
+            .into_boxed_slice()
+            .try_into()
+        {
+            Ok(h) => h,
+            Err(_) => unreachable!("the vector has MAX_HEADERS bytes"),
+        };
+    aricode_http::fetch_with_head(stream, url, budget, sink, &mut head).map_err(|e| match e {
         Error::BadUrl => HttpsError::BadUrl,
         Error::Transport(StreamError::Net(e)) => HttpsError::Io(e),
         Error::Transport(StreamError::Tls(e)) => HttpsError::Tls(e),

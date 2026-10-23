@@ -475,12 +475,26 @@ pub fn fetch<T: Transport>(
 /// `budget` is consulted before every transport operation (`Deadline`);
 /// interim responses and header bytes are bounded as well
 /// (`TooManyInformational`, `HeaderBytes`), so no phase of the exchange
-/// depends on the server to end.
+/// depends on the server to end. The header buffer (`MAX_HEADERS` bytes)
+/// is on the caller's stack; [`fetch_with_head`] takes one from the caller.
 pub fn fetch_with<T: Transport>(
     t: &mut T,
     url: &Url,
     budget: &dyn Budget,
     sink: &mut dyn FnMut(&[u8]) -> bool,
+) -> Result<u16, Error<T::Error>> {
+    fetch_with_head(t, url, budget, sink, &mut [0u8; MAX_HEADERS])
+}
+
+/// [`fetch_with`] with the header buffer given by the caller, who may keep
+/// it off a small stack (on the heap: the shell's `http`, incident 0018).
+/// Its contents on entry do not matter.
+pub fn fetch_with_head<T: Transport>(
+    t: &mut T,
+    url: &Url,
+    budget: &dyn Budget,
+    sink: &mut dyn FnMut(&[u8]) -> bool,
+    head: &mut [u8; MAX_HEADERS],
 ) -> Result<u16, Error<T::Error>> {
     let mut host_buf = [0u8; MAX_HOST + 6];
     let host = url.host_header(&mut host_buf);
@@ -490,7 +504,6 @@ pub fn fetch_with<T: Transport>(
 
     // Headers: accumulate up to the empty line; skip 1xx responses, counting
     // them and the bytes they took.
-    let mut head = [0u8; MAX_HEADERS];
     let mut have = 0;
     let mut informational = 0u32;
     let mut discarded = 0usize;

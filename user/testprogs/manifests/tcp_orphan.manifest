@@ -1,0 +1,4 @@
+# Incident 0018: drives netd's deepest call path from the shell (`run tcp_orphan`).
+name = tcp_orphan
+caps = net
+memory = 64K

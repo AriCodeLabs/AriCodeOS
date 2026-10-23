@@ -256,7 +256,7 @@ fn trim(s: &[u8]) -> &[u8] {
 
 fn help() {
     print(
-        b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  cpus      online processors and idle time per CPU\n  diag [NAME]  full report (uptime, mem, cpus, entropy, ps, services, net, devices); with NAME saves it to AriFS\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body (http:// or https://)\n  run PROG  run an initrd program and wait\n\
+        b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  cpus      online processors and idle time per CPU\n  diag [NAME]  full report (uptime, mem, cpus, entropy, ps, stacks, services, net, devices); with NAME saves it to AriFS\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body (http:// or https://)\n  run PROG  run an initrd program and wait\n\
   update    fetch and verify the signed index of every source and show what is new (installs nothing; ADR 0029)\n  update add URL|IP[:PORT]  register an update source\n  update remove N|URL  unregister a source\n  update sources  list the sources\n  update apply [--allow-downgrade]  install the image in the UPDATE partition\n  upgrade [--allow-downgrade]  install what the last `update` found (system into the inactive slot, then `reboot`; apps through the installer)\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
     );
 }
@@ -291,6 +291,40 @@ fn ps() {
             }
             ProcessState::Killed => print(b"killed      "),
         }
+        print(e.name_str().as_bytes());
+        print(b"\n");
+    }
+}
+
+/// User stack high-water marks (`sysinfo::STACKS`, incident 0018): how
+/// much of its stack each live process has touched, page granular.
+fn stacks() {
+    use abi::sysinfo::StackEntry;
+    let mut buf = [0u8; StackEntry::LEN * 32];
+    let Ok(n) = sys::system_info(SYSTEM, abi::sysinfo::STACKS, &mut buf) else {
+        print(b"diag: no access to stack use\n");
+        return;
+    };
+    print(b"user stacks (touched of size, page granular):\n");
+    for chunk in buf[..n].as_chunks::<{ StackEntry::LEN }>().0 {
+        let Some(e) = StackEntry::decode(chunk) else {
+            continue;
+        };
+        let mut b = [0u8; 20];
+        let pid = fmt_u64(e.pid as u64, &mut b);
+        print(b"  ");
+        print(pid);
+        for _ in pid.len()..5 {
+            print(b" ");
+        }
+        let kib = fmt_u64(e.touched as u64 / 1024, &mut b);
+        for _ in kib.len()..3 {
+            print(b" ");
+        }
+        print(kib);
+        print(b" of ");
+        num(e.size as u64 / 1024);
+        print(b" KiB  ");
         print(e.name_str().as_bytes());
         print(b"\n");
     }
@@ -395,6 +429,7 @@ fn diag(fs: &mut FsClient, net_client: &NetClient, mask: u64, rest: &[u8]) {
     cpus();
     entropy();
     ps();
+    stacks();
     services(mask, fs);
     services_detail();
     if mask & SERVICE_NET != 0 {
@@ -857,7 +892,9 @@ fn http_get(fs: &mut FsClient, client: &mut NetClient, arg: &[u8]) {
     let now = || sys::time::uptime_ms(SYSTEM).unwrap_or(u64::MAX);
     let deadline = now().saturating_add(HTTP_BUDGET_MS);
     let budget = || deadline.saturating_sub(now()).min(u32::MAX as u64) as u32;
-    let mut body = [0u8; 8192];
+    // On the heap (incident 0018): on the stack it was 8 KiB of the frame
+    // under every certificate check of an HTTPS download.
+    let mut body = alloc::vec![0u8; 8192];
     match aricode_https::get(
         client,
         SYSTEM,

@@ -641,6 +641,22 @@ latter briefly to add the region.
 - User programs have a 64 KiB stack and the kernel diagnoses
   `USER STACK OVERFLOW` when a fault hits its guard page (the 16 KiB GPT
   table on the stack caused it; it now goes on the program's heap).
+- Stack use is measured twice (incident 0018). Statically, `cargo xtask
+  check` ends with `stack-check`: from `objdump` of the network drivers
+  (release and dev builds) it measures every frame and the deepest chain
+  of direct calls from `_start` and fails above half the stack for the
+  chain or a quarter for one frame (`tools/xtask/src/stack.rs`,
+  `tests/README.md`); indirect calls are not seen. At run time,
+  `system_info(STACKS)` gives each live process's high-water mark: the
+  kernel finds the lowest stack page whose Accessed bit the CPU set
+  (`spawn` zeroes the pages through the kernel's own mapping and nothing
+  clears the bit), page granular, indirect calls included; `diag` lists
+  it as `user stacks (touched of size, page granular)`. Like `PROCESSES`,
+  it is readable by any holder of `READ` on `SYSTEM`, and the depth of
+  another process is a weak side channel on what it is doing (ADR 0039,
+  note of 2026-10-23); there is no address randomization for it to
+  defeat. The static check covers every initrd program with per-binary
+  budgets (`stack::EXCEPTIONS`, empty).
 - `WaitQueue::wait_until_deadline` keeps interrupts disabled
   from the check until the context switch: a `wake` from an
   MSI-X handler cannot land in the window between releasing the lock and
@@ -777,6 +793,16 @@ latter briefly to add the region.
   `Dns`) keep the client's reply endpoint and answer when
   the packet arrives or the deadline expires; frames whose next hop is not
   in the ARP cache are parked until the ARP reply (1 s).
+- Stack layout of netd (incident 0018): `Stack::new` returns the stack in
+  a `Box` (a const assertion keeps the struct under 8 KiB), the UDP socket
+  buffers, the four ARP parking frames (allocated once, reused), the
+  receive buffer and every TCP socket (`TcpSock::boxed`, out of line) are
+  on the heap. Deepest direct path at the fix: 11,752 bytes (release) and
+  15,408 bytes (dev) of virtio-net's 64 KiB, against 53,368 and 69,680
+  before; a dev build used to overflow on its first DHCP offer (`run` ->
+  `on_frame` -> `broadcast_dhcp`). `network.deep_path` drives the deepest
+  path (a full TCP table swept inside a request, a dead client's reset
+  toward an address with no ARP entry).
 - QEMU's network is user-mode (slirp): DHCP hands out 10.0.2.15,
   router 10.0.2.2 (which answers ICMP and redirects UDP to the host's
   loopback) and DNS 10.0.2.3. xtask starts, with each QEMU, a UDP responder on
@@ -1010,6 +1036,10 @@ latter briefly to add the region.
   (`Cpu::idle_cycles`) and `sysinfo::IDLE` publishes them alongside the cycles
   since the first tick; `cpus` shows them as a percentage and `diag` gathers
   `uptime`, `mem`, `cpus`, `ps` and `services --detail` into one report.
+- User stack high-water marks (incident 0018): `sysinfo::STACKS`, one
+  `StackEntry` per live process (stack size, bytes touched from the top,
+  page granular, from the Accessed bits of the stack's page table
+  entries); `diag` lists them after the processes.
 
 ## Application sandbox (Phase 28)
 

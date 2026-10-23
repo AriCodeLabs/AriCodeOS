@@ -135,3 +135,15 @@ still unknown (`docs/hardware.md`).
   before it. The audit of this branch measured what is left of that stack
   (about 12 KiB in release builds, none in dev builds): incident 0018,
   fixed on its own branch.
+
+## Note (2026-10-23, incident 0018)
+
+`system_info(STACKS)`, added with the fix of incident 0018, has the same
+audience as the counters above and the same kind of leak: any holder of
+`READ` on `SYSTEM` reads every live process's user stack depth, page
+granular (a high-water mark from the Accessed bits). Watching it while
+another process works says roughly how deep that process's code went, a
+weak side channel on what it was doing (an HTTPS certificate check is
+deeper than a plain download, for example). There is no address
+randomization for it to defeat: every process has the same stack
+addresses. It stays under `READ`, like `PROCESSES`, `IDLE` and `EVENTS`.

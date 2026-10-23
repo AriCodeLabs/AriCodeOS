@@ -397,6 +397,11 @@ pub mod sysinfo {
     /// [`RandomSource::LEN`]: readers pass a larger buffer and decode the
     /// first `LEN` bytes.
     pub const RANDOM_SOURCE: u64 = 12;
+    /// As many [`StackEntry`] as fit in the buffer, one per live process:
+    /// how much of its user stack it has touched since it started
+    /// (incident 0018), the run-time counterpart of `cargo xtask
+    /// stack-check`.
+    pub const STACKS: u64 = 13;
 
     /// What seeded the kernel generator. The number is the code of the
     /// `net tcp secret weak` and `ssh entropy weak` fault events.
@@ -742,6 +747,66 @@ pub mod sysinfo {
             })
         }
     }
+
+    /// User stack use of one live process (40 bytes, [`STACKS`]): the
+    /// stack's size and how many bytes of it, from the top down to the
+    /// lowest page the process touched, page granular. The kernel reads it
+    /// from the Accessed bits of the stack's page table entries, which
+    /// nothing clears: a high-water mark since the process started.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct StackEntry {
+        pub pid: u32,
+        pub size: u32,
+        pub touched: u32,
+        pub name: [u8; PROCESS_NAME_LEN],
+        pub name_len: u8,
+    }
+
+    impl StackEntry {
+        pub const LEN: usize = 40;
+
+        pub fn new(pid: u32, size: u32, touched: u32, name: &str) -> Self {
+            let n = name.len().min(PROCESS_NAME_LEN);
+            let mut buf = [0u8; PROCESS_NAME_LEN];
+            buf[..n].copy_from_slice(&name.as_bytes()[..n]);
+            Self {
+                pid,
+                size,
+                touched,
+                name: buf,
+                name_len: n as u8,
+            }
+        }
+
+        pub fn name_str(&self) -> &str {
+            core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("?")
+        }
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[..4].copy_from_slice(&self.pid.to_le_bytes());
+            b[4..8].copy_from_slice(&self.size.to_le_bytes());
+            b[8..12].copy_from_slice(&self.touched.to_le_bytes());
+            b[12] = self.name_len;
+            b[16..16 + PROCESS_NAME_LEN].copy_from_slice(&self.name);
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN {
+                return None;
+            }
+            let mut name = [0u8; PROCESS_NAME_LEN];
+            name.copy_from_slice(&b[16..16 + PROCESS_NAME_LEN]);
+            Some(Self {
+                pid: u32::from_le_bytes(b[..4].try_into().ok()?),
+                size: u32::from_le_bytes(b[4..8].try_into().ok()?),
+                touched: u32::from_le_bytes(b[8..12].try_into().ok()?),
+                name,
+                name_len: b[12].min(PROCESS_NAME_LEN as u8),
+            })
+        }
+    }
 }
 
 /// `system_power` actions.
@@ -1057,6 +1122,48 @@ mod tests {
         bad[4] = 9;
         assert!(ProcessEntry::decode(&bad).is_none());
         assert!(ProcessEntry::decode(&bad[..10]).is_none());
+    }
+
+    #[test]
+    fn stack_entry_round_trip() {
+        use super::sysinfo::*;
+        let e = StackEntry::new(4, 65_536, 12_288, "virtio_net");
+        let d = StackEntry::decode(&e.encode()).unwrap();
+        assert_eq!(d, e);
+        assert_eq!(d.name_str(), "virtio_net");
+        let long = StackEntry::new(1, 1, 1, "a-name-far-too-long-for-the-entry");
+        assert_eq!(long.name_len as usize, PROCESS_NAME_LEN);
+        let mut bad = e.encode();
+        bad[12] = 0xFF;
+        assert_eq!(
+            StackEntry::decode(&bad).unwrap().name_len as usize,
+            PROCESS_NAME_LEN
+        );
+        assert!(StackEntry::decode(&bad[..39]).is_none());
+    }
+
+    /// The wire layout, byte by byte: pid, size and touched little-endian,
+    /// the name length, three zero padding bytes, the name zero-filled.
+    #[test]
+    fn stack_entry_wire_layout() {
+        use super::sysinfo::*;
+        let mut wire = [0u8; StackEntry::LEN];
+        wire[..4].copy_from_slice(&[0x04, 0x03, 0x02, 0x01]);
+        wire[4..8].copy_from_slice(&[0x00, 0x00, 0x01, 0x00]);
+        wire[8..12].copy_from_slice(&[0x00, 0x30, 0x00, 0x00]);
+        wire[12] = 3;
+        wire[16..19].copy_from_slice(b"net");
+        let e = StackEntry::new(0x0102_0304, 65_536, 12_288, "net");
+        assert_eq!(e.encode(), wire);
+        assert_eq!(e.encode()[13..16], [0, 0, 0], "padding is zero");
+        assert_eq!(e.encode()[19..], [0; 21], "the name is zero-filled");
+        let d = StackEntry::decode(&wire).unwrap();
+        assert_eq!((d.pid, d.size, d.touched), (0x0102_0304, 65_536, 12_288));
+        assert_eq!(d.name_str(), "net");
+        // Padding a later version fills does not change what is read.
+        let mut later = wire;
+        later[13..16].copy_from_slice(&[0xAA; 3]);
+        assert_eq!(StackEntry::decode(&later), Some(d));
     }
 
     use super::*;

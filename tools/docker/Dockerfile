@@ -29,10 +29,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/usr/local/cargo/bin:$PATH \
     LANG=C.UTF-8
 
-# Same list as README.md "Requirements", minus gdb, plus what the test
-# runner calls: openssl (HTTPS scenarios), ssh and ssh-keygen (sshd
-# scenarios), strip (binutils, system images), ca-certificates and curl
-# (rustup only).
+# Same list as README.md "Requirements" (binutils: strip for system
+# images, objdump for `cargo xtask stack-check`), minus gdb, plus what the
+# test runner calls: openssl (HTTPS scenarios), ssh and ssh-keygen (sshd
+# scenarios), ca-certificates and curl (rustup only).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         qemu-system-x86 ovmf nasm clang lld binutils git make \

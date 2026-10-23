@@ -857,6 +857,40 @@ pub fn snapshot() -> Vec<aricode_abi::sysinfo::ProcessEntry> {
         .collect()
 }
 
+/// Bytes of the user stack the process behind `m` has touched: from the
+/// top down to the lowest stack page whose Accessed bit the CPU has set
+/// (incident 0018). `spawn` zeroes the pages through the kernel's own
+/// mapping, so only accesses through the process's mapping set the bit
+/// (its own, and the kernel's copies to and from its buffers), and nothing
+/// clears it: a high-water mark since the process started, page granular.
+/// The stack probes compilers emit for large frames touch every page they
+/// pass, so a deep call is seen even if it wrote little.
+/// The scan is `aricode_x86_paging::stack_touched`, tested on the host.
+fn stack_touched(m: &Mapper<vmm::PmmFrames, OffsetMap>) -> u64 {
+    aricode_x86_paging::stack_touched(USER_STACK_TOP - USER_STACK_SIZE, USER_STACK_TOP, |page| {
+        m.translate(page).map(|(_, flags)| flags)
+    })
+}
+
+/// User stack use of every process that still has its address space
+/// (`sysinfo::STACKS`, incident 0018).
+pub fn stack_snapshot() -> Vec<aricode_abi::sysinfo::StackEntry> {
+    use aricode_abi::sysinfo::StackEntry;
+    PROCESSES
+        .lock()
+        .iter()
+        .filter_map(|(pid, p)| {
+            let m = p.mapper.as_ref()?;
+            Some(StackEntry::new(
+                pid.0,
+                USER_STACK_SIZE as u32,
+                stack_touched(m) as u32,
+                &p.name,
+            ))
+        })
+        .collect()
+}
+
 pub fn exists(pid: Pid) -> bool {
     PROCESSES.lock().contains_key(&pid)
 }

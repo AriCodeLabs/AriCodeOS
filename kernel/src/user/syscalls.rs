@@ -262,6 +262,14 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
                 .flat_map(|e| e.encode())
                 .collect()
         }
+        sysinfo::STACKS => {
+            let max = (len as usize) / sysinfo::StackEntry::LEN;
+            process::stack_snapshot()
+                .iter()
+                .take(max)
+                .flat_map(|e| e.encode())
+                .collect()
+        }
         _ => return Err(Error::Invalid),
     };
     if bytes.len() as u64 > len {
