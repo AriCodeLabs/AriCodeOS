@@ -66,8 +66,16 @@ struct CpuSlot {
 pub struct RoundRobin {
     states: BTreeMap<Tid, State>,
     ready: VecDeque<Tid>,
-    /// (wakeup tick, thread), in no particular order.
-    sleeping: Vec<(u64, Tid)>,
+    /// (wakeup tick, thread), earliest first: `wake_due` takes from the
+    /// front and stops at the first one still in the future (performance
+    /// audit 731c398, finding E).
+    sleeping: BTreeSet<(u64, Tid)>,
+    /// Each sleeper's wakeup tick, to find it in `sleeping` when it is
+    /// woken early.
+    wakeup_of: BTreeMap<Tid, u64>,
+    /// Threads that exited and await `reap`, in exit order: the reaper
+    /// consumes this instead of scanning every thread (finding E).
+    exited: Vec<Tid>,
     cpus: Vec<CpuSlot>,
     /// Thread -> the only CPU it may run on.
     affinity: BTreeMap<Tid, usize>,
@@ -88,7 +96,9 @@ impl RoundRobin {
         Self {
             states,
             ready: VecDeque::new(),
-            sleeping: Vec::new(),
+            sleeping: BTreeSet::new(),
+            wakeup_of: BTreeMap::new(),
+            exited: Vec::new(),
             cpus: alloc::vec![CpuSlot { current, idle }],
             affinity: BTreeMap::new(),
             pending_wake: BTreeSet::new(),
@@ -217,7 +227,7 @@ impl RoundRobin {
         // A pending wakeup turns the block or sleep into a yield.
         let current_state = match current_state {
             State::Blocked | State::Sleeping if self.pending_wake.remove(&cur) => {
-                self.sleeping.retain(|(_, t)| *t != cur);
+                self.stop_sleeping(cur);
                 State::Ready
             }
             s => s,
@@ -278,7 +288,7 @@ impl RoundRobin {
                 Ok(())
             }
             Some(State::Sleeping) => {
-                self.sleeping.retain(|(_, t)| *t != tid);
+                self.stop_sleeping(tid);
                 self.states.insert(tid, State::Ready);
                 self.ready.push_back(tid);
                 Ok(())
@@ -294,25 +304,40 @@ impl RoundRobin {
     /// The current thread of `cpu` sleeps until tick `until`.
     pub fn sleep_current(&mut self, cpu: usize, until: u64) -> Option<Tid> {
         let cur = self.cpus[cpu].current;
-        self.sleeping.push((until, cur));
+        self.stop_sleeping(cur);
+        self.sleeping.insert((until, cur));
+        self.wakeup_of.insert(cur, until);
         self.switch(cpu, State::Sleeping)
     }
 
-    /// Queues the threads whose wakeup tick has arrived. Returns how many.
+    /// Takes `tid` out of the sleep list, if it is there.
+    fn stop_sleeping(&mut self, tid: Tid) {
+        if let Some(until) = self.wakeup_of.remove(&tid) {
+            self.sleeping.remove(&(until, tid));
+        }
+    }
+
+    /// Queues the threads whose wakeup tick has arrived, earliest first.
+    /// Returns how many. Only the woken ones and the next sleeper are
+    /// looked at.
     pub fn wake_due(&mut self, now: u64) -> usize {
         let mut woken = 0;
-        let mut i = 0;
-        while i < self.sleeping.len() {
-            if self.sleeping[i].0 <= now {
-                let (_, tid) = self.sleeping.swap_remove(i);
-                self.states.insert(tid, State::Ready);
-                self.ready.push_back(tid);
-                woken += 1;
-            } else {
-                i += 1;
+        while let Some(&(until, tid)) = self.sleeping.first() {
+            if until > now {
+                break;
             }
+            self.sleeping.pop_first();
+            self.wakeup_of.remove(&tid);
+            self.states.insert(tid, State::Ready);
+            self.ready.push_back(tid);
+            woken += 1;
         }
         woken
+    }
+
+    /// Threads waiting in the sleep list (for tests and diagnostics).
+    pub fn sleeping_len(&self) -> usize {
+        self.sleeping.len()
     }
 
     /// The current thread of `cpu` exits. Returns the next one (there is always a switch).
@@ -321,6 +346,8 @@ impl RoundRobin {
         let cur = self.cpus[cpu].current;
         self.pending_wake.remove(&cur);
         self.affinity.remove(&cur);
+        self.stop_sleeping(cur);
+        self.exited.push(cur);
         self.switch(cpu, State::Terminated)
             .expect("exit always switches threads")
     }
@@ -331,18 +358,17 @@ impl RoundRobin {
             None => Err(SchedError::UnknownThread),
             Some(State::Terminated) => {
                 self.states.remove(&tid);
+                self.exited.retain(|t| *t != tid);
                 Ok(())
             }
             Some(_) => Err(SchedError::WrongState),
         }
     }
 
-    /// Terminated threads awaiting `reap`.
+    /// Terminated threads awaiting `reap`, in exit order: the queue filled
+    /// by `exit_current`, never a scan of every thread (finding E).
     pub fn terminated(&self) -> impl Iterator<Item = Tid> + '_ {
-        self.states
-            .iter()
-            .filter(|(_, s)| **s == State::Terminated)
-            .map(|(t, _)| *t)
+        self.exited.iter().copied()
     }
 }
 
@@ -477,6 +503,88 @@ mod tests {
         assert_eq!(s.reap(a), Ok(()));
         assert_eq!(s.state(a), None);
         assert_eq!(s.thread_count(), 2);
+    }
+
+    /// The reaper's list holds only the threads that exited, in exit
+    /// order, however many others exist (performance audit, finding E).
+    #[test]
+    fn terminated_threads_come_from_their_own_queue() {
+        let mut s = RoundRobin::new(MAIN, IDLE);
+        let threads: Vec<Tid> = (0..200).map(|_| s.allocate_tid()).collect();
+        for &t in &threads {
+            s.add(t);
+        }
+        assert_eq!(s.terminated().count(), 0);
+        // MAIN yields; the first two threads in turn exit.
+        s.yield_current(0);
+        assert_eq!(s.current(0), threads[0]);
+        s.exit_current(0);
+        assert_eq!(s.current(0), threads[1]);
+        s.exit_current(0);
+        assert_eq!(s.terminated().collect::<Vec<_>>(), [threads[0], threads[1]]);
+        assert_eq!(s.reap(threads[1]), Ok(()));
+        assert_eq!(s.terminated().collect::<Vec<_>>(), [threads[0]]);
+        assert_eq!(s.reap(threads[1]), Err(SchedError::UnknownThread));
+        assert_eq!(s.reap(threads[0]), Ok(()));
+        assert_eq!(s.terminated().count(), 0);
+        assert_eq!(s.thread_count(), 2 + 198);
+    }
+
+    /// Sleepers wake exactly as the unordered list woke them (same threads
+    /// at the same ticks, early wakes included), now earliest first: a
+    /// random run against a plain reference model.
+    #[test]
+    fn ordered_sleepers_match_the_reference_model() {
+        let mut s = RoundRobin::new(MAIN, IDLE);
+        let threads: Vec<Tid> = (0..24).map(|_| s.allocate_tid()).collect();
+        for &t in &threads {
+            s.add(t);
+        }
+        let mut model: Vec<(u64, Tid)> = Vec::new();
+        let mut seed = 0xE5_u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for now in 0..3000u64 {
+            let cur = s.current(0);
+            match next() % 4 {
+                0 if cur != IDLE && cur != MAIN => {
+                    let until = now + 1 + next() % 40;
+                    model.push((until, cur));
+                    s.sleep_current(0, until);
+                }
+                1 if !model.is_empty() => {
+                    let (_, tid) = model.remove((next() as usize) % model.len());
+                    assert_eq!(s.wake(tid), Ok(()));
+                }
+                _ => {
+                    s.yield_current(0);
+                }
+            }
+            let mut due: Vec<Tid> = model
+                .iter()
+                .filter(|(u, _)| *u <= now)
+                .map(|(_, t)| *t)
+                .collect();
+            model.retain(|(u, _)| *u > now);
+            due.sort();
+            let before: Vec<Tid> = threads
+                .iter()
+                .copied()
+                .filter(|t| s.state(*t) == Some(State::Sleeping))
+                .collect();
+            assert_eq!(s.wake_due(now), due.len(), "tick {now}");
+            let mut woken: Vec<Tid> = before
+                .into_iter()
+                .filter(|t| s.state(*t) != Some(State::Sleeping))
+                .collect();
+            woken.sort();
+            assert_eq!(woken, due, "tick {now}");
+            assert_eq!(s.sleeping_len(), model.len(), "tick {now}");
+        }
     }
 
     #[test]
