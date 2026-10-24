@@ -256,7 +256,7 @@ fn trim(s: &[u8]) -> &[u8] {
 
 fn help() {
     print(
-        b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  cpus      online processors and idle time per CPU\n  diag [NAME]  full report (uptime, mem, cpus, entropy, ps, stacks, services, net, devices); with NAME saves it to AriFS\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body (http:// or https://)\n  run PROG  run an initrd program and wait\n\
+        b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  sleep MS  wait MS milliseconds (at most 60000)\n  cpus      online processors and idle time per CPU\n  diag [NAME]  full report (uptime, mem, cpus, entropy, ps, stacks, services, net, devices); with NAME saves it to AriFS\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body (http:// or https://)\n  run PROG  run an initrd program and wait\n\
   update [--channel stable|dev]  fetch and verify the signed index of every source of the channel (stable by default) and show what is new (installs nothing; ADR 0029, ADR 0045)\n  update add [--channel dev] URL|IP[:PORT]  register an update source (stable unless --channel dev)\n  update remove N|URL  unregister a source\n  update sources  list the sources\n  update apply [--allow-downgrade]  install the image in the UPDATE partition\n  update rollback  boot the system in the other slot next (no network; then `reboot`)\n  upgrade [--channel stable|dev] [--allow-downgrade]  install what the last `update` found (system into the inactive slot, then `reboot`; apps through the installer); only --channel moves the system to another channel\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
     );
 }
@@ -1416,6 +1416,21 @@ fn launch_failure(e: aricode_rt::sys::launch::LaunchError) {
     }
 }
 
+/// Longest `sleep`: a pause in a script, not a way to park the shell.
+const SLEEP_MAX_MS: u64 = 60_000;
+
+/// `sleep MS`: waits, for scripts and scenarios that need another program
+/// to get somewhere first (incident 0027's test).
+fn sleep(arg: &[u8]) {
+    match core::str::from_utf8(arg)
+        .ok()
+        .and_then(|a| a.trim().parse::<u64>().ok())
+    {
+        Some(ms) if ms <= SLEEP_MAX_MS => sys::thread_sleep(ms),
+        _ => print(b"usage: sleep MS (at most 60000)\n"),
+    }
+}
+
 /// Asks the broker (init) to run an initrd program with the capabilities
 /// of its manifest and waits for it to exit.
 fn run(arg: &[u8]) {
@@ -1704,6 +1719,7 @@ fn execute(
         b"services" if rest == b"--detail" => services_detail(),
         b"services" => services(mask, fs),
         b"uptime" => uptime(),
+        b"sleep" => sleep(rest),
         b"cpus" => cpus(),
         b"diag" => diag(fs, net_client, mask, rest),
         // Without a network service the shell's net handle is a

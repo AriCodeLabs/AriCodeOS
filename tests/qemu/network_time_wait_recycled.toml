@@ -1,0 +1,39 @@
+# Incident 0027: every connection the machine closes first holds its TCP
+# slot in TIME-WAIT for two seconds, and a download through the public
+# source's path takes three connections (two redirects). Six of them back
+# to back need eighteen connections within a few seconds, more than the
+# eight slots, with margin for a slow host: before the fix the last ones were refused with `net tcp
+# table full`. Now a full table gives up the TIME-WAIT slot that ends
+# soonest (recorded as `net tcp tw recycled`) and every download completes.
+name = "network.time_wait_recycled"
+description = "a TCP table full of TIME-WAIT connections recycles the oldest instead of refusing a new one"
+level = "full"
+areas = ["network", "shell"]
+timeout_secs = 150
+
+[host_update]
+system = 2
+source = "none"
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = [
+    "http http://10.0.2.2:{update_port}/AriCodeLabs/AriCodeOS/releases/latest/download/index",
+    "http http://10.0.2.2:{update_port}/AriCodeLabs/AriCodeOS/releases/latest/download/index.sig",
+    "http http://10.0.2.2:{update_port}/AriCodeLabs/AriCodeOS/releases/latest/download/index",
+    "http http://10.0.2.2:{update_port}/AriCodeLabs/AriCodeOS/releases/latest/download/index.sig",
+    "http http://10.0.2.2:{update_port}/AriCodeLabs/AriCodeOS/releases/latest/download/index",
+    "http http://10.0.2.2:{update_port}/AriCodeLabs/AriCodeOS/releases/latest/download/index.sig",
+    "net",
+    "diag",
+    "shutdown",
+]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "HTTP 200, ",
+    "serial = ",
+    ": net tcp tw recycled x",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "net tcp table full", "http: could not connect"]

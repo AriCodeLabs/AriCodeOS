@@ -491,6 +491,14 @@ fn http_serve(mut stream: std::net::TcpStream, update: Option<&Path>) {
     };
     let _ = stream.write_all(&response);
     let _ = stream.flush();
+    // The mirror behaves like a server across a real network: its close
+    // comes after the client's, so the machine closes first and holds the
+    // connection in TIME-WAIT (incident 0027).
+    if update.is_some() && mirror_route(path).is_some() {
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+        let mut rest = [0u8; 64];
+        while matches!(stream.read(&mut rest), Ok(n) if n > 0) {}
+    }
 }
 
 /// The public source's path ([`crate::image::PUBLIC_SOURCE`]), served

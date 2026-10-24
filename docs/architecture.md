@@ -872,7 +872,9 @@ latter briefly to add the region.
   established. `TcpConnect`/`TcpAccept`/`TcpRecv` stay pending with a
   deadline; `TcpSend` queues what fits and returns the count (the client
   retries with `tcp_send_all`). A slot is freed when the user has
-  closed and the connection has finished.
+  closed and the connection has finished; a full table first gives up the
+  closed TIME-WAIT connection that ends soonest (incident 0027), and
+  FIN-WAIT-2 gives up a peer that never closes after 30 s with a reset.
 - Listeners are protected (incident 0013, ADR 0035). A listener holds at
   most `tcp::listen_backlog(MAX_TCP) = 4` connections its owner has not
   accepted yet, half-open and established alike, so a burst of SYNs to port
@@ -926,7 +928,8 @@ latter briefly to add the region.
 - Refusals are visible (incident 0012). netd records a fault event
   (`sys::event_record`, ADR 0028) whenever it refuses a request or loses
   a frame, named by cause: `net tcp table full` (`TcpConnect`/`TcpListen`
-  with the 8 slots taken, TIME-WAIT included), `net arp defer full` (the
+  with the 8 slots taken and none in TIME-WAIT to recycle), `net tcp tw
+  recycled` (a TIME-WAIT slot given to a new connection, incident 0027), `net arp defer full` (the
   4-slot parking table for frames awaiting ARP), `net tx busy` (the NIC
   had no transmit slot; the frame is lost), `net arp no reply` (a parked
   frame dropped after 1 s), `net ping table full`, `net dns table full`,
