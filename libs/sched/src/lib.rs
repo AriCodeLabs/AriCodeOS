@@ -73,9 +73,10 @@ pub struct RoundRobin {
     /// Each sleeper's wakeup tick, to find it in `sleeping` when it is
     /// woken early.
     wakeup_of: BTreeMap<Tid, u64>,
-    /// Threads that exited and await `reap`, in exit order: the reaper
-    /// consumes this instead of scanning every thread (finding E).
-    exited: Vec<Tid>,
+    /// Threads that exited and await the reaper, in exit order: it
+    /// consumes this instead of scanning every thread (finding E). Its
+    /// capacity follows the thread count, so an exit never allocates.
+    exited: VecDeque<Tid>,
     cpus: Vec<CpuSlot>,
     /// Thread -> the only CPU it may run on.
     affinity: BTreeMap<Tid, usize>,
@@ -98,7 +99,7 @@ impl RoundRobin {
             ready: VecDeque::new(),
             sleeping: BTreeSet::new(),
             wakeup_of: BTreeMap::new(),
-            exited: Vec::new(),
+            exited: VecDeque::new(),
             cpus: alloc::vec![CpuSlot { current, idle }],
             affinity: BTreeMap::new(),
             pending_wake: BTreeSet::new(),
@@ -135,6 +136,11 @@ impl RoundRobin {
     pub fn add(&mut self, tid: Tid) {
         self.states.insert(tid, State::Ready);
         self.ready.push_back(tid);
+        // Room for every live thread to exit before the reaper runs.
+        let live = self.states.len();
+        if self.exited.capacity() < live {
+            self.exited.reserve(live - self.exited.len());
+        }
     }
 
     /// Sets (or clears) the CPU `tid` may run on.
@@ -304,7 +310,10 @@ impl RoundRobin {
     /// The current thread of `cpu` sleeps until tick `until`.
     pub fn sleep_current(&mut self, cpu: usize, until: u64) -> Option<Tid> {
         let cur = self.cpus[cpu].current;
-        self.stop_sleeping(cur);
+        debug_assert!(
+            !self.wakeup_of.contains_key(&cur),
+            "a running thread has no sleep entry"
+        );
         self.sleeping.insert((until, cur));
         self.wakeup_of.insert(cur, until);
         self.switch(cpu, State::Sleeping)
@@ -328,6 +337,7 @@ impl RoundRobin {
             }
             self.sleeping.pop_first();
             self.wakeup_of.remove(&tid);
+            debug_assert_eq!(self.states.get(&tid), Some(&State::Sleeping));
             self.states.insert(tid, State::Ready);
             self.ready.push_back(tid);
             woken += 1;
@@ -335,8 +345,8 @@ impl RoundRobin {
         woken
     }
 
-    /// Threads waiting in the sleep list (for tests and diagnostics).
-    pub fn sleeping_len(&self) -> usize {
+    #[cfg(test)]
+    fn sleeping_len(&self) -> usize {
         self.sleeping.len()
     }
 
@@ -347,28 +357,19 @@ impl RoundRobin {
         self.pending_wake.remove(&cur);
         self.affinity.remove(&cur);
         self.stop_sleeping(cur);
-        self.exited.push(cur);
+        self.exited.push_back(cur);
         self.switch(cpu, State::Terminated)
             .expect("exit always switches threads")
     }
 
-    /// Removes a terminated thread from the registry (to free its resources).
-    pub fn reap(&mut self, tid: Tid) -> Result<(), SchedError> {
-        match self.states.get(&tid) {
-            None => Err(SchedError::UnknownThread),
-            Some(State::Terminated) => {
-                self.states.remove(&tid);
-                self.exited.retain(|t| *t != tid);
-                Ok(())
-            }
-            Some(_) => Err(SchedError::WrongState),
-        }
-    }
-
-    /// Terminated threads awaiting `reap`, in exit order: the queue filled
-    /// by `exit_current`, never a scan of every thread (finding E).
-    pub fn terminated(&self) -> impl Iterator<Item = Tid> + '_ {
-        self.exited.iter().copied()
+    /// Removes the thread that exited first from the registry and returns
+    /// it, to free its resources; `None` when none is waiting. The queue
+    /// filled by `exit_current`, never a scan of every thread (finding E).
+    pub fn pop_terminated(&mut self) -> Option<Tid> {
+        let tid = self.exited.pop_front()?;
+        debug_assert_eq!(self.states.get(&tid), Some(&State::Terminated));
+        self.states.remove(&tid);
+        Some(tid)
     }
 }
 
@@ -498,9 +499,12 @@ mod tests {
         assert_eq!(s.yield_current(0), Some(a));
         assert_eq!(s.exit_current(0), MAIN);
         assert_eq!(s.state(a), Some(State::Terminated));
-        assert_eq!(s.terminated().collect::<Vec<_>>(), [a]);
-        assert_eq!(s.reap(MAIN), Err(SchedError::WrongState));
-        assert_eq!(s.reap(a), Ok(()));
+        assert_eq!(s.pop_terminated(), Some(a));
+        assert_eq!(
+            s.pop_terminated(),
+            None,
+            "MAIN still runs: nothing more to reap"
+        );
         assert_eq!(s.state(a), None);
         assert_eq!(s.thread_count(), 2);
     }
@@ -514,20 +518,21 @@ mod tests {
         for &t in &threads {
             s.add(t);
         }
-        assert_eq!(s.terminated().count(), 0);
+        assert_eq!(s.pop_terminated(), None);
         // MAIN yields; the first two threads in turn exit.
         s.yield_current(0);
         assert_eq!(s.current(0), threads[0]);
         s.exit_current(0);
         assert_eq!(s.current(0), threads[1]);
         s.exit_current(0);
-        assert_eq!(s.terminated().collect::<Vec<_>>(), [threads[0], threads[1]]);
-        assert_eq!(s.reap(threads[1]), Ok(()));
-        assert_eq!(s.terminated().collect::<Vec<_>>(), [threads[0]]);
-        assert_eq!(s.reap(threads[1]), Err(SchedError::UnknownThread));
-        assert_eq!(s.reap(threads[0]), Ok(()));
-        assert_eq!(s.terminated().count(), 0);
+        // In exit order, each once.
+        assert_eq!(s.pop_terminated(), Some(threads[0]));
+        assert_eq!(s.pop_terminated(), Some(threads[1]));
+        assert_eq!(s.pop_terminated(), None);
         assert_eq!(s.thread_count(), 2 + 198);
+        // Every live thread could exit before a reap without the queue
+        // growing (an exit never allocates).
+        assert!(s.exited.capacity() >= s.thread_count());
     }
 
     /// Sleepers wake exactly as the unordered list woke them (same threads

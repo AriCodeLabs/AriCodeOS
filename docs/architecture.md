@@ -323,10 +323,14 @@ latter briefly to add the region.
 - `switch_context` (System V) saves rbx, rbp, r12..r15 and rsp; a new thread
   starts through `thread_start` with r12 = entry and r13 = argument, enables
   interrupts and on return enters `exit`.
-- The scheduler lock is released before the context switch, with
-  interrupts disabled: the resuming thread never inherits a lock.
+- The scheduler lock is held across the context switch, with interrupts
+  disabled, and released by the thread that resumes (`force_unlock` after
+  `switch_context`, or in `thread_first_run` for a new thread): no other
+  CPU sees a half-switched thread.
 - Finished threads are reaped by the next thread that resumes after a
-  switch (`reap`): the stack in use is never freed. Thread guard pages
+  switch (`reap`), from the policy's exit queue (`pop_terminated`, never a
+  scan of every thread; performance audit 731c398, finding E): the stack
+  in use is never freed. Thread guard pages
   are also recognized by the `STACK OVERFLOW` diagnostic.
 - `test=threads`: two threads strictly alternate with `yield` and 40 workers
   finish and return their stacks to the PMM.
@@ -334,12 +338,14 @@ latter briefly to add the region.
 ## Preemptive scheduler (Phase 10)
 
 - The timer handler, after the EOI, calls `scheduler::on_tick`: it wakes
-  threads whose tick has arrived and, if the quantum (2 ticks = 20 ms) has
+  threads whose tick has arrived, earliest deadline first from an ordered
+  sleep list (it looks only at the threads it wakes and the next one), and, if the quantum (2 ticks = 20 ms) has
   expired or someone woke up, preempts through the same switch path as
   `yield`. The preempted thread keeps its interrupt frame on its stack and
   resumes through the handler's `iretq`.
 - No kernel lock can be preempted: all of them disable
-  interrupts. The scheduler lock is released before the switch.
+  interrupts. The scheduler lock is held across the switch and released
+  by the resuming thread.
 - `scheduler::sleep_ms` sleeps without consuming CPU; `time::sleep_ms` delegates to it.
 - `task::wait::WaitQueue` implements blocking with a condition evaluated under its
   lock and `wake_one`/`wake_all`; a wakeup that arrives before blocking is not
@@ -515,6 +521,9 @@ latter briefly to add the region.
   hands it over in `BootInfo::initrd_*`. Custom format (`aricode-initrd`): magic,
   entry count and, per file, name and data aligned to 8 bytes; the
   reader validates the whole image when opening it and copies nothing.
+  The kernel validates it once at `initrd::init` and keeps an index of
+  names (the first entry of a name wins), so launching a program no
+  longer parses the image (performance audit 731c398, finding F).
 - `cargo xtask image` builds the initrd with `init` and all the binaries in
   `user/testprogs`; the kernel no longer embeds programs and is built without
   environment variables.
