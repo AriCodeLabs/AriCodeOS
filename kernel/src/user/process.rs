@@ -81,7 +81,16 @@ pub struct Process {
     /// 731c398, finding D): a runtime's 256 KiB heap arena costs only the
     /// pages the program uses.
     on_demand: Vec<(u64, u64, u64)>,
+    /// Pages of `on_demand` backed so far (they are never unmapped one by
+    /// one, so the count is exact; audit of finding D, L2).
+    on_demand_backed: u64,
 }
+
+/// Frames first-touch backing never takes (ADR 0049): below this many free
+/// frames a process's first touch fails instead, so the kernel's own
+/// allocations (its heap, page tables, the kill path itself) still find
+/// memory. 1 MiB.
+const KERNEL_RESERVE_FRAMES: usize = 256;
 
 /// What [`back_on_demand`] did with a page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,7 +119,14 @@ fn back_page(p: &mut Process, page: u64) -> OnDemand {
     if m.translate(page).is_some() {
         return OnDemand::NotReserved;
     }
-    let Some(frame) = pmm::with(|f| f.allocate()) else {
+    let frame = pmm::with(|f| {
+        if f.stats().free_frames <= KERNEL_RESERVE_FRAMES {
+            None
+        } else {
+            f.allocate()
+        }
+    });
+    let Some(frame) = frame else {
         return OnDemand::OutOfMemory;
     };
     // SAFETY: freshly allocated frame, reachable through the physical map.
@@ -125,19 +141,31 @@ fn back_page(p: &mut Process, page: u64) -> OnDemand {
         pmm::with(|f| f.free(frame).expect("frame just allocated"));
         return OnDemand::OutOfMemory;
     }
+    p.on_demand_backed += 1;
     OnDemand::Backed
 }
 
 /// A page fault of the current process at `addr` on a page that was not
-/// present: backs it if it is a reserved zero-fill page (finding D).
-pub fn back_on_demand(addr: u64) -> OnDemand {
+/// present: backs it if it is a reserved zero-fill page (finding D). An
+/// instruction fetch from a reserved no-execute page is a real fault: no
+/// frame is spent on a page that would fault again (audit, L3).
+pub fn back_on_demand(addr: u64, fetch: bool) -> OnDemand {
     let Some(pid) = current_pid() else {
         return OnDemand::NotReserved;
     };
-    match PROCESSES.lock().get_mut(&pid) {
-        Some(p) => back_page(p, addr & !(PAGE_SIZE - 1)),
-        None => OnDemand::NotReserved,
+    let page = addr & !(PAGE_SIZE - 1);
+    let mut procs = PROCESSES.lock();
+    let Some(p) = procs.get_mut(&pid) else {
+        return OnDemand::NotReserved;
+    };
+    let no_execute = p
+        .on_demand
+        .iter()
+        .any(|(s, e, flags)| (*s..*e).contains(&page) && flags & NO_EXECUTE != 0);
+    if fetch && no_execute {
+        return OnDemand::NotReserved;
     }
+    back_page(p, page)
 }
 
 /// A foreign mapping. A DMA buffer's mapping holds a reference to the
@@ -363,6 +391,7 @@ fn spawn_full(
             main_tid: tid,
             kill_requested: false,
             on_demand,
+            on_demand_backed: 0,
         },
     );
     scheduler::start_thread(thread);
@@ -975,17 +1004,9 @@ pub fn on_demand_snapshot() -> Vec<aricode_abi::sysinfo::StackEntry> {
         .lock()
         .iter()
         .filter_map(|(pid, p)| {
-            let m = p.mapper.as_ref()?;
-            let pages = p
-                .on_demand
-                .iter()
-                .flat_map(|(s, e, _)| (*s..*e).step_by(PAGE_SIZE as usize));
-            let (reserved, backed) = pages.fold((0u64, 0u64), |(r, b), page| {
-                (
-                    r + PAGE_SIZE,
-                    b + PAGE_SIZE * u64::from(m.translate(page).is_some()),
-                )
-            });
+            p.mapper.as_ref()?;
+            let reserved: u64 = p.on_demand.iter().map(|(s, e, _)| e - s).sum();
+            let backed = p.on_demand_backed * PAGE_SIZE;
             (reserved > 0).then(|| StackEntry::new(pid.0, reserved as u32, backed as u32, &p.name))
         })
         .collect()
@@ -1005,18 +1026,29 @@ fn check_user_range(ptr: u64, len: u64, write: bool) -> Result<(), aricode_abi::
         return Ok(());
     }
     let pid = current_pid().ok_or(aricode_abi::Error::Fault)?;
-    let mut procs = PROCESSES.lock();
-    let p = procs.get_mut(&pid).ok_or(aricode_abi::Error::Fault)?;
-    let needed = USER | if write { WRITABLE } else { 0 };
-    let mut page = ptr & !(PAGE_SIZE - 1);
+    let first = ptr & !(PAGE_SIZE - 1);
+    // A reserved zero-fill page the program has not touched yet is backed
+    // now, as its own access would (finding D): the kernel never faults on
+    // it while copying. One page per hold of the global lock (audit, L1).
+    let mut page = first;
     while page < ptr + len {
-        // A reserved zero-fill page the program has not touched yet is
-        // backed now, as its own access would (finding D): the kernel
-        // never faults on it while copying.
-        if back_page(p, page) == OnDemand::OutOfMemory {
+        let backed = match PROCESSES.lock().get_mut(&pid) {
+            Some(p) => back_page(p, page),
+            None => return Err(aricode_abi::Error::Fault),
+        };
+        if backed == OnDemand::OutOfMemory {
             return Err(aricode_abi::Error::Limit);
         }
-        let m = p.mapper.as_ref().ok_or(aricode_abi::Error::Fault)?;
+        page += PAGE_SIZE;
+    }
+    let procs = PROCESSES.lock();
+    let m = procs
+        .get(&pid)
+        .and_then(|p| p.mapper.as_ref())
+        .ok_or(aricode_abi::Error::Fault)?;
+    let needed = USER | if write { WRITABLE } else { 0 };
+    let mut page = first;
+    while page < ptr + len {
         match m.translate(page) {
             Some((_, flags)) if flags & needed == needed => {}
             _ => return Err(aricode_abi::Error::Fault),
@@ -1025,6 +1057,15 @@ fn check_user_range(ptr: u64, len: u64, write: bool) -> Result<(), aricode_abi::
     }
     debug_assert!(ptr + len <= USER_SPACE_END);
     Ok(())
+}
+
+/// Checks that `[ptr, ptr+len)` of the current process can be written,
+/// backing its reserved zero-fill pages: what a call that consumes
+/// something (a message, input) does before it consumes it, so a full
+/// memory fails the call instead of losing what it took (audit of finding
+/// D, M1).
+pub fn check_user_writable(ptr: u64, len: u64) -> Result<(), aricode_abi::Error> {
+    check_user_range(ptr, len, true)
 }
 
 /// Copies `[ptr, ptr+len)` from the current process's address space,

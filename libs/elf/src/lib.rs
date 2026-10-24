@@ -49,6 +49,8 @@ impl Segment {
     /// hold only zeros (`.bss`, a runtime's heap arena): a loader may back
     /// them on first touch instead of at load (performance audit 731c398,
     /// finding D). `[start, end)`, or `None` when there is no such page.
+    /// Overflow-free for segments from `Elf::parse` (`filesz <= memsz`,
+    /// the end fits), as `page_range`.
     pub fn zero_fill_pages(&self) -> Option<(u64, u64)> {
         if !self.writable() {
             return None;
@@ -222,6 +224,8 @@ impl<'a> Elf<'a> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use alloc::vec;
 
     #[test]
     fn only_whole_zero_pages_of_writable_segments_fill_on_demand() {
@@ -248,13 +252,17 @@ mod tests {
             seg(0x40_0010, 0, 0x2000, PF_W).zero_fill_pages(),
             Some((0x40_1000, 0x40_3000))
         );
+        // Unaligned with file contents crossing a page, and an unaligned
+        // segment whose file contents fill it.
+        assert_eq!(
+            seg(0x40_0800, 0x1000, 0x5000, PF_W).zero_fill_pages(),
+            Some((0x40_2000, 0x40_6000))
+        );
+        assert_eq!(seg(0x40_0800, 0x1800, 0x1800, PF_W).zero_fill_pages(), None);
         // Nothing past the file contents, or not writable.
         assert_eq!(seg(0x40_0000, 0x1800, 0x1900, PF_W).zero_fill_pages(), None);
         assert_eq!(seg(0x40_0000, 0, 0x8000, 0).zero_fill_pages(), None);
     }
-
-    use super::*;
-    use alloc::vec;
 
     /// Builds a minimal ELF64 with `n` PT_LOAD program headers.
     fn build_elf(entry: u64, segs: &[(u64, u64, u64, u32)]) -> Vec<u8> {

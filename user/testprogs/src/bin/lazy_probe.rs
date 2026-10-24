@@ -57,9 +57,10 @@ fn main(_arg: u64) -> u64 {
     sys::print(b" KiB backed of ");
     sys::print(fmt_u64(e.size as u64 / 1024, &mut b));
     sys::print(b" KiB reserved\n");
-    // Reserved: the 256 KiB arena and BUF; backed: the heap used, one
-    // page of BUF, nothing more than reserved.
-    if e.size < (256 + 96) * 1024 || e.touched < 128 * 1024 || e.touched >= e.size {
+    // Reserved: BUF and the 256 KiB arena (less the page it may share with
+    // the end of `.data`); backed: the heap used and one page of BUF,
+    // never all of it.
+    if e.size < (96 + 256 - 4) * 1024 || e.touched < 128 * 1024 || e.touched >= e.size {
         return 5;
     }
     core::hint::black_box(&heap);

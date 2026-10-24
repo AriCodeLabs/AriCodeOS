@@ -186,8 +186,10 @@ fn console_read(handle: Handle, ptr: u64, len: u64, timeout_ms: u64) -> Result<u
     if !is_console || len == 0 || len > MAX {
         return Err(Error::Invalid);
     }
-    // Validate the destination before blocking: an invalid pointer fails right away.
-    process::copy_to_user(ptr, &[])?;
+    // Validate (and back) the destination before blocking: an invalid
+    // pointer fails right away, and no input is taken that could not be
+    // delivered (audit of finding D, M1).
+    process::check_user_writable(ptr, len)?;
     // The prompt (unterminated line) must be visible before waiting for input.
     if let Some(pid) = process::current_pid() {
         process::console_flush(pid);
@@ -480,8 +482,11 @@ fn ipc_receive(
         return Err(Error::TooBig);
     }
     let obj = endpoint_of(ep, Rights::READ)?;
-    // Check the buffers before consuming a message.
-    process::copy_to_user(buf_ptr, &[])?;
+    // Check (and back) the buffers before consuming a message: a copy that
+    // fails afterwards would lose the message and its capabilities (audit
+    // of finding D, M1).
+    process::check_user_writable(buf_ptr, buf_len)?;
+    process::check_user_writable(out_ptr, out_max * 4)?;
     let ObjectKind::Endpoint(endpoint) = &obj.kind else {
         unreachable!()
     };
@@ -565,7 +570,9 @@ fn ipc_receive_any(
     if irqs > IPC_MAX_ANY_IRQS || members.len() - irqs > IPC_MAX_ANY {
         return Err(Error::Invalid);
     }
-    process::copy_to_user(buf_ptr, &[])?;
+    // As `ipc_receive`: nothing consumed that could not be delivered.
+    process::check_user_writable(buf_ptr, buf_len)?;
+    process::check_user_writable(out_ptr, (IPC_MAX_HANDLES * 4) as u64)?;
     let (index, msg) = match crate::ipc::receive_any(&members, timeout_ms)? {
         (index, Ready::Irq(n)) => return Ok(receive_any::irq(index, n)),
         (index, Ready::Message(msg)) => (index, msg),

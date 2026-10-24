@@ -21,7 +21,8 @@ pub fn handle(frame: &mut InterruptFrame) {
         // and the instruction runs again (performance audit, finding D).
         PAGE_FAULT if frame.cs & 3 == 3 && frame.error_code & PF_PRESENT == 0 => {
             use crate::user::process::{back_on_demand, OnDemand};
-            match back_on_demand(read_cr2()) {
+            let fetch = frame.error_code & PF_INSTRUCTION != 0;
+            match back_on_demand(read_cr2(), fetch) {
                 OnDemand::Backed => {}
                 OnDemand::OutOfMemory => {
                     serial_println!(

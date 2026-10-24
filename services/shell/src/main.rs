@@ -299,7 +299,7 @@ fn ps() {
 /// User stack high-water marks (`sysinfo::STACKS`, incident 0018) and the
 /// zero-fill memory backed on first touch (`sysinfo::ON_DEMAND`,
 /// performance audit 731c398, finding D), per live process, page granular.
-fn stacks() {
+fn memory_usage() {
     usage(
         abi::sysinfo::STACKS,
         b"user stacks (touched of size, page granular):\n",
@@ -477,7 +477,7 @@ fn diag(fs: &mut FsClient, net_client: &NetClient, mask: u64, rest: &[u8]) {
     cpus();
     entropy();
     ps();
-    stacks();
+    memory_usage();
     services(mask, fs);
     services_detail();
     if mask & SERVICE_NET != 0 {
