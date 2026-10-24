@@ -296,16 +296,31 @@ fn ps() {
     }
 }
 
-/// User stack high-water marks (`sysinfo::STACKS`, incident 0018): how
-/// much of its stack each live process has touched, page granular.
-fn stacks() {
+/// User stack high-water marks (`sysinfo::STACKS`, incident 0018) and the
+/// zero-fill memory backed on first touch (`sysinfo::ON_DEMAND`,
+/// performance audit 731c398, finding D), per live process, page granular.
+fn memory_usage() {
+    usage(
+        abi::sysinfo::STACKS,
+        b"user stacks (touched of size, page granular):\n",
+        b"diag: no access to stack use\n",
+    );
+    usage(
+        abi::sysinfo::ON_DEMAND,
+        b"user memory backed on first touch (backed of reserved: .bss, heap):\n",
+        b"diag: no access to on-demand memory\n",
+    );
+}
+
+/// One per-process table of `StackEntry` (`query`): used of size, KiB.
+fn usage(query: u64, title: &[u8], refused: &[u8]) {
     use abi::sysinfo::StackEntry;
     let mut buf = [0u8; StackEntry::LEN * 32];
-    let Ok(n) = sys::system_info(SYSTEM, abi::sysinfo::STACKS, &mut buf) else {
-        print(b"diag: no access to stack use\n");
+    let Ok(n) = sys::system_info(SYSTEM, query, &mut buf) else {
+        print(refused);
         return;
     };
-    print(b"user stacks (touched of size, page granular):\n");
+    print(title);
     for chunk in buf[..n].as_chunks::<{ StackEntry::LEN }>().0 {
         let Some(e) = StackEntry::decode(chunk) else {
             continue;
@@ -462,7 +477,7 @@ fn diag(fs: &mut FsClient, net_client: &NetClient, mask: u64, rest: &[u8]) {
     cpus();
     entropy();
     ps();
-    stacks();
+    memory_usage();
     services(mask, fs);
     services_detail();
     if mask & SERVICE_NET != 0 {

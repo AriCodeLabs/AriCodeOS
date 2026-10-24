@@ -1,0 +1,25 @@
+# Performance audit 731c398, finding D: the zero-fill pages of a program
+# (its `.bss`, the runtime's 256 KiB heap arena) are reserved at load and
+# backed on first touch. `lazy_probe` has the kernel write into a page of
+# a static buffer it never touched (a syscall's output: the kernel backs
+# the page before copying), uses 128 KiB of heap, and finds its own entry
+# in `sysinfo::ON_DEMAND` with less backed than reserved; `diag` lists the
+# table for every process.
+name = "memory.on_demand"
+description = "zero-fill pages are backed on first touch: syscalls into untouched buffers, heap use, diag table"
+level = "full"
+areas = ["memory", "user", "diag"]
+cmdline = "qemu_exit shell"
+timeout_secs = 90
+stdin = ["run lazy_probe", "diag", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: launch lazy_probe with manifest [system]",
+    "lazy probe: ",
+    "run: lazy_probe exited with 0",
+    "user memory backed on first touch (backed of reserved: .bss, heap):",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "USER OUT OF MEMORY"]

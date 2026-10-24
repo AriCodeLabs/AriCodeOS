@@ -416,7 +416,12 @@ latter briefly to add the region.
   tables (`copy_from_user`): a kernel pointer returns `Fault` and is never
   dereferenced.
 - An exception with `CS.RPL = 3` is not a panic: it is diagnosed over serial and
-  the process terminates (`Killed`). When the thread is reaped, the whole
+  the process terminates (`Killed`). A not-present page fault on a
+  reserved zero-fill page is not an exception to the program: the page is
+  backed and the instruction runs again; with less than 1 MiB of frames
+  left the process is killed for `out of memory`, and a system call that
+  would write into such a page returns `Limit` without consuming anything
+  (ADR 0049). When the thread is reaped, the whole
   user address space is freed, tables included.
 - Test programs in `user/testprogs` (a separate crate): binaries in
   assembly (`hello`, `kernel_read`, `kernel_write`, `privileged`,
@@ -425,7 +430,9 @@ latter briefly to add the region.
   xtask` builds them as static ELFs for `x86_64-unknown-none` with
   `sdk/rust/user.ld` (0x400000, R-X, R--, RW- segments) and packs them with
   `init` into `aricodeos/initrd.img`. `process::spawn` loads them with
-  `aricode-elf` and maps each segment with its permissions. `_start` receives in
+  `aricode-elf` and maps each segment with its permissions (the whole
+  zero-fill pages of a writable segment, `.bss` and the runtime's heap
+  arena, are only reserved and backed on first touch, ADR 0049). `_start` receives in
   `rdi` the argument from whoever created the process. They are launched with
   `test=user_<name>`.
 
@@ -1117,7 +1124,9 @@ latter briefly to add the region.
 - User stack high-water marks (incident 0018): `sysinfo::STACKS`, one
   `StackEntry` per live process (stack size, bytes touched from the top,
   page granular, from the Accessed bits of the stack's page table
-  entries); `diag` lists them after the processes.
+  entries); `diag` lists them after the processes, followed by the
+  zero-fill memory each process has reserved and backed so far
+  (`sysinfo::ON_DEMAND`, ADR 0049).
 
 ## Application sandbox (Phase 28)
 

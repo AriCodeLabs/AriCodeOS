@@ -1,0 +1,5 @@
+# Performance audit 731c398, finding D: reads its own on-demand memory
+# use (`run lazy_probe`).
+name = lazy_probe
+caps = system
+memory = 64K
