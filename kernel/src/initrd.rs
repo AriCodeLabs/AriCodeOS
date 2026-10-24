@@ -4,11 +4,16 @@
 //! the physical map. Contains `init` and the test programs.
 
 use crate::sync::IrqLock;
+use alloc::collections::BTreeMap;
 use aricode_initrd::Initrd;
 use boot_protocol::BootInfo;
 use log::{info, warn};
 
-static IMAGE: IrqLock<Option<&'static [u8]>> = IrqLock::new(None);
+/// The initrd's files by name, built once from the validated image: a
+/// lookup no longer parses and validates the whole image again
+/// (performance audit 731c398, finding F). The first entry of a name wins,
+/// as `Initrd::find` decides.
+static INDEX: IrqLock<Option<BTreeMap<&'static str, &'static [u8]>>> = IrqLock::new(None);
 /// SHA-256 prefix of the initrd as the kernel finds it on entry (before
 /// touching memory): if it differs from the one AriBoot reports, the image
 /// was corrupted before the kernel; if it differs from the one computed in
@@ -54,7 +59,11 @@ pub fn init(info: &BootInfo) {
                 now[2],
                 now[3]
             );
-            *IMAGE.lock() = Some(bytes);
+            let mut index = BTreeMap::new();
+            for entry in rd.entries().flatten() {
+                index.entry(entry.name).or_insert(entry.data);
+            }
+            *INDEX.lock() = Some(index);
         }
         Err(e) => warn!(
             "initrd: invalid image ({e:?}), ignored; sha256 on entry {:02x}{:02x}{:02x}{:02x}, now {:02x}{:02x}{:02x}{:02x}",
@@ -65,6 +74,5 @@ pub fn init(info: &BootInfo) {
 
 /// Contents of an initrd file by name.
 pub fn find(name: &str) -> Option<&'static [u8]> {
-    let image = (*IMAGE.lock())?;
-    Initrd::parse(image).ok()?.find(name)
+    INDEX.lock().as_ref()?.get(name).copied()
 }
