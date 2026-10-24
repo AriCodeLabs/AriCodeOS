@@ -61,6 +61,23 @@ pub fn call_handles(
     out: &mut [u8],
     handles_out: &mut [Handle],
 ) -> Result<(usize, usize), Error> {
+    let reply = send(service, request, extra, send_wait_ms)?;
+    let result = sys::ipc_receive(reply, out, handles_out, reply_wait_ms).map_err(reply_error);
+    let _ = sys::handle_close(reply);
+    result
+}
+
+/// The first half of a call: sends `request` with its own reply endpoint
+/// and the `extra` handles (consumed as in `call`) and returns the reply
+/// endpoint's receive side, without waiting. The caller receives the reply
+/// on it (several at once with `ipc_receive_any`), maps a failed receive
+/// with `reply_error`, and closes it.
+pub fn send(
+    service: Handle,
+    request: &[u8],
+    extra: &[Handle],
+    send_wait_ms: u64,
+) -> Result<Handle, Error> {
     let give_up = |e: Error| {
         for h in extra {
             let _ = sys::handle_close(*h);
@@ -74,17 +91,16 @@ pub fn call_handles(
         Ok(pair) => pair,
         Err(e) => return give_up(e),
     };
-    let result = (|| {
-        let mut handles = [Handle(0); MAX_EXTRA + 1];
-        handles[0] = reply_w;
-        handles[1..1 + extra.len()].copy_from_slice(extra);
-        let sent = sys::ipc_send(service, request, &handles[..1 + extra.len()], send_wait_ms);
-        if sent.is_err() {
-            for h in &handles[..1 + extra.len()] {
-                let _ = sys::handle_close(*h);
-            }
+    let mut handles = [Handle(0); MAX_EXTRA + 1];
+    handles[0] = reply_w;
+    handles[1..1 + extra.len()].copy_from_slice(extra);
+    let sent = sys::ipc_send(service, request, &handles[..1 + extra.len()], send_wait_ms);
+    if let Err(e) = sent {
+        for h in &handles[..1 + extra.len()] {
+            let _ = sys::handle_close(*h);
         }
-        sent.map_err(|e| match e {
+        let _ = sys::handle_close(reply);
+        return Err(match e {
             Error::PeerClosed => Error::ServiceGone,
             // `Revoked` also comes back when one of the extra handles was
             // revoked: only the service endpoint's own revocation means the
@@ -93,14 +109,18 @@ pub fn call_handles(
                 Error::ServiceGone
             }
             e => e,
-        })?;
-        sys::ipc_receive(reply, out, handles_out, reply_wait_ms).map_err(|e| match e {
-            Error::PeerClosed => Error::ReplyLost,
-            e => e,
-        })
-    })();
-    let _ = sys::handle_close(reply);
-    result
+        });
+    }
+    Ok(reply)
+}
+
+/// A failed receive of a reply, named: `PeerClosed` there means the
+/// server dropped the request (`ReplyLost`).
+pub fn reply_error(e: Error) -> Error {
+    match e {
+        Error::PeerClosed => Error::ReplyLost,
+        e => e,
+    }
 }
 
 /// Slack on top of the deadline a request asks for: what the service is

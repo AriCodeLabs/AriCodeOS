@@ -82,9 +82,44 @@ impl InputClient {
             op: Op::Read,
             timeout_ms,
         })?;
-        let n = r.count as usize;
+        Ok(Self::copy_events(&r, out, times))
+    }
+
+    /// Starts a read of up to `timeout_ms` without waiting for it: the
+    /// reply comes on the returned endpoint (receive side), which the
+    /// caller waits on, several devices at once with `ipc_receive_any`
+    /// (ADR 0044), hands to `read_reply` and closes. A client that keeps
+    /// one such read outstanding per device sleeps until a device has
+    /// events instead of polling each in turn.
+    pub fn start_read(&self, timeout_ms: u32) -> Result<Handle, InputError> {
+        let req = Request {
+            op: Op::Read,
+            timeout_ms,
+        };
+        rpc::send(self.service, &req.encode(), &[], Self::REPLY_GRACE_MS).map_err(InputError::Ipc)
+    }
+
+    /// The events of a started read's reply `msg`, as `read` gives them.
+    pub fn read_reply(
+        msg: &[u8],
+        out: &mut [Event; MAX_EVENTS],
+        times: &mut [u64; MAX_EVENTS],
+    ) -> Result<usize, InputError> {
+        let reply = Reply::decode(msg).ok_or(InputError::Ipc(Error::Invalid))?;
+        match reply.status {
+            Status::Ok => Ok(Self::copy_events(&reply, out, times)),
+            s => Err(InputError::Status(s)),
+        }
+    }
+
+    fn copy_events(
+        r: &Reply,
+        out: &mut [Event; MAX_EVENTS],
+        times: &mut [u64; MAX_EVENTS],
+    ) -> usize {
+        let n = (r.count as usize).min(MAX_EVENTS);
         out[..n].copy_from_slice(&r.events[..n]);
         times[..n].copy_from_slice(&r.times[..n]);
-        Ok(n)
+        n
     }
 }
