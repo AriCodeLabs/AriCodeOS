@@ -303,12 +303,34 @@ ssh ari@192.168.1.24 diag       # a single command
 The first connection asks to confirm the host key: compare it with the
 `SHA256:` fingerprint printed by `usb-image` (the key is generated on this
 machine and kept in `build/ssh_host_ed25519_key`) and shown on the laptop's
-screen. One connection at a time; output of programs started with `run`
-still appears on the laptop's screen.
+screen. One connection at a time; programs started with `run` from an SSH
+session write to the session (ADR 0047).
 
 Without `--authorized-key` the image has no `authorized_keys` and sshd does
 not listen: no port is open. Refused keys are logged on the laptop with the
 peer's address.
+
+## The public source and its local mirror (ADR 0048)
+
+Released machines update from the project's GitHub releases,
+`https://github.com/AriCodeLabs/AriCodeOS/releases/latest/download/`: a
+release stick is written with `--public-source`, which registers it
+(`update remove` takes it out again). Every download there takes two
+redirects, which the updater follows over TLS.
+
+To try that whole path without publishing anything, `serve-update` also
+serves its publication under the same path, with GitHub's redirects
+(`latest` to a release, the release to an asset with a long signed query):
+
+```text
+update add 192.168.1.16:8765/AriCodeLabs/AriCodeOS/releases/latest/download/
+update
+upgrade
+```
+
+The plain source (`update add 192.168.1.16:8765`) and the development
+channel keep working beside it, so day-to-day iteration never depends on
+GitHub or on permission to publish there.
 
 ## Updating without the USB stick (ADR 0027, ADR 0029)
 

@@ -6,7 +6,8 @@
 //! cargo xtask build [--debug]                 builds AriBoot and AriKernel
 //! cargo xtask image [--debug]                 build + assembles build/esp/
 //! cargo xtask run   [--debug] [--cmdline S] [--cpus N] [--usb-image] [--usb-hid]   image + interactive QEMU
-//! cargo xtask usb-image [--cmdline S] [--authorized-key KEY.pub] [--update-source URL] [--dev-source URL] [--signing-key DIR]  GPT image for a USB stick at build/aricodeos-usb.img
+//! cargo xtask usb-image [--cmdline S] [--authorized-key KEY.pub] [--public-source] [--update-source URL] [--dev-source URL] [--signing-key DIR]  GPT image for a USB stick at build/aricodeos-usb.img
+//!                                             (--public-source: the project's GitHub releases, ADR 0048)
 //!                                             (--dev-source: the machine opts in to the development channel, ADR 0045)
 //! cargo xtask publish-update [--version N | --no-system] [--app DIR:VERSION]... [--no-legacy-manifest] [--signing-key DIR]
 //!                                             update source in build/update/: signed image, packages, index + index.sig, ADR 0027 manifest.txt (ADR 0029)
@@ -120,6 +121,7 @@ fn main() -> ExitCode {
             release,
             cli.value("--cmdline").unwrap_or("shell"),
             cli.value("--authorized-key").map(Path::new),
+            cli.flag("--public-source"),
             cli.value("--update-source"),
             cli.value("--dev-source"),
         ))

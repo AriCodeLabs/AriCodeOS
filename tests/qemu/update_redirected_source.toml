@@ -1,9 +1,10 @@
-# ADR 0048: HTTP redirects. The source is added as /moved/: the host answers
-# 302 to /hop/ (with a 9,243-byte header line, as github.com does) and
-# /hop/ answers 307 to the relative ../update/ with a 900-byte query (a
-# signed asset URL's length; the request must hold it), so every file of the source
-# (index, signature, image) takes two redirects, as a GitHub release
-# download does. `update` and `upgrade` work through them; the redirects'
+# ADR 0048: the public source's path and redirects, from the local mirror
+# that `serve-update` also serves. The source is added at the GitHub
+# release path (/AriCodeLabs/AriCodeOS/releases/latest/download/): `latest`
+# answers 302 to the release (with a 9,243-byte header line, as github.com
+# does), the release answers 302 to the asset with a 900-byte signed query
+# (the request must hold it), so every file of the source (index,
+# signature, image) takes the two redirects a GitHub download takes. `update` and `upgrade` work through them; the redirects'
 # bodies never reach the download. The shell's `http` shows the limits: a
 # redirect loop stops after five, and a redirect to ftp:// is refused.
 name = "update.redirected_source"
@@ -20,7 +21,7 @@ source = "none"
 [[boots]]
 cmdline = "qemu_exit shell"
 stdin = [
-    "update add 10.0.2.2:{update_port}/moved/",
+    "update add 10.0.2.2:{update_port}/AriCodeLabs/AriCodeOS/releases/latest/download/",
     "update",
     "upgrade",
     "http http://10.0.2.2:{update_port}/redirect-loop",
@@ -30,7 +31,7 @@ stdin = [
 [boots.expect]
 exit = 33
 serial_contains = [
-    "updater: source 1 http://10.0.2.2:{update_port}/moved/: index verified (serial ",
+    "updater: source 1 http://10.0.2.2:{update_port}/AriCodeLabs/AriCodeOS/releases/latest/download/: index verified (serial ",
     "updater: system: installed 1, source 1 offers 2: upgrade available",
     "updater: downloading aricodeos-2.img (",
     "updater: system image version 2 verified (signature and SHA-256)",

@@ -420,12 +420,10 @@ const EARLY_HINTS_PAUSE: Duration = Duration::from_secs(5);
 /// never a final response: the server of incident 0009, which the
 /// client's budget must cut), `/early-hints-flood` (twenty `103` at once,
 /// then a 200: the interim-response limit), `/update/NAME` from `update`
-/// (a scenario's own update source; 404 without one), the redirects of
-/// ADR 0048 (`/moved/NAME` answers 302 to `/hop/NAME` with a 9,243-byte
-/// header line as github.com sends, `/hop/NAME` answers 307 to the
-/// relative `../update/NAME` with a 900-byte signed query, as GitHub's
-/// asset URLs; `/redirect-loop` redirects to itself and
-/// `/to-ftp` to an `ftp://` URL) and 404 for everything else.
+/// (a scenario's own update source; 404 without one), the same source
+/// under the public source's URL shape ([`mirror_route`], ADR 0048), the
+/// redirect limits (`/redirect-loop` redirects to itself and `/to-ftp` to
+/// an `ftp://` URL) and 404 for everything else.
 fn http_serve(mut stream: std::net::TcpStream, update: Option<&Path>) {
     use std::io::Write;
     let mut buf = [0u8; 2048];
@@ -470,17 +468,14 @@ fn http_serve(mut stream: std::net::TcpStream, update: Option<&Path>) {
             r.extend(b"Content-Length: 15\r\nConnection: close\r\n\r\nbig headers ok\n");
             r
         }
-        // A source reached through two redirects, GitHub's shape (ADR 0048).
-        p if p.starts_with("/moved/") => redirect(
-            "302 Found",
-            &format!("/hop/{}", &p["/moved/".len()..]),
-            9243,
-        ),
-        p if p.starts_with("/hop/") => redirect(
-            "307 Temporary Redirect",
-            &format!("../update/{}?sig={}", &p["/hop/".len()..], "s".repeat(900)),
-            0,
-        ),
+        // The scenario's source under the public source's URL shape, with
+        // GitHub's redirects (ADR 0048), as `serve-update` serves it.
+        p if update.is_some() && mirror_route(p).is_some() => {
+            match mirror_route(p).expect("checked") {
+                MirrorRoute::Redirect(r) => r,
+                MirrorRoute::Asset(name) => file_response(update.expect("checked"), name),
+            }
+        }
         "/redirect-loop" => redirect("302 Found", "/redirect-loop", 0),
         "/to-ftp" => redirect("301 Moved Permanently", "ftp://10.0.2.2/index", 0),
         // The scenario's update channel (ADR 0027), never the real one.
@@ -496,6 +491,46 @@ fn http_serve(mut stream: std::net::TcpStream, update: Option<&Path>) {
     };
     let _ = stream.write_all(&response);
     let _ = stream.flush();
+}
+
+/// The public source's path ([`crate::image::PUBLIC_SOURCE`]), served
+/// locally by [`mirror_route`].
+pub const MIRROR_LATEST: &str = "/AriCodeLabs/AriCodeOS/releases/latest/download/";
+/// The release a local mirror's `latest` points to.
+const MIRROR_TAG: &str = "/AriCodeLabs/AriCodeOS/releases/download/local/";
+/// The local mirror's stand-in for GitHub's asset host.
+const MIRROR_ASSETS: &str = "/release-assets/";
+
+/// What the local mirror answers for a path.
+enum MirrorRoute<'a> {
+    Redirect(Vec<u8>),
+    /// A published file, by name.
+    Asset(&'a str),
+}
+
+/// The local mirror of the public source (ADR 0048): a publication served
+/// at [`MIRROR_LATEST`] with GitHub's two redirects, so a machine or a
+/// scenario follows the very path it follows to GitHub without anything
+/// published there. `latest` answers 302 to the release, with a
+/// 9,243-byte header line as github.com sends; the release answers 302 to
+/// the asset with a 900-byte signed query, as GitHub's asset URLs; the
+/// asset is the file. `None` for other paths.
+fn mirror_route(path: &str) -> Option<MirrorRoute<'_>> {
+    if let Some(name) = path.strip_prefix(MIRROR_LATEST) {
+        return Some(MirrorRoute::Redirect(redirect(
+            "302 Found",
+            &format!("{MIRROR_TAG}{name}"),
+            9243,
+        )));
+    }
+    if let Some(name) = path.strip_prefix(MIRROR_TAG) {
+        return Some(MirrorRoute::Redirect(redirect(
+            "302 Found",
+            &format!("{MIRROR_ASSETS}{name}?sig={}", "s".repeat(900)),
+            0,
+        )));
+    }
+    path.strip_prefix(MIRROR_ASSETS).map(MirrorRoute::Asset)
 }
 
 /// A redirect to `location` with a body that must not reach the client's
@@ -550,7 +585,8 @@ pub fn serve_update(dir: &Path, port: u16) -> Result {
     let listener = std::net::TcpListener::bind(("0.0.0.0", port))
         .map_err(|e| format!("cannot listen on port {port}: {e}"))?;
     println!(
-        "[xtask] serving {} on port {port}; on the machine: update http://<this host>:{port}/",
+        "[xtask] serving {} on port {port}; on the machine: update add http://<this host>:{port}/ \
+         (or http://<this host>:{port}{MIRROR_LATEST} for the public source's path and redirects, ADR 0048)",
         dir.display()
     );
     let dir = dir.to_path_buf();
@@ -581,9 +617,14 @@ fn serve_update_connection(mut stream: std::net::TcpStream, dir: &Path) {
         }
     }
     let request = String::from_utf8_lossy(&buf[..have]);
-    let path = request.split(' ').nth(1).unwrap_or("/");
+    let target = request.split(' ').nth(1).unwrap_or("/");
+    let path = target.split('?').next().unwrap_or("/");
     let name = path.trim_start_matches('/').to_string();
-    let response = file_response(dir, &name);
+    let response = match mirror_route(path) {
+        Some(MirrorRoute::Redirect(r)) => r,
+        Some(MirrorRoute::Asset(asset)) => file_response(dir, asset),
+        None => file_response(dir, &name),
+    };
     let outcome = match stream.write_all(&response).and_then(|()| stream.flush()) {
         Ok(()) => format!("{} bytes sent", response.len()),
         Err(e) => format!("failed: {e}"),
@@ -1637,6 +1678,26 @@ mod tests {
         assert!(get(b.port(), "/update/index").starts_with("HTTP/1.1 404"));
         assert!(get(a.port(), "/hola").ends_with("Hola desde el host\n"));
         assert!(get(a.port(), "/update/../index").starts_with("HTTP/1.1 404"));
+        // The public source's shape (ADR 0048): two redirects, then the file.
+        let latest = get(a.port(), &format!("{}index", super::MIRROR_LATEST));
+        assert!(latest.starts_with("HTTP/1.1 302"), "{latest}");
+        let tag = location(&latest);
+        assert_eq!(tag, format!("{}index", super::MIRROR_TAG));
+        let asset = get(a.port(), &tag);
+        let file = location(&asset);
+        assert!(file.starts_with("/release-assets/index?sig=") && file.len() > 900);
+        assert!(get(a.port(), &file).ends_with("serial = 7\n"));
+        // Without a channel the redirects lead to nothing.
+        assert!(get(b.port(), &file).starts_with("HTTP/1.1 404"));
+    }
+
+    /// The `Location` of a response.
+    fn location(response: &str) -> String {
+        response
+            .lines()
+            .find_map(|l| l.strip_prefix("Location: "))
+            .expect("a Location header")
+            .to_string()
     }
 
     /// Ethernet frame from `src` with ethertype `kind` and `payload`.

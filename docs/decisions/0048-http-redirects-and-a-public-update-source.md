@@ -1,8 +1,9 @@
 # ADR 0048: HTTP redirects, and a public update source
 
 - **Date:** 2026-10-24
-- **Status:** Accepted for the HTTP client (decisions 1 and 2); proposed,
-  waiting for the owner, for where the public source lives (decision 3).
+- **Status:** Accepted. Decision 3 (where the public source lives) was
+  chosen by the owner on 2026-10-24: GitHub Releases, with a local route
+  kept for fast tests that need no publishing.
   Extends ADR 0026 (HTTPS) and ADR 0029 (update sources).
 
 ## Context
@@ -58,7 +59,7 @@ new Let's Encrypt `Root YR`).
    heap (the stack variant keeps 8 KiB), and accepts twice its buffer in
    header bytes per fetch as before (incident 0009).
 
-3. **The public source (proposed).** A stable release publishes its update
+3. **The public source: GitHub Releases.** A stable release publishes its update
    source, the output of `cargo xtask publish-update --version N
    --signing-key ~/.config/aricodeos/signing-key` (`index`, `index.sig`,
    `aricodeos-N.img`, signed with the release key), and machines register
@@ -70,10 +71,22 @@ new Let's Encrypt `Root YR`).
      upload`, which the owner approves per release);
    - the owner's server: a directory such as
      `https://www.aricodeos.org/updates/stable/`, updated by the owner.
-   Release sticks would then carry that URL (`usb-image --update-source`),
-   so a fresh machine finds updates without configuration; the owner can
-   still remove it (`update remove`), and LAN or development sources keep
-   working beside it.
+   The owner chose GitHub Releases: `PUBLIC_SOURCE` in xtask, attached
+   with `gh release upload` as part of publishing a version
+   (docs/WORKFLOW.md). Release sticks carry it (`usb-image
+   --public-source`), so a fresh machine finds updates without
+   configuration; the owner can still remove it (`update remove`).
+
+4. **A local route to the same path.** Day-to-day work must not depend on
+   GitHub or on permission to publish there (owner, 2026-10-24).
+   `serve-update` serves its publication both at its root, as before, and
+   under the public source's path with GitHub's two redirects (`latest`
+   to a release with a 9,243-byte header line, the release to an asset
+   with a 900-byte signed query): `update add
+   HOST:PORT/AriCodeLabs/AriCodeOS/releases/latest/download/` on a machine
+   follows exactly what it would follow to GitHub. The scenario server
+   uses the same routes, so the automated test and the manual one check
+   one thing.
 
 ## Consequences
 
@@ -107,9 +120,12 @@ new Let's Encrypt `Root YR`).
   16 KiB buffer), location resolution with dot segments, the policy
   (GitHub's two hops, relative hops, the downgrade refusal, the hop limit,
   bad targets) over scripted exchanges.
-- `update.redirected_source` (full): every file of a source takes two
-  redirects (one with a 9,243-byte header line, one relative); `update`
-  and `upgrade` work through them, a redirect body never shows, and the
-  shell's `http` stops a redirect loop after five and refuses `ftp://`.
+- `update.redirected_source` (full): a source added at the public path of
+  the local mirror; every file takes GitHub's two redirects (a 9,243-byte
+  header line, a 900-byte query); `update` and `upgrade` work through
+  them, a redirect body never shows, and the shell's `http` stops a
+  redirect loop after five and refuses `ftp://`.
+- Host: the mirror's routes walked end to end; the public URL is a valid
+  source as written.
 - On the reference laptop: `http` on a GitHub release asset follows both
   redirects over TLS to the asset host.

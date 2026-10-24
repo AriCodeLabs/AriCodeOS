@@ -46,6 +46,22 @@ git tag -a v0.0.2 -m "AriCodeOS 0.0.2: memory and logging"
 git checkout develop
 ```
 
+A release also feeds the public update source (ADR 0048): from the tagged
+commit, publish the release's system version with the release key and
+attach the three files to the GitHub release, beside the USB image (the
+owner approves each upload):
+
+```bash
+cargo xtask publish-update --version N --no-legacy-manifest \
+    --signing-key ~/.config/aricodeos/signing-key
+gh release upload vX.Y.Z build/update/index build/update/index.sig build/update/aricodeos-N.img
+cargo xtask usb-image --public-source --signing-key ~/.config/aricodeos/signing-key
+```
+
+Before uploading, the same files can be tried locally through the mirror
+of the public path (`serve-update`, docs/hardware.md, "The public source
+and its local mirror").
+
 ## Test levels per branch
 
 The tests live in the repository ([tests/README.md](../tests/README.md)) and have three levels
