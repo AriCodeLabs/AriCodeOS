@@ -3912,6 +3912,53 @@ hubs, split transactions and 64-bit addressing only verifiable on
 hardware; the driver-death path has not run on the laptop (no driver
 died there).
 
+## 94.14 AriCodeOS 0.14
+
+**Status: completed (2026-10-24), tag `v0.14.0`.** The version that took
+the system from a LAN to the public internet: updates from the project's
+GitHub releases, a development channel that puts a build on the reference
+laptop in minutes, and SSH sessions that see what their programs print.
+Ten ADRs (0039 to 0048), ten incidents (0018 to 0027), each fix reproduced
+before it was changed and every kernel, IPC, network and update change
+audited by an independent reviewer.
+
+- Entropy and seeds: `diag` says what seeded the kernel generator (ADR
+  0039), and AriBoot carries a seed across boots in `ARIBOOT`, so a machine
+  without `rdrand` (the reference laptop) is strongly seeded from its
+  second boot (ADR 0043);
+- one wait for IPC, interrupt lines and a deadline (`ipc_receive_any`, ABI
+  6; ADR 0044): the network info call went from about 10 ms to 70 µs, and
+  the xHCI driver lost its 10 ms poll (incident 0024: an event read before
+  its cycle bit);
+- the compositor repaints only damaged regions at a 16 ms cadence (ADR
+  0046);
+- updates: a development channel with its own key, build numbers and
+  commits, `update rollback` and a stable floor (ADR 0045); images on disk
+  verified piece by piece up to the slot size, `apply` verifying the copy
+  in the slot (incident 0021); one package limit for the whole system
+  (incident 0026); redirects and 16 KiB headers over HTTPS (ADR 0048) and
+  GitHub Releases as the public source, with a local mirror of its path
+  for tests that need no publishing;
+- SSH: programs run from a session write to it through a session console
+  (ADR 0047, ABI 7), with flow control in sshd;
+- network: a full TCP table recycles the TIME-WAIT slot that ends soonest
+  and FIN-WAIT-2 gives up a silent peer after 30 s (incident 0027);
+- testing: a parallel test runner with per-run ports, a CI container and a
+  host-wide suite lock (ADR 0040), the full suite down from about an hour
+  to about twelve minutes for both passes; a thermal guard and container
+  limits protect the host;
+- verified on the laptop: the carried seed, the wait set, every dev build
+  through the dev channel, `run bench` over SSH, installed images verified
+  piece by piece (7 MiB images in QEMU),
+  and downloads from GitHub through both redirects over TLS.
+
+Proposed, awaiting the owner: agents outside the trusted base (ADR 0041),
+the driver licence and trusted vendors (ADR 0042). Open: system image
+downloads over 6 MiB (incident 0021), apps over 32 KiB need larger AriFS
+files (incident 0026), one SSH command that came back empty and was never
+reproduced (incident 0025), EHCI hubs and split transactions only
+verifiable on hardware.
+
 ---
 
 # 95. Real hardware: the right moment
