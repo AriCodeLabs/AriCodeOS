@@ -25,6 +25,7 @@
 //!     --jobs N                                N QEMU scenarios at a time (default: CPUs / 2, CPUs / 4 with
 //!                                             --cpus > 1, capped by memory; 1 = one after another)
 //!     --list                                  lists the scenarios and exits
+//! cargo xtask perf [--cpus N] [--update-baseline]  perf.bench alone, compared with tests/perf/baseline-Ncpu.txt (finding G)
 //! cargo xtask check                           fmt --check + clippy -D warnings + stack-check
 //! cargo xtask stack-check                     stack budget of every initrd program, release and dev (incident 0018)
 //! cargo xtask app-pack DIR [--version N] [--debug]   builds, packs and signs an external app (DIR/Cargo.toml + NAME.manifest) into build/pkgs/
@@ -38,6 +39,7 @@ mod fscat;
 mod image;
 mod keys;
 mod parallel;
+mod perf;
 mod ports;
 mod qemu;
 mod scenario;
@@ -132,6 +134,7 @@ fn main() -> ExitCode {
                 )
             }),
         "test" => test::run(&cli, release),
+        "perf" => perf::run(&cli, release),
         "check" => build::check(),
         "stack-check" => stack::check(),
         "app-pack" => match cli.positional(1) {

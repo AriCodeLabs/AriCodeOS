@@ -235,10 +235,10 @@ fn prebuild_packages(selected: &[&Scenario]) -> Result {
 /// What one scenario run leaves for the summary: the lines to print (in
 /// scenario order, whatever order the runs finished in), its QEMU time and
 /// whether it passed.
-struct Outcome {
-    report: String,
+pub struct Outcome {
+    pub report: String,
     elapsed: Duration,
-    ok: bool,
+    pub ok: bool,
 }
 
 /// One boot to run: the scenario's only boot, or each one in `[[boots]]`,
@@ -250,7 +250,7 @@ struct BootRun {
     expect: scenario::Expect,
 }
 
-fn run_scenario(
+pub fn run_scenario(
     base: &std::path::Path,
     s: &Scenario,
     cpus_override: Option<u32>,
