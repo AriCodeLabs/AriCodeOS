@@ -1449,6 +1449,12 @@ pub fn run_headless(
     let mut bytes = captured.lock().expect("capture").clone();
     let hotplug_result = hotplug_result.or_else(|| {
         options.hotplug.as_ref().map(|h| {
+            if hotplug_seen.is_some() {
+                return format!(
+                    "[host] hotplug: marker '{}' seen, but QEMU ended before the delay; nothing added",
+                    h.marker
+                );
+            }
             format!(
                 "[host] hotplug: marker '{}' never seen; nothing added",
                 h.marker

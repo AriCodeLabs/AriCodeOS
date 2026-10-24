@@ -829,6 +829,28 @@ pub mod hub {
 }
 
 /// `SET_ADDRESS` (USB 2.0 9.4.6).
+/// How long a polling driver may wait before it looks at the schedules
+/// and ports again (ms): `busy` (devices or work that need watching)
+/// gives `poll_ms`; otherwise `idle_ms`, never past the next hub poll
+/// (`next_hub_poll`) or a client read's deadline, and at least 1 ms.
+pub fn poll_wait(
+    now: u64,
+    busy: bool,
+    poll_ms: u64,
+    idle_ms: u64,
+    next_hub_poll: u64,
+    read_deadline: Option<u64>,
+) -> u64 {
+    if busy {
+        return poll_ms;
+    }
+    let mut wait = idle_ms.min(next_hub_poll.saturating_sub(now));
+    if let Some(deadline) = read_deadline {
+        wait = wait.min(deadline.saturating_sub(now));
+    }
+    wait.clamp(1, idle_ms.max(1))
+}
+
 pub fn set_address(address: u8) -> SetupPacket {
     SetupPacket {
         request_type: 0x00,
@@ -842,6 +864,20 @@ pub fn set_address(address: u8) -> SetupPacket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_idle_driver_waits_long_but_never_past_its_deadlines() {
+        // Busy: the short period, whatever the deadlines.
+        assert_eq!(poll_wait(1000, true, 8, 250, 1001, Some(1001)), 8);
+        // Idle: the long period...
+        assert_eq!(poll_wait(1000, false, 8, 250, 5000, None), 250);
+        // ...cut by the next hub poll or a read's deadline...
+        assert_eq!(poll_wait(1000, false, 8, 250, 1100, None), 100);
+        assert_eq!(poll_wait(1000, false, 8, 250, 5000, Some(1020)), 20);
+        // ...and at least 1 ms when one is already due.
+        assert_eq!(poll_wait(1000, false, 8, 250, 900, None), 1);
+        assert_eq!(poll_wait(1000, false, 8, 250, 5000, Some(1000)), 1);
+    }
 
     #[test]
     fn parameters_and_registers() {

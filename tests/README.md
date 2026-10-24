@@ -152,7 +152,8 @@ marker = "AriInit: boot services completed"
 delay_ms = 3000                 # after the marker (default 0): e.g. a driver gone idle first
 driver = "usb-kbd"              # QEMU device, bus and id: letters, digits, '.', '_' and '-' only
 bus = "ehci.0"
-id = "hotkbd"                   # result in "[host] hotplug: ..."
+id = "hotkbd"                   # result in "[host] hotplug: ..."; with [[boots]], on every boot (each is a new QEMU).
+                                # Not with [host_input]: QEMU's QMP socket serves one client at a time
 
 [host_input]                    # optional: input injected through QMP when marker is seen
 marker = "INPUT_READY"

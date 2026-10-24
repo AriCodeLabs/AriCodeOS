@@ -1453,9 +1453,11 @@ services/usb-ehci              usb_ehci: EHCI controller, root ports and USB 2.0
 - init launches `usb_ehci` for each `0c.03` function with interface `0x20`,
   after every xHCI, with the same contract and extras as usbd. Intel EHCIs
   have no MSI: the driver polls and never uses an IRQ, every 8 ms while
-  devices or work need watching and every 250 ms when only its ports can
-  change (scenario `usb.ehci_hotplug`: a keyboard plugged into an idle
-  controller is found and enumerated).
+  the boot enumeration runs, HID devices are served or a connection is
+  debounced, and otherwise every 250 ms (`aricode_ehci::poll_wait`) or at
+  a client read's deadline, whichever comes first: the console bridge's
+  20 ms reads still wake it (scenario `usb.ehci_hotplug`: a keyboard
+  plugged into a controller with nothing on it is found and enumerated).
 - Bring-up per EHCI 4.1 and 5.1 (USBLEGSUP handoff, HCRESET, frame list,
   async head, `CONFIGFLAG`); enumeration of root ports and hubs (the rate
   matching hub of Intel 6/7 series), split transactions through the hub's

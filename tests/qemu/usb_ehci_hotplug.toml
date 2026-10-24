@@ -1,11 +1,14 @@
-# An idle EHCI notices a device plugged in later. The controller starts
-# empty (`usb_legacy_controller`), so once the boot enumeration is over the
-# driver waits up to `IDLE_POLL_MS` (250 ms) between looks at its ports
-# instead of 8 ms (nothing to watch). Three seconds after the boot
-# services completed, the host plugs a USB keyboard into it over QMP
-# (`[host_hotplug]`): the driver must see the connection, debounce it,
-# enumerate the keyboard and serve it, as on a real machine where a
-# keyboard is plugged into an idle port.
+# An EHCI with nothing to watch notices a device plugged in later. The
+# controller starts empty (`usb_legacy_controller`), so once the boot
+# enumeration is over the driver is not busy: it waits up to
+# `IDLE_POLL_MS` (250 ms) between looks at its ports, cut short by any
+# client read's deadline (here the console bridge's 20 ms reads, so this
+# run does not time the 250 ms itself: `aricode_ehci::poll_wait` is
+# host-tested for that). Three seconds after the boot services completed,
+# the host plugs a USB keyboard into it over QMP (`[host_hotplug]`): the
+# driver must see the connection, debounce it, enumerate the keyboard and
+# serve it, as on a real machine where a keyboard is plugged into a port
+# nobody was using.
 name = "usb.ehci_hotplug"
 description = "EHCI driver: a keyboard hot-plugged while the controller is idle is detected and enumerated"
 level = "full"

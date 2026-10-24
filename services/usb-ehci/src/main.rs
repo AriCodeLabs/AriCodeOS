@@ -31,8 +31,8 @@ use alloc::boxed::Box;
 
 use aricode_ehci::{
     cap, decode_token, hub, interrupt_schedule, legacy, link, op, overlay_token, periodic_entry,
-    portsc, set_address, split_transfer, token, tt_for, Outcome, Params, Pid, Qtd, QueueHead,
-    Speed, TransferError, Tt, FRAME_LIST_LEN, HCI_VERSION_1_0,
+    poll_wait, portsc, set_address, split_transfer, token, tt_for, Outcome, Params, Pid, Qtd,
+    QueueHead, Speed, TransferError, Tt, FRAME_LIST_LEN, HCI_VERSION_1_0,
 };
 use aricode_input::{Event, HidBootKeyboard, HidBootMouse, MAX_REPORT_EVENTS};
 use aricode_proto::block::{
@@ -63,17 +63,18 @@ const ARENA_BYTES: u64 = 32 * 1024;
 const CONTROL_BUFFER: u16 = 512;
 const RING: usize = 128;
 
-/// Main loop period while something needs watching (HID devices, an
-/// enumeration, a connection being debounced, a pending read or info
-/// request): how long the driver waits for a request before it looks at
-/// the schedules again.
+/// Main loop period while something needs watching (the boot
+/// enumeration, HID devices, a connection being debounced): how long the
+/// driver waits for a request before it looks at the schedules again.
 const POLL_MS: u64 = 8;
 /// The period when nothing does: only the ports can change. USB gives a
 /// new connection 100 ms of debounce and a reset before it is usable
 /// (USB 2.0 7.1.7.3), so noticing it up to 250 ms later costs a device
-/// nothing, while an idle controller stops waking 125 times a second
+/// nothing, while an idle controller stops waking every 8 ms on its own
 /// (the driver polls: Intel EHCIs have no MSI, and a legacy pin needs ACPI
-/// `_PRT`, which the kernel does not evaluate).
+/// `_PRT`, which the kernel does not evaluate). A client that reads with a
+/// short timeout still wakes it: the console bridge reads every input
+/// service in turn with 20 ms reads (ADR 0044, finding B's input clients).
 const IDLE_POLL_MS: u64 = 250;
 /// While a transfer runs, the first milliseconds are polled with yields,
 /// then with 1 ms sleeps.
@@ -940,29 +941,27 @@ impl Ehci {
         self.boot_done || self.now() >= self.started + INFO_WAIT_MS
     }
 
-    /// Holds an Info request until `info_ready` (answered at once if the
-    /// holding room is full).
     /// How long the main loop may wait for a request before the schedules
-    /// and ports need looking at again: `POLL_MS` while something needs
-    /// watching, else `IDLE_POLL_MS`, never past the next hub poll or the
-    /// deadline of a read the client is waiting on (`read_deadline`).
+    /// and ports need looking at again (`aricode_ehci::poll_wait`):
+    /// `POLL_MS` while the boot enumeration runs, HID devices are served or
+    /// a connection is being debounced, else `IDLE_POLL_MS`, never past the
+    /// next hub poll or the deadline of a read the client is waiting on.
     fn next_wait(&self, read_deadline: Option<u64>) -> u64 {
-        let watching = !self.boot_done
-            || self.held_len > 0
-            || self.events.len > 0
+        let busy = !self.boot_done
             || self.hids.iter().any(Option::is_some)
             || self.pending.iter().any(Option::is_some);
-        if watching {
-            return POLL_MS;
-        }
-        let now = self.now();
-        let mut wait = IDLE_POLL_MS.min(self.next_hub_poll.saturating_sub(now));
-        if let Some(deadline) = read_deadline {
-            wait = wait.min(deadline.saturating_sub(now));
-        }
-        wait.clamp(1, IDLE_POLL_MS)
+        poll_wait(
+            self.now(),
+            busy,
+            POLL_MS,
+            IDLE_POLL_MS,
+            self.next_hub_poll,
+            read_deadline,
+        )
     }
 
+    /// Holds an Info request until `info_ready` (answered at once if the
+    /// holding room is full).
     fn hold_info(&mut self, reply_to: Handle) {
         if self.info_ready() || self.held_len == self.held_info.len() {
             answer_info(self, reply_to);

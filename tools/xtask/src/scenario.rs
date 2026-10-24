@@ -610,6 +610,14 @@ pub fn load_from(dir: &Path) -> Result<Vec<Scenario>> {
             }
             if let Some(h) = &s.host_hotplug {
                 h.check().map_err(|e| format!("{}: {e}", path.display()))?;
+                // QEMU's QMP socket serves one client at a time, and the
+                // input probe holds its connection through all its keys.
+                if s.host_input.is_some() {
+                    return Err(format!(
+                        "{}: [host_hotplug] and [host_input] share QEMU's single QMP connection: use one",
+                        path.display()
+                    ));
+                }
             }
             s.file = path;
             out.push(s);
