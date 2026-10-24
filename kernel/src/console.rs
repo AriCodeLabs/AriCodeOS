@@ -42,6 +42,18 @@ pub fn init_framebuffer(info: boot_protocol::FramebufferInfo) -> bool {
     }
 }
 
+/// Lends the screen to a user driver under test (`test=drivers`): the
+/// console stops drawing, so its next scroll does not repaint what the
+/// driver painted, until `take_back_framebuffer`. `None` without one.
+pub fn lend_framebuffer() -> Option<MmioSurface> {
+    FB.lock().detach()
+}
+
+/// Takes the lent screen back and redraws the console's text on it.
+pub fn take_back_framebuffer(surface: MmioSurface) {
+    FB.lock().reattach(surface);
+}
+
 /// Installs the global logger with the given maximum level.
 pub fn init_logger(level: LevelFilter) {
     // set_logger only fails if one was already set: keep the existing one then.

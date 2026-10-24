@@ -1,0 +1,66 @@
+# Incident 0018: the network driver's deepest direct call path must fit its
+# 64 KiB user stack. `tcp_orphan` (manifest `caps = net`) fills netd's 8-slot
+# TCP table with 7 connections to the host echo server and one toward
+# 10.0.2.77, an address on the subnet QEMU answers no ARP for (its SYN waits
+# parked for a MAC), has its ninth connect refused after a sweep, and exits
+# without closing anything. The shell's `http`, typed at the next prompt and
+# well inside the 1 s sweep period that refusal restarted, finds the table
+# full: netd sweeps from inside the request (`serve` -> `tcp_room` ->
+# `sweep` -> `probe`), finds the orphan gone, resets its connections, and the
+# reset toward 10.0.2.77 is parked and announced with an ARP request
+# (`send_ipv4` -> `send_arp_request` -> `send_eth` -> the NIC), the deepest
+# chain `cargo xtask stack-check` measures. Before the fix a dev build
+# (`cargo xtask test --debug`) killed virtio-net here with `USER STACK
+# OVERFLOW`; the release build had about 12 KiB left, indirect calls not
+# counted. netd names the sweep that found the orphan gone: `reclaimed
+# (sweep for a full tcp table)` is the one inside the request, the deep
+# path (`periodic sweep` would be the shallow one, from the service loop);
+# `net arp defer full` absent shows the reset got a parking slot, so the
+# ARP request went out. Serial (ADR 0040, incident 0019): the shell's
+# request must reach netd within the 1 s the orphan's refused connect
+# leaves before the next periodic sweep, and other guests running at the
+# same time slow this one in wall-clock time, which is the time netd
+# counts.
+# `diag` then lists the user stack high-water marks (`sysinfo::STACKS`, from
+# the Accessed bits of the stack pages): virtio-net's line is there, with
+# whatever its deepest path touched, indirect calls included. No selftest:
+# the boot clients would otherwise hold connections of their own in the
+# table.
+name = "network.deep_path"
+description = "netd survives its deepest call path: a full TCP table swept inside a request, a dead client's reset toward an address without ARP"
+level = "full"
+areas = ["network", "apps", "diag"]
+selftest = false
+cmdline = "qemu_exit shell"
+timeout_secs = 90
+serial = true
+stdin = ["run tcp_orphan", "http http://10.0.2.2:17010/hola", "diag", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: launch tcp_orphan with manifest [net] memory 64 KiB",
+    "virtio-net: fault net tcp table full x1",
+    "tcp_orphan: 8 connections held, one toward an address without ARP; exiting without closing",
+    "run: tcp_orphan exited with 0",
+    "virtio-net: client gone ('tcp_orphan'), 8 socket(s) left open: reclaimed (sweep for a full tcp table)",
+    "HTTP 200, 19 bytes",
+    "user stacks (touched of size, page granular):",
+    " of 64 KiB  virtio_net",
+    "=== end of diagnostics ===",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_order = [
+    "run: tcp_orphan exited with 0",
+    "virtio-net: client gone ('tcp_orphan'), 8 socket(s) left open: reclaimed",
+    "HTTP 200, 19 bytes",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "USER STACK OVERFLOW",
+    "killed: stack overflow",
+    "net arp defer full",
+    "reclaimed (periodic sweep)",
+    "http: could not connect",
+    "tcp_orphan: the ninth connection was not refused",
+]

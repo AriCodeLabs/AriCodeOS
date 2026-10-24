@@ -1,0 +1,30 @@
+# `update apply` keeps the stable floor (ADR 0045, no open downgrade
+# path): the machine runs stable 1 from slot A, once ran stable 3 (the
+# `[floor]` of updater/state), and the UPDATE partition holds a validly
+# signed stable 2. `update apply` refuses it as a downgrade and records
+# it; `update apply --allow-downgrade` installs it and says so.
+name = "update.apply_stable_floor"
+description = "update apply refuses a stable image below the stable floor without --allow-downgrade"
+level = "full"
+areas = ["update", "shell"]
+timeout_secs = 120
+
+[host_update]
+source = "none"
+stable_floor = 3
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update apply", "update apply --allow-downgrade", "diag", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "updater: UPDATE image version 2 verified (",
+    "updater: system: refused: a downgrade: stable 2 is older than stable 3, the newest release this machine ran (--allow-downgrade to force)",
+    "update: updater exited with 40",
+    "updater: system: downgrading below the stable floor 3 to 2 (--allow-downgrade)",
+    "updater: installed into slot B",
+    ": upd-downgrade-refused (code 40)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "upd-floor-damaged", "upd-no-services"]

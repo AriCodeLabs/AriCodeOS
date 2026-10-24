@@ -15,6 +15,7 @@ write = ["aricode-initrd/write"]
 
 [dependencies]
 aricode-crypto = { path = "../crypto" }
+aricode-proto = { path = "../../sdk/proto" }
 aricode-initrd = { path = "../initrd" }
 
 [dev-dependencies]

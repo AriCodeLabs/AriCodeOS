@@ -1,0 +1,21 @@
+# ADR 0039: with a CPU model that exposes rdrand (`-cpu qemu64,+rdrand`,
+# which TCG implements from the host's randomness) the kernel seeds its
+# generator from rdrand, announces it and reports it through
+# `system_info(RANDOM_SOURCE)`; the self-test checks that the account
+# counts hardware samples.
+name = "crypto.random_rdrand"
+description = "kernel random generator seeded from rdrand when the CPU has it; the source account says so"
+level = "full"
+areas = ["crypto"]
+cmdline = "qemu_exit test=random"
+cpu_rdrand = true
+
+[expect]
+exit = 33
+serial_contains = [
+    "random: ChaCha20 generator seeded with rdrand",
+    "random: source rdrand ok, ",
+    " interrupt stirs, 67 TSC samples, no carried seed (first boot), sample ",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "limited entropy"]

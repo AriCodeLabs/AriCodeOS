@@ -141,19 +141,22 @@ pub fn spawn_with_handles_and_arg(
     arg: u64,
     dma_quota: u64,
 ) -> Result<Pid, &'static str> {
-    spawn_with_caps(name, elf_bytes, grants(extra), arg, dma_quota)
+    spawn_with_caps(name, elf_bytes, None, grants(extra), arg, dma_quota)
 }
 
 /// Like `spawn_with_handles_and_arg` with capabilities that already exist
 /// (taken from the parent's table): they move into the child as they are.
+/// `session_console`, an endpoint capability with `WRITE`, becomes the
+/// child's console (ADR 0047).
 pub fn spawn_with_caps(
     name: &str,
     elf_bytes: &[u8],
+    session_console: Option<Cap>,
     extra: Vec<(Cap, aricode_handles::Rights)>,
     arg: u64,
     dma_quota: u64,
 ) -> Result<Pid, &'static str> {
-    spawn_full(name, elf_bytes, extra, arg, dma_quota)
+    spawn_full(name, elf_bytes, session_console, extra, arg, dma_quota)
 }
 
 /// Capabilities for objects the kernel grants to a new process.
@@ -176,12 +179,13 @@ pub fn spawn_with_handles(
     elf_bytes: &[u8],
     extra: Vec<(crate::object::ObjectRef, aricode_handles::Rights)>,
 ) -> Result<Pid, &'static str> {
-    spawn_full(name, elf_bytes, grants(extra), 0, 0)
+    spawn_full(name, elf_bytes, None, grants(extra), 0, 0)
 }
 
 fn spawn_full(
     name: &str,
     elf_bytes: &[u8],
+    session_console: Option<Cap>,
     extra: Vec<(Cap, aricode_handles::Rights)>,
     arg: u64,
     dma_quota: u64,
@@ -262,7 +266,7 @@ fn spawn_full(
         m.root_phys(),
     )?;
     let tid = thread.tid;
-    let mut handles = crate::object::initial_table(pid, tid);
+    let mut handles = crate::object::initial_table(pid, tid, session_console);
     for (obj, rights) in extra {
         handles
             .insert(obj, rights)
@@ -853,6 +857,40 @@ pub fn snapshot() -> Vec<aricode_abi::sysinfo::ProcessEntry> {
                 Some(ExitStatus::Killed(_)) => (ProcessState::Killed, 0),
             };
             ProcessEntry::new(pid.0, state, code, &p.name)
+        })
+        .collect()
+}
+
+/// Bytes of the user stack the process behind `m` has touched: from the
+/// top down to the lowest stack page whose Accessed bit the CPU has set
+/// (incident 0018). `spawn` zeroes the pages through the kernel's own
+/// mapping, so only accesses through the process's mapping set the bit
+/// (its own, and the kernel's copies to and from its buffers), and nothing
+/// clears it: a high-water mark since the process started, page granular.
+/// The stack probes compilers emit for large frames touch every page they
+/// pass, so a deep call is seen even if it wrote little.
+/// The scan is `aricode_x86_paging::stack_touched`, tested on the host.
+fn stack_touched(m: &Mapper<vmm::PmmFrames, OffsetMap>) -> u64 {
+    aricode_x86_paging::stack_touched(USER_STACK_TOP - USER_STACK_SIZE, USER_STACK_TOP, |page| {
+        m.translate(page).map(|(_, flags)| flags)
+    })
+}
+
+/// User stack use of every process that still has its address space
+/// (`sysinfo::STACKS`, incident 0018).
+pub fn stack_snapshot() -> Vec<aricode_abi::sysinfo::StackEntry> {
+    use aricode_abi::sysinfo::StackEntry;
+    PROCESSES
+        .lock()
+        .iter()
+        .filter_map(|(pid, p)| {
+            let m = p.mapper.as_ref()?;
+            Some(StackEntry::new(
+                pid.0,
+                USER_STACK_SIZE as u32,
+                stack_touched(m) as u32,
+                &p.name,
+            ))
         })
         .collect()
 }

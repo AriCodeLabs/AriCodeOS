@@ -23,6 +23,10 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::boxed::Box;
+
 use aricode_ehci::{
     cap, decode_token, hub, interrupt_schedule, legacy, link, op, overlay_token, periodic_entry,
     portsc, set_address, split_transfer, token, tt_for, Outcome, Params, Pid, Qtd, QueueHead,
@@ -660,7 +664,12 @@ struct Ehci {
 impl Ehci {
     /// `started`: when the process started (the Info and boot enumeration
     /// bounds count from there).
-    fn open(mask: u64, clock: Clock, strict: bool, started: u64) -> Result<Self, u64> {
+    /// The controller on the heap (incident 0018): built in `main`'s frame
+    /// it took 17 KiB of the 64 KiB stack. Out of line, so the copy an
+    /// unoptimized build may make on the way into the `Box` is popped
+    /// before the service loop.
+    #[inline(never)]
+    fn open(mask: u64, clock: Clock, strict: bool, started: u64) -> Result<Box<Self>, u64> {
         let Some(bar) = polled_bar_handle(mask, 0) else {
             say(b"no BAR 0 among the capabilities");
             return Err(exit::MAP_BAR);
@@ -846,7 +855,7 @@ impl Ehci {
         }
 
         let now = clock.now();
-        let mut ctl = Self {
+        let mut ctl = Box::new(Self {
             op,
             params,
             version,
@@ -890,7 +899,7 @@ impl Ehci {
             },
             keyboards: 0,
             mice: 0,
-        };
+        });
         // Every root port is looked at once its power and connection
         // settled (USB 2.0 7.1.7.3).
         for port in 1..=params.ports {
@@ -3409,16 +3418,20 @@ fn device_name(ctl: &Ehci) -> &'static str {
 fn main(mask: u64) -> u64 {
     let clock = Clock(extra_handle(mask, 0));
     let started = clock.now();
-    let mut args = [0u8; 256];
+    let mut args = [0u8; sys::CMDLINE_MAX];
     let (strict, fault_inject) = match sys::cmdline(clock.0, &mut args) {
-        Some(text) => {
+        Ok(text) => {
             let c = aricode_cmdline::CmdLine::new(text);
             (
                 c.has(aricode_cmdline::keys::STRICT),
                 FaultInject::parse(c.get(aricode_cmdline::keys::USB_FAULT)),
             )
         }
-        None => (false, FaultInject::None),
+        Err(_) => {
+            say(b"cannot read the command line (too long or not text): boot flags ignored");
+            record("ehci cmdline unreadable", sys::CMDLINE_MAX as u64);
+            (false, FaultInject::None)
+        }
     };
     let mut ctl = match Ehci::open(mask, clock, strict, started) {
         Ok(c) => c,

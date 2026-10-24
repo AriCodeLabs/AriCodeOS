@@ -38,6 +38,12 @@ pub const MAX_RETRIES: u8 = 6;
 /// (`tcp_synack_retries`, about 63 s) with a table of thousands of slots.
 pub const SYN_ACK_MAX_RETRIES: u8 = 3;
 const TIME_WAIT_MS: u64 = 2000;
+/// Longest wait in FIN-WAIT-2 for the peer's FIN once ours is acknowledged
+/// (audit of incident 0027, M1): a peer that never closes its side would
+/// otherwise hold the slot until the next boot. The service's close is
+/// always a full close, so nothing more can arrive for anyone; Linux waits
+/// 60 s (`tcp_fin_timeout`) with a table of thousands of slots.
+pub const FIN_WAIT2_MS: u64 = 30_000;
 
 /// Connections a listener may hold before its owner accepts them, half-open
 /// (`SynReceived`) and established alike, for a table of `table_slots`
@@ -266,6 +272,8 @@ pub struct Connection {
     retransmit_at: Option<u64>,
     retries: u8,
     time_wait_until: u64,
+    /// When FIN-WAIT-2 gives up on the peer's FIN (`FIN_WAIT2_MS`).
+    fin_wait2_until: u64,
 }
 
 impl Connection {
@@ -292,6 +300,7 @@ impl Connection {
             retransmit_at: None,
             retries: 0,
             time_wait_until: 0,
+            fin_wait2_until: 0,
         }
     }
 
@@ -437,9 +446,17 @@ impl Connection {
 
     /// Next segment to transmit, if any. Call until `None`.
     pub fn poll(&mut self, now: u64, out: &mut [u8]) -> Option<usize> {
-        // RST after abort.
+        // A peer that never sends its FIN: reset and let the slot go.
+        if self.state == State::FinWait2 && now >= self.fin_wait2_until {
+            self.state = State::Closed;
+            self.reason = Some(CloseReason::Timeout);
+            self.need_ack = true; // reused as "send RST"
+        }
+        // RST after abort or a FIN-WAIT-2 that ran out.
         if self.state == State::Closed {
-            if self.need_ack && self.reason == Some(CloseReason::Reset) {
+            if self.need_ack
+                && matches!(self.reason, Some(CloseReason::Reset | CloseReason::Timeout))
+            {
                 self.need_ack = false;
                 return self.emit(
                     self.header(FLAG_RST | FLAG_ACK, self.snd_nxt),
@@ -624,7 +641,8 @@ impl Connection {
             match self.state {
                 State::SynReceived => self.state = State::Established,
                 State::FinWait1 if self.fin_sent && h.ack == self.snd_nxt => {
-                    self.state = State::FinWait2
+                    self.state = State::FinWait2;
+                    self.fin_wait2_until = now + FIN_WAIT2_MS;
                 }
                 State::Closing if self.fin_sent && h.ack == self.snd_nxt => {
                     self.enter_time_wait(now)
@@ -674,6 +692,33 @@ impl Connection {
         self.time_wait_until = now + TIME_WAIT_MS;
         self.retransmit_at = None;
     }
+
+    /// The next time `poll` has timed work to do (ADR 0044): a
+    /// retransmission, the end of TIME-WAIT, or giving up FIN-WAIT-2.
+    /// `None` when only a segment
+    /// or a call from the user can change anything, so a service may sleep
+    /// until then; work that is due at once (a first SYN, new data, an ACK)
+    /// is what `poll` emits in the same round and needs no timer.
+    pub fn next_timer(&self) -> Option<u64> {
+        match self.state {
+            State::Closed => None,
+            State::TimeWait => Some(self.time_wait_until),
+            State::FinWait2 => Some(self.fin_wait2_until),
+            _ => self.retransmit_at,
+        }
+    }
+}
+
+/// Of `(slot, closed by its client, connection)`, the closed connection in
+/// TIME-WAIT that ends soonest: the slot a full table may give to a new
+/// connection (incident 0027). TIME-WAIT guards that connection's own
+/// address and port pair, which the new one does not share. A connection
+/// its client still holds is never chosen.
+pub fn recyclable<'a>(socks: impl Iterator<Item = (usize, bool, &'a Connection)>) -> Option<usize> {
+    socks
+        .filter(|(_, closed, c)| *closed && c.state() == State::TimeWait)
+        .min_by_key(|(_, _, c)| c.next_timer().unwrap_or(0))
+        .map(|(slot, _, _)| slot)
 }
 
 #[cfg(test)]
@@ -778,6 +823,66 @@ mod tests {
         assert!(p.a.is_closed());
     }
 
+    /// A pair whose side A closed first at `at` and sits in TIME-WAIT.
+    fn time_wait_from(at: u64) -> Connection {
+        let mut p = Pair::new(|_| false);
+        p.run(at + 10);
+        p.a.close();
+        p.run(10);
+        p.b.close();
+        p.run(10);
+        assert_eq!(p.a.state(), State::TimeWait);
+        p.a
+    }
+
+    #[test]
+    fn a_peer_that_never_closes_releases_fin_wait_2() {
+        let mut p = Pair::new(|_| false);
+        p.run(10);
+        p.a.close();
+        p.run(10);
+        assert_eq!(
+            p.a.state(),
+            State::FinWait2,
+            "our FIN acknowledged, theirs never comes"
+        );
+        assert_eq!(p.b.state(), State::CloseWait);
+        assert!(
+            p.a.next_timer().is_some_and(|t| t > p.now),
+            "a timer to wake the service"
+        );
+        p.run(FIN_WAIT2_MS - 100);
+        assert_eq!(p.a.state(), State::FinWait2, "not before its time");
+        p.run(200);
+        assert!(p.a.is_closed());
+        assert_eq!(p.a.close_reason(), Some(CloseReason::Timeout));
+        assert_eq!(
+            p.b.close_reason(),
+            Some(CloseReason::Reset),
+            "the peer got a reset"
+        );
+    }
+
+    #[test]
+    fn a_full_table_recycles_the_time_wait_that_ends_soonest() {
+        let older = time_wait_from(0);
+        let newer = time_wait_from(500);
+        let open = Pair::new(|_| false).a;
+        // Slots: 0 open, 1 newer, 2 older (closed), 3 older but still held.
+        let socks = [
+            (0, true, &open),
+            (1, true, &newer),
+            (2, true, &older),
+            (3, false, &older),
+        ];
+        assert_eq!(recyclable(socks.into_iter()), Some(2));
+        assert_eq!(recyclable([(1, true, &newer)].into_iter()), Some(1));
+        assert_eq!(
+            recyclable([(3, false, &older), (0, true, &open)].into_iter()),
+            None
+        );
+    }
+
     #[test]
     fn retransmits_lost_syn_and_data() {
         // The first SYN and the fifth segment are lost (the data: SYN
@@ -798,6 +903,69 @@ mod tests {
         p.run(INITIAL_RTO_MS + 20);
         assert_eq!(p.b.recv(&mut out), 5);
         assert_eq!(&out[..5], b"datos");
+    }
+
+    /// Like `Pair::run`, but time jumps from one timer to the next
+    /// (`next_timer`, ADR 0044) instead of advancing 10 ms at a time, as
+    /// a service that sleeps until its next deadline drives it. Stops at
+    /// `end` or when neither side has a timer left.
+    fn run_on_timers(p: &mut Pair, end: u64) {
+        loop {
+            while p.step() {}
+            let next = match (p.a.next_timer(), p.b.next_timer()) {
+                (Some(x), Some(y)) => x.min(y),
+                (x, y) => match x.or(y) {
+                    Some(t) => t,
+                    None => return,
+                },
+            };
+            assert!(
+                next > p.now,
+                "a timer at {next} ms is already due at {}",
+                p.now
+            );
+            if next > end {
+                return;
+            }
+            p.now = next;
+        }
+    }
+
+    /// Sleeping until `next_timer` loses nothing: the lost SYN and data
+    /// are retransmitted, TIME-WAIT ends, and an unanswered connection
+    /// gives up exactly at the end of its schedule.
+    #[test]
+    fn timers_alone_drive_retransmission_time_wait_and_give_up() {
+        let mut p = Pair::new(|n| n == 1 || n == 5);
+        run_on_timers(&mut p, INITIAL_RTO_MS);
+        assert_eq!(
+            p.a.state(),
+            State::Established,
+            "SYN retransmitted at its timer"
+        );
+        p.a.send(b"datos");
+        let end = p.now + 2 * INITIAL_RTO_MS;
+        run_on_timers(&mut p, end);
+        let mut out = [0u8; 16];
+        assert_eq!(p.b.recv(&mut out), 5, "data retransmitted at its timer");
+        assert_eq!(p.a.next_timer(), None, "everything acknowledged: no timer");
+        assert_eq!(p.b.next_timer(), None);
+        p.a.close();
+        while p.step() {}
+        p.b.close();
+        while p.step() {}
+        assert_eq!(p.a.state(), State::TimeWait);
+        assert_eq!(p.a.next_timer(), Some(p.now + TIME_WAIT_MS));
+        run_on_timers(&mut p, u64::MAX);
+        assert!(p.a.is_closed() && p.a.next_timer().is_none());
+
+        let mut p = Pair::new(|_| true);
+        run_on_timers(&mut p, u64::MAX);
+        assert_eq!(p.a.close_reason(), Some(CloseReason::Timeout));
+        assert_eq!(
+            p.now, FULL_SCHEDULE_MS,
+            "gave up at the end of its schedule"
+        );
     }
 
     #[test]

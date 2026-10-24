@@ -1,0 +1,98 @@
+diff --git a/apps/bench/bench.manifest b/apps/bench/bench.manifest
+index 46b008c..a8663f0 100644
+--- a/apps/bench/bench.manifest
++++ b/apps/bench/bench.manifest
+@@ -1,4 +1,4 @@
+ # Benchmarks: system clock and a private directory for the file ones.
+ name = bench
+-caps = system, fs
++caps = system, fs, net
+ memory = 64K
+diff --git a/apps/bench/src/main.rs b/apps/bench/src/main.rs
+index 0e4f6b9..52ec96b 100644
+--- a/apps/bench/src/main.rs
++++ b/apps/bench/src/main.rs
+@@ -68,12 +68,16 @@ fn calibrate(system: Handle) -> Option<u64> {
+ }
+ 
+ fn main(_arg: u64) -> u64 {
+-    let (mut system, mut fs_ep, mut hardware) = (None, None, None);
++    let (mut system, mut fs_ep, mut net_ep, mut hardware) = (None, None, None, None);
+     permissions::granted(|h, _| {
+         if permissions::is(h, kind::SYSTEM) {
+             system = Some(h);
+         } else if permissions::is(h, kind::ENDPOINT) {
+-            fs_ep = Some(h);
++            if fs_ep.is_none() {
++                fs_ep = Some(h);
++            } else {
++                net_ep = Some(h);
++            }
+         } else if permissions::is(h, kind::HARDWARE) {
+             hardware = Some(h);
+         }
+@@ -143,6 +147,64 @@ fn main(_arg: u64) -> u64 {
+         samples.push(rdtsc() - t0);
+     }
+     report(b"read 4 KiB", &mut samples, per_us, b"us");
++    // Audit instrumentation: metadata RPC without any packet transmission.
++    if let Some(net_ep) = net_ep {
++        let net = sys::net::NetClient::new(net_ep, hw).expect("audit network client");
++        let mut samples = Vec::with_capacity(200);
++        for _ in 0..200 {
++            let t0 = rdtsc();
++            assert!(net.info().is_ok());
++            samples.push(rdtsc() - t0);
++        }
++        report(b"ipc net info", &mut samples, per_us, b"us");
++    }
++    // Audit instrumentation: idle delta during a quiet five-second interval.
++    let mut before = [0u8; 8 * 18];
++    let mut after = [0u8; 8 * 18];
++    let n = sys::system_info(system, sys::abi::sysinfo::IDLE, &mut before).unwrap();
++    time::sleep_ms(5000);
++    assert_eq!(
++        sys::system_info(system, sys::abi::sysinfo::IDLE, &mut after),
++        Ok(n)
++    );
++    let word = |b: &[u8], i: usize| u64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap());
++    let elapsed = word(&after, 0).saturating_sub(word(&before, 0)).max(1);
++    for cpu in 0..word(&after, 1) as usize {
++        let idle = word(&after, cpu + 2).saturating_sub(word(&before, cpu + 2));
++        sys::print(b"audit: quiet CPU ");
++        num(cpu as u64);
++        sys::print(b" idle permille ");
++        num(idle.saturating_mul(1000) / elapsed);
++        sys::print(b"\n");
++    }
++    // Audit control: CPU stays runnable for 500 ms, then sleeps 200 ms.
++    let n = sys::system_info(system, sys::abi::sysinfo::IDLE, &mut before).unwrap();
++    let busy_start = rdtsc();
++    while rdtsc().wrapping_sub(busy_start) < per_ms * 500 {
++        core::hint::black_box(17u64.wrapping_mul(31));
++    }
++    let busy_cycles = rdtsc().wrapping_sub(busy_start);
++    time::sleep_ms(200);
++    assert_eq!(
++        sys::system_info(system, sys::abi::sysinfo::IDLE, &mut after),
++        Ok(n)
++    );
++    let elapsed = word(&after, 0).saturating_sub(word(&before, 0)).max(1);
++    sys::print(b"audit: busy/sleep elapsed cycles ");
++    num(elapsed);
++    sys::print(b" busy cycles ");
++    num(busy_cycles);
++    sys::print(b"\n");
++    for cpu in 0..word(&after, 1) as usize {
++        let idle = word(&after, cpu + 2).saturating_sub(word(&before, cpu + 2));
++        sys::print(b"audit: busy/sleep CPU ");
++        num(cpu as u64);
++        sys::print(b" idle permille ");
++        num(idle.saturating_mul(1000) / elapsed);
++        sys::print(b" idle cycles ");
++        num(idle);
++        sys::print(b"\n");
++    }
+     let _ = fs.close(fd);
+     sys::print(b"bench: done\n");
+     0

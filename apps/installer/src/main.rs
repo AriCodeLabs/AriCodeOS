@@ -48,8 +48,9 @@ use aricode_update_index::files::{self, Files, ReadError};
 use aricode_update_index::run::{self, Outcome};
 use aricode_update_index::{self as upd, compare, installer_arg, lists, Change};
 
-/// An installed package is replaced in one go: the AriFS journal (32 KiB).
-const MAX_PACKAGE: usize = 32 * 1024;
+/// An installed package is replaced in one go: the AriFS journal, the
+/// package limit the whole system shares (incident 0026).
+const MAX_PACKAGE: usize = aricode_pkg::PACKAGE_MAX;
 const MAX_PENDING: usize = 8;
 /// Largest `updater/state` read (the three sections stay well under it).
 const MAX_STATE: usize = 16 * 1024;
@@ -187,9 +188,11 @@ fn history(fs: &mut FsClient, line: &str) {
 enum Installed {
     Missing,
     Valid(aricode_pkg::PkgManifest),
-    /// Present but fails verification (or is larger than any package can
-    /// be): the broker refuses to launch it.
+    /// Present but fails verification: the broker refuses to launch it.
     Invalid,
+    /// Present but larger than `MAX_PACKAGE`, so not a package this system
+    /// installs, launches or upgrades (incident 0026).
+    TooLarge,
     /// Present or not, nobody knows: the request failed (incident 0008).
     Unknown(FsError),
 }
@@ -198,7 +201,7 @@ fn installed(fs: &mut FsClient, path: &str, pubkey: &[u8; 32]) -> Installed {
     match read_all(fs, path, MAX_PACKAGE) {
         Ok(None) => Installed::Missing,
         Err(ReadError::Failed(e)) => Installed::Unknown(e),
-        Err(ReadError::TooLarge) => Installed::Invalid,
+        Err(ReadError::TooLarge) => Installed::TooLarge,
         Ok(Some(bytes)) => match aricode_pkg::verify(&bytes, pubkey) {
             Ok(v) => Installed::Valid(v.manifest),
             Err(_) => Installed::Invalid,
@@ -229,6 +232,15 @@ fn installed_apps(fs: &mut FsClient, pubkey: &[u8; 32]) -> Result<Vec<(String, u
                     code::INSTALLED_INVALID,
                     "inst-installed-invalid",
                     &format!("{path} fails verification (it cannot be launched); not listed"),
+                );
+            }
+            Installed::TooLarge => {
+                fault(
+                    code::INSTALLED_INVALID,
+                    "inst-installed-size",
+                    &format!(
+                        "{path} is larger than the {MAX_PACKAGE} bytes a package holds (it cannot be launched or upgraded); not listed"
+                    ),
                 );
             }
         }
@@ -351,6 +363,16 @@ fn install_one(
             );
             None
         }
+        Installed::TooLarge => {
+            fault(
+                code::INSTALLED_INVALID,
+                "inst-installed-size",
+                &format!(
+                    "{target} is larger than the {MAX_PACKAGE} bytes a package holds; replacing it with version {version}"
+                ),
+            );
+            None
+        }
         Installed::Unknown(e) => {
             // ADR 0029, decision 5: what cannot be identified is not
             // replaced. A failed request is not a missing file (incident
@@ -432,8 +454,19 @@ fn install_pending(fs: &mut FsClient, pubkey: &[u8; 32]) -> u64 {
     for path in &pending {
         let bytes = match read_all(fs, path, MAX_PACKAGE) {
             Ok(Some(bytes)) => bytes,
-            Ok(None) | Err(ReadError::TooLarge) => {
-                say!("{path} cannot be read or is too large: skipped");
+            Ok(None) => {
+                say!("{path} is gone: skipped");
+                skipped += 1;
+                continue;
+            }
+            Err(ReadError::TooLarge) => {
+                fault(
+                    code::VERIFY,
+                    "inst-pkg-size",
+                    &format!(
+                        "{path} is larger than the {MAX_PACKAGE} bytes a package holds: skipped"
+                    ),
+                );
                 skipped += 1;
                 continue;
             }
@@ -484,7 +517,17 @@ fn install_staged(fs: &mut FsClient, allow_downgrade: bool, pubkey: &[u8; 32]) -
         let path = upd::main_path(e.file);
         let bytes = match read_all(fs, &path, MAX_PACKAGE) {
             Ok(Some(bytes)) if sha256(&bytes) == e.sha256 => bytes,
-            Ok(_) | Err(ReadError::TooLarge) => {
+            Err(ReadError::TooLarge) => {
+                outcomes.push(Outcome::Refused(fault(
+                    code::STAGE,
+                    "inst-stage-size",
+                    &format!(
+                        "{path} is larger than the {MAX_PACKAGE} bytes a package holds: refused"
+                    ),
+                )));
+                continue;
+            }
+            Ok(_) => {
                 outcomes.push(Outcome::Refused(fault(
                     code::STAGE,
                     "inst-stage-hash",

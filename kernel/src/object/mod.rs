@@ -15,6 +15,10 @@ pub enum ObjectKind {
     Thread(Tid),
     Process(Pid),
     Console,
+    /// A console whose text goes to an endpoint (ADR 0047): the capability
+    /// to its send side, held here so the side stays open while any handle
+    /// to this console lives. Only `console_write` uses it.
+    SessionConsole(Cap),
     Endpoint(crate::ipc::Endpoint),
     /// Capability to create processes from the initrd.
     Spawner,
@@ -60,7 +64,7 @@ impl KernelObject {
         match self.kind {
             ObjectKind::Thread(_) => kind::THREAD,
             ObjectKind::Process(_) => kind::PROCESS,
-            ObjectKind::Console => kind::CONSOLE,
+            ObjectKind::Console | ObjectKind::SessionConsole(_) => kind::CONSOLE,
             ObjectKind::Endpoint(_) => kind::ENDPOINT,
             ObjectKind::Spawner => kind::SPAWNER,
             ObjectKind::Irq(_) => kind::IRQ,
@@ -142,8 +146,10 @@ pub type Handles = HandleTable<Cap>;
 pub const HANDLE_LIMIT: usize = 256;
 
 /// Initial table of a process: itself, its main thread and the console, in
-/// that order, so they match `aricode_abi::handle`.
-pub fn initial_table(pid: Pid, main_thread: Tid) -> Handles {
+/// that order, so they match `aricode_abi::handle`. The console is the
+/// kernel's unless `session_console` brings an endpoint's send side
+/// (ADR 0047).
+pub fn initial_table(pid: Pid, main_thread: Tid, session_console: Option<Cap>) -> Handles {
     let mut t = HandleTable::new(HANDLE_LIMIT);
     let self_h = insert(
         &mut t,
@@ -157,9 +163,13 @@ pub fn initial_table(pid: Pid, main_thread: Tid) -> Handles {
         Rights::READ.union(Rights::WAIT).union(Rights::DUPLICATE),
     )
     .expect("empty table");
+    let console = match session_console {
+        Some(cap) => ObjectKind::SessionConsole(cap),
+        None => ObjectKind::Console,
+    };
     let console_h = insert(
         &mut t,
-        KernelObject::new(ObjectKind::Console),
+        KernelObject::new(console),
         Rights::WRITE.union(Rights::DUPLICATE),
     )
     .expect("empty table");

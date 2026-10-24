@@ -305,7 +305,9 @@ pub fn dropped() -> u64 {
 
 /// Self-test (`test=console_ps2`): the host types a line on the PS/2
 /// keyboard (QMP) on seeing `CONSOLE_PS2_READY` and the kernel receives it
-/// through IRQ1.
+/// through IRQ1. Each byte is echoed as it arrives, like a console: the
+/// runner types the next key only after the echo of the previous one
+/// (incident 0022), so the i8042's 16-byte queue never overflows.
 pub fn ps2_selftest() {
     crate::println!("CONSOLE_PS2_READY");
     let deadline = crate::time::ticks() + 15 * crate::time::TICK_HZ;
@@ -317,6 +319,7 @@ pub fn ps2_selftest() {
         for &b in &buf[..n] {
             if b == b'\n' || b == b'\r' {
                 let text = core::str::from_utf8(&line).unwrap_or("?");
+                crate::println!();
                 crate::println!(
                     "console: PS/2 line '{text}' ({} bytes, {} scancodes)",
                     line.len(),
@@ -324,6 +327,7 @@ pub fn ps2_selftest() {
                 );
                 return;
             }
+            crate::print!("{}", b as char);
             line.push(b);
         }
     }

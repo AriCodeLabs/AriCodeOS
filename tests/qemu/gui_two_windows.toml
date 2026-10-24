@@ -1,12 +1,14 @@
 # Phase 26: with `gui` the kernel hands over the framebuffer; init launches the compositor
 # with the virtio inputs and two applications that paint at the same time. The host
 # moves the mouse over window B, clicks (focus) and types 'h': only B
-# receives the key.
+# receives the key. `gui_trace` makes the compositor log every frame with
+# one pixel sample per window (without it frames print nothing,
+# gui.frames_untraced); the first frame flushes the whole 1280x800 screen.
 name = "gui.two_windows"
 description = "ring 3 compositor: two isolated windows, click-to-focus and routed keyboard"
 level = "full"
 areas = ["gui", "input", "init"]
-cmdline = "qemu_exit gui"
+cmdline = "qemu_exit gui gui_trace"
 timeout_secs = 120
 
 [host_input]
@@ -20,6 +22,8 @@ exit = 33
 serial_contains = [
     "framebuffer: 1280x800 stride 1280 Bgr @ 0x80000000 (reserved for the compositor)",
     "compositor: screen 1280x800",
+    "compositor: gui_trace: logging every frame",
+    "flushed 1024000 px in 1 rect(s)",
     "compositor: window 1 'Demo A' 400x300",
     "compositor: window 2 'Demo B' 400x300",
     "gui_demo A: window presented",

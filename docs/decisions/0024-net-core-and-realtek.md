@@ -84,7 +84,10 @@ prints `tcp secret from kernel entropy` at start and records the fault
 `net tcp secret degraded` if the syscall is refused (the kernel always
 answers with the bytes asked and exposes no entropy-quality state, so that
 is the only failure the core can see); `network.stack` requires the former
-and forbids the latter.
+and forbids the latter. Since 2026-10-22 (ADR 0039) the core also reads
+what seeded the generator: it prints `tcp secret from kernel entropy
+(rdrand)`, or `tcp secret weak: ...` with the fault `net tcp secret weak`
+on CPUs without `rdrand`, which is what `network.stack` now requires.
 
 ## Note (2026-10-19, incident 0013)
 
@@ -110,3 +113,39 @@ a request only reaches its own sockets, and the sockets of a client the
 kernel reports gone (ADR 0030) are closed with `net socks reclaimed xN`
 recorded. `Op::Attach` (16) creates a session, `Op::Sockets` (17) reports
 the tables per owner for `diag`.
+
+## Note (2026-10-23, incident 0018)
+
+The core's frames had grown into the driver's 64 KiB user stack: `run`
+held the whole 22 KiB `Stack` (44,952-byte frame, release), `serve` and
+`on_frame` held the temporaries of every new TCP socket (25 KiB each in a
+dev build), and the deepest direct path (a full TCP table swept inside a
+request, a dead client's reset toward an address with no ARP entry) took
+53,368 bytes of 65,536 in release and 69,680 in dev, where the driver
+died on its first DHCP offer (`run` -> `on_frame` -> `broadcast_dhcp`). Since `fix/net-stack-headroom` `Stack::new`
+returns the stack in a `Box` (out of line, struct under 8 KiB by a const
+assertion), the UDP buffers, the ARP parking frames and the receive buffer
+live on the heap, and a TCP socket is built by `TcpSock::boxed`, out of
+line: 11,752 bytes (release) and 15,408 (dev) for virtio-net. `cargo xtask
+check` now fails if the deepest direct path of either driver passes half
+the stack or one frame a quarter (`stack-check`, `tests/README.md`);
+`diag` shows each process's stack high-water mark from the kernel
+(`sysinfo::STACKS`); `network.deep_path` drives the path at run time and
+checks that the reclaim ran inside the request (`reclaimed (sweep for a
+full tcp table)`). Every initrd program is measured, a new driver
+included.
+
+## Note (2026-10-23, ADR 0044)
+
+`run` no longer ends its round with `irq_wait(IRQ, 10)`. It waits once on
+every endpoint (main and sessions) and the NIC's interrupt line
+(`ipc_receive_any` with the line in the set, through the SDK's
+`wait::end_of_round`), with the timeout of the stack's next deadline
+(`Stack::next_deadline`: sweep, DHCP, pings, DNS, socket waits, TCP
+timers, parked frames, held faults), and skips the wait when the round
+left work. A request that arrived after the round's poll used to wait for
+the next interrupt or for the 10 ms (network info p50 10 ms, performance
+audit of 731c398, finding B); an idle netd woke 100 times a second and now
+wakes once (the sweep). The `Link` trait is unchanged: a driver's
+`recv_frame` still acknowledges its device, and the kernel latches the
+interrupt that fires meanwhile.

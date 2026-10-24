@@ -1,0 +1,20 @@
+# ADR 0044: the wait-set self-test of `ipc.wait_set` with four CPUs: the
+# helper that fires the line runs pinned to CPU 1, so its interrupts land
+# while the waiter registers, checks and blocks on another CPU.
+name = "smp.wait_set"
+description = "test=wait_set with -smp 4: interrupts fired from another CPU around the block are never lost"
+level = "full"
+areas = ["smp", "ipc", "drivers"]
+cmdline = "qemu_exit test=wait_set"
+cpus = 4
+timeout_secs = 60
+
+[expect]
+exit = 33
+serial_contains = [
+    "smp: 4 CPUs online",
+    "wait set selftest ok (latched interrupt at once, list order between a message and an interrupt",
+    "interrupts around the block on 4 CPUs without a lost wakeup",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC"]

@@ -12,14 +12,17 @@
 //! the handles [`handle::SELF_PROCESS`], [`handle::MAIN_THREAD`] and
 //! [`handle::CONSOLE`].
 //!
-//! During `0.x` the ABI may change (section 74). Current version: 5
-//! (ADR 0038: `mmio_unmap`; a mapping keeps its DMA buffer alive). Version
-//! 4 added `Error::PeerClosed`, `endpoint_create_pair` and `endpoint_close`
-//! (ADR 0030).
+//! During `0.x` the ABI may change (section 74). Current version: 7
+//! (ADR 0047: `spawn_limits::CONSOLE_FIRST` gives the child a session
+//! console). Version 6 (ADR 0044): `ipc_receive_any` also waits on
+//! interrupt lines. Version 5
+//! added `mmio_unmap` (ADR 0038: a mapping keeps its DMA buffer alive);
+//! version 4 `Error::PeerClosed`, `endpoint_create_pair` and
+//! `endpoint_close` (ADR 0030).
 
 #![no_std]
 
-pub const ABI_VERSION: u32 = 5;
+pub const ABI_VERSION: u32 = 7;
 
 /// Kernel base signature (SHA-512), required to check and verify the origin
 /// and authorship of an AriCodeOS build. It is part of the fixed ABI: it is
@@ -207,6 +210,8 @@ pub mod nr {
     /// A process terminated by the kernel returns `Error::Killed`.
     pub const PROCESS_WAIT: u64 = 15;
     /// `irq_wait(irq, timeout_ms) -> accumulated interrupts`; requires `WAIT`.
+    /// A service that also serves IPC waits for both at once with
+    /// `IPC_RECEIVE_ANY` (ADR 0044).
     pub const IRQ_WAIT: u64 = 16;
     /// `mmio_map(region) -> virtual address`; requires `READ|WRITE` on an
     /// MMIO or DMA object. Mapping a region the process already maps
@@ -269,6 +274,16 @@ pub mod nr {
     /// `IPC_MAX_ANY` endpoints (`READ` on all) that has a message; `out_ptr`
     /// holds `IPC_MAX_HANDLES` handles (ADR 0020). [`Error::PeerClosed`]
     /// only when every endpoint is empty and has lost its send side.
+    ///
+    /// Since ABI 6 (ADR 0044) the set may also hold up to
+    /// [`IPC_MAX_ANY_IRQS`] interrupt lines (`WAIT` on each): the call
+    /// returns as soon as the first member in list order is ready, an
+    /// endpoint with a message or a line that fired since its interrupts
+    /// were last taken (they are taken, as `irq_wait` does, and the result
+    /// is `count | RECEIVE_ANY_IRQ | index << 48`; see
+    /// [`receive_any::decode`]). A line never closes; `PeerClosed` still
+    /// means that every endpoint in the set is empty and has lost its send
+    /// side (a set of lines only never reports it).
     pub const IPC_RECEIVE_ANY: u64 = 31;
     /// `process_kill(process)`: requires `MANAGE` on the process. Terminates it
     /// as if it had faulted (`Killed`, reason "terminated by the
@@ -342,9 +357,15 @@ pub mod spawn_from {
     }
 }
 
-/// Sixth argument of `process_spawn`: number of handles (bits 0..7) and
-/// DMA memory limit of the child in KiB (bits 8..). 0 KiB = unlimited.
+/// Sixth argument of `process_spawn`: number of handles (bits 0..7), DMA
+/// memory limit of the child in KiB (bits 8..39; 0 KiB = unlimited) and
+/// [`CONSOLE_FIRST`](spawn_limits::CONSOLE_FIRST) (bit 63).
 pub mod spawn_limits {
+    /// The first handle, an endpoint with `WRITE`, becomes the child's
+    /// console at [`handle::CONSOLE`](super::handle::CONSOLE) as a session
+    /// console (ADR 0047); the rest start at `0x0001_0004`.
+    pub const CONSOLE_FIRST: u64 = 1 << 63;
+
     pub const fn pack(handles: usize, memory_kib: u32) -> u64 {
         (handles as u64 & 0xFF) | (memory_kib as u64) << 8
     }
@@ -353,6 +374,9 @@ pub mod spawn_limits {
     }
     pub const fn memory_kib(raw: u64) -> u32 {
         (raw >> 8) as u32
+    }
+    pub const fn console_first(raw: u64) -> bool {
+        raw & CONSOLE_FIRST != 0
     }
 }
 
@@ -376,7 +400,10 @@ pub mod sysinfo {
     /// faults (Phase 33).
     pub const IOMMU: u64 = 6;
     /// Per-CPU idle time (stage 5): `u64` TSC cycles since boot, `u64`
-    /// online CPUs and, for each one, `u64` cycles spent in `hlt`.
+    /// online CPUs and, for each one, `u64` cycles its idle thread has been
+    /// its running thread (interrupts serviced meanwhile included; another
+    /// thread's time never), all sampled at the same TSC instant, so each
+    /// is at most the first value (incident 0020).
     pub const IDLE: u64 = 7;
     /// Recent kernel events (stage 5): [`EventEntry`] entries from oldest
     /// to newest, as many as fit in the buffer.
@@ -390,6 +417,206 @@ pub mod sysinfo {
     /// The kernel command line as given by the loader (UTF-8 bytes): any
     /// program can read boot flags such as `strict` (ADR 0028).
     pub const CMDLINE: u64 = 11;
+    /// One [`RandomSource`] (40 bytes): what seeded the kernel generator
+    /// that `RANDOM` reads, how much has been mixed into it since (ADR
+    /// 0039) and whether a seed carried from the previous boot was mixed
+    /// in (ADR 0043). Only the source, counters and that status: never
+    /// generator state, seed or pool material. Later fields are only
+    /// appended after [`RandomSource::LEN`]: readers pass a larger buffer
+    /// and decode the first `LEN` bytes (a kernel before ADR 0043 answers
+    /// [`RandomSource::LEN_V1`]).
+    pub const RANDOM_SOURCE: u64 = 12;
+    /// As many [`StackEntry`] as fit in the buffer, one per live process:
+    /// how much of its user stack it has touched since it started
+    /// (incident 0018), the run-time counterpart of `cargo xtask
+    /// stack-check`.
+    pub const STACKS: u64 = 13;
+
+    /// What seeded the kernel generator. The number is the code of the
+    /// `net tcp secret weak` and `ssh entropy weak` fault events.
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum EntropySource {
+        /// The CPU's `rdrand` returned data for the seed (CPUID.1:ECX.30).
+        Rdrand = 1,
+        /// No hardware source: cycle-counter samples and the timing of
+        /// device, keyboard and serial interrupts only. Weak: an observer
+        /// who knows the boot timing can narrow the generator's state.
+        TscInterrupts = 2,
+    }
+
+    impl EntropySource {
+        pub fn from_u8(v: u8) -> Option<Self> {
+            match v {
+                1 => Some(Self::Rdrand),
+                2 => Some(Self::TscInterrupts),
+                _ => None,
+            }
+        }
+
+        /// A hardware random source seeded the generator.
+        pub fn is_hardware(self) -> bool {
+            matches!(self, Self::Rdrand)
+        }
+
+        /// Short name for console and `diag` lines.
+        pub fn label(self) -> &'static str {
+            match self {
+                Self::Rdrand => "rdrand",
+                Self::TscInterrupts => "TSC + interrupts",
+            }
+        }
+    }
+
+    /// Whether a kernel seed carried from the previous boot was mixed into
+    /// the generator (ADR 0043), and if not, why. The number is byte 32 of
+    /// [`RandomSource`], the `BootInfo::carried_seed_status` AriBoot
+    /// handed over and the code of the `random seed ...` fault events.
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum CarriedSeed {
+        /// No seed store (no `ARIBOOT` partition), an older loader, or an
+        /// older kernel that does not report it.
+        NoStore = 0,
+        /// Mixed in: the previous boot's seed, never used before.
+        Mixed = 1,
+        /// The store is blank: the first boot of this disk.
+        Missing = 2,
+        /// The store holds no intact copy or could not be read.
+        Unreadable = 3,
+        /// A seed was found but AriBoot could not write its successor, so
+        /// it was not used (the next boot would find it again).
+        NotSaved = 4,
+    }
+
+    impl CarriedSeed {
+        /// Unknown values read as `NoStore`: nothing was mixed in.
+        pub fn from_u8(v: u8) -> Self {
+            match v {
+                1 => Self::Mixed,
+                2 => Self::Missing,
+                3 => Self::Unreadable,
+                4 => Self::NotSaved,
+                _ => Self::NoStore,
+            }
+        }
+
+        /// What happened to the carried seed, for console and `diag` lines.
+        pub fn reason(self) -> &'static str {
+            match self {
+                Self::Mixed => "carried seed mixed in",
+                Self::NoStore => "no seed store on the boot disk",
+                Self::Missing => "no carried seed (first boot)",
+                Self::Unreadable => "carried seed unreadable",
+                Self::NotSaved => "carried seed not used: the loader could not save its successor",
+            }
+        }
+    }
+
+    /// Reply of `RANDOM_SOURCE` (40 bytes): the seed's source, the inputs
+    /// mixed into the generator since it was seeded, seed included, and the
+    /// carried seed's status.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct RandomSource {
+        pub source: EntropySource,
+        /// `rdrand` values mixed in (the seed's and one per read since).
+        pub hardware_samples: u64,
+        /// Cycle-counter samples mixed in (64 in the seed, one per read).
+        pub tsc_samples: u64,
+        /// Interrupts whose timing reached the generator through the pool
+        /// (counted up to the last read).
+        pub interrupt_events: u64,
+        /// The seed carried from the previous boot (ADR 0043).
+        pub carried: CarriedSeed,
+    }
+
+    impl RandomSource {
+        pub const LEN: usize = 40;
+        /// Reply of a kernel before ADR 0043 (no `carried` byte).
+        pub const LEN_V1: usize = 32;
+        /// Room for the longest [`RandomSource::summary`].
+        pub const SUMMARY_MAX: usize = 80;
+
+        /// Secrets drawn now are not weak: a hardware source seeded the
+        /// generator, or a seed carried from the previous boot was mixed
+        /// in (ADR 0043: it holds what every earlier boot gathered and is
+        /// never used twice).
+        pub fn is_strong(&self) -> bool {
+            self.source.is_hardware() || self.carried == CarriedSeed::Mixed
+        }
+
+        /// `rdrand`, `rdrand + carried seed`, `TSC + interrupts + carried
+        /// seed`, or `TSC + interrupts (N samples, M events)` when weak:
+        /// the wording netd, sshd and `diag` share.
+        pub fn summary<'a>(&self, buf: &'a mut [u8; Self::SUMMARY_MAX]) -> &'a str {
+            struct Cursor<'b> {
+                buf: &'b mut [u8],
+                len: usize,
+            }
+            impl core::fmt::Write for Cursor<'_> {
+                fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                    let end = self.len + s.len();
+                    self.buf
+                        .get_mut(self.len..end)
+                        .ok_or(core::fmt::Error)?
+                        .copy_from_slice(s.as_bytes());
+                    self.len = end;
+                    Ok(())
+                }
+            }
+            let mut c = Cursor { buf, len: 0 };
+            let _ = if self.is_strong() {
+                core::fmt::Write::write_str(&mut c, self.source.label()).and_then(|()| {
+                    if self.carried == CarriedSeed::Mixed {
+                        core::fmt::Write::write_str(&mut c, " + carried seed")
+                    } else {
+                        Ok(())
+                    }
+                })
+            } else {
+                core::fmt::write(
+                    &mut c,
+                    format_args!(
+                        "{} ({} samples, {} events)",
+                        self.source.label(),
+                        self.tsc_samples,
+                        self.interrupt_events
+                    ),
+                )
+            };
+            let len = c.len;
+            // Only whole `&str`s were copied in.
+            core::str::from_utf8(&c.buf[..len]).unwrap_or("")
+        }
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[0] = self.source as u8;
+            b[8..16].copy_from_slice(&self.hardware_samples.to_le_bytes());
+            b[16..24].copy_from_slice(&self.tsc_samples.to_le_bytes());
+            b[24..32].copy_from_slice(&self.interrupt_events.to_le_bytes());
+            b[32] = self.carried as u8;
+            b
+        }
+
+        /// `None` for a reply shorter than [`Self::LEN_V1`] or a source
+        /// this build does not know. A `LEN_V1` reply (an older kernel)
+        /// has no carried seed.
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN_V1 {
+                return None;
+            }
+            Some(Self {
+                source: EntropySource::from_u8(b[0])?,
+                hardware_samples: u64::from_le_bytes(b[8..16].try_into().ok()?),
+                tsc_samples: u64::from_le_bytes(b[16..24].try_into().ok()?),
+                interrupt_events: u64::from_le_bytes(b[24..32].try_into().ok()?),
+                carried: b
+                    .get(32)
+                    .map_or(CarriedSeed::NoStore, |&v| CarriedSeed::from_u8(v)),
+            })
+        }
+    }
 
     /// Event class of the kernel ring.
     #[repr(u8)]
@@ -620,6 +847,66 @@ pub mod sysinfo {
             })
         }
     }
+
+    /// User stack use of one live process (40 bytes, [`STACKS`]): the
+    /// stack's size and how many bytes of it, from the top down to the
+    /// lowest page the process touched, page granular. The kernel reads it
+    /// from the Accessed bits of the stack's page table entries, which
+    /// nothing clears: a high-water mark since the process started.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct StackEntry {
+        pub pid: u32,
+        pub size: u32,
+        pub touched: u32,
+        pub name: [u8; PROCESS_NAME_LEN],
+        pub name_len: u8,
+    }
+
+    impl StackEntry {
+        pub const LEN: usize = 40;
+
+        pub fn new(pid: u32, size: u32, touched: u32, name: &str) -> Self {
+            let n = name.len().min(PROCESS_NAME_LEN);
+            let mut buf = [0u8; PROCESS_NAME_LEN];
+            buf[..n].copy_from_slice(&name.as_bytes()[..n]);
+            Self {
+                pid,
+                size,
+                touched,
+                name: buf,
+                name_len: n as u8,
+            }
+        }
+
+        pub fn name_str(&self) -> &str {
+            core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("?")
+        }
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[..4].copy_from_slice(&self.pid.to_le_bytes());
+            b[4..8].copy_from_slice(&self.size.to_le_bytes());
+            b[8..12].copy_from_slice(&self.touched.to_le_bytes());
+            b[12] = self.name_len;
+            b[16..16 + PROCESS_NAME_LEN].copy_from_slice(&self.name);
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN {
+                return None;
+            }
+            let mut name = [0u8; PROCESS_NAME_LEN];
+            name.copy_from_slice(&b[16..16 + PROCESS_NAME_LEN]);
+            Some(Self {
+                pid: u32::from_le_bytes(b[..4].try_into().ok()?),
+                size: u32::from_le_bytes(b[4..8].try_into().ok()?),
+                touched: u32::from_le_bytes(b[8..12].try_into().ok()?),
+                name,
+                name_len: b[12].min(PROCESS_NAME_LEN as u8),
+            })
+        }
+    }
 }
 
 /// `system_power` actions.
@@ -701,12 +988,63 @@ pub const IPC_MAX_HANDLES: usize = 4;
 pub const IPC_QUEUE_CAPACITY: usize = 16;
 /// Endpoints per `ipc_receive_any` call.
 pub const IPC_MAX_ANY: usize = 16;
+/// Interrupt lines per `ipc_receive_any` call, besides its endpoints
+/// (ADR 0044): a driver's line or two, with room to spare.
+pub const IPC_MAX_ANY_IRQS: usize = 4;
+/// Bit of an `ipc_receive_any` result that marks an interrupt line.
+pub const RECEIVE_ANY_IRQ: u64 = 1 << 47;
 /// Timeout meaning "wait indefinitely".
 pub const TIMEOUT_INFINITE: u64 = u64::MAX;
 
 /// Splits the result of `ipc_receive`.
 pub const fn receive_result(raw: u64) -> (usize, usize) {
     ((raw & 0xFFFF_FFFF) as usize, (raw >> 32) as usize)
+}
+
+/// The result of `ipc_receive_any` (ADR 0020, ADR 0044): which member of
+/// the set was ready and what it gave. The index sits in bits 48..63 for
+/// both kinds; bit 47 tells them apart.
+pub mod receive_any {
+    use super::RECEIVE_ANY_IRQ;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Ready {
+        /// A message on member `index`: its length and the handles received.
+        Message {
+            index: usize,
+            len: usize,
+            handles: usize,
+        },
+        /// Interrupt line `index` fired `count` times since its interrupts
+        /// were last taken.
+        Irq { index: usize, count: u32 },
+    }
+
+    /// Result for a message (the kernel's side).
+    pub const fn message(index: usize, len: usize, handles: usize) -> u64 {
+        (len as u64 & 0xFFFF_FFFF) | (handles as u64 & 0x7FFF) << 32 | (index as u64) << 48
+    }
+
+    /// Result for an interrupt line (the kernel's side).
+    pub const fn irq(index: usize, count: u32) -> u64 {
+        count as u64 | RECEIVE_ANY_IRQ | (index as u64) << 48
+    }
+
+    pub const fn decode(raw: u64) -> Ready {
+        let index = (raw >> 48) as usize;
+        if raw & RECEIVE_ANY_IRQ != 0 {
+            Ready::Irq {
+                index,
+                count: raw as u32,
+            }
+        } else {
+            Ready::Message {
+                index,
+                len: (raw & 0xFFFF_FFFF) as usize,
+                handles: ((raw >> 32) & 0x7FFF) as usize,
+            }
+        }
+    }
 }
 
 /// Errors returned by the kernel (negated in `rax`).
@@ -815,6 +1153,16 @@ pub const fn user_range_ok(ptr: u64, len: u64) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn spawn_limits_keep_the_console_flag_apart() {
+        use super::spawn_limits::*;
+        let raw = pack(3, u32::MAX) | CONSOLE_FIRST;
+        assert_eq!(handles(raw), 3);
+        assert_eq!(memory_kib(raw), u32::MAX);
+        assert!(console_first(raw));
+        assert!(!console_first(pack(0xFF, u32::MAX)));
+    }
+
+    #[test]
     fn kernel_base_signature_is_frozen() {
         let sig = super::KERNEL_BASE_SIGNATURE;
         assert_eq!(sig.len(), 128);
@@ -872,6 +1220,126 @@ mod tests {
     }
 
     #[test]
+    fn random_source_round_trip() {
+        use super::sysinfo::*;
+        let r = RandomSource {
+            source: EntropySource::TscInterrupts,
+            hardware_samples: 0,
+            tsc_samples: 64 + 7,
+            interrupt_events: 1234,
+            carried: CarriedSeed::Missing,
+        };
+        let b = r.encode();
+        assert_eq!(b.len(), RandomSource::LEN);
+        assert_eq!(b[0], 2, "the source number is the fault code");
+        assert!(b[1..8].iter().all(|&x| x == 0), "reserved bytes are zero");
+        assert_eq!(b[32], 2, "the carried status is the fault code");
+        assert!(b[33..].iter().all(|&x| x == 0), "reserved bytes are zero");
+        assert_eq!(RandomSource::decode(&b), Some(r));
+        let hw = RandomSource {
+            source: EntropySource::Rdrand,
+            hardware_samples: 9,
+            tsc_samples: 65,
+            interrupt_events: u64::MAX,
+            carried: CarriedSeed::NoStore,
+        };
+        assert_eq!(RandomSource::decode(&hw.encode()), Some(hw));
+        assert!(hw.source.is_hardware() && !r.source.is_hardware());
+        assert_eq!(hw.source.label(), "rdrand");
+        assert_eq!(r.source.label(), "TSC + interrupts");
+        let mut text = [0u8; RandomSource::SUMMARY_MAX];
+        assert_eq!(
+            r.summary(&mut text),
+            "TSC + interrupts (71 samples, 1234 events)"
+        );
+        assert_eq!(hw.summary(&mut text), "rdrand");
+        let widest = RandomSource {
+            tsc_samples: u64::MAX,
+            interrupt_events: u64::MAX,
+            ..r
+        };
+        assert!(widest
+            .summary(&mut text)
+            .ends_with("18446744073709551615 events)"));
+        assert!(RandomSource::decode(&b[..31]).is_none());
+        // An older kernel's 32-byte reply: no carried seed.
+        assert_eq!(
+            RandomSource::decode(&b[..RandomSource::LEN_V1]),
+            Some(RandomSource {
+                carried: CarriedSeed::NoStore,
+                ..r
+            })
+        );
+        // A later kernel's longer reply still decodes.
+        let mut longer = [0u8; 2 * RandomSource::LEN];
+        longer[..RandomSource::LEN].copy_from_slice(&b);
+        assert_eq!(RandomSource::decode(&longer), Some(r));
+        for unknown in [0u8, 3, 0xFF] {
+            let mut bad = b;
+            bad[0] = unknown;
+            assert!(RandomSource::decode(&bad).is_none(), "source {unknown}");
+        }
+    }
+
+    #[test]
+    fn carried_seed_counts_as_strong() {
+        use super::sysinfo::*;
+        let weak = RandomSource {
+            source: EntropySource::TscInterrupts,
+            hardware_samples: 0,
+            tsc_samples: 67,
+            interrupt_events: 12,
+            carried: CarriedSeed::Missing,
+        };
+        assert!(!weak.is_strong());
+        let mut text = [0u8; RandomSource::SUMMARY_MAX];
+        assert_eq!(
+            weak.summary(&mut text),
+            "TSC + interrupts (67 samples, 12 events)"
+        );
+        let carried = RandomSource {
+            carried: CarriedSeed::Mixed,
+            ..weak
+        };
+        assert!(carried.is_strong());
+        assert_eq!(
+            carried.summary(&mut text),
+            "TSC + interrupts + carried seed"
+        );
+        let both = RandomSource {
+            source: EntropySource::Rdrand,
+            hardware_samples: 8,
+            ..carried
+        };
+        assert!(both.is_strong());
+        assert_eq!(both.summary(&mut text), "rdrand + carried seed");
+        for (v, c) in [
+            (0, CarriedSeed::NoStore),
+            (1, CarriedSeed::Mixed),
+            (2, CarriedSeed::Missing),
+            (3, CarriedSeed::Unreadable),
+            (4, CarriedSeed::NotSaved),
+            (5, CarriedSeed::NoStore),
+            (0xFF, CarriedSeed::NoStore),
+        ] {
+            assert_eq!(CarriedSeed::from_u8(v), c, "{v}");
+            if v < 5 {
+                assert_eq!(c as u8, v);
+            }
+        }
+        // Only `Mixed` makes a TSC-seeded generator strong.
+        for c in [
+            CarriedSeed::NoStore,
+            CarriedSeed::Missing,
+            CarriedSeed::Unreadable,
+            CarriedSeed::NotSaved,
+        ] {
+            assert!(!RandomSource { carried: c, ..weak }.is_strong());
+            assert!(!c.reason().is_empty());
+        }
+    }
+
+    #[test]
     fn process_entry_round_trip() {
         use super::sysinfo::*;
         let e = ProcessEntry::new(7, ProcessState::Exited, 42, "virtio_blk");
@@ -889,6 +1357,48 @@ mod tests {
         bad[4] = 9;
         assert!(ProcessEntry::decode(&bad).is_none());
         assert!(ProcessEntry::decode(&bad[..10]).is_none());
+    }
+
+    #[test]
+    fn stack_entry_round_trip() {
+        use super::sysinfo::*;
+        let e = StackEntry::new(4, 65_536, 12_288, "virtio_net");
+        let d = StackEntry::decode(&e.encode()).unwrap();
+        assert_eq!(d, e);
+        assert_eq!(d.name_str(), "virtio_net");
+        let long = StackEntry::new(1, 1, 1, "a-name-far-too-long-for-the-entry");
+        assert_eq!(long.name_len as usize, PROCESS_NAME_LEN);
+        let mut bad = e.encode();
+        bad[12] = 0xFF;
+        assert_eq!(
+            StackEntry::decode(&bad).unwrap().name_len as usize,
+            PROCESS_NAME_LEN
+        );
+        assert!(StackEntry::decode(&bad[..39]).is_none());
+    }
+
+    /// The wire layout, byte by byte: pid, size and touched little-endian,
+    /// the name length, three zero padding bytes, the name zero-filled.
+    #[test]
+    fn stack_entry_wire_layout() {
+        use super::sysinfo::*;
+        let mut wire = [0u8; StackEntry::LEN];
+        wire[..4].copy_from_slice(&[0x04, 0x03, 0x02, 0x01]);
+        wire[4..8].copy_from_slice(&[0x00, 0x00, 0x01, 0x00]);
+        wire[8..12].copy_from_slice(&[0x00, 0x30, 0x00, 0x00]);
+        wire[12] = 3;
+        wire[16..19].copy_from_slice(b"net");
+        let e = StackEntry::new(0x0102_0304, 65_536, 12_288, "net");
+        assert_eq!(e.encode(), wire);
+        assert_eq!(e.encode()[13..16], [0, 0, 0], "padding is zero");
+        assert_eq!(e.encode()[19..], [0; 21], "the name is zero-filled");
+        let d = StackEntry::decode(&wire).unwrap();
+        assert_eq!((d.pid, d.size, d.touched), (0x0102_0304, 65_536, 12_288));
+        assert_eq!(d.name_str(), "net");
+        // Padding a later version fills does not change what is read.
+        let mut later = wire;
+        later[13..16].copy_from_slice(&[0xAA; 3]);
+        assert_eq!(StackEntry::decode(&later), Some(d));
     }
 
     use super::*;
@@ -935,6 +1445,70 @@ mod tests {
     fn receive_result_packs_len_and_handles() {
         assert_eq!(receive_result(4 | (2 << 32)), (4, 2));
         assert_eq!(receive_result(0), (0, 0));
+    }
+
+    #[test]
+    fn receive_any_results_round_trip() {
+        use receive_any::{decode, irq, message, Ready};
+        // ABI 6: the bit is part of the contract, above the handle count
+        // (bits 32..47) of any message and below the index (48..63).
+        assert_eq!(RECEIVE_ANY_IRQ, 1 << 47);
+        let last = IPC_MAX_ANY + IPC_MAX_ANY_IRQS - 1;
+        for index in 0..=last {
+            for handles in 0..=IPC_MAX_HANDLES {
+                for len in [0, 1, IPC_MAX_DATA] {
+                    assert_eq!(
+                        decode(message(index, len, handles)),
+                        Ready::Message {
+                            index,
+                            len,
+                            handles
+                        },
+                        "message on member {index}, {len} bytes, {handles} handles"
+                    );
+                }
+            }
+            for count in [1, 2, u32::MAX] {
+                assert_eq!(decode(irq(index, count)), Ready::Irq { index, count });
+            }
+        }
+        assert_eq!(
+            decode(message(3, IPC_MAX_DATA, IPC_MAX_HANDLES)),
+            Ready::Message {
+                index: 3,
+                len: IPC_MAX_DATA,
+                handles: IPC_MAX_HANDLES
+            }
+        );
+        // An empty message on member 0 is not an interrupt.
+        assert_eq!(
+            decode(message(0, 0, 0)),
+            Ready::Message {
+                index: 0,
+                len: 0,
+                handles: 0
+            }
+        );
+        assert_eq!(
+            decode(irq(last, 1)),
+            Ready::Irq {
+                index: last,
+                count: 1
+            }
+        );
+        assert_eq!(
+            decode(irq(0, u32::MAX)),
+            Ready::Irq {
+                index: 0,
+                count: u32::MAX
+            }
+        );
+        // The pre-ABI 6 layout of a message is unchanged.
+        let raw = 7 | (2u64 << 32) | (5u64 << 48);
+        assert_eq!(raw, message(5, 7, 2));
+        // Never negative: an error is `-4095..=-1` in the same register.
+        assert!((irq(last, u32::MAX) as i64) > 0);
+        assert!((message(last, IPC_MAX_DATA, IPC_MAX_HANDLES) as i64) > 0);
     }
 
     #[test]

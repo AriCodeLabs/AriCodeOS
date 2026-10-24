@@ -58,6 +58,11 @@ static QEMU_EXIT: AtomicBool = AtomicBool::new(false);
 #[no_mangle]
 pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     serial::Serial.init();
+    // First of all, before a reference to `BootInfo` exists: copy the
+    // carried seed out of it and zero it there (ADR 0043).
+    // SAFETY: AriBoot's `BootInfo`, in its own writable page, not yet
+    // accessed by anything else.
+    unsafe { random::take_carried(boot_info.cast_mut()) };
     let info = validate_boot_info(boot_info);
     let fb_end = info.framebuffer.address + info.framebuffer.size;
     memory::phys::init(info.phys_map_offset, info.phys_map_limit, fb_end);
@@ -345,10 +350,13 @@ fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
         "threads" => task::scheduler::threads_selftest(),
         "sched" => task::scheduler::selftest(),
         "smp" => task::scheduler::smp_selftest(),
+        "quantum" => task::scheduler::quantum_selftest(),
+        "idle" => task::scheduler::idle_selftest(),
         "iommu" => iommu::selftest(),
         "ipc" => ipc::selftest(),
         "ipc_late" => ipc::late_reply_selftest(),
         "ipc_peer" => ipc::peer_closed_selftest(),
+        "wait_set" => ipc::wait_set_selftest(),
         "drivers" => hw::selftest(info),
         "usb_hid" => hw::usb_hid_selftest(),
         "random" => random::selftest(),

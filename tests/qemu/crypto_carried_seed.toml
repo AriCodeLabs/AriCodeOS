@@ -1,0 +1,92 @@
+# ADR 0043: the kernel seed carried across boots, on QEMU's `qemu64` (no
+# rdrand, like the reference laptop as far as entropy goes). Two boots on
+# the same disk:
+#
+# Boot 1 is the first boot of the disk: the image ships no seed, so AriBoot
+# finds the store blank, the kernel generator starts from TSC + interrupts
+# only, init records `random seed missing` (code 2), netd reports its TCP
+# secret weak and `diag` says why. Init then writes the first seed from the
+# kernel generator, twice (generations 1 and 2).
+#
+# Boot 2: AriBoot takes generation 2, writes its successor (3) before the
+# jump and hands the kernel its share; the kernel mixes it in, netd's TCP
+# secret comes from `TSC + interrupts + carried seed`, nothing weak is
+# reported, and init writes generations 4 and 5. After each boot the runner
+# reads the disk image and checks that the stored seed changed
+# (`seed_store`), without ever printing it.
+name = "crypto.carried_seed"
+description = "kernel seed carried across boots: first boot weak and seed written, second boot mixes it in, the stored seed changes every boot"
+level = "full"
+areas = ["crypto", "network", "diag", "update"]
+timeout_secs = 120
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["diag", "shutdown"]
+[boots.expect]
+exit = 33
+seed_store = "changed"
+serial_contains = [
+    "seed: the seed store is blank (first boot): no carried seed",
+    "random: no carried seed: the seed store is blank (first boot)",
+    "AriInit: fault random seed missing: no seed from an earlier boot (first boot of this disk)",
+    "AriInit: random seed saved for the next boot (early, generation 1)",
+    "AriInit: random seed saved for the next boot (after the boot services, generation 2)",
+    "virtio-net: tcp secret weak: kernel generator seeded from TSC + interrupts (",
+    ", no hardware source, no carried seed (first boot): ISNs and ports guessable with effort",
+    "virtio-net: fault net tcp secret weak x1",
+    "entropy  TSC + interrupts (",
+    " events): weak, no carried seed (first boot)",
+    ": random seed missing (code 2)",
+    "=== end of diagnostics ===",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_order = [
+    "seed: the seed store is blank (first boot): no carried seed",
+    "random: no carried seed: the seed store is blank (first boot)",
+    "AriInit: fault random seed missing: ",
+    "AriInit: random seed saved for the next boot (early, generation 1)",
+    "AriInit: boot services completed",
+    "AriInit: random seed saved for the next boot (after the boot services, generation 2)",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "carried seed mixed in",
+    "random seed not saved",
+    "random seed unreadable",
+    "tcp secret from kernel entropy",
+]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["diag", "shutdown"]
+[boots.expect]
+exit = 33
+seed_store = "changed"
+serial_contains = [
+    "seed: carried seed of generation 2 taken, successor of generation 3 saved",
+    "random: seed carried from the previous boot mixed in (ADR 0043)",
+    "AriInit: kernel generator has the seed carried from the previous boot",
+    "AriInit: random seed saved for the next boot (early, generation 4)",
+    "AriInit: random seed saved for the next boot (after the boot services, generation 5)",
+    "virtio-net: tcp secret from kernel entropy (TSC + interrupts + carried seed)",
+    "entropy  TSC + interrupts + carried seed",
+    "=== end of diagnostics ===",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_order = [
+    "seed: carried seed of generation 2 taken, successor of generation 3 saved",
+    "random: seed carried from the previous boot mixed in (ADR 0043)",
+    "AriInit: kernel generator has the seed carried from the previous boot",
+    "AriInit: random seed saved for the next boot (early, generation 4)",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "random seed missing",
+    "random seed not saved",
+    "random seed unreadable",
+    "net tcp secret weak",
+    "ssh entropy weak",
+    ": weak",
+    "seed store is blank",
+]

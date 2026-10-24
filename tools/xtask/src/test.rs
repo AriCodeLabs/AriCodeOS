@@ -1,10 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
-//! Test level orchestration: unit (host) -> smoke/full (QEMU).
+//! Test level orchestration: unit (host) -> smoke/full (QEMU), the QEMU
+//! scenarios run `--jobs N` at a time (ADR 0040).
 
 use crate::scenario::{self, Level, Scenario};
-use crate::{build, image, qemu, Cli, Result};
-use std::time::Duration;
+use crate::{build, image, parallel, ports, qemu, suite_lock, Cli, Result};
+use std::fmt::Write as _;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 pub fn run(cli: &Cli, release: bool) -> Result {
     let level: Level = match (cli.flag("--all"), cli.value("--level")) {
@@ -28,6 +31,15 @@ pub fn run(cli: &Cli, release: bool) -> Result {
                 .ok()
                 .filter(|n| (1..=64).contains(n))
                 .ok_or_else(|| format!("--cpus {v}: expected a number from 1 to 64"))?,
+        ),
+        None => None,
+    };
+    let jobs_requested = match cli.value("--jobs") {
+        Some(v) => Some(
+            v.parse::<usize>()
+                .ok()
+                .filter(|n| (1..=64).contains(n))
+                .ok_or_else(|| format!("--jobs {v}: expected a number from 1 to 64"))?,
         ),
         None => None,
     };
@@ -63,6 +75,28 @@ pub fn run(cli: &Cli, release: bool) -> Result {
         cpus_override.map_or(String::new(), |n| format!(", {n} CPUs in every scenario"))
     );
 
+    // One QEMU suite at a time on the whole host, containers included
+    // (`suite_lock`): waits here for another suite to finish. Then the
+    // test hosts the guest's test programs have compiled in: one set for
+    // the whole suite, taken before anything is built so a second suite in
+    // this network namespace stops at once (ADR 0040).
+    let (_suite_lock, _responder) = match level {
+        Level::Unit => (None, None),
+        _ => {
+            let suite = format!(
+                "cargo xtask test, level {level:?}{}{}",
+                if areas.is_empty() {
+                    String::new()
+                } else {
+                    format!(", areas {}", areas.join(","))
+                },
+                cpus_override.map_or(String::new(), |n| format!(", --cpus {n}"))
+            );
+            let lock = suite_lock::acquire(&suite)?;
+            (Some(lock), Some(qemu::Responder::start()?))
+        }
+    };
+
     // Unit level: always, even when filtering by area (a feature may want
     // only its QEMU scenarios; unit tests are still cheap and run anyway).
     println!("[xtask] unit tests (host)");
@@ -72,12 +106,35 @@ pub fn run(cli: &Cli, release: bool) -> Result {
     }
 
     let base = image::build_base_esp(release)?;
+    prebuild_packages(&selected)?;
+    let jobs = jobs(jobs_requested, cpus_override, selected.len());
+    let order = schedule(&selected, jobs);
+    println!(
+        "[xtask] {} QEMU scenarios, {jobs} at a time",
+        selected.len()
+    );
+    let start = Instant::now();
     let mut failed = Vec::new();
-    for s in &selected {
-        if !run_scenario(&base, s, cpus_override, release)? {
-            failed.push(s.name.clone());
-        }
-    }
+    let mut busy = Duration::ZERO;
+    parallel::run_ordered(
+        &order,
+        jobs,
+        |i| selected[i].serial,
+        |i| run_scenario(&base, selected[i], cpus_override),
+        |i, outcome| {
+            print!("{}", outcome.report);
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            busy += outcome.elapsed;
+            if !outcome.ok {
+                failed.push(selected[i].name.clone());
+            }
+        },
+    )?;
+    println!(
+        "[xtask] QEMU wall clock {}, {} of scenario time",
+        minutes(start.elapsed()),
+        minutes(busy)
+    );
     println!(
         "[xtask] {} QEMU scenarios, {} failed",
         selected.len(),
@@ -90,47 +147,134 @@ pub fn run(cli: &Cli, release: bool) -> Result {
     }
 }
 
-/// One boot to run: the scenario's only boot, or each one in `[[boots]]`.
-struct BootRun<'a> {
+/// `1m05s`.
+fn minutes(d: Duration) -> String {
+    let s = d.as_secs();
+    format!("{}m{:02}s", s / 60, s % 60)
+}
+
+/// How many scenarios run at once: `--jobs N`, or the default for this
+/// machine's CPUs ([`parallel::default_jobs`]), never more than the
+/// available memory holds nor than there are scenarios.
+fn jobs(requested: Option<usize>, cpus_override: Option<u32>, scenarios: usize) -> usize {
+    let host_cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let wanted =
+        requested.unwrap_or_else(|| parallel::default_jobs(host_cpus, cpus_override.unwrap_or(1)));
+    let available = parallel::available_memory();
+    let jobs = parallel::cap_by_memory(wanted, available);
+    if jobs < wanted {
+        println!(
+            "[xtask] {jobs} jobs instead of {wanted}: {} MiB of memory available, {} MiB per QEMU run",
+            available.unwrap_or(0) >> 20,
+            parallel::MEMORY_PER_JOB >> 20
+        );
+    }
+    jobs.min(scenarios.max(1))
+}
+
+/// Order the scenarios start in. One at a time: as listed. Several: the
+/// ones that run alone (`serial`) first, while nothing else is going, then
+/// the longest first (the time of their previous run, kept in their
+/// directory, or their timeout when they have none), so a long scenario
+/// never starts last and holds the suite alone. Results are printed in
+/// listed order either way.
+fn schedule(selected: &[&Scenario], jobs: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..selected.len()).collect();
+    if jobs > 1 {
+        let root = image::scenarios_root();
+        let expected: Vec<f32> = selected
+            .iter()
+            .map(|s| {
+                std::fs::read_to_string(root.join(&s.name).join(ELAPSED_FILE))
+                    .ok()
+                    .and_then(|t| t.trim().parse().ok())
+                    .unwrap_or(s.timeout_secs as f32)
+            })
+            .collect();
+        order.sort_by(|&a, &b| {
+            (selected[b].serial, expected[b])
+                .partial_cmp(&(selected[a].serial, expected[a]))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+    order
+}
+
+/// The scenario's last run time (seconds), in its directory.
+const ELAPSED_FILE: &str = "elapsed";
+
+/// Builds every external package the selected scenarios install, stage or
+/// publish before they run concurrently: `build_external` keeps them, so
+/// no scenario starts cargo and the build output stays in one place.
+fn prebuild_packages(selected: &[&Scenario]) -> Result {
+    for s in selected {
+        let mut wanted: Vec<(String, u32, bool)> =
+            s.install.iter().map(|d| (d.clone(), 1, false)).collect();
+        for spec in &s.packages {
+            let mut parts = spec.split(':');
+            if let (Some(dir), Some(Ok(version))) = (parts.next(), parts.next().map(str::parse)) {
+                wanted.push((dir.to_string(), version, parts.next() == Some("corrupt")));
+            }
+        }
+        for spec in &s.staged {
+            let base = spec.strip_suffix(":wrong-hash").unwrap_or(spec);
+            let (dir, version) = crate::app_spec(base).map_err(|e| format!("{}: {e}", s.name))?;
+            wanted.push((dir, version, false));
+        }
+        for spec in s.host_update.iter().flat_map(|u| &u.apps) {
+            let (dir, version) = crate::app_spec(spec).map_err(|e| format!("{}: {e}", s.name))?;
+            wanted.push((dir, version, false));
+        }
+        for (dir, version, corrupt) in wanted {
+            build::build_external(Path::new(&dir), version, build::PACKAGES_RELEASE, corrupt)?;
+        }
+    }
+    Ok(())
+}
+
+/// What one scenario run leaves for the summary: the lines to print (in
+/// scenario order, whatever order the runs finished in), its QEMU time and
+/// whether it passed.
+struct Outcome {
+    report: String,
+    elapsed: Duration,
+    ok: bool,
+}
+
+/// One boot to run: the scenario's only boot, or each one in `[[boots]]`,
+/// with the run's ports filled in.
+struct BootRun {
     cmdline: String,
-    stdin: &'a [String],
-    kill_on: Option<&'a str>,
-    expect: &'a scenario::Expect,
+    stdin: Vec<String>,
+    kill_on: Option<String>,
+    expect: scenario::Expect,
 }
 
 fn run_scenario(
     base: &std::path::Path,
     s: &Scenario,
     cpus_override: Option<u32>,
-    release: bool,
-) -> Result<bool> {
+) -> Result<Outcome> {
+    let mut report = String::new();
     let root = image::scenarios_root();
     let workdir = image::scenario_dir(&root, &s.name)?;
-    let runs: Vec<BootRun> = if s.boots.is_empty() {
-        vec![BootRun {
-            cmdline: s.boot_cmdline(&s.cmdline),
-            stdin: &s.stdin,
-            kill_on: None,
-            expect: &s.expect,
-        }]
-    } else {
-        s.boots
-            .iter()
-            .map(|b| BootRun {
-                cmdline: s.boot_cmdline(&b.cmdline),
-                stdin: &b.stdin,
-                kill_on: b.kill_on.as_deref(),
-                expect: &b.expect,
-            })
-            .collect()
+    // This run's host ports (ADR 0040): the two `hostfwd` ports and, with
+    // `host_https`, the two HTTPS servers'.
+    let lease = ports::PortLease::take(if s.host_https { 4 } else { 2 })?;
+    let forwards = qemu::Forwards {
+        tcp: lease.ports()[0],
+        ssh: lease.ports()[1],
     };
+    let mut values: Vec<(&str, u16)> = Vec::new();
     let multi = !s.boots.is_empty();
     let disk_variant = image::DiskVariant::parse(&s.disk)
         .ok_or_else(|| format!("{}: unknown disk '{}'", s.name, s.disk))?;
     let mut installed: Vec<(String, Vec<u8>)> = Vec::new();
     for dir in &s.install {
-        installed
-            .push(build::build_external(std::path::Path::new(dir), 1, release, false)?.installed());
+        installed.push(
+            build::build_external(std::path::Path::new(dir), 1, build::PACKAGES_RELEASE, false)?
+                .installed(),
+        );
     }
     for spec in &s.packages {
         let mut parts = spec.split(':');
@@ -148,7 +292,12 @@ fn run_scenario(
             Some("corrupt") => true,
             Some(other) => return Err(format!("{}: package '{spec}': unknown '{other}'", s.name)),
         };
-        let app = build::build_external(std::path::Path::new(dir), version, release, corrupt)?;
+        let app = build::build_external(
+            std::path::Path::new(dir),
+            version,
+            build::PACKAGES_RELEASE,
+            corrupt,
+        )?;
         installed.push((
             format!(
                 "pkgs/{}-{}{}",
@@ -170,7 +319,12 @@ fn run_scenario(
                 None => (spec.as_str(), false),
             };
             let (dir, version) = crate::app_spec(base).map_err(|e| format!("{}: {e}", s.name))?;
-            let app = build::build_external(std::path::Path::new(&dir), version, release, false)?;
+            let app = build::build_external(
+                std::path::Path::new(&dir),
+                version,
+                build::PACKAGES_RELEASE,
+                false,
+            )?;
             packages.push((app, wrong_hash));
         }
         let mut entries = Vec::new();
@@ -222,58 +376,140 @@ fn run_scenario(
         }
         false => None,
     };
-    if let Some(u) = &s.host_update {
-        let channel = image::Channel {
-            system: u.system,
-            apps: u
-                .apps
-                .iter()
-                .map(|spec| crate::app_spec(spec).map_err(|e| format!("{}: {e}", s.name)))
-                .collect::<Result<_>>()?,
-            legacy_manifest: false,
-            tamper_index: u.tamper_index,
-            tamper_image: u.tamper_image,
-        };
-        image::publish_update_to(&image::test_update_dir(), release, &channel)?;
-        let url = format!(
-            "http://10.0.2.2:{}/update/\n",
-            aricode_proto::net::TEST_HTTP_PORT
-        );
-        if u.stale_index {
-            let ahead = image::stored_copy_ahead(&image::test_update_dir(), url.trim())?;
-            installed.push((
-                aricode_update_index::main_path(aricode_update_index::INDEXES_FILE),
-                aricode_update_index::stored::encode_all(&[ahead]),
-            ));
-        }
-        match u.source.as_str() {
-            "sources" => installed.push((
-                aricode_update_index::main_path(aricode_update_index::SOURCES_FILE),
-                url.into_bytes(),
-            )),
-            "legacy-url" => installed.push((
-                aricode_update_index::main_path(aricode_update_index::LEGACY_URL_FILE),
-                url.into_bytes(),
-            )),
-            "none" => {}
-            other => {
-                return Err(format!(
-                    "{}: host_update.source '{other}': sources, legacy-url or none",
-                    s.name
-                ))
+    // The scenario's own update source: published into its directory and
+    // served by its own server, so concurrent update scenarios never share
+    // a channel (ADR 0040).
+    let _update_server = match &s.host_update {
+        Some(u) => {
+            let channel = image::Publication {
+                system: u.system,
+                apps: u
+                    .apps
+                    .iter()
+                    .map(|spec| crate::app_spec(spec).map_err(|e| format!("{}: {e}", s.name)))
+                    .collect::<Result<_>>()?,
+                legacy_manifest: false,
+                tamper_index: u.tamper_index,
+                tamper_image: u.tamper_image,
+                ..image::Publication::default()
+            };
+            let dir = workdir.join("update");
+            writeln!(report, "{}", image::publish_channel(&dir, &channel)?).expect("String");
+            // The development source beside it (ADR 0045), served at /dev/
+            // by the same server.
+            if let Some(build) = u.dev_build {
+                let dev = image::Publication {
+                    channel: aricode_ab::Channel::Dev,
+                    system: Some(build),
+                    commit: Some(u.dev_commit.clone()),
+                    sign_as: u.dev_wrong_key.then_some(aricode_ab::Channel::Stable),
+                    stable_image: u.dev_stable_image,
+                    ..image::Publication::default()
+                };
+                let dev_dir = workdir.join(qemu::DEV_SOURCE_DIR);
+                image::forget_test_dev_source(&dev_dir)?;
+                writeln!(report, "{}", image::publish_channel(&dev_dir, &dev)?).expect("String");
             }
+            let server = qemu::UpdateServer::start(&dir)?;
+            values.push((scenario::UPDATE_PORT, server.port()));
+            let url = format!("http://10.0.2.2:{}/update/\n", server.port());
+            let dev_line = match (u.dev_build, u.dev_source) {
+                (Some(_), true) => format!("dev http://10.0.2.2:{}/dev/\n", server.port()),
+                (None, true) => {
+                    return Err(format!(
+                        "{}: host_update.dev_source needs dev_build",
+                        s.name
+                    ))
+                }
+                _ => String::new(),
+            };
+            if let Some(floor) = u.stable_floor {
+                let state = aricode_update_index::main_path(aricode_update_index::STATE_FILE);
+                if installed.iter().any(|(name, _)| *name == state) {
+                    return Err(format!(
+                        "{}: host_update.stable_floor and staged packages both write updater/state",
+                        s.name
+                    ));
+                }
+                installed.push((
+                    state,
+                    aricode_update_index::lists::with_section(
+                        "",
+                        aricode_update_index::lists::FLOOR,
+                        &aricode_update_index::lists::encode_floor(floor),
+                    )
+                    .into_bytes(),
+                ));
+            }
+            if u.stale_index {
+                let ahead = image::stored_copy_ahead(&dir, url.trim())?;
+                installed.push((
+                    aricode_update_index::main_path(aricode_update_index::INDEXES_FILE),
+                    aricode_update_index::stored::encode_all(&[ahead]),
+                ));
+            }
+            match u.source.as_str() {
+                "sources" => installed.push((
+                    aricode_update_index::main_path(aricode_update_index::SOURCES_FILE),
+                    format!("{url}{dev_line}").into_bytes(),
+                )),
+                "none" if !dev_line.is_empty() => installed.push((
+                    aricode_update_index::main_path(aricode_update_index::SOURCES_FILE),
+                    dev_line.into_bytes(),
+                )),
+                "legacy-url" => installed.push((
+                    aricode_update_index::main_path(aricode_update_index::LEGACY_URL_FILE),
+                    url.into_bytes(),
+                )),
+                "none" => {}
+                other => {
+                    return Err(format!(
+                        "{}: host_update.source '{other}': sources, legacy-url or none",
+                        s.name
+                    ))
+                }
+            }
+            Some(server)
         }
-    }
+        None => None,
+    };
     let _https = if s.host_https {
-        let (servers, ca) = https_servers(&workdir.join("tls"))?;
+        let ports = (lease.ports()[2], lease.ports()[3]);
+        let (servers, ca) = https_servers(&workdir.join("tls"), ports)?;
         installed.push((String::from("trusted_ca.der"), ca));
+        values.push((scenario::HTTPS_PORT, ports.0));
+        values.push((scenario::HTTPS_UNTRUSTED_PORT, ports.1));
         Some(servers)
     } else {
         None
     };
+    let fill_all =
+        |v: &[String]| -> Vec<String> { v.iter().map(|t| scenario::fill(t, &values)).collect() };
+    let runs: Vec<BootRun> = if s.boots.is_empty() {
+        vec![BootRun {
+            cmdline: s.boot_cmdline(&s.cmdline),
+            stdin: fill_all(&s.stdin),
+            kill_on: None,
+            expect: s.expect.filled(&values),
+        }]
+    } else {
+        s.boots
+            .iter()
+            .map(|b| BootRun {
+                cmdline: s.boot_cmdline(&b.cmdline),
+                stdin: fill_all(&b.stdin),
+                kill_on: b.kill_on.as_ref().map(|k| scenario::fill(k, &values)),
+                expect: b.expect.filled(&values),
+            })
+            .collect()
+    };
     let mut problems = Vec::new();
+    let mut qemu_lines = Vec::new();
     let mut elapsed = Duration::ZERO;
     let mut logs: Vec<(std::path::PathBuf, String)> = Vec::new();
+    // The kernel seed the shared disk held before each boot (ADR 0043): a
+    // fresh disk holds none.
+    let mut seed_before = None;
     for (i, run) in runs.iter().enumerate() {
         // Each boot has its own ESP (its cmdline); the disk is shared.
         let esp_name = if multi {
@@ -284,7 +520,7 @@ fn run_scenario(
         let esp = image::build_scenario_esp(base, &root, &esp_name, &run.cmdline, &s.inject)?;
         let input = qemu::Input {
             prompt: &s.prompt,
-            lines: run.stdin,
+            lines: &run.stdin,
         };
         let probe = s.host_tcp.as_ref().map(|h| qemu::TcpProbe {
             marker: &h.marker,
@@ -296,6 +532,7 @@ fn run_scenario(
             mouse_rel: h.mouse_rel,
             click: h.click.as_deref(),
             key_delay_ms: h.key_delay_ms,
+            echo_prompt: h.echo_prompt.as_deref(),
         });
         let ssh_probe = match (&s.host_ssh, &ssh_key) {
             (Some(h), Some(key)) => Some(qemu::SshProbe {
@@ -320,9 +557,10 @@ fn run_scenario(
             disk_variant,
             disk_readonly: s.disk_readonly,
             keep_disk: i > 0,
-            kill_on: run.kill_on,
+            kill_on: run.kill_on.as_deref(),
             installed: &installed,
             cpus: s.cpus(cpus_override),
+            cpu_rdrand: s.cpu_rdrand,
             usb: qemu::UsbOptions {
                 hid: s.usb_hid,
                 hid_msi: s.usb_hid_msi,
@@ -335,18 +573,28 @@ fn run_scenario(
             },
             nic: !s.no_nic,
             flr_device: s.flr_device,
+            forwards,
         };
+        let suffix = if multi {
+            format!("-{}", i + 1)
+        } else {
+            String::new()
+        };
+        let stderr_log = workdir.join(format!("qemu-stderr{suffix}.log"));
         let cap = qemu::run_headless(
             &esp,
             &workdir,
+            &stderr_log,
             Duration::from_secs(s.timeout_secs),
             &options,
         )?;
-        let log = workdir.join(if multi {
-            format!("serial-{}.log", i + 1)
-        } else {
-            String::from("serial.log")
-        });
+        // QEMU's own messages (a refused `hostfwd` port, a warning) belong
+        // to this scenario's block of the output, after its result line.
+        let stderr = std::fs::read_to_string(&stderr_log).unwrap_or_default();
+        for line in stderr.lines().filter(|l| !l.trim().is_empty()) {
+            qemu_lines.push(format!("      qemu: {line}"));
+        }
+        let log = workdir.join(format!("serial{suffix}.log"));
         let _ = std::fs::write(&log, &cap.serial);
         elapsed += cap.elapsed;
         let prefix = if multi {
@@ -354,7 +602,7 @@ fn run_scenario(
         } else {
             String::new()
         };
-        let expect = run.expect;
+        let expect = &run.expect;
         if let Some(exit) = expect.exit {
             if cap.exit_code != Some(exit) {
                 problems.push(format!("{prefix}exit {:?} != {exit}", cap.exit_code));
@@ -389,15 +637,32 @@ fn run_scenario(
         if cap.timed_out {
             problems.push(format!("{prefix}timeout {}s", s.timeout_secs));
         }
+        if expect.seed_store.is_some() || multi {
+            let seed_after = std::fs::read(workdir.join("disk.img"))
+                .ok()
+                .and_then(|img| image::seed_record(&img));
+            if let Some(why) = expect
+                .seed_store
+                .and_then(|want| want.check(seed_before.as_ref(), seed_after.as_ref()))
+            {
+                problems.push(format!("{prefix}{why}"));
+            }
+            seed_before = seed_after;
+        }
         logs.push((log, cap.serial));
         if !problems.is_empty() {
             // Later boots depend on this one: they would tell nothing new.
             break;
         }
     }
+    let _ = std::fs::write(
+        workdir.join(ELAPSED_FILE),
+        format!("{:.1}\n", elapsed.as_secs_f32()),
+    );
 
     let ok = problems.is_empty();
-    println!(
+    writeln!(
+        report,
         "[{}] {:<36} {:>5.1}s  {}",
         if ok { "PASS" } else { "FAIL" },
         s.name,
@@ -407,16 +672,24 @@ fn run_scenario(
         } else {
             problems.join("; ")
         }
-    );
+    )
+    .expect("String");
     if !ok {
         if let Some((log, serial)) = logs.last() {
             for line in serial.lines().filter(|l| !l.trim().is_empty()) {
-                println!("      | {line}");
+                writeln!(report, "      | {line}").expect("String");
             }
-            println!("      log: {}", log.display());
+            writeln!(report, "      log: {}", log.display()).expect("String");
         }
     }
-    Ok(ok)
+    for line in qemu_lines {
+        writeln!(report, "{line}").expect("String");
+    }
+    Ok(Outcome {
+        report,
+        elapsed,
+        ok,
+    })
 }
 
 /// HTTPS servers for `host_https` scenarios, killed when dropped.
@@ -432,9 +705,10 @@ impl Drop for HttpsServers {
 }
 
 /// Generates a test CA, a leaf for `10.0.2.2` signed by it and a
-/// self-signed leaf, and starts one `openssl s_server -www` for each leaf.
-/// Returns the servers and the CA certificate (DER).
-fn https_servers(dir: &std::path::Path) -> Result<(HttpsServers, Vec<u8>)> {
+/// self-signed leaf, and starts one `openssl s_server -www` for each leaf,
+/// on `ports` (trusted, untrusted). Returns the servers and the CA
+/// certificate (DER).
+fn https_servers(dir: &std::path::Path, ports: (u16, u16)) -> Result<(HttpsServers, Vec<u8>)> {
     use std::process::{Command, Stdio};
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -534,12 +808,8 @@ fn https_servers(dir: &std::path::Path) -> Result<(HttpsServers, Vec<u8>)> {
     let ca = std::fs::read(dir.join("ca.der")).map_err(|e| e.to_string())?;
     let mut servers = HttpsServers(Vec::new());
     for (port, cert, key) in [
-        (aricode_proto::net::TEST_HTTPS_PORT, "leaf.pem", "leaf.key"),
-        (
-            aricode_proto::net::TEST_HTTPS_UNTRUSTED_PORT,
-            "self.pem",
-            "self.key",
-        ),
+        (ports.0, "leaf.pem", "leaf.key"),
+        (ports.1, "self.pem", "self.key"),
     ] {
         let child = Command::new("openssl")
             .args([
@@ -555,16 +825,13 @@ fn https_servers(dir: &std::path::Path) -> Result<(HttpsServers, Vec<u8>)> {
         servers.0.push(child);
     }
     std::thread::sleep(Duration::from_millis(300));
-    // Fail loudly if a server died or the port is held by a leftover
-    // process (a killed earlier run): the scenario would otherwise talk to
-    // a stale server with another CA and report a certificate error.
-    for (child, port) in servers.0.iter_mut().zip([
-        aricode_proto::net::TEST_HTTPS_PORT,
-        aricode_proto::net::TEST_HTTPS_UNTRUSTED_PORT,
-    ]) {
+    // Fail loudly if a server died (its port was taken by another process
+    // between the lease and its bind): the scenario would otherwise talk
+    // to whatever holds the port and report a certificate error.
+    for (child, port) in servers.0.iter_mut().zip([ports.0, ports.1]) {
         if let Ok(Some(status)) = child.try_wait() {
             return Err(format!(
-                "HTTPS test server on port {port} exited at start ({status}); is the port in use by a leftover openssl?"
+                "HTTPS test server on port {port} exited at start ({status}); is the port in use?"
             ));
         }
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));

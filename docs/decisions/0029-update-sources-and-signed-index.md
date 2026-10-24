@@ -3,7 +3,9 @@
 - **Date:** 2026-10-17 (revised the same day after audit 1,
   `docs/audits/update-sources-audit-1.md`)
 - **Status:** Accepted (extends ADR 0027, replaces its channel manifest and
-  `update [URL|check]`)
+  `update [URL|check]`); extended by ADR 0045 (the development channel:
+  `dev` sources, `channel`/`commit` in the index and the system manifest,
+  a second key, `--channel` and `update rollback`)
 
 ## Context
 
@@ -67,7 +69,9 @@ it, no downgrades unless asked, and every install logged.
    (size and SHA-256), then its own signature and hashes, and the version
    inside must equal the version in the index; only then is anything
    written. The image is downloaded into the updater's memory buffer, not
-   into the `UPDATE` partition. The installer and the broker verify a
+   into the `UPDATE` partition (6 MiB, `IMAGE_DOWNLOAD_MAX`, since incident
+   0021; images already on the disk are verified piece by piece, up to
+   the slot size). The installer and the broker verify a
    package again before installing or launching it.
 
 4. **`update` reports and plans, `upgrade` follows the plan.** `update`
@@ -153,7 +157,8 @@ it, no downgrades unless asked, and every install logged.
    (decision 2, `aricode_update_index::installed_path`) is refused as a
    package (`inst-pkg-name`, code 7), never reported as a file-service
    failure. The updater's last output is in `updater/last.log`, shown to
-   remote sessions.
+   remote sessions (since ADR 0047 the updater writes to the session
+   itself and `last.log` remains the record of its last run).
 
 8. **Capabilities (least privilege).** The updater keeps `system, fs,
    net, block`: its `fs` grant is its private directory `updater/`. It
@@ -228,6 +233,14 @@ build. The key is decoded at compile time, so an invalid
 
 There is no key rotation in the protocol yet (see below).
 
+Since ADR 0045 there is a second key, the development channel's
+(`keys/dev-channel/`, seed in `~/.config/aricodeos/dev-signing-key`): it
+signs development builds and their indexes only, the key above never
+signs them, and every rule of this section applies to it the same way
+(`--signing-key DIR --channel dev`). The updater of every build carries its
+public half, inert unless the machine's loader trusts the channel; AriBoot carries it only on
+a machine installed with `usb-image --dev-source`.
+
 ## Consequences
 
 - Host unit tests (`libs/update-index`): index round trip, strict parsing,
@@ -285,8 +298,11 @@ There is no key rotation in the protocol yet (see below).
   timeout from the file service, which is never taken for a missing file
   (incident 0008).
 - Limits: four sources, four staged packages per `upgrade`, a 4 KiB index,
-  sixteen apps per index, 32 KiB packages, app names of 20 bytes, the
-  4 MiB image buffer.
+  sixteen apps per index, 32 KiB packages (`aricode_pkg::PACKAGE_MAX`,
+  shared with the broker and xtask since incident 0026), app names of 20
+  bytes, the
+  6 MiB download buffer (4 MiB before incident 0021; `publish-update`
+  refuses a larger image and warns past three quarters of it).
 - Open: key rotation and revocation (a signed key list in the index);
   freshness against a source that keeps serving one old index forever (an
   expiry date needs a trusted clock); binding an index to the source that

@@ -1,0 +1,13 @@
+scheduler: host nanoseconds per operation, median of seven batches; no kernel locks/context switch
+threads=16 empty_reap_scan_ns=35 yield_ns=29 yield_plus_scan_ns=64
+threads=64 empty_reap_scan_ns=140 yield_ns=34 yield_plus_scan_ns=186
+threads=256 empty_reap_scan_ns=585 yield_ns=20 yield_plus_scan_ns=324
+threads=1024 empty_reap_scan_ns=1155 yield_ns=30 yield_plus_scan_ns=1209
+threads=4096 empty_reap_scan_ns=4737 yield_ns=50 yield_plus_scan_ns=4738
+desktop=1024x768 one_pixel_cursor_move_changed_pixels=80 current_flip_writes=786432 current_flip_bytes=3145728
+desktop=1920x1080 one_pixel_cursor_move_changed_pixels=80 current_flip_writes=2073600 current_flip_bytes=8294400
+initrd files=74 bytes=2085424
+lookup=init parse_then_find_ns=1279 retained_parse_find_ns=441 btree_lookup_ns=30
+lookup=shell parse_then_find_ns=1688 retained_parse_find_ns=647 btree_lookup_ns=38
+lookup=bench parse_then_find_ns=1077 retained_parse_find_ns=36 btree_lookup_ns=11
+lookup=missing parse_then_find_ns=2976 retained_parse_find_ns=1060 btree_lookup_ns=31

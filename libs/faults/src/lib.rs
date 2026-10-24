@@ -82,6 +82,17 @@ impl<const N: usize> Meter<N> {
         self.window_end[kind] = now_ms.saturating_add(WINDOW_MS);
         Some((kind, count))
     }
+
+    /// When `drain_due` next has something to return: the earliest end of
+    /// a window holding refusals back. `None` when nothing is held, so a
+    /// service that sleeps until its next deadline (ADR 0044) still records
+    /// a burst when its window ends.
+    pub fn next_due(&self) -> Option<u64> {
+        (0..N)
+            .filter(|&k| self.pending[k] > 0)
+            .map(|k| self.window_end[k])
+            .min()
+    }
 }
 
 /// `"<kind> x<count>"` as an event name: `count` is shown up to
@@ -161,6 +172,26 @@ mod tests {
         assert_eq!(m.report(0, 10 + WINDOW_MS + 1), 0);
         assert_eq!(m.drain_due(10 + 2 * WINDOW_MS - 1), None);
         assert_eq!(m.drain_due(10 + 2 * WINDOW_MS), Some((0, 1)));
+    }
+
+    /// `next_due` names exactly the time `drain_due` starts returning
+    /// something, so a service may sleep until then (ADR 0044).
+    #[test]
+    fn next_due_is_when_drain_due_has_something() {
+        let mut m = Meter::<3>::new();
+        assert_eq!(m.next_due(), None, "nothing held");
+        assert_eq!(m.report(0, 10), 1);
+        assert_eq!(m.next_due(), None, "recorded at once, nothing held");
+        assert_eq!(m.report(0, 20), 0);
+        assert_eq!(m.report(2, 300), 1);
+        assert_eq!(m.report(2, 400), 0);
+        assert_eq!(m.next_due(), Some(10 + WINDOW_MS));
+        let due = m.next_due().unwrap();
+        assert_eq!(m.drain_due(due - 1), None);
+        assert_eq!(m.drain_due(due), Some((0, 1)));
+        assert_eq!(m.next_due(), Some(300 + WINDOW_MS));
+        assert_eq!(m.drain_due(300 + WINDOW_MS), Some((2, 1)));
+        assert_eq!(m.next_due(), None);
     }
 
     #[test]

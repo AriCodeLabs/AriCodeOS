@@ -16,8 +16,11 @@
 //!
 //! SMP (Phase 32): a shared ready queue; each CPU has its current thread and
 //! its idle thread (`cpu::Cpu`). Only the BSP keeps time and wakes sleepers;
-//! when a thread becomes ready and another CPU is idle, that CPU gets an IPI
-//! so it takes the thread without waiting for its next tick.
+//! when a thread becomes ready and another CPU that may run it is idle, that
+//! CPU gets an IPI so it takes the thread without waiting for its next tick.
+//! A busy CPU gives the thread its turn at the end of the running thread's
+//! quantum, which expires every quantum even when nothing else was ready
+//! (incident 0023).
 
 use super::context::switch_context;
 use super::thread::Thread;
@@ -132,17 +135,28 @@ pub fn on_tick(now: u64, bsp: bool, from_user: bool) {
     if woke > 0 {
         kick_idle();
     }
-    let expired = cpu::current().quantum_tick();
+    let expired = cpu::current().quantum_tick(QUANTUM_TICKS);
     if expired || woke > 0 {
-        PREEMPTIONS.fetch_add(1, Ordering::Relaxed);
-        switch_with(|p, c| p.preempt(c));
+        // Counted only when another thread takes the CPU: a lone thread
+        // now gets an expiry every quantum (incident 0023).
+        switch_with(|p, c| {
+            let next = p.preempt(c);
+            if next.is_some() {
+                PREEMPTIONS.fetch_add(1, Ordering::Relaxed);
+            }
+            next
+        });
     }
 }
 
-/// If another CPU is idle, takes it out of `hlt` so it checks the queue.
+/// Takes out of `hlt` the idle CPUs that can run the ready threads, one per
+/// thread (`RoundRobin::idle_cpus_to_wake`, incident 0023): a pinned thread
+/// wakes its own CPU, a batch of wakeups as many CPUs as it can use.
 fn kick_idle() {
-    if let Some(c) = cpu::idle_other_than(cpu::id()) {
-        apic::send_ipi(c.lapic_id(), apic::RESCHED_VECTOR);
+    let me = cpu::id() as usize;
+    let targets = with(|s| s.policy.idle_cpus_to_wake(me, |c| cpu::slot(c).is_online()));
+    for c in (0..cpu::MAX_CPUS).filter(|c| targets & 1 << c != 0) {
+        apic::send_ipi(cpu::slot(c).lapic_id(), apic::RESCHED_VECTOR);
     }
 }
 
@@ -210,7 +224,10 @@ extern "C" fn idle_entry(_: usize) {
 
 /// Idle loop of a CPU: if something is ready for it, it takes it; otherwise
 /// it sleeps. `sti; hlt` is atomic: an IPI or tick arriving just before
-/// sleeping still wakes the CPU.
+/// sleeping still wakes the CPU. Idle time is not measured here but at the
+/// switches to and from this thread (`Cpu::set_current`, incident 0020): a
+/// handler taken from `hlt` may switch to another thread before returning,
+/// and that thread's time is not idle.
 pub fn idle_loop() -> ! {
     loop {
         let irq = KernelIrq::save_and_disable();
@@ -219,15 +236,29 @@ pub fn idle_loop() -> ! {
             KernelIrq::restore(irq);
             yield_now();
         } else {
-            // SAFETY: rdtsc only reads the time stamp counter.
-            let t0 = unsafe { core::arch::x86_64::_rdtsc() };
             // SAFETY: enable interrupts and wait for the next one.
             unsafe { core::arch::asm!("sti", "hlt", options(nomem, nostack)) };
-            // SAFETY: same as above.
-            let t1 = unsafe { core::arch::x86_64::_rdtsc() };
-            // The idle thread never migrates: `current()` is its own CPU.
-            cpu::current().add_idle_cycles(t1.wrapping_sub(t0));
         }
+    }
+}
+
+/// Idle counters at one instant (`sysinfo::IDLE`): TSC cycles since boot
+/// and each online CPU's idle cycles, all up to one TSC reading taken with
+/// every CPU's idle clock locked (`cpu::idle_clocks_at_one_instant`). No
+/// stretch can end after that reading, so each CPU's idle is at most the
+/// elapsed cycles, and the difference of two samples is exactly the idle
+/// time between their readings.
+pub struct IdleSample {
+    pub elapsed: u64,
+    pub idle: Vec<u64>,
+}
+
+pub fn idle_sample() -> IdleSample {
+    let mut clocks = Vec::with_capacity(cpu::MAX_CPUS);
+    let now = cpu::idle_clocks_at_one_instant(&mut clocks);
+    IdleSample {
+        elapsed: crate::time::tsc_since_boot_at(now),
+        idle: clocks.iter().map(|c| c.total(now)).collect(),
     }
 }
 
@@ -624,6 +655,103 @@ pub fn selftest() {
     );
 }
 
+/// Quantum self-test (`test=quantum`, incident 0023): a thread that never
+/// blocks runs alone on a CPU for many quanta, then a thread pinned to that
+/// CPU is woken and another one is spawned there; each must start within a
+/// few quanta, which only quantum expiry can give them (no IPI targets a
+/// busy CPU, and only the BSP preempts on waking sleepers). Needs two CPUs:
+/// main waits and measures on CPU 0, the test runs on the last one.
+pub fn quantum_selftest() {
+    use super::wait::WaitQueue;
+    use core::sync::atomic::AtomicBool;
+
+    /// Long enough for any quantum counter to expire many times.
+    const ALONE_MS: u64 = 100;
+    /// How long main waits for each late thread before giving up.
+    const GIVE_UP_TICKS: u64 = 50;
+    /// Measured in the BSP's ticks while the target CPU counts its own: on
+    /// a loaded host (TCG, other guests) the two vCPUs progress unevenly,
+    /// so a few quanta of the target can take many BSP ticks. Well below
+    /// `GIVE_UP_TICKS`; the bug shows as never (`None`), not as late.
+    const LIMIT_TICKS: u64 = 25;
+    const NOT_YET: u64 = u64::MAX;
+
+    static STOP: AtomicBool = AtomicBool::new(false);
+    static BUSY_RUNNING: AtomicBool = AtomicBool::new(false);
+    static WOKEN: AtomicBool = AtomicBool::new(false);
+    static QUEUE: WaitQueue = WaitQueue::new();
+    static WAITER_RAN_AT: AtomicU64 = AtomicU64::new(NOT_YET);
+    static SPAWNED_RAN_AT: AtomicU64 = AtomicU64::new(NOT_YET);
+    extern "C" fn busy(_: usize) {
+        BUSY_RUNNING.store(true, Ordering::Release);
+        while !STOP.load(Ordering::Relaxed) {
+            core::hint::spin_loop();
+        }
+    }
+    extern "C" fn waiter(_: usize) {
+        QUEUE.wait_until(|| WOKEN.load(Ordering::Relaxed));
+        WAITER_RAN_AT.store(crate::time::ticks(), Ordering::Release);
+    }
+    extern "C" fn spawned(_: usize) {
+        SPAWNED_RAN_AT.store(crate::time::ticks(), Ordering::Release);
+    }
+    /// Ticks from `since` until `ran_at` is set, or `None` after the wait.
+    fn latency(since: u64, ran_at: &AtomicU64) -> Option<u64> {
+        loop {
+            let at = ran_at.load(Ordering::Acquire);
+            if at != NOT_YET {
+                return Some(at.saturating_sub(since));
+            }
+            if crate::time::ticks() - since > GIVE_UP_TICKS {
+                return None;
+            }
+            sleep_ms(crate::time::MS_PER_TICK);
+        }
+    }
+
+    let cpus = cpu::online_count();
+    assert!(cpus >= 2, "test=quantum needs two CPUs, {cpus} online");
+    let target = cpus - 1;
+    set_affinity(MAIN_TID, Some(0)).unwrap();
+
+    // The waiter blocks first, while the target CPU is free.
+    let w = spawn_on("q-waiter", waiter, 0, target).unwrap();
+    while state(w) != Some(State::Blocked) {
+        sleep_ms(10);
+    }
+    // Then the busy thread has the CPU to itself.
+    let b = spawn_on("q-busy", busy, 0, target).unwrap();
+    while !BUSY_RUNNING.load(Ordering::Acquire) {
+        sleep_ms(10);
+    }
+    sleep_ms(ALONE_MS);
+    WOKEN.store(true, Ordering::Relaxed);
+    let woken_at = crate::time::ticks();
+    QUEUE.wake_one();
+    let wake = latency(woken_at, &WAITER_RAN_AT);
+
+    sleep_ms(ALONE_MS);
+    let spawned_at = crate::time::ticks();
+    let s = spawn_on("q-spawned", spawned, 0, target).unwrap();
+    let spawn = latency(spawned_at, &SPAWNED_RAN_AT);
+
+    STOP.store(true, Ordering::Relaxed);
+    while [w, b, s].iter().any(|t| state(*t).is_some()) {
+        sleep_ms(10);
+    }
+    set_affinity(MAIN_TID, None).unwrap();
+    info!(
+        "quantum selftest: CPU {target} busy alone for {ALONE_MS} ms, then a woken thread started after {wake:?} ticks and a spawned one after {spawn:?} ticks (limit {LIMIT_TICKS}, gave up after {GIVE_UP_TICKS})"
+    );
+    for (what, l) in [("woken", wake), ("spawned", spawn)] {
+        assert!(
+            l.is_some_and(|t| t <= LIMIT_TICKS),
+            "a {what} thread pinned to busy CPU {target} waited {l:?} ticks (limit {LIMIT_TICKS}): its quantum no longer expires"
+        );
+    }
+    info!("quantum selftest ok (woken after {wake:?}, spawned after {spawn:?} ticks)");
+}
+
 /// SMP self-test (`test=smp`): every MADT CPU online, pinned threads running
 /// simultaneously on different CPUs, unpinned threads that migrate, a TLB
 /// shootdown observed from another CPU and a counter under a lock contended
@@ -872,4 +1000,148 @@ fn report_cpus_without_roamers(union: u32, idle_before: &[u64], waited_ms: u64) 
             ),
         }
     }
+}
+
+/// Idle accounting self-test (`test=idle`, incident 0020; the control of
+/// the performance audit of 731c398, finding A). It runs the control on
+/// CPU 0, whose timer handler wakes sleepers and switches to them on the
+/// idle thread's stack, and, with more CPUs, on the last one; with more
+/// CPUs it also checks that interrupts serviced by an idle CPU count as
+/// idle.
+pub fn idle_selftest() {
+    let cpus = cpu::online_count();
+    let mut targets = alloc::vec![0];
+    if cpus > 1 {
+        targets.push(cpus - 1);
+    }
+    let slept: Vec<u64> = targets.iter().map(|&t| idle_control(t, cpus)).collect();
+    if cpus > 1 {
+        idle_interrupts_check(cpus - 1);
+    }
+    info!(
+        "idle selftest ok ({cpus} CPUs: busy interval excluded from idle on CPUs {targets:?} and from the aggregate, sleep counted as idle: {slept:?} ms)"
+    );
+}
+
+/// Interrupt service on an idle CPU is idle time (`aricode_sched::idle`):
+/// during a window of ten 10 ms sleeps of main (about 200 ms) CPU `target`,
+/// with nothing to run, takes its timer ticks and ten RESCHED IPIs, each
+/// serviced on its idle thread. What it proves: servicing those interrupts
+/// accounts no switch on that CPU, so its idle stretch stays open through
+/// the window and its idle time grows by the whole window. A window in
+/// which the stretch changed (another thread briefly ran there) is retried;
+/// if interrupts ended the stretch, every window would change and the check
+/// fails. Each end reads the clock and the TSC together
+/// (`Cpu::idle_clock_now`), so an open stretch always started before `t0`.
+fn idle_interrupts_check(target: usize) {
+    const ATTEMPTS: u32 = 10;
+    let c = cpu::slot(target);
+    for attempt in 1..=ATTEMPTS {
+        let (before, t0) = c.idle_clock_now();
+        for _ in 0..10 {
+            apic::send_ipi(c.lapic_id(), apic::RESCHED_VECTOR);
+            sleep_ms(10);
+        }
+        let (after, t1) = c.idle_clock_now();
+        if before.idle_since().is_some() && before.idle_since() == after.idle_since() {
+            let grown = after.total(t1) - before.total(t0);
+            assert_eq!(
+                grown,
+                t1 - t0,
+                "CPU {target}: interrupts serviced while idle were not counted as idle"
+            );
+            info!(
+                "idle selftest: CPU {target} idle through a {} ms window with timer ticks and 10 RESCHED IPIs: idle grew by the whole window (attempt {attempt})",
+                crate::time::tsc_cycles_to_ms(grown).unwrap_or(0)
+            );
+            return;
+        }
+    }
+    panic!("idle selftest: CPU {target} left its idle thread in each of {ATTEMPTS} windows");
+}
+
+/// One control run: a thread pinned to `target` first sleeps, so the CPU
+/// idles and the thread is then switched in from its idle thread; it stays
+/// runnable for 500 ms and sleeps 200 ms, sampling the raw counters before
+/// and after. The busy interval cannot be idle time on its CPU: idle there
+/// is at most `elapsed - busy`, and the aggregate at most `cpus * elapsed -
+/// busy`. The 200 ms sleep must count as idle. Returns the idle
+/// milliseconds of `target`.
+fn idle_control(target: usize, cpus: usize) -> u64 {
+    const BUSY_MS: u64 = 500;
+    const SLEEP_MS: u64 = 200;
+    static BUSY_CYCLES: AtomicU64 = AtomicU64::new(0);
+    static SAMPLES: IrqLock<Option<(IdleSample, IdleSample)>> = IrqLock::new(None);
+    use crate::time::rdtsc;
+    extern "C" fn control(_: usize) {
+        sleep_ms(50);
+        let before = idle_sample();
+        let start = rdtsc();
+        while crate::time::tsc_cycles_to_ms(rdtsc().wrapping_sub(start)).expect("TSC calibrated")
+            < BUSY_MS
+        {
+            core::hint::spin_loop();
+        }
+        BUSY_CYCLES.store(rdtsc().wrapping_sub(start), Ordering::Relaxed);
+        sleep_ms(SLEEP_MS);
+        let after = idle_sample();
+        *SAMPLES.lock() = Some((before, after));
+    }
+
+    // main waits on another CPU when there is one, waking every 100 ms.
+    let main_cpu = if target == 0 { cpus - 1 } else { 0 };
+    set_affinity(MAIN_TID, Some(main_cpu)).unwrap();
+    let t = spawn_on("idle-control", control, 0, target).unwrap();
+    while state(t).is_some() {
+        sleep_ms(100);
+    }
+    set_affinity(MAIN_TID, None).unwrap();
+
+    let (before, after) = SAMPLES.lock().take().expect("control samples");
+    let busy = BUSY_CYCLES.load(Ordering::Relaxed);
+    let elapsed = after.elapsed - before.elapsed;
+    let idle: Vec<u64> = after
+        .idle
+        .iter()
+        .zip(&before.idle)
+        .map(|(a, b)| a.wrapping_sub(*b))
+        .collect();
+    let permille = |x: u64| x.saturating_mul(1000) / elapsed.max(1);
+    let ms = |x: u64| crate::time::tsc_cycles_to_ms(x).unwrap_or(0);
+    let others: Vec<u64> = idle.iter().map(|d| permille(*d)).collect();
+    let on_target = idle[target];
+    let aggregate: u64 = idle.iter().sum();
+    info!(
+        "idle selftest: control on CPU {target}: elapsed {elapsed} cycles ({} ms), busy {busy} cycles ({} ms), idle {on_target} cycles ({} ms, {} permille; at most {} permille possible); aggregate {aggregate} of {} cycles; idle permille per CPU {others:?}",
+        ms(elapsed),
+        ms(busy),
+        ms(on_target),
+        permille(on_target),
+        permille(elapsed.saturating_sub(busy)),
+        elapsed * cpus as u64
+    );
+    // Slack for where the samples fall relative to the switches: 1 %.
+    let slack = elapsed / 100;
+    assert!(
+        on_target + busy <= elapsed + slack,
+        "CPU {target} counted its busy interval as idle: idle {} ms + busy {} ms > elapsed {} ms",
+        ms(on_target),
+        ms(busy),
+        ms(elapsed)
+    );
+    assert!(
+        aggregate + busy <= (elapsed + slack) * cpus as u64,
+        "aggregate idle includes the busy interval: {} ms + busy {} ms > {cpus} x {} ms",
+        ms(aggregate),
+        ms(busy),
+        ms(elapsed)
+    );
+    // The sleep is idle time on the control's CPU (other threads may briefly
+    // run there).
+    assert!(
+        ms(on_target) >= SLEEP_MS * 3 / 4,
+        "CPU {target} idled only {} ms of a {SLEEP_MS} ms sleep",
+        ms(on_target)
+    );
+    ms(on_target)
 }

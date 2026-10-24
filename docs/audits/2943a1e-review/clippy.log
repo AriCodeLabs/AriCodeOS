@@ -1,0 +1,32 @@
+    Checking aricode-crypto v0.13.0 (/home/serverbig/AriCodeOS-audit-2943a1e/libs/crypto)
+    Checking serde_core v1.0.229
+    Checking serde v1.0.229
+    Checking hashbrown v0.17.1
+    Checking aricode-initrd v0.13.0 (/home/serverbig/AriCodeOS-audit-2943a1e/libs/initrd)
+    Checking equivalent v1.0.2
+    Checking indexmap v2.14.2
+    Checking serde_spanned v0.6.9
+    Checking toml_datetime v0.6.11
+    Checking winnow v0.7.15
+    Checking toml_write v0.1.2
+    Checking toml_edit v0.22.27
+    Checking aricode-pkg v0.13.0 (/home/serverbig/AriCodeOS-audit-2943a1e/libs/pkg)
+    Checking aricode-net v0.13.0 (/home/serverbig/AriCodeOS-audit-2943a1e/libs/net)
+    Checking aricode-http v0.13.0 (/home/serverbig/AriCodeOS-audit-2943a1e/libs/http)
+    Checking aricode-fb-console v0.13.0 (/home/serverbig/AriCodeOS-audit-2943a1e/libs/fb-console)
+    Checking aricode-proto v0.13.0 (/home/serverbig/AriCodeOS-audit-2943a1e/sdk/proto)
+    Checking aricode-pci v0.13.0 (/home/serverbig/AriCodeOS-audit-2943a1e/libs/pci)
+    Checking aricode-gfx v0.13.0 (/home/serverbig/AriCodeOS-audit-2943a1e/libs/gfx)
+    Checking aricode-virtio v0.13.0 (/home/serverbig/AriCodeOS-audit-2943a1e/libs/virtio)
+    Checking toml v0.8.23
+    Checking aricode-update-index v0.13.0 (/home/serverbig/AriCodeOS-audit-2943a1e/libs/update-index)
+    Checking aricode-ab v0.13.0 (/home/serverbig/AriCodeOS-audit-2943a1e/libs/ab)
+    Checking aricode-ssh v0.13.0 (/home/serverbig/AriCodeOS-audit-2943a1e/libs/ssh)
+    Checking aricode-arifs v0.13.0 (/home/serverbig/AriCodeOS-audit-2943a1e/libs/arifs)
+    Checking aricode-gpt v0.13.0 (/home/serverbig/AriCodeOS-audit-2943a1e/libs/gpt)
+    Checking aricode-abi v0.13.0 (/home/serverbig/AriCodeOS-audit-2943a1e/sdk/abi)
+    Checking aricode-cmdline v0.13.0 (/home/serverbig/AriCodeOS-audit-2943a1e/libs/cmdline)
+    Checking aricode-fat v0.13.0 (/home/serverbig/AriCodeOS-audit-2943a1e/libs/fat)
+    Checking xtask v0.13.0 (/home/serverbig/AriCodeOS-audit-2943a1e/tools/xtask)
+    Checking aricode-sys v0.13.0 (/home/serverbig/AriCodeOS-audit-2943a1e/sdk/rust)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 7.21s

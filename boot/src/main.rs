@@ -5,6 +5,9 @@
 //! Sequence (section 11 of the master document):
 //!   GOP framebuffer -> ACPI RSDP -> load kernel.elf -> reserve memory ->
 //!   page tables -> BootInfo -> ExitBootServices -> jump to the kernel.
+//!
+//! Before that, on the disk with the `ARIBOOT` partition: the carried
+//! kernel seed (its successor written first, ADR 0043) and the A/B slot.
 
 #![no_std]
 #![no_main]
@@ -13,6 +16,7 @@ extern crate alloc;
 
 mod memmap;
 mod qemu;
+mod seed;
 mod slots;
 
 use alloc::vec::Vec;
@@ -51,21 +55,39 @@ fn main() -> Status {
 
     // The cmdline is optional; it is copied into kernel memory so that it
     // survives ExitBootServices and AriKernel can see it.
-    let mut cmdline_bytes = read_file(cstr16!("\\aricodeos\\cmdline.txt")).unwrap_or_default();
-    let qemu_exit = CmdLine::from_bytes(&cmdline_bytes).has(keys::QEMU_EXIT);
+    let esp_cmdline = read_file(cstr16!("\\aricodeos\\cmdline.txt")).unwrap_or_default();
+    let qemu_exit = CmdLine::from_bytes(&esp_cmdline).has(keys::QEMU_EXIT);
+    // The keys that describe the booted slot and image are AriBoot's alone
+    // (ADR 0045): any copy in cmdline.txt is dropped, so the system never
+    // reads an identity the loader did not verify.
+    let mut cmdline_bytes = without_loader_keys(&esp_cmdline);
 
     // A/B boot: if there is a valid slot image, the kernel learns from the
-    // cmdline where it booted from (and whether it must confirm it).
-    let loaded = slots::load();
+    // cmdline where it booted from (and whether it must confirm it). The
+    // same disk carries the kernel seed (ADR 0043).
+    let slots::Found { loaded, seed } = slots::load();
     if let Some(l) = &loaded {
         cmdline_bytes.extend_from_slice(b" boot_slot=");
         cmdline_bytes.extend_from_slice(l.slot.name().as_bytes());
         if l.pending {
             cmdline_bytes.extend_from_slice(b" boot_pending");
         }
+        let m = &l.manifest;
+        let identity = alloc::format!(
+            " {}={} {}={}",
+            keys::BOOT_VERSION,
+            m.version,
+            keys::BOOT_CHANNEL,
+            m.channel.name()
+        );
+        cmdline_bytes.extend_from_slice(identity.as_bytes());
+        if let Some(commit) = &m.commit {
+            let commit = alloc::format!(" {}={}", keys::BOOT_COMMIT, commit.as_str());
+            cmdline_bytes.extend_from_slice(commit.as_bytes());
+        }
     }
 
-    match run(&cmdline_bytes, loaded) {
+    match run(&cmdline_bytes, loaded, seed) {
         Ok(never) => match never {},
         Err(e) => {
             error!("AriBoot: unrecoverable failure: {e}");
@@ -81,6 +103,7 @@ fn main() -> Status {
 fn run(
     cmdline_bytes: &[u8],
     loaded: Option<slots::Loaded>,
+    seed: seed::Carried,
 ) -> Result<core::convert::Infallible, &'static str> {
     // 1. GOP framebuffer (optional: without GOP we continue with serial only).
     let framebuffer = framebuffer_info();
@@ -279,7 +302,13 @@ fn run(
         cmdline_size,
         phys_map_offset: PHYS_MAP_BASE,
         phys_map_limit: phys_limit,
+        carried_seed: boot_protocol::SeedBytes(seed.seed),
+        carried_seed_status: seed.status,
+        _reserved: 0,
     };
+    // The kernel's share now lives only in `boot_info` (wiped below once
+    // it is in its page) and, after the jump, in the kernel.
+    drop(seed);
 
     info!("ExitBootServices -> AriKernel");
     // Beacons for hardware without serial (docs/hardware.md): white before
@@ -306,6 +335,8 @@ fn run(
     let boot_info_ptr = boot_info_page.as_ptr() as *mut BootInfo;
     // SAFETY: our own page, aligned, identity-mapped in the new tables.
     unsafe { boot_info_ptr.write(boot_info) };
+    // This stack becomes free memory for the kernel: no seed left on it.
+    aricode_crypto::wipe(&mut boot_info.carried_seed.0);
 
     // 10. Jump. The stack and BootInfo are handed over through the physical
     // map so the kernel never depends on the identity map. rsp = top - 8 to
@@ -399,6 +430,23 @@ fn read_file(path: &CStr16) -> uefi::Result<Vec<u8>> {
     }
     buf.truncate(read);
     Ok(buf)
+}
+
+/// `cmdline.txt` without the keys only AriBoot may set
+/// ([`keys::LOADER_ONLY`]); a copy found there is said and dropped.
+fn without_loader_keys(raw: &[u8]) -> Vec<u8> {
+    let line = CmdLine::from_bytes(raw);
+    if let Some(key) = line.first_of(keys::LOADER_ONLY) {
+        warn!("cmdline: `{key}` is set by AriBoot only; dropped from cmdline.txt");
+    }
+    let mut out = Vec::with_capacity(raw.len());
+    for token in line.tokens_without(keys::LOADER_ONLY) {
+        if !out.is_empty() {
+            out.push(b' ');
+        }
+        out.extend_from_slice(token.as_bytes());
+    }
+    out
 }
 
 fn framebuffer_info() -> FramebufferInfo {

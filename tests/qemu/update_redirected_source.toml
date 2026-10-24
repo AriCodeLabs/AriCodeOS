@@ -1,0 +1,43 @@
+# ADR 0048: the public source's path and redirects, from the local mirror
+# that `serve-update` also serves. The source is added at the GitHub
+# release path (/AriCodeLabs/AriCodeOS/releases/latest/download/): `latest`
+# answers 302 to the release (with a 9,243-byte header line, as github.com
+# does), the release answers 302 to the asset with a 900-byte signed query
+# (the request must hold it), so every file of the source (index,
+# signature, image) takes the two redirects a GitHub download takes. `update` and `upgrade` work through them; the redirects'
+# bodies never reach the download. The shell's `http` shows the limits: a
+# redirect loop stops after five, and a redirect to ftp:// is refused.
+name = "update.redirected_source"
+description = "an update source behind two redirects: update and upgrade follow them; loops and other schemes are refused"
+level = "full"
+areas = ["update", "network", "shell"]
+disk = "update-empty"
+timeout_secs = 180
+
+[host_update]
+system = 2
+source = "none"
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = [
+    "update add 10.0.2.2:{update_port}/AriCodeLabs/AriCodeOS/releases/latest/download/",
+    "update",
+    "upgrade",
+    "http http://10.0.2.2:{update_port}/redirect-loop",
+    "http http://10.0.2.2:{update_port}/to-ftp",
+    "shutdown",
+]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "updater: source 1 http://10.0.2.2:{update_port}/AriCodeLabs/AriCodeOS/releases/latest/download/: index verified (serial ",
+    "updater: system: installed 1, source 1 offers 2: upgrade available",
+    "updater: downloading aricodeos-2.img (",
+    "updater: system image version 2 verified (signature and SHA-256)",
+    "updater: installed into slot B",
+    "http: more than 5 redirects",
+    "http: redirected to an invalid location (not an http(s) URL, or too long)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "update: updater exited with", "redirect body!!", "response headers too large"]

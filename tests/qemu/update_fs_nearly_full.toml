@@ -31,7 +31,7 @@ stdin = ["update", "upgrade", "run hello_ext 6", "ls", "shutdown"]
 [boots.expect]
 exit = 33
 serial_contains = [
-    "updater: source 1 http://10.0.2.2:17010/update/: index verified (serial ",
+    "updater: source 1 http://10.0.2.2:{update_port}/update/: index verified (serial ",
     "updater: system: installed 1, source 1 offers 2: upgrade available",
     "updater: app hello_ext: installed 1, source 1 offers 2: upgrade available",
     "updater: installed into slot B",

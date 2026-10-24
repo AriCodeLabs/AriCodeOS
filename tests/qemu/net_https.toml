@@ -11,8 +11,8 @@ cmdline = "qemu_exit shell"
 host_https = true
 timeout_secs = 120
 stdin = [
-    "http https://10.0.2.2:17443/",
-    "http https://10.0.2.2:17444/",
+    "http https://10.0.2.2:{https_port}/",
+    "http https://10.0.2.2:{https_untrusted_port}/",
     "shutdown",
 ]
 

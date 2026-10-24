@@ -23,11 +23,13 @@ use alloc::boxed::Box;
 use aricode_net::owners::{Owned, Owner};
 use aricode_net::rx;
 use aricode_net::tcp::{self, Connection};
+use aricode_net::timers;
 use aricode_net::{arp, dhcp, dns, eth, icmp, ipv4, isn, udp, Ipv4Addr, MacAddr};
 use aricode_proto::net::{
     Info, Op, OwnerSockets, Reply, Request, Status, TcpStats, MAX_DATAGRAM, MAX_LABEL,
 };
 use aricode_rt::sys::virtio_pci::{IRQ, SERVICE};
+use aricode_rt::sys::wait::{self, Deadline, Woken};
 use aricode_rt::sys::{self, abi, client_buffer, Handle};
 
 /// Client buffer mappings kept across requests (ADR 0038: bounded, the
@@ -62,10 +64,15 @@ const MAIN: Owner = 0;
 /// client in a loop cannot keep frames from being received. Its twin is
 /// `rx::FRAMES_PER_ROUND` (`libs/net`, incident 0013): a round receives at
 /// most 32 frames, then serves these requests and the timers, and follows
-/// at once (no interrupt wait) when frames were left in the ring, which is
-/// recorded as `net rx budget hit`. Together they bound what a client waits
-/// under a flood to one round, instead of the flood's duration.
+/// at once (no wait) when frames were left in the ring, which is recorded
+/// as `net rx budget hit`, or when these requests used up the budget.
+/// Together they bound what a client waits under a flood to one round,
+/// instead of the flood's duration (ADR 0035, ADR 0044).
 const IPC_REQUESTS_PER_ROUND: usize = 8;
+/// Exit code when the end-of-round wait fails for a reason other than its
+/// endpoints being gone: the service's own handles are wrong, and looping
+/// on the error would spin (ADR 0044).
+const EXIT_WAIT_FAILED: u64 = 10;
 /// Fault event when the kernel gave fewer than `isn::SECRET_LEN` random
 /// bytes for the TCP secret (ADR 0034); its code is the number obtained.
 const TCP_SECRET_FAULT: &str = "net tcp secret degraded";
@@ -90,7 +97,7 @@ const ARP_WAIT_MS: u64 = 1000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fault {
     /// `TcpConnect`/`TcpListen` with every TCP slot in use (`MAX_TCP`,
-    /// TIME-WAIT and unreaped connections included).
+    /// unreaped connections included) and none in TIME-WAIT to recycle.
     TcpTableFull = 0,
     /// A frame for an unresolved next hop found the parking table full.
     ArpDeferFull = 1,
@@ -128,10 +135,19 @@ enum Fault {
     /// endpoint pair (out of handles or memory), not because the table is
     /// full.
     SessionCreate = 14,
+    /// At start: the kernel generator the TCP secret came from was not
+    /// seeded from a hardware source, or does not say what seeded it (ADR
+    /// 0034 §4, ADR 0039). Nobody was refused; the code is the
+    /// `EntropySource` number, 0 when unknown.
+    TcpSecretWeak = 15,
+    /// A full TCP table gave up the slot of a connection its client had
+    /// closed and that was waiting out TIME-WAIT, so a new connection
+    /// could have it (incident 0027). Nobody was refused (code 0).
+    TimeWaitRecycled = 16,
 }
 
 impl Fault {
-    const COUNT: usize = 15;
+    const COUNT: usize = 17;
     const ALL: [Fault; Self::COUNT] = [
         Fault::TcpTableFull,
         Fault::ArpDeferFull,
@@ -148,6 +164,8 @@ impl Fault {
         Fault::Reclaimed,
         Fault::RxBudget,
         Fault::SessionCreate,
+        Fault::TcpSecretWeak,
+        Fault::TimeWaitRecycled,
     ];
 
     fn from_index(i: usize) -> Option<Self> {
@@ -174,6 +192,8 @@ impl Fault {
             Fault::Reclaimed => "net socks reclaimed",
             Fault::RxBudget => "net rx budget hit",
             Fault::SessionCreate => "net session create",
+            Fault::TcpSecretWeak => "net tcp secret weak",
+            Fault::TimeWaitRecycled => "net tcp tw recycled",
         }
     }
 
@@ -184,7 +204,9 @@ impl Fault {
         match self {
             Fault::BadRequest => Status::Invalid,
             Fault::BadHandles => Status::BadHandles,
-            Fault::Reclaimed | Fault::RxBudget => Status::Ok,
+            Fault::Reclaimed | Fault::RxBudget | Fault::TcpSecretWeak | Fault::TimeWaitRecycled => {
+                Status::Ok
+            }
             _ => Status::Busy,
         }
     }
@@ -281,7 +303,9 @@ struct Socket {
     recv: Option<PendingRecv>,
     /// Last uncollected datagram (sender, port, data).
     queued: Option<(Ipv4Addr, u16, usize)>,
-    data: [u8; MAX_DATAGRAM as usize],
+    /// `MAX_DATAGRAM` bytes on the heap (incident 0018): eight of them
+    /// inline were 12 KiB of the `Stack`.
+    data: Box<[u8]>,
 }
 
 /// TCP socket: one connection (or a listening port) and its waits.
@@ -298,16 +322,24 @@ struct TcpSock {
 }
 
 impl TcpSock {
-    fn new(conn: Connection) -> Self {
-        Self {
-            conn,
+    /// A socket for a connection between these endpoints, on the heap.
+    /// Out of line (incident 0018): a `Connection` carries 8 KiB of
+    /// buffers, and the copies of it an unoptimized build makes on the way
+    /// into the `Box` stay in this frame instead of in the frame of every
+    /// request or frame handler that opens a connection.
+    #[inline(never)]
+    fn boxed(local: Ipv4Addr, local_port: u16, remote: Ipv4Addr, remote_port: u16) -> Box<Self> {
+        // One expression: the `Box` is allocated first and the socket
+        // written into it.
+        Box::new(Self {
+            conn: Connection::new(local, local_port, remote, remote_port),
             listening: false,
             accepted_from: None,
             connect: None,
             accept: None,
             recv: None,
             user_closed: false,
-        }
+        })
     }
 }
 
@@ -317,13 +349,36 @@ struct PendingDns {
     deadline: u64,
 }
 
-/// Frame waiting for ARP resolution.
-struct Deferred {
+/// Frames parked at once waiting for ARP resolution.
+const PARKING_SLOTS: usize = 4;
+
+/// A parking slot for a frame waiting for ARP resolution. Its buffer is
+/// allocated once, on the heap (incident 0018), and reused.
+struct Parking {
+    frame: Box<[u8]>,
+    waiting: Option<Parked>,
+}
+
+/// The frame in a parking slot: its next hop, length and deadline.
+#[derive(Clone, Copy)]
+struct Parked {
     next_hop: Ipv4Addr,
     len: usize,
-    frame: [u8; MAX_FRAME],
     deadline: u64,
 }
+
+/// A zeroed buffer allocated on the heap directly, never built on the
+/// stack first (incident 0018).
+fn heap_buffer(len: usize) -> Box<[u8]> {
+    alloc::vec![0u8; len].into_boxed_slice()
+}
+
+/// Largest `Stack` allowed (incident 0018; 4,680 bytes over virtio-net
+/// when it was set). It lives in a `Box`, but an unoptimized build may copy
+/// it through the stack on the way there, so even two copies must fit the
+/// frame budget of `cargo xtask stack-check` (16 KiB): buffers go on the
+/// heap.
+const STACK_STRUCT_MAX: usize = 8 * 1024;
 
 /// A client's session (ADR 0037): the receive side of its endpoint and the
 /// label init gave it (the process name).
@@ -337,6 +392,37 @@ struct Session {
 impl Session {
     fn label_str(&self) -> &str {
         core::str::from_utf8(&self.label[..self.len as usize]).unwrap_or("")
+    }
+}
+
+/// Why the service asks the kernel about its clients. Said with every
+/// reclaim, so the log tells a sweep made inside a request from the
+/// periodic one (incident 0018: the deep path is the former).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Why {
+    /// Once every `SWEEP_MS`, from the service loop.
+    Periodic,
+    /// Inside a request that found its table full.
+    SessionsFull,
+    TcpFull,
+    PingFull,
+    UdpFull,
+    DnsFull,
+    /// Inside a `TcpListen` or `UdpBind` whose port another client holds.
+    PortHeld,
+}
+
+impl Why {
+    fn text(self) -> &'static str {
+        match self {
+            Why::Periodic => "periodic sweep",
+            Why::SessionsFull => "sweep for a full session table",
+            Why::TcpFull => "sweep for a full tcp table",
+            Why::PingFull => "sweep for a full ping table",
+            Why::UdpFull => "sweep for a full udp table",
+            Why::DnsFull => "sweep for a full dns table",
+            Why::PortHeld => "check of a held port",
+        }
     }
 }
 
@@ -372,11 +458,14 @@ pub struct Stack<L: Link> {
     /// Per-boot key of the initial sequence numbers and the ephemeral
     /// ports (`aricode_net::isn`, ADR 0034), from the kernel's entropy.
     tcp_secret: isn::Secret,
+    /// What seeded the kernel generator the secret came from, read once at
+    /// start (ADR 0039); `None` if the kernel does not say.
+    tcp_secret_source: Option<abi::sysinfo::RandomSource>,
     /// Connections opened so far: the RFC 6056 port counter.
     tcp_port_count: u32,
     /// SYNs to a listener answered with a reset since boot (`TcpStats`).
     tcp_syn_dropped: u32,
-    deferred: [Option<Deferred>; 4],
+    deferred: [Parking; PARKING_SLOTS],
     buffers: ClientBuffers,
     /// Ephemeral UDP port for DNS queries.
     dns_port: u16,
@@ -404,7 +493,7 @@ fn new_socket(port: u16) -> Socket {
         port,
         recv: None,
         queued: None,
-        data: [0; MAX_DATAGRAM as usize],
+        data: heap_buffer(MAX_DATAGRAM as usize),
     }
 }
 
@@ -413,17 +502,16 @@ fn new_socket(port: u16) -> Socket {
 /// without it; the same source sshd draws from), read with the `SYSTEM`
 /// handle the clock already holds (`READ | TRANSFER` from init; the kernel
 /// checks `READ`). The kernel answers with every byte asked whenever it
-/// answers and exposes no entropy-quality state, so the only failure this
-/// can see is a refused syscall, and that one is not hidden: it records the
-/// fault event `TCP_SECRET_FAULT` (code = bytes obtained), says so on the
-/// console and fills the rest from the clock, so that boot's numbers are as
-/// predictable as before incident 0014 and `diag` shows it.
-fn tcp_secret(clock: &Clock, name: &str) -> isn::Secret {
+/// answers, so the only failure seen here is a refused syscall, and that
+/// one is not hidden: it records the fault event `TCP_SECRET_FAULT` (code
+/// = bytes obtained), says so on the console and fills the rest from the
+/// clock, so that boot's numbers are as predictable as before incident
+/// 0014 and `diag` shows it. The quality of the bytes is judged apart, by
+/// what seeded the generator (`report_secret_source`).
+fn tcp_secret(clock: &Clock, name: &str) -> (isn::Secret, bool) {
     let mut secret = [0u8; isn::SECRET_LEN];
     let got = sys::random(clock.0, &mut secret).unwrap_or(0);
-    if got >= isn::SECRET_LEN {
-        say(name, b"tcp secret from kernel entropy");
-    } else {
+    if got < isn::SECRET_LEN {
         let _ = sys::event_record(got as u64, TCP_SECRET_FAULT);
         say(
             name,
@@ -434,17 +522,100 @@ fn tcp_secret(clock: &Clock, name: &str) -> isn::Secret {
             *b ^= clock_bytes[i % clock_bytes.len()];
         }
     }
-    secret
+    (secret, got >= isn::SECRET_LEN)
+}
+
+/// A fault event in the kernel ring (`<kind> x<count>`, code = status
+/// number, or for `TcpSecretWeak` the `EntropySource` number of
+/// `secret_source`, 0 when unknown) and the same line on the console.
+fn record_fault(
+    name: &str,
+    what: Fault,
+    count: u32,
+    secret_source: Option<abi::sysinfo::RandomSource>,
+) {
+    let mut label = [0u8; aricode_faults::LABEL_LEN];
+    let label = aricode_faults::label(what.name(), count, &mut label);
+    let code = match what {
+        Fault::TcpSecretWeak => secret_source.map_or(0, |r| r.source as u64),
+        _ => what.status() as u64,
+    };
+    let _ = sys::event_record(code, label);
+    sys::print(name.as_bytes());
+    sys::print(b": fault ");
+    sys::print(label.as_bytes());
+    sys::print(b"\n");
+}
+
+/// Says what the TCP secret is worth (ADR 0034 §4, ADR 0039, ADR 0043):
+/// from a generator seeded by a hardware source or holding the seed
+/// carried from the previous boot, or a weak one (cycle counter and
+/// interrupt timing only, or a kernel that does not say), which is
+/// recorded as `Fault::TcpSecretWeak` through the fault meter and said on
+/// the console. The service runs either way: refusing would leave the
+/// machine without a network, and the owner reads the verdict in `diag`.
+/// `whole`: every byte came from the generator (otherwise the degraded
+/// fault was already said, and the strong line would be untrue).
+fn report_secret_source(
+    name: &str,
+    source: Option<abi::sysinfo::RandomSource>,
+    whole: bool,
+    faults: &mut aricode_faults::Meter<{ Fault::COUNT }>,
+    now: u64,
+) {
+    let mut text = [0u8; abi::sysinfo::RandomSource::SUMMARY_MAX];
+    let line = match source {
+        Some(r) if r.is_strong() && !whole => None,
+        Some(r) if r.is_strong() => Some(alloc::format!(
+            "{name}: tcp secret from kernel entropy ({})\n",
+            r.summary(&mut text)
+        )),
+        Some(r) => Some(alloc::format!(
+            "{name}: tcp secret weak: kernel generator seeded from {}, no hardware source, {}: ISNs and ports guessable with effort\n",
+            r.summary(&mut text),
+            r.carried.reason()
+        )),
+        None => Some(alloc::format!(
+            "{name}: tcp secret weak: the kernel does not report what seeded its generator\n"
+        )),
+    };
+    // One write, so the line is never split by another program's output.
+    if let Some(line) = line {
+        sys::print(line.as_bytes());
+    }
+    if !source.is_some_and(|r| r.is_strong()) {
+        let due = faults.report(Fault::TcpSecretWeak as usize, now);
+        if due > 0 {
+            record_fault(name, Fault::TcpSecretWeak, due, source);
+        }
+    }
 }
 
 impl<L: Link> Stack<L> {
-    pub fn new(link: L, clock: Clock, name: &'static str) -> Self {
+    /// Evaluated by `new`: a `Stack` over `STACK_STRUCT_MAX` does not build.
+    const SIZE_OK: () = assert!(
+        core::mem::size_of::<Self>() <= STACK_STRUCT_MAX,
+        "the network Stack outgrew STACK_STRUCT_MAX: move its buffers to the heap (incident 0018)"
+    );
+
+    /// The stack, on the heap (incident 0018): neither `run`'s frame nor an
+    /// inlining decision of the compiler holds it. Out of line, so the
+    /// copy an unoptimized build may make on the way into the `Box` is in
+    /// this frame, popped before the service loop starts.
+    #[inline(never)]
+    pub fn new(link: L, clock: Clock, name: &'static str) -> Box<Self> {
+        let () = Self::SIZE_OK;
         let xid = 0x4152_4900 | (link.mac().0[5] as u32);
-        Self {
+        let (secret, whole) = tcp_secret(&clock, name);
+        let secret_source = sys::random_source(clock.0);
+        let mut faults = aricode_faults::Meter::new();
+        report_secret_source(name, secret_source, whole, &mut faults, clock.now());
+        Box::new(Self {
             dhcp: dhcp::Client::new(link.mac(), xid),
             link,
             name,
-            tcp_secret: tcp_secret(&clock, name),
+            tcp_secret: secret,
+            tcp_secret_source: secret_source,
             clock,
             dhcp_next: 0,
             probe_deadline: 0,
@@ -458,18 +629,21 @@ impl<L: Link> Stack<L> {
             tcp: Owned::new(),
             tcp_port_count: 0,
             tcp_syn_dropped: 0,
-            deferred: [const { None }; 4],
+            deferred: core::array::from_fn(|_| Parking {
+                frame: heap_buffer(MAX_FRAME),
+                waiting: None,
+            }),
             buffers: ClientBuffers::new(),
             dns_port: 49153,
             retained: None,
-            faults: aricode_faults::Meter::new(),
+            faults,
             sessions: [None; MAX_SESSIONS],
             pending: [const { None }; MAX_SESSIONS],
             reclaimed: 0,
             last_sweep: 0,
             probe_error_said: false,
             generation: 0,
-        }
+        })
     }
 
     /// Accounts a refusal or a lost frame: recorded at once if the kind was
@@ -488,16 +662,10 @@ impl<L: Link> Stack<L> {
         }
     }
 
-    /// A fault event in the kernel ring (`<kind> x<count>`, code = status
-    /// number) and the same line on the console.
+    /// A fault event in the kernel ring and the same line on the console
+    /// (`record_fault`).
     fn record(&self, what: Fault, count: u32) {
-        let mut label = [0u8; aricode_faults::LABEL_LEN];
-        let name = aricode_faults::label(what.name(), count, &mut label);
-        let _ = sys::event_record(what.status() as u64, name);
-        sys::print(self.name.as_bytes());
-        sys::print(b": fault ");
-        sys::print(name.as_bytes());
-        sys::print(b"\n");
+        record_fault(self.name, what, count, self.tcp_secret_source);
     }
 
     /// Refuses a request: records it and answers with the matching status.
@@ -554,6 +722,53 @@ impl<L: Link> Stack<L> {
         count
     }
 
+    /// A sweep took a request while checking on its client, still to be
+    /// served: the loop must not sleep on it.
+    fn has_pending(&self) -> bool {
+        self.pending.iter().any(Option::is_some)
+    }
+
+    /// The earliest time something in the stack is due (ADR 0044): the
+    /// loop sleeps until then unless a frame, a request or the NIC's
+    /// interrupt comes first. Every deadline the round's timer work acts
+    /// on is here: the periodic sweep, DHCP (its retry or the ARP probe of
+    /// an acknowledged address), pings, DNS queries, UDP and TCP receives,
+    /// accepts and connects, TCP retransmissions and TIME-WAIT, frames
+    /// parked for ARP and faults held back by their one-second window.
+    fn next_deadline(&self) -> Deadline {
+        let waits = self
+            .pings
+            .iter()
+            .map(|(_, _, p)| p.deadline)
+            .chain(self.dns.iter().map(|(_, _, p)| p.deadline))
+            .chain(
+                self.sockets
+                    .iter()
+                    .filter_map(|(_, _, s)| s.recv.as_ref().map(|r| r.deadline)),
+            )
+            .chain(self.tcp.iter().flat_map(|(_, _, s)| {
+                [
+                    s.connect.map(|(_, d)| d),
+                    s.accept.map(|(_, d)| d),
+                    s.recv.as_ref().map(|r| r.deadline),
+                ]
+                .into_iter()
+                .flatten()
+            }))
+            .chain(
+                self.deferred
+                    .iter()
+                    .filter_map(|slot| slot.waiting.map(|p| p.deadline)),
+            );
+        Deadline::at(timers::next_deadline(
+            self.last_sweep + SWEEP_MS,
+            timers::dhcp_due(self.dhcp.state(), self.probe_deadline, self.dhcp_next),
+            waits,
+            self.tcp.iter().map(|(_, _, s)| &s.conn),
+            self.faults.next_due(),
+        ))
+    }
+
     fn session(&self, owner: Owner) -> Option<Session> {
         owner
             .checked_sub(1)
@@ -570,7 +785,7 @@ impl<L: Link> Stack<L> {
             Some(slot) => slot,
             None => {
                 // Full: the sessions of dead clients go first.
-                self.sweep(now);
+                self.sweep(now, Why::SessionsFull);
                 free(&self.sessions).ok_or(Fault::SessionsFull)?
             }
         };
@@ -591,10 +806,10 @@ impl<L: Link> Stack<L> {
     /// send handle is left and the queue is empty (ADR 0030). A request
     /// found waiting is kept for the main loop; a session with one kept is
     /// alive and not asked.
-    fn sweep(&mut self, now: u64) {
+    fn sweep(&mut self, now: u64, why: Why) {
         self.last_sweep = now;
         for i in 0..MAX_SESSIONS {
-            self.probe(i, now);
+            self.probe(i, now, why);
         }
     }
 
@@ -602,7 +817,7 @@ impl<L: Link> Stack<L> {
     /// endpoint is never retired). `true` while it lives.
     fn probe_owner(&mut self, owner: Owner, now: u64) -> bool {
         match owner.checked_sub(1) {
-            Some(i) if i < MAX_SESSIONS => self.probe(i, now),
+            Some(i) if i < MAX_SESSIONS => self.probe(i, now, Why::PortHeld),
             _ => true,
         }
     }
@@ -622,7 +837,7 @@ impl<L: Link> Stack<L> {
 
     /// Asks the kernel whether the client of session `i` is still there
     /// and retires the session if not. `true` while the session lives.
-    fn probe(&mut self, i: usize, now: u64) -> bool {
+    fn probe(&mut self, i: usize, now: u64, why: Why) -> bool {
         let Some(s) = self.sessions[i] else {
             return false;
         };
@@ -644,7 +859,7 @@ impl<L: Link> Stack<L> {
                 true
             }
             Err(e) if e.endpoint_gone() => {
-                self.retire(i, now);
+                self.retire(i, now, why);
                 false
             }
             // `Timeout` is the live answer. Anything else (a bad handle, an
@@ -668,7 +883,7 @@ impl<L: Link> Stack<L> {
     /// what it left open as a fault of that client (incident 0016). A
     /// connection the client had already closed is nobody's now and
     /// finishes by itself (TIME-WAIT, the last ACK).
-    fn retire(&mut self, i: usize, now: u64) {
+    fn retire(&mut self, i: usize, now: u64, why: Why) {
         let owner = i + 1;
         let Some(s) = self.sessions[i].take() else {
             return;
@@ -710,7 +925,9 @@ impl<L: Link> Stack<L> {
         sys::print(s.label_str().as_bytes());
         sys::print(b"'), ");
         sys::print(aricode_rt::fmt_u64(n as u64, &mut buf));
-        sys::print(b" socket(s) left open: reclaimed\n");
+        sys::print(b" socket(s) left open: reclaimed (");
+        sys::print(why.text().as_bytes());
+        sys::print(b")\n");
         self.note_many(Fault::Reclaimed, n as u32, now);
     }
 
@@ -876,14 +1093,14 @@ impl<L: Link> Stack<L> {
         match dst_mac {
             Some(mac) => self.transmit(mac, &mut frame, n, now),
             None => {
-                let Some(slot) = self.deferred.iter_mut().find(|d| d.is_none()) else {
+                let Some(slot) = self.deferred.iter_mut().find(|d| d.waiting.is_none()) else {
                     self.note(Fault::ArpDeferFull, now);
                     return Err(Status::Busy);
                 };
-                *slot = Some(Deferred {
+                slot.frame[..n].copy_from_slice(&frame[..n]);
+                slot.waiting = Some(Parked {
                     next_hop,
                     len: n,
-                    frame,
                     deadline: now + ARP_WAIT_MS,
                 });
                 self.send_arp_request(next_hop);
@@ -1034,17 +1251,19 @@ impl<L: Link> Stack<L> {
 
     fn flush_deferred(&mut self, ip: Ipv4Addr, mac: MacAddr, now: u64) {
         let mut lost = false;
+        let src = self.link.mac();
         for slot in self.deferred.iter_mut() {
-            if slot.as_ref().is_some_and(|d| d.next_hop == ip) {
-                let mut d = slot.take().unwrap();
-                eth::Header {
-                    dst: mac,
-                    src: self.link.mac(),
-                    ethertype: eth::ETHERTYPE_IPV4,
-                }
-                .write(&mut d.frame);
-                lost |= !self.link.send_frame(&d.frame[..d.len]);
+            let Some(parked) = slot.waiting.filter(|p| p.next_hop == ip) else {
+                continue;
+            };
+            slot.waiting = None;
+            eth::Header {
+                dst: mac,
+                src,
+                ethertype: eth::ETHERTYPE_IPV4,
             }
+            .write(&mut slot.frame);
+            lost |= !self.link.send_frame(&slot.frame[..parked.len]);
         }
         if lost {
             self.note(Fault::TxBusy, now);
@@ -1202,16 +1421,16 @@ impl<L: Link> Stack<L> {
             .iter()
             .filter(|(_, _, s)| s.accepted_from == Some(listener as u16))
             .count();
-        if self.tcp.is_full() || backlog >= TCP_BACKLOG {
+        if backlog >= TCP_BACKLOG || (self.tcp.is_full() && !self.recycle_time_wait(now)) {
             self.tcp_syn_dropped = self.tcp_syn_dropped.saturating_add(1);
             self.note(Fault::SynDropped, now);
             self.send_tcp_reset(ih, &h, payload.len(), now);
             return;
         }
-        let mut conn = Connection::new(ih.dst, h.dst_port, ih.src, h.src_port);
-        conn.listen(self.initial_seq(ih.dst, h.dst_port, ih.src, h.src_port, now));
-        conn.on_segment(&h, payload, now);
-        let mut sock = Box::new(TcpSock::new(conn));
+        let mut sock = TcpSock::boxed(ih.dst, h.dst_port, ih.src, h.src_port);
+        sock.conn
+            .listen(self.initial_seq(ih.dst, h.dst_port, ih.src, h.src_port, now));
+        sock.conn.on_segment(&h, payload, now);
         sock.accepted_from = Some(listener as u16);
         // The child belongs to the listener's client, who will accept it.
         self.tcp.insert(owner, sock);
@@ -1393,21 +1612,53 @@ impl<L: Link> Stack<L> {
     }
 
     /// Makes room in the TCP table by looking for dead clients when it is
-    /// full (ADR 0037: a full table is swept before it refuses). `false`
-    /// when the request is over: `owner` itself was found dead (its reply
-    /// endpoint is closed) or the table is still full (refused, recorded).
+    /// full (ADR 0037: a full table is swept before it refuses), then by
+    /// recycling a TIME-WAIT slot (incident 0027). `false` when the request
+    /// is over: `owner` itself was found dead (its reply endpoint is
+    /// closed) or the table is still full (refused, recorded).
     fn tcp_room(&mut self, owner: Owner, reply_to: Handle, now: u64) -> bool {
         if !self.tcp.is_full() {
             return true;
         }
-        self.sweep(now);
+        self.sweep(now, Why::TcpFull);
         if !self.still_there(owner, reply_to) {
             return false;
         }
-        if self.tcp.is_full() {
+        if self.tcp.is_full() && !self.recycle_time_wait(now) {
             self.refuse(reply_to, Fault::TcpTableFull, now);
             return false;
         }
+        true
+    }
+
+    /// Frees the slot of the closed connection in TIME-WAIT that would end
+    /// soonest (incident 0027). TIME-WAIT keeps late segments of that
+    /// connection from reaching a new one on the same address and port
+    /// pair; the connection taking the slot has its own pair (a new
+    /// ephemeral port, or another peer's), and its initial sequence number
+    /// comes from the per-boot secret (ADR 0034). Small stacks do the same
+    /// (lwIP's `tcp_kill_timewait`). The choice is `tcp::recyclable`
+    /// (host-tested): only connections their client has closed. `false`
+    /// when there is none.
+    fn recycle_time_wait(&mut self, now: u64) -> bool {
+        let socks = self.tcp.iter().map(|(i, _, s)| (i, s.user_closed, &s.conn));
+        let Some(i) = tcp::recyclable(socks) else {
+            return false;
+        };
+        let Some((_, mut sock)) = self.tcp.take(i) else {
+            return false;
+        };
+        // A wait the socket still holds is answered, never dropped (audit,
+        // L1): only a client that closed a connection it was still
+        // connecting can have one.
+        if let Some((reply_to, _)) = sock.connect.take() {
+            answer(reply_to, Reply::status(Status::Reset));
+        }
+        if let Some(r) = sock.recv.take() {
+            let _ = sys::handle_close(r.buf);
+            answer(r.reply_to, Reply::status(Status::Reset));
+        }
+        self.note(Fault::TimeWaitRecycled, now);
         true
     }
 
@@ -1446,9 +1697,9 @@ impl<L: Link> Stack<L> {
                 ) else {
                     return self.refuse(reply_to, Fault::TcpTableFull, now);
                 };
-                let mut conn = Connection::new(local, port, addr, req.port);
-                conn.connect(self.initial_seq(local, port, addr, req.port, now), now);
-                let mut sock = Box::new(TcpSock::new(conn));
+                let mut sock = TcpSock::boxed(local, port, addr, req.port);
+                sock.conn
+                    .connect(self.initial_seq(local, port, addr, req.port, now), now);
                 sock.connect = Some((reply_to, now + req.timeout_ms.max(1) as u64));
                 self.tcp.insert(owner, sock);
             }
@@ -1476,11 +1727,10 @@ impl<L: Link> Stack<L> {
                 if !self.tcp_room(owner, reply_to, now) {
                     return;
                 }
-                let mut conn = Connection::new(self.my_ip(), req.port, Ipv4Addr::UNSPECIFIED, 0);
+                let mut sock = TcpSock::boxed(self.my_ip(), req.port, Ipv4Addr::UNSPECIFIED, 0);
                 // A listener sends nothing itself: every SYN to it gets a
                 // connection of its own in `on_tcp`, with its own ISN.
-                conn.listen(0);
-                let mut sock = Box::new(TcpSock::new(conn));
+                sock.conn.listen(0);
                 sock.listening = true;
                 let slot = self.tcp.insert(owner, sock).unwrap_or(MAX_TCP);
                 answer(reply_to, Reply::ok(slot as u64));
@@ -1619,8 +1869,8 @@ impl<L: Link> Stack<L> {
         // retransmits or times out, and the loss stays visible in `diag`.
         let mut dropped = false;
         for slot in self.deferred.iter_mut() {
-            if slot.as_ref().is_some_and(|d| now >= d.deadline) {
-                *slot = None;
+            if slot.waiting.is_some_and(|p| now >= p.deadline) {
+                slot.waiting = None;
                 dropped = true;
             }
         }
@@ -1722,7 +1972,7 @@ impl<L: Link> Stack<L> {
             },
             Op::Ping => {
                 if self.pings.is_full() {
-                    self.sweep(now);
+                    self.sweep(now, Why::PingFull);
                     if !self.still_there(owner, reply_to) {
                         return;
                     }
@@ -1776,7 +2026,7 @@ impl<L: Link> Stack<L> {
                     }
                 }
                 if self.sockets.is_full() {
-                    self.sweep(now);
+                    self.sweep(now, Why::UdpFull);
                     if !self.still_there(owner, reply_to) {
                         return;
                     }
@@ -1831,8 +2081,7 @@ impl<L: Link> Stack<L> {
                     deadline: now + req.timeout_ms.max(1) as u64,
                 };
                 if let Some((from, port, len)) = sock.queued.take() {
-                    let data = sock.data;
-                    deliver_recv(&mut self.buffers, pending, from, port, &data[..len]);
+                    deliver_recv(&mut self.buffers, pending, from, port, &sock.data[..len]);
                 } else {
                     sock.recv = Some(pending);
                     self.retained = Some(buf); // closed on delivery or on timeout
@@ -1843,7 +2092,7 @@ impl<L: Link> Stack<L> {
                     return self.refuse(reply_to, Fault::BadHandles, now);
                 };
                 if self.dns.is_full() {
-                    self.sweep(now);
+                    self.sweep(now, Why::DnsFull);
                     if !self.still_there(owner, reply_to) {
                         return;
                     }
@@ -1934,8 +2183,10 @@ fn answer_with(reply_to: Handle, reply: Reply, handle: Handle) {
 
 /// Announces the MAC and serves requests forever: frame reception (up to
 /// `rx::FRAMES_PER_ROUND` frames), up to `IPC_REQUESTS_PER_ROUND` IPC
-/// requests (from the main endpoint and every session together), timeouts
-/// and waiting for the IRQ unless frames were left in the ring.
+/// requests (from the main endpoint and every session together) and the
+/// timers make a round; then one wait (ADR 0044) on every endpoint and the
+/// NIC's interrupt until the stack's next deadline, skipped when the round
+/// left frames, requests or swept requests behind.
 pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
     let mut hex = [0u8; 16];
     sys::print(name.as_bytes());
@@ -1948,9 +2199,27 @@ pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
     }
     sys::print(b"\n");
     let mut stack = Stack::new(link, clock, name);
-    let mut frame = [0u8; MAX_FRAME];
+    let stack = &mut *stack;
+    // The receive buffer on the heap too (incident 0018).
+    let mut frame: Box<[u8; MAX_FRAME]> = match heap_buffer(MAX_FRAME).try_into() {
+        Ok(f) => f,
+        Err(_) => unreachable!("heap_buffer(MAX_FRAME) has MAX_FRAME bytes"),
+    };
     let mut msg = [0u8; Request::LEN];
     let mut handles = [Handle(0); abi::IPC_MAX_HANDLES];
+    // The main endpoint and every session at once (ADR 0020): the index
+    // tells which one a request arrived on, and so who owns what it
+    // creates. A request can change the session table: an `Attach` grants
+    // one, a sweep or probe retires a dead client and closes its receive
+    // handle. The list is rebuilt before every receive or wait that follows
+    // such a change, so a closed handle is never passed back to the kernel
+    // (it would answer `BadHandle`) and a session granted mid-round is
+    // served in the same round.
+    let mut eps = [SERVICE; abi::IPC_MAX_ANY];
+    let mut owners = [MAIN; abi::IPC_MAX_ANY];
+    let mut count = 0;
+    let mut built = None;
+    let mut members = wait::Members::new();
     say(name, b"serving requests");
     loop {
         let now = stack.clock.now();
@@ -1959,8 +2228,8 @@ pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
         // keep the requests and the timers below from their turn.
         let round = rx::receive_round(
             rx::FRAMES_PER_ROUND,
-            &mut stack,
-            &mut frame,
+            stack,
+            &mut *frame,
             |s, f| s.link.recv_frame(f),
             |s, f, n| s.on_frame(&f[..n], now),
             |s| s.link.rx_pending(),
@@ -1970,7 +2239,7 @@ pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
         }
         // Once a second the kernel is asked about every client (ADR 0037).
         if now.saturating_sub(stack.last_sweep) >= SWEEP_MS {
-            stack.sweep(now);
+            stack.sweep(now, Why::Periodic);
         }
         // Requests a sweep took while checking on the clients.
         while let Some(i) = stack.pending.iter().position(Option::is_some) {
@@ -1978,19 +2247,9 @@ pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
                 stack.serve(p.owner, &p.msg[..p.n], &p.handles[..p.nh], now);
             }
         }
-        // The main endpoint and every session at once (ADR 0020): the index
-        // tells which one the request arrived on, and so who owns what it
-        // creates. A request served inside the round can change the
-        // session table: an `Attach` grants one, a sweep or probe retires a
-        // dead client and closes its receive handle. The list is rebuilt
-        // before the next receive whenever that happened, so a closed
-        // handle is never passed back to the kernel (it would answer
-        // `BadHandle` and end the round early) and a session granted
-        // mid-round is polled in the same round.
-        let mut eps = [SERVICE; abi::IPC_MAX_ANY];
-        let mut owners = [MAIN; abi::IPC_MAX_ANY];
-        let mut count = 0;
-        let mut built = None;
+        // Requests already queued, without waiting. A budget used up may
+        // have left more in the queues: the round then follows at once.
+        let mut requests_left = true;
         for _ in 0..IPC_REQUESTS_PER_ROUND {
             if built != Some(stack.generation) {
                 count = stack.endpoints(&mut eps, &mut owners);
@@ -2005,7 +2264,10 @@ pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
                         say(name, b"service endpoint closed; exiting");
                         sys::process_exit(9);
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        requests_left = false;
+                        break;
+                    }
                 };
             if nh == 0 {
                 continue;
@@ -2015,10 +2277,52 @@ pub fn run<L: Link>(link: L, clock: Clock, name: &'static str) -> ! {
         stack.expire(now);
         stack.tcp_expire(now);
         stack.tcp_poll(now);
-        // Frames left behind are received by the next round at once; a
-        // quiet ring waits for the interrupt (or 10 ms, for the timers).
-        if !round.left_over {
-            let _ = sys::irq_wait(IRQ, 10);
+        // One wait for whichever comes first: a request on any endpoint, a
+        // frame (the NIC's interrupt, latched by the kernel if it fired
+        // during the round) or the next deadline (ADR 0044).
+        if built != Some(stack.generation) {
+            count = stack.endpoints(&mut eps, &mut owners);
+            built = Some(stack.generation);
+        }
+        members.clear();
+        for ep in &eps[..count] {
+            members.push(*ep);
+        }
+        members.push(IRQ);
+        let work_left = round.left_over || requests_left || stack.has_pending();
+        let next = stack.next_deadline();
+        let now = stack.clock.now();
+        match wait::end_of_round(
+            members.as_slice(),
+            now,
+            work_left,
+            next,
+            &mut msg,
+            &mut handles,
+        ) {
+            // Taken from its queue by the wait: served now, at the time it
+            // arrived (the wait may have slept long: the deadlines the
+            // request sets count from now, not from before the wait), and
+            // the next round emits what it produced.
+            Ok(Woken::Message {
+                index,
+                len,
+                handles: nh,
+            }) => {
+                if nh > 0 {
+                    let now = stack.clock.now();
+                    stack.serve(owners[index], &msg[..len], &handles[..nh], now);
+                }
+            }
+            Ok(Woken::Irq { .. } | Woken::Round) => {}
+            Err(e) if e.endpoint_gone() => {
+                say(name, b"service endpoint closed; exiting");
+                sys::process_exit(9);
+            }
+            Err(e) => {
+                aricode_rt::print_error(b"net: end-of-round wait", e);
+                sys::process_exit(EXIT_WAIT_FAILED);
+            }
         }
     }
 }

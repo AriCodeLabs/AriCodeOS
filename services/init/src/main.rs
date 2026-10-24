@@ -59,6 +59,68 @@ fn run(name: &str, arg: u64) -> Result<u64, Error> {
     result
 }
 
+/// Boot check of ADR 0047 (`selftest`): `console_probe` spawned with the
+/// send side of a new pair as its console writes its lines to the receive
+/// side, not to the kernel console; `CONSOLE_FIRST` with a handle that is
+/// not an endpoint (`Invalid`), with an endpoint side it cannot write to
+/// (`Denied`) or with no handle (`Invalid`) is refused and takes nothing.
+fn session_console_check() -> bool {
+    let Ok((output, console)) = sys::endpoint_create_pair() else {
+        say(b"session console: cannot create the pair");
+        return false;
+    };
+    let spawned = sys::process_spawn_limited(SPAWNER, "console_probe", 0, &[console], 0, true);
+    if spawned.is_err() {
+        // Refused before the kernel took it (BadHandle, ignored, if taken).
+        let _ = sys::handle_close(console);
+    }
+    let exit = spawned.and_then(|child| {
+        let code = sys::process_wait(child, TIMEOUT_INFINITE);
+        let _ = sys::handle_close(child);
+        code
+    });
+    let mut text = [0u8; 256];
+    let mut len = 0;
+    let mut none = [Handle(0); 1];
+    while let Ok((n, _)) = sys::ipc_receive(output, &mut text[len..], &mut none, 0) {
+        len += n;
+        if n == 0 || len == text.len() {
+            break;
+        }
+    }
+    let received = core::str::from_utf8(&text[..len]).unwrap_or("");
+    if exit != Ok(0) || !received.contains("console probe: checks passed\n") {
+        let _ = sys::handle_close(output);
+        say(b"session console: console_probe did not write its lines to its endpoint");
+        return false;
+    }
+    // The receive side has no WRITE: refused, and still ours afterwards.
+    let receive_side = sys::process_spawn_limited(SPAWNER, "hello", 0, &[output], 0, true);
+    let kept_output = sys::object_kind(output) == Ok(sys::kind::ENDPOINT);
+    let _ = sys::handle_close(output);
+    if receive_side != Err(Error::Denied) || !kept_output {
+        say(b"session console: CONSOLE_FIRST accepted an endpoint side without WRITE");
+        return false;
+    }
+    let Ok(system) = sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER) else {
+        say(b"session console: cannot duplicate SYSTEM");
+        return false;
+    };
+    let not_endpoint = sys::process_spawn_limited(SPAWNER, "hello", 0, &[system], 0, true);
+    let kept_system = sys::object_kind(system) == Ok(sys::kind::SYSTEM);
+    let _ = sys::handle_close(system);
+    if not_endpoint != Err(Error::Invalid) || !kept_system {
+        say(b"session console: CONSOLE_FIRST accepted a handle that is not an endpoint");
+        return false;
+    }
+    if sys::process_spawn_limited(SPAWNER, "hello", 0, &[], 0, true) != Err(Error::Invalid) {
+        say(b"session console: CONSOLE_FIRST accepted a spawn without handles");
+        return false;
+    }
+    say(b"session console: console_probe wrote to its endpoint; non-endpoint consoles refused");
+    true
+}
+
 /// Finds the first PCI function with `vendor:device` and returns its index.
 fn find_pci(vendor: u16, device: u16) -> Option<u64> {
     find_pci_from(vendor, device, 0)
@@ -260,6 +322,158 @@ fn report_boot_state(block_service: Handle) {
             sys::print(b" tries)\n");
         }
         None => sys::print(b", none pending\n"),
+    }
+}
+
+/// Fault events about the carried kernel seed (ADR 0043); the code is the
+/// `CarriedSeed` number.
+const SEED_MISSING_FAULT: &str = "random seed missing";
+const SEED_UNREADABLE_FAULT: &str = "random seed unreadable";
+const SEED_NOT_SAVED_FAULT: &str = "random seed not saved";
+const _: () = assert!(SEED_NOT_SAVED_FAULT.len() <= sys::abi::sysinfo::EVENT_NAME_LEN);
+const _: () = assert!(SEED_UNREADABLE_FAULT.len() <= sys::abi::sysinfo::EVENT_NAME_LEN);
+
+fn seed_fault(name: &str, code: sys::abi::sysinfo::CarriedSeed, why: &[u8]) {
+    let _ = sys::event_record(code as u64, name);
+    sys::print(b"AriInit: fault ");
+    sys::print(name.as_bytes());
+    sys::print(b": ");
+    sys::print(why);
+    sys::print(b"\n");
+}
+
+/// Says whether the kernel generator got the seed carried from the
+/// previous boot (ADR 0043) and records a fault event when it did not:
+/// missing (the first boot of a disk, or no `ARIBOOT` to keep one),
+/// unreadable, or not used because AriBoot could not save its successor.
+/// Neither the seed nor anything derived from it is ever printed.
+fn report_carried_seed() {
+    use sys::abi::sysinfo::CarriedSeed;
+    let Some(source) = sys::random_source(SYSTEM) else {
+        return say(b"the kernel does not report its random source");
+    };
+    match source.carried {
+        CarriedSeed::Mixed => say(b"kernel generator has the seed carried from the previous boot"),
+        CarriedSeed::Missing => seed_fault(
+            SEED_MISSING_FAULT,
+            source.carried,
+            b"no seed from an earlier boot (first boot of this disk): the kernel generator starts without one",
+        ),
+        CarriedSeed::NoStore => seed_fault(
+            SEED_MISSING_FAULT,
+            source.carried,
+            b"no seed store on the boot disk (no ARIBOOT partition): every boot starts without a carried seed",
+        ),
+        CarriedSeed::Unreadable => seed_fault(
+            SEED_UNREADABLE_FAULT,
+            source.carried,
+            b"the seed store in ARIBOOT holds no intact copy: the kernel generator starts without one",
+        ),
+        CarriedSeed::NotSaved => seed_fault(
+            SEED_NOT_SAVED_FAULT,
+            source.carried,
+            b"AriBoot could not write the successor of the carried seed, so it was not used",
+        ),
+    }
+}
+
+/// The seed store (ADR 0043): sectors 1 and 2 of `ARIBOOT` on the system
+/// disk, with one block client kept for both refreshes of a boot.
+struct SeedStore {
+    blk: BlockClient,
+    first: u64,
+}
+
+impl SeedStore {
+    /// `None` (and says why) without a block client or an `ARIBOOT`
+    /// partition: then nothing is carried to the next boot either.
+    fn open(block_service: Handle) -> Option<Self> {
+        let Ok(mut blk) = BlockClient::new(block_service, HARDWARE, 16) else {
+            say(b"could not open the block service for the random seed");
+            return None;
+        };
+        let Some((first, last)) = find_partition(&mut blk, aricode_ab::PART_STATE) else {
+            say(b"no ARIBOOT partition: no random seed is carried to the next boot");
+            return None;
+        };
+        if last < first + aricode_ab::seed::COPIES[1] {
+            say(b"ARIBOOT has no room for the random seed");
+            return None;
+        }
+        Some(Self { blk, first })
+    }
+
+    /// Replaces the stored seed with fresh output of the kernel generator,
+    /// which by now holds the carried seed (if any), this boot's cycle
+    /// counter and its interrupt timing: the next boot starts from all of
+    /// it. Written to the copy not in use with the next generation, then
+    /// the old copy is blanked (`aricode_ab::seed::plan`), so a power cut
+    /// at any point leaves an intact copy. `when` names the moment for the
+    /// console line. A failure is a `random seed not saved` fault: the
+    /// next boot then gets whatever AriBoot or the previous refresh left.
+    fn refresh(&mut self, when: &[u8]) {
+        use aricode_ab::seed::{pick, plan, Record, COPIES};
+        use sys::abi::sysinfo::CarriedSeed;
+        let mut copies = [[0u8; 512]; 2];
+        let mut ok = [false; 2];
+        for (i, copy) in copies.iter_mut().enumerate() {
+            if self.blk.read(self.first + COPIES[i], 1).is_ok() {
+                copy.copy_from_slice(&self.blk.buffer()[..512]);
+                ok[i] = true;
+            }
+        }
+        aricode_crypto::wipe(&mut self.blk.buffer()[..512]);
+        let mut current = pick([
+            ok[0].then_some(&copies[0][..]),
+            ok[1].then_some(&copies[1][..]),
+        ]);
+        for copy in copies.iter_mut() {
+            aricode_crypto::wipe(copy);
+        }
+        let p = plan(&current);
+        if let aricode_ab::seed::Stored::Found { record, .. } = &mut current {
+            aricode_crypto::wipe(&mut record.seed);
+        }
+        let mut seed = [0u8; 32];
+        if sys::random(SYSTEM, &mut seed) != Ok(seed.len()) {
+            aricode_crypto::wipe(&mut seed);
+            return seed_fault(
+                SEED_NOT_SAVED_FAULT,
+                CarriedSeed::NotSaved,
+                b"the kernel generator did not answer",
+            );
+        }
+        let mut sector = Record {
+            generation: p.generation,
+            seed,
+        }
+        .encode();
+        aricode_crypto::wipe(&mut seed);
+        self.blk.buffer()[..512].copy_from_slice(&sector);
+        aricode_crypto::wipe(&mut sector);
+        // Flushed before the old copy is blanked, so a device that
+        // reorders writes cannot lose both.
+        let written =
+            self.blk.write(self.first + COPIES[p.write], 1).is_ok() && self.blk.flush().is_ok();
+        // The DMA buffer held the new seed: blank it whatever happened,
+        // and blank the old copy with it.
+        aricode_crypto::wipe(&mut self.blk.buffer()[..512]);
+        if !written {
+            return seed_fault(
+                SEED_NOT_SAVED_FAULT,
+                CarriedSeed::NotSaved,
+                b"could not write the random seed to ARIBOOT",
+            );
+        }
+        if self.blk.write(self.first + COPIES[p.blank], 1).is_err() || self.blk.flush().is_err() {
+            say(b"could not blank the old random seed copy (the new one is newer)");
+        }
+        let mut buf = [0u8; 20];
+        sys::print(b"AriInit: random seed saved for the next boot (");
+        sys::print(when);
+        sys::print(b", generation ");
+        sys::print(aricode_rt::fmt_u64(p.generation, &mut buf));
+        sys::print(b")\n");
     }
 }
 
@@ -1488,8 +1702,9 @@ struct Broker {
     stage: Option<(Handle, u64)>,
 }
 
-/// Size of the staging buffer: an installed package cannot exceed it.
-const STAGE_LEN: u64 = 256 * 1024;
+/// Size of the staging buffer: the package limit every part of the system
+/// shares (incident 0026).
+const STAGE_LEN: u64 = aricode_pkg::PACKAGE_MAX as u64;
 
 /// Where the launched program comes from.
 #[derive(Clone, Copy)]
@@ -1576,7 +1791,14 @@ impl Broker {
             return Err(LaunchStatus::NotFound);
         };
         if size == 0 || size > STAGE_LEN {
-            sys::print(b"AriInit: installed package too large\n");
+            let mut b = [0u8; 20];
+            sys::print(b"AriInit: refused, package ");
+            sys::print(pkg_path.as_bytes());
+            sys::print(b" is ");
+            sys::print(aricode_rt::fmt_u64(size, &mut b));
+            sys::print(b" bytes; packages hold 1 to ");
+            sys::print(aricode_rt::fmt_u64(STAGE_LEN, &mut b));
+            sys::print(b" (what AriFS installs)\n");
             return Err(LaunchStatus::Failed);
         }
         let virt = match self.stage {
@@ -1655,7 +1877,7 @@ impl Broker {
     /// Serves at most one request (waits up to `timeout_ms`).
     fn serve_one(&mut self, timeout_ms: u64, sup: &Supervisor) {
         let mut msg = [0u8; LaunchRequest::LEN];
-        let mut handles = [Handle(0); 1];
+        let mut handles = [Handle(0); 2];
         let Ok((n, nh)) = sys::ipc_receive(self.endpoint, &mut msg, &mut handles, timeout_ms)
         else {
             return;
@@ -1664,31 +1886,43 @@ impl Broker {
             return;
         }
         let reply_to = handles[0];
+        // A launch's console (ADR 0047); closed on every refusal below.
+        let console = (nh == 2).then_some(handles[1]);
+        let refuse = |status| {
+            if let Some(c) = console {
+                let _ = sys::handle_close(c);
+            }
+            let reply = LaunchReply::status(status);
+            let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
+            let _ = sys::handle_close(reply_to);
+        };
         // The same endpoint serves two protocols: launches (6) and service
         // status (7); the first byte tells them apart.
         if let Some(req) = status::Request::decode(&msg[..n]) {
+            if let Some(c) = console {
+                let _ = sys::handle_close(c);
+            }
             let reply = sup.status(req.index);
             let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
             let _ = sys::handle_close(reply_to);
             return;
         }
         let Some(req) = LaunchRequest::decode(&msg[..n]) else {
-            let reply = LaunchReply::status(LaunchStatus::Invalid);
-            let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
-            let _ = sys::handle_close(reply_to);
-            return;
+            return refuse(LaunchStatus::Invalid);
         };
+        // A console comes only with the flag that announces it, and never
+        // for a detached program, which may outlive the session.
+        if req.has_console() != console.is_some() || (req.has_console() && req.is_detached()) {
+            return refuse(LaunchStatus::Invalid);
+        }
         // The slot is reserved before launching: no slot, no process.
         let Some(slot) = self.running.iter().position(Option::is_none) else {
             sys::print(b"AriInit: ");
             sys::print(req.name_str().as_bytes());
             sys::print(b": running program limit reached\n");
-            let reply = LaunchReply::status(LaunchStatus::Limit);
-            let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
-            let _ = sys::handle_close(reply_to);
-            return;
+            return refuse(LaunchStatus::Limit);
         };
-        match self.launch(req.name_str(), req.arg) {
+        match self.launch(req.name_str(), req.arg, console) {
             Launched::Reply(reply) => {
                 let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
                 let _ = sys::handle_close(reply_to);
@@ -1714,8 +1948,18 @@ impl Broker {
     /// Reads the manifest (`NAME.manifest` in the initrd, or the one in the
     /// package `apps/NAME.aripkg` in AriFS if the program is installed,
     /// ADR 0017), applies the policy and launches the program; its exit is
-    /// collected by `poll_launches`.
-    fn launch(&mut self, name: &str, arg: u64) -> Launched {
+    /// collected by `poll_launches`. `console`, if any, becomes the
+    /// program's console (ADR 0047) and is closed if the launch fails.
+    fn launch(&mut self, name: &str, arg: u64, console: Option<Handle>) -> Launched {
+        // The prepared duplicates close themselves if any error path returns
+        // before transferring them (`Granted::take` hands them to the
+        // kernel). Previously, a denial after granting SYSTEM leaked one table
+        // entry per attempt. The console goes first: the kernel takes it as
+        // the first handle.
+        let mut granted = Granted::new();
+        if let Some(c) = console {
+            granted.push(c);
+        }
         let mut path = [0u8; 48];
         let Some(path) = join(name, ".manifest", &mut path) else {
             return Launched::Reply(LaunchReply::status(LaunchStatus::Invalid));
@@ -1812,11 +2056,6 @@ impl Broker {
             sys::print(b"\n");
             return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
         }
-        // The prepared duplicates close themselves if any error path returns
-        // before transferring them (`Granted::take` hands them to the
-        // kernel). Previously, a denial after granting SYSTEM leaked one table
-        // entry per attempt.
-        let mut granted = Granted::new();
         let mut needs_hw = false;
         if caps.contains(Caps::SYSTEM) {
             match sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER) {
@@ -1911,13 +2150,24 @@ impl Broker {
                 Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
         }
+        if granted.overflowed {
+            sys::print(b"AriInit: denied, ");
+            sys::print(name.as_bytes());
+            sys::print(b" would need more handles than a launch carries\n");
+            return Launched::Reply(LaunchReply::status(LaunchStatus::Failed));
+        }
         // The kernel only takes the handles if it gets to create the process;
         // on any failure the guard closes them on exit (closing one already
         // taken returns BadHandle, which is ignored).
         let spawned = match source {
-            Source::Initrd => {
-                sys::process_spawn_limited(SPAWNER, name, arg, granted.handles(), memory_kib)
-            }
+            Source::Initrd => sys::process_spawn_limited(
+                SPAWNER,
+                name,
+                arg,
+                granted.handles(),
+                memory_kib,
+                console.is_some(),
+            ),
             Source::Installed {
                 elf_offset,
                 elf_len,
@@ -1933,6 +2183,7 @@ impl Broker {
                     arg,
                     granted.handles(),
                     memory_kib,
+                    console.is_some(),
                 )
             }
         };
@@ -1953,18 +2204,22 @@ impl Broker {
 }
 
 /// Handles prepared for a launch: they are closed on drop unless `take` has
-/// handed them to the kernel.
+/// handed them to the kernel. As many as a spawn transfers; one more is
+/// closed and marks the list `overflowed`, which refuses the launch
+/// instead of starting the program without it (audit of ADR 0047, L3).
 struct Granted {
-    handles: [Handle; 12],
+    handles: [Handle; sys::abi::IPC_MAX_HANDLES * 4],
     count: usize,
+    overflowed: bool,
     transferred: bool,
 }
 
 impl Granted {
     fn new() -> Self {
         Self {
-            handles: [Handle(0); 12],
+            handles: [Handle(0); sys::abi::IPC_MAX_HANDLES * 4],
             count: 0,
+            overflowed: false,
             transferred: false,
         }
     }
@@ -1973,6 +2228,7 @@ impl Granted {
             self.handles[self.count] = h;
             self.count += 1;
         } else {
+            self.overflowed = true;
             let _ = sys::handle_close(h);
         }
     }
@@ -2050,8 +2306,16 @@ fn run_gui(inputs: &[Handle]) -> Result<Handle, u64> {
 
 fn main(arg: u64) -> u64 {
     say(b"starting");
-    let mut args = [0u8; 256];
-    let cmdline = aricode_cmdline::CmdLine::new(sys::cmdline(SYSTEM, &mut args).unwrap_or(""));
+    let mut args = [0u8; sys::CMDLINE_MAX];
+    let cmdline = aricode_cmdline::CmdLine::new(match sys::cmdline(SYSTEM, &mut args) {
+        Ok(text) => text,
+        Err(_) => {
+            // Said and recorded: boot flags such as `strict` are then off.
+            say(b"cannot read the command line (too long or not text): boot flags ignored");
+            let _ = sys::event_record(sys::CMDLINE_MAX as u64, "cmdline unreadable");
+            ""
+        }
+    });
     if cmdline.has(aricode_cmdline::keys::STRICT) {
         STRICT.store(true, core::sync::atomic::Ordering::Relaxed);
         say(b"strict mode: a failing service is not restarted");
@@ -2101,6 +2365,10 @@ fn main(arg: u64) -> u64 {
     match run("crashy_driver", 1) {
         Ok(0) => say(b"crashy_driver restarted successfully"),
         _ => return 7,
+    }
+    // 5b. A program's console can be an endpoint (ADR 0047).
+    if selftest && !session_console_check() {
+        return 47;
     }
     // 6. PCI devices as seen from user space.
     let mut buf = [0u8; 20];
@@ -2433,6 +2701,16 @@ fn main(arg: u64) -> u64 {
             None => say(b"no USB storage with an ARI0 partition"),
         }
     }
+    // 9b'. Carried kernel seed (ADR 0043): AriBoot already handed the
+    //      kernel its share and wrote a successor; once the system disk is
+    //      known (virtio-blk or USB, so after the network driver started)
+    //      that successor is replaced with output of the kernel generator,
+    //      and again once the boot services ran.
+    report_carried_seed();
+    let mut seed_store = block_service.and_then(SeedStore::open);
+    if let Some(store) = seed_store.as_mut() {
+        store.refresh(b"early");
+    }
     // 9c. Network health check, after the USB devices so that a machine
     //     waiting for DHCP does not delay its stick and keyboard.
     if let Some(wait_ms) = net_wait_ms {
@@ -2496,6 +2774,11 @@ fn main(arg: u64) -> u64 {
         None => say(b"no block service: boot not confirmed"),
     }
     say(b"boot services completed");
+    // The second refresh, with the interrupts of the whole boot (network,
+    // USB, disk) in the generator.
+    if let Some(store) = seed_store.as_mut() {
+        store.refresh(b"after the boot services");
+    }
     if arg & sys::abi::init_arg::SHELL != 0 {
         let Some(fs) = fs_service else {
             say(b"no file service, not launching the shell");

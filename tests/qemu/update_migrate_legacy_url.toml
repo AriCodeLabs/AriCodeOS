@@ -18,10 +18,10 @@ stdin = ["update", "update sources", "shutdown"]
 exit = 33
 serial_contains = [
     "updater: update_url migrated to the source list (ADR 0029)",
-    "updater: source 1 http://10.0.2.2:17010/update/: index verified (serial ",
+    "updater: source 1 http://10.0.2.2:{update_port}/update/: index verified (serial ",
     "updater: system: installed 1, source 1 offers 2: upgrade available",
     "update sources:",
-    "  1  http://10.0.2.2:17010/update/",
+    "  1  http://10.0.2.2:{update_port}/update/",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_absent = ["KERNEL PANIC", "update: updater exited with", "update: update_url migrated"]

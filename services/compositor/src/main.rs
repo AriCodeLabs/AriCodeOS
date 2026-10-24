@@ -3,12 +3,14 @@
 //! Compositor (Phase 26): owner of the framebuffer in ring 3. Handles: 0x10004 =
 //! service endpoint, 0x10005 = framebuffer (MMIO), 0x10006 = SYSTEM,
 //! 0x10007 = HARDWARE (back buffer), 0x10008.. = input services
-//! (`arg` = how many). Composes into a back buffer and flushes it to the screen;
-//! routes keyboard and mouse to the focused window.
+//! (`arg` = how many). Composes into a back buffer and flushes it to the screen,
+//! only the damaged areas and at most once per `FRAME_MS`; routes keyboard
+//! and mouse to the focused window.
 #![no_std]
 #![no_main]
 
-use aricode_gfx::{Canvas, Desktop, Hit, Window};
+use aricode_cmdline::{keys, CmdLine};
+use aricode_gfx::{Canvas, Damage, Desktop, Hit, Rect, Scene, Window};
 use aricode_input::{Keyboard, BTN_LEFT, EV_KEY, EV_REL, REL_X, REL_Y};
 use aricode_proto::window::{Event, Op, Reply, Request, Status, MAX_SIDE};
 use aricode_rt::sys::input::InputClient;
@@ -26,6 +28,10 @@ const RETRY_MS: u64 = 50;
 const MAX_INPUTS: usize = 4;
 const MAX_WINDOWS: usize = aricode_gfx::MAX_WINDOWS;
 const QUEUE: usize = 8;
+/// Shortest interval between two frames (about 60 per second): changes
+/// that arrive sooner are coalesced into the next frame, so an event waits
+/// at most one frame.
+const FRAME_MS: u64 = 16;
 
 fn say(msg: &[u8]) {
     sys::print(b"compositor: ");
@@ -77,17 +83,26 @@ impl Screen {
         .expect("back buffer")
     }
 
-    /// Flushes the back buffer to the screen, converting the pixel format.
-    fn flip(&self) {
+    /// Flushes `rects` (inside the screen) of the back buffer to the
+    /// screen, converting the pixel format.
+    fn flip(&self, rects: &[Rect]) {
         let rgb = self.info.format == abi::sysinfo::FB_FORMAT_RGB;
-        for (i, px) in self.back.iter().enumerate() {
-            let v = if rgb {
-                (px & 0xFF) << 16 | (px & 0xFF00) | (px >> 16) & 0xFF
-            } else {
-                *px
-            };
-            // SAFETY: `i` < stride*height <= size/4, inside the mapped framebuffer.
-            unsafe { self.fb.add(i).write_volatile(v) };
+        let stride = self.info.stride as usize;
+        for r in rects {
+            for y in r.y..r.bottom() {
+                let row = y as usize * stride;
+                for i in row + r.x as usize..row + r.right() as usize {
+                    let px = self.back[i];
+                    let v = if rgb {
+                        (px & 0xFF) << 16 | (px & 0xFF00) | (px >> 16) & 0xFF
+                    } else {
+                        px
+                    };
+                    // SAFETY: `r` lies inside width x height, so `i` <
+                    // stride*height <= size/4, inside the mapped framebuffer.
+                    unsafe { self.fb.add(i).write_volatile(v) };
+                }
+            }
         }
     }
 }
@@ -133,9 +148,15 @@ struct Compositor {
     desktop: Desktop,
     contents: [Option<Content>; MAX_WINDOWS],
     keyboard: Keyboard,
-    dirty: bool,
+    /// What the screen shows, and what changed since (window contents
+    /// presented by their clients, plus the diff of the scene).
+    shown: Scene,
+    damage: Damage,
+    next_frame_ms: u64,
     frames: u64,
     announced: bool,
+    /// `gui_trace` on the command line: log every frame.
+    trace: bool,
 }
 
 impl Compositor {
@@ -161,7 +182,6 @@ impl Compositor {
         }
         self.desktop.raise(id);
         self.deliver(id, Event::Focus(true));
-        self.dirty = true;
     }
 
     fn on_input(&mut self, ev: aricode_input::Event) {
@@ -172,7 +192,6 @@ impl Compositor {
                 _ => return,
             };
             self.desktop.move_pointer(dx, dy);
-            self.dirty = true;
             return;
         }
         if ev.kind == EV_KEY && (BTN_LEFT..=BTN_LEFT + 2).contains(&ev.code) {
@@ -250,14 +269,18 @@ impl Compositor {
                 sys::print(b"x");
                 num(req.height as u64);
                 sys::print(b"\n");
-                self.dirty = true;
                 answer(reply_to, Reply::ok(id as u64));
             }
             Op::Present => {
-                if self.content(req.window).is_none() {
+                let Some(virt) = self.content(req.window).map(|c| c.virt) else {
                     return answer(reply_to, Reply::status(Status::BadWindow));
+                };
+                // Every window on that buffer shows the new pixels.
+                for c in self.contents.iter().flatten().filter(|c| c.virt == virt) {
+                    if let Some(w) = self.desktop.get(c.id) {
+                        self.damage.add(&w.content);
+                    }
                 }
-                self.dirty = true;
                 answer(reply_to, Reply::ok(0));
             }
             Op::Poll => {
@@ -288,7 +311,6 @@ impl Compositor {
                 }
                 self.unmap_unused(closed.virt);
                 self.desktop.remove(req.window);
-                self.dirty = true;
                 answer(reply_to, Reply::ok(0));
             }
         }
@@ -314,28 +336,48 @@ impl Compositor {
         }
     }
 
-    /// Recomposes the desktop if anything changed and logs it to the console.
-    fn compose(&mut self) {
-        if !self.dirty {
+    /// Puts what changed on screen: recomposes and flushes only the damaged
+    /// rectangles, at most once per `FRAME_MS` (changes that arrive sooner
+    /// wait for the next frame and are merged into it).
+    fn compose(&mut self, now_ms: u64) {
+        let scene = self.desktop.scene();
+        self.shown.damage(&scene, &mut self.damage);
+        self.shown = scene;
+        if self.damage.is_empty() || now_ms < self.next_frame_ms {
             return;
         }
-        self.dirty = false;
+        self.next_frame_ms = now_ms + FRAME_MS;
         self.frames += 1;
         let contents = &self.contents;
         let desktop = &self.desktop;
         let mut screen = self.screen.canvas();
-        desktop.compose(&mut screen, |w: &Window, out: &mut Canvas| {
-            let Some(c) = contents.iter().flatten().find(|c| c.id == w.id) else {
-                return;
-            };
-            let n = (c.width * c.height) as usize;
-            // SAFETY: client buffer mapped in `Create`, `width*height*4` bytes long.
-            let pixels = unsafe { core::slice::from_raw_parts_mut(c.virt as *mut u32, n) };
-            if let Some(src) = Canvas::new(pixels, c.width, c.height, c.width) {
-                out.blit(&src, w.content.x, w.content.y);
-            }
-        });
-        self.screen.flip();
+        for r in self.damage.rects() {
+            desktop.compose_region(&mut screen, r, |w: &Window, out: &mut Canvas| {
+                let Some(c) = contents.iter().flatten().find(|c| c.id == w.id) else {
+                    return;
+                };
+                let n = (c.width * c.height) as usize;
+                // SAFETY: client buffer mapped in `Create`, `width*height*4` bytes long.
+                let pixels = unsafe { core::slice::from_raw_parts_mut(c.virt as *mut u32, n) };
+                if let Some(src) = Canvas::new(pixels, c.width, c.height, c.width) {
+                    out.blit(&src, w.content.x, w.content.y);
+                }
+            });
+        }
+        self.screen.flip(self.damage.rects());
+        if self.trace {
+            self.trace_frame();
+        }
+        self.damage.clear();
+        if !self.announced && self.desktop.count() >= 2 {
+            self.announced = true;
+            say(b"desktop ready with 2 windows");
+        }
+    }
+
+    /// `gui_trace`: the frame just flushed, and one pixel near the top-left
+    /// corner of each window's content (deterministic samples for the tests).
+    fn trace_frame(&mut self) {
         sys::print(b"compositor: frame ");
         num(self.frames);
         sys::print(b", ");
@@ -344,9 +386,11 @@ impl Compositor {
         num(self.desktop.pointer.0 as u64);
         sys::print(b",");
         num(self.desktop.pointer.1 as u64);
-        sys::print(b")\n");
-        // Deterministic samples for the tests: one pixel near the top-left
-        // corner of each window's content.
+        sys::print(b"), flushed ");
+        num(self.damage.pixels());
+        sys::print(b" px in ");
+        num(self.damage.rects().len() as u64);
+        sys::print(b" rect(s)\n");
         let mut hex = [0u8; 16];
         let screen = self.screen.canvas();
         for w in self.desktop.iter() {
@@ -362,10 +406,6 @@ impl Compositor {
                 sys::print(fmt_hex(px as u64, 6, &mut hex));
                 sys::print(b"\n");
             }
-        }
-        if !self.announced && self.desktop.count() >= 2 {
-            self.announced = true;
-            say(b"desktop ready with 2 windows");
         }
     }
 }
@@ -388,14 +428,31 @@ fn main(inputs: u64) -> u64 {
     for (i, slot) in devices.iter_mut().take(inputs).enumerate() {
         *slot = InputClient::new(Handle(FIRST_INPUT + i as u32)).ok();
     }
+    let mut args = [0u8; sys::CMDLINE_MAX];
+    let trace = match sys::cmdline(SYSTEM, &mut args) {
+        Ok(text) => CmdLine::new(text).has_flag(keys::GUI_TRACE),
+        // A line that does not fit or is not text is reported, not read as
+        // empty (ADR 0045, L5): the trace stays off.
+        Err(_) => {
+            say(b"cannot read the command line (too long or not text): gui_trace off");
+            false
+        }
+    };
+    if trace {
+        say(b"gui_trace: logging every frame");
+    }
+    let desktop = Desktop::new(screen.info.width, screen.info.height);
     let mut comp = Compositor {
-        desktop: Desktop::new(screen.info.width, screen.info.height),
+        shown: desktop.scene(),
+        damage: Damage::full(desktop.screen),
+        desktop,
         screen,
         contents: [const { None }; MAX_WINDOWS],
         keyboard: Keyboard::new(),
-        dirty: true,
+        next_frame_ms: 0,
         frames: 0,
         announced: false,
+        trace,
     };
     let mut msg = [0u8; Request::LEN];
     let mut handles = [Handle(0); 2];
@@ -475,7 +532,7 @@ fn main(inputs: u64) -> u64 {
             comp.on_input(*ev);
         }
         comp.expire(t);
-        comp.compose();
+        comp.compose(t);
         if devices.iter().all(Option::is_none) {
             sys::thread_sleep(10);
         }

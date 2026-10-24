@@ -89,7 +89,7 @@ The test clients (`fs_client`, `blk_client`, `net_client`, `tcp_client`,
 the QEMU scenarios: `cargo xtask usb-image --cmdline` refuses it, like
 every other test-only key (`qemu_exit`, `test=`, `usb_fault`, `blk_fault`,
 `restart_storm`, `service_hang`, `init_fail_late`, `input_restart`,
-`shell_fault`) and the keys AriBoot adds itself (`boot_slot`,
+`shell_fault`, `gui_trace`) and the keys AriBoot adds itself (`boot_slot`,
 `boot_pending`). If a stick's
 `cmdline.txt` is edited by hand to carry it, the screen says `AriInit:
 selftest: running the test-only boot checks` and the boot stops at
@@ -150,21 +150,57 @@ ari> shutdown
 # on the host, with the USB stick attached as /dev/sdX
 sudo dd if=/dev/sdX of=build/usb-dump.img bs=1M count=70 status=none
 cargo xtask fs-cat build/usb-dump.img            # lists the files in ARI0
-cargo xtask fs-cat build/usb-dump.img diag.txt   # uptime, memory, CPUs, processes, services, PCI and events
+cargo xtask fs-cat build/usb-dump.img diag.txt   # uptime, memory, CPUs, entropy, processes, services, PCI and events
 ```
 
 The 70 MiB cover the ARI0 partition of the USB image (LBA 133120 to 139263).
 
 ### Entropy: does the laptop have `rdrand`?
 
-The kernel's boot line `random: ChaCha20 generator seeded with rdrand` or
-`random: ChaCha20 generator seeded with TSC (no rdrand: limited entropy)`
-is the only sign of it; `diag` does not repeat it, so read it on the
-serial console or a photo of the first boot. The laptop's PCH
-(`8086:1e31`, 7-series) pairs with Ivy Bridge (usually `rdrand`) or Sandy
-Bridge (none). It decides the quality of sshd's keys (ADR 0025) and of
-netd's TCP secret (ADR 0034); user space cannot query it (kernel
-follow-up in ADR 0034 §4). Not yet read on the laptop (2026-10-18).
+Read it from `diag` (on the console, over SSH, or saved with `diag NAME`
+and read on the host with `cargo xtask fs-cat`): its `entropy` line says
+`entropy  rdrand` when the kernel generator was seeded from `rdrand`, or
+`entropy  TSC + interrupts (N samples, M events): weak` when the CPU has
+none (ADR 0039). The fault events `net tcp secret weak x1 (code 2)` and,
+when sshd generated a host key with no `random_seed` from an earlier boot,
+`ssh entropy weak (code 2)` say the same in the event list while they are
+among the recent ones. The kernel's boot line `random: ChaCha20 generator
+seeded with rdrand` or `... with TSC (no rdrand: limited entropy)` remains. The laptop's PCH (`8086:1e31`,
+7-series) pairs with Ivy Bridge (usually `rdrand`) or Sandy Bridge (none).
+
+**Read on the reference laptop (2026-10-23, version 11):** `entropy  TSC +
+interrupts (72 samples, 1737 events): weak`. The laptop's kernel generator
+gets no hardware entropy (a Sandy Bridge CPU without `rdrand`, or values
+rejected as implausible: the boot line on screen tells which). Consequences:
+the SSH host key on its stick was made on the build host
+(`usb-image --authorized-key`), so it is not affected; netd's TCP secret
+(ADR 0034) and any key generated on the machine rest on TSC and interrupt
+timing only, which makes a kernel seed saved across boots (open in ADR 0034
+and incident 0014) worth doing for this machine.
+
+**Carried seed on the laptop (2026-10-23, develop 577fa52, stick
+reflashed, ADR 0043):** first boot of the fresh stick: `entropy  TSC +
+interrupts (70 samples, 223 events): weak, no carried seed (first boot)`,
+with `net tcp secret weak x1 (code 2)` and `random seed missing (code 2)`
+in diag, as designed. After a reboot over SSH: `entropy  TSC + interrupts +
+carried seed`, no weak event, network up. From the second boot on, this
+machine's generator starts from the seed of the previous boot.
+
+**Carried seed (ADR 0043).** AriBoot now carries a kernel seed across
+boots in sectors 1 and 2 of the stick's `ARIBOOT` partition. A freshly
+flashed stick ships none, so its first boot still reads `entropy  TSC +
+interrupts (N samples, M events): weak, no carried seed (first boot)` with
+`random seed missing (code 2)` among the events, and init writes the first
+seed (`AriInit: random seed saved for the next boot (early, generation
+1)`, then generation 2 after the boot services). From the second boot on
+`diag` should read `entropy  TSC + interrupts + carried seed`, with no
+`net tcp secret weak`; AriBoot's screen line is `seed: carried seed of
+generation N taken, successor of generation N+1 saved`. Not yet read on the
+laptop. `random seed not saved (code 4)` means AriBoot could not write the
+stick (the seed was then not used); `random seed unreadable (code 3)` a
+damaged store, which init rewrites.
+It decides the quality of sshd's keys (ADR 0025) and of netd's TCP secret
+(ADR 0034). Not yet read on the laptop (2026-10-22).
 
 ## If something fails
 
@@ -267,12 +303,34 @@ ssh ari@192.168.1.24 diag       # a single command
 The first connection asks to confirm the host key: compare it with the
 `SHA256:` fingerprint printed by `usb-image` (the key is generated on this
 machine and kept in `build/ssh_host_ed25519_key`) and shown on the laptop's
-screen. One connection at a time; output of programs started with `run`
-still appears on the laptop's screen.
+screen. One connection at a time; programs started with `run` from an SSH
+session write to the session (ADR 0047).
 
 Without `--authorized-key` the image has no `authorized_keys` and sshd does
 not listen: no port is open. Refused keys are logged on the laptop with the
 peer's address.
+
+## The public source and its local mirror (ADR 0048)
+
+Released machines update from the project's GitHub releases,
+`https://github.com/AriCodeLabs/AriCodeOS/releases/latest/download/`: a
+release stick is written with `--public-source`, which registers it
+(`update remove` takes it out again). Every download there takes two
+redirects, which the updater follows over TLS.
+
+To try that whole path without publishing anything, `serve-update` also
+serves its publication under the same path, with GitHub's redirects
+(`latest` to a release, the release to an asset with a long signed query):
+
+```text
+update add 192.168.1.16:8765/AriCodeLabs/AriCodeOS/releases/latest/download/
+update
+upgrade
+```
+
+The plain source (`update add 192.168.1.16:8765`) and the development
+channel keep working beside it, so day-to-day iteration never depends on
+GitHub or on permission to publish there.
 
 ## Updating without the USB stick (ADR 0027, ADR 0029)
 
@@ -330,3 +388,72 @@ reinstalled from such a stick.
 The project's release key (public half in `keys/release/`, fingerprint in
 its README) signs everything published since 2026-10-17; the laptop was
 reinstalled from a stick built with it the same day.
+
+## Development builds in minutes (ADR 0045)
+
+To try a branch on the laptop (a driver, typically) before it reaches
+`main`, publish it to the **development channel**. It has its own key, its
+own source and its own build numbers, assigned by xtask: nothing to pick
+by hand, and nothing a stable machine will ever accept.
+
+**Once: open the channel on the laptop.** Its loader must trust the
+development key, which only a stick written with `--dev-source` gives
+(the stick from 2026-10-17 does not):
+
+```bash
+cargo xtask usb-image --signing-key ~/.config/aricodeos/signing-key \
+    --update-source http://192.168.1.16:8080/ --dev-source http://192.168.1.16:8081/ \
+    [--authorized-key ~/.ssh/id_ed25519.pub]
+```
+
+Write it and boot the laptop from it as in "Build and write the image".
+`update sources` then shows the development source with `(dev)`. On a
+laptop already installed from such a stick, `update add --channel dev
+192.168.1.16:8081` adds one (`update remove N` drops an old one); without
+`--dev-source` the channel stays closed and `update --channel dev` says
+why.
+
+**Every iteration: one command on the host**, from the branch's checkout:
+
+```bash
+cargo xtask serve-update --channel dev --signing-key ~/.config/aricodeos/dev-signing-key
+```
+
+It builds the checkout, numbers it (one above the last development build
+this host published from any checkout or worktree: the counter is
+`~/.cache/aricodeos/dev-build`, locked while a build is published),
+records its commit (`-dirty` if tracked
+files have uncommitted changes), signs image and index with the
+development key into `build/update-dev/` and serves it on port 8081 (the
+stable source keeps 8080; `--port P` changes it). Stop it with Ctrl-C and
+run it again for the next build. On the laptop, console or SSH:
+
+```text
+update --channel dev       # verify the development index, show the build it offers
+upgrade --channel dev      # install it into the inactive slot (the first time: switch to the dev channel)
+reboot
+diag                       # "system   dev build 7 (commit 0123abc456ef), slot B"
+```
+
+`update` and `upgrade` without `--channel` keep working on the stable
+source and never move the laptop off the development channel: they say
+that `upgrade --channel stable` does.
+
+**Back to stable**, with the network: `update`, then `upgrade --channel
+stable` installs the newest stable release even if its number is below the
+build's; the switch is recorded in `cat updater/history.log` and as an
+event in `diag`. **Without the network** (a build that boots but broke
+it): `update rollback` schedules the system still in the other slot,
+verified and with three tries, and says what it is (another channel, an
+older release); `reboot` boots it and it stays once it comes up. That slot
+holds the system before the last install, unless the last install never
+stayed (the loader rejected it or ran out of tries): then it holds that
+failed image, and rolling back retries it. A build that does not boot at
+all is undone by the loader alone after three attempts.
+
+The laptop never takes the same build number with another commit (two
+checkouts that published the same number before the host counter): it
+refuses it and asks for a new publication. Going back to stable never
+goes below the newest stable release the laptop ran (the stable floor in
+`updater/state`, seeded by the stick): an older one is a downgrade,
+installed only with `--allow-downgrade`.

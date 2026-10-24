@@ -1,6 +1,14 @@
 # Phase 34: console of a laptop without a serial port. The host types "hola" +
 # Enter over QMP; with no inputd running QEMU delivers it to the i8042 PS/2 keyboard and
 # the kernel receives it via IRQ1 into the console ring.
+# The guest's own count (10 scancodes) is what proves delivery: the kernel
+# exits QEMU as soon as the last event (Enter released) arrives, so QMP's
+# reply to that event can be lost with the process ("[host] QMP: failed
+# after 9 events (Connection reset by peer)", incident 0019) and the host's
+# tally is not asserted. The test echoes each byte and the host types each
+# key after the echo of the previous one (`echo_prompt`, incident 0022):
+# QEMU's i8042 queues 16 bytes and drops the rest when the guest falls
+# behind.
 name = "console.ps2"
 description = "PS/2 keyboard (i8042) as console input: one line via IRQ1"
 level = "full"
@@ -10,6 +18,7 @@ timeout_secs = 40
 
 [host_input]
 marker = "CONSOLE_PS2_READY"
+echo_prompt = "CONSOLE_PS2_READY"
 keys = ["h", "o", "l", "a", "ret"]
 
 [expect]
@@ -17,7 +26,6 @@ exit = 33
 serial_contains = [
     "console: PS/2 keyboard (GSI 1, vector 0x41, layout us)",
     "console: PS/2 line 'hola' (4 bytes, 10 scancodes)",
-    "[host] QMP: 10 input events sent",
     "ARICODEOS_KERNEL_READY",
 ]
 serial_absent = ["KERNEL PANIC", "nobody typed"]

@@ -10,5 +10,5 @@ timeout_secs = 40
 
 [expect]
 exit = 33
-serial_contains = ["drivers selftest ok (IRQ0 serviced in ring 3", "framebuffer painted from ring 3)", "ARICODEOS_KERNEL_READY"]
+serial_contains = ["drivers selftest ok (IRQ0 serviced in ring 3", "framebuffer painted from ring 3)", "pit_driver: wait on the IRQ line and an endpoint ok", "ARICODEOS_KERNEL_READY"]
 serial_absent = ["KERNEL PANIC", "USER FAULT", "has no registered line"]

@@ -16,7 +16,7 @@ Design decisions are recorded as ADRs in
 [docs/decisions/](docs/decisions/) and the branch flow (git flow) in
 [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-**Status:** 0.13.0 (2026-10-22). All 35 roadmap phases (0 to 34) are
+**Status:** 0.14.0 (2026-10-24). All 35 roadmap phases (0 to 34) are
 implemented and tested in QEMU, as are stages 1 to 4 of the post-roadmap
 sequence (observable recovery, a useful session, limits and updates,
 external applications) and the part of stage 5 that needs no hardware
@@ -55,7 +55,7 @@ the evidence is recorded in `docs/hardware.md`.
 ## Requirements (Debian 13)
 
 ```bash
-sudo apt install qemu-system-x86 ovmf nasm clang lld gdb git make
+sudo apt install qemu-system-x86 ovmf nasm clang lld binutils gdb git make
 rustup target add wasm32-unknown-unknown   # example WebAssembly modules (apps/wasm-demo)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
@@ -75,7 +75,9 @@ works on any machine with Docker (slower than on the host).
 docker build -t aricodeos-dev -f tools/docker/Dockerfile .
 docker run --rm -it -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/cargo/registry \
     --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask check
-docker run --rm -it -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/cargo/registry \
+docker run --rm -it --cpus 10 --memory 12g --memory-swap 12g \
+    -v "$PWD":"$PWD" -w "$PWD" -v aricodeos-cargo:/usr/local/cargo/registry \
+    -v "$HOME/.cache/aricodeos-lock":/run/aricodeos-lock \
     --user "$(id -u):$(id -g)" aricodeos-dev cargo xtask test --all
 ```
 
@@ -88,13 +90,64 @@ at files that do not exist there. The image exposes no port and holds no
 key. A QEMU result inside Docker is a QEMU result: it does not replace the
 hardware checks of `docs/hardware.md`.
 
+The QEMU scenarios run several at a time (`--jobs N`; by default one per
+CPU the container may use, two thirds of that with `--cpus` above 1, at
+most 10 and 6, and 1 GiB of its memory per run; see `tests/README.md`,
+"Parallel runs"). Give test containers `--cpus 10 --memory 12g
+--memory-swap 12g` on the reference host (16 CPUs) so the machine keeps
+room and stays cool. One QEMU suite runs at a time on the whole machine:
+`cargo xtask test` takes an exclusive lock on
+`$HOME/.cache/aricodeos-lock/suite.lock` before its first scenario and a
+second suite waits, printing who holds it (`[xtask] waiting for another
+QEMU suite on this host (lock ...; holder: pid, host, checkout, HEAD,
+start, suite)`). Containers share it through the
+`-v "$HOME/.cache/aricodeos-lock":/run/aricodeos-lock` mount above; inside a
+container without it a QEMU suite refuses to start, since its lock would
+guard nothing. Unit tests and `check` take no lock. Each container has its
+own network namespace, so a suite in a container never collides on ports
+with one on the host or in another container (ADR 0040).
+
+#### Continuous tests
+
+`tools/docker/ci/Dockerfile` adds to that image a script that keeps its
+own clone of the public repository in a named volume (never your
+checkout), and on each new commit of a branch (default `develop`) runs
+`cargo xtask check`, `cargo xtask test --all` and `--all --cpus 4`, then
+writes a dated report (pass/fail per scenario, the logs of the failed ones)
+to a mounted directory. It fetches over https and holds no credentials.
+
+```bash
+docker build -t aricodeos-dev -f tools/docker/Dockerfile .
+docker build -t aricodeos-ci -f tools/docker/ci/Dockerfile .
+mkdir -p ~/aricodeos-ci-reports
+docker run -d --name aricodeos-ci --restart unless-stopped \
+    --cpus 10 --memory 12g --memory-swap 12g --cpu-shares 512 \
+    -v aricodeos-ci-work:/work -v aricodeos-ci-cargo:/usr/local/cargo/registry \
+    -v ~/aricodeos-ci-reports:/reports -v "$HOME/.cache/aricodeos-lock":/run/aricodeos-lock \
+    --user "$(id -u):$(id -g)" aricodeos-ci --loop
+docker logs -f aricodeos-ci                # progress; reports in ~/aricodeos-ci-reports/latest/
+```
+
+`--loop` polls the branch every 5 minutes (`--interval S`) and rests 10
+minutes after each run (`--pause S`); without it the container tests the
+current head once and exits non-zero on a failure. `--branch B` tests
+another branch and `--jobs N` overrides the concurrency. The suites run one
+after another, at nice 10, and `--cpus`, `--memory` and `--cpu-shares` keep
+the container from taking the machine: the runner sizes its jobs from them
+(10 CPUs give 10 jobs, 6 for the `--cpus 4` pass), so development goes on
+beside it. Its two test passes run holding the suite lock (taken before
+the first, released after the second): a suite started meanwhile on the
+host or in another container waits for them, and the CI waits for it, so
+nobody has to stop the container by hand. A failure in its report is an
+incident (`docs/WORKFLOW.md`).
+
 To try the system without building it, `tools/docker/try/Dockerfile` packs
 the USB stick image into an image that boots it in QEMU with the `ari>`
 shell on your terminal (quit with Ctrl-A X):
 
 ```bash
 cargo xtask usb-image
-docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.13.0 .
+docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.14.0 .
 docker run --rm -it aricodeos
 ```
 
@@ -125,6 +178,7 @@ cargo xtask test --all     # unit + every QEMU scenario; mandatory before main
 cargo xtask test --area boot   # only the scenarios of one area
 cargo xtask test --all --cpus 4   # the whole suite with four CPUs: SMP stress test of the kernel
 cargo xtask usb-image      # build/aricodeos-usb.img to write to a USB stick (docs/hardware.md)
+cargo xtask serve-update --channel dev --signing-key DIR   # a branch build for the laptop in minutes (ADR 0045, docs/hardware.md)
 cargo xtask app-pack DIR --version N   # builds, packages and signs an out-of-tree application (docs/sdk.md)
 cargo xtask check          # rustfmt --check + clippy -D warnings
 ```

@@ -50,7 +50,8 @@ would open an unauthenticated shell on the user's network.
    empty message is end of stream in either direction. With a pty, sshd
    turns `\n` into `\r\n`.
 5. **Images and tests**: `cargo xtask usb-image --authorized-key KEY.pub`
-   installs a public key; QEMU forwards host port 17022 to the guest's 22,
+   installs a public key; QEMU forwards a host port to the guest's 22 (17022
+   for `cargo xtask run`, one chosen per run in the scenarios since ADR 0040),
    and scenario key `[host_ssh]` generates a client key, installs it, and
    runs commands with the host's `ssh` (`ssh.exec`: ls, cat, write and
    shutdown over SSH).
@@ -76,6 +77,24 @@ would open an unauthenticated shell on the user's network.
   fails; a boot nobody connects to does not write it, incident 0005) and the host key for a USB image is generated on the build host
   from `/dev/urandom` (`build/ssh_host_ed25519_key`, fingerprint printed at
   build time so it can be checked against the first `ssh` prompt).
+  Since 2026-10-22 (ADR 0039) sshd asks the kernel what seeded its
+  generator (`system_info(RANDOM_SOURCE)`) before it draws a host key:
+  when the source is not a hardware one (or the kernel does not say) and
+  no `random_seed` from an earlier boot was read, it records the fault
+  event `ssh entropy weak` (code = the `EntropySource` number, 2 for TSC +
+  interrupts, 0 when unknown) and says on the console that the new host
+  key is weak and that `cargo xtask usb-image --authorized-key` installs
+  one made on the build host. It does not refuse to start, which would
+  lock the owner out; the key is drawn as before, from the kernel
+  generator and sshd's own state, with no earlier boot's seed behind it in
+  exactly this case (with one, it is mixed in and nothing is reported). `diag` shows the source in its `entropy`
+  line (`ssh.entropy_weak`, `crypto.entropy_rdrand`).
+  Since ADR 0043 the kernel generator itself carries a seed across boots
+  (AriBoot hands it over from the `ARIBOOT` partition): a generator with
+  it mixed in counts as strong, so `ssh entropy weak` is recorded only
+  when neither that nor sshd's own `random_seed` came from an earlier
+  boot, and the weak line names why (`no carried seed (first boot)`).
+  sshd keeps its `random_seed`: it also serves a disk without `ARIBOOT`.
 - **Audit trail.** Every refused key is logged with the user name and the
   peer address; after ten failures the connection is dropped.
 - **No monopoly by idle clients** (audit of 8910d1f, finding 2). A

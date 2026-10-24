@@ -122,10 +122,11 @@ fn with_handles<R>(
 
 fn console_write(handle: Handle, ptr: u64, len: u64) -> Result<u64, Error> {
     const MAX: u64 = 4096;
-    let is_console = with_handles(|t| {
-        lookup(t, handle, Rights::WRITE).map(|o| matches!(o.kind, ObjectKind::Console))
-    })?;
-    if !is_console {
+    let console = with_handles(|t| lookup(t, handle, Rights::WRITE).cloned())?;
+    if !matches!(
+        console.kind,
+        ObjectKind::Console | ObjectKind::SessionConsole(_)
+    ) {
         return Err(Error::Invalid);
     }
     if len > MAX {
@@ -133,8 +134,48 @@ fn console_write(handle: Handle, ptr: u64, len: u64) -> Result<u64, Error> {
     }
     let bytes = process::copy_from_user(ptr, len)?;
     let text = core::str::from_utf8(&bytes).map_err(|_| Error::Invalid)?;
-    process::console_write_current(text);
-    Ok(len)
+    match &console.kind {
+        ObjectKind::SessionConsole(output) => session_console_write(output, text.as_bytes()),
+        _ => {
+            process::console_write_current(text);
+            Ok(len)
+        }
+    }
+}
+
+/// How long a session console write waits for room in the session's queue,
+/// per message (the session shell's own writes wait as long).
+const SESSION_CONSOLE_WAIT_MS: u64 = 2000;
+
+/// Text for a session console goes to its endpoint in messages of at most
+/// `IPC_MAX_DATA` bytes and never as an empty message, which the session
+/// reader takes as the end of the session (ADR 0047). Returns the bytes
+/// sent: fewer than `text` when a later message could not be (audit of ADR
+/// 0047, L2), an error only when none was.
+fn session_console_write(output: &Cap, text: &[u8]) -> Result<u64, Error> {
+    let endpoint = output.object();
+    if endpoint.is_revoked() {
+        return Err(Error::Revoked);
+    }
+    let ObjectKind::Endpoint(endpoint) = &endpoint.kind else {
+        // `spawn_from_bytes` only wraps endpoints.
+        return Err(Error::Invalid);
+    };
+    let mut sent = 0;
+    for chunk in text.chunks(IPC_MAX_DATA) {
+        let result = endpoint.send_with(SESSION_CONSOLE_WAIT_MS, || {
+            Ok(Message {
+                data: chunk.to_vec(),
+                handles: Vec::new(),
+            })
+        });
+        match result {
+            Ok(()) => sent += chunk.len() as u64,
+            Err(e) if sent == 0 => return Err(e),
+            Err(_) => break,
+        }
+    }
+    Ok(sent)
 }
 
 fn console_read(handle: Handle, ptr: u64, len: u64, timeout_ms: u64) -> Result<u64, Error> {
@@ -223,10 +264,11 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
         }
         sysinfo::CPUS => (crate::cpu::online_count() as u64).to_le_bytes().to_vec(),
         sysinfo::IDLE => {
-            let mut v = crate::time::tsc_since_boot().to_le_bytes().to_vec();
-            v.extend_from_slice(&(crate::cpu::online_count() as u64).to_le_bytes());
-            for c in crate::cpu::online() {
-                v.extend_from_slice(&c.idle_cycles().to_le_bytes());
+            let sample = crate::task::scheduler::idle_sample();
+            let mut v = sample.elapsed.to_le_bytes().to_vec();
+            v.extend_from_slice(&(sample.idle.len() as u64).to_le_bytes());
+            for idle in sample.idle {
+                v.extend_from_slice(&idle.to_le_bytes());
             }
             v
         }
@@ -249,6 +291,7 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
             crate::random::fill(&mut v);
             v
         }
+        sysinfo::RANDOM_SOURCE => crate::random::source().encode().to_vec(),
         sysinfo::FRAMEBUFFER => match crate::framebuffer::abi_info() {
             Some(fb) => fb.encode().to_vec(),
             None => return Err(Error::NotFound),
@@ -256,6 +299,14 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
         sysinfo::PROCESSES => {
             let max = (len as usize) / sysinfo::ProcessEntry::LEN;
             process::snapshot()
+                .iter()
+                .take(max)
+                .flat_map(|e| e.encode())
+                .collect()
+        }
+        sysinfo::STACKS => {
+            let max = (len as usize) / sysinfo::StackEntry::LEN;
+            process::stack_snapshot()
                 .iter()
                 .take(max)
                 .flat_map(|e| e.encode())
@@ -444,8 +495,29 @@ fn ipc_receive(
     Ok(n as u64 | ((received.len() as u64) << 32))
 }
 
-/// `ipc_receive_any` (ADR 0020): like `ipc_receive` on the first of several
-/// endpoints that has a message; the index goes in bits 48..63.
+/// A member of an `ipc_receive_any` set (ADR 0044): an interrupt line the
+/// caller may wait on (`WAIT`), or else an endpoint it may receive from,
+/// checked as `ipc_receive` checks it (`READ`, then `Invalid` for any other
+/// object), so the errors of an endpoint-only set are those of ABI 5.
+fn wait_member_of(h: Handle) -> Result<ObjectRef, Error> {
+    // One look at the table: the kind and the rights of the same entry,
+    // even if another thread of the process closes and reuses the handle.
+    with_handles(|t| {
+        let required = match lookup(t, h, Rights::NONE)?.kind {
+            ObjectKind::Irq(_) => Rights::WAIT,
+            _ => Rights::READ,
+        };
+        let obj = lookup(t, h, required)?;
+        match obj.kind {
+            ObjectKind::Irq(_) | ObjectKind::Endpoint(_) => Ok(obj.clone()),
+            _ => Err(Error::Invalid),
+        }
+    })
+}
+
+/// `ipc_receive_any` (ADR 0020, ADR 0044): like `ipc_receive` on the first
+/// of several endpoints that has a message, or the interrupts of the first
+/// line in the set that fired; the index goes in bits 48..63.
 fn ipc_receive_any(
     handles_ptr: u64,
     count: u64,
@@ -454,7 +526,9 @@ fn ipc_receive_any(
     out_ptr: u64,
     timeout_ms: u64,
 ) -> Result<u64, Error> {
-    if count == 0 || count as usize > aricode_abi::IPC_MAX_ANY {
+    use crate::ipc::{Member, Ready};
+    use aricode_abi::{receive_any, IPC_MAX_ANY, IPC_MAX_ANY_IRQS};
+    if count == 0 || count as usize > IPC_MAX_ANY + IPC_MAX_ANY_IRQS {
         return Err(Error::Invalid);
     }
     if buf_len as usize > IPC_MAX_DATA {
@@ -466,17 +540,28 @@ fn ipc_receive_any(
         .as_chunks::<4>()
         .0
         .iter()
-        .map(|c| endpoint_of(Handle(u32::from_le_bytes(*c)), Rights::READ))
+        .map(|c| wait_member_of(Handle(u32::from_le_bytes(*c))))
         .collect::<Result<_, _>>()?;
-    process::copy_to_user(buf_ptr, &[])?;
-    let endpoints: Vec<&crate::ipc::Endpoint> = objs
+    let members: Vec<Member> = objs
         .iter()
         .map(|o| match &o.kind {
-            ObjectKind::Endpoint(e) => e,
+            ObjectKind::Endpoint(e) => Member::Endpoint(e),
+            ObjectKind::Irq(l) => Member::Irq(l),
             _ => unreachable!(),
         })
         .collect();
-    let (index, msg) = crate::ipc::receive_any(&endpoints, timeout_ms)?;
+    let irqs = members
+        .iter()
+        .filter(|m| matches!(m, Member::Irq(_)))
+        .count();
+    if irqs > IPC_MAX_ANY_IRQS || members.len() - irqs > IPC_MAX_ANY {
+        return Err(Error::Invalid);
+    }
+    process::copy_to_user(buf_ptr, &[])?;
+    let (index, msg) = match crate::ipc::receive_any(&members, timeout_ms)? {
+        (index, Ready::Irq(n)) => return Ok(receive_any::irq(index, n)),
+        (index, Ready::Message(msg)) => (index, msg),
+    };
     let n = msg.data.len().min(buf_len as usize);
     process::copy_to_user(buf_ptr, &msg.data[..n])?;
     let received: Vec<u32> = with_handles(|t| {
@@ -490,7 +575,7 @@ fn ipc_receive_any(
     })?;
     let raw: Vec<u8> = received.iter().flat_map(|h| h.to_le_bytes()).collect();
     process::copy_to_user(out_ptr, &raw)?;
-    Ok(n as u64 | ((received.len() as u64) << 32) | ((index as u64) << 48))
+    Ok(receive_any::message(index, n, received.len()))
 }
 
 fn process_spawn(
@@ -572,8 +657,12 @@ fn spawn_from_bytes(
 ) -> Result<u64, Error> {
     let handles_len = aricode_abi::spawn_limits::handles(limits) as u64;
     let dma_quota = aricode_abi::spawn_limits::memory_kib(limits) as u64 * 1024;
+    let console_first = aricode_abi::spawn_limits::console_first(limits);
     if handles_len as usize > IPC_MAX_HANDLES * 4 {
         return Err(Error::TooBig);
+    }
+    if console_first && handles_len == 0 {
+        return Err(Error::Invalid);
     }
     let raw_handles = process::copy_from_user(handles_ptr, handles_len * 4)?;
     let user_handles: Vec<Handle> = raw_handles
@@ -584,16 +673,31 @@ fn spawn_from_bytes(
         .collect();
     // Validate all before removing any.
     distinct(&user_handles)?;
-    let extra: Vec<(Cap, Rights)> = with_handles(|t| {
+    let mut extra: Vec<(Cap, Rights)> = with_handles(|t| {
         for uh in &user_handles {
             lookup(t, *uh, Rights::TRANSFER)?;
+        }
+        // A session console wraps an endpoint (`Invalid` otherwise) that it
+        // can write to (`Denied` for a side without `WRITE`) (ADR 0047).
+        if console_first {
+            let first = lookup(t, user_handles[0], Rights::TRANSFER)?;
+            if !matches!(first.kind, ObjectKind::Endpoint(_)) {
+                return Err(Error::Invalid);
+            }
+            lookup(t, user_handles[0], Rights::WRITE)?;
         }
         user_handles
             .iter()
             .map(|uh| t.take(*uh).map_err(abi_error))
             .collect()
     })?;
-    let pid = match process::spawn_with_caps(name, elf, extra, arg, dma_quota) {
+    // Only the send side is kept (audit of ADR 0047, L1): a handle that also
+    // reads would otherwise hold the receive side open for the child's life.
+    let session_console = console_first.then(|| {
+        let (taken, _) = extra.remove(0);
+        Cap::new(taken.object().clone(), Rights::WRITE)
+    });
+    let pid = match process::spawn_with_caps(name, elf, session_console, extra, arg, dma_quota) {
         Ok(pid) => pid,
         Err(e) => {
             warn!("process_spawn '{name}': {e}");

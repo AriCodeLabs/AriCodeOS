@@ -276,6 +276,7 @@ VMM -> PMM            vmm::with holds the VMM and the Mapper requests frames fro
 heap.mapped -> VMM    grow holds the growth lock and maps (and, by the above, reaches the PMM)
 heap.mapped -> PMM    grow requests and returns frames
 PROCESSES -> SCHED    process::wait queries the thread state with the table held
+random.RNG -> CARRIED the seed hashes in the carried kernel seed (ADR 0043); CARRIED is a leaf
 WaitQueue.waiters     leaf: released before blocking or waking
 heap.heap, console    leaf: never call another subsystem
 ```
@@ -343,10 +344,34 @@ latter briefly to add the region.
 - `task::wait::WaitQueue` implements blocking with a condition evaluated under its
   lock and `wake_one`/`wake_all`; a wakeup that arrives before blocking is not
   lost because `unblock` fails and the thread re-evaluates.
+  `wait_any_until_deadline` waits on several queues (ADR 0044): the thread
+  registers on all of them before evaluating the condition, outside their
+  locks, so no lock is nested and a waker that takes a queue's lock after
+  the change always finds it; it leaves every queue on return.
 - `test=sched`: three threads that never yield share the CPU (minimum >= half
   of the maximum), a thread sleeps 50 ms with an observed duration of 5 to 7 ticks
   (50 to 70 ms in total), and two consumers are woken one by one and then
   all at once.
+- Idle time (incident 0020): a CPU is idle while its idle thread is its
+  running thread. `Cpu::set_current`, called at every switch, closes the
+  idle stretch when the idle thread stops running and opens one when it
+  starts (`aricode_sched::idle::IdleClock`, host-tested). A switch made
+  inside a handler taken from `hlt` (the BSP's `on_tick` waking a sleeper)
+  therefore ends the stretch at that switch: the woken thread's time is
+  never idle. Interrupts serviced on the idle thread that return to it
+  without switching count as idle. The idle loop itself measures nothing.
+  The TSC of a switch is read under the CPU's idle lock (a leaf lock).
+  `scheduler::idle_sample` (`sysinfo::IDLE`) locks every CPU's idle clock
+  in CPU order, reads the TSC once and computes the elapsed cycles and
+  every CPU's idle cycles, the open stretch included, at that reading: no
+  stretch can end after it, so each CPU's idle is at most the elapsed
+  cycles and two samples differ by exactly the idle time between them.
+- `test=idle`: the control of the performance audit of 731c398 (finding
+  A). A thread pinned to CPU 0 and, with more CPUs, to the last one stays
+  runnable 500 ms and sleeps 200 ms: its busy interval is excluded from
+  idle on its CPU and from the aggregate, and the sleep counts. With more
+  CPUs, an idle CPU taking timer ticks and RESCHED IPIs counts the whole
+  window as idle (`scheduler.idle_accounting`, `smp.idle_accounting`).
 
 ## User mode (Phase 11)
 
@@ -400,11 +425,13 @@ latter briefly to add the region.
 
 ## Objects and handles (Phase 12, ADR 0010)
 
-- `object::KernelObject` (`Thread`, `Process`, `Console`) is referenced via
+- `object::KernelObject` (`Thread`, `Process`, `Console`, and since ADR
+  0047 `SessionConsole`, a console that writes to an endpoint) is referenced via
   `Arc` from the handle tables; processes never see pointers or
   global identifiers that confer access.
 - Each process is born with three handles: itself (`MANAGE|READ|DUPLICATE`), its
-  thread (`READ|WAIT|DUPLICATE`) and the console (`WRITE|DUPLICATE`); limit of
+  thread (`READ|WAIT|DUPLICATE`) and the console (`WRITE|DUPLICATE`; a
+  session console when the spawner asked with `CONSOLE_FIRST`); limit of
   256 handles per process.
 - `user.handles` checks from ring 3: object type, forged handle
   (`BadHandle`), a duplicate without rights that cannot write (`Denied`),
@@ -455,9 +482,19 @@ latter briefly to add the region.
   (`copy_to_user` validates USER and WRITABLE) and returns `len | (n << 32)`.
 - `ipc_receive_any` (syscall 31, ADR 0020) receives from the first of up to 16
   endpoints with a message (all with `READ`, validated before waiting) and
-  returns its index in bits 48..63; multi-endpoint receivers wait
-  on a shared queue that any send wakes. fsd waits this way on its
+  returns its index in bits 48..63. fsd waits this way on its
   main endpoint and on the granted ones at once, without 10 ms polling.
+  Since ABI 6 (ADR 0044) the set may also hold up to 4 interrupt lines
+  (`WAIT`): the first ready member in list order wins, and a line's
+  accumulated interrupts are taken as `irq_wait` takes them (result
+  `count | 1 << 47 | index << 48`). The waiter registers on the receive
+  queue of each endpoint and on each line's queue before checking, and
+  leaves them all on return (`wait::wait_any_until_deadline`): a send wakes
+  only its endpoint's oldest waiter, and a set's waiter that took another
+  member passes that wakeup on. The line's count is a latch, so an
+  interrupt that fired before the wait returns it at once. netd,
+  virtio-input and usb-input end each round this way, with the timeout of
+  their next deadline (`sdk/rust/src/wait.rs`).
 - Timeouts in ms: `0` does not block, `TIMEOUT_INFINITE` waits forever. The
   waits use `WaitQueue::wait_until_deadline`: the thread sleeps with a deadline and
   an early `wake` (`RoundRobin::wake` takes a sleeper off its list)
@@ -501,7 +538,8 @@ latter briefly to add the region.
 - A driver only gets what its capabilities give it (section 27):
   - `Irq`: a GSI routed to a device vector (`0x30..=0x3F`) with the
     polarity and trigger mode from the MADT. The handler accumulates and wakes; level-triggered
-    lines stay masked until `irq_wait` services them.
+    lines stay masked until `irq_wait` (or an `ipc_receive_any` that lists
+    the line, ADR 0044) services them.
     When the last handle is dropped, the line is masked and the vector freed.
   - `Mmio`: a physical device region; `mmio_map` maps it into the process
     (`0x1000_0000` onwards, uncached) and records it as foreign memory,
@@ -641,6 +679,22 @@ latter briefly to add the region.
 - User programs have a 64 KiB stack and the kernel diagnoses
   `USER STACK OVERFLOW` when a fault hits its guard page (the 16 KiB GPT
   table on the stack caused it; it now goes on the program's heap).
+- Stack use is measured twice (incident 0018). Statically, `cargo xtask
+  check` ends with `stack-check`: from `objdump` of the network drivers
+  (release and dev builds) it measures every frame and the deepest chain
+  of direct calls from `_start` and fails above half the stack for the
+  chain or a quarter for one frame (`tools/xtask/src/stack.rs`,
+  `tests/README.md`); indirect calls are not seen. At run time,
+  `system_info(STACKS)` gives each live process's high-water mark: the
+  kernel finds the lowest stack page whose Accessed bit the CPU set
+  (`spawn` zeroes the pages through the kernel's own mapping and nothing
+  clears the bit), page granular, indirect calls included; `diag` lists
+  it as `user stacks (touched of size, page granular)`. Like `PROCESSES`,
+  it is readable by any holder of `READ` on `SYSTEM`, and the depth of
+  another process is a weak side channel on what it is doing (ADR 0039,
+  note of 2026-10-23); there is no address randomization for it to
+  defeat. The static check covers every initrd program with per-binary
+  budgets (`stack::EXCEPTIONS`, empty).
 - `WaitQueue::wait_until_deadline` keeps interrupts disabled
   from the check until the context switch: a `wake` from an
   MSI-X handler cannot land in the window between releasing the lock and
@@ -765,7 +819,11 @@ latter briefly to add the region.
   requests with timeout 0 (from its main endpoint and every client session
   together, `ipc_receive_any`; the endpoint list is rebuilt inside the
   round when a request granted or retired a session), expires deadlines and
-  waits for the IRQ for up to 10 ms. Every receive descriptor counts toward
+  then waits once on every endpoint and the NIC's interrupt line until the
+  stack's next deadline (ADR 0044: `ipc_receive_any` with the line in the
+  set, through the SDK's `wait::end_of_round`); the wait is skipped when
+  frames or requests were left over or a sweep took requests, and a request
+  that ends it is served at once. Every receive descriptor counts toward
   the 32, an errored one included (rtl-net reports it as length 0). With
   frames left over netd neither waits nor yields, so under a sustained
   flood it runs at 100% of a CPU and fairness towards other processes
@@ -777,6 +835,16 @@ latter briefly to add the region.
   `Dns`) keep the client's reply endpoint and answer when
   the packet arrives or the deadline expires; frames whose next hop is not
   in the ARP cache are parked until the ARP reply (1 s).
+- Stack layout of netd (incident 0018): `Stack::new` returns the stack in
+  a `Box` (a const assertion keeps the struct under 8 KiB), the UDP socket
+  buffers, the four ARP parking frames (allocated once, reused), the
+  receive buffer and every TCP socket (`TcpSock::boxed`, out of line) are
+  on the heap. Deepest direct path at the fix: 11,752 bytes (release) and
+  15,408 bytes (dev) of virtio-net's 64 KiB, against 53,368 and 69,680
+  before; a dev build used to overflow on its first DHCP offer (`run` ->
+  `on_frame` -> `broadcast_dhcp`). `network.deep_path` drives the deepest
+  path (a full TCP table swept inside a request, a dead client's reset
+  toward an address with no ARP entry).
 - QEMU's network is user-mode (slirp): DHCP hands out 10.0.2.15,
   router 10.0.2.2 (which answers ICMP and redirects UDP to the host's
   loopback) and DNS 10.0.2.3. xtask starts, with each QEMU, a UDP responder on
@@ -804,7 +872,9 @@ latter briefly to add the region.
   established. `TcpConnect`/`TcpAccept`/`TcpRecv` stay pending with a
   deadline; `TcpSend` queues what fits and returns the count (the client
   retries with `tcp_send_all`). A slot is freed when the user has
-  closed and the connection has finished.
+  closed and the connection has finished; a full table first gives up the
+  closed TIME-WAIT connection that ends soonest (incident 0027), and
+  FIN-WAIT-2 gives up a peer that never closes after 30 s with a reset.
 - Listeners are protected (incident 0013, ADR 0035). A listener holds at
   most `tcp::listen_backlog(MAX_TCP) = 4` connections its owner has not
   accepted yet, half-open and established alike, so a burst of SYNs to port
@@ -827,15 +897,16 @@ latter briefly to add the region.
 - Initial sequence numbers and ephemeral ports are secrets (ADR 0034,
   incident 0014). `netd` draws a 32-byte secret per boot from the kernel
   generator (`sys::random` through the `SYSTEM` handle it already holds as
-  its clock: `READ | TRANSFER` from init, `READ` is what the kernel checks)
-  and prints `tcp secret from kernel entropy`; if the syscall is refused it
-  records the fault event `net tcp secret degraded` (code = bytes
-  obtained) and says so on the console instead of falling back silently.
-  The kernel always answers `RANDOM` with the bytes asked and exposes no
-  entropy-quality state, so that fault cannot mean weak entropy; the
-  kernel's boot line `random: ChaCha20 generator seeded with rdrand` or
-  `... with TSC (no rdrand: limited entropy)` is the only quality signal
-  (QEMU's CPU is the latter). `aricode_net::isn::initial_seq` gives every connection
+  its clock: `READ | TRANSFER` from init, `READ` is what the kernel
+  checks); if the syscall is refused it records the fault event `net tcp secret
+  degraded` (code = bytes obtained) and says so on the console instead of
+  falling back silently. The kernel always answers `RANDOM` with the bytes
+  asked, so that fault cannot mean weak entropy; the quality is read
+  apart from `system_info(RANDOM_SOURCE)` (ADR 0039): `tcp secret from
+  kernel entropy (rdrand)`, or `tcp secret weak: kernel generator seeded
+  from TSC + interrupts (N samples, M events) ...` with the fault event
+  `net tcp secret weak x1` (code 2) on CPUs without `rdrand` (QEMU's
+  `qemu64`). `aricode_net::isn::initial_seq` gives every connection
   `M + F(4-tuple, secret)` as RFC 6528 prescribes (`M` the ms clock in
   4 µs ticks, `F` the first 32 bits of HMAC-SHA-256): the active SYN and
   the passive SYN|ACK alike, through `Connection::connect(iss, now)` and
@@ -846,7 +917,7 @@ latter briefly to add the region.
   candidates the caller marks in use: `netd` marks a port held by any
   slot, listeners and TIME-WAIT included. Host tests in `libs/net` pin
   each property against the old formulas.
-- QEMU forwards `127.0.0.1:17009` to guest port 7 (`hostfwd`) and
+- QEMU forwards a host port chosen per run (ADR 0040) to guest port 7 (`hostfwd`) and
   the xtask responder listens for TCP echo on `127.0.0.1:17008`. A
   scenario can declare `[host_tcp] marker/payload`: on seeing the marker
   in the serial output, xtask connects to the forwarded port, sends the payload and
@@ -857,7 +928,8 @@ latter briefly to add the region.
 - Refusals are visible (incident 0012). netd records a fault event
   (`sys::event_record`, ADR 0028) whenever it refuses a request or loses
   a frame, named by cause: `net tcp table full` (`TcpConnect`/`TcpListen`
-  with the 8 slots taken, TIME-WAIT included), `net arp defer full` (the
+  with the 8 slots taken and none in TIME-WAIT to recycle), `net tcp tw
+  recycled` (a TIME-WAIT slot given to a new connection, incident 0027), `net arp defer full` (the
   4-slot parking table for frames awaiting ARP), `net tx busy` (the NIC
   had no transmit slot; the frame is lost), `net arp no reply` (a parked
   frame dropped after 1 s), `net ping table full`, `net dns table full`,
@@ -925,6 +997,12 @@ latter briefly to add the region.
   4 events per reply; a single pending read per service
   (`Busy` if there is another). `aricode-input::Keyboard` translates in the client,
   not in the driver: the driver does not decide the keyboard layout.
+- `inputd` and usbd collect the device's events, serve up to 8 requests
+  and then wait once on their endpoints and the device's interrupt line
+  until the pending read's deadline (ADR 0044); usbd's deadline also
+  covers its recovery steps, retried at least 10 ms apart while one waits
+  for a command completion. An idle input driver sleeps until a request
+  or an event instead of waking every 10 ms.
 - QEMU carries `virtio-keyboard-pci` and `virtio-mouse-pci` (functions
   `00:04.0` and `00:05.0`; nine PCI functions in total) and in
   headless runs exposes QMP over a Unix socket in the
@@ -950,23 +1028,39 @@ latter briefly to add the region.
   returns width, height, stride, format, size and masks. Without `gui` the
   capability exists but the kernel keeps using the screen.
 - `aricode-gfx` allocates no memory: `Canvas` wraps `&mut [u32]` with
-  a stride and clips everything (`fill_rect`, `blit`, `text`, `cursor`); `Desktop`
+  a stride and clips everything (`fill_rect`, `blit`, `text`, `cursor`) to
+  the canvas and to a clip rectangle (`Canvas::clipped`); `Desktop`
   holds up to 8 windows with z-order, focus, pointer and cascade
   placement, and `compose` paints background, frames (active/inactive title),
-  contents (via a caller callback) and cursor. All tested on the host
-  over `Vec<u32>`, including composing two overlapping windows.
+  contents (via a caller callback) and cursor; `compose_region` repaints
+  only one rectangle over the previous frame, each window drawing only
+  inside its frame and the cursor inside `cursor_rect`. `Scene` snapshots
+  what a frame depends on besides window contents and `Scene::damage`
+  diffs two of them into a `Damage`: at most 8 disjoint rectangles,
+  merged when they overlap or overflow, the whole screen past half of it
+  (ADR 0046). All tested on the host over `Vec<u32>`, including composing
+  two overlapping windows and random event sequences composed both by
+  damage and whole, compared pixel for pixel.
 - The compositor composes into a DMA back buffer (the whole screen;
-  `DMA_MAX_LEN` rises to 8 MiB) and blits it to the framebuffer, converting to RGB
-  if needed. It recomposes only when something changed (`Present`, pointer,
-  focus, windows) and logs each frame over serial with one pixel sample per
-  window, which the scenarios require. Events from the `inputd`s arrive
+  `DMA_MAX_LEN` rises to 8 MiB) and flushes it to the framebuffer, converting
+  to RGB if needed, only where something changed (ADR 0046): each frame
+  diffs the scene on screen against the current one (pointer, focus,
+  windows opened, closed, raised or moved), adds the content of windows
+  whose client sent `Present`, recomposes those rectangles and writes only
+  them, at most once per 16 ms; changes that arrive sooner join the next
+  frame, so an event waits at most one frame. A one-pixel pointer move
+  flushes 247 pixels instead of the whole screen. With the test-only key
+  `gui_trace` it logs each frame over serial (pixels and rectangles
+  flushed) with one pixel sample per window, which the scenarios require;
+  without it a frame prints nothing. Events from the `inputd`s arrive
   with the instant each service received them (`Reply::times`), and the
   compositor merges them by that instant before processing them: a mouse
   click precedes the key that came after it even though the devices are
   read in turn.
 - `WindowProtocol v1`: the client allocates the content buffer with its
   hardware capability and transfers it in `Create` (the compositor maps it
-  once and reads it on every composition); `Present` marks the window dirty;
+  once and reads it whenever its content is recomposed); `Present` damages
+  the window's content, and only presented pixels are guaranteed on screen;
   `Poll` waits with a deadline for a `Key`, `Click` or `Focus`; `Close` removes it.
   The compositor translates the keyboard (`aricode-input::Keyboard`) and delivers
   only to the focused window: the `gui.two_windows` probe checks that
@@ -1005,15 +1099,23 @@ latter briefly to add the region.
   and exhausted DMA quotas, timestamped in µs; `sysinfo::EVENTS`
   publishes them to whoever holds `READ` on `SYSTEM` and `diag` shows them
   (`diag.events`). No message or file contents.
-- Per-CPU idle: the idle loop accumulates the TSC cycles spent in `hlt`
-  (`Cpu::idle_cycles`) and `sysinfo::IDLE` publishes them alongside the cycles
-  since the first tick; `cpus` shows them as a percentage and `diag` gathers
+- Per-CPU idle: the scheduler accounts the TSC cycles each CPU's idle
+  thread is its running thread, at the context switches (incident 0020,
+  "Preemptive scheduler" above), and `sysinfo::IDLE` publishes them
+  alongside the cycles since the first tick, all sampled at one instant;
+  `cpus` shows them as a percentage (not clamped) and `diag` gathers
   `uptime`, `mem`, `cpus`, `ps` and `services --detail` into one report.
+- User stack high-water marks (incident 0018): `sysinfo::STACKS`, one
+  `StackEntry` per live process (stack size, bytes touched from the top,
+  page granular, from the Accessed bits of the stack's page table
+  entries); `diag` lists them after the processes.
 
 ## Application sandbox (Phase 28)
 
-- `process_spawn` receives in its sixth argument the child's handle count and
-  DMA memory quota (`spawn_limits::pack`); the process stores it
+- `process_spawn` receives in its sixth argument the child's handle count,
+  DMA memory quota (`spawn_limits::pack`) and, since ABI 7, the
+  `CONSOLE_FIRST` flag (the first handle becomes a session console, ADR
+  0047); the process stores the quota
   (`dma_quota`, `dma_used`) and `dma_alloc` charges the size rounded up to a
   page, returning `Limit` when it is exceeded. The quota is cumulative: what was
   reserved is not returned on free (DMA buffers live as long as the
@@ -1036,8 +1138,10 @@ latter briefly to add the region.
   `spawn` in the shell) the broker replies `Started` when it creates the process and
   nobody waits for its exit. If the program is not in the initrd, the broker
   looks for it installed in AriFS (`apps/NAME.aripkg`, ADR 0017): it copies the
-  package through fsd into a 256 KiB DMA staging buffer reserved
-  once, verifies it with `aricode-pkg` (Ed25519 signature of the package
+  package through fsd into a DMA staging buffer of `PACKAGE_MAX` (32 KiB,
+  what one AriFS replace writes, shared with the installer and the
+  updater since incident 0026; a larger file is refused naming both sizes)
+  reserved once, verifies it with `aricode-pkg` (Ed25519 signature of the package
   manifest with the development key and SHA-256 of the ELF and of the
   application manifest), applies the policy to the manifest and launches it with
   `process_spawn_from` (syscall 30: `MANAGE` on the `SPAWNER`, `READ`
@@ -1135,13 +1239,40 @@ latter briefly to add the region.
   boot tick; each `fill` mixes in another sample (`reseed`). `qemu64` does not
   expose `rdrand`, so in the tests the source is the TSC and the kernel
   says so. `system_info(RANDOM)` serves up to 256 bytes per call.
+- Entropy source (ADR 0039): next to the generator, under its lock, the
+  kernel keeps a `sysinfo::RandomSource` account: the seed's source
+  (`Rdrand` = 1 only if `rdrand` returned plausible data: retried while
+  CF = 0, at least two distinct values other than all-0/all-1 bits; else
+  `TscInterrupts` = 2), the `rdrand` values and TSC samples mixed in so far and the
+  interrupt stirs counted up to the last read. `system_info(RANDOM_SOURCE)`
+  (kind 12, 32 bytes) returns it, never any state; `sys::random_source`
+  wraps it. netd records `net tcp secret weak` and sshd `ssh entropy weak`
+  (before drawing a host key with no carried `random_seed`) when the
+  source is not a hardware one, code = the source number; neither refuses
+  to run. `diag` prints `entropy  rdrand` or `entropy  TSC + interrupts (N
+  samples, M events): weak`. The scenario option `cpu_rdrand` boots
+  `-cpu qemu64,+rdrand` (TCG implements it) for the hardware path
+  (`crypto.random_rdrand`, `crypto.entropy_rdrand`).
+- Carried seed (ADR 0043): AriBoot reads a 32-byte seed from sectors 1
+  and 2 of `ARIBOOT` (two copies with a generation, `aricode_ab::seed`),
+  writes its successor to the other copy and blanks the old one, and only
+  then hands the kernel its share (HMAC of the seed) in
+  `BootInfo::carried_seed`. The kernel copies it out at entry, zeroes it
+  in `BootInfo` and hashes it into the seed; `RandomSource` (40 bytes now)
+  reports the status in byte 32 (`CarriedSeed`), and a carried seed counts
+  as strong for netd, sshd and `diag` (`entropy  TSC + interrupts +
+  carried seed`). init records `random seed missing`/`unreadable`/`not
+  saved` and replaces the stored seed with `RANDOM` output early in the
+  boot and after the boot services; images ship none
+  (`crypto.carried_seed`).
 - xtask gains `keygen`, `sign` and `verify` (seed and public key in hex);
   `keys/dev` holds the development pair that will sign the test images.
 
 ## A/B update (Phase 30)
 
 - 48 MiB test disk: `ARI0` (AriFS), `SYSA`, `SYSB`, `UPDATE` (12
-  MiB each) and `ARIBOOT` (32 KiB). The scenario picks the initial state
+  MiB each) and `ARIBOOT` (32 KiB: sector 0 the boot state, sectors 1
+  and 2 the carried kernel seed of ADR 0043). The scenario picks the initial state
   with `disk = slots | esp-only | pending-b | b-exhausted | b-corrupt`;
   the ESP failure scenarios use `esp-only`.
 - `aricode-ab`: `BootState` (magic, active, pending+attempts, counter,
@@ -1211,8 +1342,8 @@ libs/sched                     shared queue, per-CPU current/idle, affinity, pen
   invalidates the page or, with address 0, the whole TLB by toggling `CR4.PGE`.
 - Panic: `halt_others` sends `HALT` to the other CPUs before the dump, which
   names the CPU; fatal exceptions do too.
-- `system_info(CPUS)` and `cpus` in arish. Tests: `test=smp` and `smp.*`
-  scenarios; `cargo xtask test --cpus N` as a stress run of the whole suite.
+- `system_info(CPUS)` and `cpus` in arish. Tests: `test=smp`, `test=idle`
+  and `smp.*` scenarios; `cargo xtask test --cpus N` as a stress run of the whole suite.
 
 ## IOMMU (Phase 33)
 
@@ -1441,8 +1572,9 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   producer; everything is checked at run time) and has no floating point.
 - The broker policy is a constant; there are no CPU or handle quotas
   per manifest and the user heap is still static.
-- The GUI does not move or resize windows, repaints the full screen
-  every frame and has no graphical terminal; the shell is still on serial.
+- The GUI does not move or resize windows (the model can move them,
+  ADR 0046, but nothing asks it to) and has no graphical terminal; the
+  shell is still on serial.
 - No xHCI/USB HID: only virtio-input devices; the shell still reads
   from the serial console.
 - HTTP without TLS, redirects or `keep-alive`; bodies limited to the
@@ -1528,8 +1660,20 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   input and output are IPC endpoints instead of the console. The shell keeps
   unconsumed input between lines (`Input`), so a command and the `exit` that
   follows can arrive in one message.
+- Programs the session shell waits for (`run`, the updater, the installer)
+  get the session as their console (ADR 0047): the shell sends a duplicate
+  of its output endpoint's send side with the launch request (flag
+  `CONSOLE`), the broker passes it with `spawn_limits::CONSOLE_FIRST`, and
+  the kernel puts a *session console* at the child's `0x0001_0003`. It
+  reports `CONSOLE`; `console_write` sends the text to the endpoint in
+  messages of at most `IPC_MAX_DATA` bytes (never an empty one, which sshd
+  reads as the end of the session), waiting up to 2 s for room per message;
+  `ipc_send`, `console_read` and `console_inject` refuse it and it cannot be
+  transferred. Detached launches and the console shell keep the kernel
+  console. Scenarios: `init.boot` (selftest check with a pair), `ssh.exec`
+  (`run console_probe`).
 - Tests: `[host_ssh]` in scenarios (generated client key, `authorized_keys`
-  installed, host port 17022 forwarded to 22); `ssh.exec`.
+  installed, a host port chosen per run forwarded to 22, ADR 0040); `ssh.exec`.
 
 ## HTTPS (ADR 0026)
 
@@ -1541,7 +1685,11 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
 - `sdk/https` (`aricode-https`): HTTP/HTTPS GET over the TCP service; the
   shell's `http` uses it, with `trusted_ca.der` from AriFS as an optional
   extra root. Scenario `net.https` (`host_https = true` starts the host's
-  `openssl s_server`).
+  `openssl s_server`). Since ADR 0048 it follows up to five redirects
+  (301/302/303/307/308), each on a new connection within the same budget,
+  never from `https://` to `http://`, and holds 16 KiB of response headers
+  on the heap (`MAX_HEADERS_LARGE`; github.com sends 10.6 KiB); scenario
+  `update.redirected_source`.
 - init waits for sshd's `Ready` session message before starting the console
   shell, so their console output never interleaves.
 
@@ -1593,6 +1741,36 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   `update.network`, `update.tampered_index`, `update.tampered_image`,
   `update.stale_index`, `update.refuse_downgrade`, `apps.upgrade_network`,
   `apps.downgrade_refused`.
+
+## Development update channel (ADR 0045)
+
+- Two channels, two keys: the release key signs `stable`, the development
+  channel's key (`keys/dev-channel/`, seed outside the repository) signs
+  builds of `develop` or a branch. `aricode_ab::Image::verify_with` and
+  `aricode_update_index::verify_channel` bind the key to the channel the
+  manifest or the index names.
+- `aricode_crypto::trust::dev_channel_key` (`ARICODE_DEV_CHANNEL_PUB`):
+  in every updater; in AriBoot only with `usb-image --dev-source` (and in
+  test builds); never in init or the installer. AriBoot writes
+  `BootState::loader_dev_channel` on every boot; the updater uses the
+  development key only with that flag (`trusted_keys`), and fetches
+  development indexes only from `dev URL` lines in `updater/sources`.
+- The development manifest and index add `channel = dev` and
+  `commit = HEX`; the version is the build number, assigned by
+  `cargo xtask publish-update --channel dev` (counter beside
+  `build/update-dev/`). AriBoot passes `boot_version`, `boot_channel` and
+  `boot_commit`; `diag` prints the running system.
+- Shell: `update [--channel stable|dev]`, `update add [--channel dev] URL`,
+  `upgrade [--channel stable|dev] [--allow-downgrade]` (only `--channel`
+  moves the system to the other channel), `update rollback` (updater
+  `ROLLBACK`: schedules the inactive slot's verified image, no network).
+- The stable floor (`[floor]` of `updater/state`): the newest stable
+  release the machine ran; a stable release below it is a downgrade,
+  channel switch or not. A development build number seen with another
+  commit is refused. xtask numbers development builds per host
+  (`~/.cache/aricodeos/dev-build`, locked).
+- Scenarios: `update.dev_channel`, `update.dev_wrong_key`,
+  `update.dev_rollback`, `update.dev_stable_image`, `update.stable_floor`.
 
 ## DHCP address probe (2026-10-12)
 

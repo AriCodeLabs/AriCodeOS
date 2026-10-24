@@ -6,7 +6,9 @@
 # sends QMP input to the most recently activated handler, which under
 # `shell` is the virtio keyboard (activated when its driver starts), and
 # until 2026-10-17 this scenario passed typing on it (incident 0001). Keys
-# are paced (`key_delay_ms`): QEMU's usb-kbd queues at most 16 scancodes.
+# are typed one at a time, each after the shell's echo of the previous one
+# (`echo_prompt`, incident 0022), with `key_delay_ms` as a minimum: QEMU's
+# usb-kbd queues at most 16 scancodes.
 name = "shell.usb_keyboard_msi"
 description = "arish with a USB HID keyboard on an xHCI that only offers MSI (no MSI-X)"
 level = "full"
@@ -20,6 +22,7 @@ timeout_secs = 60
 [host_input]
 marker = "CONSOLE_BRIDGE_READY"
 key_delay_ms = 30
+echo_prompt = "ari> "
 keys = ["c", "p", "u", "s", "ret", "s", "h", "u", "t", "d", "o", "w", "n", "ret"]
 
 [expect]

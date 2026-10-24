@@ -1,0 +1,65 @@
+# The way back from a development build that boots but cannot reach the
+# network (ADR 0045, decision 4): after `upgrade --channel dev` and a
+# reboot into development build 5, `update rollback` verifies the system
+# still in the other slot (stable 1) and schedules it, with no network and
+# no download; a second rollback while that one is pending is refused.
+# The third boot runs stable 1 again, confirmed, and the history records
+# the rollback.
+name = "update.dev_rollback"
+description = "update rollback from a dev build: the other slot's verified system is scheduled without the network"
+level = "full"
+areas = ["update", "shell", "boot"]
+disk = "update-empty"
+timeout_secs = 300
+
+[host_update]
+dev_build = 5
+dev_source = true
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update rollback", "update --channel dev", "upgrade --channel dev", "reboot"]
+[boots.expect]
+exit = 0
+serial_contains = [
+    # Slot B is still empty: nothing to roll back to.
+    "updater: rollback refused: slot B holds no image this machine can boot: no valid slot header (empty slot or damaged header)",
+    "update: updater exited with 55",
+    "updater: system dev build 5 (commit 0123abc) installed: reboot to apply",
+    "AriCodeOS: rebooting",
+]
+serial_absent = ["KERNEL PANIC", "index refused"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update rollback", "update rollback", "diag", "reboot"]
+[boots.expect]
+exit = 0
+serial_contains = [
+    "slots: booting from slot B (image dev build 5 (commit 0123abc), pending confirmation)",
+    "AriInit: boot confirmed on slot B",
+    "updater: slot A holds system 1, verified",
+    "updater: state: active B, pending A (3 tries); reboot to try it",
+    "updater: rollback: system 1 in slot A scheduled in place of dev build 5 (commit 0123abc): a channel switch from dev to stable (pending until reboot)",
+    "updater: reboot to boot system 1",
+    "updater: rollback refused: slot A is already pending; reboot to try it (or let it roll back)",
+    "update: updater exited with 55",
+    ": upd-rollback (code 54)",
+    ": upd-rollback-pending (code 55)",
+    "AriCodeOS: rebooting",
+]
+serial_absent = ["KERNEL PANIC", "downloading aricodeos"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["diag", "cat updater/history.log", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "slots: booting from slot A (image version 1, pending confirmation)",
+    "AriInit: boot confirmed on slot A",
+    "system   version 1, slot A",
+    "rollback: system 1 in slot A scheduled in place of dev build 5 (commit 0123abc): a channel switch from dev to stable (pending until reboot)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC"]

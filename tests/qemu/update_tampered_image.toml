@@ -19,7 +19,7 @@ stdin = ["update", "upgrade", "diag", "shutdown"]
 [boots.expect]
 exit = 33
 serial_contains = [
-    "updater: source 1 http://10.0.2.2:17010/update/: index verified (serial ",
+    "updater: source 1 http://10.0.2.2:{update_port}/update/: index verified (serial ",
     "updater: system: installed 1, source 1 offers 2: upgrade available",
     "updater: downloading aricodeos-2.img (",
     "updater: system image SHA-256 does not match the signed index; not installing",

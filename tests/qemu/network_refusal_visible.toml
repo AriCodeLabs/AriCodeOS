@@ -1,9 +1,11 @@
 # Incident 0012: a refusal by netd must be visible. `tcp_hog` (manifest
 # `caps = net`) opens connections to the host echo server until netd answers
 # Busy with its 8-slot TCP table full and prints the status the way the
-# shell does; it closes them on exit, which leaves them in TIME-WAIT (2 s),
-# so the shell's `http` typed at the next prompt is refused the same way
-# and must name the status instead of "rejected the request". netd records
+# shell does; started with `spawn tcp_hog 15000` it keeps them open for 15
+# seconds, so the shell's `http` after `sleep 4000` is refused the same way
+# and must name the status instead of "rejected the request" (since
+# incident 0027 a table full of TIME-WAIT is recycled, so the connections
+# must be live for the refusal). netd records
 # the refusal as the fault event `net tcp table full x1` (name = kind and
 # count in that second, code = the status number, 5 = busy; at most one
 # event per kind per second) and `diag` lists it. No selftest: the boot
@@ -15,7 +17,7 @@ areas = ["network", "shell", "diag"]
 selftest = false
 cmdline = "qemu_exit shell"
 timeout_secs = 90
-stdin = ["run tcp_hog", "http http://10.0.2.2:17010/hola", "diag", "shutdown"]
+stdin = ["spawn tcp_hog 15000", "sleep 4000", "http http://10.0.2.2:17010/hola", "diag", "shutdown"]
 
 [expect]
 exit = 33
@@ -23,7 +25,7 @@ serial_contains = [
     "AriInit: launch tcp_hog with manifest [net]",
     "tcp_hog: 8 connections open; the next one: network service refused: busy (no free connection or send slot)",
     "virtio-net: fault net tcp table full x1",
-    "run: tcp_hog exited with 0",
+    "tcp_hog: holding them for 15000 ms",
     "http: could not connect: network service refused: busy (no free connection or send slot)",
     "recent kernel events:",
     "fault reported by process ",

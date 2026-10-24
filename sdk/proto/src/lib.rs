@@ -418,18 +418,11 @@ pub mod net {
     pub const TEST_RESPONDER_PORT: u16 = 17007;
     /// TCP port of the host test echo server.
     pub const TEST_TCP_ECHO_PORT: u16 = 17008;
-    /// Host port forwarded (`hostfwd`) to guest TCP port 7.
-    pub const TEST_TCP_FORWARD_PORT: u16 = 17009;
-    /// TCP port the guest test program listens on.
+    /// TCP port the guest test program listens on (the host reaches it
+    /// through a `hostfwd` port chosen per test run, ADR 0040).
     pub const TEST_TCP_LISTEN_PORT: u16 = 7;
     /// Port of the host test HTTP server.
     pub const TEST_HTTP_PORT: u16 = 17010;
-    /// Host port forwarded (`hostfwd`) to the guest's SSH port 22.
-    pub const TEST_SSH_FORWARD_PORT: u16 = 17022;
-    /// Host HTTPS test servers (`openssl s_server`): a certificate from the
-    /// scenario's test CA, and an untrusted self-signed one.
-    pub const TEST_HTTPS_PORT: u16 = 17443;
-    pub const TEST_HTTPS_UNTRUSTED_PORT: u16 = 17444;
     /// Longest label of a client session (`Op::Attach`): the bound the
     /// kernel gives process names, which is what the label is.
     pub const MAX_LABEL: usize = 24;
@@ -1259,7 +1252,8 @@ pub mod launch {
         pub name: [u8; MAX_NAME],
         pub name_len: u8,
         /// `DETACH`: reply `Started` when the process is created, without waiting
-        /// for it to exit (ADR 0015).
+        /// for it to exit (ADR 0015). `CONSOLE`: a second handle follows the
+        /// reply endpoint and becomes the program's console (ADR 0047).
         pub flags: u8,
     }
 
@@ -1267,6 +1261,9 @@ pub mod launch {
         pub const LEN: usize = 48;
         /// Background launch.
         pub const DETACH: u8 = 1;
+        /// The request carries the program's console (the send side of an
+        /// endpoint); never with `DETACH`.
+        pub const CONSOLE: u8 = 2;
 
         /// `None` if the name does not fit.
         pub fn new(name: &str, arg: u64) -> Option<Self> {
@@ -1290,6 +1287,15 @@ pub mod launch {
 
         pub fn is_detached(&self) -> bool {
             self.flags & Self::DETACH != 0
+        }
+
+        pub fn with_console(mut self) -> Self {
+            self.flags |= Self::CONSOLE;
+            self
+        }
+
+        pub fn has_console(&self) -> bool {
+            self.flags & Self::CONSOLE != 0
         }
 
         pub fn name_str(&self) -> &str {
@@ -1405,6 +1411,9 @@ mod tests {
         let d = Request::decode(&r.encode()).unwrap();
         assert_eq!(d, r);
         assert_eq!(d.name_str(), "hello_app");
+        assert!(!d.has_console() && !d.is_detached());
+        let c = Request::decode(&r.with_console().encode()).unwrap();
+        assert!(c.has_console() && !c.is_detached());
         assert!(Request::new("", 0).is_none());
         assert!(Request::new(&"x".repeat(33), 0).is_none());
         assert_eq!(

@@ -9,5 +9,6 @@ description = "AriCodeOS update sources and signed update index (ADR 0029): inde
 path = "src/lib.rs"
 
 [dependencies]
+aricode-ab = { path = "../ab" }
 aricode-crypto = { path = "../crypto" }
 aricode-pkg = { path = "../pkg" }

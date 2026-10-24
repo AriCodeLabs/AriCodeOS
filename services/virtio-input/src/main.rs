@@ -10,6 +10,7 @@
 use aricode_input::Event;
 use aricode_proto::input::{Event as WireEvent, Op, Reply, Request, Status, MAX_EVENTS, MAX_NAME};
 use aricode_rt::sys::virtio_pci::{extra_handle, DmaRegion, Queue, Transport, IRQ, SERVICE};
+use aricode_rt::sys::wait::{self, Deadline, Woken};
 use aricode_rt::sys::{self, abi, Handle};
 
 /// `virtio_input_config`: select, subsel, size and the payload at offset 8.
@@ -21,6 +22,9 @@ const CFG_ID_NAME: u8 = 0x01;
 
 const SLOTS: u16 = 64;
 const RING: usize = 128;
+/// Exit code when the end-of-round wait fails for a reason other than the
+/// service endpoint being gone: looping on it would spin (ADR 0044).
+const EXIT_WAIT_FAILED: u64 = 10;
 
 fn say(msg: &[u8]) {
     sys::print(b"virtio-input: ");
@@ -76,8 +80,11 @@ impl Device {
         core::str::from_utf8(&self.name[..self.name_len]).unwrap_or("?")
     }
 
-    /// Next device event; refills the slot.
-    fn poll(&mut self) -> Option<Event> {
+    /// Next used slot, refilled: `Some(None)` for one that held no valid
+    /// event, so a caller draining the queue does not stop there and leave
+    /// the events behind it for an interrupt that already came; `None`
+    /// once the queue is empty.
+    fn poll(&mut self) -> Option<Option<Event>> {
         let (head, len) = self.eventq.vq.pop_used()?;
         let off = 8 * head as u64;
         let ev = if len as usize >= Event::LEN {
@@ -90,7 +97,7 @@ impl Device {
             .vq
             .add(&[(self.buffers.phys + off, Event::LEN as u32, true)]);
         self.eventq.notify(&self.transport);
-        ev
+        Some(ev)
     }
 }
 
@@ -147,8 +154,73 @@ fn answer(reply_to: Handle, reply: Reply) {
     let _ = sys::handle_close(reply_to);
 }
 
+/// Requests served per round between two looks at the device, so a client
+/// in a loop cannot keep events from being collected; a budget used up
+/// makes the next round follow at once (ADR 0044).
+const REQUESTS_PER_ROUND: usize = 8;
+
+/// The driver's state between rounds: the device, its queued events and
+/// the one read waiting for them.
+struct Driver {
+    dev: Device,
+    ring: EventRing,
+    pending: Option<(Handle, u64)>,
+    events: [WireEvent; MAX_EVENTS],
+    times: [u64; MAX_EVENTS],
+}
+
+impl Driver {
+    /// Serves one request: the reply endpoint comes first; any other
+    /// handle is closed.
+    fn serve(&mut self, msg: &[u8], handles: &[Handle], now: u64) {
+        let Some((&reply_to, extra)) = handles.split_first() else {
+            return;
+        };
+        for h in extra {
+            let _ = sys::handle_close(*h);
+        }
+        match Request::decode(msg) {
+            Some(Request { op: Op::Info, .. }) => {
+                let reply = Reply::status(Status::Ok)
+                    .with_name(self.dev.name_str())
+                    .unwrap_or(Reply::status(Status::Ok));
+                answer(reply_to, reply);
+            }
+            Some(Request {
+                op: Op::Read,
+                timeout_ms,
+            }) => {
+                if self.ring.len > 0 {
+                    let n = self.ring.take(&mut self.events, &mut self.times);
+                    answer(reply_to, Reply::events(&self.events[..n], &self.times[..n]));
+                } else if self.pending.is_some() {
+                    answer(reply_to, Reply::status(Status::Busy));
+                } else {
+                    self.pending = Some((reply_to, now + timeout_ms.max(1) as u64));
+                }
+            }
+            None => answer(reply_to, Reply::status(Status::Invalid)),
+        }
+    }
+
+    /// Answers the waiting read once events arrived or its deadline passed.
+    fn settle_pending(&mut self, now: u64) {
+        let Some((reply_to, deadline)) = self.pending else {
+            return;
+        };
+        if self.ring.len > 0 {
+            let n = self.ring.take(&mut self.events, &mut self.times);
+            answer(reply_to, Reply::events(&self.events[..n], &self.times[..n]));
+            self.pending = None;
+        } else if now >= deadline {
+            answer(reply_to, Reply::status(Status::Timeout));
+            self.pending = None;
+        }
+    }
+}
+
 fn main(mask: u64) -> u64 {
-    let mut dev = match Device::setup(mask) {
+    let dev = match Device::setup(mask) {
         Ok(d) => d,
         Err(step) => {
             say(b"initialization failed");
@@ -159,24 +231,35 @@ fn main(mask: u64) -> u64 {
     sys::print(b"virtio-input: device ready: ");
     sys::print(dev.name_str().as_bytes());
     sys::print(b"\n");
-    let mut ring = EventRing {
-        buf: [(Event::default(), 0); RING],
-        head: 0,
-        len: 0,
-        dropped: 0,
+    let mut drv = Driver {
+        dev,
+        ring: EventRing {
+            buf: [(Event::default(), 0); RING],
+            head: 0,
+            len: 0,
+            dropped: 0,
+        },
+        pending: None,
+        events: [WireEvent::default(); MAX_EVENTS],
+        times: [0u64; MAX_EVENTS],
     };
-    let mut pending: Option<(Handle, u64)> = None;
     let mut msg = [0u8; Request::LEN];
-    let mut handles = [Handle(0); 1];
-    let mut events = [WireEvent::default(); MAX_EVENTS];
-    let mut times = [0u64; MAX_EVENTS];
+    let mut handles = [Handle(0); abi::IPC_MAX_HANDLES];
+    // One wait for a request, an event (the device's interrupt) or the
+    // waiting read's deadline (ADR 0044).
+    let mut members = wait::Members::new();
+    members.push(SERVICE);
+    members.push(IRQ);
     say(b"serving requests");
     loop {
         let now = clock.now();
-        while let Some(ev) = dev.poll() {
-            ring.push(ev, now);
+        while let Some(ev) = drv.dev.poll() {
+            if let Some(ev) = ev {
+                drv.ring.push(ev, now);
+            }
         }
-        for _ in 0..8 {
+        let mut requests_left = true;
+        for _ in 0..REQUESTS_PER_ROUND {
             let (n, nh) = match sys::ipc_receive(SERVICE, &mut msg, &mut handles, 0) {
                 Ok(r) => r,
                 // The service endpoint was closed or revoked (ADR 0030): nobody
@@ -185,46 +268,39 @@ fn main(mask: u64) -> u64 {
                     say(b"service endpoint closed; exiting");
                     sys::process_exit(9);
                 }
-                Err(_) => break,
+                Err(_) => {
+                    requests_left = false;
+                    break;
+                }
             };
-            if nh == 0 {
-                continue;
+            drv.serve(&msg[..n], &handles[..nh], now);
+        }
+        drv.settle_pending(now);
+        let next = match drv.pending {
+            Some((_, deadline)) => Deadline::at(deadline),
+            None => Deadline::NONE,
+        };
+        match wait::end_of_round(
+            members.as_slice(),
+            clock.now(),
+            requests_left,
+            next,
+            &mut msg,
+            &mut handles,
+        ) {
+            Ok(Woken::Message {
+                len, handles: nh, ..
+            }) => drv.serve(&msg[..len], &handles[..nh], clock.now()),
+            Ok(Woken::Irq { .. } | Woken::Round) => {}
+            Err(e) if e.endpoint_gone() => {
+                say(b"service endpoint closed; exiting");
+                sys::process_exit(9);
             }
-            let reply_to = handles[0];
-            match Request::decode(&msg[..n]) {
-                Some(Request { op: Op::Info, .. }) => {
-                    let reply = Reply::status(Status::Ok)
-                        .with_name(dev.name_str())
-                        .unwrap_or(Reply::status(Status::Ok));
-                    answer(reply_to, reply);
-                }
-                Some(Request {
-                    op: Op::Read,
-                    timeout_ms,
-                }) => {
-                    if ring.len > 0 {
-                        let n = ring.take(&mut events, &mut times);
-                        answer(reply_to, Reply::events(&events[..n], &times[..n]));
-                    } else if pending.is_some() {
-                        answer(reply_to, Reply::status(Status::Busy));
-                    } else {
-                        pending = Some((reply_to, now + timeout_ms.max(1) as u64));
-                    }
-                }
-                None => answer(reply_to, Reply::status(Status::Invalid)),
+            Err(e) => {
+                aricode_rt::print_error(b"virtio-input: end-of-round wait", e);
+                sys::process_exit(EXIT_WAIT_FAILED);
             }
         }
-        if let Some((reply_to, deadline)) = pending {
-            if ring.len > 0 {
-                let n = ring.take(&mut events, &mut times);
-                answer(reply_to, Reply::events(&events[..n], &times[..n]));
-                pending = None;
-            } else if now >= deadline {
-                answer(reply_to, Reply::status(Status::Timeout));
-                pending = None;
-            }
-        }
-        let _ = sys::irq_wait(IRQ, 10);
     }
 }
 

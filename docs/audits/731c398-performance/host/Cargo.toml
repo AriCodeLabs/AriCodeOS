@@ -1,0 +1,14 @@
+[package]
+name = "aricode-performance-audit"
+version = "0.1.0"
+edition = "2021"
+[workspace]
+[dependencies]
+aricode-sched = { path = "../../../../libs/sched" }
+aricode-gfx = { path = "../../../../libs/gfx" }
+aricode-initrd = { path = "../../../../libs/initrd" }
+aricode-arifs = { path = "../../../../libs/arifs" }
+[profile.release]
+opt-level = 2
+lto = true
+codegen-units = 1

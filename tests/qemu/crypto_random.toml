@@ -1,7 +1,10 @@
 # Phase 31: the kernel seeds a ChaCha20 generator from rdrand or the TSC and serves
-# random bytes; two consecutive reads are different and non-zero.
+# random bytes; two consecutive reads are different and non-zero. ADR 0039:
+# the self-test also checks the account `system_info(RANDOM_SOURCE)` reports
+# (source, TSC samples, interrupt events). QEMU's `qemu64` has no rdrand, so
+# this is the TSC path; `crypto.random_rdrand` is the hardware one.
 name = "crypto.random"
-description = "kernel random generator: seed, announced source and distinct reads"
+description = "kernel random generator: seed, announced source, source account and distinct reads"
 level = "full"
 areas = ["crypto"]
 cmdline = "qemu_exit test=random"
@@ -9,9 +12,9 @@ cmdline = "qemu_exit test=random"
 [expect]
 exit = 33
 serial_contains = [
-    "random: ChaCha20 generator seeded with",
-    "random: source",
-    "interrupt stirs, sample",
+    "random: ChaCha20 generator seeded with TSC (no rdrand: limited entropy)",
+    "random: source tsc ok, ",
+    " interrupt stirs, 67 TSC samples, no carried seed (first boot), sample ",
     "ARICODEOS_KERNEL_READY",
 ]
 serial_absent = ["KERNEL PANIC"]

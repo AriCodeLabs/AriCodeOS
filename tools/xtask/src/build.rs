@@ -94,10 +94,16 @@ pub fn cargo() -> Command {
     c.current_dir(root());
     // The verifiers embed the selected public key (`aricode_crypto::trust`);
     // with the development key the variable is removed so a stray value in
-    // the environment cannot change what a build trusts.
+    // the environment cannot change what a build trusts. The development
+    // channel's public key is always set by xtask, never inherited (ADR
+    // 0045); AriBoot's build removes it unless the machine opted in.
     match crate::keys::signing_public_hex() {
         Some(key) => c.env(crate::keys::SIGNING_PUB_ENV, key),
         None => c.env_remove(crate::keys::SIGNING_PUB_ENV),
+    };
+    match crate::keys::dev_channel_public_hex() {
+        Ok(key) => c.env(crate::keys::DEV_CHANNEL_PUB_ENV, key),
+        Err(_) => c.env_remove(crate::keys::DEV_CHANNEL_PUB_ENV),
     };
     c
 }
@@ -206,33 +212,36 @@ pub fn initrd_manifests() -> Result<Vec<(String, PathBuf)>> {
     Ok(out)
 }
 
+/// Packages of the initrd programs (`initrd_programs`).
+pub const USER_PACKAGES: &[&str] = &[
+    "user-testprogs",
+    "ariinit",
+    "ari-virtio-blk",
+    "ari-virtio-net",
+    "ari-rtl-net",
+    "ari-sshd",
+    "ari-virtio-input",
+    "ari-usb-input",
+    "ari-usb-ehci",
+    "ari-console-bridge",
+    "ari-compositor",
+    "ari-fsd",
+    "ari-app-hello",
+    "ari-app-perms-check",
+    "ari-app-updater",
+    "ari-app-fs-probe",
+    "ari-app-win-probe",
+    "ari-app-wasm-runner",
+    "ari-app-notes-reader",
+    "ari-app-installer",
+    "ari-app-bench",
+    "ari-shell",
+];
+
 /// Builds `init` and the user programs (static ELFs at 0x400000) and
 /// returns the directory with the binaries.
 pub fn build_user_programs(release: bool) -> Result<PathBuf> {
-    for pkg in [
-        "user-testprogs",
-        "ariinit",
-        "ari-virtio-blk",
-        "ari-virtio-net",
-        "ari-rtl-net",
-        "ari-sshd",
-        "ari-virtio-input",
-        "ari-usb-input",
-        "ari-usb-ehci",
-        "ari-console-bridge",
-        "ari-compositor",
-        "ari-fsd",
-        "ari-app-hello",
-        "ari-app-perms-check",
-        "ari-app-updater",
-        "ari-app-fs-probe",
-        "ari-app-win-probe",
-        "ari-app-wasm-runner",
-        "ari-app-notes-reader",
-        "ari-app-installer",
-        "ari-app-bench",
-        "ari-shell",
-    ] {
+    for pkg in USER_PACKAGES {
         println!("[xtask] build {pkg} ({KERNEL_TARGET})");
         let mut c = cargo();
         c.args(["build", "-p", pkg, "--target", KERNEL_TARGET]);
@@ -277,6 +286,7 @@ pub fn check_user_elf(name: &str, elf: &[u8]) -> Result {
 }
 
 /// Program built out of tree and packaged (ADR 0017).
+#[derive(Clone)]
 pub struct ExternalApp {
     pub name: String,
     pub version: u32,
@@ -300,18 +310,55 @@ impl ExternalApp {
 /// signs the package with the development key. `dir` holds a single
 /// `NAME.manifest`, which gives the binary name. With `corrupt`, the
 /// signature does not verify (tests).
+///
+/// Each (app, version, profile, corrupt) is built once per process and
+/// then served from memory: the test runner builds every package its
+/// scenarios need before they run concurrently (ADR 0040), so a scenario
+/// never starts cargo and its output never interleaves with theirs.
+/// Packages that ship as data (scenario installs, update sources) are built
+/// in the release profile whatever the OS build, as the WebAssembly demo:
+/// a dev build of `hello_ext` (75,408 bytes) is larger than any machine can
+/// install (`PACKAGE_MAX`, incident 0026). Only `app-pack --debug` builds
+/// one in the dev profile, and is refused if it does not fit.
+pub const PACKAGES_RELEASE: bool = true;
+
 pub fn build_external(
     dir: &Path,
     version: u32,
     release: bool,
     corrupt: bool,
 ) -> Result<ExternalApp> {
+    type Key = (PathBuf, u32, bool, bool);
+    static BUILT: std::sync::Mutex<Vec<(Key, ExternalApp)>> = std::sync::Mutex::new(Vec::new());
     let dir = if dir.is_absolute() {
         dir.to_path_buf()
     } else {
         root().join(dir)
     };
-    let mut manifests = std::fs::read_dir(&dir)
+    let key = (dir.clone(), version, release, corrupt);
+    if let Some((_, app)) = BUILT
+        .lock()
+        .expect("built packages")
+        .iter()
+        .find(|(k, _)| *k == key)
+    {
+        return Ok(app.clone());
+    }
+    let app = build_external_now(&dir, version, release, corrupt)?;
+    BUILT
+        .lock()
+        .expect("built packages")
+        .push((key, app.clone()));
+    Ok(app)
+}
+
+fn build_external_now(
+    dir: &Path,
+    version: u32,
+    release: bool,
+    corrupt: bool,
+) -> Result<ExternalApp> {
+    let mut manifests = std::fs::read_dir(dir)
         .map_err(|e| format!("{}: {e}", dir.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "manifest"));
@@ -353,6 +400,7 @@ pub fn build_external(
     let seed = crate::keys::signing_seed()?;
     let package = aricode_pkg::build(&name, version, &elf, &manifest, &seed, corrupt)
         .ok_or_else(|| format!("{name}: invalid package name"))?;
+    check_package_size(&name, package.len(), release)?;
     // Post-build check (re-audit, R1): a package meant to be valid must
     // verify with the key the build embeds.
     if !corrupt && aricode_pkg::verify(&package, &crate::keys::expected_public_key()?).is_err() {
@@ -365,6 +413,23 @@ pub fn build_external(
         version,
         package,
     })
+}
+
+/// A package the machines cannot install is never produced (incident
+/// 0026): one AriFS replace writes at most `PACKAGE_MAX` bytes.
+fn check_package_size(name: &str, len: usize, release: bool) -> Result {
+    let max = aricode_pkg::PACKAGE_MAX;
+    if len > max {
+        let hint = if release {
+            ""
+        } else {
+            "; dev builds are larger, the release profile may fit"
+        };
+        return Err(format!(
+            "{name}: package of {len} bytes, larger than the {max} a machine can install (PACKAGE_MAX, AriFS atomic replace; incident 0026){hint}"
+        ));
+    }
+    Ok(())
 }
 
 /// `cargo xtask app-pack DIR [--version N]`: produces `build/pkgs/NAME-N.aripkg`.
@@ -391,18 +456,27 @@ pub fn app_pack(dir: &Path, version: u32, release: bool) -> Result {
 
 /// Builds the sample WebAssembly modules and leaves `demo.wasm` in `build/`,
 /// from where `write_test_disk` copies it into the runner's private directory.
-pub fn build_wasm_programs(release: bool) -> Result {
-    println!("[xtask] build wasm-demo ({WASM_TARGET})");
+/// Always in the release profile, a dev build of the OS included: the module
+/// is data for the runner, and its dev build (636,854 bytes against 12,050,
+/// found 2026-10-23 while reproducing incident 0018 on a dev build) does not
+/// fit the test disk's ARI0, so `cargo xtask test --debug` failed before any
+/// scenario.
+pub fn build_wasm_programs() -> Result {
+    println!("[xtask] build wasm-demo ({WASM_TARGET}, release)");
     let mut c = cargo();
-    c.args(["build", "-p", "wasm-demo", "--target", WASM_TARGET]);
-    if release {
-        c.arg("--release");
-    }
+    c.args([
+        "build",
+        "-p",
+        "wasm-demo",
+        "--target",
+        WASM_TARGET,
+        "--release",
+    ]);
     run(c)?;
     let src = root()
         .join("target")
         .join(WASM_TARGET)
-        .join(profile_dir(release))
+        .join(profile_dir(true))
         .join("wasm_demo.wasm");
     let dst = crate::build_dir().join("demo.wasm");
     std::fs::create_dir_all(crate::build_dir()).map_err(|e| e.to_string())?;
@@ -414,13 +488,18 @@ pub fn build_wasm_programs(release: bool) -> Result {
 /// scenario: test behaviour is controlled through the cmdline.
 pub fn build_os(release: bool) -> Result<Artifacts> {
     let user_bin = build_user_programs(release)?;
-    build_wasm_programs(release)?;
+    build_wasm_programs()?;
     for (pkg, target) in [("ariboot", UEFI_TARGET), ("arikernel", KERNEL_TARGET)] {
         println!("[xtask] build {pkg} ({target})");
         let mut c = cargo();
         c.args(["build", "-p", pkg, "--target", target]);
         if release {
             c.arg("--release");
+        }
+        if pkg == "ariboot" && !crate::keys::loader_trusts_dev() {
+            // Least privilege (ADR 0045): only a machine that opted in has
+            // a loader that boots development builds.
+            c.env_remove(crate::keys::DEV_CHANNEL_PUB_ENV);
         }
         run(c)?;
     }
@@ -463,11 +542,21 @@ pub fn check() -> Result {
         c.args(["--", "-D", "warnings"]);
         run(c)?;
     }
-    Ok(())
+    // Every initrd program's stack budget (incident 0018).
+    crate::stack::check()
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn packages_machines_cannot_install_are_not_built() {
+        let max = aricode_pkg::PACKAGE_MAX;
+        assert!(super::check_package_size("app", max, true).is_ok());
+        assert!(super::check_package_size("app", max + 1, true).is_err());
+        let dev = super::check_package_size("app", max + 1, false).unwrap_err();
+        assert!(dev.contains("release profile"), "{dev}");
+    }
+
     use super::*;
 
     /// Every workspace package is linted by `check` and, when it runs on the

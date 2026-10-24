@@ -1,7 +1,8 @@
 # ADR 0034: TCP secrets: initial sequence numbers and ephemeral ports
 
 - **Date:** 2026-10-18
-- **Status:** Accepted (incident 0014; amends ADR 0024)
+- **Status:** Accepted (incident 0014; amends ADR 0024); §4 amended by
+  ADR 0039 on 2026-10-22 (the generator's source is visible)
 
 ## Context
 
@@ -58,27 +59,32 @@ the sense of RFC 6528.
    candidates are distinct, so the answer comes within 9 candidates; the
    function gives up with `None` after one pass over the range, which netd
    answers as `Busy` (`net tcp table full`).
-4. **Degradation is loud, and what netd can see is limited.**
+4. **Degradation is loud, weakness too.**
    `system_info(RANDOM)` always answers with `min(len, 256)` bytes
-   (`kernel/src/user/syscalls.rs`), and the kernel exposes no readiness or
-   source state of its generator to user space, so the fault event `net
-   tcp secret degraded` (code = bytes obtained) and the console line
-   `fault net tcp secret degraded: too few random bytes, ISNs predictable`
-   fire only when the syscall itself is refused (a handle without `READ`,
-   or a kernel without the query), never for the quality of the entropy;
-   the rest of the secret is then filled from the clock, so that boot is
-   as predictable as before and `diag` says so. The only quality signal is
-   the kernel's own boot line `random: ChaCha20 generator seeded with
-   rdrand` or `... with TSC (no rdrand: limited entropy)`, which netd
-   cannot read. QEMU's default CPU has no `rdrand`: scenario
-   `network.stack`, which requires `tcp secret from kernel entropy` and
-   forbids the degraded line, passes with a TSC-seeded generator, and its
-   assertion means "the whole secret came from the kernel generator", not
-   "from strong entropy". Incident 0014's plan item 3 (wait for entropy,
-   `net isn no entropy`) is superseded: without a readiness state there is
-   nothing to wait for. Kernel follow-up: expose the generator's source
-   and seeding state to user space (a `system_info` kind), so netd and sshd
-   can wait or report instead of trusting blindly.
+   (`kernel/src/user/syscalls.rs`), so the fault event `net tcp secret
+   degraded` (code = bytes obtained) and the console line `fault net tcp
+   secret degraded: too few random bytes, ISNs predictable` fire only when
+   the syscall itself is refused (a handle without `READ`, or a kernel
+   without the query); the rest of the secret is then filled from the
+   clock, so that boot is as predictable as before and `diag` says so.
+   The quality of the bytes is a separate question, answered since ADR
+   0039 by `system_info(RANDOM_SOURCE)`: right after drawing the secret
+   netd asks what seeded the kernel generator. From `rdrand` it prints
+   `tcp secret from kernel entropy (rdrand)`; from the TSC and interrupt
+   timing only (or when the kernel does not say) it prints `tcp secret
+   weak: kernel generator seeded from TSC + interrupts (N samples, M
+   events), no hardware source: ISNs and ports guessable with effort` and
+   records `net tcp secret weak x1` through its fault meter, code = the
+   `EntropySource` number (2; 0 when unknown). netd runs either way. QEMU's
+   default CPU has no `rdrand`: scenario `network.stack` requires the weak
+   line and event and forbids the degraded one; `crypto.entropy_rdrand`
+   (`-cpu qemu64,+rdrand`) requires the strong line and no weak event.
+   Incident 0014's plan item 3 (wait for entropy, `net isn no entropy`)
+   stays superseded: the kernel reports a source, not a readiness state,
+   so there is still nothing to wait for. Saving a kernel seed across
+   boots, future work when this was written, is ADR 0043: with a carried
+   seed mixed in netd prints `tcp secret from kernel entropy (TSC +
+   interrupts + carried seed)` and records no weak event.
 5. **Host tests** (`libs/net`): the ISN differs across secrets for one
    tuple and across tuples for one secret (by more than 2^16, never a
    neighbour), grows by 250 per millisecond for one tuple and secret and
@@ -115,8 +121,9 @@ the sense of RFC 6528.
   kernel generator at netd's start (interrupt-timing pool plus TSC); sshd's
   persisted seed does not help netd, which has no file service. The
   kernel's generator, not each service, is where the entropy question is
-  answered (ADR 0025, "Entropy"); a deeper fix there (exposing the
-  generator's source and seeding state to user space first, then saving a
-  seed across boots at kernel level) is future work. Whether the laptop has
-  `rdrand` is read from its `random: ... seeded with` boot line
-  (`docs/hardware.md`).
+  answered (ADR 0025, "Entropy"). Its source is visible since ADR 0039
+  (`net tcp secret weak` when it is not a hardware one). Since ADR 0043
+  AriBoot hands the kernel a seed carried from the previous boot before
+  any process runs, so netd's secret also holds what earlier boots
+  gathered; only the first boot of a disk is weak. Whether the laptop has
+  `rdrand` is read from the `entropy` line of `diag` (`docs/hardware.md`).

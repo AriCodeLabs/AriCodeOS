@@ -19,6 +19,7 @@ pub mod rpc;
 pub mod status;
 pub mod time;
 pub mod virtio_pci;
+pub mod wait;
 pub mod window;
 
 pub use aricode_abi::{self as abi, handle, kind, rights, Error, TIMEOUT_INFINITE};
@@ -180,27 +181,47 @@ pub fn ipc_receive(
 
 /// Receives from the first of `endpoints` (up to `IPC_MAX_ANY`, all with
 /// `READ`) that has a message; `handles_out` holds `IPC_MAX_HANDLES`. Returns
-/// (endpoint index, bytes, handles) (ADR 0020).
+/// (endpoint index, bytes, handles) (ADR 0020). For endpoints only: a set
+/// that also holds interrupt lines is waited on with [`wait_any`].
 pub fn ipc_receive_any(
     endpoints: &[Handle],
     buf: &mut [u8],
     handles_out: &mut [Handle; abi::IPC_MAX_HANDLES],
     timeout_ms: u64,
 ) -> Result<(usize, usize, usize), Error> {
+    match wait_any(endpoints, buf, handles_out, timeout_ms)? {
+        abi::receive_any::Ready::Message {
+            index,
+            len,
+            handles,
+        } => Ok((index, len, handles)),
+        // Only if the caller listed a line: nothing was received.
+        abi::receive_any::Ready::Irq { index, .. } => Ok((index, 0, 0)),
+    }
+}
+
+/// Waits for the first member of `members` (in order) that is ready: an
+/// endpoint with a message (`READ`, up to `IPC_MAX_ANY`) or an interrupt
+/// line that fired since its interrupts were last taken (`WAIT`, up to
+/// `IPC_MAX_ANY_IRQS`), up to `timeout_ms` (ADR 0044). A message lands in
+/// `buf` and `handles_out`; a line's interrupts are taken and counted, as
+/// `irq_wait` does. Service loops use it through [`wait::end_of_round`].
+pub fn wait_any(
+    members: &[Handle],
+    buf: &mut [u8],
+    handles_out: &mut [Handle; abi::IPC_MAX_HANDLES],
+    timeout_ms: u64,
+) -> Result<abi::receive_any::Ready, Error> {
     let raw = call6(
         nr::IPC_RECEIVE_ANY,
-        endpoints.as_ptr() as u64,
-        endpoints.len() as u64,
+        members.as_ptr() as u64,
+        members.len() as u64,
         buf.as_mut_ptr() as u64,
         buf.len() as u64,
         handles_out.as_mut_ptr() as u64,
         timeout_ms,
     )?;
-    Ok((
-        (raw >> 48) as usize,
-        (raw & 0xFFFF_FFFF) as usize,
-        ((raw >> 32) & 0xFFFF) as usize,
-    ))
+    Ok(abi::receive_any::decode(raw))
 }
 
 /// Creates a process from the initrd (requires `MANAGE` on the `SPAWNER`).
@@ -216,17 +237,30 @@ pub fn process_spawn_with(
     arg: u64,
     handles: &[Handle],
 ) -> Result<Handle, Error> {
-    process_spawn_limited(spawner, name, arg, handles, 0)
+    process_spawn_limited(spawner, name, arg, handles, 0, false)
+}
+
+/// `spawn_limits` for `handles`, `memory_kib` and `console_first`.
+fn spawn_limits(handles: &[Handle], memory_kib: u32, console_first: bool) -> u64 {
+    let flag = if console_first {
+        abi::spawn_limits::CONSOLE_FIRST
+    } else {
+        0
+    };
+    abi::spawn_limits::pack(handles.len(), memory_kib) | flag
 }
 
 /// Like `process_spawn_with`, setting the child's DMA memory quota in KiB
-/// (0 = unlimited).
+/// (0 = unlimited). With `console_first`, `handles[0]` (an endpoint with
+/// `WRITE`) becomes the child's console instead of the kernel console and
+/// the rest start at `0x0001_0004` (ADR 0047).
 pub fn process_spawn_limited(
     spawner: Handle,
     name: &str,
     arg: u64,
     handles: &[Handle],
     memory_kib: u32,
+    console_first: bool,
 ) -> Result<Handle, Error> {
     call6(
         nr::PROCESS_SPAWN,
@@ -235,14 +269,14 @@ pub fn process_spawn_limited(
         name.len() as u64,
         arg,
         handles.as_ptr() as u64,
-        abi::spawn_limits::pack(handles.len(), memory_kib),
+        spawn_limits(handles, memory_kib, console_first),
     )
     .map(|h| Handle(h as u32))
 }
 
 /// Creates a process from an ELF held in the caller's DMA buffer `elf`
 /// (`elf_len` bytes from `elf_offset`) (ADR 0017); requires `MANAGE` on the
-/// `SPAWNER` and `READ` on the buffer. Handles and quota as in
+/// `SPAWNER` and `READ` on the buffer. Handles, quota and console as in
 /// `process_spawn_limited`.
 #[allow(clippy::too_many_arguments)]
 pub fn process_spawn_from(
@@ -254,6 +288,7 @@ pub fn process_spawn_from(
     arg: u64,
     handles: &[Handle],
     memory_kib: u32,
+    console_first: bool,
 ) -> Result<Handle, Error> {
     let req = abi::spawn_from::Request::new(elf.0, elf_offset, elf_len, name)
         .ok_or(Error::Invalid)?
@@ -264,7 +299,7 @@ pub fn process_spawn_from(
         req.as_ptr() as u64,
         arg,
         handles.as_ptr() as u64,
-        abi::spawn_limits::pack(handles.len(), memory_kib),
+        spawn_limits(handles, memory_kib, console_first),
         0,
     )
     .map(|h| Handle(h as u32))
@@ -397,10 +432,17 @@ pub fn event_record(code: u64, name: &str) -> Result<(), Error> {
     .map(|_| ())
 }
 
-/// The kernel command line into `buf` (`sysinfo::CMDLINE`), as text.
-pub fn cmdline(system: Handle, buf: &mut [u8]) -> Option<&str> {
-    let n = system_info(system, abi::sysinfo::CMDLINE, buf).ok()?;
-    core::str::from_utf8(&buf[..n]).ok()
+/// Room for the kernel command line: AriBoot adds the slot and image keys
+/// (ADR 0045) to whatever `cmdline.txt` holds.
+pub const CMDLINE_MAX: usize = 1024;
+
+/// The kernel command line into `buf` (`sysinfo::CMDLINE`), as text. A line
+/// that does not fit (`TooBig`), is not UTF-8 (`Invalid`) or cannot be read
+/// is an error, never an empty line: a caller that took it for empty would
+/// silently drop `strict` and the test knobs (audit of ADR 0045, L5).
+pub fn cmdline(system: Handle, buf: &mut [u8; CMDLINE_MAX]) -> Result<&str, Error> {
+    let n = system_info(system, abi::sysinfo::CMDLINE, buf)?;
+    core::str::from_utf8(&buf[..n]).map_err(|_| Error::Invalid)
 }
 
 pub fn system_info(system: Handle, kind: u64, buf: &mut [u8]) -> Result<usize, Error> {
@@ -421,6 +463,19 @@ pub fn system_info(system: Handle, kind: u64, buf: &mut [u8]) -> Result<usize, E
 pub fn random(system: Handle, buf: &mut [u8]) -> Result<usize, Error> {
     let n = buf.len().min(abi::sysinfo::RANDOM_MAX as usize);
     system_info(system, abi::sysinfo::RANDOM, &mut buf[..n])
+}
+
+/// How the kernel generator behind [`random`] was seeded and what has been
+/// mixed into it since (`sysinfo::RANDOM_SOURCE`, ADR 0039), with a
+/// `SYSTEM` handle (`READ`). `None` if the kernel refuses the query or
+/// answers with a source this build does not know: callers that draw
+/// secrets treat that as weak. The buffer is twice the struct: a later
+/// kernel may append fields (ADR 0039) and this build reads the first
+/// `LEN` bytes.
+pub fn random_source(system: Handle) -> Option<abi::sysinfo::RandomSource> {
+    let mut b = [0u8; 2 * abi::sysinfo::RandomSource::LEN];
+    let n = system_info(system, abi::sysinfo::RANDOM_SOURCE, &mut b).ok()?;
+    abi::sysinfo::RandomSource::decode(&b[..n])
 }
 
 /// Powers off or reboots (`abi::power`). Only returns if the kernel rejects the action.
