@@ -76,6 +76,68 @@ pub struct Process {
     /// Pending `process_kill`: the thread terminates on returning to ring 0 or
     /// on waking from a wait (audit 6ee19fb, finding 4).
     kill_requested: bool,
+    /// Zero-fill pages of its writable segments (`[start, end)` and their
+    /// flags), backed on first touch instead of at load (performance audit
+    /// 731c398, finding D): a runtime's 256 KiB heap arena costs only the
+    /// pages the program uses.
+    on_demand: Vec<(u64, u64, u64)>,
+}
+
+/// What [`back_on_demand`] did with a page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnDemand {
+    /// The page was reserved and is now backed by a zeroed frame.
+    Backed,
+    /// Not a reserved page (or already backed): a real fault.
+    NotReserved,
+    /// Reserved, but no frame was left.
+    OutOfMemory,
+}
+
+/// Backs `page` of `p` with a zeroed frame if it is one of its reserved
+/// zero-fill pages and not mapped yet.
+fn back_page(p: &mut Process, page: u64) -> OnDemand {
+    let Some(&(_, _, flags)) = p
+        .on_demand
+        .iter()
+        .find(|(s, e, _)| (*s..*e).contains(&page))
+    else {
+        return OnDemand::NotReserved;
+    };
+    let Some(m) = p.mapper.as_mut() else {
+        return OnDemand::NotReserved;
+    };
+    if m.translate(page).is_some() {
+        return OnDemand::NotReserved;
+    }
+    let Some(frame) = pmm::with(|f| f.allocate()) else {
+        return OnDemand::OutOfMemory;
+    };
+    // SAFETY: freshly allocated frame, reachable through the physical map.
+    unsafe {
+        core::ptr::write_bytes(
+            phys::phys_to_virt(frame.addr()) as *mut u8,
+            0,
+            PAGE_SIZE as usize,
+        )
+    };
+    if m.map_4k(page, frame.addr(), flags).is_err() {
+        pmm::with(|f| f.free(frame).expect("frame just allocated"));
+        return OnDemand::OutOfMemory;
+    }
+    OnDemand::Backed
+}
+
+/// A page fault of the current process at `addr` on a page that was not
+/// present: backs it if it is a reserved zero-fill page (finding D).
+pub fn back_on_demand(addr: u64) -> OnDemand {
+    let Some(pid) = current_pid() else {
+        return OnDemand::NotReserved;
+    };
+    match PROCESSES.lock().get_mut(&pid) {
+        Some(p) => back_page(p, addr & !(PAGE_SIZE - 1)),
+        None => OnDemand::NotReserved,
+    }
 }
 
 /// A foreign mapping. A DMA buffer's mapping holds a reference to the
@@ -207,6 +269,7 @@ fn spawn_full(
     // SAFETY: the kernel PML4 is valid and reachable through the physical map.
     unsafe { m.share_kernel_half(kernel_root) };
 
+    let mut on_demand = Vec::new();
     for seg in &elf.segments {
         let mut flags = USER;
         if seg.writable() {
@@ -216,8 +279,16 @@ fn spawn_full(
             flags |= NO_EXECUTE;
         }
         let (start, end) = seg.page_range();
+        // Zero-fill pages are only reserved here, backed on first touch.
+        let eager_end = match seg.zero_fill_pages() {
+            Some((lazy, lazy_end)) => {
+                on_demand.push((lazy, lazy_end, flags));
+                lazy
+            }
+            None => end,
+        };
         let bytes = elf.segment_bytes(seg);
-        for page in (start..end).step_by(PAGE_SIZE as usize) {
+        for page in (start..eager_end).step_by(PAGE_SIZE as usize) {
             let frame = pmm::with(|p| p.allocate()).ok_or("process: out of frames")?;
             let dst = phys::phys_to_virt(frame.addr()) as *mut u8;
             // SAFETY: freshly allocated frame, reachable through the physical map.
@@ -291,6 +362,7 @@ fn spawn_full(
             reaped: false,
             main_tid: tid,
             kill_requested: false,
+            on_demand,
         },
     );
     scheduler::start_thread(thread);
@@ -895,6 +967,30 @@ pub fn stack_snapshot() -> Vec<aricode_abi::sysinfo::StackEntry> {
         .collect()
 }
 
+/// Zero-fill memory reserved and backed so far, per live process that has
+/// any (`sysinfo::ON_DEMAND`, finding D).
+pub fn on_demand_snapshot() -> Vec<aricode_abi::sysinfo::StackEntry> {
+    use aricode_abi::sysinfo::StackEntry;
+    PROCESSES
+        .lock()
+        .iter()
+        .filter_map(|(pid, p)| {
+            let m = p.mapper.as_ref()?;
+            let pages = p
+                .on_demand
+                .iter()
+                .flat_map(|(s, e, _)| (*s..*e).step_by(PAGE_SIZE as usize));
+            let (reserved, backed) = pages.fold((0u64, 0u64), |(r, b), page| {
+                (
+                    r + PAGE_SIZE,
+                    b + PAGE_SIZE * u64::from(m.translate(page).is_some()),
+                )
+            });
+            (reserved > 0).then(|| StackEntry::new(pid.0, reserved as u32, backed as u32, &p.name))
+        })
+        .collect()
+}
+
 pub fn exists(pid: Pid) -> bool {
     PROCESSES.lock().contains_key(&pid)
 }
@@ -909,14 +1005,18 @@ fn check_user_range(ptr: u64, len: u64, write: bool) -> Result<(), aricode_abi::
         return Ok(());
     }
     let pid = current_pid().ok_or(aricode_abi::Error::Fault)?;
-    let procs = PROCESSES.lock();
-    let m = procs
-        .get(&pid)
-        .and_then(|p| p.mapper.as_ref())
-        .ok_or(aricode_abi::Error::Fault)?;
+    let mut procs = PROCESSES.lock();
+    let p = procs.get_mut(&pid).ok_or(aricode_abi::Error::Fault)?;
     let needed = USER | if write { WRITABLE } else { 0 };
     let mut page = ptr & !(PAGE_SIZE - 1);
     while page < ptr + len {
+        // A reserved zero-fill page the program has not touched yet is
+        // backed now, as its own access would (finding D): the kernel
+        // never faults on it while copying.
+        if back_page(p, page) == OnDemand::OutOfMemory {
+            return Err(aricode_abi::Error::Limit);
+        }
+        let m = p.mapper.as_ref().ok_or(aricode_abi::Error::Fault)?;
         match m.translate(page) {
             Some((_, flags)) if flags & needed == needed => {}
             _ => return Err(aricode_abi::Error::Fault),
