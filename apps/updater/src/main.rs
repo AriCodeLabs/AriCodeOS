@@ -1195,7 +1195,7 @@ fn http_error(e: aricode_https::HttpsError) -> String {
             return format!("more than {} redirects", aricode_https::MAX_REDIRECTS)
         }
         E::InsecureRedirect => "refused a redirect from https to plain http",
-        E::BadRedirect => "redirected to a location that is not an http(s) URL",
+        E::BadRedirect => "redirected to an invalid location (not an http(s) URL, or too long)",
     })
 }
 

@@ -1,6 +1,7 @@
 # ADR 0048: HTTP redirects. The source is added as /moved/: the host answers
 # 302 to /hop/ (with a 9,243-byte header line, as github.com does) and
-# /hop/ answers 307 to the relative ../update/, so every file of the source
+# /hop/ answers 307 to the relative ../update/ with a 900-byte query (a
+# signed asset URL's length; the request must hold it), so every file of the source
 # (index, signature, image) takes two redirects, as a GitHub release
 # download does. `update` and `upgrade` work through them; the redirects'
 # bodies never reach the download. The shell's `http` shows the limits: a
@@ -35,7 +36,7 @@ serial_contains = [
     "updater: system image version 2 verified (signature and SHA-256)",
     "updater: installed into slot B",
     "http: more than 5 redirects",
-    "http: redirected to a location that is not an http(s) URL",
+    "http: redirected to an invalid location (not an http(s) URL, or too long)",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_absent = ["KERNEL PANIC", "update: updater exited with", "redirect body!!", "response headers too large"]

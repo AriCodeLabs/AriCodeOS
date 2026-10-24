@@ -41,11 +41,14 @@ new Let's Encrypt `Root YR`).
      `TooManyRedirects`;
    - never from `https://` to `http://` (`InsecureRedirect`); `http://` to
      `https://` is fine, so a LAN source may move to TLS;
-   - the `Location` is resolved against the request (absolute,
-     scheme-relative, absolute-path or relative, dot segments removed,
-     fragment dropped; RFC 3986) and must be an `http(s)` URL of at most
-     `MAX_LOCATION` = 2048 bytes (`BadRedirect`, or `TooBig` when longer);
-     two different `Location` headers make the response malformed;
+   - the `Location` is printable ASCII (a server percent-encodes the
+     rest), resolved against the request (absolute, scheme-relative,
+     absolute-path, query-only or relative; dot segments removed from the
+     path, never the query; fragment dropped; RFC 3986) and must be an
+     `http(s)` URL of at most `MAX_LOCATION` = 2048 bytes whose host is a
+     host name or an IPv4 address (letters, digits, `-`, `_`, `.`; no
+     `user@`) and whose port is not 0; otherwise `BadRedirect`. Two
+     different `Location` headers make the response malformed;
    - a redirect's body never reaches the caller's sink.
    `aricode_http::fetch_with_head`, used by the plain `sys::http` client
    without `alloc`, keeps returning a redirect as its status.
@@ -86,6 +89,17 @@ new Let's Encrypt `Root YR`).
   new index.
 - The plain `sys::http` client does not follow redirects; nothing in the
   system uses it for update sources.
+- A source can make a machine send a few blind `GET`s elsewhere, an
+  internal address included (at most six requests per download, within
+  its budget, responses never returned to the source). That is what any
+  redirect-following client allows; the updater trusts nothing it gets
+  that way.
+- The independent audit (no high findings) found a panic on a non-ASCII
+  `Location` (a slice inside a character), now refused before any slice
+  and covered by a random test, and the query, scheme and host rules
+  above. A request now holds a path as long as `MAX_LOCATION` (the
+  reference laptop found the 512-byte limit with GitHub's signed asset
+  URL, about 900 bytes).
 
 ## Tests
 

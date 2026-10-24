@@ -57,8 +57,8 @@ pub enum HttpsError {
     Deadline(Phase),
     /// More than `aricode_http::MAX_INFORMATIONAL` interim responses.
     TooManyInformational,
-    /// Headers of the exchange, interim responses included, exceed
-    /// `aricode_http::MAX_HEADER_BYTES`.
+    /// Headers of one exchange, interim responses included, exceed twice
+    /// the 16 KiB header buffer (`aricode_http::MAX_HEADERS_LARGE`).
     HeaderBytes,
     /// More than [`MAX_SILENT_BYTES`] of TLS records in a row carried no
     /// application data.
@@ -67,7 +67,8 @@ pub enum HttpsError {
     TooManyRedirects,
     /// A redirect from `https://` to `http://`: never followed (ADR 0048).
     InsecureRedirect,
-    /// A redirect whose `Location` is not a URL this client can fetch.
+    /// A redirect whose `Location` is not a URL this client can fetch, or
+    /// longer than `aricode_http::MAX_LOCATION`.
     BadRedirect,
 }
 
@@ -493,6 +494,7 @@ fn fetch<T: Tcp, R: Records>(
         Error::Deadline(phase) => HttpsError::Deadline(phase),
         Error::TooManyInformational => HttpsError::TooManyInformational,
         Error::HeaderBytes => HttpsError::HeaderBytes,
+        Error::LongLocation => HttpsError::BadRedirect,
     })
 }
 

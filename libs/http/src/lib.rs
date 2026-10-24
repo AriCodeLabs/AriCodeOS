@@ -127,8 +127,12 @@ pub enum Error<E> {
     /// More than [`MAX_INFORMATIONAL`] interim responses.
     TooManyInformational,
     /// The headers of this fetch, discarded interim responses included,
-    /// exceed [`MAX_HEADER_BYTES`].
+    /// exceed twice the header buffer ([`MAX_HEADER_BYTES`] for the default
+    /// one).
     HeaderBytes,
+    /// A redirect's `Location` is longer than [`MAX_LOCATION`]
+    /// ([`fetch_or_redirect`] only).
+    LongLocation,
 }
 
 /// Result of a GET: status code and body bytes written.
@@ -178,22 +182,30 @@ impl<'a> Url<'a> {
             Some(r) => (r, true),
             None => (s.strip_prefix("http://").unwrap_or(s), false),
         };
-        if rest.is_empty() || rest.contains("://") {
+        if rest.is_empty() {
             return None;
         }
-        let (authority, path) = match rest.find('/') {
-            Some(i) => (&rest[..i], &rest[i..]),
+        // The authority ends at the first `/` or `?`; a `://` in it is a
+        // second scheme, one in the query is just data (ADR 0048 audit).
+        let (authority, path) = match rest.find(['/', '?']) {
+            Some(i) if rest.as_bytes()[i] == b'/' => (&rest[..i], &rest[i..]),
+            Some(_) => return None,
             None => (rest, "/"),
         };
         let (host, port) = match authority.rsplit_once(':') {
-            Some((h, p)) => (h, p.parse().ok()?),
+            Some((h, p)) => (h, p.parse().ok().filter(|&p: &u16| p != 0)?),
             None => (authority, if secure { 443 } else { 80 }),
         };
+        // A host name or an IPv4 address: letters, digits, `-`, `_`, `.`
+        // (no `@` user part, no other characters; a URL may come from a
+        // redirect).
         if host.is_empty()
             || host.len() > MAX_HOST
-            || host.contains(' ')
+            || !host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
             || path.contains(' ')
-            || path.bytes().any(|b| b < 0x20)
+            || path.bytes().any(|b| b < 0x20 || b == 0x7F)
         {
             return None;
         }
@@ -346,13 +358,23 @@ pub fn parse_response(buf: &[u8]) -> Option<Result<Response, ()>> {
 /// else (another scheme, control characters, spaces, longer than `out`).
 pub fn resolve_location<'o>(base: &Url, location: &str, out: &'o mut [u8]) -> Option<&'o str> {
     let location = location.split('#').next().unwrap_or("");
-    if location.is_empty() || location.bytes().any(|b| b <= b' ' || b == 0x7F) {
+    // Printable ASCII only: a server percent-encodes the rest (RFC 3986),
+    // and every slice below then falls on a character boundary.
+    if location.is_empty() || location.bytes().any(|b| !(0x21..0x7F).contains(&b)) {
         return None;
     }
     let scheme = if base.secure { "https://" } else { "http://" };
     let mut host_buf = [0u8; MAX_HOST + 6];
     let authority = base.host_header(&mut host_buf);
-    let lower = |s: &str, p: &str| s.len() >= p.len() && s[..p.len()].eq_ignore_ascii_case(p);
+    let (base_path, _) = base.path.split_once('?').unwrap_or((base.path, ""));
+    let starts = |p: &str| {
+        location
+            .as_bytes()
+            .get(..p.len())
+            .is_some_and(|h| h.eq_ignore_ascii_case(p.as_bytes()))
+    };
+    // A scheme is only what comes before the first `/`, `?` or `#`.
+    let head = location.split(['/', '?']).next().unwrap_or("");
     let mut n = 0;
     let mut put = |part: &str| -> Option<()> {
         out.get_mut(n..n + part.len())?
@@ -360,13 +382,13 @@ pub fn resolve_location<'o>(base: &Url, location: &str, out: &'o mut [u8]) -> Op
         n += part.len();
         Some(())
     };
-    if lower(location, "https://") {
+    if starts("https://") {
         put("https://")?;
         put(&location[8..])?;
-    } else if lower(location, "http://") {
+    } else if starts("http://") {
         put("http://")?;
         put(&location[7..])?;
-    } else if location.contains("://") || location.split('/').next()?.contains(':') {
+    } else if head.contains(':') {
         return None;
     } else if let Some(rest) = location.strip_prefix("//") {
         put(scheme)?;
@@ -375,19 +397,25 @@ pub fn resolve_location<'o>(base: &Url, location: &str, out: &'o mut [u8]) -> Op
         put(scheme)?;
         put(authority)?;
         put(location)?;
+    } else if location.starts_with('?') {
+        put(scheme)?;
+        put(authority)?;
+        put(base_path)?;
+        put(location)?;
     } else {
-        let dir = &base.path[..base.path.rfind('/').map_or(0, |i| i + 1)];
+        let dir = &base_path[..base_path.rfind('/').map_or(0, |i| i + 1)];
         put(scheme)?;
         put(authority)?;
         put(if dir.is_empty() { "/" } else { dir })?;
         put(location)?;
     }
-    // Dot segments go (RFC 3986 §5.2.4), in the path and not the query.
+    // Dot segments go (RFC 3986 §5.2.4), in the path and not the query;
+    // the authority ends at the first `/` or `?`.
     let path_at = out[..n].windows(3).position(|w| w == b"://")? + 3;
     let path_at = path_at
         + out[path_at..n]
             .iter()
-            .position(|&b| b == b'/')
+            .position(|&b| b == b'/' || b == b'?')
             .unwrap_or(n - path_at);
     let query_at = path_at
         + out[path_at..n]
@@ -622,8 +650,7 @@ pub fn fetch_with<T: Transport>(
 }
 
 /// [`fetch_with`] with the header buffer given by the caller, who may keep
-/// it off a small stack (on the heap: the shell's `http`, incident 0018)
-/// and size it (at least 256 bytes; the fetch accepts twice its size in
+/// it off a small stack (incident 0018) and size it (at least 256 bytes; the fetch accepts twice its size in
 /// header bytes). Its contents on entry do not matter. A redirect is
 /// returned as its status, with its body.
 pub fn fetch_with_head<T: Transport>(
@@ -651,7 +678,8 @@ pub enum Answer {
 
 /// [`fetch_with_head`] that stops at a redirect with a `Location` and
 /// returns it instead of its body, for a caller that follows it on a new
-/// connection (ADR 0048). A `Location` over [`MAX_LOCATION`] is `TooBig`.
+/// connection (ADR 0048). A `Location` over [`MAX_LOCATION`] is
+/// `LongLocation`.
 pub fn fetch_or_redirect<T: Transport>(
     t: &mut T,
     url: &Url,
@@ -676,7 +704,9 @@ fn exchange<T: Transport>(
     let max_header_bytes = 2 * head.len();
     let mut host_buf = [0u8; MAX_HOST + 6];
     let host = url.host_header(&mut host_buf);
-    let mut req = [0u8; MAX_HOST + 6 + 512];
+    // Room for the longest path a redirect may lead to (a signed asset URL
+    // is about 900 bytes) besides the host and the fixed header lines.
+    let mut req = [0u8; MAX_HOST + 6 + MAX_LOCATION + 128];
     let n = write_get(host, url.path, &mut req).ok_or(Error::BadUrl)?;
     send(t, budget, &req[..n])?;
 
@@ -723,7 +753,7 @@ fn exchange<T: Transport>(
         response.location.clone(),
     ) {
         if location.len() > MAX_LOCATION {
-            return Err(Error::TooBig);
+            return Err(Error::LongLocation);
         }
         let len = location.len();
         head.copy_within(location, 0);
@@ -867,6 +897,7 @@ mod tests {
     extern crate std;
     use super::*;
     use std::collections::VecDeque;
+    use std::format;
     use std::string::String;
     use std::vec;
     use std::vec::Vec;
@@ -1325,13 +1356,32 @@ mod tests {
         long.extend(b"\r\n\r\n");
         assert_eq!(
             redirect_fetch(&[&long], MAX_HEADERS_LARGE).0,
-            Err(Error::TooBig)
+            Err(Error::LongLocation)
         );
         // A buffer too small for any response is refused up front.
         assert_eq!(
             redirect_fetch(&[b"HTTP/1.1 200 OK\r\n\r\n"], 64).0,
             Err(Error::TooBig)
         );
+    }
+
+    #[test]
+    fn long_redirected_paths_fit_the_request() {
+        // A signed asset URL as GitHub gives (2026-10-24: about 900 bytes),
+        // up to the longest Location a redirect may carry.
+        let path = format!("/asset?{}", "s".repeat(MAX_LOCATION - 40));
+        let url_text = format!("https://release-assets.example{path}");
+        let url = Url::parse(&url_text).unwrap();
+        let mut t = Mock::new(&[b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"]);
+        let status = fetch_with_head(
+            &mut t,
+            &url,
+            &Unbounded,
+            &mut |_: &[u8]| true,
+            &mut [0u8; 512],
+        );
+        assert_eq!(status, Ok(200));
+        assert!(t.sent.windows(path.len()).any(|w| w == path.as_bytes()));
     }
 
     #[test]
@@ -1381,6 +1431,88 @@ mod tests {
         }
         let mut tiny = [0u8; 10];
         assert_eq!(resolve_location(&base, "/long/path/here", &mut tiny), None);
+        // Queries (audit of ADR 0048, L1 and L2).
+        let q = Url::parse("https://h/a/b?q=1/x/y").unwrap();
+        let mut out = [0u8; MAX_LOCATION];
+        let mut r = |loc: &str| resolve_location(&q, loc, &mut out).map(String::from);
+        assert_eq!(r("?x").as_deref(), Some("https://h/a/b?x"));
+        assert_eq!(r("c").as_deref(), Some("https://h/a/c"));
+        assert_eq!(
+            r("/p?u=https://x/../y").as_deref(),
+            Some("https://h/p?u=https://x/../y")
+        );
+        assert_eq!(
+            r("https://h/x?u=https://y").as_deref(),
+            Some("https://h/x?u=https://y")
+        );
+        assert_eq!(
+            r("//h?a/../b"),
+            None,
+            "a query right after the host is not followed"
+        );
+        // Non-ASCII is refused, never a panic (audit, M1).
+        for bad in [
+            "aééééé",
+            "http://é",
+            "http:/éé",
+            "/caf\u{e9}",
+            "https://h/\u{a0}",
+        ] {
+            assert_eq!(r(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn resolve_location_never_panics() {
+        let bases = [
+            "https://h/a/b?q=1",
+            "http://10.0.2.2:8000/",
+            "https://x.example/p/q/r",
+        ];
+        let alphabet: Vec<char> = "/?#.:@%éhtps01 \u{a0}\u{7f}\\".chars().collect();
+        let mut seed = 0x48_u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut out = [0u8; 64];
+        for round in 0..20_000 {
+            let base = Url::parse(bases[round % bases.len()]).unwrap();
+            let len = (next() % 24) as usize;
+            let mut loc: String = (0..len)
+                .map(|_| alphabet[(next() as usize) % alphabet.len()])
+                .collect();
+            if round % 5 == 0 {
+                loc.insert_str(0, ["http://", "https://", "//", "/"][round % 4]);
+            }
+            if let Some(url) = resolve_location(&base, &loc, &mut out) {
+                assert!(Url::parse(url).is_some(), "{loc:?} gave {url:?}");
+                assert!(url.is_ascii());
+            }
+        }
+    }
+
+    #[test]
+    fn hosts_from_urls_are_host_names() {
+        for bad in [
+            "https://good.com@evil.com/x",
+            "https://h\u{e9}/x",
+            "https://h\\x/y",
+            "https://h:0/x",
+            "http://h?x",
+            "https://a://b/c",
+        ] {
+            assert_eq!(Url::parse(bad), None, "{bad:?}");
+        }
+        for good in [
+            "https://h_1.example:8443/a?u=https://x",
+            "10.0.2.2:8000/update/",
+            "http://h",
+        ] {
+            assert!(Url::parse(good).is_some(), "{good:?}");
+        }
     }
 
     #[test]

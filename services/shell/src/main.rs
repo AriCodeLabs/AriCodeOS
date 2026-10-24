@@ -994,7 +994,7 @@ fn http_get(fs: &mut FsClient, client: &mut NetClient, arg: &[u8]) {
             print(b"http: refused a redirect from https to plain http\n")
         }
         Err(HttpsError::BadRedirect) => {
-            print(b"http: redirected to a location that is not an http(s) URL\n")
+            print(b"http: redirected to an invalid location (not an http(s) URL, or too long)\n")
         }
     }
 }

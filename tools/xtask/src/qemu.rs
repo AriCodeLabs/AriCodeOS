@@ -423,7 +423,8 @@ const EARLY_HINTS_PAUSE: Duration = Duration::from_secs(5);
 /// (a scenario's own update source; 404 without one), the redirects of
 /// ADR 0048 (`/moved/NAME` answers 302 to `/hop/NAME` with a 9,243-byte
 /// header line as github.com sends, `/hop/NAME` answers 307 to the
-/// relative `../update/NAME`; `/redirect-loop` redirects to itself and
+/// relative `../update/NAME` with a 900-byte signed query, as GitHub's
+/// asset URLs; `/redirect-loop` redirects to itself and
 /// `/to-ftp` to an `ftp://` URL) and 404 for everything else.
 fn http_serve(mut stream: std::net::TcpStream, update: Option<&Path>) {
     use std::io::Write;
@@ -439,7 +440,9 @@ fn http_serve(mut stream: std::net::TcpStream, update: Option<&Path>) {
         }
     }
     let request = String::from_utf8_lossy(&buf[..have]);
-    let path = request.split(' ').nth(1).unwrap_or("/");
+    let target = request.split(' ').nth(1).unwrap_or("/");
+    // Routing ignores the query, as a file server does.
+    let path = target.split('?').next().unwrap_or("/");
     if path == "/early-hints" {
         // Until the client gives up and closes (the write then fails).
         while stream
@@ -475,7 +478,7 @@ fn http_serve(mut stream: std::net::TcpStream, update: Option<&Path>) {
         ),
         p if p.starts_with("/hop/") => redirect(
             "307 Temporary Redirect",
-            &format!("../update/{}", &p["/hop/".len()..]),
+            &format!("../update/{}?sig={}", &p["/hop/".len()..], "s".repeat(900)),
             0,
         ),
         "/redirect-loop" => redirect("302 Found", "/redirect-loop", 0),
