@@ -147,6 +147,13 @@ packages = ["examples/hello_ext:2", "examples/hello_ext:3:corrupt"]  # pending p
 staged = ["examples/hello_ext:2:wrong-hash"]  # packages already staged for `run installer 2` (DIR:VERSION[:wrong-hash])
 staged_bad_path = true          # adds a staged line naming pkgs/evil.aripkg
 
+[host_hotplug]                  # optional: a device plugged in through QMP device_add
+marker = "AriInit: boot services completed"
+delay_ms = 3000                 # after the marker (default 0): e.g. a driver gone idle first
+driver = "usb-kbd"              # QEMU device, bus and id: letters, digits, '.', '_' and '-' only
+bus = "ehci.0"
+id = "hotkbd"                   # result in "[host] hotplug: ..."
+
 [host_input]                    # optional: input injected through QMP when marker is seen
 marker = "INPUT_READY"
 keys = ["h", "o", "l", "a", "ret"]   # QEMU qcode names, press and release on kbd0; "shift+dot" holds the modifiers while the key is pressed

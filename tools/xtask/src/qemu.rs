@@ -226,6 +226,27 @@ fn base_command(
     q
 }
 
+/// QMP hot-plug: `delay` after `marker` appears in the serial output, the
+/// device `driver` is added on `bus` with `id` (`device_add`).
+pub struct Hotplug<'a> {
+    pub marker: &'a str,
+    pub delay: Duration,
+    pub driver: &'a str,
+    pub bus: &'a str,
+    pub id: &'a str,
+}
+
+fn run_hotplug(path: &Path, driver: &str, bus: &str, id: &str) -> String {
+    // Names checked by the scenario loader: plain names, safe in JSON.
+    let command = format!(
+        r#"{{"execute":"device_add","arguments":{{"driver":"{driver}","bus":"{bus}","id":"{id}"}}}}"#
+    );
+    match Qmp::connect(path).and_then(|mut q| q.execute(&command)) {
+        Ok(()) => format!("[host] hotplug: {driver} added on {bus} as {id}"),
+        Err(e) => format!("[host] hotplug: {driver} on {bus} failed: {e}"),
+    }
+}
+
 /// QMP input injection: on seeing `marker` in the serial output, `keys` (QEMU
 /// qcode names) are typed and the mouse is moved and clicked.
 pub struct InputProbe<'a> {
@@ -1164,6 +1185,7 @@ pub struct Headless<'a> {
     pub ssh_probe: Option<SshProbe<'a>>,
     pub flood: Option<FloodProbe<'a>>,
     pub input_probe: Option<InputProbe<'a>>,
+    pub hotplug: Option<Hotplug<'a>>,
     pub disk_variant: image::DiskVariant,
     pub disk_readonly: bool,
     /// Reuses the previous boot's test disk instead of building it again
@@ -1277,6 +1299,9 @@ pub fn run_headless(
     let mut probe_result: Option<String> = None;
     let mut probe_thread: Option<std::thread::JoinHandle<String>> = None;
     let mut input_result: Option<String> = None;
+    let mut hotplug_result: Option<String> = None;
+    // When the hot-plug marker was first seen.
+    let mut hotplug_seen: Option<Instant> = None;
     let mut ssh_result: Option<String> = None;
     let mut ssh_thread: Option<std::thread::JoinHandle<String>> = None;
     let mut input_thread: Option<std::thread::JoinHandle<String>> = None;
@@ -1362,6 +1387,16 @@ pub fn run_headless(
                 }));
             }
         }
+        if let (Some(h), None) = (options.hotplug.as_ref(), &hotplug_result) {
+            if hotplug_seen.is_none()
+                && count_occurrences(&captured.lock().expect("capture"), h.marker.as_bytes()) > 0
+            {
+                hotplug_seen = Some(Instant::now());
+            }
+            if hotplug_seen.is_some_and(|t| t.elapsed() >= h.delay) {
+                hotplug_result = Some(run_hotplug(qmp.path(), h.driver, h.bus, h.id));
+            }
+        }
         if let Some(p) = input_probe {
             if input_thread.is_none()
                 && input_result.is_none()
@@ -1412,9 +1447,23 @@ pub fn run_headless(
     drop(qmp);
     reader.join().map_err(|_| "serial reader")?;
     let mut bytes = captured.lock().expect("capture").clone();
-    for line in [probe_result, input_result, ssh_result, flood_result]
-        .into_iter()
-        .flatten()
+    let hotplug_result = hotplug_result.or_else(|| {
+        options.hotplug.as_ref().map(|h| {
+            format!(
+                "[host] hotplug: marker '{}' never seen; nothing added",
+                h.marker
+            )
+        })
+    });
+    for line in [
+        probe_result,
+        input_result,
+        ssh_result,
+        flood_result,
+        hotplug_result,
+    ]
+    .into_iter()
+    .flatten()
     {
         bytes.extend_from_slice(format!("\n{line}\n").as_bytes());
     }

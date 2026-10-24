@@ -11,7 +11,9 @@
 //! Contract with init (`start_driver`): `SERVICE`, cfg, hardware, the IRQ
 //! if the function has one, BAR0, then `SYSTEM` (`READ`) and the block
 //! service endpoint. Intel EHCI functions have neither MSI nor MSI-X, so
-//! the driver never uses the IRQ: it polls the schedules between requests.
+//! the driver never uses the IRQ: it polls the schedules between requests,
+//! every `POLL_MS` while devices or work need watching and every
+//! `IDLE_POLL_MS` when only the ports can change.
 //!
 //! Failures (ADR 0028): every failed transfer is printed with the qTD
 //! token and recorded as a fault event; the controller's own three tries
@@ -61,9 +63,18 @@ const ARENA_BYTES: u64 = 32 * 1024;
 const CONTROL_BUFFER: u16 = 512;
 const RING: usize = 128;
 
-/// Main loop period: how long the driver waits for a request before it
-/// looks at the schedules again.
+/// Main loop period while something needs watching (HID devices, an
+/// enumeration, a connection being debounced, a pending read or info
+/// request): how long the driver waits for a request before it looks at
+/// the schedules again.
 const POLL_MS: u64 = 8;
+/// The period when nothing does: only the ports can change. USB gives a
+/// new connection 100 ms of debounce and a reset before it is usable
+/// (USB 2.0 7.1.7.3), so noticing it up to 250 ms later costs a device
+/// nothing, while an idle controller stops waking 125 times a second
+/// (the driver polls: Intel EHCIs have no MSI, and a legacy pin needs ACPI
+/// `_PRT`, which the kernel does not evaluate).
+const IDLE_POLL_MS: u64 = 250;
 /// While a transfer runs, the first milliseconds are polled with yields,
 /// then with 1 ms sleeps.
 const SPIN_MS: u64 = 2;
@@ -931,6 +942,27 @@ impl Ehci {
 
     /// Holds an Info request until `info_ready` (answered at once if the
     /// holding room is full).
+    /// How long the main loop may wait for a request before the schedules
+    /// and ports need looking at again: `POLL_MS` while something needs
+    /// watching, else `IDLE_POLL_MS`, never past the next hub poll or the
+    /// deadline of a read the client is waiting on (`read_deadline`).
+    fn next_wait(&self, read_deadline: Option<u64>) -> u64 {
+        let watching = !self.boot_done
+            || self.held_len > 0
+            || self.events.len > 0
+            || self.hids.iter().any(Option::is_some)
+            || self.pending.iter().any(Option::is_some);
+        if watching {
+            return POLL_MS;
+        }
+        let now = self.now();
+        let mut wait = IDLE_POLL_MS.min(self.next_hub_poll.saturating_sub(now));
+        if let Some(deadline) = read_deadline {
+            wait = wait.min(deadline.saturating_sub(now));
+        }
+        wait.clamp(1, IDLE_POLL_MS)
+    }
+
     fn hold_info(&mut self, reply_to: Handle) {
         if self.info_ready() || self.held_len == self.held_info.len() {
             answer_info(self, reply_to);
@@ -3492,7 +3524,7 @@ fn main(mask: u64) -> u64 {
         } else {
             &with_block[..1]
         };
-        let mut timeout = POLL_MS;
+        let mut timeout = ctl.next_wait(waiting.map(|(_, deadline)| deadline));
         // At most eight messages per iteration, served in one batch: a
         // block request and the one queued behind it run back to back, and
         // housekeeping (`HOUSEKEEPING_MS`) runs once per batch (budget
