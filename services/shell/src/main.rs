@@ -985,6 +985,17 @@ fn http_get(fs: &mut FsClient, client: &mut NetClient, arg: &[u8]) {
         Err(HttpsError::HeaderBytes) => {
             print(b"http: response headers too large in all (interim responses included)\n")
         }
+        Err(HttpsError::TooManyRedirects) => {
+            print(b"http: more than ");
+            num(aricode_https::MAX_REDIRECTS as u64);
+            print(b" redirects\n");
+        }
+        Err(HttpsError::InsecureRedirect) => {
+            print(b"http: refused a redirect from https to plain http\n")
+        }
+        Err(HttpsError::BadRedirect) => {
+            print(b"http: redirected to an invalid location (not an http(s) URL, or too long)\n")
+        }
     }
 }
 

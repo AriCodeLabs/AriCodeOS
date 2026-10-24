@@ -19,10 +19,10 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
+use aricode_http::{Answer, Error, Transport, Url};
 pub use aricode_http::{Budget, Fetched, Phase, Unbounded};
-use aricode_http::{Error, Transport, Url};
 use aricode_sys::net::{NetClient, NetError};
 use aricode_sys::{self as sys, Handle};
 use aricode_tls::{Client, Event};
@@ -57,13 +57,24 @@ pub enum HttpsError {
     Deadline(Phase),
     /// More than `aricode_http::MAX_INFORMATIONAL` interim responses.
     TooManyInformational,
-    /// Headers of the exchange, interim responses included, exceed
-    /// `aricode_http::MAX_HEADER_BYTES`.
+    /// Headers of one exchange, interim responses included, exceed twice
+    /// the 16 KiB header buffer (`aricode_http::MAX_HEADERS_LARGE`).
     HeaderBytes,
     /// More than [`MAX_SILENT_BYTES`] of TLS records in a row carried no
     /// application data.
     EmptyRecords,
+    /// More than [`MAX_REDIRECTS`] redirects (ADR 0048).
+    TooManyRedirects,
+    /// A redirect from `https://` to `http://`: never followed (ADR 0048).
+    InsecureRedirect,
+    /// A redirect whose `Location` is not a URL this client can fetch, or
+    /// longer than `aricode_http::MAX_LOCATION`.
+    BadRedirect,
 }
+
+/// Most redirects one download follows (ADR 0048); a GitHub release
+/// download takes two (`latest` to the tag, the tag to the asset host).
+pub const MAX_REDIRECTS: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamError {
@@ -334,7 +345,10 @@ pub fn get(
 /// Streaming download: the body goes to `sink` piece by piece (any size,
 /// in order), which returns `false` to abort. Returns the status code.
 /// `timeout_ms` bounds one network operation, `budget` the whole exchange
-/// from the name resolution to the last body byte (`Deadline`).
+/// from the name resolution to the last body byte (`Deadline`), redirects
+/// included: up to [`MAX_REDIRECTS`] are followed, each on a new
+/// connection, never from `https://` to `http://` (ADR 0048). Only the
+/// final response's body reaches `sink`.
 pub fn get_with(
     net: &mut NetClient,
     system: Handle,
@@ -344,7 +358,71 @@ pub fn get_with(
     budget: &dyn Budget,
     sink: &mut dyn FnMut(&[u8]) -> bool,
 ) -> Result<u16, HttpsError> {
-    let url = Url::parse(url).ok_or(HttpsError::BadUrl)?;
+    // On the heap: on the stack it sat in the frame of every caller's
+    // download, next to the TLS certificate checks (incident 0018).
+    let mut head = alloc::vec![0u8; aricode_http::MAX_HEADERS_LARGE];
+    follow(url, &mut head, |url, head| {
+        get_once(
+            net,
+            system,
+            extra_roots,
+            url,
+            timeout_ms,
+            budget,
+            sink,
+            head,
+        )
+    })
+}
+
+/// The redirect policy of [`get_with`] over `once`, which performs one
+/// exchange: the next URL is resolved against the current one, a
+/// downgrade to plain HTTP is refused, and more than [`MAX_REDIRECTS`] is
+/// an error.
+fn follow(
+    url: &str,
+    head: &mut [u8],
+    mut once: impl FnMut(&Url, &mut [u8]) -> Result<Answer, HttpsError>,
+) -> Result<u16, HttpsError> {
+    let mut current = String::from(url);
+    let mut redirects = 0;
+    loop {
+        let parsed = Url::parse(&current).ok_or(if redirects == 0 {
+            HttpsError::BadUrl
+        } else {
+            HttpsError::BadRedirect
+        })?;
+        let len = match once(&parsed, head)? {
+            Answer::Done(status) => return Ok(status),
+            Answer::Redirect { len, .. } => len,
+        };
+        if redirects == MAX_REDIRECTS {
+            return Err(HttpsError::TooManyRedirects);
+        }
+        let location = core::str::from_utf8(&head[..len]).map_err(|_| HttpsError::BadRedirect)?;
+        let mut out = alloc::vec![0u8; aricode_http::MAX_LOCATION];
+        let next = aricode_http::resolve_location(&parsed, location, &mut out)
+            .ok_or(HttpsError::BadRedirect)?;
+        if parsed.secure && !next.starts_with("https://") {
+            return Err(HttpsError::InsecureRedirect);
+        }
+        current = String::from(next);
+        redirects += 1;
+    }
+}
+
+/// One exchange of [`get_with`] on its own connection.
+#[allow(clippy::too_many_arguments)]
+fn get_once(
+    net: &mut NetClient,
+    system: Handle,
+    extra_roots: &[Vec<u8>],
+    url: &Url,
+    timeout_ms: u32,
+    budget: &dyn Budget,
+    sink: &mut dyn FnMut(&[u8]) -> bool,
+    head: &mut [u8],
+) -> Result<Answer, HttpsError> {
     let addr = match aricode_net::Ipv4Addr::parse(url.host) {
         Some(ip) => ip.0,
         None => {
@@ -386,31 +464,22 @@ pub fn get_with(
         true => stream.handshake(),
         false => Ok(()),
     }
-    .and_then(|()| fetch(&mut stream, &url, budget, sink));
+    .and_then(|()| fetch(&mut stream, url, budget, sink, head));
     stream.close();
     let _ = stream.tcp.net.tcp_close(sock);
     result
 }
 
-/// The HTTP exchange over a connected stream, with its errors named.
+/// The HTTP exchange over a connected stream, with its errors named; a
+/// redirect comes back with its `Location` at the start of `head`.
 fn fetch<T: Tcp, R: Records>(
     stream: &mut Stream<'_, T, R>,
     url: &Url,
     budget: &dyn Budget,
     sink: &mut dyn FnMut(&[u8]) -> bool,
-) -> Result<u16, HttpsError> {
-    // The 8 KiB header buffer on the heap: on the stack it sat in the
-    // frame of every caller's download, next to the TLS certificate
-    // checks (incident 0018).
-    let mut head: Box<[u8; aricode_http::MAX_HEADERS]> =
-        match alloc::vec![0u8; aricode_http::MAX_HEADERS]
-            .into_boxed_slice()
-            .try_into()
-        {
-            Ok(h) => h,
-            Err(_) => unreachable!("the vector has MAX_HEADERS bytes"),
-        };
-    aricode_http::fetch_with_head(stream, url, budget, sink, &mut head).map_err(|e| match e {
+    head: &mut [u8],
+) -> Result<Answer, HttpsError> {
+    aricode_http::fetch_or_redirect(stream, url, budget, sink, head).map_err(|e| match e {
         Error::BadUrl => HttpsError::BadUrl,
         Error::Transport(StreamError::Net(e)) => HttpsError::Io(e),
         Error::Transport(StreamError::Tls(e)) => HttpsError::Tls(e),
@@ -425,6 +494,7 @@ fn fetch<T: Tcp, R: Records>(
         Error::Deadline(phase) => HttpsError::Deadline(phase),
         Error::TooManyInformational => HttpsError::TooManyInformational,
         Error::HeaderBytes => HttpsError::HeaderBytes,
+        Error::LongLocation => HttpsError::BadRedirect,
     })
 }
 
@@ -442,6 +512,99 @@ fn before_http(budget: &dyn Budget, phase: Phase, e: HttpsError) -> HttpsError {
 mod tests {
     use super::*;
     use core::cell::Cell;
+
+    fn head() -> Vec<u8> {
+        alloc::vec![0u8; aricode_http::MAX_HEADERS_LARGE]
+    }
+
+    /// `follow` over scripted exchanges: each URL asked is recorded and
+    /// answered by `answer` (a status, or a location to redirect to).
+    fn follow_script(
+        start: &str,
+        answer: impl Fn(&str) -> Result<u16, &'static str>,
+    ) -> (Result<u16, HttpsError>, Vec<String>) {
+        let mut asked = Vec::new();
+        let mut buf = head();
+        let r = follow(start, &mut buf, |url, head| {
+            let mut host = [0u8; aricode_http::MAX_HOST + 6];
+            let full = alloc::format!(
+                "{}://{}{}",
+                if url.secure { "https" } else { "http" },
+                url.host_header(&mut host),
+                url.path
+            );
+            asked.push(full.clone());
+            match answer(&full) {
+                Ok(status) => Ok(Answer::Done(status)),
+                Err(location) => {
+                    head[..location.len()].copy_from_slice(location.as_bytes());
+                    Ok(Answer::Redirect {
+                        status: 302,
+                        len: location.len(),
+                    })
+                }
+            }
+        });
+        (r, asked)
+    }
+
+    /// GitHub's two hops, a relative one, the downgrade refusal and the
+    /// hop limit (ADR 0048).
+    #[test]
+    fn redirects_are_followed_within_the_policy() {
+        let (r, asked) = follow_script(
+            "https://github.com/o/r/releases/latest/download/index",
+            |u| match u {
+                "https://github.com/o/r/releases/latest/download/index" => {
+                    Err("https://github.com/o/r/releases/download/v14/index")
+                }
+                "https://github.com/o/r/releases/download/v14/index" => {
+                    Err("https://release-assets.githubusercontent.com/asset?sig=x")
+                }
+                _ => Ok(200),
+            },
+        );
+        assert_eq!(r, Ok(200));
+        assert_eq!(asked.len(), 3);
+        assert_eq!(
+            asked[2],
+            "https://release-assets.githubusercontent.com/asset?sig=x"
+        );
+        let (r, asked) = follow_script("http://10.0.2.2:8000/moved/index", |u| {
+            if u.contains("/moved/") {
+                Err("../update/index")
+            } else {
+                Ok(200)
+            }
+        });
+        assert_eq!(
+            (r, asked[1].as_str()),
+            (Ok(200), "http://10.0.2.2:8000/update/index")
+        );
+        // http to https is fine; https to http never.
+        let (r, _) = follow_script("http://a/x", |u| {
+            if u.starts_with("http:") {
+                Err("https://a/x")
+            } else {
+                Ok(200)
+            }
+        });
+        assert_eq!(r, Ok(200));
+        let (r, asked) = follow_script("https://a/x", |_| Err("http://a/x"));
+        assert_eq!((r, asked.len()), (Err(HttpsError::InsecureRedirect), 1));
+        let (r, asked) = follow_script("https://a/x", |_| Err("//a/x"));
+        assert_eq!(
+            (r, asked.len()),
+            (
+                Err(HttpsError::TooManyRedirects),
+                MAX_REDIRECTS as usize + 1
+            )
+        );
+        let (r, _) = follow_script("https://a/x", |_| Err("ftp://a/x"));
+        assert_eq!(r, Err(HttpsError::BadRedirect));
+        let (r, asked) = follow_script("not a url", |_| Ok(200));
+        assert_eq!((r, asked.len()), (Err(HttpsError::BadUrl), 0));
+    }
 
     /// Every operation gets what is left of the budget, never more than the
     /// per-operation cap, and nothing once the budget is spent.
@@ -623,10 +786,16 @@ mod tests {
         let mut s = stream(&clock, &budget, 1_000, 1, b"", Silent { connected: true });
         let url = Url::parse("https://host/index").unwrap();
         let mut calls = 0;
-        let r = fetch(&mut s, &url, &budget, &mut |_: &[u8]| {
-            calls += 1;
-            true
-        });
+        let r = fetch(
+            &mut s,
+            &url,
+            &budget,
+            &mut |_: &[u8]| {
+                calls += 1;
+                true
+            },
+            &mut head(),
+        );
         assert_eq!(r, Err(HttpsError::Deadline(Phase::Headers)));
         assert_eq!(
             clock.now.get(),
@@ -645,7 +814,7 @@ mod tests {
         let budget = clock.budget();
         let mut s = stream(&clock, &budget, 10, 1400, b"", Silent { connected: true });
         let url = Url::parse("https://host/index").unwrap();
-        let r = fetch(&mut s, &url, &budget, &mut |_: &[u8]| true);
+        let r = fetch(&mut s, &url, &budget, &mut |_: &[u8]| true, &mut head());
         assert_eq!(r, Err(HttpsError::EmptyRecords));
         assert_eq!(s.tcp.receives as usize, MAX_SILENT_BYTES / 1400 + 1);
         assert!(clock.now.get() < 1_000);
@@ -681,11 +850,17 @@ mod tests {
         s.silent = MAX_SILENT_BYTES;
         let url = Url::parse("https://host/index").unwrap();
         let mut got = Vec::new();
-        let r = fetch(&mut s, &url, &budget, &mut |c: &[u8]| {
-            got.extend_from_slice(c);
-            true
-        });
-        assert_eq!(r, Ok(200));
+        let r = fetch(
+            &mut s,
+            &url,
+            &budget,
+            &mut |c: &[u8]| {
+                got.extend_from_slice(c);
+                true
+            },
+            &mut head(),
+        );
+        assert_eq!(r, Ok(Answer::Done(200)));
         assert_eq!(got, b"hello");
         assert_eq!(s.silent, 0, "data resets the silence counter");
         assert_eq!(s.tcp.receives as usize, response.len().div_ceil(7));

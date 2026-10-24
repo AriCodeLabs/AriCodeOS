@@ -113,5 +113,7 @@ pub fn get(
         Error::Deadline(phase) => HttpError::Deadline(phase),
         Error::TooManyInformational => HttpError::TooManyInformational,
         Error::HeaderBytes => HttpError::HeaderBytes,
+        // Only a fetch that stops at redirects reports it; this one does not.
+        Error::LongLocation => HttpError::Malformed,
     })
 }
