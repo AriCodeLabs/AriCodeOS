@@ -74,6 +74,7 @@ each commit on feature/* or fix/*     cargo xtask check && cargo xtask test --le
 before merging into develop           cargo xtask check && cargo xtask test   (unit + smoke)  (~5 min)
 before merging into main (release)    cargo xtask check && cargo xtask test --all
                                       and cargo xtask test --all --cpus 4                     (~12 min both)
+                                      and cargo xtask perf && cargo xtask perf --cpus 4       (~2 min, alone)
 ```
 
 The QEMU scenarios run several at a time (`--jobs N`, by default from the

@@ -20,6 +20,28 @@ It runs `bench` twice; keep the second result: the first one pays for the
 program's pages and the buffers. With other guests running at the same
 time (`--jobs` above 1) the figures are not comparable.
 
+## Regression check: `cargo xtask perf`
+
+```bash
+cargo xtask perf               # 1 CPU, against tests/perf/baseline-1cpu.txt
+cargo xtask perf --cpus 4      # against tests/perf/baseline-4cpu.txt
+cargo xtask perf --update-baseline [--cpus 4]   # record the run as the baseline
+```
+
+It runs `perf.bench` alone on the host (the suite lock: no other guest),
+reads the second `bench` run, writes it to `build/perf/result-Ncpu.txt`
+and compares it with the baseline of the same CPU count, recorded on the
+reference host with its CPU and QEMU version in the file's comments
+(performance audit 731c398, finding G). A latency regresses when its p50
+passes twice the baseline plus 2 µs; the overall quiet idle when it drops
+more than 30 permille; a figure missing from the run regresses too. The
+tolerances are wide on purpose: TCG's noise must not fail a run, while
+the regressions worth stopping for still do (the 10 ms wait of finding B
+would fail by a factor of 600). The figures compare builds on one host;
+on another host, record its own baseline first. The counters themselves
+are checked by the idle-accounting controls (`scheduler.idle_accounting`,
+`smp.idle_accounting`, incident 0020).
+
 ## What `bench` measures
 
 `apps/bench` is an ordinary broker application (`system`, `fs`, `net`,
