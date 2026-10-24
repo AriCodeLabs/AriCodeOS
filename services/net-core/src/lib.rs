@@ -97,7 +97,7 @@ const ARP_WAIT_MS: u64 = 1000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fault {
     /// `TcpConnect`/`TcpListen` with every TCP slot in use (`MAX_TCP`,
-    /// TIME-WAIT and unreaped connections included).
+    /// unreaped connections included) and none in TIME-WAIT to recycle.
     TcpTableFull = 0,
     /// A frame for an unresolved next hop found the parking table full.
     ArpDeferFull = 1,
@@ -140,10 +140,14 @@ enum Fault {
     /// 0034 §4, ADR 0039). Nobody was refused; the code is the
     /// `EntropySource` number, 0 when unknown.
     TcpSecretWeak = 15,
+    /// A full TCP table gave up the slot of a connection its client had
+    /// closed and that was waiting out TIME-WAIT, so a new connection
+    /// could have it (incident 0027). Nobody was refused (code 0).
+    TimeWaitRecycled = 16,
 }
 
 impl Fault {
-    const COUNT: usize = 16;
+    const COUNT: usize = 17;
     const ALL: [Fault; Self::COUNT] = [
         Fault::TcpTableFull,
         Fault::ArpDeferFull,
@@ -161,6 +165,7 @@ impl Fault {
         Fault::RxBudget,
         Fault::SessionCreate,
         Fault::TcpSecretWeak,
+        Fault::TimeWaitRecycled,
     ];
 
     fn from_index(i: usize) -> Option<Self> {
@@ -188,6 +193,7 @@ impl Fault {
             Fault::RxBudget => "net rx budget hit",
             Fault::SessionCreate => "net session create",
             Fault::TcpSecretWeak => "net tcp secret weak",
+            Fault::TimeWaitRecycled => "net tcp tw recycled",
         }
     }
 
@@ -198,7 +204,9 @@ impl Fault {
         match self {
             Fault::BadRequest => Status::Invalid,
             Fault::BadHandles => Status::BadHandles,
-            Fault::Reclaimed | Fault::RxBudget | Fault::TcpSecretWeak => Status::Ok,
+            Fault::Reclaimed | Fault::RxBudget | Fault::TcpSecretWeak | Fault::TimeWaitRecycled => {
+                Status::Ok
+            }
             _ => Status::Busy,
         }
     }
@@ -1413,7 +1421,7 @@ impl<L: Link> Stack<L> {
             .iter()
             .filter(|(_, _, s)| s.accepted_from == Some(listener as u16))
             .count();
-        if self.tcp.is_full() || backlog >= TCP_BACKLOG {
+        if backlog >= TCP_BACKLOG || (self.tcp.is_full() && !self.recycle_time_wait(now)) {
             self.tcp_syn_dropped = self.tcp_syn_dropped.saturating_add(1);
             self.note(Fault::SynDropped, now);
             self.send_tcp_reset(ih, &h, payload.len(), now);
@@ -1604,9 +1612,10 @@ impl<L: Link> Stack<L> {
     }
 
     /// Makes room in the TCP table by looking for dead clients when it is
-    /// full (ADR 0037: a full table is swept before it refuses). `false`
-    /// when the request is over: `owner` itself was found dead (its reply
-    /// endpoint is closed) or the table is still full (refused, recorded).
+    /// full (ADR 0037: a full table is swept before it refuses), then by
+    /// recycling a TIME-WAIT slot (incident 0027). `false` when the request
+    /// is over: `owner` itself was found dead (its reply endpoint is
+    /// closed) or the table is still full (refused, recorded).
     fn tcp_room(&mut self, owner: Owner, reply_to: Handle, now: u64) -> bool {
         if !self.tcp.is_full() {
             return true;
@@ -1615,10 +1624,29 @@ impl<L: Link> Stack<L> {
         if !self.still_there(owner, reply_to) {
             return false;
         }
-        if self.tcp.is_full() {
+        if self.tcp.is_full() && !self.recycle_time_wait(now) {
             self.refuse(reply_to, Fault::TcpTableFull, now);
             return false;
         }
+        true
+    }
+
+    /// Frees the slot of the closed connection in TIME-WAIT that would end
+    /// soonest (incident 0027). TIME-WAIT keeps late segments of that
+    /// connection from reaching a new one on the same address and port
+    /// pair; the connection taking the slot has its own pair (a new
+    /// ephemeral port, or another peer's), and its initial sequence number
+    /// comes from the per-boot secret (ADR 0034). Small stacks do the same
+    /// (lwIP's `tcp_kill_timewait`). The choice is `tcp::recyclable`
+    /// (host-tested): only connections their client has closed. `false`
+    /// when there is none.
+    fn recycle_time_wait(&mut self, now: u64) -> bool {
+        let socks = self.tcp.iter().map(|(i, _, s)| (i, s.user_closed, &s.conn));
+        let Some(i) = tcp::recyclable(socks) else {
+            return false;
+        };
+        self.tcp.take(i);
+        self.note(Fault::TimeWaitRecycled, now);
         true
     }
 

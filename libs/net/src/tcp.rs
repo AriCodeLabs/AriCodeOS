@@ -689,6 +689,18 @@ impl Connection {
     }
 }
 
+/// Of `(slot, closed by its client, connection)`, the closed connection in
+/// TIME-WAIT that ends soonest: the slot a full table may give to a new
+/// connection (incident 0027). TIME-WAIT guards that connection's own
+/// address and port pair, which the new one does not share. A connection
+/// its client still holds is never chosen.
+pub fn recyclable<'a>(socks: impl Iterator<Item = (usize, bool, &'a Connection)>) -> Option<usize> {
+    socks
+        .filter(|(_, closed, c)| *closed && c.state() == State::TimeWait)
+        .min_by_key(|(_, _, c)| c.next_timer().unwrap_or(0))
+        .map(|(slot, _, _)| slot)
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -789,6 +801,38 @@ mod tests {
         assert_eq!(p.a.state(), State::TimeWait);
         p.run(TIME_WAIT_MS + 20);
         assert!(p.a.is_closed());
+    }
+
+    /// A pair whose side A closed first at `at` and sits in TIME-WAIT.
+    fn time_wait_from(at: u64) -> Connection {
+        let mut p = Pair::new(|_| false);
+        p.run(at + 10);
+        p.a.close();
+        p.run(10);
+        p.b.close();
+        p.run(10);
+        assert_eq!(p.a.state(), State::TimeWait);
+        p.a
+    }
+
+    #[test]
+    fn a_full_table_recycles_the_time_wait_that_ends_soonest() {
+        let older = time_wait_from(0);
+        let newer = time_wait_from(500);
+        let open = Pair::new(|_| false).a;
+        // Slots: 0 open, 1 newer, 2 older (closed), 3 older but still held.
+        let socks = [
+            (0, true, &open),
+            (1, true, &newer),
+            (2, true, &older),
+            (3, false, &older),
+        ];
+        assert_eq!(recyclable(socks.into_iter()), Some(2));
+        assert_eq!(recyclable([(1, true, &newer)].into_iter()), Some(1));
+        assert_eq!(
+            recyclable([(3, false, &older), (0, true, &open)].into_iter()),
+            None
+        );
     }
 
     #[test]

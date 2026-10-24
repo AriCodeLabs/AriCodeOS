@@ -21,7 +21,7 @@ const HOST: [u8; 4] = [10, 0, 2, 2];
 /// More than netd's TCP table (8 slots): the loop must end in a refusal.
 const MAX_ATTEMPTS: usize = 16;
 
-fn main(_arg: u64) -> u64 {
+fn main(arg: u64) -> u64 {
     let Ok(net) = NetClient::new(NETD, HW) else {
         sys::print(b"tcp_hog: no network client\n");
         return 1;
@@ -58,6 +58,14 @@ fn main(_arg: u64) -> u64 {
         sys::print(e.describe().as_bytes());
     }
     sys::print(b"\n");
+    // With `arg` = N, the table stays full of live connections for N ms
+    // (incident 0027: TIME-WAIT slots are recycled, live ones are not).
+    if arg > 0 {
+        sys::print(b"tcp_hog: holding them for ");
+        sys::print(fmt_u64(arg, &mut buf));
+        sys::print(b" ms\n");
+        sys::thread_sleep(arg);
+    }
     for s in &socks[..open] {
         let _ = net.tcp_close(*s);
     }
