@@ -5,8 +5,10 @@
 //! (`NetError::describe`, the text the shell shows), then closes them all
 //! and exits. Launched through the broker with `run tcp_hog` and the
 //! manifest `caps = net`: handles 0x10004 = netd, 0x10005 = HARDWARE.
-//! Right after it exits the closed connections sit in TIME-WAIT (2 s), so
-//! a connection the shell attempts at once is refused the same way.
+//! With `arg` = N it holds them open for N ms first (`spawn tcp_hog N`),
+//! so a connection the shell attempts meanwhile is refused the same way;
+//! once closed they sit in TIME-WAIT, which a full table recycles
+//! (incident 0027).
 #![no_std]
 #![no_main]
 

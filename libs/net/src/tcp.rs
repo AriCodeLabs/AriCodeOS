@@ -38,6 +38,12 @@ pub const MAX_RETRIES: u8 = 6;
 /// (`tcp_synack_retries`, about 63 s) with a table of thousands of slots.
 pub const SYN_ACK_MAX_RETRIES: u8 = 3;
 const TIME_WAIT_MS: u64 = 2000;
+/// Longest wait in FIN-WAIT-2 for the peer's FIN once ours is acknowledged
+/// (audit of incident 0027, M1): a peer that never closes its side would
+/// otherwise hold the slot until the next boot. The service's close is
+/// always a full close, so nothing more can arrive for anyone; Linux waits
+/// 60 s (`tcp_fin_timeout`) with a table of thousands of slots.
+pub const FIN_WAIT2_MS: u64 = 30_000;
 
 /// Connections a listener may hold before its owner accepts them, half-open
 /// (`SynReceived`) and established alike, for a table of `table_slots`
@@ -266,6 +272,8 @@ pub struct Connection {
     retransmit_at: Option<u64>,
     retries: u8,
     time_wait_until: u64,
+    /// When FIN-WAIT-2 gives up on the peer's FIN (`FIN_WAIT2_MS`).
+    fin_wait2_until: u64,
 }
 
 impl Connection {
@@ -292,6 +300,7 @@ impl Connection {
             retransmit_at: None,
             retries: 0,
             time_wait_until: 0,
+            fin_wait2_until: 0,
         }
     }
 
@@ -437,9 +446,17 @@ impl Connection {
 
     /// Next segment to transmit, if any. Call until `None`.
     pub fn poll(&mut self, now: u64, out: &mut [u8]) -> Option<usize> {
-        // RST after abort.
+        // A peer that never sends its FIN: reset and let the slot go.
+        if self.state == State::FinWait2 && now >= self.fin_wait2_until {
+            self.state = State::Closed;
+            self.reason = Some(CloseReason::Timeout);
+            self.need_ack = true; // reused as "send RST"
+        }
+        // RST after abort or a FIN-WAIT-2 that ran out.
         if self.state == State::Closed {
-            if self.need_ack && self.reason == Some(CloseReason::Reset) {
+            if self.need_ack
+                && matches!(self.reason, Some(CloseReason::Reset | CloseReason::Timeout))
+            {
                 self.need_ack = false;
                 return self.emit(
                     self.header(FLAG_RST | FLAG_ACK, self.snd_nxt),
@@ -624,7 +641,8 @@ impl Connection {
             match self.state {
                 State::SynReceived => self.state = State::Established,
                 State::FinWait1 if self.fin_sent && h.ack == self.snd_nxt => {
-                    self.state = State::FinWait2
+                    self.state = State::FinWait2;
+                    self.fin_wait2_until = now + FIN_WAIT2_MS;
                 }
                 State::Closing if self.fin_sent && h.ack == self.snd_nxt => {
                     self.enter_time_wait(now)
@@ -676,7 +694,8 @@ impl Connection {
     }
 
     /// The next time `poll` has timed work to do (ADR 0044): a
-    /// retransmission or the end of TIME-WAIT. `None` when only a segment
+    /// retransmission, the end of TIME-WAIT, or giving up FIN-WAIT-2.
+    /// `None` when only a segment
     /// or a call from the user can change anything, so a service may sleep
     /// until then; work that is due at once (a first SYN, new data, an ACK)
     /// is what `poll` emits in the same round and needs no timer.
@@ -684,6 +703,7 @@ impl Connection {
         match self.state {
             State::Closed => None,
             State::TimeWait => Some(self.time_wait_until),
+            State::FinWait2 => Some(self.fin_wait2_until),
             _ => self.retransmit_at,
         }
     }
@@ -813,6 +833,34 @@ mod tests {
         p.run(10);
         assert_eq!(p.a.state(), State::TimeWait);
         p.a
+    }
+
+    #[test]
+    fn a_peer_that_never_closes_releases_fin_wait_2() {
+        let mut p = Pair::new(|_| false);
+        p.run(10);
+        p.a.close();
+        p.run(10);
+        assert_eq!(
+            p.a.state(),
+            State::FinWait2,
+            "our FIN acknowledged, theirs never comes"
+        );
+        assert_eq!(p.b.state(), State::CloseWait);
+        assert!(
+            p.a.next_timer().is_some_and(|t| t > p.now),
+            "a timer to wake the service"
+        );
+        p.run(FIN_WAIT2_MS - 100);
+        assert_eq!(p.a.state(), State::FinWait2, "not before its time");
+        p.run(200);
+        assert!(p.a.is_closed());
+        assert_eq!(p.a.close_reason(), Some(CloseReason::Timeout));
+        assert_eq!(
+            p.b.close_reason(),
+            Some(CloseReason::Reset),
+            "the peer got a reset"
+        );
     }
 
     #[test]

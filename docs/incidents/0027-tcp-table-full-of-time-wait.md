@@ -62,6 +62,20 @@ sweep, which only looks for dead clients.
   `update.redirected_source` under the same server; host test of the
   choice.
 
+## Audit (2026-10-24)
+
+Independent audit: no high findings; recycling is safe (the next
+connection to the same server does not get the recycled port again until
+the RFC 6056 counter wraps, 16,384 opens later, and its ISN is higher).
+Applied: a peer that acknowledges our FIN and never sends its own held a
+slot in FIN-WAIT-2 until the next boot, which recycling did not cover;
+FIN-WAIT-2 now gives up after `FIN_WAIT2_MS` = 30 s with a reset
+(host-tested), so `net tcp table full` again means live connections. A
+recycled socket that still held a connect or receive wait answers it
+(`Reset`) instead of dropping its handle. The scenarios got wider margins
+(six downloads, a 4 s pause, a 15 s hold) and check the downloads
+themselves; the documents say what recycling changed.
+
 ## Open
 
 - Eight slots are few for a machine that serves SSH and downloads at

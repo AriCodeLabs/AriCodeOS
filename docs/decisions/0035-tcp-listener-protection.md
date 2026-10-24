@@ -33,7 +33,8 @@ and visible in `diag`.
    `tcp::listen_backlog(MAX_TCP) = MAX_TCP / 2 = 4` connections its owner
    has not accepted yet, half-open (`SynReceived`) and established alike
    (`TcpSock::accepted_from` marks them). A SYN to a listener whose backlog
-   is at the cap, or that finds no free slot, creates nothing. With the
+   is at the cap, or that finds no free slot (nor a TIME-WAIT one to
+   recycle, since incident 0027), creates nothing. With the
    listener's own slot that is 5 slots at most for one listening port, so a
    burst of SYNs to port 22 always leaves at least 3 slots to active opens;
    connections sshd has accepted are sshd's sessions, bounded by sshd, not

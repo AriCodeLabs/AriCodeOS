@@ -158,7 +158,10 @@ now share one model and one vocabulary (`Attach`, sessions, sweep, retire,
 - Leases (option b).
 - Reclaiming TIME-WAIT connections of a dead client with a reset: frees a
   slot two seconds sooner at the cost of TCP's protection against old
-  duplicates, for a client that did close properly.
+  duplicates, for a client that did close properly. (Incident 0027 later
+  recycles a TIME-WAIT slot without a reset, but only when the table is
+  full and a new connection needs it; the new connection does not get the
+  old pair again until the port counter wraps.)
 
 ## Consequences
 

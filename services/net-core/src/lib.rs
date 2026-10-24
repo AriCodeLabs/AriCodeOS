@@ -1645,7 +1645,19 @@ impl<L: Link> Stack<L> {
         let Some(i) = tcp::recyclable(socks) else {
             return false;
         };
-        self.tcp.take(i);
+        let Some((_, mut sock)) = self.tcp.take(i) else {
+            return false;
+        };
+        // A wait the socket still holds is answered, never dropped (audit,
+        // L1): only a client that closed a connection it was still
+        // connecting can have one.
+        if let Some((reply_to, _)) = sock.connect.take() {
+            answer(reply_to, Reply::status(Status::Reset));
+        }
+        if let Some(r) = sock.recv.take() {
+            let _ = sys::handle_close(r.buf);
+            answer(r.reply_to, Reply::status(Status::Reset));
+        }
         self.note(Fault::TimeWaitRecycled, now);
         true
     }
