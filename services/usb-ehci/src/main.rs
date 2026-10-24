@@ -11,7 +11,9 @@
 //! Contract with init (`start_driver`): `SERVICE`, cfg, hardware, the IRQ
 //! if the function has one, BAR0, then `SYSTEM` (`READ`) and the block
 //! service endpoint. Intel EHCI functions have neither MSI nor MSI-X, so
-//! the driver never uses the IRQ: it polls the schedules between requests.
+//! the driver never uses the IRQ: it polls the schedules between requests,
+//! every `POLL_MS` while devices or work need watching and every
+//! `IDLE_POLL_MS` when only the ports can change.
 //!
 //! Failures (ADR 0028): every failed transfer is printed with the qTD
 //! token and recorded as a fault event; the controller's own three tries
@@ -29,8 +31,8 @@ use alloc::boxed::Box;
 
 use aricode_ehci::{
     cap, decode_token, hub, interrupt_schedule, legacy, link, op, overlay_token, periodic_entry,
-    portsc, set_address, split_transfer, token, tt_for, Outcome, Params, Pid, Qtd, QueueHead,
-    Speed, TransferError, Tt, FRAME_LIST_LEN, HCI_VERSION_1_0,
+    poll_wait, portsc, set_address, split_transfer, token, tt_for, Outcome, Params, Pid, Qtd,
+    QueueHead, Speed, TransferError, Tt, FRAME_LIST_LEN, HCI_VERSION_1_0,
 };
 use aricode_input::{Event, HidBootKeyboard, HidBootMouse, MAX_REPORT_EVENTS};
 use aricode_proto::block::{
@@ -61,9 +63,19 @@ const ARENA_BYTES: u64 = 32 * 1024;
 const CONTROL_BUFFER: u16 = 512;
 const RING: usize = 128;
 
-/// Main loop period: how long the driver waits for a request before it
-/// looks at the schedules again.
+/// Main loop period while something needs watching (the boot
+/// enumeration, HID devices, a connection being debounced): how long the
+/// driver waits for a request before it looks at the schedules again.
 const POLL_MS: u64 = 8;
+/// The period when nothing does: only the ports can change. USB gives a
+/// new connection 100 ms of debounce and a reset before it is usable
+/// (USB 2.0 7.1.7.3), so noticing it up to 250 ms later costs a device
+/// nothing, while an idle controller stops waking every 8 ms on its own
+/// (the driver polls: Intel EHCIs have no MSI, and a legacy pin needs ACPI
+/// `_PRT`, which the kernel does not evaluate). A client that reads with a
+/// short timeout still wakes it: the console bridge reads every input
+/// service in turn with 20 ms reads (ADR 0044, finding B's input clients).
+const IDLE_POLL_MS: u64 = 250;
 /// While a transfer runs, the first milliseconds are polled with yields,
 /// then with 1 ms sleeps.
 const SPIN_MS: u64 = 2;
@@ -927,6 +939,25 @@ impl Ehci {
     /// enumeration, or once `INFO_WAIT_MS` passed.
     fn info_ready(&self) -> bool {
         self.boot_done || self.now() >= self.started + INFO_WAIT_MS
+    }
+
+    /// How long the main loop may wait for a request before the schedules
+    /// and ports need looking at again (`aricode_ehci::poll_wait`):
+    /// `POLL_MS` while the boot enumeration runs, HID devices are served or
+    /// a connection is being debounced, else `IDLE_POLL_MS`, never past the
+    /// next hub poll or the deadline of a read the client is waiting on.
+    fn next_wait(&self, read_deadline: Option<u64>) -> u64 {
+        let busy = !self.boot_done
+            || self.hids.iter().any(Option::is_some)
+            || self.pending.iter().any(Option::is_some);
+        poll_wait(
+            self.now(),
+            busy,
+            POLL_MS,
+            IDLE_POLL_MS,
+            self.next_hub_poll,
+            read_deadline,
+        )
     }
 
     /// Holds an Info request until `info_ready` (answered at once if the
@@ -3492,7 +3523,7 @@ fn main(mask: u64) -> u64 {
         } else {
             &with_block[..1]
         };
-        let mut timeout = POLL_MS;
+        let mut timeout = ctl.next_wait(waiting.map(|(_, deadline)| deadline));
         // At most eight messages per iteration, served in one batch: a
         // block request and the one queued behind it run back to back, and
         // housekeeping (`HOUSEKEEPING_MS`) runs once per batch (budget

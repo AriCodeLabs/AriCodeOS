@@ -183,7 +183,14 @@ margin.
   with 1 ms reads (finding B's last paragraph); waiting on them at once
   needs reads kept outstanding on reply endpoints in one set with its
   service endpoint, a change of its own. The EHCI driver polls its
-  controller (`POLL_MS`) and keeps its loop. Device interrupts arrive on
+  controller (`POLL_MS`) and keeps its loop. (Since 2026-10-25 it polls
+  every 8 ms only while devices or work need watching, and otherwise
+  every 250 ms or at a client read's deadline: with nothing attached it no
+  longer wakes every 8 ms on its own, though the console bridge's 20 ms
+  reads still wake it, about 30 times a second on the reference laptop
+  instead of about 130; quiet idle there went from 994 to 996-997
+  permille. Its legacy interrupt pin stays unused: routing it needs the
+  ACPI `_PRT`, which the kernel does not evaluate.) Device interrupts arrive on
   the boot CPU, as before.
 - Found by this change's suites and fixed in the same branch: usb-input
   read an xHCI event whole before its cycle bit and could take a stale

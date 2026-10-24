@@ -145,6 +145,42 @@ fn default_dev_commit() -> String {
     String::from("0123abc")
 }
 
+/// `[host_hotplug]`: QEMU `device_add` of `driver` on `bus` with `id`, once
+/// `marker` was seen and `delay_ms` more passed (letting the guest settle
+/// first, e.g. a driver into its idle polling).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostHotplug {
+    pub marker: String,
+    #[serde(default)]
+    pub delay_ms: u64,
+    pub driver: String,
+    pub bus: String,
+    pub id: String,
+}
+
+impl HostHotplug {
+    /// The names go into hand-written QMP JSON: plain names only.
+    fn check(&self) -> Result {
+        for (what, v) in [
+            ("driver", &self.driver),
+            ("bus", &self.bus),
+            ("id", &self.id),
+        ] {
+            if v.is_empty()
+                || !v
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            {
+                return Err(format!(
+                    "[host_hotplug] {what} {v:?}: letters, digits, '.', '_' and '-' only"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostInput {
@@ -338,6 +374,9 @@ pub struct Scenario {
     /// QMP input injection on seeing `marker`: keys (QEMU qcode names) on
     /// the virtio keyboard, relative motion and a click on the mouse.
     pub host_input: Option<HostInput>,
+    /// A device plugged in over QMP (`device_add`) `delay_ms` after the
+    /// guest prints `marker`: hot-plug detection.
+    pub host_hotplug: Option<HostHotplug>,
     #[serde(default)]
     pub host_ssh: Option<HostSsh>,
     /// Plain TCP connections held open against a guest listener (incident
@@ -569,6 +608,17 @@ pub fn load_from(dir: &Path) -> Result<Vec<Scenario>> {
                 h.check_queue()
                     .map_err(|e| format!("{}: {e}", path.display()))?;
             }
+            if let Some(h) = &s.host_hotplug {
+                h.check().map_err(|e| format!("{}: {e}", path.display()))?;
+                // QEMU's QMP socket serves one client at a time, and the
+                // input probe holds its connection through all its keys.
+                if s.host_input.is_some() {
+                    return Err(format!(
+                        "{}: [host_hotplug] and [host_input] share QEMU's single QMP connection: use one",
+                        path.display()
+                    ));
+                }
+            }
             s.file = path;
             out.push(s);
         }
@@ -671,6 +721,21 @@ pub fn select<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hotplug_names_are_plain() {
+        let h = |driver: &str| HostHotplug {
+            marker: String::from("m"),
+            delay_ms: 0,
+            driver: driver.to_string(),
+            bus: String::from("ehci.0"),
+            id: String::from("hot-1"),
+        };
+        assert!(h("usb-kbd").check().is_ok());
+        for bad in ["", "usb\"kbd", "a b", "x}{"] {
+            assert!(h(bad).check().is_err(), "{bad:?}");
+        }
+    }
 
     #[test]
     fn serial_order_checks_the_sequence() {

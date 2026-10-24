@@ -534,6 +534,13 @@ pub fn run_scenario(
             key_delay_ms: h.key_delay_ms,
             echo_prompt: h.echo_prompt.as_deref(),
         });
+        let hotplug = s.host_hotplug.as_ref().map(|h| qemu::Hotplug {
+            marker: &h.marker,
+            delay: Duration::from_millis(h.delay_ms),
+            driver: &h.driver,
+            bus: &h.bus,
+            id: &h.id,
+        });
         let ssh_probe = match (&s.host_ssh, &ssh_key) {
             (Some(h), Some(key)) => Some(qemu::SshProbe {
                 marker: &h.marker,
@@ -554,6 +561,7 @@ pub fn run_scenario(
             ssh_probe,
             flood,
             input_probe,
+            hotplug,
             disk_variant,
             disk_readonly: s.disk_readonly,
             keep_disk: i > 0,
