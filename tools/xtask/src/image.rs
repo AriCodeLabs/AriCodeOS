@@ -405,16 +405,25 @@ fn stick_state() -> String {
     )
 }
 
+/// Where the public update source lives (ADR 0048): the newest GitHub
+/// release's files, published with `publish-update` and attached to each
+/// release (docs/WORKFLOW.md).
+pub const PUBLIC_SOURCE: &str =
+    "https://github.com/AriCodeLabs/AriCodeOS/releases/latest/download/";
+
 /// `cargo xtask usb-image [--cmdline S]`: image ready to `dd` onto a USB stick.
 /// `authorized_key`: an OpenSSH public key file installed in ARI0 as
 /// `authorized_keys`, so the machine accepts SSH logins with that key.
 /// `dev_source`: the machine opts in to the development channel (ADR
 /// 0045): its AriBoot trusts that channel's key and `updater/sources` gets
 /// the source as `dev URL`. Without it the stick has neither.
+/// `public_source`: the stick registers [`PUBLIC_SOURCE`] (release sticks),
+/// before `update_source` if both are given.
 pub fn build_usb_image(
     release: bool,
     cmdline: &str,
     authorized_key: Option<&Path>,
+    public_source: bool,
     update_source: Option<&str>,
     dev_source: Option<&str>,
 ) -> Result<PathBuf> {
@@ -431,6 +440,12 @@ pub fn build_usb_image(
     }
     // The source list first: an invalid source fails before any build.
     let mut sources = aricode_update_index::Sources::default();
+    if public_source {
+        let url = sources
+            .add(PUBLIC_SOURCE)
+            .map_err(|e| format!("--public-source: {e:?}"))?;
+        println!("[xtask] public update source {url} (ADR 0048)");
+    }
     if let Some(input) = update_source {
         let url = sources
             .add(input)
@@ -1146,6 +1161,15 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     #[test]
+    fn the_public_source_is_a_valid_source_as_written() {
+        let mut sources = aricode_update_index::Sources::default();
+        assert_eq!(sources.add(PUBLIC_SOURCE), Ok(PUBLIC_SOURCE));
+        // Its local mirror too, on a LAN host (ADR 0048).
+        let mirror = format!("http://192.168.1.16:8765{}", crate::qemu::MIRROR_LATEST);
+        assert!(sources.add(&mirror).is_ok());
+    }
+
+    #[test]
     fn images_updaters_cannot_download_are_not_published() {
         let max = aricode_update_index::IMAGE_DOWNLOAD_MAX;
         assert!(check_download_size(max).is_ok());
@@ -1224,7 +1248,7 @@ mod tests {
             "shell usb_fault=idle",
             "test=panic",
         ] {
-            let err = build_usb_image(false, cmdline, None, None, None).unwrap_err();
+            let err = build_usb_image(false, cmdline, None, false, None, None).unwrap_err();
             assert!(err.contains("test-only key"), "{cmdline}: {err}");
         }
         for cmdline in [
@@ -1232,7 +1256,7 @@ mod tests {
             "shell boot_pending",
             "shell boot_channel=dev",
         ] {
-            let err = build_usb_image(false, cmdline, None, None, None).unwrap_err();
+            let err = build_usb_image(false, cmdline, None, false, None, None).unwrap_err();
             assert!(err.contains("added by AriBoot"), "{cmdline}: {err}");
         }
     }
