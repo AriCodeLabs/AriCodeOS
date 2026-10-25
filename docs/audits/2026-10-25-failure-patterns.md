@@ -86,7 +86,7 @@ of this document.
 | L3 | ECAM bus offset underflows for `bus < bus_start` [A-L4] |
 | L4 | A remote peer can pin TCP slots for good (Closing never sends; FinWait1 with a zero window has no probe) [B-L3] |
 | L5 | RSA exponent unbounded: ~11 s of CPU per handshake [B-L4, D-L5] — **fixed** (incident 0029) |
-| L6 | WASM block ends rescanned on every entry: fuel no longer bounds run time [B-L5] |
+| L6 | WASM block ends rescanned on every entry: fuel no longer bounds run time [B-L5] — **fixed** on `fix/wasm-block-table` (incident 0042; the audit of that fix, M1-M3, H1 and L1-L3, fixed on the same branch) |
 | L7 | AriFS layout arithmetic overflows (debug panic, release wrap); `recover` does not bound the journal length [B-L1] |
 | L8 | DHCP retry counter overflow (debug); predictable DHCP xid and DNS id/port [B-L2, C] |
 | L9 | Any `net` app can listen on port 22; sshd's failed re-listen is silent [E-L1] |
