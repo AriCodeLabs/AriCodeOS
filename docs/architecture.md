@@ -162,9 +162,15 @@ and `page_tables_base/size` which tables it reclaims when activating its own.
   cells; the screen is then painted once per message, only the cells whose
   character differs from the shadow, a glyph per `Surface::glyph` call
   (colours encoded once, one bounds check per pixel row). Thread code
-  paints one text row per hold of the console's `IrqLock`, so interrupts
-  are never off for a whole repaint; code with interrupts off retries the
-  lock for a bounded time and paints in one hold (incident 0031: a full
+  waits for the console's `IrqLock` (without the deadlock panic: every
+  holder has interrupts off and holds it for one row) and paints one text
+  row per hold, so interrupts are never off for a whole repaint; code with
+  interrupts off retries the lock for a bounded time and paints one row,
+  leaving the rest to the next writer or the cursor thread, which paints
+  pending rows before it blinks (`blink` draws one glyph at most). Messages
+  are queued for the screen under the serial lock (order `SERIAL` then
+  `FB`), so both show them in the same order, and also while the screen is
+  lent to a driver under test (incident 0031 and its audit: a full
   repaint per newline, a `put` per pixel, lost timer ticks and made test
   timing depend on the kernel's layout). It understands backspace (`\x08`, the cursor
   moves back one cell) and draws a `_` cursor toggled by a kernel thread

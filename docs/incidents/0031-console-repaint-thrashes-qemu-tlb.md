@@ -170,6 +170,55 @@ fixed on its own merits; none by slowing the console or by retries.
   Enter press is decoded; the expected 10 and 18 are unchanged and no
   longer racy.
 
+## Audit (2026-10-25)
+
+An independent read-only audit of the branch found no High findings.
+Follow-ups, one commit:
+
+- **M1**: `blink` ran `redraw(usize::MAX)` under the cursor thread's
+  `try_lock` with interrupts off. After a screen came back from a driver
+  under test (every cell dirty) or with a writer preempted between rows,
+  the cursor thread could paint the rest of the screen in one hold: the
+  incident's 40-85 ms with interrupts off. `blink` now draws one glyph at
+  most (the cursor, or the cell it hid) and does nothing while rows are
+  pending; the cursor thread paints pending rows in steps
+  (`paint_in_steps`) before blinking, so they are never left behind.
+- **M2**: thread writers used `IrqLock::lock`, which panics after 2^26
+  spins; before the fix `write_raw` never panicked (it only used
+  `try_lock`). The console now waits with its own loop (`wait_fb`:
+  `try_lock` and `spin_loop`, interrupts restored between attempts, no
+  counter): every holder has interrupts off, so it is on another CPU,
+  holds the lock for one row and waits on nothing.
+- **L1**: a writer with interrupts off painted everyone's backlog in one
+  hold. It now paints one row (a line that did not scroll is all there
+  is) and leaves the rest to the next thread writer or the cursor thread.
+  Every hold of `FB` after boot is now one row or one glyph.
+- **L2**: serial was released before the screen was taken, so two writers
+  could come out A, B on serial and B, A on screen (on a laptop without a
+  serial port the screen is the log). The message is now queued for the
+  screen while the serial lock is still held (order `SERIAL` then `FB`,
+  `FB` a leaf); only the painting runs without it.
+- **L3**: `test=console_ps2` read `PS2.lock()` inside the `println!`
+  arguments, holding the guard for the whole console write; read into a
+  local first.
+- **L4**: lines logged while the screen was lent were dropped, although
+  `reattach` says they are kept. They are now queued while detached (a
+  redraw without a screen drops only the dirty range; `reattach`
+  repaints every cell). The console ignores writes before its first
+  `attach` (no grid yet).
+- **I1**: comments updated: the console static holds two arrays, about
+  64 KiB.
+- **I3** (optional, not done): counting the screen lines dropped when
+  the bounded retry gives up needs a diagnostics path for kernel console
+  counters that does not exist yet; such lines still reach serial.
+
+New host tests: `blink_draws_at_most_one_glyph` (pending rows after a
+reattach or a deferred write: no painting; then one glyph to show and
+one to hide); the detach test now also checks the whole screen against
+the cells after the reattach. `cargo xtask test --all --area
+console,usb,input,diag,drivers,shell`: 122 scenarios, 0 failed (2m19s);
+host tests 650 passed.
+
 ## Open
 
 - `cargo xtask perf` baselines were not re-measured on this branch: the
@@ -177,3 +226,5 @@ fixed on its own merits; none by slowing the console or by retries.
   move (they are taken before `main` anyway).
 - Kernel image grows by 32 KiB (`drawn` in the console's `static`,
   `.data`).
+- I3 of the audit (a counter of screen lines dropped by interrupt-context
+  writers) waits for a diagnostics path for kernel console counters.

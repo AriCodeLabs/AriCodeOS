@@ -331,11 +331,13 @@ pub fn ps2_selftest() {
         for &b in &buf[..n] {
             if b == b'\n' || b == b'\r' {
                 let text = core::str::from_utf8(&line).unwrap_or("?");
+                // Read first: a guard inside the arguments would be held
+                // for the whole console write.
+                let scancodes = PS2.lock().bytes_at_newline;
                 crate::println!();
                 crate::println!(
-                    "console: PS/2 line '{text}' ({} bytes, {} scancodes)",
+                    "console: PS/2 line '{text}' ({} bytes, {scancodes} scancodes)",
                     line.len(),
-                    PS2.lock().bytes_at_newline
                 );
                 return;
             }

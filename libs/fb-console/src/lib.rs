@@ -3,7 +3,8 @@
 //! Text console on top of a 32 bpp linear framebuffer.
 //!
 //! `no_std`, no `alloc`: the character grid lives inside the `Console`
-//! itself (fixed maximum size, about 32 KiB). That is why the console is
+//! itself (fixed maximum size: two arrays of `MAX_CELLS`, the text and
+//! the shadow of the screen, about 64 KiB). That is why the console is
 //! built empty and const (`Console::empty`) in a `static` and the surface is
 //! attached afterwards (`attach`): returning it by value would put the grid
 //! on the stack, which is small during kernel boot. Pixel access is
@@ -258,10 +259,17 @@ impl<S: Surface> Console<S> {
     /// Toggles the cursor: a `_` in the cell where the next write will go.
     /// The kernel calls it periodically; any write hides it before painting,
     /// so cell contents never change.
+    ///
+    /// It draws at most one glyph: the caller may hold a lock with
+    /// interrupts off, and painting pending rows from here could mean a
+    /// whole screen in one hold (incident 0031, audit M1).
     pub fn blink(&mut self) {
-        if self.cursor_drawn.is_some() {
-            self.hide_cursor();
-            self.redraw(usize::MAX);
+        if let Some((col, row)) = self.cursor_drawn.take() {
+            // Only the cursor's cell, restored from the cells.
+            let idx = row * self.cols + col;
+            let b = self.cells[idx];
+            self.draw_glyph(col, row, b);
+            self.drawn[idx] = b;
             return;
         }
         // While text is flowing nothing is painted: the cursor only makes sense
@@ -272,9 +280,11 @@ impl<S: Surface> Console<S> {
         if self.surface.is_none() || self.cols == 0 {
             return;
         }
-        // Text still waiting to be painted goes first: the cursor belongs
-        // after it.
-        self.redraw(usize::MAX);
+        // Text still waiting to be painted belongs before the cursor, and
+        // painting it is the caller's job, in bounded steps (`redraw`).
+        if self.needs_redraw() {
+            return;
+        }
         let col = self.cursor_col.min(self.cols - 1);
         let row = self.cursor_row;
         self.draw_glyph(col, row, b'_');
@@ -297,6 +307,10 @@ impl<S: Surface> Console<S> {
     }
 
     fn queue_char(&mut self, ch: char) {
+        // Never attached: no grid to write into.
+        if self.cols == 0 {
+            return;
+        }
         self.hide_cursor();
         self.wrote_since_blink = true;
         match ch {
@@ -670,6 +684,7 @@ mod tests {
         assert!(c.needs_redraw(), "nothing is drawn until the redraw");
         assert_eq!(c.surface().unwrap().at(639, 479), painted);
         assert!(c.redraw(usize::MAX));
+        assert_screen_matches_cells(&c);
         let s = c.surface().unwrap();
         assert_eq!(s.at(639, 479), C::DEFAULT_BG, "kept cells drawn again");
         assert_eq!(c.cell(0, 0), b'd', "the lines written meanwhile are kept");
@@ -842,5 +857,45 @@ mod tests {
                 assert_screen_matches_cells(&c);
             }
         }
+    }
+
+    /// Audit M1 of incident 0031: `blink` runs under a lock with
+    /// interrupts off, so it never paints pending rows (a screen handed
+    /// back, a writer preempted between rows): at most one glyph.
+    #[test]
+    fn blink_draws_at_most_one_glyph() {
+        let mut c = C::new(Mem::new(64, 64)); // 8 x 4
+        c.write_str("a\nb\nc\nd").unwrap();
+        c.blink(); // notes the writes
+        let s = c.detach().unwrap();
+        c.reattach(s);
+        glyphs_drawn(&mut c);
+        for _ in 0..3 {
+            c.blink();
+        }
+        assert_eq!(glyphs_drawn(&mut c), 0, "rows pending: no painting");
+        assert_eq!(c.cursor_drawn, None);
+        c.redraw(usize::MAX);
+        glyphs_drawn(&mut c);
+        c.blink();
+        assert_eq!(glyphs_drawn(&mut c), 1, "the cursor");
+        assert!(c.cursor_drawn.is_some());
+        // Rows dirtied behind the cursor's back (a deferred write
+        // hides it) are left alone by the blink too.
+        c.write_deferred(format_args!("\nxyz"));
+        c.blink();
+        c.blink();
+        assert_eq!(glyphs_drawn(&mut c), 0);
+        c.redraw(usize::MAX);
+        glyphs_drawn(&mut c);
+        // Painted and idle (the writes were noted above): show, then
+        // hide, one glyph each.
+        c.blink();
+        assert_eq!(glyphs_drawn(&mut c), 1);
+        c.blink();
+        assert_eq!(glyphs_drawn(&mut c), 1);
+        assert_eq!(c.cursor_drawn, None);
+        assert!(!c.needs_redraw());
+        assert_screen_matches_cells(&c);
     }
 }
