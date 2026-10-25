@@ -8,6 +8,10 @@
 //! recorded when the window ends ([`Meter::drain_due`]), so no fault
 //! disappears from the tally and a burst followed by silence still shows
 //! its size. Shared by netd (`services/net-core`) and fsd (`services/arifs`).
+//!
+//! [`Budget`] and [`SharedRing`] are the kernel's side: how fast any one
+//! process may add events by its own calls, and how much of the ring they
+//! may hold, whether or not it meters itself.
 
 #![no_std]
 
@@ -122,6 +126,128 @@ pub fn label<'a>(kind: &str, count: u32, buf: &'a mut [u8; LABEL_LEN]) -> &'a st
     }
     // Only ASCII and a prefix cut on a char boundary were written.
     core::str::from_utf8(&buf[..cut + 2 + len]).unwrap_or("")
+}
+
+/// A process's share of the kernel event ring (audit 2026-10-25 E, L4: any
+/// process could push the refusals that matter out of it with
+/// `event_record` in a loop): [`Budget::BURST`] events at once, one more
+/// every [`Budget::REFILL_MS`]. What is over budget is counted and shown
+/// with the next event that fits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    tokens: u32,
+    /// Instant the tokens were last topped up, in whole refill steps.
+    refilled_ms: u64,
+    dropped: u64,
+}
+
+impl Default for Budget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Budget {
+    /// A quarter of the 64-entry ring.
+    pub const BURST: u32 = 16;
+    pub const REFILL_MS: u64 = 500;
+
+    pub const fn new() -> Self {
+        Self {
+            tokens: Self::BURST,
+            refilled_ms: 0,
+            dropped: 0,
+        }
+    }
+
+    /// Charges one event at `now_ms`. `Some(n)`: record it, preceded by an
+    /// entry saying `n` events were dropped when `n > 0`; `None`: over
+    /// budget, counted for the next one.
+    pub fn charge(&mut self, now_ms: u64) -> Option<u64> {
+        // Refills count from the start of a burst, not from a fixed grid.
+        if self.tokens == Self::BURST {
+            self.refilled_ms = now_ms;
+        }
+        let steps = now_ms.saturating_sub(self.refilled_ms) / Self::REFILL_MS;
+        if steps > 0 {
+            self.tokens = (self.tokens as u64 + steps).min(Self::BURST as u64) as u32;
+            self.refilled_ms += steps * Self::REFILL_MS;
+        }
+        if self.tokens == 0 {
+            self.dropped = self.dropped.saturating_add(1);
+            return None;
+        }
+        self.tokens -= 1;
+        Some(core::mem::take(&mut self.dropped))
+    }
+}
+
+/// The kernel's event ring, oldest first, with a share per reporter
+/// (incident 0040): events a process caused (`push` with `Some(owner)`)
+/// never hold more than `share` entries; one more replaces that owner's
+/// oldest. A slow loop then overwrites itself instead of the boot's and the
+/// other processes' events. Events with no owner (the kernel's own) are
+/// unbounded, and a full ring drops its oldest entry either way.
+pub struct SharedRing<T: Copy, const N: usize> {
+    items: [Option<(T, Option<u32>)>; N],
+    len: usize,
+}
+
+impl<T: Copy, const N: usize> SharedRing<T, N> {
+    pub const fn new() -> Self {
+        Self {
+            items: [None; N],
+            len: 0,
+        }
+    }
+
+    /// Appends `item`. Returns whether it replaced an older entry of the
+    /// same owner.
+    pub fn push(&mut self, item: T, owner: Option<u32>, share: usize) -> bool {
+        let mut replaced = false;
+        if let Some(o) = owner {
+            let held = self.items[..self.len]
+                .iter()
+                .filter(|e| e.is_some_and(|(_, w)| w == Some(o)))
+                .count();
+            if held >= share.max(1) {
+                if let Some(i) = self.items[..self.len]
+                    .iter()
+                    .position(|e| e.is_some_and(|(_, w)| w == Some(o)))
+                {
+                    self.remove(i);
+                    replaced = true;
+                }
+            }
+        }
+        if self.len == N {
+            self.remove(0);
+        }
+        self.items[self.len] = Some((item, owner));
+        self.len += 1;
+        replaced
+    }
+
+    fn remove(&mut self, i: usize) {
+        self.items.copy_within(i + 1..self.len, i);
+        self.len -= 1;
+        self.items[self.len] = None;
+    }
+
+    /// The last `max` entries, oldest first.
+    pub fn recent(&self, max: usize) -> impl Iterator<Item = T> + '_ {
+        let n = self.len.min(max);
+        self.items[self.len - n..self.len]
+            .iter()
+            .flatten()
+            .map(|(t, _)| *t)
+    }
+}
+
+impl<T: Copy, const N: usize> Default for SharedRing<T, N> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -265,6 +391,52 @@ mod tests {
         assert_eq!(m.report(7, 0), 1);
         assert_eq!(m.report(7, 0), 1);
         assert_eq!(m.drain_due(WINDOW_MS), None);
+    }
+
+    #[test]
+    fn budget_bounds_a_loop_and_reports_what_it_dropped() {
+        let mut b = Budget::new();
+        // The burst starts the refill clock, wherever it falls.
+        let t0 = 499;
+        for _ in 0..Budget::BURST {
+            assert_eq!(b.charge(t0), Some(0));
+        }
+        for _ in 0..1000 {
+            assert_eq!(b.charge(t0 + 10), None);
+        }
+        // One step after the burst: one event, carrying the count.
+        assert_eq!(b.charge(t0 + Budget::REFILL_MS - 1), None);
+        assert_eq!(b.charge(t0 + Budget::REFILL_MS), Some(1001));
+        assert_eq!(b.charge(t0 + Budget::REFILL_MS), None);
+        // A long silence refills up to the burst only.
+        let later = 1_000_000;
+        for _ in 0..Budget::BURST {
+            assert!(b.charge(later).is_some());
+        }
+        assert_eq!(b.charge(later), None);
+    }
+
+    extern crate std;
+    use std::vec::Vec;
+
+    #[test]
+    fn a_reporter_overwrites_its_own_events_only() {
+        let mut r = SharedRing::<u32, 8>::new();
+        r.push(1, None, 3); // the kernel's
+        r.push(2, Some(7), 3); // another process
+                               // A slow loop of process 9: never more than 3 of its entries.
+        for i in 100..140 {
+            r.push(i, Some(9), 3);
+        }
+        let kept: Vec<u32> = r.recent(8).collect();
+        assert_eq!(kept, [1, 2, 137, 138, 139]);
+        // The kernel's own events still roll the ring over.
+        for i in 200..210 {
+            r.push(i, None, 3);
+        }
+        let kept: Vec<u32> = r.recent(8).collect();
+        assert_eq!(kept, (202..210).collect::<Vec<u32>>());
+        assert_eq!(r.recent(3).collect::<Vec<u32>>(), [207, 208, 209]);
     }
 
     #[test]

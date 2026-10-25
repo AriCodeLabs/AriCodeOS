@@ -525,6 +525,7 @@ dependencies = [
  "aricode-cmdline",
  "aricode-crypto",
  "aricode-elf",
+ "aricode-faults",
  "aricode-fb-console",
  "aricode-handles",
  "aricode-heap",

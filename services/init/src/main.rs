@@ -239,7 +239,10 @@ fn find_pci_from(vendor: u16, device: u16, start: u64) -> Option<u64> {
 /// the configuration space, the hardware capability, the IRQ (if any), only
 /// the BARs that are present and then `extras` (driver specific); `arg`
 /// carries a mask: bit 15 = IRQ present, bits 0..5 = BAR i present, plus
-/// `arg_extra` (`abi::driver_arg`).
+/// `arg_extra` (`abi::driver_arg`). `extras` are consumed: on any failure
+/// they are closed with the claim's handles, which releases the device for
+/// the next attempt (audit 2026-10-25 C, L4: a failed spawn left it claimed
+/// by init for good).
 fn start_driver(
     name: &str,
     index: u64,
@@ -247,28 +250,34 @@ fn start_driver(
     extras: &[Handle],
     arg_extra: u64,
 ) -> Result<Handle, Error> {
-    let handles = sys::pci_claim(PCI_ROOT, index)?;
-    let mut to_send = [Handle(0); 12];
-    to_send[0] = sys::handle_duplicate(service, rights::READ | rights::WRITE | rights::TRANSFER)?;
-    let mut n = 1;
+    let mut sent = Granted::new();
+    let claimed = sys::pci_claim(PCI_ROOT, index);
+    let own = sys::handle_duplicate(service, rights::READ | rights::WRITE | rights::TRANSFER);
     let mut mask = arg_extra;
-    for (i, h) in handles.iter().enumerate() {
-        if h.0 == 0 {
-            continue;
+    if let Ok(own) = own {
+        sent.push(own);
+    }
+    if let Ok(handles) = claimed {
+        for (i, h) in handles.iter().enumerate() {
+            if h.0 == 0 {
+                continue;
+            }
+            match i {
+                2 => mask |= 1 << 15,
+                3..=8 => mask |= 1 << (i - 3),
+                _ => {}
+            }
+            sent.push(*h);
         }
-        match i {
-            2 => mask |= 1 << 15,
-            3..=8 => mask |= 1 << (i - 3),
-            _ => {}
-        }
-        to_send[n] = *h;
-        n += 1;
     }
     for h in extras {
-        to_send[n] = *h;
-        n += 1;
+        sent.push(*h);
     }
-    sys::process_spawn_with(SPAWNER, name, mask, &to_send[..n])
+    claimed?;
+    own?;
+    let child = sys::process_spawn_with(SPAWNER, name, mask, sent.handles())?;
+    sent.take();
+    Ok(child)
 }
 
 /// Reads and announces the boot state (for the no-confirmation tests).
@@ -743,12 +752,28 @@ fn start_fsd(
     block_service: Handle,
     partition_lba: u64,
 ) -> Result<Handle, Error> {
-    let own = sys::handle_duplicate(fs_service, rights::READ | rights::WRITE | rights::TRANSFER)?;
-    let blk = sys::handle_duplicate(block_service, rights::WRITE | rights::TRANSFER)?;
-    let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
+    // Closed again if a later step fails.
+    let mut sent = Granted::new();
+    sent.push(sys::handle_duplicate(
+        fs_service,
+        rights::READ | rights::WRITE | rights::TRANSFER,
+    )?);
+    sent.push(sys::handle_duplicate(
+        block_service,
+        rights::WRITE | rights::TRANSFER,
+    )?);
+    sent.push(sys::handle_duplicate(
+        HARDWARE,
+        rights::MANAGE | rights::TRANSFER,
+    )?);
     // SYSTEM (read): clock to expire abandoned chunked replaces.
-    let system = sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER)?;
-    sys::process_spawn_with(SPAWNER, "fsd", partition_lba, &[own, blk, hw, system])
+    sent.push(sys::handle_duplicate(
+        SYSTEM,
+        rights::READ | rights::TRANSFER,
+    )?);
+    let child = sys::process_spawn_with(SPAWNER, "fsd", partition_lba, sent.handles())?;
+    sent.take();
+    Ok(child)
 }
 
 /// How a resident service is (re)launched.
@@ -973,6 +998,9 @@ struct Resident {
     probe: Probe,
     endpoint: Handle,
     process: Option<Handle>,
+    /// A process that outlived its kill (`Service::abandon`): watched so
+    /// that its endpoints are retired once it does exit.
+    abandoned: Option<Handle>,
     sup: Service,
     /// Extra driver argument bits for every (re)launch (`abi::driver_arg`).
     driver_arg: u64,
@@ -1061,6 +1089,7 @@ impl Supervisor {
             probe,
             endpoint,
             process: None,
+            abandoned: None,
             sup: Service::new(policy, optional),
             driver_arg: 0,
         });
@@ -1136,6 +1165,9 @@ impl Supervisor {
                     }
                 }
                 if failed {
+                    for h in &extras[..n] {
+                        let _ = sys::handle_close(*h);
+                    }
                     Err(Error::Limit)
                 } else {
                     start_driver(r.name, pci_index, r.endpoint, &extras[..n], r.driver_arg)
@@ -1147,7 +1179,13 @@ impl Supervisor {
             } => start_fsd(r.endpoint, block_service, partition_lba),
             Kind::Program { arg } => {
                 sys::handle_duplicate(r.endpoint, rights::READ | rights::WRITE | rights::TRANSFER)
-                    .and_then(|ep| sys::process_spawn_with(SPAWNER, r.name, arg, &[ep]))
+                    .and_then(|ep| {
+                        let spawned = sys::process_spawn_with(SPAWNER, r.name, arg, &[ep]);
+                        if spawned.is_err() {
+                            let _ = sys::handle_close(ep);
+                        }
+                        spawned
+                    })
             }
             Kind::ConsoleBridge { inputs, count } => start_console_bridge(&inputs[..count]),
             Kind::Sshd { fs, net, sessions } => start_sshd(fs, net, sessions),
@@ -1203,19 +1241,19 @@ impl Supervisor {
             }
         }
         if stuck {
-            sys::print(b"AriInit: service ");
-            sys::print(r.name.as_bytes());
-            sys::print(b" neither responds nor exits: failed, not relaunching\n");
-            r.sup.stop();
+            r.abandoned = r.process.take();
         }
         // A process that could not be killed may still be serving: its
-        // endpoints stay open (audit robustness-1, reviewer 1).
+        // endpoints stay open (audit robustness-1, reviewer 1), and no new
+        // generation competes with it.
         self.announce_death(i, now_ms(), Exit::StartTimeout, !stuck);
     }
 
     /// Records the death of `i`, closes its process and announces the
     /// decision. `gone`: the process no longer runs, so its endpoints may be
-    /// closed if it will not be relaunched.
+    /// closed if it will not be relaunched; if it still runs after a kill
+    /// the service fails for good (audit 2026-10-25 C, L5: it used to be
+    /// relaunched next to the old one).
     fn announce_death(&mut self, i: usize, now: u64, exit: Exit, gone: bool) {
         let Some(r) = self.slots[i].as_mut() else {
             return;
@@ -1223,7 +1261,11 @@ impl Supervisor {
         if let Some(h) = r.process.take() {
             let _ = sys::handle_close(h);
         }
-        let action = r.sup.died(now, exit);
+        let action = if gone {
+            r.sup.died(now, exit)
+        } else {
+            r.sup.abandon(exit)
+        };
         sys::print(b"AriInit: service ");
         sys::print(r.name.as_bytes());
         sys::print(match exit {
@@ -1238,6 +1280,8 @@ impl Supervisor {
                 sys::print(aricode_rt::fmt_u64(at.saturating_sub(now), &mut b));
                 sys::print(b" ms\n");
             }
+            _ if !gone => sys::print(b"; still running after a kill: failed, not relaunched\n"),
+            Action::Nothing => sys::print(b"; retired: not restarted\n"),
             _ if strict() => sys::print(b"; strict mode: not restarted (inspect with diag)\n"),
             _ => {
                 sys::print(b"; restart budget exhausted: ");
@@ -1256,6 +1300,18 @@ impl Supervisor {
     /// Watches the processes: deaths, start timeouts and restarts that are due.
     fn poll(&mut self) {
         let now = now_ms();
+        for r in self.slots[..self.count].iter_mut().flatten() {
+            let Some(h) = r.abandoned else { continue };
+            if matches!(sys::process_wait(h, 0), Err(Error::Timeout)) {
+                continue;
+            }
+            let _ = sys::handle_close(h);
+            r.abandoned = None;
+            sys::print(b"AriInit: service ");
+            sys::print(r.name.as_bytes());
+            sys::print(b": its abandoned process exited at last\n");
+            r.retire_endpoints();
+        }
         for i in 0..self.count {
             let (process, state) = match self.slots[i].as_ref() {
                 Some(r) => (r.process, r.sup.state()),
@@ -1547,9 +1603,18 @@ const RAW_AREA_OFFSET: u64 = 4096 - 34;
 /// Launches a client of a service with its endpoint (WRITE only) and a
 /// hardware capability for its DMA buffer.
 fn spawn_block_client(name: &str, service: Handle, arg: u64) -> Result<Handle, Error> {
-    let ep = sys::handle_duplicate(service, rights::WRITE | rights::TRANSFER)?;
-    let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
-    sys::process_spawn_with(SPAWNER, name, arg, &[ep, hw])
+    let mut sent = Granted::new();
+    sent.push(sys::handle_duplicate(
+        service,
+        rights::WRITE | rights::TRANSFER,
+    )?);
+    sent.push(sys::handle_duplicate(
+        HARDWARE,
+        rights::MANAGE | rights::TRANSFER,
+    )?);
+    let child = sys::process_spawn_with(SPAWNER, name, arg, sent.handles())?;
+    sent.take();
+    Ok(child)
 }
 
 /// Launches a client with `spawn_block_client` and waits for it to exit,
