@@ -1,0 +1,20 @@
+# ADR 0051 (audit 2026-10-25 A, H1): a BAR the device reports was handed to
+# its driver as an MMIO object without any check, so a device reporting a
+# BAR in RAM gave its driver kernel memory. With `pci_fault=bar` the xHCI
+# controller is read as reporting BAR 0 at 1 MiB: the kernel refuses it,
+# the driver gets no BAR and gives up, and the rest of the system boots.
+name = "pci.lying_bar"
+description = "a device reporting a BAR in RAM: the BAR is refused at boot, its driver gets nothing to map"
+level = "full"
+areas = ["pci", "usb", "hardware"]
+cmdline = "qemu_exit pci_fault=bar"
+usb_hid = true
+timeout_secs = 60
+
+[expect]
+exit = 33
+serial_contains = [
+    "BAR 0 at 0x100000 (0x4000 bytes) not offered: Overlaps(\"RAM\")",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "usb-input: device ready"]

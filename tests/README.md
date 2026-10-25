@@ -107,6 +107,7 @@ cpu_rdrand = true               # -cpu qemu64,+rdrand (TCG implements it): the k
 usb_hid = true                  # adds qemu-xhci with a USB keyboard and mouse (QMP events go to the USB devices)
 usb_hid_only_input = true       # no virtio keyboard/mouse, so QMP input reaches the USB HID devices (xHCI or EHCI)
 usb_hid_msi = true              # that xHCI offers MSI only, no MSI-X (like 2012 Intel controllers)
+usb_hid_msi_and_msix = true     # that xHCI offers both (a refused MSI-X falls back to MSI, ADR 0051)
 usb_storage = true              # the test disk hangs off the xHCI as USB mass storage; there is no virtio-blk
 host_https = true               # two host HTTPS servers (openssl s_server -www) on ports chosen per run, written {https_port} (cert from a
                                 # test CA installed as trusted_ca.der) and {https_untrusted_port} (self-signed) in stdin, kill_on and expect
