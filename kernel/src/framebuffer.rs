@@ -13,6 +13,13 @@ pub fn set_info(info: FramebufferInfo) {
     *INFO.lock() = Some(info);
 }
 
+/// The framebuffer's physical range `[start, end)`, if there is one: no
+/// device BAR but the display's own may cover it (ADR 0051).
+pub fn phys_range() -> Option<(u64, u64)> {
+    let info = (*INFO.lock())?;
+    (info.address != 0).then(|| (info.address, info.address.saturating_add(info.size)))
+}
+
 /// Framebuffer description in the ABI format (`sysinfo::Framebuffer`), or
 /// `None` if there is no display.
 pub fn abi_info() -> Option<aricode_abi::sysinfo::Framebuffer> {

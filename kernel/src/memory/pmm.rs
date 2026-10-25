@@ -8,49 +8,25 @@
 
 use super::phys;
 use crate::sync::IrqLock;
-use aricode_pmm::{BitmapAllocator, Frame, Stats, FRAME_SIZE};
+use aricode_pmm::{BitmapAllocator, Frame, RangeSet, Stats, FRAME_SIZE};
 use boot_protocol::{BootInfo, MemoryRegionKind};
-use log::{debug, info};
+use log::{debug, info, warn};
 
 static PMM: IrqLock<Option<BitmapAllocator<'static>>> = IrqLock::new(None);
 
-/// What the firmware reported as RAM or firmware data (free, boot, runtime
-/// services, ACPI), merged into ranges: what no device BAR may cover (ADR
-/// 0051). Kept past boot, when the memory map itself is gone.
-static RAM: IrqLock<RamRanges> = IrqLock::new(RamRanges {
-    ranges: [(0, 0); RAM_RANGES],
-    len: 0,
-});
+/// What the firmware map reported as RAM or firmware data (free, boot,
+/// runtime services, ACPI), and as reserved: what no device BAR may cover
+/// (ADR 0051). Kept past boot, when the map itself is gone.
+static RAM: IrqLock<RangeSet<64>> = IrqLock::new(RangeSet::new());
+static RESERVED: IrqLock<RangeSet<64>> = IrqLock::new(RangeSet::new());
 
-const RAM_RANGES: usize = 64;
-
-struct RamRanges {
-    ranges: [(u64, u64); RAM_RANGES],
-    len: usize,
-}
-
-impl RamRanges {
-    /// Adds `[start, end)`, merged with the last range when they touch.
-    /// With every slot taken the last range grows to cover it: the map
-    /// errs towards more RAM, never less.
-    fn add(&mut self, start: u64, end: u64) {
-        if let Some(last) = self.len.checked_sub(1).map(|i| &mut self.ranges[i]) {
-            if start <= last.1 || self.len == RAM_RANGES {
-                last.0 = last.0.min(start);
-                last.1 = last.1.max(end);
-                return;
-            }
-        }
-        self.ranges[self.len] = (start, end);
-        self.len += 1;
+/// Calls `f` with each range a device BAR must not cover, and what it is.
+pub fn for_each_firmware_range(mut f: impl FnMut(u64, u64, &'static str)) {
+    for &(start, end) in RAM.lock().as_slice() {
+        f(start, end, "RAM");
     }
-}
-
-/// Calls `f` with each RAM range `[start, end)` (see `RAM`).
-pub fn for_each_ram_range(mut f: impl FnMut(u64, u64)) {
-    let ram = RAM.lock();
-    for &(start, end) in &ram.ranges[..ram.len] {
-        f(start, end);
+    for &(start, end) in RESERVED.lock().as_slice() {
+        f(start, end, "firmware-reserved memory");
     }
 }
 
@@ -105,17 +81,19 @@ pub fn init(info: &BootInfo) {
         );
     }
     {
-        let mut ram = RAM.lock();
-        for d in regions().filter(|d| {
-            matches!(
-                d.kind(),
+        let (mut ram, mut reserved) = (RAM.lock(), RESERVED.lock());
+        for d in regions() {
+            match d.kind() {
                 MemoryRegionKind::Free
-                    | MemoryRegionKind::Boot
-                    | MemoryRegionKind::Firmware
-                    | MemoryRegionKind::Acpi
-            )
-        }) {
-            ram.add(d.phys_start, d.end());
+                | MemoryRegionKind::Boot
+                | MemoryRegionKind::Firmware
+                | MemoryRegionKind::Acpi => ram.add(d.phys_start, d.end()),
+                MemoryRegionKind::Reserved => reserved.add(d.phys_start, d.end()),
+                MemoryRegionKind::Mmio => {}
+            }
+        }
+        if ram.approximated() || reserved.approximated() {
+            warn!("pmm: memory map with too many ranges: small gaps counted as memory");
         }
     }
     pmm.reserve_range(0, LOW_RESERVED_END);

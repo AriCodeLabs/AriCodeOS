@@ -155,7 +155,10 @@ pub fn bars(cfg: &[u8]) -> Vec<(usize, Bar)> {
         let prefetchable = raw & 0x8 != 0;
         let mut address = (raw & !0xF) as u64;
         if is_64 {
-            if 0x10 + (i + 1) * 4 + 4 > cfg.len() {
+            // A 64-bit BAR in the last slot has no high half of its own
+            // (the next register is something else: CardBus, or a bridge's
+            // bus numbers, which sizing would overwrite).
+            if i + 1 >= count || 0x10 + (i + 1) * 4 + 4 > cfg.len() {
                 break;
             }
             address |= (u32_at(cfg, 0x10 + (i + 1) * 4) as u64) << 32;
@@ -671,5 +674,32 @@ mod tests {
         assert!(!msix_table_fits(0xFFFF_FFF8, 1, 0x4000));
         assert!(!msix_table_fits(u64::MAX - 8, 1, u64::MAX));
         assert!(!msix_table_fits(0, u64::MAX, 0x4000));
+    }
+
+    #[test]
+    fn a_64_bit_bar_in_the_last_slot_is_ignored() {
+        let mut c = [0u8; 64];
+        // Type 0: BAR 5 says 64-bit.
+        c[0x24..0x28].copy_from_slice(&0xFEB0_0004u32.to_le_bytes());
+        assert!(bars(&c).is_empty());
+        // Type 1 (bridge): BAR 1 says 64-bit; 0x18 holds bus numbers.
+        let mut b = [0u8; 64];
+        b[14] = 1;
+        b[0x14..0x18].copy_from_slice(&0xFEB0_0004u32.to_le_bytes());
+        b[0x18..0x1C].copy_from_slice(&0x0002_0100u32.to_le_bytes());
+        assert!(bars(&b).is_empty());
+        // A 64-bit BAR 4 with its high half in BAR 5 is fine.
+        c[0x20..0x24].copy_from_slice(&0xFEB0_0004u32.to_le_bytes());
+        c[0x24..0x28].copy_from_slice(&1u32.to_le_bytes());
+        assert!(matches!(
+            bars(&c)[..],
+            [(
+                4,
+                Bar::Memory {
+                    address: 0x1_FEB0_0000,
+                    ..
+                }
+            )]
+        ));
     }
 }
