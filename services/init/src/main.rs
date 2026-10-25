@@ -969,7 +969,7 @@ fn start_sshd(fs: Handle, net: Handle, sessions: Handle) -> Result<Handle, Error
     granted.push(system);
     let shells = sys::handle_duplicate(sessions, w)?;
     granted.push(shells);
-    let netd = attach_net_session(net, "sshd")?;
+    let netd = attach_net_session(net, "sshd", aricode_proto::net::SSH_PORT)?;
     granted.push(netd);
     let child =
         sys::process_spawn_with(SPAWNER, "sshd", 0, &[netd, fsd, hw, system, shells, keys])?;
@@ -1699,9 +1699,9 @@ fn file_grant(granted: Result<Handle, FsError>) -> Result<Handle, Error> {
 /// new endpoint to the client called `label` and keeps its receive side, so
 /// the sockets the process leaves open are closed when it dies. A refusal
 /// is said on the console (an attach never fails silently).
-fn attach_net_session(net_service: Handle, label: &str) -> Result<Handle, Error> {
+fn attach_net_session(net_service: Handle, label: &str, port: u16) -> Result<Handle, Error> {
     use aricode_rt::sys::net::NetError;
-    match aricode_rt::sys::net::attach(net_service, label) {
+    match aricode_rt::sys::net::attach(net_service, label, port) {
         Ok(h) => Ok(h),
         Err(NetError::Ipc(e)) => {
             aricode_rt::print_error(b"AriInit: network session", e);
@@ -1763,7 +1763,7 @@ fn spawn_shell(
     // closed here: a placeholder that reaches nobody (a send fails at once
     // with `PeerClosed`).
     let netd = if arg & SERVICE_NET != 0 {
-        attach_net_session(net_service, "shell")?
+        attach_net_session(net_service, "shell", 0)?
     } else {
         let (dead, placeholder) = sys::endpoint_create_pair()?;
         let _ = sys::handle_close(dead);
@@ -1852,9 +1852,10 @@ impl Sessions {
 /// Capability broker (Phase 28): launches programs according to their
 /// manifest. An application receives, in this order, only what it asks for
 /// and is allowed: `SYSTEM` (read), a private directory in fsd, the network
-/// endpoint, the compositor endpoint, the block endpoint (trusted
-/// applications only), the input endpoints, and finally `HARDWARE` if it
-/// needs buffers, bounded by the manifest's memory.
+/// endpoint, a compositor session, the block endpoint (trusted
+/// applications only), and finally `HARDWARE` if it needs buffers, bounded
+/// by the manifest's memory. The input services are never granted (ADR
+/// 0053).
 struct Broker {
     endpoint: Handle,
     fs: Option<FsClient>,
@@ -1862,8 +1863,6 @@ struct Broker {
     /// The network service's main endpoint, when a driver serves it.
     net: Option<Handle>,
     compositor: Option<Handle>,
-    inputs: [Handle; 4],
-    input_count: usize,
     /// Launched programs that have not exited yet (ADR 0015): process and,
     /// if someone waits for its exit, the endpoint to reply to.
     running: [Option<Running>; MAX_RUNNING],
@@ -1898,13 +1897,37 @@ const MAX_RUNNING: usize = 4;
 struct Running {
     process: Handle,
     reply_to: Option<Handle>,
+    /// Its compositor session, ended when it exits (ADR 0052).
+    window: Option<u32>,
 }
 
 /// Immediate result of `launch`: an already decided reply, or a created
-/// process whose exit must be awaited in a slot.
+/// process (and its compositor session) whose exit must be awaited in a
+/// slot.
 enum Launched {
     Reply(LaunchReply),
-    Process(Handle),
+    Process(Handle, Option<u32>),
+}
+
+/// A compositor session made for a launch: ended on drop unless `keep`
+/// took it, so a launch refused after `Attach` frees its slot at once.
+struct WindowSession {
+    compositor: Handle,
+    id: Option<u32>,
+}
+
+impl WindowSession {
+    fn keep(&mut self) -> Option<u32> {
+        self.id.take()
+    }
+}
+
+impl Drop for WindowSession {
+    fn drop(&mut self) {
+        if let Some(id) = self.id {
+            let _ = sys::window::detach(self.compositor, id);
+        }
+    }
 }
 
 impl Broker {
@@ -1915,19 +1938,13 @@ impl Broker {
         block: Option<Handle>,
         net: Option<Handle>,
         compositor: Option<Handle>,
-        inputs: &[Handle],
     ) -> Result<Self, Error> {
-        let mut ins = [Handle(0); 4];
-        let n = inputs.len().min(4);
-        ins[..n].copy_from_slice(&inputs[..n]);
         Ok(Self {
             endpoint: sys::endpoint_create()?,
             fs,
             block,
             net,
             compositor,
-            inputs: ins,
-            input_count: n,
             running: [None; MAX_RUNNING],
             stage: None,
         })
@@ -2036,6 +2053,10 @@ impl Broker {
                 Err(_) => LaunchReply::status(LaunchStatus::Failed),
             };
             let _ = sys::handle_close(r.process);
+            if let (Some(comp), Some(id)) = (self.compositor, r.window) {
+                // Whoever still holds its session is cut off with it.
+                let _ = sys::window::detach(comp, id);
+            }
             if let Some(reply_to) = r.reply_to {
                 let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
                 let _ = sys::handle_close(reply_to);
@@ -2097,19 +2118,21 @@ impl Broker {
                 let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
                 let _ = sys::handle_close(reply_to);
             }
-            Launched::Process(process) if req.is_detached() => {
+            Launched::Process(process, window) if req.is_detached() => {
                 let reply = LaunchReply::status(LaunchStatus::Started);
                 let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
                 let _ = sys::handle_close(reply_to);
                 self.running[slot] = Some(Running {
                     process,
                     reply_to: None,
+                    window,
                 });
             }
-            Launched::Process(process) => {
+            Launched::Process(process, window) => {
                 self.running[slot] = Some(Running {
                     process,
                     reply_to: Some(reply_to),
+                    window,
                 });
             }
         }
@@ -2130,6 +2153,7 @@ impl Broker {
         if let Some(c) = console {
             granted.push(c);
         }
+        let mut window: Option<WindowSession> = None;
         let mut path = [0u8; 48];
         let Some(path) = join(name, ".manifest", &mut path) else {
             return Launched::Reply(LaunchReply::status(LaunchStatus::Invalid));
@@ -2268,7 +2292,7 @@ impl Broker {
             let Some(net) = self.net else {
                 return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
             };
-            match attach_net_session(net, name) {
+            match attach_net_session(net, name, 0) {
                 Ok(h) => granted.push(h),
                 Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
@@ -2278,7 +2302,21 @@ impl Broker {
             let Some(comp) = self.compositor else {
                 return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
             };
-            match sys::handle_duplicate(comp, rights::WRITE | rights::TRANSFER) {
+            // A session of its own (ADR 0052): its windows are its alone and
+            // close when it is gone. Same rights as before: send only.
+            let session = match sys::window::attach(comp) {
+                Ok((h, id)) => {
+                    window = Some(WindowSession {
+                        compositor: comp,
+                        id: Some(id),
+                    });
+                    h
+                }
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
+            };
+            let narrowed = sys::handle_duplicate(session, rights::WRITE | rights::TRANSFER);
+            let _ = sys::handle_close(session);
+            match narrowed {
                 Ok(h) => granted.push(h),
                 Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
@@ -2305,14 +2343,6 @@ impl Broker {
                 Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
             needs_hw = true;
-        }
-        if caps.contains(Caps::INPUT) {
-            for ep in &self.inputs[..self.input_count] {
-                match sys::handle_duplicate(*ep, rights::WRITE | rights::TRANSFER) {
-                    Ok(h) => granted.push(h),
-                    Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
-                }
-            }
         }
         if needs_hw {
             match sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER) {
@@ -2369,7 +2399,7 @@ impl Broker {
                 }));
             }
         };
-        Launched::Process(child)
+        Launched::Process(child, window.as_mut().and_then(WindowSession::keep))
     }
 }
 
@@ -2455,23 +2485,62 @@ fn run_gui(inputs: &[Handle]) -> Result<Handle, u64> {
     let _compositor =
         sys::process_spawn_with(SPAWNER, "compositor", inputs.len() as u64, &handles[..n])
             .map_err(|_| 7u64)?;
-    let mut apps = [Handle(0); 2];
+    let mut apps = [None; 2];
+    let mut failed = None;
     for (i, app) in apps.iter_mut().enumerate() {
-        let ep =
-            sys::handle_duplicate(service, rights::WRITE | rights::TRANSFER).map_err(|_| 8u64)?;
-        let hw =
-            sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER).map_err(|_| 8u64)?;
-        *app =
-            sys::process_spawn_with(SPAWNER, "gui_demo", i as u64, &[ep, hw]).map_err(|_| 9u64)?;
-    }
-    for app in apps {
-        let code = sys::process_wait(app, TIMEOUT_INFINITE).map_err(|_| 10u64)?;
-        let _ = sys::handle_close(app);
-        if code != 0 {
-            return Err(100 + code);
+        match spawn_gui_app(service, i) {
+            Ok(launched) => *app = Some(launched),
+            Err(code) => {
+                failed = Some(code);
+                break;
+            }
         }
     }
-    Ok(service)
+    // Every application launched is waited for and its session ended, even
+    // when a later one failed to start.
+    for (app, session) in apps.into_iter().flatten() {
+        let code = sys::process_wait(app, TIMEOUT_INFINITE);
+        let _ = sys::handle_close(app);
+        let _ = sys::window::detach(service, session);
+        failed = failed.or(match code {
+            Ok(0) => None,
+            Ok(code) => Some(100 + code),
+            Err(_) => Some(10),
+        });
+    }
+    match failed {
+        Some(code) => Err(code),
+        None => Ok(service),
+    }
+}
+
+/// Starts graphical demo `i` with a compositor session of its own (ADR
+/// 0052, send side only) and `HARDWARE`; returns it and the session's id.
+fn spawn_gui_app(service: Handle, i: usize) -> Result<(Handle, u32), u64> {
+    let (session, id) = sys::window::attach(service).map_err(|_| 8u64)?;
+    let narrowed = sys::handle_duplicate(session, rights::WRITE | rights::TRANSFER);
+    let _ = sys::handle_close(session);
+    let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER);
+    match (narrowed, hw) {
+        (Ok(ep), Ok(hw)) => match sys::process_spawn_with(SPAWNER, "gui_demo", i as u64, &[ep, hw])
+        {
+            Ok(app) => Ok((app, id)),
+            // The kernel takes the handles only when it creates the process.
+            Err(_) => {
+                let _ = sys::handle_close(ep);
+                let _ = sys::handle_close(hw);
+                let _ = sys::window::detach(service, id);
+                Err(9)
+            }
+        },
+        (ep, hw) => {
+            for h in [ep, hw].into_iter().flatten() {
+                let _ = sys::handle_close(h);
+            }
+            let _ = sys::window::detach(service, id);
+            Err(8)
+        }
+    }
 }
 
 fn main(arg: u64) -> u64 {
@@ -2960,7 +3029,6 @@ fn main(arg: u64) -> u64 {
             block_service,
             (services & SERVICE_NET != 0).then_some(net_service),
             compositor,
-            &input_eps[..inputs],
         ) else {
             return 26;
         };

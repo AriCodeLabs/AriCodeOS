@@ -12,8 +12,13 @@ use aricode_proto::block::{Op, Reply, Request, Status, MAX_SECTORS};
 /// and the recovery reserve), and a request may first queue behind one
 /// idle-loop maintenance step (`REENUMERATE_STEP_MS` = 6 s, the longest)
 /// and one other request: 34 + 6 + 34 = 74 s < 90 s, assuming at most two
-/// concurrent block clients (one queued request). The file client above
-/// waits longer still (`fs::REPLY_WAIT_MS`, 120 s).
+/// concurrent block clients (one queued request). virtio-blk spends at
+/// most its 30 s request timeout plus a reset (about 2 s) on a request
+/// (incident 0043): 32 + 32 = 64 s < 90 s under the same assumption; a
+/// third client queued behind two requests that both time out can get its
+/// own timeout before the driver's `Io` (its buffer stays safe: the driver
+/// keeps its handle until the reset). The file client above waits longer
+/// still (`fs::REPLY_WAIT_MS`, 120 s).
 pub const REPLY_WAIT_MS: u64 = 90_000;
 
 pub struct BlockClient {

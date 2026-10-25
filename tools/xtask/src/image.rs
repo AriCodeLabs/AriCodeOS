@@ -942,7 +942,29 @@ pub fn write_test_disk(
         }
         init_ariboot(&mut img, PART_ARIBOOT, state);
     }
-    io(fs::write(path, img), "write test disk")
+    write_sparse(path, &img)
+}
+
+/// Writes `img` leaving its all-zero 64 KiB chunks as holes: a scenario
+/// disk is 48 MiB, mostly zeros, and writing it whole put 48 MiB of dirty
+/// pages per boot on the host, which the guest's first flush then waited
+/// for (incident 0043: with ten guests at once, requests took over 2 s).
+fn write_sparse(path: &Path, img: &[u8]) -> Result {
+    use std::io::{Seek, SeekFrom, Write};
+    const CHUNK: usize = 64 * 1024;
+    let mut f = io(fs::File::create(path), "create test disk")?;
+    io(f.set_len(img.len() as u64), "size test disk")?;
+    for (i, chunk) in img.chunks(CHUNK).enumerate() {
+        if chunk.iter().all(|&b| b == 0) {
+            continue;
+        }
+        io(
+            f.seek(SeekFrom::Start((i * CHUNK) as u64)),
+            "seek test disk",
+        )?;
+        io(f.write_all(chunk), "write test disk")?;
+    }
+    Ok(())
 }
 
 /// `ARIBOOT` of a new image: the boot state in sector 0 and no kernel seed

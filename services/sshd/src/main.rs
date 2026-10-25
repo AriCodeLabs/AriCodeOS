@@ -31,7 +31,7 @@ use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::net::{NetClient, NetError};
 use aricode_rt::sys::{self, abi, Error, Handle};
 use aricode_ssh::keys_refresh::{Change, KeyRefresh};
-use aricode_ssh::{fingerprint, parse_authorized_keys, Event, Server};
+use aricode_ssh::{fingerprint, log_safe, parse_authorized_keys, Event, Server};
 
 const NET: Handle = Handle(0x0001_0004);
 const FS: Handle = Handle(0x0001_0005);
@@ -41,7 +41,9 @@ const SESSIONS: Handle = Handle(0x0001_0008);
 /// `authorized_keys`, read-only (ADR 0050); `FS` is sshd's own directory.
 const KEYS: Handle = Handle(0x0001_0009);
 
-const PORT: u16 = 22;
+/// Given to sshd's network session by init: no other program may listen
+/// on it (audit 2026-10-25 E, L1).
+const PORT: u16 = aricode_proto::net::SSH_PORT;
 /// A connection that has not authenticated after this long is dropped: the
 /// server attends one connection at a time, so an idle client must not
 /// hold the port.
@@ -401,15 +403,17 @@ fn serve(
                 for e in events.drain(..) {
                     match e {
                         Event::Authenticated { user } => {
+                            let mut safe = [0u8; 32];
                             sys::print(b"sshd: user '");
-                            sys::print(user.as_bytes());
+                            sys::print(log_safe(user.as_bytes(), &mut safe));
                             sys::print(b"' authenticated from ");
                             print_ip(peer);
                             sys::print(b"\n");
                         }
                         Event::AuthFailed { user } => {
+                            let mut safe = [0u8; 32];
                             sys::print(b"sshd: refused key for '");
-                            sys::print(user.as_bytes());
+                            sys::print(log_safe(user.as_bytes(), &mut safe));
                             sys::print(b"' from ");
                             print_ip(peer);
                             sys::print(b"\n");
@@ -639,12 +643,15 @@ fn main(_arg: u64) -> u64 {
     let seed = host_key(&mut fs, &mut entropy, &mut seed_saved);
     let mut listener = match net.tcp_listen(PORT) {
         Ok(l) => l,
-        Err(_) => {
-            say(b"cannot listen on port 22");
+        Err(e) => {
+            sys::print(b"sshd: cannot listen on port 22 (");
+            sys::print(e.describe().as_bytes());
+            sys::print(b")\n");
             ready();
             return 3;
         }
     };
+    let mut relisten_refused = false;
     let mut b = [0u8; 20];
     sys::print(b"sshd: listening on port 22, host key ");
     sys::print(fingerprint(&aricode_crypto::ed25519::public_key(&seed)).as_bytes());
@@ -669,9 +676,21 @@ fn main(_arg: u64) -> u64 {
             // Listen again on the next generation after a pause.
             Err(NetError::Ipc(Error::ReplyLost)) | Err(NetError::Status(Status::BadSock)) => {
                 sys::time::sleep_ms(500);
-                if let Ok(l) = net.tcp_listen(PORT) {
-                    listener = l;
-                    say(b"network service restarted: listening on port 22 again");
+                match net.tcp_listen(PORT) {
+                    Ok(l) => {
+                        listener = l;
+                        relisten_refused = false;
+                        say(b"network service restarted: listening on port 22 again");
+                    }
+                    // Said once, not every 500 ms: a refusal is never silent
+                    // (owner's rule), nor a flood.
+                    Err(e) if !relisten_refused => {
+                        relisten_refused = true;
+                        sys::print(b"sshd: cannot listen on port 22 again (");
+                        sys::print(e.describe().as_bytes());
+                        sys::print(b"); retrying\n");
+                    }
+                    Err(_) => {}
                 }
                 continue;
             }
