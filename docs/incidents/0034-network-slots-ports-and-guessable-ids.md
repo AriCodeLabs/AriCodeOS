@@ -36,3 +36,23 @@
 - netd draws the DHCP xid, the first DNS id and the DNS source port at
   random (never from the TCP secret), takes DNS answers only from the
   configured server's port 53, and saturates the DHCP retry counter.
+
+## Audit of the fix
+
+- H1: the first DNS source check accepted answers only from the
+  configured server, which broke lookups that name their own server (the
+  boot test `net_client` resolves through the test responder). Each
+  pending query now records where it went; an answer counts only for the
+  query with its id that went to the address and port it comes from.
+- L1: every DNS query gets its own random id (none a pending query has).
+- L2: an answer must carry one question, not be truncated; a nonzero
+  rcode is no address.
+- L3: a short random read for the starting ids is said.
+- L5, L6, L7: stronger and new TCP tests (the FIN's sequence from
+  CLOSING, LAST-ACK's deadline); `Denied` in the status tests with the
+  "network service refused" wording; docs.
+- Accepted residual risk (M1): an active attacker can still keep closed
+  connections in FIN-WAIT-1 with a zero window, each for at most
+  `CLOSING_MS`, and so keep TCP slots busy while the attack lasts. A full
+  table recycles only TIME-WAIT slots; recycling the closing slot that
+  ends soonest (with an RST) would bound it further.

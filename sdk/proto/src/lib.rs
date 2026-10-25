@@ -1620,6 +1620,12 @@ mod tests {
                 .status,
             Status::Reset
         );
+        assert_eq!(
+            Reply::decode(&Reply::status(Status::Denied).encode())
+                .unwrap()
+                .status,
+            Status::Denied
+        );
     }
 
     #[test]

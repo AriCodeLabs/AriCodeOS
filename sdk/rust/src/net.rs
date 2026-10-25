@@ -39,7 +39,9 @@ impl NetError {
                 Status::NoRoute => "no network configuration",
                 Status::NotFound => "unknown name",
                 Status::Reset => "connection refused or reset by the other end",
-                Status::Denied => "port reserved to another service",
+                Status::Denied => {
+                    "network service refused: denied (port reserved to another service)"
+                }
                 Status::Busy => "network service refused: busy (no free connection or send slot)",
                 Status::Invalid => "network service refused: invalid (malformed request)",
                 Status::BadHandles => {
@@ -354,7 +356,7 @@ impl NetClient {
 mod tests {
     use super::*;
 
-    const ALL: [Status; 10] = [
+    const ALL: [Status; 11] = [
         Status::Ok,
         Status::Invalid,
         Status::Timeout,
@@ -365,6 +367,7 @@ mod tests {
         Status::InUse,
         Status::NotFound,
         Status::Reset,
+        Status::Denied,
     ];
 
     /// Every status has its own text and none hides behind a generic

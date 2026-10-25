@@ -353,6 +353,9 @@ impl TcpSock {
 struct PendingDns {
     reply_to: Handle,
     id: u16,
+    /// Where the query went: only an answer from there counts.
+    server: Ipv4Addr,
+    port: u16,
     deadline: u64,
 }
 
@@ -621,7 +624,12 @@ impl<L: Link> Stack<L> {
         // the TCP secret, which must never go on the wire. With no random
         // bytes they fall back to the clock, as the secret does.
         let mut r = clock.now().to_le_bytes();
-        let _ = sys::random(clock.0, &mut r);
+        if sys::random(clock.0, &mut r).unwrap_or(0) < r.len() {
+            say(
+                name,
+                b"too few random bytes: the DHCP and DNS ids start predictable",
+            );
+        }
         let xid = u32::from_le_bytes([r[0], r[1], r[2], r[3]]);
         let dns_id = u16::from_le_bytes([r[4], r[5]]);
         // Within the dynamic range 49152..65535.
@@ -687,7 +695,27 @@ impl<L: Link> Stack<L> {
         record_fault(self.name, what, count, self.tcp_secret_source);
     }
 
-    /// Refuses a request: records it and answers with the matching status.
+    /// A random id for a new DNS query, none a pending query has (audit of
+    /// incident 0034, L1: a counter let whoever saw one query predict the
+    /// next). Without random bytes, the next id of the counter.
+    fn fresh_dns_id(&mut self) -> u16 {
+        for _ in 0..8 {
+            let mut r = [0u8; 2];
+            let id = match sys::random(self.clock.0, &mut r) {
+                Ok(2) => u16::from_le_bytes(r),
+                _ => {
+                    self.dns_id = self.dns_id.wrapping_add(1);
+                    self.dns_id
+                }
+            };
+            if !self.dns.iter().any(|(_, _, p)| p.id == id) {
+                return id;
+            }
+        }
+        self.dns_id = self.dns_id.wrapping_add(1);
+        self.dns_id
+    }
+
     /// Whether `owner` may listen or bind on `port`: an unprivileged one,
     /// or the privileged one its session was given; the main endpoint
     /// (init) any.
@@ -697,6 +725,7 @@ impl<L: Link> Stack<L> {
             || self.session(owner).is_some_and(|s| s.port == port)
     }
 
+    /// Refuses a request: records it and answers with the matching status.
     fn refuse(&mut self, reply_to: Handle, what: Fault, now: u64) {
         self.note(what, now);
         answer(reply_to, Reply::status(what.status()));
@@ -1371,13 +1400,7 @@ impl<L: Link> Stack<L> {
             return;
         }
         if uh.dst_port == self.dns_port {
-            // Only the configured server's answers, from its port: with
-            // the random id and source port, what an off-path host must
-            // guess (audit 2026-10-25 C, DNS note).
-            let from_server = self.config.is_some_and(|c| c.dns == ih.src);
-            if from_server && uh.src_port == dns::PORT {
-                self.on_dns(data);
-            }
+            self.on_dns(ih.src, uh.src_port, data);
             return;
         }
         let Some((_, _, sock)) = self
@@ -1864,9 +1887,16 @@ impl<L: Link> Stack<L> {
         }
     }
 
-    fn on_dns(&mut self, data: &[u8]) {
+    /// An answer counts only for the pending query with its id that went
+    /// to the address and port it comes from: with the random id and
+    /// source port, what an off-path host must guess (audit 2026-10-25 C,
+    /// DNS note).
+    fn on_dns(&mut self, src: Ipv4Addr, src_port: u16, data: &[u8]) {
         for i in 0..MAX_DNS {
             let Some(p) = self.dns.at(i) else { continue };
+            if p.server != src || p.port != src_port {
+                continue;
+            }
             let reply = match dns::parse_response(p.id, data) {
                 Some(dns::Answer::Address(ip, _)) => Reply::ok(0).with_addr(ip.0, 0),
                 Some(dns::Answer::NoAddress(_)) => Reply::status(Status::NotFound),
@@ -2162,8 +2192,7 @@ impl<L: Link> Stack<L> {
                 let Ok(name_str) = core::str::from_utf8(&name[..len]) else {
                     return self.refuse(reply_to, Fault::BadRequest, now);
                 };
-                let id = self.dns_id;
-                self.dns_id = self.dns_id.wrapping_add(1);
+                let id = self.fresh_dns_id();
                 let mut q = [0u8; 320];
                 let Some(n) = dns::write_query(id, name_str, &mut q) else {
                     return self.refuse(reply_to, Fault::BadRequest, now);
@@ -2176,6 +2205,8 @@ impl<L: Link> Stack<L> {
                             PendingDns {
                                 reply_to,
                                 id,
+                                server,
+                                port,
                                 deadline: now + req.timeout_ms.max(1) as u64,
                             },
                         );

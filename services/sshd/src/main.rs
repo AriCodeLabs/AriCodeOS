@@ -641,8 +641,10 @@ fn main(_arg: u64) -> u64 {
     let seed = host_key(&mut fs, &mut entropy, &mut seed_saved);
     let mut listener = match net.tcp_listen(PORT) {
         Ok(l) => l,
-        Err(_) => {
-            say(b"cannot listen on port 22");
+        Err(e) => {
+            sys::print(b"sshd: cannot listen on port 22 (");
+            sys::print(e.describe().as_bytes());
+            sys::print(b")\n");
             ready();
             return 3;
         }

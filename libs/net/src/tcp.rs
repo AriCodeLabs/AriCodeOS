@@ -1373,7 +1373,12 @@ mod tests {
         assert_eq!(c.state(), State::FinWait1);
         let at = c.next_timer().expect("a deadline");
         assert!(at <= 2 + CLOSING_MS);
-        assert!(c.poll(at - 1, &mut seg).is_none() || c.state() == State::FinWait1);
+        assert_eq!(
+            c.poll(at - 1, &mut seg),
+            None,
+            "nothing to send in a zero window"
+        );
+        assert_eq!(c.state(), State::FinWait1);
         let n = c.poll(at, &mut seg).expect("an RST");
         let (h, _) = Header::parse(
             Ipv4Addr::new(10, 0, 2, 15),
@@ -1384,5 +1389,73 @@ mod tests {
         assert!(h.flags & FLAG_RST != 0);
         assert!(c.is_closed());
         assert_eq!(c.close_reason(), Some(CloseReason::Timeout));
+    }
+
+    /// The FIN sent from CLOSING follows the data, acknowledges the peer's
+    /// FIN, and its acknowledgement leads to TIME-WAIT.
+    #[test]
+    fn closing_fin_is_in_sequence_and_acknowledged() {
+        let mut seg = [0u8; MAX_SEGMENT];
+        let (me, peer) = (Ipv4Addr::new(10, 0, 2, 15), Ipv4Addr::new(10, 0, 2, 2));
+        let (mut c, una) = closed_with_data_pending(&mut seg);
+        let h = |ack, flags| Header {
+            src_port: 4000,
+            dst_port: 22,
+            seq: 5001,
+            ack,
+            flags,
+            window: 65535,
+        };
+        c.on_segment(&h(una.wrapping_add(10), FLAG_ACK | FLAG_FIN), &[], 3);
+        let mut fin = None;
+        while let Some(n) = c.poll(4, &mut seg) {
+            let (sh, _) = Header::parse(me, peer, &seg[..n]).unwrap();
+            if sh.flags & FLAG_FIN != 0 {
+                fin = Some(sh);
+            }
+        }
+        let fin = fin.expect("a FIN");
+        assert_eq!(fin.seq, una.wrapping_add(100));
+        assert_eq!(fin.ack, 5002);
+        let mut ack = h(una.wrapping_add(101), FLAG_ACK);
+        ack.seq = 5002;
+        c.on_segment(&ack, &[], 5);
+        assert_eq!(c.state(), State::TimeWait);
+    }
+
+    /// LAST-ACK has the same deadline: a peer that never acknowledges our
+    /// FIN (here, never opens its window for it) gets an RST.
+    #[test]
+    fn last_ack_gives_up_after_closing_ms() {
+        let mut seg = [0u8; MAX_SEGMENT];
+        let (me, peer) = (Ipv4Addr::new(10, 0, 2, 15), Ipv4Addr::new(10, 0, 2, 2));
+        let mut c = Connection::new(me, 22, peer, 4000);
+        c.listen(1000);
+        let h = |seq, ack, flags, window| Header {
+            src_port: 4000,
+            dst_port: 22,
+            seq,
+            ack,
+            flags,
+            window,
+        };
+        c.on_segment(&h(5000, 0, FLAG_SYN, 0), &[], 0);
+        let n = c.poll(0, &mut seg).unwrap();
+        let una = Header::parse(me, peer, &seg[..n])
+            .unwrap()
+            .0
+            .seq
+            .wrapping_add(1);
+        c.on_segment(&h(5001, una, FLAG_ACK | FLAG_FIN, 0), &[], 1);
+        assert_eq!(c.state(), State::CloseWait);
+        c.send(b"bye");
+        c.close();
+        assert_eq!(c.state(), State::LastAck);
+        while c.poll(2, &mut seg).is_some() {}
+        let at = c.next_timer().expect("a deadline");
+        assert!(at <= 2 + CLOSING_MS);
+        let n = c.poll(2 + CLOSING_MS, &mut seg).expect("an RST");
+        assert!(Header::parse(me, peer, &seg[..n]).unwrap().0.flags & FLAG_RST != 0);
+        assert!(c.is_closed());
     }
 }
