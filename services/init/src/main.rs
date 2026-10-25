@@ -26,7 +26,7 @@ use aricode_proto::launch::{
 };
 use aricode_proto::status;
 use aricode_rt::sys::abi::driver_arg;
-use aricode_rt::sys::block::BlockClient;
+use aricode_rt::sys::block::{find_partition, BlockClient};
 use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::{self, rights, Error, Handle, TIMEOUT_INFINITE};
 use aricode_supervisor::{Action, Exit, Policy, Service, State};
@@ -269,30 +269,6 @@ fn start_driver(
         n += 1;
     }
     sys::process_spawn_with(SPAWNER, name, mask, &to_send[..n])
-}
-
-/// First and last LBA of the GPT partition `name`, reading the table through
-/// the block service.
-fn find_partition(blk: &mut BlockClient, name: &str) -> Option<(u64, u64)> {
-    blk.read(1, 1).ok()?;
-    let header = aricode_gpt::Header::parse(&blk.buffer()[..512]).ok()?;
-    let sectors = header.entries_bytes().div_ceil(512) as u64;
-    let mut table = alloc::vec![0u8; sectors as usize * 512];
-    let mut lba = 0;
-    while lba < sectors {
-        let n = (sectors - lba).min(16) as u16;
-        blk.read(header.entries_lba + lba, n).ok()?;
-        let o = lba as usize * 512;
-        table[o..o + n as usize * 512].copy_from_slice(&blk.buffer()[..n as usize * 512]);
-        lba += n as u64;
-    }
-    let mut parts = [None; 16];
-    let count = aricode_gpt::partitions(&header, &table, &mut parts).ok()?;
-    parts[..count]
-        .iter()
-        .flatten()
-        .find(|p| p.name_str() == name)
-        .map(|p| (p.first_lba, p.last_lba))
 }
 
 /// Reads and announces the boot state (for the no-confirmation tests).

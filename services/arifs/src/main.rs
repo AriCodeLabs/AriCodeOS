@@ -38,6 +38,8 @@ const _: () = assert!(
 );
 
 const SERVICE: Handle = Handle(0x0001_0004);
+/// Exit code when the volume must be mounted again (`needs_reopen`).
+const EXIT_REMOUNT: u64 = 4;
 const BLOCK: Handle = Handle(0x0001_0005);
 const HW: Handle = Handle(0x0001_0006);
 const SYSTEM: Handle = Handle(0x0001_0007);
@@ -420,6 +422,18 @@ impl Service {
 
     /// Serves one request that arrived on `owner`'s endpoint (0 = main).
     fn serve(&mut self, owner: usize, msg: &[u8], handles: &[Handle]) {
+        self.serve_one(owner, msg, handles);
+        // A committed replace could not be applied: only a fresh mount
+        // brings the volume back (it redoes the journal). Exiting lets the
+        // supervisor relaunch fsd; until then every request would fail
+        // (audit of incident 0032, M1).
+        if self.fs.needs_reopen() {
+            say(b"a committed replace could not be applied; exiting to redo it at mount");
+            sys::process_exit(EXIT_REMOUNT);
+        }
+    }
+
+    fn serve_one(&mut self, owner: usize, msg: &[u8], handles: &[Handle]) {
         let Some(&reply_to) = handles.first() else {
             return;
         };

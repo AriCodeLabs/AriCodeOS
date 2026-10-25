@@ -42,3 +42,26 @@
   `failed_metadata_writes_leave_memory_as_the_disk`,
   `layout_arithmetic_is_checked`,
   `a_journal_longer_than_its_area_is_discarded`.
+
+## Audit of the fix
+
+- M1: a write failing after a replace was committed (the header may have
+  landed, or the apply broke off) used to leave the session reading a
+  mix, and a later write was lost when the next mount replayed the
+  journal. The volume is now poisoned: every operation fails until it is
+  opened again (`needs_reopen`), and fsd exits so its supervisor
+  relaunches it and the mount redoes the journal. Test
+  `a_failed_apply_poisons_until_reopened`.
+- M2: a 1024-entry table (128 KiB) in init's fixed 256 KiB heap could
+  still abort it. `aricode_gpt::TableScan` reads a table piece by piece
+  with a running CRC and no buffer; the SDK's `block::find_partition`
+  (now shared by init and the updater) and virtio-blk's report use it.
+  Every used entry must lie within the header's usable range (which
+  bounds `Partition::sectors`, L4), not only the first ones that fit.
+  Tests `table_scan_takes_any_split` and the range cases.
+- L1, L2, L6: the layout test exercises the capacity bound; `create_sized`
+  refuses a capacity that would not mount again and checks `data_next`
+  arithmetic.
+- Open (L3): the superblock's `total_sectors` is not checked against the
+  partition's real length; fsd is given only the partition's first LBA.
+  Passing the length changes fsd's launch arguments: a follow-up.
