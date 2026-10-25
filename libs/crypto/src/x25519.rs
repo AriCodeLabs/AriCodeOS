@@ -65,7 +65,7 @@ pub fn public_key(k: &[u8; KEY_LEN]) -> [u8; KEY_LEN] {
 /// (a low-order point, which RFC 7748 section 6.1 says to reject).
 pub fn shared(k: &[u8; KEY_LEN], peer: &[u8; KEY_LEN]) -> Option<[u8; KEY_LEN]> {
     let s = scalar_mult(k, peer);
-    (s != [0u8; KEY_LEN]).then_some(s)
+    (!crate::ct_eq(&s, &[0u8; KEY_LEN])).then_some(s)
 }
 
 #[cfg(test)]

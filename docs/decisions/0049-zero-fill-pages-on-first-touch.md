@@ -45,7 +45,9 @@ its 260 KiB of zero-fill memory, `virtio_net` 60, the shell 12, sshd 0.
    The total a process can reach is what it could reach before (its
    segments); only the moment its memory is taken moves, from its start
    to its first use. Spawns no longer fail for memory a program would
-   never touch.
+   never touch. Since 2026-10-25 (audit C, L1) a spawn's own segment and
+   stack frames respect the reserve too, and a spawn that fails gives
+   back every frame it took.
 
 4. **Visible.** `sysinfo::ON_DEMAND` gives, per live process, the
    zero-fill memory reserved and backed so far; `diag` prints the table
