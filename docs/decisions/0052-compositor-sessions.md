@@ -25,29 +25,47 @@ found:
 1. **The main endpoint makes sessions only.** A new `window::Op::Attach`
    on the compositor's main endpoint creates an endpoint pair; the
    compositor keeps the receive side, the reply transfers the send side
-   (`sys::window::attach`). Everything else on the main endpoint answers
-   `Invalid`, and `Attach` on a session answers `Invalid` too. Only init
-   holds the main endpoint.
+   (`sys::window::attach`) and the session's id (`generation << 8 | slot`,
+   so a stale id never names a later session in the same slot).
+   `Op::Detach` with that id ends the session. Everything else on the
+   main endpoint answers `Invalid`, and `Attach` or `Detach` on a session
+   answers `Invalid` too. Only init holds the main endpoint.
 
 2. **One session per program.** The broker's `window` capability and
    `run_gui` hand each program the send side of a session of its own,
    narrowed to `WRITE | TRANSFER` (the rights it had before). At most 8
-   sessions; a ninth `Attach` answers `Busy` and the launch fails.
+   sessions; when all are taken, `Attach` first retires the sessions whose
+   clients are gone, and answers `Busy` (the launch fails) only if none
+   is. A session has at most 2 windows open, so no client fills the
+   table of 8.
 
 3. **A window answers only its session.** `Create` records the session;
    `Present`, `Poll` and `Close` on a window of another session answer
    `BadWindow`, exactly as for a window that does not exist, so a client
    learns nothing about the others.
 
-4. **A dead client's windows close.** The compositor receives on the
-   main endpoint and every session at once (`ipc_receive_any`), and once
-   a second asks each session whether its send side is gone
-   (`PeerClosed`). Then the session closes and so does every window it
-   made: a pending `Poll` answers `BadWindow`, the buffer is unmapped and
-   the screen under it repainted. The compositor says
-   `client N gone: M window(s) closed`.
+4. **A dead client's windows close.** Two paths, the first one to see it
+   wins:
+   - init tracks the process: when the broker (or `run_gui`) collects a
+     program's exit, it sends `Detach`, and the compositor closes the
+     session's endpoint (`endpoint_close`), which also cuts off any other
+     holder of its send side. A client cannot keep its session alive past
+     its exit by handing the send side away, for instance as the reply
+     endpoint of a `Poll`; a launch refused after `Attach` detaches too;
+   - every 100 ms the compositor asks each session whether its send side
+     is gone (`PeerClosed` or `Revoked`).
 
-5. **Window buffers are DMA buffers.** `Create` refuses (`BadHandles`) a
+   Then the session closes and so does every window it made: a pending
+   `Poll` answers `BadWindow`, the buffer is unmapped and the screen under
+   it repainted. The compositor says `client N gone: M window(s) closed`.
+
+5. **No client starves the others.** The compositor receives on the main
+   endpoint and every session at once (`ipc_receive_any`, which serves
+   the first ready member); the sessions' order rotates every receive, so
+   a client that floods its session takes at most its turn. A `Poll`
+   waits at most 60 s, so a reply handle is not held for days.
+
+6. **Window buffers are DMA buffers.** `Create` refuses (`BadHandles`) a
    buffer that is not a DMA object (`sys::dma_phys` fails).
 
 ## Consequences
@@ -58,7 +76,9 @@ found:
 - A client can still pass its session's send side to another program,
   which then shares its windows: delegation by the owner, as with any
   capability.
-- A dead client's window lingers at most about a second.
-- Tested by `gui.two_windows`: Demo B fails to close Demo A's window and
-  leaves without closing its own, which the compositor closes when B is
-  gone.
+- A dead client's window lingers until init collects its exit, or at
+  most 100 ms after its last send handle goes.
+- Tested by `gui.two_windows`: Demo B cannot poll, present or close Demo
+  A's window, nor attach or detach from its session, and leaves without
+  closing its own, which the compositor closes when B is gone; the order
+  of those steps is checked.

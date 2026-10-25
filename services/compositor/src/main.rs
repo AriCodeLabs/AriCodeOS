@@ -31,9 +31,14 @@ const QUEUE: usize = 8;
 /// Client sessions (ADR 0052): one per program the broker launches with
 /// `window`.
 const MAX_SESSIONS: usize = 8;
+/// Windows one session may have open: a client cannot fill the table
+/// (audit of ADR 0052, M2).
+const MAX_WINDOWS_PER_SESSION: usize = 2;
+/// The longest a `Poll` waits: a reply handle is not held for days.
+const MAX_POLL_MS: u32 = 60_000;
 /// How often every session is asked whether its client is still there.
-const SWEEP_MS: u64 = 1000;
-/// What arrives on the main endpoint (init): only `Attach`.
+const SWEEP_MS: u64 = 100;
+/// What arrives on the main endpoint (init): only `Attach` and `Detach`.
 const MAIN: usize = 0;
 /// Shortest interval between two frames (about 60 per second): changes
 /// that arrive sooner are coalesced into the next frame, so an event waits
@@ -174,9 +179,22 @@ struct Compositor {
     announced: bool,
     /// `gui_trace` on the command line: log every frame.
     trace: bool,
-    /// Receive sides of the client sessions (ADR 0052).
-    sessions: [Option<Handle>; MAX_SESSIONS],
+    /// Receive sides of the client sessions (ADR 0052) and their ids.
+    sessions: [Option<Session>; MAX_SESSIONS],
+    /// Generation of the next session id, so a stale `Detach` names no
+    /// later session in the same slot.
+    generation: u32,
+    /// The session listed first in the next receive: it rotates, so one
+    /// client's flood cannot starve the others (audit of ADR 0052, M1).
+    first: usize,
     last_sweep_ms: u64,
+}
+
+#[derive(Clone, Copy)]
+struct Session {
+    endpoint: Handle,
+    /// `generation << 8 | slot`.
+    id: u32,
 }
 
 impl Compositor {
@@ -192,26 +210,70 @@ impl Compositor {
     }
 
     /// `Attach`: a new session endpoint; the compositor keeps its receive
-    /// side, the client gets the send side.
-    fn attach(&mut self, reply_to: Handle) {
+    /// side, the client gets the send side and init the id.
+    fn attach(&mut self, reply_to: Handle, now_ms: u64) {
+        if self.sessions.iter().all(Option::is_some) {
+            // Clients that died since the last sweep free their slots first.
+            self.reap_gone(now_ms);
+        }
         let Some(slot) = self.sessions.iter().position(Option::is_none) else {
             return answer(reply_to, Reply::status(Status::Busy));
         };
-        let Ok((receive, send)) = sys::endpoint_create_pair() else {
+        let Ok((endpoint, send)) = sys::endpoint_create_pair() else {
             return answer(reply_to, Reply::status(Status::Busy));
         };
-        self.sessions[slot] = Some(receive);
-        answer_with(reply_to, Reply::ok(0), send);
+        self.generation = (self.generation + 1) & 0x00ff_ffff;
+        let id = self.generation << 8 | slot as u32;
+        self.sessions[slot] = Some(Session { endpoint, id });
+        answer_with(reply_to, Reply::ok(id as u64), send);
+    }
+
+    /// `Detach`: init saw the client of session `id` exit. Closing the
+    /// endpoint also cuts off any other holder of its send side, such as a
+    /// pending `Poll` that was handed the session itself as its reply
+    /// endpoint (audit of ADR 0052, M2).
+    fn detach(&mut self, reply_to: Handle, id: u32) {
+        let Some(slot) = self
+            .sessions
+            .iter()
+            .position(|s| s.is_some_and(|s| s.id == id))
+        else {
+            // Already retired by the sweep.
+            return answer(reply_to, Reply::status(Status::BadWindow));
+        };
+        if let Some(s) = self.sessions[slot] {
+            let _ = sys::endpoint_close(s.endpoint);
+        }
+        self.retire(slot);
+        answer(reply_to, Reply::ok(0));
+    }
+
+    /// Retires every session whose client side is gone; a message found
+    /// on the way is served. `PeerClosed` comes once the queue is empty and
+    /// no send side is left.
+    fn reap_gone(&mut self, now_ms: u64) {
+        let mut msg = [0u8; Request::LEN];
+        let mut handles = [Handle(0); sys::abi::IPC_MAX_HANDLES];
+        for slot in 0..MAX_SESSIONS {
+            let Some(s) = self.sessions[slot] else {
+                continue;
+            };
+            match sys::ipc_receive(s.endpoint, &mut msg, &mut handles, 0) {
+                Ok((n, nh)) => serve(self, slot + 1, &msg[..n], &handles[..nh], now_ms),
+                Err(e) if e.endpoint_gone() => self.retire(slot),
+                Err(_) => {}
+            }
+        }
     }
 
     /// The client of session `slot` is gone: its endpoint closes and every
     /// window it made goes with it, so a dead client's window neither keeps
     /// the focus nor fills the table (audit 2026-10-25 C, M5).
     fn retire(&mut self, slot: usize) {
-        let Some(ep) = self.sessions[slot].take() else {
+        let Some(s) = self.sessions[slot].take() else {
             return;
         };
-        let _ = sys::handle_close(ep);
+        let _ = sys::handle_close(s.endpoint);
         let mut closed_windows = 0;
         for i in 0..self.contents.len() {
             if !self.contents[i]
@@ -304,13 +366,14 @@ impl Compositor {
         buf: Option<Handle>,
         now_ms: u64,
     ) {
-        // The main endpoint (init, the broker) only makes sessions; windows
-        // live in sessions, which cannot make more.
-        if (owner == MAIN) != (req.op == Op::Attach) {
+        // The main endpoint (init, the broker) only makes and ends
+        // sessions; windows live in sessions, which can do neither.
+        if (owner == MAIN) != matches!(req.op, Op::Attach | Op::Detach) {
             return answer(reply_to, Reply::status(Status::Invalid));
         }
         match req.op {
-            Op::Attach => self.attach(reply_to),
+            Op::Attach => self.attach(reply_to, now_ms),
+            Op::Detach => self.detach(reply_to, req.window),
             Op::Create => {
                 let Some(buf) = buf else {
                     return answer(reply_to, Reply::status(Status::BadHandles));
@@ -338,7 +401,13 @@ impl Compositor {
                 let Ok(virt) = sys::mmio_map(buf) else {
                     return answer(reply_to, Reply::status(Status::BadHandles));
                 };
-                let Some(slot) = self.contents.iter().position(|c| c.is_none()) else {
+                let open = self.contents.iter().flatten().filter(|c| c.owner == owner);
+                let Some(slot) = self
+                    .contents
+                    .iter()
+                    .position(|c| c.is_none())
+                    .filter(|_| open.count() < MAX_WINDOWS_PER_SESSION)
+                else {
                     self.unmap_unused(virt);
                     return answer(reply_to, Reply::status(Status::Busy));
                 };
@@ -389,7 +458,8 @@ impl Compositor {
                 if c.pending.is_some() {
                     return answer(reply_to, Reply::status(Status::Busy));
                 }
-                c.pending = Some((reply_to, now_ms + req.timeout_ms.max(1) as u64));
+                let wait = req.timeout_ms.clamp(1, MAX_POLL_MS);
+                c.pending = Some((reply_to, now_ms + wait as u64));
             }
             Op::Close => {
                 let Some(slot) = self.contents.iter().position(|c| {
@@ -549,6 +619,8 @@ fn main(inputs: u64) -> u64 {
         announced: false,
         trace,
         sessions: [None; MAX_SESSIONS],
+        generation: 0,
+        first: 0,
         last_sweep_ms: 0,
     };
     let mut msg = [0u8; Request::LEN];
@@ -559,17 +631,20 @@ fn main(inputs: u64) -> u64 {
     loop {
         let t = now(SYSTEM);
         for _ in 0..8 {
-            // The main endpoint and every session at once (ADR 0052).
+            // The main endpoint and every session at once (ADR 0052),
+            // starting from a different session each time.
             let mut eps = [SERVICE; 1 + MAX_SESSIONS];
             let mut owners = [MAIN; 1 + MAX_SESSIONS];
             let mut n_eps = 1;
-            for (i, s) in comp.sessions.iter().enumerate() {
-                if let Some(ep) = s {
-                    eps[n_eps] = *ep;
+            for k in 0..MAX_SESSIONS {
+                let i = (comp.first + k) % MAX_SESSIONS;
+                if let Some(s) = comp.sessions[i] {
+                    eps[n_eps] = s.endpoint;
                     owners[n_eps] = i + 1;
                     n_eps += 1;
                 }
             }
+            comp.first = (comp.first + 1) % MAX_SESSIONS;
             let (which, n, nh) =
                 match sys::ipc_receive_any(&eps[..n_eps], &mut msg, &mut handles, 0) {
                     Ok(r) => r,
@@ -586,16 +661,7 @@ fn main(inputs: u64) -> u64 {
         // Clients that went away: their sessions and windows go too.
         if t.saturating_sub(comp.last_sweep_ms) >= SWEEP_MS {
             comp.last_sweep_ms = t;
-            for slot in 0..MAX_SESSIONS {
-                let Some(ep) = comp.sessions[slot] else {
-                    continue;
-                };
-                match sys::ipc_receive(ep, &mut msg, &mut handles, 0) {
-                    Ok((n, nh)) => serve(&mut comp, slot + 1, &msg[..n], &handles[..nh], t),
-                    Err(sys::Error::PeerClosed) => comp.retire(slot),
-                    Err(_) => {}
-                }
-            }
+            comp.reap_gone(t);
         }
         // Read every device and process their events in time order
         // (a mouse click must precede the key that came after it).

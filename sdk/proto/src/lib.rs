@@ -1057,8 +1057,13 @@ pub mod window {
         /// (ADR 0052). The reply carries the send side of a new endpoint;
         /// windows created through it belong to that client alone, which
         /// alone can present, poll or close them, and they close when the
-        /// kernel reports the client gone.
+        /// kernel reports the client gone. `Reply::value` is the session's
+        /// id for `Detach`.
         Attach = 5,
+        /// Main endpoint only: the client of session `window` (an `Attach`
+        /// id) has exited; its endpoint and windows close now, whoever else
+        /// still holds its send side (ADR 0052).
+        Detach = 6,
     }
 
     /// Request (64 bytes).
@@ -1126,6 +1131,7 @@ pub mod window {
                 3 => Op::Poll,
                 4 => Op::Close,
                 5 => Op::Attach,
+                6 => Op::Detach,
                 _ => return None,
             };
             let mut title = [0u8; MAX_TITLE];
@@ -1455,6 +1461,11 @@ mod tests {
         let d = Request::decode(&r.encode()).unwrap();
         assert_eq!(d, r);
         assert_eq!(d.title_str(), "Demo A");
+        for op in [Op::Attach, Op::Detach] {
+            let mut s = Request::new(op);
+            s.window = 0x0102_0003;
+            assert_eq!(Request::decode(&s.encode()), Some(s));
+        }
         assert!(Request::new(Op::Create)
             .with_title(&"t".repeat(25))
             .is_none());

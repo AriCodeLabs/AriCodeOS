@@ -130,11 +130,12 @@ impl Window {
 
 /// Broker and init only, over the compositor's main endpoint: a session
 /// for one client (ADR 0052); returns its send side (`WRITE`,
-/// transferable). Windows created through it are that client's alone.
-pub fn attach(compositor: Handle) -> Result<Handle, WindowError> {
+/// transferable) and its id for [`detach`]. Windows created through it are
+/// that client's alone.
+pub fn attach(compositor: Handle) -> Result<(Handle, u32), WindowError> {
     let req = Request::new(Op::Attach);
     let mut msg = [0u8; Reply::LEN];
-    let mut handles = [Handle(0); 1];
+    let mut handles = [Handle(0); sys::abi::IPC_MAX_HANDLES];
     let (len, nh) = rpc::call_handles(
         compositor,
         &req.encode(),
@@ -145,10 +146,36 @@ pub fn attach(compositor: Handle) -> Result<Handle, WindowError> {
         &mut handles,
     )
     .map_err(WindowError::Ipc)?;
-    let reply = Reply::decode(&msg[..len]).ok_or(WindowError::Ipc(Error::Invalid))?;
-    match (reply.status, nh) {
-        (Status::Ok, 1) => Ok(handles[0]),
-        (Status::Ok, _) => Err(WindowError::Ipc(Error::Invalid)),
-        (s, _) => Err(WindowError::Status(s)),
+    let reply = Reply::decode(&msg[..len]);
+    let session = match reply.map(|r| (r.status, r.value)) {
+        Some((Status::Ok, id)) if nh == 1 => return Ok((handles[0], id as u32)),
+        Some((Status::Ok, _)) | None => WindowError::Ipc(Error::Invalid),
+        Some((s, _)) => WindowError::Status(s),
+    };
+    for h in &handles[..nh] {
+        let _ = sys::handle_close(*h);
+    }
+    Err(session)
+}
+
+/// Broker and init only: the client of session `id` has exited, so its
+/// windows close now (ADR 0052).
+pub fn detach(compositor: Handle, id: u32) -> Result<(), WindowError> {
+    let mut req = Request::new(Op::Detach);
+    req.window = id;
+    let mut msg = [0u8; Reply::LEN];
+    let len = rpc::call(
+        compositor,
+        &req.encode(),
+        &[],
+        rpc::GRACE_MS,
+        rpc::GRACE_MS,
+        &mut msg,
+    )
+    .map_err(WindowError::Ipc)?;
+    match Reply::decode(&msg[..len]).map(|r| r.status) {
+        Some(Status::Ok) => Ok(()),
+        Some(s) => Err(WindowError::Status(s)),
+        None => Err(WindowError::Ipc(Error::Invalid)),
     }
 }

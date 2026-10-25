@@ -25,10 +25,9 @@ fn num_i32(v: i32) {
     sys::print(aricode_rt::fmt_u64(v.unsigned_abs() as u64, &mut b));
 }
 
-/// Asks to close window `id` through our session: `BadWindow` if it is not
-/// ours.
-fn close_foreign(id: u32) -> Option<Status> {
-    let mut req = Request::new(Op::Close);
+/// Sends `op` on window `id` through our session and returns the status.
+fn ask(op: Op, id: u32) -> Option<Status> {
+    let mut req = Request::new(op);
     req.window = id;
     let mut msg = [0u8; Reply::LEN];
     let len = rpc::call(
@@ -125,8 +124,17 @@ fn main(index: u64) -> u64 {
     }
     if index == 1 {
         let foreign = (1..=2).find(|&id| id != win.id()).unwrap_or(1);
-        if close_foreign(foreign) != Some(Status::BadWindow) {
-            sys::print(b"gui_demo B: closed a window that is not its own\n");
+        for op in [Op::Poll, Op::Present, Op::Close] {
+            if ask(op, foreign) != Some(Status::BadWindow) {
+                sys::print(b"gui_demo B: reached a window that is not its own\n");
+                return 4;
+            }
+        }
+        // Sessions cannot make or end sessions.
+        if ask(Op::Attach, 0) != Some(Status::Invalid)
+            || ask(Op::Detach, foreign) != Some(Status::Invalid)
+        {
+            sys::print(b"gui_demo B: its session made or ended a session\n");
             return 4;
         }
         sys::print(b"gui_demo B: the other window is out of reach\n");
