@@ -71,6 +71,11 @@ pub struct HostSsh {
     /// runner checks its fingerprint).
     #[serde(default)]
     pub old_host_key: bool,
+    /// A command whose connection fails (ssh exit 255) is tried again,
+    /// once a second, for up to this many seconds: for scenarios where
+    /// sshd is relaunched between commands. 0 (default): no retry.
+    #[serde(default)]
+    pub retry_connect_secs: u64,
 }
 
 /// Connection flood from the host (incident 0013): on seeing `marker` the

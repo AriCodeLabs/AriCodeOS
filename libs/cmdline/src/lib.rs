@@ -133,6 +133,10 @@ pub mod keys {
     /// Tests only: `shell_fault`, the shell accepts `fault`, which makes it
     /// crash on purpose (a session shell that dies, ADR 0030).
     pub const SHELL_FAULT: &str = "shell_fault";
+    /// Tests only: `fsd_fault`, fsd crashes when asked to open `fsd-fault`
+    /// (a file service that dies while its clients hold sessions, ADR
+    /// 0050).
+    pub const FSD_FAULT: &str = "fsd_fault";
     /// `smp=off`: do not start the application processors (real hardware).
     pub const SMP: &str = "smp";
     /// `iommu=off`: do not enable DMA translation (real hardware).
@@ -201,6 +205,7 @@ pub mod keys {
         INPUT_RESTART,
         INPUT_ORPHAN,
         SHELL_FAULT,
+        FSD_FAULT,
         SELFTEST,
         USB_FAULT,
         BLK_FAULT,

@@ -847,64 +847,98 @@ const SSHD_FILES: [&str; 2] = ["ssh_host_ed25519_key", "random_seed"];
 /// (`write authorized_keys ...`); sshd only reads them.
 const AUTHORIZED_KEYS: &str = "authorized_keys";
 
+/// How long init waits for fsd to grant sshd's sessions: it does so from
+/// its supervisor loop, which must not stall behind a file service that
+/// does not answer (a failed grant is a failed launch, retried later).
+const SSHD_GRANT_MS: u64 = 2_000;
+
+/// A whole small file: `None` if it does not exist; an error if it cannot
+/// be read or does not fit `buf`.
+fn read_small(fs: &mut FsClient, name: &str, buf: &mut [u8]) -> Result<Option<usize>, ()> {
+    let fd = match fs.open(name) {
+        Ok(fd) => fd,
+        Err(FsError::Status(aricode_proto::fs::Status::NotFound)) => return Ok(None),
+        Err(_) => return Err(()),
+    };
+    let r = fs.read(fd, 0, buf);
+    let _ = fs.close(fd);
+    match r {
+        Ok(n) if n < buf.len() => Ok(Some(n)),
+        _ => Err(()),
+    }
+}
+
 /// Moves sshd's files from the AriFS root, where releases before ADR 0050
 /// kept them, into `sshd/`. The root copy is then overwritten with zeros
-/// and emptied: AriFS cannot remove a file, and whoever can read the root
-/// must not find the host key there. Nothing is moved over a copy already
-/// in `sshd/`; a failure leaves the root copy as it was and says so.
+/// and emptied (AriFS cannot remove a file, and the root must not keep the
+/// host key), but only once `sshd/` holds the same bytes, read back: a
+/// copy that failed half-way is completed on the next boot, never trusted.
+/// When both hold different non-empty contents (a key written to the root
+/// after the move, by hand or by an older release), neither is touched and
+/// init says so: no key is ever destroyed. Each outcome is said.
 fn move_sshd_files(fs: &mut FsClient) {
-    let mut data = [0u8; 256];
+    let mut root = [0u8; 256];
+    let mut moved = [0u8; 256];
     let mut name_buf = [0u8; 64];
     for name in SSHD_FILES {
-        let Ok(old) = fs.open(name) else {
-            continue;
+        let say_file = |what: &[u8]| {
+            sys::print(b"AriInit: ");
+            sys::print(name.as_bytes());
+            sys::print(what);
         };
-        let n = match fs.read(old, 0, &mut data) {
-            Ok(n) if n < data.len() => n,
-            _ => {
-                let _ = fs.close(old);
-                sys::print(b"AriInit: not moving ");
-                sys::print(name.as_bytes());
-                sys::print(b" into sshd/: unreadable or too large\n");
+        let n = match read_small(fs, name, &mut root) {
+            Ok(Some(n)) if n > 0 => n,
+            Ok(_) => continue,
+            Err(()) => {
+                say_file(b": unreadable or too large in the root; not moved into sshd/\n");
                 continue;
             }
         };
-        if n == 0 {
-            let _ = fs.close(old);
-            continue;
-        }
         let dir_len = SSHD_DIR.len();
         name_buf[..dir_len].copy_from_slice(SSHD_DIR.as_bytes());
         name_buf[dir_len] = b'/';
         name_buf[dir_len + 1..dir_len + 1 + name.len()].copy_from_slice(name.as_bytes());
-        let moved = core::str::from_utf8(&name_buf[..dir_len + 1 + name.len()]).unwrap_or("");
-        let copied = match fs.open(moved) {
-            // sshd/ already has its own: the root copy is only stale.
-            Ok(fd) => {
-                let _ = fs.close(fd);
-                true
+        let target = core::str::from_utf8(&name_buf[..dir_len + 1 + name.len()]).unwrap_or("");
+        match read_small(fs, target, &mut moved) {
+            Ok(Some(m)) if moved[..m] == root[..n] => {}
+            Ok(Some(m)) if m > 0 => {
+                say_file(b" in the root differs from sshd/'s: both left in place\n");
+                continue;
             }
-            Err(_) => fs
-                .create(moved)
-                .and_then(|fd| {
-                    let r = fs.replace(fd, &data[..n]);
-                    let _ = fs.close(fd);
-                    r
-                })
-                .is_ok(),
-        };
-        let blanked = copied && {
+            // Absent, or empty from a copy that broke off.
+            Ok(_) => {
+                let written = fs
+                    .open(target)
+                    .or_else(|_| fs.create(target))
+                    .and_then(|fd| {
+                        let r = fs.replace(fd, &root[..n]);
+                        let _ = fs.close(fd);
+                        r
+                    })
+                    .is_ok();
+                let same = written
+                    && matches!(read_small(fs, target, &mut moved), Ok(Some(m)) if moved[..m] == root[..n]);
+                if !same {
+                    say_file(b": could not move into sshd/; the root copy is kept\n");
+                    continue;
+                }
+            }
+            Err(()) => {
+                say_file(b": sshd/'s copy is unreadable; the root copy is kept\n");
+                continue;
+            }
+        }
+        let blanked = fs.open(name).is_ok_and(|fd| {
             let zeros = [0u8; 256];
-            fs.replace(old, &zeros[..n]).is_ok() && fs.replace(old, &[]).is_ok()
-        };
-        let _ = fs.close(old);
-        sys::print(if blanked {
-            b"AriInit: moved " as &[u8]
-        } else {
-            b"AriInit: could not move "
+            let r = fs.replace(fd, &zeros[..n]).is_ok() && fs.replace(fd, &[]).is_ok();
+            let _ = fs.close(fd);
+            r
         });
-        sys::print(name.as_bytes());
-        sys::print(b" into sshd/\n");
+        say_file(if blanked {
+            b" moved into sshd/\n" as &[u8]
+        } else {
+            b" copied into sshd/, but the root copy could not be emptied\n"
+        });
     }
 }
 
@@ -920,9 +954,13 @@ fn start_sshd(fs: Handle, net: Handle, sessions: Handle) -> Result<Handle, Error
     // The guard closes every handle made so far if a later step fails (the
     // kernel takes them only when it creates the process).
     let mut granted = Granted::new();
-    let fsd = file_grant(sys::fs::bind(fs, SSHD_DIR))?;
+    let fsd = file_grant(sys::fs::bind(fs, SSHD_DIR, SSHD_GRANT_MS))?;
     granted.push(fsd);
-    let keys = file_grant(sys::fs::share_may_be_missing(fs, AUTHORIZED_KEYS))?;
+    let keys = file_grant(sys::fs::share_may_be_missing(
+        fs,
+        AUTHORIZED_KEYS,
+        SSHD_GRANT_MS,
+    ))?;
     granted.push(keys);
     let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
     granted.push(hw);

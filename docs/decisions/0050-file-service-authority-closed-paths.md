@@ -34,8 +34,7 @@ authority closed on the main path and open on others:
    private file). A manifest's `read_files` may name only such files,
    not starting with `.`, and none of `aricode_manifest::RESERVED_FILES`
    (`authorized_keys`, `ssh_host_ed25519_key`, `random_seed`). The
-   manifest parser refuses the rest, so the build, the installer and the
-   broker all refuse them.
+   broker refuses the rest when it parses the manifest at launch.
 
 3. **sshd has its own files.** Its host key and `random_seed` live in
    `sshd/`, a private-directory session (`Bind`) of each sshd generation.
@@ -45,13 +44,23 @@ authority closed on the main path and open on others:
    `Share` with `len = SHARE_MAY_BE_MISSING` grants it even before the
    file exists, so sshd still opens port 22 once a key is installed. sshd
    no longer holds the main endpoint, and its descriptors die with it.
+   Its sessions die with the fsd generation that granted them: when one
+   can never answer again (`ServiceGone`), sshd exits and init relaunches
+   it with new ones, instead of keeping its last keys (a key removed since
+   would stay valid) or staying closed. init grants them with a 2 s reply
+   wait (`SSHD_GRANT_MS`): it does so from its supervisor loop.
 
 4. **Moving the files.** At boot, before launching sshd, init copies a
-   root `ssh_host_ed25519_key` or `random_seed` into `sshd/` (unless a
-   copy is already there), overwrites the root copy with zeros and
-   empties it: AriFS cannot remove a file, and the root must not keep the
-   host key. Each move is said on the console; a failure leaves the root
-   copy and says so. The host fingerprint does not change.
+   root `ssh_host_ed25519_key` or `random_seed` into `sshd/`, reads the
+   copy back, and only when it holds the same bytes overwrites the root
+   copy with zeros and empties it (AriFS cannot remove a file, and the
+   root must not keep the host key). A copy that broke off is completed
+   on the next boot, never trusted. When `sshd/` already holds different
+   non-empty contents (a key written to the root after the move, by hand
+   or by an older release), neither is touched and init says so: no key
+   is ever destroyed. Each outcome is said on the console. The host
+   fingerprint does not change when the move succeeds; going back to a
+   release before ADR 0050 finds the root copy empty and makes a new key.
    `cargo xtask usb-image` writes the host key into `sshd/` directly and
    creates it, and the image, with mode 0600 on the build host.
 
@@ -80,8 +89,12 @@ authority closed on the main path and open on others:
   mid-request cannot open a root file (incident 0028).
 - Host: `aricode-manifest` refuses system files, paths, dot names and the
   reserved names.
-- `ssh.*` scenarios: sshd serves with its own sessions; the host key it
-  uses is the one the image put in `sshd/`.
+- `ssh.*` scenarios: sshd serves with its own sessions.
+- `ssh.file_service_restart` (test key `fsd_fault`): fsd crashes while
+  sshd holds its sessions; sshd exits, is relaunched and serves again.
+- `ssh.no_keys_then_written`: sshd starts closed, the owner writes
+  `authorized_keys` from the console and sshd opens port 22 (the share
+  granted before the file existed).
 - `ssh.host_key_moved`: a disk whose root holds the host key (an older
   release's layout) boots with the same fingerprint, the key moved into
   `sshd/` and the root copy empty.

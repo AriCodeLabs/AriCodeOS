@@ -1,12 +1,14 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
 //! Tries to leave its private directory (audit 2026-10-25 C, H1). It fills
-//! fsd's descriptor table from its own session, sends `Open "hola.txt"`
-//! (a file of the main namespace) and closes its session before the reply.
-//! The full table makes fsd sweep for dead clients while serving that very
-//! request; the sweep finds the session closed and retires it. The request
-//! must then be refused: served without a session it would see the whole
-//! namespace. Launched through the broker with `run fs_escape` and the
+//! fsd's descriptor table from its own session and sends `Open "hola.txt"`
+//! (a file of the main namespace) carrying its only send side of the
+//! session as the third handle: the kernel takes it from this process with
+//! the send, and fsd closes extra handles before serving, so when the full
+//! table makes fsd sweep for dead clients while serving that very request,
+//! the session has no sender left and is retired, whatever the timing. The
+//! request must then be refused: served without a session it would see the
+//! whole namespace. Launched through the broker with `run fs_escape` and the
 //! manifest `caps = fs`: handles 0x10004 = its fsd session, 0x10005 =
 //! HARDWARE. Success (refused) = 0.
 #![no_std]
@@ -44,10 +46,15 @@ fn main(_arg: u64) -> u64 {
     let Some(req) = Request::new(Op::Open).with_name("hola.txt") else {
         return 5;
     };
-    let Ok(reply) = rpc::send(FSD, &req.encode(), &[], 1000) else {
+    // The second handle is the request's data buffer slot (unused by
+    // `Open`): any transferable handle.
+    let Ok((filler, other)) = sys::endpoint_create_pair() else {
         return 6;
     };
-    let _ = sys::handle_close(FSD);
+    let _ = sys::handle_close(other);
+    let Ok(reply) = rpc::send(FSD, &req.encode(), &[filler, FSD], 1000) else {
+        return 6;
+    };
     let mut msg = [0u8; Reply::LEN];
     let mut handles = [Handle(0); abi::IPC_MAX_HANDLES];
     let got = sys::ipc_receive(reply, &mut msg, &mut handles, 5000);

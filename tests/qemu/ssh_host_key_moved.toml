@@ -19,7 +19,7 @@ old_host_key = true
 [expect]
 exit = 33
 serial_contains = [
-    "AriInit: moved ssh_host_ed25519_key into sshd/",
+    "AriInit: ssh_host_ed25519_key moved into sshd/",
     "sshd: user 'ari' authenticated from 10.0.2.2",
     "[host] ssh| ssh_host_ed25519_key 0 bytes",
     "[host] ssh| sshd/ssh_host_ed25519_key 65 bytes",

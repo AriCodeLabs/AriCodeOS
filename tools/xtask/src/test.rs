@@ -555,6 +555,7 @@ pub fn run_scenario(
                 commands: &h.commands,
                 key: key.clone(),
                 idle_client: h.idle_client,
+                retry_connect_secs: h.retry_connect_secs,
             }),
             _ => None,
         };

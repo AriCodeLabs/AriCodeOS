@@ -1,0 +1,32 @@
+# ADR 0050: sshd reads authorized_keys through a read-only share that init
+# grants before the file exists (`SHARE_MAY_BE_MISSING`). Without keys sshd
+# stays closed; once the owner writes the file from the console it finds
+# it (it checks every 5 s) and opens port 22. The key is a public half
+# whose private half was never kept: nobody can log in with it.
+name = "ssh.no_keys_then_written"
+description = "sshd starts closed; authorized_keys written from the console afterwards opens port 22 through the share granted before it existed"
+level = "full"
+areas = ["ssh", "filesystem", "shell"]
+cmdline = "qemu_exit shell"
+timeout_secs = 120
+stdin = [
+    "write authorized_keys ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAQuBeAvFxEkM1hr+Bkxzg2IQgsSJ7uAY143nzNYBNX/ aricode-test-public",
+    "sleep 8000",
+    "shutdown",
+]
+
+[expect]
+exit = 33
+serial_contains = [
+    "sshd: no authorized_keys in AriFS: not listening",
+    "sshd: authorized_keys found",
+    "sshd: listening on port 22, host key SHA256:",
+    ", 1 authorized key(s)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "file session refused", "file sessions gone"]
+serial_order = [
+    "sshd: no authorized_keys in AriFS: not listening",
+    "ari> write authorized_keys",
+    "sshd: authorized_keys found",
+]

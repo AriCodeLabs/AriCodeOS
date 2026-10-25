@@ -122,13 +122,13 @@ impl FsClient {
     /// Broker only: asks fsd for an endpoint bound to the private directory
     /// `prefix` and returns the received handle (`WRITE`, transferable).
     pub fn bind(&self, prefix: &str) -> Result<Handle, FsError> {
-        grant(self.service, Op::Bind, prefix, 0)
+        grant(self.service, Op::Bind, prefix, 0, REPLY_WAIT_MS)
     }
 
     /// Broker only: asks fsd for an endpoint bound to the file `name` in
     /// read-only mode (ADR 0016) and returns the received handle.
     pub fn share(&self, name: &str) -> Result<Handle, FsError> {
-        grant(self.service, Op::Share, name, 0)
+        grant(self.service, Op::Share, name, 0, REPLY_WAIT_MS)
     }
 
     /// Broker and init only: asks fsd for a session bound to the main
@@ -136,7 +136,7 @@ impl FsClient {
     /// transferable). The process that gets it sees every file, like the
     /// main endpoint, and its descriptors are released when it dies.
     pub fn attach(&self) -> Result<Handle, FsError> {
-        grant(self.service, Op::Attach, "", 0)
+        grant(self.service, Op::Attach, "", 0, REPLY_WAIT_MS)
     }
 
     /// Descriptor table usage of owner slot `index` (ADR 0036): the counts
@@ -238,21 +238,23 @@ impl FsClient {
 }
 /// Init only, over fsd's main endpoint `service`: `FsClient::bind`, for a
 /// process launched without a file client of init's at hand (sshd under
-/// the supervisor, ADR 0050).
-pub fn bind(service: Handle, prefix: &str) -> Result<Handle, FsError> {
-    grant(service, Op::Bind, prefix, 0)
+/// the supervisor, ADR 0050). Waits at most `wait_ms` for each of the
+/// send and the reply: init's supervisor loop must not stall behind a
+/// file service that does not answer.
+pub fn bind(service: Handle, prefix: &str, wait_ms: u64) -> Result<Handle, FsError> {
+    grant(service, Op::Bind, prefix, 0, wait_ms)
 }
 
 /// Init only: `FsClient::share` for a file that may not exist yet; through
 /// the endpoint the file is found once it is created (sshd's
-/// `authorized_keys`, ADR 0050).
-pub fn share_may_be_missing(service: Handle, name: &str) -> Result<Handle, FsError> {
-    grant(service, Op::Share, name, SHARE_MAY_BE_MISSING)
+/// `authorized_keys`, ADR 0050). Waits as `bind`.
+pub fn share_may_be_missing(service: Handle, name: &str, wait_ms: u64) -> Result<Handle, FsError> {
+    grant(service, Op::Share, name, SHARE_MAY_BE_MISSING, wait_ms)
 }
 
 /// A session request (`Bind`, `Share`, `Attach`) on the main endpoint: the
 /// reply carries the session's send side.
-fn grant(service: Handle, op: Op, name: &str, len: u32) -> Result<Handle, FsError> {
+fn grant(service: Handle, op: Op, name: &str, len: u32, wait_ms: u64) -> Result<Handle, FsError> {
     let mut req = Request::new(op)
         .with_name(name)
         .ok_or(FsError::Status(Status::Invalid))?;
@@ -263,8 +265,8 @@ fn grant(service: Handle, op: Op, name: &str, len: u32) -> Result<Handle, FsErro
         service,
         &req.encode(),
         &[],
-        rpc::GRACE_MS,
-        REPLY_WAIT_MS,
+        rpc::GRACE_MS.min(wait_ms),
+        wait_ms,
         &mut msg,
         &mut handles,
     )

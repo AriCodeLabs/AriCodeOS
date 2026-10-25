@@ -280,6 +280,22 @@ struct Service {
     /// An unexpected probe error was already said (once is enough to be
     /// seen; the session is kept and probed again).
     probe_error_said: bool,
+    /// `fsd_fault` (tests only): opening `FAULT_FILE` crashes fsd.
+    fault_on_open: bool,
+}
+
+/// The name whose `Open` crashes fsd under `fsd_fault` (tests only).
+const FAULT_FILE: &str = "fsd-fault";
+
+/// Deliberate crash (`fsd_fault`, tests only): fsd dies by a page fault, as
+/// a file service with a bug would, and its supervisor relaunches it.
+fn fault() -> ! {
+    say(b"crashing on purpose (fsd_fault)");
+    // SAFETY: deliberate fault; page 0 is never mapped and the address is
+    // hidden from the compiler so that it emits the read.
+    let bad = core::hint::black_box(0x40u64) as *const u64;
+    let v = unsafe { bad.read_volatile() };
+    sys::process_exit(v)
 }
 
 impl Service {
@@ -525,6 +541,9 @@ impl Service {
                 }
             }
             Op::Open => {
+                if self.fault_on_open && req.name_str() == FAULT_FILE {
+                    fault();
+                }
                 match qualified(prefix, req.name_str(), &mut qbuf).and_then(|q| self.fs.find(q)) {
                     Some(i) => self.open(i, owner),
                     None => Reply::status(Status::NotFound),
@@ -782,6 +801,12 @@ fn main(partition_lba: u64) -> u64 {
         reclaimed: 0,
         last_sweep_ms: 0,
         probe_error_said: false,
+        fault_on_open: {
+            let mut buf = [0u8; sys::CMDLINE_MAX];
+            sys::cmdline(SYSTEM, &mut buf).is_ok_and(|c| {
+                aricode_cmdline::CmdLine::new(c).has(aricode_cmdline::keys::FSD_FAULT)
+            })
+        },
     };
     let mut msg = [0u8; Request::LEN];
     say(b"serving requests");

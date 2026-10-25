@@ -118,6 +118,7 @@ version = "0.14.0"
 dependencies = [
  "aricode-arifs",
  "aricode-build",
+ "aricode-cmdline",
  "aricode-faults",
  "aricode-proto",
  "aricode-rt",

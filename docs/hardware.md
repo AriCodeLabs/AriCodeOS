@@ -84,7 +84,7 @@ QEMU test hosts (10.0.2.2). What the system itself may write at boot:
   boot, not at boot (a failed save says so and is retried on the next
   connection). Both live in `sshd/` (ADR 0050); a stick from an older
   release has them in the AriFS root, and init moves them once at boot
-  (`AriInit: moved ssh_host_ed25519_key into sshd/`), the fingerprint
+  (`AriInit: ssh_host_ed25519_key moved into sshd/`), the fingerprint
   unchanged.
 
 The test clients (`fs_client`, `blk_client`, `net_client`, `tcp_client`,
@@ -92,7 +92,7 @@ The test clients (`fs_client`, `blk_client`, `net_client`, `tcp_client`,
 the QEMU scenarios: `cargo xtask usb-image --cmdline` refuses it, like
 every other test-only key (`qemu_exit`, `test=`, `usb_fault`, `blk_fault`,
 `restart_storm`, `service_hang`, `init_fail_late`, `input_restart`,
-`input_orphan`, `shell_fault`, `gui_trace`) and the keys AriBoot adds itself (`boot_slot`,
+`input_orphan`, `shell_fault`, `fsd_fault`, `gui_trace`) and the keys AriBoot adds itself (`boot_slot`,
 `boot_pending`). If a stick's
 `cmdline.txt` is edited by hand to carry it, the screen says `AriInit:
 selftest: running the test-only boot checks` and the boot stops at
