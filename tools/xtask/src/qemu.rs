@@ -313,9 +313,12 @@ impl Qmp {
     /// No `device`: QMP only accepts a display there, not an input device;
     /// the event goes to the active handler of its type (the virtio devices
     /// register after the i8042 and take priority).
-    fn send_event(&mut self, event: &str) -> std::io::Result<()> {
+    /// Several events go in one command: QEMU queues them all in the
+    /// device before it answers, with nothing of the guest's in between.
+    fn send_events(&mut self, events: &[String]) -> std::io::Result<()> {
         self.execute(&format!(
-            r#"{{"execute":"input-send-event","arguments":{{"events":[{event}]}}}}"#
+            r#"{{"execute":"input-send-event","arguments":{{"events":[{}]}}}}"#,
+            events.join(",")
         ))
     }
 }
@@ -334,9 +337,9 @@ fn run_input_probe(
         Err(e) => return format!("[host] QMP: no connection ({e})"),
     };
     let mut sent = 0;
-    let mut step = |qmp: &mut Qmp, event: String| -> Result {
-        qmp.send_event(&event).map_err(|e| e.to_string())?;
-        sent += 1;
+    let mut step = |qmp: &mut Qmp, events: &[String]| -> Result {
+        qmp.send_events(events).map_err(|e| e.to_string())?;
+        sent += events.len();
         Ok(())
     };
     let result: Result = (|| {
@@ -344,11 +347,15 @@ fn run_input_probe(
         if let Some((dx, dy)) = mouse_rel {
             step(
                 &mut qmp,
-                format!(r#"{{"type":"rel","data":{{"axis":"x","value":{dx}}}}}"#),
+                &[format!(
+                    r#"{{"type":"rel","data":{{"axis":"x","value":{dx}}}}}"#
+                )],
             )?;
             step(
                 &mut qmp,
-                format!(r#"{{"type":"rel","data":{{"axis":"y","value":{dy}}}}}"#),
+                &[format!(
+                    r#"{{"type":"rel","data":{{"axis":"y","value":{dy}}}}}"#
+                )],
             )?;
         }
         // A short pause between phases: the compositor orders by arrival time
@@ -358,7 +365,9 @@ fn run_input_probe(
             for down in [true, false] {
                 step(
                     &mut qmp,
-                    format!(r#"{{"type":"btn","data":{{"down":{down},"button":"{button}"}}}}"#),
+                    &[format!(
+                        r#"{{"type":"btn","data":{{"down":{down},"button":"{button}"}}}}"#
+                    )],
                 )?;
             }
         }
@@ -374,19 +383,27 @@ fn run_input_probe(
                 Step::Key(key) => {
                     // "a" presses and releases; "shift+dot" presses the
                     // modifiers, then the key, and releases them in reverse
-                    // order.
+                    // order. The whole key is one QMP command (incident
+                    // 0031): a guest that acts on the press (Enter on
+                    // `shutdown`) may power off at once, and a release sent
+                    // as a command of its own then found QEMU gone ("failed
+                    // after 29 events, Broken pipe"). The device queues
+                    // them in order, so the guest still sees press before
+                    // release, and the pause after the key is the same
+                    // `key_delay` per event as before.
                     let parts: Vec<&str> = key.split('+').collect();
                     let presses = parts.iter().map(|p| (p, true));
                     let releases = parts.iter().rev().map(|p| (p, false));
-                    for (part, down) in presses.chain(releases) {
-                        step(
-                            &mut qmp,
+                    let events: Vec<String> = presses
+                        .chain(releases)
+                        .map(|(part, down)| {
                             format!(
                                 r#"{{"type":"key","data":{{"down":{down},"key":{{"type":"qcode","data":"{part}"}}}}}}"#
-                            ),
-                        )?;
-                        std::thread::sleep(key_delay);
-                    }
+                            )
+                        })
+                        .collect();
+                    step(&mut qmp, &events)?;
+                    std::thread::sleep(key_delay * events.len() as u32);
                     continue;
                 }
                 Step::Prompt => echo.as_ref().map(|e| e.prompt.as_bytes().to_vec()),
