@@ -63,6 +63,7 @@ pub(crate) struct Parsed<'a> {
     pub not_before: u64,
     pub not_after: u64,
     pub public_key: PublicKey<'a>,
+    pub spki: &'a [u8],
     pub is_ca: bool,
     pub max_path_len: Option<u32>,
     pub dns_names: Vec<&'a str>,
@@ -97,7 +98,8 @@ impl<'a> Parsed<'a> {
         let not_after = der::time(validity.any()?)?;
         validity.finish()?;
         let subject = r.expect_tlv(der::SEQUENCE)?;
-        let public_key = parse_public_key(r.expect(der::SEQUENCE)?)?;
+        let spki = r.expect_tlv(der::SEQUENCE)?;
+        let public_key = parse_public_key(spki.value)?;
         r.optional(0x81)?; // issuerUniqueID
         r.optional(0x82)?; // subjectUniqueID
         let mut parsed = Parsed {
@@ -109,6 +111,7 @@ impl<'a> Parsed<'a> {
             not_before,
             not_after,
             public_key,
+            spki: spki.raw,
             is_ca: false,
             digital_signature: true,
             server_auth: true,
@@ -239,6 +242,7 @@ impl<'a> Certificate<'a> {
             not_before: p.not_before,
             not_after: p.not_after,
             public_key: p.public_key,
+            spki: p.spki,
             is_ca: p.is_ca,
             max_path_len: p.max_path_len,
             dns_names: p.dns_names,
@@ -269,7 +273,11 @@ fn pss_hash(params: Tlv) -> Result<Hash, Error> {
     }
 }
 
-fn parse_public_key(spki: &[u8]) -> Result<PublicKey<'_>, Error> {
+/// One encoding per key (audit of ADR 0054, M1): the AlgorithmIdentifier
+/// carries exactly what RFC 3279, 5480 and 8410 put there and nothing more,
+/// as webpki requires, so a key's SubjectPublicKeyInfo hash, what
+/// `roots::DISTRUSTED` names, cannot be dodged by re-encoding the key.
+pub(crate) fn parse_public_key(spki: &[u8]) -> Result<PublicKey<'_>, Error> {
     let mut r = Reader::new(spki);
     let mut alg = Reader::new(r.expect(der::SEQUENCE)?);
     let key = der::octet_aligned_bits(r.expect(der::BIT_STRING)?)?;
@@ -277,6 +285,12 @@ fn parse_public_key(spki: &[u8]) -> Result<PublicKey<'_>, Error> {
     let id = alg.expect(der::OID)?;
     match id {
         oid::RSA_ENCRYPTION => {
+            // Parameters: exactly NULL (RFC 3279 2.3.1).
+            let params = alg.any()?;
+            if params.tag != der::NULL || !params.value.is_empty() {
+                return Err(Error::Malformed);
+            }
+            alg.finish()?;
             let mut k = Reader::new(der::single(key, der::SEQUENCE)?);
             let n = der::unsigned(k.expect(der::INTEGER)?)?;
             let e = der::unsigned(k.expect(der::INTEGER)?)?;
@@ -299,14 +313,19 @@ fn parse_public_key(spki: &[u8]) -> Result<PublicKey<'_>, Error> {
                 oid::P384 => (Curve::P384, 48),
                 _ => return Err(Error::Unsupported),
             };
+            alg.finish()?;
             if key.len() != 1 + 2 * coord || key[0] != 0x04 {
                 return Err(Error::Unsupported); // only uncompressed points
             }
             Ok(PublicKey::Ec { curve, point: key })
         }
-        oid::ED25519 => Ok(PublicKey::Ed25519(
-            key.try_into().map_err(|_| Error::Malformed)?,
-        )),
+        oid::ED25519 => {
+            // Parameters absent (RFC 8410 3).
+            alg.finish()?;
+            Ok(PublicKey::Ed25519(
+                key.try_into().map_err(|_| Error::Malformed)?,
+            ))
+        }
         _ => Err(Error::Unsupported),
     }
 }

@@ -104,7 +104,7 @@ pub struct Client {
     rng: Rng,
     roots: Vec<&'static [u8]>,
     extra_roots: Vec<Vec<u8>>,
-    now: Option<u64>,
+    now: aricode_x509::ValidityTime,
     secret_key: [u8; 32],
     session_id: Vec<u8>,
     /// Handshake messages so far (hashed when a secret needs them).
@@ -129,14 +129,16 @@ pub struct Client {
 
 impl Client {
     /// `host`: SNI and name to verify; `rng_seed`: 32 fresh random bytes;
-    /// `roots`: trusted roots (DER); `now`: Unix seconds or None (no
-    /// validity dates check).
+    /// `roots`: trusted roots (DER); `now`: what validity dates are
+    /// checked against (`aricode_x509::check_time`; `Some` Unix seconds is
+    /// a trusted clock, `None` skips them).
     pub fn new(
         host: &str,
         rng_seed: [u8; 32],
         roots: Vec<&'static [u8]>,
-        now: Option<u64>,
+        now: impl Into<aricode_x509::ValidityTime>,
     ) -> Self {
+        let now = now.into();
         Self {
             state: State::Idle,
             host: String::from(host),

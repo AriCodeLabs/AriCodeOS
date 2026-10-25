@@ -52,6 +52,9 @@ pub enum Error {
     /// A CA's nameConstraints do not allow a name of the leaf (RFC 5280
     /// 4.2.1.10).
     NameConstraint,
+    /// A certificate of the chain, or the root it ends at, has a key this
+    /// system no longer trusts (`roots::DISTRUSTED`, ADR 0054).
+    Distrusted,
 }
 
 /// The dNSName subtrees of a CA's nameConstraints extension.
@@ -172,6 +175,9 @@ pub struct Certificate<'a> {
     pub not_before: u64,
     pub not_after: u64,
     pub public_key: PublicKey<'a>,
+    /// The whole SubjectPublicKeyInfo (DER element): what
+    /// `roots::DISTRUSTED` names, by SHA-256.
+    pub spki: &'a [u8],
     /// basicConstraints cA and, if keyUsage is present, keyCertSign.
     pub is_ca: bool,
     /// basicConstraints pathLenConstraint.
@@ -188,6 +194,45 @@ pub struct Certificate<'a> {
     pub server_auth: bool,
     /// nameConstraints dNSName subtrees, critical or not.
     pub name_constraints: Option<NameConstraints<'a>>,
+}
+
+/// No moment this system checks certificates at can be earlier than this
+/// (2026-10-25 00:00 UTC): a real-time clock that reads earlier (a dead
+/// CMOS battery reads 2000) or none at all gives this instead of skipping
+/// the validity dates, so a certificate that expired before it is always
+/// refused (audit 2026-10-25 D, M1: no clock meant no date check). Raised
+/// at each release (docs/WORKFLOW.md).
+pub const TIME_FLOOR: u64 = 1_792_886_400;
+
+/// What a chain's validity dates are checked against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidityTime {
+    /// A clock that can be trusted: `notBefore <= t <= notAfter`.
+    Clock(u64),
+    /// No clock that can be trusted: only `notAfter >= floor`, since a
+    /// certificate issued after the floor is no sign of a wrong date
+    /// (audit of incident 0036, H1: checking `notBefore` against the floor
+    /// refused every certificate renewed after the release).
+    AtLeast(u64),
+    /// Dates not checked (tests).
+    Unchecked,
+}
+
+impl From<Option<u64>> for ValidityTime {
+    fn from(now: Option<u64>) -> Self {
+        now.map_or(ValidityTime::Unchecked, ValidityTime::Clock)
+    }
+}
+
+/// The time certificates are checked at from the real-time clock's Unix
+/// seconds: the clock when it reads at or after `TIME_FLOOR`; otherwise (no
+/// clock, or one that reads earlier) `TIME_FLOOR` as a lower bound of
+/// every `notAfter`.
+pub fn check_time(rtc: Option<u64>) -> ValidityTime {
+    match rtc {
+        Some(t) if t >= TIME_FLOOR => ValidityTime::Clock(t),
+        _ => ValidityTime::AtLeast(TIME_FLOOR),
+    }
 }
 
 /// Checks `signature` over `message` with `key`. False on any mismatch
@@ -305,10 +350,11 @@ fn name_matches(pattern: &str, host: &str) -> bool {
     }
 }
 
-fn check_validity(not_before: u64, not_after: u64, now: Option<u64>) -> Result<(), Error> {
+fn check_validity(not_before: u64, not_after: u64, now: ValidityTime) -> Result<(), Error> {
     match now {
-        Some(t) if t < not_before => Err(Error::NotYetValid),
-        Some(t) if t > not_after => Err(Error::Expired),
+        ValidityTime::Clock(t) if t < not_before => Err(Error::NotYetValid),
+        ValidityTime::Clock(t) if t > not_after => Err(Error::Expired),
+        ValidityTime::AtLeast(floor) if floor > not_after => Err(Error::Expired),
         _ => Ok(()),
     }
 }
@@ -327,16 +373,40 @@ fn trusted_leaf(leaf: Certificate) -> Result<Certificate, Error> {
 /// any order. Each certificate must be signed by an intermediate of the
 /// chain (a CA within its path length, valid at `now`) or by one of
 /// `roots` (DER trust anchors; roots that do not parse are ignored). A
-/// certificate identical to a root is trusted directly. `now` is Unix
-/// seconds; `None` skips the validity dates. Returns the parsed leaf.
+/// certificate identical to a root is trusted directly. `now`: what the
+/// validity dates are checked against (`Some` Unix seconds is a trusted
+/// clock, `None` skips them). Returns the parsed leaf.
 pub fn verify_chain<'a>(
     chain: &[&'a [u8]],
     roots: &[&[u8]],
     host: &str,
-    now: Option<u64>,
+    now: impl Into<ValidityTime>,
 ) -> Result<Certificate<'a>, Error> {
+    verify_chain_with(chain, roots, roots::DISTRUSTED, host, now)
+}
+
+/// Whether `spki` (a whole SubjectPublicKeyInfo) is one of `distrusted`
+/// (SHA-256 digests).
+fn is_distrusted(spki: &[u8], distrusted: &[[u8; 32]]) -> bool {
+    !distrusted.is_empty() && distrusted.contains(&aricode_crypto::sha256::sha256(spki))
+}
+
+/// [`verify_chain`] with an explicit list of distrusted keys: no
+/// certificate on the path, leaf, intermediate or root, may have one of
+/// them, whatever signed it (ADR 0054).
+pub(crate) fn verify_chain_with<'a>(
+    chain: &[&'a [u8]],
+    roots: &[&[u8]],
+    distrusted: &[[u8; 32]],
+    host: &str,
+    now: impl Into<ValidityTime>,
+) -> Result<Certificate<'a>, Error> {
+    let now = now.into();
     let leaf_der = *chain.first().ok_or(Error::Malformed)?;
     let leaf = Certificate::parse(leaf_der)?;
+    if is_distrusted(leaf.spki, distrusted) {
+        return Err(Error::Distrusted);
+    }
     check_validity(leaf.not_before, leaf.not_after, now)?;
     if !matches_hostname(&leaf, host) {
         return Err(Error::NameMismatch);
@@ -364,6 +434,12 @@ pub fn verify_chain<'a>(
         };
         let mut error = Error::UnknownIssuer;
         for anchor in anchors.iter().filter(|a| a.subject == current.issuer) {
+            // Distrust is said of the issuer that really signed, and no
+            // later mismatch hides it (audit of ADR 0054, L1).
+            if signed_by(&anchor.public_key) && is_distrusted(anchor.spki, distrusted) {
+                error = Error::Distrusted;
+                continue;
+            }
             if signed_by(&anchor.public_key) {
                 check_validity(anchor.not_before, anchor.not_after, now)?;
                 if !anchor.server_auth {
@@ -372,7 +448,9 @@ pub fn verify_chain<'a>(
                 check_name_constraints(&leaf, host, anchor.name_constraints.as_ref())?;
                 return trusted_leaf(leaf);
             }
-            error = Error::BadSignature;
+            if error != Error::Distrusted {
+                error = Error::BadSignature;
+            }
         }
         let mut next = None;
         for (i, der) in chain.iter().enumerate() {
@@ -393,6 +471,8 @@ pub fn verify_chain<'a>(
             }
             let outcome = if !signed_by(&candidate.public_key) {
                 Err(Error::BadSignature)
+            } else if is_distrusted(candidate.spki, distrusted) {
+                Err(Error::Distrusted)
             } else if !candidate.is_ca
                 || candidate
                     .max_path_len
@@ -413,7 +493,8 @@ pub fn verify_chain<'a>(
                     next = Some((i, candidate));
                     break;
                 }
-                Err(e) => error = e,
+                Err(e) if error != Error::Distrusted => error = e,
+                Err(_) => {}
             }
         }
         let (i, issuer) = next.ok_or(error)?;
