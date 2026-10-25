@@ -581,6 +581,7 @@ pub fn run_scenario(
             usb: qemu::UsbOptions {
                 hid: s.usb_hid,
                 hid_msi: s.usb_hid_msi,
+                hid_msi_and_msix: s.usb_hid_msi_and_msix,
                 hid_only_input: s.usb_hid_only_input,
                 legacy_controller: s.usb_legacy_controller,
                 storage: s.usb_storage,

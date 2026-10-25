@@ -68,8 +68,16 @@ pub fn parse_response(id: u16, b: &[u8]) -> Option<Answer> {
     if b.len() < HEADER_LEN || be16(&b[0..2]) != id || b[2] & 0x80 == 0 {
         return None;
     }
-    let rcode = b[3] & 0x0F;
+    // One question, as asked; a truncated answer is no answer (audit of
+    // incident 0034, L2).
     let qd = be16(&b[4..6]) as usize;
+    if qd != 1 || b[2] & 0x02 != 0 {
+        return None;
+    }
+    let rcode = b[3] & 0x0F;
+    if rcode != 0 {
+        return Some(Answer::NoAddress(rcode));
+    }
     let an = be16(&b[6..8]) as usize;
     let mut i = HEADER_LEN;
     for _ in 0..qd {

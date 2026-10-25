@@ -35,8 +35,9 @@ const PAGE: u64 = 4096;
 const EVICTORS: usize = 8;
 /// Fresh buffers allocated after the eviction.
 const FRESH: usize = 8;
-/// Reply wait: the driver's request timeout (2 s) plus its recovery.
-const REPLY_WAIT_MS: u64 = 15_000;
+/// Reply wait: the block clients' own, which covers the driver's request
+/// timeout and its recovery (incident 0043).
+const REPLY_WAIT_MS: u64 = aricode_rt::sys::block::REPLY_WAIT_MS;
 
 fn say(msg: &[u8]) {
     sys::print(b"blk_late: ");

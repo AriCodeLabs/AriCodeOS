@@ -26,6 +26,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "aricode-gpt"
+version = "0.14.0"
+
+[[package]]
 name = "aricode-heap"
 version = "0.14.0"
 
@@ -67,6 +71,7 @@ version = "0.14.0"
 dependencies = [
  "aricode-abi",
  "aricode-gfx",
+ "aricode-gpt",
  "aricode-http",
  "aricode-net",
  "aricode-proto",

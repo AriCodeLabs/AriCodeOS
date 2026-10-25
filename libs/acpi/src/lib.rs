@@ -292,6 +292,9 @@ impl DeviceScope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Drhd {
     pub register_base: u64,
+    /// 4 KiB pages of its register set: the Size field (2^N pages, VT-d
+    /// 3.0; 0 in older tables, one page).
+    pub pages: u64,
     pub segment: u16,
     /// Covers every device of the segment not listed by another unit.
     pub include_all: bool,
@@ -370,6 +373,7 @@ impl Dmar {
                     include_all: e[4] & 1 != 0,
                     segment: u16_at(e, 6),
                     register_base: u64_at(e, 8),
+                    pages: 1 << (e[5] & 0xF),
                     scopes: parse_scopes(&e[16..])?,
                 }),
                 1 if len >= 24 => dmar.reserved.push(Rmrr {

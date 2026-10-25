@@ -19,8 +19,11 @@ pub struct Address {
 }
 
 impl Address {
-    /// Offset within the segment's ECAM region.
+    /// Offset within the segment's ECAM region. The caller keeps `bus`
+    /// within the segment's bus range (audit 2026-10-25 A, L4: a bridge
+    /// naming a bus below it wrapped this offset).
     pub const fn ecam_offset(&self, bus_start: u8) -> u64 {
+        debug_assert!(self.bus >= bus_start);
         (((self.bus - bus_start) as u64) << 20)
             | ((self.device as u64) << 15)
             | ((self.function as u64) << 12)
@@ -152,7 +155,10 @@ pub fn bars(cfg: &[u8]) -> Vec<(usize, Bar)> {
         let prefetchable = raw & 0x8 != 0;
         let mut address = (raw & !0xF) as u64;
         if is_64 {
-            if 0x10 + (i + 1) * 4 + 4 > cfg.len() {
+            // A 64-bit BAR in the last slot has no high half of its own
+            // (the next register is something else: CardBus, or a bridge's
+            // bus numbers, which sizing would overwrite).
+            if i + 1 >= count || 0x10 + (i + 1) * 4 + 4 > cfg.len() {
                 break;
             }
             address |= (u32_at(cfg, 0x10 + (i + 1) * 4) as u64) << 32;
@@ -174,6 +180,68 @@ pub fn bars(cfg: &[u8]) -> Vec<(usize, Bar)> {
 pub const fn bar_size_from_probe(probed: u32, is_io: bool) -> u32 {
     let mask = if is_io { !0x3u32 } else { !0xFu32 };
     (!(probed & mask)).wrapping_add(1)
+}
+
+/// A physical range a device's memory BAR must not touch: RAM, the
+/// kernel's own MMIO, another device's BAR (ADR 0051).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Forbidden {
+    pub start: u64,
+    /// Exclusive.
+    pub end: u64,
+    pub what: &'static str,
+}
+
+/// Why a memory BAR is not offered to a driver (ADR 0051).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarRefusal {
+    /// Size 0, or below the 16 bytes a memory BAR decodes at least.
+    Empty,
+    /// The size a BAR decodes is always a power of two.
+    NotPowerOfTwo,
+    /// A BAR is aligned to its size.
+    Misaligned,
+    /// The range runs past the top of the address space.
+    Wraps,
+    /// It shares a page with a forbidden range: a driver maps whole pages.
+    Overlaps(&'static str),
+}
+
+/// The pages a range spans: `[start, end)` rounded out to 4 KiB.
+pub fn page_span(start: u64, len: u64) -> Option<(u64, u64)> {
+    let end = start.checked_add(len)?;
+    Some((start & !0xFFF, end.checked_next_multiple_of(0x1000)?))
+}
+
+/// Checks a memory BAR the device reports (`address`, `size` from the
+/// sizing probe) before the kernel maps it or hands it to a driver: a
+/// device must not choose where the CPU writes (audit 2026-10-25 A, H1).
+/// Overlap is judged by whole pages, since that is what gets mapped.
+pub fn check_bar(address: u64, size: u64, forbidden: &[Forbidden]) -> Result<(), BarRefusal> {
+    if size < 16 {
+        return Err(BarRefusal::Empty);
+    }
+    if !size.is_power_of_two() {
+        return Err(BarRefusal::NotPowerOfTwo);
+    }
+    if address & (size - 1) != 0 {
+        return Err(BarRefusal::Misaligned);
+    }
+    let (start, end) = page_span(address, size).ok_or(BarRefusal::Wraps)?;
+    match forbidden.iter().find(|f| f.start < end && start < f.end) {
+        Some(f) => Err(BarRefusal::Overlaps(f.what)),
+        None => Ok(()),
+    }
+}
+
+/// Whether MSI-X table entries `0..entries` (16 bytes each) at `offset`
+/// lie within a BAR of `bar_size` bytes (audit 2026-10-25 A, H1: the
+/// offset was never compared with the BAR).
+pub fn msix_table_fits(offset: u64, entries: u64, bar_size: u64) -> bool {
+    entries
+        .checked_mul(16)
+        .and_then(|len| offset.checked_add(len))
+        .is_some_and(|end| end <= bar_size)
 }
 
 pub const CAP_MSI: u8 = 0x05;
@@ -550,5 +618,88 @@ mod tests {
             Flr::AdvancedFeatures { cap: 0x90 }.transactions_pending(),
             (0x95, 1)
         );
+    }
+
+    #[test]
+    fn device_reported_bars_are_checked() {
+        let ram = Forbidden {
+            start: 0x10_0000,
+            end: 0x8000_0000,
+            what: "RAM",
+        };
+        let lapic = Forbidden {
+            start: 0xFEE0_0000,
+            end: 0xFEE0_1000,
+            what: "local APIC",
+        };
+        let f = [ram, lapic];
+        assert_eq!(check_bar(0xC000_0000, 0x1000, &f), Ok(()));
+        assert_eq!(check_bar(0x80_0000_0000, 0x4000, &f), Ok(()));
+        // A 1 KiB BAR alone in its page (EHCI on the reference laptop).
+        assert_eq!(check_bar(0xF7E0_0400, 0x400, &f), Ok(()));
+        assert_eq!(
+            check_bar(0x1000_0000, 0x1000, &f),
+            Err(BarRefusal::Overlaps("RAM"))
+        );
+        // Sharing the page is enough.
+        assert_eq!(
+            check_bar(0x7FFF_FF00, 0x100, &f),
+            Err(BarRefusal::Overlaps("RAM"))
+        );
+        assert_eq!(
+            check_bar(0xFEE0_0000, 0x1000, &f),
+            Err(BarRefusal::Overlaps("local APIC"))
+        );
+        assert_eq!(check_bar(0xC000_0000, 0, &f), Err(BarRefusal::Empty));
+        assert_eq!(
+            check_bar(0xC000_0000, 0x3000, &f),
+            Err(BarRefusal::NotPowerOfTwo)
+        );
+        assert_eq!(
+            check_bar(0xC000_1000, 0x4000, &f),
+            Err(BarRefusal::Misaligned)
+        );
+        assert_eq!(
+            check_bar(0xFFFF_FFFF_FFFF_F000, 0x1000, &f),
+            Err(BarRefusal::Wraps)
+        );
+    }
+
+    #[test]
+    fn msix_table_bounds() {
+        assert!(msix_table_fits(0x2000, 1, 0x4000));
+        assert!(msix_table_fits(0x3FF0, 1, 0x4000));
+        assert!(!msix_table_fits(0x3FF8, 1, 0x4000));
+        // An offset of up to 4 GiB past a 16 KiB BAR (the audit's case).
+        assert!(!msix_table_fits(0xFFFF_FFF8, 1, 0x4000));
+        assert!(!msix_table_fits(u64::MAX - 8, 1, u64::MAX));
+        assert!(!msix_table_fits(0, u64::MAX, 0x4000));
+    }
+
+    #[test]
+    fn a_64_bit_bar_in_the_last_slot_is_ignored() {
+        let mut c = [0u8; 64];
+        // Type 0: BAR 5 says 64-bit.
+        c[0x24..0x28].copy_from_slice(&0xFEB0_0004u32.to_le_bytes());
+        assert!(bars(&c).is_empty());
+        // Type 1 (bridge): BAR 1 says 64-bit; 0x18 holds bus numbers.
+        let mut b = [0u8; 64];
+        b[14] = 1;
+        b[0x14..0x18].copy_from_slice(&0xFEB0_0004u32.to_le_bytes());
+        b[0x18..0x1C].copy_from_slice(&0x0002_0100u32.to_le_bytes());
+        assert!(bars(&b).is_empty());
+        // A 64-bit BAR 4 with its high half in BAR 5 is fine.
+        c[0x20..0x24].copy_from_slice(&0xFEB0_0004u32.to_le_bytes());
+        c[0x24..0x28].copy_from_slice(&1u32.to_le_bytes());
+        assert!(matches!(
+            bars(&c)[..],
+            [(
+                4,
+                Bar::Memory {
+                    address: 0x1_FEB0_0000,
+                    ..
+                }
+            )]
+        ));
     }
 }

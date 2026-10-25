@@ -33,8 +33,13 @@ use aricode_rt::sys::{self, Error, Handle, TIMEOUT_INFINITE};
 use aricode_virtio::blk;
 
 /// How long a request may take before the device is considered not to
-/// complete it (ms).
-const REQUEST_TIMEOUT_MS: u64 = 2000;
+/// complete it (ms). 30 s, the window Linux gives SCSI and NVMe commands:
+/// a flush on a consumer SSD, or on a hypervisor host whose disk is busy,
+/// legitimately takes seconds, and 2 s turned such a request into a device
+/// reset and a failed request (incident 0043). The client's reply wait
+/// (`block::REPLY_WAIT_MS`, 90 s) covers one timeout, the reset and one
+/// queued request.
+const REQUEST_TIMEOUT_MS: u64 = 30_000;
 /// Device resets in a row, with no request completed in between, after
 /// which the device is given up (bounded recovery, ADR 0028).
 const MAX_RESETS: u32 = 3;
@@ -178,7 +183,27 @@ impl Device {
             }
             match sys::irq_wait(IRQ, REQUEST_TIMEOUT_MS) {
                 Ok(_) => {}
-                Err(Error::Timeout) => return Err(42),
+                // The used ring is what says a request completed; the
+                // interrupt only tells. A completion found without it is
+                // taken, and said, so a lost interrupt shows instead of
+                // passing for a slow device (incident 0043).
+                // With `strict` the anomaly halts the driver like a failed
+                // request (ADR 0028).
+                Err(Error::Timeout) if self.queue.vq.has_used() => {
+                    say(b"a request completed without its interrupt");
+                    record("blk irq missing", head as u64);
+                    if self.strict {
+                        return Err(46);
+                    }
+                }
+                Err(Error::Timeout) => {
+                    say(if self.transport.needs_reset() {
+                        b"a request did not complete: the device asks to be reset" as &[u8]
+                    } else {
+                        b"a request did not complete within 30 s"
+                    });
+                    return Err(42);
+                }
                 Err(_) => return Err(43),
             }
         }
@@ -295,20 +320,25 @@ fn report_partitions(dev: &mut Device) {
             return;
         }
     };
-    // The table (16 KiB) goes on the heap: the user stack is small.
-    let mut table = alloc::vec![0u8; 128 * aricode_gpt::ENTRY_LEN];
-    let sectors = header.entries_bytes() / 512;
-    for i in 0..sectors.min(32) {
-        match dev.read_own(header.entries_lba + i as u64) {
-            Ok(s) => table[i * 512..(i + 1) * 512].copy_from_slice(s),
-            Err(_) => {
+    // Sector by sector into the scanner: no buffer for the whole table,
+    // whatever size the header declares (audit of incident 0032, L5).
+    let mut parts = [None; 8];
+    let mut scan = aricode_gpt::TableScan::new(&header, &mut parts);
+    let sectors = (header.entries_bytes() / 512) as u64;
+    for i in 0..sectors {
+        match header
+            .entries_lba
+            .checked_add(i)
+            .map(|lba| dev.read_own(lba))
+        {
+            Some(Ok(s)) => scan.feed(s),
+            _ => {
                 say(b"error reading the GPT table");
                 return;
             }
         }
     }
-    let mut parts = [None; 8];
-    match aricode_gpt::partitions(&header, &table, &mut parts) {
+    match scan.finish() {
         Ok(n) => {
             sys::print(b"virtio-blk: GPT with ");
             sys::print(aricode_rt::fmt_u64(n as u64, &mut buf));
