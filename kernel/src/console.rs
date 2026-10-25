@@ -3,14 +3,20 @@
 //! Kernel console: always serial, framebuffer if present. Implements
 //! `log::Log` for the `log::{trace,debug,info,warn,error}!` macros.
 //!
-//! The framebuffer console sits behind an `IrqLock`. If the lock is held (an
-//! exception inside the console itself), the text goes out on serial only
-//! instead of blocking: losing a line on screen is better than hanging.
+//! The framebuffer console sits behind an `IrqLock`. Thread code (interrupts
+//! enabled) waits for it, queues its text into the console's cells and then
+//! paints them a few rows per hold of the lock, so interrupts are never off
+//! for a whole repaint (incident 0031: timer ticks were lost during each
+//! scroll). Code running with interrupts off (handlers, exceptions) only
+//! tries for a bounded time and paints in one hold; if the lock stays held
+//! (an exception inside the console itself) the text goes out on serial
+//! only instead of blocking: losing a line on screen is better than hanging.
 
 use crate::framebuffer::MmioSurface;
 use crate::serial::Serial;
 use crate::sync::IrqLock;
 use aricode_fb_console::Console;
+use aricode_sync::IrqGuard;
 use core::fmt::Write;
 use log::{Level, LevelFilter, Log, Metadata, Record};
 
@@ -51,7 +57,46 @@ pub fn lend_framebuffer() -> Option<MmioSurface> {
 
 /// Takes the lent screen back and redraws the console's text on it.
 pub fn take_back_framebuffer(surface: MmioSurface) {
-    FB.lock().reattach(surface);
+    let mut guard = FB.lock();
+    guard.reattach(surface);
+    paint_in_steps(guard);
+}
+
+/// Text rows painted per hold of `FB` from thread code. A row is at most
+/// one glyph per column (about 20 000 pixel stores at 1280 px wide), so
+/// interrupts stay off for a row, never for a whole screen.
+const ROWS_PER_HOLD: usize = 1;
+
+/// Paints what is pending, `ROWS_PER_HOLD` rows per hold, releasing the
+/// lock (and so restoring interrupts) between rows: the tick and other
+/// CPUs' writers get in between. Whoever holds the lock next paints the
+/// rows still dirty, whatever wrote them, so a writer preempted between
+/// rows leaves nothing inconsistent.
+fn paint_in_steps(mut guard: FbGuard) {
+    while !guard.redraw(ROWS_PER_HOLD) {
+        drop(guard);
+        guard = FB.lock();
+    }
+}
+
+type FbGuard = IrqGuard<'static, Console<MmioSurface>, crate::sync::KernelIrq>;
+
+/// Console lock for one message, as `serial_guard`: with interrupts
+/// enabled it waits (the holder keeps interrupts off only for a row, so it
+/// is another CPU and releases it soon); with them disabled (handler,
+/// exception) it only retries for a bounded time, since this same CPU may
+/// be the holder (an exception inside the console).
+fn fb_guard(interrupts: bool) -> Option<FbGuard> {
+    if interrupts {
+        return Some(FB.lock());
+    }
+    for _ in 0..200_000 {
+        if let Some(g) = FB.try_lock() {
+            return Some(g);
+        }
+        core::hint::spin_loop();
+    }
+    None
 }
 
 /// Installs the global logger with the given maximum level.
@@ -107,13 +152,29 @@ extern "C" fn cursor_thread(_arg: usize) {
 }
 
 /// Writes text without log formatting to every output (markers, banner).
+/// Serial first, under its own lock only (painting the screen does not
+/// hold up other writers' serial output); then the screen, painted once
+/// per message: a message of many lines scrolls the cells many times but
+/// paints only the cells that changed.
 pub fn write_raw(args: core::fmt::Arguments) {
-    let _serial = serial_guard();
-    let _ = Serial.write_fmt(args);
-    if let Some(mut guard) = FB.try_lock() {
-        if guard.is_attached() {
-            let _ = guard.write_fmt(args);
-        }
+    {
+        let _serial = serial_guard();
+        let _ = Serial.write_fmt(args);
+    }
+    let interrupts = crate::sync::interrupts_enabled();
+    let Some(mut guard) = fb_guard(interrupts) else {
+        return;
+    };
+    if !guard.is_attached() {
+        return;
+    }
+    guard.write_deferred(args);
+    if interrupts {
+        paint_in_steps(guard);
+    } else {
+        // Interrupts are off already: releasing the lock between rows
+        // would not let the tick in.
+        guard.redraw(usize::MAX);
     }
 }
 

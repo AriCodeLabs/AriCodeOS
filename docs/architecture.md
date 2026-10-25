@@ -157,8 +157,16 @@ and `page_tables_base/size` which tables it reclaims when activating its own.
   `log=<level>` on the cmdline changes it and an invalid value produces a `WARN`.
 - The panic handler writes to serial only (`serial_println!`): it touches no
   shared state, in case the panic happens midway through a framebuffer write.
-- The framebuffer console keeps a copy of the cells and repaints on
-  scroll; it never reads from VRAM. It understands backspace (`\x08`, the cursor
+- The framebuffer console keeps the cells it holds and a RAM shadow of
+  the cells on screen; it never reads from VRAM. A write only changes the
+  cells; the screen is then painted once per message, only the cells whose
+  character differs from the shadow, a glyph per `Surface::glyph` call
+  (colours encoded once, one bounds check per pixel row). Thread code
+  paints one text row per hold of the console's `IrqLock`, so interrupts
+  are never off for a whole repaint; code with interrupts off retries the
+  lock for a bounded time and paints in one hold (incident 0031: a full
+  repaint per newline, a `put` per pixel, lost timer ticks and made test
+  timing depend on the kernel's layout). It understands backspace (`\x08`, the cursor
   moves back one cell) and draws a `_` cursor toggled by a kernel thread
   (`console::start_cursor_thread`, every 500 ms, with `try_lock`). Neither the tick
   (nothing is painted from handlers) nor the idle loop: one more call in that
@@ -263,8 +271,9 @@ critical section cannot be interrupted or re-entered by a handler. Between
 wait spins interrupts return to their previous state (Phase 32): a CPU
 waiting for a lock held by another keeps servicing IPIs. A lock held for many
 spins means re-entry (one CPU) or deadlock, so `lock` panics
-instead of hanging. The console uses `try_lock` and falls back to serial only if it is held
-(an exception inside the console itself does not block diagnostics). Each
+instead of hanging. With interrupts off the console only retries its lock for a bounded time and
+falls back to serial only if it stays held (an exception inside the console itself does not
+block diagnostics). Each
 CPU's own state (GDT, TSS, current thread, quantum) takes no lock:
 only its CPU touches it, with interrupts disabled (`cpu::Cpu`).
 
