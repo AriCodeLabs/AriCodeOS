@@ -9,7 +9,7 @@
 
 use super::{
     skip_blocktype, skip_immediates, try_push, BlockEnds, BrTable, Error, Function, Module, Reader,
-    SideTables, ValType,
+    SideTables, ValType, MAX_ARITY, MAX_FUNCTION_LOCALS,
 };
 use alloc::vec::Vec;
 
@@ -234,15 +234,18 @@ impl<'m, 'a> Validator<'m, 'a> {
 
     fn function(&mut self, f: &Function) -> Result<(), Error> {
         let ty = self.func_type(f.index)?;
+        // `locals` was reserved once for the most a function can have
+        // (`validate`): filling it never allocates.
         self.locals.clear();
         self.locals.extend_from_slice(&ty.params);
         let mut r = Reader::new(self.module.bytes, f.locals_decl);
         for _ in 0..r.u32()? {
-            let n = r.u32()?;
+            let n = r.u32()? as usize;
             let t = r.valtype()?;
-            for _ in 0..n {
-                self.locals.push(t);
+            if n > self.locals.capacity() - self.locals.len() {
+                return Err(Error::Unsupported("too many locals"));
             }
+            self.locals.resize(self.locals.len() + n, t);
         }
         if r.pos != f.code_start {
             return Err(invalid("locals declaration"));
@@ -691,10 +694,14 @@ pub(crate) fn validate(module: &Module) -> Result<SideTables, Error> {
         .and_then(|_| side.br_tables.try_reserve_exact(br_tables))
         .and_then(|_| side.br_depths.try_reserve_exact(br_depths))
         .map_err(|_| OUT_OF_MEMORY)?;
+    let mut locals = Vec::new();
+    locals
+        .try_reserve_exact(MAX_ARITY + MAX_FUNCTION_LOCALS)
+        .map_err(|_| OUT_OF_MEMORY)?;
     let mut v = Validator {
         module,
         func_types,
-        locals: Vec::new(),
+        locals,
         vals: Vec::new(),
         ctrls: Vec::new(),
         side,

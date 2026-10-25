@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 use aricode_rt::fmt_u64;
 use aricode_rt::sys::fs::FsClient;
 use aricode_rt::sys::{self, kind, permissions, time, Handle};
-use aricode_wasm::{Error, FuncType, Host, Instance, Module, ValType, Value};
+use aricode_wasm::{bytes_cost, Error, FuncType, Host, Instance, Module, ValType, Value};
 
 const MODULE_FILE: &str = "demo.wasm";
 const MANIFEST_FILE: &str = "demo.manifest";
@@ -23,6 +23,18 @@ const MANIFEST_FILE: &str = "demo.manifest";
 const MEMORY_BYTES: u64 = 4 * aricode_wasm::PAGE as u64;
 /// Maximum length of file names a module can pass to `file_*`.
 const MAX_FILE_NAME: usize = 32;
+/// Fuel an import costs on top of the bytes it moves (`bytes_cost`), so a
+/// module's fuel also bounds the time it makes the system work for it
+/// (incident 0042, audit M-a). A `file_write` is a durable AriFS replace
+/// (journal and data written to disk): at most 50 per call of 50 M units.
+const FILE_WRITE_COST: u64 = 1_000_000;
+/// A `file_read`: open, IPC reads and close with the filesystem service.
+const FILE_READ_COST: u64 = 10_000;
+/// A `print`: a system call to the console, plus one unit per byte (the
+/// console is far slower than memory).
+const PRINT_COST: u64 = 1_000;
+/// An `uptime_ms`: one system call.
+const CLOCK_COST: u64 = 100;
 
 fn say(msg: &[u8]) {
     sys::print(b"wasm_runner: ");
@@ -135,6 +147,19 @@ impl AriHost {
 }
 
 impl Host for AriHost {
+    fn cost(&self, import: usize, args: &[Value]) -> u64 {
+        // Lengths are i32 arguments; a larger claim than memory traps in
+        // `call`, or runs out of fuel first.
+        let len = |i: usize| args.get(i).map_or(0, |&v| v as u32 as usize);
+        match self.imports.get(import).copied().flatten() {
+            Some(Api::Print) => PRINT_COST + len(1) as u64,
+            Some(Api::UptimeMs) => CLOCK_COST,
+            Some(Api::FileRead) => FILE_READ_COST + bytes_cost(len(3)),
+            Some(Api::FileWrite) => FILE_WRITE_COST + bytes_cost(len(3)),
+            None => 0,
+        }
+    }
+
     fn call(&mut self, import: usize, args: &[Value], memory: &mut [u8]) -> Result<Value, Error> {
         match self.imports.get(import).copied().flatten() {
             Some(Api::Print) => {
@@ -331,6 +356,10 @@ fn main(arg: u64) -> u64 {
         }
     };
     let mut imports = Vec::new();
+    if imports.try_reserve_exact(module.imports().len()).is_err() {
+        report(b"", Error::OutOfMemory);
+        return 6;
+    }
     for imp in module.imports() {
         let api = if imp.module == b"aricode" {
             Api::by_name(&imp.name)

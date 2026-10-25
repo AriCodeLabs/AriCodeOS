@@ -113,6 +113,57 @@ reverting each one alone).
 The same pass also charges `call_indirect` for comparing the expected and
 actual function types (one unit per 64 value types).
 
+### Second audit (2026-10-25)
+
+An independent audit of the branch (`52d5c64`, `1d5539d`, `74dd6d8`)
+found no high finding and no memory-safety problem. It found that the
+claim above, every allocation in parsing and validation fallible, was not
+true, and more of the same class:
+
+- **M-a (pre-existing): an import cost one unit of fuel whatever it did.**
+  `wasm_runner`'s `file_write` replaces up to 256 KiB durably on disk and
+  `file_read` loops IPC over as much: `loop { file_write(256 KiB) }` could
+  do ~10 M durable AriFS replaces within `MAX_STEPS` (time, and wear of a
+  USB stick). Fix: `Host::cost(import, args)` prices an import and the
+  interpreter charges it before the import runs (one it cannot pay never
+  runs). The runner charges `file_write` 1 000 000 units plus one per 64
+  bytes (at most 50 per call), `file_read` 10 000 plus one per 64 bytes,
+  `print` 1000 plus one per byte and `uptime_ms` 100. Test:
+  `imports_cost_what_the_host_says`.
+- **L1: the validator's locals were filled with infallible pushes** (up
+  to 4096 + 1000 entries): a module tuned to the runner's heap could still
+  panic it. Fix: reserved once with `try_reserve_exact` for the most a
+  function can have, filled with `resize`; failure is `OutOfMemory`. Test:
+  `running_out_of_heap_is_an_error_at_every_step`, with a test allocator
+  that fails after a given number of bytes: parsing, validating,
+  instantiating and calling a module are run under every budget up to
+  what they need, and each must return a value or `OutOfMemory` /
+  `StackOverflow`. Without the fix the test process aborts (`memory
+  allocation of 8 bytes failed`).
+- **L2: the runner's own `imports` list grew with infallible pushes.**
+  Reserved with `try_reserve_exact`; failure exits with 6.
+- **I1: dead `br_table`s make the densest side tables**, 14 bytes per 3
+  bytes of code (~4.7 per module byte; a 32 KiB module needs ~150 KiB,
+  which still fits). Stated in the profile; test
+  `dead_br_tables_keep_side_tables_bounded`.
+- **I3 (pre-existing): the table section accepted any number of tables**,
+  each resetting a table of up to 4096 entries (and so did repeated table
+  sections). One table and one memory at most, as in the MVP:
+  `Unsupported("more than one table")` / `("more than one memory")`. Test:
+  `one_table_and_one_memory_at_most`.
+- **I4 (pre-existing): the host passes `memory` on every call**, and one
+  shorter than the instance's pages made loads, stores, `memory.fill` and
+  `memory.copy` slice out of bounds (a panic). Every access is now checked
+  against the shorter of the two. Test:
+  `a_memory_shorter_than_the_instance_traps_instead_of_panicking`.
+- **I5: the profile's table of runner exit codes missed 1, 2, 4, 8, 9, 10,
+  14 and 15**, and put an instantiation `OutOfMemory` (exit 9) under 6.
+  Completed.
+- **I8: `start` has its own fuel**: one run of the runner can spend 2 x
+  50 M. Stated in the profile.
+
+Each fix's test fails with that fix reverted (checked one by one).
+
 ### Contract changes (profile v1, ADR 0019)
 
 Recorded in `docs/wasm-profile.md`:
@@ -129,5 +180,8 @@ Recorded in `docs/wasm-profile.md`:
   calls (`StackOverflow`).
 - New error `Error::OutOfMemory`; the module and its instance must fit the
   host's heap.
+- `Host` has a new required method, `cost`: hosts price their imports in
+  fuel, and the runner's prices are part of the profile.
+- At most one table and one memory (MVP), now enforced.
 - `Module`'s fields are private and `validate` is internal (library API;
   only `wasm_runner` uses the library).

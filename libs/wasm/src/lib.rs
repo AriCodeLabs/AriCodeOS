@@ -37,6 +37,8 @@ pub const PAGE: usize = 65536;
 pub const MAX_CALL_DEPTH: usize = 64;
 /// Values on the operand stack, in total.
 pub const MAX_STACK: usize = 16 * 1024;
+/// Declared locals of one function (parameters not included).
+pub const MAX_FUNCTION_LOCALS: usize = 4096;
 /// Locals (parameters included) of all active calls, in total.
 pub const MAX_LOCALS: usize = 16 * 1024;
 /// Parameters, and results, of a function type (the limits of the
@@ -92,8 +94,9 @@ fn try_to_vec(bytes: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(v)
 }
 
-/// Fuel for `bytes` bytes of variable work.
-fn bytes_cost(bytes: usize) -> u64 {
+/// Fuel for `bytes` bytes of variable work (hosts use it to price their
+/// imports, [`Host::cost`]).
+pub fn bytes_cost(bytes: usize) -> u64 {
     (bytes / WORK_BYTES) as u64
 }
 
@@ -417,7 +420,13 @@ impl<'a> Module<'a> {
                     }
                 }
                 4 => {
-                    for _ in 0..s.u32()? {
+                    // One table at most (MVP): each would reset a table of
+                    // up to 4096 entries.
+                    let count = s.u32()?;
+                    if count > 1 || m.table_limits.is_some() {
+                        return Err(Error::Unsupported("more than one table"));
+                    }
+                    if count == 1 {
                         if s.u8()? != 0x70 {
                             return Err(Error::Malformed("table type"));
                         }
@@ -434,7 +443,11 @@ impl<'a> Module<'a> {
                     }
                 }
                 5 => {
-                    for _ in 0..s.u32()? {
+                    let count = s.u32()?;
+                    if count > 1 || m.memory_pages.is_some() {
+                        return Err(Error::Unsupported("more than one memory"));
+                    }
+                    if count == 1 {
                         let flags = s.u8()?;
                         let min = s.u32()?;
                         let max = if flags & 1 != 0 { Some(s.u32()?) } else { None };
@@ -515,7 +528,7 @@ impl<'a> Module<'a> {
                             s.valtype()?;
                             locals = locals.checked_add(n).ok_or(Error::Malformed("locals"))?;
                         }
-                        if locals > 4096 {
+                        if locals as usize > MAX_FUNCTION_LOCALS {
                             return Err(Error::Unsupported("too many locals"));
                         }
                         let function = Function {
@@ -643,6 +656,11 @@ fn valtypes(r: &mut Reader) -> Result<Vec<ValType>, Error> {
 /// Functions the host offers the module. `call(import index,
 /// arguments, memory)` returns the result (or 0 if there is none).
 pub trait Host {
+    /// Fuel that import `import` costs with `args`, charged before it runs
+    /// on top of the call instruction: the host prices its own work (bytes
+    /// it moves, IPC, disk writes) so fuel also bounds the time spent in
+    /// imports ([`bytes_cost`]).
+    fn cost(&self, import: usize, args: &[Value]) -> u64;
     fn call(&mut self, import: usize, args: &[Value], memory: &mut [u8]) -> Result<Value, Error>;
 }
 
@@ -726,6 +744,14 @@ impl<'m, 'a> Instance<'m, 'a> {
     /// Bytes of linear memory currently valid (`memory_pages * PAGE`).
     pub fn memory_len(&self) -> usize {
         self.memory_pages as usize * PAGE
+    }
+
+    /// Valid bytes of the `memory` the host passes to this call: never past
+    /// its end, even if it is shorter than the one the instance was built
+    /// on (every access is checked against this, so a short buffer traps
+    /// instead of panicking).
+    fn active_len(&self, memory: &[u8]) -> usize {
+        self.memory_len().min(memory.len())
     }
 
     /// Runs the module's `start` function if it declares one. Must be called
@@ -912,7 +938,8 @@ impl<'m, 'a> Instance<'m, 'a> {
                 return Err(Error::Trap("missing arguments"));
             }
             let args_start = this.stack.len() - n;
-            let active = this.memory_len().min(memory.len());
+            this.charge(host.cost(import, &this.stack[args_start..]))?;
+            let active = this.active_len(memory);
             let result = host.call(import, &this.stack[args_start..], &mut memory[..active])?;
             this.stack.truncate(args_start);
             if !ty.results.is_empty() {
@@ -1120,7 +1147,7 @@ impl<'m, 'a> Instance<'m, 'a> {
                     let _align = r.u32()?;
                     let offset = r.u32()?;
                     let base = self.pop32()?;
-                    let active = self.memory_len();
+                    let active = self.active_len(memory);
                     let v = load(&memory[..active], base, offset, op)?;
                     self.push(v)?;
                 }
@@ -1129,7 +1156,7 @@ impl<'m, 'a> Instance<'m, 'a> {
                     let offset = r.u32()?;
                     let v = self.pop()?;
                     let base = self.pop32()?;
-                    let active = self.memory_len();
+                    let active = self.active_len(memory);
                     store(&mut memory[..active], base, offset, op, v)?;
                 }
                 0x3F => {
@@ -1213,7 +1240,7 @@ impl<'m, 'a> Instance<'m, 'a> {
                         let dst = self.pop32()? as usize;
                         let end_src = src.checked_add(n).ok_or(Error::Trap("memory.copy"))?;
                         let end_dst = dst.checked_add(n).ok_or(Error::Trap("memory.copy"))?;
-                        let active = self.memory_len();
+                        let active = self.active_len(memory);
                         if end_src > active || end_dst > active {
                             return Err(Error::Trap("out-of-bounds memory access"));
                         }
@@ -1226,7 +1253,7 @@ impl<'m, 'a> Instance<'m, 'a> {
                         let v = self.pop32()? as u8;
                         let dst = self.pop32()? as usize;
                         let end = dst.checked_add(n).ok_or(Error::Trap("memory.fill"))?;
-                        if end > self.memory_len() {
+                        if end > self.active_len(memory) {
                             return Err(Error::Trap("out-of-bounds memory access"));
                         }
                         self.charge(bytes_cost(n))?;
@@ -1721,6 +1748,9 @@ mod tests {
 
     struct NoHost;
     impl Host for NoHost {
+        fn cost(&self, _: usize, _: &[Value]) -> u64 {
+            0
+        }
         fn call(&mut self, _: usize, _: &[Value], _: &mut [u8]) -> Result<Value, Error> {
             Err(Error::MissingImport)
         }
@@ -2022,6 +2052,215 @@ mod tests {
         assert!(Module::parse(&b.build()).is_ok());
     }
 
+    /// A global allocator that fails once a thread has allocated a given
+    /// number of bytes (frees are not given back): the runner's heap is
+    /// small, and running out must be an error, never a panic.
+    mod capped {
+        use core::cell::Cell;
+        use std::alloc::{GlobalAlloc, Layout, System};
+
+        std::thread_local! {
+            static LEFT: Cell<Option<usize>> = const { Cell::new(None) };
+        }
+
+        struct Capped;
+
+        // SAFETY: forwards to the system allocator, or returns null.
+        unsafe impl GlobalAlloc for Capped {
+            unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+                let allowed = LEFT
+                    .try_with(|left| match left.get() {
+                        Some(n) if n < layout.size() => false,
+                        Some(n) => {
+                            left.set(Some(n - layout.size()));
+                            true
+                        }
+                        None => true,
+                    })
+                    .unwrap_or(true);
+                if allowed {
+                    // SAFETY: same layout contract as ours.
+                    unsafe { System.alloc(layout) }
+                } else {
+                    core::ptr::null_mut()
+                }
+            }
+            unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+                // SAFETY: `ptr` came from `System.alloc` with `layout`.
+                unsafe { System.dealloc(ptr, layout) }
+            }
+        }
+
+        #[global_allocator]
+        static ALLOC: Capped = Capped;
+
+        /// Runs `f` allowing `bytes` of allocations on this thread; returns
+        /// its result and the bytes it allocated.
+        pub fn with_budget<R>(bytes: usize, f: impl FnOnce() -> R) -> (R, usize) {
+            LEFT.with(|l| l.set(Some(bytes)));
+            let r = f();
+            let left = LEFT.with(|l| l.replace(None)).unwrap_or(0);
+            (r, bytes - left)
+        }
+    }
+
+    #[test]
+    fn running_out_of_heap_is_an_error_at_every_step() {
+        // A function with 4096 locals, a block and a br_table, called
+        // through a table: every allocation of parsing, validating,
+        // instantiating and calling, failed in turn, must return an error
+        // (audit L1 of incident 0042: the validator's locals did not).
+        let mut b = Builder::new();
+        let t = b.ty(&[0x7F], &[0x7F]);
+        b.globals.push((0x7F, true, 3));
+        let wide = b.func(
+            t,
+            4096,
+            &[0x02, 0x40, 0x20, 0, 0x0E, 1, 0, 0, 0x0B, 0x20, 0],
+        );
+        let f = b.func(t, 0, &[0x20, 0, 0x41, 0, 0x11, t as u8, 0]);
+        b.export("f", f);
+        b.table = vec![wide];
+        b.data.push((0, b"data".to_vec()));
+        let wasm = b.build();
+        let (_, need) = capped::with_budget(usize::MAX / 2, || Module::parse(&wasm).map(|_| ()));
+        for budget in 0..=need {
+            let (r, _) = capped::with_budget(budget, || Module::parse(&wasm).map(|_| ()));
+            assert!(
+                matches!(r, Ok(()) | Err(Error::OutOfMemory)),
+                "budget {budget}: {r:?}"
+            );
+        }
+        let m = Module::parse(&wasm).unwrap();
+        let mut mem = vec![0u8; PAGE];
+        let call = |mem: &mut Vec<u8>| {
+            let mut inst = Instance::new(&m, mem)?;
+            inst.call("f", &[5], mem, &mut NoHost)
+        };
+        let (r, need) = capped::with_budget(usize::MAX / 2, || call(&mut mem));
+        assert_eq!(r, Ok(5));
+        for budget in (0..=need).step_by(8) {
+            let (r, _) = capped::with_budget(budget, || call(&mut mem));
+            assert!(
+                matches!(r, Ok(5) | Err(Error::OutOfMemory | Error::StackOverflow)),
+                "budget {budget}: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dead_br_tables_keep_side_tables_bounded() {
+        // unreachable ; br_table [] 0 (3 bytes) again and again: the
+        // densest side table, 14 bytes per 3 bytes of code (audit I1).
+        let mut b = Builder::new();
+        let t = b.ty(&[], &[]);
+        let mut code = vec![0x00];
+        while code.len() < 30_000 {
+            code.extend_from_slice(&[0x0E, 0, 0]);
+        }
+        let f = b.func(t, 0, &code);
+        b.export("f", f);
+        let wasm = b.build();
+        let m = Module::parse(&wasm).unwrap();
+        let side = m.side.br_tables.len() * core::mem::size_of::<BrTable>()
+            + m.side.br_depths.len() * core::mem::size_of::<u16>();
+        assert_eq!(m.side.br_tables.len(), 10_000);
+        assert_eq!(m.side.br_tables.capacity(), 10_000, "reserved exactly");
+        assert!(3 * side <= 14 * wasm.len(), "{side} bytes of side tables");
+    }
+
+    #[test]
+    fn one_table_and_one_memory_at_most() {
+        // Each table section reset a table of up to 4096 entries (audit I3).
+        let header = b"\0asm\x01\0\0\0".to_vec();
+        let cases: [(&[u8], &str); 4] = [
+            (&[4, 7, 2, 0x70, 0, 1, 0x70, 0, 1], "more than one table"),
+            (
+                &[4, 4, 1, 0x70, 0, 1, 4, 4, 1, 0x70, 0, 1],
+                "more than one table",
+            ),
+            (&[5, 5, 2, 0, 1, 0, 1], "more than one memory"),
+            (&[5, 3, 1, 0, 1, 5, 3, 1, 0, 1], "more than one memory"),
+        ];
+        for (sections, why) in cases {
+            let mut wasm = header.clone();
+            wasm.extend_from_slice(sections);
+            assert_eq!(Module::parse(&wasm).err(), Some(Error::Unsupported(why)));
+        }
+        let mut wasm = header.clone();
+        wasm.extend_from_slice(&[4, 1, 0, 5, 1, 0]); // zero tables and memories
+        assert!(Module::parse(&wasm).is_ok());
+    }
+
+    #[test]
+    fn a_memory_shorter_than_the_instance_traps_instead_of_panicking() {
+        // The host passes `memory` on every call; one shorter than the
+        // instance's pages must trap, not slice out of bounds (audit I4).
+        let mut b = Builder::new();
+        let t = b.ty(&[0x7F], &[0x7F]);
+        let ld = b.func(t, 0, &[0x20, 0, 0x2D, 0, 0]);
+        b.export("ld", ld);
+        let st = b.func(t, 0, &[0x20, 0, 0x41, 1, 0x3A, 0, 0, 0x41, 0]);
+        b.export("st", st);
+        let fill = b.func(t, 0, &[0x20, 0, 0x41, 7, 0x41, 16, 0xFC, 11, 0, 0x41, 0]);
+        b.export("fill", fill);
+        let copy = b.func(t, 0, &[0x20, 0, 0x41, 0, 0x41, 16, 0xFC, 10, 0, 0, 0x41, 0]);
+        b.export("copy", copy);
+        let grow = b.func(t, 0, &[0x20, 0, 0x40, 0]);
+        b.export("grow", grow);
+        let wasm = b.build();
+        let m = Module::parse(&wasm).unwrap();
+        let mut mem = vec![0u8; PAGE];
+        let mut inst = Instance::new(&m, &mut mem).unwrap();
+        let short = &mut mem[..100];
+        let oob = Err(Error::Trap("out-of-bounds memory access"));
+        for name in ["ld", "st", "fill", "copy"] {
+            assert_eq!(inst.call(name, &[200], short, &mut NoHost), oob, "{name}");
+            assert_eq!(inst.call(name, &[10], short, &mut NoHost), Ok(0), "{name}");
+        }
+        assert_eq!(
+            inst.call("grow", &[1], short, &mut NoHost),
+            Ok(u32::MAX as u64)
+        );
+    }
+
+    #[test]
+    fn imports_cost_what_the_host_says() {
+        // loop { call tick ; br 0 }: an import is one unit whatever it does
+        // unless the host prices it (audit M-a: `file_write` replaced up to
+        // 256 KiB on disk per unit of fuel).
+        struct Ticks {
+            calls: u64,
+            cost: u64,
+        }
+        impl Host for Ticks {
+            fn cost(&self, _: usize, _: &[Value]) -> u64 {
+                self.cost
+            }
+            fn call(&mut self, _: usize, _: &[Value], _: &mut [u8]) -> Result<Value, Error> {
+                self.calls += 1;
+                Ok(0)
+            }
+        }
+        let mut b = Builder::new();
+        let t = b.ty(&[], &[]);
+        let tick = b.import("aricode", "tick", t);
+        let f = b.func(t, 0, &[0x03, 0x40, 0x10, tick as u8, 0x0C, 0, 0x0B]);
+        b.export("f", f);
+        let wasm = b.build();
+        let m = Module::parse(&wasm).unwrap();
+        let mut mem = vec![0u8; PAGE];
+        for cost in [1000, 200_000] {
+            let mut inst = Instance::new(&m, &mut mem).unwrap();
+            inst.fuel = 100_000;
+            let mut host = Ticks { calls: 0, cost };
+            assert_eq!(inst.call("f", &[], &mut mem, &mut host), Err(Error::Fuel));
+            // Charged before the import runs: one it cannot pay never runs.
+            assert!(host.calls * cost <= inst.fuel, "{} calls", host.calls);
+            assert_eq!(host.calls == 0, cost > inst.fuel);
+        }
+    }
+
     #[test]
     fn if_else_block_results_and_select() {
         let mut b = Builder::new();
@@ -2108,6 +2347,9 @@ mod tests {
     fn imports_reach_the_host() {
         struct Log(Vec<Value>);
         impl Host for Log {
+            fn cost(&self, _: usize, _: &[Value]) -> u64 {
+                0
+            }
             fn call(
                 &mut self,
                 import: usize,
@@ -2244,6 +2486,9 @@ mod tests {
         // The host does not see beyond the active memory either.
         struct Peek;
         impl Host for Peek {
+            fn cost(&self, _: usize, _: &[Value]) -> u64 {
+                0
+            }
             fn call(&mut self, _: usize, _: &[Value], memory: &mut [u8]) -> Result<Value, Error> {
                 Ok(memory.len() as u64)
             }
