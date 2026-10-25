@@ -7,6 +7,9 @@
 # runs from the idle loop: the request itself answers Io (the shell's
 # first write fails) and the next write, once the transport is Ready
 # again, succeeds.
+# `sleep 3000` provides the two idle seconds: the `repeat 10 ping` used
+# before lasted that long only while every line of its output took a
+# full repaint of the screen console (incident 0031).
 name = "usb.fault_retry"
 description = "usbd: an injected CBW transaction error answers Io, is recovered when idle (reset recovery) and recorded in diag"
 level = "full"
@@ -15,7 +18,7 @@ usb_storage = true
 cmdline = "qemu_exit shell usb_fault=idle"
 timeout_secs = 90
 stdin = [
-    "repeat 10 ping 10.0.2.2",
+    "sleep 3000",
     "write probe.txt after idle",
     "repeat 3 ping 10.0.2.2",
     "write probe.txt second try",
