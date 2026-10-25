@@ -187,6 +187,11 @@ pub mod keys {
     /// notification; init then runs the `blk_late` test client on that
     /// LBA (incident 0017).
     pub const BLK_FAULT: &str = "blk_fault";
+    /// Tests only: `pci_fault=msix|bar`, the kernel reads the xHCI
+    /// controller as a lying device would report itself: an MSI-X table
+    /// offset past its BAR, or BAR 0 at an address in RAM. Both must be
+    /// refused at boot (ADR 0051).
+    pub const PCI_FAULT: &str = "pci_fault";
     /// Tests only: `gui_trace`, the compositor logs every frame it puts on
     /// screen over serial (frame number, windows, cursor, pixels flushed)
     /// with one pixel sample per window, which the GUI scenarios check.
@@ -209,6 +214,7 @@ pub mod keys {
         SELFTEST,
         USB_FAULT,
         BLK_FAULT,
+        PCI_FAULT,
         GUI_TRACE,
     ];
 

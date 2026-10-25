@@ -439,6 +439,10 @@ pub struct Scenario {
     /// controllers: the kernel must program the MSI capability.
     #[serde(default)]
     pub usb_hid_msi: bool,
+    /// The `usb_hid` xHCI offers both MSI and MSI-X: a function whose
+    /// MSI-X the kernel refuses falls back to MSI (ADR 0051).
+    #[serde(default)]
+    pub usb_hid_msi_and_msix: bool,
     /// The test disk is attached over USB (`usb-storage` on the xHCI) and
     /// there is no virtio-blk: usbd serves it as a block service (ADR 0023).
     #[serde(default)]

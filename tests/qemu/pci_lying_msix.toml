@@ -1,0 +1,33 @@
+# ADR 0051 (audit 2026-10-25 A, H1): the kernel wrote the MSI-X entry at
+# BAR + Table Offset with the offset as the device reported it, never
+# compared with the BAR: a device chose where the kernel wrote. With
+# `pci_fault=msix` the xHCI controller is read as reporting a table 4 GiB
+# past its BAR: the kernel refuses MSI-X, gives it MSI, and the keyboard
+# still works.
+name = "pci.lying_msix"
+description = "a device whose MSI-X table lies outside its BAR gets MSI instead; nothing is written there"
+level = "full"
+areas = ["pci", "usb", "interrupts", "hardware"]
+cmdline = "qemu_exit shell pci_fault=msix"
+usb_hid = true
+usb_hid_only_input = true
+usb_hid_msi_and_msix = true
+timeout_secs = 60
+
+[host_input]
+marker = "CONSOLE_BRIDGE_READY"
+key_delay_ms = 30
+echo_prompt = "ari> "
+keys = ["c", "p", "u", "s", "ret", "s", "h", "u", "t", "d", "o", "w", "n", "ret"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "MSI-X table (BAR 0, offset 0xfffffff8) outside a usable BAR: MSI-X not used",
+    "1b36:000d claimed (MSI)",
+    "usb-input: device ready: USB HID Keyboard+Mouse",
+    "cpus: ",
+    "ari> shutdown",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "1b36:000d claimed (MSI-X"]
