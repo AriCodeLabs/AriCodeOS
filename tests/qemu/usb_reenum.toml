@@ -9,6 +9,9 @@
 # shows the attempt and its outcome. The new slot reuses the memory of the
 # released one (only after its Disable Slot succeeded, xHCI 4.6.4), so the
 # arena does not grow (incident 0001 audit 5 M4).
+# `sleep 3000` provides the two idle seconds: the `repeat 10 ping` used
+# before lasted that long only while every line of its output took a
+# full repaint of the screen console (incident 0031).
 name = "usb.reenum"
 description = "usbd: a given-up endpoint disables the slot, re-enumerates the stick from the idle loop and serves again"
 level = "full"
@@ -17,7 +20,7 @@ usb_storage = true
 cmdline = "qemu_exit shell usb_fault=idle:reenum"
 timeout_secs = 90
 stdin = [
-    "repeat 10 ping 10.0.2.2",
+    "sleep 3000",
     "write probe.txt after idle",
     "repeat 3 ping 10.0.2.2",
     "write probe.txt second try",

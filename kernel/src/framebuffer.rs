@@ -66,6 +66,21 @@ impl MmioSurface {
     fn encode(&self, Rgb(r, g, b): Rgb) -> u32 {
         self.info.encode(r, g, b)
     }
+
+    /// Pointer to the first pixel of row `y` from column `x`, for `len`
+    /// pixels, or `None` if any of them falls outside the width, height or
+    /// the framebuffer's size.
+    fn span(&self, x: usize, y: usize, len: usize) -> Option<*mut u32> {
+        if y >= self.height() || x + len > self.width() {
+            return None;
+        }
+        let idx = y * self.info.stride as usize + x;
+        if (idx + len) * 4 > self.info.size as usize {
+            return None;
+        }
+        // SAFETY: `idx + len` is inside the mapped framebuffer (checked above).
+        Some(unsafe { self.base.add(idx) })
+    }
 }
 
 impl Surface for MmioSurface {
@@ -86,5 +101,37 @@ impl Surface for MmioSurface {
         // SAFETY: `base` is the mapped framebuffer (AriBoot and then the VMM cover
         // it in the physical map); `idx` is bounded by width/height/stride and `size`.
         unsafe { self.base.add(idx).write_volatile(self.encode(color)) };
+    }
+
+    /// The console's only drawing path (incident 0031): colours encoded
+    /// once, one bounds check per pixel row, and the row written in a tight
+    /// loop of volatile stores. Never reads the framebuffer.
+    fn glyph(&mut self, x: usize, y: usize, rows: &[u8], fg: Rgb, bg: Rgb) {
+        let (fg, bg) = (self.encode(fg), self.encode(bg));
+        let cols = self.width().saturating_sub(x).min(8);
+        for (dy, &bits) in rows.iter().enumerate() {
+            let Some(row) = self.span(x, y + dy, cols) else {
+                return;
+            };
+            for dx in 0..cols {
+                let px = if bits & (0x80 >> dx) != 0 { fg } else { bg };
+                // SAFETY: `span` checked the `cols` pixels from `row`.
+                unsafe { row.add(dx).write_volatile(px) };
+            }
+        }
+    }
+
+    fn fill_rows(&mut self, y: usize, rows: usize, color: Rgb) {
+        let color = self.encode(color);
+        let w = self.width();
+        for yy in y..(y + rows).min(self.height()) {
+            let Some(row) = self.span(0, yy, w) else {
+                return;
+            };
+            for x in 0..w {
+                // SAFETY: `span` checked the `w` pixels from `row`.
+                unsafe { row.add(x).write_volatile(color) };
+            }
+        }
     }
 }
