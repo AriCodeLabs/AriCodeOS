@@ -38,6 +38,8 @@ const _: () = assert!(
 );
 
 const SERVICE: Handle = Handle(0x0001_0004);
+/// Exit code when the volume must be mounted again (`needs_reopen`).
+const EXIT_REMOUNT: u64 = 4;
 const BLOCK: Handle = Handle(0x0001_0005);
 const HW: Handle = Handle(0x0001_0006);
 const SYSTEM: Handle = Handle(0x0001_0007);
@@ -81,18 +83,18 @@ impl BlockDevice for PartitionDevice {
     /// A whole batch in one request to the block service (stage 5).
     fn read_sectors(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), FsError> {
         let count = (buf.len() / SECTOR) as u16;
-        self.blk
-            .read(self.base_lba + lba, count)
-            .map_err(|_| FsError::Io)?;
+        // Checked: a forged entry's start must not wrap onto another
+        // partition (audit 2026-10-25 B, L1).
+        let at = self.base_lba.checked_add(lba).ok_or(FsError::Io)?;
+        self.blk.read(at, count).map_err(|_| FsError::Io)?;
         buf.copy_from_slice(&self.blk.buffer()[..buf.len()]);
         Ok(())
     }
     fn write_sectors(&mut self, lba: u64, buf: &[u8]) -> Result<(), FsError> {
         let count = (buf.len() / SECTOR) as u16;
+        let at = self.base_lba.checked_add(lba).ok_or(FsError::Io)?;
         self.blk.buffer()[..buf.len()].copy_from_slice(buf);
-        self.blk
-            .write(self.base_lba + lba, count)
-            .map_err(|_| FsError::Io)
+        self.blk.write(at, count).map_err(|_| FsError::Io)
     }
 }
 
@@ -420,6 +422,18 @@ impl Service {
 
     /// Serves one request that arrived on `owner`'s endpoint (0 = main).
     fn serve(&mut self, owner: usize, msg: &[u8], handles: &[Handle]) {
+        self.serve_one(owner, msg, handles);
+        // A committed replace could not be applied: only a fresh mount
+        // brings the volume back (it redoes the journal). Exiting lets the
+        // supervisor relaunch fsd; until then every request would fail
+        // (audit of incident 0032, M1).
+        if self.fs.needs_reopen() {
+            say(b"a committed replace could not be applied; exiting to redo it at mount");
+            sys::process_exit(EXIT_REMOUNT);
+        }
+    }
+
+    fn serve_one(&mut self, owner: usize, msg: &[u8], handles: &[Handle]) {
         let Some(&reply_to) = handles.first() else {
             return;
         };

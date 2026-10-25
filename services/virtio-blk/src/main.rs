@@ -320,20 +320,25 @@ fn report_partitions(dev: &mut Device) {
             return;
         }
     };
-    // The table (16 KiB) goes on the heap: the user stack is small.
-    let mut table = alloc::vec![0u8; 128 * aricode_gpt::ENTRY_LEN];
-    let sectors = header.entries_bytes() / 512;
-    for i in 0..sectors.min(32) {
-        match dev.read_own(header.entries_lba + i as u64) {
-            Ok(s) => table[i * 512..(i + 1) * 512].copy_from_slice(s),
-            Err(_) => {
+    // Sector by sector into the scanner: no buffer for the whole table,
+    // whatever size the header declares (audit of incident 0032, L5).
+    let mut parts = [None; 8];
+    let mut scan = aricode_gpt::TableScan::new(&header, &mut parts);
+    let sectors = (header.entries_bytes() / 512) as u64;
+    for i in 0..sectors {
+        match header
+            .entries_lba
+            .checked_add(i)
+            .map(|lba| dev.read_own(lba))
+        {
+            Some(Ok(s)) => scan.feed(s),
+            _ => {
                 say(b"error reading the GPT table");
                 return;
             }
         }
     }
-    let mut parts = [None; 8];
-    match aricode_gpt::partitions(&header, &table, &mut parts) {
+    match scan.finish() {
         Ok(n) => {
             sys::print(b"virtio-blk: GPT with ");
             sys::print(aricode_rt::fmt_u64(n as u64, &mut buf));
