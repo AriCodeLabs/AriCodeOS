@@ -13,8 +13,9 @@
 //! A request the device does not complete (a timeout with its descriptors
 //! still in the ring, an unexpected used entry, a device that asks for a
 //! reset) leaves the device owning the client's buffer: the driver keeps
-//! the buffer's handle, answers `Io`, resets the device and creates the
-//! queue again, and only then releases the buffer (incident 0017). After
+//! the buffer's handle, resets the device and creates the queue again,
+//! answers `Io` (only then, so no late write lands in a buffer the client
+//! reuses, incident 0033), and releases the buffer (incident 0017). After
 //! `MAX_RESETS` resets with no request completed in between, or a reset
 //! that fails, the driver exits: the kernel clears bus mastering before it
 //! frees what the driver held (ADR 0038) and the supervisor restarts it.
@@ -76,15 +77,16 @@ struct Device {
     /// `strict` (ADR 0028): the first failed request halts the driver.
     strict: bool,
     /// Client buffers of requests the device did not complete, kept until
-    /// it is reset (incident 0017). One at most: the device is reset right
-    /// after such a request is answered.
+    /// it is reset (incident 0017). One at most: the device is reset before
+    /// such a request is answered.
     owned: DeviceOwned<1>,
     /// Device resets since the last request the device completed.
     resets: u32,
 }
 
 fn setup(mask: u64) -> Result<Device, u64> {
-    let transport = Transport::open(mask, blk::F_FLUSH).map_err(|e| e.code())?;
+    let transport =
+        Transport::open(mask, blk::F_FLUSH, blk::CFG_CAPACITY + 8).map_err(|e| e.code())?;
     let flush = transport.features & blk::F_FLUSH != 0;
     let queue = transport.setup_queue(0, 64).map_err(|e| e.code())?;
     transport.driver_ok();
@@ -174,12 +176,19 @@ impl Device {
             self.queue.notify(&self.transport);
         }
         loop {
-            if let Some((done, _)) = self.queue.vq.pop_used() {
-                if done != head {
-                    return Err(41);
+            match self.queue.vq.pop_used() {
+                Ok(Some((done, _))) => {
+                    if done != head {
+                        return Err(41);
+                    }
+                    self.resets = 0;
+                    break;
                 }
-                self.resets = 0;
-                break;
+                Ok(None) => {}
+                // The device returned what it never held (audit
+                // 2026-10-25 A, M1): the request fails and the device is
+                // reset, as for a timeout.
+                Err(_) => return Err(45),
             }
             match sys::irq_wait(IRQ, REQUEST_TIMEOUT_MS) {
                 Ok(_) => {}
@@ -462,13 +471,15 @@ fn serve(dev: &mut Device) -> ! {
         if nh >= 2 {
             dev.settle_client_buffer(handles[1], given, lba_served);
         }
-        let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
-        let _ = sys::handle_close(reply_to);
-        // The client has its answer; the device is reset before the next
-        // request, and only then is a kept buffer released.
+        // A request the device may still complete: it is reset before the
+        // client hears back, so no late write lands in a buffer the client
+        // has reused for its next request (audit 2026-10-25 C, L7); only
+        // then is a kept buffer released.
         if dev.device_owns_buffers() {
             dev.recover();
         }
+        let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
+        let _ = sys::handle_close(reply_to);
     }
 }
 

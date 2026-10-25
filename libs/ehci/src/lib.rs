@@ -44,6 +44,15 @@ pub struct Params {
 }
 
 impl Params {
+    /// Whether the operational registers, every root port's included, lie
+    /// within the controller's BAR of `bar_len` bytes at `caplength` (audit
+    /// 2026-10-25 A, L1): the driver addresses them as the BAR's base plus
+    /// that offset.
+    pub fn registers_fit(&self, caplength: u64, bar_len: u64) -> bool {
+        let ports = (self.ports as u64).max(1);
+        caplength + op::portsc(ports as u8) + 4 <= bar_len
+    }
+
     pub fn decode(hcsparams: u32, hccparams: u32) -> Self {
         Self {
             ports: (hcsparams & 0xF) as u8,
@@ -1215,5 +1224,14 @@ mod tests {
         assert_eq!(r, [0x23, 8, 0x51, 0x90, 1, 0, 0, 0]);
         let r = hub::clear_tt_buffer(3, 0, hub::TT_CONTROL, false).to_bytes();
         assert_eq!(r, [0x23, 8, 0x30, 0x00, 1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn operational_registers_must_fit_the_bar() {
+        // Intel 7 series: 1 KiB BAR, CAPLENGTH 0x20, 3 ports.
+        let p = Params::decode(3, 0);
+        assert!(p.registers_fit(0x20, 0x400));
+        assert!(!p.registers_fit(0xFF, 0x100));
+        assert!(!Params::decode(15, 0).registers_fit(0x3F0, 0x400));
     }
 }

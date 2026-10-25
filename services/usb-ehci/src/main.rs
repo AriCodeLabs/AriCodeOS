@@ -672,6 +672,7 @@ impl Ehci {
             say(b"no BAR 0 among the capabilities");
             return Err(exit::MAP_BAR);
         };
+        let bar_len = sys::region_len(bar).map_err(|_| exit::MAP_BAR)?;
         let base = Mmio(sys::mmio_map(bar).map_err(|_| {
             say(b"could not map BAR 0");
             exit::MAP_BAR
@@ -692,6 +693,10 @@ impl Ehci {
             return Err(exit::NOT_EHCI);
         }
         let params = Params::decode(base.r32(cap::HCSPARAMS), base.r32(cap::HCCPARAMS));
+        if !params.registers_fit(caplength, bar_len) {
+            say(b"operational registers outside BAR 0: not an EHCI to drive");
+            return Err(exit::NOT_EHCI);
+        }
         let op = Mmio(base.0 + caplength);
         let region = DmaRegion::alloc(ARENA_BYTES).map_err(|_| exit::DMA)?;
         // Every link pointer is 32 bits with CTRLDSSEGMENT above it (EHCI
@@ -3313,6 +3318,11 @@ fn wait_reg(mmio: &Mmio, reg: u64, mask: u32, set: bool, clock: &Clock, timeout_
 /// One block protocol request on the USB storage.
 fn serve_block(ctl: &mut Ehci, msg: &[u8], handles: &[Handle]) {
     let reply_to = handles[0];
+    // The reply endpoint and the buffer are used; anything else is closed
+    // (audit 2026-10-25 C, M3).
+    for h in handles.iter().skip(2) {
+        let _ = sys::handle_close(*h);
+    }
     let capacity = ctl.storage.as_ref().map_or(0, |s| s.capacity);
     let invalid = BlockReply {
         status: BlockStatus::Invalid,
@@ -3532,6 +3542,12 @@ fn main(mask: u64) -> u64 {
                 continue;
             }
             let reply_to = handles[0];
+            // Only the reply endpoint is used: any other handle is closed,
+            // or the driver's table fills up and requests start arriving
+            // without their reply endpoint (audit 2026-10-25 C, M3).
+            for h in &handles[1..nh] {
+                let _ = sys::handle_close(*h);
+            }
             match Request::decode(&msg[..n]) {
                 // Held until the boot enumeration is over (or `INFO_WAIT_MS`
                 // passed), so the device name is the final one.

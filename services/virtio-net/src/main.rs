@@ -21,6 +21,18 @@ const NET_HDR: u64 = 12;
 const SLOT: u64 = 2048;
 const RX_SLOTS: u16 = 16;
 const TX_SLOTS: u16 = 8;
+/// Exit code when the device returned a buffer it never held: its queue
+/// state cannot be trusted; init relaunches the driver, which resets it.
+const EXIT_DEVICE_LIED: u64 = 50;
+
+/// A used-ring element the device made up (audit 2026-10-25 A, M1).
+fn device_lied(_: aricode_virtio::UsedError) -> ! {
+    say(
+        NAME,
+        b"the device returned a buffer it never held; exiting to reset it",
+    );
+    aricode_rt::sys::process_exit(EXIT_DEVICE_LIED)
+}
 
 struct Nic {
     transport: Transport,
@@ -35,7 +47,8 @@ struct Nic {
 
 impl Nic {
     fn setup(mask: u64) -> Result<Self, u64> {
-        let transport = Transport::open(mask, FEATURE_MAC).map_err(|e| e.code())?;
+        // The MAC: the first 6 bytes of the device configuration.
+        let transport = Transport::open(mask, FEATURE_MAC, 6).map_err(|e| e.code())?;
         let mut mac = [0u8; 6];
         for (i, b) in mac.iter_mut().enumerate() {
             *b = transport.device_cfg.r8(i as u64);
@@ -65,8 +78,12 @@ impl Nic {
 
     /// Collects completed transmissions so their slots can be reused.
     fn reclaim_tx(&mut self) {
-        while self.tx.vq.pop_used().is_some() {
-            self.tx_inflight = self.tx_inflight.saturating_sub(1);
+        loop {
+            match self.tx.vq.pop_used() {
+                Ok(Some(_)) => self.tx_inflight = self.tx_inflight.saturating_sub(1),
+                Ok(None) => break,
+                Err(e) => device_lied(e),
+            }
         }
     }
 
@@ -101,7 +118,10 @@ impl Nic {
 
     /// Next received frame (copied into `out`); refills the slot.
     fn recv_frame(&mut self, out: &mut [u8; MAX_FRAME]) -> Option<usize> {
-        let (head, len) = self.rx.vq.pop_used()?;
+        let (head, len) = match self.rx.vq.pop_used() {
+            Ok(used) => used?,
+            Err(e) => device_lied(e),
+        };
         let off = SLOT * head as u64;
         let len = (len as usize)
             .saturating_sub(NET_HDR as usize)
