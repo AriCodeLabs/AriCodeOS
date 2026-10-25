@@ -99,6 +99,9 @@ pub struct Service {
     backoff_ms: u64,
     restart_at: Option<u64>,
     budget_reset: bool,
+    /// Retired on purpose (`stop`): a later death is recorded, not
+    /// restarted, until the next explicit `starting`.
+    retired: bool,
 }
 
 impl Service {
@@ -115,6 +118,7 @@ impl Service {
             backoff_ms: 0,
             restart_at: None,
             budget_reset: false,
+            retired: false,
         }
     }
 
@@ -147,6 +151,7 @@ impl Service {
         self.ready_at = None;
         self.restart_at = None;
         self.budget_reset = false;
+        self.retired = false;
         self.generation
     }
 
@@ -158,11 +163,24 @@ impl Service {
         }
     }
 
-    /// Retire the service on purpose: it stays `Stopped` with no pending restart.
+    /// Retire the service on purpose: it stays `Stopped` with no pending
+    /// restart, even if its process dies afterwards (audit 2026-10-25 C, L5).
     pub fn stop(&mut self) {
         self.state = State::Stopped;
         self.restart_at = None;
         self.ready_at = None;
+        self.retired = true;
+    }
+
+    /// The process outlived a kill: it may still hold its devices and
+    /// endpoints, so another generation must not compete with it. The
+    /// service is `Failed` whatever budget it had left.
+    pub fn abandon(&mut self, exit: Exit) -> Action {
+        self.last_exit = Some(exit);
+        self.ready_at = None;
+        self.state = State::Failed;
+        self.restart_at = None;
+        Action::GiveUp
     }
 
     /// Alive, but with a lost function.
@@ -176,6 +194,10 @@ impl Service {
     pub fn died(&mut self, now: u64, exit: Exit) -> Action {
         self.last_exit = Some(exit);
         self.ready_at = None;
+        if self.retired {
+            self.state = State::Stopped;
+            return Action::Nothing;
+        }
         self.restarts += 1;
         if self.restarts > self.policy.max_restarts {
             self.state = State::Failed;
@@ -370,6 +392,28 @@ mod tests {
         s.ready(5);
         assert_eq!(s.state(), State::Ready);
         assert_eq!(s.status().ready_at, Some(5));
+    }
+
+    #[test]
+    fn a_retired_or_abandoned_service_is_not_restarted() {
+        let mut s = Service::new(policy(), false);
+        s.starting(0);
+        s.ready(5);
+        s.stop();
+        assert_eq!(s.died(10, Exit::Killed), Action::Nothing);
+        assert_eq!(s.state(), State::Stopped);
+        assert_eq!(s.status().last_exit, Some(Exit::Killed));
+        assert_eq!(s.tick(10_000), Action::Nothing);
+        // An explicit start lifts the retirement.
+        s.starting(20);
+        assert!(matches!(s.died(30, Exit::Code(1)), Action::Restart { .. }));
+
+        let mut t = Service::new(policy(), false);
+        t.starting(0);
+        assert_eq!(t.tick(1000), Action::Timeout);
+        assert_eq!(t.abandon(Exit::StartTimeout), Action::GiveUp);
+        assert_eq!(t.state(), State::Failed);
+        assert_eq!(t.tick(100_000), Action::Nothing);
     }
 
     extern crate std;
