@@ -1,8 +1,9 @@
 # Audit 2026-10-25 E, L4: a process calling `event_record` in a loop used
 # to push every other event out of the kernel's 64-entry ring. Each process
-# now has a share of it (16 at once, one more every 500 ms): hello_app's
-# events, recorded before the flood, are still in `diag`, and what the
-# flood lost is reported with its last event.
+# now has a rate (16 at once, one more every 500 ms) and a share of the ring
+# (8 entries, replacing its own oldest): hello_app's events, recorded before
+# the flood, are still in `diag`, and what the flood lost is reported with
+# its last event.
 name = "diag.event_flood"
 description = "the kernel bounds each process's share of the event ring"
 level = "full"
@@ -27,7 +28,6 @@ serial_contains = [
 serial_absent = ["KERNEL PANIC", "diag: no access"]
 serial_order = [
     "s] process 21 'hello_app' exited with code 0",
-    "s] fault reported by process 22: event flood (code 15)",
     "s] fault reported by process 22: events dropped (code 184)",
     "s] fault reported by process 22: event flood end (code 200)",
 ]

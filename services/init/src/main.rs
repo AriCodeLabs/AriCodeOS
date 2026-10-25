@@ -1022,6 +1022,9 @@ struct Resident {
     probe: Probe,
     endpoint: Handle,
     process: Option<Handle>,
+    /// A process that outlived its kill (`Service::abandon`): watched so
+    /// that its endpoints are retired once it does exit.
+    abandoned: Option<Handle>,
     sup: Service,
     /// Extra driver argument bits for every (re)launch (`abi::driver_arg`).
     driver_arg: u64,
@@ -1110,6 +1113,7 @@ impl Supervisor {
             probe,
             endpoint,
             process: None,
+            abandoned: None,
             sup: Service::new(policy, optional),
             driver_arg: 0,
         });
@@ -1260,6 +1264,9 @@ impl Supervisor {
                 stuck = matches!(sys::process_wait(h, 2000), Err(Error::Timeout));
             }
         }
+        if stuck {
+            r.abandoned = r.process.take();
+        }
         // A process that could not be killed may still be serving: its
         // endpoints stay open (audit robustness-1, reviewer 1), and no new
         // generation competes with it.
@@ -1317,6 +1324,18 @@ impl Supervisor {
     /// Watches the processes: deaths, start timeouts and restarts that are due.
     fn poll(&mut self) {
         let now = now_ms();
+        for r in self.slots[..self.count].iter_mut().flatten() {
+            let Some(h) = r.abandoned else { continue };
+            if matches!(sys::process_wait(h, 0), Err(Error::Timeout)) {
+                continue;
+            }
+            let _ = sys::handle_close(h);
+            r.abandoned = None;
+            sys::print(b"AriInit: service ");
+            sys::print(r.name.as_bytes());
+            sys::print(b": its abandoned process exited at last\n");
+            r.retire_endpoints();
+        }
         for i in 0..self.count {
             let (process, state) = match self.slots[i].as_ref() {
                 Some(r) => (r.process, r.sup.state()),

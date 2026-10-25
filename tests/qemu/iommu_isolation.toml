@@ -1,8 +1,9 @@
 # Phase 33: a test driver receives the virtio-blk, reads a sector into its
 # (translated) buffer and then tells the device to write to memory that is not
 # its own: the unit blocks it and logs the fault; the domain is freed with
-# the process. A client buffer the driver unmapped is out of the device's
-# reach too (audit 2026-10-25 C, L11). Also (audit 3eb4965, finding 2) a function reassigned
+# the process. A client buffer the driver unmapped and whose handle it
+# closed is out of the device's reach too, while one whose handle it holds
+# stays reachable (audit 2026-10-25 C, L11; incident 0017). Also (audit 3eb4965, finding 2) a function reassigned
 # to another domain keeps its context when the previous one is freed.
 name = "iommu.isolation"
 description = "test=iommu: legitimate DMA translated, DMA to foreign memory blocked and logged, domain freed"
@@ -18,7 +19,7 @@ serial_contains = [
     "in identity domain",
     "iommu: DMA fault from 00:02.0 (write at 0x1000):",
     "dma_rogue: legitimate read ok, DMA to foreign memory blocked (",
-    "dma_rogue: client buffer reachable while mapped, blocked once unmapped",
+    "dma_rogue: client buffer reachable while mapped or held, blocked once given back",
     "iommu selftest ok (legitimate read translated, DMA to foreign memory and to an unmapped client buffer blocked with",
     "memory intact, domain freed, reassignment of 00:02.0 kept)",
     "iommu: 00:02.0 reassigned from the domain of process 1001 to domain",

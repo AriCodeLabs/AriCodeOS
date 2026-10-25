@@ -670,9 +670,14 @@ pub fn on_fault_irq() {
                 let (low, high) = (u.r64(off), u.r64(off + 8));
                 if let Some(f) = FaultRecord::decode(low, high) {
                     FAULTS.fetch_add(1, Ordering::Relaxed);
-                    crate::events::record(
+                    // Charged to the share of the process whose domain has
+                    // the device: a driver making it fault in a loop
+                    // overwrites only its own events (incident 0040).
+                    let owner = s.owners.get(&f.source_id).copied().unwrap_or(0);
+                    crate::events::record_caused(
+                        owner,
                         aricode_abi::sysinfo::EventKind::DmaFault,
-                        0,
+                        owner,
                         f.source_id as u64,
                         aricode_iommu::fault_reason_name(f.reason),
                     );
@@ -726,8 +731,9 @@ pub fn selftest() {
         }
     }
     // A client's buffer, handed over last: the test driver maps it, lets the
-    // device read into it, unmaps it and tries again, which must fault and
-    // leave the 0xA5 it wrote (audit 2026-10-25 C, L11).
+    // device read into it, unmaps it (the device still reaches it while the
+    // handle is held), closes the handle and tries again, which must fault
+    // and leave the 0xA5 it wrote (audit 2026-10-25 C, L11).
     let client = crate::hw::dma_alloc(4096).expect("client buffer");
     let client_phys = match &client.kind {
         ObjectKind::Dma(d) => d.region.phys,
@@ -766,11 +772,18 @@ pub fn selftest() {
         "the device wrote to memory outside its domain"
     );
     // SAFETY: the client buffer, still held by `client`.
-    let tail = unsafe { (phys::phys_to_virt(client_phys + 510) as *const [u8; 2]).read() };
+    let tail = |off: u64| unsafe {
+        (phys::phys_to_virt(client_phys + off + 510) as *const [u8; 2]).read()
+    };
     assert_eq!(
-        tail,
+        tail(1024),
+        [0x55, 0xAA],
+        "the device must reach a client buffer whose handle its driver holds"
+    );
+    assert_eq!(
+        tail(2048),
         [0xA5, 0xA5],
-        "the device wrote to a client buffer its driver had unmapped"
+        "the device wrote to a client buffer its driver had given back"
     );
     drop(client);
     let (_, domains, _) = stats();

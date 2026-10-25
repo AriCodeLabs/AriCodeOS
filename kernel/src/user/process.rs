@@ -87,6 +87,11 @@ pub struct Process {
     /// Its share of the event ring for the events its own calls cause
     /// (`event_record`, quota refusals).
     events: aricode_faults::Budget,
+    /// Client buffers a mapping put in its IOMMU domain, unmapped while it
+    /// still held a handle to them: a driver keeps the handle of a buffer
+    /// its device may still own (incident 0017), so the device keeps
+    /// reaching it until the last handle goes (`settle_lingering`).
+    lingering: Vec<(u64, alloc::sync::Weak<crate::object::KernelObject>)>,
 }
 
 /// Frames first-touch backing never takes (ADR 0049): below this many free
@@ -399,6 +404,7 @@ fn spawn_full(
             on_demand,
             on_demand_backed: 0,
             events: aricode_faults::Budget::new(),
+            lingering: Vec::new(),
         },
     );
     scheduler::start_thread(thread);
@@ -1152,19 +1158,22 @@ pub fn map_foreign(
     if dma.is_some() {
         p.dma_mapped += span;
     }
+    // A lingering buffer mapped again: this mapping takes it over.
+    let lingered = dma.is_some() && take_lingering(p, start);
     p.foreign.push(Foreign {
         virt,
         phys: start,
         span,
         dma,
-        in_domain: false,
+        in_domain: lingered,
     });
     Ok((virt + offset, true))
 }
 
-/// Records an event the current process caused, within its share of the
-/// ring (`aricode_faults::Budget`); events over it are counted and reported
-/// as `events dropped` with the next one that fits.
+/// Records an event the current process caused, within its rate
+/// (`aricode_faults::Budget`: events over it are counted and reported as
+/// `events dropped` with the next one that fits) and its share of the ring
+/// (`events::SHARE`).
 pub fn record_event(kind: aricode_abi::sysinfo::EventKind, code: u64, name: &str) {
     let Some(pid) = current_pid() else {
         return crate::events::record(kind, 0, code, name);
@@ -1181,29 +1190,88 @@ pub fn record_event(kind: aricode_abi::sysinfo::EventKind, code: u64, name: &str
         None => 0,
     };
     if dropped > 0 {
-        crate::events::record(
+        crate::events::record_caused(
+            pid.0,
             aricode_abi::sysinfo::EventKind::Fault,
             pid.0,
             dropped,
             "events dropped",
         );
     }
-    crate::events::record(kind, pid.0, code, name);
+    crate::events::record_caused(pid.0, kind, pid.0, code, name);
 }
 
-/// Records that the mapping at `virt` (an address `map_foreign` returned)
-/// put its buffer in the IOMMU domain. `false` if the mapping is gone.
-pub fn foreign_in_domain(virt: u64) -> bool {
+/// Whether `handles` holds a capability to `obj`.
+fn holds(handles: &crate::object::Handles, obj: &crate::object::ObjectRef) -> bool {
+    handles
+        .iter()
+        .any(|(cap, _)| alloc::sync::Arc::ptr_eq(cap.object(), obj))
+}
+
+/// Removes `start` from the lingering buffers of `p`; whether it was there.
+fn take_lingering(p: &mut Process, start: u64) -> bool {
+    let before = p.lingering.len();
+    p.lingering.retain(|(phys, _)| *phys != start);
+    p.lingering.len() != before
+}
+
+/// `mmio_map` put the buffer at `phys` in the current process's IOMMU
+/// domain: records it on the mapping of that buffer, so its unmap takes it
+/// out again. `false` if no mapping or lingering handle of this process
+/// needs it any more (another thread unmapped it meanwhile): the caller
+/// takes it out. Matched by physical address, never by the virtual one,
+/// which a concurrent unmap and map may have reused.
+pub fn foreign_in_domain(phys: u64) -> bool {
     let Some(pid) = current_pid() else {
         return false;
     };
-    let start = virt & !(PAGE_SIZE - 1);
-    PROCESSES
-        .lock()
-        .get_mut(&pid)
-        .and_then(|p| p.foreign.iter_mut().find(|f| f.virt == start))
-        .map(|f| f.in_domain = true)
-        .is_some()
+    let start = phys & !(PAGE_SIZE - 1);
+    let mut procs = PROCESSES.lock();
+    let Some(p) = procs.get_mut(&pid) else {
+        return false;
+    };
+    match p
+        .foreign
+        .iter_mut()
+        .find(|f| f.phys == start && f.dma.is_some())
+    {
+        Some(f) => {
+            f.in_domain = true;
+            true
+        }
+        None => p.lingering.iter().any(|(l, _)| *l == start),
+    }
+}
+
+/// After the current process closed or gave away handles: the lingering
+/// buffers it no longer holds leave its IOMMU domain.
+pub fn settle_lingering() {
+    let Some(pid) = current_pid() else {
+        return;
+    };
+    let gone: Vec<u64> = {
+        let mut procs = PROCESSES.lock();
+        let Some(p) = procs.get_mut(&pid) else {
+            return;
+        };
+        if p.lingering.is_empty() {
+            return;
+        }
+        let handles = &p.handles;
+        let mut gone = Vec::new();
+        p.lingering.retain(|(phys, buffer)| {
+            let keep = buffer.upgrade().is_some_and(|b| holds(handles, &b));
+            // A freed buffer already left every domain (`DmaBuffer::drop`).
+            if !keep && buffer.strong_count() > 0 {
+                gone.push(*phys);
+            }
+            keep
+        });
+        gone
+    };
+    for phys in gone {
+        crate::iommu::unmap_region(pid.0, phys);
+    }
 }
 
 /// `mmio_unmap`: removes the current process's foreign mapping that
@@ -1212,7 +1280,7 @@ pub fn foreign_in_domain(virt: u64) -> bool {
 /// which may free it.
 pub fn unmap_foreign(virt: u64) -> Result<(), aricode_abi::Error> {
     let pid = current_pid().ok_or(aricode_abi::Error::Fault)?;
-    let f = {
+    let (f, release) = {
         let mut procs = PROCESSES.lock();
         let p = procs.get_mut(&pid).ok_or(aricode_abi::Error::Fault)?;
         let start = virt & !(PAGE_SIZE - 1);
@@ -1229,12 +1297,25 @@ pub fn unmap_foreign(virt: u64) -> Result<(), aricode_abi::Error> {
         if f.dma.is_some() {
             p.dma_mapped -= f.span;
         }
-        f
+        // Its devices stop reaching a client buffer with the mapping, not
+        // when the buffer is freed; while the process still holds a handle
+        // to it, with that handle (its device may still own the buffer).
+        let release = match &f.dma {
+            Some(buffer) if f.in_domain => {
+                if holds(&p.handles, buffer) {
+                    p.lingering
+                        .push((f.phys, alloc::sync::Arc::downgrade(buffer)));
+                    false
+                } else {
+                    true
+                }
+            }
+            _ => false,
+        };
+        (f, release)
     };
     vmm::flush_own_user_range(f.virt, f.span);
-    // Its devices stop reaching a client buffer with the mapping, not when
-    // the buffer is freed.
-    if f.in_domain {
+    if release {
         crate::iommu::unmap_region(pid.0, f.phys);
     }
     // Only now can the addresses be handed out again.

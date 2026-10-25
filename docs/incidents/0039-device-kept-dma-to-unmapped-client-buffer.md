@@ -32,10 +32,25 @@ another service.
 ## Fix
 
 `map_region` reports whether the call put the region in the domain; the
-mapping records it (`Foreign::in_domain`), and `mmio_unmap` takes the
-region out of that process's domain (`iommu::unmap_region`, IOTLB
-invalidated) right after the CPU mapping goes. A buffer the process
-allocated itself stays in its domain, as before. Drivers keep the handle,
-not the mapping, of a buffer their device may still own (incident 0017),
-and serve one request at a time, so no in-flight transfer loses its
-buffer.
+mapping records it (`Foreign::in_domain`, matched by physical address so a
+concurrent unmap and map in another thread cannot mark the wrong record).
+When the mapping goes, the region leaves that process's domain
+(`iommu::unmap_region`, IOTLB invalidated), unless the process still holds
+a handle to the buffer: a driver keeps the handle of a buffer its device
+may still own (incident 0017, `DeviceOwned`, "kept for good"), so the
+region then stays until the last handle is closed or given away
+(`settle_lingering`, after `handle_close` and `ipc_send`), or until the
+buffer is freed. A buffer the process allocated itself stays in its
+domain, as before.
+
+## Audit
+
+The independent audit of the first version found that removing the
+region with the mapping broke incident 0017's invariant: `ClientBuffers`
+evicting the mapping of a buffer an xHCI or EHCI controller still owned
+would have made the stalled transfer fault, and the controller halt,
+instead of landing in the kept buffer. Fixed as above; `iommu.isolation`
+now checks both sides: the device reaches the buffer while its handle is
+held after the unmap, and faults once the handle is closed. The same audit
+moved the client-buffer check before the illegal DMA, so a request the
+device never completes cannot leave the queue stuck for it.

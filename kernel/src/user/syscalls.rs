@@ -28,7 +28,11 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         }
         nr::THREAD_GET_TID => Ok(scheduler::current_tid().0 as u64),
         nr::ABI_VERSION => Ok(ABI_VERSION as u64),
-        nr::HANDLE_CLOSE => with_handles(|t| t.remove(h).map(|_| 0).map_err(abi_error)),
+        nr::HANDLE_CLOSE => {
+            let r = with_handles(|t| t.remove(h).map(|_| 0).map_err(abi_error));
+            process::settle_lingering();
+            r
+        }
         nr::HANDLE_DUPLICATE => with_handles(|t| {
             lookup(t, h, Rights::NONE)?;
             t.duplicate(h, Rights(frame.rsi as u32), |cap, rights| {
@@ -83,7 +87,12 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         }),
         nr::PCI_CLAIM => pci_claim(h, frame.rsi as usize, frame.rdx),
         nr::PROCESS_WAIT => process_wait(h, frame.rsi),
-        nr::IPC_SEND => ipc_send(h, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9),
+        nr::IPC_SEND => {
+            let r = ipc_send(h, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9);
+            // The handles it transferred may have been a lingering buffer's.
+            process::settle_lingering();
+            r
+        }
         nr::IPC_RECEIVE => ipc_receive(h, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9),
         nr::IPC_RECEIVE_ANY => ipc_receive_any(
             frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9,
@@ -834,9 +843,10 @@ fn mmio_map(h: Handle) -> Result<u64, Error> {
         let r = match source_id {
             Some(sid) => crate::iommu::attach(pid.0, sid),
             // A buffer this call put in the domain leaves it with the
-            // mapping (`mmio_unmap`); one the process allocated stays.
+            // mapping (`mmio_unmap`) or with the last handle after it; one
+            // the process allocated stays.
             None if held.is_some() => crate::iommu::map_region(pid.0, phys, len).map(|added| {
-                if added && !process::foreign_in_domain(virt) {
+                if added && !process::foreign_in_domain(phys) {
                     // Unmapped meanwhile by another thread of the process.
                     crate::iommu::unmap_region(pid.0, phys);
                 }
