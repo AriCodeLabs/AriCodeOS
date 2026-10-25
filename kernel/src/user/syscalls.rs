@@ -833,7 +833,14 @@ fn mmio_map(h: Handle) -> Result<u64, Error> {
     if let Some(pid) = process::current_pid() {
         let r = match source_id {
             Some(sid) => crate::iommu::attach(pid.0, sid),
-            None if held.is_some() => crate::iommu::map_region(pid.0, phys, len),
+            // A buffer this call put in the domain leaves it with the
+            // mapping (`mmio_unmap`); one the process allocated stays.
+            None if held.is_some() => crate::iommu::map_region(pid.0, phys, len).map(|added| {
+                if added && !process::foreign_in_domain(virt) {
+                    // Unmapped meanwhile by another thread of the process.
+                    crate::iommu::unmap_region(pid.0, phys);
+                }
+            }),
             None => Ok(()),
         };
         if let Err(e) = r {
@@ -892,7 +899,7 @@ fn dma_alloc(h: Handle, len: u64) -> Result<u64, Error> {
     }
     let dma = crate::hw::dma_alloc(len).map_err(|_| Error::Limit)?;
     if let (Some(pid), ObjectKind::Dma(d)) = (process::current_pid(), &dma.kind) {
-        if let Err(e) = crate::iommu::map_region(pid.0, d.region.phys, d.region.len) {
+        if let Err(e) = crate::iommu::map_region(pid.0, d.region.phys, d.region.len).map(|_| ()) {
             warn!("dma_alloc: {e}");
             return Err(Error::Limit);
         }

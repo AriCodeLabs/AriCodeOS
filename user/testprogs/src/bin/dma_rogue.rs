@@ -4,13 +4,16 @@
 //! `virtio_pci` contract (SERVICE = SYSTEM handle with READ), reads sector 0
 //! into its own DMA buffer (translated by the unit) and then asks the device
 //! to write to a physical address it does not own: the request must not
-//! complete and the unit must have recorded the fault.
+//! complete and the unit must have recorded the fault. Then, with a client's
+//! buffer (a DMA object the kernel hands it last): a read into it works
+//! while it is mapped, and is blocked once it is unmapped (audit 2026-10-25
+//! C, L11).
 #![no_std]
 #![no_main]
 
 use aricode_rt::fmt_u64;
 use aricode_rt::sys::virtio_pci::{DmaRegion, Queue, Transport, IRQ, SERVICE};
-use aricode_rt::sys::{self, abi, Error};
+use aricode_rt::sys::{self, abi, kind, permissions, Error, Handle};
 use aricode_virtio::blk;
 
 /// Reserved low memory: never belongs to this process or anyone else.
@@ -56,6 +59,17 @@ fn faults() -> Result<u64, u64> {
 }
 
 fn main(mask: u64) -> u64 {
+    // The client buffer, found before this driver allocates DMA buffers of
+    // its own, which would be listed too.
+    let mut client = None;
+    permissions::granted(|h, _| {
+        if permissions::is(h, kind::DMA) {
+            client = Some(h);
+        }
+    });
+    let Some(client) = client else {
+        return 60;
+    };
     let transport = match Transport::open(mask, 0) {
         Ok(t) => t,
         Err(e) => return e.code(),
@@ -110,6 +124,46 @@ fn main(mask: u64) -> u64 {
     sys::print(b"dma_rogue: legitimate read ok, DMA to foreign memory blocked (");
     sys::print(fmt_u64(after - before, &mut b));
     sys::print(b" fault(s) recorded)\n");
+    client_buffer(&transport, &mut queue, &mut req, client)
+}
+
+/// The client buffer the kernel handed over: mapped, the device reads
+/// sector 0 into it; unmapped, the same read must fault and leave it as it
+/// was (`0xA5`), which the kernel checks again after the exit.
+fn client_buffer(
+    transport: &Transport,
+    queue: &mut Queue,
+    req: &mut DmaRegion,
+    client: Handle,
+) -> u64 {
+    let (Ok(phys), Ok(virt)) = (sys::dma_phys(client), sys::mmio_map(client)) else {
+        return 61;
+    };
+    // SAFETY: the client buffer, 4 KiB, mapped RW until the unmap below.
+    let bytes = unsafe { core::slice::from_raw_parts_mut(virt as *mut u8, 512) };
+    match submit(transport, queue, req, phys, 2000) {
+        Ok(true) if bytes[510] == 0x55 && bytes[511] == 0xAA => {}
+        Ok(_) => return 62,
+        Err(e) => return e,
+    }
+    bytes.fill(0xA5);
+    if sys::mmio_unmap(virt).is_err() {
+        return 63;
+    }
+    let Ok(before) = faults() else {
+        return 50;
+    };
+    if let Err(e) = submit(transport, queue, req, phys, 500) {
+        return e;
+    }
+    let Ok(after) = faults() else {
+        return 50;
+    };
+    if after <= before {
+        sys::print(b"dma_rogue: the device still reached the client buffer after its unmap\n");
+        return 64;
+    }
+    sys::print(b"dma_rogue: client buffer reachable while mapped, blocked once unmapped\n");
     0
 }
 

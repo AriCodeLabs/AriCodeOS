@@ -102,7 +102,7 @@ of this document.
 | L19 | sshd accepts exec/shell on a channel it already closed [C-L8] |
 | L20 | The TLS key seed falls back to zeros if `sys::random` fails [C-L9] |
 | L21 | SSH sequence numbers wrap without a forced rekey; strict KEX only when the client offers it (Terrapin with old clients) [C-L10, D-L6, D-L7] |
-| L22 | A driver's device keeps DMA access to client buffers after `mmio_unmap` [C-L11] |
+| L22 | A driver's device keeps DMA access to client buffers after `mmio_unmap` [C-L11] — **fixed** on `fix/init-supervisor` (incident 0039) |
 | L23 | X.509: duplicate extensions accepted, a CA accepted as a leaf, CN fallback, wildcards over public suffixes, IP vs dNSName, NUL/control bytes in dNSName [D-L1..L4] — **fixed** except the CN fallback and wildcards over public suffixes (incident 0029) |
 
 ### Info

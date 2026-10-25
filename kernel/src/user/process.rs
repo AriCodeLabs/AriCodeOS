@@ -177,6 +177,9 @@ struct Foreign {
     phys: u64,
     span: u64,
     dma: Option<crate::object::ObjectRef>,
+    /// Mapping it put the buffer in the process's IOMMU domain: unmapping
+    /// takes it out again (audit 2026-10-25 C, L11).
+    in_domain: bool,
 }
 
 /// Reason given when a process is killed at another's request.
@@ -1155,8 +1158,24 @@ pub fn map_foreign(
         phys: start,
         span,
         dma,
+        in_domain: false,
     });
     Ok((virt + offset, true))
+}
+
+/// Records that the mapping at `virt` (an address `map_foreign` returned)
+/// put its buffer in the IOMMU domain. `false` if the mapping is gone.
+pub fn foreign_in_domain(virt: u64) -> bool {
+    let Some(pid) = current_pid() else {
+        return false;
+    };
+    let start = virt & !(PAGE_SIZE - 1);
+    PROCESSES
+        .lock()
+        .get_mut(&pid)
+        .and_then(|p| p.foreign.iter_mut().find(|f| f.virt == start))
+        .map(|f| f.in_domain = true)
+        .is_some()
 }
 
 /// `mmio_unmap`: removes the current process's foreign mapping that
@@ -1185,6 +1204,11 @@ pub fn unmap_foreign(virt: u64) -> Result<(), aricode_abi::Error> {
         f
     };
     vmm::flush_own_user_range(f.virt, f.span);
+    // Its devices stop reaching a client buffer with the mapping, not when
+    // the buffer is freed.
+    if f.in_domain {
+        crate::iommu::unmap_region(pid.0, f.phys);
+    }
     // Only now can the addresses be handed out again.
     if let Some(p) = PROCESSES.lock().get_mut(&pid) {
         p.mmio_ranges.free(f.virt, f.span);
