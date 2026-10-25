@@ -571,6 +571,10 @@ pub enum DiskVariant {
     /// `demo.wasm` imports `aricode.file_write` with another signature: the
     /// runner does not link it (audit 6ee19fb, finding 5).
     WasmBadImport,
+    /// `demo.wasm` is the largest module AriFS stores, nearly all of it
+    /// empty blocks: its block table must fit the runner's heap (incident
+    /// 0042, audit M1).
+    WasmManyBlocks,
     /// USB stick image: the ESP lives inside the disk (no `fat:` in QEMU).
     UsbImage,
     /// Slot A and UPDATE hold images padded past the updater's download
@@ -619,6 +623,7 @@ impl DiskVariant {
             "wasm-restricted" => Self::WasmRestricted,
             "wasm-invalid" => Self::WasmInvalid,
             "wasm-bad-import" => Self::WasmBadImport,
+            "wasm-many-blocks" => Self::WasmManyBlocks,
             "usb-image" => Self::UsbImage,
             "large-a" => Self::LargeA,
             "oversized-package" => Self::OversizedPackage,
@@ -869,6 +874,9 @@ pub fn write_test_disk(
         DiskVariant::WasmBadImport => {
             overwrite_arifs(&mut img, PART_ARI0, WASM_MODULE_FILE, BAD_IMPORT_WASM)?
         }
+        DiskVariant::WasmManyBlocks => {
+            overwrite_arifs(&mut img, PART_ARI0, WASM_MODULE_FILE, &many_blocks_wasm())?
+        }
         DiskVariant::FsNearlyFull => fill_arifs(&mut img, PART_ARI0, FS_FREE_ENTRIES)?,
         DiskVariant::FsOneShort => fill_arifs(&mut img, PART_ARI0, FS_FREE_ENTRIES - 1)?,
         DiskVariant::OversizedPackage => install_files(
@@ -937,12 +945,35 @@ pub fn write_test_disk(
             | DiskVariant::WasmRestricted
             | DiskVariant::WasmInvalid
             | DiskVariant::WasmBadImport
+            | DiskVariant::WasmManyBlocks
             | DiskVariant::LargeA
             | DiskVariant::OversizedPackage => {}
         }
         init_ariboot(&mut img, PART_ARIBOOT, state);
     }
-    io(fs::write(path, img), "write test disk")
+    write_sparse(path, &img)
+}
+
+/// Writes `img` leaving its all-zero 64 KiB chunks as holes: a scenario
+/// disk is 48 MiB, mostly zeros, and writing it whole put 48 MiB of dirty
+/// pages per boot on the host, which the guest's first flush then waited
+/// for (incident 0043: with ten guests at once, requests took over 2 s).
+fn write_sparse(path: &Path, img: &[u8]) -> Result {
+    use std::io::{Seek, SeekFrom, Write};
+    const CHUNK: usize = 64 * 1024;
+    let mut f = io(fs::File::create(path), "create test disk")?;
+    io(f.set_len(img.len() as u64), "size test disk")?;
+    for (i, chunk) in img.chunks(CHUNK).enumerate() {
+        if chunk.iter().all(|&b| b == 0) {
+            continue;
+        }
+        io(
+            f.seek(SeekFrom::Start((i * CHUNK) as u64)),
+            "seek test disk",
+        )?;
+        io(f.write_all(chunk), "write test disk")?;
+    }
+    Ok(())
 }
 
 /// `ARIBOOT` of a new image: the boot state in sector 0 and no kernel seed
@@ -1118,6 +1149,44 @@ const BAD_IMPORT_WASM: &[u8] = &[
     0x07, 0x08, 0x01, 0x04, 0x6D, 0x61, 0x69, 0x6E, 0x00, 0x01, // export "main" = func 1
     0x0A, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0B, // main: call 0
 ];
+
+/// Valid module as large as an AriFS file (32 KiB): `main(i64) -> i32`
+/// enters about 10 900 empty blocks one after another and returns 7. Its
+/// block table takes 12 bytes per block (~128 KiB); the map it replaced
+/// took ~63 and panicked the runner (incident 0042, audit M1).
+fn many_blocks_wasm() -> Vec<u8> {
+    fn leb(mut v: usize, out: &mut Vec<u8>) {
+        loop {
+            let b = (v & 0x7F) as u8;
+            v >>= 7;
+            if v == 0 {
+                out.push(b);
+                return;
+            }
+            out.push(b | 0x80);
+        }
+    }
+    let capacity = aricode_arifs::FILE_CAPACITY_SECTORS as usize * aricode_arifs::SECTOR;
+    let mut body = vec![0x00]; // no locals
+    for _ in 0..(capacity - 80) / 3 {
+        body.extend_from_slice(&[0x02, 0x40, 0x0B]); // block end
+    }
+    body.extend_from_slice(&[0x41, 0x07, 0x0B]); // i32.const 7 ; end
+    let mut code = vec![0x01];
+    leb(body.len(), &mut code);
+    code.extend_from_slice(&body);
+    let mut module = vec![
+        0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, // header
+        0x01, 0x06, 0x01, 0x60, 0x01, 0x7E, 0x01, 0x7F, // type: (i64) -> i32
+        0x03, 0x02, 0x01, 0x00, // function: type 0
+        0x07, 0x08, 0x01, 0x04, 0x6D, 0x61, 0x69, 0x6E, 0x00, 0x00, // export "main"
+        0x0A, // code
+    ];
+    leb(code.len(), &mut module);
+    module.extend_from_slice(&code);
+    assert!(module.len() <= capacity, "{} bytes", module.len());
+    module
+}
 
 /// Replaces an AriFS file entirely (the library's atomic replace).
 fn overwrite_arifs(img: &mut [u8], part: (u64, u64), name: &str, bytes: &[u8]) -> Result {

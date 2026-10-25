@@ -1,0 +1,22 @@
+# Incident 0042, audit M1: a valid module as large as an AriFS file
+# (32 KiB) made of ~10 900 empty blocks. Its block table (12 bytes per
+# block, built once by the validator) fits the runner's 256 KiB heap and
+# the module runs; the per-instance map it replaced needed ~690 KiB and
+# panicked the runner.
+name = "wasm.many_blocks"
+description = "WASM module of 32 KiB of blocks: the block table fits the runner's heap and it runs"
+level = "full"
+areas = ["wasm", "sandbox", "shell"]
+cmdline = "qemu_exit shell"
+disk = "wasm-many-blocks"
+timeout_secs = 90
+stdin = ["run wasm_runner 5", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "wasm_runner: main returned 7",
+    "run: wasm_runner exited with 7",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "panic in user program", "module failed", "out of memory", "too large"]

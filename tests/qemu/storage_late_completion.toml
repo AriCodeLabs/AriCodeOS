@@ -13,11 +13,14 @@
 # before the fix the device's late write landed in a fresh buffer on the
 # timed-out buffer's frame. Boot 2 has the IOMMU on: before the fix the
 # late write was an IOMMU fault.
+#
+# Each injected request waits the driver's full 30 s request timeout
+# (incident 0043), so the two boots take about a minute longer.
 name = "storage.late_completion"
 description = "virtio-blk: a timed-out request's buffer is kept until the device is reset, so a late completion never lands in reused memory"
 level = "full"
 areas = ["storage", "virtio", "drivers"]
-timeout_secs = 120
+timeout_secs = 180
 
 [[boots]]
 cmdline = "qemu_exit iommu=off blk_fault=4300"

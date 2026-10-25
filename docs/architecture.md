@@ -687,9 +687,12 @@ latter briefly to add the region.
 - At startup the driver reads the GPT (`aricode-gpt`, header and table CRC)
   and announces the partitions; the xtask test disk carries a protective
   MBR, a GPT with backup and an `ARI0` partition of type AriCodeOS.
-- A request the device does not complete (a 2 s timeout with the
+- A request the device does not complete (a 30 s timeout with the
   descriptors still in the ring, an unexpected used entry, or
-  `DEVICE_NEEDS_RESET`) answers `Io`; the driver keeps the client's buffer
+  `DEVICE_NEEDS_RESET`) answers `Io` (30 s, the window Linux gives disk
+  commands: a busy host disk took over 2 s, incident 0043; a completion
+  found in the used ring at the deadline is taken and recorded as
+  `blk irq missing`); the driver keeps the client's buffer
   handle, resets the device (bounded, virtio 1.2 2.4), negotiates the same
   features, creates queue 0 again on its memory, and only then releases
   the buffer (`blk buf kept`, `blk reset`, `blk buf released`). Three
@@ -906,7 +909,11 @@ latter briefly to add the region.
   retries with `tcp_send_all`). A slot is freed when the user has
   closed and the connection has finished; a full table first gives up the
   closed TIME-WAIT connection that ends soonest (incident 0027), and
-  FIN-WAIT-2 gives up a peer that never closes after 30 s with a reset.
+  FIN-WAIT-2 gives up a peer that never closes after 30 s with a reset;
+  FIN-WAIT-1, CLOSING and LAST-ACK likewise after `CLOSING_MS` (30 s),
+  so a peer cannot hold a closed connection's slot (incident 0034).
+  Ports below 1024 need the session to have been given that port at
+  `Attach` (sshd's session gets 22); others are refused with `Denied`.
 - Listeners are protected (incident 0013, ADR 0035). A listener holds at
   most `tcp::listen_backlog(MAX_TCP) = 4` connections its owner has not
   accepted yet, half-open and established alike, so a burst of SYNs to port
@@ -969,7 +976,9 @@ latter briefly to add the region.
   socket that already waits), `net bad request` (`Status::Invalid`), `net
   bad handles` (`Status::BadHandles`), `net syn dropped` (a SYN to a
   listener refused with a reset: no free slot or the listener's backlog at
-  its cap, ADR 0035), `net sessions full` (an `Attach` with every session
+  its cap, ADR 0035), `net port reserved` (a listen or bind on a
+  privileged port the session was not given, incident 0034), `net
+  sessions full` (an `Attach` with every session
   slot taken), `net session create` (an `Attach` whose endpoint pair the
   kernel could not create), `net socks reclaimed` (sockets closed on behalf of a dead
   client, code 0, ADR 0037) and `net rx budget hit` (a round of reception
@@ -1097,6 +1106,9 @@ latter briefly to add the region.
   once and reads it whenever its content is recomposed); `Present` damages
   the window's content, and only presented pixels are guaranteed on screen;
   `Poll` waits with a deadline for a `Key`, `Click` or `Focus`; `Close` removes it.
+  Each program talks over a session of its own (`Attach`, ADR 0052): a
+  window answers only the session that made it, and closes when that
+  program is gone; window buffers must be DMA buffers.
   The compositor translates the keyboard (`aricode-input::Keyboard`) and delivers
   only to the focused window: the `gui.two_windows` probe checks that
   the other window sees nothing.

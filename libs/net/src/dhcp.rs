@@ -224,13 +224,16 @@ impl Client {
         match self.state {
             State::Init | State::Selecting => {
                 if self.state == State::Selecting {
-                    self.retries += 1;
+                    // Saturating: with no server, it grows for the whole
+                    // boot (audit 2026-10-25 B, L2: a debug build panicked
+                    // at 256).
+                    self.retries = self.retries.saturating_add(1);
                 }
                 self.state = State::Selecting;
                 write_message(self.xid, self.mac, DISCOVER, None, None, out)
             }
             State::Requesting => {
-                self.retries += 1;
+                self.retries = self.retries.saturating_add(1);
                 let offer = self.offer?;
                 write_message(
                     self.xid,

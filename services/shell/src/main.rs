@@ -999,6 +999,9 @@ fn http_get(fs: &mut FsClient, client: &mut NetClient, arg: &[u8]) {
         Err(HttpsError::EmptyRecords) => {
             print(b"http: TLS: the server kept sending records without data\n")
         }
+        Err(HttpsError::NoEntropy) => {
+            print(b"http: TLS: too few random bytes for a key; not connecting\n")
+        }
         Err(HttpsError::HeaderBytes) => {
             print(b"http: response headers too large in all (interim responses included)\n")
         }
@@ -1029,7 +1032,7 @@ fn tls_error(e: aricode_tls::Error) -> &'static [u8] {
     use aricode_tls::Error as E;
     use aricode_x509::Error as X;
     match e {
-        E::Certificate(X::Expired) => b"certificate expired",
+        E::Certificate(X::Expired) => b"certificate expired (or the clock is wrong)",
         E::Certificate(X::NotYetValid) => b"certificate not yet valid (check the clock)",
         E::Certificate(X::NameMismatch) => b"certificate does not match the host name",
         E::Certificate(X::UnknownIssuer) => b"certificate signed by an unknown authority",
@@ -1038,6 +1041,7 @@ fn tls_error(e: aricode_tls::Error) -> &'static [u8] {
         E::Certificate(X::NameConstraint) => {
             b"certificate outside the names its issuer may vouch for"
         }
+        E::Certificate(X::Distrusted) => b"certificate uses a key that is no longer trusted",
         E::Certificate(_) => b"certificate rejected",
         E::Alert(_) => b"the server sent an alert",
         E::Unsupported(_) => b"the server needs an unsupported TLS feature",

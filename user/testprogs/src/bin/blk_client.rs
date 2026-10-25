@@ -34,7 +34,15 @@ impl Client {
         sys::ipc_send(BLK, &req.encode(), &handles[..n], TIMEOUT_INFINITE).ok()?;
         let mut msg = [0u8; 32];
         let mut none: [Handle; 0] = [];
-        let (len, _) = sys::ipc_receive(self.reply, &mut msg, &mut none, 5000).ok()?;
+        // The block clients' reply wait: a slow but healthy request (up to
+        // the driver's 30 s) must not fail the boot (incident 0043).
+        let (len, _) = sys::ipc_receive(
+            self.reply,
+            &mut msg,
+            &mut none,
+            aricode_rt::sys::block::REPLY_WAIT_MS,
+        )
+        .ok()?;
         Reply::decode(&msg[..len])
     }
 

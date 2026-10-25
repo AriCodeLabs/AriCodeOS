@@ -790,3 +790,129 @@ fn constraints_on_roots_paths_and_ip_hosts() {
         Ok(())
     );
 }
+
+/// Audit 2026-10-25 D, M1: no clock, or one that reads before the build,
+/// skipped or defeated the validity check.
+#[test]
+fn certificates_are_checked_at_no_earlier_than_the_floor() {
+    assert_eq!(check_time(None), ValidityTime::AtLeast(TIME_FLOOR));
+    assert_eq!(
+        check_time(Some(946_684_800)),
+        ValidityTime::AtLeast(TIME_FLOOR)
+    );
+    assert_eq!(
+        check_time(Some(TIME_FLOOR + 5)),
+        ValidityTime::Clock(TIME_FLOOR + 5)
+    );
+    // Without a trusted clock only expiry before the floor is refused: a
+    // leaf issued after the floor passes, one expired before it fails
+    // (audit of incident 0036, H1: notBefore was checked against the floor
+    // too, refusing every certificate renewed after the release).
+    let roots = [cert!("rsa-root")];
+    let chain = [cert!("rsa-leaf"), cert!("rsa-int")];
+    let leaf = Certificate::parse(cert!("rsa-leaf")).unwrap();
+    let at = |floor| {
+        verify_chain(
+            &chain,
+            &roots,
+            "www.example.com",
+            ValidityTime::AtLeast(floor),
+        )
+    };
+    assert!(
+        at(leaf.not_before - 1).is_ok(),
+        "issued after the floor: fine"
+    );
+    assert!(at(leaf.not_after).is_ok());
+    assert_eq!(at(leaf.not_after + 1).err(), Some(Error::Expired));
+}
+
+#[test]
+fn distrusted_keys_are_refused_anywhere_in_the_chain() {
+    let spki = |der| aricode_crypto::sha256::sha256(Certificate::parse(der).unwrap().spki);
+    let chain = [RSA_LEAF, RSA_INT];
+    let host = "www.example.com";
+    verify_chain_with(&chain, &[RSA_ROOT], &[], host, Some(NOW)).unwrap();
+    // An unrelated key changes nothing.
+    verify_chain_with(&chain, &[RSA_ROOT], &[spki(EC_INT)], host, Some(NOW)).unwrap();
+    for distrusted in [RSA_LEAF, RSA_INT, RSA_ROOT] {
+        assert_eq!(
+            verify_chain_with(&chain, &[RSA_ROOT], &[spki(distrusted)], host, Some(NOW)).err(),
+            Some(Error::Distrusted)
+        );
+    }
+    // The root sent in the chain too, a chain ending in the root itself, a
+    // pinned leaf: still refused.
+    let root = [spki(RSA_ROOT)];
+    assert_eq!(
+        verify_chain_with(
+            &[RSA_LEAF, RSA_INT, RSA_ROOT],
+            &[RSA_ROOT],
+            &root,
+            host,
+            Some(NOW)
+        )
+        .err(),
+        Some(Error::Distrusted)
+    );
+    assert_eq!(
+        verify_chain_with(&[RSA_LEAF], &[RSA_LEAF], &[spki(RSA_LEAF)], host, Some(NOW)).err(),
+        Some(Error::Distrusted)
+    );
+    // Another anchor that signs nothing does not hide the distrusted one.
+    assert_eq!(
+        verify_chain_with(&chain, &[RSA_ROOT, EC_ROOT], &root, host, Some(NOW)).err(),
+        Some(Error::Distrusted)
+    );
+    // The default list is what verify_chain applies.
+    assert_eq!(
+        verify_chain(&chain, &[RSA_ROOT], host, Some(NOW)).is_ok(),
+        roots::DISTRUSTED.is_empty()
+    );
+}
+
+#[test]
+fn spki_is_the_published_pin_and_every_root_parses() {
+    // ISRG Root X1's well-known SPKI pin (base64
+    // C5+lpZ7tcVwmwQIMcRtPbsQtWLABXhQzejna0wHFr8M=).
+    const ISRG_X1_PIN: [u8; 32] = [
+        11, 159, 165, 165, 158, 237, 113, 92, 38, 193, 2, 12, 113, 27, 79, 110, 196, 45, 88, 176,
+        1, 94, 20, 51, 122, 57, 218, 211, 1, 197, 175, 195,
+    ];
+    let isrg = Certificate::parse(roots::DEFAULT[0]).unwrap();
+    assert_eq!(aricode_crypto::sha256::sha256(isrg.spki), ISRG_X1_PIN);
+    // The strict key encoding drops no embedded root (anchors that do not
+    // parse would be skipped silently).
+    // Anchors are read as `Parsed`: a root's own signature (SHA-1 for some)
+    // is never checked.
+    for (i, der) in roots::DEFAULT.iter().enumerate() {
+        assert!(Parsed::parse(der).is_ok(), "root {i}");
+    }
+}
+
+#[test]
+fn a_key_has_one_encoding() {
+    // ISRG Root X1's SubjectPublicKeyInfo contents: AlgorithmIdentifier
+    // (rsaEncryption, NULL) then the key.
+    let spki = Certificate::parse(roots::DEFAULT[0]).unwrap().spki;
+    let contents = der::single(spki, der::SEQUENCE).unwrap();
+    assert!(cert::parse_public_key(contents).is_ok());
+    let alg_len = 2 + contents[1] as usize;
+    let (alg, key) = contents.split_at(alg_len);
+    let rewrap = |alg_contents: &[u8]| {
+        let mut v = alg_contents.to_vec();
+        v.insert(0, alg_contents.len() as u8);
+        v.insert(0, der::SEQUENCE);
+        v.extend_from_slice(key);
+        v
+    };
+    let oid = &alg[2..13]; // 06 09 + nine bytes
+                           // Parameters absent, or something after them: the same key, refused.
+    assert_eq!(
+        cert::parse_public_key(&rewrap(oid)).err(),
+        Some(Error::Malformed)
+    );
+    let mut extra = alg[2..].to_vec();
+    extra.extend_from_slice(&[0x05, 0x00]);
+    assert!(cert::parse_public_key(&rewrap(&extra)).is_err());
+}

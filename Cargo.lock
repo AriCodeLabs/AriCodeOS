@@ -437,6 +437,7 @@ version = "0.14.0"
 dependencies = [
  "aricode-abi",
  "aricode-gfx",
+ "aricode-gpt",
  "aricode-http",
  "aricode-net",
  "aricode-proto",

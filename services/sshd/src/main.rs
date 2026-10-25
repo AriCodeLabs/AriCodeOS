@@ -31,7 +31,7 @@ use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::net::{NetClient, NetError};
 use aricode_rt::sys::{self, abi, Error, Handle};
 use aricode_ssh::keys_refresh::{Change, KeyRefresh};
-use aricode_ssh::{fingerprint, parse_authorized_keys, Event, Server};
+use aricode_ssh::{fingerprint, log_safe, parse_authorized_keys, Event, Server};
 
 const NET: Handle = Handle(0x0001_0004);
 const FS: Handle = Handle(0x0001_0005);
@@ -41,7 +41,9 @@ const SESSIONS: Handle = Handle(0x0001_0008);
 /// `authorized_keys`, read-only (ADR 0050); `FS` is sshd's own directory.
 const KEYS: Handle = Handle(0x0001_0009);
 
-const PORT: u16 = 22;
+/// Given to sshd's network session by init: no other program may listen
+/// on it (audit 2026-10-25 E, L1).
+const PORT: u16 = aricode_proto::net::SSH_PORT;
 /// A connection that has not authenticated after this long is dropped: the
 /// server attends one connection at a time, so an idle client must not
 /// hold the port.
@@ -69,6 +71,10 @@ struct Entropy {
     counter: u64,
     /// A non-empty `random_seed` from an earlier boot was read and mixed in.
     carried: bool,
+    /// A draw from the kernel gave fewer bytes than asked: whatever the
+    /// kernel says of its generator, this boot's keys are weak unless a
+    /// seed was carried (audit of incident 0036, M1).
+    draw_failed: bool,
 }
 
 impl Entropy {
@@ -79,7 +85,7 @@ impl Entropy {
             h.update(saved);
         }
         let mut fresh = [0u8; 32];
-        let _ = sys::random(SYSTEM, &mut fresh);
+        let draw_failed = sys::random(SYSTEM, &mut fresh) != Ok(fresh.len());
         h.update(&fresh);
         h.update(&sys::time::uptime_us(SYSTEM).unwrap_or(0).to_le_bytes());
         let state = h.finish();
@@ -87,6 +93,7 @@ impl Entropy {
             state,
             counter: 0,
             carried: saved.is_ok_and(|s| !s.is_empty()),
+            draw_failed,
         }
     }
 
@@ -100,12 +107,15 @@ impl Entropy {
     /// before this one add to it, so nothing is reported.
     fn check_for_host_key(&self) {
         let source = sys::random_source(SYSTEM);
-        if self.carried || source.is_some_and(|r| r.is_strong()) {
+        if self.carried || (!self.draw_failed && source.is_some_and(|r| r.is_strong())) {
             return;
         }
         let _ = sys::event_record(source.map_or(0, |r| r.source as u64), ENTROPY_WEAK_FAULT);
         let mut text = [0u8; abi::sysinfo::RandomSource::SUMMARY_MAX];
         let why = match source {
+            _ if self.draw_failed => {
+                alloc::string::String::from("the kernel gave too few random bytes")
+            }
             Some(r) => alloc::format!(
                 "kernel generator seeded from {}, {}",
                 r.summary(&mut text),
@@ -153,7 +163,7 @@ impl Entropy {
     /// Fresh 32 bytes: state, kernel randomness and a counter.
     fn next(&mut self) -> [u8; 32] {
         let mut fresh = [0u8; 32];
-        let _ = sys::random(SYSTEM, &mut fresh);
+        self.draw_failed |= sys::random(SYSTEM, &mut fresh) != Ok(fresh.len());
         self.counter += 1;
         let mut h = aricode_crypto::sha256::Sha256::new();
         h.update(&self.derive(b"fresh"));
@@ -401,15 +411,17 @@ fn serve(
                 for e in events.drain(..) {
                     match e {
                         Event::Authenticated { user } => {
+                            let mut safe = [0u8; 32];
                             sys::print(b"sshd: user '");
-                            sys::print(user.as_bytes());
+                            sys::print(log_safe(user.as_bytes(), &mut safe));
                             sys::print(b"' authenticated from ");
                             print_ip(peer);
                             sys::print(b"\n");
                         }
                         Event::AuthFailed { user } => {
+                            let mut safe = [0u8; 32];
                             sys::print(b"sshd: refused key for '");
-                            sys::print(user.as_bytes());
+                            sys::print(log_safe(user.as_bytes(), &mut safe));
                             sys::print(b"' from ");
                             print_ip(peer);
                             sys::print(b"\n");
@@ -639,12 +651,15 @@ fn main(_arg: u64) -> u64 {
     let seed = host_key(&mut fs, &mut entropy, &mut seed_saved);
     let mut listener = match net.tcp_listen(PORT) {
         Ok(l) => l,
-        Err(_) => {
-            say(b"cannot listen on port 22");
+        Err(e) => {
+            sys::print(b"sshd: cannot listen on port 22 (");
+            sys::print(e.describe().as_bytes());
+            sys::print(b")\n");
             ready();
             return 3;
         }
     };
+    let mut relisten_refused = false;
     let mut b = [0u8; 20];
     sys::print(b"sshd: listening on port 22, host key ");
     sys::print(fingerprint(&aricode_crypto::ed25519::public_key(&seed)).as_bytes());
@@ -669,9 +684,21 @@ fn main(_arg: u64) -> u64 {
             // Listen again on the next generation after a pause.
             Err(NetError::Ipc(Error::ReplyLost)) | Err(NetError::Status(Status::BadSock)) => {
                 sys::time::sleep_ms(500);
-                if let Ok(l) = net.tcp_listen(PORT) {
-                    listener = l;
-                    say(b"network service restarted: listening on port 22 again");
+                match net.tcp_listen(PORT) {
+                    Ok(l) => {
+                        listener = l;
+                        relisten_refused = false;
+                        say(b"network service restarted: listening on port 22 again");
+                    }
+                    // Said once, not every 500 ms: a refusal is never silent
+                    // (owner's rule), nor a flood.
+                    Err(e) if !relisten_refused => {
+                        relisten_refused = true;
+                        sys::print(b"sshd: cannot listen on port 22 again (");
+                        sys::print(e.describe().as_bytes());
+                        sys::print(b"); retrying\n");
+                    }
+                    Err(_) => {}
                 }
                 continue;
             }

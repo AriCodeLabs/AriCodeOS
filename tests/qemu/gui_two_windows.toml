@@ -4,6 +4,9 @@
 # receives the key. `gui_trace` makes the compositor log every frame with
 # one pixel sample per window (without it frames print nothing,
 # gui.frames_untraced); the first frame flushes the whole 1280x800 screen.
+# Each application has its own compositor session (ADR 0052): B cannot poll,
+# present or close A's window, nor make or end sessions, and the window B
+# leaves open closes when B is gone.
 name = "gui.two_windows"
 description = "ring 3 compositor: two isolated windows, click-to-focus and routed keyboard"
 level = "full"
@@ -35,8 +38,29 @@ serial_contains = [
     "gui_demo B: click button 1 at (380,280)",
     "gui_demo B: key 'h'",
     "gui_demo A: no keys",
+    "gui_demo B: the other window is out of reach",
+    "gui_demo B: leaving without closing its window",
+    "compositor: client 2 gone: 1 window(s) closed",
+    "gui_demo A: window closed",
+    "compositor: client 1 gone: 0 window(s) closed",
     "AriInit: gui ok (2 applications)",
     "[host] QMP: 6 input events sent",
     "ARICODEOS_KERNEL_READY",
 ]
-serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "gui_demo A: key", "gui_demo A: focus gained"]
+serial_absent = [
+    "KERNEL PANIC",
+    "USER STACK OVERFLOW",
+    "gui_demo A: key",
+    "gui_demo A: focus gained",
+    "reached a window that is not its own",
+    "made or ended a session",
+]
+# Window 1 is still open when B tries it, and B's window is reclaimed
+# before A closes its own.
+serial_order = [
+    "gui_demo B: the other window is out of reach",
+    "compositor: client 2 gone: 1 window(s) closed",
+    "gui_demo A: window closed",
+    "compositor: client 1 gone: 0 window(s) closed",
+    "AriInit: gui ok (2 applications)",
+]
