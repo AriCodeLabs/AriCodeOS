@@ -125,6 +125,11 @@ pub mod keys {
     /// crashes holding a client's read and checks the client keeps the
     /// device (ADR 0030).
     pub const INPUT_RESTART: &str = "input_restart";
+    /// Tests only: `input_orphan`, before the console bridge starts a
+    /// reader starts a read on each input service and dies with it
+    /// waiting; the keys typed next must still reach the shell (audit
+    /// 2026-10-25 C, M4).
+    pub const INPUT_ORPHAN: &str = "input_orphan";
     /// Tests only: `shell_fault`, the shell accepts `fault`, which makes it
     /// crash on purpose (a session shell that dies, ADR 0030).
     pub const SHELL_FAULT: &str = "shell_fault";
@@ -194,6 +199,7 @@ pub mod keys {
         RESTART_STORM,
         SERVICE_HANG,
         INPUT_RESTART,
+        INPUT_ORPHAN,
         SHELL_FAULT,
         SELFTEST,
         USB_FAULT,

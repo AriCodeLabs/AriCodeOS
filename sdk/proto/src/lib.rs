@@ -850,12 +850,17 @@ pub mod input {
     /// Events per reply.
     pub const MAX_EVENTS: usize = 4;
     pub const MAX_NAME: usize = 32;
+    /// The longest a read waits: a longer `timeout_ms` is cut to this, so a
+    /// reader that died while its read waited holds the service's one
+    /// place no longer (audit 2026-10-25 C, M4).
+    pub const MAX_READ_MS: u32 = 10_000;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Op {
         /// Device name in `Reply::name`.
         Info = 1,
-        /// Waits up to `timeout_ms` and returns up to `MAX_EVENTS` events.
+        /// Waits up to `timeout_ms` (at most `MAX_READ_MS`) and returns up
+        /// to `MAX_EVENTS` events.
         Read = 2,
     }
 

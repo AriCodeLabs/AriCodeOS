@@ -9,7 +9,7 @@
 #![no_main]
 
 use aricode_input::{Keyboard, EV_KEY};
-use aricode_proto::input::{Event, Reply, Status, MAX_EVENTS};
+use aricode_proto::input::{Event, Reply, Status, MAX_EVENTS, MAX_READ_MS};
 use aricode_rt::sys::input::{InputClient, InputError};
 use aricode_rt::sys::{self, abi, Handle};
 
@@ -20,8 +20,10 @@ const MAX_INPUTS: usize = 4;
 /// outstanding per device and the bridge waits on all their replies at
 /// once (ADR 0044), so a key press is forwarded as soon as its driver has
 /// it and an idle driver is not woken (before: 20 ms reads, polled in
-/// turn). A read that ends without events is simply started again.
-const READ_MS: u32 = 10_000;
+/// turn). A read that ends without events is simply started again. The
+/// longest a driver allows: a bridge that died holds a driver's one
+/// waiting place no longer.
+const READ_MS: u32 = MAX_READ_MS;
 /// How often the bridge looks for a read whose driver died holding it: its
 /// reply endpoint closes, which a wait on several endpoints does not
 /// report while the others are open (ADR 0036).
