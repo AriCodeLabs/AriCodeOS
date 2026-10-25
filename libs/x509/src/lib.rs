@@ -198,10 +198,35 @@ pub struct Certificate<'a> {
 /// at each release (docs/WORKFLOW.md).
 pub const TIME_FLOOR: u64 = 1_792_886_400;
 
-/// The time certificates are checked at: the real-time clock's Unix
-/// seconds, never earlier than `TIME_FLOOR`.
-pub fn check_time(rtc: Option<u64>) -> u64 {
-    rtc.unwrap_or(0).max(TIME_FLOOR)
+/// What a chain's validity dates are checked against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidityTime {
+    /// A clock that can be trusted: `notBefore <= t <= notAfter`.
+    Clock(u64),
+    /// No clock that can be trusted: only `notAfter >= floor`, since a
+    /// certificate issued after the floor is no sign of a wrong date
+    /// (audit of incident 0036, H1: checking `notBefore` against the floor
+    /// refused every certificate renewed after the release).
+    AtLeast(u64),
+    /// Dates not checked (tests).
+    Unchecked,
+}
+
+impl From<Option<u64>> for ValidityTime {
+    fn from(now: Option<u64>) -> Self {
+        now.map_or(ValidityTime::Unchecked, ValidityTime::Clock)
+    }
+}
+
+/// The time certificates are checked at from the real-time clock's Unix
+/// seconds: the clock when it reads at or after `TIME_FLOOR`; otherwise (no
+/// clock, or one that reads earlier) `TIME_FLOOR` as a lower bound of
+/// every `notAfter`.
+pub fn check_time(rtc: Option<u64>) -> ValidityTime {
+    match rtc {
+        Some(t) if t >= TIME_FLOOR => ValidityTime::Clock(t),
+        _ => ValidityTime::AtLeast(TIME_FLOOR),
+    }
 }
 
 /// Checks `signature` over `message` with `key`. False on any mismatch
@@ -319,10 +344,11 @@ fn name_matches(pattern: &str, host: &str) -> bool {
     }
 }
 
-fn check_validity(not_before: u64, not_after: u64, now: Option<u64>) -> Result<(), Error> {
+fn check_validity(not_before: u64, not_after: u64, now: ValidityTime) -> Result<(), Error> {
     match now {
-        Some(t) if t < not_before => Err(Error::NotYetValid),
-        Some(t) if t > not_after => Err(Error::Expired),
+        ValidityTime::Clock(t) if t < not_before => Err(Error::NotYetValid),
+        ValidityTime::Clock(t) if t > not_after => Err(Error::Expired),
+        ValidityTime::AtLeast(floor) if floor > not_after => Err(Error::Expired),
         _ => Ok(()),
     }
 }
@@ -341,14 +367,16 @@ fn trusted_leaf(leaf: Certificate) -> Result<Certificate, Error> {
 /// any order. Each certificate must be signed by an intermediate of the
 /// chain (a CA within its path length, valid at `now`) or by one of
 /// `roots` (DER trust anchors; roots that do not parse are ignored). A
-/// certificate identical to a root is trusted directly. `now` is Unix
-/// seconds; `None` skips the validity dates. Returns the parsed leaf.
+/// certificate identical to a root is trusted directly. `now`: what the
+/// validity dates are checked against (`Some` Unix seconds is a trusted
+/// clock, `None` skips them). Returns the parsed leaf.
 pub fn verify_chain<'a>(
     chain: &[&'a [u8]],
     roots: &[&[u8]],
     host: &str,
-    now: Option<u64>,
+    now: impl Into<ValidityTime>,
 ) -> Result<Certificate<'a>, Error> {
+    let now = now.into();
     let leaf_der = *chain.first().ok_or(Error::Malformed)?;
     let leaf = Certificate::parse(leaf_der)?;
     check_validity(leaf.not_before, leaf.not_after, now)?;

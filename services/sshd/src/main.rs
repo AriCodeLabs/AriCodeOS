@@ -69,6 +69,10 @@ struct Entropy {
     counter: u64,
     /// A non-empty `random_seed` from an earlier boot was read and mixed in.
     carried: bool,
+    /// A draw from the kernel gave fewer bytes than asked: whatever the
+    /// kernel says of its generator, this boot's keys are weak unless a
+    /// seed was carried (audit of incident 0036, M1).
+    draw_failed: bool,
 }
 
 impl Entropy {
@@ -79,7 +83,7 @@ impl Entropy {
             h.update(saved);
         }
         let mut fresh = [0u8; 32];
-        let _ = sys::random(SYSTEM, &mut fresh);
+        let draw_failed = sys::random(SYSTEM, &mut fresh) != Ok(fresh.len());
         h.update(&fresh);
         h.update(&sys::time::uptime_us(SYSTEM).unwrap_or(0).to_le_bytes());
         let state = h.finish();
@@ -87,6 +91,7 @@ impl Entropy {
             state,
             counter: 0,
             carried: saved.is_ok_and(|s| !s.is_empty()),
+            draw_failed,
         }
     }
 
@@ -100,12 +105,15 @@ impl Entropy {
     /// before this one add to it, so nothing is reported.
     fn check_for_host_key(&self) {
         let source = sys::random_source(SYSTEM);
-        if self.carried || source.is_some_and(|r| r.is_strong()) {
+        if self.carried || (!self.draw_failed && source.is_some_and(|r| r.is_strong())) {
             return;
         }
         let _ = sys::event_record(source.map_or(0, |r| r.source as u64), ENTROPY_WEAK_FAULT);
         let mut text = [0u8; abi::sysinfo::RandomSource::SUMMARY_MAX];
         let why = match source {
+            _ if self.draw_failed => {
+                alloc::string::String::from("the kernel gave too few random bytes")
+            }
             Some(r) => alloc::format!(
                 "kernel generator seeded from {}, {}",
                 r.summary(&mut text),
@@ -153,7 +161,7 @@ impl Entropy {
     /// Fresh 32 bytes: state, kernel randomness and a counter.
     fn next(&mut self) -> [u8; 32] {
         let mut fresh = [0u8; 32];
-        let _ = sys::random(SYSTEM, &mut fresh);
+        self.draw_failed |= sys::random(SYSTEM, &mut fresh) != Ok(fresh.len());
         self.counter += 1;
         let mut h = aricode_crypto::sha256::Sha256::new();
         h.update(&self.derive(b"fresh"));

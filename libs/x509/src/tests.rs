@@ -795,7 +795,34 @@ fn constraints_on_roots_paths_and_ip_hosts() {
 /// skipped or defeated the validity check.
 #[test]
 fn certificates_are_checked_at_no_earlier_than_the_floor() {
-    assert_eq!(check_time(None), TIME_FLOOR);
-    assert_eq!(check_time(Some(946_684_800)), TIME_FLOOR); // 2000-01-01
-    assert_eq!(check_time(Some(TIME_FLOOR + 5)), TIME_FLOOR + 5);
+    assert_eq!(check_time(None), ValidityTime::AtLeast(TIME_FLOOR));
+    assert_eq!(
+        check_time(Some(946_684_800)),
+        ValidityTime::AtLeast(TIME_FLOOR)
+    );
+    assert_eq!(
+        check_time(Some(TIME_FLOOR + 5)),
+        ValidityTime::Clock(TIME_FLOOR + 5)
+    );
+    // Without a trusted clock only expiry before the floor is refused: a
+    // leaf issued after the floor passes, one expired before it fails
+    // (audit of incident 0036, H1: notBefore was checked against the floor
+    // too, refusing every certificate renewed after the release).
+    let roots = [cert!("rsa-root")];
+    let chain = [cert!("rsa-leaf"), cert!("rsa-int")];
+    let leaf = Certificate::parse(cert!("rsa-leaf")).unwrap();
+    let at = |floor| {
+        verify_chain(
+            &chain,
+            &roots,
+            "www.example.com",
+            ValidityTime::AtLeast(floor),
+        )
+    };
+    assert!(
+        at(leaf.not_before - 1).is_ok(),
+        "issued after the floor: fine"
+    );
+    assert!(at(leaf.not_after).is_ok());
+    assert_eq!(at(leaf.not_after + 1).err(), Some(Error::Expired));
 }

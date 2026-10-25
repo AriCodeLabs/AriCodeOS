@@ -1032,7 +1032,7 @@ fn tls_error(e: aricode_tls::Error) -> &'static [u8] {
     use aricode_tls::Error as E;
     use aricode_x509::Error as X;
     match e {
-        E::Certificate(X::Expired) => b"certificate expired",
+        E::Certificate(X::Expired) => b"certificate expired (or the clock is wrong)",
         E::Certificate(X::NotYetValid) => b"certificate not yet valid (check the clock)",
         E::Certificate(X::NameMismatch) => b"certificate does not match the host name",
         E::Certificate(X::UnknownIssuer) => b"certificate signed by an unknown authority",

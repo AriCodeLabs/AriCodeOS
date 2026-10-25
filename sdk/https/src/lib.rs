@@ -450,12 +450,7 @@ fn get_once(
         .map_err(|e| before_http(budget, Phase::Connect, HttpsError::Connect(e)))?;
     let tls = url.secure.then(|| {
         let now = aricode_x509::check_time(sys::time::unix_seconds(system));
-        let mut client = Client::new(
-            url.host,
-            seed,
-            aricode_x509::roots::DEFAULT.to_vec(),
-            Some(now),
-        );
+        let mut client = Client::new(url.host, seed, aricode_x509::roots::DEFAULT.to_vec(), now);
         for root in extra_roots {
             client.add_root(root.clone());
         }
