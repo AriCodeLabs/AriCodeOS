@@ -55,17 +55,17 @@ of this document.
 
 | ID | Finding | Status |
 |---|---|---|
-| H1 | **fsd serves a request whose session the same request's sweep has retired** [C-H1]. A sandboxed app fills the 16-entry descriptor table, sends `Open`/`Create` and closes its session handle; the sweep inside `serve` retires the session, and `handle` then runs with no session: whole namespace, no read-only filter. The descriptor stays on the recycled slot for the next session. `services/arifs/src/main.rs:436-529` | open |
+| H1 | **fsd serves a request whose session the same request's sweep has retired** [C-H1]. A sandboxed app fills the 16-entry descriptor table, sends `Open`/`Create` and closes its session handle; the sweep inside `serve` retires the session, and `handle` then runs with no session: whole namespace, no read-only filter. The descriptor stays on the recycled slot for the next session. `services/arifs/src/main.rs:436-529` | **fixed** (incident 0028, merged `02cff0d`) |
 | H2 | **A PCI device chooses where the kernel writes** [A-H1]. `table_phys = bar + table_offset` is never compared with the BAR size, BARs are never checked against RAM or the kernel's own MMIO, and the offset is re-read at every claim. The kernel writes the MSI-X entry there; a driver's `Mmio` object maps the reported BAR. The IOMMU does not stop CPU writes. `kernel/src/pci.rs:393-428`, `kernel/src/hw.rs:117-192` | open |
-| H3 | **Non-critical nameConstraints are ignored** [D-H1]: a sub-CA limited to one domain can vouch for any name. `libs/x509/src/cert.rs:449-452` | open |
-| H4 | **Extended key usage is not chained** [D-H2]: an e-mail-only CA can issue TLS server certificates we accept. `libs/x509/src/lib.rs:207,250-263` | open |
+| H3 | **Non-critical nameConstraints are ignored** [D-H1]: a sub-CA limited to one domain can vouch for any name. `libs/x509/src/cert.rs:449-452` | **fixed** (incident 0029, merged `24ccb91`) |
+| H4 | **Extended key usage is not chained** [D-H2]: an e-mail-only CA can issue TLS server certificates we accept. `libs/x509/src/lib.rs:207,250-263` | **fixed** (incident 0029, merged `24ccb91`) |
 
 ### Medium
 
 | ID | Finding | Status |
 |---|---|---|
-| M1 | **`read_files` has no policy** [E-M1]: a signed manifest can share itself any file of the main namespace, the SSH host key and `random_seed` included; `../` is accepted by the character check. Contradicts ADR 0025. *Reproduced* (manifest parse). | open |
-| M2 | **sshd holds fsd's main endpoint** [E-M2, C-M6]: owner 0, the whole namespace, Bind/Share/Attach, and init's descriptors; descriptors leaked by dead generations accumulate. A pre-auth parser bug would become a persistent backdoor. `services/init/src/main.rs:852` | open |
+| M1 | **`read_files` has no policy** [E-M1]: a signed manifest can share itself any file of the main namespace, the SSH host key and `random_seed` included; `../` is accepted by the character check. Contradicts ADR 0025. *Reproduced* (manifest parse). | **fixed** (ADR 0050, merged `02cff0d`) |
+| M2 | **sshd holds fsd's main endpoint** [E-M2, C-M6]: owner 0, the whole namespace, Bind/Share/Attach, and init's descriptors; descriptors leaked by dead generations accumulate. A pre-auth parser bug would become a persistent backdoor. `services/init/src/main.rs:852` | **fixed** (ADR 0050, merged `02cff0d`) |
 | M3 | **GPT `entry_count` is unbounded** [B-M1]: a USB stick with a crafted header makes AriBoot allocate ~512 GiB and abort, so the machine does not boot; init and the updater die likewise. `Partition::sectors` underflows. `libs/gpt/src/lib.rs:99-122` | open |
 | M4 | **A partial IOMMU map is never rolled back** [C-M1]: on OOM mid-range, mapped leaves stay in the domain while the frames go back to the allocator. `kernel/src/iommu.rs:400-420` | open |
 | M5 | **virtio used-ring `id` unchecked** [A-M1, B-L6]: raw-pointer writes up to ~1 MiB past the queue; cyclic chains hang the driver. *Reproduced* on the host. `libs/virtio/src/lib.rs:195-287` | open |
@@ -85,15 +85,15 @@ of this document.
 | L2 | The compositor accepts an `Mmio` object as a window buffer, which also moves the device into its IOMMU domain [A-L3] |
 | L3 | ECAM bus offset underflows for `bus < bus_start` [A-L4] |
 | L4 | A remote peer can pin TCP slots for good (Closing never sends; FinWait1 with a zero window has no probe) [B-L3] |
-| L5 | RSA exponent unbounded: ~11 s of CPU per handshake [B-L4, D-L5] |
+| L5 | RSA exponent unbounded: ~11 s of CPU per handshake [B-L4, D-L5] — **fixed** (incident 0029) |
 | L6 | WASM block ends rescanned on every entry: fuel no longer bounds run time [B-L5] |
 | L7 | AriFS layout arithmetic overflows (debug panic, release wrap); `recover` does not bound the journal length [B-L1] |
 | L8 | DHCP retry counter overflow (debug); predictable DHCP xid and DNS id/port [B-L2, C] |
 | L9 | Any `net` app can listen on port 22; sshd's failed re-listen is silent [E-L1] |
 | L10 | Pre-auth SSH user name printed raw (log and terminal injection) [E-L2, C, B] |
-| L11 | `apps`, `pkgs`, `updater` not reserved as app names [E-L3] |
+| L11 | `apps`, `pkgs`, `updater` not reserved as app names [E-L3] — **fixed** (ADR 0050: `apps`, `pkgs`, `sshd`; `updater` stays the updater's own) |
 | L12 | `event_record` unmetered: any process can push refusals out of the ring [E-L4] |
-| L13 | The build host writes `ssh_host_ed25519_key` and stick images mode 0664 [E-L5] |
+| L13 | The build host writes `ssh_host_ed25519_key` and stick images mode 0664 [E-L5] — **fixed** (ADR 0050, mode 0600) |
 | L14 | Failed spawn leaks frames and ignores the kernel reserve; an orphan child when the parent's table is full; `pci_claim` inserts partially [C-L1..L3] |
 | L15 | init launch error paths leak handles; a failed `start_driver` can leave a device claimed for good [C-L4] |
 | L16 | The supervisor relaunches a service it retired as stuck [C-L5] |
@@ -103,7 +103,7 @@ of this document.
 | L20 | The TLS key seed falls back to zeros if `sys::random` fails [C-L9] |
 | L21 | SSH sequence numbers wrap without a forced rekey; strict KEX only when the client offers it (Terrapin with old clients) [C-L10, D-L6, D-L7] |
 | L22 | A driver's device keeps DMA access to client buffers after `mmio_unmap` [C-L11] |
-| L23 | X.509: duplicate extensions accepted, a CA accepted as a leaf, CN fallback, wildcards over public suffixes, IP vs dNSName, NUL/control bytes in dNSName [D-L1..L4] |
+| L23 | X.509: duplicate extensions accepted, a CA accepted as a leaf, CN fallback, wildcards over public suffixes, IP vs dNSName, NUL/control bytes in dNSName [D-L1..L4] — **fixed** except the CN fallback and wildcards over public suffixes (incident 0029) |
 
 ### Info
 
@@ -136,6 +136,14 @@ capability lets any app read the physical keyboard (ADR 0013 point 4).
 - Broker launches through one `launch()`, release-key package checks,
   initrd precedence, fsd prefixes and shares, netd ownership, updater
   signatures, downgrade rule and floor, staged file names.
+
+## Progress
+
+- 2026-10-25: M8 and L17 (input, `45e9f00`); H1, M1, M2, L11, L13
+  (file service, `02cff0d`; the audit of that branch found that sshd's
+  new sessions died with an fsd restart, fixed there with scenario
+  `ssh.file_service_restart`); H3, H4, L5, most of L23 (X.509,
+  `24ccb91`).
 
 ## Fix plan
 
