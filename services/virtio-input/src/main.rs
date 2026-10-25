@@ -8,7 +8,8 @@
 #![no_main]
 
 use aricode_input::Event;
-use aricode_proto::input::{Event as WireEvent, Op, Reply, Request, Status, MAX_EVENTS, MAX_NAME};
+use aricode_proto::input::{Event as WireEvent, Op, Reply, Request, Status, MAX_NAME};
+use aricode_rt::sys::input::EventQueue;
 use aricode_rt::sys::virtio_pci::{extra_handle, DmaRegion, Queue, Transport, IRQ, SERVICE};
 use aricode_rt::sys::wait::{self, Deadline, Woken};
 use aricode_rt::sys::{self, abi, Handle};
@@ -21,7 +22,6 @@ const CFG_PAYLOAD: u64 = 8;
 const CFG_ID_NAME: u8 = 0x01;
 
 const SLOTS: u16 = 64;
-const RING: usize = 128;
 /// Exit code when the end-of-round wait fails for a reason other than the
 /// service endpoint being gone: looping on it would spin (ADR 0044).
 const EXIT_WAIT_FAILED: u64 = 10;
@@ -113,42 +113,6 @@ impl Clock {
     }
 }
 
-/// Queue of events pending delivery (the oldest are dropped).
-struct EventRing {
-    buf: [(Event, u64); RING],
-    head: usize,
-    len: usize,
-    dropped: u64,
-}
-
-impl EventRing {
-    fn push(&mut self, ev: Event, at: u64) {
-        if self.len == RING {
-            self.head = (self.head + 1) % RING;
-            self.len -= 1;
-            self.dropped += 1;
-        }
-        self.buf[(self.head + self.len) % RING] = (ev, at);
-        self.len += 1;
-    }
-
-    fn take(&mut self, out: &mut [WireEvent; MAX_EVENTS], times: &mut [u64; MAX_EVENTS]) -> usize {
-        let n = self.len.min(MAX_EVENTS);
-        for (slot, t) in out.iter_mut().zip(times.iter_mut()).take(n) {
-            let (e, at) = self.buf[self.head];
-            *slot = WireEvent {
-                kind: e.kind,
-                code: e.code,
-                value: e.value,
-            };
-            *t = at;
-            self.head = (self.head + 1) % RING;
-            self.len -= 1;
-        }
-        n
-    }
-}
-
 fn answer(reply_to: Handle, reply: Reply) {
     let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
     let _ = sys::handle_close(reply_to);
@@ -159,17 +123,20 @@ fn answer(reply_to: Handle, reply: Reply) {
 /// makes the next round follow at once (ADR 0044).
 const REQUESTS_PER_ROUND: usize = 8;
 
-/// The driver's state between rounds: the device, its queued events and
-/// the one read waiting for them.
+/// The driver's state between rounds: the device, and its queued events
+/// with the one read waiting for them.
 struct Driver {
     dev: Device,
-    ring: EventRing,
-    pending: Option<(Handle, u64)>,
-    events: [WireEvent; MAX_EVENTS],
-    times: [u64; MAX_EVENTS],
+    queue: EventQueue,
 }
 
 impl Driver {
+    fn tell_gone_reader(&mut self) {
+        if self.queue.first_gone_reader() {
+            say(b"a reader died with its read waiting; its events wait for the next read");
+        }
+    }
+
     /// Serves one request: the reply endpoint comes first; any other
     /// handle is closed.
     fn serve(&mut self, msg: &[u8], handles: &[Handle], now: u64) {
@@ -190,31 +157,10 @@ impl Driver {
                 op: Op::Read,
                 timeout_ms,
             }) => {
-                if self.ring.len > 0 {
-                    let n = self.ring.take(&mut self.events, &mut self.times);
-                    answer(reply_to, Reply::events(&self.events[..n], &self.times[..n]));
-                } else if self.pending.is_some() {
-                    answer(reply_to, Reply::status(Status::Busy));
-                } else {
-                    self.pending = Some((reply_to, now + timeout_ms.max(1) as u64));
-                }
+                self.queue.read(reply_to, timeout_ms, now);
+                self.tell_gone_reader();
             }
             None => answer(reply_to, Reply::status(Status::Invalid)),
-        }
-    }
-
-    /// Answers the waiting read once events arrived or its deadline passed.
-    fn settle_pending(&mut self, now: u64) {
-        let Some((reply_to, deadline)) = self.pending else {
-            return;
-        };
-        if self.ring.len > 0 {
-            let n = self.ring.take(&mut self.events, &mut self.times);
-            answer(reply_to, Reply::events(&self.events[..n], &self.times[..n]));
-            self.pending = None;
-        } else if now >= deadline {
-            answer(reply_to, Reply::status(Status::Timeout));
-            self.pending = None;
         }
     }
 }
@@ -233,15 +179,7 @@ fn main(mask: u64) -> u64 {
     sys::print(b"\n");
     let mut drv = Driver {
         dev,
-        ring: EventRing {
-            buf: [(Event::default(), 0); RING],
-            head: 0,
-            len: 0,
-            dropped: 0,
-        },
-        pending: None,
-        events: [WireEvent::default(); MAX_EVENTS],
-        times: [0u64; MAX_EVENTS],
+        queue: EventQueue::new(),
     };
     let mut msg = [0u8; Request::LEN];
     let mut handles = [Handle(0); abi::IPC_MAX_HANDLES];
@@ -255,7 +193,14 @@ fn main(mask: u64) -> u64 {
         let now = clock.now();
         while let Some(ev) = drv.dev.poll() {
             if let Some(ev) = ev {
-                drv.ring.push(ev, now);
+                let wire = WireEvent {
+                    kind: ev.kind,
+                    code: ev.code,
+                    value: ev.value,
+                };
+                if drv.queue.push(wire, now) && drv.queue.dropped() == 1 {
+                    say(b"input event queue full: the oldest events are dropped");
+                }
             }
         }
         let mut requests_left = true;
@@ -275,11 +220,9 @@ fn main(mask: u64) -> u64 {
             };
             drv.serve(&msg[..n], &handles[..nh], now);
         }
-        drv.settle_pending(now);
-        let next = match drv.pending {
-            Some((_, deadline)) => Deadline::at(deadline),
-            None => Deadline::NONE,
-        };
+        drv.queue.settle(now);
+        drv.tell_gone_reader();
+        let next = drv.queue.deadline().map_or(Deadline::NONE, Deadline::at);
         match wait::end_of_round(
             members.as_slice(),
             clock.now(),

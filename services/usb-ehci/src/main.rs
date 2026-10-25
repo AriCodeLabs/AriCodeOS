@@ -38,8 +38,9 @@ use aricode_input::{Event, HidBootKeyboard, HidBootMouse, MAX_REPORT_EVENTS};
 use aricode_proto::block::{
     Op as BlockOp, Reply as BlockReply, Request as BlockRequest, Status as BlockStatus, MAX_SECTORS,
 };
-use aricode_proto::input::{Event as WireEvent, Op, Reply, Request, Status, MAX_EVENTS};
+use aricode_proto::input::{Event as WireEvent, Op, Reply, Request, Status};
 use aricode_rt::sys::block::{map_client_buffer, ClientBuffers, REPLY_WAIT_MS};
+use aricode_rt::sys::input::EventQueue;
 use aricode_rt::sys::virtio_pci::{extra_handle, polled_bar_handle, DmaRegion, Mmio, CFG, SERVICE};
 use aricode_rt::sys::{self, abi, abi::driver_arg, Handle};
 use aricode_usb_storage::{
@@ -61,7 +62,6 @@ const MAX_PENDING: usize = 32;
 const QTDS_PER_PIPE: usize = 4;
 const ARENA_BYTES: u64 = 32 * 1024;
 const CONTROL_BUFFER: u16 = 512;
-const RING: usize = 128;
 
 /// Main loop period while something needs watching (the boot
 /// enumeration, HID devices, a connection being debounced): how long the
@@ -485,36 +485,22 @@ struct Step {
     on_short: OnShort,
 }
 
-/// Event pending delivery to the input client.
-struct Pending {
-    buf: [(Event, u64); RING],
-    head: usize,
-    len: usize,
+fn tell_gone_reader(queue: &mut EventQueue) {
+    if queue.first_gone_reader() {
+        say(b"a reader died with its read waiting; its events wait for the next read");
+    }
 }
 
-impl Pending {
-    fn push(&mut self, ev: Event, at: u64) {
-        if self.len == RING {
-            self.head = (self.head + 1) % RING;
-            self.len -= 1;
-        }
-        self.buf[(self.head + self.len) % RING] = (ev, at);
-        self.len += 1;
-    }
-    fn take(&mut self, out: &mut [WireEvent; MAX_EVENTS], times: &mut [u64; MAX_EVENTS]) -> usize {
-        let n = self.len.min(MAX_EVENTS);
-        for (slot, t) in out.iter_mut().zip(times.iter_mut()).take(n) {
-            let (e, at) = self.buf[self.head];
-            *slot = WireEvent {
-                kind: e.kind,
-                code: e.code,
-                value: e.value,
-            };
-            *t = at;
-            self.head = (self.head + 1) % RING;
-            self.len -= 1;
-        }
-        n
+/// Queues `ev` for the input client; when full the oldest event is
+/// dropped, never silently: the first drop of the boot is printed.
+fn queue_event(queue: &mut EventQueue, ev: Event, at: u64) {
+    let wire = WireEvent {
+        kind: ev.kind,
+        code: ev.code,
+        value: ev.value,
+    };
+    if queue.push(wire, at) && queue.dropped() == 1 {
+        say(b"input event queue full: the oldest events are dropped");
     }
 }
 
@@ -668,7 +654,7 @@ struct Ehci {
     /// When the driver started (boot enumeration bounds).
     started: u64,
     /// Input events waiting for the client.
-    events: Pending,
+    events: EventQueue,
     keyboards: u8,
     mice: u8,
 }
@@ -904,11 +890,7 @@ impl Ehci {
             held_info: [Handle(0); abi::IPC_QUEUE_CAPACITY],
             held_len: 0,
             started,
-            events: Pending {
-                buf: [(Event::default(), 0); RING],
-                head: 0,
-                len: 0,
-            },
+            events: EventQueue::new(),
             keyboards: 0,
             mice: 0,
         });
@@ -2387,7 +2369,7 @@ impl Ehci {
             };
             let now = self.now();
             for e in &out[..n] {
-                self.events.push(*e, now);
+                queue_event(&mut self.events, *e, now);
             }
             self.hids[h] = None;
         }
@@ -2611,7 +2593,7 @@ impl Ehci {
                         Decoder::Mouse(m) => m.feed(report, &mut out),
                     };
                     for e in &out[..n] {
-                        self.events.push(*e, now);
+                        queue_event(&mut self.events, *e, now);
                     }
                     self.hids[h] = Some(hid);
                     self.arm(h);
@@ -3509,11 +3491,8 @@ fn main(mask: u64) -> u64 {
     // so its type is checked.
     let block_ep = extra_handle(mask, 1);
     let has_block = sys::object_kind(block_ep) == Ok(abi::kind::ENDPOINT);
-    let mut waiting: Option<(Handle, u64)> = None;
     let mut msg = [0u8; 32];
     let mut handles = [Handle(0); abi::IPC_MAX_HANDLES];
-    let mut events = [WireEvent::default(); MAX_EVENTS];
-    let mut times = [0u64; MAX_EVENTS];
     let with_block = [SERVICE, block_ep];
     loop {
         // The block service waits for the boot enumeration: init asks the
@@ -3523,7 +3502,7 @@ fn main(mask: u64) -> u64 {
         } else {
             &with_block[..1]
         };
-        let mut timeout = ctl.next_wait(waiting.map(|(_, deadline)| deadline));
+        let mut timeout = ctl.next_wait(ctl.events.deadline());
         // At most eight messages per iteration, served in one batch: a
         // block request and the one queued behind it run back to back, and
         // housekeeping (`HOUSEKEEPING_MS`) runs once per batch (budget
@@ -3561,14 +3540,9 @@ fn main(mask: u64) -> u64 {
                     op: Op::Read,
                     timeout_ms,
                 }) => {
-                    if ctl.events.len > 0 {
-                        let n = ctl.events.take(&mut events, &mut times);
-                        answer(reply_to, Reply::events(&events[..n], &times[..n]));
-                    } else if waiting.is_some() {
-                        answer(reply_to, Reply::status(Status::Busy));
-                    } else {
-                        waiting = Some((reply_to, ctl.now() + timeout_ms.max(1) as u64));
-                    }
+                    let now = ctl.now();
+                    ctl.events.read(reply_to, timeout_ms, now);
+                    tell_gone_reader(&mut ctl.events);
                 }
                 None => answer(reply_to, Reply::status(Status::Invalid)),
             }
@@ -3580,16 +3554,9 @@ fn main(mask: u64) -> u64 {
             c.service_ports();
         });
         ctl.release_info();
-        if let Some((reply_to, deadline)) = waiting {
-            if ctl.events.len > 0 {
-                let n = ctl.events.take(&mut events, &mut times);
-                answer(reply_to, Reply::events(&events[..n], &times[..n]));
-                waiting = None;
-            } else if ctl.now() >= deadline {
-                answer(reply_to, Reply::status(Status::Timeout));
-                waiting = None;
-            }
-        }
+        let now = ctl.now();
+        ctl.events.settle(now);
+        tell_gone_reader(&mut ctl.events);
     }
 }
 

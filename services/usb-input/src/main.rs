@@ -34,9 +34,10 @@ use aricode_input::{Event, HidBootKeyboard, HidBootMouse, MAX_REPORT_EVENTS};
 use aricode_proto::block::{
     Op as BlockOp, Reply as BlockReply, Request as BlockRequest, Status as BlockStatus, MAX_SECTORS,
 };
-use aricode_proto::input::{Event as WireEvent, Op, Reply, Request, Status, MAX_EVENTS};
+use aricode_proto::input::{Event as WireEvent, Op, Reply, Request, Status};
 use aricode_rt::sys::block::{map_client_buffer, ClientBuffers};
 use aricode_rt::sys::client_buffer::{DeviceOwned, Kept};
+use aricode_rt::sys::input::{EventQueue, QUEUE_LEN};
 use aricode_rt::sys::virtio_pci::{bar_handle, extra_handle, DmaRegion, Mmio, CFG, IRQ, SERVICE};
 use aricode_rt::sys::wait::{self, Deadline, Woken};
 use aricode_rt::sys::{self, abi, Handle};
@@ -58,7 +59,6 @@ const XFER_RING_TRBS: usize = 16;
 const MAX_DEVICES: usize = 4;
 /// Pending report TRBs per interrupt endpoint.
 const REPORTS_IN_FLIGHT: usize = 4;
-const RING: usize = 128;
 
 /// Timeouts of a SCSI command over Bulk-Only (ms). BOT 1.0 specifies no
 /// transport timeout; SCSI stacks bound a whole command instead (Linux
@@ -801,55 +801,44 @@ struct Controller {
     ports_switched: bool,
 }
 
-/// Event pending delivery to the client.
+/// Input events decoded from HID reports, waiting for the client.
 struct Pending {
-    buf: [(Event, u64); RING],
-    head: usize,
-    len: usize,
-    /// Events dropped because the queue was full (the client did not read
-    /// for `RING` events), and the total last printed.
-    dropped: u64,
+    queue: EventQueue,
+    /// The total of dropped events last printed.
     dropped_reported: u64,
 }
 
 impl Pending {
     /// Queues `ev`; when full the oldest event is dropped, never silently:
     /// the first drop of the boot is printed and recorded (`usb hid evt
-    /// dropped`), and the running total is printed when the client next
-    /// takes events (`take`).
+    /// dropped`), and the running total is printed after the client next
+    /// reads (`report_drops`).
     fn push(&mut self, ev: Event, at: u64) {
-        if self.len == RING {
-            self.head = (self.head + 1) % RING;
-            self.len -= 1;
-            self.dropped += 1;
-            if self.dropped == 1 {
-                say(b"input event queue full: the oldest events are dropped");
-                record("usb hid evt dropped", RING as u64);
-            }
+        let wire = WireEvent {
+            kind: ev.kind,
+            code: ev.code,
+            value: ev.value,
+        };
+        if self.queue.push(wire, at) && self.queue.dropped() == 1 {
+            say(b"input event queue full: the oldest events are dropped");
+            record("usb hid evt dropped", QUEUE_LEN as u64);
         }
-        self.buf[(self.head + self.len) % RING] = (ev, at);
-        self.len += 1;
     }
-    fn take(&mut self, out: &mut [WireEvent; MAX_EVENTS], times: &mut [u64; MAX_EVENTS]) -> usize {
-        if self.dropped > self.dropped_reported {
-            self.dropped_reported = self.dropped;
+
+    fn tell_gone_reader(&mut self) {
+        if self.queue.first_gone_reader() {
+            say(b"a reader died with its read waiting; its events wait for the next read");
+        }
+    }
+
+    fn report_drops(&mut self) {
+        let dropped = self.queue.dropped();
+        if dropped > self.dropped_reported {
+            self.dropped_reported = dropped;
             sys::print(b"usb-input: ");
-            num(self.dropped);
+            num(dropped);
             sys::print(b" input events dropped in this boot (queue full)\n");
         }
-        let n = self.len.min(MAX_EVENTS);
-        for (slot, t) in out.iter_mut().zip(times.iter_mut()).take(n) {
-            let (e, at) = self.buf[self.head];
-            *slot = WireEvent {
-                kind: e.kind,
-                code: e.code,
-                value: e.value,
-            };
-            *t = at;
-            self.head = (self.head + 1) % RING;
-            self.len -= 1;
-        }
-        n
     }
 }
 
@@ -991,10 +980,7 @@ impl Controller {
             devices: [None, None, None, None],
             storage: None,
             pending: Pending {
-                buf: [(Event::default(), 0); RING],
-                head: 0,
-                len: 0,
-                dropped: 0,
+                queue: EventQueue::new(),
                 dropped_reported: 0,
             },
             disabling: None,
@@ -4248,55 +4234,33 @@ fn answer(reply_to: Handle, reply: Reply) {
     let _ = sys::handle_close(reply_to);
 }
 
-/// The input service's side of the loop: the one read waiting for events
-/// and the buffers its replies are built in.
-struct Replies<'a> {
-    waiting: &'a mut Option<(Handle, u64)>,
-    events: &'a mut [WireEvent; MAX_EVENTS],
-    times: &'a mut [u64; MAX_EVENTS],
-}
-
-impl Replies<'_> {
-    /// Serves one request that arrived on endpoint `which` (0: the input
-    /// service, 1: the block service).
-    fn serve(
-        &mut self,
-        ctl: &mut Controller,
-        which: usize,
-        msg: &[u8],
-        handles: &[Handle],
-        now: u64,
-    ) {
-        if handles.is_empty() {
-            return;
+/// Serves one request that arrived on endpoint `which` (0: the input
+/// service, 1: the block service).
+fn serve(ctl: &mut Controller, which: usize, msg: &[u8], handles: &[Handle], now: u64) {
+    if handles.is_empty() {
+        return;
+    }
+    if which == 1 {
+        serve_block(ctl, msg, handles);
+        return;
+    }
+    let reply_to = handles[0];
+    match Request::decode(msg) {
+        Some(Request { op: Op::Info, .. }) => {
+            let reply = Reply::status(Status::Ok)
+                .with_name(device_name(ctl))
+                .unwrap_or(Reply::status(Status::Ok));
+            answer(reply_to, reply);
         }
-        if which == 1 {
-            serve_block(ctl, msg, handles);
-            return;
+        Some(Request {
+            op: Op::Read,
+            timeout_ms,
+        }) => {
+            ctl.pending.queue.read(reply_to, timeout_ms, now);
+            ctl.pending.report_drops();
+            ctl.pending.tell_gone_reader();
         }
-        let reply_to = handles[0];
-        match Request::decode(msg) {
-            Some(Request { op: Op::Info, .. }) => {
-                let reply = Reply::status(Status::Ok)
-                    .with_name(device_name(ctl))
-                    .unwrap_or(Reply::status(Status::Ok));
-                answer(reply_to, reply);
-            }
-            Some(Request {
-                op: Op::Read,
-                timeout_ms,
-            }) => {
-                if ctl.pending.len > 0 {
-                    let n = ctl.pending.take(self.events, self.times);
-                    answer(reply_to, Reply::events(&self.events[..n], &self.times[..n]));
-                } else if self.waiting.is_some() {
-                    answer(reply_to, Reply::status(Status::Busy));
-                } else {
-                    *self.waiting = Some((reply_to, now + timeout_ms.max(1) as u64));
-                }
-            }
-            None => answer(reply_to, Reply::status(Status::Invalid)),
-        }
+        None => answer(reply_to, Reply::status(Status::Invalid)),
     }
 }
 
@@ -4472,11 +4436,8 @@ fn main(mask: u64) -> u64 {
     } else {
         &[SERVICE]
     };
-    let mut waiting: Option<(Handle, u64)> = None;
     let mut msg = [0u8; 32];
     let mut handles = [Handle(0); abi::IPC_MAX_HANDLES];
-    let mut events = [WireEvent::default(); MAX_EVENTS];
-    let mut times = [0u64; MAX_EVENTS];
     // One wait for a request on either endpoint, an event (the
     // controller's interrupt) or the next deadline (ADR 0044).
     let mut members = wait::Members::new();
@@ -4504,29 +4465,16 @@ fn main(mask: u64) -> u64 {
                     break;
                 }
             };
-            let mut reply = Replies {
-                waiting: &mut waiting,
-                events: &mut events,
-                times: &mut times,
-            };
             // The clock per request: a block request before this one may
             // have taken seconds, and a read's deadline counts from now.
             let now = ctl.clock.now();
-            reply.serve(&mut ctl, which, &msg[..n], &handles[..nh], now);
+            serve(&mut ctl, which, &msg[..n], &handles[..nh], now);
         }
         let now = ctl.clock.now();
-        if let Some((reply_to, deadline)) = waiting {
-            if ctl.pending.len > 0 {
-                let n = ctl.pending.take(&mut events, &mut times);
-                answer(reply_to, Reply::events(&events[..n], &times[..n]));
-                waiting = None;
-            } else if now >= deadline {
-                answer(reply_to, Reply::status(Status::Timeout));
-                waiting = None;
-            }
-        }
+        ctl.pending.queue.settle(now);
+        ctl.pending.tell_gone_reader();
         let mut next = Deadline::NONE;
-        next.include_opt(waiting.map(|(_, deadline)| deadline));
+        next.include_opt(ctl.pending.queue.deadline());
         next.include_opt(
             ctl.next_maintenance()
                 .map(|due| due.max(now + MAINTENANCE_PACE_MS)),
@@ -4544,15 +4492,10 @@ fn main(mask: u64) -> u64 {
                 len,
                 handles: nh,
             }) => {
-                let mut reply = Replies {
-                    waiting: &mut waiting,
-                    events: &mut events,
-                    times: &mut times,
-                };
                 // At the time it arrived: a read's deadline counts from
                 // now, not from before the wait.
                 let now = ctl.clock.now();
-                reply.serve(&mut ctl, index, &msg[..len], &handles[..nh], now);
+                serve(&mut ctl, index, &msg[..len], &handles[..nh], now);
             }
             Ok(Woken::Irq { .. } | Woken::Round) => {}
             Err(e) if e.endpoint_gone() => {

@@ -1334,6 +1334,18 @@ fn input_restart(sup: &mut Supervisor) -> Result<(), u64> {
     }
 }
 
+/// A reader that dies with its read waiting on each input service, before
+/// the console bridge starts (`input_orphan`, audit 2026-10-25 C, M4): the
+/// keys typed next must still reach the shell.
+fn orphan_reads(inputs: &[Handle], sup: &mut Supervisor) {
+    for ep in inputs {
+        match run_block_client_supervised("input_orphan", *ep, 0, sup) {
+            Ok(0) => {}
+            _ => say(b"input_orphan failed"),
+        }
+    }
+}
+
 /// Induced restarts (`restart_storm`): a test service that dies after each
 /// request is restarted 100 times under the supervisor while fsd keeps
 /// serving; at the end free memory must match the initial amount.
@@ -2327,6 +2339,7 @@ fn main(arg: u64) -> u64 {
         say(b"selftest: running the test-only boot checks (QEMU test environment)");
     }
     let input_restart_test = cmdline.has(aricode_cmdline::keys::INPUT_RESTART);
+    let input_orphan_test = cmdline.has(aricode_cmdline::keys::INPUT_ORPHAN);
     let blk_fault = cmdline
         .get(aricode_cmdline::keys::BLK_FAULT)
         .and_then(|v| v.parse().ok());
@@ -2797,6 +2810,9 @@ fn main(arg: u64) -> u64 {
         // as long as there is no compositor (with the GUI the events belong
         // to it, and each input service accepts a single reader).
         if inputs > 0 && compositor.is_none() {
+            if input_orphan_test {
+                orphan_reads(&input_eps[..inputs], &mut sup);
+            }
             let mut ins = [Handle(0); MAX_INPUTS];
             ins[..inputs].copy_from_slice(&input_eps[..inputs]);
             let launched = sup
