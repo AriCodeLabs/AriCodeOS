@@ -394,7 +394,7 @@ fn is_distrusted(spki: &[u8], distrusted: &[[u8; 32]]) -> bool {
 /// [`verify_chain`] with an explicit list of distrusted keys: no
 /// certificate on the path, leaf, intermediate or root, may have one of
 /// them, whatever signed it (ADR 0054).
-pub fn verify_chain_with<'a>(
+pub(crate) fn verify_chain_with<'a>(
     chain: &[&'a [u8]],
     roots: &[&[u8]],
     distrusted: &[[u8; 32]],
@@ -434,7 +434,9 @@ pub fn verify_chain_with<'a>(
         };
         let mut error = Error::UnknownIssuer;
         for anchor in anchors.iter().filter(|a| a.subject == current.issuer) {
-            if is_distrusted(anchor.spki, distrusted) {
+            // Distrust is said of the issuer that really signed, and no
+            // later mismatch hides it (audit of ADR 0054, L1).
+            if signed_by(&anchor.public_key) && is_distrusted(anchor.spki, distrusted) {
                 error = Error::Distrusted;
                 continue;
             }
@@ -446,7 +448,9 @@ pub fn verify_chain_with<'a>(
                 check_name_constraints(&leaf, host, anchor.name_constraints.as_ref())?;
                 return trusted_leaf(leaf);
             }
-            error = Error::BadSignature;
+            if error != Error::Distrusted {
+                error = Error::BadSignature;
+            }
         }
         let mut next = None;
         for (i, der) in chain.iter().enumerate() {
@@ -465,10 +469,10 @@ pub fn verify_chain_with<'a>(
             if candidate.subject != current.issuer {
                 continue;
             }
-            let outcome = if is_distrusted(candidate.spki, distrusted) {
-                Err(Error::Distrusted)
-            } else if !signed_by(&candidate.public_key) {
+            let outcome = if !signed_by(&candidate.public_key) {
                 Err(Error::BadSignature)
+            } else if is_distrusted(candidate.spki, distrusted) {
+                Err(Error::Distrusted)
             } else if !candidate.is_ca
                 || candidate
                     .max_path_len
@@ -489,7 +493,8 @@ pub fn verify_chain_with<'a>(
                     next = Some((i, candidate));
                     break;
                 }
-                Err(e) => error = e,
+                Err(e) if error != Error::Distrusted => error = e,
+                Err(_) => {}
             }
         }
         let (i, issuer) = next.ok_or(error)?;

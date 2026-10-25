@@ -1041,6 +1041,7 @@ fn tls_error(e: aricode_tls::Error) -> &'static [u8] {
         E::Certificate(X::NameConstraint) => {
             b"certificate outside the names its issuer may vouch for"
         }
+        E::Certificate(X::Distrusted) => b"certificate uses a key that is no longer trusted",
         E::Certificate(_) => b"certificate rejected",
         E::Alert(_) => b"the server sent an alert",
         E::Unsupported(_) => b"the server needs an unsupported TLS feature",

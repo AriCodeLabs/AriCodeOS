@@ -841,9 +841,78 @@ fn distrusted_keys_are_refused_anywhere_in_the_chain() {
             Some(Error::Distrusted)
         );
     }
+    // The root sent in the chain too, a chain ending in the root itself, a
+    // pinned leaf: still refused.
+    let root = [spki(RSA_ROOT)];
+    assert_eq!(
+        verify_chain_with(
+            &[RSA_LEAF, RSA_INT, RSA_ROOT],
+            &[RSA_ROOT],
+            &root,
+            host,
+            Some(NOW)
+        )
+        .err(),
+        Some(Error::Distrusted)
+    );
+    assert_eq!(
+        verify_chain_with(&[RSA_LEAF], &[RSA_LEAF], &[spki(RSA_LEAF)], host, Some(NOW)).err(),
+        Some(Error::Distrusted)
+    );
+    // Another anchor that signs nothing does not hide the distrusted one.
+    assert_eq!(
+        verify_chain_with(&chain, &[RSA_ROOT, EC_ROOT], &root, host, Some(NOW)).err(),
+        Some(Error::Distrusted)
+    );
     // The default list is what verify_chain applies.
     assert_eq!(
         verify_chain(&chain, &[RSA_ROOT], host, Some(NOW)).is_ok(),
         roots::DISTRUSTED.is_empty()
     );
+}
+
+#[test]
+fn spki_is_the_published_pin_and_every_root_parses() {
+    // ISRG Root X1's well-known SPKI pin (base64
+    // C5+lpZ7tcVwmwQIMcRtPbsQtWLABXhQzejna0wHFr8M=).
+    const ISRG_X1_PIN: [u8; 32] = [
+        11, 159, 165, 165, 158, 237, 113, 92, 38, 193, 2, 12, 113, 27, 79, 110, 196, 45, 88, 176,
+        1, 94, 20, 51, 122, 57, 218, 211, 1, 197, 175, 195,
+    ];
+    let isrg = Certificate::parse(roots::DEFAULT[0]).unwrap();
+    assert_eq!(aricode_crypto::sha256::sha256(isrg.spki), ISRG_X1_PIN);
+    // The strict key encoding drops no embedded root (anchors that do not
+    // parse would be skipped silently).
+    // Anchors are read as `Parsed`: a root's own signature (SHA-1 for some)
+    // is never checked.
+    for (i, der) in roots::DEFAULT.iter().enumerate() {
+        assert!(Parsed::parse(der).is_ok(), "root {i}");
+    }
+}
+
+#[test]
+fn a_key_has_one_encoding() {
+    // ISRG Root X1's SubjectPublicKeyInfo contents: AlgorithmIdentifier
+    // (rsaEncryption, NULL) then the key.
+    let spki = Certificate::parse(roots::DEFAULT[0]).unwrap().spki;
+    let contents = der::single(spki, der::SEQUENCE).unwrap();
+    assert!(cert::parse_public_key(contents).is_ok());
+    let alg_len = 2 + contents[1] as usize;
+    let (alg, key) = contents.split_at(alg_len);
+    let rewrap = |alg_contents: &[u8]| {
+        let mut v = alg_contents.to_vec();
+        v.insert(0, alg_contents.len() as u8);
+        v.insert(0, der::SEQUENCE);
+        v.extend_from_slice(key);
+        v
+    };
+    let oid = &alg[2..13]; // 06 09 + nine bytes
+                           // Parameters absent, or something after them: the same key, refused.
+    assert_eq!(
+        cert::parse_public_key(&rewrap(oid)).err(),
+        Some(Error::Malformed)
+    );
+    let mut extra = alg[2..].to_vec();
+    extra.extend_from_slice(&[0x05, 0x00]);
+    assert!(cert::parse_public_key(&rewrap(&extra)).is_err());
 }

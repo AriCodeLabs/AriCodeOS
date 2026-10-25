@@ -39,3 +39,16 @@ valid.
   a machine that does not update keeps trusting the key.
 - The update signing keys are out of scope: their rotation and
   revocation is ADR 0041, whose timing is the owner's decision.
+
+## Audit (2026-10-25)
+
+- The key parser accepted several encodings of one key (RSA parameters
+  NULL or absent, trailing elements after an EC curve or Ed25519 OID), so
+  a certificate re-encoding a distrusted key escaped its hash. Keys now
+  have one accepted encoding, as webpki requires: RSA parameters exactly
+  NULL, nothing after the EC curve, Ed25519 parameters absent. Every
+  embedded root still parses (tested), and ISRG Root X1's hash equals its
+  published SPKI pin.
+- `Distrusted` is reported for the issuer that really signed and is not
+  replaced by a later mismatch; the shell says "certificate uses a key that
+  is no longer trusted"; `verify_chain_with` is crate-private.
