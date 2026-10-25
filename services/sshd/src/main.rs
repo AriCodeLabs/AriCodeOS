@@ -31,7 +31,7 @@ use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::net::{NetClient, NetError};
 use aricode_rt::sys::{self, abi, Error, Handle};
 use aricode_ssh::keys_refresh::{Change, KeyRefresh};
-use aricode_ssh::{fingerprint, parse_authorized_keys, Event, Server};
+use aricode_ssh::{fingerprint, log_safe, parse_authorized_keys, Event, Server};
 
 const NET: Handle = Handle(0x0001_0004);
 const FS: Handle = Handle(0x0001_0005);
@@ -401,15 +401,17 @@ fn serve(
                 for e in events.drain(..) {
                     match e {
                         Event::Authenticated { user } => {
+                            let mut safe = [0u8; 32];
                             sys::print(b"sshd: user '");
-                            sys::print(user.as_bytes());
+                            sys::print(log_safe(user.as_bytes(), &mut safe));
                             sys::print(b"' authenticated from ");
                             print_ip(peer);
                             sys::print(b"\n");
                         }
                         Event::AuthFailed { user } => {
+                            let mut safe = [0u8; 32];
                             sys::print(b"sshd: refused key for '");
-                            sys::print(user.as_bytes());
+                            sys::print(log_safe(user.as_bytes(), &mut safe));
                             sys::print(b"' from ");
                             print_ip(peer);
                             sys::print(b"\n");

@@ -62,6 +62,9 @@ mod msg {
 const KEX: &[u8] = b"curve25519-sha256";
 const KEX_LIBSSH: &[u8] = b"curve25519-sha256@libssh.org";
 const STRICT_S: &[u8] = b"kex-strict-s-v00@openssh.com";
+/// Packets either way a connection may carry: half the sequence space,
+/// far from its wrap (no rekey is supported).
+const MAX_PACKETS: u32 = 1 << 31;
 const STRICT_C: &[u8] = b"kex-strict-c-v00@openssh.com";
 const HOSTKEY: &[u8] = b"ssh-ed25519";
 const CIPHER: &[u8] = b"chacha20-poly1305@openssh.com";
@@ -121,6 +124,8 @@ struct Channel {
     remote_max_packet: u32,
     local_consumed: u32,
     pty: bool,
+    /// A shell or command was started on it: one per channel.
+    started: bool,
     sent_eof: bool,
     sent_close: bool,
     pending: Vec<u8>,
@@ -187,6 +192,19 @@ pub fn ed25519_blob(public: &[u8; 32]) -> Vec<u8> {
 }
 
 /// `SHA256:...` fingerprint of a host key, as `ssh` prints it.
+/// `name` as it may go to a log: printable ASCII kept, every other byte
+/// (newlines, escape sequences) as `?`, at most `out.len()` bytes. The user
+/// name of an authentication attempt comes from the network before anyone
+/// is authenticated (audit 2026-10-25 E, L2: forged log lines, terminal
+/// escapes).
+pub fn log_safe<'a>(name: &[u8], out: &'a mut [u8; 32]) -> &'a [u8] {
+    let n = name.len().min(out.len());
+    for (o, &b) in out.iter_mut().zip(&name[..n]) {
+        *o = if (0x20..0x7f).contains(&b) { b } else { b'?' };
+    }
+    &out[..n]
+}
+
 pub fn fingerprint(public: &[u8; 32]) -> String {
     let digest = aricode_crypto::sha256::sha256(&ed25519_blob(public));
     let mut s = String::from("SHA256:");
@@ -440,6 +458,15 @@ impl Server {
             }
         }
         self.recv_seq = self.recv_seq.wrapping_add(1);
+        // The ChaCha20 nonce is the sequence number and keys are never
+        // exchanged again: a counter must never wrap (audit 2026-10-25 C,
+        // L10; D, L6). Both are checked here: a client always sends
+        // something (window adjustments) while output flows.
+        if self.recv_seq >= MAX_PACKETS || self.send_seq >= MAX_PACKETS {
+            return Err(Error::Protocol(
+                "too many packets without a key re-exchange",
+            ));
+        }
         let pad = packet[4] as usize;
         if pad + 1 > len {
             return Err(Error::Protocol("bad padding"));
@@ -600,7 +627,16 @@ impl Server {
         for l in &lists[6..8] {
             negotiate(l, &[NONE]).ok_or(Error::Negotiation("client requires compression"))?;
         }
-        self.strict = list_has(lists[0], STRICT_C);
+        // Strict key exchange is required: without it a man in the middle
+        // can delete packets at the start of the encrypted stream
+        // (Terrapin, CVE-2023-48795) with the cipher used here. OpenSSH 9.6
+        // and PuTTY 0.80 and later offer it (audit 2026-10-25 D, L7).
+        if !list_has(lists[0], STRICT_C) {
+            return Err(Error::Negotiation(
+                "client does not offer strict key exchange (kex-strict-c-v00@openssh.com)",
+            ));
+        }
+        self.strict = true;
         if r.bool() == Some(true) {
             return Err(Error::Negotiation(
                 "guessed key exchange packets are not supported",
@@ -739,7 +775,7 @@ impl Server {
         events.push(Event::AuthFailed {
             user: String::from_utf8_lossy(user).into_owned(),
         });
-        if self.auth_failures > MAX_AUTH_FAILURES {
+        if self.auth_failures >= MAX_AUTH_FAILURES {
             self.disconnect(14, b"too many authentication failures", out);
             return Ok(());
         }
@@ -774,6 +810,7 @@ impl Server {
             remote_max_packet: max_packet.max(256),
             local_consumed: 0,
             pty: false,
+            started: false,
             sent_eof: false,
             sent_close: false,
             pending: Vec::new(),
@@ -805,12 +842,17 @@ impl Server {
                 true
             }
             b"env" | b"window-change" => true,
+            // One shell or command per channel, never on one this side has
+            // already closed (audit 2026-10-25 C, L8).
+            b"shell" | b"exec" if ch.started || ch.sent_eof || ch.sent_close => false,
             b"shell" => {
+                ch.started = true;
                 events.push(Event::Shell { pty: ch.pty });
                 true
             }
             b"exec" => {
                 let command = r.string().ok_or(bad)?.to_vec();
+                ch.started = true;
                 events.push(Event::Exec {
                     command,
                     pty: ch.pty,
@@ -872,5 +914,79 @@ mod tests {
             s.feed(b"SSH-1.5-old\r\n", &mut out, &mut ev),
             Err(Error::Protocol("unsupported SSH protocol version"))
         );
+    }
+
+    /// A client KEXINIT packet (unencrypted) offering `kex` as its key
+    /// exchange list and what the server supports otherwise.
+    fn client_kexinit(kex: &[u8]) -> Vec<u8> {
+        let mut payload = alloc::vec![msg::KEXINIT];
+        payload.extend_from_slice(&[7; 16]);
+        let lists: [&[u8]; 10] = [
+            kex,
+            b"ssh-ed25519",
+            b"chacha20-poly1305@openssh.com",
+            b"chacha20-poly1305@openssh.com",
+            b"",
+            b"",
+            b"none",
+            b"none",
+            b"",
+            b"",
+        ];
+        for l in lists {
+            payload.extend_from_slice(&(l.len() as u32).to_be_bytes());
+            payload.extend_from_slice(l);
+        }
+        payload.push(0); // first_kex_packet_follows
+        payload.extend_from_slice(&[0; 4]);
+        let mut pad = 8 - (5 + payload.len()) % 8;
+        if pad < 4 {
+            pad += 8;
+        }
+        let len = 1 + payload.len() + pad;
+        let mut packet = (len as u32).to_be_bytes().to_vec();
+        packet.push(pad as u8);
+        packet.extend_from_slice(&payload);
+        packet.extend(core::iter::repeat_n(0, pad));
+        packet
+    }
+
+    /// Audit 2026-10-25 D, L7: a client without strict key exchange is open
+    /// to Terrapin with this cipher; it is refused.
+    #[test]
+    fn strict_key_exchange_is_required() {
+        let mut out = Vec::new();
+        let mut ev = Vec::new();
+        let mut s = Server::new([1; 32], [2; 32], Vec::new());
+        s.start(&mut out);
+        let mut input = b"SSH-2.0-test\r\n".to_vec();
+        input.extend(client_kexinit(b"curve25519-sha256"));
+        assert_eq!(
+            s.feed(&input, &mut out, &mut ev),
+            Err(Error::Negotiation(
+                "client does not offer strict key exchange (kex-strict-c-v00@openssh.com)"
+            ))
+        );
+        let mut s = Server::new([1; 32], [2; 32], Vec::new());
+        s.start(&mut out);
+        let mut input = b"SSH-2.0-test\r\n".to_vec();
+        input.extend(client_kexinit(
+            b"curve25519-sha256,kex-strict-c-v00@openssh.com",
+        ));
+        assert_eq!(s.feed(&input, &mut out, &mut ev), Ok(()));
+        assert!(s.strict);
+    }
+
+    /// Audit 2026-10-25 E, L2: a user name from the network goes to the log
+    /// without control bytes, bounded.
+    #[test]
+    fn user_names_are_made_log_safe() {
+        let mut b = [0u8; 32];
+        assert_eq!(log_safe(b"ari", &mut b), b"ari");
+        assert_eq!(
+            log_safe(b"x' authenticated\n\x1b[2Jroot", &mut b),
+            b"x' authenticated??[2Jroot"
+        );
+        assert_eq!(log_safe(&[b'a'; 100], &mut b).len(), 32);
     }
 }
