@@ -84,6 +84,9 @@ pub struct Process {
     /// Pages of `on_demand` backed so far (they are never unmapped one by
     /// one, so the count is exact; audit of finding D, L2).
     on_demand_backed: u64,
+    /// Its share of the event ring for the events its own calls cause
+    /// (`event_record`, quota refusals).
+    events: aricode_faults::Budget,
 }
 
 /// Frames first-touch backing never takes (ADR 0049): below this many free
@@ -395,6 +398,7 @@ fn spawn_full(
             kill_requested: false,
             on_demand,
             on_demand_backed: 0,
+            events: aricode_faults::Budget::new(),
         },
     );
     scheduler::start_thread(thread);
@@ -1125,12 +1129,7 @@ pub fn map_foreign(
     // with a quota, no more than the quota (ADR 0038).
     if dma.is_some() && p.dma_quota != 0 && p.dma_mapped.saturating_add(span) > p.dma_quota {
         drop(procs);
-        crate::events::record(
-            aricode_abi::sysinfo::EventKind::DmaQuota,
-            pid.0,
-            span,
-            "mmio_map",
-        );
+        record_event(aricode_abi::sysinfo::EventKind::DmaQuota, span, "mmio_map");
         return Err(aricode_abi::Error::Limit);
     }
     // The MMIO/DMA area is above the user stack (8 MiB) and reaches the
@@ -1161,6 +1160,35 @@ pub fn map_foreign(
         in_domain: false,
     });
     Ok((virt + offset, true))
+}
+
+/// Records an event the current process caused, within its share of the
+/// ring (`aricode_faults::Budget`); events over it are counted and reported
+/// as `events dropped` with the next one that fits.
+pub fn record_event(kind: aricode_abi::sysinfo::EventKind, code: u64, name: &str) {
+    let Some(pid) = current_pid() else {
+        return crate::events::record(kind, 0, code, name);
+    };
+    let now_ms = crate::time::uptime_us() / 1000;
+    let charged = PROCESSES
+        .lock()
+        .get_mut(&pid)
+        .map(|p| p.events.charge(now_ms));
+    let dropped = match charged {
+        Some(Some(dropped)) => dropped,
+        Some(None) => return,
+        // Not a process (it is being created or reaped): the kernel's own.
+        None => 0,
+    };
+    if dropped > 0 {
+        crate::events::record(
+            aricode_abi::sysinfo::EventKind::Fault,
+            pid.0,
+            dropped,
+            "events dropped",
+        );
+    }
+    crate::events::record(kind, pid.0, code, name);
 }
 
 /// Records that the mapping at `virt` (an address `map_foreign` returned)

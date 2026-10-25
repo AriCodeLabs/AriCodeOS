@@ -8,6 +8,9 @@
 //! recorded when the window ends ([`Meter::drain_due`]), so no fault
 //! disappears from the tally and a burst followed by silence still shows
 //! its size. Shared by netd (`services/net-core`) and fsd (`services/arifs`).
+//!
+//! [`Budget`] is the kernel's side: what any one process may add to the
+//! ring by its own calls, whether or not it meters itself.
 
 #![no_std]
 
@@ -122,6 +125,56 @@ pub fn label<'a>(kind: &str, count: u32, buf: &'a mut [u8; LABEL_LEN]) -> &'a st
     }
     // Only ASCII and a prefix cut on a char boundary were written.
     core::str::from_utf8(&buf[..cut + 2 + len]).unwrap_or("")
+}
+
+/// A process's share of the kernel event ring (audit 2026-10-25 E, L4: any
+/// process could push the refusals that matter out of it with
+/// `event_record` in a loop): [`Budget::BURST`] events at once, one more
+/// every [`Budget::REFILL_MS`]. What is over budget is counted and shown
+/// with the next event that fits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    tokens: u32,
+    /// Instant the tokens were last topped up, in whole refill steps.
+    refilled_ms: u64,
+    dropped: u64,
+}
+
+impl Default for Budget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Budget {
+    /// A quarter of the 64-entry ring.
+    pub const BURST: u32 = 16;
+    pub const REFILL_MS: u64 = 500;
+
+    pub const fn new() -> Self {
+        Self {
+            tokens: Self::BURST,
+            refilled_ms: 0,
+            dropped: 0,
+        }
+    }
+
+    /// Charges one event at `now_ms`. `Some(n)`: record it, preceded by an
+    /// entry saying `n` events were dropped when `n > 0`; `None`: over
+    /// budget, counted for the next one.
+    pub fn charge(&mut self, now_ms: u64) -> Option<u64> {
+        let steps = now_ms.saturating_sub(self.refilled_ms) / Self::REFILL_MS;
+        if steps > 0 {
+            self.tokens = (self.tokens as u64 + steps).min(Self::BURST as u64) as u32;
+            self.refilled_ms += steps * Self::REFILL_MS;
+        }
+        if self.tokens == 0 {
+            self.dropped = self.dropped.saturating_add(1);
+            return None;
+        }
+        self.tokens -= 1;
+        Some(core::mem::take(&mut self.dropped))
+    }
 }
 
 #[cfg(test)]
@@ -265,6 +318,27 @@ mod tests {
         assert_eq!(m.report(7, 0), 1);
         assert_eq!(m.report(7, 0), 1);
         assert_eq!(m.drain_due(WINDOW_MS), None);
+    }
+
+    #[test]
+    fn budget_bounds_a_loop_and_reports_what_it_dropped() {
+        let mut b = Budget::new();
+        for _ in 0..Budget::BURST {
+            assert_eq!(b.charge(10), Some(0));
+        }
+        for _ in 0..1000 {
+            assert_eq!(b.charge(10), None);
+        }
+        // Refills come in whole steps: one event, carrying the count.
+        assert_eq!(b.charge(Budget::REFILL_MS - 1), None);
+        assert_eq!(b.charge(Budget::REFILL_MS), Some(1001));
+        assert_eq!(b.charge(Budget::REFILL_MS), None);
+        // A long silence refills up to the burst only.
+        let later = 1_000_000;
+        for _ in 0..Budget::BURST {
+            assert!(b.charge(later).is_some());
+        }
+        assert_eq!(b.charge(later), None);
     }
 
     #[test]

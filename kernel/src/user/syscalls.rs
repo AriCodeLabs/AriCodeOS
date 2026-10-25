@@ -866,13 +866,7 @@ fn event_record(code: Handle, name_ptr: u64, name_len: u64) -> Result<u64, Error
     }
     let raw = process::copy_from_user(name_ptr, name_len)?;
     let name = core::str::from_utf8(&raw).map_err(|_| Error::Invalid)?;
-    let pid = process::current_pid().map_or(0, |p| p.0);
-    crate::events::record(
-        aricode_abi::sysinfo::EventKind::Fault,
-        pid,
-        code.0 as u64,
-        name,
-    );
+    process::record_event(aricode_abi::sysinfo::EventKind::Fault, code.0 as u64, name);
     Ok(0)
 }
 
@@ -889,12 +883,7 @@ fn dma_alloc(h: Handle, len: u64) -> Result<u64, Error> {
     // Process quota (set by its launcher): the size rounded up to pages is
     // charged, since that is what gets allocated.
     if !process::charge_dma(len.next_multiple_of(4096)) {
-        crate::events::record(
-            aricode_abi::sysinfo::EventKind::DmaQuota,
-            process::current_pid().map_or(0, |p| p.0),
-            len,
-            "dma_alloc",
-        );
+        process::record_event(aricode_abi::sysinfo::EventKind::DmaQuota, len, "dma_alloc");
         return Err(Error::Limit);
     }
     let dma = crate::hw::dma_alloc(len).map_err(|_| Error::Limit)?;

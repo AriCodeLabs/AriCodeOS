@@ -92,7 +92,7 @@ of this document.
 | L9 | Any `net` app can listen on port 22; sshd's failed re-listen is silent [E-L1] |
 | L10 | Pre-auth SSH user name printed raw (log and terminal injection) [E-L2, C, B] |
 | L11 | `apps`, `pkgs`, `updater` not reserved as app names [E-L3] — **fixed** (ADR 0050: `apps`, `pkgs`, `sshd`; `updater` stays the updater's own) |
-| L12 | `event_record` unmetered: any process can push refusals out of the ring [E-L4] |
+| L12 | `event_record` unmetered: any process can push refusals out of the ring [E-L4] — **fixed** on `fix/init-supervisor` (incident 0040) |
 | L13 | The build host writes `ssh_host_ed25519_key` and stick images mode 0664 [E-L5] — **fixed** (ADR 0050, mode 0600) |
 | L14 | Failed spawn leaks frames and ignores the kernel reserve; an orphan child when the parent's table is full; `pci_claim` inserts partially [C-L1..L3] |
 | L15 | init launch error paths leak handles; a failed `start_driver` can leave a device claimed for good [C-L4] — **fixed** on `fix/init-supervisor` (incident 0038) |
