@@ -191,7 +191,11 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     };
     console_input::init(layout);
     initrd::init(info);
-    pci::init();
+    pci::init(match cmdline.get(keys::PCI_FAULT) {
+        Some("msix") => pci::Lie::MsixOffset,
+        Some("bar") => pci::Lie::BarInRam,
+        _ => pci::Lie::None,
+    });
     if cmdline.get(keys::PCI_FLR) == Some("off") {
         pci::set_flr_enabled(false);
         info!("pci: function level resets disabled on the command line (pci.flr=off)");

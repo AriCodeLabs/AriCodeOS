@@ -9,9 +9,9 @@ use crate::sync::IrqLock;
 use alloc::vec::Vec;
 use aricode_handles::Rights;
 use aricode_pci::{
-    bars, cap_name, capabilities, device_control_after_flr, flr_method, pcie_saved_controls,
-    Address, Bar, Flr, Header, SavedHeader, CAP_MSI, CAP_MSIX, COMMAND_BUS_MASTER,
-    COMMAND_INTX_DISABLE, COMMAND_MEMORY, FLR_WAIT_MS,
+    bars, cap_name, capabilities, check_bar, device_control_after_flr, flr_method, msix_table_fits,
+    page_span, pcie_saved_controls, Address, Bar, Flr, Forbidden, Header, SavedHeader, CAP_MSI,
+    CAP_MSIX, COMMAND_BUS_MASTER, COMMAND_INTX_DISABLE, COMMAND_MEMORY, FLR_WAIT_MS,
 };
 use aricode_x86_paging::{CACHE_DISABLE, GLOBAL, NO_EXECUTE, WRITABLE, WRITE_THROUGH};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -20,15 +20,41 @@ use log::{info, warn};
 /// Virtual ECAM window (up to 256 MiB: 256 buses).
 const ECAM_VIRT: u64 = 0xFFFF_D100_0000_0000;
 const BUS_BYTES: u64 = 1 << 20;
+/// Command register: I/O space decoding.
+const COMMAND_IO: u16 = 1 << 0;
+/// The MSI address window: writes there are interrupts, never memory.
+const MSI_WINDOW: (u64, u64) = (0xFEE0_0000, 0xFF00_0000);
+
+/// A memory BAR checked at boot (ADR 0051): the only ones the kernel maps
+/// or hands to a driver, with the size measured then.
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryBar {
+    pub index: usize,
+    pub address: u64,
+    pub size: u64,
+}
+
+/// Where a function's MSI-X table lies, checked at boot to fit its BAR,
+/// and the Table Offset/BIR register it was read from: a claim refuses
+/// MSI-X if the register reads otherwise then.
+#[derive(Debug, Clone, Copy)]
+pub struct MsixTable {
+    pub register: u32,
+    pub phys: u64,
+}
 
 #[derive(Debug, Clone)]
 pub struct PciDevice {
     pub address: Address,
     pub header: Header,
     pub bars: Vec<(usize, Bar)>,
+    /// The memory BARs that passed `check_devices`.
+    pub memory_bars: Vec<MemoryBar>,
     pub capability_ids: Vec<u8>,
     /// Offset of the MSI-X capability in configuration space.
     pub msix_cap: Option<u8>,
+    /// Its table, if it fits a checked BAR.
+    pub msix_table: Option<MsixTable>,
     /// Offset of the MSI capability (used if there is no MSI-X).
     pub msi_cap: Option<u8>,
     /// Configuration object handed to the current driver: while it lives
@@ -141,7 +167,18 @@ fn read_config(ecam: &Ecam, addr: Address) -> [u8; 256] {
 
 /// Maps the ECAM and enumerates every reachable function. The list is then
 /// available to `pci_claim` through `init`'s PCI root.
-pub fn init() {
+/// `pci_fault` (tests only): what the xHCI controller is read as lying
+/// about at boot, to exercise `check_devices`' refusals.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Lie {
+    None,
+    /// Its MSI-X Table Offset points past its BAR.
+    MsixOffset,
+    /// Its BAR 0 lies at 1 MiB, in RAM.
+    BarInRam,
+}
+
+pub fn init(lie: Lie) {
     let Some(entry) = crate::acpi::with(|a| a.mcfg.first().copied()) else {
         warn!("pci: no MCFG, enumeration skipped");
         return;
@@ -166,7 +203,7 @@ pub fn init() {
     let mut pending = alloc::vec![entry.bus_start];
     let mut visited = [false; 256];
     while let Some(bus) = pending.pop() {
-        if visited[bus as usize] || bus > ecam.bus_end {
+        if visited[bus as usize] || bus < ecam.bus_start || bus > ecam.bus_end {
             continue;
         }
         visited[bus as usize] = true;
@@ -207,8 +244,10 @@ pub fn init() {
                     address,
                     header,
                     bars: bars(&cfg),
+                    memory_bars: Vec::new(),
                     capability_ids: caps.iter().map(|c| c.id).collect(),
                     msix_cap: caps.iter().find(|c| c.id == CAP_MSIX).map(|c| c.offset),
+                    msix_table: None,
                     msi_cap: caps.iter().find(|c| c.id == CAP_MSI).map(|c| c.offset),
                     claimed: None,
                     flr: flr_method(&cfg),
@@ -219,6 +258,7 @@ pub fn init() {
             }
         }
     }
+    check_devices(&ecam, &mut found, lie);
     for d in &found {
         let mut caps: Vec<&str> = d
             .capability_ids
@@ -313,6 +353,122 @@ pub fn info_ext_packed(index: usize) -> Option<u64> {
 }
 
 /// Size of a memory BAR by probing (write ones, read, restore).
+/// Physical ranges no device BAR may touch: RAM and firmware data, and
+/// the kernel's own MMIO (local and I/O APICs, the MSI window, the DMA
+/// remapping units, ECAM).
+fn kernel_ranges(ecam: &Ecam) -> Vec<Forbidden> {
+    let mut out = Vec::new();
+    crate::memory::pmm::for_each_ram_range(|start, end| {
+        out.push(Forbidden {
+            start,
+            end,
+            what: "RAM",
+        })
+    });
+    let mut page = |base: u64, what: &'static str| {
+        if let Some((start, end)) = page_span(base, 1) {
+            out.push(Forbidden { start, end, what });
+        }
+    };
+    crate::acpi::with(|a| {
+        page(a.madt.lapic_address as u64, "the local APIC");
+        for io in &a.madt.io_apics {
+            page(io.address as u64, "an I/O APIC");
+        }
+        for unit in a.dmar.iter().flat_map(|d| &d.units) {
+            page(unit.register_base, "a DMA remapping unit");
+        }
+    });
+    out.push(Forbidden {
+        start: MSI_WINDOW.0,
+        end: MSI_WINDOW.1,
+        what: "the MSI window",
+    });
+    let buses = ecam.bus_end as u64 - ecam.bus_start as u64 + 1;
+    out.push(Forbidden {
+        start: ecam.base,
+        end: ecam.base + buses * BUS_BYTES,
+        what: "ECAM",
+    });
+    out
+}
+
+/// Sizes every memory BAR (decoding off meanwhile, as the sizing probe
+/// requires) and keeps those a driver may get: a device must not choose
+/// where the CPU writes, through the kernel's MSI-X programming or a
+/// driver's mapping (audit 2026-10-25 A, H1; ADR 0051). A BAR is refused
+/// if it is not a proper BAR (`check_bar`), touches RAM or the kernel's
+/// MMIO, or shares a page with another device's BAR; an MSI-X table must
+/// lie within a kept BAR. Each refusal is said; the device keeps working
+/// without that BAR, or with MSI instead of MSI-X.
+fn check_devices(ecam: &Ecam, devices: &mut [PciDevice], lie: Lie) {
+    let forbidden = kernel_ranges(ecam);
+    let lying =
+        |d: &PciDevice| (d.header.class, d.header.subclass, d.header.prog_if) == (0x0C, 0x03, 0x30);
+    let mut sized = Vec::new();
+    for (di, d) in devices.iter().enumerate() {
+        let cmd = read_u16(ecam, d.address, 0x04);
+        write_u16(ecam, d.address, 0x04, cmd & !(COMMAND_MEMORY | COMMAND_IO));
+        for (bi, bar) in &d.bars {
+            if let Bar::Memory { address, is_64, .. } = bar {
+                let size = probe_bar_size(ecam, d.address, *bi, *is_64);
+                let address = match lie {
+                    Lie::BarInRam if *bi == 0 && lying(d) => 0x10_0000,
+                    _ => *address,
+                };
+                sized.push((di, *bi, address, size));
+            }
+        }
+        write_u16(ecam, d.address, 0x04, cmd);
+    }
+    for &(di, bi, address, size) in &sized {
+        let others: Vec<Forbidden> = sized
+            .iter()
+            .filter(|other| other.0 != di)
+            .filter_map(|&(_, _, a, s)| page_span(a, s))
+            .map(|(start, end)| Forbidden {
+                start,
+                end,
+                what: "another device's BAR",
+            })
+            .collect();
+        match check_bar(address, size, &forbidden).and_then(|()| check_bar(address, size, &others))
+        {
+            Ok(()) => devices[di].memory_bars.push(MemoryBar {
+                index: bi,
+                address,
+                size,
+            }),
+            Err(why) => warn!(
+                "pci: {} BAR {} at {:#x} ({:#x} bytes) not offered: {:?}",
+                devices[di].address, bi, address, size, why
+            ),
+        }
+    }
+    for d in devices.iter_mut() {
+        let Some(cap) = d.msix_cap else {
+            continue;
+        };
+        let mut register = read_u32(ecam, d.address, cap as u64 + 4);
+        if lie == Lie::MsixOffset && lying(d) {
+            register |= 0xFFFF_FFF8;
+        }
+        let (bir, offset) = ((register & 0x7) as usize, (register & !0x7) as u64);
+        match d.memory_bars.iter().find(|b| b.index == bir) {
+            Some(b) if msix_table_fits(offset, 1, b.size) => {
+                d.msix_table = Some(MsixTable {
+                    register,
+                    phys: b.address + offset,
+                })
+            }
+            _ => warn!(
+                "pci: {} MSI-X table (BAR {}, offset {:#x}) outside a usable BAR: MSI-X not used",
+                d.address, bir, offset
+            ),
+        }
+    }
+}
+
 fn probe_bar_size(ecam: &Ecam, addr: Address, index: usize, is_64: bool) -> u64 {
     let off = 0x10 + 4 * index as u64;
     let orig_lo = read_u32(ecam, addr, off);
@@ -389,39 +545,41 @@ fn claim_locked(index: usize, ecam: &Ecam, d: &mut PciDevice) -> Result<Claimed,
         KernelObject::new(ObjectKind::Hardware),
         Rights::MANAGE.union(Rights::TRANSFER),
     ));
-    // 3..9: memory BARs with their size.
-    for (bar_index, bar) in &d.bars {
-        if let Bar::Memory { address, is_64, .. } = bar {
-            let size = probe_bar_size(ecam, addr, *bar_index, *is_64);
-            if size == 0 || *address == 0 {
-                continue;
-            }
-            handles[3 + bar_index] = Some((
-                KernelObject::new(ObjectKind::Mmio(crate::hw::Region {
-                    phys: *address,
-                    len: size,
-                    cacheable: false,
-                    source_id,
-                    claim: None,
-                })),
-                mmio_rights,
-            ));
+    // 3..9: the memory BARs checked at boot, with the size measured then,
+    // if the device still reports them where it did (ADR 0051).
+    let now = bars(&read_config(ecam, addr));
+    for b in &d.memory_bars {
+        let unchanged = now.iter().any(|(i, bar)| {
+            *i == b.index && matches!(bar, Bar::Memory { address, .. } if *address == b.address)
+        });
+        if !unchanged {
+            warn!(
+                "pci: {} BAR {} moved since boot: not offered",
+                addr, b.index
+            );
+            continue;
         }
+        handles[3 + b.index] = Some((
+            KernelObject::new(ObjectKind::Mmio(crate::hw::Region {
+                phys: b.address,
+                len: b.size,
+                cacheable: false,
+                source_id,
+                claim: None,
+            })),
+            mmio_rights,
+        ));
     }
     // 2: IRQ via MSI-X (entry 0) or, if the function has no MSI-X, via MSI.
+    // The MSI-X table is where it was checked at boot; a device that now
+    // reports another place gets MSI.
     let mut irq_kind: Option<&str> = None;
-    if let Some(cap) = d.msix_cap {
+    if let (Some(cap), Some(table)) = (d.msix_cap, d.msix_table) {
         let cap = cap as u64;
-        let table = read_u32(ecam, addr, cap + 4);
-        let bir = (table & 0x7) as usize;
-        let table_offset = (table & !0x7) as u64;
-        let bar_phys = d.bars.iter().find_map(|(i, b)| match b {
-            Bar::Memory { address, .. } if *i == bir => Some(*address),
-            _ => None,
-        });
-        if let Some(bar_phys) = bar_phys {
-            let table_phys = bar_phys + table_offset;
-            let irq = crate::hw::register_msix(table_phys, 0)?;
+        if read_u32(ecam, addr, cap + 4) != table.register {
+            warn!("pci: {} MSI-X table moved since boot: MSI-X not used", addr);
+        } else {
+            let irq = crate::hw::register_msix(table.phys, 0)?;
             // Enable MSI-X (bit 15) without masking the function (bit 14).
             let ctrl = read_u32(ecam, addr, cap) >> 16;
             write_u16(ecam, addr, cap + 2, (ctrl as u16 | 0x8000) & !0x4000);

@@ -18,6 +18,8 @@ pub struct UsbOptions {
     pub hid: bool,
     /// That xHCI offers MSI only (no MSI-X).
     pub hid_msi: bool,
+    /// That xHCI offers both MSI and MSI-X.
+    pub hid_msi_and_msix: bool,
     /// No virtio keyboard and mouse: QMP input reaches the USB HID devices
     /// (xHCI or EHCI).
     pub hid_only_input: bool,
@@ -191,10 +193,10 @@ fn base_command(
     if usb.hid || usb.storage {
         // xHCI (Phase 25, part two) with a USB HID keyboard and mouse and/or
         // the test disk as USB storage.
-        let xhci = if usb.hid_msi {
-            "qemu-xhci,id=xhci,msi=on,msix=off"
-        } else {
-            "qemu-xhci,id=xhci"
+        let xhci = match (usb.hid_msi, usb.hid_msi_and_msix) {
+            (true, _) => "qemu-xhci,id=xhci,msi=on,msix=off",
+            (false, true) => "qemu-xhci,id=xhci,msi=on,msix=on",
+            (false, false) => "qemu-xhci,id=xhci",
         };
         q.args(["-device", xhci]);
         if usb.hid {
