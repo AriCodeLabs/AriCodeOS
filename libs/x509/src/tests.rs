@@ -527,6 +527,7 @@ fn name_constraint_subtrees() {
         |permitted: &'static [&'static str], excluded: &'static [&'static str]| NameConstraints {
             permitted: permitted.to_vec(),
             excluded: excluded.to_vec(),
+            ip_subtrees: false,
         };
     let good = nc(&["good.example"], &[]);
     for name in [
@@ -694,5 +695,98 @@ fn hardened_parsing() {
         )
         .err(),
         Some(Error::WrongPurpose)
+    );
+}
+
+/// Audit of incident 0029, L1, L2, L3 and L4: restrictions on roots, two
+/// constrained CAs in one path, IP hosts, and the bounds on work done
+/// before a chain is trusted.
+#[test]
+fn constraints_on_roots_paths_and_ip_hosts() {
+    let at = Some(NOW);
+    let ncr = [cert!("ncr-root")];
+    assert!(verify_chain(&[cert!("ncr-ok")], &ncr, "www.good.example", at).is_ok());
+    assert_eq!(
+        verify_chain(&[cert!("ncr-evil")], &ncr, "www.evil.example", at).err(),
+        Some(Error::NameConstraint)
+    );
+    assert_eq!(
+        verify_chain(
+            &[cert!("ekur-leaf")],
+            &[cert!("ekur-root")],
+            "www.eku.example",
+            at
+        )
+        .err(),
+        Some(Error::WrongPurpose)
+    );
+    // nc-int permits good.example, nc2-int below it only sub.good.example.
+    let roots = [cert!("nc-root")];
+    let path = |leaf| [leaf, cert!("nc2-int"), cert!("nc-int")];
+    assert!(verify_chain(&path(cert!("nc2-ok")), &roots, "www.sub.good.example", at).is_ok());
+    assert_eq!(
+        verify_chain(&path(cert!("nc2-out")), &roots, "www.good.example", at).err(),
+        Some(Error::NameConstraint)
+    );
+    // A CA with iPAddress subtrees, which are not evaluated: an IP host is
+    // refused, a DNS host is not.
+    let ip = [cert!("ip-leaf"), cert!("ip-int")];
+    assert_eq!(
+        verify_chain(&ip, &roots, "10.0.2.2", at).err(),
+        Some(Error::NameConstraint)
+    );
+    assert!(verify_chain(&ip, &roots, "www.ip.example", at).is_ok());
+    // A CA certificate that is itself a trust anchor, presented as the
+    // server's.
+    let ca = [cert!("ca-as-leaf")];
+    assert_eq!(
+        verify_chain(&ca, &ca, "www.good.example", at).err(),
+        Some(Error::WrongPurpose)
+    );
+    // An IP host matches a dNSName spelling it, never a wildcard.
+    let wild = built(None, &[san(&[b"*.0.2.2"])]);
+    assert!(!matches_hostname(
+        &Certificate::parse(&wild).unwrap(),
+        "10.0.2.2"
+    ));
+    let exact = built(None, &[san(&[b"10.0.2.2"])]);
+    assert!(matches_hostname(
+        &Certificate::parse(&exact).unwrap(),
+        "10.0.2.2"
+    ));
+    assert!(
+        !is_ipv4("10.0.2") && !is_ipv4("10.0.2.256") && !is_ipv4("a.0.2.2") && is_ipv4("10.0.2.2")
+    );
+    // At most MAX_EXTENSIONS extensions.
+    let many: Vec<Vec<u8>> = (0..=32u8)
+        .map(|i| extension(&[0x2a, 0x03, i], &[0x05, 0x00]))
+        .collect();
+    assert_eq!(
+        Certificate::parse(&built(None, &many)).err(),
+        Some(Error::Unsupported)
+    );
+    // Leaf names × subtrees within NAME_CONSTRAINT_BUDGET.
+    let names: Vec<Vec<u8>> = (0..200)
+        .map(|i| alloc::format!("n{i}.good.example").into_bytes())
+        .collect();
+    let refs: Vec<&[u8]> = names.iter().map(|n| n.as_slice()).collect();
+    let der = built(None, &[san(&refs)]);
+    let leaf = Certificate::parse(&der).unwrap();
+    let wide = NameConstraints {
+        permitted: vec!["good.example"; 100],
+        excluded: Vec::new(),
+        ip_subtrees: false,
+    };
+    assert_eq!(
+        check_name_constraints(&leaf, "n1.good.example", Some(&wide)),
+        Err(Error::NameConstraint)
+    );
+    let narrow = NameConstraints {
+        permitted: vec!["good.example"; 10],
+        ..wide
+    };
+    assert_eq!(
+        check_name_constraints(&leaf, "n1.good.example", Some(&narrow)),
+        Ok(())
     );
 }

@@ -66,18 +66,26 @@ below it:
   excluded one; a `*.` name counts for every name it can stand for. A
   chain with a constrained CA needs a subjectAltName (no common name
   fallback). Subtrees of other name types constrain names this client
-  never authenticates; `minimum`/`maximum` are refused. Before, a
-  non-critical extension was ignored and a critical one refused the whole
-  chain.
+  does not evaluate; since a host given as an IPv4 address is matched
+  against dNSNames (exactly, never by a wildcard), such a host is refused
+  under a CA that has iPAddress subtrees. `minimum`/`maximum` are
+  refused. The comparisons one CA may cost (leaf names × subtrees) are
+  bounded by `NAME_CONSTRAINT_BUDGET`, since they run before the chain is
+  trusted. Before, a non-critical extension was ignored and a critical one
+  refused the whole chain.
 - `extendedKeyUsage` on an intermediate or a root must include
   `serverAuth` or `anyExtendedKeyUsage`.
 - A CA certificate is never accepted as the server's (checked once its
   chain is trusted, so an untrusted self-signed CA still reads as an
   unknown issuer).
-- Parsing refuses two instances of one extension, dNSNames that are empty
-  or hold bytes outside printable ASCII, and RSA keys above 8192 bits or
-  with an exponent that is even, below 3 or above 2^32 - 1 (verification
-  cost grows with both).
+- Parsing refuses two instances of one extension or more than 32
+  extensions, dNSNames that are empty or hold bytes outside printable
+  ASCII or a space, and RSA keys outside 1024..8192 bits or with an
+  exponent that is even, below 3 or above 2^32 - 1 (verification cost
+  grows with both; 1024 bits stays accepted for RFC 8448's test key).
+- A self-signed server certificate trusted as `trusted_ca.der` must not
+  itself be a CA (`openssl req -x509` makes one by default: add
+  `-addext basicConstraints=CA:FALSE`), as browsers require.
 
 The shell reports `certificate outside the names its issuer may vouch
 for` (`Error::NameConstraint`) and `certificate not issued for a TLS

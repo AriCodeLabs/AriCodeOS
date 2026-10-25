@@ -61,7 +61,16 @@ pub struct NameConstraints<'a> {
     pub permitted: Vec<&'a str>,
     /// No name may lie in any of these.
     pub excluded: Vec<&'a str>,
+    /// The extension also has iPAddress subtrees, which this client does
+    /// not evaluate: a host given as an IP address is refused under it.
+    pub ip_subtrees: bool,
 }
+
+/// Name comparisons one CA's nameConstraints may cost (leaf names ×
+/// subtrees): both are chosen by whoever built the chain, and constraints
+/// are checked before the chain is trusted. Past it the chain is refused
+/// (audit of incident 0029, L3; webpki uses the same kind of budget).
+pub const NAME_CONSTRAINT_BUDGET: usize = 16_384;
 
 impl NameConstraints<'_> {
     /// Whether the leaf name `name` (possibly a `*.` wildcard, which stands
@@ -227,26 +236,57 @@ pub fn verify_signature(
 /// single left-most `*` label matches exactly one label), or, only when the
 /// certificate has no dNSName, its common name. Case-insensitive; a
 /// trailing dot on `host` is ignored.
+/// An IP host (an IPv4 address, `matches_hostname`) matches a dNSName
+/// that spells it exactly, never a wildcard.
 pub fn matches_hostname(cert: &Certificate, host: &str) -> bool {
     let host = host.strip_suffix('.').unwrap_or(host);
     if host.is_empty() || host.contains('*') {
         return false;
     }
+    let matches = |pattern: &str| {
+        if is_ipv4(host) {
+            pattern.strip_suffix('.').unwrap_or(pattern) == host
+        } else {
+            name_matches(pattern, host)
+        }
+    };
     if cert.dns_names.is_empty() {
-        cert.common_name.is_some_and(|cn| name_matches(cn, host))
+        cert.common_name.is_some_and(matches)
     } else {
-        cert.dns_names.iter().any(|name| name_matches(name, host))
+        cert.dns_names.iter().any(|name| matches(name))
     }
 }
 
-/// Checks the leaf's names against a CA's nameConstraints: every dNSName,
-/// and the common name when it stands in for them. A constrained chain
-/// needs a subjectAltName: a common name is no constrained name type.
-fn check_name_constraints(leaf: &Certificate, nc: Option<&NameConstraints>) -> Result<(), Error> {
+/// Four decimal octets separated by dots.
+fn is_ipv4(host: &str) -> bool {
+    let mut parts = 0;
+    host.split('.').all(|p| {
+        parts += 1;
+        !p.is_empty()
+            && p.len() <= 3
+            && p.bytes().all(|b| b.is_ascii_digit())
+            && p.parse::<u8>().is_ok()
+    }) && parts == 4
+}
+
+/// Checks the leaf's names against a CA's nameConstraints: every dNSName.
+/// A constrained chain needs a subjectAltName (a common name is no
+/// constrained name type), and an IP host is refused when the CA also
+/// constrains IP addresses, which this client does not evaluate.
+fn check_name_constraints(
+    leaf: &Certificate,
+    host: &str,
+    nc: Option<&NameConstraints>,
+) -> Result<(), Error> {
     let Some(nc) = nc else {
         return Ok(());
     };
-    if leaf.dns_names.is_empty() || !leaf.dns_names.iter().all(|n| nc.allows(n)) {
+    let subtrees = (nc.permitted.len() + nc.excluded.len()).max(1);
+    if leaf.dns_names.is_empty()
+        || leaf.dns_names.len().saturating_mul(subtrees) > NAME_CONSTRAINT_BUDGET
+        || (nc.ip_subtrees && is_ipv4(host.strip_suffix('.').unwrap_or(host)))
+        || !leaf.dns_names.iter().all(|n| nc.allows(n))
+    {
         return Err(Error::NameConstraint);
     }
     Ok(())
@@ -329,7 +369,7 @@ pub fn verify_chain<'a>(
                 if !anchor.server_auth {
                     return Err(Error::WrongPurpose);
                 }
-                check_name_constraints(&leaf, anchor.name_constraints.as_ref())?;
+                check_name_constraints(&leaf, host, anchor.name_constraints.as_ref())?;
                 return trusted_leaf(leaf);
             }
             error = Error::BadSignature;
@@ -365,7 +405,7 @@ pub fn verify_chain<'a>(
                 Err(Error::WrongPurpose)
             } else {
                 check_validity(candidate.not_before, candidate.not_after, now).and_then(|()| {
-                    check_name_constraints(&leaf, candidate.name_constraints.as_ref())
+                    check_name_constraints(&leaf, host, candidate.name_constraints.as_ref())
                 })
             };
             match outcome {

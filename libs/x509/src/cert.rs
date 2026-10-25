@@ -41,6 +41,12 @@ const SERVER_AUTH: &[u8] = &[0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01];
 const ANY_EXTENDED_KEY_USAGE: &[u8] = &[0x55, 0x1d, 0x25, 0x00];
 /// GeneralName `dNSName [2] IA5String` (implicit, primitive).
 const DNS_NAME: u8 = 0x82;
+/// GeneralName `iPAddress [7] OCTET STRING` (implicit, primitive).
+const IP_ADDRESS: u8 = 0x87;
+/// Extensions a certificate may carry: real ones carry about ten. Bounds
+/// the duplicate check, which runs before anything is trusted (audit of
+/// incident 0029, L2).
+const MAX_EXTENSIONS: usize = 32;
 /// NameConstraints `permittedSubtrees [0]` and `excludedSubtrees [1]`
 /// (implicit, constructed).
 const PERMITTED_SUBTREES: u8 = 0xa0;
@@ -131,6 +137,9 @@ impl<'a> Parsed<'a> {
             // would let parsers that keep the first and the last disagree.
             if seen.contains(&id) {
                 return Err(Error::Malformed);
+            }
+            if seen.len() == MAX_EXTENSIONS {
+                return Err(Error::Unsupported);
             }
             seen.push(id);
             let critical = match ext.optional(der::BOOLEAN)? {
@@ -310,9 +319,11 @@ fn name_constraints(value: &[u8]) -> Result<NameConstraints<'_>, Error> {
     let mut nc = NameConstraints {
         permitted: Vec::new(),
         excluded: Vec::new(),
+        ip_subtrees: false,
     };
     let mut r = Reader::new(der::single(value, der::SEQUENCE)?);
     let mut any = false;
+    let mut ip = false;
     for (tag, list) in [
         (PERMITTED_SUBTREES, &mut nc.permitted),
         (EXCLUDED_SUBTREES, &mut nc.excluded),
@@ -331,6 +342,7 @@ fn name_constraints(value: &[u8]) -> Result<NameConstraints<'_>, Error> {
             if !subtree.is_empty() {
                 return Err(Error::Unsupported);
             }
+            ip |= base.tag == IP_ADDRESS;
             // An empty dNSName constraint stands for every name.
             if base.tag == DNS_NAME {
                 list.push(if base.value.is_empty() {
@@ -345,6 +357,7 @@ fn name_constraints(value: &[u8]) -> Result<NameConstraints<'_>, Error> {
     if !any {
         return Err(Error::Malformed);
     }
+    nc.ip_subtrees = ip;
     Ok(nc)
 }
 
