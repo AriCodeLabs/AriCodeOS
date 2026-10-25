@@ -68,13 +68,18 @@ static WAITERS: WaitQueue = WaitQueue::new();
 struct Ps2 {
     decoder: ScancodeSet1,
     keyboard: Keyboard,
+    /// Bytes read from the i8042 (the keyboard's acknowledgements included).
     bytes: u64,
+    /// `bytes` when the last line ended (the byte that produced the newline
+    /// included), for `ps2_selftest`.
+    bytes_at_newline: u64,
 }
 
 static PS2: IrqLock<Ps2> = IrqLock::new(Ps2 {
     decoder: ScancodeSet1::new(),
     keyboard: Keyboard::new(),
     bytes: 0,
+    bytes_at_newline: 0,
 });
 
 /// Routes the COM1 IRQ to its dedicated vector and enables the UART receive
@@ -231,6 +236,9 @@ pub fn on_keyboard_irq() {
             }
             if let Some(ev) = ps2.decoder.feed(byte) {
                 for &c in ps2.keyboard.feed(ev).as_slice() {
+                    if c == b'\n' || c == b'\r' {
+                        ps2.bytes_at_newline = ps2.bytes;
+                    }
                     ring.push(c);
                     pushed = true;
                 }
@@ -307,7 +315,11 @@ pub fn dropped() -> u64 {
 /// keyboard (QMP) on seeing `CONSOLE_PS2_READY` and the kernel receives it
 /// through IRQ1. Each byte is echoed as it arrives, like a console: the
 /// runner types the next key only after the echo of the previous one
-/// (incident 0022), so the i8042's 16-byte queue never overflows.
+/// (incident 0022), so the i8042's 16-byte queue never overflows. The
+/// scancodes reported are those up to the Enter press, the keyboard's
+/// acknowledgement of its set-up included: counting them when the line is
+/// printed also took in the Enter release or not depending on how fast the
+/// console printed (incident 0031).
 pub fn ps2_selftest() {
     crate::println!("CONSOLE_PS2_READY");
     let deadline = crate::time::ticks() + 15 * crate::time::TICK_HZ;
@@ -319,11 +331,13 @@ pub fn ps2_selftest() {
         for &b in &buf[..n] {
             if b == b'\n' || b == b'\r' {
                 let text = core::str::from_utf8(&line).unwrap_or("?");
+                // Read first: a guard inside the arguments would be held
+                // for the whole console write.
+                let scancodes = PS2.lock().bytes_at_newline;
                 crate::println!();
                 crate::println!(
-                    "console: PS/2 line '{text}' ({} bytes, {} scancodes)",
+                    "console: PS/2 line '{text}' ({} bytes, {scancodes} scancodes)",
                     line.len(),
-                    PS2.lock().bytes
                 );
                 return;
             }

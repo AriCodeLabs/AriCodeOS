@@ -12,6 +12,9 @@
 # boot, so its absence afterwards is proven by the arena line and the
 # absent Disable Slot). The same medium comes back in service and the next
 # write succeeds.
+# `sleep 3000` provides the two idle seconds: the `repeat 10 ping` used
+# before lasted that long only while every line of its output took a
+# full repaint of the screen console (incident 0031).
 name = "usb.reset_device"
 description = "usbd: re-enumeration of a device still on its port uses Reset Device and reuses the slot and its memory"
 level = "full"
@@ -20,7 +23,7 @@ usb_storage = true
 cmdline = "qemu_exit shell usb_fault=idle:reset"
 timeout_secs = 90
 stdin = [
-    "repeat 10 ping 10.0.2.2",
+    "sleep 3000",
     "write probe.txt after idle",
     "repeat 3 ping 10.0.2.2",
     "write probe.txt second try",
