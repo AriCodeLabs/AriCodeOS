@@ -187,9 +187,14 @@ impl Device {
                 // interrupt only tells. A completion found without it is
                 // taken, and said, so a lost interrupt shows instead of
                 // passing for a slow device (incident 0043).
+                // With `strict` the anomaly halts the driver like a failed
+                // request (ADR 0028).
                 Err(Error::Timeout) if self.queue.vq.has_used() => {
                     say(b"a request completed without its interrupt");
                     record("blk irq missing", head as u64);
+                    if self.strict {
+                        return Err(46);
+                    }
                 }
                 Err(Error::Timeout) => {
                     say(if self.transport.needs_reset() {

@@ -53,3 +53,25 @@ from the lost logs, so the driver now says so if it ever happens.
   host.
 - `storage.late_completion`, which waits out an injected lost doorbell
   twice, gets 180 s.
+
+## Audit (2026-10-25)
+
+- The test programs' own reply waits were sized for the 2 s limit:
+  `blk_late` (15 s, `storage.late_completion` failed) and `blk_client`
+  (5 s, every selftest boot) now use `block::REPLY_WAIT_MS` (90 s).
+- With `strict`, a completion found without its interrupt halts the
+  driver (code 46) instead of being taken.
+- fsd stamps a chunked replace's staging time after the chunk is written,
+  not before: slow block requests no longer make a live transaction look
+  abandoned to the next writer.
+- `block::REPLY_WAIT_MS`'s documented chain now includes virtio-blk
+  (32 s per timed-out request, two clients).
+- Accepted: the wait is a fresh 30 s per wake-up, not one deadline per
+  request; the queue's vector only fires on completions, so a wake-up with
+  nothing to pop happens at most once (a late interrupt latched from the
+  previous request). Callers that wait 5 s on init's broker or fsd
+  (`launch::spawn`, `service_status`, sshd's session request) can time out
+  while a slow but healthy disk request runs; the launch then still
+  happens. The USB image is still written whole (it is one per run, not
+  one per scenario). A head id out of range in the used ring is handled on
+  `fix/driver-bounds` (incident 0033).
