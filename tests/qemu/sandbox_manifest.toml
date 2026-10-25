@@ -5,7 +5,8 @@
 # Regressions from audit 2026-09-27-sdk-28e745a: after 300 failed launches
 # the broker has not leaked handles (the later `run hello_app 9`
 # works; previously the 256-entry table ran out) and permissions::granted skips the
-# gaps left by giving up a permission (perms_check).
+# gaps left by giving up a permission (perms_check). A program asking for
+# the raw keyboard (`input`) is denied (ADR 0053).
 name = "sandbox.manifest"
 description = "capability broker: manifest, private directory, quota and denial"
 level = "full"
@@ -23,6 +24,7 @@ stdin = [
     "run fs_victim",
     "run fs_probe",
     "repeat 300 run win_probe",
+    "run input_client",
     "run hello_app 10",
     "shutdown",
 ]
@@ -54,6 +56,8 @@ serial_contains = [
     "fs_probe: journal does not leak foreign data (incomplete commit rejected)",
     "run: fs_probe exited with 0",
     "run: win_probe: denied by the broker",
+    "AriInit: denied, requests system capabilities: input",
+    "run: input_client: denied by the broker",
     "hello_app: hello from an SDK app (arg 10)",
     "ARICODEOS_SHUTDOWN",
 ]

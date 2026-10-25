@@ -1103,6 +1103,9 @@ latter briefly to add the region.
   once and reads it whenever its content is recomposed); `Present` damages
   the window's content, and only presented pixels are guaranteed on screen;
   `Poll` waits with a deadline for a `Key`, `Click` or `Focus`; `Close` removes it.
+  Each program talks over a session of its own (`Attach`, ADR 0052): a
+  window answers only the session that made it, and closes when that
+  program is gone; window buffers must be DMA buffers.
   The compositor translates the keyboard (`aricode-input::Keyboard`) and delivers
   only to the focused window: the `gui.two_windows` probe checks that
   the other window sees nothing.

@@ -33,7 +33,8 @@ for a usable session with those keyboards.
 4. **One reader per input service.** While the bridge runs, a program
    launched from the shell that asks for input competes with it and will
    see `Busy` or lose key presses. This is the stage 2 contract (shell
-   session); the graphical session does not launch the bridge.
+   session); the graphical session does not launch the bridge. Since ADR
+   0053 programs launched through the broker cannot ask for input at all.
 
 ## Rejected alternatives
 
