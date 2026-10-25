@@ -210,6 +210,20 @@ impl Params {
         }
     }
 
+    /// Whether the register blocks the controller places by CAPLENGTH,
+    /// RTSOFF and DBOFF lie within its BAR of `bar_len` bytes: the
+    /// operational registers with every port's, interrupter 0's runtime
+    /// registers, and a doorbell per slot plus the controller's. The
+    /// driver addresses them as the BAR's base plus those offsets, so one
+    /// past the BAR would make it touch whatever is mapped after it
+    /// (audit 2026-10-25 A, L1).
+    pub fn registers_fit(&self, caplength: u64, rtsoff: u64, dboff: u64, bar_len: u64) -> bool {
+        let operational = caplength + 0x400 + 0x10 * self.max_ports as u64;
+        let runtime = rtsoff + 0x20 + 0x20;
+        let doorbells = dboff + 4 * (self.max_slots as u64 + 1);
+        operational <= bar_len && runtime <= bar_len && doorbells <= bar_len
+    }
+
     /// Bytes of DMA buffer the driver needs: 64 KiB for the DCBAA,
     /// rings, ERST and device contexts, plus one page for each
     /// scratchpad the controller asks for (2012 Intel parts ask for dozens;
@@ -2067,4 +2081,23 @@ mod tests {
 
     extern crate std;
     use std::vec::Vec;
+
+    #[test]
+    fn register_blocks_must_fit_the_bar() {
+        // QEMU's xHCI: 8 ports, 64 slots, 16 KiB BAR.
+        let p = Params::decode(64 | (1 << 8) | (8 << 24), 0, 0);
+        assert!(p.registers_fit(0x40, 0x1000, 0x2000, 0x4000));
+        assert!(
+            !p.registers_fit(0x40, 0x4000, 0x2000, 0x4000),
+            "runtime past the BAR"
+        );
+        assert!(
+            !p.registers_fit(0x40, 0x1000, 0x3FFC, 0x4000),
+            "doorbells past the BAR"
+        );
+        assert!(
+            !p.registers_fit(0xFF, 0x1000, 0x2000, 0x500),
+            "ports past the BAR"
+        );
+    }
 }

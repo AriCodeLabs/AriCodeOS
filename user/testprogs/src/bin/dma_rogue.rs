@@ -36,8 +36,10 @@ fn submit(
         .ok_or(40u64)?;
     queue.notify(transport);
     loop {
-        if let Some((done, _)) = queue.vq.pop_used() {
-            return if done == head { Ok(true) } else { Err(41) };
+        match queue.vq.pop_used() {
+            Ok(Some((done, _))) => return if done == head { Ok(true) } else { Err(41) },
+            Ok(None) => {}
+            Err(_) => return Err(44),
         }
         match sys::irq_wait(IRQ, timeout_ms) {
             Ok(_) => {}

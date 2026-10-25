@@ -169,12 +169,19 @@ impl Device {
             self.queue.notify(&self.transport);
         }
         loop {
-            if let Some((done, _)) = self.queue.vq.pop_used() {
-                if done != head {
-                    return Err(41);
+            match self.queue.vq.pop_used() {
+                Ok(Some((done, _))) => {
+                    if done != head {
+                        return Err(41);
+                    }
+                    self.resets = 0;
+                    break;
                 }
-                self.resets = 0;
-                break;
+                Ok(None) => {}
+                // The device returned what it never held (audit
+                // 2026-10-25 A, M1): the request fails and the device is
+                // reset, as for a timeout.
+                Err(_) => return Err(44),
             }
             match sys::irq_wait(IRQ, REQUEST_TIMEOUT_MS) {
                 Ok(_) => {}
@@ -432,13 +439,15 @@ fn serve(dev: &mut Device) -> ! {
         if nh >= 2 {
             dev.settle_client_buffer(handles[1], given, lba_served);
         }
-        let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
-        let _ = sys::handle_close(reply_to);
-        // The client has its answer; the device is reset before the next
-        // request, and only then is a kept buffer released.
+        // A request the device may still complete: it is reset before the
+        // client hears back, so no late write lands in a buffer the client
+        // has reused for its next request (audit 2026-10-25 C, L7); only
+        // then is a kept buffer released.
         if dev.device_owns_buffers() {
             dev.recover();
         }
+        let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
+        let _ = sys::handle_close(reply_to);
     }
 }
 

@@ -44,6 +44,8 @@ pub mod common {
     pub const QUEUE_DESC: u64 = 0x20;
     pub const QUEUE_DRIVER: u64 = 0x28;
     pub const QUEUE_DEVICE: u64 = 0x30;
+    /// Bytes the structure takes up to `QUEUE_DEVICE`'s end.
+    pub const LEN: u64 = 0x38;
 }
 
 /// Structure types announced by the virtio-pci vendor capabilities.
@@ -77,7 +79,10 @@ pub fn find_structures(cfg: &[u8]) -> [Option<PciStructure>; 5] {
             continue;
         }
         let cfg_type = cfg[o + 3];
-        if !(1..=4).contains(&cfg_type) {
+        // BARs are numbered 0 to 5 (virtio 1.2, 4.1.4); another number
+        // would select nothing, or shift past the driver's BAR mask
+        // (audit 2026-10-25 A, L1).
+        if !(1..=4).contains(&cfg_type) || cfg[o + 4] > 5 {
             continue;
         }
         let u32_at = |p: usize| u32::from_le_bytes(cfg[p..p + 4].try_into().unwrap());
@@ -145,8 +150,32 @@ impl QueueLayout {
     }
 }
 
+/// Largest queue a `Virtqueue` handles: its private bookkeeping is sized
+/// for it (8 bytes per entry, inside the driver's own structures: the
+/// network stack's has a size bound, incident 0018). The drivers ask for at
+/// most 64.
+pub const MAX_QUEUE_SIZE: u16 = 64;
+
+/// A used-ring element the device should not have written (audit
+/// 2026-10-25 A, M1): the queue's state is no longer trustworthy and the
+/// driver resets the device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsedError {
+    /// The id is not the head of a chain the device holds.
+    NotInFlight(u32),
+    /// More bytes than the chain's device-writable buffers hold.
+    TooLong { head: u16, len: u32 },
+}
+
 /// A split virtqueue living in a DMA buffer mapped at `virt` with
 /// physical address `phys`. Single producer (the driver).
+///
+/// The device can write anything in its DMA memory, the descriptor table
+/// included, so the queue keeps its own copy of what it needs to trust:
+/// the free list's links and, for each chain the device holds, its length
+/// and how many bytes it may write. A used id or length the device makes
+/// up is refused instead of steering raw-pointer writes (audit 2026-10-25
+/// A, M1: an id of 1000 in a 64-entry queue wrote past the queue).
 pub struct Virtqueue {
     layout: QueueLayout,
     virt: *mut u8,
@@ -155,6 +184,12 @@ pub struct Virtqueue {
     num_free: u16,
     avail_idx: u16,
     last_used: u16,
+    /// Next free descriptor after each free one.
+    next: [u16; MAX_QUEUE_SIZE as usize],
+    /// Per head of a chain the device holds: its descriptors (0: not a
+    /// held head) and its device-writable bytes.
+    held: [u16; MAX_QUEUE_SIZE as usize],
+    writable: [u32; MAX_QUEUE_SIZE as usize],
 }
 
 impl Virtqueue {
@@ -162,7 +197,14 @@ impl Virtqueue {
     ///
     /// `virt` must point to `layout.total_len` writable, page-aligned
     /// bytes that mirror physical `phys`, exclusive to this queue.
+    ///
+    /// # Panics
+    /// If `layout.size` exceeds `MAX_QUEUE_SIZE`.
     pub unsafe fn new(layout: QueueLayout, virt: *mut u8, phys: u64) -> Self {
+        assert!(
+            layout.size <= MAX_QUEUE_SIZE,
+            "virtqueue larger than MAX_QUEUE_SIZE"
+        );
         core::ptr::write_bytes(virt, 0, layout.total_len);
         let mut q = Self {
             layout,
@@ -172,9 +214,12 @@ impl Virtqueue {
             num_free: layout.size,
             avail_idx: 0,
             last_used: 0,
+            next: [0; MAX_QUEUE_SIZE as usize],
+            held: [0; MAX_QUEUE_SIZE as usize],
+            writable: [0; MAX_QUEUE_SIZE as usize],
         };
         for i in 0..layout.size {
-            q.desc_mut(i).next = i.wrapping_add(1);
+            q.next[i as usize] = i.wrapping_add(1);
         }
         q
     }
@@ -198,6 +243,7 @@ impl Virtqueue {
             &mut *(self.virt.add(self.layout.desc_offset + 16 * i as usize) as *mut Descriptor)
         }
     }
+    #[cfg(test)]
     fn desc(&self, i: u16) -> Descriptor {
         // SAFETY: same as above.
         unsafe {
@@ -227,20 +273,24 @@ impl Virtqueue {
         }
         let head = self.free_head;
         let mut i = head;
+        let mut writable = 0u32;
         for (n, &(addr, len, write)) in buffers.iter().enumerate() {
-            let next_free = self.desc(i).next;
+            let next_free = self.next[i as usize];
             let last = n + 1 == buffers.len();
             let d = self.desc_mut(i);
             d.addr = addr;
             d.len = len;
             d.flags = if write { DESC_WRITE } else { 0 } | if last { 0 } else { DESC_NEXT };
-            if !last {
-                d.next = next_free;
+            d.next = if last { 0 } else { next_free };
+            if write {
+                writable = writable.saturating_add(len);
             }
             i = next_free;
         }
         self.free_head = i;
         self.num_free -= buffers.len() as u16;
+        self.held[head as usize] = buffers.len() as u16;
+        self.writable[head as usize] = writable;
         let slot = self.avail_idx % self.layout.size;
         self.write_u16(self.layout.avail_offset + 4 + 2 * slot as usize, head);
         fence(Ordering::SeqCst);
@@ -259,31 +309,36 @@ impl Virtqueue {
     }
 
     /// Next element consumed by the device: (head, bytes written).
-    /// Returns the chain's descriptors to the free list.
-    pub fn pop_used(&mut self) -> Option<(u16, u32)> {
+    /// Returns the chain's descriptors to the free list, walking the
+    /// queue's own links, never the device-writable table. `Err` if the
+    /// device names a chain it does not hold or writes more than the chain
+    /// takes: the driver resets the device.
+    pub fn pop_used(&mut self) -> Result<Option<(u16, u32)>, UsedError> {
         if !self.has_used() {
-            return None;
+            return Ok(None);
         }
         let slot = self.last_used % self.layout.size;
         let base = self.layout.used_offset + 4 + 8 * slot as usize;
-        let head = self.read_u32(base) as u16;
+        let id = self.read_u32(base);
         let len = self.read_u32(base + 4);
-        self.last_used = self.last_used.wrapping_add(1);
-        // Return the chain to the free list.
-        let mut i = head;
-        let mut count = 1;
-        loop {
-            let d = self.desc(i);
-            if d.flags & DESC_NEXT == 0 {
-                break;
-            }
-            i = d.next;
-            count += 1;
+        let head = match u16::try_from(id) {
+            Ok(h) if h < self.layout.size && self.held[h as usize] != 0 => h,
+            _ => return Err(UsedError::NotInFlight(id)),
+        };
+        if len > self.writable[head as usize] {
+            return Err(UsedError::TooLong { head, len });
         }
-        self.desc_mut(i).next = self.free_head;
+        self.last_used = self.last_used.wrapping_add(1);
+        // The chain's descriptors in the order `add` linked them.
+        let count = core::mem::take(&mut self.held[head as usize]);
+        let mut tail = head;
+        for _ in 1..count {
+            tail = self.next[tail as usize];
+        }
+        self.next[tail as usize] = self.free_head;
         self.free_head = head;
         self.num_free += count;
-        Some((head, len))
+        Ok(Some((head, len)))
     }
 
     pub fn num_free(&self) -> u16 {
@@ -422,7 +477,7 @@ mod tests {
         // No room for a chain of 2.
         assert!(q.add(&[(0, 1, false), (0, 1, false)]).is_none());
         assert!(!q.has_used());
-        assert!(q.pop_used().is_none());
+        assert_eq!(q.pop_used(), Ok(None));
         // The "device" consumes: used.ring[0] = {id 0, len 513}, used.idx = 1
         unsafe {
             (b.ptr.add(l.used_offset + 4) as *mut u32).write(0);
@@ -430,16 +485,56 @@ mod tests {
             (b.ptr.add(l.used_offset + 2) as *mut u16).write(1);
         }
         assert!(q.has_used(), "a used entry is visible before it is popped");
-        assert_eq!(q.pop_used(), Some((0, 513)));
+        assert_eq!(q.pop_used(), Ok(Some((0, 513))));
         assert_eq!(q.num_free(), 4, "the chain returns to the free list");
         assert_eq!(q.in_flight(), 0);
         assert!(!q.has_used());
-        assert!(q.pop_used().is_none());
+        assert_eq!(q.pop_used(), Ok(None));
         // The whole queue can be used again.
         assert!(q
             .add(&[(0, 1, false), (0, 1, false), (0, 1, false), (0, 1, false)])
             .is_some());
         assert_eq!(q.num_free(), 0);
+    }
+
+    /// Writes used element `n` as {id, len} and publishes it.
+    fn device_returns(b: &Buf, l: &QueueLayout, n: u16, id: u32, len: u32) {
+        unsafe {
+            (b.ptr.add(l.used_offset + 4 + 8 * n as usize) as *mut u32).write(id);
+            (b.ptr.add(l.used_offset + 8 + 8 * n as usize) as *mut u32).write(len);
+            (b.ptr.add(l.used_offset + 2) as *mut u16).write(n + 1);
+        }
+    }
+
+    /// Audit 2026-10-25 A, M1: the used id indexed the descriptor table
+    /// unchecked (an id past the queue wrote past it), a forged or repeated
+    /// id corrupted the free list, and a cyclic chain hung the driver.
+    #[test]
+    fn device_made_up_used_elements_are_refused() {
+        let l = QueueLayout::new(4);
+        let b = Buf::new(l.total_len);
+        let mut q = unsafe { Virtqueue::new(l, b.ptr, 0x10_0000) };
+        let head = q.add(&[(0x1000, 16, false), (0x2000, 512, true)]).unwrap();
+        device_returns(&b, &l, 0, 1000, 1);
+        assert_eq!(q.pop_used(), Err(UsedError::NotInFlight(1000)));
+        // Descriptor 1 is in the chain but no chain's head.
+        device_returns(&b, &l, 0, 1, 1);
+        assert_eq!(q.pop_used(), Err(UsedError::NotInFlight(1)));
+        device_returns(&b, &l, 0, head as u32, 513);
+        assert_eq!(q.pop_used(), Err(UsedError::TooLong { head, len: 513 }));
+        // The device rewrites the chain's links into a cycle: the queue
+        // walks its own copy and terminates.
+        unsafe {
+            let d1 = b.ptr.add(l.desc_offset + 16) as *mut Descriptor;
+            (*d1).flags = DESC_NEXT;
+            (*d1).next = 0;
+        }
+        device_returns(&b, &l, 0, head as u32, 512);
+        assert_eq!(q.pop_used(), Ok(Some((head, 512))));
+        assert_eq!(q.num_free(), 4);
+        // The same id again: no longer held.
+        device_returns(&b, &l, 1, head as u32, 1);
+        assert_eq!(q.pop_used(), Err(UsedError::NotInFlight(head as u32)));
     }
 
     #[test]

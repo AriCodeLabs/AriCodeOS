@@ -25,6 +25,9 @@ const SLOTS: u16 = 64;
 /// Exit code when the end-of-round wait fails for a reason other than the
 /// service endpoint being gone: looping on it would spin (ADR 0044).
 const EXIT_WAIT_FAILED: u64 = 10;
+/// Exit code when the device returned a buffer it never held (audit
+/// 2026-10-25 A, M1): init relaunches the driver, which resets it.
+const EXIT_DEVICE_LIED: u64 = 11;
 
 fn say(msg: &[u8]) {
     sys::print(b"virtio-input: ");
@@ -85,7 +88,13 @@ impl Device {
     /// the events behind it for an interrupt that already came; `None`
     /// once the queue is empty.
     fn poll(&mut self) -> Option<Option<Event>> {
-        let (head, len) = self.eventq.vq.pop_used()?;
+        let (head, len) = match self.eventq.vq.pop_used() {
+            Ok(used) => used?,
+            Err(_) => {
+                say(b"the device returned a buffer it never held; exiting to reset it");
+                sys::process_exit(EXIT_DEVICE_LIED)
+            }
+        };
         let off = 8 * head as u64;
         let ev = if len as usize >= Event::LEN {
             Event::decode(self.buffers.slice_mut(off, Event::LEN as u64))

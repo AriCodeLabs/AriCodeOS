@@ -864,6 +864,7 @@ impl Controller {
             say(b"no BAR 0 or no IRQ among the capabilities");
             return Err(exit::MAP_BAR);
         };
+        let bar_len = sys::region_len(bar).map_err(|_| exit::MAP_BAR)?;
         let base = Mmio(sys::mmio_map(bar).map_err(|_| {
             say(b"could not map BAR 0");
             exit::MAP_BAR
@@ -892,9 +893,15 @@ impl Controller {
             base.r32(cap::HCSPARAMS2),
             base.r32(cap::HCCPARAMS1),
         );
+        let rtsoff = (base.r32(cap::RTSOFF) & !0x1F) as u64;
+        let dboff = (base.r32(cap::DBOFF) & !0x3) as u64;
+        if !params.registers_fit(caplength, rtsoff, dboff, bar_len) {
+            say(b"register blocks outside BAR 0: not an xHCI to drive");
+            return Err(exit::NOT_XHCI);
+        }
         let op = Mmio(base.0 + caplength);
-        let runtime = Mmio(base.0 + (base.r32(cap::RTSOFF) & !0x1F) as u64);
-        let doorbells = Mmio(base.0 + (base.r32(cap::DBOFF) & !0x3) as u64);
+        let runtime = Mmio(base.0 + rtsoff);
+        let doorbells = Mmio(base.0 + dboff);
         let region = DmaRegion::alloc(params.dma_arena_bytes()).map_err(|_| exit::DMA)?;
         let mut arena = Arena { region, next: 0 };
 
@@ -1587,7 +1594,17 @@ impl Controller {
     ) -> Result<(), &'static str> {
         let spd = self.prepare_port(port, force_reset, deadline)?;
         let slot = match self.command_timed(Trb::enable_slot(), b"Enable Slot", deadline, 500) {
-            Issued::Done(completion::SUCCESS, slot) if slot != 0 => slot,
+            // A slot the controller said it has (xHCI 4.6.3): it indexes
+            // the DCBAA, which holds `max_slots + 1` entries (audit
+            // 2026-10-25 A, L2).
+            Issued::Done(completion::SUCCESS, slot)
+                if slot != 0 && slot <= self.params.max_slots =>
+            {
+                slot
+            }
+            Issued::Done(completion::SUCCESS, _) => {
+                return Err("Enable Slot gave a slot past max_slots")
+            }
             _ => return Err("Enable Slot failed"),
         };
         let result = self
@@ -4132,6 +4149,11 @@ fn intel_route_ports(cfg: &Mmio) -> bool {
 /// One block protocol request on the USB storage.
 fn serve_block(ctl: &mut Controller, msg: &[u8], handles: &[Handle]) {
     let reply_to = handles[0];
+    // The reply endpoint and the buffer are used; anything else is closed
+    // (audit 2026-10-25 C, M3).
+    for h in handles.iter().skip(2) {
+        let _ = sys::handle_close(*h);
+    }
     ctl.request_buffer = BufferFate::Release;
     let capacity = ctl.storage.as_ref().map_or(0, |s| s.capacity);
     let invalid = BlockReply {
@@ -4245,6 +4267,12 @@ fn serve(ctl: &mut Controller, which: usize, msg: &[u8], handles: &[Handle], now
         return;
     }
     let reply_to = handles[0];
+    // Only the reply endpoint is used: any other handle is closed, or the
+    // driver's table fills up and requests start arriving without their
+    // reply endpoint (audit 2026-10-25 C, M3).
+    for h in &handles[1..] {
+        let _ = sys::handle_close(*h);
+    }
     match Request::decode(msg) {
         Some(Request { op: Op::Info, .. }) => {
             let reply = Reply::status(Status::Ok)

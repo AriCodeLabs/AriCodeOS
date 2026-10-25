@@ -11,8 +11,8 @@
 
 use crate::{self as sys, Error, Handle};
 use aricode_virtio::{
-    cfg_type, common, find_structures, status, QueueLayout, Virtqueue, FEATURE_ACCESS_PLATFORM,
-    FEATURE_VERSION_1,
+    cfg_type, common, find_structures, status, PciStructure, QueueLayout, Virtqueue,
+    FEATURE_ACCESS_PLATFORM, FEATURE_VERSION_1,
 };
 
 /// Fixed handles of the contract with init.
@@ -137,6 +137,9 @@ pub enum SetupError {
     MsixRejected,
     /// `DEVICE_STATUS` did not read 0 within `RESET_POLLS` polls of a reset.
     ResetTimeout,
+    /// A structure, or a queue's notification address, the device placed
+    /// outside its BAR (audit 2026-10-25 A, L1).
+    BadStructure,
 }
 
 /// Bound of a device reset: `RESET_POLLS` reads of `DEVICE_STATUS`,
@@ -159,6 +162,8 @@ pub struct Transport {
     pub notify: Mmio,
     pub device_cfg: Mmio,
     notify_multiplier: u64,
+    /// Bytes of the notification structure.
+    notify_len: u64,
     /// Negotiated features.
     pub features: u64,
 }
@@ -193,26 +198,39 @@ impl Transport {
         let common_s = structures[cfg_type::COMMON as usize].ok_or(SetupError::NoCommon)?;
         let notify_s = structures[cfg_type::NOTIFY as usize].ok_or(SetupError::NoNotify)?;
         let device_s = structures[cfg_type::DEVICE as usize].ok_or(SetupError::NoDevice)?;
-        let mut mapped: [Option<(u8, u64)>; 3] = [None; 3];
-        let mut bar_virt = |bar: u8| -> Result<u64, SetupError> {
-            if let Some((_, v)) = mapped.iter().flatten().find(|(b, _)| *b == bar) {
-                return Ok(*v);
+        let mut mapped: [Option<(u8, u64, u64)>; 3] = [None; 3];
+        // A structure's registers, if the device placed them within the
+        // BAR it names: every access is `Mmio` base + a fixed offset, so a
+        // structure past its BAR would make the driver touch whatever is
+        // mapped after it (audit 2026-10-25 A, L1).
+        let mut structure = |s: &PciStructure, needed: u64| -> Result<Mmio, SetupError> {
+            let (virt, len) = match mapped.iter().flatten().find(|(b, _, _)| *b == s.bar) {
+                Some(&(_, v, l)) => (v, l),
+                None => {
+                    let h = bar_handle(mask, s.bar).ok_or(SetupError::MapBar)?;
+                    let len = sys::region_len(h).map_err(|_| SetupError::MapBar)?;
+                    let v = sys::mmio_map(h).map_err(|_| SetupError::MapBar)?;
+                    if let Some(slot) = mapped.iter_mut().find(|m| m.is_none()) {
+                        *slot = Some((s.bar, v, len));
+                    }
+                    (v, len)
+                }
+            };
+            let end = s.offset as u64 + s.length as u64;
+            if (s.length as u64) < needed || end > len {
+                return Err(SetupError::BadStructure);
             }
-            let h = bar_handle(mask, bar).ok_or(SetupError::MapBar)?;
-            let v = sys::mmio_map(h).map_err(|_| SetupError::MapBar)?;
-            if let Some(slot) = mapped.iter_mut().find(|m| m.is_none()) {
-                *slot = Some((bar, v));
-            }
-            Ok(v)
+            Ok(Mmio(virt + s.offset as u64))
         };
-        let common = Mmio(bar_virt(common_s.bar)? + common_s.offset as u64);
-        let notify = Mmio(bar_virt(notify_s.bar)? + notify_s.offset as u64);
-        let device_cfg = Mmio(bar_virt(device_s.bar)? + device_s.offset as u64);
+        let common = structure(&common_s, common::LEN)?;
+        let notify = structure(&notify_s, 2)?;
+        let device_cfg = structure(&device_s, 0)?;
         let mut transport = Self {
             common,
             notify,
             device_cfg,
             notify_multiplier: notify_s.notify_off_multiplier as u64,
+            notify_len: notify_s.length as u64,
             features: 0,
         };
         transport.reset()?;
@@ -279,7 +297,10 @@ impl Transport {
     pub fn setup_queue(&self, index: u16, max_size: u16) -> Result<Queue, SetupError> {
         let c = &self.common;
         c.w16(common::QUEUE_SELECT, index);
-        let size = c.r16(common::QUEUE_SIZE).min(max_size);
+        let size = c
+            .r16(common::QUEUE_SIZE)
+            .min(max_size)
+            .min(aricode_virtio::MAX_QUEUE_SIZE);
         if size == 0 {
             return Err(SetupError::QueueMissing);
         }
@@ -328,6 +349,14 @@ impl Transport {
             return Err(SetupError::MsixRejected);
         }
         let notify_addr = c.r16(common::QUEUE_NOTIFY_OFF) as u64 * self.notify_multiplier;
+        // The 16-bit notification register lies within the notification
+        // structure (audit 2026-10-25 A, L1: up to 2^48 past it).
+        if notify_addr
+            .checked_add(2)
+            .is_none_or(|end| end > self.notify_len)
+        {
+            return Err(SetupError::BadStructure);
+        }
         c.w16(common::QUEUE_ENABLE, 1);
         Ok(notify_addr)
     }
