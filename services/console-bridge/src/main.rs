@@ -63,12 +63,13 @@ fn main(count: u64) -> u64 {
     let mut pending: [Option<Handle>; MAX_INPUTS] = [None; MAX_INPUTS];
     // One keyboard state per device: shift and lock state belong to it.
     let mut keyboards = [Keyboard::new(); MAX_INPUTS];
-    let mut events = [Event::default(); MAX_EVENTS];
-    let mut times = [0u64; MAX_EVENTS];
+    let mut buf = Buffers {
+        events: [Event::default(); MAX_EVENTS],
+        times: [0; MAX_EVENTS],
+        text: [0; MAX_EVENTS * 4],
+    };
     let mut msg = [0u8; Reply::LEN];
     let mut none = [Handle(0); abi::IPC_MAX_HANDLES];
-    // Up to 4 bytes per key (escape sequences for the arrow keys).
-    let mut text = [0u8; MAX_EVENTS * 4];
     // No announcement of its own: init does it before launching the shell,
     // so nothing interleaves with the first prompt on the console (SMP).
     let mut parked = false;
@@ -118,42 +119,41 @@ fn main(count: u64) -> u64 {
         let wait = if retry { RETRY_MS } else { CHECK_MS };
         match sys::ipc_receive_any(&set[..n_set], &mut msg, &mut none, wait) {
             Ok((which, len, nh)) => {
-                for h in &none[..nh] {
-                    let _ = sys::handle_close(*h);
-                }
                 let i = owner[which];
                 if let Some(reply) = pending[i].take() {
                     let _ = sys::handle_close(reply);
                 }
-                // No events (the read timed out): nothing to translate; the
-                // read starts again. A busy service (another reader holds
-                // its one place) is asked again only after a pause.
-                let n = match InputClient::read_reply(&msg[..len], &mut events, &mut times) {
-                    Ok(n) => n,
-                    Err(InputError::Status(Status::Busy)) => {
-                        sys::thread_sleep(RETRY_MS);
-                        0
-                    }
-                    Err(_) => 0,
-                };
-                if inject(&mut keyboards[i], &events[..n], &mut text).is_err() {
+                if deliver(&mut keyboards[i], &msg[..len], &none[..nh], &mut buf).is_err() {
                     say(b"console rejects input; exiting");
                     return 3;
                 }
             }
             // Nothing within the wait, or every read's driver gone: look
             // for reads whose driver died holding them (their reply
-            // endpoint closed) and start those again after a pause.
+            // endpoint closed) and start those again after a pause. A
+            // reply that arrives in the meantime is delivered like any
+            // other.
             Err(_) => {
                 let mut lost = false;
-                for p in pending.iter_mut() {
+                for (i, p) in pending.iter_mut().enumerate() {
                     let Some(reply) = *p else { continue };
-                    if sys::ipc_receive(reply, &mut msg, &mut none, 0)
-                        == Err(sys::Error::PeerClosed)
-                    {
-                        let _ = sys::handle_close(reply);
-                        *p = None;
-                        lost = true;
+                    match sys::ipc_receive(reply, &mut msg, &mut none, 0) {
+                        Ok((len, nh)) => {
+                            let _ = sys::handle_close(reply);
+                            *p = None;
+                            if deliver(&mut keyboards[i], &msg[..len], &none[..nh], &mut buf)
+                                .is_err()
+                            {
+                                say(b"console rejects input; exiting");
+                                return 3;
+                            }
+                        }
+                        Err(sys::Error::PeerClosed) => {
+                            let _ = sys::handle_close(reply);
+                            *p = None;
+                            lost = true;
+                        }
+                        Err(_) => {}
                     }
                 }
                 if lost {
@@ -162,6 +162,38 @@ fn main(count: u64) -> u64 {
             }
         }
     }
+}
+
+/// Room to decode one read reply.
+struct Buffers {
+    events: [Event; MAX_EVENTS],
+    times: [u64; MAX_EVENTS],
+    // Up to 4 bytes per key (escape sequences for the arrow keys).
+    text: [u8; MAX_EVENTS * 4],
+}
+
+/// Handles one read reply of a device: closes any handles it carried and
+/// injects its keys. No events (the read timed out): nothing to translate;
+/// the read starts again. A busy service (another reader holds its one
+/// place) is asked again only after a pause.
+fn deliver(
+    keyboard: &mut Keyboard,
+    msg: &[u8],
+    handles: &[Handle],
+    buf: &mut Buffers,
+) -> Result<(), sys::Error> {
+    for h in handles {
+        let _ = sys::handle_close(*h);
+    }
+    let n = match InputClient::read_reply(msg, &mut buf.events, &mut buf.times) {
+        Ok(n) => n,
+        Err(InputError::Status(Status::Busy)) => {
+            sys::thread_sleep(RETRY_MS);
+            0
+        }
+        Err(_) => 0,
+    };
+    inject(keyboard, &buf.events[..n], &mut buf.text)
 }
 
 /// Translates a device's key events into console text and injects it.
