@@ -63,6 +63,9 @@ pub enum HttpsError {
     /// More than [`MAX_SILENT_BYTES`] of TLS records in a row carried no
     /// application data.
     EmptyRecords,
+    /// The kernel gave fewer random bytes than a TLS key needs: no
+    /// connection is made with a guessable key (audit 2026-10-25 C, L9).
+    NoEntropy,
     /// More than [`MAX_REDIRECTS`] redirects (ADR 0048).
     TooManyRedirects,
     /// A redirect from `https://` to `http://`: never followed (ADR 0048).
@@ -436,14 +439,23 @@ fn get_once(
     if budget.remaining_ms() == 0 {
         return Err(HttpsError::Deadline(Phase::Connect));
     }
+    // The key exchange's seed, before anything is opened: with too few
+    // random bytes it would have been zeros, a key anyone can compute.
+    let mut seed = [0u8; 32];
+    if url.secure && sys::random(system, &mut seed) != Ok(seed.len()) {
+        return Err(HttpsError::NoEntropy);
+    }
     let sock = net
         .tcp_connect(addr, url.port, op_timeout(budget, timeout_ms))
         .map_err(|e| before_http(budget, Phase::Connect, HttpsError::Connect(e)))?;
     let tls = url.secure.then(|| {
-        let mut seed = [0u8; 32];
-        let _ = sys::random(system, &mut seed);
-        let now = sys::time::unix_seconds(system);
-        let mut client = Client::new(url.host, seed, aricode_x509::roots::DEFAULT.to_vec(), now);
+        let now = aricode_x509::check_time(sys::time::unix_seconds(system));
+        let mut client = Client::new(
+            url.host,
+            seed,
+            aricode_x509::roots::DEFAULT.to_vec(),
+            Some(now),
+        );
         for root in extra_roots {
             client.add_root(root.clone());
         }

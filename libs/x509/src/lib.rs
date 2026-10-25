@@ -190,6 +190,20 @@ pub struct Certificate<'a> {
     pub name_constraints: Option<NameConstraints<'a>>,
 }
 
+/// No moment this system checks certificates at can be earlier than this
+/// (2026-10-25 00:00 UTC): a real-time clock that reads earlier (a dead
+/// CMOS battery reads 2000) or none at all gives this instead of skipping
+/// the validity dates, so a certificate that expired before it is always
+/// refused (audit 2026-10-25 D, M1: no clock meant no date check). Raised
+/// at each release (docs/WORKFLOW.md).
+pub const TIME_FLOOR: u64 = 1_792_886_400;
+
+/// The time certificates are checked at: the real-time clock's Unix
+/// seconds, never earlier than `TIME_FLOOR`.
+pub fn check_time(rtc: Option<u64>) -> u64 {
+    rtc.unwrap_or(0).max(TIME_FLOOR)
+}
+
 /// Checks `signature` over `message` with `key`. False on any mismatch
 /// between key type and algorithm.
 pub fn verify_signature(

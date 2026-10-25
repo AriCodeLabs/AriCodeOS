@@ -1191,6 +1191,7 @@ fn http_error(e: aricode_https::HttpsError) -> String {
         E::TooManyInformational => "too many interim responses",
         E::HeaderBytes => "response headers too large in all (interim responses included)",
         E::EmptyRecords => "TLS stall (records without data kept coming)",
+        E::NoEntropy => "too few random bytes for a TLS key",
         E::TooManyRedirects => {
             return format!("more than {} redirects", aricode_https::MAX_REDIRECTS)
         }

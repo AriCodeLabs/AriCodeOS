@@ -790,3 +790,12 @@ fn constraints_on_roots_paths_and_ip_hosts() {
         Ok(())
     );
 }
+
+/// Audit 2026-10-25 D, M1: no clock, or one that reads before the build,
+/// skipped or defeated the validity check.
+#[test]
+fn certificates_are_checked_at_no_earlier_than_the_floor() {
+    assert_eq!(check_time(None), TIME_FLOOR);
+    assert_eq!(check_time(Some(946_684_800)), TIME_FLOOR); // 2000-01-01
+    assert_eq!(check_time(Some(TIME_FLOOR + 5)), TIME_FLOOR + 5);
+}

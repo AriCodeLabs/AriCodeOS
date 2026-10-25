@@ -999,6 +999,9 @@ fn http_get(fs: &mut FsClient, client: &mut NetClient, arg: &[u8]) {
         Err(HttpsError::EmptyRecords) => {
             print(b"http: TLS: the server kept sending records without data\n")
         }
+        Err(HttpsError::NoEntropy) => {
+            print(b"http: TLS: too few random bytes for a key; not connecting\n")
+        }
         Err(HttpsError::HeaderBytes) => {
             print(b"http: response headers too large in all (interim responses included)\n")
         }
