@@ -404,12 +404,13 @@ impl State {
         if dom.regions.contains_key(&start) {
             return Ok(());
         }
-        for page in (start..end).step_by(PAGE_SIZE as usize) {
-            match dom.tables.map_4k(page, page, true) {
-                Ok(()) | Err(IommuError::AlreadyMapped) => {}
-                Err(IommuError::OutOfRange) => return Err("iommu: address beyond the unit width"),
-                Err(_) => return Err("iommu: no frames for the tables"),
-            }
+        // All or nothing: a failure leaves no leaf behind that a device
+        // could still use once the caller frees the buffer (audit
+        // 2026-10-25 C, M1).
+        match dom.tables.map_identity(start, end, true) {
+            Ok(()) => {}
+            Err(IommuError::OutOfRange) => return Err("iommu: address beyond the unit width"),
+            Err(_) => return Err("iommu: no frames for the tables"),
         }
         dom.regions.insert(start, end - start);
         for u in Self::units_of(dom) {

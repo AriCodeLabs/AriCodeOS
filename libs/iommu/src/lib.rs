@@ -403,6 +403,31 @@ impl<A: FrameAlloc, M: PhysMap> SecondLevel<A, M> {
         Ok(())
     }
 
+    /// Identity-maps the pages of `[start, end)`, all or nothing (pages
+    /// already mapped are left as they are). Every check and every table
+    /// it needs come first; only then are leaves written, which cannot
+    /// fail. So a failure (no frame for a table, beyond the unit's width)
+    /// leaves no page mapped by this call pointing at memory the caller
+    /// then frees (audit 2026-10-25 C, M1); tables made for it stay, empty.
+    /// The caller invalidates the IOTLB.
+    pub fn map_identity(&mut self, start: u64, end: u64, write: bool) -> Result<(), IommuError> {
+        let mut page = start;
+        while page < end {
+            self.check(page)?;
+            self.leaf_table(page, true)?;
+            page += PAGE_SIZE;
+        }
+        let mut page = start;
+        while page < end {
+            match self.map_4k(page, page, write) {
+                Ok(()) | Err(IommuError::AlreadyMapped) => {}
+                Err(e) => return Err(e),
+            }
+            page += PAGE_SIZE;
+        }
+        Ok(())
+    }
+
     /// Removes page `iova` and returns the physical address it had.
     pub fn unmap_4k(&mut self, iova: u64) -> Result<u64, IommuError> {
         self.check(iova)?;
@@ -603,5 +628,52 @@ mod tests {
         sl.map_4k(0x1000, 0x2000, true).unwrap();
         // Two new tables (2 x 64 lines) + 2 intermediate entries + 1 leaf.
         assert_eq!(FLUSHED.load(Ordering::Relaxed) - after_root, 2 * 64 + 3);
+    }
+
+    /// A frame source that runs out after `left` frames.
+    struct LimitedFrames {
+        inner: HostFrames,
+        left: usize,
+    }
+    impl FrameAlloc for LimitedFrames {
+        fn alloc_frame(&mut self) -> Option<u64> {
+            self.left = self.left.checked_sub(1)?;
+            self.inner.alloc_frame()
+        }
+    }
+
+    /// Audit 2026-10-25 C, M1: a range whose mapping failed half-way kept
+    /// the leaves already written, so devices could still reach memory
+    /// the caller freed after the error.
+    #[test]
+    fn identity_range_is_all_or_nothing() {
+        // 4 levels: the root plus one table per level for the first 2 MiB;
+        // the range crosses into the next 2 MiB, which needs one more leaf
+        // table than the frames allow.
+        let frames = LimitedFrames {
+            inner: HostFrames { live: Vec::new() },
+            left: 4,
+        };
+        let mut sl = SecondLevel::new(frames, IdentityMap, 4, None).unwrap();
+        let (start, end) = (0x1F_E000, 0x20_2000);
+        assert_eq!(
+            sl.map_identity(start, end, true),
+            Err(IommuError::OutOfFrames)
+        );
+        for page in (start..end).step_by(PAGE_SIZE as usize) {
+            assert_eq!(sl.translate(page), None, "{page:#x} left mapped");
+        }
+        // With room, the whole range maps; pages mapped before stay.
+        let mut sl =
+            SecondLevel::new(HostFrames { live: Vec::new() }, IdentityMap, 4, None).unwrap();
+        assert_eq!(sl.map_4k(0x20_0000, 0x20_0000, false), Ok(()));
+        assert_eq!(sl.map_identity(start, end, true), Ok(()));
+        assert_eq!(sl.translate(0x1F_E000), Some((0x1F_E000, true)));
+        assert_eq!(sl.translate(0x20_0000), Some((0x20_0000, false)));
+        assert_eq!(sl.translate(0x20_1000), Some((0x20_1000, true)));
+        assert_eq!(
+            sl.map_identity(sl.limit(), sl.limit() + PAGE_SIZE, true),
+            Err(IommuError::OutOfRange)
+        );
     }
 }
