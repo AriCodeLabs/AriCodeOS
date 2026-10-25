@@ -19,6 +19,7 @@ extern crate alloc;
 
 mod validate;
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 pub use validate::validate;
 
@@ -525,8 +526,20 @@ pub struct Instance<'m, 'a> {
     globals: Vec<Value>,
     stack: Vec<Value>,
     labels: Vec<Label>,
-    /// End of each block, computed the first time it is entered.
     memory_pages: u32,
+    /// Where each block of a function already entered ends: block start
+    /// (after its type) -> (`else` position, position after `end`). Built
+    /// for a whole function the first time one of its blocks is entered, so
+    /// entering a block costs a lookup, not a scan of its body (audit
+    /// 2026-10-25 B, L5: fuel counts instructions, and a rescan per entry
+    /// let a small fuel budget run for a long time).
+    blocks: BTreeMap<usize, (Option<usize>, usize)>,
+    /// Functions whose blocks are in `blocks`.
+    mapped: Vec<u32>,
+    /// Code bytes read to find where blocks end (tests: bounded by the
+    /// code size, not by how often blocks are entered).
+    #[cfg(test)]
+    scanned: core::cell::Cell<usize>,
 }
 
 impl<'m, 'a> Instance<'m, 'a> {
@@ -556,6 +569,10 @@ impl<'m, 'a> Instance<'m, 'a> {
             stack: Vec::new(),
             labels: Vec::new(),
             memory_pages: pages,
+            blocks: BTreeMap::new(),
+            mapped: Vec::new(),
+            #[cfg(test)]
+            scanned: core::cell::Cell::new(0),
         })
     }
 
@@ -629,41 +646,56 @@ impl<'m, 'a> Instance<'m, 'a> {
         self.pop().map(|v| v as u32)
     }
 
-    /// Jumps to the end of the block starting at `pc` (after its opcode and type)
-    /// returning (position of the `else` if any, position after `end`).
-    fn find_block_end(
-        &self,
-        func: &Function,
-        mut pc: usize,
-    ) -> Result<(Option<usize>, usize), Error> {
+    /// The block starting at `pc` (after its opcode and type) of `func`:
+    /// (position of the `else` if any, position after `end`).
+    fn block_end(&mut self, func: &Function, pc: usize) -> Result<(Option<usize>, usize), Error> {
+        if !self.mapped.contains(&func.index) {
+            self.map_blocks(func)?;
+            self.mapped.push(func.index);
+        }
+        self.blocks
+            .get(&pc)
+            .copied()
+            .ok_or(Error::Malformed("block without end"))
+    }
+
+    /// Records where every block of `func` ends, in one pass over its body.
+    fn map_blocks(&mut self, func: &Function) -> Result<(), Error> {
         let code = &self.module.bytes[..func.code_end];
-        let mut depth = 0usize;
-        let mut else_pos = None;
+        // Open blocks: (start after the type, `else` position).
+        let mut open: Vec<(usize, Option<usize>)> = Vec::new();
+        let mut pc = func.code_start;
         while pc < code.len() {
+            #[cfg(test)]
+            self.scanned.set(self.scanned.get() + 1);
             let op = code[pc];
             pc += 1;
             let mut r = Reader::new(code, pc);
             match op {
                 0x02..=0x04 => {
                     skip_blocktype(&mut r)?;
-                    depth += 1;
+                    open.push((r.pos, None));
                 }
                 0x05 => {
-                    if depth == 0 {
-                        else_pos = Some(r.pos);
+                    if let Some(top) = open.last_mut() {
+                        top.1 = Some(r.pos);
                     }
                 }
+                // The function's own `end` closes no block.
                 0x0B => {
-                    if depth == 0 {
-                        return Ok((else_pos, r.pos));
+                    if let Some((start, else_pos)) = open.pop() {
+                        self.blocks.insert(start, (else_pos, r.pos));
                     }
-                    depth -= 1;
                 }
                 _ => skip_immediates(op, &mut r)?,
             }
             pc = r.pos;
         }
-        Err(Error::Malformed("block without end"))
+        if open.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Malformed("block without end"))
+        }
     }
 
     fn branch(&mut self, depth: u32, frame_labels_base: usize) -> Result<Option<usize>, Error> {
@@ -803,7 +835,7 @@ impl<'m, 'a> Instance<'m, 'a> {
                 0x01 => {}
                 0x02 | 0x03 => {
                     let arity = block_arity(&mut r, module)?;
-                    let (_, end) = self.find_block_end(&func, r.pos)?;
+                    let (_, end) = self.block_end(&func, r.pos)?;
                     let start = r.pos;
                     self.labels.push(Label {
                         end,
@@ -815,7 +847,7 @@ impl<'m, 'a> Instance<'m, 'a> {
                 }
                 0x04 => {
                     let arity = block_arity(&mut r, module)?;
-                    let (else_pos, end) = self.find_block_end(&func, r.pos)?;
+                    let (else_pos, end) = self.block_end(&func, r.pos)?;
                     let cond = self.pop32()?;
                     self.labels.push(Label {
                         end,
@@ -1618,6 +1650,45 @@ mod tests {
         b.export("sum", f);
         assert_eq!(run(&b.build(), "sum", &[10]), Ok(45));
         assert_eq!(run(&b.build(), "sum", &[1]), Ok(0));
+    }
+
+    #[test]
+    fn entering_a_block_costs_no_scan_of_its_body() {
+        // loop { block { 4000 x nop } ; i += 1 ; br_if i < n }: each pass
+        // enters the block, whose end lies 4000 instructions further on.
+        // Fuel counts instructions, so finding that end again on every
+        // entry would make the time per unit of fuel grow with the body
+        // (audit 2026-10-25 B, L5).
+        let mut b = Builder::new();
+        let t = b.ty(&[0x7F], &[0x7F]);
+        let mut code = vec![0x03, 0x40, 0x02, 0x40];
+        code.extend(core::iter::repeat_n(0x01, 4000));
+        code.extend_from_slice(&[
+            0x0B, // end block
+            0x20, 1, 0x41, 1, 0x6A, 0x22, 1, // i += 1 (tee)
+            0x20, 0, 0x49, 0x0D, 0,    // br_if i <u n
+            0x0B, // end loop
+            0x20, 1,
+        ]);
+        let f = b.func(t, 1, &code);
+        b.export("f", f);
+        let wasm = b.build();
+        let m = Module::parse(&wasm).unwrap();
+        let mut mem = vec![0u8; PAGE];
+        let mut inst = Instance::new(&m, &mut mem).unwrap();
+        struct NoHost;
+        impl Host for NoHost {
+            fn call(&mut self, _: usize, _: &[Value], _: &mut [u8]) -> Result<Value, Error> {
+                Err(Error::Trap("no host"))
+            }
+        }
+        assert_eq!(inst.call("f", &[200], &mut mem, &mut NoHost), Ok(200));
+        assert!(
+            inst.scanned.get() <= 2 * code.len(),
+            "{} instructions read to find block ends in {} bytes of code",
+            inst.scanned.get(),
+            code.len()
+        );
     }
 
     #[test]
