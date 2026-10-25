@@ -39,6 +39,7 @@ impl NetError {
                 Status::NoRoute => "no network configuration",
                 Status::NotFound => "unknown name",
                 Status::Reset => "connection refused or reset by the other end",
+                Status::Denied => "port reserved to another service",
                 Status::Busy => "network service refused: busy (no free connection or send slot)",
                 Status::Invalid => "network service refused: invalid (malformed request)",
                 Status::BadHandles => {
@@ -59,14 +60,17 @@ impl NetError {
 /// process opens through it are released when it dies. A label longer than
 /// `MAX_LABEL` is cut at a character boundary, as the kernel cuts process
 /// names. No buffer is needed, so no `NetClient` is.
-pub fn attach(service: Handle, label: &str) -> Result<Handle, NetError> {
+/// `port`: the one privileged port (below `PRIVILEGED_PORTS`) the session
+/// may listen or bind on, 0 for none.
+pub fn attach(service: Handle, label: &str, port: u16) -> Result<Handle, NetError> {
     let mut cut = label.len().min(MAX_LABEL);
     while !label.is_char_boundary(cut) {
         cut -= 1;
     }
-    let req = Request::new(Op::Attach)
+    let mut req = Request::new(Op::Attach)
         .with_label(&label[..cut])
         .ok_or(NetError::Status(Status::Invalid))?;
+    req.port = port;
     let mut msg = [0u8; Reply::LEN];
     let mut handles = [Handle(0); 1];
     let (len, nh) = rpc::call_handles(

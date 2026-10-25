@@ -476,6 +476,8 @@ pub mod net {
         /// side of a new endpoint; the sockets opened through it belong to
         /// that client and are released when the kernel reports it gone.
         /// `Invalid` from a session, `Busy` when every session slot is taken.
+        /// `Request::port`: the one port below `PRIVILEGED_PORTS` the session
+        /// may listen or bind on (0: none).
         Attach = 16,
         /// Socket table usage of owner slot `sock` (0 = main endpoint,
         /// `1..` = sessions): `Reply::value` = [`OwnerSockets`] packed,
@@ -616,7 +618,16 @@ pub mod net {
         NotFound = 8,
         /// The connection was refused or reset by the other end.
         Reset = 9,
+        /// A port below `PRIVILEGED_PORTS` the session was not given.
+        Denied = 10,
     }
+
+    /// Ports a session may listen or bind on only if `Attach` gave it that
+    /// one (audit 2026-10-25 E, L1: any program with `net` could listen on
+    /// 22 while sshd was down and pose as it).
+    pub const PRIVILEGED_PORTS: u16 = 1024;
+    /// The SSH server's port, given to sshd's session.
+    pub const SSH_PORT: u16 = 22;
 
     /// Reply (48 bytes): status, value, port and data (addresses).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -699,6 +710,7 @@ pub mod net {
                 7 => Status::InUse,
                 8 => Status::NotFound,
                 9 => Status::Reset,
+                10 => Status::Denied,
                 _ => return None,
             };
             let mut data = [0u8; 24];

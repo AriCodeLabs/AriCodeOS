@@ -27,6 +27,7 @@ use aricode_net::timers;
 use aricode_net::{arp, dhcp, dns, eth, icmp, ipv4, isn, udp, Ipv4Addr, MacAddr};
 use aricode_proto::net::{
     Info, Op, OwnerSockets, Reply, Request, Status, TcpStats, MAX_DATAGRAM, MAX_LABEL,
+    PRIVILEGED_PORTS,
 };
 use aricode_rt::sys::virtio_pci::{IRQ, SERVICE};
 use aricode_rt::sys::wait::{self, Deadline, Woken};
@@ -144,10 +145,13 @@ enum Fault {
     /// closed and that was waiting out TIME-WAIT, so a new connection
     /// could have it (incident 0027). Nobody was refused (code 0).
     TimeWaitRecycled = 16,
+    /// `TcpListen`/`UdpBind` on a privileged port the session was not
+    /// given (`PRIVILEGED_PORTS`).
+    PortReserved = 17,
 }
 
 impl Fault {
-    const COUNT: usize = 17;
+    const COUNT: usize = 18;
     const ALL: [Fault; Self::COUNT] = [
         Fault::TcpTableFull,
         Fault::ArpDeferFull,
@@ -166,6 +170,7 @@ impl Fault {
         Fault::SessionCreate,
         Fault::TcpSecretWeak,
         Fault::TimeWaitRecycled,
+        Fault::PortReserved,
     ];
 
     fn from_index(i: usize) -> Option<Self> {
@@ -194,6 +199,7 @@ impl Fault {
             Fault::SessionCreate => "net session create",
             Fault::TcpSecretWeak => "net tcp secret weak",
             Fault::TimeWaitRecycled => "net tcp tw recycled",
+            Fault::PortReserved => "net port reserved",
         }
     }
 
@@ -204,6 +210,7 @@ impl Fault {
         match self {
             Fault::BadRequest => Status::Invalid,
             Fault::BadHandles => Status::BadHandles,
+            Fault::PortReserved => Status::Denied,
             Fault::Reclaimed | Fault::RxBudget | Fault::TcpSecretWeak | Fault::TimeWaitRecycled => {
                 Status::Ok
             }
@@ -387,6 +394,8 @@ struct Session {
     ep: Handle,
     label: [u8; MAX_LABEL],
     len: u8,
+    /// The privileged port it may use (0: none).
+    port: u16,
 }
 
 impl Session {
@@ -605,8 +614,18 @@ impl<L: Link> Stack<L> {
     #[inline(never)]
     pub fn new(link: L, clock: Clock, name: &'static str) -> Box<Self> {
         let () = Self::SIZE_OK;
-        let xid = 0x4152_4900 | (link.mac().0[5] as u32);
         let (secret, whole) = tcp_secret(&clock, name);
+        // DHCP transaction id, first DNS id and DNS source port drawn at
+        // random, not from the MAC or fixed: an off-path host that guesses
+        // them can forge the answers (audit 2026-10-25 B, L2). Not from
+        // the TCP secret, which must never go on the wire. With no random
+        // bytes they fall back to the clock, as the secret does.
+        let mut r = clock.now().to_le_bytes();
+        let _ = sys::random(clock.0, &mut r);
+        let xid = u32::from_le_bytes([r[0], r[1], r[2], r[3]]);
+        let dns_id = u16::from_le_bytes([r[4], r[5]]);
+        // Within the dynamic range 49152..65535.
+        let dns_port = 49152 + u16::from_le_bytes([r[6], r[7]]) % 16384;
         let secret_source = sys::random_source(clock.0);
         let mut faults = aricode_faults::Meter::new();
         report_secret_source(name, secret_source, whole, &mut faults, clock.now());
@@ -622,7 +641,7 @@ impl<L: Link> Stack<L> {
             config: None,
             arp: arp::Cache::new(),
             ip_id: 1,
-            dns_id: 1,
+            dns_id,
             pings: Owned::new(),
             sockets: Owned::new(),
             dns: Owned::new(),
@@ -634,7 +653,7 @@ impl<L: Link> Stack<L> {
                 waiting: None,
             }),
             buffers: ClientBuffers::new(),
-            dns_port: 49153,
+            dns_port,
             retained: None,
             faults,
             sessions: [None; MAX_SESSIONS],
@@ -669,6 +688,15 @@ impl<L: Link> Stack<L> {
     }
 
     /// Refuses a request: records it and answers with the matching status.
+    /// Whether `owner` may listen or bind on `port`: an unprivileged one,
+    /// or the privileged one its session was given; the main endpoint
+    /// (init) any.
+    fn port_allowed(&self, owner: Owner, port: u16) -> bool {
+        port >= PRIVILEGED_PORTS
+            || owner == MAIN
+            || self.session(owner).is_some_and(|s| s.port == port)
+    }
+
     fn refuse(&mut self, reply_to: Handle, what: Fault, now: u64) {
         self.note(what, now);
         answer(reply_to, Reply::status(what.status()));
@@ -779,7 +807,7 @@ impl<L: Link> Stack<L> {
     /// which the service keeps the receive side; the send side goes to the
     /// client, and when its last holder dies the session is retired. One
     /// per launch, so the sockets of one process never mix with another's.
-    fn grant(&mut self, label: &str, now: u64) -> Result<Handle, Fault> {
+    fn grant(&mut self, label: &str, port: u16, now: u64) -> Result<Handle, Fault> {
         let free = |sessions: &[Option<Session>]| sessions.iter().position(Option::is_none);
         let slot = match free(&self.sessions) {
             Some(slot) => slot,
@@ -796,6 +824,7 @@ impl<L: Link> Stack<L> {
             ep: receive,
             label: l,
             len: label.len() as u8,
+            port,
         });
         self.generation = self.generation.wrapping_add(1);
         Ok(send)
@@ -1342,7 +1371,13 @@ impl<L: Link> Stack<L> {
             return;
         }
         if uh.dst_port == self.dns_port {
-            self.on_dns(data);
+            // Only the configured server's answers, from its port: with
+            // the random id and source port, what an off-path host must
+            // guess (audit 2026-10-25 C, DNS note).
+            let from_server = self.config.is_some_and(|c| c.dns == ih.src);
+            if from_server && uh.src_port == dns::PORT {
+                self.on_dns(data);
+            }
             return;
         }
         let Some((_, _, sock)) = self
@@ -1707,6 +1742,9 @@ impl<L: Link> Stack<L> {
                 if req.port == 0 {
                     return self.refuse(reply_to, Fault::BadRequest, now);
                 }
+                if !self.port_allowed(owner, req.port) {
+                    return self.refuse(reply_to, Fault::PortReserved, now);
+                }
                 // A port another client listens on may be a dead client's
                 // (sshd relaunched before the sweep noticed its previous
                 // generation): ask about that client before refusing.
@@ -1936,7 +1974,7 @@ impl<L: Link> Stack<L> {
                 if owner != MAIN {
                     return self.refuse(reply_to, Fault::BadRequest, now);
                 }
-                match self.grant(req.label_str(), now) {
+                match self.grant(req.label_str(), req.port, now) {
                     Ok(send) => answer_with(reply_to, Reply::ok(0), send),
                     Err(fault) => self.refuse(reply_to, fault, now),
                 }
@@ -2008,6 +2046,9 @@ impl<L: Link> Stack<L> {
             Op::UdpBind => {
                 if req.port == 0 {
                     return self.refuse(reply_to, Fault::BadRequest, now);
+                }
+                if !self.port_allowed(owner, req.port) {
+                    return self.refuse(reply_to, Fault::PortReserved, now);
                 }
                 // A port in use may be a dead client's: ask about it first.
                 let held_by = |sockets: &Owned<Socket, MAX_SOCKETS>| {

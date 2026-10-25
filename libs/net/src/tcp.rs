@@ -44,6 +44,13 @@ const TIME_WAIT_MS: u64 = 2000;
 /// always a full close, so nothing more can arrive for anyone; Linux waits
 /// 60 s (`tcp_fin_timeout`) with a table of thousands of slots.
 pub const FIN_WAIT2_MS: u64 = 30_000;
+/// Longest a closed connection may take to deliver its last data and FIN
+/// and have the FIN acknowledged (FIN-WAIT-1, CLOSING, LAST-ACK): a peer
+/// that answers just enough to keep it from timing out (a zero window, or
+/// a FIN that crosses ours while data is pending) would otherwise hold the
+/// slot until the next boot, and eight such peers every TCP slot, sshd's
+/// included (audit 2026-10-25 B, L3). Ends in RST, as FIN-WAIT-2 does.
+pub const CLOSING_MS: u64 = 30_000;
 
 /// Connections a listener may hold before its owner accepts them, half-open
 /// (`SynReceived`) and established alike, for a table of `table_slots`
@@ -274,6 +281,9 @@ pub struct Connection {
     time_wait_until: u64,
     /// When FIN-WAIT-2 gives up on the peer's FIN (`FIN_WAIT2_MS`).
     fin_wait2_until: u64,
+    /// When a connection closed on our side gives up delivering its data
+    /// and FIN (`CLOSING_MS`); set at the first `poll` after `close`.
+    closing_until: Option<u64>,
 }
 
 impl Connection {
@@ -301,6 +311,7 @@ impl Connection {
             retries: 0,
             time_wait_until: 0,
             fin_wait2_until: 0,
+            closing_until: None,
         }
     }
 
@@ -446,7 +457,19 @@ impl Connection {
 
     /// Next segment to transmit, if any. Call until `None`.
     pub fn poll(&mut self, now: u64, out: &mut [u8]) -> Option<usize> {
-        // A peer that never sends its FIN: reset and let the slot go.
+        // A peer that never sends its FIN, or keeps ours from being
+        // delivered and acknowledged: reset and let the slot go.
+        if matches!(
+            self.state,
+            State::FinWait1 | State::Closing | State::LastAck
+        ) {
+            let until = *self.closing_until.get_or_insert(now + CLOSING_MS);
+            if now >= until {
+                self.state = State::Closed;
+                self.reason = Some(CloseReason::Timeout);
+                self.need_ack = true; // reused as "send RST"
+            }
+        }
         if self.state == State::FinWait2 && now >= self.fin_wait2_until {
             self.state = State::Closed;
             self.reason = Some(CloseReason::Timeout);
@@ -506,9 +529,15 @@ impl Connection {
             return seg;
         }
         // New data.
+        // CLOSING included: a FIN from the peer can arrive while our data
+        // and FIN are still pending (audit 2026-10-25 B, L3).
         if matches!(
             self.state,
-            State::Established | State::CloseWait | State::FinWait1 | State::LastAck
+            State::Established
+                | State::CloseWait
+                | State::FinWait1
+                | State::Closing
+                | State::LastAck
         ) {
             let sent = self.inflight() - usize::from(self.fin_sent);
             let unsent = self.send.len.saturating_sub(sent);
@@ -704,6 +733,13 @@ impl Connection {
             State::Closed => None,
             State::TimeWait => Some(self.time_wait_until),
             State::FinWait2 => Some(self.fin_wait2_until),
+            State::FinWait1 | State::Closing | State::LastAck => {
+                let closing = self.closing_until;
+                match (self.retransmit_at, closing) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                }
+            }
             _ => self.retransmit_at,
         }
     }
@@ -1249,5 +1285,104 @@ mod tests {
             "another address"
         );
         assert!(seq_lt(u32::MAX - 1, 1) && !seq_lt(1, u32::MAX - 1));
+    }
+
+    /// A connection on port 22 that sent 10 of 100 bytes into a 10-byte
+    /// window and was closed by its owner.
+    fn closed_with_data_pending(seg: &mut [u8]) -> (Connection, u32) {
+        let me = Ipv4Addr::new(10, 0, 2, 15);
+        let peer = Ipv4Addr::new(10, 0, 2, 2);
+        let mut c = Connection::new(me, 22, peer, 4000);
+        c.listen(1000);
+        let h = |seq, ack, flags, window| Header {
+            src_port: 4000,
+            dst_port: 22,
+            seq,
+            ack,
+            flags,
+            window,
+        };
+        c.on_segment(&h(5000, 0, FLAG_SYN, 10), &[], 0);
+        let n = c.poll(0, seg).unwrap();
+        let una = Header::parse(me, peer, &seg[..n])
+            .unwrap()
+            .0
+            .seq
+            .wrapping_add(1);
+        c.on_segment(&h(5001, una, FLAG_ACK, 10), &[], 1);
+        c.send(&[0x41; 100]);
+        c.close();
+        while c.poll(2, seg).is_some() {}
+        (c, una)
+    }
+
+    /// Audit 2026-10-25 B, L3 (reproduced by the audit): a FIN from the
+    /// peer while our data and FIN were pending left the connection in
+    /// CLOSING with nothing ever sent and no timer: the slot was held
+    /// until the next boot.
+    #[test]
+    fn closing_sends_what_is_pending() {
+        let mut seg = [0u8; MAX_SEGMENT];
+        let (mut c, una) = closed_with_data_pending(&mut seg);
+        let fin = Header {
+            src_port: 4000,
+            dst_port: 22,
+            seq: 5001,
+            ack: una.wrapping_add(10),
+            flags: FLAG_ACK | FLAG_FIN,
+            window: 65535,
+        };
+        c.on_segment(&fin, &[], 3);
+        assert_eq!(c.state(), State::Closing);
+        let mut sent = 0;
+        let mut fin_sent = false;
+        while let Some(n) = c.poll(4, &mut seg) {
+            let (h, p) = Header::parse(
+                Ipv4Addr::new(10, 0, 2, 15),
+                Ipv4Addr::new(10, 0, 2, 2),
+                &seg[..n],
+            )
+            .unwrap();
+            sent += p.len();
+            fin_sent |= h.flags & FLAG_FIN != 0;
+        }
+        assert_eq!((sent, fin_sent), (90, true));
+        assert!(
+            c.next_timer().is_some(),
+            "a timer while the FIN waits for its ACK"
+        );
+    }
+
+    /// Audit 2026-10-25 B, L3: a peer that never opens its window keeps a
+    /// closed connection in FIN-WAIT-1 with no timer. It now ends in RST
+    /// after `CLOSING_MS`.
+    #[test]
+    fn a_closed_connection_gives_up_after_closing_ms() {
+        let mut seg = [0u8; MAX_SEGMENT];
+        let (mut c, una) = closed_with_data_pending(&mut seg);
+        // The peer acknowledges the 10 bytes and closes its window.
+        let ack = Header {
+            src_port: 4000,
+            dst_port: 22,
+            seq: 5001,
+            ack: una.wrapping_add(10),
+            flags: FLAG_ACK,
+            window: 0,
+        };
+        c.on_segment(&ack, &[], 3);
+        assert_eq!(c.state(), State::FinWait1);
+        let at = c.next_timer().expect("a deadline");
+        assert!(at <= 2 + CLOSING_MS);
+        assert!(c.poll(at - 1, &mut seg).is_none() || c.state() == State::FinWait1);
+        let n = c.poll(at, &mut seg).expect("an RST");
+        let (h, _) = Header::parse(
+            Ipv4Addr::new(10, 0, 2, 15),
+            Ipv4Addr::new(10, 0, 2, 2),
+            &seg[..n],
+        )
+        .unwrap();
+        assert!(h.flags & FLAG_RST != 0);
+        assert!(c.is_closed());
+        assert_eq!(c.close_reason(), Some(CloseReason::Timeout));
     }
 }
