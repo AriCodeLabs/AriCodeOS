@@ -421,7 +421,9 @@ impl<A: FrameAlloc, M: PhysMap> SecondLevel<A, M> {
         while page < end {
             match self.map_4k(page, page, write) {
                 Ok(()) | Err(IommuError::AlreadyMapped) => {}
-                Err(e) => return Err(e),
+                // Checked and every table made above: nothing is left to
+                // fail, and a failure here would leave leaves behind.
+                Err(e) => unreachable!("iommu: map after the checks failed: {e:?}"),
             }
             page += PAGE_SIZE;
         }

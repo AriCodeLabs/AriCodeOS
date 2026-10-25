@@ -723,9 +723,17 @@ fn spawn_from_bytes(
         .union(Rights::WAIT)
         .union(Rights::MANAGE)
         .union(Rights::DUPLICATE);
-    with_handles(|t| {
+    let handle = with_handles(|t| {
         insert(t, KernelObject::new(ObjectKind::Process(pid)), rights).map(|h| h.0 as u64)
-    })
+    });
+    if handle.is_err() {
+        // A child its parent cannot hold could be neither waited for nor
+        // killed, and a supervisor would start another (audit 2026-10-25
+        // C, L2): it does not run.
+        warn!("process_spawn '{name}': no room for its handle; killing it");
+        process::request_kill(pid);
+    }
+    handle
 }
 
 fn require_pci_root(t: &crate::object::Handles, h: Handle, required: Rights) -> Result<(), Error> {
@@ -735,8 +743,17 @@ fn require_pci_root(t: &crate::object::Handles, h: Handle, required: Rights) -> 
     }
 }
 
+/// The handles a claim inserts all go in, or none does (audit 2026-10-25
+/// C, L3: a full table left some inserted and never reported, the device
+/// claimed with no handle the caller knew of).
 fn pci_claim(root: Handle, index: usize, out_ptr: u64) -> Result<u64, Error> {
-    with_handles(|t| require_pci_root(t, root, Rights::MANAGE))?;
+    with_handles(|t| {
+        require_pci_root(t, root, Rights::MANAGE)?;
+        if t.room() < aricode_abi::PCI_CLAIM_HANDLES {
+            return Err(Error::Limit);
+        }
+        Ok(())
+    })?;
     process::copy_to_user(out_ptr, &[0u8; aricode_abi::PCI_CLAIM_HANDLES * 4])?;
     let claimed = crate::pci::claim(index).map_err(|e| {
         warn!("pci_claim {index}: {e}");
@@ -746,6 +763,7 @@ fn pci_claim(root: Handle, index: usize, out_ptr: u64) -> Result<u64, Error> {
         let mut out = Vec::with_capacity(aricode_abi::PCI_CLAIM_HANDLES * 4);
         for slot in claimed.handles {
             let value = match slot {
+                // Room was checked above; this process is single-threaded.
                 Some((obj, rights)) => insert(t, obj, rights)?.0,
                 None => 0,
             };
@@ -753,7 +771,23 @@ fn pci_claim(root: Handle, index: usize, out_ptr: u64) -> Result<u64, Error> {
         }
         Ok(out)
     })?;
-    process::copy_to_user(out_ptr, &raw)?;
+    if let Err(e) = process::copy_to_user(out_ptr, &raw) {
+        // The caller never learns the handles: take them back (dropped
+        // here, outside the table's lock: the claim's drop takes the PCI
+        // locks).
+        let taken: Vec<_> = with_handles(|t| {
+            Ok(raw
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| u32::from_le_bytes(*b))
+                .filter(|&h| h != 0)
+                .filter_map(|h| t.remove(Handle(h)).ok())
+                .collect())
+        })?;
+        drop(taken);
+        return Err(e);
+    }
     Ok(aricode_abi::PCI_CLAIM_HANDLES as u64)
 }
 

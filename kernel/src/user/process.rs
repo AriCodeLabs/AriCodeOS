@@ -131,7 +131,7 @@ fn back_page(p: &mut Process, page: u64) -> OnDemand {
         )
     };
     if m.map_4k(page, frame.addr(), flags).is_err() {
-        pmm::with(|f| f.free(frame).expect("frame just allocated"));
+        free_frame(frame);
         return OnDemand::OutOfMemory;
     }
     p.on_demand_backed += 1;
@@ -786,6 +786,48 @@ pub fn reap_selftest() {
         "process reap selftest ok ({} processes created and waited for on {} CPU(s), {lost} frames difference, heap +{heap_grown} pages)",
         ROUNDS * BATCH,
         crate::cpu::online_count()
+    );
+}
+
+/// `test=spawn_oom` (audit 2026-10-25 C, L1): a spawn that runs out of
+/// frames half-way gives back every frame it took (the address space's
+/// root, tables, pages), and once memory is back the next spawn works.
+pub fn spawn_oom_selftest() {
+    use crate::memory::heap;
+    use crate::user::programs;
+
+    let code = programs::by_name("hello").expect("hello in the initrd");
+    // Warm-up: let the heap do whatever growing it will before measuring.
+    for _ in 0..4 {
+        let pid = spawn("hello", code).expect("spawn");
+        assert_eq!(wait(pid), ExitStatus::Exited(42));
+    }
+    // Leave a few frames above the kernel reserve: enough for the address
+    // space and its first page, not for the image and the stack.
+    let mut held = Vec::new();
+    while pmm::stats().free_frames > KERNEL_RESERVE_FRAMES + 4 {
+        held.push(pmm::with(|p| p.allocate()).expect("free frame"));
+    }
+    let free_before = pmm::stats().free_frames;
+    let heap_before = heap::mapped_bytes();
+    const TRIES: usize = 10;
+    for _ in 0..TRIES {
+        assert!(
+            spawn("hello", code).is_err(),
+            "spawn must run out of frames"
+        );
+    }
+    let heap_grown = (heap::mapped_bytes() - heap_before) / PAGE_SIZE;
+    let lost = free_before as i64 - pmm::stats().free_frames as i64 - heap_grown as i64;
+    let held_count = held.len();
+    for f in held {
+        free_frame(f);
+    }
+    assert!(lost <= 0, "frames lost by {TRIES} failed spawns: {lost}");
+    let pid = spawn("hello", code).expect("spawn once memory is back");
+    assert_eq!(wait(pid), ExitStatus::Exited(42));
+    info!(
+        "spawn out-of-memory selftest ok ({TRIES} failed spawns with {held_count} frames held, {lost} frames difference, heap +{heap_grown} pages)"
     );
 }
 
