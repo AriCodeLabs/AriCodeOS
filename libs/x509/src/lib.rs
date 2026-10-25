@@ -46,8 +46,80 @@ pub enum Error {
     ChainTooLong,
     /// The leaf may not authenticate a TLS server: extendedKeyUsage without
     /// serverAuth, or keyUsage without digitalSignature (RFC 5280 4.2.1.12,
-    /// RFC 8446 4.4.2.2).
+    /// RFC 8446 4.4.2.2); or a CA of the chain may not issue for one: its
+    /// extendedKeyUsage lacks serverAuth.
     WrongPurpose,
+    /// A CA's nameConstraints do not allow a name of the leaf (RFC 5280
+    /// 4.2.1.10).
+    NameConstraint,
+}
+
+/// The dNSName subtrees of a CA's nameConstraints extension.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameConstraints<'a> {
+    /// If not empty, every name must lie in one of these.
+    pub permitted: Vec<&'a str>,
+    /// No name may lie in any of these.
+    pub excluded: Vec<&'a str>,
+}
+
+impl NameConstraints<'_> {
+    /// Whether the leaf name `name` (possibly a `*.` wildcard, which stands
+    /// for any one label) is allowed: each name it can stand for lies in a
+    /// permitted subtree, and none in an excluded one.
+    pub fn allows(&self, name: &str) -> bool {
+        let name = name.strip_suffix('.').unwrap_or(name);
+        let (wildcard, base) = match name.strip_prefix("*.") {
+            Some(base) => (true, base),
+            None => (false, name),
+        };
+        // Every expansion `label.base` is inside a subtree iff `base` is.
+        let permitted =
+            self.permitted.is_empty() || self.permitted.iter().any(|p| within(base, p, wildcard));
+        // An expansion can fall inside an excluded subtree if `base` is in
+        // it, or (wildcard) if the subtree lies below `base` (only one label
+        // below can actually match; deeper is refused too, to stay simple).
+        let excluded = self
+            .excluded
+            .iter()
+            .any(|e| within(base, e, wildcard) || (wildcard && strictly_below(trim(e), base)));
+        permitted && !excluded
+    }
+}
+
+/// A constraint without its trailing dot and its leading one (`.a.com`,
+/// a common spelling for "the subdomains of `a.com`", which `within`
+/// reads as such).
+fn trim(constraint: &str) -> &str {
+    let c = constraint.strip_suffix('.').unwrap_or(constraint);
+    c.strip_prefix('.').unwrap_or(c)
+}
+
+/// Whether `name` lies in the subtree `constraint` (RFC 5280 4.2.1.10: the
+/// constraint itself and any name formed by adding labels on its left;
+/// the empty constraint holds every name). With a leading dot only the
+/// added-label names. `wildcard`: `name` is the base of a `*.` name, whose
+/// expansions all have one label more.
+fn within(name: &str, constraint: &str, wildcard: bool) -> bool {
+    let dot = constraint.starts_with('.');
+    let c = trim(constraint);
+    if c.is_empty() {
+        return true;
+    }
+    if name.eq_ignore_ascii_case(c) {
+        return wildcard || !dot;
+    }
+    strictly_below(name, c)
+}
+
+/// `name` ends with `.parent` (case-insensitive), with a label before it.
+fn strictly_below(name: &str, parent: &str) -> bool {
+    if parent.is_empty() {
+        return !name.is_empty();
+    }
+    name.len() > parent.len() + 1
+        && name.as_bytes()[name.len() - parent.len() - 1] == b'.'
+        && name[name.len() - parent.len()..].eq_ignore_ascii_case(parent)
 }
 
 /// Subject public key; slices point into the certificate.
@@ -105,6 +177,8 @@ pub struct Certificate<'a> {
     /// extendedKeyUsage includes serverAuth or anyExtendedKeyUsage (true
     /// without the extension).
     pub server_auth: bool,
+    /// nameConstraints dNSName subtrees, critical or not.
+    pub name_constraints: Option<NameConstraints<'a>>,
 }
 
 /// Checks `signature` over `message` with `key`. False on any mismatch
@@ -165,6 +239,19 @@ pub fn matches_hostname(cert: &Certificate, host: &str) -> bool {
     }
 }
 
+/// Checks the leaf's names against a CA's nameConstraints: every dNSName,
+/// and the common name when it stands in for them. A constrained chain
+/// needs a subjectAltName: a common name is no constrained name type.
+fn check_name_constraints(leaf: &Certificate, nc: Option<&NameConstraints>) -> Result<(), Error> {
+    let Some(nc) = nc else {
+        return Ok(());
+    };
+    if leaf.dns_names.is_empty() || !leaf.dns_names.iter().all(|n| nc.allows(n)) {
+        return Err(Error::NameConstraint);
+    }
+    Ok(())
+}
+
 fn name_matches(pattern: &str, host: &str) -> bool {
     let pattern = pattern.strip_suffix('.').unwrap_or(pattern);
     match pattern.strip_prefix("*.") {
@@ -184,6 +271,16 @@ fn check_validity(not_before: u64, not_after: u64, now: Option<u64>) -> Result<(
         Some(t) if t > not_after => Err(Error::Expired),
         _ => Ok(()),
     }
+}
+
+/// A leaf whose chain is trusted, unless it is itself a CA: a CA
+/// certificate is no server's certificate (audit 2026-10-25 D, L2). Checked
+/// last, so an untrusted self-signed CA still reads as an unknown issuer.
+fn trusted_leaf(leaf: Certificate) -> Result<Certificate, Error> {
+    if leaf.is_ca {
+        return Err(Error::WrongPurpose);
+    }
+    Ok(leaf)
 }
 
 /// Verifies a server chain: `chain[0]` is the leaf, then intermediates in
@@ -215,7 +312,7 @@ pub fn verify_chain<'a>(
     let mut intermediates = 0;
     loop {
         if roots.contains(&current_der) {
-            return Ok(leaf);
+            return trusted_leaf(leaf);
         }
         let signed_by = |key: &PublicKey| {
             verify_signature(
@@ -229,7 +326,11 @@ pub fn verify_chain<'a>(
         for anchor in anchors.iter().filter(|a| a.subject == current.issuer) {
             if signed_by(&anchor.public_key) {
                 check_validity(anchor.not_before, anchor.not_after, now)?;
-                return Ok(leaf);
+                if !anchor.server_auth {
+                    return Err(Error::WrongPurpose);
+                }
+                check_name_constraints(&leaf, anchor.name_constraints.as_ref())?;
+                return trusted_leaf(leaf);
             }
             error = Error::BadSignature;
         }
@@ -258,8 +359,14 @@ pub fn verify_chain<'a>(
                     .is_some_and(|max| intermediates > max as usize)
             {
                 Err(Error::NotCa)
+            } else if !candidate.server_auth {
+                // An issuer limited to other purposes cannot vouch for a
+                // TLS server (audit 2026-10-25 D, H2).
+                Err(Error::WrongPurpose)
             } else {
-                check_validity(candidate.not_before, candidate.not_after, now)
+                check_validity(candidate.not_before, candidate.not_after, now).and_then(|()| {
+                    check_name_constraints(&leaf, candidate.name_constraints.as_ref())
+                })
             };
             match outcome {
                 Ok(()) => {

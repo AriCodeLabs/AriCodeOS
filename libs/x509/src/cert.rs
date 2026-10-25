@@ -3,7 +3,7 @@
 //! Certificate parsing (RFC 5280, the subset the web PKI uses).
 
 use crate::der::{self, explicit, Reader, Tlv};
-use crate::{Certificate, Error, PublicKey, SignatureAlgorithm};
+use crate::{Certificate, Error, NameConstraints, PublicKey, SignatureAlgorithm};
 use alloc::vec::Vec;
 use aricode_crypto::ecdsa::Curve;
 use aricode_crypto::Hash;
@@ -29,6 +29,7 @@ mod oid {
     pub const BASIC_CONSTRAINTS: &[u8] = &[0x55, 0x1d, 0x13];
     pub const CERTIFICATE_POLICIES: &[u8] = &[0x55, 0x1d, 0x20];
     pub const EXTENDED_KEY_USAGE: &[u8] = &[0x55, 0x1d, 0x25];
+    pub const NAME_CONSTRAINTS: &[u8] = &[0x55, 0x1d, 0x1e];
 }
 
 /// keyUsage bit 5 (keyCertSign), in the first content byte.
@@ -40,6 +41,10 @@ const SERVER_AUTH: &[u8] = &[0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01];
 const ANY_EXTENDED_KEY_USAGE: &[u8] = &[0x55, 0x1d, 0x25, 0x00];
 /// GeneralName `dNSName [2] IA5String` (implicit, primitive).
 const DNS_NAME: u8 = 0x82;
+/// NameConstraints `permittedSubtrees [0]` and `excludedSubtrees [1]`
+/// (implicit, constructed).
+const PERMITTED_SUBTREES: u8 = 0xa0;
+const EXCLUDED_SUBTREES: u8 = 0xa1;
 
 /// The parts of a certificate shared by [`Certificate`] and trust anchors.
 pub(crate) struct Parsed<'a> {
@@ -58,6 +63,7 @@ pub(crate) struct Parsed<'a> {
     pub common_name: Option<&'a str>,
     pub digital_signature: bool,
     pub server_auth: bool,
+    pub name_constraints: Option<NameConstraints<'a>>,
 }
 
 impl<'a> Parsed<'a> {
@@ -103,6 +109,7 @@ impl<'a> Parsed<'a> {
             max_path_len: None,
             dns_names: Vec::new(),
             common_name: common_name(subject.value)?,
+            name_constraints: None,
         };
         if let Some(extensions) = r.optional(explicit(3))? {
             parsed.parse_extensions(der::single(extensions, der::SEQUENCE)?)?;
@@ -114,10 +121,18 @@ impl<'a> Parsed<'a> {
     fn parse_extensions(&mut self, data: &'a [u8]) -> Result<(), Error> {
         let mut basic_ca = false;
         let mut cert_sign = true; // no keyUsage extension: no restriction
+        let mut seen: Vec<&[u8]> = Vec::new();
         let mut list = Reader::new(data);
         while !list.is_empty() {
             let mut ext = Reader::new(list.expect(der::SEQUENCE)?);
             let id = ext.expect(der::OID)?;
+            // RFC 5280 4.2: one instance per extension. Two answers to the
+            // same question (two basicConstraints, two subjectAltNames)
+            // would let parsers that keep the first and the last disagree.
+            if seen.contains(&id) {
+                return Err(Error::Malformed);
+            }
+            seen.push(id);
             let critical = match ext.optional(der::BOOLEAN)? {
                 Some(b) => der::boolean(b)?,
                 None => false,
@@ -158,9 +173,16 @@ impl<'a> Parsed<'a> {
                     while !names.is_empty() {
                         let name = names.any()?;
                         if name.tag == DNS_NAME {
-                            self.dns_names.push(ascii(name.value)?);
+                            self.dns_names.push(dns_name(name.value)?);
                         }
                     }
+                }
+                // Applied by `verify_chain` to every name the leaf is
+                // checked against, critical or not (audit 2026-10-25 D, H1:
+                // ignoring a non-critical one let a CA limited to one
+                // domain vouch for any).
+                oid::NAME_CONSTRAINTS => {
+                    self.name_constraints = Some(name_constraints(value)?);
                 }
                 // Understood well enough to ignore even when critical.
                 oid::CERTIFICATE_POLICIES => {}
@@ -214,6 +236,7 @@ impl<'a> Certificate<'a> {
             common_name: p.common_name,
             digital_signature: p.digital_signature,
             server_auth: p.server_auth,
+            name_constraints: p.name_constraints,
         })
     }
 }
@@ -249,6 +272,16 @@ fn parse_public_key(spki: &[u8]) -> Result<PublicKey<'_>, Error> {
             let n = der::unsigned(k.expect(der::INTEGER)?)?;
             let e = der::unsigned(k.expect(der::INTEGER)?)?;
             k.finish()?;
+            // A modulus of up to 8192 bits and an odd exponent of 3 up to
+            // 2^32 - 1: the cost of a verification grows with both, and a
+            // chain is checked before anything in it is trusted (audit
+            // 2026-10-25 B, L4: an exponent of 120 000 bytes cost 11 s).
+            // 1024 bits at least (RFC 8448's server key has that).
+            let odd = e.last().is_some_and(|b| b & 1 == 1);
+            let small = e.len() == 1 && e[0] < 3;
+            if !(128..=1024).contains(&n.len()) || e.len() > 4 || !odd || small {
+                return Err(Error::Unsupported);
+            }
             Ok(PublicKey::Rsa { n, e })
         }
         oid::EC_PUBLIC_KEY => {
@@ -267,6 +300,52 @@ fn parse_public_key(spki: &[u8]) -> Result<PublicKey<'_>, Error> {
         )),
         _ => Err(Error::Unsupported),
     }
+}
+
+/// RFC 5280 4.2.1.10: the dNSName subtrees of a NameConstraints value.
+/// Subtrees of other name types constrain only names of their own type,
+/// none of which authenticate a TLS server here. `minimum`/`maximum`
+/// (which RFC 5280 says must not appear) and an empty value are refused.
+fn name_constraints(value: &[u8]) -> Result<NameConstraints<'_>, Error> {
+    let mut nc = NameConstraints {
+        permitted: Vec::new(),
+        excluded: Vec::new(),
+    };
+    let mut r = Reader::new(der::single(value, der::SEQUENCE)?);
+    let mut any = false;
+    for (tag, list) in [
+        (PERMITTED_SUBTREES, &mut nc.permitted),
+        (EXCLUDED_SUBTREES, &mut nc.excluded),
+    ] {
+        let Some(subtrees) = r.optional(tag)? else {
+            continue;
+        };
+        any = true;
+        let mut subtrees = Reader::new(subtrees);
+        if subtrees.is_empty() {
+            return Err(Error::Malformed);
+        }
+        while !subtrees.is_empty() {
+            let mut subtree = Reader::new(subtrees.expect(der::SEQUENCE)?);
+            let base = subtree.any()?;
+            if !subtree.is_empty() {
+                return Err(Error::Unsupported);
+            }
+            // An empty dNSName constraint stands for every name.
+            if base.tag == DNS_NAME {
+                list.push(if base.value.is_empty() {
+                    ""
+                } else {
+                    dns_name(base.value)?
+                });
+            }
+        }
+    }
+    r.finish()?;
+    if !any {
+        return Err(Error::Malformed);
+    }
+    Ok(nc)
 }
 
 /// First commonName of a Name, if it is a readable string.
@@ -294,8 +373,11 @@ fn common_name(name: &[u8]) -> Result<Option<&str>, Error> {
     Ok(None)
 }
 
-fn ascii(bytes: &[u8]) -> Result<&str, Error> {
-    if bytes.is_ascii() {
+/// A dNSName: printable ASCII without spaces, not empty. NUL or control
+/// bytes would make the name read differently by code that stops at them
+/// (audit 2026-10-25 D, L4).
+fn dns_name(bytes: &[u8]) -> Result<&str, Error> {
+    if !bytes.is_empty() && bytes.iter().all(|b| (0x21..=0x7e).contains(b)) {
         core::str::from_utf8(bytes).map_err(|_| Error::Malformed)
     } else {
         Err(Error::Malformed)

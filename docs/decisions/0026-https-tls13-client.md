@@ -56,9 +56,38 @@ unrestricted. Test chains `purpose-ok`, `purpose-client` and
 `purpose-nosign` cover the control and both refusals; the shell reports
 `certificate not issued for a TLS server`.
 
+## Constraints on intermediates (failure-pattern audit 2026-10-25, incident 0029)
+
+A restriction a CA places on what it may issue binds every certificate
+below it:
+
+- `nameConstraints`, critical or not: each subjectAltName dNSName of the
+  leaf must lie in a permitted dNSName subtree (if there is any) and in no
+  excluded one; a `*.` name counts for every name it can stand for. A
+  chain with a constrained CA needs a subjectAltName (no common name
+  fallback). Subtrees of other name types constrain names this client
+  never authenticates; `minimum`/`maximum` are refused. Before, a
+  non-critical extension was ignored and a critical one refused the whole
+  chain.
+- `extendedKeyUsage` on an intermediate or a root must include
+  `serverAuth` or `anyExtendedKeyUsage`.
+- A CA certificate is never accepted as the server's (checked once its
+  chain is trusted, so an untrusted self-signed CA still reads as an
+  unknown issuer).
+- Parsing refuses two instances of one extension, dNSNames that are empty
+  or hold bytes outside printable ASCII, and RSA keys above 8192 bits or
+  with an exponent that is even, below 3 or above 2^32 - 1 (verification
+  cost grows with both).
+
+The shell reports `certificate outside the names its issuer may vouch
+for` (`Error::NameConstraint`) and `certificate not issued for a TLS
+server`. Test chains `nc-*`, `eku-*` and `ca-as-leaf`
+(`testdata/generate.sh`) and certificates built in the tests cover each
+case.
+
 ## Consequences
 
-- No revocation checking (CRL/OCSP), name constraints, IP-address SANs, session resumption, 0-RTT, ALPN or client certificates.
+- No revocation checking (CRL/OCSP), IP-address SANs, session resumption, 0-RTT, ALPN or client certificates.
   A HelloRetryRequest (server insisting on another group) fails.
 - Only TLS 1.3: servers limited to TLS 1.2 cannot be reached.
 - Responses are limited by the shell's 8 KiB buffer; HTTP/1.1 only.
