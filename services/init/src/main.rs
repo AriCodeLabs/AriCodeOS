@@ -1811,9 +1811,10 @@ impl Sessions {
 /// Capability broker (Phase 28): launches programs according to their
 /// manifest. An application receives, in this order, only what it asks for
 /// and is allowed: `SYSTEM` (read), a private directory in fsd, the network
-/// endpoint, the compositor endpoint, the block endpoint (trusted
-/// applications only), the input endpoints, and finally `HARDWARE` if it
-/// needs buffers, bounded by the manifest's memory.
+/// endpoint, a compositor session, the block endpoint (trusted
+/// applications only), and finally `HARDWARE` if it needs buffers, bounded
+/// by the manifest's memory. The input services are never granted (ADR
+/// 0053).
 struct Broker {
     endpoint: Handle,
     fs: Option<FsClient>,
@@ -1821,8 +1822,6 @@ struct Broker {
     /// The network service's main endpoint, when a driver serves it.
     net: Option<Handle>,
     compositor: Option<Handle>,
-    inputs: [Handle; 4],
-    input_count: usize,
     /// Launched programs that have not exited yet (ADR 0015): process and,
     /// if someone waits for its exit, the endpoint to reply to.
     running: [Option<Running>; MAX_RUNNING],
@@ -1874,19 +1873,13 @@ impl Broker {
         block: Option<Handle>,
         net: Option<Handle>,
         compositor: Option<Handle>,
-        inputs: &[Handle],
     ) -> Result<Self, Error> {
-        let mut ins = [Handle(0); 4];
-        let n = inputs.len().min(4);
-        ins[..n].copy_from_slice(&inputs[..n]);
         Ok(Self {
             endpoint: sys::endpoint_create()?,
             fs,
             block,
             net,
             compositor,
-            inputs: ins,
-            input_count: n,
             running: [None; MAX_RUNNING],
             stage: None,
         })
@@ -2272,14 +2265,6 @@ impl Broker {
                 Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
             needs_hw = true;
-        }
-        if caps.contains(Caps::INPUT) {
-            for ep in &self.inputs[..self.input_count] {
-                match sys::handle_duplicate(*ep, rights::WRITE | rights::TRANSFER) {
-                    Ok(h) => granted.push(h),
-                    Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
-                }
-            }
         }
         if needs_hw {
             match sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER) {
@@ -2930,7 +2915,6 @@ fn main(arg: u64) -> u64 {
             block_service,
             (services & SERVICE_NET != 0).then_some(net_service),
             compositor,
-            &input_eps[..inputs],
         ) else {
             return 26;
         };

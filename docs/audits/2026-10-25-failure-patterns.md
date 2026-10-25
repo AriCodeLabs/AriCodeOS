@@ -116,7 +116,8 @@ barrier; AES uses tables; Ed25519 verify accepts small-order keys;
 `serve-update` echoes the raw request target into its log and `Location`;
 authorized_keys lines with options are ignored silently; `none` and
 unsigned publickey queries are not counted as auth failures; the `input`
-capability lets any app read the physical keyboard (ADR 0013 point 4).
+capability lets any app read the physical keyboard (ADR 0013 point 4;
+removed on `fix/compositor-ownership`, ADR 0053).
 
 ## Checked and found sound
 

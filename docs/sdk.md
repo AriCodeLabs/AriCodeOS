@@ -129,7 +129,7 @@ launches with capabilities, such as `tcp_hog` or `sock_leaker`, keeps its manife
 
 ```text
 name = hello_app
-caps = system, fs      # system | fs | net | window | input | block (updater only) | install (installer only)
+caps = system, fs      # system | fs | net | window | block (updater only) | install (installer only)
 memory = 128K          # DMA buffer quota (K or M, at most 8M)
 read_files = hola.txt  # up to 4 AriFS files in read-only mode (ADR 0016)
 ```
@@ -138,13 +138,13 @@ Handles arrive in this fixed order, only the requested ones: `SYSTEM`
 (read), the fsd private directory, one endpoint per `read_files` entry (in
 order; from it the program can only list, open and read that file, and
 everything else answers `Denied`), the network endpoint, a compositor
-session (its windows are its alone, ADR 0052), the block endpoint, the fsd main namespace (`install`), the input
-endpoints and, if any capability needs buffers (`fs`, `read_files`, `net`,
+session (its windows are its alone, ADR 0052), the block endpoint, the fsd main namespace (`install`) and, if any capability needs buffers (`fs`, `read_files`, `net`,
 `window`, `block`, `install`), `HARDWARE` at the end. With
 `sys::permissions::granted` the application recognises them by kind without
 depending on the position. Without a manifest only the console and `SYSTEM`
-are received. Asking for `spawner`, `pci` or `framebuffer` makes the broker
-deny the launch.
+are received. Asking for `input`, `spawner`, `pci` or `framebuffer` makes
+the broker deny the launch: the raw keyboard and mouse belong to the shell
+console or the compositor, which hands each window its own keys (ADR 0053).
 
 ## Rules
 

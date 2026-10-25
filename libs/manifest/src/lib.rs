@@ -25,6 +25,9 @@ impl Caps {
     pub const FS: Caps = Caps(1 << 1);
     pub const NET: Caps = Caps(1 << 2);
     pub const WINDOW: Caps = Caps(1 << 3);
+    /// The raw input services: never granted to an application, which would
+    /// read every key typed on the machine, into the shell or another
+    /// program's window (ADR 0053). Windows get their keys by focus.
     pub const INPUT: Caps = Caps(1 << 4);
     /// Reserved for the system: never granted to an application.
     pub const SPAWNER: Caps = Caps(1 << 5);
@@ -39,8 +42,7 @@ impl Caps {
 
     pub const NONE: Caps = Caps(0);
     /// The ones the broker grants to normal applications.
-    pub const APP_ALLOWED: Caps =
-        Caps(Caps::SYSTEM.0 | Caps::FS.0 | Caps::NET.0 | Caps::WINDOW.0 | Caps::INPUT.0);
+    pub const APP_ALLOWED: Caps = Caps(Caps::SYSTEM.0 | Caps::FS.0 | Caps::NET.0 | Caps::WINDOW.0);
 
     const NAMES: [(&'static str, Caps); 10] = [
         ("system", Caps::SYSTEM),
@@ -380,12 +382,15 @@ mod tests {
                 "install only for installer, not {other}"
             );
         }
-        let forbidden = Manifest::parse("name = x\ncaps = fs, spawner").unwrap();
+        let forbidden = Manifest::parse("name = x\ncaps = fs, input, spawner").unwrap();
         let denied: Vec<&str> = forbidden
             .caps
             .difference(Caps::APP_ALLOWED)
             .names()
             .collect();
-        assert_eq!(denied, ["spawner"]);
+        assert_eq!(denied, ["input", "spawner"]);
+        for name in ["updater", "installer", "x"] {
+            assert!(!Caps::allowed_for(name).contains(Caps::INPUT), "{name}");
+        }
     }
 }

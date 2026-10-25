@@ -1,0 +1,6 @@
+# ADR 0053: the raw input services are never granted to a program the
+# broker launches; `run input_client` from the shell is denied
+# (sandbox.manifest). init still starts it directly in the input scenarios.
+name = input_client
+caps = system, input
+memory = 64K
