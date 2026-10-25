@@ -1,0 +1,29 @@
+# ADR 0050: sshd's host key and random_seed live in its own directory
+# `sshd/`. A disk from an older release keeps them in the AriFS root: init
+# moves them at boot, overwrites the root copy and empties it, and sshd
+# listens with the same key (the runner checks the fingerprint of the key
+# it installed in the root). Over SSH, the session shell lists the empty
+# root copy and the moved key.
+name = "ssh.host_key_moved"
+description = "init moves an older release's root host key into sshd/; sshd keeps the same fingerprint and the root copy is emptied"
+level = "full"
+areas = ["ssh", "filesystem", "init"]
+cmdline = "qemu_exit shell"
+timeout_secs = 120
+
+[host_ssh]
+marker = "sshd: listening on port 22"
+commands = ["ls", "cat ssh_host_ed25519_key", "shutdown"]
+old_host_key = true
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: moved ssh_host_ed25519_key into sshd/",
+    "sshd: user 'ari' authenticated from 10.0.2.2",
+    "[host] ssh| ssh_host_ed25519_key 0 bytes",
+    "[host] ssh| sshd/ssh_host_ed25519_key 65 bytes",
+    "[host] ssh exit 0",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "new host key generated", "could not move", "Permission denied"]

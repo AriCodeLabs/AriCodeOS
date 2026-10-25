@@ -112,7 +112,9 @@ would open an unauthenticated shell on the user's network.
   live in the AriFS root. Programs launched through the broker see only
   their private directory; the console shell, sshd and an authenticated
   SSH session can read and change them (an authenticated user already has
-  the shell).
+  the shell). (Since ADR 0050 the host key and the seed live in `sshd/`;
+  sshd sees only that directory and reads `authorized_keys`, and no
+  manifest can share any of them.)
 - **Exposure.** The laptop sits on the local network behind the router;
   sshd is only reachable from the Internet if a port is forwarded to it.
   The protocol parser runs before authentication, so the surface is the

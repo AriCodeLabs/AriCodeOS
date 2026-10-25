@@ -82,7 +82,10 @@ QEMU test hosts (10.0.2.2). What the system itself may write at boot:
   one, so normally never; `random_seed` is saved just before), and
   `random_seed`, rewritten on the first accepted SSH connection of each
   boot, not at boot (a failed save says so and is retried on the next
-  connection).
+  connection). Both live in `sshd/` (ADR 0050); a stick from an older
+  release has them in the AriFS root, and init moves them once at boot
+  (`AriInit: moved ssh_host_ed25519_key into sshd/`), the fingerprint
+  unchanged.
 
 The test clients (`fs_client`, `blk_client`, `net_client`, `tcp_client`,
 `http_client`, `input_client`) run only with `selftest`, which belongs to
@@ -302,7 +305,8 @@ ssh ari@192.168.1.24 diag       # a single command
 
 The first connection asks to confirm the host key: compare it with the
 `SHA256:` fingerprint printed by `usb-image` (the key is generated on this
-machine and kept in `build/ssh_host_ed25519_key`) and shown on the laptop's
+machine and kept in `build/ssh_host_ed25519_key`, mode 0600 like the
+image itself) and shown on the laptop's
 screen. One connection at a time; programs started with `run` from an SSH
 session write to the session (ADR 0047).
 

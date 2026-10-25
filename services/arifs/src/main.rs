@@ -20,7 +20,9 @@
 use aricode_arifs::descriptors::{Descriptors, MAX_OPEN};
 use aricode_arifs::{AriFs, BlockDevice, FsError, Recovery, SECTOR};
 use aricode_faults::Meter;
-use aricode_proto::fs::{Op, OwnerDescriptors, Reply, Request, Status, MAX_IO};
+use aricode_proto::fs::{
+    Op, OwnerDescriptors, Reply, Request, Status, MAX_IO, SHARE_MAY_BE_MISSING,
+};
 use aricode_rt::sys::{self, block::BlockClient, client_buffer, Handle};
 
 /// Client buffer mappings kept across requests (ADR 0038: bounded, the
@@ -421,7 +423,7 @@ impl Service {
                         Op::Share => Kind::ReadOnlyFile,
                         _ => Kind::Root,
                     };
-                    self.grant(req.name_str(), kind)
+                    self.grant(req.name_str(), kind, req.len == SHARE_MAY_BE_MISSING)
                 };
                 if let Some(d) = data {
                     let _ = sys::handle_close(d);
@@ -672,7 +674,7 @@ impl Service {
     /// fsd keeps the receive side; the send side goes to the client, and
     /// when its last holder dies the session is retired. Each launch gets
     /// its own session, so the descriptors of one never mix with another's.
-    fn grant(&mut self, name: &str, kind: Kind) -> Result<Handle, Status> {
+    fn grant(&mut self, name: &str, kind: Kind, may_be_missing: bool) -> Result<Handle, Status> {
         let valid = match kind {
             Kind::Dir => {
                 !name.is_empty()
@@ -681,13 +683,15 @@ impl Service {
                         .bytes()
                         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
             }
-            Kind::ReadOnlyFile => name.len() <= 32,
+            // A top-level file: never one inside a directory, which is
+            // some program's private files (ADR 0050).
+            Kind::ReadOnlyFile => !name.is_empty() && name.len() <= 32 && !name.contains('/'),
             Kind::Root => name.is_empty(),
         };
         if !valid {
             return Err(Status::Invalid);
         }
-        if kind == Kind::ReadOnlyFile && self.fs.find(name).is_none() {
+        if kind == Kind::ReadOnlyFile && !may_be_missing && self.fs.find(name).is_none() {
             return Err(Status::NotFound);
         }
         let free = |sessions: &[Option<Session>]| sessions.iter().position(Option::is_none);

@@ -1211,7 +1211,11 @@ latter briefly to add the region.
   `Open` only opens that file, and `Create`, `Write`, `Replace`, `Flush`, `Bind`
   and `Share` reply `Denied`. The broker requests a `Share` for each name
   in the manifest's `read_files` and denies the launch if the file does not
-  exist (`sandbox.shared_file`).
+  exist (`sandbox.shared_file`). A shared file is a top-level file, never
+  one inside a directory nor a system file (`RESERVED_FILES`), and a
+  request whose session is gone is refused (ADR 0050, incident 0028).
+  sshd has two sessions of its own: `sshd/` (host key, `random_seed`) and
+  a read-only `authorized_keys` that may not exist yet.
 
 - The kernel serial console serializes each message with a spinlock without
   disabling interrupts (`console::write_raw`): previously a kernel `info!`
@@ -1614,8 +1618,9 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   variables and program launching arrive with the process
   service.
 - `fsd` identifies a client by the endpoint its requests arrive on (its
-  session, ADR 0036); processes that share the main endpoint (init, sshd)
-  are one owner, and their descriptors are released only by `Close`. netd
+  session, ADR 0036); only init holds the main endpoint (sshd has its own
+  sessions since ADR 0050), and its descriptors are released only by
+  `Close`. netd
   does the same (ADR 0037): init and the boot test clients share its main
   endpoint, and a session dies with the netd generation that created it.
 

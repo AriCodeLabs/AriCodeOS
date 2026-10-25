@@ -5,14 +5,16 @@
 //! request, asks init for a session shell (it has no SPAWNER). One
 //! connection at a time.
 //!
-//! Handles from init: `[net (WRITE), fs (WRITE), hardware, SYSTEM (READ),
-//! sessions (WRITE)]`. In AriFS: `ssh_host_ed25519_key` (the host key seed
-//! in hex; installed by `cargo xtask usb-image --authorized-key`, or
-//! created on first start), `authorized_keys` (OpenSSH format,
+//! Handles from init: `[net (WRITE), fs (its directory `sshd/`, WRITE),
+//! hardware, SYSTEM (READ), sessions (WRITE), authorized_keys (read-only)]`
+//! (ADR 0050). In `sshd/`: `ssh_host_ed25519_key` (the host key seed in
+//! hex; installed by `cargo xtask usb-image --authorized-key`, or created
+//! on first start) and `random_seed`; in the AriFS root, read-only:
+//! `authorized_keys` (OpenSSH format,
 //! `ssh-ed25519` lines; reread after every connection, or at most once a
 //! minute while the file service does not answer; a key removed during
-//! such an outage stays valid until the file service answers again) and
-//! `random_seed` (entropy carried across boots).
+//! such an outage stays valid until the file service answers again).
+//! `random_seed` is entropy carried across boots.
 //!
 //! Closed by default: without an `authorized_keys` file with at least one
 //! key, sshd does not listen at all.
@@ -36,6 +38,8 @@ const FS: Handle = Handle(0x0001_0005);
 const HW: Handle = Handle(0x0001_0006);
 const SYSTEM: Handle = Handle(0x0001_0007);
 const SESSIONS: Handle = Handle(0x0001_0008);
+/// `authorized_keys`, read-only (ADR 0050); `FS` is sshd's own directory.
+const KEYS: Handle = Handle(0x0001_0009);
 
 const PORT: u16 = 22;
 /// A connection that has not authenticated after this long is dropped: the
@@ -570,7 +574,7 @@ fn reread_keys(fs: &mut FsClient, refresh: &mut KeyRefresh, keys: &mut Vec<[u8; 
 }
 
 fn main(_arg: u64) -> u64 {
-    let Ok(mut fs) = FsClient::new(FS, HW) else {
+    let (Ok(mut fs), Ok(mut keys_fs)) = (FsClient::new(FS, HW), FsClient::new(KEYS, HW)) else {
         say(b"no file client");
         return 1;
     };
@@ -579,7 +583,7 @@ fn main(_arg: u64) -> u64 {
         return 2;
     };
     let mut entropy = Entropy::load(&mut fs);
-    let mut keys = authorized(&mut fs).unwrap_or_default();
+    let mut keys = authorized(&mut keys_fs).unwrap_or_default();
     let mut refresh = KeyRefresh::new();
     let mut announced = false;
     if keys.is_empty() {
@@ -589,7 +593,7 @@ fn main(_arg: u64) -> u64 {
         // Closed until the owner installs a key; checked every few seconds.
         while keys.is_empty() {
             sys::time::sleep_ms(5_000);
-            keys = authorized(&mut fs).unwrap_or_default();
+            keys = authorized(&mut keys_fs).unwrap_or_default();
         }
         say(b"authorized_keys found");
     }
@@ -642,7 +646,7 @@ fn main(_arg: u64) -> u64 {
             // authorized_keys emptied while running: reread first, so a key
             // installed since counts (audit robustness-1, M1); refuse if
             // there is still none.
-            reread_keys(&mut fs, &mut refresh, &mut keys);
+            reread_keys(&mut keys_fs, &mut refresh, &mut keys);
             if keys.is_empty() {
                 say(b"authorized_keys is empty now: connection refused");
                 let _ = net.tcp_close(sock);
@@ -659,7 +663,7 @@ fn main(_arg: u64) -> u64 {
         // Reread between connections so a key added or removed from the
         // console counts, without delaying the next client's banner behind
         // a file service that does not answer.
-        reread_keys(&mut fs, &mut refresh, &mut keys);
+        reread_keys(&mut keys_fs, &mut refresh, &mut keys);
     }
 }
 

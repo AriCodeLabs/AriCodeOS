@@ -606,9 +606,11 @@ fn ls(fs: &FsClient) {
         match fs.list(i, &mut name) {
             Ok(Some((n, size))) => {
                 print(&name[..n]);
-                for _ in n..20 {
+                // A column of 20, and always one space after a longer name.
+                for _ in n..n.max(19) {
                     print(b" ");
                 }
+                print(b" ");
                 num(size);
                 print(b" bytes\n");
                 i += 1;
