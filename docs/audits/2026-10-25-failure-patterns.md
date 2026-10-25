@@ -72,7 +72,7 @@ of this document.
 | M6 | **AriFS create leaves a ghost entry on an I/O error** [C-M2], which can make the volume unmountable; `write`/`apply_journal` update the size before the table. *Reproduced* on the host. `libs/arifs/src/lib.rs:472,565,669` | open |
 | M7 | **USB drivers never close a request's extra handles** [C-M3]: ~85 requests fill the driver's table; keyboard and USB storage stop until reboot. | open |
 | M8 | **An input driver's waiting place is held by a dead reader, and events go to it** [C-M4]: keys lost after any reader dies. | **fixed** (`6c17a9d`, merged to develop): shared `EventQueue`, events leave only once delivered, reads capped at 10 s; scenario `input.orphan_read` failed before the fix |
-| M9 | **Compositor window ids are global and unowned** [C-M5]: an app can poll another's keys or close its window; dead clients' windows are never reclaimed. | open |
+| M9 | **Compositor window ids are global and unowned** [C-M5]: an app can poll another's keys or close its window; dead clients' windows are never reclaimed. | fixed on `fix/compositor-ownership` (ADR 0052, incident 0037) |
 | M10 | **Certificate validity fails open without a clock** [D-M1]: no RTC (or a bad one) skips the time check. | open |
 | M11 | **Ed25519 signing is not constant time** [D-M2] (SSH host key). | open |
 | M12 | **No way to distrust a root or key** [D-M3] (the emSign case). | fixed on `fix/tls-time-and-seed` (ADR 0054) |
@@ -86,7 +86,7 @@ of this document.
 | L3 | ECAM bus offset underflows for `bus < bus_start` [A-L4] |
 | L4 | A remote peer can pin TCP slots for good (Closing never sends; FinWait1 with a zero window has no probe) [B-L3] |
 | L5 | RSA exponent unbounded: ~11 s of CPU per handshake [B-L4, D-L5] — **fixed** (incident 0029) |
-| L6 | WASM block ends rescanned on every entry: fuel no longer bounds run time [B-L5] |
+| L6 | WASM block ends rescanned on every entry: fuel no longer bounds run time [B-L5] — **fixed** on `fix/wasm-block-table` (incident 0042; the audit of that fix, M1-M3, H1 and L1-L3, fixed on the same branch) |
 | L7 | AriFS layout arithmetic overflows (debug panic, release wrap); `recover` does not bound the journal length [B-L1] |
 | L8 | DHCP retry counter overflow (debug); predictable DHCP xid and DNS id/port [B-L2, C] |
 | L9 | Any `net` app can listen on port 22; sshd's failed re-listen is silent [E-L1] |
@@ -116,7 +116,8 @@ barrier; AES uses tables; Ed25519 verify accepts small-order keys;
 `serve-update` echoes the raw request target into its log and `Location`;
 authorized_keys lines with options are ignored silently; `none` and
 unsigned publickey queries are not counted as auth failures; the `input`
-capability lets any app read the physical keyboard (ADR 0013 point 4).
+capability lets any app read the physical keyboard (ADR 0013 point 4;
+removed on `fix/compositor-ownership`, ADR 0053).
 
 ## Checked and found sound
 

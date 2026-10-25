@@ -310,6 +310,12 @@ pub struct AriFs<D: BlockDevice> {
     /// Chunked replace in progress: file and next expected offset. Only what
     /// this transaction wrote gets committed.
     staged: Option<(usize, u32)>,
+    /// A write failed after a replace was committed: the journal, not
+    /// memory, holds the truth now, so every operation fails until the
+    /// volume is opened again, which redoes the journal (audit of incident
+    /// 0032, M1: the session showed a mix, and a later write was lost when
+    /// the next mount replayed the journal over it).
+    poisoned: bool,
 }
 
 impl<D: BlockDevice> AriFs<D> {
@@ -334,6 +340,7 @@ impl<D: BlockDevice> AriFs<D> {
             sequence: 0,
             recovery: Recovery::Clean,
             staged: None,
+            poisoned: false,
         };
         fs.recover()?;
         Ok(fs)
@@ -348,8 +355,17 @@ impl<D: BlockDevice> AriFs<D> {
         }
         let used: alloc_free::Entries<'_> = alloc_free::Entries(table);
         for (i, a) in used.iter() {
-            let a_end = a.start_lba + a.capacity_sectors as u64;
-            if a.capacity_sectors == 0 || a.start_lba < DATA_LBA || a_end > sb.data_next {
+            // Checked: a forged start near the top of the range wrapped
+            // past every bound (audit 2026-10-25 B, L1), and a capacity
+            // whose bytes do not fit `u32` overflowed `capacity_bytes`.
+            let Some(a_end) = a.start_lba.checked_add(a.capacity_sectors as u64) else {
+                return Err(FsError::Corrupt);
+            };
+            if a.capacity_sectors == 0
+                || a.capacity_sectors > u32::MAX / SECTOR as u32
+                || a.start_lba < DATA_LBA
+                || a_end > sb.data_next
+            {
                 return Err(FsError::Corrupt);
             }
             if a.size > a.capacity_bytes() {
@@ -357,7 +373,7 @@ impl<D: BlockDevice> AriFs<D> {
             }
             for (j, b) in used.iter() {
                 if j > i
-                    && a.start_lba < b.start_lba + b.capacity_sectors as u64
+                    && a.start_lba < b.start_lba.saturating_add(b.capacity_sectors as u64)
                     && b.start_lba < a_end
                 {
                     return Err(FsError::Corrupt);
@@ -390,7 +406,22 @@ impl<D: BlockDevice> AriFs<D> {
             sequence: 0,
             recovery: Recovery::Clean,
             staged: None,
+            poisoned: false,
         })
+    }
+
+    /// A committed replace could not be applied (`poisoned`): the volume
+    /// must be opened again before anything else.
+    pub fn needs_reopen(&self) -> bool {
+        self.poisoned
+    }
+
+    fn usable(&self) -> Result<(), FsError> {
+        if self.poisoned {
+            Err(FsError::Io)
+        } else {
+            Ok(())
+        }
     }
 
     pub fn superblock(&self) -> Superblock {
@@ -419,18 +450,29 @@ impl<D: BlockDevice> AriFs<D> {
         self.table.get(index).and_then(|e| e.as_ref())
     }
 
-    fn write_table_entry(&mut self, index: usize) -> Result<(), FsError> {
+    /// Writes entry `index` as `entry` and only then takes it in memory:
+    /// a failed write leaves memory as the disk was, so a later operation
+    /// never publishes metadata the disk does not have (audit 2026-10-25
+    /// C, M2: a failed create left a ghost entry that a later write
+    /// persisted against a stale superblock, and the volume would not
+    /// mount).
+    fn store_entry(&mut self, index: usize, entry: Entry) -> Result<(), FsError> {
         let per_sector = SECTOR / ENTRY_LEN;
         let lba = TABLE_LBA + (index / per_sector) as u64;
         let mut s = [0u8; SECTOR];
         self.dev.read_sector(lba, &mut s)?;
         let off = (index % per_sector) * ENTRY_LEN;
-        let bytes = match self.table[index] {
-            Some(e) => e.encode(),
-            None => [0u8; ENTRY_LEN],
-        };
-        s[off..off + ENTRY_LEN].copy_from_slice(&bytes);
-        self.dev.write_sector(lba, &s)
+        s[off..off + ENTRY_LEN].copy_from_slice(&entry.encode());
+        self.dev.write_sector(lba, &s)?;
+        self.table[index] = Some(entry);
+        Ok(())
+    }
+
+    /// Entry `index` with `size` bytes, stored as `store_entry` does.
+    fn store_size(&mut self, index: usize, size: u32) -> Result<(), FsError> {
+        let mut entry = *self.entry(index).ok_or(FsError::NotFound)?;
+        entry.size = size;
+        self.store_entry(index, entry)
     }
 
     /// Creates an empty file with the usual fixed capacity. Returns its index.
@@ -443,7 +485,12 @@ impl<D: BlockDevice> AriFs<D> {
     /// (ADR 0017). `replace` only supports up to the journal capacity
     /// (`FILE_CAPACITY_SECTORS`).
     pub fn create_sized(&mut self, name: &str, sectors: u32) -> Result<usize, FsError> {
-        if sectors == 0 || !sectors.is_multiple_of(FILE_CAPACITY_SECTORS) {
+        self.usable()?;
+        // A capacity whose bytes do not fit `u32` would not mount again.
+        if sectors == 0
+            || !sectors.is_multiple_of(FILE_CAPACITY_SECTORS)
+            || sectors > u32::MAX / SECTOR as u32
+        {
             return Err(FsError::OutOfRange);
         }
         if !valid_name(name) {
@@ -458,7 +505,8 @@ impl<D: BlockDevice> AriFs<D> {
             .position(Option::is_none)
             .ok_or(FsError::NoSpace)?;
         let start = self.sb.data_next;
-        if start + sectors as u64 > self.sb.total_sectors {
+        let end = start.checked_add(sectors as u64).ok_or(FsError::NoSpace)?;
+        if end > self.sb.total_sectors {
             return Err(FsError::NoSpace);
         }
         let mut entry = Entry {
@@ -469,22 +517,25 @@ impl<D: BlockDevice> AriFs<D> {
             size: 0,
         };
         entry.name[..name.len()].copy_from_slice(name.as_bytes());
-        self.table[index] = Some(entry);
-        self.sb.data_next = start + sectors as u64;
         // Superblock first, then a barrier: the medium may reorder sectors
         // until `flush`, and an entry published over unreserved space would
         // leave two overlapping files when it is allocated again
         // (audit 6ee19fb, finding 2). A cut between both leaves reserved
-        // space without an entry, which breaks nothing.
-        self.dev.write_sector(0, &self.sb.encode())?;
+        // space without an entry, which breaks nothing. Memory follows the
+        // disk only once each write succeeded.
+        let mut sb = self.sb;
+        sb.data_next = end;
+        self.dev.write_sector(0, &sb.encode())?;
         self.dev.flush()?;
-        self.write_table_entry(index)?;
+        self.sb = sb;
+        self.store_entry(index, entry)?;
         Ok(index)
     }
 
     /// Reads up to `buf.len()` bytes from `offset`. Returns the bytes read
     /// (0 at end of file).
     pub fn read(&mut self, index: usize, offset: u32, buf: &mut [u8]) -> Result<usize, FsError> {
+        self.usable()?;
         let e = *self.entry(index).ok_or(FsError::NotFound)?;
         if offset >= e.size {
             return Ok(0);
@@ -547,6 +598,7 @@ impl<D: BlockDevice> AriFs<D> {
     /// capacity, in place. Updates the size after the data. Not durable
     /// until `flush`.
     pub fn write(&mut self, index: usize, offset: u32, data: &[u8]) -> Result<usize, FsError> {
+        self.usable()?;
         let e = *self.entry(index).ok_or(FsError::NotFound)?;
         if offset > e.size {
             return Err(FsError::OutOfRange);
@@ -561,9 +613,7 @@ impl<D: BlockDevice> AriFs<D> {
             // covers it: without a barrier, a cut could keep the size and
             // lose the data (audit 6ee19fb, finding 2).
             self.dev.flush()?;
-            let entry = self.table[index].as_mut().ok_or(FsError::NotFound)?;
-            entry.size = end as u32;
-            self.write_table_entry(index)?;
+            self.store_size(index, end as u32)?;
         }
         Ok(data.len())
     }
@@ -581,6 +631,7 @@ impl<D: BlockDevice> AriFs<D> {
     /// any order, within the journal and file capacity) make up a replace
     /// larger than one IPC request (ADR 0018).
     pub fn replace_chunk(&mut self, index: usize, offset: u32, data: &[u8]) -> Result<(), FsError> {
+        self.usable()?;
         let e = *self.entry(index).ok_or(FsError::NotFound)?;
         let end = offset as usize + data.len();
         if end > e.capacity_bytes() as usize || end > JOURNAL_CAPACITY_BYTES {
@@ -611,8 +662,11 @@ impl<D: BlockDevice> AriFs<D> {
     /// the file and applies them (idempotent: `open` repeats it if
     /// needed).
     pub fn replace_commit(&mut self, index: usize, len: u32) -> Result<(), FsError> {
+        self.usable()?;
         let journal = self.commit_header(index, len)?;
-        self.apply_journal(&journal)
+        let applied = self.apply_journal(&journal);
+        self.poisoned |= applied.is_err();
+        applied
     }
 
     /// The first two phases of `replace`: leaves a committed replace in the
@@ -645,9 +699,14 @@ impl<D: BlockDevice> AriFs<D> {
             data_crc,
             sequence: self.sequence,
         };
-        self.dev.write_sector(JOURNAL_LBA, &journal.encode())?;
-        self.dev.flush()?;
-        Ok(journal)
+        // Past here the pending header may be on disk even if the write
+        // reports a failure.
+        let committed = self
+            .dev
+            .write_sector(JOURNAL_LBA, &journal.encode())
+            .and_then(|()| self.dev.flush());
+        self.poisoned |= committed.is_err();
+        committed.map(|()| journal)
     }
 
     /// Copies the journal data into the file, sets the size and clears the
@@ -665,9 +724,7 @@ impl<D: BlockDevice> AriFs<D> {
             self.dev.write_sectors(e.start_lba + done as u64, buf)?;
             done += n;
         }
-        let entry = self.table[index].as_mut().ok_or(FsError::NotFound)?;
-        entry.size = journal.len;
-        self.write_table_entry(index)?;
+        self.store_size(index, journal.len)?;
         self.dev.flush()?;
         // Clearing does not need `flush`: if it is lost, the next `open`
         // redoes an already applied replace (idempotent). Each `flush` is an
@@ -689,9 +746,13 @@ impl<D: BlockDevice> AriFs<D> {
             return Ok(());
         }
         let index = journal.index as usize;
-        let fits = self
-            .entry(index)
-            .is_some_and(|e| journal.len <= e.capacity_bytes());
+        // A forged pending journal must not replay sectors past the
+        // journal area (other files' data) into the target (audit
+        // 2026-10-25 B, L1), the bound `commit_header` sets.
+        let fits = journal.len as usize <= JOURNAL_CAPACITY_BYTES
+            && self
+                .entry(index)
+                .is_some_and(|e| journal.len <= e.capacity_bytes());
         if !fits || !self.journal_data_matches(&journal)? {
             self.recovery = Recovery::Discarded;
             return self.clear_journal();
@@ -731,13 +792,13 @@ impl<D: BlockDevice> AriFs<D> {
 
     /// Truncates to zero bytes.
     pub fn truncate(&mut self, index: usize) -> Result<(), FsError> {
-        let entry = self.table[index].as_mut().ok_or(FsError::NotFound)?;
-        entry.size = 0;
-        self.write_table_entry(index)
+        self.usable()?;
+        self.store_size(index, 0)
     }
 
     /// Makes previous writes durable (`write`, `create`, `truncate`).
     pub fn flush(&mut self) -> Result<(), FsError> {
+        self.usable()?;
         self.dev.flush()
     }
 
@@ -1364,5 +1425,152 @@ mod tests {
         assert_eq!(fs.recovery(), Recovery::Replayed { index: i });
         assert_eq!(content(&mut fs, i), b"nuevo");
         assert_eq!(fs.sequence, 9, "the sequence continues from the journal");
+    }
+
+    /// Fails the first write to `fail_lba`, then behaves.
+    struct FailOnce {
+        d: MemDisk,
+        fail_lba: Option<u64>,
+    }
+    impl BlockDevice for FailOnce {
+        fn read_sector(&mut self, lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), FsError> {
+            self.d.read_sector(lba, buf)
+        }
+        fn write_sector(&mut self, lba: u64, buf: &[u8; SECTOR]) -> Result<(), FsError> {
+            if self.fail_lba == Some(lba) {
+                self.fail_lba = None;
+                return Err(FsError::Io);
+            }
+            self.d.write_sector(lba, buf)
+        }
+        fn flush(&mut self) -> Result<(), FsError> {
+            Ok(())
+        }
+    }
+
+    /// Audit 2026-10-25 C, M2 (reproduced by the audit on the old code: a
+    /// failed create kept its entry in memory, a later write persisted it
+    /// over a superblock that never reserved its space, and the volume no
+    /// longer mounted). Each metadata write that fails leaves memory as
+    /// the disk was.
+    #[test]
+    fn failed_metadata_writes_leave_memory_as_the_disk() {
+        for fail in [0, TABLE_LBA] {
+            let fs = AriFs::format(disk(400), 400).unwrap();
+            let mut fs = AriFs::open(FailOnce {
+                d: fs.into_device(),
+                fail_lba: Some(fail),
+            })
+            .unwrap();
+            assert_eq!(fs.create("ghost"), Err(FsError::Io), "fail at {fail}");
+            assert_eq!(fs.find("ghost"), None, "fail at {fail}: ghost entry");
+            let i = fs.create("real").unwrap();
+            fs.write(i, 0, b"x").unwrap();
+            let d = fs.into_device().d;
+            let fs = AriFs::open(d).expect("still mounts");
+            assert_eq!(fs.find("ghost"), None);
+            let i = fs.find("real").unwrap();
+            assert_eq!(fs.entry(i).unwrap().size, 1);
+        }
+        // A size update that fails keeps the old size.
+        let fs = AriFs::format(disk(400), 400).unwrap();
+        let mut fs = AriFs::open(FailOnce {
+            d: fs.into_device(),
+            fail_lba: None,
+        })
+        .unwrap();
+        let i = fs.create("f").unwrap();
+        fs.write(i, 0, b"abc").unwrap();
+        fs.dev.fail_lba = Some(TABLE_LBA);
+        assert_eq!(fs.write(i, 3, b"def"), Err(FsError::Io));
+        assert_eq!(fs.entry(i).unwrap().size, 3);
+    }
+
+    /// Audit 2026-10-25 B, L1: an entry whose end wraps past the top of
+    /// the range passed the layout check; one whose capacity in bytes does
+    /// not fit `u32` overflowed.
+    #[test]
+    fn layout_arithmetic_is_checked() {
+        let mut fs = AriFs::format(disk(400), 400).unwrap();
+        let i = fs.create("f").unwrap();
+        let mut sb = fs.sb;
+        let mut table = fs.table;
+        let mut e = table[i].unwrap();
+        e.start_lba = u64::MAX - 10;
+        e.capacity_sectors = 64;
+        table[i] = Some(e);
+        assert_eq!(
+            AriFs::<MemDisk>::check_layout(&sb, &table),
+            Err(FsError::Corrupt)
+        );
+        e.start_lba = DATA_LBA;
+        e.capacity_sectors = u32::MAX / SECTOR as u32 + 1;
+        table[i] = Some(e);
+        // Room for it, so only the capacity bound can refuse it.
+        sb.data_next = DATA_LBA + e.capacity_sectors as u64;
+        sb.total_sectors = sb.data_next;
+        assert_eq!(
+            AriFs::<MemDisk>::check_layout(&sb, &table),
+            Err(FsError::Corrupt)
+        );
+    }
+
+    /// Audit 2026-10-25 B, L1: a forged pending journal longer than the
+    /// journal area, on a file large enough to take it, replayed sectors
+    /// beyond the journal (other files' data) into that file.
+    #[test]
+    fn a_journal_longer_than_its_area_is_discarded() {
+        let mut fs = AriFs::format(disk(2000), 2000).unwrap();
+        let big = fs.create_sized("big", 4 * FILE_CAPACITY_SECTORS).unwrap();
+        let len = 2 * JOURNAL_CAPACITY_BYTES as u32;
+        let data_crc = fs.journal_crc(len).unwrap();
+        let forged = Journal {
+            state: JOURNAL_PENDING,
+            index: big as u32,
+            len,
+            data_crc,
+            sequence: 7,
+        };
+        fs.dev.write_sector(JOURNAL_LBA, &forged.encode()).unwrap();
+        let fs = AriFs::open(fs.into_device()).unwrap();
+        assert_eq!(fs.recovery(), Recovery::Discarded);
+        assert_eq!(fs.entry(big).unwrap().size, 0);
+    }
+
+    /// Audit of incident 0032, M1: once a replace is committed, a failed
+    /// apply must not leave the session reading a mix, nor let a later
+    /// write land only to be undone when the next mount replays the
+    /// journal. The volume refuses everything until it is opened again,
+    /// which applies the replace.
+    #[test]
+    fn a_failed_apply_poisons_until_reopened() {
+        let fs = AriFs::format(disk(400), 400).unwrap();
+        let mut fs = AriFs::open(FailOnce {
+            d: fs.into_device(),
+            fail_lba: None,
+        })
+        .unwrap();
+        let i = fs.create("f").unwrap();
+        fs.replace(i, b"old-old").unwrap();
+        fs.dev.fail_lba = Some(TABLE_LBA);
+        assert_eq!(fs.replace(i, b"NEW"), Err(FsError::Io));
+        assert!(fs.needs_reopen());
+        let mut buf = [0u8; 16];
+        assert_eq!(fs.read(i, 0, &mut buf), Err(FsError::Io));
+        assert_eq!(fs.write(i, 0, b"later-write"), Err(FsError::Io));
+        assert_eq!(fs.truncate(i), Err(FsError::Io));
+        let mut fs = AriFs::open(fs.into_device().d).unwrap();
+        assert_eq!(fs.recovery(), Recovery::Replayed { index: i });
+        assert_eq!(fs.read(i, 0, &mut buf), Ok(3));
+        assert_eq!(&buf[..3], b"NEW");
+        assert!(!fs.needs_reopen());
+    }
+
+    #[test]
+    fn create_sized_refuses_what_would_not_mount() {
+        let mut fs = AriFs::format(disk(400), 400).unwrap();
+        let too_big =
+            (u32::MAX / SECTOR as u32 / FILE_CAPACITY_SECTORS + 1) * FILE_CAPACITY_SECTORS;
+        assert_eq!(fs.create_sized("huge", too_big), Err(FsError::OutOfRange));
     }
 }

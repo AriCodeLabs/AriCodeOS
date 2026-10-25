@@ -61,3 +61,6 @@ support.
   opcodes and polymorphic unreachable code.
 - Extending the profile (floating point, more API) goes through the
   validator and this page; the profile is versioned.
+
+Amended by ADR 0055 (2026-10-25): fuel counts work, imports pay fuel, and new
+limits on arity, locals, tables and memories.

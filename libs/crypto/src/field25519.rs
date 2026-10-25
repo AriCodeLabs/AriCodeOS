@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
 //! Arithmetic in GF(2^255 - 19) with five 51-bit limbs, shared by Ed25519
-//! and X25519. Only multiplication by small constants and the swap used by
-//! the X25519 ladder are written to be constant time; inversion and
-//! comparison are not (they only see public values or the final result).
+//! and X25519. Carry, addition, subtraction, multiplication, squaring,
+//! `to_bytes`, `is_negative` and `cswap` have no data-dependent branches;
+//! `pow` branches on its exponent, which is always a public constant
+//! (`invert`, `pow22523`, `sqrt_m1`). The secret-scalar ladders of X25519
+//! and Ed25519 signing rely on that.
 
 /// Element of GF(p), p = 2^255 - 19, in five 51-bit limbs.
 #[derive(Clone, Copy, Debug)]

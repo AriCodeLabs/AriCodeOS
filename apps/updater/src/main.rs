@@ -45,7 +45,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use aricode_ab::{schedule, BootState, Image, ImageError, Manifest, Slot, PART_STATE, PART_UPDATE};
 use aricode_crypto::sha256::sha256;
-use aricode_rt::sys::block::BlockClient;
+use aricode_rt::sys::block::{find_partition, BlockClient};
 use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::net::NetClient;
 use aricode_rt::sys::{self, Handle};
@@ -427,28 +427,6 @@ fn installed_apps(state: &str) -> Option<Vec<(String, u32)>> {
 }
 
 // ---------------------------------------------------------------- disk
-
-fn find_partition(blk: &mut BlockClient, name: &str) -> Option<(u64, u64)> {
-    blk.read(1, 1).ok()?;
-    let header = aricode_gpt::Header::parse(&blk.buffer()[..SECTOR]).ok()?;
-    let sectors = header.entries_bytes().div_ceil(SECTOR) as u64;
-    let mut table = alloc::vec![0u8; sectors as usize * SECTOR];
-    let mut lba = 0;
-    while lba < sectors {
-        let n = (sectors - lba).min(CHUNK as u64) as u16;
-        blk.read(header.entries_lba + lba, n).ok()?;
-        let o = lba as usize * SECTOR;
-        table[o..o + n as usize * SECTOR].copy_from_slice(&blk.buffer()[..n as usize * SECTOR]);
-        lba += n as u64;
-    }
-    let mut parts = [None; 16];
-    let count = aricode_gpt::partitions(&header, &table, &mut parts).ok()?;
-    parts[..count]
-        .iter()
-        .flatten()
-        .find(|p| p.name_str() == name)
-        .map(|p| (p.first_lba, p.last_lba))
-}
 
 /// Why a slot holds no image this updater accepts (incident 0021: an image
 /// too large for memory once read as one that does not verify).

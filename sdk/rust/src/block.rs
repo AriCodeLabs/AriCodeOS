@@ -12,8 +12,13 @@ use aricode_proto::block::{Op, Reply, Request, Status, MAX_SECTORS};
 /// and the recovery reserve), and a request may first queue behind one
 /// idle-loop maintenance step (`REENUMERATE_STEP_MS` = 6 s, the longest)
 /// and one other request: 34 + 6 + 34 = 74 s < 90 s, assuming at most two
-/// concurrent block clients (one queued request). The file client above
-/// waits longer still (`fs::REPLY_WAIT_MS`, 120 s).
+/// concurrent block clients (one queued request). virtio-blk spends at
+/// most its 30 s request timeout plus a reset (about 2 s) on a request
+/// (incident 0043): 32 + 32 = 64 s < 90 s under the same assumption; a
+/// third client queued behind two requests that both time out can get its
+/// own timeout before the driver's `Io` (its buffer stays safe: the driver
+/// keeps its handle until the reset). The file client above waits longer
+/// still (`fs::REPLY_WAIT_MS`, 120 s).
 pub const REPLY_WAIT_MS: u64 = 90_000;
 
 pub struct BlockClient {
@@ -145,4 +150,32 @@ pub type ClientBuffers = crate::client_buffer::ClientBuffers<8>;
 /// the server maps the buffer or holds a handle to it, incident 0039).
 pub fn map_client_buffer(buffers: &mut ClientBuffers, dma: Handle) -> Option<(u64, u64)> {
     buffers.device_view(dma)
+}
+
+/// First and last LBA of the GPT partition `name` on the disk behind
+/// `blk`. The table is read in chunks straight into the GPT scanner, so
+/// its size (up to `aricode_gpt::MAX_ENTRIES` entries) costs no memory: a
+/// crafted stick cannot exhaust a program's fixed heap (audit of incident
+/// 0032, M2).
+pub fn find_partition(blk: &mut BlockClient, name: &str) -> Option<(u64, u64)> {
+    const SECTOR: usize = 512;
+    const CHUNK: u64 = 16;
+    blk.read(1, 1).ok()?;
+    let header = aricode_gpt::Header::parse(&blk.buffer()[..SECTOR]).ok()?;
+    let sectors = header.entries_bytes().div_ceil(SECTOR) as u64;
+    let mut parts = [None; 16];
+    let mut scan = aricode_gpt::TableScan::new(&header, &mut parts);
+    let mut lba = 0;
+    while lba < sectors {
+        let n = (sectors - lba).min(CHUNK) as u16;
+        blk.read(header.entries_lba.checked_add(lba)?, n).ok()?;
+        scan.feed(&blk.buffer()[..n as usize * SECTOR]);
+        lba += n as u64;
+    }
+    let count = scan.finish().ok()?;
+    parts[..count]
+        .iter()
+        .flatten()
+        .find(|p| p.name_str() == name)
+        .map(|p| (p.first_lba, p.last_lba))
 }
