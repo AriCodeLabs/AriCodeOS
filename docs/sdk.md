@@ -137,8 +137,8 @@ read_files = hola.txt  # up to 4 AriFS files in read-only mode (ADR 0016)
 Handles arrive in this fixed order, only the requested ones: `SYSTEM`
 (read), the fsd private directory, one endpoint per `read_files` entry (in
 order; from it the program can only list, open and read that file, and
-everything else answers `Denied`), the network endpoint, the compositor
-endpoint, the block endpoint, the fsd main namespace (`install`), the input
+everything else answers `Denied`), the network endpoint, a compositor
+session (its windows are its alone, ADR 0052), the block endpoint, the fsd main namespace (`install`), the input
 endpoints and, if any capability needs buffers (`fs`, `read_files`, `net`,
 `window`, `block`, `install`), `HARDWARE` at the end. With
 `sys::permissions::granted` the application recognises them by kind without

@@ -127,3 +127,28 @@ impl Window {
         self.call(self.request(Op::Close), false).map(|_| ())
     }
 }
+
+/// Broker and init only, over the compositor's main endpoint: a session
+/// for one client (ADR 0052); returns its send side (`WRITE`,
+/// transferable). Windows created through it are that client's alone.
+pub fn attach(compositor: Handle) -> Result<Handle, WindowError> {
+    let req = Request::new(Op::Attach);
+    let mut msg = [0u8; Reply::LEN];
+    let mut handles = [Handle(0); 1];
+    let (len, nh) = rpc::call_handles(
+        compositor,
+        &req.encode(),
+        &[],
+        rpc::GRACE_MS,
+        rpc::GRACE_MS,
+        &mut msg,
+        &mut handles,
+    )
+    .map_err(WindowError::Ipc)?;
+    let reply = Reply::decode(&msg[..len]).ok_or(WindowError::Ipc(Error::Invalid))?;
+    match (reply.status, nh) {
+        (Status::Ok, 1) => Ok(handles[0]),
+        (Status::Ok, _) => Err(WindowError::Ipc(Error::Invalid)),
+        (s, _) => Err(WindowError::Status(s)),
+    }
+}

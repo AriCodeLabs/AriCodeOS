@@ -28,6 +28,13 @@ const RETRY_MS: u64 = 50;
 const MAX_INPUTS: usize = 4;
 const MAX_WINDOWS: usize = aricode_gfx::MAX_WINDOWS;
 const QUEUE: usize = 8;
+/// Client sessions (ADR 0052): one per program the broker launches with
+/// `window`.
+const MAX_SESSIONS: usize = 8;
+/// How often every session is asked whether its client is still there.
+const SWEEP_MS: u64 = 1000;
+/// What arrives on the main endpoint (init): only `Attach`.
+const MAIN: usize = 0;
 /// Shortest interval between two frames (about 60 per second): changes
 /// that arrive sooner are coalesced into the next frame, so an event waits
 /// at most one frame.
@@ -110,6 +117,8 @@ impl Screen {
 /// Window content: the mapped client buffer and its event queue.
 struct Content {
     id: u32,
+    /// The session it was created through: slot + 1.
+    owner: usize,
     virt: u64,
     width: u32,
     height: u32,
@@ -143,6 +152,14 @@ fn answer(reply_to: Handle, reply: Reply) {
     let _ = sys::handle_close(reply_to);
 }
 
+/// `reply` carrying `handle` (moved to the client).
+fn answer_with(reply_to: Handle, reply: Reply, handle: Handle) {
+    if sys::ipc_send(reply_to, &reply.encode(), &[handle], 0).is_err() {
+        let _ = sys::handle_close(handle);
+    }
+    let _ = sys::handle_close(reply_to);
+}
+
 struct Compositor {
     screen: Screen,
     desktop: Desktop,
@@ -157,11 +174,70 @@ struct Compositor {
     announced: bool,
     /// `gui_trace` on the command line: log every frame.
     trace: bool,
+    /// Receive sides of the client sessions (ADR 0052).
+    sessions: [Option<Handle>; MAX_SESSIONS],
+    last_sweep_ms: u64,
 }
 
 impl Compositor {
     fn content(&mut self, id: u32) -> Option<&mut Content> {
         self.contents.iter_mut().flatten().find(|c| c.id == id)
+    }
+
+    /// Window `id` if `owner` created it: another client's windows answer
+    /// as if they did not exist (audit 2026-10-25 C, M5: any client could
+    /// poll another's keys or close its window).
+    fn owned(&mut self, id: u32, owner: usize) -> Option<&mut Content> {
+        self.content(id).filter(|c| c.owner == owner)
+    }
+
+    /// `Attach`: a new session endpoint; the compositor keeps its receive
+    /// side, the client gets the send side.
+    fn attach(&mut self, reply_to: Handle) {
+        let Some(slot) = self.sessions.iter().position(Option::is_none) else {
+            return answer(reply_to, Reply::status(Status::Busy));
+        };
+        let Ok((receive, send)) = sys::endpoint_create_pair() else {
+            return answer(reply_to, Reply::status(Status::Busy));
+        };
+        self.sessions[slot] = Some(receive);
+        answer_with(reply_to, Reply::ok(0), send);
+    }
+
+    /// The client of session `slot` is gone: its endpoint closes and every
+    /// window it made goes with it, so a dead client's window neither keeps
+    /// the focus nor fills the table (audit 2026-10-25 C, M5).
+    fn retire(&mut self, slot: usize) {
+        let Some(ep) = self.sessions[slot].take() else {
+            return;
+        };
+        let _ = sys::handle_close(ep);
+        let mut closed_windows = 0;
+        for i in 0..self.contents.len() {
+            if !self.contents[i]
+                .as_ref()
+                .is_some_and(|c| c.owner == slot + 1)
+            {
+                continue;
+            }
+            let Some(closed) = self.contents[i].take() else {
+                continue;
+            };
+            if let Some((h, _)) = closed.pending {
+                answer(h, Reply::status(Status::BadWindow));
+            }
+            self.unmap_unused(closed.virt);
+            if let Some(w) = self.desktop.get(closed.id) {
+                self.damage.add(&w.frame());
+            }
+            self.desktop.remove(closed.id);
+            closed_windows += 1;
+        }
+        sys::print(b"compositor: client ");
+        num(slot as u64 + 1);
+        sys::print(b" gone: ");
+        num(closed_windows);
+        sys::print(b" window(s) closed\n");
     }
 
     fn deliver(&mut self, id: u32, ev: Event) {
@@ -220,12 +296,31 @@ impl Compositor {
         }
     }
 
-    fn handle(&mut self, req: Request, reply_to: Handle, buf: Option<Handle>, now_ms: u64) {
+    fn handle(
+        &mut self,
+        req: Request,
+        owner: usize,
+        reply_to: Handle,
+        buf: Option<Handle>,
+        now_ms: u64,
+    ) {
+        // The main endpoint (init, the broker) only makes sessions; windows
+        // live in sessions, which cannot make more.
+        if (owner == MAIN) != (req.op == Op::Attach) {
+            return answer(reply_to, Reply::status(Status::Invalid));
+        }
         match req.op {
+            Op::Attach => self.attach(reply_to),
             Op::Create => {
                 let Some(buf) = buf else {
                     return answer(reply_to, Reply::status(Status::BadHandles));
                 };
+                // A DMA buffer, not a device's registers: mapping an `Mmio`
+                // object would read the device every frame and move it into
+                // the compositor's IOMMU domain (audit 2026-10-25 A, L3).
+                if sys::dma_phys(buf).is_err() {
+                    return answer(reply_to, Reply::status(Status::BadHandles));
+                }
                 if req.width == 0
                     || req.height == 0
                     || req.width > MAX_SIDE
@@ -253,6 +348,7 @@ impl Compositor {
                 };
                 self.contents[slot] = Some(Content {
                     id,
+                    owner,
                     virt,
                     width: req.width,
                     height: req.height,
@@ -272,7 +368,7 @@ impl Compositor {
                 answer(reply_to, Reply::ok(id as u64));
             }
             Op::Present => {
-                let Some(virt) = self.content(req.window).map(|c| c.virt) else {
+                let Some(virt) = self.owned(req.window, owner).map(|c| c.virt) else {
                     return answer(reply_to, Reply::status(Status::BadWindow));
                 };
                 // Every window on that buffer shows the new pixels.
@@ -284,7 +380,7 @@ impl Compositor {
                 answer(reply_to, Reply::ok(0));
             }
             Op::Poll => {
-                let Some(c) = self.content(req.window) else {
+                let Some(c) = self.owned(req.window, owner) else {
                     return answer(reply_to, Reply::status(Status::BadWindow));
                 };
                 if let Some(ev) = c.pop() {
@@ -296,11 +392,10 @@ impl Compositor {
                 c.pending = Some((reply_to, now_ms + req.timeout_ms.max(1) as u64));
             }
             Op::Close => {
-                let Some(slot) = self
-                    .contents
-                    .iter()
-                    .position(|c| c.as_ref().is_some_and(|c| c.id == req.window))
-                else {
+                let Some(slot) = self.contents.iter().position(|c| {
+                    c.as_ref()
+                        .is_some_and(|c| c.id == req.window && c.owner == owner)
+                }) else {
                     return answer(reply_to, Reply::status(Status::BadWindow));
                 };
                 let Some(closed) = self.contents[slot].take() else {
@@ -453,38 +548,53 @@ fn main(inputs: u64) -> u64 {
         frames: 0,
         announced: false,
         trace,
+        sessions: [None; MAX_SESSIONS],
+        last_sweep_ms: 0,
     };
     let mut msg = [0u8; Request::LEN];
-    let mut handles = [Handle(0); 2];
+    let mut handles = [Handle(0); sys::abi::IPC_MAX_HANDLES];
     let mut events = [aricode_proto::input::Event::default(); aricode_proto::input::MAX_EVENTS];
     let mut times = [0u64; aricode_proto::input::MAX_EVENTS];
     say(b"serving requests");
     loop {
         let t = now(SYSTEM);
         for _ in 0..8 {
-            let (n, nh) = match sys::ipc_receive(SERVICE, &mut msg, &mut handles, 0) {
-                Ok(r) => r,
-                // The service endpoint was closed or revoked (ADR 0030): nobody
-                // can send here again, so polling it would spin.
-                Err(e) if e.endpoint_gone() => {
-                    say(b"service endpoint closed; exiting");
-                    return 9;
+            // The main endpoint and every session at once (ADR 0052).
+            let mut eps = [SERVICE; 1 + MAX_SESSIONS];
+            let mut owners = [MAIN; 1 + MAX_SESSIONS];
+            let mut n_eps = 1;
+            for (i, s) in comp.sessions.iter().enumerate() {
+                if let Some(ep) = s {
+                    eps[n_eps] = *ep;
+                    owners[n_eps] = i + 1;
+                    n_eps += 1;
                 }
-                Err(_) => break,
-            };
-            if nh == 0 {
-                continue;
             }
-            let reply_to = handles[0];
-            let buf = (nh >= 2).then_some(handles[1]);
-            match Request::decode(&msg[..n]) {
-                Some(req) => comp.handle(req, reply_to, buf, t),
-                None => answer(reply_to, Reply::status(Status::Invalid)),
-            }
-            // The content buffer stays mapped (the mapping keeps it allocated
-            // until the window closes, ADR 0038); the handle is not needed.
-            if let Some(b) = buf {
-                let _ = sys::handle_close(b);
+            let (which, n, nh) =
+                match sys::ipc_receive_any(&eps[..n_eps], &mut msg, &mut handles, 0) {
+                    Ok(r) => r,
+                    // The service endpoint was closed or revoked (ADR 0030):
+                    // nobody can send here again, so polling it would spin.
+                    Err(e) if e.endpoint_gone() && n_eps == 1 => {
+                        say(b"service endpoint closed; exiting");
+                        return 9;
+                    }
+                    Err(_) => break,
+                };
+            serve(&mut comp, owners[which], &msg[..n], &handles[..nh], t);
+        }
+        // Clients that went away: their sessions and windows go too.
+        if t.saturating_sub(comp.last_sweep_ms) >= SWEEP_MS {
+            comp.last_sweep_ms = t;
+            for slot in 0..MAX_SESSIONS {
+                let Some(ep) = comp.sessions[slot] else {
+                    continue;
+                };
+                match sys::ipc_receive(ep, &mut msg, &mut handles, 0) {
+                    Ok((n, nh)) => serve(&mut comp, slot + 1, &msg[..n], &handles[..nh], t),
+                    Err(sys::Error::PeerClosed) => comp.retire(slot),
+                    Err(_) => {}
+                }
             }
         }
         // Read every device and process their events in time order
@@ -536,6 +646,27 @@ fn main(inputs: u64) -> u64 {
         if devices.iter().all(Option::is_none) {
             sys::thread_sleep(10);
         }
+    }
+}
+
+/// One request from `owner`: handles `[reply, buffer?]`; any others are
+/// closed unread.
+fn serve(comp: &mut Compositor, owner: usize, msg: &[u8], handles: &[Handle], t: u64) {
+    let Some((&reply_to, rest)) = handles.split_first() else {
+        return;
+    };
+    let buf = rest.first().copied();
+    for &extra in rest.iter().skip(1) {
+        let _ = sys::handle_close(extra);
+    }
+    match Request::decode(msg) {
+        Some(req) => comp.handle(req, owner, reply_to, buf, t),
+        None => answer(reply_to, Reply::status(Status::Invalid)),
+    }
+    // The content buffer stays mapped (the mapping keeps it allocated until
+    // the window closes, ADR 0038); the handle is not needed.
+    if let Some(b) = buf {
+        let _ = sys::handle_close(b);
     }
 }
 

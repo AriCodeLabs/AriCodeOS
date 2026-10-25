@@ -72,7 +72,7 @@ of this document.
 | M6 | **AriFS create leaves a ghost entry on an I/O error** [C-M2], which can make the volume unmountable; `write`/`apply_journal` update the size before the table. *Reproduced* on the host. `libs/arifs/src/lib.rs:472,565,669` | open |
 | M7 | **USB drivers never close a request's extra handles** [C-M3]: ~85 requests fill the driver's table; keyboard and USB storage stop until reboot. | open |
 | M8 | **An input driver's waiting place is held by a dead reader, and events go to it** [C-M4]: keys lost after any reader dies. | **fixed** (`6c17a9d`, merged to develop): shared `EventQueue`, events leave only once delivered, reads capped at 10 s; scenario `input.orphan_read` failed before the fix |
-| M9 | **Compositor window ids are global and unowned** [C-M5]: an app can poll another's keys or close its window; dead clients' windows are never reclaimed. | open |
+| M9 | **Compositor window ids are global and unowned** [C-M5]: an app can poll another's keys or close its window; dead clients' windows are never reclaimed. | fixed on `fix/compositor-ownership` (ADR 0052, incident 0037) |
 | M10 | **Certificate validity fails open without a clock** [D-M1]: no RTC (or a bad one) skips the time check. | open |
 | M11 | **Ed25519 signing is not constant time** [D-M2] (SSH host key). | open |
 | M12 | **No way to distrust a root or key** [D-M3] (the emSign case). | open |

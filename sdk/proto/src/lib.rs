@@ -1053,6 +1053,12 @@ pub mod window {
         /// Waits up to `timeout_ms` for a window event.
         Poll = 3,
         Close = 4,
+        /// Main endpoint only (init, the broker): a session for one client
+        /// (ADR 0052). The reply carries the send side of a new endpoint;
+        /// windows created through it belong to that client alone, which
+        /// alone can present, poll or close them, and they close when the
+        /// kernel reports the client gone.
+        Attach = 5,
     }
 
     /// Request (64 bytes).
@@ -1119,6 +1125,7 @@ pub mod window {
                 2 => Op::Present,
                 3 => Op::Poll,
                 4 => Op::Close,
+                5 => Op::Attach,
                 _ => return None,
             };
             let mut title = [0u8; MAX_TITLE];

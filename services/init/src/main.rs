@@ -2237,7 +2237,15 @@ impl Broker {
             let Some(comp) = self.compositor else {
                 return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
             };
-            match sys::handle_duplicate(comp, rights::WRITE | rights::TRANSFER) {
+            // A session of its own (ADR 0052): its windows are its alone and
+            // close when it is gone. Same rights as before: send only.
+            let session = match sys::window::attach(comp) {
+                Ok(h) => h,
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
+            };
+            let narrowed = sys::handle_duplicate(session, rights::WRITE | rights::TRANSFER);
+            let _ = sys::handle_close(session);
+            match narrowed {
                 Ok(h) => granted.push(h),
                 Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
@@ -2416,8 +2424,11 @@ fn run_gui(inputs: &[Handle]) -> Result<Handle, u64> {
             .map_err(|_| 7u64)?;
     let mut apps = [Handle(0); 2];
     for (i, app) in apps.iter_mut().enumerate() {
-        let ep =
-            sys::handle_duplicate(service, rights::WRITE | rights::TRANSFER).map_err(|_| 8u64)?;
+        // Each application its own session (ADR 0052), send side only.
+        let session = sys::window::attach(service).map_err(|_| 8u64)?;
+        let ep = sys::handle_duplicate(session, rights::WRITE | rights::TRANSFER);
+        let _ = sys::handle_close(session);
+        let ep = ep.map_err(|_| 8u64)?;
         let hw =
             sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER).map_err(|_| 8u64)?;
         *app =
