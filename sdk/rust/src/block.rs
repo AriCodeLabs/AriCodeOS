@@ -141,8 +141,8 @@ impl BlockClient {
 pub type ClientBuffers = crate::client_buffer::ClientBuffers<8>;
 
 /// Physical address and length of a client's `dma` buffer, mapped into
-/// this server and its devices' IOMMU domain (the IOMMU entry stays until
-/// the buffer is freed).
+/// this server and its devices' IOMMU domain (the IOMMU entry stays while
+/// the server maps the buffer or holds a handle to it, incident 0039).
 pub fn map_client_buffer(buffers: &mut ClientBuffers, dma: Handle) -> Option<(u64, u64)> {
     buffers.device_view(dma)
 }
