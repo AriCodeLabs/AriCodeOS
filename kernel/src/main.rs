@@ -367,6 +367,7 @@ fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
         "console_input" => console_input::selftest(),
         "console_ps2" => console_input::ps2_selftest(),
         "process_reap" => user::process::reap_selftest(),
+        "spawn_oom" => user::process::spawn_oom_selftest(),
         "dma_lifetime" => user::process::dma_lifetime_selftest(),
         "pci_reap" => pci::reap_selftest(),
         other if other.starts_with("user_") => run_user_program(&other[5..]),

@@ -1,0 +1,16 @@
+# Audit 2026-10-25 C, L1: a spawn that failed half-way leaked every frame it
+# had mapped (the page-table walker has no destructor), so a supervisor
+# relaunching a program under memory pressure lost more each time. With
+# all but a few frames above the kernel reserve held, ten spawns must fail
+# and give everything back, and one must work once memory is free again.
+name = "user.spawn_oom"
+description = "test=spawn_oom: spawns that run out of frames half-way leave no frame behind"
+level = "full"
+areas = ["user", "memory"]
+cmdline = "qemu_exit test=spawn_oom"
+timeout_secs = 60
+
+[expect]
+exit = 33
+serial_contains = ["spawn out-of-memory selftest ok (10 failed spawns with ", "ARICODEOS_KERNEL_READY"]
+serial_absent = ["KERNEL PANIC", "frames lost by"]

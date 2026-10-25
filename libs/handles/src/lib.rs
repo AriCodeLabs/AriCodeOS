@@ -107,6 +107,11 @@ impl<T> HandleTable<T> {
         self.live == 0
     }
 
+    /// Handles that can still be inserted.
+    pub fn room(&self) -> usize {
+        self.limit - self.live
+    }
+
     pub fn insert(&mut self, object: T, rights: Rights) -> Result<Handle, HandleError> {
         if !rights.is_valid() {
             return Err(HandleError::Escalation);
