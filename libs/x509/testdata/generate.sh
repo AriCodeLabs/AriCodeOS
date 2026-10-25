@@ -124,3 +124,73 @@ key crit-leaf -algorithm EC -pkeyopt ec_paramgen_curve:P-256
 printf 'subjectAltName=DNS:crit.example.org\n1.3.6.1.4.1.55555.1=critical,ASN1:NULL\n' >crit.ext
 issue crit-leaf '/CN=crit.example.org' ec-int crit.ext $LEAF_FROM $LEAF_TO -sha256
 der crit-leaf
+
+# Constraints on intermediates (audit 2026-10-25 D, H1 and H2), under a
+# root of their own. nameConstraints limited to good.example, non-critical
+# and critical; with an excluded subtree; an intermediate whose
+# extendedKeyUsage is e-mail only, and one with serverAuth.
+key nc-root -algorithm EC -pkeyopt ec_paramgen_curve:P-256
+root nc-root '/O=AriCode Test/CN=AriCode Test Constraints Root' -sha256 $CA_FROM $CA_TO
+printf 'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign\nnameConstraints=permitted;DNS:good.example\n' >nc-int.ext
+printf 'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign\nnameConstraints=critical,permitted;DNS:good.example\n' >nc-crit-int.ext
+printf 'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign\nnameConstraints=critical,permitted;DNS:good.example,excluded;DNS:bad.good.example\n' >nc-excl-int.ext
+printf 'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign\nextendedKeyUsage=emailProtection\n' >eku-mail-int.ext
+printf 'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign\nextendedKeyUsage=serverAuth,clientAuth\n' >eku-tls-int.ext
+for n in nc-int nc-crit-int nc-excl-int eku-mail-int eku-tls-int; do
+    key $n -algorithm EC -pkeyopt ec_paramgen_curve:P-256
+    issue $n "/O=AriCode Test/CN=AriCode Test $n" nc-root $n.ext $CA_FROM $CA_TO -sha256
+    der $n
+done
+# leaf name issuer: SAN given as "DNS:a,DNS:b" or "-" for none (CN only)
+leaf() {
+    key $1 -algorithm EC -pkeyopt ec_paramgen_curve:P-256
+    if [ "$2" = - ]; then
+        printf 'basicConstraints=CA:FALSE\n' >$1.ext
+    else
+        printf 'basicConstraints=CA:FALSE\nsubjectAltName=%s\n' "$2" >$1.ext
+    fi
+    issue $1 "/CN=$4" $3 $1.ext $LEAF_FROM $LEAF_TO -sha256
+    der $1
+}
+leaf nc-ok DNS:www.good.example nc-int www.good.example
+leaf nc-evil DNS:www.evil.example nc-int www.evil.example
+leaf nc-mixed DNS:www.good.example,DNS:www.evil.example nc-int www.good.example
+leaf nc-wild DNS:*.good.example nc-int www.good.example
+leaf nc-cn - nc-int www.good.example
+leaf nc-crit-ok DNS:www.good.example nc-crit-int www.good.example
+leaf nc-crit-evil DNS:www.evil.example nc-crit-int www.evil.example
+leaf nc-excl-ok DNS:www.good.example nc-excl-int www.good.example
+leaf nc-excl-bad DNS:x.bad.good.example nc-excl-int x.bad.good.example
+leaf nc-excl-wild DNS:*.good.example nc-excl-int www.good.example
+leaf eku-mail-leaf DNS:www.eku.example eku-mail-int www.eku.example
+leaf eku-tls-leaf DNS:www.eku.example eku-tls-int www.eku.example
+# Restrictions on roots, two constrained CAs in one path, and IP hosts
+# (audit of incident 0029, L1 and L4).
+constrained_root() { # name subject extension
+    key $1 -algorithm EC -pkeyopt ec_paramgen_curve:P-256
+    openssl req -x509 -new -key "$1.key" -subj "$2" -sha256 -not_before $CA_FROM -not_after $CA_TO \
+        -addext 'basicConstraints=critical,CA:TRUE' -addext 'keyUsage=critical,keyCertSign' \
+        -addext "$3" -out "$1.pem"
+    der $1
+}
+constrained_root ncr-root '/O=AriCode Test/CN=AriCode Test Constrained Root' 'nameConstraints=permitted;DNS:good.example'
+constrained_root ekur-root '/O=AriCode Test/CN=AriCode Test Mail Root' 'extendedKeyUsage=emailProtection'
+leaf ncr-ok DNS:www.good.example ncr-root www.good.example
+leaf ncr-evil DNS:www.evil.example ncr-root www.evil.example
+leaf ekur-leaf DNS:www.eku.example ekur-root www.eku.example
+printf 'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign\nnameConstraints=permitted;DNS:sub.good.example\n' >nc2-int.ext
+key nc2-int -algorithm EC -pkeyopt ec_paramgen_curve:P-256
+issue nc2-int '/O=AriCode Test/CN=AriCode Test nc2-int' nc-int nc2-int.ext $CA_FROM $CA_TO -sha256
+der nc2-int
+leaf nc2-ok DNS:www.sub.good.example nc2-int www.sub.good.example
+leaf nc2-out DNS:www.good.example nc2-int www.good.example
+printf 'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign\nnameConstraints=permitted;IP:192.168.0.0/255.255.0.0\n' >ip-int.ext
+key ip-int -algorithm EC -pkeyopt ec_paramgen_curve:P-256
+issue ip-int '/O=AriCode Test/CN=AriCode Test ip-int' nc-root ip-int.ext $CA_FROM $CA_TO -sha256
+der ip-int
+leaf ip-leaf DNS:10.0.2.2,DNS:www.ip.example ip-int 10.0.2.2
+# A CA certificate presented as a server's (audit 2026-10-25 D, L2).
+key ca-as-leaf -algorithm EC -pkeyopt ec_paramgen_curve:P-256
+printf 'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,digitalSignature\nsubjectAltName=DNS:www.good.example\n' >ca-as-leaf.ext
+issue ca-as-leaf '/CN=www.good.example' nc-root ca-as-leaf.ext $CA_FROM $CA_TO -sha256
+der ca-as-leaf nc-root
