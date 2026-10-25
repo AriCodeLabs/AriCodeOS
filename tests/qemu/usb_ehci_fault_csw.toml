@@ -5,6 +5,9 @@
 # CLEAR_FEATURE(ENDPOINT_HALT) (USB 2.0 9.4.5), reads the CSW once more
 # (BOT 6.7.2), and when that stalls too runs the Reset Recovery (BOT
 # 5.3.4). The request answers Io; the next write succeeds.
+# `sleep 3000` provides the two idle seconds: the `repeat 10 ping` used
+# before lasted that long only while every line of its output took a
+# full repaint of the screen console (incident 0031).
 name = "usb.ehci_fault_csw"
 description = "EHCI driver: a real STALL on bulk IN is cleared per USB 2.0/BOT, the request answers Io and the next one succeeds"
 level = "full"
@@ -13,7 +16,7 @@ usb_ehci_storage = true
 cmdline = "qemu_exit shell usb_fault=idle:csw"
 timeout_secs = 120
 stdin = [
-    "repeat 10 ping 10.0.2.2",
+    "sleep 3000",
     "write probe.txt after idle",
     "repeat 3 ping 10.0.2.2",
     "write probe.txt second try",

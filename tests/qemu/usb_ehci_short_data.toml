@@ -7,6 +7,9 @@
 # at the transport boundary: the request answers Io with the count, the
 # fault is recorded, no Reset Recovery runs (the CSW was valid) and the
 # next write succeeds.
+# `sleep 3000` provides the two idle seconds: the `repeat 10 ping` used
+# before lasted that long only while every line of its output took a
+# full repaint of the screen console (incident 0031).
 name = "usb.ehci_short_data"
 description = "EHCI driver: a data stage one sector short is never a success; the request answers Io with the count, fault in diag, no recovery, the next write succeeds"
 level = "full"
@@ -15,7 +18,7 @@ usb_ehci_storage = true
 cmdline = "qemu_exit shell usb_fault=idle:short-data"
 timeout_secs = 120
 stdin = [
-    "repeat 10 ping 10.0.2.2",
+    "sleep 3000",
     "write probe.txt after idle",
     "repeat 3 ping 10.0.2.2",
     "write probe.txt second try",
