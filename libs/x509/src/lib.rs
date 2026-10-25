@@ -52,6 +52,9 @@ pub enum Error {
     /// A CA's nameConstraints do not allow a name of the leaf (RFC 5280
     /// 4.2.1.10).
     NameConstraint,
+    /// A certificate of the chain, or the root it ends at, has a key this
+    /// system no longer trusts (`roots::DISTRUSTED`, ADR 0054).
+    Distrusted,
 }
 
 /// The dNSName subtrees of a CA's nameConstraints extension.
@@ -172,6 +175,9 @@ pub struct Certificate<'a> {
     pub not_before: u64,
     pub not_after: u64,
     pub public_key: PublicKey<'a>,
+    /// The whole SubjectPublicKeyInfo (DER element): what
+    /// `roots::DISTRUSTED` names, by SHA-256.
+    pub spki: &'a [u8],
     /// basicConstraints cA and, if keyUsage is present, keyCertSign.
     pub is_ca: bool,
     /// basicConstraints pathLenConstraint.
@@ -376,9 +382,31 @@ pub fn verify_chain<'a>(
     host: &str,
     now: impl Into<ValidityTime>,
 ) -> Result<Certificate<'a>, Error> {
+    verify_chain_with(chain, roots, roots::DISTRUSTED, host, now)
+}
+
+/// Whether `spki` (a whole SubjectPublicKeyInfo) is one of `distrusted`
+/// (SHA-256 digests).
+fn is_distrusted(spki: &[u8], distrusted: &[[u8; 32]]) -> bool {
+    !distrusted.is_empty() && distrusted.contains(&aricode_crypto::sha256::sha256(spki))
+}
+
+/// [`verify_chain`] with an explicit list of distrusted keys: no
+/// certificate on the path, leaf, intermediate or root, may have one of
+/// them, whatever signed it (ADR 0054).
+pub fn verify_chain_with<'a>(
+    chain: &[&'a [u8]],
+    roots: &[&[u8]],
+    distrusted: &[[u8; 32]],
+    host: &str,
+    now: impl Into<ValidityTime>,
+) -> Result<Certificate<'a>, Error> {
     let now = now.into();
     let leaf_der = *chain.first().ok_or(Error::Malformed)?;
     let leaf = Certificate::parse(leaf_der)?;
+    if is_distrusted(leaf.spki, distrusted) {
+        return Err(Error::Distrusted);
+    }
     check_validity(leaf.not_before, leaf.not_after, now)?;
     if !matches_hostname(&leaf, host) {
         return Err(Error::NameMismatch);
@@ -406,6 +434,10 @@ pub fn verify_chain<'a>(
         };
         let mut error = Error::UnknownIssuer;
         for anchor in anchors.iter().filter(|a| a.subject == current.issuer) {
+            if is_distrusted(anchor.spki, distrusted) {
+                error = Error::Distrusted;
+                continue;
+            }
             if signed_by(&anchor.public_key) {
                 check_validity(anchor.not_before, anchor.not_after, now)?;
                 if !anchor.server_auth {
@@ -433,7 +465,9 @@ pub fn verify_chain<'a>(
             if candidate.subject != current.issuer {
                 continue;
             }
-            let outcome = if !signed_by(&candidate.public_key) {
+            let outcome = if is_distrusted(candidate.spki, distrusted) {
+                Err(Error::Distrusted)
+            } else if !signed_by(&candidate.public_key) {
                 Err(Error::BadSignature)
             } else if !candidate.is_ca
                 || candidate

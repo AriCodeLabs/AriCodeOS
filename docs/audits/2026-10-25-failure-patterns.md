@@ -75,7 +75,7 @@ of this document.
 | M9 | **Compositor window ids are global and unowned** [C-M5]: an app can poll another's keys or close its window; dead clients' windows are never reclaimed. | open |
 | M10 | **Certificate validity fails open without a clock** [D-M1]: no RTC (or a bad one) skips the time check. | open |
 | M11 | **Ed25519 signing is not constant time** [D-M2] (SSH host key). | open |
-| M12 | **No way to distrust a root or key** [D-M3] (the emSign case). | open |
+| M12 | **No way to distrust a root or key** [D-M3] (the emSign case). | fixed on `fix/tls-time-and-seed` (ADR 0054) |
 
 ### Low
 

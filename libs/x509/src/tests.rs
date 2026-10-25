@@ -826,3 +826,24 @@ fn certificates_are_checked_at_no_earlier_than_the_floor() {
     assert!(at(leaf.not_after).is_ok());
     assert_eq!(at(leaf.not_after + 1).err(), Some(Error::Expired));
 }
+
+#[test]
+fn distrusted_keys_are_refused_anywhere_in_the_chain() {
+    let spki = |der| aricode_crypto::sha256::sha256(Certificate::parse(der).unwrap().spki);
+    let chain = [RSA_LEAF, RSA_INT];
+    let host = "www.example.com";
+    verify_chain_with(&chain, &[RSA_ROOT], &[], host, Some(NOW)).unwrap();
+    // An unrelated key changes nothing.
+    verify_chain_with(&chain, &[RSA_ROOT], &[spki(EC_INT)], host, Some(NOW)).unwrap();
+    for distrusted in [RSA_LEAF, RSA_INT, RSA_ROOT] {
+        assert_eq!(
+            verify_chain_with(&chain, &[RSA_ROOT], &[spki(distrusted)], host, Some(NOW)).err(),
+            Some(Error::Distrusted)
+        );
+    }
+    // The default list is what verify_chain applies.
+    assert_eq!(
+        verify_chain(&chain, &[RSA_ROOT], host, Some(NOW)).is_ok(),
+        roots::DISTRUSTED.is_empty()
+    );
+}

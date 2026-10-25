@@ -50,7 +50,10 @@ Before the release branch is merged, raise `aricode_x509::TIME_FLOOR`
 (`libs/x509/src/lib.rs`) to the release day: no machine checks
 certificates at an earlier moment, so a certificate that expired before
 the release is refused even when the real-time clock is wrong (incident
-0036).
+0036). Check the week's certificate advisories too (webpki-roots,
+Mozilla's CA list): a key distrusted there goes into
+`aricode_x509::roots::DISTRUSTED` (`libs/x509/src/roots.rs`) with a comment
+naming the certificate and the advisory (ADR 0054).
 
 A release also feeds the public update source (ADR 0048): from the tagged
 commit, publish the release's system version with the release key and

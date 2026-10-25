@@ -63,6 +63,7 @@ pub(crate) struct Parsed<'a> {
     pub not_before: u64,
     pub not_after: u64,
     pub public_key: PublicKey<'a>,
+    pub spki: &'a [u8],
     pub is_ca: bool,
     pub max_path_len: Option<u32>,
     pub dns_names: Vec<&'a str>,
@@ -97,7 +98,8 @@ impl<'a> Parsed<'a> {
         let not_after = der::time(validity.any()?)?;
         validity.finish()?;
         let subject = r.expect_tlv(der::SEQUENCE)?;
-        let public_key = parse_public_key(r.expect(der::SEQUENCE)?)?;
+        let spki = r.expect_tlv(der::SEQUENCE)?;
+        let public_key = parse_public_key(spki.value)?;
         r.optional(0x81)?; // issuerUniqueID
         r.optional(0x82)?; // subjectUniqueID
         let mut parsed = Parsed {
@@ -109,6 +111,7 @@ impl<'a> Parsed<'a> {
             not_before,
             not_after,
             public_key,
+            spki: spki.raw,
             is_ca: false,
             digital_signature: true,
             server_auth: true,
@@ -239,6 +242,7 @@ impl<'a> Certificate<'a> {
             not_before: p.not_before,
             not_after: p.not_after,
             public_key: p.public_key,
+            spki: p.spki,
             is_ca: p.is_ca,
             max_path_len: p.max_path_len,
             dns_names: p.dns_names,
