@@ -8,6 +8,9 @@
 # driver must reject the count before reading a field, record the fault,
 # answer Io, run the Reset Recovery from the idle loop, and serve the next
 # write.
+# `sleep 3000` provides the two idle seconds: the `repeat 10 ping` used
+# before lasted that long only while every line of its output took a
+# full repaint of the screen console (incident 0031).
 name = "usb.short_csw"
 description = "usbd: an 8-byte CSW is invalid (BOT 5.2), never a success; the request answers Io, Reset Recovery follows and the next write succeeds"
 level = "full"
@@ -16,7 +19,7 @@ usb_storage = true
 cmdline = "qemu_exit shell usb_fault=idle:short-csw"
 timeout_secs = 90
 stdin = [
-    "repeat 10 ping 10.0.2.2",
+    "sleep 3000",
     "write probe.txt after idle",
     "repeat 3 ping 10.0.2.2",
     "write probe.txt second try",

@@ -4,7 +4,10 @@
 # before any recovery command, the fault is recorded, and init does not
 # restart the driver. The shell is driven over the serial console (the USB
 # keyboard is gone): `diag` lists the fault and `shutdown` ends the run.
-# The pings only keep the shell busy until the host has typed the key.
+# `sleep 3000` keeps the shell busy until the host has typed the key
+# (QMP, some 0.2 s after CONSOLE_BRIDGE_READY) and usbd has halted, so
+# `diag` comes after the fault; the `repeat 10 ping` used before lasted
+# long enough only while the screen console was slow (incident 0031).
 # No virtio keyboard and mouse (`usb_hid_only_input`): otherwise QMP input
 # goes to the virtio keyboard, the most recently activated handler.
 name = "strict.usb_hid_halt"
@@ -15,7 +18,7 @@ cmdline = "qemu_exit shell strict usb_fault=1:hid"
 usb_hid = true
 usb_hid_only_input = true
 timeout_secs = 120
-stdin = ["repeat 10 ping 10.0.2.2", "diag", "shutdown"]
+stdin = ["sleep 3000", "diag", "shutdown"]
 
 [host_input]
 marker = "CONSOLE_BRIDGE_READY"
