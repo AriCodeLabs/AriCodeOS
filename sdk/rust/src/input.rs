@@ -136,6 +136,10 @@ pub struct EventQueue {
     len: usize,
     dropped: u64,
     waiting: Option<(Handle, u64)>,
+    /// Replies not delivered because their reader was gone, and whether
+    /// the first was told (`first_gone_reader`).
+    gone: u64,
+    gone_told: bool,
 }
 
 impl Default for EventQueue {
@@ -159,6 +163,8 @@ impl EventQueue {
             len: 0,
             dropped: 0,
             waiting: None,
+            gone: 0,
+            gone_told: false,
         }
     }
 
@@ -179,6 +185,15 @@ impl EventQueue {
     /// Events dropped so far because the queue was full.
     pub fn dropped(&self) -> u64 {
         self.dropped
+    }
+
+    /// `true` once: after the first time events could not be delivered
+    /// because their reader was gone (they stayed queued), for the driver
+    /// to say so.
+    pub fn first_gone_reader(&mut self) -> bool {
+        let first = self.gone > 0 && !self.gone_told;
+        self.gone_told |= first;
+        first
     }
 
     /// When the waiting read ends without events, if one waits.
@@ -241,6 +256,8 @@ impl EventQueue {
         if send(reply_to, &Reply::events(&events[..n], &times[..n])) {
             self.head = (self.head + n) % QUEUE_LEN;
             self.len -= n;
+        } else {
+            self.gone += 1;
         }
     }
 }
@@ -352,6 +369,8 @@ mod tests {
         q.settle_with(5, &mut dead.send());
         assert_eq!(dead.got[0], (7, Status::Ok, 2));
         assert_eq!((q.len, q.deadline()), (2, None));
+        assert!(q.first_gone_reader());
+        assert!(!q.first_gone_reader());
         let mut next = Reader::new(true);
         q.read_with(Handle(9), 10_000, 7, &mut next.send());
         assert_eq!(next.got[0], (9, Status::Ok, 2));

@@ -24,9 +24,10 @@ const MAX_INPUTS: usize = 4;
 /// longest a driver allows: a bridge that died holds a driver's one
 /// waiting place no longer.
 const READ_MS: u32 = MAX_READ_MS;
-/// How often the bridge looks for a read whose driver died holding it: its
-/// reply endpoint closes, which a wait on several endpoints does not
-/// report while the others are open (ADR 0036).
+/// The longest wait: after every wait, so at least this often, the bridge
+/// looks for a read whose driver died holding it: its reply endpoint
+/// closes, which a wait on several endpoints does not report while the
+/// others are open (ADR 0036).
 const CHECK_MS: u64 = 1_000;
 /// Pause before reading again from a driver that died holding the read
 /// (ADR 0030): its supervisor relaunches it on the same endpoint.
@@ -63,6 +64,8 @@ fn main(count: u64) -> u64 {
     }
     // The reply endpoint of each device's outstanding read.
     let mut pending: [Option<Handle>; MAX_INPUTS] = [None; MAX_INPUTS];
+    // Devices whose service answered busy: their next read waits a round.
+    let mut backoff = [false; MAX_INPUTS];
     // One keyboard state per device: shift and lock state belong to it.
     let mut keyboards = [Keyboard::new(); MAX_INPUTS];
     let mut buf = Buffers {
@@ -83,6 +86,13 @@ fn main(count: u64) -> u64 {
         for (i, slot) in clients.iter_mut().take(count).enumerate() {
             let Some(client) = slot else { continue };
             if pending[i].is_some() {
+                continue;
+            }
+            // A busy service is asked again only after a pause: the wait
+            // below is short, and the other devices are not held up.
+            if backoff[i] {
+                backoff[i] = false;
+                retry = true;
                 continue;
             }
             match client.start_read(READ_MS) {
@@ -119,51 +129,77 @@ fn main(count: u64) -> u64 {
             continue;
         }
         let wait = if retry { RETRY_MS } else { CHECK_MS };
-        match sys::ipc_receive_any(&set[..n_set], &mut msg, &mut none, wait) {
-            Ok((which, len, nh)) => {
-                let i = owner[which];
-                if let Some(reply) = pending[i].take() {
-                    let _ = sys::handle_close(reply);
-                }
-                if deliver(&mut keyboards[i], &msg[..len], &none[..nh], &mut buf).is_err() {
+        let mut lost = false;
+        if let Ok((which, len, nh)) = sys::ipc_receive_any(&set[..n_set], &mut msg, &mut none, wait)
+        {
+            let i = owner[which];
+            match finish(
+                &mut pending[i],
+                &mut keyboards[i],
+                &msg[..len],
+                &none[..nh],
+                &mut buf,
+            ) {
+                Ok(busy) => backoff[i] = busy,
+                Err(_) => {
                     say(b"console rejects input; exiting");
                     return 3;
                 }
             }
-            // Nothing within the wait, or every read's driver gone: look
-            // for reads whose driver died holding them (their reply
-            // endpoint closed) and start those again after a pause. A
-            // reply that arrives in the meantime is delivered like any
-            // other.
-            Err(_) => {
-                let mut lost = false;
-                for (i, p) in pending.iter_mut().enumerate() {
-                    let Some(reply) = *p else { continue };
-                    match sys::ipc_receive(reply, &mut msg, &mut none, 0) {
-                        Ok((len, nh)) => {
-                            let _ = sys::handle_close(reply);
-                            *p = None;
-                            if deliver(&mut keyboards[i], &msg[..len], &none[..nh], &mut buf)
-                                .is_err()
-                            {
-                                say(b"console rejects input; exiting");
-                                return 3;
-                            }
+        }
+        // Whatever ended the wait, every other outstanding read is looked at
+        // without waiting: a reply already there is delivered, and a read
+        // whose driver died holding it (its reply endpoint closed, which a
+        // wait on several endpoints does not report while the others are
+        // open, ADR 0036) is started again after a pause. Looking only when
+        // the wait times out would miss a dead keyboard for as long as the
+        // mouse keeps moving.
+        for i in 0..MAX_INPUTS {
+            let Some(reply) = pending[i] else { continue };
+            match sys::ipc_receive(reply, &mut msg, &mut none, 0) {
+                Ok((len, nh)) => {
+                    match finish(
+                        &mut pending[i],
+                        &mut keyboards[i],
+                        &msg[..len],
+                        &none[..nh],
+                        &mut buf,
+                    ) {
+                        Ok(busy) => backoff[i] = busy,
+                        Err(_) => {
+                            say(b"console rejects input; exiting");
+                            return 3;
                         }
-                        Err(sys::Error::PeerClosed) => {
-                            let _ = sys::handle_close(reply);
-                            *p = None;
-                            lost = true;
-                        }
-                        Err(_) => {}
                     }
                 }
-                if lost {
-                    sys::thread_sleep(RETRY_MS);
+                Err(sys::Error::PeerClosed) => {
+                    let _ = sys::handle_close(reply);
+                    pending[i] = None;
+                    lost = true;
                 }
+                Err(_) => {}
             }
         }
+        if lost {
+            sys::thread_sleep(RETRY_MS);
+        }
     }
+}
+
+/// Ends a device's outstanding read with its reply: closes the reply
+/// endpoint and delivers the reply. `Ok(true)`: the service was busy
+/// (another reader holds its one place), so the next read waits a round.
+fn finish(
+    pending: &mut Option<Handle>,
+    keyboard: &mut Keyboard,
+    msg: &[u8],
+    handles: &[Handle],
+    buf: &mut Buffers,
+) -> Result<bool, sys::Error> {
+    if let Some(reply) = pending.take() {
+        let _ = sys::handle_close(reply);
+    }
+    deliver(keyboard, msg, handles, buf)
 }
 
 /// Room to decode one read reply.
@@ -176,26 +212,23 @@ struct Buffers {
 
 /// Handles one read reply of a device: closes any handles it carried and
 /// injects its keys. No events (the read timed out): nothing to translate;
-/// the read starts again. A busy service (another reader holds its one
-/// place) is asked again only after a pause.
+/// the read starts again. `Ok(true)`: the service was busy.
 fn deliver(
     keyboard: &mut Keyboard,
     msg: &[u8],
     handles: &[Handle],
     buf: &mut Buffers,
-) -> Result<(), sys::Error> {
+) -> Result<bool, sys::Error> {
     for h in handles {
         let _ = sys::handle_close(*h);
     }
     let n = match InputClient::read_reply(msg, &mut buf.events, &mut buf.times) {
         Ok(n) => n,
-        Err(InputError::Status(Status::Busy)) => {
-            sys::thread_sleep(RETRY_MS);
-            0
-        }
+        Err(InputError::Status(Status::Busy)) => return Ok(true),
         Err(_) => 0,
     };
-    inject(keyboard, &buf.events[..n], &mut buf.text)
+    inject(keyboard, &buf.events[..n], &mut buf.text)?;
+    Ok(false)
 }
 
 /// Translates a device's key events into console text and injects it.

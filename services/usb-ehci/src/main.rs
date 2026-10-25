@@ -485,6 +485,12 @@ struct Step {
     on_short: OnShort,
 }
 
+fn tell_gone_reader(queue: &mut EventQueue) {
+    if queue.first_gone_reader() {
+        say(b"a reader died with its read waiting; its events wait for the next read");
+    }
+}
+
 /// Queues `ev` for the input client; when full the oldest event is
 /// dropped, never silently: the first drop of the boot is printed.
 fn queue_event(queue: &mut EventQueue, ev: Event, at: u64) {
@@ -3536,6 +3542,7 @@ fn main(mask: u64) -> u64 {
                 }) => {
                     let now = ctl.now();
                     ctl.events.read(reply_to, timeout_ms, now);
+                    tell_gone_reader(&mut ctl.events);
                 }
                 None => answer(reply_to, Reply::status(Status::Invalid)),
             }
@@ -3549,6 +3556,7 @@ fn main(mask: u64) -> u64 {
         ctl.release_info();
         let now = ctl.now();
         ctl.events.settle(now);
+        tell_gone_reader(&mut ctl.events);
     }
 }
 

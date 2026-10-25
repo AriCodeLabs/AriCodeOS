@@ -131,6 +131,12 @@ struct Driver {
 }
 
 impl Driver {
+    fn tell_gone_reader(&mut self) {
+        if self.queue.first_gone_reader() {
+            say(b"a reader died with its read waiting; its events wait for the next read");
+        }
+    }
+
     /// Serves one request: the reply endpoint comes first; any other
     /// handle is closed.
     fn serve(&mut self, msg: &[u8], handles: &[Handle], now: u64) {
@@ -150,7 +156,10 @@ impl Driver {
             Some(Request {
                 op: Op::Read,
                 timeout_ms,
-            }) => self.queue.read(reply_to, timeout_ms, now),
+            }) => {
+                self.queue.read(reply_to, timeout_ms, now);
+                self.tell_gone_reader();
+            }
             None => answer(reply_to, Reply::status(Status::Invalid)),
         }
     }
@@ -212,6 +221,7 @@ fn main(mask: u64) -> u64 {
             drv.serve(&msg[..n], &handles[..nh], now);
         }
         drv.queue.settle(now);
+        drv.tell_gone_reader();
         let next = drv.queue.deadline().map_or(Deadline::NONE, Deadline::at);
         match wait::end_of_round(
             members.as_slice(),

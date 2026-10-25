@@ -4,7 +4,9 @@
 # queue and sent to the dead reader: lost. Here a reader starts a read on
 # each input service and dies before the console bridge starts; the host
 # then types, each key waiting for the shell's echo of the previous one, so
-# a lost key stops the scenario.
+# a lost key stops the scenario. The keyboard driver must say the first
+# key's events found the reader gone: the case was exercised, not avoided
+# by the dead read expiring first.
 name = "input.orphan_read"
 description = "input: a reader dies with its read waiting; the keys typed next still reach the shell through the console bridge"
 level = "full"
@@ -22,6 +24,7 @@ exit = 33
 serial_contains = [
     "input_orphan: read started; exiting with it waiting",
     "AriInit: console bridge with 2 input device(s)",
+    "virtio-input: a reader died with its read waiting; its events wait for the next read",
     "cpus: ",
     "ari> shutdown",
     "ARICODEOS_SHUTDOWN",

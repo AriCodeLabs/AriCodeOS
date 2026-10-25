@@ -825,6 +825,12 @@ impl Pending {
         }
     }
 
+    fn tell_gone_reader(&mut self) {
+        if self.queue.first_gone_reader() {
+            say(b"a reader died with its read waiting; its events wait for the next read");
+        }
+    }
+
     fn report_drops(&mut self) {
         let dropped = self.queue.dropped();
         if dropped > self.dropped_reported {
@@ -4252,6 +4258,7 @@ fn serve(ctl: &mut Controller, which: usize, msg: &[u8], handles: &[Handle], now
         }) => {
             ctl.pending.queue.read(reply_to, timeout_ms, now);
             ctl.pending.report_drops();
+            ctl.pending.tell_gone_reader();
         }
         None => answer(reply_to, Reply::status(Status::Invalid)),
     }
@@ -4465,7 +4472,7 @@ fn main(mask: u64) -> u64 {
         }
         let now = ctl.clock.now();
         ctl.pending.queue.settle(now);
-        ctl.pending.report_drops();
+        ctl.pending.tell_gone_reader();
         let mut next = Deadline::NONE;
         next.include_opt(ctl.pending.queue.deadline());
         next.include_opt(

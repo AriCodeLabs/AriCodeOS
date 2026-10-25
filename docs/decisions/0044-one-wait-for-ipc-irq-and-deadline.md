@@ -187,9 +187,11 @@ margin.
   every 8 ms only while devices or work need watching, and otherwise
   every 250 ms or at a client read's deadline: with nothing attached it no
   longer wakes every 8 ms on its own, though the console bridge's 20 ms
-  reads still wake it, about 30 times a second on the reference laptop
+  reads still woke it, about 30 times a second on the reference laptop
   instead of about 130; quiet idle there went from 994 to 996-997
-  permille. Its legacy interrupt pin stays unused: routing it needs the
+  permille. The same day the bridge moved to outstanding reads of up to
+  10 s, waited on at once, which no longer wake an idle driver (ADR 0013).
+  Its legacy interrupt pin stays unused: routing it needs the
   ACPI `_PRT`, which the kernel does not evaluate.) Device interrupts arrive on
   the boot CPU, as before.
 - Found by this change's suites and fixed in the same branch: usb-input

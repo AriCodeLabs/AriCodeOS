@@ -83,7 +83,7 @@ it (incident 0005).
    `aricode_cmdline::keys::TEST_ONLY` lists every key documented "Tests
    only" (`qemu_exit`, `test`, `init_fail_late`, `restart_storm`,
    `service_hang`, `input_restart`, `shell_fault`, `selftest`,
-   `usb_fault`; a unit test keeps the list and the documentation in
+   `usb_fault`, later `blk_fault`, `gui_trace` and `input_orphan`; a unit test keeps the list and the documentation in
    step), and `keys::LOADER_ONLY` the keys AriBoot
    adds itself (`boot_slot`, `boot_pending`); `cargo xtask usb-image
    --cmdline` refuses a line with any of them.

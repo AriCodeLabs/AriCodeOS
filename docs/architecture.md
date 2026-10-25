@@ -779,7 +779,8 @@ latter briefly to add the region.
   writes text into the same ring and requires `MANAGE` on the `Console`;
   only init has it (`0x10008` with `READ|MANAGE|DUPLICATE|TRANSFER`) and
   delegates it to the `console_bridge` service, which in `shell` mode without a compositor
-  polls the input services (virtio-input, USB HID) in turn and
+  keeps one read outstanding on each input service (virtio-input, USB HID),
+  waits on all their replies at once and
   translates keystrokes with `aricode_input::Keyboard`. It is one more supervised
   resident (`services --detail`); the `shell.usb_keyboard`
   and `shell.virtio_keyboard` scenarios type a session over QMP.
@@ -1011,7 +1012,10 @@ latter briefly to add the region.
   `1af4:1052` function with its own endpoint and `SYSTEM` as an extra.
 - `InputServiceProtocol v1`: `Info` (name) and `Read(timeout)` with up to
   4 events per reply; a single pending read per service
-  (`Busy` if there is another). `aricode-input::Keyboard` translates in the client,
+  (`Busy` if there is another), waiting at most `MAX_READ_MS` (10 s).
+  The drivers share `sys::input::EventQueue`: events leave it only once a
+  reply carrying them was delivered, so a reader that died with its read
+  waiting loses nobody's keys. `aricode-input::Keyboard` translates in the client,
   not in the driver: the driver does not decide the keyboard layout.
 - `inputd` and usbd collect the device's events, serve up to 8 requests
   and then wait once on their endpoints and the device's interrupt line
