@@ -1,0 +1,5 @@
+# Audit 2026-10-25 C, H1: tries to leave its private directory through a
+# session retired mid-request (`run fs_escape`).
+name = fs_escape
+caps = fs
+memory = 64K

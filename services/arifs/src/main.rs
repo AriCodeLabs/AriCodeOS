@@ -461,6 +461,12 @@ impl Service {
     fn handle(&mut self, owner: usize, req: Request, data: Option<Handle>) -> Reply {
         let mut qbuf = [0u8; 64];
         let session = self.session(owner);
+        // A client endpoint whose session is gone (retired, possibly by
+        // this very request's sweep) has no authority at all: never the
+        // main namespace's (audit 2026-10-25 C, H1; incident 0028).
+        if owner != 0 && session.is_none() {
+            return Reply::status(Status::Denied);
+        }
         // Read-only shared file: a single visible name and no operation
         // that writes (ADR 0016).
         if let Some(shared) = session.filter(|s| s.kind == Kind::ReadOnlyFile) {
@@ -577,6 +583,12 @@ impl Service {
                         // (`retire` abandons the transaction of a dead one).
                         if let Some(i) = s.owner.checked_sub(1) {
                             self.probe(i, now);
+                        }
+                        // The probe may have retired the requester itself
+                        // (its other file's transaction): nothing is
+                        // recorded for an owner that is gone.
+                        if owner != 0 && self.session(owner).is_none() {
+                            return Reply::status(Status::Denied);
                         }
                         if self.staging.is_some_and(|s| !s.abandoned(now)) {
                             return Reply::status(Status::Busy);
