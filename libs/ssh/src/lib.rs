@@ -191,7 +191,6 @@ pub fn ed25519_blob(public: &[u8; 32]) -> Vec<u8> {
     w.0
 }
 
-/// `SHA256:...` fingerprint of a host key, as `ssh` prints it.
 /// `name` as it may go to a log: printable ASCII kept, every other byte
 /// (newlines, escape sequences) as `?`, at most `out.len()` bytes. The user
 /// name of an authentication attempt comes from the network before anyone
@@ -205,6 +204,7 @@ pub fn log_safe<'a>(name: &[u8], out: &'a mut [u8; 32]) -> &'a [u8] {
     &out[..n]
 }
 
+/// `SHA256:...` fingerprint of a host key, as `ssh` prints it.
 pub fn fingerprint(public: &[u8; 32]) -> String {
     let digest = aricode_crypto::sha256::sha256(&ed25519_blob(public));
     let mut s = String::from("SHA256:");
@@ -288,6 +288,28 @@ impl Server {
 
     /// Processes bytes from the client.
     pub fn feed(
+        &mut self,
+        data: &[u8],
+        out: &mut Vec<u8>,
+        events: &mut Vec<Event>,
+    ) -> Result<(), Error> {
+        let r = self.feed_packets(data, out, events);
+        // The client hears why it is refused (KEY_EXCHANGE_FAILED or
+        // PROTOCOL_ERROR, RFC 4253 11.1), not just a closed connection
+        // (audit of incident 0035, M1).
+        match r {
+            Err(Error::Negotiation(m)) if self.phase != Phase::Closed => {
+                self.disconnect(3, m.as_bytes(), out)
+            }
+            Err(Error::Protocol(m)) if self.phase != Phase::Closed => {
+                self.disconnect(2, m.as_bytes(), out)
+            }
+            _ => {}
+        }
+        r
+    }
+
+    fn feed_packets(
         &mut self,
         data: &[u8],
         out: &mut Vec<u8>,
@@ -411,6 +433,13 @@ impl Server {
     // ------------------------------------------------------------ packets
 
     fn send_packet(&mut self, payload: &[u8], out: &mut Vec<u8>) {
+        // The nonce is the sequence number and keys are never exchanged
+        // again: past `MAX_PACKETS` nothing more is sent, whatever window
+        // the client granted (audit of incident 0035, L1).
+        if self.send_seq >= MAX_PACKETS {
+            self.phase = Phase::Closed;
+            return;
+        }
         // Block size 8; with the AEAD the length field is not counted.
         let base = if self.send.is_some() { 1 } else { 5 } + payload.len();
         let mut pad = 8 - base % 8;
@@ -460,9 +489,8 @@ impl Server {
         self.recv_seq = self.recv_seq.wrapping_add(1);
         // The ChaCha20 nonce is the sequence number and keys are never
         // exchanged again: a counter must never wrap (audit 2026-10-25 C,
-        // L10; D, L6). Both are checked here: a client always sends
-        // something (window adjustments) while output flows.
-        if self.recv_seq >= MAX_PACKETS || self.send_seq >= MAX_PACKETS {
+        // L10; D, L6). `send_packet` bounds the other direction.
+        if self.recv_seq >= MAX_PACKETS {
             return Err(Error::Protocol(
                 "too many packets without a key re-exchange",
             ));
@@ -604,8 +632,11 @@ impl Server {
 
     /// During the initial key exchange with strict KEX, only KEX messages
     /// are allowed (Terrapin mitigation).
+    /// Strict key exchange is required of every client, so it holds from
+    /// the first packet: only KEX messages until NEWKEYS (audit of incident
+    /// 0035, L4).
     fn in_strict_kex(&self) -> bool {
-        self.strict && self.phase == Phase::Kex
+        self.phase == Phase::Kex
     }
 
     fn negotiate(&mut self, r: &mut Reader) -> Result<(), Error> {
@@ -961,12 +992,17 @@ mod tests {
         s.start(&mut out);
         let mut input = b"SSH-2.0-test\r\n".to_vec();
         input.extend(client_kexinit(b"curve25519-sha256"));
+        out.clear();
         assert_eq!(
             s.feed(&input, &mut out, &mut ev),
             Err(Error::Negotiation(
                 "client does not offer strict key exchange (kex-strict-c-v00@openssh.com)"
             ))
         );
+        // The client is told: a DISCONNECT (plain, before NEWKEYS) with
+        // reason KEY_EXCHANGE_FAILED.
+        assert_eq!(out[5], msg::DISCONNECT);
+        assert_eq!(u32::from_be_bytes(out[6..10].try_into().unwrap()), 3);
         let mut s = Server::new([1; 32], [2; 32], Vec::new());
         s.start(&mut out);
         let mut input = b"SSH-2.0-test\r\n".to_vec();
