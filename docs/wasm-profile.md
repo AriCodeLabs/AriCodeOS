@@ -28,9 +28,18 @@ for the module.
   provides (4 pages, 256 KiB). `memory.grow` grows within that buffer and
   returns -1 if it does not fit.
 - Imports: functions only, and only from the `aricode` module.
-- Limits: 4096 locals per function, 1024 nested blocks, modules of up to
-  64 KiB (loaded by the runner), 64 nested calls, 16 Ki values on the stack
-  and 50 M steps per exported call.
+- Limits: 4096 locals per function and 16 Ki locals (parameters
+  included) across all active calls, 1000 parameters and 1000 results per
+  function type (the WebAssembly JavaScript API limits), 1024 nested
+  blocks, modules of up to 64 KiB (loaded by the runner), 64 nested calls,
+  16 Ki values on the stack and 50 M units of fuel per exported call.
+- Fuel counts work, not instructions: one unit per instruction, plus one
+  per 64 bytes that `memory.fill`, `memory.copy` and `memory.grow` touch,
+  per 8 values a branch or a return keeps or a call moves and zeroes as
+  locals, and per 64 value types `call_indirect` compares (incident 0042).
+- The parsed module (its block and `br_table` side tables included) and
+  the instance must fit the runner's heap: if they do not, the module fails
+  with `out of memory`, never a panic.
 
 ## Validation
 
@@ -93,7 +102,7 @@ interpreter's step counter does not count time spent inside an import.
 |---|---|
 | 3 | no `demo.wasm` |
 | 5 | module larger than 64 KiB |
-| 6 | malformed, unsupported or invalid module (the reason is printed) |
+| 6 | malformed, unsupported or invalid module (the reason is printed), or too large for the runner's memory |
 | 7 | unknown import |
 | 11 | missing or invalid manifest |
 | 12 | import not granted by the manifest |

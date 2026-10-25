@@ -6,30 +6,48 @@
 //! bounds, direct and indirect calls and function imports. No floating
 //! point (traps with `Unsupported`), no SIMD.
 //!
-//! The module is parsed once ([`Module::parse`]); execution
-//! ([`Instance::call`]) walks the code byte by byte with a bounded value
-//! stack and label stack. Every memory operation checks bounds: a hostile
-//! module can only fail, never escape its memory.
+//! The module is parsed and validated once ([`Module::parse`]), which also
+//! records where every block ends and what every `br_table` targets;
+//! execution ([`Instance::call`]) walks the code byte by byte with a
+//! bounded value stack and label stack. Every memory operation checks
+//! bounds: a hostile module can only fail, never escape its memory.
 //! Linear memory is supplied by the host as a `&mut [u8]` (in the
 //! system, a DMA buffer bounded by the application's quota).
+//!
+//! Fuel counts work, not instructions: every instruction costs one unit
+//! and an instruction whose work grows with an operand (bulk memory, values
+//! a branch or a return keeps, locals zeroed by a call) costs one more unit
+//! per [`WORK_BYTES`] bytes it touches, so run time stays proportional to
+//! the fuel spent (incident 0042). Allocation failures are errors, never
+//! panics: the host program's heap is small (`wasm_runner`: 256 KiB).
 
 #![no_std]
 
 extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
 mod validate;
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-pub use validate::validate;
+use validate::validate;
 
 pub const PAGE: usize = 65536;
 /// Maximum depth of nested calls.
 pub const MAX_CALL_DEPTH: usize = 64;
 /// Values on the operand stack, in total.
 pub const MAX_STACK: usize = 16 * 1024;
-/// Execution steps per `call` invocation (against infinite loops).
+/// Locals (parameters included) of all active calls, in total.
+pub const MAX_LOCALS: usize = 16 * 1024;
+/// Parameters, and results, of a function type (the limits of the
+/// WebAssembly JavaScript API): bounds the work of validating and running
+/// a block, a call or a branch.
+pub const MAX_ARITY: usize = 1000;
+/// Fuel per `call` invocation (against infinite loops), in units of work:
+/// one per instruction plus one per [`WORK_BYTES`] bytes of variable work.
 pub const MAX_STEPS: u64 = 50_000_000;
+/// Bytes moved, zeroed or compared that cost one unit of fuel.
+pub const WORK_BYTES: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -40,8 +58,10 @@ pub enum Error {
     Unsupported(&'static str),
     /// Runtime trap: `unreachable`, division by zero, out-of-bounds memory access...
     Trap(&'static str),
+    /// Call depth, operand stack, locals or labels exhausted (also when the
+    /// heap cannot hold them).
     StackOverflow,
-    /// Too many steps.
+    /// Fuel exhausted ([`MAX_STEPS`]).
     Fuel,
     /// An import has no host.
     MissingImport,
@@ -50,6 +70,36 @@ pub enum Error {
     Invalid(&'static str),
     /// Export not found.
     NoExport,
+    /// The heap cannot hold the parsed module or its instance.
+    OutOfMemory,
+}
+
+/// `v.push(x)`, or `full` if the allocator cannot make room.
+fn try_push<T>(v: &mut Vec<T>, x: T, full: Error) -> Result<(), Error> {
+    if v.len() == v.capacity() {
+        v.try_reserve(1).map_err(|_| full)?;
+    }
+    v.push(x);
+    Ok(())
+}
+
+/// A copy of `bytes` on the heap, or `OutOfMemory`.
+fn try_to_vec(bytes: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(bytes.len())
+        .map_err(|_| Error::OutOfMemory)?;
+    v.extend_from_slice(bytes);
+    Ok(v)
+}
+
+/// Fuel for `bytes` bytes of variable work.
+fn bytes_cost(bytes: usize) -> u64 {
+    (bytes / WORK_BYTES) as u64
+}
+
+/// Fuel for moving or zeroing `n` values.
+fn values_cost(n: usize) -> u64 {
+    bytes_cost(n.saturating_mul(core::mem::size_of::<Value>()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,57 +128,98 @@ pub struct Import {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct Export {
-    pub name_start: usize,
-    pub name_len: usize,
-    pub kind: u8,
-    pub index: u32,
+struct Export {
+    name_start: usize,
+    name_len: usize,
+    kind: u8,
+    index: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct Function {
+struct Function {
     /// Index of the function in the function space (imported ones first).
-    pub index: u32,
-    pub type_index: u32,
+    index: u32,
+    type_index: u32,
     /// Declared locals (without parameters).
-    pub locals: u32,
+    locals: u32,
     /// Position of the locals declaration (types) inside the module.
-    pub locals_decl: usize,
+    locals_decl: usize,
     /// Range of the body (instructions) inside the module.
-    pub code_start: usize,
-    pub code_end: usize,
+    code_start: usize,
+    code_end: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct Global {
-    pub ty: ValType,
-    pub mutable: bool,
-    pub init: Value,
+struct Global {
+    ty: ValType,
+    mutable: bool,
+    init: Value,
     /// Type of the initializer constant (must match `ty`).
-    pub init_ty: ValType,
+    init_ty: ValType,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct DataSegment {
-    pub offset: u32,
-    pub start: usize,
-    pub len: usize,
+struct DataSegment {
+    offset: u32,
+    start: usize,
+    len: usize,
 }
 
-/// Parsed module; keeps a reference to the original bytes.
+/// Where a `block` or an `if` ends: positions in the module, after its
+/// type, after its `else` (0: none) and after its `end`. 12 bytes per
+/// block (audit 2026-10-25 of incident 0042, M1).
+#[derive(Debug, Clone, Copy)]
+struct BlockEnds {
+    start: u32,
+    else_pos: u32,
+    end: u32,
+}
+
+/// A `br_table` (position after its opcode): its `n` label depths and
+/// then the default are `br_depths[first..=first + n]`.
+#[derive(Debug, Clone, Copy)]
+struct BrTable {
+    pos: u32,
+    first: u32,
+    n: u32,
+}
+
+/// What the validator records so execution never decodes code it does
+/// not run: shared by every instance of the module. Entries are in code
+/// order, found by binary search.
+#[derive(Default)]
+struct SideTables {
+    blocks: Vec<BlockEnds>,
+    br_tables: Vec<BrTable>,
+    /// Label depths, below `MAX_NESTING + 1`.
+    br_depths: Vec<u16>,
+}
+
+/// Parsed and validated module; keeps a reference to the original bytes.
+/// Read-only once parsed: instances rely on what validation checked.
 pub struct Module<'a> {
     bytes: &'a [u8],
-    pub types: Vec<FuncType>,
-    pub imports: Vec<Import>,
-    pub functions: Vec<Function>,
-    pub table: Vec<Option<u32>>,
+    types: Vec<FuncType>,
+    imports: Vec<Import>,
+    functions: Vec<Function>,
+    table: Vec<Option<u32>>,
     /// Declared table limits (minimum, maximum), if there is a table.
-    pub table_limits: Option<(u32, Option<u32>)>,
-    pub memory_pages: Option<(u32, Option<u32>)>,
-    pub globals: Vec<Global>,
-    pub exports: Vec<Export>,
-    pub data: Vec<DataSegment>,
-    pub start: Option<u32>,
+    table_limits: Option<(u32, Option<u32>)>,
+    memory_pages: Option<(u32, Option<u32>)>,
+    globals: Vec<Global>,
+    exports: Vec<Export>,
+    data: Vec<DataSegment>,
+    start: Option<u32>,
+    side: SideTables,
+}
+
+/// Bytes of the module read (tests: execution reads the instructions it
+/// runs, not the code around them).
+#[cfg(test)]
+mod meter {
+    std::thread_local! {
+        pub static CODE_READS: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+    }
 }
 
 struct Reader<'a> {
@@ -141,6 +232,8 @@ impl<'a> Reader<'a> {
         Self { b, pos }
     }
     fn u8(&mut self) -> Result<u8, Error> {
+        #[cfg(test)]
+        meter::CODE_READS.with(|c| c.set(c.get() + 1));
         let v = *self
             .b
             .get(self.pos)
@@ -202,6 +295,8 @@ impl<'a> Reader<'a> {
         }
     }
     fn bytes(&mut self, n: usize) -> Result<&'a [u8], Error> {
+        #[cfg(test)]
+        meter::CODE_READS.with(|c| c.set(c.get() + n as u64));
         let s = self
             .b
             .get(self.pos..self.pos.checked_add(n).ok_or(Error::Malformed("length"))?)
@@ -254,6 +349,11 @@ impl<'a> Module<'a> {
         if bytes.len() < 8 || &bytes[..4] != b"\0asm" || bytes[4..8] != [1, 0, 0, 0] {
             return Err(Error::Malformed("header"));
         }
+        // Side tables keep positions as u32.
+        if u32::try_from(bytes.len()).is_err() {
+            return Err(Error::Unsupported("module larger than 4 GiB"));
+        }
+        let oom = Error::OutOfMemory;
         let mut m = Module {
             bytes,
             types: Vec::new(),
@@ -266,6 +366,7 @@ impl<'a> Module<'a> {
             exports: Vec::new(),
             data: Vec::new(),
             start: None,
+            side: SideTables::default(),
         };
         let mut func_types: Vec<u32> = Vec::new();
         let mut r = Reader::new(bytes, 8);
@@ -285,33 +386,26 @@ impl<'a> Module<'a> {
                         if s.u8()? != 0x60 {
                             return Err(Error::Malformed("function type"));
                         }
-                        let np = s.u32()?;
-                        let mut params = Vec::new();
-                        for _ in 0..np {
-                            params.push(s.valtype()?);
-                        }
-                        let nr = s.u32()?;
-                        let mut results = Vec::new();
-                        for _ in 0..nr {
-                            results.push(s.valtype()?);
-                        }
-                        m.types.push(FuncType { params, results });
+                        let params = valtypes(&mut s)?;
+                        let results = valtypes(&mut s)?;
+                        try_push(&mut m.types, FuncType { params, results }, oom)?;
                     }
                 }
                 2 => {
                     for _ in 0..s.u32()? {
                         let ml = s.u32()? as usize;
-                        let module = s.bytes(ml)?.to_vec();
+                        let module = try_to_vec(s.bytes(ml)?)?;
                         let nl = s.u32()? as usize;
-                        let name = s.bytes(nl)?.to_vec();
+                        let name = try_to_vec(s.bytes(nl)?)?;
                         match s.u8()? {
                             0 => {
                                 let type_index = s.u32()?;
-                                m.imports.push(Import {
+                                let import = Import {
                                     module,
                                     name,
                                     type_index,
-                                });
+                                };
+                                try_push(&mut m.imports, import, oom)?;
                             }
                             _ => return Err(Error::Unsupported("non-function import")),
                         }
@@ -319,7 +413,7 @@ impl<'a> Module<'a> {
                 }
                 3 => {
                     for _ in 0..s.u32()? {
-                        func_types.push(s.u32()?);
+                        try_push(&mut func_types, s.u32()?, oom)?;
                     }
                 }
                 4 => {
@@ -333,7 +427,9 @@ impl<'a> Module<'a> {
                         if min > 4096 {
                             return Err(Error::Unsupported("large table"));
                         }
-                        m.table = alloc::vec![None; min as usize];
+                        m.table.clear();
+                        m.table.try_reserve_exact(min as usize).map_err(|_| oom)?;
+                        m.table.resize(min as usize, None);
                         m.table_limits = Some((min, max));
                     }
                 }
@@ -350,12 +446,13 @@ impl<'a> Module<'a> {
                         let ty = s.valtype()?;
                         let mutable = s.u8()? == 1;
                         let (init_ty, init) = const_expr_typed(&mut s)?;
-                        m.globals.push(Global {
+                        let global = Global {
                             ty,
                             mutable,
                             init,
                             init_ty,
-                        });
+                        };
+                        try_push(&mut m.globals, global, oom)?;
                     }
                 }
                 7 => {
@@ -365,12 +462,13 @@ impl<'a> Module<'a> {
                         s.bytes(name_len)?;
                         let kind = s.u8()?;
                         let index = s.u32()?;
-                        m.exports.push(Export {
+                        let export = Export {
                             name_start,
                             name_len,
                             kind,
                             index,
-                        });
+                        };
+                        try_push(&mut m.exports, export, oom)?;
                     }
                 }
                 8 => m.start = Some(s.u32()?),
@@ -420,14 +518,15 @@ impl<'a> Module<'a> {
                         if locals > 4096 {
                             return Err(Error::Unsupported("too many locals"));
                         }
-                        m.functions.push(Function {
+                        let function = Function {
                             index,
                             type_index,
                             locals,
                             locals_decl: body_start,
                             code_start: s.pos,
                             code_end: body_end,
-                        });
+                        };
+                        try_push(&mut m.functions, function, oom)?;
                         s.pos = body_end;
                     }
                 }
@@ -445,7 +544,7 @@ impl<'a> Module<'a> {
                         let len = s.u32()? as usize;
                         let start = s.pos;
                         s.bytes(len)?;
-                        m.data.push(DataSegment { offset, start, len });
+                        try_push(&mut m.data, DataSegment { offset, start, len }, oom)?;
                     }
                 }
                 12 => {} // data count
@@ -456,11 +555,21 @@ impl<'a> Module<'a> {
         if func_types.len() != m.functions.len() {
             return Err(Error::Malformed("missing bodies"));
         }
-        validate(&m)?;
+        m.side = validate(&m)?;
         Ok(m)
     }
 
-    pub fn export_name(&self, e: &Export) -> &'a [u8] {
+    /// Function types, by index.
+    pub fn types(&self) -> &[FuncType] {
+        &self.types
+    }
+
+    /// Imported functions, in function-index order.
+    pub fn imports(&self) -> &[Import] {
+        &self.imports
+    }
+
+    fn export_name(&self, e: &Export) -> &'a [u8] {
         &self.bytes[e.name_start..e.name_start + e.name_len]
     }
 
@@ -489,6 +598,46 @@ impl<'a> Module<'a> {
     pub fn initial_pages(&self) -> u32 {
         self.memory_pages.map(|(min, _)| min).unwrap_or(0)
     }
+
+    /// The `block` or `if` whose code starts at `start` (after its type).
+    fn block(&self, start: usize) -> Result<BlockEnds, Error> {
+        let blocks = &self.side.blocks;
+        blocks
+            .binary_search_by_key(&(start as u32), |b| b.start)
+            .map(|i| blocks[i])
+            .map_err(|_| Error::Malformed("block without end"))
+    }
+
+    /// Label depth chosen by `index` in the `br_table` at `pos` (after its
+    /// opcode): the default when `index` is past its labels.
+    fn br_depth(&self, pos: usize, index: u32) -> Result<u32, Error> {
+        let tables = &self.side.br_tables;
+        let t = tables
+            .binary_search_by_key(&(pos as u32), |t| t.pos)
+            .map(|i| tables[i])
+            .map_err(|_| Error::Malformed("br_table"))?;
+        let at = t.first as usize + index.min(t.n) as usize;
+        self.side
+            .br_depths
+            .get(at)
+            .map(|&d| d as u32)
+            .ok_or(Error::Malformed("br_table"))
+    }
+}
+
+/// A count and that many value types (params or results of a function
+/// type), at most [`MAX_ARITY`].
+fn valtypes(r: &mut Reader) -> Result<Vec<ValType>, Error> {
+    let n = r.u32()? as usize;
+    if n > MAX_ARITY {
+        return Err(Error::Unsupported("too many params or results"));
+    }
+    let mut types = Vec::new();
+    types.try_reserve_exact(n).map_err(|_| Error::OutOfMemory)?;
+    for _ in 0..n {
+        types.push(r.valtype()?);
+    }
+    Ok(types)
 }
 
 /// Functions the host offers the module. `call(import index,
@@ -498,10 +647,10 @@ pub trait Host {
 }
 
 struct Label {
-    /// Position of the instruction after the `end` (or of the `else`).
-    end: usize,
-    /// `loop`: jump to the start.
-    loop_start: Option<usize>,
+    /// Where a `br` goes: after the `end`, or the start of a `loop`; the
+    /// `else` of an `if` also jumps there.
+    target: usize,
+    is_loop: bool,
     /// Stack height on entry (without the block parameters).
     height: usize,
     /// Values the block leaves when exiting through `br`.
@@ -527,19 +676,10 @@ pub struct Instance<'m, 'a> {
     stack: Vec<Value>,
     labels: Vec<Label>,
     memory_pages: u32,
-    /// Where each block of a function already entered ends: block start
-    /// (after its type) -> (`else` position, position after `end`). Built
-    /// for a whole function the first time one of its blocks is entered, so
-    /// entering a block costs a lookup, not a scan of its body (audit
-    /// 2026-10-25 B, L5: fuel counts instructions, and a rescan per entry
-    /// let a small fuel budget run for a long time).
-    blocks: BTreeMap<usize, (Option<usize>, usize)>,
-    /// Functions whose blocks are in `blocks`.
-    mapped: Vec<u32>,
-    /// Code bytes read to find where blocks end (tests: bounded by the
-    /// code size, not by how often blocks are entered).
-    #[cfg(test)]
-    scanned: core::cell::Cell<usize>,
+    /// Fuel spent by the current call ([`MAX_STEPS`]).
+    steps: u64,
+    /// Fuel per call: `MAX_STEPS` (tests lower it).
+    fuel: u64,
 }
 
 impl<'m, 'a> Instance<'m, 'a> {
@@ -563,16 +703,19 @@ impl<'m, 'a> Instance<'m, 'a> {
                 .ok_or(Error::Trap("data segment out of memory"))?;
             dst.copy_from_slice(&module.bytes[d.start..d.start + d.len]);
         }
+        let mut globals = Vec::new();
+        globals
+            .try_reserve_exact(module.globals.len())
+            .map_err(|_| Error::OutOfMemory)?;
+        globals.extend(module.globals.iter().map(|g| g.init));
         Ok(Self {
             module,
-            globals: module.globals.iter().map(|g| g.init).collect(),
+            globals,
             stack: Vec::new(),
             labels: Vec::new(),
             memory_pages: pages,
-            blocks: BTreeMap::new(),
-            mapped: Vec::new(),
-            #[cfg(test)]
-            scanned: core::cell::Cell::new(0),
+            steps: 0,
+            fuel: MAX_STEPS,
         })
     }
 
@@ -616,11 +759,15 @@ impl<'m, 'a> Instance<'m, 'a> {
     ) -> Result<Value, Error> {
         self.stack.clear();
         self.labels.clear();
+        self.steps = 0;
         let ty = self.module.function_type(index)?;
         if ty.params.len() != args.len() {
             return Err(Error::OutOfRange);
         }
         let results = ty.results.len();
+        self.stack
+            .try_reserve(args.len())
+            .map_err(|_| Error::StackOverflow)?;
         self.stack.extend_from_slice(args);
         self.run(index, memory, host)?;
         Ok(if results > 0 {
@@ -634,7 +781,20 @@ impl<'m, 'a> Instance<'m, 'a> {
         if self.stack.len() >= MAX_STACK {
             return Err(Error::StackOverflow);
         }
-        self.stack.push(v);
+        try_push(&mut self.stack, v, Error::StackOverflow)
+    }
+
+    fn push_label(&mut self, l: Label) -> Result<(), Error> {
+        try_push(&mut self.labels, l, Error::StackOverflow)
+    }
+
+    /// Spends `units` of fuel: every operation charges in proportion to its
+    /// work before doing it.
+    fn charge(&mut self, units: u64) -> Result<(), Error> {
+        self.steps = self.steps.saturating_add(units);
+        if self.steps > self.fuel {
+            return Err(Error::Fuel);
+        }
         Ok(())
     }
 
@@ -644,58 +804,6 @@ impl<'m, 'a> Instance<'m, 'a> {
 
     fn pop32(&mut self) -> Result<u32, Error> {
         self.pop().map(|v| v as u32)
-    }
-
-    /// The block starting at `pc` (after its opcode and type) of `func`:
-    /// (position of the `else` if any, position after `end`).
-    fn block_end(&mut self, func: &Function, pc: usize) -> Result<(Option<usize>, usize), Error> {
-        if !self.mapped.contains(&func.index) {
-            self.map_blocks(func)?;
-            self.mapped.push(func.index);
-        }
-        self.blocks
-            .get(&pc)
-            .copied()
-            .ok_or(Error::Malformed("block without end"))
-    }
-
-    /// Records where every block of `func` ends, in one pass over its body.
-    fn map_blocks(&mut self, func: &Function) -> Result<(), Error> {
-        let code = &self.module.bytes[..func.code_end];
-        // Open blocks: (start after the type, `else` position).
-        let mut open: Vec<(usize, Option<usize>)> = Vec::new();
-        let mut pc = func.code_start;
-        while pc < code.len() {
-            #[cfg(test)]
-            self.scanned.set(self.scanned.get() + 1);
-            let op = code[pc];
-            pc += 1;
-            let mut r = Reader::new(code, pc);
-            match op {
-                0x02..=0x04 => {
-                    skip_blocktype(&mut r)?;
-                    open.push((r.pos, None));
-                }
-                0x05 => {
-                    if let Some(top) = open.last_mut() {
-                        top.1 = Some(r.pos);
-                    }
-                }
-                // The function's own `end` closes no block.
-                0x0B => {
-                    if let Some((start, else_pos)) = open.pop() {
-                        self.blocks.insert(start, (else_pos, r.pos));
-                    }
-                }
-                _ => skip_immediates(op, &mut r)?,
-            }
-            pc = r.pos;
-        }
-        if open.is_empty() {
-            Ok(())
-        } else {
-            Err(Error::Malformed("block without end"))
-        }
     }
 
     fn branch(&mut self, depth: u32, frame_labels_base: usize) -> Result<Option<usize>, Error> {
@@ -709,17 +817,12 @@ impl<'m, 'a> Instance<'m, 'a> {
         }
         let (target, height, arity, is_loop, params) = {
             let l = &self.labels[idx];
-            (
-                l.loop_start.unwrap_or(l.end),
-                l.height,
-                l.arity,
-                l.loop_start.is_some(),
-                l.params,
-            )
+            (l.target, l.height, l.arity, l.is_loop, l.params)
         };
         // Keep the block's output values (or the parameters of the
         // `loop`, which re-enters) and discard the rest.
         let keep = if is_loop { params } else { arity };
+        self.charge(values_cost(keep))?;
         let len = self.stack.len();
         if len < height + keep {
             return Err(Error::Trap("stack too short in br"));
@@ -739,8 +842,11 @@ impl<'m, 'a> Instance<'m, 'a> {
         let module = self.module;
         let n_imports = module.imports.len();
         let mut frames: Vec<Frame> = Vec::new();
+        // Reserved whole: a call never allocates a frame.
+        frames
+            .try_reserve_exact(MAX_CALL_DEPTH)
+            .map_err(|_| Error::StackOverflow)?;
         let mut locals: Vec<Value> = Vec::new();
-        let mut steps = 0u64;
 
         // Entering a function: parameters already on the stack.
         let enter = |this: &mut Self,
@@ -760,20 +866,30 @@ impl<'m, 'a> Instance<'m, 'a> {
             if this.stack.len() < nparams {
                 return Err(Error::Trap("missing arguments"));
             }
+            // Parameters move and declared locals start at zero: work
+            // that grows with them.
+            let frame_locals = nparams + f.locals as usize;
+            if locals.len() + frame_locals > MAX_LOCALS {
+                return Err(Error::StackOverflow);
+            }
+            this.charge(values_cost(frame_locals))?;
+            locals
+                .try_reserve(frame_locals)
+                .map_err(|_| Error::StackOverflow)?;
             let locals_base = locals.len();
             let args_start = this.stack.len() - nparams;
             locals.extend_from_slice(&this.stack[args_start..]);
             this.stack.truncate(args_start);
-            locals.resize(locals_base + nparams + f.locals as usize, 0);
+            locals.resize(locals_base + frame_locals, 0);
             let labels_base = this.labels.len();
             // Implicit function label: a `br` to it is a `return`.
-            this.labels.push(Label {
-                end: f.code_end,
-                loop_start: None,
+            this.push_label(Label {
+                target: f.code_end,
+                is_loop: false,
                 height: this.stack.len(),
                 arity: ty.results.len(),
                 params: 0,
-            });
+            })?;
             frames.push(Frame {
                 func: index as usize - n_imports,
                 pc: f.code_start,
@@ -795,9 +911,10 @@ impl<'m, 'a> Instance<'m, 'a> {
             if this.stack.len() < n {
                 return Err(Error::Trap("missing arguments"));
             }
-            let args: Vec<Value> = this.stack.split_off(this.stack.len() - n);
+            let args_start = this.stack.len() - n;
             let active = this.memory_len().min(memory.len());
-            let result = host.call(import, &args, &mut memory[..active])?;
+            let result = host.call(import, &this.stack[args_start..], &mut memory[..active])?;
+            this.stack.truncate(args_start);
             if !ty.results.is_empty() {
                 this.push(result)?;
             }
@@ -821,49 +938,51 @@ impl<'m, 'a> Instance<'m, 'a> {
                 self.finish_frame(&fr, &mut locals)?;
                 continue;
             }
-            steps += 1;
-            if steps > MAX_STEPS {
-                return Err(Error::Fuel);
-            }
-            let op = code[frame.pc];
-            let mut r = Reader::new(code, frame.pc + 1);
+            let pc = frame.pc;
             let frame_labels_base = frame.labels_base;
             let locals_base = frame.locals_base;
+            self.charge(1)?;
+            let mut r = Reader::new(code, pc);
+            let op = r.u8()?;
             let mut next_pc: Option<usize> = None;
             match op {
                 0x00 => return Err(Error::Trap("unreachable")),
                 0x01 => {}
                 0x02 | 0x03 => {
-                    let arity = block_arity(&mut r, module)?;
-                    let (_, end) = self.block_end(&func, r.pos)?;
-                    let start = r.pos;
-                    self.labels.push(Label {
-                        end,
-                        loop_start: (op == 0x03).then_some(start),
-                        height: self.stack.len() - arity.0,
-                        arity: arity.1,
-                        params: arity.0,
-                    });
+                    let (params, results) = block_arity(&mut r, module)?;
+                    let is_loop = op == 0x03;
+                    let target = if is_loop {
+                        r.pos
+                    } else {
+                        module.block(r.pos)?.end as usize
+                    };
+                    self.push_label(Label {
+                        target,
+                        is_loop,
+                        height: self.stack.len() - params,
+                        arity: results,
+                        params,
+                    })?;
                 }
                 0x04 => {
-                    let arity = block_arity(&mut r, module)?;
-                    let (else_pos, end) = self.block_end(&func, r.pos)?;
+                    let (params, results) = block_arity(&mut r, module)?;
+                    let block = module.block(r.pos)?;
+                    let end = block.end as usize;
                     let cond = self.pop32()?;
-                    self.labels.push(Label {
-                        end,
-                        loop_start: None,
-                        height: self.stack.len() - arity.0,
-                        arity: arity.1,
-                        params: arity.0,
-                    });
+                    if cond != 0 || block.else_pos != 0 {
+                        self.push_label(Label {
+                            target: end,
+                            is_loop: false,
+                            height: self.stack.len() - params,
+                            arity: results,
+                            params,
+                        })?;
+                    }
                     if cond == 0 {
-                        match else_pos {
-                            Some(p) => next_pc = Some(p),
-                            None => {
-                                self.labels.pop();
-                                next_pc = Some(end);
-                            }
-                        }
+                        next_pc = Some(match block.else_pos {
+                            0 => end,
+                            p => p as usize,
+                        });
                     }
                 }
                 0x05 => {
@@ -872,7 +991,7 @@ impl<'m, 'a> Instance<'m, 'a> {
                         .labels
                         .pop()
                         .ok_or(Error::Malformed("else without block"))?;
-                    next_pc = Some(l.end);
+                    next_pc = Some(l.target);
                 }
                 0x0B => {
                     if self.labels.len() == frame_labels_base + 1 {
@@ -905,17 +1024,10 @@ impl<'m, 'a> Instance<'m, 'a> {
                     }
                 }
                 0x0E => {
-                    let n = r.u32()? as usize;
-                    let mut chosen = None;
-                    let idx = self.pop32()? as usize;
-                    for i in 0..n {
-                        let d = r.u32()?;
-                        if i == idx {
-                            chosen = Some(d);
-                        }
-                    }
-                    let default = r.u32()?;
-                    let depth = chosen.unwrap_or(default);
+                    // The validator decoded its labels: picking one reads
+                    // none of them (audit H1).
+                    let index = self.pop32()?;
+                    let depth = module.br_depth(r.pos, index)?;
                     next_pc = self.branch_or_return(depth, frame_labels_base)?;
                     if next_pc.is_none() {
                         let fr = frames.pop().unwrap();
@@ -952,6 +1064,8 @@ impl<'m, 'a> Instance<'m, 'a> {
                         .types
                         .get(type_index as usize)
                         .ok_or(Error::OutOfRange)?;
+                    // Comparing the types is work that grows with them.
+                    self.charge(bytes_cost(expected.params.len() + expected.results.len()))?;
                     if module.function_type(index)? != expected {
                         return Err(Error::Trap("call_indirect: type mismatch"));
                     }
@@ -1033,6 +1147,7 @@ impl<'m, 'a> Instance<'m, 'a> {
                         .unwrap_or(u32::MAX) as u64;
                     if new * PAGE as u64 <= memory.len() as u64 && new <= max {
                         // New pages start zeroed.
+                        self.charge(bytes_cost(delta as usize * PAGE))?;
                         memory[old as usize * PAGE..new as usize * PAGE].fill(0);
                         self.memory_pages = new as u32;
                         self.push(old as u64)?;
@@ -1102,6 +1217,7 @@ impl<'m, 'a> Instance<'m, 'a> {
                         if end_src > active || end_dst > active {
                             return Err(Error::Trap("out-of-bounds memory access"));
                         }
+                        self.charge(bytes_cost(n))?;
                         memory.copy_within(src..end_src, dst);
                     }
                     11 => {
@@ -1113,6 +1229,7 @@ impl<'m, 'a> Instance<'m, 'a> {
                         if end > self.memory_len() {
                             return Err(Error::Trap("out-of-bounds memory access"));
                         }
+                        self.charge(bytes_cost(n))?;
                         memory[dst..end].fill(v);
                     }
                     _ => return Err(Error::Unsupported("0xFC prefix")),
@@ -1148,6 +1265,7 @@ impl<'m, 'a> Instance<'m, 'a> {
         if len < fr.stack_base + fr.results {
             return Err(Error::Trap("not enough results"));
         }
+        self.charge(values_cost(fr.results))?;
         let from = len - fr.results;
         self.stack.copy_within(from..len, fr.stack_base);
         self.stack.truncate(fr.stack_base + fr.results);
@@ -1652,13 +1770,37 @@ mod tests {
         assert_eq!(run(&b.build(), "sum", &[1]), Ok(0));
     }
 
+    /// One call with `fuel` units: its result, the fuel it spent, the code
+    /// bytes it read and global 0 at the end (the tests' modules count
+    /// their own loop passes there).
+    struct Metered {
+        result: Result<Value, Error>,
+        steps: u64,
+        reads: u64,
+        counter: Value,
+    }
+
+    fn metered(wasm: &[u8], name: &str, args: &[Value], fuel: u64) -> Metered {
+        let m = Module::parse(wasm).unwrap();
+        let mut mem = vec![0u8; PAGE];
+        let mut inst = Instance::new(&m, &mut mem).unwrap();
+        inst.fuel = fuel;
+        let before = meter::CODE_READS.with(|c| c.get());
+        let result = inst.call(name, args, &mut mem, &mut NoHost);
+        Metered {
+            result,
+            steps: inst.steps,
+            reads: meter::CODE_READS.with(|c| c.get()) - before,
+            counter: inst.global(0).unwrap_or(0),
+        }
+    }
+
     #[test]
     fn entering_a_block_costs_no_scan_of_its_body() {
         // loop { block { 4000 x nop } ; i += 1 ; br_if i < n }: each pass
         // enters the block, whose end lies 4000 instructions further on.
-        // Fuel counts instructions, so finding that end again on every
-        // entry would make the time per unit of fuel grow with the body
-        // (audit 2026-10-25 B, L5).
+        // Finding that end again on every entry would read about twice the
+        // bytes of the instructions run (audit 2026-10-25 B, L5).
         let mut b = Builder::new();
         let t = b.ty(&[0x7F], &[0x7F]);
         let mut code = vec![0x03, 0x40, 0x02, 0x40];
@@ -1672,23 +1814,212 @@ mod tests {
         ]);
         let f = b.func(t, 1, &code);
         b.export("f", f);
-        let wasm = b.build();
-        let m = Module::parse(&wasm).unwrap();
-        let mut mem = vec![0u8; PAGE];
-        let mut inst = Instance::new(&m, &mut mem).unwrap();
-        struct NoHost;
-        impl Host for NoHost {
-            fn call(&mut self, _: usize, _: &[Value], _: &mut [u8]) -> Result<Value, Error> {
-                Err(Error::Trap("no host"))
-            }
-        }
-        assert_eq!(inst.call("f", &[200], &mut mem, &mut NoHost), Ok(200));
+        let run = metered(&b.build(), "f", &[200], MAX_STEPS);
+        assert_eq!(run.result, Ok(200));
         assert!(
-            inst.scanned.get() <= 2 * code.len(),
-            "{} instructions read to find block ends in {} bytes of code",
-            inst.scanned.get(),
-            code.len()
+            run.reads < run.steps + run.steps / 4,
+            "{} code bytes read for {} units of fuel",
+            run.reads,
+            run.steps
         );
+    }
+
+    #[test]
+    fn block_table_is_compact_and_built_by_validation() {
+        // The largest module the runner loads (64 KiB) with a body of
+        // nothing but blocks: one 12-byte entry per block, reserved once
+        // (audit M1: a map of ~63 B per block did not fit the runner's
+        // 256 KiB heap and panicked it).
+        let mut b = Builder::new();
+        let t = b.ty(&[], &[0x7F]);
+        let mut code = Vec::new();
+        let mut opened = 0;
+        while code.len() < 64 * 1024 - 100 {
+            // Every tenth one an `if` with an `else` (on 0: runs the `else`).
+            if opened % 10 == 0 {
+                code.extend_from_slice(&[0x41, 0, 0x04, 0x40, 0x05, 0x0B]);
+            } else {
+                code.extend_from_slice(&[0x02, 0x40, 0x0B]);
+            }
+            opened += 1;
+        }
+        code.extend_from_slice(&[0x41, 7]);
+        let f = b.func(t, 0, &code);
+        b.export("f", f);
+        let wasm = b.build();
+        assert!(wasm.len() <= 64 * 1024, "{} bytes", wasm.len());
+        let m = Module::parse(&wasm).unwrap();
+        assert_eq!(m.side.blocks.len(), opened);
+        assert_eq!(m.side.blocks.capacity(), opened, "reserved exactly");
+        assert_eq!(core::mem::size_of::<BlockEnds>(), 12);
+        assert!(m.side.blocks.len() * 12 <= 4 * wasm.len());
+        // Instances share the table; running reads only what runs.
+        for _ in 0..2 {
+            let run = metered(&wasm, "f", &[], MAX_STEPS);
+            assert_eq!(run.result, Ok(7));
+            assert!(run.reads <= wasm.len() as u64, "{} bytes read", run.reads);
+        }
+    }
+
+    #[test]
+    fn br_table_picks_a_label_without_decoding_the_others() {
+        // loop { block { br_table [0; 60000] 0 (index a) } ; g += 1 ; br 0 }
+        // Decoding the labels on every pass cost 60000 reads for one unit
+        // of fuel (audit H1).
+        let mut b = Builder::new();
+        let t = b.ty(&[0x7F], &[]);
+        b.globals.push((0x7F, true, 0));
+        let n = 60_000u32;
+        let mut code = vec![0x03, 0x40, 0x02, 0x40, 0x20, 0, 0x0E];
+        leb(n, &mut code);
+        code.extend(core::iter::repeat_n(0, n as usize + 1));
+        code.extend_from_slice(&[0x0B, 0x23, 0, 0x41, 1, 0x6A, 0x24, 0, 0x0C, 0, 0x0B]);
+        let f = b.func(t, 0, &code);
+        b.export("f", f);
+        let wasm = b.build();
+        for index in [0, 59_999, 70_000] {
+            let run = metered(&wasm, "f", &[index], 100_000);
+            assert_eq!(run.result, Err(Error::Fuel));
+            assert!(run.counter > 1000, "{} passes", run.counter);
+            assert!(run.reads <= 4 * run.steps, "{} reads", run.reads);
+        }
+    }
+
+    #[test]
+    fn br_table_with_multibyte_labels_and_default() {
+        // As in `br_table_globals_and_indirect_calls`, with labels encoded
+        // in two and three bytes (0x80 0x00 is 0): the side table holds
+        // the decoded depths.
+        let mut b = Builder::new();
+        let t = b.ty(&[0x7F], &[0x7F]);
+        let code = [
+            0x02, 0x7F, 0x02, 0x40, 0x02, 0x40, 0x02, 0x40, 0x20, 0, 0x0E, 2, 0x80, 0x00, 0x81,
+            0x00, 0x82, 0x80, 0x00, 0x0B, 0x41, 0xE4, 0x00, 0x0C, 2, 0x0B, 0x41, 0xC8, 0x01, 0x0C,
+            1, 0x0B, 0x41, 0xAC, 0x02, 0x0B,
+        ];
+        let sw = b.func(t, 0, &code);
+        b.export("sw", sw);
+        let wasm = b.build();
+        assert_eq!(run(&wasm, "sw", &[0]), Ok(100));
+        assert_eq!(run(&wasm, "sw", &[1]), Ok(200));
+        assert_eq!(run(&wasm, "sw", &[2]), Ok(300));
+        assert_eq!(run(&wasm, "sw", &[u32::MAX as u64]), Ok(300));
+    }
+
+    #[test]
+    fn bulk_memory_costs_fuel_by_length() {
+        // loop { memory.fill/copy of the whole page ; g += 1 ; br 0 }: one
+        // unit of fuel used to fill 64 KiB (audit M2).
+        for op in [&[0xFC, 11, 0][..], &[0xFC, 10, 0, 0][..]] {
+            let mut b = Builder::new();
+            let t = b.ty(&[], &[]);
+            b.globals.push((0x7F, true, 0));
+            let mut code = vec![0x03, 0x40, 0x41, 0, 0x41, 0, 0x41, 0x80, 0x80, 0x04];
+            code.extend_from_slice(op);
+            code.extend_from_slice(&[0x23, 0, 0x41, 1, 0x6A, 0x24, 0, 0x0C, 0, 0x0B]);
+            let f = b.func(t, 0, &code);
+            b.export("f", f);
+            let fuel = 100_000;
+            let run = metered(&b.build(), "f", &[], fuel);
+            assert_eq!(run.result, Err(Error::Fuel));
+            let bytes = run.counter * PAGE as u64;
+            assert!(run.counter >= 1);
+            assert!(
+                bytes / WORK_BYTES as u64 <= fuel,
+                "{bytes} bytes for {fuel} units"
+            );
+        }
+    }
+
+    #[test]
+    fn branch_keeping_many_values_costs_fuel_by_them() {
+        // 1000 values ; loop (param i32 x 1000) { g += 1 ; br 0 }: each `br`
+        // keeps the loop's 1000 parameters (audit M3).
+        let mut b = Builder::new();
+        let t = b.ty(&[], &[]);
+        let wide = b.ty(&[0x7F; 1000], &[]);
+        b.globals.push((0x7F, true, 0));
+        let mut code = Vec::new();
+        for _ in 0..1000 {
+            code.extend_from_slice(&[0x41, 0]);
+        }
+        code.extend_from_slice(&[0x03, wide as u8]);
+        code.extend_from_slice(&[0x23, 0, 0x41, 1, 0x6A, 0x24, 0, 0x0C, 0, 0x0B]);
+        let f = b.func(t, 0, &code);
+        b.export("f", f);
+        let fuel = 100_000;
+        let run = metered(&b.build(), "f", &[], fuel);
+        assert_eq!(run.result, Err(Error::Fuel));
+        assert!(run.counter >= 1);
+        assert!(
+            values_cost(run.counter as usize * 1000) <= fuel,
+            "{} passes",
+            run.counter
+        );
+    }
+
+    #[test]
+    fn calls_pay_for_their_locals_and_locals_are_bounded() {
+        // g += 1 ; call self, with 4096 locals: the locals of all frames
+        // are bounded (audit L2: 64 frames x 4096 locals reached 2 MiB).
+        let mut b = Builder::new();
+        let t = b.ty(&[], &[]);
+        b.globals.push((0x7F, true, 0));
+        let deep = b.func(t, 4096, &[0x23, 0, 0x41, 1, 0x6A, 0x24, 0, 0x10, 0]);
+        b.export("deep", deep);
+        let wide = b.func(t, 4096, &[0x23, 0, 0x41, 1, 0x6A, 0x24, 0]);
+        // loop { call wide ; br 0 }
+        let caller = b.func(t, 0, &[0x03, 0x40, 0x10, wide as u8, 0x0C, 0, 0x0B]);
+        b.export("caller", caller);
+        let wasm = b.build();
+        let run = metered(&wasm, "deep", &[], MAX_STEPS);
+        assert_eq!(run.result, Err(Error::StackOverflow));
+        assert!(
+            run.counter as usize <= MAX_LOCALS / 4096,
+            "{} frames",
+            run.counter
+        );
+        // Zeroing 4096 locals costs fuel on every call.
+        let fuel = 100_000;
+        let run = metered(&wasm, "caller", &[], fuel);
+        assert_eq!(run.result, Err(Error::Fuel));
+        assert!(run.counter >= 1);
+        assert!(values_cost(run.counter as usize * 4096) <= fuel);
+    }
+
+    #[test]
+    fn validating_br_table_checks_each_label_depth_once() {
+        // block (result i32 x 1000) { block (result i32 x 1000) {
+        //   unreachable ; br_table [0 1 0 1 ...; 20000] 0 } }: checking
+        // every label cost labels x arity (audit L3).
+        let mut b = Builder::new();
+        let wide = b.ty(&[], &[0x7F; 1000]);
+        let mut code = vec![0x02, wide as u8, 0x02, wide as u8, 0x00, 0x41, 0, 0x0E];
+        leb(20_000, &mut code);
+        for i in 0..=20_000 {
+            code.push((i % 2) as u8);
+        }
+        code.extend_from_slice(&[0x0B, 0x0B]);
+        let f = b.func(wide, 0, &code);
+        b.export("f", f);
+        let wasm = b.build();
+        validate::meter::TYPE_CHECKS.with(|c| c.set(0));
+        assert!(Module::parse(&wasm).is_ok());
+        let checks = validate::meter::TYPE_CHECKS.with(|c| c.get());
+        assert!(checks < 20_000, "{checks} type checks");
+    }
+
+    #[test]
+    fn function_types_are_bounded() {
+        let mut b = Builder::new();
+        b.ty(&[0x7F; MAX_ARITY + 1], &[]);
+        assert_eq!(
+            Module::parse(&b.build()).err(),
+            Some(Error::Unsupported("too many params or results"))
+        );
+        let mut b = Builder::new();
+        b.ty(&[], &[0x7E; MAX_ARITY]);
+        assert!(Module::parse(&b.build()).is_ok());
     }
 
     #[test]

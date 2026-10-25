@@ -214,6 +214,7 @@ fn describe(e: Error) -> &'static str {
         Error::Fuel => "too many steps",
         Error::MissingImport => "unknown import",
         Error::NoExport => "no main export",
+        Error::OutOfMemory => "module too large for the runner's memory",
     }
 }
 
@@ -330,7 +331,7 @@ fn main(arg: u64) -> u64 {
         }
     };
     let mut imports = Vec::new();
-    for imp in &module.imports {
+    for imp in module.imports() {
         let api = if imp.module == b"aricode" {
             Api::by_name(&imp.name)
         } else {
@@ -356,7 +357,7 @@ fn main(arg: u64) -> u64 {
             return 12;
         }
         let (params, results) = api.signature();
-        let declared = module.types.get(imp.type_index as usize);
+        let declared = module.types().get(imp.type_index as usize);
         if !declared.is_some_and(|ty| same_signature(ty, params, results)) {
             sys::print(b"wasm_runner: import aricode.");
             sys::print(&imp.name);
