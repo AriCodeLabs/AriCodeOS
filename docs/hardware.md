@@ -92,7 +92,7 @@ The test clients (`fs_client`, `blk_client`, `net_client`, `tcp_client`,
 the QEMU scenarios: `cargo xtask usb-image --cmdline` refuses it, like
 every other test-only key (`qemu_exit`, `test=`, `usb_fault`, `blk_fault`,
 `restart_storm`, `service_hang`, `init_fail_late`, `input_restart`,
-`input_orphan`, `shell_fault`, `fsd_fault`, `gui_trace`) and the keys AriBoot adds itself (`boot_slot`,
+`input_orphan`, `shell_fault`, `fsd_fault`, `pci_fault`, `gui_trace`) and the keys AriBoot adds itself (`boot_slot`,
 `boot_pending`). If a stick's
 `cmdline.txt` is edited by hand to carry it, the screen says `AriInit:
 selftest: running the test-only boot checks` and the boot stops at
