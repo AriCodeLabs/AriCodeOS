@@ -35,7 +35,16 @@ pub enum GptError {
     BadEntriesCrc,
     Truncated,
     Unsupported,
+    /// A partition that ends before it starts.
+    BadEntry,
 }
+
+/// Most entries a table may declare: the specification's minimum is 128,
+/// and every tool writes 128. The count is read from the disk and sizes
+/// the table read: unbounded, a crafted stick made the loader allocate
+/// about 512 GiB and abort, so the machine did not boot (audit 2026-10-25
+/// B, M1).
+pub const MAX_ENTRIES: u32 = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
@@ -67,7 +76,7 @@ impl Header {
             return Err(GptError::BadSignature);
         }
         let header_len = u32_at(sector, 12) as usize;
-        if header_len < 92 || header_len > sector.len() {
+        if header_len < 92 || header_len > sector.len().min(SECTOR) {
             return Err(GptError::Truncated);
         }
         let stored = u32_at(sector, 16);
@@ -81,6 +90,10 @@ impl Header {
         if entry_len as usize != ENTRY_LEN {
             return Err(GptError::Unsupported);
         }
+        let entry_count = u32_at(sector, 80);
+        if entry_count == 0 || entry_count > MAX_ENTRIES {
+            return Err(GptError::Unsupported);
+        }
         let mut disk_guid = [0u8; 16];
         disk_guid.copy_from_slice(&sector[56..72]);
         Ok(Self {
@@ -90,7 +103,7 @@ impl Header {
             last_usable: u64_at(sector, 48),
             disk_guid,
             entries_lba: u64_at(sector, 72),
-            entry_count: u32_at(sector, 80),
+            entry_count,
             entry_len,
             entries_crc: u32_at(sector, 88),
         })
@@ -117,6 +130,8 @@ impl Partition {
     pub fn name_str(&self) -> &str {
         core::str::from_utf8(&self.name[..self.name_len]).unwrap_or("?")
     }
+    /// Its length; `partitions` never yields one that ends before it
+    /// starts.
     pub fn sectors(&self) -> u64 {
         self.last_lba - self.first_lba + 1
     }
@@ -143,11 +158,15 @@ pub fn partitions(
         if n >= out.len() {
             break;
         }
+        let (first_lba, last_lba) = (u64_at(e, 32), u64_at(e, 40));
+        if last_lba < first_lba {
+            return Err(GptError::BadEntry);
+        }
         let mut p = Partition {
             type_guid: e[..16].try_into().unwrap(),
             guid: e[16..32].try_into().unwrap(),
-            first_lba: u64_at(e, 32),
-            last_lba: u64_at(e, 40),
+            first_lba,
+            last_lba,
             name: [0; 36],
             name_len: 0,
         };
@@ -259,6 +278,53 @@ pub fn write_disk_with_guid(
 mod tests {
     extern crate std;
     use super::*;
+
+    /// A header sector with `entry_count` and a valid CRC.
+    fn header_with(entry_count: u32) -> [u8; SECTOR] {
+        let mut s = [0u8; SECTOR];
+        s[..8].copy_from_slice(SIGNATURE);
+        s[12..16].copy_from_slice(&92u32.to_le_bytes());
+        s[72..80].copy_from_slice(&2u64.to_le_bytes());
+        s[80..84].copy_from_slice(&entry_count.to_le_bytes());
+        s[84..88].copy_from_slice(&(ENTRY_LEN as u32).to_le_bytes());
+        let crc = crc32(&s[..92]);
+        s[16..20].copy_from_slice(&crc.to_le_bytes());
+        s
+    }
+
+    /// Audit 2026-10-25 B, M1: the entry count sizes an allocation in the
+    /// loader, init and the updater.
+    #[test]
+    fn entry_count_is_bounded() {
+        assert_eq!(
+            Header::parse(&header_with(128)).unwrap().entries_bytes(),
+            128 * 128
+        );
+        assert_eq!(Header::parse(&header_with(MAX_ENTRIES)).map(|_| ()), Ok(()));
+        for bad in [0, MAX_ENTRIES + 1, 0xFFFF_FFFF] {
+            assert_eq!(
+                Header::parse(&header_with(bad)).err(),
+                Some(GptError::Unsupported),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_partition_ending_before_it_starts_is_refused() {
+        let mut h = Header::parse(&header_with(4)).unwrap();
+        let mut table = [0u8; 4 * ENTRY_LEN];
+        table[0] = 1; // a type GUID: the entry is used
+        table[32..40].copy_from_slice(&100u64.to_le_bytes());
+        table[40..48].copy_from_slice(&99u64.to_le_bytes());
+        h.entries_crc = crc32(&table);
+        let mut out = [None; 4];
+        assert_eq!(partitions(&h, &table, &mut out), Err(GptError::BadEntry));
+        table[40..48].copy_from_slice(&100u64.to_le_bytes());
+        h.entries_crc = crc32(&table);
+        assert_eq!(partitions(&h, &table, &mut out), Ok(1));
+        assert_eq!(out[0].unwrap().sectors(), 1);
+    }
 
     #[test]
     fn crc32_known_vector() {

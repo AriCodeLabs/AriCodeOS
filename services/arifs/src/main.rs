@@ -81,18 +81,18 @@ impl BlockDevice for PartitionDevice {
     /// A whole batch in one request to the block service (stage 5).
     fn read_sectors(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), FsError> {
         let count = (buf.len() / SECTOR) as u16;
-        self.blk
-            .read(self.base_lba + lba, count)
-            .map_err(|_| FsError::Io)?;
+        // Checked: a forged entry's start must not wrap onto another
+        // partition (audit 2026-10-25 B, L1).
+        let at = self.base_lba.checked_add(lba).ok_or(FsError::Io)?;
+        self.blk.read(at, count).map_err(|_| FsError::Io)?;
         buf.copy_from_slice(&self.blk.buffer()[..buf.len()]);
         Ok(())
     }
     fn write_sectors(&mut self, lba: u64, buf: &[u8]) -> Result<(), FsError> {
         let count = (buf.len() / SECTOR) as u16;
+        let at = self.base_lba.checked_add(lba).ok_or(FsError::Io)?;
         self.blk.buffer()[..buf.len()].copy_from_slice(buf);
-        self.blk
-            .write(self.base_lba + lba, count)
-            .map_err(|_| FsError::Io)
+        self.blk.write(at, count).map_err(|_| FsError::Io)
     }
 }
 
