@@ -27,7 +27,7 @@ const SLOTS: u16 = 64;
 const EXIT_WAIT_FAILED: u64 = 10;
 /// Exit code when the device returned a buffer it never held (audit
 /// 2026-10-25 A, M1): init relaunches the driver, which resets it.
-const EXIT_DEVICE_LIED: u64 = 11;
+const EXIT_DEVICE_LIED: u64 = 50;
 
 fn say(msg: &[u8]) {
     sys::print(b"virtio-input: ");
@@ -45,7 +45,9 @@ struct Device {
 
 impl Device {
     fn setup(mask: u64) -> Result<Self, u64> {
-        let transport = Transport::open(mask, 0).map_err(|e| e.code())?;
+        // Select, subsel, size and the name's payload.
+        let transport =
+            Transport::open(mask, 0, CFG_PAYLOAD + MAX_NAME as u64).map_err(|e| e.code())?;
         // Device name.
         transport.device_cfg.w8(CFG_SELECT, CFG_ID_NAME);
         transport.device_cfg.w8(CFG_SUBSEL, 0);

@@ -58,7 +58,7 @@ fn faults() -> Result<u64, u64> {
 }
 
 fn main(mask: u64) -> u64 {
-    let transport = match Transport::open(mask, 0) {
+    let transport = match Transport::open(mask, 0, 0) {
         Ok(t) => t,
         Err(e) => return e.code(),
     };

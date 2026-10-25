@@ -187,7 +187,9 @@ impl Queue {
 impl Transport {
     /// Maps the structures and negotiates `VERSION_1 | wanted & offered`.
     /// Leaves the device in `FEATURES_OK`; queues and `driver_ok` remain to be done.
-    pub fn open(mask: u64, wanted: u64) -> Result<Self, SetupError> {
+    /// `device_cfg_len`: the bytes of device configuration the driver
+    /// accesses, which the device's structure must hold within its BAR.
+    pub fn open(mask: u64, wanted: u64, device_cfg_len: u64) -> Result<Self, SetupError> {
         let cfg_virt = sys::mmio_map(CFG).map_err(|_| SetupError::MapConfig)?;
         let mut cfg = [0u8; 256];
         for (i, b) in cfg.iter_mut().enumerate() {
@@ -224,7 +226,7 @@ impl Transport {
         };
         let common = structure(&common_s, common::LEN)?;
         let notify = structure(&notify_s, 2)?;
-        let device_cfg = structure(&device_s, 0)?;
+        let device_cfg = structure(&device_s, device_cfg_len)?;
         let mut transport = Self {
             common,
             notify,
@@ -301,6 +303,13 @@ impl Transport {
             .r16(common::QUEUE_SIZE)
             .min(max_size)
             .min(aricode_virtio::MAX_QUEUE_SIZE);
+        // A power of two (virtio 1.2, 2.7: split queues): the ring indexes
+        // are taken modulo the size and wrap at 2^16 (audit of incident
+        // 0033, L4).
+        let size = match size {
+            0 => 0,
+            n => 1 << (15 - n.leading_zeros()),
+        };
         if size == 0 {
             return Err(SetupError::QueueMissing);
         }

@@ -907,7 +907,7 @@ impl Controller {
 
         // The firmware may still own the controller (SMM):
         // ask it to hand it over before touching it.
-        bios_handoff(&base, &clock);
+        bios_handoff(&base, bar_len, &clock);
 
         // Stop and reset the controller.
         op.w32(op::USBCMD, op.r32(op::USBCMD) & !op::CMD_RUN);
@@ -4080,7 +4080,7 @@ impl Controller {
 /// capability): the OS requests ownership, waits for the firmware to
 /// release its own and turns off its SMIs. Without the capability (QEMU)
 /// there is nothing to do.
-fn bios_handoff(base: &Mmio, clock: &Clock) {
+fn bios_handoff(base: &Mmio, bar_len: u64, clock: &Clock) {
     const LEGACY_SUPPORT: u32 = 1;
     const BIOS_OWNED: u32 = 1 << 16;
     const OS_OWNED: u32 = 1 << 24;
@@ -4090,7 +4090,10 @@ fn bios_handoff(base: &Mmio, clock: &Clock) {
     const EVENTS: u32 = 0x7 << 29;
     let mut off = ((base.r32(cap::HCCPARAMS1) >> 16) & 0xFFFF) as u64 * 4;
     for _ in 0..32 {
-        if off == 0 {
+        // Each capability's two registers within BAR 0, past the
+        // capability registers, dword aligned: the controller chooses the
+        // offsets (audit of incident 0033, M1).
+        if off < 0x20 || !off.is_multiple_of(4) || off + 8 > bar_len {
             return;
         }
         let legsup = base.r32(off);

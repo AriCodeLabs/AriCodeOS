@@ -163,8 +163,6 @@ pub const MAX_QUEUE_SIZE: u16 = 64;
 pub enum UsedError {
     /// The id is not the head of a chain the device holds.
     NotInFlight(u32),
-    /// More bytes than the chain's device-writable buffers hold.
-    TooLong { head: u16, len: u32 },
 }
 
 /// A split virtqueue living in a DMA buffer mapped at `virt` with
@@ -190,6 +188,8 @@ pub struct Virtqueue {
     /// held head) and its device-writable bytes.
     held: [u16; MAX_QUEUE_SIZE as usize],
     writable: [u32; MAX_QUEUE_SIZE as usize],
+    /// Used elements whose length exceeded what their chain takes.
+    overlong: u32,
 }
 
 impl Virtqueue {
@@ -217,6 +217,7 @@ impl Virtqueue {
             next: [0; MAX_QUEUE_SIZE as usize],
             held: [0; MAX_QUEUE_SIZE as usize],
             writable: [0; MAX_QUEUE_SIZE as usize],
+            overlong: 0,
         };
         for i in 0..layout.size {
             q.next[i as usize] = i.wrapping_add(1);
@@ -311,8 +312,10 @@ impl Virtqueue {
     /// Next element consumed by the device: (head, bytes written).
     /// Returns the chain's descriptors to the free list, walking the
     /// queue's own links, never the device-writable table. `Err` if the
-    /// device names a chain it does not hold or writes more than the chain
-    /// takes: the driver resets the device.
+    /// device names a chain it does not hold: the driver resets the
+    /// device. A length past what the chain takes is cut to it and counted
+    /// (`overlong`): some devices report one wrongly, and it only sizes the
+    /// driver's copy.
     pub fn pop_used(&mut self) -> Result<Option<(u16, u32)>, UsedError> {
         if !self.has_used() {
             return Ok(None);
@@ -325,9 +328,13 @@ impl Virtqueue {
             Ok(h) if h < self.layout.size && self.held[h as usize] != 0 => h,
             _ => return Err(UsedError::NotInFlight(id)),
         };
-        if len > self.writable[head as usize] {
-            return Err(UsedError::TooLong { head, len });
-        }
+        let writable = self.writable[head as usize];
+        let len = if len > writable {
+            self.overlong = self.overlong.saturating_add(1);
+            writable
+        } else {
+            len
+        };
         self.last_used = self.last_used.wrapping_add(1);
         // The chain's descriptors in the order `add` linked them.
         let count = core::mem::take(&mut self.held[head as usize]);
@@ -339,6 +346,11 @@ impl Virtqueue {
         self.free_head = head;
         self.num_free += count;
         Ok(Some((head, len)))
+    }
+
+    /// Used elements so far whose length was cut to their chain's capacity.
+    pub fn overlong(&self) -> u32 {
+        self.overlong
     }
 
     pub fn num_free(&self) -> u16 {
@@ -520,17 +532,17 @@ mod tests {
         // Descriptor 1 is in the chain but no chain's head.
         device_returns(&b, &l, 0, 1, 1);
         assert_eq!(q.pop_used(), Err(UsedError::NotInFlight(1)));
-        device_returns(&b, &l, 0, head as u32, 513);
-        assert_eq!(q.pop_used(), Err(UsedError::TooLong { head, len: 513 }));
         // The device rewrites the chain's links into a cycle: the queue
-        // walks its own copy and terminates.
+        // walks its own copy and terminates. Its length past the chain's
+        // 512 writable bytes is cut to them.
         unsafe {
             let d1 = b.ptr.add(l.desc_offset + 16) as *mut Descriptor;
             (*d1).flags = DESC_NEXT;
             (*d1).next = 0;
         }
-        device_returns(&b, &l, 0, head as u32, 512);
+        device_returns(&b, &l, 0, head as u32, 513);
         assert_eq!(q.pop_used(), Ok(Some((head, 512))));
+        assert_eq!(q.overlong(), 1);
         assert_eq!(q.num_free(), 4);
         // The same id again: no longer held.
         device_returns(&b, &l, 1, head as u32, 1);

@@ -47,7 +47,8 @@ struct Nic {
 
 impl Nic {
     fn setup(mask: u64) -> Result<Self, u64> {
-        let transport = Transport::open(mask, FEATURE_MAC).map_err(|e| e.code())?;
+        // The MAC: the first 6 bytes of the device configuration.
+        let transport = Transport::open(mask, FEATURE_MAC, 6).map_err(|e| e.code())?;
         let mut mac = [0u8; 6];
         for (i, b) in mac.iter_mut().enumerate() {
             *b = transport.device_cfg.r8(i as u64);
