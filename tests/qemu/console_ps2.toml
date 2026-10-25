@@ -1,11 +1,14 @@
 # Phase 34: console of a laptop without a serial port. The host types "hola" +
 # Enter over QMP; with no inputd running QEMU delivers it to the i8042 PS/2 keyboard and
 # the kernel receives it via IRQ1 into the console ring.
-# The guest's own count (10 scancodes) is what proves delivery: the kernel
-# exits QEMU as soon as the last event (Enter released) arrives, so QMP's
-# reply to that event can be lost with the process ("[host] QMP: failed
-# after 9 events (Connection reset by peer)", incident 0019) and the host's
-# tally is not asserted. The test echoes each byte and the host types each
+# The guest's own count (10 scancodes: the keyboard's acknowledgement of
+# its set-up, then every byte up to the Enter press) is what proves
+# delivery. It is taken when the Enter press is decoded: taken when the
+# line was printed, it took in the Enter release or not depending on how
+# fast the console printed (incident 0031). The kernel exits QEMU right
+# after the line, so QMP's reply can be lost with the process
+# ("[host] QMP: failed after 9 events (Connection reset by peer)",
+# incident 0019) and the host's tally is not asserted. The test echoes each byte and the host types each
 # key after the echo of the previous one (`echo_prompt`, incident 0022):
 # QEMU's i8042 queues 16 bytes and drops the rest when the guest falls
 # behind.
