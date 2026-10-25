@@ -33,8 +33,13 @@ use aricode_rt::sys::{self, Error, Handle, TIMEOUT_INFINITE};
 use aricode_virtio::blk;
 
 /// How long a request may take before the device is considered not to
-/// complete it (ms).
-const REQUEST_TIMEOUT_MS: u64 = 2000;
+/// complete it (ms). 30 s, the window Linux gives SCSI and NVMe commands:
+/// a flush on a consumer SSD, or on a hypervisor host whose disk is busy,
+/// legitimately takes seconds, and 2 s turned such a request into a device
+/// reset and a failed request (incident 0043). The client's reply wait
+/// (`block::REPLY_WAIT_MS`, 90 s) covers one timeout, the reset and one
+/// queued request.
+const REQUEST_TIMEOUT_MS: u64 = 30_000;
 /// Device resets in a row, with no request completed in between, after
 /// which the device is given up (bounded recovery, ADR 0028).
 const MAX_RESETS: u32 = 3;
@@ -178,7 +183,22 @@ impl Device {
             }
             match sys::irq_wait(IRQ, REQUEST_TIMEOUT_MS) {
                 Ok(_) => {}
-                Err(Error::Timeout) => return Err(42),
+                // The used ring is what says a request completed; the
+                // interrupt only tells. A completion found without it is
+                // taken, and said, so a lost interrupt shows instead of
+                // passing for a slow device (incident 0043).
+                Err(Error::Timeout) if self.queue.vq.has_used() => {
+                    say(b"a request completed without its interrupt");
+                    record("blk irq missing", head as u64);
+                }
+                Err(Error::Timeout) => {
+                    say(if self.transport.needs_reset() {
+                        b"a request did not complete: the device asks to be reset" as &[u8]
+                    } else {
+                        b"a request did not complete within 30 s"
+                    });
+                    return Err(42);
+                }
                 Err(_) => return Err(43),
             }
         }
