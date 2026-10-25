@@ -95,8 +95,8 @@ of this document.
 | L12 | `event_record` unmetered: any process can push refusals out of the ring [E-L4] |
 | L13 | The build host writes `ssh_host_ed25519_key` and stick images mode 0664 [E-L5] — **fixed** (ADR 0050, mode 0600) |
 | L14 | Failed spawn leaks frames and ignores the kernel reserve; an orphan child when the parent's table is full; `pci_claim` inserts partially [C-L1..L3] |
-| L15 | init launch error paths leak handles; a failed `start_driver` can leave a device claimed for good [C-L4] |
-| L16 | The supervisor relaunches a service it retired as stuck [C-L5] |
+| L15 | init launch error paths leak handles; a failed `start_driver` can leave a device claimed for good [C-L4] — **fixed** on `fix/init-supervisor` (incident 0038) |
+| L16 | The supervisor relaunches a service it retired as stuck [C-L5] — **fixed** on `fix/init-supervisor` (incident 0038) |
 | L17 | console-bridge dropped a reply that arrived during its probe [C-L6] — **fixed** (`a510f21`) |
 | L18 | virtio-blk answers a timed-out request before resetting the device [C-L7] |
 | L19 | sshd accepts exec/shell on a channel it already closed [C-L8] |
