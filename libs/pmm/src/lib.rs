@@ -12,6 +12,9 @@
 
 #![no_std]
 
+mod ranges;
+pub use ranges::RangeSet;
+
 pub const FRAME_SIZE: u64 = 4096;
 
 /// A physical frame, identified by its base address (a multiple of 4 KiB).

@@ -993,7 +993,7 @@ fn start_sshd(fs: Handle, net: Handle, sessions: Handle) -> Result<Handle, Error
     granted.push(system);
     let shells = sys::handle_duplicate(sessions, w)?;
     granted.push(shells);
-    let netd = attach_net_session(net, "sshd")?;
+    let netd = attach_net_session(net, "sshd", aricode_proto::net::SSH_PORT)?;
     granted.push(netd);
     let child =
         sys::process_spawn_with(SPAWNER, "sshd", 0, &[netd, fsd, hw, system, shells, keys])?;
@@ -1723,9 +1723,9 @@ fn file_grant(granted: Result<Handle, FsError>) -> Result<Handle, Error> {
 /// new endpoint to the client called `label` and keeps its receive side, so
 /// the sockets the process leaves open are closed when it dies. A refusal
 /// is said on the console (an attach never fails silently).
-fn attach_net_session(net_service: Handle, label: &str) -> Result<Handle, Error> {
+fn attach_net_session(net_service: Handle, label: &str, port: u16) -> Result<Handle, Error> {
     use aricode_rt::sys::net::NetError;
-    match aricode_rt::sys::net::attach(net_service, label) {
+    match aricode_rt::sys::net::attach(net_service, label, port) {
         Ok(h) => Ok(h),
         Err(NetError::Ipc(e)) => {
             aricode_rt::print_error(b"AriInit: network session", e);
@@ -1787,7 +1787,7 @@ fn spawn_shell(
     // closed here: a placeholder that reaches nobody (a send fails at once
     // with `PeerClosed`).
     let netd = if arg & SERVICE_NET != 0 {
-        attach_net_session(net_service, "shell")?
+        attach_net_session(net_service, "shell", 0)?
     } else {
         let (dead, placeholder) = sys::endpoint_create_pair()?;
         let _ = sys::handle_close(dead);
@@ -2292,7 +2292,7 @@ impl Broker {
             let Some(net) = self.net else {
                 return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
             };
-            match attach_net_session(net, name) {
+            match attach_net_session(net, name, 0) {
                 Ok(h) => granted.push(h),
                 Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }

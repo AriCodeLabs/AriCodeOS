@@ -127,14 +127,7 @@ fn back_page(p: &mut Process, page: u64) -> OnDemand {
     if m.translate(page).is_some() {
         return OnDemand::NotReserved;
     }
-    let frame = pmm::with(|f| {
-        if f.stats().free_frames <= KERNEL_RESERVE_FRAMES {
-            None
-        } else {
-            f.allocate()
-        }
-    });
-    let Some(frame) = frame else {
+    let Some(frame) = user_frame() else {
         return OnDemand::OutOfMemory;
     };
     // SAFETY: freshly allocated frame, reachable through the physical map.
@@ -146,7 +139,7 @@ fn back_page(p: &mut Process, page: u64) -> OnDemand {
         )
     };
     if m.map_4k(page, frame.addr(), flags).is_err() {
-        pmm::with(|f| f.free(frame).expect("frame just allocated"));
+        free_frame(frame);
         return OnDemand::OutOfMemory;
     }
     p.on_demand_backed += 1;
@@ -308,79 +301,40 @@ fn spawn_full(
     // SAFETY: the kernel PML4 is valid and reachable through the physical map.
     unsafe { m.share_kernel_half(kernel_root) };
 
-    let mut on_demand = Vec::new();
-    for seg in &elf.segments {
-        let mut flags = USER;
-        if seg.writable() {
-            flags |= WRITABLE;
+    // Every step from here can fail with frames already taken: on failure
+    // they all go back (audit 2026-10-25 C, L1: a failed spawn leaked every
+    // frame mapped so far, and a supervisor relaunching it leaked more).
+    let on_demand = match map_image(&mut m, &elf) {
+        Ok(lazy) => lazy,
+        Err(e) => {
+            free_address_space(m);
+            return Err(e);
         }
-        if !seg.executable() {
-            flags |= NO_EXECUTE;
-        }
-        let (start, end) = seg.page_range();
-        // Zero-fill pages are only reserved here, backed on first touch.
-        let eager_end = match seg.zero_fill_pages() {
-            Some((lazy, lazy_end)) => {
-                on_demand.push((lazy, lazy_end, flags));
-                lazy
-            }
-            None => end,
-        };
-        let bytes = elf.segment_bytes(seg);
-        for page in (start..eager_end).step_by(PAGE_SIZE as usize) {
-            let frame = pmm::with(|p| p.allocate()).ok_or("process: out of frames")?;
-            let dst = phys::phys_to_virt(frame.addr()) as *mut u8;
-            // SAFETY: freshly allocated frame, reachable through the physical map.
-            unsafe { core::ptr::write_bytes(dst, 0, PAGE_SIZE as usize) };
-            // Part of the file contents that falls in this page.
-            let file_start = seg.vaddr.max(page);
-            let file_end = (seg.vaddr + seg.filesz).min(page + PAGE_SIZE);
-            if file_start < file_end {
-                let src =
-                    &bytes[(file_start - seg.vaddr) as usize..(file_end - seg.vaddr) as usize];
-                // SAFETY: destination within the frame; `src` within the segment.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        src.as_ptr(),
-                        dst.add((file_start - page) as usize),
-                        src.len(),
-                    )
-                };
-            }
-            m.map_4k(page, frame.addr(), flags)
-                .map_err(|_| "process: map segment")?;
-        }
-    }
-    // Stack: RW, NX, with the lowest page left unmapped as a guard.
-    for virt in (USER_STACK_TOP - USER_STACK_SIZE..USER_STACK_TOP).step_by(PAGE_SIZE as usize) {
-        let frame = pmm::with(|p| p.allocate()).ok_or("process: out of frames")?;
-        // SAFETY: freshly allocated frame.
-        unsafe {
-            core::ptr::write_bytes(
-                phys::phys_to_virt(frame.addr()) as *mut u8,
-                0,
-                PAGE_SIZE as usize,
-            )
-        };
-        m.map_4k(virt, frame.addr(), USER | WRITABLE | NO_EXECUTE)
-            .map_err(|_| "process: map stack")?;
-    }
+    };
 
     // The thread is prepared now and only queued once the process is in the
     // table: its first code looks up the entry point and the jump to ring 3.
-    let thread = scheduler::prepare_for_process(
+    let thread = match scheduler::prepare_for_process(
         name,
         user_thread_entry,
         pid.0 as usize,
         pid.0,
         m.root_phys(),
-    )?;
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            free_address_space(m);
+            return Err(e);
+        }
+    };
     let tid = thread.tid;
     let mut handles = crate::object::initial_table(pid, tid, session_console);
     for (obj, rights) in extra {
-        handles
-            .insert(obj, rights)
-            .map_err(|_| "process: handle table full")?;
+        if handles.insert(obj, rights).is_err() {
+            drop((thread, handles));
+            free_address_space(m);
+            return Err("process: handle table full");
+        }
     }
     PROCESSES.lock().insert(
         pid,
@@ -422,6 +376,112 @@ fn spawn_full(
         elf.entry
     );
     Ok(pid)
+}
+
+/// Maps a new process's image into `m`: its segments' pages backed now
+/// (the zero-fill ones only reserved, returned) and the user stack. On an
+/// error the caller frees the address space; a frame taken but not mapped
+/// goes back here.
+fn map_image(
+    m: &mut Mapper<vmm::PmmFrames, OffsetMap>,
+    elf: &aricode_elf::Elf,
+) -> Result<Vec<(u64, u64, u64)>, &'static str> {
+    let mut on_demand = Vec::new();
+    for seg in &elf.segments {
+        let mut flags = USER;
+        if seg.writable() {
+            flags |= WRITABLE;
+        }
+        if !seg.executable() {
+            flags |= NO_EXECUTE;
+        }
+        let (start, end) = seg.page_range();
+        // Zero-fill pages are only reserved here, backed on first touch.
+        let eager_end = match seg.zero_fill_pages() {
+            Some((lazy, lazy_end)) => {
+                on_demand.push((lazy, lazy_end, flags));
+                lazy
+            }
+            None => end,
+        };
+        let bytes = elf.segment_bytes(seg);
+        for page in (start..eager_end).step_by(PAGE_SIZE as usize) {
+            let frame = user_frame().ok_or("process: out of frames")?;
+            let dst = phys::phys_to_virt(frame.addr()) as *mut u8;
+            // SAFETY: freshly allocated frame, reachable through the physical map.
+            unsafe { core::ptr::write_bytes(dst, 0, PAGE_SIZE as usize) };
+            // Part of the file contents that falls in this page.
+            let file_start = seg.vaddr.max(page);
+            let file_end = (seg.vaddr + seg.filesz).min(page + PAGE_SIZE);
+            if file_start < file_end {
+                let src =
+                    &bytes[(file_start - seg.vaddr) as usize..(file_end - seg.vaddr) as usize];
+                // SAFETY: destination within the frame; `src` within the segment.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        src.as_ptr(),
+                        dst.add((file_start - page) as usize),
+                        src.len(),
+                    )
+                };
+            }
+            if m.map_4k(page, frame.addr(), flags).is_err() {
+                free_frame(frame);
+                return Err("process: map segment");
+            }
+        }
+    }
+    // Stack: RW, NX, with the lowest page left unmapped as a guard.
+    for virt in (USER_STACK_TOP - USER_STACK_SIZE..USER_STACK_TOP).step_by(PAGE_SIZE as usize) {
+        let frame = user_frame().ok_or("process: out of frames")?;
+        // SAFETY: freshly allocated frame.
+        unsafe {
+            core::ptr::write_bytes(
+                phys::phys_to_virt(frame.addr()) as *mut u8,
+                0,
+                PAGE_SIZE as usize,
+            )
+        };
+        if m.map_4k(virt, frame.addr(), USER | WRITABLE | NO_EXECUTE)
+            .is_err()
+        {
+            free_frame(frame);
+            return Err("process: map stack");
+        }
+    }
+    Ok(on_demand)
+}
+
+/// A frame for a process's own memory, never one of the last
+/// `KERNEL_RESERVE_FRAMES` (ADR 0049): those stay for the kernel.
+fn user_frame() -> Option<Frame> {
+    pmm::with(|f| {
+        if f.stats().free_frames <= KERNEL_RESERVE_FRAMES {
+            None
+        } else {
+            f.allocate()
+        }
+    })
+}
+
+fn free_frame(frame: Frame) {
+    pmm::with(|p| p.free(frame).expect("process frame"));
+}
+
+/// Frees a process address space: every frame of its user half (pages
+/// and page tables) and its root; the kernel half is shared, never freed.
+/// Returns how many frames went back.
+fn free_address_space(mut m: Mapper<vmm::PmmFrames, OffsetMap>) -> usize {
+    let mut frames = Vec::new();
+    m.free_user_half(|f| frames.push(f));
+    frames.push(m.into_root_frame());
+    let n = frames.len();
+    pmm::with(|p| {
+        for f in frames {
+            p.free(Frame::from_addr(f)).expect("process frame");
+        }
+    });
+    n
 }
 
 /// First code of the main thread, with the process address space already
@@ -570,15 +630,7 @@ pub fn release_address_space(pid: u32) {
                 let _ = m.unmap_4k(page);
             }
         }
-        let mut frames = Vec::new();
-        m.free_user_half(|f| frames.push(f));
-        frames.push(m.into_root_frame());
-        let n = frames.len();
-        pmm::with(|p| {
-            for f in frames {
-                p.free(Frame::from_addr(f)).expect("process frame");
-            }
-        });
+        let n = free_address_space(m);
         log::debug!("user: address space of process {pid} freed ({n} frames)");
         for f in foreign {
             report_last_reference(pid, &f);
@@ -747,6 +799,48 @@ pub fn reap_selftest() {
         "process reap selftest ok ({} processes created and waited for on {} CPU(s), {lost} frames difference, heap +{heap_grown} pages)",
         ROUNDS * BATCH,
         crate::cpu::online_count()
+    );
+}
+
+/// `test=spawn_oom` (audit 2026-10-25 C, L1): a spawn that runs out of
+/// frames half-way gives back every frame it took (the address space's
+/// root, tables, pages), and once memory is back the next spawn works.
+pub fn spawn_oom_selftest() {
+    use crate::memory::heap;
+    use crate::user::programs;
+
+    let code = programs::by_name("hello").expect("hello in the initrd");
+    // Warm-up: let the heap do whatever growing it will before measuring.
+    for _ in 0..4 {
+        let pid = spawn("hello", code).expect("spawn");
+        assert_eq!(wait(pid), ExitStatus::Exited(42));
+    }
+    // Leave a few frames above the kernel reserve: enough for the address
+    // space and its first page, not for the image and the stack.
+    let mut held = Vec::new();
+    while pmm::stats().free_frames > KERNEL_RESERVE_FRAMES + 4 {
+        held.push(pmm::with(|p| p.allocate()).expect("free frame"));
+    }
+    let free_before = pmm::stats().free_frames;
+    let heap_before = heap::mapped_bytes();
+    const TRIES: usize = 10;
+    for _ in 0..TRIES {
+        assert!(
+            spawn("hello", code).is_err(),
+            "spawn must run out of frames"
+        );
+    }
+    let heap_grown = (heap::mapped_bytes() - heap_before) / PAGE_SIZE;
+    let lost = free_before as i64 - pmm::stats().free_frames as i64 - heap_grown as i64;
+    let held_count = held.len();
+    for f in held {
+        free_frame(f);
+    }
+    assert!(lost <= 0, "frames lost by {TRIES} failed spawns: {lost}");
+    let pid = spawn("hello", code).expect("spawn once memory is back");
+    assert_eq!(wait(pid), ExitStatus::Exited(42));
+    info!(
+        "spawn out-of-memory selftest ok ({TRIES} failed spawns with {held_count} frames held, {lost} frames difference, heap +{heap_grown} pages)"
     );
 }
 
