@@ -383,7 +383,8 @@ pub fn write_usb_image(
         USB_PART_ARIBOOT,
         aricode_ab::BootState::fresh(aricode_ab::Slot::A),
     );
-    io(fs::write(path, &img), "write USB image")?;
+    // It carries the SSH host key and the owner's authorized key.
+    io(write_private(path, &img), "write USB image")?;
     Ok(format!(
         "[xtask] USB image at {} ({} MiB, {} files in the ESP)",
         path.display(),
@@ -485,7 +486,7 @@ pub fn build_usb_image(
         // rdrand has little entropy on its first boot); kept in build/ so
         // rebuilt images keep the fingerprint.
         let (seed, hex) = ssh_host_key(&crate::build_dir().join("ssh_host_ed25519_key"))?;
-        extra.push((String::from("ssh_host_ed25519_key"), hex));
+        extra.push((String::from("sshd/ssh_host_ed25519_key"), hex));
         println!(
             "[xtask] SSH host key {} (build/ssh_host_ed25519_key)",
             aricode_ssh::fingerprint(&aricode_crypto::ed25519::public_key(&seed))
@@ -1562,12 +1563,34 @@ mod tests {
     }
 }
 
+/// Writes a file only its owner can read (mode 0600, an existing file's
+/// mode included): a host key, or an image that carries one (audit
+/// 2026-10-25 E, L5).
+fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.set_permissions(fs::Permissions::from_mode(0o600))?;
+    f.write_all(data)
+}
+
 /// The SSH host key seed at `path` (hex, one line), created from
 /// `/dev/urandom` if missing. Returns the seed and the file's bytes.
 fn ssh_host_key(path: &Path) -> Result<([u8; 32], Vec<u8>)> {
     let mut seed = [0u8; 32];
     if let Ok(text) = fs::read_to_string(path) {
         if aricode_crypto::unhex(text.trim(), &mut seed).is_some() {
+            // Kept by older builds readable by everyone.
+            use std::os::unix::fs::PermissionsExt;
+            io(
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600)),
+                "restrict the SSH host key",
+            )?;
             return Ok((seed, text.into_bytes()));
         }
         return Err(format!("{}: not a 64-digit hex seed", path.display()));
@@ -1579,7 +1602,10 @@ fn ssh_host_key(path: &Path) -> Result<([u8; 32], Vec<u8>)> {
     )?;
     let mut hex = [0u8; 64];
     let text = format!("{}\n", aricode_crypto::hex(&seed, &mut hex));
-    io(fs::write(path, &text), "write the SSH host key")?;
+    io(
+        write_private(path, text.as_bytes()),
+        "write the SSH host key",
+    )?;
     Ok((seed, text.into_bytes()))
 }
 

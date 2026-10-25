@@ -175,6 +175,7 @@ impl Manifest {
                         || !value
                             .bytes()
                             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+                        || RESERVED_NAMES.contains(&value)
                     {
                         return Err(ManifestError::BadName);
                     }
@@ -214,16 +215,26 @@ impl Manifest {
     }
 }
 
-/// Full AriFS name: `[A-Za-z0-9._-/]`, not starting or ending with `/`.
+/// Program names no manifest may take (ADR 0050): a program's name is its
+/// private directory, and these directories hold system files (installed
+/// and staged packages, sshd's host key and seed).
+pub const RESERVED_NAMES: [&str; 3] = ["apps", "pkgs", "sshd"];
+
+/// Files no manifest may share (ADR 0050): the keys sshd accepts, and
+/// sshd's own files where releases before ADR 0050 kept them.
+pub const RESERVED_FILES: [&str; 3] = ["authorized_keys", "ssh_host_ed25519_key", "random_seed"];
+
+/// A file a manifest may share (ADR 0016, 0050): a top-level AriFS file,
+/// `[A-Za-z0-9._-]`, not starting with `.`, not a system file. A name with
+/// `/` would be inside some program's private directory.
 fn valid_file_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= MAX_NAME
         && name
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'))
-        && !name.starts_with('/')
-        && !name.ends_with('/')
-        && !name.contains("//")
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        && !name.starts_with('.')
+        && !RESERVED_FILES.contains(&name)
 }
 
 /// `64K`, `2M` or KiB without a suffix; bounded by [`MAX_MEMORY_KIB`].
@@ -262,9 +273,9 @@ mod tests {
 
     #[test]
     fn read_files_in_order_and_bounded() {
-        let m = Manifest::parse("name = x\nread_files = hola.txt, docs/guia.md\n").unwrap();
+        let m = Manifest::parse("name = x\nread_files = hola.txt, guia.md\n").unwrap();
         let files: Vec<&str> = m.read_files().collect();
-        assert_eq!(files, ["hola.txt", "docs/guia.md"]);
+        assert_eq!(files, ["hola.txt", "guia.md"]);
         assert_eq!(
             Manifest::parse("name = x\nread_files = /abs"),
             Err(ManifestError::BadFile)
@@ -274,6 +285,35 @@ mod tests {
             Err(ManifestError::BadFile)
         );
         assert_eq!(Manifest::parse("name = x").unwrap().read_files().count(), 0);
+    }
+
+    /// Audit 2026-10-25 E, M1 and L3: a manifest could share itself any
+    /// file, sshd's host key or another program's private files included,
+    /// and take the name of a system directory.
+    #[test]
+    fn system_files_and_names_are_refused() {
+        for f in [
+            "ssh_host_ed25519_key",
+            "random_seed",
+            "authorized_keys",
+            "sshd/ssh_host_ed25519_key",
+            "updater/state",
+            "hello_app/secret",
+            "apps/x.aripkg",
+            "../x",
+            "a/./b",
+            ".",
+            "..",
+            ".hidden",
+        ] {
+            let text = std::format!("name = x\nread_files = {f}");
+            assert_eq!(Manifest::parse(&text), Err(ManifestError::BadFile), "{f}");
+        }
+        for n in RESERVED_NAMES {
+            let text = std::format!("name = {n}");
+            assert_eq!(Manifest::parse(&text), Err(ManifestError::BadName), "{n}");
+        }
+        assert!(Manifest::parse("name = updater").is_ok());
     }
 
     #[test]

@@ -14,7 +14,8 @@ the permission down is not enough to make it effective.
 
 ## Decision
 
-1. **`read_files = a, b` in the manifest** (up to 4 full AriFS names). The
+1. **`read_files = a, b` in the manifest** (up to 4 full AriFS names;
+   since ADR 0050 only top-level files that are not system files). The
    broker asks fsd for one endpoint per file (`Op::Share`, only through the
    main endpoint) and hands them over after the private directory, in
    manifest order. If the file does not exist, the launch is denied before

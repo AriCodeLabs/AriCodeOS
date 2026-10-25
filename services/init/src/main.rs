@@ -840,17 +840,128 @@ fn start_console_bridge(inputs: &[Handle]) -> Result<Handle, Error> {
     result
 }
 
-/// Launches sshd with `[net session (WRITE), fs (WRITE), hardware, SYSTEM
-/// (READ), sessions (WRITE)]`. It gets no SPAWNER: shells are launched by
-/// init. Every generation gets a network session of its own (ADR 0037), so
-/// the listener of one that died is closed instead of holding port 22.
+/// sshd's private directory (ADR 0050): its host key and `random_seed`.
+const SSHD_DIR: &str = "sshd";
+const SSHD_FILES: [&str; 2] = ["ssh_host_ed25519_key", "random_seed"];
+/// The keys sshd accepts: in the AriFS root, where the owner writes them
+/// (`write authorized_keys ...`); sshd only reads them.
+const AUTHORIZED_KEYS: &str = "authorized_keys";
+
+/// How long init waits for fsd to grant sshd's sessions: it does so from
+/// its supervisor loop, which must not stall behind a file service that
+/// does not answer (a failed grant is a failed launch, retried later).
+const SSHD_GRANT_MS: u64 = 2_000;
+
+/// A whole small file: `None` if it does not exist; an error if it cannot
+/// be read or does not fit `buf`.
+fn read_small(fs: &mut FsClient, name: &str, buf: &mut [u8]) -> Result<Option<usize>, ()> {
+    let fd = match fs.open(name) {
+        Ok(fd) => fd,
+        Err(FsError::Status(aricode_proto::fs::Status::NotFound)) => return Ok(None),
+        Err(_) => return Err(()),
+    };
+    let r = fs.read(fd, 0, buf);
+    let _ = fs.close(fd);
+    match r {
+        Ok(n) if n < buf.len() => Ok(Some(n)),
+        _ => Err(()),
+    }
+}
+
+/// Moves sshd's files from the AriFS root, where releases before ADR 0050
+/// kept them, into `sshd/`. The root copy is then overwritten with zeros
+/// and emptied (AriFS cannot remove a file, and the root must not keep the
+/// host key), but only once `sshd/` holds the same bytes, read back: a
+/// copy that failed half-way is completed on the next boot, never trusted.
+/// When both hold different non-empty contents (a key written to the root
+/// after the move, by hand or by an older release), neither is touched and
+/// init says so: no key is ever destroyed. Each outcome is said.
+fn move_sshd_files(fs: &mut FsClient) {
+    let mut root = [0u8; 256];
+    let mut moved = [0u8; 256];
+    let mut name_buf = [0u8; 64];
+    for name in SSHD_FILES {
+        let say_file = |what: &[u8]| {
+            sys::print(b"AriInit: ");
+            sys::print(name.as_bytes());
+            sys::print(what);
+        };
+        let n = match read_small(fs, name, &mut root) {
+            Ok(Some(n)) if n > 0 => n,
+            Ok(_) => continue,
+            Err(()) => {
+                say_file(b": unreadable or too large in the root; not moved into sshd/\n");
+                continue;
+            }
+        };
+        let dir_len = SSHD_DIR.len();
+        name_buf[..dir_len].copy_from_slice(SSHD_DIR.as_bytes());
+        name_buf[dir_len] = b'/';
+        name_buf[dir_len + 1..dir_len + 1 + name.len()].copy_from_slice(name.as_bytes());
+        let target = core::str::from_utf8(&name_buf[..dir_len + 1 + name.len()]).unwrap_or("");
+        match read_small(fs, target, &mut moved) {
+            Ok(Some(m)) if moved[..m] == root[..n] => {}
+            Ok(Some(m)) if m > 0 => {
+                say_file(b" in the root differs from sshd/'s: both left in place\n");
+                continue;
+            }
+            // Absent, or empty from a copy that broke off.
+            Ok(_) => {
+                let written = fs
+                    .open(target)
+                    .or_else(|_| fs.create(target))
+                    .and_then(|fd| {
+                        let r = fs.replace(fd, &root[..n]);
+                        let _ = fs.close(fd);
+                        r
+                    })
+                    .is_ok();
+                let same = written
+                    && matches!(read_small(fs, target, &mut moved), Ok(Some(m)) if moved[..m] == root[..n]);
+                if !same {
+                    say_file(b": could not move into sshd/; the root copy is kept\n");
+                    continue;
+                }
+            }
+            Err(()) => {
+                say_file(b": sshd/'s copy is unreadable; the root copy is kept\n");
+                continue;
+            }
+        }
+        let blanked = fs.open(name).is_ok_and(|fd| {
+            let zeros = [0u8; 256];
+            let r = fs.replace(fd, &zeros[..n]).is_ok() && fs.replace(fd, &[]).is_ok();
+            let _ = fs.close(fd);
+            r
+        });
+        say_file(if blanked {
+            b" moved into sshd/\n" as &[u8]
+        } else {
+            b" copied into sshd/, but the root copy could not be emptied\n"
+        });
+    }
+}
+
+/// Launches sshd with `[net session (WRITE), its fsd session (sshd/,
+/// WRITE), hardware, SYSTEM (READ), sessions (WRITE), authorized_keys
+/// (read-only fsd session)]`. It gets no SPAWNER: shells are launched by
+/// init. Every generation gets network and file sessions of its own (ADR
+/// 0037, 0050): the listener of one that died is closed instead of holding
+/// port 22, its descriptors are released, and it sees only its own files
+/// and the keys it accepts.
 fn start_sshd(fs: Handle, net: Handle, sessions: Handle) -> Result<Handle, Error> {
     let w = rights::WRITE | rights::TRANSFER;
     // The guard closes every handle made so far if a later step fails (the
     // kernel takes them only when it creates the process).
     let mut granted = Granted::new();
-    let fsd = sys::handle_duplicate(fs, w)?;
+    let fsd = file_grant(sys::fs::bind(fs, SSHD_DIR, SSHD_GRANT_MS))?;
     granted.push(fsd);
+    let keys = file_grant(sys::fs::share_may_be_missing(
+        fs,
+        AUTHORIZED_KEYS,
+        SSHD_GRANT_MS,
+    ))?;
+    granted.push(keys);
     let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
     granted.push(hw);
     let system = sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER)?;
@@ -859,7 +970,8 @@ fn start_sshd(fs: Handle, net: Handle, sessions: Handle) -> Result<Handle, Error
     granted.push(shells);
     let netd = attach_net_session(net, "sshd")?;
     granted.push(netd);
-    let child = sys::process_spawn_with(SPAWNER, "sshd", 0, &[netd, fsd, hw, system, shells])?;
+    let child =
+        sys::process_spawn_with(SPAWNER, "sshd", 0, &[netd, fsd, hw, system, shells, keys])?;
     granted.take();
     Ok(child)
 }
@@ -1521,7 +1633,12 @@ fn run_shell(
 /// descriptors the process leaves open are released when it dies. A
 /// refusal is said on the console (an attach never fails silently).
 fn attach_file_session(fs: &FsClient) -> Result<Handle, Error> {
-    match fs.attach() {
+    file_grant(fs.attach())
+}
+
+/// A file session fsd granted, or the refusal said on the console.
+fn file_grant(granted: Result<Handle, FsError>) -> Result<Handle, Error> {
+    match granted {
         Ok(h) => Ok(h),
         Err(FsError::Ipc(e)) => {
             aricode_rt::print_error(b"AriInit: file session", e);
@@ -2844,6 +2961,9 @@ fn main(arg: u64) -> u64 {
         // that init launches on its behalf.
         let mut sessions = None;
         if services & SERVICE_NET != 0 {
+            if let Some(fs) = broker.fs.as_mut() {
+                move_sshd_files(fs);
+            }
             if let Ok(endpoint) = sys::endpoint_create() {
                 let launched = sup
                     .register(

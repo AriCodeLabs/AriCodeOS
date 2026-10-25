@@ -5,14 +5,16 @@
 //! request, asks init for a session shell (it has no SPAWNER). One
 //! connection at a time.
 //!
-//! Handles from init: `[net (WRITE), fs (WRITE), hardware, SYSTEM (READ),
-//! sessions (WRITE)]`. In AriFS: `ssh_host_ed25519_key` (the host key seed
-//! in hex; installed by `cargo xtask usb-image --authorized-key`, or
-//! created on first start), `authorized_keys` (OpenSSH format,
+//! Handles from init: `[net (WRITE), fs (its directory `sshd/`, WRITE),
+//! hardware, SYSTEM (READ), sessions (WRITE), authorized_keys (read-only)]`
+//! (ADR 0050). In `sshd/`: `ssh_host_ed25519_key` (the host key seed in
+//! hex; installed by `cargo xtask usb-image --authorized-key`, or created
+//! on first start) and `random_seed`; in the AriFS root, read-only:
+//! `authorized_keys` (OpenSSH format,
 //! `ssh-ed25519` lines; reread after every connection, or at most once a
 //! minute while the file service does not answer; a key removed during
-//! such an outage stays valid until the file service answers again) and
-//! `random_seed` (entropy carried across boots).
+//! such an outage stays valid until the file service answers again).
+//! `random_seed` is entropy carried across boots.
 //!
 //! Closed by default: without an `authorized_keys` file with at least one
 //! key, sshd does not listen at all.
@@ -36,6 +38,8 @@ const FS: Handle = Handle(0x0001_0005);
 const HW: Handle = Handle(0x0001_0006);
 const SYSTEM: Handle = Handle(0x0001_0007);
 const SESSIONS: Handle = Handle(0x0001_0008);
+/// `authorized_keys`, read-only (ADR 0050); `FS` is sshd's own directory.
+const KEYS: Handle = Handle(0x0001_0009);
 
 const PORT: u16 = 22;
 /// A connection that has not authenticated after this long is dropped: the
@@ -176,8 +180,13 @@ fn write_file(fs: &mut FsClient, name: &str, data: &[u8]) -> bool {
 enum ReadError {
     /// The file service answered: there is no such file.
     Absent,
-    /// The file service did not answer (gone, retired or too slow).
+    /// The file service did not answer (died mid-request, or too slow).
     Unavailable,
+    /// The session can never answer again: its fsd generation is gone
+    /// (sessions die with it, ADR 0050). sshd exits so init relaunches it
+    /// with new sessions; keeping the last keys would keep a key removed
+    /// since valid until reboot.
+    Gone,
     /// It answered, but the content could not be read whole.
     Incomplete,
 }
@@ -190,6 +199,7 @@ enum ReadError {
 fn read_file(fs: &mut FsClient, name: &str) -> Result<Vec<u8>, ReadError> {
     let fd = fs.open(name).map_err(|e| match e {
         FsError::Status(FsStatus::NotFound) => ReadError::Absent,
+        FsError::Ipc(Error::ServiceGone) => ReadError::Gone,
         e if e.service_unavailable() => ReadError::Unavailable,
         _ => ReadError::Incomplete,
     })?;
@@ -200,6 +210,7 @@ fn read_file(fs: &mut FsClient, name: &str) -> Result<Vec<u8>, ReadError> {
         match fs.read(fd, data.len() as u32, &mut chunk) {
             Ok(0) => break Ok(()),
             Ok(n) => data.extend_from_slice(&chunk[..n]),
+            Err(FsError::Ipc(Error::ServiceGone)) => break Err(ReadError::Gone),
             Err(e) if e.service_unavailable() => break Err(ReadError::Unavailable),
             Err(_) if errors < 3 => {
                 errors += 1;
@@ -541,14 +552,22 @@ fn authorized(fs: &mut FsClient) -> Result<Vec<[u8; 32]>, ReadError> {
 /// once a minute (incident 0001: each attempt would hold the next banner
 /// for the file client's whole wait), logged once when it starts failing
 /// and once when it answers again.
-fn reread_keys(fs: &mut FsClient, refresh: &mut KeyRefresh, keys: &mut Vec<[u8; 32]>) {
+/// `Err(Gone)`: the session is gone for good (see `ReadError::Gone`).
+fn reread_keys(
+    fs: &mut FsClient,
+    refresh: &mut KeyRefresh,
+    keys: &mut Vec<[u8; 32]>,
+) -> Result<(), ReadError> {
     if !refresh.due(now_ms()) {
-        return;
+        return Ok(());
     }
     // Only a complete read (or "no such file") is an answer; a file service
     // that does not answer or a read that breaks off keeps the last keys and
     // is retried at most once a minute (audit robustness-1, L5).
     let result = authorized(fs);
+    if result == Err(ReadError::Gone) {
+        return Err(ReadError::Gone);
+    }
     let answered = result.is_ok();
     if let Ok(k) = result {
         *keys = k;
@@ -567,10 +586,28 @@ fn reread_keys(fs: &mut FsClient, refresh: &mut KeyRefresh, keys: &mut Vec<[u8; 
         }
         None => {}
     }
+    Ok(())
+}
+
+/// Exit code when the file sessions are gone (`ReadError::Gone`).
+const EXIT_FILES_GONE: u64 = 5;
+
+fn files_gone() -> u64 {
+    say(b"file sessions gone (the file service was restarted); exiting for new ones");
+    EXIT_FILES_GONE
+}
+
+/// Keys for a start: none if the file does not exist or could not be read
+/// (closed until a reread finds some); `Err(Gone)` as `reread_keys`.
+fn initial_keys(fs: &mut FsClient) -> Result<Vec<[u8; 32]>, ReadError> {
+    match authorized(fs) {
+        Err(ReadError::Gone) => Err(ReadError::Gone),
+        r => Ok(r.unwrap_or_default()),
+    }
 }
 
 fn main(_arg: u64) -> u64 {
-    let Ok(mut fs) = FsClient::new(FS, HW) else {
+    let (Ok(mut fs), Ok(mut keys_fs)) = (FsClient::new(FS, HW), FsClient::new(KEYS, HW)) else {
         say(b"no file client");
         return 1;
     };
@@ -579,7 +616,9 @@ fn main(_arg: u64) -> u64 {
         return 2;
     };
     let mut entropy = Entropy::load(&mut fs);
-    let mut keys = authorized(&mut fs).unwrap_or_default();
+    let Ok(mut keys) = initial_keys(&mut keys_fs) else {
+        return files_gone();
+    };
     let mut refresh = KeyRefresh::new();
     let mut announced = false;
     if keys.is_empty() {
@@ -589,7 +628,10 @@ fn main(_arg: u64) -> u64 {
         // Closed until the owner installs a key; checked every few seconds.
         while keys.is_empty() {
             sys::time::sleep_ms(5_000);
-            keys = authorized(&mut fs).unwrap_or_default();
+            let Ok(k) = initial_keys(&mut keys_fs) else {
+                return files_gone();
+            };
+            keys = k;
         }
         say(b"authorized_keys found");
     }
@@ -642,7 +684,10 @@ fn main(_arg: u64) -> u64 {
             // authorized_keys emptied while running: reread first, so a key
             // installed since counts (audit robustness-1, M1); refuse if
             // there is still none.
-            reread_keys(&mut fs, &mut refresh, &mut keys);
+            if reread_keys(&mut keys_fs, &mut refresh, &mut keys).is_err() {
+                let _ = net.tcp_close(sock);
+                return files_gone();
+            }
             if keys.is_empty() {
                 say(b"authorized_keys is empty now: connection refused");
                 let _ = net.tcp_close(sock);
@@ -659,7 +704,9 @@ fn main(_arg: u64) -> u64 {
         // Reread between connections so a key added or removed from the
         // console counts, without delaying the next client's banner behind
         // a file service that does not answer.
-        reread_keys(&mut fs, &mut refresh, &mut keys);
+        if reread_keys(&mut keys_fs, &mut refresh, &mut keys).is_err() {
+            return files_gone();
+        }
     }
 }
 

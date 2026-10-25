@@ -17,6 +17,7 @@ aricode-sys = { path = "../../sdk/rust" }
 aricode-proto = { path = "../../sdk/proto" }
 aricode-arifs = { path = "../../libs/arifs" }
 aricode-faults = { path = "../../libs/faults" }
+aricode-cmdline = { path = "../../libs/cmdline" }
 aricode-rt = { path = "../../sdk/runtime" }
 
 [build-dependencies]

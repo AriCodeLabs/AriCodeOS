@@ -9,6 +9,9 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+/// The host key `[host_ssh] old_host_key` installs: public, tests only.
+const OLD_HOST_KEY_SEED: [u8; 32] = [0x41; 32];
+
 pub fn run(cli: &Cli, release: bool) -> Result {
     let level: Level = match (cli.flag("--all"), cli.value("--level")) {
         (true, _) => Level::Full,
@@ -372,6 +375,11 @@ pub fn run_scenario(
             }
             let public = std::fs::read(dir.join("id_ed25519.pub")).map_err(|e| e.to_string())?;
             installed.push((String::from("authorized_keys"), public));
+            if s.host_ssh.as_ref().is_some_and(|h| h.old_host_key) {
+                let mut hex = [0u8; 64];
+                let text = format!("{}\n", aricode_crypto::hex(&OLD_HOST_KEY_SEED, &mut hex));
+                installed.push((String::from("ssh_host_ed25519_key"), text.into_bytes()));
+            }
             Some(key)
         }
         false => None,
@@ -547,6 +555,7 @@ pub fn run_scenario(
                 commands: &h.commands,
                 key: key.clone(),
                 idle_client: h.idle_client,
+                retry_connect_secs: h.retry_connect_secs,
             }),
             _ => None,
         };
@@ -634,6 +643,13 @@ pub fn run_scenario(
         for needle in &expect.serial_absent {
             if cap.serial.contains(needle) {
                 problems.push(format!("{prefix}unexpected '{needle}'"));
+            }
+        }
+        if s.host_ssh.as_ref().is_some_and(|h| h.old_host_key) {
+            let public = aricode_crypto::ed25519::public_key(&OLD_HOST_KEY_SEED);
+            let needle = format!("host key {}", aricode_ssh::fingerprint(&public));
+            if !cap.serial.contains(&needle) {
+                problems.push(format!("{prefix}missing '{needle}' (the moved host key)"));
             }
         }
         if let Some(i) = scenario::first_out_of_order(&cap.serial, &expect.serial_order) {

@@ -951,11 +951,18 @@ pub struct SshProbe<'a> {
     pub commands: &'a [String],
     pub key: std::path::PathBuf,
     pub idle_client: bool,
+    pub retry_connect_secs: u64,
 }
 
 /// Runs each command over SSH; the result is one block of `[host] ssh`
 /// lines: the command, every output line and the exit status.
-fn run_ssh_probe(port: u16, commands: &[String], key: &Path, idle_client: bool) -> String {
+fn run_ssh_probe(
+    port: u16,
+    commands: &[String],
+    key: &Path,
+    idle_client: bool,
+    retry_connect_secs: u64,
+) -> String {
     let mut lines = Vec::new();
     // An idle client that holds a connection without identifying itself;
     // kept open for the whole probe (sshd must drop it on its own).
@@ -973,31 +980,23 @@ fn run_ssh_probe(port: u16, commands: &[String], key: &Path, idle_client: bool) 
         }
     });
     for cmd in commands {
-        let out = Command::new("ssh")
-            .args([
-                "-F",
-                "/dev/null",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "StrictHostKeyChecking=no",
-            ])
-            .args([
-                "-o",
-                "UserKnownHostsFile=/dev/null",
-                "-o",
-                "ConnectTimeout=90",
-                "-o",
-                "LogLevel=ERROR",
-            ])
-            // Only the scenario's key: the agent's keys would be refused first.
-            .args(["-o", "IdentitiesOnly=yes", "-i"])
-            .arg(key)
-            .args(["-p", &port.to_string()])
-            .arg("ari@127.0.0.1")
-            .arg(cmd)
-            .stdin(Stdio::null())
-            .output();
+        // ssh exits with 255 when it could not connect or log in: tried
+        // again for `retry_connect_secs` (sshd being relaunched).
+        let deadline = Instant::now() + Duration::from_secs(retry_connect_secs);
+        let mut retries = 0;
+        let out = loop {
+            let out = ssh_command(port, key, cmd);
+            match &out {
+                Ok(o) if o.status.code() == Some(255) && Instant::now() < deadline => {
+                    retries += 1;
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+                _ => break out,
+            }
+        };
+        if retries > 0 {
+            lines.push(format!("[host] ssh connection retried {retries} time(s)"));
+        }
         match out {
             Ok(o) => {
                 lines.push(format!("[host] ssh $ {cmd}"));
@@ -1014,6 +1013,35 @@ fn run_ssh_probe(port: u16, commands: &[String], key: &Path, idle_client: bool) 
     }
     drop(idle);
     lines.join("\n")
+}
+
+/// One command through the host's OpenSSH client with the scenario's key.
+fn ssh_command(port: u16, key: &Path, cmd: &str) -> std::io::Result<std::process::Output> {
+    Command::new("ssh")
+        .args([
+            "-F",
+            "/dev/null",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=no",
+        ])
+        .args([
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "ConnectTimeout=90",
+            "-o",
+            "LogLevel=ERROR",
+        ])
+        // Only the scenario's key: the agent's keys would be refused first.
+        .args(["-o", "IdentitiesOnly=yes", "-i"])
+        .arg(key)
+        .args(["-p", &port.to_string()])
+        .arg("ari@127.0.0.1")
+        .arg(cmd)
+        .stdin(Stdio::null())
+        .output()
 }
 
 pub fn run_interactive(
@@ -1366,9 +1394,10 @@ pub fn run_headless(
                 let commands = p.commands.to_vec();
                 let key = p.key.clone();
                 let idle = p.idle_client;
+                let retry = p.retry_connect_secs;
                 let port = options.forwards.ssh;
                 ssh_thread = Some(std::thread::spawn(move || {
-                    run_ssh_probe(port, &commands, &key, idle)
+                    run_ssh_probe(port, &commands, &key, idle, retry)
                 }));
             }
             if ssh_thread.as_ref().is_some_and(|t| t.is_finished()) {

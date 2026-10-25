@@ -159,6 +159,9 @@ pub mod fs {
         /// Main endpoint only (the broker): creates an endpoint bound
         /// to a single file in read-only mode (ADR 0016); the reply
         /// transfers it (`WRITE`). Through it only that file can be seen, opened and read.
+        /// `name` is a top-level file (no `/`, ADR 0050). `NotFound` if it
+        /// does not exist, unless `len` = `SHARE_MAY_BE_MISSING`: then the
+        /// file may appear later (sshd's `authorized_keys`).
         Share = 10,
         /// `fd`, `offset`, `len`; handles `[reply, buffer]`: one chunk of the
         /// new content to the journal, without committing anything (ADR 0018). Only
@@ -215,6 +218,9 @@ pub mod fs {
     }
 
     /// Request (64 bytes): header, arguments and name.
+    /// `Request::len` of a `Share` whose file may not exist yet.
+    pub const SHARE_MAY_BE_MISSING: u32 = 1;
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Request {
         pub op: Op,

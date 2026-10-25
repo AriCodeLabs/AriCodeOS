@@ -3,7 +3,9 @@
 //! File service client (`aricode-proto::fs`).
 
 use crate::{self as sys, rights, rpc, Error, Handle};
-use aricode_proto::fs::{Op, OwnerDescriptors, Reply, Request, Status, MAX_IO, MAX_REPLACE};
+use aricode_proto::fs::{
+    Op, OwnerDescriptors, Reply, Request, Status, MAX_IO, MAX_REPLACE, SHARE_MAY_BE_MISSING,
+};
 
 /// Reply wait of a file request (ms): above the block client's
 /// (`block::REPLY_WAIT_MS`, 90 s) plus the file service's own work, so a
@@ -120,13 +122,13 @@ impl FsClient {
     /// Broker only: asks fsd for an endpoint bound to the private directory
     /// `prefix` and returns the received handle (`WRITE`, transferable).
     pub fn bind(&self, prefix: &str) -> Result<Handle, FsError> {
-        self.grant(Op::Bind, prefix)
+        grant(self.service, Op::Bind, prefix, 0, REPLY_WAIT_MS)
     }
 
     /// Broker only: asks fsd for an endpoint bound to the file `name` in
     /// read-only mode (ADR 0016) and returns the received handle.
     pub fn share(&self, name: &str) -> Result<Handle, FsError> {
-        self.grant(Op::Share, name)
+        grant(self.service, Op::Share, name, 0, REPLY_WAIT_MS)
     }
 
     /// Broker and init only: asks fsd for a session bound to the main
@@ -134,7 +136,7 @@ impl FsClient {
     /// transferable). The process that gets it sees every file, like the
     /// main endpoint, and its descriptors are released when it dies.
     pub fn attach(&self) -> Result<Handle, FsError> {
-        self.grant(Op::Attach, "")
+        grant(self.service, Op::Attach, "", 0, REPLY_WAIT_MS)
     }
 
     /// Descriptor table usage of owner slot `index` (ADR 0036): the counts
@@ -156,30 +158,6 @@ impl FsClient {
             }
             Err(FsError::Status(Status::NotFound)) => Ok(None),
             Err(e) => Err(e),
-        }
-    }
-
-    fn grant(&self, op: Op, name: &str) -> Result<Handle, FsError> {
-        let req = Request::new(op)
-            .with_name(name)
-            .ok_or(FsError::Status(Status::Invalid))?;
-        let mut msg = [0u8; Reply::LEN];
-        let mut handles = [Handle(0); 1];
-        let (len, nh) = rpc::call_handles(
-            self.service,
-            &req.encode(),
-            &[],
-            rpc::GRACE_MS,
-            REPLY_WAIT_MS,
-            &mut msg,
-            &mut handles,
-        )
-        .map_err(FsError::Ipc)?;
-        let reply = Reply::decode(&msg[..len]).ok_or(FsError::Ipc(Error::Invalid))?;
-        match (reply.status, nh) {
-            (Status::Ok, 1) => Ok(handles[0]),
-            (Status::Ok, _) => Err(FsError::Ipc(Error::Invalid)),
-            (s, _) => Err(FsError::Status(s)),
         }
     }
 
@@ -256,5 +234,47 @@ impl FsClient {
     /// Makes previous writes durable (ADR 0014).
     pub fn flush(&self) -> Result<(), FsError> {
         self.call(Request::new(Op::Flush), false).map(|_| ())
+    }
+}
+/// Init only, over fsd's main endpoint `service`: `FsClient::bind`, for a
+/// process launched without a file client of init's at hand (sshd under
+/// the supervisor, ADR 0050). Waits at most `wait_ms` for each of the
+/// send and the reply: init's supervisor loop must not stall behind a
+/// file service that does not answer.
+pub fn bind(service: Handle, prefix: &str, wait_ms: u64) -> Result<Handle, FsError> {
+    grant(service, Op::Bind, prefix, 0, wait_ms)
+}
+
+/// Init only: `FsClient::share` for a file that may not exist yet; through
+/// the endpoint the file is found once it is created (sshd's
+/// `authorized_keys`, ADR 0050). Waits as `bind`.
+pub fn share_may_be_missing(service: Handle, name: &str, wait_ms: u64) -> Result<Handle, FsError> {
+    grant(service, Op::Share, name, SHARE_MAY_BE_MISSING, wait_ms)
+}
+
+/// A session request (`Bind`, `Share`, `Attach`) on the main endpoint: the
+/// reply carries the session's send side.
+fn grant(service: Handle, op: Op, name: &str, len: u32, wait_ms: u64) -> Result<Handle, FsError> {
+    let mut req = Request::new(op)
+        .with_name(name)
+        .ok_or(FsError::Status(Status::Invalid))?;
+    req.len = len;
+    let mut msg = [0u8; Reply::LEN];
+    let mut handles = [Handle(0); 1];
+    let (len, nh) = rpc::call_handles(
+        service,
+        &req.encode(),
+        &[],
+        rpc::GRACE_MS.min(wait_ms),
+        wait_ms,
+        &mut msg,
+        &mut handles,
+    )
+    .map_err(FsError::Ipc)?;
+    let reply = Reply::decode(&msg[..len]).ok_or(FsError::Ipc(Error::Invalid))?;
+    match (reply.status, nh) {
+        (Status::Ok, 1) => Ok(handles[0]),
+        (Status::Ok, _) => Err(FsError::Ipc(Error::Invalid)),
+        (s, _) => Err(FsError::Status(s)),
     }
 }
