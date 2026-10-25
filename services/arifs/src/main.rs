@@ -635,10 +635,14 @@ impl Service {
                     }
                     _ => {
                         let r = self.fs.replace_chunk(index, req.offset, &buf[..len]);
+                        // Stamped once the chunk is written: its block
+                        // requests may take seconds, which must not make a
+                        // live transaction look abandoned (audit of
+                        // incident 0043, L4).
                         self.staging = r.is_ok().then_some(Staging {
                             index,
                             owner,
-                            last_ms: now,
+                            last_ms: now_ms(),
                         });
                         if r.is_err() {
                             self.fs.abandon_replace();

@@ -687,9 +687,12 @@ latter briefly to add the region.
 - At startup the driver reads the GPT (`aricode-gpt`, header and table CRC)
   and announces the partitions; the xtask test disk carries a protective
   MBR, a GPT with backup and an `ARI0` partition of type AriCodeOS.
-- A request the device does not complete (a 2 s timeout with the
+- A request the device does not complete (a 30 s timeout with the
   descriptors still in the ring, an unexpected used entry, or
-  `DEVICE_NEEDS_RESET`) answers `Io`; the driver keeps the client's buffer
+  `DEVICE_NEEDS_RESET`) answers `Io` (30 s, the window Linux gives disk
+  commands: a busy host disk took over 2 s, incident 0043; a completion
+  found in the used ring at the deadline is taken and recorded as
+  `blk irq missing`); the driver keeps the client's buffer
   handle, resets the device (bounded, virtio 1.2 2.4), negotiates the same
   features, creates queue 0 again on its memory, and only then releases
   the buffer (`blk buf kept`, `blk reset`, `blk buf released`). Three
