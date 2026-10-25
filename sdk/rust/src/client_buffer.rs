@@ -118,7 +118,8 @@ pub enum Kept {
 /// may write into such a buffer at any time, so its handle stays open:
 /// a handle keeps the DMA buffer allocated whatever the client does and
 /// whatever the mapping cache evicts (ADR 0038), and its IOMMU entry, if
-/// any, lives as long as the buffer. The driver releases the buffers once
+/// any, lives as long as the driver holds a handle or a mapping of it
+/// (incident 0039). The driver releases the buffers once
 /// the device cannot reach them any more (the device or its queue was
 /// reset, the slot was confirmed released) or keeps them for good when it
 /// never can know. At most `N` are held; more are kept for good at once.
