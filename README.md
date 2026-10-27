@@ -16,7 +16,7 @@ Design decisions are recorded as ADRs in
 [docs/decisions/](docs/decisions/) and the branch flow (git flow) in
 [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-**Status:** 0.14.0 (2026-10-24). All 35 roadmap phases (0 to 34) are
+**Status:** 0.15.0 (2026-10-27). All 35 roadmap phases (0 to 34) are
 implemented and tested in QEMU, as are stages 1 to 4 of the post-roadmap
 sequence (observable recovery, a useful session, limits and updates,
 external applications) and the part of stage 5 that needs no hardware
@@ -147,7 +147,7 @@ shell on your terminal (quit with Ctrl-A X):
 
 ```bash
 cargo xtask usb-image
-docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.14.0 .
+docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.15.0 .
 docker run --rm -it aricodeos
 ```
 

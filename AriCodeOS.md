@@ -3959,6 +3959,52 @@ files (incident 0026), one SSH command that came back empty and was never
 reproduced (incident 0025), EHCI hubs and split transactions only
 verifiable on hardware.
 
+## 94.15 AriCodeOS 0.15
+
+**Status: completed (2026-10-27), tag `v0.15.0`.** The version of the
+failure-pattern review: a week of public vulnerability news (OpenSSH,
+PHP2Shell, Node, Java's TLS, rustls' certificate checks) read not for
+their languages but for their methods, and every place AriCodeOS made the
+same kind of mistake fixed. 47 findings (docs/audits/2026-10-25-failure-
+patterns.md), each on its own branch with an incident, a reproduction
+before the fix where one was possible and an independent audit; sixteen
+incidents (0028 to 0043) and seven ADRs (0049 to 0055).
+
+- Authority closed on every path: the file service refuses a request
+  whose session is gone, sshd keeps its own files (ADR 0050), every
+  graphical program gets a compositor session that owns its windows (ADR
+  0052), and no application gets the raw keyboard (ADR 0053);
+- devices checked, not trusted: the addresses a PCI device reports are
+  checked against its BARs and the kernel's memory (ADR 0051), the
+  virtqueue keeps its own bookkeeping, xHCI/EHCI offsets are bounded, and
+  a driver's device loses a client buffer the driver gave back (incident
+  0039);
+- error paths that clean up: a failed spawn frees its address space, a
+  partial IOMMU map is rolled back, init closes what a failed launch made,
+  and the supervisor no longer relaunches a service it gave up on;
+- storage and parsers bounded: GPT tables streamed, AriFS layout checked
+  and a volume poisoned after a failed commit, the WASM interpreter's fuel
+  counting work and imports paying for theirs (ADR 0055);
+- network and crypto: TCP closing deadlines, port 22 reserved for sshd,
+  random DHCP and DNS identifiers, strict SSH key exchange required,
+  constant-time Ed25519 signing, certificate validity checked against a
+  release floor without a clock, a TLS seed that never falls back to
+  zeros, and a list of distrusted keys refused anywhere in a chain (ADR
+  0054) carrying the eight compromised eMudhra intermediates;
+- the event ring shared fairly between processes (incident 0040);
+- found on the way: the screen console repainted the whole screen per
+  line, so test results depended on where the kernel image fell in memory
+  (incident 0031), and virtio-blk gave up on requests a busy host disk
+  took over 2 s (incident 0043);
+- verified: the full suite, 197 scenarios with 1 and with 4 CPUs, and dev
+  build 12 on the reference laptop (network, USB keyboard and storage, SSH
+  with an unchanged host key, HTTPS to GitHub and Google).
+
+Still the owner's: agents outside the trusted base (ADR 0041), the driver
+licence (ADR 0042), downloads over 6 MiB and apps over 32 KiB. Left as
+stated by the review: the common-name fallback and wildcards over public
+suffixes in X.509, and its informational findings.
+
 ---
 
 # 95. Real hardware: the right moment

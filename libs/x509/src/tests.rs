@@ -864,11 +864,17 @@ fn distrusted_keys_are_refused_anywhere_in_the_chain() {
         verify_chain_with(&chain, &[RSA_ROOT, EC_ROOT], &root, host, Some(NOW)).err(),
         Some(Error::Distrusted)
     );
-    // The default list is what verify_chain applies.
-    assert_eq!(
-        verify_chain(&chain, &[RSA_ROOT], host, Some(NOW)).is_ok(),
-        roots::DISTRUSTED.is_empty()
-    );
+    // The default list is what verify_chain applies, and names none of the
+    // test keys.
+    verify_chain(&chain, &[RSA_ROOT], host, Some(NOW)).unwrap();
+    for der in [RSA_LEAF, RSA_INT, RSA_ROOT] {
+        assert!(!roots::DISTRUSTED.contains(&spki(der)));
+    }
+    // Every entry is a distinct key.
+    let mut keys = roots::DISTRUSTED.to_vec();
+    keys.sort_unstable();
+    keys.dedup();
+    assert_eq!(keys.len(), roots::DISTRUSTED.len());
 }
 
 #[test]
@@ -915,4 +921,20 @@ fn a_key_has_one_encoding() {
     let mut extra = alg[2..].to_vec();
     extra.extend_from_slice(&[0x05, 0x00]);
     assert!(cert::parse_public_key(&rewrap(&extra)).is_err());
+}
+
+#[test]
+fn a_compromised_emudhra_key_is_refused() {
+    // EM DV TLS CA - G3B as emSign issued it (certificate SHA-256
+    // 42C4ACCD...8BA1493), one of the eight eMudhra intermediates whose
+    // keys were compromised in October 2026. Not generated: fetched from
+    // the incident's published list and checked against Go's crypto/x509.
+    let der = cert!("emudhra-dv-tls-g3b");
+    let c = Certificate::parse(der).unwrap();
+    assert!(roots::DISTRUSTED.contains(&aricode_crypto::sha256::sha256(c.spki)));
+    // Pinned as a trust anchor or sent as a leaf, it is refused.
+    assert_eq!(
+        verify_chain(&[der], &[der], "example.com", None).err(),
+        Some(Error::Distrusted)
+    );
 }
