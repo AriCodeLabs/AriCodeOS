@@ -174,6 +174,22 @@ removed on `fix/compositor-ownership`, ADR 0053).
   key queries answered `PK_OK` (queries for other keys already counted)
   count against the ten authentication requests of a connection;
   reaching the limit disconnects and is logged.
+- 2026-10-27, infos, on `fix/kernel-infos` (incident 0047, each
+  reproduced on develop first):
+  - handle generations: a table uses every position before reusing one
+    (oldest free first) and a position moves to another index when its
+    generation runs out, so a closed value comes back after 255-256 *
+    65535 reuses of its position (1.7 * 10^7 to 4 * 10^9 closes in the
+    table) instead of 65535 (ADR 0057; host test
+    `a_stale_handle_never_resolves_again`);
+  - DMA quota: a `dma_alloc` that fails after its charge gives it back
+    (`memory.dma_lifetime`, `dma_refund`);
+  - `map_uc` windows: a PCI function's MSI-X window is mapped by its first
+    claim and reused by every later one, so driver restarts map nothing
+    new (`drivers.pci_reap`, nine more claims per function);
+  - typed-ahead console input: what a dead reader left unread, and what
+    arrives before the next reader, is discarded and logged (ADR 0057;
+    new scenario `console.orphan_input`).
 
 ## Fix plan
 

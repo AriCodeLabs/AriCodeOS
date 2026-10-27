@@ -550,6 +550,8 @@ pub fn console_flush(pid: Pid) {
 
 fn finish(pid: Pid, status: ExitStatus) -> ! {
     console_flush(pid);
+    // Before anyone can see the exit: a successor must not read first.
+    crate::console_input::process_gone(pid.0);
     let (name, waiters) = {
         let mut procs = PROCESSES.lock();
         let p = procs.get_mut(&pid).expect("process in the table");
@@ -960,8 +962,38 @@ pub fn dma_lifetime_selftest() {
         ExitStatus::Exited(1),
         "dma lifetime: mmio_map beyond the quota must be refused"
     );
+
+    // 4. An allocation that fails after its quota charge gives the charge
+    //    back (incident 0047): with two pages of quota, four requests that
+    //    find the handle table full leave room for one page.
+    let pid = spawn_with_handles_and_arg(
+        "dma_refund",
+        crate::user::programs::by_name("dma_refund").expect("dma_refund in the initrd"),
+        alloc::vec![(
+            crate::object::KernelObject::new(crate::object::ObjectKind::Hardware),
+            aricode_handles::Rights::MANAGE
+        )],
+        0,
+        2 * PAGE_SIZE,
+    )
+    .expect("dma_refund");
+    let mut waited_ms = 0;
+    while !exited(pid) {
+        assert!(
+            waited_ms < 10_000,
+            "dma lifetime: dma_refund did not finish"
+        );
+        scheduler::sleep_ms(10);
+        waited_ms += 10;
+    }
+    let used = PROCESSES.lock().get(&pid).map(|p| p.dma_used);
+    assert_eq!(
+        (wait(pid), used),
+        (ExitStatus::Exited(0), Some(PAGE_SIZE)),
+        "dma lifetime: failed allocations must give their quota charge back (exit status, DMA charged)"
+    );
     info!(
-        "dma lifetime selftest ok ({} frames kept by a mapping after the last handle, freed on reap and on mmio_unmap; mapping beyond the quota refused)",
+        "dma lifetime selftest ok ({} frames kept by a mapping after the last handle, freed on reap and on mmio_unmap; mapping beyond the quota refused; failed allocations refunded)",
         LEN / PAGE_SIZE
     );
 }
@@ -1034,7 +1066,9 @@ fn exited(pid: Pid) -> bool {
 }
 
 /// Charges `len` bytes of DMA to the current process's quota; `false` if it
-/// would exceed it (the quota is cumulative: allocations are not refunded).
+/// would exceed it. The quota is cumulative: a buffer the process got stays
+/// charged after it is freed; an allocation that fails is refunded
+/// (`refund_dma`).
 pub fn charge_dma(len: u64) -> bool {
     let Some(pid) = current_pid() else {
         return true;
@@ -1048,6 +1082,17 @@ pub fn charge_dma(len: u64) -> bool {
     }
     p.dma_used += len;
     true
+}
+
+/// Gives back a `charge_dma` of `len` bytes whose allocation failed after
+/// it was charged (incident 0047).
+pub fn refund_dma(len: u64) {
+    let Some(pid) = current_pid() else {
+        return;
+    };
+    if let Some(p) = PROCESSES.lock().get_mut(&pid) {
+        p.dma_used = p.dma_used.saturating_sub(len);
+    }
 }
 
 /// Snapshot of the process table for `system_info`.

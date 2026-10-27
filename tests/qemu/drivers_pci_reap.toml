@@ -6,7 +6,8 @@
 # (the supervisor's restart path: the new driver turns it on after its own
 # reset). This checks the kernel's bookkeeping and the command register; a
 # device that keeps writing after its driver died is not something QEMU
-# emulates.
+# emulates. Incident 0047: nine more claims of each function, as restarts
+# make them, map no new uncached MSI-X window.
 name = "drivers.pci_reap"
 description = "test=pci_reap: bus mastering cleared before the dead driver's memory is freed, FLR, claimed again with bus mastering off"
 level = "full"
@@ -23,6 +24,7 @@ serial_contains = [
     "header restored after the function level reset",
     "claimed again (the previous driver died)",
     "pci reap selftest ok (",
+    "9 more claims each, uncached windows unchanged at",
     "ARICODEOS_KERNEL_READY",
 ]
 serial_order = [

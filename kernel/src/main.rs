@@ -366,6 +366,7 @@ fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
         "random" => random::selftest(),
         "console_input" => console_input::selftest(),
         "console_ps2" => console_input::ps2_selftest(),
+        "console_orphan" => console_input::orphan_selftest(),
         "process_reap" => user::process::reap_selftest(),
         "spawn_oom" => user::process::spawn_oom_selftest(),
         "dma_lifetime" => user::process::dma_lifetime_selftest(),

@@ -32,6 +32,11 @@ struct Ring {
     head: usize,
     len: usize,
     dropped: u64,
+    /// Process that read the console last: what is queued is typed for it.
+    reader: Option<u32>,
+    /// That reader died (it is named here until a new one reads): what is
+    /// queued meanwhile was typed for it too (incident 0047).
+    dead_reader: Option<u32>,
 }
 
 impl Ring {
@@ -41,7 +46,16 @@ impl Ring {
             head: 0,
             len: 0,
             dropped: 0,
+            reader: None,
+            dead_reader: None,
         }
+    }
+    /// Empties the ring; returns how many bytes it held.
+    fn discard(&mut self) -> usize {
+        let n = self.len;
+        self.head = 0;
+        self.len = 0;
+        n
     }
     fn push(&mut self, b: u8) {
         if self.len == CAPACITY {
@@ -264,6 +278,50 @@ pub fn on_irq() {
     WAITERS.wake_all();
 }
 
+/// Process `pid` is about to read the console (`console_read`). If the
+/// reader before it died, what is still queued was typed for that reader
+/// (a shell that crashed with a line half read): it is discarded instead
+/// of reaching this one, where it could run as a command (incident 0047).
+/// Input typed before anyone has read, at boot, stays for the first
+/// reader.
+pub fn take(pid: u32) {
+    let (discarded, dead) = {
+        let mut ring = RING.lock();
+        if ring.reader == Some(pid) {
+            return;
+        }
+        ring.reader = Some(pid);
+        match ring.dead_reader.take() {
+            Some(dead) => (ring.discard(), dead),
+            None => return,
+        }
+    };
+    if discarded > 0 {
+        info!(
+            "console: {discarded} byte(s) typed after its reader (process {dead}) died discarded"
+        );
+    }
+}
+
+/// Process `pid` is finishing. If it was the console's reader, what it
+/// left unread is discarded, and so is whatever arrives before the next
+/// reader takes the console (`take`). Called before anyone can see that
+/// it exited, so its successor never reads first.
+pub fn process_gone(pid: u32) {
+    let discarded = {
+        let mut ring = RING.lock();
+        if ring.reader != Some(pid) {
+            return;
+        }
+        ring.reader = None;
+        ring.dead_reader = Some(pid);
+        ring.discard()
+    };
+    if discarded > 0 {
+        info!("console: {discarded} typed byte(s) discarded: their reader (process {pid}) is gone");
+    }
+}
+
 /// Copies up to `buf.len()` available bytes; waits for the first one until
 /// `deadline` (ticks). Returns 0 only if the deadline expired.
 pub fn read(buf: &mut [u8], deadline: Option<u64>) -> usize {
@@ -374,4 +432,37 @@ pub fn selftest() {
             line.push(b);
         }
     }
+}
+
+/// Self-test (`test=console_orphan`, incident 0047): a reader takes one
+/// byte of a line the runner types after `CONSOLE_ORPHAN_READY` and dies
+/// with the rest unread, as a crashing shell would; the reader started
+/// next must not receive those bytes (they could run as a command).
+pub fn orphan_selftest() {
+    use crate::object::{KernelObject, ObjectKind};
+    use crate::user::process::{self, ExitStatus};
+    use aricode_handles::Rights;
+
+    let run = |arg: u64| {
+        let pid = process::spawn_with_handles_and_arg(
+            "console_orphan",
+            crate::user::programs::by_name("console_orphan").expect("console_orphan in the initrd"),
+            alloc::vec![(KernelObject::new(ObjectKind::Console), Rights::READ)],
+            arg,
+            0,
+        )
+        .expect("console_orphan");
+        process::wait(pid)
+    };
+    let first = run(0);
+    assert!(
+        matches!(first, ExitStatus::Killed(_)),
+        "the first reader must die by its fault: {first:?}"
+    );
+    assert_eq!(
+        run(1),
+        ExitStatus::Exited(0),
+        "console: bytes typed for a reader that died reached the next one"
+    );
+    info!("console orphan selftest ok (what a dead reader left unread did not reach the next one)");
 }
