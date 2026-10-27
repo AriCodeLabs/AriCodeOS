@@ -50,7 +50,5 @@ issues any more rely on.
   its CN: the TLS unit tests that replay it accept it through a test-only
   switch (`trust_pinned_leaf`, compiled only under `cfg(test)`), and a test
   checks that the real path refuses it.
-- Not done: wildcards over public suffixes (`*.co.uk` is accepted, since
-  it has two labels after the `*`). Refusing them needs the Public Suffix
-  List in the trust base; public CAs are already forbidden to issue such
-  names, so it remains an open item of the audit.
+- Wildcards over public suffixes (`*.co.uk`), left open here, are refused
+  since ADR 0062.

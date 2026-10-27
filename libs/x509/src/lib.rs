@@ -19,6 +19,7 @@ extern crate alloc;
 mod cert;
 mod der;
 pub mod roots;
+mod suffixes;
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -341,11 +342,16 @@ fn check_name_constraints(
 fn name_matches(pattern: &str, host: &str) -> bool {
     let pattern = pattern.strip_suffix('.').unwrap_or(pattern);
     match pattern.strip_prefix("*.") {
-        // At least two labels after the wildcard: no `*.com`.
-        Some(base) if !base.contains('*') && base.contains('.') => match host.split_once('.') {
-            Some((label, rest)) => !label.is_empty() && rest.eq_ignore_ascii_case(base),
-            None => false,
-        },
+        // At least two labels after the wildcard (no `*.com`), and not a
+        // public suffix (no `*.co.uk`, ADR 0062).
+        Some(base)
+            if !base.contains('*') && base.contains('.') && !suffixes::is_public_suffix(base) =>
+        {
+            match host.split_once('.') {
+                Some((label, rest)) => !label.is_empty() && rest.eq_ignore_ascii_case(base),
+                None => false,
+            }
+        }
         Some(_) => false,
         None => !pattern.contains('*') && pattern.eq_ignore_ascii_case(host),
     }

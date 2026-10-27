@@ -1,7 +1,8 @@
 # Incident 0048: A certificate's common name was read as a host name
 
 - Opened: 2026-10-27. Status: fixed on `fix/x509-no-cn-fallback`
-  (ADR 0058).
+  (ADR 0058) and, for wildcards over public suffixes, on
+  `fix/x509-public-suffix-wildcards` (ADR 0062).
 - Found by: the failure-pattern audit of 2026-10-25 (audit D, L1; the
   part of L23 left open by incident 0029). Not seen on a machine.
 - Environment: every HTTPS connection (`aricode-tls` through
@@ -62,6 +63,14 @@ Also from the audit: the shell names the subjectAltName in its message,
 and ADR 0058 no longer claims Firefox ignores the common name in every
 case.
 
-## Left open
+## Wildcards over public suffixes (2026-10-27)
 
-Wildcards over public suffixes (`*.co.uk`): ADR 0058, "Consequences".
+Left open by the fix above and closed on
+`fix/x509-public-suffix-wildcards` (ADR 0062). Evidence: at develop
+`49b3c28`, `name_matches("*.co.uk", "example.co.uk")` returned true (the
+wildcard needed only two labels after it); the host test
+`no_wildcard_over_a_public_suffix` fails with the suffix check disabled
+(`*.co.uk matched example.co.uk`). The base of a `*.` name is now checked
+against the ICANN section of the Public Suffix List, shipped as an
+MPL-2.0 extract with the owner's approval; the private section
+(`github.io`) is not used.

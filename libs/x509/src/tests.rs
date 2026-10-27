@@ -993,3 +993,35 @@ fn an_ip_host_matches_an_ip_address_entry() {
         Err(Error::NameConstraint)
     );
 }
+
+#[test]
+fn no_wildcard_over_a_public_suffix() {
+    // ICANN suffixes of two labels, any case, a trailing dot.
+    for (pattern, host) in [
+        ("*.co.uk", "example.co.uk"),
+        ("*.CO.UK", "example.co.uk"),
+        ("*.co.uk.", "example.co.uk"),
+        ("*.com.au", "shop.com.au"),
+        ("*.xn--55qx5d.hk", "a.xn--55qx5d.hk"),
+    ] {
+        assert!(!name_matches(pattern, host), "{pattern} matched {host}");
+    }
+    // A wildcard rule (`*.ck`) makes every name under it a suffix, but not
+    // its exception (`!www.ck`); deeper names stay registrable.
+    assert!(!name_matches("*.foo.ck", "a.foo.ck"));
+    assert!(name_matches("*.www.ck", "a.www.ck"));
+    assert!(name_matches("*.city.kobe.jp", "a.city.kobe.jp"));
+    // Registrable names under a suffix, and the private section, are fine.
+    assert!(name_matches("*.example.co.uk", "www.example.co.uk"));
+    assert!(name_matches("*.github.io", "lynxcraft.github.io"));
+    assert!(name_matches("*.example.com", "www.example.com"));
+    // An exact name equal to a suffix is no wildcard: matching is exact.
+    assert!(name_matches("co.uk", "co.uk"));
+
+    assert!(suffixes::is_public_suffix("co.uk") && suffixes::is_public_suffix("Co.Uk"));
+    assert!(suffixes::is_public_suffix("anything.ck") && !suffixes::is_public_suffix("www.ck"));
+    assert!(!suffixes::is_public_suffix("city.kobe.jp") && suffixes::is_public_suffix("x.kobe.jp"));
+    assert!(
+        !suffixes::is_public_suffix("example.co.uk") && !suffixes::is_public_suffix("github.io")
+    );
+}
