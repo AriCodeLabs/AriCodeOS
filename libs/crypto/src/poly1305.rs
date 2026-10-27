@@ -150,6 +150,14 @@ impl Poly1305 {
     }
 }
 
+impl Drop for Poly1305 {
+    fn drop(&mut self) {
+        crate::wipe(&mut self.r);
+        crate::wipe(&mut self.h);
+        crate::wipe(&mut self.s);
+    }
+}
+
 /// Tag of `msg` under the one-time `key`.
 pub fn tag(key: &[u8; KEY_LEN], msg: &[u8]) -> [u8; TAG_LEN] {
     let mut p = Poly1305::new(key);
@@ -201,6 +209,15 @@ mod tests {
             tag(&key, &msg).to_vec(),
             hex("03000000000000000000000000000000")
         );
+    }
+
+    #[test]
+    fn key_is_wiped_when_dropped() {
+        let mut p = core::mem::ManuallyDrop::new(Poly1305::new(&[0xA5; 32]));
+        p.update_padded(b"data");
+        // SAFETY: dropped once; afterwards only plain integers are read.
+        unsafe { core::mem::ManuallyDrop::drop(&mut p) };
+        assert_eq!((p.r, p.h, p.s), ([0; 5], [0; 5], [0; 4]));
     }
 
     extern crate std;

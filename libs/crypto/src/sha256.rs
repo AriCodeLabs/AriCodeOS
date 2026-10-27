@@ -117,11 +117,21 @@ impl Sha256 {
         let mut block = self.buf;
         block[56..].copy_from_slice(&bits.to_be_bytes());
         self.compress(&block);
+        crate::wipe(&mut block);
         let mut out = [0u8; DIGEST_LEN];
         for (o, h) in out.as_chunks_mut::<4>().0.iter_mut().zip(self.h) {
             *o = h.to_be_bytes();
         }
         out
+    }
+}
+
+/// The state is as secret as what was hashed (a seed, an HMAC key, a key
+/// exchange's shared secret): wiped when dropped.
+impl Drop for Sha256 {
+    fn drop(&mut self) {
+        crate::wipe(&mut self.h);
+        crate::wipe(&mut self.buf);
     }
 }
 
@@ -190,5 +200,14 @@ mod tests {
         }
         assert_eq!(s.finish(), sha256(&data));
         let _ = hex;
+    }
+
+    #[test]
+    fn state_is_wiped_when_dropped() {
+        let mut s = core::mem::ManuallyDrop::new(Sha256::new());
+        s.update(b"secret");
+        // SAFETY: dropped once; afterwards only plain integers are read.
+        unsafe { core::mem::ManuallyDrop::drop(&mut s) };
+        assert_eq!((s.h, s.buf), ([0; 8], [0; 64]));
     }
 }
