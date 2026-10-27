@@ -201,6 +201,13 @@ fix apart.
   scenarios, 0 failed; full suite with 1 CPU, 200 scenarios, 0 failed;
   with `--cpus 4`, 200 scenarios, 1 failed: `iommu.isolation` (below).
   Not rerun.
+- On `f580dd4` (the audit follow-up, after merging develop): `cargo xtask
+  check`; `cargo xtask test --level unit` (726 host tests); `cargo xtask
+  test --all --area pci,drivers,interrupts`: 28 scenarios, 0 failed; full
+  suite with 1 CPU, 202 scenarios, 0 failed; with `--cpus 4`, 202
+  scenarios, 0 failed (`iommu.isolation` passed this time; its failure
+  above stays open). Host at most 80 °C, the thermal guard paused
+  nothing.
 
 ## Observed during the tests: `iommu.isolation` failed once with 4 CPUs
 
