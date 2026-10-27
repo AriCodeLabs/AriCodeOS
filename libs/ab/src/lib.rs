@@ -237,34 +237,53 @@ pub fn confirm(state: BootState, slot: Slot) -> BootState {
     }
 }
 
+/// What AriBoot says it booted, from the keys it alone writes on the
+/// command line (ADR 0045).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Booted {
+    /// The slot, and whether it was booted pending confirmation
+    /// (`boot_slot`, `boot_pending`); `None` for the ESP.
+    pub slot: Option<(Slot, bool)>,
+    /// The booted image is a development build (`boot_channel=dev`): the
+    /// loader verified it, so it trusts the development channel's key.
+    pub dev_channel: bool,
+}
+
 /// The state to write over a damaged record (ADR 0060), rebuilt from
-/// what AriBoot booted, never from the damaged bytes: `booted` is the slot
-/// and whether it awaits confirmation (`boot_slot`, `boot_pending` on the
-/// command line, written by AriBoot alone), `None` for the ESP.
+/// what AriBoot booted, never from the damaged bytes; `None` when that
+/// cannot be known.
 ///
-/// - From a slot, confirmed: that slot is active, nothing pending; AriBoot
-///   booted it from a valid record that said so (or from its own reading
-///   of a damaged one, which is slot A).
-/// - From a slot, pending: the other slot is active (a pending slot is
-///   never the active one, [`schedule`]); the pending slot is kept with
-///   no tries left, so the next boot returns to the confirmed system, as
-///   when a trial runs out: whether init confirmed it before the damage
-///   is not known.
+/// - From a slot, confirmed (no `boot_pending`): that slot is active and
+///   stays so for the whole boot, since only init's confirmation of a
+///   pending boot changes the active slot. AriBoot booted it from a valid
+///   record that said so, or from its own reading of a damaged one (slot
+///   A). A trial scheduled since (`update apply`, `upgrade`, `update
+///   rollback`) is dropped: the running system stays, and the install can
+///   be made again.
+/// - From a slot, pending: `None`. Init confirms the slot once the boot
+///   services work, but a confirmation that fails is only logged (the
+///   shell and sshd start either way), and `boot_pending` stays on the
+///   command line all boot. Whether the running slot is now the active
+///   one or still on trial is unknown, and either guess can be worse than
+///   AriBoot's own reading: taking it as on trial makes it the install
+///   target, or boots the slot scheduled after it as confirmed; taking it
+///   as confirmed skips a trial that failed. The record is left to AriBoot.
 /// - From the ESP: AriBoot's own reading, A active ([`BootState::fresh`]),
 ///   which it does not write when A does not boot.
 ///
-/// The next boot is then never less conservative than AriBoot's reading
-/// of the damaged record (A active), and keeps the running system where
-/// that reading would have switched to slot A.
-pub fn recovered(booted: Option<(Slot, bool)>) -> BootState {
-    match booted {
-        None => BootState::fresh(Slot::A),
-        Some((slot, false)) => BootState::fresh(slot),
-        Some((slot, true)) => BootState {
-            pending: Some((slot, 0)),
-            ..BootState::fresh(slot.other())
-        },
-    }
+/// `loader_dev_channel` is set only when the running image is a
+/// development build; otherwise it stays off until AriBoot writes the
+/// record on the next boot.
+pub fn recovered(booted: Booted) -> Option<BootState> {
+    let active = match booted.slot {
+        None => Slot::A,
+        Some((slot, false)) => slot,
+        Some((_, true)) => return None,
+    };
+    Some(BootState {
+        loader_dev_channel: booted.dev_channel,
+        ..BootState::fresh(active)
+    })
 }
 
 /// State after installing a new image in the inactive slot.
@@ -715,6 +734,13 @@ mod tests {
         );
     }
 
+    fn booted(slot: Option<(Slot, bool)>) -> Booted {
+        Booted {
+            slot,
+            dev_channel: false,
+        }
+    }
+
     #[test]
     fn a_damaged_state_is_rebuilt_from_the_booted_slot() {
         // Incident 0045: B active and booted, the record then damaged. The
@@ -723,23 +749,56 @@ mod tests {
         let mut sector = BootState::fresh(Slot::B).encode();
         sector[60] ^= 1;
         assert_eq!(BootState::decode(&sector), None);
-        let state = recovered(Some((Slot::B, false)));
+        let state = recovered(booted(Some((Slot::B, false)))).unwrap();
         assert_eq!((state.active, state.pending), (Slot::B, None));
         assert_eq!(choose(state).slot, Slot::B, "the next boot keeps B");
-        // Pending B (A confirmed): the trial ends, the next boot is A.
-        let state = recovered(Some((Slot::B, true)));
-        assert_eq!((state.active, state.pending), (Slot::A, Some((Slot::B, 0))));
-        assert_eq!(choose(state).slot, Slot::A);
-        let state = recovered(Some((Slot::A, true)));
+        // B confirmed, then an install into A scheduled and its write torn:
+        // the trial is dropped, B stays.
+        let scheduled = schedule(BootState::fresh(Slot::B), Slot::A);
+        assert_eq!(choose(scheduled).slot, Slot::A);
         assert_eq!(choose(state).slot, Slot::B);
         // From the ESP nothing is known: AriBoot's own reading.
-        assert_eq!(recovered(None), BootState::fresh(Slot::A));
-        assert_eq!(recovered(Some((Slot::A, false))), BootState::fresh(Slot::A));
+        assert_eq!(recovered(booted(None)), Some(BootState::fresh(Slot::A)));
+        // The development flag only from a running development build.
+        let dev = recovered(Booted {
+            slot: Some((Slot::A, false)),
+            dev_channel: true,
+        })
+        .unwrap();
+        assert!(dev.loader_dev_channel);
+        assert!(!recovered(booted(None)).unwrap().loader_dev_channel);
         // What is written decodes as itself.
-        for booted in [None, Some((Slot::A, true)), Some((Slot::B, false))] {
-            let s = recovered(booted);
+        for b in [None, Some((Slot::A, false)), Some((Slot::B, false))] {
+            let s = recovered(booted(b)).unwrap();
             assert_eq!(BootState::decode(&s.encode()), Some(s));
         }
+    }
+
+    /// Audit of incident 0045, H1: init confirms a pending slot before the
+    /// shell starts, so an updater run sees `boot_pending` for a slot that
+    /// is usually active already. Rebuilt as "the other slot active, this
+    /// one pending with no tries", the running slot became the install
+    /// target; and after a second install was scheduled and its write
+    /// tore, the next boot took the new, never tried image as confirmed.
+    #[test]
+    fn a_pending_boot_leaves_a_damaged_state_to_ariboot() {
+        // (a) B confirmed, A installed: AriBoot boots A pending, init
+        // confirms A, then the record is damaged.
+        let d = choose(schedule(BootState::fresh(Slot::B), Slot::A));
+        assert_eq!((d.slot, d.pending), (Slot::A, true));
+        let confirmed = confirm(d.state, Slot::A);
+        assert_eq!(confirmed.active.other(), Slot::B, "the true target");
+        assert_eq!(recovered(booted(Some((Slot::A, true)))), None);
+        // (b) Same boot, then B installed and scheduled, and a second
+        // install into B tears the record: AriBoot's own reading boots A,
+        // the system that runs.
+        let scheduled = schedule(confirmed, Slot::B);
+        assert_eq!(choose(scheduled).slot, Slot::B);
+        assert_eq!(recovered(booted(Some((Slot::A, true)))), None);
+        assert_eq!(choose(BootState::fresh(Slot::A)).slot, Slot::A);
+        // (c) A confirmation that failed (the boot goes on, logged): the
+        // same answer, since the updater cannot tell it from (a).
+        assert_eq!(recovered(booted(Some((Slot::B, true)))), None);
     }
 
     #[test]

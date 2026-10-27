@@ -2,8 +2,9 @@
 # machine runs stable 1 from slot A and its `[floor]` (once stable 3) is
 # damaged. `update apply` refuses the validly signed stable 2 in UPDATE,
 # which could be below the lost floor, and records it; the floor is not
-# replaced. `update apply --allow-downgrade` rewrites it as the running
-# release, says so, and installs.
+# replaced. `update apply --allow-downgrade` installs, and only once the
+# image went into its slot rewrites the floor as the running release, and
+# says so (audit of incident 0045, L4).
 name = "update.apply_floor_damaged"
 description = "a damaged stable floor refuses stable images until --allow-downgrade rewrites it"
 level = "full"
@@ -21,12 +22,13 @@ stdin = ["update apply", "cat updater/state", "update apply --allow-downgrade", 
 [boots.expect]
 exit = 33
 serial_contains = [
-    "updater: the stable floor in updater/state is damaged: the newest stable release this machine ran is unknown, so stable releases are refused without --allow-downgrade (which rewrites it as the running release)",
+    "updater: the stable floor in updater/state is damaged: the newest stable release this machine ran is unknown, so stable releases are refused without --allow-downgrade (an install forced with it rewrites the floor as the running release)",
     "updater: system: refused: the stable floor is damaged, so stable 2 could be older than a release this machine ran (--allow-downgrade to install it)",
     "update: updater exited with 58",
     "stable 3x",
-    "updater: the stable floor in updater/state was damaged: rewritten as stable 1, the running release (--allow-downgrade); any newer release this machine ran is forgotten",
+    "updater: system: installing 2 with the stable floor damaged (--allow-downgrade)",
     "updater: installed into slot B",
+    "updater: the stable floor in updater/state was damaged: rewritten as stable 1, the running release (--allow-downgrade); any newer release this machine ran is forgotten",
     "stable 1",
     ": upd-floor-refused (code 58)",
     ": upd-floor-rewritten (code 58)",
@@ -35,7 +37,7 @@ serial_contains = [
 serial_order = [
     "update: updater exited with 58",
     "stable 3x",
-    "rewritten as stable 1",
     "updater: installed into slot B",
+    "rewritten as stable 1",
 ]
 serial_absent = ["KERNEL PANIC", "upd-floor-write", "upd-no-services"]

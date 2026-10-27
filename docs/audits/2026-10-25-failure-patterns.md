@@ -168,10 +168,11 @@ removed on `fix/compositor-ownership`, ADR 0053).
   encodings (1160 forgeries accepted before, none after).
 - 2026-10-27, info (`fix/updater-state`, incident 0045, ADR 0060): a boot
   state with a bad CRC is no longer read as fresh; the updater rewrites
-  it from what AriBoot booted and installs nothing in that run.
+  it from what AriBoot booted (never after a boot pending confirmation,
+  audit H1) and installs nothing in that run.
 - 2026-10-27, info (same branch): a damaged stable floor fails closed,
-  refusing every stable release until `--allow-downgrade` rewrites it as
-  the running release.
+  refusing every stable release until a stable install forced with
+  `--allow-downgrade` rewrites it as the running release once it went in.
 - 2026-10-27, info (same branch): `serve-update` answers 400 to a request
   line that is not `METHOD SP target SP HTTP/x.y` with a visible-ASCII
   target, logs it escaped, and redirects only to plain file names.

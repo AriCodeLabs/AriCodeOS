@@ -477,7 +477,7 @@ fn http_serve(mut stream: std::net::TcpStream, update: Option<&Path>) {
             break;
         }
     }
-    let Some(target) = request_target(&buf[..have]) else {
+    let Some((_, target)) = request_line(&buf[..have]) else {
         let _ = stream.write_all(BAD_REQUEST);
         return;
     };
@@ -543,17 +543,17 @@ fn http_serve(mut stream: std::net::TcpStream, update: Option<&Path>) {
     }
 }
 
-/// The answer to a request whose first line is not one [`request_target`]
+/// The answer to a request whose first line is not one [`request_line`]
 /// accepts.
 const BAD_REQUEST: &[u8] =
     b"HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\nConnection: close\r\n\r\nbad request";
 
-/// The target of an HTTP request, from its first line: `METHOD SP target
-/// SP HTTP/x.y CRLF`, the target visible ASCII only (RFC 9112, 3.2: no
-/// space, no control byte). `None` for anything else, which is answered
-/// 400: no byte a client sends reaches a response header or a log line
-/// raw (incident 0045).
-fn request_target(request: &[u8]) -> Option<&str> {
+/// The method and target of an HTTP request, from its first line: `METHOD
+/// SP target SP HTTP/x.y CRLF`, the method upper-case letters, the target
+/// visible ASCII only (RFC 9112, 3.2: no space, no control byte). `None`
+/// for anything else, which is answered 400: no byte a client sends
+/// reaches a response header or a log line raw (incident 0045).
+fn request_line(request: &[u8]) -> Option<(&str, &str)> {
     let line = request.split(|&b| b == b'\n').next()?.strip_suffix(b"\r")?;
     let mut parts = line.split(|&b| b == b' ');
     let (method, target, version) = (parts.next()?, parts.next()?, parts.next()?);
@@ -565,7 +565,10 @@ fn request_target(request: &[u8]) -> Option<&str> {
         && version.iter().all(visible)
         && !target.is_empty()
         && target.iter().all(visible);
-    valid.then(|| std::str::from_utf8(target).ok()).flatten()
+    let text = |b| std::str::from_utf8(b).ok();
+    valid
+        .then(|| Some((text(method)?, text(target)?)))
+        .flatten()
 }
 
 /// `bytes` for a log line: printable ASCII as it is (a backslash
@@ -718,15 +721,15 @@ fn serve_update_connection(mut stream: std::net::TcpStream, dir: &Path) {
         }
     }
     let request = &buf[..have];
-    let (response, what) = match request_target(request) {
-        Some(target) => {
+    let (response, what) = match request_line(request) {
+        Some((method, target)) => {
             let path = target.split('?').next().unwrap_or("/");
             let response = match mirror_route(path) {
                 Some(MirrorRoute::Redirect(r)) => r,
                 Some(MirrorRoute::Asset(asset)) => file_response(dir, asset),
                 None => file_response(dir, path.trim_start_matches('/')),
             };
-            (response, format!("GET {target}"))
+            (response, format!("{method} {target}"))
         }
         None => {
             let line = request.split(|&b| b == b'\n').next().unwrap_or_default();
@@ -1918,13 +1921,16 @@ mod tests {
 
     #[test]
     fn request_targets_and_log_text_are_checked() {
-        use super::{log_escaped, request_target};
+        use super::{log_escaped, request_line};
         use std::io::{Read, Write};
         assert_eq!(
-            request_target(b"GET /index HTTP/1.1\r\nHost: x\r\n\r\n"),
-            Some("/index")
+            request_line(b"GET /index HTTP/1.1\r\nHost: x\r\n\r\n"),
+            Some(("GET", "/index"))
         );
-        assert_eq!(request_target(b"GET /a?b=c HTTP/1.0\r\n"), Some("/a?b=c"));
+        assert_eq!(
+            request_line(b"HEAD /a?b=c HTTP/1.0\r\n"),
+            Some(("HEAD", "/a?b=c"))
+        );
         for bad in [
             &b"GET /index HTTP/1.1"[..],
             b"GET /index HTTP/1.1\n",
@@ -1938,7 +1944,7 @@ mod tests {
             b"GET /index FTP/1.1\r\n",
             b"",
         ] {
-            assert_eq!(request_target(bad), None, "{bad:?}");
+            assert_eq!(request_line(bad), None, "{bad:?}");
         }
         assert_eq!(log_escaped(b"/a\r\n\x1b[2J\\x"), r"/a\x0d\x0a\x1b[2J\\x");
         // The scenarios' server refuses such a line too.

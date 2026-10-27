@@ -1346,7 +1346,9 @@ latter briefly to add the region.
 - A boot state that does not decode is damaged, never fresh (ADR 0060):
   AriBoot boots A and rewrites it once A verifies; the updater rewrites
   it from what AriBoot booted (`boot_slot`, `boot_pending`;
-  `aricode_ab::recovered`) and installs nothing in that run
+  `aricode_ab::recovered`), never after a boot pending confirmation
+  (whether init confirmed it is not known; a reboot lets AriBoot rewrite
+  it), and installs nothing in that run
   (`upd-state-damaged`, code 60; scenario `update.state_damaged`).
 - xtask strips debug info from kernel and initrd (`strip
   --strip-debug` if available): the initrd goes from 4.8 MiB to 550 KiB and the
@@ -1831,7 +1833,8 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
 - The stable floor (`[floor]` of `updater/state`): the newest stable
   release the machine ran; a stable release below it is a downgrade,
   channel switch or not. A damaged floor refuses every stable release
-  until `--allow-downgrade` rewrites it as the running one
+  until a stable install forced with `--allow-downgrade` rewrites it as
+  the running one once it went in
   (`floor_for_run`, ADR 0060; `update.apply_floor_damaged`). A
   development build number seen with another
   commit is refused. xtask numbers development builds per host

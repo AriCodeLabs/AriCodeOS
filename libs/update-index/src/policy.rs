@@ -204,29 +204,41 @@ pub fn raise_floor(floor: Option<u32>, installed: Option<SystemId>) -> Option<u3
 /// The floor of one run (ADR 0060), from the `[floor]` section as read
 /// (`stored`) and the active system (`installed`), and the version to save
 /// when it changes. A sound floor is raised to the active stable release
-/// ([`raise_floor`]). A damaged one is never replaced silently, since
-/// whatever replaced it could be lower than what it held: it stays
-/// damaged, which refuses every stable release ([`decide_system`]), until
-/// the owner passes `--allow-downgrade`, the consent the floor asks for
-/// anyway; then it is rewritten as the active stable release, the newest
-/// one this machine is still known to have run. With a development build
-/// or an unknown system active there is nothing to rewrite it with.
+/// ([`raise_floor`]). A damaged one is never replaced here, since whatever
+/// replaced it could be lower than what it held: it stays damaged, which
+/// refuses every stable release ([`decide_system`]) until an install the
+/// owner forced rewrites it ([`floor_rewrite`]).
 pub fn floor_for_run(
     stored: Result<Option<u32>, DamagedFloor>,
     installed: Option<SystemId>,
-    allow_downgrade: bool,
 ) -> (StableFloor, Option<u32>) {
-    let at = |floor: Option<u32>| floor.map_or(StableFloor::Unset, StableFloor::At);
     match stored {
         Ok(floor) => {
             let raised = raise_floor(floor, installed);
-            (at(raised), raised.filter(|_| raised != floor))
+            (
+                raised.map_or(StableFloor::Unset, StableFloor::At),
+                raised.filter(|_| raised != floor),
+            )
         }
-        Err(DamagedFloor) => match raise_floor(None, installed) {
-            Some(running) if allow_downgrade => (StableFloor::At(running), Some(running)),
-            _ => (StableFloor::Damaged, None),
-        },
+        Err(DamagedFloor) => (StableFloor::Damaged, None),
     }
+}
+
+/// What to write over a damaged floor once a stable image was installed
+/// with `--allow-downgrade` (ADR 0060), the consent the floor asks for
+/// anyway: the active stable release, the newest one this machine is still
+/// known to have run. Only after the image verified and went into its slot
+/// (audit of incident 0045, L4): a refused or invalid image changes
+/// nothing. With a development build or an unknown system active there is
+/// nothing to write.
+pub fn floor_rewrite(
+    stored: Result<Option<u32>, DamagedFloor>,
+    installed: Option<SystemId>,
+    offered: SystemId,
+    allow_downgrade: bool,
+) -> Option<u32> {
+    let forced = stored.is_err() && allow_downgrade && offered.channel == Channel::Stable;
+    raise_floor(None, installed).filter(|_| forced)
 }
 
 /// The newest system image among the indexes: (index position, entry).
@@ -574,7 +586,7 @@ mod tests {
         let body = "stable 3x\n";
         assert_eq!(lists::parse_floor(body), Err(DamagedFloor));
         let running = id(Stable, 1, None);
-        let (floor, save) = floor_for_run(lists::parse_floor(body), Some(running), false);
+        let (floor, save) = floor_for_run(lists::parse_floor(body), Some(running));
         assert_eq!(
             (floor, save),
             (StableFloor::Damaged, None),
@@ -612,8 +624,8 @@ mod tests {
             ),
             SystemDecision::Install
         );
-        // --allow-downgrade installs and rewrites the floor as the running
-        // stable release.
+        // --allow-downgrade installs; the floor is rewritten as the running
+        // stable release only by the install that went in.
         let forced = SystemRules {
             allow_downgrade: true,
             ..rules
@@ -622,30 +634,43 @@ mod tests {
             decide_system(compare_system(Some(running), two), two, forced),
             SystemDecision::Install
         );
-        assert_eq!(
-            floor_for_run(lists::parse_floor(body), Some(running), true),
-            (StableFloor::At(1), Some(1))
-        );
-        // ... but not with a development build or an unknown system active.
+        let damaged = lists::parse_floor(body);
+        assert_eq!(floor_rewrite(damaged, Some(running), two, true), Some(1));
+        // ... not without --allow-downgrade, not for a development build,
+        // not over a sound floor, and not with a development build or an
+        // unknown system active.
         let dev7 = id(Dev, 7, Some("0123abc"));
+        assert_eq!(floor_rewrite(damaged, Some(running), two, false), None);
+        assert_eq!(floor_rewrite(damaged, Some(running), dev, true), None);
+        assert_eq!(floor_rewrite(Ok(Some(3)), Some(running), two, true), None);
         for installed in [Some(dev7), None] {
-            assert_eq!(
-                floor_for_run(Err(DamagedFloor), installed, true),
-                (StableFloor::Damaged, None)
-            );
+            assert_eq!(floor_rewrite(damaged, installed, two, true), None);
         }
         // A sound floor is raised and saved only when it changes.
         assert_eq!(
-            floor_for_run(Ok(Some(3)), Some(running), false),
+            floor_for_run(Ok(Some(3)), Some(running)),
             (StableFloor::At(3), None)
         );
         assert_eq!(
-            floor_for_run(Ok(Some(3)), Some(id(Stable, 5, None)), false),
+            floor_for_run(Ok(Some(3)), Some(id(Stable, 5, None))),
             (StableFloor::At(5), Some(5))
         );
         assert_eq!(
-            floor_for_run(Ok(None), Some(dev7), false),
+            floor_for_run(Ok(None), Some(dev7)),
             (StableFloor::Unset, None)
+        );
+    }
+
+    /// Audit of incident 0045, L4: `update apply --allow-downgrade` saved
+    /// the rewritten floor before UPDATE was even read, so an invalid or
+    /// development image still lowered it. Reading the floor never saves
+    /// over a damaged one, with or without the flag.
+    #[test]
+    fn reading_a_damaged_floor_never_saves_it() {
+        let running = id(Channel::Stable, 1, None);
+        assert_eq!(
+            floor_for_run(Err(DamagedFloor), Some(running)),
+            (StableFloor::Damaged, None)
         );
     }
 
