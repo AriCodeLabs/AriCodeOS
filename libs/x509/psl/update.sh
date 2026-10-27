@@ -32,12 +32,15 @@ def ascii_label(label):
 
 rules = []
 icann = False
+markers = set()
 for line in data.decode("utf-8").splitlines():
     line = line.strip()
     if "===BEGIN ICANN DOMAINS===" in line:
         icann = True
+        markers.add("begin")
     elif "===END ICANN DOMAINS===" in line:
         icann = False
+        markers.add("end")
     if not icann or not line or line.startswith("//"):
         continue
     rule = line.split()[0]
@@ -47,11 +50,17 @@ for line in data.decode("utf-8").splitlines():
     if prefix or labels[0] == "*" or len(labels) >= 2:
         rules.append(prefix + ".".join(labels))
 
+# A captive portal page or a cut download must not replace the extract
+# with an empty one (audit of ea368aa, finding 3).
+if markers != {"begin", "end"} or len(rules) < 5000:
+    sys.exit(f"not a whole Public Suffix List: ICANN markers {sorted(markers)}, {len(rules)} rules")
+
 with open(out, "w", encoding="ascii", newline="\n") as f:
     f.write(
         "// This Source Code Form is subject to the terms of the Mozilla Public\n"
         "// License, v. 2.0. If a copy of the MPL was not distributed with this\n"
         "// file, You can obtain one at https://mozilla.org/MPL/2.0/.\n"
+        "// SPDX-FileCopyrightText: Mozilla Foundation and the Public Suffix List contributors\n"
         "// SPDX-License-Identifier: MPL-2.0\n"
         "//\n"
         "// Extract of the Public Suffix List (https://publicsuffix.org/), ICANN\n"

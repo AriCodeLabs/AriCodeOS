@@ -32,5 +32,12 @@ Third-party data
 libs/x509/psl/icann-wildcard-bases.dat is an extract of the Public Suffix
 List (https://publicsuffix.org/), maintained by the Mozilla Foundation and
 its contributors, and is distributed under the Mozilla Public License,
-v. 2.0 (https://mozilla.org/MPL/2.0/), as its header states. The rest of
-AriCodeOS is under the Apache License, Version 2.0.
+v. 2.0 (https://mozilla.org/MPL/2.0/), as its header states. It is
+compiled into the programs that verify certificates (the shell and the
+updater); its source form is libs/x509/psl/ in the repository above.
+
+The console font (libs/fb-console) is Terminus Font, Copyright (c) 2010
+Dimitar Toshkov Zhekov, under the SIL Open Font License, Version 1.1
+(libs/fb-console/FONT-LICENSE-OFL.txt).
+
+The rest of AriCodeOS is under the Apache License, Version 2.0.

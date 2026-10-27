@@ -74,3 +74,24 @@ wildcard needed only two labels after it); the host test
 against the ICANN section of the Public Suffix List, shipped as an
 MPL-2.0 extract with the owner's approval; the private section
 (`github.io`) is not used.
+
+An independent audit of that commit (`ea368aa`) compared the lookup with
+an independent implementation of the list's algorithm over 30 780 names
+(no mismatch) and reproduced the extract byte for byte, and found:
+
+- **Medium:** the list was scanned once per wildcard name, before the
+  chain was verified, and a leaf may carry thousands of names: 16 000
+  wildcard names cost 1.2 s per handshake on the development host. A
+  wildcard can only stand on the host's parent, so that name is now
+  looked up once, lazily (`many_wildcard_names_cost_one_suffix_lookup`:
+  4000 wildcard names, at most one lookup; 2000 without the cache).
+- `*.kobe.jp` covered `city.kobe.jp` (an exception rule's child), where
+  Chrome refuses: a wildcard rule's own base now counts as a suffix.
+- `update.sh` wrote an empty extract from a download that was not a list:
+  it now requires both ICANN markers and 5000 rules.
+- ADR 0062 said browsers use the list (only Chrome does) and that a newly
+  listed suffix errs towards refusing (it is accepted until the next
+  release); NOTICE did not say where the data file's source form is, and
+  the file had no copyright line. Corrected; the console font, the other
+  third-party file, is now named in NOTICE too.
+- Names with an empty label (`*.co.uk..`) now match nothing.

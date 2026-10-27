@@ -14,16 +14,21 @@ stand for every company registered under `co.uk`: a public suffix, where
 names are registered by unrelated owners. The Baseline Requirements
 forbid public CAs to issue such a wildcard, but nothing in the client
 checked it, and roots an owner adds are not bound by the Baseline
-Requirements at all. Browsers refuse it with the Public Suffix List
-(Chrome checks a wildcard's base against the list's ICANN section).
+Requirements at all. Chrome refuses it with the Public Suffix List (it
+checks the host's registry, ICANN section only); Firefox and
+rustls-webpki only require two labels after the wildcard, as ADR 0026
+did.
 
 ## Decision
 
 1. `matches_hostname` refuses a `*.` dNSName whose base (what follows
    `*.`) is a public suffix of the ICANN section of the Public Suffix
-   List: a rule names it, or a wildcard rule names its parent and no
+   List: a rule names it, a wildcard rule names its parent and no
    exception rule names it (`*.ck` makes `foo.ck` a suffix, `!www.ck`
-   keeps `www.ck` registrable).
+   keeps `www.ck` registrable), or a wildcard rule's own base is it
+   (`*.kobe.jp` makes `kobe.jp` one, so `*.kobe.jp` cannot cover
+   `city.kobe.jp`, as in Chrome). Names with an empty label match
+   nothing.
 2. The private section (`github.io`, cloud and hosting names) is not used:
    those suffixes are run by one operator that holds certificates for
    them (GitHub Pages serves `*.github.io`), and Chrome leaves it out for
@@ -49,8 +54,15 @@ Requirements at all. Browsers refuse it with the Public Suffix List
 
 - A certificate for `*.co.uk` (or `*.com.au`, `*.foo.ck`) matches no host,
   whoever issued it. `*.example.co.uk` and `*.github.io` match as before.
-- A suffix added to the list after a release is known from the next
-  release; a name removed from the list stays refused until then. Both
-  err towards refusing, and only for wildcard names.
-- The lookup is a linear scan of the extract, done only when a wildcard
-  name is matched (once per certificate name), not per packet.
+- A suffix added to the list after a release is accepted under a
+  wildcard until the next release brings it; a name removed from the list
+  stays refused until then.
+- The lookup is a linear scan of the extract (about 76 µs on the
+  development host), done at most once per host name checked: a wildcard
+  can only stand on the host's parent, so that one name is looked up,
+  lazily, whatever the number of wildcard names in the certificate (the
+  first version looked up every wildcard name, before the chain was
+  verified: 16 000 of them took 1.2 s).
+- `update.sh` refuses a download that is not a whole list (both ICANN
+  markers and at least 5000 rules), so a captive portal page or a cut
+  transfer cannot empty the extract.
