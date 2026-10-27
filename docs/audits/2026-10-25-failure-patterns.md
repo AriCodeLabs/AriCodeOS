@@ -157,6 +157,13 @@ removed on `fix/compositor-ownership`, ADR 0053).
   on requests a busy host disk took over 2 s, `2cd0102`). Left as stated:
   the CN fallback and wildcards over public suffixes (L23), and the
   infos below.
+- 2026-10-27, info (`fix/sshd-auth-accounting`, incident 0046):
+  authorized_keys lines with options (or another key type, or a key that
+  does not decode) are refused by line number, logged and recorded; no
+  options are supported.
+- 2026-10-27, info (same branch): `none` requests after the first and
+  unsigned publickey queries count against the ten authentication
+  requests of a connection; reaching the limit disconnects and is logged.
 
 ## Fix plan
 

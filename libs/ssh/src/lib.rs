@@ -75,16 +75,26 @@ const NONE: &[u8] = b"none";
 /// Window we grant the client, and when to top it up.
 const RECV_WINDOW: u32 = 1 << 20;
 const MAX_PACKET: u32 = 32 * 1024;
-const MAX_AUTH_FAILURES: u32 = 10;
+/// Authentication requests a connection may make without succeeding
+/// (incident 0046): refused keys and methods, key queries (`publickey`
+/// without a signature, answered `PK_OK` for an authorized key) and `none`
+/// requests all count, except a first `none`, the client asking for the
+/// methods (RFC 4252, 5.2). A client can neither probe keys nor keep the
+/// server answering without bound.
+const MAX_AUTH_ATTEMPTS: u32 = 10;
 
 /// What happened, for the caller to act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     /// The client proved it holds an authorized key.
     Authenticated { user: String },
-    /// A public-key attempt was refused (key not authorized or bad
-    /// signature); the connection goes on until `MAX_AUTH_FAILURES`.
+    /// A public-key attempt was refused (key not authorized, bad
+    /// signature, or another method); the connection goes on until
+    /// `MAX_AUTH_ATTEMPTS`.
     AuthFailed { user: String },
+    /// The connection used up `MAX_AUTH_ATTEMPTS` requests without
+    /// authenticating and is disconnected.
+    TooManyAuthAttempts { user: String },
     /// Interactive shell requested (`pty` if a terminal was asked for).
     Shell { pty: bool },
     /// A single command.
@@ -153,35 +163,109 @@ pub struct Server {
     recv: Option<ChaChaPoly>,
     send_seq: u32,
     recv_seq: u32,
-    auth_failures: u32,
+    /// Authentication requests counted against `MAX_AUTH_ATTEMPTS`.
+    auth_attempts: u32,
+    /// The client already asked for the methods (a first `none`).
+    methods_asked: bool,
     user: Option<String>,
     channel: Option<Channel>,
 }
 
-/// `authorized_keys` content: the `ssh-ed25519` public keys it lists.
-pub fn parse_authorized_keys(text: &[u8]) -> Vec<[u8; 32]> {
-    let mut keys = Vec::new();
-    for line in text.split(|&b| b == b'\n') {
+/// Refused lines of one `authorized_keys` reported by number; more are
+/// only counted.
+pub const MAX_REPORTED_LINES: usize = 16;
+
+/// Why a line of `authorized_keys` gives no key (incident 0046).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyLineError {
+    /// It starts with options (`from=`, `command=`, `restrict`, ...).
+    /// None is supported, and the key without them would have more power
+    /// than its line gives it: the line is refused, never taken without
+    /// its options.
+    Options,
+    /// Another key type (`ssh-rsa`, `ecdsa-sha2-nistp256`, a certificate):
+    /// only `ssh-ed25519` keys log in.
+    KeyType,
+    /// Not a key line, or an `ssh-ed25519` key that does not decode.
+    Malformed,
+}
+
+impl KeyLineError {
+    /// Why, for the log.
+    pub fn describe(self) -> &'static str {
+        match self {
+            KeyLineError::Options => {
+                "it has options (from=, command=, restrict, ...), which are not supported"
+            }
+            KeyLineError::KeyType => "only ssh-ed25519 keys are supported",
+            KeyLineError::Malformed => "not a valid ssh-ed25519 key line",
+        }
+    }
+}
+
+/// What an `authorized_keys` file gives: its keys and the lines it refused.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuthorizedKeys {
+    pub keys: Vec<[u8; 32]>,
+    /// The first refused lines (number from 1, why), at most
+    /// [`MAX_REPORTED_LINES`].
+    pub refused: Vec<(usize, KeyLineError)>,
+    /// Every refused line, reported or not.
+    pub refused_total: usize,
+}
+
+/// A key type name of the OpenSSH format, supported or not.
+fn is_key_type(field: &[u8]) -> bool {
+    [b"ssh-".as_slice(), b"ecdsa-sha2-", b"sk-"]
+        .iter()
+        .any(|p| field.starts_with(p))
+}
+
+/// `authorized_keys` content (the OpenSSH format without options): the
+/// `ssh-ed25519` keys it lists, and every other line that is not blank or
+/// a `#` comment as refused, with the reason, so the owner learns that
+/// its key does not log in.
+pub fn parse_authorized_keys(text: &[u8]) -> AuthorizedKeys {
+    let mut parsed = AuthorizedKeys::default();
+    for (i, line) in text.split(|&b| b == b'\n').enumerate() {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
         let mut fields = line
             .split(|&b| b == b' ' || b == b'\t')
             .filter(|f| !f.is_empty());
-        if fields.next() != Some(HOSTKEY) {
-            continue;
-        }
-        let Some(blob) = fields
-            .next()
-            .and_then(|b| base64::decode(b.strip_suffix(b"\r").unwrap_or(b)))
-        else {
-            continue;
+        let first = match fields.next() {
+            None => continue,
+            Some(f) if f.starts_with(b"#") => continue,
+            Some(f) => f,
         };
-        let mut r = Reader::new(&blob);
-        if r.string() == Some(HOSTKEY) {
-            if let Some(k) = r.string().and_then(|k| <[u8; 32]>::try_from(k).ok()) {
-                keys.push(k);
+        let key = if first == HOSTKEY {
+            fields
+                .next()
+                .and_then(base64::decode)
+                .and_then(|blob| {
+                    let mut r = Reader::new(&blob);
+                    (r.string() == Some(HOSTKEY))
+                        .then(|| r.string().and_then(|k| <[u8; 32]>::try_from(k).ok()))
+                        .flatten()
+                })
+                .ok_or(KeyLineError::Malformed)
+        } else if is_key_type(first) {
+            Err(KeyLineError::KeyType)
+        } else if fields.any(is_key_type) {
+            Err(KeyLineError::Options)
+        } else {
+            Err(KeyLineError::Malformed)
+        };
+        match key {
+            Ok(k) => parsed.keys.push(k),
+            Err(e) => {
+                parsed.refused_total += 1;
+                if parsed.refused.len() < MAX_REPORTED_LINES {
+                    parsed.refused.push((i + 1, e));
+                }
             }
         }
     }
-    keys
+    parsed
 }
 
 /// `string "ssh-ed25519" + string key`, the wire form of an Ed25519 key.
@@ -234,7 +318,8 @@ impl Server {
             recv: None,
             send_seq: 0,
             recv_seq: 0,
-            auth_failures: 0,
+            auth_attempts: 0,
+            methods_asked: false,
             user: None,
             channel: None,
         }
@@ -747,14 +832,20 @@ impl Server {
             self.disconnect(7, b"service not available", out);
             return Ok(());
         }
+        let mut reply = Writer::new(msg::USERAUTH_FAILURE);
+        reply.string(b"publickey").bool(false);
+        // A key or method refused, as opposed to a query answered.
+        let mut refused = true;
         if method == NONE {
-            // A query for the supported methods (RFC 4252 5.2), not an attempt.
-            let mut w = Writer::new(msg::USERAUTH_FAILURE);
-            w.string(b"publickey").bool(false);
-            self.send_packet(&w.0, out);
-            return Ok(());
-        }
-        if method == b"publickey" {
+            // A query for the supported methods (RFC 4252 5.2): the first
+            // one is free, a repeated one costs an attempt.
+            refused = false;
+            if !self.methods_asked {
+                self.methods_asked = true;
+                self.send_packet(&reply.0, out);
+                return Ok(());
+            }
+        } else if method == b"publickey" {
             let has_sig = r.bool().ok_or(bad)?;
             let alg = r.string().ok_or(bad)?;
             let blob = r.string().ok_or(bad)?;
@@ -767,52 +858,55 @@ impl Server {
             } else {
                 None
             };
-            if let Some(key) = key {
-                if !has_sig {
-                    let mut w = Writer::new(msg::USERAUTH_PK_OK);
-                    w.string(alg).string(blob);
-                    self.send_packet(&w.0, out);
-                    return Ok(());
+            match key {
+                // "Would this key be accepted?": answered, and counted.
+                Some(_) if !has_sig => {
+                    reply = Writer::new(msg::USERAUTH_PK_OK);
+                    reply.string(alg).string(blob);
+                    refused = false;
                 }
-                let sig_blob = r.string().ok_or(bad)?;
-                let mut sr = Reader::new(sig_blob);
-                let ok = sr.string() == Some(HOSTKEY)
-                    && sr
-                        .string()
-                        .and_then(|s| <[u8; 64]>::try_from(s).ok())
-                        .is_some_and(|sig| {
-                            let mut data = Writer::default();
-                            data.string(&self.session_id.unwrap_or_default())
-                                .u8(msg::USERAUTH_REQUEST)
-                                .string(user)
-                                .string(service)
-                                .string(b"publickey")
-                                .bool(true)
-                                .string(alg)
-                                .string(blob);
-                            ed25519::verify(&key, &data.0, &sig)
-                        });
-                if ok {
-                    self.send_packet(&[msg::USERAUTH_SUCCESS], out);
-                    let user = String::from_utf8_lossy(user).into_owned();
-                    self.user = Some(user.clone());
-                    self.phase = Phase::Connected;
-                    events.push(Event::Authenticated { user });
-                    return Ok(());
+                Some(key) => {
+                    let sig_blob = r.string().ok_or(bad)?;
+                    let mut sr = Reader::new(sig_blob);
+                    let ok = sr.string() == Some(HOSTKEY)
+                        && sr
+                            .string()
+                            .and_then(|s| <[u8; 64]>::try_from(s).ok())
+                            .is_some_and(|sig| {
+                                let mut data = Writer::default();
+                                data.string(&self.session_id.unwrap_or_default())
+                                    .u8(msg::USERAUTH_REQUEST)
+                                    .string(user)
+                                    .string(service)
+                                    .string(b"publickey")
+                                    .bool(true)
+                                    .string(alg)
+                                    .string(blob);
+                                ed25519::verify(&key, &data.0, &sig)
+                            });
+                    if ok {
+                        self.send_packet(&[msg::USERAUTH_SUCCESS], out);
+                        let user = String::from_utf8_lossy(user).into_owned();
+                        self.user = Some(user.clone());
+                        self.phase = Phase::Connected;
+                        events.push(Event::Authenticated { user });
+                        return Ok(());
+                    }
                 }
+                None => {}
             }
         }
-        self.auth_failures += 1;
-        events.push(Event::AuthFailed {
-            user: String::from_utf8_lossy(user).into_owned(),
-        });
-        if self.auth_failures >= MAX_AUTH_FAILURES {
-            self.disconnect(14, b"too many authentication failures", out);
+        let user = String::from_utf8_lossy(user).into_owned();
+        self.auth_attempts += 1;
+        if refused {
+            events.push(Event::AuthFailed { user: user.clone() });
+        }
+        if self.auth_attempts >= MAX_AUTH_ATTEMPTS {
+            events.push(Event::TooManyAuthAttempts { user });
+            self.disconnect(14, b"too many authentication attempts", out);
             return Ok(());
         }
-        let mut w = Writer::new(msg::USERAUTH_FAILURE);
-        w.string(b"publickey").bool(false);
-        self.send_packet(&w.0, out);
+        self.send_packet(&reply.0, out);
         Ok(())
     }
 
@@ -924,8 +1018,167 @@ mod tests {
             b"ssh-ed25519 !!!bad\n",
         ]
         .concat();
-        assert_eq!(parse_authorized_keys(&text), alloc::vec![pk]);
+        let parsed = parse_authorized_keys(&text);
+        assert_eq!(parsed.keys, alloc::vec![pk]);
+        assert_eq!(
+            parsed.refused,
+            alloc::vec![(2, KeyLineError::KeyType), (4, KeyLineError::Malformed)]
+        );
         assert!(fingerprint(&pk).starts_with("SHA256:"));
+    }
+
+    /// Incident 0046: a line with options was skipped without a word, so
+    /// the owner never learned that its key does not log in.
+    #[test]
+    fn lines_with_options_are_refused_by_number() {
+        let key = base64::encode(&ed25519_blob(&[7u8; 32]), true);
+        let with = |prefix: &str| [prefix.as_bytes(), &key, b" me@host\n"].concat();
+        let text = [
+            with("ssh-ed25519 "),
+            b"\n   \n\t# indented comment\n".to_vec(),
+            with("from=\"10.0.0.1\",command=\"ls -l\" ssh-ed25519 "),
+            with("restrict ssh-ed25519 "),
+            with("no-pty\tssh-ed25519 "),
+            b"ecdsa-sha2-nistp256 AAAA x\nssh-ed25519-cert-v01@openssh.com AAAA x\n".to_vec(),
+            b"just some words\n".to_vec(),
+        ]
+        .concat();
+        let parsed = parse_authorized_keys(&text);
+        assert_eq!(parsed.keys, alloc::vec![[7u8; 32]]);
+        use KeyLineError::{KeyType, Malformed, Options};
+        assert_eq!(
+            parsed.refused,
+            alloc::vec![
+                (5, Options),
+                (6, Options),
+                (7, Options),
+                (8, KeyType),
+                (9, KeyType),
+                (10, Malformed)
+            ]
+        );
+        assert_eq!(parsed.refused_total, 6);
+        // Reported by number up to a bound, all counted.
+        let many = with("restrict ssh-ed25519 ").repeat(MAX_REPORTED_LINES + 5);
+        let parsed = parse_authorized_keys(&many);
+        assert!(parsed.keys.is_empty());
+        assert_eq!(parsed.refused.len(), MAX_REPORTED_LINES);
+        assert_eq!(parsed.refused_total, MAX_REPORTED_LINES + 5);
+        assert_eq!(parsed.refused[MAX_REPORTED_LINES - 1].0, MAX_REPORTED_LINES);
+    }
+
+    /// One USERAUTH_REQUEST (after its message byte) to a server in the
+    /// authentication phase: the message type of the reply, and the events.
+    fn auth_request(s: &mut Server, method: &[u8], rest: impl Fn(&mut Writer)) -> (u8, Vec<Event>) {
+        let mut w = Writer::default();
+        w.string(b"ari").string(b"ssh-connection").string(method);
+        rest(&mut w);
+        let mut out = Vec::new();
+        let mut events = Vec::new();
+        s.userauth(&mut Reader::new(&w.0), &mut out, &mut events)
+            .unwrap();
+        (out[5], events)
+    }
+
+    /// Incident 0046: `none` requests and key queries were not counted, so
+    /// a client could probe keys and keep the server answering for ever.
+    #[test]
+    fn every_auth_request_but_the_first_none_counts() {
+        let pk = ed25519::public_key(&[5; 32]);
+        let blob = ed25519_blob(&pk);
+        let other = ed25519_blob(&[9; 32]);
+        let query = |key: &[u8]| {
+            let key = key.to_vec();
+            move |w: &mut Writer| {
+                w.bool(false).string(HOSTKEY).string(&key);
+            }
+        };
+        let fresh = || {
+            let mut s = Server::new([1; 32], [2; 32], alloc::vec![pk]);
+            s.phase = Phase::Auth;
+            s
+        };
+        let user = || String::from("ari");
+        // Repeated `none`: the first is free, nine more are answered, the
+        // tenth counted one disconnects, said once.
+        let mut s = fresh();
+        for _ in 0..MAX_AUTH_ATTEMPTS {
+            assert_eq!(
+                auth_request(&mut s, NONE, |_| {}),
+                (msg::USERAUTH_FAILURE, alloc::vec![])
+            );
+        }
+        assert_eq!(
+            auth_request(&mut s, NONE, |_| {}),
+            (
+                msg::DISCONNECT,
+                alloc::vec![Event::TooManyAuthAttempts { user: user() }]
+            )
+        );
+        assert!(s.is_closed());
+        // Queries for an authorized key: answered PK_OK, and counted.
+        let mut s = fresh();
+        for _ in 1..MAX_AUTH_ATTEMPTS {
+            assert_eq!(
+                auth_request(&mut s, b"publickey", query(&blob)).0,
+                msg::USERAUTH_PK_OK
+            );
+        }
+        assert_eq!(
+            auth_request(&mut s, b"publickey", query(&blob)).0,
+            msg::DISCONNECT
+        );
+        // A refused key is reported, and counted with the rest.
+        let mut s = fresh();
+        assert_eq!(auth_request(&mut s, NONE, |_| {}).0, msg::USERAUTH_FAILURE);
+        assert_eq!(
+            auth_request(&mut s, b"publickey", query(&other)),
+            (
+                msg::USERAUTH_FAILURE,
+                alloc::vec![Event::AuthFailed { user: user() }]
+            )
+        );
+        assert_eq!(
+            auth_request(&mut s, b"password", |_| {}).1,
+            alloc::vec![Event::AuthFailed { user: user() }]
+        );
+        for _ in 3..MAX_AUTH_ATTEMPTS {
+            assert_eq!(auth_request(&mut s, NONE, |_| {}).0, msg::USERAUTH_FAILURE);
+        }
+        assert_eq!(
+            auth_request(&mut s, b"publickey", query(&blob)).0,
+            msg::DISCONNECT
+        );
+        // A usual login (none, a query, the signed request) stays well
+        // within the limit.
+        let mut s = fresh();
+        s.session_id = Some([3; 32]);
+        assert_eq!(auth_request(&mut s, NONE, |_| {}).0, msg::USERAUTH_FAILURE);
+        assert_eq!(
+            auth_request(&mut s, b"publickey", query(&blob)).0,
+            msg::USERAUTH_PK_OK
+        );
+        let mut signed = Writer::default();
+        signed
+            .string(&[3; 32])
+            .u8(msg::USERAUTH_REQUEST)
+            .string(b"ari")
+            .string(b"ssh-connection")
+            .string(b"publickey")
+            .bool(true)
+            .string(HOSTKEY)
+            .string(&blob);
+        let sig = ed25519::sign(&[5; 32], &signed.0);
+        let mut sig_blob = Writer::default();
+        sig_blob.string(HOSTKEY).string(&sig);
+        let (reply, events) = auth_request(&mut s, b"publickey", |w| {
+            w.bool(true)
+                .string(HOSTKEY)
+                .string(&blob)
+                .string(&sig_blob.0);
+        });
+        assert_eq!(reply, msg::USERAUTH_SUCCESS);
+        assert_eq!(events, alloc::vec![Event::Authenticated { user: user() }]);
     }
 
     #[test]
