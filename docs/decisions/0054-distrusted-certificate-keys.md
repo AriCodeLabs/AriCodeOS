@@ -29,9 +29,12 @@ valid.
    and each entry carries a comment naming the certificate and the
    advisory. Updates are signed and installed like any other change, so
    the list never comes from the network on its own.
-4. The list is empty today: none of the embedded roots, and no
-   certificate this system is known to meet, is affected by a current
-   advisory (the emSign roots are not embedded).
+4. Release 0.15.0 lists the eight eMudhra intermediates whose keys were
+   compromised in October 2026 (Mozilla bug 2083449; the same keys as Go's
+   `crypto/x509` and rustls-webpki 0.103.16). They chain to emSign roots
+   and to Sectigo's AAA Certificate Services, none of them embedded, so no
+   chain this system trusts by default reaches them; the entries hold for
+   roots an owner adds.
 
 ## Consequences
 
