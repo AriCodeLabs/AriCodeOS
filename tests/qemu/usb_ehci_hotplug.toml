@@ -1,0 +1,37 @@
+# An EHCI with nothing to watch notices a device plugged in later. The
+# controller starts empty (`usb_legacy_controller`), so once the boot
+# enumeration is over the driver is not busy: it waits up to
+# `IDLE_POLL_MS` (250 ms) between looks at its ports, cut short by any
+# client read's deadline (here the console bridge's 20 ms reads, so this
+# run does not time the 250 ms itself: `aricode_ehci::poll_wait` is
+# host-tested for that). Three seconds after the boot services completed,
+# the host plugs a USB keyboard into it over QMP (`[host_hotplug]`): the
+# driver must see the connection, debounce it, enumerate the keyboard and
+# serve it, as on a real machine where a keyboard is plugged into a port
+# nobody was using.
+name = "usb.ehci_hotplug"
+description = "EHCI driver: a keyboard hot-plugged while the controller is idle is detected and enumerated"
+level = "full"
+areas = ["usb", "drivers", "input"]
+cmdline = "qemu_exit shell"
+usb_legacy_controller = true
+timeout_secs = 90
+stdin = ["sleep 9000", "shutdown"]
+
+[host_hotplug]
+marker = "AriInit: boot services completed"
+delay_ms = 3000
+driver = "usb-kbd"
+bus = "ehci.0"
+id = "hotkbd"
+
+[expect]
+exit = 33
+serial_contains = [
+    "usb-ehci: EHCI ready (",
+    "usb-ehci: port 1: device 0627:0001 class 0 bcdUSB 0200 speed high address 1",
+    "usb-ehci: port 1: HID keyboard (boot protocol, 8 bytes per report",
+    "[host] hotplug: usb-kbd added on ehci.0 as hotkbd",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "hotplug: usb-kbd on ehci.0 failed", "marker 'AriInit: boot services completed' never seen"]

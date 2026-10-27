@@ -9,35 +9,32 @@
 
 use crate::sync::IrqLock;
 use aricode_abi::sysinfo::{EventEntry, EventKind};
+use aricode_faults::SharedRing;
 
 const CAPACITY: usize = 64;
 
-struct Ring {
-    entries: [EventEntry; CAPACITY],
-    next: usize,
-    len: usize,
-}
+/// Entries the events one process causes may hold at once (incident 0040):
+/// an eighth of the ring, so a loop, however slow, overwrites only its own.
+pub const SHARE: usize = 8;
 
-static RING: IrqLock<Ring> = IrqLock::new(Ring {
-    entries: [EventEntry::EMPTY; CAPACITY],
-    next: 0,
-    len: 0,
-});
+static RING: IrqLock<SharedRing<EventEntry, CAPACITY>> = IrqLock::new(SharedRing::new());
 
-/// Records an event; if the ring is full the oldest one is dropped.
+/// Records an event of the kernel's own; if the ring is full the oldest one
+/// is dropped.
 pub fn record(kind: EventKind, pid: u32, code: u64, name: &str) {
     let entry = EventEntry::new(crate::time::uptime_us(), kind, pid, code, name);
-    let mut r = RING.lock();
-    let at = r.next;
-    r.entries[at] = entry;
-    r.next = (at + 1) % CAPACITY;
-    r.len = (r.len + 1).min(CAPACITY);
+    RING.lock().push(entry, None, SHARE);
+}
+
+/// Records an event process `owner` caused (`event_record`, a quota it hit,
+/// a DMA fault of its device): within its share of the ring, replacing its
+/// own oldest one past it.
+pub fn record_caused(owner: u32, kind: EventKind, pid: u32, code: u64, name: &str) {
+    let entry = EventEntry::new(crate::time::uptime_us(), kind, pid, code, name);
+    RING.lock().push(entry, Some(owner), SHARE);
 }
 
 /// The last `max` events, oldest first.
 pub fn recent(max: usize) -> alloc::vec::Vec<EventEntry> {
-    let r = RING.lock();
-    let n = r.len.min(max);
-    let first = (r.next + CAPACITY - n) % CAPACITY;
-    (0..n).map(|i| r.entries[(first + i) % CAPACITY]).collect()
+    RING.lock().recent(max).collect()
 }

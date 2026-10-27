@@ -125,9 +125,18 @@ pub mod keys {
     /// crashes holding a client's read and checks the client keeps the
     /// device (ADR 0030).
     pub const INPUT_RESTART: &str = "input_restart";
+    /// Tests only: `input_orphan`, before the console bridge starts a
+    /// reader starts a read on each input service and dies with it
+    /// waiting; the keys typed next must still reach the shell (audit
+    /// 2026-10-25 C, M4).
+    pub const INPUT_ORPHAN: &str = "input_orphan";
     /// Tests only: `shell_fault`, the shell accepts `fault`, which makes it
     /// crash on purpose (a session shell that dies, ADR 0030).
     pub const SHELL_FAULT: &str = "shell_fault";
+    /// Tests only: `fsd_fault`, fsd crashes when asked to open `fsd-fault`
+    /// (a file service that dies while its clients hold sessions, ADR
+    /// 0050).
+    pub const FSD_FAULT: &str = "fsd_fault";
     /// `smp=off`: do not start the application processors (real hardware).
     pub const SMP: &str = "smp";
     /// `iommu=off`: do not enable DMA translation (real hardware).
@@ -178,6 +187,11 @@ pub mod keys {
     /// notification; init then runs the `blk_late` test client on that
     /// LBA (incident 0017).
     pub const BLK_FAULT: &str = "blk_fault";
+    /// Tests only: `pci_fault=msix|bar`, the kernel reads the xHCI
+    /// controller as a lying device would report itself: an MSI-X table
+    /// offset past its BAR, or BAR 0 at an address in RAM. Both must be
+    /// refused at boot (ADR 0051).
+    pub const PCI_FAULT: &str = "pci_fault";
     /// Tests only: `gui_trace`, the compositor logs every frame it puts on
     /// screen over serial (frame number, windows, cursor, pixels flushed)
     /// with one pixel sample per window, which the GUI scenarios check.
@@ -194,10 +208,13 @@ pub mod keys {
         RESTART_STORM,
         SERVICE_HANG,
         INPUT_RESTART,
+        INPUT_ORPHAN,
         SHELL_FAULT,
+        FSD_FAULT,
         SELFTEST,
         USB_FAULT,
         BLK_FAULT,
+        PCI_FAULT,
         GUI_TRACE,
     ];
 

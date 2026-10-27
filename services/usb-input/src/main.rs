@@ -34,9 +34,10 @@ use aricode_input::{Event, HidBootKeyboard, HidBootMouse, MAX_REPORT_EVENTS};
 use aricode_proto::block::{
     Op as BlockOp, Reply as BlockReply, Request as BlockRequest, Status as BlockStatus, MAX_SECTORS,
 };
-use aricode_proto::input::{Event as WireEvent, Op, Reply, Request, Status, MAX_EVENTS};
+use aricode_proto::input::{Event as WireEvent, Op, Reply, Request, Status};
 use aricode_rt::sys::block::{map_client_buffer, ClientBuffers};
 use aricode_rt::sys::client_buffer::{DeviceOwned, Kept};
+use aricode_rt::sys::input::{EventQueue, QUEUE_LEN};
 use aricode_rt::sys::virtio_pci::{bar_handle, extra_handle, DmaRegion, Mmio, CFG, IRQ, SERVICE};
 use aricode_rt::sys::wait::{self, Deadline, Woken};
 use aricode_rt::sys::{self, abi, Handle};
@@ -58,7 +59,6 @@ const XFER_RING_TRBS: usize = 16;
 const MAX_DEVICES: usize = 4;
 /// Pending report TRBs per interrupt endpoint.
 const REPORTS_IN_FLIGHT: usize = 4;
-const RING: usize = 128;
 
 /// Timeouts of a SCSI command over Bulk-Only (ms). BOT 1.0 specifies no
 /// transport timeout; SCSI stacks bound a whole command instead (Linux
@@ -801,55 +801,44 @@ struct Controller {
     ports_switched: bool,
 }
 
-/// Event pending delivery to the client.
+/// Input events decoded from HID reports, waiting for the client.
 struct Pending {
-    buf: [(Event, u64); RING],
-    head: usize,
-    len: usize,
-    /// Events dropped because the queue was full (the client did not read
-    /// for `RING` events), and the total last printed.
-    dropped: u64,
+    queue: EventQueue,
+    /// The total of dropped events last printed.
     dropped_reported: u64,
 }
 
 impl Pending {
     /// Queues `ev`; when full the oldest event is dropped, never silently:
     /// the first drop of the boot is printed and recorded (`usb hid evt
-    /// dropped`), and the running total is printed when the client next
-    /// takes events (`take`).
+    /// dropped`), and the running total is printed after the client next
+    /// reads (`report_drops`).
     fn push(&mut self, ev: Event, at: u64) {
-        if self.len == RING {
-            self.head = (self.head + 1) % RING;
-            self.len -= 1;
-            self.dropped += 1;
-            if self.dropped == 1 {
-                say(b"input event queue full: the oldest events are dropped");
-                record("usb hid evt dropped", RING as u64);
-            }
+        let wire = WireEvent {
+            kind: ev.kind,
+            code: ev.code,
+            value: ev.value,
+        };
+        if self.queue.push(wire, at) && self.queue.dropped() == 1 {
+            say(b"input event queue full: the oldest events are dropped");
+            record("usb hid evt dropped", QUEUE_LEN as u64);
         }
-        self.buf[(self.head + self.len) % RING] = (ev, at);
-        self.len += 1;
     }
-    fn take(&mut self, out: &mut [WireEvent; MAX_EVENTS], times: &mut [u64; MAX_EVENTS]) -> usize {
-        if self.dropped > self.dropped_reported {
-            self.dropped_reported = self.dropped;
+
+    fn tell_gone_reader(&mut self) {
+        if self.queue.first_gone_reader() {
+            say(b"a reader died with its read waiting; its events wait for the next read");
+        }
+    }
+
+    fn report_drops(&mut self) {
+        let dropped = self.queue.dropped();
+        if dropped > self.dropped_reported {
+            self.dropped_reported = dropped;
             sys::print(b"usb-input: ");
-            num(self.dropped);
+            num(dropped);
             sys::print(b" input events dropped in this boot (queue full)\n");
         }
-        let n = self.len.min(MAX_EVENTS);
-        for (slot, t) in out.iter_mut().zip(times.iter_mut()).take(n) {
-            let (e, at) = self.buf[self.head];
-            *slot = WireEvent {
-                kind: e.kind,
-                code: e.code,
-                value: e.value,
-            };
-            *t = at;
-            self.head = (self.head + 1) % RING;
-            self.len -= 1;
-        }
-        n
     }
 }
 
@@ -875,6 +864,7 @@ impl Controller {
             say(b"no BAR 0 or no IRQ among the capabilities");
             return Err(exit::MAP_BAR);
         };
+        let bar_len = sys::region_len(bar).map_err(|_| exit::MAP_BAR)?;
         let base = Mmio(sys::mmio_map(bar).map_err(|_| {
             say(b"could not map BAR 0");
             exit::MAP_BAR
@@ -903,15 +893,21 @@ impl Controller {
             base.r32(cap::HCSPARAMS2),
             base.r32(cap::HCCPARAMS1),
         );
+        let rtsoff = (base.r32(cap::RTSOFF) & !0x1F) as u64;
+        let dboff = (base.r32(cap::DBOFF) & !0x3) as u64;
+        if !params.registers_fit(caplength, rtsoff, dboff, bar_len) {
+            say(b"register blocks outside BAR 0: not an xHCI to drive");
+            return Err(exit::NOT_XHCI);
+        }
         let op = Mmio(base.0 + caplength);
-        let runtime = Mmio(base.0 + (base.r32(cap::RTSOFF) & !0x1F) as u64);
-        let doorbells = Mmio(base.0 + (base.r32(cap::DBOFF) & !0x3) as u64);
+        let runtime = Mmio(base.0 + rtsoff);
+        let doorbells = Mmio(base.0 + dboff);
         let region = DmaRegion::alloc(params.dma_arena_bytes()).map_err(|_| exit::DMA)?;
         let mut arena = Arena { region, next: 0 };
 
         // The firmware may still own the controller (SMM):
         // ask it to hand it over before touching it.
-        bios_handoff(&base, &clock);
+        bios_handoff(&base, bar_len, &clock);
 
         // Stop and reset the controller.
         op.w32(op::USBCMD, op.r32(op::USBCMD) & !op::CMD_RUN);
@@ -991,10 +987,7 @@ impl Controller {
             devices: [None, None, None, None],
             storage: None,
             pending: Pending {
-                buf: [(Event::default(), 0); RING],
-                head: 0,
-                len: 0,
-                dropped: 0,
+                queue: EventQueue::new(),
                 dropped_reported: 0,
             },
             disabling: None,
@@ -1601,7 +1594,17 @@ impl Controller {
     ) -> Result<(), &'static str> {
         let spd = self.prepare_port(port, force_reset, deadline)?;
         let slot = match self.command_timed(Trb::enable_slot(), b"Enable Slot", deadline, 500) {
-            Issued::Done(completion::SUCCESS, slot) if slot != 0 => slot,
+            // A slot the controller said it has (xHCI 4.6.3): it indexes
+            // the DCBAA, which holds `max_slots + 1` entries (audit
+            // 2026-10-25 A, L2).
+            Issued::Done(completion::SUCCESS, slot)
+                if slot != 0 && slot <= self.params.max_slots =>
+            {
+                slot
+            }
+            Issued::Done(completion::SUCCESS, _) => {
+                return Err("Enable Slot gave a slot past max_slots")
+            }
             _ => return Err("Enable Slot failed"),
         };
         let result = self
@@ -4077,7 +4080,7 @@ impl Controller {
 /// capability): the OS requests ownership, waits for the firmware to
 /// release its own and turns off its SMIs. Without the capability (QEMU)
 /// there is nothing to do.
-fn bios_handoff(base: &Mmio, clock: &Clock) {
+fn bios_handoff(base: &Mmio, bar_len: u64, clock: &Clock) {
     const LEGACY_SUPPORT: u32 = 1;
     const BIOS_OWNED: u32 = 1 << 16;
     const OS_OWNED: u32 = 1 << 24;
@@ -4087,7 +4090,10 @@ fn bios_handoff(base: &Mmio, clock: &Clock) {
     const EVENTS: u32 = 0x7 << 29;
     let mut off = ((base.r32(cap::HCCPARAMS1) >> 16) & 0xFFFF) as u64 * 4;
     for _ in 0..32 {
-        if off == 0 {
+        // Each capability's two registers within BAR 0, past the
+        // capability registers, dword aligned: the controller chooses the
+        // offsets (audit of incident 0033, M1).
+        if off < 0x20 || !off.is_multiple_of(4) || off + 8 > bar_len {
             return;
         }
         let legsup = base.r32(off);
@@ -4146,6 +4152,11 @@ fn intel_route_ports(cfg: &Mmio) -> bool {
 /// One block protocol request on the USB storage.
 fn serve_block(ctl: &mut Controller, msg: &[u8], handles: &[Handle]) {
     let reply_to = handles[0];
+    // The reply endpoint and the buffer are used; anything else is closed
+    // (audit 2026-10-25 C, M3).
+    for h in handles.iter().skip(2) {
+        let _ = sys::handle_close(*h);
+    }
     ctl.request_buffer = BufferFate::Release;
     let capacity = ctl.storage.as_ref().map_or(0, |s| s.capacity);
     let invalid = BlockReply {
@@ -4248,55 +4259,39 @@ fn answer(reply_to: Handle, reply: Reply) {
     let _ = sys::handle_close(reply_to);
 }
 
-/// The input service's side of the loop: the one read waiting for events
-/// and the buffers its replies are built in.
-struct Replies<'a> {
-    waiting: &'a mut Option<(Handle, u64)>,
-    events: &'a mut [WireEvent; MAX_EVENTS],
-    times: &'a mut [u64; MAX_EVENTS],
-}
-
-impl Replies<'_> {
-    /// Serves one request that arrived on endpoint `which` (0: the input
-    /// service, 1: the block service).
-    fn serve(
-        &mut self,
-        ctl: &mut Controller,
-        which: usize,
-        msg: &[u8],
-        handles: &[Handle],
-        now: u64,
-    ) {
-        if handles.is_empty() {
-            return;
+/// Serves one request that arrived on endpoint `which` (0: the input
+/// service, 1: the block service).
+fn serve(ctl: &mut Controller, which: usize, msg: &[u8], handles: &[Handle], now: u64) {
+    if handles.is_empty() {
+        return;
+    }
+    if which == 1 {
+        serve_block(ctl, msg, handles);
+        return;
+    }
+    let reply_to = handles[0];
+    // Only the reply endpoint is used: any other handle is closed, or the
+    // driver's table fills up and requests start arriving without their
+    // reply endpoint (audit 2026-10-25 C, M3).
+    for h in &handles[1..] {
+        let _ = sys::handle_close(*h);
+    }
+    match Request::decode(msg) {
+        Some(Request { op: Op::Info, .. }) => {
+            let reply = Reply::status(Status::Ok)
+                .with_name(device_name(ctl))
+                .unwrap_or(Reply::status(Status::Ok));
+            answer(reply_to, reply);
         }
-        if which == 1 {
-            serve_block(ctl, msg, handles);
-            return;
+        Some(Request {
+            op: Op::Read,
+            timeout_ms,
+        }) => {
+            ctl.pending.queue.read(reply_to, timeout_ms, now);
+            ctl.pending.report_drops();
+            ctl.pending.tell_gone_reader();
         }
-        let reply_to = handles[0];
-        match Request::decode(msg) {
-            Some(Request { op: Op::Info, .. }) => {
-                let reply = Reply::status(Status::Ok)
-                    .with_name(device_name(ctl))
-                    .unwrap_or(Reply::status(Status::Ok));
-                answer(reply_to, reply);
-            }
-            Some(Request {
-                op: Op::Read,
-                timeout_ms,
-            }) => {
-                if ctl.pending.len > 0 {
-                    let n = ctl.pending.take(self.events, self.times);
-                    answer(reply_to, Reply::events(&self.events[..n], &self.times[..n]));
-                } else if self.waiting.is_some() {
-                    answer(reply_to, Reply::status(Status::Busy));
-                } else {
-                    *self.waiting = Some((reply_to, now + timeout_ms.max(1) as u64));
-                }
-            }
-            None => answer(reply_to, Reply::status(Status::Invalid)),
-        }
+        None => answer(reply_to, Reply::status(Status::Invalid)),
     }
 }
 
@@ -4472,11 +4467,8 @@ fn main(mask: u64) -> u64 {
     } else {
         &[SERVICE]
     };
-    let mut waiting: Option<(Handle, u64)> = None;
     let mut msg = [0u8; 32];
     let mut handles = [Handle(0); abi::IPC_MAX_HANDLES];
-    let mut events = [WireEvent::default(); MAX_EVENTS];
-    let mut times = [0u64; MAX_EVENTS];
     // One wait for a request on either endpoint, an event (the
     // controller's interrupt) or the next deadline (ADR 0044).
     let mut members = wait::Members::new();
@@ -4504,29 +4496,16 @@ fn main(mask: u64) -> u64 {
                     break;
                 }
             };
-            let mut reply = Replies {
-                waiting: &mut waiting,
-                events: &mut events,
-                times: &mut times,
-            };
             // The clock per request: a block request before this one may
             // have taken seconds, and a read's deadline counts from now.
             let now = ctl.clock.now();
-            reply.serve(&mut ctl, which, &msg[..n], &handles[..nh], now);
+            serve(&mut ctl, which, &msg[..n], &handles[..nh], now);
         }
         let now = ctl.clock.now();
-        if let Some((reply_to, deadline)) = waiting {
-            if ctl.pending.len > 0 {
-                let n = ctl.pending.take(&mut events, &mut times);
-                answer(reply_to, Reply::events(&events[..n], &times[..n]));
-                waiting = None;
-            } else if now >= deadline {
-                answer(reply_to, Reply::status(Status::Timeout));
-                waiting = None;
-            }
-        }
+        ctl.pending.queue.settle(now);
+        ctl.pending.tell_gone_reader();
         let mut next = Deadline::NONE;
-        next.include_opt(waiting.map(|(_, deadline)| deadline));
+        next.include_opt(ctl.pending.queue.deadline());
         next.include_opt(
             ctl.next_maintenance()
                 .map(|due| due.max(now + MAINTENANCE_PACE_MS)),
@@ -4544,15 +4523,10 @@ fn main(mask: u64) -> u64 {
                 len,
                 handles: nh,
             }) => {
-                let mut reply = Replies {
-                    waiting: &mut waiting,
-                    events: &mut events,
-                    times: &mut times,
-                };
                 // At the time it arrived: a read's deadline counts from
                 // now, not from before the wait.
                 let now = ctl.clock.now();
-                reply.serve(&mut ctl, index, &msg[..len], &handles[..nh], now);
+                serve(&mut ctl, index, &msg[..len], &handles[..nh], now);
             }
             Ok(Woken::Irq { .. } | Woken::Round) => {}
             Err(e) if e.endpoint_gone() => {

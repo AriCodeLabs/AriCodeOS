@@ -159,6 +159,9 @@ pub mod fs {
         /// Main endpoint only (the broker): creates an endpoint bound
         /// to a single file in read-only mode (ADR 0016); the reply
         /// transfers it (`WRITE`). Through it only that file can be seen, opened and read.
+        /// `name` is a top-level file (no `/`, ADR 0050). `NotFound` if it
+        /// does not exist, unless `len` = `SHARE_MAY_BE_MISSING`: then the
+        /// file may appear later (sshd's `authorized_keys`).
         Share = 10,
         /// `fd`, `offset`, `len`; handles `[reply, buffer]`: one chunk of the
         /// new content to the journal, without committing anything (ADR 0018). Only
@@ -215,6 +218,9 @@ pub mod fs {
     }
 
     /// Request (64 bytes): header, arguments and name.
+    /// `Request::len` of a `Share` whose file may not exist yet.
+    pub const SHARE_MAY_BE_MISSING: u32 = 1;
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Request {
         pub op: Op,
@@ -470,6 +476,8 @@ pub mod net {
         /// side of a new endpoint; the sockets opened through it belong to
         /// that client and are released when the kernel reports it gone.
         /// `Invalid` from a session, `Busy` when every session slot is taken.
+        /// `Request::port`: the one port below `PRIVILEGED_PORTS` the session
+        /// may listen or bind on (0: none).
         Attach = 16,
         /// Socket table usage of owner slot `sock` (0 = main endpoint,
         /// `1..` = sessions): `Reply::value` = [`OwnerSockets`] packed,
@@ -610,7 +618,16 @@ pub mod net {
         NotFound = 8,
         /// The connection was refused or reset by the other end.
         Reset = 9,
+        /// A port below `PRIVILEGED_PORTS` the session was not given.
+        Denied = 10,
     }
+
+    /// Ports a session may listen or bind on only if `Attach` gave it that
+    /// one (audit 2026-10-25 E, L1: any program with `net` could listen on
+    /// 22 while sshd was down and pose as it).
+    pub const PRIVILEGED_PORTS: u16 = 1024;
+    /// The SSH server's port, given to sshd's session.
+    pub const SSH_PORT: u16 = 22;
 
     /// Reply (48 bytes): status, value, port and data (addresses).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -693,6 +710,7 @@ pub mod net {
                 7 => Status::InUse,
                 8 => Status::NotFound,
                 9 => Status::Reset,
+                10 => Status::Denied,
                 _ => return None,
             };
             let mut data = [0u8; 24];
@@ -850,12 +868,17 @@ pub mod input {
     /// Events per reply.
     pub const MAX_EVENTS: usize = 4;
     pub const MAX_NAME: usize = 32;
+    /// The longest a read waits: a longer `timeout_ms` is cut to this, so a
+    /// reader that died while its read waited holds the service's one
+    /// place no longer (audit 2026-10-25 C, M4).
+    pub const MAX_READ_MS: u32 = 10_000;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Op {
         /// Device name in `Reply::name`.
         Info = 1,
-        /// Waits up to `timeout_ms` and returns up to `MAX_EVENTS` events.
+        /// Waits up to `timeout_ms` (at most `MAX_READ_MS`) and returns up
+        /// to `MAX_EVENTS` events.
         Read = 2,
     }
 
@@ -1042,6 +1065,17 @@ pub mod window {
         /// Waits up to `timeout_ms` for a window event.
         Poll = 3,
         Close = 4,
+        /// Main endpoint only (init, the broker): a session for one client
+        /// (ADR 0052). The reply carries the send side of a new endpoint;
+        /// windows created through it belong to that client alone, which
+        /// alone can present, poll or close them, and they close when the
+        /// kernel reports the client gone. `Reply::value` is the session's
+        /// id for `Detach`.
+        Attach = 5,
+        /// Main endpoint only: the client of session `window` (an `Attach`
+        /// id) has exited; its endpoint and windows close now, whoever else
+        /// still holds its send side (ADR 0052).
+        Detach = 6,
     }
 
     /// Request (64 bytes).
@@ -1108,6 +1142,8 @@ pub mod window {
                 2 => Op::Present,
                 3 => Op::Poll,
                 4 => Op::Close,
+                5 => Op::Attach,
+                6 => Op::Detach,
                 _ => return None,
             };
             let mut title = [0u8; MAX_TITLE];
@@ -1437,6 +1473,11 @@ mod tests {
         let d = Request::decode(&r.encode()).unwrap();
         assert_eq!(d, r);
         assert_eq!(d.title_str(), "Demo A");
+        for op in [Op::Attach, Op::Detach] {
+            let mut s = Request::new(op);
+            s.window = 0x0102_0003;
+            assert_eq!(Request::decode(&s.encode()), Some(s));
+        }
         assert!(Request::new(Op::Create)
             .with_title(&"t".repeat(25))
             .is_none());
@@ -1596,6 +1637,12 @@ mod tests {
                 .unwrap()
                 .status,
             Status::Reset
+        );
+        assert_eq!(
+            Reply::decode(&Reply::status(Status::Denied).encode())
+                .unwrap()
+                .status,
+            Status::Denied
         );
     }
 

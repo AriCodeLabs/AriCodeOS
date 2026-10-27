@@ -5,14 +5,16 @@
 //! request, asks init for a session shell (it has no SPAWNER). One
 //! connection at a time.
 //!
-//! Handles from init: `[net (WRITE), fs (WRITE), hardware, SYSTEM (READ),
-//! sessions (WRITE)]`. In AriFS: `ssh_host_ed25519_key` (the host key seed
-//! in hex; installed by `cargo xtask usb-image --authorized-key`, or
-//! created on first start), `authorized_keys` (OpenSSH format,
+//! Handles from init: `[net (WRITE), fs (its directory `sshd/`, WRITE),
+//! hardware, SYSTEM (READ), sessions (WRITE), authorized_keys (read-only)]`
+//! (ADR 0050). In `sshd/`: `ssh_host_ed25519_key` (the host key seed in
+//! hex; installed by `cargo xtask usb-image --authorized-key`, or created
+//! on first start) and `random_seed`; in the AriFS root, read-only:
+//! `authorized_keys` (OpenSSH format,
 //! `ssh-ed25519` lines; reread after every connection, or at most once a
 //! minute while the file service does not answer; a key removed during
-//! such an outage stays valid until the file service answers again) and
-//! `random_seed` (entropy carried across boots).
+//! such an outage stays valid until the file service answers again).
+//! `random_seed` is entropy carried across boots.
 //!
 //! Closed by default: without an `authorized_keys` file with at least one
 //! key, sshd does not listen at all.
@@ -29,15 +31,19 @@ use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::net::{NetClient, NetError};
 use aricode_rt::sys::{self, abi, Error, Handle};
 use aricode_ssh::keys_refresh::{Change, KeyRefresh};
-use aricode_ssh::{fingerprint, parse_authorized_keys, Event, Server};
+use aricode_ssh::{fingerprint, log_safe, parse_authorized_keys, Event, Server};
 
 const NET: Handle = Handle(0x0001_0004);
 const FS: Handle = Handle(0x0001_0005);
 const HW: Handle = Handle(0x0001_0006);
 const SYSTEM: Handle = Handle(0x0001_0007);
 const SESSIONS: Handle = Handle(0x0001_0008);
+/// `authorized_keys`, read-only (ADR 0050); `FS` is sshd's own directory.
+const KEYS: Handle = Handle(0x0001_0009);
 
-const PORT: u16 = 22;
+/// Given to sshd's network session by init: no other program may listen
+/// on it (audit 2026-10-25 E, L1).
+const PORT: u16 = aricode_proto::net::SSH_PORT;
 /// A connection that has not authenticated after this long is dropped: the
 /// server attends one connection at a time, so an idle client must not
 /// hold the port.
@@ -65,6 +71,10 @@ struct Entropy {
     counter: u64,
     /// A non-empty `random_seed` from an earlier boot was read and mixed in.
     carried: bool,
+    /// A draw from the kernel gave fewer bytes than asked: whatever the
+    /// kernel says of its generator, this boot's keys are weak unless a
+    /// seed was carried (audit of incident 0036, M1).
+    draw_failed: bool,
 }
 
 impl Entropy {
@@ -75,7 +85,7 @@ impl Entropy {
             h.update(saved);
         }
         let mut fresh = [0u8; 32];
-        let _ = sys::random(SYSTEM, &mut fresh);
+        let draw_failed = sys::random(SYSTEM, &mut fresh) != Ok(fresh.len());
         h.update(&fresh);
         h.update(&sys::time::uptime_us(SYSTEM).unwrap_or(0).to_le_bytes());
         let state = h.finish();
@@ -83,6 +93,7 @@ impl Entropy {
             state,
             counter: 0,
             carried: saved.is_ok_and(|s| !s.is_empty()),
+            draw_failed,
         }
     }
 
@@ -96,12 +107,15 @@ impl Entropy {
     /// before this one add to it, so nothing is reported.
     fn check_for_host_key(&self) {
         let source = sys::random_source(SYSTEM);
-        if self.carried || source.is_some_and(|r| r.is_strong()) {
+        if self.carried || (!self.draw_failed && source.is_some_and(|r| r.is_strong())) {
             return;
         }
         let _ = sys::event_record(source.map_or(0, |r| r.source as u64), ENTROPY_WEAK_FAULT);
         let mut text = [0u8; abi::sysinfo::RandomSource::SUMMARY_MAX];
         let why = match source {
+            _ if self.draw_failed => {
+                alloc::string::String::from("the kernel gave too few random bytes")
+            }
             Some(r) => alloc::format!(
                 "kernel generator seeded from {}, {}",
                 r.summary(&mut text),
@@ -149,7 +163,7 @@ impl Entropy {
     /// Fresh 32 bytes: state, kernel randomness and a counter.
     fn next(&mut self) -> [u8; 32] {
         let mut fresh = [0u8; 32];
-        let _ = sys::random(SYSTEM, &mut fresh);
+        self.draw_failed |= sys::random(SYSTEM, &mut fresh) != Ok(fresh.len());
         self.counter += 1;
         let mut h = aricode_crypto::sha256::Sha256::new();
         h.update(&self.derive(b"fresh"));
@@ -176,8 +190,13 @@ fn write_file(fs: &mut FsClient, name: &str, data: &[u8]) -> bool {
 enum ReadError {
     /// The file service answered: there is no such file.
     Absent,
-    /// The file service did not answer (gone, retired or too slow).
+    /// The file service did not answer (died mid-request, or too slow).
     Unavailable,
+    /// The session can never answer again: its fsd generation is gone
+    /// (sessions die with it, ADR 0050). sshd exits so init relaunches it
+    /// with new sessions; keeping the last keys would keep a key removed
+    /// since valid until reboot.
+    Gone,
     /// It answered, but the content could not be read whole.
     Incomplete,
 }
@@ -190,6 +209,7 @@ enum ReadError {
 fn read_file(fs: &mut FsClient, name: &str) -> Result<Vec<u8>, ReadError> {
     let fd = fs.open(name).map_err(|e| match e {
         FsError::Status(FsStatus::NotFound) => ReadError::Absent,
+        FsError::Ipc(Error::ServiceGone) => ReadError::Gone,
         e if e.service_unavailable() => ReadError::Unavailable,
         _ => ReadError::Incomplete,
     })?;
@@ -200,6 +220,7 @@ fn read_file(fs: &mut FsClient, name: &str) -> Result<Vec<u8>, ReadError> {
         match fs.read(fd, data.len() as u32, &mut chunk) {
             Ok(0) => break Ok(()),
             Ok(n) => data.extend_from_slice(&chunk[..n]),
+            Err(FsError::Ipc(Error::ServiceGone)) => break Err(ReadError::Gone),
             Err(e) if e.service_unavailable() => break Err(ReadError::Unavailable),
             Err(_) if errors < 3 => {
                 errors += 1;
@@ -390,15 +411,17 @@ fn serve(
                 for e in events.drain(..) {
                     match e {
                         Event::Authenticated { user } => {
+                            let mut safe = [0u8; 32];
                             sys::print(b"sshd: user '");
-                            sys::print(user.as_bytes());
+                            sys::print(log_safe(user.as_bytes(), &mut safe));
                             sys::print(b"' authenticated from ");
                             print_ip(peer);
                             sys::print(b"\n");
                         }
                         Event::AuthFailed { user } => {
+                            let mut safe = [0u8; 32];
                             sys::print(b"sshd: refused key for '");
-                            sys::print(user.as_bytes());
+                            sys::print(log_safe(user.as_bytes(), &mut safe));
                             sys::print(b"' from ");
                             print_ip(peer);
                             sys::print(b"\n");
@@ -541,14 +564,22 @@ fn authorized(fs: &mut FsClient) -> Result<Vec<[u8; 32]>, ReadError> {
 /// once a minute (incident 0001: each attempt would hold the next banner
 /// for the file client's whole wait), logged once when it starts failing
 /// and once when it answers again.
-fn reread_keys(fs: &mut FsClient, refresh: &mut KeyRefresh, keys: &mut Vec<[u8; 32]>) {
+/// `Err(Gone)`: the session is gone for good (see `ReadError::Gone`).
+fn reread_keys(
+    fs: &mut FsClient,
+    refresh: &mut KeyRefresh,
+    keys: &mut Vec<[u8; 32]>,
+) -> Result<(), ReadError> {
     if !refresh.due(now_ms()) {
-        return;
+        return Ok(());
     }
     // Only a complete read (or "no such file") is an answer; a file service
     // that does not answer or a read that breaks off keeps the last keys and
     // is retried at most once a minute (audit robustness-1, L5).
     let result = authorized(fs);
+    if result == Err(ReadError::Gone) {
+        return Err(ReadError::Gone);
+    }
     let answered = result.is_ok();
     if let Ok(k) = result {
         *keys = k;
@@ -567,10 +598,28 @@ fn reread_keys(fs: &mut FsClient, refresh: &mut KeyRefresh, keys: &mut Vec<[u8; 
         }
         None => {}
     }
+    Ok(())
+}
+
+/// Exit code when the file sessions are gone (`ReadError::Gone`).
+const EXIT_FILES_GONE: u64 = 5;
+
+fn files_gone() -> u64 {
+    say(b"file sessions gone (the file service was restarted); exiting for new ones");
+    EXIT_FILES_GONE
+}
+
+/// Keys for a start: none if the file does not exist or could not be read
+/// (closed until a reread finds some); `Err(Gone)` as `reread_keys`.
+fn initial_keys(fs: &mut FsClient) -> Result<Vec<[u8; 32]>, ReadError> {
+    match authorized(fs) {
+        Err(ReadError::Gone) => Err(ReadError::Gone),
+        r => Ok(r.unwrap_or_default()),
+    }
 }
 
 fn main(_arg: u64) -> u64 {
-    let Ok(mut fs) = FsClient::new(FS, HW) else {
+    let (Ok(mut fs), Ok(mut keys_fs)) = (FsClient::new(FS, HW), FsClient::new(KEYS, HW)) else {
         say(b"no file client");
         return 1;
     };
@@ -579,7 +628,9 @@ fn main(_arg: u64) -> u64 {
         return 2;
     };
     let mut entropy = Entropy::load(&mut fs);
-    let mut keys = authorized(&mut fs).unwrap_or_default();
+    let Ok(mut keys) = initial_keys(&mut keys_fs) else {
+        return files_gone();
+    };
     let mut refresh = KeyRefresh::new();
     let mut announced = false;
     if keys.is_empty() {
@@ -589,7 +640,10 @@ fn main(_arg: u64) -> u64 {
         // Closed until the owner installs a key; checked every few seconds.
         while keys.is_empty() {
             sys::time::sleep_ms(5_000);
-            keys = authorized(&mut fs).unwrap_or_default();
+            let Ok(k) = initial_keys(&mut keys_fs) else {
+                return files_gone();
+            };
+            keys = k;
         }
         say(b"authorized_keys found");
     }
@@ -597,12 +651,15 @@ fn main(_arg: u64) -> u64 {
     let seed = host_key(&mut fs, &mut entropy, &mut seed_saved);
     let mut listener = match net.tcp_listen(PORT) {
         Ok(l) => l,
-        Err(_) => {
-            say(b"cannot listen on port 22");
+        Err(e) => {
+            sys::print(b"sshd: cannot listen on port 22 (");
+            sys::print(e.describe().as_bytes());
+            sys::print(b")\n");
             ready();
             return 3;
         }
     };
+    let mut relisten_refused = false;
     let mut b = [0u8; 20];
     sys::print(b"sshd: listening on port 22, host key ");
     sys::print(fingerprint(&aricode_crypto::ed25519::public_key(&seed)).as_bytes());
@@ -627,9 +684,21 @@ fn main(_arg: u64) -> u64 {
             // Listen again on the next generation after a pause.
             Err(NetError::Ipc(Error::ReplyLost)) | Err(NetError::Status(Status::BadSock)) => {
                 sys::time::sleep_ms(500);
-                if let Ok(l) = net.tcp_listen(PORT) {
-                    listener = l;
-                    say(b"network service restarted: listening on port 22 again");
+                match net.tcp_listen(PORT) {
+                    Ok(l) => {
+                        listener = l;
+                        relisten_refused = false;
+                        say(b"network service restarted: listening on port 22 again");
+                    }
+                    // Said once, not every 500 ms: a refusal is never silent
+                    // (owner's rule), nor a flood.
+                    Err(e) if !relisten_refused => {
+                        relisten_refused = true;
+                        sys::print(b"sshd: cannot listen on port 22 again (");
+                        sys::print(e.describe().as_bytes());
+                        sys::print(b"); retrying\n");
+                    }
+                    Err(_) => {}
                 }
                 continue;
             }
@@ -642,7 +711,10 @@ fn main(_arg: u64) -> u64 {
             // authorized_keys emptied while running: reread first, so a key
             // installed since counts (audit robustness-1, M1); refuse if
             // there is still none.
-            reread_keys(&mut fs, &mut refresh, &mut keys);
+            if reread_keys(&mut keys_fs, &mut refresh, &mut keys).is_err() {
+                let _ = net.tcp_close(sock);
+                return files_gone();
+            }
             if keys.is_empty() {
                 say(b"authorized_keys is empty now: connection refused");
                 let _ = net.tcp_close(sock);
@@ -659,7 +731,9 @@ fn main(_arg: u64) -> u64 {
         // Reread between connections so a key added or removed from the
         // console counts, without delaying the next client's banner behind
         // a file service that does not answer.
-        reread_keys(&mut fs, &mut refresh, &mut keys);
+        if reread_keys(&mut keys_fs, &mut refresh, &mut keys).is_err() {
+            return files_gone();
+        }
     }
 }
 

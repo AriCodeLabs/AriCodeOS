@@ -404,12 +404,13 @@ impl State {
         if dom.regions.contains_key(&start) {
             return Ok(());
         }
-        for page in (start..end).step_by(PAGE_SIZE as usize) {
-            match dom.tables.map_4k(page, page, true) {
-                Ok(()) | Err(IommuError::AlreadyMapped) => {}
-                Err(IommuError::OutOfRange) => return Err("iommu: address beyond the unit width"),
-                Err(_) => return Err("iommu: no frames for the tables"),
-            }
+        // All or nothing: a failure leaves no leaf behind that a device
+        // could still use once the caller frees the buffer (audit
+        // 2026-10-25 C, M1).
+        match dom.tables.map_identity(start, end, true) {
+            Ok(()) => {}
+            Err(IommuError::OutOfRange) => return Err("iommu: address beyond the unit width"),
+            Err(_) => return Err("iommu: no frames for the tables"),
         }
         dom.regions.insert(start, end - start);
         for u in Self::units_of(dom) {
@@ -562,9 +563,39 @@ pub fn attach(pid: u32, source: u16) -> Result<(), &'static str> {
     with(|s| s.attach(pid, source)).unwrap_or(Ok(()))
 }
 
-/// Identity-maps `[phys, phys+len)` in the domain of `pid`.
-pub fn map_region(pid: u32, phys: u64, len: u64) -> Result<(), &'static str> {
-    with(|s| s.map_range(pid, phys, len)).unwrap_or(Ok(()))
+/// Identity-maps `[phys, phys+len)` in the domain of `pid`. Returns whether
+/// this call added it (`false`: the domain had it, or there is no IOMMU).
+pub fn map_region(pid: u32, phys: u64, len: u64) -> Result<bool, &'static str> {
+    with(|s| {
+        let start = phys & !(PAGE_SIZE - 1);
+        let had = s
+            .domains
+            .get(&pid)
+            .is_some_and(|d| d.regions.contains_key(&start));
+        s.map_range(pid, phys, len).map(|()| !had)
+    })
+    .unwrap_or(Ok(false))
+}
+
+/// Removes the region starting at `phys` from the domain of `pid` only:
+/// the process unmapped a client's buffer, which its devices must no
+/// longer reach (audit 2026-10-25 C, L11). Other domains keep it.
+pub fn unmap_region(pid: u32, phys: u64) {
+    let start = phys & !(PAGE_SIZE - 1);
+    with(|s| {
+        let Some(dom) = s.domains.get_mut(&pid) else {
+            return;
+        };
+        let Some(len) = dom.regions.remove(&start) else {
+            return;
+        };
+        for page in (start..start + len).step_by(PAGE_SIZE as usize) {
+            let _ = dom.tables.unmap_4k(page);
+        }
+        for u in State::units_of(dom) {
+            s.units[u].invalidate_iotlb();
+        }
+    });
 }
 
 /// Removes a region from every domain that has it (the DMA buffer is being
@@ -640,9 +671,14 @@ pub fn on_fault_irq() {
                 let (low, high) = (u.r64(off), u.r64(off + 8));
                 if let Some(f) = FaultRecord::decode(low, high) {
                     FAULTS.fetch_add(1, Ordering::Relaxed);
-                    crate::events::record(
+                    // Charged to the share of the process whose domain has
+                    // the device: a driver making it fault in a loop
+                    // overwrites only its own events (incident 0040).
+                    let owner = s.owners.get(&f.source_id).copied().unwrap_or(0);
+                    crate::events::record_caused(
+                        owner,
                         aricode_abi::sysinfo::EventKind::DmaFault,
-                        0,
+                        owner,
                         f.source_id as u64,
                         aricode_iommu::fault_reason_name(f.reason),
                     );
@@ -695,6 +731,16 @@ pub fn selftest() {
             extra.push(h);
         }
     }
+    // A client's buffer, handed over last: the test driver maps it, lets the
+    // device read into it, unmaps it (the device still reaches it while the
+    // handle is held), closes the handle and tries again, which must fault
+    // and leave the 0xA5 it wrote (audit 2026-10-25 C, L11).
+    let client = crate::hw::dma_alloc(4096).expect("client buffer");
+    let client_phys = match &client.kind {
+        ObjectKind::Dma(d) => d.region.phys,
+        _ => unreachable!("dma_alloc makes DMA objects"),
+    };
+    extra.push((client.clone(), Rights::READ.union(Rights::WRITE)));
     // The memory the test driver targets (0x1000, reserved) must not change
     // by a single byte.
     const FOREIGN_PHYS: u64 = 0x1000;
@@ -726,6 +772,21 @@ pub fn selftest() {
         foreign_before,
         "the device wrote to memory outside its domain"
     );
+    // SAFETY: the client buffer, still held by `client`.
+    let tail = |off: u64| unsafe {
+        (phys::phys_to_virt(client_phys + off + 510) as *const [u8; 2]).read()
+    };
+    assert_eq!(
+        tail(1024),
+        [0x55, 0xAA],
+        "the device must reach a client buffer whose handle its driver holds"
+    );
+    assert_eq!(
+        tail(2048),
+        [0xA5, 0xA5],
+        "the device wrote to a client buffer its driver had given back"
+    );
+    drop(client);
     let (_, domains, _) = stats();
     assert_eq!(
         domains, 0,
@@ -758,6 +819,6 @@ pub fn selftest() {
     let (_, domains, _) = stats();
     assert_eq!(domains, 0);
     info!(
-        "iommu selftest ok (legitimate read translated, DMA to foreign memory blocked with {recorded} fault(s) recorded and memory intact, domain freed, reassignment of {bus:02x}:{dev:02x}.{func} kept)"
+        "iommu selftest ok (legitimate read translated, DMA to foreign memory and to an unmapped client buffer blocked with {recorded} fault(s) recorded and memory intact, domain freed, reassignment of {bus:02x}:{dev:02x}.{func} kept)"
     );
 }

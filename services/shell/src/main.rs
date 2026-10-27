@@ -296,16 +296,31 @@ fn ps() {
     }
 }
 
-/// User stack high-water marks (`sysinfo::STACKS`, incident 0018): how
-/// much of its stack each live process has touched, page granular.
-fn stacks() {
+/// User stack high-water marks (`sysinfo::STACKS`, incident 0018) and the
+/// zero-fill memory backed on first touch (`sysinfo::ON_DEMAND`,
+/// performance audit 731c398, finding D), per live process, page granular.
+fn memory_usage() {
+    usage(
+        abi::sysinfo::STACKS,
+        b"user stacks (touched of size, page granular):\n",
+        b"diag: no access to stack use\n",
+    );
+    usage(
+        abi::sysinfo::ON_DEMAND,
+        b"user memory backed on first touch (backed of reserved: .bss, heap):\n",
+        b"diag: no access to on-demand memory\n",
+    );
+}
+
+/// One per-process table of `StackEntry` (`query`): used of size, KiB.
+fn usage(query: u64, title: &[u8], refused: &[u8]) {
     use abi::sysinfo::StackEntry;
     let mut buf = [0u8; StackEntry::LEN * 32];
-    let Ok(n) = sys::system_info(SYSTEM, abi::sysinfo::STACKS, &mut buf) else {
-        print(b"diag: no access to stack use\n");
+    let Ok(n) = sys::system_info(SYSTEM, query, &mut buf) else {
+        print(refused);
         return;
     };
-    print(b"user stacks (touched of size, page granular):\n");
+    print(title);
     for chunk in buf[..n].as_chunks::<{ StackEntry::LEN }>().0 {
         let Some(e) = StackEntry::decode(chunk) else {
             continue;
@@ -462,7 +477,7 @@ fn diag(fs: &mut FsClient, net_client: &NetClient, mask: u64, rest: &[u8]) {
     cpus();
     entropy();
     ps();
-    stacks();
+    memory_usage();
     services(mask, fs);
     services_detail();
     if mask & SERVICE_NET != 0 {
@@ -591,9 +606,11 @@ fn ls(fs: &FsClient) {
         match fs.list(i, &mut name) {
             Ok(Some((n, size))) => {
                 print(&name[..n]);
-                for _ in n..20 {
+                // A column of 20, and always one space after a longer name.
+                for _ in n..n.max(19) {
                     print(b" ");
                 }
+                print(b" ");
                 num(size);
                 print(b" bytes\n");
                 i += 1;
@@ -982,6 +999,9 @@ fn http_get(fs: &mut FsClient, client: &mut NetClient, arg: &[u8]) {
         Err(HttpsError::EmptyRecords) => {
             print(b"http: TLS: the server kept sending records without data\n")
         }
+        Err(HttpsError::NoEntropy) => {
+            print(b"http: TLS: too few random bytes for a key; not connecting\n")
+        }
         Err(HttpsError::HeaderBytes) => {
             print(b"http: response headers too large in all (interim responses included)\n")
         }
@@ -1012,12 +1032,16 @@ fn tls_error(e: aricode_tls::Error) -> &'static [u8] {
     use aricode_tls::Error as E;
     use aricode_x509::Error as X;
     match e {
-        E::Certificate(X::Expired) => b"certificate expired",
+        E::Certificate(X::Expired) => b"certificate expired (or the clock is wrong)",
         E::Certificate(X::NotYetValid) => b"certificate not yet valid (check the clock)",
         E::Certificate(X::NameMismatch) => b"certificate does not match the host name",
         E::Certificate(X::UnknownIssuer) => b"certificate signed by an unknown authority",
         E::Certificate(X::BadSignature) => b"invalid certificate signature",
         E::Certificate(X::WrongPurpose) => b"certificate not issued for a TLS server",
+        E::Certificate(X::NameConstraint) => {
+            b"certificate outside the names its issuer may vouch for"
+        }
+        E::Certificate(X::Distrusted) => b"certificate uses a key that is no longer trusted",
         E::Certificate(_) => b"certificate rejected",
         E::Alert(_) => b"the server sent an alert",
         E::Unsupported(_) => b"the server needs an unsupported TLS feature",

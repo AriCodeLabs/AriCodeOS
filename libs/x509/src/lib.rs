@@ -46,8 +46,92 @@ pub enum Error {
     ChainTooLong,
     /// The leaf may not authenticate a TLS server: extendedKeyUsage without
     /// serverAuth, or keyUsage without digitalSignature (RFC 5280 4.2.1.12,
-    /// RFC 8446 4.4.2.2).
+    /// RFC 8446 4.4.2.2); or a CA of the chain may not issue for one: its
+    /// extendedKeyUsage lacks serverAuth.
     WrongPurpose,
+    /// A CA's nameConstraints do not allow a name of the leaf (RFC 5280
+    /// 4.2.1.10).
+    NameConstraint,
+    /// A certificate of the chain, or the root it ends at, has a key this
+    /// system no longer trusts (`roots::DISTRUSTED`, ADR 0054).
+    Distrusted,
+}
+
+/// The dNSName subtrees of a CA's nameConstraints extension.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameConstraints<'a> {
+    /// If not empty, every name must lie in one of these.
+    pub permitted: Vec<&'a str>,
+    /// No name may lie in any of these.
+    pub excluded: Vec<&'a str>,
+    /// The extension also has iPAddress subtrees, which this client does
+    /// not evaluate: a host given as an IP address is refused under it.
+    pub ip_subtrees: bool,
+}
+
+/// Name comparisons one CA's nameConstraints may cost (leaf names ×
+/// subtrees): both are chosen by whoever built the chain, and constraints
+/// are checked before the chain is trusted. Past it the chain is refused
+/// (audit of incident 0029, L3; webpki uses the same kind of budget).
+pub const NAME_CONSTRAINT_BUDGET: usize = 16_384;
+
+impl NameConstraints<'_> {
+    /// Whether the leaf name `name` (possibly a `*.` wildcard, which stands
+    /// for any one label) is allowed: each name it can stand for lies in a
+    /// permitted subtree, and none in an excluded one.
+    pub fn allows(&self, name: &str) -> bool {
+        let name = name.strip_suffix('.').unwrap_or(name);
+        let (wildcard, base) = match name.strip_prefix("*.") {
+            Some(base) => (true, base),
+            None => (false, name),
+        };
+        // Every expansion `label.base` is inside a subtree iff `base` is.
+        let permitted =
+            self.permitted.is_empty() || self.permitted.iter().any(|p| within(base, p, wildcard));
+        // An expansion can fall inside an excluded subtree if `base` is in
+        // it, or (wildcard) if the subtree lies below `base` (only one label
+        // below can actually match; deeper is refused too, to stay simple).
+        let excluded = self
+            .excluded
+            .iter()
+            .any(|e| within(base, e, wildcard) || (wildcard && strictly_below(trim(e), base)));
+        permitted && !excluded
+    }
+}
+
+/// A constraint without its trailing dot and its leading one (`.a.com`,
+/// a common spelling for "the subdomains of `a.com`", which `within`
+/// reads as such).
+fn trim(constraint: &str) -> &str {
+    let c = constraint.strip_suffix('.').unwrap_or(constraint);
+    c.strip_prefix('.').unwrap_or(c)
+}
+
+/// Whether `name` lies in the subtree `constraint` (RFC 5280 4.2.1.10: the
+/// constraint itself and any name formed by adding labels on its left;
+/// the empty constraint holds every name). With a leading dot only the
+/// added-label names. `wildcard`: `name` is the base of a `*.` name, whose
+/// expansions all have one label more.
+fn within(name: &str, constraint: &str, wildcard: bool) -> bool {
+    let dot = constraint.starts_with('.');
+    let c = trim(constraint);
+    if c.is_empty() {
+        return true;
+    }
+    if name.eq_ignore_ascii_case(c) {
+        return wildcard || !dot;
+    }
+    strictly_below(name, c)
+}
+
+/// `name` ends with `.parent` (case-insensitive), with a label before it.
+fn strictly_below(name: &str, parent: &str) -> bool {
+    if parent.is_empty() {
+        return !name.is_empty();
+    }
+    name.len() > parent.len() + 1
+        && name.as_bytes()[name.len() - parent.len() - 1] == b'.'
+        && name[name.len() - parent.len()..].eq_ignore_ascii_case(parent)
 }
 
 /// Subject public key; slices point into the certificate.
@@ -91,6 +175,9 @@ pub struct Certificate<'a> {
     pub not_before: u64,
     pub not_after: u64,
     pub public_key: PublicKey<'a>,
+    /// The whole SubjectPublicKeyInfo (DER element): what
+    /// `roots::DISTRUSTED` names, by SHA-256.
+    pub spki: &'a [u8],
     /// basicConstraints cA and, if keyUsage is present, keyCertSign.
     pub is_ca: bool,
     /// basicConstraints pathLenConstraint.
@@ -105,6 +192,47 @@ pub struct Certificate<'a> {
     /// extendedKeyUsage includes serverAuth or anyExtendedKeyUsage (true
     /// without the extension).
     pub server_auth: bool,
+    /// nameConstraints dNSName subtrees, critical or not.
+    pub name_constraints: Option<NameConstraints<'a>>,
+}
+
+/// No moment this system checks certificates at can be earlier than this
+/// (2026-10-27 00:00 UTC): a real-time clock that reads earlier (a dead
+/// CMOS battery reads 2000) or none at all gives this instead of skipping
+/// the validity dates, so a certificate that expired before it is always
+/// refused (audit 2026-10-25 D, M1: no clock meant no date check). Raised
+/// at each release (docs/WORKFLOW.md).
+pub const TIME_FLOOR: u64 = 1_793_059_200;
+
+/// What a chain's validity dates are checked against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidityTime {
+    /// A clock that can be trusted: `notBefore <= t <= notAfter`.
+    Clock(u64),
+    /// No clock that can be trusted: only `notAfter >= floor`, since a
+    /// certificate issued after the floor is no sign of a wrong date
+    /// (audit of incident 0036, H1: checking `notBefore` against the floor
+    /// refused every certificate renewed after the release).
+    AtLeast(u64),
+    /// Dates not checked (tests).
+    Unchecked,
+}
+
+impl From<Option<u64>> for ValidityTime {
+    fn from(now: Option<u64>) -> Self {
+        now.map_or(ValidityTime::Unchecked, ValidityTime::Clock)
+    }
+}
+
+/// The time certificates are checked at from the real-time clock's Unix
+/// seconds: the clock when it reads at or after `TIME_FLOOR`; otherwise (no
+/// clock, or one that reads earlier) `TIME_FLOOR` as a lower bound of
+/// every `notAfter`.
+pub fn check_time(rtc: Option<u64>) -> ValidityTime {
+    match rtc {
+        Some(t) if t >= TIME_FLOOR => ValidityTime::Clock(t),
+        _ => ValidityTime::AtLeast(TIME_FLOOR),
+    }
 }
 
 /// Checks `signature` over `message` with `key`. False on any mismatch
@@ -153,16 +281,60 @@ pub fn verify_signature(
 /// single left-most `*` label matches exactly one label), or, only when the
 /// certificate has no dNSName, its common name. Case-insensitive; a
 /// trailing dot on `host` is ignored.
+/// An IP host (an IPv4 address, `matches_hostname`) matches a dNSName
+/// that spells it exactly, never a wildcard.
 pub fn matches_hostname(cert: &Certificate, host: &str) -> bool {
     let host = host.strip_suffix('.').unwrap_or(host);
     if host.is_empty() || host.contains('*') {
         return false;
     }
+    let matches = |pattern: &str| {
+        if is_ipv4(host) {
+            pattern.strip_suffix('.').unwrap_or(pattern) == host
+        } else {
+            name_matches(pattern, host)
+        }
+    };
     if cert.dns_names.is_empty() {
-        cert.common_name.is_some_and(|cn| name_matches(cn, host))
+        cert.common_name.is_some_and(matches)
     } else {
-        cert.dns_names.iter().any(|name| name_matches(name, host))
+        cert.dns_names.iter().any(|name| matches(name))
     }
+}
+
+/// Four decimal octets separated by dots.
+fn is_ipv4(host: &str) -> bool {
+    let mut parts = 0;
+    host.split('.').all(|p| {
+        parts += 1;
+        !p.is_empty()
+            && p.len() <= 3
+            && p.bytes().all(|b| b.is_ascii_digit())
+            && p.parse::<u8>().is_ok()
+    }) && parts == 4
+}
+
+/// Checks the leaf's names against a CA's nameConstraints: every dNSName.
+/// A constrained chain needs a subjectAltName (a common name is no
+/// constrained name type), and an IP host is refused when the CA also
+/// constrains IP addresses, which this client does not evaluate.
+fn check_name_constraints(
+    leaf: &Certificate,
+    host: &str,
+    nc: Option<&NameConstraints>,
+) -> Result<(), Error> {
+    let Some(nc) = nc else {
+        return Ok(());
+    };
+    let subtrees = (nc.permitted.len() + nc.excluded.len()).max(1);
+    if leaf.dns_names.is_empty()
+        || leaf.dns_names.len().saturating_mul(subtrees) > NAME_CONSTRAINT_BUDGET
+        || (nc.ip_subtrees && is_ipv4(host.strip_suffix('.').unwrap_or(host)))
+        || !leaf.dns_names.iter().all(|n| nc.allows(n))
+    {
+        return Err(Error::NameConstraint);
+    }
+    Ok(())
 }
 
 fn name_matches(pattern: &str, host: &str) -> bool {
@@ -178,28 +350,63 @@ fn name_matches(pattern: &str, host: &str) -> bool {
     }
 }
 
-fn check_validity(not_before: u64, not_after: u64, now: Option<u64>) -> Result<(), Error> {
+fn check_validity(not_before: u64, not_after: u64, now: ValidityTime) -> Result<(), Error> {
     match now {
-        Some(t) if t < not_before => Err(Error::NotYetValid),
-        Some(t) if t > not_after => Err(Error::Expired),
+        ValidityTime::Clock(t) if t < not_before => Err(Error::NotYetValid),
+        ValidityTime::Clock(t) if t > not_after => Err(Error::Expired),
+        ValidityTime::AtLeast(floor) if floor > not_after => Err(Error::Expired),
         _ => Ok(()),
     }
+}
+
+/// A leaf whose chain is trusted, unless it is itself a CA: a CA
+/// certificate is no server's certificate (audit 2026-10-25 D, L2). Checked
+/// last, so an untrusted self-signed CA still reads as an unknown issuer.
+fn trusted_leaf(leaf: Certificate) -> Result<Certificate, Error> {
+    if leaf.is_ca {
+        return Err(Error::WrongPurpose);
+    }
+    Ok(leaf)
 }
 
 /// Verifies a server chain: `chain[0]` is the leaf, then intermediates in
 /// any order. Each certificate must be signed by an intermediate of the
 /// chain (a CA within its path length, valid at `now`) or by one of
 /// `roots` (DER trust anchors; roots that do not parse are ignored). A
-/// certificate identical to a root is trusted directly. `now` is Unix
-/// seconds; `None` skips the validity dates. Returns the parsed leaf.
+/// certificate identical to a root is trusted directly. `now`: what the
+/// validity dates are checked against (`Some` Unix seconds is a trusted
+/// clock, `None` skips them). Returns the parsed leaf.
 pub fn verify_chain<'a>(
     chain: &[&'a [u8]],
     roots: &[&[u8]],
     host: &str,
-    now: Option<u64>,
+    now: impl Into<ValidityTime>,
 ) -> Result<Certificate<'a>, Error> {
+    verify_chain_with(chain, roots, roots::DISTRUSTED, host, now)
+}
+
+/// Whether `spki` (a whole SubjectPublicKeyInfo) is one of `distrusted`
+/// (SHA-256 digests).
+fn is_distrusted(spki: &[u8], distrusted: &[[u8; 32]]) -> bool {
+    !distrusted.is_empty() && distrusted.contains(&aricode_crypto::sha256::sha256(spki))
+}
+
+/// [`verify_chain`] with an explicit list of distrusted keys: no
+/// certificate on the path, leaf, intermediate or root, may have one of
+/// them, whatever signed it (ADR 0054).
+pub(crate) fn verify_chain_with<'a>(
+    chain: &[&'a [u8]],
+    roots: &[&[u8]],
+    distrusted: &[[u8; 32]],
+    host: &str,
+    now: impl Into<ValidityTime>,
+) -> Result<Certificate<'a>, Error> {
+    let now = now.into();
     let leaf_der = *chain.first().ok_or(Error::Malformed)?;
     let leaf = Certificate::parse(leaf_der)?;
+    if is_distrusted(leaf.spki, distrusted) {
+        return Err(Error::Distrusted);
+    }
     check_validity(leaf.not_before, leaf.not_after, now)?;
     if !matches_hostname(&leaf, host) {
         return Err(Error::NameMismatch);
@@ -215,7 +422,7 @@ pub fn verify_chain<'a>(
     let mut intermediates = 0;
     loop {
         if roots.contains(&current_der) {
-            return Ok(leaf);
+            return trusted_leaf(leaf);
         }
         let signed_by = |key: &PublicKey| {
             verify_signature(
@@ -227,11 +434,23 @@ pub fn verify_chain<'a>(
         };
         let mut error = Error::UnknownIssuer;
         for anchor in anchors.iter().filter(|a| a.subject == current.issuer) {
+            // Distrust is said of the issuer that really signed, and no
+            // later mismatch hides it (audit of ADR 0054, L1).
+            if signed_by(&anchor.public_key) && is_distrusted(anchor.spki, distrusted) {
+                error = Error::Distrusted;
+                continue;
+            }
             if signed_by(&anchor.public_key) {
                 check_validity(anchor.not_before, anchor.not_after, now)?;
-                return Ok(leaf);
+                if !anchor.server_auth {
+                    return Err(Error::WrongPurpose);
+                }
+                check_name_constraints(&leaf, host, anchor.name_constraints.as_ref())?;
+                return trusted_leaf(leaf);
             }
-            error = Error::BadSignature;
+            if error != Error::Distrusted {
+                error = Error::BadSignature;
+            }
         }
         let mut next = None;
         for (i, der) in chain.iter().enumerate() {
@@ -252,21 +471,30 @@ pub fn verify_chain<'a>(
             }
             let outcome = if !signed_by(&candidate.public_key) {
                 Err(Error::BadSignature)
+            } else if is_distrusted(candidate.spki, distrusted) {
+                Err(Error::Distrusted)
             } else if !candidate.is_ca
                 || candidate
                     .max_path_len
                     .is_some_and(|max| intermediates > max as usize)
             {
                 Err(Error::NotCa)
+            } else if !candidate.server_auth {
+                // An issuer limited to other purposes cannot vouch for a
+                // TLS server (audit 2026-10-25 D, H2).
+                Err(Error::WrongPurpose)
             } else {
-                check_validity(candidate.not_before, candidate.not_after, now)
+                check_validity(candidate.not_before, candidate.not_after, now).and_then(|()| {
+                    check_name_constraints(&leaf, host, candidate.name_constraints.as_ref())
+                })
             };
             match outcome {
                 Ok(()) => {
                     next = Some((i, candidate));
                     break;
                 }
-                Err(e) => error = e,
+                Err(e) if error != Error::Distrusted => error = e,
+                Err(_) => {}
             }
         }
         let (i, issuer) = next.ok_or(error)?;

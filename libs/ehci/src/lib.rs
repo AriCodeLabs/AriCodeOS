@@ -44,6 +44,15 @@ pub struct Params {
 }
 
 impl Params {
+    /// Whether the operational registers, every root port's included, lie
+    /// within the controller's BAR of `bar_len` bytes at `caplength` (audit
+    /// 2026-10-25 A, L1): the driver addresses them as the BAR's base plus
+    /// that offset.
+    pub fn registers_fit(&self, caplength: u64, bar_len: u64) -> bool {
+        let ports = (self.ports as u64).max(1);
+        caplength + op::portsc(ports as u8) + 4 <= bar_len
+    }
+
     pub fn decode(hcsparams: u32, hccparams: u32) -> Self {
         Self {
             ports: (hcsparams & 0xF) as u8,
@@ -829,6 +838,28 @@ pub mod hub {
 }
 
 /// `SET_ADDRESS` (USB 2.0 9.4.6).
+/// How long a polling driver may wait before it looks at the schedules
+/// and ports again (ms): `busy` (devices or work that need watching)
+/// gives `poll_ms`; otherwise `idle_ms`, never past the next hub poll
+/// (`next_hub_poll`) or a client read's deadline, and at least 1 ms.
+pub fn poll_wait(
+    now: u64,
+    busy: bool,
+    poll_ms: u64,
+    idle_ms: u64,
+    next_hub_poll: u64,
+    read_deadline: Option<u64>,
+) -> u64 {
+    if busy {
+        return poll_ms;
+    }
+    let mut wait = idle_ms.min(next_hub_poll.saturating_sub(now));
+    if let Some(deadline) = read_deadline {
+        wait = wait.min(deadline.saturating_sub(now));
+    }
+    wait.clamp(1, idle_ms.max(1))
+}
+
 pub fn set_address(address: u8) -> SetupPacket {
     SetupPacket {
         request_type: 0x00,
@@ -842,6 +873,20 @@ pub fn set_address(address: u8) -> SetupPacket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_idle_driver_waits_long_but_never_past_its_deadlines() {
+        // Busy: the short period, whatever the deadlines.
+        assert_eq!(poll_wait(1000, true, 8, 250, 1001, Some(1001)), 8);
+        // Idle: the long period...
+        assert_eq!(poll_wait(1000, false, 8, 250, 5000, None), 250);
+        // ...cut by the next hub poll or a read's deadline...
+        assert_eq!(poll_wait(1000, false, 8, 250, 1100, None), 100);
+        assert_eq!(poll_wait(1000, false, 8, 250, 5000, Some(1020)), 20);
+        // ...and at least 1 ms when one is already due.
+        assert_eq!(poll_wait(1000, false, 8, 250, 900, None), 1);
+        assert_eq!(poll_wait(1000, false, 8, 250, 5000, Some(1000)), 1);
+    }
 
     #[test]
     fn parameters_and_registers() {
@@ -1179,5 +1224,14 @@ mod tests {
         assert_eq!(r, [0x23, 8, 0x51, 0x90, 1, 0, 0, 0]);
         let r = hub::clear_tt_buffer(3, 0, hub::TT_CONTROL, false).to_bytes();
         assert_eq!(r, [0x23, 8, 0x30, 0x00, 1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn operational_registers_must_fit_the_bar() {
+        // Intel 7 series: 1 KiB BAR, CAPLENGTH 0x20, 3 ports.
+        let p = Params::decode(3, 0);
+        assert!(p.registers_fit(0x20, 0x400));
+        assert!(!p.registers_fit(0xFF, 0x100));
+        assert!(!Params::decode(15, 0).registers_fit(0x3F0, 0x400));
     }
 }

@@ -423,3 +423,518 @@ fn purpose_restrictions() {
     let plain = Certificate::parse(cert!("ec-leaf")).unwrap();
     assert!(plain.server_auth && plain.digital_signature);
 }
+
+/// Verifies `leaf` under intermediate `int` and the constraints root.
+fn under(leaf: &'static [u8], int: &'static [u8], host: &str) -> Result<(), Error> {
+    verify_chain(&[leaf, int], &[cert!("nc-root")], host, Some(NOW)).map(|_| ())
+}
+
+/// Audit 2026-10-25 D, H1: a non-critical nameConstraints extension was
+/// ignored, so an intermediate limited to good.example could vouch for any
+/// name (the webpki/JSSE pattern). Critical or not, it now applies.
+#[test]
+fn name_constraints_bind_intermediates() {
+    let int = Certificate::parse(cert!("nc-int")).unwrap();
+    let nc = int.name_constraints.as_ref().unwrap();
+    assert_eq!(
+        (nc.permitted.as_slice(), nc.excluded.len()),
+        (&["good.example"][..], 0)
+    );
+    assert_eq!(
+        under(cert!("nc-ok"), cert!("nc-int"), "www.good.example"),
+        Ok(())
+    );
+    assert_eq!(
+        under(cert!("nc-evil"), cert!("nc-int"), "www.evil.example"),
+        Err(Error::NameConstraint)
+    );
+    // Every name of the leaf is checked, not only the one asked for.
+    assert_eq!(
+        under(cert!("nc-mixed"), cert!("nc-int"), "www.good.example"),
+        Err(Error::NameConstraint)
+    );
+    assert_eq!(
+        under(cert!("nc-wild"), cert!("nc-int"), "a.good.example"),
+        Ok(())
+    );
+    // A constrained chain needs a subjectAltName: no common name fallback.
+    assert_eq!(
+        under(cert!("nc-cn"), cert!("nc-int"), "www.good.example"),
+        Err(Error::NameConstraint)
+    );
+    // Critical: understood now, so no longer refused as unsupported.
+    assert_eq!(
+        under(
+            cert!("nc-crit-ok"),
+            cert!("nc-crit-int"),
+            "www.good.example"
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        under(
+            cert!("nc-crit-evil"),
+            cert!("nc-crit-int"),
+            "www.evil.example"
+        ),
+        Err(Error::NameConstraint)
+    );
+    // Excluded subtrees, and a wildcard that could stand for one.
+    assert_eq!(
+        under(
+            cert!("nc-excl-ok"),
+            cert!("nc-excl-int"),
+            "www.good.example"
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        under(
+            cert!("nc-excl-bad"),
+            cert!("nc-excl-int"),
+            "x.bad.good.example"
+        ),
+        Err(Error::NameConstraint)
+    );
+    assert_eq!(
+        under(
+            cert!("nc-excl-wild"),
+            cert!("nc-excl-int"),
+            "www.good.example"
+        ),
+        Err(Error::NameConstraint)
+    );
+}
+
+/// Audit 2026-10-25 D, H2: an intermediate whose extendedKeyUsage allows
+/// only e-mail protection could issue TLS server certificates we accepted.
+#[test]
+fn intermediates_need_server_auth() {
+    let host = "www.eku.example";
+    assert_eq!(
+        under(cert!("eku-tls-leaf"), cert!("eku-tls-int"), host),
+        Ok(())
+    );
+    assert_eq!(
+        under(cert!("eku-mail-leaf"), cert!("eku-mail-int"), host),
+        Err(Error::WrongPurpose)
+    );
+}
+
+#[test]
+fn name_constraint_subtrees() {
+    let nc =
+        |permitted: &'static [&'static str], excluded: &'static [&'static str]| NameConstraints {
+            permitted: permitted.to_vec(),
+            excluded: excluded.to_vec(),
+            ip_subtrees: false,
+        };
+    let good = nc(&["good.example"], &[]);
+    for name in [
+        "good.example",
+        "a.good.example",
+        "A.B.Good.Example",
+        "*.good.example",
+        "good.example.",
+    ] {
+        assert!(good.allows(name), "{name}");
+    }
+    for name in [
+        "notgood.example",
+        "good.example.evil",
+        "example",
+        "*.example",
+        "evil.example",
+    ] {
+        assert!(!good.allows(name), "{name}");
+    }
+    // A leading dot: the subdomains only.
+    let subs = nc(&[".good.example"], &[]);
+    assert!(subs.allows("a.good.example") && subs.allows("*.good.example"));
+    assert!(!subs.allows("good.example"));
+    // The empty constraint holds every name.
+    assert!(nc(&[""], &[]).allows("anything.example"));
+    let excl = nc(&[], &["bad.example"]);
+    assert!(excl.allows("good.example") && excl.allows("notbad.example"));
+    for name in ["bad.example", "x.bad.example", "*.bad.example", "*.example"] {
+        assert!(!excl.allows(name), "{name}");
+    }
+}
+
+/// A DER element: `tag`, its definite length and `value`.
+fn tlv(tag: u8, value: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    match value.len() {
+        n if n < 0x80 => out.push(n as u8),
+        n if n < 0x100 => out.extend([0x81, n as u8]),
+        n => out.extend([0x82, (n >> 8) as u8, n as u8]),
+    }
+    out.extend_from_slice(value);
+    out
+}
+
+/// An unsigned certificate (the parser does not check signatures) with an
+/// Ed25519 or the given key and these extensions.
+fn built(spki: Option<Vec<u8>>, extensions: &[Vec<u8>]) -> Vec<u8> {
+    let ed25519 = tlv(0x30, &tlv(0x06, &[0x2b, 0x65, 0x70]));
+    let name = tlv(
+        0x30,
+        &tlv(
+            0x31,
+            &tlv(0x30, &[tlv(0x06, &[0x55, 4, 3]), tlv(0x0c, b"x")].concat()),
+        ),
+    );
+    let validity = tlv(
+        0x30,
+        &[tlv(0x17, b"250101000000Z"), tlv(0x17, b"350101000000Z")].concat(),
+    );
+    let spki = spki.unwrap_or_else(|| {
+        tlv(
+            0x30,
+            &[
+                ed25519.clone(),
+                tlv(0x03, &[[0u8].as_slice(), &[7u8; 32]].concat()),
+            ]
+            .concat(),
+        )
+    });
+    let tbs = tlv(
+        0x30,
+        &[
+            tlv(0xa0, &tlv(0x02, &[2])),
+            tlv(0x02, &[1]),
+            ed25519.clone(),
+            name.clone(),
+            validity,
+            name,
+            spki,
+            tlv(0xa3, &tlv(0x30, &extensions.concat())),
+        ]
+        .concat(),
+    );
+    tlv(0x30, &[tbs, ed25519, tlv(0x03, &[0u8; 65])].concat())
+}
+
+fn extension(oid: &[u8], value: &[u8]) -> Vec<u8> {
+    tlv(0x30, &[tlv(0x06, oid), tlv(0x04, value)].concat())
+}
+
+fn san(names: &[&[u8]]) -> Vec<u8> {
+    let names: Vec<u8> = names.iter().flat_map(|n| tlv(0x82, n)).collect();
+    extension(&[0x55, 0x1d, 0x11], &tlv(0x30, &names))
+}
+
+/// Audit 2026-10-25 D, L1, L2, L4 and B, L4.
+#[test]
+fn hardened_parsing() {
+    // The builder itself makes a certificate the parser takes.
+    let ok = built(None, &[san(&[b"www.good.example"])]);
+    assert_eq!(
+        Certificate::parse(&ok).unwrap().dns_names,
+        ["www.good.example"]
+    );
+    // Two basicConstraints (CA:FALSE, then CA:TRUE): parsers keeping the
+    // first and the last would disagree on whether it is a CA.
+    let bc = |ca: bool| {
+        let body = if ca { tlv(0x01, &[0xff]) } else { Vec::new() };
+        extension(&[0x55, 0x1d, 0x13], &tlv(0x30, &body))
+    };
+    assert_eq!(
+        Certificate::parse(&built(None, &[bc(false), bc(true)])).err(),
+        Some(Error::Malformed)
+    );
+    assert_eq!(
+        Certificate::parse(&built(None, &[san(&[b"a.example"]), san(&[b"b.example"])])).err(),
+        Some(Error::Malformed)
+    );
+    // NUL, escape, space and empty names.
+    for name in [&b"www.bank.com\0.evil.com"[..], b"\x1b[31mred", b"a b", b""] {
+        assert_eq!(
+            Certificate::parse(&built(None, &[san(&[name])])).err(),
+            Some(Error::Malformed)
+        );
+    }
+    // RSA keys: a 2048-bit modulus with 65537 parses; a tiny or huge
+    // exponent, an even one, or a modulus outside 1024..8192 bits do not.
+    let rsa = |n_len: usize, e: &[u8]| {
+        let alg = tlv(
+            0x30,
+            &[
+                tlv(
+                    0x06,
+                    &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01],
+                ),
+                tlv(0x05, &[]),
+            ]
+            .concat(),
+        );
+        let mut n = vec![0x00, 0xc0];
+        n.resize(n_len + 1, 0x01);
+        let key = tlv(0x30, &[tlv(0x02, &n), tlv(0x02, e)].concat());
+        let bits = tlv(0x03, &[[0u8].as_slice(), &key].concat());
+        Certificate::parse(&built(Some(tlv(0x30, &[alg, bits].concat())), &[])).map(|_| ())
+    };
+    assert_eq!(rsa(256, &[0x01, 0x00, 0x01]), Ok(()));
+    assert_eq!(rsa(256, &[0x03]), Ok(()));
+    for (n_len, e) in [
+        (256, &[0x01][..]),
+        (256, &[0x01, 0x00, 0x00]),
+        (256, &[0x7f, 0xff, 0xff, 0xff, 0xff]),
+        (64, &[0x01, 0x00, 0x01]),
+        (1025, &[0x01, 0x00, 0x01]),
+    ] {
+        assert_eq!(rsa(n_len, e), Err(Error::Unsupported), "{n_len} {e:?}");
+    }
+    // A trusted CA certificate presented as the server's.
+    assert_eq!(
+        verify_chain(
+            &[cert!("ca-as-leaf")],
+            &[cert!("nc-root")],
+            "www.good.example",
+            Some(NOW)
+        )
+        .err(),
+        Some(Error::WrongPurpose)
+    );
+}
+
+/// Audit of incident 0029, L1, L2, L3 and L4: restrictions on roots, two
+/// constrained CAs in one path, IP hosts, and the bounds on work done
+/// before a chain is trusted.
+#[test]
+fn constraints_on_roots_paths_and_ip_hosts() {
+    let at = Some(NOW);
+    let ncr = [cert!("ncr-root")];
+    assert!(verify_chain(&[cert!("ncr-ok")], &ncr, "www.good.example", at).is_ok());
+    assert_eq!(
+        verify_chain(&[cert!("ncr-evil")], &ncr, "www.evil.example", at).err(),
+        Some(Error::NameConstraint)
+    );
+    assert_eq!(
+        verify_chain(
+            &[cert!("ekur-leaf")],
+            &[cert!("ekur-root")],
+            "www.eku.example",
+            at
+        )
+        .err(),
+        Some(Error::WrongPurpose)
+    );
+    // nc-int permits good.example, nc2-int below it only sub.good.example.
+    let roots = [cert!("nc-root")];
+    let path = |leaf| [leaf, cert!("nc2-int"), cert!("nc-int")];
+    assert!(verify_chain(&path(cert!("nc2-ok")), &roots, "www.sub.good.example", at).is_ok());
+    assert_eq!(
+        verify_chain(&path(cert!("nc2-out")), &roots, "www.good.example", at).err(),
+        Some(Error::NameConstraint)
+    );
+    // A CA with iPAddress subtrees, which are not evaluated: an IP host is
+    // refused, a DNS host is not.
+    let ip = [cert!("ip-leaf"), cert!("ip-int")];
+    assert_eq!(
+        verify_chain(&ip, &roots, "10.0.2.2", at).err(),
+        Some(Error::NameConstraint)
+    );
+    assert!(verify_chain(&ip, &roots, "www.ip.example", at).is_ok());
+    // A CA certificate that is itself a trust anchor, presented as the
+    // server's.
+    let ca = [cert!("ca-as-leaf")];
+    assert_eq!(
+        verify_chain(&ca, &ca, "www.good.example", at).err(),
+        Some(Error::WrongPurpose)
+    );
+    // An IP host matches a dNSName spelling it, never a wildcard.
+    let wild = built(None, &[san(&[b"*.0.2.2"])]);
+    assert!(!matches_hostname(
+        &Certificate::parse(&wild).unwrap(),
+        "10.0.2.2"
+    ));
+    let exact = built(None, &[san(&[b"10.0.2.2"])]);
+    assert!(matches_hostname(
+        &Certificate::parse(&exact).unwrap(),
+        "10.0.2.2"
+    ));
+    assert!(
+        !is_ipv4("10.0.2") && !is_ipv4("10.0.2.256") && !is_ipv4("a.0.2.2") && is_ipv4("10.0.2.2")
+    );
+    // At most MAX_EXTENSIONS extensions.
+    let many: Vec<Vec<u8>> = (0..=32u8)
+        .map(|i| extension(&[0x2a, 0x03, i], &[0x05, 0x00]))
+        .collect();
+    assert_eq!(
+        Certificate::parse(&built(None, &many)).err(),
+        Some(Error::Unsupported)
+    );
+    // Leaf names × subtrees within NAME_CONSTRAINT_BUDGET.
+    let names: Vec<Vec<u8>> = (0..200)
+        .map(|i| alloc::format!("n{i}.good.example").into_bytes())
+        .collect();
+    let refs: Vec<&[u8]> = names.iter().map(|n| n.as_slice()).collect();
+    let der = built(None, &[san(&refs)]);
+    let leaf = Certificate::parse(&der).unwrap();
+    let wide = NameConstraints {
+        permitted: vec!["good.example"; 100],
+        excluded: Vec::new(),
+        ip_subtrees: false,
+    };
+    assert_eq!(
+        check_name_constraints(&leaf, "n1.good.example", Some(&wide)),
+        Err(Error::NameConstraint)
+    );
+    let narrow = NameConstraints {
+        permitted: vec!["good.example"; 10],
+        ..wide
+    };
+    assert_eq!(
+        check_name_constraints(&leaf, "n1.good.example", Some(&narrow)),
+        Ok(())
+    );
+}
+
+/// Audit 2026-10-25 D, M1: no clock, or one that reads before the build,
+/// skipped or defeated the validity check.
+#[test]
+fn certificates_are_checked_at_no_earlier_than_the_floor() {
+    assert_eq!(check_time(None), ValidityTime::AtLeast(TIME_FLOOR));
+    assert_eq!(
+        check_time(Some(946_684_800)),
+        ValidityTime::AtLeast(TIME_FLOOR)
+    );
+    assert_eq!(
+        check_time(Some(TIME_FLOOR + 5)),
+        ValidityTime::Clock(TIME_FLOOR + 5)
+    );
+    // Without a trusted clock only expiry before the floor is refused: a
+    // leaf issued after the floor passes, one expired before it fails
+    // (audit of incident 0036, H1: notBefore was checked against the floor
+    // too, refusing every certificate renewed after the release).
+    let roots = [cert!("rsa-root")];
+    let chain = [cert!("rsa-leaf"), cert!("rsa-int")];
+    let leaf = Certificate::parse(cert!("rsa-leaf")).unwrap();
+    let at = |floor| {
+        verify_chain(
+            &chain,
+            &roots,
+            "www.example.com",
+            ValidityTime::AtLeast(floor),
+        )
+    };
+    assert!(
+        at(leaf.not_before - 1).is_ok(),
+        "issued after the floor: fine"
+    );
+    assert!(at(leaf.not_after).is_ok());
+    assert_eq!(at(leaf.not_after + 1).err(), Some(Error::Expired));
+}
+
+#[test]
+fn distrusted_keys_are_refused_anywhere_in_the_chain() {
+    let spki = |der| aricode_crypto::sha256::sha256(Certificate::parse(der).unwrap().spki);
+    let chain = [RSA_LEAF, RSA_INT];
+    let host = "www.example.com";
+    verify_chain_with(&chain, &[RSA_ROOT], &[], host, Some(NOW)).unwrap();
+    // An unrelated key changes nothing.
+    verify_chain_with(&chain, &[RSA_ROOT], &[spki(EC_INT)], host, Some(NOW)).unwrap();
+    for distrusted in [RSA_LEAF, RSA_INT, RSA_ROOT] {
+        assert_eq!(
+            verify_chain_with(&chain, &[RSA_ROOT], &[spki(distrusted)], host, Some(NOW)).err(),
+            Some(Error::Distrusted)
+        );
+    }
+    // The root sent in the chain too, a chain ending in the root itself, a
+    // pinned leaf: still refused.
+    let root = [spki(RSA_ROOT)];
+    assert_eq!(
+        verify_chain_with(
+            &[RSA_LEAF, RSA_INT, RSA_ROOT],
+            &[RSA_ROOT],
+            &root,
+            host,
+            Some(NOW)
+        )
+        .err(),
+        Some(Error::Distrusted)
+    );
+    assert_eq!(
+        verify_chain_with(&[RSA_LEAF], &[RSA_LEAF], &[spki(RSA_LEAF)], host, Some(NOW)).err(),
+        Some(Error::Distrusted)
+    );
+    // Another anchor that signs nothing does not hide the distrusted one.
+    assert_eq!(
+        verify_chain_with(&chain, &[RSA_ROOT, EC_ROOT], &root, host, Some(NOW)).err(),
+        Some(Error::Distrusted)
+    );
+    // The default list is what verify_chain applies, and names none of the
+    // test keys.
+    verify_chain(&chain, &[RSA_ROOT], host, Some(NOW)).unwrap();
+    for der in [RSA_LEAF, RSA_INT, RSA_ROOT] {
+        assert!(!roots::DISTRUSTED.contains(&spki(der)));
+    }
+    // Every entry is a distinct key.
+    let mut keys = roots::DISTRUSTED.to_vec();
+    keys.sort_unstable();
+    keys.dedup();
+    assert_eq!(keys.len(), roots::DISTRUSTED.len());
+}
+
+#[test]
+fn spki_is_the_published_pin_and_every_root_parses() {
+    // ISRG Root X1's well-known SPKI pin (base64
+    // C5+lpZ7tcVwmwQIMcRtPbsQtWLABXhQzejna0wHFr8M=).
+    const ISRG_X1_PIN: [u8; 32] = [
+        11, 159, 165, 165, 158, 237, 113, 92, 38, 193, 2, 12, 113, 27, 79, 110, 196, 45, 88, 176,
+        1, 94, 20, 51, 122, 57, 218, 211, 1, 197, 175, 195,
+    ];
+    let isrg = Certificate::parse(roots::DEFAULT[0]).unwrap();
+    assert_eq!(aricode_crypto::sha256::sha256(isrg.spki), ISRG_X1_PIN);
+    // The strict key encoding drops no embedded root (anchors that do not
+    // parse would be skipped silently).
+    // Anchors are read as `Parsed`: a root's own signature (SHA-1 for some)
+    // is never checked.
+    for (i, der) in roots::DEFAULT.iter().enumerate() {
+        assert!(Parsed::parse(der).is_ok(), "root {i}");
+    }
+}
+
+#[test]
+fn a_key_has_one_encoding() {
+    // ISRG Root X1's SubjectPublicKeyInfo contents: AlgorithmIdentifier
+    // (rsaEncryption, NULL) then the key.
+    let spki = Certificate::parse(roots::DEFAULT[0]).unwrap().spki;
+    let contents = der::single(spki, der::SEQUENCE).unwrap();
+    assert!(cert::parse_public_key(contents).is_ok());
+    let alg_len = 2 + contents[1] as usize;
+    let (alg, key) = contents.split_at(alg_len);
+    let rewrap = |alg_contents: &[u8]| {
+        let mut v = alg_contents.to_vec();
+        v.insert(0, alg_contents.len() as u8);
+        v.insert(0, der::SEQUENCE);
+        v.extend_from_slice(key);
+        v
+    };
+    let oid = &alg[2..13]; // 06 09 + nine bytes
+                           // Parameters absent, or something after them: the same key, refused.
+    assert_eq!(
+        cert::parse_public_key(&rewrap(oid)).err(),
+        Some(Error::Malformed)
+    );
+    let mut extra = alg[2..].to_vec();
+    extra.extend_from_slice(&[0x05, 0x00]);
+    assert!(cert::parse_public_key(&rewrap(&extra)).is_err());
+}
+
+#[test]
+fn a_compromised_emudhra_key_is_refused() {
+    // EM DV TLS CA - G3B as emSign issued it (certificate SHA-256
+    // 42C4ACCD...8BA1493), one of the eight eMudhra intermediates whose
+    // keys were compromised in October 2026. Not generated: fetched from
+    // the incident's published list and checked against Go's crypto/x509.
+    let der = cert!("emudhra-dv-tls-g3b");
+    let c = Certificate::parse(der).unwrap();
+    assert!(roots::DISTRUSTED.contains(&aricode_crypto::sha256::sha256(c.spki)));
+    // Pinned as a trust anchor or sent as a leaf, it is refused.
+    assert_eq!(
+        verify_chain(&[der], &[der], "example.com", None).err(),
+        Some(Error::Distrusted)
+    );
+}

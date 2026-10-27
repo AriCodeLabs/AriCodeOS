@@ -26,7 +26,7 @@ use aricode_proto::launch::{
 };
 use aricode_proto::status;
 use aricode_rt::sys::abi::driver_arg;
-use aricode_rt::sys::block::BlockClient;
+use aricode_rt::sys::block::{find_partition, BlockClient};
 use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::{self, rights, Error, Handle, TIMEOUT_INFINITE};
 use aricode_supervisor::{Action, Exit, Policy, Service, State};
@@ -239,7 +239,10 @@ fn find_pci_from(vendor: u16, device: u16, start: u64) -> Option<u64> {
 /// the configuration space, the hardware capability, the IRQ (if any), only
 /// the BARs that are present and then `extras` (driver specific); `arg`
 /// carries a mask: bit 15 = IRQ present, bits 0..5 = BAR i present, plus
-/// `arg_extra` (`abi::driver_arg`).
+/// `arg_extra` (`abi::driver_arg`). `extras` are consumed: on any failure
+/// they are closed with the claim's handles, which releases the device for
+/// the next attempt (audit 2026-10-25 C, L4: a failed spawn left it claimed
+/// by init for good).
 fn start_driver(
     name: &str,
     index: u64,
@@ -247,52 +250,34 @@ fn start_driver(
     extras: &[Handle],
     arg_extra: u64,
 ) -> Result<Handle, Error> {
-    let handles = sys::pci_claim(PCI_ROOT, index)?;
-    let mut to_send = [Handle(0); 12];
-    to_send[0] = sys::handle_duplicate(service, rights::READ | rights::WRITE | rights::TRANSFER)?;
-    let mut n = 1;
+    let mut sent = Granted::new();
+    let claimed = sys::pci_claim(PCI_ROOT, index);
+    let own = sys::handle_duplicate(service, rights::READ | rights::WRITE | rights::TRANSFER);
     let mut mask = arg_extra;
-    for (i, h) in handles.iter().enumerate() {
-        if h.0 == 0 {
-            continue;
+    if let Ok(own) = own {
+        sent.push(own);
+    }
+    if let Ok(handles) = claimed {
+        for (i, h) in handles.iter().enumerate() {
+            if h.0 == 0 {
+                continue;
+            }
+            match i {
+                2 => mask |= 1 << 15,
+                3..=8 => mask |= 1 << (i - 3),
+                _ => {}
+            }
+            sent.push(*h);
         }
-        match i {
-            2 => mask |= 1 << 15,
-            3..=8 => mask |= 1 << (i - 3),
-            _ => {}
-        }
-        to_send[n] = *h;
-        n += 1;
     }
     for h in extras {
-        to_send[n] = *h;
-        n += 1;
+        sent.push(*h);
     }
-    sys::process_spawn_with(SPAWNER, name, mask, &to_send[..n])
-}
-
-/// First and last LBA of the GPT partition `name`, reading the table through
-/// the block service.
-fn find_partition(blk: &mut BlockClient, name: &str) -> Option<(u64, u64)> {
-    blk.read(1, 1).ok()?;
-    let header = aricode_gpt::Header::parse(&blk.buffer()[..512]).ok()?;
-    let sectors = header.entries_bytes().div_ceil(512) as u64;
-    let mut table = alloc::vec![0u8; sectors as usize * 512];
-    let mut lba = 0;
-    while lba < sectors {
-        let n = (sectors - lba).min(16) as u16;
-        blk.read(header.entries_lba + lba, n).ok()?;
-        let o = lba as usize * 512;
-        table[o..o + n as usize * 512].copy_from_slice(&blk.buffer()[..n as usize * 512]);
-        lba += n as u64;
-    }
-    let mut parts = [None; 16];
-    let count = aricode_gpt::partitions(&header, &table, &mut parts).ok()?;
-    parts[..count]
-        .iter()
-        .flatten()
-        .find(|p| p.name_str() == name)
-        .map(|p| (p.first_lba, p.last_lba))
+    claimed?;
+    own?;
+    let child = sys::process_spawn_with(SPAWNER, name, mask, sent.handles())?;
+    sent.take();
+    Ok(child)
 }
 
 /// Reads and announces the boot state (for the no-confirmation tests).
@@ -767,12 +752,28 @@ fn start_fsd(
     block_service: Handle,
     partition_lba: u64,
 ) -> Result<Handle, Error> {
-    let own = sys::handle_duplicate(fs_service, rights::READ | rights::WRITE | rights::TRANSFER)?;
-    let blk = sys::handle_duplicate(block_service, rights::WRITE | rights::TRANSFER)?;
-    let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
+    // Closed again if a later step fails.
+    let mut sent = Granted::new();
+    sent.push(sys::handle_duplicate(
+        fs_service,
+        rights::READ | rights::WRITE | rights::TRANSFER,
+    )?);
+    sent.push(sys::handle_duplicate(
+        block_service,
+        rights::WRITE | rights::TRANSFER,
+    )?);
+    sent.push(sys::handle_duplicate(
+        HARDWARE,
+        rights::MANAGE | rights::TRANSFER,
+    )?);
     // SYSTEM (read): clock to expire abandoned chunked replaces.
-    let system = sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER)?;
-    sys::process_spawn_with(SPAWNER, "fsd", partition_lba, &[own, blk, hw, system])
+    sent.push(sys::handle_duplicate(
+        SYSTEM,
+        rights::READ | rights::TRANSFER,
+    )?);
+    let child = sys::process_spawn_with(SPAWNER, "fsd", partition_lba, sent.handles())?;
+    sent.take();
+    Ok(child)
 }
 
 /// How a resident service is (re)launched.
@@ -840,26 +841,138 @@ fn start_console_bridge(inputs: &[Handle]) -> Result<Handle, Error> {
     result
 }
 
-/// Launches sshd with `[net session (WRITE), fs (WRITE), hardware, SYSTEM
-/// (READ), sessions (WRITE)]`. It gets no SPAWNER: shells are launched by
-/// init. Every generation gets a network session of its own (ADR 0037), so
-/// the listener of one that died is closed instead of holding port 22.
+/// sshd's private directory (ADR 0050): its host key and `random_seed`.
+const SSHD_DIR: &str = "sshd";
+const SSHD_FILES: [&str; 2] = ["ssh_host_ed25519_key", "random_seed"];
+/// The keys sshd accepts: in the AriFS root, where the owner writes them
+/// (`write authorized_keys ...`); sshd only reads them.
+const AUTHORIZED_KEYS: &str = "authorized_keys";
+
+/// How long init waits for fsd to grant sshd's sessions: it does so from
+/// its supervisor loop, which must not stall behind a file service that
+/// does not answer (a failed grant is a failed launch, retried later).
+const SSHD_GRANT_MS: u64 = 2_000;
+
+/// A whole small file: `None` if it does not exist; an error if it cannot
+/// be read or does not fit `buf`.
+fn read_small(fs: &mut FsClient, name: &str, buf: &mut [u8]) -> Result<Option<usize>, ()> {
+    let fd = match fs.open(name) {
+        Ok(fd) => fd,
+        Err(FsError::Status(aricode_proto::fs::Status::NotFound)) => return Ok(None),
+        Err(_) => return Err(()),
+    };
+    let r = fs.read(fd, 0, buf);
+    let _ = fs.close(fd);
+    match r {
+        Ok(n) if n < buf.len() => Ok(Some(n)),
+        _ => Err(()),
+    }
+}
+
+/// Moves sshd's files from the AriFS root, where releases before ADR 0050
+/// kept them, into `sshd/`. The root copy is then overwritten with zeros
+/// and emptied (AriFS cannot remove a file, and the root must not keep the
+/// host key), but only once `sshd/` holds the same bytes, read back: a
+/// copy that failed half-way is completed on the next boot, never trusted.
+/// When both hold different non-empty contents (a key written to the root
+/// after the move, by hand or by an older release), neither is touched and
+/// init says so: no key is ever destroyed. Each outcome is said.
+fn move_sshd_files(fs: &mut FsClient) {
+    let mut root = [0u8; 256];
+    let mut moved = [0u8; 256];
+    let mut name_buf = [0u8; 64];
+    for name in SSHD_FILES {
+        let say_file = |what: &[u8]| {
+            sys::print(b"AriInit: ");
+            sys::print(name.as_bytes());
+            sys::print(what);
+        };
+        let n = match read_small(fs, name, &mut root) {
+            Ok(Some(n)) if n > 0 => n,
+            Ok(_) => continue,
+            Err(()) => {
+                say_file(b": unreadable or too large in the root; not moved into sshd/\n");
+                continue;
+            }
+        };
+        let dir_len = SSHD_DIR.len();
+        name_buf[..dir_len].copy_from_slice(SSHD_DIR.as_bytes());
+        name_buf[dir_len] = b'/';
+        name_buf[dir_len + 1..dir_len + 1 + name.len()].copy_from_slice(name.as_bytes());
+        let target = core::str::from_utf8(&name_buf[..dir_len + 1 + name.len()]).unwrap_or("");
+        match read_small(fs, target, &mut moved) {
+            Ok(Some(m)) if moved[..m] == root[..n] => {}
+            Ok(Some(m)) if m > 0 => {
+                say_file(b" in the root differs from sshd/'s: both left in place\n");
+                continue;
+            }
+            // Absent, or empty from a copy that broke off.
+            Ok(_) => {
+                let written = fs
+                    .open(target)
+                    .or_else(|_| fs.create(target))
+                    .and_then(|fd| {
+                        let r = fs.replace(fd, &root[..n]);
+                        let _ = fs.close(fd);
+                        r
+                    })
+                    .is_ok();
+                let same = written
+                    && matches!(read_small(fs, target, &mut moved), Ok(Some(m)) if moved[..m] == root[..n]);
+                if !same {
+                    say_file(b": could not move into sshd/; the root copy is kept\n");
+                    continue;
+                }
+            }
+            Err(()) => {
+                say_file(b": sshd/'s copy is unreadable; the root copy is kept\n");
+                continue;
+            }
+        }
+        let blanked = fs.open(name).is_ok_and(|fd| {
+            let zeros = [0u8; 256];
+            let r = fs.replace(fd, &zeros[..n]).is_ok() && fs.replace(fd, &[]).is_ok();
+            let _ = fs.close(fd);
+            r
+        });
+        say_file(if blanked {
+            b" moved into sshd/\n" as &[u8]
+        } else {
+            b" copied into sshd/, but the root copy could not be emptied\n"
+        });
+    }
+}
+
+/// Launches sshd with `[net session (WRITE), its fsd session (sshd/,
+/// WRITE), hardware, SYSTEM (READ), sessions (WRITE), authorized_keys
+/// (read-only fsd session)]`. It gets no SPAWNER: shells are launched by
+/// init. Every generation gets network and file sessions of its own (ADR
+/// 0037, 0050): the listener of one that died is closed instead of holding
+/// port 22, its descriptors are released, and it sees only its own files
+/// and the keys it accepts.
 fn start_sshd(fs: Handle, net: Handle, sessions: Handle) -> Result<Handle, Error> {
     let w = rights::WRITE | rights::TRANSFER;
     // The guard closes every handle made so far if a later step fails (the
     // kernel takes them only when it creates the process).
     let mut granted = Granted::new();
-    let fsd = sys::handle_duplicate(fs, w)?;
+    let fsd = file_grant(sys::fs::bind(fs, SSHD_DIR, SSHD_GRANT_MS))?;
     granted.push(fsd);
+    let keys = file_grant(sys::fs::share_may_be_missing(
+        fs,
+        AUTHORIZED_KEYS,
+        SSHD_GRANT_MS,
+    ))?;
+    granted.push(keys);
     let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
     granted.push(hw);
     let system = sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER)?;
     granted.push(system);
     let shells = sys::handle_duplicate(sessions, w)?;
     granted.push(shells);
-    let netd = attach_net_session(net, "sshd")?;
+    let netd = attach_net_session(net, "sshd", aricode_proto::net::SSH_PORT)?;
     granted.push(netd);
-    let child = sys::process_spawn_with(SPAWNER, "sshd", 0, &[netd, fsd, hw, system, shells])?;
+    let child =
+        sys::process_spawn_with(SPAWNER, "sshd", 0, &[netd, fsd, hw, system, shells, keys])?;
     granted.take();
     Ok(child)
 }
@@ -885,6 +998,9 @@ struct Resident {
     probe: Probe,
     endpoint: Handle,
     process: Option<Handle>,
+    /// A process that outlived its kill (`Service::abandon`): watched so
+    /// that its endpoints are retired once it does exit.
+    abandoned: Option<Handle>,
     sup: Service,
     /// Extra driver argument bits for every (re)launch (`abi::driver_arg`).
     driver_arg: u64,
@@ -973,6 +1089,7 @@ impl Supervisor {
             probe,
             endpoint,
             process: None,
+            abandoned: None,
             sup: Service::new(policy, optional),
             driver_arg: 0,
         });
@@ -1048,6 +1165,9 @@ impl Supervisor {
                     }
                 }
                 if failed {
+                    for h in &extras[..n] {
+                        let _ = sys::handle_close(*h);
+                    }
                     Err(Error::Limit)
                 } else {
                     start_driver(r.name, pci_index, r.endpoint, &extras[..n], r.driver_arg)
@@ -1059,7 +1179,13 @@ impl Supervisor {
             } => start_fsd(r.endpoint, block_service, partition_lba),
             Kind::Program { arg } => {
                 sys::handle_duplicate(r.endpoint, rights::READ | rights::WRITE | rights::TRANSFER)
-                    .and_then(|ep| sys::process_spawn_with(SPAWNER, r.name, arg, &[ep]))
+                    .and_then(|ep| {
+                        let spawned = sys::process_spawn_with(SPAWNER, r.name, arg, &[ep]);
+                        if spawned.is_err() {
+                            let _ = sys::handle_close(ep);
+                        }
+                        spawned
+                    })
             }
             Kind::ConsoleBridge { inputs, count } => start_console_bridge(&inputs[..count]),
             Kind::Sshd { fs, net, sessions } => start_sshd(fs, net, sessions),
@@ -1115,19 +1241,19 @@ impl Supervisor {
             }
         }
         if stuck {
-            sys::print(b"AriInit: service ");
-            sys::print(r.name.as_bytes());
-            sys::print(b" neither responds nor exits: failed, not relaunching\n");
-            r.sup.stop();
+            r.abandoned = r.process.take();
         }
         // A process that could not be killed may still be serving: its
-        // endpoints stay open (audit robustness-1, reviewer 1).
+        // endpoints stay open (audit robustness-1, reviewer 1), and no new
+        // generation competes with it.
         self.announce_death(i, now_ms(), Exit::StartTimeout, !stuck);
     }
 
     /// Records the death of `i`, closes its process and announces the
     /// decision. `gone`: the process no longer runs, so its endpoints may be
-    /// closed if it will not be relaunched.
+    /// closed if it will not be relaunched; if it still runs after a kill
+    /// the service fails for good (audit 2026-10-25 C, L5: it used to be
+    /// relaunched next to the old one).
     fn announce_death(&mut self, i: usize, now: u64, exit: Exit, gone: bool) {
         let Some(r) = self.slots[i].as_mut() else {
             return;
@@ -1135,7 +1261,11 @@ impl Supervisor {
         if let Some(h) = r.process.take() {
             let _ = sys::handle_close(h);
         }
-        let action = r.sup.died(now, exit);
+        let action = if gone {
+            r.sup.died(now, exit)
+        } else {
+            r.sup.abandon(exit)
+        };
         sys::print(b"AriInit: service ");
         sys::print(r.name.as_bytes());
         sys::print(match exit {
@@ -1150,6 +1280,8 @@ impl Supervisor {
                 sys::print(aricode_rt::fmt_u64(at.saturating_sub(now), &mut b));
                 sys::print(b" ms\n");
             }
+            _ if !gone => sys::print(b"; still running after a kill: failed, not relaunched\n"),
+            Action::Nothing => sys::print(b"; retired: not restarted\n"),
             _ if strict() => sys::print(b"; strict mode: not restarted (inspect with diag)\n"),
             _ => {
                 sys::print(b"; restart budget exhausted: ");
@@ -1168,6 +1300,18 @@ impl Supervisor {
     /// Watches the processes: deaths, start timeouts and restarts that are due.
     fn poll(&mut self) {
         let now = now_ms();
+        for r in self.slots[..self.count].iter_mut().flatten() {
+            let Some(h) = r.abandoned else { continue };
+            if matches!(sys::process_wait(h, 0), Err(Error::Timeout)) {
+                continue;
+            }
+            let _ = sys::handle_close(h);
+            r.abandoned = None;
+            sys::print(b"AriInit: service ");
+            sys::print(r.name.as_bytes());
+            sys::print(b": its abandoned process exited at last\n");
+            r.retire_endpoints();
+        }
         for i in 0..self.count {
             let (process, state) = match self.slots[i].as_ref() {
                 Some(r) => (r.process, r.sup.state()),
@@ -1334,6 +1478,18 @@ fn input_restart(sup: &mut Supervisor) -> Result<(), u64> {
     }
 }
 
+/// A reader that dies with its read waiting on each input service, before
+/// the console bridge starts (`input_orphan`, audit 2026-10-25 C, M4): the
+/// keys typed next must still reach the shell.
+fn orphan_reads(inputs: &[Handle], sup: &mut Supervisor) {
+    for ep in inputs {
+        match run_block_client_supervised("input_orphan", *ep, 0, sup) {
+            Ok(0) => {}
+            _ => say(b"input_orphan failed"),
+        }
+    }
+}
+
 /// Induced restarts (`restart_storm`): a test service that dies after each
 /// request is restarted 100 times under the supervisor while fsd keeps
 /// serving; at the end free memory must match the initial amount.
@@ -1447,9 +1603,18 @@ const RAW_AREA_OFFSET: u64 = 4096 - 34;
 /// Launches a client of a service with its endpoint (WRITE only) and a
 /// hardware capability for its DMA buffer.
 fn spawn_block_client(name: &str, service: Handle, arg: u64) -> Result<Handle, Error> {
-    let ep = sys::handle_duplicate(service, rights::WRITE | rights::TRANSFER)?;
-    let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER)?;
-    sys::process_spawn_with(SPAWNER, name, arg, &[ep, hw])
+    let mut sent = Granted::new();
+    sent.push(sys::handle_duplicate(
+        service,
+        rights::WRITE | rights::TRANSFER,
+    )?);
+    sent.push(sys::handle_duplicate(
+        HARDWARE,
+        rights::MANAGE | rights::TRANSFER,
+    )?);
+    let child = sys::process_spawn_with(SPAWNER, name, arg, sent.handles())?;
+    sent.take();
+    Ok(child)
 }
 
 /// Launches a client with `spawn_block_client` and waits for it to exit,
@@ -1509,7 +1674,12 @@ fn run_shell(
 /// descriptors the process leaves open are released when it dies. A
 /// refusal is said on the console (an attach never fails silently).
 fn attach_file_session(fs: &FsClient) -> Result<Handle, Error> {
-    match fs.attach() {
+    file_grant(fs.attach())
+}
+
+/// A file session fsd granted, or the refusal said on the console.
+fn file_grant(granted: Result<Handle, FsError>) -> Result<Handle, Error> {
+    match granted {
         Ok(h) => Ok(h),
         Err(FsError::Ipc(e)) => {
             aricode_rt::print_error(b"AriInit: file session", e);
@@ -1529,9 +1699,9 @@ fn attach_file_session(fs: &FsClient) -> Result<Handle, Error> {
 /// new endpoint to the client called `label` and keeps its receive side, so
 /// the sockets the process leaves open are closed when it dies. A refusal
 /// is said on the console (an attach never fails silently).
-fn attach_net_session(net_service: Handle, label: &str) -> Result<Handle, Error> {
+fn attach_net_session(net_service: Handle, label: &str, port: u16) -> Result<Handle, Error> {
     use aricode_rt::sys::net::NetError;
-    match aricode_rt::sys::net::attach(net_service, label) {
+    match aricode_rt::sys::net::attach(net_service, label, port) {
         Ok(h) => Ok(h),
         Err(NetError::Ipc(e)) => {
             aricode_rt::print_error(b"AriInit: network session", e);
@@ -1593,7 +1763,7 @@ fn spawn_shell(
     // closed here: a placeholder that reaches nobody (a send fails at once
     // with `PeerClosed`).
     let netd = if arg & SERVICE_NET != 0 {
-        attach_net_session(net_service, "shell")?
+        attach_net_session(net_service, "shell", 0)?
     } else {
         let (dead, placeholder) = sys::endpoint_create_pair()?;
         let _ = sys::handle_close(dead);
@@ -1682,9 +1852,10 @@ impl Sessions {
 /// Capability broker (Phase 28): launches programs according to their
 /// manifest. An application receives, in this order, only what it asks for
 /// and is allowed: `SYSTEM` (read), a private directory in fsd, the network
-/// endpoint, the compositor endpoint, the block endpoint (trusted
-/// applications only), the input endpoints, and finally `HARDWARE` if it
-/// needs buffers, bounded by the manifest's memory.
+/// endpoint, a compositor session, the block endpoint (trusted
+/// applications only), and finally `HARDWARE` if it needs buffers, bounded
+/// by the manifest's memory. The input services are never granted (ADR
+/// 0053).
 struct Broker {
     endpoint: Handle,
     fs: Option<FsClient>,
@@ -1692,8 +1863,6 @@ struct Broker {
     /// The network service's main endpoint, when a driver serves it.
     net: Option<Handle>,
     compositor: Option<Handle>,
-    inputs: [Handle; 4],
-    input_count: usize,
     /// Launched programs that have not exited yet (ADR 0015): process and,
     /// if someone waits for its exit, the endpoint to reply to.
     running: [Option<Running>; MAX_RUNNING],
@@ -1728,13 +1897,37 @@ const MAX_RUNNING: usize = 4;
 struct Running {
     process: Handle,
     reply_to: Option<Handle>,
+    /// Its compositor session, ended when it exits (ADR 0052).
+    window: Option<u32>,
 }
 
 /// Immediate result of `launch`: an already decided reply, or a created
-/// process whose exit must be awaited in a slot.
+/// process (and its compositor session) whose exit must be awaited in a
+/// slot.
 enum Launched {
     Reply(LaunchReply),
-    Process(Handle),
+    Process(Handle, Option<u32>),
+}
+
+/// A compositor session made for a launch: ended on drop unless `keep`
+/// took it, so a launch refused after `Attach` frees its slot at once.
+struct WindowSession {
+    compositor: Handle,
+    id: Option<u32>,
+}
+
+impl WindowSession {
+    fn keep(&mut self) -> Option<u32> {
+        self.id.take()
+    }
+}
+
+impl Drop for WindowSession {
+    fn drop(&mut self) {
+        if let Some(id) = self.id {
+            let _ = sys::window::detach(self.compositor, id);
+        }
+    }
 }
 
 impl Broker {
@@ -1745,19 +1938,13 @@ impl Broker {
         block: Option<Handle>,
         net: Option<Handle>,
         compositor: Option<Handle>,
-        inputs: &[Handle],
     ) -> Result<Self, Error> {
-        let mut ins = [Handle(0); 4];
-        let n = inputs.len().min(4);
-        ins[..n].copy_from_slice(&inputs[..n]);
         Ok(Self {
             endpoint: sys::endpoint_create()?,
             fs,
             block,
             net,
             compositor,
-            inputs: ins,
-            input_count: n,
             running: [None; MAX_RUNNING],
             stage: None,
         })
@@ -1866,6 +2053,10 @@ impl Broker {
                 Err(_) => LaunchReply::status(LaunchStatus::Failed),
             };
             let _ = sys::handle_close(r.process);
+            if let (Some(comp), Some(id)) = (self.compositor, r.window) {
+                // Whoever still holds its session is cut off with it.
+                let _ = sys::window::detach(comp, id);
+            }
             if let Some(reply_to) = r.reply_to {
                 let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
                 let _ = sys::handle_close(reply_to);
@@ -1927,19 +2118,21 @@ impl Broker {
                 let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
                 let _ = sys::handle_close(reply_to);
             }
-            Launched::Process(process) if req.is_detached() => {
+            Launched::Process(process, window) if req.is_detached() => {
                 let reply = LaunchReply::status(LaunchStatus::Started);
                 let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
                 let _ = sys::handle_close(reply_to);
                 self.running[slot] = Some(Running {
                     process,
                     reply_to: None,
+                    window,
                 });
             }
-            Launched::Process(process) => {
+            Launched::Process(process, window) => {
                 self.running[slot] = Some(Running {
                     process,
                     reply_to: Some(reply_to),
+                    window,
                 });
             }
         }
@@ -1960,6 +2153,7 @@ impl Broker {
         if let Some(c) = console {
             granted.push(c);
         }
+        let mut window: Option<WindowSession> = None;
         let mut path = [0u8; 48];
         let Some(path) = join(name, ".manifest", &mut path) else {
             return Launched::Reply(LaunchReply::status(LaunchStatus::Invalid));
@@ -2098,7 +2292,7 @@ impl Broker {
             let Some(net) = self.net else {
                 return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
             };
-            match attach_net_session(net, name) {
+            match attach_net_session(net, name, 0) {
                 Ok(h) => granted.push(h),
                 Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
@@ -2108,7 +2302,21 @@ impl Broker {
             let Some(comp) = self.compositor else {
                 return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
             };
-            match sys::handle_duplicate(comp, rights::WRITE | rights::TRANSFER) {
+            // A session of its own (ADR 0052): its windows are its alone and
+            // close when it is gone. Same rights as before: send only.
+            let session = match sys::window::attach(comp) {
+                Ok((h, id)) => {
+                    window = Some(WindowSession {
+                        compositor: comp,
+                        id: Some(id),
+                    });
+                    h
+                }
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
+            };
+            let narrowed = sys::handle_duplicate(session, rights::WRITE | rights::TRANSFER);
+            let _ = sys::handle_close(session);
+            match narrowed {
                 Ok(h) => granted.push(h),
                 Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
@@ -2135,14 +2343,6 @@ impl Broker {
                 Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
             needs_hw = true;
-        }
-        if caps.contains(Caps::INPUT) {
-            for ep in &self.inputs[..self.input_count] {
-                match sys::handle_duplicate(*ep, rights::WRITE | rights::TRANSFER) {
-                    Ok(h) => granted.push(h),
-                    Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
-                }
-            }
         }
         if needs_hw {
             match sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER) {
@@ -2199,7 +2399,7 @@ impl Broker {
                 }));
             }
         };
-        Launched::Process(child)
+        Launched::Process(child, window.as_mut().and_then(WindowSession::keep))
     }
 }
 
@@ -2285,23 +2485,62 @@ fn run_gui(inputs: &[Handle]) -> Result<Handle, u64> {
     let _compositor =
         sys::process_spawn_with(SPAWNER, "compositor", inputs.len() as u64, &handles[..n])
             .map_err(|_| 7u64)?;
-    let mut apps = [Handle(0); 2];
+    let mut apps = [None; 2];
+    let mut failed = None;
     for (i, app) in apps.iter_mut().enumerate() {
-        let ep =
-            sys::handle_duplicate(service, rights::WRITE | rights::TRANSFER).map_err(|_| 8u64)?;
-        let hw =
-            sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER).map_err(|_| 8u64)?;
-        *app =
-            sys::process_spawn_with(SPAWNER, "gui_demo", i as u64, &[ep, hw]).map_err(|_| 9u64)?;
-    }
-    for app in apps {
-        let code = sys::process_wait(app, TIMEOUT_INFINITE).map_err(|_| 10u64)?;
-        let _ = sys::handle_close(app);
-        if code != 0 {
-            return Err(100 + code);
+        match spawn_gui_app(service, i) {
+            Ok(launched) => *app = Some(launched),
+            Err(code) => {
+                failed = Some(code);
+                break;
+            }
         }
     }
-    Ok(service)
+    // Every application launched is waited for and its session ended, even
+    // when a later one failed to start.
+    for (app, session) in apps.into_iter().flatten() {
+        let code = sys::process_wait(app, TIMEOUT_INFINITE);
+        let _ = sys::handle_close(app);
+        let _ = sys::window::detach(service, session);
+        failed = failed.or(match code {
+            Ok(0) => None,
+            Ok(code) => Some(100 + code),
+            Err(_) => Some(10),
+        });
+    }
+    match failed {
+        Some(code) => Err(code),
+        None => Ok(service),
+    }
+}
+
+/// Starts graphical demo `i` with a compositor session of its own (ADR
+/// 0052, send side only) and `HARDWARE`; returns it and the session's id.
+fn spawn_gui_app(service: Handle, i: usize) -> Result<(Handle, u32), u64> {
+    let (session, id) = sys::window::attach(service).map_err(|_| 8u64)?;
+    let narrowed = sys::handle_duplicate(session, rights::WRITE | rights::TRANSFER);
+    let _ = sys::handle_close(session);
+    let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER);
+    match (narrowed, hw) {
+        (Ok(ep), Ok(hw)) => match sys::process_spawn_with(SPAWNER, "gui_demo", i as u64, &[ep, hw])
+        {
+            Ok(app) => Ok((app, id)),
+            // The kernel takes the handles only when it creates the process.
+            Err(_) => {
+                let _ = sys::handle_close(ep);
+                let _ = sys::handle_close(hw);
+                let _ = sys::window::detach(service, id);
+                Err(9)
+            }
+        },
+        (ep, hw) => {
+            for h in [ep, hw].into_iter().flatten() {
+                let _ = sys::handle_close(h);
+            }
+            let _ = sys::window::detach(service, id);
+            Err(8)
+        }
+    }
 }
 
 fn main(arg: u64) -> u64 {
@@ -2327,6 +2566,7 @@ fn main(arg: u64) -> u64 {
         say(b"selftest: running the test-only boot checks (QEMU test environment)");
     }
     let input_restart_test = cmdline.has(aricode_cmdline::keys::INPUT_RESTART);
+    let input_orphan_test = cmdline.has(aricode_cmdline::keys::INPUT_ORPHAN);
     let blk_fault = cmdline
         .get(aricode_cmdline::keys::BLK_FAULT)
         .and_then(|v| v.parse().ok());
@@ -2789,7 +3029,6 @@ fn main(arg: u64) -> u64 {
             block_service,
             (services & SERVICE_NET != 0).then_some(net_service),
             compositor,
-            &input_eps[..inputs],
         ) else {
             return 26;
         };
@@ -2797,6 +3036,9 @@ fn main(arg: u64) -> u64 {
         // as long as there is no compositor (with the GUI the events belong
         // to it, and each input service accepts a single reader).
         if inputs > 0 && compositor.is_none() {
+            if input_orphan_test {
+                orphan_reads(&input_eps[..inputs], &mut sup);
+            }
             let mut ins = [Handle(0); MAX_INPUTS];
             ins[..inputs].copy_from_slice(&input_eps[..inputs]);
             let launched = sup
@@ -2828,6 +3070,9 @@ fn main(arg: u64) -> u64 {
         // that init launches on its behalf.
         let mut sessions = None;
         if services & SERVICE_NET != 0 {
+            if let Some(fs) = broker.fs.as_mut() {
+                move_sshd_files(fs);
+            }
             if let Ok(endpoint) = sys::endpoint_create() {
                 let launched = sup
                     .register(

@@ -11,7 +11,9 @@
 //! Contract with init (`start_driver`): `SERVICE`, cfg, hardware, the IRQ
 //! if the function has one, BAR0, then `SYSTEM` (`READ`) and the block
 //! service endpoint. Intel EHCI functions have neither MSI nor MSI-X, so
-//! the driver never uses the IRQ: it polls the schedules between requests.
+//! the driver never uses the IRQ: it polls the schedules between requests,
+//! every `POLL_MS` while devices or work need watching and every
+//! `IDLE_POLL_MS` when only the ports can change.
 //!
 //! Failures (ADR 0028): every failed transfer is printed with the qTD
 //! token and recorded as a fault event; the controller's own three tries
@@ -29,15 +31,16 @@ use alloc::boxed::Box;
 
 use aricode_ehci::{
     cap, decode_token, hub, interrupt_schedule, legacy, link, op, overlay_token, periodic_entry,
-    portsc, set_address, split_transfer, token, tt_for, Outcome, Params, Pid, Qtd, QueueHead,
-    Speed, TransferError, Tt, FRAME_LIST_LEN, HCI_VERSION_1_0,
+    poll_wait, portsc, set_address, split_transfer, token, tt_for, Outcome, Params, Pid, Qtd,
+    QueueHead, Speed, TransferError, Tt, FRAME_LIST_LEN, HCI_VERSION_1_0,
 };
 use aricode_input::{Event, HidBootKeyboard, HidBootMouse, MAX_REPORT_EVENTS};
 use aricode_proto::block::{
     Op as BlockOp, Reply as BlockReply, Request as BlockRequest, Status as BlockStatus, MAX_SECTORS,
 };
-use aricode_proto::input::{Event as WireEvent, Op, Reply, Request, Status, MAX_EVENTS};
+use aricode_proto::input::{Event as WireEvent, Op, Reply, Request, Status};
 use aricode_rt::sys::block::{map_client_buffer, ClientBuffers, REPLY_WAIT_MS};
+use aricode_rt::sys::input::EventQueue;
 use aricode_rt::sys::virtio_pci::{extra_handle, polled_bar_handle, DmaRegion, Mmio, CFG, SERVICE};
 use aricode_rt::sys::{self, abi, abi::driver_arg, Handle};
 use aricode_usb_storage::{
@@ -59,11 +62,20 @@ const MAX_PENDING: usize = 32;
 const QTDS_PER_PIPE: usize = 4;
 const ARENA_BYTES: u64 = 32 * 1024;
 const CONTROL_BUFFER: u16 = 512;
-const RING: usize = 128;
 
-/// Main loop period: how long the driver waits for a request before it
-/// looks at the schedules again.
+/// Main loop period while something needs watching (the boot
+/// enumeration, HID devices, a connection being debounced): how long the
+/// driver waits for a request before it looks at the schedules again.
 const POLL_MS: u64 = 8;
+/// The period when nothing does: only the ports can change. USB gives a
+/// new connection 100 ms of debounce and a reset before it is usable
+/// (USB 2.0 7.1.7.3), so noticing it up to 250 ms later costs a device
+/// nothing, while an idle controller stops waking every 8 ms on its own
+/// (the driver polls: Intel EHCIs have no MSI, and a legacy pin needs ACPI
+/// `_PRT`, which the kernel does not evaluate). A client that reads with a
+/// short timeout still wakes it: the console bridge reads every input
+/// service in turn with 20 ms reads (ADR 0044, finding B's input clients).
+const IDLE_POLL_MS: u64 = 250;
 /// While a transfer runs, the first milliseconds are polled with yields,
 /// then with 1 ms sleeps.
 const SPIN_MS: u64 = 2;
@@ -473,36 +485,22 @@ struct Step {
     on_short: OnShort,
 }
 
-/// Event pending delivery to the input client.
-struct Pending {
-    buf: [(Event, u64); RING],
-    head: usize,
-    len: usize,
+fn tell_gone_reader(queue: &mut EventQueue) {
+    if queue.first_gone_reader() {
+        say(b"a reader died with its read waiting; its events wait for the next read");
+    }
 }
 
-impl Pending {
-    fn push(&mut self, ev: Event, at: u64) {
-        if self.len == RING {
-            self.head = (self.head + 1) % RING;
-            self.len -= 1;
-        }
-        self.buf[(self.head + self.len) % RING] = (ev, at);
-        self.len += 1;
-    }
-    fn take(&mut self, out: &mut [WireEvent; MAX_EVENTS], times: &mut [u64; MAX_EVENTS]) -> usize {
-        let n = self.len.min(MAX_EVENTS);
-        for (slot, t) in out.iter_mut().zip(times.iter_mut()).take(n) {
-            let (e, at) = self.buf[self.head];
-            *slot = WireEvent {
-                kind: e.kind,
-                code: e.code,
-                value: e.value,
-            };
-            *t = at;
-            self.head = (self.head + 1) % RING;
-            self.len -= 1;
-        }
-        n
+/// Queues `ev` for the input client; when full the oldest event is
+/// dropped, never silently: the first drop of the boot is printed.
+fn queue_event(queue: &mut EventQueue, ev: Event, at: u64) {
+    let wire = WireEvent {
+        kind: ev.kind,
+        code: ev.code,
+        value: ev.value,
+    };
+    if queue.push(wire, at) && queue.dropped() == 1 {
+        say(b"input event queue full: the oldest events are dropped");
     }
 }
 
@@ -656,7 +654,7 @@ struct Ehci {
     /// When the driver started (boot enumeration bounds).
     started: u64,
     /// Input events waiting for the client.
-    events: Pending,
+    events: EventQueue,
     keyboards: u8,
     mice: u8,
 }
@@ -674,6 +672,7 @@ impl Ehci {
             say(b"no BAR 0 among the capabilities");
             return Err(exit::MAP_BAR);
         };
+        let bar_len = sys::region_len(bar).map_err(|_| exit::MAP_BAR)?;
         let base = Mmio(sys::mmio_map(bar).map_err(|_| {
             say(b"could not map BAR 0");
             exit::MAP_BAR
@@ -694,6 +693,10 @@ impl Ehci {
             return Err(exit::NOT_EHCI);
         }
         let params = Params::decode(base.r32(cap::HCSPARAMS), base.r32(cap::HCCPARAMS));
+        if !params.registers_fit(caplength, bar_len) {
+            say(b"operational registers outside BAR 0: not an EHCI to drive");
+            return Err(exit::NOT_EHCI);
+        }
         let op = Mmio(base.0 + caplength);
         let region = DmaRegion::alloc(ARENA_BYTES).map_err(|_| exit::DMA)?;
         // Every link pointer is 32 bits with CTRLDSSEGMENT above it (EHCI
@@ -892,11 +895,7 @@ impl Ehci {
             held_info: [Handle(0); abi::IPC_QUEUE_CAPACITY],
             held_len: 0,
             started,
-            events: Pending {
-                buf: [(Event::default(), 0); RING],
-                head: 0,
-                len: 0,
-            },
+            events: EventQueue::new(),
             keyboards: 0,
             mice: 0,
         });
@@ -927,6 +926,25 @@ impl Ehci {
     /// enumeration, or once `INFO_WAIT_MS` passed.
     fn info_ready(&self) -> bool {
         self.boot_done || self.now() >= self.started + INFO_WAIT_MS
+    }
+
+    /// How long the main loop may wait for a request before the schedules
+    /// and ports need looking at again (`aricode_ehci::poll_wait`):
+    /// `POLL_MS` while the boot enumeration runs, HID devices are served or
+    /// a connection is being debounced, else `IDLE_POLL_MS`, never past the
+    /// next hub poll or the deadline of a read the client is waiting on.
+    fn next_wait(&self, read_deadline: Option<u64>) -> u64 {
+        let busy = !self.boot_done
+            || self.hids.iter().any(Option::is_some)
+            || self.pending.iter().any(Option::is_some);
+        poll_wait(
+            self.now(),
+            busy,
+            POLL_MS,
+            IDLE_POLL_MS,
+            self.next_hub_poll,
+            read_deadline,
+        )
     }
 
     /// Holds an Info request until `info_ready` (answered at once if the
@@ -2356,7 +2374,7 @@ impl Ehci {
             };
             let now = self.now();
             for e in &out[..n] {
-                self.events.push(*e, now);
+                queue_event(&mut self.events, *e, now);
             }
             self.hids[h] = None;
         }
@@ -2580,7 +2598,7 @@ impl Ehci {
                         Decoder::Mouse(m) => m.feed(report, &mut out),
                     };
                     for e in &out[..n] {
-                        self.events.push(*e, now);
+                        queue_event(&mut self.events, *e, now);
                     }
                     self.hids[h] = Some(hid);
                     self.arm(h);
@@ -3300,6 +3318,11 @@ fn wait_reg(mmio: &Mmio, reg: u64, mask: u32, set: bool, clock: &Clock, timeout_
 /// One block protocol request on the USB storage.
 fn serve_block(ctl: &mut Ehci, msg: &[u8], handles: &[Handle]) {
     let reply_to = handles[0];
+    // The reply endpoint and the buffer are used; anything else is closed
+    // (audit 2026-10-25 C, M3).
+    for h in handles.iter().skip(2) {
+        let _ = sys::handle_close(*h);
+    }
     let capacity = ctl.storage.as_ref().map_or(0, |s| s.capacity);
     let invalid = BlockReply {
         status: BlockStatus::Invalid,
@@ -3478,11 +3501,8 @@ fn main(mask: u64) -> u64 {
     // so its type is checked.
     let block_ep = extra_handle(mask, 1);
     let has_block = sys::object_kind(block_ep) == Ok(abi::kind::ENDPOINT);
-    let mut waiting: Option<(Handle, u64)> = None;
     let mut msg = [0u8; 32];
     let mut handles = [Handle(0); abi::IPC_MAX_HANDLES];
-    let mut events = [WireEvent::default(); MAX_EVENTS];
-    let mut times = [0u64; MAX_EVENTS];
     let with_block = [SERVICE, block_ep];
     loop {
         // The block service waits for the boot enumeration: init asks the
@@ -3492,7 +3512,7 @@ fn main(mask: u64) -> u64 {
         } else {
             &with_block[..1]
         };
-        let mut timeout = POLL_MS;
+        let mut timeout = ctl.next_wait(ctl.events.deadline());
         // At most eight messages per iteration, served in one batch: a
         // block request and the one queued behind it run back to back, and
         // housekeeping (`HOUSEKEEPING_MS`) runs once per batch (budget
@@ -3522,6 +3542,12 @@ fn main(mask: u64) -> u64 {
                 continue;
             }
             let reply_to = handles[0];
+            // Only the reply endpoint is used: any other handle is closed,
+            // or the driver's table fills up and requests start arriving
+            // without their reply endpoint (audit 2026-10-25 C, M3).
+            for h in &handles[1..nh] {
+                let _ = sys::handle_close(*h);
+            }
             match Request::decode(&msg[..n]) {
                 // Held until the boot enumeration is over (or `INFO_WAIT_MS`
                 // passed), so the device name is the final one.
@@ -3530,14 +3556,9 @@ fn main(mask: u64) -> u64 {
                     op: Op::Read,
                     timeout_ms,
                 }) => {
-                    if ctl.events.len > 0 {
-                        let n = ctl.events.take(&mut events, &mut times);
-                        answer(reply_to, Reply::events(&events[..n], &times[..n]));
-                    } else if waiting.is_some() {
-                        answer(reply_to, Reply::status(Status::Busy));
-                    } else {
-                        waiting = Some((reply_to, ctl.now() + timeout_ms.max(1) as u64));
-                    }
+                    let now = ctl.now();
+                    ctl.events.read(reply_to, timeout_ms, now);
+                    tell_gone_reader(&mut ctl.events);
                 }
                 None => answer(reply_to, Reply::status(Status::Invalid)),
             }
@@ -3549,16 +3570,9 @@ fn main(mask: u64) -> u64 {
             c.service_ports();
         });
         ctl.release_info();
-        if let Some((reply_to, deadline)) = waiting {
-            if ctl.events.len > 0 {
-                let n = ctl.events.take(&mut events, &mut times);
-                answer(reply_to, Reply::events(&events[..n], &times[..n]));
-                waiting = None;
-            } else if ctl.now() >= deadline {
-                answer(reply_to, Reply::status(Status::Timeout));
-                waiting = None;
-            }
-        }
+        let now = ctl.now();
+        ctl.events.settle(now);
+        tell_gone_reader(&mut ctl.events);
     }
 }
 

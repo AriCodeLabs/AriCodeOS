@@ -157,8 +157,22 @@ and `page_tables_base/size` which tables it reclaims when activating its own.
   `log=<level>` on the cmdline changes it and an invalid value produces a `WARN`.
 - The panic handler writes to serial only (`serial_println!`): it touches no
   shared state, in case the panic happens midway through a framebuffer write.
-- The framebuffer console keeps a copy of the cells and repaints on
-  scroll; it never reads from VRAM. It understands backspace (`\x08`, the cursor
+- The framebuffer console keeps the cells it holds and a RAM shadow of
+  the cells on screen; it never reads from VRAM. A write only changes the
+  cells; the screen is then painted once per message, only the cells whose
+  character differs from the shadow, a glyph per `Surface::glyph` call
+  (colours encoded once, one bounds check per pixel row). Thread code
+  waits for the console's `IrqLock` (without the deadlock panic: every
+  holder has interrupts off and holds it for one row) and paints one text
+  row per hold, so interrupts are never off for a whole repaint; code with
+  interrupts off retries the lock for a bounded time and paints one row,
+  leaving the rest to the next writer or the cursor thread, which paints
+  pending rows before it blinks (`blink` draws one glyph at most). Messages
+  are queued for the screen under the serial lock (order `SERIAL` then
+  `FB`), so both show them in the same order, and also while the screen is
+  lent to a driver under test (incident 0031 and its audit: a full
+  repaint per newline, a `put` per pixel, lost timer ticks and made test
+  timing depend on the kernel's layout). It understands backspace (`\x08`, the cursor
   moves back one cell) and draws a `_` cursor toggled by a kernel thread
   (`console::start_cursor_thread`, every 500 ms, with `try_lock`). Neither the tick
   (nothing is painted from handlers) nor the idle loop: one more call in that
@@ -263,8 +277,9 @@ critical section cannot be interrupted or re-entered by a handler. Between
 wait spins interrupts return to their previous state (Phase 32): a CPU
 waiting for a lock held by another keeps servicing IPIs. A lock held for many
 spins means re-entry (one CPU) or deadlock, so `lock` panics
-instead of hanging. The console uses `try_lock` and falls back to serial only if it is held
-(an exception inside the console itself does not block diagnostics). Each
+instead of hanging. With interrupts off the console only retries its lock for a bounded time and
+falls back to serial only if it stays held (an exception inside the console itself does not
+block diagnostics). Each
 CPU's own state (GDT, TSS, current thread, quantum) takes no lock:
 only its CPU touches it, with interrupts disabled (`cpu::Cpu`).
 
@@ -323,10 +338,14 @@ latter briefly to add the region.
 - `switch_context` (System V) saves rbx, rbp, r12..r15 and rsp; a new thread
   starts through `thread_start` with r12 = entry and r13 = argument, enables
   interrupts and on return enters `exit`.
-- The scheduler lock is released before the context switch, with
-  interrupts disabled: the resuming thread never inherits a lock.
+- The scheduler lock is held across the context switch, with interrupts
+  disabled, and released by the thread that resumes (`force_unlock` after
+  `switch_context`, or in `thread_first_run` for a new thread): no other
+  CPU sees a half-switched thread.
 - Finished threads are reaped by the next thread that resumes after a
-  switch (`reap`): the stack in use is never freed. Thread guard pages
+  switch (`reap`), from the policy's exit queue (`pop_terminated`, never a
+  scan of every thread; performance audit 731c398, finding E): the stack
+  in use is never freed. Thread guard pages
   are also recognized by the `STACK OVERFLOW` diagnostic.
 - `test=threads`: two threads strictly alternate with `yield` and 40 workers
   finish and return their stacks to the PMM.
@@ -334,12 +353,14 @@ latter briefly to add the region.
 ## Preemptive scheduler (Phase 10)
 
 - The timer handler, after the EOI, calls `scheduler::on_tick`: it wakes
-  threads whose tick has arrived and, if the quantum (2 ticks = 20 ms) has
+  threads whose tick has arrived, earliest deadline first from an ordered
+  sleep list (it looks only at the threads it wakes and the next one), and, if the quantum (2 ticks = 20 ms) has
   expired or someone woke up, preempts through the same switch path as
   `yield`. The preempted thread keeps its interrupt frame on its stack and
   resumes through the handler's `iretq`.
 - No kernel lock can be preempted: all of them disable
-  interrupts. The scheduler lock is released before the switch.
+  interrupts. The scheduler lock is held across the switch and released
+  by the resuming thread.
 - `scheduler::sleep_ms` sleeps without consuming CPU; `time::sleep_ms` delegates to it.
 - `task::wait::WaitQueue` implements blocking with a condition evaluated under its
   lock and `wake_one`/`wake_all`; a wakeup that arrives before blocking is not
@@ -410,7 +431,12 @@ latter briefly to add the region.
   tables (`copy_from_user`): a kernel pointer returns `Fault` and is never
   dereferenced.
 - An exception with `CS.RPL = 3` is not a panic: it is diagnosed over serial and
-  the process terminates (`Killed`). When the thread is reaped, the whole
+  the process terminates (`Killed`). A not-present page fault on a
+  reserved zero-fill page is not an exception to the program: the page is
+  backed and the instruction runs again; with less than 1 MiB of frames
+  left the process is killed for `out of memory`, and a system call that
+  would write into such a page returns `Limit` without consuming anything
+  (ADR 0049). When the thread is reaped, the whole
   user address space is freed, tables included.
 - Test programs in `user/testprogs` (a separate crate): binaries in
   assembly (`hello`, `kernel_read`, `kernel_write`, `privileged`,
@@ -419,7 +445,9 @@ latter briefly to add the region.
   xtask` builds them as static ELFs for `x86_64-unknown-none` with
   `sdk/rust/user.ld` (0x400000, R-X, R--, RW- segments) and packs them with
   `init` into `aricodeos/initrd.img`. `process::spawn` loads them with
-  `aricode-elf` and maps each segment with its permissions. `_start` receives in
+  `aricode-elf` and maps each segment with its permissions (the whole
+  zero-fill pages of a writable segment, `.bss` and the runtime's heap
+  arena, are only reserved and backed on first touch, ADR 0049). `_start` receives in
   `rdi` the argument from whoever created the process. They are launched with
   `test=user_<name>`.
 
@@ -515,6 +543,9 @@ latter briefly to add the region.
   hands it over in `BootInfo::initrd_*`. Custom format (`aricode-initrd`): magic,
   entry count and, per file, name and data aligned to 8 bytes; the
   reader validates the whole image when opening it and copies nothing.
+  The kernel validates it once at `initrd::init` and keeps an index of
+  names (the first entry of a name wins), so launching a program no
+  longer parses the image (performance audit 731c398, finding F).
 - `cargo xtask image` builds the initrd with `init` and all the binaries in
   `user/testprogs`; the kernel no longer embeds programs and is built without
   environment variables.
@@ -656,9 +687,12 @@ latter briefly to add the region.
 - At startup the driver reads the GPT (`aricode-gpt`, header and table CRC)
   and announces the partitions; the xtask test disk carries a protective
   MBR, a GPT with backup and an `ARI0` partition of type AriCodeOS.
-- A request the device does not complete (a 2 s timeout with the
+- A request the device does not complete (a 30 s timeout with the
   descriptors still in the ring, an unexpected used entry, or
-  `DEVICE_NEEDS_RESET`) answers `Io`; the driver keeps the client's buffer
+  `DEVICE_NEEDS_RESET`) answers `Io` (30 s, the window Linux gives disk
+  commands: a busy host disk took over 2 s, incident 0043; a completion
+  found in the used ring at the deadline is taken and recorded as
+  `blk irq missing`); the driver keeps the client's buffer
   handle, resets the device (bounded, virtio 1.2 2.4), negotiates the same
   features, creates queue 0 again on its memory, and only then releases
   the buffer (`blk buf kept`, `blk reset`, `blk buf released`). Three
@@ -763,7 +797,8 @@ latter briefly to add the region.
   writes text into the same ring and requires `MANAGE` on the `Console`;
   only init has it (`0x10008` with `READ|MANAGE|DUPLICATE|TRANSFER`) and
   delegates it to the `console_bridge` service, which in `shell` mode without a compositor
-  polls the input services (virtio-input, USB HID) in turn and
+  keeps one read outstanding on each input service (virtio-input, USB HID),
+  waits on all their replies at once and
   translates keystrokes with `aricode_input::Keyboard`. It is one more supervised
   resident (`services --detail`); the `shell.usb_keyboard`
   and `shell.virtio_keyboard` scenarios type a session over QMP.
@@ -874,7 +909,11 @@ latter briefly to add the region.
   retries with `tcp_send_all`). A slot is freed when the user has
   closed and the connection has finished; a full table first gives up the
   closed TIME-WAIT connection that ends soonest (incident 0027), and
-  FIN-WAIT-2 gives up a peer that never closes after 30 s with a reset.
+  FIN-WAIT-2 gives up a peer that never closes after 30 s with a reset;
+  FIN-WAIT-1, CLOSING and LAST-ACK likewise after `CLOSING_MS` (30 s),
+  so a peer cannot hold a closed connection's slot (incident 0034).
+  Ports below 1024 need the session to have been given that port at
+  `Attach` (sshd's session gets 22); others are refused with `Denied`.
 - Listeners are protected (incident 0013, ADR 0035). A listener holds at
   most `tcp::listen_backlog(MAX_TCP) = 4` connections its owner has not
   accepted yet, half-open and established alike, so a burst of SYNs to port
@@ -937,7 +976,9 @@ latter briefly to add the region.
   socket that already waits), `net bad request` (`Status::Invalid`), `net
   bad handles` (`Status::BadHandles`), `net syn dropped` (a SYN to a
   listener refused with a reset: no free slot or the listener's backlog at
-  its cap, ADR 0035), `net sessions full` (an `Attach` with every session
+  its cap, ADR 0035), `net port reserved` (a listen or bind on a
+  privileged port the session was not given, incident 0034), `net
+  sessions full` (an `Attach` with every session
   slot taken), `net session create` (an `Attach` whose endpoint pair the
   kernel could not create), `net socks reclaimed` (sockets closed on behalf of a dead
   client, code 0, ADR 0037) and `net rx budget hit` (a round of reception
@@ -995,7 +1036,10 @@ latter briefly to add the region.
   `1af4:1052` function with its own endpoint and `SYSTEM` as an extra.
 - `InputServiceProtocol v1`: `Info` (name) and `Read(timeout)` with up to
   4 events per reply; a single pending read per service
-  (`Busy` if there is another). `aricode-input::Keyboard` translates in the client,
+  (`Busy` if there is another), waiting at most `MAX_READ_MS` (10 s).
+  The drivers share `sys::input::EventQueue`: events leave it only once a
+  reply carrying them was delivered, so a reader that died with its read
+  waiting loses nobody's keys. `aricode-input::Keyboard` translates in the client,
   not in the driver: the driver does not decide the keyboard layout.
 - `inputd` and usbd collect the device's events, serve up to 8 requests
   and then wait once on their endpoints and the device's interrupt line
@@ -1062,6 +1106,9 @@ latter briefly to add the region.
   once and reads it whenever its content is recomposed); `Present` damages
   the window's content, and only presented pixels are guaranteed on screen;
   `Poll` waits with a deadline for a `Key`, `Click` or `Focus`; `Close` removes it.
+  Each program talks over a session of its own (`Attach`, ADR 0052): a
+  window answers only the session that made it, and closes when that
+  program is gone; window buffers must be DMA buffers.
   The compositor translates the keyboard (`aricode-input::Keyboard`) and delivers
   only to the focused window: the `gui.two_windows` probe checks that
   the other window sees nothing.
@@ -1108,7 +1155,9 @@ latter briefly to add the region.
 - User stack high-water marks (incident 0018): `sysinfo::STACKS`, one
   `StackEntry` per live process (stack size, bytes touched from the top,
   page granular, from the Accessed bits of the stack's page table
-  entries); `diag` lists them after the processes.
+  entries); `diag` lists them after the processes, followed by the
+  zero-fill memory each process has reserved and backed so far
+  (`sysinfo::ON_DEMAND`, ADR 0049).
 
 ## Application sandbox (Phase 28)
 
@@ -1189,7 +1238,11 @@ latter briefly to add the region.
   `Open` only opens that file, and `Create`, `Write`, `Replace`, `Flush`, `Bind`
   and `Share` reply `Denied`. The broker requests a `Share` for each name
   in the manifest's `read_files` and denies the launch if the file does not
-  exist (`sandbox.shared_file`).
+  exist (`sandbox.shared_file`). A shared file is a top-level file, never
+  one inside a directory nor a system file (`RESERVED_FILES`), and a
+  request whose session is gone is refused (ADR 0050, incident 0028).
+  sshd has two sessions of its own: `sshd/` (host key, `random_seed`) and
+  a read-only `authorized_keys` that may not exist yet.
 
 - The kernel serial console serializes each message with a spinlock without
   disabling interrupts (`console::write_raw`): previously a kernel `info!`
@@ -1434,7 +1487,12 @@ services/usb-ehci              usb_ehci: EHCI controller, root ports and USB 2.0
 
 - init launches `usb_ehci` for each `0c.03` function with interface `0x20`,
   after every xHCI, with the same contract and extras as usbd. Intel EHCIs
-  have no MSI: the driver polls (main loop period 8 ms) and never uses an IRQ.
+  have no MSI: the driver polls and never uses an IRQ, every 8 ms while
+  the boot enumeration runs, HID devices are served or a connection is
+  debounced, and otherwise every 250 ms (`aricode_ehci::poll_wait`) or at
+  a client read's deadline, whichever comes first: the console bridge's
+  20 ms reads still wake it (scenario `usb.ehci_hotplug`: a keyboard
+  plugged into a controller with nothing on it is found and enumerated).
 - Bring-up per EHCI 4.1 and 5.1 (USBLEGSUP handoff, HCRESET, frame list,
   async head, `CONFIGFLAG`); enumeration of root ports and hubs (the rate
   matching hub of Intel 6/7 series), split transactions through the hub's
@@ -1587,8 +1645,9 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   variables and program launching arrive with the process
   service.
 - `fsd` identifies a client by the endpoint its requests arrive on (its
-  session, ADR 0036); processes that share the main endpoint (init, sshd)
-  are one owner, and their descriptors are released only by `Close`. netd
+  session, ADR 0036); only init holds the main endpoint (sshd has its own
+  sessions since ADR 0050), and its descriptors are released only by
+  `Close`. netd
   does the same (ADR 0037): init and the boot test clients share its main
   endpoint, and a session dies with the netd generation that created it.
 

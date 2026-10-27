@@ -2,8 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Ed25519 (RFC 8032) from scratch: GF(2^255-19) arithmetic with five 51-bit
 //! limbs, points in extended coordinates, scalars modulo L by long
-//! division. Meant to verify manifest signatures at boot; signing is the
-//! host's job. Not constant time.
+//! division. Verification works on public values only and is not
+//! constant time; what handles the secret seed (the public key from it and
+//! signing, which sshd does with its host key) runs in constant time
+//! (audit 2026-10-25 D, M2): the point ladder selects instead of
+//! branching, and reduction modulo L subtracts without branching.
 
 use crate::sha512::Sha512;
 
@@ -99,7 +102,25 @@ impl Curve {
         }
     }
 
-    /// Scalar multiplication (double and add, variable time).
+    /// Scalar multiplication by a secret scalar: the same operations for
+    /// every scalar, the result of each addition taken or not by a mask
+    /// (a timing or cache observer learns nothing of the scalar's bits).
+    fn mul_secret(&self, scalar: &[u8; 32], p: &Point) -> Point {
+        let mut r = self.identity();
+        for i in (0..256).rev() {
+            r = self.double(&r);
+            let mut sum = self.add(&r, p);
+            let bit = ((scalar[i / 8] >> (i % 8)) & 1) as u64;
+            Fe::cswap(&mut r.x, &mut sum.x, bit);
+            Fe::cswap(&mut r.y, &mut sum.y, bit);
+            Fe::cswap(&mut r.z, &mut sum.z, bit);
+            Fe::cswap(&mut r.t, &mut sum.t, bit);
+        }
+        r
+    }
+
+    /// Scalar multiplication by a public scalar (double and add, variable
+    /// time): verification only.
     fn mul(&self, scalar: &[u8; 32], p: &Point) -> Point {
         let mut r = self.identity();
         for i in (0..256).rev() {
@@ -181,14 +202,16 @@ fn ge(a: &[u64; 4], b: &[u64; 4]) -> bool {
     true
 }
 
-fn sub_in_place(a: &mut [u64; 4], b: &[u64; 4]) {
+/// a -= b; returns the final borrow (1 if b > a).
+fn sub_in_place(a: &mut [u64; 4], b: &[u64; 4]) -> u64 {
     let mut borrow = 0u64;
     for i in 0..4 {
         let (d, b1) = a[i].overflowing_sub(b[i]);
         let (d, b2) = d.overflowing_sub(borrow);
         a[i] = d;
-        borrow = (b1 || b2) as u64;
+        borrow = (b1 | b2) as u64;
     }
+    borrow
 }
 
 /// x mod L for x of up to 512 bits (LE limbs), by binary long division.
@@ -203,8 +226,13 @@ fn reduce_limbs(x: &[u64; 8]) -> [u64; 4] {
             *limb = (*limb << 1) | carry;
             carry = top;
         }
-        if ge(&rem, &L) {
-            sub_in_place(&mut rem, &L);
+        // rem - L kept when it did not borrow, without a branch: the
+        // scalar may be secret (the signing nonce, the key).
+        let mut less = rem;
+        let borrow = sub_in_place(&mut less, &L);
+        let keep = borrow.wrapping_sub(1); // all ones when rem >= L
+        for (r, l) in rem.iter_mut().zip(less) {
+            *r = (l & keep) | (*r & !keep);
         }
     }
     rem
@@ -282,7 +310,7 @@ pub fn public_key(seed: &[u8; SEED_LEN]) -> [u8; PUBLIC_KEY_LEN] {
     a.copy_from_slice(&h[..32]);
     clamp(&mut a);
     let c = Curve::new();
-    c.compress(&c.mul(&a, &c.base()))
+    c.compress(&c.mul_secret(&a, &c.base()))
 }
 
 /// Signs `msg` with the seed (RFC 8032 §5.1.6).
@@ -294,13 +322,13 @@ pub fn sign(seed: &[u8; SEED_LEN], msg: &[u8]) -> [u8; SIGNATURE_LEN] {
     let prefix = &h[32..];
     let c = Curve::new();
     let base = c.base();
-    let pk = c.compress(&c.mul(&a, &base));
+    let pk = c.compress(&c.mul_secret(&a, &base));
 
     let mut hasher = Sha512::new();
     hasher.update(prefix);
     hasher.update(msg);
     let r = reduce(&hasher.finish());
-    let rb = c.compress(&c.mul(&r, &base));
+    let rb = c.compress(&c.mul_secret(&r, &base));
 
     let mut hasher = Sha512::new();
     hasher.update(&rb);
@@ -472,5 +500,32 @@ mod tests {
         let mut bad_pk = pk;
         bad_pk[31] = 0xFF;
         let _ = verify(&bad_pk, &msg, &sig); // must not panic
+    }
+
+    /// The constant-time ladder computes what double-and-add computes, and
+    /// the branchless reduction what long division with a branch did.
+    #[test]
+    fn constant_time_paths_agree() {
+        let c = Curve::new();
+        let b = c.base();
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..16 {
+            let mut k = [0u8; 32];
+            for byte in k.iter_mut() {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                *byte = x as u8;
+            }
+            assert_eq!(
+                c.compress(&c.mul_secret(&k, &b)),
+                c.compress(&c.mul(&k, &b))
+            );
+        }
+        let mut all = [0xFFu8; 64];
+        let r = reduce(&all);
+        assert!(!ge(&limbs_from_bytes(&r)[..4].try_into().unwrap(), &L));
+        all = [0; 64];
+        assert_eq!(reduce(&all), [0; 32]);
     }
 }

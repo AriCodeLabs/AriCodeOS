@@ -107,6 +107,7 @@ cpu_rdrand = true               # -cpu qemu64,+rdrand (TCG implements it): the k
 usb_hid = true                  # adds qemu-xhci with a USB keyboard and mouse (QMP events go to the USB devices)
 usb_hid_only_input = true       # no virtio keyboard/mouse, so QMP input reaches the USB HID devices (xHCI or EHCI)
 usb_hid_msi = true              # that xHCI offers MSI only, no MSI-X (like 2012 Intel controllers)
+usb_hid_msi_and_msix = true     # that xHCI offers both (a refused MSI-X falls back to MSI, ADR 0051)
 usb_storage = true              # the test disk hangs off the xHCI as USB mass storage; there is no virtio-blk
 host_https = true               # two host HTTPS servers (openssl s_server -www) on ports chosen per run, written {https_port} (cert from a
                                 # test CA installed as trusted_ca.der) and {https_untrusted_port} (self-signed) in stdin, kill_on and expect
@@ -146,6 +147,14 @@ install = ["examples/hello_ext"]  # external apps xtask builds, signs (version 1
 packages = ["examples/hello_ext:2", "examples/hello_ext:3:corrupt"]  # pending packages in pkgs/ (DIR:VERSION[:corrupt]) for `run installer`
 staged = ["examples/hello_ext:2:wrong-hash"]  # packages already staged for `run installer 2` (DIR:VERSION[:wrong-hash])
 staged_bad_path = true          # adds a staged line naming pkgs/evil.aripkg
+
+[host_hotplug]                  # optional: a device plugged in through QMP device_add
+marker = "AriInit: boot services completed"
+delay_ms = 3000                 # after the marker (default 0): e.g. a driver gone idle first
+driver = "usb-kbd"              # QEMU device, bus and id: letters, digits, '.', '_' and '-' only
+bus = "ehci.0"
+id = "hotkbd"                   # result in "[host] hotplug: ..."; with [[boots]], on every boot (each is a new QEMU).
+                                # Not with [host_input]: QEMU's QMP socket serves one client at a time
 
 [host_input]                    # optional: input injected through QMP when marker is seen
 marker = "INPUT_READY"

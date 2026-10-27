@@ -65,6 +65,17 @@ pub struct HostSsh {
     /// be served once sshd drops the idle client.
     #[serde(default)]
     pub idle_client: bool,
+    /// Installs a host key in the AriFS root, where releases before ADR
+    /// 0050 kept it (`OLD_HOST_KEY_SEED`, public, tests only): once init
+    /// has moved it into `sshd/`, sshd must still listen with it (the
+    /// runner checks its fingerprint).
+    #[serde(default)]
+    pub old_host_key: bool,
+    /// A command whose connection fails (ssh exit 255) is tried again,
+    /// once a second, for up to this many seconds: for scenarios where
+    /// sshd is relaunched between commands. 0 (default): no retry.
+    #[serde(default)]
+    pub retry_connect_secs: u64,
 }
 
 /// Connection flood from the host (incident 0013): on seeing `marker` the
@@ -143,6 +154,42 @@ fn default_update_source() -> String {
 
 fn default_dev_commit() -> String {
     String::from("0123abc")
+}
+
+/// `[host_hotplug]`: QEMU `device_add` of `driver` on `bus` with `id`, once
+/// `marker` was seen and `delay_ms` more passed (letting the guest settle
+/// first, e.g. a driver into its idle polling).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostHotplug {
+    pub marker: String,
+    #[serde(default)]
+    pub delay_ms: u64,
+    pub driver: String,
+    pub bus: String,
+    pub id: String,
+}
+
+impl HostHotplug {
+    /// The names go into hand-written QMP JSON: plain names only.
+    fn check(&self) -> Result {
+        for (what, v) in [
+            ("driver", &self.driver),
+            ("bus", &self.bus),
+            ("id", &self.id),
+        ] {
+            if v.is_empty()
+                || !v
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            {
+                return Err(format!(
+                    "[host_hotplug] {what} {v:?}: letters, digits, '.', '_' and '-' only"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -338,6 +385,9 @@ pub struct Scenario {
     /// QMP input injection on seeing `marker`: keys (QEMU qcode names) on
     /// the virtio keyboard, relative motion and a click on the mouse.
     pub host_input: Option<HostInput>,
+    /// A device plugged in over QMP (`device_add`) `delay_ms` after the
+    /// guest prints `marker`: hot-plug detection.
+    pub host_hotplug: Option<HostHotplug>,
     #[serde(default)]
     pub host_ssh: Option<HostSsh>,
     /// Plain TCP connections held open against a guest listener (incident
@@ -356,7 +406,7 @@ pub struct Scenario {
     /// Initial state of the test disk (`image::DiskVariant`): `slots`
     /// (default), `update-empty`, `esp-only`, `pending-b`, `b-exhausted`, `b-corrupt`,
     /// `fs-pending-replace`, `fs-corrupt`, `wasm-restricted`, `wasm-invalid`,
-    /// `wasm-bad-import`.
+    /// `wasm-bad-import`, `wasm-many-blocks`.
     #[serde(default = "default_disk")]
     pub disk: String,
     /// Presents the test disk as read-only (write failures).
@@ -389,6 +439,10 @@ pub struct Scenario {
     /// controllers: the kernel must program the MSI capability.
     #[serde(default)]
     pub usb_hid_msi: bool,
+    /// The `usb_hid` xHCI offers both MSI and MSI-X: a function whose
+    /// MSI-X the kernel refuses falls back to MSI (ADR 0051).
+    #[serde(default)]
+    pub usb_hid_msi_and_msix: bool,
     /// The test disk is attached over USB (`usb-storage` on the xHCI) and
     /// there is no virtio-blk: usbd serves it as a block service (ADR 0023).
     #[serde(default)]
@@ -569,6 +623,17 @@ pub fn load_from(dir: &Path) -> Result<Vec<Scenario>> {
                 h.check_queue()
                     .map_err(|e| format!("{}: {e}", path.display()))?;
             }
+            if let Some(h) = &s.host_hotplug {
+                h.check().map_err(|e| format!("{}: {e}", path.display()))?;
+                // QEMU's QMP socket serves one client at a time, and the
+                // input probe holds its connection through all its keys.
+                if s.host_input.is_some() {
+                    return Err(format!(
+                        "{}: [host_hotplug] and [host_input] share QEMU's single QMP connection: use one",
+                        path.display()
+                    ));
+                }
+            }
             s.file = path;
             out.push(s);
         }
@@ -671,6 +736,21 @@ pub fn select<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hotplug_names_are_plain() {
+        let h = |driver: &str| HostHotplug {
+            marker: String::from("m"),
+            delay_ms: 0,
+            driver: driver.to_string(),
+            bus: String::from("ehci.0"),
+            id: String::from("hot-1"),
+        };
+        assert!(h("usb-kbd").check().is_ok());
+        for bad in ["", "usb\"kbd", "a b", "x}{"] {
+            assert!(h(bad).check().is_err(), "{bad:?}");
+        }
+    }
 
     #[test]
     fn serial_order_checks_the_sequence() {

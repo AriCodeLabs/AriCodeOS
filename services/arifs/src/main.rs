@@ -20,7 +20,9 @@
 use aricode_arifs::descriptors::{Descriptors, MAX_OPEN};
 use aricode_arifs::{AriFs, BlockDevice, FsError, Recovery, SECTOR};
 use aricode_faults::Meter;
-use aricode_proto::fs::{Op, OwnerDescriptors, Reply, Request, Status, MAX_IO};
+use aricode_proto::fs::{
+    Op, OwnerDescriptors, Reply, Request, Status, MAX_IO, SHARE_MAY_BE_MISSING,
+};
 use aricode_rt::sys::{self, block::BlockClient, client_buffer, Handle};
 
 /// Client buffer mappings kept across requests (ADR 0038: bounded, the
@@ -36,6 +38,8 @@ const _: () = assert!(
 );
 
 const SERVICE: Handle = Handle(0x0001_0004);
+/// Exit code when the volume must be mounted again (`needs_reopen`).
+const EXIT_REMOUNT: u64 = 4;
 const BLOCK: Handle = Handle(0x0001_0005);
 const HW: Handle = Handle(0x0001_0006);
 const SYSTEM: Handle = Handle(0x0001_0007);
@@ -79,18 +83,18 @@ impl BlockDevice for PartitionDevice {
     /// A whole batch in one request to the block service (stage 5).
     fn read_sectors(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), FsError> {
         let count = (buf.len() / SECTOR) as u16;
-        self.blk
-            .read(self.base_lba + lba, count)
-            .map_err(|_| FsError::Io)?;
+        // Checked: a forged entry's start must not wrap onto another
+        // partition (audit 2026-10-25 B, L1).
+        let at = self.base_lba.checked_add(lba).ok_or(FsError::Io)?;
+        self.blk.read(at, count).map_err(|_| FsError::Io)?;
         buf.copy_from_slice(&self.blk.buffer()[..buf.len()]);
         Ok(())
     }
     fn write_sectors(&mut self, lba: u64, buf: &[u8]) -> Result<(), FsError> {
         let count = (buf.len() / SECTOR) as u16;
+        let at = self.base_lba.checked_add(lba).ok_or(FsError::Io)?;
         self.blk.buffer()[..buf.len()].copy_from_slice(buf);
-        self.blk
-            .write(self.base_lba + lba, count)
-            .map_err(|_| FsError::Io)
+        self.blk.write(at, count).map_err(|_| FsError::Io)
     }
 }
 
@@ -278,6 +282,22 @@ struct Service {
     /// An unexpected probe error was already said (once is enough to be
     /// seen; the session is kept and probed again).
     probe_error_said: bool,
+    /// `fsd_fault` (tests only): opening `FAULT_FILE` crashes fsd.
+    fault_on_open: bool,
+}
+
+/// The name whose `Open` crashes fsd under `fsd_fault` (tests only).
+const FAULT_FILE: &str = "fsd-fault";
+
+/// Deliberate crash (`fsd_fault`, tests only): fsd dies by a page fault, as
+/// a file service with a bug would, and its supervisor relaunches it.
+fn fault() -> ! {
+    say(b"crashing on purpose (fsd_fault)");
+    // SAFETY: deliberate fault; page 0 is never mapped and the address is
+    // hidden from the compiler so that it emits the read.
+    let bad = core::hint::black_box(0x40u64) as *const u64;
+    let v = unsafe { bad.read_volatile() };
+    sys::process_exit(v)
 }
 
 impl Service {
@@ -402,6 +422,18 @@ impl Service {
 
     /// Serves one request that arrived on `owner`'s endpoint (0 = main).
     fn serve(&mut self, owner: usize, msg: &[u8], handles: &[Handle]) {
+        self.serve_one(owner, msg, handles);
+        // A committed replace could not be applied: only a fresh mount
+        // brings the volume back (it redoes the journal). Exiting lets the
+        // supervisor relaunch fsd; until then every request would fail
+        // (audit of incident 0032, M1).
+        if self.fs.needs_reopen() {
+            say(b"a committed replace could not be applied; exiting to redo it at mount");
+            sys::process_exit(EXIT_REMOUNT);
+        }
+    }
+
+    fn serve_one(&mut self, owner: usize, msg: &[u8], handles: &[Handle]) {
         let Some(&reply_to) = handles.first() else {
             return;
         };
@@ -421,7 +453,7 @@ impl Service {
                         Op::Share => Kind::ReadOnlyFile,
                         _ => Kind::Root,
                     };
-                    self.grant(req.name_str(), kind)
+                    self.grant(req.name_str(), kind, req.len == SHARE_MAY_BE_MISSING)
                 };
                 if let Some(d) = data {
                     let _ = sys::handle_close(d);
@@ -461,6 +493,12 @@ impl Service {
     fn handle(&mut self, owner: usize, req: Request, data: Option<Handle>) -> Reply {
         let mut qbuf = [0u8; 64];
         let session = self.session(owner);
+        // A client endpoint whose session is gone (retired, possibly by
+        // this very request's sweep) has no authority at all: never the
+        // main namespace's (audit 2026-10-25 C, H1; incident 0028).
+        if owner != 0 && session.is_none() {
+            return Reply::status(Status::Denied);
+        }
         // Read-only shared file: a single visible name and no operation
         // that writes (ADR 0016).
         if let Some(shared) = session.filter(|s| s.kind == Kind::ReadOnlyFile) {
@@ -517,6 +555,9 @@ impl Service {
                 }
             }
             Op::Open => {
+                if self.fault_on_open && req.name_str() == FAULT_FILE {
+                    fault();
+                }
                 match qualified(prefix, req.name_str(), &mut qbuf).and_then(|q| self.fs.find(q)) {
                     Some(i) => self.open(i, owner),
                     None => Reply::status(Status::NotFound),
@@ -578,6 +619,12 @@ impl Service {
                         if let Some(i) = s.owner.checked_sub(1) {
                             self.probe(i, now);
                         }
+                        // The probe may have retired the requester itself
+                        // (its other file's transaction): nothing is
+                        // recorded for an owner that is gone.
+                        if owner != 0 && self.session(owner).is_none() {
+                            return Reply::status(Status::Denied);
+                        }
                         if self.staging.is_some_and(|s| !s.abandoned(now)) {
                             return Reply::status(Status::Busy);
                         }
@@ -602,10 +649,14 @@ impl Service {
                     }
                     _ => {
                         let r = self.fs.replace_chunk(index, req.offset, &buf[..len]);
+                        // Stamped once the chunk is written: its block
+                        // requests may take seconds, which must not make a
+                        // live transaction look abandoned (audit of
+                        // incident 0043, L4).
                         self.staging = r.is_ok().then_some(Staging {
                             index,
                             owner,
-                            last_ms: now,
+                            last_ms: now_ms(),
                         });
                         if r.is_err() {
                             self.fs.abandon_replace();
@@ -660,7 +711,7 @@ impl Service {
     /// fsd keeps the receive side; the send side goes to the client, and
     /// when its last holder dies the session is retired. Each launch gets
     /// its own session, so the descriptors of one never mix with another's.
-    fn grant(&mut self, name: &str, kind: Kind) -> Result<Handle, Status> {
+    fn grant(&mut self, name: &str, kind: Kind, may_be_missing: bool) -> Result<Handle, Status> {
         let valid = match kind {
             Kind::Dir => {
                 !name.is_empty()
@@ -669,13 +720,15 @@ impl Service {
                         .bytes()
                         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
             }
-            Kind::ReadOnlyFile => name.len() <= 32,
+            // A top-level file: never one inside a directory, which is
+            // some program's private files (ADR 0050).
+            Kind::ReadOnlyFile => !name.is_empty() && name.len() <= 32 && !name.contains('/'),
             Kind::Root => name.is_empty(),
         };
         if !valid {
             return Err(Status::Invalid);
         }
-        if kind == Kind::ReadOnlyFile && self.fs.find(name).is_none() {
+        if kind == Kind::ReadOnlyFile && !may_be_missing && self.fs.find(name).is_none() {
             return Err(Status::NotFound);
         }
         let free = |sessions: &[Option<Session>]| sessions.iter().position(Option::is_none);
@@ -766,6 +819,12 @@ fn main(partition_lba: u64) -> u64 {
         reclaimed: 0,
         last_sweep_ms: 0,
         probe_error_said: false,
+        fault_on_open: {
+            let mut buf = [0u8; sys::CMDLINE_MAX];
+            sys::cmdline(SYSTEM, &mut buf).is_ok_and(|c| {
+                aricode_cmdline::CmdLine::new(c).has(aricode_cmdline::keys::FSD_FAULT)
+            })
+        },
     };
     let mut msg = [0u8; Request::LEN];
     say(b"serving requests");

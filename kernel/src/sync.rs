@@ -45,6 +45,14 @@ impl IrqPolicy for KernelIrq {
 
 pub type IrqLock<T> = aricode_sync::IrqLock<T, KernelIrq>;
 
+/// Runs `f` with interrupts off on this CPU, as they were afterwards.
+pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
+    let was = KernelIrq::save_and_disable();
+    let r = f();
+    KernelIrq::restore(was);
+    r
+}
+
 /// `true` if interrupts are enabled on this CPU.
 pub fn interrupts_enabled() -> bool {
     let rflags: u64;

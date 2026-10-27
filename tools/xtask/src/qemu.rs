@@ -18,6 +18,8 @@ pub struct UsbOptions {
     pub hid: bool,
     /// That xHCI offers MSI only (no MSI-X).
     pub hid_msi: bool,
+    /// That xHCI offers both MSI and MSI-X.
+    pub hid_msi_and_msix: bool,
     /// No virtio keyboard and mouse: QMP input reaches the USB HID devices
     /// (xHCI or EHCI).
     pub hid_only_input: bool,
@@ -191,10 +193,10 @@ fn base_command(
     if usb.hid || usb.storage {
         // xHCI (Phase 25, part two) with a USB HID keyboard and mouse and/or
         // the test disk as USB storage.
-        let xhci = if usb.hid_msi {
-            "qemu-xhci,id=xhci,msi=on,msix=off"
-        } else {
-            "qemu-xhci,id=xhci"
+        let xhci = match (usb.hid_msi, usb.hid_msi_and_msix) {
+            (true, _) => "qemu-xhci,id=xhci,msi=on,msix=off",
+            (false, true) => "qemu-xhci,id=xhci,msi=on,msix=on",
+            (false, false) => "qemu-xhci,id=xhci",
         };
         q.args(["-device", xhci]);
         if usb.hid {
@@ -224,6 +226,27 @@ fn base_command(
     }
     q.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     q
+}
+
+/// QMP hot-plug: `delay` after `marker` appears in the serial output, the
+/// device `driver` is added on `bus` with `id` (`device_add`).
+pub struct Hotplug<'a> {
+    pub marker: &'a str,
+    pub delay: Duration,
+    pub driver: &'a str,
+    pub bus: &'a str,
+    pub id: &'a str,
+}
+
+fn run_hotplug(path: &Path, driver: &str, bus: &str, id: &str) -> String {
+    // Names checked by the scenario loader: plain names, safe in JSON.
+    let command = format!(
+        r#"{{"execute":"device_add","arguments":{{"driver":"{driver}","bus":"{bus}","id":"{id}"}}}}"#
+    );
+    match Qmp::connect(path).and_then(|mut q| q.execute(&command)) {
+        Ok(()) => format!("[host] hotplug: {driver} added on {bus} as {id}"),
+        Err(e) => format!("[host] hotplug: {driver} on {bus} failed: {e}"),
+    }
 }
 
 /// QMP input injection: on seeing `marker` in the serial output, `keys` (QEMU
@@ -292,9 +315,12 @@ impl Qmp {
     /// No `device`: QMP only accepts a display there, not an input device;
     /// the event goes to the active handler of its type (the virtio devices
     /// register after the i8042 and take priority).
-    fn send_event(&mut self, event: &str) -> std::io::Result<()> {
+    /// Several events go in one command: QEMU queues them all in the
+    /// device before it answers, with nothing of the guest's in between.
+    fn send_events(&mut self, events: &[String]) -> std::io::Result<()> {
         self.execute(&format!(
-            r#"{{"execute":"input-send-event","arguments":{{"events":[{event}]}}}}"#
+            r#"{{"execute":"input-send-event","arguments":{{"events":[{}]}}}}"#,
+            events.join(",")
         ))
     }
 }
@@ -313,9 +339,9 @@ fn run_input_probe(
         Err(e) => return format!("[host] QMP: no connection ({e})"),
     };
     let mut sent = 0;
-    let mut step = |qmp: &mut Qmp, event: String| -> Result {
-        qmp.send_event(&event).map_err(|e| e.to_string())?;
-        sent += 1;
+    let mut step = |qmp: &mut Qmp, events: &[String]| -> Result {
+        qmp.send_events(events).map_err(|e| e.to_string())?;
+        sent += events.len();
         Ok(())
     };
     let result: Result = (|| {
@@ -323,11 +349,15 @@ fn run_input_probe(
         if let Some((dx, dy)) = mouse_rel {
             step(
                 &mut qmp,
-                format!(r#"{{"type":"rel","data":{{"axis":"x","value":{dx}}}}}"#),
+                &[format!(
+                    r#"{{"type":"rel","data":{{"axis":"x","value":{dx}}}}}"#
+                )],
             )?;
             step(
                 &mut qmp,
-                format!(r#"{{"type":"rel","data":{{"axis":"y","value":{dy}}}}}"#),
+                &[format!(
+                    r#"{{"type":"rel","data":{{"axis":"y","value":{dy}}}}}"#
+                )],
             )?;
         }
         // A short pause between phases: the compositor orders by arrival time
@@ -337,7 +367,9 @@ fn run_input_probe(
             for down in [true, false] {
                 step(
                     &mut qmp,
-                    format!(r#"{{"type":"btn","data":{{"down":{down},"button":"{button}"}}}}"#),
+                    &[format!(
+                        r#"{{"type":"btn","data":{{"down":{down},"button":"{button}"}}}}"#
+                    )],
                 )?;
             }
         }
@@ -353,19 +385,27 @@ fn run_input_probe(
                 Step::Key(key) => {
                     // "a" presses and releases; "shift+dot" presses the
                     // modifiers, then the key, and releases them in reverse
-                    // order.
+                    // order. The whole key is one QMP command (incident
+                    // 0031): a guest that acts on the press (Enter on
+                    // `shutdown`) may power off at once, and a release sent
+                    // as a command of its own then found QEMU gone ("failed
+                    // after 29 events, Broken pipe"). The device queues
+                    // them in order, so the guest still sees press before
+                    // release, and the pause after the key is the same
+                    // `key_delay` per event as before.
                     let parts: Vec<&str> = key.split('+').collect();
                     let presses = parts.iter().map(|p| (p, true));
                     let releases = parts.iter().rev().map(|p| (p, false));
-                    for (part, down) in presses.chain(releases) {
-                        step(
-                            &mut qmp,
+                    let events: Vec<String> = presses
+                        .chain(releases)
+                        .map(|(part, down)| {
                             format!(
                                 r#"{{"type":"key","data":{{"down":{down},"key":{{"type":"qcode","data":"{part}"}}}}}}"#
-                            ),
-                        )?;
-                        std::thread::sleep(key_delay);
-                    }
+                            )
+                        })
+                        .collect();
+                    step(&mut qmp, &events)?;
+                    std::thread::sleep(key_delay * events.len() as u32);
                     continue;
                 }
                 Step::Prompt => echo.as_ref().map(|e| e.prompt.as_bytes().to_vec()),
@@ -930,11 +970,18 @@ pub struct SshProbe<'a> {
     pub commands: &'a [String],
     pub key: std::path::PathBuf,
     pub idle_client: bool,
+    pub retry_connect_secs: u64,
 }
 
 /// Runs each command over SSH; the result is one block of `[host] ssh`
 /// lines: the command, every output line and the exit status.
-fn run_ssh_probe(port: u16, commands: &[String], key: &Path, idle_client: bool) -> String {
+fn run_ssh_probe(
+    port: u16,
+    commands: &[String],
+    key: &Path,
+    idle_client: bool,
+    retry_connect_secs: u64,
+) -> String {
     let mut lines = Vec::new();
     // An idle client that holds a connection without identifying itself;
     // kept open for the whole probe (sshd must drop it on its own).
@@ -952,31 +999,23 @@ fn run_ssh_probe(port: u16, commands: &[String], key: &Path, idle_client: bool) 
         }
     });
     for cmd in commands {
-        let out = Command::new("ssh")
-            .args([
-                "-F",
-                "/dev/null",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "StrictHostKeyChecking=no",
-            ])
-            .args([
-                "-o",
-                "UserKnownHostsFile=/dev/null",
-                "-o",
-                "ConnectTimeout=90",
-                "-o",
-                "LogLevel=ERROR",
-            ])
-            // Only the scenario's key: the agent's keys would be refused first.
-            .args(["-o", "IdentitiesOnly=yes", "-i"])
-            .arg(key)
-            .args(["-p", &port.to_string()])
-            .arg("ari@127.0.0.1")
-            .arg(cmd)
-            .stdin(Stdio::null())
-            .output();
+        // ssh exits with 255 when it could not connect or log in: tried
+        // again for `retry_connect_secs` (sshd being relaunched).
+        let deadline = Instant::now() + Duration::from_secs(retry_connect_secs);
+        let mut retries = 0;
+        let out = loop {
+            let out = ssh_command(port, key, cmd);
+            match &out {
+                Ok(o) if o.status.code() == Some(255) && Instant::now() < deadline => {
+                    retries += 1;
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+                _ => break out,
+            }
+        };
+        if retries > 0 {
+            lines.push(format!("[host] ssh connection retried {retries} time(s)"));
+        }
         match out {
             Ok(o) => {
                 lines.push(format!("[host] ssh $ {cmd}"));
@@ -993,6 +1032,35 @@ fn run_ssh_probe(port: u16, commands: &[String], key: &Path, idle_client: bool) 
     }
     drop(idle);
     lines.join("\n")
+}
+
+/// One command through the host's OpenSSH client with the scenario's key.
+fn ssh_command(port: u16, key: &Path, cmd: &str) -> std::io::Result<std::process::Output> {
+    Command::new("ssh")
+        .args([
+            "-F",
+            "/dev/null",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=no",
+        ])
+        .args([
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "ConnectTimeout=90",
+            "-o",
+            "LogLevel=ERROR",
+        ])
+        // Only the scenario's key: the agent's keys would be refused first.
+        .args(["-o", "IdentitiesOnly=yes", "-i"])
+        .arg(key)
+        .args(["-p", &port.to_string()])
+        .arg("ari@127.0.0.1")
+        .arg(cmd)
+        .stdin(Stdio::null())
+        .output()
 }
 
 pub fn run_interactive(
@@ -1164,6 +1232,7 @@ pub struct Headless<'a> {
     pub ssh_probe: Option<SshProbe<'a>>,
     pub flood: Option<FloodProbe<'a>>,
     pub input_probe: Option<InputProbe<'a>>,
+    pub hotplug: Option<Hotplug<'a>>,
     pub disk_variant: image::DiskVariant,
     pub disk_readonly: bool,
     /// Reuses the previous boot's test disk instead of building it again
@@ -1277,6 +1346,9 @@ pub fn run_headless(
     let mut probe_result: Option<String> = None;
     let mut probe_thread: Option<std::thread::JoinHandle<String>> = None;
     let mut input_result: Option<String> = None;
+    let mut hotplug_result: Option<String> = None;
+    // When the hot-plug marker was first seen.
+    let mut hotplug_seen: Option<Instant> = None;
     let mut ssh_result: Option<String> = None;
     let mut ssh_thread: Option<std::thread::JoinHandle<String>> = None;
     let mut input_thread: Option<std::thread::JoinHandle<String>> = None;
@@ -1341,9 +1413,10 @@ pub fn run_headless(
                 let commands = p.commands.to_vec();
                 let key = p.key.clone();
                 let idle = p.idle_client;
+                let retry = p.retry_connect_secs;
                 let port = options.forwards.ssh;
                 ssh_thread = Some(std::thread::spawn(move || {
-                    run_ssh_probe(port, &commands, &key, idle)
+                    run_ssh_probe(port, &commands, &key, idle, retry)
                 }));
             }
             if ssh_thread.as_ref().is_some_and(|t| t.is_finished()) {
@@ -1360,6 +1433,16 @@ pub fn run_headless(
                 flood_thread = Some(std::thread::spawn(move || {
                     run_flood_probe(forwards, port, n, &ready, &stop)
                 }));
+            }
+        }
+        if let (Some(h), None) = (options.hotplug.as_ref(), &hotplug_result) {
+            if hotplug_seen.is_none()
+                && count_occurrences(&captured.lock().expect("capture"), h.marker.as_bytes()) > 0
+            {
+                hotplug_seen = Some(Instant::now());
+            }
+            if hotplug_seen.is_some_and(|t| t.elapsed() >= h.delay) {
+                hotplug_result = Some(run_hotplug(qmp.path(), h.driver, h.bus, h.id));
             }
         }
         if let Some(p) = input_probe {
@@ -1412,9 +1495,29 @@ pub fn run_headless(
     drop(qmp);
     reader.join().map_err(|_| "serial reader")?;
     let mut bytes = captured.lock().expect("capture").clone();
-    for line in [probe_result, input_result, ssh_result, flood_result]
-        .into_iter()
-        .flatten()
+    let hotplug_result = hotplug_result.or_else(|| {
+        options.hotplug.as_ref().map(|h| {
+            if hotplug_seen.is_some() {
+                return format!(
+                    "[host] hotplug: marker '{}' seen, but QEMU ended before the delay; nothing added",
+                    h.marker
+                );
+            }
+            format!(
+                "[host] hotplug: marker '{}' never seen; nothing added",
+                h.marker
+            )
+        })
+    });
+    for line in [
+        probe_result,
+        input_result,
+        ssh_result,
+        flood_result,
+        hotplug_result,
+    ]
+    .into_iter()
+    .flatten()
     {
         bytes.extend_from_slice(format!("\n{line}\n").as_bytes());
     }

@@ -9,6 +9,9 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+/// The host key `[host_ssh] old_host_key` installs: public, tests only.
+const OLD_HOST_KEY_SEED: [u8; 32] = [0x41; 32];
+
 pub fn run(cli: &Cli, release: bool) -> Result {
     let level: Level = match (cli.flag("--all"), cli.value("--level")) {
         (true, _) => Level::Full,
@@ -235,10 +238,10 @@ fn prebuild_packages(selected: &[&Scenario]) -> Result {
 /// What one scenario run leaves for the summary: the lines to print (in
 /// scenario order, whatever order the runs finished in), its QEMU time and
 /// whether it passed.
-struct Outcome {
-    report: String,
+pub struct Outcome {
+    pub report: String,
     elapsed: Duration,
-    ok: bool,
+    pub ok: bool,
 }
 
 /// One boot to run: the scenario's only boot, or each one in `[[boots]]`,
@@ -250,7 +253,7 @@ struct BootRun {
     expect: scenario::Expect,
 }
 
-fn run_scenario(
+pub fn run_scenario(
     base: &std::path::Path,
     s: &Scenario,
     cpus_override: Option<u32>,
@@ -372,6 +375,11 @@ fn run_scenario(
             }
             let public = std::fs::read(dir.join("id_ed25519.pub")).map_err(|e| e.to_string())?;
             installed.push((String::from("authorized_keys"), public));
+            if s.host_ssh.as_ref().is_some_and(|h| h.old_host_key) {
+                let mut hex = [0u8; 64];
+                let text = format!("{}\n", aricode_crypto::hex(&OLD_HOST_KEY_SEED, &mut hex));
+                installed.push((String::from("ssh_host_ed25519_key"), text.into_bytes()));
+            }
             Some(key)
         }
         false => None,
@@ -534,12 +542,20 @@ fn run_scenario(
             key_delay_ms: h.key_delay_ms,
             echo_prompt: h.echo_prompt.as_deref(),
         });
+        let hotplug = s.host_hotplug.as_ref().map(|h| qemu::Hotplug {
+            marker: &h.marker,
+            delay: Duration::from_millis(h.delay_ms),
+            driver: &h.driver,
+            bus: &h.bus,
+            id: &h.id,
+        });
         let ssh_probe = match (&s.host_ssh, &ssh_key) {
             (Some(h), Some(key)) => Some(qemu::SshProbe {
                 marker: &h.marker,
                 commands: &h.commands,
                 key: key.clone(),
                 idle_client: h.idle_client,
+                retry_connect_secs: h.retry_connect_secs,
             }),
             _ => None,
         };
@@ -554,6 +570,7 @@ fn run_scenario(
             ssh_probe,
             flood,
             input_probe,
+            hotplug,
             disk_variant,
             disk_readonly: s.disk_readonly,
             keep_disk: i > 0,
@@ -564,6 +581,7 @@ fn run_scenario(
             usb: qemu::UsbOptions {
                 hid: s.usb_hid,
                 hid_msi: s.usb_hid_msi,
+                hid_msi_and_msix: s.usb_hid_msi_and_msix,
                 hid_only_input: s.usb_hid_only_input,
                 legacy_controller: s.usb_legacy_controller,
                 storage: s.usb_storage,
@@ -626,6 +644,13 @@ fn run_scenario(
         for needle in &expect.serial_absent {
             if cap.serial.contains(needle) {
                 problems.push(format!("{prefix}unexpected '{needle}'"));
+            }
+        }
+        if s.host_ssh.as_ref().is_some_and(|h| h.old_host_key) {
+            let public = aricode_crypto::ed25519::public_key(&OLD_HOST_KEY_SEED);
+            let needle = format!("host key {}", aricode_ssh::fingerprint(&public));
+            if !cap.serial.contains(&needle) {
+                problems.push(format!("{prefix}missing '{needle}' (the moved host key)"));
             }
         }
         if let Some(i) = scenario::first_out_of_order(&cap.serial, &expect.serial_order) {

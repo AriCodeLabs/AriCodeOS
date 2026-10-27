@@ -76,6 +76,97 @@ pub struct Process {
     /// Pending `process_kill`: the thread terminates on returning to ring 0 or
     /// on waking from a wait (audit 6ee19fb, finding 4).
     kill_requested: bool,
+    /// Zero-fill pages of its writable segments (`[start, end)` and their
+    /// flags), backed on first touch instead of at load (performance audit
+    /// 731c398, finding D): a runtime's 256 KiB heap arena costs only the
+    /// pages the program uses.
+    on_demand: Vec<(u64, u64, u64)>,
+    /// Pages of `on_demand` backed so far (they are never unmapped one by
+    /// one, so the count is exact; audit of finding D, L2).
+    on_demand_backed: u64,
+    /// Its share of the event ring for the events its own calls cause
+    /// (`event_record`, quota refusals).
+    events: aricode_faults::Budget,
+    /// Client buffers a mapping put in its IOMMU domain, unmapped while it
+    /// still held a handle to them: a driver keeps the handle of a buffer
+    /// its device may still own (incident 0017), so the device keeps
+    /// reaching it until the last handle goes (`settle_lingering`).
+    lingering: Vec<(u64, alloc::sync::Weak<crate::object::KernelObject>)>,
+}
+
+/// Frames first-touch backing never takes (ADR 0049): below this many free
+/// frames a process's first touch fails instead, so the kernel's own
+/// allocations (its heap, page tables, the kill path itself) still find
+/// memory. 1 MiB.
+const KERNEL_RESERVE_FRAMES: usize = 256;
+
+/// What [`back_on_demand`] did with a page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnDemand {
+    /// The page was reserved and is now backed by a zeroed frame.
+    Backed,
+    /// Not a reserved page (or already backed): a real fault.
+    NotReserved,
+    /// Reserved, but no frame was left.
+    OutOfMemory,
+}
+
+/// Backs `page` of `p` with a zeroed frame if it is one of its reserved
+/// zero-fill pages and not mapped yet.
+fn back_page(p: &mut Process, page: u64) -> OnDemand {
+    let Some(&(_, _, flags)) = p
+        .on_demand
+        .iter()
+        .find(|(s, e, _)| (*s..*e).contains(&page))
+    else {
+        return OnDemand::NotReserved;
+    };
+    let Some(m) = p.mapper.as_mut() else {
+        return OnDemand::NotReserved;
+    };
+    if m.translate(page).is_some() {
+        return OnDemand::NotReserved;
+    }
+    let Some(frame) = user_frame() else {
+        return OnDemand::OutOfMemory;
+    };
+    // SAFETY: freshly allocated frame, reachable through the physical map.
+    unsafe {
+        core::ptr::write_bytes(
+            phys::phys_to_virt(frame.addr()) as *mut u8,
+            0,
+            PAGE_SIZE as usize,
+        )
+    };
+    if m.map_4k(page, frame.addr(), flags).is_err() {
+        free_frame(frame);
+        return OnDemand::OutOfMemory;
+    }
+    p.on_demand_backed += 1;
+    OnDemand::Backed
+}
+
+/// A page fault of the current process at `addr` on a page that was not
+/// present: backs it if it is a reserved zero-fill page (finding D). An
+/// instruction fetch from a reserved no-execute page is a real fault: no
+/// frame is spent on a page that would fault again (audit, L3).
+pub fn back_on_demand(addr: u64, fetch: bool) -> OnDemand {
+    let Some(pid) = current_pid() else {
+        return OnDemand::NotReserved;
+    };
+    let page = addr & !(PAGE_SIZE - 1);
+    let mut procs = PROCESSES.lock();
+    let Some(p) = procs.get_mut(&pid) else {
+        return OnDemand::NotReserved;
+    };
+    let no_execute = p
+        .on_demand
+        .iter()
+        .any(|(s, e, flags)| (*s..*e).contains(&page) && flags & NO_EXECUTE != 0);
+    if fetch && no_execute {
+        return OnDemand::NotReserved;
+    }
+    back_page(p, page)
 }
 
 /// A foreign mapping. A DMA buffer's mapping holds a reference to the
@@ -87,6 +178,9 @@ struct Foreign {
     phys: u64,
     span: u64,
     dma: Option<crate::object::ObjectRef>,
+    /// Mapping it put the buffer in the process's IOMMU domain: unmapping
+    /// takes it out again (audit 2026-10-25 C, L11).
+    in_domain: bool,
 }
 
 /// Reason given when a process is killed at another's request.
@@ -207,70 +301,40 @@ fn spawn_full(
     // SAFETY: the kernel PML4 is valid and reachable through the physical map.
     unsafe { m.share_kernel_half(kernel_root) };
 
-    for seg in &elf.segments {
-        let mut flags = USER;
-        if seg.writable() {
-            flags |= WRITABLE;
+    // Every step from here can fail with frames already taken: on failure
+    // they all go back (audit 2026-10-25 C, L1: a failed spawn leaked every
+    // frame mapped so far, and a supervisor relaunching it leaked more).
+    let on_demand = match map_image(&mut m, &elf) {
+        Ok(lazy) => lazy,
+        Err(e) => {
+            free_address_space(m);
+            return Err(e);
         }
-        if !seg.executable() {
-            flags |= NO_EXECUTE;
-        }
-        let (start, end) = seg.page_range();
-        let bytes = elf.segment_bytes(seg);
-        for page in (start..end).step_by(PAGE_SIZE as usize) {
-            let frame = pmm::with(|p| p.allocate()).ok_or("process: out of frames")?;
-            let dst = phys::phys_to_virt(frame.addr()) as *mut u8;
-            // SAFETY: freshly allocated frame, reachable through the physical map.
-            unsafe { core::ptr::write_bytes(dst, 0, PAGE_SIZE as usize) };
-            // Part of the file contents that falls in this page.
-            let file_start = seg.vaddr.max(page);
-            let file_end = (seg.vaddr + seg.filesz).min(page + PAGE_SIZE);
-            if file_start < file_end {
-                let src =
-                    &bytes[(file_start - seg.vaddr) as usize..(file_end - seg.vaddr) as usize];
-                // SAFETY: destination within the frame; `src` within the segment.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        src.as_ptr(),
-                        dst.add((file_start - page) as usize),
-                        src.len(),
-                    )
-                };
-            }
-            m.map_4k(page, frame.addr(), flags)
-                .map_err(|_| "process: map segment")?;
-        }
-    }
-    // Stack: RW, NX, with the lowest page left unmapped as a guard.
-    for virt in (USER_STACK_TOP - USER_STACK_SIZE..USER_STACK_TOP).step_by(PAGE_SIZE as usize) {
-        let frame = pmm::with(|p| p.allocate()).ok_or("process: out of frames")?;
-        // SAFETY: freshly allocated frame.
-        unsafe {
-            core::ptr::write_bytes(
-                phys::phys_to_virt(frame.addr()) as *mut u8,
-                0,
-                PAGE_SIZE as usize,
-            )
-        };
-        m.map_4k(virt, frame.addr(), USER | WRITABLE | NO_EXECUTE)
-            .map_err(|_| "process: map stack")?;
-    }
+    };
 
     // The thread is prepared now and only queued once the process is in the
     // table: its first code looks up the entry point and the jump to ring 3.
-    let thread = scheduler::prepare_for_process(
+    let thread = match scheduler::prepare_for_process(
         name,
         user_thread_entry,
         pid.0 as usize,
         pid.0,
         m.root_phys(),
-    )?;
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            free_address_space(m);
+            return Err(e);
+        }
+    };
     let tid = thread.tid;
     let mut handles = crate::object::initial_table(pid, tid, session_console);
     for (obj, rights) in extra {
-        handles
-            .insert(obj, rights)
-            .map_err(|_| "process: handle table full")?;
+        if handles.insert(obj, rights).is_err() {
+            drop((thread, handles));
+            free_address_space(m);
+            return Err("process: handle table full");
+        }
     }
     PROCESSES.lock().insert(
         pid,
@@ -291,6 +355,10 @@ fn spawn_full(
             reaped: false,
             main_tid: tid,
             kill_requested: false,
+            on_demand,
+            on_demand_backed: 0,
+            events: aricode_faults::Budget::new(),
+            lingering: Vec::new(),
         },
     );
     scheduler::start_thread(thread);
@@ -308,6 +376,112 @@ fn spawn_full(
         elf.entry
     );
     Ok(pid)
+}
+
+/// Maps a new process's image into `m`: its segments' pages backed now
+/// (the zero-fill ones only reserved, returned) and the user stack. On an
+/// error the caller frees the address space; a frame taken but not mapped
+/// goes back here.
+fn map_image(
+    m: &mut Mapper<vmm::PmmFrames, OffsetMap>,
+    elf: &aricode_elf::Elf,
+) -> Result<Vec<(u64, u64, u64)>, &'static str> {
+    let mut on_demand = Vec::new();
+    for seg in &elf.segments {
+        let mut flags = USER;
+        if seg.writable() {
+            flags |= WRITABLE;
+        }
+        if !seg.executable() {
+            flags |= NO_EXECUTE;
+        }
+        let (start, end) = seg.page_range();
+        // Zero-fill pages are only reserved here, backed on first touch.
+        let eager_end = match seg.zero_fill_pages() {
+            Some((lazy, lazy_end)) => {
+                on_demand.push((lazy, lazy_end, flags));
+                lazy
+            }
+            None => end,
+        };
+        let bytes = elf.segment_bytes(seg);
+        for page in (start..eager_end).step_by(PAGE_SIZE as usize) {
+            let frame = user_frame().ok_or("process: out of frames")?;
+            let dst = phys::phys_to_virt(frame.addr()) as *mut u8;
+            // SAFETY: freshly allocated frame, reachable through the physical map.
+            unsafe { core::ptr::write_bytes(dst, 0, PAGE_SIZE as usize) };
+            // Part of the file contents that falls in this page.
+            let file_start = seg.vaddr.max(page);
+            let file_end = (seg.vaddr + seg.filesz).min(page + PAGE_SIZE);
+            if file_start < file_end {
+                let src =
+                    &bytes[(file_start - seg.vaddr) as usize..(file_end - seg.vaddr) as usize];
+                // SAFETY: destination within the frame; `src` within the segment.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        src.as_ptr(),
+                        dst.add((file_start - page) as usize),
+                        src.len(),
+                    )
+                };
+            }
+            if m.map_4k(page, frame.addr(), flags).is_err() {
+                free_frame(frame);
+                return Err("process: map segment");
+            }
+        }
+    }
+    // Stack: RW, NX, with the lowest page left unmapped as a guard.
+    for virt in (USER_STACK_TOP - USER_STACK_SIZE..USER_STACK_TOP).step_by(PAGE_SIZE as usize) {
+        let frame = user_frame().ok_or("process: out of frames")?;
+        // SAFETY: freshly allocated frame.
+        unsafe {
+            core::ptr::write_bytes(
+                phys::phys_to_virt(frame.addr()) as *mut u8,
+                0,
+                PAGE_SIZE as usize,
+            )
+        };
+        if m.map_4k(virt, frame.addr(), USER | WRITABLE | NO_EXECUTE)
+            .is_err()
+        {
+            free_frame(frame);
+            return Err("process: map stack");
+        }
+    }
+    Ok(on_demand)
+}
+
+/// A frame for a process's own memory, never one of the last
+/// `KERNEL_RESERVE_FRAMES` (ADR 0049): those stay for the kernel.
+fn user_frame() -> Option<Frame> {
+    pmm::with(|f| {
+        if f.stats().free_frames <= KERNEL_RESERVE_FRAMES {
+            None
+        } else {
+            f.allocate()
+        }
+    })
+}
+
+fn free_frame(frame: Frame) {
+    pmm::with(|p| p.free(frame).expect("process frame"));
+}
+
+/// Frees a process address space: every frame of its user half (pages
+/// and page tables) and its root; the kernel half is shared, never freed.
+/// Returns how many frames went back.
+fn free_address_space(mut m: Mapper<vmm::PmmFrames, OffsetMap>) -> usize {
+    let mut frames = Vec::new();
+    m.free_user_half(|f| frames.push(f));
+    frames.push(m.into_root_frame());
+    let n = frames.len();
+    pmm::with(|p| {
+        for f in frames {
+            p.free(Frame::from_addr(f)).expect("process frame");
+        }
+    });
+    n
 }
 
 /// First code of the main thread, with the process address space already
@@ -456,15 +630,7 @@ pub fn release_address_space(pid: u32) {
                 let _ = m.unmap_4k(page);
             }
         }
-        let mut frames = Vec::new();
-        m.free_user_half(|f| frames.push(f));
-        frames.push(m.into_root_frame());
-        let n = frames.len();
-        pmm::with(|p| {
-            for f in frames {
-                p.free(Frame::from_addr(f)).expect("process frame");
-            }
-        });
+        let n = free_address_space(m);
         log::debug!("user: address space of process {pid} freed ({n} frames)");
         for f in foreign {
             report_last_reference(pid, &f);
@@ -633,6 +799,48 @@ pub fn reap_selftest() {
         "process reap selftest ok ({} processes created and waited for on {} CPU(s), {lost} frames difference, heap +{heap_grown} pages)",
         ROUNDS * BATCH,
         crate::cpu::online_count()
+    );
+}
+
+/// `test=spawn_oom` (audit 2026-10-25 C, L1): a spawn that runs out of
+/// frames half-way gives back every frame it took (the address space's
+/// root, tables, pages), and once memory is back the next spawn works.
+pub fn spawn_oom_selftest() {
+    use crate::memory::heap;
+    use crate::user::programs;
+
+    let code = programs::by_name("hello").expect("hello in the initrd");
+    // Warm-up: let the heap do whatever growing it will before measuring.
+    for _ in 0..4 {
+        let pid = spawn("hello", code).expect("spawn");
+        assert_eq!(wait(pid), ExitStatus::Exited(42));
+    }
+    // Leave a few frames above the kernel reserve: enough for the address
+    // space and its first page, not for the image and the stack.
+    let mut held = Vec::new();
+    while pmm::stats().free_frames > KERNEL_RESERVE_FRAMES + 4 {
+        held.push(pmm::with(|p| p.allocate()).expect("free frame"));
+    }
+    let free_before = pmm::stats().free_frames;
+    let heap_before = heap::mapped_bytes();
+    const TRIES: usize = 10;
+    for _ in 0..TRIES {
+        assert!(
+            spawn("hello", code).is_err(),
+            "spawn must run out of frames"
+        );
+    }
+    let heap_grown = (heap::mapped_bytes() - heap_before) / PAGE_SIZE;
+    let lost = free_before as i64 - pmm::stats().free_frames as i64 - heap_grown as i64;
+    let held_count = held.len();
+    for f in held {
+        free_frame(f);
+    }
+    assert!(lost <= 0, "frames lost by {TRIES} failed spawns: {lost}");
+    let pid = spawn("hello", code).expect("spawn once memory is back");
+    assert_eq!(wait(pid), ExitStatus::Exited(42));
+    info!(
+        "spawn out-of-memory selftest ok ({TRIES} failed spawns with {held_count} frames held, {lost} frames difference, heap +{heap_grown} pages)"
     );
 }
 
@@ -895,6 +1103,22 @@ pub fn stack_snapshot() -> Vec<aricode_abi::sysinfo::StackEntry> {
         .collect()
 }
 
+/// Zero-fill memory reserved and backed so far, per live process that has
+/// any (`sysinfo::ON_DEMAND`, finding D).
+pub fn on_demand_snapshot() -> Vec<aricode_abi::sysinfo::StackEntry> {
+    use aricode_abi::sysinfo::StackEntry;
+    PROCESSES
+        .lock()
+        .iter()
+        .filter_map(|(pid, p)| {
+            p.mapper.as_ref()?;
+            let reserved: u64 = p.on_demand.iter().map(|(s, e, _)| e - s).sum();
+            let backed = p.on_demand_backed * PAGE_SIZE;
+            (reserved > 0).then(|| StackEntry::new(pid.0, reserved as u32, backed as u32, &p.name))
+        })
+        .collect()
+}
+
 pub fn exists(pid: Pid) -> bool {
     PROCESSES.lock().contains_key(&pid)
 }
@@ -909,13 +1133,28 @@ fn check_user_range(ptr: u64, len: u64, write: bool) -> Result<(), aricode_abi::
         return Ok(());
     }
     let pid = current_pid().ok_or(aricode_abi::Error::Fault)?;
+    let first = ptr & !(PAGE_SIZE - 1);
+    // A reserved zero-fill page the program has not touched yet is backed
+    // now, as its own access would (finding D): the kernel never faults on
+    // it while copying. One page per hold of the global lock (audit, L1).
+    let mut page = first;
+    while page < ptr + len {
+        let backed = match PROCESSES.lock().get_mut(&pid) {
+            Some(p) => back_page(p, page),
+            None => return Err(aricode_abi::Error::Fault),
+        };
+        if backed == OnDemand::OutOfMemory {
+            return Err(aricode_abi::Error::Limit);
+        }
+        page += PAGE_SIZE;
+    }
     let procs = PROCESSES.lock();
     let m = procs
         .get(&pid)
         .and_then(|p| p.mapper.as_ref())
         .ok_or(aricode_abi::Error::Fault)?;
     let needed = USER | if write { WRITABLE } else { 0 };
-    let mut page = ptr & !(PAGE_SIZE - 1);
+    let mut page = first;
     while page < ptr + len {
         match m.translate(page) {
             Some((_, flags)) if flags & needed == needed => {}
@@ -925,6 +1164,15 @@ fn check_user_range(ptr: u64, len: u64, write: bool) -> Result<(), aricode_abi::
     }
     debug_assert!(ptr + len <= USER_SPACE_END);
     Ok(())
+}
+
+/// Checks that `[ptr, ptr+len)` of the current process can be written,
+/// backing its reserved zero-fill pages: what a call that consumes
+/// something (a message, input) does before it consumes it, so a full
+/// memory fails the call instead of losing what it took (audit of finding
+/// D, M1).
+pub fn check_user_writable(ptr: u64, len: u64) -> Result<(), aricode_abi::Error> {
+    check_user_range(ptr, len, true)
 }
 
 /// Copies `[ptr, ptr+len)` from the current process's address space,
@@ -981,12 +1229,7 @@ pub fn map_foreign(
     // with a quota, no more than the quota (ADR 0038).
     if dma.is_some() && p.dma_quota != 0 && p.dma_mapped.saturating_add(span) > p.dma_quota {
         drop(procs);
-        crate::events::record(
-            aricode_abi::sysinfo::EventKind::DmaQuota,
-            pid.0,
-            span,
-            "mmio_map",
-        );
+        record_event(aricode_abi::sysinfo::EventKind::DmaQuota, span, "mmio_map");
         return Err(aricode_abi::Error::Limit);
     }
     // The MMIO/DMA area is above the user stack (8 MiB) and reaches the
@@ -1009,13 +1252,120 @@ pub fn map_foreign(
     if dma.is_some() {
         p.dma_mapped += span;
     }
+    // A lingering buffer mapped again: this mapping takes it over.
+    let lingered = dma.is_some() && take_lingering(p, start);
     p.foreign.push(Foreign {
         virt,
         phys: start,
         span,
         dma,
+        in_domain: lingered,
     });
     Ok((virt + offset, true))
+}
+
+/// Records an event the current process caused, within its rate
+/// (`aricode_faults::Budget`: events over it are counted and reported as
+/// `events dropped` with the next one that fits) and its share of the ring
+/// (`events::SHARE`).
+pub fn record_event(kind: aricode_abi::sysinfo::EventKind, code: u64, name: &str) {
+    let Some(pid) = current_pid() else {
+        return crate::events::record(kind, 0, code, name);
+    };
+    let now_ms = crate::time::uptime_us() / 1000;
+    let charged = PROCESSES
+        .lock()
+        .get_mut(&pid)
+        .map(|p| p.events.charge(now_ms));
+    let dropped = match charged {
+        Some(Some(dropped)) => dropped,
+        Some(None) => return,
+        // Not a process (it is being created or reaped): the kernel's own.
+        None => 0,
+    };
+    if dropped > 0 {
+        crate::events::record_caused(
+            pid.0,
+            aricode_abi::sysinfo::EventKind::Fault,
+            pid.0,
+            dropped,
+            "events dropped",
+        );
+    }
+    crate::events::record_caused(pid.0, kind, pid.0, code, name);
+}
+
+/// Whether `handles` holds a capability to `obj`.
+fn holds(handles: &crate::object::Handles, obj: &crate::object::ObjectRef) -> bool {
+    handles
+        .iter()
+        .any(|(cap, _)| alloc::sync::Arc::ptr_eq(cap.object(), obj))
+}
+
+/// Removes `start` from the lingering buffers of `p`; whether it was there.
+fn take_lingering(p: &mut Process, start: u64) -> bool {
+    let before = p.lingering.len();
+    p.lingering.retain(|(phys, _)| *phys != start);
+    p.lingering.len() != before
+}
+
+/// `mmio_map` put the buffer at `phys` in the current process's IOMMU
+/// domain: records it on the mapping of that buffer, so its unmap takes it
+/// out again. `false` if no mapping or lingering handle of this process
+/// needs it any more (another thread unmapped it meanwhile): the caller
+/// takes it out. Matched by physical address, never by the virtual one,
+/// which a concurrent unmap and map may have reused.
+pub fn foreign_in_domain(phys: u64) -> bool {
+    let Some(pid) = current_pid() else {
+        return false;
+    };
+    let start = phys & !(PAGE_SIZE - 1);
+    let mut procs = PROCESSES.lock();
+    let Some(p) = procs.get_mut(&pid) else {
+        return false;
+    };
+    match p
+        .foreign
+        .iter_mut()
+        .find(|f| f.phys == start && f.dma.is_some())
+    {
+        Some(f) => {
+            f.in_domain = true;
+            true
+        }
+        None => p.lingering.iter().any(|(l, _)| *l == start),
+    }
+}
+
+/// After the current process closed or gave away handles: the lingering
+/// buffers it no longer holds leave its IOMMU domain.
+pub fn settle_lingering() {
+    let Some(pid) = current_pid() else {
+        return;
+    };
+    let gone: Vec<u64> = {
+        let mut procs = PROCESSES.lock();
+        let Some(p) = procs.get_mut(&pid) else {
+            return;
+        };
+        if p.lingering.is_empty() {
+            return;
+        }
+        let handles = &p.handles;
+        let mut gone = Vec::new();
+        p.lingering.retain(|(phys, buffer)| {
+            let keep = buffer.upgrade().is_some_and(|b| holds(handles, &b));
+            // A freed buffer already left every domain (`DmaBuffer::drop`).
+            if !keep && buffer.strong_count() > 0 {
+                gone.push(*phys);
+            }
+            keep
+        });
+        gone
+    };
+    for phys in gone {
+        crate::iommu::unmap_region(pid.0, phys);
+    }
 }
 
 /// `mmio_unmap`: removes the current process's foreign mapping that
@@ -1024,7 +1374,7 @@ pub fn map_foreign(
 /// which may free it.
 pub fn unmap_foreign(virt: u64) -> Result<(), aricode_abi::Error> {
     let pid = current_pid().ok_or(aricode_abi::Error::Fault)?;
-    let f = {
+    let (f, release) = {
         let mut procs = PROCESSES.lock();
         let p = procs.get_mut(&pid).ok_or(aricode_abi::Error::Fault)?;
         let start = virt & !(PAGE_SIZE - 1);
@@ -1041,9 +1391,27 @@ pub fn unmap_foreign(virt: u64) -> Result<(), aricode_abi::Error> {
         if f.dma.is_some() {
             p.dma_mapped -= f.span;
         }
-        f
+        // Its devices stop reaching a client buffer with the mapping, not
+        // when the buffer is freed; while the process still holds a handle
+        // to it, with that handle (its device may still own the buffer).
+        let release = match &f.dma {
+            Some(buffer) if f.in_domain => {
+                if holds(&p.handles, buffer) {
+                    p.lingering
+                        .push((f.phys, alloc::sync::Arc::downgrade(buffer)));
+                    false
+                } else {
+                    true
+                }
+            }
+            _ => false,
+        };
+        (f, release)
     };
     vmm::flush_own_user_range(f.virt, f.span);
+    if release {
+        crate::iommu::unmap_region(pid.0, f.phys);
+    }
     // Only now can the addresses be handed out again.
     if let Some(p) = PROCESSES.lock().get_mut(&pid) {
         p.mmio_ranges.free(f.virt, f.span);

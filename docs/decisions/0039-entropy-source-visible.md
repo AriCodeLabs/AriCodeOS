@@ -147,6 +147,8 @@ weak side channel on what it was doing (an HTTPS certificate check is
 deeper than a plain download, for example). There is no address
 randomization for it to defeat: every process has the same stack
 addresses. It stays under `READ`, like `PROCESSES`, `IDLE` and `EVENTS`.
+`system_info(ON_DEMAND)` (ADR 0049) shows the same audience how far each
+process's heap and `.bss` have grown, page granular, under the same right.
 
 ## Note (2026-10-23, ADR 0043)
 

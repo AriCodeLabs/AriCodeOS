@@ -109,7 +109,7 @@ received.
 | filesystem | `sys::fs::FsClient` over the `fsd` endpoint and a `HARDWARE` capability for its buffer: `list`, `open`, `create`, `read`, `write` (in place, durable after `flush`), `replace` (all-or-nothing and durable, up to 32 KiB: in chunks to the journal above 4 KiB), `flush`, `close` (ADR 0014, 0018); `descriptors` reports the table per owner, and `bind`/`share`/`attach` (init and the broker only) create the per-client sessions whose descriptors die with their process (ADR 0036) |
 | network | `sys::net::NetClient`: `info`, `link` (physical link state, even before DHCP), `ping`, UDP (`udp_bind/send/recv`), TCP (`tcp_connect/listen/accept/send/recv/close`), `resolve`; `sockets` reports the tables per owner, and `sys::net::attach` (init and the broker only) creates the per-client session whose sockets die with their process (ADR 0037); `sys::http::get` on top (per-operation timeout plus a `Budget` for the whole download, ADR 0033) |
 | window | `sys::window::Window::create(compositor, hardware, w, h, title)`, `canvas()` (an `aricode-gfx` canvas), `present`, `poll` (`Key`, `Click`, `Focus`), `close` |
-| input | `sys::input::InputClient` over an `inputd`: evdev events with timestamps; `aricode-input::Keyboard` translates them |
+| input | `sys::input::InputClient` over an `inputd`: evdev events with timestamps (`read`, or `start_read` + `read_reply` to wait on several devices at once with `ipc_receive_any`; a read waits at most `MAX_READ_MS`, 10 s); `aricode-input::Keyboard` translates them. Drivers keep their events in `sys::input::EventQueue`, which delivers them to the one waiting read and keeps them until a reply carrying them was delivered |
 | console | `sys::console_write` (`WRITE`), `sys::console_read` (`READ`, with a deadline); `sys::console_inject` requires `MANAGE` and is only used by init's console bridge (ADR 0013). A program run from an SSH session has a session console (ADR 0047): `console_write` and `sys::print` reach the session unchanged |
 | time | `sys::time::uptime_ms(system)`, `sys::time::uptime_us(system)` (calibrated TSC), `sys::time::Clock`, `sys::time::sleep_ms` |
 | permissions | `sys::permissions::{granted, kind_name, is, drop_handle}` |
@@ -129,7 +129,7 @@ launches with capabilities, such as `tcp_hog` or `sock_leaker`, keeps its manife
 
 ```text
 name = hello_app
-caps = system, fs      # system | fs | net | window | input | block (updater only) | install (installer only)
+caps = system, fs      # system | fs | net | window | block (updater only) | install (installer only)
 memory = 128K          # DMA buffer quota (K or M, at most 8M)
 read_files = hola.txt  # up to 4 AriFS files in read-only mode (ADR 0016)
 ```
@@ -137,14 +137,14 @@ read_files = hola.txt  # up to 4 AriFS files in read-only mode (ADR 0016)
 Handles arrive in this fixed order, only the requested ones: `SYSTEM`
 (read), the fsd private directory, one endpoint per `read_files` entry (in
 order; from it the program can only list, open and read that file, and
-everything else answers `Denied`), the network endpoint, the compositor
-endpoint, the block endpoint, the fsd main namespace (`install`), the input
-endpoints and, if any capability needs buffers (`fs`, `read_files`, `net`,
+everything else answers `Denied`), the network endpoint, a compositor
+session (its windows are its alone, ADR 0052), the block endpoint, the fsd main namespace (`install`) and, if any capability needs buffers (`fs`, `read_files`, `net`,
 `window`, `block`, `install`), `HARDWARE` at the end. With
 `sys::permissions::granted` the application recognises them by kind without
 depending on the position. Without a manifest only the console and `SYSTEM`
-are received. Asking for `spawner`, `pci` or `framebuffer` makes the broker
-deny the launch.
+are received. Asking for `input`, `spawner`, `pci` or `framebuffer` makes
+the broker deny the launch: the raw keyboard and mouse belong to the shell
+console or the compositor, which hands each window its own keys (ADR 0053).
 
 ## Rules
 
@@ -163,7 +163,9 @@ deny the launch.
 ## Deadlines and correlation of calls (ADR 0012)
 
 Every call of the SDK clients (`block`, `fs`, `net`, `window`, `input`,
-`launch`, `status`) goes through `aricode_sys::rpc::call`:
+`launch`, `status`) goes through `aricode_sys::rpc::call` (the one
+exception, `InputClient::start_read`, uses `rpc::send` and leaves the wait
+to its caller; the driver bounds it with `MAX_READ_MS`):
 
 - each request creates its own reply endpoint and closes it on return; a
   late reply is lost and is never attributed to another request;

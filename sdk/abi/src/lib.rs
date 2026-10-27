@@ -431,6 +431,11 @@ pub mod sysinfo {
     /// (incident 0018), the run-time counterpart of `cargo xtask
     /// stack-check`.
     pub const STACKS: u64 = 13;
+    /// As many [`StackEntry`] as fit, one per live process with zero-fill
+    /// pages backed on first touch (performance audit 731c398, finding
+    /// D): `size` is the memory reserved that way (`.bss`, a runtime's heap
+    /// arena), `touched` what the process has made the kernel back so far.
+    pub const ON_DEMAND: u64 = 14;
 
     /// What seeded the kernel generator. The number is the code of the
     /// `net tcp secret weak` and `ssh entropy weak` fault events.

@@ -14,7 +14,11 @@ pub const ENTRY_LEN: usize = 128;
 
 /// CRC-32 (IEEE 802.3, reflected), the one GPT uses.
 pub fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
+    !crc32_update(0xFFFF_FFFF, data)
+}
+
+/// Continues a CRC-32 over `data` (state not inverted).
+fn crc32_update(mut crc: u32, data: &[u8]) -> u32 {
     for &b in data {
         crc ^= b as u32;
         for _ in 0..8 {
@@ -25,7 +29,7 @@ pub fn crc32(data: &[u8]) -> u32 {
             };
         }
     }
-    !crc
+    crc
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +39,16 @@ pub enum GptError {
     BadEntriesCrc,
     Truncated,
     Unsupported,
+    /// A partition that ends before it starts.
+    BadEntry,
 }
+
+/// Most entries a table may declare: the specification's minimum is 128,
+/// and every tool writes 128. The count is read from the disk and sizes
+/// the table read: unbounded, a crafted stick made the loader allocate
+/// about 512 GiB and abort, so the machine did not boot (audit 2026-10-25
+/// B, M1).
+pub const MAX_ENTRIES: u32 = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
@@ -67,7 +80,7 @@ impl Header {
             return Err(GptError::BadSignature);
         }
         let header_len = u32_at(sector, 12) as usize;
-        if header_len < 92 || header_len > sector.len() {
+        if header_len < 92 || header_len > sector.len().min(SECTOR) {
             return Err(GptError::Truncated);
         }
         let stored = u32_at(sector, 16);
@@ -81,6 +94,10 @@ impl Header {
         if entry_len as usize != ENTRY_LEN {
             return Err(GptError::Unsupported);
         }
+        let entry_count = u32_at(sector, 80);
+        if entry_count == 0 || entry_count > MAX_ENTRIES {
+            return Err(GptError::Unsupported);
+        }
         let mut disk_guid = [0u8; 16];
         disk_guid.copy_from_slice(&sector[56..72]);
         Ok(Self {
@@ -90,7 +107,7 @@ impl Header {
             last_usable: u64_at(sector, 48),
             disk_guid,
             entries_lba: u64_at(sector, 72),
-            entry_count: u32_at(sector, 80),
+            entry_count,
             entry_len,
             entries_crc: u32_at(sector, 88),
         })
@@ -117,6 +134,8 @@ impl Partition {
     pub fn name_str(&self) -> &str {
         core::str::from_utf8(&self.name[..self.name_len]).unwrap_or("?")
     }
+    /// Its length; `partitions` never yields one that ends before it
+    /// starts.
     pub fn sectors(&self) -> u64 {
         self.last_lba - self.first_lba + 1
     }
@@ -128,26 +147,83 @@ pub fn partitions(
     table: &[u8],
     out: &mut [Option<Partition>],
 ) -> Result<usize, GptError> {
-    let len = header.entry_count as usize * ENTRY_LEN;
-    if table.len() < len {
-        return Err(GptError::Truncated);
+    let mut scan = TableScan::new(header, out);
+    scan.feed(table);
+    scan.finish()
+}
+
+/// Reads a partition table piece by piece, in order, without holding it
+/// whole: `feed` takes the table's bytes as they are read (any split; bytes
+/// past the table are ignored) and `finish` checks the CRC. No allocation,
+/// so a header that declares the largest table costs its reader nothing
+/// (audit of incident 0032, M2). Every used entry must lie within the
+/// header's usable range, which also keeps `Partition::sectors` in range.
+pub struct TableScan<'a> {
+    header: Header,
+    out: &'a mut [Option<Partition>],
+    found: usize,
+    crc: u32,
+    /// Table bytes taken so far, and the start of an entry split between
+    /// two `feed` calls.
+    taken: usize,
+    partial: [u8; ENTRY_LEN],
+    error: Option<GptError>,
+}
+
+impl<'a> TableScan<'a> {
+    pub fn new(header: &Header, out: &'a mut [Option<Partition>]) -> Self {
+        Self {
+            header: *header,
+            out,
+            found: 0,
+            crc: 0xFFFF_FFFF,
+            taken: 0,
+            partial: [0; ENTRY_LEN],
+            error: None,
+        }
     }
-    if crc32(&table[..len]) != header.entries_crc {
-        return Err(GptError::BadEntriesCrc);
+
+    fn table_len(&self) -> usize {
+        self.header.entry_count as usize * ENTRY_LEN
     }
-    let mut n = 0;
-    for e in table[..len].as_chunks::<ENTRY_LEN>().0 {
+
+    pub fn feed(&mut self, mut bytes: &[u8]) {
+        let room = self.table_len() - self.taken;
+        bytes = &bytes[..bytes.len().min(room)];
+        self.crc = crc32_update(self.crc, bytes);
+        while !bytes.is_empty() {
+            let at = self.taken % ENTRY_LEN;
+            let n = (ENTRY_LEN - at).min(bytes.len());
+            self.partial[at..at + n].copy_from_slice(&bytes[..n]);
+            self.taken += n;
+            bytes = &bytes[n..];
+            if at + n == ENTRY_LEN {
+                let entry = self.partial;
+                self.entry(&entry);
+            }
+        }
+    }
+
+    fn entry(&mut self, e: &[u8; ENTRY_LEN]) {
         if e[..16].iter().all(|&b| b == 0) {
-            continue;
+            return;
         }
-        if n >= out.len() {
-            break;
+        let (first_lba, last_lba) = (u64_at(e, 32), u64_at(e, 40));
+        if last_lba < first_lba
+            || first_lba < self.header.first_usable
+            || last_lba > self.header.last_usable
+        {
+            self.error.get_or_insert(GptError::BadEntry);
+            return;
         }
+        let Some(slot) = self.out.get_mut(self.found) else {
+            return;
+        };
         let mut p = Partition {
             type_guid: e[..16].try_into().unwrap(),
             guid: e[16..32].try_into().unwrap(),
-            first_lba: u64_at(e, 32),
-            last_lba: u64_at(e, 40),
+            first_lba,
+            last_lba,
             name: [0; 36],
             name_len: 0,
         };
@@ -159,10 +235,24 @@ pub fn partitions(
             p.name[p.name_len] = if c < 128 { c as u8 } else { b'?' };
             p.name_len += 1;
         }
-        out[n] = Some(p);
-        n += 1;
+        *slot = Some(p);
+        self.found += 1;
     }
-    Ok(n)
+
+    /// How many partitions went into `out`, once the whole table was fed
+    /// and its CRC matches the header's.
+    pub fn finish(self) -> Result<usize, GptError> {
+        if self.taken < self.table_len() {
+            return Err(GptError::Truncated);
+        }
+        if !self.crc != self.header.entries_crc {
+            return Err(GptError::BadEntriesCrc);
+        }
+        match self.error {
+            Some(e) => Err(e),
+            None => Ok(self.found),
+        }
+    }
 }
 
 /// Type GUID of the AriCodeOS partitions.
@@ -259,6 +349,101 @@ pub fn write_disk_with_guid(
 mod tests {
     extern crate std;
     use super::*;
+
+    /// A header sector with `entry_count` and a valid CRC.
+    fn header_with(entry_count: u32) -> [u8; SECTOR] {
+        let mut s = [0u8; SECTOR];
+        s[..8].copy_from_slice(SIGNATURE);
+        s[12..16].copy_from_slice(&92u32.to_le_bytes());
+        s[40..48].copy_from_slice(&34u64.to_le_bytes());
+        s[48..56].copy_from_slice(&1000u64.to_le_bytes());
+        s[72..80].copy_from_slice(&2u64.to_le_bytes());
+        s[80..84].copy_from_slice(&entry_count.to_le_bytes());
+        s[84..88].copy_from_slice(&(ENTRY_LEN as u32).to_le_bytes());
+        let crc = crc32(&s[..92]);
+        s[16..20].copy_from_slice(&crc.to_le_bytes());
+        s
+    }
+
+    /// Audit 2026-10-25 B, M1: the entry count sizes an allocation in the
+    /// loader, init and the updater.
+    #[test]
+    fn entry_count_is_bounded() {
+        assert_eq!(
+            Header::parse(&header_with(128)).unwrap().entries_bytes(),
+            128 * 128
+        );
+        assert_eq!(Header::parse(&header_with(MAX_ENTRIES)).map(|_| ()), Ok(()));
+        for bad in [0, MAX_ENTRIES + 1, 0xFFFF_FFFF] {
+            assert_eq!(
+                Header::parse(&header_with(bad)).err(),
+                Some(GptError::Unsupported),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_partition_ending_before_it_starts_is_refused() {
+        let mut h = Header::parse(&header_with(4)).unwrap();
+        let mut table = [0u8; 4 * ENTRY_LEN];
+        table[0] = 1; // a type GUID: the entry is used
+        table[32..40].copy_from_slice(&100u64.to_le_bytes());
+        table[40..48].copy_from_slice(&99u64.to_le_bytes());
+        h.entries_crc = crc32(&table);
+        let mut out = [None; 4];
+        assert_eq!(partitions(&h, &table, &mut out), Err(GptError::BadEntry));
+        table[40..48].copy_from_slice(&100u64.to_le_bytes());
+        h.entries_crc = crc32(&table);
+        assert_eq!(partitions(&h, &table, &mut out), Ok(1));
+        assert_eq!(out[0].unwrap().sectors(), 1);
+        // Outside the usable range (audit of incident 0032, L4: 0..u64::MAX
+        // overflowed `sectors`).
+        for (first, last) in [(0u64, u64::MAX), (10, 100), (100, 1001)] {
+            table[32..40].copy_from_slice(&first.to_le_bytes());
+            table[40..48].copy_from_slice(&last.to_le_bytes());
+            h.entries_crc = crc32(&table);
+            assert_eq!(
+                partitions(&h, &table, &mut out),
+                Err(GptError::BadEntry),
+                "{first}..{last}"
+            );
+        }
+    }
+
+    /// The table fed in any split gives what the whole table gives, and a
+    /// bad entry past the room in `out` is still refused.
+    #[test]
+    fn table_scan_takes_any_split() {
+        let mut h = Header::parse(&header_with(8)).unwrap();
+        let mut table = [0u8; 8 * ENTRY_LEN];
+        for (k, first) in [(0usize, 100u64), (3, 200), (5, 300)] {
+            let e = &mut table[k * ENTRY_LEN..(k + 1) * ENTRY_LEN];
+            e[0] = 1;
+            e[32..40].copy_from_slice(&first.to_le_bytes());
+            e[40..48].copy_from_slice(&(first + 9).to_le_bytes());
+        }
+        h.entries_crc = crc32(&table);
+        for split in [1, 7, 128, 300, 1024] {
+            let mut out = [None; 2];
+            let mut scan = TableScan::new(&h, &mut out);
+            for piece in table.chunks(split) {
+                scan.feed(piece);
+            }
+            // Bytes past the table (padding of its last sector) are ignored.
+            scan.feed(&[0xFF; 64]);
+            assert_eq!(scan.finish(), Ok(2), "split {split}");
+            assert_eq!(out[1].unwrap().first_lba, 200);
+        }
+        let mut out = [None; 2];
+        let mut scan = TableScan::new(&h, &mut out);
+        scan.feed(&table[..table.len() - 1]);
+        assert_eq!(scan.finish(), Err(GptError::Truncated));
+        table[5 * ENTRY_LEN + 40..5 * ENTRY_LEN + 48].copy_from_slice(&1u64.to_le_bytes());
+        h.entries_crc = crc32(&table);
+        let mut out = [None; 2];
+        assert_eq!(partitions(&h, &table, &mut out), Err(GptError::BadEntry));
+    }
 
     #[test]
     fn crc32_known_vector() {

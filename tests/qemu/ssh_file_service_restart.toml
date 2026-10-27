@@ -1,0 +1,37 @@
+# ADR 0050 (audit of fix/fsd-authority, H1): sshd's file sessions belong to
+# the fsd generation that granted them. When fsd is relaunched they can
+# never answer again; sshd must not keep its last authorized keys (a key
+# removed since would stay valid until reboot) nor stay closed: it exits
+# and init relaunches it with new sessions. `fsd_fault` makes fsd crash
+# when a session shell opens `fsd-fault`; the next commands reach the
+# relaunched sshd (the runner retries while it starts listening).
+name = "ssh.file_service_restart"
+description = "fsd crashes while sshd holds its sessions: sshd exits, init relaunches it with new ones, SSH works again"
+level = "full"
+areas = ["ssh", "filesystem", "init", "services"]
+cmdline = "qemu_exit shell fsd_fault"
+timeout_secs = 200
+
+[host_ssh]
+marker = "sshd: listening on port 22"
+commands = ["cat fsd-fault", "ls", "cat hola.txt", "shutdown"]
+retry_connect_secs = 60
+
+[expect]
+exit = 33
+serial_contains = [
+    "fsd: crashing on purpose (fsd_fault)",
+    "AriInit: service fsd died from a fault; restart in",
+    "sshd: file sessions gone (the file service was restarted); exiting for new ones",
+    "AriInit: service sshd restarted (generation 2)",
+    "[host] ssh| hola.txt",
+    "[host] ssh| Hola desde AriFS",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "Permission denied", "cannot reread authorized_keys"]
+serial_order = [
+    "fsd: crashing on purpose (fsd_fault)",
+    "sshd: file sessions gone",
+    "AriInit: service sshd restarted (generation 2)",
+    "[host] ssh| Hola desde AriFS",
+]

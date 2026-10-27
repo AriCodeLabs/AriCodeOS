@@ -19,7 +19,12 @@ would open an unauthenticated shell on the user's network.
    an independent computation with the OpenSSL command line.
 2. **Protocol as a library** (`aricode-ssh`): an SSH-2 server state machine
    with no I/O (bytes and events in, bytes out). Exactly one algorithm per
-   slot: `curve25519-sha256` with strict KEX (Terrapin mitigation),
+   slot: `curve25519-sha256` with strict KEX (Terrapin mitigation;
+   required of the client since incident 0035: OpenSSH 9.6, PuTTY 0.80,
+   WinSCP 6.2.2, FileZilla 3.66.4, Dropbear 2024.84, libssh 0.10.6,
+   libssh2 1.11.1, Paramiko 3.4, Go x/crypto 0.17 or later, or a
+   distribution's backport; older clients are refused with
+   KEY_EXCHANGE_FAILED and the reason),
    `ssh-ed25519` host key, `chacha20-poly1305@openssh.com`, no compression,
    `publickey` authentication with `ssh-ed25519` keys, one `session`
    channel (`pty-req`, `shell`, `exec`, `env`, `window-change`, flow control,
@@ -112,7 +117,9 @@ would open an unauthenticated shell on the user's network.
   live in the AriFS root. Programs launched through the broker see only
   their private directory; the console shell, sshd and an authenticated
   SSH session can read and change them (an authenticated user already has
-  the shell).
+  the shell). (Since ADR 0050 the host key and the seed live in `sshd/`;
+  sshd sees only that directory and reads `authorized_keys`, and no
+  manifest can share any of them.)
 - **Exposure.** The laptop sits on the local network behind the router;
   sshd is only reachable from the Internet if a port is forwarded to it.
   The protocol parser runs before authentication, so the surface is the
@@ -131,3 +138,10 @@ would open an unauthenticated shell on the user's network.
 - HTTPS (TLS 1.3 client) can reuse X25519, ChaCha20-Poly1305 and SHA-256;
   it still needs HKDF, the TLS record and handshake layers, and certificate
   verification (ECDSA/RSA and a set of trusted roots).
+
+## Limits (2026-10-25, incident 0035)
+
+- No key re-exchange: a connection ends before either direction reaches
+  2^31 packets, so the ChaCha20 nonce never repeats. OpenSSH clients ask
+  for a re-exchange after about 1 GiB in either direction with this
+  cipher, which the server refuses: sessions moving more than that end.

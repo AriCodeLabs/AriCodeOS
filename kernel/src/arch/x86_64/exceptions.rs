@@ -17,6 +17,23 @@ pub fn handle(frame: &mut InterruptFrame) {
         BREAKPOINT => {
             log::warn!("#BP breakpoint at rip={:#x}, continuing", frame.rip);
         }
+        // A reserved zero-fill page touched for the first time is backed
+        // and the instruction runs again (performance audit, finding D).
+        PAGE_FAULT if frame.cs & 3 == 3 && frame.error_code & PF_PRESENT == 0 => {
+            use crate::user::process::{back_on_demand, OnDemand};
+            let fetch = frame.error_code & PF_INSTRUCTION != 0;
+            match back_on_demand(read_cr2(), fetch) {
+                OnDemand::Backed => {}
+                OnDemand::OutOfMemory => {
+                    serial_println!(
+                        "USER OUT OF MEMORY: no frame for page {:#x} on first touch",
+                        read_cr2()
+                    );
+                    crate::user::process::kill_current("out of memory")
+                }
+                OnDemand::NotReserved => user_fault(frame),
+            }
+        }
         0..=31 if frame.cs & 3 == 3 => user_fault(frame),
         0..=31 => fatal(frame),
         v => super::apic::handle_interrupt(v, frame.cs & 3 == 3),

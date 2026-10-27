@@ -28,7 +28,11 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         }
         nr::THREAD_GET_TID => Ok(scheduler::current_tid().0 as u64),
         nr::ABI_VERSION => Ok(ABI_VERSION as u64),
-        nr::HANDLE_CLOSE => with_handles(|t| t.remove(h).map(|_| 0).map_err(abi_error)),
+        nr::HANDLE_CLOSE => {
+            let r = with_handles(|t| t.remove(h).map(|_| 0).map_err(abi_error));
+            process::settle_lingering();
+            r
+        }
         nr::HANDLE_DUPLICATE => with_handles(|t| {
             lookup(t, h, Rights::NONE)?;
             t.duplicate(h, Rights(frame.rsi as u32), |cap, rights| {
@@ -83,7 +87,12 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         }),
         nr::PCI_CLAIM => pci_claim(h, frame.rsi as usize, frame.rdx),
         nr::PROCESS_WAIT => process_wait(h, frame.rsi),
-        nr::IPC_SEND => ipc_send(h, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9),
+        nr::IPC_SEND => {
+            let r = ipc_send(h, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9);
+            // The handles it transferred may have been a lingering buffer's.
+            process::settle_lingering();
+            r
+        }
         nr::IPC_RECEIVE => ipc_receive(h, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9),
         nr::IPC_RECEIVE_ANY => ipc_receive_any(
             frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9,
@@ -186,8 +195,10 @@ fn console_read(handle: Handle, ptr: u64, len: u64, timeout_ms: u64) -> Result<u
     if !is_console || len == 0 || len > MAX {
         return Err(Error::Invalid);
     }
-    // Validate the destination before blocking: an invalid pointer fails right away.
-    process::copy_to_user(ptr, &[])?;
+    // Validate (and back) the destination before blocking: an invalid
+    // pointer fails right away, and no input is taken that could not be
+    // delivered (audit of finding D, M1).
+    process::check_user_writable(ptr, len)?;
     // The prompt (unterminated line) must be visible before waiting for input.
     if let Some(pid) = process::current_pid() {
         process::console_flush(pid);
@@ -307,6 +318,14 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
         sysinfo::STACKS => {
             let max = (len as usize) / sysinfo::StackEntry::LEN;
             process::stack_snapshot()
+                .iter()
+                .take(max)
+                .flat_map(|e| e.encode())
+                .collect()
+        }
+        sysinfo::ON_DEMAND => {
+            let max = (len as usize) / sysinfo::StackEntry::LEN;
+            process::on_demand_snapshot()
                 .iter()
                 .take(max)
                 .flat_map(|e| e.encode())
@@ -472,8 +491,11 @@ fn ipc_receive(
         return Err(Error::TooBig);
     }
     let obj = endpoint_of(ep, Rights::READ)?;
-    // Check the buffers before consuming a message.
-    process::copy_to_user(buf_ptr, &[])?;
+    // Check (and back) the buffers before consuming a message: a copy that
+    // fails afterwards would lose the message and its capabilities (audit
+    // of finding D, M1).
+    process::check_user_writable(buf_ptr, buf_len)?;
+    process::check_user_writable(out_ptr, out_max * 4)?;
     let ObjectKind::Endpoint(endpoint) = &obj.kind else {
         unreachable!()
     };
@@ -557,7 +579,9 @@ fn ipc_receive_any(
     if irqs > IPC_MAX_ANY_IRQS || members.len() - irqs > IPC_MAX_ANY {
         return Err(Error::Invalid);
     }
-    process::copy_to_user(buf_ptr, &[])?;
+    // As `ipc_receive`: nothing consumed that could not be delivered.
+    process::check_user_writable(buf_ptr, buf_len)?;
+    process::check_user_writable(out_ptr, (IPC_MAX_HANDLES * 4) as u64)?;
     let (index, msg) = match crate::ipc::receive_any(&members, timeout_ms)? {
         (index, Ready::Irq(n)) => return Ok(receive_any::irq(index, n)),
         (index, Ready::Message(msg)) => (index, msg),
@@ -708,9 +732,17 @@ fn spawn_from_bytes(
         .union(Rights::WAIT)
         .union(Rights::MANAGE)
         .union(Rights::DUPLICATE);
-    with_handles(|t| {
+    let handle = with_handles(|t| {
         insert(t, KernelObject::new(ObjectKind::Process(pid)), rights).map(|h| h.0 as u64)
-    })
+    });
+    if handle.is_err() {
+        // A child its parent cannot hold could be neither waited for nor
+        // killed, and a supervisor would start another (audit 2026-10-25
+        // C, L2): it does not run.
+        warn!("process_spawn '{name}': no room for its handle; killing it");
+        process::request_kill(pid);
+    }
+    handle
 }
 
 fn require_pci_root(t: &crate::object::Handles, h: Handle, required: Rights) -> Result<(), Error> {
@@ -720,8 +752,17 @@ fn require_pci_root(t: &crate::object::Handles, h: Handle, required: Rights) -> 
     }
 }
 
+/// The handles a claim inserts all go in, or none does (audit 2026-10-25
+/// C, L3: a full table left some inserted and never reported, the device
+/// claimed with no handle the caller knew of).
 fn pci_claim(root: Handle, index: usize, out_ptr: u64) -> Result<u64, Error> {
-    with_handles(|t| require_pci_root(t, root, Rights::MANAGE))?;
+    with_handles(|t| {
+        require_pci_root(t, root, Rights::MANAGE)?;
+        if t.room() < aricode_abi::PCI_CLAIM_HANDLES {
+            return Err(Error::Limit);
+        }
+        Ok(())
+    })?;
     process::copy_to_user(out_ptr, &[0u8; aricode_abi::PCI_CLAIM_HANDLES * 4])?;
     let claimed = crate::pci::claim(index).map_err(|e| {
         warn!("pci_claim {index}: {e}");
@@ -731,6 +772,7 @@ fn pci_claim(root: Handle, index: usize, out_ptr: u64) -> Result<u64, Error> {
         let mut out = Vec::with_capacity(aricode_abi::PCI_CLAIM_HANDLES * 4);
         for slot in claimed.handles {
             let value = match slot {
+                // Room was checked above; this process is single-threaded.
                 Some((obj, rights)) => insert(t, obj, rights)?.0,
                 None => 0,
             };
@@ -738,7 +780,23 @@ fn pci_claim(root: Handle, index: usize, out_ptr: u64) -> Result<u64, Error> {
         }
         Ok(out)
     })?;
-    process::copy_to_user(out_ptr, &raw)?;
+    if let Err(e) = process::copy_to_user(out_ptr, &raw) {
+        // The caller never learns the handles: take them back (dropped
+        // here, outside the table's lock: the claim's drop takes the PCI
+        // locks).
+        let taken: Vec<_> = with_handles(|t| {
+            Ok(raw
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| u32::from_le_bytes(*b))
+                .filter(|&h| h != 0)
+                .filter_map(|h| t.remove(Handle(h)).ok())
+                .collect())
+        })?;
+        drop(taken);
+        return Err(e);
+    }
     Ok(aricode_abi::PCI_CLAIM_HANDLES as u64)
 }
 
@@ -818,7 +876,15 @@ fn mmio_map(h: Handle) -> Result<u64, Error> {
     if let Some(pid) = process::current_pid() {
         let r = match source_id {
             Some(sid) => crate::iommu::attach(pid.0, sid),
-            None if held.is_some() => crate::iommu::map_region(pid.0, phys, len),
+            // A buffer this call put in the domain leaves it with the
+            // mapping (`mmio_unmap`) or with the last handle after it; one
+            // the process allocated stays.
+            None if held.is_some() => crate::iommu::map_region(pid.0, phys, len).map(|added| {
+                if added && !process::foreign_in_domain(phys) {
+                    // Unmapped meanwhile by another thread of the process.
+                    crate::iommu::unmap_region(pid.0, phys);
+                }
+            }),
             None => Ok(()),
         };
         if let Err(e) = r {
@@ -844,13 +910,7 @@ fn event_record(code: Handle, name_ptr: u64, name_len: u64) -> Result<u64, Error
     }
     let raw = process::copy_from_user(name_ptr, name_len)?;
     let name = core::str::from_utf8(&raw).map_err(|_| Error::Invalid)?;
-    let pid = process::current_pid().map_or(0, |p| p.0);
-    crate::events::record(
-        aricode_abi::sysinfo::EventKind::Fault,
-        pid,
-        code.0 as u64,
-        name,
-    );
+    process::record_event(aricode_abi::sysinfo::EventKind::Fault, code.0 as u64, name);
     Ok(0)
 }
 
@@ -867,17 +927,12 @@ fn dma_alloc(h: Handle, len: u64) -> Result<u64, Error> {
     // Process quota (set by its launcher): the size rounded up to pages is
     // charged, since that is what gets allocated.
     if !process::charge_dma(len.next_multiple_of(4096)) {
-        crate::events::record(
-            aricode_abi::sysinfo::EventKind::DmaQuota,
-            process::current_pid().map_or(0, |p| p.0),
-            len,
-            "dma_alloc",
-        );
+        process::record_event(aricode_abi::sysinfo::EventKind::DmaQuota, len, "dma_alloc");
         return Err(Error::Limit);
     }
     let dma = crate::hw::dma_alloc(len).map_err(|_| Error::Limit)?;
     if let (Some(pid), ObjectKind::Dma(d)) = (process::current_pid(), &dma.kind) {
-        if let Err(e) = crate::iommu::map_region(pid.0, d.region.phys, d.region.len) {
+        if let Err(e) = crate::iommu::map_region(pid.0, d.region.phys, d.region.len).map(|_| ()) {
             warn!("dma_alloc: {e}");
             return Err(Error::Limit);
         }

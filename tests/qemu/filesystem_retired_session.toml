@@ -1,0 +1,24 @@
+# Audit 2026-10-25 C, H1 (incident 0028): fsd served a request whose
+# session the request's own sweep had retired, with no session at all,
+# i.e. the whole namespace. `fs_escape` (manifest `caps = fs`, a private
+# directory) fills the descriptor table, sends `Open "hola.txt"` and
+# closes its session before the reply: the open must be refused.
+name = "filesystem.retired_session"
+description = "fsd refuses a request whose session was retired while it was served; a private directory cannot reach the main namespace"
+level = "full"
+areas = ["filesystem", "sandbox", "shell"]
+cmdline = "qemu_exit shell"
+timeout_secs = 90
+stdin = ["run fs_escape", "cat hola.txt", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: launch fs_escape with manifest [fs] memory 64 KiB",
+    "fsd: private directory 'fs_escape'",
+    "fs_escape: refused (status 9)",
+    "run: fs_escape exited with 0",
+    "Hola desde AriFS",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "outside its directory", "fs_escape: no reply"]

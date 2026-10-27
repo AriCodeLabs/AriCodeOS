@@ -434,14 +434,14 @@ fn switch_with(decide: impl FnOnce(&mut RoundRobin, usize) -> Option<Tid>) {
 /// Frees finished threads. Always runs on a thread other than the one being
 /// freed, so dropping its stack is safe.
 fn reap() {
+    // The policy's exit queue (performance audit, finding E): nothing is
+    // scanned, and with no exits nothing is allocated.
     let zombies: Vec<Box<Thread>> = with(|s| {
-        let dead: Vec<Tid> = s.policy.terminated().collect();
-        dead.into_iter()
-            .filter_map(|t| {
-                s.policy.reap(t).ok()?;
-                s.threads.remove(&t)
-            })
-            .collect()
+        let mut out = Vec::new();
+        while let Some(t) = s.policy.pop_terminated() {
+            out.extend(s.threads.remove(&t));
+        }
+        out
     });
     for z in zombies {
         debug!("task: reap {:?} '{}'", z.tid, z.name);

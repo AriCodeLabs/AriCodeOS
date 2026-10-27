@@ -33,7 +33,8 @@ for a usable session with those keyboards.
 4. **One reader per input service.** While the bridge runs, a program
    launched from the shell that asks for input competes with it and will
    see `Busy` or lose key presses. This is the stage 2 contract (shell
-   session); the graphical session does not launch the bridge.
+   session); the graphical session does not launch the bridge. Since ADR
+   0053 programs launched through the broker cannot ask for input at all.
 
 ## Rejected alternatives
 
@@ -51,8 +52,20 @@ for a usable session with those keyboards.
 
 - Init receives `0x10008` with `READ|MANAGE|DUPLICATE|TRANSFER` and still
   passes only `READ|TRANSFER` to the shell.
-- The bridge polls the services in turn with a `POLL_MS` (20 ms) timeout:
-  the worst-case latency of a key press grows with the number of devices.
+- The bridge polled the services in turn with a `POLL_MS` (20 ms)
+  timeout: the worst-case latency of a key press grew with the number of
+  devices. Since 2026-10-25 it keeps one read outstanding per device
+  (`InputClient::start_read`) and waits on all their replies at once
+  (ADR 0044): a key is forwarded as soon as its driver has it, and an
+  idle driver is not woken. After every wait it looks, without waiting,
+  at each other outstanding read, so a read whose driver died is started
+  again even while another device stays busy.
+- A read waits at most `aricode_proto::input::MAX_READ_MS` (10 s), and a
+  driver's queued events (`sys::input::EventQueue`, shared by inputd and
+  both USB drivers) leave its queue only once a reply carrying them was
+  delivered: a reader that died with its read waiting holds the driver's
+  one place for at most 10 s and takes no events with it (audit
+  2026-10-25 C, M4; scenario `input.orphan_read`).
 - The bridge writes nothing at startup: init announces its launch
   (`CONSOLE_BRIDGE_READY`) before creating the shell, because with several
   CPUs a line from the bridge got interleaved with the first prompt.
