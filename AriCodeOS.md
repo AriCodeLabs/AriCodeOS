@@ -4005,6 +4005,51 @@ licence (ADR 0042), downloads over 6 MiB and apps over 32 KiB. Left as
 stated by the review: the common-name fallback and wildcards over public
 suffixes in X.509, and its informational findings.
 
+## 94.16 AriCodeOS 0.16
+
+**Status: completed (2026-10-27), tag `v0.16.0`.** The version that
+closes what the failure-pattern review of 0.15 had left as stated: the
+two open parts of its X.509 finding and its thirteen informational
+findings, plus two defects and two test races found on the way. Each on
+its own branch with an incident, a reproduction first and an independent
+audit, re-audited until clean; eight incidents (0044 to 0051) and five
+ADRs (0057, 0058, 0060, 0061, 0062).
+
+- X.509: the subject common name is never a host name, an IPv4 host
+  matches an iPAddress entry (ADR 0058), and no wildcard stands on a
+  public suffix (`*.co.uk`), checked against an extract of the Public
+  Suffix List's ICANN section shipped under MPL-2.0 (ADR 0062);
+- cryptography: AES without tables (a bitsliced S-box), `ct_eq` behind an
+  optimization barrier, Ed25519 verification refusing small-order and
+  non-canonical points (1160 forgeries of 12 544 accepted before, none
+  after), and keys, handshake secrets and key schedules wiped when they
+  end (incident 0044);
+- the updater fails closed: a damaged boot state is rebuilt from the slot
+  AriBoot booted, a damaged stable floor refuses stable releases until
+  the owner consents, and `serve-update` keeps request bytes out of its
+  headers (ADR 0060; its first version could have targeted the running
+  slot, found by the audit and fixed before the merge);
+- sshd: authorized_keys lines with options are refused aloud, by line
+  number, and every authentication request but the first `none` counts
+  against the limit (incident 0046);
+- the kernel: stale handles no longer come back after 65 536 reuses (ADR
+  0057), the DMA quota is refunded on every failed allocation, MSI-X
+  windows no longer grow with driver restarts, and input typed for a dead
+  console reader is discarded (incident 0047);
+- PCI: an old claim's interrupt line no longer silences a newer claim, and
+  MSI-X is used only where the table is still where it was and the
+  function decodes memory (ADR 0061);
+- test races fixed, not retried: a port-lease test racing other sockets
+  (incident 0049) and `dma_rogue` reading the DMA fault count before the
+  fault interrupt was handled with 4 CPUs (incident 0051);
+- verified: the full suite, 202 scenarios with 1 and with 4 CPUs, and dev
+  build 13 on the reference laptop (HTTPS to GitHub, Google, Wikipedia,
+  Cloudflare and the website).
+
+Still the owner's: agents outside the trusted base (ADR 0041), the driver
+licence (ADR 0042), downloads over 6 MiB and apps over 32 KiB. Accepted
+residuals are listed in each incident's "What remains".
+
 ---
 
 # 95. Real hardware: the right moment
