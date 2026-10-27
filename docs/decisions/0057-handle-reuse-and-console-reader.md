@@ -71,9 +71,12 @@ console would. Nothing documented what happens to input left unread.
 ## Consequences
 
 - A stale handle in a long-running program fails with `BadHandle` instead
-  of naming another object, as ADR 0010 meant.
-- A table that churns grows to its limit's positions (about 8 KiB of
-  kernel heap per process at most: 256 entries of 24 bytes and the free
-  queue) instead of reusing one slot.
+  of naming another object, as ADR 0010 meant, until its value comes back:
+  after at least about 1.7·10^7 closes in the same table (every other
+  position held) and up to about 4.3·10^9; only a wider handle format
+  would remove that (incident 0047, "What remains").
+- A table that churns grows to its limit's positions (about 10 KiB of
+  kernel heap per process at most: 256 positions of 32 bytes and a free
+  queue of up to 256 indexes) instead of reusing one slot.
 - A crashed console reader's half-typed line is gone; whoever reads the
   console next starts from an empty line.

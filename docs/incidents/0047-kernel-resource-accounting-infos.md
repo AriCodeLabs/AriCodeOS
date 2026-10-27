@@ -218,3 +218,28 @@ interrupt line masking a newer claim's entry (below) and that a
   the fix the separate windows pointed at the same entry, so this is
   unchanged; it needs its own fix (revoke the old line on reclaim, or skip
   the mask when the entry no longer holds the line's vector).
+
+## Second audit (2026-10-27)
+
+An independent audit of `30a2146` and `65f8643`, ordered by the
+coordinator, found no high or medium finding (handle values bounded and
+never shared by two live handles, stale and forged values refused, table
+memory bounded; DMA refund exactly once and only after a charge, no frame
+or IOMMU leaf leaked; the MSI-X window serialized under the PCI lock and
+never unmapped; the console discard without deadlock and logged without
+the bytes; each new test fails with its fix reverted). Followed up:
+
+- ADR 0057 overstated two things: a stale handle fails only until its
+  value comes back, and a churning table takes about 10 KiB (positions
+  are 32 bytes, plus the free queue), not 8. Corrected.
+- Two pre-existing PCI defects it confirmed are not part of this branch
+  and get their own incident: an old claim's IRQ line, which can outlive
+  the claim (it is transferable), masks MSI-X entry 0 (or disables MSI)
+  when dropped, after a newer claim programmed it; and the MSI-X table's
+  BAR base is not checked again at a claim, only its capability
+  register.
+- A live reader can lose unread type-ahead when another process becomes
+  the reader and exits: as designed (ADR 0057, "Alternatives"; only the
+  shell reads the console today).
+- Not covered by a test: the refund on the no-contiguous-memory and
+  IOMMU failure paths (only the full-handle-table path is exercised).
