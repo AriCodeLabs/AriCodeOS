@@ -104,4 +104,7 @@ case.
   every record exchange, send and receive get what is left of it, and
   `HttpsError::Deadline(Phase)` says where the time ran out.
 - AES uses table lookups (not cache-timing hardened); public-key
-  operations are verification only.
+  operations are verification only. (Since incident 0044, 2026-10-27:
+  AES is bitsliced, without tables, about three times slower; the
+  ephemeral key, the schedule's secrets and the record keys are wiped
+  when they are no longer needed.)

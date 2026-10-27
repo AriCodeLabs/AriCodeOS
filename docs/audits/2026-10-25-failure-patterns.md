@@ -112,7 +112,8 @@ refunded on a failed allocation; `map_uc` windows are never freed; typed-
 ahead console bytes survive a shell crash; the updater treats a boot
 state with a bad CRC as fresh and the stable floor fails open when its
 section is damaged; secrets are not zeroized; `ct_eq` has no optimization
-barrier; AES uses tables; Ed25519 verify accepts small-order keys;
+barrier; AES uses tables; Ed25519 verify accepts small-order keys (these
+four fixed on `fix/crypto-hardening`, incident 0044);
 `serve-update` echoes the raw request target into its log and `Location`;
 authorized_keys lines with options are ignored silently; `none` and
 unsigned publickey queries are not counted as auth failures; the `input`
@@ -157,6 +158,12 @@ removed on `fix/compositor-ownership`, ADR 0053).
   on requests a busy host disk took over 2 s, `2cd0102`). Left as stated:
   the CN fallback and wildcards over public suffixes (L23), and the
   infos below.
+- 2026-10-27: four infos of the crypto library fixed on
+  `fix/crypto-hardening` (incident 0044): secrets wiped when dropped or
+  where their buffer ends (what is not covered is listed in the incident);
+  `ct_eq` with an optimization barrier; AES with a bitsliced S-box, no
+  table; Ed25519 verify refuses small-order A and R and non-canonical
+  encodings (1160 forgeries accepted before, none after).
 
 ## Fix plan
 

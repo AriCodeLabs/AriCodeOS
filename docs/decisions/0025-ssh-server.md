@@ -145,3 +145,12 @@ would open an unauthenticated shell on the user's network.
   2^31 packets, so the ChaCha20 nonce never repeats. OpenSSH clients ask
   for a re-exchange after about 1 GiB in either direction with this
   cipher, which the server refuses: sessions moving more than that end.
+
+## Secrets and keys (2026-10-27, incident 0044)
+
+- Each connection's copy of the host key, its generator, the ephemeral
+  key, K and the session keys are wiped when the connection ends or when
+  they are used up; sshd's own host key copy lives as long as sshd.
+- A public key of small order (or a non-canonical encoding) in
+  `authorized_keys` no longer verifies anything: with such a key, a
+  signature with S = 0 verified for many messages without a private key.
