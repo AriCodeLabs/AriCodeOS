@@ -84,7 +84,9 @@ programmed (into nothing) and enabled.
 
 - An old claim's line can no longer silence or tear a newer claim's
   interrupts; a dropped line of the latest claim masks its source as
-  before. The drop never reads the device.
+  before. The drop does not read the MSI-X table; turning MSI off reads
+  the MSI control register first (a configuration read, as before this
+  ADR).
 - A drop of the latest claim's line still writes its MSI-X entry at the
   boot-time table address. If its own driver moved that BAR, the write
   goes where the BAR was: nowhere (posted, dropped), or into another

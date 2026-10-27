@@ -175,8 +175,19 @@ that nothing in the branch explains the 4-CPU `iommu.isolation` failure
   FLR (until the completion timeout, while other CPUs spin on `VECTORS`
   in `handle_device_irq`) or reach another device that moved a BAR onto
   the old table address (read side effects). Fixed by removing the reads:
-  ownership comes from the claim numbers (Fix of defect 1). Only the
-  test's `hw::delivered` reads the device, outside any drop.
+  ownership comes from the claim numbers (Fix of defect 1). The MSI-X
+  table is no longer read in a drop; one read remains, older than this
+  incident: the latest claim's MSI line, dropped, turns MSI off with a
+  read-modify-write of the MSI control register (a configuration read
+  under `VECTORS`; it can stall only if that line outlived its claim and
+  drops during a reset's 100 ms). The test's `hw::delivered` reads the
+  device too, outside any drop.
+- **Re-audit (2026-10-27)** of `f580dd4`: mergeable; the claim numbers
+  hold in every case checked (claims failing midway, a claim refused
+  MSI-X, resets, reap order, a drop racing a claim on another CPU, no
+  wraparound, lock order unchanged). It found the "never reads the
+  device" wording inexact (the MSI control read above): corrected in the
+  documents, the code left as it is.
 - **Low: `info!` inside the `VECTORS` critical section.** The drop now
   logs after releasing the lock.
 - **Info: the `msix_window` comment** said the dead line masks its entry

@@ -625,7 +625,7 @@ latter briefly to add the region.
   - An interrupt line can outlive its claim (it has `TRANSFER`). Dropped,
     it masks its MSI-X entry or disables MSI only if its claim is still
     the function's latest (claim numbers kept under `VECTORS`; the drop
-    never reads the device), so a line dropped after the function was
+    does not read the MSI-X table), so a line dropped after the function was
     claimed again leaves the new claim's interrupts on. A claim uses
     MSI-X only if the table's register and its BAR read as at boot and
     memory decoding is on, turns MSI off when it uses MSI-X and MSI-X off
