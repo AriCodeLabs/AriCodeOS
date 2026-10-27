@@ -11,7 +11,8 @@
 //! hex; installed by `cargo xtask usb-image --authorized-key`, or created
 //! on first start) and `random_seed`; in the AriFS root, read-only:
 //! `authorized_keys` (OpenSSH format,
-//! `ssh-ed25519` lines; reread after every connection, or at most once a
+//! `ssh-ed25519` lines without options; any other line is refused and said
+//! with its number, incident 0046; reread after every connection, or at most once a
 //! minute while the file service does not answer; a key removed during
 //! such an outage stays valid until the file service answers again).
 //! `random_seed` is entropy carried across boots.
@@ -24,6 +25,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use aricode_crypto::SecretBytes;
 use aricode_proto::fs::Status as FsStatus;
 use aricode_proto::net::Status;
 use aricode_proto::session;
@@ -31,7 +33,9 @@ use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::net::{NetClient, NetError};
 use aricode_rt::sys::{self, abi, Error, Handle};
 use aricode_ssh::keys_refresh::{Change, KeyRefresh};
-use aricode_ssh::{fingerprint, log_safe, parse_authorized_keys, Event, Server};
+use aricode_ssh::{
+    fingerprint, log_safe, parse_authorized_keys, AuthorizedKeys, Event, KeyLineError, Server,
+};
 
 const NET: Handle = Handle(0x0001_0004);
 const FS: Handle = Handle(0x0001_0005);
@@ -56,6 +60,10 @@ const SEED_FILE: &str = "random_seed";
 /// code is the `EntropySource` number, 0 when the kernel does not say.
 const ENTROPY_WEAK_FAULT: &str = "ssh entropy weak";
 const _: () = assert!(ENTROPY_WEAK_FAULT.len() <= abi::sysinfo::EVENT_NAME_LEN);
+/// Fault event for a line of `authorized_keys` that gives no key
+/// (incident 0046); its code is the line number.
+const KEY_LINE_FAULT: &str = "ssh key line refused";
+const _: () = assert!(KEY_LINE_FAULT.len() <= abi::sysinfo::EVENT_NAME_LEN);
 
 fn say(msg: &[u8]) {
     sys::print(b"sshd: ");
@@ -80,19 +88,24 @@ struct Entropy {
 impl Entropy {
     fn load(fs: &mut FsClient) -> Self {
         let mut h = aricode_crypto::sha256::Sha256::new();
-        let saved = read_file(fs, SEED_FILE);
+        let mut saved = read_file(fs, SEED_FILE);
         if let Ok(saved) = &saved {
             h.update(saved);
         }
         let mut fresh = [0u8; 32];
         let draw_failed = sys::random(SYSTEM, &mut fresh) != Ok(fresh.len());
         h.update(&fresh);
+        aricode_crypto::wipe(&mut fresh);
         h.update(&sys::time::uptime_us(SYSTEM).unwrap_or(0).to_le_bytes());
         let state = h.finish();
+        let carried = saved.as_ref().is_ok_and(|s| !s.is_empty());
+        if let Ok(saved) = &mut saved {
+            aricode_crypto::wipe(saved);
+        }
         Self {
             state,
             counter: 0,
-            carried: saved.is_ok_and(|s| !s.is_empty()),
+            carried,
             draw_failed,
         }
     }
@@ -141,11 +154,12 @@ impl Entropy {
     /// leaves the same seed to the next one. A failed save is logged and
     /// returns `false`, so the caller tries again next time.
     fn save_next(&self, fs: &mut FsClient) -> bool {
-        let next = self.derive(b"next boot");
+        let next = SecretBytes(self.derive(b"next boot"));
         let mut hex = [0u8; 65];
-        let n = aricode_crypto::hex(&next, &mut hex[..64]).len();
+        let n = aricode_crypto::hex(&next.0, &mut hex[..64]).len();
         hex[n] = b'\n';
         let saved = write_file(fs, SEED_FILE, &hex[..n + 1]);
+        aricode_crypto::wipe(&mut hex);
         if !saved {
             say(b"could not save random_seed; trying again on the next connection");
         }
@@ -166,8 +180,9 @@ impl Entropy {
         self.draw_failed |= sys::random(SYSTEM, &mut fresh) != Ok(fresh.len());
         self.counter += 1;
         let mut h = aricode_crypto::sha256::Sha256::new();
-        h.update(&self.derive(b"fresh"));
+        h.update(&SecretBytes(self.derive(b"fresh")).0);
         h.update(&fresh);
+        aricode_crypto::wipe(&mut fresh);
         self.state = h.finish();
         self.derive(b"output")
     }
@@ -233,6 +248,11 @@ fn read_file(fs: &mut FsClient, name: &str) -> Result<Vec<u8>, ReadError> {
         }
     };
     let _ = fs.close(fd);
+    // The host key and random_seed pass through here.
+    aricode_crypto::wipe(&mut chunk);
+    if result.is_err() {
+        aricode_crypto::wipe(&mut data);
+    }
     result.map(|()| data)
 }
 
@@ -244,11 +264,12 @@ fn read_file(fs: &mut FsClient, name: &str) -> Result<Vec<u8>, ReadError> {
 /// the next one; `seed_saved` records whether that save succeeded.
 fn host_key(fs: &mut FsClient, entropy: &mut Entropy, seed_saved: &mut bool) -> [u8; 32] {
     match read_file(fs, HOST_KEY_FILE) {
-        Ok(text) => {
+        Ok(mut text) => {
             let mut seed = [0u8; 32];
-            if aricode_crypto::unhex(core::str::from_utf8(&text).unwrap_or("").trim(), &mut seed)
-                .is_some()
-            {
+            let parsed =
+                aricode_crypto::unhex(core::str::from_utf8(&text).unwrap_or("").trim(), &mut seed);
+            aricode_crypto::wipe(&mut text);
+            if parsed.is_some() {
                 return seed;
             }
             say(b"host key file is invalid; generating a new one");
@@ -266,7 +287,9 @@ fn host_key(fs: &mut FsClient, entropy: &mut Entropy, seed_saved: &mut bool) -> 
     let mut hex = [0u8; 65];
     let n = aricode_crypto::hex(&seed, &mut hex[..64]).len();
     hex[n] = b'\n';
-    say(if write_file(fs, HOST_KEY_FILE, &hex[..n + 1]) {
+    let saved = write_file(fs, HOST_KEY_FILE, &hex[..n + 1]);
+    aricode_crypto::wipe(&mut hex);
+    say(if saved {
         b"new host key generated and saved"
     } else {
         b"new host key generated (could not save it: it changes on every boot)"
@@ -383,11 +406,13 @@ fn serve(
     net: &mut NetClient,
     sock: u16,
     peer: [u8; 4],
-    seed: [u8; 32],
-    rng: [u8; 32],
+    seed: &[u8; 32],
+    rng: &[u8; 32],
     authorized: Vec<[u8; 32]>,
 ) {
-    let mut server = Server::new(seed, rng, authorized);
+    // The server's copies of the host key and of the generator seed are
+    // wiped when it is dropped (incident 0044).
+    let mut server = Server::new(*seed, *rng, authorized);
     let mut out = Vec::new();
     server.start(&mut out);
     if !send(net, sock, &mut out) {
@@ -425,6 +450,14 @@ fn serve(
                             sys::print(b"' from ");
                             print_ip(peer);
                             sys::print(b"\n");
+                        }
+                        Event::TooManyAuthAttempts { user } => {
+                            let mut safe = [0u8; 32];
+                            sys::print(b"sshd: too many authentication attempts for '");
+                            sys::print(log_safe(user.as_bytes(), &mut safe));
+                            sys::print(b"' from ");
+                            print_ip(peer);
+                            sys::print(b": disconnected\n");
                         }
                         Event::Shell { .. } | Event::Exec { .. } if session.is_some() => {}
                         Event::Shell { .. } => match open_session(session::Kind::Shell) {
@@ -548,14 +581,57 @@ fn ready() {
     );
 }
 
+/// The refused lines of `authorized_keys` as last reported: a reread of
+/// the same file (after every connection, every 5 s while closed) does not
+/// say them again. The file's digest is part of it, so an edited line
+/// that is refused for the same reason under the same number is said too.
+#[derive(Default, PartialEq)]
+struct Refused {
+    lines: Vec<(usize, KeyLineError)>,
+    total: usize,
+    file: [u8; 32],
+}
+
 /// Keys from `authorized_keys`: none if the file does not exist (closed by
-/// default); an error if it could not be read.
-fn authorized(fs: &mut FsClient) -> Result<Vec<[u8; 32]>, ReadError> {
-    match read_file(fs, AUTHORIZED_KEYS) {
-        Ok(text) => Ok(parse_authorized_keys(&text)),
-        Err(ReadError::Absent) => Ok(Vec::new()),
-        Err(e) => Err(e),
+/// default); an error if it could not be read. Every line that gives no
+/// key is said with its number and the reason, and recorded, whenever what
+/// is refused changes (incident 0046): a line with options, or with a key
+/// type other than `ssh-ed25519`, must not just not work.
+fn authorized(fs: &mut FsClient, reported: &mut Refused) -> Result<Vec<[u8; 32]>, ReadError> {
+    let (parsed, file) = match read_file(fs, AUTHORIZED_KEYS) {
+        Ok(text) => (
+            parse_authorized_keys(&text),
+            aricode_crypto::sha256::sha256(&text),
+        ),
+        Err(ReadError::Absent) => (AuthorizedKeys::default(), [0; 32]),
+        Err(e) => return Err(e),
+    };
+    let refused = Refused {
+        lines: parsed.refused,
+        total: parsed.refused_total,
+        file,
+    };
+    if refused != *reported {
+        let mut b = [0u8; 20];
+        for &(line, why) in &refused.lines {
+            sys::print(b"sshd: authorized_keys line ");
+            sys::print(aricode_rt::fmt_u64(line as u64, &mut b));
+            sys::print(b" gives no key: ");
+            sys::print(why.describe().as_bytes());
+            sys::print(b"\n");
+            let _ = sys::event_record(line as u64, KEY_LINE_FAULT);
+        }
+        if refused.total > refused.lines.len() {
+            sys::print(b"sshd: authorized_keys: ");
+            sys::print(aricode_rt::fmt_u64(
+                (refused.total - refused.lines.len()) as u64,
+                &mut b,
+            ));
+            sys::print(b" more line(s) give no key\n");
+        }
+        *reported = refused;
     }
+    Ok(parsed.keys)
 }
 
 /// Rereads `authorized_keys` after a connection when `refresh` says it is
@@ -569,6 +645,7 @@ fn reread_keys(
     fs: &mut FsClient,
     refresh: &mut KeyRefresh,
     keys: &mut Vec<[u8; 32]>,
+    reported: &mut Refused,
 ) -> Result<(), ReadError> {
     if !refresh.due(now_ms()) {
         return Ok(());
@@ -576,7 +653,7 @@ fn reread_keys(
     // Only a complete read (or "no such file") is an answer; a file service
     // that does not answer or a read that breaks off keeps the last keys and
     // is retried at most once a minute (audit robustness-1, L5).
-    let result = authorized(fs);
+    let result = authorized(fs, reported);
     if result == Err(ReadError::Gone) {
         return Err(ReadError::Gone);
     }
@@ -611,8 +688,8 @@ fn files_gone() -> u64 {
 
 /// Keys for a start: none if the file does not exist or could not be read
 /// (closed until a reread finds some); `Err(Gone)` as `reread_keys`.
-fn initial_keys(fs: &mut FsClient) -> Result<Vec<[u8; 32]>, ReadError> {
-    match authorized(fs) {
+fn initial_keys(fs: &mut FsClient, reported: &mut Refused) -> Result<Vec<[u8; 32]>, ReadError> {
+    match authorized(fs, reported) {
         Err(ReadError::Gone) => Err(ReadError::Gone),
         r => Ok(r.unwrap_or_default()),
     }
@@ -628,19 +705,24 @@ fn main(_arg: u64) -> u64 {
         return 2;
     };
     let mut entropy = Entropy::load(&mut fs);
-    let Ok(mut keys) = initial_keys(&mut keys_fs) else {
+    let mut reported = Refused::default();
+    let Ok(mut keys) = initial_keys(&mut keys_fs, &mut reported) else {
         return files_gone();
     };
     let mut refresh = KeyRefresh::new();
     let mut announced = false;
     if keys.is_empty() {
-        say(b"no authorized_keys in AriFS: not listening (install a key with cargo xtask usb-image --authorized-key, or write authorized_keys ... from the console)");
+        if reported.total == 0 {
+            say(b"no authorized_keys in AriFS: not listening (install a key with cargo xtask usb-image --authorized-key, or write authorized_keys ... from the console)");
+        } else {
+            say(b"no usable key in authorized_keys: not listening (one ssh-ed25519 key per line, without options)");
+        }
         ready();
         announced = true;
         // Closed until the owner installs a key; checked every few seconds.
         while keys.is_empty() {
             sys::time::sleep_ms(5_000);
-            let Ok(k) = initial_keys(&mut keys_fs) else {
+            let Ok(k) = initial_keys(&mut keys_fs, &mut reported) else {
                 return files_gone();
             };
             keys = k;
@@ -711,7 +793,7 @@ fn main(_arg: u64) -> u64 {
             // authorized_keys emptied while running: reread first, so a key
             // installed since counts (audit robustness-1, M1); refuse if
             // there is still none.
-            if reread_keys(&mut keys_fs, &mut refresh, &mut keys).is_err() {
+            if reread_keys(&mut keys_fs, &mut refresh, &mut keys, &mut reported).is_err() {
                 let _ = net.tcp_close(sock);
                 return files_gone();
             }
@@ -724,14 +806,14 @@ fn main(_arg: u64) -> u64 {
         if !seed_saved {
             seed_saved = entropy.save_next(&mut fs);
         }
-        let rng = entropy.next();
-        serve(&mut net, sock, peer, seed, rng, keys.clone());
+        let rng = SecretBytes(entropy.next());
+        serve(&mut net, sock, peer, &seed, &rng.0, keys.clone());
         let _ = net.tcp_close(sock);
         say(b"connection closed");
         // Reread between connections so a key added or removed from the
         // console counts, without delaying the next client's banner behind
         // a file service that does not answer.
-        if reread_keys(&mut keys_fs, &mut refresh, &mut keys).is_err() {
+        if reread_keys(&mut keys_fs, &mut refresh, &mut keys, &mut reported).is_err() {
             return files_gone();
         }
     }

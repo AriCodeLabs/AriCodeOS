@@ -1,0 +1,38 @@
+# Incident 0046: authorized_keys lines with options were skipped without a
+# word. sshd supports no options, so such a line gives no key: it is said
+# with its number and recorded, and sshd stays closed while no line gives
+# a key. Once a plain line is written it opens port 22. The keys are
+# public halves whose private halves were never kept.
+name = "ssh.key_options_refused"
+description = "an authorized_keys line with options is refused by number, never silently; a plain line opens port 22"
+level = "full"
+areas = ["ssh", "filesystem", "shell"]
+cmdline = "qemu_exit shell"
+timeout_secs = 120
+stdin = [
+    "write authorized_keys restrict ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAQuBeAvFxEkM1hr+Bkxzg2IQgsSJ7uAY143nzNYBNX/ aricode-test-public",
+    "sleep 7000",
+    "write authorized_keys ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAQuBeAvFxEkM1hr+Bkxzg2IQgsSJ7uAY143nzNYBNX/ aricode-test-public",
+    "sleep 7000",
+    "diag",
+    "shutdown",
+]
+
+[expect]
+exit = 33
+serial_contains = [
+    "sshd: no authorized_keys in AriFS: not listening",
+    "sshd: authorized_keys line 1 gives no key: it has options (from=, command=, restrict, ...), which are not supported",
+    "sshd: authorized_keys found",
+    "sshd: listening on port 22, host key SHA256:",
+    ", 1 authorized key(s)",
+    ": ssh key line refused (code 1)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "file sessions gone"]
+serial_order = [
+    "ari> write authorized_keys restrict",
+    "sshd: authorized_keys line 1 gives no key",
+    "ari> write authorized_keys ssh-ed25519",
+    "sshd: authorized_keys found",
+]

@@ -5,7 +5,7 @@
 //! keys and KeyUpdate. The transcript is passed as the concatenation of the
 //! handshake messages and hashed here.
 
-use aricode_crypto::{hkdf, hmac, Hash};
+use aricode_crypto::{hkdf, hmac, Hash, SecretBytes};
 
 /// The three cipher suites we offer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +50,8 @@ impl Suite {
     }
 }
 
-/// A secret or digest as long as the suite's hash (32 or 48 bytes).
+/// A secret or digest as long as the suite's hash (32 or 48 bytes),
+/// wiped when dropped (incident 0044).
 #[derive(Clone)]
 pub struct Secret {
     bytes: [u8; 48],
@@ -76,6 +77,12 @@ impl Secret {
     }
 }
 
+impl Drop for Secret {
+    fn drop(&mut self) {
+        aricode_crypto::wipe(&mut self.bytes);
+    }
+}
+
 /// Hash of the transcript (the concatenated handshake messages).
 pub fn transcript_hash(suite: Suite, transcript: &[u8]) -> Secret {
     let mut out = [0u8; 64];
@@ -86,8 +93,8 @@ pub fn transcript_hash(suite: Suite, transcript: &[u8]) -> Secret {
 /// HKDF-Extract with the suite's hash.
 pub fn extract(suite: Suite, salt: &[u8], ikm: &[u8]) -> Secret {
     match suite.hash() {
-        Hash::Sha384 => Secret::from_slice(&hkdf::extract_sha384(salt, ikm)),
-        _ => Secret::from_slice(&hkdf::extract_sha256(salt, ikm)),
+        Hash::Sha384 => Secret::from_slice(&SecretBytes(hkdf::extract_sha384(salt, ikm)).0),
+        _ => Secret::from_slice(&SecretBytes(hkdf::extract_sha256(salt, ikm)).0),
     }
 }
 
@@ -185,7 +192,8 @@ pub fn next_traffic_secret(suite: Suite, secret: &Secret) -> Secret {
     expand_secret(suite, secret, b"traffic upd", &[])
 }
 
-/// Record protection key and IV from a traffic secret.
+/// Record protection key and IV from a traffic secret. The caller wipes
+/// the key once its cipher is built.
 pub fn traffic_key(suite: Suite, secret: &Secret) -> ([u8; 32], [u8; 12]) {
     let mut key = [0u8; 32];
     let mut iv = [0u8; 12];
@@ -316,5 +324,15 @@ mod tests {
         assert_eq!(finished(suite, &hs.server, b"x").as_bytes().len(), 48);
         assert_eq!(Suite::from_id(0x1302), Some(suite));
         assert_eq!(Suite::from_id(0x1304), None);
+    }
+
+    #[test]
+    fn secrets_are_wiped_when_dropped() {
+        let (_, hs) = Schedule::new(Suite::Aes256GcmSha384, &[7; 32], b"transcript");
+        let mut s = core::mem::ManuallyDrop::new(hs.client.clone());
+        assert!(s.bytes.iter().any(|&b| b != 0));
+        // SAFETY: dropped once; afterwards only plain bytes are read.
+        unsafe { core::mem::ManuallyDrop::drop(&mut s) };
+        assert_eq!(s.bytes, [0; 48]);
     }
 }
