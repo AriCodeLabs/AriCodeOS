@@ -940,7 +940,10 @@ fn dma_alloc(h: Handle, len: u64) -> Result<u64, Error> {
     // gives the charge back (incident 0047). The buffer itself goes with
     // the error (its drop leaves the IOMMU domains and frees the frames).
     let granted = (|| {
-        let dma = crate::hw::dma_alloc(len).map_err(|_| Error::Limit)?;
+        let dma = crate::hw::dma_alloc(len).map_err(|e| {
+            warn!("dma_alloc: {e} ({len} bytes)");
+            Error::Limit
+        })?;
         if let (Some(pid), ObjectKind::Dma(d)) = (process::current_pid(), &dma.kind) {
             if let Err(e) = crate::iommu::map_region(pid.0, d.region.phys, d.region.len) {
                 warn!("dma_alloc: {e}");

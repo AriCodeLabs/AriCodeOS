@@ -78,4 +78,4 @@ for a usable session with those keyboards.
 The ring hands input only to the reader it was typed for: when the
 process that last called `console_read` finishes, what it left unread is
 discarded, and so is what arrives before another process reads (a crashed
-shell's half-typed line no longer reaches the next shell; incident 0047).
+shell's half-typed line can no longer reach a later reader; incident 0047).

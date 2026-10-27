@@ -58,8 +58,8 @@ pub struct PciDevice {
     /// The kernel's uncached window onto that table, mapped by the first
     /// claim that uses MSI-X and kept with the function: every later claim
     /// (a restarted driver) reuses it, so restarts map nothing new
-    /// (incident 0047), and the interrupt line of a dead driver can always
-    /// mask its entry through it.
+    /// (incident 0047), and the window stays mapped for the interrupt line
+    /// of a dead driver, which masks its entry when it is dropped.
     pub msix_window: Option<u64>,
     /// Offset of the MSI capability (used if there is no MSI-X).
     pub msi_cap: Option<u8>,

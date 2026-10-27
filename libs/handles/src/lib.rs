@@ -8,12 +8,13 @@
 //! if it guesses both index and generation. Rights can only be reduced when
 //! duplicating, never extended.
 //!
-//! A closed value is not handed out again before the table has gone
-//! through the other values it can give (ADR 0057): every position is used
-//! before one is reused, the one free the longest goes first, and a
-//! position moves on to another index when its generations run out. With
-//! the kernel's 256 positions a stale handle could only come back after
-//! about 4 * 10^9 handles were closed in the same table.
+//! A closed value is not handed out again before its position has gone
+//! through all its other values (ADR 0057): every position is used before
+//! one is reused, the one free the longest goes first, and a position
+//! moves on to another index when its generations run out. With the
+//! kernel's 256 positions that is 255 or 256 * 65535 reuses of the
+//! position: between about 1.7 * 10^7 closes in the table (all other
+//! positions held) and about 4 * 10^9 (all free).
 
 #![no_std]
 

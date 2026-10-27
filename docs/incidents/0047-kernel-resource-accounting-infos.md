@@ -54,9 +54,11 @@ spread over all of it (ADR 0057):
   generation 1, and only once every index of the position has had every
   generation does it start again.
 
-A value then comes back only after the table handed out every other value
-its positions have: about 2^32 closes in the same table with 256
-positions, instead of 65535. The low half
+A value then comes back only after its position went through all its
+other values: 255 or 256 * 65535 reuses of that position with 256
+positions. Spread by the FIFO over the free positions, that is between
+about 1.7 * 10^7 closes in the table (every other position held) and
+about 4 * 10^9 (every other position free), instead of 65535. The low half
 of a handle never reads `0xFFFF`, so `endpoint_create_pair`'s packed
 result still never reads as an error (its comment and ADR 0030 relied on
 indexes staying below `HANDLE_LIMIT`). The values of a fresh table are
@@ -153,15 +155,18 @@ console_orphan: received 16 byte(s) typed for the dead reader: m -r everything
 assertion `left == right` failed: console: bytes typed for a reader that died reached the next one
 ```
 
-With init, that next reader is the relaunched shell, which would run the
-rest of the line as a command.
+Any later reader of the console would get it: a relaunched shell would
+run the rest of the line as a command. Today init does not relaunch the
+console shell (it calls `run_shell` once) and only the shell reads the
+console, so the risk was latent: it would open as soon as anything reads
+the console after a dead reader.
 
 ### Mechanism
 
 The console input ring is global and knows nothing about who reads it:
 `console_read` hands whatever is queued to whoever holds `READ` on the
-console. When the shell died with input queued, init started a new shell
-on the same ring.
+console. A reader that died with input queued left it for the next
+reader of the same ring.
 
 ### Fix
 
@@ -175,6 +180,18 @@ answer to the new prompt is never taken for the dead reader's. Input
 typed at boot, before anyone has read, still goes to the first reader.
 ADR 0057 states the rule.
 
+## Audit
+
+An independent review of `30a2146` found no correctness bug, no
+reachable kernel panic, no double refund and no input an existing
+scenario should get that is now lost. It corrected two claims of the
+first version of these documents: init does not relaunch the console
+shell (finding 4 was latent, see above), and the reuse distance of a
+handle value is about 4 * 10^9 closes only when the table is otherwise
+empty, 1.7 * 10^7 when it is otherwise full. It also noted the old
+interrupt line masking a newer claim's entry (below) and that a
+`dma_alloc` without contiguous memory failed silently, now logged.
+
 ## Tests
 
 - `cargo xtask check`; `cargo xtask test --level unit` (new host tests in
@@ -187,9 +204,17 @@ ADR 0057 states the rule.
 
 ## What remains
 
-- Handle values do come back after about 2^32 closes in one table; the
-  format has 32 bits. Widening it would change the ABI and was not
-  needed.
-- A foreground program that reads the console and exits normally also
-  loses the input it left unread; no program other than the shell reads
-  the console today.
+- Handle values do come back, after 255-256 * 65535 reuses of their
+  position (at least about 1.7 * 10^7 closes in the table); the format
+  has 32 bits. Widening it would change the ABI and was not needed.
+- The console follows its last reader only: a foreground program that
+  reads the console and exits also loses the input it left unread, and
+  with two live readers one that exits would discard what the other was
+  about to read. No program other than the shell reads the console today
+  (ADR 0057, alternatives).
+- Found by the audit, not introduced here: an interrupt line of an old
+  claim (it has `TRANSFER`, so it can outlive the claim) masks entry 0
+  when dropped, which can mask the entry a newer claim programmed. Before
+  the fix the separate windows pointed at the same entry, so this is
+  unchanged; it needs its own fix (revoke the old line on reclaim, or skip
+  the mask when the entry no longer holds the line's vector).

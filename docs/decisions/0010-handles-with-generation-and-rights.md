@@ -51,4 +51,5 @@ the 16-bit generation wrapped, so a closed handle came back after 65535
 closes (incident 0047). ADR 0057 keeps the format and changes the reuse
 order: every position is used before one is reused, oldest free first,
 and a position whose generations run out moves to another index, so a
-value comes back only after about 2^32 closes in the same table.
+value comes back only after 255-256 * 65535 reuses of its position:
+between about 1.7 * 10^7 and 4 * 10^9 closes in the same table.
