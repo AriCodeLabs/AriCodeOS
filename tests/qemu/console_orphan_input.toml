@@ -1,0 +1,24 @@
+# Incident 0047: bytes typed for a console reader that died (a shell that
+# crashed with a line half read) must not reach the reader started next,
+# where they could run as a command. The first console_orphan takes one
+# byte of the line the runner types on seeing CONSOLE_ORPHAN_READY and
+# faults; the second must find nothing to read.
+name = "console.orphan_input"
+description = "test=console_orphan: input left unread by a reader that died is discarded, not given to the next one"
+level = "full"
+areas = ["console", "user"]
+cmdline = "qemu_exit test=console_orphan"
+prompt = "CONSOLE_ORPHAN_READY"
+stdin = ["rm -r everything"]
+timeout_secs = 40
+
+[expect]
+exit = 33
+serial_contains = [
+    "console_orphan: one byte read, crashing with the rest unread",
+    "console: 16 typed byte(s) discarded: their reader (process 1) is gone",
+    "console_orphan: nothing typed for the dead reader arrived ok",
+    "console orphan selftest ok",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "typed for the dead reader: "]

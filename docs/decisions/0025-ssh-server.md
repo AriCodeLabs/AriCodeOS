@@ -139,6 +139,30 @@ would open an unauthenticated shell on the user's network.
   it still needs HKDF, the TLS record and handshake layers, and certificate
   verification (ECDSA/RSA and a set of trusted roots).
 
+## Limits (2026-10-27, incident 0046)
+
+- `authorized_keys` takes the OpenSSH format **without options**: one
+  `ssh-ed25519 KEY [comment]` per line, blank lines and `#` comments. A
+  line with options (`from=`, `command=`, `restrict`, ...), another key
+  type or a key that does not decode gives no key, as before, but no
+  longer silently: sshd says each such line with its number and the
+  reason and records `ssh key line refused` (code: the line number),
+  whenever what is refused or the file changes. Taking the key without its options
+  would give it more than its line allows, so it is never done.
+- A connection gets `MAX_AUTH_ATTEMPTS` (10) authentication requests
+  without succeeding: refused keys and methods, key queries (`publickey`
+  without a signature, answered `PK_OK` for an authorized key) and
+  repeated `none` requests all count; a first `none`, the client asking
+  for the methods (RFC 4252, 5.2), does not. The tenth is answered with a
+  DISCONNECT (reason 14) and logged (`too many authentication attempts`).
+  A usual login counts one request (the key query; the signed request
+  that succeeds is not counted), so a client trying keys in turn gets
+  eight refused ones before the right key; OpenSSH's sshd, which does
+  not count key queries, allows five (`MaxAuthTries 6`). Other requests
+  that get an answer without being authentication (a repeated service
+  request, an unknown message) are not counted: the 30 s authentication
+  deadline bounds them.
+
 ## Limits (2026-10-25, incident 0035)
 
 - No key re-exchange: a connection ends before either direction reaches

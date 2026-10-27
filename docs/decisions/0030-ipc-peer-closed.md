@@ -219,3 +219,10 @@ For a request/reply call (ADR 0012) this gives:
 - **The kernel closing the endpoint when "the serving process" dies**: the
   kernel cannot tell init's capability from the server's, and closing an
   endpoint while a restart is pending would break ADR 0011.
+
+## Note (2026-10-27, ADR 0057)
+
+Handle indexes are no longer bounded by `HANDLE_LIMIT`: a table spreads
+its values over the whole index range. The packed result of
+`endpoint_create_pair` still never reads as an error, because the low half
+of a handle never reads `0xFFFF`, so no handle is `0xFFFF_FFFF`.

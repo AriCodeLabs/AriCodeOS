@@ -244,6 +244,8 @@ pub mod nr {
     pub const PCI_CLAIM: u64 = 23;
     /// `console_read(console, ptr, len, timeout_ms) -> bytes read (>= 1)`;
     /// requires `READ`. Blocks until there is input or the deadline expires (`Timeout`).
+    /// The caller becomes the console's reader: input it leaves unread when
+    /// it finishes is discarded, not given to the next reader (ADR 0057).
     pub const CONSOLE_READ: u64 = 24;
     /// `system_info(system, kind, ptr, len) -> bytes written` (see [`sysinfo`]);
     /// requires `READ`.

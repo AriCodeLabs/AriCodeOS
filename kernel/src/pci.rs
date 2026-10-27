@@ -55,6 +55,12 @@ pub struct PciDevice {
     pub msix_cap: Option<u8>,
     /// Its table, if it fits a checked BAR.
     pub msix_table: Option<MsixTable>,
+    /// The kernel's uncached window onto that table, mapped by the first
+    /// claim that uses MSI-X and kept with the function: every later claim
+    /// (a restarted driver) reuses it, so restarts map nothing new
+    /// (incident 0047), and the window stays mapped for the interrupt line
+    /// of a dead driver, which masks its entry when it is dropped.
+    pub msix_window: Option<u64>,
     /// Offset of the MSI capability (used if there is no MSI-X).
     pub msi_cap: Option<u8>,
     /// Configuration object handed to the current driver: while it lives
@@ -249,6 +255,7 @@ pub fn init(lie: Lie) {
                     capability_ids: caps.iter().map(|c| c.id).collect(),
                     msix_cap: caps.iter().find(|c| c.id == CAP_MSIX).map(|c| c.offset),
                     msix_table: None,
+                    msix_window: None,
                     msi_cap: caps.iter().find(|c| c.id == CAP_MSI).map(|c| c.offset),
                     claimed: None,
                     flr: flr_method(&cfg),
@@ -638,7 +645,15 @@ fn claim_locked(index: usize, ecam: &Ecam, d: &mut PciDevice) -> Result<Claimed,
         if read_u32(ecam, addr, cap + 4) != table.register {
             warn!("pci: {} MSI-X table moved since boot: MSI-X not used", addr);
         } else {
-            let irq = crate::hw::register_msix(table.phys, 0)?;
+            let window = match d.msix_window {
+                Some(virt) => virt,
+                None => {
+                    let virt = crate::hw::map_uc(table.phys, crate::hw::MSIX_ENTRY_BYTES)?;
+                    d.msix_window = Some(virt);
+                    virt
+                }
+            };
+            let irq = crate::hw::register_msix(window)?;
             // Enable MSI-X (bit 15) without masking the function (bit 14).
             let ctrl = read_u32(ecam, addr, cap) >> 16;
             write_u16(ecam, addr, cap + 2, (ctrl as u16 | 0x8000) & !0x4000);
@@ -965,6 +980,8 @@ fn command_and_header(index: usize) -> (u16, SavedHeader) {
 /// that keeps writing, which QEMU's devices do not do.
 pub fn reap_selftest() {
     use crate::user::{process, programs};
+    /// Claims after the one that follows the reap, as restarts make them.
+    const RECLAIMS: usize = 8;
 
     let blk = find_class(0x01, 0x00).expect("virtio-blk on the PCI bus");
     let flr = DEVICES
@@ -975,6 +992,7 @@ pub fn reap_selftest() {
     for index in [blk, flr] {
         let boot = DEVICES.lock()[index].boot_header;
         let claimed = claim(index).expect("claim");
+        let windows = crate::hw::uc_window_bytes();
         let (cmd, _) = command_and_header(index);
         assert!(
             cmd & COMMAND_BUS_MASTER == 0,
@@ -1019,12 +1037,25 @@ pub fn reap_selftest() {
         assert_eq!(header, boot, "the boot-time header is back");
         // Dropping the claim here (no process) goes through `ClaimToken`.
         drop(again);
+        // A driver restarted again and again claims the function each time:
+        // the kernel's window onto its MSI-X table must not grow with that
+        // (incident 0047).
+        for _ in 0..RECLAIMS {
+            drop(claim(index).expect("claim once more"));
+        }
+        assert_eq!(
+            crate::hw::uc_window_bytes(),
+            windows,
+            "claims after the first one map no new uncached window"
+        );
     }
     let addr = |i: usize| DEVICES.lock()[i].address;
     info!(
-        "pci reap selftest ok ({} and {}: bus mastering cleared on driver reap, {} reset with FLR, both claimed again with their boot header and bus mastering off)",
+        "pci reap selftest ok ({} and {}: bus mastering cleared on driver reap, {} reset with FLR, both claimed again with their boot header and bus mastering off; {} more claims each, uncached windows unchanged at {} KiB)",
         addr(blk),
         addr(flr),
-        addr(flr)
+        addr(flr),
+        RECLAIMS + 1,
+        crate::hw::uc_window_bytes() / 1024
     );
 }
