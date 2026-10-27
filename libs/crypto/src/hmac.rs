@@ -6,6 +6,7 @@
 
 use crate::sha256::Sha256;
 use crate::sha512::Sha384;
+use crate::SecretBytes;
 
 /// The hash interface HMAC needs: `BLOCK`-byte input blocks, `N`-byte output.
 trait Digest<const N: usize> {
@@ -41,17 +42,21 @@ impl Digest<48> for Sha384 {
     }
 }
 
+/// The padded key and the inner digest are wiped before returning; the
+/// hash states wipe themselves when dropped.
 fn hmac<H: Digest<N>, const N: usize>(key: &[u8], parts: &[&[u8]]) -> [u8; N] {
     // Keys longer than a block are hashed first; shorter ones are zero-padded.
-    let mut k = [0u8; 128];
+    let mut padded = SecretBytes([0u8; 128]);
     if key.len() > H::BLOCK {
         let mut h = H::new();
         h.update(key);
-        k[..N].copy_from_slice(&h.finish());
+        let mut digest = h.finish();
+        padded.0[..N].copy_from_slice(&digest);
+        crate::wipe(&mut digest);
     } else {
-        k[..key.len()].copy_from_slice(key);
+        padded.0[..key.len()].copy_from_slice(key);
     }
-    let k = &mut k[..H::BLOCK];
+    let k = &mut padded.0[..H::BLOCK];
 
     k.iter_mut().for_each(|b| *b ^= 0x36);
     let mut inner = H::new();
@@ -59,13 +64,14 @@ fn hmac<H: Digest<N>, const N: usize>(key: &[u8], parts: &[&[u8]]) -> [u8; N] {
     for p in parts {
         inner.update(p);
     }
-    let inner = inner.finish();
+    let mut inner = inner.finish();
 
     // 0x36 ^ 0x5c turns the inner pad into the outer pad.
     k.iter_mut().for_each(|b| *b ^= 0x36 ^ 0x5c);
     let mut outer = H::new();
     outer.update(k);
     outer.update(&inner);
+    crate::wipe(&mut inner);
     outer.finish()
 }
 

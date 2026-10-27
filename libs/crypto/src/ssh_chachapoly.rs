@@ -9,6 +9,7 @@
 
 use crate::chacha20::{block, xor_keystream};
 use crate::poly1305;
+use crate::SecretBytes;
 
 pub const KEY_LEN: usize = 64;
 pub const TAG_LEN: usize = poly1305::TAG_LEN;
@@ -66,10 +67,17 @@ impl ChaChaPoly {
     }
 
     fn tag(&self, n: &[u8; 12], packet: &[u8]) -> [u8; TAG_LEN] {
-        let b0 = block(&self.main, n, 0);
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&b0[..32]);
-        poly1305::tag(&key, packet)
+        let b0 = SecretBytes(block(&self.main, n, 0));
+        let mut key = SecretBytes([0u8; 32]);
+        key.0.copy_from_slice(&b0.0[..32]);
+        poly1305::tag(&key.0, packet)
+    }
+}
+
+impl Drop for ChaChaPoly {
+    fn drop(&mut self) {
+        crate::wipe(&mut self.main);
+        crate::wipe(&mut self.header);
     }
 }
 
@@ -114,5 +122,13 @@ mod tests {
         assert_eq!(bad[10], packet[10] ^ 1);
         let mut wrong_seq = packet.clone();
         assert!(!c.open(8, &mut wrong_seq, &tag));
+    }
+
+    #[test]
+    fn keys_are_wiped_when_dropped() {
+        let mut c = core::mem::ManuallyDrop::new(ChaChaPoly::new(&[0xA5; KEY_LEN]));
+        // SAFETY: dropped once; afterwards only plain bytes are read.
+        unsafe { core::mem::ManuallyDrop::drop(&mut c) };
+        assert_eq!((c.main, c.header), ([0; 32], [0; 32]));
     }
 }

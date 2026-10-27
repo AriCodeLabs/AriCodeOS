@@ -7,15 +7,16 @@
 
 use crate::aes::Aes;
 use crate::chacha20::{block, xor_keystream};
-use crate::ct_eq;
 use crate::poly1305::Poly1305;
+use crate::{ct_eq, SecretBytes};
 
 pub const TAG_LEN: usize = 16;
 
 fn chacha_tag(key: &[u8; 32], nonce: &[u8; 12], aad: &[u8], ct: &[u8]) -> [u8; TAG_LEN] {
-    let mut otk = [0u8; 32];
-    otk.copy_from_slice(&block(key, nonce, 0)[..32]);
-    let mut p = Poly1305::new(&otk);
+    let block0 = SecretBytes(block(key, nonce, 0));
+    let mut otk = SecretBytes([0u8; 32]);
+    otk.0.copy_from_slice(&block0.0[..32]);
+    let mut p = Poly1305::new(&otk.0);
     p.update_padded(aad);
     p.update_padded(ct);
     let mut lens = [0u8; 16];
@@ -51,7 +52,8 @@ pub fn chacha20poly1305_open(
     true
 }
 
-/// AES-GCM with an expanded 128- or 256-bit key.
+/// AES-GCM with an expanded 128- or 256-bit key; the key and `H` are
+/// wiped when it is dropped.
 #[derive(Clone)]
 pub struct AesGcm {
     aes: Aes,
@@ -60,7 +62,8 @@ pub struct AesGcm {
 }
 
 /// Multiplication in GF(2^128) with the GCM bit order, without
-/// data-dependent branches.
+/// data-dependent branches or tables: `H` and the data never choose an
+/// address (incident 0044).
 fn gf_mul(x: u128, y: u128) -> u128 {
     const R: u128 = 0xe1 << 120;
     let mut z = 0u128;
@@ -76,11 +79,11 @@ impl AesGcm {
     /// `key` must be 16 or 32 bytes long.
     pub fn new(key: &[u8]) -> Option<Self> {
         let aes = Aes::new(key)?;
-        let mut h = [0u8; 16];
-        aes.encrypt_block(&mut h);
+        let mut h = crate::SecretBytes([0u8; 16]);
+        aes.encrypt_block(&mut h.0);
         Some(Self {
             aes,
-            h: u128::from_be_bytes(h),
+            h: u128::from_be_bytes(h.0),
         })
     }
 
@@ -93,10 +96,11 @@ impl AesGcm {
 
     /// CTR mode starting at counter 2 (counter 1 masks the tag).
     fn ctr(&self, nonce: &[u8; 12], data: &mut [u8]) {
+        let mut ks = crate::SecretBytes([0u8; 16]);
         for (i, chunk) in data.chunks_mut(16).enumerate() {
-            let mut ks = Self::counter_block(nonce, (i as u32).wrapping_add(2));
-            self.aes.encrypt_block(&mut ks);
-            for (d, k) in chunk.iter_mut().zip(ks) {
+            ks.0 = Self::counter_block(nonce, (i as u32).wrapping_add(2));
+            self.aes.encrypt_block(&mut ks.0);
+            for (d, k) in chunk.iter_mut().zip(ks.0) {
                 *d ^= k;
             }
         }
@@ -113,9 +117,9 @@ impl AesGcm {
         }
         let lens = ((aad.len() as u128 * 8) << 64) | (ct.len() as u128 * 8);
         y = gf_mul(y ^ lens, self.h);
-        let mut j0 = Self::counter_block(nonce, 1);
-        self.aes.encrypt_block(&mut j0);
-        (y ^ u128::from_be_bytes(j0)).to_be_bytes()
+        let mut j0 = crate::SecretBytes(Self::counter_block(nonce, 1));
+        self.aes.encrypt_block(&mut j0.0);
+        (y ^ u128::from_be_bytes(j0.0)).to_be_bytes()
     }
 
     /// Encrypts `data` in place and returns the tag.
@@ -131,6 +135,12 @@ impl AesGcm {
         }
         self.ctr(nonce, data);
         true
+    }
+}
+
+impl Drop for AesGcm {
+    fn drop(&mut self) {
+        crate::wipe(core::slice::from_mut(&mut self.h));
     }
 }
 
@@ -277,5 +287,14 @@ mod tests {
     #[test]
     fn gcm_rejects_bad_key_length() {
         assert!(AesGcm::new(&[0u8; 24]).is_none());
+    }
+
+    #[test]
+    fn ghash_key_is_wiped_when_dropped() {
+        let mut gcm = core::mem::ManuallyDrop::new(AesGcm::new(&[0xA5; 16]).unwrap());
+        assert_ne!(gcm.h, 0);
+        // SAFETY: dropped once; afterwards only a plain integer is read.
+        unsafe { core::mem::ManuallyDrop::drop(&mut gcm) };
+        assert_eq!(gcm.h, 0);
     }
 }

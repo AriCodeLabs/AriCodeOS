@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 use aricode_crypto::chacha20::Rng;
 use aricode_crypto::sha256::Sha256;
 use aricode_crypto::ssh_chachapoly::{ChaChaPoly, TAG_LEN};
-use aricode_crypto::{ed25519, x25519};
+use aricode_crypto::{ed25519, wipe, x25519, SecretBytes};
 use wire::{list_has, negotiate, Reader, Writer};
 
 pub const VERSION: &[u8] = b"SSH-2.0-AriCodeOS_sshd_1.0";
@@ -765,10 +765,15 @@ impl Server {
         let q_c: [u8; 32] = q_c
             .try_into()
             .map_err(|_| Error::Protocol("bad client public key"))?;
-        let mut secret = [0u8; 32];
-        self.rng.fill(&mut secret);
-        let q_s = x25519::public_key(&secret);
-        let k = x25519::shared(&secret, &q_c).ok_or(Error::Protocol("low-order client key"))?;
+        // The ephemeral key, the shared secret K and everything derived
+        // from K are wiped on every way out (incident 0044).
+        let mut secret = SecretBytes([0u8; 32]);
+        self.rng.fill(&mut secret.0);
+        let q_s = x25519::public_key(&secret.0);
+        let k = SecretBytes(
+            x25519::shared(&secret.0, &q_c).ok_or(Error::Protocol("low-order client key"))?,
+        );
+        let k = &k.0;
         let k_s = ed25519_blob(&self.host_public);
         // H = HASH(V_C || V_S || I_C || I_S || K_S || Q_C || Q_S || K).
         let mut h = Writer::default();
@@ -779,8 +784,9 @@ impl Server {
             .string(&k_s)
             .string(&q_c)
             .string(&q_s)
-            .mpint(&k);
+            .mpint(k);
         let hash = aricode_crypto::sha256::sha256(&h.0);
+        wipe(&mut h.0);
         let session_id = *self.session_id.get_or_insert(hash);
         let sig = ed25519::sign(&self.host_seed, &hash);
         let mut sig_blob = Writer::default();
@@ -790,30 +796,33 @@ impl Server {
         self.send_packet(&w.0, out);
         self.send_packet(&[msg::NEWKEYS], out);
         // Keys: C = client to server, D = server to client (RFC 4253 7.2).
-        let derive = |letter: u8| -> [u8; 64] {
+        let derive = |letter: u8| -> SecretBytes<64> {
             let mut mk = Writer::default();
-            mk.mpint(&k);
+            mk.mpint(k);
             let mut first = Sha256::new();
             first.update(&mk.0);
             first.update(&hash);
             first.update(&[letter]);
             first.update(&session_id);
-            let k1 = first.finish();
+            let mut k1 = first.finish();
             let mut second = Sha256::new();
             second.update(&mk.0);
             second.update(&hash);
             second.update(&k1);
-            let k2 = second.finish();
-            let mut key = [0u8; 64];
-            key[..32].copy_from_slice(&k1);
-            key[32..].copy_from_slice(&k2);
+            let mut k2 = second.finish();
+            let mut key = SecretBytes([0u8; 64]);
+            key.0[..32].copy_from_slice(&k1);
+            key.0[32..].copy_from_slice(&k2);
+            for b in [&mut mk.0[..], &mut k1, &mut k2] {
+                wipe(b);
+            }
             key
         };
-        self.send = Some(ChaChaPoly::new(&derive(b'D')));
+        self.send = Some(ChaChaPoly::new(&derive(b'D').0));
         if self.strict {
             self.send_seq = 0;
         }
-        self.next_recv = Some(ChaChaPoly::new(&derive(b'C')));
+        self.next_recv = Some(ChaChaPoly::new(&derive(b'C').0));
         self.next_send = None;
         Ok(())
     }
@@ -996,6 +1005,14 @@ impl Server {
             self.send_packet(&w.0, out);
         }
         Ok(())
+    }
+}
+
+/// This connection's copy of the host key; the generator and the packet
+/// keys wipe themselves.
+impl Drop for Server {
+    fn drop(&mut self) {
+        wipe(&mut self.host_seed);
     }
 }
 
@@ -1277,5 +1294,14 @@ mod tests {
             b"x' authenticated??[2Jroot"
         );
         assert_eq!(log_safe(&[b'a'; 100], &mut b).len(), 32);
+    }
+
+    /// Incident 0044: a connection's copy of the host key ends with it.
+    #[test]
+    fn host_key_is_wiped_when_dropped() {
+        let mut s = core::mem::ManuallyDrop::new(Server::new([0xA5; 32], [1; 32], Vec::new()));
+        // SAFETY: dropped once; afterwards only a plain array is read.
+        unsafe { core::mem::ManuallyDrop::drop(&mut s) };
+        assert_eq!(s.host_seed, [0; 32]);
     }
 }
