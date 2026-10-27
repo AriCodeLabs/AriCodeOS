@@ -52,8 +52,8 @@ pub mod trust;
 pub use aricode_ab::{Channel, Keys};
 pub use index::{verify, verify_channel, AppEntry, Index, IndexError, SystemEntry};
 pub use policy::{
-    best_app, best_system, check_fresh, compare, compare_system, decide_system, raise_floor,
-    Change, Refusal, SystemChange, SystemDecision, SystemId, SystemRules,
+    best_app, best_system, check_fresh, compare, compare_system, decide_system, floor_for_run,
+    raise_floor, Change, Refusal, StableFloor, SystemChange, SystemDecision, SystemId, SystemRules,
 };
 pub use sources::{normalize_source, Migration, Source, SourceError, Sources};
 pub use trust::{image_matches_offer, trusted_keys};

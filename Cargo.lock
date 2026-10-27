@@ -62,6 +62,7 @@ version = "0.15.0"
 dependencies = [
  "aricode-ab",
  "aricode-build",
+ "aricode-cmdline",
  "aricode-crypto",
  "aricode-gpt",
  "aricode-https",

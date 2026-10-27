@@ -157,6 +157,15 @@ removed on `fix/compositor-ownership`, ADR 0053).
   on requests a busy host disk took over 2 s, `2cd0102`). Left as stated:
   the CN fallback and wildcards over public suffixes (L23), and the
   infos below.
+- 2026-10-27, info (`fix/updater-state`, incident 0045, ADR 0060): a boot
+  state with a bad CRC is no longer read as fresh; the updater rewrites
+  it from what AriBoot booted and installs nothing in that run.
+- 2026-10-27, info (same branch): a damaged stable floor fails closed,
+  refusing every stable release until `--allow-downgrade` rewrites it as
+  the running release.
+- 2026-10-27, info (same branch): `serve-update` answers 400 to a request
+  line that is not `METHOD SP target SP HTTP/x.y` with a visible-ASCII
+  target, logs it escaped, and redirects only to plain file names.
 
 ## Fix plan
 

@@ -431,8 +431,18 @@ pub fn run_scenario(
                 }
                 _ => String::new(),
             };
+            if u.stable_floor_damaged && u.stable_floor.is_none() {
+                return Err(format!(
+                    "{}: host_update.stable_floor_damaged needs stable_floor",
+                    s.name
+                ));
+            }
             if let Some(floor) = u.stable_floor {
                 let state = aricode_update_index::main_path(aricode_update_index::STATE_FILE);
+                let mut body = aricode_update_index::lists::encode_floor(floor);
+                if u.stable_floor_damaged {
+                    body.insert(body.len() - 1, 'x');
+                }
                 if installed.iter().any(|(name, _)| *name == state) {
                     return Err(format!(
                         "{}: host_update.stable_floor and staged packages both write updater/state",
@@ -444,7 +454,7 @@ pub fn run_scenario(
                     aricode_update_index::lists::with_section(
                         "",
                         aricode_update_index::lists::FLOOR,
-                        &aricode_update_index::lists::encode_floor(floor),
+                        &body,
                     )
                     .into_bytes(),
                 ));

@@ -53,8 +53,8 @@ use aricode_update_index::files::{self, Files, ReadError};
 use aricode_update_index::lists::{self, PlanItem, StagedEntry};
 use aricode_update_index::{
     self as upd, best_app, best_system, check_fresh, compare, compare_system, decide_system,
-    stored, updater_arg, Change, Channel, Index, Keys, Migration, Refusal, Sources, SystemChange,
-    SystemDecision, SystemId, SystemRules,
+    stored, updater_arg, Change, Channel, Index, Keys, Migration, Refusal, Sources, StableFloor,
+    SystemChange, SystemDecision, SystemId, SystemRules,
 };
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -143,6 +143,9 @@ mod code {
     /// the reason, so "installed version unknown" is never unexplained
     /// (incident 0021).
     pub const ACTIVE_IMAGE: u64 = 59;
+    /// The boot state in `ARIBOOT` was damaged (ADR 0060): rebuilt from
+    /// what AriBoot booted, and nothing installed in that run.
+    pub const STATE_DAMAGED: u64 = 60;
 }
 
 /// Everything printed, kept in `last.log` as the record of the last run
@@ -535,7 +538,12 @@ impl Disk {
                 "cannot read the boot state",
             ));
         }
-        let state = BootState::decode(&blk.buffer()[..SECTOR]).unwrap_or(BootState::fresh(Slot::A));
+        // A damaged record is never read as fresh (incident 0045): which
+        // slot is active is not known from it, and guessing A would take
+        // the running slot B for the one to install into.
+        let Some(state) = BootState::decode(&blk.buffer()[..SECTOR]) else {
+            return Err(repair_boot_state(&mut blk, state_part.0));
+        };
         let target = state.active.other();
         let (Some(active_part), Some(slot_part)) = (
             find_partition(&mut blk, state.active.partition()),
@@ -823,6 +831,71 @@ impl Disk {
     }
 }
 
+/// What AriBoot booted, from the keys it alone writes on the command line
+/// (ADR 0045): the slot and whether it awaits confirmation, `None` for the
+/// ESP. `Err` when the line cannot be read or names no slot.
+fn booted_slot() -> Result<Option<(Slot, bool)>, ()> {
+    use aricode_cmdline::{keys, CmdLine};
+    let mut buf = [0u8; sys::CMDLINE_MAX];
+    let line = CmdLine::new(sys::cmdline(SYSTEM, &mut buf).map_err(|_| ())?);
+    let slot = match line.get(keys::BOOT_SLOT) {
+        None if !line.has(keys::BOOT_SLOT) => return Ok(None),
+        Some("A") => Slot::A,
+        Some("B") => Slot::B,
+        _ => return Err(()),
+    };
+    Ok(Some((slot, line.has_flag(keys::BOOT_PENDING))))
+}
+
+/// The boot state at `lba` is damaged (ADR 0060): rewritten from what
+/// AriBoot booted (`aricode_ab::recovered`) and read back, said and
+/// recorded. Nothing else is done with the disk in this run, so an install
+/// never starts from a record the run had to rebuild: the owner sees the
+/// repair and runs the command again. Returns the exit code.
+fn repair_boot_state(blk: &mut BlockClient, lba: u64) -> u64 {
+    let Ok(booted) = booted_slot() else {
+        return fault(
+            code::STATE_DAMAGED,
+            "upd-state-damaged",
+            "the boot state in ARIBOOT is damaged and the command line does not say what AriBoot booted: nothing installed",
+        );
+    };
+    let state = aricode_ab::recovered(booted);
+    blk.buffer()[..SECTOR].copy_from_slice(&state.encode());
+    let written = blk.write(lba, 1).is_ok()
+        && blk.flush().is_ok()
+        && blk.read(lba, 1).is_ok()
+        && BootState::decode(&blk.buffer()[..SECTOR]) == Some(state);
+    if !written {
+        return fault(
+            code::STATE_WRITE,
+            "upd-state-write",
+            "the boot state in ARIBOOT is damaged and could not be rewritten: nothing installed",
+        );
+    }
+    let from = match booted {
+        Some((slot, false)) => format!("slot {}", slot.name()),
+        Some((slot, true)) => format!("slot {} pending confirmation", slot.name()),
+        None => String::from("the ESP"),
+    };
+    let now = match state.pending {
+        Some((slot, _)) => format!(
+            "active {}, pending {} with no tries left (the next boot returns to {})",
+            state.active.name(),
+            slot.name(),
+            state.active.name()
+        ),
+        None => format!("active {}, none pending", state.active.name()),
+    };
+    fault(
+        code::STATE_DAMAGED,
+        "upd-state-damaged",
+        &format!(
+            "the boot state in ARIBOOT was damaged: rewritten from what AriBoot booted ({from}) as {now}; nothing installed: run the command again"
+        ),
+    )
+}
+
 // ---------------------------------------------------------------- policy
 
 /// A system as reports name it: `12` for a release (as before ADR 0045),
@@ -894,24 +967,44 @@ fn installed_id(m: &Manifest) -> SystemId<'_> {
 /// The stable floor (audit of ADR 0045, M1): the newest stable release
 /// this machine ran, kept in the `[floor]` section of `state` (seeded by
 /// `usb-image`), raised to the active system when that is a newer stable
-/// release, and saved. `state` is updated in place, so the sections this
-/// run writes later keep it.
+/// release, and saved. A damaged floor is never replaced silently (ADR
+/// 0060, `floor_for_run`): it refuses every stable release until the owner
+/// passes `--allow-downgrade`, which rewrites it as the running stable
+/// release. `state` is updated in place, so the sections this run writes
+/// later keep it.
 fn stable_floor(
     fs: &mut FsClient,
     state: &mut String,
     installed: &Option<Manifest>,
-) -> Option<u32> {
+    allow_downgrade: bool,
+) -> StableFloor {
     let body = lists::section(state, lists::FLOOR).unwrap_or_default();
-    let floor = lists::parse_floor(&body).unwrap_or_else(|_| {
-        fault(
-            code::FLOOR,
-            "upd-floor-damaged",
-            "the stable floor in updater/state is damaged: ignored (the running stable release sets it again)",
-        );
-        None
-    });
-    let raised = upd::raise_floor(floor, installed.as_ref().map(installed_id));
-    if let (true, Some(version)) = (raised != floor, raised) {
+    let stored = lists::parse_floor(&body);
+    let (floor, save) = upd::floor_for_run(
+        stored,
+        installed.as_ref().map(installed_id),
+        allow_downgrade,
+    );
+    match (stored, floor) {
+        (Err(_), StableFloor::Damaged) => {
+            fault(
+                code::FLOOR,
+                "upd-floor-damaged",
+                "the stable floor in updater/state is damaged: the newest stable release this machine ran is unknown, so stable releases are refused without --allow-downgrade (which rewrites it as the running release)",
+            );
+        }
+        (Err(_), StableFloor::At(version)) => {
+            fault(
+                code::FLOOR,
+                "upd-floor-rewritten",
+                &format!(
+                    "the stable floor in updater/state was damaged: rewritten as stable {version}, the running release (--allow-downgrade); any newer release this machine ran is forgotten"
+                ),
+            );
+        }
+        _ => {}
+    }
+    if let Some(version) = save {
         let next = lists::with_section(state, lists::FLOOR, &lists::encode_floor(version));
         if write_file(fs, upd::STATE_FILE, next.as_bytes()) {
             *state = next;
@@ -923,7 +1016,7 @@ fn stable_floor(
             );
         }
     }
-    raised
+    floor
 }
 
 /// The system install rule (ADR 0029 decision 5, ADR 0045 decision 2,
@@ -939,14 +1032,21 @@ fn decide_system_install(
     let offered_ident = ident(offered.channel, offered.version, offered.commit);
     match decide_system(change, offered, rules) {
         SystemDecision::Install => {
-            let below_floor = rules
-                .stable_floor
-                .is_some_and(|f| offered.channel == Channel::Stable && offered.version < f);
-            if below_floor && change != SystemChange::Within(Change::Downgrade) {
-                say!(
-                    "system: downgrading below the stable floor {} to {offered_ident} (--allow-downgrade)",
-                    rules.stable_floor.unwrap_or(0)
-                );
+            let stable = offered.channel == Channel::Stable;
+            match rules.stable_floor {
+                StableFloor::At(floor)
+                    if stable
+                        && offered.version < floor
+                        && change != SystemChange::Within(Change::Downgrade) =>
+                {
+                    say!(
+                        "system: downgrading below the stable floor {floor} to {offered_ident} (--allow-downgrade)"
+                    )
+                }
+                StableFloor::Damaged if stable => say!(
+                    "system: installing {offered_ident} with the stable floor damaged (--allow-downgrade)"
+                ),
+                _ => {}
             }
             match change {
                 SystemChange::Unknown => say!(
@@ -986,6 +1086,13 @@ fn decide_system_install(
             "upd-downgrade-refused",
             &format!(
                 "system: refused: a downgrade: stable {offered_ident} is older than stable {floor}, the newest release this machine ran (--allow-downgrade to force)"
+            ),
+        )),
+        SystemDecision::Refused(Refusal::FloorDamaged) => Err(fault(
+            code::FLOOR,
+            "upd-floor-refused",
+            &format!(
+                "system: refused: the stable floor is damaged, so stable {offered_ident} could be older than a release this machine ran (--allow-downgrade to install it)"
             ),
         )),
         SystemDecision::Refused(Refusal::SwitchNotExplicit) if !rules.explicit_channel => {
@@ -1038,7 +1145,7 @@ fn apply(allow_downgrade: bool, keys: &Keys) -> u64 {
         Ok(s) => s,
         Err(code) => return code,
     };
-    let stable_floor = stable_floor(&mut fs, &mut state, &installed);
+    let stable_floor = stable_floor(&mut fs, &mut state, &installed, allow_downgrade);
     let update = disk.update;
     let (total, manifest) = match disk.load(update, keys) {
         Ok(loaded) => loaded,
@@ -1569,8 +1676,8 @@ fn report(fs: &mut FsClient, sources: &Sources, keys: &Keys, channel: Channel) -
                 }
             };
             let floor = match &mut state {
-                Ok(text) => stable_floor(fs, text, &installed),
-                Err(_) => None,
+                Ok(text) => stable_floor(fs, text, &installed, false),
+                Err(_) => StableFloor::Unset,
             };
             let offered = SystemId {
                 channel,
@@ -1581,7 +1688,11 @@ fn report(fs: &mut FsClient, sources: &Sources, keys: &Keys, channel: Channel) -
             // Below the floor but not below the installed release (that is
             // a plain downgrade, named as such).
             let below_floor = channel == Channel::Stable
-                && floor.is_some_and(|f| s.version < f)
+                && match floor {
+                    StableFloor::At(f) => s.version < f,
+                    StableFloor::Damaged => true,
+                    StableFloor::Unset => false,
+                }
                 && change != SystemChange::Within(Change::Downgrade);
             available +=
                 usize::from(change == SystemChange::Within(Change::Upgrade) && !below_floor);
@@ -1591,8 +1702,11 @@ fn report(fs: &mut FsClient, sources: &Sources, keys: &Keys, channel: Channel) -
             }
             let text = match (change, floor) {
                 (SystemChange::Within(Change::Same), _) => system_change_text(change),
-                (_, Some(f)) if below_floor => format!(
+                (_, StableFloor::At(f)) if below_floor => format!(
                     "older than stable {f}, the newest release this machine ran; upgrade refuses it without --allow-downgrade"
+                ),
+                (_, StableFloor::Damaged) if below_floor => String::from(
+                    "the stable floor is damaged; upgrade refuses it without --allow-downgrade",
                 ),
                 _ => system_change_text(change),
             };
@@ -2001,7 +2115,7 @@ fn upgrade(
                     let rules = SystemRules {
                         allow_downgrade,
                         explicit_channel: explicit,
-                        stable_floor: stable_floor(fs, &mut state, &installed),
+                        stable_floor: stable_floor(fs, &mut state, &installed, allow_downgrade),
                     };
                     match decide_system_install(&installed, offered, rules) {
                         Ok(true) => {

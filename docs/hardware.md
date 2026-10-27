@@ -460,4 +460,6 @@ checkouts that published the same number before the host counter): it
 refuses it and asks for a new publication. Going back to stable never
 goes below the newest stable release the laptop ran (the stable floor in
 `updater/state`, seeded by the stick): an older one is a downgrade,
-installed only with `--allow-downgrade`.
+installed only with `--allow-downgrade`. If that floor is ever damaged,
+every stable release is refused until `--allow-downgrade` rewrites it
+as the running release (ADR 0060).

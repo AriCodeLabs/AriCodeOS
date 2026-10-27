@@ -4,6 +4,7 @@
 //! several sources and rollback protection for indexes.
 
 use crate::index::{AppEntry, Index, IndexError, SystemEntry};
+use crate::lists::DamagedFloor;
 use aricode_ab::Channel;
 
 /// What installing an offered version would do.
@@ -92,6 +93,10 @@ pub enum Refusal {
     /// ran (the stable floor, audit of ADR 0045 M1): a downgrade, even when
     /// it arrives as a channel switch.
     BelowStableFloor(u32),
+    /// A stable release while the stable floor is damaged (ADR 0060): the
+    /// newest stable release this machine ran is unknown, so any stable
+    /// release could be below it.
+    FloorDamaged,
     /// The installed version is unknown (ADR 0029, audit 1 H1).
     Unknown,
     /// Another channel, and the owner did not name it (`--channel`), or the
@@ -118,8 +123,21 @@ pub struct SystemRules {
     /// `--channel` named the offered image's channel (`upgrade`); `false`
     /// for `update apply`, which never changes the channel.
     pub explicit_channel: bool,
-    /// The newest stable release this machine ran, if known.
-    pub stable_floor: Option<u32>,
+    /// The newest stable release this machine ran, as far as known.
+    pub stable_floor: StableFloor,
+}
+
+/// The stable floor as one run knows it (audit of ADR 0045 M1, ADR 0060).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StableFloor {
+    /// None recorded: a machine from before the floor, or one that ran
+    /// development builds only.
+    #[default]
+    Unset,
+    /// The newest stable release this machine ran.
+    At(u32),
+    /// The record is damaged: that release is unknown.
+    Damaged,
 }
 
 /// The install rule for a system image (ADR 0029 decision 5, ADR 0045
@@ -127,7 +145,8 @@ pub struct SystemRules {
 /// and never a reinstall; across channels, only when the owner named the
 /// channel, whatever the numbers say, since a build number and a release
 /// version are not comparable; never a stable release below the stable
-/// floor without `--allow-downgrade`, switch or not; an unknown installed
+/// floor without `--allow-downgrade`, switch or not, nor any stable
+/// release while the floor is damaged (ADR 0060); an unknown installed
 /// version only with `--allow-downgrade`, and then, without a named
 /// channel, only a stable image; a build number seen with another commit
 /// never.
@@ -147,9 +166,13 @@ pub fn decide_system(
         }
         _ => {}
     }
-    if let Some(floor) = rules.stable_floor {
-        if offered.channel == Channel::Stable && offered.version < floor && !rules.allow_downgrade {
-            return Refused(Refusal::BelowStableFloor(floor));
+    if offered.channel == Channel::Stable && !rules.allow_downgrade {
+        match rules.stable_floor {
+            StableFloor::At(floor) if offered.version < floor => {
+                return Refused(Refusal::BelowStableFloor(floor))
+            }
+            StableFloor::Damaged => return Refused(Refusal::FloorDamaged),
+            _ => {}
         }
     }
     match change {
@@ -175,6 +198,34 @@ pub fn raise_floor(floor: Option<u32>, installed: Option<SystemId>) -> Option<u3
             Some(floor.map_or(i.version, |f| f.max(i.version)))
         }
         _ => floor,
+    }
+}
+
+/// The floor of one run (ADR 0060), from the `[floor]` section as read
+/// (`stored`) and the active system (`installed`), and the version to save
+/// when it changes. A sound floor is raised to the active stable release
+/// ([`raise_floor`]). A damaged one is never replaced silently, since
+/// whatever replaced it could be lower than what it held: it stays
+/// damaged, which refuses every stable release ([`decide_system`]), until
+/// the owner passes `--allow-downgrade`, the consent the floor asks for
+/// anyway; then it is rewritten as the active stable release, the newest
+/// one this machine is still known to have run. With a development build
+/// or an unknown system active there is nothing to rewrite it with.
+pub fn floor_for_run(
+    stored: Result<Option<u32>, DamagedFloor>,
+    installed: Option<SystemId>,
+    allow_downgrade: bool,
+) -> (StableFloor, Option<u32>) {
+    let at = |floor: Option<u32>| floor.map_or(StableFloor::Unset, StableFloor::At);
+    match stored {
+        Ok(floor) => {
+            let raised = raise_floor(floor, installed);
+            (at(raised), raised.filter(|_| raised != floor))
+        }
+        Err(DamagedFloor) => match raise_floor(None, installed) {
+            Some(running) if allow_downgrade => (StableFloor::At(running), Some(running)),
+            _ => (StableFloor::Damaged, None),
+        },
     }
 }
 
@@ -261,7 +312,7 @@ mod tests {
     const UPGRADE: SystemRules = SystemRules {
         allow_downgrade: false,
         explicit_channel: false,
-        stable_floor: None,
+        stable_floor: StableFloor::Unset,
     };
 
     #[test]
@@ -307,7 +358,7 @@ mod tests {
             let rules = |allow_downgrade| SystemRules {
                 allow_downgrade,
                 explicit_channel: explicit,
-                stable_floor: None,
+                stable_floor: StableFloor::Unset,
             };
             let offered = id(Dev, 6, Some("0123abc"));
             let older = SystemChange::Within(Change::Downgrade);
@@ -377,7 +428,7 @@ mod tests {
         assert_eq!(floor, Some(12), "a rollback keeps the floor");
         let named = SystemRules {
             explicit_channel: true,
-            stable_floor: floor,
+            stable_floor: floor.map_or(StableFloor::Unset, StableFloor::At),
             ..UPGRADE
         };
         let installed = id(Dev, 7, Some("0123abc"));
@@ -437,7 +488,7 @@ mod tests {
             let rules = SystemRules {
                 allow_downgrade,
                 explicit_channel: true,
-                stable_floor: None,
+                stable_floor: StableFloor::Unset,
             };
             assert_eq!(
                 decide_system(change, other, rules),
@@ -454,7 +505,7 @@ mod tests {
         let apply = SystemRules {
             allow_downgrade: true,
             explicit_channel: false,
-            stable_floor: None,
+            stable_floor: StableFloor::Unset,
         };
         let dev = id(Channel::Dev, 5, Some("0123abc"));
         assert_eq!(
@@ -480,7 +531,7 @@ mod tests {
         let apply = SystemRules {
             allow_downgrade: false,
             explicit_channel: false,
-            stable_floor: Some(3),
+            stable_floor: StableFloor::At(3),
         };
         let running = id(Channel::Stable, 1, None);
         let two = id(Channel::Stable, 2, None);
@@ -509,6 +560,92 @@ mod tests {
         assert_eq!(
             decide_system(compare_system(Some(running), four), four, apply),
             SystemDecision::Install
+        );
+    }
+
+    #[test]
+    fn a_damaged_floor_refuses_every_stable_release() {
+        // Incident 0045: the machine ran stable 3, runs stable 1 (rolled
+        // back with --allow-downgrade) and its `[floor]` is damaged. The
+        // floor was dropped and saved again as 1, the running release, so
+        // stable 2 went in as an upgrade.
+        use crate::lists;
+        use Channel::{Dev, Stable};
+        let body = "stable 3x\n";
+        assert_eq!(lists::parse_floor(body), Err(DamagedFloor));
+        let running = id(Stable, 1, None);
+        let (floor, save) = floor_for_run(lists::parse_floor(body), Some(running), false);
+        assert_eq!(
+            (floor, save),
+            (StableFloor::Damaged, None),
+            "never replaced"
+        );
+        let rules = SystemRules {
+            stable_floor: floor,
+            ..UPGRADE
+        };
+        for version in [2, 4, 400] {
+            let offered = id(Stable, version, None);
+            assert_eq!(
+                decide_system(compare_system(Some(running), offered), offered, rules),
+                SystemDecision::Refused(Refusal::FloorDamaged),
+                "stable {version}"
+            );
+        }
+        // Older than the running release: the plain downgrade, as before.
+        let two = id(Stable, 2, None);
+        assert_eq!(
+            decide_system(compare_system(Some(id(Stable, 3, None)), two), two, rules),
+            SystemDecision::Refused(Refusal::Downgrade)
+        );
+        // The floor says nothing about development builds.
+        let dev = id(Dev, 8, Some("0123abc"));
+        let named = SystemRules {
+            explicit_channel: true,
+            ..rules
+        };
+        assert_eq!(
+            decide_system(
+                compare_system(Some(id(Dev, 7, Some("4567def"))), dev),
+                dev,
+                named
+            ),
+            SystemDecision::Install
+        );
+        // --allow-downgrade installs and rewrites the floor as the running
+        // stable release.
+        let forced = SystemRules {
+            allow_downgrade: true,
+            ..rules
+        };
+        assert_eq!(
+            decide_system(compare_system(Some(running), two), two, forced),
+            SystemDecision::Install
+        );
+        assert_eq!(
+            floor_for_run(lists::parse_floor(body), Some(running), true),
+            (StableFloor::At(1), Some(1))
+        );
+        // ... but not with a development build or an unknown system active.
+        let dev7 = id(Dev, 7, Some("0123abc"));
+        for installed in [Some(dev7), None] {
+            assert_eq!(
+                floor_for_run(Err(DamagedFloor), installed, true),
+                (StableFloor::Damaged, None)
+            );
+        }
+        // A sound floor is raised and saved only when it changes.
+        assert_eq!(
+            floor_for_run(Ok(Some(3)), Some(running), false),
+            (StableFloor::At(3), None)
+        );
+        assert_eq!(
+            floor_for_run(Ok(Some(3)), Some(id(Stable, 5, None)), false),
+            (StableFloor::At(5), Some(5))
+        );
+        assert_eq!(
+            floor_for_run(Ok(None), Some(dev7), false),
+            (StableFloor::Unset, None)
         );
     }
 

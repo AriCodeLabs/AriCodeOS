@@ -1343,6 +1343,11 @@ latter briefly to add the region.
 - init confirms the pending slot at the end of the boot services:
   it locates `ARIBOOT` by reading the GPT through the block service and writes
   `confirm(state, slot)`. `updater` does the reverse with `schedule`.
+- A boot state that does not decode is damaged, never fresh (ADR 0060):
+  AriBoot boots A and rewrites it once A verifies; the updater rewrites
+  it from what AriBoot booted (`boot_slot`, `boot_pending`;
+  `aricode_ab::recovered`) and installs nothing in that run
+  (`upd-state-damaged`, code 60; scenario `update.state_damaged`).
 - xtask strips debug info from kernel and initrd (`strip
   --strip-debug` if available): the initrd goes from 4.8 MiB to 550 KiB and the
   system image fits in the slot.
@@ -1825,7 +1830,10 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   `ROLLBACK`: schedules the inactive slot's verified image, no network).
 - The stable floor (`[floor]` of `updater/state`): the newest stable
   release the machine ran; a stable release below it is a downgrade,
-  channel switch or not. A development build number seen with another
+  channel switch or not. A damaged floor refuses every stable release
+  until `--allow-downgrade` rewrites it as the running one
+  (`floor_for_run`, ADR 0060; `update.apply_floor_damaged`). A
+  development build number seen with another
   commit is refused. xtask numbers development builds per host
   (`~/.cache/aricodeos/dev-build`, locked).
 - Scenarios: `update.dev_channel`, `update.dev_wrong_key`,

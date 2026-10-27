@@ -92,6 +92,10 @@ pub struct BootState {
 }
 
 impl BootState {
+    /// The state of a new image: `active` confirmed, nothing pending. Also
+    /// AriBoot's reading of a damaged record, the one reading that needs
+    /// no other evidence (ADR 0060); the updater never reads a damaged
+    /// record as fresh ([`recovered`]).
     pub const fn fresh(active: Slot) -> Self {
         Self {
             active,
@@ -123,7 +127,8 @@ impl BootState {
         s
     }
 
-    /// `None` if the sector is not a valid state (magic, version or CRC).
+    /// `None` if the sector is not a valid state (magic, version or CRC):
+    /// a damaged record, which says nothing about the slots (ADR 0060).
     pub fn decode(s: &[u8]) -> Option<Self> {
         if s.len() < 64 || &s[..8] != STATE_MAGIC || s[8] != 1 {
             return None;
@@ -229,6 +234,36 @@ pub fn confirm(state: BootState, slot: Slot) -> BootState {
         active: slot,
         pending: None,
         ..state
+    }
+}
+
+/// The state to write over a damaged record (ADR 0060), rebuilt from
+/// what AriBoot booted, never from the damaged bytes: `booted` is the slot
+/// and whether it awaits confirmation (`boot_slot`, `boot_pending` on the
+/// command line, written by AriBoot alone), `None` for the ESP.
+///
+/// - From a slot, confirmed: that slot is active, nothing pending; AriBoot
+///   booted it from a valid record that said so (or from its own reading
+///   of a damaged one, which is slot A).
+/// - From a slot, pending: the other slot is active (a pending slot is
+///   never the active one, [`schedule`]); the pending slot is kept with
+///   no tries left, so the next boot returns to the confirmed system, as
+///   when a trial runs out: whether init confirmed it before the damage
+///   is not known.
+/// - From the ESP: AriBoot's own reading, A active ([`BootState::fresh`]),
+///   which it does not write when A does not boot.
+///
+/// The next boot is then never less conservative than AriBoot's reading
+/// of the damaged record (A active), and keeps the running system where
+/// that reading would have switched to slot A.
+pub fn recovered(booted: Option<(Slot, bool)>) -> BootState {
+    match booted {
+        None => BootState::fresh(Slot::A),
+        Some((slot, false)) => BootState::fresh(slot),
+        Some((slot, true)) => BootState {
+            pending: Some((slot, 0)),
+            ..BootState::fresh(slot.other())
+        },
     }
 }
 
@@ -678,6 +713,33 @@ mod tests {
                 .active,
             Slot::B
         );
+    }
+
+    #[test]
+    fn a_damaged_state_is_rebuilt_from_the_booted_slot() {
+        // Incident 0045: B active and booted, the record then damaged. The
+        // updater read it as fresh (A active) and took B, the running
+        // slot, for the inactive one to install into.
+        let mut sector = BootState::fresh(Slot::B).encode();
+        sector[60] ^= 1;
+        assert_eq!(BootState::decode(&sector), None);
+        let state = recovered(Some((Slot::B, false)));
+        assert_eq!((state.active, state.pending), (Slot::B, None));
+        assert_eq!(choose(state).slot, Slot::B, "the next boot keeps B");
+        // Pending B (A confirmed): the trial ends, the next boot is A.
+        let state = recovered(Some((Slot::B, true)));
+        assert_eq!((state.active, state.pending), (Slot::A, Some((Slot::B, 0))));
+        assert_eq!(choose(state).slot, Slot::A);
+        let state = recovered(Some((Slot::A, true)));
+        assert_eq!(choose(state).slot, Slot::B);
+        // From the ESP nothing is known: AriBoot's own reading.
+        assert_eq!(recovered(None), BootState::fresh(Slot::A));
+        assert_eq!(recovered(Some((Slot::A, false))), BootState::fresh(Slot::A));
+        // What is written decodes as itself.
+        for booted in [None, Some((Slot::A, true)), Some((Slot::B, false))] {
+            let s = recovered(booted);
+            assert_eq!(BootState::decode(&s.encode()), Some(s));
+        }
     }
 
     #[test]

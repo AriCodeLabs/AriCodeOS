@@ -1,0 +1,41 @@
+# A damaged stable floor fails closed (incident 0045, ADR 0060): the
+# machine runs stable 1 from slot A and its `[floor]` (once stable 3) is
+# damaged. `update apply` refuses the validly signed stable 2 in UPDATE,
+# which could be below the lost floor, and records it; the floor is not
+# replaced. `update apply --allow-downgrade` rewrites it as the running
+# release, says so, and installs.
+name = "update.apply_floor_damaged"
+description = "a damaged stable floor refuses stable images until --allow-downgrade rewrites it"
+level = "full"
+areas = ["update", "shell"]
+timeout_secs = 120
+
+[host_update]
+source = "none"
+stable_floor = 3
+stable_floor_damaged = true
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update apply", "cat updater/state", "update apply --allow-downgrade", "cat updater/state", "diag", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "updater: the stable floor in updater/state is damaged: the newest stable release this machine ran is unknown, so stable releases are refused without --allow-downgrade (which rewrites it as the running release)",
+    "updater: system: refused: the stable floor is damaged, so stable 2 could be older than a release this machine ran (--allow-downgrade to install it)",
+    "update: updater exited with 58",
+    "stable 3x",
+    "updater: the stable floor in updater/state was damaged: rewritten as stable 1, the running release (--allow-downgrade); any newer release this machine ran is forgotten",
+    "updater: installed into slot B",
+    "stable 1",
+    ": upd-floor-refused (code 58)",
+    ": upd-floor-rewritten (code 58)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_order = [
+    "update: updater exited with 58",
+    "stable 3x",
+    "rewritten as stable 1",
+    "updater: installed into slot B",
+]
+serial_absent = ["KERNEL PANIC", "upd-floor-write", "upd-no-services"]
