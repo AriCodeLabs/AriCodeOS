@@ -1733,6 +1733,10 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   (`run console_probe`).
 - Tests: `[host_ssh]` in scenarios (generated client key, `authorized_keys`
   installed, a host port chosen per run forwarded to 22, ADR 0040); `ssh.exec`.
+- `authorized_keys` without options: every line that gives no key is said
+  with its number (`parse_authorized_keys` returns the refused lines;
+  `ssh.key_options_refused`). Ten authentication requests per connection,
+  key queries and repeated `none` included (incident 0046).
 
 ## HTTPS (ADR 0026)
 

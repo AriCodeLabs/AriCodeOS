@@ -166,6 +166,14 @@ removed on `fix/compositor-ownership`, ADR 0053).
   `ct_eq` with an optimization barrier; AES with a bitsliced S-box, no
   table; Ed25519 verify refuses small-order A and R and non-canonical
   encodings (1160 forgeries accepted before, none after).
+- 2026-10-27, info (`fix/sshd-auth-accounting`, incident 0046):
+  authorized_keys lines with options (or another key type, or a key that
+  does not decode) are refused by line number, logged and recorded; no
+  options are supported.
+- 2026-10-27, info (same branch): `none` requests after the first and
+  key queries answered `PK_OK` (queries for other keys already counted)
+  count against the ten authentication requests of a connection;
+  reaching the limit disconnects and is logged.
 
 ## Fix plan
 
