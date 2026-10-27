@@ -98,6 +98,7 @@ disk = "slots"                  # disk: slots (default) | esp-only | pending-b |
                                 #       | wasm-restricted (module manifest with print only) | wasm-invalid (ill-typed demo.wasm)
                                 #       | wasm-bad-import (demo.wasm imports a host function with another signature)
                                 #       | a-corrupt (slot A fails verification: ESP boot, installed version unknown)
+                                #       | a-corrupt-state-damaged (a-corrupt with the boot state's CRC damaged: AriBoot leaves it so)
                                 #       | pending-b-older-update (B v2 pending, UPDATE holds v1) | fs-nearly-full (5 entries free for the updater) | fs-one-short (4)
 disk_readonly = false           # true: the test disk is presented read-only
 serial = true                   # runs with no other scenario at once (--jobs); say why in the file (tests/README.md, "Parallel runs")
@@ -137,6 +138,7 @@ dev_wrong_key = true            # the development source is signed with the stab
 dev_source = true               # register it in updater/sources as `dev URL` (default: not registered, the channel is closed)
 dev_stable_image = true         # the development index offers a stable image under its build number (refused at install)
 stable_floor = 3                # updater/state starts with this stable floor (the newest stable release the machine ran)
+stable_floor_damaged = true     # that floor written damaged (`stable 3x`): refused, never read as no floor
 usb_legacy_controller = true    # also adds an EHCI with no devices (the EHCI driver runs next to usbd)
 usb_ehci_hid = true             # an EHCI with a USB keyboard and mouse (high speed) for usb_ehci (ADR 0031)
 usb_ehci_storage = true         # the test disk hangs off the EHCI as USB mass storage; there is no virtio-blk

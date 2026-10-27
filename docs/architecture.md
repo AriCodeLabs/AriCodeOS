@@ -622,6 +622,14 @@ latter briefly to add the region.
     stuck on`, `flr skipped: tx pending`, `flr: function not ready`).
     `test=pci_reap` checks the order and the bookkeeping with an `igb` that
     advertises FLR.
+  - An interrupt line can outlive its claim (it has `TRANSFER`). Dropped,
+    it masks its MSI-X entry or disables MSI only if its claim is still
+    the function's latest (claim numbers kept under `VECTORS`; the drop
+    does not read the MSI-X table), so a line dropped after the function was
+    claimed again leaves the new claim's interrupts on. A claim uses
+    MSI-X only if the table's register and its BAR read as at boot and
+    memory decoding is on, turns MSI off when it uses MSI-X and MSI-X off
+    when it does not (ADR 0061, `test=pci_stale_line`).
 - `test=drivers`: `pit_driver` services five PIT IRQ0s (channel 0 at 100 Hz)
   and allocates, maps and verifies a DMA buffer; `fb_driver` receives the
   framebuffer as an MMIO region and paints 64x64 pixels; the kernel checks
@@ -793,6 +801,9 @@ latter briefly to add the region.
   `console_read` (syscall 24) requires `READ` on a `Console` object,
   validates the destination before blocking and returns `Timeout` if the deadline expires.
   Bytes dropped because the ring is full are counted for diagnostics.
+  Input belongs to its reader (ADR 0057): when the process that last
+  called `console_read` finishes, what it left unread is discarded, and so
+  is what arrives before another process reads (both logged).
 - User-space keyboards (stage 2, ADR 0013): `console_inject` (syscall 29)
   writes text into the same ring and requires `MANAGE` on the `Console`;
   only init has it (`0x10008` with `READ|MANAGE|DUPLICATE|TRANSFER`) and
@@ -1168,7 +1179,8 @@ latter briefly to add the region.
   (`dma_quota`, `dma_used`) and `dma_alloc` charges the size rounded up to a
   page, returning `Limit` when it is exceeded. The quota is cumulative: what was
   reserved is not returned on free (DMA buffers live as long as the
-  process). The DMA a process keeps mapped (its own buffers and those of
+  process); an allocation that fails after the charge gives it back
+  (incident 0047). The DMA a process keeps mapped (its own buffers and those of
   clients) is also bounded by the quota: `mmio_map` beyond it returns
   `Limit` (ADR 0038).
 - `initrd_read` (syscall 27) copies an initrd file to whoever holds
@@ -1343,6 +1355,13 @@ latter briefly to add the region.
 - init confirms the pending slot at the end of the boot services:
   it locates `ARIBOOT` by reading the GPT through the block service and writes
   `confirm(state, slot)`. `updater` does the reverse with `schedule`.
+- A boot state that does not decode is damaged, never fresh (ADR 0060):
+  AriBoot boots A and rewrites it once A verifies; the updater rewrites
+  it from what AriBoot booted (`boot_slot`, `boot_pending`;
+  `aricode_ab::recovered`: that slot active, pending or not, since the
+  updater only runs from a shell init starts after confirming), and
+  installs nothing in that run
+  (`upd-state-damaged`, code 60; scenario `update.state_damaged`).
 - xtask strips debug info from kernel and initrd (`strip
   --strip-debug` if available): the initrd goes from 4.8 MiB to 550 KiB and the
   system image fits in the slot.
@@ -1733,6 +1752,10 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   (`run console_probe`).
 - Tests: `[host_ssh]` in scenarios (generated client key, `authorized_keys`
   installed, a host port chosen per run forwarded to 22, ADR 0040); `ssh.exec`.
+- `authorized_keys` without options: every line that gives no key is said
+  with its number (`parse_authorized_keys` returns the refused lines;
+  `ssh.key_options_refused`). Ten authentication requests per connection,
+  key queries and repeated `none` included (incident 0046).
 
 ## HTTPS (ADR 0026)
 
@@ -1825,7 +1848,11 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   `ROLLBACK`: schedules the inactive slot's verified image, no network).
 - The stable floor (`[floor]` of `updater/state`): the newest stable
   release the machine ran; a stable release below it is a downgrade,
-  channel switch or not. A development build number seen with another
+  channel switch or not. A damaged floor refuses every stable release
+  until a stable install forced with `--allow-downgrade` rewrites it as
+  the running one once it went in
+  (`floor_for_run`, ADR 0060; `update.apply_floor_damaged`). A
+  development build number seen with another
   commit is refused. xtask numbers development builds per host
   (`~/.cache/aricodeos/dev-build`, locked).
 - Scenarios: `update.dev_channel`, `update.dev_wrong_key`,

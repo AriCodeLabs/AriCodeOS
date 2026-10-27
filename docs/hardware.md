@@ -285,8 +285,9 @@ and always on the USB stick itself or a dedicated USB drive.
 
 ## SSH into the laptop (ADR 0025)
 
-Build the image with your public key (only `ssh-ed25519` keys) and write it
-as usual:
+Build the image with your public key (only `ssh-ed25519` keys, one per
+line, without options such as `from=` or `command=`: such a line gives no
+key, and sshd says so with its line number) and write it as usual:
 
 ```bash
 cargo xtask usb-image --cmdline "shell kbd=es" --authorized-key ~/.ssh/id_ed25519.pub
@@ -312,7 +313,9 @@ session write to the session (ADR 0047).
 
 Without `--authorized-key` the image has no `authorized_keys` and sshd does
 not listen: no port is open. Refused keys are logged on the laptop with the
-peer's address.
+peer's address. A connection gets ten authentication requests (key
+queries and repeated `none` requests count, a first `none` does not), then
+it is disconnected, also logged.
 
 ## The public source and its local mirror (ADR 0048)
 
@@ -460,4 +463,6 @@ checkouts that published the same number before the host counter): it
 refuses it and asks for a new publication. Going back to stable never
 goes below the newest stable release the laptop ran (the stable floor in
 `updater/state`, seeded by the stick): an older one is a downgrade,
-installed only with `--allow-downgrade`.
+installed only with `--allow-downgrade`. If that floor is ever damaged,
+every stable release is refused until an install forced with
+`--allow-downgrade` rewrites it as the running release (ADR 0060).

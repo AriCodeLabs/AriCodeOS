@@ -99,7 +99,7 @@ fn exec_with_an_authorized_key() {
     }
     let dir = tmpdir("exec");
     let line = client_key(&dir);
-    let keys = parse_authorized_keys(&line);
+    let keys = parse_authorized_keys(&line).keys;
     assert_eq!(keys.len(), 1);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -136,7 +136,7 @@ fn interactive_session_with_a_pty() {
         return;
     }
     let dir = tmpdir("pty");
-    let keys = parse_authorized_keys(&client_key(&dir));
+    let keys = parse_authorized_keys(&client_key(&dir)).keys;
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = std::thread::spawn(move || {
@@ -229,7 +229,7 @@ fn large_output_is_delivered_whole() {
         return;
     }
     let dir = tmpdir("large-output");
-    let keys = parse_authorized_keys(&client_key(&dir));
+    let keys = parse_authorized_keys(&client_key(&dir)).keys;
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let expected = 3 * 1024 * 1024;

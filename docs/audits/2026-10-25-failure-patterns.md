@@ -103,7 +103,7 @@ of this document.
 | L20 | The TLS key seed falls back to zeros if `sys::random` fails [C-L9] — **fixed** (incident 0036, merged `d11c242`) |
 | L21 | SSH sequence numbers wrap without a forced rekey; strict KEX only when the client offers it (Terrapin with old clients) [C-L10, D-L6, D-L7] — **fixed** (incident 0035, merged `3d4906b`) |
 | L22 | A driver's device keeps DMA access to client buffers after `mmio_unmap` [C-L11] — **fixed** (incident 0039, merged `e2f6192`) |
-| L23 | X.509: duplicate extensions accepted, a CA accepted as a leaf, CN fallback, wildcards over public suffixes, IP vs dNSName, NUL/control bytes in dNSName [D-L1..L4] — **fixed** except the CN fallback and wildcards over public suffixes (incident 0029) |
+| L23 | X.509: duplicate extensions accepted, a CA accepted as a leaf, CN fallback, wildcards over public suffixes, IP vs dNSName, NUL/control bytes in dNSName [D-L1..L4] — **fixed** (incident 0029; the CN fallback: incident 0048, ADR 0058; wildcards over public suffixes: ADR 0062) |
 
 ### Info
 
@@ -112,7 +112,8 @@ refunded on a failed allocation; `map_uc` windows are never freed; typed-
 ahead console bytes survive a shell crash; the updater treats a boot
 state with a bad CRC as fresh and the stable floor fails open when its
 section is damaged; secrets are not zeroized; `ct_eq` has no optimization
-barrier; AES uses tables; Ed25519 verify accepts small-order keys;
+barrier; AES uses tables; Ed25519 verify accepts small-order keys (these
+four fixed on `fix/crypto-hardening`, incident 0044);
 `serve-update` echoes the raw request target into its log and `Location`;
 authorized_keys lines with options are ignored silently; `none` and
 unsigned publickey queries are not counted as auth failures; the `input`
@@ -157,6 +158,61 @@ removed on `fix/compositor-ownership`, ADR 0053).
   on requests a busy host disk took over 2 s, `2cd0102`). Left as stated:
   the CN fallback and wildcards over public suffixes (L23), and the
   infos below.
+- 2026-10-27: the CN fallback (L23) on `fix/x509-no-cn-fallback`
+  (incident 0048, ADR 0058); wildcards over public suffixes on
+  `fix/x509-public-suffix-wildcards` (ADR 0062, Public Suffix List extract
+  under MPL-2.0).
+- 2026-10-27: four infos of the crypto library fixed on
+  `fix/crypto-hardening` (incident 0044): secrets wiped when dropped or
+  where their buffer ends (what is not covered is listed in the incident);
+  `ct_eq` with an optimization barrier; AES with a bitsliced S-box, no
+  table; Ed25519 verify refuses small-order A and R and non-canonical
+  encodings (1160 forgeries accepted before, none after).
+- 2026-10-27, info (`fix/sshd-auth-accounting`, incident 0046):
+  authorized_keys lines with options (or another key type, or a key that
+  does not decode) are refused by line number, logged and recorded; no
+  options are supported.
+- 2026-10-27, info (same branch): `none` requests after the first and
+  key queries answered `PK_OK` (queries for other keys already counted)
+  count against the ten authentication requests of a connection;
+  reaching the limit disconnects and is logged.
+- 2026-10-27, infos, on `fix/kernel-infos` (incident 0047, each
+  reproduced on develop first):
+  - handle generations: a table uses every position before reusing one
+    (oldest free first) and a position moves to another index when its
+    generation runs out, so a closed value comes back after 255-256 *
+    65535 reuses of its position (1.7 * 10^7 to 4 * 10^9 closes in the
+    table) instead of 65535 (ADR 0057; host test
+    `a_stale_handle_never_resolves_again`);
+  - DMA quota: a `dma_alloc` that fails after its charge gives it back
+    (`memory.dma_lifetime`, `dma_refund`);
+  - `map_uc` windows: a PCI function's MSI-X window is mapped by its first
+    claim and reused by every later one, so driver restarts map nothing
+    new (`drivers.pci_reap`, nine more claims per function);
+  - typed-ahead console input: what a dead reader left unread, and what
+    arrives before the next reader, is discarded and logged (ADR 0057;
+    new scenario `console.orphan_input`).
+- 2026-10-27, info (`fix/updater-state`, incident 0045, ADR 0060): a boot
+  state with a bad CRC is no longer read as fresh; the updater rewrites
+  it from what AriBoot booted (the slot that passed init's checks,
+  pending or not; audit H1, re-audit M1) and installs nothing in that
+  run.
+- 2026-10-27, info (same branch): a damaged stable floor fails closed,
+  refusing every stable release until a stable install forced with
+  `--allow-downgrade` rewrites it as the running release once it went in.
+- 2026-10-27, info (same branch): `serve-update` answers 400 to a request
+  line that is not `METHOD SP target SP HTTP/x.y` with a visible-ASCII
+  target, logs it escaped, and redirects only to plain file names.
+- 2026-10-27, two PCI defects the second audit of incident 0047
+  confirmed, on `fix/pci-stale-irq-line` (incident 0050, ADR 0061, both
+  reproduced on develop first): an interrupt line that outlived its claim
+  masked the new claim's MSI-X entry or MSI when dropped (it now masks
+  only while its claim is the function's latest, decided from claim
+  numbers under the lock the claims program under, without reading the
+  device), and a claim programmed the MSI-X table where its BAR had been
+  after a driver moved it (MSI-X now needs that BAR where it was at boot
+  and memory decoding on; MSI and MSI-X never both on, after the branch's
+  audit); new scenario `pci.stale_line`.
 
 ## Fix plan
 

@@ -21,6 +21,7 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use aricode_crypto::SecretBytes;
 use aricode_http::{Answer, Error, Transport, Url};
 pub use aricode_http::{Budget, Fetched, Phase, Unbounded};
 use aricode_sys::net::{NetClient, NetError};
@@ -441,8 +442,9 @@ fn get_once(
     }
     // The key exchange's seed, before anything is opened: with too few
     // random bytes it would have been zeros, a key anyone can compute.
-    let mut seed = [0u8; 32];
-    if url.secure && sys::random(system, &mut seed) != Ok(seed.len()) {
+    // Wiped on every way out; the client wipes its own copy (incident 0044).
+    let mut seed = SecretBytes([0u8; 32]);
+    if url.secure && sys::random(system, &mut seed.0) != Ok(seed.0.len()) {
         return Err(HttpsError::NoEntropy);
     }
     let sock = net
@@ -450,7 +452,7 @@ fn get_once(
         .map_err(|e| before_http(budget, Phase::Connect, HttpsError::Connect(e)))?;
     let tls = url.secure.then(|| {
         let now = aricode_x509::check_time(sys::time::unix_seconds(system));
-        let mut client = Client::new(url.host, seed, aricode_x509::roots::DEFAULT.to_vec(), now);
+        let mut client = Client::new(url.host, seed.0, aricode_x509::roots::DEFAULT.to_vec(), now);
         for root in extra_roots {
             client.add_root(root.clone());
         }

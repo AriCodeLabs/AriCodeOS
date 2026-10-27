@@ -5,6 +5,11 @@
 
 use super::*;
 
+/// `name_matches_with` without a cache shared between names.
+fn name_matches(pattern: &str, host: &str) -> bool {
+    name_matches_with(pattern, host, &mut None)
+}
+
 macro_rules! cert {
     ($name:literal) => {
         include_bytes!(concat!("../testdata/", $name, ".der")) as &[u8]
@@ -20,6 +25,7 @@ const EC_INT: &[u8] = cert!("ec-int");
 const EC_LEAF: &[u8] = cert!("ec-leaf");
 const ED_ROOT: &[u8] = cert!("ed-root");
 const ED_LEAF: &[u8] = cert!("ed-leaf");
+const CN_ONLY_LEAF: &[u8] = cert!("cn-only-leaf");
 const NOTCA_LEAF: &[u8] = cert!("notca-leaf");
 const PLEN_INT0: &[u8] = cert!("plen-int0");
 const PLEN_INT1: &[u8] = cert!("plen-int1");
@@ -47,7 +53,6 @@ fn parses_rsa_chain() {
     assert_eq!(root.signature_algorithm, SignatureAlgorithm::RsaPkcs1Sha256);
     assert!(root.is_ca && root.issuer == root.subject);
     assert_eq!(root.not_after, 2_682_374_400); // GeneralizedTime 2055-01-01
-    assert_eq!(root.common_name, Some("AriCode Test RSA Root"));
     let int = Certificate::parse(RSA_INT).unwrap();
     assert_eq!(int.signature_algorithm, SignatureAlgorithm::RsaPkcs1Sha384);
     assert_eq!(int.issuer, root.subject);
@@ -56,7 +61,6 @@ fn parses_rsa_chain() {
     assert_eq!(leaf.signature_algorithm, SignatureAlgorithm::RsaPkcs1Sha512);
     assert_eq!((leaf.not_before, leaf.not_after), (JAN_2026, JAN_2027));
     assert_eq!(leaf.dns_names, ["*.example.com", "example.com"]);
-    assert_eq!(leaf.common_name, Some("example.com"));
     assert!(!leaf.is_ca);
     match leaf.public_key {
         PublicKey::Rsa { n, e } => assert_eq!((n.len(), e), (256, &[1, 0, 1][..])),
@@ -84,8 +88,7 @@ fn parses_ec_and_ed25519() {
     let ed = Certificate::parse(ED_LEAF).unwrap();
     assert_eq!(ed.signature_algorithm, SignatureAlgorithm::Ed25519);
     assert!(matches!(ed.public_key, PublicKey::Ed25519(_)));
-    assert!(ed.dns_names.is_empty() && !ed.is_ca);
-    assert_eq!(ed.common_name, Some("ed.example.net"));
+    assert!(ed.dns_names == ["ed.example.net"] && !ed.is_ca);
 }
 
 #[test]
@@ -143,7 +146,6 @@ fn hostname_matching() {
     ] {
         assert!(!matches_hostname(&leaf, host), "{host}");
     }
-    // Common name only when there is no subjectAltName dNSName.
     let ed = Certificate::parse(ED_LEAF).unwrap();
     assert!(matches_hostname(&ed, "ed.example.net") && !matches_hostname(&ed, "x.example.net"));
     let ec = Certificate::parse(EC_LEAF).unwrap();
@@ -165,7 +167,7 @@ fn verifies_good_chains() {
         Some(NOW),
     )
     .unwrap();
-    assert_eq!(leaf.common_name, Some("example.com"));
+    assert_eq!(leaf.dns_names, ["*.example.com", "example.com"]);
     verify_chain(
         &[RSA_PSS_LEAF, RSA_INT],
         &[RSA_ROOT],
@@ -375,8 +377,8 @@ fn embedded_roots_parse_and_self_verify() {
             Ok(c) => {
                 assert!(
                     verify_signature(&c.public_key, c.signature_algorithm, c.tbs, c.signature),
-                    "{:?}",
-                    c.common_name
+                    "{:02x?}",
+                    c.subject
                 );
                 verified += 1;
             }
@@ -457,10 +459,11 @@ fn name_constraints_bind_intermediates() {
         under(cert!("nc-wild"), cert!("nc-int"), "a.good.example"),
         Ok(())
     );
-    // A constrained chain needs a subjectAltName: no common name fallback.
+    // A leaf without a subjectAltName matches no host, constrained or not
+    // (ADR 0058).
     assert_eq!(
         under(cert!("nc-cn"), cert!("nc-int"), "www.good.example"),
-        Err(Error::NameConstraint)
+        Err(Error::NameMismatch)
     );
     // Critical: understood now, so no longer refused as unsupported.
     assert_eq!(
@@ -755,7 +758,11 @@ fn constraints_on_roots_paths_and_ip_hosts() {
         "10.0.2.2"
     ));
     assert!(
-        !is_ipv4("10.0.2") && !is_ipv4("10.0.2.256") && !is_ipv4("a.0.2.2") && is_ipv4("10.0.2.2")
+        ipv4("10.0.2").is_none()
+            && ipv4("10.0.2.256").is_none()
+            && ipv4("10.0.2.2.1").is_none()
+            && ipv4("a.0.2.2").is_none()
+            && ipv4("10.0.2.2") == Some([10, 0, 2, 2])
     );
     // At most MAX_EXTENSIONS extensions.
     let many: Vec<Vec<u8>> = (0..=32u8)
@@ -937,4 +944,119 @@ fn a_compromised_emudhra_key_is_refused() {
         verify_chain(&[der], &[der], "example.com", None).err(),
         Some(Error::Distrusted)
     );
+}
+
+#[test]
+fn a_common_name_is_no_host_name() {
+    // A leaf naming its host only in the subject CN (incident 0048): it
+    // parses, and `openssl verify` chains it to EC_ROOT, but it matches no
+    // host (ADR 0058).
+    let leaf = Certificate::parse(CN_ONLY_LEAF).unwrap();
+    assert!(leaf.dns_names.is_empty());
+    assert!(!matches_hostname(&leaf, "www.example.org"));
+    assert_eq!(
+        verify_chain(
+            &[CN_ONLY_LEAF, EC_INT],
+            &[EC_ROOT],
+            "www.example.org",
+            Some(NOW)
+        )
+        .err(),
+        Some(Error::NameMismatch)
+    );
+}
+
+#[test]
+fn an_ip_host_matches_an_ip_address_entry() {
+    let ip_san = |values: &[&[u8]]| {
+        let names: Vec<u8> = values.iter().flat_map(|v| tlv(0x87, v)).collect();
+        built(None, &[extension(&[0x55, 0x1d, 0x11], &tlv(0x30, &names))])
+    };
+    let der = ip_san(&[&[10, 0, 2, 2]]);
+    let leaf = Certificate::parse(&der).unwrap();
+    assert_eq!(leaf.ip_addresses, [[10, 0, 2, 2]]);
+    assert!(matches_hostname(&leaf, "10.0.2.2") && matches_hostname(&leaf, "10.0.2.2."));
+    assert!(!matches_hostname(&leaf, "10.0.2.3") && !matches_hostname(&leaf, "www.good.example"));
+    // An IPv6 entry is skipped, any other length is malformed.
+    let v6 = ip_san(&[&[0; 16]]);
+    assert!(Certificate::parse(&v6).unwrap().ip_addresses.is_empty());
+    assert_eq!(
+        Certificate::parse(&ip_san(&[&[10, 0, 2, 2, 0]])).err(),
+        Some(Error::Malformed)
+    );
+    // A constrained chain needs a dNSName: no iPAddress constraint is
+    // evaluated, and a leaf without a subjectAltName names nothing.
+    let int = Certificate::parse(cert!("nc-int")).unwrap();
+    let nc = int.name_constraints.as_ref();
+    assert_eq!(
+        check_name_constraints(&leaf, "10.0.2.2", nc),
+        Err(Error::NameConstraint)
+    );
+    let cn_only = Certificate::parse(CN_ONLY_LEAF).unwrap();
+    assert_eq!(
+        check_name_constraints(&cn_only, "www.example.org", nc),
+        Err(Error::NameConstraint)
+    );
+}
+
+#[test]
+fn no_wildcard_over_a_public_suffix() {
+    // ICANN suffixes of two labels, any case, a trailing dot.
+    for (pattern, host) in [
+        ("*.co.uk", "example.co.uk"),
+        ("*.CO.UK", "example.co.uk"),
+        ("*.co.uk.", "example.co.uk"),
+        ("*.com.au", "shop.com.au"),
+        ("*.xn--55qx5d.hk", "a.xn--55qx5d.hk"),
+    ] {
+        assert!(!name_matches(pattern, host), "{pattern} matched {host}");
+    }
+    // A wildcard rule (`*.ck`) makes every name under it a suffix, but not
+    // its exception (`!www.ck`); deeper names stay registrable.
+    assert!(!name_matches("*.foo.ck", "a.foo.ck"));
+    assert!(name_matches("*.www.ck", "a.www.ck"));
+    assert!(name_matches("*.city.kobe.jp", "a.city.kobe.jp"));
+    // A wildcard rule's base is a suffix too: `*.kobe.jp` cannot cover
+    // `city.kobe.jp`, which another party holds.
+    assert!(!name_matches("*.kobe.jp", "city.kobe.jp"));
+    // Registrable names under a suffix, and the private section, are fine.
+    assert!(name_matches("*.example.co.uk", "www.example.co.uk"));
+    assert!(name_matches("*.github.io", "lynxcraft.github.io"));
+    assert!(name_matches("*.example.com", "www.example.com"));
+    // An exact name equal to a suffix is no wildcard: matching is exact.
+    assert!(name_matches("co.uk", "co.uk"));
+
+    assert!(suffixes::is_public_suffix("co.uk") && suffixes::is_public_suffix("Co.Uk"));
+    assert!(suffixes::is_public_suffix("anything.ck") && !suffixes::is_public_suffix("www.ck"));
+    assert!(!suffixes::is_public_suffix("city.kobe.jp") && suffixes::is_public_suffix("x.kobe.jp"));
+    assert!(suffixes::is_public_suffix("kobe.jp") && suffixes::is_public_suffix("nom.br"));
+    assert!(
+        !suffixes::is_public_suffix("example.co.uk") && !suffixes::is_public_suffix("github.io")
+    );
+}
+
+#[test]
+fn many_wildcard_names_cost_one_suffix_lookup() {
+    // Audit of ea368aa, finding 1: a leaf may carry thousands of wildcard
+    // names, checked before its chain is. 2000 `*.co.uk` (each naming the
+    // host's parent and refused) and 2000 `*.other.example` must cost at
+    // most one lookup of the list.
+    let mut names: Vec<&[u8]> = Vec::new();
+    for _ in 0..2000 {
+        names.push(b"*.co.uk");
+        names.push(b"*.other.example");
+    }
+    let der = built(None, &[san(&names)]);
+    let leaf = Certificate::parse(&der).unwrap();
+    let before = suffixes::SCANS.with(|n| n.get());
+    assert!(!matches_hostname(&leaf, "example.co.uk"));
+    assert!(!matches_hostname(&leaf, "www.example.org"));
+    let scans = suffixes::SCANS.with(|n| n.get()) - before;
+    assert!(scans <= 1, "{scans} lookups");
+    // Empty labels match nothing, on either side.
+    let dots = built(None, &[san(&[b"*.co.uk..", b"a..example.com"])]);
+    let dots = Certificate::parse(&dots).unwrap();
+    assert!(!matches_hostname(&dots, "a.co.uk.."));
+    assert!(!matches_hostname(&dots, "a..example.com"));
+    assert!(!name_matches("*.com..", "a.com."));
 }

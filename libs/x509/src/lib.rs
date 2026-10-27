@@ -15,10 +15,13 @@
 #![no_std]
 
 extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
 mod cert;
 mod der;
 pub mod roots;
+mod suffixes;
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -184,8 +187,8 @@ pub struct Certificate<'a> {
     pub max_path_len: Option<u32>,
     /// subjectAltName dNSName entries.
     pub dns_names: Vec<&'a str>,
-    /// First subject commonName.
-    pub common_name: Option<&'a str>,
+    /// subjectAltName iPAddress entries holding an IPv4 address.
+    pub ip_addresses: Vec<[u8; 4]>,
     /// keyUsage digitalSignature (true without a keyUsage extension). TLS
     /// 1.3 server authentication signs with the key, so it is required.
     pub digital_signature: bool,
@@ -278,46 +281,58 @@ pub fn verify_signature(
 }
 
 /// True if `host` is one of the certificate's subjectAltName dNSNames (a
-/// single left-most `*` label matches exactly one label), or, only when the
-/// certificate has no dNSName, its common name. Case-insensitive; a
-/// trailing dot on `host` is ignored.
-/// An IP host (an IPv4 address, `matches_hostname`) matches a dNSName
-/// that spells it exactly, never a wildcard.
+/// single left-most `*` label matches exactly one label). The subject's
+/// common name is never read as a host name (ADR 0058): a certificate
+/// without a subjectAltName matches no host. Case-insensitive; a trailing
+/// dot on `host` or a name is ignored, and a host or name with an empty
+/// label matches nothing. A wildcard never stands on a public suffix
+/// (ADR 0062).
+/// An IP host (an IPv4 address) matches an iPAddress entry with that
+/// address, or a dNSName that spells it exactly, never a wildcard.
 pub fn matches_hostname(cert: &Certificate, host: &str) -> bool {
     let host = host.strip_suffix('.').unwrap_or(host);
-    if host.is_empty() || host.contains('*') {
+    if host.contains('*') || host.split('.').any(str::is_empty) {
         return false;
     }
-    let matches = |pattern: &str| {
-        if is_ipv4(host) {
-            pattern.strip_suffix('.').unwrap_or(pattern) == host
-        } else {
-            name_matches(pattern, host)
+    match ipv4(host) {
+        Some(ip) => {
+            cert.ip_addresses.contains(&ip)
+                || cert
+                    .dns_names
+                    .iter()
+                    .any(|name| name.strip_suffix('.').unwrap_or(name) == host)
         }
-    };
-    if cert.dns_names.is_empty() {
-        cert.common_name.is_some_and(matches)
-    } else {
-        cert.dns_names.iter().any(|name| matches(name))
+        None => {
+            // A wildcard can only stand on the host's parent, so whether that
+            // is a public suffix is looked up once, and only when a wildcard
+            // name reaches it: a leaf of thousands of wildcard names costs
+            // one lookup (audit of ea368aa, finding 1).
+            let mut parent_allowed = None;
+            cert.dns_names
+                .iter()
+                .any(|name| name_matches_with(name, host, &mut parent_allowed))
+        }
     }
 }
 
 /// Four decimal octets separated by dots.
-fn is_ipv4(host: &str) -> bool {
-    let mut parts = 0;
-    host.split('.').all(|p| {
-        parts += 1;
-        !p.is_empty()
-            && p.len() <= 3
-            && p.bytes().all(|b| b.is_ascii_digit())
-            && p.parse::<u8>().is_ok()
-    }) && parts == 4
+fn ipv4(host: &str) -> Option<[u8; 4]> {
+    let mut ip = [0u8; 4];
+    let mut parts = host.split('.');
+    for octet in &mut ip {
+        let p = parts.next()?;
+        if p.is_empty() || p.len() > 3 || !p.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        *octet = p.parse().ok()?;
+    }
+    parts.next().is_none().then_some(ip)
 }
 
 /// Checks the leaf's names against a CA's nameConstraints: every dNSName.
-/// A constrained chain needs a subjectAltName (a common name is no
-/// constrained name type), and an IP host is refused when the CA also
-/// constrains IP addresses, which this client does not evaluate.
+/// A constrained chain needs a dNSName (a leaf named only by iPAddress is
+/// refused), and an IP host is refused when the CA also constrains IP
+/// addresses: this client evaluates no iPAddress constraint.
 fn check_name_constraints(
     leaf: &Certificate,
     host: &str,
@@ -329,7 +344,7 @@ fn check_name_constraints(
     let subtrees = (nc.permitted.len() + nc.excluded.len()).max(1);
     if leaf.dns_names.is_empty()
         || leaf.dns_names.len().saturating_mul(subtrees) > NAME_CONSTRAINT_BUDGET
-        || (nc.ip_subtrees && is_ipv4(host.strip_suffix('.').unwrap_or(host)))
+        || (nc.ip_subtrees && ipv4(host.strip_suffix('.').unwrap_or(host)).is_some())
         || !leaf.dns_names.iter().all(|n| nc.allows(n))
     {
         return Err(Error::NameConstraint);
@@ -337,13 +352,22 @@ fn check_name_constraints(
     Ok(())
 }
 
-fn name_matches(pattern: &str, host: &str) -> bool {
+/// Whether the dNSName `pattern` names `host` (no trailing dot, no empty
+/// label). `parent_allowed` caches, for this host, whether a wildcard may
+/// stand on its parent (not a public suffix, ADR 0062).
+fn name_matches_with(pattern: &str, host: &str, parent_allowed: &mut Option<bool>) -> bool {
     let pattern = pattern.strip_suffix('.').unwrap_or(pattern);
+    if pattern.split('.').any(str::is_empty) {
+        return false;
+    }
     match pattern.strip_prefix("*.") {
-        // At least two labels after the wildcard: no `*.com`.
+        // At least two labels after the wildcard (no `*.com`), the host's
+        // parent, and not a public suffix (no `*.co.uk`).
         Some(base) if !base.contains('*') && base.contains('.') => match host.split_once('.') {
-            Some((label, rest)) => !label.is_empty() && rest.eq_ignore_ascii_case(base),
-            None => false,
+            Some((_, parent)) if parent.eq_ignore_ascii_case(base) => {
+                *parent_allowed.get_or_insert_with(|| !suffixes::is_public_suffix(parent))
+            }
+            _ => false,
         },
         Some(_) => false,
         None => !pattern.contains('*') && pattern.eq_ignore_ascii_case(host),

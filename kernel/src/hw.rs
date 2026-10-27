@@ -13,7 +13,7 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Weak;
 use aricode_pmm::{Frame, FRAME_SIZE};
 use core::sync::atomic::{AtomicU32, Ordering};
-use log::warn;
+use log::{info, warn};
 
 /// Vectors reserved for devices.
 pub const DEVICE_VECTOR_FIRST: u8 = 0x30;
@@ -22,17 +22,52 @@ pub const DEVICE_VECTOR_LAST: u8 = 0x3F;
 /// Source of a line: an I/O APIC GSI, an MSI-X entry (table mapped by the
 /// kernel, entry index) or an MSI capability (the function's configuration
 /// space in the ECAM and the capability offset; ADR 0022).
+#[derive(Clone, Copy)]
 pub enum IrqSource {
     Gsi { gsi: u32, level: bool },
     Msix { table_virt: u64, entry: u32 },
     Msi { cfg_virt: u64, cap: u8 },
 }
 
-/// An interrupt line routed to a vector. When the last handle is dropped it
-/// is masked and the vector is freed.
+impl IrqSource {
+    /// The message the MSI-X entry or MSI capability holds now, as
+    /// `(address, data, delivered)`: `delivered` is false while the entry
+    /// is masked or MSI is disabled. `None` for an I/O APIC line.
+    fn message(&self) -> Option<(u64, u32, bool)> {
+        match *self {
+            IrqSource::Gsi { .. } => None,
+            IrqSource::Msix { table_virt, entry } => {
+                let [lo, hi, data, control] = msix_read(table_virt, entry);
+                Some((
+                    (hi as u64) << 32 | lo as u64,
+                    data,
+                    control & MSIX_MASKED == 0,
+                ))
+            }
+            IrqSource::Msi { cfg_virt, cap } => Some(msi_read(cfg_virt, cap)),
+        }
+    }
+}
+
+/// `true` if `source` delivers `vector`: it holds that vector towards the
+/// boot LAPIC, as `register_msix` and `register_msi` program it, with the
+/// MSI-X entry unmasked or MSI enabled (`test=pci_stale_line`).
+pub fn delivered(source: &IrqSource, vector: u8) -> bool {
+    let _programming = VECTORS.lock();
+    source
+        .message()
+        .is_some_and(|(addr, data, on)| addr == message_address() && data == vector as u32 && on)
+}
+
+/// An interrupt line routed to a vector. When the last handle is dropped
+/// the vector is freed and the source masked, unless the line's PCI
+/// function was claimed again since (incident 0050).
 pub struct IrqLine {
     pub source: IrqSource,
     pub vector: u8,
+    /// For an MSI-X or MSI line: its PCI function (source id) and the
+    /// number of the claim it was made for (`Vectors::claims`).
+    claim: Option<(u16, u64)>,
     pending: AtomicU32,
     waiters: WaitQueue,
 }
@@ -101,23 +136,56 @@ impl IrqLine {
 }
 
 impl Drop for IrqLine {
+    /// Masks the source, unless the line's function was claimed again
+    /// since: a line is transferable, so it can outlive its claim (in
+    /// another process, in a queued message), and the function's
+    /// interrupts then belong to the newer claim, which masking would
+    /// silence (incident 0050). Decided from the claim numbers alone,
+    /// without reading the device: with `VECTORS` held and interrupts
+    /// off, a read could stall on a function being reset or reach another
+    /// device. The decision and the mask run under `VECTORS`, as every
+    /// claim's programming does, so no entry is torn.
     fn drop(&mut self) {
-        match self.source {
-            IrqSource::Gsi { gsi, .. } => ioapic::set_masked(gsi, true),
-            IrqSource::Msix { table_virt, entry } => {
-                msix_write(table_virt, entry, 0, 0, MSIX_MASKED)
+        let superseded = {
+            let mut vectors = VECTORS.lock();
+            let superseded = self
+                .claim
+                .is_some_and(|(function, n)| vectors.claims.get(&function) != Some(&n));
+            if !superseded {
+                match self.source {
+                    IrqSource::Gsi { gsi, .. } => ioapic::set_masked(gsi, true),
+                    IrqSource::Msix { table_virt, entry } => {
+                        msix_write(table_virt, entry, 0, 0, MSIX_MASKED)
+                    }
+                    IrqSource::Msi { cfg_virt, cap } => msi_enable(cfg_virt, cap, false),
+                }
             }
-            IrqSource::Msi { cfg_virt, cap } => msi_enable(cfg_virt, cap, false),
+            vectors.lines.remove(&self.vector);
+            superseded
+        };
+        if superseded {
+            info!(
+                "irq: vector {:#x} released; its function was claimed again since, its interrupts left to the newer claim",
+                self.vector
+            );
         }
-        VECTORS.lock().remove(&self.vector);
     }
 }
 
 const MSIX_MASKED: u32 = 1;
 
+/// Reads an MSI-X table entry (addr lo, addr hi, data, control), for
+/// `delivered` only.
+fn msix_read(table_virt: u64, entry: u32) -> [u32; 4] {
+    let base = (table_virt + MSIX_ENTRY_BYTES * entry as u64) as *const u32;
+    // SAFETY: as in `msix_write`; the window stays mapped for the device's
+    // life.
+    core::array::from_fn(|i| unsafe { base.add(i).read_volatile() })
+}
+
 /// Writes an MSI-X table entry (16 bytes: addr lo, addr hi, data, control).
 fn msix_write(table_virt: u64, entry: u32, addr: u64, data: u32, control: u32) {
-    let base = (table_virt + 16 * entry as u64) as *mut u32;
+    let base = (table_virt + MSIX_ENTRY_BYTES * entry as u64) as *mut u32;
     // SAFETY: the table was mapped uncached in `map_uc` and `entry` is a valid
     // entry of the claimed device.
     unsafe {
@@ -129,9 +197,19 @@ fn msix_write(table_virt: u64, entry: u32, addr: u64, data: u32, control: u32) {
     }
 }
 
-/// Uncached kernel MMIO windows (MSI-X tables and the like), allocated
-/// incrementally and never freed: used for as long as the device lives.
-static UC_NEXT: IrqLock<u64> = IrqLock::new(0xFFFF_D200_0000_0000);
+/// Uncached kernel MMIO windows, allocated incrementally and never freed:
+/// each one is mapped once for a device and kept for as long as the
+/// device lives (a DMAR unit's registers, a PCI function's MSI-X table,
+/// whose window the function's record keeps for every later claim;
+/// incident 0047). A window is never handed to anything else, so no TLB
+/// shootdown is ever needed for this range.
+const UC_BASE: u64 = 0xFFFF_D200_0000_0000;
+static UC_NEXT: IrqLock<u64> = IrqLock::new(UC_BASE);
+
+/// Bytes of uncached windows mapped so far (`test=pci_reap`).
+pub fn uc_window_bytes() -> u64 {
+    *UC_NEXT.lock() - UC_BASE
+}
 
 pub(crate) fn map_uc(phys: u64, len: u64) -> Result<u64, &'static str> {
     use crate::memory::vmm;
@@ -162,53 +240,86 @@ fn message_address() -> u64 {
     0xFEE0_0000 | ((apic::bsp_id() as u64) << 12)
 }
 
-fn allocate_vector(vectors: &BTreeMap<u8, Weak<KernelObject>>) -> Result<u8, &'static str> {
-    (DEVICE_VECTOR_FIRST..=DEVICE_VECTOR_LAST)
-        .find(|v| !vectors.contains_key(v))
-        .ok_or("hw: no free vectors")
+/// The device vectors in use and, per PCI function, which claim's lines
+/// own its MSI-X entry and MSI capability.
+struct Vectors {
+    lines: BTreeMap<u8, Weak<KernelObject>>,
+    /// Per function (source id): a number that changes with each claim
+    /// (`next_claim`). A line made for an earlier number no longer owns
+    /// the function's interrupts and never touches them (incident 0050).
+    claims: BTreeMap<u16, u64>,
 }
 
-fn new_line(
-    vectors: &mut BTreeMap<u8, Weak<KernelObject>>,
-    source: IrqSource,
-    vector: u8,
-) -> ObjectRef {
-    let obj = KernelObject::new(ObjectKind::Irq(IrqLine {
-        source,
-        vector,
-        pending: AtomicU32::new(0),
-        waiters: WaitQueue::new(),
-    }));
-    vectors.insert(vector, alloc::sync::Arc::downgrade(&obj));
-    obj
+impl Vectors {
+    fn allocate(&self) -> Result<u8, &'static str> {
+        (DEVICE_VECTOR_FIRST..=DEVICE_VECTOR_LAST)
+            .find(|v| !self.lines.contains_key(v))
+            .ok_or("hw: no free vectors")
+    }
+
+    /// A new claim of `function`: the lines of the earlier ones stop
+    /// owning its interrupts.
+    fn next_claim(&mut self, function: u16) -> u64 {
+        let n = self.claims.entry(function).or_insert(0);
+        *n += 1;
+        *n
+    }
+
+    fn new_line(&mut self, source: IrqSource, vector: u8, claim: Option<(u16, u64)>) -> ObjectRef {
+        let obj = KernelObject::new(ObjectKind::Irq(IrqLine {
+            source,
+            vector,
+            claim,
+            pending: AtomicU32::new(0),
+            waiters: WaitQueue::new(),
+        }));
+        self.lines.insert(vector, alloc::sync::Arc::downgrade(&obj));
+        obj
+    }
 }
 
-/// Creates the IRQ object for an MSI-X entry: allocates a vector and
-/// programs the entry towards the boot LAPIC.
-pub fn register_msix(table_phys: u64, entry: u32) -> Result<ObjectRef, &'static str> {
-    let table_virt = map_uc(table_phys, 16 * (entry as u64 + 1))?;
+/// Bytes of one MSI-X table entry (PCI 3.0, 6.8.2).
+pub const MSIX_ENTRY_BYTES: u64 = 16;
+
+/// Creates the IRQ object of a claim of `function` (its source id) for
+/// entry 0 of its MSI-X table (the one a claim hands out) mapped at
+/// `table_virt` by `map_uc`, which outlives the line: allocates a vector
+/// and programs the entry towards the boot LAPIC. The function's earlier
+/// lines stop owning its interrupts.
+pub fn register_msix(table_virt: u64, function: u16) -> Result<ObjectRef, &'static str> {
+    let entry = 0;
     let mut vectors = VECTORS.lock();
-    let vector = allocate_vector(&vectors)?;
+    let vector = vectors.allocate()?;
     msix_write(table_virt, entry, message_address(), vector as u32, 0);
-    Ok(new_line(
-        &mut vectors,
+    let claim = vectors.next_claim(function);
+    Ok(vectors.new_line(
         IrqSource::Msix { table_virt, entry },
         vector,
+        Some((function, claim)),
     ))
 }
 
-/// Creates the IRQ object for an MSI capability (single message): allocates
-/// a vector, programs address and data towards the boot LAPIC and enables
-/// MSI. For functions without MSI-X (2012 Intel controllers, for example).
-pub fn register_msi(cfg_virt: u64, cap: u8) -> Result<ObjectRef, &'static str> {
+/// Creates the IRQ object of a claim of `function` for its MSI capability
+/// (single message): allocates a vector, programs address and data towards
+/// the boot LAPIC and enables MSI. For functions without MSI-X (2012 Intel
+/// controllers, for example). The function's earlier lines stop owning
+/// its interrupts.
+pub fn register_msi(cfg_virt: u64, cap: u8, function: u16) -> Result<ObjectRef, &'static str> {
     let mut vectors = VECTORS.lock();
-    let vector = allocate_vector(&vectors)?;
+    let vector = vectors.allocate()?;
     msi_program(cfg_virt, cap, message_address(), vector as u16);
-    Ok(new_line(
-        &mut vectors,
+    let claim = vectors.next_claim(function);
+    Ok(vectors.new_line(
         IrqSource::Msi { cfg_virt, cap },
         vector,
+        Some((function, claim)),
     ))
+}
+
+/// A claim of `function` that hands out no interrupt line: the earlier
+/// claims' lines stop owning its interrupts all the same.
+pub fn claimed_without_interrupt(function: u16) {
+    VECTORS.lock().next_claim(function);
 }
 
 /// MSI capability (PCI 3.0, 6.8.1): control at +2 (bit 0 enable, bits 6:4
@@ -241,6 +352,23 @@ fn msi_program(cfg_virt: u64, cap: u8, addr: u64, data: u16) {
         }
     }
     msi_enable(cfg_virt, cap, true);
+}
+
+/// The MSI capability's message now: `(address, data, enabled)`.
+fn msi_read(cfg_virt: u64, cap: u8) -> (u64, u32, bool) {
+    let base = cfg_virt + cap as u64;
+    // SAFETY: same as `msi_program`.
+    unsafe {
+        let ctrl = ((base + 2) as *const u16).read_volatile();
+        let lo = ((base + 4) as *const u32).read_volatile() as u64;
+        let (hi, data_off) = if ctrl & MSI_64BIT != 0 {
+            (((base + 8) as *const u32).read_volatile() as u64, 0xC)
+        } else {
+            (0, 8)
+        };
+        let data = ((base + data_off) as *const u16).read_volatile() as u32;
+        (hi << 32 | lo, data, ctrl & MSI_ENABLE != 0)
+    }
 }
 
 fn msi_enable(cfg_virt: u64, cap: u8, on: bool) {
@@ -286,7 +414,10 @@ impl Drop for DmaBuffer {
     }
 }
 
-static VECTORS: IrqLock<BTreeMap<u8, Weak<KernelObject>>> = IrqLock::new(BTreeMap::new());
+static VECTORS: IrqLock<Vectors> = IrqLock::new(Vectors {
+    lines: BTreeMap::new(),
+    claims: BTreeMap::new(),
+});
 
 /// DMA buffers whose memory must never be reused: their driver died with
 /// a device that did not stop mastering the bus (incident 0004). Kept for
@@ -306,18 +437,9 @@ pub fn quarantine(dma: ObjectRef) -> u64 {
 /// Creates the IRQ object for a GSI: allocates a vector, routes and registers it.
 pub fn register_irq(gsi: u32, level: bool, active_low: bool) -> Result<ObjectRef, &'static str> {
     let mut vectors = VECTORS.lock();
-    let vector = (DEVICE_VECTOR_FIRST..=DEVICE_VECTOR_LAST)
-        .find(|v| !vectors.contains_key(v))
-        .ok_or("hw: no free vectors")?;
+    let vector = vectors.allocate()?;
     ioapic::route(gsi, vector, apic::bsp_id(), level, active_low)?;
-    let obj = KernelObject::new(ObjectKind::Irq(IrqLine {
-        source: IrqSource::Gsi { gsi, level },
-        vector,
-        pending: AtomicU32::new(0),
-        waiters: WaitQueue::new(),
-    }));
-    vectors.insert(vector, alloc::sync::Arc::downgrade(&obj));
-    Ok(obj)
+    Ok(vectors.new_line(IrqSource::Gsi { gsi, level }, vector, None))
 }
 
 /// An interrupt line that no device raises, for the wait-set self-test
@@ -339,7 +461,7 @@ pub fn quiet_line_for_selftest() -> ObjectRef {
 /// Entry from the APIC for device vectors.
 pub fn handle_device_irq(vector: u8) {
     crate::random::stir();
-    let line = VECTORS.lock().get(&vector).and_then(Weak::upgrade);
+    let line = VECTORS.lock().lines.get(&vector).and_then(Weak::upgrade);
     match line.as_ref().map(|o| &o.kind) {
         Some(ObjectKind::Irq(l)) => l.fire(),
         _ => warn!("irq: vector {vector:#x} has no registered line"),
@@ -475,7 +597,7 @@ pub fn selftest(info: &boot_protocol::BootInfo) {
         "pit_driver: {status:?}"
     );
     assert!(
-        VECTORS.lock().is_empty(),
+        VECTORS.lock().lines.is_empty(),
         "the vector must be freed when the line is dropped"
     );
 

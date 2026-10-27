@@ -16,6 +16,7 @@ pub fn extract_sha384(salt: &[u8], ikm: &[u8]) -> [u8; 48] {
 
 /// HKDF-Expand: fills `out` with `T(1) || T(2) || ...` where
 /// `T(i) = HMAC(prk, T(i-1) || info || i)`.
+/// The last `T(i)` is wiped: it is output key material.
 fn expand<const N: usize>(
     mac: fn(&[u8], &[&[u8]]) -> [u8; N],
     prk: &[u8],
@@ -30,6 +31,7 @@ fn expand<const N: usize>(
         t = mac(prk, &[prev, info, &counter]);
         chunk.copy_from_slice(&t[..chunk.len()]);
     }
+    crate::wipe(&mut t);
 }
 
 /// HKDF-Expand with SHA-256; `out.len()` must not exceed 255 * 32.

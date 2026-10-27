@@ -26,7 +26,7 @@ mod rfc8448;
 use alloc::string::String;
 use alloc::vec::Vec;
 use aricode_crypto::chacha20::Rng;
-use aricode_crypto::{ct_eq, x25519};
+use aricode_crypto::{ct_eq, x25519, SecretBytes};
 use keys::{Schedule, Secret, Suite};
 use record::{Protection, ALERT, APPLICATION_DATA, CHANGE_CIPHER_SPEC, HANDSHAKE};
 
@@ -105,6 +105,11 @@ pub struct Client {
     roots: Vec<&'static [u8]>,
     extra_roots: Vec<Vec<u8>>,
     now: aricode_x509::ValidityTime,
+    /// Tests only: accept a leaf that is itself a configured root, whatever
+    /// its names. The RFC 8448 trace's server certificate names its host
+    /// only in the subject CN, which no host matches (ADR 0058).
+    #[cfg(test)]
+    trust_pinned_leaf: bool,
     secret_key: [u8; 32],
     session_id: Vec<u8>,
     /// Handshake messages so far (hashed when a secret needs them).
@@ -145,6 +150,8 @@ impl Client {
             rng: Rng::new(rng_seed),
             roots,
             extra_roots: Vec::new(),
+            #[cfg(test)]
+            trust_pinned_leaf: false,
             now,
             secret_key: [0; 32],
             session_id: Vec::new(),
@@ -383,10 +390,12 @@ impl Client {
         match (self.state, typ) {
             (State::WaitServerHello, handshake::SERVER_HELLO) => {
                 let sh = handshake::server_hello(body, &self.session_id)?;
-                let shared = x25519::shared(&self.secret_key, &sh.key_share)
-                    .ok_or(Error::Protocol("bad x25519 key share"))?;
+                // The ephemeral key is used once, whatever the outcome.
+                let shared = x25519::shared(&self.secret_key, &sh.key_share);
+                aricode_crypto::wipe(&mut self.secret_key);
+                let shared = SecretBytes(shared.ok_or(Error::Protocol("bad x25519 key share"))?);
                 self.transcript.extend_from_slice(msg);
-                let (schedule, secrets) = Schedule::new(sh.suite, &shared, &self.transcript);
+                let (schedule, secrets) = Schedule::new(sh.suite, &shared.0, &self.transcript);
                 self.recv = Some(Protection::new(sh.suite, &secrets.server));
                 self.send = Some(Protection::new(sh.suite, &secrets.client));
                 self.suite = sh.suite;
@@ -415,8 +424,14 @@ impl Client {
                 let chain = handshake::certificate(body)?;
                 let mut roots: Vec<&[u8]> = self.roots.clone();
                 roots.extend(self.extra_roots.iter().map(Vec::as_slice));
-                aricode_x509::verify_chain(&chain, &roots, &self.host, self.now)
-                    .map_err(Error::Certificate)?;
+                #[cfg(test)]
+                let pinned = self.trust_pinned_leaf && roots.contains(&chain[0]);
+                #[cfg(not(test))]
+                let pinned = false;
+                if !pinned {
+                    aricode_x509::verify_chain(&chain, &roots, &self.host, self.now)
+                        .map_err(Error::Certificate)?;
+                }
                 self.leaf = chain[0].to_vec();
                 self.transcript.extend_from_slice(msg);
                 self.state = State::WaitCertificateVerify;
@@ -497,6 +512,14 @@ impl Client {
     }
 }
 
+/// The ephemeral key of a connection dropped before its ServerHello; the
+/// generator, the secrets and the record keys wipe themselves.
+impl Drop for Client {
+    fn drop(&mut self) {
+        aricode_crypto::wipe(&mut self.secret_key);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,6 +561,7 @@ mod tests {
         c.transcript = h(CLIENT_HELLO);
         if trust {
             c.add_root(rfc_certificate());
+            c.trust_pinned_leaf = true;
         }
         c
     }
@@ -559,6 +583,8 @@ mod tests {
         assert_eq!(events, [Event::Connected]);
         assert!(c.is_connected());
         assert_eq!(out, [&CCS[..], &h(CLIENT_FINISHED_RECORD)].concat());
+        // The ephemeral key did its one job and is gone (incident 0044).
+        assert_eq!(c.secret_key, [0; 32]);
 
         let (r, out, events) = feed(&mut c, &h(NEW_SESSION_TICKET_RECORD));
         assert_eq!((r, out.len(), events.len()), (Ok(()), 0, 0));
@@ -621,20 +647,25 @@ mod tests {
         assert_eq!(out.len(), 6 + 5 + 3 + 16);
         assert!(feed(&mut c, &[]).0.is_err());
 
+        // Not a configured root: the test bypass does not apply and the
+        // real check refuses it.
         let mut c = rfc_client("rsa", false);
+        c.trust_pinned_leaf = true;
         let (r, _, _) = feed(&mut c, &server_flight());
-        assert_eq!(
-            r,
-            Err(Error::Certificate(aricode_x509::Error::UnknownIssuer))
-        );
+        assert!(matches!(r, Err(Error::Certificate(_))), "{r:?}");
 
-        let mut c = rfc_client("server", true);
-        let (r, _, events) = feed(&mut c, &server_flight());
-        assert_eq!(
-            r,
-            Err(Error::Certificate(aricode_x509::Error::NameMismatch))
-        );
-        assert!(events.is_empty());
+        // Without the test bypass the trace's certificate, which names
+        // `rsa` only in its CN, matches no host (incident 0048).
+        for host in ["rsa", "server"] {
+            let mut c = rfc_client(host, true);
+            c.trust_pinned_leaf = false;
+            let (r, _, events) = feed(&mut c, &server_flight());
+            assert_eq!(
+                r,
+                Err(Error::Certificate(aricode_x509::Error::NameMismatch))
+            );
+            assert!(events.is_empty());
+        }
     }
 
     #[test]

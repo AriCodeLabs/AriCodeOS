@@ -4,7 +4,10 @@
 //! -tls1_3 -rev`, which echoes each line reversed): every cipher suite,
 //! ECDSA P-256/P-384, RSA-PSS and Ed25519 server certificates issued by a
 //! test CA, a CertificateRequest, and rejection of a wrong host name and
-//! of an untrusted CA. Skipped when `openssl` is not installed.
+//! of an untrusted CA. `openssl` is required, as for the QEMU HTTPS
+//! scenarios: the TLS unit tests replay a fixed trace whose certificate is
+//! accepted only through a test switch (ADR 0058), so these are the host
+//! tests that reach a successful `verify_chain`.
 
 use aricode_tls::{Client, Error, Event};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -13,8 +16,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-fn tools() -> bool {
-    Command::new("openssl").arg("version").output().is_ok()
+fn require_openssl() {
+    assert!(
+        Command::new("openssl").arg("version").output().is_ok(),
+        "these tests need openssl installed"
+    );
 }
 
 fn tmpdir(name: &str) -> PathBuf {
@@ -209,10 +215,7 @@ fn exchange(port: u16, host: &str, root: Vec<u8>, line: &[u8]) -> Result<Vec<u8>
 }
 
 fn round_trip(name: &str, leaf: &str, extra: &[&str]) {
-    if !tools() {
-        eprintln!("openssl not installed: skipped");
-        return;
-    }
+    require_openssl();
     let dir = tmpdir(name);
     let ca = make_ca(&dir, "ca", CA_NAME);
     make_leaf(&dir, "ca", leaf);
@@ -298,9 +301,7 @@ fn try_connect(host: &str, trusted: &str) -> Result<Vec<u8>, Error> {
 
 #[test]
 fn wrong_host_name_is_rejected() {
-    if !tools() {
-        return;
-    }
+    require_openssl();
     assert_eq!(
         try_connect("example.com", CA_NAME),
         Err(Error::Certificate(aricode_x509::Error::NameMismatch))
@@ -309,17 +310,13 @@ fn wrong_host_name_is_rejected() {
 
 #[test]
 fn wildcard_name_matches() {
-    if !tools() {
-        return;
-    }
+    require_openssl();
     assert_eq!(try_connect("a.test.local", CA_NAME), Ok(b"x\n".to_vec()));
 }
 
 #[test]
 fn untrusted_ca_is_rejected() {
-    if !tools() {
-        return;
-    }
+    require_openssl();
     assert_eq!(
         try_connect("localhost", "Some Other CA"),
         Err(Error::Certificate(aricode_x509::Error::UnknownIssuer))
@@ -328,9 +325,7 @@ fn untrusted_ca_is_rejected() {
 
 #[test]
 fn impostor_ca_with_the_same_name_is_rejected() {
-    if !tools() {
-        return;
-    }
+    require_openssl();
     // Same subject as the issuer, different key: the signature fails.
     let dir = tmpdir("impostor");
     let _ = make_ca(&dir, "ca", CA_NAME);

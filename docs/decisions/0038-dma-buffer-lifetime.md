@@ -276,3 +276,10 @@ in a row, or a reset that fails, it exits, and the reap order above (bus
 mastering cleared before anything the driver held is freed) covers the
 buffer it still kept. `storage.late_completion` reproduces the late write
 into a reused frame without the fix (incident 0017).
+
+## Note (2026-10-27, incident 0047): failed allocations are refunded
+
+`dma_alloc` charged the quota and kept the charge when the allocation then
+failed (no contiguous memory, the IOMMU mapping, a full handle table). A
+failed allocation now gives its charge back; a buffer the process got
+stays charged after it is freed, as above.

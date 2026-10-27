@@ -16,6 +16,7 @@ bench = false
 aricode-rt = { path = "../../sdk/runtime" }
 aricode-gpt = { path = "../../libs/gpt" }
 aricode-ab = { path = "../../libs/ab" }
+aricode-cmdline = { path = "../../libs/cmdline" }
 aricode-crypto = { path = "../../libs/crypto" }
 aricode-https = { path = "../../sdk/https" }
 aricode-proto = { path = "../../sdk/proto" }

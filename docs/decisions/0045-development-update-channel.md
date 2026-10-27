@@ -242,3 +242,8 @@ without being asked, doors are closed by default, refusals are logged.
   it.
 - Open, besides phase 2: key rotation and revocation remain open for
   both keys (ADR 0029).
+- Note (2026-10-27, ADR 0060, incident 0045): a damaged `[floor]` no
+  longer counts as no floor. It refuses every stable release
+  (`upd-floor-refused`, code 58) until a stable install the owner forced
+  with `--allow-downgrade` rewrites it as the running stable release once
+  it went in (`upd-floor-rewritten`).
