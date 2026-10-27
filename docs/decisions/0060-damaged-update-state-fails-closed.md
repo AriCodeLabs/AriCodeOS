@@ -100,10 +100,14 @@ boot something, and with no record nothing better is known.
   stages no app in that run, and `update` still reports, with the system
   unknown. The next run proceeds.
 - After a repair from a stable image, the development channel stays
-  closed until the next boot: a record AriBoot has not written since it
-  was made or rebuilt (`BootState::written_by_loader`, 0 boots counted)
-  says nothing of the loader's trust, and the updater says so and asks
-  for a reboot.
+  closed until the next boot from a slot: a record AriBoot has not
+  written since it was made or rebuilt (`BootState::written_by_loader`,
+  0 boots counted) says nothing of the loader's trust, and the updater
+  says so. A machine that boots from the ESP never has its record
+  written, so its channel stays closed; and since AriBoot also writes
+  without counting (rejecting a slot, a decision it cannot persist), a
+  loader-written record can read as not written for one more boot. Both
+  err towards keeping the channel closed.
 - After a damaged floor, `upgrade` and `update apply` refuse stable
   releases, upgrades included, until the owner passes
   `--allow-downgrade`; `update` says so in its report.

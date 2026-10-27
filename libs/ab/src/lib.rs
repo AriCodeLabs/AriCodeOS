@@ -105,10 +105,14 @@ impl BootState {
         }
     }
 
-    /// Whether AriBoot wrote this record: it counts every boot it writes
-    /// ([`choose`]), so only a new image's record, or one the updater
-    /// rebuilt (ADR 0060), holds 0 boots. Until AriBoot writes it, its
-    /// `loader_dev_channel` says nothing about the loader.
+    /// Whether AriBoot has written this record: it counts every boot it
+    /// chooses ([`choose`]), and nothing else raises the count, so a record
+    /// holding 0 boots is a new image's or one the updater rebuilt (ADR
+    /// 0060), and its `loader_dev_channel` says nothing about the loader.
+    /// The test errs one way only: AriBoot also writes a record without
+    /// counting (`reject`, `unpersisted`) and the count wraps at
+    /// `u32::MAX`, so a loader-written record can read as not written; the
+    /// development channel then stays closed one boot longer.
     pub fn written_by_loader(&self) -> bool {
         self.boot_count != 0
     }

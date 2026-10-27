@@ -2343,7 +2343,7 @@ fn dev_not_trusted() -> u64 {
         // Rebuilt and not yet written by AriBoot (re-audit L-a), or the
         // record changed while this run started (L-b): not known.
         (true, _) => {
-            "whether this machine's boot loader trusts the development channel is not known: the boot state was rebuilt or changed and AriBoot has not written it since; reboot, then run the command again"
+            "whether this machine's boot loader trusts the development channel is not known: the boot state was rebuilt or changed and AriBoot has not written it since; boot from a slot, then run the command again"
         }
     };
     fault(

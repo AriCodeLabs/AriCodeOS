@@ -225,11 +225,16 @@ L2, L4, I3 and I4 correct, and one medium and two low findings:
   slot and with a confirmation whose write failed.
 - **L-a: after a repair from a stable image the development channel blamed
   the loader** ("does not trust the development channel", pointing at a
-  new stick) until the next boot. AriBoot counts every boot it writes, so
-  a record holding 0 boots was made or rebuilt and not written by it
-  since (`BootState::written_by_loader`); its development flag says
-  nothing. `loader_trust` now tells that case apart and the refusal says
-  the trust is not known and that a reboot restores it.
+  new stick) until the next boot. AriBoot counts every boot it chooses
+  and nothing else raises the count, so a record holding 0 boots was made
+  or rebuilt and not written by it since (`BootState::written_by_loader`);
+  its development flag says nothing. `loader_trust` now tells that case
+  apart and the refusal says the trust is not known and that a boot from
+  a slot restores it. The test errs only towards keeping the channel
+  closed: AriBoot also writes without counting when it rejects a slot or
+  cannot persist a decision, and the count wraps at `u32::MAX`; a machine
+  that boots from the ESP never has the record written (third pass of the
+  re-audit, L1 and L2).
 - **L-b: the race in `dev_not_trusted`** (a record that became valid
   between the check and the repair) fell through to the same message; it
   now gives the same "not known, reboot" message.
