@@ -23,7 +23,6 @@ mod oid {
     pub const SHA256: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01];
     pub const SHA384: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02];
     pub const SHA512: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03];
-    pub const COMMON_NAME: &[u8] = &[0x55, 0x04, 0x03];
     pub const KEY_USAGE: &[u8] = &[0x55, 0x1d, 0x0f];
     pub const SUBJECT_ALT_NAME: &[u8] = &[0x55, 0x1d, 0x11];
     pub const BASIC_CONSTRAINTS: &[u8] = &[0x55, 0x1d, 0x13];
@@ -67,7 +66,6 @@ pub(crate) struct Parsed<'a> {
     pub is_ca: bool,
     pub max_path_len: Option<u32>,
     pub dns_names: Vec<&'a str>,
-    pub common_name: Option<&'a str>,
     pub digital_signature: bool,
     pub server_auth: bool,
     pub name_constraints: Option<NameConstraints<'a>>,
@@ -98,6 +96,7 @@ impl<'a> Parsed<'a> {
         let not_after = der::time(validity.any()?)?;
         validity.finish()?;
         let subject = r.expect_tlv(der::SEQUENCE)?;
+        check_name(subject.value)?;
         let spki = r.expect_tlv(der::SEQUENCE)?;
         let public_key = parse_public_key(spki.value)?;
         r.optional(0x81)?; // issuerUniqueID
@@ -117,7 +116,6 @@ impl<'a> Parsed<'a> {
             server_auth: true,
             max_path_len: None,
             dns_names: Vec::new(),
-            common_name: common_name(subject.value)?,
             name_constraints: None,
         };
         if let Some(extensions) = r.optional(explicit(3))? {
@@ -246,7 +244,6 @@ impl<'a> Certificate<'a> {
             is_ca: p.is_ca,
             max_path_len: p.max_path_len,
             dns_names: p.dns_names,
-            common_name: p.common_name,
             digital_signature: p.digital_signature,
             server_auth: p.server_auth,
             name_constraints: p.name_constraints,
@@ -380,29 +377,20 @@ fn name_constraints(value: &[u8]) -> Result<NameConstraints<'_>, Error> {
     Ok(nc)
 }
 
-/// First commonName of a Name, if it is a readable string.
-fn common_name(name: &[u8]) -> Result<Option<&str>, Error> {
+/// Checks that a Name is a sequence of SETs of AttributeTypeAndValue
+/// (an OID and a value). Nothing in it is read: host names come only from
+/// subjectAltName (ADR 0058).
+fn check_name(name: &[u8]) -> Result<(), Error> {
     let mut rdns = Reader::new(name);
     while !rdns.is_empty() {
         let mut set = Reader::new(rdns.expect(der::SET)?);
         while !set.is_empty() {
             let mut atv = Reader::new(set.expect(der::SEQUENCE)?);
-            let id = atv.expect(der::OID)?;
-            let value = atv.any()?;
-            if id == oid::COMMON_NAME
-                && matches!(
-                    value.tag,
-                    der::UTF8_STRING
-                        | der::PRINTABLE_STRING
-                        | der::IA5_STRING
-                        | der::TELETEX_STRING
-                )
-            {
-                return Ok(core::str::from_utf8(value.value).ok());
-            }
+            atv.expect(der::OID)?;
+            atv.any()?;
         }
     }
-    Ok(None)
+    Ok(())
 }
 
 /// A dNSName: printable ASCII without spaces, not empty. NUL or control

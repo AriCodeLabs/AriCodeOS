@@ -23,7 +23,8 @@ SHA-256.
    P-384 and Ed25519 keys; SHA-256/384/512 RSA, RSA-PSS and ECDSA
    signatures; basicConstraints, keyUsage, SAN), chain building to a trust
    anchor with CA, path-length and date checks, host name matching (SAN
-   dNSName with one left-most wildcard, CN only without SAN). 17 embedded
+   dNSName with one left-most wildcard, CN only without SAN; since ADR
+   0058 the CN is never read). 17 embedded
    roots (Let's Encrypt, Google Trust Services, DigiCert, Amazon, Sectigo
    USERTrust, GlobalSign), listed with fingerprints in `libs/x509/roots/`.
 3. **TLS 1.3 client** (`aricode-tls`): a no-I/O state machine like

@@ -20,6 +20,7 @@ const EC_INT: &[u8] = cert!("ec-int");
 const EC_LEAF: &[u8] = cert!("ec-leaf");
 const ED_ROOT: &[u8] = cert!("ed-root");
 const ED_LEAF: &[u8] = cert!("ed-leaf");
+const CN_ONLY_LEAF: &[u8] = cert!("cn-only-leaf");
 const NOTCA_LEAF: &[u8] = cert!("notca-leaf");
 const PLEN_INT0: &[u8] = cert!("plen-int0");
 const PLEN_INT1: &[u8] = cert!("plen-int1");
@@ -47,7 +48,6 @@ fn parses_rsa_chain() {
     assert_eq!(root.signature_algorithm, SignatureAlgorithm::RsaPkcs1Sha256);
     assert!(root.is_ca && root.issuer == root.subject);
     assert_eq!(root.not_after, 2_682_374_400); // GeneralizedTime 2055-01-01
-    assert_eq!(root.common_name, Some("AriCode Test RSA Root"));
     let int = Certificate::parse(RSA_INT).unwrap();
     assert_eq!(int.signature_algorithm, SignatureAlgorithm::RsaPkcs1Sha384);
     assert_eq!(int.issuer, root.subject);
@@ -56,7 +56,6 @@ fn parses_rsa_chain() {
     assert_eq!(leaf.signature_algorithm, SignatureAlgorithm::RsaPkcs1Sha512);
     assert_eq!((leaf.not_before, leaf.not_after), (JAN_2026, JAN_2027));
     assert_eq!(leaf.dns_names, ["*.example.com", "example.com"]);
-    assert_eq!(leaf.common_name, Some("example.com"));
     assert!(!leaf.is_ca);
     match leaf.public_key {
         PublicKey::Rsa { n, e } => assert_eq!((n.len(), e), (256, &[1, 0, 1][..])),
@@ -84,8 +83,7 @@ fn parses_ec_and_ed25519() {
     let ed = Certificate::parse(ED_LEAF).unwrap();
     assert_eq!(ed.signature_algorithm, SignatureAlgorithm::Ed25519);
     assert!(matches!(ed.public_key, PublicKey::Ed25519(_)));
-    assert!(ed.dns_names.is_empty() && !ed.is_ca);
-    assert_eq!(ed.common_name, Some("ed.example.net"));
+    assert!(ed.dns_names == ["ed.example.net"] && !ed.is_ca);
 }
 
 #[test]
@@ -143,7 +141,6 @@ fn hostname_matching() {
     ] {
         assert!(!matches_hostname(&leaf, host), "{host}");
     }
-    // Common name only when there is no subjectAltName dNSName.
     let ed = Certificate::parse(ED_LEAF).unwrap();
     assert!(matches_hostname(&ed, "ed.example.net") && !matches_hostname(&ed, "x.example.net"));
     let ec = Certificate::parse(EC_LEAF).unwrap();
@@ -165,7 +162,7 @@ fn verifies_good_chains() {
         Some(NOW),
     )
     .unwrap();
-    assert_eq!(leaf.common_name, Some("example.com"));
+    assert_eq!(leaf.dns_names, ["*.example.com", "example.com"]);
     verify_chain(
         &[RSA_PSS_LEAF, RSA_INT],
         &[RSA_ROOT],
@@ -375,8 +372,8 @@ fn embedded_roots_parse_and_self_verify() {
             Ok(c) => {
                 assert!(
                     verify_signature(&c.public_key, c.signature_algorithm, c.tbs, c.signature),
-                    "{:?}",
-                    c.common_name
+                    "{:02x?}",
+                    c.subject
                 );
                 verified += 1;
             }
@@ -457,10 +454,11 @@ fn name_constraints_bind_intermediates() {
         under(cert!("nc-wild"), cert!("nc-int"), "a.good.example"),
         Ok(())
     );
-    // A constrained chain needs a subjectAltName: no common name fallback.
+    // A leaf without a subjectAltName matches no host, constrained or not
+    // (ADR 0058).
     assert_eq!(
         under(cert!("nc-cn"), cert!("nc-int"), "www.good.example"),
-        Err(Error::NameConstraint)
+        Err(Error::NameMismatch)
     );
     // Critical: understood now, so no longer refused as unsupported.
     assert_eq!(
@@ -936,5 +934,24 @@ fn a_compromised_emudhra_key_is_refused() {
     assert_eq!(
         verify_chain(&[der], &[der], "example.com", None).err(),
         Some(Error::Distrusted)
+    );
+}
+
+#[test]
+fn a_common_name_is_no_host_name() {
+    // A leaf naming its host only in the subject CN (incident 0048): it
+    // parses and chains, but matches no host (ADR 0058).
+    let leaf = Certificate::parse(CN_ONLY_LEAF).unwrap();
+    assert!(leaf.dns_names.is_empty());
+    assert!(!matches_hostname(&leaf, "www.example.org"));
+    assert_eq!(
+        verify_chain(
+            &[CN_ONLY_LEAF, EC_INT],
+            &[EC_ROOT],
+            "www.example.org",
+            Some(NOW)
+        )
+        .err(),
+        Some(Error::NameMismatch)
     );
 }

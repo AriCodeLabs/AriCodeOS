@@ -184,8 +184,6 @@ pub struct Certificate<'a> {
     pub max_path_len: Option<u32>,
     /// subjectAltName dNSName entries.
     pub dns_names: Vec<&'a str>,
-    /// First subject commonName.
-    pub common_name: Option<&'a str>,
     /// keyUsage digitalSignature (true without a keyUsage extension). TLS
     /// 1.3 server authentication signs with the key, so it is required.
     pub digital_signature: bool,
@@ -278,9 +276,10 @@ pub fn verify_signature(
 }
 
 /// True if `host` is one of the certificate's subjectAltName dNSNames (a
-/// single left-most `*` label matches exactly one label), or, only when the
-/// certificate has no dNSName, its common name. Case-insensitive; a
-/// trailing dot on `host` is ignored.
+/// single left-most `*` label matches exactly one label). The subject's
+/// common name is never read as a host name (ADR 0058): a certificate
+/// without a dNSName matches no host. Case-insensitive; a trailing dot on
+/// `host` is ignored.
 /// An IP host (an IPv4 address, `matches_hostname`) matches a dNSName
 /// that spells it exactly, never a wildcard.
 pub fn matches_hostname(cert: &Certificate, host: &str) -> bool {
@@ -295,11 +294,7 @@ pub fn matches_hostname(cert: &Certificate, host: &str) -> bool {
             name_matches(pattern, host)
         }
     };
-    if cert.dns_names.is_empty() {
-        cert.common_name.is_some_and(matches)
-    } else {
-        cert.dns_names.iter().any(|name| matches(name))
-    }
+    cert.dns_names.iter().any(|name| matches(name))
 }
 
 /// Four decimal octets separated by dots.
@@ -315,8 +310,8 @@ fn is_ipv4(host: &str) -> bool {
 }
 
 /// Checks the leaf's names against a CA's nameConstraints: every dNSName.
-/// A constrained chain needs a subjectAltName (a common name is no
-/// constrained name type), and an IP host is refused when the CA also
+/// A constrained chain needs a subjectAltName (as every chain does,
+/// `matches_hostname`), and an IP host is refused when the CA also
 /// constrains IP addresses, which this client does not evaluate.
 fn check_name_constraints(
     leaf: &Certificate,
