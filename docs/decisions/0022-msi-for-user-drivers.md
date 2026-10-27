@@ -43,7 +43,8 @@ any 2012 controller.
 
 ## Note (2026-10-27, ADR 0061)
 
-Masking on drop (point 2) applies only while the source still carries the
-line's own vector: a line can outlive its claim, and a newer claim of the
-function programs another vector, which the old line leaves alone
-(incident 0050).
+Masking on drop (point 2) applies only while the line's claim is the
+function's latest: a line can outlive its claim, and once the function is
+claimed again the old line leaves its interrupts to the newer claim
+(incident 0050). A claim that uses MSI-X turns MSI off, so the two are
+never on together.

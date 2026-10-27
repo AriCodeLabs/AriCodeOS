@@ -623,12 +623,13 @@ latter briefly to add the region.
     `test=pci_reap` checks the order and the bookkeeping with an `igb` that
     advertises FLR.
   - An interrupt line can outlive its claim (it has `TRANSFER`). Dropped,
-    it masks its MSI-X entry or disables MSI only if the entry or
-    capability still carries its own vector, so a line dropped after the
-    function was claimed again leaves the new claim's interrupts on. A
-    claim uses MSI-X only if the table's register and its BAR read as at
-    boot, and turns MSI-X off when it does not use it (ADR 0061,
-    `test=pci_stale_line`).
+    it masks its MSI-X entry or disables MSI only if its claim is still
+    the function's latest (claim numbers kept under `VECTORS`; the drop
+    never reads the device), so a line dropped after the function was
+    claimed again leaves the new claim's interrupts on. A claim uses
+    MSI-X only if the table's register and its BAR read as at boot and
+    memory decoding is on, turns MSI off when it uses MSI-X and MSI-X off
+    when it does not (ADR 0061, `test=pci_stale_line`).
 - `test=drivers`: `pit_driver` services five PIT IRQ0s (channel 0 at 100 Hz)
   and allocates, maps and verifies a DMA buffer; `fb_driver` receives the
   framebuffer as an MMIO region and paints 64x64 pixels; the kernel checks

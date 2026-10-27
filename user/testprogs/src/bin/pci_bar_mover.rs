@@ -3,8 +3,9 @@
 //! Driver that moves a BAR of its function and dies (`test=pci_stale_line`,
 //! incident 0050): through its writable configuration page it turns memory
 //! decoding off (so the moved BAR overlaps nothing) and writes a new
-//! address into the BAR that holds the function's MSI-X table, then
-//! faults. The next claim must not program the table where the BAR was.
+//! address into a BAR (the kernel's test picks the one that holds the
+//! MSI-X table, or another), then faults. The next claim must not program
+//! the table where the function does not decode it.
 //! Argument: the BAR register's offset in the high 32 bits, the value to
 //! write in the low 32 bits.
 //! Handles: 0x10004 = the function's configuration (claim). Exit code

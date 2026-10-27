@@ -28,8 +28,9 @@ pci: 00:02.0 1af4:1042 claimed again (the previous driver died) (MSI-X entry 0)
 Reason: 00:02.0: dropping the old claim's line must leave the new claim's MSI-X entry on (vector 0x31)
 ```
 
-And with the loop of the test restricted to the xHCI, which the scenario
-starts with MSI only (`usb_hid_msi`), on develop:
+And with the loop of the test restricted to the xHCI, which the first
+version of the scenario started with MSI only (`usb_hid_msi`; it now
+offers both and the test parks its BAR so that it gets MSI), on develop:
 
 ```text
 pci: 00:06.0 1b36:000d claimed again (the previous driver died) (MSI)
@@ -58,25 +59,25 @@ before init claims again.
 
 ### Fix
 
-The line masks only what it programmed (ADR 0061, point 1). Its drop
-reads the entry or capability and masks it only if it still holds the
-line's own message: its vector towards the boot LAPIC. A vector is never
-given to two live lines (`allocate_vector` skips the ones in use), so the
-newer claim's entry always holds another vector. The read, the check and
-the mask run under `VECTORS`, the lock both `register_msix` and
-`register_msi` program under, so no entry can be torn. A drop that leaves
-the source alone says so:
+A line touches its function's interrupts only while its claim is the
+latest (ADR 0061, point 1). Under `VECTORS` the kernel keeps a number
+per PCI function that every claim changes (`register_msix`,
+`register_msi`, or `claimed_without_interrupt` for a claim with no
+line), and each MSI-X or MSI line records its claim's number. The drop
+masks only if that number is still the function's, and decides it
+without reading the device. The decision and the mask run under
+`VECTORS`, the lock every claim programs under, so no entry can be torn.
+A drop that leaves the source alone says so, after releasing the lock:
 
 ```text
-irq: vector 0x30 released; its device was programmed again since (a newer claim), left as it is
+irq: vector 0x30 released; its function was claimed again since, its interrupts left to the newer claim
 ```
 
-Revoking the old line when the function is claimed again was considered
-and not chosen (ADR 0061, "Alternatives"): it covers only the reclaim,
-needs the device record to track the line and an ordering between the
-PCI locks and `VECTORS`, whereas what the hardware holds decides exactly
-whether the entry is still the line's, whatever way the line outlived
-its claim.
+The first version of the fix read the entry in the drop and masked only
+if it still held the line's vector; the audit of the branch showed what
+those reads cost (see "Audit"), and the claim numbers replaced them.
+Revoking the old line on reclaim was not chosen (ADR 0061,
+"Alternatives").
 
 ## 2. The MSI-X table was programmed where its BAR had been
 
@@ -112,13 +113,15 @@ another device's moved BAR decodes.
 
 ### Fix
 
-A claim uses MSI-X only if the register and the BAR it names both read as
-at boot (ADR 0061, point 2), with the same check that decides whether a
-BAR is offered; otherwise the function gets MSI if it has it, else no
-interrupt, logged:
+A claim uses MSI-X only where the function decodes the table (ADR 0061,
+point 2): the register and the BAR it names both read as at boot (the
+same check that decides whether a BAR is offered) and memory decoding is
+on after the claim's command write (added after the audit, below);
+otherwise the function gets MSI if it has it, else no interrupt, logged:
 
 ```text
 pci: 00:03.0 MSI-X table's BAR 1 moved since boot: MSI-X not used
+pci: 00:04.0 memory decoding stays off (a BAR was not offered): MSI-X not used
 ```
 
 A claim that does not use MSI-X now turns it off whether or not the
@@ -127,18 +130,77 @@ claim left MSI-X enabled, and the device would go on sending the old
 message, whose vector belongs to another line once the old one is gone.
 The test checks MSI-X is off after the refused claim.
 
+## Audit (2026-10-27)
+
+An independent audit of `20a326f` and `b1f88f8`, ordered by the
+coordinator, confirmed both fixes, that the tests fail without them, and
+that nothing in the branch explains the 4-CPU `iommu.isolation` failure
+(below). Its findings, each fixed on this branch after merging develop
+(`a789243`), the first two reproduced first:
+
+- **Medium (pre-existing): MSI-X was programmed while memory decoding
+  could be off.** A claim turns decoding on only when every assigned BAR
+  is offered. A driver that moved another BAR (the virtio keyboard's BAR
+  4) and turned decoding off left the table's BAR in place: the next
+  claim took MSI-X, its writes went nowhere and MSI-X was enabled with
+  whatever entry 0 held (the dead claim's vector, maybe another line's by
+  then), firing once a driver turned decoding and bus mastering on. With
+  `pci_bar_mover` moving the keyboard's BAR 4, on `a789243`:
+
+  ```text
+  pci: 00:04.0 BAR 4 moved since boot: not offered
+  pci: 00:04.0 1af4:1052 claimed again (the previous driver died) (MSI-X entry 0)
+  Reason: 00:04.0: a claim must not program the MSI-X table at 0x81042000 after BAR 4 moved with decoding off (the entry there reads back as delivered: false)
+  ```
+
+  Fixed: MSI-X also needs memory decoding on after the claim's command
+  write (ADR 0061, point 2); otherwise MSI or nothing, and MSI-X off.
+  The dead line's drop had also read all ones there and logged "a newer
+  claim", which was untrue; the drop no longer reads (next point but one).
+- **Low (reachable through the branch): MSI and MSI-X both enabled.** An
+  MSI claim's line that lives on no longer turns MSI off once the
+  function is claimed again, and the MSI-X path never cleared MSI
+  Enable. The test parks the xHCI's BAR so that a claim gets MSI, keeps
+  that line, puts the BAR back and claims again; on `a789243`:
+
+  ```text
+  pci: 00:06.0 1b36:000d claimed again (the previous driver died) (MSI-X entry 0)
+  Reason: 00:06.0: a claim that takes MSI-X must turn off the MSI an earlier claim left enabled (its line still lives)
+  ```
+
+  Fixed: the MSI-X path turns MSI off before enabling MSI-X (ADR 0061,
+  point 3).
+- **Low: the drop read the device with `VECTORS` held and interrupts
+  off.** Non-posted reads could stall on a function within 100 ms of an
+  FLR (until the completion timeout, while other CPUs spin on `VECTORS`
+  in `handle_device_irq`) or reach another device that moved a BAR onto
+  the old table address (read side effects). Fixed by removing the reads:
+  ownership comes from the claim numbers (Fix of defect 1). Only the
+  test's `hw::delivered` reads the device, outside any drop.
+- **Low: `info!` inside the `VECTORS` critical section.** The drop now
+  logs after releasing the lock.
+- **Info: the `msix_window` comment** said the dead line masks its entry
+  unconditionally; corrected.
+
+With the claim-number check disabled, `pci.stale_line` fails at the
+original assertion (`dropping the old claim's line must leave the new
+claim's MSI-X entry on (vector 0x31)`), so the scenario still tells the
+fix apart.
+
 ## Tests
 
-- `pci.stale_line` (new, areas `pci`, `drivers`, `interrupts`): both
-  parts above, plus that the newest claim's line, dropped, still masks its
-  source (MSI-X and MSI). It failed on develop as shown and passes with
-  the fix. Logs of the runs: `/home/serverbig/aricode-logs/incident-0050/`.
-- `cargo xtask check`; `cargo xtask test --level unit` (718 host tests);
-  `cargo xtask test --all --area pci,drivers,interrupts`: 28 scenarios, 0
-  failed.
-- Full suite on `20a326f` (kernel interrupt code): with 1 CPU, 200
-  scenarios, 0 failed; with `--cpus 4`, 200 scenarios, 1 failed:
-  `iommu.isolation` (below). Not rerun.
+- `pci.stale_line` (new, areas `pci`, `drivers`, `interrupts`, xHCI with
+  MSI and MSI-X): the stale lines (MSI-X on the virtio-blk, MSI on the
+  xHCI with its BAR parked), the newest line still masking its source,
+  MSI off under MSI-X, and a moved BAR (the table's on the virtio-net,
+  another on the virtio keyboard) with decoding off. Each part failed
+  before its fix as shown and passes with it. Logs of the runs:
+  `/home/serverbig/aricode-logs/incident-0050/`.
+- On `20a326f`: `cargo xtask check`; `cargo xtask test --level unit` (718
+  host tests); `cargo xtask test --all --area pci,drivers,interrupts`: 28
+  scenarios, 0 failed; full suite with 1 CPU, 200 scenarios, 0 failed;
+  with `--cpus 4`, 200 scenarios, 1 failed: `iommu.isolation` (below).
+  Not rerun.
 
 ## Observed during the tests: `iommu.isolation` failed once with 4 CPUs
 
@@ -171,18 +233,20 @@ have to wait, bounded, for the count instead of reading it once.
 Instrumentation that would confirm it: record the CPU and time of the
 `FAULTS` increment and of `dma_rogue`'s read. Nothing in this branch
 touches that path: the test's only interrupt line is claimed and
-programmed as before, and dropped only after `dma_rogue` exits. It needs
-its own incident and branch.
+programmed as before, and dropped only after `dma_rogue` exits (the
+audit agreed). The coordinator is reproducing it on develop as its own
+incident.
 
 ## What remains
 
-- A line's drop after its own driver moved the BAR reads the entry at the
-  old address: nothing decodes it there (so nothing is written), or a
-  device whose driver arranged for it to echo the line's exact message,
-  which then gets the mask itself (ADR 0061, "Alternatives").
+- A drop of the latest claim's line still writes (posted) its MSI-X entry
+  at the boot-time table address. If its own driver moved that BAR, the
+  write goes where the BAR was: nowhere, or into a function whose driver
+  moved a BAR there, which the kernel cannot see without reading (ADR
+  0061, "Consequences"). The same write was made before this incident.
 - The holder of an old line can still wait on it. Before the function is
   claimed again it fires for the dead claim's device, as when it was
-  handed over; after, never (the device sends another vector).
-- The fix was not reviewed by an independent audit on this branch; the
-  coordinator orders it before the merge (failure protocol, step 6).
+  handed over; after, never (the device sends another vector or nothing).
+- The kernel does not read entry 0 back after programming it (ADR 0061,
+  "Alternatives").
 - `iommu.isolation` with 4 CPUs (above): its own incident.
