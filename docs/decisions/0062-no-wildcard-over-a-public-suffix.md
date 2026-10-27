@@ -27,8 +27,11 @@ did.
    exception rule names it (`*.ck` makes `foo.ck` a suffix, `!www.ck`
    keeps `www.ck` registrable), or a wildcard rule's own base is it
    (`*.kobe.jp` makes `kobe.jp` one, so `*.kobe.jp` cannot cover
-   `city.kobe.jp`, as in Chrome). Names with an empty label match
-   nothing.
+   `city.kobe.jp`, as in Chrome). For the nine bases of more than one
+   label this makes (`kobe.jp`, `sch.uk`, `nom.br` and six other `.jp`
+   cities) it is stricter than Chrome, which still allows such a
+   wildcard for a host that is itself a public suffix (`x.kobe.jp`): it
+   errs towards refusing. Names with an empty label match nothing.
 2. The private section (`github.io`, cloud and hosting names) is not used:
    those suffixes are run by one operator that holds certificates for
    them (GitHub Pages serves `*.github.io`), and Chrome leaves it out for

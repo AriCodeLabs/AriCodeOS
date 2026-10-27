@@ -284,7 +284,9 @@ pub fn verify_signature(
 /// single left-most `*` label matches exactly one label). The subject's
 /// common name is never read as a host name (ADR 0058): a certificate
 /// without a subjectAltName matches no host. Case-insensitive; a trailing
-/// dot on `host` is ignored.
+/// dot on `host` or a name is ignored, and a host or name with an empty
+/// label matches nothing. A wildcard never stands on a public suffix
+/// (ADR 0062).
 /// An IP host (an IPv4 address) matches an iPAddress entry with that
 /// address, or a dNSName that spells it exactly, never a wildcard.
 pub fn matches_hostname(cert: &Certificate, host: &str) -> bool {

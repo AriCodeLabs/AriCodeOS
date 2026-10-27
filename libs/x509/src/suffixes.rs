@@ -20,9 +20,10 @@ fn rules() -> impl Iterator<Item = &'static str> {
 /// True if `name` (labels in ASCII, no trailing dot, any case) is a public
 /// suffix of the ICANN section for a wildcard: a rule names it, a wildcard
 /// rule names its parent and no exception rule names it, or a wildcard
-/// rule's own base is it (`*.kobe.jp` makes `kobe.jp` one too, as Chrome
-/// reads the list for certificates, so `*.kobe.jp` cannot cover
-/// `city.kobe.jp`; audit of ea368aa, finding 2). Single-label names are not
+/// rule's own base is it (`*.kobe.jp` makes `kobe.jp` one too, so
+/// `*.kobe.jp` cannot cover `city.kobe.jp`, as Chrome refuses; audit of
+/// ea368aa, finding 2; for a host that is itself a suffix, `x.kobe.jp`,
+/// this is stricter than Chrome, ADR 0062). Single-label names are not
 /// in the extract: callers refuse them before asking.
 pub(crate) fn is_public_suffix(name: &str) -> bool {
     #[cfg(test)]
