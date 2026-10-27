@@ -257,8 +257,8 @@ pub fn encode_floor(version: u32) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DamagedFloor;
 
-/// The stable floor in a `[floor]` body; [`DamagedFloor`] when damaged
-/// (the caller reports it and keeps no floor rather than guess one).
+/// The stable floor in a `[floor]` body; [`DamagedFloor`] when damaged,
+/// which never means "no floor" (`policy::floor_for_run`, ADR 0060).
 pub fn parse_floor(text: &str) -> Result<Option<u32>, DamagedFloor> {
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
     let Some(line) = lines.next() else {

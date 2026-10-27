@@ -477,8 +477,10 @@ fn http_serve(mut stream: std::net::TcpStream, update: Option<&Path>) {
             break;
         }
     }
-    let request = String::from_utf8_lossy(&buf[..have]);
-    let target = request.split(' ').nth(1).unwrap_or("/");
+    let Some((_, target)) = request_line(&buf[..have]) else {
+        let _ = stream.write_all(BAD_REQUEST);
+        return;
+    };
     // Routing ignores the query, as a file server does.
     let path = target.split('?').next().unwrap_or("/");
     if path == "/early-hints" {
@@ -541,6 +543,59 @@ fn http_serve(mut stream: std::net::TcpStream, update: Option<&Path>) {
     }
 }
 
+/// The answer to a request whose first line is not one [`request_line`]
+/// accepts.
+const BAD_REQUEST: &[u8] =
+    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\nConnection: close\r\n\r\nbad request";
+
+/// The method and target of an HTTP request, from its first line: `METHOD
+/// SP target SP HTTP/x.y CRLF`, the method upper-case letters, the target
+/// visible ASCII only (RFC 9112, 3.2: no space, no control byte). `None`
+/// for anything else, which is answered 400: no byte a client sends
+/// reaches a response header or a log line raw (incident 0045).
+fn request_line(request: &[u8]) -> Option<(&str, &str)> {
+    let line = request.split(|&b| b == b'\n').next()?.strip_suffix(b"\r")?;
+    let mut parts = line.split(|&b| b == b' ');
+    let (method, target, version) = (parts.next()?, parts.next()?, parts.next()?);
+    let visible = |b: &u8| (0x21..=0x7E).contains(b);
+    let valid = parts.next().is_none()
+        && !method.is_empty()
+        && method.iter().all(u8::is_ascii_uppercase)
+        && version.starts_with(b"HTTP/")
+        && version.iter().all(visible)
+        && !target.is_empty()
+        && target.iter().all(visible);
+    let text = |b| std::str::from_utf8(b).ok();
+    valid
+        .then(|| Some((text(method)?, text(target)?)))
+        .flatten()
+}
+
+/// `bytes` for a log line: printable ASCII as it is (a backslash
+/// doubled), any other byte as `\xNN`, so a client cannot write control
+/// sequences or line breaks into the host's terminal or log (incident
+/// 0045).
+fn log_escaped(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|&b| match b {
+            b'\\' => String::from("\\\\"),
+            0x20..=0x7E => char::from(b).to_string(),
+            _ => format!("\\x{b:02x}"),
+        })
+        .collect()
+}
+
+/// A file name the update servers serve: letters, digits, `-`, `.` and
+/// `_`, never a path. Only such a name goes into a response, as a file or
+/// in a `Location`.
+fn plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b))
+}
+
 /// The public source's path ([`crate::image::PUBLIC_SOURCE`]), served
 /// locally by [`mirror_route`].
 pub const MIRROR_LATEST: &str = "/AriCodeLabs/AriCodeOS/releases/latest/download/";
@@ -562,23 +617,25 @@ enum MirrorRoute<'a> {
 /// published there. `latest` answers 302 to the release, with a
 /// 9,243-byte header line as github.com sends; the release answers 302 to
 /// the asset with a 900-byte signed query, as GitHub's asset URLs; the
-/// asset is the file. `None` for other paths.
+/// asset is the file. `None` for other paths, and for names that are not
+/// [`plain_name`]s: a redirect carries nothing else in its `Location`.
 fn mirror_route(path: &str) -> Option<MirrorRoute<'_>> {
-    if let Some(name) = path.strip_prefix(MIRROR_LATEST) {
+    let named = |prefix: &str| path.strip_prefix(prefix).filter(|n| plain_name(n));
+    if let Some(name) = named(MIRROR_LATEST) {
         return Some(MirrorRoute::Redirect(redirect(
             "302 Found",
             &format!("{MIRROR_TAG}{name}"),
             9243,
         )));
     }
-    if let Some(name) = path.strip_prefix(MIRROR_TAG) {
+    if let Some(name) = named(MIRROR_TAG) {
         return Some(MirrorRoute::Redirect(redirect(
             "302 Found",
             &format!("{MIRROR_ASSETS}{name}?sig={}", "s".repeat(900)),
             0,
         )));
     }
-    path.strip_prefix(MIRROR_ASSETS).map(MirrorRoute::Asset)
+    named(MIRROR_ASSETS).map(MirrorRoute::Asset)
 }
 
 /// A redirect to `location` with a body that must not reach the client's
@@ -604,11 +661,10 @@ pub const DEV_SOURCE_DIR: &str = "dev";
 
 /// `200` with the file `name` of `dir` (plain names only), or `404`.
 pub fn file_response(dir: &Path, name: &str) -> Vec<u8> {
-    let plain = !name.is_empty()
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b));
-    match plain.then(|| std::fs::read(dir.join(name)).ok()).flatten() {
+    match plain_name(name)
+        .then(|| std::fs::read(dir.join(name)).ok())
+        .flatten()
+    {
         Some(data) => {
             let mut r = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -664,20 +720,31 @@ fn serve_update_connection(mut stream: std::net::TcpStream, dir: &Path) {
             break;
         }
     }
-    let request = String::from_utf8_lossy(&buf[..have]);
-    let target = request.split(' ').nth(1).unwrap_or("/");
-    let path = target.split('?').next().unwrap_or("/");
-    let name = path.trim_start_matches('/').to_string();
-    let response = match mirror_route(path) {
-        Some(MirrorRoute::Redirect(r)) => r,
-        Some(MirrorRoute::Asset(asset)) => file_response(dir, asset),
-        None => file_response(dir, &name),
+    let request = &buf[..have];
+    let (response, what) = match request_line(request) {
+        Some((method, target)) => {
+            let path = target.split('?').next().unwrap_or("/");
+            let response = match mirror_route(path) {
+                Some(MirrorRoute::Redirect(r)) => r,
+                Some(MirrorRoute::Asset(asset)) => file_response(dir, asset),
+                None => file_response(dir, path.trim_start_matches('/')),
+            };
+            (response, format!("{method} {target}"))
+        }
+        None => {
+            let line = request.split(|&b| b == b'\n').next().unwrap_or_default();
+            let shown = log_escaped(&line[..line.len().min(200)]);
+            (
+                BAD_REQUEST.to_vec(),
+                format!("bad request line \"{shown}\""),
+            )
+        }
     };
     let outcome = match stream.write_all(&response).and_then(|()| stream.flush()) {
         Ok(()) => format!("{} bytes sent", response.len()),
         Err(e) => format!("failed: {e}"),
     };
-    println!("[xtask] {peer} GET /{name}: {outcome}");
+    println!("[xtask] {peer} {what}: {outcome}");
     let _ = std::io::stdout().flush();
 }
 
@@ -1800,6 +1867,93 @@ mod tests {
         assert!(get(a.port(), &file).ends_with("serial = 7\n"));
         // Without a channel the redirects lead to nothing.
         assert!(get(b.port(), &file).starts_with("HTTP/1.1 404"));
+    }
+
+    /// Incident 0045: `serve-update` took the target as whatever followed
+    /// the first space, CR and LF included, and put it in a `Location` (a
+    /// `Set-Cookie` line of the client's choice in the response) and in
+    /// its log line.
+    #[test]
+    fn serve_update_keeps_request_bytes_out_of_headers() {
+        use std::io::{Read, Write};
+        let tmp = crate::test_util::TempDir::new("serve-update-target");
+        std::fs::write(tmp.path().join("index"), b"serial = 7\n").unwrap();
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let latest = super::MIRROR_LATEST;
+        let requests = [
+            format!("GET {latest}index\r\nSet-Cookie:%20a=1 HTTP/1.1\r\n\r\n"),
+            format!("GET {latest}index\rSet-Cookie:%20a=1 HTTP/1.1\r\n\r\n"),
+            format!("GET {latest}a%0d%0aSet-Cookie:x HTTP/1.1\r\n\r\n"),
+            format!("GET {latest}index HTTP/1.1\r\n\r\n"),
+        ];
+        let dir = tmp.path().to_path_buf();
+        let count = requests.len();
+        let server = std::thread::spawn(move || {
+            for _ in 0..count {
+                let (s, _) = listener.accept().unwrap();
+                super::serve_update_connection(s, &dir);
+            }
+        });
+        let answers: Vec<String> = requests
+            .iter()
+            .map(|request| {
+                let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+                c.write_all(request.as_bytes()).unwrap();
+                let mut out = String::new();
+                c.read_to_string(&mut out).unwrap();
+                out
+            })
+            .collect();
+        server.join().unwrap();
+        for out in &answers {
+            assert!(!out.lines().any(|l| l.starts_with("Set-Cookie")), "{out:?}");
+        }
+        assert!(
+            answers[0].starts_with("HTTP/1.1 400"),
+            "CR LF in the target"
+        );
+        assert!(answers[1].starts_with("HTTP/1.1 400"), "a bare CR");
+        // Escaped, the name is no plain file name: no redirect to it.
+        assert!(answers[2].starts_with("HTTP/1.1 404"), "{:?}", answers[2]);
+        assert_eq!(location(&answers[3]), format!("{}index", super::MIRROR_TAG));
+    }
+
+    #[test]
+    fn request_targets_and_log_text_are_checked() {
+        use super::{log_escaped, request_line};
+        use std::io::{Read, Write};
+        assert_eq!(
+            request_line(b"GET /index HTTP/1.1\r\nHost: x\r\n\r\n"),
+            Some(("GET", "/index"))
+        );
+        assert_eq!(
+            request_line(b"HEAD /a?b=c HTTP/1.0\r\n"),
+            Some(("HEAD", "/a?b=c"))
+        );
+        for bad in [
+            &b"GET /index HTTP/1.1"[..],
+            b"GET /index HTTP/1.1\n",
+            b"GET /in\x1bdex HTTP/1.1\r\n",
+            b"GET /in\x7fdex HTTP/1.1\r\n",
+            b"GET /\xc3\xa9 HTTP/1.1\r\n",
+            b"GET  /index HTTP/1.1\r\n",
+            b"GET /index HTTP/1.1 x\r\n",
+            b"GET /index\r\n",
+            b"get /index HTTP/1.1\r\n",
+            b"GET /index FTP/1.1\r\n",
+            b"",
+        ] {
+            assert_eq!(request_line(bad), None, "{bad:?}");
+        }
+        assert_eq!(log_escaped(b"/a\r\n\x1b[2J\\x"), r"/a\x0d\x0a\x1b[2J\\x");
+        // The scenarios' server refuses such a line too.
+        let server = super::UpdateServer::start(std::path::Path::new("missing")).unwrap();
+        let mut c = std::net::TcpStream::connect(("127.0.0.1", server.port())).unwrap();
+        c.write_all(b"GET /hola\r\nX: y HTTP/1.1\r\n\r\n").unwrap();
+        let mut out = String::new();
+        c.read_to_string(&mut out).unwrap();
+        assert!(out.starts_with("HTTP/1.1 400"), "{out}");
     }
 
     /// The `Location` of a response.

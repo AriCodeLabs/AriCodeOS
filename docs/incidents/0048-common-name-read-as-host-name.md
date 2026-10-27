@@ -1,7 +1,8 @@
 # Incident 0048: A certificate's common name was read as a host name
 
 - Opened: 2026-10-27. Status: fixed on `fix/x509-no-cn-fallback`
-  (ADR 0058).
+  (ADR 0058) and, for wildcards over public suffixes, on
+  `fix/x509-public-suffix-wildcards` (ADR 0062).
 - Found by: the failure-pattern audit of 2026-10-25 (audit D, L1; the
   part of L23 left open by incident 0029). Not seen on a machine.
 - Environment: every HTTPS connection (`aricode-tls` through
@@ -62,6 +63,35 @@ Also from the audit: the shell names the subjectAltName in its message,
 and ADR 0058 no longer claims Firefox ignores the common name in every
 case.
 
-## Left open
+## Wildcards over public suffixes (2026-10-27)
 
-Wildcards over public suffixes (`*.co.uk`): ADR 0058, "Consequences".
+Left open by the fix above and closed on
+`fix/x509-public-suffix-wildcards` (ADR 0062). Evidence: at develop
+`49b3c28`, `name_matches("*.co.uk", "example.co.uk")` returned true (the
+wildcard needed only two labels after it); the host test
+`no_wildcard_over_a_public_suffix` fails with the suffix check disabled
+(`*.co.uk matched example.co.uk`). The base of a `*.` name is now checked
+against the ICANN section of the Public Suffix List, shipped as an
+MPL-2.0 extract with the owner's approval; the private section
+(`github.io`) is not used.
+
+An independent audit of that commit (`ea368aa`) compared the lookup with
+an independent implementation of the list's algorithm over 30 780 names
+(no mismatch) and reproduced the extract byte for byte, and found:
+
+- **Medium:** the list was scanned once per wildcard name, before the
+  chain was verified, and a leaf may carry thousands of names: 16 000
+  wildcard names cost 1.2 s per handshake on the development host. A
+  wildcard can only stand on the host's parent, so that name is now
+  looked up once, lazily (`many_wildcard_names_cost_one_suffix_lookup`:
+  4000 wildcard names, at most one lookup; 2000 without the cache).
+- `*.kobe.jp` covered `city.kobe.jp` (an exception rule's child), where
+  Chrome refuses: a wildcard rule's own base now counts as a suffix.
+- `update.sh` wrote an empty extract from a download that was not a list:
+  it now requires both ICANN markers and 5000 rules.
+- ADR 0062 said browsers use the list (only Chrome does) and that a newly
+  listed suffix errs towards refusing (it is accepted until the next
+  release); NOTICE did not say where the data file's source form is, and
+  the file had no copyright line. Corrected; the console font, the other
+  third-party file, is now named in NOTICE too.
+- Names with an empty label (`*.co.uk..`) now match nothing.

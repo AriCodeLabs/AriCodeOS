@@ -1,0 +1,50 @@
+# A damaged boot state is never read as fresh (incident 0045, ADR 0060):
+# slot A does not verify and the state's CRC is damaged, so AriBoot reads
+# A active, rejects it and boots from the ESP, leaving the record as it
+# is. The first `update apply` rewrites it from what AriBoot booted (the
+# ESP: AriBoot's own reading, A active) and installs nothing, recorded;
+# the second installs into B as on a sound record, and B boots next.
+# The slot cases (B booted, pending or not) are host tests of
+# `aricode_ab::recovered`: AriBoot rewrites a damaged record whenever a
+# slot boots, so only the updater's own run can meet one there.
+name = "update.state_damaged"
+description = "a damaged boot state is rebuilt from what AriBoot booted; nothing installed in that run"
+level = "full"
+areas = ["update", "boot", "shell"]
+disk = "a-corrupt-state-damaged"
+timeout_secs = 150
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update apply --allow-downgrade", "update apply --allow-downgrade", "diag", "reboot"]
+[boots.expect]
+exit = 0
+serial_contains = [
+    "slots: invalid boot state, assuming A active",
+    "slots: no valid image; booting from the ESP",
+    "updater: the boot state in ARIBOOT was damaged: rewritten from what AriBoot booted (the ESP) as active A, none pending; nothing installed: run the command again",
+    "update: updater exited with 60",
+    "updater: system: installed version unknown; installing 2 (--allow-downgrade)",
+    "updater: installed into slot B",
+    "updater: state: active A, pending B (3 tries); reboot to try it",
+    ": upd-state-damaged (code 60)",
+    "AriCodeOS: rebooting",
+]
+serial_order = [
+    "update: updater exited with 60",
+    "updater: installed into slot B",
+]
+serial_absent = ["KERNEL PANIC", "upd-state-write"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "slots: state active A, pending B (3 tries)",
+    "slots: booting from slot B (image version 2, pending confirmation)",
+    "AriInit: boot confirmed on slot B",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "invalid boot state"]

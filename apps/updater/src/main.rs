@@ -43,7 +43,9 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use aricode_ab::{schedule, BootState, Image, ImageError, Manifest, Slot, PART_STATE, PART_UPDATE};
+use aricode_ab::{
+    schedule, BootState, Booted, Image, ImageError, Manifest, Slot, PART_STATE, PART_UPDATE,
+};
 use aricode_crypto::sha256::sha256;
 use aricode_rt::sys::block::{find_partition, BlockClient};
 use aricode_rt::sys::fs::{FsClient, FsError};
@@ -53,8 +55,8 @@ use aricode_update_index::files::{self, Files, ReadError};
 use aricode_update_index::lists::{self, PlanItem, StagedEntry};
 use aricode_update_index::{
     self as upd, best_app, best_system, check_fresh, compare, compare_system, decide_system,
-    stored, updater_arg, Change, Channel, Index, Keys, Migration, Refusal, Sources, SystemChange,
-    SystemDecision, SystemId, SystemRules,
+    stored, updater_arg, Change, Channel, Index, Keys, Migration, Refusal, Sources, StableFloor,
+    SystemChange, SystemDecision, SystemId, SystemRules,
 };
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -143,6 +145,9 @@ mod code {
     /// the reason, so "installed version unknown" is never unexplained
     /// (incident 0021).
     pub const ACTIVE_IMAGE: u64 = 59;
+    /// The boot state in `ARIBOOT` was damaged (ADR 0060): rebuilt from
+    /// what AriBoot booted, and nothing installed in that run.
+    pub const STATE_DAMAGED: u64 = 60;
 }
 
 /// Everything printed, kept in `last.log` as the record of the last run
@@ -492,9 +497,15 @@ impl Disk {
     }
 
     /// The disk if this machine has the A/B layout; nothing said or
-    /// recorded when it has not (final re-audit, L-b).
-    fn probe() -> Option<Self> {
-        Self::open_with(false).ok()
+    /// recorded when it has not (final re-audit, L-b). A damaged boot
+    /// state is said, repaired and returned as `Err`, as by [`Disk::open`]
+    /// (audit of incident 0045, L1).
+    fn probe() -> Result<Option<Self>, u64> {
+        match Self::open_with(false) {
+            Ok(disk) => Ok(Some(disk)),
+            Err(code) if state_damaged(code) => Err(code),
+            Err(_) => Ok(None),
+        }
     }
 
     /// `report`: whether failures are faults (`open`) or a silent `None`
@@ -535,7 +546,12 @@ impl Disk {
                 "cannot read the boot state",
             ));
         }
-        let state = BootState::decode(&blk.buffer()[..SECTOR]).unwrap_or(BootState::fresh(Slot::A));
+        // A damaged record is never read as fresh (incident 0045): which
+        // slot is active is not known from it, and guessing A would take
+        // the running slot B for the one to install into.
+        let Some(state) = BootState::decode(&blk.buffer()[..SECTOR]) else {
+            return Err(repair_boot_state(&mut blk, state_part.0));
+        };
         let target = state.active.other();
         let (Some(active_part), Some(slot_part)) = (
             find_partition(&mut blk, state.active.partition()),
@@ -823,6 +839,71 @@ impl Disk {
     }
 }
 
+/// What AriBoot booted, from the keys it alone writes on the command line
+/// (ADR 0045). `Err` when the line cannot be read or names no slot.
+fn booted() -> Result<Booted, ()> {
+    use aricode_cmdline::{keys, CmdLine};
+    let mut buf = [0u8; sys::CMDLINE_MAX];
+    let line = CmdLine::new(sys::cmdline(SYSTEM, &mut buf).map_err(|_| ())?);
+    let slot = match line.get(keys::BOOT_SLOT) {
+        None if !line.has(keys::BOOT_SLOT) => None,
+        Some("A") => Some(Slot::A),
+        Some("B") => Some(Slot::B),
+        _ => return Err(()),
+    };
+    Ok(Booted {
+        slot: slot.map(|s| (s, line.has_flag(keys::BOOT_PENDING))),
+        dev_channel: slot.is_some() && line.get(keys::BOOT_CHANNEL) == Some("dev"),
+    })
+}
+
+/// The exit codes of a run that found the boot state damaged
+/// ([`repair_boot_state`]): it ends there, whatever it was doing.
+fn state_damaged(code: u64) -> bool {
+    code == code::STATE_DAMAGED || code == code::STATE_WRITE
+}
+
+/// The boot state at `lba` is damaged (ADR 0060): rewritten from what
+/// AriBoot booted (`aricode_ab::recovered`) and read back, said and
+/// recorded. Nothing else is done in this run, so an install never starts
+/// from a record the run had to rebuild: the owner sees the repair and
+/// runs the command again. Returns the exit code.
+fn repair_boot_state(blk: &mut BlockClient, lba: u64) -> u64 {
+    let Ok(booted) = booted() else {
+        return fault(
+            code::STATE_DAMAGED,
+            "upd-state-damaged",
+            "the boot state in ARIBOOT is damaged and the command line does not say what AriBoot booted: nothing installed",
+        );
+    };
+    let state = aricode_ab::recovered(booted);
+    blk.buffer()[..SECTOR].copy_from_slice(&state.encode());
+    let written = blk.write(lba, 1).is_ok()
+        && blk.flush().is_ok()
+        && blk.read(lba, 1).is_ok()
+        && BootState::decode(&blk.buffer()[..SECTOR]) == Some(state);
+    if !written {
+        return fault(
+            code::STATE_WRITE,
+            "upd-state-write",
+            "the boot state in ARIBOOT is damaged and could not be rewritten: nothing installed",
+        );
+    }
+    let from = match booted.slot {
+        Some((slot, false)) => format!("slot {}", slot.name()),
+        Some((slot, true)) => format!("slot {}, which passed init's checks", slot.name()),
+        None => String::from("the ESP"),
+    };
+    fault(
+        code::STATE_DAMAGED,
+        "upd-state-damaged",
+        &format!(
+            "the boot state in ARIBOOT was damaged: rewritten from what AriBoot booted ({from}) as active {}, none pending; nothing installed: run the command again",
+            state.active.name()
+        ),
+    )
+}
+
 // ---------------------------------------------------------------- policy
 
 /// A system as reports name it: `12` for a release (as before ADR 0045),
@@ -894,36 +975,78 @@ fn installed_id(m: &Manifest) -> SystemId<'_> {
 /// The stable floor (audit of ADR 0045, M1): the newest stable release
 /// this machine ran, kept in the `[floor]` section of `state` (seeded by
 /// `usb-image`), raised to the active system when that is a newer stable
-/// release, and saved. `state` is updated in place, so the sections this
-/// run writes later keep it.
+/// release, and saved. A damaged floor is never replaced here (ADR 0060,
+/// `floor_for_run`): it refuses every stable release, and only a stable
+/// install forced with `--allow-downgrade` rewrites it once it went in
+/// ([`rewrite_damaged_floor`]). `state` is updated in place, so the
+/// sections this run writes later keep it.
 fn stable_floor(
     fs: &mut FsClient,
     state: &mut String,
     installed: &Option<Manifest>,
-) -> Option<u32> {
+) -> StableFloor {
     let body = lists::section(state, lists::FLOOR).unwrap_or_default();
-    let floor = lists::parse_floor(&body).unwrap_or_else(|_| {
+    let (floor, save) = upd::floor_for_run(
+        lists::parse_floor(&body),
+        installed.as_ref().map(installed_id),
+    );
+    if floor == StableFloor::Damaged {
         fault(
             code::FLOOR,
             "upd-floor-damaged",
-            "the stable floor in updater/state is damaged: ignored (the running stable release sets it again)",
+            "the stable floor in updater/state is damaged: the newest stable release this machine ran is unknown, so stable releases are refused without --allow-downgrade (an install forced with it rewrites the floor as the running release)",
         );
-        None
-    });
-    let raised = upd::raise_floor(floor, installed.as_ref().map(installed_id));
-    if let (true, Some(version)) = (raised != floor, raised) {
-        let next = lists::with_section(state, lists::FLOOR, &lists::encode_floor(version));
-        if write_file(fs, upd::STATE_FILE, next.as_bytes()) {
-            *state = next;
-        } else {
-            fault(
-                code::FILE_WRITE,
-                "upd-floor-write",
-                "cannot save the stable floor",
-            );
-        }
     }
-    raised
+    if let Some(version) = save {
+        save_floor(fs, state, version);
+    }
+    floor
+}
+
+/// Writes `version` as the stable floor in `state` and in the file.
+fn save_floor(fs: &mut FsClient, state: &mut String, version: u32) -> bool {
+    let next = lists::with_section(state, lists::FLOOR, &lists::encode_floor(version));
+    if write_file(fs, upd::STATE_FILE, next.as_bytes()) {
+        *state = next;
+        true
+    } else {
+        fault(
+            code::FILE_WRITE,
+            "upd-floor-write",
+            "cannot save the stable floor",
+        );
+        false
+    }
+}
+
+/// After `offered` went into its slot: a damaged floor is rewritten as the
+/// running stable release when the owner forced the install with
+/// `--allow-downgrade` (ADR 0060, `floor_rewrite`), said and recorded.
+fn rewrite_damaged_floor(
+    fs: &mut FsClient,
+    state: &mut String,
+    installed: &Option<Manifest>,
+    offered: SystemId,
+    allow_downgrade: bool,
+) {
+    let body = lists::section(state, lists::FLOOR).unwrap_or_default();
+    let Some(version) = upd::floor_rewrite(
+        lists::parse_floor(&body),
+        installed.as_ref().map(installed_id),
+        offered,
+        allow_downgrade,
+    ) else {
+        return;
+    };
+    if save_floor(fs, state, version) {
+        fault(
+            code::FLOOR,
+            "upd-floor-rewritten",
+            &format!(
+                "the stable floor in updater/state was damaged: rewritten as stable {version}, the running release (--allow-downgrade); any newer release this machine ran is forgotten"
+            ),
+        );
+    }
 }
 
 /// The system install rule (ADR 0029 decision 5, ADR 0045 decision 2,
@@ -939,14 +1062,21 @@ fn decide_system_install(
     let offered_ident = ident(offered.channel, offered.version, offered.commit);
     match decide_system(change, offered, rules) {
         SystemDecision::Install => {
-            let below_floor = rules
-                .stable_floor
-                .is_some_and(|f| offered.channel == Channel::Stable && offered.version < f);
-            if below_floor && change != SystemChange::Within(Change::Downgrade) {
-                say!(
-                    "system: downgrading below the stable floor {} to {offered_ident} (--allow-downgrade)",
-                    rules.stable_floor.unwrap_or(0)
-                );
+            let stable = offered.channel == Channel::Stable;
+            match rules.stable_floor {
+                StableFloor::At(floor)
+                    if stable
+                        && offered.version < floor
+                        && change != SystemChange::Within(Change::Downgrade) =>
+                {
+                    say!(
+                        "system: downgrading below the stable floor {floor} to {offered_ident} (--allow-downgrade)"
+                    )
+                }
+                StableFloor::Damaged if stable => say!(
+                    "system: installing {offered_ident} with the stable floor damaged (--allow-downgrade)"
+                ),
+                _ => {}
             }
             match change {
                 SystemChange::Unknown => say!(
@@ -986,6 +1116,13 @@ fn decide_system_install(
             "upd-downgrade-refused",
             &format!(
                 "system: refused: a downgrade: stable {offered_ident} is older than stable {floor}, the newest release this machine ran (--allow-downgrade to force)"
+            ),
+        )),
+        SystemDecision::Refused(Refusal::FloorDamaged) => Err(fault(
+            code::FLOOR,
+            "upd-floor-refused",
+            &format!(
+                "system: refused: the stable floor is damaged, so stable {offered_ident} could be older than a release this machine ran (--allow-downgrade to install it)"
             ),
         )),
         SystemDecision::Refused(Refusal::SwitchNotExplicit) if !rules.explicit_channel => {
@@ -1067,7 +1204,11 @@ fn apply(allow_downgrade: bool, keys: &Keys) -> u64 {
     };
     match decide_system_install(&installed, installed_id(&manifest), rules) {
         Ok(true) => match disk.install_from_update(total, &manifest, keys) {
-            Ok(()) => 0,
+            Ok(()) => {
+                let offered = installed_id(&manifest);
+                rewrite_damaged_floor(&mut fs, &mut state, &installed, offered, allow_downgrade);
+                0
+            }
             Err(code) => code,
         },
         Ok(false) => 0,
@@ -1570,7 +1711,7 @@ fn report(fs: &mut FsClient, sources: &Sources, keys: &Keys, channel: Channel) -
             };
             let floor = match &mut state {
                 Ok(text) => stable_floor(fs, text, &installed),
-                Err(_) => None,
+                Err(_) => StableFloor::Unset,
             };
             let offered = SystemId {
                 channel,
@@ -1581,7 +1722,11 @@ fn report(fs: &mut FsClient, sources: &Sources, keys: &Keys, channel: Channel) -
             // Below the floor but not below the installed release (that is
             // a plain downgrade, named as such).
             let below_floor = channel == Channel::Stable
-                && floor.is_some_and(|f| s.version < f)
+                && match floor {
+                    StableFloor::At(f) => s.version < f,
+                    StableFloor::Damaged => true,
+                    StableFloor::Unset => false,
+                }
                 && change != SystemChange::Within(Change::Downgrade);
             available +=
                 usize::from(change == SystemChange::Within(Change::Upgrade) && !below_floor);
@@ -1591,8 +1736,11 @@ fn report(fs: &mut FsClient, sources: &Sources, keys: &Keys, channel: Channel) -
             }
             let text = match (change, floor) {
                 (SystemChange::Within(Change::Same), _) => system_change_text(change),
-                (_, Some(f)) if below_floor => format!(
+                (_, StableFloor::At(f)) if below_floor => format!(
                     "older than stable {f}, the newest release this machine ran; upgrade refuses it without --allow-downgrade"
+                ),
+                (_, StableFloor::Damaged) if below_floor => String::from(
+                    "the stable floor is damaged; upgrade refuses it without --allow-downgrade",
                 ),
                 _ => system_change_text(change),
             };
@@ -1977,7 +2125,10 @@ fn upgrade(
         {
             if plan.items.iter().any(|p| matches!(p, PlanItem::System(..))) {
                 result = not_reported(&what);
-            } else if let Some(mut disk) = Disk::probe() {
+            } else if let Some(mut disk) = match Disk::probe() {
+                Ok(disk) => disk,
+                Err(code) => return code,
+            } {
                 // The plan has no system line (it was up to date at
                 // `update`), yet an index offers a newer one or another
                 // channel's: say so instead of staying silent (re-audit,
@@ -2017,6 +2168,9 @@ fn upgrade(
                         Err(code) => result = code,
                     }
                 }
+                // Nothing is staged in a run that found the boot state
+                // damaged (audit of incident 0045, L1).
+                Err(code) if state_damaged(code) => return code,
                 Err(code) => result = code,
             }
         }
@@ -2084,8 +2238,16 @@ fn upgrade(
     }
     // 3. Install.
     if let Some((mut disk, offer, installed)) = system_job {
-        if let Err(code) = upgrade_system(fs, net, &mut disk, &offer, &installed, keys) {
-            result = code;
+        match upgrade_system(fs, net, &mut disk, &offer, &installed, keys) {
+            Ok(()) => {
+                let offered = SystemId {
+                    channel: offer.channel,
+                    version: offer.entry.version,
+                    commit: offer.commit,
+                };
+                rewrite_damaged_floor(fs, &mut state, &installed, offered, allow_downgrade);
+            }
+            Err(code) => result = code,
         }
     }
     let mut staged: Vec<StagedEntry> = Vec::new();
@@ -2113,19 +2275,39 @@ fn upgrade(
     }
 }
 
+/// What the boot state says about the loader's trust in the development
+/// channel (ADR 0045).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LoaderTrust {
+    Trusts,
+    /// No A/B layout, a loader before ADR 0045, or one built without the
+    /// key.
+    DoesNot,
+    /// The record was made or rebuilt (ADR 0060) and AriBoot has not
+    /// written it since (`BootState::written_by_loader`).
+    NotRecorded,
+    /// The record is damaged.
+    Damaged,
+}
+
 /// Whether this machine's boot loader trusts the development channel: the
-/// flag AriBoot writes in the boot state on every boot (ADR 0045). Without
-/// the A/B layout, or with a state written by a loader before ADR 0045,
-/// it does not.
-fn loader_trusts_dev() -> bool {
+/// flag AriBoot writes in the boot state on every boot (ADR 0045).
+fn loader_trust() -> LoaderTrust {
     let Ok(mut blk) = BlockClient::new(BLOCK, HW, CHUNK) else {
-        return false;
+        return LoaderTrust::DoesNot;
     };
     let Some((first_lba, _)) = find_partition(&mut blk, PART_STATE) else {
-        return false;
+        return LoaderTrust::DoesNot;
     };
-    blk.read(first_lba, 1).is_ok()
-        && BootState::decode(&blk.buffer()[..SECTOR]).is_some_and(|s| s.loader_dev_channel)
+    if blk.read(first_lba, 1).is_err() {
+        return LoaderTrust::DoesNot;
+    }
+    match BootState::decode(&blk.buffer()[..SECTOR]) {
+        None => LoaderTrust::Damaged,
+        Some(s) if s.loader_dev_channel => LoaderTrust::Trusts,
+        Some(s) if !s.written_by_loader() => LoaderTrust::NotRecorded,
+        Some(_) => LoaderTrust::DoesNot,
+    }
 }
 
 /// The keys of this run (ADR 0045): the release key, and the development
@@ -2137,17 +2319,32 @@ fn run_keys() -> Keys {
     upd::trusted_keys(
         aricode_crypto::trust::public_key(),
         compiled,
-        compiled.is_some() && loader_trusts_dev(),
+        compiled.is_some() && loader_trust() == LoaderTrust::Trusts,
     )
 }
 
 /// Why the development channel is closed on this machine, said and
 /// recorded (owner's rule: refusals are logged).
 fn dev_not_trusted() -> u64 {
-    let why = if aricode_crypto::trust::dev_channel_key().is_none() {
-        "this build does not carry the development channel's key"
-    } else {
-        "this machine's boot loader does not trust the development channel (install it from a stick made with cargo xtask usb-image --dev-source URL)"
+    let compiled = aricode_crypto::trust::dev_channel_key().is_some();
+    if compiled && loader_trust() == LoaderTrust::Damaged {
+        // Not known while the boot state is damaged (audit of incident
+        // 0045, L2): repaired first, like any run that opens the disk.
+        say!("development channel: the boot state in ARIBOOT is damaged, so whether this machine's loader trusts the channel is not known");
+        if let Err(code) = Disk::open() {
+            return code;
+        }
+    }
+    let why = match (compiled, loader_trust()) {
+        (false, _) => "this build does not carry the development channel's key",
+        (true, LoaderTrust::DoesNot) => {
+            "this machine's boot loader does not trust the development channel (install it from a stick made with cargo xtask usb-image --dev-source URL)"
+        }
+        // Rebuilt and not yet written by AriBoot (re-audit L-a), or the
+        // record changed while this run started (L-b): not known.
+        (true, _) => {
+            "whether this machine's boot loader trusts the development channel is not known: the boot state was rebuilt or changed and AriBoot has not written it since; boot from a slot, then run the command again"
+        }
     };
     fault(
         code::DEV_NOT_TRUSTED,

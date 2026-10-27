@@ -550,6 +550,10 @@ pub enum DiskVariant {
     /// A active with an image whose signature is invalid: AriBoot boots
     /// from the ESP and the installed version is unknown (ADR 0029, H1).
     CorruptA,
+    /// Like `CorruptA` with the boot state's CRC damaged as well: AriBoot
+    /// reads A active, rejects it and boots from the ESP without rewriting
+    /// the state, so the updater meets the damaged record (incident 0045).
+    CorruptAStateDamaged,
     /// Like `PendingB` (B version 2 is confirmed on boot) but UPDATE holds
     /// version 1: `update apply` must refuse the downgrade.
     PendingBOlderUpdate,
@@ -615,6 +619,7 @@ impl DiskVariant {
             "b-exhausted" => Self::ExhaustedB,
             "b-corrupt" => Self::CorruptB,
             "a-corrupt" => Self::CorruptA,
+            "a-corrupt-state-damaged" => Self::CorruptAStateDamaged,
             "pending-b-older-update" => Self::PendingBOlderUpdate,
             "fs-nearly-full" => Self::FsNearlyFull,
             "fs-one-short" => Self::FsOneShort,
@@ -908,7 +913,10 @@ pub fn write_test_disk(
             ),
             _ => (system_image(1, false)?, system_image(2, false)?),
         };
-        if variant == DiskVariant::CorruptA {
+        if matches!(
+            variant,
+            DiskVariant::CorruptA | DiskVariant::CorruptAStateDamaged
+        ) {
             write_slot(&mut img, PART_SYSA, &system_image(1, true)?)?;
         } else {
             write_slot(&mut img, PART_SYSA, &v1)?;
@@ -935,6 +943,7 @@ pub fn write_test_disk(
             }
             DiskVariant::Slots
             | DiskVariant::CorruptA
+            | DiskVariant::CorruptAStateDamaged
             | DiskVariant::FsNearlyFull
             | DiskVariant::FsOneShort
             | DiskVariant::UpdateEmpty
@@ -950,6 +959,10 @@ pub fn write_test_disk(
             | DiskVariant::OversizedPackage => {}
         }
         init_ariboot(&mut img, PART_ARIBOOT, state);
+        if variant == DiskVariant::CorruptAStateDamaged {
+            // One bit of the CRC (bytes 60..64 of the state sector).
+            img[PART_ARIBOOT.0 as usize * 512 + 60] ^= 1;
+        }
     }
     write_sparse(path, &img)
 }

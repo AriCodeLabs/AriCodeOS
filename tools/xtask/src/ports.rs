@@ -108,10 +108,24 @@ mod tests {
         all.sort_unstable();
         all.dedup();
         assert_eq!(all.len(), 6, "two live leases share a port: {all:?}");
-        // Not held open: the program the port is for can bind it.
-        for &p in a.ports() {
-            std::net::TcpListener::bind(("127.0.0.1", p)).expect("leased port is bindable");
-        }
+        // Not held open: the program the port is for can bind it. Another
+        // socket can take a port between the lease and this bind (other
+        // tests of this binary bind and connect in parallel, and so does
+        // the rest of the host; incident 0049), so a fresh lease is tried
+        // when that happens: a lease that held its ports would fail every
+        // time, a chance collision almost never twice.
+        let bindable = |lease: &PortLease| {
+            lease
+                .ports()
+                .iter()
+                .map(|&p| std::net::TcpListener::bind(("127.0.0.1", p)))
+                .collect::<Result<Vec<_>, _>>()
+                .is_ok()
+        };
+        assert!(
+            bindable(&a) || (0..4).any(|_| bindable(&PortLease::take(3).unwrap())),
+            "five leases in a row had a port that could not be bound"
+        );
         let gone = a.ports().to_vec();
         drop(a);
         let leased = LEASED.lock().unwrap();

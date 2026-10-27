@@ -103,7 +103,7 @@ of this document.
 | L20 | The TLS key seed falls back to zeros if `sys::random` fails [C-L9] — **fixed** (incident 0036, merged `d11c242`) |
 | L21 | SSH sequence numbers wrap without a forced rekey; strict KEX only when the client offers it (Terrapin with old clients) [C-L10, D-L6, D-L7] — **fixed** (incident 0035, merged `3d4906b`) |
 | L22 | A driver's device keeps DMA access to client buffers after `mmio_unmap` [C-L11] — **fixed** (incident 0039, merged `e2f6192`) |
-| L23 | X.509: duplicate extensions accepted, a CA accepted as a leaf, CN fallback, wildcards over public suffixes, IP vs dNSName, NUL/control bytes in dNSName [D-L1..L4] — **fixed** except wildcards over public suffixes (incident 0029; the CN fallback: incident 0048, ADR 0058) |
+| L23 | X.509: duplicate extensions accepted, a CA accepted as a leaf, CN fallback, wildcards over public suffixes, IP vs dNSName, NUL/control bytes in dNSName [D-L1..L4] — **fixed** (incident 0029; the CN fallback: incident 0048, ADR 0058; wildcards over public suffixes: ADR 0062) |
 
 ### Info
 
@@ -159,7 +159,9 @@ removed on `fix/compositor-ownership`, ADR 0053).
   the CN fallback and wildcards over public suffixes (L23), and the
   infos below.
 - 2026-10-27: the CN fallback (L23) on `fix/x509-no-cn-fallback`
-  (incident 0048, ADR 0058); wildcards over public suffixes stay open.
+  (incident 0048, ADR 0058); wildcards over public suffixes on
+  `fix/x509-public-suffix-wildcards` (ADR 0062, Public Suffix List extract
+  under MPL-2.0).
 - 2026-10-27: four infos of the crypto library fixed on
   `fix/crypto-hardening` (incident 0044): secrets wiped when dropped or
   where their buffer ends (what is not covered is listed in the incident);
@@ -190,6 +192,17 @@ removed on `fix/compositor-ownership`, ADR 0053).
   - typed-ahead console input: what a dead reader left unread, and what
     arrives before the next reader, is discarded and logged (ADR 0057;
     new scenario `console.orphan_input`).
+- 2026-10-27, info (`fix/updater-state`, incident 0045, ADR 0060): a boot
+  state with a bad CRC is no longer read as fresh; the updater rewrites
+  it from what AriBoot booted (the slot that passed init's checks,
+  pending or not; audit H1, re-audit M1) and installs nothing in that
+  run.
+- 2026-10-27, info (same branch): a damaged stable floor fails closed,
+  refusing every stable release until a stable install forced with
+  `--allow-downgrade` rewrites it as the running release once it went in.
+- 2026-10-27, info (same branch): `serve-update` answers 400 to a request
+  line that is not `METHOD SP target SP HTTP/x.y` with a visible-ASCII
+  target, logs it escaped, and redirects only to plain file names.
 - 2026-10-27, two PCI defects the second audit of incident 0047
   confirmed, on `fix/pci-stale-irq-line` (incident 0050, ADR 0061, both
   reproduced on develop first): an interrupt line that outlived its claim
