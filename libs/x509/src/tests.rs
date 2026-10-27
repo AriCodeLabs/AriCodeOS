@@ -753,7 +753,11 @@ fn constraints_on_roots_paths_and_ip_hosts() {
         "10.0.2.2"
     ));
     assert!(
-        !is_ipv4("10.0.2") && !is_ipv4("10.0.2.256") && !is_ipv4("a.0.2.2") && is_ipv4("10.0.2.2")
+        ipv4("10.0.2").is_none()
+            && ipv4("10.0.2.256").is_none()
+            && ipv4("10.0.2.2.1").is_none()
+            && ipv4("a.0.2.2").is_none()
+            && ipv4("10.0.2.2") == Some([10, 0, 2, 2])
     );
     // At most MAX_EXTENSIONS extensions.
     let many: Vec<Vec<u8>> = (0..=32u8)
@@ -940,7 +944,8 @@ fn a_compromised_emudhra_key_is_refused() {
 #[test]
 fn a_common_name_is_no_host_name() {
     // A leaf naming its host only in the subject CN (incident 0048): it
-    // parses and chains, but matches no host (ADR 0058).
+    // parses, and `openssl verify` chains it to EC_ROOT, but it matches no
+    // host (ADR 0058).
     let leaf = Certificate::parse(CN_ONLY_LEAF).unwrap();
     assert!(leaf.dns_names.is_empty());
     assert!(!matches_hostname(&leaf, "www.example.org"));
@@ -953,5 +958,38 @@ fn a_common_name_is_no_host_name() {
         )
         .err(),
         Some(Error::NameMismatch)
+    );
+}
+
+#[test]
+fn an_ip_host_matches_an_ip_address_entry() {
+    let ip_san = |values: &[&[u8]]| {
+        let names: Vec<u8> = values.iter().flat_map(|v| tlv(0x87, v)).collect();
+        built(None, &[extension(&[0x55, 0x1d, 0x11], &tlv(0x30, &names))])
+    };
+    let der = ip_san(&[&[10, 0, 2, 2]]);
+    let leaf = Certificate::parse(&der).unwrap();
+    assert_eq!(leaf.ip_addresses, [[10, 0, 2, 2]]);
+    assert!(matches_hostname(&leaf, "10.0.2.2") && matches_hostname(&leaf, "10.0.2.2."));
+    assert!(!matches_hostname(&leaf, "10.0.2.3") && !matches_hostname(&leaf, "www.good.example"));
+    // An IPv6 entry is skipped, any other length is malformed.
+    let v6 = ip_san(&[&[0; 16]]);
+    assert!(Certificate::parse(&v6).unwrap().ip_addresses.is_empty());
+    assert_eq!(
+        Certificate::parse(&ip_san(&[&[10, 0, 2, 2, 0]])).err(),
+        Some(Error::Malformed)
+    );
+    // A constrained chain needs a dNSName: no iPAddress constraint is
+    // evaluated, and a leaf without a subjectAltName names nothing.
+    let int = Certificate::parse(cert!("nc-int")).unwrap();
+    let nc = int.name_constraints.as_ref();
+    assert_eq!(
+        check_name_constraints(&leaf, "10.0.2.2", nc),
+        Err(Error::NameConstraint)
+    );
+    let cn_only = Certificate::parse(CN_ONLY_LEAF).unwrap();
+    assert_eq!(
+        check_name_constraints(&cn_only, "www.example.org", nc),
+        Err(Error::NameConstraint)
     );
 }

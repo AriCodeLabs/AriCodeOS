@@ -66,6 +66,7 @@ pub(crate) struct Parsed<'a> {
     pub is_ca: bool,
     pub max_path_len: Option<u32>,
     pub dns_names: Vec<&'a str>,
+    pub ip_addresses: Vec<[u8; 4]>,
     pub digital_signature: bool,
     pub server_auth: bool,
     pub name_constraints: Option<NameConstraints<'a>>,
@@ -116,6 +117,7 @@ impl<'a> Parsed<'a> {
             server_auth: true,
             max_path_len: None,
             dns_names: Vec::new(),
+            ip_addresses: Vec::new(),
             name_constraints: None,
         };
         if let Some(extensions) = r.optional(explicit(3))? {
@@ -182,8 +184,16 @@ impl<'a> Parsed<'a> {
                     let mut names = Reader::new(der::single(value, der::SEQUENCE)?);
                     while !names.is_empty() {
                         let name = names.any()?;
-                        if name.tag == DNS_NAME {
-                            self.dns_names.push(dns_name(name.value)?);
+                        match name.tag {
+                            DNS_NAME => self.dns_names.push(dns_name(name.value)?),
+                            // IPv4 is kept; an IPv6 address, which this
+                            // client never connects to by number, is skipped.
+                            IP_ADDRESS => match name.value.len() {
+                                4 => self.ip_addresses.push(name.value.try_into().unwrap()),
+                                16 => {}
+                                _ => return Err(Error::Malformed),
+                            },
+                            _ => {}
                         }
                     }
                 }
@@ -244,6 +254,7 @@ impl<'a> Certificate<'a> {
             is_ca: p.is_ca,
             max_path_len: p.max_path_len,
             dns_names: p.dns_names,
+            ip_addresses: p.ip_addresses,
             digital_signature: p.digital_signature,
             server_auth: p.server_auth,
             name_constraints: p.name_constraints,

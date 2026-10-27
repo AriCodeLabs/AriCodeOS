@@ -74,7 +74,7 @@ printf 'basicConstraints=CA:FALSE\n' >cn-only-leaf.ext
 issue cn-only-leaf '/CN=www.example.org' ec-int cn-only-leaf.ext $LEAF_FROM $LEAF_TO -sha256
 der cn-only-leaf
 
-# Ed25519 root -> Ed25519 leaf without subjectAltName (common name fallback).
+# Ed25519 root -> Ed25519 leaf.
 key ed-root -algorithm ED25519
 root ed-root '/O=AriCode Test/CN=AriCode Test Ed25519 Root' '' $CA_FROM $CA_TO
 key ed-leaf -algorithm ED25519

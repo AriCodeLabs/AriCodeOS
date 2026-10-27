@@ -11,9 +11,9 @@ subjectAltName dNSNames and, when the certificate had none, against the
 first commonName of its subject. That fallback is what RFC 6125 6.4.4
 allowed for old certificates; RFC 9525 (2023), which replaces it, drops
 it, the CA/Browser Forum Baseline Requirements have required a
-subjectAltName for every name since 2012, and current clients (Chrome
-since 58, Firefox, Go's crypto/x509, rustls-webpki) never read the common
-name.
+subjectAltName for every name since 2012, and current clients do not read
+the common name for publicly trusted certificates (Chrome since 58, Go's
+crypto/x509 since 1.17, rustls-webpki never did).
 
 Keeping it means a second, weaker name check: the common name is free
 text that nameConstraints do not cover (ADR 0026 already refused a
@@ -23,16 +23,21 @@ issues any more rely on.
 
 ## Decision
 
-1. `aricode_x509::matches_hostname` reads only subjectAltName dNSNames. A
-   certificate without one matches no host and `verify_chain` refuses it
-   with `Error::NameMismatch`, whether the chain ends at an embedded root,
-   at a root the owner added, or at the leaf itself pinned as a root.
+1. `aricode_x509::matches_hostname` reads only the subjectAltName: a
+   dNSName for a host name; for an IPv4 host, an iPAddress entry with that
+   address or a dNSName that spells it exactly (RFC 9525 6.2; IPv6 entries
+   are skipped, as this client does not connect by IPv6 address). A
+   certificate without a matching entry is refused with
+   `Error::NameMismatch`, whether the chain ends at an embedded root, at a
+   root the owner added, or at the leaf itself pinned as a root.
 2. `Certificate` no longer carries the common name: nothing reads it. The
-   subject Name is still checked for its structure (SETs of
-   AttributeTypeAndValue) as before.
+   subject Name is now checked for its structure (SETs of
+   AttributeTypeAndValue) to its end; before, the walk stopped at the
+   first common name.
 3. Unchanged: one left-most wildcard label, at least two labels after it,
-   IPv4 hosts only as an exact dNSName, nameConstraints over every
-   dNSName.
+   no wildcard for an IP host, nameConstraints over every dNSName; a
+   constrained chain needs a dNSName, since no iPAddress constraint is
+   evaluated.
 
 ## Consequences
 
