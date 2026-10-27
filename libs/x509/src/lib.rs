@@ -15,10 +15,13 @@
 #![no_std]
 
 extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
 mod cert;
 mod der;
 pub mod roots;
+mod suffixes;
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -281,12 +284,14 @@ pub fn verify_signature(
 /// single left-most `*` label matches exactly one label). The subject's
 /// common name is never read as a host name (ADR 0058): a certificate
 /// without a subjectAltName matches no host. Case-insensitive; a trailing
-/// dot on `host` is ignored.
+/// dot on `host` or a name is ignored, and a host or name with an empty
+/// label matches nothing. A wildcard never stands on a public suffix
+/// (ADR 0062).
 /// An IP host (an IPv4 address) matches an iPAddress entry with that
 /// address, or a dNSName that spells it exactly, never a wildcard.
 pub fn matches_hostname(cert: &Certificate, host: &str) -> bool {
     let host = host.strip_suffix('.').unwrap_or(host);
-    if host.is_empty() || host.contains('*') {
+    if host.contains('*') || host.split('.').any(str::is_empty) {
         return false;
     }
     match ipv4(host) {
@@ -297,7 +302,16 @@ pub fn matches_hostname(cert: &Certificate, host: &str) -> bool {
                     .iter()
                     .any(|name| name.strip_suffix('.').unwrap_or(name) == host)
         }
-        None => cert.dns_names.iter().any(|name| name_matches(name, host)),
+        None => {
+            // A wildcard can only stand on the host's parent, so whether that
+            // is a public suffix is looked up once, and only when a wildcard
+            // name reaches it: a leaf of thousands of wildcard names costs
+            // one lookup (audit of ea368aa, finding 1).
+            let mut parent_allowed = None;
+            cert.dns_names
+                .iter()
+                .any(|name| name_matches_with(name, host, &mut parent_allowed))
+        }
     }
 }
 
@@ -338,13 +352,22 @@ fn check_name_constraints(
     Ok(())
 }
 
-fn name_matches(pattern: &str, host: &str) -> bool {
+/// Whether the dNSName `pattern` names `host` (no trailing dot, no empty
+/// label). `parent_allowed` caches, for this host, whether a wildcard may
+/// stand on its parent (not a public suffix, ADR 0062).
+fn name_matches_with(pattern: &str, host: &str, parent_allowed: &mut Option<bool>) -> bool {
     let pattern = pattern.strip_suffix('.').unwrap_or(pattern);
+    if pattern.split('.').any(str::is_empty) {
+        return false;
+    }
     match pattern.strip_prefix("*.") {
-        // At least two labels after the wildcard: no `*.com`.
+        // At least two labels after the wildcard (no `*.com`), the host's
+        // parent, and not a public suffix (no `*.co.uk`).
         Some(base) if !base.contains('*') && base.contains('.') => match host.split_once('.') {
-            Some((label, rest)) => !label.is_empty() && rest.eq_ignore_ascii_case(base),
-            None => false,
+            Some((_, parent)) if parent.eq_ignore_ascii_case(base) => {
+                *parent_allowed.get_or_insert_with(|| !suffixes::is_public_suffix(parent))
+            }
+            _ => false,
         },
         Some(_) => false,
         None => !pattern.contains('*') && pattern.eq_ignore_ascii_case(host),

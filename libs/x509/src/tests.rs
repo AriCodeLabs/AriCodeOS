@@ -5,6 +5,11 @@
 
 use super::*;
 
+/// `name_matches_with` without a cache shared between names.
+fn name_matches(pattern: &str, host: &str) -> bool {
+    name_matches_with(pattern, host, &mut None)
+}
+
 macro_rules! cert {
     ($name:literal) => {
         include_bytes!(concat!("../testdata/", $name, ".der")) as &[u8]
@@ -992,4 +997,66 @@ fn an_ip_host_matches_an_ip_address_entry() {
         check_name_constraints(&cn_only, "www.example.org", nc),
         Err(Error::NameConstraint)
     );
+}
+
+#[test]
+fn no_wildcard_over_a_public_suffix() {
+    // ICANN suffixes of two labels, any case, a trailing dot.
+    for (pattern, host) in [
+        ("*.co.uk", "example.co.uk"),
+        ("*.CO.UK", "example.co.uk"),
+        ("*.co.uk.", "example.co.uk"),
+        ("*.com.au", "shop.com.au"),
+        ("*.xn--55qx5d.hk", "a.xn--55qx5d.hk"),
+    ] {
+        assert!(!name_matches(pattern, host), "{pattern} matched {host}");
+    }
+    // A wildcard rule (`*.ck`) makes every name under it a suffix, but not
+    // its exception (`!www.ck`); deeper names stay registrable.
+    assert!(!name_matches("*.foo.ck", "a.foo.ck"));
+    assert!(name_matches("*.www.ck", "a.www.ck"));
+    assert!(name_matches("*.city.kobe.jp", "a.city.kobe.jp"));
+    // A wildcard rule's base is a suffix too: `*.kobe.jp` cannot cover
+    // `city.kobe.jp`, which another party holds.
+    assert!(!name_matches("*.kobe.jp", "city.kobe.jp"));
+    // Registrable names under a suffix, and the private section, are fine.
+    assert!(name_matches("*.example.co.uk", "www.example.co.uk"));
+    assert!(name_matches("*.github.io", "lynxcraft.github.io"));
+    assert!(name_matches("*.example.com", "www.example.com"));
+    // An exact name equal to a suffix is no wildcard: matching is exact.
+    assert!(name_matches("co.uk", "co.uk"));
+
+    assert!(suffixes::is_public_suffix("co.uk") && suffixes::is_public_suffix("Co.Uk"));
+    assert!(suffixes::is_public_suffix("anything.ck") && !suffixes::is_public_suffix("www.ck"));
+    assert!(!suffixes::is_public_suffix("city.kobe.jp") && suffixes::is_public_suffix("x.kobe.jp"));
+    assert!(suffixes::is_public_suffix("kobe.jp") && suffixes::is_public_suffix("nom.br"));
+    assert!(
+        !suffixes::is_public_suffix("example.co.uk") && !suffixes::is_public_suffix("github.io")
+    );
+}
+
+#[test]
+fn many_wildcard_names_cost_one_suffix_lookup() {
+    // Audit of ea368aa, finding 1: a leaf may carry thousands of wildcard
+    // names, checked before its chain is. 2000 `*.co.uk` (each naming the
+    // host's parent and refused) and 2000 `*.other.example` must cost at
+    // most one lookup of the list.
+    let mut names: Vec<&[u8]> = Vec::new();
+    for _ in 0..2000 {
+        names.push(b"*.co.uk");
+        names.push(b"*.other.example");
+    }
+    let der = built(None, &[san(&names)]);
+    let leaf = Certificate::parse(&der).unwrap();
+    let before = suffixes::SCANS.with(|n| n.get());
+    assert!(!matches_hostname(&leaf, "example.co.uk"));
+    assert!(!matches_hostname(&leaf, "www.example.org"));
+    let scans = suffixes::SCANS.with(|n| n.get()) - before;
+    assert!(scans <= 1, "{scans} lookups");
+    // Empty labels match nothing, on either side.
+    let dots = built(None, &[san(&[b"*.co.uk..", b"a..example.com"])]);
+    let dots = Certificate::parse(&dots).unwrap();
+    assert!(!matches_hostname(&dots, "a.co.uk.."));
+    assert!(!matches_hostname(&dots, "a..example.com"));
+    assert!(!name_matches("*.com..", "a.com."));
 }

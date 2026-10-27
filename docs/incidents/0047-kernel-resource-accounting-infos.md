@@ -217,7 +217,8 @@ interrupt line masking a newer claim's entry (below) and that a
   when dropped, which can mask the entry a newer claim programmed. Before
   the fix the separate windows pointed at the same entry, so this is
   unchanged; it needs its own fix (revoke the old line on reclaim, or skip
-  the mask when the entry no longer holds the line's vector).
+  the mask when the entry no longer holds the line's vector): incident
+  0050 skips the mask.
 
 ## Second audit (2026-10-27)
 
@@ -237,7 +238,7 @@ the bytes; each new test fails with its fix reverted). Followed up:
   the claim (it is transferable), masks MSI-X entry 0 (or disables MSI)
   when dropped, after a newer claim programmed it; and the MSI-X table's
   BAR base is not checked again at a claim, only its capability
-  register.
+  register. Both fixed in incident 0050 (ADR 0061).
 - A live reader can lose unread type-ahead when another process becomes
   the reader and exits: as designed (ADR 0057, "Alternatives"; only the
   shell reads the console today).
