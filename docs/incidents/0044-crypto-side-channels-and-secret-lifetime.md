@@ -131,8 +131,10 @@
      the derivation buffers and derived keys, the HTTPS client's seed,
      sshd's host key text and hex, `random_seed` text and hex, the kernel
      randomness it mixes and its file read buffer. sshd now hands each
-     connection its host key and generator seed by reference, so the
-     `Server` holds the only copy and wipes it.
+     connection its host key and generator seed by reference: each
+     connection's `Server` keeps one copy and wipes it; `main`'s
+     long-lived seed and the by-value argument copies of `Server::new` and
+     `Rng::new` are not wiped ("Not covered").
    - Tests: one per type that a drop wipes it (`*_wiped_when_dropped` in
      `aes`, `aead`, `poly1305`, `chacha20`, `ssh_chachapoly`, `sha256`,
      `sha512`, `lib`, `tls::keys`, `tls::record`, `ssh`), and
@@ -151,15 +153,20 @@ What the fix does not claim:
   safe code; the wipes cover the named buffers only.
 - **Working state of the primitives.** The ChaCha20 block function's
   state, the SHA-256/512 message schedule in `compress`, Poly1305's
-  locals, the field elements and points inside the Ed25519 signing ladder
-  and the per-step temporaries of the X25519 ladder are not wiped:
+  locals, AES's key-expansion words, S-box bit planes and round state,
+  the field elements and points inside the Ed25519 signing ladder and the
+  per-step temporaries of the X25519 ladder are not wiped:
   wiping each block's state would cost a large share of their speed, and
   the next call overwrites the same stack.
 - **Heap copies.** A `Vec` that grows moves its content and frees the old
   buffer without wiping it: sshd's `read_file` (host key text,
   `random_seed`), the SSH `Writer`s that hold K. The final buffer is
-  wiped. Freed process memory reaches another process only through the
-  kernel, which zeroes pages on first touch (ADR 0049).
+  wiped, and so is a partial read that failed. Freed process memory
+  reaches another process only through the kernel, which zeroes pages on
+  first touch (ADR 0049).
+- **Other processes' copies.** The host key and `random_seed` text pass
+  through the file service's IPC buffers and cache on their way to sshd;
+  nothing there is wiped.
 - **Secrets that live as long as their program.** sshd's host key seed in
   `main` and its `Entropy` state, the kernel generator (a `static`): they
   are never dropped.
@@ -172,6 +179,29 @@ What the fix does not claim:
 - **No timing measurement.** AES and `ct_eq` are constant time by
   construction and by reading the source; no dudect-style statistical
   test was run, and `black_box` is documented by Rust as best effort.
+
+## Audit (2026-10-27)
+
+An independent audit of `cfaec96`/`a3a13fe` reproduced the forgery count
+(1160 accepted before, none after), read the release assembly of
+`sub_bytes`, `encrypt_block`, GHASH and `ct_eq` (no secret-dependent
+branch or load), and found no high or medium finding. Its low and info
+findings, all followed up:
+
+- This incident claimed sshd's `Server` held the only copy of the host
+  key: reworded (section "Fix", point 4).
+- AES-GCM's GHASH key buffer in `AesGcm::new`, the CTR keystream block
+  and the tag mask E(K, J0) were not wiped although ChaCha's are: they are
+  now `SecretBytes`. AES's own working state joins "Not covered".
+- sshd dropped a partial read that failed without wiping it: wiped now;
+  the file service's copies are listed under "Not covered".
+- `hex`, which sshd uses on the host key and `random_seed`, indexed a
+  table with secret nibbles: it computes the digit without a table or a
+  branch (tested against the table for every byte); `unhex` still
+  branches per character, and the crate documentation says so.
+- `wipe` accepted any `Copy + Default` type, for which writing the
+  default can leave padding or payload bytes: it takes only unsigned
+  integers now (a sealed `Word` trait).
 
 ## Tests run
 

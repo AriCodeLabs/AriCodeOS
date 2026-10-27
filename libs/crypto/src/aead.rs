@@ -79,11 +79,11 @@ impl AesGcm {
     /// `key` must be 16 or 32 bytes long.
     pub fn new(key: &[u8]) -> Option<Self> {
         let aes = Aes::new(key)?;
-        let mut h = [0u8; 16];
-        aes.encrypt_block(&mut h);
+        let mut h = crate::SecretBytes([0u8; 16]);
+        aes.encrypt_block(&mut h.0);
         Some(Self {
             aes,
-            h: u128::from_be_bytes(h),
+            h: u128::from_be_bytes(h.0),
         })
     }
 
@@ -96,10 +96,11 @@ impl AesGcm {
 
     /// CTR mode starting at counter 2 (counter 1 masks the tag).
     fn ctr(&self, nonce: &[u8; 12], data: &mut [u8]) {
+        let mut ks = crate::SecretBytes([0u8; 16]);
         for (i, chunk) in data.chunks_mut(16).enumerate() {
-            let mut ks = Self::counter_block(nonce, (i as u32).wrapping_add(2));
-            self.aes.encrypt_block(&mut ks);
-            for (d, k) in chunk.iter_mut().zip(ks) {
+            ks.0 = Self::counter_block(nonce, (i as u32).wrapping_add(2));
+            self.aes.encrypt_block(&mut ks.0);
+            for (d, k) in chunk.iter_mut().zip(ks.0) {
                 *d ^= k;
             }
         }
@@ -116,9 +117,9 @@ impl AesGcm {
         }
         let lens = ((aad.len() as u128 * 8) << 64) | (ct.len() as u128 * 8);
         y = gf_mul(y ^ lens, self.h);
-        let mut j0 = Self::counter_block(nonce, 1);
-        self.aes.encrypt_block(&mut j0);
-        (y ^ u128::from_be_bytes(j0)).to_be_bytes()
+        let mut j0 = crate::SecretBytes(Self::counter_block(nonce, 1));
+        self.aes.encrypt_block(&mut j0.0);
+        (y ^ u128::from_be_bytes(j0.0)).to_be_bytes()
     }
 
     /// Encrypts `data` in place and returns the tag.

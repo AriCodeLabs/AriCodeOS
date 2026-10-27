@@ -243,6 +243,9 @@ fn read_file(fs: &mut FsClient, name: &str) -> Result<Vec<u8>, ReadError> {
     let _ = fs.close(fd);
     // The host key and random_seed pass through here.
     aricode_crypto::wipe(&mut chunk);
+    if result.is_err() {
+        aricode_crypto::wipe(&mut data);
+    }
     result.map(|()| data)
 }
 

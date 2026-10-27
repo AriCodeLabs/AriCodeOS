@@ -16,8 +16,9 @@
 //!   [`aes`]) and [`rsa`] signature verification (PKCS#1 v1.5 and PSS) over
 //!   [`bigint`].
 //!
-//! What handles secrets runs in constant time: Ed25519 signing, the X25519
-//! ladder and AES (a bitsliced S-box, no table). Ed25519 verification
+//! The primitives that handle secrets run in constant time: Ed25519
+//! signing, the X25519 ladder, AES (a bitsliced S-box, no table) and
+//! [`hex`]; [`unhex`] does not (it branches on each character). Ed25519 verification
 //! works on public values only. Key types (`Aes`, `AesGcm`, `ChaChaPoly`,
 //! `Poly1305`, the hash states, `Rng`) wipe themselves when dropped, and
 //! [`SecretBytes`] does it for a secret array on the stack (incident 0044).
@@ -88,12 +89,32 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+/// Unsigned integers: every byte of the value is data (no padding, no
+/// niche), so writing zero clears all of it.
+pub trait Word: Copy + sealed::Sealed {
+    const ZERO: Self;
+}
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+macro_rules! words {
+    ($($t:ty),*) => {$(
+        impl sealed::Sealed for $t {}
+        impl Word for $t {
+            const ZERO: Self = 0;
+        }
+    )*};
+}
+words!(u8, u32, u64, u128);
+
 /// Zeroes memory that held secret material (a seed, a key, a key
 /// schedule), with writes the compiler cannot drop as dead stores.
-pub fn wipe<T: Copy + Default>(buf: &mut [T]) {
+pub fn wipe<T: Word>(buf: &mut [T]) {
     for b in buf.iter_mut() {
         // SAFETY: a valid, exclusive `&mut T`.
-        unsafe { core::ptr::write_volatile(b, T::default()) };
+        unsafe { core::ptr::write_volatile(b, T::ZERO) };
     }
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }
@@ -111,11 +132,16 @@ impl<const N: usize> Drop for SecretBytes<N> {
 
 /// Writes `bytes` as lowercase hexadecimal into `out` (2 characters per byte).
 pub fn hex<'a>(bytes: &[u8], out: &'a mut [u8]) -> &'a str {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    // Without a table or a branch on the nibble: callers print seeds and
+    // keys. 39 moves 10..=15 from ':'..='?' to 'a'..='f'.
+    fn digit(n: u8) -> u8 {
+        let above_9 = 0u8.wrapping_sub((9u8.wrapping_sub(n) >> 7) & 1);
+        b'0' + n + (above_9 & 39)
+    }
     let n = bytes.len().min(out.len() / 2);
     for (i, b) in bytes[..n].iter().enumerate() {
-        out[2 * i] = DIGITS[(b >> 4) as usize];
-        out[2 * i + 1] = DIGITS[(b & 15) as usize];
+        out[2 * i] = digit(b >> 4);
+        out[2 * i + 1] = digit(b & 15);
     }
     core::str::from_utf8(&out[..2 * n]).unwrap_or("")
 }
@@ -161,6 +187,13 @@ mod tests {
     fn hex_round_trip_and_ct_eq() {
         let mut out = [0u8; 8];
         assert_eq!(hex(&[0xde, 0xad, 0xbe, 0xef], &mut out), "deadbeef");
+        // Every byte, against the table the branchless digits replaced.
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        for b in 0..=255u8 {
+            let mut two = [0u8; 2];
+            hex(&[b], &mut two);
+            assert_eq!(two, [DIGITS[(b >> 4) as usize], DIGITS[(b & 15) as usize]]);
+        }
         let mut back = [0u8; 4];
         unhex("DEADbeef", &mut back).unwrap();
         assert_eq!(back, [0xde, 0xad, 0xbe, 0xef]);
