@@ -190,6 +190,17 @@ removed on `fix/compositor-ownership`, ADR 0053).
   - typed-ahead console input: what a dead reader left unread, and what
     arrives before the next reader, is discarded and logged (ADR 0057;
     new scenario `console.orphan_input`).
+- 2026-10-27, info (`fix/updater-state`, incident 0045, ADR 0060): a boot
+  state with a bad CRC is no longer read as fresh; the updater rewrites
+  it from what AriBoot booted (the slot that passed init's checks,
+  pending or not; audit H1, re-audit M1) and installs nothing in that
+  run.
+- 2026-10-27, info (same branch): a damaged stable floor fails closed,
+  refusing every stable release until a stable install forced with
+  `--allow-downgrade` rewrites it as the running release once it went in.
+- 2026-10-27, info (same branch): `serve-update` answers 400 to a request
+  line that is not `METHOD SP target SP HTTP/x.y` with a visible-ASCII
+  target, logs it escaped, and redirects only to plain file names.
 
 ## Fix plan
 

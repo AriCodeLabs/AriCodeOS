@@ -164,6 +164,11 @@ fn choose_slot(disk: &mut Disk, parts: &[Partition], state_lba: u64) -> Option<L
         stable: aricode_crypto::trust::public_key(),
         dev: aricode_crypto::trust::dev_channel_key(),
     };
+    // A damaged record says nothing about the slots, but the loader must
+    // boot something: A, the slot a new image starts from, and the record
+    // is rewritten to say so once A verifies. The updater, which can wait,
+    // rebuilds a damaged record from what this loader booted instead and
+    // never reads it as fresh (ADR 0060).
     let mut state = disk
         .read(state_lba, 1)
         .and_then(|s| BootState::decode(&s))

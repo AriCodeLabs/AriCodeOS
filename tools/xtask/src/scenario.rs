@@ -146,6 +146,10 @@ pub struct HostUpdate {
     /// The machine starts with this stable floor in `updater/state` (the
     /// newest stable release it ran, ADR 0045 audit M1).
     pub stable_floor: Option<u32>,
+    /// That floor is written damaged (`stable 3x`): the updater must not
+    /// take it for no floor (incident 0045).
+    #[serde(default)]
+    pub stable_floor_damaged: bool,
 }
 
 fn default_update_source() -> String {

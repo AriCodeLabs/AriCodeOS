@@ -92,6 +92,10 @@ pub struct BootState {
 }
 
 impl BootState {
+    /// The state of a new image: `active` confirmed, nothing pending. Also
+    /// AriBoot's reading of a damaged record, the one reading that needs
+    /// no other evidence (ADR 0060); the updater never reads a damaged
+    /// record as fresh ([`recovered`]).
     pub const fn fresh(active: Slot) -> Self {
         Self {
             active,
@@ -99,6 +103,18 @@ impl BootState {
             boot_count: 0,
             loader_dev_channel: false,
         }
+    }
+
+    /// Whether AriBoot has written this record: it counts every boot it
+    /// chooses ([`choose`]), and nothing else raises the count, so a record
+    /// holding 0 boots is a new image's or one the updater rebuilt (ADR
+    /// 0060), and its `loader_dev_channel` says nothing about the loader.
+    /// The test errs one way only: AriBoot also writes a record without
+    /// counting (`reject`, `unpersisted`) and the count wraps at
+    /// `u32::MAX`, so a loader-written record can read as not written; the
+    /// development channel then stays closed one boot longer.
+    pub fn written_by_loader(&self) -> bool {
+        self.boot_count != 0
     }
 
     pub fn encode(&self) -> [u8; SECTOR] {
@@ -123,7 +139,8 @@ impl BootState {
         s
     }
 
-    /// `None` if the sector is not a valid state (magic, version or CRC).
+    /// `None` if the sector is not a valid state (magic, version or CRC):
+    /// a damaged record, which says nothing about the slots (ADR 0060).
     pub fn decode(s: &[u8]) -> Option<Self> {
         if s.len() < 64 || &s[..8] != STATE_MAGIC || s[8] != 1 {
             return None;
@@ -229,6 +246,49 @@ pub fn confirm(state: BootState, slot: Slot) -> BootState {
         active: slot,
         pending: None,
         ..state
+    }
+}
+
+/// What AriBoot says it booted, from the keys it alone writes on the
+/// command line (ADR 0045).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Booted {
+    /// The slot, and whether it was booted pending confirmation
+    /// (`boot_slot`, `boot_pending`); `None` for the ESP.
+    pub slot: Option<(Slot, bool)>,
+    /// The booted image is a development build (`boot_channel=dev`): the
+    /// loader verified it, so it trusts the development channel's key.
+    pub dev_channel: bool,
+}
+
+/// The state to write over a damaged record (ADR 0060), rebuilt from
+/// what AriBoot booted, never from the damaged bytes.
+///
+/// - From a slot, pending or not: that slot active, nothing pending.
+///   Confirmed (no `boot_pending`), it is active and stays so for the
+///   whole boot, since only init's confirmation of a pending boot changes
+///   the active slot. Pending, it is what init meant to write: init
+///   confirms the slot at the end of its boot (step 11), after every
+///   health check, and a boot that fails a check never gets there and
+///   starts no shell; the updater is launched only from a shell, which
+///   init starts after step 11. So a running updater means the slot passed
+///   init's checks, and a slot still marked pending only means the
+///   confirmation's own write failed. A trial scheduled since (`update
+///   apply`, `upgrade`, `update rollback`) is dropped: the running system
+///   stays, and the install can be made again. **This rests on the
+///   launch order**: anything that could run the updater before init's
+///   step 11 would make this rule wrong for pending boots.
+/// - From the ESP: AriBoot's own reading, A active ([`BootState::fresh`]),
+///   which it does not write when A does not boot.
+///
+/// `loader_dev_channel` is set only when the running image is a
+/// development build; otherwise it stays off until AriBoot writes the
+/// record on the next boot.
+pub fn recovered(booted: Booted) -> BootState {
+    let active = booted.slot.map_or(Slot::A, |(slot, _)| slot);
+    BootState {
+        loader_dev_channel: booted.dev_channel,
+        ..BootState::fresh(active)
     }
 }
 
@@ -678,6 +738,86 @@ mod tests {
                 .active,
             Slot::B
         );
+    }
+
+    fn booted(slot: Option<(Slot, bool)>) -> Booted {
+        Booted {
+            slot,
+            dev_channel: false,
+        }
+    }
+
+    #[test]
+    fn a_damaged_state_is_rebuilt_from_the_booted_slot() {
+        // Incident 0045: B active and booted, the record then damaged. The
+        // updater read it as fresh (A active) and took B, the running
+        // slot, for the inactive one to install into.
+        let mut sector = BootState::fresh(Slot::B).encode();
+        sector[60] ^= 1;
+        assert_eq!(BootState::decode(&sector), None);
+        let state = recovered(booted(Some((Slot::B, false))));
+        assert_eq!((state.active, state.pending), (Slot::B, None));
+        assert_eq!(choose(state).slot, Slot::B, "the next boot keeps B");
+        // From the ESP nothing is known: AriBoot's own reading.
+        assert_eq!(recovered(booted(None)), BootState::fresh(Slot::A));
+        // The development flag only from a running development build.
+        let dev = recovered(Booted {
+            slot: Some((Slot::A, false)),
+            dev_channel: true,
+        });
+        assert!(dev.loader_dev_channel);
+        assert!(!recovered(booted(None)).loader_dev_channel);
+        // Until AriBoot writes it again, a rebuilt record is not the
+        // loader's word (re-audit of incident 0045, L-a).
+        assert!(!recovered(booted(Some((Slot::B, true)))).written_by_loader());
+        assert!(choose(recovered(booted(None))).state.written_by_loader());
+        // What is written decodes as itself.
+        for b in [None, Some((Slot::A, true)), Some((Slot::B, false))] {
+            let s = recovered(booted(b));
+            assert_eq!(BootState::decode(&s.encode()), Some(s));
+        }
+    }
+
+    /// Audit and re-audit of incident 0045 (H1, M1): an updater runs only
+    /// after init's step 11, so a slot booted pending has passed init's
+    /// checks, whether its confirmation was written or not. Rebuilt as
+    /// "the other slot active, this one pending with no tries", the
+    /// running slot became the install target, or the next boot took an
+    /// untried image as confirmed; left to AriBoot, a machine running B
+    /// went back to A. Rebuilt as that slot active, neither happens.
+    #[test]
+    fn a_pending_boot_is_rebuilt_as_the_slot_init_checked() {
+        for x in [Slot::A, Slot::B] {
+            let y = x.other();
+            let repaired = recovered(booted(Some((x, true))));
+            // (a) y confirmed, x installed: AriBoot boots x pending, init
+            // confirms x, then the record is damaged.
+            let d = choose(schedule(BootState::fresh(y), x));
+            assert_eq!((d.slot, d.pending), (x, true));
+            let confirmed = confirm(d.state, x);
+            assert_eq!(repaired, BootState::fresh(x), "what init wrote");
+            assert_eq!(repaired.active.other(), confirmed.active.other());
+            assert_ne!(repaired.active.other(), x, "never the running slot");
+            assert_eq!(choose(repaired).slot, x, "the next boot keeps x");
+            // (b) The same boot, then y installed and scheduled, and a
+            // second install into y tears the record: the untried y is
+            // never booted as confirmed; x, which passed init, boots.
+            let scheduled = schedule(confirmed, y);
+            let d2 = choose(scheduled);
+            assert_eq!((d2.slot, d2.pending), (y, true));
+            let next = choose(repaired);
+            assert_eq!((next.slot, next.pending), (x, false));
+            // (c) Init's confirmation write failed (no ARIBOOT, a read or
+            // write error): the record still says y active, x pending;
+            // the repair writes what init meant to.
+            let unconfirmed = d.state;
+            assert_eq!(unconfirmed.active, y);
+            let meant = confirm(unconfirmed, x);
+            assert_eq!(
+                (repaired.active, repaired.pending),
+                (meant.active, meant.pending)
+            );
+        }
     }
 
     #[test]
