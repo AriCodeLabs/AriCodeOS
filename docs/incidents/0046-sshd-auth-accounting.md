@@ -1,7 +1,7 @@
 # Incident 0046: sshd's authorized_keys and authentication accounting
 
-- Opened: 2026-10-27. Status: fixed on `fix/sshd-auth-accounting`; the
-  independent audit of the fix is pending.
+- Opened: 2026-10-27. Status: fixed on `fix/sshd-auth-accounting`, with
+  the follow-ups of its audit (section "Audit (2026-10-27)").
 - Found by: the failure-pattern audit of 2026-10-25, section "Info":
   authorized_keys lines with options are ignored silently; `none` and
   unsigned publickey queries are not counted as authentication failures.
@@ -58,13 +58,15 @@ tree; the regressions below replace them):
 2. **Every authentication request counts but the first `none`.**
    `MAX_AUTH_ATTEMPTS` (10, the old failure limit) now counts refused
    keys and methods, key queries answered `PK_OK` and repeated `none`
-   requests; a first `none`, the client asking for the methods (RFC 4252,
-   5.2), is free, as in OpenSSH. The request that reaches the limit is
+   requests; one `none`, the client asking for the methods (RFC 4252,
+   5.2), is free (OpenSSH frees it only as the first request; here it is
+   free wherever it comes, still once). The request that reaches the limit is
    answered with a DISCONNECT (reason 14, `too many authentication
    attempts`) and a new event, `TooManyAuthAttempts`, which sshd logs
    with the user name (made log-safe) and the peer. A usual OpenSSH login
    counts one request (the key query); one with several keys in the agent
-   counts one per key tried.
+   counts one per key tried, so eight refused keys fit before the right
+   one (ADR 0025, "Limits").
 
 ## Regressions
 
@@ -80,6 +82,29 @@ tree; the regressions below replace them):
 - QEMU: `ssh.key_options_refused` (a `restrict` line written from the
   console is said by number and recorded, sshd stays closed; a plain line
   opens port 22), and the `ssh` area scenarios.
+
+## Audit (2026-10-27)
+
+An independent audit of `ffc8b97` found no high or medium finding: no
+line with options yields a key (quoted options with spaces, tabs, `from=`,
+`restrict`, BOM, NUL, CR, certificates and a 70 KB line checked), the
+report is bounded and prints no file bytes, every userauth path counts,
+and the disconnect closes the connection before pipelined requests are
+read (checked with a real OpenSSH client offering 5, 8 and 9 wrong keys).
+Its low findings, followed up:
+
+- "Report when what is refused changes" compared line numbers and
+  reasons only: an edited line refused for the same reason under the
+  same number was not said again. The file's digest is now part of what
+  was reported.
+- Counting `PK_OK` queries leaves a key-trying client eight refused keys
+  instead of nine; now stated in ADR 0025 (stock OpenSSH allows five).
+- Requests answered without being authentication (a repeated service
+  request, an unknown message type, a global request) are not counted;
+  the 30 s authentication deadline bounds them, and ADR 0025 says so.
+
+Testing the follow-ups, the unit level failed once with its output
+discarded; it did not recur in seven runs (incident 0049).
 
 ## Open
 

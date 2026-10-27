@@ -565,11 +565,13 @@ fn ready() {
 
 /// The refused lines of `authorized_keys` as last reported: a reread of
 /// the same file (after every connection, every 5 s while closed) does not
-/// say them again.
+/// say them again. The file's digest is part of it, so an edited line
+/// that is refused for the same reason under the same number is said too.
 #[derive(Default, PartialEq)]
 struct Refused {
     lines: Vec<(usize, KeyLineError)>,
     total: usize,
+    file: [u8; 32],
 }
 
 /// Keys from `authorized_keys`: none if the file does not exist (closed by
@@ -578,14 +580,18 @@ struct Refused {
 /// is refused changes (incident 0046): a line with options, or with a key
 /// type other than `ssh-ed25519`, must not just not work.
 fn authorized(fs: &mut FsClient, reported: &mut Refused) -> Result<Vec<[u8; 32]>, ReadError> {
-    let parsed = match read_file(fs, AUTHORIZED_KEYS) {
-        Ok(text) => parse_authorized_keys(&text),
-        Err(ReadError::Absent) => AuthorizedKeys::default(),
+    let (parsed, file) = match read_file(fs, AUTHORIZED_KEYS) {
+        Ok(text) => (
+            parse_authorized_keys(&text),
+            aricode_crypto::sha256::sha256(&text),
+        ),
+        Err(ReadError::Absent) => (AuthorizedKeys::default(), [0; 32]),
         Err(e) => return Err(e),
     };
     let refused = Refused {
         lines: parsed.refused,
         total: parsed.refused_total,
+        file,
     };
     if refused != *reported {
         let mut b = [0u8; 20];

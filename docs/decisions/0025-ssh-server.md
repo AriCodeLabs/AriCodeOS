@@ -147,7 +147,7 @@ would open an unauthenticated shell on the user's network.
   type or a key that does not decode gives no key, as before, but no
   longer silently: sshd says each such line with its number and the
   reason and records `ssh key line refused` (code: the line number),
-  whenever what is refused changes. Taking the key without its options
+  whenever what is refused or the file changes. Taking the key without its options
   would give it more than its line allows, so it is never done.
 - A connection gets `MAX_AUTH_ATTEMPTS` (10) authentication requests
   without succeeding: refused keys and methods, key queries (`publickey`
@@ -156,7 +156,12 @@ would open an unauthenticated shell on the user's network.
   for the methods (RFC 4252, 5.2), does not. The tenth is answered with a
   DISCONNECT (reason 14) and logged (`too many authentication attempts`).
   A usual login counts one request (the key query; the signed request
-  that succeeds is not counted).
+  that succeeds is not counted), so a client trying keys in turn gets
+  eight refused ones before the right key; OpenSSH's sshd, which does
+  not count key queries, allows five (`MaxAuthTries 6`). Other requests
+  that get an answer without being authentication (a repeated service
+  request, an unknown message) are not counted: the 30 s authentication
+  deadline bounds them.
 
 ## Limits (2026-10-25, incident 0035)
 
