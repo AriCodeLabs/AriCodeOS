@@ -16,9 +16,11 @@
 //!   [`aes`]) and [`rsa`] signature verification (PKCS#1 v1.5 and PSS) over
 //!   [`bigint`].
 //!
-//! Ed25519 operations are not constant time; they verify signatures and,
-//! for the SSH host key, sign with a key that lives on the device. X25519
-//! uses a constant-time ladder because its scalar is the ephemeral secret.
+//! What handles secrets runs in constant time: Ed25519 signing, the X25519
+//! ladder and AES (a bitsliced S-box, no table). Ed25519 verification
+//! works on public values only. Key types (`Aes`, `AesGcm`, `ChaChaPoly`,
+//! `Poly1305`, the hash states, `Rng`) wipe themselves when dropped, and
+//! [`SecretBytes`] does it for a secret array on the stack (incident 0044).
 
 #![no_std]
 
@@ -72,25 +74,39 @@ impl Hash {
 }
 
 /// Equality comparison without short-circuit (for tags and signatures).
+/// The accumulator goes through [`core::hint::black_box`] at every byte,
+/// so the optimizer cannot see that a nonzero value is final and turn the
+/// loop into an early exit (audit 2026-10-25, incident 0044).
 pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
     let mut diff = 0u8;
     for (x, y) in a.iter().zip(b) {
-        diff |= x ^ y;
+        diff = core::hint::black_box(diff | (x ^ y));
     }
     diff == 0
 }
 
-/// Zeroes a buffer that held secret material (a seed, a key), with writes
-/// the compiler cannot drop as dead stores.
-pub fn wipe(buf: &mut [u8]) {
+/// Zeroes memory that held secret material (a seed, a key, a key
+/// schedule), with writes the compiler cannot drop as dead stores.
+pub fn wipe<T: Copy + Default>(buf: &mut [T]) {
     for b in buf.iter_mut() {
-        // SAFETY: a valid, exclusive `&mut u8`.
-        unsafe { core::ptr::write_volatile(b, 0) };
+        // SAFETY: a valid, exclusive `&mut T`.
+        unsafe { core::ptr::write_volatile(b, T::default()) };
     }
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
+/// A secret byte array that is [`wipe`]d when it goes out of scope, on
+/// every way out of the function holding it (an early `?` included).
+/// Copies the compiler makes when the value moves are not covered.
+pub struct SecretBytes<const N: usize>(pub [u8; N]);
+
+impl<const N: usize> Drop for SecretBytes<N> {
+    fn drop(&mut self) {
+        wipe(&mut self.0);
+    }
 }
 
 /// Writes `bytes` as lowercase hexadecimal into `out` (2 characters per byte).
@@ -128,6 +144,17 @@ mod tests {
         let mut buf = [0xFFu8; 40];
         wipe(&mut buf);
         assert!(buf.iter().all(|&b| b == 0));
+        let mut words = [u64::MAX; 5];
+        wipe(&mut words);
+        assert_eq!(words, [0; 5]);
+    }
+
+    #[test]
+    fn secret_bytes_are_wiped_when_dropped() {
+        let mut s = core::mem::ManuallyDrop::new(SecretBytes([0xA5u8; 32]));
+        // SAFETY: dropped once; afterwards only plain bytes are read.
+        unsafe { core::mem::ManuallyDrop::drop(&mut s) };
+        assert_eq!(s.0, [0; 32]);
     }
 
     #[test]

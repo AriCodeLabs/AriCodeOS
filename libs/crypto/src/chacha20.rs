@@ -49,13 +49,17 @@ pub fn block(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> [u8; 64] {
 /// `reseed` mixes fresh entropy into the key.
 /// XORs `data` with the keystream for (`key`, `nonce`) starting at block
 /// `counter` (encryption and decryption are the same operation).
+/// The last block of keystream is wiped (each block overwrites the one
+/// before it).
 pub fn xor_keystream(key: &[u8; 32], nonce: &[u8; 12], counter: u32, data: &mut [u8]) {
+    let mut ks = [0u8; 64];
     for (i, chunk) in data.chunks_mut(64).enumerate() {
-        let ks = block(key, nonce, counter.wrapping_add(i as u32));
+        ks = block(key, nonce, counter.wrapping_add(i as u32));
         for (b, k) in chunk.iter_mut().zip(ks.iter()) {
             *b ^= k;
         }
     }
+    crate::wipe(&mut ks);
 }
 
 pub struct Rng {
@@ -79,10 +83,11 @@ impl Rng {
 
     /// New key = ChaCha(current key) XOR entropy: never worse than before.
     pub fn reseed(&mut self, entropy: &[u8; 32]) {
-        let mix = block(&self.key, &self.nonce, u32::MAX);
+        let mut mix = block(&self.key, &self.nonce, u32::MAX);
         for (k, (m, e)) in self.key.iter_mut().zip(mix.iter().zip(entropy)) {
             *k = *k ^ m ^ e;
         }
+        crate::wipe(&mut mix);
         self.counter = 0;
         self.used = 64;
     }
@@ -107,6 +112,15 @@ impl Rng {
             *byte = self.buf[self.used];
             self.used += 1;
         }
+    }
+}
+
+/// The key and the unread output are secret (TLS and SSH draw their
+/// ephemeral keys from an `Rng`).
+impl Drop for Rng {
+    fn drop(&mut self) {
+        crate::wipe(&mut self.key);
+        crate::wipe(&mut self.buf);
     }
 }
 
@@ -148,5 +162,14 @@ mod tests {
         b.fill(&mut y);
         a.fill(&mut x);
         assert_ne!(x, y);
+    }
+
+    #[test]
+    fn rng_is_wiped_when_dropped() {
+        let mut r = core::mem::ManuallyDrop::new(Rng::new([7; 32]));
+        r.fill(&mut [0u8; 3]);
+        // SAFETY: dropped once; afterwards only plain bytes are read.
+        unsafe { core::mem::ManuallyDrop::drop(&mut r) };
+        assert_eq!((r.key, r.buf), ([0; 32], [0; 64]));
     }
 }

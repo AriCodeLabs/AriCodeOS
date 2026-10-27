@@ -23,9 +23,10 @@ fn clamp(k: &[u8; KEY_LEN]) -> [u8; KEY_LEN] {
     k
 }
 
-/// `k * u`: the scalar is clamped and the top bit of `u` is ignored.
+/// `k * u`: the scalar is clamped and the top bit of `u` is ignored. The
+/// clamped copy of the scalar and the ladder's registers are wiped.
 pub fn scalar_mult(k: &[u8; KEY_LEN], u: &[u8; KEY_LEN]) -> [u8; KEY_LEN] {
-    let k = clamp(k);
+    let mut k = clamp(k);
     let x1 = Fe::from_bytes(u);
     let a24 = Fe::from_u64(121_665);
     let (mut x2, mut z2) = (Fe::ONE, Fe::ZERO);
@@ -53,7 +54,12 @@ pub fn scalar_mult(k: &[u8; KEY_LEN], u: &[u8; KEY_LEN]) -> [u8; KEY_LEN] {
     }
     Fe::cswap(&mut x2, &mut x3, swap);
     Fe::cswap(&mut z2, &mut z3, swap);
-    x2.mul(z2.invert()).to_bytes()
+    let out = x2.mul(z2.invert()).to_bytes();
+    crate::wipe(&mut k);
+    for fe in [&mut x2, &mut z2, &mut x3, &mut z3] {
+        crate::wipe(&mut fe.0);
+    }
+    out
 }
 
 /// Public key for the secret `k`.

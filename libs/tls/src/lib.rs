@@ -26,7 +26,7 @@ mod rfc8448;
 use alloc::string::String;
 use alloc::vec::Vec;
 use aricode_crypto::chacha20::Rng;
-use aricode_crypto::{ct_eq, x25519};
+use aricode_crypto::{ct_eq, x25519, SecretBytes};
 use keys::{Schedule, Secret, Suite};
 use record::{Protection, ALERT, APPLICATION_DATA, CHANGE_CIPHER_SPEC, HANDSHAKE};
 
@@ -383,10 +383,12 @@ impl Client {
         match (self.state, typ) {
             (State::WaitServerHello, handshake::SERVER_HELLO) => {
                 let sh = handshake::server_hello(body, &self.session_id)?;
-                let shared = x25519::shared(&self.secret_key, &sh.key_share)
-                    .ok_or(Error::Protocol("bad x25519 key share"))?;
+                // The ephemeral key is used once, whatever the outcome.
+                let shared = x25519::shared(&self.secret_key, &sh.key_share);
+                aricode_crypto::wipe(&mut self.secret_key);
+                let shared = SecretBytes(shared.ok_or(Error::Protocol("bad x25519 key share"))?);
                 self.transcript.extend_from_slice(msg);
-                let (schedule, secrets) = Schedule::new(sh.suite, &shared, &self.transcript);
+                let (schedule, secrets) = Schedule::new(sh.suite, &shared.0, &self.transcript);
                 self.recv = Some(Protection::new(sh.suite, &secrets.server));
                 self.send = Some(Protection::new(sh.suite, &secrets.client));
                 self.suite = sh.suite;
@@ -497,6 +499,14 @@ impl Client {
     }
 }
 
+/// The ephemeral key of a connection dropped before its ServerHello; the
+/// generator, the secrets and the record keys wipe themselves.
+impl Drop for Client {
+    fn drop(&mut self) {
+        aricode_crypto::wipe(&mut self.secret_key);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,6 +569,8 @@ mod tests {
         assert_eq!(events, [Event::Connected]);
         assert!(c.is_connected());
         assert_eq!(out, [&CCS[..], &h(CLIENT_FINISHED_RECORD)].concat());
+        // The ephemeral key did its one job and is gone (incident 0044).
+        assert_eq!(c.secret_key, [0; 32]);
 
         let (r, out, events) = feed(&mut c, &h(NEW_SESSION_TICKET_RECORD));
         assert_eq!((r, out.len(), events.len()), (Ok(()), 0, 0));

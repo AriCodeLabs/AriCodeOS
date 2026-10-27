@@ -341,6 +341,7 @@ version = "0.15.0"
 name = "aricode-https"
 version = "0.15.0"
 dependencies = [
+ "aricode-crypto",
  "aricode-http",
  "aricode-net",
  "aricode-sys",
