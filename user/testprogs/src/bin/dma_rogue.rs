@@ -63,6 +63,33 @@ fn faults() -> Result<u64, u64> {
     Ok(u64::from_le_bytes(buf[16..24].try_into().unwrap()))
 }
 
+/// The unit reports a blocked access by an interrupt that can reach the
+/// kernel after the device has already completed the request, which this
+/// program may see in the used ring on another CPU first (incident 0051):
+/// the fault count is waited for, up to `FAULT_WAIT_MS`.
+const FAULT_WAIT_MS: u64 = 1000;
+
+/// The fault count once it is above `before`, or what it is after
+/// `FAULT_WAIT_MS` if it never rises.
+fn faults_above(before: u64) -> Result<u64, u64> {
+    let mut waited = 0;
+    loop {
+        let now = faults()?;
+        if now > before || waited >= FAULT_WAIT_MS {
+            return Ok(now);
+        }
+        sys::time::sleep_ms(10);
+        waited += 10;
+    }
+}
+
+/// The fault count after a request that must not fault, once a fault it
+/// raised would have been reported: a late fault is counted, not missed.
+fn faults_settled() -> Result<u64, u64> {
+    sys::time::sleep_ms(100);
+    faults()
+}
+
 fn main(mask: u64) -> u64 {
     // The client buffer, found before this driver allocates DMA buffers of
     // its own, which would be listed too.
@@ -87,9 +114,6 @@ fn main(mask: u64) -> u64 {
     let Ok(mut req) = DmaRegion::alloc(4096) else {
         return 30;
     };
-    let Ok(before) = faults() else {
-        return 50;
-    };
 
     // 1. Legitimate read: sector 0 (the GPT protective MBR) into our own buffer.
     let own_data = req.phys + 16;
@@ -110,6 +134,11 @@ fn main(mask: u64) -> u64 {
     if code != 0 {
         return code;
     }
+    // Counted from here, so the fault of the client buffer's step (already
+    // waited for there) cannot stand for this one.
+    let Ok(before) = faults_settled() else {
+        return 50;
+    };
 
     // 2. DMA to foreign memory. Whatever the device reports about the request
     // (not completing it, an I/O error or even "success", as QEMU does when
@@ -123,7 +152,7 @@ fn main(mask: u64) -> u64 {
         Ok(true) => sys::print(b"dma_rogue: the device reported the request as completed\n"),
         Err(e) => return e,
     }
-    let Ok(after) = faults() else {
+    let Ok(after) = faults_above(before) else {
         return 50;
     };
     if after <= before {
@@ -161,7 +190,7 @@ fn client_buffer(
     if sys::mmio_unmap(virt).is_err() {
         return 63;
     }
-    let Ok(before) = faults() else {
+    let Ok(before) = faults_settled() else {
         return 50;
     };
     match submit(transport, queue, req, phys + 1024, 2000) {
@@ -169,7 +198,7 @@ fn client_buffer(
         Ok(false) => return 65,
         Err(e) => return e,
     }
-    if faults() != Ok(before) {
+    if faults_settled() != Ok(before) {
         sys::print(b"dma_rogue: the device lost a buffer whose handle is still held\n");
         return 66;
     }
@@ -179,7 +208,7 @@ fn client_buffer(
     if let Err(e) = submit(transport, queue, req, phys + 2048, 500) {
         return e;
     }
-    let Ok(after) = faults() else {
+    let Ok(after) = faults_above(before) else {
         return 50;
     };
     if after <= before {
