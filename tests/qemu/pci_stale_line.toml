@@ -1,0 +1,36 @@
+# Incident 0050: what a dead driver leaves behind must not reach the next
+# claim of its function. An interrupt line is transferable, so it can
+# outlive its claim (here in a message nobody received); dropped after the
+# function was claimed again, it masked the new claim's MSI-X entry (or
+# disabled its MSI). And a driver can move the BAR that holds its MSI-X
+# table through its configuration page: the next claim programmed the
+# table where the BAR was at boot. The xHCI offers MSI only
+# (`usb_hid_msi`), so both kinds of line are covered.
+name = "pci.stale_line"
+description = "test=pci_stale_line: an old claim's interrupt line leaves the new claim's interrupts on; a moved MSI-X BAR is not programmed"
+level = "full"
+areas = ["pci", "drivers", "interrupts"]
+cmdline = "qemu_exit test=pci_stale_line"
+usb_hid = true
+usb_hid_msi = true
+timeout_secs = 40
+
+[expect]
+exit = 33
+serial_contains = [
+    "claimed again (the previous driver died) (MSI-X entry 0)",
+    "1b36:000d claimed again (the previous driver died) (MSI)",
+    "stale MSI-X line dropped after the function was claimed again: the new claim's interrupts stay on",
+    "stale MSI line dropped after the function was claimed again: the new claim's interrupts stay on",
+    "its device was programmed again since (a newer claim), left as it is",
+    "MSI-X table's BAR 1 moved since boot: MSI-X not used",
+    "pci stale line selftest ok (",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_order = [
+    "1af4:1041 claimed (MSI-X entry 0)",
+    "BAR 1 moved since boot: not offered",
+    "MSI-X table's BAR 1 moved since boot: MSI-X not used",
+    "1af4:1041 claimed again (the previous driver died)",
+]
+serial_absent = ["KERNEL PANIC", "1af4:1041 claimed again (the previous driver died) (MSI-X"]

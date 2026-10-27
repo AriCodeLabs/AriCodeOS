@@ -190,6 +190,14 @@ removed on `fix/compositor-ownership`, ADR 0053).
   - typed-ahead console input: what a dead reader left unread, and what
     arrives before the next reader, is discarded and logged (ADR 0057;
     new scenario `console.orphan_input`).
+- 2026-10-27, two PCI defects the second audit of incident 0047
+  confirmed, on `fix/pci-stale-irq-line` (incident 0050, ADR 0061, both
+  reproduced on develop first): an interrupt line that outlived its claim
+  masked the new claim's MSI-X entry or MSI when dropped (it now masks
+  only a source that still carries its own vector, checked under the
+  lock the claims program under), and a claim programmed the MSI-X table
+  where its BAR had been after a driver moved it (MSI-X now needs that
+  BAR where it was at boot); new scenario `pci.stale_line`.
 
 ## Fix plan
 

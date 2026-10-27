@@ -36,7 +36,8 @@ pub struct MemoryBar {
 
 /// Where a function's MSI-X table lies, checked at boot to fit its BAR,
 /// and the Table Offset/BIR register it was read from: a claim refuses
-/// MSI-X if the register reads otherwise then.
+/// MSI-X if the register reads otherwise then, or if that BAR moved
+/// (incident 0050).
 #[derive(Debug, Clone, Copy)]
 pub struct MsixTable {
     pub register: u32,
@@ -596,12 +597,14 @@ fn claim_locked(index: usize, ecam: &Ecam, d: &mut PciDevice) -> Result<Claimed,
         .iter()
         .filter(|(_, b)| matches!(b, Bar::Memory { address, .. } if *address != 0))
         .count();
+    let unchanged = |b: &MemoryBar| {
+        now.iter().any(|(i, bar)| {
+            *i == b.index && matches!(bar, Bar::Memory { address, .. } if *address == b.address)
+        })
+    };
     let mut offered = 0;
     for b in &d.memory_bars {
-        let unchanged = now.iter().any(|(i, bar)| {
-            *i == b.index && matches!(bar, Bar::Memory { address, .. } if *address == b.address)
-        });
-        if !unchanged {
+        if !unchanged(b) {
             warn!(
                 "pci: {} BAR {} moved since boot: not offered",
                 addr, b.index
@@ -637,13 +640,22 @@ fn claim_locked(index: usize, ecam: &Ecam, d: &mut PciDevice) -> Result<Claimed,
         (cmd & !(COMMAND_BUS_MASTER | COMMAND_MEMORY)) | memory | COMMAND_INTX_DISABLE,
     );
     // 2: IRQ via MSI-X (entry 0) or, if the function has no MSI-X, via MSI.
-    // The MSI-X table is where it was checked at boot; a device that now
-    // reports another place gets MSI.
+    // The MSI-X table is where it was checked at boot: its register and the
+    // BAR it lies in read as they did then (a driver can move the BAR
+    // through its configuration page, and the kernel would write where
+    // the BAR was; incident 0050). A device that reports another place
+    // gets MSI.
     let mut irq_kind: Option<&str> = None;
     if let (Some(cap), Some(table)) = (d.msix_cap, d.msix_table) {
         let cap = cap as u64;
+        let bir = (table.register & 0x7) as usize;
         if read_u32(ecam, addr, cap + 4) != table.register {
             warn!("pci: {} MSI-X table moved since boot: MSI-X not used", addr);
+        } else if !d.memory_bars.iter().any(|b| b.index == bir && unchanged(b)) {
+            warn!(
+                "pci: {} MSI-X table's BAR {} moved since boot: MSI-X not used",
+                addr, bir
+            );
         } else {
             let window = match d.msix_window {
                 Some(virt) => virt,
@@ -665,13 +677,16 @@ fn claim_locked(index: usize, ecam: &Ecam, d: &mut PciDevice) -> Result<Claimed,
         }
     }
     if irq_kind.is_none() {
+        // An earlier claim may have left MSI-X enabled: it would take
+        // precedence over MSI (audit of ADR 0051, L3), and without MSI the
+        // device would go on sending the old claim's message, whose vector
+        // may belong to another line once the old one is gone (incident
+        // 0050).
+        if let Some(x) = d.msix_cap {
+            let ctrl = read_u32(ecam, addr, x as u64) >> 16;
+            write_u16(ecam, addr, x as u64 + 2, ctrl as u16 & !0x8000);
+        }
         if let Some(cap) = d.msi_cap {
-            // An earlier claim may have left MSI-X enabled, which would
-            // take precedence over MSI (audit of ADR 0051, L3).
-            if let Some(x) = d.msix_cap {
-                let ctrl = read_u32(ecam, addr, x as u64) >> 16;
-                write_u16(ecam, addr, x as u64 + 2, ctrl as u16 & !0x8000);
-            }
             let irq = crate::hw::register_msi(config_ptr(ecam, addr, 0), cap)?;
             handles[2] = Some((
                 irq,
@@ -1057,5 +1072,144 @@ pub fn reap_selftest() {
         addr(flr),
         RECLAIMS + 1,
         crate::hw::uc_window_bytes() / 1024
+    );
+}
+
+/// Self-test (`test=pci_stale_line`, incident 0050): what a dead driver
+/// leaves behind must not reach the next claim of its function.
+///
+/// 1. An interrupt line outlives its claim: `pci_irq_keeper` sends its IRQ
+///    handle in a message nobody receives yet and dies. The function is
+///    claimed again (a new vector programmed), then the message is dropped
+///    with the old line in it: the new claim's interrupts must stay on. On
+///    the virtio-blk (MSI-X) and on the scenario's xHCI (MSI only). The
+///    line of the newest claim, dropped, does mask its source.
+/// 2. A driver moves the BAR that holds its function's MSI-X table
+///    (`pci_bar_mover`, on the virtio-net) and dies: the next claim must
+///    not program the table where the BAR was, nor leave MSI-X enabled.
+pub fn stale_line_selftest() {
+    use crate::hw::{delivered, IrqSource};
+    use crate::user::{process, programs};
+    use aricode_handles::Rights;
+
+    let line = |irq: &ObjectRef| match &irq.kind {
+        ObjectKind::Irq(l) => (l.source, l.vector),
+        _ => unreachable!("handle 2 of a claim is an IRQ"),
+    };
+    let blk = find_class(0x01, 0x00).expect("virtio-blk on the PCI bus");
+    let xhci = find_class(0x0C, 0x03).expect("an xHCI (scenario: usb_hid)");
+    for index in [blk, xhci] {
+        let addr = DEVICES.lock()[index].address;
+        let [cfg, _, irq, ..] = claim(index).expect("claim").handles;
+        let irq = irq.expect("the claim hands out an interrupt line");
+        let old = alloc::sync::Arc::downgrade(&irq.0);
+        let mailbox = KernelObject::new(ObjectKind::Endpoint(crate::ipc::Endpoint::new()));
+        let pid = process::spawn_with_handles(
+            "pci_irq_keeper",
+            programs::by_name("pci_irq_keeper").expect("pci_irq_keeper in the initrd"),
+            alloc::vec![
+                cfg.expect("configuration"),
+                irq,
+                (mailbox.clone(), Rights::WRITE)
+            ],
+        )
+        .expect("pci_irq_keeper");
+        let status = process::wait(pid);
+        assert!(
+            matches!(status, process::ExitStatus::Killed(_)),
+            "pci_irq_keeper must die by its fault: {status:?}"
+        );
+        assert!(
+            !DEVICES.lock()[index].is_claimed(),
+            "the function is free once its driver is reaped"
+        );
+        assert!(
+            old.strong_count() > 0,
+            "the old line outlives its claim, in the queued message"
+        );
+        let again = claim(index).expect("claim again after the driver died");
+        let (source, vector) = line(&again.handles[2].as_ref().expect("an interrupt line").0);
+        let msix = matches!(source, IrqSource::Msix { .. });
+        assert!(
+            delivered(&source, vector),
+            "{addr}: the new claim's line is delivered"
+        );
+        drop(mailbox);
+        assert_eq!(
+            old.strong_count(),
+            0,
+            "the old line is gone with its message"
+        );
+        assert!(
+            delivered(&source, vector),
+            "{addr}: dropping the old claim's line must leave the new claim's {} on (vector {vector:#x})",
+            if msix { "MSI-X entry" } else { "MSI" }
+        );
+        drop(again);
+        assert!(
+            !delivered(&source, vector),
+            "{addr}: the newest claim's line, dropped, masks its source"
+        );
+        info!(
+            "pci: {addr} stale {} line dropped after the function was claimed again: the new claim's interrupts stay on",
+            if msix { "MSI-X" } else { "MSI" }
+        );
+    }
+
+    let net = find_class(0x02, 0x00).expect("virtio-net on the PCI bus");
+    let (addr, cap, bar_off, phys) = {
+        let devs = DEVICES.lock();
+        let d = &devs[net];
+        let table = d.msix_table.expect("virtio-net has a usable MSI-X table");
+        let bir = (table.register & 0x7) as u64;
+        (
+            d.address,
+            d.msix_cap.expect("MSI-X") as u64,
+            0x10 + 4 * bir,
+            table.phys,
+        )
+    };
+    let msix_enabled = || {
+        let ecam_guard = ECAM.lock();
+        read_u16(ecam_guard.as_ref().expect("ECAM"), addr, cap + 2) & 0x8000 != 0
+    };
+    let bar_now = || {
+        let ecam_guard = ECAM.lock();
+        read_u32(ecam_guard.as_ref().expect("ECAM"), addr, bar_off)
+    };
+    let [cfg, ..] = claim(net).expect("claim").handles;
+    assert!(msix_enabled(), "the first claim uses MSI-X");
+    // Bit 27: 128 MiB away, above any BAR size bit of QEMU's virtio.
+    let moved = bar_now() ^ 0x0800_0000;
+    let pid = process::spawn_with_handles_and_arg(
+        "pci_bar_mover",
+        programs::by_name("pci_bar_mover").expect("pci_bar_mover in the initrd"),
+        alloc::vec![cfg.expect("configuration")],
+        bar_off << 32 | moved as u64,
+        0,
+    )
+    .expect("pci_bar_mover");
+    let status = process::wait(pid);
+    assert!(
+        matches!(status, process::ExitStatus::Killed(_)),
+        "pci_bar_mover must die by its fault: {status:?}"
+    );
+    assert_eq!(bar_now(), moved, "the driver moved the BAR");
+    let again = claim(net).expect("claim again after the driver died");
+    if let Some((irq, _)) = &again.handles[2] {
+        let (source, vector) = line(irq);
+        assert!(
+            !matches!(source, IrqSource::Msix { .. }),
+            "{addr}: a claim must not program the MSI-X table at {phys:#x}, where its BAR was at boot (the entry there reads back as delivered: {})",
+            delivered(&source, vector)
+        );
+    }
+    assert!(
+        !msix_enabled(),
+        "{addr}: MSI-X left enabled by the dead driver's claim is turned off when the new claim cannot use it"
+    );
+    drop(again);
+    info!(
+        "pci stale line selftest ok (old lines leave newer claims' interrupts on, MSI-X and MSI; {addr}: its MSI-X table's BAR moved, not programmed there)"
     );
 }

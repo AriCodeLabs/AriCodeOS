@@ -13,7 +13,7 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Weak;
 use aricode_pmm::{Frame, FRAME_SIZE};
 use core::sync::atomic::{AtomicU32, Ordering};
-use log::warn;
+use log::{info, warn};
 
 /// Vectors reserved for devices.
 pub const DEVICE_VECTOR_FIRST: u8 = 0x30;
@@ -22,14 +22,54 @@ pub const DEVICE_VECTOR_LAST: u8 = 0x3F;
 /// Source of a line: an I/O APIC GSI, an MSI-X entry (table mapped by the
 /// kernel, entry index) or an MSI capability (the function's configuration
 /// space in the ECAM and the capability offset; ADR 0022).
+#[derive(Clone, Copy)]
 pub enum IrqSource {
     Gsi { gsi: u32, level: bool },
     Msix { table_virt: u64, entry: u32 },
     Msi { cfg_virt: u64, cap: u8 },
 }
 
-/// An interrupt line routed to a vector. When the last handle is dropped it
-/// is masked and the vector is freed.
+impl IrqSource {
+    /// The message the MSI-X entry or MSI capability holds now, as
+    /// `(address, data, delivered)`: `delivered` is false while the entry
+    /// is masked or MSI is disabled. `None` for an I/O APIC line.
+    fn message(&self) -> Option<(u64, u32, bool)> {
+        match *self {
+            IrqSource::Gsi { .. } => None,
+            IrqSource::Msix { table_virt, entry } => {
+                let [lo, hi, data, control] = msix_read(table_virt, entry);
+                Some((
+                    (hi as u64) << 32 | lo as u64,
+                    data,
+                    control & MSIX_MASKED == 0,
+                ))
+            }
+            IrqSource::Msi { cfg_virt, cap } => Some(msi_read(cfg_virt, cap)),
+        }
+    }
+
+    /// `true` if the MSI-X entry or MSI capability holds `vector`'s
+    /// message: that vector towards the boot LAPIC, as `register_msix` and
+    /// `register_msi` program it. A vector is never given to two live
+    /// lines (`allocate_vector` skips the ones in use), so while a line
+    /// lives this says whether its source is still its own or a newer
+    /// claim of the function has programmed it since (incident 0050).
+    fn carries(&self, vector: u8) -> bool {
+        self.message()
+            .is_some_and(|(addr, data, _)| addr == message_address() && data == vector as u32)
+    }
+}
+
+/// `true` if `source` delivers `vector`: it carries its message, with the
+/// MSI-X entry unmasked or MSI enabled (`test=pci_stale_line`).
+pub fn delivered(source: &IrqSource, vector: u8) -> bool {
+    let _programming = VECTORS.lock();
+    source.carries(vector) && source.message().is_some_and(|(_, _, on)| on)
+}
+
+/// An interrupt line routed to a vector. When the last handle is dropped
+/// its source is masked, if it still carries this line's message, and the
+/// vector is freed.
 pub struct IrqLine {
     pub source: IrqSource,
     pub vector: u8,
@@ -101,19 +141,39 @@ impl IrqLine {
 }
 
 impl Drop for IrqLine {
+    /// Masks the source, unless it is an MSI-X entry or MSI capability
+    /// that a newer claim of the function has programmed since: a line is
+    /// transferable, so it can outlive its claim (in another process, in a
+    /// queued message), and masking then would silence the new driver
+    /// (incident 0050). The check and the mask run under `VECTORS`, the
+    /// lock `register_msix` and `register_msi` program under, so neither
+    /// can tear the other's write.
     fn drop(&mut self) {
+        let mut vectors = VECTORS.lock();
         match self.source {
             IrqSource::Gsi { gsi, .. } => ioapic::set_masked(gsi, true),
+            source if !source.carries(self.vector) => info!(
+                "irq: vector {:#x} released; its device was programmed again since (a newer claim), left as it is",
+                self.vector
+            ),
             IrqSource::Msix { table_virt, entry } => {
                 msix_write(table_virt, entry, 0, 0, MSIX_MASKED)
             }
             IrqSource::Msi { cfg_virt, cap } => msi_enable(cfg_virt, cap, false),
         }
-        VECTORS.lock().remove(&self.vector);
+        vectors.remove(&self.vector);
     }
 }
 
 const MSIX_MASKED: u32 = 1;
+
+/// Reads an MSI-X table entry (addr lo, addr hi, data, control).
+fn msix_read(table_virt: u64, entry: u32) -> [u32; 4] {
+    let base = (table_virt + MSIX_ENTRY_BYTES * entry as u64) as *const u32;
+    // SAFETY: as in `msix_write`; the window stays mapped for the device's
+    // life, so a line that outlived its claim still reads its entry.
+    core::array::from_fn(|i| unsafe { base.add(i).read_volatile() })
+}
 
 /// Writes an MSI-X table entry (16 bytes: addr lo, addr hi, data, control).
 fn msix_write(table_virt: u64, entry: u32, addr: u64, data: u32, control: u32) {
@@ -255,6 +315,23 @@ fn msi_program(cfg_virt: u64, cap: u8, addr: u64, data: u16) {
         }
     }
     msi_enable(cfg_virt, cap, true);
+}
+
+/// The MSI capability's message now: `(address, data, enabled)`.
+fn msi_read(cfg_virt: u64, cap: u8) -> (u64, u32, bool) {
+    let base = cfg_virt + cap as u64;
+    // SAFETY: same as `msi_program`.
+    unsafe {
+        let ctrl = ((base + 2) as *const u16).read_volatile();
+        let lo = ((base + 4) as *const u32).read_volatile() as u64;
+        let (hi, data_off) = if ctrl & MSI_64BIT != 0 {
+            (((base + 8) as *const u32).read_volatile() as u64, 0xC)
+        } else {
+            (0, 8)
+        };
+        let data = ((base + data_off) as *const u16).read_volatile() as u32;
+        (hi << 32 | lo, data, ctrl & MSI_ENABLE != 0)
+    }
 }
 
 fn msi_enable(cfg_virt: u64, cap: u8, on: bool) {

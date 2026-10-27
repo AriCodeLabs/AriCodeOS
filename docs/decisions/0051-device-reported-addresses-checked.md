@@ -101,3 +101,10 @@ address memory without a bound.
   the system boots).
 - The full suite with 1 and 4 CPUs: every driver's BARs are offered as
   before.
+
+## Note (2026-10-27, ADR 0061)
+
+Point 3 also requires the BAR that holds the MSI-X table to read as at
+boot: a driver can move it through its configuration page, and the kernel
+programmed the table where the BAR had been (incident 0050). A claim that
+does not use MSI-X now turns it off whether or not the function has MSI.
