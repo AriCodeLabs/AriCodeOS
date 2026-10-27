@@ -43,3 +43,12 @@ the console (`sdk/abi::handle`).
   processes (`TRANSFER`) and revocation, without changing the representation.
 - The tables live in the kernel and count against the process limit
   (section 52).
+
+## Note (2026-10-27, ADR 0057)
+
+Rule 1 did not hold over time: the index just freed was reused first and
+the 16-bit generation wrapped, so a closed handle came back after 65535
+closes (incident 0047). ADR 0057 keeps the format and changes the reuse
+order: every position is used before one is reused, oldest free first,
+and a position whose generations run out moves to another index, so a
+value comes back only after about 2^32 closes in the same table.

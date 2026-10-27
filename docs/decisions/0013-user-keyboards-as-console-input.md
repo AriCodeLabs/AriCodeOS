@@ -72,3 +72,10 @@ for a usable session with those keyboards.
 - `shell.usb_keyboard` and `shell.virtio_keyboard` test a shell session
   typed via QMP on a USB HID keyboard and on a virtio one;
   `shell.services_detail` shows the bridge as a resident.
+
+## Note (2026-10-27, ADR 0057)
+
+The ring hands input only to the reader it was typed for: when the
+process that last called `console_read` finishes, what it left unread is
+discarded, and so is what arrives before another process reads (a crashed
+shell's half-typed line no longer reaches the next shell; incident 0047).

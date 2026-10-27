@@ -793,6 +793,9 @@ latter briefly to add the region.
   `console_read` (syscall 24) requires `READ` on a `Console` object,
   validates the destination before blocking and returns `Timeout` if the deadline expires.
   Bytes dropped because the ring is full are counted for diagnostics.
+  Input belongs to its reader (ADR 0057): when the process that last
+  called `console_read` finishes, what it left unread is discarded, and so
+  is what arrives before another process reads (both logged).
 - User-space keyboards (stage 2, ADR 0013): `console_inject` (syscall 29)
   writes text into the same ring and requires `MANAGE` on the `Console`;
   only init has it (`0x10008` with `READ|MANAGE|DUPLICATE|TRANSFER`) and
@@ -1168,7 +1171,8 @@ latter briefly to add the region.
   (`dma_quota`, `dma_used`) and `dma_alloc` charges the size rounded up to a
   page, returning `Limit` when it is exceeded. The quota is cumulative: what was
   reserved is not returned on free (DMA buffers live as long as the
-  process). The DMA a process keeps mapped (its own buffers and those of
+  process); an allocation that fails after the charge gives it back
+  (incident 0047). The DMA a process keeps mapped (its own buffers and those of
   clients) is also bounded by the quota: `mmio_map` beyond it returns
   `Limit` (ADR 0038).
 - `initrd_read` (syscall 27) copies an initrd file to whoever holds

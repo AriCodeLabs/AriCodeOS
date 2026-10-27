@@ -117,7 +117,7 @@ const MSIX_MASKED: u32 = 1;
 
 /// Writes an MSI-X table entry (16 bytes: addr lo, addr hi, data, control).
 fn msix_write(table_virt: u64, entry: u32, addr: u64, data: u32, control: u32) {
-    let base = (table_virt + 16 * entry as u64) as *mut u32;
+    let base = (table_virt + MSIX_ENTRY_BYTES * entry as u64) as *mut u32;
     // SAFETY: the table was mapped uncached in `map_uc` and `entry` is a valid
     // entry of the claimed device.
     unsafe {
@@ -129,9 +129,19 @@ fn msix_write(table_virt: u64, entry: u32, addr: u64, data: u32, control: u32) {
     }
 }
 
-/// Uncached kernel MMIO windows (MSI-X tables and the like), allocated
-/// incrementally and never freed: used for as long as the device lives.
-static UC_NEXT: IrqLock<u64> = IrqLock::new(0xFFFF_D200_0000_0000);
+/// Uncached kernel MMIO windows, allocated incrementally and never freed:
+/// each one is mapped once for a device and kept for as long as the
+/// device lives (a DMAR unit's registers, a PCI function's MSI-X table,
+/// whose window the function's record keeps for every later claim;
+/// incident 0047). A window is never handed to anything else, so no TLB
+/// shootdown is ever needed for this range.
+const UC_BASE: u64 = 0xFFFF_D200_0000_0000;
+static UC_NEXT: IrqLock<u64> = IrqLock::new(UC_BASE);
+
+/// Bytes of uncached windows mapped so far (`test=pci_reap`).
+pub fn uc_window_bytes() -> u64 {
+    *UC_NEXT.lock() - UC_BASE
+}
 
 pub(crate) fn map_uc(phys: u64, len: u64) -> Result<u64, &'static str> {
     use crate::memory::vmm;
@@ -183,10 +193,14 @@ fn new_line(
     obj
 }
 
-/// Creates the IRQ object for an MSI-X entry: allocates a vector and
-/// programs the entry towards the boot LAPIC.
-pub fn register_msix(table_phys: u64, entry: u32) -> Result<ObjectRef, &'static str> {
-    let table_virt = map_uc(table_phys, 16 * (entry as u64 + 1))?;
+/// Bytes of one MSI-X table entry (PCI 3.0, 6.8.2).
+pub const MSIX_ENTRY_BYTES: u64 = 16;
+
+/// Creates the IRQ object for entry 0 of an MSI-X table (the one a claim
+/// hands out) mapped at `table_virt` by `map_uc`, which outlives the
+/// line: allocates a vector and programs the entry towards the boot LAPIC.
+pub fn register_msix(table_virt: u64) -> Result<ObjectRef, &'static str> {
+    let entry = 0;
     let mut vectors = VECTORS.lock();
     let vector = allocate_vector(&vectors)?;
     msix_write(table_virt, entry, message_address(), vector as u32, 0);

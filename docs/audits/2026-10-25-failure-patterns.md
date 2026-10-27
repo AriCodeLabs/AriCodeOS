@@ -157,6 +157,21 @@ removed on `fix/compositor-ownership`, ADR 0053).
   on requests a busy host disk took over 2 s, `2cd0102`). Left as stated:
   the CN fallback and wildcards over public suffixes (L23), and the
   infos below.
+- 2026-10-27, infos, on `fix/kernel-infos` (incident 0047, each
+  reproduced on develop first):
+  - handle generations: a table uses every position before reusing one
+    (oldest free first) and a position moves to another index when its
+    generation runs out, so a closed value comes back after about 2^32
+    closes instead of 65535 (ADR 0057; host test
+    `a_stale_handle_never_resolves_again`);
+  - DMA quota: a `dma_alloc` that fails after its charge gives it back
+    (`memory.dma_lifetime`, `dma_refund`);
+  - `map_uc` windows: a PCI function's MSI-X window is mapped by its first
+    claim and reused by every later one, so driver restarts map nothing
+    new (`drivers.pci_reap`, nine more claims per function);
+  - typed-ahead console input: what a dead reader left unread, and what
+    arrives before the next reader, is discarded and logged (ADR 0057;
+    new scenario `console.orphan_input`).
 
 ## Fix plan
 

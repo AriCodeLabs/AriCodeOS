@@ -199,8 +199,13 @@ fn console_read(handle: Handle, ptr: u64, len: u64, timeout_ms: u64) -> Result<u
     // pointer fails right away, and no input is taken that could not be
     // delivered (audit of finding D, M1).
     process::check_user_writable(ptr, len)?;
-    // The prompt (unterminated line) must be visible before waiting for input.
     if let Some(pid) = process::current_pid() {
+        // This process becomes the console's reader before its prompt
+        // shows, so nothing typed in answer to the prompt is taken for a
+        // dead reader's input (incident 0047).
+        crate::console_input::take(pid.0);
+        // The prompt (unterminated line) must be visible before waiting
+        // for input.
         process::console_flush(pid);
     }
     let mut buf = alloc::vec![0u8; len as usize];
@@ -381,9 +386,9 @@ fn endpoint_create_pair(t: &mut crate::object::Handles) -> Result<u64, Error> {
             // -4095..=-1 as an error. A handle is `generation << 16 |
             // (index + 1)`, so the value is negative whenever the send
             // handle's generation is >= 0x8000; it is in the error range
-            // only if the send handle is 0xFFFF_FFFF and the receive handle
-            // is >= 0xFFFF_F001, i.e. index + 1 >= 0xF001 in both, far above
-            // `HANDLE_LIMIT` (256). Asserted, not assumed.
+            // only if the send handle is 0xFFFF_FFFF, and no handle is:
+            // the table never hands out index + 1 = 0xFFFF (ADR 0057).
+            // Asserted, not assumed.
             debug_assert!(aricode_abi::decode(packed as i64).is_ok());
             Ok(packed)
         }
@@ -926,20 +931,30 @@ fn dma_alloc(h: Handle, len: u64) -> Result<u64, Error> {
     }
     // Process quota (set by its launcher): the size rounded up to pages is
     // charged, since that is what gets allocated.
-    if !process::charge_dma(len.next_multiple_of(4096)) {
+    let charge = len.next_multiple_of(4096);
+    if !process::charge_dma(charge) {
         process::record_event(aricode_abi::sysinfo::EventKind::DmaQuota, len, "dma_alloc");
         return Err(Error::Limit);
     }
-    let dma = crate::hw::dma_alloc(len).map_err(|_| Error::Limit)?;
-    if let (Some(pid), ObjectKind::Dma(d)) = (process::current_pid(), &dma.kind) {
-        if let Err(e) = crate::iommu::map_region(pid.0, d.region.phys, d.region.len).map(|_| ()) {
-            warn!("dma_alloc: {e}");
-            return Err(Error::Limit);
+    // Only a buffer the process gets stays charged: every failure below
+    // gives the charge back (incident 0047). The buffer itself goes with
+    // the error (its drop leaves the IOMMU domains and frees the frames).
+    let granted = (|| {
+        let dma = crate::hw::dma_alloc(len).map_err(|_| Error::Limit)?;
+        if let (Some(pid), ObjectKind::Dma(d)) = (process::current_pid(), &dma.kind) {
+            if let Err(e) = crate::iommu::map_region(pid.0, d.region.phys, d.region.len) {
+                warn!("dma_alloc: {e}");
+                return Err(Error::Limit);
+            }
         }
+        let rights = Rights::READ
+            .union(Rights::WRITE)
+            .union(Rights::DUPLICATE)
+            .union(Rights::TRANSFER);
+        with_handles(|t| insert(t, dma, rights).map(|h| h.0 as u64))
+    })();
+    if granted.is_err() {
+        process::refund_dma(charge);
     }
-    let rights = Rights::READ
-        .union(Rights::WRITE)
-        .union(Rights::DUPLICATE)
-        .union(Rights::TRANSFER);
-    with_handles(|t| insert(t, dma, rights).map(|h| h.0 as u64))
+    granted
 }
