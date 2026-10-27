@@ -1346,9 +1346,9 @@ latter briefly to add the region.
 - A boot state that does not decode is damaged, never fresh (ADR 0060):
   AriBoot boots A and rewrites it once A verifies; the updater rewrites
   it from what AriBoot booted (`boot_slot`, `boot_pending`;
-  `aricode_ab::recovered`), never after a boot pending confirmation
-  (whether init confirmed it is not known; a reboot lets AriBoot rewrite
-  it), and installs nothing in that run
+  `aricode_ab::recovered`: that slot active, pending or not, since the
+  updater only runs from a shell init starts after confirming), and
+  installs nothing in that run
   (`upd-state-damaged`, code 60; scenario `update.state_damaged`).
 - xtask strips debug info from kernel and initrd (`strip
   --strip-debug` if available): the initrd goes from 4.8 MiB to 550 KiB and the

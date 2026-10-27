@@ -865,11 +865,9 @@ fn state_damaged(code: u64) -> bool {
 
 /// The boot state at `lba` is damaged (ADR 0060): rewritten from what
 /// AriBoot booted (`aricode_ab::recovered`) and read back, said and
-/// recorded; from a boot pending confirmation it is not known, so nothing
-/// is written and a reboot lets AriBoot rewrite it. Either way nothing
-/// else is done in this run, so an install never starts from a record the
-/// run had to rebuild: the owner sees the repair and runs the command
-/// again. Returns the exit code.
+/// recorded. Nothing else is done in this run, so an install never starts
+/// from a record the run had to rebuild: the owner sees the repair and
+/// runs the command again. Returns the exit code.
 fn repair_boot_state(blk: &mut BlockClient, lba: u64) -> u64 {
     let Ok(booted) = booted() else {
         return fault(
@@ -878,16 +876,7 @@ fn repair_boot_state(blk: &mut BlockClient, lba: u64) -> u64 {
             "the boot state in ARIBOOT is damaged and the command line does not say what AriBoot booted: nothing installed",
         );
     };
-    let Some(state) = aricode_ab::recovered(booted) else {
-        let slot = booted.slot.map_or("?", |(s, _)| s.name());
-        return fault(
-            code::STATE_DAMAGED,
-            "upd-state-damaged",
-            &format!(
-                "the boot state in ARIBOOT is damaged and this boot started as a trial of slot {slot}, whether confirmed since or not: not rewritten, nothing installed; reboot, and AriBoot rewrites it (booting slot A)"
-            ),
-        );
-    };
+    let state = aricode_ab::recovered(booted);
     blk.buffer()[..SECTOR].copy_from_slice(&state.encode());
     let written = blk.write(lba, 1).is_ok()
         && blk.flush().is_ok()
@@ -901,7 +890,8 @@ fn repair_boot_state(blk: &mut BlockClient, lba: u64) -> u64 {
         );
     }
     let from = match booted.slot {
-        Some((slot, _)) => format!("slot {}", slot.name()),
+        Some((slot, false)) => format!("slot {}", slot.name()),
+        Some((slot, true)) => format!("slot {}, which passed init's checks", slot.name()),
         None => String::from("the ESP"),
     };
     fault(
@@ -2285,21 +2275,39 @@ fn upgrade(
     }
 }
 
+/// What the boot state says about the loader's trust in the development
+/// channel (ADR 0045).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LoaderTrust {
+    Trusts,
+    /// No A/B layout, a loader before ADR 0045, or one built without the
+    /// key.
+    DoesNot,
+    /// The record was made or rebuilt (ADR 0060) and AriBoot has not
+    /// written it since (`BootState::written_by_loader`).
+    NotRecorded,
+    /// The record is damaged.
+    Damaged,
+}
+
 /// Whether this machine's boot loader trusts the development channel: the
-/// flag AriBoot writes in the boot state on every boot (ADR 0045). Without
-/// the A/B layout, or with a state written by a loader before ADR 0045,
-/// it does not. `None` when the state is there but damaged: not known.
-fn loader_trusts_dev() -> Option<bool> {
+/// flag AriBoot writes in the boot state on every boot (ADR 0045).
+fn loader_trust() -> LoaderTrust {
     let Ok(mut blk) = BlockClient::new(BLOCK, HW, CHUNK) else {
-        return Some(false);
+        return LoaderTrust::DoesNot;
     };
     let Some((first_lba, _)) = find_partition(&mut blk, PART_STATE) else {
-        return Some(false);
+        return LoaderTrust::DoesNot;
     };
     if blk.read(first_lba, 1).is_err() {
-        return Some(false);
+        return LoaderTrust::DoesNot;
     }
-    BootState::decode(&blk.buffer()[..SECTOR]).map(|s| s.loader_dev_channel)
+    match BootState::decode(&blk.buffer()[..SECTOR]) {
+        None => LoaderTrust::Damaged,
+        Some(s) if s.loader_dev_channel => LoaderTrust::Trusts,
+        Some(s) if !s.written_by_loader() => LoaderTrust::NotRecorded,
+        Some(_) => LoaderTrust::DoesNot,
+    }
 }
 
 /// The keys of this run (ADR 0045): the release key, and the development
@@ -2311,7 +2319,7 @@ fn run_keys() -> Keys {
     upd::trusted_keys(
         aricode_crypto::trust::public_key(),
         compiled,
-        compiled.is_some() && loader_trusts_dev() == Some(true),
+        compiled.is_some() && loader_trust() == LoaderTrust::Trusts,
     )
 }
 
@@ -2319,7 +2327,7 @@ fn run_keys() -> Keys {
 /// recorded (owner's rule: refusals are logged).
 fn dev_not_trusted() -> u64 {
     let compiled = aricode_crypto::trust::dev_channel_key().is_some();
-    if compiled && loader_trusts_dev().is_none() {
+    if compiled && loader_trust() == LoaderTrust::Damaged {
         // Not known while the boot state is damaged (audit of incident
         // 0045, L2): repaired first, like any run that opens the disk.
         say!("development channel: the boot state in ARIBOOT is damaged, so whether this machine's loader trusts the channel is not known");
@@ -2327,10 +2335,16 @@ fn dev_not_trusted() -> u64 {
             return code;
         }
     }
-    let why = if !compiled {
-        "this build does not carry the development channel's key"
-    } else {
-        "this machine's boot loader does not trust the development channel (install it from a stick made with cargo xtask usb-image --dev-source URL)"
+    let why = match (compiled, loader_trust()) {
+        (false, _) => "this build does not carry the development channel's key",
+        (true, LoaderTrust::DoesNot) => {
+            "this machine's boot loader does not trust the development channel (install it from a stick made with cargo xtask usb-image --dev-source URL)"
+        }
+        // Rebuilt and not yet written by AriBoot (re-audit L-a), or the
+        // record changed while this run started (L-b): not known.
+        (true, _) => {
+            "whether this machine's boot loader trusts the development channel is not known: the boot state was rebuilt or changed and AriBoot has not written it since; reboot, then run the command again"
+        }
     };
     fault(
         code::DEV_NOT_TRUSTED,

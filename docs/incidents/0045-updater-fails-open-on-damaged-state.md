@@ -63,11 +63,10 @@ ADR 0060 records the contract.
    refuses to work from it: `repair_boot_state` rewrites it from what
    AriBoot booted, read from the keys only AriBoot writes on the command
    line (`boot_slot`, `boot_pending`, ADR 0045), with
-   `aricode_ab::recovered`: a slot booted confirmed is active with
-   nothing pending; from the ESP it writes AriBoot's own reading, A
-   active; from a boot pending confirmation nothing is written (audit H1
-   below; the first version kept the slot pending with no tries left).
-   The record is read back. The run then installs
+   `aricode_ab::recovered`: a slot booted, pending or not, is active
+   with nothing pending (the updater only runs after init checked and
+   confirmed it; audit H1 and re-audit M1 below); from the ESP it writes
+   AriBoot's own reading, A active. The record is read back. The run then installs
    nothing and says so (`upd-state-damaged`, code 60): `the boot state in
    ARIBOOT was damaged: rewritten from what AriBoot booted (slot B) as
    active B, none pending; nothing installed: run the command again`.
@@ -97,7 +96,8 @@ ADR 0060 records the contract.
 
 - `aricode_ab`: `a_damaged_state_is_rebuilt_from_the_booted_slot` (fails
   with `recovered` returning `fresh(A)`, as before),
-  `a_pending_boot_leaves_a_damaged_state_to_ariboot` (audit H1).
+  `a_pending_boot_is_rebuilt_as_the_slot_init_checked` (audit H1,
+  re-audit M1).
 - `aricode_update_index`: `a_damaged_floor_refuses_every_stable_release`
   (fails with the old mapping of a damaged floor: `left: (At(1), Some(1))`,
   `right: (Damaged, None)`), `reading_a_damaged_floor_never_saves_it`
@@ -125,8 +125,8 @@ ADR 0060 records the contract.
   detect.
 - AriBoot's reading of a damaged record (boot A) can switch a machine
   running B to A if the record is damaged and the machine reboots before
-  any updater run, and always after a pending boot (audit H1); a
-  redundant copy of the record would be needed to do better.
+  any updater run; a redundant copy of the record would be needed to do
+  better.
 - From an ESP boot, B becomes the install target although it may hold the
   only image that verifies (audit L3).
 
@@ -153,17 +153,13 @@ where it differs the follow-up below holds (ADR 0060 is corrected).
   confirmation (`confirm_boot_slot`: no block service, no `ARIBOOT`, a
   read or write error, an invalid state) is only logged and the shell and
   sshd start anyway, so the updater cannot tell a confirmed slot from one
-  still on trial. Rule chosen: **from a boot pending confirmation,
-  `recovered` returns `None` and nothing is written**; the run exits 60
-  and asks for a reboot, after which AriBoot boots A and rewrites the
-  record (its own reading). A confirmed boot from a slot is still rebuilt
-  as that slot active: the active slot only changes during a boot through
-  init's confirmation of a pending boot, so it is the slot that runs, and
-  at most a trial scheduled during this boot is dropped. Test:
-  `a_pending_boot_leaves_a_damaged_state_to_ariboot` (both scenarios and
-  a failed confirmation); on `126429e` the same scenarios, written against
-  the old signature, failed with `install target is the running slot A`
-  and `B booted as confirmed: Decision { slot: B, pending: false, ... }`.
+  still on trial. First follow-up (`a070565`): from a boot pending
+  confirmation `recovered` returned `None` and nothing was written, the
+  run asking for a reboot. The re-audit (M1 below) showed that rationale
+  wrong and the rule now rebuilds the slot as active. On `126429e` both
+  scenarios, written against the old signature, failed with `install
+  target is the running slot A` and `B booted as confirmed: Decision {
+  slot: B, pending: false, ... }`.
 - **L1: `upgrade` went on after a repair.** `Disk::probe` dropped the
   repair's code, and with a system line in the plan `Disk::open`'s 60 was
   kept but the apps were still staged (exit `60|0x100`). Now `probe`
@@ -200,3 +196,40 @@ where it differs the follow-up below holds (ADR 0060 is corrected).
   events with code 58, not exit codes; ADR 0060 says so.
 - **I4:** `serve-update` logged `GET` for any method; `request_line`
   returns the method too and the log shows it.
+
+### Re-audit (2026-10-27)
+
+An independent re-audit of `a070565` found H1's hazards closed and L1,
+L2, L4, I3 and I4 correct, and one medium and two low findings:
+
+- **M1: the reason for leaving a pending boot to AriBoot was wrong.**
+  The audit H1 follow-up assumed that a failed confirmation lets the
+  shell start on an unchecked slot. In the code, init confirms at step 11
+  after every health check; a trial that fails a check never gets there
+  (a service fails and init returns, or `init_fail_late` returns 99) and
+  then no shell starts; the updater is launched only from a shell
+  (`services/shell`, `launch_run("updater", ..)`; the compositor launches
+  no updater), and sshd's session shells start after step 11 too. So
+  whenever the updater runs, the pending slot passed init's checks, and
+  an unconfirmed one only means that the confirmation's own I/O failed.
+  Leaving the record to AriBoot sent a machine running B back to A, an
+  older system or the never-tried image a second install put there, with
+  no fallback. Follow-up: `recovered` rebuilds a slot booted pending as
+  active, exactly what init meant to write, and returns a plain
+  `BootState` again; the premise is stated in its doc comment, in ADR
+  0060 and here: anything that could run the updater before init's step
+  11 would have to revisit the rule. Test:
+  `a_pending_boot_is_rebuilt_as_the_slot_init_checked`, for A and B: after
+  the repair the install target is never the running slot, and the next
+  boot is the slot that passed init, with an install torn in the other
+  slot and with a confirmation whose write failed.
+- **L-a: after a repair from a stable image the development channel blamed
+  the loader** ("does not trust the development channel", pointing at a
+  new stick) until the next boot. AriBoot counts every boot it writes, so
+  a record holding 0 boots was made or rebuilt and not written by it
+  since (`BootState::written_by_loader`); its development flag says
+  nothing. `loader_trust` now tells that case apart and the refusal says
+  the trust is not known and that a reboot restores it.
+- **L-b: the race in `dev_not_trusted`** (a record that became valid
+  between the check and the repair) fell through to the same message; it
+  now gives the same "not known, reboot" message.

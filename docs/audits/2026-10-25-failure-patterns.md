@@ -168,8 +168,9 @@ removed on `fix/compositor-ownership`, ADR 0053).
   encodings (1160 forgeries accepted before, none after).
 - 2026-10-27, info (`fix/updater-state`, incident 0045, ADR 0060): a boot
   state with a bad CRC is no longer read as fresh; the updater rewrites
-  it from what AriBoot booted (never after a boot pending confirmation,
-  audit H1) and installs nothing in that run.
+  it from what AriBoot booted (the slot that passed init's checks,
+  pending or not; audit H1, re-audit M1) and installs nothing in that
+  run.
 - 2026-10-27, info (same branch): a damaged stable floor fails closed,
   refusing every stable release until a stable install forced with
   `--allow-downgrade` rewrites it as the running release once it went in.
