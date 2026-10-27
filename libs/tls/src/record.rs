@@ -34,7 +34,8 @@ enum Cipher {
     Gcm(Box<AesGcm>),
 }
 
-/// One direction's record protection.
+/// One direction's record protection; its key and IV are wiped when it
+/// is dropped (an `AesGcm` wipes itself).
 pub struct Protection {
     cipher: Cipher,
     iv: [u8; 12],
@@ -43,13 +44,14 @@ pub struct Protection {
 
 impl Protection {
     pub fn new(suite: Suite, secret: &Secret) -> Self {
-        let (key, iv) = traffic_key(suite, secret);
+        let (mut key, iv) = traffic_key(suite, secret);
         let cipher = match suite {
             Suite::Chacha20Poly1305Sha256 => Cipher::ChaCha(key),
             Suite::Aes128GcmSha256 | Suite::Aes256GcmSha384 => Cipher::Gcm(Box::new(
                 AesGcm::new(&key[..suite.key_len()]).expect("AES key length is 16 or 32"),
             )),
         };
+        aricode_crypto::wipe(&mut key);
         Self { cipher, iv, seq: 0 }
     }
 
@@ -107,6 +109,15 @@ impl Protection {
             return Err(Error::Protocol("record overflow"));
         }
         Ok((data[end], end))
+    }
+}
+
+impl Drop for Protection {
+    fn drop(&mut self) {
+        if let Cipher::ChaCha(key) = &mut self.cipher {
+            aricode_crypto::wipe(key);
+        }
+        aricode_crypto::wipe(&mut self.iv);
     }
 }
 
@@ -179,5 +190,18 @@ mod tests {
                 Err(Error::Protocol(_))
             ));
         }
+    }
+
+    #[test]
+    fn keys_are_wiped_when_dropped() {
+        let suite = Suite::Chacha20Poly1305Sha256;
+        let (_, hs) = Schedule::new(suite, &[1; 32], b"t");
+        let mut p = core::mem::ManuallyDrop::new(Protection::new(suite, &hs.server));
+        // SAFETY: dropped once; afterwards only plain bytes are read.
+        unsafe { core::mem::ManuallyDrop::drop(&mut p) };
+        let Cipher::ChaCha(key) = &p.cipher else {
+            panic!("ChaCha20 suite")
+        };
+        assert_eq!((key, &p.iv), (&[0; 32], &[0; 12]));
     }
 }
