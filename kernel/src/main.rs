@@ -371,6 +371,7 @@ fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
         "spawn_oom" => user::process::spawn_oom_selftest(),
         "dma_lifetime" => user::process::dma_lifetime_selftest(),
         "pci_reap" => pci::reap_selftest(),
+        "pci_stale_line" => pci::stale_line_selftest(),
         other if other.starts_with("user_") => run_user_program(&other[5..]),
         // W^X: writing to .rodata -> protection #PF.
         "write_rodata" => {

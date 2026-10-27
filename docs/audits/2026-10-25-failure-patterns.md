@@ -203,6 +203,16 @@ removed on `fix/compositor-ownership`, ADR 0053).
 - 2026-10-27, info (same branch): `serve-update` answers 400 to a request
   line that is not `METHOD SP target SP HTTP/x.y` with a visible-ASCII
   target, logs it escaped, and redirects only to plain file names.
+- 2026-10-27, two PCI defects the second audit of incident 0047
+  confirmed, on `fix/pci-stale-irq-line` (incident 0050, ADR 0061, both
+  reproduced on develop first): an interrupt line that outlived its claim
+  masked the new claim's MSI-X entry or MSI when dropped (it now masks
+  only while its claim is the function's latest, decided from claim
+  numbers under the lock the claims program under, without reading the
+  device), and a claim programmed the MSI-X table where its BAR had been
+  after a driver moved it (MSI-X now needs that BAR where it was at boot
+  and memory decoding on; MSI and MSI-X never both on, after the branch's
+  audit); new scenario `pci.stale_line`.
 
 ## Fix plan
 

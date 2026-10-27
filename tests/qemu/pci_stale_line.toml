@@ -1,0 +1,49 @@
+# Incident 0050: what a dead driver leaves behind must not reach the next
+# claim of its function. An interrupt line is transferable, so it can
+# outlive its claim (here in a message nobody received); dropped after the
+# function was claimed again, it masked the new claim's MSI-X entry (or
+# disabled its MSI). A driver can move a BAR through its configuration
+# page: the next claim programmed the MSI-X table where its BAR had been,
+# or, with another BAR moved and decoding off, where the function did not
+# answer. And an MSI claim's line that lived on left MSI enabled under the
+# next claim's MSI-X. The xHCI offers MSI and MSI-X (`usb_hid_msi_and_msix`);
+# the test parks its BAR so that its first claims get MSI.
+name = "pci.stale_line"
+description = "test=pci_stale_line: an old claim's interrupt line leaves the new claim's interrupts on; no MSI-X where the function does not decode it; MSI off under MSI-X"
+level = "full"
+areas = ["pci", "drivers", "interrupts"]
+cmdline = "qemu_exit test=pci_stale_line"
+usb_hid = true
+usb_hid_msi_and_msix = true
+timeout_secs = 40
+
+[expect]
+exit = 33
+serial_contains = [
+    "1af4:1042 claimed again (the previous driver died) (MSI-X entry 0)",
+    "1b36:000d claimed again (the previous driver died) (MSI)",
+    "stale MSI-X line dropped after the function was claimed again: the new claim's interrupts stay on",
+    "stale MSI line dropped after the function was claimed again: the new claim's interrupts stay on",
+    "its function was claimed again since, its interrupts left to the newer claim",
+    "MSI-X table's BAR 0 moved since boot: MSI-X not used",
+    "claimed with MSI-X after an MSI claim whose line lived on: MSI off",
+    "pci stale line selftest ok (",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_order = [
+    "1af4:1041 claimed (MSI-X entry 0)",
+    "00:03.0 BAR 1 moved since boot: not offered",
+    "00:03.0 MSI-X table's BAR 1 moved since boot: MSI-X not used",
+    "1af4:1041 claimed again (the previous driver died)",
+    "00:03.0 BAR 1 moved by its dead driver: MSI-X not programmed, and off",
+    "1af4:1052 claimed (MSI-X entry 0)",
+    "00:04.0 BAR 4 moved since boot: not offered",
+    "00:04.0 memory decoding stays off (a BAR was not offered): MSI-X not used",
+    "1af4:1052 claimed again (the previous driver died)",
+    "00:04.0 BAR 4 moved by its dead driver: MSI-X not programmed, and off",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "1af4:1041 claimed again (the previous driver died) (MSI-X",
+    "1af4:1052 claimed again (the previous driver died) (MSI-X",
+]

@@ -40,3 +40,11 @@ any 2012 controller.
 - Functions with neither MSI nor MSI-X are claimed without an IRQ (as
   before) and the driver sees it in the mask; INTx via the I/O APIC is left
   for when a device needs it.
+
+## Note (2026-10-27, ADR 0061)
+
+Masking on drop (point 2) applies only while the line's claim is the
+function's latest: a line can outlive its claim, and once the function is
+claimed again the old line leaves its interrupts to the newer claim
+(incident 0050). A claim that uses MSI-X turns MSI off, so the two are
+never on together.
