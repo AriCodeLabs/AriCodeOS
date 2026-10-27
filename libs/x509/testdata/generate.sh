@@ -68,11 +68,17 @@ printf 'subjectAltName=DNS:www.example.org\n' >ec-leaf.ext
 issue ec-leaf '/CN=www.example.org' ec-int ec-leaf.ext $LEAF_FROM $LEAF_TO -sha256
 der ec-root ec-int ec-leaf
 
-# Ed25519 root -> Ed25519 leaf without subjectAltName (common name fallback).
+# A leaf that names its host only in the subject CN (incident 0048).
+key cn-only-leaf -algorithm EC -pkeyopt ec_paramgen_curve:P-256
+printf 'basicConstraints=CA:FALSE\n' >cn-only-leaf.ext
+issue cn-only-leaf '/CN=www.example.org' ec-int cn-only-leaf.ext $LEAF_FROM $LEAF_TO -sha256
+der cn-only-leaf
+
+# Ed25519 root -> Ed25519 leaf.
 key ed-root -algorithm ED25519
 root ed-root '/O=AriCode Test/CN=AriCode Test Ed25519 Root' '' $CA_FROM $CA_TO
 key ed-leaf -algorithm ED25519
-printf 'basicConstraints=CA:FALSE\n' >ed-leaf.ext
+printf 'basicConstraints=CA:FALSE\nsubjectAltName=DNS:ed.example.net\n' >ed-leaf.ext
 issue ed-leaf '/CN=ed.example.net' ed-root ed-leaf.ext $LEAF_FROM $LEAF_TO
 der ed-root ed-leaf
 

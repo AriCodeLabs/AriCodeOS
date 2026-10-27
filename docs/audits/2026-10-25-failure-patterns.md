@@ -103,7 +103,7 @@ of this document.
 | L20 | The TLS key seed falls back to zeros if `sys::random` fails [C-L9] — **fixed** (incident 0036, merged `d11c242`) |
 | L21 | SSH sequence numbers wrap without a forced rekey; strict KEX only when the client offers it (Terrapin with old clients) [C-L10, D-L6, D-L7] — **fixed** (incident 0035, merged `3d4906b`) |
 | L22 | A driver's device keeps DMA access to client buffers after `mmio_unmap` [C-L11] — **fixed** (incident 0039, merged `e2f6192`) |
-| L23 | X.509: duplicate extensions accepted, a CA accepted as a leaf, CN fallback, wildcards over public suffixes, IP vs dNSName, NUL/control bytes in dNSName [D-L1..L4] — **fixed** except the CN fallback and wildcards over public suffixes (incident 0029) |
+| L23 | X.509: duplicate extensions accepted, a CA accepted as a leaf, CN fallback, wildcards over public suffixes, IP vs dNSName, NUL/control bytes in dNSName [D-L1..L4] — **fixed** except wildcards over public suffixes (incident 0029; the CN fallback: incident 0048, ADR 0058) |
 
 ### Info
 
@@ -158,6 +158,8 @@ removed on `fix/compositor-ownership`, ADR 0053).
   on requests a busy host disk took over 2 s, `2cd0102`). Left as stated:
   the CN fallback and wildcards over public suffixes (L23), and the
   infos below.
+- 2026-10-27: the CN fallback (L23) on `fix/x509-no-cn-fallback`
+  (incident 0048, ADR 0058); wildcards over public suffixes stay open.
 - 2026-10-27: four infos of the crypto library fixed on
   `fix/crypto-hardening` (incident 0044): secrets wiped when dropped or
   where their buffer ends (what is not covered is listed in the incident);
