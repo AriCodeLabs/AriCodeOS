@@ -114,6 +114,11 @@ pub struct HostUpdate {
     /// updater must refuse the download).
     #[serde(default)]
     pub tamper_image: bool,
+    /// The image is removed after publishing: the signed index names a
+    /// file the source no longer serves, as `latest/download/` does once a
+    /// newer release replaced the one the index came from (incident 0052).
+    #[serde(default)]
+    pub withdraw_image: bool,
     /// The machine already holds a verified copy of this source's index
     /// with a higher serial (the published one must be refused as stale).
     #[serde(default)]
