@@ -41,14 +41,7 @@ pub enum Kind {
 }
 
 pub fn run(cli: &crate::Cli, release: bool) -> Result {
-    let cpus: u32 = match cli.value("--cpus") {
-        Some(v) => v
-            .parse()
-            .ok()
-            .filter(|n| (1..=64).contains(n))
-            .ok_or_else(|| format!("--cpus {v}: expected a number from 1 to 64"))?,
-        None => 1,
-    };
+    let cpus = cli.cpus()?.unwrap_or(1);
     let all = scenario::load_all()?;
     let bench = all
         .iter()

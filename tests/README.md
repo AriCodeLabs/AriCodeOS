@@ -19,6 +19,11 @@ cargo xtask test --area boot        # QEMU scenarios of one area (with --all to 
 cargo xtask test --list             # list scenarios and which ones the filter selects
 ```
 
+Every `cargo xtask` command refuses an option it does not take, a missing
+value, an option given twice and a number that does not parse, before it
+runs anything (incident 0053): there is no per-scenario filter, and a
+mistyped one is an error, not a full run.
+
 ## Where things are
 
 ```text
