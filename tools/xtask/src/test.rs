@@ -28,15 +28,7 @@ pub fn run(cli: &Cli, release: bool) -> Result {
         })
         .unwrap_or_default();
 
-    let cpus_override = match cli.value("--cpus") {
-        Some(v) => Some(
-            v.parse::<u32>()
-                .ok()
-                .filter(|n| (1..=64).contains(n))
-                .ok_or_else(|| format!("--cpus {v}: expected a number from 1 to 64"))?,
-        ),
-        None => None,
-    };
+    let cpus_override = cli.cpus()?;
     let jobs_requested = match cli.value("--jobs") {
         Some(v) => Some(
             v.parse::<usize>()
