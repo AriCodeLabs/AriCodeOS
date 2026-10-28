@@ -381,7 +381,10 @@ it returns to the previous one. `update sources` lists the sources, `update
 remove N` drops one, `cat updater/history.log` shows what was installed and
 `upgrade --allow-downgrade` is the only way back to an older version. The
 source can also be baked into the stick with `cargo xtask usb-image
---update-source URL`.
+--update-source URL`. `upgrade` installs what the last `update` reported.
+If the source has published a newer release since then, `upgrade` fails
+with "the source no longer serves ..." and installs nothing; run `update`
+again, then `upgrade` (incident 0052).
 
 **Signing key.** Without `--signing-key DIR` everything is signed with the
 development key, whose seed is in the repository: anyone on the network
