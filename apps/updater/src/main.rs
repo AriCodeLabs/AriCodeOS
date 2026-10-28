@@ -1319,6 +1319,37 @@ fn http_error(e: aricode_https::HttpsError) -> String {
     })
 }
 
+/// Why a download failed.
+enum FetchError {
+    /// The server answered this status instead of 200.
+    Status(u16),
+    Other(String),
+}
+
+impl core::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Status(status) => write!(f, "HTTP {status}"),
+            Self::Other(why) => f.write_str(why),
+        }
+    }
+}
+
+/// A file the stored index names, downloaded by `upgrade`, that the source
+/// answers 404 or 410 for: it no longer serves the publication `update`
+/// verified. A source at a moving path (GitHub's `latest/download/`, a
+/// directory the owner replaces) does that once it publishes a newer
+/// release; the run fails closed and says what to run (incident 0052).
+fn withdrawn(e: &FetchError, file: &str, channel: Channel) -> String {
+    match e {
+        FetchError::Status(404 | 410) => format!(
+            ": the source no longer serves {file}, most likely replaced by a newer release since the last update: run {}, then upgrade",
+            update_command(channel)
+        ),
+        _ => String::new(),
+    }
+}
+
 /// The run's budget as the HTTP client sees it: what is left until
 /// `DEADLINE`, asked before every network operation.
 fn run_budget() -> u32 {
@@ -1331,7 +1362,7 @@ fn run_budget() -> u32 {
 /// every send and receive, headers and chunk framing included, so a server
 /// that keeps the response coming without ever delivering a body byte
 /// cannot hold the run (incident 0009). Returns the bytes received.
-fn fetch(net: &mut NetClient, url: &str, out: &mut [u8]) -> Result<usize, String> {
+fn fetch(net: &mut NetClient, url: &str, out: &mut [u8]) -> Result<usize, FetchError> {
     let (mut got, mut overflow) = (0usize, false);
     let mut sink = |chunk: &[u8]| {
         if got + chunk.len() > out.len() {
@@ -1353,23 +1384,28 @@ fn fetch(net: &mut NetClient, url: &str, out: &mut [u8]) -> Result<usize, String
     );
     match result {
         Ok(200) => Ok(got),
-        Ok(status) => Err(format!("HTTP {status}")),
-        Err(_) if overflow => Err(format!("larger than {} bytes", out.len())),
-        Err(e) => Err(http_error(e)),
+        Ok(status) => Err(FetchError::Status(status)),
+        Err(_) if overflow => Err(FetchError::Other(format!(
+            "larger than {} bytes",
+            out.len()
+        ))),
+        Err(e) => Err(FetchError::Other(http_error(e))),
     }
 }
 
 /// `fetch` of exactly `out.len()` bytes (what the index announced).
-fn fetch_exact(net: &mut NetClient, url: &str, out: &mut [u8]) -> Result<(), String> {
+fn fetch_exact(net: &mut NetClient, url: &str, out: &mut [u8]) -> Result<(), FetchError> {
     let want = out.len();
     match fetch(net, url, out)? {
         n if n == want => Ok(()),
-        n => Err(format!("{n} bytes received, the index announced {want}")),
+        n => Err(FetchError::Other(format!(
+            "{n} bytes received, the index announced {want}"
+        ))),
     }
 }
 
 /// `fetch` of a small file of at most `max` bytes.
-fn fetch_small(net: &mut NetClient, url: &str, max: usize) -> Result<Vec<u8>, String> {
+fn fetch_small(net: &mut NetClient, url: &str, max: usize) -> Result<Vec<u8>, FetchError> {
     let mut buf = alloc::vec![0u8; max];
     let n = fetch(net, url, &mut buf)?;
     buf.truncate(n);
@@ -1880,7 +1916,10 @@ fn upgrade_system(
         return Err(download_fault(
             code::DOWNLOAD,
             "upd-image-download",
-            format!("download failed: {e}"),
+            format!(
+                "download failed: {e}{}",
+                withdrawn(&e, entry.file, offer.channel)
+            ),
         ));
     }
     if sha256(&image[..size]) != entry.sha256 {
@@ -1984,7 +2023,11 @@ fn stage_app<'e>(
         return Err(download_fault(
             code::DOWNLOAD,
             "upd-pkg-download",
-            format!("app {}: download failed: {e}", entry.name),
+            format!(
+                "app {}: download failed: {e}{}",
+                entry.name,
+                withdrawn(&e, entry.file, Channel::Stable)
+            ),
         ));
     }
     if sha256(&bytes) != entry.sha256 {
@@ -2041,6 +2084,14 @@ fn stage_app<'e>(
     })
 }
 
+/// The command that refreshes `channel`'s sources.
+fn update_command(channel: Channel) -> &'static str {
+    match channel {
+        Channel::Stable => "update",
+        Channel::Dev => "update --channel dev",
+    }
+}
+
 /// `UPGRADE`: installs what the plan lists, from the verified stored
 /// indexes of `channel`. `explicit`: the owner named the channel
 /// (`--channel`), the only way the system moves to the other one.
@@ -2072,10 +2123,6 @@ fn upgrade(
             &format!("{rejected} invalid line(s) in the plan ignored"),
         );
     }
-    let update_command = |c: Channel| match c {
-        Channel::Stable => "update",
-        Channel::Dev => "update --channel dev",
-    };
     if plan.channel != channel {
         return fault(
             code::PLAN,

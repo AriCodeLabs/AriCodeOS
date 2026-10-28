@@ -1957,6 +1957,23 @@ pub fn stored_copy_ahead(dir: &Path, url: &str) -> Result<Vec<u8>> {
     ))
 }
 
+/// Removes the system image the index published in `dir` names, leaving
+/// the index and its signature: the source then answers 404 for a file its
+/// signed index still lists (scenario `update.withdrawn_image`).
+pub fn withdraw_system_image(dir: &Path) -> Result {
+    let text = io(
+        fs::read_to_string(dir.join(aricode_update_index::INDEX_FILE)),
+        "read the published index",
+    )?;
+    let index =
+        aricode_update_index::Index::parse(&text).map_err(|e| format!("published index: {e:?}"))?;
+    let system = index.system.ok_or("the index offers no system image")?;
+    io(
+        fs::remove_file(dir.join(system.file)),
+        &format!("remove {}", system.file),
+    )
+}
+
 /// `cargo xtask publish-update` (ADR 0027, ADR 0029): publishes into `dir`
 /// one complete update source: the signed system image `aricodeos-N.img`
 /// (slot layout: ARISLOT header + container), the app packages
