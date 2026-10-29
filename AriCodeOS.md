@@ -18,6 +18,8 @@
 
 AriCodeOS was born with the intention of building a modern operating system from scratch, without using Linux, Windows, BSD or any other kernel as its execution base.
 
+"From scratch" does not mean writing every line ourselves (ADR 0063). It means looking at what exists, comparing it, learning from other systems' failures and improving on them: never copying something only because it was written years ago and works, and never keeping our own only because it is ours. Each subsystem is measured against the established implementations, for compatibility and for how fast the system runs. The better one is kept, adopted under a permissive licence when it is not ours.
+
 The project does not initially aim to be a general replacement for Windows or Linux. Its first goal is to build a modern, small, secure, verifiable kernel designed around current hardware.
 
 The fundamental principles will be:

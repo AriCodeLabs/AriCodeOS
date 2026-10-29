@@ -542,6 +542,7 @@ pub fn check() -> Result {
         c.args(["--", "-D", "warnings"]);
         run(c)?;
     }
+    crate::deps::check()?;
     // Every initrd program's stack budget (incident 0018).
     crate::stack::check()
 }
