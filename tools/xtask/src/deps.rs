@@ -94,32 +94,40 @@ struct DepKind {
 /// change is refused, so nothing is picked up that the repository does not
 /// pin.
 pub fn check(user_roots: &[&str]) -> Result {
-    let metadata = metadata(None)?;
-    judge(&metadata, user_roots)
+    let all = metadata(None, None)?;
+    let user = metadata(None, Some(crate::build::USER_TARGET))?;
+    judge(&all, &user, user_roots)
 }
 
 /// The same checks for an app built out of tree (`dir/Cargo.toml`, its own
 /// workspace): every package of that workspace, the SDK's by path
 /// included, is linked into the user program.
 pub fn check_external(dir: &std::path::Path) -> Result {
-    let metadata = metadata(Some(&dir.join("Cargo.toml")))?;
-    let roots: Vec<String> = metadata
+    let manifest = dir.join("Cargo.toml");
+    let all = metadata(Some(&manifest), None)?;
+    let user = metadata(Some(&manifest), Some(crate::build::USER_TARGET))?;
+    let roots: Vec<String> = all
         .packages
         .iter()
         .filter(|p| p.source.is_none())
         .map(|p| p.name.clone())
         .collect();
     let roots: Vec<&str> = roots.iter().map(String::as_str).collect();
-    judge(&metadata, &roots)
+    judge(&all, &user, &roots)
 }
 
-/// `cargo metadata --locked` of the repository, or of `manifest`.
-fn metadata(manifest: Option<&std::path::Path>) -> Result<Metadata> {
+/// `cargo metadata --locked` of the repository, or of `manifest`; with
+/// `platform`, the dependency graph keeps only what that target builds
+/// (`cfg(unix)` dependencies in, `cfg(target_arch = "aarch64")` ones out).
+fn metadata(manifest: Option<&std::path::Path>, platform: Option<&str>) -> Result<Metadata> {
     let mut c = std::process::Command::new(env!("CARGO"));
     c.current_dir(crate::root())
         .args(["metadata", "--format-version", "1", "--locked"]);
     if let Some(m) = manifest {
         c.arg("--manifest-path").arg(m);
+    }
+    if let Some(p) = platform {
+        c.args(["--filter-platform", p]);
     }
     let out = c.output().map_err(|e| format!("cargo metadata: {e}"))?;
     if !out.status.success() {
@@ -131,7 +139,10 @@ fn metadata(manifest: Option<&std::path::Path>) -> Result<Metadata> {
     serde_json::from_slice(&out.stdout).map_err(|e| format!("cargo metadata: {e}"))
 }
 
-fn judge(metadata: &Metadata, user_roots: &[&str]) -> Result {
+/// Licences and sources over every crate (`all`); crates that bind to the
+/// host OS over what the user programs link on their target (`user`).
+fn judge(all: &Metadata, user: &Metadata, user_roots: &[&str]) -> Result {
+    let metadata = all;
     let mut refused: Vec<String> = metadata
         .packages
         .iter()
@@ -141,7 +152,7 @@ fn judge(metadata: &Metadata, user_roots: &[&str]) -> Result {
                 .map(|why| format!("{} {}: {why}", p.name, p.version))
         })
         .collect();
-    refused.extend(host_os_crates(metadata, user_roots));
+    refused.extend(host_os_crates(user, user_roots));
     let third_party = metadata
         .packages
         .iter()
@@ -159,8 +170,8 @@ fn judge(metadata: &Metadata, user_roots: &[&str]) -> Result {
 }
 
 /// Refusals for crates of [`HOST_OS_CRATES`] that a user program links:
-/// its normal dependencies, followed whatever their `cfg` (a crate behind
-/// `cfg(unix)` is built for the Linux target). Build dependencies run on
+/// its normal dependencies in a graph already filtered for the user target
+/// (a crate behind `cfg(unix)` is built for it). Build dependencies run on
 /// the host and are not followed.
 fn host_os_crates(metadata: &Metadata, user_roots: &[&str]) -> Vec<String> {
     use std::collections::{BTreeMap, BTreeSet};

@@ -3,9 +3,36 @@ name = "aricode-crypto"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "AriCodeOS cryptographic primitives: SHA-256, SHA-384, SHA-512, HMAC, HKDF, Ed25519, X25519, ChaCha20, Poly1305, ChaCha20-Poly1305, AES-GCM, RSA verification and the OpenSSH ChaCha20-Poly1305 cipher (no_std, no dependencies)"
+description = "AriCodeOS cryptography: one interface over RustCrypto and dalek (SHA-2, AES-GCM, ChaCha20-Poly1305, Ed25519, X25519) and its own ECDSA and RSA verification, HMAC, HKDF and SSH cipher (no_std)"
 
 [lib]
 path = "src/lib.rs"
 
+[features]
+# Portable backends only, for the kernel and AriBoot: they must never
+# execute SIMD instructions (ADR 0065, ADR 0066). The `--cfg` flags of
+# .cargo/config.toml do the same for the crates whose switch is a cfg.
+soft = ["sha2/force-soft"]
+
+# ADR 0066: the implementations that measured best. Features: only what is
+# used, `zeroize` wherever a crate offers it; no `getrandom`, no `std`.
+# `aes`, `ghash`, `polyval` are named only to turn on their `zeroize`.
+# The crates whose state `wipe_state` zeroes are pinned with `=`: a bump
+# changes their layout assumptions and needs that list audited again.
 [dependencies]
+sha2 = { version = "=0.10.9", default-features = false }
+aes = { version = "=0.8.4", default-features = false, features = ["zeroize"] }
+aes-gcm = { version = "=0.10.3", default-features = false, features = ["aes", "zeroize"] }
+ghash = { version = "=0.5.1", default-features = false, features = ["zeroize"] }
+polyval = { version = "=0.6.2", default-features = false, features = ["zeroize"] }
+chacha20 = { version = "0.9.1", default-features = false, features = ["zeroize"] }
+chacha20poly1305 = { version = "0.10.1", default-features = false }
+poly1305 = { version = "0.8.0", default-features = false, features = ["zeroize"] }
+ed25519-dalek = { version = "2.2.0", default-features = false, features = ["fast", "zeroize"] }
+# The bare `x25519` function only: no secret types, so no `zeroize`
+# (which would bring a procedural macro into the kernel graph).
+x25519-dalek = { version = "2.0.1", default-features = false }
+
+# The Wycheproof test (tests/wycheproof.rs) reads its JSON vectors.
+[dev-dependencies]
+serde_json = "1"

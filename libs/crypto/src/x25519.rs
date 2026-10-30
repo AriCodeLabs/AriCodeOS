@@ -1,10 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
-//! X25519 (RFC 7748): Diffie-Hellman on Curve25519 with the Montgomery
-//! ladder. The ladder swaps with [`Fe::cswap`] and never branches on the
-//! scalar, so the ephemeral secret does not leak through timing.
-
-use crate::field25519::Fe;
+//! X25519 (RFC 7748) over `x25519-dalek` (ADR 0066): Diffie-Hellman on
+//! Curve25519 with a constant-time Montgomery ladder.
 
 pub const KEY_LEN: usize = 32;
 
@@ -15,51 +12,11 @@ pub const BASEPOINT: [u8; KEY_LEN] = {
     b
 };
 
-fn clamp(k: &[u8; KEY_LEN]) -> [u8; KEY_LEN] {
-    let mut k = *k;
-    k[0] &= 248;
-    k[31] &= 127;
-    k[31] |= 64;
-    k
-}
-
-/// `k * u`: the scalar is clamped and the top bit of `u` is ignored. The
-/// clamped copy of the scalar and the ladder's registers are wiped.
+/// `k * u`: the scalar is clamped and the top bit of `u` is ignored.
+/// The clamped scalar and the ladder's registers `x25519-dalek` leaves on
+/// the stack are scrubbed before returning ([`crate::scrub_stack`]).
 pub fn scalar_mult(k: &[u8; KEY_LEN], u: &[u8; KEY_LEN]) -> [u8; KEY_LEN] {
-    let mut k = clamp(k);
-    let x1 = Fe::from_bytes(u);
-    let a24 = Fe::from_u64(121_665);
-    let (mut x2, mut z2) = (Fe::ONE, Fe::ZERO);
-    let (mut x3, mut z3) = (x1, Fe::ONE);
-    let mut swap = 0u64;
-    for t in (0..255).rev() {
-        let bit = ((k[t / 8] >> (t % 8)) & 1) as u64;
-        swap ^= bit;
-        Fe::cswap(&mut x2, &mut x3, swap);
-        Fe::cswap(&mut z2, &mut z3, swap);
-        swap = bit;
-        let a = x2.add(z2);
-        let aa = a.square();
-        let b = x2.sub(z2);
-        let bb = b.square();
-        let e = aa.sub(bb);
-        let c = x3.add(z3);
-        let d = x3.sub(z3);
-        let da = d.mul(a);
-        let cb = c.mul(b);
-        x3 = da.add(cb).square();
-        z3 = x1.mul(da.sub(cb).square());
-        x2 = aa.mul(bb);
-        z2 = e.mul(aa.add(a24.mul(e)));
-    }
-    Fe::cswap(&mut x2, &mut x3, swap);
-    Fe::cswap(&mut z2, &mut z3, swap);
-    let out = x2.mul(z2.invert()).to_bytes();
-    crate::wipe(&mut k);
-    for fe in [&mut x2, &mut z2, &mut x3, &mut z3] {
-        crate::wipe(&mut fe.0);
-    }
-    out
+    crate::scrubbed::<{ crate::SCRUB_CURVE }, _>(|| x25519_dalek::x25519(*k, *u))
 }
 
 /// Public key for the secret `k`.

@@ -589,6 +589,16 @@ pub fn build_os(release: bool) -> Result<Artifacts> {
     for (pkg, target) in [("ariboot", UEFI_TARGET), ("arikernel", KERNEL_TARGET)] {
         println!("[xtask] build {pkg} ({target})");
         let mut c = cargo();
+        // Any of these would replace the target's flags in
+        // .cargo/config.toml, the portable cryptography's included (audit
+        // of ADR 0066, L5).
+        for v in [
+            "RUSTFLAGS",
+            "CARGO_ENCODED_RUSTFLAGS",
+            "CARGO_BUILD_RUSTFLAGS",
+        ] {
+            c.env_remove(v);
+        }
         c.args(["build", "-p", pkg, "--target", target]);
         if release {
             c.arg("--release");
@@ -601,6 +611,18 @@ pub fn build_os(release: bool) -> Result<Artifacts> {
         run(c)?;
     }
     let t = root().join("target");
+    let kernel = t
+        .join(KERNEL_TARGET)
+        .join(profile_dir(release))
+        .join("arikernel");
+    let loader = t
+        .join(UEFI_TARGET)
+        .join(profile_dir(release))
+        .join("ariboot.efi");
+    for (name, path) in [("arikernel", &kernel), ("ariboot", &loader)] {
+        let listing = crate::stack::disassemble(path)?;
+        check_no_simd(name, &listing)?;
+    }
     Ok(Artifacts {
         ariboot: t
             .join(UEFI_TARGET)
@@ -614,6 +636,43 @@ pub fn build_os(release: bool) -> Result<Artifacts> {
     })
 }
 
+/// The kernel and AriBoot must not touch a vector register (XMM, YMM, ZMM,
+/// MMX or an AVX-512 mask): user threads' registers stay live in the
+/// kernel (ADR 0065), and the adopted cryptography would use AES-NI or
+/// AVX2 if its portable backends were not forced (ADR 0066). Saving and
+/// restoring the whole state (`fxsave`, `xrstor`...) names no register and
+/// is allowed. `listing` is `objdump -d` output in AT&T syntax.
+pub fn check_no_simd(name: &str, listing: &str) -> Result {
+    // `%xmm0`..`%zmm31`, `%mm0`..`%mm7`, `%k0`..`%k7`: a prefix and a digit.
+    let uses_vector_register = |line: &str| {
+        line.match_indices('%').any(|(i, _)| {
+            let rest = &line.as_bytes()[i + 1..];
+            ["xmm", "ymm", "zmm", "mm", "k"].iter().any(|p| {
+                rest.starts_with(p.as_bytes()) && rest.get(p.len()).is_some_and(u8::is_ascii_digit)
+            })
+        })
+    };
+    // Instructions that change vector state without naming a register:
+    // the upper halves of YMM, MXCSR, the MMX/x87 switch (audit of ADR
+    // 0066, L4). The kernel's own `fxsave`/`xrstor`, `fninit` and the
+    // error-pointer reset (`fnclex`, `emms`, `fild`) are allowed.
+    const IMPLICIT: [&str; 4] = ["vzeroupper", "vzeroall", "ldmxcsr", "femms"];
+    let implicit = |line: &str| line.split_whitespace().any(|w| IMPLICIT.contains(&w));
+    let offending: Vec<&str> = listing
+        .lines()
+        .filter(|l| uses_vector_register(l) || implicit(l))
+        .take(5)
+        .collect();
+    if offending.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{name} uses vector registers, which the kernel and AriBoot must never do (ADR 0065, ADR 0066); first instructions:\n  {}",
+            offending.join("\n  ")
+        ))
+    }
+}
+
 /// Host unit tests of every crate that is not bare-metal.
 pub fn unit_tests() -> Result {
     let mut c = cargo();
@@ -623,8 +682,41 @@ pub fn unit_tests() -> Result {
             c.args(["--exclude", pkg]);
         }
     }
+    run(c)?;
+    // The host picks the SIMD backends at run time; the kernel and AriBoot
+    // run the portable ones (ADR 0066), which this tests as they build
+    // them (audit of ADR 0066, L3). Its own target directory keeps the
+    // flags from rebuilding the host's.
+    println!("[xtask] aricode-crypto with the trusted base's portable backends");
+    let mut c = cargo();
+    c.env("CARGO_ENCODED_RUSTFLAGS", TRUSTED_CRYPTO_CFGS.join("\x1f"))
+        .args([
+            "test",
+            "-p",
+            "aricode-crypto",
+            "--features",
+            "soft",
+            "--target-dir",
+        ])
+        .arg(root().join("target").join("soft-crypto"));
     run(c)
 }
+
+/// The `--cfg` flags `.cargo/config.toml` gives the kernel's and AriBoot's
+/// targets, for the host test of their cryptography (a unit test keeps the
+/// two lists equal).
+const TRUSTED_CRYPTO_CFGS: &[&str] = &[
+    "--cfg",
+    "aes_force_soft",
+    "--cfg",
+    "polyval_force_soft",
+    "--cfg",
+    "chacha20_force_soft",
+    "--cfg",
+    "poly1305_force_soft",
+    "--cfg",
+    "curve25519_dalek_backend=\"serial\"",
+];
 
 pub fn check() -> Result {
     let mut c = cargo();
@@ -708,6 +800,49 @@ mod tests {
         elf[56..58].copy_from_slice(&1u16.to_le_bytes());
         elf[64..68].copy_from_slice(&ptype.to_le_bytes());
         elf
+    }
+
+    /// The host test of the trusted base's cryptography uses the flags its
+    /// targets get from .cargo/config.toml.
+    #[test]
+    fn trusted_crypto_cfgs_match_the_config() {
+        let config: toml::Table = std::fs::read_to_string(root().join(".cargo/config.toml"))
+            .expect("read .cargo/config.toml")
+            .parse()
+            .expect("parse .cargo/config.toml");
+        for target in [KERNEL_TARGET, UEFI_TARGET] {
+            let flags: Vec<&str> = config["target"][target]["rustflags"]
+                .as_array()
+                .expect("rustflags")
+                .iter()
+                .map(|f| f.as_str().expect("flag"))
+                .collect();
+            let cfgs: Vec<&str> = flags
+                .windows(2)
+                .filter(|w| w[0] == "--cfg")
+                .flat_map(|w| ["--cfg", w[1]])
+                .collect();
+            assert_eq!(cfgs, TRUSTED_CRYPTO_CFGS, "{target}");
+        }
+    }
+
+    #[test]
+    fn trusted_base_never_touches_vector_registers() {
+        let clean = "ffffffff80001000: fxsave64 (%rdi)\n  ffff: xrstor64 (%rsi)\n  ffff: mov %rax,%rbx\n  ffff: fninit\n  ffff: emms\n  ffff: mov %r8,%rcx\n";
+        assert!(check_no_simd("k", clean).is_ok());
+        for bad in [
+            "  1000: movdqa %xmm0,(%rdi)",
+            "  1000: vpxor %ymm1,%ymm1,%ymm1",
+            "  1000: vmovdqa64 %zmm3,(%rax)",
+            "  1000: movq %mm0,%rax",
+            "  1000: kmovw %k1,%eax",
+            "  1000: aesenc %xmm1,%xmm0",
+            "  1000:\tvzeroupper",
+            "  1000:\tldmxcsr (%rsp)",
+        ] {
+            let e = check_no_simd("k", bad).unwrap_err();
+            assert!(e.contains("vector registers"), "{bad}: {e}");
+        }
     }
 
     #[test]

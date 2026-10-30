@@ -92,7 +92,7 @@ The owner's meaning of "from scratch", in their words (2026-10-29):
       no implementation can use AES-NI, SHA-NI or vector code. Done in
       ADR 0065.
    3. Cryptography: compare `aricode-crypto` with RustCrypto and the dalek
-      crates.
+      crates. Done in ADR 0066.
    4. TLS and X.509: compare with rustls and rustls-webpki.
    5. SSH: compare with sunset and Dropbear's design.
    6. TCP/IP, then the WASM interpreter: compare with smoltcp and wasmi.

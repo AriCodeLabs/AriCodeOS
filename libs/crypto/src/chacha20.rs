@@ -1,65 +1,41 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
-//! ChaCha20 (RFC 7539): stream of 64-byte blocks; basis of the kernel RNG.
+//! ChaCha20 (RFC 8439) over RustCrypto's `chacha20` (ADR 0066), portable
+//! in the kernel and AriBoot; basis of the kernel RNG ([`Rng`], ours).
 
-const CONSTANTS: [u32; 4] = [0x61707865, 0x3320646e, 0x79622d32, 0x6b206574];
+use chacha20::cipher::consts::U10;
+use chacha20::cipher::{
+    KeyIvInit, StreamCipher, StreamCipherCore, StreamCipherSeek, StreamCipherSeekCore,
+};
 
-#[inline(always)]
-fn quarter(s: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
-    s[a] = s[a].wrapping_add(s[b]);
-    s[d] = (s[d] ^ s[a]).rotate_left(16);
-    s[c] = s[c].wrapping_add(s[d]);
-    s[b] = (s[b] ^ s[c]).rotate_left(12);
-    s[a] = s[a].wrapping_add(s[b]);
-    s[d] = (s[d] ^ s[a]).rotate_left(8);
-    s[c] = s[c].wrapping_add(s[d]);
-    s[b] = (s[b] ^ s[c]).rotate_left(7);
+/// The cipher for (`key`, `nonce`), positioned at block `counter`. It
+/// wipes its key when dropped.
+fn at(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> chacha20::ChaCha20 {
+    let mut c = chacha20::ChaCha20::new(key.into(), nonce.into());
+    c.seek(u64::from(counter) * 64);
+    c
 }
 
-/// One keystream block for `key`, `nonce` (96 bits) and `counter`.
+/// One keystream block for `key`, `nonce` (96 bits) and `counter`, any
+/// counter included: the stream wrapper refuses block 2^32 - 1, which
+/// [`Rng::reseed`] uses, so this goes to the cipher core.
 pub fn block(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> [u8; 64] {
-    let mut state = [0u32; 16];
-    state[..4].copy_from_slice(&CONSTANTS);
-    for (i, k) in key.as_chunks::<4>().0.iter().enumerate() {
-        state[4 + i] = u32::from_le_bytes(*k);
-    }
-    state[12] = counter;
-    for (i, n) in nonce.as_chunks::<4>().0.iter().enumerate() {
-        state[13 + i] = u32::from_le_bytes(*n);
-    }
-    let mut w = state;
-    for _ in 0..10 {
-        quarter(&mut w, 0, 4, 8, 12);
-        quarter(&mut w, 1, 5, 9, 13);
-        quarter(&mut w, 2, 6, 10, 14);
-        quarter(&mut w, 3, 7, 11, 15);
-        quarter(&mut w, 0, 5, 10, 15);
-        quarter(&mut w, 1, 6, 11, 12);
-        quarter(&mut w, 2, 7, 8, 13);
-        quarter(&mut w, 3, 4, 9, 14);
-    }
+    let mut core = chacha20::ChaChaCore::<U10>::new(key.into(), nonce.into());
+    core.set_block_pos(counter);
     let mut out = [0u8; 64];
-    for (i, o) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-        *o = w[i].wrapping_add(state[i]).to_le_bytes();
-    }
+    core.write_keystream_block((&mut out).into());
     out
 }
 
-/// Deterministic generator: consecutive ChaCha20 blocks over a seed key;
-/// `reseed` mixes fresh entropy into the key.
 /// XORs `data` with the keystream for (`key`, `nonce`) starting at block
 /// `counter` (encryption and decryption are the same operation).
-/// The last block of keystream is wiped (each block overwrites the one
-/// before it).
+///
+/// # Panics
+///
+/// If `data` runs past block 2^32 - 1, the end of the keystream: the
+/// callers start at block 0 or 1 with packets of kilobytes.
 pub fn xor_keystream(key: &[u8; 32], nonce: &[u8; 12], counter: u32, data: &mut [u8]) {
-    let mut ks = [0u8; 64];
-    for (i, chunk) in data.chunks_mut(64).enumerate() {
-        ks = block(key, nonce, counter.wrapping_add(i as u32));
-        for (b, k) in chunk.iter_mut().zip(ks.iter()) {
-            *b ^= k;
-        }
-    }
-    crate::wipe(&mut ks);
+    at(key, nonce, counter).apply_keystream(data);
 }
 
 pub struct Rng {
@@ -162,6 +138,25 @@ mod tests {
         b.fill(&mut y);
         a.fill(&mut x);
         assert_ne!(x, y);
+    }
+
+    /// The last block of a nonce: the stream wrapper of `chacha20` refuses
+    /// it and `Rng::reseed` uses it (ADR 0066). Reference value from an
+    /// independent implementation of RFC 8439's block function.
+    #[test]
+    fn last_block_of_a_nonce() {
+        let key: [u8; 32] = core::array::from_fn(|i| i as u8 + 1);
+        let nonce: [u8; 12] = core::array::from_fn(|i| i as u8);
+        let mut expected = [0u8; 64];
+        crate::unhex(
+            "461d29d38817022be371e89ba0337f939c1c079b820287720fab9ccd2e9789f1\
+             a660ef15c18594da1cf1351e2f868b2d028f784ee84102a8512223ca966a9f35",
+            &mut expected,
+        )
+        .unwrap();
+        assert_eq!(block(&key, &nonce, u32::MAX), expected);
+        let mut r = Rng::new(key);
+        r.reseed(&[0; 32]);
     }
 
     #[test]

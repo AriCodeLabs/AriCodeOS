@@ -1,5 +1,5 @@
-# ADR 0064: a system image larger than the updater's whole memory (7 MiB
-# against 1 MiB) is downloaded into UPDATE as it arrives, its SHA-256 read
+# ADR 0064: a system image larger than the updater's whole memory (the
+# system plus 3 MiB of padding against 1 MiB) is downloaded into UPDATE as it arrives, its SHA-256 read
 # back from the disk and compared with the signed index, verified there and
 # copied into slot B as `update apply` does, hashed again on the way. The
 # second boot comes from B. UPDATE starts with another image in it and the
