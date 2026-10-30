@@ -1,12 +1,15 @@
 # ADR 0064: a system image larger than the updater's whole memory (7 MiB
 # against 1 MiB) is downloaded into UPDATE as it arrives, its SHA-256 read
 # back from the disk and compared with the signed index, verified there and
-# copied into slot B as `update apply` does. The second boot comes from B.
+# copied into slot B as `update apply` does, hashed again on the way. The
+# second boot comes from B. UPDATE starts with another image in it and the
+# padding is a non-zero pattern ending in a partial sector, so a lost or
+# misplaced write changes the hash (audit of ADR 0064, L5).
 name = "update.large_download"
 description = "an image larger than the updater's memory downloads into UPDATE, installs and boots"
 level = "full"
 areas = ["update", "network", "boot", "shell"]
-disk = "update-empty"
+disk = "slots"
 timeout_secs = 240
 
 [host_update]

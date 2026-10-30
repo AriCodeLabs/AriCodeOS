@@ -302,9 +302,10 @@ a machine installed with `usb-image --dev-source`.
 - Limits: four sources, four staged packages per `upgrade`, a 4 KiB index,
   sixteen apps per index, 32 KiB packages (`aricode_pkg::PACKAGE_MAX`,
   shared with the broker and xtask since incident 0026), app names of 20
-  bytes, the
-  6 MiB download buffer (4 MiB before incident 0021; `publish-update`
-  refuses a larger image and warns past three quarters of it).
+  bytes, and system images up to the 12 MiB of the slot and `UPDATE`
+  partitions (`SYSTEM_IMAGE_MAX`, ADR 0064; a 6 MiB memory buffer before
+  it, 4 MiB before incident 0021; `publish-update` refuses a larger image
+  and warns past three quarters of it).
 - Open: key rotation and revocation (a signed key list in the index);
   freshness against a source that keeps serving one old index forever (an
   expiry date needs a trusted clock); binding an index to the source that
