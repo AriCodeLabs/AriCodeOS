@@ -1,0 +1,42 @@
+# ADR 0064: a system image larger than the updater's whole memory (7 MiB
+# against 1 MiB) is downloaded into UPDATE as it arrives, its SHA-256 read
+# back from the disk and compared with the signed index, verified there and
+# copied into slot B as `update apply` does. The second boot comes from B.
+name = "update.large_download"
+description = "an image larger than the updater's memory downloads into UPDATE, installs and boots"
+level = "full"
+areas = ["update", "network", "boot", "shell"]
+disk = "update-empty"
+timeout_secs = 240
+
+[host_update]
+system = 2
+large_image = true
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update", "upgrade", "reboot"]
+[boots.expect]
+exit = 0
+serial_contains = [
+    "updater: system: installed 1, source 1 offers 2: upgrade available",
+    "updater: downloading aricodeos-2.img (",
+    " bytes) into UPDATE",
+    "updater: system image version 2 verified (signature and SHA-256)",
+    "updater: installed into slot B",
+    "updater: state: active A, pending B (3 tries); reboot to try it",
+    "AriCodeOS: rebooting",
+]
+serial_absent = ["KERNEL PANIC", "update: updater exited with"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "slots: booting from slot B (image version 2, pending confirmation)",
+    "AriInit: boot confirmed on slot B",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "booting from the ESP"]

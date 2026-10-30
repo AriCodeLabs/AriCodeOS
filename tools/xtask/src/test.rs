@@ -391,6 +391,7 @@ pub fn run_scenario(
                 legacy_manifest: false,
                 tamper_index: u.tamper_index,
                 tamper_image: u.tamper_image,
+                large_image: u.large_image,
                 ..image::Publication::default()
             };
             let dir = workdir.join("update");
