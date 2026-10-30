@@ -419,6 +419,8 @@ rustup component add rust-src llvm-tools
 
 The exact target configuration may evolve towards custom JSON targets when we need precise control over the ABI, red zone, CPU features, code model and linker.
 
+Update (2026-10-30, ADR 0065): custom JSON targets need nightly, which ADR 0008 rules out. User programs are built for `x86_64-unknown-linux-gnu` instead, as freestanding static binaries with no Linux and no C library, so they can use SSE and AVX; the kernel stays on `x86_64-unknown-none`.
+
 ---
 
 # 9. Development model

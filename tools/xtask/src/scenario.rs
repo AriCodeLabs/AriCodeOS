@@ -434,6 +434,11 @@ pub struct Scenario {
     /// is seeded from a hardware source (ADR 0039). Off, `qemu64` has none.
     #[serde(default)]
     pub cpu_rdrand: bool,
+    /// The CPU model adds XSAVE, AVX and the AES and SSE4 extensions
+    /// ([`crate::qemu::SIMD_FEATURES`]), so the kernel saves user state with
+    /// `XSAVE` instead of `FXSAVE` (ADR 0065). Off, `qemu64` has none.
+    #[serde(default)]
+    pub cpu_simd: bool,
     /// Adds an xHCI controller with a USB HID keyboard and mouse. QMP events
     /// go to the most recently activated input handler: the USB keyboard
     /// only while no virtio-input driver has started (QEMU activates a

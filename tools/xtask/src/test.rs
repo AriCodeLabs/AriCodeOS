@@ -585,6 +585,7 @@ pub fn run_scenario(
             installed: &installed,
             cpus: s.cpus(cpus_override),
             cpu_rdrand: s.cpu_rdrand,
+            cpu_simd: s.cpu_simd,
             usb: qemu::UsbOptions {
                 hid: s.usb_hid,
                 hid_msi: s.usb_hid_msi,

@@ -1,0 +1,24 @@
+# ADR 0065 on a CPU model with XSAVE and AVX (`cpu_simd`): the kernel
+# enables x87, SSE and AVX in XCR0 and saves with XSAVEOPT; the probes also
+# check the YMM upper halves, and the sleepers of `fpu.isolation_smp` run
+# on this path too. Intel CPUs of the reference laptop's age
+# (Ivy Bridge) take this path on hardware.
+name = "fpu.xsave"
+description = "test=fpu on 4 CPUs with XSAVE and AVX: processes keep their own x87/SSE/AVX state, migrating"
+level = "full"
+areas = ["fpu", "smp", "user"]
+cmdline = "qemu_exit test=fpu"
+cpus = 4
+cpu_simd = true
+timeout_secs = 120
+
+[expect]
+exit = 33
+serial_contains = [
+    "cpu: user FPU state saved eagerly with xsave, xcr0 0x7 (832 bytes per thread)",
+    "fpu_probe 6: xsave state kept over 300 switches",
+    "fpu_probe 18: xsave state kept over 300 switches",
+    "fpu selftest ok (6 processes kept their own registers on 4 CPU(s); #MF ended only its process; ",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "fpu_probe: round", "left by another process", "not aligned"]

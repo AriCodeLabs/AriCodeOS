@@ -10,6 +10,27 @@ use std::string::String;
 pub const UEFI_TARGET: &str = "x86_64-unknown-uefi";
 pub const KERNEL_TARGET: &str = "x86_64-unknown-none";
 pub const WASM_TARGET: &str = "wasm32-unknown-unknown";
+/// User programs (ADR 0065): built for this target as freestanding static
+/// binaries, without its C library or anything of Linux, so they can use
+/// SSE and AVX. [`user_cargo`] sets the flags that make them so.
+pub const USER_TARGET: &str = "x86_64-unknown-linux-gnu";
+
+/// Code generation and link flags of user programs. Passed through the
+/// environment, not `.cargo/config.toml`: the host's own builds (xtask,
+/// unit tests, build scripts) share the triple and must not get them.
+/// Cargo gives these flags to target crates only when `--target` is
+/// passed, never to build scripts.
+/// - `relocation-model=static`: a static ELF at its linked address
+///   (`sdk/rust/user.ld`); no loader relocates it.
+/// - `crt-static`: linked `-static`, never against a dynamic loader.
+/// - `rust-lld`: the toolchain's own linker, so no host C toolchain or C
+///   library takes part; an unresolved libc symbol fails the link.
+pub const USER_RUSTFLAGS: &[&str] = &[
+    "-Crelocation-model=static",
+    "-Ctarget-feature=+crt-static",
+    "-Clinker=rust-lld",
+    "-Clinker-flavor=ld.lld",
+];
 
 /// Workspace packages and the target they are built/linted with.
 /// Single source of truth for `check` and for the host unit tests.
@@ -48,32 +69,32 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("aricode-ehci", None),
     ("aricode-sys", None),
     ("aricode-build", None),
-    ("aricode-rt", Some(KERNEL_TARGET)),
-    ("ari-app-hello", Some(KERNEL_TARGET)),
-    ("ari-app-perms-check", Some(KERNEL_TARGET)),
-    ("ari-app-updater", Some(KERNEL_TARGET)),
-    ("ari-app-fs-probe", Some(KERNEL_TARGET)),
-    ("ari-app-win-probe", Some(KERNEL_TARGET)),
-    ("ari-app-wasm-runner", Some(KERNEL_TARGET)),
-    ("ari-app-notes-reader", Some(KERNEL_TARGET)),
-    ("ari-app-installer", Some(KERNEL_TARGET)),
-    ("ari-app-bench", Some(KERNEL_TARGET)),
+    ("aricode-rt", Some(USER_TARGET)),
+    ("ari-app-hello", Some(USER_TARGET)),
+    ("ari-app-perms-check", Some(USER_TARGET)),
+    ("ari-app-updater", Some(USER_TARGET)),
+    ("ari-app-fs-probe", Some(USER_TARGET)),
+    ("ari-app-win-probe", Some(USER_TARGET)),
+    ("ari-app-wasm-runner", Some(USER_TARGET)),
+    ("ari-app-notes-reader", Some(USER_TARGET)),
+    ("ari-app-installer", Some(USER_TARGET)),
+    ("ari-app-bench", Some(USER_TARGET)),
     ("wasm-demo", Some(WASM_TARGET)),
-    ("user-testprogs", Some(KERNEL_TARGET)),
-    ("ariinit", Some(KERNEL_TARGET)),
-    ("ari-virtio-blk", Some(KERNEL_TARGET)),
-    ("ari-virtio-net", Some(KERNEL_TARGET)),
-    ("ari-virtio-input", Some(KERNEL_TARGET)),
-    ("ari-usb-input", Some(KERNEL_TARGET)),
-    ("ari-usb-ehci", Some(KERNEL_TARGET)),
-    ("ari-console-bridge", Some(KERNEL_TARGET)),
-    ("ari-compositor", Some(KERNEL_TARGET)),
-    ("ari-fsd", Some(KERNEL_TARGET)),
-    ("ari-shell", Some(KERNEL_TARGET)),
-    ("ari-net-core", Some(KERNEL_TARGET)),
-    ("ari-rtl-net", Some(KERNEL_TARGET)),
-    ("ari-sshd", Some(KERNEL_TARGET)),
-    ("aricode-https", Some(KERNEL_TARGET)),
+    ("user-testprogs", Some(USER_TARGET)),
+    ("ariinit", Some(USER_TARGET)),
+    ("ari-virtio-blk", Some(USER_TARGET)),
+    ("ari-virtio-net", Some(USER_TARGET)),
+    ("ari-virtio-input", Some(USER_TARGET)),
+    ("ari-usb-input", Some(USER_TARGET)),
+    ("ari-usb-ehci", Some(USER_TARGET)),
+    ("ari-console-bridge", Some(USER_TARGET)),
+    ("ari-compositor", Some(USER_TARGET)),
+    ("ari-fsd", Some(USER_TARGET)),
+    ("ari-shell", Some(USER_TARGET)),
+    ("ari-net-core", Some(USER_TARGET)),
+    ("ari-rtl-net", Some(USER_TARGET)),
+    ("ari-sshd", Some(USER_TARGET)),
+    ("aricode-https", Some(USER_TARGET)),
     ("aricode-fat", None),
     ("aricode-iommu", None),
     ("aricode-lineedit", None),
@@ -105,6 +126,14 @@ pub fn cargo() -> Command {
         Ok(key) => c.env(crate::keys::DEV_CHANNEL_PUB_ENV, key),
         Err(_) => c.env_remove(crate::keys::DEV_CHANNEL_PUB_ENV),
     };
+    c
+}
+
+/// [`cargo`] for a command that builds or lints user programs for
+/// [`USER_TARGET`]; the caller passes `--target USER_TARGET`.
+pub fn user_cargo() -> Command {
+    let mut c = cargo();
+    c.env("CARGO_ENCODED_RUSTFLAGS", USER_RUSTFLAGS.join("\x1f"));
     c
 }
 
@@ -242,20 +271,17 @@ pub const USER_PACKAGES: &[&str] = &[
 /// returns the directory with the binaries.
 pub fn build_user_programs(release: bool) -> Result<PathBuf> {
     for pkg in USER_PACKAGES {
-        println!("[xtask] build {pkg} ({KERNEL_TARGET})");
-        let mut c = cargo();
-        c.args(["build", "-p", pkg, "--target", KERNEL_TARGET]);
+        println!("[xtask] build {pkg} ({USER_TARGET})");
+        let mut c = user_cargo();
+        c.args(["build", "-p", pkg, "--target", USER_TARGET]);
         if release {
             c.arg("--release");
         }
-        // Same flags as the kernel (.cargo/config.toml): the `kernel` code
-        // model allows signed 32-bit absolute addresses, so 0x400000 is
-        // valid, and it matches the precompiled `core` (LTO).
         run(c)?;
     }
     let out = root()
         .join("target")
-        .join(KERNEL_TARGET)
+        .join(USER_TARGET)
         .join(profile_dir(release));
     // A program without its `build.rs` (`aricode_build::user_program`) is
     // linked at the default address and the kernel rejects it at boot (the
@@ -271,16 +297,84 @@ pub fn build_user_programs(release: bool) -> Result<PathBuf> {
 /// Base address of the user programs (`aricode-build`).
 pub const USER_BASE: u64 = 0x40_0000;
 
-/// The ELF entry point must be in the user region.
+/// A user program is a static executable whose entry point is in the user
+/// region. Built for [`USER_TARGET`] (ADR 0065), it must also not ask for
+/// a dynamic loader, thread-local storage or relocations at load time
+/// (a statically linked C library brings `IRELATIVE` ones): nothing in
+/// AriCodeOS would process them.
 pub fn check_user_elf(name: &str, elf: &[u8]) -> Result {
-    if elf.len() < 32 || &elf[..4] != b"\x7fELF" {
+    const ET_EXEC: u16 = 2;
+    const PT_DYNAMIC: u32 = 2;
+    const PT_INTERP: u32 = 3;
+    const PT_TLS: u32 = 7;
+    const SHT_RELA: u32 = 4;
+    const SHT_REL: u32 = 9;
+    const SHF_ALLOC: u64 = 2;
+    let u16_at = |o: usize| elf.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+    let u32_at = |o: usize| {
+        elf.get(o..o + 4)
+            .map(|b| u32::from_le_bytes(b.try_into().expect("4 bytes")))
+    };
+    let u64_at = |o: usize| {
+        elf.get(o..o + 8)
+            .map(|b| u64::from_le_bytes(b.try_into().expect("8 bytes")))
+    };
+    if elf.len() < 64 || &elf[..4] != b"\x7fELF" {
         return Err(format!("{name}: not an ELF"));
     }
-    let entry = u64::from_le_bytes(elf[24..32].try_into().expect("8 bytes"));
+    let entry = u64_at(24).expect("header");
     if entry < USER_BASE {
         return Err(format!(
             "{name}: entry point {entry:#x} outside the user region (missing build.rs with aricode_build::user_program)"
         ));
+    }
+    if u16_at(16) != Some(ET_EXEC) {
+        return Err(format!(
+            "{name}: not a static executable (position-independent or shared object; ADR 0065)"
+        ));
+    }
+    let phoff = u64_at(32).expect("header") as usize;
+    let phentsize = u16_at(54).expect("header") as usize;
+    let phnum = u16_at(56).expect("header") as usize;
+    for i in 0..phnum {
+        let at = phoff
+            .checked_add(i * phentsize)
+            .ok_or_else(|| format!("{name}: program headers out of range"))?;
+        match u32_at(at) {
+            Some(PT_INTERP) => {
+                return Err(format!(
+                    "{name}: asks for a dynamic loader (PT_INTERP; ADR 0065)"
+                ))
+            }
+            Some(PT_DYNAMIC) => {
+                return Err(format!(
+                    "{name}: has a dynamic section (PT_DYNAMIC; ADR 0065)"
+                ))
+            }
+            Some(PT_TLS) => {
+                return Err(format!(
+                    "{name}: uses thread-local storage (PT_TLS; ADR 0065)"
+                ))
+            }
+            Some(_) => {}
+            None => return Err(format!("{name}: program headers out of range")),
+        }
+    }
+    let shoff = u64_at(40).expect("header") as usize;
+    let shentsize = u16_at(58).expect("header") as usize;
+    let shnum = u16_at(60).expect("header") as usize;
+    for i in 0..shnum {
+        let at = shoff
+            .checked_add(i * shentsize)
+            .ok_or_else(|| format!("{name}: section headers out of range"))?;
+        let (Some(kind), Some(flags)) = (u32_at(at + 4), u64_at(at + 8)) else {
+            return Err(format!("{name}: section headers out of range"));
+        };
+        if matches!(kind, SHT_RELA | SHT_REL) && flags & SHF_ALLOC != 0 {
+            return Err(format!(
+                "{name}: carries relocations to apply at load time (ADR 0065)"
+            ));
+        }
     }
     Ok(())
 }
@@ -377,23 +471,26 @@ fn build_external_now(
         .join("external")
         .join(format!("{name}-v{version}"));
     println!(
-        "[xtask] external build {name} v{version} ({}, {KERNEL_TARGET})",
+        "[xtask] external build {name} v{version} ({}, {USER_TARGET})",
         dir.display()
     );
-    let mut c = cargo();
+    let mut c = user_cargo();
     c.env("APP_VERSION", version.to_string())
         .args(["build", "--manifest-path"])
         .arg(dir.join("Cargo.toml"))
-        .args(["--target", KERNEL_TARGET, "--target-dir"])
+        .args(["--target", USER_TARGET, "--target-dir"])
         .arg(&target_dir);
     if release {
         c.arg("--release");
     }
     run(c)?;
     let elf = target_dir
-        .join(KERNEL_TARGET)
+        .join(USER_TARGET)
         .join(profile_dir(release))
         .join(&name);
+    let built = std::fs::read(&elf).map_err(|e| format!("{}: {e}", elf.display()))?;
+    check_user_elf(&name, &built)?;
+    crate::deps::check_external(dir)?;
     let elf = crate::image::stripped_elf(&elf)?;
     let manifest =
         std::fs::read(&manifest_path).map_err(|e| format!("{}: {e}", manifest_path.display()))?;
@@ -534,7 +631,11 @@ pub fn check() -> Result {
     c.args(["fmt", "--all", "--", "--check"]);
     run(c)?;
     for (pkg, target) in PACKAGES {
-        let mut c = cargo();
+        let mut c = if *target == Some(USER_TARGET) {
+            user_cargo()
+        } else {
+            cargo()
+        };
         c.args(["clippy", "-p", pkg]);
         if let Some(t) = target {
             c.args(["--target", t]);
@@ -542,7 +643,12 @@ pub fn check() -> Result {
         c.args(["--", "-D", "warnings"]);
         run(c)?;
     }
-    crate::deps::check()?;
+    let user: Vec<&str> = PACKAGES
+        .iter()
+        .filter(|(_, t)| *t == Some(USER_TARGET))
+        .map(|(p, _)| *p)
+        .collect();
+    crate::deps::check(&user)?;
     // Every initrd program's stack budget (incident 0018).
     crate::stack::check()
 }
@@ -590,14 +696,69 @@ mod tests {
         );
     }
 
+    /// An ELF header (static executable at the user base) followed by
+    /// one program header of type `ptype`.
+    fn elf_with(ptype: u32) -> Vec<u8> {
+        let mut elf = vec![0u8; 64 + 56];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[16..18].copy_from_slice(&2u16.to_le_bytes());
+        elf[24..32].copy_from_slice(&0x0040_0000u64.to_le_bytes());
+        elf[32..40].copy_from_slice(&64u64.to_le_bytes());
+        elf[54..56].copy_from_slice(&56u16.to_le_bytes());
+        elf[56..58].copy_from_slice(&1u16.to_le_bytes());
+        elf[64..68].copy_from_slice(&ptype.to_le_bytes());
+        elf
+    }
+
     #[test]
     fn user_elf_entry_must_be_in_user_region() {
-        let mut elf = [0u8; 64];
-        elf[..4].copy_from_slice(b"\x7fELF");
+        let mut elf = elf_with(1);
+        assert!(check_user_elf("x", &elf).is_ok());
         elf[24..32].copy_from_slice(&0x0020_1d00u64.to_le_bytes());
         assert!(check_user_elf("x", &elf).unwrap_err().contains("build.rs"));
-        elf[24..32].copy_from_slice(&0x0040_0000u64.to_le_bytes());
-        assert!(check_user_elf("x", &elf).is_ok());
         assert!(check_user_elf("x", b"nope").is_err());
+    }
+
+    /// ADR 0065: a program built for the Linux target that would need a
+    /// loader is refused, not shipped.
+    #[test]
+    fn user_elf_must_be_static() {
+        let interp = check_user_elf("x", &elf_with(3)).unwrap_err();
+        assert!(interp.contains("PT_INTERP"), "{interp}");
+        let dynamic = check_user_elf("x", &elf_with(2)).unwrap_err();
+        assert!(dynamic.contains("PT_DYNAMIC"), "{dynamic}");
+        let mut pie = elf_with(1);
+        pie[16..18].copy_from_slice(&3u16.to_le_bytes());
+        assert!(check_user_elf("x", &pie).unwrap_err().contains("static"));
+        let mut cut = elf_with(1);
+        cut.truncate(66);
+        assert!(check_user_elf("x", &cut)
+            .unwrap_err()
+            .contains("out of range"));
+        let tls = check_user_elf("x", &elf_with(7)).unwrap_err();
+        assert!(tls.contains("PT_TLS"), "{tls}");
+    }
+
+    /// A loaded `.rela` section (static glibc's `.rela.iplt`) is refused;
+    /// an unloaded one (relocations kept for a debugger) is not.
+    #[test]
+    fn user_elf_must_not_need_load_time_relocations() {
+        let with_section = |kind: u32, flags: u64| {
+            let mut elf = elf_with(1);
+            let shoff = elf.len() as u64;
+            elf.resize(elf.len() + 64, 0);
+            elf[40..48].copy_from_slice(&shoff.to_le_bytes());
+            elf[58..60].copy_from_slice(&64u16.to_le_bytes());
+            elf[60..62].copy_from_slice(&1u16.to_le_bytes());
+            let at = shoff as usize;
+            elf[at + 4..at + 8].copy_from_slice(&kind.to_le_bytes());
+            elf[at + 8..at + 16].copy_from_slice(&flags.to_le_bytes());
+            elf
+        };
+        let rela = check_user_elf("x", &with_section(4, 2)).unwrap_err();
+        assert!(rela.contains("load time"), "{rela}");
+        assert!(check_user_elf("x", &with_section(9, 2)).is_err());
+        assert!(check_user_elf("x", &with_section(4, 0)).is_ok());
+        assert!(check_user_elf("x", &with_section(1, 2)).is_ok());
     }
 }

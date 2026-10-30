@@ -307,6 +307,8 @@ extern "C" fn ap_entry(idx: usize) -> ! {
     idt::load();
     syscall::init();
     cpu::activate(cpu);
+    // CR0/CR4 came from the BSP; XCR0 is per CPU (ADR 0065).
+    super::fpu::init_cpu();
     apic::init_local();
     scheduler::adopt_idle(idx);
     cpu.set_online();

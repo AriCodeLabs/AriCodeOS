@@ -89,7 +89,8 @@ The owner's meaning of "from scratch", in their words (2026-10-29):
       inactive slot, ADR to follow). Adopted code makes images grow.
    2. SIMD in user programs: the kernel saves the FPU/SSE state eagerly on
       every switch (the lazy scheme was CVE-2018-3665, LazyFP). Without it
-      no implementation can use AES-NI, SHA-NI or vector code.
+      no implementation can use AES-NI, SHA-NI or vector code. Done in
+      ADR 0065.
    3. Cryptography: compare `aricode-crypto` with RustCrypto and the dalek
       crates.
    4. TLS and X.509: compare with rustls and rustls-webpki.

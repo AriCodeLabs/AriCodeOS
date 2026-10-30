@@ -21,6 +21,24 @@ extern crate alloc;
 
 pub use aricode_sys as sys;
 
+mod mem;
+
+/// The target's precompiled `core` and `alloc` were built to unwind: their
+/// cleanup paths call `_Unwind_Resume` and their unwind tables name
+/// `rust_eh_personality`. Programs abort on panic (the panic handler of
+/// [`entry!`] exits), so nothing ever unwinds and neither is reached; if
+/// one were, the process ends as on a panic (ADR 0065).
+#[no_mangle]
+pub extern "C" fn _Unwind_Resume(_exception: *mut core::ffi::c_void) -> ! {
+    sys::process_exit(PANIC_EXIT_CODE)
+}
+
+/// See [`_Unwind_Resume`].
+#[no_mangle]
+pub extern "C" fn rust_eh_personality() -> ! {
+    sys::process_exit(PANIC_EXIT_CODE)
+}
+
 /// User program heap: 256 KiB of static memory served by
 /// `aricode-heap` (the same allocator as the kernel) behind a spinlock. No
 /// growth: services and drivers use little dynamic memory.
