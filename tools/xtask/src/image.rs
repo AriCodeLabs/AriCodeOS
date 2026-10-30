@@ -593,20 +593,22 @@ pub enum DiskVariant {
 
 /// Padding of the large images (`large-a`, `host_update.large_image`):
 /// past the updater's memory (its manifest's `memory`), within the 12 MiB
-/// slot.
-const LARGE_IMAGE_PAD: usize = 7 * 1024 * 1024;
+/// slot, and not a whole number of sectors, so the last one is partial.
+const LARGE_IMAGE_PAD: usize = 7 * 1024 * 1024 + 333;
 
-/// `container` with one more entry, `padding`, of `pad` zero bytes: the
-/// signature covers only the manifest, so the image still verifies.
+/// `container` with one more entry, `padding`, of `pad` bytes of a
+/// pattern that is never zero, so a write lost or put in the wrong place
+/// changes the image's SHA-256 (audit of ADR 0064, L5). The signature
+/// covers only the manifest, so the image still verifies.
 fn padded(container: &[u8], pad: usize) -> Result<Vec<u8>> {
     let rd = aricode_initrd::Initrd::parse(container).map_err(|e| format!("pad: {e:?}"))?;
-    let zeros = vec![0u8; pad];
+    let pattern: Vec<u8> = (0..pad).map(|i| (i % 251) as u8 + 1).collect();
     let mut files: Vec<(&str, &[u8])> = rd
         .entries()
         .map(|e| e.map(|e| (e.name, e.data)))
         .collect::<std::result::Result<_, _>>()
         .map_err(|e| format!("pad: {e:?}"))?;
-    files.push(("padding", &zeros));
+    files.push(("padding", &pattern));
     aricode_initrd::build(&files).map_err(|e| format!("pad: {e:?}"))
 }
 
@@ -1268,7 +1270,9 @@ mod tests {
         let big = padded(&container, 1000).unwrap();
         let rd = aricode_initrd::Initrd::parse(&big).unwrap();
         assert_eq!(rd.find("manifest"), Some(&b"m"[..]));
-        assert_eq!(rd.find("padding").map(<[u8]>::len), Some(1000));
+        let padding = rd.find("padding").unwrap();
+        assert_eq!(padding.len(), 1000);
+        assert!(padding.iter().all(|&b| b != 0));
         // Padded past the updater's memory, the image still fits the slot.
         let slot = (PART_SYSA.1 - PART_SYSA.0) as usize * 512;
         let manifest =

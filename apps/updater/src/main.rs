@@ -15,7 +15,8 @@
 //!   installs what the plan lists: the system image into the inactive slot,
 //!   app packages staged in this directory for the installer. Every
 //!   download is checked against the index (size, SHA-256) and against its
-//!   own signature before anything is written.
+//!   own signature before it is installed: a system image in `UPDATE`,
+//!   which it is downloaded into (ADR 0064), a package in memory.
 //! - `ALLOW_DOWNGRADE` (flag, with `APPLY` or `UPGRADE`): older versions, or
 //!   a system whose installed version cannot be read, may be replaced.
 //! - `CHANNEL_DEV`, `CHANNEL_EXPLICIT` (flags, with `REFRESH` or `UPGRADE`,
@@ -474,7 +475,7 @@ fn image_error(e: &ImageError) -> &'static str {
     }
 }
 
-/// The A/B layout of the boot disk and a buffer for one downloaded image.
+/// The A/B layout of the boot disk and the `UPDATE` partition.
 /// Only opened when a system image is involved (audit 1, M5).
 struct Disk {
     blk: BlockClient,
@@ -571,42 +572,48 @@ impl Disk {
     }
 
     /// Downloads `url`, `size` bytes as the index announced, into `UPDATE`
-    /// (ADR 0064). Its header sector is cleared and flushed first, so a cut
-    /// download never leaves a valid image there; the container's sectors
-    /// are written as they arrive, through the block client's buffer, so
-    /// the image's size is bounded by the partition and not by memory. The
-    /// image's own header comes back unwritten: [`Disk::seal_update`]
-    /// writes it once the bytes on the disk match the index.
+    /// (ADR 0064). With the first byte that arrives its header sector is
+    /// cleared and flushed, so a cut download never leaves a valid image
+    /// there, and a run that receives nothing (no network, no server)
+    /// leaves `UPDATE` as it was. The container's sectors are gathered in
+    /// the block client's buffer and written 16 at a time, so the image's
+    /// size is bounded by the partition and not by memory. The image's own
+    /// header comes back unwritten: [`Disk::seal_update`] writes it once
+    /// the image on the disk has passed every check.
     fn download_to_update(
         &mut self,
         net: &mut NetClient,
         url: &str,
         size: usize,
     ) -> Result<[u8; SECTOR], Download> {
-        self.blk.buffer()[..SECTOR].fill(0);
-        if self.blk.write(self.update.0, 1).is_err() || self.blk.flush().is_err() {
-            return Err(Download::Disk(update_io("clearing the header of")));
-        }
         let chunk = CHUNK as usize * SECTOR;
+        let first = self.update.0;
         let blk = &mut self.blk;
-        let mut lba = self.update.0 + 1;
+        let mut lba = first + 1;
         let mut header = [0u8; SECTOR];
-        let mut pending: Vec<u8> = Vec::with_capacity(chunk);
+        // Bytes gathered in the block buffer, not yet written.
+        let mut filled = 0usize;
         let (mut got, mut overflow, mut failed) = (0usize, false, false);
-        // Writes what `pending` holds, its last sector padded with zeros.
-        let mut put = |pending: &mut Vec<u8>| {
-            let sectors = pending.len().div_ceil(SECTOR);
-            pending.resize(sectors * SECTOR, 0);
-            blk.buffer()[..pending.len()].copy_from_slice(pending);
+        // Writes what the buffer holds, its last sector padded with zeros.
+        let mut put = |blk: &mut BlockClient, filled: &mut usize| {
+            let sectors = filled.div_ceil(SECTOR);
+            blk.buffer()[*filled..sectors * SECTOR].fill(0);
             let ok = blk.write(lba, sectors as u16).is_ok();
             lba += sectors as u64;
-            pending.clear();
+            *filled = 0;
             ok
         };
         let mut sink = |mut data: &[u8]| {
             if got + data.len() > size {
                 overflow = true;
                 return false;
+            }
+            if got == 0 {
+                blk.buffer()[..SECTOR].fill(0);
+                if blk.write(first, 1).is_err() || blk.flush().is_err() {
+                    failed = true;
+                    return false;
+                }
             }
             if got < SECTOR {
                 let n = (SECTOR - got).min(data.len());
@@ -615,11 +622,12 @@ impl Disk {
                 data = &data[n..];
             }
             while !data.is_empty() {
-                let n = (chunk - pending.len()).min(data.len());
-                pending.extend_from_slice(&data[..n]);
+                let n = (chunk - filled).min(data.len());
+                blk.buffer()[filled..filled + n].copy_from_slice(&data[..n]);
+                filled += n;
                 got += n;
                 data = &data[n..];
-                if pending.len() == chunk && !put(&mut pending) {
+                if filled == chunk && !put(blk, &mut filled) {
                     failed = true;
                     return false;
                 }
@@ -644,7 +652,7 @@ impl Disk {
             }
             Ok(()) => {}
         }
-        if (!pending.is_empty() && !put(&mut pending)) || self.blk.flush().is_err() {
+        if (filled > 0 && !put(blk, &mut filled)) || blk.flush().is_err() {
             return Err(Download::Disk(update_io("writing")));
         }
         Ok(header)
@@ -671,9 +679,10 @@ impl Disk {
         Ok(hash.finish())
     }
 
-    /// Writes the downloaded image's header into `UPDATE`, after its bytes
-    /// matched the index: from then on `UPDATE` holds that image, as `update
-    /// apply` expects.
+    /// Writes the downloaded image's header into `UPDATE`, after the image
+    /// matched the index and verified: from then on `UPDATE` holds that
+    /// image, as `update apply` expects, and never one `upgrade` refused
+    /// (audit of ADR 0064, L1).
     fn seal_update(&mut self, header: &[u8; SECTOR]) -> Result<(), u64> {
         self.blk.buffer()[..SECTOR].copy_from_slice(header);
         if self.blk.write(self.update.0, 1).is_err() || self.blk.flush().is_err() {
@@ -840,13 +849,24 @@ impl Disk {
     /// itself before writing its header, and schedules it: what boots is
     /// what was verified, without holding the image in memory (incident
     /// 0021).
+    ///
+    /// `indexed`: a download's own header and the SHA-256 the index gives
+    /// it. The bytes copied are hashed as they go and must match it, and
+    /// that header is the one written, so the slot holds exactly the bytes
+    /// the index names (audit of ADR 0064, L6).
     fn install_from_update(
         &mut self,
         total: usize,
         expected: &Manifest,
         keys: &Keys,
+        indexed: Option<(&[u8; SECTOR], &[u8; 32])>,
     ) -> Result<(), u64> {
         let sectors = self.begin_install(total)?;
+        let mut hash = indexed.map(|(header, _)| {
+            let mut h = Sha256::new();
+            h.update(header);
+            h
+        });
         let mut done = 1u64;
         while done < sectors {
             let n = (sectors - done).min(CHUNK as u64) as u16;
@@ -857,12 +877,32 @@ impl Disk {
                     "cannot read UPDATE while copying it; not installing",
                 ));
             }
+            if let Some(h) = hash.as_mut() {
+                let bytes = (total - done as usize * SECTOR).min(n as usize * SECTOR);
+                h.update(&self.blk.buffer()[..bytes]);
+            }
             self.write(self.slot_part.0 + done, n)?;
             done += n as u64;
         }
         self.flush_slot()?;
+        let header = match (hash, indexed) {
+            (Some(h), Some((header, sha256))) => {
+                if h.finish() != *sha256 {
+                    return Err(fault(
+                        code::DOWNLOAD_MISMATCH,
+                        "upd-slot-sha256",
+                        &format!(
+                            "the copy in slot {} does not match the signed index; not scheduled",
+                            self.target.name()
+                        ),
+                    ));
+                }
+                *header
+            }
+            _ => Image::header((total - SECTOR) as u32),
+        };
         self.check_copy(total, expected, keys)?;
-        self.finish_install(&Image::header((total - SECTOR) as u32))
+        self.finish_install(&header)
     }
 
     /// Marks the inactive slot pending with tries and reads the state back.
@@ -1261,7 +1301,7 @@ fn apply(allow_downgrade: bool, keys: &Keys) -> u64 {
         stable_floor,
     };
     match decide_system_install(&installed, installed_id(&manifest), rules) {
-        Ok(true) => match disk.install_from_update(total, &manifest, keys) {
+        Ok(true) => match disk.install_from_update(total, &manifest, keys, None) {
             Ok(()) => {
                 let offered = installed_id(&manifest);
                 rewrite_damaged_floor(&mut fs, &mut state, &installed, offered, allow_downgrade);
@@ -2010,20 +2050,22 @@ fn upgrade_system(
             "system image SHA-256 does not match the signed index; not installing",
         ));
     }
-    disk.seal_update(&header)?;
-    // Its own signature, verified again as AriBoot will (Phase 30): the
-    // index authenticates the file, the manifest authenticates the content,
-    // and the key that signed the manifest is the channel's (ADR 0045).
+    // Its own signature, verified again as AriBoot will (Phase 30), from
+    // the disk and before `UPDATE` is sealed: the index authenticates the
+    // file, the manifest authenticates the content, and the key that
+    // signed the manifest is the channel's (ADR 0045).
     let offered = ident(offer.channel, entry.version, offer.commit);
-    let update = disk.update;
-    let verified = match disk.load(update, keys) {
-        Ok((total, m))
-            if total == size
-                && upd::image_matches_offer(&m, offer.channel, entry.version, offer.commit) =>
-        {
-            m
-        }
-        Ok((total, m)) if total == size => {
+    let len = Image::container_len(&header)
+        .ok()
+        .map(|len| len as usize)
+        .filter(|&len| SECTOR + len == size);
+    let checked = match len {
+        Some(len) => disk.verify_container(disk.update.0, len, keys),
+        None => Err(ImageError::BadHeader),
+    };
+    let verified = match checked {
+        Ok(m) if upd::image_matches_offer(&m, offer.channel, entry.version, offer.commit) => m,
+        Ok(m) => {
             return Err(fault(
                 code::IMAGE_REFUSED,
                 "upd-image-version",
@@ -2033,7 +2075,8 @@ fn upgrade_system(
                 ),
             ))
         }
-        Ok(_) | Err(_) => {
+        Err(ImageError::Unreadable) => return Err(update_io("reading back")),
+        Err(_) => {
             return Err(fault(
                 code::IMAGE_REFUSED,
                 "upd-image-signature",
@@ -2041,13 +2084,14 @@ fn upgrade_system(
             ))
         }
     };
+    disk.seal_update(&header)?;
     let described = aricode_ab::Describe {
         channel: offer.channel,
         version: entry.version,
         commit: offer.commit.and_then(aricode_ab::Commit::parse),
     };
     say!("system image {described} verified (signature and SHA-256)");
-    disk.install_from_update(size, &verified, keys)?;
+    disk.install_from_update(size, &verified, keys, Some((&header, &entry.sha256)))?;
     let switched = installed.as_ref().filter(|m| m.channel != offer.channel);
     history(
         fs,

@@ -38,10 +38,11 @@ wrong with each:
 ## Decision
 
 1. **`upgrade` downloads a system image into `UPDATE` as it arrives.**
-   - `UPDATE`'s header sector is zeroed and flushed first, so a cut
-     download never leaves a valid image there.
-   - The container's sectors are written through the block client's
-     buffer, 16 sectors at a time.
+   - `UPDATE`'s header sector is zeroed and flushed when the first byte
+     arrives, so a cut download never leaves a valid image there, and a
+     run that receives nothing leaves `UPDATE` as it was.
+   - The container's sectors are gathered in the block client's buffer
+     and written 16 sectors at a time.
    - The image's own header is held back in memory.
    - The size limit is the `UPDATE` partition, measured on the machine.
      Memory plays no part.
@@ -49,15 +50,22 @@ wrong with each:
 2. **What the disk holds is what is checked.**
    - The image's SHA-256 is computed by reading `UPDATE` back, not over
      the bytes received, and is compared with the signed index.
-   - Only then is the header written.
    - Then the image is verified from the disk: its signature and hashes,
      the channel's key, and the version and commit the index names.
+   - Only then is its header written. `UPDATE` never holds an image
+     `upgrade` refused, which `update apply` could otherwise install.
 
 3. **It installs as `update apply` does.** The verified image is copied
    from `UPDATE` into the inactive slot:
    - the slot's old header is zeroed first;
-   - the copy is verified in the slot before its header is written;
+   - the bytes copied are hashed on the way and must match the index
+     again;
+   - the copy is verified in the slot;
+   - the downloaded header is written last;
    - the slot is then scheduled with three tries.
+
+   So the slot holds exactly the bytes the index names, unsigned
+   container entries included.
 
    This is the path incident 0021 built and `update.large_image` already
    covers. The running system and the inactive slot's previous system are
@@ -97,6 +105,47 @@ wrong with each:
 - New code: `UPDATE_IO` (16, `upd-update-io`) when `UPDATE` cannot be
   written or read back during a download. `NO_MEMORY` (11) is gone with
   the buffer.
+
+## Audit (2026-10-30)
+
+An independent audit found no high or medium findings. It found no path
+that schedules an unverified image, writes the active slot, or touches the
+inactive slot before every check has passed. Its low findings and what
+was done:
+
+- **L1.** The header was written before the signature and version checks,
+  so an image `upgrade` refused stayed in `UPDATE` for `update apply` to
+  install.
+  - Fixed: the image is verified first and sealed after.
+  - `update.dev_stable_image` now runs `update apply` after the refusal.
+    It failed before the fix (the refused image was installed into
+    slot B) and passes after it.
+- **L2.** A read error while verifying `UPDATE` was reported as a bad
+  signature. It is now `upd-update-io`.
+- **L3.** `UPDATE` was cleared before any network contact. It is now
+  cleared on the first byte received.
+  - What remains: the HTTP client also hands the body of an error answer
+    (a 404 page) to the download, so such an answer still replaces
+    `UPDATE`'s contents. That fits decision 4.
+- **L4.** Nothing stops two updater runs at once (two shell sessions). One
+  run's download can overwrite `UPDATE` while another copies it.
+  - The copy's hash and its check refuse to schedule the mix.
+  - But the inactive slot's header was already zeroed, so its previous
+    system is lost.
+  - Open: a single-instance rule for the updater. The old flow raced on
+    slot writes in the same way, over a shorter window.
+- **L5.** The large-image test could not see lost writes in 7 MiB of
+  zeros. Now:
+  - the padding is a non-zero pattern;
+  - its length leaves the last sector partial;
+  - the scenario starts with another image in `UPDATE`.
+- **L6.** The slot was bound to the index only through the signature. The
+  copy is now hashed against the index, and the downloaded header is the
+  one written.
+- **L7.** An 8 KiB heap buffer stayed alive through the TLS handshakes.
+  Bytes are now gathered in the block client's DMA buffer.
+- **L8.** Stale text about the memory buffer was fixed in the updater, in
+  ADR 0029 and in `update.large_image`.
 
 ## Tests
 
