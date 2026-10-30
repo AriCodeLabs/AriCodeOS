@@ -2,7 +2,10 @@
 xtask = "run --package xtask --release --"
 
 # Kernel: static ELF in the higher half. code-model=kernel allows addresses
-# in the top 2 GiB with signed 32-bit displacements.
+# in the top 2 GiB with signed 32-bit displacements. User programs are built
+# for x86_64-unknown-linux-gnu with flags xtask passes (USER_RUSTFLAGS in
+# tools/xtask/src/build.rs, ADR 0065): set here, they would also reach the
+# host's own builds, which share that triple.
 [target.x86_64-unknown-none]
 rustflags = [
     "-C", "relocation-model=static",

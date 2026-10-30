@@ -46,6 +46,29 @@ struct Cpu {
     /// `-cpu qemu64,+rdrand` instead of `qemu64` (TCG implements `rdrand`
     /// from the host's randomness; ADR 0039).
     rdrand: bool,
+    /// [`SIMD_FEATURES`] added to the model (ADR 0065).
+    simd: bool,
+}
+
+/// What `cpu_simd` adds to `qemu64`: XSAVE with AVX, so the kernel takes
+/// its `XSAVE` path, plus the extensions vector and AES code looks for.
+/// TCG implements all of them.
+pub const SIMD_FEATURES: &str =
+    "+xsave,+xsaveopt,+avx,+avx2,+aes,+pclmulqdq,+ssse3,+sse4.1,+sse4.2,+popcnt";
+
+impl Cpu {
+    /// The `-cpu` argument.
+    fn model(&self) -> String {
+        let mut model = String::from("qemu64");
+        if self.rdrand {
+            model.push_str(",+rdrand");
+        }
+        if self.simd {
+            model.push(',');
+            model.push_str(SIMD_FEATURES);
+        }
+        model
+    }
 }
 
 /// Network cards of the machine and the host ports forwarded into it.
@@ -102,11 +125,7 @@ fn base_command(
         "-machine",
         "q35",
         "-cpu",
-        if cpu.rdrand {
-            "qemu64,+rdrand"
-        } else {
-            "qemu64"
-        },
+        &cpu.model(),
         "-smp",
         &cpu.count.max(1).to_string(),
         "-m",
@@ -1175,6 +1194,7 @@ pub fn run_interactive(
         Cpu {
             count: cpus,
             rdrand: false,
+            simd: false,
         },
         usb,
         Nics {
@@ -1312,6 +1332,8 @@ pub struct Headless<'a> {
     pub cpus: u32,
     /// `-cpu qemu64,+rdrand` instead of `qemu64` (scenario `cpu_rdrand`).
     pub cpu_rdrand: bool,
+    /// [`SIMD_FEATURES`] added to the CPU model (scenario `cpu_simd`).
+    pub cpu_simd: bool,
     pub usb: UsbOptions,
     /// The virtio-net card is present (every scenario but `no_nic` ones).
     pub nic: bool,
@@ -1367,6 +1389,7 @@ pub fn run_headless(
         Cpu {
             count: options.cpus,
             rdrand: options.cpu_rdrand,
+            simd: options.cpu_simd,
         },
         options.usb,
         Nics {
@@ -1809,6 +1832,7 @@ mod tests {
             super::Cpu {
                 count: 1,
                 rdrand: false,
+                simd: false,
             },
             super::UsbOptions::default(),
             super::Nics {

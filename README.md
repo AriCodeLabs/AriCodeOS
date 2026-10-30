@@ -60,8 +60,10 @@ rustup target add wasm32-unknown-unknown   # example WebAssembly modules (apps/w
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-`rust-toolchain.toml` pins the Rust version and adds the
-`x86_64-unknown-none` and `x86_64-unknown-uefi` targets automatically.
+`rust-toolchain.toml` pins the Rust version and adds its targets
+automatically: `x86_64-unknown-none` (the kernel), `x86_64-unknown-uefi`
+(AriBoot) and `x86_64-unknown-linux-gnu` (user programs, built
+freestanding, without Linux or its C library: ADR 0065).
 
 ### Docker
 

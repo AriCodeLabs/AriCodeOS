@@ -3,6 +3,11 @@
 //! Third-party crates (ADR 0063): every crate outside the workspace comes
 //! from crates.io at the version `Cargo.lock` pins, under a licence the
 //! project accepts. `cargo xtask check` refuses anything else.
+//!
+//! User programs are built for the Linux target without its C library
+//! (ADR 0065), so no crate that calls Linux or libc may reach them: such a
+//! crate would compile for the target and then fail to link, or worse,
+//! issue Linux system calls on AriCodeOS.
 
 use crate::Result;
 use serde::Deserialize;
@@ -29,13 +34,31 @@ const ACCEPTED: &[&str] = &[
 /// The only registry crates may come from.
 const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
+/// Crates that bind a program to Linux or its C library, refused in the
+/// dependencies of user programs (ADR 0065).
+/// Raw Linux system call crates included (audit of ADR 0065, finding 4).
+const HOST_OS_CRATES: &[&str] = &[
+    "errno",
+    "getrandom",
+    "libc",
+    "linux-raw-sys",
+    "linux-syscall",
+    "nix",
+    "origin",
+    "rustix",
+    "sc",
+    "syscalls",
+];
+
 #[derive(Deserialize)]
 struct Metadata {
     packages: Vec<Package>,
+    resolve: Resolve,
 }
 
 #[derive(Deserialize)]
 struct Package {
+    id: String,
     name: String,
     version: String,
     license: Option<String>,
@@ -43,24 +66,73 @@ struct Package {
     source: Option<String>,
 }
 
-/// Checks every third-party crate of the workspace. `--locked`: a
-/// `Cargo.lock` that would change is refused, so nothing is picked up
-/// that the repository does not pin.
-pub fn check() -> Result {
-    let out = std::process::Command::new(env!("CARGO"))
-        .current_dir(crate::root())
-        .args(["metadata", "--format-version", "1", "--locked"])
-        .output()
-        .map_err(|e| format!("cargo metadata: {e}"))?;
+#[derive(Deserialize)]
+struct Resolve {
+    nodes: Vec<Node>,
+}
+
+#[derive(Deserialize)]
+struct Node {
+    id: String,
+    deps: Vec<NodeDep>,
+}
+
+#[derive(Deserialize)]
+struct NodeDep {
+    pkg: String,
+    dep_kinds: Vec<DepKind>,
+}
+
+#[derive(Deserialize)]
+struct DepKind {
+    /// `None` for a normal dependency, `"build"` or `"dev"` otherwise.
+    kind: Option<String>,
+}
+
+/// Checks every third-party crate of the workspace, and what the user
+/// programs `user_roots` link. `--locked`: a `Cargo.lock` that would
+/// change is refused, so nothing is picked up that the repository does not
+/// pin.
+pub fn check(user_roots: &[&str]) -> Result {
+    let metadata = metadata(None)?;
+    judge(&metadata, user_roots)
+}
+
+/// The same checks for an app built out of tree (`dir/Cargo.toml`, its own
+/// workspace): every package of that workspace, the SDK's by path
+/// included, is linked into the user program.
+pub fn check_external(dir: &std::path::Path) -> Result {
+    let metadata = metadata(Some(&dir.join("Cargo.toml")))?;
+    let roots: Vec<String> = metadata
+        .packages
+        .iter()
+        .filter(|p| p.source.is_none())
+        .map(|p| p.name.clone())
+        .collect();
+    let roots: Vec<&str> = roots.iter().map(String::as_str).collect();
+    judge(&metadata, &roots)
+}
+
+/// `cargo metadata --locked` of the repository, or of `manifest`.
+fn metadata(manifest: Option<&std::path::Path>) -> Result<Metadata> {
+    let mut c = std::process::Command::new(env!("CARGO"));
+    c.current_dir(crate::root())
+        .args(["metadata", "--format-version", "1", "--locked"]);
+    if let Some(m) = manifest {
+        c.arg("--manifest-path").arg(m);
+    }
+    let out = c.output().map_err(|e| format!("cargo metadata: {e}"))?;
     if !out.status.success() {
         return Err(format!(
             "cargo metadata --locked failed (is Cargo.lock up to date?):\n{}",
             String::from_utf8_lossy(&out.stderr)
         ));
     }
-    let metadata: Metadata =
-        serde_json::from_slice(&out.stdout).map_err(|e| format!("cargo metadata: {e}"))?;
-    let refused: Vec<String> = metadata
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("cargo metadata: {e}"))
+}
+
+fn judge(metadata: &Metadata, user_roots: &[&str]) -> Result {
+    let mut refused: Vec<String> = metadata
         .packages
         .iter()
         .filter_map(|p| {
@@ -69,6 +141,7 @@ pub fn check() -> Result {
                 .map(|why| format!("{} {}: {why}", p.name, p.version))
         })
         .collect();
+    refused.extend(host_os_crates(metadata, user_roots));
     let third_party = metadata
         .packages
         .iter()
@@ -83,6 +156,56 @@ pub fn check() -> Result {
             refused.join("\n  ")
         ))
     }
+}
+
+/// Refusals for crates of [`HOST_OS_CRATES`] that a user program links:
+/// its normal dependencies, followed whatever their `cfg` (a crate behind
+/// `cfg(unix)` is built for the Linux target). Build dependencies run on
+/// the host and are not followed.
+fn host_os_crates(metadata: &Metadata, user_roots: &[&str]) -> Vec<String> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let package = |id: &str| metadata.packages.iter().find(|p| p.id == id);
+    let edges: BTreeMap<&str, Vec<&str>> = metadata
+        .resolve
+        .nodes
+        .iter()
+        .map(|n| {
+            let normal = n
+                .deps
+                .iter()
+                .filter(|d| d.dep_kinds.iter().any(|k| k.kind.is_none()))
+                .map(|d| d.pkg.as_str())
+                .collect();
+            (n.id.as_str(), normal)
+        })
+        .collect();
+    let mut refused = BTreeSet::new();
+    for root in user_roots {
+        let Some(start) = metadata
+            .packages
+            .iter()
+            .find(|p| p.name == *root && p.source.is_none())
+        else {
+            continue;
+        };
+        let mut seen = BTreeSet::new();
+        let mut stack = vec![start.id.as_str()];
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            if let Some(p) = package(id) {
+                if HOST_OS_CRATES.contains(&p.name.as_str()) {
+                    refused.insert(format!(
+                        "{} {}: binds to Linux or libc, linked by user program {root} (ADR 0065)",
+                        p.name, p.version
+                    ));
+                }
+            }
+            stack.extend(edges.get(id).into_iter().flatten());
+        }
+    }
+    refused.into_iter().collect()
 }
 
 /// Why a third-party crate is refused, `None` when it is accepted.
@@ -186,6 +309,49 @@ mod tests {
         ] {
             assert!(!accepted(bad), "{bad}");
         }
+    }
+
+    /// A user program reaching `libc` through a `cfg(unix)` dependency
+    /// is refused; one that only needs it to build (a build script) or
+    /// for its tests is not, and neither is a host tool.
+    #[test]
+    fn user_programs_do_not_link_the_host_os() {
+        let json = r#"{
+            "packages": [
+                {"id": "app", "name": "app", "version": "1", "license": null, "source": null},
+                {"id": "lib", "name": "lib", "version": "1", "license": null, "source": null},
+                {"id": "tool", "name": "tool", "version": "1", "license": null, "source": null},
+                {"id": "libc", "name": "libc", "version": "0.2", "license": "MIT", "source": "x"},
+                {"id": "cc", "name": "cc", "version": "1", "license": "MIT", "source": "x"}
+            ],
+            "resolve": {"nodes": [
+                {"id": "app", "deps": [
+                    {"pkg": "lib", "dep_kinds": [{"kind": null, "target": null}]},
+                    {"pkg": "cc", "dep_kinds": [{"kind": "build", "target": null}]}
+                ]},
+                {"id": "lib", "deps": [
+                    {"pkg": "libc", "dep_kinds": [{"kind": null, "target": "cfg(unix)"}]}
+                ]},
+                {"id": "cc", "deps": [
+                    {"pkg": "libc", "dep_kinds": [{"kind": null, "target": null}]}
+                ]},
+                {"id": "tool", "deps": [
+                    {"pkg": "libc", "dep_kinds": [{"kind": null, "target": null}]}
+                ]},
+                {"id": "libc", "deps": []}
+            ]}
+        }"#;
+        let metadata: Metadata = serde_json::from_str(json).expect("metadata");
+        let refused = host_os_crates(&metadata, &["app"]);
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(refused[0].contains("libc 0.2") && refused[0].contains("app"));
+        assert!(host_os_crates(&metadata, &["tool_not_a_user_program"]).is_empty());
+        let dev_only = json.replace(
+            r#""pkg": "libc", "dep_kinds": [{"kind": null, "target": "cfg(unix)"}]"#,
+            r#""pkg": "libc", "dep_kinds": [{"kind": "dev", "target": null}]"#,
+        );
+        let metadata: Metadata = serde_json::from_str(&dev_only).expect("metadata");
+        assert!(host_os_crates(&metadata, &["app"]).is_empty());
     }
 
     #[test]

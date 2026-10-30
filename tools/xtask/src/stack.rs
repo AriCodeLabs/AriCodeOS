@@ -21,7 +21,10 @@
 //!   the chain is cut (direct recursion is reported);
 //! - `rsp` adjustments after a function's first call (dynamic `alloca`,
 //!   stack arguments pushed later) and stack realignment (`and $-N,%rsp`),
-//!   which add up to `N - 8` bytes.
+//!   which add up to `N - 8` bytes;
+//! - the red zone: since ADR 0065 user programs are built for a target
+//!   that has one, so a leaf function may use 128 bytes below `rsp`
+//!   without adjusting it.
 //!
 //! That is why the path budget is half the stack and not all of it. Direct
 //! calls, unconditional tail calls (`jmp`) and conditional ones (`jcc` to
@@ -412,8 +415,8 @@ pub fn check() -> Result {
     let mut verdicts = Vec::new();
     for release in [true, false] {
         let profile = if release { "release" } else { "debug" };
-        let mut c = build::cargo();
-        c.args(["build", "--target", build::KERNEL_TARGET]);
+        let mut c = build::user_cargo();
+        c.args(["build", "--target", build::USER_TARGET]);
         for pkg in build::USER_PACKAGES {
             c.args(["-p", pkg]);
         }
@@ -424,7 +427,7 @@ pub fn check() -> Result {
         for bin in &programs {
             let elf = root()
                 .join("target")
-                .join(build::KERNEL_TARGET)
+                .join(build::USER_TARGET)
                 .join(profile)
                 .join(bin);
             let funcs = parse(&disassemble(&elf)?);

@@ -1,0 +1,24 @@
+# ADR 0065 with four CPUs: six `fpu_probe` instances migrate between CPUs
+# when they sleep, and are preempted mid-round. Then two probes that sleep
+# in every round leave CPUs idle: a probe woken on another CPU later comes
+# back to one that ran only its idle thread and still holds the probe's
+# older registers, which must not skip the restore (audit of ADR 0065,
+# finding 1). Every round's pattern differs, so stale registers fail it.
+name = "fpu.isolation_smp"
+description = "test=fpu on 4 CPUs (fxsave): 6 processes migrating between CPUs keep their own x87/SSE state"
+level = "full"
+areas = ["fpu", "smp", "user"]
+cmdline = "qemu_exit test=fpu"
+cpus = 4
+timeout_secs = 120
+
+[expect]
+exit = 33
+serial_contains = [
+    "smp: 4 CPUs online",
+    "fpu_probe 6: fxsave state kept over 300 switches",
+    "fpu_probe 18: fxsave state kept over 300 switches",
+    "fpu selftest ok (6 processes kept their own registers on 4 CPU(s); #MF ended only its process; ",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "fpu_probe: round", "left by another process", "not aligned"]

@@ -110,6 +110,8 @@ serial = true                   # runs with no other scenario at once (--jobs); 
 cpus = 4                        # processors (-smp N); undeclared: 1, or whatever `--cpus N` forces
 cpu_rdrand = true               # -cpu qemu64,+rdrand (TCG implements it): the kernel generator is seeded from rdrand (ADR 0039);
                                 # default qemu64 has none, so every other scenario runs the weak TSC + interrupts path
+cpu_simd = true                 # adds XSAVE, AVX, AES and SSE4 to qemu64 (qemu::SIMD_FEATURES): the kernel saves user
+                                # registers with XSAVE, not FXSAVE (ADR 0065); default qemu64 has none
 usb_hid = true                  # adds qemu-xhci with a USB keyboard and mouse (QMP events go to the USB devices)
 usb_hid_only_input = true       # no virtio keyboard/mouse, so QMP input reaches the USB HID devices (xHCI or EHCI)
 usb_hid_msi = true              # that xHCI offers MSI only, no MSI-X (like 2012 Intel controllers)

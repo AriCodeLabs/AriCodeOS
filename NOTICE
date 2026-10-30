@@ -41,4 +41,10 @@ Terminus Font, Copyright (c) 2010 Dimitar Toshkov Zhekov, and stay under
 the SIL Open Font License, Version 1.1
 (libs/fb-console/FONT-LICENSE-OFL.txt).
 
+sdk/runtime/src/mem.rs (memcpy, memmove, memset, memcmp, bcmp of user
+programs) is adapted from compiler-builtins
+(https://github.com/rust-lang/compiler-builtins, src/mem), by the
+compiler-builtins contributors, available under the MIT or the Apache
+License, Version 2.0; AriCodeOS uses it under the latter.
+
 The rest of AriCodeOS is under the Apache License, Version 2.0.

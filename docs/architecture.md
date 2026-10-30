@@ -338,6 +338,12 @@ latter briefly to add the region.
 - `switch_context` (System V) saves rbx, rbp, r12..r15 and rsp; a new thread
   starts through `thread_start` with r12 = entry and r13 = argument, enables
   interrupts and on return enters `exit`.
+- User threads also own an x87/SSE/AVX area (`arch::x86_64::fpu`, ADR
+  0065). The scheduler saves the leaving user thread's registers into it
+  on every switch (`FXSAVE`, or `XSAVEOPT` with x87, SSE and AVX in
+  `XCR0`) and loads the next one's, never lazily (CVE-2018-3665). A CPU
+  that still holds the next thread's registers skips the load. The kernel
+  is soft-float and never touches them, so kernel threads have no area.
 - The scheduler lock is held across the context switch, with interrupts
   disabled, and released by the thread that resumes (`force_unlock` after
   `switch_context`, or in `thread_first_run` for a new thread): no other
@@ -442,8 +448,9 @@ latter briefly to add the region.
   assembly (`hello`, `kernel_read`, `kernel_write`, `privileged`,
   `bad_syscall`, `bad_pointer`) and in Rust on top of `aricode-sys`
   (`sleep_yield`, `handles`, `caps`, `ipc_server`, `ipc_client`). `cargo
-  xtask` builds them as static ELFs for `x86_64-unknown-none` with
-  `sdk/rust/user.ld` (0x400000, R-X, R--, RW- segments) and packs them with
+  xtask` builds them as static ELFs for `x86_64-unknown-linux-gnu`, without
+  its C library or anything of Linux, so they may use SSE and AVX (ADR
+  0065), with `sdk/rust/user.ld` (0x400000, R-X, R--, RW- segments) and packs them with
   `init` into `aricodeos/initrd.img`. `process::spawn` loads them with
   `aricode-elf` and maps each segment with its permissions (the whole
   zero-fill pages of a writable segment, `.bss` and the runtime's heap
