@@ -46,7 +46,7 @@ use alloc::vec::Vec;
 use aricode_ab::{
     schedule, BootState, Booted, Image, ImageError, Manifest, Slot, PART_STATE, PART_UPDATE,
 };
-use aricode_crypto::sha256::sha256;
+use aricode_crypto::sha256::{sha256, Sha256};
 use aricode_rt::sys::block::{find_partition, BlockClient};
 use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::net::NetClient;
@@ -66,10 +66,6 @@ const NET: Handle = Handle(0x0001_0006);
 const BLOCK: Handle = Handle(0x0001_0007);
 const HW: Handle = Handle(0x0001_0008);
 
-/// DMA buffer where a downloaded image (header + container) is held and
-/// verified before it is written anywhere (ADR 0029, decision 3). Images
-/// already on the disk are verified piece by piece instead (incident 0021).
-const IMAGE_BUFFER: u64 = upd::IMAGE_DOWNLOAD_MAX as u64;
 const SECTOR: usize = 512;
 const CHUNK: u16 = 16;
 /// Wait for one network operation.
@@ -93,9 +89,11 @@ mod code {
     pub const STATE_READ: u64 = 6;
     pub const NO_SLOTS: u64 = 7;
     pub const SLOT_TOO_SMALL: u64 = 10;
-    pub const NO_MEMORY: u64 = 11;
     pub const UPDATE_INVALID: u64 = 13;
     pub const SLOT_WRITE: u64 = 14;
+    /// `UPDATE` could not be written or read back while an image was
+    /// downloaded into it (ADR 0064).
+    pub const UPDATE_IO: u64 = 16;
     pub const STATE_WRITE: u64 = 15;
     pub const STATE_READBACK: u64 = 17;
     pub const NO_SERVICES: u64 = 20;
@@ -486,9 +484,6 @@ struct Disk {
     active_part: (u64, u64),
     target: Slot,
     slot_part: (u64, u64),
-    /// The download buffer, allocated when a download first needs it: the
-    /// DMA quota is spent once per process, and only `upgrade` downloads.
-    image: Option<&'static mut [u8]>,
 }
 
 impl Disk {
@@ -567,35 +562,124 @@ impl Disk {
             active_part,
             target,
             slot_part,
-            image: None,
         })
     }
 
-    /// The download buffer (`IMAGE_BUFFER` bytes), allocated on first use.
-    fn download_buffer(&mut self) -> Result<&mut [u8], u64> {
-        if self.image.is_none() {
-            let Ok(dma) = sys::dma_alloc(HW, IMAGE_BUFFER) else {
-                return Err(fault(
-                    code::NO_MEMORY,
-                    "upd-no-memory",
-                    "no memory for the image (quota)",
-                ));
-            };
-            let Ok(virt) = sys::mmio_map(dma) else {
-                return Err(fault(
-                    code::NO_MEMORY,
-                    "upd-no-memory",
-                    "cannot map the image buffer",
-                ));
-            };
-            // SAFETY: our own DMA buffer of IMAGE_BUFFER bytes, mapped RW,
-            // used only through this exclusive reference for the life of the
-            // process.
-            self.image = Some(unsafe {
-                core::slice::from_raw_parts_mut(virt as *mut u8, IMAGE_BUFFER as usize)
-            });
+    /// The largest image `upgrade` downloads: `UPDATE`'s size (ADR 0064).
+    fn update_room(&self) -> usize {
+        (self.update.1 - self.update.0 + 1) as usize * SECTOR
+    }
+
+    /// Downloads `url`, `size` bytes as the index announced, into `UPDATE`
+    /// (ADR 0064). Its header sector is cleared and flushed first, so a cut
+    /// download never leaves a valid image there; the container's sectors
+    /// are written as they arrive, through the block client's buffer, so
+    /// the image's size is bounded by the partition and not by memory. The
+    /// image's own header comes back unwritten: [`Disk::seal_update`]
+    /// writes it once the bytes on the disk match the index.
+    fn download_to_update(
+        &mut self,
+        net: &mut NetClient,
+        url: &str,
+        size: usize,
+    ) -> Result<[u8; SECTOR], Download> {
+        self.blk.buffer()[..SECTOR].fill(0);
+        if self.blk.write(self.update.0, 1).is_err() || self.blk.flush().is_err() {
+            return Err(Download::Disk(update_io("clearing the header of")));
         }
-        Ok(self.image.as_deref_mut().expect("allocated above"))
+        let chunk = CHUNK as usize * SECTOR;
+        let blk = &mut self.blk;
+        let mut lba = self.update.0 + 1;
+        let mut header = [0u8; SECTOR];
+        let mut pending: Vec<u8> = Vec::with_capacity(chunk);
+        let (mut got, mut overflow, mut failed) = (0usize, false, false);
+        // Writes what `pending` holds, its last sector padded with zeros.
+        let mut put = |pending: &mut Vec<u8>| {
+            let sectors = pending.len().div_ceil(SECTOR);
+            pending.resize(sectors * SECTOR, 0);
+            blk.buffer()[..pending.len()].copy_from_slice(pending);
+            let ok = blk.write(lba, sectors as u16).is_ok();
+            lba += sectors as u64;
+            pending.clear();
+            ok
+        };
+        let mut sink = |mut data: &[u8]| {
+            if got + data.len() > size {
+                overflow = true;
+                return false;
+            }
+            if got < SECTOR {
+                let n = (SECTOR - got).min(data.len());
+                header[got..got + n].copy_from_slice(&data[..n]);
+                got += n;
+                data = &data[n..];
+            }
+            while !data.is_empty() {
+                let n = (chunk - pending.len()).min(data.len());
+                pending.extend_from_slice(&data[..n]);
+                got += n;
+                data = &data[n..];
+                if pending.len() == chunk && !put(&mut pending) {
+                    failed = true;
+                    return false;
+                }
+            }
+            true
+        };
+        let fetched = fetch_into(net, url, &mut sink);
+        if failed {
+            return Err(Download::Disk(update_io("writing")));
+        }
+        match fetched {
+            Err(_) if overflow => {
+                return Err(Download::Fetch(FetchError::Other(format!(
+                    "larger than the {size} bytes the index announced"
+                ))))
+            }
+            Err(e) => return Err(Download::Fetch(e)),
+            Ok(()) if got != size => {
+                return Err(Download::Fetch(FetchError::Other(format!(
+                    "{got} bytes received, the index announced {size}"
+                ))))
+            }
+            Ok(()) => {}
+        }
+        if (!pending.is_empty() && !put(&mut pending)) || self.blk.flush().is_err() {
+            return Err(Download::Disk(update_io("writing")));
+        }
+        Ok(header)
+    }
+
+    /// The SHA-256 of the image of `size` bytes in `UPDATE`, read back from
+    /// the disk, its header sector taken from `header` (not written yet):
+    /// what is compared with the index is what the disk holds.
+    fn update_sha256(&mut self, header: &[u8; SECTOR], size: usize) -> Result<[u8; 32], u64> {
+        let mut hash = Sha256::new();
+        hash.update(header);
+        let mut left = size - SECTOR;
+        let mut lba = self.update.0 + 1;
+        while left > 0 {
+            let bytes = left.min(CHUNK as usize * SECTOR);
+            let sectors = bytes.div_ceil(SECTOR) as u16;
+            if self.blk.read(lba, sectors).is_err() {
+                return Err(update_io("reading back"));
+            }
+            hash.update(&self.blk.buffer()[..bytes]);
+            lba += sectors as u64;
+            left -= bytes;
+        }
+        Ok(hash.finish())
+    }
+
+    /// Writes the downloaded image's header into `UPDATE`, after its bytes
+    /// matched the index: from then on `UPDATE` holds that image, as `update
+    /// apply` expects.
+    fn seal_update(&mut self, header: &[u8; SECTOR]) -> Result<(), u64> {
+        self.blk.buffer()[..SECTOR].copy_from_slice(header);
+        if self.blk.write(self.update.0, 1).is_err() || self.blk.flush().is_err() {
+            return Err(update_io("writing the header of"));
+        }
+        Ok(())
     }
 
     /// Verifies the container of `len` bytes that starts one sector after
@@ -719,35 +803,9 @@ impl Disk {
         })
     }
 
-    /// Writes the verified image in the download buffer (`total` bytes,
-    /// verified as `expected`) into the inactive slot, checks the copy there
-    /// and schedules it as pending with tries.
-    fn install(&mut self, total: usize, expected: &Manifest, keys: &Keys) -> Result<(), u64> {
-        let sectors = self.begin_install(total)?;
-        let image = self.image.take().expect("the image was downloaded");
-        image[total..sectors as usize * SECTOR].fill(0);
-        let mut done = 1u64;
-        let mut written = Ok(());
-        while done < sectors && written.is_ok() {
-            let n = (sectors - done).min(CHUNK as u64) as u16;
-            let o = done as usize * SECTOR;
-            let bytes = n as usize * SECTOR;
-            self.blk.buffer()[..bytes].copy_from_slice(&image[o..o + bytes]);
-            written = self.write(self.slot_part.0 + done, n);
-            done += n as u64;
-        }
-        let mut header = [0u8; SECTOR];
-        header.copy_from_slice(&image[..SECTOR]);
-        self.image = Some(image);
-        written?;
-        self.flush_slot()?;
-        self.check_copy(total, expected, keys)?;
-        self.finish_install(&header)
-    }
-
     /// Verifies the container just written to the inactive slot, before its
-    /// header: the copy must be the image verified before it was written
-    /// (audit of incident 0021, L2 and L4).
+    /// header: the copy must be the image verified in `UPDATE` (audit of
+    /// incident 0021, L2 and L4).
     fn check_copy(&mut self, total: usize, expected: &Manifest, keys: &Keys) -> Result<(), u64> {
         let refused = |event: &str, why: String| {
             Err(fault(
@@ -1335,6 +1393,22 @@ impl core::fmt::Display for FetchError {
     }
 }
 
+/// Why a download into `UPDATE` failed.
+enum Download {
+    Fetch(FetchError),
+    /// `UPDATE` could not be written; the fault is already reported.
+    Disk(u64),
+}
+
+/// The fault of a failed write or read of `UPDATE` during a download.
+fn update_io(what: &str) -> u64 {
+    fault(
+        code::UPDATE_IO,
+        "upd-update-io",
+        &format!("error {what} UPDATE; not installing"),
+    )
+}
+
 /// A file the stored index names, downloaded by `upgrade`, that the source
 /// answers 404 or 410 for: it no longer serves the publication `update`
 /// verified. A source at a moving path (GitHub's `latest/download/`, a
@@ -1373,22 +1447,26 @@ fn fetch(net: &mut NetClient, url: &str, out: &mut [u8]) -> Result<usize, FetchE
         got += chunk.len();
         true
     };
-    let result = aricode_https::get_with(
-        net,
-        SYSTEM,
-        &[],
-        url,
-        HTTP_TIMEOUT_MS,
-        &run_budget,
-        &mut sink,
-    );
-    match result {
-        Ok(200) => Ok(got),
-        Ok(status) => Err(FetchError::Status(status)),
+    match fetch_into(net, url, &mut sink) {
+        Ok(()) => Ok(got),
         Err(_) if overflow => Err(FetchError::Other(format!(
             "larger than {} bytes",
             out.len()
         ))),
+        Err(e) => Err(e),
+    }
+}
+
+/// Downloads `url` into `sink`, within the run's budget: `Ok` when the
+/// server answered 200 and the sink took every byte.
+fn fetch_into(
+    net: &mut NetClient,
+    url: &str,
+    sink: &mut dyn FnMut(&[u8]) -> bool,
+) -> Result<(), FetchError> {
+    match aricode_https::get_with(net, SYSTEM, &[], url, HTTP_TIMEOUT_MS, &run_budget, sink) {
+        Ok(200) => Ok(()),
+        Ok(status) => Err(FetchError::Status(status)),
         Err(e) => Err(FetchError::Other(http_error(e))),
     }
 }
@@ -1883,7 +1961,10 @@ struct SystemOffer<'a> {
     commit: Option<&'a str>,
 }
 
-/// Downloads, checks and installs the system image `offer`.
+/// Downloads, checks and installs the system image `offer`: into `UPDATE`
+/// first, then into the inactive slot as `update apply` does (ADR 0064),
+/// so neither the running system nor the one before it (the inactive slot,
+/// `update rollback`'s way back) is touched until the image is verified.
 fn upgrade_system(
     fs: &mut FsClient,
     net: &mut NetClient,
@@ -1894,14 +1975,12 @@ fn upgrade_system(
 ) -> Result<(), u64> {
     let (url, entry) = (offer.url, offer.entry);
     let size = entry.size as usize;
-    if size <= SECTOR || size > IMAGE_BUFFER as usize {
+    let room = disk.update_room();
+    if size <= SECTOR || size > room {
         let why = if size <= SECTOR {
             String::from("too small to hold an image")
         } else {
-            format!(
-                "more than the {} this updater can download and verify in memory",
-                upd::IMAGE_DOWNLOAD_MAX
-            )
+            format!("more than the {room} bytes of the UPDATE partition")
         };
         return Err(fault(
             code::IMAGE_REFUSED,
@@ -1909,38 +1988,42 @@ fn upgrade_system(
             &format!("system image {}: {size} bytes, {why}", entry.file),
         ));
     }
-    let image = disk.download_buffer()?;
-    say!("downloading {} ({size} bytes)", entry.file);
-    // Into memory only: nothing touches the disk until every check passed.
-    if let Err(e) = fetch_exact(net, &format!("{url}{}", entry.file), &mut image[..size]) {
-        return Err(download_fault(
-            code::DOWNLOAD,
-            "upd-image-download",
-            format!(
-                "download failed: {e}{}",
-                withdrawn(&e, entry.file, offer.channel)
-            ),
-        ));
-    }
-    if sha256(&image[..size]) != entry.sha256 {
+    say!("downloading {} ({size} bytes) into UPDATE", entry.file);
+    let header = match disk.download_to_update(net, &format!("{url}{}", entry.file), size) {
+        Ok(header) => header,
+        Err(Download::Disk(code)) => return Err(code),
+        Err(Download::Fetch(e)) => {
+            return Err(download_fault(
+                code::DOWNLOAD,
+                "upd-image-download",
+                format!(
+                    "download failed: {e}{}",
+                    withdrawn(&e, entry.file, offer.channel)
+                ),
+            ))
+        }
+    };
+    if disk.update_sha256(&header, size)? != entry.sha256 {
         return Err(fault(
             code::DOWNLOAD_MISMATCH,
             "upd-image-sha256",
             "system image SHA-256 does not match the signed index; not installing",
         ));
     }
+    disk.seal_update(&header)?;
     // Its own signature, verified again as AriBoot will (Phase 30): the
     // index authenticates the file, the manifest authenticates the content,
     // and the key that signed the manifest is the channel's (ADR 0045).
-    let manifest = Image::container_len(&image[..SECTOR])
-        .ok()
-        .filter(|&len| SECTOR + len as usize == size)
-        .and_then(|_| Image::verify_with(&image[SECTOR..size], keys).ok())
-        .map(|v| v.manifest);
     let offered = ident(offer.channel, entry.version, offer.commit);
-    let verified = match manifest {
-        Some(m) if upd::image_matches_offer(&m, offer.channel, entry.version, offer.commit) => m,
-        Some(m) => {
+    let update = disk.update;
+    let verified = match disk.load(update, keys) {
+        Ok((total, m))
+            if total == size
+                && upd::image_matches_offer(&m, offer.channel, entry.version, offer.commit) =>
+        {
+            m
+        }
+        Ok((total, m)) if total == size => {
             return Err(fault(
                 code::IMAGE_REFUSED,
                 "upd-image-version",
@@ -1950,7 +2033,7 @@ fn upgrade_system(
                 ),
             ))
         }
-        None => {
+        Ok(_) | Err(_) => {
             return Err(fault(
                 code::IMAGE_REFUSED,
                 "upd-image-signature",
@@ -1964,7 +2047,7 @@ fn upgrade_system(
         commit: offer.commit.and_then(aricode_ab::Commit::parse),
     };
     say!("system image {described} verified (signature and SHA-256)");
-    disk.install(size, &verified, keys)?;
+    disk.install_from_update(size, &verified, keys)?;
     let switched = installed.as_ref().filter(|m| m.channel != offer.channel);
     history(
         fs,

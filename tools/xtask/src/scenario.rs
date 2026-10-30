@@ -119,6 +119,10 @@ pub struct HostUpdate {
     /// newer release replaced the one the index came from (incident 0052).
     #[serde(default)]
     pub withdraw_image: bool,
+    /// The system image is padded past the updater's memory (ADR 0064):
+    /// only a download into `UPDATE` holds it.
+    #[serde(default)]
+    pub large_image: bool,
     /// The machine already holds a verified copy of this source's index
     /// with a higher serial (the published one must be refused as stale).
     #[serde(default)]

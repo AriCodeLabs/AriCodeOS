@@ -88,11 +88,12 @@ pub const LEGACY_URL_FILE: &str = "update_url";
 pub const HISTORY_FILE: &str = "history.log";
 /// The history keeps its most recent lines within this size.
 pub const HISTORY_MAX: usize = 2048;
-/// Largest system image the updater downloads: the image is held and
-/// verified in memory before anything is written (ADR 0029, decision 3),
-/// within the updater's 8 MiB memory (the manifest maximum). Installed
-/// images are verified piece by piece, up to the slot size (incident 0021).
-pub const IMAGE_DOWNLOAD_MAX: usize = 6 * 1024 * 1024;
+/// Largest system image (header and container) published: the 12 MiB of
+/// the slot and `UPDATE` partitions every disk layout gives (`cargo xtask`
+/// checks its layouts against it). The updater downloads into `UPDATE`
+/// and verifies there (ADR 0064), so memory does not bound it; on a
+/// machine it is checked against the partitions themselves.
+pub const SYSTEM_IMAGE_MAX: usize = 12 * 1024 * 1024;
 /// Output of the updater's last run, kept for later reading (`cat`, or
 /// `fs-cat` on a dump of the disk).
 pub const UPDATER_LOG_FILE: &str = "last.log";

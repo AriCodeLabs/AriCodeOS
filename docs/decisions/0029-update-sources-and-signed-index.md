@@ -68,10 +68,12 @@ it, no downgrades unless asked, and every install logged.
    manifest (ADR 0017). At install time the download must match the index
    (size and SHA-256), then its own signature and hashes, and the version
    inside must equal the version in the index; only then is anything
-   written. The image is downloaded into the updater's memory buffer, not
-   into the `UPDATE` partition (6 MiB, `IMAGE_DOWNLOAD_MAX`, since incident
-   0021; images already on the disk are verified piece by piece, up to
-   the slot size). The installer and the broker verify a
+   written to a slot. Since ADR 0064 the system image is downloaded into
+   the `UPDATE` partition, its SHA-256 read back from the disk and checked
+   there, then copied into the slot as `update apply` does (until then, a
+   6 MiB memory buffer limited downloads, incident 0021). Images on the
+   disk are verified piece by piece, up to the slot size. The installer
+   and the broker verify a
    package again before installing or launching it.
 
 4. **`update` reports and plans, `upgrade` follows the plan.** `update`
