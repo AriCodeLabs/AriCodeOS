@@ -1,15 +1,15 @@
 # perf.bench, second run (cargo xtask perf; performance audit 731c398, finding G)
 # QEMU TCG, 4 CPU(s), one guest on the host: QEMU emulator version 10.0.13 (Debian 1:10.0.13+ds-0+deb13u1)
 # host: AMD Ryzen 7 5800X 8-Core Processor
-syscall_thread_get_tid ns 379 478 488
-ipc_fsd_list ns 86000 129000 140000
+syscall_thread_get_tid ns 338 348 358
+ipc_fsd_list ns 81000 104000 127000
 replace_4_KiB ns 3096000 3228000 4817000
-read_4_KiB ns 222000 251000 281000
-ipc_net_info ns 79000 101000 136000
-sha256_16_KiB ns 160000 175000 175000
-chacha20poly1305_16_KiB ns 227000 345000 345000
-aes128gcm_16_KiB ns 2409000 2567000 2567000
-ed25519_verify ns 1285000 1372000 1372000
-x25519 ns 375000 398000 398000
-memcpy_64_KiB ns 15000 19000 32000
+read_4_KiB ns 239000 270000 302000
+ipc_net_info ns 83000 96000 107000
+sha256_16_KiB ns 227000 435000 435000
+chacha20poly1305_16_KiB ns 102000 109000 109000
+aes128gcm_16_KiB ns 621000 690000 690000
+ed25519_verify ns 376000 394000 394000
+x25519 ns 345000 351000 351000
+memcpy_64_KiB ns 15000 15000 21000
 quiet_idle_all permille 999

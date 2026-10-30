@@ -2,39 +2,29 @@
 // SPDX-License-Identifier: Apache-2.0
 //! AEAD ciphers of TLS 1.3: ChaCha20-Poly1305 (RFC 8439 section 2.8) and
 //! AES-GCM (NIST SP 800-38D) with 128- or 256-bit keys, both with 96-bit
-//! nonces and 16-byte tags. Data is encrypted or decrypted in place; `open`
+//! nonces and 16-byte tags, over RustCrypto's `chacha20poly1305` and
+//! `aes-gcm` (ADR 0066). Data is encrypted or decrypted in place; `open`
 //! leaves the data untouched when the tag does not match.
 
-use crate::aes::Aes;
-use crate::chacha20::{block, xor_keystream};
-use crate::poly1305::Poly1305;
-use crate::{ct_eq, SecretBytes};
+use aes_gcm::aead::{AeadInPlace, KeyInit};
 
 pub const TAG_LEN: usize = 16;
 
-fn chacha_tag(key: &[u8; 32], nonce: &[u8; 12], aad: &[u8], ct: &[u8]) -> [u8; TAG_LEN] {
-    let block0 = SecretBytes(block(key, nonce, 0));
-    let mut otk = SecretBytes([0u8; 32]);
-    otk.0.copy_from_slice(&block0.0[..32]);
-    let mut p = Poly1305::new(&otk.0);
-    p.update_padded(aad);
-    p.update_padded(ct);
-    let mut lens = [0u8; 16];
-    lens[..8].copy_from_slice(&(aad.len() as u64).to_le_bytes());
-    lens[8..].copy_from_slice(&(ct.len() as u64).to_le_bytes());
-    p.update_padded(&lens);
-    p.finish()
-}
-
 /// Encrypts `data` in place and returns the tag.
+///
+/// # Panics
+///
+/// Past 256 GiB of data, the limit of RFC 8439.
 pub fn chacha20poly1305_seal(
     key: &[u8; 32],
     nonce: &[u8; 12],
     aad: &[u8],
     data: &mut [u8],
 ) -> [u8; TAG_LEN] {
-    xor_keystream(key, nonce, 1, data);
-    chacha_tag(key, nonce, aad, data)
+    chacha20poly1305::ChaCha20Poly1305::new(key.into())
+        .encrypt_in_place_detached(nonce.into(), aad, data)
+        .expect("ChaCha20-Poly1305 message within 256 GiB")
+        .into()
 }
 
 /// Checks `tag` and, if it is valid, decrypts `data` in place.
@@ -45,102 +35,80 @@ pub fn chacha20poly1305_open(
     data: &mut [u8],
     tag: &[u8; TAG_LEN],
 ) -> bool {
-    if !ct_eq(&chacha_tag(key, nonce, aad, data), tag) {
-        return false;
-    }
-    xor_keystream(key, nonce, 1, data);
-    true
+    chacha20poly1305::ChaCha20Poly1305::new(key.into())
+        .decrypt_in_place_detached(nonce.into(), aad, data, tag.into())
+        .is_ok()
 }
 
-/// AES-GCM with an expanded 128- or 256-bit key; the key and `H` are
-/// wiped when it is dropped.
+/// AES-GCM with an expanded 128- or 256-bit key; the key schedule and the
+/// GHASH key are wiped when it is dropped, whatever backend the CPU
+/// selected (`polyval`'s run-time detected one does not wipe itself).
 #[derive(Clone)]
-pub struct AesGcm {
-    aes: Aes,
-    /// The GHASH key `H = E(K, 0^128)`.
-    h: u128,
-}
+pub struct AesGcm(Key);
 
-/// Multiplication in GF(2^128) with the GCM bit order, without
-/// data-dependent branches or tables: `H` and the data never choose an
-/// address (incident 0044).
-fn gf_mul(x: u128, y: u128) -> u128 {
-    const R: u128 = 0xe1 << 120;
-    let mut z = 0u128;
-    let mut v = y;
-    for i in (0..128).rev() {
-        z ^= v & 0u128.wrapping_sub((x >> i) & 1);
-        v = (v >> 1) ^ (R & 0u128.wrapping_sub(v & 1));
-    }
-    z
+// No `alloc` in this crate to box the larger AES-256 key schedule; an
+// `AesGcm` lives once per TLS connection direction.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone)]
+enum Key {
+    Aes128(aes_gcm::Aes128Gcm),
+    Aes256(aes_gcm::Aes256Gcm),
 }
 
 impl AesGcm {
     /// `key` must be 16 or 32 bytes long.
     pub fn new(key: &[u8]) -> Option<Self> {
-        let aes = Aes::new(key)?;
-        let mut h = crate::SecretBytes([0u8; 16]);
-        aes.encrypt_block(&mut h.0);
-        Some(Self {
-            aes,
-            h: u128::from_be_bytes(h.0),
+        // The key expansion's intermediate words are scrubbed.
+        crate::scrubbed::<{ crate::SCRUB_HASH }, _>(|| {
+            match key.len() {
+                16 => aes_gcm::Aes128Gcm::new_from_slice(key)
+                    .ok()
+                    .map(Key::Aes128),
+                32 => aes_gcm::Aes256Gcm::new_from_slice(key)
+                    .ok()
+                    .map(Key::Aes256),
+                _ => None,
+            }
+            .map(Self)
         })
     }
 
-    fn counter_block(nonce: &[u8; 12], counter: u32) -> [u8; 16] {
-        let mut b = [0u8; 16];
-        b[..12].copy_from_slice(nonce);
-        b[12..].copy_from_slice(&counter.to_be_bytes());
-        b
-    }
-
-    /// CTR mode starting at counter 2 (counter 1 masks the tag).
-    fn ctr(&self, nonce: &[u8; 12], data: &mut [u8]) {
-        let mut ks = crate::SecretBytes([0u8; 16]);
-        for (i, chunk) in data.chunks_mut(16).enumerate() {
-            ks.0 = Self::counter_block(nonce, (i as u32).wrapping_add(2));
-            self.aes.encrypt_block(&mut ks.0);
-            for (d, k) in chunk.iter_mut().zip(ks.0) {
-                *d ^= k;
-            }
-        }
-    }
-
-    fn tag(&self, nonce: &[u8; 12], aad: &[u8], ct: &[u8]) -> [u8; TAG_LEN] {
-        let mut y = 0u128;
-        for part in [aad, ct] {
-            for chunk in part.chunks(16) {
-                let mut b = [0u8; 16];
-                b[..chunk.len()].copy_from_slice(chunk);
-                y = gf_mul(y ^ u128::from_be_bytes(b), self.h);
-            }
-        }
-        let lens = ((aad.len() as u128 * 8) << 64) | (ct.len() as u128 * 8);
-        y = gf_mul(y ^ lens, self.h);
-        let mut j0 = crate::SecretBytes(Self::counter_block(nonce, 1));
-        self.aes.encrypt_block(&mut j0.0);
-        (y ^ u128::from_be_bytes(j0.0)).to_be_bytes()
-    }
-
     /// Encrypts `data` in place and returns the tag.
+    ///
+    /// # Panics
+    ///
+    /// Past 64 GiB of data, the limit of NIST SP 800-38D.
     pub fn seal(&self, nonce: &[u8; 12], aad: &[u8], data: &mut [u8]) -> [u8; TAG_LEN] {
-        self.ctr(nonce, data);
-        self.tag(nonce, aad, data)
+        let n = nonce.into();
+        match &self.0 {
+            Key::Aes128(c) => c.encrypt_in_place_detached(n, aad, data),
+            Key::Aes256(c) => c.encrypt_in_place_detached(n, aad, data),
+        }
+        .expect("AES-GCM message within 64 GiB")
+        .into()
     }
 
     /// Checks `tag` and, if it is valid, decrypts `data` in place.
     pub fn open(&self, nonce: &[u8; 12], aad: &[u8], data: &mut [u8], tag: &[u8; TAG_LEN]) -> bool {
-        if !ct_eq(&self.tag(nonce, aad, data), tag) {
-            return false;
+        let (n, t) = (nonce.into(), tag.into());
+        match &self.0 {
+            Key::Aes128(c) => c.decrypt_in_place_detached(n, aad, data, t),
+            Key::Aes256(c) => c.decrypt_in_place_detached(n, aad, data, t),
         }
-        self.ctr(nonce, data);
-        true
+        .is_ok()
     }
 }
 
 impl Drop for AesGcm {
     fn drop(&mut self) {
-        crate::wipe(core::slice::from_mut(&mut self.h));
+        // SAFETY: AES key schedules and GHASH states are words and SIMD
+        // registers, valid as zeros; the variant is left as it is.
+        unsafe {
+            match &mut self.0 {
+                Key::Aes128(c) => crate::wipe_state(c),
+                Key::Aes256(c) => crate::wipe_state(c),
+            }
+        }
     }
 }
 
@@ -290,11 +258,17 @@ mod tests {
     }
 
     #[test]
-    fn ghash_key_is_wiped_when_dropped() {
-        let mut gcm = core::mem::ManuallyDrop::new(AesGcm::new(&[0xA5; 16]).unwrap());
-        assert_ne!(gcm.h, 0);
-        // SAFETY: dropped once; afterwards only a plain integer is read.
-        unsafe { core::mem::ManuallyDrop::drop(&mut gcm) };
-        assert_eq!(gcm.h, 0);
+    fn keys_are_wiped_when_dropped() {
+        for len in [16, 32] {
+            let mut gcm = core::mem::ManuallyDrop::new(AesGcm::new(&[0xA5; 32][..len]).unwrap());
+            let state = |g: &AesGcm| match &g.0 {
+                Key::Aes128(c) => crate::tests::bytes_of(c).to_vec(),
+                Key::Aes256(c) => crate::tests::bytes_of(c).to_vec(),
+            };
+            assert!(state(&gcm).iter().any(|&b| b != 0));
+            // SAFETY: dropped once; afterwards only its bytes are read.
+            unsafe { core::mem::ManuallyDrop::drop(&mut gcm) };
+            assert!(state(&gcm).iter().all(|&b| b == 0), "AES-{}", len * 8);
+        }
     }
 }

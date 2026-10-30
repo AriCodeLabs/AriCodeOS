@@ -1,37 +1,35 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
-//! Cryptography (Phase 31): the four primitives the chain of trust needs,
-//! written from scratch and checked against the official vectors
-//! (FIPS 180-4, RFC 8032, RFC 7539). No `alloc`.
+//! Cryptography: one interface over the implementations that measured
+//! best (ADR 0063, ADR 0066), with this crate's policy on top (strict
+//! verification, wiping key material).
 //!
-//! - [`sha256`] and [`sha512`]: image and message hashes.
-//! - [`ed25519`]: manifest signatures (the private key only lives on the host).
-//! - [`chacha20`]: deterministic generator for the kernel RNG and the SSH
-//!   stream cipher.
-//! - [`x25519`] (RFC 7748), [`poly1305`] (RFC 8439) and [`ssh_chachapoly`]
-//!   (`chacha20-poly1305@openssh.com`): the SSH transport (ADR 0025).
+//! - Adopted: [`sha256`] and [`sha512`] (`sha2`), [`aead`] (`aes-gcm`,
+//!   `chacha20poly1305`), [`chacha20`] (`chacha20`), [`poly1305`]
+//!   (`poly1305`), [`ed25519`] (`ed25519-dalek`) and [`x25519`]
+//!   (`x25519-dalek`). User programs get their SIMD backends, detected at
+//!   run time; the kernel and AriBoot build them portable (feature `soft`
+//!   and the `--cfg` flags of `.cargo/config.toml`), since they must never
+//!   execute SIMD instructions (ADR 0065).
+//! - Ours, faster than the adopted alternatives: [`ecdsa`] (P-256, P-384)
+//!   and [`rsa`] (PKCS#1 v1.5 and PSS) verification over [`bigint`].
+//! - Ours, thin: [`hmac`], [`hkdf`] (RFC 5869), the kernel generator
+//!   ([`chacha20::Rng`]), [`ssh_chachapoly`]
+//!   (`chacha20-poly1305@openssh.com`) and [`trust`].
 //!
-//! - TLS 1.3 client (HTTPS): [`sha512::Sha384`], [`hmac`], [`hkdf`]
-//!   (RFC 5869), [`aead`] (ChaCha20-Poly1305 of RFC 8439 and AES-GCM over
-//!   [`aes`]) and [`rsa`] signature verification (PKCS#1 v1.5 and PSS) over
-//!   [`bigint`].
-//!
-//! The primitives that handle secrets run in constant time: Ed25519
-//! signing, the X25519 ladder, AES (a bitsliced S-box, no table) and
-//! [`hex`]; [`unhex`] does not (it branches on each character). Ed25519 verification
-//! works on public values only. Key types (`Aes`, `AesGcm`, `ChaChaPoly`,
-//! `Poly1305`, the hash states, `Rng`) wipe themselves when dropped, and
-//! [`SecretBytes`] does it for a secret array on the stack (incident 0044).
+//! Every implementation passes the Wycheproof vectors it supports. What
+//! handles secrets runs in constant time; [`unhex`] does not (it branches
+//! on each character). Key types and hash states wipe themselves when
+//! dropped, whatever backend was selected, and [`SecretBytes`] does it for
+//! a secret array on the stack (incident 0044).
 
 #![no_std]
 
 pub mod aead;
-pub mod aes;
 pub mod bigint;
 pub mod chacha20;
 pub mod ecdsa;
 pub mod ed25519;
-mod field25519;
 pub mod hkdf;
 pub mod hmac;
 mod p_curves;
@@ -119,6 +117,78 @@ pub fn wipe<T: Word>(buf: &mut [T]) {
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }
 
+/// Zeroes every byte of a state of an adopted crate (ADR 0066) that holds
+/// key material but does not wipe itself on every backend: `sha2` 0.10 has
+/// no `zeroize` support, and the run-time detected backend of `polyval`
+/// (GHASH, inside `aes-gcm`) keeps its key in a `ManuallyDrop` that is
+/// never dropped.
+///
+/// # Safety
+///
+/// All-zero bytes must be a valid `T`, since `T`'s own `Drop` (if any)
+/// runs afterwards. Audited for the versions `Cargo.toml` pins with `=`
+/// (audit of ADR 0066, L2):
+/// - `sha2::Sha256`, `Sha384`, `Sha512`: `u32`/`u64` arrays, a `u64`
+///   block count, a byte buffer with a `u8` position, `PhantomData`;
+/// - `aes_gcm::Aes128Gcm`, `Aes256Gcm`: `aes` key schedules (a union of
+///   `ManuallyDrop` AES-NI and portable schedules plus a zero-sized CPU
+///   detection token) and `ghash`/`polyval` (the same shape, `u64` pairs).
+///
+/// None holds a reference, a `NonZero`, an enum or an `Option`. A version
+/// bump of these crates (or of `digest`, `block-buffer`, `cipher`) needs
+/// this list checked again.
+unsafe fn wipe_state<T>(state: &mut T) {
+    // SAFETY: an exclusive reference covers `size_of::<T>()` bytes.
+    let bytes = unsafe {
+        core::slice::from_raw_parts_mut(state as *mut T as *mut u8, core::mem::size_of::<T>())
+    };
+    wipe(bytes);
+}
+
+/// Words (8 bytes) [`scrub_stack`] clears after a curve operation on a
+/// secret (Ed25519 signing and public key, X25519), 4 KiB: they reach 2.5
+/// KiB of stack, measured by painting it, in the kernel's and in user
+/// programs' builds.
+const SCRUB_CURVE: usize = 512;
+/// The same after HMAC and AES key expansion, 2 KiB (at most 1.1 KiB).
+const SCRUB_HASH: usize = 256;
+
+/// Runs `f` in a frame of its own, then zeroes the `N` words of stack
+/// below, where `f` and what it called kept their locals. The adopted
+/// crates leave secrets there that our own code used to wipe: Ed25519's
+/// nonce and secret scalar, X25519's clamped scalar and ladder, `sha2`'s
+/// message schedule (audit of ADR 0066, M1). `f` must not be inlined into
+/// the caller, or its locals would sit in the caller's frame, above the
+/// scrubbed area.
+fn scrubbed<const N: usize, T>(f: impl FnOnce() -> T) -> T {
+    let value = isolated(f);
+    scrub_stack::<N>();
+    value
+}
+
+#[inline(never)]
+fn isolated<T>(f: impl FnOnce() -> T) -> T {
+    f()
+}
+
+/// Zeroes the `N` words of stack just below the caller. Never inlined, so
+/// its frame starts where the frame of the function called before it did.
+///
+/// The area is not initialized first: `[0u64; N]` becomes a call to
+/// `memset`, whose return address and saved registers would land below
+/// the area. Volatile word stores stay stores.
+#[inline(never)]
+fn scrub_stack<const N: usize>() {
+    let mut area = core::mem::MaybeUninit::<[u64; N]>::uninit();
+    let p = area.as_mut_ptr().cast::<u64>();
+    for i in 0..N {
+        // SAFETY: within the `N` words of `area`.
+        unsafe { p.add(i).write_volatile(0) };
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    core::hint::black_box(&area);
+}
+
 /// A secret byte array that is [`wipe`]d when it goes out of scope, on
 /// every way out of the function holding it (an early `?` included).
 /// Copies the compiler makes when the value moves are not covered.
@@ -164,6 +234,121 @@ pub fn unhex(text: &str, out: &mut [u8]) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    extern crate std;
+
+    /// The bytes of `v`, to check that a dropped state was wiped.
+    pub(crate) fn bytes_of<T>(v: &T) -> &[u8] {
+        // SAFETY: reads `size_of::<T>()` bytes of a live value; the callers
+        // only pass values whose every byte was written by `wipe`.
+        unsafe {
+            core::slice::from_raw_parts(v as *const T as *const u8, core::mem::size_of::<T>())
+        }
+    }
+
+    /// Runs `f` and returns a copy of the stack it used below the caller
+    /// (x86_64 only; reads memory below `rsp` that this thread owns).
+    #[cfg(target_arch = "x86_64")]
+    #[inline(never)]
+    fn stack_after(f: &dyn Fn()) -> std::vec::Vec<u8> {
+        const DEPTH: usize = 16 * 1024;
+        let top: usize;
+        // SAFETY: reads rsp.
+        unsafe { core::arch::asm!("mov {}, rsp", out(reg) top, options(nomem, nostack)) };
+        for a in top - DEPTH..top - 256 {
+            // SAFETY: the thread's stack, below every live frame.
+            unsafe { core::ptr::write_volatile(a as *mut u8, 0) };
+        }
+        f();
+        (top - DEPTH..top - 256)
+            // SAFETY: as above.
+            .map(|a| unsafe { core::ptr::read_volatile(a as *const u8) })
+            .collect()
+    }
+
+    /// Whether any 8 consecutive bytes of `secret` appear in `stack`.
+    #[cfg(target_arch = "x86_64")]
+    fn found(stack: &[u8], secret: &[u8]) -> bool {
+        secret
+            .windows(8)
+            .any(|w| w.iter().any(|&b| b != 0) && stack.windows(8).any(|s| s == w))
+    }
+
+    /// Audit of ADR 0066, M1: the adopted crates leave Ed25519's expanded
+    /// key and nonce, X25519's clamped scalar and HMAC's padded keys on the
+    /// stack; the facade scrubs them. Each secret is searched for after the
+    /// operation returns.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn secret_operations_leave_nothing_on_the_stack() {
+        use std::vec::Vec;
+        let seed: [u8; 32] = core::array::from_fn(|i| 0x40 + i as u8);
+        let msg = b"message to sign";
+        let expanded = sha512::sha512(&seed);
+        let mut nonce_input = expanded[32..].to_vec();
+        nonce_input.extend_from_slice(msg);
+        let nonce_hash = sha512::sha512(&nonce_input);
+        let mut clamped = seed;
+        clamped[0] &= 248;
+        clamped[31] = (clamped[31] & 127) | 64;
+        // The secret scalar a (clamped, reduced mod L, as `ed25519-dalek`
+        // keeps it) and the nonce r of this seed and message, computed
+        // with Python integers: r = SHA-512(prefix || msg) mod L.
+        let mut a = [0u8; 32];
+        unhex(
+            "bf040757e91311c04b94092aaa0577f2e8165e486417ad3ae5e48b49290cd606",
+            &mut a,
+        )
+        .unwrap();
+        let mut r = [0u8; 32];
+        unhex(
+            "3578efe9df8c32423e8a5175547011752ec8b550c556a80a3c5d258e277f9b0a",
+            &mut r,
+        )
+        .unwrap();
+        let peer = x25519::public_key(&[5u8; 32]);
+        let hkey: Vec<u8> = (0..100u8).map(|i| i ^ 0x5C).collect();
+        let hashed_key = sha256::sha256(&hkey);
+        let ipad: Vec<u8> = hashed_key.iter().map(|b| b ^ 0x36).collect();
+        let cases: [(&str, &dyn Fn(), Vec<&[u8]>); 4] = [
+            (
+                "ed25519 sign",
+                &|| {
+                    core::hint::black_box(ed25519::sign(&seed, msg));
+                },
+                std::vec![&seed[..], &expanded[..], &nonce_hash[..], &a[..], &r[..]],
+            ),
+            (
+                "ed25519 public key",
+                &|| {
+                    core::hint::black_box(ed25519::public_key(&seed));
+                },
+                std::vec![&seed[..], &expanded[..], &a[..]],
+            ),
+            (
+                "x25519",
+                &|| {
+                    core::hint::black_box(x25519::scalar_mult(&seed, &peer));
+                },
+                std::vec![&seed[..], &clamped[..]],
+            ),
+            (
+                "hmac-sha256",
+                &|| {
+                    core::hint::black_box(hmac::hmac_sha256(&hkey, &[b"m"]));
+                },
+                std::vec![&hkey[..], &hashed_key[..], &ipad[..]],
+            ),
+        ];
+        for (name, f, secrets) in cases {
+            let stack = stack_after(f);
+            for (i, secret) in secrets.iter().enumerate() {
+                assert!(
+                    !found(&stack, secret),
+                    "{name}: secret {i} left on the stack"
+                );
+            }
+        }
+    }
 
     #[test]
     fn wipe_zeroes_everything() {

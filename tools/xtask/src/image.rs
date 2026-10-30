@@ -593,8 +593,10 @@ pub enum DiskVariant {
 
 /// Padding of the large images (`large-a`, `host_update.large_image`):
 /// past the updater's memory (its manifest's `memory`), within the 12 MiB
-/// slot, and not a whole number of sectors, so the last one is partial.
-const LARGE_IMAGE_PAD: usize = 7 * 1024 * 1024 + 333;
+/// slot with room for a system of up to 8 MiB (4.4 MiB since ADR 0066's
+/// adopted cryptography), and not a whole number of sectors, so the last
+/// one is partial.
+const LARGE_IMAGE_PAD: usize = 3 * 1024 * 1024 + 333;
 
 /// `container` with one more entry, `padding`, of `pad` bytes of a
 /// pattern that is never zero, so a write lost or put in the wrong place
@@ -1287,7 +1289,7 @@ mod tests {
             })
             .expect("the updater's memory");
         assert!(LARGE_IMAGE_PAD > memory);
-        assert!(LARGE_IMAGE_PAD + 4 * 1024 * 1024 < slot);
+        assert!(LARGE_IMAGE_PAD + 8 * 1024 * 1024 < slot);
     }
 
     #[test]

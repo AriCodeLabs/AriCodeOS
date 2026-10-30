@@ -28,7 +28,8 @@ aricode-elf = { path = "../libs/elf" }
 aricode-initrd = { path = "../libs/initrd" }
 aricode-acpi = { path = "../libs/acpi" }
 aricode-pci = { path = "../libs/pci" }
-aricode-crypto = { path = "../libs/crypto" }
+# Portable backends: no SIMD in the trusted base (ADR 0066).
+aricode-crypto = { path = "../libs/crypto", features = ["soft"] }
 aricode-iommu = { path = "../libs/iommu" }
 aricode-input = { path = "../libs/input" }
 aricode-faults = { path = "../libs/faults" }

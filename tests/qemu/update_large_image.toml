@@ -1,5 +1,5 @@
 # Incident 0021: images larger than the updater's memory. Slot A and UPDATE
-# hold versions 1 and 2 padded with a 7 MiB entry (disk `large-a`; the
+# hold versions 1 and 2 padded with a 3 MiB entry (disk `large-a`; the
 # signature covers only the manifest, so they verify), more than the
 # updater's memory and within the 12 MiB slot. The updater verifies the
 # active image piece by piece (`installed 1`, never "unknown"), `update

@@ -6,10 +6,33 @@ xtask = "run --package xtask --release --"
 # for x86_64-unknown-linux-gnu with flags xtask passes (USER_RUSTFLAGS in
 # tools/xtask/src/build.rs, ADR 0065): set here, they would also reach the
 # host's own builds, which share that triple.
+#
+# The kernel and AriBoot never execute SIMD instructions: user threads'
+# registers stay live in them (ADR 0065). The adopted cryptography picks
+# AES-NI, PCLMULQDQ or AVX2 at run time through `cpufeatures`, which
+# already answers "no" on these targets; the cfgs below force the portable
+# code outright, so the choice does not rest on that crate (ADR 0066).
+# Every OS build refuses a kernel or loader that names a vector register
+# (`check_no_simd` in tools/xtask/src/build.rs).
 [target.x86_64-unknown-none]
 rustflags = [
     "-C", "relocation-model=static",
     "-C", "code-model=kernel",
+    "--cfg", "aes_force_soft",
+    "--cfg", "polyval_force_soft",
+    "--cfg", "chacha20_force_soft",
+    "--cfg", "poly1305_force_soft",
+    "--cfg", 'curve25519_dalek_backend="serial"',
+]
+
+# AriBoot: the same portable cryptography as the kernel.
+[target.x86_64-unknown-uefi]
+rustflags = [
+    "--cfg", "aes_force_soft",
+    "--cfg", "polyval_force_soft",
+    "--cfg", "chacha20_force_soft",
+    "--cfg", "poly1305_force_soft",
+    "--cfg", 'curve25519_dalek_backend="serial"',
 ]
 
 # Sample WebAssembly modules: MVP only, plus the extensions `aricode-wasm`
