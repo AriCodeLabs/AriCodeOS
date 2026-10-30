@@ -1,8 +1,8 @@
 # Incident 0021: a system image larger than the updater's buffer reads as "installed version unknown"
 
 - Opened: 2026-10-23. Status: fixed on `fix/update-image-size`
-  (2026-10-24) for images on the disk; downloads keep a memory limit, now
-  6 MiB, by ADR 0029's rule (see Fix and Open).
+  (2026-10-24) for images on the disk; downloads kept a 6 MiB memory
+  limit until ADR 0064 (2026-10-30) sent them through `UPDATE` (see Open).
 - Found by: the dev-build runs of incident 0018 (`cargo xtask test --debug
   --all --area network` on `fix/net-stack-headroom`), confirmed by the
   independent audit of that branch.
@@ -104,6 +104,11 @@ extra entries (the `large-a` padding relies on it); kernel and initrd are
 still bound by their hashes.
 
 ## Open
+
+Closed on 2026-10-30 by ADR 0064: downloads go into `UPDATE`, are checked
+there and installed with the copy-and-verify path, up to the 12 MiB of the
+partitions. The owner left the choice to that ADR's author. The item as
+it stood:
 
 - Downloads larger than 6 MiB need the owner's decision, since each way
   changes a rule: stage the download in `UPDATE` and install it with the

@@ -22,7 +22,7 @@ stdin = ["update", "upgrade", "reboot"]
 [boots.expect]
 exit = 0
 serial_contains = [
-    "AriInit: launch updater with manifest [system fs net block] memory 8192 KiB",
+    "AriInit: launch updater with manifest [system fs net block] memory 1024 KiB",
     "updater: source 1 http://10.0.2.2:{update_port}/update/: index verified (serial ",
     "updater: system: installed 1, source 1 offers 2: upgrade available",
     "updater: 1 upgrade(s) available: run upgrade",
