@@ -3,7 +3,7 @@ name = "ari-app-bench"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Reproducible AriCodeOS measurements from ring 3: syscall, IPC and files with percentiles"
+description = "Reproducible AriCodeOS measurements from ring 3: syscall, IPC, files and computation with percentiles"
 publish = false
 
 [[bin]]
@@ -14,6 +14,7 @@ bench = false
 
 [dependencies]
 aricode-rt = { path = "../../sdk/runtime" }
+aricode-crypto = { path = "../../libs/crypto" }
 
 [build-dependencies]
 aricode-build = { path = "../../sdk/build" }
