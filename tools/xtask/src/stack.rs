@@ -62,9 +62,20 @@ pub const DEFAULT_BUDGET: Budget = Budget {
 };
 
 /// Programs allowed more than [`DEFAULT_BUDGET`]: (binary, budget, reason
-/// and tracking incident). Empty: every offender found when the check was
-/// extended was fixed instead (incident 0018).
-pub const EXCEPTIONS: &[(&str, Budget, &str)] = &[];
+/// and tracking incident). Every offender found when the check was
+/// extended was fixed instead (incident 0018); what is left is code of
+/// another project that keeps its working data on the stack.
+pub const EXCEPTIONS: &[(&str, Budget, &str)] = &[(
+    "sshd",
+    Budget {
+        path: 38 * 1024,
+        frame: 23 * 1024,
+    },
+    "ML-KEM-768 encryption in ml-kem 0.3.3 keeps its matrix on the stack \
+     (23.5 KB frame in release, 37.1 KB path in dev with the frame that \
+     isolates it for the scrub; libcrux-ml-kem uses as much); only during a \
+     key exchange (ADR 0068, incident 0055)",
+)];
 
 /// Budget of the initrd program `bin`.
 pub fn budget(bin: &str) -> Budget {
@@ -652,6 +663,7 @@ Disassembly of section .text:
             assert!(b.path < USER_STACK, "{bin}: budget over the stack");
         }
         assert_eq!(budget("virtio_net"), DEFAULT_BUDGET);
+        assert!(budget("sshd").frame > DEFAULT_BUDGET.frame);
     }
 
     #[test]

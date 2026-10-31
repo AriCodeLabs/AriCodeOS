@@ -253,3 +253,174 @@ fn large_output_is_delivered_whole() {
     assert!(o.stdout.iter().all(|&b| b == b'x'));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Byte `i` of a streamed output: a position pattern, so data out of order
+/// or repeated is seen, not only data lost (audit of ADR 0068, L3).
+fn pattern(i: u64) -> u8 {
+    (i % 251) as u8
+}
+
+/// One connection whose command gets `size` bytes of [`pattern`], produced
+/// as the client's window allows (never more than 1 MiB waiting), then
+/// exit 0.
+fn serve_stream(listener: TcpListener, authorized: Vec<[u8; 32]>, size: u64) {
+    let (mut sock, _) = listener.accept().unwrap();
+    sock.set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    let mut server = Server::new([0x42; 32], [0x17; 32], authorized);
+    let mut out = Vec::new();
+    server.start(&mut out);
+    // Chunks of a multiple of 251 bytes, so each starts the pattern anew.
+    let chunk: Vec<u8> = (0..251 * 261).map(pattern).collect();
+    let mut left: Option<u64> = None;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut events = Vec::new();
+    loop {
+        while let Some(n) = left.filter(|&n| n > 0 && server.pending_len() < 1 << 20) {
+            let k = n.min(chunk.len() as u64) as usize;
+            server.send_data(&chunk[..k], &mut out);
+            left = Some(n - k as u64);
+        }
+        if left == Some(0) {
+            server.exit(0, &mut out);
+            left = None;
+        }
+        if sock.write_all(&out).is_err() || server.is_closed() {
+            return;
+        }
+        out.clear();
+        let n = match sock.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        if server.feed(&buf[..n], &mut out, &mut events).is_err() {
+            let _ = sock.write_all(&out);
+            return;
+        }
+        for e in events.drain(..) {
+            match e {
+                Event::Exec { .. } => left = Some(size),
+                Event::Closed => {
+                    let _ = sock.write_all(&out);
+                    return;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Runs `ssh -v` with `extra` against a `serve_stream` of `size` bytes:
+/// the bytes received, the exit status and the client's log.
+fn stream(name: &str, size: u64, extra: &[&str]) -> (u64, Option<i32>, String) {
+    let dir = tmpdir(name);
+    let keys = parse_authorized_keys(&client_key(&dir)).keys;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || serve_stream(listener, keys, size));
+    let mut child = ssh(&dir, port, &[&["-v"], extra].concat())
+        .arg("stream")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let log = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stderr.read_to_string(&mut s);
+        s
+    });
+    let mut stdout = child.stdout.take().unwrap();
+    let mut got = 0u64;
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        match stdout.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                for (i, &b) in buf[..n].iter().enumerate() {
+                    let at = got + i as u64;
+                    assert_eq!(b, pattern(at), "byte {at} wrong");
+                }
+                got += n as u64;
+            }
+        }
+    }
+    let status = child.wait().unwrap().code();
+    server.join().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    (got, status, log.join().unwrap())
+}
+
+/// The client's choice of key exchange: the post-quantum hybrid by default
+/// (OpenSSH 10), X25519 alone for a client that offers only that (ADR 0068).
+#[test]
+fn post_quantum_and_classic_key_exchanges() {
+    if !tools() {
+        return;
+    }
+    // Whether this client has the hybrid (OpenSSH 9.9 and later): the
+    // default must then be it (audit of ADR 0068, L4).
+    let q = Command::new("ssh").args(["-Q", "kex"]).output().unwrap();
+    let pq = String::from_utf8_lossy(&q.stdout)
+        .lines()
+        .any(|l| l == "mlkem768x25519-sha256");
+    let (got, status, log) = stream("kex-default", 1000, &[]);
+    assert_eq!((got, status), (1000, Some(0)), "{log}");
+    let expected = if pq {
+        "mlkem768x25519-sha256"
+    } else {
+        "curve25519-sha256"
+    };
+    assert!(
+        log.contains(&format!("kex: algorithm: {expected}")),
+        "{log}"
+    );
+    for kex in [
+        "mlkem768x25519-sha256",
+        "curve25519-sha256",
+        "curve25519-sha256@libssh.org",
+    ] {
+        if kex.starts_with("mlkem") && !pq {
+            continue;
+        }
+        let option = format!("KexAlgorithms={kex}");
+        let (got, status, log) = stream("kex-one", 1000, &["-o", &option]);
+        assert_eq!((got, status), (1000, Some(0)), "{kex}: {log}");
+        assert!(log.contains(&format!("kex: algorithm: {kex}")), "{log}");
+    }
+}
+
+/// A re-exchange the client asks for (every MiB here) keeps the session
+/// going: before ADR 0068 the server refused it, and OpenSSH sessions
+/// ended after about 1 GiB with this cipher.
+#[test]
+fn client_rekeys_mid_transfer() {
+    if !tools() {
+        return;
+    }
+    let size = 8 << 20;
+    let (got, status, log) = stream("client-rekey", size, &["-o", "RekeyLimit=1M"]);
+    assert_eq!((got, status), (size, Some(0)), "{log}");
+    // OpenSSH checks its limit lazily on a connection it only reads from:
+    // three re-exchanges in 8 MiB with 10.0.
+    let exchanges = log.matches("SSH2_MSG_NEWKEYS received").count();
+    assert!(exchanges >= 3, "{exchanges} key exchanges: {log}");
+}
+
+/// The server asks for new keys itself after 1 GiB either way, whatever
+/// the client's own limit.
+#[test]
+fn server_rekeys_after_a_gibibyte() {
+    if !tools() {
+        return;
+    }
+    let size = (1 << 30) + (256 << 20);
+    let (got, status, log) = stream("server-rekey", size, &["-o", "RekeyLimit=8G"]);
+    assert_eq!((got, status), (size, Some(0)), "{log}");
+    let exchanges = log.matches("SSH2_MSG_NEWKEYS received").count();
+    assert_eq!(
+        exchanges, 2,
+        "the first exchange and one the server started: {log}"
+    );
+}

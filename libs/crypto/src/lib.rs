@@ -32,6 +32,8 @@ pub mod ecdsa;
 pub mod ed25519;
 pub mod hkdf;
 pub mod hmac;
+#[cfg(feature = "mlkem")]
+pub mod mlkem;
 mod p_curves;
 pub mod poly1305;
 pub mod rsa;
@@ -185,6 +187,23 @@ fn scrub_stack<const N: usize>() {
         // SAFETY: within the `N` words of `area`.
         unsafe { p.add(i).write_volatile(0) };
     }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    core::hint::black_box(&area);
+}
+
+/// Zeroes `2 * N` words of stack below the caller, in two frames of `N`
+/// words, the second below the first: for work deeper than one frame may
+/// be (ML-KEM), without a frame larger than `N` words.
+#[cfg(feature = "mlkem")]
+#[inline(never)]
+fn scrub_stack_deep<const N: usize>() {
+    let mut area = core::mem::MaybeUninit::<[u64; N]>::uninit();
+    let p = area.as_mut_ptr().cast::<u64>();
+    for i in 0..N {
+        // SAFETY: within the `N` words of `area`.
+        unsafe { p.add(i).write_volatile(0) };
+    }
+    scrub_stack::<N>();
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     core::hint::black_box(&area);
 }

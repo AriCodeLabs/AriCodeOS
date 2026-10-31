@@ -5,11 +5,12 @@
 //! No I/O and no threads, so it runs the same in the AriCodeOS `sshd`
 //! service and in host tests against the real OpenSSH client.
 //!
-//! Supported (and only): key exchange `curve25519-sha256` with strict KEX
-//! (`kex-strict-s-v00@openssh.com`), host key `ssh-ed25519`, cipher
-//! `chacha20-poly1305@openssh.com`, no compression, `publickey`
-//! authentication with `ssh-ed25519` keys, and one `session` channel with
-//! `pty-req`, `shell`, `exec`, `env` and `window-change`.
+//! Supported (and only): key exchange `mlkem768x25519-sha256` (post-quantum
+//! hybrid) or `curve25519-sha256`, with strict KEX
+//! (`kex-strict-s-v00@openssh.com`) and key re-exchange, host key
+//! `ssh-ed25519`, cipher `chacha20-poly1305@openssh.com`, no compression,
+//! `publickey` authentication with `ssh-ed25519` keys, and one `session`
+//! channel with `pty-req`, `shell`, `exec`, `env` and `window-change`.
 
 #![no_std]
 
@@ -19,6 +20,7 @@ pub mod base64;
 pub mod keys_refresh;
 pub mod wire;
 
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 use aricode_crypto::chacha20::Rng;
@@ -59,12 +61,27 @@ mod msg {
     pub const CHANNEL_FAILURE: u8 = 100;
 }
 
+/// ML-KEM-768 with X25519 (draft-ietf-sshm-mlkem-hybrid-kex), preferred:
+/// a recorded session stays secret even against a future quantum computer.
+const KEX_MLKEM: &[u8] = b"mlkem768x25519-sha256";
 const KEX: &[u8] = b"curve25519-sha256";
 const KEX_LIBSSH: &[u8] = b"curve25519-sha256@libssh.org";
 const STRICT_S: &[u8] = b"kex-strict-s-v00@openssh.com";
-/// Packets either way a connection may carry: half the sequence space,
-/// far from its wrap (no rekey is supported).
+/// Packets either way under one set of keys: half the sequence space, far
+/// from its wrap. Re-exchange starts long before (`REKEY_PACKETS`); a
+/// client that never completes it is disconnected here.
 const MAX_PACKETS: u32 = 1 << 31;
+/// Payload bytes either way after which the server asks for new keys, as
+/// OpenSSH and Dropbear do with this cipher.
+const REKEY_BYTES: u64 = 1 << 30;
+/// Packets either way after which the server asks for new keys.
+const REKEY_PACKETS: u32 = 1 << 28;
+/// Replies held back while a key exchange the server started waits for the
+/// client (RFC 4253 7.1 forbids sending them before NEWKEYS). A client that
+/// keeps asking instead of answering is disconnected: memory stays bounded
+/// (Dropbear 2026.92 fixed the same unbounded growth).
+const MAX_DEFERRED: usize = 64;
+const MLKEM_EK_LEN: usize = aricode_crypto::mlkem::ENCAPSULATION_KEY_LEN;
 const STRICT_C: &[u8] = b"kex-strict-c-v00@openssh.com";
 const HOSTKEY: &[u8] = b"ssh-ed25519";
 const CIPHER: &[u8] = b"chacha20-poly1305@openssh.com";
@@ -128,6 +145,25 @@ enum Phase {
     Closed,
 }
 
+/// The negotiated key exchange method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Method {
+    MlKem768X25519,
+    Curve25519,
+}
+
+/// A key exchange in progress, the first one or a re-exchange.
+struct Kex {
+    /// Our KEXINIT payload, as sent.
+    ours: Vec<u8>,
+    /// The client's KEXINIT payload; empty until it arrives.
+    theirs: Vec<u8>,
+    method: Method,
+    /// Keys for the client's packets after its NEWKEYS; set once we have
+    /// answered and sent ours.
+    next_recv: Option<ChaChaPoly>,
+}
+
 struct Channel {
     remote_id: u32,
     remote_window: u32,
@@ -138,7 +174,8 @@ struct Channel {
     started: bool,
     sent_eof: bool,
     sent_close: bool,
-    pending: Vec<u8>,
+    /// A ring, so sending from its front never moves what is left.
+    pending: VecDeque<u8>,
     /// `exit` was requested while `pending` could not be sent: finished
     /// once the client widens its window.
     exit_code: Option<u32>,
@@ -152,17 +189,18 @@ pub struct Server {
     authorized: Vec<[u8; 32]>,
     input: Vec<u8>,
     client_version: Vec<u8>,
-    our_kexinit: Vec<u8>,
-    client_kexinit: Vec<u8>,
     strict: bool,
     session_id: Option<[u8; 32]>,
-    /// Keys derived but not yet in use (until NEWKEYS in each direction).
-    next_send: Option<ChaChaPoly>,
-    next_recv: Option<ChaChaPoly>,
+    kex: Option<Kex>,
+    /// Non-KEX payloads produced while a key exchange holds them back.
+    deferred: Vec<Vec<u8>>,
     send: Option<ChaChaPoly>,
     recv: Option<ChaChaPoly>,
     send_seq: u32,
     recv_seq: u32,
+    /// Payload bytes either way under the current keys.
+    sent_bytes: u64,
+    recv_bytes: u64,
     /// Authentication requests counted against `MAX_AUTH_ATTEMPTS`.
     auth_attempts: u32,
     /// The client already asked for the methods (a first `none`).
@@ -308,16 +346,16 @@ impl Server {
             authorized,
             input: Vec::new(),
             client_version: Vec::new(),
-            our_kexinit: Vec::new(),
-            client_kexinit: Vec::new(),
             strict: false,
             session_id: None,
-            next_send: None,
-            next_recv: None,
+            kex: None,
+            deferred: Vec::new(),
             send: None,
             recv: None,
             send_seq: 0,
             recv_seq: 0,
+            sent_bytes: 0,
+            recv_bytes: 0,
             auth_attempts: 0,
             methods_asked: false,
             user: None,
@@ -348,12 +386,24 @@ impl Server {
     pub fn start(&mut self, out: &mut Vec<u8>) {
         out.extend_from_slice(VERSION);
         out.extend_from_slice(b"\r\n");
+        self.send_kexinit(out);
+    }
+
+    /// Sends our KEXINIT, starting a key exchange: the first one (with
+    /// the strict KEX marker) or a re-exchange.
+    fn send_kexinit(&mut self, out: &mut Vec<u8>) {
         let mut cookie = [0u8; 16];
         self.rng.fill(&mut cookie);
         let mut w = Writer::new(msg::KEXINIT);
         w.bytes(&cookie);
         let mut kex = Vec::new();
-        for (i, n) in [KEX, KEX_LIBSSH, STRICT_S].iter().enumerate() {
+        let first = self.session_id.is_none();
+        let names: &[&[u8]] = if first {
+            &[KEX_MLKEM, KEX, KEX_LIBSSH, STRICT_S]
+        } else {
+            &[KEX_MLKEM, KEX, KEX_LIBSSH]
+        };
+        for (i, n) in names.iter().enumerate() {
             if i > 0 {
                 kex.push(b',');
             }
@@ -367,8 +417,31 @@ impl Server {
             .string(NONE)
             .string(NONE);
         w.string(b"").string(b"").bool(false).u32(0);
-        self.our_kexinit = w.0.clone();
+        self.kex = Some(Kex {
+            ours: w.0.clone(),
+            theirs: Vec::new(),
+            method: Method::Curve25519,
+            next_recv: None,
+        });
         self.send_packet(&w.0, out);
+    }
+
+    /// Between our KEXINIT and our NEWKEYS only transport and KEX messages
+    /// may leave (RFC 4253 7.1).
+    fn sending_kex(&self) -> bool {
+        self.kex.as_ref().is_some_and(|k| k.next_recv.is_none())
+    }
+
+    /// Starts a re-exchange once either direction carried enough under the
+    /// current keys.
+    fn rekey_if_due(&mut self, out: &mut Vec<u8>) {
+        let due = self.sent_bytes >= REKEY_BYTES
+            || self.recv_bytes >= REKEY_BYTES
+            || self.send_seq >= REKEY_PACKETS
+            || self.recv_seq >= REKEY_PACKETS;
+        if due && self.kex.is_none() && matches!(self.phase, Phase::Auth | Phase::Connected) {
+            self.send_kexinit(out);
+        }
     }
 
     /// Processes bytes from the client.
@@ -428,6 +501,7 @@ impl Server {
             if self.phase == Phase::Closed {
                 break;
             }
+            self.rekey_if_due(out);
         }
         Ok(())
     }
@@ -445,12 +519,12 @@ impl Server {
         if ch.pty {
             for &b in data {
                 if b == b'\n' {
-                    ch.pending.push(b'\r');
+                    ch.pending.push_back(b'\r');
                 }
-                ch.pending.push(b);
+                ch.pending.push_back(b);
             }
         } else {
-            ch.pending.extend_from_slice(data);
+            ch.pending.extend(data);
         }
         self.flush_channel(out);
     }
@@ -488,8 +562,15 @@ impl Server {
         self.send_packet(&w.0, out);
     }
 
+    /// Sends what the client's window allows, straight from the pending
+    /// ring into the packet: no copy in between (the copies made sending
+    /// cost a third more CPU per byte than sunset, ADR 0068).
     fn flush_channel(&mut self, out: &mut Vec<u8>) {
         loop {
+            // Channel data waits for the end of a key exchange.
+            if self.sending_kex() || self.phase == Phase::Closed {
+                return;
+            }
             let Some(ch) = self.channel.as_mut() else {
                 return;
             };
@@ -497,14 +578,31 @@ impl Server {
                 .min(ch.remote_window)
                 .min(ch.remote_max_packet.saturating_sub(64).max(1)) as usize;
             if n == 0 {
+                // An exit waiting for its output completes once all of it
+                // left: after a window adjust, or after a key exchange
+                // held it back with the window open.
+                if ch.pending.is_empty() {
+                    if let Some(code) = ch.exit_code.take() {
+                        self.exit(code, out);
+                    }
+                }
                 return;
             }
-            let chunk: Vec<u8> = ch.pending.drain(..n).collect();
             ch.remote_window -= n as u32;
-            let id = ch.remote_id;
-            let mut w = Writer::new(msg::CHANNEL_DATA);
-            w.u32(id).string(&chunk);
-            self.send_packet(&w.0, out);
+            let mut header = [0u8; 9];
+            header[0] = msg::CHANNEL_DATA;
+            header[1..5].copy_from_slice(&ch.remote_id.to_be_bytes());
+            header[5..].copy_from_slice(&(n as u32).to_be_bytes());
+            let pending = core::mem::take(&mut ch.pending);
+            let (a, b) = pending.as_slices();
+            let a = &a[..a.len().min(n)];
+            let b = &b[..n - a.len()];
+            self.send_parts(&[&header, a, b], out);
+            if let Some(ch) = self.channel.as_mut() {
+                ch.pending = pending;
+                ch.pending.drain(..n);
+            }
+            self.rekey_if_due(out);
         }
     }
 
@@ -518,32 +616,65 @@ impl Server {
     // ------------------------------------------------------------ packets
 
     fn send_packet(&mut self, payload: &[u8], out: &mut Vec<u8>) {
-        // The nonce is the sequence number and keys are never exchanged
-        // again: past `MAX_PACKETS` nothing more is sent, whatever window
-        // the client granted (audit of incident 0035, L1).
+        self.send_parts(&[payload], out);
+    }
+
+    /// Sends one packet whose payload is `parts` end to end, built and
+    /// sealed in place at the end of `out`.
+    fn send_parts(&mut self, parts: &[&[u8]], out: &mut Vec<u8>) {
+        if self.phase == Phase::Closed {
+            return;
+        }
+        let kind = parts.iter().find_map(|p| p.first().copied()).unwrap_or(0);
+        // Between our KEXINIT and our NEWKEYS other messages wait
+        // (RFC 4253 7.1), within a bound.
+        if self.sending_kex() && !is_kex_message(kind) {
+            if self.deferred.len() >= MAX_DEFERRED {
+                self.disconnect(2, b"key re-exchange not answered", out);
+                return;
+            }
+            self.deferred.push(parts.concat());
+            return;
+        }
+        // The nonce is the sequence number: past `MAX_PACKETS` under one
+        // set of keys nothing more is sent, whatever window the client
+        // granted (audit of incident 0035, L1). Re-exchange resets it long
+        // before, unless the client never answers.
         if self.send_seq >= MAX_PACKETS {
             self.phase = Phase::Closed;
             return;
         }
+        let len: usize = parts.iter().map(|p| p.len()).sum();
         // Block size 8; with the AEAD the length field is not counted.
-        let base = if self.send.is_some() { 1 } else { 5 } + payload.len();
+        let base = if self.send.is_some() { 1 } else { 5 } + len;
         let mut pad = 8 - base % 8;
         if pad < 4 {
             pad += 8;
         }
-        let mut packet = Vec::with_capacity(4 + 1 + payload.len() + pad + TAG_LEN);
-        packet.extend_from_slice(&((1 + payload.len() + pad) as u32).to_be_bytes());
-        packet.push(pad as u8);
-        packet.extend_from_slice(payload);
-        let start = packet.len();
-        packet.resize(start + pad, 0);
-        self.rng.fill(&mut packet[start..]);
+        let start = out.len();
+        out.reserve(4 + 1 + len + pad + TAG_LEN);
+        out.extend_from_slice(&((1 + len + pad) as u32).to_be_bytes());
+        out.push(pad as u8);
+        for p in parts {
+            out.extend_from_slice(p);
+        }
+        let padding = out.len();
+        out.resize(padding + pad, 0);
+        self.rng.fill(&mut out[padding..]);
         if let Some(c) = &self.send {
-            let tag = c.seal(self.send_seq, &mut packet);
-            packet.extend_from_slice(&tag);
+            let tag = c.seal(self.send_seq, &mut out[start..]);
+            out.extend_from_slice(&tag);
         }
         self.send_seq = self.send_seq.wrapping_add(1);
-        out.extend_from_slice(&packet);
+        self.sent_bytes += len as u64;
+    }
+
+    /// Sends what a finished key exchange held back, then channel data.
+    fn release_deferred(&mut self, out: &mut Vec<u8>) {
+        for payload in core::mem::take(&mut self.deferred) {
+            self.send_packet(&payload, out);
+        }
+        self.flush_channel(out);
     }
 
     /// Next complete packet's payload, if the input holds one.
@@ -572,9 +703,10 @@ impl Server {
             }
         }
         self.recv_seq = self.recv_seq.wrapping_add(1);
-        // The ChaCha20 nonce is the sequence number and keys are never
-        // exchanged again: a counter must never wrap (audit 2026-10-25 C,
-        // L10; D, L6). `send_packet` bounds the other direction.
+        // The ChaCha20 nonce is the sequence number: a counter must never
+        // wrap under one set of keys (audit 2026-10-25 C, L10; D, L6).
+        // Re-exchange resets it long before; `send_parts` bounds the other
+        // direction.
         if self.recv_seq >= MAX_PACKETS {
             return Err(Error::Protocol(
                 "too many packets without a key re-exchange",
@@ -584,7 +716,10 @@ impl Server {
         if pad + 1 > len {
             return Err(Error::Protocol("bad padding"));
         }
-        Ok(Some(packet[5..4 + len - pad].to_vec()))
+        self.recv_bytes += (len - pad - 1) as u64;
+        packet.truncate(4 + len - pad);
+        packet.drain(..5);
+        Ok(Some(packet))
     }
 
     // ----------------------------------------------------------- dispatch
@@ -606,33 +741,59 @@ impl Server {
             }
             // Strict KEX forbids anything but KEX messages during the first
             // exchange; afterwards these are harmless.
-            msg::IGNORE | msg::DEBUG | msg::UNIMPLEMENTED | msg::EXT_INFO
-                if !self.in_strict_kex() => {}
-            msg::KEXINIT if self.phase == Phase::Kex && self.client_kexinit.is_empty() => {
-                self.client_kexinit = payload.to_vec();
-                self.negotiate(&mut r)?;
+            msg::IGNORE | msg::DEBUG | msg::UNIMPLEMENTED if !self.in_strict_kex() => {}
+            msg::EXT_INFO if !self.in_strict_kex() && !self.receiving_kex() => {}
+            msg::KEXINIT if !self.receiving_kex() && self.phase != Phase::Closed => {
+                // A re-exchange the client starts: ours goes first. Only
+                // after authentication: before it, each one would only make
+                // the server compute (audit of ADR 0068, I4).
+                if self.kex.is_none() {
+                    if self.phase != Phase::Connected {
+                        return Err(Error::Protocol("key re-exchange before authentication"));
+                    }
+                    self.send_kexinit(out);
+                }
+                let method = self.negotiate(&mut r)?;
+                if let Some(k) = self.kex.as_mut() {
+                    k.theirs = payload.to_vec();
+                    k.method = method;
+                }
             }
             msg::KEX_ECDH_INIT
-                if self.phase == Phase::Kex
-                    && !self.client_kexinit.is_empty()
-                    && self.next_recv.is_none() =>
+                if self
+                    .kex
+                    .as_ref()
+                    .is_some_and(|k| !k.theirs.is_empty() && k.next_recv.is_none()) =>
             {
                 let q_c = r.string().ok_or(Error::Protocol("bad ECDH_INIT"))?;
                 self.key_exchange(q_c, out)?;
             }
-            msg::NEWKEYS if self.phase == Phase::Kex && self.next_recv.is_some() => {
-                self.recv = self.next_recv.take();
+            msg::NEWKEYS if self.kex.as_ref().is_some_and(|k| k.next_recv.is_some()) => {
+                self.recv = self.kex.take().and_then(|k| k.next_recv);
+                // Strict KEX: every NEWKEYS starts the count again, so a
+                // nonce never repeats under the same keys.
                 if self.strict {
                     self.recv_seq = 0;
                 }
-                self.phase = Phase::Auth;
+                self.recv_bytes = 0;
+                if self.phase == Phase::Kex {
+                    self.phase = Phase::Auth;
+                }
             }
             _ if self.in_strict_kex() => {
                 return Err(Error::Protocol(
                     "unexpected message during strict key exchange",
                 ))
             }
-            msg::KEXINIT => return Err(Error::Protocol("key re-exchange is not supported")),
+            // Once the client sent its KEXINIT, only transport and KEX
+            // messages until its NEWKEYS (RFC 4253 7.1).
+            _ if self.receiving_kex() && !is_kex_message(kind) => {
+                return Err(Error::Protocol("unexpected message during key exchange"))
+            }
+            msg::KEXINIT => return Err(Error::Protocol("unexpected KEXINIT")),
+            msg::NEWKEYS | 30..=49 => {
+                return Err(Error::Protocol("unexpected key exchange message"))
+            }
             msg::SERVICE_REQUEST if self.phase == Phase::Auth => {
                 let name = r.string().ok_or(Error::Protocol("bad SERVICE_REQUEST"))?;
                 if name != b"ssh-userauth" {
@@ -682,15 +843,6 @@ impl Server {
                     ch.remote_window = ch.remote_window.saturating_add(add);
                 }
                 self.flush_channel(out);
-                // A deferred exit completes once nothing is pending.
-                if let Some(code) = self
-                    .channel
-                    .as_ref()
-                    .filter(|c| c.pending.is_empty())
-                    .and_then(|c| c.exit_code)
-                {
-                    self.exit(code, out);
-                }
             }
             msg::CHANNEL_EOF if self.phase == Phase::Connected => events.push(Event::Eof),
             msg::CHANNEL_CLOSE if self.phase == Phase::Connected => {
@@ -724,14 +876,24 @@ impl Server {
         self.phase == Phase::Kex
     }
 
-    fn negotiate(&mut self, r: &mut Reader) -> Result<(), Error> {
+    /// The client has sent its KEXINIT and not yet its NEWKEYS.
+    fn receiving_kex(&self) -> bool {
+        self.kex.as_ref().is_some_and(|k| !k.theirs.is_empty())
+    }
+
+    /// Checks the client's KEXINIT lists and picks the key exchange method
+    /// (the client's first choice among ours, RFC 4253 7.1).
+    fn negotiate(&mut self, r: &mut Reader) -> Result<Method, Error> {
         r.take(16).ok_or(Error::Protocol("bad KEXINIT"))?;
         let mut lists: [&[u8]; 10] = [&[]; 10];
         for l in lists.iter_mut() {
             *l = r.string().ok_or(Error::Protocol("bad KEXINIT"))?;
         }
-        negotiate(lists[0], &[KEX, KEX_LIBSSH])
-            .ok_or(Error::Negotiation("no common key exchange"))?;
+        let method = match negotiate(lists[0], &[KEX_MLKEM, KEX, KEX_LIBSSH]) {
+            Some(KEX_MLKEM) => Method::MlKem768X25519,
+            Some(_) => Method::Curve25519,
+            None => return Err(Error::Negotiation("no common key exchange")),
+        };
         negotiate(lists[1], &[HOSTKEY]).ok_or(Error::Negotiation(
             "client does not accept ssh-ed25519 host keys",
         ))?;
@@ -746,45 +908,77 @@ impl Server {
         // Strict key exchange is required: without it a man in the middle
         // can delete packets at the start of the encrypted stream
         // (Terrapin, CVE-2023-48795) with the cipher used here. OpenSSH 9.6
-        // and PuTTY 0.80 and later offer it (audit 2026-10-25 D, L7).
-        if !list_has(lists[0], STRICT_C) {
-            return Err(Error::Negotiation(
-                "client does not offer strict key exchange (kex-strict-c-v00@openssh.com)",
-            ));
+        // and PuTTY 0.80 and later offer it (audit 2026-10-25 D, L7). It is
+        // agreed in the first exchange and holds for the connection.
+        if self.session_id.is_none() {
+            if !list_has(lists[0], STRICT_C) {
+                return Err(Error::Negotiation(
+                    "client does not offer strict key exchange (kex-strict-c-v00@openssh.com)",
+                ));
+            }
+            self.strict = true;
         }
-        self.strict = true;
         if r.bool() == Some(true) {
             return Err(Error::Negotiation(
                 "guessed key exchange packets are not supported",
             ));
         }
-        Ok(())
+        Ok(method)
     }
 
     fn key_exchange(&mut self, q_c: &[u8], out: &mut Vec<u8>) -> Result<(), Error> {
-        let q_c: [u8; 32] = q_c
-            .try_into()
-            .map_err(|_| Error::Protocol("bad client public key"))?;
-        // The ephemeral key, the shared secret K and everything derived
-        // from K are wiped on every way out (incident 0044).
-        let mut secret = SecretBytes([0u8; 32]);
-        self.rng.fill(&mut secret.0);
-        let q_s = x25519::public_key(&secret.0);
-        let k = SecretBytes(
-            x25519::shared(&secret.0, &q_c).ok_or(Error::Protocol("low-order client key"))?,
-        );
-        let k = &k.0;
+        let Some(method) = self.kex.as_ref().map(|k| k.method) else {
+            return Err(Error::Protocol("unexpected ECDH_INIT"));
+        };
+        // The ephemeral keys, the shared secrets and everything derived
+        // from them are wiped on every way out (incident 0044).
+        let (q_s, k_enc) = match method {
+            Method::Curve25519 => {
+                let (q_s, k) = self.x25519(q_c)?;
+                let mut enc = Writer::default();
+                enc.mpint(&k.0);
+                (q_s.to_vec(), SecretVec(enc.0))
+            }
+            // C_INIT = ML-KEM encapsulation key || X25519 key; S_REPLY =
+            // ciphertext || X25519 key; K = SHA-256(ML-KEM key || X25519
+            // secret), as a string (draft-ietf-sshm-mlkem-hybrid-kex).
+            Method::MlKem768X25519 => {
+                if q_c.len() != MLKEM_EK_LEN + 32 {
+                    return Err(Error::Protocol("bad ML-KEM client key"));
+                }
+                let (ek, x) = q_c.split_at(MLKEM_EK_LEN);
+                let mut m = SecretBytes([0u8; 32]);
+                self.rng.fill(&mut m.0);
+                let (ct, k_pq) = aricode_crypto::mlkem::encapsulate(ek, &m)
+                    .ok_or(Error::Protocol("bad ML-KEM client key"))?;
+                let (x_s, k_cl) = self.x25519(x)?;
+                let mut h = Sha256::new();
+                h.update(&k_pq.0);
+                h.update(&k_cl.0);
+                let k = SecretBytes(h.finish());
+                let mut enc = Writer::default();
+                enc.string(&k.0);
+                ([ct.as_slice(), &x_s].concat(), SecretVec(enc.0))
+            }
+        };
+        // This exchange's secrets are drawn: the generator forgets the key
+        // they came from, so reading its state later cannot recover them
+        // (audit of ADR 0068, L2).
+        self.rng.ratchet();
         let k_s = ed25519_blob(&self.host_public);
+        let Some(kex) = self.kex.as_ref() else {
+            return Err(Error::Protocol("unexpected ECDH_INIT"));
+        };
         // H = HASH(V_C || V_S || I_C || I_S || K_S || Q_C || Q_S || K).
         let mut h = Writer::default();
         h.string(&self.client_version)
             .string(VERSION)
-            .string(&self.client_kexinit)
-            .string(&self.our_kexinit)
+            .string(&kex.theirs)
+            .string(&kex.ours)
             .string(&k_s)
-            .string(&q_c)
+            .string(q_c)
             .string(&q_s)
-            .mpint(k);
+            .bytes(&k_enc.0);
         let hash = aricode_crypto::sha256::sha256(&h.0);
         wipe(&mut h.0);
         let session_id = *self.session_id.get_or_insert(hash);
@@ -797,34 +991,51 @@ impl Server {
         self.send_packet(&[msg::NEWKEYS], out);
         // Keys: C = client to server, D = server to client (RFC 4253 7.2).
         let derive = |letter: u8| -> SecretBytes<64> {
-            let mut mk = Writer::default();
-            mk.mpint(k);
             let mut first = Sha256::new();
-            first.update(&mk.0);
+            first.update(&k_enc.0);
             first.update(&hash);
             first.update(&[letter]);
             first.update(&session_id);
             let mut k1 = first.finish();
             let mut second = Sha256::new();
-            second.update(&mk.0);
+            second.update(&k_enc.0);
             second.update(&hash);
             second.update(&k1);
             let mut k2 = second.finish();
             let mut key = SecretBytes([0u8; 64]);
             key.0[..32].copy_from_slice(&k1);
             key.0[32..].copy_from_slice(&k2);
-            for b in [&mut mk.0[..], &mut k1, &mut k2] {
+            for b in [&mut k1, &mut k2] {
                 wipe(b);
             }
             key
         };
         self.send = Some(ChaChaPoly::new(&derive(b'D').0));
+        // Strict KEX: every NEWKEYS starts the count again.
         if self.strict {
             self.send_seq = 0;
         }
-        self.next_recv = Some(ChaChaPoly::new(&derive(b'C').0));
-        self.next_send = None;
+        self.sent_bytes = 0;
+        let next_recv = ChaChaPoly::new(&derive(b'C').0);
+        if let Some(k) = self.kex.as_mut() {
+            k.next_recv = Some(next_recv);
+        }
+        // Our NEWKEYS is out: what the exchange held back can follow.
+        self.release_deferred(out);
         Ok(())
+    }
+
+    /// A fresh X25519 key pair against the client's `q_c`: our public key
+    /// and the shared secret. A low-order client key is refused.
+    fn x25519(&mut self, q_c: &[u8]) -> Result<([u8; 32], SecretBytes<32>), Error> {
+        let q_c: [u8; 32] = q_c
+            .try_into()
+            .map_err(|_| Error::Protocol("bad client public key"))?;
+        let mut secret = SecretBytes([0u8; 32]);
+        self.rng.fill(&mut secret.0);
+        let q_s = x25519::public_key(&secret.0);
+        let k = x25519::shared(&secret.0, &q_c).ok_or(Error::Protocol("low-order client key"))?;
+        Ok((q_s, SecretBytes(k)))
     }
 
     fn userauth(
@@ -947,7 +1158,7 @@ impl Server {
             started: false,
             sent_eof: false,
             sent_close: false,
-            pending: Vec::new(),
+            pending: VecDeque::new(),
             exit_code: None,
         });
         let mut w = Writer::new(msg::CHANNEL_OPEN_CONFIRMATION);
@@ -1005,6 +1216,21 @@ impl Server {
             self.send_packet(&w.0, out);
         }
         Ok(())
+    }
+}
+
+/// Messages allowed while a key exchange is in progress (RFC 4253 7.1):
+/// the transport's generic ones (service requests excluded) and KEX ones.
+fn is_kex_message(kind: u8) -> bool {
+    matches!(kind, 1..=4 | 20..=49)
+}
+
+/// An encoded shared secret, wiped when dropped.
+struct SecretVec(Vec<u8>);
+
+impl Drop for SecretVec {
+    fn drop(&mut self) {
+        wipe(&mut self.0);
     }
 }
 
@@ -1294,6 +1520,355 @@ mod tests {
             b"x' authenticated??[2Jroot"
         );
         assert_eq!(log_safe(&[b'a'; 100], &mut b).len(), 32);
+    }
+
+    /// A server past authentication, with a session channel open, as after
+    /// the first key exchange (packets in clear here).
+    fn connected() -> Server {
+        let mut s = Server::new([1; 32], [2; 32], Vec::new());
+        s.phase = Phase::Connected;
+        s.session_id = Some([3; 32]);
+        s.strict = true;
+        let mut open = Writer::default();
+        open.string(b"session").u32(5).u32(1 << 20).u32(32768);
+        s.channel_open(&mut Reader::new(&open.0), &mut Vec::new())
+            .unwrap();
+        s
+    }
+
+    /// The client's KEXINIT payload offering `kex`.
+    fn kexinit_payload(kex: &[u8]) -> Vec<u8> {
+        let packet = client_kexinit(kex);
+        let pad = packet[4] as usize;
+        packet[5..packet.len() - pad].to_vec()
+    }
+
+    /// The message numbers of the plaintext packets at the start of `out`
+    /// (it stops where encrypted ones begin to look malformed).
+    fn kinds(out: &[u8]) -> Vec<u8> {
+        let mut kinds = Vec::new();
+        let mut rest = out;
+        while rest.len() >= 6 {
+            let len = u32::from_be_bytes(rest[..4].try_into().unwrap()) as usize;
+            let Some(next) = rest.get(4 + len..) else {
+                break;
+            };
+            kinds.push(rest[5]);
+            rest = next;
+        }
+        kinds
+    }
+
+    /// ADR 0068: between the server's KEXINIT and its NEWKEYS, replies and
+    /// channel data wait (RFC 4253 7.1) and leave once the exchange is done.
+    #[test]
+    fn a_rekey_holds_other_messages_back_until_newkeys() {
+        let mut s = connected();
+        let (mut out, mut ev) = (Vec::new(), Vec::new());
+        // The packet that reaches the limit goes, then our KEXINIT; later
+        // data waits for the exchange.
+        s.sent_bytes = REKEY_BYTES - 1;
+        s.send_data(b"hello", &mut out);
+        assert_eq!(kinds(&out), alloc::vec![msg::CHANNEL_DATA, msg::KEXINIT]);
+        s.send_data(b"again", &mut out);
+        assert_eq!(kinds(&out).len(), 2, "data waits for the exchange");
+        assert_eq!(s.pending_len(), 5);
+        out.clear();
+        // The client asks something before it sees our KEXINIT.
+        let mut global = Writer::new(msg::GLOBAL_REQUEST);
+        global.string(b"keepalive@openssh.com").bool(true);
+        s.handle(&global.0, &mut out, &mut ev).unwrap();
+        s.exit(7, &mut out);
+        assert!(out.is_empty(), "the reply and the exit wait");
+        // Its KEXINIT (without the strict marker, as OpenSSH sends it on a
+        // re-exchange) and its key.
+        s.handle(&kexinit_payload(b"curve25519-sha256"), &mut out, &mut ev)
+            .unwrap();
+        let mut init = Writer::new(msg::KEX_ECDH_INIT);
+        init.string(&x25519::public_key(&[9; 32]));
+        s.handle(&init.0, &mut out, &mut ev).unwrap();
+        assert_eq!(kinds(&out)[..2], [msg::KEX_ECDH_REPLY, msg::NEWKEYS]);
+        // After our NEWKEYS (sequence restarted, strict KEX): the reply,
+        // then the data, then exit-status, EOF and close.
+        assert!(s.deferred.is_empty());
+        assert_eq!(s.pending_len(), 0);
+        assert_eq!(
+            s.send_seq, 5,
+            "REQUEST_FAILURE, data, exit-status, EOF, close"
+        );
+        assert_eq!(s.sent_bytes, 1 + 14 + 25 + 5 + 5);
+        s.handle(&[msg::NEWKEYS], &mut out, &mut ev).unwrap();
+        assert!(s.kex.is_none() && s.recv.is_some());
+        assert_eq!((s.recv_seq, s.recv_bytes), (0, 0));
+    }
+
+    /// Dropbear 2026.92: a peer that keeps sending instead of answering a
+    /// re-exchange grew the server's memory without bound. Here it is
+    /// disconnected after `MAX_DEFERRED` held replies.
+    #[test]
+    fn an_unanswered_rekey_is_bounded() {
+        let mut s = connected();
+        let (mut out, mut ev) = (Vec::new(), Vec::new());
+        s.recv_seq = REKEY_PACKETS;
+        s.rekey_if_due(&mut out);
+        let mut global = Writer::new(msg::GLOBAL_REQUEST);
+        global.string(b"x").bool(true);
+        for _ in 0..MAX_DEFERRED {
+            s.handle(&global.0, &mut out, &mut ev).unwrap();
+        }
+        assert!(!s.is_closed());
+        assert_eq!(s.deferred.len(), MAX_DEFERRED);
+        out.clear();
+        s.handle(&global.0, &mut out, &mut ev).unwrap();
+        assert!(s.is_closed());
+        assert_eq!(kinds(&out), alloc::vec![msg::DISCONNECT]);
+    }
+
+    /// Once the client sent its KEXINIT, anything but transport and KEX
+    /// messages before its NEWKEYS breaks the protocol, and a second
+    /// KEXINIT too.
+    #[test]
+    fn a_client_rekey_allows_only_kex_messages() {
+        let kexinit = kexinit_payload(b"mlkem768x25519-sha256,curve25519-sha256");
+        let mut s = connected();
+        let (mut out, mut ev) = (Vec::new(), Vec::new());
+        s.handle(&kexinit, &mut out, &mut ev).unwrap();
+        assert_eq!(kinds(&out), alloc::vec![msg::KEXINIT], "ours answers");
+        assert_eq!(s.kex.as_ref().unwrap().method, Method::MlKem768X25519);
+        s.handle(&[msg::IGNORE, 0, 0, 0, 0], &mut out, &mut ev)
+            .unwrap();
+        let mut data = Writer::new(msg::CHANNEL_DATA);
+        data.u32(0).string(b"typed");
+        assert_eq!(
+            s.handle(&data.0, &mut out, &mut ev),
+            Err(Error::Protocol("unexpected message during key exchange"))
+        );
+        let mut s = connected();
+        s.handle(&kexinit, &mut out, &mut ev).unwrap();
+        assert_eq!(
+            s.handle(&kexinit, &mut out, &mut ev),
+            Err(Error::Protocol("unexpected KEXINIT"))
+        );
+        // An ML-KEM key failing the FIPS 203 check, or of the wrong size.
+        for key in [
+            &[0xff; MLKEM_EK_LEN + 32][..],
+            &[0; MLKEM_EK_LEN + 31],
+            &[0; 32],
+        ] {
+            let mut s = connected();
+            s.handle(&kexinit, &mut out, &mut ev).unwrap();
+            let mut init = Writer::new(msg::KEX_ECDH_INIT);
+            init.string(key);
+            assert_eq!(
+                s.handle(&init.0, &mut out, &mut ev),
+                Err(Error::Protocol("bad ML-KEM client key"))
+            );
+        }
+    }
+
+    /// Audit of ADR 0068, I4: before authentication a re-exchange only
+    /// makes the server compute; the client may not start one.
+    #[test]
+    fn no_client_rekey_before_authentication() {
+        let mut s = connected();
+        s.phase = Phase::Auth;
+        let (mut out, mut ev) = (Vec::new(), Vec::new());
+        assert_eq!(
+            s.handle(&kexinit_payload(b"curve25519-sha256"), &mut out, &mut ev),
+            Err(Error::Protocol("key re-exchange before authentication"))
+        );
+        assert!(out.is_empty());
+    }
+
+    /// Audit of ADR 0068, L2: drawing an exchange's secrets ratchets the
+    /// generator, so its later state does not give them back.
+    #[test]
+    fn a_key_exchange_ratchets_the_generator() {
+        let mut s = connected();
+        let (mut out, mut ev) = (Vec::new(), Vec::new());
+        s.handle(&kexinit_payload(b"curve25519-sha256"), &mut out, &mut ev)
+            .unwrap();
+        let mut init = Writer::new(msg::KEX_ECDH_INIT);
+        init.string(&x25519::public_key(&[9; 32]));
+        s.handle(&init.0, &mut out, &mut ev).unwrap();
+        // Without the ratchet the server's generator would still be the
+        // seed's stream, a few blocks on.
+        let mut stream = [0u8; 4096];
+        Rng::new([2; 32]).fill(&mut stream);
+        let mut next = [0u8; 64];
+        s.rng.fill(&mut next);
+        assert!(!stream.windows(64).any(|w| w == next));
+    }
+
+    /// Random packets through `feed`, in clear before the first NEWKEYS:
+    /// framing, the KEXINIT lists, key exchanges with keys of the right
+    /// sizes (so X25519, ML-KEM and the host signature run), then what the
+    /// encrypted side makes of packets in clear (audit of ADR 0068, L4).
+    #[test]
+    fn random_packets_through_feed_never_panic() {
+        extern crate std;
+        let rounds: u64 = std::env::var("SSH_FUZZ_ITERATIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2_000)
+            / 10;
+        let mut x = 0xD1B5_4A32_D192_ED03u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let frame = |payload: &[u8], pad: usize| {
+            let mut p = ((1 + payload.len() + pad) as u32).to_be_bytes().to_vec();
+            p.push(pad as u8);
+            p.extend_from_slice(payload);
+            p.extend(core::iter::repeat_n(0, pad));
+            p
+        };
+        const KEX_LISTS: &[&[u8]] = &[
+            b"mlkem768x25519-sha256,kex-strict-c-v00@openssh.com",
+            b"curve25519-sha256,kex-strict-c-v00@openssh.com",
+            b"curve25519-sha256",
+            b"x,y",
+        ];
+        for _ in 0..rounds.max(1) {
+            let mut s = Server::new([1; 32], [2; 32], alloc::vec![[4; 32]]);
+            let (mut out, mut ev) = (Vec::new(), Vec::new());
+            s.start(&mut out);
+            let mut input = b"SSH-2.0-fuzz\r\n".to_vec();
+            let r = next();
+            input.extend(client_kexinit(KEX_LISTS[(r % 4) as usize]));
+            let key_len = [32, MLKEM_EK_LEN + 32, 31, 0][((r >> 8) % 4) as usize];
+            let key: Vec<u8> = (0..key_len).map(|_| next() as u8).collect();
+            let mut init = Writer::new(msg::KEX_ECDH_INIT);
+            init.string(&key);
+            input.extend(frame(&init.0, 4 + (r >> 16) as usize % 8));
+            for _ in 0..(r >> 24) % 6 {
+                let v = next();
+                let body: Vec<u8> = (0..v % 40).map(|_| next() as u8).collect();
+                let pad = (v >> 32) as usize % 12;
+                let mut p = frame(&[&[(v >> 40) as u8][..], &body].concat(), pad);
+                if v >> 63 == 1 {
+                    // A broken length or padding.
+                    let at = (v >> 48) as usize % p.len();
+                    p[at] ^= 1 << ((v >> 56) % 8);
+                }
+                input.extend(p);
+            }
+            // Fed in random pieces.
+            let mut rest = &input[..];
+            while !rest.is_empty() {
+                let n = (1 + next() % 300) as usize;
+                let (a, b) = rest.split_at(n.min(rest.len()));
+                if s.feed(a, &mut out, &mut ev).is_err() || s.is_closed() {
+                    break;
+                }
+                rest = b;
+            }
+        }
+    }
+
+    /// Random messages in every phase never panic: the parser runs before
+    /// authentication (ADR 0025 "Exposure"). `SSH_FUZZ_ITERATIONS` runs
+    /// longer.
+    #[test]
+    fn random_messages_never_panic() {
+        extern crate std;
+        let rounds: u64 = std::env::var("SSH_FUZZ_ITERATIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20_000);
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        const KINDS: &[u8] = &[
+            1, 2, 3, 4, 5, 7, 20, 21, 30, 50, 80, 90, 93, 94, 96, 97, 98, 255,
+        ];
+        const NAMES: &[&[u8]] = &[
+            b"session",
+            b"exec",
+            b"shell",
+            b"pty-req",
+            b"env",
+            b"window-change",
+            b"publickey",
+            b"none",
+            b"ssh-userauth",
+            b"ssh-connection",
+            b"ssh-ed25519",
+            b"curve25519-sha256",
+            b"mlkem768x25519-sha256",
+            b"kex-strict-c-v00@openssh.com",
+            b"chacha20-poly1305@openssh.com",
+        ];
+        for round in 0..rounds {
+            let mut s = match round % 4 {
+                0 => {
+                    let mut s = Server::new([1; 32], [2; 32], alloc::vec![[4; 32]]);
+                    s.start(&mut Vec::new());
+                    s.phase = Phase::Kex;
+                    s
+                }
+                1 => {
+                    let mut s = connected();
+                    s.phase = Phase::Auth;
+                    s.channel = None;
+                    s
+                }
+                2 => connected(),
+                _ => {
+                    let mut s = connected();
+                    s.sent_bytes = REKEY_BYTES;
+                    s.rekey_if_due(&mut Vec::new());
+                    s
+                }
+            };
+            let (mut out, mut ev) = (Vec::new(), Vec::new());
+            for _ in 0..8 {
+                let r = next();
+                let mut w = Writer::new(KINDS[(r % KINDS.len() as u64) as usize]);
+                for f in 0..(r >> 8) % 7 {
+                    let v = next();
+                    match (v >> 60) % 5 {
+                        0 => {
+                            w.u32(v as u32 % 4);
+                        }
+                        1 => {
+                            w.string(NAMES[(v % NAMES.len() as u64) as usize]);
+                        }
+                        2 => {
+                            let mut list = Vec::new();
+                            for i in 0..1 + v % 3 {
+                                if i > 0 {
+                                    list.push(b',');
+                                }
+                                list.extend_from_slice(
+                                    NAMES[((v >> (8 * i)) % NAMES.len() as u64) as usize],
+                                );
+                            }
+                            w.string(&list);
+                        }
+                        3 => {
+                            let len = [0, 1, 31, 32, 33, 64, 1216, 0xffff_ffff][(v % 8) as usize];
+                            w.u32(len);
+                            w.bytes(&v.to_be_bytes()[..(f as usize % 8)]);
+                        }
+                        _ => {
+                            w.bool(v & 1 == 1);
+                        }
+                    }
+                }
+                if s.handle(&w.0, &mut out, &mut ev).is_err() || s.is_closed() {
+                    break;
+                }
+                s.send_data(b"out\n", &mut out);
+            }
+        }
     }
 
     /// Incident 0044: a connection's copy of the host key ends with it.
