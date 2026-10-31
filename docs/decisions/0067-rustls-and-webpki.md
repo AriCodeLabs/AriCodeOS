@@ -120,8 +120,18 @@ needs `getrandom`, so it cannot run in AriCodeOS as it is.
      CBC, RC4, static RSA key exchange, TLS 1.0 and 1.1 are not possible.
    - TLS 1.2 requires the extended master secret (RFC 7627). The owner
      approved TLS 1.2 described as "with extended master secret".
-     rustls supports it but does not require it by default; the setting
-     follows the approval.
+     rustls supports it but does not require it by default. Told of the
+     difference and its cost, the owner left the choice to the best for
+     speed and security (2026-10-31). It stays required:
+     - Speed is the same either way.
+     - Without it, a TLS 1.2 session can share its master secret with
+       another one (the triple handshake). That needs resumption or
+       renegotiation, which this client does not do today. Requiring it
+       now means adding resumption later cannot reopen the attack.
+     - RFC 9325 (BCP 195) asks TLS 1.2 clients to use it.
+     - The measured cost is badssl.com's deliberately old hosts and
+       `1.1.1.1`, which another check refused anyway (see "TLS: real
+       servers").
    - Key exchange: X25519 first, then P-256 and P-384, so a server
      preferring a NIST curve answers with a HelloRetryRequest, which the
      old client could not follow.
