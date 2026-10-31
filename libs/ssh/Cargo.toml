@@ -3,7 +3,10 @@ name = "aricode-ssh"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "SSH-2 server protocol as a state machine: curve25519-sha256, ssh-ed25519, chacha20-poly1305@openssh.com, public-key auth and one session channel (no I/O)"
+description = "SSH-2 server protocol as a state machine: mlkem768x25519-sha256 or curve25519-sha256 with re-exchange, ssh-ed25519, chacha20-poly1305@openssh.com, public-key auth and one session channel (no I/O)"
 
 [dependencies]
 aricode-crypto = { path = "../crypto" }
+# ML-KEM-768 for the post-quantum hybrid key exchange (ADR 0068).
+# `hazmat` exposes encapsulation with our own randomness.
+ml-kem = { version = "0.3.3", default-features = false, features = ["alloc", "hazmat"] }
