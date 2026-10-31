@@ -494,7 +494,65 @@ pub fn system_power(system: Handle, action: u64) -> Error {
     }
 }
 
-/// Helper for test programs: writes to the console, ignoring errors.
+/// Writes to the console, ignoring errors. Text longer than one write
+/// takes goes in pieces of at most `CONSOLE_WRITE_MAX` bytes, cut between
+/// UTF-8 characters, since the kernel takes only valid UTF-8 in each
+/// (incident 0054: a longer write was refused whole, and nothing said so).
 pub fn print(bytes: &[u8]) {
-    let _ = console_write(Handle::CONSOLE, bytes);
+    for piece in console_pieces(bytes) {
+        let _ = console_write(Handle::CONSOLE, piece);
+    }
+}
+
+/// `bytes` in pieces of at most `CONSOLE_WRITE_MAX` bytes, each ending at
+/// a UTF-8 character boundary when one is within reach.
+fn console_pieces(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let mut rest = bytes;
+    core::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+        let max = rest.len().min(aricode_abi::CONSOLE_WRITE_MAX);
+        // Back up over continuation bytes (10xxxxxx) to a character's
+        // start; a run of more than 3 is no UTF-8, so cut anyway.
+        let mut n = max;
+        while n < rest.len() && max - n < 4 && n > 0 && rest[n] & 0xC0 == 0x80 {
+            n -= 1;
+        }
+        if n == 0 || (n < rest.len() && rest[n] & 0xC0 == 0x80) {
+            n = max;
+        }
+        let (piece, tail) = rest.split_at(n);
+        rest = tail;
+        Some(piece)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+    use super::*;
+    use std::vec::Vec;
+
+    /// Incident 0054: every piece fits one console write, ends between
+    /// UTF-8 characters, and together they are the text.
+    #[test]
+    fn console_pieces_respect_the_limit_and_utf8() {
+        let max = aricode_abi::CONSOLE_WRITE_MAX;
+        let ascii = std::vec![b'a'; max * 2 + 5];
+        let lens: Vec<usize> = console_pieces(&ascii).map(<[u8]>::len).collect();
+        assert_eq!(lens, [max, max, 5]);
+        // A three-byte character across the limit moves whole to the next.
+        let mut text = std::vec![b'a'; max - 1];
+        text.extend_from_slice("€bc".as_bytes());
+        let pieces: Vec<&[u8]> = console_pieces(&text).collect();
+        assert_eq!(pieces[0].len(), max - 1);
+        assert!(pieces.iter().all(|p| core::str::from_utf8(p).is_ok()));
+        assert_eq!(pieces.concat(), text);
+        assert_eq!(console_pieces(b"").count(), 0);
+        // No UTF-8 at all: cut at the limit anyway, nothing lost.
+        let junk = std::vec![0x80u8; max + 10];
+        let lens: Vec<usize> = console_pieces(&junk).map(<[u8]>::len).collect();
+        assert_eq!(lens, [max, 10]);
+    }
 }

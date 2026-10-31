@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
 //! HTTP and HTTPS GET for AriCodeOS programs. `http://` goes straight over
-//! the TCP service; `https://` runs TLS 1.3 (`aricode-tls`) on top, with
-//! the certificate checked against the embedded roots
-//! (`aricode_x509::roots::DEFAULT`), the host name and, if the kernel has
-//! a real-time clock, the validity dates. Needs `alloc` (the TLS client
+//! the TCP service; `https://` runs TLS 1.3 or 1.2 (`aricode-tls`, rustls)
+//! on top, with the certificate checked against the embedded roots
+//! (Mozilla's store, `aricode_x509::roots::default`), the host name and
+//! the validity dates (at the clock, or without a trusted one at least
+//! the release's floor). Needs `alloc` (the TLS client
 //! buffers records), so it lives outside `aricode-sys`.
 //!
 //! Every download has two time limits (incident 0009): `timeout_ms`, the
@@ -113,7 +114,7 @@ impl Tcp for Socket<'_> {
 
 /// The TLS record layer of a stream (`aricode_tls::Client` in programs).
 trait Records {
-    fn start(&mut self, out: &mut Vec<u8>);
+    fn start(&mut self, out: &mut Vec<u8>) -> Result<(), aricode_tls::Error>;
     fn is_connected(&self) -> bool;
     fn feed(
         &mut self,
@@ -126,7 +127,7 @@ trait Records {
 }
 
 impl Records for Client {
-    fn start(&mut self, out: &mut Vec<u8>) {
+    fn start(&mut self, out: &mut Vec<u8>) -> Result<(), aricode_tls::Error> {
         Client::start(self, out)
     }
     fn is_connected(&self) -> bool {
@@ -218,11 +219,13 @@ impl<T: Tcp, R: Records> Stream<'_, T, R> {
     /// `Deadline(Handshake)` rather than holding the caller.
     fn handshake(&mut self) -> Result<(), HttpsError> {
         let mut out = Vec::new();
+        // An invalid server name fails here, not after a reply timeout.
         self.tls
             .as_mut()
             .expect("TLS stream")
             .client
-            .start(&mut out);
+            .start(&mut out)
+            .map_err(HttpsError::Tls)?;
         self.send_raw(&out).map_err(|e| self.failure(e))?;
         while !self.tls.as_ref().expect("TLS stream").client.is_connected() {
             if self.budget.remaining_ms() == 0 {
@@ -452,10 +455,13 @@ fn get_once(
         .map_err(|e| before_http(budget, Phase::Connect, HttpsError::Connect(e)))?;
     let tls = url.secure.then(|| {
         let now = aricode_x509::check_time(sys::time::unix_seconds(system));
-        let mut client = Client::new(url.host, seed.0, aricode_x509::roots::DEFAULT.to_vec(), now);
-        for root in extra_roots {
-            client.add_root(root.clone());
-        }
+        let client = Client::new(
+            url.host,
+            seed.0,
+            aricode_tls::mozilla_roots(),
+            extra_roots,
+            now,
+        );
         Tls {
             client,
             plain: Vec::new(),
@@ -709,7 +715,9 @@ mod tests {
     }
 
     impl Records for Silent {
-        fn start(&mut self, _: &mut Vec<u8>) {}
+        fn start(&mut self, _: &mut Vec<u8>) -> Result<(), aricode_tls::Error> {
+            Ok(())
+        }
         fn is_connected(&self) -> bool {
             self.connected
         }
@@ -729,7 +737,9 @@ mod tests {
     struct Plain;
 
     impl Records for Plain {
-        fn start(&mut self, _: &mut Vec<u8>) {}
+        fn start(&mut self, _: &mut Vec<u8>) -> Result<(), aricode_tls::Error> {
+            Ok(())
+        }
         fn is_connected(&self) -> bool {
             true
         }

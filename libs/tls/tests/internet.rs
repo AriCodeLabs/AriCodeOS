@@ -16,14 +16,15 @@ fn get(host: &str) -> Result<String, String> {
     let mut c = Client::new(
         host,
         [7; 32],
-        aricode_x509::roots::DEFAULT.to_vec(),
-        Some(now),
+        aricode_tls::mozilla_roots(),
+        &[],
+        aricode_x509::ValidityTime::Clock(now),
     );
     let mut sock = TcpStream::connect((host, 443)).map_err(|e| e.to_string())?;
     sock.set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
     let mut out = Vec::new();
-    c.start(&mut out);
+    c.start(&mut out).map_err(|e| format!("{e:?}"))?;
     sock.write_all(&out).unwrap();
     let mut body = Vec::new();
     let mut buf = [0u8; 8192];

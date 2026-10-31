@@ -278,9 +278,9 @@ and always on the USB stick itself or a dedicated USB drive.
 - The shell edits the line like a terminal: Left/Right, Home/End
   (Ctrl-A/Ctrl-E), insert and delete anywhere (Backspace, Delete), Ctrl-U to
   clear, Up/Down for the history.
-- HTTPS works with `http https://...` (TLS 1.3, ADR 0026): the server
-  certificate is checked against embedded roots, the host name and the
-  date from the real-time clock (`rtc:` line at boot). A private CA can be
+- HTTPS works with `http https://...` (TLS 1.3 or 1.2, ADR 0067): the
+  server certificate is checked against Mozilla's roots, the host name and
+  the date from the real-time clock (`rtc:` line at boot). A private CA can be
   trusted by saving its certificate (DER) as `trusted_ca.der` in AriFS.
 
 ## SSH into the laptop (ADR 0025)

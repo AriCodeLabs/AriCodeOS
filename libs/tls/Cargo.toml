@@ -3,8 +3,23 @@ name = "aricode-tls"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "TLS 1.3 client as a state machine: x25519, ChaCha20-Poly1305 and AES-GCM suites, X.509 server authentication (no I/O)"
+description = "TLS client over rustls's unbuffered API: aricode-crypto provider, rustls-webpki with this system's certificate policy (no I/O, no_std)"
 
+# ADR 0067: rustls and rustls-webpki without std or their own crypto
+# providers; RustCrypto's p256 and p384 for the NIST key exchanges only.
 [dependencies]
 aricode-crypto = { path = "../crypto" }
+aricode-sync = { path = "../sync" }
 aricode-x509 = { path = "../x509" }
+rustls = { version = "0.23.46", default-features = false, features = ["tls12"] }
+webpki = { package = "rustls-webpki", version = "0.103.16", default-features = false, features = ["alloc"] }
+p256 = { version = "0.13.2", default-features = false, features = ["ecdh"] }
+p384 = { version = "0.13.1", default-features = false, features = ["ecdh"] }
+rand_core = { version = "0.6.4", default-features = false }
+
+# Host tests only, never built for AriCodeOS: a rustls server (with `ring`
+# to sign) for the client to talk to, and `rcgen` to make its certificates
+# at run time, so no private key is committed.
+[dev-dependencies]
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = { version = "0.13", default-features = false, features = ["ring", "crypto"] }

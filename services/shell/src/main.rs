@@ -1044,6 +1044,10 @@ fn tls_error(e: aricode_tls::Error) -> &'static [u8] {
             b"certificate outside the names its issuer may vouch for"
         }
         E::Certificate(X::Distrusted) => b"certificate uses a key that is no longer trusted",
+        E::Certificate(X::WildcardOverSuffix) => {
+            b"certificate names this host only through a wildcard over a public suffix"
+        }
+        E::Certificate(X::NotCa) => b"certificate chain misuses a CA or a leaf certificate",
         E::Certificate(_) => b"certificate rejected",
         E::Alert(_) => b"the server sent an alert",
         E::Unsupported(_) => b"the server needs an unsupported TLS feature",
