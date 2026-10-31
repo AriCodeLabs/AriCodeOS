@@ -409,7 +409,8 @@ pub struct Scenario {
     /// HTTPS servers on the host (`openssl s_server -www`): one with a
     /// certificate for `10.0.2.2` from a test CA installed in AriFS as
     /// `trusted_ca.der`, one self-signed and untrusted, on ports chosen per
-    /// run: [`HTTPS_PORT`] and [`HTTPS_UNTRUSTED_PORT`].
+    /// run: [`HTTPS_PORT`] and [`HTTPS_UNTRUSTED_PORT`], and the trusted one
+    /// again with TLS 1.2 only on [`HTTPS_TLS12_PORT`].
     #[serde(default)]
     pub host_https: bool,
     /// An update source (ADR 0029) published into the scenario's directory
@@ -529,6 +530,7 @@ pub struct Scenario {
 pub const UPDATE_PORT: &str = "{update_port}";
 pub const HTTPS_PORT: &str = "{https_port}";
 pub const HTTPS_UNTRUSTED_PORT: &str = "{https_untrusted_port}";
+pub const HTTPS_TLS12_PORT: &str = "{https_tls12_port}";
 
 /// `text` with each placeholder of `values` replaced by its port.
 pub fn fill(text: &str, values: &[(&str, u16)]) -> String {
@@ -682,6 +684,7 @@ impl Scenario {
             (UPDATE_PORT, self.host_update.is_some(), "[host_update]"),
             (HTTPS_PORT, self.host_https, "host_https = true"),
             (HTTPS_UNTRUSTED_PORT, self.host_https, "host_https = true"),
+            (HTTPS_TLS12_PORT, self.host_https, "host_https = true"),
         ] {
             if !provided && self.texts().any(|t| t.contains(placeholder)) {
                 return Err(format!("{placeholder} needs {field}"));

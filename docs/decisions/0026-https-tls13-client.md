@@ -1,7 +1,9 @@
 # ADR 0026: HTTPS with a TLS 1.3 client and X.509 verification
 
 - **Date:** 2026-10-11
-- **Status:** Accepted
+- **Status:** Accepted. The client and the chain verification were
+  replaced by rustls and rustls-webpki in ADR 0067, which also enables
+  TLS 1.2 and replaces the 17 roots with Mozilla's store.
 
 ## Context
 

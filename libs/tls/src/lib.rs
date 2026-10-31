@@ -1,40 +1,34 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
-//! TLS 1.3 client (RFC 8446) as a state machine: bytes from the server go
-//! in through [`Client::feed`], bytes for the server and [`Event`]s come
-//! out. No I/O and no threads, so it runs the same in AriCodeOS and in host
-//! tests against `openssl s_server`.
+//! TLS client (ADR 0067): rustls driven through its unbuffered API, on
+//! `aricode-crypto` ([`provider`]) and `rustls-webpki` with this system's
+//! certificate policy ([`verify`]). Bytes from the server go in through
+//! [`Client::feed`]; bytes for the server and [`Event`]s come out. No I/O
+//! and no threads, so it runs the same in AriCodeOS and in host tests.
 //!
-//! Supported (and only): TLS 1.3, key exchange x25519, cipher suites
-//! TLS_CHACHA20_POLY1305_SHA256, TLS_AES_128_GCM_SHA256 and
-//! TLS_AES_256_GCM_SHA384, server signatures ecdsa_secp256r1_sha256,
-//! ecdsa_secp384r1_sha384, rsa_pss_rsae_sha256/384/512 and ed25519, with
-//! the certificate chain checked by `aricode-x509`. No resumption, no
-//! early data, no client certificates (an empty Certificate answers a
-//! CertificateRequest), no HelloRetryRequest.
+//! TLS 1.3 and TLS 1.2 (rustls's subset: ECDHE with AEADs, extended master
+//! secret); key exchange X25519, P-256 or P-384; AES-GCM and
+//! ChaCha20-Poly1305; server certificates verified against the given roots.
+//! No client certificates (rustls answers a request with none), no session
+//! resumption across connections, no early data.
 
 #![no_std]
 
 extern crate alloc;
-
-pub mod handshake;
-pub mod keys;
-pub mod record;
 #[cfg(test)]
-mod rfc8448;
+extern crate std;
 
-use alloc::string::String;
+pub mod provider;
+pub mod verify;
+
+use alloc::boxed::Box;
+use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
-use aricode_crypto::chacha20::Rng;
-use aricode_crypto::{ct_eq, x25519, SecretBytes};
-use keys::{Schedule, Secret, Suite};
-use record::{Protection, ALERT, APPLICATION_DATA, CHANGE_CIPHER_SPEC, HANDSHAKE};
-
-/// Largest handshake message we buffer (certificate chains included).
-const MAX_HANDSHAKE: usize = 1 << 17;
-
-const ALERT_CLOSE_NOTIFY: u8 = 0;
-const ALERT_USER_CANCELED: u8 = 90;
+use rustls::client::UnbufferedClientConnection;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::unbuffered::{ConnectionState, EncodeError, EncryptError, UnbufferedStatus};
+use rustls::ClientConfig;
 
 /// What happened, for the caller to act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,145 +48,139 @@ pub enum Error {
     Protocol(&'static str),
     /// The server sent this fatal alert.
     Alert(u8),
-    /// The certificate chain was rejected.
+    /// The certificate chain was refused.
     Certificate(aricode_x509::Error),
-    /// The server wants something we do not implement.
+    /// The server and this client share no version, suite or group.
     Unsupported(&'static str),
-    /// A record failed authentication (tampering or desynchronization).
+    /// A record failed authentication.
     Decrypt,
 }
 
-impl Error {
-    /// The alert we send the server for this error.
-    fn alert(self, connected: bool) -> Option<u8> {
-        use aricode_x509::Error as X;
-        Some(match self {
-            Error::Alert(_) => return None,
-            Error::Decrypt => 20,                       // bad_record_mac
-            Error::Certificate(X::UnknownIssuer) => 48, // unknown_ca
-            Error::Certificate(X::Expired | X::NotYetValid) => 45, // certificate_expired
-            Error::Certificate(X::Unsupported | X::WrongPurpose) => 43, // unsupported_certificate
-            Error::Certificate(_) => 42,                // bad_certificate
-            Error::Protocol(_) if connected => 10,      // unexpected_message
-            Error::Protocol(_) | Error::Unsupported(_) => 40, // handshake_failure
-        })
+/// The time rustls is told it is: the policy's moment (the clock, or the
+/// floor without a trusted one). Certificates are checked by
+/// [`verify::Verifier`] with the full policy.
+#[derive(Debug)]
+struct PolicyTime(u64);
+
+impl rustls::time_provider::TimeProvider for PolicyTime {
+    fn current_time(&self) -> Option<UnixTime> {
+        Some(UnixTime::since_unix_epoch(core::time::Duration::from_secs(
+            self.0,
+        )))
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum State {
-    Idle,
-    WaitServerHello,
-    WaitEncryptedExtensions,
-    WaitCertificate,
-    WaitCertificateVerify,
-    WaitFinished,
-    Connected,
-    Closed,
+/// Bytes of server records held while rustls waits for the rest of a
+/// handshake message: the largest message (2^16 - 1 bytes) plus one whole
+/// record. rustls keeps every fragment of a message in the caller's
+/// buffer, headers and padding included, so without a limit a server
+/// could fill the program's heap with tiny fragments before it is
+/// authenticated (audit of ADR 0067, M1).
+pub const MAX_INCOMING: usize = 0xFFFF + 18_437;
+
+/// The default trust anchors (Mozilla's, `aricode_x509::roots`), parsed
+/// once per program. The certificates stay where the binary holds them:
+/// only this small table of references is allocated, once, and kept.
+pub fn mozilla_roots() -> &'static [CertificateDer<'static>] {
+    static ROOTS: aricode_sync::SpinLock<Option<&'static [CertificateDer<'static>]>> =
+        aricode_sync::SpinLock::new(None);
+    let mut roots = ROOTS.lock();
+    roots.get_or_insert_with(|| {
+        Box::leak(
+            aricode_x509::roots::default()
+                .map(CertificateDer::from_slice)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        )
+    })
 }
 
-/// Secrets known after the ServerHello.
-struct Handshake {
-    schedule: Schedule,
-    client: Secret,
-    server: Secret,
-}
-
+/// A TLS connection to one server.
 pub struct Client {
-    state: State,
-    host: String,
-    rng: Rng,
-    roots: Vec<&'static [u8]>,
-    extra_roots: Vec<Vec<u8>>,
-    now: aricode_x509::ValidityTime,
-    /// Tests only: accept a leaf that is itself a configured root, whatever
-    /// its names. The RFC 8448 trace's server certificate names its host
-    /// only in the subject CN, which no host matches (ADR 0058).
-    #[cfg(test)]
-    trust_pinned_leaf: bool,
-    secret_key: [u8; 32],
-    session_id: Vec<u8>,
-    /// Handshake messages so far (hashed when a secret needs them).
-    transcript: Vec<u8>,
-    /// Received bytes not yet forming a whole record.
-    input: Vec<u8>,
-    /// Handshake bytes not yet forming a whole message.
-    pending: Vec<u8>,
-    /// Negotiated in the ServerHello (meaningless before).
-    suite: Suite,
-    hs: Option<Handshake>,
-    leaf: Vec<u8>,
-    cert_request: Option<Vec<u8>>,
-    recv: Option<Protection>,
-    send: Option<Protection>,
-    /// Application traffic secrets, for KeyUpdate.
-    recv_secret: Option<Secret>,
-    send_secret: Option<Secret>,
-    sent_ccs: bool,
-    sent_close: bool,
+    conn: Option<UnbufferedClientConnection>,
+    verifier: Arc<verify::Verifier>,
+    /// Bytes from the server not yet consumed by rustls.
+    incoming: Vec<u8>,
+    /// Events produced outside [`Client::feed`], handed out by the next one.
+    pending: Vec<Event>,
+    connected: bool,
+    closed: bool,
+    /// Why the connection died outside [`Client::feed`], for the next one.
+    failed: Option<Error>,
 }
 
 impl Client {
-    /// `host`: SNI and name to verify; `rng_seed`: 32 fresh random bytes;
-    /// `roots`: trusted roots (DER); `now`: what validity dates are
-    /// checked against (`aricode_x509::check_time`; `Some` Unix seconds is
-    /// a trusted clock, `None` skips them).
+    /// `host`: SNI and name to verify (a DNS name or an IP address);
+    /// `rng_seed`: 32 fresh random bytes, mixed into the generator;
+    /// `roots`: trusted roots ([`mozilla_roots`] by default; ones that do
+    /// not parse are ignored); `extra`: more roots the caller owns (tests,
+    /// user-installed); `now`: what validity dates are checked against
+    /// (`aricode_x509::check_time`).
     pub fn new(
         host: &str,
         rng_seed: [u8; 32],
-        roots: Vec<&'static [u8]>,
-        now: impl Into<aricode_x509::ValidityTime>,
+        roots: &'static [CertificateDer<'static>],
+        extra: &[Vec<u8>],
+        now: aricode_x509::ValidityTime,
     ) -> Self {
-        let now = now.into();
+        let mut seed = aricode_crypto::SecretBytes(rng_seed);
+        provider::reseed(&seed.0);
+        aricode_crypto::wipe(&mut seed.0);
+        // Anchors borrow the static roots; only `extra` is copied.
+        let mut anchors: Vec<_> = roots
+            .iter()
+            .filter_map(|der| webpki::anchor_from_trusted_cert(der).ok())
+            .collect();
+        anchors.extend(extra.iter().filter_map(|der| {
+            webpki::anchor_from_trusted_cert(&CertificateDer::from(der.as_slice()))
+                .ok()
+                .map(|a| a.to_owned())
+        }));
+        let at = match now {
+            aricode_x509::ValidityTime::Clock(t) | aricode_x509::ValidityTime::AtLeast(t) => t,
+        };
+        let verifier = verify::Verifier::new(anchors, now);
+        let conn = ServerName::try_from(host).ok().and_then(|name| {
+            let mut config = ClientConfig::builder_with_details(
+                Arc::new(provider::provider()),
+                Arc::new(PolicyTime(at)),
+            )
+            .with_safe_default_protocol_versions()
+            .ok()?
+            .dangerous()
+            .with_custom_certificate_verifier(verifier.clone())
+            .with_no_client_auth();
+            // TLS 1.2 only with the extended master secret (RFC 7627).
+            config.require_ems = true;
+            UnbufferedClientConnection::new(Arc::new(config), name.to_owned()).ok()
+        });
+        let failed = conn
+            .is_none()
+            .then_some(Error::Protocol("invalid server name"));
         Self {
-            state: State::Idle,
-            host: String::from(host),
-            rng: Rng::new(rng_seed),
-            roots,
-            extra_roots: Vec::new(),
-            #[cfg(test)]
-            trust_pinned_leaf: false,
-            now,
-            secret_key: [0; 32],
-            session_id: Vec::new(),
-            transcript: Vec::new(),
-            input: Vec::new(),
+            conn,
+            verifier,
+            incoming: Vec::new(),
             pending: Vec::new(),
-            suite: Suite::ALL[0],
-            hs: None,
-            leaf: Vec::new(),
-            cert_request: None,
-            recv: None,
-            send: None,
-            recv_secret: None,
-            send_secret: None,
-            sent_ccs: false,
-            sent_close: false,
+            connected: false,
+            closed: failed.is_some(),
+            failed,
         }
     }
 
-    /// An extra trust anchor (tests, user-installed roots).
-    pub fn add_root(&mut self, der: Vec<u8>) {
-        self.extra_roots.push(der);
-    }
-
     pub fn is_connected(&self) -> bool {
-        self.state == State::Connected
+        self.connected && !self.closed
     }
 
-    /// Sends the ClientHello.
-    pub fn start(&mut self, out: &mut Vec<u8>) {
-        let mut random = [0u8; 32];
-        self.rng.fill(&mut random);
-        self.rng.fill(&mut self.secret_key);
-        // A legacy session id makes middleboxes take this for resumption.
-        self.session_id = alloc::vec![0; 32];
-        self.rng.fill(&mut self.session_id);
-        let public = x25519::public_key(&self.secret_key);
-        let hello = handshake::client_hello(&random, &self.session_id, &public, &self.host);
-        self.transcript = hello.clone();
-        record::write_plain(HANDSHAKE, 0x0301, &hello, out);
-        self.state = State::WaitServerHello;
+    /// Writes the ClientHello into `out`.
+    pub fn start(&mut self, out: &mut Vec<u8>) -> Result<(), Error> {
+        if let Some(e) = self.failed {
+            return Err(e);
+        }
+        let mut events = Vec::new();
+        let r = self.drive(out, &mut events, None);
+        self.pending.extend(events);
+        r.inspect_err(|e| self.fail(*e))
     }
 
     /// Processes bytes from the server. On error the connection is dead:
@@ -203,528 +191,222 @@ impl Client {
         out: &mut Vec<u8>,
         events: &mut Vec<Event>,
     ) -> Result<(), Error> {
-        if matches!(self.state, State::Idle | State::Closed) {
+        events.append(&mut self.pending);
+        if let Some(e) = self.failed {
+            return Err(e);
+        }
+        if self.closed {
             return Err(Error::Protocol("connection not open"));
         }
-        self.input.extend_from_slice(input);
-        let r = self.records(out, events);
-        if let Err(e) = r {
-            if let Some(alert) = e.alert(self.state == State::Connected) {
-                self.send_alert(2, alert, out);
-            }
-            self.state = State::Closed;
-            self.input.clear();
+        if self.incoming.len() + input.len() > MAX_INCOMING {
+            let e = Error::Protocol("handshake message spread over too many bytes");
+            self.fail(e);
+            return Err(e);
         }
-        r
+        self.incoming.extend_from_slice(input);
+        self.drive(out, events, None).inspect_err(|e| self.fail(*e))
     }
 
     /// Sends application data (ignored before [`Event::Connected`] or
     /// after [`Client::close`]).
     pub fn send(&mut self, data: &[u8], out: &mut Vec<u8>) {
-        if self.state != State::Connected || self.sent_close {
+        if !self.is_connected() {
             return;
         }
-        for chunk in data.chunks(record::MAX_PLAINTEXT) {
-            self.send_record(APPLICATION_DATA, chunk, out);
+        let mut events = Vec::new();
+        if let Err(e) = self.drive(out, &mut events, Some(Write::Data(data))) {
+            self.fail(e);
         }
+        self.pending.extend(events);
     }
 
     /// Sends close_notify; nothing more is sent afterwards.
     pub fn close(&mut self, out: &mut Vec<u8>) {
-        if self.state != State::Idle && !self.sent_close {
-            self.send_alert(1, ALERT_CLOSE_NOTIFY, out);
+        if self.connected && !self.closed {
+            let mut events = Vec::new();
+            let _ = self.drive(out, &mut events, Some(Write::Close));
+            self.pending.extend(events);
         }
+        self.closed = true;
     }
 
-    fn send_alert(&mut self, level: u8, description: u8, out: &mut Vec<u8>) {
-        if self.sent_close {
-            return;
-        }
-        self.send_record(ALERT, &[level, description], out);
-        self.sent_close = true;
+    /// Marks the connection dead with `e`, reported by the next call.
+    fn fail(&mut self, e: Error) {
+        self.closed = true;
+        self.failed.get_or_insert(e);
+        self.incoming.clear();
     }
 
-    fn send_record(&mut self, typ: u8, data: &[u8], out: &mut Vec<u8>) {
-        match self.send.as_mut() {
-            Some(p) => {
-                if !self.sent_ccs {
-                    // Middlebox compatibility (RFC 8446 appendix D.4).
-                    record::write_plain(CHANGE_CIPHER_SPEC, 0x0303, &[1], out);
-                    self.sent_ccs = true;
-                }
-                p.seal(typ, data, out);
-            }
-            None => record::write_plain(typ, 0x0303, data, out),
-        }
-    }
-
-    fn records(&mut self, out: &mut Vec<u8>, events: &mut Vec<Event>) -> Result<(), Error> {
-        let mut pos = 0;
-        while self.state != State::Closed && self.input.len() - pos >= record::HEADER_LEN {
-            let header: [u8; record::HEADER_LEN] = self.input[pos..pos + record::HEADER_LEN]
-                .try_into()
-                .unwrap_or_default();
-            let len = u16::from_be_bytes([header[3], header[4]]) as usize;
-            if header[1] != 3 {
-                return Err(Error::Protocol("not a TLS record"));
-            }
-            if len > record::MAX_CIPHERTEXT {
-                return Err(Error::Protocol("record overflow"));
-            }
-            let end = pos + record::HEADER_LEN + len;
-            if self.input.len() < end {
-                break;
-            }
-            let mut body = self.input[pos + record::HEADER_LEN..end].to_vec();
-            pos = end;
-            self.record(&header, &mut body, out, events)?;
-        }
-        self.input.drain(..pos);
-        Ok(())
-    }
-
-    fn record(
+    /// Runs rustls over the bytes received so far until it needs more
+    /// input or, with `write`, until that is encrypted into `out`.
+    fn drive(
         &mut self,
-        header: &[u8; record::HEADER_LEN],
-        body: &mut [u8],
         out: &mut Vec<u8>,
         events: &mut Vec<Event>,
+        mut write: Option<Write<'_>>,
     ) -> Result<(), Error> {
-        let mut typ = header[0];
-        let mut len = body.len();
-        if typ == CHANGE_CIPHER_SPEC {
-            // Accepted (and ignored) only during the handshake.
-            let handshaking = !matches!(self.state, State::Connected | State::Closed);
-            if handshaking && body == [1] {
-                return Ok(());
-            }
-            return Err(Error::Protocol("unexpected ChangeCipherSpec"));
-        }
-        if let Some(recv) = self.recv.as_mut() {
-            if typ != APPLICATION_DATA {
-                return Err(Error::Protocol("unprotected record after the ServerHello"));
-            }
-            (typ, len) = recv.open(header, body)?;
-        } else if len > record::MAX_PLAINTEXT {
-            return Err(Error::Protocol("record overflow"));
-        }
-        let data = &body[..len];
-        if typ != HANDSHAKE && !self.pending.is_empty() {
-            return Err(Error::Protocol("handshake message interrupted"));
-        }
-        match typ {
-            HANDSHAKE => {
-                if data.is_empty() {
-                    return Err(Error::Protocol("empty handshake record"));
-                }
-                self.pending.extend_from_slice(data);
-                self.messages(out, events)
-            }
-            ALERT => self.alert(data, out, events),
-            APPLICATION_DATA if self.state == State::Connected => {
-                if !data.is_empty() {
-                    events.push(Event::Data(data.to_vec()));
-                }
-                Ok(())
-            }
-            _ => Err(Error::Protocol("unexpected record type")),
-        }
-    }
-
-    fn alert(
-        &mut self,
-        data: &[u8],
-        out: &mut Vec<u8>,
-        events: &mut Vec<Event>,
-    ) -> Result<(), Error> {
-        let &[_level, description] = data else {
-            return Err(Error::Protocol("malformed alert"));
+        let Some(conn) = self.conn.as_mut() else {
+            self.closed = true;
+            return Err(Error::Protocol("invalid server name"));
         };
-        match description {
-            ALERT_CLOSE_NOTIFY => {
-                self.send_alert(1, ALERT_CLOSE_NOTIFY, out);
-                self.state = State::Closed;
-                events.push(Event::Closed);
-                Ok(())
-            }
-            ALERT_USER_CANCELED => Ok(()),
-            d => Err(Error::Alert(d)),
-        }
-    }
-
-    fn messages(&mut self, out: &mut Vec<u8>, events: &mut Vec<Event>) -> Result<(), Error> {
-        while self.pending.len() >= 4 {
-            let len = (self.pending[1] as usize) << 16
-                | (self.pending[2] as usize) << 8
-                | self.pending[3] as usize;
-            if len > MAX_HANDSHAKE {
-                return Err(Error::Protocol("handshake message too large"));
-            }
-            if self.pending.len() < 4 + len {
-                break;
-            }
-            let msg: Vec<u8> = self.pending.drain(..4 + len).collect();
-            let key_change = self.message(&msg, out, events)?;
-            // Messages before a key change must end on a record boundary.
-            if key_change && !self.pending.is_empty() {
-                return Err(Error::Protocol(
-                    "data after a key change in the same record",
-                ));
-            }
-            if self.state == State::Closed {
-                break;
-            }
-        }
-        Ok(())
-    }
-
-    /// Handles one handshake message; true if the receive keys changed.
-    fn message(
-        &mut self,
-        msg: &[u8],
-        out: &mut Vec<u8>,
-        events: &mut Vec<Event>,
-    ) -> Result<bool, Error> {
-        let typ = msg[0];
-        let body = &msg[4..];
-        match (self.state, typ) {
-            (State::WaitServerHello, handshake::SERVER_HELLO) => {
-                let sh = handshake::server_hello(body, &self.session_id)?;
-                // The ephemeral key is used once, whatever the outcome.
-                let shared = x25519::shared(&self.secret_key, &sh.key_share);
-                aricode_crypto::wipe(&mut self.secret_key);
-                let shared = SecretBytes(shared.ok_or(Error::Protocol("bad x25519 key share"))?);
-                self.transcript.extend_from_slice(msg);
-                let (schedule, secrets) = Schedule::new(sh.suite, &shared.0, &self.transcript);
-                self.recv = Some(Protection::new(sh.suite, &secrets.server));
-                self.send = Some(Protection::new(sh.suite, &secrets.client));
-                self.suite = sh.suite;
-                self.hs = Some(Handshake {
-                    schedule,
-                    client: secrets.client,
-                    server: secrets.server,
-                });
-                self.state = State::WaitEncryptedExtensions;
-                Ok(true)
-            }
-            (State::WaitEncryptedExtensions, handshake::ENCRYPTED_EXTENSIONS) => {
-                handshake::encrypted_extensions(body)?;
-                self.transcript.extend_from_slice(msg);
-                self.state = State::WaitCertificate;
-                Ok(false)
-            }
-            (State::WaitCertificate, handshake::CERTIFICATE_REQUEST)
-                if self.cert_request.is_none() =>
-            {
-                self.cert_request = Some(handshake::certificate_request(body)?);
-                self.transcript.extend_from_slice(msg);
-                Ok(false)
-            }
-            (State::WaitCertificate, handshake::CERTIFICATE) => {
-                let chain = handshake::certificate(body)?;
-                let mut roots: Vec<&[u8]> = self.roots.clone();
-                roots.extend(self.extra_roots.iter().map(Vec::as_slice));
-                #[cfg(test)]
-                let pinned = self.trust_pinned_leaf && roots.contains(&chain[0]);
-                #[cfg(not(test))]
-                let pinned = false;
-                if !pinned {
-                    aricode_x509::verify_chain(&chain, &roots, &self.host, self.now)
-                        .map_err(Error::Certificate)?;
+        loop {
+            let UnbufferedStatus { mut discard, state } =
+                conn.process_tls_records(&mut self.incoming);
+            let state = match state {
+                Ok(s) => s,
+                Err(e) => {
+                    let err = map_error(&self.verifier, &e);
+                    // rustls queued a fatal alert: send it.
+                    if let Ok(ConnectionState::EncodeTlsData(mut enc)) =
+                        conn.process_tls_records(&mut []).state
+                    {
+                        let _ = encode(|b| enc.encode(b).map_err(Grow::from), out);
+                    }
+                    self.closed = true;
+                    self.incoming.clear();
+                    return Err(err);
                 }
-                self.leaf = chain[0].to_vec();
-                self.transcript.extend_from_slice(msg);
-                self.state = State::WaitCertificateVerify;
-                Ok(false)
-            }
-            (State::WaitCertificateVerify, handshake::CERTIFICATE_VERIFY) => {
-                let hash = keys::transcript_hash(self.suite, &self.transcript);
-                handshake::certificate_verify(body, &self.leaf, hash.as_bytes())?;
-                self.transcript.extend_from_slice(msg);
-                self.state = State::WaitFinished;
-                Ok(false)
-            }
-            (State::WaitFinished, handshake::FINISHED) => {
-                self.finished(msg, out, events)?;
-                Ok(true)
-            }
-            (State::Connected, handshake::NEW_SESSION_TICKET) => {
-                handshake::new_session_ticket(body)?;
-                Ok(false)
-            }
-            (State::Connected, handshake::KEY_UPDATE) => {
-                let suite = self.suite;
-                let requested = handshake::key_update(body)?;
-                if let Some(secret) = self.recv_secret.as_mut() {
-                    *secret = keys::next_traffic_secret(suite, secret);
-                    self.recv = Some(Protection::new(suite, secret));
-                }
-                if requested && !self.sent_close {
-                    self.send_record(
-                        HANDSHAKE,
-                        &handshake::message(handshake::KEY_UPDATE, &[0]),
-                        out,
-                    );
-                    if let Some(secret) = self.send_secret.as_mut() {
-                        *secret = keys::next_traffic_secret(suite, secret);
-                        self.send = Some(Protection::new(suite, secret));
+            };
+            let mut done = false;
+            match state {
+                ConnectionState::ReadTraffic(mut traffic) => {
+                    while let Some(record) = traffic.next_record() {
+                        let record = record.map_err(|e| map_error(&self.verifier, &e))?;
+                        discard += record.discard;
+                        events.push(Event::Data(record.payload.to_vec()));
                     }
                 }
-                Ok(true)
+                ConnectionState::EncodeTlsData(mut enc) => {
+                    if encode(|b| enc.encode(b).map_err(Grow::from), out).is_err() {
+                        self.closed = true;
+                        return Err(Error::Protocol("handshake record too large"));
+                    }
+                }
+                // `out` is sent by the caller after this returns, in order.
+                ConnectionState::TransmitTlsData(t) => t.done(),
+                ConnectionState::BlockedHandshake => done = true,
+                ConnectionState::WriteTraffic(mut traffic) => {
+                    if !self.connected {
+                        self.connected = true;
+                        events.push(Event::Connected);
+                    }
+                    match write.take() {
+                        Some(Write::Data(data)) => {
+                            encode(|b| traffic.encrypt(data, b).map_err(Grow::from), out)
+                                .map_err(|_| Error::Protocol("record too large"))?;
+                        }
+                        Some(Write::Close) => {
+                            encode(|b| traffic.queue_close_notify(b).map_err(Grow::from), out)
+                                .map_err(|_| Error::Protocol("record too large"))?;
+                        }
+                        None => {}
+                    }
+                    done = true;
+                }
+                ConnectionState::PeerClosed => events.push(Event::Closed),
+                ConnectionState::Closed => {
+                    self.closed = true;
+                    done = true;
+                }
+                _ => done = true,
             }
-            _ => Err(Error::Protocol("unexpected handshake message")),
+            self.incoming.drain(..discard);
+            if done {
+                return Ok(());
+            }
         }
-    }
-
-    /// Server Finished: verify it, answer with our (empty Certificate and)
-    /// Finished, and switch to the application keys.
-    fn finished(
-        &mut self,
-        msg: &[u8],
-        out: &mut Vec<u8>,
-        events: &mut Vec<Event>,
-    ) -> Result<(), Error> {
-        let hs = self.hs.take().ok_or(Error::Protocol("no handshake keys"))?;
-        let suite = self.suite;
-        let expected = keys::finished(suite, &hs.server, &self.transcript);
-        if !ct_eq(expected.as_bytes(), &msg[4..]) {
-            return Err(Error::Protocol("bad server Finished"));
-        }
-        self.transcript.extend_from_slice(msg);
-        let app = hs.schedule.application(&self.transcript);
-        self.recv = Some(Protection::new(suite, &app.server));
-        if let Some(context) = self.cert_request.take() {
-            let cert = handshake::empty_certificate(&context);
-            self.send_record(HANDSHAKE, &cert, out);
-            self.transcript.extend_from_slice(&cert);
-        }
-        let verify = keys::finished(suite, &hs.client, &self.transcript);
-        let ours = handshake::message(handshake::FINISHED, verify.as_bytes());
-        self.send_record(HANDSHAKE, &ours, out);
-        self.send = Some(Protection::new(suite, &app.client));
-        self.recv_secret = Some(app.server);
-        self.send_secret = Some(app.client);
-        self.transcript = Vec::new();
-        self.leaf = Vec::new();
-        self.state = State::Connected;
-        events.push(Event::Connected);
-        Ok(())
     }
 }
 
-/// The ephemeral key of a connection dropped before its ServerHello; the
-/// generator, the secrets and the record keys wipe themselves.
-impl Drop for Client {
-    fn drop(&mut self) {
-        aricode_crypto::wipe(&mut self.secret_key);
+/// rustls's error in this crate's terms, the certificate verifier's own
+/// reason first.
+fn map_error(verifier: &verify::Verifier, e: &rustls::Error) -> Error {
+    use rustls::Error as R;
+    if let Some(why) = verifier.refusal() {
+        return Error::Certificate(why);
+    }
+    match e {
+        R::AlertReceived(a) => Error::Alert(u8::from(*a)),
+        R::DecryptError => Error::Decrypt,
+        R::InvalidCertificate(c) => Error::Certificate(certificate_error(c)),
+        R::PeerIncompatible(_) => Error::Unsupported("no common TLS parameters"),
+        R::NoCertificatesPresented => Error::Protocol("no certificate"),
+        R::PeerMisbehaved(_) => Error::Protocol("the server misbehaved"),
+        R::InappropriateMessage { .. } | R::InappropriateHandshakeMessage { .. } => {
+            Error::Protocol("unexpected message")
+        }
+        R::InvalidMessage(_) => Error::Protocol("invalid message"),
+        R::PeerSentOversizedRecord => Error::Protocol("oversized record"),
+        _ => Error::Protocol("TLS failure"),
+    }
+}
+
+/// rustls's certificate errors that do not come from the chain verifier
+/// (a bad CertificateVerify or ServerKeyExchange signature). Its deprecated
+/// variant is still matched: older paths may return it.
+#[allow(deprecated)]
+fn certificate_error(c: &rustls::CertificateError) -> aricode_x509::Error {
+    use aricode_x509::Error as X;
+    use rustls::CertificateError as C;
+    match c {
+        C::BadSignature => X::BadSignature,
+        C::Expired | C::ExpiredContext { .. } => X::Expired,
+        C::NotValidYet | C::NotValidYetContext { .. } => X::NotYetValid,
+        C::UnknownIssuer => X::UnknownIssuer,
+        C::NotValidForName | C::NotValidForNameContext { .. } => X::NameMismatch,
+        C::InvalidPurpose | C::InvalidPurposeContext { .. } => X::WrongPurpose,
+        C::UnsupportedSignatureAlgorithm | C::UnsupportedSignatureAlgorithmContext { .. } => {
+            X::Unsupported
+        }
+        _ => X::Malformed,
+    }
+}
+
+/// What [`Client::drive`] encrypts once the connection allows it.
+enum Write<'a> {
+    Data(&'a [u8]),
+    Close,
+}
+
+/// A buffer rustls found too small, and the size it needs.
+struct Grow(usize);
+
+impl From<EncodeError> for Grow {
+    fn from(e: EncodeError) -> Self {
+        match e {
+            EncodeError::InsufficientSize(s) => Grow(s.required_size),
+            _ => Grow(0),
+        }
+    }
+}
+
+impl From<EncryptError> for Grow {
+    fn from(e: EncryptError) -> Self {
+        match e {
+            EncryptError::InsufficientSize(s) => Grow(s.required_size),
+            _ => Grow(0),
+        }
+    }
+}
+
+/// Calls `f` with a buffer large enough for what it writes, and appends
+/// the written bytes to `out`.
+fn encode(
+    mut f: impl FnMut(&mut [u8]) -> Result<usize, Grow>,
+    out: &mut Vec<u8>,
+) -> Result<(), ()> {
+    let mut buf = vec![0u8; 2048];
+    loop {
+        match f(&mut buf) {
+            Ok(n) => {
+                out.extend_from_slice(&buf[..n]);
+                return Ok(());
+            }
+            Err(Grow(need)) if need > buf.len() => buf.resize(need, 0),
+            Err(_) => return Err(()),
+        }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use alloc::vec;
-    use rfc8448::*;
-
-    /// The server's first flight: ServerHello record + encrypted record.
-    fn server_flight() -> Vec<u8> {
-        let mut f = vec![0x16, 3, 3, 0, 0x5a];
-        f.extend_from_slice(&h(SERVER_HELLO));
-        f.extend_from_slice(&h(SERVER_RECORD));
-        f
-    }
-
-    /// The trace's self-signed RSA certificate (CN "rsa"), from the
-    /// Certificate message.
-    fn rfc_certificate() -> Vec<u8> {
-        h(SERVER_FLIGHT)[51..51 + 0x1b0].to_vec()
-    }
-
-    /// A client that sent the trace's ClientHello: its key, session id and
-    /// transcript replaced after `start`.
-    fn rfc_client(host: &str, trust: bool) -> Client {
-        let mut c = Client::new(host, [0x42; 32], Vec::new(), None);
-        let mut out = Vec::new();
-        c.start(&mut out);
-        assert_eq!(
-            &out[..5],
-            &[
-                0x16,
-                3,
-                1,
-                ((out.len() - 5) >> 8) as u8,
-                (out.len() - 5) as u8
-            ]
-        );
-        c.secret_key = h(CLIENT_PRIVATE).try_into().unwrap();
-        c.session_id = Vec::new();
-        c.transcript = h(CLIENT_HELLO);
-        if trust {
-            c.add_root(rfc_certificate());
-            c.trust_pinned_leaf = true;
-        }
-        c
-    }
-
-    fn feed(c: &mut Client, data: &[u8]) -> (Result<(), Error>, Vec<u8>, Vec<Event>) {
-        let mut out = Vec::new();
-        let mut events = Vec::new();
-        let r = c.feed(data, &mut out, &mut events);
-        (r, out, events)
-    }
-
-    const CCS: [u8; 6] = [20, 3, 3, 0, 1, 1];
-
-    #[test]
-    fn rfc8448_handshake_data_and_close() {
-        let mut c = rfc_client("rsa", true);
-        let (r, out, events) = feed(&mut c, &server_flight());
-        assert_eq!(r, Ok(()));
-        assert_eq!(events, [Event::Connected]);
-        assert!(c.is_connected());
-        assert_eq!(out, [&CCS[..], &h(CLIENT_FINISHED_RECORD)].concat());
-        // The ephemeral key did its one job and is gone (incident 0044).
-        assert_eq!(c.secret_key, [0; 32]);
-
-        let (r, out, events) = feed(&mut c, &h(NEW_SESSION_TICKET_RECORD));
-        assert_eq!((r, out.len(), events.len()), (Ok(()), 0, 0));
-
-        let data: Vec<u8> = (0..50).collect();
-        let mut out = Vec::new();
-        c.send(&data, &mut out);
-        assert_eq!(out, h(CLIENT_DATA_RECORD));
-
-        let (r, _, events) = feed(&mut c, &h(SERVER_DATA_RECORD));
-        assert_eq!(r, Ok(()));
-        assert_eq!(events, [Event::Data(data)]);
-
-        let mut out = Vec::new();
-        c.close(&mut out);
-        assert_eq!(out, h(CLIENT_CLOSE_RECORD));
-        let (r, out, events) = feed(&mut c, &h(SERVER_CLOSE_RECORD));
-        assert_eq!((r, out.len()), (Ok(()), 0));
-        assert_eq!(events, [Event::Closed]);
-        assert!(!c.is_connected());
-        assert!(feed(&mut c, &[]).0.is_err());
-    }
-
-    #[test]
-    fn fragmented_coalesced_and_ccs() {
-        // Everything at once, with a middlebox CCS after the ServerHello.
-        let mut all = server_flight();
-        all.splice(95..95, CCS);
-        all.extend_from_slice(&h(NEW_SESSION_TICKET_RECORD));
-        all.extend_from_slice(&h(SERVER_DATA_RECORD));
-        let mut c = rfc_client("rsa", true);
-        let (r, _, events) = feed(&mut c, &all);
-        assert_eq!(r, Ok(()));
-        assert_eq!(events, [Event::Connected, Event::Data((0..50).collect())]);
-
-        // One byte at a time.
-        let mut c = rfc_client("rsa", true);
-        let mut events = Vec::new();
-        let mut out = Vec::new();
-        for b in &all {
-            c.feed(&[*b], &mut out, &mut events).unwrap();
-        }
-        assert_eq!(events, [Event::Connected, Event::Data((0..50).collect())]);
-        assert_eq!(out, [&CCS[..], &h(CLIENT_FINISHED_RECORD)].concat());
-
-        // A CCS after the handshake is a protocol error.
-        let (r, _, _) = feed(&mut c, &CCS);
-        assert!(matches!(r, Err(Error::Protocol(_))));
-    }
-
-    #[test]
-    fn tampering_and_untrusted_certificates() {
-        let mut flight = server_flight();
-        let n = flight.len();
-        flight[n - 20] ^= 0x80;
-        let mut c = rfc_client("rsa", true);
-        let (r, out, _) = feed(&mut c, &flight);
-        assert_eq!(r, Err(Error::Decrypt));
-        // CCS + encrypted alert (2 bytes + type + tag).
-        assert_eq!(out.len(), 6 + 5 + 3 + 16);
-        assert!(feed(&mut c, &[]).0.is_err());
-
-        // Not a configured root: the test bypass does not apply and the
-        // real check refuses it.
-        let mut c = rfc_client("rsa", false);
-        c.trust_pinned_leaf = true;
-        let (r, _, _) = feed(&mut c, &server_flight());
-        assert!(matches!(r, Err(Error::Certificate(_))), "{r:?}");
-
-        // Without the test bypass the trace's certificate, which names
-        // `rsa` only in its CN, matches no host (incident 0048).
-        for host in ["rsa", "server"] {
-            let mut c = rfc_client(host, true);
-            c.trust_pinned_leaf = false;
-            let (r, _, events) = feed(&mut c, &server_flight());
-            assert_eq!(
-                r,
-                Err(Error::Certificate(aricode_x509::Error::NameMismatch))
-            );
-            assert!(events.is_empty());
-        }
-    }
-
-    #[test]
-    fn server_alert_and_garbage() {
-        let mut c = rfc_client("rsa", true);
-        let (r, out, _) = feed(&mut c, &[21, 3, 3, 0, 2, 2, 40]);
-        assert_eq!(r, Err(Error::Alert(40)));
-        assert!(out.is_empty(), "no alert in answer to an alert");
-
-        let mut c = rfc_client("rsa", true);
-        let (r, out, _) = feed(&mut c, b"HTTP/1.1 400 Bad Request\r\n");
-        assert!(matches!(r, Err(Error::Protocol(_))));
-        // Plaintext handshake_failure alert.
-        assert_eq!(out, [21, 3, 3, 0, 2, 2, 40]);
-
-        // Application data before the handshake.
-        let mut c = rfc_client("rsa", true);
-        assert!(feed(&mut c, &[23, 3, 3, 0, 1, 0]).0.is_err());
-    }
-
-    #[test]
-    fn key_update_both_ways() {
-        let mut c = rfc_client("rsa", true);
-        assert_eq!(feed(&mut c, &server_flight()).2, [Event::Connected]);
-        let suite = c.suite;
-        let server_secret = c.recv_secret.clone().unwrap();
-        let client_secret = c.send_secret.clone().unwrap();
-
-        // The server updates its keys and asks us to update ours.
-        let mut server_send = Protection::new(suite, &server_secret);
-        let mut rec = Vec::new();
-        server_send.seal(
-            HANDSHAKE,
-            &handshake::message(handshake::KEY_UPDATE, &[1]),
-            &mut rec,
-        );
-        let next_server = keys::next_traffic_secret(suite, &server_secret);
-        let mut server_send = Protection::new(suite, &next_server);
-        server_send.seal(APPLICATION_DATA, b"after", &mut rec);
-        let (r, out, events) = feed(&mut c, &rec);
-        assert_eq!(r, Ok(()));
-        assert_eq!(events, [Event::Data(b"after".to_vec())]);
-
-        // Our KeyUpdate(update_not_requested) goes with the old keys...
-        let mut server_recv = Protection::new(suite, &client_secret);
-        let mut body = out[5..].to_vec();
-        let (typ, len) = server_recv
-            .open(out[..5].try_into().unwrap(), &mut body)
-            .unwrap();
-        assert_eq!((typ, &body[..len]), (HANDSHAKE, &[24, 0, 0, 1, 0][..]));
-        // ...and what follows with the new ones.
-        let mut out = Vec::new();
-        c.send(b"x", &mut out);
-        let mut server_recv =
-            Protection::new(suite, &keys::next_traffic_secret(suite, &client_secret));
-        let mut body = out[5..].to_vec();
-        let (typ, len) = server_recv
-            .open(out[..5].try_into().unwrap(), &mut body)
-            .unwrap();
-        assert_eq!((typ, &body[..len]), (APPLICATION_DATA, &b"x"[..]));
-    }
-}
+mod tests;

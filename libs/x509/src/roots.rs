@@ -1,41 +1,55 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
-//! Embedded trust anchors (see `roots/README.md` for subjects and
-//! fingerprints) and the keys no longer trusted anywhere in a chain.
+//! Embedded trust anchors (Mozilla's TLS server roots, `roots/README.md`)
+//! and the keys no longer trusted anywhere in a chain.
 
-/// DER root certificates trusted by default.
-pub const DEFAULT: &[&[u8]] = &[
-    include_bytes!("../roots/isrg-root-x1.der"),
-    include_bytes!("../roots/isrg-root-x2.der"),
-    include_bytes!("../roots/gts-root-r1.der"),
-    include_bytes!("../roots/gts-root-r2.der"),
-    include_bytes!("../roots/gts-root-r3.der"),
-    include_bytes!("../roots/gts-root-r4.der"),
-    include_bytes!("../roots/digicert-global-root-ca.der"),
-    include_bytes!("../roots/digicert-global-root-g2.der"),
-    include_bytes!("../roots/digicert-global-root-g3.der"),
-    include_bytes!("../roots/amazon-root-ca-1.der"),
-    include_bytes!("../roots/amazon-root-ca-2.der"),
-    include_bytes!("../roots/amazon-root-ca-3.der"),
-    include_bytes!("../roots/amazon-root-ca-4.der"),
-    include_bytes!("../roots/usertrust-rsa.der"),
-    include_bytes!("../roots/usertrust-ecc.der"),
-    include_bytes!("../roots/globalsign-root-r6.der"),
-    include_bytes!("../roots/globalsign-ecc-root-r5.der"),
-];
+/// The TLS server roots of Mozilla's store, concatenated DER, extracted by
+/// `tools/mozilla-roots.py` (`roots/mozilla.txt` lists them; ADR 0067).
+const MOZILLA: &[u8] = include_bytes!("../roots/mozilla.der");
+
+/// The root certificates trusted by default, one DER certificate each.
+pub fn default() -> impl Iterator<Item = &'static [u8]> {
+    let mut rest = MOZILLA;
+    core::iter::from_fn(move || {
+        let len = der_len(rest)?;
+        let (cert, tail) = rest.split_at(len);
+        rest = tail;
+        Some(cert)
+    })
+}
+
+/// Length of the DER element at the start of `der` (tag, length, value),
+/// `None` at the end or on a truncated one.
+fn der_len(der: &[u8]) -> Option<usize> {
+    let (&first, rest) = der.get(1..)?.split_first()?;
+    let (header, value) = match first {
+        n @ 0..=0x7F => (2, n as usize),
+        0x81..=0x83 => {
+            let k = (first & 0x7F) as usize;
+            let v = rest
+                .get(..k)?
+                .iter()
+                .fold(0usize, |a, &b| (a << 8) | b as usize);
+            (2 + k, v)
+        }
+        _ => return None,
+    };
+    let total = header + value;
+    (total <= der.len()).then_some(total)
+}
 
 /// SHA-256 of the SubjectPublicKeyInfo of keys no longer trusted, wherever
 /// they appear in a chain: a root, an intermediate cross-signed by a root
 /// still trusted, or a leaf (ADR 0054). A release adds one with a comment
-/// naming the certificate and the advisory; removing a root from `DEFAULT`
+/// naming the certificate and the advisory; removing a root from the store
 /// alone would not stop an intermediate it cross-signed.
 ///
 /// The eight eMudhra intermediates whose private keys were compromised
 /// (October 2026; Mozilla bug 2083449; the same list as Go's
 /// `crypto/x509` and rustls-webpki 0.103.16), each issued by an emSign
-/// root and cross-signed by Sectigo's AAA Certificate Services. Neither
-/// root is in `DEFAULT`, so no chain this system trusts by default reaches
-/// them; the entries hold for roots an owner adds.
+/// root and cross-signed by Sectigo's AAA Certificate Services. Mozilla's
+/// store holds emSign roots, so these entries are what refuses those
+/// intermediates.
 pub const DISTRUSTED: &[[u8; 32]] = &[
     // CN=EM DV TLS CA - G3B,O=eMudhra BV,C=NL
     [
@@ -86,3 +100,36 @@ pub const DISTRUSTED: &[[u8; 32]] = &[
         0x0e, 0x30,
     ],
 ];
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn mozilla_store_splits_into_certificates() {
+        let certs: Vec<&[u8]> = super::default().collect();
+        let listed = include_str!("../roots/mozilla.txt")
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .count();
+        assert_eq!(certs.len(), listed);
+        assert!(certs.len() > 100);
+        assert_eq!(
+            certs.iter().map(|c| c.len()).sum::<usize>(),
+            super::MOZILLA.len()
+        );
+        // Every listed fingerprint is the SHA-256 of a certificate, in order.
+        for (cert, line) in certs.iter().zip(
+            include_str!("../roots/mozilla.txt")
+                .lines()
+                .filter(|l| !l.starts_with('#')),
+        ) {
+            let mut hex = [0u8; 64];
+            assert_eq!(
+                &line[..64],
+                aricode_crypto::hex(&aricode_crypto::sha256::sha256(cert), &mut hex)
+            );
+        }
+    }
+
+    extern crate std;
+    use std::vec::Vec;
+}

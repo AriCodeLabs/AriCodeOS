@@ -53,12 +53,10 @@ const HOST_OS_CRATES: &[&str] = &[
 #[derive(Deserialize)]
 struct Metadata {
     packages: Vec<Package>,
-    resolve: Resolve,
 }
 
 #[derive(Deserialize)]
 struct Package {
-    id: String,
     name: String,
     version: String,
     license: Option<String>,
@@ -66,37 +64,14 @@ struct Package {
     source: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct Resolve {
-    nodes: Vec<Node>,
-}
-
-#[derive(Deserialize)]
-struct Node {
-    id: String,
-    deps: Vec<NodeDep>,
-}
-
-#[derive(Deserialize)]
-struct NodeDep {
-    pkg: String,
-    dep_kinds: Vec<DepKind>,
-}
-
-#[derive(Deserialize)]
-struct DepKind {
-    /// `None` for a normal dependency, `"build"` or `"dev"` otherwise.
-    kind: Option<String>,
-}
-
 /// Checks every third-party crate of the workspace, and what the user
 /// programs `user_roots` link. `--locked`: a `Cargo.lock` that would
 /// change is refused, so nothing is picked up that the repository does not
 /// pin.
 pub fn check(user_roots: &[&str]) -> Result {
-    let all = metadata(None, None)?;
-    let user = metadata(None, Some(crate::build::USER_TARGET))?;
-    judge(&all, &user, user_roots)
+    let all = metadata(None)?;
+    let user = user_graph(None, user_roots)?;
+    judge(&all, &user)
 }
 
 /// The same checks for an app built out of tree (`dir/Cargo.toml`, its own
@@ -104,30 +79,18 @@ pub fn check(user_roots: &[&str]) -> Result {
 /// included, is linked into the user program.
 pub fn check_external(dir: &std::path::Path) -> Result {
     let manifest = dir.join("Cargo.toml");
-    let all = metadata(Some(&manifest), None)?;
-    let user = metadata(Some(&manifest), Some(crate::build::USER_TARGET))?;
-    let roots: Vec<String> = all
-        .packages
-        .iter()
-        .filter(|p| p.source.is_none())
-        .map(|p| p.name.clone())
-        .collect();
-    let roots: Vec<&str> = roots.iter().map(String::as_str).collect();
-    judge(&all, &user, &roots)
+    let all = metadata(Some(&manifest))?;
+    let user = user_graph(Some(&manifest), &[])?;
+    judge(&all, &user)
 }
 
-/// `cargo metadata --locked` of the repository, or of `manifest`; with
-/// `platform`, the dependency graph keeps only what that target builds
-/// (`cfg(unix)` dependencies in, `cfg(target_arch = "aarch64")` ones out).
-fn metadata(manifest: Option<&std::path::Path>, platform: Option<&str>) -> Result<Metadata> {
+/// `cargo metadata --locked` of the repository, or of `manifest`.
+fn metadata(manifest: Option<&std::path::Path>) -> Result<Metadata> {
     let mut c = std::process::Command::new(env!("CARGO"));
     c.current_dir(crate::root())
         .args(["metadata", "--format-version", "1", "--locked"]);
     if let Some(m) = manifest {
         c.arg("--manifest-path").arg(m);
-    }
-    if let Some(p) = platform {
-        c.args(["--filter-platform", p]);
     }
     let out = c.output().map_err(|e| format!("cargo metadata: {e}"))?;
     if !out.status.success() {
@@ -139,9 +102,61 @@ fn metadata(manifest: Option<&std::path::Path>, platform: Option<&str>) -> Resul
     serde_json::from_slice(&out.stdout).map_err(|e| format!("cargo metadata: {e}"))
 }
 
+/// What `roots` (user programs; none: the workspace of `manifest`) link on
+/// the user target, as `cargo tree` resolves it: the crates actually
+/// built, as `(name, version)`. `cargo metadata`'s graph is not used for
+/// this: it lists optional dependencies whose feature is off (it shows
+/// `rustls-webpki` linking `ring`, which a build never does).
+fn user_graph(manifest: Option<&std::path::Path>, roots: &[&str]) -> Result<Vec<(String, String)>> {
+    // With the user programs' flags, so `cfg`s such as `crt-static` are
+    // what their build sees (audit of ADR 0067, L9).
+    let mut c = crate::build::user_cargo();
+    c.args([
+        "tree",
+        "--locked",
+        "--target",
+        crate::build::USER_TARGET,
+        "-e",
+        "normal",
+        "--prefix",
+        "none",
+        "--format",
+        "{p}",
+    ]);
+    if let Some(m) = manifest {
+        c.arg("--manifest-path").arg(m);
+    }
+    for r in roots {
+        c.args(["-p", r]);
+    }
+    let out = c.output().map_err(|e| format!("cargo tree: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "cargo tree --locked failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    Ok(parse_tree(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// `name vX.Y.Z [(path)] [(*)]` lines into unique `(name, version)`.
+fn parse_tree(text: &str) -> Vec<(String, String)> {
+    let mut crates: Vec<(String, String)> = text
+        .lines()
+        .filter_map(|l| {
+            let mut w = l.split_whitespace();
+            let (name, version) = (w.next()?, w.next()?.strip_prefix('v')?);
+            Some((name.to_string(), version.to_string()))
+        })
+        .collect();
+    crates.sort();
+    crates.dedup();
+    crates
+}
+
 /// Licences and sources over every crate (`all`); crates that bind to the
 /// host OS over what the user programs link on their target (`user`).
-fn judge(all: &Metadata, user: &Metadata, user_roots: &[&str]) -> Result {
+fn judge(all: &Metadata, user: &[(String, String)]) -> Result {
     let metadata = all;
     let mut refused: Vec<String> = metadata
         .packages
@@ -152,7 +167,7 @@ fn judge(all: &Metadata, user: &Metadata, user_roots: &[&str]) -> Result {
                 .map(|why| format!("{} {}: {why}", p.name, p.version))
         })
         .collect();
-    refused.extend(host_os_crates(user, user_roots));
+    refused.extend(host_os_crates(user));
     let third_party = metadata
         .packages
         .iter()
@@ -169,54 +184,16 @@ fn judge(all: &Metadata, user: &Metadata, user_roots: &[&str]) -> Result {
     }
 }
 
-/// Refusals for crates of [`HOST_OS_CRATES`] that a user program links:
-/// its normal dependencies in a graph already filtered for the user target
-/// (a crate behind `cfg(unix)` is built for it). Build dependencies run on
-/// the host and are not followed.
-fn host_os_crates(metadata: &Metadata, user_roots: &[&str]) -> Vec<String> {
-    use std::collections::{BTreeMap, BTreeSet};
-    let package = |id: &str| metadata.packages.iter().find(|p| p.id == id);
-    let edges: BTreeMap<&str, Vec<&str>> = metadata
-        .resolve
-        .nodes
-        .iter()
-        .map(|n| {
-            let normal = n
-                .deps
-                .iter()
-                .filter(|d| d.dep_kinds.iter().any(|k| k.kind.is_none()))
-                .map(|d| d.pkg.as_str())
-                .collect();
-            (n.id.as_str(), normal)
+/// Refusals for crates of [`HOST_OS_CRATES`] in the user programs' build
+/// graph (normal dependencies on their target: a crate behind `cfg(unix)`
+/// is in, build scripts' dependencies run on the host and are not).
+fn host_os_crates(user: &[(String, String)]) -> Vec<String> {
+    user.iter()
+        .filter(|(name, _)| HOST_OS_CRATES.contains(&name.as_str()))
+        .map(|(name, version)| {
+            format!("{name} {version}: binds to Linux or libc, linked by a user program (ADR 0065)")
         })
-        .collect();
-    let mut refused = BTreeSet::new();
-    for root in user_roots {
-        let Some(start) = metadata
-            .packages
-            .iter()
-            .find(|p| p.name == *root && p.source.is_none())
-        else {
-            continue;
-        };
-        let mut seen = BTreeSet::new();
-        let mut stack = vec![start.id.as_str()];
-        while let Some(id) = stack.pop() {
-            if !seen.insert(id) {
-                continue;
-            }
-            if let Some(p) = package(id) {
-                if HOST_OS_CRATES.contains(&p.name.as_str()) {
-                    refused.insert(format!(
-                        "{} {}: binds to Linux or libc, linked by user program {root} (ADR 0065)",
-                        p.name, p.version
-                    ));
-                }
-            }
-            stack.extend(edges.get(id).into_iter().flatten());
-        }
-    }
-    refused.into_iter().collect()
+        .collect()
 }
 
 /// Why a third-party crate is refused, `None` when it is accepted.
@@ -322,47 +299,23 @@ mod tests {
         }
     }
 
-    /// A user program reaching `libc` through a `cfg(unix)` dependency
-    /// is refused; one that only needs it to build (a build script) or
-    /// for its tests is not, and neither is a host tool.
+    /// `cargo tree` output: a crate the user programs build is refused
+    /// once, whatever path reaches it; one absent from it is not.
     #[test]
     fn user_programs_do_not_link_the_host_os() {
-        let json = r#"{
-            "packages": [
-                {"id": "app", "name": "app", "version": "1", "license": null, "source": null},
-                {"id": "lib", "name": "lib", "version": "1", "license": null, "source": null},
-                {"id": "tool", "name": "tool", "version": "1", "license": null, "source": null},
-                {"id": "libc", "name": "libc", "version": "0.2", "license": "MIT", "source": "x"},
-                {"id": "cc", "name": "cc", "version": "1", "license": "MIT", "source": "x"}
-            ],
-            "resolve": {"nodes": [
-                {"id": "app", "deps": [
-                    {"pkg": "lib", "dep_kinds": [{"kind": null, "target": null}]},
-                    {"pkg": "cc", "dep_kinds": [{"kind": "build", "target": null}]}
-                ]},
-                {"id": "lib", "deps": [
-                    {"pkg": "libc", "dep_kinds": [{"kind": null, "target": "cfg(unix)"}]}
-                ]},
-                {"id": "cc", "deps": [
-                    {"pkg": "libc", "dep_kinds": [{"kind": null, "target": null}]}
-                ]},
-                {"id": "tool", "deps": [
-                    {"pkg": "libc", "dep_kinds": [{"kind": null, "target": null}]}
-                ]},
-                {"id": "libc", "deps": []}
-            ]}
-        }"#;
-        let metadata: Metadata = serde_json::from_str(json).expect("metadata");
-        let refused = host_os_crates(&metadata, &["app"]);
+        let tree = "\
+app v0.1.0 (/src/app)
+lib v0.1.0 (/src/lib)
+libc v0.2.191
+rustls v0.23.46
+libc v0.2.191 (*)
+";
+        let graph = parse_tree(tree);
+        assert_eq!(graph.len(), 4);
+        let refused = host_os_crates(&graph);
         assert_eq!(refused.len(), 1, "{refused:?}");
-        assert!(refused[0].contains("libc 0.2") && refused[0].contains("app"));
-        assert!(host_os_crates(&metadata, &["tool_not_a_user_program"]).is_empty());
-        let dev_only = json.replace(
-            r#""pkg": "libc", "dep_kinds": [{"kind": null, "target": "cfg(unix)"}]"#,
-            r#""pkg": "libc", "dep_kinds": [{"kind": "dev", "target": null}]"#,
-        );
-        let metadata: Metadata = serde_json::from_str(&dev_only).expect("metadata");
-        assert!(host_os_crates(&metadata, &["app"]).is_empty());
+        assert!(refused[0].starts_with("libc 0.2.191: "));
+        assert!(host_os_crates(&parse_tree("app v0.1.0 (/src/app)\nrustls v0.23.46\n")).is_empty());
     }
 
     #[test]

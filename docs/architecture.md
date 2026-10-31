@@ -1764,12 +1764,17 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   `ssh.key_options_refused`). Ten authentication requests per connection,
   key queries and repeated `none` included (incident 0046).
 
-## HTTPS (ADR 0026)
+## HTTPS (ADR 0026, ADR 0067)
 
 - `aricode-crypto`: SHA-384, HMAC, HKDF, ChaCha20-Poly1305 and AES-GCM,
   big integers with RSA PKCS#1 v1.5/PSS verification, ECDSA P-256/P-384.
-- `aricode-x509`: DER, certificates, chain verification, host names, 17
-  embedded roots. `aricode-tls`: TLS 1.3 client state machine.
+- `aricode-tls`: rustls through its unbuffered API, on a provider built
+  from `aricode-crypto` (plus RustCrypto's `p256`/`p384` for the NIST key
+  exchanges), TLS 1.3 and TLS 1.2; chains verified by `rustls-webpki`.
+- `aricode-x509`: this system's certificate policy on top: Mozilla's TLS
+  server roots (`tools/mozilla-roots.py`), distrusted keys (ADR 0054), the
+  time without a trusted clock, no wildcard over a public suffix (ADR
+  0062).
 - Kernel: CMOS real-time clock read at boot (`rtc.rs`, `sysinfo::WALLCLOCK`).
 - `sdk/https` (`aricode-https`): HTTP/HTTPS GET over the TCP service; the
   shell's `http` uses it, with `trusted_ca.der` from AriFS as an optional
